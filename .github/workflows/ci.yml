@@ -104,8 +104,7 @@ jobs:
 
       - name: Start MuninnDB server
         run: |
-          # Capture startup output so we can extract the auto-generated admin password.
-          ./muninndb-server --daemon --data /tmp/muninn-ci-data > /tmp/server.log 2>&1 &
+          ./muninndb-server --daemon --data /tmp/muninn-ci-data &
           echo "SERVER_PID=$!" >> $GITHUB_ENV
 
           # Wait up to 15s for the MCP health endpoint (public, no auth required).
@@ -121,20 +120,11 @@ jobs:
 
       - name: Configure default vault as public
         run: |
-          # Parse the randomly generated admin password from the startup log.
-          # Startup prints: │  Admin password: <password>                   │
-          ADMIN_PASS=$(grep -oP "Admin password: \K\S+" /tmp/server.log | head -1)
-          if [ -z "$ADMIN_PASS" ]; then
-            echo "ERROR: could not extract admin password from server log"
-            cat /tmp/server.log
-            exit 1
-          fi
-
-          # Login to the UI server (port 8476) to get a session cookie.
+          # Login with default credentials (root/password set on first run).
           curl -sf -c /tmp/cookies.txt \
             -X POST http://localhost:8476/api/auth/login \
             -H "Content-Type: application/json" \
-            -d "{\"username\":\"root\",\"password\":\"$ADMIN_PASS\"}"
+            -d '{"username":"root","password":"password"}'
 
           # Set the default vault to public so SDK tests can write without a token.
           curl -sf -b /tmp/cookies.txt \

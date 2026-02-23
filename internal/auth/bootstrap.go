@@ -1,16 +1,14 @@
 package auth
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"os"
 )
 
 // Bootstrap ensures an admin user and session secret exist.
-// On first run, creates "root" with a randomly generated password and prints it.
-// Subsequent runs are no-ops.
+// On first run, creates "root" with the default password "password" and prints a
+// reminder to change it. Subsequent runs are no-ops.
 // secretPath is where the session signing secret is persisted (e.g. dataDir/auth_secret).
 func Bootstrap(store *Store, secretPath string) (secret []byte, err error) {
 	// Load or generate session secret
@@ -28,19 +26,14 @@ func Bootstrap(store *Store, secretPath string) (secret []byte, err error) {
 
 	// Create root admin if none exists
 	if !store.AdminExists() {
-		pwBytes := make([]byte, 12)
-		if _, randErr := rand.Read(pwBytes); randErr != nil {
-			return nil, fmt.Errorf("generate admin password: %w", randErr)
-		}
-		password := base64.RawURLEncoding.EncodeToString(pwBytes)
-		if err = store.CreateAdmin("root", password); err != nil {
+		if err = store.CreateAdmin("root", "password"); err != nil {
 			return nil, fmt.Errorf("create root admin: %w", err)
 		}
 		fmt.Println("┌─────────────────────────────────────────┐")
 		fmt.Println("│         MuninnDB — First Run Auth        │")
 		fmt.Println("│                                          │")
-		fmt.Printf( "│  Admin username: %-23s│\n", "root")
-		fmt.Printf( "│  Admin password: %-23s│\n", password)
+		fmt.Println("│  Admin username: root                    │")
+		fmt.Println("│  Admin password: password                │")
 		fmt.Println("│                                          │")
 		fmt.Println("│  Change this password after first login. │")
 		fmt.Println("└─────────────────────────────────────────┘")
