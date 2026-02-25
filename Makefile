@@ -6,7 +6,7 @@ MODEL_REPO  := Xenova/all-MiniLM-L6-v2
 HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
 ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
 
-.PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets build test test-integration \
+.PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets build test bench test-integration \
         eval-bible-setup eval-bible eval-bible-full eval-bible-quick eval-bible-export eval-bible-fast
 
 ## fetch-assets: download the model, tokenizer, and all platform ORT libraries.
@@ -34,6 +34,7 @@ fetch-ort-libs:
 	@$(MAKE) -s _ort-darwin-arm64
 	@$(MAKE) -s _ort-darwin-amd64
 	@$(MAKE) -s _ort-linux-amd64
+	@$(MAKE) -s _ort-windows-amd64
 	@echo "==> ORT native libraries ready."
 
 _ort-darwin-arm64:
@@ -68,6 +69,16 @@ _ort-linux-amd64:
 		find /tmp -name 'libonnxruntime.so.*' | head -1 | xargs -I{} cp {} $(ASSETS_DIR)/libonnxruntime_linux_amd64.so
 	@echo "    linux/amd64: $$(du -sh $(ASSETS_DIR)/libonnxruntime_linux_amd64.so | cut -f1)"
 
+_ort-windows-amd64:
+	@echo "    Fetching windows/amd64..."
+	@curl -fL --progress-bar \
+		"$(ORT_BASE)/onnxruntime-win-x64-$(ORT_VERSION).zip" \
+		-o "/tmp/ort-win-x64.zip"
+	@rm -rf /tmp/ort-win-x64-extract && mkdir -p /tmp/ort-win-x64-extract
+	@unzip -q /tmp/ort-win-x64.zip -d /tmp/ort-win-x64-extract
+	@find /tmp/ort-win-x64-extract -name 'onnxruntime.dll' | head -1 | xargs -I{} cp {} $(ASSETS_DIR)/onnxruntime_windows_amd64.dll
+	@echo "    windows/amd64: $$(du -sh $(ASSETS_DIR)/onnxruntime_windows_amd64.dll | cut -f1)"
+
 ## clean-assets: remove downloaded binary assets.
 clean-assets:
 	@echo "==> Removing downloaded assets..."
@@ -75,6 +86,7 @@ clean-assets:
 	@rm -f $(ASSETS_DIR)/tokenizer.json
 	@rm -f $(ASSETS_DIR)/libonnxruntime_*.dylib
 	@rm -f $(ASSETS_DIR)/libonnxruntime_*.so
+	@rm -f $(ASSETS_DIR)/onnxruntime_*.dll
 	@echo "==> Done."
 
 ## build: build the server binary (requires fetch-assets first).
@@ -84,6 +96,10 @@ build:
 ## test: run unit tests across all packages.
 test:
 	@go test ./...
+
+## bench: run E2E benchmark suite.
+bench:
+	go test -bench=BenchmarkE2E -benchmem -benchtime=3s ./internal/bench/...
 
 ## test-integration: run integration tests (requires no muninn already running on :8750).
 ## Builds the binary, exercises the full start/stop/restart lifecycle, then cleans up.

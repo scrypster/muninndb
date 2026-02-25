@@ -19,6 +19,7 @@ builds:
     goos:
       - darwin
       - linux
+      - windows
     goarch:
       - arm64
       - amd64
@@ -26,18 +27,27 @@ builds:
       # linux/arm64 has no ORT native library — skip until arm64 .so is added.
       - goos: linux
         goarch: arm64
+      # windows/arm64 — ORT release exists but not yet tested; enable when ready.
+      - goos: windows
+        goarch: arm64
     env:
       - CGO_ENABLED=1
-    # Cross-compilation: darwin/amd64 and linux/amd64 from an arm64 Mac require
-    # the appropriate cross-compiler. Install via:
+    # Cross-compilation: darwin/amd64, linux/amd64, and windows/amd64 from an
+    # arm64 Mac require the appropriate cross-compiler. Install via:
     #   brew install FiloSottile/musl-cross/musl-cross
     #   brew install SergioBenitez/osxct/x86_64-apple-darwin14
+    #   brew install mingw-w64
     overrides:
       - goos: linux
         goarch: amd64
         env:
           - CGO_ENABLED=1
           - CC=x86_64-linux-musl-gcc
+      - goos: windows
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=x86_64-w64-mingw32-gcc
 
 archives:
   - id: muninn
@@ -88,6 +98,11 @@ release:
     ```sh
     curl -sSL https://github.com/scrypster/muninndb/releases/download/{{ .Tag }}/muninn_{{ .Tag }}_linux_amd64.tar.gz | tar -xz
     sudo mv muninn /usr/local/bin/
+    ```
+
+    **Windows (PowerShell)**
+    ```powershell
+    irm https://muninndb.com/install.ps1 | iex
     ```
 
     **Docker**
