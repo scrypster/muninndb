@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -54,6 +53,8 @@ func runStart(webEnabled bool) {
 	}
 
 	cmd := exec.Command(os.Args[0], args...)
+	cmd.SysProcAttr = daemonSysProcAttr()
+	daemonExtraSetup(cmd)
 	cmd.Stdout = nil
 	logPath := logFilePath()
 	lf, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
@@ -82,7 +83,7 @@ func runStart(webEnabled bool) {
 	}
 
 	// Wait for health check (up to 5s)
-	mcpHealthURL := "http://localhost" + defaultMCPAddr + "/mcp/health"
+	mcpHealthURL := "http://" + defaultMCPAddr + "/mcp/health"
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
@@ -110,7 +111,7 @@ func runStart(webEnabled bool) {
 	fmt.Fprintln(os.Stderr, "  For more detail: muninn logs")
 }
 
-// runStop sends SIGTERM to the running daemon.
+// runStop signals the running daemon to shut down.
 func runStop() {
 	pidPath := filepath.Join(defaultDataDir(), "muninn.pid")
 	pid, err := readPID(pidPath)
@@ -123,7 +124,7 @@ func runStop() {
 		fmt.Fprintf(os.Stderr, "process not found: %v\n", err)
 		os.Exit(1)
 	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
+	if err := stopProcess(proc); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to stop: %v\n", err)
 		os.Exit(1)
 	}
@@ -132,8 +133,8 @@ func runStop() {
 	// doesn't race with the old process still holding the ports.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if proc.Signal(syscall.Signal(0)) != nil {
-			break // process is gone
+		if !isProcessRunning(pid) {
+			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -146,7 +147,7 @@ func runStop() {
 func runStatus() {
 	state := printStatusDisplay(false)
 	if state == stateStopped {
-		os.Exit(1)
+		osExit(1)
 	}
 }
 
@@ -156,7 +157,7 @@ func runStartService(service string) {
 		fmt.Println("Web UI is not yet implemented (planned for Epic 16)")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown service: %s\n", service)
-		os.Exit(1)
+		osExit(1)
 	}
 }
 
@@ -166,16 +167,8 @@ func runStopService(service string) {
 		fmt.Println("Web UI is not yet implemented (planned for Epic 16)")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown service: %s\n", service)
-		os.Exit(1)
+		osExit(1)
 	}
-}
-
-func isProcessRunning(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 func defaultDataDir() string {

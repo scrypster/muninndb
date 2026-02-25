@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 func main() {
@@ -21,6 +22,22 @@ func main() {
 	}
 
 	sub := parseSubcommand(os.Args[1:])
+	rest := os.Args[2:]
+
+	// For commands without FlagSets, check for -h/--help and show subcommand help
+	if sub != "" && sub != "help" && sub != "--help" && sub != "-h" {
+		helpKey := sub
+		if strings.Contains(helpKey, ":") {
+			helpKey = strings.Replace(helpKey, ":", " ", 1)
+		}
+		if wantsHelp(rest) {
+			if fn, ok := subcommandHelp[helpKey]; ok {
+				fn()
+				return
+			}
+		}
+	}
+
 	switch sub {
 	case "":
 		runDefault()
@@ -38,17 +55,19 @@ func main() {
 		runStopService("web")
 	case "status":
 		runStatus()
+	case "backup":
+		runBackup(rest)
 	case "upgrade":
-		runUpgrade(os.Args[2:])
+		runUpgrade(rest)
 	case "restart":
 		runStop()
 		runStart(true)
 	case "show:vaults":
 		runShowVaults()
 	case "logs":
-		runLogs(os.Args[2:])
+		runLogs(rest)
 	case "cluster":
-		runCluster(os.Args[2:])
+		runCluster(rest)
 	case "completion:bash":
 		printCompletion("bash")
 	case "completion:zsh":
@@ -60,7 +79,29 @@ func main() {
 		os.Exit(1)
 	case "help", "--help", "-h":
 		printHelp()
+	case "version", "--version":
+		fmt.Println(muninnVersion())
+		return
 	default:
+		// Container commands: "vault" or "vault:delete" both route to runVault.
+		// parseSubcommand joins two-word commands with ":", so we match by prefix.
+		// rest (os.Args[2:]) includes the subcommand word for dispatch.
+		if sub == "vault" || strings.HasPrefix(sub, "vault:") {
+			runVault(rest)
+			return
+		}
+		if strings.HasPrefix(sub, "cluster:") {
+			runCluster(rest)
+			return
+		}
+		// muninn help <subcommand> → show subcommand help
+		if strings.HasPrefix(sub, "help:") {
+			helpKey := strings.TrimPrefix(sub, "help:")
+			if fn, ok := subcommandHelp[helpKey]; ok {
+				fn()
+				return
+			}
+		}
 		fmt.Fprintf(os.Stderr, "Unknown command: %q\n\n", sub)
 		fmt.Fprintln(os.Stderr, "Run 'muninn help' to see all commands.")
 		os.Exit(1)

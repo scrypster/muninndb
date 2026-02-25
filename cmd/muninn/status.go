@@ -67,8 +67,14 @@ func overallState(svcs []serviceStatus) runState {
 	return stateDegraded
 }
 
-// probeServices hits all health endpoints and returns statuses.
-func probeServices() []serviceStatus {
+// probeServicesFn is the default health-check probe. Tests override it.
+var probeServicesFn = probeServicesDefault
+
+// probeServices delegates to probeServicesFn for testability.
+func probeServices() []serviceStatus { return probeServicesFn() }
+
+// probeServicesDefault hits all health endpoints and returns statuses.
+func probeServicesDefault() []serviceStatus {
 	client := &http.Client{Timeout: 2 * time.Second}
 	probe := func(url string) bool {
 		resp, err := client.Get(url)

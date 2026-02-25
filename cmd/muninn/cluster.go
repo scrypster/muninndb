@@ -15,7 +15,8 @@ import (
 func runCluster(args []string) {
 	if len(args) == 0 {
 		printClusterHelp()
-		os.Exit(1)
+		osExit(1)
+		return
 	}
 
 	sub := args[0]
@@ -33,13 +34,13 @@ func runCluster(args []string) {
 	case "remove-node":
 		runClusterRemoveNode(subArgs)
 	case "enable":
-		os.Exit(runClusterEnable(subArgs))
+		osExit(runClusterEnable(subArgs))
 	case "disable":
-		os.Exit(runClusterDisable(subArgs))
+		osExit(runClusterDisable(subArgs))
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown cluster subcommand: %q\n", sub)
 		printClusterHelp()
-		os.Exit(1)
+		osExit(1)
 	}
 }
 
@@ -216,20 +217,22 @@ func runClusterFailover(args []string) {
 	resp, err := httpPost(*addr + "/v1/replication/promote")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to reach server at %s: %v\n", *addr, err)
-		os.Exit(1)
+		osExit(1)
+		return
 	}
 
 	var result map[string]interface{}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: invalid response: %v\n", err)
-		os.Exit(1)
+		osExit(1)
+		return
 	}
 
 	if triggered := getBool(result, "triggered"); triggered {
 		fmt.Println("  ✓ Election triggered.")
 	} else {
 		fmt.Println("  Election not triggered.")
-		os.Exit(1)
+		osExit(1)
 	}
 }
 

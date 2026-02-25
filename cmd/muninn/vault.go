@@ -9,37 +9,85 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 )
 
+func printVaultUsage() {
+	fmt.Println("Usage: muninn vault <command> [flags]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  list        [--pattern <glob>]                   List all vaults")
+	fmt.Println("  delete      <name> [--yes] [--force]             Delete a vault and all its memories")
+	fmt.Println("  clear       <name> [--yes] [--force]             Remove all memories from a vault")
+	fmt.Println("  clone       <source> <new-name>                  Clone a vault into a new vault")
+	fmt.Println("  merge       <source> <target> [--delete-source] [--yes]  Merge source into target vault")
+	fmt.Println("  export      --vault <name> [--output <file>] [--reset-metadata]  Export vault to .muninn archive")
+	fmt.Println("  import      <file> --vault <name> [--reset-metadata]             Import .muninn archive into new vault")
+	fmt.Println("  reindex-fts <name>                               Rebuild FTS index with Porter2 stemming")
+	fmt.Println()
+	fmt.Println("Auth flags (MySQL-style, optional):")
+	fmt.Println("  -u <user>         Admin username (default: root)")
+	fmt.Println("  -p                Prompt for password")
+	fmt.Println("  -p<password>      Inline password (no space)")
+	fmt.Println("  -h <host:port>    Server host:port (default: localhost:8475)")
+}
+
 func runVault(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: muninn vault <delete|clear|clone|merge|export|import>")
-		fmt.Println("  delete <name> [--yes] [--force]              Delete a vault and all its memories")
-		fmt.Println("  clear  <name> [--yes] [--force]              Remove all memories from a vault")
-		fmt.Println("  clone  <source> <new-name>                   Clone a vault into a new vault")
-		fmt.Println("  merge  <source> <target> [--delete-source] [--yes]  Merge source into target vault")
-		fmt.Println("  export --vault <name> [--output <file>] [--reset-metadata]  Export vault to .muninn archive")
-		fmt.Println("  import <file> --vault <name> [--reset-metadata]             Import .muninn archive into new vault")
+		printVaultUsage()
 		return
 	}
-	switch args[0] {
-	case "delete":
-		runVaultDelete(args[1:])
-	case "clear":
-		runVaultClear(args[1:])
-	case "clone":
-		runVaultClone(args[1:])
-	case "merge":
-		runVaultMerge(args[1:])
-	case "export":
-		runVaultExport(args[1:])
-	case "import":
-		runVaultImport(args[1:])
+
+	// Parse auth flags (-u, -p, -h), leaving the subcommand and its args.
+	remaining, username, password, prompted := parseAdminFlags(args)
+	if len(remaining) == 0 {
+		printVaultUsage()
+		return
+	}
+
+	sub := remaining[0]
+	subArgs := remaining[1:]
+
+	// "list" uses the public API — no admin auth needed.
+	if sub == "list" {
+		runVaultList(subArgs)
+		return
+	}
+
+	// Validate the subcommand before authenticating so typos get fast feedback.
+	switch sub {
+	case "delete", "clear", "clone", "merge", "export", "import", "reindex-fts":
 	default:
-		fmt.Printf("Unknown vault command: %q\n", args[0])
-		fmt.Println("Available: delete, clear, clone, merge, export, import")
+		fmt.Printf("Unknown vault command: %q\n", sub)
+		printVaultUsage()
+		return
+	}
+
+	// Authenticate with the admin API.
+	if err := authenticateAdmin(username, password, prompted); err != nil {
+		fmt.Fprintf(os.Stderr, "Authentication failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Is muninn running? Try: muninn status")
+		osExit(1)
+		return
+	}
+
+	switch sub {
+	case "delete":
+		runVaultDelete(subArgs)
+	case "clear":
+		runVaultClear(subArgs)
+	case "clone":
+		runVaultClone(subArgs)
+	case "merge":
+		runVaultMerge(subArgs)
+	case "export":
+		runVaultExport(subArgs)
+	case "import":
+		runVaultImport(subArgs)
+	case "reindex-fts":
+		runVaultReindexFTS(subArgs)
 	}
 }
 
@@ -53,7 +101,7 @@ func runVaultDelete(args []string) {
 		return
 	}
 	doVaultRequestForce("DELETE",
-		fmt.Sprintf("http://localhost:8475/api/admin/vaults/%s", url.PathEscape(name)),
+		fmt.Sprintf("%s/api/admin/vaults/%s", vaultAdminBase, url.PathEscape(name)),
 		"Vault deleted.", force)
 }
 
@@ -67,8 +115,80 @@ func runVaultClear(args []string) {
 		return
 	}
 	doVaultRequestForce("POST",
-		fmt.Sprintf("http://localhost:8475/api/admin/vaults/%s/clear", url.PathEscape(name)),
+		fmt.Sprintf("%s/api/admin/vaults/%s/clear", vaultAdminBase, url.PathEscape(name)),
 		"Vault cleared.", force)
+}
+
+// ---------------------------------------------------------------------------
+// vault list
+// ---------------------------------------------------------------------------
+
+func runVaultList(args []string) {
+	var pattern string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--pattern":
+			if i+1 < len(args) {
+				i++
+				pattern = args[i]
+			}
+		case strings.HasPrefix(a, "--pattern="):
+			pattern = strings.TrimPrefix(a, "--pattern=")
+		case !strings.HasPrefix(a, "-") && pattern == "":
+			pattern = a
+		}
+	}
+
+	resp, err := http.Get(vaultAdminBase + "/api/vaults")
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		fmt.Println("Is muninn running? Try: muninn status")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("Error: HTTP %d\n", resp.StatusCode)
+		return
+	}
+
+	var raw json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		fmt.Printf("Error parsing response: %v\n", err)
+		return
+	}
+
+	var names []string
+	if err := json.Unmarshal(raw, &names); err != nil {
+		var wrapped map[string][]string
+		if err2 := json.Unmarshal(raw, &wrapped); err2 == nil {
+			names = wrapped["vaults"]
+		}
+	}
+
+	if len(names) == 0 {
+		fmt.Println("No vaults found.")
+		return
+	}
+
+	var matched int
+	for _, name := range names {
+		if pattern != "" {
+			ok, _ := path.Match(pattern, name)
+			if !ok {
+				continue
+			}
+		}
+		matched++
+		fmt.Printf("  %s\n", name)
+	}
+
+	if pattern != "" {
+		fmt.Printf("\n  %d of %d vaults matched %q\n", matched, len(names), pattern)
+	} else {
+		fmt.Printf("\n  %d vault(s)\n", matched)
+	}
 }
 
 // parseVaultArgs parses: <name> [--yes|-y] [--force|-f]
@@ -115,6 +235,7 @@ func doVaultRequestForce(method, reqURL, successMsg string, force bool) {
 	if force {
 		req.Header.Set("X-Allow-Default", "true")
 	}
+	addSessionCookie(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -136,7 +257,7 @@ func doVaultRequestForce(method, reqURL, successMsg string, force bool) {
 			fmt.Println("  Protected vault. Cannot override.")
 		}
 	case http.StatusUnauthorized:
-		fmt.Println("  Not authenticated. Open the web UI to manage vaults: http://localhost:8476")
+		fmt.Println("  Not authenticated. Use -u <user> -p to authenticate.")
 	default:
 		fmt.Printf("  Error: HTTP %d\n", resp.StatusCode)
 	}
@@ -162,13 +283,14 @@ func runVaultClone(args []string) {
 		return
 	}
 	req, err := http.NewRequest("POST",
-		fmt.Sprintf("http://localhost:8475/api/admin/vaults/%s/clone", url.PathEscape(source)),
+		fmt.Sprintf("%s/api/admin/vaults/%s/clone", vaultAdminBase, url.PathEscape(source)),
 		bytes.NewReader(bodyBytes))
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	addSessionCookie(req)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -223,7 +345,8 @@ func runVaultMerge(args []string) {
 
 	if source == target {
 		fmt.Fprintln(os.Stderr, "Error: cannot merge a vault into itself")
-		os.Exit(1)
+		osExit(1)
+		return
 	}
 
 	if !yes {
@@ -250,13 +373,14 @@ func runVaultMerge(args []string) {
 		return
 	}
 	req, err := http.NewRequest("POST",
-		fmt.Sprintf("http://localhost:8475/api/admin/vaults/%s/merge-into", url.PathEscape(source)),
+		fmt.Sprintf("%s/api/admin/vaults/%s/merge-into", vaultAdminBase, url.PathEscape(source)),
 		bytes.NewReader(bodyBytes))
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	addSessionCookie(req)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -281,6 +405,65 @@ func runVaultMerge(args []string) {
 	}
 
 	pollProgressBar(result.JobID, source)
+}
+
+// ---------------------------------------------------------------------------
+// vault reindex-fts
+// ---------------------------------------------------------------------------
+
+func runVaultReindexFTS(args []string) {
+	var vaultName string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") && vaultName == "" {
+			vaultName = a
+		}
+	}
+	if vaultName == "" {
+		fmt.Println("Usage: muninn vault reindex-fts <vault-name>")
+		fmt.Println("  Rebuilds the FTS index for the vault using the current Porter2-stemmed tokenizer.")
+		fmt.Println("  Old posting lists are deleted and re-created with stemmed tokens.")
+		fmt.Println("  After this completes, the vault FTS version marker is set to 1.")
+		return
+	}
+
+	fmt.Printf("Re-indexing FTS for vault %q...\n", vaultName)
+
+	reqURL := fmt.Sprintf("%s/api/admin/vaults/%s/reindex-fts", vaultAdminBase, url.PathEscape(vaultName))
+	client := &http.Client{Timeout: 30 * time.Minute}
+	req, err := http.NewRequest("POST", reqURL, nil)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	addSessionCookie(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		fmt.Println("Is muninn running? Try: muninn status")
+		return
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var result struct {
+			Vault            string `json:"vault"`
+			EngramsReindexed int64  `json:"engrams_reindexed"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			fmt.Println("  Done (could not parse response).")
+			return
+		}
+		fmt.Printf("  Re-indexed %d engrams in vault %q.\n", result.EngramsReindexed, result.Vault)
+		fmt.Println("  FTS version marker set to 1 (Porter2 stemming active).")
+	case http.StatusNotFound:
+		fmt.Println("  Vault not found.")
+	case http.StatusUnauthorized:
+		fmt.Println("  Not authenticated. Use -u <user> -p to authenticate.")
+	default:
+		printHTTPError(resp)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -363,10 +546,12 @@ func pollProgressBar(jobID, vaultName string) {
 }
 
 func fetchJobStatus(jobID, vaultName string) *statusSnap {
-	u := fmt.Sprintf("http://localhost:8475/api/admin/vaults/%s/job-status?job_id=%s",
-		url.PathEscape(vaultName), url.QueryEscape(jobID))
+	u := fmt.Sprintf("%s/api/admin/vaults/%s/job-status?job_id=%s",
+		vaultAdminBase, url.PathEscape(vaultName), url.QueryEscape(jobID))
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(u)
+	req, _ := http.NewRequest("GET", u, nil)
+	addSessionCookie(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil
 	}
@@ -447,7 +632,7 @@ func runVaultExport(args []string) {
 		outputFile = vaultName + ".muninn"
 	}
 
-	exportURL := fmt.Sprintf("http://localhost:8475/api/admin/vaults/%s/export", url.PathEscape(vaultName))
+	exportURL := fmt.Sprintf("%s/api/admin/vaults/%s/export", vaultAdminBase, url.PathEscape(vaultName))
 	if resetMetadata {
 		exportURL += "?reset_metadata=true"
 	}
@@ -455,7 +640,13 @@ func runVaultExport(args []string) {
 	fmt.Printf("Exporting vault %q to %q...\n", vaultName, outputFile)
 
 	client := &http.Client{Timeout: 30 * time.Minute}
-	resp, err := client.Get(exportURL)
+	req, err := http.NewRequest("GET", exportURL, nil)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	addSessionCookie(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
 		fmt.Println("Is muninn running? Try: muninn status")
@@ -526,7 +717,7 @@ func runVaultImport(args []string) {
 		return
 	}
 
-	importURL := fmt.Sprintf("http://localhost:8475/api/admin/vaults/import?vault=%s", url.QueryEscape(vaultName))
+	importURL := fmt.Sprintf("%s/api/admin/vaults/import?vault=%s", vaultAdminBase, url.QueryEscape(vaultName))
 	if resetMetadata {
 		importURL += "&reset_metadata=true"
 	}
@@ -541,6 +732,7 @@ func runVaultImport(args []string) {
 	}
 	req.ContentLength = stat.Size()
 	req.Header.Set("Content-Type", "application/octet-stream")
+	addSessionCookie(req)
 
 	resp, err := client.Do(req)
 	if err != nil {

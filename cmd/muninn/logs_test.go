@@ -134,19 +134,18 @@ func TestPrintLastN_EmptyFile(t *testing.T) {
 	_ = out // should be empty, no panic
 }
 
-// TestRunLogsWithLastFlagMissingFile tests runLogs with --last flag when log file doesn't exist.
-func TestRunLogsWithLastFlagMissingFile(t *testing.T) {
+// TestRunLogsNoFollowMissingFile tests runLogs --no-follow when log file doesn't exist.
+func TestRunLogsNoFollowMissingFile(t *testing.T) {
+	t.Setenv("MUNINNDB_DATA", t.TempDir())
 	out := captureStdout(func() {
-		runLogs([]string{"--last", "5"})
+		runLogs([]string{"--no-follow", "--last", "5"})
 	})
-	// Should handle missing file gracefully by printing "No log file" message
-	// (unless muninn.log actually exists in the test environment)
 	if strings.Contains(out, "error") && !strings.Contains(out, "No log file") {
 		t.Errorf("unexpected error in output: %s", out)
 	}
 }
 
-// TestRunLogsWithLastZero tests that --last 0 falls through to tailLog (not printLastN).
+// TestRunLogsWithLastZero tests that --last 0 shows no history but still tails.
 // We call tailLog directly with a local buffer so the goroutine never touches os.Stdout;
 // this avoids a data race with captureStdout in concurrently-running tests.
 func TestRunLogsWithLastZero(t *testing.T) {
@@ -154,7 +153,7 @@ func TestRunLogsWithLastZero(t *testing.T) {
 	done := make(chan bool, 1)
 	go func() {
 		// Nonexistent path → tailLog returns immediately with "No log file" message.
-		tailLog("/tmp/muninn-nonexistent-test-99999.log", "", &buf, &buf)
+		tailLog("/tmp/muninn-nonexistent-test-99999.log", "", 0, &buf, &buf)
 		done <- true
 	}()
 
@@ -166,24 +165,63 @@ func TestRunLogsWithLastZero(t *testing.T) {
 	}
 }
 
-// TestRunLogsWithLastFlagValidation tests that runLogs handles the --last flag.
-func TestRunLogsWithLastFlagValidation(t *testing.T) {
-	// Test that runLogs parses and processes --last flag without crashing
+// TestRunLogsWithNoFollowValidation tests that runLogs handles --no-follow correctly.
+func TestRunLogsWithNoFollowValidation(t *testing.T) {
+	t.Setenv("MUNINNDB_DATA", t.TempDir())
 	out := captureStdout(func() {
-		// Use a non-existent file path to avoid blocking in tailLog
-		runLogs([]string{"--last", "10"})
+		runLogs([]string{"--no-follow", "--last", "10"})
 	})
-	// Should produce output (either "No log file" message or actual log lines)
-	// The key is that it doesn't panic
 	_ = out
 }
 
-// TestRunLogsWithLevelFilterAndLast tests combining --level and --last flags.
-func TestRunLogsWithLevelFilterAndLast(t *testing.T) {
-	// Test that both flags are parsed correctly
+// TestRunLogsWithLevelFilterAndNoFollow tests combining --level, --last, and --no-follow.
+func TestRunLogsWithLevelFilterAndNoFollow(t *testing.T) {
+	t.Setenv("MUNINNDB_DATA", t.TempDir())
 	out := captureStdout(func() {
-		runLogs([]string{"--last", "5", "--level", "error"})
+		runLogs([]string{"--no-follow", "--last", "5", "--level", "error"})
 	})
-	// Should handle both flags without crashing
 	_ = out
+}
+
+// TestRunLogsPositionalArg tests muninn logs 50 syntax.
+func TestRunLogsPositionalArg(t *testing.T) {
+	t.Setenv("MUNINNDB_DATA", t.TempDir())
+	out := captureStdout(func() {
+		runLogs([]string{"--no-follow", "50"})
+	})
+	_ = out
+}
+
+// TestTailLogShowsHistory verifies that tailLog prints last N lines before tailing.
+func TestTailLogShowsHistory(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "muninn-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(f, "line %d INFO test\n", i)
+	}
+	f.Close()
+
+	var out strings.Builder
+	var errOut strings.Builder
+	done := make(chan struct{})
+	go func() {
+		defer func() { recover() }()
+		tailLog(f.Name(), "", 3, &out, &errOut)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	result := out.String()
+	if !strings.Contains(result, "line 8") || !strings.Contains(result, "line 9") || !strings.Contains(result, "line 10") {
+		t.Errorf("expected last 3 lines (8-10) in output, got: %s", result)
+	}
+	if strings.Contains(result, "line 7 ") {
+		t.Errorf("line 7 should not appear in last-3 output, got: %s", result)
+	}
 }

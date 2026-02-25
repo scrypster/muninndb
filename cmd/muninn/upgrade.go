@@ -13,10 +13,16 @@ import (
 
 const githubReleaseAPI = "https://api.github.com/repos/scrypster/muninndb/releases/latest"
 
-// latestVersion hits the GitHub releases API and returns the latest tag (e.g. "v1.2.3").
+// latestVersionFn is the function that fetches the latest version. Tests override it.
+var latestVersionFn = latestVersionDefault
+
+// latestVersion delegates to latestVersionFn for testability.
+func latestVersion() (string, error) { return latestVersionFn() }
+
+// latestVersionDefault hits the GitHub releases API and returns the latest tag (e.g. "v1.2.3").
 // Returns ("", nil) if the current version is "dev" (dev build — skip check).
 // Returns ("", err) on network failure — callers should treat this as non-fatal.
-func latestVersion() (string, error) {
+func latestVersionDefault() (string, error) {
 	if muninnVersion() == "dev" {
 		return "", nil
 	}
@@ -95,7 +101,8 @@ func runUpgrade(args []string) {
 	if err != nil {
 		fmt.Println("failed (no network?)")
 		fmt.Fprintf(os.Stderr, "  Could not reach GitHub: %v\n", err)
-		os.Exit(1)
+		osExit(1)
+		return
 	}
 	if latest == "" {
 		fmt.Println("skipped (dev build)")
@@ -110,7 +117,8 @@ func runUpgrade(args []string) {
 	fmt.Printf("update available: %s\n\n", latest)
 
 	if checkOnly {
-		os.Exit(1) // non-zero so scripts can detect "update available"
+		osExit(1) // non-zero so scripts can detect "update available"
+		return
 	}
 
 	// Print platform-appropriate upgrade instructions

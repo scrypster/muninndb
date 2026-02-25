@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/cognitive"
 	plugincfg "github.com/scrypster/muninndb/internal/config"
@@ -29,6 +30,8 @@ import (
 	hnswpkg "github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/logging"
 	"github.com/scrypster/muninndb/internal/mcp"
+	"github.com/scrypster/muninndb/internal/metrics"
+	"github.com/scrypster/muninndb/internal/storage/migrate"
 	"github.com/scrypster/muninndb/internal/plugin"
 	embedpkg "github.com/scrypster/muninndb/internal/plugin/embed"
 	enrichpkg "github.com/scrypster/muninndb/internal/plugin/enrich"
@@ -81,6 +84,18 @@ func resolveEmbedInfo(cfg plugincfg.PluginConfig) rest.EmbedInfo {
 	if os.Getenv("MUNINN_VOYAGE_KEY") != "" {
 		return rest.EmbedInfo{Provider: "voyage", Model: "voyage-3"}
 	}
+	if os.Getenv("MUNINN_COHERE_KEY") != "" {
+		return rest.EmbedInfo{Provider: "cohere", Model: "embed-v4"}
+	}
+	if os.Getenv("MUNINN_GOOGLE_KEY") != "" {
+		return rest.EmbedInfo{Provider: "google", Model: "text-embedding-004"}
+	}
+	if os.Getenv("MUNINN_JINA_KEY") != "" {
+		return rest.EmbedInfo{Provider: "jina", Model: "jina-embeddings-v3"}
+	}
+	if os.Getenv("MUNINN_MISTRAL_KEY") != "" {
+		return rest.EmbedInfo{Provider: "mistral", Model: "mistral-embed"}
+	}
 	// Saved config fallback (env vars above take precedence).
 	switch cfg.EmbedProvider {
 	case "ollama":
@@ -94,6 +109,14 @@ func resolveEmbedInfo(cfg plugincfg.PluginConfig) rest.EmbedInfo {
 		return rest.EmbedInfo{Provider: "openai", Model: "text-embedding-3-small"}
 	case "voyage":
 		return rest.EmbedInfo{Provider: "voyage", Model: "voyage-3"}
+	case "cohere":
+		return rest.EmbedInfo{Provider: "cohere", Model: "embed-v4"}
+	case "google":
+		return rest.EmbedInfo{Provider: "google", Model: "text-embedding-004"}
+	case "jina":
+		return rest.EmbedInfo{Provider: "jina", Model: "jina-embeddings-v3"}
+	case "mistral":
+		return rest.EmbedInfo{Provider: "mistral", Model: "mistral-embed"}
 	case "none":
 		return rest.EmbedInfo{Provider: "none", Model: ""}
 	}
@@ -105,7 +128,7 @@ func resolveEmbedInfo(cfg plugincfg.PluginConfig) rest.EmbedInfo {
 }
 
 // buildEmbedder constructs an embedder. Priority (highest → lowest):
-//  1. Environment variables (MUNINN_OLLAMA_URL, MUNINN_OPENAI_KEY, MUNINN_VOYAGE_KEY)
+//  1. Environment variables (MUNINN_OLLAMA_URL, MUNINN_OPENAI_KEY, MUNINN_VOYAGE_KEY, MUNINN_COHERE_KEY, MUNINN_GOOGLE_KEY, MUNINN_JINA_KEY, MUNINN_MISTRAL_KEY)
 //  2. Saved plugin_config.json (cfg parameter)
 //  3. Bundled local ONNX model — enabled by default when the binary was built
 //     with embedded assets. Disable with MUNINN_LOCAL_EMBED=0.
@@ -118,6 +141,10 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 		ollamaURL  = "MUNINN_OLLAMA_URL"
 		openaiKey  = "MUNINN_OPENAI_KEY"
 		voyageKey  = "MUNINN_VOYAGE_KEY"
+		cohereKey  = "MUNINN_COHERE_KEY"
+		googleKey  = "MUNINN_GOOGLE_KEY"
+		jinaKey    = "MUNINN_JINA_KEY"
+		mistralKey = "MUNINN_MISTRAL_KEY"
 		localEmbed = "MUNINN_LOCAL_EMBED"
 	)
 
@@ -159,6 +186,38 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 		}
 	}
 
+	// 1. Env var: Cohere
+	if key := os.Getenv(cohereKey); key != "" {
+		slog.Info("initializing Cohere embedder")
+		if svc := tryEmbedService("cohere://embed-v4", plugin.PluginConfig{APIKey: key}); svc != nil {
+			return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
+		}
+	}
+
+	// 1. Env var: Google
+	if key := os.Getenv(googleKey); key != "" {
+		slog.Info("initializing Google embedder")
+		if svc := tryEmbedService("google://text-embedding-004", plugin.PluginConfig{APIKey: key}); svc != nil {
+			return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
+		}
+	}
+
+	// 1. Env var: Jina
+	if key := os.Getenv(jinaKey); key != "" {
+		slog.Info("initializing Jina embedder")
+		if svc := tryEmbedService("jina://jina-embeddings-v3", plugin.PluginConfig{APIKey: key}); svc != nil {
+			return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
+		}
+	}
+
+	// 1. Env var: Mistral
+	if key := os.Getenv(mistralKey); key != "" {
+		slog.Info("initializing Mistral embedder")
+		if svc := tryEmbedService("mistral://mistral-embed", plugin.PluginConfig{APIKey: key}); svc != nil {
+			return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
+		}
+	}
+
 	// 2. Saved config fallback
 	if cfg.EmbedProvider != "" && cfg.EmbedProvider != "none" && cfg.EmbedProvider != "local" {
 		switch cfg.EmbedProvider {
@@ -179,6 +238,26 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 			if svc := tryEmbedService("voyage://voyage-3", plugin.PluginConfig{APIKey: cfg.EmbedAPIKey}); svc != nil {
 				return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
 			}
+		case "cohere":
+			slog.Info("initializing Cohere embedder from saved config")
+			if svc := tryEmbedService("cohere://embed-v4", plugin.PluginConfig{APIKey: cfg.EmbedAPIKey}); svc != nil {
+				return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
+			}
+		case "google":
+			slog.Info("initializing Google embedder from saved config")
+			if svc := tryEmbedService("google://text-embedding-004", plugin.PluginConfig{APIKey: cfg.EmbedAPIKey}); svc != nil {
+				return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
+			}
+		case "jina":
+			slog.Info("initializing Jina embedder from saved config")
+			if svc := tryEmbedService("jina://jina-embeddings-v3", plugin.PluginConfig{APIKey: cfg.EmbedAPIKey}); svc != nil {
+				return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
+			}
+		case "mistral":
+			slog.Info("initializing Mistral embedder from saved config")
+			if svc := tryEmbedService("mistral://mistral-embed", plugin.PluginConfig{APIKey: cfg.EmbedAPIKey}); svc != nil {
+				return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
+			}
 		}
 	}
 
@@ -197,7 +276,7 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 	slog.Warn("no embedder configured, semantic similarity disabled")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  ⚠  No embedder configured — semantic search disabled.")
-	fmt.Fprintln(os.Stderr, "     To use a cloud embedder: set MUNINN_OLLAMA_URL, MUNINN_OPENAI_KEY, or MUNINN_VOYAGE_KEY")
+	fmt.Fprintln(os.Stderr, "     To use a cloud embedder: set MUNINN_OPENAI_KEY, MUNINN_COHERE_KEY, MUNINN_GOOGLE_KEY, etc.")
 	fmt.Fprintln(os.Stderr, "     To disable this warning: set MUNINN_LOCAL_EMBED=0")
 	fmt.Fprintln(os.Stderr, "")
 	return activation.NewNoopEmbedder(), nil, nil
@@ -333,6 +412,23 @@ func handleClusterConn(conn net.Conn, coord *replication.ClusterCoordinator) {
 	}
 }
 
+// validateServerFlags checks that each addr is a valid host:port pair with a
+// port number in the range 1-65535. Returns the first validation error found.
+func validateServerFlags(addrs ...string) error {
+	for _, addr := range addrs {
+		host, portStr, err := net.SplitHostPort(addr)
+		if err != nil {
+			return fmt.Errorf("invalid address %q: %w", addr, err)
+		}
+		_ = host
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("invalid port in address %q: port must be 1-65535", addr)
+		}
+	}
+	return nil
+}
+
 func runServer() {
 	// Apply memory limits before any significant allocations.
 	applyMemoryLimits()
@@ -343,11 +439,43 @@ func runServer() {
 	restAddr := flag.String("rest-addr", "127.0.0.1:8475", "REST HTTP listen address")
 	mcpAddr := flag.String("mcp-addr", defaultMCPAddr, "MCP JSON-RPC listen address")
 	grpcAddr := flag.String("grpc-addr", "127.0.0.1:8477", "gRPC listen address")
+	metricsAddr := flag.String("metrics-addr", "", "Prometheus /metrics listen address (empty = disabled)")
 	mcpToken := flag.String("mcp-token", "", "Bearer token for MCP auth (empty = no auth)")
 	dev := flag.Bool("dev", false, "serve web assets from ./web directory (development mode)")
 	var logLevelStr string
 	flag.StringVar(&logLevelStr, "log-level", "info", "Log level: debug, info, warn, error")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of muninndb:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nEnvironment variables (primary configuration; see docs for full list):\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_OLLAMA_URL            Ollama embedder base URL (e.g. http://localhost:11434)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_OPENAI_KEY            OpenAI embedder API key\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_VOYAGE_KEY            Voyage embedder API key\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_COHERE_KEY            Cohere embedder API key\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_GOOGLE_KEY            Google Gemini embedder API key\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_JINA_KEY              Jina embedder API key\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_MISTRAL_KEY           Mistral embedder API key\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_LOCAL_EMBED           Set to \"0\" to disable bundled ONNX embedder\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_ENRICH_URL            LLM enrichment endpoint URL (optional)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_ENRICH_API_KEY        API key for enrichment (or MUNINN_ANTHROPIC_KEY)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_CORS_ORIGINS          Comma-separated CORS allowed origins\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_MEM_LIMIT_GB          Memory limit in GB (default: 4)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_GC_PERCENT            Go GC target percentage (default: 200)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_GLOBAL_RPS Global rate limit requests/sec (default: 1000)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_PER_IP_RPS Per-IP rate limit requests/sec (default: 100)\n")
+	}
 	flag.Parse()
+
+	// Validate address flags early so misconfigurations are caught before any
+	// resources are allocated. metricsAddr is optional (empty = disabled).
+	addrsToValidate := []string{*mbpAddr, *restAddr, *mcpAddr, *grpcAddr}
+	if *metricsAddr != "" {
+		addrsToValidate = append(addrsToValidate, *metricsAddr)
+	}
+	if err := validateServerFlags(addrsToValidate...); err != nil {
+		slog.Error("invalid server address flag", "err", err)
+		os.Exit(1)
+	}
 
 	var logLevel slog.Level
 	if err := logLevel.UnmarshalText([]byte(logLevelStr)); err != nil {
@@ -356,7 +484,7 @@ func runServer() {
 	}
 	// Create ring buffer — onAdd wired after uiSrv is constructed.
 	ring := logging.NewRingBuffer(1000, nil)
-	baseHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
+	baseHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(logging.NewRingHandler(baseHandler, ring)))
 
 	// Resolve web FS (embedded by default, filesystem in dev mode)
@@ -380,16 +508,37 @@ func runServer() {
 		os.Exit(1)
 	}
 
+	// Verify the data directory is writable before opening the DB.
+	testFile := filepath.Join(dbPath, ".write-test")
+	if err := os.WriteFile(testFile, []byte("ok"), 0600); err != nil {
+		slog.Error("data directory is not writable", "path", dbPath, "err", err)
+		os.Exit(1)
+	}
+	os.Remove(testFile)
+
 	db, err := storage.OpenPebble(dbPath, storage.DefaultOptions())
 	if err != nil {
 		slog.Error("open pebble", "err", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	// NOTE: db.Close() is NOT deferred here because store.Close() (called
+	// during the ordered shutdown sequence) internally closes the Pebble DB
+	// after flushing its own background workers.
 
 	if err := replication.CheckAndSetSchemaVersion(db); err != nil {
 		slog.Error("schema version check", "err", err)
 		os.Exit(1)
+	}
+
+	// Run versioned schema migrations before the storage layer is built.
+	migRunner := migrate.NewRunner(db)
+	// Future migrations will be registered here:
+	// migRunner.Register(migrate.Migration{Version: 1, Description: "...", Up: func(db *pebble.DB) error { ... }})
+	if applied, err := migRunner.Run(); err != nil {
+		slog.Error("migration failed", "err", err)
+		os.Exit(1)
+	} else if applied > 0 {
+		slog.Info("migrations applied", "count", applied)
 	}
 
 	// Load cluster config (disabled by default; enabled via muninn.yaml or cluster.yaml).
@@ -415,14 +564,7 @@ func runServer() {
 		}
 		coordinator = replication.NewClusterCoordinator(&clusterCfg, repLog, applier, epochStore)
 
-		coordinator.OnBecameCortex = func(epoch uint64) {
-			log.Printf("[cluster] node promoted to Cortex at epoch %d", epoch)
-			// Phase 2: start cognitive workers here
-		}
-		coordinator.OnBecameLobe = func() {
-			log.Printf("[cluster] node demoted to Lobe")
-			// Phase 2: stop cognitive workers here
-		}
+		// Role change callbacks are wired after engine creation (below).
 	}
 
 	authStore := auth.NewStore(db)
@@ -442,17 +584,28 @@ func runServer() {
 	}
 	defer mol.Close()
 
-	// Recover from sealed segments (no-op replay for now)
+	// Recover MOL: replay sealed segments to reconcile sequence tracking.
+	// Crash recovery of engram data is handled by Pebble's internal WAL.
+	// The MOL replay ensures replication sequence continuity.
+	lastSeq := wal.LoadLastSeq(db)
+	var replayedCount int
 	err = mol.Recover(db, func(e *wal.MOLEntry) error {
+		if e.SeqNum <= lastSeq {
+			return nil // already committed
+		}
+		replayedCount++
 		return nil
 	})
 	if err != nil {
 		slog.Error("recover wal", "err", err)
 		os.Exit(1)
 	}
+	if replayedCount > 0 {
+		slog.Info("wal recovery", "replayed_entries", replayedCount, "last_committed_seq", lastSeq)
+	}
 
 	// Build storage layer
-	store := storage.NewPebbleStore(db, 10000)
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 10000})
 
 	// Run startup migrations before the engine is built.
 	runStartupMigrations(context.Background(), store)
@@ -462,6 +615,11 @@ func runServer() {
 
 	// Set WAL on store
 	store.SetWAL(mol, gc)
+
+	// Wire MOL into coordinator for periodic SafePrune.
+	if coordinator != nil {
+		coordinator.SetMOL(mol)
+	}
 
 	// Build indexes
 	ftsIndex := fts.New(db)
@@ -500,16 +658,63 @@ func runServer() {
 
 	// Create cognitive workers with storage adapters
 	hebbianWorkerImpl := cognitive.NewHebbianWorker(cognitive.NewHebbianStoreAdapter(store))
-	decayWorkerImpl := cognitive.NewDecayWorker(cognitive.NewDecayStoreAdapter(store))
-	decayWorkerImpl.Worker.EnableAdaptiveScaling()
 	contradictWorkerImpl := cognitive.NewContradictWorker(cognitive.NewContradictStoreAdapter(store))
 	confidenceWorkerImpl := cognitive.NewConfidenceWorker(cognitive.NewConfidenceStoreAdapter(store))
 
+	// Create PAS transition worker, wiring it to the TransitionCache.
+	transitionWorkerImpl := cognitive.NewTransitionWorker(store.TransitionCache())
+	actEngine.SetTransitionStore(store.TransitionCache())
+
 	// Build engine API - pass the full worker implementations
 	eng := engine.NewEngine(store, authStore, ftsIndex, actEngine, trigSystem,
-		hebbianWorkerImpl, decayWorkerImpl,
+		hebbianWorkerImpl,
 		contradictWorkerImpl.Worker, confidenceWorkerImpl.Worker,
 		embedder, hnswRegistry)
+
+	eng.SetTransitionWorker(transitionWorkerImpl)
+
+	// Wire cluster role change callbacks now that the engine exists.
+	if coordinator != nil {
+		hebbianStore := cognitive.NewHebbianStoreAdapter(store)
+		contradictStore := cognitive.NewContradictStoreAdapter(store)
+		confidenceStore := cognitive.NewConfidenceStoreAdapter(store)
+
+		var cogCancel context.CancelFunc
+		var cogHeb *cognitive.HebbianWorker
+		var cogTransition *cognitive.TransitionWorker
+
+		coordinator.OnBecameCortex = func(epoch uint64) {
+			slog.Info("[cluster] node promoted to Cortex — starting cognitive workers", "epoch", epoch)
+			cogHeb = cognitive.NewHebbianWorker(hebbianStore)
+			contra := cognitive.NewContradictWorker(contradictStore)
+			conf := cognitive.NewConfidenceWorker(confidenceStore)
+			eng.SetCognitiveWorkers(cogHeb, contra.Worker, conf.Worker)
+
+			cogTransition = cognitive.NewTransitionWorker(store.TransitionCache())
+			eng.SetTransitionWorker(cogTransition)
+
+			var cogCtx context.Context
+			cogCtx, cogCancel = context.WithCancel(context.Background())
+			go contra.Worker.Run(cogCtx)
+			go conf.Worker.Run(cogCtx)
+		}
+		coordinator.OnBecameLobe = func() {
+			slog.Info("[cluster] node demoted to Lobe — stopping cognitive workers")
+			if cogCancel != nil {
+				cogCancel()
+				cogCancel = nil
+			}
+			if cogHeb != nil {
+				cogHeb.Stop()
+				cogHeb = nil
+			}
+			if cogTransition != nil {
+				cogTransition.Stop()
+				cogTransition = nil
+			}
+			eng.ClearCognitiveWorkers()
+		}
+	}
 
 	// Create wrapper for REST that handles the context
 	restWrapper := rest.NewEngineWrapper(eng, hnswRegistry)
@@ -534,6 +739,7 @@ func runServer() {
 		Addr:     *mcpAddr,
 		HasToken: *mcpToken != "",
 	})
+	restServer.SetVersion(muninnVersion())
 
 	// Build MCP server
 	mcpAdapter := mcp.NewEngineAdapter(eng, enrichPlugin)
@@ -545,14 +751,25 @@ func runServer() {
 
 	// Signal handling
 	ctx, cancel := context.WithCancel(context.Background())
-	sigCh := make(chan os.Signal, 1)
+	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		<-sigCh
-		slog.Info("shutdown signal received")
+		slog.Info("shutdown signal received — starting graceful shutdown")
 		cancel()
+		<-sigCh
+		slog.Error("second signal received — forcing immediate exit")
+		os.Exit(1)
 	}()
+
+	// Start Prometheus metrics server (if configured).
+	// Register per-vault engram count collector and start the HTTP listener.
+	if *metricsAddr != "" {
+		prometheus.MustRegister(metrics.NewVaultEngramCollector(store))
+		metrics.Serve(ctx, *metricsAddr)
+		slog.Info("metrics server starting", "addr", *metricsAddr)
+	}
 
 	// startCoordinator starts the TCP listener and coordinator.Run goroutines
 	// for the given coordinator. Captures server-lifetime ctx from outer scope.
@@ -625,7 +842,6 @@ func runServer() {
 
 	// Start cognitive workers.
 	// HebbianWorker auto-starts its own goroutine in NewHebbianWorker; do NOT call Run again.
-	go decayWorkerImpl.Worker.Run(ctx)
 	go contradictWorkerImpl.Worker.Run(ctx)
 	go confidenceWorkerImpl.Worker.Run(ctx)
 
@@ -717,44 +933,61 @@ func runServer() {
 	}
 
 	slog.Info("shutting down")
-	if retroProcessor != nil {
-		retroProcessor.Stop()
-	}
-	if enrichPlugin != nil {
-		if closer, ok := enrichPlugin.(interface{ Close() error }); ok {
-			_ = closer.Close()
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		if retroProcessor != nil {
+			retroProcessor.Stop()
 		}
-	}
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutCancel()
-	mbpServer.Shutdown(shutCtx)
-	restServer.Shutdown(shutCtx)
-	grpcShutCtx, grpcShutCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer grpcShutCancel()
-	if err := grpcServer.Shutdown(grpcShutCtx); err != nil {
-		slog.Error("gRPC shutdown error", "err", err)
-	}
-	mcpShutCtx, mcpShutCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer mcpShutCancel()
-	if err := mcpServer.Shutdown(mcpShutCtx); err != nil {
-		slog.Error("mcp shutdown error", "err", err)
-	}
-	uiShutCtx, uiShutCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer uiShutCancel()
-	if err := uiSrv.Stop(uiShutCtx); err != nil {
-		slog.Error("ui server shutdown error", "err", err)
-	}
-	// Stop cluster coordinator before closing the DB (coordinator holds DB references).
-	if coordinator != nil {
-		if err := coordinator.Stop(); err != nil {
-			slog.Error("[cluster] coordinator stop error", "err", err)
+		if enrichPlugin != nil {
+			if closer, ok := enrichPlugin.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
 		}
+		netShutCtx, netShutCancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer netShutCancel()
+		mbpServer.Shutdown(netShutCtx)
+		restServer.Shutdown(netShutCtx)
+		if err := grpcServer.Shutdown(netShutCtx); err != nil {
+			slog.Error("gRPC shutdown error", "err", err)
+		}
+		if err := mcpServer.Shutdown(netShutCtx); err != nil {
+			slog.Error("mcp shutdown error", "err", err)
+		}
+		if err := uiSrv.Stop(netShutCtx); err != nil {
+			slog.Error("ui server shutdown error", "err", err)
+		}
+		// Stop cluster coordinator before closing the DB (coordinator holds DB references).
+		if coordinator != nil {
+			if err := coordinator.Stop(); err != nil {
+				slog.Error("[cluster] coordinator stop error", "err", err)
+			}
+		}
+		// Stop cognitive workers: eng.Stop() flushes the coherence counters (final flush) and
+		// stops the autoAssoc worker. HebbianWorker must be stopped AFTER eng.Stop() so any
+		// buffered Hebbian writes enqueued by the engine are not lost.
+		//
+		// contradictWorkerImpl and confidenceWorkerImpl are Worker[T] types started
+		// with `go worker.Run(ctx)`. They exit when ctx is cancelled (signal handler
+		// or errCh path above). No explicit Stop() is needed — the 30s shutdown
+		// timeout below provides the hard deadline if they stall.
+		eng.Stop()
+		hebbianWorkerImpl.Stop()
+		transitionWorkerImpl.Stop()
+		// Close the storage layer (flushes TransitionCache, counter flush,
+		// provenance worker, WAL sync, and then closes Pebble). Must happen
+		// after cognitive workers have stopped writing, but before the
+		// GroupCommitter is torn down.
+		if err := store.Close(); err != nil {
+			slog.Error("store close error", "err", err)
+		}
+		gc.Stop()
+	}()
+	select {
+	case <-shutdownDone:
+		slog.Info("shutdown complete")
+	case <-time.After(30 * time.Second):
+		slog.Error("shutdown timed out after 30s; forcing exit")
+		os.Exit(1)
 	}
-	// Stop cognitive workers: HebbianWorker auto-started its own goroutine and must be
-	// stopped explicitly. eng.Stop() flushes the coherence counters (final flush) and
-	// stops the autoAssoc worker.
-	hebbianWorkerImpl.Stop()
-	eng.Stop()
-	gc.Stop()
-	slog.Info("shutdown complete")
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -79,32 +80,59 @@ func (r *replState) cmdShowVaults() {
 		return
 	}
 
-	// The API may return []vault or {vaults: []} — handle both
+	// The API may return []string, []vault, or {vaults: []} — handle all forms.
+	var vaultNames []string
 	var vaults []map[string]any
 	switch v := result.(type) {
 	case []any:
 		for _, item := range v {
-			if m, ok := item.(map[string]any); ok {
-				vaults = append(vaults, m)
+			switch val := item.(type) {
+			case string:
+				vaultNames = append(vaultNames, val)
+			case map[string]any:
+				vaults = append(vaults, val)
 			}
 		}
 	case map[string]any:
 		if list, ok := v["vaults"].([]any); ok {
 			for _, item := range list {
-				if m, ok := item.(map[string]any); ok {
-					vaults = append(vaults, m)
+				switch val := item.(type) {
+				case string:
+					vaultNames = append(vaultNames, val)
+				case map[string]any:
+					vaults = append(vaults, val)
 				}
 			}
 		}
 	}
 
-	if len(vaults) == 0 {
+	if len(vaults) == 0 && len(vaultNames) == 0 {
 		fmt.Println("  No vaults found.")
 		fmt.Println("  Vaults are created automatically when your AI tools store their first memory.")
 		return
 	}
 
-	formatVaultTable(vaults)
+	if len(vaults) > 0 {
+		formatVaultTable(vaults)
+		return
+	}
+
+	// String-only vault list — filter out test vaults and display cleanly.
+	var userVaults, testVaults int
+	for _, name := range vaultNames {
+		if strings.HasPrefix(name, "proof-") {
+			testVaults++
+			continue
+		}
+		userVaults++
+		fmt.Printf("  • %s\n", name)
+	}
+	if testVaults > 0 {
+		fmt.Printf("\n  (%d test vaults hidden)\n", testVaults)
+	}
+	if userVaults == 0 && testVaults > 0 {
+		fmt.Println("  No user vaults found (only test vaults).")
+	}
 }
 
 func (r *replState) cmdShowMemories() {
@@ -128,18 +156,136 @@ func (r *replState) cmdShowMemories() {
 	prettyPrint(result)
 }
 
-func (r *replState) cmdSearch(query string) {
-	result, err := mcpCall(r.mcpURL, "muninn_recall", map[string]any{
+type searchOptions struct {
+	query   string
+	since   string // RFC3339
+	before  string // RFC3339
+	mode    string // "actr", "cgdn", or "" (additive/default)
+	hops    int    // 0 = not set
+	profile string
+}
+
+// parseSearchFlags parses: search <query words...> [--flag value]...
+// Query is everything before the first --flag token.
+// Returns (opts, errMsg); errMsg is empty on success.
+func parseSearchFlags(input string) (searchOptions, string) {
+	tokens := strings.Fields(input)
+	opts := searchOptions{}
+
+	// Split query/flags at first token starting with "--"
+	flagStart := len(tokens)
+	for i, tok := range tokens {
+		if strings.HasPrefix(tok, "--") {
+			flagStart = i
+			break
+		}
+	}
+
+	opts.query = strings.Join(tokens[:flagStart], " ")
+
+	// Parse flags
+	flagTokens := tokens[flagStart:]
+	for i := 0; i < len(flagTokens); i++ {
+		tok := flagTokens[i]
+		if !strings.HasPrefix(tok, "--") {
+			return opts, fmt.Sprintf("unexpected token after flags: %q", tok)
+		}
+		if i+1 >= len(flagTokens) {
+			return opts, fmt.Sprintf("flag %q requires a value", tok)
+		}
+		val := flagTokens[i+1]
+		i++ // consume value
+
+		switch tok {
+		case "--since":
+			if _, err := time.Parse(time.RFC3339, val); err != nil {
+				if _, err2 := time.Parse("2006-01-02", val); err2 != nil {
+					return opts, fmt.Sprintf("--since: invalid ISO8601 date: %q", val)
+				}
+				t, _ := time.Parse("2006-01-02", val)
+				val = t.UTC().Format(time.RFC3339)
+			}
+			opts.since = val
+		case "--before":
+			if _, err := time.Parse(time.RFC3339, val); err != nil {
+				if _, err2 := time.Parse("2006-01-02", val); err2 != nil {
+					return opts, fmt.Sprintf("--before: invalid ISO8601 date: %q", val)
+				}
+				t, _ := time.Parse("2006-01-02", val)
+				val = t.UTC().Format(time.RFC3339)
+			}
+			opts.before = val
+		case "--mode":
+			if val != "actr" && val != "cgdn" && val != "additive" && val != "" {
+				return opts, fmt.Sprintf("--mode: unknown value %q (valid: actr, cgdn, additive)", val)
+			}
+			if val == "additive" {
+				val = "" // additive is the default; pass empty string to MCP
+			}
+			opts.mode = val
+		case "--hops":
+			n, err := strconv.Atoi(val)
+			if err != nil || n < 0 {
+				return opts, fmt.Sprintf("--hops: must be a non-negative integer, got %q", val)
+			}
+			opts.hops = n
+		case "--profile":
+			validProfiles := map[string]bool{
+				"default": true, "causal": true, "confirmatory": true,
+				"adversarial": true, "structural": true,
+			}
+			if !validProfiles[val] {
+				return opts, fmt.Sprintf("--profile: unknown value %q (valid: default, causal, confirmatory, adversarial, structural)", val)
+			}
+			opts.profile = val
+		default:
+			return opts, fmt.Sprintf("unknown flag: %s. Valid: --since, --before, --mode, --hops, --profile", tok)
+		}
+	}
+
+	return opts, ""
+}
+
+func (r *replState) cmdSearch(input string) {
+	opts, errMsg := parseSearchFlags(input)
+	if errMsg != "" {
+		fmt.Printf("Error: %s\n", errMsg)
+		return
+	}
+	if opts.query == "" {
+		fmt.Println("  Usage:   search <query> [--since ISO8601] [--before ISO8601] [--mode actr|cgdn|additive] [--hops N] [--profile default|causal|confirmatory|adversarial|structural]")
+		fmt.Println("  Example: search decisions about authentication --since 2026-01-01")
+		return
+	}
+
+	params := map[string]any{
 		"vault":   r.vault,
-		"context": []string{query},
+		"context": []string{opts.query},
 		"limit":   10,
-	})
+	}
+	if opts.since != "" {
+		params["since"] = opts.since
+	}
+	if opts.before != "" {
+		params["before"] = opts.before
+	}
+	if opts.mode != "" {
+		params["mode"] = opts.mode
+	}
+	if opts.hops > 0 {
+		params["max_hops"] = opts.hops
+	}
+	if opts.profile != "" {
+		params["profile"] = opts.profile
+	}
+
+	result, err := mcpCall(r.mcpURL, "muninn_recall", params)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
 	}
 	if isEmptyMCPResult(result) {
-		fmt.Printf("No memories match '%s'.\n", query)
+		fmt.Printf("No memories match '%s'.\n", opts.query)
 		fmt.Println()
 		fmt.Println("Tips:")
 		fmt.Println("  • Try broader terms or synonyms")

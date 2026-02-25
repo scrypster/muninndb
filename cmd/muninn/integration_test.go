@@ -222,10 +222,12 @@ func mcpTool(t *testing.T, token, toolName string, args map[string]any) map[stri
 		t.Fatalf("mcpTool %s: HTTP %d", toolName, resp.StatusCode)
 	}
 	rawBody, _ := io.ReadAll(resp.Body)
-	// result is []{"type":"text","text":"<json>"} (textContent envelope)
+	// result is {"content":[{"type":"text","text":"<json>"}]} (MCP textContent envelope)
 	var rpcResp struct {
-		Result []struct {
-			Text string `json:"text"`
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
 		} `json:"result"`
 		Error *struct {
 			Code    int    `json:"code"`
@@ -233,16 +235,16 @@ func mcpTool(t *testing.T, token, toolName string, args map[string]any) map[stri
 		} `json:"error"`
 	}
 	if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&rpcResp); err != nil {
-		t.Fatalf("mcpTool %s: decode: %v", toolName, err)
+		t.Fatalf("mcpTool %s: decode: %v\nbody: %s", toolName, err, rawBody)
 	}
 	if rpcResp.Error != nil {
 		t.Fatalf("mcpTool %s: RPC error %d: %s", toolName, rpcResp.Error.Code, rpcResp.Error.Message)
 	}
-	if len(rpcResp.Result) == 0 {
-		t.Fatalf("mcpTool %s: empty result array", toolName)
+	if len(rpcResp.Result.Content) == 0 {
+		t.Fatalf("mcpTool %s: empty result.content array\nbody: %s", toolName, rawBody)
 	}
 	var result map[string]any
-	if err := json.Unmarshal([]byte(rpcResp.Result[0].Text), &result); err != nil {
+	if err := json.Unmarshal([]byte(rpcResp.Result.Content[0].Text), &result); err != nil {
 		t.Fatalf("mcpTool %s: parse text payload: %v", toolName, err)
 	}
 	return result
@@ -323,5 +325,334 @@ func TestMCPRoundTrip(t *testing.T) {
 	const want = "integration test memory"
 	if !strings.Contains(content, want) {
 		t.Errorf("muninn_read: content %q does not contain %q", content, want)
+	}
+}
+
+// waitForIDs polls muninn_recall until all wantIDs appear in results or timeout.
+func waitForIDs(t *testing.T, token string, args map[string]any, wantIDs []string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		result := mcpTool(t, token, "muninn_recall", args)
+		memories, _ := result["memories"].([]any)
+		found := 0
+		for _, m := range memories {
+			mem, _ := m.(map[string]any)
+			id, _ := mem["id"].(string)
+			for _, want := range wantIDs {
+				if id == want {
+					found++
+				}
+			}
+		}
+		if found >= len(wantIDs) {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("timeout after %v: did not find all IDs %v in recall results", timeout, wantIDs)
+}
+
+// extractIDs returns the set of IDs from a muninn_recall result.
+func extractIDs(result map[string]any) map[string]bool {
+	ids := make(map[string]bool)
+	memories, _ := result["memories"].([]any)
+	for _, m := range memories {
+		mem, _ := m.(map[string]any)
+		if id, ok := mem["id"].(string); ok {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+// TestMCPTemporalFilter verifies that the since/before temporal filters on
+// muninn_recall correctly include or exclude memories based on created_at.
+func TestMCPTemporalFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	dataDir := t.TempDir()
+	startDaemon(t, dataDir)
+	token := readTokenFile()
+
+	now := time.Now().UTC()
+	ago30 := now.Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	ago3 := now.Add(-3 * 24 * time.Hour).Format(time.RFC3339)
+	ago7 := now.Add(-7 * 24 * time.Hour).Format(time.RFC3339)
+
+	// Write 3 memories with controlled timestamps.
+	r1 := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":      "default",
+		"concept":    "ancient event",
+		"content":    "something that happened long ago",
+		"created_at": ago30,
+	})
+	r2 := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":      "default",
+		"concept":    "recent event",
+		"content":    "something that happened recently",
+		"created_at": ago3,
+	})
+	r3 := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":   "default",
+		"concept": "current event",
+		"content": "something happening now",
+	})
+
+	id1, _ := r1["id"].(string)
+	id2, _ := r2["id"].(string)
+	id3, _ := r3["id"].(string)
+	if id1 == "" || id2 == "" || id3 == "" {
+		t.Fatalf("failed to get IDs: %v %v %v", r1, r2, r3)
+	}
+
+	// since=7d ago: should return recent (3d) + current, NOT ancient (30d).
+	result := mcpTool(t, token, "muninn_recall", map[string]any{
+		"vault":   "default",
+		"context": []string{"event"},
+		"since":   ago7,
+		"limit":   20,
+	})
+	ids := extractIDs(result)
+	if !ids[id2] {
+		t.Errorf("expected recent event (3d ago) in since=7d results, got ids: %v", ids)
+	}
+	if !ids[id3] {
+		t.Errorf("expected current event in since=7d results, got ids: %v", ids)
+	}
+	if ids[id1] {
+		t.Errorf("ancient event (30d ago) should NOT appear in since=7d results")
+	}
+
+	// before=7d ago: should return ancient only.
+	result2 := mcpTool(t, token, "muninn_recall", map[string]any{
+		"vault":   "default",
+		"context": []string{"event"},
+		"before":  ago7,
+		"limit":   20,
+	})
+	ids2 := extractIDs(result2)
+	if !ids2[id1] {
+		t.Errorf("expected ancient event in before=7d results, got ids: %v", ids2)
+	}
+	if ids2[id2] || ids2[id3] {
+		t.Errorf("recent/current events should NOT appear in before=7d results")
+	}
+}
+
+// TestMCPAssociationTraversal verifies that explicitly linked memories are
+// surfaced via graph traversal when mode=deep is requested.
+func TestMCPAssociationTraversal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	dataDir := t.TempDir()
+	startDaemon(t, dataDir)
+	token := readTokenFile()
+
+	// Write 3 related memories.
+	rA := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":   "default",
+		"concept": "quantum mechanics",
+		"content": "quantum mechanics explains particle behavior through wave equations",
+	})
+	rB := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":   "default",
+		"concept": "wave functions",
+		"content": "wave functions describe quantum states in Hilbert space",
+	})
+	rC := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":   "default",
+		"concept": "Copenhagen interpretation",
+		"content": "Copenhagen interpretation resolves the quantum measurement problem",
+	})
+
+	idA, _ := rA["id"].(string)
+	idB, _ := rB["id"].(string)
+	idC, _ := rC["id"].(string)
+	if idA == "" || idB == "" || idC == "" {
+		t.Fatalf("failed to write memories: %v %v %v", rA, rB, rC)
+	}
+
+	// Link A→B and B→C explicitly.
+	mcpTool(t, token, "muninn_link", map[string]any{
+		"vault":     "default",
+		"source_id": idA,
+		"target_id": idB,
+		"relation":  "relates_to",
+		"weight":    0.8,
+	})
+	mcpTool(t, token, "muninn_link", map[string]any{
+		"vault":     "default",
+		"source_id": idB,
+		"target_id": idC,
+		"relation":  "relates_to",
+		"weight":    0.8,
+	})
+
+	// Poll-retry: recall with mode=deep (MaxHops=4) until all 3 IDs appear.
+	waitForIDs(t, token, map[string]any{
+		"vault":   "default",
+		"context": []string{"quantum mechanics"},
+		"mode":    "deep",
+		"limit":   20,
+	}, []string{idA, idB, idC}, 10*time.Second)
+}
+
+// TestMCPTraverse verifies that muninn_traverse returns nodes and edges when
+// traversing an explicitly linked memory graph.
+func TestMCPTraverse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	dataDir := t.TempDir()
+	startDaemon(t, dataDir)
+	token := readTokenFile()
+
+	// Write 3 memories.
+	rA := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":   "default",
+		"concept": "Node-A",
+		"content": "starting point",
+	})
+	rB := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":   "default",
+		"concept": "Node-B",
+		"content": "intermediate node",
+	})
+	rC := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":   "default",
+		"concept": "Node-C",
+		"content": "terminal node",
+	})
+
+	idA, _ := rA["id"].(string)
+	idB, _ := rB["id"].(string)
+	idC, _ := rC["id"].(string)
+	if idA == "" || idB == "" || idC == "" {
+		t.Fatalf("failed to write memories: %v %v %v", rA, rB, rC)
+	}
+
+	// Link A→B and B→C.
+	mcpTool(t, token, "muninn_link", map[string]any{
+		"vault":     "default",
+		"source_id": idA,
+		"target_id": idB,
+		"relation":  "relates_to",
+		"weight":    0.8,
+	})
+	mcpTool(t, token, "muninn_link", map[string]any{
+		"vault":     "default",
+		"source_id": idB,
+		"target_id": idC,
+		"relation":  "relates_to",
+		"weight":    0.8,
+	})
+
+	// Traverse from A with max_hops=2.
+	result := mcpTool(t, token, "muninn_traverse", map[string]any{
+		"vault":     "default",
+		"start_id":  idA,
+		"max_hops":  2,
+		"max_nodes": 20,
+	})
+
+	// Assert no error key in result.
+	if errVal, hasErr := result["error"]; hasErr {
+		t.Fatalf("muninn_traverse returned error: %v", errVal)
+	}
+
+	nodes, _ := result["nodes"].([]any)
+	if len(nodes) < 3 {
+		t.Errorf("expected at least 3 nodes in traverse result, got %d: %v", len(nodes), result)
+	}
+
+	edges, _ := result["edges"].([]any)
+	if len(edges) < 2 {
+		t.Errorf("expected at least 2 edges in traverse result, got %d: %v", len(edges), result)
+	}
+}
+
+// TestMCPFullPipelineProof exercises the full pipeline: temporal filtering
+// combined with graph traversal to verify that linked memories respect the
+// since filter (alpha at 20d is excluded; beta at 10d and gamma at 2d appear).
+func TestMCPFullPipelineProof(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	dataDir := t.TempDir()
+	startDaemon(t, dataDir)
+	token := readTokenFile()
+
+	now := time.Now().UTC()
+	ago20 := now.Add(-20 * 24 * time.Hour).Format(time.RFC3339)
+	ago10 := now.Add(-10 * 24 * time.Hour).Format(time.RFC3339)
+	ago2 := now.Add(-2 * 24 * time.Hour).Format(time.RFC3339)
+	ago15 := now.Add(-15 * 24 * time.Hour).Format(time.RFC3339)
+
+	// Write 3 memories at different timestamps.
+	rAlpha := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":      "default",
+		"concept":    "alpha physics discovery",
+		"content":    "alpha particle physics discovery from ancient experiments",
+		"created_at": ago20,
+	})
+	rBeta := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":      "default",
+		"concept":    "beta physics experiment",
+		"content":    "beta physics experiment confirming alpha findings",
+		"created_at": ago10,
+	})
+	rGamma := mcpTool(t, token, "muninn_remember", map[string]any{
+		"vault":      "default",
+		"concept":    "gamma physics result",
+		"content":    "gamma physics result proving the theory correct",
+		"created_at": ago2,
+	})
+
+	idAlpha, _ := rAlpha["id"].(string)
+	idBeta, _ := rBeta["id"].(string)
+	idGamma, _ := rGamma["id"].(string)
+	if idAlpha == "" || idBeta == "" || idGamma == "" {
+		t.Fatalf("failed to write memories")
+	}
+
+	// Link the chain: alpha→beta→gamma.
+	mcpTool(t, token, "muninn_link", map[string]any{
+		"vault": "default", "source_id": idAlpha, "target_id": idBeta, "relation": "relates_to", "weight": 0.8,
+	})
+	mcpTool(t, token, "muninn_link", map[string]any{
+		"vault": "default", "source_id": idBeta, "target_id": idGamma, "relation": "relates_to", "weight": 0.8,
+	})
+
+	// Recall with since=15d ago + mode=deep.
+	// Should return: beta + gamma (in time window) via direct match + traversal.
+	// Should NOT return: alpha (outside 15d window even though linked).
+	waitForIDs(t, token, map[string]any{
+		"vault":   "default",
+		"context": []string{"physics"},
+		"since":   ago15,
+		"mode":    "deep",
+		"limit":   20,
+	}, []string{idBeta, idGamma}, 10*time.Second)
+
+	// Verify alpha excluded.
+	result := mcpTool(t, token, "muninn_recall", map[string]any{
+		"vault":   "default",
+		"context": []string{"physics"},
+		"since":   ago15,
+		"mode":    "deep",
+		"limit":   20,
+	})
+	ids := extractIDs(result)
+	if ids[idAlpha] {
+		t.Errorf("alpha (20d ago) should NOT appear in since=15d results — temporal filter failed")
+	}
+	if !ids[idBeta] {
+		t.Errorf("beta (10d ago) should appear in since=15d results")
+	}
+	if !ids[idGamma] {
+		t.Errorf("gamma (2d ago) should appear in since=15d results")
 	}
 }
