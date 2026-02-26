@@ -6,7 +6,7 @@ MODEL_REPO  := Xenova/all-MiniLM-L6-v2
 HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
 ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
 
-.PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets build test bench test-integration \
+.PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets web build test bench test-integration \
         eval-bible-setup eval-bible eval-bible-full eval-bible-quick eval-bible-export eval-bible-fast
 
 ## fetch-assets: download the model, tokenizer, and all platform ORT libraries.
@@ -89,8 +89,12 @@ clean-assets:
 	@rm -f $(ASSETS_DIR)/onnxruntime_*.dll
 	@echo "==> Done."
 
-## build: build the server binary (requires fetch-assets first).
-build:
+## web: compile Tailwind CSS via Vite (requires Node.js + npm).
+web:
+	@cd web && npm ci --silent && npm run build --silent
+
+## build: build the server binary (requires fetch-assets and web first).
+build: web
 	@go build -o muninndb-server ./cmd/muninn/...
 
 ## test: run unit tests across all packages.

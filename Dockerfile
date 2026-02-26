@@ -8,12 +8,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl make ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Node.js for Tailwind/Vite CSS build
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . .
 
 # Fetch only what linux/amd64 needs (skips darwin libs to speed up the build).
 # - model_int8.onnx + tokenizer.json: required by local_assets_common.go go:embed
 # - libonnxruntime_linux_amd64.so:    required by local_assets_linux_amd64.go go:embed
 RUN make fetch-model _ort-linux-amd64
+
+# Build web assets (Tailwind CSS via Vite)
+RUN cd web && npm ci --ignore-scripts && npm run build
 
 # Build the server binary.
 # CGO_ENABLED=0 would break the local ONNX embedder (dlopen at runtime).

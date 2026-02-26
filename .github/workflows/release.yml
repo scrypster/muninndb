@@ -60,6 +60,13 @@ jobs:
         if: steps.asset-cache.outputs.cache-hit != 'true'
         run: make fetch-model ${{ matrix.ort_target }}
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web assets
+        run: cd web && npm ci --ignore-scripts && npm run build
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
@@ -114,6 +121,13 @@ jobs:
           $dll = Get-ChildItem -Path "$env:TEMP\ort-extract" -Recurse -Filter "onnxruntime.dll" | Select-Object -First 1
           Copy-Item $dll.FullName -Destination "internal/plugin/embed/assets/onnxruntime_windows_amd64.dll"
         shell: pwsh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web assets
+        run: cd web && npm ci --ignore-scripts && npm run build
 
       - name: Build binary
         run: |

@@ -34,6 +34,13 @@ jobs:
         if: steps.asset-cache.outputs.cache-hit != 'true'
         run: make fetch-model _ort-linux-amd64
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web assets
+        run: cd web && npm ci --ignore-scripts && npm run build
+
       - name: Build server
         run: go build -o muninndb-server ./cmd/muninn/...
 
@@ -75,6 +82,13 @@ jobs:
           if [ ! -f internal/plugin/embed/assets/model_int8.onnx ]; then
             make fetch-model _ort-linux-amd64
           fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web assets
+        run: cd web && npm ci --ignore-scripts && npm run build
 
       # TestMain builds the binary itself; we just need Go + assets present.
       # Tests exercise: help, unknown-command, init, start, stop, restart, status, MCP round-trip.
@@ -121,6 +135,13 @@ jobs:
           Copy-Item $dll.FullName -Destination "internal/plugin/embed/assets/onnxruntime_windows_amd64.dll"
           Write-Host "DLL size: $((Get-Item 'internal/plugin/embed/assets/onnxruntime_windows_amd64.dll').Length / 1MB) MB"
         shell: pwsh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web assets
+        run: cd web && npm ci --ignore-scripts && npm run build
 
       - name: Build server
         run: go build -o muninn.exe ./cmd/muninn/...
@@ -198,6 +219,13 @@ jobs:
           if [ ! -f internal/plugin/embed/assets/model_int8.onnx ]; then
             make fetch-model _ort-linux-amd64
           fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build web assets
+        run: cd web && npm ci --ignore-scripts && npm run build
 
       - name: Build server
         run: go build -o muninndb-server ./cmd/muninn/...

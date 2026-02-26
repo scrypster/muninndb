@@ -110,47 +110,41 @@ func runInteractiveInit(mcpURL string, tokenFlag *string, noToken *bool, noStart
 	selectedTools := runToolMultiSelect(tools)
 
 	// Step 2: Embedder selection
+	embedderOptions := []selectOption{
+		{label: "Local (bundled)", hint: "offline, no setup required   (recommended)"},
+		{label: "Ollama", hint: "self-hosted"},
+		{label: "OpenAI", hint: "cloud, requires API key"},
+		{label: "Voyage", hint: "cloud, requires API key"},
+		{label: "Cohere", hint: "cloud, requires API key"},
+		{label: "Google (Gemini)", hint: "cloud, requires API key"},
+		{label: "Jina", hint: "cloud, requires API key"},
+		{label: "Mistral", hint: "cloud, requires API key"},
+	}
 	fmt.Println()
 	fmt.Println("  Which embedder should muninn use for memory search?")
 	fmt.Println()
-	fmt.Println("    ▶  1)  Local (bundled)  ·  offline, no setup required   (recommended)")
-	fmt.Println("       2)  Ollama           ·  self-hosted")
-	fmt.Println("       3)  OpenAI           ·  cloud, requires API key")
-	fmt.Println("       4)  Voyage           ·  cloud, requires API key")
-	fmt.Println("       5)  Cohere           ·  cloud, requires API key")
-	fmt.Println("       6)  Google (Gemini)  ·  cloud, requires API key")
-	fmt.Println("       7)  Jina             ·  cloud, requires API key")
-	fmt.Println("       8)  Mistral          ·  cloud, requires API key")
-	fmt.Println()
-	fmt.Print("  Choice [1]: ")
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	embedderChoice := strings.TrimSpace(scanner.Text())
-	if embedderChoice == "" {
-		embedderChoice = "1"
-	}
+	embedderIdx := runSingleSelect(embedderOptions, 0)
+	embedderChoice := fmt.Sprintf("%d", embedderIdx+1)
 	printEmbedderNote(embedderChoice)
 
 	// Step 3: Behavior mode selection
+	behaviorOptions := []selectOption{
+		{label: "Autonomous", hint: "AI remembers proactively   (recommended)"},
+		{label: "Prompted", hint: "only when you ask"},
+		{label: "Selective", hint: "decisions & errors auto, rest on request"},
+		{label: "Custom", hint: "provide your own instructions"},
+	}
 	fmt.Println()
 	fmt.Println("  How should your AI use memory?")
 	fmt.Println()
-	fmt.Println("    ▶  1)  Autonomous   ·  AI remembers proactively   (recommended)")
-	fmt.Println("       2)  Prompted     ·  only when you ask")
-	fmt.Println("       3)  Selective    ·  decisions & errors auto, rest on request")
-	fmt.Println("       4)  Custom       ·  provide your own instructions")
-	fmt.Println()
-	fmt.Print("  Choice [1]: ")
-	scanner.Scan()
-	behaviorChoice := strings.TrimSpace(scanner.Text())
-	if behaviorChoice == "" {
-		behaviorChoice = "1"
-	}
+	behaviorIdx := runSingleSelect(behaviorOptions, 0)
+	behaviorChoice := fmt.Sprintf("%d", behaviorIdx+1)
 	behaviorMode := parseBehaviorChoice(behaviorChoice)
 	var customInstructions string
 	if behaviorMode == "custom" {
 		fmt.Println()
 		fmt.Print("  Enter your custom instructions: ")
+		scanner := bufio.NewScanner(os.Stdin)
 		scanner.Scan()
 		customInstructions = strings.TrimSpace(scanner.Text())
 	}
@@ -211,6 +205,44 @@ func runInteractiveInit(mcpURL string, tokenFlag *string, noToken *bool, noStart
 	fmt.Println()
 }
 
+// readKey reads a single keypress from stdin in raw mode. It handles
+// fragmented escape sequences by doing a follow-up read when the first
+// byte is ESC (0x1b). Returns the key bytes and any read error.
+func readKey(buf []byte) (int, error) {
+	n, err := os.Stdin.Read(buf)
+	if err != nil || n == 0 {
+		return n, err
+	}
+	if n == 1 && buf[0] == 27 {
+		extra := make([]byte, 8)
+		n2, _ := os.Stdin.Read(extra)
+		copy(buf[1:], extra[:n2])
+		n += n2
+	}
+	return n, nil
+}
+
+// parseArrow returns +1 (down), -1 (up), or 0 (not an arrow) from raw key bytes.
+func parseArrow(buf []byte, n int) int {
+	if n == 1 {
+		switch buf[0] {
+		case 'k', 'K':
+			return -1
+		case 'j', 'J':
+			return +1
+		}
+	}
+	if n >= 3 && buf[0] == 27 && buf[1] == 91 {
+		switch buf[2] {
+		case 65:
+			return -1
+		case 66:
+			return +1
+		}
+	}
+	return 0
+}
+
 // runToolMultiSelect renders an interactive checkbox list with arrow-key
 // navigation and spacebar toggling. Falls back to text input for non-TTY.
 func runToolMultiSelect(tools []toolChoice) []string {
@@ -225,7 +257,7 @@ func runToolMultiSelect(tools []toolChoice) []string {
 	}
 
 	cursor := 0
-	totalLines := len(tools) + 2 // tool rows + blank line + help line
+	totalLines := len(tools) + 2
 
 	render := func(first bool) {
 		if !first {
@@ -252,18 +284,18 @@ func runToolMultiSelect(tools []toolChoice) []string {
 
 	render(true)
 
-	buf := make([]byte, 3)
+	buf := make([]byte, 16)
 	for {
-		n, readErr := os.Stdin.Read(buf)
+		n, readErr := readKey(buf)
 		if readErr != nil {
 			break
 		}
 
+		changed := true
 		switch {
 		case n == 1 && buf[0] == ' ':
 			tools[cursor].selected = !tools[cursor].selected
 		case n == 1 && (buf[0] == '\r' || buf[0] == '\n'):
-			// Clear the help line, print final state, restore terminal
 			fmt.Printf("\r\033[%dA", totalLines)
 			for i, t := range tools {
 				check := "○"
@@ -295,25 +327,20 @@ func runToolMultiSelect(tools []toolChoice) []string {
 			fmt.Print("\r\n")
 			term.Restore(fd, oldState)
 			os.Exit(0)
-		case n == 1 && (buf[0] == 'k' || buf[0] == 'K'):
-			if cursor > 0 {
-				cursor--
-			}
-		case n == 1 && (buf[0] == 'j' || buf[0] == 'J'):
-			if cursor < len(tools)-1 {
-				cursor++
-			}
-		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 65: // Up
-			if cursor > 0 {
-				cursor--
-			}
-		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 66: // Down
-			if cursor < len(tools)-1 {
-				cursor++
+		default:
+			if dir := parseArrow(buf, n); dir != 0 {
+				next := cursor + dir
+				if next >= 0 && next < len(tools) {
+					cursor = next
+				}
+			} else {
+				changed = false
 			}
 		}
 
-		render(false)
+		if changed {
+			render(false)
+		}
 	}
 
 	term.Restore(fd, oldState)
@@ -375,6 +402,123 @@ func runToolMultiSelectFallback(tools []toolChoice) []string {
 		}
 	}
 	return keys
+}
+
+// selectOption describes one entry in a single-select menu.
+type selectOption struct {
+	label string
+	hint  string
+}
+
+// runSingleSelect renders an interactive single-select menu with arrow-key
+// navigation. Returns the selected index (0-based). Falls back to a numbered
+// text prompt when stdin is not a terminal.
+func runSingleSelect(options []selectOption, defaultIdx int) int {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return runSingleSelectFallback(options, defaultIdx)
+	}
+
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return runSingleSelectFallback(options, defaultIdx)
+	}
+
+	cursor := defaultIdx
+	totalLines := len(options) + 2
+
+	render := func(first bool) {
+		if !first {
+			fmt.Printf("\r\033[%dA", totalLines)
+		}
+		for i, o := range options {
+			arrow := "     "
+			if i == cursor {
+				arrow = "  ▸  "
+			}
+			fmt.Printf("\r\033[K  %s%d)  %-18s·  %s\r\n", arrow, i+1, o.label, o.hint)
+		}
+		fmt.Print("\r\033[K\r\n")
+		fmt.Print("\r\033[K  \033[2m↑/↓ navigate  ·  enter confirm\033[0m")
+	}
+
+	render(true)
+
+	buf := make([]byte, 16)
+	for {
+		n, readErr := readKey(buf)
+		if readErr != nil {
+			break
+		}
+
+		switch {
+		case n == 1 && (buf[0] == '\r' || buf[0] == '\n'):
+			fmt.Printf("\r\033[%dA", totalLines)
+			for i, o := range options {
+				arrow := "     "
+				if i == cursor {
+					arrow = "  ▸  "
+				}
+				fmt.Printf("\r\033[K  %s%d)  %-18s·  %s\r\n", arrow, i+1, o.label, o.hint)
+			}
+			fmt.Print("\r\033[K\r\n")
+			fmt.Print("\r\033[K")
+			term.Restore(fd, oldState)
+			return cursor
+		case n == 1 && buf[0] == 3: // Ctrl+C
+			fmt.Print("\r\n")
+			term.Restore(fd, oldState)
+			os.Exit(0)
+		case n == 1 && buf[0] >= '1' && buf[0] <= '9':
+			idx := int(buf[0]-'0') - 1
+			if idx < len(options) {
+				cursor = idx
+			}
+		default:
+			if dir := parseArrow(buf, n); dir != 0 {
+				next := cursor + dir
+				if next >= 0 && next < len(options) {
+					cursor = next
+				}
+			} else {
+				continue
+			}
+		}
+
+		render(false)
+	}
+
+	term.Restore(fd, oldState)
+	return cursor
+}
+
+// runSingleSelectFallback handles non-TTY environments with simple numbered input.
+func runSingleSelectFallback(options []selectOption, defaultIdx int) int {
+	for i, o := range options {
+		arrow := "     "
+		if i == defaultIdx {
+			arrow = "  ▸  "
+		}
+		fmt.Printf("  %s%d)  %-18s·  %s\n", arrow, i+1, o.label, o.hint)
+	}
+	fmt.Println()
+	fmt.Printf("  Choice [%d]: ", defaultIdx+1)
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" {
+		return defaultIdx
+	}
+	for _, c := range input {
+		if c >= '1' && c <= '9' {
+			idx := int(c-'0') - 1
+			if idx < len(options) {
+				return idx
+			}
+		}
+	}
+	return defaultIdx
 }
 
 func printEmbedderNote(choice string) {
