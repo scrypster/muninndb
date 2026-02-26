@@ -51,11 +51,15 @@ jobs:
 
       - name: Build muninn-python
         working-directory: sdk/python
-        run: python -m build
+        run: |
+          rm -rf dist/
+          python -m build
 
       - name: Build muninndb (alias stub)
         working-directory: sdk/muninndb
-        run: python -m build
+        run: |
+          rm -rf dist/
+          python -m build
 
       - name: Collect all artifacts
         run: |

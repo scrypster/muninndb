@@ -33,6 +33,8 @@ muninndb-data/
 **/.venv/
 **/venv/
 **/__pycache__/
+*.pyc
+*.bak
 
 # macOS
 .DS_Store
@@ -64,4 +66,8 @@ scripts/eval-*
 /eval
 sdk/node/node_modules/
 sdk/node/dist/
+sdk/python/dist/
+sdk/python/*.egg-info/
+sdk/muninndb/dist/
+sdk/muninndb/*.egg-info/
 sdk/php/vendor/
