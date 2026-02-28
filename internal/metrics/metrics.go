@@ -46,6 +46,29 @@ var (
 		Name: "muninn_fts_index_failures_total",
 		Help: "Total number of FTS index write failures during reindex.",
 	}, []string{"vault"})
+
+	WriteDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "muninndb_write_duration_seconds",
+		Help:    "Engine write latency per vault",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
+	}, []string{"vault"})
+
+	ActivateDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "muninndb_activate_duration_seconds",
+		Help:    "Engine activation (recall) latency per vault",
+		Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2},
+	}, []string{"vault"})
+
+	ReadDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "muninndb_read_duration_seconds",
+		Help:    "Engine read latency per vault",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1},
+	}, []string{"vault"})
+
+	EmbedPending = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "muninndb_embed_pending",
+		Help: "Number of engrams pending embedding",
+	})
 )
 
 // VaultStore is the subset of storage.PebbleStore methods needed by VaultEngramCollector.
