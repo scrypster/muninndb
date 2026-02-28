@@ -130,6 +130,7 @@ type EngineAPI interface {
 	ListDeleted(ctx context.Context, vault string, limit int) (*ListDeletedResponse, error)
 	RetryEnrich(ctx context.Context, vault, engramID string) (*RetryEnrichResponse, error)
 	GetContradictions(ctx context.Context, vault string) (*ContradictionsResponse, error)
+	ResolveContradiction(ctx context.Context, vault, idA, idB string) error
 	GetGuide(ctx context.Context, vault string) (string, error)
 }
 
@@ -377,6 +378,18 @@ type ContradictionItem struct {
 // ContradictionsResponse is returned by the contradictions endpoint.
 type ContradictionsResponse struct {
 	Contradictions []ContradictionItem `json:"contradictions"`
+}
+
+// ResolveContradictionRequest is the body for POST /api/admin/contradictions/resolve.
+type ResolveContradictionRequest struct {
+	Vault string `json:"vault"`
+	IDA   string `json:"id_a"`
+	IDB   string `json:"id_b"`
+}
+
+// ResolveContradictionResponse is returned by the resolve-contradiction endpoint.
+type ResolveContradictionResponse struct {
+	Resolved bool `json:"resolved"`
 }
 
 // GuideResponse is returned by the guide endpoint.

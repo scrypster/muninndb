@@ -152,6 +152,10 @@ func (m *mockEngine) RetryEnrich(ctx context.Context, vault, engramID string) (*
 func (m *mockEngine) GetContradictions(ctx context.Context, vault string) (*rest.ContradictionsResponse, error) {
 	return &rest.ContradictionsResponse{}, nil
 }
+
+func (m *mockEngine) ResolveContradiction(ctx context.Context, vault, idA, idB string) error {
+	return nil
+}
 func (m *mockEngine) GetGuide(ctx context.Context, vault string) (string, error) {
 	return "", nil
 }

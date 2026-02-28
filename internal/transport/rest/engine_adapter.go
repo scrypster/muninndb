@@ -465,6 +465,10 @@ func (w *RESTEngineWrapper) RetryEnrich(ctx context.Context, vault, engramID str
 	}, nil
 }
 
+func (w *RESTEngineWrapper) ResolveContradiction(ctx context.Context, vault, idA, idB string) error {
+	return w.engine.ResolveContradiction(ctx, vault, idA, idB)
+}
+
 func (w *RESTEngineWrapper) GetContradictions(ctx context.Context, vault string) (*ContradictionsResponse, error) {
 	pairs, err := w.engine.GetContradictions(ctx, vault)
 	if err != nil {

@@ -453,6 +453,18 @@
                     @click="openMemory({id:pair.id_b, concept:pair.concept_b, content:'', vault:vault}); memoriesSubTab='list'">View</button>
                 </div>
               </div>
+              <!-- Resolution actions -->
+              <div style="display:flex;gap:0.5rem;margin-top:0.875rem;flex-wrap:wrap;align-items:center;">
+                <span style="font-size:0.75rem;color:var(--text-muted);margin-right:0.25rem;">Resolve:</span>
+                <button class="btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.625rem;" title="Keep Memory A — archives B and marks A as superseding"
+                  @click="resolveContradiction(pair.id_a, pair.id_b, 'keep_a')">Keep A</button>
+                <button class="btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.625rem;" title="Keep Memory B — archives A and marks B as superseding"
+                  @click="resolveContradiction(pair.id_a, pair.id_b, 'keep_b')">Keep B</button>
+                <button class="btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.625rem;" title="Merge both memories into a single consolidated memory"
+                  @click="resolveContradiction(pair.id_a, pair.id_b, 'merge')">Merge</button>
+                <button class="btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.625rem;opacity:0.7;" title="Dismiss this contradiction flag without archiving either memory"
+                  @click="resolveContradiction(pair.id_a, pair.id_b, 'dismiss')">Dismiss</button>
+              </div>
               <div x-show="pair.detected_at" style="font-size:0.75rem;color:var(--text-muted);margin-top:0.625rem;">
                 Detected: <span x-text="pair.detected_at ? new Date(pair.detected_at * 1000).toLocaleString() : ''"></span>
               </div>
@@ -611,19 +623,30 @@
         edges represent associations — <em>supports</em>, <em>contradicts</em>, <em>depends on</em>, etc.
         Click a node to preview its content.
       </p>
-      <div style="display:flex;gap:1rem;margin-bottom:1rem;align-items:center;">
+      <div style="display:flex;gap:0.75rem;margin-bottom:1rem;align-items:center;flex-wrap:wrap;">
         <button class="btn-primary" @click="loadGraph()">Load Graph</button>
         <span style="color:var(--text-muted);font-size:0.875rem;">Top 50 active engrams + associations</span>
+        <!-- Orphan toggle -->
+        <label style="display:flex;align-items:center;gap:0.375rem;font-size:0.8125rem;color:var(--text-muted);cursor:pointer;" title="Show engrams with no associations (orphan nodes)">
+          <input type="checkbox" x-model="graphShowOrphans" @change="graphLoaded && loadGraph()" />
+          Show orphans
+        </label>
         <span x-show="graphLoaded" class="badge-success">Loaded</span>
+        <!-- Zoom controls -->
+        <div x-show="graphLoaded" style="display:flex;gap:0.375rem;margin-left:auto;">
+          <button class="btn-secondary" style="padding:0.25rem 0.625rem;font-size:0.875rem;" title="Zoom in" @click="graphZoomIn()">+</button>
+          <button class="btn-secondary" style="padding:0.25rem 0.625rem;font-size:0.875rem;" title="Zoom out" @click="graphZoomOut()">−</button>
+          <button class="btn-secondary" style="padding:0.25rem 0.75rem;font-size:0.8125rem;" title="Fit all nodes in view" @click="graphFit()">Fit</button>
+        </div>
       </div>
-      <div x-show="!graphLoaded" style="flex:1;border:1px solid var(--border);border-radius:0.75rem;display:flex;align-items:center;justify-content:center;color:var(--text-muted);">
+      <div x-show="!graphLoaded" style="flex:1;min-height:500px;border:1px solid var(--border);border-radius:0.75rem;display:flex;align-items:center;justify-content:center;color:var(--text-muted);">
         <div style="text-align:center;">
           <div style="font-size:2rem;margin-bottom:0.75rem;">⬡</div>
           <div>Click <strong>Load Graph</strong> to visualize memory connections</div>
           <div style="font-size:0.8125rem;margin-top:0.5rem;">Requires at least 2 memories with associations</div>
         </div>
       </div>
-      <div id="cy" x-show="graphLoaded" style="flex:1;border:1px solid var(--border);border-radius:0.75rem;"></div>
+      <div id="cy" x-show="graphLoaded" style="flex:1;min-height:500px;border:1px solid var(--border);border-radius:0.75rem;"></div>
     </div>
 
     <!-- ── Observability View ─────────────────────────────────────── -->

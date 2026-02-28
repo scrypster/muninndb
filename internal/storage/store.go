@@ -88,6 +88,10 @@ type EngineStore interface {
 	// GetContradictions returns all contradiction pairs in the vault by scanning the 0x0A prefix.
 	GetContradictions(ctx context.Context, wsPrefix [8]byte) ([][2]ULID, error)
 
+	// ResolveContradiction deletes the contradiction marker(s) for the pair (a,b).
+	// Both directions are removed (the pair is stored bidirectionally).
+	ResolveContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error
+
 	// ListByState returns up to limit engram IDs whose lifecycle state matches,
 	// using the 0x0B state secondary index.
 	ListByState(ctx context.Context, wsPrefix [8]byte, state LifecycleState, limit int) ([]ULID, error)

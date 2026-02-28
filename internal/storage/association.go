@@ -87,8 +87,9 @@ func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, s
 		return fmt.Errorf("commit batch: %w", err)
 	}
 
-	// Association list is TTL-cached; no immediate invalidation needed.
-	// New edges will be visible after assocCacheTTL (200ms).
+	// Invalidate source node's cached association list so BFS traversal
+	// sees the new edge immediately instead of waiting for TTL expiry.
+	ps.assocCache.Remove(assocCacheKey(wsPrefix, src))
 
 	return nil
 }
@@ -477,6 +478,28 @@ func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, 
 		return fmt.Errorf("commit batch: %w", err)
 	}
 
+	return nil
+}
+
+// ResolveContradiction deletes the contradiction marker(s) for the pair (a,b).
+// Contradictions are stored bidirectionally, so both directions are removed.
+func (ps *PebbleStore) ResolveContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error {
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+
+	var aBytes [16]byte = [16]byte(a)
+	var bBytes [16]byte = [16]byte(b)
+
+	// Delete both directions regardless of canonical ordering — the caller may pass
+	// (a,b) or (b,a) so we always remove the marker written for each direction.
+	contraKeyAB := keys.ContradictionKey(wsPrefix, 0, 0, aBytes)
+	contraKeyBA := keys.ContradictionKey(wsPrefix, 0, 0, bBytes)
+	batch.Delete(contraKeyAB, nil)
+	batch.Delete(contraKeyBA, nil)
+
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return fmt.Errorf("resolve contradiction: %w", err)
+	}
 	return nil
 }
 

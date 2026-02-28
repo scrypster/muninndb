@@ -1,6 +1,6 @@
 {
   "name": "@muninndb/client",
-  "version": "0.0.0-dev",
+  "version": "0.2.3",
   "description": "Official TypeScript/Node.js SDK for MuninnDB — the cognitive memory database",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

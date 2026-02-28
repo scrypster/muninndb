@@ -77,6 +77,43 @@ jobs:
         if: github.event.inputs.dry_run == 'true'
         run: echo "Dry run complete. Packages built but not uploaded."
 
+  # ── Node SDK → npm (OIDC trusted publishing — no token) ──────────────────
+  publish-node:
+    name: Build & publish @muninndb/client to npm
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Inject version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/\"version\": \"0.0.0-dev\"/\"version\": \"${VERSION}\"/" sdk/node/package.json
+
+      - name: Install and build
+        working-directory: sdk/node
+        run: |
+          npm ci
+          npm run build
+
+      - name: Publish to npm
+        if: github.event.inputs.dry_run != 'true'
+        working-directory: sdk/node
+        run: npm publish --access public
+
+      - name: Dry run — skip npm publish
+        if: github.event.inputs.dry_run == 'true'
+        run: echo "Dry run: Node package built but not published."
+
   # ── PHP SDK → Packagist (via subtree split to muninndb-php repo) ─────────
   publish-php:
     name: Sync PHP SDK to muninndb-php

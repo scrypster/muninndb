@@ -253,6 +253,10 @@ func (m *MockEngine) GetContradictions(ctx context.Context, vault string) (*Cont
 	}, nil
 }
 
+func (m *MockEngine) ResolveContradiction(ctx context.Context, vault, idA, idB string) error {
+	return nil
+}
+
 func (m *MockEngine) GetGuide(ctx context.Context, vault string) (string, error) {
 	return "MuninnDB Guide for vault \"default\"\n\nThis vault has 100 memories.", nil
 }
@@ -1840,6 +1844,67 @@ func TestContradictions_EngineError(t *testing.T) {
 	server := NewServer("localhost:8080", &contradictionsErrEngine{}, nil, nil, nil, EmbedInfo{}, nil, "", nil)
 
 	req := httptest.NewRequest("GET", "/api/contradictions?vault=default", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", w.Code)
+	}
+}
+
+// ── POST /api/admin/contradictions/resolve ────────────────────────────────────
+
+// TestResolveContradiction_Success verifies the happy path returns {resolved:true}.
+func TestResolveContradiction_Success(t *testing.T) {
+	server := NewServer("localhost:8080", &MockEngine{}, nil, nil, nil, EmbedInfo{}, nil, "", nil)
+
+	body := `{"vault":"default","id_a":"01ARZ3NDEKTSV4RRFFQ69G5FAV","id_b":"01ARZ3NDEKTSV4RRFFQ69G5FAW"}`
+	req := httptest.NewRequest("POST", "/api/admin/contradictions/resolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["resolved"] != true {
+		t.Errorf("expected resolved=true, got %v", resp["resolved"])
+	}
+}
+
+// TestResolveContradiction_MissingIDs verifies missing IDs returns 400.
+func TestResolveContradiction_MissingIDs(t *testing.T) {
+	server := NewServer("localhost:8080", &MockEngine{}, nil, nil, nil, EmbedInfo{}, nil, "", nil)
+
+	body := `{"vault":"default","id_a":"","id_b":""}`
+	req := httptest.NewRequest("POST", "/api/admin/contradictions/resolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// resolveContradictionErrEngine returns an error from ResolveContradiction.
+type resolveContradictionErrEngine struct{ MockEngine }
+
+func (e *resolveContradictionErrEngine) ResolveContradiction(ctx context.Context, vault, idA, idB string) error {
+	return fmt.Errorf("storage error")
+}
+
+// TestResolveContradiction_EngineError verifies engine error → 500.
+func TestResolveContradiction_EngineError(t *testing.T) {
+	server := NewServer("localhost:8080", &resolveContradictionErrEngine{}, nil, nil, nil, EmbedInfo{}, nil, "", nil)
+
+	body := `{"vault":"default","id_a":"01ARZ3NDEKTSV4RRFFQ69G5FAV","id_b":"01ARZ3NDEKTSV4RRFFQ69G5FAW"}`
+	req := httptest.NewRequest("POST", "/api/admin/contradictions/resolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
 

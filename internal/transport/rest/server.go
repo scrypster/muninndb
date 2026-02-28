@@ -206,6 +206,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.handleRenameVault))
 	mux.HandleFunc("POST /api/admin/backup", s.withAdminMiddleware(s.handleBackup))
 	mux.HandleFunc("GET /api/admin/observability", s.withAdminMiddleware(s.handleObservability))
+	mux.HandleFunc("POST /api/admin/contradictions/resolve", s.withAdminMiddleware(s.handleResolveContradiction))
 
 	// Cluster management — session auth required
 	mux.HandleFunc("GET /api/admin/cluster/token", s.withAdminMiddleware(s.handleAdminClusterToken))
@@ -1343,6 +1344,27 @@ func (s *Server) handleContradictions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleResolveContradiction(w http.ResponseWriter, r *http.Request) {
+	var req ResolveContradictionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+		return
+	}
+	if req.IDA == "" || req.IDB == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "id_a and id_b are required")
+		return
+	}
+	vault := req.Vault
+	if vault == "" {
+		vault = ctxVault(r)
+	}
+	if err := s.engine.ResolveContradiction(r.Context(), vault, req.IDA, req.IDB); err != nil {
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, ResolveContradictionResponse{Resolved: true})
 }
 
 func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {

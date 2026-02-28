@@ -408,3 +408,7 @@ The bundled local embedder uses ONNX Runtime, which requires the Visual C++ Redi
 *Named after Muninn — one of Odin's two ravens, whose name means "memory" in Old Norse. Muninn flies across the nine worlds and returns what has been forgotten.*
 
 Built by [MJ Bonanno](https://scrypster.com) · [muninndb.com](https://muninndb.com) · BSL 1.1
+
+---
+
+*MuninnDB is patent pending (U.S. Provisional Patent Application No. 63/991,402) and licensed under BSL 1.1.*

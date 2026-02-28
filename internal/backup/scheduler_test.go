@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -13,12 +14,12 @@ import (
 // stubCheckpointer is a test double for Checkpointer.
 // It writes a marker file inside destDir to confirm the call happened.
 type stubCheckpointer struct {
-	called    int
+	called    atomic.Int32
 	markerErr error // if non-nil, Checkpoint returns this error
 }
 
 func (s *stubCheckpointer) Checkpoint(destDir string) error {
-	s.called++
+	s.called.Add(1)
 	if s.markerErr != nil {
 		return s.markerErr
 	}
@@ -57,8 +58,8 @@ func TestRunOnce_CreatesCheckpoint(t *testing.T) {
 	sched.runOnce()
 	after := time.Now().UTC()
 
-	if stub.called != 1 {
-		t.Fatalf("expected Checkpoint called once, got %d", stub.called)
+	if stub.called.Load() != 1 {
+		t.Fatalf("expected Checkpoint called once, got %d", stub.called.Load())
 	}
 
 	// Verify a backup directory was created.
@@ -214,7 +215,7 @@ func TestScheduler_Start(t *testing.T) {
 	sched.Start(ctx)
 	<-ctx.Done()
 
-	if stub.called == 0 {
+	if stub.called.Load() == 0 {
 		t.Fatal("expected Checkpoint to be called at least once by the scheduler goroutine")
 	}
 }
@@ -277,8 +278,8 @@ func TestRunOnce_MkdirAllFailure(t *testing.T) {
 		t.Error("expected LastError to be non-empty when MkdirAll fails")
 	}
 	// Checkpoint must not have been attempted.
-	if stub.called != 0 {
-		t.Errorf("expected Checkpoint not called, got %d calls", stub.called)
+	if stub.called.Load() != 0 {
+		t.Errorf("expected Checkpoint not called, got %d calls", stub.called.Load())
 	}
 }
 

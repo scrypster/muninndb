@@ -734,11 +734,78 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    openMemory(m) {
+    async resolveContradiction(idA, idB, action) {
+      const vault = this.vault;
+      try {
+        if (action === 'keep_a') {
+          // A supersedes B; archive B
+          await fetch('/api/link', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_id: idA, target_id: idB, rel_type: 4, weight: 1.0, vault }),
+          });
+          await fetch('/api/engrams/' + encodeURIComponent(idB) + '/state', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vault, state: 'archived' }),
+          });
+          await fetch('/api/admin/contradictions/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
+          });
+        } else if (action === 'keep_b') {
+          // B supersedes A; archive A
+          await fetch('/api/link', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_id: idB, target_id: idA, rel_type: 4, weight: 1.0, vault }),
+          });
+          await fetch('/api/engrams/' + encodeURIComponent(idA) + '/state', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vault, state: 'archived' }),
+          });
+          await fetch('/api/admin/contradictions/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
+          });
+        } else if (action === 'dismiss') {
+          await fetch('/api/admin/contradictions/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
+          });
+        } else if (action === 'merge') {
+          // Open consolidate modal pre-filled with both IDs
+          this.multiSelectMode = true;
+          this.selectedMemoryIds = [idA, idB];
+          this.consolidateModal = { show: true, mergedContent: '(Merge contradicting memories here)' };
+          return; // don't reload contradictions yet
+        }
+        this.addNotification('success', 'Contradiction resolved');
+      } catch (err) {
+        this.addNotification('error', 'Resolve failed: ' + err.message);
+      }
+      this.loadContradictions();
+    },
+
+    async openMemory(m) {
+      // Session entries only have id/concept/createdAt — fetch full engram if content is missing.
+      if (!m.content && m.id) {
+        try {
+          const resp = await fetch('/api/engrams/' + encodeURIComponent(m.id) + '?vault=' + encodeURIComponent(this.vault));
+          if (resp.ok) {
+            const full = await resp.json();
+            m = { ...m, ...full };
+          }
+        } catch (e) { /* fall through with partial data */ }
+      }
       this.selectedMemory = m;
-      // Navigate to memories view if not there
+      // Navigate to memories view and update URL
       if (this.currentView !== 'memories') {
-        this.currentView = 'memories';
+        this.navigateTo('memories');
       }
     },
 
@@ -957,6 +1024,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Graph ──────────────────────────────────────────────────────────────
+    graphShowOrphans: false,
+
     async loadGraph() {
       this.addNotification('info', 'Loading graph…');
       try {
@@ -969,18 +1038,6 @@ document.addEventListener('alpine:init', () => {
           this.addNotification('error', 'No engrams to graph');
           return;
         }
-
-        // Build node elements
-        const elements = engrams.map(e => ({
-          data: {
-            id: e.id,
-            label: e.concept || e.id.slice(0, 8),
-            size: 20 + (e.confidence || 0.5) * 20,
-            color: (e.confidence || 0) > 0.7 ? '#06b6d4'
-                 : (e.confidence || 0) > 0.4 ? '#a855f7' : '#eab308',
-            snippet: (e.content || '').slice(0, 80),
-          },
-        }));
 
         // Load links for first 20 engrams in parallel
         const nodeIdSet = new Set(engrams.map(e => e.id));
@@ -1001,14 +1058,43 @@ document.addEventListener('alpine:init', () => {
         );
         const edgeBatches = await Promise.all(linkPromises);
         const edgeSet = new Set();
-        for (const edges of edgeBatches) {
-          for (const edge of edges) {
+        const edges = [];
+        const connectedNodeIds = new Set();
+        for (const batch of edgeBatches) {
+          for (const edge of batch) {
             if (nodeIdSet.has(edge.data.target) && !edgeSet.has(edge.data.id)) {
               edgeSet.add(edge.data.id);
-              elements.push(edge);
+              edges.push(edge);
+              connectedNodeIds.add(edge.data.source);
+              connectedNodeIds.add(edge.data.target);
             }
           }
         }
+
+        // Filter orphan nodes (nodes with 0 edges) unless showOrphans is toggled on
+        const showOrphans = this.graphShowOrphans;
+        const filteredEngrams = showOrphans
+          ? engrams
+          : engrams.filter(e => connectedNodeIds.has(e.id));
+
+        // If no connected nodes, fall back to all engrams so the graph isn't empty
+        const nodesToRender = filteredEngrams.length > 0 ? filteredEngrams : engrams;
+
+        // Build node elements
+        const nodeElements = nodesToRender.map(e => ({
+          data: {
+            id: e.id,
+            label: e.concept || e.id.slice(0, 8),
+            size: connectedNodeIds.has(e.id) ? 20 + (e.confidence || 0.5) * 20 : 12,
+            color: !connectedNodeIds.has(e.id) ? '#64748b'
+                 : (e.confidence || 0) > 0.7 ? '#06b6d4'
+                 : (e.confidence || 0) > 0.4 ? '#a855f7' : '#eab308',
+            orphan: !connectedNodeIds.has(e.id),
+            snippet: (e.content || '').slice(0, 80),
+          },
+        }));
+
+        const elements = [...nodeElements, ...edges];
 
         // Init or reinit Cytoscape
         if (this._cy) { this._cy.destroy(); this._cy = null; }
@@ -1034,6 +1120,13 @@ document.addEventListener('alpine:init', () => {
               },
             },
             {
+              selector: 'node[?orphan]',
+              style: {
+                'opacity': 0.45,
+                'border-style': 'dashed',
+              },
+            },
+            {
               selector: 'edge',
               style: {
                 'line-color': 'rgba(168,85,247,0.4)',
@@ -1048,6 +1141,7 @@ document.addEventListener('alpine:init', () => {
             },
           ],
           layout: { name: 'fcose', animate: true, animationDuration: 600 },
+          wheelSensitivity: 0.3,
         });
 
         this._cy.on('tap', 'node', (evt) => {
@@ -1059,10 +1153,23 @@ document.addEventListener('alpine:init', () => {
         });
 
         this.graphLoaded = true;
-        this.addNotification('success', 'Graph loaded (' + engrams.length + ' nodes)');
+        const orphanCount = engrams.length - connectedNodeIds.size;
+        const msg = 'Graph loaded (' + nodesToRender.length + ' nodes' +
+          (orphanCount > 0 && !showOrphans ? ', ' + orphanCount + ' orphans hidden' : '') + ')';
+        this.addNotification('success', msg);
       } catch (err) {
         this.addNotification('error', 'Graph failed: ' + err.message);
       }
+    },
+
+    graphZoomIn() {
+      if (this._cy) { this._cy.zoom(this._cy.zoom() * 1.25); this._cy.center(); }
+    },
+    graphZoomOut() {
+      if (this._cy) { this._cy.zoom(this._cy.zoom() * 0.8); this._cy.center(); }
+    },
+    graphFit() {
+      if (this._cy) { this._cy.fit(); }
     },
 
     // ── Session ────────────────────────────────────────────────────────────

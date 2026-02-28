@@ -224,6 +224,68 @@ func TestGetContradictions_WithPairs(t *testing.T) {
 }
 
 
+// TestResolveContradiction verifies that ResolveContradiction removes both
+// directions of the contradiction marker and GetContradictions no longer returns the pair.
+func TestResolveContradiction(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("contra-resolve")
+
+	idA := NewULID()
+	idB := NewULID()
+	idC := NewULID()
+
+	// Flag two pairs.
+	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+		t.Fatalf("FlagContradiction(A,B): %v", err)
+	}
+	if err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
+		t.Fatalf("FlagContradiction(A,C): %v", err)
+	}
+
+	// Resolve the (A,B) pair.
+	if err := store.ResolveContradiction(ctx, ws, idA, idB); err != nil {
+		t.Fatalf("ResolveContradiction(A,B): %v", err)
+	}
+
+	pairs, err := store.GetContradictions(ctx, ws)
+	if err != nil {
+		t.Fatalf("GetContradictions: %v", err)
+	}
+	// Only (A,C) should remain.
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 pair after resolve, got %d: %v", len(pairs), pairs)
+	}
+}
+
+// TestResolveContradiction_BothDirections verifies that ResolveContradiction works
+// regardless of which direction (a,b) or (b,a) the caller passes.
+func TestResolveContradiction_BothDirections(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("contra-resolve-dir")
+
+	idA := NewULID()
+	idB := NewULID()
+
+	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+		t.Fatalf("FlagContradiction: %v", err)
+	}
+
+	// Resolve using (b,a) order — must still remove both directions.
+	if err := store.ResolveContradiction(ctx, ws, idB, idA); err != nil {
+		t.Fatalf("ResolveContradiction(B,A): %v", err)
+	}
+
+	pairs, err := store.GetContradictions(ctx, ws)
+	if err != nil {
+		t.Fatalf("GetContradictions: %v", err)
+	}
+	if len(pairs) != 0 {
+		t.Fatalf("expected 0 pairs after resolve, got %d: %v", len(pairs), pairs)
+	}
+}
+
 // newTestStore creates a PebbleStore backed by a temp dir.
 // openTestPebble already registers Cleanup for the DB; we just wrap it in a store.
 func newTestStore(t *testing.T) *PebbleStore {
