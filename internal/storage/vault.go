@@ -126,6 +126,59 @@ func (ps *PebbleStore) BackfillVaultNames() error {
 	return nil
 }
 
+// VaultNameExists returns true if a vault with the given name is registered
+// (i.e. a 0x0F index key exists for the name).
+func (ps *PebbleStore) VaultNameExists(name string) bool {
+	idxKey := keys.VaultNameIndexKey(name)
+	_, closer, err := ps.db.Get(idxKey)
+	if err == nil {
+		closer.Close()
+		return true
+	}
+	return false
+}
+
+// RenameVault atomically renames a vault by updating the two index keys
+// (0x0E prefix→name and 0x0F nameHash→prefix). No engram data changes.
+// Returns an error if oldName doesn't match the stored name for ws, or if
+// newName already exists (collision).
+func (ps *PebbleStore) RenameVault(ws [8]byte, oldName, newName string) error {
+	// Verify 0x0E meta key exists and matches oldName.
+	metaKey := keys.VaultMetaKey(ws)
+	val, closer, err := ps.db.Get(metaKey)
+	if err != nil {
+		return fmt.Errorf("vault prefix not found: %w", err)
+	}
+	storedName := string(val)
+	closer.Close()
+	if storedName != oldName {
+		return fmt.Errorf("vault name mismatch: stored %q, expected %q", storedName, oldName)
+	}
+
+	// Verify newName doesn't already exist (collision check).
+	if ps.VaultNameExists(newName) {
+		return fmt.Errorf("vault name %q already exists", newName)
+	}
+
+	// Atomic batch: update 0x0E, set new 0x0F, delete old 0x0F.
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+	batch.Set(metaKey, []byte(newName), nil)
+	batch.Set(keys.VaultNameIndexKey(newName), ws[:], nil)
+	batch.Delete(keys.VaultNameIndexKey(oldName), nil)
+	if err := batch.Commit(nil); err != nil {
+		return fmt.Errorf("rename vault commit: %w", err)
+	}
+
+	// Update cache: evict old, insert new.
+	ps.vaultPrefixCache.Remove(oldName)
+	ps.vaultPrefixCache.Add(newName, ws)
+	// Clear the written flag so WriteVaultName re-checks if called with the old name.
+	ps.vaultNameWritten.Delete(ws)
+
+	return nil
+}
+
 // ListVaultNames scans the 0x0E prefix and returns all known vault names.
 func (ps *PebbleStore) ListVaultNames() ([]string, error) {
 	iter, err := ps.db.NewIter(&pebble.IterOptions{

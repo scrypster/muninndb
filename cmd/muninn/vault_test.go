@@ -387,3 +387,94 @@ func TestRunVault_NoArgs_IncludesCloneAndMerge(t *testing.T) {
 		t.Errorf("expected 'merge' in usage, got: %q", out)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// rename tests
+// ---------------------------------------------------------------------------
+
+func TestVaultRename_RequiresAtLeastOneArg(t *testing.T) {
+	out := captureStdout(func() {
+		runVaultRename([]string{})
+	})
+	if !strings.Contains(out, "Usage:") {
+		t.Errorf("expected Usage message for no args, got: %q", out)
+	}
+}
+
+func TestVaultRename_RequiresTwoArgs(t *testing.T) {
+	out := captureStdout(func() {
+		runVaultRename([]string{"only-one"})
+	})
+	if !strings.Contains(out, "Usage:") {
+		t.Errorf("expected Usage message, got: %q", out)
+	}
+}
+
+func TestVaultRename_Success(t *testing.T) {
+	oldBase := vaultAdminBase
+	defer func() { vaultAdminBase = oldBase }()
+
+	var capturedMethod, capturedPath, capturedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		capturedPath = r.URL.Path
+		buf := new(strings.Builder)
+		io.Copy(buf, r.Body)
+		capturedBody = buf.String()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"old_name":"old-vault","new_name":"new-vault"}`))
+	}))
+	defer srv.Close()
+	vaultAdminBase = srv.URL
+
+	out := captureStdout(func() {
+		runVaultRename([]string{"old-vault", "new-vault"})
+	})
+
+	if capturedMethod != "POST" {
+		t.Errorf("expected POST, got %q", capturedMethod)
+	}
+	if capturedPath != "/api/admin/vaults/old-vault/rename" {
+		t.Errorf("unexpected path: %q", capturedPath)
+	}
+	if !strings.Contains(capturedBody, `"new_name":"new-vault"`) {
+		t.Errorf("body should contain new_name, got: %q", capturedBody)
+	}
+	if !strings.Contains(out, `Vault renamed from "old-vault" to "new-vault"`) {
+		t.Errorf("expected success message, got: %q", out)
+	}
+}
+
+func TestVaultRename_ServerError(t *testing.T) {
+	oldBase := vaultAdminBase
+	defer func() { vaultAdminBase = oldBase }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"message":"vault not found"}}`))
+	}))
+	defer srv.Close()
+	vaultAdminBase = srv.URL
+
+	out := captureStdout(func() {
+		runVaultRename([]string{"old-vault", "new-vault"})
+	})
+	if !strings.Contains(out, "vault not found") {
+		t.Errorf("expected 'vault not found' error, got: %q", out)
+	}
+}
+
+func TestVaultRename_ConnectionRefused(t *testing.T) {
+	oldBase := vaultAdminBase
+	defer func() { vaultAdminBase = oldBase }()
+
+	vaultAdminBase = "http://127.0.0.1:19999"
+	out := captureStdout(func() {
+		runVaultRename([]string{"old-vault", "new-vault"})
+	})
+	if !strings.Contains(out, "Error connecting") {
+		t.Errorf("expected connection error message, got: %q", out)
+	}
+}

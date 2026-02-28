@@ -1570,6 +1570,37 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // ── Rename ─────────────────────────────────────────────────────────────
+    openVaultRename() {
+      const newName = prompt('Enter new name for vault "' + this.vault + '":');
+      if (!newName || newName === this.vault) return;
+      this.renameVault(newName);
+    },
+
+    async renameVault(newName) {
+      try {
+        const r = await fetch(
+          '/api/admin/vaults/' + encodeURIComponent(this.vault) + '/rename',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: newName }),
+          }
+        );
+        if (!r.ok) {
+          const err = await r.json().catch(() => null);
+          const msg = err && err.error && err.error.message ? err.error.message : 'HTTP ' + r.status;
+          this.addNotification('error', 'Rename failed: ' + msg);
+          return;
+        }
+        this.vault = newName;
+        this.loadVaults();
+        this.addNotification('success', 'Vault renamed to "' + newName + '"');
+      } catch (e) {
+        this.addNotification('error', 'Rename failed: ' + e.message);
+      }
+    },
+
     // ── Clone / Merge ───────────────────────────────────────────────────────
     openVaultClone() {
       if (this.activeJob && this.activeJob.status === 'running') {

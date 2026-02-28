@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
@@ -404,6 +405,58 @@ func (s *Server) handlePutPluginConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sendJSON(w, http.StatusOK, cfg)
+}
+
+// handleRenameVault renames a vault (metadata-only, no engram data changes).
+// POST /api/admin/vaults/{name}/rename
+// Body: {"new_name": "new-vault-name"}
+// Response 200: {"old_name": "...", "new_name": "..."}
+func (s *Server) handleRenameVault(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+	var req struct {
+		NewName string `json:"new_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NewName == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "new_name required in body")
+		return
+	}
+	if !isValidVaultName(req.NewName) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "new_name must be 1–64 lowercase alphanumeric characters, hyphens, or underscores")
+		return
+	}
+	if req.NewName == name {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "new_name must differ from current name")
+		return
+	}
+	if err := s.engine.RenameVault(r.Context(), name, req.NewName); err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, engine.ErrVaultJobActive) {
+			s.sendError(r, w, http.StatusConflict, ErrVaultForbidden, err.Error())
+			return
+		}
+		// Name collision or other error.
+		if strings.Contains(err.Error(), "already exists") {
+			s.sendError(r, w, http.StatusConflict, ErrVaultForbidden, err.Error())
+			return
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, map[string]string{
+		"old_name": name,
+		"new_name": req.NewName,
+	})
 }
 
 // handleDeleteVault deletes a vault and all its data.

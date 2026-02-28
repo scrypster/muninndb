@@ -270,6 +270,10 @@ func (w *RESTEngineWrapper) StartReembedVault(ctx context.Context, vaultName, mo
 	return w.engine.StartReembedVault(ctx, vaultName, modelName)
 }
 
+func (w *RESTEngineWrapper) RenameVault(ctx context.Context, oldName, newName string) error {
+	return w.engine.RenameVault(ctx, oldName, newName)
+}
+
 func (w *RESTEngineWrapper) Checkpoint(destDir string) error {
 	return w.engine.Checkpoint(destDir)
 }

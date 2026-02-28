@@ -228,6 +228,19 @@ func (r *Registry) DeleteVault(name string) {
 	r.mu.Unlock()
 }
 
+// RenameVault moves the VaultCounters entry from oldName to newName.
+// No-op if oldName is not tracked.
+func (r *Registry) RenameVault(oldName, newName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.vaults[oldName]
+	if !ok {
+		return
+	}
+	r.vaults[newName] = c
+	delete(r.vaults, oldName)
+}
+
 // SerializeAll returns a snapshot of all vault counters as a map of vault name → [7]int64.
 func (r *Registry) SerializeAll() map[string][7]int64 {
 	r.mu.RLock()

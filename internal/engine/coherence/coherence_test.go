@@ -475,6 +475,116 @@ func TestScoreBoundaries(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// RenameVault tests
+// ---------------------------------------------------------------------------
+
+func TestRegistryRenameVault(t *testing.T) {
+	reg := NewRegistry()
+
+	// Create counters under "old" and record some writes.
+	c := reg.GetOrCreate("old")
+	c.RecordWrite(0.5)
+	c.RecordWrite(0.7)
+	c.RecordWrite(0.9)
+
+	// Rename "old" -> "new".
+	reg.RenameVault("old", "new")
+
+	// GetOrCreate("new") should return the same counters with preserved data.
+	cNew := reg.GetOrCreate("new")
+	if cNew.TotalEngrams.Load() != 3 {
+		t.Errorf("renamed vault TotalEngrams: expected 3, got %d", cNew.TotalEngrams.Load())
+	}
+
+	// GetOrCreate("old") should now return a fresh zeroed counter.
+	cOld := reg.GetOrCreate("old")
+	if cOld.TotalEngrams.Load() != 0 {
+		t.Errorf("old vault after rename should be fresh: expected 0 engrams, got %d", cOld.TotalEngrams.Load())
+	}
+	if cOld == cNew {
+		t.Errorf("old and new should be different counter instances after rename")
+	}
+}
+
+func TestRegistryRenameVault_NoOp(t *testing.T) {
+	reg := NewRegistry()
+
+	// Pre-populate a vault that should not be affected.
+	reg.GetOrCreate("existing").RecordWrite(0.5)
+
+	// Rename a vault that does not exist — should not panic.
+	reg.RenameVault("nonexistent", "target")
+
+	// "existing" should be untouched.
+	if reg.GetOrCreate("existing").TotalEngrams.Load() != 1 {
+		t.Errorf("existing vault should be unchanged after no-op rename")
+	}
+
+	// "target" should not have been created by the no-op rename.
+	snapshots := reg.Snapshots()
+	for _, snap := range snapshots {
+		if snap.VaultName == "target" {
+			t.Errorf("no-op rename should not create a 'target' vault")
+		}
+	}
+
+	// Total vaults should still be 1.
+	if len(snapshots) != 1 {
+		t.Errorf("expected 1 vault after no-op rename, got %d", len(snapshots))
+	}
+}
+
+func TestRegistryRenameVault_PreservesCounters(t *testing.T) {
+	reg := NewRegistry()
+
+	c := reg.GetOrCreate("alpha")
+
+	// Record a mix of writes, links, and contradictions.
+	for i := 0; i < 15; i++ {
+		c.RecordWrite(0.6)
+	}
+	for i := 0; i < 8; i++ {
+		c.RecordLinkCreated(true, false)
+	}
+	for i := 0; i < 3; i++ {
+		c.RecordLinkCreated(false, true) // refines links
+	}
+	for i := 0; i < 4; i++ {
+		c.RecordContradictionSet()
+	}
+
+	// Snapshot the counters before rename via Serialize.
+	dataBefore := c.Serialize()
+
+	// Rename.
+	reg.RenameVault("alpha", "beta")
+
+	// Verify all counter values are preserved via Serialize on the renamed entry.
+	cRenamed := reg.GetOrCreate("beta")
+	dataAfter := cRenamed.Serialize()
+
+	for i := 0; i < len(dataBefore); i++ {
+		if dataBefore[i] != dataAfter[i] {
+			t.Errorf("Serialize()[%d] mismatch after rename: before %d, after %d", i, dataBefore[i], dataAfter[i])
+		}
+	}
+
+	// Double-check specific values.
+	if cRenamed.TotalEngrams.Load() != 15 {
+		t.Errorf("TotalEngrams: expected 15, got %d", cRenamed.TotalEngrams.Load())
+	}
+	if cRenamed.OrphanCount.Load() != 7 { // 15 writes - 8 first-link creations = 7
+		t.Errorf("OrphanCount: expected 7, got %d", cRenamed.OrphanCount.Load())
+	}
+	if cRenamed.RefinesCount.Load() != 3 {
+		t.Errorf("RefinesCount: expected 3, got %d", cRenamed.RefinesCount.Load())
+	}
+	if cRenamed.Contradictions.Load() != 4 {
+		t.Errorf("Contradictions: expected 4, got %d", cRenamed.Contradictions.Load())
+	}
+}
+
 func BenchmarkRecordWrite(b *testing.B) {
 	c := &VaultCounters{}
 	b.ResetTimer()

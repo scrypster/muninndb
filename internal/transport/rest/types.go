@@ -113,6 +113,8 @@ type EngineAPI interface {
 	Observability(ctx context.Context, version string, uptimeSeconds int64) (*engine.ObservabilitySnapshot, error)
 	// GetProcessorStats returns stats for all retroactive processors.
 	GetProcessorStats() []plugin.RetroactiveStats
+	// RenameVault atomically renames a vault (metadata-only, no engram data changes).
+	RenameVault(ctx context.Context, oldName, newName string) error
 	// Checkpoint creates a Pebble checkpoint (point-in-time snapshot) at destDir.
 	Checkpoint(destDir string) error
 

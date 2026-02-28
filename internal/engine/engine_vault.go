@@ -133,3 +133,64 @@ func (e *Engine) DeleteVault(ctx context.Context, vaultName string) error {
 	}
 	return nil
 }
+
+// RenameVault atomically renames a vault. This is a metadata-only operation —
+// no engram data is moved or modified. Returns ErrVaultNotFound if oldName
+// doesn't exist, ErrVaultJobActive if a clone/merge job targets the vault,
+// or an error if newName already exists.
+func (e *Engine) RenameVault(ctx context.Context, oldName, newName string) error {
+	e.vaultOpsMu.Lock()
+	defer e.vaultOpsMu.Unlock()
+
+	// Validate oldName exists and newName doesn't.
+	names, err := e.store.ListVaultNames()
+	if err != nil {
+		return fmt.Errorf("rename vault: list names: %w", err)
+	}
+	var oldFound, newFound bool
+	for _, n := range names {
+		if n == oldName {
+			oldFound = true
+		}
+		if n == newName {
+			newFound = true
+		}
+	}
+	if !oldFound {
+		return fmt.Errorf("vault %q: %w", oldName, ErrVaultNotFound)
+	}
+	if newFound {
+		return fmt.Errorf("vault %q already exists", newName)
+	}
+
+	// Reject if a clone/merge job is targeting this vault.
+	if e.jobManager != nil && e.jobManager.HasActiveJobTargeting(oldName) {
+		return fmt.Errorf("rename vault %q: %w", oldName, ErrVaultJobActive)
+	}
+
+	ws := e.store.ResolveVaultPrefix(oldName)
+
+	// Storage: atomic batch rename.
+	if err := e.store.RenameVault(ws, oldName, newName); err != nil {
+		return fmt.Errorf("rename vault storage: %w", err)
+	}
+
+	// Auth config: move config entry if present.
+	if e.authStore != nil {
+		if err := e.authStore.RenameVaultConfig(oldName, newName); err != nil {
+			slog.Warn("rename vault: auth config rename failed", "err", err)
+		}
+	}
+
+	// Coherence: move counters.
+	if e.coherence != nil {
+		e.coherence.RenameVault(oldName, newName)
+	}
+
+	// Per-vault mutex: move entry from old to new name.
+	if mu, ok := e.vaultMu.LoadAndDelete(oldName); ok {
+		e.vaultMu.Store(newName, mu)
+	}
+
+	return nil
+}

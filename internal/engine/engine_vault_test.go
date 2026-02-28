@@ -2,9 +2,12 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -196,6 +199,96 @@ func TestClearVault_Idempotent(t *testing.T) {
 	}
 }
 
+// TestEngineRenameVault_Success verifies that a renamed vault's engrams are
+// accessible under the new name.
+func TestEngineRenameVault_Success(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := eng.Write(ctx, writeReq("rename-src", "photosynthesis process", "plants convert light")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	if err := eng.RenameVault(ctx, "rename-src", "rename-dst"); err != nil {
+		t.Fatalf("RenameVault: %v", err)
+	}
+
+	// New name should be listed.
+	vaults, err := eng.ListVaults(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundNew, foundOld bool
+	for _, v := range vaults {
+		if v == "rename-dst" {
+			foundNew = true
+		}
+		if v == "rename-src" {
+			foundOld = true
+		}
+	}
+	if !foundNew {
+		t.Error("renamed vault not found in ListVaults")
+	}
+	if foundOld {
+		t.Error("old vault name still in ListVaults after rename")
+	}
+
+	// Engrams should be accessible under new name.
+	resp, err := eng.Activate(ctx, activateReq("rename-dst", "photosynthesis"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Activations) == 0 {
+		t.Error("expected activations under new vault name, got 0")
+	}
+}
+
+// TestEngineRenameVault_NotFound verifies that renaming a nonexistent vault returns an error.
+func TestEngineRenameVault_NotFound(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	err := eng.RenameVault(ctx, "no-such-vault", "anything")
+	if err == nil {
+		t.Fatal("expected error for nonexistent vault, got nil")
+	}
+}
+
+// TestEngineRenameVault_Collision verifies that renaming to an existing vault name fails.
+func TestEngineRenameVault_Collision(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	eng.Write(ctx, writeReq("vault-x", "c", "d"))
+	eng.Write(ctx, writeReq("vault-y", "e", "f"))
+	time.Sleep(200 * time.Millisecond)
+
+	err := eng.RenameVault(ctx, "vault-x", "vault-y")
+	if err == nil {
+		t.Fatal("expected collision error, got nil")
+	}
+}
+
+// TestEngineRenameVault_SameName verifies behavior when old and new name are the same.
+func TestEngineRenameVault_SameName(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	eng.Write(ctx, writeReq("same-vault", "c", "d"))
+	time.Sleep(200 * time.Millisecond)
+
+	err := eng.RenameVault(ctx, "same-vault", "same-vault")
+	if err == nil {
+		t.Fatal("expected error for same-name rename, got nil")
+	}
+}
+
 func TestEngineClearVault_CoherenceGone(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
@@ -228,4 +321,197 @@ func TestEngineClearVault_CoherenceGone(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestEngineRenameVault_AuthConfigMoved verifies that RenameVault moves the
+// auth vault config from the old name to the new name.
+func TestEngineRenameVault_AuthConfigMoved(t *testing.T) {
+	eng, authStore, _, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Write an engram to register the vault.
+	if _, err := eng.Write(ctx, writeReq("auth-rename-src", "concept", "content")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// Set a vault config on the source vault.
+	if err := authStore.SetVaultConfig(auth.VaultConfig{Name: "auth-rename-src", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	// Rename the vault.
+	if err := eng.RenameVault(ctx, "auth-rename-src", "auth-rename-dst"); err != nil {
+		t.Fatalf("RenameVault: %v", err)
+	}
+
+	// Verify the config was moved to the new name.
+	cfg, err := authStore.GetVaultConfig("auth-rename-dst")
+	if err != nil {
+		t.Fatalf("GetVaultConfig(dst): %v", err)
+	}
+	if cfg.Name != "auth-rename-dst" {
+		t.Errorf("expected config Name=%q, got %q", "auth-rename-dst", cfg.Name)
+	}
+	if !cfg.Public {
+		t.Error("expected config Public=true after rename, got false")
+	}
+}
+
+// TestEngineRenameVault_CoherenceCountersMoved verifies that RenameVault
+// transfers coherence counters from old name to new name.
+func TestEngineRenameVault_CoherenceCountersMoved(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Write a few engrams to build up coherence counters.
+	for i := 0; i < 3; i++ {
+		if _, err := eng.Write(ctx, writeReq("coh-rename-src", "concept", "content")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	if eng.coherence == nil {
+		t.Skip("coherence is nil — cannot test coherence rename")
+	}
+
+	// Snapshot the source vault's coherence counters.
+	srcSnap := eng.coherence.GetOrCreate("coh-rename-src").Snapshot("coh-rename-src")
+	if srcSnap.TotalEngrams <= 0 {
+		t.Fatalf("expected TotalEngrams > 0 before rename, got %d", srcSnap.TotalEngrams)
+	}
+	beforeEngrams := srcSnap.TotalEngrams
+
+	// Rename the vault.
+	if err := eng.RenameVault(ctx, "coh-rename-src", "coh-rename-dst"); err != nil {
+		t.Fatalf("RenameVault: %v", err)
+	}
+
+	// Verify the counters are now under the new name.
+	dstSnap := eng.coherence.GetOrCreate("coh-rename-dst").Snapshot("coh-rename-dst")
+	if dstSnap.TotalEngrams != beforeEngrams {
+		t.Errorf("expected TotalEngrams=%d after rename, got %d", beforeEngrams, dstSnap.TotalEngrams)
+	}
+}
+
+// TestEngineRenameVault_VaultMuMoved verifies that the per-vault mutex is
+// moved from the old name to the new name during a rename, so that subsequent
+// operations on the new vault name succeed.
+func TestEngineRenameVault_VaultMuMoved(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Write an engram to register the vault.
+	if _, err := eng.Write(ctx, writeReq("mu-rename-src", "concept", "content")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// Force a mutex entry to exist for the source vault by calling ClearVault
+	// (which calls getVaultMutex internally). Write again to re-populate data.
+	if err := eng.ClearVault(ctx, "mu-rename-src"); err != nil {
+		t.Fatalf("ClearVault (pre-rename): %v", err)
+	}
+	if _, err := eng.Write(ctx, writeReq("mu-rename-src", "concept2", "content2")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Capture the original mutex pointer so we can verify identity after rename.
+	origMu := eng.getVaultMutex("mu-rename-src")
+
+	// Rename the vault.
+	if err := eng.RenameVault(ctx, "mu-rename-src", "mu-rename-dst"); err != nil {
+		t.Fatalf("RenameVault: %v", err)
+	}
+
+	// Verify the mutex was moved (same pointer), not recreated.
+	newMu := eng.getVaultMutex("mu-rename-dst")
+	if newMu != origMu {
+		t.Error("expected renamed vault mutex to be the same pointer as the original")
+	}
+
+	// Verify ClearVault works on the new name — this exercises the mutex path.
+	if err := eng.ClearVault(ctx, "mu-rename-dst"); err != nil {
+		t.Fatalf("ClearVault on renamed vault: %v", err)
+	}
+}
+
+// TestEngineRenameVault_ClosedDB verifies that RenameVault fails when the
+// underlying Pebble DB is closed. Pebble panics with ErrClosed rather than
+// returning an error, so we recover and verify the panic value.
+func TestEngineRenameVault_ClosedDB(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup() // safe — PebbleStore.Close is idempotent via sync.Once
+	ctx := context.Background()
+
+	// Write an engram to register the vault.
+	if _, err := eng.Write(ctx, writeReq("db-close-vault", "c", "d")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Stop background workers first to avoid panics from closed DB.
+	eng.Stop()
+	// Close the underlying Pebble DB so that ListVaultNames will fail.
+	eng.store.Close()
+
+	// Pebble panics (rather than returning an error) when the DB is closed,
+	// so we recover the panic and verify it contains the expected message.
+	var panicked bool
+	var panicVal any
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				panicVal = r
+			}
+		}()
+		eng.RenameVault(ctx, "db-close-vault", "new-vault")
+	}()
+
+	if !panicked {
+		t.Fatal("expected panic on closed DB, but RenameVault returned normally")
+	}
+	msg := fmt.Sprintf("%v", panicVal)
+	if !strings.Contains(msg, "closed") {
+		t.Errorf("expected panic message containing 'closed', got: %v", panicVal)
+	}
+}
+
+// TestEngineRenameVault_JobActive verifies that renaming a vault with an
+// active clone/merge job targeting it returns ErrVaultJobActive.
+func TestEngineRenameVault_JobActive(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Write an engram to register the vault.
+	if _, err := eng.Write(ctx, writeReq("job-active-vault", "concept", "content")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Create a running job that targets this vault (simulates an in-progress clone).
+	job, err := eng.jobManager.Create("clone", "some-source", "job-active-vault")
+	if err != nil {
+		t.Fatalf("jobManager.Create: %v", err)
+	}
+	// Don't Complete the job — leave it running.
+
+	// Attempt to rename — should be rejected.
+	err = eng.RenameVault(ctx, "job-active-vault", "new-name")
+	if err == nil {
+		t.Fatal("expected ErrVaultJobActive, got nil")
+	}
+	if !strings.Contains(err.Error(), "active clone/merge job") {
+		t.Errorf("expected ErrVaultJobActive in error, got: %v", err)
+	}
+
+	// Clean up: complete the job so the engine can shut down cleanly.
+	eng.jobManager.Complete(job)
 }

@@ -92,8 +92,11 @@ func (m *mockEngine) Unsubscribe(ctx context.Context, subID string) error {
 	return nil
 }
 
-func (m *mockEngine) ClearVault(ctx context.Context, vaultName string) error { return nil }
+func (m *mockEngine) ClearVault(ctx context.Context, vaultName string) error  { return nil }
 func (m *mockEngine) DeleteVault(ctx context.Context, vaultName string) error { return nil }
+func (m *mockEngine) RenameVault(ctx context.Context, oldName, newName string) error {
+	return nil
+}
 func (m *mockEngine) GetVaultJob(jobID string) (*vaultjob.Job, bool)          { return nil, false }
 func (m *mockEngine) StartClone(ctx context.Context, sourceVault, newName string) (*vaultjob.Job, error) {
 	return &vaultjob.Job{ID: "mock-clone-job", Operation: "clone", Source: sourceVault, Target: newName}, nil

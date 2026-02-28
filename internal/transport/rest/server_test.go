@@ -148,6 +148,9 @@ func (m *MockEngine) Unsubscribe(ctx context.Context, subID string) error {
 
 func (m *MockEngine) ClearVault(ctx context.Context, vaultName string) error { return nil }
 func (m *MockEngine) DeleteVault(ctx context.Context, vaultName string) error { return nil }
+func (m *MockEngine) RenameVault(ctx context.Context, oldName, newName string) error {
+	return nil
+}
 func (m *MockEngine) StartClone(ctx context.Context, sourceVault, newName string) (*vaultjob.Job, error) {
 	return &vaultjob.Job{ID: "mock-clone-job", Operation: "clone", Source: sourceVault, Target: newName}, nil
 }
@@ -1493,5 +1496,241 @@ func TestHandleObservability(t *testing.T) {
 	var snap engine.ObservabilitySnapshot
 	if err := json.NewDecoder(w.Body).Decode(&snap); err != nil {
 		t.Fatalf("decode response: %v", err)
+	}
+}
+
+func TestHandleRenameVault_Success(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	body := strings.NewReader(`{"new_name":"renamed-vault"}`)
+	req := httptest.NewRequest("POST", "/api/admin/vaults/old-vault/rename", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["old_name"] != "old-vault" || resp["new_name"] != "renamed-vault" {
+		t.Errorf("unexpected response: %v", resp)
+	}
+}
+
+func TestHandleRenameVault_InvalidName(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	body := strings.NewReader(`{"new_name":"BAD NAME!"}`)
+	req := httptest.NewRequest("POST", "/api/admin/vaults/old-vault/rename", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleRenameVault_SameName(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	body := strings.NewReader(`{"new_name":"same-vault"}`)
+	req := httptest.NewRequest("POST", "/api/admin/vaults/same-vault/rename", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// renameMockNotFound embeds MockEngine and overrides RenameVault to return
+// an error wrapping engine.ErrVaultNotFound.
+type renameMockNotFound struct{ MockEngine }
+
+func (m *renameMockNotFound) RenameVault(_ context.Context, _, _ string) error {
+	return fmt.Errorf("rename: %w", engine.ErrVaultNotFound)
+}
+
+func TestHandleRenameVault_NotFound(t *testing.T) {
+	eng := &renameMockNotFound{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	body := strings.NewReader(`{"new_name":"new-vault"}`)
+	req := httptest.NewRequest("POST", "/api/admin/vaults/old-vault/rename", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// renameMockJobActive embeds MockEngine and overrides RenameVault to return
+// an error wrapping engine.ErrVaultJobActive.
+type renameMockJobActive struct{ MockEngine }
+
+func (m *renameMockJobActive) RenameVault(_ context.Context, _, _ string) error {
+	return fmt.Errorf("rename: %w", engine.ErrVaultJobActive)
+}
+
+func TestHandleRenameVault_JobActive(t *testing.T) {
+	eng := &renameMockJobActive{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	body := strings.NewReader(`{"new_name":"new-vault"}`)
+	req := httptest.NewRequest("POST", "/api/admin/vaults/old-vault/rename", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// renameMockCollision embeds MockEngine and overrides RenameVault to return
+// an error containing "already exists" to simulate a name collision.
+type renameMockCollision struct{ MockEngine }
+
+func (m *renameMockCollision) RenameVault(_ context.Context, _, _ string) error {
+	return fmt.Errorf("vault %q already exists", "new-vault")
+}
+
+func TestHandleRenameVault_Collision(t *testing.T) {
+	eng := &renameMockCollision{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	body := strings.NewReader(`{"new_name":"new-vault"}`)
+	req := httptest.NewRequest("POST", "/api/admin/vaults/old-vault/rename", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleRenameVault_MissingBody(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	req := httptest.NewRequest("POST", "/api/admin/vaults/old-vault/rename", strings.NewReader(""))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleRenameVault_EmptyNewName(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	body := strings.NewReader(`{"new_name":""}`)
+	req := httptest.NewRequest("POST", "/api/admin/vaults/old-vault/rename", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestHandleRenameVault_ResponseBody verifies the full JSON response contract:
+// exactly two keys (old_name, new_name), correct Content-Type header.
+func TestHandleRenameVault_ResponseBody(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	body := strings.NewReader(`{"new_name":"renamed-vault"}`)
+	req := httptest.NewRequest("POST", "/api/admin/vaults/old-vault/rename", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify Content-Type header.
+	ct := w.Header().Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", ct)
+	}
+
+	// Decode into a generic map to check for extra fields.
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Verify exactly two keys.
+	if len(resp) != 2 {
+		t.Errorf("expected exactly 2 keys in response, got %d: %v", len(resp), resp)
+	}
+
+	// Verify old_name value.
+	if v, ok := resp["old_name"]; !ok {
+		t.Error("response missing 'old_name' key")
+	} else if v != "old-vault" {
+		t.Errorf("expected old_name='old-vault', got %q", v)
+	}
+
+	// Verify new_name value.
+	if v, ok := resp["new_name"]; !ok {
+		t.Error("response missing 'new_name' key")
+	} else if v != "renamed-vault" {
+		t.Errorf("expected new_name='renamed-vault', got %q", v)
+	}
+}
+
+// renameMockInternalError embeds MockEngine and overrides RenameVault to return
+// a generic error that does not match any recognized sentinel or substring.
+type renameMockInternalError struct{ MockEngine }
+
+func (m *renameMockInternalError) RenameVault(_ context.Context, _, _ string) error {
+	return fmt.Errorf("disk I/O error")
+}
+
+// TestHandleRenameVault_InternalServerError verifies that an unrecognized engine
+// error falls through to the 500 Internal Server Error branch.
+func TestHandleRenameVault_InternalServerError(t *testing.T) {
+	eng := &renameMockInternalError{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	body := strings.NewReader(`{"new_name":"new-vault"}`)
+	req := httptest.NewRequest("POST", "/api/admin/vaults/old-vault/rename", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify the error response contains the underlying message.
+	var errResp ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if errResp.Error.Code != ErrStorageError {
+		t.Errorf("expected error code %d, got %d", ErrStorageError, errResp.Error.Code)
+	}
+	if errResp.Error.Message == "" {
+		t.Error("expected non-empty error message in response")
 	}
 }

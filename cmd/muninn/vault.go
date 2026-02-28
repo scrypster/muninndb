@@ -26,6 +26,7 @@ func printVaultUsage() {
 	fmt.Println("  export      --vault <name> [--output <file>] [--reset-metadata]  Export vault to .muninn archive")
 	fmt.Println("  import      <file> --vault <name> [--reset-metadata]             Import .muninn archive into new vault")
 	fmt.Println("  reindex-fts <name>                               Rebuild FTS index with Porter2 stemming")
+	fmt.Println("  rename      <old-name> <new-name>                  Rename a vault (metadata only)")
 	fmt.Println("  reembed     <name>                               Clear embeddings and re-embed with current model")
 	fmt.Println("  recall-mode <vault> [mode]                        Get or set default recall mode")
 	fmt.Println()
@@ -60,7 +61,7 @@ func runVault(args []string) {
 
 	// Validate the subcommand before authenticating so typos get fast feedback.
 	switch sub {
-	case "delete", "clear", "clone", "merge", "export", "import", "reindex-fts", "reembed", "recall-mode":
+	case "delete", "clear", "clone", "merge", "rename", "export", "import", "reindex-fts", "reembed", "recall-mode":
 	default:
 		fmt.Printf("Unknown vault command: %q\n", sub)
 		printVaultUsage()
@@ -82,6 +83,8 @@ func runVault(args []string) {
 		runVaultClear(subArgs)
 	case "clone":
 		runVaultClone(subArgs)
+	case "rename":
+		runVaultRename(subArgs)
 	case "merge":
 		runVaultMerge(subArgs)
 	case "export":
@@ -321,6 +324,50 @@ func runVaultClone(args []string) {
 	}
 
 	pollProgressBar(result.JobID, source)
+}
+
+// ---------------------------------------------------------------------------
+// vault rename
+// ---------------------------------------------------------------------------
+
+func runVaultRename(args []string) {
+	if len(args) < 2 {
+		fmt.Println("Usage: muninn vault rename <old-name> <new-name>")
+		return
+	}
+	oldName := args[0]
+	newName := args[1]
+
+	bodyBytes, err := json.Marshal(map[string]any{"new_name": newName})
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	req, err := http.NewRequest("POST",
+		fmt.Sprintf("%s/api/admin/vaults/%s/rename", vaultAdminBase, url.PathEscape(oldName)),
+		bytes.NewReader(bodyBytes))
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	addSessionCookie(req)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		fmt.Println("Is muninn running? Try: muninn status")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		printHTTPError(resp)
+		return
+	}
+
+	fmt.Printf("  Vault renamed from %q to %q.\n", oldName, newName)
 }
 
 // ---------------------------------------------------------------------------
