@@ -27,6 +27,8 @@ import (
 	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/metrics"
+	"github.com/scrypster/muninndb/internal/metrics/latency"
+	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/scoring"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -78,6 +80,14 @@ type Engine struct {
 	// Stored as atomic.Value to allow safe concurrent reads without a mutex.
 	onWrite atomic.Value // stores func()
 
+	// latencyTracker records per-vault per-operation latency samples.
+	// nil-safe — callers check before recording.
+	latencyTracker *latency.Tracker
+
+	// retroProcessors holds references to background processors (embed, enrich)
+	// so Observability() can report their stats. Set via SetRetroactiveProcessors.
+	retroProcessors []*plugin.RetroactiveProcessor
+
 	// noveltyJobsDropped counts novelty jobs silently dropped because the channel was full.
 	noveltyJobsDropped atomic.Int64
 
@@ -103,6 +113,32 @@ type Engine struct {
 // Safe to call concurrently with Write.
 func (e *Engine) SetOnWrite(fn func()) {
 	e.onWrite.Store(fn)
+}
+
+// SetLatencyTracker configures the per-vault latency tracker.
+func (e *Engine) SetLatencyTracker(t *latency.Tracker) {
+	e.latencyTracker = t
+}
+
+// SetRetroactiveProcessors registers background processors for observability.
+func (e *Engine) SetRetroactiveProcessors(procs ...*plugin.RetroactiveProcessor) {
+	e.retroProcessors = procs
+}
+
+// GetProcessorStats returns stats for all registered retroactive processors.
+func (e *Engine) GetProcessorStats() []plugin.RetroactiveStats {
+	stats := make([]plugin.RetroactiveStats, 0, len(e.retroProcessors))
+	for _, p := range e.retroProcessors {
+		if p != nil {
+			stats = append(stats, p.Stats())
+		}
+	}
+	return stats
+}
+
+// LatencyTracker returns the latency tracker (may be nil).
+func (e *Engine) LatencyTracker() *latency.Tracker {
+	return e.latencyTracker
 }
 
 // fastQueryID returns a unique query identifier without crypto/rand overhead.
@@ -408,6 +444,7 @@ func (e *Engine) Hello(ctx context.Context, req *mbp.HelloRequest) (*mbp.HelloRe
 
 // Write implements mbp.EngineAPI.Write.
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
+	writeStart := time.Now()
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 	e.activity.Record(wsPrefix)
 
@@ -646,6 +683,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	metrics.EngineWritesTotal.Inc()
+
+	if e.latencyTracker != nil {
+		d := time.Since(writeStart)
+		e.latencyTracker.Record(wsPrefix, "write", d)
+		metrics.WriteDuration.WithLabelValues(vaultName).Observe(d.Seconds())
+	}
 
 	return &mbp.WriteResponse{
 		ID:        id.String(),
@@ -928,6 +971,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 
 // Read implements mbp.EngineAPI.Read.
 func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadResponse, error) {
+	readStart := time.Now()
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 
 	id, err := storage.ParseULID(req.ID)
@@ -938,6 +982,12 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 	eng, err := e.store.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
 		return nil, fmt.Errorf("get engram: %w", err)
+	}
+
+	if e.latencyTracker != nil {
+		d := time.Since(readStart)
+		e.latencyTracker.Record(wsPrefix, "read", d)
+		metrics.ReadDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
 	}
 
 	return &mbp.ReadResponse{
@@ -980,6 +1030,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	snap := e.store.NewSnapshot()
 	defer snap.Close()
 	ctx = storage.ContextWithSnapshot(ctx, snap)
+	activateStart := time.Now()
 
 	// Resolve per-vault Plasticity config. nil authStore means use defaults (tests, bench).
 	var resolved auth.ResolvedPlasticity
@@ -1297,6 +1348,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 				}
 			}
 		}
+	}
+
+	if e.latencyTracker != nil {
+		d := time.Since(activateStart)
+		e.latencyTracker.Record(wsPrefix, "activate", d)
+		metrics.ActivateDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
 	}
 
 	return &mbp.ActivateResponse{
