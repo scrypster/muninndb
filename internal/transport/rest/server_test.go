@@ -1457,6 +1457,27 @@ func TestGuideEndpoint(t *testing.T) {
 	}
 }
 
+func TestHandleReembedVault(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
+
+	req := httptest.NewRequest("POST", "/api/admin/vaults/test-vault/reembed", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["job_id"] == "" {
+		t.Error("expected non-empty job_id in response")
+	}
+}
+
 func TestHandleObservability(t *testing.T) {
 	eng := &MockEngine{}
 	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, nil, "")
