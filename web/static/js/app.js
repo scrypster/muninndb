@@ -791,11 +791,21 @@ document.addEventListener('alpine:init', () => {
       this.loadContradictions();
     },
 
-    openMemory(m) {
+    async openMemory(m) {
+      // Session entries only have id/concept/createdAt — fetch full engram if content is missing.
+      if (!m.content && m.id) {
+        try {
+          const resp = await fetch('/api/engrams/' + encodeURIComponent(m.id) + '?vault=' + encodeURIComponent(this.vault));
+          if (resp.ok) {
+            const full = await resp.json();
+            m = { ...m, ...full };
+          }
+        } catch (e) { /* fall through with partial data */ }
+      }
       this.selectedMemory = m;
-      // Navigate to memories view if not there
+      // Navigate to memories view and update URL
       if (this.currentView !== 'memories') {
-        this.currentView = 'memories';
+        this.navigateTo('memories');
       }
     },
 
