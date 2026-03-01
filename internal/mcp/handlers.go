@@ -634,6 +634,92 @@ func (s *MCPServer) handleGuide(ctx context.Context, w http.ResponseWriter, id j
 	sendResult(w, id, textContent(guide))
 }
 
+func (s *MCPServer) handleRememberTree(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	rootRaw, ok := args["root"]
+	if !ok {
+		sendError(w, id, -32602, "invalid params: 'root' is required")
+		return
+	}
+	rootBytes, err := json.Marshal(rootRaw)
+	if err != nil {
+		sendError(w, id, -32602, "invalid params: cannot marshal root")
+		return
+	}
+	var rootInput TreeNodeInput
+	if err := json.Unmarshal(rootBytes, &rootInput); err != nil {
+		sendError(w, id, -32602, "invalid params: root must match TreeNodeInput schema")
+		return
+	}
+	req := &RememberTreeRequest{Vault: vault, Root: rootInput}
+	result, err := s.engine.RememberTree(ctx, req)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(result)))
+}
+
+func (s *MCPServer) handleRecallTree(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	rootID, ok := args["root_id"].(string)
+	if !ok || rootID == "" {
+		sendError(w, id, -32602, "invalid params: 'root_id' is required")
+		return
+	}
+	maxDepth := 10
+	if d, ok := args["max_depth"].(float64); ok {
+		maxDepth = int(d)
+	}
+	limit := 0
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	includeCompleted := true
+	if ic, ok := args["include_completed"].(bool); ok {
+		includeCompleted = ic
+	}
+	result, err := s.engine.RecallTree(ctx, vault, rootID, maxDepth, limit, includeCompleted)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(result)))
+}
+
+func (s *MCPServer) handleAddChild(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	parentID, ok := args["parent_id"].(string)
+	if !ok || parentID == "" {
+		sendError(w, id, -32602, "invalid params: 'parent_id' is required")
+		return
+	}
+	concept, ok := args["concept"].(string)
+	if !ok || concept == "" {
+		sendError(w, id, -32602, "invalid params: 'concept' is required")
+		return
+	}
+	content, _ := args["content"].(string)
+	child := &AddChildRequest{Concept: concept, Content: content}
+	if t, ok := args["type"].(string); ok {
+		child.Type = t
+	}
+	if tags, ok := args["tags"].([]any); ok {
+		for _, t := range tags {
+			if str, ok := t.(string); ok {
+				child.Tags = append(child.Tags, str)
+			}
+		}
+	}
+	if ord, ok := args["ordinal"].(float64); ok {
+		o := int32(ord)
+		child.Ordinal = &o
+	}
+	result, err := s.engine.AddChild(ctx, vault, parentID, child)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(result)))
+}
+
 // applyTypeArgs parses the "type" and "type_label" arguments from an MCP call
 // and sets MemoryType + TypeLabel on the WriteRequest accordingly.
 func applyTypeArgs(args map[string]any, req *mbp.WriteRequest) {

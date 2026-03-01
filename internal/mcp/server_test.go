@@ -190,8 +190,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 19 {
-		t.Errorf("expected 19 tools, got %d", len(tools))
+	if len(tools) != 22 {
+		t.Errorf("expected 22 tools, got %d", len(tools))
 	}
 }
 

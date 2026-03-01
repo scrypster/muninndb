@@ -194,6 +194,10 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		"muninn_list_deleted": s.handleListDeleted,
 		"muninn_retry_enrich": s.handleRetryEnrich,
 		"muninn_guide":        s.handleGuide,
+		// Hierarchical memory tools
+		"muninn_remember_tree": s.handleRememberTree,
+		"muninn_recall_tree":   s.handleRecallTree,
+		"muninn_add_child":     s.handleAddChild,
 	}
 
 	handler, found := handlers[req.Params.Name]

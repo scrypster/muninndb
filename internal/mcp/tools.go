@@ -343,5 +343,61 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{},
 			},
 		},
+		// Hierarchical memory tools
+		{
+			Name:        "muninn_remember_tree",
+			Description: "Store a nested hierarchy (project plan, task tree, outline) as a collection of linked engrams. Each node becomes a full engram with cognitive properties. Children are ordered by their position in the tree. Returns root_id and a node_map for future reference.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"root": map[string]any{
+						"type":        "object",
+						"description": "The root node of the tree. Each node may have a 'children' array for nesting.",
+						"properties": map[string]any{
+							"concept":  map[string]any{"type": "string", "description": "Short label for this node."},
+							"content":  map[string]any{"type": "string", "description": "Content for this node."},
+							"type":     map[string]any{"type": "string", "description": "Memory type (goal, task, etc.)."},
+							"tags":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+							"children": map[string]any{"type": "array", "description": "Child nodes (same schema, recursive)."},
+						},
+						"required": []string{"concept", "content"},
+					},
+				},
+				"required": []string{"root"},
+			},
+		},
+		{
+			Name:        "muninn_recall_tree",
+			Description: "Retrieve the complete, ordered hierarchy rooted at root_id. Returns all nodes in their original structured order, with state and metadata at each level. Use after muninn_recall finds the root engram's ID.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":             vaultProp,
+					"root_id":           map[string]any{"type": "string", "description": "ULID of the root engram."},
+					"max_depth":         map[string]any{"type": "integer", "description": "Maximum recursion depth. 0 = unlimited (default: 10)."},
+					"limit":             map[string]any{"type": "integer", "description": "Max children per node per level. 0 = no limit (default: 0)."},
+					"include_completed": map[string]any{"type": "boolean", "description": "Include completed nodes and their subtrees (default: true)."},
+				},
+				"required": []string{"root_id"},
+			},
+		},
+		{
+			Name:        "muninn_add_child",
+			Description: "Add a single child node to an existing parent in a tree. Writes the engram and wires the is_part_of association and ordinal key. Use for incremental tree updates without resending the whole tree.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":     vaultProp,
+					"parent_id": map[string]any{"type": "string", "description": "ULID of the parent engram."},
+					"concept":   map[string]any{"type": "string", "description": "Short label for the new child."},
+					"content":   map[string]any{"type": "string", "description": "Content for the new child."},
+					"type":      map[string]any{"type": "string", "description": "Memory type (task, goal, etc.)."},
+					"tags":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"ordinal":   map[string]any{"type": "integer", "description": "Explicit ordinal position. Omit to append at end."},
+				},
+				"required": []string{"parent_id", "concept", "content"},
+			},
+		},
 	}
 }

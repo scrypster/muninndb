@@ -7,8 +7,21 @@ import (
 
 func TestAllToolDefinitionsCount(t *testing.T) {
 	tools := allToolDefinitions()
-	if len(tools) != 19 {
-		t.Errorf("expected 19 tools, got %d", len(tools))
+	if len(tools) != 22 {
+		t.Errorf("expected 22 tools, got %d", len(tools))
+	}
+}
+
+func TestAllToolDefinitions_ContainsTreeTools(t *testing.T) {
+	tools := allToolDefinitions()
+	names := make(map[string]bool, len(tools))
+	for _, td := range tools {
+		names[td.Name] = true
+	}
+	for _, want := range []string{"muninn_remember_tree", "muninn_recall_tree", "muninn_add_child"} {
+		if !names[want] {
+			t.Errorf("missing tool: %s", want)
+		}
 	}
 }
 
@@ -61,6 +74,8 @@ func TestExpectedToolNames(t *testing.T) {
 		"muninn_state", "muninn_list_deleted", "muninn_retry_enrich",
 		// Guide
 		"muninn_guide",
+		// Hierarchical memory
+		"muninn_remember_tree", "muninn_recall_tree", "muninn_add_child",
 	}
 	for _, name := range expected {
 		if !names[name] {
