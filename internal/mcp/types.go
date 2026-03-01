@@ -291,3 +291,18 @@ type AssociationParams struct {
 	TargetID string  `json:"target_id"`
 	Weight   float32 `json:"weight"`
 }
+
+// ProvenanceEntry is a single audit log record returned by muninn_provenance.
+type ProvenanceEntry struct {
+	Timestamp string `json:"timestamp"` // RFC3339
+	Source    string `json:"source"`    // "human", "llm", "inferred", etc.
+	AgentID   string `json:"agent_id,omitempty"`
+	Operation string `json:"operation"` // "write", "update", "read", etc.
+	Note      string `json:"note,omitempty"`
+}
+
+// ProvenanceResult is the response from muninn_provenance.
+type ProvenanceResult struct {
+	ID      string            `json:"id"`
+	Entries []ProvenanceEntry `json:"entries"`
+}

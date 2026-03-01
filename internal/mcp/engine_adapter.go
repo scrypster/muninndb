@@ -9,6 +9,7 @@ import (
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/plugin"
+	"github.com/scrypster/muninndb/internal/provenance"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -370,6 +371,46 @@ func (a *mcpEngineAdapter) MergeEntity(ctx context.Context, vault, entityA, enti
 
 func (a *mcpEngineAdapter) ReplayEnrichment(ctx context.Context, vault string, stages []string, limit int, dryRun bool) (*engine.ReplayEnrichmentResult, error) {
 	return a.eng.ReplayEnrichment(ctx, vault, stages, limit, dryRun)
+}
+
+func (a *mcpEngineAdapter) GetProvenance(ctx context.Context, vault, id string) ([]ProvenanceEntry, error) {
+	entries, err := a.eng.GetProvenance(ctx, vault, id)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ProvenanceEntry, len(entries))
+	for i, e := range entries {
+		result[i] = ProvenanceEntry{
+			Timestamp: e.Timestamp.UTC().Format(time.RFC3339),
+			Source:    provenanceSourceString(e.Source),
+			AgentID:   e.AgentID,
+			Operation: e.Operation,
+			Note:      e.Note,
+		}
+	}
+	return result, nil
+}
+
+// provenanceSourceString converts a provenance.SourceType to its string label.
+func provenanceSourceString(s provenance.SourceType) string {
+	switch s {
+	case provenance.SourceHuman:
+		return "human"
+	case provenance.SourceLLM:
+		return "llm"
+	case provenance.SourceDocument:
+		return "document"
+	case provenance.SourceInferred:
+		return "inferred"
+	case provenance.SourceExternal:
+		return "external"
+	case provenance.SourceWorkingMem:
+		return "working_mem"
+	case provenance.SourceSynthetic:
+		return "synthetic"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(s))
+	}
 }
 
 // convertTreeNodeInput converts MCP → engine input types.

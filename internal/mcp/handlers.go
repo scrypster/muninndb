@@ -1161,6 +1161,23 @@ func (s *MCPServer) handleMergeEntity(ctx context.Context, w http.ResponseWriter
 	})))
 }
 
+func (s *MCPServer) handleProvenance(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok := args["id"].(string)
+	if !ok || engramID == "" {
+		sendError(w, id, -32602, "id is required")
+		return
+	}
+	entries, err := s.engine.GetProvenance(ctx, vault, engramID)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []ProvenanceEntry{}
+	}
+	sendResult(w, id, textContent(mustJSON(&ProvenanceResult{ID: engramID, Entries: entries})))
+}
+
 func (s *MCPServer) handleReplayEnrichment(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	if vault == "" {
 		sendError(w, id, -32602, "invalid params: 'vault' is required")

@@ -232,6 +232,9 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 
 		// Enrichment replay
 		"muninn_replay_enrichment": s.handleReplayEnrichment,
+
+		// Provenance audit trail
+		"muninn_provenance": s.handleProvenance,
 	}
 
 	handler, found := handlers[req.Params.Name]

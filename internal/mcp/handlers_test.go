@@ -1506,6 +1506,9 @@ func (e *slowIdempotentEngine) MergeEntity(ctx context.Context, vault string, en
 func (e *slowIdempotentEngine) ReplayEnrichment(ctx context.Context, vault string, stages []string, limit int, dryRun bool) (*engine.ReplayEnrichmentResult, error) {
 	return (&fakeEngine{}).ReplayEnrichment(ctx, vault, stages, limit, dryRun)
 }
+func (e *slowIdempotentEngine) GetProvenance(ctx context.Context, vault, id string) ([]ProvenanceEntry, error) {
+	return (&fakeEngine{}).GetProvenance(ctx, vault, id)
+}
 
 // TestHandleRemember_ConcurrentSameOpID verifies that two concurrent
 // muninn_remember calls carrying the same op_id do not produce duplicate

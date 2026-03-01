@@ -29,6 +29,7 @@ import (
 	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/metrics/latency"
 	"github.com/scrypster/muninndb/internal/plugin"
+	"github.com/scrypster/muninndb/internal/provenance"
 	"github.com/scrypster/muninndb/internal/scoring"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -65,6 +66,7 @@ type Engine struct {
 	pruneDone   chan struct{}        // signals prune worker shutdown
 	coherence   *coherence.Registry // per-vault incremental coherence counters
 	scoring     *scoring.Store      // per-vault learnable scoring weights
+	prov        *provenance.Store   // audit trail per-engram
 
 	// Fix 5: coherence persistence lifecycle
 	coherenceFlushStop chan struct{}
@@ -235,6 +237,7 @@ func NewEngine(
 		pruneDone:        make(chan struct{}),
 		coherence:        coherence.NewRegistry(),
 		scoring:          scoring.NewStore(store.GetDB()),
+		prov:             provenance.NewStore(store.GetDB()),
 		stopCtx:          stopCtx,
 		stopCancel:       stopCancel,
 		hnswRegistry:     hnswRegistry,
@@ -2332,5 +2335,15 @@ func (e *Engine) runNoveltyWorker() {
 			}
 		}
 	}
+}
+
+// GetProvenance returns the ordered provenance log for an engram by ID.
+func (e *Engine) GetProvenance(ctx context.Context, vault, id string) ([]provenance.ProvenanceEntry, error) {
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+	ulid, err := storage.ParseULID(id)
+	if err != nil {
+		return nil, fmt.Errorf("parse id: %w", err)
+	}
+	return e.prov.Get(ctx, wsPrefix, [16]byte(ulid))
 }
 

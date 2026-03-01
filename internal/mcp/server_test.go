@@ -139,6 +139,10 @@ func (f *fakeEngine) ReplayEnrichment(_ context.Context, _ string, _ []string, _
 	}, nil
 }
 
+func (f *fakeEngine) GetProvenance(_ context.Context, _, _ string) ([]ProvenanceEntry, error) {
+	return []ProvenanceEntry{}, nil
+}
+
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil)
 }
@@ -236,8 +240,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 31 {
-		t.Errorf("expected 31 tools, got %d", len(tools))
+	if len(tools) != 32 {
+		t.Errorf("expected 32 tools, got %d", len(tools))
 	}
 }
 

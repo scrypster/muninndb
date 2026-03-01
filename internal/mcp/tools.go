@@ -529,6 +529,19 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{},
 			},
 		},
+		// Provenance audit trail
+		{
+			Name:        "muninn_provenance",
+			Description: "Returns the ordered audit trail for an engram — who wrote it, what changed, and why.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"id":    map[string]any{"type": "string", "description": "Engram ID (ULID)."},
+				},
+				"required": []string{"id"},
+			},
+		},
 		// Entity timeline
 		{
 			Name:        "muninn_entity_timeline",

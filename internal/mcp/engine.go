@@ -129,4 +129,8 @@ type EngineInterface interface {
 	// limit caps how many engrams are processed in this call (1-200, default 50).
 	// When dryRun=true, only counts engrams needing enrichment without writing.
 	ReplayEnrichment(ctx context.Context, vault string, stages []string, limit int, dryRun bool) (*engine.ReplayEnrichmentResult, error)
+
+	// GetProvenance returns the ordered audit log for an engram.
+	// Returns an empty slice (not error) if no entries exist.
+	GetProvenance(ctx context.Context, vault, id string) ([]ProvenanceEntry, error)
 }
