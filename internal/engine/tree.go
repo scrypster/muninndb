@@ -40,8 +40,9 @@ type RememberTreeResult struct {
 	NodeMap map[string]string // concept → ULID string
 }
 
-// RememberTree creates all engrams depth-first, wires is_part_of associations,
-// and writes ordinal keys. Returns the root ID and a map of concept → ULID.
+// RememberTree writes all nodes, associations, and ordinal keys depth-first;
+// on failure, already-written nodes are left in storage.
+// Returns the root ID and a map of concept → ULID.
 func (e *Engine) RememberTree(ctx context.Context, req *RememberTreeRequest) (*RememberTreeResult, error) {
 	ws := e.store.ResolveVaultPrefix(req.Vault)
 	nodeMap := make(map[string]string)
@@ -126,8 +127,26 @@ func (e *Engine) writeTreeNode(
 	return id, nil
 }
 
+// lifecycleStateString converts a LifecycleState to a human-readable string.
+func lifecycleStateString(s storage.LifecycleState) string {
+	switch s {
+	case storage.StateActive:
+		return "active"
+	case storage.StateCompleted:
+		return "completed"
+	case storage.StateSoftDeleted:
+		return "deleted"
+	case storage.StateArchived:
+		return "archived"
+	default:
+		return fmt.Sprintf("unknown(%d)", s)
+	}
+}
+
 // RecallTree reads the root engram then recursively reads children using
 // ListChildOrdinals (already sorted ascending by ordinal). Returns the full tree.
+// limit caps the number of children fetched per node at each level — it is not a
+// global cap on total output nodes. maxDepth=0 means unlimited depth.
 func (e *Engine) RecallTree(ctx context.Context, vault, rootID string, maxDepth, limit int, includeCompleted bool) (*TreeNode, error) {
 	ws := e.store.ResolveVaultPrefix(vault)
 
@@ -140,6 +159,7 @@ func (e *Engine) RecallTree(ctx context.Context, vault, rootID string, maxDepth,
 }
 
 // recallTreeNode recursively reads a node and its children up to maxDepth.
+// maxDepth=0 means unlimited depth. limit caps children per node (0 = no limit).
 func (e *Engine) recallTreeNode(
 	ctx context.Context,
 	ws [8]byte,
@@ -164,11 +184,13 @@ func (e *Engine) recallTreeNode(
 	node := &TreeNode{
 		ID:           eng.ID.String(),
 		Concept:      eng.Concept,
-		State:        fmt.Sprintf("%d", eng.State),
+		State:        lifecycleStateString(eng.State),
 		LastAccessed: lastAccessed,
 	}
 
-	if depth >= maxDepth {
+	// maxDepth <= 0 means unlimited depth.
+	if maxDepth > 0 && depth >= maxDepth {
+		node.Children = []TreeNode{}
 		return node, nil
 	}
 
@@ -181,13 +203,21 @@ func (e *Engine) recallTreeNode(
 		ordinals = ordinals[:limit]
 	}
 
+	node.Children = []TreeNode{}
+
 	for _, entry := range ordinals {
+		if !includeCompleted {
+			metas, err := e.store.GetMetadata(ctx, ws, []storage.ULID{entry.ChildID})
+			if err != nil || len(metas) == 0 || metas[0] == nil {
+				continue // skip unreadable children
+			}
+			if metas[0].State == storage.StateCompleted {
+				continue
+			}
+		}
 		child, err := e.recallTreeNode(ctx, ws, entry.ChildID, maxDepth, depth+1, limit, includeCompleted)
 		if err != nil {
 			return nil, err
-		}
-		if !includeCompleted && child.State == fmt.Sprintf("%d", storage.StateCompleted) {
-			continue
 		}
 		child.Ordinal = entry.Ordinal
 		node.Children = append(node.Children, *child)

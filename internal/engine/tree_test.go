@@ -139,6 +139,9 @@ func TestRecallTree_FilterCompleted(t *testing.T) {
 		t.Fatalf("RecallTree: %v", err)
 	}
 
+	if tree.Concept != "Root" {
+		t.Errorf("root concept: got %q, want %q", tree.Concept, "Root")
+	}
 	if len(tree.Children) != 1 {
 		t.Fatalf("expected 1 child after filtering completed, got %d", len(tree.Children))
 	}
@@ -181,6 +184,13 @@ func TestRecallTree_Limit(t *testing.T) {
 
 	if len(tree.Children) != 2 {
 		t.Fatalf("expected 2 children with limit=2, got %d", len(tree.Children))
+	}
+	// Confirm first 2 by ordinal are returned, not arbitrary.
+	if tree.Children[0].Concept != "Child 1" {
+		t.Errorf("expected Child 1 as first child, got %q", tree.Children[0].Concept)
+	}
+	if tree.Children[1].Concept != "Child 2" {
+		t.Errorf("expected Child 2 as second child, got %q", tree.Children[1].Concept)
 	}
 }
 
