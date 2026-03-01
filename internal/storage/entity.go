@@ -196,6 +196,40 @@ func (ps *PebbleStore) ScanEntityEngrams(ctx context.Context, entityName string,
 	return nil
 }
 
+// ScanEngramEntities scans the 0x20 forward index for all entities mentioned
+// by the given engram in vault ws. Calls fn for each entity name found.
+// Uses the EntityEngramLinkPrefix (0x20|ws|engramID) as the scan prefix;
+// the value stored at each key is the raw entity name string.
+func (ps *PebbleStore) ScanEngramEntities(ctx context.Context, ws [8]byte, engramID ULID, fn func(entityName string) error) error {
+	prefix := keys.EntityEngramLinkPrefix(ws, [16]byte(engramID))
+	upperBound := make([]byte, len(prefix))
+	copy(upperBound, prefix)
+	for i := len(upperBound) - 1; i >= 0; i-- {
+		upperBound[i]++
+		if upperBound[i] != 0 {
+			break
+		}
+	}
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound})
+	if err != nil {
+		return fmt.Errorf("scan engram entities: iter: %w", err)
+	}
+	defer iter.Close()
+
+	for valid := iter.First(); valid; valid = iter.Next() {
+		val := iter.Value()
+		entityName := string(val)
+		if entityName == "" {
+			continue
+		}
+		if err := fn(entityName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // UpsertRelationshipRecord writes a vault-scoped relationship record at 0x21.
 func (ps *PebbleStore) UpsertRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error {
 	record.UpdatedAt = time.Now().UnixNano()

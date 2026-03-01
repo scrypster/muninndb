@@ -1269,6 +1269,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	}
 	metrics.EngineActivationsTotal.Inc()
 
+	// Entity boost phase: spread activation through shared named entities.
+	// After BFS produces a scored set, any engram sharing a named entity with a
+	// top-N result receives a small boost. This surfaces entity-linked engrams
+	// that have no direct association edge to the query-matching engrams.
+	result.Activations = e.applyEntityBoost(ctx, wsPrefix, result.Activations)
+
 	// Convert result.Activations to []mbp.ActivationItem
 	items := make([]mbp.ActivationItem, len(result.Activations))
 	for i, scored := range result.Activations {

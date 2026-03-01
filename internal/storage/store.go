@@ -184,6 +184,10 @@ type EngineStore interface {
 	// a non-nil error or the index is exhausted.
 	ScanEntityEngrams(ctx context.Context, entityName string, fn func(ws [8]byte, engramID ULID) error) error
 
+	// ScanEngramEntities scans the 0x20 forward index for all entities mentioned
+	// by the given engram in vault ws. Calls fn for each entity name.
+	ScanEngramEntities(ctx context.Context, ws [8]byte, engramID ULID, fn func(entityName string) error) error
+
 	// UpsertRelationshipRecord writes a vault-scoped relationship record.
 	UpsertRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error
 
