@@ -503,6 +503,135 @@ func TestRetroactiveProcessor_NotifyWakeup(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// processEngram — DigestEntities flag suppresses UpsertEntity calls
+// ---------------------------------------------------------------------------
+
+// TestRetroactiveProcessor_DigestEntitiesFlagSkipsUpsert verifies the core bug fix:
+// when the DigestEntities flag is already set on an engram, processEngram must NOT
+// call UpsertEntity. Previously, hasEntities was derived from len(KeyPoints) > 0,
+// which incorrectly conflated summarization key points with entity extraction.
+// After the fix, GetDigestFlags is the authoritative source.
+func TestRetroactiveProcessor_DigestEntitiesFlagSkipsUpsert(t *testing.T) {
+	// The engram has KeyPoints set (simulating summarization having run),
+	// but NO Summary — the old buggy code used len(KeyPoints)>0 as the entity proxy,
+	// which would have skipped UpsertEntity even when entities hadn't been extracted.
+	// The fixed code reads GetDigestFlags; with DigestEntities set, it must skip.
+	eng := &Engram{
+		Concept:   "service",
+		Content:   "uses postgres",
+		KeyPoints: []string{"uses postgres"}, // set by summarization — NOT entity extraction
+	}
+	iter := &mockIterator{engrams: []*Engram{eng}}
+
+	store := &mockPluginStore{
+		countResult:    1,
+		scanResult:     iter,
+		getFlagsResult: DigestEntities, // authoritative: entities already extracted
+	}
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-flag-test", tier: TierEnrich},
+		enrichResult: &EnrichmentResult{
+			Summary: "summary",
+			Entities: []ExtractedEntity{
+				{Name: "postgres", Type: "database", Confidence: 0.9},
+			},
+		},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	err := rp.processEngram(context.Background(), eng)
+	if err != nil {
+		t.Fatalf("processEngram should succeed, got %v", err)
+	}
+
+	// UpsertEntity must NOT have been called because DigestEntities flag was set.
+	if store.upsertEntityCalls != 0 {
+		t.Errorf("UpsertEntity should not be called when DigestEntities flag is set, got %d calls",
+			store.upsertEntityCalls)
+	}
+}
+
+// TestRetroactiveProcessor_NoDigestEntitiesFlagCallsUpsert verifies the positive case:
+// when DigestEntities flag is NOT set and the enrich result has entities, UpsertEntity
+// must be called for each entity.
+func TestRetroactiveProcessor_NoDigestEntitiesFlagCallsUpsert(t *testing.T) {
+	eng := &Engram{
+		Concept: "service",
+		Content: "uses postgres",
+	}
+	iter := &mockIterator{engrams: []*Engram{eng}}
+
+	store := &mockPluginStore{
+		countResult:    1,
+		scanResult:     iter,
+		getFlagsResult: 0, // no flags set — entities not yet extracted
+	}
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-noupsert-test", tier: TierEnrich},
+		enrichResult: &EnrichmentResult{
+			Summary: "summary",
+			Entities: []ExtractedEntity{
+				{Name: "postgres", Type: "database", Confidence: 0.9},
+				{Name: "service", Type: "service", Confidence: 0.8},
+			},
+		},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	err := rp.processEngram(context.Background(), eng)
+	if err != nil {
+		t.Fatalf("processEngram should succeed, got %v", err)
+	}
+
+	// UpsertEntity MUST be called once per entity when flag is not set.
+	if store.upsertEntityCalls != 2 {
+		t.Errorf("expected 2 UpsertEntity calls, got %d", store.upsertEntityCalls)
+	}
+}
+
+// TestRetroactiveProcessor_KeyPointsAloneDoNotSkipEntities verifies the bug fix directly:
+// KeyPoints being non-empty (set by summarization) must NOT prevent entity extraction.
+// The old code used len(eng.KeyPoints) > 0 as the hasEntities proxy — this test would
+// have FAILED before the fix (UpsertEntity would have been skipped).
+func TestRetroactiveProcessor_KeyPointsAloneDoNotSkipEntities(t *testing.T) {
+	eng := &Engram{
+		Concept:   "service",
+		Content:   "uses postgres",
+		Summary:   "",                      // no summary yet
+		KeyPoints: []string{"key point 1"}, // set by a prior summarization run
+	}
+	iter := &mockIterator{engrams: []*Engram{eng}}
+
+	store := &mockPluginStore{
+		countResult:    1,
+		scanResult:     iter,
+		getFlagsResult: 0, // DigestEntities NOT set — entities must be extracted
+	}
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-kp-test", tier: TierEnrich},
+		enrichResult: &EnrichmentResult{
+			Summary: "summary",
+			Entities: []ExtractedEntity{
+				{Name: "postgres", Type: "database", Confidence: 0.9},
+			},
+		},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	err := rp.processEngram(context.Background(), eng)
+	if err != nil {
+		t.Fatalf("processEngram should succeed, got %v", err)
+	}
+
+	// Even though KeyPoints is non-empty, entities must be upserted because
+	// the DigestEntities flag was not set. The bug fix ensures flags are authoritative.
+	if store.upsertEntityCalls != 1 {
+		t.Errorf("expected 1 UpsertEntity call (KeyPoints alone must not skip entities), got %d",
+			store.upsertEntityCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // processBatch — iterator with nil engram
 // ---------------------------------------------------------------------------
 

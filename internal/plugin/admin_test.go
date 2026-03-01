@@ -29,10 +29,11 @@ type mockPluginStore struct {
 	hnswInsertErr   error
 	autoLinkErr     error
 
-	setFlagCalls     int
-	updateEmbedCalls int
-	hnswInsertCalls  int
-	autoLinkCalls    int
+	setFlagCalls      int
+	updateEmbedCalls  int
+	hnswInsertCalls   int
+	autoLinkCalls     int
+	upsertEntityCalls int
 }
 
 func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _ uint8) (int64, error) {
@@ -62,6 +63,7 @@ func (m *mockPluginStore) UpdateDigest(_ context.Context, _ ULID, _ *EnrichmentR
 }
 
 func (m *mockPluginStore) UpsertEntity(_ context.Context, _ ExtractedEntity) error {
+	m.upsertEntityCalls++
 	return m.upsertEntityErr
 }
 

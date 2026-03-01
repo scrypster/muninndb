@@ -46,9 +46,15 @@ type ExtractedRelation struct {
 // DigestFlags tracks which processing stages have been applied to an engram.
 // Stored in the ERF metadata Reserved section at offset 68 (first byte of Reserved).
 const (
-	DigestCore   uint8 = 0x01 // extractive, rule-based (core engine — always set on write)
+	DigestCore   uint8 = 0x01 // extractive, rule-based (always set on write)
 	DigestEmbed  uint8 = 0x02 // embedding vector generated and stored
-	DigestEnrich uint8 = 0x04 // LLM-enriched (summary, entities, relationships)
+	DigestEnrich uint8 = 0x04 // LLM-enriched: full pipeline complete
+
+	// Per-stage completion flags (set individually by UpdateDigest).
+	DigestEntities      uint8 = 0x08 // entity extraction complete
+	DigestRelationships uint8 = 0x10 // relationship extraction complete
+	DigestClassified    uint8 = 0x20 // classification complete
+	DigestSummarized    uint8 = 0x40 // summarization complete
 )
 
 // PluginStatus represents the runtime state of a registered plugin.

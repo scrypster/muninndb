@@ -399,10 +399,16 @@ func (rp *RetroactiveProcessor) processEngram(ctx context.Context, eng *Engram) 
 
 	// Check if this is an enrich plugin
 	if enrich, ok := rp.plugin.(EnrichPlugin); ok {
-		// For caller_preferred mode: if the engram already has caller-provided
-		// data for certain fields, the background pipeline should only fill gaps.
-		hasSummary := eng.Summary != ""
-		hasEntities := len(eng.KeyPoints) > 0
+		// Read per-stage digest flags so we don't re-run stages the caller already provided.
+		// engramHasEntities previously used len(eng.KeyPoints) > 0, which incorrectly
+		// conflated summarization keypoints with entity extraction. Flags are authoritative.
+		flags, _ := rp.store.GetDigestFlags(ctx, eng.ID)
+		hasSummary := eng.Summary != "" || (flags&DigestSummarized != 0)
+		hasEntities := flags&DigestEntities != 0
+		hasRelationships := flags&DigestRelationships != 0
+		hasClassification := flags&DigestClassified != 0
+		_ = hasRelationships // will be used in Task 2 wiring
+		_ = hasClassification
 
 		// If both summary and entities are already present from caller,
 		// skip the enrich call entirely (all fields covered).
@@ -417,11 +423,13 @@ func (rp *RetroactiveProcessor) processEngram(ctx context.Context, eng *Engram) 
 		}
 
 		// Only overwrite fields the caller didn't provide.
+		// hasSummary covers both eng.Summary != "" and DigestSummarized flag;
+		// KeyPoints are part of the summarization output so they're guarded by hasSummary.
 		if hasSummary {
 			result.Summary = eng.Summary
-		}
-		if hasEntities {
-			result.KeyPoints = eng.KeyPoints
+			if len(eng.KeyPoints) > 0 {
+				result.KeyPoints = eng.KeyPoints
+			}
 		}
 
 		// Store the enrichment result

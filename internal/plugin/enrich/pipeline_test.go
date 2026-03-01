@@ -504,7 +504,10 @@ func TestSkipIfPresent_Classification(t *testing.T) {
 	}
 }
 
-// TestSkipIfPresent_Entities verifies entity extraction is skipped when key points exist.
+// TestSkipIfPresent_Entities verifies entity extraction is skipped only when both
+// KeyPoints AND Summary are present (caller provided full enrichment).
+// With only KeyPoints set (no Summary), entity extraction must NOT be skipped —
+// KeyPoints alone may have been set by summarization and do not proxy for entity extraction.
 func TestSkipIfPresent_Entities(t *testing.T) {
 	var calledEntities bool
 	mock := NewMockLLMProvider()
@@ -525,20 +528,45 @@ func TestSkipIfPresent_Entities(t *testing.T) {
 	limiter := NewTokenBucketLimiter(100.0, 100.0)
 	pipeline := NewPipeline(mock, limiter)
 
-	eng := &storage.Engram{
-		ID:        storage.NewULID(),
-		Concept:   "c",
-		Content:   "x",
-		KeyPoints: []string{"existing key point"},
-	}
+	t.Run("KeyPointsOnly_MustNotSkip", func(t *testing.T) {
+		// With only KeyPoints set (no Summary), entity extraction must proceed.
+		// The old code used KeyPoints alone as a skip-proxy — this was the bug.
+		calledEntities = false
+		eng := &storage.Engram{
+			ID:        storage.NewULID(),
+			Concept:   "c",
+			Content:   "x",
+			KeyPoints: []string{"existing key point"},
+			// Summary intentionally empty
+		}
+		_, err := pipeline.Run(context.Background(), eng)
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if !calledEntities {
+			t.Fatal("entity extraction must NOT be skipped when only KeyPoints are set (no Summary)")
+		}
+	})
 
-	_, err := pipeline.Run(context.Background(), eng)
-	if err != nil {
-		t.Fatalf("Run failed: %v", err)
-	}
-	if calledEntities {
-		t.Fatal("entity extraction should have been skipped (engram already has key points)")
-	}
+	t.Run("KeyPointsAndSummary_MaySkip", func(t *testing.T) {
+		// With both KeyPoints AND Summary set, caller provided full enrichment —
+		// entity extraction may be skipped (conservative heuristic).
+		calledEntities = false
+		eng := &storage.Engram{
+			ID:        storage.NewULID(),
+			Concept:   "c",
+			Content:   "x",
+			KeyPoints: []string{"existing key point"},
+			Summary:   "existing summary",
+		}
+		_, err := pipeline.Run(context.Background(), eng)
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if calledEntities {
+			t.Fatal("entity extraction should be skipped when both KeyPoints and Summary are present")
+		}
+	})
 }
 
 // TestFullModeBackwardCompat verifies full mode (default) runs all 4 calls.
