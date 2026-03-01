@@ -235,6 +235,9 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 
 		// Provenance audit trail
 		"muninn_provenance": s.handleProvenance,
+
+		// SGD learning loop feedback
+		"muninn_feedback": s.handleFeedback,
 	}
 
 	handler, found := handlers[req.Params.Name]

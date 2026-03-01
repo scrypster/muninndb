@@ -133,4 +133,9 @@ type EngineInterface interface {
 	// GetProvenance returns the ordered audit log for an engram.
 	// Returns an empty slice (not error) if no entries exist.
 	GetProvenance(ctx context.Context, vault, id string) ([]ProvenanceEntry, error)
+
+	// RecordFeedback records an explicit negative feedback signal for an engram.
+	// useful=false means the engram was retrieved but was not helpful.
+	// The engine computes the ScoreVector internally.
+	RecordFeedback(ctx context.Context, vault, engramID string, useful bool) error
 }

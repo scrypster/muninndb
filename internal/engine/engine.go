@@ -1070,6 +1070,17 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		return nil, fmt.Errorf("get engram: %w", err)
 	}
 
+	// Fire implicit positive feedback signal asynchronously — read = accessed.
+	go func() {
+		signal := scoring.FeedbackSignal{
+			EngramID:    [16]byte(id),
+			Accessed:    true,
+			ScoreVector: scoring.DefaultWeights(),
+			Timestamp:   time.Now(),
+		}
+		e.scoring.RecordFeedback(context.Background(), wsPrefix, signal)
+	}()
+
 	d := time.Since(readStart)
 	if e.latencyTracker != nil {
 		e.latencyTracker.Record(wsPrefix, "read", d)
@@ -2345,5 +2356,24 @@ func (e *Engine) GetProvenance(ctx context.Context, vault, id string) ([]provena
 		return nil, fmt.Errorf("parse id: %w", err)
 	}
 	return e.prov.Get(ctx, wsPrefix, [16]byte(ulid))
+}
+
+// RecordFeedback records an explicit feedback signal for an engram.
+// useful=false signals negative feedback (retrieved but not helpful);
+// useful=true signals positive feedback (retrieved and helpful).
+func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, useful bool) error {
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+	ulid, err := storage.ParseULID(engramID)
+	if err != nil {
+		return fmt.Errorf("parse id: %w", err)
+	}
+	signal := scoring.FeedbackSignal{
+		EngramID:    [16]byte(ulid),
+		Accessed:    useful,
+		ScoreVector: scoring.DefaultWeights(),
+		Timestamp:   time.Now(),
+	}
+	go e.scoring.RecordFeedback(ctx, wsPrefix, signal)
+	return nil
 }
 

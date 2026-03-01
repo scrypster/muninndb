@@ -556,5 +556,21 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"entity_name"},
 			},
 		},
+	// SGD learning loop feedback
+	{
+		Name:        "muninn_feedback",
+		Description: "Record explicit feedback on an engram. Use useful=false when a retrieved engram was not helpful. Updates the vault's learned scoring weights via SGD.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"vault":     vaultProp,
+				"engram_id": map[string]any{"type": "string", "description": "Engram ID that was retrieved"},
+				"useful":    map[string]any{"type": "boolean", "description": "Whether the engram was helpful (default false = negative signal)"},
+			},
+			"required": []string{"engram_id"},
+		},
+	},
 	}
 }
+
+

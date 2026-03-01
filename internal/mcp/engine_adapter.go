@@ -373,6 +373,10 @@ func (a *mcpEngineAdapter) ReplayEnrichment(ctx context.Context, vault string, s
 	return a.eng.ReplayEnrichment(ctx, vault, stages, limit, dryRun)
 }
 
+func (a *mcpEngineAdapter) RecordFeedback(ctx context.Context, vault, engramID string, useful bool) error {
+	return a.eng.RecordFeedback(ctx, vault, engramID, useful)
+}
+
 func (a *mcpEngineAdapter) GetProvenance(ctx context.Context, vault, id string) ([]ProvenanceEntry, error) {
 	entries, err := a.eng.GetProvenance(ctx, vault, id)
 	if err != nil {

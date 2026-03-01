@@ -7,8 +7,8 @@ import (
 
 func TestAllToolDefinitionsCount(t *testing.T) {
 	tools := allToolDefinitions()
-	if len(tools) != 32 {
-		t.Errorf("expected 32 tools, got %d", len(tools))
+	if len(tools) != 33 {
+		t.Errorf("expected 33 tools, got %d", len(tools))
 	}
 }
 
@@ -95,6 +95,8 @@ func TestExpectedToolNames(t *testing.T) {
 		"muninn_replay_enrichment",
 		// Provenance audit trail
 		"muninn_provenance",
+		// SGD learning loop feedback
+		"muninn_feedback",
 	}
 	for _, name := range expected {
 		if !names[name] {

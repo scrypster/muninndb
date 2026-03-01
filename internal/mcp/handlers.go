@@ -1223,6 +1223,20 @@ func (s *MCPServer) handleReplayEnrichment(ctx context.Context, w http.ResponseW
 	})))
 }
 
+func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok := args["engram_id"].(string)
+	if !ok || engramID == "" {
+		sendError(w, id, -32602, "engram_id is required")
+		return
+	}
+	useful, _ := args["useful"].(bool)
+	if err := s.engine.RecordFeedback(ctx, vault, engramID, useful); err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{"ok": true, "engram_id": engramID, "useful": useful})))
+}
+
 func (s *MCPServer) handleEntityTimeline(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	entityName, ok := args["entity_name"].(string)
 	if !ok || entityName == "" {
