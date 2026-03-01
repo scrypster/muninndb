@@ -13,6 +13,12 @@ type AssocWeightUpdate struct {
 	Weight float32
 }
 
+// OrdinalEntry is a (childID, ordinal) pair returned by ListChildOrdinals.
+type OrdinalEntry struct {
+	ChildID ULID
+	Ordinal int32
+}
+
 // EngineStore is the storage interface for the MuninnDB engine.
 // Implemented by the Pebble-backed store. All operations are vault-scoped
 // via the vault prefix in the key construction.
@@ -120,6 +126,21 @@ type EngineStore interface {
 	// EngramsByCreatedSince returns engrams created at or after since, ordered
 	// by creation time (ascending), with offset/limit for pagination.
 	EngramsByCreatedSince(ctx context.Context, wsPrefix [8]byte, since time.Time, offset, limit int) ([]*Engram, error)
+
+	// WriteOrdinal atomically writes the ordinal for childID within parentID.
+	// Overwrites any existing value.
+	WriteOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID, ordinal int32) error
+
+	// ReadOrdinal reads the ordinal for (parentID, childID).
+	// Returns found=false if the key does not exist.
+	ReadOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID) (ordinal int32, found bool, err error)
+
+	// DeleteOrdinal removes the ordinal key for (parentID, childID). No-op if absent.
+	DeleteOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID) error
+
+	// ListChildOrdinals returns all (childID, ordinal) pairs for parentID,
+	// sorted by ordinal ascending.
+	ListChildOrdinals(ctx context.Context, wsPrefix [8]byte, parentID ULID) ([]OrdinalEntry, error)
 
 	// Close flushes all pending writes and closes the Pebble database.
 	Close() error
