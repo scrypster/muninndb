@@ -126,6 +126,33 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 	return nil
 }
 
+// WriteAssociation queues forward (0x03), reverse (0x04), and weight-index (0x14) keys
+// for the association into the batch. Uses the same key-building and value-encoding
+// logic as PebbleStore.WriteAssociation.
+func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src, dst ULID, assoc *Association) error {
+	if b.committed {
+		return fmt.Errorf("batch already committed")
+	}
+	av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated)
+	b.batch.Set(keys.AssocFwdKey(ws, [16]byte(src), assoc.Weight, [16]byte(dst)), av[:], nil)
+	b.batch.Set(keys.AssocRevKey(ws, [16]byte(dst), assoc.Weight, [16]byte(src)), av[:], nil)
+	var weightBuf [4]byte
+	binary.BigEndian.PutUint32(weightBuf[:], math.Float32bits(assoc.Weight))
+	b.batch.Set(keys.AssocWeightIndexKey(ws, [16]byte(src), [16]byte(dst)), weightBuf[:], nil)
+	return nil
+}
+
+// WriteOrdinal queues the ordinal key for (parentID, childID) into the batch.
+func (b *pebbleStoreBatch) WriteOrdinal(ctx context.Context, ws [8]byte, parentID, childID ULID, ordinal int32) error {
+	if b.committed {
+		return fmt.Errorf("batch already committed")
+	}
+	key := keys.OrdinalKey(ws, [16]byte(parentID), [16]byte(childID))
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], uint32(ordinal))
+	return b.batch.Set(key, buf[:], nil)
+}
+
 // Commit atomically flushes all queued writes to Pebble and runs post-commit
 // side effects (vault counters, WAL entries, provenance).
 func (b *pebbleStoreBatch) Commit() error {

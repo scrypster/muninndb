@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/storage"
-	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // TreeNode is a single node in a recalled memory tree.
@@ -211,7 +211,9 @@ func (e *Engine) CountChildren(ctx context.Context, vault, engramID string) (int
 }
 
 // AddChild writes a single child engram, wires the is_part_of association (child → parent),
-// and assigns an ordinal key. If input.Ordinal is nil, appends after the last existing child.
+// and assigns an ordinal key using a single atomic Pebble batch. This ensures that
+// a crash between any two writes cannot leave the tree in an inconsistent state.
+// If input.Ordinal is nil, appends after the last existing child.
 func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *AddChildInput) (*AddChildResult, error) {
 	if input == nil {
 		return nil, fmt.Errorf("add child: input must not be nil")
@@ -235,49 +237,53 @@ func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *Ad
 			parentID, lifecycleStateString(parentEng.State))
 	}
 
-	// Write the child engram.
-	wr := &mbp.WriteRequest{
-		Vault:   vault,
+	// Build the child engram struct directly (same pattern as RememberTree).
+	child := &storage.Engram{
 		Concept: input.Concept,
 		Content: input.Content,
 		Tags:    input.Tags,
 	}
 	if input.Type != "" {
-		mt, ok := storage.ParseMemoryType(input.Type)
-		if ok {
-			wr.MemoryType = uint8(mt)
+		if mt, ok := storage.ParseMemoryType(input.Type); ok {
+			child.MemoryType = mt
 		} else {
-			wr.TypeLabel = input.Type
+			child.TypeLabel = input.Type
 		}
 	}
-	resp, err := e.Write(ctx, wr)
-	if err != nil {
-		return nil, fmt.Errorf("add child: write engram: %w", err)
-	}
-	cid, err := storage.ParseULID(resp.ID)
-	if err != nil {
-		return nil, fmt.Errorf("add child: parse child id: %w", err)
-	}
 
-	// Wire is_part_of association: child → parent.
-	if err := e.store.WriteAssociation(ctx, ws, cid, pid, &storage.Association{
-		TargetID:   pid,
-		RelType:    storage.RelIsPartOf,
-		Weight:     1.0,
-		Confidence: 1.0,
-		CreatedAt:  time.Now(),
-	}); err != nil {
-		return nil, fmt.Errorf("add child: write association: %w", err)
-	}
-
-	// Determine ordinal: explicit or append after max existing.
+	// Determine ordinal and commit all three writes atomically.
 	// When appending (Ordinal == nil), we must hold the per-parent mutex to
 	// serialize the read-modify-write so concurrent appends cannot collide.
 	ordinal := int32(1)
+
+	commitBatch := func(ord int32) error {
+		batch := e.store.NewBatch()
+		defer batch.Discard()
+		if err := batch.WriteEngram(ctx, ws, child); err != nil {
+			return fmt.Errorf("queue engram: %w", err)
+		}
+		assoc := &storage.Association{
+			TargetID:   pid,
+			RelType:    storage.RelIsPartOf,
+			Weight:     1.0,
+			Confidence: 1.0,
+			CreatedAt:  time.Now(),
+		}
+		if err := batch.WriteAssociation(ctx, ws, child.ID, pid, assoc); err != nil {
+			return fmt.Errorf("queue association: %w", err)
+		}
+		if err := batch.WriteOrdinal(ctx, ws, pid, child.ID, ord); err != nil {
+			return fmt.Errorf("queue ordinal: %w", err)
+		}
+		return batch.Commit()
+	}
+
 	if input.Ordinal != nil {
 		ordinal = *input.Ordinal
-		if err := e.store.WriteOrdinal(ctx, ws, pid, cid, ordinal); err != nil {
-			return nil, fmt.Errorf("add child: write ordinal: %w", err)
+		// Assign ID before the batch so we have it for the association key.
+		child.ID = storage.NewULID()
+		if err := commitBatch(ordinal); err != nil {
+			return nil, fmt.Errorf("add child: commit batch: %w", err)
 		}
 	} else {
 		mu := e.getChildMutex(parentID)
@@ -291,14 +297,46 @@ func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *Ad
 		if len(existing) > 0 {
 			ordinal = existing[len(existing)-1].Ordinal + 1
 		}
-		writeErr := e.store.WriteOrdinal(ctx, ws, pid, cid, ordinal)
+		// Assign ID under mutex so the ULID is stable before the batch commit.
+		child.ID = storage.NewULID()
+		commitErr := commitBatch(ordinal)
 		mu.Unlock()
-		if writeErr != nil {
-			return nil, fmt.Errorf("add child: write ordinal: %w", writeErr)
+		if commitErr != nil {
+			return nil, fmt.Errorf("add child: commit batch: %w", commitErr)
 		}
 	}
 
-	return &AddChildResult{ChildID: resp.ID, Ordinal: ordinal}, nil
+	// Post-commit side effects (async, non-critical for crash-safety).
+	// These mirror what e.Write() triggers after the storage write.
+	vaultName := vault
+	if vaultName == "" {
+		vaultName = "default"
+	}
+	_ = e.store.WriteVaultName(ws, vaultName)
+	e.activity.Record(ws)
+
+	if e.ftsWorker != nil {
+		e.ftsWorker.Submit(fts.IndexJob{
+			WS:      ws,
+			ID:      [16]byte(child.ID),
+			Concept: child.Concept,
+			Content: child.Content,
+			Tags:    child.Tags,
+		})
+	}
+
+	if e.triggers != nil {
+		vaultID := wsVaultID(ws)
+		childCopy := *child
+		childCopy.Tags = append([]string(nil), child.Tags...)
+		e.triggers.NotifyWrite(vaultID, &childCopy, true)
+	}
+
+	if fn, ok := e.onWrite.Load().(func()); ok && fn != nil {
+		fn()
+	}
+
+	return &AddChildResult{ChildID: child.ID.String(), Ordinal: ordinal}, nil
 }
 
 // lifecycleStateString converts a LifecycleState to a human-readable string.

@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -304,5 +307,40 @@ func TestRememberTree_AtomicBatch_AllNodesReadable(t *testing.T) {
 			t.Errorf("concept mismatch: got %q want %q", engram.Concept, concept)
 		}
 	}
+}
+
+func TestAddChild_WritesAll_Atomically(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	parentResp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "test", Concept: "Parent", Content: "parent content",
+	})
+	require.NoError(t, err)
+
+	result, err := eng.AddChild(ctx, "test", parentResp.ID, &AddChildInput{
+		Concept: "Child", Content: "child content",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.ChildID)
+
+	ws := eng.store.ResolveVaultPrefix("test")
+	pid, _ := storage.ParseULID(parentResp.ID)
+	cid, _ := storage.ParseULID(result.ChildID)
+
+	// All three must be readable after AddChild returns.
+	child, err := eng.store.GetEngram(ctx, ws, cid)
+	require.NoError(t, err)
+	require.NotNil(t, child, "child engram must exist")
+
+	assocs, err := eng.store.GetAssociations(ctx, ws, []storage.ULID{cid}, 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, assocs[cid], "is_part_of association must exist")
+
+	ordinal, found, err := eng.store.ReadOrdinal(ctx, ws, pid, cid)
+	require.NoError(t, err)
+	require.True(t, found, "ordinal must exist")
+	assert.Equal(t, int32(1), ordinal)
 }
 

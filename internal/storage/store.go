@@ -24,6 +24,10 @@ type OrdinalEntry struct {
 type StoreBatch interface {
 	// WriteEngram queues an engram write into the batch.
 	WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *Engram) error
+	// WriteAssociation queues association forward (0x03), reverse (0x04) keys into the batch.
+	WriteAssociation(ctx context.Context, wsPrefix [8]byte, src, dst ULID, assoc *Association) error
+	// WriteOrdinal queues the ordinal key for (parentID, childID) into the batch.
+	WriteOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID, ordinal int32) error
 	// Commit atomically commits all queued writes.
 	Commit() error
 	// Discard releases the batch without writing anything.
