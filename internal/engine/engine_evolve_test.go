@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -54,4 +57,12 @@ func TestEvolve_AtomicBatch_OldSoftDeletedNewReadable(t *testing.T) {
 	if newEng.State != storage.StateActive {
 		t.Errorf("new engram state = %v, want StateActive", newEng.State)
 	}
+
+	// Verify supersedes association was written.
+	assocMap, err := eng.store.GetAssociations(ctx, ws, []storage.ULID{newID}, 10)
+	require.NoError(t, err)
+	assocs := assocMap[newID]
+	require.Len(t, assocs, 1, "supersedes association must exist")
+	assert.Equal(t, oldULID, assocs[0].TargetID, "association must point to old engram")
+	assert.Equal(t, storage.RelSupersedes, assocs[0].RelType, "association type must be RelSupersedes")
 }

@@ -14,6 +14,13 @@ import (
 	"github.com/scrypster/muninndb/internal/wal"
 )
 
+// stateUpdate records a (workspace, id) pair whose state was changed via
+// UpdateEngramState. Used by Commit to invalidate stale L1 cache entries.
+type stateUpdate struct {
+	ws [8]byte
+	id ULID
+}
+
 // pebbleStoreBatch implements StoreBatch using a single pebble.Batch.
 // All WriteEngram calls queue writes into the batch; Commit flushes them atomically.
 type pebbleStoreBatch struct {
@@ -23,6 +30,9 @@ type pebbleStoreBatch struct {
 	// pendingItems collects metadata needed for post-commit side effects
 	// (vault counters, WAL entries, provenance). They are processed after Commit.
 	pendingItems []batchPendingItem
+	// stateUpdatedIDs tracks engrams whose state was changed by UpdateEngramState.
+	// Their cache entries are invalidated in Commit after the batch flushes to Pebble.
+	stateUpdatedIDs []stateUpdate
 }
 
 // batchPendingItem holds the data required for post-commit vault counter and
@@ -186,7 +196,12 @@ func (b *pebbleStoreBatch) UpdateEngramState(ctx context.Context, ws [8]byte, id
 	if err := b.batch.Set(keys.EngramKey(ws, id16), erfBytes, nil); err != nil {
 		return fmt.Errorf("update state: set engram key: %w", err)
 	}
-	return b.batch.Set(keys.MetaKey(ws, id16), erf.MetaKeySlice(erfBytes), nil)
+	if err := b.batch.Set(keys.MetaKey(ws, id16), erf.MetaKeySlice(erfBytes), nil); err != nil {
+		return err
+	}
+	// Track for cache invalidation in Commit.
+	b.stateUpdatedIDs = append(b.stateUpdatedIDs, stateUpdate{ws: ws, id: id})
+	return nil
 }
 
 // Commit atomically flushes all queued writes to Pebble and runs post-commit
@@ -203,6 +218,14 @@ func (b *pebbleStoreBatch) Commit() error {
 	}
 	if err := b.batch.Commit(syncOption); err != nil {
 		return fmt.Errorf("batch commit: %w", err)
+	}
+
+	// Invalidate L1 cache entries for all engrams whose state was updated.
+	// The batch has now been flushed to Pebble; any cached entry reflects the
+	// pre-commit state and must be evicted so subsequent reads see the new state.
+	for _, su := range b.stateUpdatedIDs {
+		b.ps.cache.Delete(su.ws, su.id)
+		b.ps.metaCache.Remove([16]byte(su.id))
 	}
 
 	// Post-commit side effects — mirrors PebbleStore.WriteEngram post-commit work.
