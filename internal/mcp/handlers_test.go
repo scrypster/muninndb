@@ -1591,3 +1591,29 @@ func TestHandleEntityStateEngineError(t *testing.T) {
 		t.Errorf("expected -32000 for engine error, got %v", resp.Error)
 	}
 }
+
+func TestHandleEntityStateInvalidState(t *testing.T) {
+	srv := newTestServerWith(&entityStateEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state","arguments":{"vault":"default","entity_name":"PostgreSQL","state":"invalid_state"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for invalid state, got %v", resp.Error)
+	}
+	if resp.Error != nil && !strings.Contains(resp.Error.Message, "must be one of") {
+		t.Errorf("expected error message to mention valid states, got: %q", resp.Error.Message)
+	}
+}
+
+func TestHandleEntityStateMergedWithoutMergedInto(t *testing.T) {
+	srv := newTestServerWith(&entityStateEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state","arguments":{"vault":"default","entity_name":"Postgres","state":"merged"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for merged without merged_into, got %v", resp.Error)
+	}
+	if resp.Error != nil && !strings.Contains(resp.Error.Message, "merged_into") {
+		t.Errorf("expected error message to mention merged_into requirement, got: %q", resp.Error.Message)
+	}
+}

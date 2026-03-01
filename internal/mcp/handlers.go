@@ -827,7 +827,21 @@ func (s *MCPServer) handleEntityState(ctx context.Context, w http.ResponseWriter
 		sendError(w, id, -32602, "invalid params: 'state' is required")
 		return
 	}
+	validEntityStates := map[string]bool{
+		"active":     true,
+		"deprecated": true,
+		"merged":     true,
+		"resolved":   true,
+	}
+	if !validEntityStates[state] {
+		sendError(w, id, -32602, "invalid params: 'state' must be one of: active, deprecated, merged, resolved")
+		return
+	}
 	mergedInto, _ := args["merged_into"].(string)
+	if state == "merged" && mergedInto == "" {
+		sendError(w, id, -32602, "invalid params: 'merged_into' is required when state=merged")
+		return
+	}
 
 	if err := s.engine.SetEntityState(ctx, entityName, state, mergedInto); err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
