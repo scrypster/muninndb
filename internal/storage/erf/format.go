@@ -91,12 +91,25 @@ const (
 // Tagged extension field prefixes. Written after variable data, before CRC32 trailer.
 // Format: tag(1) | len(2, big-endian) | data(len).
 const (
-	TagTypeLabel uint8 = 0x19 // free-form TypeLabel string
+	TagTypeLabel  uint8 = 0x19 // free-form TypeLabel string
+	TagSummary    uint8 = 0x1A // abstractive summary (UTF-8 string)
+	TagKeyPoints  uint8 = 0x1B // semantic key points (msgpack []string)
 )
 
 // appendTaggedString appends a tagged length-prefixed UTF-8 string to buf.
 func appendTaggedString(buf []byte, tag uint8, s string) []byte {
 	data := []byte(s)
+	if len(data) > 0xFFFF {
+		data = data[:0xFFFF]
+	}
+	buf = append(buf, tag)
+	buf = append(buf, byte(len(data)>>8), byte(len(data)))
+	buf = append(buf, data...)
+	return buf
+}
+
+// appendTaggedBytes appends a tagged length-prefixed raw byte slice to buf.
+func appendTaggedBytes(buf []byte, tag uint8, data []byte) []byte {
 	if len(data) > 0xFFFF {
 		data = data[:0xFFFF]
 	}

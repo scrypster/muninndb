@@ -4,8 +4,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/dchest/siphash"
+	"golang.org/x/text/unicode/norm"
 )
 
 // SipHash keys for vault prefix computation
@@ -521,4 +523,57 @@ func Hash(s string) uint32 {
 		h *= 16777619
 	}
 	return h
+}
+
+// EntityNameHash computes the 8-byte SipHash of a NFKC-normalized, lowercased,
+// trimmed entity name. Used for the 0x1F entity key and 0x20 link key.
+func EntityNameHash(name string) [8]byte {
+	normalized := strings.ToLower(strings.TrimSpace(norm.NFKC.String(name)))
+	hashVal := siphash.Hash(sipKey0, sipKey1, []byte(normalized))
+	var h [8]byte
+	binary.BigEndian.PutUint64(h[:], hashVal)
+	return h
+}
+
+// EntityKey constructs the global entity record key (0x1F prefix).
+// Key: 0x1F | nameHash(8) = 9 bytes
+func EntityKey(nameHash [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = 0x1F
+	copy(key[1:9], nameHash[:])
+	return key
+}
+
+// EntityEngramLinkKey constructs the engram→entity link key (0x20 prefix).
+// Key: 0x20 | wsPrefix(8) | engramID(16) | nameHash(8) = 33 bytes
+func EntityEngramLinkKey(ws [8]byte, engramID [16]byte, nameHash [8]byte) []byte {
+	key := make([]byte, 1+8+16+8)
+	key[0] = 0x20
+	copy(key[1:9], ws[:])
+	copy(key[9:25], engramID[:])
+	copy(key[25:33], nameHash[:])
+	return key
+}
+
+// EntityEngramLinkPrefix returns a 25-byte prefix for scanning all entity links
+// from a given engram (0x20 | ws(8) | engramID(16)).
+func EntityEngramLinkPrefix(ws [8]byte, engramID [16]byte) []byte {
+	key := make([]byte, 1+8+16)
+	key[0] = 0x20
+	copy(key[1:9], ws[:])
+	copy(key[9:25], engramID[:])
+	return key
+}
+
+// RelationshipKey constructs a vault-scoped relationship key (0x21 prefix).
+// Key: 0x21 | ws(8) | engramID(16) | fromNameHash(8) | relTypeByte(1) | toNameHash(8) = 42 bytes
+func RelationshipKey(ws [8]byte, engramID [16]byte, fromHash [8]byte, relTypeByte uint8, toHash [8]byte) []byte {
+	key := make([]byte, 1+8+16+8+1+8)
+	key[0] = 0x21
+	copy(key[1:9], ws[:])
+	copy(key[9:25], engramID[:])
+	copy(key[25:33], fromHash[:])
+	key[33] = relTypeByte
+	copy(key[34:42], toHash[:])
+	return key
 }

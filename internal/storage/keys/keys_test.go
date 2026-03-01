@@ -2,6 +2,8 @@ package keys
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestKeyPrefixesAreUnique(t *testing.T) {
@@ -201,4 +203,16 @@ func TestEmbeddingKey(t *testing.T) {
 	if k[9] != 0x02 {
 		t.Errorf("EmbeddingKey id[0] = 0x%02x, want 0x02", k[9])
 	}
+}
+
+func TestEntityNameHash_Normalizes(t *testing.T) {
+	h1 := EntityNameHash("MJ")
+	h2 := EntityNameHash("mj")
+	h3 := EntityNameHash("  MJ  ")
+	require.Equal(t, h1, h2, "case should be normalized")
+	require.Equal(t, h1, h3, "whitespace should be trimmed")
+
+	hA := EntityNameHash("Alice")
+	hB := EntityNameHash("Bob")
+	require.NotEqual(t, hA, hB)
 }

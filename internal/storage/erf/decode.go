@@ -183,6 +183,13 @@ func parseTaggedFields(buf []byte, eng *Engram) {
 		switch tag {
 		case TagTypeLabel:
 			eng.TypeLabel = string(buf[:length])
+		case TagSummary:
+			eng.Summary = string(buf[:length])
+		case TagKeyPoints:
+			var kp []string
+			if err := msgpack.Unmarshal(buf[:length], &kp); err == nil {
+				eng.KeyPoints = kp
+			}
 		}
 		buf = buf[length:]
 	}

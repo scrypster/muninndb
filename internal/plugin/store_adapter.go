@@ -51,20 +51,39 @@ func (a *pluginStoreAdapter) UpdateEmbedding(ctx context.Context, id ULID, vec [
 }
 
 func (a *pluginStoreAdapter) UpdateDigest(ctx context.Context, id ULID, result *EnrichmentResult) error {
-	// Enrich pipeline not in scope for this wiring task; no-op.
-	return nil
+	return a.store.UpdateDigest(ctx, storage.ULID(id), result.Summary, result.KeyPoints, result.MemoryType)
 }
 
 func (a *pluginStoreAdapter) UpsertEntity(ctx context.Context, entity ExtractedEntity) error {
-	return nil // entity storage not in scope for this wiring task
+	record := storage.EntityRecord{
+		Name:       entity.Name,
+		Type:       entity.Type,
+		Confidence: entity.Confidence,
+	}
+	return a.store.UpsertEntityRecord(ctx, record, "plugin:enrich")
 }
 
 func (a *pluginStoreAdapter) LinkEngramToEntity(ctx context.Context, engramID ULID, entityName string) error {
-	return nil // entity linking not in scope
+	ws, ok := a.store.FindVaultPrefix(storage.ULID(engramID))
+	if !ok {
+		return fmt.Errorf("LinkEngramToEntity: engram %s not found", engramID.String())
+	}
+	return a.store.WriteEntityEngramLink(ctx, ws, storage.ULID(engramID), entityName)
 }
 
 func (a *pluginStoreAdapter) UpsertRelationship(ctx context.Context, engramID ULID, rel ExtractedRelation) error {
-	return nil // relationship storage not in scope
+	ws, ok := a.store.FindVaultPrefix(storage.ULID(engramID))
+	if !ok {
+		return fmt.Errorf("UpsertRelationship: engram %s not found", engramID.String())
+	}
+	record := storage.RelationshipRecord{
+		FromEntity: rel.FromEntity,
+		ToEntity:   rel.ToEntity,
+		RelType:    rel.RelType,
+		Weight:     rel.Weight,
+		Source:     "plugin:enrich",
+	}
+	return a.store.UpsertRelationshipRecord(ctx, ws, storage.ULID(engramID), record)
 }
 
 func (a *pluginStoreAdapter) HNSWInsert(ctx context.Context, id ULID, vec []float32) error {

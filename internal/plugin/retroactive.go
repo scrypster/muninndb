@@ -445,7 +445,11 @@ func (rp *RetroactiveProcessor) processEngram(ctx context.Context, eng *Engram) 
 		if !hasEntities {
 			for _, entity := range result.Entities {
 				if err := rp.store.UpsertEntity(ctx, entity); err != nil {
-					slog.Warn("failed to upsert entity", "error", err)
+					slog.Warn("enrich: failed to upsert entity", "id", eng.ID.String(), "name", entity.Name, "err", err)
+					continue
+				}
+				if err := rp.store.LinkEngramToEntity(ctx, eng.ID, entity.Name); err != nil {
+					slog.Warn("enrich: failed to link engram to entity", "id", eng.ID.String(), "name", entity.Name, "err", err)
 				}
 			}
 		}

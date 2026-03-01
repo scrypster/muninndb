@@ -139,6 +139,14 @@ func encodeInto(b *erfBuffer, eng *Engram) error {
 	if eng.TypeLabel != "" {
 		b.buf = appendTaggedString(b.buf, TagTypeLabel, eng.TypeLabel)
 	}
+	if eng.Summary != "" {
+		b.buf = appendTaggedString(b.buf, TagSummary, eng.Summary)
+	}
+	if len(eng.KeyPoints) > 0 {
+		if kpBytes, err := msgpack.Marshal(eng.KeyPoints); err == nil {
+			b.buf = appendTaggedBytes(b.buf, TagKeyPoints, kpBytes)
+		}
+	}
 
 	b.buf[5] = flags
 
@@ -244,6 +252,14 @@ func encodeV2Into(b *erfBuffer, eng *Engram) error {
 	// Tagged extension fields (backward compatible: old decoders skip unknown tags)
 	if eng.TypeLabel != "" {
 		b.buf = appendTaggedString(b.buf, TagTypeLabel, eng.TypeLabel)
+	}
+	if eng.Summary != "" {
+		b.buf = appendTaggedString(b.buf, TagSummary, eng.Summary)
+	}
+	if len(eng.KeyPoints) > 0 {
+		if kpBytes, err := msgpack.Marshal(eng.KeyPoints); err == nil {
+			b.buf = appendTaggedBytes(b.buf, TagKeyPoints, kpBytes)
+		}
 	}
 
 	b.buf[5] = flags

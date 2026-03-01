@@ -501,15 +501,6 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		eng.Summary = callerSummary
 	}
 
-	// Store caller-provided entities as key points on the engram (written with initial data).
-	if len(callerEntities) > 0 {
-		entityNames := make([]string, 0, len(callerEntities))
-		for _, ent := range callerEntities {
-			entityNames = append(entityNames, ent.Name+" ("+ent.Type+")")
-		}
-		eng.KeyPoints = append(eng.KeyPoints, entityNames...)
-	}
-
 	// Set custom CreatedAt if provided
 	if req.CreatedAt != nil {
 		eng.CreatedAt = *req.CreatedAt
@@ -537,6 +528,28 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	id, err := e.store.WriteEngram(ctx, wsPrefix, eng)
 	if err != nil {
 		return nil, fmt.Errorf("write engram: %w", err)
+	}
+
+	// Store caller-provided inline entities in the entity table (not as KeyPoints).
+	if len(callerEntities) > 0 {
+		ws, _ := e.store.FindVaultPrefix(id)
+		for _, ent := range callerEntities {
+			record := storage.EntityRecord{
+				Name:       ent.Name,
+				Type:       ent.Type,
+				Confidence: 1.0,
+			}
+			if err := e.store.UpsertEntityRecord(ctx, record, "inline"); err != nil {
+				slog.Warn("engine: failed to store inline entity", "name", ent.Name, "err", err)
+				continue
+			}
+			if err := e.store.WriteEntityEngramLink(ctx, ws, id, ent.Name); err != nil {
+				slog.Warn("engine: failed to link inline entity", "name", ent.Name, "err", err)
+			}
+		}
+		// Mark entities as caller-provided so the retroactive processor skips extraction.
+		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
+		_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEntities)
 	}
 
 	// Create associations from caller-provided relationships (after engram is stored).
@@ -787,13 +800,6 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		if callerSummary != "" {
 			eng.Summary = callerSummary
 		}
-		if len(callerEntities) > 0 {
-			entityNames := make([]string, 0, len(callerEntities))
-			for _, ent := range callerEntities {
-				entityNames = append(entityNames, ent.Name+" ("+ent.Type+")")
-			}
-			eng.KeyPoints = append(eng.KeyPoints, entityNames...)
-		}
 		if req.CreatedAt != nil {
 			eng.CreatedAt = *req.CreatedAt
 		}
@@ -859,6 +865,28 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 		p := &prepared[i]
 		id := ids[i]
+
+		// Store caller-provided inline entities in the entity table (not as KeyPoints).
+		if len(p.callerEntities) > 0 {
+			ws, _ := e.store.FindVaultPrefix(id)
+			for _, ent := range p.callerEntities {
+				record := storage.EntityRecord{
+					Name:       ent.Name,
+					Type:       ent.Type,
+					Confidence: 1.0,
+				}
+				if err := e.store.UpsertEntityRecord(ctx, record, "inline"); err != nil {
+					slog.Warn("engine: batch: failed to store inline entity", "name", ent.Name, "err", err)
+					continue
+				}
+				if err := e.store.WriteEntityEngramLink(ctx, ws, id, ent.Name); err != nil {
+					slog.Warn("engine: batch: failed to link inline entity", "name", ent.Name, "err", err)
+				}
+			}
+			// Mark entities as caller-provided so the retroactive processor skips extraction.
+			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
+			_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEntities)
+		}
 
 		for _, rel := range p.callerRelationships {
 			targetULID, parseErr := storage.ParseULID(rel.TargetID)

@@ -147,6 +147,18 @@ type EngineStore interface {
 	// sorted by ordinal ascending.
 	ListChildOrdinals(ctx context.Context, wsPrefix [8]byte, parentID ULID) ([]OrdinalEntry, error)
 
+	// UpsertEntityRecord stores or updates a global entity record.
+	UpsertEntityRecord(ctx context.Context, record EntityRecord, source string) error
+
+	// GetEntityRecord reads a global entity record by canonical name. Returns nil, nil if not found.
+	GetEntityRecord(ctx context.Context, name string) (*EntityRecord, error)
+
+	// WriteEntityEngramLink writes a vault-scoped engram→entity link.
+	WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error
+
+	// UpsertRelationshipRecord writes a vault-scoped relationship record.
+	UpsertRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error
+
 	// Close flushes all pending writes and closes the Pebble database.
 	Close() error
 }
