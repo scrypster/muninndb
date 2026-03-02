@@ -93,68 +93,144 @@ func newerVersionAvailable(current, latest string) bool {
 	return latPat > curPat
 }
 
-// runUpgrade checks for a newer version and prints instructions to upgrade.
-// If --check is passed as arg, it just checks and exits (for scripting).
+// runUpgrade is the entry point for `muninn upgrade`.
+// Flags:
+//
+//	--check   Check only; exit 1 if update available (for scripting).
+//	--yes/-y  Skip confirmation prompt (non-interactive upgrade).
 func runUpgrade(args []string) {
-	checkOnly := len(args) > 0 && args[0] == "--check"
+	checkOnly := false
+	skipConfirm := false
+	for _, a := range args {
+		if a == "--check" {
+			checkOnly = true
+		}
+		if a == "--yes" || a == "-y" {
+			skipConfirm = true
+		}
+	}
 
 	current := muninnVersion()
+
+	// Banner
+	fmt.Println()
+	fmt.Println("  ┌────────────────────────────────────────────────────┐")
+	fmt.Println("  │                                                    │")
+	fmt.Printf("  │   muninn  ·  cognitive memory database  %-9s│\n", current)
+	fmt.Println("  │                                                    │")
+	fmt.Println("  └────────────────────────────────────────────────────┘")
+	fmt.Println()
 	fmt.Printf("  Current version: %s\n", current)
-	fmt.Print("  Checking for updates... ")
+
+	fmt.Print("  Checking for updates...")
 
 	latest, err := latestVersion()
 	if err != nil {
-		fmt.Println("failed (no network?)")
+		fmt.Println(" failed")
+		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintf(os.Stderr, "  Could not reach GitHub: %v\n", err)
-		osExit(1)
+		fmt.Fprintln(os.Stderr, "  Check your connection and try again.")
+		fmt.Fprintln(os.Stderr, "")
 		return
 	}
 	if latest == "" {
-		fmt.Println("skipped (dev build)")
+		fmt.Println(" skipped")
+		fmt.Println()
+		fmt.Println("  Dev build — version checks are disabled.")
+		fmt.Println()
 		return
 	}
 
 	if !newerVersionAvailable(current, latest) {
-		fmt.Printf("up to date (%s)\n", current)
+		fmt.Printf(" done\n")
+		fmt.Println()
+		fmt.Printf("  You're up to date (%s).\n", current)
+		fmt.Println()
 		return
 	}
 
-	fmt.Printf("update available: %s\n\n", latest)
+	// Update available
+	fmt.Println("  done")
+	fmt.Println()
+	fmt.Println("  ✦  Update available")
+	fmt.Println()
+	fmt.Printf("     %s  →  %s\n", current, latest)
+	fmt.Println()
+	fmt.Printf("  Release notes → github.com/scrypster/muninndb/releases/tag/%s\n", latest)
+	fmt.Println()
+	fmt.Println("  ────────────────────────────────────────────────────")
+	fmt.Println()
 
 	if checkOnly {
-		osExit(1) // non-zero so scripts can detect "update available"
+		osExit(1)
 		return
 	}
 
-	// Print platform-appropriate upgrade instructions
-	goos := runtime.GOOS
-	switch goos {
-	case "darwin":
-		// Prefer Homebrew if it looks like they used it
-		if _, err := os.Stat("/usr/local/bin/muninn"); err == nil {
-			fmt.Println("  To upgrade:")
-			fmt.Println()
-			fmt.Println("    brew upgrade scrypster/tap/muninn")
-			fmt.Println()
-			fmt.Println("  or re-run the installer:")
-			fmt.Println()
-			fmt.Println("    curl -sSL https://muninndb.com/install.sh | sh")
-		} else {
-			fmt.Println("  To upgrade:")
-			fmt.Println()
-			fmt.Println("    curl -sSL https://muninndb.com/install.sh | sh")
-		}
-	case "linux":
-		fmt.Println("  To upgrade:")
-		fmt.Println()
-		fmt.Println("    curl -sSL https://muninndb.com/install.sh | sh")
-	default:
+	// Windows: no self-replace (OS locks running executables)
+	if runtime.GOOS == "windows" {
 		fmt.Printf("  Download %s from:\n", latest)
-		fmt.Println("    https://github.com/scrypster/muninndb/releases/latest")
+		fmt.Printf("    https://github.com/scrypster/muninndb/releases/tag/%s\n", latest)
+		fmt.Println()
+		exec.Command("cmd", "/c", "start",
+			fmt.Sprintf("https://github.com/scrypster/muninndb/releases/tag/%s", latest)).Start()
+		return
+	}
+
+	fmt.Println("  Your data is safe. Only the binary will be replaced.")
+	fmt.Println("  The daemon will restart automatically.")
+	fmt.Println()
+
+	if !skipConfirm {
+		opts := []selectOption{
+			{label: fmt.Sprintf("Yes, upgrade to %s", latest), hint: ""},
+			{label: fmt.Sprintf("No, keep %s", current), hint: ""},
+		}
+		fmt.Println("  Upgrade now?")
+		fmt.Println()
+		choice := runSingleSelect(opts, 0)
+		fmt.Println()
+		fmt.Println("  ────────────────────────────────────────────────────")
+		if choice != 0 {
+			fmt.Println()
+			fmt.Println("  Upgrade cancelled.")
+			fmt.Println()
+			return
+		}
+	}
+
+	// Homebrew: delegate to brew
+	if isHomebrewInstall() {
+		fmt.Println()
+		fmt.Println("  Detected Homebrew install. Running brew upgrade...")
+		fmt.Println()
+		cmd := exec.Command("brew", "upgrade", "scrypster/tap/muninn")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintf(os.Stderr, "  brew upgrade failed: %v\n", err)
+			osExit(1)
+		}
+		return
+	}
+
+	// Self-update (curl/manual installs)
+	if err := selfUpdate(latest); err != nil {
+		fmt.Println()
+		fmt.Fprintf(os.Stderr, "  Upgrade failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "")
+		if strings.Contains(err.Error(), "permission denied") {
+			fmt.Fprintln(os.Stderr, "  Try: sudo muninn upgrade")
+		}
+		fmt.Fprintln(os.Stderr, "")
+		osExit(1)
+		return
 	}
 
 	fmt.Println()
-	fmt.Println("  After upgrading: muninn restart")
+	fmt.Println("  ────────────────────────────────────────────────────")
+	fmt.Println()
+	fmt.Printf("  You're running %s. Enjoy the upgrade.\n", latest)
 	fmt.Println()
 }
 
