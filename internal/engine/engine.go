@@ -537,6 +537,17 @@ func (e *Engine) Hello(ctx context.Context, req *mbp.HelloRequest) (*mbp.HelloRe
 		return nil, fmt.Errorf("unsupported version: %s", req.Version)
 	}
 
+	// Register the vault name so it appears in ListVaults even before the
+	// first engram is written (idempotent, cheap).
+	vaultName := req.Vault
+	if vaultName == "" {
+		vaultName = "default"
+	}
+	wsPrefix := e.store.ResolveVaultPrefix(vaultName)
+	if err := e.store.WriteVaultName(wsPrefix, vaultName); err != nil {
+		slog.Warn("engine: Hello: failed to persist vault name", "vault", vaultName, "err", err)
+	}
+
 	return &mbp.HelloResponse{
 		ServerVersion: "1.0.0",
 		SessionID:     uuid.New().String(),
