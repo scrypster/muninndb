@@ -104,11 +104,6 @@ func (s *PebbleEpisodicStore) AppendFrame(ctx context.Context, ws [8]byte, episo
 		return nil, fmt.Errorf("marshal frame: %w", err)
 	}
 
-	frameKey := keys.EpisodeFrameKey(ws, episodeID, frame.Position)
-	if err := s.db.Set(frameKey, frameData, pebble.NoSync); err != nil {
-		return nil, fmt.Errorf("set frame key: %w", err)
-	}
-
 	// Increment episode FrameCount and update
 	ep.FrameCount++
 	epData, err := json.Marshal(ep)
@@ -116,10 +111,26 @@ func (s *PebbleEpisodicStore) AppendFrame(ctx context.Context, ws [8]byte, episo
 		return nil, fmt.Errorf("marshal updated episode: %w", err)
 	}
 
+	frameKey := keys.EpisodeFrameKey(ws, episodeID, frame.Position)
 	epKey := keys.EpisodeKey(ws, episodeID)
-	if err := s.db.Set(epKey, epData, pebble.NoSync); err != nil {
-		return nil, fmt.Errorf("update episode frame count: %w", err)
+
+	// Atomically commit frame write and FrameCount update so a crash between
+	// the two writes cannot leave FrameCount stale (which would cause duplicate
+	// frame positions on the next AppendFrame call).
+	batch := s.db.NewBatch()
+	if err := batch.Set(frameKey, frameData, nil); err != nil {
+		batch.Close()
+		return nil, fmt.Errorf("episodic: frame write: %w", err)
 	}
+	if err := batch.Set(epKey, epData, nil); err != nil {
+		batch.Close()
+		return nil, fmt.Errorf("episodic: episode update: %w", err)
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		batch.Close()
+		return nil, fmt.Errorf("episodic: commit: %w", err)
+	}
+	batch.Close()
 
 	return frame, nil
 }

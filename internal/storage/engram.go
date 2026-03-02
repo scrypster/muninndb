@@ -511,7 +511,7 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	}
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, uint64(newCount))
-	if err := ps.db.Set(keys.VaultCountKey(wsPrefix), buf, pebble.NoSync); err != nil {
+	if err := ps.db.Set(keys.VaultCountKey(wsPrefix), buf, pebble.Sync); err != nil {
 		slog.Warn("storage: failed to persist vault count", "error", err)
 	}
 
