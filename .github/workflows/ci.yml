@@ -270,7 +270,7 @@ jobs:
       - name: Run SDK assertion tests
         working-directory: sdk/python
         env:
-          MUNINNDB_URL: http://localhost:8750
+          MUNINNDB_URL: http://localhost:8476
           MUNINNDB_TOKEN: ""
         run: PYTHONPATH=. pytest tests/test_sdk_smoke.py -v --timeout=30
 

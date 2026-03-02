@@ -6,7 +6,7 @@ available. This is intentional: the purpose is to catch regressions in the SDK
 or server before they ship.
 
 Configure the server address with environment variables:
-    MUNINNDB_URL   — base URL (default: http://localhost:8750)
+    MUNINNDB_URL   — base URL (default: http://localhost:8476)
     MUNINNDB_TOKEN — bearer token (default: None / no auth)
 
 Run:
@@ -21,7 +21,7 @@ import pytest_asyncio
 from muninn.client import MuninnClient
 from muninn.errors import MuninnAuthError, MuninnConnectionError, MuninnError
 
-BASE_URL = os.environ.get("MUNINNDB_URL", "http://localhost:8750")
+BASE_URL = os.environ.get("MUNINNDB_URL", "http://localhost:8476")
 TOKEN = os.environ.get("MUNINNDB_TOKEN") or None
 VAULT = "sdk-smoke-test"
 

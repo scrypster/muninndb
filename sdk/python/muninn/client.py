@@ -894,7 +894,7 @@ class MuninnClient:
             MuninnError: If health check fails
         """
         try:
-            response = await self._request("GET", "/health")
+            response = await self._request("GET", "/api/health")
             return response.get("status") == "ok"
         except MuninnError:
             return False
