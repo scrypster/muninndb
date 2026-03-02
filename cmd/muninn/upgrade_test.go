@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -124,6 +125,9 @@ func TestVerifyBinary(t *testing.T) {
 }
 
 func TestVerifyBinary_NotExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod has no effect on Windows — execute bit check is skipped there")
+	}
 	f, err := os.CreateTemp("", "muninn-test-*")
 	if err != nil {
 		t.Fatal(err)

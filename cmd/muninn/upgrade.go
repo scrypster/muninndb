@@ -375,7 +375,8 @@ func verifyBinary(path, expectedVersion string) error {
 	if err != nil {
 		return fmt.Errorf("stat: %w", err)
 	}
-	if fi.Mode()&0111 == 0 {
+	// Windows does not use Unix execute bits — skip permission check.
+	if runtime.GOOS != "windows" && fi.Mode()&0111 == 0 {
 		return fmt.Errorf("%s is not executable", path)
 	}
 	if expectedVersion == "" {
