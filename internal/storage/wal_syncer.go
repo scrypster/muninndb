@@ -89,11 +89,13 @@ func (s *walSyncer) run() {
 		select {
 		case <-ticker.C:
 			if err := s.db.LogData(nil, pebble.Sync); err != nil {
-				slog.Warn("storage: WAL sync failed", "err", err)
+				slog.Error("storage: WAL sync failed", "component", "wal_syncer", "err", err)
 			}
 		case <-s.stop:
 			// Final sync before shutdown.
-			_ = s.db.LogData(nil, pebble.Sync)
+			if err := s.db.LogData(nil, pebble.Sync); err != nil {
+				slog.Error("storage: final WAL sync on shutdown failed", "component", "wal_syncer", "err", err)
+			}
 			return
 		}
 	}

@@ -1018,10 +1018,20 @@ func (s *Server) handleListEngrams(w http.ResponseWriter, r *http.Request) {
 
 	var minConf, maxConf float64
 	if v := q.Get("min_confidence"); v != "" {
-		minConf, _ = strconv.ParseFloat(v, 32)
+		parsed, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid min_confidence: %s", v), http.StatusBadRequest)
+			return
+		}
+		minConf = parsed
 	}
 	if v := q.Get("max_confidence"); v != "" {
-		maxConf, _ = strconv.ParseFloat(v, 32)
+		parsed, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid max_confidence: %s", v), http.StatusBadRequest)
+			return
+		}
+		maxConf = parsed
 	}
 
 	since := q.Get("since")

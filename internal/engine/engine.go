@@ -592,14 +592,18 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		// Write co-occurrence pairs for entities co-appearing in this engram.
 		for i := 0; i < len(linkedEntityNames); i++ {
 			for j := i + 1; j < len(linkedEntityNames); j++ {
-				_ = e.store.IncrementEntityCoOccurrence(ctx, ws, linkedEntityNames[i], linkedEntityNames[j])
-				_ = e.store.UpsertRelationshipRecord(ctx, ws, id, storage.RelationshipRecord{
+				if err := e.store.IncrementEntityCoOccurrence(ctx, ws, linkedEntityNames[i], linkedEntityNames[j]); err != nil {
+					slog.Warn("engine: failed to increment co-occurrence", "vault", req.Vault, "engram", id.String(), "entity_a", linkedEntityNames[i], "entity_b", linkedEntityNames[j], "err", err)
+				}
+				if err := e.store.UpsertRelationshipRecord(ctx, ws, id, storage.RelationshipRecord{
 					FromEntity: linkedEntityNames[i],
 					ToEntity:   linkedEntityNames[j],
 					RelType:    "co_occurs_with",
 					Weight:     0.3,
 					Source:     "co-occurrence",
-				})
+				}); err != nil {
+					slog.Warn("engine: failed to upsert co_occurs_with relationship", "vault", req.Vault, "engram", id.String(), "entity_a", linkedEntityNames[i], "entity_b", linkedEntityNames[j], "err", err)
+				}
 			}
 		}
 		// Mark entities as caller-provided so the retroactive processor skips extraction.
@@ -637,13 +641,15 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 			if weight <= 0 {
 				weight = 0.9
 			}
-			_ = e.store.UpsertRelationshipRecord(ctx, wsER, id, storage.RelationshipRecord{
+			if err := e.store.UpsertRelationshipRecord(ctx, wsER, id, storage.RelationshipRecord{
 				FromEntity: er.FromEntity,
 				ToEntity:   er.ToEntity,
 				RelType:    er.RelType,
 				Weight:     weight,
 				Source:     "inline",
-			})
+			}); err != nil {
+				slog.Warn("engine: failed to store entity relationship", "vault", req.Vault, "engram", id.String(), "from", er.FromEntity, "to", er.ToEntity, "rel_type", er.RelType, "err", err)
+			}
 		}
 	}
 
@@ -979,14 +985,18 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			// Write co-occurrence pairs for entities co-appearing in this engram.
 			for i := 0; i < len(linkedEntityNames); i++ {
 				for j := i + 1; j < len(linkedEntityNames); j++ {
-					_ = e.store.IncrementEntityCoOccurrence(ctx, ws, linkedEntityNames[i], linkedEntityNames[j])
-					_ = e.store.UpsertRelationshipRecord(ctx, ws, id, storage.RelationshipRecord{
+					if err := e.store.IncrementEntityCoOccurrence(ctx, ws, linkedEntityNames[i], linkedEntityNames[j]); err != nil {
+						slog.Warn("engine: batch: failed to increment co-occurrence", "vault", p.vaultName, "engram", id.String(), "entity_a", linkedEntityNames[i], "entity_b", linkedEntityNames[j], "err", err)
+					}
+					if err := e.store.UpsertRelationshipRecord(ctx, ws, id, storage.RelationshipRecord{
 						FromEntity: linkedEntityNames[i],
 						ToEntity:   linkedEntityNames[j],
 						RelType:    "co_occurs_with",
 						Weight:     0.3,
 						Source:     "co-occurrence",
-					})
+					}); err != nil {
+						slog.Warn("engine: batch: failed to upsert co_occurs_with relationship", "vault", p.vaultName, "engram", id.String(), "entity_a", linkedEntityNames[i], "entity_b", linkedEntityNames[j], "err", err)
+					}
 				}
 			}
 			// Mark entities as caller-provided so the retroactive processor skips extraction.
@@ -997,6 +1007,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		for _, rel := range p.callerRelationships {
 			targetULID, parseErr := storage.ParseULID(rel.TargetID)
 			if parseErr != nil {
+				slog.Warn("engine: batch: skipping inline relationship with invalid target_id", "target_id", rel.TargetID, "err", parseErr)
 				continue
 			}
 			relAssoc := &storage.Association{
@@ -1006,27 +1017,35 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 				Confidence: 1.0,
 				CreatedAt:  time.Now(),
 			}
-			_ = e.store.WriteAssociation(ctx, p.wsPrefix, id, targetULID, relAssoc)
+			if err := e.store.WriteAssociation(ctx, p.wsPrefix, id, targetULID, relAssoc); err != nil {
+				slog.Warn("engine: batch: failed to write inline relationship", "target_id", rel.TargetID, "err", err)
+			}
 		}
 
 		// Store caller-provided entity-to-entity relationships in the 0x21 relationship index.
 		if len(p.callerEntityRelationships) > 0 {
-			wsER, _ := e.store.FindVaultPrefix(id)
-			for _, er := range p.callerEntityRelationships {
-				if er.FromEntity == "" || er.ToEntity == "" || er.RelType == "" {
-					continue
+			wsER, ok := e.store.FindVaultPrefix(id)
+			if !ok {
+				slog.Warn("engine: batch: failed to find vault prefix for entity relationships", "vault", p.vaultName, "engram", id.String())
+			} else {
+				for _, er := range p.callerEntityRelationships {
+					if er.FromEntity == "" || er.ToEntity == "" || er.RelType == "" {
+						continue
+					}
+					weight := er.Weight
+					if weight <= 0 {
+						weight = 0.9
+					}
+					if err := e.store.UpsertRelationshipRecord(ctx, wsER, id, storage.RelationshipRecord{
+						FromEntity: er.FromEntity,
+						ToEntity:   er.ToEntity,
+						RelType:    er.RelType,
+						Weight:     weight,
+						Source:     "inline",
+					}); err != nil {
+						slog.Warn("engine: batch: failed to store entity relationship", "vault", p.vaultName, "engram", id.String(), "from", er.FromEntity, "to", er.ToEntity, "rel_type", er.RelType, "err", err)
+					}
 				}
-				weight := er.Weight
-				if weight <= 0 {
-					weight = 0.9
-				}
-				_ = e.store.UpsertRelationshipRecord(ctx, wsER, id, storage.RelationshipRecord{
-					FromEntity: er.FromEntity,
-					ToEntity:   er.ToEntity,
-					RelType:    er.RelType,
-					Weight:     weight,
-					Source:     "inline",
-				})
 			}
 		}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -85,7 +86,9 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		return
 	}
 	if opID != "" {
-		_ = s.engine.WriteIdempotency(ctx, opID, resp.ID)
+		if err := s.engine.WriteIdempotency(ctx, opID, resp.ID); err != nil {
+			slog.Warn("mcp: failed to record idempotency receipt", "op_id", opID, "engram_id", resp.ID, "err", err)
+		}
 	}
 	result := WriteResult{ID: resp.ID}
 	if len(content) > 500 {
