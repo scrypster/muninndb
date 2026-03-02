@@ -28,7 +28,7 @@ Concrete signals that speak to production readiness:
 - **Atomic Pebble batches across key-space prefixes** — multi-key operations (ordinal index, engram record, association edges) are committed in a single atomic Pebble batch; see `internal/engine/tree.go` for the tree write path.
 - **Race-tested** — 44 packages contain test files, all verified clean under the Go `-race` detector.
 - **Per-entity mutex** — `UpsertEntityRecord` in `internal/storage/entity.go` acquires a per-entity lock (see file header comment: "Per-entity lock via `getEntityLock(nameHash)`") to prevent TOCTOU races on concurrent entity upserts.
-- **Per-parent mutex** — `getChildMutex` in `internal/engine/tree.go` serializes writes under each parent node, preventing sibling-ordering races without a global tree lock.
+- **Per-parent mutex** — `getChildMutex` defined in `internal/engine/engine.go` (called from `internal/engine/tree.go`) serializes writes under each parent node, preventing sibling-ordering races without a global tree lock.
 - **Provisional patent** — U.S. Provisional Patent Application No. 63/991,402, filed February 26, 2026.
 
 ---
