@@ -16,12 +16,12 @@ type RelType uint16
 
 // Association represents a directed link between two engrams
 type Association struct {
-	TargetID      string
-	RelType       uint16
-	Weight        float32
-	Confidence    float32
-	CreatedAt     int64
-	LastActivated int32
+	TargetID      string  `msgpack:"target_id" json:"target_id"`
+	RelType       uint16  `msgpack:"rel_type" json:"rel_type"`
+	Weight        float32 `msgpack:"weight" json:"weight"`
+	Confidence    float32 `msgpack:"confidence" json:"confidence"`
+	CreatedAt     int64   `msgpack:"created_at" json:"created_at"`
+	LastActivated int32   `msgpack:"last_activated" json:"last_activated"`
 }
 
 // HelloRequest is the HELLO handshake payload.
@@ -103,8 +103,8 @@ type WriteResponse struct {
 
 // ReadRequest retrieves an engram by ID.
 type ReadRequest struct {
-	ID    string `msgpack:"id"`
-	Vault string `msgpack:"vault,omitempty"`
+	ID    string `msgpack:"id" json:"id"`
+	Vault string `msgpack:"vault,omitempty" json:"vault,omitempty"`
 }
 
 // ReadResponse returns the full engram data.
@@ -133,48 +133,48 @@ type ReadResponse struct {
 
 // ActivateRequest queries for relevant engrams.
 type ActivateRequest struct {
-	Context     []string  `msgpack:"context"`
-	Threshold   float32   `msgpack:"threshold,omitempty"`
-	MaxResults  int       `msgpack:"max_results,omitempty"`
-	MaxHops     int       `msgpack:"max_hops,omitempty"`
-	IncludeWhy  bool      `msgpack:"include_why,omitempty"`
-	Weights     *Weights  `msgpack:"weights,omitempty"`
-	Filters     []Filter  `msgpack:"filters,omitempty"`
-	Vault       string    `msgpack:"vault,omitempty"`
-	Embedding   []float32 `msgpack:"embedding,omitempty"`
-	BriefMode   string    `msgpack:"brief_mode,omitempty"`                       // "extractive"|"llm"|"auto"|"" (default: "auto")
-	DisableHops bool      `msgpack:"disable_hops,omitempty"`                     // when true, override default hop traversal to 0
-	Profile     string    `json:"profile,omitempty" msgpack:"profile,omitempty"` // traversal profile override: ""|"default"|"causal"|"confirmatory"|"adversarial"|"structural"
-	Mode        string    `json:"mode,omitempty" msgpack:"mode,omitempty"`       // recall mode preset: "semantic"|"recent"|"balanced"|"deep"
+	Context     []string  `msgpack:"context" json:"context"`
+	Threshold   float32   `msgpack:"threshold,omitempty" json:"threshold,omitempty"`
+	MaxResults  int       `msgpack:"max_results,omitempty" json:"max_results,omitempty"`
+	MaxHops     int       `msgpack:"max_hops,omitempty" json:"max_hops,omitempty"`
+	IncludeWhy  bool      `msgpack:"include_why,omitempty" json:"include_why,omitempty"`
+	Weights     *Weights  `msgpack:"weights,omitempty" json:"weights,omitempty"`
+	Filters     []Filter  `msgpack:"filters,omitempty" json:"filters,omitempty"`
+	Vault       string    `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	Embedding   []float32 `msgpack:"embedding,omitempty" json:"embedding,omitempty"`
+	BriefMode   string    `msgpack:"brief_mode,omitempty" json:"brief_mode,omitempty"`                       // "extractive"|"llm"|"auto"|"" (default: "auto")
+	DisableHops bool      `msgpack:"disable_hops,omitempty" json:"disable_hops,omitempty"`                   // when true, override default hop traversal to 0
+	Profile     string    `json:"profile,omitempty" msgpack:"profile,omitempty"`                             // traversal profile override: ""|"default"|"causal"|"confirmatory"|"adversarial"|"structural"
+	Mode        string    `json:"mode,omitempty" msgpack:"mode,omitempty"`                                   // recall mode preset: "semantic"|"recent"|"balanced"|"deep"
 }
 
 // Weights defines scoring weight distribution.
 type Weights struct {
-	SemanticSimilarity float32 `msgpack:"semantic_similarity"`
-	FullTextRelevance  float32 `msgpack:"full_text_relevance"`
-	DecayFactor        float32 `msgpack:"decay_factor"`
-	HebbianBoost       float32 `msgpack:"hebbian_boost"`
-	AccessFrequency    float32 `msgpack:"access_frequency"`
-	Recency            float32 `msgpack:"recency"`
+	SemanticSimilarity float32 `msgpack:"semantic_similarity" json:"semantic_similarity"`
+	FullTextRelevance  float32 `msgpack:"full_text_relevance" json:"full_text_relevance"`
+	DecayFactor        float32 `msgpack:"decay_factor" json:"decay_factor"`
+	HebbianBoost       float32 `msgpack:"hebbian_boost" json:"hebbian_boost"`
+	AccessFrequency    float32 `msgpack:"access_frequency" json:"access_frequency"`
+	Recency            float32 `msgpack:"recency" json:"recency"`
 	// CGDN: Cognitive-Gated Divisive Normalization (Carandini & Heeger 2012).
 	// When UseCGDN=true, replaces additive weighted sum with multiplicative
 	// cognitive gating and divisive normalization across all candidates.
-	UseCGDN   bool    `msgpack:"use_cgdn,omitempty"`
-	CGDNAlpha float32 `msgpack:"cgdn_alpha,omitempty"` // Ebbinghaus gate exponent (default 1.5)
-	CGDNBeta  float32 `msgpack:"cgdn_beta,omitempty"`  // Hebbian gate exponent (default 0.5)
-	CGDNPower float32 `msgpack:"cgdn_power,omitempty"` // divisive normalization power (default 2.0)
+	UseCGDN   bool    `msgpack:"use_cgdn,omitempty" json:"use_cgdn,omitempty"`
+	CGDNAlpha float32 `msgpack:"cgdn_alpha,omitempty" json:"cgdn_alpha,omitempty"` // Ebbinghaus gate exponent (default 1.5)
+	CGDNBeta  float32 `msgpack:"cgdn_beta,omitempty" json:"cgdn_beta,omitempty"`   // Hebbian gate exponent (default 0.5)
+	CGDNPower float32 `msgpack:"cgdn_power,omitempty" json:"cgdn_power,omitempty"` // divisive normalization power (default 2.0)
 	// ACT-R: total recall mode. Score = ContentMatch × softplus(B(M) + scale×Hebbian).
-	UseACTR      bool    `msgpack:"use_actr,omitempty"`
-	ACTRDecay    float32 `msgpack:"actr_decay,omitempty"`      // power-law exponent d (default 0.5)
-	ACTRHebScale float32 `msgpack:"actr_heb_scale,omitempty"`  // Hebbian amplifier (default 4.0)
-	DisableACTR  bool    `msgpack:"disable_actr,omitempty" json:"disable_actr,omitempty"` // when true, use legacy weighted-sum scoring instead of ACT-R
+	UseACTR      bool    `msgpack:"use_actr,omitempty" json:"use_actr,omitempty"`
+	ACTRDecay    float32 `msgpack:"actr_decay,omitempty" json:"actr_decay,omitempty"`           // power-law exponent d (default 0.5)
+	ACTRHebScale float32 `msgpack:"actr_heb_scale,omitempty" json:"actr_heb_scale,omitempty"`   // Hebbian amplifier (default 4.0)
+	DisableACTR  bool    `msgpack:"disable_actr,omitempty" json:"disable_actr,omitempty"`       // when true, use legacy weighted-sum scoring instead of ACT-R
 }
 
 // Filter restricts activation results.
 type Filter struct {
-	Field string      `msgpack:"field"`
-	Op    string      `msgpack:"op"`
-	Value interface{} `msgpack:"value"`
+	Field string      `msgpack:"field" json:"field"`
+	Op    string      `msgpack:"op" json:"op"`
+	Value interface{} `msgpack:"value" json:"value"`
 }
 
 // BriefSentence is a single sentence from the activation brief.
@@ -286,7 +286,7 @@ type ForgetResponse struct {
 
 // StatRequest queries database statistics.
 type StatRequest struct {
-	Vault string `msgpack:"vault,omitempty"`
+	Vault string `msgpack:"vault,omitempty" json:"vault,omitempty"`
 }
 
 // CoherenceResult holds coherence metrics for a single vault.
