@@ -112,7 +112,7 @@ jobs:
 
       - name: Dry run — skip npm publish
         if: github.event.inputs.dry_run == 'true'
-        run: echo "Dry run: Node package built but not published."
+        run: echo "Dry run — Node package built but not published."
 
   # ── PHP SDK → Packagist (via subtree split to muninndb-php repo) ─────────
   publish-php:
