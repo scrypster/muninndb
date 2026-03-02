@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -140,5 +141,28 @@ func TestDeleteEngramOrdinal(t *testing.T) {
 	}
 	if found {
 		t.Error("ordinal should be removed after DeleteEngramOrdinal")
+	}
+}
+
+// TestWriteOrdinal_RejectsNegative verifies that WriteOrdinal rejects
+// negative ordinal values with a clear error message.
+func TestWriteOrdinal_RejectsNegative(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("ordinal-reject-negative")
+
+	parent := NewULID()
+	child := NewULID()
+
+	// Attempt to write a negative ordinal.
+	err := store.WriteOrdinal(ctx, ws, parent, child, -1)
+	if err == nil {
+		t.Fatal("expected error when writing negative ordinal, got nil")
+	}
+
+	// Verify error message contains guidance about non-negative requirement.
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "non-negative") {
+		t.Errorf("expected error message to mention 'non-negative', got: %q", errMsg)
 	}
 }

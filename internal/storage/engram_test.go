@@ -470,3 +470,49 @@ func TestDeleteEngram_WithAssociations(t *testing.T) {
 		t.Errorf("expected 0 associations from A after delete, got %d", len(post[idA]))
 	}
 }
+
+// TestGetMetadata_ReturnNilForMissing verifies that GetMetadata returns nil
+// entries for non-existent engrams without error, allowing callers to
+// distinguish missing from present engrams in a batch call.
+func TestGetMetadata_ReturnNilForMissing(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("getmetadata-missing")
+
+	// Write two engrams.
+	id1 := writeTestEngram(t, store, ws, "exists-1", "content-1")
+	id2 := writeTestEngram(t, store, ws, "exists-2", "content-2")
+
+	// Create a non-existent ID (never written).
+	missingID := NewULID()
+
+	// Call GetMetadata with all three IDs (real, real, missing).
+	metas, err := store.GetMetadata(ctx, ws, []ULID{id1, id2, missingID})
+	if err != nil {
+		t.Fatalf("GetMetadata: %v", err)
+	}
+
+	// Verify we get exactly 3 result slots.
+	if len(metas) != 3 {
+		t.Fatalf("expected 3 metadata results, got %d", len(metas))
+	}
+
+	// Slot 0 (id1): should be non-nil.
+	if metas[0] == nil {
+		t.Error("slot 0 (id1): expected non-nil metadata")
+	} else if metas[0].ID != id1 {
+		t.Errorf("slot 0: ID mismatch: got %v, want %v", metas[0].ID, id1)
+	}
+
+	// Slot 1 (id2): should be non-nil.
+	if metas[1] == nil {
+		t.Error("slot 1 (id2): expected non-nil metadata")
+	} else if metas[1].ID != id2 {
+		t.Errorf("slot 1: ID mismatch: got %v, want %v", metas[1].ID, id2)
+	}
+
+	// Slot 2 (missingID): should be nil (no error).
+	if metas[2] != nil {
+		t.Errorf("slot 2 (missingID): expected nil, got %+v", metas[2])
+	}
+}

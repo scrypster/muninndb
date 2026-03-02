@@ -357,6 +357,25 @@ func TestHandleRememberMissingContent(t *testing.T) {
 	}
 }
 
+func TestHandleRemember_RejectsWhitespaceContent(t *testing.T) {
+	srv := newTestServer()
+	// Attempt to remember with whitespace-only content (spaces, tabs, newlines).
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_remember","arguments":{"vault":"default","content":"   "}}}`
+	w := postRPC(t, srv, body)
+	if w.Code != http.StatusOK {
+		t.Errorf("HTTP status = %d, want 200 (JSON-RPC errors return 200)", w.Code)
+	}
+	var resp JSONRPCResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Error == nil {
+		t.Fatal("expected error for whitespace-only content, got nil")
+	}
+	// Expect a parameter validation error code (-32602).
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
 func TestHandleConsolidateExceedsLimit(t *testing.T) {
 	srv := newTestServer()
 	ids := make([]string, 51)
