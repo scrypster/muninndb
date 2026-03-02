@@ -1054,6 +1054,33 @@ func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) {
 			})
 		}
 	}
+	if erAny, ok := args["entity_relationships"].([]any); ok {
+		for i, eAny := range erAny {
+			if i >= 30 {
+				break
+			}
+			eMap, ok := eAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			fromEntity, _ := eMap["from_entity"].(string)
+			toEntity, _ := eMap["to_entity"].(string)
+			relType, _ := eMap["rel_type"].(string)
+			if fromEntity == "" || toEntity == "" || relType == "" {
+				continue
+			}
+			weight := float32(0.9)
+			if w, ok := eMap["weight"].(float64); ok && w > 0 && w <= 1 {
+				weight = float32(w)
+			}
+			req.EntityRelationships = append(req.EntityRelationships, mbp.InlineEntityRelationship{
+				FromEntity: fromEntity,
+				ToEntity:   toEntity,
+				RelType:    relType,
+				Weight:     weight,
+			})
+		}
+	}
 }
 
 var relTypeMap = map[string]storage.RelType{

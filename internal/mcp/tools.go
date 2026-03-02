@@ -8,7 +8,7 @@ func allToolDefinitions() []ToolDefinition {
 	return []ToolDefinition{
 		{
 			Name:        "muninn_remember",
-			Description: "Store a new piece of information (engram) in long-term memory. IMPORTANT: Keep each memory atomic — one concept, decision, or fact per memory. If a conversation covers multiple topics, use muninn_remember_batch to store them as separate memories. Atomic memories produce sharper recall, better associations, and more accurate contradiction detection.",
+			Description: "Store a new piece of information (engram) in long-term memory. IMPORTANT: Keep each memory atomic — one concept, decision, or fact per memory. If a conversation covers multiple topics, use muninn_remember_batch to store them as separate memories. Atomic memories produce sharper recall, better associations, and more accurate contradiction detection. TIP: Provide ‘entities’ and ‘entity_relationships’ whenever you can identify them — this builds the knowledge graph immediately without requiring background enrichment.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -44,6 +44,20 @@ func allToolDefinitions() []ToolDefinition {
 							"weight":    map[string]any{"type": "number", "description": "Association weight 0.0-1.0 (default 0.9)."},
 						},
 						"required": []string{"target_id", "relation"},
+					},
+				},
+				"entity_relationships": map[string]any{
+					"type":        "array",
+					"description": "Typed semantic relationships between named entities in this memory. Populates the entity knowledge graph directly — no LLM enrichment required. Example: [{\"from_entity\":\"PostgreSQL\",\"to_entity\":\"Redis\",\"rel_type\":\"caches_with\",\"weight\":0.9}]. Common rel_types: uses, depends_on, caches_with, manages, owns, contradicts, supports, extends, implements, belongs_to.",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"from_entity": map[string]any{"type": "string", "description": "Source entity name (must match an entity in 'entities' or already known to the vault)."},
+							"to_entity":   map[string]any{"type": "string", "description": "Target entity name."},
+							"rel_type":    map[string]any{"type": "string", "description": "Relationship type (e.g. uses, depends_on, caches_with, manages, contradicts)."},
+							"weight":      map[string]any{"type": "number", "description": "Confidence 0.0-1.0 (default 0.9)."},
+						},
+						"required": []string{"from_entity", "to_entity", "rel_type"},
 					},
 				},
 				"op_id": map[string]any{
@@ -99,6 +113,20 @@ func allToolDefinitions() []ToolDefinition {
 									"required": []string{"target_id", "relation"},
 								},
 								"description": "Relationships to existing memories.",
+							},
+							"entity_relationships": map[string]any{
+								"type": "array",
+								"items": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"from_entity": map[string]any{"type": "string"},
+										"to_entity":   map[string]any{"type": "string"},
+										"rel_type":    map[string]any{"type": "string"},
+										"weight":      map[string]any{"type": "number"},
+									},
+									"required": []string{"from_entity", "to_entity", "rel_type"},
+								},
+								"description": "Typed entity-to-entity relationships for this memory.",
 							},
 						},
 							"required": []string{"content"},
