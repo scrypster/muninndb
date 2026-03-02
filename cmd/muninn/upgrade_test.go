@@ -113,3 +113,29 @@ func TestDownloadAndExtractBinary(t *testing.T) {
 		t.Errorf("content mismatch: got %q, want %q", data, content)
 	}
 }
+
+func TestVerifyBinary(t *testing.T) {
+	// Use the current test binary — it's always a real executable
+	err := verifyBinary(os.Args[0], "")
+	if err != nil {
+		t.Errorf("verifyBinary with real binary: %v", err)
+	}
+}
+
+func TestVerifyBinary_NotExecutable(t *testing.T) {
+	f, err := os.CreateTemp("", "muninn-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("not a binary")
+	f.Close()
+	defer os.Remove(f.Name())
+
+	// Make it non-executable
+	os.Chmod(f.Name(), 0600)
+
+	err = verifyBinary(f.Name(), "")
+	if err == nil {
+		t.Error("expected error for non-executable file, got nil")
+	}
+}

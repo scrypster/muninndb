@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -241,4 +242,124 @@ func downloadAndExtractBinary(url, binaryName string) (string, error) {
 		return tmp.Name(), nil
 	}
 	return "", fmt.Errorf("binary %q not found in archive", binaryName)
+}
+
+// upgradeStep prints a left-aligned step label, executes fn, then prints ✓ or ✗.
+func upgradeStep(label string, fn func() error) error {
+	fmt.Printf("  %-28s", label)
+	if err := fn(); err != nil {
+		fmt.Println("✗")
+		return err
+	}
+	fmt.Println("✓")
+	return nil
+}
+
+// verifyBinary checks that path is an executable file.
+// If expectedVersion is non-empty, it also runs "<path> version" and checks
+// that the output contains expectedVersion.
+func verifyBinary(path, expectedVersion string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+	if fi.Mode()&0111 == 0 {
+		return fmt.Errorf("%s is not executable", path)
+	}
+	if expectedVersion == "" {
+		return nil
+	}
+	out, err := exec.Command(path, "version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("version check failed: %w", err)
+	}
+	if !strings.Contains(string(out), strings.TrimPrefix(expectedVersion, "v")) {
+		return fmt.Errorf("version mismatch: expected %s in %q", expectedVersion, out)
+	}
+	return nil
+}
+
+// isDaemonRunning returns true if a muninn daemon process is currently running.
+func isDaemonRunning() bool {
+	pidPath := filepath.Join(defaultDataDir(), "muninn.pid")
+	pid, err := readPID(pidPath)
+	if err != nil {
+		return false
+	}
+	return isProcessRunning(pid)
+}
+
+// selfUpdate performs the atomic binary self-replacement for curl/manual installs.
+// Sequence: stop daemon → download → verify → chmod → rename → restart.
+func selfUpdate(latest string) error {
+	goos := runtime.GOOS
+	goarch := runtime.GOARCH
+	binaryName := "muninn"
+	if goos == "windows" {
+		binaryName = "muninn.exe"
+	}
+
+	assetURL := releaseAssetURL(latest, goos, goarch)
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot locate current binary: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fmt.Errorf("cannot resolve symlink: %w", err)
+	}
+
+	daemonWasRunning := isDaemonRunning()
+
+	fmt.Println()
+
+	var tmpPath string
+
+	if err := upgradeStep("Stopping daemon...", func() error {
+		if !daemonWasRunning {
+			return nil
+		}
+		runStop()
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := upgradeStep(fmt.Sprintf("Downloading %s...", latest), func() error {
+		var dlErr error
+		tmpPath, dlErr = downloadAndExtractBinary(assetURL, binaryName)
+		return dlErr
+	}); err != nil {
+		return err
+	}
+
+	if err := upgradeStep("Verifying binary...", func() error {
+		if err := os.Chmod(tmpPath, 0755); err != nil {
+			return err
+		}
+		return verifyBinary(tmpPath, latest)
+	}); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	if err := upgradeStep("Installing...", func() error {
+		return os.Rename(tmpPath, exe)
+	}); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	if err := upgradeStep("Restarting daemon...", func() error {
+		if !daemonWasRunning {
+			return nil
+		}
+		runStart(true)
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	return nil
 }
