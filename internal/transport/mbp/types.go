@@ -241,30 +241,30 @@ type SubscribeResponse struct {
 
 // ActivationPush is an unsolicited server push.
 type ActivationPush struct {
-	SubscriptionID string         `msgpack:"subscription_id"`
-	Activation     ActivationItem `msgpack:"activation"`
-	Trigger        string         `msgpack:"trigger"`
-	PushNumber     int            `msgpack:"push_number"`
-	At             int64          `msgpack:"at"`
+	SubscriptionID string         `msgpack:"subscription_id" json:"subscription_id"`
+	Activation     ActivationItem `msgpack:"activation" json:"activation"`
+	Trigger        string         `msgpack:"trigger" json:"trigger"`
+	PushNumber     int            `msgpack:"push_number" json:"push_number"`
+	At             int64          `msgpack:"at" json:"at"`
 }
 
 // UnsubscribeRequest cancels a subscription.
 type UnsubscribeRequest struct {
-	SubID string `msgpack:"sub_id"`
+	SubID string `msgpack:"sub_id" json:"sub_id"`
 }
 
 // UnsubscribeResponse confirms unsubscription.
 type UnsubscribeResponse struct {
-	OK bool `msgpack:"ok"`
+	OK bool `msgpack:"ok" json:"ok"`
 }
 
 // LinkRequest creates/updates an association.
 type LinkRequest struct {
-	SourceID string  `msgpack:"source_id"`
-	TargetID string  `msgpack:"target_id"`
-	RelType  uint16  `msgpack:"rel_type"`
-	Weight   float32 `msgpack:"weight,omitempty"`
-	Vault    string  `msgpack:"vault,omitempty"`
+	SourceID string  `msgpack:"source_id" json:"source_id"`
+	TargetID string  `msgpack:"target_id" json:"target_id"`
+	RelType  uint16  `msgpack:"rel_type" json:"rel_type"`
+	Weight   float32 `msgpack:"weight,omitempty" json:"weight,omitempty"`
+	Vault    string  `msgpack:"vault,omitempty" json:"vault,omitempty"`
 }
 
 // LinkResponse confirms association.
