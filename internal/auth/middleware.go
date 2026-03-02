@@ -82,6 +82,29 @@ func (s *Store) AdminAPIMiddleware(secret []byte, next http.HandlerFunc) http.Ha
 	}
 }
 
+// VaultAuthWithAdminBypass combines vault-level API key auth with an admin
+// session bypass. A valid admin session cookie (muninn_session) grants full
+// write-mode access to any vault — the Web UI admin console uses this path.
+// External API clients continue to authenticate with Bearer tokens as before.
+func (s *Store) VaultAuthWithAdminBypass(secret []byte, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Admin session bypass — authenticated Web UI gets full access to any vault.
+		cookie, err := r.Cookie("muninn_session")
+		if err == nil && validateSessionToken(cookie.Value, secret) {
+			vault := r.URL.Query().Get("vault")
+			if vault == "" {
+				vault = "default"
+			}
+			ctx := context.WithValue(r.Context(), ContextVault, vault)
+			ctx = context.WithValue(ctx, ContextMode, "write")
+			next(w, r.WithContext(ctx))
+			return
+		}
+		// Fall through to standard vault auth (Bearer token or public vault).
+		s.VaultAuthMiddleware(next)(w, r)
+	}
+}
+
 // ObserveFromContext returns true if the request is in observe mode.
 // Engine activation handlers use this to skip cognitive state mutations.
 func ObserveFromContext(ctx context.Context) bool {

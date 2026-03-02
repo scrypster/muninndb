@@ -102,6 +102,85 @@ func (a *ftsTrigAdapter) Search(ctx context.Context, ws [8]byte, query string, t
 	return out, nil
 }
 
+// TestHelloVersionCheck ensures the engine accepts the protocol version string
+// "1" (as sent by the Web UI and MBP clients) and rejects other version strings.
+// Regression test for issue #19: engine incorrectly required "1.0" instead of "1".
+func TestHelloVersionCheck(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// "1" must succeed — this is the MBP protocol version string
+	resp, err := eng.Hello(ctx, &mbp.HelloRequest{Version: "1", Vault: "test"})
+	if err != nil {
+		t.Fatalf("Hello with version=1 should succeed, got: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if resp.ServerVersion == "" {
+		t.Error("ServerVersion should not be empty")
+	}
+
+	// any other version must fail
+	_, err = eng.Hello(ctx, &mbp.HelloRequest{Version: "1.0", Vault: "test"})
+	if err == nil {
+		t.Fatal("Hello with version=1.0 should return an error")
+	}
+	_, err = eng.Hello(ctx, &mbp.HelloRequest{Version: "2", Vault: "test"})
+	if err == nil {
+		t.Fatal("Hello with version=2 should return an error")
+	}
+	_, err = eng.Hello(ctx, &mbp.HelloRequest{Version: "", Vault: "test"})
+	if err == nil {
+		t.Fatal("Hello with empty version should return an error")
+	}
+}
+
+// TestHelloRegistersVault ensures that calling Hello registers the vault name
+// so it appears in ListVaults without needing to write an engram first.
+// Regression test for issue #19 part 2: vault not appearing in dropdown after creation.
+func TestHelloRegistersVault(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "new-vault-hello-test"
+
+	// Before hello, the vault must not be listed
+	before, err := eng.ListVaults(ctx)
+	if err != nil {
+		t.Fatalf("ListVaults before hello: %v", err)
+	}
+	for _, v := range before {
+		if v == vault {
+			t.Fatalf("vault %q already exists before Hello — test setup issue", vault)
+		}
+	}
+
+	// Hello must succeed and register the vault
+	_, err = eng.Hello(ctx, &mbp.HelloRequest{Version: "1", Vault: vault})
+	if err != nil {
+		t.Fatalf("Hello failed: %v", err)
+	}
+
+	// After hello, the vault must appear in ListVaults
+	after, err := eng.ListVaults(ctx)
+	if err != nil {
+		t.Fatalf("ListVaults after hello: %v", err)
+	}
+	found := false
+	for _, v := range after {
+		if v == vault {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("vault %q not found in ListVaults after Hello; got: %v", vault, after)
+	}
+}
+
 // TestActivateReturnsResults is the primary regression test for the bug where
 // Activate always returned 0 results. It exercises the full engine pipeline:
 // Write → FTS index → Activate → BM25 scoring.

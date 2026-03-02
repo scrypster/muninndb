@@ -441,12 +441,13 @@ func (s *Server) publicBodySizeMiddleware(next http.HandlerFunc) http.HandlerFun
 
 // withMiddleware applies the full chain: observability + body size limit + vault auth.
 // All vault-scoped data routes use this.
+// Admin session cookies bypass vault locking so the Web UI can access any vault.
 // If authStore is nil (e.g. in tests), vault auth is skipped.
 func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
 	if s.authStore == nil {
 		return s.withPublicMiddleware(s.bodySizeMiddleware(handler))
 	}
-	return s.withPublicMiddleware(s.bodySizeMiddleware(s.authStore.VaultAuthMiddleware(handler)))
+	return s.withPublicMiddleware(s.bodySizeMiddleware(s.authStore.VaultAuthWithAdminBypass(s.sessionSecret, handler)))
 }
 
 // withAdminMiddleware applies observability + body size limit + admin session auth.
@@ -1079,6 +1080,27 @@ func (s *Server) handleListVaults(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return
 	}
+
+	// Merge in vaults that exist in the auth config but haven't had an engram
+	// written yet (or a Hello call pre-fix). This ensures newly created vaults
+	// appear in the dropdown immediately after creation.
+	if s.authStore != nil {
+		cfgs, cfgErr := s.authStore.ListVaultConfigs()
+		if cfgErr == nil {
+			seen := make(map[string]struct{}, len(vaults))
+			for _, v := range vaults {
+				seen[v] = struct{}{}
+			}
+			for _, cfg := range cfgs {
+				if cfg.Name != "" {
+					if _, ok := seen[cfg.Name]; !ok {
+						vaults = append(vaults, cfg.Name)
+					}
+				}
+			}
+		}
+	}
+
 	s.sendJSON(w, http.StatusOK, vaults)
 }
 
