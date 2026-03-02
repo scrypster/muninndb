@@ -7,9 +7,16 @@ import (
 	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
+
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
+
+// lastUpdateLRUSize is the maximum number of (vault, engram) pairs tracked for
+// RecordFeedback throttling. Entries are evicted in LRU order once the cache
+// is full, preventing unbounded memory growth.
+const lastUpdateLRUSize = 10_000
 
 // Store persists VaultWeights to Pebble using the 0x18 key prefix.
 type Store struct {
@@ -17,16 +24,18 @@ type Store struct {
 	mu sync.RWMutex
 	// in-memory cache: avoid Pebble round-trip on every scoring call
 	cache map[[8]byte]*VaultWeights
-	// Track last update time per engram to throttle RecordFeedback
-	lastUpdate map[[24]byte]time.Time // key: vault_prefix(8) + engram_id(16)
+	// lastUpdateLRU tracks last update time per (vault, engram) pair to throttle
+	// RecordFeedback. Bounded to lastUpdateLRUSize entries; thread-safe internally.
+	lastUpdateLRU *lru.Cache[[24]byte, time.Time]
 }
 
 // NewStore creates a new scoring weight store.
 func NewStore(db *pebble.DB) *Store {
+	lruCache, _ := lru.New[[24]byte, time.Time](lastUpdateLRUSize)
 	return &Store{
-		db:         db,
-		cache:      make(map[[8]byte]*VaultWeights),
-		lastUpdate: make(map[[24]byte]time.Time),
+		db:            db,
+		cache:         make(map[[8]byte]*VaultWeights),
+		lastUpdateLRU: lruCache,
 	}
 }
 
@@ -99,15 +108,12 @@ func (s *Store) RecordFeedback(ctx context.Context, ws [8]byte, signal FeedbackS
 	copy(trackKey[:8], ws[:])
 	copy(trackKey[8:24], signal.EngramID[:])
 
-	s.mu.Lock()
-	lastUpdate, ok := s.lastUpdate[trackKey]
 	now := signal.Timestamp
+	lastUpdate, ok := s.lastUpdateLRU.Peek(trackKey)
 	if ok && now.Sub(lastUpdate) < 30*time.Minute {
-		s.mu.Unlock()
 		return // throttle: skip this update
 	}
-	s.lastUpdate[trackKey] = now
-	s.mu.Unlock()
+	s.lastUpdateLRU.Add(trackKey, now)
 
 	// Retrieve current weights (async best-effort)
 	vw, err := s.Get(ctx, ws)
@@ -128,6 +134,6 @@ func (s *Store) RecordFeedback(ctx context.Context, ws [8]byte, signal FeedbackS
 func (s *Store) InvalidateCache() {
 	s.mu.Lock()
 	s.cache = make(map[[8]byte]*VaultWeights)
-	s.lastUpdate = make(map[[24]byte]time.Time)
 	s.mu.Unlock()
+	s.lastUpdateLRU.Purge()
 }
