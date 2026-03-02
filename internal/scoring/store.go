@@ -79,7 +79,7 @@ func (s *Store) Save(ctx context.Context, vw *VaultWeights) error {
 	}
 
 	key := keys.VaultWeightsKey(vw.VaultPrefix)
-	if err := s.db.Set(key, data, pebble.NoSync); err != nil {
+	if err := s.db.Set(key, data, pebble.Sync); err != nil {
 		return err
 	}
 

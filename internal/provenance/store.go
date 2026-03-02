@@ -3,6 +3,7 @@ package provenance
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"sync/atomic"
 
 	"github.com/cockroachdb/pebble"
@@ -40,7 +41,7 @@ func (s *Store) Append(ctx context.Context, ws [8]byte, id [16]byte, entry Prove
 	if err != nil {
 		return err
 	}
-	return s.db.Set(key, data, pebble.NoSync)
+	return s.db.Set(key, data, pebble.Sync)
 }
 
 // Get returns all provenance entries for an engram via a prefix-range scan,
@@ -62,9 +63,11 @@ func (s *Store) Get(ctx context.Context, ws [8]byte, id [16]byte) ([]ProvenanceE
 	entries := make([]ProvenanceEntry, 0)
 	for iter.First(); iter.Valid(); iter.Next() {
 		var e ProvenanceEntry
-		if err := json.Unmarshal(iter.Value(), &e); err == nil {
-			entries = append(entries, e)
+		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+			slog.Warn("provenance: skipping corrupt entry", "err", err)
+			continue
 		}
+		entries = append(entries, e)
 	}
 	if err := iter.Error(); err != nil {
 		return nil, err
