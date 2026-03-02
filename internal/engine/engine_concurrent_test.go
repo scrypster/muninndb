@@ -190,7 +190,9 @@ func TestConcurrentWriteActivate_StressSmall(t *testing.T) {
 					// load; panics are not.
 					continue
 				}
-				_ = resp
+				if resp == nil {
+					errCh <- fmt.Errorf("activator goroutine %d: Activate returned nil response with no error", activatorID)
+				}
 			}
 		}(a)
 	}
@@ -201,6 +203,22 @@ func TestConcurrentWriteActivate_StressSmall(t *testing.T) {
 	close(errCh)
 	for err := range errCh {
 		t.Errorf("concurrent stress error: %v", err)
+	}
+
+	// Phase 3 — serial sanity check: run one final Activate after all
+	// concurrent goroutines have completed to verify the engine is in a
+	// structurally valid state (not just that no panic occurred).
+	finalResp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      vault,
+		Context:    []string{"stress"},
+		MaxResults: 5,
+	})
+	if err != nil {
+		t.Errorf("serial Activate after stress run failed: %v", err)
+	} else if finalResp == nil {
+		t.Error("serial Activate after stress run returned nil response with no error")
+	} else if finalResp.TotalFound < 0 {
+		t.Errorf("serial Activate: TotalFound must be >= 0, got %d", finalResp.TotalFound)
 	}
 
 	// Assert the vault contains at least the seed engrams. Under the race

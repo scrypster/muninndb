@@ -28,6 +28,17 @@ func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}
+			// Enforce vault scoping: the key must be issued for the requested vault.
+			if key.Vault != vault {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				errMsg, _ := json.Marshal(map[string]string{
+					"error": fmt.Sprintf("api key is not authorized for vault %q", vault),
+					"code":  "VAULT_KEY_MISMATCH",
+				})
+				w.Write(errMsg)
+				return
+			}
 			ctx := context.WithValue(r.Context(), ContextVault, key.Vault)
 			ctx = context.WithValue(ctx, ContextMode, key.Mode)
 			ctx = context.WithValue(ctx, ContextAPIKey, &key)

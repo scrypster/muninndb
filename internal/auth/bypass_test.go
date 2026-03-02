@@ -205,25 +205,19 @@ func TestMiddleware_CrossVaultAccess(t *testing.T) {
 		t.Fatalf("GenerateAPIKey: %v", err)
 	}
 
-	var capturedVault string
 	handler := s.VaultAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		capturedVault, _ = r.Context().Value(ContextVault).(string)
 		w.WriteHeader(http.StatusOK)
 	})
 
 	// Key was generated for "private" but request targets "other".
-	// Middleware authenticates the key and binds context to the key's vault,
-	// so the handler sees vault="private" regardless of the query param.
+	// Vault scoping enforcement must reject this with 401.
 	req := httptest.NewRequest("GET", "/api/engrams?vault=other", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	handler(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 (key is valid), got %d", w.Code)
-	}
-	if capturedVault != "private" {
-		t.Errorf("context vault should be key's vault %q, got %q — cross-vault leak", "private", capturedVault)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("cross-vault access: key for %q accessing %q: expected 401, got %d", "private", "other", w.Code)
 	}
 }
 

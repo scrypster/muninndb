@@ -63,6 +63,10 @@ func TestReplayEnrichment_DryRunNoModification(t *testing.T) {
 	if result.Processed < 2 {
 		t.Errorf("expected at least 2 engrams to need enrichment, got %d", result.Processed)
 	}
+	// Fresh vault with unenriched engrams: none should be skipped.
+	if result.Skipped != 0 {
+		t.Errorf("expected Skipped=0 for fresh vault (no prior enrichment), got %d", result.Skipped)
+	}
 	// Verify no enrichment actually ran (no enrichPlugin was set).
 	// Checking the dry_run field is sufficient: engine would error on real run without plugin.
 }
