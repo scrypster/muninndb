@@ -1031,14 +1031,16 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 
 		if e.ftsWorker != nil {
-			e.ftsWorker.Submit(fts.IndexJob{
+			if !e.ftsWorker.Submit(fts.IndexJob{
 				WS:        p.wsPrefix,
 				ID:        [16]byte(id),
 				Concept:   p.eng.Concept,
 				CreatedBy: p.eng.CreatedBy,
 				Content:   p.eng.Content,
 				Tags:      p.eng.Tags,
-			})
+			}) {
+				slog.Warn("engine: FTS index job dropped in batch write", "id", id.String())
+			}
 		}
 
 		_, contraW, _ := e.cogWorkers()

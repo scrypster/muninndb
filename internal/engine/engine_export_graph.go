@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sort"
 
 	"github.com/scrypster/muninndb/internal/storage"
 )
@@ -72,6 +73,22 @@ func (e *Engine) ExportGraph(ctx context.Context, vault string, includeEngrams b
 		}
 		nodes = append(nodes, node)
 	}
+
+	// Sort edges deterministically: by From, then To, then RelType
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].From != edges[j].From {
+			return edges[i].From < edges[j].From
+		}
+		if edges[i].To != edges[j].To {
+			return edges[i].To < edges[j].To
+		}
+		return edges[i].RelType < edges[j].RelType
+	})
+
+	// Sort nodes deterministically: by ID
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].ID < nodes[j].ID
+	})
 
 	return &ExportGraph{
 		Nodes: nodes,
