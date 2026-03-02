@@ -22,12 +22,32 @@ func TestHandleProvenance_HappyPath(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp JSONRPCResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatal(err)
-	}
+	resp := decodeResp(t, w.Body.String())
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	content := extractInnerJSON(t, resp)
+	// The response must echo the requested engram ID.
+	if content["id"] != "01HXYZ" {
+		t.Errorf("provenance response id = %v, want 01HXYZ", content["id"])
+	}
+	// The entries array must be present and non-empty (provenanceEngine returns 1 entry).
+	entries, ok := content["entries"].([]any)
+	if !ok {
+		t.Fatalf("provenance entries should be an array, got %T", content["entries"])
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 provenance entry, got %d", len(entries))
+	}
+	entry, ok := entries[0].(map[string]any)
+	if !ok {
+		t.Fatalf("entries[0] should be an object, got %T", entries[0])
+	}
+	if entry["source"] != "human" {
+		t.Errorf("entries[0].source = %v, want human", entry["source"])
+	}
+	if entry["operation"] != "write" {
+		t.Errorf("entries[0].operation = %v, want write", entry["operation"])
 	}
 }
 

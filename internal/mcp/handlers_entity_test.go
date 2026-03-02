@@ -33,10 +33,25 @@ func TestHandleEntity_HappyPath(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp JSONRPCResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	resp := decodeResp(t, w.Body.String())
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	content := extractInnerJSON(t, resp)
+	if content["name"] != "PostgreSQL" {
+		t.Errorf("entity name = %v, want PostgreSQL", content["name"])
+	}
+	if content["type"] != "database" {
+		t.Errorf("entity type = %v, want database", content["type"])
+	}
+	if content["mention_count"] == nil {
+		t.Error("entity response should have a mention_count field")
+	}
+	if mentionCount, ok := content["mention_count"].(float64); !ok || mentionCount != 3 {
+		t.Errorf("entity mention_count = %v, want 3", content["mention_count"])
+	}
+	if content["state"] != "active" {
+		t.Errorf("entity state = %v, want active", content["state"])
 	}
 }
 
@@ -56,10 +71,30 @@ func TestHandleEntities_HappyPath(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp JSONRPCResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	resp := decodeResp(t, w.Body.String())
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	content := extractInnerJSON(t, resp)
+	if content["count"] == nil {
+		t.Error("entities response should have a count field")
+	}
+	if count, ok := content["count"].(float64); !ok || count != 1 {
+		t.Errorf("entities count = %v, want 1", content["count"])
+	}
+	entities, ok := content["entities"].([]any)
+	if !ok {
+		t.Fatalf("entities field should be an array, got %T", content["entities"])
+	}
+	if len(entities) != 1 {
+		t.Fatalf("expected 1 entity, got %d", len(entities))
+	}
+	first, ok := entities[0].(map[string]any)
+	if !ok {
+		t.Fatalf("entities[0] should be an object, got %T", entities[0])
+	}
+	if first["name"] != "PostgreSQL" {
+		t.Errorf("entities[0].name = %v, want PostgreSQL", first["name"])
 	}
 }
 
@@ -70,9 +105,16 @@ func TestHandleEntities_NoVaultDefaultsToDefault(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp JSONRPCResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	resp := decodeResp(t, w.Body.String())
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	// Verify that the response is a valid entities list (not an empty or malformed result).
+	content := extractInnerJSON(t, resp)
+	if _, ok := content["entities"]; !ok {
+		t.Error("entities response should have an 'entities' field even when vault is omitted")
+	}
+	if _, ok := content["count"]; !ok {
+		t.Error("entities response should have a 'count' field even when vault is omitted")
 	}
 }
