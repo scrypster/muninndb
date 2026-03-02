@@ -139,3 +139,35 @@ func TestVerifyBinary_NotExecutable(t *testing.T) {
 		t.Error("expected error for non-executable file, got nil")
 	}
 }
+
+func TestDownloadAndExtractBinary_Progress(t *testing.T) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	content := make([]byte, 1024) // 1KB fake binary
+	hdr := &tar.Header{Name: "muninn", Mode: 0755, Size: int64(len(content))}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	tw.Write(content)
+	tw.Close()
+	gw.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", buf.Len()))
+		w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	var lastReported int64
+	dest, err := downloadAndExtractBinaryProgress(srv.URL, "muninn", func(downloaded, total int64) {
+		lastReported = downloaded
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer os.Remove(dest)
+	if lastReported == 0 {
+		t.Error("progress callback was never called")
+	}
+}

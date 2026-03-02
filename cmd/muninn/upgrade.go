@@ -267,10 +267,26 @@ func releaseAssetURL(version, goos, goarch string) string {
 	)
 }
 
-// downloadAndExtractBinary downloads a tar.gz from url, extracts the file named
-// binaryName, writes it to a temp file next to the current executable, and
-// returns the temp file path. Caller is responsible for removing on error or after use.
-func downloadAndExtractBinary(url, binaryName string) (string, error) {
+// progressReader wraps an io.Reader and calls fn(bytesRead, total) after each read.
+type progressReader struct {
+	r     io.Reader
+	total int64
+	read  int64
+	fn    func(downloaded, total int64)
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.r.Read(p)
+	pr.read += int64(n)
+	if pr.fn != nil {
+		pr.fn(pr.read, pr.total)
+	}
+	return n, err
+}
+
+// downloadAndExtractBinaryProgress is like downloadAndExtractBinary but calls
+// progressFn(bytesDownloaded, totalBytes) during the download. progressFn may be nil.
+func downloadAndExtractBinaryProgress(url, binaryName string, progressFn func(downloaded, total int64)) (string, error) {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -281,7 +297,12 @@ func downloadAndExtractBinary(url, binaryName string) (string, error) {
 		return "", fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
 	}
 
-	gr, err := gzip.NewReader(resp.Body)
+	var body io.Reader = resp.Body
+	if progressFn != nil {
+		body = &progressReader{r: resp.Body, total: resp.ContentLength, fn: progressFn}
+	}
+
+	gr, err := gzip.NewReader(body)
 	if err != nil {
 		return "", fmt.Errorf("gzip open: %w", err)
 	}
@@ -296,11 +317,9 @@ func downloadAndExtractBinary(url, binaryName string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("tar read: %w", err)
 		}
-		// Match bare filename — archive may have a directory prefix
 		if filepath.Base(hdr.Name) != binaryName {
 			continue
 		}
-		// Write to temp file next to the current executable for same-filesystem rename
 		exe, err := os.Executable()
 		if err != nil {
 			return "", fmt.Errorf("cannot determine executable path: %w", err)
@@ -318,6 +337,13 @@ func downloadAndExtractBinary(url, binaryName string) (string, error) {
 		return tmp.Name(), nil
 	}
 	return "", fmt.Errorf("binary %q not found in archive", binaryName)
+}
+
+// downloadAndExtractBinary downloads a tar.gz from url, extracts the file named
+// binaryName, writes it to a temp file next to the current executable, and
+// returns the temp file path. Caller is responsible for removing on error or after use.
+func downloadAndExtractBinary(url, binaryName string) (string, error) {
+	return downloadAndExtractBinaryProgress(url, binaryName, nil)
 }
 
 // upgradeStep prints a left-aligned step label, executes fn, then prints ✓ or ✗.
@@ -404,7 +430,13 @@ func selfUpdate(latest string) error {
 
 	if err := upgradeStep(fmt.Sprintf("Downloading %s...", latest), func() error {
 		var dlErr error
-		tmpPath, dlErr = downloadAndExtractBinary(assetURL, binaryName)
+		label := fmt.Sprintf("Downloading %s...", latest)
+		tmpPath, dlErr = downloadAndExtractBinaryProgress(assetURL, binaryName, func(dl, total int64) {
+			if total > 0 {
+				mb := float64(dl) / 1024 / 1024
+				fmt.Printf("\r  %-28s%.1f MB", label, mb)
+			}
+		})
 		return dlErr
 	}); err != nil {
 		return err
