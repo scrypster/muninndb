@@ -2071,3 +2071,20 @@ func TestHandleVaultStats_AccurateCount(t *testing.T) {
 		t.Errorf("expected beta engram_count 7, got %d", found["beta"])
 	}
 }
+
+func TestHandleVaultStats_RequiresAdminAuth(t *testing.T) {
+	// GET /api/vaults/stats is an admin endpoint; requests without a valid
+	// session cookie must be rejected with 401.
+	store := newTestAuthStore(t)
+	secret := []byte("test-secret")
+	srv := NewServer("localhost:0", &MockEngine{}, store, secret, nil, EmbedInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/vaults/stats", nil)
+	// No session cookie — should be rejected by admin auth middleware.
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d: %s", w.Code, w.Body.String())
+	}
+}

@@ -1108,25 +1108,11 @@ func (s *Server) handleListVaults(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleVaultStats() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Get all vaults using the same merge pattern as handleListVaults.
-		vaultNames, err := s.engine.ListVaults(r.Context())
-		if err != nil {
+		if _, err := s.engine.ListVaults(r.Context()); err != nil {
 			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 			return
 		}
-		if s.authStore != nil {
-			cfgs, _ := s.authStore.ListVaultConfigs()
-			seen := make(map[string]struct{}, len(vaultNames))
-			for _, n := range vaultNames {
-				seen[n] = struct{}{}
-			}
-			for _, cfg := range cfgs {
-				if cfg.Name != "" {
-					if _, ok := seen[cfg.Name]; !ok {
-						vaultNames = append(vaultNames, cfg.Name)
-					}
-				}
-			}
-		}
+		vaultNames := s.collectVaultNames(r, s.authStore)
 
 		type vaultStat struct {
 			Name        string `json:"name"`
