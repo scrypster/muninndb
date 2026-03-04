@@ -804,6 +804,55 @@ func (s *Server) handleExportVault(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleExportVaultMarkdown exports a vault as a markdown tar.gz archive.
+// GET /api/admin/vaults/{name}/export-markdown
+// Response: application/gzip stream with Content-Disposition attachment.
+func (s *Server) handleExportVaultMarkdown(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+
+	// Match existing vault export behavior and return 404 when the vault is missing.
+	names, err := s.engine.ListVaults(r.Context())
+	if err != nil {
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, "list vaults failed")
+		return
+	}
+	found := false
+	for _, n := range names {
+		if n == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, fmt.Sprintf("vault %q not found", name))
+		return
+	}
+
+	filename := name + "-markdown.tgz"
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+
+	cw := &countingWriter{ResponseWriter: w}
+	_, err = writeVaultMarkdownExport(r.Context(), s.engine, name, cw)
+	if err != nil {
+		if cw.n == 0 {
+			slog.Error("rest: export markdown failed before streaming", "vault", name, "err", err)
+			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, "markdown export failed")
+			return
+		}
+		slog.Error("rest: export markdown failed mid-stream; aborting connection", "vault", name, "err", err, "bytes_written", cw.n)
+		panic(http.ErrAbortHandler)
+	}
+}
+
 // handleImportVault imports a .muninn archive into a new vault.
 // POST /api/admin/vaults/import?vault=NAME
 // Body: raw .muninn archive (gzip'd tar)

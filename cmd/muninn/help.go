@@ -165,6 +165,7 @@ var subcommandHelp = map[string]func(){
 				{"clone <source> <new-name>", "Clone a vault into a new vault"},
 				{"merge <source> <target>", "Merge source vault into target"},
 				{"export --vault <name>", "Export vault to .muninn archive"},
+				{"export-markdown --vault <name>", "Export vault notes as markdown .tgz"},
 				{"import <file> --vault <name>", "Import .muninn archive"},
 				{"reindex-fts <name>", "Rebuild FTS index"},
 				{"", ""},
@@ -181,6 +182,7 @@ var subcommandHelp = map[string]func(){
 				"muninn vault delete old-project --yes",
 				"muninn vault clone production staging",
 				"muninn vault export --vault mydata -o backup.muninn",
+				"muninn vault export-markdown --vault mydata -o notes.tgz",
 				"muninn vault delete prod-vault -u admin -p",
 			})
 	},

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/engine"
@@ -367,6 +368,29 @@ func TestHandleExportVault_InvalidName(t *testing.T) {
 	w := serveVault(srv, "GET", "/api/admin/vaults/INVALID_CAPS/export", nil, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleExportVaultMarkdown_Success(t *testing.T) {
+	srv := newVaultTestServer(&MockEngine{})
+	w := serveVault(srv, "GET", "/api/admin/vaults/default/export-markdown", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	cd := w.Header().Get("Content-Disposition")
+	if !strings.Contains(cd, "default-markdown.tgz") {
+		t.Fatalf("expected markdown content-disposition, got %q", cd)
+	}
+	if w.Body.Len() == 0 {
+		t.Fatal("expected non-empty markdown archive body")
+	}
+}
+
+func TestHandleExportVaultMarkdown_NotFound(t *testing.T) {
+	srv := newVaultTestServer(&MockEngine{})
+	w := serveVault(srv, "GET", "/api/admin/vaults/missing/export-markdown", nil, nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
