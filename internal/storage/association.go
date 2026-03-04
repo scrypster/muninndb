@@ -474,6 +474,12 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		oldW := keys.WeightFromComplement(wc)
 		newW := float32(float64(oldW) * decayFactor)
 
+		// Bootstrap legacy peakWeight from current weight (pre-upgrade associations have peakWeight=0).
+		// This runs before decay so oldW is the pre-decay weight — a good conservative peak estimate.
+		if peakWeight == 0 {
+			peakWeight = oldW
+		}
+
 		e := assocEntry{
 			src: src, dst: dst, oldW: oldW, newW: newW,
 			relType: relType, confidence: confidence,
@@ -481,9 +487,17 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 			peakWeight: peakWeight,
 		}
 		if newW < minWeight {
-			e.remove = true
-			removed++
-		}
+			dynamicFloor := peakWeight * 0.05
+			if dynamicFloor > 0 {
+				// Earned association: clamp to floor instead of deleting.
+				e.newW = dynamicFloor
+				// e.remove stays false
+			} else {
+				// No peak (guard; shouldn't reach here after bootstrap).
+				e.remove = true
+				removed++
+			}
+		} // else: newW >= minWeight, standard keep
 		chunk = append(chunk, e)
 
 		if len(chunk) >= assocDecayChunkSize {

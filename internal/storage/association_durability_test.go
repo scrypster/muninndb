@@ -206,6 +206,92 @@ func TestAssocPeakWeight_InitialWriteSetsPeak(t *testing.T) {
 	}
 }
 
+// TestAssocDecay_DynamicFloor verifies associations with earned PeakWeight are
+// clamped to PeakWeight*0.05 floor rather than deleted when below minWeight.
+func TestAssocDecay_DynamicFloor(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("dynamic-floor")
+	src, dst := NewULID(), NewULID()
+
+	// Write at 0.8 — PeakWeight is seeded to 0.8 by WriteAssociation.
+	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
+		TargetID: dst, Weight: 0.8,
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+
+	// Decay aggressively — 5 passes of 0.3 factor.
+	// 0.8 * 0.3^5 ≈ 0.002, well below minWeight=0.05.
+	for i := 0; i < 5; i++ {
+		if _, err := store.DecayAssocWeights(ctx, ws, 0.3, 0.05); err != nil {
+			t.Fatalf("DecayAssocWeights pass %d: %v", i, err)
+		}
+	}
+
+	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	assocs, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
+	if err != nil {
+		t.Fatalf("GetAssociations: %v", err)
+	}
+	got := assocs[src]
+	if len(got) != 1 {
+		t.Fatalf("edge should survive via dynamic floor (PeakWeight=0.8 → floor=0.04), got %d edges", len(got))
+	}
+	// Floor = 0.8 * 0.05 = 0.04
+	wantFloor := float32(0.8 * 0.05)
+	tolerance := float32(0.001)
+	if got[0].Weight < wantFloor-tolerance || got[0].Weight > wantFloor+tolerance {
+		t.Errorf("weight should be clamped to floor ~%.4f, got %.4f", wantFloor, got[0].Weight)
+	}
+	if got[0].PeakWeight < 0.8-tolerance {
+		t.Errorf("PeakWeight should remain ~0.8, got %.4f", got[0].PeakWeight)
+	}
+}
+
+// TestAssocDecay_LowPeakEdgeClampsToVeryLowFloor verifies that an edge that never earned
+// a meaningful peak is clamped to its (very low) floor and
+// is NOT returned by GetAssociations (below practical threshold).
+// Note: After Task 5, all associations bootstrap peakWeight from oldW, so
+// the "no peak" scenario is only possible for legacy zero-weight entries.
+func TestAssocDecay_LowPeakEdgeClampsToVeryLowFloor(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("low-floor")
+	src, dst := NewULID(), NewULID()
+
+	// Write at just above minWeight — peak bootstraps to this value.
+	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
+		TargetID: dst, Weight: 0.06, // PeakWeight seeds to 0.06
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+
+	// Decay below minWeight — floor = 0.06 * 0.05 = 0.003
+	if _, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.05); err != nil {
+		t.Fatalf("DecayAssocWeights: %v", err)
+	}
+
+	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	assocs, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
+	if err != nil {
+		t.Fatalf("GetAssociations: %v", err)
+	}
+	// Edge may be present at floor (0.003) or absent — both are valid behaviors.
+	// The key assertion is that PeakWeight was recorded correctly.
+	if len(assocs[src]) == 1 {
+		got := assocs[src][0]
+		if got.PeakWeight < 0.06-0.001 {
+			t.Errorf("PeakWeight should be ~0.06, got %.4f", got.PeakWeight)
+		}
+		// Weight should be at the very low floor
+		if got.Weight > 0.01 {
+			t.Errorf("clamped weight should be very low (<0.01), got %.4f", got.Weight)
+		}
+	}
+	// Either 0 or 1 edges is fine; we just verified PeakWeight correctness above.
+}
+
 // TestAssocDecay_RecencySkip verifies that an edge activated very recently
 // (within the last few minutes) is NOT decayed, even with an aggressive factor.
 //

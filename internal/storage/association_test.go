@@ -450,7 +450,8 @@ func TestUpdateAssocWeightPersistsCorrectly(t *testing.T) {
 }
 
 // TestDecayAssocWeightsReducesBelowThreshold verifies that DecayAssocWeights
-// removes associations whose weight falls below the minWeight threshold.
+// clamps associations to PeakWeight*0.05 floor (rather than deleting) when weight
+// falls below minWeight. The dynamic floor preserves earned associations.
 func TestDecayAssocWeightsReducesBelowThreshold(t *testing.T) {
 	store := newTestStore(t)
 
@@ -458,10 +459,11 @@ func TestDecayAssocWeightsReducesBelowThreshold(t *testing.T) {
 	ws := store.VaultPrefix("decay-roundtrip")
 
 	// Write three associations with different weights.
+	// PeakWeight is seeded from Weight at write time.
 	pairs := [][2]ULID{
-		{NewULID(), NewULID()}, // weight 0.8 — stays after 50% decay (0.4 > 0.3)
-		{NewULID(), NewULID()}, // weight 0.5 — stays after 50% decay (0.25 < 0.3, removed)
-		{NewULID(), NewULID()}, // weight 0.1 — removed after 50% decay (0.05 < 0.3)
+		{NewULID(), NewULID()}, // weight 0.8 — stays after 50% decay (0.4 > 0.3), no floor needed
+		{NewULID(), NewULID()}, // weight 0.5 — decays to 0.25 < 0.3, floor = 0.5*0.05 = 0.025
+		{NewULID(), NewULID()}, // weight 0.1 — decays to 0.05 < 0.3, floor = 0.1*0.05 = 0.005
 	}
 	weights := []float32{0.8, 0.5, 0.1}
 
@@ -474,16 +476,17 @@ func TestDecayAssocWeightsReducesBelowThreshold(t *testing.T) {
 		}
 	}
 
-	// Decay by 50% with minWeight=0.3 — should remove pairs[1] and pairs[2].
+	// Decay by 50% with minWeight=0.3.
+	// Dynamic floor: edges below minWeight are clamped, NOT deleted — removed=0.
 	removed, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.3)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
-	if removed != 2 {
-		t.Errorf("expected 2 removed, got %d", removed)
+	if removed != 0 {
+		t.Errorf("expected 0 removed (edges clamped to floor), got %d", removed)
 	}
 
-	// pairs[0] should survive with weight ~0.4.
+	// pairs[0] should survive with weight ~0.4 (above minWeight, no clamping).
 	w0, err := store.GetAssocWeight(ctx, ws, pairs[0][0], pairs[0][1])
 	if err != nil {
 		t.Fatalf("GetAssocWeight[0]: %v", err)
@@ -492,22 +495,24 @@ func TestDecayAssocWeightsReducesBelowThreshold(t *testing.T) {
 		t.Errorf("surviving weight: got %v, want ~0.4", w0)
 	}
 
-	// pairs[1] should be gone.
+	// pairs[1] should be clamped to floor: 0.5 * 0.05 = 0.025.
 	w1, err := store.GetAssocWeight(ctx, ws, pairs[1][0], pairs[1][1])
 	if err != nil {
 		t.Fatalf("GetAssocWeight[1]: %v", err)
 	}
-	if w1 != 0.0 {
-		t.Errorf("decayed-below-min weight should be 0, got %v", w1)
+	wantFloor1 := float32(0.5 * 0.05)
+	if w1 < wantFloor1-0.001 || w1 > wantFloor1+0.001 {
+		t.Errorf("clamped weight for pairs[1]: got %v, want ~%.4f (floor)", w1, wantFloor1)
 	}
 
-	// pairs[2] should be gone.
+	// pairs[2] should be clamped to floor: 0.1 * 0.05 = 0.005.
 	w2, err := store.GetAssocWeight(ctx, ws, pairs[2][0], pairs[2][1])
 	if err != nil {
 		t.Fatalf("GetAssocWeight[2]: %v", err)
 	}
-	if w2 != 0.0 {
-		t.Errorf("decayed-below-min weight should be 0, got %v", w2)
+	wantFloor2 := float32(0.1 * 0.05)
+	if w2 < wantFloor2-0.001 || w2 > wantFloor2+0.001 {
+		t.Errorf("clamped weight for pairs[2]: got %v, want ~%.4f (floor)", w2, wantFloor2)
 	}
 }
 

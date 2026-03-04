@@ -109,9 +109,10 @@ func TestAssocWeightIndex_UpdateWeight(t *testing.T) {
 	}
 }
 
-// TestAssocWeightIndex_DecayRemovesEntry verifies DecayAssocWeights removes
-// the 0x14 index entry when weight drops below minWeight.
-func TestAssocWeightIndex_DecayRemovesEntry(t *testing.T) {
+// TestAssocWeightIndex_DecayFloorsClampsEntry verifies DecayAssocWeights clamps
+// the association to PeakWeight*0.05 floor (rather than deleting) when weight drops
+// below minWeight. The 0x14 index entry is updated to the floor value.
+func TestAssocWeightIndex_DecayFloorsClampsEntry(t *testing.T) {
 	store, cleanup := newTestStoreHelper(t)
 	defer cleanup()
 
@@ -121,26 +122,29 @@ func TestAssocWeightIndex_DecayRemovesEntry(t *testing.T) {
 	a := NewULID()
 	b := NewULID()
 
+	// PeakWeight seeds to 0.05 at WriteAssociation time.
 	assoc := &Association{TargetID: b, Weight: 0.05}
 	if err := store.WriteAssociation(ctx, ws, a, b, assoc); err != nil {
 		t.Fatal(err)
 	}
 
-	// Decay by 50% with minWeight=0.1 — should remove the association
+	// Decay by 50% with minWeight=0.1 — newW=0.025 < 0.1, floor = 0.05*0.05 = 0.0025.
+	// Dynamic floor: edge is clamped, NOT deleted — removed count should be 0.
 	removed, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.1)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
-	if removed != 1 {
-		t.Errorf("expected 1 removed, got %d", removed)
+	if removed != 0 {
+		t.Errorf("expected 0 removed (edge clamped to floor), got %d", removed)
 	}
 
-	// Index entry should be gone
+	// Index entry should reflect floor weight (0.05 * 0.05 = 0.0025), not zero.
 	w, err := store.GetAssocWeight(ctx, ws, a, b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w != 0.0 {
-		t.Errorf("expected 0 after decay removal, got %v", w)
+	wantFloor := float32(0.05 * 0.05)
+	if w < wantFloor-0.001 || w > wantFloor+0.001 {
+		t.Errorf("expected floor weight ~%.4f after decay clamp, got %v", wantFloor, w)
 	}
 }
