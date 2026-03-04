@@ -1,4 +1,4 @@
-//go:build localassets && !(darwin && arm64) && !(darwin && amd64) && !(linux && amd64) && !(windows && amd64)
+//go:build localassets && !(darwin && arm64) && !(darwin && amd64) && !(linux && amd64) && !(linux && arm64) && !(windows && amd64)
 
 package embed
 

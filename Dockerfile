@@ -4,6 +4,8 @@ FROM golang:1.24-bookworm AS builder
 
 WORKDIR /src
 
+ARG TARGETARCH
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl make ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -15,10 +17,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 
 COPY . .
 
-# Fetch only what linux/amd64 needs (skips darwin libs to speed up the build).
+# Fetch model + platform-specific ORT native library.
+# TARGETARCH is injected by Docker Buildx (amd64 or arm64).
 # - model_int8.onnx + tokenizer.json: required by local_assets_common.go go:embed
-# - libonnxruntime_linux_amd64.so:    required by local_assets_linux_amd64.go go:embed
-RUN make fetch-model _ort-linux-amd64
+# - libonnxruntime_linux_{arch}.so:   required by local_assets_linux_{arch}.go go:embed
+RUN make fetch-model _ort-linux-${TARGETARCH}
 
 # Build web assets (Tailwind CSS via Vite)
 RUN cd web && npm ci --ignore-scripts && npm run build
