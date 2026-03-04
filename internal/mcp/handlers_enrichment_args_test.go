@@ -21,3 +21,20 @@ func TestApplyEnrichmentArgs_PlainStringEntityIsSkipped(t *testing.T) {
 		t.Errorf("expected 0 entities (plain string should be skipped), got %d", len(req.Entities))
 	}
 }
+
+func TestApplyEnrichmentArgs_PlainStringEntityMalformedCount(t *testing.T) {
+	args := map[string]any{
+		"entities": []any{
+			"PostgreSQL",                                          // malformed: plain string
+			map[string]any{"name": "Go", "type": "language"},    // valid
+		},
+	}
+	req := &mbp.WriteRequest{}
+	malformed := applyEnrichmentArgs(args, req)
+	if malformed != 1 {
+		t.Errorf("expected malformedCount=1, got %d", malformed)
+	}
+	if len(req.Entities) != 1 {
+		t.Errorf("expected 1 valid entity, got %d", len(req.Entities))
+	}
+}
