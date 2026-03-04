@@ -7,7 +7,8 @@ HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
 ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
 
 .PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets web build test bench test-integration \
-        eval-bible-setup eval-bible eval-bible-full eval-bible-quick eval-bible-export eval-bible-fast
+        eval-bible-setup eval-bible eval-bible-full eval-bible-quick eval-bible-export eval-bible-fast \
+        _ort-darwin-arm64 _ort-darwin-amd64 _ort-linux-amd64 _ort-linux-arm64 _ort-windows-amd64
 
 ## fetch-assets: download the model, tokenizer, and all platform ORT libraries.
 fetch-assets: fetch-model fetch-ort-libs
@@ -34,6 +35,7 @@ fetch-ort-libs:
 	@$(MAKE) -s _ort-darwin-arm64
 	@$(MAKE) -s _ort-darwin-amd64
 	@$(MAKE) -s _ort-linux-amd64
+	@$(MAKE) -s _ort-linux-arm64
 	@$(MAKE) -s _ort-windows-amd64
 	@echo "==> ORT native libraries ready."
 
@@ -68,6 +70,17 @@ _ort-linux-amd64:
 	@cp /tmp/onnxruntime-linux-x64-$(ORT_VERSION)/lib/libonnxruntime.so.$(ORT_VERSION) $(ASSETS_DIR)/libonnxruntime_linux_amd64.so 2>/dev/null || \
 		find /tmp -name 'libonnxruntime.so.*' | head -1 | xargs -I{} cp {} $(ASSETS_DIR)/libonnxruntime_linux_amd64.so
 	@echo "    linux/amd64: $$(du -sh $(ASSETS_DIR)/libonnxruntime_linux_amd64.so | cut -f1)"
+
+_ort-linux-arm64:
+	@echo "    Fetching linux/arm64..."
+	@curl -fL --progress-bar \
+		"$(ORT_BASE)/onnxruntime-linux-aarch64-$(ORT_VERSION).tgz" \
+		-o "/tmp/ort-linux-arm64.tgz"
+	@tar -xzf /tmp/ort-linux-arm64.tgz -C /tmp onnxruntime-linux-aarch64-$(ORT_VERSION)/lib/libonnxruntime.so.$(ORT_VERSION) 2>/dev/null || \
+		tar -xzf /tmp/ort-linux-arm64.tgz -C /tmp --strip-components=2 --wildcards '*/lib/libonnxruntime.so.*'
+	@cp /tmp/onnxruntime-linux-aarch64-$(ORT_VERSION)/lib/libonnxruntime.so.$(ORT_VERSION) $(ASSETS_DIR)/libonnxruntime_linux_arm64.so 2>/dev/null || \
+		find /tmp -name 'libonnxruntime.so.*' | head -1 | xargs -I{} cp {} $(ASSETS_DIR)/libonnxruntime_linux_arm64.so
+	@echo "    linux/arm64: $$(du -sh $(ASSETS_DIR)/libonnxruntime_linux_arm64.so | cut -f1)"
 
 _ort-windows-amd64:
 	@echo "    Fetching windows/amd64..."

@@ -28,6 +28,7 @@ jobs:
             goos: darwin
             goarch: amd64
             ort_target: _ort-darwin-amd64
+            # ORT dropped Intel Mac support after v1.23.2; this pin is intentional.
             cache_key: embed-assets-ort-1.23.2-minilm-v2-darwin-amd64
             cc: "clang -arch x86_64"
 
@@ -36,6 +37,13 @@ jobs:
             goarch: amd64
             ort_target: _ort-linux-amd64
             cache_key: embed-assets-ort-1.24.2-minilm-v2-linux-amd64
+            cc: ""
+
+          - runner: ubuntu-24.04-arm  # Native linux/arm64 runner
+            goos: linux
+            goarch: arm64
+            ort_target: _ort-linux-arm64
+            cache_key: embed-assets-ort-1.24.2-minilm-v2-linux-arm64
             cc: ""
 
     steps:
@@ -178,10 +186,12 @@ jobs:
             muninn-darwin-arm64 \
             muninn-darwin-amd64 \
             muninn-linux-amd64 \
+            muninn-linux-arm64 \
             muninn-windows-amd64.exe \
             muninn_${GITHUB_REF_NAME}_darwin_arm64.tar.gz \
             muninn_${GITHUB_REF_NAME}_darwin_amd64.tar.gz \
             muninn_${GITHUB_REF_NAME}_linux_amd64.tar.gz \
+            muninn_${GITHUB_REF_NAME}_linux_arm64.tar.gz \
             muninn_${GITHUB_REF_NAME}_windows_amd64.zip
 
   # ── Update Homebrew formula with new version + SHA256s ──────────────────
@@ -201,7 +211,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
           BASE="https://github.com/scrypster/muninndb/releases/download/${VERSION}"
-          for platform in darwin-arm64 darwin-amd64 linux-amd64; do
+          for platform in darwin-arm64 darwin-amd64 linux-amd64 linux-arm64; do
             curl -fsSL "${BASE}/muninn-${platform}" -o "muninn-${platform}"
             sha256sum "muninn-${platform}" | cut -d' ' -f1 > "sha256-${platform}.txt"
             echo "${platform}: $(cat sha256-${platform}.txt)"
@@ -213,6 +223,7 @@ jobs:
           ARM64_SHA=$(cat sha256-darwin-arm64.txt)
           AMD64_MAC_SHA=$(cat sha256-darwin-amd64.txt)
           AMD64_LIN_SHA=$(cat sha256-linux-amd64.txt)
+          ARM64_LIN_SHA=$(cat sha256-linux-arm64.txt)
 
           FORMULA="homebrew-tap/Formula/muninn.rb"
 
@@ -223,6 +234,7 @@ jobs:
           sed -i 's|sha256 "[^"]*"  # darwin-arm64|sha256 "'"${ARM64_SHA}"'"  # darwin-arm64|' "${FORMULA}"
           sed -i 's|sha256 "[^"]*"  # darwin-amd64|sha256 "'"${AMD64_MAC_SHA}"'"  # darwin-amd64|' "${FORMULA}"
           sed -i 's|sha256 "[^"]*"  # linux-amd64|sha256 "'"${AMD64_LIN_SHA}"'"  # linux-amd64|'  "${FORMULA}"
+          sed -i 's|sha256 "[^"]*"  # linux-arm64|sha256 "'"${ARM64_LIN_SHA}"'"  # linux-arm64|'  "${FORMULA}"
 
       - name: Commit and push
         run: |
