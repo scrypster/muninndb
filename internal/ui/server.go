@@ -31,6 +31,8 @@ type Server struct {
 	sessionSecret []byte
 	ring          *logging.RingBuffer
 	tlsConfig     *tls.Config // nil = plain TCP
+	corsOrigins   []string
+	ln            net.Listener
 }
 
 // sseHub manages connected SSE clients.
@@ -74,7 +76,8 @@ func (h *sseHub) broadcast(data []byte) {
 // apiHandler is mounted at /api/ so the SPA can make same-origin API calls.
 // authStore and sessionSecret are used to handle admin login/logout via cookie sessions.
 // tlsConfig, if non-nil, enables TLS on the listener.
-func NewServer(webFS fs.FS, engine rest.EngineAPI, apiHandler http.Handler, authStore *auth.Store, sessionSecret []byte, ring *logging.RingBuffer, tlsConfig *tls.Config) (*Server, error) {
+// corsOrigins is the list of allowed CORS origins for the SSE endpoint.
+func NewServer(webFS fs.FS, engine rest.EngineAPI, apiHandler http.Handler, authStore *auth.Store, sessionSecret []byte, ring *logging.RingBuffer, tlsConfig *tls.Config, corsOrigins []string) (*Server, error) {
 	staticFS, err := fs.Sub(webFS, "static")
 	if err != nil {
 		return nil, err
@@ -94,11 +97,11 @@ func NewServer(webFS fs.FS, engine rest.EngineAPI, apiHandler http.Handler, auth
 		sessionSecret: sessionSecret,
 		ring:          ring,
 		tlsConfig:     tlsConfig,
+		corsOrigins:   corsOrigins,
 	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
-	mux.HandleFunc("/events", s.handleSSE)
 	// Login/logout are handled by the UI server itself (cookie sessions).
 	// These must be registered before the /api/ catch-all so they take precedence.
 	mux.HandleFunc("POST /api/auth/login", s.handleAdminLogin)
@@ -109,11 +112,14 @@ func NewServer(webFS fs.FS, engine rest.EngineAPI, apiHandler http.Handler, auth
 	})
 	if s.authStore != nil && len(s.sessionSecret) > 0 {
 		mux.HandleFunc("GET /api/auth/check", s.authStore.AdminAPIMiddleware(s.sessionSecret, authCheckHandler))
+		mux.HandleFunc("GET /logs", s.authStore.AdminAPIMiddleware(s.sessionSecret, s.handleLogs))
+		mux.HandleFunc("/events", s.authStore.AdminAPIMiddleware(s.sessionSecret, s.handleSSE))
 	} else {
 		mux.HandleFunc("GET /api/auth/check", authCheckHandler)
+		mux.HandleFunc("GET /logs", s.handleLogs)
+		mux.HandleFunc("/events", s.handleSSE)
 	}
 	mux.Handle("/api/", apiHandler)
-	mux.HandleFunc("GET /logs", s.handleLogs)
 	mux.HandleFunc("/", s.handleSPA)
 
 	s.mux = mux
@@ -138,11 +144,12 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	if err != nil {
 		return err
 	}
+	s.ln = ln // store raw listener for Addr(); TLS wrapper (if any) shares the same addr
+	s.server.Addr = ln.Addr().String()
 	if s.tlsConfig != nil {
 		ln = tls.NewListener(ln, s.tlsConfig)
 		slog.Info("ui: TLS enabled", "addr", ln.Addr().String())
 	}
-	s.server.Addr = addr
 
 	go func() {
 		if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -153,6 +160,15 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	go s.broadcaster(ctx)
 
 	return nil
+}
+
+// Addr returns the server's resolved listening address after Start has been called.
+// Safe to call from the same goroutine as Start; no concurrent access is expected.
+func (s *Server) Addr() string {
+	if s.ln != nil {
+		return s.ln.Addr().String()
+	}
+	return s.server.Addr
 }
 
 // Stop gracefully shuts down the UI server.
@@ -190,7 +206,41 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(out)
 }
 
+// setCORSIfAllowed sets Access-Control-Allow-Origin + Vary: Origin if the
+// request origin is in s.corsOrigins. Also handles OPTIONS preflight with 204.
+// Returns true if the request was a preflight (caller should return early).
+func (s *Server) setCORSIfAllowed(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	matched := false
+	if origin != "" && len(s.corsOrigins) > 0 {
+		for _, allowed := range s.corsOrigins {
+			if origin == allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				matched = true
+				break
+			}
+		}
+		// Vary must be set unconditionally when this endpoint is CORS-aware
+		// so caches don't serve one origin's response to another origin.
+		w.Header().Set("Vary", "Origin")
+	}
+	if r.Method == http.MethodOptions {
+		if matched {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
+	if s.setCORSIfAllowed(w, r) {
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -200,7 +250,6 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
@@ -257,6 +306,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
+		Secure:   s.tlsConfig != nil,
 		MaxAge:   86400,
 	})
 	w.Header().Set("Content-Type", "application/json")

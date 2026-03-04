@@ -48,7 +48,7 @@ import (
 	webui "github.com/scrypster/muninndb/web"
 )
 
-const defaultMCPAddr = "127.0.0.1:8750"
+const defaultMCPPort = "8750"
 
 const vaultUpgradeWarning = `
 ================================================================
@@ -432,17 +432,52 @@ func validateServerFlags(addrs ...string) error {
 	return nil
 }
 
+// parseListenHost extracts the --listen-host value from args, falling back to
+// envVal and then "127.0.0.1". It is a pure function so it can be tested
+// without parsing the real flag set.
+func parseListenHost(args []string, envVal string) string {
+	host := "127.0.0.1"
+	if envVal != "" {
+		host = envVal
+	}
+	for i, arg := range args {
+		if (arg == "--listen-host" || arg == "-listen-host") && i+1 < len(args) {
+			host = args[i+1]
+			break
+		}
+		if after, ok := strings.CutPrefix(arg, "--listen-host="); ok {
+			host = after
+			break
+		}
+		if after, ok := strings.CutPrefix(arg, "-listen-host="); ok {
+			host = after
+			break
+		}
+	}
+	return host
+}
+
 func runServer() {
 	// Apply memory limits before any significant allocations.
 	applyMemoryLimits()
 
+	// Pre-scan os.Args for --listen-host so we can use it as the default host
+	// for all --*-addr flags. Explicit --*-addr flags will still override it.
+	listenHost := parseListenHost(os.Args[1:], os.Getenv("MUNINN_LISTEN_HOST"))
+
 	// Flags
 	dataDir := flag.String("data", "./muninn-data", "data directory")
-	mbpAddr := flag.String("mbp-addr", "127.0.0.1:8474", "MBP TCP listen address")
-	restAddr := flag.String("rest-addr", "127.0.0.1:8475", "REST HTTP listen address")
-	mcpAddr := flag.String("mcp-addr", defaultMCPAddr, "MCP JSON-RPC listen address")
-	grpcAddr := flag.String("grpc-addr", "127.0.0.1:8477", "gRPC listen address")
+	_ = flag.String("listen-host", listenHost, `host to bind all servers to (default "127.0.0.1"; use 0.0.0.0 for LAN/remote access)`)
+	mbpAddr := flag.String("mbp-addr", listenHost+":8474", "MBP TCP listen address")
+	restAddr := flag.String("rest-addr", listenHost+":8475", "REST HTTP listen address")
+	mcpAddr := flag.String("mcp-addr", listenHost+":"+defaultMCPPort, "MCP JSON-RPC listen address")
+	grpcAddr := flag.String("grpc-addr", listenHost+":8477", "gRPC listen address")
 	metricsAddr := flag.String("metrics-addr", "", "Prometheus /metrics listen address (empty = disabled)")
+	uiAddrDefault := listenHost + ":8476"
+	if v := os.Getenv("MUNINN_UI_ADDR"); v != "" {
+		uiAddrDefault = v
+	}
+	uiAddr := flag.String("ui-addr", uiAddrDefault, "Web UI HTTP listen address")
 	mcpToken := flag.String("mcp-token", "", "Bearer token for MCP auth (empty = no auth)")
 	dev := flag.Bool("dev", false, "serve web assets from ./web directory (development mode)")
 	backupInterval := flag.String("backup-interval", "", "Automated backup interval (e.g. 6h, 30m); empty = disabled")
@@ -450,6 +485,8 @@ func runServer() {
 	backupRetain := flag.Int("backup-retain", 5, "Number of automated backups to keep")
 	tlsCert := flag.String("tls-cert", "", "Path to TLS certificate file (PEM)")
 	tlsKey  := flag.String("tls-key",  "", "Path to TLS private key file (PEM)")
+	corsOriginsDefault := os.Getenv("MUNINN_CORS_ORIGINS")
+	corsOriginsFlag := flag.String("cors-origins", corsOriginsDefault, "Comma-separated allowed CORS origins for browser clients (e.g. http://myapp.local:3000); overrides MUNINN_CORS_ORIGINS")
 	var logLevelStr string
 	flag.StringVar(&logLevelStr, "log-level", "info", "Log level: debug, info, warn, error")
 	flag.Usage = func() {
@@ -466,6 +503,7 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_LOCAL_EMBED           Set to \"0\" to disable bundled ONNX embedder\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_ENRICH_URL            LLM enrichment endpoint URL (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_ENRICH_API_KEY        API key for enrichment (or MUNINN_ANTHROPIC_KEY)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_LISTEN_HOST           Host to bind all servers to (e.g. 0.0.0.0 for LAN access)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_CORS_ORIGINS          Comma-separated CORS allowed origins\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_MEM_LIMIT_GB          Memory limit in GB (default: 4)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_GC_PERCENT            Go GC target percentage (default: 200)\n")
@@ -530,13 +568,17 @@ func runServer() {
 
 	// Validate address flags early so misconfigurations are caught before any
 	// resources are allocated. metricsAddr is optional (empty = disabled).
-	addrsToValidate := []string{*mbpAddr, *restAddr, *mcpAddr, *grpcAddr}
+	addrsToValidate := []string{*mbpAddr, *restAddr, *mcpAddr, *grpcAddr, *uiAddr}
 	if *metricsAddr != "" {
 		addrsToValidate = append(addrsToValidate, *metricsAddr)
 	}
 	if err := validateServerFlags(addrsToValidate...); err != nil {
 		slog.Error("invalid server address flag", "err", err)
 		os.Exit(1)
+	}
+
+	if listenHost == "0.0.0.0" {
+		slog.Warn("all services bound to 0.0.0.0 — ensure firewall rules are in place")
 	}
 
 	var logLevel slog.Level
@@ -806,7 +848,7 @@ func runServer() {
 
 	// Build transport servers
 	mbpServer := mbp.NewServer(*mbpAddr, eng, authStore, clientTLS)
-	corsOrigins := parseCORSOrigins(os.Getenv("MUNINN_CORS_ORIGINS"))
+	corsOrigins := parseCORSOrigins(*corsOriginsFlag)
 	restServer := rest.NewServer(*restAddr, restWrapper, authStore, sessionSecret, corsOrigins, embedInfo, pluginRegistry, *dataDir, clientTLS, rest.MCPInfo{
 		Addr:     *mcpAddr,
 		HasToken: *mcpToken != "",
@@ -967,7 +1009,7 @@ func runServer() {
 	}()
 
 	// Start UI server
-	uiSrv, err := ui.NewServer(webFS, restWrapper, restServer.Handler(), authStore, sessionSecret, ring, clientTLS)
+	uiSrv, err := ui.NewServer(webFS, restWrapper, restServer.Handler(), authStore, sessionSecret, ring, clientTLS, corsOrigins)
 	if err != nil {
 		slog.Error("create ui server", "err", err)
 		os.Exit(1)
@@ -983,11 +1025,11 @@ func runServer() {
 		})
 		uiSrv.Broadcast(data)
 	})
-	if err := uiSrv.Start(ctx, "127.0.0.1:8476"); err != nil {
+	if err := uiSrv.Start(ctx, *uiAddr); err != nil {
 		slog.Error("start ui server", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("UI server listening", "addr", "127.0.0.1:8476")
+	slog.Info("UI server listening", "addr", *uiAddr)
 
 	slog.Info("vault fail-closed: unconfigured vaults require an API key; use muninn api-key create to grant access")
 

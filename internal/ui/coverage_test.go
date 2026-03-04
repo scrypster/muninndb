@@ -36,7 +36,7 @@ func TestHandleAdminLogin_Success(t *testing.T) {
 	sessionSecret := []byte("test-session-secret-32-bytes-ok!")
 
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestHandleAdminLogin_InvalidCredentials(t *testing.T) {
 	sessionSecret := []byte("test-session-secret-32-bytes-ok!")
 
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestHandleAdminLogin_InvalidJSON(t *testing.T) {
 	sessionSecret := []byte("test-session-secret-32-bytes-ok!")
 
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestHandleAdminLogin_InvalidJSON(t *testing.T) {
 
 func TestHandleAdminLogout(t *testing.T) {
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestHandleAdminLogout(t *testing.T) {
 
 func TestBroadcast_SendsToClients(t *testing.T) {
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestBroadcast_SendsToClients(t *testing.T) {
 func TestBroadcastStats_ViaStatsMockEngine(t *testing.T) {
 	eng := &statsMockEngine{engramCount: 42}
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestBroadcastStats_ViaStatsMockEngine(t *testing.T) {
 
 func TestHandleLogs_NilRingBuffer(t *testing.T) {
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, nil, nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestHandleLogs_NilRingBuffer(t *testing.T) {
 func TestHandleLogs_EmptyRingBuffer(t *testing.T) {
 	rb := logging.NewRingBuffer(10, nil)
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, rb, nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, rb, nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestHandleLogs_EmptyRingBuffer(t *testing.T) {
 
 func TestAuthCheck_NoAuth(t *testing.T) {
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestNewServer_BadStaticFS(t *testing.T) {
 func TestSSEBroadcast_Integration(t *testing.T) {
 	eng := &statsMockEngine{engramCount: 10}
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestSSEBroadcast_Integration(t *testing.T) {
 
 func TestHandleAdminLogin_NoAuthStore(t *testing.T) {
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestAuthCheck_WithAuthStore(t *testing.T) {
 	sessionSecret := []byte("test-session-secret-32-bytes-ok!")
 
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestHandleAdminLogout_ClearsSessionCookie(t *testing.T) {
 	sessionSecret := []byte("test-session-secret-32-bytes-ok!")
 
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), as, sessionSecret, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestHandleAdminLogout_ClearsSessionCookie(t *testing.T) {
 func TestBroadcastStats_StatsUpdate(t *testing.T) {
 	eng := &statsMockEngine{engramCount: 42}
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestBroadcast_MemoryAdded(t *testing.T) {
 		},
 	}
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestAPIProxy(t *testing.T) {
 	})
 
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, apiHandler, nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, apiHandler, nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestAPIProxy(t *testing.T) {
 
 func TestStaticHandler_NotFound(t *testing.T) {
 	webFS := makeMockFS()
-	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, &mockEngine{}, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

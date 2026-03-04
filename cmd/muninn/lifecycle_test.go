@@ -6,6 +6,102 @@ import (
 	"testing"
 )
 
+func TestBuildDaemonArgs(t *testing.T) {
+	cases := []struct {
+		name           string
+		dataDir        string
+		dev            bool
+		mcpToken       string
+		osArgs         []string
+		listenHostEnv  string
+		corsOriginsEnv string
+		wantContains   []string
+		wantAbsent     []string
+	}{
+		{
+			name:    "default listen-host not forwarded",
+			dataDir: "/tmp/data",
+			osArgs:  []string{},
+			wantAbsent: []string{"--listen-host"},
+		},
+		{
+			name:    "non-default listen-host forwarded",
+			dataDir: "/tmp/data",
+			osArgs:  []string{"--listen-host", "0.0.0.0"},
+			wantContains: []string{"--listen-host", "0.0.0.0"},
+		},
+		{
+			name:    "cors-origins flag in osArgs forwarded",
+			dataDir: "/tmp/data",
+			osArgs:  []string{"--cors-origins", "http://flag.local"},
+			wantContains: []string{"--cors-origins", "http://flag.local"},
+		},
+		{
+			name:           "cors-origins from env when no flag",
+			dataDir:        "/tmp/data",
+			osArgs:         []string{},
+			corsOriginsEnv: "http://env.local",
+			wantContains:   []string{"--cors-origins", "http://env.local"},
+		},
+		{
+			name:           "flag wins over env for cors-origins",
+			dataDir:        "/tmp/data",
+			osArgs:         []string{"--cors-origins", "http://flag.local"},
+			corsOriginsEnv: "http://env.local",
+			wantContains:   []string{"--cors-origins", "http://flag.local"},
+			wantAbsent:     []string{"http://env.local"},
+		},
+		{
+			name:         "neither cors flag nor env not forwarded",
+			dataDir:      "/tmp/data",
+			osArgs:       []string{},
+			wantAbsent:   []string{"--cors-origins"},
+		},
+		{
+			name:         "dev true forwarded",
+			dataDir:      "/tmp/data",
+			dev:          true,
+			osArgs:       []string{},
+			wantContains: []string{"--dev"},
+		},
+		{
+			name:         "mcpToken set forwarded",
+			dataDir:      "/tmp/data",
+			mcpToken:     "tok123",
+			osArgs:       []string{},
+			wantContains: []string{"--mcp-token", "tok123"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildDaemonArgs(tc.dataDir, tc.dev, tc.mcpToken, tc.osArgs, tc.listenHostEnv, tc.corsOriginsEnv)
+
+			for _, want := range tc.wantContains {
+				found := false
+				for _, arg := range got {
+					if arg == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected %q in args %v", want, got)
+				}
+			}
+
+			for _, absent := range tc.wantAbsent {
+				for _, arg := range got {
+					if arg == absent {
+						t.Errorf("expected %q to be absent from args %v", absent, got)
+						break
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestIsProcessRunningCurrentProcess checks if the current process is identified as running.
 func TestIsProcessRunningCurrentProcess(t *testing.T) {
 	pid := os.Getpid()
