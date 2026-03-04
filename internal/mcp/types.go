@@ -65,6 +65,10 @@ type Memory struct {
 	Tags        []string  `json:"tags,omitempty"`
 	State       string    `json:"state"`
 	CreatedAt   time.Time `json:"created_at"`
+	LastAccess  time.Time `json:"last_access"`
+	AccessCount uint32    `json:"access_count,omitempty"`
+	Relevance   float32   `json:"relevance,omitempty"`
+	SourceType  string    `json:"source_type,omitempty"`
 }
 
 type ContradictionPair struct {

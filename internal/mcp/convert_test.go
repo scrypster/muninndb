@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -101,6 +102,87 @@ func TestConvertUsesContentWhenNoSummary(t *testing.T) {
 	m := activationToMemory(item)
 	if m.Content != "the content" {
 		t.Errorf("content = %q, want %q", m.Content, "the content")
+	}
+}
+
+// TestActivationToMemoryFreshnessFull verifies that all four freshness fields
+// from ActivationItem are mapped correctly onto the resulting Memory.
+func TestActivationToMemoryFreshnessFull(t *testing.T) {
+	const lastAccessNs = int64(1700000000_000000000) // a fixed nanosecond timestamp
+	item := &mbp.ActivationItem{
+		ID:          "fresh-id",
+		Concept:     "freshness concept",
+		Content:     "freshness content",
+		Score:       0.75,
+		LastAccess:  lastAccessNs,
+		AccessCount: 42,
+		Relevance:   0.88,
+		SourceType:  "human",
+	}
+	m := activationToMemory(item)
+
+	if m.AccessCount != 42 {
+		t.Errorf("AccessCount = %d, want 42", m.AccessCount)
+	}
+	if m.Relevance != 0.88 {
+		t.Errorf("Relevance = %v, want 0.88", m.Relevance)
+	}
+	if m.SourceType != "human" {
+		t.Errorf("SourceType = %q, want %q", m.SourceType, "human")
+	}
+	wantTime := time.Unix(0, lastAccessNs).UTC()
+	if !m.LastAccess.Equal(wantTime) {
+		t.Errorf("LastAccess = %v, want %v", m.LastAccess, wantTime)
+	}
+}
+
+// TestActivationToMemoryLastAccessConversion verifies the int64 nanosecond →
+// UTC time.Time conversion is correct for a known timestamp.
+func TestActivationToMemoryLastAccessConversion(t *testing.T) {
+	// 2024-01-15 12:00:00 UTC expressed in nanoseconds
+	wantTime := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+	ns := wantTime.UnixNano()
+
+	item := &mbp.ActivationItem{
+		ID:         "ts-test",
+		LastAccess: ns,
+	}
+	m := activationToMemory(item)
+
+	if !m.LastAccess.Equal(wantTime) {
+		t.Errorf("LastAccess = %v, want %v", m.LastAccess, wantTime)
+	}
+	if m.LastAccess.Location() != time.UTC {
+		t.Errorf("LastAccess location = %v, want UTC", m.LastAccess.Location())
+	}
+}
+
+// TestActivationToMemoryLastAccessZero verifies that a zero LastAccess value
+// produces time.Unix(0,0).UTC() (the zero Unix epoch in UTC).
+func TestActivationToMemoryLastAccessZero(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:         "zero-ts",
+		LastAccess: 0,
+	}
+	m := activationToMemory(item)
+
+	want := time.Unix(0, 0).UTC()
+	if !m.LastAccess.Equal(want) {
+		t.Errorf("LastAccess with 0 input = %v, want %v", m.LastAccess, want)
+	}
+}
+
+// TestActivationToMemoryEmptySourceType verifies that an empty SourceType on
+// the ActivationItem results in an empty SourceType on the Memory.
+func TestActivationToMemoryEmptySourceType(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:         "no-source",
+		SourceType: "",
+	}
+	m := activationToMemory(item)
+
+	if m.SourceType != "" {
+		t.Errorf("SourceType = %q, want empty string", m.SourceType)
 	}
 }
 

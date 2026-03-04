@@ -24,6 +24,10 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		VectorScore: float64(item.ScoreComponents.SemanticSimilarity),
 		Confidence:  item.Confidence,
 		Why:         item.Why,
+		LastAccess:  time.Unix(0, item.LastAccess).UTC(),
+		AccessCount: item.AccessCount,
+		Relevance:   item.Relevance,
+		SourceType:  item.SourceType,
 	}
 }
 
@@ -39,8 +43,11 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		Content:    content,
 		Confidence: r.Confidence,
 		Tags:       r.Tags,
-		State:      fmt.Sprintf("%d", r.State),
-		CreatedAt:  time.Unix(0, r.CreatedAt), // r.CreatedAt is nanoseconds since epoch
+		State:       fmt.Sprintf("%d", r.State),
+		CreatedAt:   time.Unix(0, r.CreatedAt), // r.CreatedAt is nanoseconds since epoch
+		LastAccess:  time.Unix(0, int64(r.LastAccess)).UTC(),
+		AccessCount: r.AccessCount,
+		Relevance:   r.Relevance,
 	}
 }
 

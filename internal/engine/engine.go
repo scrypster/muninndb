@@ -1498,13 +1498,16 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	items := make([]mbp.ActivationItem, len(result.Activations))
 	for i, scored := range result.Activations {
 		items[i] = mbp.ActivationItem{
-			ID:         scored.Engram.ID.String(),
-			Concept:    scored.Engram.Concept,
-			Content:    scored.Engram.Content,
-			Score:      float32(scored.Score),
-			Confidence: scored.Engram.Confidence,
-			Why:        scored.Why,
-			Dormant:    scored.Dormant,
+			ID:          scored.Engram.ID.String(),
+			Concept:     scored.Engram.Concept,
+			Content:     scored.Engram.Content,
+			Score:       float32(scored.Score),
+			Confidence:  scored.Engram.Confidence,
+			Why:         scored.Why,
+			Dormant:     scored.Dormant,
+			LastAccess:  scored.Engram.LastAccess.UnixNano(),
+			AccessCount: scored.Engram.AccessCount,
+			Relevance:   scored.Engram.Relevance,
 		}
 
 		items[i].ScoreComponents = mbp.ScoreComponents{
@@ -1527,6 +1530,27 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			}
 		}
 	}
+
+	// Parallel provenance fetch — each goroutine owns its index, no mutex needed.
+	var wg sync.WaitGroup
+	for i, scored := range result.Activations {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		wg.Add(1)
+		go func(idx int, id [16]byte) {
+			defer wg.Done()
+			entries, err := e.prov.Get(ctx, wsPrefix, id)
+			if err != nil {
+				slog.Warn("activate: provenance lookup failed", "id", id, "err", err)
+				return
+			}
+			if len(entries) > 0 {
+				items[idx].SourceType = sourceTypeString(entries[len(entries)-1].Source)
+			}
+		}(i, [16]byte(scored.Engram.ID))
+	}
+	wg.Wait()
 
 	// Submit co-activations to Hebbian worker (skipped in observe mode or when disabled by Plasticity).
 	// On Lobe nodes (hebbianWorker == nil) collect refs for forwarding to Cortex instead.
@@ -2546,6 +2570,29 @@ func (e *Engine) runNoveltyWorker() {
 				e.coherence.GetOrCreate(job.vaultName).RecordLinkCreated(true, true)
 			}
 		}
+	}
+}
+
+// sourceTypeString converts a provenance.SourceType to its string representation
+// for inclusion in activation responses.
+func sourceTypeString(st provenance.SourceType) string {
+	switch st {
+	case provenance.SourceHuman:
+		return "human"
+	case provenance.SourceLLM:
+		return "llm"
+	case provenance.SourceDocument:
+		return "document"
+	case provenance.SourceInferred:
+		return "inferred"
+	case provenance.SourceExternal:
+		return "external"
+	case provenance.SourceWorkingMem:
+		return "working_memory"
+	case provenance.SourceSynthetic:
+		return "synthetic"
+	default:
+		return ""
 	}
 }
 

@@ -483,7 +483,7 @@ func provenanceSourceString(s provenance.SourceType) string {
 	case provenance.SourceExternal:
 		return "external"
 	case provenance.SourceWorkingMem:
-		return "working_mem"
+		return "working_memory"
 	case provenance.SourceSynthetic:
 		return "synthetic"
 	default:

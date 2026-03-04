@@ -776,6 +776,103 @@ func TestHandleRecallProfileOmittedIsEmpty(t *testing.T) {
 	}
 }
 
+// ── muninn_recall freshness fields ───────────────────────────────────────────
+
+// recallFreshnessEngine returns an ActivateResponse with a single ActivationItem
+// that has all four freshness fields populated.
+type recallFreshnessEngine struct{ fakeEngine }
+
+func (e *recallFreshnessEngine) Activate(_ context.Context, req *mbp.ActivateRequest) (*mbp.ActivateResponse, error) {
+	return &mbp.ActivateResponse{
+		Activations: []mbp.ActivationItem{
+			{
+				ID:          "freshness-001",
+				Concept:     "freshness concept",
+				Content:     "freshness content",
+				Score:       0.9,
+				LastAccess:  1700000000_000000000,
+				AccessCount: 7,
+				Relevance:   0.85,
+				SourceType:  "human",
+			},
+		},
+	}, nil
+}
+
+// TestHandleRecallFreshnessFieldsPresent verifies that when the engine returns
+// an ActivationItem with all four freshness fields, the JSON response contains
+// last_access, access_count, relevance, and source_type.
+func TestHandleRecallFreshnessFieldsPresent(t *testing.T) {
+	srv := newTestServerWith(&recallFreshnessEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["test"]}}}`
+	w := postRPC(t, srv, body)
+	outer := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	memories, ok := outer["memories"].([]any)
+	if !ok || len(memories) == 0 {
+		t.Fatalf("expected non-empty memories array, got %T %v", outer["memories"], outer["memories"])
+	}
+	mem, ok := memories[0].(map[string]any)
+	if !ok {
+		t.Fatalf("memories[0] should be an object, got %T", memories[0])
+	}
+
+	for _, field := range []string{"last_access", "access_count", "relevance", "source_type"} {
+		if _, exists := mem[field]; !exists {
+			t.Errorf("memories[0] missing field %q", field)
+		}
+	}
+	if mem["source_type"] != "human" {
+		t.Errorf("source_type = %v, want %q", mem["source_type"], "human")
+	}
+	if v, ok := mem["access_count"].(float64); !ok || v != 7 {
+		t.Errorf("access_count = %v, want 7", mem["access_count"])
+	}
+}
+
+// recallNoSourceEngine returns an ActivationItem with SourceType deliberately
+// left empty to exercise the omitempty behaviour.
+type recallNoSourceEngine struct{ fakeEngine }
+
+func (e *recallNoSourceEngine) Activate(_ context.Context, req *mbp.ActivateRequest) (*mbp.ActivateResponse, error) {
+	return &mbp.ActivateResponse{
+		Activations: []mbp.ActivationItem{
+			{
+				ID:          "no-source-001",
+				Concept:     "no source concept",
+				Content:     "no source content",
+				Score:       0.7,
+				AccessCount: 3,
+				Relevance:   0.6,
+				// SourceType deliberately omitted
+			},
+		},
+	}, nil
+}
+
+// TestHandleRecallEmptySourceTypeOmitted verifies that when SourceType is empty
+// on the ActivationItem, the source_type field is absent from the JSON response
+// (due to the omitempty tag on Memory.SourceType).
+func TestHandleRecallEmptySourceTypeOmitted(t *testing.T) {
+	srv := newTestServerWith(&recallNoSourceEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["test"]}}}`
+	w := postRPC(t, srv, body)
+	outer := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	memories, ok := outer["memories"].([]any)
+	if !ok || len(memories) == 0 {
+		t.Fatalf("expected non-empty memories array, got %T %v", outer["memories"], outer["memories"])
+	}
+	mem, ok := memories[0].(map[string]any)
+	if !ok {
+		t.Fatalf("memories[0] should be an object, got %T", memories[0])
+	}
+
+	if _, exists := mem["source_type"]; exists {
+		t.Errorf("source_type should be absent when SourceType is empty (omitempty), but it was present with value %v", mem["source_type"])
+	}
+}
+
 // ── muninn_read ──────────────────────────────────────────────────────────────
 
 // readWithDataEngine returns a populated ReadResponse so shape assertions are meaningful.

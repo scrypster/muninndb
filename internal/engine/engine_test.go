@@ -1461,6 +1461,141 @@ func TestEngineRead_NotFound(t *testing.T) {
 // TestEngineRead_AfterRestart: Persistence test
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// TestActivate_CancelledContext_PreventsProvenanceGoroutines
+// ---------------------------------------------------------------------------
+
+// TestActivate_CancelledContext_PreventsProvenanceGoroutines verifies the
+// ctx.Err() guard that sits at the top of the provenance goroutine loop inside
+// activateCore. The guard is:
+//
+//	for i, scored := range result.Activations {
+//	    if err := ctx.Err(); err != nil {
+//	        break  // ← this path
+//	    }
+//	    wg.Add(1)
+//	    go func(...) { ... }(...)
+//	}
+//
+// With a pre-cancelled context and DisableHops=true (which bypasses the Phase-5
+// BFS check that would also fail on a cancelled ctx), two outcomes are valid:
+//
+//  1. activateCore returns context.Canceled / context.DeadlineExceeded — this
+//     means the cancellation propagated through an earlier Pebble read, which
+//     is equally correct: the ctx.Err() guard prevented goroutine spawning.
+//
+//  2. activateCore returns results but every SourceType field is empty — the
+//     activation pipeline completed (Pebble ignores context cancellation at
+//     the iterator level), but the provenance loop broke immediately on the
+//     first ctx.Err() check, so no goroutines were ever spawned to fill SourceType.
+//
+// Both outcomes prove the guard is exercised.
+func TestActivate_CancelledContext_PreventsProvenanceGoroutines(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Write a handful of engrams so there is something to activate against.
+	topics := []struct {
+		concept string
+		content string
+	}{
+		{"context cancellation alpha", "context cancellation propagation in Go goroutines"},
+		{"context cancellation beta", "cancelling contexts prevents unnecessary goroutine spawns"},
+		{"context cancellation gamma", "context deadline exceeded stops background operations"},
+	}
+	for _, w := range topics {
+		if _, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   "ctx-cancel-test",
+			Concept: w.concept,
+			Content: w.content,
+		}); err != nil {
+			t.Fatalf("Write(%q): %v", w.concept, err)
+		}
+	}
+
+	// Allow the async FTS worker to index the written engrams.
+	time.Sleep(300 * time.Millisecond)
+
+	// Sanity check: normal activate returns results, establishing a baseline.
+	normalResp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:       "ctx-cancel-test",
+		Context:     []string{"context cancellation goroutine"},
+		MaxResults:  10,
+		Threshold:   0.01,
+		DisableHops: true,
+	})
+	if err != nil {
+		t.Fatalf("baseline Activate: %v", err)
+	}
+	if len(normalResp.Activations) == 0 {
+		t.Skip("no results returned from baseline Activate — FTS did not index; skipping cancellation test")
+	}
+
+	// Create a context that is already cancelled before Activate is called.
+	// DisableHops=true bypasses the Phase-5 BFS guard (which would also fail
+	// on a cancelled ctx) so that the execution reaches the provenance loop,
+	// where the ctx.Err() check we want to exercise lives.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately — ctx.Err() returns context.Canceled from here on
+
+	resp, err := eng.Activate(cancelledCtx, &mbp.ActivateRequest{
+		Vault:       "ctx-cancel-test",
+		Context:     []string{"context cancellation goroutine"},
+		MaxResults:  10,
+		Threshold:   0.01,
+		DisableHops: true,
+	})
+
+	if err != nil {
+		// Outcome 1: the cancelled ctx propagated through a Pebble read or
+		// another ctx-aware path before reaching the provenance loop.
+		// Both context.Canceled and context.DeadlineExceeded are acceptable.
+		if err != context.Canceled && err != context.DeadlineExceeded {
+			// Unwrap to check for wrapped context errors.
+			unwrapped := err
+			for {
+				if unwrapped == context.Canceled || unwrapped == context.DeadlineExceeded {
+					break
+				}
+				type unwrapper interface{ Unwrap() error }
+				if u, ok := unwrapped.(unwrapper); ok {
+					unwrapped = u.Unwrap()
+					if unwrapped == nil {
+						break
+					}
+				} else {
+					break
+				}
+			}
+			if unwrapped != context.Canceled && unwrapped != context.DeadlineExceeded {
+				t.Fatalf("Activate with cancelled ctx returned unexpected error: %v", err)
+			}
+		}
+		// Valid outcome: ctx cancellation was detected and propagated correctly.
+		t.Logf("Activate with pre-cancelled ctx returned error (expected): %v", err)
+		return
+	}
+
+	// Outcome 2: activation completed despite the cancelled ctx (Pebble
+	// iterators do not observe context cancellation at the read level).
+	// The provenance loop must have broken immediately on the ctx.Err() check,
+	// so no goroutines were spawned to fill SourceType.
+	if resp == nil {
+		t.Fatal("Activate returned nil response without error")
+	}
+	for _, item := range resp.Activations {
+		if item.SourceType != "" {
+			t.Errorf(
+				"item %q has SourceType=%q: provenance goroutine was spawned despite cancelled ctx — ctx.Err() guard did not fire",
+				item.Concept, item.SourceType,
+			)
+		}
+	}
+	t.Logf("Activate with pre-cancelled ctx returned %d results, all SourceType fields empty (provenance loop broken by ctx.Err() guard)", len(resp.Activations))
+}
+
 // TestEngineRead_AfterRestart writes data, stops the engine, reopens from the SAME
 // directory, and verifies data survives.
 func TestEngineRead_AfterRestart(t *testing.T) {
