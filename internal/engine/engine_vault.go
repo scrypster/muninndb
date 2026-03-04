@@ -136,6 +136,13 @@ func (e *Engine) DeleteVault(ctx context.Context, vaultName string) error {
 		return fmt.Errorf("delete vault (name cleanup): %w", err)
 	}
 
+	// NOTE: vaultMu.Delete runs outside the per-vault lock. Any concurrent
+	// caller that reaches getVaultMutex after DeleteVaultNameOnly returns will
+	// find the vault name gone from storage and abort via ErrVaultNotFound
+	// before it ever uses the mutex. The re-insertion/deletion race window is
+	// therefore harmless in practice.
+	e.vaultMu.Delete(vaultName)
+
 	// Auth config: remove config entry if present.
 	if e.authStore != nil {
 		if err := e.authStore.DeleteVaultConfig(vaultName); err != nil {

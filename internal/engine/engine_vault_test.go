@@ -577,6 +577,35 @@ func TestDeleteVault_NotFoundAfterDelete(t *testing.T) {
 	}
 }
 
+// TestDeleteVault_VaultMuEntryRemoved verifies that the vaultMu sync.Map entry
+// is deleted when a vault is deleted, preventing unbounded map growth.
+func TestDeleteVault_VaultMuEntryRemoved(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vaultName = "vaultmu-delete-vault"
+
+	if _, err := eng.Write(ctx, writeReq(vaultName, "concept", "content")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// Populate the vaultMu entry.
+	eng.getVaultMutex(vaultName)
+	if _, ok := eng.vaultMu.Load(vaultName); !ok {
+		t.Fatal("expected vaultMu entry to exist after getVaultMutex")
+	}
+
+	if err := eng.DeleteVault(ctx, vaultName); err != nil {
+		t.Fatalf("DeleteVault: %v", err)
+	}
+
+	if _, ok := eng.vaultMu.Load(vaultName); ok {
+		t.Error("expected vaultMu entry to be removed after DeleteVault")
+	}
+}
+
 // TestEngineRenameVault_JobActive verifies that renaming a vault with an
 // active clone/merge job targeting it returns ErrVaultJobActive.
 func TestEngineRenameVault_JobActive(t *testing.T) {

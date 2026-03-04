@@ -28,7 +28,14 @@ type MCPServer struct {
 
 	sseSessionsMu    sync.Mutex
 	sseSessions      map[string]*sseSession // sessionID → session
-	idempotencyLocks sync.Map               // per-op_id mutex for idempotent remember
+	// NOTE: idempotencyLocks grows by one entry per unique op_id seen during the
+	// process lifetime. In practice op_id cardinality is low (client-generated,
+	// not per-request UUIDs), so growth is bounded by usage patterns. The
+	// canonical exactly-once guarantee lives in Pebble; the in-memory lock only
+	// prevents the concurrent check→write TOCTOU race during the narrow window
+	// before a receipt is written. Disk accumulation is addressed by
+	// runIdempotencySweep (see engine.go).
+	idempotencyLocks sync.Map
 }
 
 // getIdempotencyLock returns (or lazily creates) a per-op_id mutex. This is
@@ -36,8 +43,8 @@ type MCPServer struct {
 // arrive with the same op_id: only one goroutine at a time can execute the
 // check→write→store-receipt flow for a given op_id.
 func (s *MCPServer) getIdempotencyLock(opID string) *sync.Mutex {
-	m, _ := s.idempotencyLocks.LoadOrStore(opID, &sync.Mutex{})
-	return m.(*sync.Mutex)
+	v, _ := s.idempotencyLocks.LoadOrStore(opID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 type sseSession struct {

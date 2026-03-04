@@ -117,10 +117,11 @@ type Engine struct {
 	autoAssoc      *autoassoc.Worker    // write-time automatic tag-based associations
 	neighborWorker *autoassoc.NeighborWorker // semantic neighbor auto-linking
 	goalLinkWorker *autoassoc.GoalLinkWorker  // goal-aware semantic auto-linking
-	noveltyDet  *novelty.Detector   // write-time near-duplicate detection
-	noveltyJobs chan noveltyJob      // async novelty work queue
-	noveltyDone chan struct{}        // signals novelty worker shutdown
-	pruneDone   chan struct{}        // signals prune worker shutdown
+	noveltyDet           *novelty.Detector // write-time near-duplicate detection
+	noveltyJobs          chan noveltyJob    // async novelty work queue
+	noveltyDone          chan struct{}      // signals novelty worker shutdown
+	pruneDone            chan struct{}      // signals prune worker shutdown
+	idempotencySweepDone chan struct{}      // signals idempotency sweep worker shutdown
 	coherence   *coherence.Registry // per-vault incremental coherence counters
 	scoring     *scoring.Store      // per-vault learnable scoring weights
 	prov        *provenance.Store   // audit trail per-engram
@@ -170,8 +171,10 @@ type Engine struct {
 	// (PruneVault, ReindexFTSVault, ClearVault). Maps string vault name → *sync.Mutex.
 	vaultMu sync.Map
 
-	// childMu serializes the read-modify-write ordinal assignment in AddChild
-	// when Ordinal is nil (append mode). Maps parent ULID string → *sync.Mutex.
+	// NOTE: childMu grows by one entry per unique parent ULID ever passed to
+	// AddChild. This is bounded by the number of distinct tree nodes in the
+	// database — it cannot grow faster than the corpus itself — so no eviction
+	// is needed.
 	childMu sync.Map
 }
 
@@ -247,8 +250,8 @@ func (e *Engine) getVaultMutex(name string) *sync.Mutex {
 // Used to serialize the read-modify-write ordinal assignment in AddChild (append mode)
 // so concurrent appends to the same parent cannot produce duplicate ordinals.
 func (e *Engine) getChildMutex(parentID string) *sync.Mutex {
-	mu, _ := e.childMu.LoadOrStore(parentID, &sync.Mutex{})
-	return mu.(*sync.Mutex)
+	v, _ := e.childMu.LoadOrStore(parentID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // noveltyJob is the unit of work for the async novelty worker.
@@ -355,6 +358,11 @@ func NewEngine(
 	// Only active for vaults with MaxEngrams > 0 or RetentionDays > 0.
 	go e.runPruneWorker()
 
+	// Start daily idempotency receipt sweep — purges Pebble 0x19 entries
+	// older than 30 days to prevent unbounded disk growth.
+	e.idempotencySweepDone = make(chan struct{})
+	go e.runIdempotencySweep()
+
 	return e
 }
 
@@ -447,6 +455,14 @@ func (e *Engine) Stop() {
 		// Stop the vault job GC goroutine.
 		if e.jobManager != nil {
 			e.jobManager.Close()
+		}
+		// Wait for idempotency sweep worker to exit.
+		if e.idempotencySweepDone != nil {
+			select {
+			case <-e.idempotencySweepDone:
+			case <-time.After(5 * time.Second):
+				slog.Warn("engine: idempotency sweep worker did not exit within 5s")
+			}
 		}
 	})
 }
@@ -2527,6 +2543,36 @@ func (e *Engine) runPruneWorker() {
 			}
 			jitter = time.Duration(rand.Intn(10)) * time.Second
 			timer.Reset(60*time.Second + jitter)
+		case <-e.stopCtx.Done():
+			return
+		}
+	}
+}
+
+// runIdempotencySweep is a daily background sweep that purges idempotency
+// receipts (0x19 Pebble prefix) older than 30 days. It runs immediately on
+// startup (to clean up existing accumulation) and then every 24 hours.
+func (e *Engine) runIdempotencySweep() {
+	defer close(e.idempotencySweepDone)
+	const retention = 30 * 24 * time.Hour
+	sweep := func() {
+		n, err := e.store.PurgeExpiredIdempotency(e.stopCtx, retention)
+		if err != nil && e.stopCtx.Err() == nil {
+			slog.Warn("engine: idempotency sweep error", "err", err)
+			return
+		}
+		if n > 0 {
+			slog.Info("engine: idempotency sweep purged entries", "count", n, "retention_days", 30)
+		}
+	}
+	// Run immediately so stale receipts from before this deploy are cleaned up.
+	sweep()
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			sweep()
 		case <-e.stopCtx.Done():
 			return
 		}
