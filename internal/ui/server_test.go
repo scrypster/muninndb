@@ -488,6 +488,56 @@ func TestSSECORS_NonAllowlistedOrigin(t *testing.T) {
 	}
 }
 
+func TestSSECORS_Preflight(t *testing.T) {
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	origins := []string{"http://example.com"}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, origins)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodOptions, "/events", nil)
+	req.Header.Set("Origin", "http://example.com")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", w.Code)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://example.com" {
+		t.Errorf("expected Access-Control-Allow-Origin: http://example.com, got %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "GET") {
+		t.Errorf("expected Access-Control-Allow-Methods to contain GET, got %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("expected Access-Control-Allow-Credentials: true, got %q", got)
+	}
+}
+
+func TestSSECORS_Preflight_NonAllowlisted(t *testing.T) {
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	origins := []string{"http://example.com"}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, origins)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodOptions, "/events", nil)
+	req.Header.Set("Origin", "http://evil.com")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", w.Code)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("expected no Access-Control-Allow-Origin header, got %q", got)
+	}
+}
+
 func TestSSECORS_EmptyCORSOrigins(t *testing.T) {
 	webFS := makeMockFS()
 	eng := &mockEngine{}

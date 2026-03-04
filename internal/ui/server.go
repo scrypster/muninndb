@@ -200,16 +200,25 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 // Returns true if the request was a preflight (caller should return early).
 func (s *Server) setCORSIfAllowed(w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
-	if origin != "" {
+	matched := false
+	if origin != "" && len(s.corsOrigins) > 0 {
 		for _, allowed := range s.corsOrigins {
 			if origin == allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				matched = true
 				break
 			}
 		}
+		// Vary must be set unconditionally when this endpoint is CORS-aware
+		// so caches don't serve one origin's response to another origin.
+		w.Header().Set("Vary", "Origin")
 	}
 	if r.Method == http.MethodOptions {
+		if matched {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return true
 	}
