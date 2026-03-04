@@ -292,7 +292,12 @@ func TestPruneVault_VaultIsolation(t *testing.T) {
 }
 
 // TestAssocDecay_PrunesWeakEdges verifies that DecayAssocWeights (called from
-// the prune worker) removes weak association edges while keeping strong ones.
+// the prune worker) decays weak association edges while keeping strong ones.
+//
+// Dynamic floor semantics (Task 5): an edge that falls below minWeight is NOT
+// deleted if its PeakWeight > 0. Instead it is clamped to PeakWeight * 0.05.
+// An edge written at weight 0.03 seeds PeakWeight=0.03, so its floor is
+// 0.03 * 0.05 = 0.0015. The edge survives, clamped to the floor.
 func TestAssocDecay_PrunesWeakEdges(t *testing.T) {
 	_, _, store, cleanup := testEnvWithAuth(t)
 	defer cleanup()
@@ -345,14 +350,15 @@ func TestAssocDecay_PrunesWeakEdges(t *testing.T) {
 	}
 
 	// Run decay with factor=0.95, minWeight=0.05.
-	// A→B: 0.8 * 0.95 = 0.76 (survives)
-	// A→C: 0.03 * 0.95 = 0.0285 < 0.05 (deleted)
+	// A→B: 0.8 * 0.95 = 0.76 (survives above threshold)
+	// A→C: 0.03 * 0.95 = 0.0285 < 0.05, but PeakWeight=0.03 → floor=0.0015 → clamped (not deleted)
 	removed, err := store.DecayAssocWeights(ctx, ws, 0.95, 0.05)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
-	if removed != 1 {
-		t.Errorf("expected 1 edge removed, got %d", removed)
+	// Dynamic floor: weak edge is clamped, not deleted.
+	if removed != 0 {
+		t.Errorf("expected 0 edges removed (dynamic floor clamps weak edges), got %d", removed)
 	}
 
 	// Strong edge should survive with decayed weight.
@@ -364,9 +370,14 @@ func TestAssocDecay_PrunesWeakEdges(t *testing.T) {
 		t.Errorf("expected A→B weight ~0.76, got %f", wAB)
 	}
 
-	// Weak edge should be gone.
+	// Weak edge should be clamped to dynamic floor (PeakWeight * 0.05 = 0.03 * 0.05 = 0.0015),
+	// not deleted. It must still exist (weight > 0) and be at or near the floor.
 	wAC, _ = store.GetAssocWeight(ctx, ws, idA, idC)
-	if wAC != 0 {
-		t.Errorf("weak edge A→C should be deleted after decay, got weight %f", wAC)
+	if wAC == 0 {
+		t.Error("weak edge A→C should be clamped to dynamic floor, not deleted")
+	}
+	const expectedFloor = float32(0.03 * 0.05) // 0.0015
+	if wAC > expectedFloor+0.001 {
+		t.Errorf("weak edge A→C weight %f exceeds expected floor ~%f", wAC, expectedFloor)
 	}
 }
