@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 )
@@ -25,6 +26,7 @@ func printVaultUsage() {
 	fmt.Println("  clone       <source> <new-name>                  Clone a vault into a new vault")
 	fmt.Println("  merge       <source> <target> [--delete-source] [--yes]  Merge source into target vault")
 	fmt.Println("  export      --vault <name> [--output <file>] [--reset-metadata]  Export vault to .muninn archive")
+	fmt.Println("  export-markdown --vault <name> [--output <file>] [--all-vaults]  Export vault notes to markdown .tgz")
 	fmt.Println("  import      <file> --vault <name> [--reset-metadata]             Import .muninn archive into new vault")
 	fmt.Println("  reindex-fts <name>                               Rebuild FTS index with Porter2 stemming")
 	fmt.Println("  rename      <old-name> <new-name>                  Rename a vault (metadata only)")
@@ -62,7 +64,7 @@ func runVault(args []string) {
 
 	// Validate the subcommand before authenticating so typos get fast feedback.
 	switch sub {
-	case "create", "delete", "clear", "clone", "merge", "rename", "export", "import", "reindex-fts", "reembed", "recall-mode":
+	case "create", "delete", "clear", "clone", "merge", "rename", "export", "export-markdown", "import", "reindex-fts", "reembed", "recall-mode":
 	default:
 		fmt.Printf("Unknown vault command: %q\n", sub)
 		printVaultUsage()
@@ -92,6 +94,8 @@ func runVault(args []string) {
 		runVaultMerge(subArgs)
 	case "export":
 		runVaultExport(subArgs)
+	case "export-markdown":
+		runVaultExportMarkdown(subArgs)
 	case "import":
 		runVaultImport(subArgs)
 	case "reindex-fts":
@@ -850,6 +854,124 @@ func runVaultExport(args []string) {
 		return
 	}
 	fmt.Printf("  Exported %d bytes to %q\n", n, outputFile)
+}
+
+// ---------------------------------------------------------------------------
+// vault export-markdown
+// ---------------------------------------------------------------------------
+
+func runVaultExportMarkdown(args []string) {
+	var vaultName, outputFile string
+	var allVaults bool
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--vault" || a == "-v":
+			if i+1 < len(args) {
+				i++
+				vaultName = args[i]
+			}
+		case strings.HasPrefix(a, "--vault="):
+			vaultName = strings.TrimPrefix(a, "--vault=")
+		case a == "--output" || a == "-o":
+			if i+1 < len(args) {
+				i++
+				outputFile = args[i]
+			}
+		case strings.HasPrefix(a, "--output="):
+			outputFile = strings.TrimPrefix(a, "--output=")
+		case a == "--all-vaults":
+			allVaults = true
+		case !strings.HasPrefix(a, "-") && vaultName == "":
+			vaultName = a
+		}
+	}
+
+	if allVaults {
+		names, err := listVaultNamesAdmin()
+		if err != nil {
+			fmt.Printf("Error listing vaults: %v\n", err)
+			return
+		}
+		outDir := outputFile
+		if outDir == "" {
+			outDir = "."
+		}
+		for _, name := range names {
+			fmt.Printf("Exporting vault %q...\n", name)
+			dest := fmt.Sprintf("%s/%s.markdown.tgz", outDir, name)
+			if err := exportVaultMarkdownOne(name, dest); err != nil {
+				fmt.Printf("  Error exporting %q: %v\n", name, err)
+			}
+		}
+		return
+	}
+
+	if vaultName == "" {
+		fmt.Println("Usage: muninn vault export-markdown --vault <name> [--output <file>] [--all-vaults]")
+		return
+	}
+
+	if outputFile == "" {
+		outputFile = vaultName + ".markdown.tgz"
+	}
+
+	if err := exportVaultMarkdownOne(vaultName, outputFile); err != nil {
+		fmt.Printf("Error: %v\n", err)
+	}
+}
+
+func exportVaultMarkdownOne(vaultName, outputFile string) error {
+	exportURL := fmt.Sprintf("%s/api/admin/vaults/%s/export-markdown", vaultAdminBase, url.PathEscape(vaultName))
+
+	client := &http.Client{Timeout: 30 * time.Minute}
+	req, err := http.NewRequest("GET", exportURL, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	addSessionCookie(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connect to MuninnDB: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	f, err := os.Create(outputFile)
+	if err != nil {
+		return fmt.Errorf("create output file: %w", err)
+	}
+	defer f.Close()
+
+	n, err := io.Copy(f, resp.Body)
+	if err != nil {
+		return fmt.Errorf("write archive: %w", err)
+	}
+	fmt.Printf("  Exported %d bytes to %q\n", n, outputFile)
+	return nil
+}
+
+func listVaultNamesAdmin() ([]string, error) {
+	resp, err := http.Get(vaultAdminBase + "/api/vaults")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var names []string
+	if err := json.NewDecoder(resp.Body).Decode(&names); err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // ---------------------------------------------------------------------------

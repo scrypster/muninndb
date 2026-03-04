@@ -910,6 +910,41 @@ func (s *Server) handleReembedVault(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
 }
 
+// handleExportVaultMarkdown exports a vault as a markdown .tgz archive.
+// GET /api/admin/vaults/{name}/export-markdown
+// Response: application/gzip stream with Content-Disposition attachment.
+func (s *Server) handleExportVaultMarkdown(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+
+	// Check vault exists by listing engrams (limit 1).
+	_, err := s.engine.ListEngrams(r.Context(), &ListEngramsRequest{Vault: name, Limit: 1})
+	if err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, fmt.Sprintf("vault %q not found", name))
+			return
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, "failed to access vault")
+		return
+	}
+
+	filename := name + ".markdown.tgz"
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+
+	if err := writeVaultMarkdownExport(r.Context(), s.engine, name, w); err != nil {
+		slog.Error("rest: markdown export failed", "vault", name, "err", err)
+		// Headers already committed; nothing to do but log.
+	}
+}
+
 // handleVaultJobStatus returns the current status of a vault clone/merge job.
 // GET /api/admin/vaults/{name}/job-status?job_id=...
 // Response 200: StatusSnapshot JSON

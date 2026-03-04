@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/engine"
@@ -402,4 +403,38 @@ func TestHandleImportVault_MissingVaultName(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for missing vault name, got %d", w.Code)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// handleExportVaultMarkdown
+// ---------------------------------------------------------------------------
+
+func TestHandleExportVaultMarkdown_Success(t *testing.T) {
+	srv := newVaultTestServer(&MockEngine{})
+	w := serveVault(srv, "GET", "/api/admin/vaults/testvault/export-markdown", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	cd := w.Header().Get("Content-Disposition")
+	if !strings.Contains(cd, "testvault.markdown.tgz") {
+		t.Errorf("expected Content-Disposition with testvault.markdown.tgz, got %q", cd)
+	}
+}
+
+func TestHandleExportVaultMarkdown_NotFound(t *testing.T) {
+	eng := &markdownExportNotFoundEngine{}
+	srv := newVaultTestServer(eng)
+	w := serveVault(srv, "GET", "/api/admin/vaults/missing/export-markdown", nil, nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// markdownExportNotFoundEngine returns ErrVaultNotFound for ListEngrams.
+type markdownExportNotFoundEngine struct {
+	MockEngine
+}
+
+func (e *markdownExportNotFoundEngine) ListEngrams(_ context.Context, req *ListEngramsRequest) (*ListEngramsResponse, error) {
+	return nil, fmt.Errorf("vault %q: %w", req.Vault, engine.ErrVaultNotFound)
 }

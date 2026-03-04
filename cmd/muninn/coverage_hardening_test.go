@@ -454,6 +454,62 @@ func TestRunVaultExport_ResetMetadata(t *testing.T) {
 	}
 }
 
+func TestRunVaultExportMarkdown_Success(t *testing.T) {
+	cleanup := withMockVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.Contains(r.URL.Path, "/export-markdown") {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("md-archive"))
+			return
+		}
+	})
+	defer cleanup()
+
+	outFile := filepath.Join(t.TempDir(), "notes.tgz")
+	out := captureStdout(func() {
+		runVaultExportMarkdown([]string{"--vault", "default", "--output", outFile})
+	})
+	if !strings.Contains(out, "Exported") {
+		t.Errorf("expected 'Exported' in output: %s", out)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("markdown export file not written: %v", err)
+	}
+	if string(data) != "md-archive" {
+		t.Errorf("unexpected markdown export file content: %q", string(data))
+	}
+}
+
+func TestRunVaultExportMarkdown_AllVaults(t *testing.T) {
+	cleanup := withMockVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/vaults":
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]string{"default", "team"})
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/export-markdown"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("archive"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	defer cleanup()
+
+	outDir := t.TempDir()
+	out := captureStdout(func() {
+		runVaultExportMarkdown([]string{"--all-vaults", "--output", outDir})
+	})
+	if !strings.Contains(out, "Exporting vault") {
+		t.Errorf("expected export progress output, got: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "default.markdown.tgz")); err != nil {
+		t.Fatalf("missing default export file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "team.markdown.tgz")); err != nil {
+		t.Fatalf("missing team export file: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // vault.go: runVaultImport with httptest
 // ---------------------------------------------------------------------------
