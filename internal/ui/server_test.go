@@ -2,6 +2,7 @@ package ui_test
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -12,6 +13,9 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
+	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/cognitive"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
@@ -187,7 +191,7 @@ func makeMockFS() fs.FS {
 func TestNewServer(t *testing.T) {
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -199,7 +203,7 @@ func TestNewServer(t *testing.T) {
 func TestSPAHandler(t *testing.T) {
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -221,7 +225,7 @@ func TestSPAHandler(t *testing.T) {
 func TestStaticHandler(t *testing.T) {
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -239,7 +243,7 @@ func TestSPAHandlerNonRoot(t *testing.T) {
 	// All non-static paths should serve index.html (SPA catch-all)
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -263,7 +267,7 @@ func TestSSEResponseHeaders(t *testing.T) {
 	// Test SSE headers using a real httptest server (needs actual streaming)
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -295,16 +299,13 @@ func TestSSEResponseHeaders(t *testing.T) {
 		if resp.Header.Get("Cache-Control") != "no-cache" {
 			t.Errorf("expected Cache-Control: no-cache, got %q", resp.Header.Get("Cache-Control"))
 		}
-		if resp.Header.Get("Access-Control-Allow-Origin") != "*" {
-			t.Errorf("expected Access-Control-Allow-Origin: *, got %q", resp.Header.Get("Access-Control-Allow-Origin"))
-		}
 	}
 }
 
 func TestServerStartStop(t *testing.T) {
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -330,7 +331,7 @@ func TestSPAHandlerMissingIndex(t *testing.T) {
 		"templates/.keep":     &fstest.MapFile{Data: []byte("")},
 	}
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(badFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil)
+	srv, err := ui.NewServer(badFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -361,7 +362,7 @@ func TestHandleLogs_ReturnsSnapshot(t *testing.T) {
 
 	webFS := makeMockFS()
 	eng := &mockEngine{}
-	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, rb, nil)
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, rb, nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -389,5 +390,329 @@ func TestHandleLogs_ReturnsSnapshot(t *testing.T) {
 	}
 	if result[1]["level"] != "WARN" {
 		t.Errorf("expected second entry level=WARN, got %q", result[1]["level"])
+	}
+}
+
+// openTestPebble opens an in-memory Pebble DB for testing.
+func openTestPebble(t *testing.T) *pebble.DB {
+	t.Helper()
+	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// newAuthServer creates a UI server with a real authStore and session secret.
+func newAuthServer(t *testing.T, corsOrigins []string) (*ui.Server, *auth.Store, []byte) {
+	t.Helper()
+	db := openTestPebble(t)
+	store := auth.NewStore(db)
+	if err := store.CreateAdmin("admin", "password"); err != nil {
+		t.Fatalf("CreateAdmin: %v", err)
+	}
+	secret, err := auth.GenerateSecret()
+	if err != nil {
+		t.Fatalf("GenerateSecret: %v", err)
+	}
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), store, secret, logging.NewRingBuffer(10, nil), nil, corsOrigins)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return srv, store, secret
+}
+
+func TestSSECORS_AllowlistedOrigin(t *testing.T) {
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	origins := []string{"http://example.com"}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, origins)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/events", nil)
+	req.Header.Set("Origin", "http://example.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil && resp == nil {
+		t.Skipf("could not establish SSE connection: %v", err)
+		return
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "http://example.com" {
+			t.Errorf("expected Access-Control-Allow-Origin: http://example.com, got %q", got)
+		}
+		if got := resp.Header.Get("Vary"); got != "Origin" {
+			t.Errorf("expected Vary: Origin, got %q", got)
+		}
+	}
+}
+
+func TestSSECORS_NonAllowlistedOrigin(t *testing.T) {
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	origins := []string{"http://example.com"}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, origins)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/events", nil)
+	req.Header.Set("Origin", "http://evil.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil && resp == nil {
+		t.Skipf("could not establish SSE connection: %v", err)
+		return
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("expected no Access-Control-Allow-Origin header, got %q", got)
+		}
+	}
+}
+
+func TestSSECORS_Preflight(t *testing.T) {
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	origins := []string{"http://example.com"}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, origins)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodOptions, "/events", nil)
+	req.Header.Set("Origin", "http://example.com")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", w.Code)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://example.com" {
+		t.Errorf("expected Access-Control-Allow-Origin: http://example.com, got %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "GET") {
+		t.Errorf("expected Access-Control-Allow-Methods to contain GET, got %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("expected Access-Control-Allow-Credentials: true, got %q", got)
+	}
+}
+
+func TestSSECORS_Preflight_NonAllowlisted(t *testing.T) {
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	origins := []string{"http://example.com"}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, origins)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodOptions, "/events", nil)
+	req.Header.Set("Origin", "http://evil.com")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", w.Code)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("expected no Access-Control-Allow-Origin header, got %q", got)
+	}
+}
+
+func TestSSECORS_EmptyCORSOrigins(t *testing.T) {
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/events", nil)
+	req.Header.Set("Origin", "http://anywhere.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil && resp == nil {
+		t.Skipf("could not establish SSE connection: %v", err)
+		return
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("expected no Access-Control-Allow-Origin header, got %q", got)
+		}
+	}
+}
+
+func TestLogs_RequiresAuth(t *testing.T) {
+	srv, _, _ := newAuthServer(t, nil)
+
+	req := httptest.NewRequest("GET", "/logs", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without session cookie, got %d", w.Code)
+	}
+}
+
+func TestLogs_AllowedWithValidSession(t *testing.T) {
+	srv, _, secret := newAuthServer(t, nil)
+
+	token, err := auth.NewSessionToken("admin", secret)
+	if err != nil {
+		t.Fatalf("NewSessionToken: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/logs", nil)
+	req.AddCookie(&http.Cookie{Name: "muninn_session", Value: token})
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 with valid session cookie, got %d", w.Code)
+	}
+}
+
+func TestEvents_RequiresAuth(t *testing.T) {
+	srv, _, _ := newAuthServer(t, nil)
+
+	req := httptest.NewRequest("GET", "/events", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without session cookie, got %d", w.Code)
+	}
+}
+
+func TestUIServerBindsToAddr(t *testing.T) {
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), nil, nil, logging.NewRingBuffer(10, nil), nil, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := srv.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		srv.Stop(stopCtx)
+	}()
+
+	addr := srv.Addr()
+	if addr == "" || addr == "127.0.0.1:0" {
+		t.Fatalf("expected resolved addr, got %q", addr)
+	}
+
+	resp, err := http.Get("http://" + addr + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	resp.Body.Close()
+	// Any HTTP response (200, 302, 401) proves the server is listening
+	if resp.StatusCode < 100 || resp.StatusCode > 599 {
+		t.Fatalf("expected valid HTTP status code, got %d", resp.StatusCode)
+	}
+	t.Logf("server listening on %s, status %d", addr, resp.StatusCode)
+}
+
+func TestSessionCookie_SecureFlagWithTLS(t *testing.T) {
+	db := openTestPebble(t)
+	store := auth.NewStore(db)
+	if err := store.CreateAdmin("admin", "password"); err != nil {
+		t.Fatalf("CreateAdmin: %v", err)
+	}
+	secret, err := auth.GenerateSecret()
+	if err != nil {
+		t.Fatalf("GenerateSecret: %v", err)
+	}
+
+	// Use a non-nil tls.Config to signal TLS mode.
+	tlsCfg := &tls.Config{}
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), store, secret, logging.NewRingBuffer(10, nil), tlsCfg, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	body := `{"username":"admin","password":"password"}`
+	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from login, got %d: %s", w.Code, w.Body.String())
+	}
+
+	setCookie := w.Header().Get("Set-Cookie")
+	if !strings.Contains(setCookie, "Secure") {
+		t.Errorf("expected Set-Cookie to contain Secure flag, got: %q", setCookie)
+	}
+}
+
+func TestSessionCookie_NoSecureFlagWithoutTLS(t *testing.T) {
+	db := openTestPebble(t)
+	store := auth.NewStore(db)
+	if err := store.CreateAdmin("admin", "password"); err != nil {
+		t.Fatalf("CreateAdmin: %v", err)
+	}
+	secret, err := auth.GenerateSecret()
+	if err != nil {
+		t.Fatalf("GenerateSecret: %v", err)
+	}
+
+	webFS := makeMockFS()
+	eng := &mockEngine{}
+	// nil tlsConfig = no TLS, Secure flag should NOT be set
+	srv, err := ui.NewServer(webFS, eng, http.NotFoundHandler(), store, secret, logging.NewRingBuffer(10, nil), nil, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	body := `{"username":"admin","password":"password"}`
+	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from login, got %d: %s", w.Code, w.Body.String())
+	}
+
+	setCookie := w.Header().Get("Set-Cookie")
+	if strings.Contains(setCookie, "Secure") {
+		t.Errorf("expected Set-Cookie to NOT contain Secure flag, got: %q", setCookie)
 	}
 }

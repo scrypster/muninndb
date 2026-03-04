@@ -7,8 +7,46 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
+
+// buildDaemonArgs constructs the argument list for the forked daemon process.
+// It forwards --listen-host when non-default and --cors-origins when non-empty.
+func buildDaemonArgs(dataDir string, dev bool, mcpToken string, osArgs []string, listenHostEnv, corsOriginsEnv string) []string {
+	args := []string{"--daemon", "--data", dataDir}
+	if dev {
+		args = append(args, "--dev")
+	}
+	if mcpToken != "" {
+		args = append(args, "--mcp-token", mcpToken)
+	}
+	// --listen-host: forward when non-default
+	listenHost := parseListenHost(osArgs, listenHostEnv)
+	if listenHost != "127.0.0.1" {
+		args = append(args, "--listen-host", listenHost)
+	}
+	// --cors-origins: forward from flag or env
+	corsOrigins := corsOriginsEnv
+	for i, arg := range osArgs {
+		if (arg == "--cors-origins" || arg == "-cors-origins") && i+1 < len(osArgs) {
+			corsOrigins = osArgs[i+1]
+			break
+		}
+		if after, ok := strings.CutPrefix(arg, "--cors-origins="); ok {
+			corsOrigins = after
+			break
+		}
+		if after, ok := strings.CutPrefix(arg, "-cors-origins="); ok {
+			corsOrigins = after
+			break
+		}
+	}
+	if corsOrigins != "" {
+		args = append(args, "--cors-origins", corsOrigins)
+	}
+	return args
+}
 
 // runStart forks muninn as a background daemon and waits for health check.
 func runStart(webEnabled bool) {
@@ -36,20 +74,18 @@ func runStart(webEnabled bool) {
 		os.Exit(1)
 	}
 
-	args := []string{"--daemon", "--data", dataDir}
-	if !webEnabled {
-		args = append(args, "--no-web")
-	}
-	// Pass through --dev flag if present
+	// Determine dev mode from os.Args
+	dev := false
 	for _, arg := range os.Args {
 		if arg == "--dev" {
-			args = append(args, "--dev")
+			dev = true
 			break
 		}
 	}
-	// Pass MCP token from token file if present
-	if tok := readTokenFile(); tok != "" {
-		args = append(args, "--mcp-token", tok)
+
+	args := buildDaemonArgs(dataDir, dev, readTokenFile(), os.Args[1:], os.Getenv("MUNINN_LISTEN_HOST"), os.Getenv("MUNINN_CORS_ORIGINS"))
+	if !webEnabled {
+		args = append(args, "--no-web")
 	}
 
 	cmd := exec.Command(os.Args[0], args...)
@@ -83,7 +119,7 @@ func runStart(webEnabled bool) {
 	}
 
 	// Wait for health check (up to 5s)
-	mcpHealthURL := "http://" + defaultMCPAddr + "/mcp/health"
+	mcpHealthURL := "http://127.0.0.1:" + defaultMCPPort + "/mcp/health"
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
