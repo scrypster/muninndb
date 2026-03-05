@@ -824,6 +824,61 @@ func TestClusterCoordinator_CogForwardedTotal(t *testing.T) {
 	}
 }
 
+func TestClusterCoordinator_HandleCogForward_RestoredEdges(t *testing.T) {
+	coord, _ := newTestCoordinator(t, "primary")
+	coord.SetCognitiveWorkers(&mockHebbianSubmitter{})
+
+	if total := coord.CogForwardedTotal(); total != 0 {
+		t.Errorf("expected CogForwardedTotal=0 initially, got %d", total)
+	}
+
+	// Send a frame with only RestoredEdges (no co-activations).
+	effect := mbp.CognitiveSideEffect{
+		QueryID: "q-restored",
+		RestoredEdges: []mbp.EdgeRef{
+			{Src: [16]byte{0xA1}, Dst: [16]byte{0xB1}},
+			{Src: [16]byte{0xA2}, Dst: [16]byte{0xB2}},
+		},
+	}
+	payload, err := msgpack.Marshal(effect)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := coord.HandleIncomingFrame("lobe-restored", mbp.TypeCogForward, payload); err != nil {
+		t.Fatalf("HandleIncomingFrame with RestoredEdges: %v", err)
+	}
+
+	// The coordinator should count restored edges in cogForwardedTotal.
+	if total := coord.CogForwardedTotal(); total != 2 {
+		t.Errorf("expected CogForwardedTotal=2 after 2 RestoredEdges, got %d", total)
+	}
+
+	// Send a second frame that mixes co-activations and RestoredEdges.
+	effect2 := mbp.CognitiveSideEffect{
+		QueryID: "q-mixed",
+		CoActivations: []mbp.CoActivationRef{
+			{ID: [16]byte{1}, Score: 0.5},
+		},
+		RestoredEdges: []mbp.EdgeRef{
+			{Src: [16]byte{0xC1}, Dst: [16]byte{0xD1}},
+		},
+	}
+	payload2, err := msgpack.Marshal(effect2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := coord.HandleIncomingFrame("lobe-restored", mbp.TypeCogForward, payload2); err != nil {
+		t.Fatalf("HandleIncomingFrame mixed frame: %v", err)
+	}
+
+	// 2 restored + 1 co-activation + 1 restored = 4 total.
+	if total := coord.CogForwardedTotal(); total != 4 {
+		t.Errorf("expected CogForwardedTotal=4 after mixed frame, got %d", total)
+	}
+}
+
 // mockFlushable tracks whether Stop() was called and uses a channel to signal
 // completion, allowing tests to verify flush ordering without time.Sleep.
 type mockFlushable struct {

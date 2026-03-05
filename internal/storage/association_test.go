@@ -2,8 +2,12 @@ package storage
 
 import (
 	"context"
+	"encoding/binary"
+	"math"
 	"testing"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 // ---------------------------------------------------------------------------
@@ -331,6 +335,53 @@ func TestGetChildrenByParent_IsPartOf(t *testing.T) {
 	}
 }
 
+func TestEncodeArchiveValue_RoundTrip(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	relType := RelSupports
+	confidence := float32(0.85)
+	createdAt := now.Add(-24 * time.Hour)
+	lastActivated := int32(now.Unix())
+	peakWeight := float32(0.92)
+	coActivationCount := uint32(42)
+	restoredAt := int32(now.Unix())
+
+	val := encodeArchiveValue(relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, restoredAt)
+	if len(val) != 30 {
+		t.Fatalf("expected 30 bytes, got %d", len(val))
+	}
+
+	gotRelType, gotConf, gotCreated, gotLastAct, gotPeak, gotCoAct, gotRestored := decodeAssocValue(val[:])
+	if gotRelType != relType {
+		t.Errorf("relType: got %v, want %v", gotRelType, relType)
+	}
+	if gotConf < 0.84 || gotConf > 0.86 {
+		t.Errorf("confidence: got %v, want ~0.85", gotConf)
+	}
+	if gotCreated.Unix() != createdAt.Unix() {
+		t.Errorf("createdAt: got %v, want %v", gotCreated, createdAt)
+	}
+	if gotLastAct != lastActivated {
+		t.Errorf("lastActivated: got %v, want %v", gotLastAct, lastActivated)
+	}
+	if gotPeak < 0.91 || gotPeak > 0.93 {
+		t.Errorf("peakWeight: got %v, want ~0.92", gotPeak)
+	}
+	if gotCoAct != coActivationCount {
+		t.Errorf("coActivationCount: got %v, want %v", gotCoAct, coActivationCount)
+	}
+	if gotRestored != restoredAt {
+		t.Errorf("restoredAt: got %v, want %v", gotRestored, restoredAt)
+	}
+}
+
+func TestDecodeAssocValue_26Bytes_RestoredAtZero(t *testing.T) {
+	val := encodeAssocValue(RelSupports, 0.9, time.Now(), 100, 0.8, 5)
+	_, _, _, _, _, _, restoredAt := decodeAssocValue(val[:])
+	if restoredAt != 0 {
+		t.Errorf("restoredAt from 26-byte value: got %v, want 0", restoredAt)
+	}
+}
+
 // newTestStore creates a PebbleStore backed by a temp dir.
 // openTestPebble already registers Cleanup for the DB; we just wrap it in a store.
 func newTestStore(t *testing.T) *PebbleStore {
@@ -478,7 +529,7 @@ func TestDecayAssocWeightsReducesBelowThreshold(t *testing.T) {
 
 	// Decay by 50% with minWeight=0.3.
 	// Dynamic floor: edges below minWeight are clamped, NOT deleted — removed=0.
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.3)
+	removed, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.3, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
@@ -604,5 +655,88 @@ func TestGetAssociations_ReturnsCopy(t *testing.T) {
 	}
 	if !seen[dst1] || !seen[dst2] {
 		t.Error("original associations missing in fresh call")
+	}
+}
+
+// TestRestoredAt_ClearedAfterReestablishment verifies that restoredAt is cleared
+// when an edge accumulates 3+ co-activations post-restore.
+func TestRestoredAt_ClearedAfterReestablishment(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("restored-clear")
+
+	src := NewULID()
+	dst := NewULID()
+
+	// Write a restored edge (simulate via archive value written to live keys).
+	now := int32(time.Now().Unix())
+	restoreWeight := float32(0.25)
+	val := encodeArchiveValue(RelSupports, 0.9, time.Now().Add(-72*time.Hour), now, 1.0, 5, now)
+	fwdKey := keys.AssocFwdKey(ws, [16]byte(src), restoreWeight, [16]byte(dst))
+	store.db.Set(fwdKey, val[:], nil)
+	revKey := keys.AssocRevKey(ws, [16]byte(dst), restoreWeight, [16]byte(src))
+	store.db.Set(revKey, val[:], nil)
+	var wiBuf [4]byte
+	binary.BigEndian.PutUint32(wiBuf[:], math.Float32bits(restoreWeight))
+	store.db.Set(keys.AssocWeightIndexKey(ws, [16]byte(src), [16]byte(dst)), wiBuf[:], nil)
+
+	// Update weight 3 times (3 co-activations post-restore).
+	for i := 0; i < 3; i++ {
+		if err := store.UpdateAssocWeight(ctx, ws, src, dst, restoreWeight+float32(i)*0.01, 1); err != nil {
+			t.Fatalf("UpdateAssocWeight[%d]: %v", i, err)
+		}
+	}
+
+	// Read back and verify restoredAt is cleared.
+	_, _, _, _, _, _, restoredAt := store.getAssocValueFull(ws, src, dst)
+	if restoredAt != 0 {
+		t.Errorf("restoredAt should be cleared after 3 co-activations, got %v", restoredAt)
+	}
+}
+
+// TestDecayAssocWeights_ArchivesStrongEdge verifies that an edge whose
+// consolidation score exceeds archiveThreshold is moved to the 0x25 archive
+// namespace instead of being clamped to the dynamic floor.
+func TestDecayAssocWeights_ArchivesStrongEdge(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("decay-archive")
+
+	src := NewULID()
+	dst := NewULID()
+
+	// Write edge: weight=0.8, will get peakWeight=0.8, coActivationCount=1 seeded.
+	// consolidation score = peakWeight(0.8) * coActivationCount(1) / max(daysSince,1)
+	// Set lastActivated to 2 days ago so daysSince=2: score = 0.8*1/2 = 0.4 > 0.05 => archive.
+	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
+		TargetID:      dst,
+		Weight:        0.8,
+		RelType:       RelSupports,
+		LastActivated: int32(time.Now().Add(-48 * time.Hour).Unix()),
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+
+	// Decay aggressively to force below minWeight, archiveThreshold=0.05.
+	_, err := store.DecayAssocWeights(ctx, ws, 0.01, 0.3, 0.05)
+	if err != nil {
+		t.Fatalf("DecayAssocWeights: %v", err)
+	}
+
+	// Edge should be gone from live weight index.
+	w, _ := store.GetAssocWeight(ctx, ws, src, dst)
+	if w > 0 {
+		t.Errorf("live weight should be 0 after archive, got %v", w)
+	}
+
+	// Edge should exist in archive (0x25).
+	archiveKey := keys.ArchiveAssocKey(ws, [16]byte(src), [16]byte(dst))
+	val, closer, err := store.db.Get(archiveKey)
+	if err != nil {
+		t.Fatalf("archived edge not found in 0x25 namespace: %v", err)
+	}
+	defer closer.Close()
+	if len(val) != 30 {
+		t.Fatalf("archive value should be 30 bytes, got %d", len(val))
 	}
 }

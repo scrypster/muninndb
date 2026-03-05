@@ -941,6 +941,13 @@ func (c *ClusterCoordinator) handleCogForward(fromNodeID string, payload []byte)
 		atomic.AddUint64(&c.cogForwardedTotal, n)
 	}
 
+	// Log restored edges forwarded from Lobe (observability).
+	// The Cortex will restore these edges independently on its own next activation.
+	if n := uint64(len(effect.RestoredEdges)); n > 0 {
+		slog.Debug("cog-forward: restored edges from Lobe", "from", fromNodeID, "count", n)
+		atomic.AddUint64(&c.cogForwardedTotal, n)
+	}
+
 	// Send CogAck back to Lobe — best-effort, ignore send errors.
 	ack := mbp.CogAck{QueryID: effect.QueryID}
 	ackPayload, err := msgpack.Marshal(ack)

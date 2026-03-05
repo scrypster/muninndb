@@ -71,6 +71,11 @@ type PebbleStore struct {
 	closeOnce   sync.Once
 	entityLocks       sync.Map // key: normalized entity name → *sync.Mutex
 	coOccurrenceLocks sync.Map // key: "hashA:hashB" → *sync.Mutex
+	// archiveBloom is an in-memory Bloom filter over src engram IDs that have
+	// archived associations in the 0x25 namespace. Gates the 0x25 prefix scan
+	// during BFS traversal: if the filter says "no," skip the scan entirely.
+	// Rebuilt on startup and after GC runs via RebuildArchiveBloom.
+	archiveBloom *archiveBloom
 }
 
 // assocCacheEntry holds a cached association list.
@@ -179,6 +184,7 @@ func NewPebbleStore(db *pebble.DB, cfg PebbleStoreConfig) *PebbleStore {
 	ps.counterFlush = newCounterCoalescer(db)
 	ps.provWork = newProvenanceWorker(prov)
 	ps.transCache = NewTransitionCache(ps)
+	ps.archiveBloom = ps.RebuildArchiveBloom()
 	return ps
 }
 

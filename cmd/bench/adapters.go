@@ -19,8 +19,8 @@ func (a *benchHebbianAdapter) UpdateAssocWeight(ctx context.Context, ws [8]byte,
 	// is accumulated exclusively through UpdateAssocWeightBatch in processBatch.
 	return a.store.UpdateAssocWeight(ctx, ws, storage.ULID(src), storage.ULID(dst), w, 0)
 }
-func (a *benchHebbianAdapter) DecayAssocWeights(ctx context.Context, ws [8]byte, factor float64, min float32) (int, error) {
-	return a.store.DecayAssocWeights(ctx, ws, factor, min)
+func (a *benchHebbianAdapter) DecayAssocWeights(ctx context.Context, ws [8]byte, factor float64, min float32, archiveThreshold float64) (int, error) {
+	return a.store.DecayAssocWeights(ctx, ws, factor, min, archiveThreshold)
 }
 func (a *benchHebbianAdapter) UpdateAssocWeightBatch(ctx context.Context, updates []cognitive.AssocWeightUpdate) error {
 	storageUpdates := make([]storage.AssocWeightUpdate, len(updates))

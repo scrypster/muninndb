@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -219,7 +220,7 @@ func TestWriteAIToolConfig_AtomicTempCleaned(t *testing.T) {
 	// No temp files should remain
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp.") {
+		if strings.HasSuffix(e.Name(), ".tmp") {
 			t.Errorf("temp file not cleaned up: %s", e.Name())
 		}
 	}
@@ -231,8 +232,8 @@ func TestMCPServerEntry_WithToken(t *testing.T) {
 	if entry["url"] != "http://localhost:8750/mcp" {
 		t.Errorf("unexpected url: %v", entry["url"])
 	}
-	if entry["type"] != "http" {
-		t.Errorf("type = %v, want \"http\" (SSE is deprecated)", entry["type"])
+	if _, ok := entry["type"]; ok {
+		t.Errorf("type field must not be present (causes Claude Desktop crash on startup)")
 	}
 	headers, ok := entry["headers"].(map[string]any)
 	if !ok {
@@ -249,8 +250,8 @@ func TestMCPServerEntry_NoToken(t *testing.T) {
 	if _, ok := entry["headers"]; ok {
 		t.Error("headers should not be present when token is empty")
 	}
-	if entry["type"] != "http" {
-		t.Errorf("type = %v, want \"http\" (SSE is deprecated)", entry["type"])
+	if _, ok := entry["type"]; ok {
+		t.Errorf("type field must not be present (causes Claude Desktop crash on startup)")
 	}
 }
 
@@ -282,6 +283,20 @@ func TestParseToolNumbers(t *testing.T) {
 	}
 }
 
+// TestOpenCodeConfigPath verifies OpenCode config path is absolute and contains "opencode".
+func TestOpenCodeConfigPath(t *testing.T) {
+	path := openCodeConfigPath()
+	if !filepath.IsAbs(path) {
+		t.Errorf("path %q should be absolute", path)
+	}
+	if !strings.Contains(path, "opencode") {
+		t.Errorf("path %q should contain 'opencode'", path)
+	}
+	if !strings.HasSuffix(path, "opencode.json") {
+		t.Errorf("path %q should end with opencode.json", path)
+	}
+}
+
 // TestOpenClawConfigPath verifies OpenClaw config path is set correctly.
 func TestOpenClawConfigPath(t *testing.T) {
 	path := openClawConfigPath()
@@ -291,6 +306,175 @@ func TestOpenClawConfigPath(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	if !strings.HasPrefix(path, home) {
 		t.Errorf("path %q should start with home dir", path)
+	}
+}
+
+func TestOpenCodeMCPEntry_WithToken(t *testing.T) {
+	entry := openCodeMCPEntry("http://localhost:8750/mcp", "mdb_testtoken123")
+	if entry["type"] != "remote" {
+		t.Errorf("type = %v, want \"remote\"", entry["type"])
+	}
+	if entry["oauth"] != false {
+		t.Errorf("oauth = %v, want false", entry["oauth"])
+	}
+	headers, ok := entry["headers"].(map[string]any)
+	if !ok {
+		t.Fatal("headers not found when token supplied")
+	}
+	auth, _ := headers["Authorization"].(string)
+	if auth != "Bearer {file:~/.muninn/mcp.token}" {
+		t.Errorf("Authorization = %q, want file-template literal", auth)
+	}
+	if strings.Contains(fmt.Sprintf("%v", entry), "mdb_testtoken123") {
+		t.Error("raw token value should NOT appear in entry")
+	}
+}
+
+func TestOpenCodeMCPEntry_NoToken(t *testing.T) {
+	entry := openCodeMCPEntry("http://localhost:8750/mcp", "")
+	if entry["type"] != "remote" {
+		t.Errorf("type = %v, want \"remote\"", entry["type"])
+	}
+	if entry["oauth"] != false {
+		t.Errorf("oauth = %v, want false", entry["oauth"])
+	}
+	if _, ok := entry["headers"]; ok {
+		t.Error("headers should not be present when token is empty")
+	}
+}
+
+func TestMergeOpenCodeMCP_PreservesOtherEntries(t *testing.T) {
+	cfg := map[string]any{
+		"mcp": map[string]any{
+			"other-tool": map[string]any{"type": "remote", "url": "http://other:9999"},
+		},
+		"topKey": "preserved",
+	}
+	mergeOpenCodeMCP(cfg, "http://localhost:8750/mcp", "tok")
+	mcp := cfg["mcp"].(map[string]any)
+	if _, ok := mcp["other-tool"]; !ok {
+		t.Error("other-tool entry removed")
+	}
+	if _, ok := mcp["muninn"]; !ok {
+		t.Error("muninn not added")
+	}
+	if cfg["topKey"] != "preserved" {
+		t.Error("top-level key lost")
+	}
+}
+
+func TestMergeOpenCodeMCP_EmptyConfig(t *testing.T) {
+	cfg := map[string]any{}
+	mergeOpenCodeMCP(cfg, "http://localhost:8750/mcp", "tok")
+	mcp, ok := cfg["mcp"].(map[string]any)
+	if !ok {
+		t.Fatal("cfg[\"mcp\"] not a map")
+	}
+	if _, ok := mcp["muninn"]; !ok {
+		t.Error("muninn not added")
+	}
+}
+
+func TestConfigureOpenCode_WritesCorrectSchema(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	out := captureStdout(func() {
+		if err := configureOpenCode("http://localhost:8750/mcp", "mdb_testtoken"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	data, err := os.ReadFile(openCodeConfigPath())
+	if err != nil {
+		t.Fatalf("config file not written: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, data)
+	}
+	mcp := cfg["mcp"].(map[string]any)
+	muninn := mcp["muninn"].(map[string]any)
+
+	if muninn["type"] != "remote" {
+		t.Errorf("type = %v, want \"remote\"", muninn["type"])
+	}
+	if muninn["oauth"] != false {
+		t.Errorf("oauth = %v, want false", muninn["oauth"])
+	}
+	if !strings.Contains(out, "✓") || !strings.Contains(out, "OpenCode") {
+		t.Errorf("output missing success marker: %s", out)
+	}
+	if !strings.Contains(out, "Restart OpenCode") {
+		t.Errorf("output missing restart hint: %s", out)
+	}
+}
+
+func TestConfigureOpenCode_NoToken(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	captureStdout(func() {
+		configureOpenCode("http://localhost:8750/mcp", "")
+	})
+
+	data, _ := os.ReadFile(openCodeConfigPath())
+	var cfg map[string]any
+	json.Unmarshal(data, &cfg)
+	muninn := cfg["mcp"].(map[string]any)["muninn"].(map[string]any)
+	if _, ok := muninn["headers"]; ok {
+		t.Error("headers should not be present without token")
+	}
+	if muninn["oauth"] != false {
+		t.Error("oauth must be false even without token")
+	}
+}
+
+func TestConfigureOpenCode_PreservesExistingEntries(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	path := openCodeConfigPath()
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, []byte(`{"mcp":{"other":{"type":"remote","url":"http://x"}},"topKey":"kept"}`), 0644)
+
+	captureStdout(func() {
+		configureOpenCode("http://localhost:8750/mcp", "tok")
+	})
+
+	data, _ := os.ReadFile(path)
+	var cfg map[string]any
+	json.Unmarshal(data, &cfg)
+	if cfg["topKey"] != "kept" {
+		t.Error("top-level key lost")
+	}
+	mcp := cfg["mcp"].(map[string]any)
+	if _, ok := mcp["other"]; !ok {
+		t.Error("other tool removed")
+	}
+	if _, ok := mcp["muninn"]; !ok {
+		t.Error("muninn not added")
+	}
+}
+
+func TestConfigureOpenCode_SummaryAdded(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+	out := captureStdout(func() { configureOpenCode("http://localhost:8750/mcp", "tok") })
+	if !strings.Contains(out, "added") {
+		t.Errorf("expected 'added' in output for new config: %s", out)
+	}
+}
+
+func TestConfigureOpenCode_SummaryUpdated(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+	path := openCodeConfigPath()
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, []byte(`{"mcp":{"muninn":{"type":"remote","url":"http://localhost:8750/mcp","oauth":false}}}`), 0644)
+	out := captureStdout(func() { configureOpenCode("http://localhost:8750/mcp", "tok") })
+	if !strings.Contains(out, "updated") {
+		t.Errorf("expected 'updated' in output for existing mcp: %s", out)
 	}
 }
 

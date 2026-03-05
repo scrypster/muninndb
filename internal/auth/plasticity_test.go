@@ -483,3 +483,18 @@ func TestLookupRecallMode_BalancedIsZero(t *testing.T) {
 		t.Errorf("balanced should be all zero values, got %+v", p)
 	}
 }
+
+func TestPlasticityConfig_ArchiveThreshold_Default(t *testing.T) {
+	r := ResolvePlasticity(&PlasticityConfig{Preset: "default"})
+	if r.ArchiveThreshold != 0.05 {
+		t.Errorf("default ArchiveThreshold: got %v, want 0.05", r.ArchiveThreshold)
+	}
+}
+
+func TestPlasticityConfig_ArchiveThreshold_Override(t *testing.T) {
+	val := 0.10
+	r := ResolvePlasticity(&PlasticityConfig{ArchiveThreshold: &val})
+	if r.ArchiveThreshold != 0.10 {
+		t.Errorf("overridden ArchiveThreshold: got %v, want 0.10", r.ArchiveThreshold)
+	}
+}

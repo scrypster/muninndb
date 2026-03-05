@@ -667,3 +667,50 @@ func IdempotencyKey(opID string) []byte {
 	binary.BigEndian.PutUint64(key[1:], hashVal)
 	return key
 }
+
+// ArchiveAssocKey constructs the archived association key (0x25 prefix).
+// No weight complement — archive keys are not sorted by weight.
+// No reverse key — restore is one-directional (BFS always traverses outbound edges).
+// Key: 0x25 | wsPrefix(8) | src(16) | dst(16) = 41 bytes
+func ArchiveAssocKey(ws [8]byte, src [16]byte, dst [16]byte) []byte {
+	key := make([]byte, 1+8+16+16)
+	key[0] = 0x25
+	copy(key[1:9], ws[:])
+	copy(key[9:25], src[:])
+	copy(key[25:41], dst[:])
+	return key
+}
+
+// ArchiveAssocPrefixForID returns a 25-byte scan prefix covering all archived
+// associations from a given source engram (0x25 | ws(8) | src(16)).
+func ArchiveAssocPrefixForID(ws [8]byte, src [16]byte) []byte {
+	key := make([]byte, 1+8+16)
+	key[0] = 0x25
+	copy(key[1:9], ws[:])
+	copy(key[9:25], src[:])
+	return key
+}
+
+// ArchiveAssocRangeStart returns the inclusive lower bound for scanning all
+// archived associations within a vault (0x25 | ws(8)).
+func ArchiveAssocRangeStart(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = 0x25
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// ArchiveAssocRangeEnd returns the exclusive upper bound for scanning all
+// archived associations within a vault. Increments the ws portion.
+func ArchiveAssocRangeEnd(ws [8]byte) []byte {
+	end := make([]byte, 1+8)
+	end[0] = 0x25
+	copy(end[1:9], ws[:])
+	for i := len(end) - 1; i >= 1; i-- {
+		end[i]++
+		if end[i] != 0 {
+			break
+		}
+	}
+	return end
+}

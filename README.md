@@ -56,7 +56,7 @@ That Q3 incident surfaces. You never mentioned it. MuninnDB connected the concep
 
 ## Connect Your AI Tools
 
-MuninnDB auto-detects and configures Claude Desktop, Cursor, OpenClaw, Windsurf, VS Code, and others:
+MuninnDB auto-detects and configures Claude Desktop, Cursor, OpenClaw, Windsurf, OpenCode, VS Code, and others:
 
 ```bash
 muninn init
@@ -166,6 +166,31 @@ Add to `.vscode/mcp.json` in your workspace:
   }
 }
 ```
+</details>
+
+<details>
+<summary>OpenCode</summary>
+
+Add to `~/.config/opencode/opencode.json` (macOS/Linux) or `%APPDATA%\opencode\opencode.json` (Windows):
+
+```json
+{
+  "mcp": {
+    "muninn": {
+      "type": "remote",
+      "url": "http://localhost:8750/mcp",
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer {file:~/.muninn/mcp.token}"
+      }
+    }
+  }
+}
+```
+
+Omit the `headers` block if you are running MuninnDB without token authentication.
+
+> **Note:** OpenCode tools are exposed as `muninn_muninn_remember`, `muninn_muninn_recall`, etc. (server key + tool name prefix). Users preferring shorter names can register the server under the key `memory` instead, which yields `memory_muninn_remember`, `memory_muninn_recall`, etc.
 </details>
 
 MuninnDB exposes **35 MCP tools** — store, activate, search, batch insert, get usage guidance, manage vaults, and more. On first connect, call `muninn_guide` for vault-aware instructions. No token required against the default vault. [Full MCP reference →](https://muninndb.com/docs)

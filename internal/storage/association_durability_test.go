@@ -94,7 +94,7 @@ func TestAssocMetadata_PreservedThroughDecay(t *testing.T) {
 	}
 
 	// Decay: factor 0.9, minWeight 0.05 — edge stays alive at 0.72.
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.9, 0.05)
+	removed, err := store.DecayAssocWeights(ctx, ws, 0.9, 0.05, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestAssocDecay_DynamicFloor(t *testing.T) {
 	// Decay aggressively — 5 passes of 0.3 factor.
 	// 0.8 * 0.3^5 ≈ 0.002, well below minWeight=0.05.
 	for i := 0; i < 5; i++ {
-		if _, err := store.DecayAssocWeights(ctx, ws, 0.3, 0.05); err != nil {
+		if _, err := store.DecayAssocWeights(ctx, ws, 0.3, 0.05, 0.0); err != nil {
 			t.Fatalf("DecayAssocWeights pass %d: %v", i, err)
 		}
 	}
@@ -268,7 +268,7 @@ func TestAssocDecay_LowPeakEdgeClampsToVeryLowFloor(t *testing.T) {
 	}
 
 	// Decay below minWeight — floor = 0.06 * 0.05 = 0.003
-	if _, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.05); err != nil {
+	if _, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.05, 0.0); err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
 
@@ -367,7 +367,7 @@ func TestAssocDecay_RecencySkip(t *testing.T) {
 	// Aggressive decay factor 0.1 with minWeight 0.05.
 	// Without recency skip: 0.8 * 0.1 = 0.08 (survives but weight is massacred).
 	// With recency skip: weight must remain at 0.8 unchanged.
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.1, 0.05)
+	removed, err := store.DecayAssocWeights(ctx, ws, 0.1, 0.05, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}

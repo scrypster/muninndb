@@ -165,10 +165,12 @@ func writeAIToolConfig(path string, mergeFn func(cfg map[string]any)) (string, e
 }
 
 // mcpServerEntry returns the JSON map for muninn's MCP server entry.
+// Note: "type" is intentionally omitted. Claude Desktop v1.1.4010+ crashes
+// on startup with a TypeError if "type":"http" is present in any mcpServers
+// entry. The MCP client infers transport from the URL schema.
 func mcpServerEntry(mcpURL, token string) map[string]any {
 	entry := map[string]any{
-		"type": "http",
-		"url":  mcpURL,
+		"url": mcpURL,
 	}
 	if token != "" {
 		entry["headers"] = map[string]any{
@@ -186,6 +188,34 @@ func mergeMCPServers(cfg map[string]any, mcpURL, token string) {
 	}
 	servers["muninn"] = mcpServerEntry(mcpURL, token)
 	cfg["mcpServers"] = servers
+}
+
+// openCodeMCPEntry returns the JSON map for muninn's OpenCode MCP entry.
+// OpenCode requires type "remote", explicit oauth:false, and uses a
+// file-template for auth so the token is read from disk at startup.
+func openCodeMCPEntry(mcpURL, token string) map[string]any {
+	entry := map[string]any{
+		"type":  "remote",
+		"url":   mcpURL,
+		"oauth": false,
+	}
+	if token != "" {
+		entry["headers"] = map[string]any{
+			"Authorization": "Bearer {file:~/.muninn/mcp.token}",
+		}
+	}
+	return entry
+}
+
+// mergeOpenCodeMCP upserts muninn into cfg["mcp"]["muninn"],
+// preserving all other entries under the "mcp" top-level key.
+func mergeOpenCodeMCP(cfg map[string]any, mcpURL, token string) {
+	mcp, ok := cfg["mcp"].(map[string]any)
+	if !ok {
+		mcp = map[string]any{}
+	}
+	mcp["muninn"] = openCodeMCPEntry(mcpURL, token)
+	cfg["mcp"] = mcp
 }
 
 // claudeCodeConfigPath returns the path to Claude Code's (claude CLI) config file.
@@ -248,6 +278,27 @@ func openClawConfigPath() string {
 	return filepath.Join(home, ".openclaw", "mcp.json")
 }
 
+// openCodeConfigPath returns the path to OpenCode's config file.
+// macOS/Linux: ~/.config/opencode/opencode.json
+// Windows:     %APPDATA%\opencode\opencode.json
+func openCodeConfigPath() string {
+	switch runtime.GOOS {
+	case "windows":
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			home, _ := os.UserHomeDir()
+			appData = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(appData, "opencode", "opencode.json")
+	default: // macOS and Linux — OpenCode uses XDG conventions on both
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			return filepath.Join(xdg, "opencode", "opencode.json")
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".config", "opencode", "opencode.json")
+	}
+}
+
 // configureClaudeDesktop writes the muninn MCP entry into Claude Desktop's config.
 func configureClaudeDesktop(mcpURL, token string) error {
 	path := claudeDesktopConfigPath()
@@ -301,6 +352,39 @@ func configureOpenClaw(mcpURL, token string) error {
 	}
 	fmt.Printf("  ✓ OpenClaw: %s\n    %s\n", summary, path)
 	fmt.Println("  → Restart OpenClaw to activate muninn memory")
+	return nil
+}
+
+// configureOpenCode writes the muninn MCP entry into OpenCode's opencode.json.
+func configureOpenCode(mcpURL, token string) error {
+	path := openCodeConfigPath()
+
+	// Capture whether "mcp" key exists before writeAIToolConfig runs,
+	// so we can print an accurate summary (writeAIToolConfig hardcodes "mcpServers").
+	hadMCP := false
+	if existing, err := os.ReadFile(path); err == nil {
+		var peek map[string]any
+		if json.Unmarshal(existing, &peek) == nil {
+			hadMCP = peek["mcp"] != nil
+		}
+	}
+
+	_, err := writeAIToolConfig(path, func(cfg map[string]any) {
+		mergeOpenCodeMCP(cfg, mcpURL, token)
+	})
+	if err != nil {
+		return err
+	}
+
+	var summary string
+	if hadMCP {
+		summary = "updated mcp.muninn in existing config (other servers preserved)"
+	} else {
+		summary = "added mcp.muninn to config"
+	}
+
+	fmt.Printf("  ✓ OpenCode: %s\n    %s\n", summary, path)
+	fmt.Println("  → Restart OpenCode to activate MuninnDB memory")
 	return nil
 }
 

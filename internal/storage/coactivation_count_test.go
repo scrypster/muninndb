@@ -216,7 +216,7 @@ func TestCoActivationCount_LegacyValueDecodesAsZero(t *testing.T) {
 	// peakWeight (bytes 18-21): 0.5 as float32 bits big-endian
 	binary.BigEndian.PutUint32(legacy[18:22], math.Float32bits(0.5))
 
-	_, _, _, _, _, coActivationCount := decodeAssocValue(legacy[:])
+	_, _, _, _, _, coActivationCount, _ := decodeAssocValue(legacy[:])
 	if coActivationCount != 0 {
 		t.Errorf("legacy 22-byte value: CoActivationCount got %d, want 0", coActivationCount)
 	}

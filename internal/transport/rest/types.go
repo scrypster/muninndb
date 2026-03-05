@@ -178,6 +178,7 @@ type AssociationItem struct {
 	RelType           uint16  `json:"rel_type"`
 	Weight            float32 `json:"weight"`
 	CoActivationCount uint32  `json:"co_activation_count"`
+	RestoredAt        int64   `json:"restored_at,omitempty"`
 }
 
 // GetEngramLinksRequest requests associations for an engram.

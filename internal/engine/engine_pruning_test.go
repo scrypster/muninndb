@@ -352,7 +352,7 @@ func TestAssocDecay_PrunesWeakEdges(t *testing.T) {
 	// Run decay with factor=0.95, minWeight=0.05.
 	// A→B: 0.8 * 0.95 = 0.76 (survives above threshold)
 	// A→C: 0.03 * 0.95 = 0.0285 < 0.05, but PeakWeight=0.03 → floor=0.0015 → clamped (not deleted)
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.95, 0.05)
+	removed, err := store.DecayAssocWeights(ctx, ws, 0.95, 0.05, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}

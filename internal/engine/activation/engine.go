@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/scrypster/muninndb/internal/storage"
+	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // DefaultWeights for composite scoring.
@@ -154,11 +155,12 @@ type ActivateRequest struct {
 
 // ActivateResult is what the transport layer serializes and returns.
 type ActivateResult struct {
-	QueryID     string
-	Activations []ScoredEngram
-	TotalFound  int
-	LatencyMs   float64
-	ProfileUsed string // resolved traversal profile name (e.g. "default", "causal")
+	QueryID       string
+	Activations   []ScoredEngram
+	TotalFound    int
+	LatencyMs     float64
+	ProfileUsed   string      // resolved traversal profile name (e.g. "default", "causal")
+	RestoredEdges []mbp.EdgeRef // edges lazily restored from archive during Phase 4.75
 }
 
 // ActivateResponseFrame is one streaming frame of results.
@@ -182,6 +184,12 @@ type ActivationStore interface {
 	// Returns 0 if not in cache; callers fall back to eng.LastAccess.
 	EngramLastAccessNs(wsPrefix [8]byte, id storage.ULID) int64
 	EngramIDsByCreatedRange(ctx context.Context, wsPrefix [8]byte, since, until time.Time, limit int) ([]storage.ULID, error)
+	// RestoreArchivedEdgesTransitive lazily restores archived edges for src and
+	// its direct neighbors, returning the set of restored destination IDs.
+	RestoreArchivedEdgesTransitive(ctx context.Context, wsPrefix [8]byte, src storage.ULID, maxDirect int, maxTransitive int) ([]storage.ULID, error)
+	// ArchiveBloomMayContain returns true if src may have archived edges
+	// (Bloom filter probabilistic check; false positives possible, no false negatives).
+	ArchiveBloomMayContain(id [16]byte) bool
 }
 
 // FTSIndex is the full-text search interface.
@@ -375,6 +383,9 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 		e.phase4_5TransitionBoost(ctx, ws, req.VaultID, fused)
 	}
 
+	// Phase 4.75: Lazy archive restore — check Bloom filter, restore dormant edges.
+	restoredEdges := e.phase4_75ArchiveRestore(ctx, ws, fused)
+
 	// Resolve traversal profile for Phase 5 and for audit logging.
 	// Always resolved so ProfileUsed is set on every activation, regardless of HopDepth.
 	profileName, profile := resolveProfile(req)
@@ -400,6 +411,7 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 
 	result.LatencyMs = float64(time.Since(start).Microseconds()) / 1000.0
 	result.ProfileUsed = profileName
+	result.RestoredEdges = restoredEdges
 
 	slog.Info("activation complete", "profile", profileName, "results", len(result.Activations), "elapsed_ms", result.LatencyMs)
 
@@ -846,6 +858,34 @@ func resolveProfile(req *ActivateRequest) (string, *TraversalProfile) {
 	}
 	inferredName := InferProfile(req.Context, req.VaultDefault)
 	return inferredName, GetProfile(inferredName)
+}
+
+// phase4_75ArchiveRestore checks the Bloom filter for archived edges among
+// the fused candidate IDs and lazily restores them before BFS traversal.
+// False positives from the Bloom filter trigger a cheap storage scan that
+// returns immediately when no archive keys are found; false negatives are
+// impossible, so no archived edges are silently skipped.
+// Returns the set of edges that were restored (src→dst pairs) for forwarding
+// to the Cortex via CognitiveForwarder.
+func (e *ActivationEngine) phase4_75ArchiveRestore(ctx context.Context, ws [8]byte, candidates []fusedCandidate) []mbp.EdgeRef {
+	var restoredEdges []mbp.EdgeRef
+	for _, c := range candidates {
+		if !e.store.ArchiveBloomMayContain([16]byte(c.id)) {
+			continue
+		}
+		// Restore top-10 direct + top-5 transitive neighbors.
+		restored, err := e.store.RestoreArchivedEdgesTransitive(ctx, ws, c.id, 10, 5)
+		if err != nil || len(restored) == 0 {
+			continue
+		}
+		for _, dst := range restored {
+			restoredEdges = append(restoredEdges, mbp.EdgeRef{
+				Src: [16]byte(c.id),
+				Dst: [16]byte(dst),
+			})
+		}
+	}
+	return restoredEdges
 }
 
 // phase5Traverse explores the association graph via level-by-level BFS from top candidates.

@@ -130,6 +130,12 @@ type KVPair struct {
 	Value []byte `msgpack:"value"`
 }
 
+// EdgeRef is a (src, dst) pair identifying an association edge.
+type EdgeRef struct {
+	Src [16]byte `msgpack:"src"`
+	Dst [16]byte `msgpack:"dst"`
+}
+
 // CognitiveSideEffect carries cognitive side effects from a Lobe activation to the Cortex.
 type CognitiveSideEffect struct {
 	QueryID       string            `msgpack:"query_id"`
@@ -137,6 +143,8 @@ type CognitiveSideEffect struct {
 	Timestamp     int64             `msgpack:"timestamp"`
 	CoActivations []CoActivationRef `msgpack:"co_activations,omitempty"`
 	AccessedIDs   [][16]byte        `msgpack:"accessed_ids,omitempty"`
+	ArchivedEdges []EdgeRef         `msgpack:"archived_edges,omitempty"`
+	RestoredEdges []EdgeRef         `msgpack:"restored_edges,omitempty"`
 }
 
 // CoActivationRef is a pair of engram IDs that were co-activated.

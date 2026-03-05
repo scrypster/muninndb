@@ -179,6 +179,7 @@ func (w *RESTEngineWrapper) GetEngramLinks(ctx context.Context, req *GetEngramLi
 			RelType:           uint16(a.RelType),
 			Weight:            a.Weight,
 			CoActivationCount: a.CoActivationCount,
+			RestoredAt:        int64(a.RestoredAt),
 		}
 	}
 	return &GetEngramLinksResponse{Links: links}, nil

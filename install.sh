@@ -47,7 +47,17 @@ URL="https://github.com/${REPO}/releases/download/${TAG}/${BIN_NAME}-${PLATFORM}
 TMP=$(mktemp)
 
 echo "  Downloading muninn ${TAG} for ${OS}/${ARCH}..."
-curl -fsSL --progress-bar "${URL}" -o "${TMP}"
+HTTP_CODE=$(curl -sSL --progress-bar -w "%{http_code}" -o "${TMP}" "${URL}")
+if [ "${HTTP_CODE}" != "200" ]; then
+  rm -f "${TMP}"
+  echo "" >&2
+  echo "muninn: download failed (HTTP ${HTTP_CODE})" >&2
+  echo "  URL: ${URL}" >&2
+  echo "" >&2
+  echo "  This may mean the release asset for ${PLATFORM} is not yet available." >&2
+  echo "  Download manually: https://github.com/${REPO}/releases/tag/${TAG}" >&2
+  exit 1
+fi
 chmod +x "${TMP}"
 
 # ── Install ──────────────────────────────────────────────────────────────────

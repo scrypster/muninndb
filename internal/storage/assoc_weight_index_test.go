@@ -130,7 +130,7 @@ func TestAssocWeightIndex_DecayFloorsClampsEntry(t *testing.T) {
 
 	// Decay by 50% with minWeight=0.1 — newW=0.025 < 0.1, floor = 0.05*0.05 = 0.0025.
 	// Dynamic floor: edge is clamped, NOT deleted — removed count should be 0.
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.1)
+	removed, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.1, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}

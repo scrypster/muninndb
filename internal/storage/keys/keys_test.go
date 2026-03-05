@@ -277,3 +277,41 @@ func TestEntityKeyLayout(t *testing.T) {
 	require.Equal(t, byte(0x21), rk[0], "RelationshipKey must start with 0x21")
 	require.Len(t, rk, 42, "RelationshipKey must be 42 bytes")
 }
+
+func TestArchiveAssocKey_Layout(t *testing.T) {
+	ws := [8]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	src := [16]byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F}
+	dst := [16]byte{0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F}
+
+	key := ArchiveAssocKey(ws, src, dst)
+
+	// Total length: 1 (prefix) + 8 (ws) + 16 (src) + 16 (dst) = 41 bytes
+	if len(key) != 41 {
+		t.Fatalf("expected 41 bytes, got %d", len(key))
+	}
+	if key[0] != 0x25 {
+		t.Errorf("prefix byte: got 0x%02X, want 0x25", key[0])
+	}
+	if !bytes.Equal(key[1:9], ws[:]) {
+		t.Error("ws mismatch")
+	}
+	if !bytes.Equal(key[9:25], src[:]) {
+		t.Error("src mismatch")
+	}
+	if !bytes.Equal(key[25:41], dst[:]) {
+		t.Error("dst mismatch")
+	}
+}
+
+func TestArchiveAssocPrefixForID_Length(t *testing.T) {
+	ws := [8]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	src := [16]byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F}
+
+	prefix := ArchiveAssocPrefixForID(ws, src)
+	if len(prefix) != 25 {
+		t.Fatalf("expected 25 bytes, got %d", len(prefix))
+	}
+	if prefix[0] != 0x25 {
+		t.Errorf("prefix byte: got 0x%02X, want 0x25", prefix[0])
+	}
+}

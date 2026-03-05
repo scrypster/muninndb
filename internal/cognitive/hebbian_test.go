@@ -68,7 +68,7 @@ func (m *mockHebbianStore) GetAssocWeight(_ context.Context, _ [8]byte, src, dst
 	return m.weights[pairKeyBytes(src, dst)], nil
 }
 
-func (m *mockHebbianStore) DecayAssocWeights(_ context.Context, _ [8]byte, _ float64, _ float32) (int, error) {
+func (m *mockHebbianStore) DecayAssocWeights(_ context.Context, _ [8]byte, _ float64, _ float32, _ float64) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.decayed++

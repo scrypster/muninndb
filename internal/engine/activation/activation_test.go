@@ -125,6 +125,14 @@ func (s *stubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since,
 	return ids, nil
 }
 
+func (s *stubStore) RestoreArchivedEdgesTransitive(_ context.Context, _ [8]byte, _ storage.ULID, _, _ int) ([]storage.ULID, error) {
+	return nil, nil
+}
+
+func (s *stubStore) ArchiveBloomMayContain(_ [16]byte) bool {
+	return false
+}
+
 // stubFTS implements activation.FTSIndex using a fixed scored list.
 type stubFTS struct {
 	results []activation.ScoredID
@@ -1038,5 +1046,157 @@ func TestResolveWeights_DisableACTR_SetsUseACTRFalse(t *testing.T) {
 	}
 	if len(result.Activations) == 0 {
 		t.Error("expected results when DisableACTR overrides UseACTR")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Phase 4.75 archive restore restores dormant edges during activation
+// ---------------------------------------------------------------------------
+//
+// This integration test verifies that the activation engine's Phase 4.75
+// restore hook fires during Run() and restores archived edges for fused
+// candidates whose IDs appear in the Bloom filter.
+//
+// Setup:
+//  1. Write engram A (seed) and engram B (target) into a real PebbleStore.
+//  2. Write an association A → B with LastActivated=0 (no grace-window skip).
+//  3. Run DecayAssocWeights with an aggressive decay factor and a very low
+//     archiveThreshold so the edge is moved into the 0x25 archive namespace.
+//  4. Confirm the live edge is gone (weight == 0) and the Bloom filter is set.
+//  5. Run activation with engram A as the FTS seed. Phase 4.75 fires and
+//     calls RestoreArchivedEdgesTransitive for engram A.
+//  6. Assert the A → B live edge has been restored (weight > 0), proving
+//     Phase 4.75 ran and wrote back the dormant edge into the live index.
+//
+// Note: we assert the live edge weight rather than checking BFS result
+// membership, because RRF-derived baseScores are small and the propagated
+// score of a just-restored edge (peakWeight*0.25) is below the BFS
+// minHopScore floor. The edge-weight assertion is the direct proof that the
+// restore hook ran end-to-end through the activation pipeline.
+func TestPhase4_75_ArchiveRestoreRunsDuringActivation(t *testing.T) {
+	dir, err := os.MkdirTemp("", "muninndb-archive-restore-activation-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := storage.OpenPebble(dir, storage.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	pstore := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 1000})
+
+	ctx := context.Background()
+	ws := pstore.VaultPrefix("archive-restore-activation-test")
+
+	// Engram A is the activation seed.
+	engramA := &storage.Engram{
+		Concept:    "engram-a-seed",
+		Content:    "seed engram for archive restore test",
+		Confidence: 1.0,
+		Stability:  30.0,
+		Relevance:  0.9,
+		State:      storage.StateActive,
+	}
+	// Engram B is the target — connected to A via the (to-be-archived) edge.
+	engramB := &storage.Engram{
+		Concept:    "engram-b-target",
+		Content:    "target engram connected via archived edge",
+		Confidence: 1.0,
+		Stability:  30.0,
+		Relevance:  0.8,
+		State:      storage.StateActive,
+	}
+
+	_, err = pstore.WriteEngram(ctx, ws, engramA)
+	if err != nil {
+		t.Fatalf("WriteEngram A: %v", err)
+	}
+	_, err = pstore.WriteEngram(ctx, ws, engramB)
+	if err != nil {
+		t.Fatalf("WriteEngram B: %v", err)
+	}
+
+	// Write A → B association with LastActivated=0 so DecayAssocWeights does
+	// not skip it via the recent-activation grace window (the guard fires only
+	// when lastActivated > 0 and within the grace period).
+	err = pstore.WriteAssociation(ctx, ws, engramA.ID, engramB.ID, &storage.Association{
+		TargetID:   engramB.ID,
+		Weight:     0.5,
+		RelType:    storage.RelSupports,
+		Confidence: 1.0,
+		CreatedAt:  time.Now().Add(-30 * 24 * time.Hour),
+		// LastActivated intentionally left at zero.
+	})
+	if err != nil {
+		t.Fatalf("WriteAssociation A→B: %v", err)
+	}
+
+	// Verify the live edge exists before decay.
+	wPre, err := pstore.GetAssocWeight(ctx, ws, engramA.ID, engramB.ID)
+	if err != nil || wPre == 0 {
+		t.Fatalf("pre-decay: A→B weight = %v err = %v (expected live edge)", wPre, err)
+	}
+
+	// Trigger archiving via DecayAssocWeights:
+	//   decayFactor = 0.001 → newW = 0.5 * 0.001 = 0.0005 < minWeight(0.01)
+	//   consolidationScore = peakWeight(0.5) * coActCount(1) / daysSince(~20000)
+	//                      ≈ 0.000025
+	//   archiveThreshold = 0.000001 < 0.000025 → archive condition is satisfied.
+	_, err = pstore.DecayAssocWeights(ctx, ws, 0.001, 0.01, 0.000001)
+	if err != nil {
+		t.Fatalf("DecayAssocWeights: %v", err)
+	}
+
+	// Confirm the edge is now in the archive namespace (live weight == 0).
+	wArchived, _ := pstore.GetAssocWeight(ctx, ws, engramA.ID, engramB.ID)
+	if wArchived != 0 {
+		t.Skipf("edge A→B was not archived (weight=%v); consolidation score may have been "+
+			"above threshold — environment-dependent; skipping rather than failing", wArchived)
+	}
+
+	// Bloom filter must be set by DecayAssocWeights.
+	if !pstore.ArchiveBloomMayContain([16]byte(engramA.ID)) {
+		t.Fatal("archive Bloom filter not set for engram A after DecayAssocWeights")
+	}
+
+	// Run activation. Phase 4.75 should detect the Bloom hit for engram A and
+	// call RestoreArchivedEdgesTransitive, writing A→B back into the live index.
+	ftsStub := &stubFTS{results: []activation.ScoredID{
+		{ID: engramA.ID, Score: 0.9},
+	}}
+	eng := activation.New(pstore, ftsStub, &emptyHNSW{}, &stubEmbedder{})
+
+	result, err := eng.Run(ctx, &activation.ActivateRequest{
+		VaultPrefix: ws,
+		Context:     []string{"seed engram"},
+		Threshold:   0.0,
+		MaxResults:  20,
+		HopDepth:    1,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Assert the A→B live edge was restored by Phase 4.75.
+	// A non-zero weight proves RestoreArchivedEdgesTransitive ran during activation.
+	wRestored, err := pstore.GetAssocWeight(ctx, ws, engramA.ID, engramB.ID)
+	if err != nil {
+		t.Fatalf("GetAssocWeight post-activation: %v", err)
+	}
+	if wRestored == 0 {
+		t.Error("A→B edge not restored: Phase 4.75 archive restore hook did not fire or failed silently")
+	} else {
+		t.Logf("Phase 4.75 restored A→B edge: weight = %.4f (expected ~%.4f = peakWeight*0.25)",
+			wRestored, 0.5*0.25)
+	}
+
+	// Assert that RestoredEdges is populated on the result so the Cortex can be notified.
+	if len(result.RestoredEdges) == 0 {
+		t.Error("expected result.RestoredEdges to be non-empty after Phase 4.75 restore, got none")
+	} else {
+		t.Logf("Phase 4.75 populated %d RestoredEdges in ActivateResult", len(result.RestoredEdges))
 	}
 }

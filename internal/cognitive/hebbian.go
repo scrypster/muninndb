@@ -25,7 +25,8 @@ type HebbianStore interface {
 	GetAssocWeight(ctx context.Context, ws [8]byte, src, dst [16]byte) (float32, error)
 	// DecayAssocWeights multiplies all association weights for ws by decayFactor,
 	// deleting entries that fall below minWeight. Returns count deleted.
-	DecayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32) (int, error)
+	// archiveThreshold > 0 enables moving strong floor-hit edges to the 0x25 archive namespace.
+	DecayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error)
 	// UpdateAssocWeightBatch atomically updates multiple association weights in a single batch.
 	UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error
 }

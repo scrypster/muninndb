@@ -2,6 +2,7 @@ package mbp
 
 import (
 	"testing"
+	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -408,6 +409,37 @@ func TestRoundTrip_CognitiveSideEffect(t *testing.T) {
 		if got.AccessedIDs[i] != id {
 			t.Errorf("AccessedIDs[%d] mismatch: got %v, want %v", i, got.AccessedIDs[i], id)
 		}
+	}
+}
+
+func TestCognitiveSideEffect_ArchiveRestore_RoundTrip(t *testing.T) {
+	orig := CognitiveSideEffect{
+		QueryID:      "test-query",
+		OriginNodeID: "node-1",
+		Timestamp:    time.Now().UnixNano(),
+		ArchivedEdges: []EdgeRef{
+			{Src: [16]byte{1}, Dst: [16]byte{2}},
+		},
+		RestoredEdges: []EdgeRef{
+			{Src: [16]byte{3}, Dst: [16]byte{4}},
+		},
+	}
+
+	data, err := msgpack.Marshal(&orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got CognitiveSideEffect
+	if err = msgpack.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(got.ArchivedEdges) != 1 {
+		t.Errorf("ArchivedEdges: got %d, want 1", len(got.ArchivedEdges))
+	}
+	if len(got.RestoredEdges) != 1 {
+		t.Errorf("RestoredEdges: got %d, want 1", len(got.RestoredEdges))
 	}
 }
 

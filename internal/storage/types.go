@@ -108,6 +108,7 @@ type Association struct {
 	LastActivated     int32   // Unix seconds (not nanoseconds; int32 is sufficient)
 	PeakWeight        float32 // historical max Weight; 0 = untracked (legacy pre-upgrade)
 	CoActivationCount uint32  // lifetime Hebbian co-activation count; 0 = pre-feature/unknown
+	RestoredAt        int32   // Unix seconds; 0 = never restored
 }
 
 // LifecycleState is the engram state machine (uint8 on disk).

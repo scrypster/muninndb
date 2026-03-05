@@ -35,6 +35,7 @@ type PlasticityConfig struct {
 	// Association edge decay (applied each prune pass, ~60s)
 	AssocDecayFactor *float32 `json:"assoc_decay_factor,omitempty"` // multiplier per pass (e.g. 0.95 = 5% decay); 0 = disabled
 	AssocMinWeight   *float32 `json:"assoc_min_weight,omitempty"`   // edges below this are deleted (e.g. 0.05)
+	ArchiveThreshold *float64 `json:"archive_threshold,omitempty"` // consolidation score threshold for archiving (default 0.05)
 
 	// Behavior mode controls how AI agents use memory
 	BehaviorMode         *string `json:"behavior_mode,omitempty"`          // "autonomous"|"prompted"|"selective"|"custom"
@@ -84,6 +85,7 @@ type ResolvedPlasticity struct {
 	// Association edge decay
 	AssocDecayFactor float32 `json:"assoc_decay_factor"` // multiplier per prune pass; 0 = disabled
 	AssocMinWeight   float32 `json:"assoc_min_weight"`   // edges below this are deleted
+	ArchiveThreshold float64 `json:"archive_threshold"`  // consolidation score threshold for archiving
 	// Behavior mode
 	BehaviorMode         string `json:"behavior_mode"`
 	BehaviorInstructions string `json:"behavior_instructions"`
@@ -116,6 +118,7 @@ type plasticityPreset struct {
 	RetentionDays        float32
 	AssocDecayFactor     float32
 	AssocMinWeight       float32
+	ArchiveThreshold     float64
 	BehaviorMode         string
 	InlineEnrichment  string
 	EnrichmentEnabled bool
@@ -143,6 +146,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		RetentionDays:        0,
 		AssocDecayFactor:     0.95,
 		AssocMinWeight:       0.05,
+		ArchiveThreshold:     0.05,
 		BehaviorMode:         "autonomous",
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
@@ -168,6 +172,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		RetentionDays:        0,
 		AssocDecayFactor:     0.95,
 		AssocMinWeight:       0.05,
+		ArchiveThreshold:     0.05,
 		BehaviorMode:         "autonomous",
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
@@ -193,6 +198,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		RetentionDays:        0,
 		AssocDecayFactor:     0,
 		AssocMinWeight:       0,
+		ArchiveThreshold:     0.05,
 		BehaviorMode:         "selective",
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
@@ -218,6 +224,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		RetentionDays:        0,
 		AssocDecayFactor:     0.98,
 		AssocMinWeight:       0.03,
+		ArchiveThreshold:     0.05,
 		BehaviorMode:         "autonomous",
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
@@ -258,6 +265,7 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		RetentionDays:        p.RetentionDays,
 		AssocDecayFactor:     p.AssocDecayFactor,
 		AssocMinWeight:       p.AssocMinWeight,
+		ArchiveThreshold:     p.ArchiveThreshold,
 		BehaviorMode:         p.BehaviorMode,
 		InlineEnrichment:     p.InlineEnrichment,
 		EnrichmentEnabled:    p.EnrichmentEnabled,
@@ -384,6 +392,16 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 			w = 1
 		}
 		r.AssocMinWeight = w
+	}
+	if cfg.ArchiveThreshold != nil {
+		v := *cfg.ArchiveThreshold
+		if v < 0 {
+			v = 0
+		}
+		if v > 1 {
+			v = 1
+		}
+		r.ArchiveThreshold = v
 	}
 	if cfg.BehaviorMode != nil {
 		if validBehaviorMode(*cfg.BehaviorMode) {

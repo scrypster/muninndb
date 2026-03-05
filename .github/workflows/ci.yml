@@ -283,6 +283,17 @@ jobs:
             kill $SERVER_PID 2>/dev/null || true
           fi
 
+  # ── Shell script linting ─────────────────────────────────────────────
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        run: shellcheck install.sh
+
   # ── API spec validation — catches drift before it ships ───────────────
   api-spec-validation:
     name: API spec validation

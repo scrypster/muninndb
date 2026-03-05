@@ -479,6 +479,14 @@ func (s *internalStubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte
 	return nil, nil
 }
 
+func (s *internalStubStore) RestoreArchivedEdgesTransitive(_ context.Context, _ [8]byte, _ storage.ULID, _, _ int) ([]storage.ULID, error) {
+	return nil, nil
+}
+
+func (s *internalStubStore) ArchiveBloomMayContain(_ [16]byte) bool {
+	return false
+}
+
 // stubTransitionStore implements PASTransitionStore for testing.
 type stubTransitionStore struct {
 	transitions map[storage.ULID][]storage.TransitionTarget

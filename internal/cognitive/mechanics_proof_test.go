@@ -632,7 +632,7 @@ func (m *mockHebbianStore) GetAssocWeight(ctx context.Context, ws [8]byte, src, 
 	return weight, nil
 }
 
-func (m *mockHebbianStore) DecayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32) (int, error) {
+func (m *mockHebbianStore) DecayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	removed := 0
