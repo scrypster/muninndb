@@ -246,14 +246,7 @@ func encodeArchiveValue(relType RelType, confidence float32, createdAt time.Time
 }
 ```
 
-   c. Update ALL callers of `decodeAssocValue` to accept the new 7th return value. Each call site currently uses 6 returns -- add `_` or a named variable for `restoredAt`. Known callers in `internal/storage/association.go`:
-   - Line 185 in `GetAssociations` (add `_`)
-   - Line 252 in `associationsForOne` (add `_`)
-   - Line 294 in `getAssocValue` (add `_` and update return signature)
-   - Line 309 in `UpdateAssocWeight` (add `_`)
-   - Line 361 in `UpdateAssocWeightBatch` (add `_`)
-   - Line 497 in `DecayAssocWeights` (add `_`)
-   - Line 611 in `GetChildrenByParent` (add `_`)
+   c. Run `grep -rn "decodeAssocValue" internal/storage/` to find all callers in the package. Update each to destructure the new 7th return value `restoredAt`. Unused sites should assign `_ = restoredAt`.
 
 4. **Run to pass.**
 
@@ -376,9 +369,11 @@ When an edge hits the dynamic floor AND its consolidation score exceeds `archive
 |------|--------|
 | `internal/storage/association.go` | Modify `DecayAssocWeights` signature to accept `archiveThreshold float64`, add archive branch in `flushChunk` |
 | `internal/storage/association_test.go` | Add `TestDecayAssocWeights_ArchivesStrongEdge` |
+| `internal/storage/store.go` | Modify: `EngineStore` interface — update `DecayAssocWeights` signature to include the new `archiveThreshold float64` parameter |
 | `internal/cognitive/hebbian.go` | Update `HebbianStore` interface to match new signature |
 | `internal/cognitive/store_adapters.go` | Update adapter to pass through new param |
 | `internal/engine/engine.go` | Pass `resolved.ArchiveThreshold` to `DecayAssocWeights` |
+| `internal/engine/engine_pruning_test.go` | Modify: update the call to `store.DecayAssocWeights(ctx, ws, 0.95, 0.05)` to pass the new `archiveThreshold` argument |
 | `cmd/bench/adapters.go` | Update bench adapter |
 | `internal/cognitive/hebbian_test.go` | Update mock |
 | `internal/cognitive/mechanics_proof_test.go` | Update mock |
@@ -496,13 +491,15 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 
    (The existing `batch.Delete` for 0x03/0x04 already runs for all entries at the top of the loop.)
 
-   e. Update the interface in `internal/cognitive/hebbian.go`:
+   e. Update `EngineStore` interface in `internal/storage/store.go` to match the new `DecayAssocWeights` signature (add `archiveThreshold float64` parameter).
+
+   f. Update the interface in `internal/cognitive/hebbian.go`:
 
 ```go
 	DecayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error)
 ```
 
-   f. Update adapter in `internal/cognitive/store_adapters.go`:
+   g. Update adapter in `internal/cognitive/store_adapters.go`:
 
 ```go
 func (a *hebbianStoreAdapter) DecayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error) {
@@ -536,7 +533,7 @@ cd /Users/mjbonanno/github.com/scrypster/muninndb/.worktrees/feat-association-ar
 5. **Commit.**
 
 ```bash
-git add internal/storage/association.go internal/storage/association_test.go internal/cognitive/hebbian.go internal/cognitive/store_adapters.go internal/engine/engine.go cmd/bench/adapters.go internal/cognitive/hebbian_test.go internal/cognitive/mechanics_proof_test.go
+git add internal/storage/association.go internal/storage/association_test.go internal/storage/store.go internal/cognitive/hebbian.go internal/cognitive/store_adapters.go internal/engine/engine.go internal/engine/engine_pruning_test.go cmd/bench/adapters.go internal/cognitive/hebbian_test.go internal/cognitive/mechanics_proof_test.go
 git commit -m "feat(storage): archive trigger in DecayAssocWeights for strong dormant edges"
 ```
 
@@ -544,14 +541,16 @@ git commit -m "feat(storage): archive trigger in DecayAssocWeights for strong do
 
 ## Task 5: Bloom filter over archived source engram IDs
 
-Add an in-memory Bloom filter that tracks which source engram IDs have archived edges. Built on startup by scanning `0x25`, updated on archive (add) and restore (remove).
+Add an in-memory Bloom filter that tracks which source engram IDs have archived edges. Built on startup by scanning `0x25`, updated on archive (add).
+
+> **Note:** Standard `bits-and-blooms/bloom` does not support removal. False positives from non-removed entries are acceptable — they trigger a cheap 0x25 prefix scan that finds nothing. The weekly GC pass (Task 11) can call `RebuildArchiveBloom` to periodically compact the filter.
 
 ### Files
 
 | File | Action |
 |------|--------|
 | `go.mod` / `go.sum` | Add `github.com/bits-and-blooms/bloom/v3` dependency |
-| `internal/storage/archive_bloom.go` | New file: `ArchiveBloom` struct with `Init`, `Add`, `MayContain`, `Remove` |
+| `internal/storage/archive_bloom.go` | New file: `ArchiveBloom` struct with `Init`, `Add`, `MayContain` |
 | `internal/storage/archive_bloom_test.go` | New file: test Bloom filter ops |
 | `internal/storage/impl.go` | Add `archiveBloom *ArchiveBloom` field to `PebbleStore`, init in `NewPebbleStore` |
 
@@ -1061,25 +1060,20 @@ Insert the archive restore call between Phase 4.5 (PAS transition boost) and Pha
 
 | File | Action |
 |------|--------|
-| `internal/engine/activation/engine.go` | Add `phase4_75ArchiveRestore` method, call it between Phase 4.5 and Phase 5 |
-| `internal/engine/activation/activation_test.go` | Add integration test |
-| `internal/storage/store.go` | Add `RestoreArchivedEdgesTransitive` to `StorageAPI` interface (or create a new interface) |
+| `internal/engine/activation/engine.go` | Add `phase4_75ArchiveRestore` method, call it between Phase 4.5 and Phase 5; add `RestoreArchivedEdgesTransitive` and `ArchiveBloomMayContain` to the `ActivationStore` interface |
+| `internal/engine/activation/activation_test.go` | Add integration test; update any mocks of `ActivationStore` used in activation tests |
 
 ### Steps
 
 1. **Failing test.** Add in `internal/engine/activation/activation_test.go` (or a new test file):
 
 ```go
-func TestPhase4_75_ArchiveRestore_Called(t *testing.T) {
-	// Verify that the archive restore phase is invoked between Phase 4.5 and Phase 5.
-	// Use a mock store that records RestoreArchivedEdgesTransitive calls.
-	// This test verifies the wiring, not the restore logic (covered in storage tests).
-	// Implementation depends on how the store interface is structured.
-	t.Skip("TODO: implement after wiring is complete")
+func TestPhase4_75ArchiveRestore_RestoredEdgesVisibleToBFS(t *testing.T) {
+	// 1. Create a store with an archived edge (src → dst at 0x25)
+	// 2. Run activation with src as a seed engram
+	// 3. Assert dst appears in the activation results
 }
 ```
-
-NOTE: The exact test strategy depends on how the activation engine accesses the store. The engine uses `e.store` which is a `StorageAPI` interface. The test must verify that `RestoreArchivedEdgesTransitive` is called for the fused candidate IDs when the Bloom filter reports hits.
 
 2. **Run to fail.**
 
@@ -1089,7 +1083,7 @@ cd /Users/mjbonanno/github.com/scrypster/muninndb/.worktrees/feat-association-ar
 
 3. **Implement.**
 
-   a. Add `RestoreArchivedEdgesTransitive` to the store interface used by the activation engine (check `internal/engine/activation/engine.go` for the exact interface -- likely `StorageAPI` or a field-level interface).
+   a. Add `RestoreArchivedEdgesTransitive` and `ArchiveBloomMayContain` to the `ActivationStore` interface in `internal/engine/activation/engine.go` (around the existing interface definition). Also update any mocks of `ActivationStore` used in activation tests.
 
    b. Add `phase4_75ArchiveRestore` method in `internal/engine/activation/engine.go`:
 
@@ -1123,7 +1117,7 @@ cd /Users/mjbonanno/github.com/scrypster/muninndb/.worktrees/feat-association-ar
 5. **Commit.**
 
 ```bash
-git add internal/engine/activation/engine.go internal/storage/store.go
+git add internal/engine/activation/engine.go internal/engine/activation/activation_test.go
 git commit -m "feat(activation): insert archive restore phase between Phase 4.5 and Phase 5"
 ```
 
@@ -1274,7 +1268,7 @@ cd /Users/mjbonanno/github.com/scrypster/muninndb/.worktrees/feat-association-ar
 
 3. **Implement.**
 
-   a. Add `getAssocValueFull` method that returns all 7 decoded fields including `restoredAt`:
+   a. Consider extending the existing unexported `getAssocValue` helper (in `association.go`) to return `restoredAt` instead of adding a new `getAssocValueFull` function, to avoid duplication. If a new function is preferred for clarity, add `getAssocValueFull` that returns all 7 decoded fields including `restoredAt`:
 
 ```go
 func (ps *PebbleStore) getAssocValueFull(wsPrefix [8]byte, a, b ULID) (RelType, float32, time.Time, int32, float32, uint32, int32) {
@@ -1522,7 +1516,7 @@ Verify that the existing `CognitiveForwarder` and `CognitiveSideEffect` MBP prot
 
 ### Steps
 
-1. **Failing test.** Add in `internal/transport/mbp/cluster_frames_test.go`:
+1. **Failing test.** Add in `internal/transport/mbp/cluster_frames_test.go`. Add `"github.com/vmihailenco/msgpack/v5"` to the test file's imports if not already present.
 
 ```go
 func TestCognitiveSideEffect_ArchiveRestore_RoundTrip(t *testing.T) {
@@ -1538,13 +1532,13 @@ func TestCognitiveSideEffect_ArchiveRestore_RoundTrip(t *testing.T) {
 		},
 	}
 
-	data, err := orig.MarshalMsgpack()
+	data, err := msgpack.Marshal(&orig)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 
 	var got CognitiveSideEffect
-	if err := got.UnmarshalMsgpack(data); err != nil {
+	if err = msgpack.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
