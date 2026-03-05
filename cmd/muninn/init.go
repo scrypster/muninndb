@@ -40,6 +40,7 @@ func detectInstalledTools() []toolChoice {
 		{key: "openclaw", displayName: "OpenClaw", configPath: openClawConfigPath()},
 		{key: "windsurf", displayName: "Windsurf", configPath: windsurfConfigPath()},
 		{key: "codex", displayName: "Codex", configPath: codexConfigPath()},
+		{key: "opencode", displayName: "OpenCode", configPath: openCodeConfigPath()},
 		{key: "vscode", displayName: "VS Code", configPath: ""},
 		{key: "manual", displayName: "Other / manual config", configPath: ""},
 	}
@@ -57,7 +58,7 @@ func detectInstalledTools() []toolChoice {
 // runInit runs the first-time onboarding wizard (or non-interactive setup via flags).
 func runInit() {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	toolFlag := fs.String("tool", "", "AI tools to configure, comma-separated: claude,claude-code,cursor,openclaw,windsurf,codex,vscode,manual")
+	toolFlag := fs.String("tool", "", "AI tools to configure, comma-separated: claude,claude-code,cursor,openclaw,windsurf,codex,opencode,vscode,manual")
 	tokenFlag := fs.String("token", "", "Use this specific token (skip generation)")
 	noToken := fs.Bool("no-token", false, "Disable token authentication (open MCP endpoint)")
 	noStart := fs.Bool("no-start", false, "Skip starting the server")
@@ -687,10 +688,15 @@ func configureNamedTools(tools []string, mcpURL, token string) []string {
 				errs = append(errs, fmt.Sprintf("Codex: %v", err))
 				fmt.Fprintf(os.Stderr, "  ✗ Codex: %v\n", err)
 			}
+		case "opencode":
+			if err := configureOpenCode(mcpURL, token); err != nil {
+				errs = append(errs, fmt.Sprintf("OpenCode: %v", err))
+				fmt.Fprintf(os.Stderr, "  ✗ OpenCode: %v\n", err)
+			}
 		case "manual", "other":
 			printManualInstructions(mcpURL, token)
 		default:
-			fmt.Fprintf(os.Stderr, "  unknown tool: %q (use: claude, claude-code, cursor, vscode, windsurf, openclaw, codex, manual)\n", t)
+			fmt.Fprintf(os.Stderr, "  unknown tool: %q (use: claude, claude-code, cursor, vscode, windsurf, openclaw, opencode, codex, manual)\n", t)
 		}
 	}
 	return errs

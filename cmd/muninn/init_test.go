@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -165,6 +166,60 @@ func TestDetectTools(t *testing.T) {
 		if tool.displayName == "" {
 			t.Error("tool missing displayName")
 		}
+	}
+}
+
+func TestDetectInstalledTools_IncludesOpenCode(t *testing.T) {
+	tools := detectInstalledTools()
+	for _, tool := range tools {
+		if tool.key == "opencode" {
+			if tool.displayName != "OpenCode" {
+				t.Errorf("displayName = %q, want \"OpenCode\"", tool.displayName)
+			}
+			if tool.configPath == "" {
+				t.Error("configPath should not be empty")
+			}
+			return
+		}
+	}
+	t.Error("opencode not found in detectInstalledTools()")
+}
+
+func TestConfigureNamedTools_OpenCode(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	out := captureStdout(func() {
+		errs := configureNamedTools([]string{"opencode"}, "http://localhost:8750/mcp", "tok123")
+		if len(errs) > 0 {
+			t.Errorf("unexpected errors: %v", errs)
+		}
+	})
+
+	if !strings.Contains(out, "✓") || !strings.Contains(out, "OpenCode") {
+		t.Errorf("expected success output, got: %s", out)
+	}
+
+	data, err := os.ReadFile(openCodeConfigPath())
+	if err != nil {
+		t.Fatalf("config not written: %v", err)
+	}
+	var cfg map[string]any
+	json.Unmarshal(data, &cfg)
+	muninn := cfg["mcp"].(map[string]any)["muninn"].(map[string]any)
+	if muninn["type"] != "remote" {
+		t.Errorf("type = %v, want \"remote\"", muninn["type"])
+	}
+}
+
+func TestUnknownToolMessage_IncludesOpenCode(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+	stderr := captureStderr(func() {
+		configureNamedTools([]string{"notarealtool"}, "http://localhost:8750/mcp", "")
+	})
+	if !strings.Contains(stderr, "opencode") {
+		t.Errorf("unknown-tool error should list 'opencode', got: %s", stderr)
 	}
 }
 
