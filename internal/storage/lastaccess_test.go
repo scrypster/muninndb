@@ -10,8 +10,7 @@ import (
 
 func newTestPebbleStore(t *testing.T) *PebbleStore {
 	t.Helper()
-	db := openTestPebble(t)
-	return NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	return openTestStore(t)
 }
 
 func TestWriteLastAccessEntry_AndScan(t *testing.T) {

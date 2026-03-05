@@ -39,7 +39,7 @@ func TestAssociationsForOne_CacheMiss(t *testing.T) {
 	}
 
 	// Use a fresh store so the assoc cache is cold.
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 
 	assocs, err := fresh.associationsForOne(ws, idA, 50)
 	if err != nil {
@@ -115,7 +115,7 @@ func TestUpdateAssocWeightBatch_SingleUpdate(t *testing.T) {
 	}
 
 	// Verify via GetAssociations on a fresh (cold-cache) store.
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	results, err := fresh.GetAssociations(ctx, ws, []ULID{idA}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)
@@ -383,11 +383,14 @@ func TestDecodeAssocValue_26Bytes_RestoredAtZero(t *testing.T) {
 }
 
 // newTestStore creates a PebbleStore backed by a temp dir.
-// openTestPebble already registers Cleanup for the DB; we just wrap it in a store.
+// store.Close() drains background goroutines, closes the DB, and removes the dir.
+//
+// Do NOT use openTestPebble here: PebbleStore.Close() already calls
+// db.Close() internally. A second db.Close() from openTestPebble's cleanup
+// would cause pebble to panic with "pebble: closed".
 func newTestStore(t *testing.T) *PebbleStore {
 	t.Helper()
-	db := openTestPebble(t)
-	return NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	return openTestStore(t)
 }
 
 // TestWriteAssociationGetAssociationsRoundtrip verifies that WriteAssociation persists
@@ -486,7 +489,7 @@ func TestUpdateAssocWeightPersistsCorrectly(t *testing.T) {
 	}
 
 	// Force a cache miss by creating a fresh store backed by the same DB.
-	store2 := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	store2 := newFreshStore(t, store.db)
 	results2, err := store2.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations (fresh store): %v", err)

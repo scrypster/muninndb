@@ -20,9 +20,8 @@ func TestScanEngrams_ErrorPropagation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("scan-test")
 	ctx := context.Background()
 

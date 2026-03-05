@@ -2,12 +2,26 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
 )
+
+// isClosedPanic reports whether the recovered panic value represents a
+// "pebble: closed" condition. Pebble can panic with either an error value
+// (implementing the error interface with pebble.ErrClosed) or a formatted
+// string message containing "pebble: closed" when the WAL writer is torn down.
+func isClosedPanic(r any) bool {
+	if err, ok := r.(error); ok {
+		return errors.Is(err, pebble.ErrClosed)
+	}
+	// Pebble's applyInternal panics with a formatted string in some code paths.
+	return strings.Contains(fmt.Sprintf("%v", r), pebble.ErrClosed.Error())
+}
 
 const walSyncInterval = 10 * time.Millisecond
 
@@ -54,9 +68,10 @@ const walSyncInterval = 10 * time.Millisecond
 //	  walSyncInterval (10ms) via LogData(nil, pebble.Sync), providing a bounded
 //	  durability window equivalent to MySQL innodb_flush_log_at_trx_commit=2.
 type walSyncer struct {
-	db   *pebble.DB
-	stop chan struct{}
-	done chan struct{}
+	db      *pebble.DB
+	stop    chan struct{}
+	done    chan struct{}
+	stopped atomic.Bool // set true before signalling the goroutine to stop
 }
 
 func newWALSyncer(db *pebble.DB) *walSyncer {
@@ -71,54 +86,63 @@ func newWALSyncer(db *pebble.DB) *walSyncer {
 
 func (s *walSyncer) run() {
 	defer close(s.done)
-	// Recover from panics that occur if db.Close() races with an in-flight
-	// ticker sync during shutdown. Pebble can panic in two forms:
-	//   - error: pebble.ErrClosed ("pebble: closed")
-	//   - string: "pebble/record: closed LogWriter" (from the WAL writer internals)
-	// Both are expected during shutdown and are silently swallowed here.
-	// Any other panic is re-panicked so it is not silently swallowed.
-	defer func() {
-		if r := recover(); r != nil {
-			if err, ok := r.(error); ok {
-				// Catch pebble.ErrClosed ("pebble: closed") and the internal
-				// record.errClosedWriter ("pebble/record: closed LogWriter").
-				// The latter is an unexported error value so we cannot use
-				// errors.Is — match by message substring instead.
-				if errors.Is(err, pebble.ErrClosed) {
-					return // expected during shutdown
-				}
-				if strings.Contains(err.Error(), "closed LogWriter") {
-					return // expected: "pebble/record: closed LogWriter"
-				}
-			}
-			if s, ok := r.(string); ok && strings.Contains(s, "closed") {
-				return // expected: string-form closed panic
-			}
-			panic(r) // unexpected — re-panic
-		}
-	}()
 
 	ticker := time.NewTicker(walSyncInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			if err := s.db.LogData(nil, pebble.Sync); err != nil {
-				slog.Error("storage: WAL sync failed", "component", "wal_syncer", "err", err)
-			}
+			s.doSync()
 		case <-s.stop:
 			// Final sync before shutdown.
-			if err := s.db.LogData(nil, pebble.Sync); err != nil {
-				slog.Error("storage: final WAL sync on shutdown failed", "component", "wal_syncer", "err", err)
-			}
+			s.doSync()
 			return
 		}
+	}
+}
+
+// doSync calls db.LogData and handles both error returns and panics gracefully.
+//
+// Pebble can surface a closed-DB condition in two ways:
+//   - as a return value: pebble.ErrClosed ("pebble: closed")
+//   - as a panic:        any value when the WAL writer is already torn down
+//
+// A closed-DB panic is always silently swallowed — the db is in an
+// unrecoverable closed state regardless of how it got there (orderly shutdown
+// or abrupt close). Any other panic while stopped is false is unexpected and
+// is re-panicked so it is not silently lost.
+func (s *walSyncer) doSync() {
+	defer func() {
+		if r := recover(); r != nil {
+			// Swallow closed-db panics unconditionally: pebble surfaces a
+			// closed-db condition as a panic (not an error) when the WAL writer
+			// is already torn down. This is safe to ignore in all cases because
+			// the db is already in an unrecoverable state.
+			if isClosedPanic(r) {
+				return
+			}
+			if s.stopped.Load() {
+				return // expected: pebble is shutting down
+			}
+			panic(r) // unexpected during normal operation — propagate
+		}
+	}()
+
+	if err := s.db.LogData(nil, pebble.Sync); err != nil {
+		if s.stopped.Load() || errors.Is(err, pebble.ErrClosed) {
+			return // expected during shutdown
+		}
+		slog.Error("storage: WAL sync failed", "component", "wal_syncer", "err", err)
 	}
 }
 
 // Close signals the syncer to stop and blocks until the final sync completes.
 // Must be called before db.Close().
 func (s *walSyncer) Close() {
+	// Mark as stopped BEFORE signalling the goroutine. This ensures that if
+	// the goroutine is mid-doSync when Close is called, the error/panic
+	// recovery correctly identifies the condition as expected shutdown.
+	s.stopped.Store(true)
 	close(s.stop)
 	<-s.done
 }

@@ -10,8 +10,7 @@ import (
 // then calls ListByStateInRange with a window that covers only 2 of them.
 // Verifies that exactly 2 IDs are returned.
 func TestListByStateInRange(t *testing.T) {
-	db := openTestPebble(t)
-	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	store := openTestStore(t)
 	ws := store.VaultPrefix("range-test")
 	ctx := context.Background()
 
@@ -83,8 +82,7 @@ func TestListByStateInRange(t *testing.T) {
 
 // TestCountEngrams writes 3 engrams and verifies CountEngrams returns at least 3.
 func TestCountEngrams(t *testing.T) {
-	db := openTestPebble(t)
-	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	store := openTestStore(t)
 	ws := store.VaultPrefix("count-engrams-test")
 	ctx := context.Background()
 
@@ -109,8 +107,7 @@ func TestCountEngrams(t *testing.T) {
 // TestEngramIDsByCreatedRange writes engrams at distinct timestamps and verifies
 // that EngramIDsByCreatedRange returns only those within the specified window.
 func TestEngramIDsByCreatedRange(t *testing.T) {
-	db := openTestPebble(t)
-	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	store := openTestStore(t)
 	ws := store.VaultPrefix("ids-by-range-test")
 	ctx := context.Background()
 
@@ -173,8 +170,7 @@ func TestEngramIDsByCreatedRange(t *testing.T) {
 // LowestRelevanceIDs(ctx, ws, 3), and verifies that 3 IDs are returned and they
 // correspond to the 3 lowest-relevance engrams.
 func TestLowestRelevanceIDs(t *testing.T) {
-	db := openTestPebble(t)
-	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	store := openTestStore(t)
 	ws := store.VaultPrefix("lowest-relevance-test")
 	ctx := context.Background()
 

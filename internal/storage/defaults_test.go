@@ -23,9 +23,8 @@ func TestWriteEngramDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -85,9 +84,8 @@ func TestWriteEngramExplicitValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 

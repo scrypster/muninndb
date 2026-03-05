@@ -6,13 +6,14 @@ import (
 )
 
 // newTestStoreForBatch creates a PebbleStore backed by a temp Pebble DB.
-// The Pebble DB (and therefore the store) is closed via t.Cleanup registered
-// inside openTestPebble. Do not call store.Close() separately — it would
-// double-close the underlying DB.
+// store.Close() drains background goroutines, closes the DB, and removes the dir.
+//
+// Do NOT use openTestPebble here: PebbleStore.Close() already calls
+// db.Close() internally. A second db.Close() from openTestPebble's cleanup
+// would cause pebble to panic with "pebble: closed".
 func newTestStoreForBatch(t *testing.T) *PebbleStore {
 	t.Helper()
-	db := openTestPebble(t)
-	return NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	return openTestStore(t)
 }
 
 // TestStoreBatch_CommitWritesTwoEngrams verifies that committing a batch with

@@ -21,7 +21,7 @@ func newTestStoreHelper(t *testing.T) (*PebbleStore, func()) {
 	}
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
 	cleanup := func() {
-		db.Close()
+		store.Close()
 		os.RemoveAll(dir)
 	}
 	return store, cleanup

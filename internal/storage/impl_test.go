@@ -21,9 +21,8 @@ func TestWriteEngramWritesBucketKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -80,9 +79,8 @@ func TestUpdateRelevanceMovesKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -165,9 +163,8 @@ func TestRecentActiveUsesIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -243,8 +240,6 @@ func TestWriteEngramCallsWAL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	mol, err := wal.Open(walDir)
 	if err != nil {
 		t.Fatal(err)
@@ -256,6 +251,7 @@ func TestWriteEngramCallsWAL(t *testing.T) {
 
 	// Create PebbleStore and set WAL
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	store.SetWAL(mol, gc)
 
 	ws := store.VaultPrefix("test")
@@ -300,9 +296,8 @@ func TestSetWALOptional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -340,9 +335,8 @@ func TestGetAssocWeight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -404,9 +398,8 @@ func TestUpdateAssocWeight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -459,9 +452,8 @@ func TestGetConfidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -500,9 +492,8 @@ func TestUpdateConfidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -547,9 +538,8 @@ func TestGetConceptAssociations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -627,9 +617,8 @@ func TestFlagContradiction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -688,9 +677,8 @@ func TestUpdateAssocWeightNoDuplicateEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -739,9 +727,8 @@ func TestListByState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -792,9 +779,8 @@ func TestListByStateLimitRespected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("test")
 	ctx := context.Background()
 
@@ -830,9 +816,8 @@ func TestWriteReadCoherence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("coh-vault")
 
 	// Write a known 7-element array.
@@ -867,9 +852,8 @@ func TestReadCoherenceMissReturnsNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
 	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
 	ws := store.VaultPrefix("never-written")
 
 	_, ok, err := store.ReadCoherence(ws)

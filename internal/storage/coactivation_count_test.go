@@ -24,7 +24,7 @@ func TestCoActivationCount_NewAssocStartsAtOne(t *testing.T) {
 		t.Fatalf("WriteAssociation: %v", err)
 	}
 
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	results, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)
@@ -62,7 +62,7 @@ func TestCoActivationCount_IncrementOnUpdate(t *testing.T) {
 		t.Fatalf("UpdateAssocWeight (delta=3): %v", err)
 	}
 
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	results, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations after first update: %v", err)
@@ -80,7 +80,7 @@ func TestCoActivationCount_IncrementOnUpdate(t *testing.T) {
 		t.Fatalf("UpdateAssocWeight (delta=10): %v", err)
 	}
 
-	fresh2 := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh2 := newFreshStore(t, store.db)
 	results2, err := fresh2.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations after second update: %v", err)
@@ -125,7 +125,7 @@ func TestCoActivationCount_BatchUpdate(t *testing.T) {
 		t.Fatalf("UpdateAssocWeightBatch: %v", err)
 	}
 
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	results, err := fresh.GetAssociations(ctx, ws, []ULID{src1, src2}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)
@@ -167,7 +167,7 @@ func TestCoActivationCount_ZeroDeltaDoesNotChange(t *testing.T) {
 	}
 
 	// Verify initial count is 1.
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	results, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations after write: %v", err)
@@ -185,7 +185,7 @@ func TestCoActivationCount_ZeroDeltaDoesNotChange(t *testing.T) {
 		t.Fatalf("UpdateAssocWeight (delta=0): %v", err)
 	}
 
-	fresh2 := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh2 := newFreshStore(t, store.db)
 	results2, err := fresh2.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations after zero-delta update: %v", err)
@@ -244,7 +244,7 @@ func TestCoActivationCount_SaturatesAtMaxUint32(t *testing.T) {
 		t.Fatalf("UpdateAssocWeight (delta=MaxUint32-1): %v", err)
 	}
 
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	results, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations after saturation update: %v", err)
@@ -262,7 +262,7 @@ func TestCoActivationCount_SaturatesAtMaxUint32(t *testing.T) {
 		t.Fatalf("UpdateAssocWeight (delta=1, post-saturation): %v", err)
 	}
 
-	fresh2 := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh2 := newFreshStore(t, store.db)
 	results2, err := fresh2.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations after post-saturation update: %v", err)

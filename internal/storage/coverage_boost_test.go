@@ -18,8 +18,7 @@ import (
 // TestEngramsByCreatedSince_Pagination writes 5 engrams and verifies that
 // offset and limit parameters correctly page through the results.
 func TestEngramsByCreatedSince_Pagination(t *testing.T) {
-	db := openTestPebble(t)
-	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	store := openTestStore(t)
 	ws := store.VaultPrefix("since-page-test")
 	ctx := context.Background()
 
@@ -78,8 +77,7 @@ func TestEngramsByCreatedSince_Pagination(t *testing.T) {
 // TestEngramsByCreatedSince_EmptyVault verifies EngramsByCreatedSince on a
 // vault with no engrams returns an empty slice without error.
 func TestEngramsByCreatedSince_EmptyVault(t *testing.T) {
-	db := openTestPebble(t)
-	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	store := openTestStore(t)
 	ws := store.VaultPrefix("since-empty-vault")
 	ctx := context.Background()
 
@@ -253,8 +251,7 @@ func TestMergeVaultData_WithOnCopyCallback(t *testing.T) {
 // TestListByCreatorInRange writes engrams with different CreatedBy values and
 // verifies that ListByCreatorInRange filters by creator and time window.
 func TestListByCreatorInRange(t *testing.T) {
-	db := openTestPebble(t)
-	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	store := openTestStore(t)
 	ws := store.VaultPrefix("creator-range-test")
 	ctx := context.Background()
 
@@ -330,8 +327,7 @@ func TestListByCreatorInRange(t *testing.T) {
 
 // TestListByCreatorInRange_DefaultLimit verifies the default-limit path (limit <= 0).
 func TestListByCreatorInRange_DefaultLimit(t *testing.T) {
-	db := openTestPebble(t)
-	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	store := openTestStore(t)
 	ws := store.VaultPrefix("creator-deflimit-test")
 	ctx := context.Background()
 

@@ -40,7 +40,7 @@ func TestAssocMetadata_LastActivated_PreservedOnUpdate(t *testing.T) {
 	}
 
 	// Read back on a fresh (cold-cache) store.
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	results, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)
@@ -103,7 +103,7 @@ func TestAssocMetadata_PreservedThroughDecay(t *testing.T) {
 	}
 
 	// Read back on a fresh (cold-cache) store.
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	results, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)
@@ -163,7 +163,7 @@ func TestAssocPeakWeight_TrackedAcrossUpdates(t *testing.T) {
 	}
 
 	// Open fresh store (bypass cache) to read from Pebble directly
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	assocs, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)
@@ -193,7 +193,7 @@ func TestAssocPeakWeight_InitialWriteSetsPeak(t *testing.T) {
 		t.Fatalf("WriteAssociation: %v", err)
 	}
 
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	assocs, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)
@@ -229,7 +229,7 @@ func TestAssocDecay_DynamicFloor(t *testing.T) {
 		}
 	}
 
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	assocs, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)
@@ -272,7 +272,7 @@ func TestAssocDecay_LowPeakEdgeClampsToVeryLowFloor(t *testing.T) {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
 
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	assocs, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)
@@ -317,7 +317,7 @@ func TestAssocPeakWeight_BatchUpdatePreservesPeak(t *testing.T) {
 	}
 
 	// Read via fresh store to bypass cache
-	fresh := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	fresh := newFreshStore(t, store.db)
 	assocs, err := fresh.GetAssociations(ctx, ws, []ULID{src}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations: %v", err)

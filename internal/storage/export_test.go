@@ -14,11 +14,8 @@ import (
 )
 
 func TestExportImportRoundtrip(t *testing.T) {
-	db := openTestPebble(t)
-	src := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
-
-	db2 := openTestPebble(t)
-	dst := NewPebbleStore(db2, PebbleStoreConfig{CacheSize: 100})
+	src := openTestStore(t)
+	dst := openTestStore(t)
 
 	ctx := context.Background()
 
@@ -69,8 +66,7 @@ func TestExportImportRoundtrip(t *testing.T) {
 }
 
 func TestImportDeduplication(t *testing.T) {
-	db := openTestPebble(t)
-	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	store := openTestStore(t)
 	ctx := context.Background()
 
 	ws := store.VaultPrefix("dedup-vault")
@@ -124,8 +120,7 @@ func TestImportDeduplication(t *testing.T) {
 }
 
 func TestExportEmptyVault(t *testing.T) {
-	db := openTestPebble(t)
-	src := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	src := openTestStore(t)
 	ctx := context.Background()
 
 	ws := src.VaultPrefix("empty-vault")
@@ -144,8 +139,7 @@ func TestExportEmptyVault(t *testing.T) {
 	}
 
 	// Should still be importable.
-	db2 := openTestPebble(t)
-	dst := NewPebbleStore(db2, PebbleStoreConfig{CacheSize: 100})
+	dst := openTestStore(t)
 	wsD := dst.VaultPrefix("dest-empty")
 	if err := dst.WriteVaultName(wsD, "dest-empty"); err != nil {
 		t.Fatalf("dst WriteVaultName: %v", err)
@@ -165,8 +159,7 @@ func TestImport_CorruptChecksum(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Export 2 engrams from "chk-src".
-	srcDB := openTestPebble(t)
-	src := NewPebbleStore(srcDB, PebbleStoreConfig{CacheSize: 100})
+	src := openTestStore(t)
 	wsSrc := src.VaultPrefix("chk-src")
 	if err := src.WriteVaultName(wsSrc, "chk-src"); err != nil {
 		t.Fatalf("WriteVaultName src: %v", err)
@@ -191,8 +184,7 @@ func TestImport_CorruptChecksum(t *testing.T) {
 	}
 
 	// 3. Import into "chk-dst" — must fail with a checksum error.
-	dstDB := openTestPebble(t)
-	dst := NewPebbleStore(dstDB, PebbleStoreConfig{CacheSize: 100})
+	dst := openTestStore(t)
 	wsDst := dst.VaultPrefix("chk-dst")
 	if err := dst.WriteVaultName(wsDst, "chk-dst"); err != nil {
 		t.Fatalf("WriteVaultName dst: %v", err)
@@ -318,8 +310,7 @@ func TestImport_LegacyNoChecksum(t *testing.T) {
 	}
 
 	// Import into "legacy-dst" — must succeed (nil error).
-	dstDB := openTestPebble(t)
-	dst := NewPebbleStore(dstDB, PebbleStoreConfig{CacheSize: 100})
+	dst := openTestStore(t)
 	wsDst := dst.VaultPrefix("legacy-dst")
 	if err := dst.WriteVaultName(wsDst, "legacy-dst"); err != nil {
 		t.Fatalf("WriteVaultName: %v", err)

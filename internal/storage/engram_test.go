@@ -461,7 +461,7 @@ func TestDeleteEngram_WithAssociations(t *testing.T) {
 	// Open a fresh store instance sharing the same underlying DB so the
 	// assocCache (TTL=2s) starts cold and reads straight from Pebble.
 	// This confirms the physical association keys were actually removed.
-	freshStore := NewPebbleStore(store.db, PebbleStoreConfig{CacheSize: 100})
+	freshStore := newFreshStore(t, store.db)
 	post, err := freshStore.GetAssociations(ctx, ws, []ULID{idA}, 10)
 	if err != nil {
 		t.Fatalf("GetAssociations after delete (fresh store): %v", err)
