@@ -102,5 +102,7 @@ func TestRestoreArchivedEdges_Transitive(t *testing.T) {
 		t.Error("neighbor->deepNeighbor should be restored (transitive)")
 	}
 
-	_ = restored
+	if len(restored) != 2 {
+		t.Errorf("expected 2 restored ULIDs (neighbor + deepNeighbor), got %d", len(restored))
+	}
 }
