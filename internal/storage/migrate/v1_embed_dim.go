@@ -26,7 +26,12 @@ func BackfillEmbedDim(db *pebble.DB) error {
 	}
 	defer iter.Close()
 
+	const batchSize = 100
+
 	patched, skipped := 0, 0
+
+	batch := db.NewBatch()
+	batchCount := 0
 
 	for valid := iter.First(); valid; valid = iter.Next() {
 		embedKey := iter.Key()
@@ -72,25 +77,40 @@ func BackfillEmbedDim(db *pebble.DB) error {
 		}
 
 		if err := erf.PatchEmbedDim(buf, uint8(dim)); err != nil {
+			batch.Close()
 			return fmt.Errorf("backfill embed dim: patch ERF for %x/%x: %w", wsPrefix, id, err)
 		}
 
-		batch := db.NewBatch()
-		batch.Set(erfKey, buf, nil)
 		// Also patch the 0x02 meta key which holds a prefix of the ERF record.
 		metaKey := keys.MetaKey(wsPrefix, id)
+		batch.Set(erfKey, buf, nil)
 		batch.Set(metaKey, erf.MetaKeySlice(buf), nil)
-		if err := batch.Commit(pebble.Sync); err != nil {
-			batch.Close()
-			return fmt.Errorf("backfill embed dim: commit for %x/%x: %w", wsPrefix, id, err)
-		}
-		batch.Close()
+		batchCount++
 		patched++
+
+		if batchCount >= batchSize {
+			if err := batch.Commit(pebble.Sync); err != nil {
+				batch.Close()
+				return fmt.Errorf("backfill embed dim: commit batch: %w", err)
+			}
+			batch.Close()
+			batch = db.NewBatch()
+			batchCount = 0
+		}
 	}
 
 	if err := iter.Error(); err != nil {
+		batch.Close()
 		return fmt.Errorf("backfill embed dim: iter: %w", err)
 	}
+
+	if batchCount > 0 {
+		if err := batch.Commit(pebble.Sync); err != nil {
+			batch.Close()
+			return fmt.Errorf("backfill embed dim: commit final batch: %w", err)
+		}
+	}
+	batch.Close()
 
 	slog.Info("backfill embed dim complete", "patched", patched, "skipped", skipped)
 	return nil
