@@ -50,6 +50,53 @@ func TestParseOpenAIURL(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIURL_CustomBaseURL(t *testing.T) {
+	config, err := ParseProviderURL("openai://text-embedding-3-small?base_url=http://localhost:8080/v1")
+	if err != nil {
+		t.Fatalf("failed to parse openai URL with custom base_url: %v", err)
+	}
+	if config.Host != "localhost" {
+		t.Errorf("expected host 'localhost', got %q", config.Host)
+	}
+	if config.Port != 8080 {
+		t.Errorf("expected port 8080, got %d", config.Port)
+	}
+	if config.BaseURL != "http://localhost:8080" {
+		t.Errorf("expected BaseURL 'http://localhost:8080', got %q", config.BaseURL)
+	}
+}
+
+func TestParseOpenAIURL_CustomBaseURLPathPrefix(t *testing.T) {
+	config, err := ParseProviderURL("openai://text-embedding-3-small?base_url=https://gateway.example.com/openai/v1")
+	if err != nil {
+		t.Fatalf("failed to parse openai URL with path-prefixed base_url: %v", err)
+	}
+	if config.Host != "gateway.example.com" {
+		t.Errorf("expected host 'gateway.example.com', got %q", config.Host)
+	}
+	if config.Port != 443 {
+		t.Errorf("expected port 443, got %d", config.Port)
+	}
+	if config.BaseURL != "https://gateway.example.com/openai" {
+		t.Errorf("expected BaseURL 'https://gateway.example.com/openai', got %q", config.BaseURL)
+	}
+}
+
+func TestParseOpenAIURL_InvalidBaseURL(t *testing.T) {
+	tests := []string{
+		"openai://text-embedding-3-small?base_url=ftp://localhost:8080",
+		"openai://text-embedding-3-small?base_url=https://",
+		"openai://text-embedding-3-small?base_url=://not-a-url",
+		"openai://text-embedding-3-small?base_url=http://localhost:0",
+		"openai://text-embedding-3-small?base_url=http://localhost:65536",
+	}
+	for _, providerURL := range tests {
+		if _, err := ParseProviderURL(providerURL); err == nil {
+			t.Errorf("expected parse error for provider URL %q", providerURL)
+		}
+	}
+}
+
 func TestParseAnthropicURL(t *testing.T) {
 	config, err := ParseProviderURL("anthropic://claude-haiku")
 	if err != nil {
@@ -105,11 +152,11 @@ func TestParseInvalidScheme(t *testing.T) {
 
 func TestParseMalformedURL(t *testing.T) {
 	tests := []string{
-		"",                        // empty
-		"not-a-url",               // no scheme
-		"openai://",               // missing model
-		"ollama://localhost/",     // missing port
-		"ollama://localhost/",     // missing port
+		"",                    // empty
+		"not-a-url",           // no scheme
+		"openai://",           // missing model
+		"ollama://localhost/", // missing port
+		"ollama://localhost/", // missing port
 	}
 
 	for _, url := range tests {

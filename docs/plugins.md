@@ -72,6 +72,8 @@ muninn server
 
 # OpenAI
 export MUNINN_OPENAI_KEY="sk-..."
+# Optional: override OpenAI base URL (for LocalAI/OpenAI-compatible gateways)
+export MUNINN_OPENAI_URL="http://localhost:8080/v1"
 muninn server
 
 # Voyage AI — optimized for retrieval tasks
@@ -107,6 +109,8 @@ Provider comparison:
 | Google | `MUNINN_GOOGLE_KEY` | text-embedding-004 | 768 | Per token | API |
 | Jina | `MUNINN_JINA_KEY` | jina-embeddings-v3 | 1024 | Per token | API |
 | Mistral | `MUNINN_MISTRAL_KEY` | mistral-embed | 1024 | Per token | API |
+
+`MUNINN_OPENAI_URL` can optionally override the OpenAI base URL for compatible endpoints (for example LocalAI or an internal gateway). If set to an invalid value, MuninnDB skips OpenAI initialization instead of falling back to `api.openai.com`.
 
 ### Retroactive Enrichment
 

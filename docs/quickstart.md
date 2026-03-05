@@ -152,7 +152,7 @@ The bundled local embedder (all-MiniLM-L6-v2, 384-dim) is included and works off
 |----------|--------|-------|
 | Local (bundled) | On by default — no config needed | Offline. ~80MB. Opt out with `MUNINN_LOCAL_EMBED=0`. |
 | Ollama | `MUNINN_OLLAMA_URL=ollama://localhost:11434/nomic-embed-text` | Self-hosted. |
-| OpenAI | `MUNINN_OPENAI_KEY=sk-...` | `text-embedding-3-small`, 1536d. |
+| OpenAI | `MUNINN_OPENAI_KEY=sk-...` | `text-embedding-3-small`, 1536d. Optional base URL override: `MUNINN_OPENAI_URL=http://localhost:8080/v1` (invalid override disables OpenAI init). |
 | Voyage | `MUNINN_VOYAGE_KEY=pa-...` | voyage-3, 1024d. |
 | Cohere | `MUNINN_COHERE_KEY=...` | embed-v4, 1024d. |
 | Google | `MUNINN_GOOGLE_KEY=...` | text-embedding-004, 768d. |

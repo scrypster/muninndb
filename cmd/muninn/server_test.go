@@ -118,6 +118,50 @@ func TestResolveEmbedInfo_EnvOpenAI(t *testing.T) {
 	}
 }
 
+func TestResolveEmbedInfo_EnvOpenAIWithURLOverride(t *testing.T) {
+	clearEmbedEnv(t)
+	t.Setenv("MUNINN_OPENAI_KEY", "sk-test-key")
+	t.Setenv("MUNINN_OPENAI_URL", "openai://text-embedding-3-large?base_url=http://localhost:8080/v1")
+
+	info := resolveEmbedInfo(plugincfg.PluginConfig{})
+	if info.Provider != "openai" {
+		t.Errorf("expected provider=openai, got %q", info.Provider)
+	}
+	if info.Model != "text-embedding-3-large" {
+		t.Errorf("expected model=text-embedding-3-large, got %q", info.Model)
+	}
+}
+
+func TestResolveEmbedInfo_EnvOpenAIInvalidURLSkipsOpenAI(t *testing.T) {
+	clearEmbedEnv(t)
+	t.Setenv("MUNINN_OPENAI_KEY", "sk-test-key")
+	t.Setenv("MUNINN_OPENAI_URL", "ftp://localhost:8080")
+	t.Setenv("MUNINN_LOCAL_EMBED", "0")
+
+	info := resolveEmbedInfo(plugincfg.PluginConfig{})
+	if info.Provider != "none" {
+		t.Errorf("expected provider=none, got %q", info.Provider)
+	}
+	if info.Model != "" {
+		t.Errorf("expected model=\"\", got %q", info.Model)
+	}
+}
+
+func TestResolveEmbedInfo_EnvOpenAIInvalidURLFallsThroughToNextProvider(t *testing.T) {
+	clearEmbedEnv(t)
+	t.Setenv("MUNINN_OPENAI_KEY", "sk-test-key")
+	t.Setenv("MUNINN_OPENAI_URL", "ftp://localhost:8080")
+	t.Setenv("MUNINN_VOYAGE_KEY", "voy-test-key")
+
+	info := resolveEmbedInfo(plugincfg.PluginConfig{})
+	if info.Provider != "voyage" {
+		t.Errorf("expected provider=voyage, got %q", info.Provider)
+	}
+	if info.Model != "voyage-3" {
+		t.Errorf("expected model=voyage-3, got %q", info.Model)
+	}
+}
+
 func TestResolveEmbedInfo_EnvVoyage(t *testing.T) {
 	clearEmbedEnv(t)
 	t.Setenv("MUNINN_VOYAGE_KEY", "voy-test-key")
@@ -224,6 +268,104 @@ func TestResolveEmbedInfo_ConfigOllamaWithURL(t *testing.T) {
 	}
 	if info.Model != "mxbai-embed-large" {
 		t.Errorf("expected model=mxbai-embed-large, got %q", info.Model)
+	}
+}
+
+func TestResolveEmbedInfo_ConfigOpenAIWithURLOverride(t *testing.T) {
+	clearEmbedEnv(t)
+
+	cfg := plugincfg.PluginConfig{
+		EmbedProvider: "openai",
+		EmbedURL:      "openai://text-embedding-3-large?base_url=http://localhost:8080/v1",
+	}
+	info := resolveEmbedInfo(cfg)
+	if info.Provider != "openai" {
+		t.Errorf("expected provider=openai, got %q", info.Provider)
+	}
+	if info.Model != "text-embedding-3-large" {
+		t.Errorf("expected model=text-embedding-3-large, got %q", info.Model)
+	}
+}
+
+func TestResolveEmbedInfo_ConfigOpenAIInvalidURLSkipsOpenAI(t *testing.T) {
+	clearEmbedEnv(t)
+	t.Setenv("MUNINN_LOCAL_EMBED", "0")
+
+	cfg := plugincfg.PluginConfig{
+		EmbedProvider: "openai",
+		EmbedURL:      "ftp://localhost:8080",
+	}
+	info := resolveEmbedInfo(cfg)
+	if info.Provider != "none" {
+		t.Errorf("expected provider=none, got %q", info.Provider)
+	}
+	if info.Model != "" {
+		t.Errorf("expected model=\"\", got %q", info.Model)
+	}
+}
+
+func TestResolveEmbedInfo_InvalidEnvOpenAIURLSkipsSavedConfigOpenAI(t *testing.T) {
+	clearEmbedEnv(t)
+	t.Setenv("MUNINN_OPENAI_URL", "ftp://localhost:8080")
+	t.Setenv("MUNINN_LOCAL_EMBED", "0")
+
+	cfg := plugincfg.PluginConfig{
+		EmbedProvider: "openai",
+		EmbedURL:      "openai://text-embedding-3-large?base_url=http://localhost:8080/v1",
+	}
+	info := resolveEmbedInfo(cfg)
+	if info.Provider != "none" {
+		t.Errorf("expected provider=none, got %q", info.Provider)
+	}
+	if info.Model != "" {
+		t.Errorf("expected model=\"\", got %q", info.Model)
+	}
+}
+
+func TestResolveOpenAIEmbedProviderURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "default_when_empty",
+			raw:  "",
+			want: defaultOpenAIEmbedProviderURL,
+		},
+		{
+			name: "provider_url_passthrough",
+			raw:  "openai://text-embedding-3-small?base_url=http://localhost:8080/v1",
+			want: "openai://text-embedding-3-small?base_url=http://localhost:8080/v1",
+		},
+		{
+			name: "base_url_converted",
+			raw:  "https://gateway.example.com/openai/v1",
+			want: "openai://text-embedding-3-small?base_url=https%3A%2F%2Fgateway.example.com%2Fopenai%2Fv1",
+		},
+		{
+			name:    "invalid_url_rejected",
+			raw:     "ftp://localhost:8080",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		got, err := resolveOpenAIEmbedProviderURL(tc.raw)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%s: expected error, got nil", tc.name)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -397,7 +539,7 @@ func TestListenHostFlag_ExplicitAddrOverrides(t *testing.T) {
 func clearEmbedEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
-		"MUNINN_OLLAMA_URL", "MUNINN_OPENAI_KEY", "MUNINN_VOYAGE_KEY",
+		"MUNINN_OLLAMA_URL", "MUNINN_OPENAI_KEY", "MUNINN_OPENAI_URL", "MUNINN_VOYAGE_KEY",
 		"MUNINN_COHERE_KEY", "MUNINN_GOOGLE_KEY", "MUNINN_JINA_KEY",
 		"MUNINN_MISTRAL_KEY", "MUNINN_LOCAL_EMBED",
 	} {

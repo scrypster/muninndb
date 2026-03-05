@@ -133,7 +133,58 @@ func parseOpenAIURL(parsed *url.URL, config *ProviderConfig) (*ProviderConfig, e
 	config.Host = "api.openai.com"
 	config.Port = 443
 	config.BaseURL = "https://api.openai.com"
+	if raw := strings.TrimSpace(parsed.Query().Get("base_url")); raw != "" {
+		baseURL, host, port, err := parseHTTPBaseURL(raw, "openai")
+		if err != nil {
+			return nil, err
+		}
+		config.Host = host
+		config.Port = port
+		config.BaseURL = baseURL
+	}
 	return config, nil
+}
+
+func parseHTTPBaseURL(raw, provider string) (string, string, int, error) {
+	baseURL, err := url.Parse(raw)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("%s base_url is malformed: %w", provider, err)
+	}
+	scheme := strings.ToLower(strings.TrimSpace(baseURL.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return "", "", 0, fmt.Errorf("%s base_url must use http or https", provider)
+	}
+	host := strings.TrimSpace(baseURL.Hostname())
+	if host == "" {
+		return "", "", 0, fmt.Errorf("%s base_url must include a host", provider)
+	}
+
+	port := 0
+	if portStr := strings.TrimSpace(baseURL.Port()); portStr != "" {
+		port, err = strconv.Atoi(portStr)
+		if err != nil {
+			return "", "", 0, fmt.Errorf("%s base_url has invalid port: %w", provider, err)
+		}
+		if port < 1 || port > 65535 {
+			return "", "", 0, fmt.Errorf("%s base_url port must be between 1 and 65535", provider)
+		}
+	} else if scheme == "https" {
+		port = 443
+	} else {
+		port = 80
+	}
+
+	cleanPath := strings.TrimRight(baseURL.Path, "/")
+	cleanPath = strings.TrimSuffix(cleanPath, "/v1")
+	if cleanPath == "/" {
+		cleanPath = ""
+	}
+	normalized := &url.URL{
+		Scheme: scheme,
+		Host:   baseURL.Host,
+		Path:   cleanPath,
+	}
+	return normalized.String(), host, port, nil
 }
 
 func parseAnthropicURL(parsed *url.URL, config *ProviderConfig) (*ProviderConfig, error) {

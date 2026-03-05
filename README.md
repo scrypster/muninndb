@@ -353,7 +353,7 @@ When you're ready to customize:
 |------|-----|
 | Embedder: bundled (default) | On automatically — set `MUNINN_LOCAL_EMBED=0` to disable |
 | Embedder: Ollama | `MUNINN_OLLAMA_URL=ollama://localhost:11434/nomic-embed-text` |
-| Embedder: OpenAI | `MUNINN_OPENAI_KEY=sk-...` |
+| Embedder: OpenAI | `MUNINN_OPENAI_KEY=sk-...` (+ optional `MUNINN_OPENAI_URL=http://localhost:8080/v1`; invalid override disables OpenAI init) |
 | Embedder: Voyage | `MUNINN_VOYAGE_KEY=pa-...` |
 | Embedder: Cohere | `MUNINN_COHERE_KEY=...` |
 | Embedder: Google (Gemini) | `MUNINN_GOOGLE_KEY=...` |

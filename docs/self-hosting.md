@@ -120,6 +120,8 @@ ollama pull nomic-embed-text
 
 ```sh
 MUNINN_OPENAI_KEY=sk-...
+# Optional: OpenAI-compatible base URL (e.g. LocalAI)
+MUNINN_OPENAI_URL=http://localhost:8080/v1
 ```
 
 Uses `text-embedding-3-small` (1536-dim). ~$0.02 per million tokens.
@@ -272,6 +274,7 @@ curl http://localhost:8750/mcp/health
 | `MUNINNDB_DATA` | `~/.muninn/data` | Data directory (binary) or `/data` (Docker) |
 | `MUNINN_LOCAL_EMBED` | on | Set to `"0"` to disable the bundled ONNX embedder |
 | `MUNINN_OPENAI_KEY` | `""` | OpenAI API key for embeddings |
+| `MUNINN_OPENAI_URL` | `""` | Optional OpenAI base URL or provider URL override (invalid values skip OpenAI init) |
 | `MUNINN_OLLAMA_URL` | `""` | Ollama URL for embeddings, e.g. `ollama://localhost:11434/nomic-embed-text` |
 | `MUNINN_VOYAGE_KEY` | `""` | Voyage AI key for embeddings |
 | `MUNINN_ENRICH_URL` | `""` | LLM enrichment URL (optional) |

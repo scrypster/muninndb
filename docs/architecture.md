@@ -50,7 +50,7 @@ Consumers (AI agents, applications, Claude, Cursor)
 └─────────────────────────────────────────────────────┘
 ```
 
-The plugin layer is intentionally optional. MuninnDB without any plugins is a fully functional cognitive database: full-text search, ACT-R temporal scoring, Hebbian association, contradiction detection, Bayesian confidence updates, and graph traversal all work without an embedding model or LLM. The embed plugin is configured via env vars (MUNINN_OLLAMA_URL, MUNINN_OPENAI_KEY, MUNINN_VOYAGE_KEY) and adds vector search. The enrich plugin is configured via MUNINN_ENRICH_URL and adds semantic contradiction detection and LLM-powered enrichment. Neither is required.
+The plugin layer is intentionally optional. MuninnDB without any plugins is a fully functional cognitive database: full-text search, ACT-R temporal scoring, Hebbian association, contradiction detection, Bayesian confidence updates, and graph traversal all work without an embedding model or LLM. The embed plugin is configured via env vars (MUNINN_OLLAMA_URL, MUNINN_OPENAI_KEY, MUNINN_OPENAI_URL, MUNINN_VOYAGE_KEY) and adds vector search. The enrich plugin is configured via MUNINN_ENRICH_URL and adds semantic contradiction detection and LLM-powered enrichment. Neither is required.
 
 ---
 

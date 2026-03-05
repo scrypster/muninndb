@@ -328,6 +328,7 @@ func printHelp() {
 	fmt.Println()
 	fmt.Printf("  %-28s %s\n", "MUNINN_OLLAMA_URL", "Local Ollama embed model (e.g. ollama://localhost:11434/nomic-embed-text)")
 	fmt.Printf("  %-28s %s\n", "MUNINN_OPENAI_KEY", "OpenAI embeddings API key (text-embedding-3-small, 1536d)")
+	fmt.Printf("  %-28s %s\n", "MUNINN_OPENAI_URL", "Optional OpenAI base URL or provider URL override")
 	fmt.Printf("  %-28s %s\n", "MUNINN_VOYAGE_KEY", "Voyage AI embeddings API key (voyage-3, 1024d)")
 	fmt.Printf("  %-28s %s\n", "MUNINN_COHERE_KEY", "Cohere embeddings API key (embed-v4, 1024d)")
 	fmt.Printf("  %-28s %s\n", "MUNINN_GOOGLE_KEY", "Google Gemini embeddings API key (text-embedding-004, 768d)")

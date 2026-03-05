@@ -13,7 +13,7 @@ const pluginConfigFile = "plugin_config.json"
 type PluginConfig struct {
 	// Embed provider settings
 	EmbedProvider string `json:"embed_provider"` // "ollama", "openai", "voyage", "local", "none"
-	EmbedURL      string `json:"embed_url"`      // provider URL (used for ollama)
+	EmbedURL      string `json:"embed_url"`      // provider URL override (ollama) or OpenAI base/provider URL override
 	EmbedAPIKey   string `json:"embed_api_key"`  // API key (openai, voyage)
 
 	// Enrich provider settings

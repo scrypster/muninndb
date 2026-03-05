@@ -533,6 +533,7 @@ func printEmbedderNote(choice string) {
 	case "3":
 		fmt.Println()
 		fmt.Println("  OpenAI selected. Set MUNINN_OPENAI_KEY to configure.")
+		fmt.Println("  Optional: set MUNINN_OPENAI_URL for custom base URL (e.g. LocalAI).")
 	case "4":
 		fmt.Println()
 		fmt.Println("  Voyage selected. Set MUNINN_VOYAGE_KEY to configure.")
