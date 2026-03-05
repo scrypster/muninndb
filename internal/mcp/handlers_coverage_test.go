@@ -231,6 +231,42 @@ func TestHandleRecall_EmptyContextArray(t *testing.T) {
 	}
 }
 
+func TestHandleRecall_ContextWrongType(t *testing.T) {
+	// A non-string, non-array context (e.g. a number) should return a clear type error.
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":42}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for wrong context type, got %v", resp.Error)
+	}
+	if resp.Error != nil && !strings.Contains(resp.Error.Message, "got") {
+		t.Errorf("expected error message to mention actual type, got: %q", resp.Error.Message)
+	}
+}
+
+func TestHandleRecall_ContextBareString(t *testing.T) {
+	// A bare string should be coerced into a single-element array and succeed.
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":"some query"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Errorf("expected bare string context to be coerced and succeed, got error: %v", resp.Error)
+	}
+}
+
+func TestHandleRecall_ContextAllNonStrings(t *testing.T) {
+	// An array containing only non-string elements should return -32602.
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":[123,true]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for all-non-string context array, got %v", resp.Error)
+	}
+}
+
 func TestHandleRecall_ThresholdClampedBelow(t *testing.T) {
 	// threshold < 0 should be clamped to 0, not error.
 	srv := newTestServer()

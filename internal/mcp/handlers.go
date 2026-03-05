@@ -193,9 +193,24 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 }
 
 func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
-	ctxArr, ok := args["context"].([]any)
-	if !ok || len(ctxArr) == 0 {
+	raw, exists := args["context"]
+	if !exists {
 		sendError(w, id, -32602, "invalid params: 'context' is required")
+		return
+	}
+	var ctxArr []any
+	switch v := raw.(type) {
+	case string:
+		// LLM clients sometimes send a bare string instead of a single-element array — coerce it.
+		ctxArr = []any{v}
+	case []any:
+		ctxArr = v
+	default:
+		sendError(w, id, -32602, fmt.Sprintf("invalid params: 'context' must be a string or array of strings, got %T", raw))
+		return
+	}
+	if len(ctxArr) == 0 {
+		sendError(w, id, -32602, "invalid params: 'context' must not be empty")
 		return
 	}
 	var contexts []string
@@ -203,6 +218,10 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		if str, ok := c.(string); ok {
 			contexts = append(contexts, str)
 		}
+	}
+	if len(contexts) == 0 {
+		sendError(w, id, -32602, "invalid params: 'context' must contain at least one string")
+		return
 	}
 
 	threshold := float32(0.5)
