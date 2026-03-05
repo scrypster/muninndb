@@ -122,6 +122,7 @@ type Engine struct {
 	noveltyDone          chan struct{}      // signals novelty worker shutdown
 	pruneDone            chan struct{}      // signals prune worker shutdown
 	idempotencySweepDone chan struct{}      // signals idempotency sweep worker shutdown
+	archiveGCDone        chan struct{}      // signals archive GC worker shutdown
 	coherence   *coherence.Registry // per-vault incremental coherence counters
 	scoring     *scoring.Store      // per-vault learnable scoring weights
 	prov        *provenance.Store   // audit trail per-engram
@@ -363,6 +364,11 @@ func NewEngine(
 	e.idempotencySweepDone = make(chan struct{})
 	go e.runIdempotencySweep()
 
+	// Start weekly archive GC sweep — true-prunes 0x25 edges that have been
+	// dormant for 3+ years, had low peak weight, and were never restored.
+	e.archiveGCDone = make(chan struct{})
+	go e.runArchiveGCWorker()
+
 	return e
 }
 
@@ -462,6 +468,14 @@ func (e *Engine) Stop() {
 			case <-e.idempotencySweepDone:
 			case <-time.After(5 * time.Second):
 				slog.Warn("engine: idempotency sweep worker did not exit within 5s")
+			}
+		}
+		// Wait for archive GC worker to exit.
+		if e.archiveGCDone != nil {
+			select {
+			case <-e.archiveGCDone:
+			case <-time.After(5 * time.Second):
+				slog.Warn("engine: archive GC worker did not exit within 5s")
 			}
 		}
 	})
@@ -2573,6 +2587,34 @@ func (e *Engine) runIdempotencySweep() {
 		select {
 		case <-ticker.C:
 			sweep()
+		case <-e.stopCtx.Done():
+			return
+		}
+	}
+}
+
+// runArchiveGCWorker is a weekly background sweep that true-prunes 0x25 archived
+// edges meeting all four conditions: peakWeight < 0.15, coActivationCount < 3,
+// daysSinceLastActivation > 1095, and restoredAt == 0 (never restored).
+func (e *Engine) runArchiveGCWorker() {
+	defer close(e.archiveGCDone)
+	ticker := time.NewTicker(7 * 24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			vaults, _ := e.ListVaults(e.stopCtx)
+			for _, vaultName := range vaults {
+				ws := e.store.ResolveVaultPrefix(vaultName)
+				pruned, err := e.store.GCArchivedEdges(e.stopCtx, ws)
+				if err != nil {
+					slog.Warn("engine: archive GC failed", "vault", vaultName, "err", err)
+					continue
+				}
+				if pruned > 0 {
+					slog.Info("engine: archive GC pruned edges", "vault", vaultName, "pruned", pruned)
+				}
+			}
 		case <-e.stopCtx.Done():
 			return
 		}
