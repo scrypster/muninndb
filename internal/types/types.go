@@ -139,10 +139,12 @@ const (
 type EmbedDimension uint8
 
 const (
-	EmbedNone EmbedDimension = 0
-	Embed384  EmbedDimension = 1
-	Embed768  EmbedDimension = 2
-	Embed1536 EmbedDimension = 3
+	EmbedNone  EmbedDimension = 0
+	Embed384   EmbedDimension = 1
+	Embed768   EmbedDimension = 2
+	Embed1536  EmbedDimension = 3
+	Embed3072  EmbedDimension = 4
+	EmbedOther EmbedDimension = 255 // embedded, dimension not in known enum
 )
 
 // MemoryType is the rule-based classification.

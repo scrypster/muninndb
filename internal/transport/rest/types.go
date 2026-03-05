@@ -146,7 +146,7 @@ type EngramItem struct {
 	Vault      string   `json:"vault"`
 	CreatedAt  int64    `json:"created_at"`
 	// EmbedDim is the stored embedding dimensionality code (0 = no embedding).
-	// 1 = 384-dim, 2 = 768-dim, 3 = 1536-dim.
+	// 1 = 384-dim, 2 = 768-dim, 3 = 1536-dim, 4 = 3072-dim, 255 = embedded (unknown dimension).
 	EmbedDim uint8 `json:"embed_dim,omitempty"`
 }
 

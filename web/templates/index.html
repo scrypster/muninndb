@@ -571,6 +571,8 @@
                 <span x-show="selectedMemory.embed_dim === 1" style="font-size:0.875rem;color:var(--text-secondary);">Yes (384-dim)</span>
                 <span x-show="selectedMemory.embed_dim === 2" style="font-size:0.875rem;color:var(--text-secondary);">Yes (768-dim)</span>
                 <span x-show="selectedMemory.embed_dim === 3" style="font-size:0.875rem;color:var(--text-secondary);">Yes (1536-dim)</span>
+                <span x-show="selectedMemory.embed_dim === 4" style="font-size:0.875rem;color:var(--text-secondary);">Yes (3072-dim)</span>
+                <span x-show="selectedMemory.embed_dim > 0 && ![1,2,3,4].includes(selectedMemory.embed_dim)" style="font-size:0.875rem;color:var(--text-secondary);">Yes (embedded)</span>
                 <span x-show="!(selectedMemory.embed_dim && selectedMemory.embed_dim > 0)" style="font-size:0.875rem;color:var(--text-muted);">Not embedded</span>
               </div>
             </div>

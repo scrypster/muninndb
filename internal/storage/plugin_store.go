@@ -3,10 +3,12 @@ package storage
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
+	"github.com/scrypster/muninndb/internal/types"
 )
 
 // CountWithoutFlag returns the number of engrams across all vaults that are
@@ -126,6 +128,7 @@ func (ps *PebbleStore) getDigestFlagsRaw(id [16]byte) (uint8, error) {
 // UpdateEmbedding stores an embedding vector for an engram.
 // The wsPrefix is looked up from the engram's key scan.
 // For ERF v2, only the 0x18 embedding key is written; the full engram is not re-encoded.
+// It also patches EmbedDim in the ERF record so the UI reflects embedding status.
 func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id ULID, vec []float32) error {
 	params, quantized := erf.Quantize(vec)
 	paramsBuf := erf.EncodeQuantizeParams(params)
@@ -137,7 +140,40 @@ func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id
 
 	batch := ps.db.NewBatch()
 	defer batch.Close()
+
+	// Write the quantized embedding vector.
 	batch.Set(keys.EmbeddingKey(wsPrefix, [16]byte(id)), embedBytes, nil)
+
+	// Patch EmbedDim in the ERF record so the UI reflects embedding status.
+	// EmbedDim lives at byte offset erf.OffsetEmbedDim (67) from the record start.
+	// PatchEmbedDim also recomputes the CRC32 trailer so the record stays valid.
+	dim := DimFromLen(len(vec))
+	if dim != types.EmbedNone {
+		erfKey := keys.EngramKey(wsPrefix, [16]byte(id))
+		val, closer, err := ps.db.Get(erfKey)
+		if err == nil {
+			buf := make([]byte, len(val))
+			copy(buf, val)
+			closer.Close()
+
+			if patchErr := erf.PatchEmbedDim(buf, uint8(dim)); patchErr != nil {
+				slog.Warn("UpdateEmbedding: failed to patch EmbedDim in ERF record",
+					"id", id,
+					"err", patchErr,
+				)
+			} else {
+				batch.Set(erfKey, buf, nil)
+				// Also update the 0x02 meta key so GetMetadata sees the new EmbedDim.
+				metaKey := keys.MetaKey(wsPrefix, [16]byte(id))
+				batch.Set(metaKey, erf.MetaKeySlice(buf), nil)
+				// Invalidate both caches so the next read re-fetches from Pebble.
+				ps.cache.Delete(wsPrefix, id)
+				ps.metaCache.Remove([16]byte(id))
+			}
+		}
+		// If the ERF record doesn't exist (race), skip — WriteEngram will set it.
+	}
+
 	if err := batch.Commit(pebble.Sync); err != nil {
 		return fmt.Errorf("update embedding: commit: %w", err)
 	}
