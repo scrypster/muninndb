@@ -350,6 +350,39 @@ func configureOpenClaw(mcpURL, token string) error {
 	return nil
 }
 
+// configureOpenCode writes the muninn MCP entry into OpenCode's opencode.json.
+func configureOpenCode(mcpURL, token string) error {
+	path := openCodeConfigPath()
+
+	// Capture whether "mcp" key exists before writeAIToolConfig runs,
+	// so we can print an accurate summary (writeAIToolConfig hardcodes "mcpServers").
+	hadMCP := false
+	if existing, err := os.ReadFile(path); err == nil {
+		var peek map[string]any
+		if json.Unmarshal(existing, &peek) == nil {
+			hadMCP = peek["mcp"] != nil
+		}
+	}
+
+	_, err := writeAIToolConfig(path, func(cfg map[string]any) {
+		mergeOpenCodeMCP(cfg, mcpURL, token)
+	})
+	if err != nil {
+		return err
+	}
+
+	var summary string
+	if hadMCP {
+		summary = "updated mcp.muninn in existing config (other servers preserved)"
+	} else {
+		summary = "added mcp.muninn to config"
+	}
+
+	fmt.Printf("  ✓ OpenCode: %s\n    %s\n", summary, path)
+	fmt.Println("  → Restart OpenCode to activate MuninnDB memory")
+	return nil
+}
+
 // codexConfigPath returns the path to OpenAI Codex CLI's config file.
 // Codex uses ~/.codex/config.toml for global MCP server configuration.
 func codexConfigPath() string {

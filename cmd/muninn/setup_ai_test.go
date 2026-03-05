@@ -375,6 +375,109 @@ func TestMergeOpenCodeMCP_EmptyConfig(t *testing.T) {
 	}
 }
 
+func TestConfigureOpenCode_WritesCorrectSchema(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	out := captureStdout(func() {
+		if err := configureOpenCode("http://localhost:8750/mcp", "mdb_testtoken"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	data, err := os.ReadFile(openCodeConfigPath())
+	if err != nil {
+		t.Fatalf("config file not written: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, data)
+	}
+	mcp := cfg["mcp"].(map[string]any)
+	muninn := mcp["muninn"].(map[string]any)
+
+	if muninn["type"] != "remote" {
+		t.Errorf("type = %v, want \"remote\"", muninn["type"])
+	}
+	if muninn["oauth"] != false {
+		t.Errorf("oauth = %v, want false", muninn["oauth"])
+	}
+	if !strings.Contains(out, "✓") || !strings.Contains(out, "OpenCode") {
+		t.Errorf("output missing success marker: %s", out)
+	}
+	if !strings.Contains(out, "Restart OpenCode") {
+		t.Errorf("output missing restart hint: %s", out)
+	}
+}
+
+func TestConfigureOpenCode_NoToken(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	captureStdout(func() {
+		configureOpenCode("http://localhost:8750/mcp", "")
+	})
+
+	data, _ := os.ReadFile(openCodeConfigPath())
+	var cfg map[string]any
+	json.Unmarshal(data, &cfg)
+	muninn := cfg["mcp"].(map[string]any)["muninn"].(map[string]any)
+	if _, ok := muninn["headers"]; ok {
+		t.Error("headers should not be present without token")
+	}
+	if muninn["oauth"] != false {
+		t.Error("oauth must be false even without token")
+	}
+}
+
+func TestConfigureOpenCode_PreservesExistingEntries(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	path := openCodeConfigPath()
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, []byte(`{"mcp":{"other":{"type":"remote","url":"http://x"}},"topKey":"kept"}`), 0644)
+
+	captureStdout(func() {
+		configureOpenCode("http://localhost:8750/mcp", "tok")
+	})
+
+	data, _ := os.ReadFile(path)
+	var cfg map[string]any
+	json.Unmarshal(data, &cfg)
+	if cfg["topKey"] != "kept" {
+		t.Error("top-level key lost")
+	}
+	mcp := cfg["mcp"].(map[string]any)
+	if _, ok := mcp["other"]; !ok {
+		t.Error("other tool removed")
+	}
+	if _, ok := mcp["muninn"]; !ok {
+		t.Error("muninn not added")
+	}
+}
+
+func TestConfigureOpenCode_SummaryAdded(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+	out := captureStdout(func() { configureOpenCode("http://localhost:8750/mcp", "tok") })
+	if !strings.Contains(out, "added") {
+		t.Errorf("expected 'added' in output for new config: %s", out)
+	}
+}
+
+func TestConfigureOpenCode_SummaryUpdated(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+	path := openCodeConfigPath()
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, []byte(`{"mcp":{"muninn":{"type":"remote","url":"http://localhost:8750/mcp","oauth":false}}}`), 0644)
+	out := captureStdout(func() { configureOpenCode("http://localhost:8750/mcp", "tok") })
+	if !strings.Contains(out, "updated") {
+		t.Errorf("expected 'updated' in output for existing mcp: %s", out)
+	}
+}
+
 // Helper to override HOME in tests
 func withTempHome(t *testing.T) (string, func()) {
 	t.Helper()
