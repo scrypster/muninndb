@@ -231,8 +231,8 @@ func TestMCPServerEntry_WithToken(t *testing.T) {
 	if entry["url"] != "http://localhost:8750/mcp" {
 		t.Errorf("unexpected url: %v", entry["url"])
 	}
-	if entry["type"] != "http" {
-		t.Errorf("type = %v, want \"http\" (SSE is deprecated)", entry["type"])
+	if _, ok := entry["type"]; ok {
+		t.Errorf("type field must not be present (causes Claude Desktop crash on startup)")
 	}
 	headers, ok := entry["headers"].(map[string]any)
 	if !ok {
@@ -249,8 +249,8 @@ func TestMCPServerEntry_NoToken(t *testing.T) {
 	if _, ok := entry["headers"]; ok {
 		t.Error("headers should not be present when token is empty")
 	}
-	if entry["type"] != "http" {
-		t.Errorf("type = %v, want \"http\" (SSE is deprecated)", entry["type"])
+	if _, ok := entry["type"]; ok {
+		t.Errorf("type field must not be present (causes Claude Desktop crash on startup)")
 	}
 }
 

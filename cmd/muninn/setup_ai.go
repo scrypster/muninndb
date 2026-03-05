@@ -165,10 +165,12 @@ func writeAIToolConfig(path string, mergeFn func(cfg map[string]any)) (string, e
 }
 
 // mcpServerEntry returns the JSON map for muninn's MCP server entry.
+// Note: "type" is intentionally omitted. Claude Desktop v1.1.4010+ crashes
+// on startup with a TypeError if "type":"http" is present in any mcpServers
+// entry. The MCP client infers transport from the URL schema.
 func mcpServerEntry(mcpURL, token string) map[string]any {
 	entry := map[string]any{
-		"type": "http",
-		"url":  mcpURL,
+		"url": mcpURL,
 	}
 	if token != "" {
 		entry["headers"] = map[string]any{
