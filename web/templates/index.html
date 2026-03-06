@@ -604,13 +604,9 @@
       <!-- Graph header -->
       <div style="display:flex;align-items:baseline;gap:0.875rem;margin-bottom:1.5rem;flex-wrap:wrap;">
         <h2 style="margin:0;">Graph</h2>
-        <div class="vault-chip">
+        <div class="vault-chip" @click="vaultModalOpen=true" style="cursor:pointer;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.7;"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/><path d="M3 12a9 3 0 0018 0"/></svg>
-          <select class="vault-chip-select" x-model="vault" @change="onVaultChange()">
-            <template x-for="v in vaults" :key="v">
-              <option :value="v" x-text="v"></option>
-            </template>
-          </select>
+          <span class="vault-chip-btn" x-text="vault"></span>
         </div>
       </div>
 
@@ -1825,13 +1821,9 @@ Authorization = "Bearer &lt;token from ~/.muninn/mcp.token&gt;"</pre>
     <div x-show="currentView==='session'">
       <div style="display:flex;align-items:baseline;gap:0.875rem;margin-bottom:0.25rem;flex-wrap:wrap;">
         <h2 style="margin:0;">Session Timeline</h2>
-        <div class="vault-chip">
+        <div class="vault-chip" @click="vaultModalOpen=true" style="cursor:pointer;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.7;"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/><path d="M3 12a9 3 0 0018 0"/></svg>
-          <select class="vault-chip-select" x-model="vault" @change="onVaultChange()">
-            <template x-for="v in vaults" :key="v">
-              <option :value="v" x-text="v"></option>
-            </template>
-          </select>
+          <span class="vault-chip-btn" x-text="vault"></span>
         </div>
         <div style="flex:1;"></div>
         <select class="input-field" style="width:auto;" x-model="sessionRange" @change="loadSession()">
