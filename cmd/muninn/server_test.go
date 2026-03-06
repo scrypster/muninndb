@@ -369,6 +369,29 @@ func TestResolveOpenAIEmbedProviderURL(t *testing.T) {
 	}
 }
 
+func TestResolveOpenAIEmbedProviderURL_CaseInsensitiveScheme(t *testing.T) {
+	// URI schemes are case-insensitive per RFC 3986 — OPENAI:// should work like openai://
+	got, err := resolveOpenAIEmbedProviderURL("OPENAI://text-embedding-3-small?base_url=http://localhost:8080/v1")
+	if err != nil {
+		t.Fatalf("unexpected error for uppercase scheme: %v", err)
+	}
+	if got == "" {
+		t.Error("expected non-empty provider URL")
+	}
+}
+
+func TestResolveEmbedInfo_OpenAIURLWithoutKey(t *testing.T) {
+	// MUNINN_OPENAI_URL without MUNINN_OPENAI_KEY should not activate the OpenAI embedder.
+	clearEmbedEnv(t)
+	t.Setenv("MUNINN_OPENAI_URL", "http://localhost:8080/v1")
+	t.Setenv("MUNINN_LOCAL_EMBED", "0")
+
+	info := resolveEmbedInfo(plugincfg.PluginConfig{})
+	if info.Provider == "openai" {
+		t.Errorf("OPENAI_URL without OPENAI_KEY should not activate openai, got provider=%q", info.Provider)
+	}
+}
+
 func TestResolveEmbedInfo_EnvPriorityOverConfig(t *testing.T) {
 	clearEmbedEnv(t)
 	t.Setenv("MUNINN_OPENAI_KEY", "sk-override")

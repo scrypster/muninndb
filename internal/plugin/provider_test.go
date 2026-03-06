@@ -89,6 +89,8 @@ func TestParseOpenAIURL_InvalidBaseURL(t *testing.T) {
 		"openai://text-embedding-3-small?base_url=://not-a-url",
 		"openai://text-embedding-3-small?base_url=http://localhost:0",
 		"openai://text-embedding-3-small?base_url=http://localhost:65536",
+		// query string in base_url rejected to avoid silent config mismatch
+		"openai://text-embedding-3-small?base_url=http%3A%2F%2Flocalhost%3A8080%2Fv1%3Fkey%3Dfoo",
 	}
 	for _, providerURL := range tests {
 		if _, err := ParseProviderURL(providerURL); err == nil {

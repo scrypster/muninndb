@@ -174,7 +174,7 @@ func resolveOpenAIEmbedProviderURL(raw string) (string, error) {
 	if raw == "" {
 		return defaultOpenAIEmbedProviderURL, nil
 	}
-	if strings.HasPrefix(raw, "openai://") {
+	if strings.HasPrefix(strings.ToLower(raw), "openai://") {
 		if _, err := plugin.ParseProviderURL(raw); err != nil {
 			return "", err
 		}
@@ -204,7 +204,7 @@ func openAIEmbedLogAttrs(providerURL string) []any {
 	if err != nil {
 		return []any{"url", sanitizeProviderURLForLog(providerURL)}
 	}
-	return []any{"model", provCfg.Model, "base_url", provCfg.BaseURL}
+	return []any{"model", provCfg.Model, "custom_base_url", provCfg.BaseURL != "https://api.openai.com"}
 }
 
 // buildEmbedder constructs an embedder. Priority (highest → lowest):

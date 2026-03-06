@@ -158,6 +158,12 @@ func parseHTTPBaseURL(raw, provider string) (string, string, int, error) {
 	if host == "" {
 		return "", "", 0, fmt.Errorf("%s base_url must include a host", provider)
 	}
+	if baseURL.RawQuery != "" {
+		return "", "", 0, fmt.Errorf("%s base_url must not contain query parameters", provider)
+	}
+	if baseURL.Fragment != "" {
+		return "", "", 0, fmt.Errorf("%s base_url must not contain a fragment", provider)
+	}
 
 	port := 0
 	if portStr := strings.TrimSpace(baseURL.Port()); portStr != "" {
@@ -175,6 +181,8 @@ func parseHTTPBaseURL(raw, provider string) (string, string, int, error) {
 	}
 
 	cleanPath := strings.TrimRight(baseURL.Path, "/")
+	// Strip trailing /v1 — the OpenAI embed client appends /v1/embeddings itself,
+	// so http://host/v1 and http://host resolve to the same endpoint.
 	cleanPath = strings.TrimSuffix(cleanPath, "/v1")
 	if cleanPath == "/" {
 		cleanPath = ""
