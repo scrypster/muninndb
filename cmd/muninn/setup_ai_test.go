@@ -297,7 +297,7 @@ func TestOpenCodeConfigPath(t *testing.T) {
 	}
 }
 
-// TestOpenClawConfigPath verifies OpenClaw config path is set correctly.
+// TestOpenClawConfigPath verifies OpenClaw config path points to openclaw.json (not mcp.json).
 func TestOpenClawConfigPath(t *testing.T) {
 	path := openClawConfigPath()
 	if path == "" {
@@ -306,6 +306,188 @@ func TestOpenClawConfigPath(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	if !strings.HasPrefix(path, home) {
 		t.Errorf("path %q should start with home dir", path)
+	}
+	if !strings.HasSuffix(path, filepath.Join(".openclaw", "openclaw.json")) {
+		t.Errorf("path %q should end with .openclaw/openclaw.json", path)
+	}
+}
+
+func TestOpenClawMCPEntry_WithToken(t *testing.T) {
+	entry := openClawMCPEntry("http://localhost:8750/mcp", "mdb_tok123")
+	if entry["transport"] != "streamable-http" {
+		t.Errorf("transport = %v, want \"streamable-http\"", entry["transport"])
+	}
+	if entry["url"] != "http://localhost:8750/mcp" {
+		t.Errorf("url = %v, want MCP URL", entry["url"])
+	}
+	headers, ok := entry["headers"].(map[string]any)
+	if !ok {
+		t.Fatal("headers not found when token supplied")
+	}
+	if headers["Authorization"] != "Bearer mdb_tok123" {
+		t.Errorf("Authorization = %v, want \"Bearer mdb_tok123\"", headers["Authorization"])
+	}
+}
+
+func TestOpenClawMCPEntry_NoToken(t *testing.T) {
+	entry := openClawMCPEntry("http://localhost:8750/mcp", "")
+	if entry["transport"] != "streamable-http" {
+		t.Errorf("transport = %v, want \"streamable-http\"", entry["transport"])
+	}
+	if _, ok := entry["headers"]; ok {
+		t.Error("headers should not be present when token is empty")
+	}
+}
+
+func TestMergeOpenClawMCP_PreservesOtherEntries(t *testing.T) {
+	cfg := map[string]any{
+		"provider": map[string]any{
+			"mcpServers": map[string]any{
+				"other-tool": map[string]any{"transport": "streamable-http", "url": "http://other:9999"},
+			},
+		},
+		"topKey": "preserved",
+	}
+	mergeOpenClawMCP(cfg, "http://localhost:8750/mcp", "tok")
+	provider := cfg["provider"].(map[string]any)
+	servers := provider["mcpServers"].(map[string]any)
+	if _, ok := servers["other-tool"]; !ok {
+		t.Error("other-tool entry removed")
+	}
+	if _, ok := servers["muninn"]; !ok {
+		t.Error("muninn not added")
+	}
+	if cfg["topKey"] != "preserved" {
+		t.Error("top-level key lost")
+	}
+}
+
+func TestMergeOpenClawMCP_EmptyConfig(t *testing.T) {
+	cfg := map[string]any{}
+	mergeOpenClawMCP(cfg, "http://localhost:8750/mcp", "tok")
+	provider, ok := cfg["provider"].(map[string]any)
+	if !ok {
+		t.Fatal("cfg[\"provider\"] not a map")
+	}
+	servers, ok := provider["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatal("provider[\"mcpServers\"] not a map")
+	}
+	if _, ok := servers["muninn"]; !ok {
+		t.Error("muninn not added")
+	}
+}
+
+func TestConfigureOpenClaw_WritesCorrectSchema(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	out := captureStdout(func() {
+		if err := configureOpenClaw("http://localhost:8750/mcp", "mdb_testtoken"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	data, err := os.ReadFile(openClawConfigPath())
+	if err != nil {
+		t.Fatalf("config file not written: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, data)
+	}
+
+	provider, ok := cfg["provider"].(map[string]any)
+	if !ok {
+		t.Fatal("provider key not found — OpenClaw reads provider.mcpServers, not top-level mcpServers")
+	}
+	servers, ok := provider["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatal("provider.mcpServers not found")
+	}
+	muninn, ok := servers["muninn"].(map[string]any)
+	if !ok {
+		t.Fatal("provider.mcpServers.muninn not found")
+	}
+	if muninn["transport"] != "streamable-http" {
+		t.Errorf("transport = %v, want \"streamable-http\"", muninn["transport"])
+	}
+	if muninn["url"] != "http://localhost:8750/mcp" {
+		t.Errorf("url = %v, want MCP URL", muninn["url"])
+	}
+	if !strings.Contains(out, "✓") || !strings.Contains(out, "OpenClaw") {
+		t.Errorf("output missing success marker: %s", out)
+	}
+	if !strings.Contains(out, "Restart OpenClaw") {
+		t.Errorf("output missing restart hint: %s", out)
+	}
+}
+
+func TestConfigureOpenClaw_NoToken(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	captureStdout(func() {
+		configureOpenClaw("http://localhost:8750/mcp", "")
+	})
+
+	data, _ := os.ReadFile(openClawConfigPath())
+	var cfg map[string]any
+	json.Unmarshal(data, &cfg)
+	muninn := cfg["provider"].(map[string]any)["mcpServers"].(map[string]any)["muninn"].(map[string]any)
+	if _, ok := muninn["headers"]; ok {
+		t.Error("headers should not be present without token")
+	}
+	if muninn["transport"] != "streamable-http" {
+		t.Errorf("transport must be streamable-http even without token, got %v", muninn["transport"])
+	}
+}
+
+func TestConfigureOpenClaw_PreservesExistingEntries(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+
+	path := openClawConfigPath()
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, []byte(`{"provider":{"mcpServers":{"other":{"transport":"streamable-http","url":"http://x"}}},"topKey":"kept"}`), 0644)
+
+	captureStdout(func() {
+		configureOpenClaw("http://localhost:8750/mcp", "tok")
+	})
+
+	data, _ := os.ReadFile(path)
+	var cfg map[string]any
+	json.Unmarshal(data, &cfg)
+	if cfg["topKey"] != "kept" {
+		t.Error("top-level key lost")
+	}
+	servers := cfg["provider"].(map[string]any)["mcpServers"].(map[string]any)
+	if _, ok := servers["other"]; !ok {
+		t.Error("other tool removed")
+	}
+	if _, ok := servers["muninn"]; !ok {
+		t.Error("muninn not added")
+	}
+}
+
+func TestConfigureOpenClaw_SummaryAdded(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+	out := captureStdout(func() { configureOpenClaw("http://localhost:8750/mcp", "tok") })
+	if !strings.Contains(out, "added") {
+		t.Errorf("expected 'added' in output for new config: %s", out)
+	}
+}
+
+func TestConfigureOpenClaw_SummaryUpdated(t *testing.T) {
+	_, cleanup := withTempHome(t)
+	defer cleanup()
+	path := openClawConfigPath()
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, []byte(`{"provider":{"mcpServers":{"muninn":{"transport":"streamable-http","url":"http://localhost:8750/mcp"}}}}`), 0644)
+	out := captureStdout(func() { configureOpenClaw("http://localhost:8750/mcp", "tok") })
+	if !strings.Contains(out, "updated") {
+		t.Errorf("expected 'updated' in output for existing provider: %s", out)
 	}
 }
 
@@ -665,7 +847,8 @@ func TestConfigureWindsurfWritesConfig(t *testing.T) {
 	}
 }
 
-// TestConfigureOpenClawWritesConfig verifies OpenClaw config is written correctly.
+// TestConfigureOpenClawWritesConfig verifies OpenClaw config is written at the correct path
+// with the correct nested schema (provider.mcpServers, not top-level mcpServers).
 func TestConfigureOpenClawWritesConfig(t *testing.T) {
 	_, cleanup := withTempHome(t)
 	defer cleanup()
@@ -680,8 +863,25 @@ func TestConfigureOpenClawWritesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("file not written: %v", err)
 	}
-	if !strings.Contains(string(data), `"muninn"`) {
-		t.Errorf("muninn not in config: %s", data)
+	// Must use provider.mcpServers — top-level mcpServers is not read by OpenClaw
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	provider, ok := cfg["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider key not found in config: %s", data)
+	}
+	servers, ok := provider["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider.mcpServers not found: %s", data)
+	}
+	muninn, ok := servers["muninn"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider.mcpServers.muninn not found: %s", data)
+	}
+	if muninn["transport"] != "streamable-http" {
+		t.Errorf("transport = %v, want \"streamable-http\"", muninn["transport"])
 	}
 	if !strings.Contains(string(data), "8750") {
 		t.Errorf("MCP port not in config: %s", data)

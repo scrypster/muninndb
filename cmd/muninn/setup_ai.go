@@ -272,10 +272,11 @@ func windsurfConfigPath() string {
 	return filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")
 }
 
-// openClawConfigPath returns the path to OpenClaw's MCP config file.
+// openClawConfigPath returns the path to OpenClaw's config file.
+// OpenClaw reads ~/.openclaw/openclaw.json — not mcp.json.
 func openClawConfigPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".openclaw", "mcp.json")
+	return filepath.Join(home, ".openclaw", "openclaw.json")
 }
 
 // openCodeConfigPath returns the path to OpenCode's config file.
@@ -341,17 +342,66 @@ func configureWindsurf(mcpURL, token string) error {
 	return nil
 }
 
-// configureOpenClaw writes the muninn MCP entry into OpenClaw's mcp.json.
+// openClawMCPEntry returns the JSON map for muninn's OpenClaw MCP entry.
+// OpenClaw uses transport:"streamable-http" (not type:"http") and nests
+// MCP servers under provider.mcpServers in openclaw.json.
+func openClawMCPEntry(mcpURL, token string) map[string]any {
+	entry := map[string]any{
+		"transport": "streamable-http",
+		"url":       mcpURL,
+	}
+	if token != "" {
+		entry["headers"] = map[string]any{
+			"Authorization": "Bearer " + token,
+		}
+	}
+	return entry
+}
+
+// mergeOpenClawMCP upserts muninn into cfg["provider"]["mcpServers"]["muninn"],
+// preserving all other entries.
+func mergeOpenClawMCP(cfg map[string]any, mcpURL, token string) {
+	provider, ok := cfg["provider"].(map[string]any)
+	if !ok {
+		provider = map[string]any{}
+	}
+	servers, ok := provider["mcpServers"].(map[string]any)
+	if !ok {
+		servers = map[string]any{}
+	}
+	servers["muninn"] = openClawMCPEntry(mcpURL, token)
+	provider["mcpServers"] = servers
+	cfg["provider"] = provider
+}
+
+// configureOpenClaw writes the muninn MCP entry into OpenClaw's openclaw.json.
 func configureOpenClaw(mcpURL, token string) error {
 	path := openClawConfigPath()
-	summary, err := writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeMCPServers(cfg, mcpURL, token)
+
+	hadProvider := false
+	if existing, err := os.ReadFile(path); err == nil {
+		var peek map[string]any
+		if json.Unmarshal(existing, &peek) == nil {
+			hadProvider = peek["provider"] != nil
+		}
+	}
+
+	_, err := writeAIToolConfig(path, func(cfg map[string]any) {
+		mergeOpenClawMCP(cfg, mcpURL, token)
 	})
 	if err != nil {
 		return err
 	}
+
+	var summary string
+	if hadProvider {
+		summary = "updated provider.mcpServers.muninn in existing config (other servers preserved)"
+	} else {
+		summary = "added provider.mcpServers.muninn to config"
+	}
+
 	fmt.Printf("  ✓ OpenClaw: %s\n    %s\n", summary, path)
-	fmt.Println("  → Restart OpenClaw to activate muninn memory")
+	fmt.Println("  → Restart OpenClaw to activate MuninnDB memory")
 	return nil
 }
 
