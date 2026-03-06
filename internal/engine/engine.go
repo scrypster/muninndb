@@ -166,6 +166,15 @@ type Engine struct {
 	jobManager   *vaultjob.Manager  // tracks async clone/merge jobs
 	stopCtx      context.Context    // cancelled on Stop() to signal goroutines
 	stopCancel   context.CancelFunc
+
+	// Goroutine lifecycle tracking — see spawnFireAndForget and spawnJob.
+	// Per-request fire-and-forget goroutines (Read, RecordAccess).
+	fireAndForgetWG      sync.WaitGroup
+	fireAndForgetStopped atomic.Bool
+	// Long-running vault job goroutines (clone, merge, reembed, import).
+	jobWG      sync.WaitGroup
+	jobStopped atomic.Bool
+
 	hnswRegistry *hnsw.Registry     // per-vault HNSW indexes (shared with activation)
 
 	// vaultMu provides per-vault mutual exclusion for destructive vault operations
@@ -411,6 +420,11 @@ func (e *Engine) Stop() {
 		if e.stopCancel != nil {
 			e.stopCancel()
 		}
+		// Fence new goroutine spawns immediately. Must happen after stopCancel()
+		// so goroutines see a cancelled context, and before wg.Wait() calls below.
+		e.fireAndForgetStopped.Store(true)
+		e.jobStopped.Store(true)
+
 		if e.autoAssoc != nil {
 			e.autoAssoc.Stop()
 			if e.neighborWorker != nil {
@@ -458,6 +472,17 @@ func (e *Engine) Stop() {
 				slog.Warn("engine: coherence flush worker did not exit within 5s")
 			}
 		}
+		// Drain job goroutines BEFORE closing the job manager. Job goroutines
+		// call jobManager.Fail() / jobManager.Complete() — closing the manager
+		// first would race with those calls.
+		jobDone := make(chan struct{})
+		go func() { e.jobWG.Wait(); close(jobDone) }()
+		select {
+		case <-jobDone:
+		case <-time.After(30 * time.Second):
+			slog.Warn("engine: job goroutines did not drain within 30s")
+		}
+
 		// Stop the vault job GC goroutine.
 		if e.jobManager != nil {
 			e.jobManager.Close()
@@ -478,7 +503,59 @@ func (e *Engine) Stop() {
 				slog.Warn("engine: archive GC worker did not exit within 5s")
 			}
 		}
+
+		// Drain fire-and-forget goroutines last — they write to Pebble via the
+		// scoring store. Must complete before store.Close() (called by the caller
+		// immediately after Stop() returns).
+		ffDone := make(chan struct{})
+		go func() { e.fireAndForgetWG.Wait(); close(ffDone) }()
+		select {
+		case <-ffDone:
+		case <-time.After(5 * time.Second):
+			slog.Warn("engine: fire-and-forget goroutines did not drain within 5s")
+		}
 	})
+}
+
+// spawnFireAndForget tracks fn in the engine's fire-and-forget WaitGroup and
+// launches it as a goroutine. Returns false without spawning if the engine is
+// shutting down. Callers may silently skip work on false — fire-and-forget
+// tasks are best-effort by definition.
+//
+// Uses the add-before-check pattern: Add(1) happens before the stopped check,
+// and Stop() sets stopped before calling Wait(). This eliminates the TOCTOU
+// race in naive check-then-add WaitGroup usage.
+//
+// MUST be used instead of bare `go` for all per-request goroutines.
+func (e *Engine) spawnFireAndForget(fn func()) bool {
+	e.fireAndForgetWG.Add(1)            // Add FIRST — visible to wg.Wait() in Stop()
+	if e.fireAndForgetStopped.Load() {
+		e.fireAndForgetWG.Done()         // Undo — engine is shutting down
+		return false
+	}
+	go func() {
+		defer e.fireAndForgetWG.Done()
+		fn()
+	}()
+	return true
+}
+
+// spawnJob tracks fn in the engine's job WaitGroup and launches it as a
+// goroutine. Returns false without spawning if the engine is shutting down.
+// Callers MUST fail the associated job immediately when false is returned.
+//
+// MUST be used instead of bare `go` for all vault job goroutines.
+func (e *Engine) spawnJob(fn func()) bool {
+	e.jobWG.Add(1)                      // Add FIRST — visible to wg.Wait() in Stop()
+	if e.jobStopped.Load() {
+		e.jobWG.Done()                   // Undo — engine is shutting down
+		return false
+	}
+	go func() {
+		defer e.jobWG.Done()
+		fn()
+	}()
+	return true
 }
 
 // SetCoordinator wires the Lobe's ClusterCoordinator so Activate() can forward
