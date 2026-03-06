@@ -121,18 +121,21 @@ Add to `~/.cursor/mcp.json`:
 <details>
 <summary>OpenClaw</summary>
 
-Add to `~/.openclaw/mcp.json`:
+Add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
   "mcpServers": {
     "muninn": {
-      "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "command": "muninn",
+      "args": ["mcp"],
+      "transport": "stdio"
     }
   }
 }
 ```
+
+OpenClaw uses stdio transport. The `muninn mcp` proxy (included in the binary) handles bearer token auth automatically — no credential needed in the config file.
 </details>
 
 <details>

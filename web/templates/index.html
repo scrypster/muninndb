@@ -1783,6 +1783,26 @@
             </template>
           </div>
 
+          <!-- OpenClaw -->
+          <div class="card-polished">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem;">OpenClaw</h3>
+            <p style="color:var(--text-muted);font-size:0.8125rem;margin:0 0 0.5rem;">
+              Run <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">muninn init --tool openclaw --yes</code> to configure automatically, or add manually to <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/.openclaw/openclaw.json</code>:
+            </p>
+            <pre style="background:var(--bg-elevated);border-radius:0.5rem;padding:0.75rem;font-size:0.8125rem;overflow-x:auto;color:var(--text-primary);margin:0 0 0.5rem;">{
+  "mcpServers": {
+    "muninn": {
+      "command": "muninn",
+      "args": ["mcp"],
+      "transport": "stdio"
+    }
+  }
+}</pre>
+            <p style="font-size:0.75rem;color:var(--text-muted);margin:0;">
+              OpenClaw uses stdio transport. The <code style="font-family:monospace;background:var(--bg-base);padding:0.1rem 0.3rem;border-radius:0.2rem;">muninn mcp</code> proxy handles auth automatically — no token needed in the config.
+            </p>
+          </div>
+
           <!-- Codex -->
           <div class="card-polished">
             <h3 style="margin:0 0 0.75rem;font-size:1rem;">Codex</h3>

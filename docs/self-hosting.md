@@ -220,16 +220,31 @@ If you enabled MCP auth (token file at `~/.muninn/mcp.token`):
 }
 ```
 
-**OpenClaw** — `~/.openclaw/mcp.json`
+**OpenClaw** — `~/.openclaw/openclaw.json`
+
+OpenClaw only supports stdio-transport MCP servers. MuninnDB ships a built-in
+proxy (`muninn mcp`) that bridges OpenClaw's subprocess model to the running
+daemon. `muninn init` configures this automatically; for manual setup:
+
 ```json
 {
   "mcpServers": {
     "muninn": {
-      "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "command": "muninn",
+      "args": ["mcp"],
+      "transport": "stdio"
     }
   }
 }
+```
+
+The `muninn mcp` proxy reads the bearer token from `~/.muninn/mcp.token` on
+every request, so it works transparently even after a daemon restart — no
+credential embedded in the config file.
+
+To override the daemon endpoint (non-default port, TLS):
+```sh
+MUNINN_MCP_URL=https://my-server:8750/mcp muninn mcp
 ```
 
 **Windsurf** — `~/.codeium/windsurf/mcp_config.json`
@@ -283,6 +298,7 @@ curl http://localhost:8750/mcp/health
 | `MUNINN_MEM_LIMIT_GB` | `4` | GOMEMLIMIT in GB |
 | `MUNINN_GC_PERCENT` | `200` | GOGC tuning |
 | `MUNINN_CORS_ORIGINS` | `""` | Comma-separated allowed CORS origins |
+| `MUNINN_MCP_URL` | `http://127.0.0.1:8750/mcp` | Override MCP endpoint used by `muninn mcp` proxy (OpenClaw) |
 
 ---
 

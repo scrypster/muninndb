@@ -64,6 +64,8 @@ func main() {
 		runStart(true)
 	case "show:vaults":
 		runShowVaults()
+	case "mcp":
+		runMCPStdio()
 	case "logs":
 		runLogs(rest)
 	case "cluster":

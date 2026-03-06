@@ -225,6 +225,16 @@ var subcommandHelp = map[string]func(){
 				"muninn admin change-password -u root -p",
 			})
 	},
+	"mcp": func() {
+		printSubcommandUsage("mcp", "stdio→HTTP MCP proxy for OpenClaw", "muninn mcp",
+			[][2]string{
+				{"MUNINN_MCP_URL", "Override MCP endpoint (default: http://127.0.0.1:8750/mcp)"},
+			},
+			[]string{
+				"muninn mcp",
+				"MUNINN_MCP_URL=https://remote:8750/mcp muninn mcp",
+			})
+	},
 	"show vaults": func() {
 		printSubcommandUsage("show vaults", "list all vaults", "muninn show vaults", nil,
 			[]string{"muninn show vaults"})
@@ -293,6 +303,7 @@ func printHelp() {
 	fmt.Printf("  %-32s %s\n", cyan("muninn admin change-password"), "Change the admin password")
 	fmt.Printf("  %-32s %s\n", cyan("muninn backup --output <dir>"), "Offline point-in-time backup (server must be stopped)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn cluster"), "Cluster management (info, status, failover, add-node, remove-node)")
+	fmt.Printf("  %-32s %s\n", cyan("muninn mcp"), "stdio→HTTP MCP proxy (for OpenClaw)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn completion <shell>"), "Shell completion (bash/zsh/fish)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn upgrade"), "Check for and install updates")
 	fmt.Printf("  %-32s %s\n", cyan("muninn help"), "Show this message")
@@ -312,7 +323,7 @@ func printHelp() {
 	fmt.Println("  Run " + cyan("muninn init") + " to configure Claude Desktop, Cursor, or Windsurf automatically.")
 	fmt.Println()
 	fmt.Println("  MCP endpoint: http://localhost:8750/mcp")
-	fmt.Printf("  %-28s %s\n", "MUNINNDB_MCP_URL", "Override MCP server URL")
+	fmt.Printf("  %-28s %s\n", "MUNINN_MCP_URL", "Override MCP server URL (also used by 'muninn mcp' proxy)")
 	fmt.Printf("  %-28s %s\n", "MUNINNDB_DATA", "Override default data directory")
 	fmt.Println()
 

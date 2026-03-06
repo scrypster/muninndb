@@ -5,7 +5,7 @@ import "fmt"
 // muninnCommands is the canonical list of all top-level subcommands.
 var muninnCommands = []string{
 	"init", "start", "stop", "restart", "status",
-	"shell", "logs", "show", "completion", "help",
+	"shell", "logs", "mcp", "show", "completion", "help",
 }
 
 func printCompletion(shell string) {
@@ -26,7 +26,7 @@ const bashCompletion = `# muninn bash completion
 
 _muninn_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
-    local commands="init start stop restart status shell logs show completion help"
+    local commands="init start stop restart status shell logs mcp show completion help"
     COMPREPLY=($(compgen -W "${commands}" -- "${cur}"))
 }
 complete -F _muninn_completions muninn
@@ -46,6 +46,7 @@ _muninn() {
         'status:Show service health'
         'shell:Interactive memory explorer'
         'logs:Tail the log file'
+        'mcp:stdio→HTTP MCP proxy (for OpenClaw)'
         'completion:Generate shell completion script'
         'help:Show help'
     )
@@ -66,6 +67,7 @@ complete -c muninn -n __fish_use_subcommand -a restart   -d 'Stop and restart'
 complete -c muninn -n __fish_use_subcommand -a status    -d 'Show service health'
 complete -c muninn -n __fish_use_subcommand -a shell     -d 'Interactive memory explorer'
 complete -c muninn -n __fish_use_subcommand -a logs      -d 'Tail the log file'
+complete -c muninn -n __fish_use_subcommand -a mcp       -d 'stdio→HTTP MCP proxy (for OpenClaw)'
 complete -c muninn -n __fish_use_subcommand -a completion -d 'Generate shell completion script'
 complete -c muninn -n __fish_use_subcommand -a help      -d 'Show help'
 `

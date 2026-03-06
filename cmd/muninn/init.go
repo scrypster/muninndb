@@ -684,6 +684,10 @@ func configureNamedTools(tools []string, mcpURL, token string) []string {
 				errs = append(errs, fmt.Sprintf("OpenClaw: %v", err))
 				fmt.Fprintf(os.Stderr, "  ✗ OpenClaw: %v\n", err)
 			}
+			// Also install the SKILL.md so OpenClaw knows how to use MuninnDB tools.
+			if err := configureOpenClawSkill(); err != nil {
+				fmt.Fprintf(os.Stderr, "  warning: OpenClaw skill: %v\n", err)
+			}
 		case "codex":
 			if err := configureCodex(mcpURL, token); err != nil {
 				errs = append(errs, fmt.Sprintf("Codex: %v", err))
