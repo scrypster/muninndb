@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"context"
 	"sync"
 	"testing"
+
+	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // TestEngine_SpawnAfterStop verifies that spawnFireAndForget and spawnJob
@@ -28,6 +31,38 @@ func TestEngine_SpawnAfterStop(t *testing.T) {
 	if launched {
 		t.Error("spawnJob: goroutine was launched after Stop()")
 	}
+}
+
+// TestEngine_StopDrainsFireAndForget verifies that stopping the engine while
+// a Read-triggered scoring goroutine is in-flight does not panic.
+// This is the scenario that produced "panic: pebble: closed" in CI.
+func TestEngine_StopDrainsFireAndForget(t *testing.T) {
+	for range 50 {
+		eng, cleanup := testEnv(t)
+
+		// Write an engram so Read has something to return.
+		ctx := context.Background()
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   "test",
+			Concept: "lifecycle",
+			Content: "goroutine drain test",
+		})
+		if err != nil {
+			cleanup()
+			t.Fatal(err)
+		}
+
+		// Read triggers a fire-and-forget scoring goroutine.
+		_, _ = eng.Read(ctx, &mbp.ReadRequest{
+			Vault: "test",
+			ID:    resp.ID,
+		})
+
+		// Stop immediately — races with the feedback goroutine.
+		// spawnFireAndForget must drain it before store.Close().
+		cleanup() // calls eng.Stop() then store.Close()
+	}
+	// Reaching here without panic means the drain worked correctly.
 }
 
 // TestEngine_StopIdempotent verifies that Stop() can be called multiple times

@@ -112,7 +112,10 @@ func (s *Store) RecordFeedback(ctx context.Context, ws [8]byte, signal FeedbackS
 	defer func() {
 		if r := recover(); r != nil {
 			if err, ok := r.(error); ok && errors.Is(err, pebble.ErrClosed) {
-				return // expected: DB closed before async feedback goroutine exits
+				// Defense-in-depth: Engine.spawnFireAndForget + WaitGroup is the
+				// primary guard. This recover() handles the 5s timeout edge case
+				// and future call sites that bypass the spawn helper.
+				return
 			}
 			panic(r) // unexpected — propagate
 		}

@@ -1367,7 +1367,8 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 	}
 
 	// Fire implicit positive feedback signal asynchronously — read = accessed.
-	go func() {
+	// spawnFireAndForget ensures Stop() drains this goroutine before DB close.
+	e.spawnFireAndForget(func() {
 		signal := scoring.FeedbackSignal{
 			EngramID:    [16]byte(id),
 			Accessed:    true,
@@ -1375,7 +1376,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 			Timestamp:   time.Now(),
 		}
 		e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
-	}()
+	})
 
 	d := time.Since(readStart)
 	if e.latencyTracker != nil {
@@ -2795,7 +2796,12 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 		ScoreVector: scoring.DefaultWeights(),
 		Timestamp:   time.Now(),
 	}
-	go e.scoring.RecordFeedback(ctx, wsPrefix, signal)
+	// spawnFireAndForget ensures Stop() drains this goroutine before DB close.
+	// Uses e.stopCtx (not caller ctx) — feedback writes are gated by engine
+	// lifecycle, not request lifecycle. Client disconnect must not abort them.
+	e.spawnFireAndForget(func() {
+		e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
+	})
 	return nil
 }
 
