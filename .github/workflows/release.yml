@@ -179,10 +179,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
+          # Create release if it doesn't already exist (e.g. pre-created manually).
+          # This is intentionally idempotent — if the tag/release was created before
+          # CI finished, we skip creation and go straight to uploading assets.
+          if ! gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${{ github.repository }}" \
+              --title "muninn ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
+
+          gh release upload "${GITHUB_REF_NAME}" \
             --repo "${{ github.repository }}" \
-            --title "muninn ${GITHUB_REF_NAME}" \
-            --generate-notes \
+            --clobber \
             muninn-darwin-arm64 \
             muninn-darwin-amd64 \
             muninn-linux-amd64 \
