@@ -2,9 +2,11 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
 	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -65,7 +67,10 @@ func (e *Engine) StartClone(ctx context.Context, sourceVault, newName string) (*
 	job.CopyTotal = sourceCount
 	job.IndexTotal = sourceCount
 
-	go e.runClone(job, wsSource, wsTarget, newName)
+	if !e.spawnJob(func() { e.runClone(job, wsSource, wsTarget, newName) }) {
+		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
+		return nil, nil
+	}
 	return job, nil
 }
 
@@ -76,6 +81,12 @@ func (e *Engine) runClone(job *vaultjob.Job, wsSource, wsTarget [8]byte, newName
 	// Panic recovery: if goroutine panics, ensure running counter is decremented.
 	defer func() {
 		if r := recover(); r != nil {
+			// Swallow closed-DB panics — can occur if the 30s Stop() timeout
+			// expires and Pebble is closed before this goroutine exits.
+			if err, ok := r.(error); ok && errors.Is(err, pebble.ErrClosed) {
+				e.jobManager.Fail(job, fmt.Errorf("engine closed during job"))
+				return
+			}
 			e.jobManager.Fail(job, fmt.Errorf("vault job panicked: %v", r))
 			slog.Error("clone job panicked", "job_id", job.ID, "source_vault", wsSource, "target_vault", newName, "panic", r)
 		}
@@ -185,7 +196,10 @@ func (e *Engine) StartMerge(ctx context.Context, sourceVault, targetVault string
 	job.CopyTotal = sourceCount
 	job.IndexTotal = sourceCount
 
-	go e.runMerge(job, wsSource, wsTarget, sourceVault, targetVault, deleteSource)
+	if !e.spawnJob(func() { e.runMerge(job, wsSource, wsTarget, sourceVault, targetVault, deleteSource) }) {
+		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
+		return nil, nil
+	}
 	return job, nil
 }
 
@@ -196,6 +210,12 @@ func (e *Engine) runMerge(job *vaultjob.Job, wsSource, wsTarget [8]byte, sourceV
 	// Panic recovery: if goroutine panics, ensure running counter is decremented.
 	defer func() {
 		if r := recover(); r != nil {
+			// Swallow closed-DB panics — can occur if the 30s Stop() timeout
+			// expires and Pebble is closed before this goroutine exits.
+			if err, ok := r.(error); ok && errors.Is(err, pebble.ErrClosed) {
+				e.jobManager.Fail(job, fmt.Errorf("engine closed during job"))
+				return
+			}
 			e.jobManager.Fail(job, fmt.Errorf("vault job panicked: %v", r))
 			slog.Error("merge job panicked", "job_id", job.ID, "source_vault", sourceVault, "target_vault", targetVault, "panic", r)
 		}

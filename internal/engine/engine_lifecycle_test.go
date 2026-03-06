@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -63,6 +64,44 @@ func TestEngine_StopDrainsFireAndForget(t *testing.T) {
 		cleanup() // calls eng.Stop() then store.Close()
 	}
 	// Reaching here without panic means the drain worked correctly.
+}
+
+// TestEngine_StopDrainsJobs is a stress test that starts a clone job just before
+// Stop(), verifying that no panic or hang occurs. Either the job runs to completion
+// or spawnJob returns false (engine shutting down) — both outcomes are correct.
+func TestEngine_StopDrainsJobs(t *testing.T) {
+	ctx := context.Background()
+	for i := range 20 {
+		eng, cleanup := testEnv(t)
+
+		src := fmt.Sprintf("drain-src-%d", i)
+		dst := fmt.Sprintf("drain-dst-%d", i)
+
+		// Create source and target vaults by writing an engram to each.
+		if _, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   src,
+			Concept: "lifecycle drain test",
+			Content: "source engram",
+		}); err != nil {
+			cleanup()
+			t.Fatal(err)
+		}
+		if _, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   dst,
+			Concept: "lifecycle drain test",
+			Content: "target engram",
+		}); err != nil {
+			cleanup()
+			t.Fatal(err)
+		}
+
+		// Trigger a clone job just before Stop. Either the job runs or
+		// spawnJob returns false — both are correct. Must not panic or hang.
+		go func() {
+			eng.StartClone(ctx, src, src+"_clone")
+		}()
+		cleanup()
+	}
 }
 
 // TestEngine_StopIdempotent verifies that Stop() can be called multiple times
