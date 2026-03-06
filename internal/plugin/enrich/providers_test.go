@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -263,6 +264,49 @@ func TestOpenAIProvider_Init_Success(t *testing.T) {
 		APIKey:  "key",
 	})
 	if err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+}
+
+// TestOpenAIProvider_Init_ProbeContainsJSON is a regression test for the bug
+// where the connectivity probe sent "Say 'OK' only." without the word "json",
+// causing OpenAI to reject the request with HTTP 400 when response_format is
+// json_object. Asserts that all probe messages contain "json".
+func TestOpenAIProvider_Init_ProbeContainsJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req openaiChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
+		// OpenAI requires at least one message to contain the word "json"
+		// when response_format=json_object is set.
+		hasJSON := false
+		for _, msg := range req.Messages {
+			if strings.Contains(strings.ToLower(msg.Content), "json") {
+				hasJSON = true
+				break
+			}
+		}
+		if !hasJSON {
+			t.Errorf("no probe message contains 'json' — OpenAI rejects response_format=json_object when 'json' does not appear in any message")
+		}
+		resp := openaiChatResponse{
+			Choices: []struct {
+				Message openaiMessage `json:"message"`
+			}{
+				{Message: openaiMessage{Role: "assistant", Content: `{"ok":true}`}},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	p := NewOpenAILLMProvider()
+	if err := p.Init(context.Background(), LLMProviderConfig{
+		BaseURL: srv.URL,
+		Model:   "test",
+		APIKey:  "key",
+	}); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 }

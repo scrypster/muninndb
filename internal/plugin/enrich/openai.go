@@ -69,8 +69,11 @@ func (p *OpenAILLMProvider) Init(ctx context.Context, cfg LLMProviderConfig) err
 		return fmt.Errorf("openai provider requires API key")
 	}
 
-	// Send a probe completion request to validate connectivity
-	_, err := p.Complete(ctx, "You are a helpful assistant.", "Say 'OK' only.")
+	// Send a probe completion request to validate connectivity.
+	// The user message must contain the word "json" because Complete always
+	// sets response_format:json_object — OpenAI rejects requests where none
+	// of the messages mention json when that format is requested.
+	_, err := p.Complete(ctx, "You are a connectivity probe. Respond with valid JSON only.", `{"ok":true}`)
 	if err != nil {
 		return fmt.Errorf("openai connectivity check failed: %w", err)
 	}
