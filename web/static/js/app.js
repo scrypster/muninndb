@@ -158,6 +158,12 @@ document.addEventListener('alpine:init', () => {
     embedStatus: null,       // loaded from GET /api/admin/embed/status
     mcpInfo: null,           // loaded from GET /api/admin/mcp-info
     connectCopied: false,    // feedback for copy button
+    connectPlatform: (() => {
+        const p = (navigator.userAgent || '').toLowerCase();
+        if (p.includes('win')) return 'windows';
+        if (p.includes('linux')) return 'linux';
+        return 'macos'; // default
+    })(),
     apiKeys: [],
     apiKeyForm: { vault: '', label: '', mode: 'full' },
     apiKeyToken: null,
