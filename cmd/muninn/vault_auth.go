@@ -14,8 +14,8 @@ import (
 // Package-level session state set by runVault before dispatching subcommands.
 // Tests don't touch these, so doVaultRequestForce and friends work unchanged.
 var (
-	vaultAdminBase = "http://localhost:8475" // REST API
-	vaultUIBase    = "http://localhost:8476" // login endpoint lives here
+	vaultAdminBase = "http://127.0.0.1:8475" // REST API
+	vaultUIBase    = "http://127.0.0.1:8476" // login endpoint lives here
 	vaultCookie    string                   // muninn_session value
 )
 
@@ -29,7 +29,7 @@ var (
 //	-p                prompt for password
 //	-p<password>      inline password (no space, like MySQL)
 //	--password=<pw>   inline password
-//	-h <host:port>    UI host:port (default: localhost:8476)
+//	-h <host:port>    UI host:port (default: 127.0.0.1:8476)
 func parseAdminFlags(args []string) (remaining []string, username, password string, prompted bool) {
 	username = "root"
 

@@ -30,7 +30,7 @@ func TestClusterCommands_InfoJSON(t *testing.T) {
 					},
 					{
 						"node_id":  "node-2",
-						"addr":     "localhost:8475",
+						"addr":     "127.0.0.1:8475",
 						"role":     "Lobe",
 						"last_seq": 950,
 					},

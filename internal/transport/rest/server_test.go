@@ -1953,7 +1953,7 @@ func TestGuide_EngineError(t *testing.T) {
 // returns correct MCP URL for the UI to call entity graph via MCP.
 func TestEntityGraphVisualization_MCPInfoEndpoint(t *testing.T) {
 	// Create server with MCP address configured
-	server := NewServer("localhost:8080", &MockEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil, MCPInfo{Addr: "localhost:8750", HasToken: false})
+	server := NewServer("localhost:8080", &MockEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil, MCPInfo{Addr: "127.0.0.1:8750", HasToken: false})
 
 	req := httptest.NewRequest("GET", "/api/admin/mcp-info", nil)
 	w := httptest.NewRecorder()

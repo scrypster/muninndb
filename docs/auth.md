@@ -83,7 +83,7 @@ Keys are 46 characters. The raw bytes are generated with `crypto/rand`. The toke
 Include the key as a bearer token on every request:
 
 ```bash
-curl http://localhost:8475/api/engrams?vault=default \
+curl http://127.0.0.1:8475/api/engrams?vault=default \
   -H "Authorization: Bearer mk_xK9m..."
 ```
 
@@ -96,7 +96,7 @@ The key implicitly identifies the vault. If the key belongs to `default` and the
 ### Create a key (admin only)
 
 ```bash
-curl -X POST http://localhost:8475/api/admin/keys \
+curl -X POST http://127.0.0.1:8475/api/admin/keys \
   -H "Content-Type: application/json" \
   -d '{
     "vault": "default",
@@ -122,7 +122,7 @@ Response:
 ### List keys for a vault
 
 ```bash
-curl "http://localhost:8475/api/admin/keys?vault=default"
+curl "http://127.0.0.1:8475/api/admin/keys?vault=default"
 ```
 
 Token values are not returned. You see the key metadata (ID, label, mode, created date) only.
@@ -130,7 +130,7 @@ Token values are not returned. You see the key metadata (ID, label, mode, create
 ### Revoke a key
 
 ```bash
-curl -X DELETE "http://localhost:8475/api/admin/keys/A1B2C3D4?vault=default"
+curl -X DELETE "http://127.0.0.1:8475/api/admin/keys/A1B2C3D4?vault=default"
 ```
 
 Revocation is immediate. The token stops working on the next request.
@@ -146,7 +146,7 @@ The `default` vault is created as **public** on first run — no API key require
 To open a vault (allow unauthenticated access):
 
 ```bash
-curl -X PUT http://localhost:8475/api/admin/vaults/config \
+curl -X PUT http://127.0.0.1:8475/api/admin/vaults/config \
   -H "Content-Type: application/json" \
   -d '{"name":"myvault","public":true}'
 ```
@@ -154,7 +154,7 @@ curl -X PUT http://localhost:8475/api/admin/vaults/config \
 To lock a vault (require an API key):
 
 ```bash
-curl -X PUT http://localhost:8475/api/admin/vaults/config \
+curl -X PUT http://127.0.0.1:8475/api/admin/vaults/config \
   -H "Content-Type: application/json" \
   -d '{"name":"default","public":false}'
 ```
@@ -170,7 +170,7 @@ Plasticity controls the cognitive pipeline for a vault — how it learns, forget
 Get the current plasticity configuration for a vault:
 
 ```bash
-curl "http://localhost:8475/api/admin/vault/default/plasticity" \
+curl "http://127.0.0.1:8475/api/admin/vault/default/plasticity" \
   -H "Authorization: Bearer <admin-session>"
 ```
 
@@ -202,7 +202,7 @@ Response includes both the saved configuration and the fully resolved values (pr
 Update plasticity for a vault:
 
 ```bash
-curl -X PUT "http://localhost:8475/api/admin/vault/default/plasticity" \
+curl -X PUT "http://127.0.0.1:8475/api/admin/vault/default/plasticity" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <admin-session>" \
   -d '{

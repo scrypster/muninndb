@@ -82,7 +82,7 @@ func runBackup(args []string) {
 		fmt.Fprintf(os.Stderr, "error: muninn is running (pid %d) — cannot perform offline backup\n", pid)
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Use the online backup endpoint instead:")
-		fmt.Fprintf(os.Stderr, "  curl -X POST http://localhost:8475/api/admin/backup -d '{\"output_dir\": \"%s\"}'\n", outputDir)
+		fmt.Fprintf(os.Stderr, "  curl -X POST http://127.0.0.1:8475/api/admin/backup -d '{\"output_dir\": \"%s\"}'\n", outputDir)
 		osExit(1)
 		return
 	}

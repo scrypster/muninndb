@@ -237,7 +237,7 @@ func TestMCPInfo(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.URL != "http://localhost:8750/mcp" {
+	if resp.URL != "http://127.0.0.1:8750/mcp" {
 		t.Errorf("unexpected URL: %q", resp.URL)
 	}
 	if !resp.TokenConfigured {
@@ -278,7 +278,7 @@ func TestMCPInfo_CustomPort(t *testing.T) {
 
 	var resp MCPInfoResponse
 	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.URL != "http://localhost:9999/mcp" {
+	if resp.URL != "http://127.0.0.1:9999/mcp" {
 		t.Errorf("unexpected URL for custom port: %q", resp.URL)
 	}
 }

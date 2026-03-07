@@ -50,7 +50,7 @@ func mcpCall(baseURL, toolName string, args map[string]any) (map[string]any, err
 
 func (r *replState) cmdShowVaults() {
 	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest("GET", "http://localhost:8475/api/vaults", nil)
+	req, err := http.NewRequest("GET", "http://127.0.0.1:8475/api/vaults", nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
@@ -70,7 +70,7 @@ func (r *replState) cmdShowVaults() {
 		// Fallback: show static message
 		fmt.Println("  default   (built-in)")
 		fmt.Println()
-		fmt.Println("  For full vault list, open: http://localhost:8476")
+		fmt.Println("  For full vault list, open: http://127.0.0.1:8476")
 		return
 	}
 
@@ -350,7 +350,7 @@ func (r *replState) cmdShowStats() {
 	fmt.Println("  MBP  :8474   binary protocol")
 	fmt.Println("  REST :8475   JSON API")
 	fmt.Println("  MCP  :8750   AI tool integration")
-	fmt.Println("  UI   :8476   http://localhost:8476")
+	fmt.Println("  UI   :8476   http://127.0.0.1:8476")
 	if r.vault != "" {
 		fmt.Println()
 		result, err := mcpCall(r.mcpURL, "muninn_status", map[string]any{"vault": r.vault})
@@ -380,7 +380,7 @@ func isEmptyMCPResult(result map[string]any) bool {
 }
 
 func runShowVaults() {
-	r := &replState{mcpURL: "http://localhost:8750"}
+	r := &replState{mcpURL: "http://127.0.0.1:8750"}
 	r.cmdShowVaults()
 }
 

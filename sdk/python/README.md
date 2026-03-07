@@ -30,7 +30,7 @@ import asyncio
 from muninn import MuninnClient
 
 async def main():
-    async with MuninnClient("http://localhost:8476") as client:
+    async with MuninnClient("http://127.0.0.1:8476") as client:
         # Write a memory
         engram_id = await client.write(
             vault="default",
@@ -210,7 +210,7 @@ Create a client with custom settings:
 
 ```python
 client = MuninnClient(
-    base_url="http://localhost:8476",      # Server address
+    base_url="http://127.0.0.1:8476",      # Server address
     token="your-bearer-token",              # Optional auth token
     timeout=5.0,                            # Request timeout (seconds)
     max_retries=3,                          # Max retry attempts
@@ -287,7 +287,7 @@ Example with custom retry settings:
 
 ```python
 async with MuninnClient(
-    base_url="http://localhost:8476",
+    base_url="http://127.0.0.1:8476",
     max_retries=5,
     retry_backoff=1.0
 ) as client:

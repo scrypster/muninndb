@@ -11,7 +11,7 @@ import (
 
 func main() {
 	token := os.Getenv("MUNINN_TOKEN")
-	client := muninn.NewClient("http://localhost:8476", token)
+	client := muninn.NewClient("http://127.0.0.1:8476", token)
 	ctx := context.Background()
 
 	// Health check

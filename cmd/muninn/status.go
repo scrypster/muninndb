@@ -86,9 +86,9 @@ func probeServicesDefault() []serviceStatus {
 	}
 
 	return []serviceStatus{
-		{name: "database", port: 8475, up: probe("http://localhost:8475/api/health")},
-		{name: "mcp", port: 8750, up: probe("http://localhost:8750/mcp/health")},
-		{name: "web ui", port: 8476, up: probe("http://localhost:8476/")},
+		{name: "database", port: 8475, up: probe("http://127.0.0.1:8475/api/health")},
+		{name: "mcp", port: 8750, up: probe("http://127.0.0.1:8750/mcp/health")},
+		{name: "web ui", port: 8476, up: probe("http://127.0.0.1:8476/")},
 	}
 }
 

@@ -72,7 +72,7 @@ muninn start
 **Or** enable cluster mode on a running node via REST:
 
 ```sh
-curl -X POST http://localhost:8475/api/admin/cluster/enable \
+curl -X POST http://127.0.0.1:8475/api/admin/cluster/enable \
   -H "Content-Type: application/json" \
   -H "Cookie: <admin-session-cookie>" \
   -d '{
@@ -87,7 +87,7 @@ curl -X POST http://localhost:8475/api/admin/cluster/enable \
 1. On the Cortex, obtain a join token (required when `cluster_secret` is set):
 
 ```sh
-curl http://localhost:8475/api/admin/cluster/token \
+curl http://127.0.0.1:8475/api/admin/cluster/token \
   -H "Cookie: <admin-session-cookie>"
 # {"token":"...", "expires_at":"...", "ttl_seconds":900}
 ```
@@ -95,7 +95,7 @@ curl http://localhost:8475/api/admin/cluster/token \
 2. Register the pending peer on the Cortex:
 
 ```sh
-curl -X POST http://localhost:8475/api/admin/cluster/nodes \
+curl -X POST http://127.0.0.1:8475/api/admin/cluster/nodes \
   -H "Content-Type: application/json" \
   -H "Cookie: <admin-session-cookie>" \
   -d '{"addr": "10.0.1.6:8474", "token": "<token-from-step-1>"}'
@@ -147,8 +147,8 @@ muninn cluster info
 muninn cluster status
 
 # REST (cluster auth: Bearer token = cluster_secret)
-curl -H "Authorization: Bearer <cluster_secret>" http://localhost:8475/v1/cluster/health
-curl -H "Authorization: Bearer <cluster_secret>" http://localhost:8475/v1/cluster/info
+curl -H "Authorization: Bearer <cluster_secret>" http://127.0.0.1:8475/v1/cluster/health
+curl -H "Authorization: Bearer <cluster_secret>" http://127.0.0.1:8475/v1/cluster/info
 ```
 
 Expected: `status: "ok"`, `is_leader: true` on Cortex, `replication_lag: 0` on Cortex, non-zero lag on Lobes until caught up.
@@ -163,7 +163,7 @@ Expected: `status: "ok"`, `is_leader: true` on Cortex, `replication_lag: 0` on C
 
 ```sh
 curl -H "Authorization: Bearer $MUNINN_CLUSTER_SECRET" \
-  http://localhost:8475/v1/cluster/health
+  http://127.0.0.1:8475/v1/cluster/health
 ```
 
 Response: `status` (`ok` | `degraded` | `down`), `role`, `is_leader`, `epoch`, `replication_lag`.
@@ -172,7 +172,7 @@ Response: `status` (`ok` | `degraded` | `down`), `role`, `is_leader`, `epoch`, `
 
 ```sh
 curl -H "Authorization: Bearer $MUNINN_CLUSTER_SECRET" \
-  http://localhost:8475/v1/cluster/info
+  http://127.0.0.1:8475/v1/cluster/info
 ```
 
 ### Checking Replica Lag
@@ -180,7 +180,7 @@ curl -H "Authorization: Bearer $MUNINN_CLUSTER_SECRET" \
 ```sh
 # On a Lobe — returns this node's lag
 curl -H "Authorization: Bearer $MUNINN_CLUSTER_SECRET" \
-  http://localhost:8475/v1/replication/lag
+  http://127.0.0.1:8475/v1/replication/lag
 # {"lag": 42, "role": "replica"}
 
 # Full status
@@ -193,7 +193,7 @@ muninn cluster status
 
 ```sh
 curl -N -H "Cookie: <admin-session>" \
-  http://localhost:8475/api/admin/cluster/events
+  http://127.0.0.1:8475/api/admin/cluster/events
 ```
 
 Use for debugging replication flow. Requires admin session authentication.
@@ -215,7 +215,7 @@ Use for debugging replication flow. Requires admin session authentication.
 
 ```sh
 # Optional: drain=true waits up to 30s for replica to catch up before removal
-curl -X DELETE "http://localhost:8475/api/admin/cluster/nodes/replica-1?drain=true" \
+curl -X DELETE "http://127.0.0.1:8475/api/admin/cluster/nodes/replica-1?drain=true" \
   -H "Cookie: <admin-session>"
 ```
 
@@ -244,7 +244,7 @@ Add sentinel nodes as in §2. They increase quorum size and improve ODOWN detect
 **POST /api/admin/cluster/failover** — Planned handoff to a specific Lobe:
 
 ```sh
-curl -X POST http://localhost:8475/api/admin/cluster/failover \
+curl -X POST http://127.0.0.1:8475/api/admin/cluster/failover \
   -H "Content-Type: application/json" \
   -H "Cookie: <admin-session>" \
   -d '{"target_node_id": "replica-1"}'
@@ -266,7 +266,7 @@ Timeout: 5s for HANDOFF_ACK, 30s for convergence.
 
 ```sh
 curl -X POST -H "Authorization: Bearer $MUNINN_CLUSTER_SECRET" \
-  http://localhost:8475/v1/replication/promote
+  http://127.0.0.1:8475/v1/replication/promote
 ```
 
 Use when the Cortex has failed and you need a new leader elected. The Lobe with quorum votes will become Cortex.
@@ -327,7 +327,7 @@ Use when the Cortex has failed and you need a new leader elected. The Lobe with 
 muninn backup --data-dir ~/.muninn/data --output /backups/muninn-$(date +%Y%m%d)
 
 # Online backup (server running) — via REST API:
-curl -X POST http://localhost:8475/api/admin/backup \
+curl -X POST http://127.0.0.1:8475/api/admin/backup \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"output_dir": "/backups/muninn-online"}'
@@ -339,7 +339,7 @@ The backup creates a Pebble checkpoint (hardlinked, space-efficient) plus copies
 
 ```sh
 curl -H "Cookie: <admin-session>" \
-  "http://localhost:8475/api/admin/vaults/default/export" \
+  "http://127.0.0.1:8475/api/admin/vaults/default/export" \
   -o default.muninn
 ```
 
@@ -359,7 +359,7 @@ Includes: `pebble/`, `wal/`, `auth_secret`, `cluster.yaml`, etc.
 **Vault import** (for vault export):
 
 ```sh
-curl -X POST "http://localhost:8475/api/admin/vaults/import?vault=restored" \
+curl -X POST "http://127.0.0.1:8475/api/admin/vaults/import?vault=restored" \
   -H "Content-Type: application/gzip" \
   -H "Cookie: <admin-session>" \
   --data-binary @default.muninn

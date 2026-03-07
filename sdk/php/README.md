@@ -32,7 +32,7 @@ composer require muninndb/client
 use MuninnDB\MuninnClient;
 
 $client = new MuninnClient(
-    baseUrl: 'http://localhost:8476',
+    baseUrl: 'http://127.0.0.1:8476',
     token: 'your-api-token',
 );
 
@@ -123,7 +123,7 @@ $client->write(
 
 ```php
 $client = new MuninnClient(
-    baseUrl: 'http://localhost:8476', // Server URL
+    baseUrl: 'http://127.0.0.1:8476', // Server URL
     token: '',                        // Bearer token
     timeout: 5.0,                     // Request timeout in seconds
     maxRetries: 3,                    // Retry count on 5xx / connection errors
@@ -383,7 +383,7 @@ All configuration is done through the constructor — no config files, no enviro
 
 ```php
 $client = new MuninnClient(
-    baseUrl: getenv('MUNINN_URL') ?: 'http://localhost:8476',
+    baseUrl: getenv('MUNINN_URL') ?: 'http://127.0.0.1:8476',
     token: getenv('MUNINN_TOKEN') ?: '',
     timeout: 10.0,
     maxRetries: 5,

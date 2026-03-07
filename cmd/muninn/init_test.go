@@ -190,7 +190,7 @@ func TestConfigureNamedTools_OpenCode(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		errs := configureNamedTools([]string{"opencode"}, "http://localhost:8750/mcp", "tok123")
+		errs := configureNamedTools([]string{"opencode"}, "http://127.0.0.1:8750/mcp", "tok123")
 		if len(errs) > 0 {
 			t.Errorf("unexpected errors: %v", errs)
 		}
@@ -216,7 +216,7 @@ func TestUnknownToolMessage_IncludesOpenCode(t *testing.T) {
 	_, cleanup := withTempHome(t)
 	defer cleanup()
 	stderr := captureStderr(func() {
-		configureNamedTools([]string{"notarealtool"}, "http://localhost:8750/mcp", "")
+		configureNamedTools([]string{"notarealtool"}, "http://127.0.0.1:8750/mcp", "")
 	})
 	if !strings.Contains(stderr, "opencode") {
 		t.Errorf("unknown-tool error should list 'opencode', got: %s", stderr)
@@ -280,7 +280,7 @@ func TestPrintWelcomeBanner(t *testing.T) {
 
 func TestConfigureNamedToolsUnknownTool(t *testing.T) {
 	out := captureStderr(func() {
-		configureNamedTools([]string{"unknowntool"}, "http://localhost:8750/mcp", "tok123")
+		configureNamedTools([]string{"unknowntool"}, "http://127.0.0.1:8750/mcp", "tok123")
 	})
 	if !strings.Contains(out, "unknown tool") {
 		t.Errorf("expected 'unknown tool' warning, got: %s", out)
@@ -356,7 +356,7 @@ func TestConfigureNamedToolsReturnsErrorsSlice(t *testing.T) {
 	var errs []string
 	captureStderr(func() {
 		captureStdout(func() {
-			errs = configureNamedTools([]string{"claude"}, "http://localhost:8750/mcp", "tok")
+			errs = configureNamedTools([]string{"claude"}, "http://127.0.0.1:8750/mcp", "tok")
 		})
 	})
 

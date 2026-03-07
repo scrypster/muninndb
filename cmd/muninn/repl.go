@@ -15,7 +15,7 @@ import (
 
 type replState struct {
 	vault         string // current vault context (empty = no vault selected)
-	mcpURL        string // e.g. "http://localhost:8750"
+	mcpURL        string // e.g. "http://127.0.0.1:8750"
 	cmdCount      int    // total commands run this session (for tip rotation)
 	firstRun      bool   // true if no config file existed at shell start
 	sessionCookie string // for REST API calls requiring admin auth
@@ -63,7 +63,7 @@ func parseReplInput(line string) (string, []string) {
 func runShell() {
 	mcpURL := os.Getenv("MUNINNDB_MCP_URL")
 	if mcpURL == "" {
-		mcpURL = "http://localhost:8750"
+		mcpURL = "http://127.0.0.1:8750"
 	}
 
 	// Detect first run (no config file = user hasn't used 'use <vault>' before)
@@ -84,7 +84,7 @@ func runShell() {
 	}
 
 	// Auto-authenticate with default credentials; prompt only if that fails
-	sessionCookie, authErr := autoAuth("http://localhost:8476")
+	sessionCookie, authErr := autoAuth("http://127.0.0.1:8476")
 	if authErr != nil {
 		// Default creds failed — prompt once
 		fmt.Print("Username: ")
@@ -105,7 +105,7 @@ func runShell() {
 			os.Exit(1)
 		}
 		// Refresh cookie after explicit login
-		sessionCookie, _ = autoAuth("http://localhost:8476")
+		sessionCookie, _ = autoAuth("http://127.0.0.1:8476")
 	}
 
 	r.sessionCookie = sessionCookie
@@ -276,7 +276,7 @@ func (r *replState) printRotatingTip() {
 		"Tip: 'search' uses semantic similarity — try natural language queries.",
 		"Tip: 'show contradictions' surfaces memories that conflict with each other.",
 		"Tip: Switch between projects with 'use <vault-name>'.",
-		"Tip: Open http://localhost:8476 to browse the memory graph visually.",
+		"Tip: Open http://127.0.0.1:8476 to browse the memory graph visually.",
 		"Tip: 'forget' is reversible — restore memories from Settings in the web UI.",
 		"Tip: The web UI shows memory confidence, decay, and association graphs.",
 	}
@@ -286,7 +286,7 @@ func (r *replState) printRotatingTip() {
 }
 
 // shellValidateAdmin validates admin credentials against the running UI server's
-// login endpoint (POST http://localhost:8476/api/auth/login).
+// login endpoint (POST http://127.0.0.1:8476/api/auth/login).
 // Returns nil on success, non-nil on auth failure or network error.
 func shellValidateAdmin(username, password string) error {
 	body, _ := json.Marshal(map[string]string{
@@ -294,7 +294,7 @@ func shellValidateAdmin(username, password string) error {
 		"password": password,
 	})
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post("http://localhost:8476/api/auth/login", "application/json", bytes.NewReader(body))
+	resp, err := client.Post("http://127.0.0.1:8476/api/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("connect to server: %w", err)
 	}

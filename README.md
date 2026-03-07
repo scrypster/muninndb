@@ -38,19 +38,19 @@ muninn start
 
 ```bash
 # 3. Store a memory
-curl -sX POST http://localhost:8475/api/engrams \
+curl -sX POST http://127.0.0.1:8475/api/engrams \
   -H 'Content-Type: application/json' \
   -d '{"concept":"payment incident","content":"We switched to idempotency keys after the double-charge incident in Q3"}'
 
 # 4. Ask what is relevant RIGHT NOW
-curl -sX POST http://localhost:8475/api/activate \
+curl -sX POST http://127.0.0.1:8475/api/activate \
   -H 'Content-Type: application/json' \
   -d '{"context":["debugging the payment retry logic"]}'
 ```
 
 That Q3 incident surfaces. You never mentioned it. MuninnDB connected the concepts.
 
-**Web UI:** `http://localhost:8476` · **Admin:** `root` / `password` (change after first login)
+**Web UI:** `http://127.0.0.1:8476` · **Admin:** `root` / `password` (change after first login)
 
 ---
 
@@ -75,7 +75,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 {
   "mcpServers": {
     "muninn": {
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -94,7 +94,7 @@ Add to `~/.claude.json`:
   "mcpServers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -111,7 +111,7 @@ Add to `~/.cursor/mcp.json`:
   "mcpServers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -148,7 +148,7 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
   "mcpServers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -165,7 +165,7 @@ Add to `.vscode/mcp.json` in your workspace:
   "servers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -182,7 +182,7 @@ Add to `~/.config/opencode/opencode.json` (macOS/Linux) or `%APPDATA%\opencode\o
   "mcp": {
     "muninn": {
       "type": "remote",
-      "url": "http://localhost:8750/mcp",
+      "url": "http://127.0.0.1:8750/mcp",
       "oauth": false,
       "headers": {
         "Authorization": "Bearer {file:~/.muninn/mcp.token}"
@@ -232,7 +232,7 @@ The Q3 incident surfaced because MuninnDB understood that *"payment retry logic"
 
 ```bash
 # Write
-curl -sX POST http://localhost:8475/api/engrams \
+curl -sX POST http://127.0.0.1:8475/api/engrams \
   -H 'Content-Type: application/json' \
   -d '{
     "concept": "auth architecture",
@@ -241,12 +241,12 @@ curl -sX POST http://localhost:8475/api/engrams \
   }'
 
 # Activate by context (returns ranked, time-weighted, associated memories)
-curl -sX POST http://localhost:8475/api/activate \
+curl -sX POST http://127.0.0.1:8475/api/activate \
   -H 'Content-Type: application/json' \
   -d '{"context": ["reviewing the login flow for the mobile app"], "max_results": 5}'
 
 # Search by text
-curl 'http://localhost:8475/api/engrams?q=JWT&vault=default'
+curl 'http://127.0.0.1:8475/api/engrams?q=JWT&vault=default'
 ```
 
 **Python SDK:**
@@ -254,7 +254,7 @@ curl 'http://localhost:8475/api/engrams?q=JWT&vault=default'
 ```python
 from muninn import MuninnClient
 
-async with MuninnClient("http://localhost:8475") as m:
+async with MuninnClient("http://127.0.0.1:8475") as m:
     # Store
     await m.write(vault="default", concept="auth architecture",
                   content="Short-lived JWTs, refresh in HttpOnly cookies")
@@ -287,7 +287,7 @@ chain = ConversationChain(llm=your_llm, memory=memory)
 ```go
 import "github.com/scrypster/muninndb/sdk/go/muninn"
 
-client := muninn.NewClient("http://localhost:8475", "your-api-key")
+client := muninn.NewClient("http://127.0.0.1:8475", "your-api-key")
 id, _ := client.Write(ctx, "default", "auth architecture",
     "Short-lived JWTs, refresh in HttpOnly cookies", []string{"auth"})
 resp, _ := client.Activate(ctx, "default", []string{"login flow"}, 5)
@@ -433,7 +433,7 @@ If your tool reports a schema validation or config parsing error, try removing `
 <details>
 <summary>muninn_remember or muninn_recall hangs</summary>
 
-Check that the server is running: `muninn status`. If the server is running but tools hang, check `muninn logs` for errors. The most common cause is a stale MCP config pointing to the wrong port — verify the URL in your config matches `http://localhost:8750/mcp`.
+Check that the server is running: `muninn status`. If the server is running but tools hang, check `muninn logs` for errors. The most common cause is a stale MCP config pointing to the wrong port — verify the URL in your config matches `http://127.0.0.1:8750/mcp`.
 </details>
 
 <details>
