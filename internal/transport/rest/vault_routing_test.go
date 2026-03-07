@@ -8,16 +8,36 @@ import (
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
-// vaultTrackingEngine wraps MockEngine and records the vault passed to key engine calls.
+// vaultTrackingEngine wraps MockEngine and records the vault passed to every engine call
+// that accepts a vault parameter.
 type vaultTrackingEngine struct {
 	MockEngine
-	lastWriteVault    string
-	lastActivateVault string
-	lastListVault     string
-	lastReadVault     string
-	lastForgetVault   string
+	lastWriteVault              string
+	lastWriteBatchVault         string
+	lastActivateVault           string
+	lastListVault               string
+	lastReadVault               string
+	lastForgetVault             string
+	lastLinkVault               string
+	lastStatVault               string
+	lastGetEngramLinksVault     string
+	lastGetBatchEngramLinksVault string
+	lastGetSessionVault         string
+	lastEvolveVault             string
+	lastConsolidateVault        string
+	lastDecideVault             string
+	lastRestoreVault            string
+	lastTraverseVault           string
+	lastExplainVault            string
+	lastUpdateStateVault        string
+	lastUpdateTagsVault         string
+	lastListDeletedVault        string
+	lastRetryEnrichVault        string
+	lastGetContradictionsVault  string
+	lastGetGuideVault           string
 }
 
 func (e *vaultTrackingEngine) Write(ctx context.Context, req *WriteRequest) (*WriteResponse, error) {
@@ -43,6 +63,98 @@ func (e *vaultTrackingEngine) Read(ctx context.Context, req *ReadRequest) (*Read
 func (e *vaultTrackingEngine) Forget(ctx context.Context, req *ForgetRequest) (*ForgetResponse, error) {
 	e.lastForgetVault = req.Vault
 	return e.MockEngine.Forget(ctx, req)
+}
+
+func (e *vaultTrackingEngine) WriteBatch(ctx context.Context, reqs []*WriteRequest) ([]*WriteResponse, []error) {
+	if len(reqs) > 0 {
+		e.lastWriteBatchVault = reqs[0].Vault
+	}
+	return e.MockEngine.WriteBatch(ctx, reqs)
+}
+
+func (e *vaultTrackingEngine) Link(ctx context.Context, req *mbp.LinkRequest) (*LinkResponse, error) {
+	e.lastLinkVault = req.Vault
+	return e.MockEngine.Link(ctx, req)
+}
+
+func (e *vaultTrackingEngine) Stat(ctx context.Context, req *StatRequest) (*StatResponse, error) {
+	e.lastStatVault = req.Vault
+	return e.MockEngine.Stat(ctx, req)
+}
+
+func (e *vaultTrackingEngine) GetEngramLinks(ctx context.Context, req *GetEngramLinksRequest) (*GetEngramLinksResponse, error) {
+	e.lastGetEngramLinksVault = req.Vault
+	return e.MockEngine.GetEngramLinks(ctx, req)
+}
+
+func (e *vaultTrackingEngine) GetBatchEngramLinks(ctx context.Context, req *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error) {
+	e.lastGetBatchEngramLinksVault = req.Vault
+	return e.MockEngine.GetBatchEngramLinks(ctx, req)
+}
+
+func (e *vaultTrackingEngine) GetSession(ctx context.Context, req *GetSessionRequest) (*GetSessionResponse, error) {
+	e.lastGetSessionVault = req.Vault
+	return e.MockEngine.GetSession(ctx, req)
+}
+
+func (e *vaultTrackingEngine) Evolve(ctx context.Context, vault, engramID, newContent, reason string) (*EvolveResponse, error) {
+	e.lastEvolveVault = vault
+	return e.MockEngine.Evolve(ctx, vault, engramID, newContent, reason)
+}
+
+func (e *vaultTrackingEngine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResponse, error) {
+	e.lastConsolidateVault = vault
+	return e.MockEngine.Consolidate(ctx, vault, ids, mergedContent)
+}
+
+func (e *vaultTrackingEngine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*DecideResponse, error) {
+	e.lastDecideVault = vault
+	return e.MockEngine.Decide(ctx, vault, decision, rationale, alternatives, evidenceIDs)
+}
+
+func (e *vaultTrackingEngine) Restore(ctx context.Context, vault, engramID string) (*RestoreResponse, error) {
+	e.lastRestoreVault = vault
+	return e.MockEngine.Restore(ctx, vault, engramID)
+}
+
+func (e *vaultTrackingEngine) Traverse(ctx context.Context, vault string, req *TraverseRequest) (*TraverseResponse, error) {
+	e.lastTraverseVault = vault
+	return e.MockEngine.Traverse(ctx, vault, req)
+}
+
+func (e *vaultTrackingEngine) Explain(ctx context.Context, vault string, req *ExplainRequest) (*ExplainResponse, error) {
+	e.lastExplainVault = vault
+	return e.MockEngine.Explain(ctx, vault, req)
+}
+
+func (e *vaultTrackingEngine) UpdateState(ctx context.Context, vault, engramID, state, reason string) error {
+	e.lastUpdateStateVault = vault
+	return e.MockEngine.UpdateState(ctx, vault, engramID, state, reason)
+}
+
+func (e *vaultTrackingEngine) UpdateTags(ctx context.Context, vault, engramID string, tags []string) error {
+	e.lastUpdateTagsVault = vault
+	return e.MockEngine.UpdateTags(ctx, vault, engramID, tags)
+}
+
+func (e *vaultTrackingEngine) ListDeleted(ctx context.Context, vault string, limit int) (*ListDeletedResponse, error) {
+	e.lastListDeletedVault = vault
+	return e.MockEngine.ListDeleted(ctx, vault, limit)
+}
+
+func (e *vaultTrackingEngine) RetryEnrich(ctx context.Context, vault, engramID string) (*RetryEnrichResponse, error) {
+	e.lastRetryEnrichVault = vault
+	return e.MockEngine.RetryEnrich(ctx, vault, engramID)
+}
+
+func (e *vaultTrackingEngine) GetContradictions(ctx context.Context, vault string) (*ContradictionsResponse, error) {
+	e.lastGetContradictionsVault = vault
+	return e.MockEngine.GetContradictions(ctx, vault)
+}
+
+func (e *vaultTrackingEngine) GetGuide(ctx context.Context, vault string) (string, error) {
+	e.lastGetGuideVault = vault
+	return e.MockEngine.GetGuide(ctx, vault)
 }
 
 // newVaultTrackingServer creates a Server with a vaultTrackingEngine and a
@@ -245,5 +357,385 @@ func TestVaultRouting_Forget_ExplicitVault(t *testing.T) {
 	// MockEngine.Forget returns &ForgetResponse{OK: true} with nil error; check vault was forwarded.
 	if eng.lastForgetVault != "myvault" {
 		t.Errorf("engine Forget vault: want %q, got %q", "myvault", eng.lastForgetVault)
+	}
+}
+
+// TestVaultRouting_WriteBatch_ExplicitVault verifies that POST /api/engrams/batch?vault=myvault
+// passes "myvault" to every item in the batch.
+func TestVaultRouting_WriteBatch_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"engrams":[{"concept":"test","content":"hello"}]}`)
+	req := httptest.NewRequest("POST", "/api/engrams/batch?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteBatchVault != "myvault" {
+		t.Errorf("engine WriteBatch vault: want %q, got %q", "myvault", eng.lastWriteBatchVault)
+	}
+}
+
+// TestVaultRouting_Link_ExplicitVault verifies that POST /api/link?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Link_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"source_id":"id1","target_id":"id2","rel_type":1}`)
+	req := httptest.NewRequest("POST", "/api/link?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastLinkVault != "myvault" {
+		t.Errorf("engine Link vault: want %q, got %q", "myvault", eng.lastLinkVault)
+	}
+}
+
+// TestVaultRouting_Stat_ExplicitVault verifies that GET /api/stats?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Stat_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/stats?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastStatVault != "myvault" {
+		t.Errorf("engine Stat vault: want %q, got %q", "myvault", eng.lastStatVault)
+	}
+}
+
+// TestVaultRouting_GetEngramLinks_ExplicitVault verifies that GET /api/engrams/{id}/links?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_GetEngramLinks_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/engrams/some-id/links?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastGetEngramLinksVault != "myvault" {
+		t.Errorf("engine GetEngramLinks vault: want %q, got %q", "myvault", eng.lastGetEngramLinksVault)
+	}
+}
+
+// TestVaultRouting_GetBatchEngramLinks_ExplicitVault verifies that POST /api/engrams/links/batch?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_GetBatchEngramLinks_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"ids":["id1"]}`)
+	req := httptest.NewRequest("POST", "/api/engrams/links/batch?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastGetBatchEngramLinksVault != "myvault" {
+		t.Errorf("engine GetBatchEngramLinks vault: want %q, got %q", "myvault", eng.lastGetBatchEngramLinksVault)
+	}
+}
+
+// TestVaultRouting_GetSession_ExplicitVault verifies that GET /api/session?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_GetSession_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/session?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastGetSessionVault != "myvault" {
+		t.Errorf("engine GetSession vault: want %q, got %q", "myvault", eng.lastGetSessionVault)
+	}
+}
+
+// TestVaultRouting_Evolve_ExplicitVault verifies that POST /api/engrams/{id}/evolve?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Evolve_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"new_content":"updated","reason":"improvement"}`)
+	req := httptest.NewRequest("POST", "/api/engrams/some-id/evolve?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastEvolveVault != "myvault" {
+		t.Errorf("engine Evolve vault: want %q, got %q", "myvault", eng.lastEvolveVault)
+	}
+}
+
+// TestVaultRouting_Consolidate_ExplicitVault verifies that POST /api/consolidate?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Consolidate_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"ids":["id1","id2"],"merged_content":"merged"}`)
+	req := httptest.NewRequest("POST", "/api/consolidate?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastConsolidateVault != "myvault" {
+		t.Errorf("engine Consolidate vault: want %q, got %q", "myvault", eng.lastConsolidateVault)
+	}
+}
+
+// TestVaultRouting_Decide_ExplicitVault verifies that POST /api/decide?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Decide_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"decision":"use postgres","rationale":"proven reliability"}`)
+	req := httptest.NewRequest("POST", "/api/decide?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastDecideVault != "myvault" {
+		t.Errorf("engine Decide vault: want %q, got %q", "myvault", eng.lastDecideVault)
+	}
+}
+
+// TestVaultRouting_Restore_ExplicitVault verifies that POST /api/engrams/{id}/restore?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Restore_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/api/engrams/some-id/restore?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastRestoreVault != "myvault" {
+		t.Errorf("engine Restore vault: want %q, got %q", "myvault", eng.lastRestoreVault)
+	}
+}
+
+// TestVaultRouting_Traverse_ExplicitVault verifies that POST /api/traverse?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Traverse_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"start_id":"root-id"}`)
+	req := httptest.NewRequest("POST", "/api/traverse?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastTraverseVault != "myvault" {
+		t.Errorf("engine Traverse vault: want %q, got %q", "myvault", eng.lastTraverseVault)
+	}
+}
+
+// TestVaultRouting_Explain_ExplicitVault verifies that POST /api/explain?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_Explain_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"engram_id":"some-id"}`)
+	req := httptest.NewRequest("POST", "/api/explain?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastExplainVault != "myvault" {
+		t.Errorf("engine Explain vault: want %q, got %q", "myvault", eng.lastExplainVault)
+	}
+}
+
+// TestVaultRouting_UpdateState_ExplicitVault verifies that PUT /api/engrams/{id}/state?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_UpdateState_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"state":"active"}`)
+	req := httptest.NewRequest("PUT", "/api/engrams/some-id/state?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastUpdateStateVault != "myvault" {
+		t.Errorf("engine UpdateState vault: want %q, got %q", "myvault", eng.lastUpdateStateVault)
+	}
+}
+
+// TestVaultRouting_UpdateTags_ExplicitVault verifies that PUT /api/engrams/{id}/tags?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_UpdateTags_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"tags":["a","b"]}`)
+	req := httptest.NewRequest("PUT", "/api/engrams/some-id/tags?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastUpdateTagsVault != "myvault" {
+		t.Errorf("engine UpdateTags vault: want %q, got %q", "myvault", eng.lastUpdateTagsVault)
+	}
+}
+
+// TestVaultRouting_ListDeleted_ExplicitVault verifies that GET /api/deleted?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_ListDeleted_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/deleted?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastListDeletedVault != "myvault" {
+		t.Errorf("engine ListDeleted vault: want %q, got %q", "myvault", eng.lastListDeletedVault)
+	}
+}
+
+// TestVaultRouting_RetryEnrich_ExplicitVault verifies that POST /api/engrams/{id}/retry-enrich?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_RetryEnrich_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/api/engrams/some-id/retry-enrich?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastRetryEnrichVault != "myvault" {
+		t.Errorf("engine RetryEnrich vault: want %q, got %q", "myvault", eng.lastRetryEnrichVault)
+	}
+}
+
+// TestVaultRouting_GetContradictions_ExplicitVault verifies that GET /api/contradictions?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_GetContradictions_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/contradictions?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastGetContradictionsVault != "myvault" {
+		t.Errorf("engine GetContradictions vault: want %q, got %q", "myvault", eng.lastGetContradictionsVault)
+	}
+}
+
+// TestVaultRouting_GetGuide_ExplicitVault verifies that GET /api/guide?vault=myvault
+// passes "myvault" to the engine.
+func TestVaultRouting_GetGuide_ExplicitVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/guide?vault=myvault", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastGetGuideVault != "myvault" {
+		t.Errorf("engine GetGuide vault: want %q, got %q", "myvault", eng.lastGetGuideVault)
 	}
 }
