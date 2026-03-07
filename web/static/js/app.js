@@ -22,6 +22,7 @@ document.addEventListener('alpine:init', () => {
     liveFeed: [],
     _activityChart: null,
     _prevEngramCount: 0,
+    _prevVaultCount: 0,
 
     // Memories
     memories: [],
@@ -513,6 +514,14 @@ document.addEventListener('alpine:init', () => {
         if (this._prevEngramCount > 0 && newCount > this._prevEngramCount) {
           this._fetchNewestEngram();
         }
+
+        // Vault count-diff: refresh vault list when a vault is added or removed.
+        // Guard with > 0 on first message (learn current count without triggering a reload).
+        const newVaultCount = msg.data.vaultCount || 0;
+        if (this._prevVaultCount > 0 && newVaultCount !== this._prevVaultCount) {
+          this.loadVaults();
+        }
+        this._prevVaultCount = newVaultCount;
 
         // Re-fetch stats scoped to the selected vault instead of using
         // the global broadcast values.
@@ -1254,88 +1263,48 @@ document.addEventListener('alpine:init', () => {
     async loadEntityGraph() {
       this.entityGraphStatus = 'Loading entity graph…';
       try {
-        // Get MCP info first to find the MCP endpoint
-        const mcpInfo = await this.apiCall('/api/admin/mcp-info');
-        const mcpURL = mcpInfo.url || 'http://localhost:8750/mcp';
+        // Call the REST endpoint directly instead of the MCP server.
+        // The previous approach fetched from http://127.0.0.1:8750/mcp which
+        // is unreachable from remote browsers (127.0.0.1 resolves to the
+        // browser's own loopback, not the server's).
+        const data = await this.apiCall(
+          '/api/admin/entity-graph?vault=' + encodeURIComponent(this.vault) + '&include_engrams=true'
+        );
 
-        // Call muninn_export_graph via MCP
-        const mcpRequest = {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'tools/call',
-          params: {
-            name: 'muninn_export_graph',
-            arguments: {
-              vault: this.vault,
-              format: 'json-ld',
-              include_engrams: true
-            }
-          }
-        };
-
-        const resp = await fetch(mcpURL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(mcpRequest)
-        });
-
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => resp.statusText);
-          throw new Error('MCP error: ' + resp.status + ' ' + text);
-        }
-
-        const json = await resp.json();
-        if (json.error) {
-          throw new Error('MCP error: ' + json.error.message);
-        }
-
-        // Parse the result
-        const result = JSON.parse(json.result.content[0].text);
-        const data = JSON.parse(result.data);
-        const graph = data['@graph'] || [];
-
-        // Extract nodes and edges from JSON-LD
         const nodes = [];
         const edges = [];
         const nodeIdSet = new Set();
 
-        graph.forEach(item => {
-          if (item['@type'] === 'muninn:Entity') {
-            const entityId = item['@id'] || '';
-            const entityName = item.name || entityId.replace('muninn:entity/', '');
-            const entityType = (item['muninn:entityType'] || 'other').toLowerCase();
+        (data.nodes || []).forEach(n => {
+          const entityType = (n.type || 'other').toLowerCase();
+          nodeIdSet.add(n.id);
+          nodes.push({
+            id: n.id,
+            label: n.id,
+            type: entityType,
+            title: n.id + ' (' + entityType + ')',
+            shape: 'dot',
+            size: 16,
+            color: this.getEntityTypeColor(entityType),
+            font: { size: 11, color: '#e2e8f0' },
+            borderWidth: 2,
+            borderWidthSelected: 3,
+            borderColor: 'rgba(255,255,255,0.2)'
+          });
+        });
 
-            nodeIdSet.add(entityId);
-            nodes.push({
-              id: entityId,
-              label: entityName,
-              title: entityName + ' (' + entityType + ')',
-              shape: 'dot',
-              size: 16,
-              color: this.getEntityTypeColor(entityType),
-              font: { size: 11, color: '#e2e8f0' },
-              borderWidth: 2,
-              borderWidthSelected: 3,
-              borderColor: 'rgba(255,255,255,0.2)'
+        (data.edges || []).forEach(e => {
+          if (nodeIdSet.has(e.from) && nodeIdSet.has(e.to)) {
+            edges.push({
+              from: e.from,
+              to: e.to,
+              label: e.rel_type,
+              arrows: 'to',
+              color: 'rgba(168,85,247,0.4)',
+              font: { size: 10, color: '#ccc' },
+              width: Math.max(1, (e.weight || 0.5) * 3),
+              smooth: { type: 'continuous' }
             });
-          } else if (item['@type'] === 'muninn:Relationship') {
-            const from = item['muninn:from'] || '';
-            const to = item['muninn:to'] || '';
-            const relType = item['muninn:relType'] || '';
-            const weight = item['muninn:weight'] || 0.5;
-
-            if (nodeIdSet.has(from) && nodeIdSet.has(to)) {
-              edges.push({
-                from: from,
-                to: to,
-                label: relType,
-                arrows: 'to',
-                color: 'rgba(168,85,247,0.4)',
-                font: { size: 10, color: '#ccc' },
-                width: Math.max(1, weight * 3),
-                smooth: { type: 'continuous' }
-              });
-            }
           }
         });
 
@@ -1411,7 +1380,7 @@ document.addEventListener('alpine:init', () => {
         // Add click handler to show entity info
         this._entityCy.on('tap', 'node', (evt) => {
           const node = evt.target;
-          this.addNotification('info', node.data('label') + ' (' + node.data('id').replace('muninn:entity/', '') + ')');
+          this.addNotification('info', node.data('label') + ' (' + node.data('type') + ')');
         });
 
         this.entityGraphLoaded = true;

@@ -184,6 +184,10 @@ func (m *mockEngine) GetProcessorStats() []plugin.RetroactiveStats {
 	return nil
 }
 
+func (m *mockEngine) ExportGraph(ctx context.Context, vault string, includeEngrams bool) (*engine.ExportGraph, error) {
+	return &engine.ExportGraph{}, nil
+}
+
 func makeMockFS() fs.FS {
 	return fstest.MapFS{
 		"static/dist/app.css":   &fstest.MapFile{Data: []byte("/* css */")},
