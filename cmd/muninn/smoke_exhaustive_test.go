@@ -57,7 +57,7 @@ var allMCPTools = []string{
 func adminLogin(t *testing.T) string {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"username": "root", "password": "password"})
-	req, _ := http.NewRequest("POST", "http://localhost:8476/api/auth/login", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", "http://127.0.0.1:8476/api/auth/login", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	// Use a client that does NOT follow redirects so we can capture the cookie directly.
 	client := &http.Client{
@@ -92,7 +92,7 @@ func mcpToolsList(t *testing.T, token string) []string {
 		"method":  "tools/list",
 		"params":  map[string]any{},
 	})
-	req, _ := http.NewRequest("POST", "http://localhost:8750/mcp", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", "http://127.0.0.1:8750/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -144,7 +144,7 @@ func mcpToolText(t *testing.T, token, toolName string, args map[string]any) stri
 			"arguments": args,
 		},
 	})
-	req, _ := http.NewRequest("POST", "http://localhost:8750/mcp", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", "http://127.0.0.1:8750/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -194,7 +194,7 @@ func mcpToolNoFail(t *testing.T, token, toolName string, args map[string]any) (m
 			"arguments": args,
 		},
 	})
-	req, _ := http.NewRequest("POST", "http://localhost:8750/mcp", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", "http://127.0.0.1:8750/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -799,7 +799,7 @@ func doREST(t *testing.T, method, path string, body []byte, headers map[string]s
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, "http://localhost:8475"+path, bodyReader)
+	req, err := http.NewRequest(method, "http://127.0.0.1:8475"+path, bodyReader)
 	if err != nil {
 		t.Fatalf("doREST %s %s: %v", method, path, err)
 	}
@@ -823,7 +823,7 @@ func doRESTWithCookie(t *testing.T, method, path string, body []byte, cookieName
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, "http://localhost:8475"+path, bodyReader)
+	req, err := http.NewRequest(method, "http://127.0.0.1:8475"+path, bodyReader)
 	if err != nil {
 		t.Fatalf("doRESTWithCookie %s %s: %v", method, path, err)
 	}

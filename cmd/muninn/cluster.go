@@ -57,14 +57,14 @@ func printClusterHelp() {
 	fmt.Println("  disable       Disable cluster mode on the running node")
 	fmt.Println()
 	fmt.Println("Flags:")
-	fmt.Println("  --addr <url>   Server address (default: http://localhost:8475)")
+	fmt.Println("  --addr <url>   Server address (default: http://127.0.0.1:8475)")
 	fmt.Println("  --json         Output raw JSON")
 }
 
 // runClusterInfo displays cluster topology and node status.
 func runClusterInfo(args []string) {
 	fs := flag.NewFlagSet("cluster info", flag.ContinueOnError)
-	addr := fs.String("addr", "http://localhost:8475", "Server address")
+	addr := fs.String("addr", "http://127.0.0.1:8475", "Server address")
 	outputJSON := fs.Bool("json", false, "Output raw JSON")
 	fs.Parse(args)
 
@@ -124,7 +124,7 @@ func runClusterInfo(args []string) {
 // runClusterStatus shows cluster health and per-node replication lag.
 func runClusterStatus(args []string) {
 	fs := flag.NewFlagSet("cluster status", flag.ContinueOnError)
-	addr := fs.String("addr", "http://localhost:8475", "Server address")
+	addr := fs.String("addr", "http://127.0.0.1:8475", "Server address")
 	outputJSON := fs.Bool("json", false, "Output raw JSON")
 	fs.Parse(args)
 
@@ -200,7 +200,7 @@ func runClusterStatus(args []string) {
 // runClusterFailover triggers a manual failover/election.
 func runClusterFailover(args []string) {
 	fs := flag.NewFlagSet("cluster failover", flag.ContinueOnError)
-	addr := fs.String("addr", "http://localhost:8475", "Server address")
+	addr := fs.String("addr", "http://127.0.0.1:8475", "Server address")
 	yes := fs.Bool("yes", false, "Skip confirmation prompt")
 	fs.Parse(args)
 
@@ -303,7 +303,7 @@ func runClusterRemoveNode(args []string) {
 // runClusterEnable enables cluster mode on a running node via the admin API.
 func runClusterEnable(args []string) int {
 	fs := flag.NewFlagSet("cluster enable", flag.ContinueOnError)
-	addr := fs.String("addr", "http://localhost:8475", "MuninnDB admin address")
+	addr := fs.String("addr", "http://127.0.0.1:8475", "MuninnDB admin address")
 	role := fs.String("role", "primary", "Node role: primary|replica|sentinel|observer")
 	bindAddr := fs.String("bind-addr", "", "Cluster bind address (IP:port)")
 	cortexAddr := fs.String("cortex-addr", "", "Cortex address (required for replica/sentinel/observer)")
@@ -365,7 +365,7 @@ func runClusterEnable(args []string) int {
 // runClusterDisable disables cluster mode on a running node via the admin API.
 func runClusterDisable(args []string) int {
 	fs := flag.NewFlagSet("cluster disable", flag.ContinueOnError)
-	addr := fs.String("addr", "http://localhost:8475", "MuninnDB admin address")
+	addr := fs.String("addr", "http://127.0.0.1:8475", "MuninnDB admin address")
 	yes := fs.Bool("yes", false, "Skip confirmation prompt")
 
 	if err := fs.Parse(args); err != nil {

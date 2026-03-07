@@ -201,12 +201,14 @@ type ActivationItem struct {
 	ID              string          `msgpack:"id"                          json:"id"`
 	Concept         string          `msgpack:"concept"                     json:"concept"`
 	Content         string          `msgpack:"content"                     json:"content"`
+	Summary         string          `msgpack:"summary,omitempty"           json:"summary,omitempty"`
 	Score           float32         `msgpack:"score"                       json:"score"`
 	Confidence      float32         `msgpack:"confidence"                  json:"confidence"`
 	ScoreComponents ScoreComponents `msgpack:"score_components,omitempty"  json:"score_components,omitempty"`
 	Why             string          `msgpack:"why,omitempty"               json:"why,omitempty"`
 	HopPath         []string        `msgpack:"hop_path,omitempty"          json:"hop_path,omitempty"`
 	Dormant         bool            `msgpack:"dormant,omitempty"           json:"dormant,omitempty"`
+	CreatedAt       int64           `msgpack:"created_at,omitempty"        json:"created_at,omitempty"`
 	LastAccess      int64           `msgpack:"last_access,omitempty"       json:"last_access,omitempty"`
 	AccessCount     uint32          `msgpack:"access_count,omitempty"      json:"access_count,omitempty"`
 	Relevance       float32         `msgpack:"relevance,omitempty"         json:"relevance,omitempty"`

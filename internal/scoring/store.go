@@ -3,6 +3,7 @@ package scoring
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -102,7 +103,24 @@ func (s *Store) Save(ctx context.Context, vw *VaultWeights) error {
 // RecordFeedback applies a feedback signal to the vault's weights and saves.
 // Enforces max update frequency: skips if last update was < 30 minutes ago for this engram.
 // Uses a best-effort approach — errors are logged but not returned.
+//
+// Pebble panics (rather than returning an error) when the DB is closed. Since
+// Engine.Read fires this in a goroutine, teardown can race with the write.
+// We recover and silently swallow closed-DB panics — the DB is already in an
+// unrecoverable state and the feedback write is best-effort anyway.
 func (s *Store) RecordFeedback(ctx context.Context, ws [8]byte, signal FeedbackSignal) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, pebble.ErrClosed) {
+				// Defense-in-depth: Engine.spawnFireAndForget + WaitGroup is the
+				// primary guard. This recover() handles the 5s timeout edge case
+				// and future call sites that bypass the spawn helper.
+				return
+			}
+			panic(r) // unexpected — propagate
+		}
+	}()
+
 	// Build tracking key: vault_prefix(8) + engram_id(16)
 	var trackKey [24]byte
 	copy(trackKey[:8], ws[:])

@@ -368,7 +368,7 @@ func TestFetchJobStatus_ReturnsSnapOnOK(t *testing.T) {
 func TestFetchJobStatus_ReturnsNilOnConnectionRefused(t *testing.T) {
 	// Port with nothing listening — fetchJobStatus should return nil.
 	snap := fetchJobStatus("some-job", "some-vault")
-	// It will try localhost:8475 which is likely not running in CI; nil is fine.
+	// It will try 127.0.0.1:8475 which is likely not running in CI; nil is fine.
 	_ = snap // either nil or a real snap — just must not panic
 }
 

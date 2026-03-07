@@ -164,10 +164,13 @@ func writeAIToolConfig(path string, mergeFn func(cfg map[string]any)) (string, e
 	return "added mcpServers.muninn to config", nil
 }
 
-// mcpServerEntry returns the JSON map for muninn's MCP server entry.
+// mcpServerEntry returns the JSON map for muninn's HTTP MCP server entry.
+// Used by Cursor, Windsurf, and the VS Code manual snippet — clients that
+// natively support HTTP/SSE transport via a url field.
+//
 // Note: "type" is intentionally omitted. Claude Desktop v1.1.4010+ crashes
 // on startup with a TypeError if "type":"http" is present in any mcpServers
-// entry. The MCP client infers transport from the URL schema.
+// entry. Claude Desktop uses the stdio bridge instead (see desktopMCPEntry).
 func mcpServerEntry(mcpURL, token string) map[string]any {
 	entry := map[string]any{
 		"url": mcpURL,
@@ -218,6 +221,33 @@ func mergeOpenCodeMCP(cfg map[string]any, mcpURL, token string) {
 	cfg["mcp"] = mcp
 }
 
+// claudeCodeMCPEntry returns the JSON map for muninn's Claude Code MCP entry.
+// Claude Code requires "type":"http" for schema validation; this is distinct from
+// Claude Desktop which crashes if "type" is present (see mcpServerEntry).
+func claudeCodeMCPEntry(mcpURL, token string) map[string]any {
+	entry := map[string]any{
+		"type": "http",
+		"url":  mcpURL,
+	}
+	if token != "" {
+		entry["headers"] = map[string]any{
+			"Authorization": "Bearer " + token,
+		}
+	}
+	return entry
+}
+
+// mergeClaudeCodeMCP upserts muninn into cfg["mcpServers"] using the Claude
+// Code-specific entry format (includes "type":"http").
+func mergeClaudeCodeMCP(cfg map[string]any, mcpURL, token string) {
+	servers, ok := cfg["mcpServers"].(map[string]any)
+	if !ok {
+		servers = map[string]any{}
+	}
+	servers["muninn"] = claudeCodeMCPEntry(mcpURL, token)
+	cfg["mcpServers"] = servers
+}
+
 // claudeCodeConfigPath returns the path to Claude Code's (claude CLI) config file.
 // Claude Code reads ~/.claude.json for global MCP server configuration.
 func claudeCodeConfigPath() string {
@@ -229,7 +259,7 @@ func claudeCodeConfigPath() string {
 func configureClaudeCode(mcpURL, token string) error {
 	path := claudeCodeConfigPath()
 	summary, err := writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeMCPServers(cfg, mcpURL, token)
+		mergeClaudeCodeMCP(cfg, mcpURL, token)
 	})
 	if err != nil {
 		return err
@@ -309,11 +339,50 @@ func openCodeConfigPath() string {
 	}
 }
 
-// configureClaudeDesktop writes the muninn MCP entry into Claude Desktop's config.
-func configureClaudeDesktop(mcpURL, token string) error {
+// desktopMCPEntry returns a stdio MCP entry for Claude Desktop.
+//
+// Claude Desktop's config file (claude_desktop_config.json) only supports stdio
+// transports — any "type":"http" or "type":"sse" field crashes the app on startup.
+// The entry spawns the muninn binary as a subprocess; the built-in mcp proxy
+// bridges stdin/stdout JSON-RPC to the running MuninnDB daemon over HTTP.
+//
+// The Bearer token and server URL are NOT embedded in the config: the proxy
+// reads the token from ~/.muninn/mcp.token and connects to the default daemon
+// port at runtime, so the config never needs to change after daemon restarts.
+//
+// binPath should be the absolute path to the muninn binary (from os.Executable),
+// which avoids PATH lookup failures when Desktop spawns the subprocess.
+func desktopMCPEntry(binPath string) map[string]any {
+	return map[string]any{
+		"command": binPath,
+		"args":    []any{"mcp"},
+	}
+}
+
+// mergeDesktopMCP upserts the muninn stdio entry into cfg["mcpServers"].
+func mergeDesktopMCP(cfg map[string]any, binPath string) {
+	servers, ok := cfg["mcpServers"].(map[string]any)
+	if !ok {
+		servers = map[string]any{}
+	}
+	servers["muninn"] = desktopMCPEntry(binPath)
+	cfg["mcpServers"] = servers
+}
+
+// configureClaudeDesktop writes the muninn stdio MCP entry into Claude Desktop's config.
+// mcpURL and token are accepted for interface compatibility but are not embedded in the
+// config — the muninn mcp proxy reads them from disk at runtime.
+func configureClaudeDesktop(_, _ string) error {
+	// Resolve the absolute path to this binary so Desktop can spawn it without
+	// relying on PATH, which is often minimal in GUI app environments.
+	binPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve binary path: %w", err)
+	}
+
 	path := claudeDesktopConfigPath()
 	summary, err := writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeMCPServers(cfg, mcpURL, token)
+		mergeDesktopMCP(cfg, binPath)
 	})
 	if err != nil {
 		return err

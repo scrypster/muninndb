@@ -75,6 +75,7 @@ type EngineAPI interface {
 	Stat(ctx context.Context, req *StatRequest) (*StatResponse, error)
 	ListEngrams(ctx context.Context, req *ListEngramsRequest) (*ListEngramsResponse, error)
 	GetEngramLinks(ctx context.Context, req *GetEngramLinksRequest) (*GetEngramLinksResponse, error)
+	GetBatchEngramLinks(ctx context.Context, req *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error)
 	ListVaults(ctx context.Context) ([]string, error)
 	GetSession(ctx context.Context, req *GetSessionRequest) (*GetSessionResponse, error)
 	WorkerStats() cognitive.EngineWorkerStats
@@ -190,6 +191,19 @@ type GetEngramLinksRequest struct {
 // GetEngramLinksResponse returns association edges.
 type GetEngramLinksResponse struct {
 	Links []AssociationItem `json:"links"`
+}
+
+// BatchGetEngramLinksRequest requests associations for multiple engrams in one call.
+type BatchGetEngramLinksRequest struct {
+	IDs        []string `json:"ids"`
+	Vault      string   `json:"vault,omitempty"`
+	MaxPerNode int      `json:"max_per_node,omitempty"`
+}
+
+// BatchGetEngramLinksResponse returns association edges keyed by source engram ID.
+// Every requested ID is present in the map, even if it has zero associations.
+type BatchGetEngramLinksResponse struct {
+	Links map[string][]AssociationItem `json:"links"`
 }
 
 // GetSessionRequest requests recent writes.

@@ -166,6 +166,15 @@ type Engine struct {
 	jobManager   *vaultjob.Manager  // tracks async clone/merge jobs
 	stopCtx      context.Context    // cancelled on Stop() to signal goroutines
 	stopCancel   context.CancelFunc
+
+	// Goroutine lifecycle tracking — see spawnFireAndForget and spawnJob.
+	// Per-request fire-and-forget goroutines (Read, RecordAccess).
+	fireAndForgetWG      sync.WaitGroup
+	fireAndForgetStopped atomic.Bool
+	// Long-running vault job goroutines (clone, merge, reembed, import).
+	jobWG      sync.WaitGroup
+	jobStopped atomic.Bool
+
 	hnswRegistry *hnsw.Registry     // per-vault HNSW indexes (shared with activation)
 
 	// vaultMu provides per-vault mutual exclusion for destructive vault operations
@@ -306,6 +315,7 @@ func NewEngine(
 		jobManager:       vaultjob.NewManager(),
 	}
 	// Start async novelty worker to decouple O(N) Jaccard scan from write hot path.
+	// engine:spawn-ok — tracked by noveltyDone channel, drained in Stop()
 	go e.runNoveltyWorker()
 	// Start async FTS worker to decouple indexing from the write hot path.
 	// The engram is already durable in Pebble before this worker runs —
@@ -352,21 +362,25 @@ func NewEngine(
 		// Start periodic coherence flush goroutine.
 		e.coherenceFlushStop = make(chan struct{})
 		e.coherenceFlushDone = make(chan struct{})
+		// engine:spawn-ok — tracked by coherenceFlushDone channel, drained in Stop()
 		go e.runCoherenceFlush()
 	}
 
 	// Start periodic vault pruning sweep (runs every 60s with ±5s jitter).
 	// Only active for vaults with MaxEngrams > 0 or RetentionDays > 0.
+	// engine:spawn-ok — tracked by pruneDone channel, drained in Stop()
 	go e.runPruneWorker()
 
 	// Start daily idempotency receipt sweep — purges Pebble 0x19 entries
 	// older than 30 days to prevent unbounded disk growth.
 	e.idempotencySweepDone = make(chan struct{})
+	// engine:spawn-ok — tracked by idempotencySweepDone channel, drained in Stop()
 	go e.runIdempotencySweep()
 
 	// Start weekly archive GC sweep — true-prunes 0x25 edges that have been
 	// dormant for 3+ years, had low peak weight, and were never restored.
 	e.archiveGCDone = make(chan struct{})
+	// engine:spawn-ok — tracked by archiveGCDone channel, drained in Stop()
 	go e.runArchiveGCWorker()
 
 	return e
@@ -411,6 +425,11 @@ func (e *Engine) Stop() {
 		if e.stopCancel != nil {
 			e.stopCancel()
 		}
+		// Fence new goroutine spawns immediately. Must happen after stopCancel()
+		// so goroutines see a cancelled context, and before wg.Wait() calls below.
+		e.fireAndForgetStopped.Store(true)
+		e.jobStopped.Store(true)
+
 		if e.autoAssoc != nil {
 			e.autoAssoc.Stop()
 			if e.neighborWorker != nil {
@@ -458,6 +477,18 @@ func (e *Engine) Stop() {
 				slog.Warn("engine: coherence flush worker did not exit within 5s")
 			}
 		}
+		// Drain job goroutines BEFORE closing the job manager. Job goroutines
+		// call jobManager.Fail() / jobManager.Complete() — closing the manager
+		// first would race with those calls.
+		jobDone := make(chan struct{})
+		// engine:spawn-ok — local inline drain helper; closes jobDone and exits immediately after WG drains
+		go func() { e.jobWG.Wait(); close(jobDone) }()
+		select {
+		case <-jobDone:
+		case <-time.After(30 * time.Second):
+			slog.Warn("engine: job goroutines did not drain within 30s")
+		}
+
 		// Stop the vault job GC goroutine.
 		if e.jobManager != nil {
 			e.jobManager.Close()
@@ -478,7 +509,62 @@ func (e *Engine) Stop() {
 				slog.Warn("engine: archive GC worker did not exit within 5s")
 			}
 		}
+
+		// Drain fire-and-forget goroutines last — they write to Pebble via the
+		// scoring store. Must complete before store.Close() (called by the caller
+		// immediately after Stop() returns).
+		ffDone := make(chan struct{})
+		// engine:spawn-ok — local inline drain helper; closes ffDone and exits immediately after WG drains
+		go func() { e.fireAndForgetWG.Wait(); close(ffDone) }()
+		select {
+		case <-ffDone:
+		case <-time.After(5 * time.Second):
+			slog.Warn("engine: fire-and-forget goroutines did not drain within 5s")
+		}
 	})
+}
+
+// spawnFireAndForget tracks fn in the engine's fire-and-forget WaitGroup and
+// launches it as a goroutine. Returns false without spawning if the engine is
+// shutting down. Callers may silently skip work on false — fire-and-forget
+// tasks are best-effort by definition.
+//
+// Uses the add-before-check pattern: Add(1) happens before the stopped check,
+// and Stop() sets stopped before calling Wait(). This eliminates the TOCTOU
+// race in naive check-then-add WaitGroup usage.
+//
+// MUST be used instead of bare `go` for all per-request goroutines.
+func (e *Engine) spawnFireAndForget(fn func()) bool {
+	e.fireAndForgetWG.Add(1)            // Add FIRST — visible to wg.Wait() in Stop()
+	if e.fireAndForgetStopped.Load() {
+		e.fireAndForgetWG.Done()         // Undo — engine is shutting down
+		return false
+	}
+	// engine:spawn-ok — tracked by fireAndForgetWG, drained in Stop() before store.Close()
+	go func() {
+		defer e.fireAndForgetWG.Done()
+		fn()
+	}()
+	return true
+}
+
+// spawnJob tracks fn in the engine's job WaitGroup and launches it as a
+// goroutine. Returns false without spawning if the engine is shutting down.
+// Callers MUST fail the associated job immediately when false is returned.
+//
+// MUST be used instead of bare `go` for all vault job goroutines.
+func (e *Engine) spawnJob(fn func()) bool {
+	e.jobWG.Add(1)                      // Add FIRST — visible to wg.Wait() in Stop()
+	if e.jobStopped.Load() {
+		e.jobWG.Done()                   // Undo — engine is shutting down
+		return false
+	}
+	// engine:spawn-ok — tracked by jobWG, drained in Stop() before jobManager.Close()
+	go func() {
+		defer e.jobWG.Done()
+		fn()
+	}()
+	return true
 }
 
 // SetCoordinator wires the Lobe's ClusterCoordinator so Activate() can forward
@@ -1290,7 +1376,8 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 	}
 
 	// Fire implicit positive feedback signal asynchronously — read = accessed.
-	go func() {
+	// spawnFireAndForget ensures Stop() drains this goroutine before DB close.
+	e.spawnFireAndForget(func() {
 		signal := scoring.FeedbackSignal{
 			EngramID:    [16]byte(id),
 			Accessed:    true,
@@ -1298,7 +1385,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 			Timestamp:   time.Now(),
 		}
 		e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
-	}()
+	})
 
 	d := time.Since(readStart)
 	if e.latencyTracker != nil {
@@ -1537,10 +1624,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			ID:          scored.Engram.ID.String(),
 			Concept:     scored.Engram.Concept,
 			Content:     scored.Engram.Content,
+			Summary:     scored.Engram.Summary,
 			Score:       float32(scored.Score),
 			Confidence:  scored.Engram.Confidence,
 			Why:         scored.Why,
 			Dormant:     scored.Dormant,
+			CreatedAt:   scored.Engram.CreatedAt.UnixNano(),
 			LastAccess:  scored.Engram.LastAccess.UnixNano(),
 			AccessCount: scored.Engram.AccessCount,
 			Relevance:   scored.Engram.Relevance,
@@ -1574,6 +1663,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			break
 		}
 		wg.Add(1)
+		// engine:spawn-ok — tracked by local wg, drained by wg.Wait() a few lines below
 		go func(idx int, id [16]byte) {
 			defer wg.Done()
 			entries, err := e.prov.Get(ctx, wsPrefix, id)
@@ -2718,7 +2808,12 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 		ScoreVector: scoring.DefaultWeights(),
 		Timestamp:   time.Now(),
 	}
-	go e.scoring.RecordFeedback(ctx, wsPrefix, signal)
+	// spawnFireAndForget ensures Stop() drains this goroutine before DB close.
+	// Uses e.stopCtx (not caller ctx) — feedback writes are gated by engine
+	// lifecycle, not request lifecycle. Client disconnect must not abort them.
+	e.spawnFireAndForget(func() {
+		e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
+	})
 	return nil
 }
 

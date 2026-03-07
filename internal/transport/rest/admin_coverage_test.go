@@ -644,8 +644,8 @@ func TestMCPInfo_EmptyAddr(t *testing.T) {
 
 	var resp MCPInfoResponse
 	json.NewDecoder(w.Body).Decode(&resp)
-	if !strings.Contains(resp.URL, "localhost") {
-		t.Errorf("expected localhost in URL for empty addr, got %q", resp.URL)
+	if !strings.Contains(resp.URL, "127.0.0.1") {
+		t.Errorf("expected 127.0.0.1 in URL for empty addr, got %q", resp.URL)
 	}
 }
 
@@ -661,7 +661,7 @@ func TestMCPInfo_IPv6Wildcard(t *testing.T) {
 
 	var resp MCPInfoResponse
 	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.URL != "http://localhost:8750/mcp" {
+	if resp.URL != "http://127.0.0.1:8750/mcp" {
 		t.Errorf("expected localhost for :: wildcard, got %q", resp.URL)
 	}
 }

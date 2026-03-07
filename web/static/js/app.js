@@ -158,6 +158,12 @@ document.addEventListener('alpine:init', () => {
     embedStatus: null,       // loaded from GET /api/admin/embed/status
     mcpInfo: null,           // loaded from GET /api/admin/mcp-info
     connectCopied: false,    // feedback for copy button
+    connectPlatform: (() => {
+        const p = (navigator.userAgent || '').toLowerCase();
+        if (p.includes('win')) return 'windows';
+        if (p.includes('linux')) return 'linux';
+        return 'macos'; // default
+    })(),
     apiKeys: [],
     apiKeyForm: { vault: '', label: '', mode: 'full' },
     apiKeyToken: null,
@@ -864,7 +870,10 @@ document.addEventListener('alpine:init', () => {
       const id = this.confirmForgetId;
       this.confirmForgetId = null;
       try {
-        await this.apiCall('/api/engrams/' + encodeURIComponent(id), { method: 'DELETE' });
+        await this.apiCall(
+          '/api/engrams/' + encodeURIComponent(id) + '?vault=' + encodeURIComponent(this.vault),
+          { method: 'DELETE' }
+        );
         this.addNotification('success', 'Memory forgotten');
         if (this.selectedMemory && this.selectedMemory.id === id) {
           this.selectedMemory = null;
@@ -925,7 +934,7 @@ document.addEventListener('alpine:init', () => {
       this.editMemorySaving = true;
       try {
         const resp = await this.apiCall(
-          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/evolve',
+          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/evolve?vault=' + encodeURIComponent(this.vault),
           {
             method: 'POST',
             body: JSON.stringify({
@@ -1092,34 +1101,34 @@ document.addEventListener('alpine:init', () => {
           return;
         }
 
-        // Load links for first 20 engrams in parallel
+        // Load all engram links in a single batch call (replaces N+1 pattern).
         const nodeIdSet = new Set(engrams.map(e => e.id));
-        const linkPromises = engrams.slice(0, 20).map(e =>
-          this.apiCall('/api/engrams/' + encodeURIComponent(e.id) + '/links')
-            .then(resp => {
-              const links = resp.links || [];
-              return links.map(l => ({
-                data: {
-                  id: e.id + '-' + l.target_id,
-                  source: e.id,
-                  target: l.target_id,
-                  weight: l.weight || 0.5,
-                },
-              }));
-            })
-            .catch(() => [])
-        );
-        const edgeBatches = await Promise.all(linkPromises);
+        const batchResp = await this.apiCall('/api/engrams/links/batch', {
+          method: 'POST',
+          body: JSON.stringify({
+            ids: engrams.map(e => e.id),
+            vault: this.vault,
+          }),
+        });
+        const linksMap = batchResp.links || {};
         const edgeSet = new Set();
         const edges = [];
         const connectedNodeIds = new Set();
-        for (const batch of edgeBatches) {
-          for (const edge of batch) {
-            if (nodeIdSet.has(edge.data.target) && !edgeSet.has(edge.data.id)) {
-              edgeSet.add(edge.data.id);
-              edges.push(edge);
-              connectedNodeIds.add(edge.data.source);
-              connectedNodeIds.add(edge.data.target);
+        for (const [srcId, srcLinks] of Object.entries(linksMap)) {
+          for (const l of (srcLinks || [])) {
+            const edgeId = srcId + '-' + l.target_id;
+            if (nodeIdSet.has(l.target_id) && !edgeSet.has(edgeId)) {
+              edgeSet.add(edgeId);
+              edges.push({
+                data: {
+                  id: edgeId,
+                  source: srcId,
+                  target: l.target_id,
+                  weight: l.weight || 0.5,
+                },
+              });
+              connectedNodeIds.add(srcId);
+              connectedNodeIds.add(l.target_id);
             }
           }
         }
@@ -1185,7 +1194,7 @@ document.addEventListener('alpine:init', () => {
                 'line-color': 'rgba(168,85,247,0.4)',
                 'width': 2,
                 'curve-style': 'bezier',
-                'opacity': 0.6,
+                'opacity': 0,
               },
             },
             {
@@ -1195,6 +1204,16 @@ document.addEventListener('alpine:init', () => {
           ],
           layout: { name: 'fcose', animate: true, animationDuration: 600 },
           wheelSensitivity: 0.3,
+        });
+
+        // Fade edges in after nodes settle into position (fcose layout: 600ms).
+        // cy.one() fires once and removes itself — does not re-trigger on layout re-runs.
+        this._cy.one('layoutstop', () => {
+          this._cy.edges().animate({
+            style: { opacity: 0.6 },
+            duration: 250,
+            easing: 'ease-in-out',
+          });
         });
 
         this._cy.on('tap', 'node', (evt) => {

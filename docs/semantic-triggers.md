@@ -91,7 +91,7 @@ Non-blocking async channel per subscriber. If the subscriber's channel is full b
 ### Basic Subscribe (Go SDK)
 
 ```go
-client := muninn.NewClient("http://localhost:8475", token)
+client := muninn.NewClient("http://127.0.0.1:8475", token)
 pushCh, err := client.Subscribe(ctx, "my-project")
 if err != nil {
     log.Fatal(err)
@@ -120,7 +120,7 @@ q.Set("context", "database architecture")
 q.Set("threshold", "0.8")
 q.Set("push_on_write", "true")
 
-url := "http://localhost:8475/api/subscribe?" + q.Encode()
+url := "http://127.0.0.1:8475/api/subscribe?" + q.Encode()
 // Then use client.Subscribe(ctx, vault) which encapsulates this
 
 pushCh, err := client.Subscribe(ctx, "my-project")
@@ -146,7 +146,7 @@ The canonical integration for AI agents looks like this:
 
 ```go
 func RunAgent(ctx context.Context, task string) error {
-    client := muninn.NewClient("http://localhost:8475", token)
+    client := muninn.NewClient("http://127.0.0.1:8475", token)
 
     // Subscribe at session start
     // The DB will push memories as they become relevant — no polling
@@ -183,7 +183,7 @@ import asyncio
 from muninn.client import MuninnClient
 
 async def run_agent(task: str):
-    async with MuninnClient("http://localhost:8475", token=token) as client:
+    async with MuninnClient("http://127.0.0.1:8475", token=token) as client:
         # Subscribe to semantic triggers via SSE
         stream = client.subscribe(vault="agent-session", push_on_write=True, threshold=0.7)
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
@@ -19,11 +20,14 @@ import (
 type mcpEngineAdapter struct {
 	eng      *engine.Engine
 	enricher plugin.EnrichPlugin
+	pStore   plugin.PluginStore // needed by RetryEnrich to persist entities/relationships
 }
 
 // NewEngineAdapter returns an EngineInterface backed by eng with optional enricher.
-func NewEngineAdapter(eng *engine.Engine, enricher plugin.EnrichPlugin) EngineInterface {
-	return &mcpEngineAdapter{eng: eng, enricher: enricher}
+// pStore is used by RetryEnrich to persist entity and relationship data; pass nil when
+// no enrichment plugin is configured (RetryEnrich will error before using pStore).
+func NewEngineAdapter(eng *engine.Engine, enricher plugin.EnrichPlugin, pStore plugin.PluginStore) EngineInterface {
+	return &mcpEngineAdapter{eng: eng, enricher: enricher, pStore: pStore}
 }
 
 func (a *mcpEngineAdapter) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
@@ -212,15 +216,49 @@ func (a *mcpEngineAdapter) RetryEnrich(ctx context.Context, vault, id string) (*
 		return nil, fmt.Errorf("retry enrich: enrich failed: %w", err)
 	}
 
-	// Persist enrichment results back to the engram.
-	// Summary and KeyPoints map directly. MemoryType is a uint8 enum with no clean
-	// string mapping, and Classification in Engram is a uint16 cluster ID — both are
-	// left unchanged since the string values from EnrichmentResult cannot be losslessly
-	// converted without a lookup table.
-	eng.Summary = result.Summary
-	eng.KeyPoints = result.KeyPoints
-	if _, err := store.WriteEngram(ctx, wsPrefix, eng); err != nil {
-		return nil, fmt.Errorf("retry enrich: persist results: %w", err)
+	// Persist the full enrichment result: summary, key points, entities, relationships.
+	// Unlike the retroactive processor, RetryEnrich is a forced manual re-run: it does
+	// not check existing DigestEntities/DigestRelationships flags before writing.
+	// This is intentional — the caller explicitly requested re-enrichment.
+	if err := a.pStore.UpdateDigest(ctx, plugin.ULID(ulid), result); err != nil {
+		return nil, fmt.Errorf("retry enrich: persist digest: %w", err)
+	}
+
+	// Persist entities, links, and co-occurrence pairs.
+	var linkedEntityNames []string
+	for _, entity := range result.Entities {
+		if err := a.pStore.UpsertEntity(ctx, entity); err != nil {
+			slog.Warn("retry enrich: failed to upsert entity", "id", id, "name", entity.Name, "err", err)
+			continue
+		}
+		if err := a.pStore.LinkEngramToEntity(ctx, plugin.ULID(ulid), entity.Name); err != nil {
+			slog.Warn("retry enrich: failed to link engram to entity — entity upserted but not linked",
+				"id", id, "name", entity.Name, "err", err)
+			continue
+		}
+		linkedEntityNames = append(linkedEntityNames, entity.Name)
+	}
+	for i := 0; i < len(linkedEntityNames); i++ {
+		for j := i + 1; j < len(linkedEntityNames); j++ {
+			_ = a.pStore.IncrementEntityCoOccurrence(ctx, plugin.ULID(ulid), linkedEntityNames[i], linkedEntityNames[j])
+		}
+	}
+	if len(result.Entities) > 0 {
+		if err := a.pStore.SetDigestFlag(ctx, plugin.ULID(ulid), plugin.DigestEntities); err != nil {
+			slog.Warn("retry enrich: failed to set DigestEntities flag", "id", id, "err", err)
+		}
+	}
+
+	// Persist relationships.
+	for _, rel := range result.Relationships {
+		if err := a.pStore.UpsertRelationship(ctx, plugin.ULID(ulid), rel); err != nil {
+			slog.Warn("retry enrich: failed to upsert relationship", "id", id, "err", err)
+		}
+	}
+	if len(result.Relationships) > 0 {
+		if err := a.pStore.SetDigestFlag(ctx, plugin.ULID(ulid), plugin.DigestRelationships); err != nil {
+			slog.Warn("retry enrich: failed to set DigestRelationships flag", "id", id, "err", err)
+		}
 	}
 
 	return &RetryEnrichResult{

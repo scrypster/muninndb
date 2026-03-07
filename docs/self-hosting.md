@@ -55,7 +55,7 @@ docker run -d \
   ghcr.io/scrypster/muninndb:latest
 ```
 
-Open the Web UI: http://localhost:8476
+Open the Web UI: http://127.0.0.1:8476
 
 ### Docker Compose
 
@@ -175,7 +175,7 @@ Add to your AI tool's MCP config:
   "mcpServers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -187,7 +187,7 @@ If you enabled MCP auth (token file at `~/.muninn/mcp.token`):
   "mcpServers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp",
+      "url": "http://127.0.0.1:8750/mcp",
       "headers": {
         "Authorization": "Bearer <your-token>"
       }
@@ -202,7 +202,7 @@ If you enabled MCP auth (token file at `~/.muninn/mcp.token`):
   "mcpServers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -214,7 +214,7 @@ If you enabled MCP auth (token file at `~/.muninn/mcp.token`):
   "mcpServers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -253,7 +253,7 @@ MUNINN_MCP_URL=https://my-server:8750/mcp muninn mcp
   "mcpServers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -265,7 +265,7 @@ MUNINN_MCP_URL=https://my-server:8750/mcp muninn mcp
   "servers": {
     "muninn": {
       "type": "http",
-      "url": "http://localhost:8750/mcp"
+      "url": "http://127.0.0.1:8750/mcp"
     }
   }
 }
@@ -276,7 +276,7 @@ Restart your AI tool after editing the config.
 ### Verify the connection
 
 ```sh
-curl http://localhost:8750/mcp/health
+curl http://127.0.0.1:8750/mcp/health
 # → {"status":"ok"}
 ```
 
@@ -500,7 +500,7 @@ Encryption at rest protects data that is **stored on disk while the system is of
 
 All services expose the same health endpoint:
 ```sh
-curl http://localhost:8750/mcp/health
+curl http://127.0.0.1:8750/mcp/health
 ```
 
 Returns `{"status":"ok"}` when the server is ready to accept requests.

@@ -84,7 +84,7 @@ func TestWriteAIToolConfig_NewFile(t *testing.T) {
 	path := filepath.Join(dir, "claude_desktop_config.json")
 
 	summary, err := writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeMCPServers(cfg, "http://localhost:8750/mcp", "mdb_testtoken")
+		mergeMCPServers(cfg, "http://127.0.0.1:8750/mcp", "mdb_testtoken")
 	})
 	if err != nil {
 		t.Fatalf("writeAIToolConfig: %v", err)
@@ -110,7 +110,7 @@ func TestWriteAIToolConfig_NewFile(t *testing.T) {
 	if !ok {
 		t.Fatal("muninn entry not found in mcpServers")
 	}
-	if entry["url"] != "http://localhost:8750/mcp" {
+	if entry["url"] != "http://127.0.0.1:8750/mcp" {
 		t.Errorf("unexpected URL in config: %v", entry["url"])
 	}
 }
@@ -131,7 +131,7 @@ func TestWriteAIToolConfig_PreservesExistingServers(t *testing.T) {
 	os.WriteFile(path, b, 0600)
 
 	_, err := writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeMCPServers(cfg, "http://localhost:8750/mcp", "")
+		mergeMCPServers(cfg, "http://127.0.0.1:8750/mcp", "")
 	})
 	if err != nil {
 		t.Fatalf("writeAIToolConfig: %v", err)
@@ -161,7 +161,7 @@ func TestWriteAIToolConfig_InvalidExistingJSON(t *testing.T) {
 	os.WriteFile(path, []byte("this is not json {{{{"), 0644)
 
 	_, err := writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeMCPServers(cfg, "http://localhost:8750/mcp", "")
+		mergeMCPServers(cfg, "http://127.0.0.1:8750/mcp", "")
 	})
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
@@ -178,7 +178,7 @@ func TestWriteAIToolConfig_CreatesParentDir(t *testing.T) {
 	// Parent dir does NOT exist yet
 
 	_, err := writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeMCPServers(cfg, "http://localhost:8750/mcp", "")
+		mergeMCPServers(cfg, "http://127.0.0.1:8750/mcp", "")
 	})
 	if err != nil {
 		t.Fatalf("writeAIToolConfig should create parent dirs: %v", err)
@@ -196,7 +196,7 @@ func TestWriteAIToolConfig_BackupCreated(t *testing.T) {
 	os.WriteFile(path, original, 0644)
 
 	writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeMCPServers(cfg, "http://localhost:8750/mcp", "")
+		mergeMCPServers(cfg, "http://127.0.0.1:8750/mcp", "")
 	})
 
 	bak, err := os.ReadFile(path + ".bak")
@@ -214,7 +214,7 @@ func TestWriteAIToolConfig_AtomicTempCleaned(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 
 	writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeMCPServers(cfg, "http://localhost:8750/mcp", "")
+		mergeMCPServers(cfg, "http://127.0.0.1:8750/mcp", "")
 	})
 
 	// No temp files should remain
@@ -228,8 +228,8 @@ func TestWriteAIToolConfig_AtomicTempCleaned(t *testing.T) {
 
 // TestMCPServerEntry_WithToken verifies token is included when provided.
 func TestMCPServerEntry_WithToken(t *testing.T) {
-	entry := mcpServerEntry("http://localhost:8750/mcp", "mdb_abc123")
-	if entry["url"] != "http://localhost:8750/mcp" {
+	entry := mcpServerEntry("http://127.0.0.1:8750/mcp", "mdb_abc123")
+	if entry["url"] != "http://127.0.0.1:8750/mcp" {
 		t.Errorf("unexpected url: %v", entry["url"])
 	}
 	if _, ok := entry["type"]; ok {
@@ -246,12 +246,60 @@ func TestMCPServerEntry_WithToken(t *testing.T) {
 
 // TestMCPServerEntry_NoToken verifies no headers when token is empty.
 func TestMCPServerEntry_NoToken(t *testing.T) {
-	entry := mcpServerEntry("http://localhost:8750/mcp", "")
+	entry := mcpServerEntry("http://127.0.0.1:8750/mcp", "")
 	if _, ok := entry["headers"]; ok {
 		t.Error("headers should not be present when token is empty")
 	}
 	if _, ok := entry["type"]; ok {
 		t.Errorf("type field must not be present (causes Claude Desktop crash on startup)")
+	}
+}
+
+// TestClaudeCodeMCPEntry_HasType verifies that the Claude Code entry includes "type":"http".
+func TestClaudeCodeMCPEntry_HasType(t *testing.T) {
+	entry := claudeCodeMCPEntry("http://127.0.0.1:8750/mcp", "")
+	if entry["type"] != "http" {
+		t.Errorf(`type = %v, want "http" — Claude Code schema requires this field`, entry["type"])
+	}
+	if entry["url"] != "http://127.0.0.1:8750/mcp" {
+		t.Errorf("url = %v, want http://127.0.0.1:8750/mcp", entry["url"])
+	}
+}
+
+// TestClaudeCodeMCPEntry_WithToken verifies token is included under headers.
+func TestClaudeCodeMCPEntry_WithToken(t *testing.T) {
+	entry := claudeCodeMCPEntry("http://127.0.0.1:8750/mcp", "mdb_tok")
+	headers, ok := entry["headers"].(map[string]any)
+	if !ok {
+		t.Fatal("headers missing")
+	}
+	if headers["Authorization"] != "Bearer mdb_tok" {
+		t.Errorf("Authorization = %v, want Bearer mdb_tok", headers["Authorization"])
+	}
+}
+
+// TestClaudeCodeMCPEntry_NoToken verifies no headers when token is empty.
+func TestClaudeCodeMCPEntry_NoToken(t *testing.T) {
+	entry := claudeCodeMCPEntry("http://127.0.0.1:8750/mcp", "")
+	if _, ok := entry["headers"]; ok {
+		t.Error("headers should not be present when token is empty")
+	}
+}
+
+// TestMergeClaudeCodeMCP_SetsTypeField verifies mergeClaudeCodeMCP writes "type":"http".
+func TestMergeClaudeCodeMCP_SetsTypeField(t *testing.T) {
+	cfg := map[string]any{}
+	mergeClaudeCodeMCP(cfg, "http://127.0.0.1:8750/mcp", "tok")
+	servers, ok := cfg["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatal("mcpServers missing")
+	}
+	muninn, ok := servers["muninn"].(map[string]any)
+	if !ok {
+		t.Fatal("mcpServers.muninn missing")
+	}
+	if muninn["type"] != "http" {
+		t.Errorf(`type = %v, want "http"`, muninn["type"])
 	}
 }
 
@@ -267,7 +315,7 @@ func TestParseToolNumbers(t *testing.T) {
 		{"1 1 2", []int{1, 2}}, // deduplication
 		{"", nil},
 		{"6 7 8", []int{6, 7, 8}}, // valid range is 1-9
-		{"abc", nil},    // non-numeric
+		{"abc", nil},              // non-numeric
 	}
 	for _, tt := range tests {
 		got := parseToolNumbers(tt.input)
@@ -374,7 +422,7 @@ func TestConfigureOpenClaw_WritesCorrectSchema(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		if err := configureOpenClaw("http://localhost:8750/mcp", "mdb_testtoken"); err != nil {
+		if err := configureOpenClaw("http://127.0.0.1:8750/mcp", "mdb_testtoken"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -424,7 +472,7 @@ func TestConfigureOpenClaw_NoToken(t *testing.T) {
 	defer cleanup()
 
 	captureStdout(func() {
-		configureOpenClaw("http://localhost:8750/mcp", "")
+		configureOpenClaw("http://127.0.0.1:8750/mcp", "")
 	})
 
 	data, _ := os.ReadFile(openClawConfigPath())
@@ -448,7 +496,7 @@ func TestConfigureOpenClaw_PreservesExistingEntries(t *testing.T) {
 	os.WriteFile(path, []byte(`{"mcpServers":{"other":{"command":"other","transport":"stdio"}},"topKey":"kept"}`), 0644)
 
 	captureStdout(func() {
-		configureOpenClaw("http://localhost:8750/mcp", "tok")
+		configureOpenClaw("http://127.0.0.1:8750/mcp", "tok")
 	})
 
 	data, _ := os.ReadFile(path)
@@ -469,7 +517,7 @@ func TestConfigureOpenClaw_PreservesExistingEntries(t *testing.T) {
 func TestConfigureOpenClaw_SummaryAdded(t *testing.T) {
 	_, cleanup := withTempHome(t)
 	defer cleanup()
-	out := captureStdout(func() { configureOpenClaw("http://localhost:8750/mcp", "tok") })
+	out := captureStdout(func() { configureOpenClaw("http://127.0.0.1:8750/mcp", "tok") })
 	if !strings.Contains(out, "added") {
 		t.Errorf("expected 'added' in output for new config: %s", out)
 	}
@@ -481,7 +529,7 @@ func TestConfigureOpenClaw_SummaryUpdated(t *testing.T) {
 	path := openClawConfigPath()
 	os.MkdirAll(filepath.Dir(path), 0755)
 	os.WriteFile(path, []byte(`{"mcpServers":{"muninn":{"command":"muninn","args":["mcp"],"transport":"stdio"}}}`), 0644)
-	out := captureStdout(func() { configureOpenClaw("http://localhost:8750/mcp", "tok") })
+	out := captureStdout(func() { configureOpenClaw("http://127.0.0.1:8750/mcp", "tok") })
 	if !strings.Contains(out, "updated") {
 		t.Errorf("expected 'updated' in output for existing mcpServers: %s", out)
 	}
@@ -555,7 +603,7 @@ func TestConfigureOpenClawSkill_CreatesDirectory(t *testing.T) {
 }
 
 func TestOpenCodeMCPEntry_WithToken(t *testing.T) {
-	entry := openCodeMCPEntry("http://localhost:8750/mcp", "mdb_testtoken123")
+	entry := openCodeMCPEntry("http://127.0.0.1:8750/mcp", "mdb_testtoken123")
 	if entry["type"] != "remote" {
 		t.Errorf("type = %v, want \"remote\"", entry["type"])
 	}
@@ -576,7 +624,7 @@ func TestOpenCodeMCPEntry_WithToken(t *testing.T) {
 }
 
 func TestOpenCodeMCPEntry_NoToken(t *testing.T) {
-	entry := openCodeMCPEntry("http://localhost:8750/mcp", "")
+	entry := openCodeMCPEntry("http://127.0.0.1:8750/mcp", "")
 	if entry["type"] != "remote" {
 		t.Errorf("type = %v, want \"remote\"", entry["type"])
 	}
@@ -595,7 +643,7 @@ func TestMergeOpenCodeMCP_PreservesOtherEntries(t *testing.T) {
 		},
 		"topKey": "preserved",
 	}
-	mergeOpenCodeMCP(cfg, "http://localhost:8750/mcp", "tok")
+	mergeOpenCodeMCP(cfg, "http://127.0.0.1:8750/mcp", "tok")
 	mcp := cfg["mcp"].(map[string]any)
 	if _, ok := mcp["other-tool"]; !ok {
 		t.Error("other-tool entry removed")
@@ -610,7 +658,7 @@ func TestMergeOpenCodeMCP_PreservesOtherEntries(t *testing.T) {
 
 func TestMergeOpenCodeMCP_EmptyConfig(t *testing.T) {
 	cfg := map[string]any{}
-	mergeOpenCodeMCP(cfg, "http://localhost:8750/mcp", "tok")
+	mergeOpenCodeMCP(cfg, "http://127.0.0.1:8750/mcp", "tok")
 	mcp, ok := cfg["mcp"].(map[string]any)
 	if !ok {
 		t.Fatal("cfg[\"mcp\"] not a map")
@@ -625,7 +673,7 @@ func TestConfigureOpenCode_WritesCorrectSchema(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		if err := configureOpenCode("http://localhost:8750/mcp", "mdb_testtoken"); err != nil {
+		if err := configureOpenCode("http://127.0.0.1:8750/mcp", "mdb_testtoken"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -660,7 +708,7 @@ func TestConfigureOpenCode_NoToken(t *testing.T) {
 	defer cleanup()
 
 	captureStdout(func() {
-		configureOpenCode("http://localhost:8750/mcp", "")
+		configureOpenCode("http://127.0.0.1:8750/mcp", "")
 	})
 
 	data, _ := os.ReadFile(openCodeConfigPath())
@@ -684,7 +732,7 @@ func TestConfigureOpenCode_PreservesExistingEntries(t *testing.T) {
 	os.WriteFile(path, []byte(`{"mcp":{"other":{"type":"remote","url":"http://x"}},"topKey":"kept"}`), 0644)
 
 	captureStdout(func() {
-		configureOpenCode("http://localhost:8750/mcp", "tok")
+		configureOpenCode("http://127.0.0.1:8750/mcp", "tok")
 	})
 
 	data, _ := os.ReadFile(path)
@@ -705,7 +753,7 @@ func TestConfigureOpenCode_PreservesExistingEntries(t *testing.T) {
 func TestConfigureOpenCode_SummaryAdded(t *testing.T) {
 	_, cleanup := withTempHome(t)
 	defer cleanup()
-	out := captureStdout(func() { configureOpenCode("http://localhost:8750/mcp", "tok") })
+	out := captureStdout(func() { configureOpenCode("http://127.0.0.1:8750/mcp", "tok") })
 	if !strings.Contains(out, "added") {
 		t.Errorf("expected 'added' in output for new config: %s", out)
 	}
@@ -716,8 +764,8 @@ func TestConfigureOpenCode_SummaryUpdated(t *testing.T) {
 	defer cleanup()
 	path := openCodeConfigPath()
 	os.MkdirAll(filepath.Dir(path), 0755)
-	os.WriteFile(path, []byte(`{"mcp":{"muninn":{"type":"remote","url":"http://localhost:8750/mcp","oauth":false}}}`), 0644)
-	out := captureStdout(func() { configureOpenCode("http://localhost:8750/mcp", "tok") })
+	os.WriteFile(path, []byte(`{"mcp":{"muninn":{"type":"remote","url":"http://127.0.0.1:8750/mcp","oauth":false}}}`), 0644)
+	out := captureStdout(func() { configureOpenCode("http://127.0.0.1:8750/mcp", "tok") })
 	if !strings.Contains(out, "updated") {
 		t.Errorf("expected 'updated' in output for existing mcp: %s", out)
 	}
@@ -746,16 +794,15 @@ func withTempHome(t *testing.T) (string, func()) {
 	}
 }
 
-// TestConfigureClaudeDesktopWritesConfig verifies Claude Desktop config is written at correct path with correct JSON.
+// TestConfigureClaudeDesktopWritesConfig verifies Claude Desktop config is written at the
+// correct path with a stdio entry (command + args), not an HTTP entry (url + headers).
+// Claude Desktop v1.1.4010+ crashes on startup if any mcpServers entry has type:"http".
 func TestConfigureClaudeDesktopWritesConfig(t *testing.T) {
 	home, cleanup := withTempHome(t)
 	defer cleanup()
 
-	mcpURL := "http://localhost:8750/mcp"
-	token := "mdb_testtoken123"
-
 	out := captureStdout(func() {
-		err := configureClaudeDesktop(mcpURL, token)
+		err := configureClaudeDesktop("http://127.0.0.1:8750/mcp", "mdb_testtoken123")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -785,15 +832,23 @@ func TestConfigureClaudeDesktopWritesConfig(t *testing.T) {
 	if !ok {
 		t.Fatalf("mcpServers.muninn not found: %s", data)
 	}
-	if muninn["url"] != mcpURL {
-		t.Errorf("url = %v, want %q", muninn["url"], mcpURL)
+
+	// Must be a stdio entry: command + args, no url/headers/type.
+	if muninn["command"] == nil || muninn["command"] == "" {
+		t.Errorf("command field missing or empty — Desktop config must use stdio transport: %s", data)
 	}
-	headers, ok := muninn["headers"].(map[string]any)
-	if !ok {
-		t.Fatalf("headers not found when token supplied: %s", data)
+	args, ok := muninn["args"].([]any)
+	if !ok || len(args) == 0 || args[0] != "mcp" {
+		t.Errorf("args should be [\"mcp\"], got %v: %s", muninn["args"], data)
 	}
-	if headers["Authorization"] != "Bearer "+token {
-		t.Errorf("Authorization = %v, want %q", headers["Authorization"], "Bearer "+token)
+	if muninn["url"] != nil {
+		t.Errorf("url must not be present in Desktop config (causes schema crash): %s", data)
+	}
+	if muninn["headers"] != nil {
+		t.Errorf("headers must not be present in Desktop config: %s", data)
+	}
+	if muninn["type"] != nil {
+		t.Errorf("type must not be present in Desktop config (causes crash): %s", data)
 	}
 
 	// Output should contain success marker
@@ -802,13 +857,14 @@ func TestConfigureClaudeDesktopWritesConfig(t *testing.T) {
 	}
 }
 
-// TestConfigureClaudeDesktopNoToken verifies no auth header is written when token is empty.
+// TestConfigureClaudeDesktopNoToken verifies Desktop config is still stdio even when no token.
+// The token is read at runtime by muninn mcp, so it never appears in the config file.
 func TestConfigureClaudeDesktopNoToken(t *testing.T) {
 	_, cleanup := withTempHome(t)
 	defer cleanup()
 
 	captureStdout(func() {
-		if err := configureClaudeDesktop("http://localhost:8750/mcp", ""); err != nil {
+		if err := configureClaudeDesktop("http://127.0.0.1:8750/mcp", ""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -819,8 +875,15 @@ func TestConfigureClaudeDesktopNoToken(t *testing.T) {
 	servers := cfg["mcpServers"].(map[string]any)
 	muninn := servers["muninn"].(map[string]any)
 
-	if _, hasHeaders := muninn["headers"]; hasHeaders {
-		t.Error("headers should not be present when token is empty")
+	// stdio entry: command present, no url/headers regardless of token presence.
+	if muninn["command"] == nil {
+		t.Error("command field missing — Desktop config must use stdio transport")
+	}
+	if muninn["url"] != nil {
+		t.Error("url must not be present in Desktop config")
+	}
+	if muninn["headers"] != nil {
+		t.Error("headers must not be present in Desktop config")
 	}
 }
 
@@ -836,7 +899,7 @@ func TestConfigureClaudeDesktopPreservesExistingKeys(t *testing.T) {
 	os.WriteFile(path, []byte(existing), 0644)
 
 	captureStdout(func() {
-		configureClaudeDesktop("http://localhost:8750/mcp", "tok123")
+		configureClaudeDesktop("http://127.0.0.1:8750/mcp", "tok123")
 	})
 
 	data, _ := os.ReadFile(path)
@@ -864,7 +927,7 @@ func TestConfigureCursorWritesConfig(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		if err := configureCursor("http://localhost:8750/mcp", "tok"); err != nil {
+		if err := configureCursor("http://127.0.0.1:8750/mcp", "tok"); err != nil {
 			t.Fatalf("error: %v", err)
 		}
 	})
@@ -890,7 +953,7 @@ func TestConfigureWindsurfWritesConfig(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		if err := configureWindsurf("http://localhost:8750/mcp", "tok"); err != nil {
+		if err := configureWindsurf("http://127.0.0.1:8750/mcp", "tok"); err != nil {
 			t.Fatalf("error: %v", err)
 		}
 	})
@@ -917,7 +980,7 @@ func TestConfigureOpenClawWritesConfig(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		if err := configureOpenClaw("http://localhost:8750/mcp", "tok"); err != nil {
+		if err := configureOpenClaw("http://127.0.0.1:8750/mcp", "tok"); err != nil {
 			t.Fatalf("error: %v", err)
 		}
 	})
@@ -971,7 +1034,7 @@ func TestConfigureCodexWritesConfig(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		if err := configureCodex("http://localhost:8750/mcp", "mdb_testtoken"); err != nil {
+		if err := configureCodex("http://127.0.0.1:8750/mcp", "mdb_testtoken"); err != nil {
 			t.Fatalf("error: %v", err)
 		}
 	})
@@ -984,7 +1047,7 @@ func TestConfigureCodexWritesConfig(t *testing.T) {
 	if !strings.Contains(content, "muninn") {
 		t.Errorf("muninn not in config: %s", content)
 	}
-	if !strings.Contains(content, "http://localhost:8750/mcp") {
+	if !strings.Contains(content, "http://127.0.0.1:8750/mcp") {
 		t.Errorf("MCP URL not in config: %s", content)
 	}
 	if !strings.Contains(content, "Bearer mdb_testtoken") {
@@ -1001,7 +1064,7 @@ func TestConfigureCodexNoToken(t *testing.T) {
 	defer cleanup()
 
 	captureStdout(func() {
-		if err := configureCodex("http://localhost:8750/mcp", ""); err != nil {
+		if err := configureCodex("http://127.0.0.1:8750/mcp", ""); err != nil {
 			t.Fatalf("error: %v", err)
 		}
 	})
@@ -1014,7 +1077,7 @@ func TestConfigureCodexNoToken(t *testing.T) {
 	if strings.Contains(content, "http_headers") {
 		t.Errorf("should not have http_headers without token: %s", content)
 	}
-	if !strings.Contains(content, "http://localhost:8750/mcp") {
+	if !strings.Contains(content, "http://127.0.0.1:8750/mcp") {
 		t.Errorf("URL missing: %s", content)
 	}
 }
@@ -1034,7 +1097,7 @@ url = "http://other.example"
 	os.WriteFile(path, []byte(existing), 0644)
 
 	captureStdout(func() {
-		configureCodex("http://localhost:8750/mcp", "tok123")
+		configureCodex("http://127.0.0.1:8750/mcp", "tok123")
 	})
 
 	data, _ := os.ReadFile(path)
@@ -1057,7 +1120,7 @@ func TestWriteCodexTOMLConfig_InvalidTOML(t *testing.T) {
 	path := filepath.Join(dir, "config.toml")
 	os.WriteFile(path, []byte("this is not valid toml = = = [[["), 0644)
 
-	_, err := writeCodexTOMLConfig(path, "http://localhost:8750/mcp", "")
+	_, err := writeCodexTOMLConfig(path, "http://127.0.0.1:8750/mcp", "")
 	if err == nil {
 		t.Fatal("expected error for invalid TOML, got nil")
 	}
@@ -1073,7 +1136,7 @@ func TestWriteCodexTOMLConfig_BackupCreated(t *testing.T) {
 	original := []byte("[mcp_servers]\n")
 	os.WriteFile(path, original, 0644)
 
-	writeCodexTOMLConfig(path, "http://localhost:8750/mcp", "")
+	writeCodexTOMLConfig(path, "http://127.0.0.1:8750/mcp", "")
 
 	bak, err := os.ReadFile(path + ".bak")
 	if err != nil {
@@ -1090,7 +1153,7 @@ func TestConfigureNamedToolsCodex(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"codex"}, "http://localhost:8750/mcp", "tok123")
+		configureNamedTools([]string{"codex"}, "http://127.0.0.1:8750/mcp", "tok123")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for codex tool, got: %s", out)
@@ -1105,7 +1168,7 @@ func TestConfigureNamedToolsCodex(t *testing.T) {
 // TestPrintVSCodeInstructions verifies VS Code instructions contain required elements.
 func TestPrintVSCodeInstructions(t *testing.T) {
 	out := captureStdout(func() {
-		printVSCodeInstructions("http://localhost:8750/mcp", "mdb_mytoken")
+		printVSCodeInstructions("http://127.0.0.1:8750/mcp", "mdb_mytoken")
 	})
 	if !strings.Contains(out, `"muninn"`) {
 		t.Errorf("missing muninn key: %s", out)
@@ -1128,7 +1191,7 @@ func TestPrintVSCodeInstructions(t *testing.T) {
 // TestPrintVSCodeInstructionsNoToken verifies no auth header without token.
 func TestPrintVSCodeInstructionsNoToken(t *testing.T) {
 	out := captureStdout(func() {
-		printVSCodeInstructions("http://localhost:8750/mcp", "")
+		printVSCodeInstructions("http://127.0.0.1:8750/mcp", "")
 	})
 	if strings.Contains(out, "Bearer") {
 		t.Errorf("should not have auth header without token: %s", out)
@@ -1138,7 +1201,7 @@ func TestPrintVSCodeInstructionsNoToken(t *testing.T) {
 // TestPrintManualInstructions verifies manual instructions contain required elements.
 func TestPrintManualInstructions(t *testing.T) {
 	out := captureStdout(func() {
-		printManualInstructions("http://localhost:8750/mcp", "mdb_secrettoken")
+		printManualInstructions("http://127.0.0.1:8750/mcp", "mdb_secrettoken")
 	})
 	if !strings.Contains(out, "mcpServers") {
 		t.Errorf("missing mcpServers: %s", out)
@@ -1157,7 +1220,7 @@ func TestPrintManualInstructions(t *testing.T) {
 // TestPrintManualInstructionsNoToken verifies curl command appears without token.
 func TestPrintManualInstructionsNoToken(t *testing.T) {
 	out := captureStdout(func() {
-		printManualInstructions("http://localhost:8750/mcp", "")
+		printManualInstructions("http://127.0.0.1:8750/mcp", "")
 	})
 	if strings.Contains(out, "Bearer") {
 		t.Errorf("should not have auth header without token: %s", out)
@@ -1174,7 +1237,7 @@ func TestConfigureNamedToolsClaudeDesktop(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claude"}, "http://localhost:8750/mcp", "tok123")
+		configureNamedTools([]string{"claude"}, "http://127.0.0.1:8750/mcp", "tok123")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for claude tool, got: %s", out)
@@ -1193,7 +1256,7 @@ func TestConfigureNamedToolsClaudeDesktopAlias(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claude-desktop"}, "http://localhost:8750/mcp", "tok")
+		configureNamedTools([]string{"claude-desktop"}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("claude-desktop alias should work: %s", out)
@@ -1206,7 +1269,7 @@ func TestConfigureNamedToolsCursor(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"cursor"}, "http://localhost:8750/mcp", "tok123")
+		configureNamedTools([]string{"cursor"}, "http://127.0.0.1:8750/mcp", "tok123")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for cursor tool, got: %s", out)
@@ -1224,7 +1287,7 @@ func TestConfigureNamedToolsWindsurf(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"windsurf"}, "http://localhost:8750/mcp", "tok123")
+		configureNamedTools([]string{"windsurf"}, "http://127.0.0.1:8750/mcp", "tok123")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for windsurf tool, got: %s", out)
@@ -1242,7 +1305,7 @@ func TestConfigureNamedToolsOpenClaw(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"openclaw"}, "http://localhost:8750/mcp", "tok123")
+		configureNamedTools([]string{"openclaw"}, "http://127.0.0.1:8750/mcp", "tok123")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for openclaw tool, got: %s", out)
@@ -1260,7 +1323,7 @@ func TestConfigureNamedToolsVSCode(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"vscode"}, "http://localhost:8750/mcp", "")
+		configureNamedTools([]string{"vscode"}, "http://127.0.0.1:8750/mcp", "")
 	})
 	if !strings.Contains(out, "VS Code") {
 		t.Errorf("expected VS Code instructions, got: %s", out)
@@ -1276,7 +1339,7 @@ func TestConfigureNamedToolsVSCodeAlias(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"vs-code"}, "http://localhost:8750/mcp", "")
+		configureNamedTools([]string{"vs-code"}, "http://127.0.0.1:8750/mcp", "")
 	})
 	if !strings.Contains(out, "VS Code") {
 		t.Errorf("expected VS Code instructions with vs-code alias: %s", out)
@@ -1289,7 +1352,7 @@ func TestConfigureNamedToolsManual(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"manual"}, "http://localhost:8750/mcp", "")
+		configureNamedTools([]string{"manual"}, "http://127.0.0.1:8750/mcp", "")
 	})
 	if !strings.Contains(out, "mcpServers") {
 		t.Errorf("expected manual instructions, got: %s", out)
@@ -1305,7 +1368,7 @@ func TestConfigureNamedToolsOtherAlias(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"other"}, "http://localhost:8750/mcp", "")
+		configureNamedTools([]string{"other"}, "http://127.0.0.1:8750/mcp", "")
 	})
 	if !strings.Contains(out, "mcpServers") {
 		t.Errorf("expected manual instructions with 'other' alias: %s", out)
@@ -1318,7 +1381,7 @@ func TestConfigureNamedToolsMultiple(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claude", "cursor"}, "http://localhost:8750/mcp", "tok123")
+		configureNamedTools([]string{"claude", "cursor"}, "http://127.0.0.1:8750/mcp", "tok123")
 	})
 
 	// Both should succeed
@@ -1343,7 +1406,7 @@ func TestConfigureNamedToolsUnknownToolSetupAI(t *testing.T) {
 	defer cleanup()
 
 	stderr := captureStderr(func() {
-		configureNamedTools([]string{"nonexistent"}, "http://localhost:8750/mcp", "")
+		configureNamedTools([]string{"nonexistent"}, "http://127.0.0.1:8750/mcp", "")
 	})
 	if !strings.Contains(stderr, "unknown tool") {
 		t.Errorf("expected error for unknown tool, got stderr: %s", stderr)

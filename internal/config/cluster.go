@@ -53,6 +53,12 @@ type muninnYAML struct {
 	Cluster ClusterConfig `yaml:"cluster"`
 }
 
+// ClusterDefaults returns a ClusterConfig with all default values applied.
+// Use this as the base when constructing a new cluster config programmatically
+// to avoid accidentally persisting zero-values for required fields such as
+// LeaseTTL and HeartbeatMS.
+func ClusterDefaults() ClusterConfig { return clusterDefaults() }
+
 // clusterDefaults returns a ClusterConfig with default values applied.
 func clusterDefaults() ClusterConfig {
 	return ClusterConfig{

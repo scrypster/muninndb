@@ -26,8 +26,8 @@ type MCPServer struct {
 	srv       *http.Server
 	tlsConfig *tls.Config // nil = plain TCP
 
-	sseSessionsMu    sync.Mutex
-	sseSessions      map[string]*sseSession // sessionID → session
+	sseSessionsMu sync.Mutex
+	sseSessions   map[string]*sseSession // sessionID → session
 	// NOTE: idempotencyLocks grows by one entry per unique op_id seen during the
 	// process lifetime. In practice op_id cardinality is low (client-generated,
 	// not per-request UUIDs), so growth is bounded by usage patterns. The
@@ -450,6 +450,7 @@ func (s *MCPServer) processAndPushSSE(w http.ResponseWriter, r *http.Request, ch
 		slog.Info("mcp: response ready", "via", label, "method", req.Method, "bytes", len(responseBytes), "streams", len(channels))
 
 		// Primary delivery: write response in POST body.
+		copyResponseHeaders(w.Header(), recorder.header)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write(responseBytes); err != nil {
@@ -497,11 +498,17 @@ type responseCapture struct {
 	code   int
 }
 
-func (r *responseCapture) Header() http.Header      { return r.header }
-func (r *responseCapture) WriteHeader(code int)      { r.code = code }
+func (r *responseCapture) Header() http.Header         { return r.header }
+func (r *responseCapture) WriteHeader(code int)        { r.code = code }
 func (r *responseCapture) Write(b []byte) (int, error) { return r.buf.Write(b) }
 
 func (s *MCPServer) handleInitialize(w http.ResponseWriter, req *JSONRPCRequest) {
+	// Streamable HTTP clients may require a session ID from initialize even if the
+	// server does not enforce session state on subsequent unary POST requests.
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err == nil {
+		w.Header().Set(mcpSessionHeader, hex.EncodeToString(idBytes))
+	}
 	sendResult(w, req.ID, map[string]any{
 		"protocolVersion": "2024-11-05",
 		"capabilities": map[string]any{
@@ -543,6 +550,14 @@ func sendError(w http.ResponseWriter, id json.RawMessage, code int, message stri
 		ID:      id,
 		Error:   &JSONRPCError{Code: code, Message: message},
 	})
+}
+
+func copyResponseHeaders(dst, src http.Header) {
+	for k, values := range src {
+		for _, v := range values {
+			dst.Add(k, v)
+		}
+	}
 }
 
 // mustJSON marshals v to JSON.

@@ -1002,8 +1002,13 @@ func runServer() {
 	})
 	restServer.SetVersion(muninnVersion())
 
+	// Shared plugin store — bridges raw storage to the plugin.PluginStore interface.
+	// Created here so it can be shared by the MCP adapter (RetryEnrich) and both
+	// retroactive processors (embed + enrich) which are started below.
+	pStore := plugin.NewStoreAdapter(store, hnswRegistry)
+
 	// Build MCP server
-	mcpAdapter := mcp.NewEngineAdapter(eng, enrichPlugin)
+	mcpAdapter := mcp.NewEngineAdapter(eng, enrichPlugin, pStore)
 	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, clientTLS)
 
 	// Build gRPC server
@@ -1105,22 +1110,43 @@ func runServer() {
 	go contradictWorkerImpl.Worker.Run(ctx)
 	go confidenceWorkerImpl.Worker.Run(ctx)
 
-	// Start RetroactiveProcessor if a real embedder is configured.
+	// Start retroactive embed processor if a real embedder is configured.
 	// It runs continuously, picking up newly written engrams via Notify() or its poll ticker.
 	var retroProcessor *plugin.RetroactiveProcessor
 	if embedPlugin != nil {
-		pStore := plugin.NewStoreAdapter(store, hnswRegistry)
 		retroProcessor = plugin.NewRetroactiveProcessor(pStore, embedPlugin, plugin.DigestEmbed)
 		retroProcessor.Start(ctx)
-		// Wire engine → processor: each successful Write notifies the embed worker.
-		eng.SetOnWrite(retroProcessor.Notify)
 		slog.Info("retroactive embed processor started")
+	}
+
+	// Start retroactive enrich processor if an enrich plugin is configured.
+	// Without this processor, auto-enrichment never fires (issue #113 bug 1).
+	var enrichProcessor *plugin.RetroactiveProcessor
+	if enrichPlugin != nil {
+		enrichProcessor = plugin.NewRetroactiveProcessor(pStore, enrichPlugin, plugin.DigestEnrich)
+		enrichProcessor.Start(ctx)
+		slog.Info("retroactive enrich processor started")
+	}
+
+	// Wire engine → processors: chain Notify calls so every Write wakes all active workers.
+	switch {
+	case retroProcessor != nil && enrichProcessor != nil:
+		embedNotify := retroProcessor.Notify
+		enrichNotify := enrichProcessor.Notify
+		eng.SetOnWrite(func() { embedNotify(); enrichNotify() })
+	case retroProcessor != nil:
+		eng.SetOnWrite(retroProcessor.Notify)
+	case enrichProcessor != nil:
+		eng.SetOnWrite(enrichProcessor.Notify)
 	}
 
 	// Wire processors into engine for observability stats.
 	var obsProcs []*plugin.RetroactiveProcessor
 	if retroProcessor != nil {
 		obsProcs = append(obsProcs, retroProcessor)
+	}
+	if enrichProcessor != nil {
+		obsProcs = append(obsProcs, enrichProcessor)
 	}
 	eng.SetRetroactiveProcessors(obsProcs...)
 
@@ -1221,6 +1247,9 @@ func runServer() {
 		defer close(shutdownDone)
 		if retroProcessor != nil {
 			retroProcessor.Stop()
+		}
+		if enrichProcessor != nil {
+			enrichProcessor.Stop()
 		}
 		if enrichPlugin != nil {
 			if closer, ok := enrichPlugin.(interface{ Close() error }); ok {

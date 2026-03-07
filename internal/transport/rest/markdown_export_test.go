@@ -68,6 +68,10 @@ func (e *markdownExportEngine) GetEngramLinks(_ context.Context, req *GetEngramL
 	return &GetEngramLinksResponse{}, nil
 }
 
+func (e *markdownExportEngine) GetBatchEngramLinks(_ context.Context, _ *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error) {
+	return &BatchGetEngramLinksResponse{Links: map[string][]AssociationItem{}}, nil
+}
+
 // ---------------------------------------------------------------------------
 // writeVaultMarkdownExport
 // ---------------------------------------------------------------------------

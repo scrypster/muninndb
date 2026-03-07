@@ -422,13 +422,13 @@ func (s *Server) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		// Fallback for misconfigured or empty addresses.
-		host = "localhost"
+		host = "127.0.0.1"
 		port = "8750"
 	}
 	// A wildcard listen address (empty string, 0.0.0.0, or ::) means the server
-	// is reachable on any interface; present it as localhost in the UI.
+	// is reachable on any interface; use 127.0.0.1 to avoid IPv6 dual-stack ambiguity.
 	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "localhost"
+		host = "127.0.0.1"
 	}
 	mcpURL := "http://" + host + ":" + port + "/mcp"
 	s.sendJSON(w, http.StatusOK, MCPInfoResponse{

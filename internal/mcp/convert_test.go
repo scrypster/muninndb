@@ -186,6 +186,46 @@ func TestActivationToMemoryEmptySourceType(t *testing.T) {
 	}
 }
 
+// TestActivationToMemoryCreatedAt is a regression test for GitHub issue #97:
+// muninn_recall returned created_at: 0001-01-01T00:00:00Z (Go zero-value) for
+// all engrams because CreatedAt was not mapped through the ActivationItem pipeline.
+func TestActivationToMemoryCreatedAt(t *testing.T) {
+	// Use a well-known timestamp to avoid test fragility.
+	want := time.Date(2026, 3, 6, 20, 15, 29, 0, time.UTC)
+	item := &mbp.ActivationItem{
+		ID:        "engram-abc",
+		Concept:   "test",
+		Content:   "content",
+		CreatedAt: want.UnixNano(),
+	}
+	m := activationToMemory(item)
+
+	if m.CreatedAt.IsZero() {
+		t.Fatal("CreatedAt is zero — regression: issue #97 not fixed")
+	}
+	if !m.CreatedAt.Equal(want) {
+		t.Errorf("CreatedAt = %v, want %v", m.CreatedAt, want)
+	}
+	if m.CreatedAt.Location() != time.UTC {
+		t.Errorf("CreatedAt location = %v, want UTC", m.CreatedAt.Location())
+	}
+}
+
+// TestActivationToMemoryCreatedAtZero verifies that a zero CreatedAt (not yet
+// persisted, or old data) maps to the Unix epoch, not a Go zero time.
+func TestActivationToMemoryCreatedAtZero(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:        "engram-zero",
+		CreatedAt: 0,
+	}
+	m := activationToMemory(item)
+
+	want := time.Unix(0, 0).UTC()
+	if !m.CreatedAt.Equal(want) {
+		t.Errorf("CreatedAt with 0 input = %v, want %v", m.CreatedAt, want)
+	}
+}
+
 func TestConvertReadResponseToMemory(t *testing.T) {
 	resp := &mbp.ReadResponse{
 		ID:         "read-123",
@@ -204,5 +244,82 @@ func TestConvertReadResponseToMemory(t *testing.T) {
 	}
 	if len(m.Tags) != 2 {
 		t.Errorf("tags len = %d, want 2", len(m.Tags))
+	}
+}
+
+// TestReadResponseToMemory_FullContent verifies muninn_read returns full content
+// without truncation — regression guard for issue #112.
+func TestReadResponseToMemory_FullContent(t *testing.T) {
+	long := make([]byte, 2000)
+	for i := range long {
+		long[i] = 'y'
+	}
+	resp := &mbp.ReadResponse{
+		ID:      "full-read",
+		Content: string(long),
+	}
+	m := readResponseToMemory(resp)
+	if len(m.Content) != 2000 {
+		t.Errorf("readResponseToMemory truncated content: got len %d, want 2000", len(m.Content))
+	}
+}
+
+// TestReadResponseToMemory_MapsummaryField verifies that Summary from the read
+// response is propagated to the Memory.
+func TestReadResponseToMemory_MapsSummaryField(t *testing.T) {
+	resp := &mbp.ReadResponse{
+		ID:      "sum-read",
+		Content: "full content here",
+		Summary: "short summary",
+	}
+	m := readResponseToMemory(resp)
+	if m.Summary != "short summary" {
+		t.Errorf("Summary = %q, want %q", m.Summary, "short summary")
+	}
+	if m.Content != "full content here" {
+		t.Errorf("Content = %q, want full content", m.Content)
+	}
+}
+
+// TestActivationToMemory_PrefersSummary verifies that muninn_recall uses the
+// enrichment summary when present instead of the truncated content preview.
+func TestActivationToMemory_PrefersSummary(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:      "recall-with-summary",
+		Concept: "concept",
+		Content: "this is the full long content that goes well beyond any preview limit",
+		Summary: "short enriched summary",
+	}
+	m := activationToMemory(item)
+	if m.Summary != "short enriched summary" {
+		t.Errorf("Summary = %q, want %q", m.Summary, "short enriched summary")
+	}
+	// Content field should carry the summary as the display value when present.
+	if m.Content != "short enriched summary" {
+		t.Errorf("Content (display) = %q, want summary %q", m.Content, "short enriched summary")
+	}
+}
+
+// TestActivationToMemory_FallsBackToTruncated verifies that when no summary
+// exists, muninn_recall falls back to a truncated content preview.
+func TestActivationToMemory_FallsBackToTruncated(t *testing.T) {
+	long := make([]byte, 800)
+	for i := range long {
+		long[i] = 'z'
+	}
+	item := &mbp.ActivationItem{
+		ID:      "recall-no-summary",
+		Content: string(long),
+		Summary: "",
+	}
+	m := activationToMemory(item)
+	if m.Summary != "" {
+		t.Errorf("Summary should be empty, got %q", m.Summary)
+	}
+	if len(m.Content) > contentPreviewLen+3 {
+		t.Errorf("Content not truncated: len=%d", len(m.Content))
+	}
+	if m.Content[len(m.Content)-3:] != "..." {
+		t.Error("truncated content must end with '...'")
 	}
 }

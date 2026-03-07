@@ -174,6 +174,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/stats", s.withMiddleware(s.handleStats))
 	mux.HandleFunc("GET /api/engrams", s.withMiddleware(s.handleListEngrams))
 	mux.HandleFunc("GET /api/engrams/{id}/links", s.withMiddleware(s.handleGetEngramLinks))
+	mux.HandleFunc("POST /api/engrams/links/batch", s.withMiddleware(s.handleBatchGetEngramLinks))
 	mux.HandleFunc("GET /api/vaults", s.withMiddleware(s.handleListVaults))
 	mux.HandleFunc("GET /api/vaults/stats", s.withAdminMiddleware(s.handleVaultStats()))
 	mux.HandleFunc("GET /api/session", s.withMiddleware(s.handleGetSession))
@@ -1081,6 +1082,35 @@ func (s *Server) handleGetEngramLinks(w http.ResponseWriter, r *http.Request) {
 	}
 	vault := ctxVault(r)
 	resp, err := s.engine.GetEngramLinks(r.Context(), &GetEngramLinksRequest{ID: id, Vault: vault})
+	if err != nil {
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+// handleBatchGetEngramLinks returns associations for multiple engrams in one call.
+// POST /api/engrams/links/batch
+// Body: {"ids": ["ulid1", ...], "vault": "x", "max_per_node": 50}
+// Response 200: {"links": {"id1": [{target_id, rel_type, weight, co_activation_count}], ...}}
+func (s *Server) handleBatchGetEngramLinks(w http.ResponseWriter, r *http.Request) {
+	var req BatchGetEngramLinksRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+		return
+	}
+	if len(req.IDs) == 0 {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "'ids' array is required and must not be empty")
+		return
+	}
+	if len(req.IDs) > 200 {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "'ids' exceeds maximum batch size of 200")
+		return
+	}
+	if req.Vault == "" {
+		req.Vault = ctxVault(r)
+	}
+	resp, err := s.engine.GetBatchEngramLinks(r.Context(), &req)
 	if err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return

@@ -71,7 +71,7 @@ func runInit() {
 	}
 	fs.Parse(args)
 
-	mcpURL := "http://localhost:8750/mcp"
+	mcpURL := "http://127.0.0.1:8750/mcp"
 	isInteractive := term.IsTerminal(int(os.Stdin.Fd()))
 
 	if !isInteractive && !*yes && *toolFlag == "" {
@@ -200,7 +200,7 @@ func runInteractiveInit(mcpURL string, tokenFlag *string, noToken *bool, noStart
 	fmt.Println("  Try it → open Claude Code or Cursor and ask:")
 	fmt.Println(`    "What do you remember about me?"`)
 	fmt.Println()
-	fmt.Println("  Browse memories → http://localhost:8476")
+	fmt.Println("  Browse memories → http://127.0.0.1:8476")
 	fmt.Println()
 	fmt.Println("  ────────────────────────────────────────────────────")
 	fmt.Println()
@@ -603,11 +603,11 @@ func runNonInteractiveInit(mcpURL, toolStr, tokenStr string, noToken, noStart, y
 
 	fmt.Println()
 	fmt.Println("muninn is running.")
-	fmt.Println("  MCP endpoint:   http://localhost:8750/mcp")
+	fmt.Println("  MCP endpoint:   http://127.0.0.1:8750/mcp")
 	if token != "" {
 		fmt.Println("  Token:          ~/.muninn/mcp.token")
 	}
-	fmt.Println("  Web UI:         http://localhost:8476")
+	fmt.Println("  Web UI:         http://127.0.0.1:8476")
 	fmt.Println()
 }
 

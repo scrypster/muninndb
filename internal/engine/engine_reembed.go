@@ -2,9 +2,11 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
 )
 
@@ -56,7 +58,10 @@ func (e *Engine) StartReembedVault(ctx context.Context, vaultName, modelName str
 	job.CopyTotal = engramCount // "copy" phase = flag clearing
 	job.IndexTotal = 0          // no separate index phase; RetroactiveProcessor handles it
 
-	go e.runReembed(job, ws, vaultName)
+	if !e.spawnJob(func() { e.runReembed(job, ws, vaultName) }) {
+		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
+		return job, nil // job is already failed; return it so the caller can report the job_id
+	}
 	return job, nil
 }
 
@@ -65,6 +70,12 @@ func (e *Engine) runReembed(job *vaultjob.Job, ws [8]byte, vaultName string) {
 
 	defer func() {
 		if r := recover(); r != nil {
+			// Swallow closed-DB panics — can occur if the 30s Stop() timeout
+			// expires and Pebble is closed before this goroutine exits.
+			if err, ok := r.(error); ok && errors.Is(err, pebble.ErrClosed) {
+				e.jobManager.Fail(job, fmt.Errorf("engine closed during job"))
+				return
+			}
 			e.jobManager.Fail(job, fmt.Errorf("reembed job panicked: %v", r))
 			slog.Error("reembed job panicked", "job_id", job.ID, "vault", vaultName, "panic", r)
 		}

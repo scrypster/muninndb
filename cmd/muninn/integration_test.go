@@ -24,7 +24,7 @@ var muninnBin string
 // since these tests require exclusive use of that port.
 func TestMain(m *testing.M) {
 	// Guard: skip if something is already on the MCP port.
-	if resp, err := http.Get("http://localhost:8750/mcp/health"); err == nil {
+	if resp, err := http.Get("http://127.0.0.1:8750/mcp/health"); err == nil {
 		resp.Body.Close()
 		fmt.Fprintln(os.Stderr, "integration: muninn already running on :8750 — stop it first")
 		os.Exit(0)
@@ -58,11 +58,11 @@ func muninnCmd(dataDir string, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// waitForHealth polls localhost:8750/mcp/health until 200 or timeout.
+// waitForHealth polls 127.0.0.1:8750/mcp/health until 200 or timeout.
 func waitForHealth(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get("http://localhost:8750/mcp/health")
+		resp, err := http.Get("http://127.0.0.1:8750/mcp/health")
 		if err == nil && resp.StatusCode == 200 {
 			resp.Body.Close()
 			return true
@@ -72,11 +72,11 @@ func waitForHealth(timeout time.Duration) bool {
 	return false
 }
 
-// waitForDead polls until localhost:8750 refuses connections (port is free).
+// waitForDead polls until 127.0.0.1:8750 refuses connections (port is free).
 func waitForDead(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get("http://localhost:8750/mcp/health")
+		resp, err := http.Get("http://127.0.0.1:8750/mcp/health")
 		if err != nil {
 			return true // connection refused — port is free
 		}
@@ -136,7 +136,7 @@ func TestInitNoStart(t *testing.T) {
 		t.Fatalf("muninn init --yes --no-start --no-token: %v\n%s", err, out)
 	}
 	// Port 8750 must still be closed.
-	resp, hErr := http.Get("http://localhost:8750/mcp/health")
+	resp, hErr := http.Get("http://127.0.0.1:8750/mcp/health")
 	if hErr == nil {
 		resp.Body.Close()
 		t.Error("daemon should not be running after --no-start, but :8750 responded")
@@ -208,7 +208,7 @@ func mcpTool(t *testing.T, token, toolName string, args map[string]any) map[stri
 			"arguments": args,
 		},
 	})
-	req, _ := http.NewRequest("POST", "http://localhost:8750/mcp", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", "http://127.0.0.1:8750/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)

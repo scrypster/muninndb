@@ -56,7 +56,7 @@ type WriteResult struct {
 type Memory struct {
 	ID          string    `json:"id"`
 	Concept     string    `json:"concept"`
-	Content     string    `json:"content"` // truncated to 500 chars if no Summary
+	Content     string    `json:"content"` // recall: summary or 500-char preview; read: full content
 	Summary     string    `json:"summary,omitempty"`
 	Score       float64   `json:"score,omitempty"`
 	VectorScore float64   `json:"vector_score,omitempty"`

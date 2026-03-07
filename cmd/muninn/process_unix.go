@@ -23,10 +23,10 @@ func isProcessRunning(pid int) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
-// daemonSysProcAttr returns SysProcAttr for the daemon child process.
-// On Unix, no special attributes are needed — the child survives the parent.
+// daemonSysProcAttr detaches the daemon into its own session so it is not
+// terminated when the parent CLI process exits or loses its controlling TTY.
 func daemonSysProcAttr() *syscall.SysProcAttr {
-	return nil
+	return &syscall.SysProcAttr{Setsid: true}
 }
 
 // daemonExtraSetup applies platform-specific settings to the daemon command.

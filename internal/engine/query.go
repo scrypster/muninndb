@@ -48,6 +48,35 @@ func (e *Engine) GetAssociations(ctx context.Context, vault, engramID string, ma
 	return assocMap[id], nil
 }
 
+// GetAssociationsBatch returns forward associations for multiple engrams.
+// The storage layer already supports batching with a single Pebble iterator.
+func (e *Engine) GetAssociationsBatch(ctx context.Context, vault string, engramIDs []string, maxN int) (map[string][]storage.Association, error) {
+	ws := e.store.ResolveVaultPrefix(vault)
+	ids := make([]storage.ULID, len(engramIDs))
+	for i, s := range engramIDs {
+		id, err := storage.ParseULID(s)
+		if err != nil {
+			return nil, fmt.Errorf("parse id at index %d: %w", i, err)
+		}
+		ids[i] = id
+	}
+	assocMap, err := e.store.GetAssociations(ctx, ws, ids, maxN)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string][]storage.Association, len(assocMap))
+	for id, assocs := range assocMap {
+		result[id.String()] = assocs
+	}
+	// Guarantee every requested ID appears in the result map.
+	for _, s := range engramIDs {
+		if _, ok := result[s]; !ok {
+			result[s] = nil
+		}
+	}
+	return result, nil
+}
+
 // GetContradictions returns all contradiction pairs stored in a vault.
 func (e *Engine) GetContradictions(ctx context.Context, vault string) ([][2]storage.ULID, error) {
 	ws := e.store.ResolveVaultPrefix(vault)

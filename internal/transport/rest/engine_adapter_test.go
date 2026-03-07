@@ -49,6 +49,9 @@ func (m *mockEngineAPI) ListEngrams(ctx context.Context, req *ListEngramsRequest
 func (m *mockEngineAPI) GetEngramLinks(ctx context.Context, req *GetEngramLinksRequest) (*GetEngramLinksResponse, error) {
 	return nil, nil
 }
+func (m *mockEngineAPI) GetBatchEngramLinks(ctx context.Context, req *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error) {
+	return &BatchGetEngramLinksResponse{Links: map[string][]AssociationItem{}}, nil
+}
 func (m *mockEngineAPI) ListVaults(ctx context.Context) ([]string, error) {
 	return nil, nil
 }

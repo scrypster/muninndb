@@ -82,6 +82,93 @@ func TestBuildDaemonArgs_CORSFlagBeatsEnv(t *testing.T) {
 	}
 }
 
+// TestBuildDaemonArgs_PortFlagsForwarded is a regression test for GitHub
+// issue #100: --mbp-addr, --rest-addr, --grpc-addr, --mcp-addr were silently
+// ignored because buildDaemonArgs never forwarded them to the daemon process.
+func TestBuildDaemonArgs_PortFlagsForwarded(t *testing.T) {
+	cases := []struct {
+		flag string
+		val  string
+	}{
+		{"--rest-addr", "127.0.0.1:8485"},
+		{"--mbp-addr", "127.0.0.1:8494"},
+		{"--grpc-addr", "127.0.0.1:8497"},
+		{"--mcp-addr", "127.0.0.1:8760"},
+		{"--ui-addr", "127.0.0.1:8486"},
+	}
+	for _, tc := range cases {
+		osArgs := []string{tc.flag, tc.val}
+		got := buildDaemonArgs("/tmp/data", false, "", osArgs, "", "")
+
+		foundFlag := false
+		foundVal := false
+		for i, arg := range got {
+			if arg == tc.flag {
+				foundFlag = true
+				if i+1 < len(got) && got[i+1] == tc.val {
+					foundVal = true
+				}
+			}
+		}
+		if !foundFlag || !foundVal {
+			t.Errorf("%s %s not forwarded to daemon: got %v", tc.flag, tc.val, got)
+		}
+	}
+}
+
+// TestBuildDaemonArgs_PortFlagsEqForm verifies forwarding for --flag=value syntax.
+func TestBuildDaemonArgs_PortFlagsEqForm(t *testing.T) {
+	osArgs := []string{"--rest-addr=127.0.0.1:8485"}
+	got := buildDaemonArgs("/tmp/data", false, "", osArgs, "", "")
+
+	found := false
+	for i, arg := range got {
+		if arg == "--rest-addr" && i+1 < len(got) && got[i+1] == "127.0.0.1:8485" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("--rest-addr=127.0.0.1:8485 not forwarded: got %v", got)
+	}
+}
+
+// TestBuildDaemonArgs_DefaultAddrNotForwarded ensures that omitting per-service
+// address flags produces no --*-addr entries in daemon args (they are redundant
+// since the daemon uses the same defaults).
+func TestBuildDaemonArgs_DefaultAddrNotForwarded(t *testing.T) {
+	got := buildDaemonArgs("/tmp/data", false, "", []string{}, "", "")
+	for _, arg := range got {
+		for _, flag := range []string{"--rest-addr", "--mbp-addr", "--grpc-addr", "--mcp-addr", "--ui-addr"} {
+			if arg == flag {
+				t.Errorf("unexpected %s in daemon args when not explicitly set: %v", flag, got)
+			}
+		}
+	}
+}
+
+// TestParseExplicitFlag covers both --flag value and --flag=value forms.
+func TestParseExplicitFlag(t *testing.T) {
+	cases := []struct {
+		args []string
+		name string
+		want string
+	}{
+		{[]string{"--rest-addr", "10.0.0.1:8485"}, "rest-addr", "10.0.0.1:8485"},
+		{[]string{"--rest-addr=10.0.0.1:8485"}, "rest-addr", "10.0.0.1:8485"},
+		{[]string{"-rest-addr", "10.0.0.1:8485"}, "rest-addr", "10.0.0.1:8485"},
+		{[]string{"-rest-addr=10.0.0.1:8485"}, "rest-addr", "10.0.0.1:8485"},
+		{[]string{"--other", "val"}, "rest-addr", ""},
+		{[]string{}, "rest-addr", ""},
+		{[]string{"--rest-addr"}, "rest-addr", ""}, // flag at end of args with no value
+	}
+	for _, tc := range cases {
+		got := parseExplicitFlag(tc.name, tc.args)
+		if got != tc.want {
+			t.Errorf("parseExplicitFlag(%q, %v) = %q, want %q", tc.name, tc.args, got, tc.want)
+		}
+	}
+}
+
 func TestResolveEmbedInfo_EnvOllama(t *testing.T) {
 	clearEmbedEnv(t)
 	t.Setenv("MUNINN_OLLAMA_URL", "ollama://localhost:11434/nomic-embed-text")

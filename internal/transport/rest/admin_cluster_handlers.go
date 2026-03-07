@@ -95,12 +95,13 @@ func (s *Server) handleAdminClusterEnable(w http.ResponseWriter, r *http.Request
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "cortex_addr is required for non-primary roles")
 		return
 	}
-	cfg := config.ClusterConfig{
-		Enabled:       true,
-		Role:          req.Role,
-		BindAddr:      req.BindAddr,
-		ClusterSecret: req.ClusterSecret,
-	}
+	// Start from defaults so fields like LeaseTTL and HeartbeatMS are never
+	// persisted as zero (which would cause a crash on the next restart).
+	cfg := config.ClusterDefaults()
+	cfg.Enabled = true
+	cfg.Role = req.Role
+	cfg.BindAddr = req.BindAddr
+	cfg.ClusterSecret = req.ClusterSecret
 	if req.CortexAddr != "" {
 		cfg.Seeds = []string{req.CortexAddr}
 	}

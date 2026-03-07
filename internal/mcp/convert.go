@@ -7,23 +7,30 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
-const contentMaxLen = 500
+const contentPreviewLen = 500
 
 // activationToMemory converts an mbp.ActivationItem to an MCP Memory for recall responses.
-// Truncates Content to contentMaxLen chars if over limit.
+// Prefers Summary when available; falls back to a content preview (500 chars) so that
+// recall returns discovery-oriented data rather than a raw content slice.
 func activationToMemory(item *mbp.ActivationItem) Memory {
-	content := item.Content
-	if len(content) > contentMaxLen {
-		content = content[:contentMaxLen] + "..."
+	// Use the enrichment-generated summary when present; otherwise preview content.
+	displayContent := item.Summary
+	if displayContent == "" {
+		displayContent = item.Content
+		if len(displayContent) > contentPreviewLen {
+			displayContent = displayContent[:contentPreviewLen] + "..."
+		}
 	}
 	return Memory{
 		ID:          item.ID,
 		Concept:     item.Concept,
-		Content:     content,
+		Content:     displayContent,
+		Summary:     item.Summary,
 		Score:       float64(item.Score),
 		VectorScore: float64(item.ScoreComponents.SemanticSimilarity),
 		Confidence:  item.Confidence,
 		Why:         item.Why,
+		CreatedAt:   time.Unix(0, item.CreatedAt).UTC(),
 		LastAccess:  time.Unix(0, item.LastAccess).UTC(),
 		AccessCount: item.AccessCount,
 		Relevance:   item.Relevance,
@@ -32,20 +39,18 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 }
 
 // readResponseToMemory converts a ReadResponse to a Memory for the muninn_read tool.
+// Returns the full content without truncation, and maps Summary when present.
 func readResponseToMemory(r *mbp.ReadResponse) Memory {
-	content := r.Content
-	if len(content) > contentMaxLen {
-		content = content[:contentMaxLen] + "..."
-	}
 	return Memory{
-		ID:         r.ID,
-		Concept:    r.Concept,
-		Content:    content,
-		Confidence: r.Confidence,
-		Tags:       r.Tags,
-		State:       fmt.Sprintf("%d", r.State),
-		CreatedAt:   time.Unix(0, r.CreatedAt), // r.CreatedAt is nanoseconds since epoch
-		LastAccess:  time.Unix(0, int64(r.LastAccess)).UTC(),
+		ID:          r.ID,
+		Concept:     r.Concept,
+		Content:     r.Content, // full content, no truncation
+		Summary:     r.Summary,
+		Confidence:  r.Confidence,
+		Tags:        r.Tags,
+		State:      fmt.Sprintf("%d", r.State),
+		CreatedAt:  time.Unix(0, r.CreatedAt).UTC(),
+		LastAccess: time.Unix(0, r.LastAccess).UTC(),
 		AccessCount: r.AccessCount,
 		Relevance:   r.Relevance,
 	}

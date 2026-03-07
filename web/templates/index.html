@@ -1660,6 +1660,22 @@
           </div>
         </div>
 
+        <!-- Platform toggle -->
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">
+          <span style="font-size:0.8125rem;color:var(--text-muted);">Platform:</span>
+          <div style="display:flex;border:1px solid var(--border);border-radius:0.375rem;overflow:hidden;">
+            <button @click="connectPlatform='macos'"
+              :style="connectPlatform==='macos' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);'"
+              style="padding:0.25rem 0.75rem;font-size:0.8125rem;border:none;cursor:pointer;">macOS</button>
+            <button @click="connectPlatform='linux'"
+              :style="connectPlatform==='linux' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);'"
+              style="padding:0.25rem 0.75rem;font-size:0.8125rem;border:none;border-left:1px solid var(--border);cursor:pointer;">Linux</button>
+            <button @click="connectPlatform='windows'"
+              :style="connectPlatform==='windows' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);'"
+              style="padding:0.25rem 0.75rem;font-size:0.8125rem;border:none;border-left:1px solid var(--border);cursor:pointer;">Windows</button>
+          </div>
+        </div>
+
         <!-- Tool cards — tiled grid -->
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:1rem;align-items:start;">
 
@@ -1694,7 +1710,9 @@
               Run <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">muninn init --tool claude --yes</code> to configure automatically, or add manually:
             </p>
             <p style="font-size:0.75rem;color:var(--text-muted);margin:0 0 0.5rem;">
-              <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/Library/Application Support/Claude/claude_desktop_config.json</code>
+              <code x-show="connectPlatform==='macos'" style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/Library/Application Support/Claude/claude_desktop_config.json</code>
+              <code x-show="connectPlatform==='linux'" style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/.config/Claude/claude_desktop_config.json</code>
+              <code x-show="connectPlatform==='windows'" style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">%APPDATA%\Claude\claude_desktop_config.json</code>
             </p>
             <!-- No token -->
             <template x-if="!mcpInfo || !mcpInfo.token_configured">
@@ -1708,7 +1726,8 @@
             </template>
             <!-- Token configured -->
             <template x-if="mcpInfo && mcpInfo.token_configured">
-              <pre style="background:var(--bg-elevated);border-radius:0.5rem;padding:0.75rem;font-size:0.8125rem;overflow-x:auto;color:var(--text-primary);margin:0;">{
+              <div>
+                <pre x-show="connectPlatform!=='windows'" style="background:var(--bg-elevated);border-radius:0.5rem;padding:0.75rem;font-size:0.8125rem;overflow-x:auto;color:var(--text-primary);margin:0;">{
   "mcpServers": {
     "muninn": {
       "url": "<span x-text="mcpInfo.url"></span>",
@@ -1718,6 +1737,17 @@
     }
   }
 }</pre>
+                <pre x-show="connectPlatform==='windows'" style="background:var(--bg-elevated);border-radius:0.5rem;padding:0.75rem;font-size:0.8125rem;overflow-x:auto;color:var(--text-primary);margin:0;">{
+  "mcpServers": {
+    "muninn": {
+      "url": "<span x-text="mcpInfo.url"></span>",
+      "headers": {
+        "Authorization": "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"
+      }
+    }
+  }
+}</pre>
+              </div>
             </template>
           </div>
 
@@ -1725,7 +1755,8 @@
           <div class="card-polished">
             <h3 style="margin:0 0 0.75rem;font-size:1rem;">Cursor</h3>
             <p style="color:var(--text-muted);font-size:0.8125rem;margin:0 0 0.5rem;">
-              Run <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">muninn init --tool cursor --yes</code> or edit <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/.cursor/mcp.json</code>:
+              Run <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">muninn init --tool cursor --yes</code> or edit
+              <code x-show="connectPlatform!=='windows'" style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/.cursor/mcp.json</code><code x-show="connectPlatform==='windows'" style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">%USERPROFILE%\.cursor\mcp.json</code>:
             </p>
             <!-- No token -->
             <template x-if="!mcpInfo || !mcpInfo.token_configured">
@@ -1787,7 +1818,8 @@
           <div class="card-polished">
             <h3 style="margin:0 0 0.75rem;font-size:1rem;">OpenClaw</h3>
             <p style="color:var(--text-muted);font-size:0.8125rem;margin:0 0 0.5rem;">
-              Run <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">muninn init --tool openclaw --yes</code> to configure automatically, or add manually to <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/.openclaw/openclaw.json</code>:
+              Run <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">muninn init --tool openclaw --yes</code> to configure automatically, or add manually to
+              <code x-show="connectPlatform!=='windows'" style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/.openclaw/openclaw.json</code><code x-show="connectPlatform==='windows'" style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">%APPDATA%\OpenClaw\openclaw.json</code>:
             </p>
             <pre style="background:var(--bg-elevated);border-radius:0.5rem;padding:0.75rem;font-size:0.8125rem;overflow-x:auto;color:var(--text-primary);margin:0 0 0.5rem;">{
   "mcpServers": {
@@ -1807,7 +1839,8 @@
           <div class="card-polished">
             <h3 style="margin:0 0 0.75rem;font-size:1rem;">Codex</h3>
             <p style="color:var(--text-muted);font-size:0.8125rem;margin:0 0 0.5rem;">
-              Run <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">muninn init --tool codex --yes</code> or edit <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/.codex/config.toml</code>:
+              Run <code style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">muninn init --tool codex --yes</code> or edit
+              <code x-show="connectPlatform!=='windows'" style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">~/.codex/config.toml</code><code x-show="connectPlatform==='windows'" style="font-family:monospace;background:var(--bg-elevated);padding:0.1rem 0.35rem;border-radius:0.25rem;">%USERPROFILE%\.codex\config.toml</code>:
             </p>
             <!-- No token -->
             <template x-if="!mcpInfo || !mcpInfo.token_configured">
@@ -1816,11 +1849,18 @@ url = "<span x-text="mcpInfo ? mcpInfo.url : 'http://localhost:8750/mcp'"></span
             </template>
             <!-- Token configured -->
             <template x-if="mcpInfo && mcpInfo.token_configured">
-              <pre style="background:var(--bg-elevated);border-radius:0.5rem;padding:0.75rem;font-size:0.8125rem;overflow-x:auto;color:var(--text-primary);margin:0;">[mcp_servers.muninn]
+              <div>
+                <pre x-show="connectPlatform!=='windows'" style="background:var(--bg-elevated);border-radius:0.5rem;padding:0.75rem;font-size:0.8125rem;overflow-x:auto;color:var(--text-primary);margin:0;">[mcp_servers.muninn]
 url = "<span x-text="mcpInfo.url"></span>"
 
 [mcp_servers.muninn.http_headers]
 Authorization = "Bearer &lt;token from ~/.muninn/mcp.token&gt;"</pre>
+                <pre x-show="connectPlatform==='windows'" style="background:var(--bg-elevated);border-radius:0.5rem;padding:0.75rem;font-size:0.8125rem;overflow-x:auto;color:var(--text-primary);margin:0;">[mcp_servers.muninn]
+url = "<span x-text="mcpInfo.url"></span>"
+
+[mcp_servers.muninn.http_headers]
+Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre>
+              </div>
             </template>
           </div>
 
