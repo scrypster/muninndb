@@ -18,7 +18,7 @@ import asyncio
 from muninn import MuninnClient
 
 async def main():
-    async with MuninnClient("http://localhost:8475") as client:
+    async with MuninnClient("http://127.0.0.1:8475") as client:
         eid = await client.write(
             vault="default",
             concept="neural plasticity",

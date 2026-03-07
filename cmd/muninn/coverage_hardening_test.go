@@ -786,7 +786,7 @@ func TestRunNonInteractiveInit(t *testing.T) {
 	t.Setenv("MUNINNDB_DATA", filepath.Join(home, "data"))
 
 	out := captureStdout(func() {
-		runNonInteractiveInit("http://localhost:8750/mcp", "manual", "", false, true, true)
+		runNonInteractiveInit("http://127.0.0.1:8750/mcp", "manual", "", false, true, true)
 	})
 	if !strings.Contains(out, "Manual") && !strings.Contains(out, "manual") &&
 		!strings.Contains(out, "mcpServers") && !strings.Contains(out, "curl") {
@@ -800,7 +800,7 @@ func TestRunNonInteractiveInit(t *testing.T) {
 
 func TestConfigureTools_Empty(t *testing.T) {
 	out := captureStdout(func() {
-		configureTools(nil, "http://localhost:8750/mcp", "")
+		configureTools(nil, "http://127.0.0.1:8750/mcp", "")
 	})
 	_ = out
 }
@@ -1081,7 +1081,7 @@ func TestRunVaultImport_ResetMetadata(t *testing.T) {
 
 func TestConfigureTools_ManualAndVSCode(t *testing.T) {
 	out := captureStdout(func() {
-		configureTools([]int{3, 5}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{3, 5}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if !strings.Contains(out, "muninn") {
 		t.Errorf("expected instructions: %s", out)
@@ -1094,7 +1094,7 @@ func TestConfigureTools_AllNumbered(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 
 	out := captureStdout(func() {
-		errs := configureTools([]int{1, 2, 3, 4, 5}, "http://localhost:8750/mcp", "tok")
+		errs := configureTools([]int{1, 2, 3, 4, 5}, "http://127.0.0.1:8750/mcp", "tok")
 		_ = errs
 	})
 	_ = out
@@ -1112,7 +1112,7 @@ func TestConfigureNamedTools_AllNames(t *testing.T) {
 	out := captureStdout(func() {
 		errs := configureNamedTools([]string{
 			"claude", "claude-code", "cursor", "windsurf", "openclaw", "vscode", "manual",
-		}, "http://localhost:8750/mcp", "tok")
+		}, "http://127.0.0.1:8750/mcp", "tok")
 		_ = errs
 	})
 	_ = out
@@ -1396,7 +1396,7 @@ func TestConfigureClaudeCode_Full(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		err := configureClaudeCode("http://localhost:8750/mcp", "tok")
+		err := configureClaudeCode("http://127.0.0.1:8750/mcp", "tok")
 		if err != nil {
 			t.Fatalf("error: %v", err)
 		}
@@ -1417,7 +1417,7 @@ func TestRunNonInteractiveInit_WithTools(t *testing.T) {
 	t.Setenv("MUNINNDB_DATA", filepath.Join(home, "data"))
 
 	out := captureStdout(func() {
-		runNonInteractiveInit("http://localhost:8750/mcp", "vscode,manual", "", true, true, true)
+		runNonInteractiveInit("http://127.0.0.1:8750/mcp", "vscode,manual", "", true, true, true)
 	})
 	_ = out
 }
@@ -1429,7 +1429,7 @@ func TestRunNonInteractiveInit_WithToken(t *testing.T) {
 	t.Setenv("MUNINNDB_DATA", filepath.Join(home, "data"))
 
 	out := captureStdout(func() {
-		runNonInteractiveInit("http://localhost:8750/mcp", "", "mdb_customtoken", false, true, true)
+		runNonInteractiveInit("http://127.0.0.1:8750/mcp", "", "mdb_customtoken", false, true, true)
 	})
 	if !strings.Contains(out, "Token") || !strings.Contains(out, "mcp.token") {
 		t.Logf("output: %s", out)
@@ -1444,7 +1444,7 @@ func TestRunNonInteractiveInit_GenerateToken(t *testing.T) {
 	t.Setenv("MUNINNDB_DATA", filepath.Join(home, ".muninn", "data"))
 
 	out := captureStdout(func() {
-		runNonInteractiveInit("http://localhost:8750/mcp", "", "", false, true, true)
+		runNonInteractiveInit("http://127.0.0.1:8750/mcp", "", "", false, true, true)
 	})
 	_ = out
 }
@@ -1946,7 +1946,7 @@ func TestConfigureNamedTools_OpenClaw(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 
 	out := captureStdout(func() {
-		errs := configureNamedTools([]string{"openclaw"}, "http://localhost:8750/mcp", "tok")
+		errs := configureNamedTools([]string{"openclaw"}, "http://127.0.0.1:8750/mcp", "tok")
 		_ = errs
 	})
 	_ = out
@@ -1961,7 +1961,7 @@ func TestConfigureTools_ClaudeDesktop_Path(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	captureStdout(func() {
-		configureTools([]int{1}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{1}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 }
 
@@ -1970,7 +1970,7 @@ func TestConfigureTools_Cursor_Path(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	captureStdout(func() {
-		configureTools([]int{2}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{2}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 }
 
@@ -1979,7 +1979,7 @@ func TestConfigureTools_Windsurf_Path(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	captureStdout(func() {
-		configureTools([]int{4}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{4}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 }
 

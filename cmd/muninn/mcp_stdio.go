@@ -29,7 +29,7 @@ var mcpProxyURL = "http://127.0.0.1:" + defaultMCPPort + "/mcp"
 //
 // MUNINN_MCP_URL overrides the target endpoint for non-default port or TLS setups:
 //
-//	MUNINN_MCP_URL=https://localhost:8750/mcp muninn mcp
+//	MUNINN_MCP_URL=https://127.0.0.1:8750/mcp muninn mcp
 func runMCPStdio() {
 	if u := os.Getenv("MUNINN_MCP_URL"); u != "" {
 		mcpProxyURL = u

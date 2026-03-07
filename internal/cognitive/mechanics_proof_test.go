@@ -439,7 +439,7 @@ func cleanupVault(t *testing.T, base, vault string) {
 
 		// Authenticate to get a session cookie.
 		loginBody := strings.NewReader(`{"username":"root","password":"password"}`)
-		loginResp, err := client.Post("http://localhost:8476/api/auth/login", "application/json", loginBody)
+		loginResp, err := client.Post("http://127.0.0.1:8476/api/auth/login", "application/json", loginBody)
 		if err != nil {
 			t.Logf("vault cleanup: login failed: %v", err)
 			return
@@ -471,12 +471,12 @@ func cleanupVault(t *testing.T, base, vault string) {
 }
 
 func TestLiveIntegration_WriteAndActivate(t *testing.T) {
-	base := "http://localhost:8475"
+	base := "http://127.0.0.1:8475"
 
 	// Check server is up
 	resp, err := http.Get(base + "/api/stats")
 	if err != nil || resp.StatusCode != 200 {
-		t.Skip("server not running at localhost:8475 — skipping live test")
+		t.Skip("server not running at 127.0.0.1:8475 — skipping live test")
 	}
 	resp.Body.Close()
 
@@ -817,12 +817,12 @@ func TestProveWorker_DormancyWakeUp(t *testing.T) {
 // TestLiveIntegration_ContradictionDetection verifies that contradicting engrams
 // trigger the contradiction detection worker.
 func TestLiveIntegration_ContradictionDetection(t *testing.T) {
-	base := "http://localhost:8475"
+	base := "http://127.0.0.1:8475"
 
 	// Check server is up
 	resp, err := http.Get(base + "/api/stats")
 	if err != nil || resp.StatusCode != 200 {
-		t.Skip("server not running at localhost:8475 — skipping live test")
+		t.Skip("server not running at 127.0.0.1:8475 — skipping live test")
 	}
 	resp.Body.Close()
 
@@ -981,12 +981,12 @@ func TestLiveIntegration_ContradictionDetection(t *testing.T) {
 
 // TestLiveIntegration_ScoreComposition verifies the breakdown of FTS, Semantic, and Hebbian scores.
 func TestLiveIntegration_ScoreComposition(t *testing.T) {
-	base := "http://localhost:8475"
+	base := "http://127.0.0.1:8475"
 
 	// Check server is up
 	resp, err := http.Get(base + "/api/stats")
 	if err != nil || resp.StatusCode != 200 {
-		t.Skip("server not running at localhost:8475 — skipping live test")
+		t.Skip("server not running at 127.0.0.1:8475 — skipping live test")
 	}
 	resp.Body.Close()
 
@@ -1143,12 +1143,12 @@ func TestLiveIntegration_ScoreComposition(t *testing.T) {
 // TestLiveIntegration_HNSWRetroactiveProcessing verifies that the RetroactiveProcessor
 // embeds engrams asynchronously and SemanticSimilarity becomes non-zero after a delay.
 func TestLiveIntegration_HNSWRetroactiveProcessing(t *testing.T) {
-	base := "http://localhost:8475"
+	base := "http://127.0.0.1:8475"
 
 	// Check server is up
 	resp, err := http.Get(base + "/api/stats")
 	if err != nil || resp.StatusCode != 200 {
-		t.Skip("server not running at localhost:8475 — skipping live test")
+		t.Skip("server not running at 127.0.0.1:8475 — skipping live test")
 	}
 	resp.Body.Close()
 

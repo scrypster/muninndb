@@ -152,7 +152,7 @@ func runStart(webEnabled bool) {
 			fmt.Printf("muninn started (pid %d)\n", cmd.Process.Pid)
 			fmt.Println()
 			printStatusDisplay(true)
-			fmt.Println("  Web UI → http://localhost:8476")
+			fmt.Println("  Web UI → http://127.0.0.1:8476")
 			fmt.Println()
 			return
 		}

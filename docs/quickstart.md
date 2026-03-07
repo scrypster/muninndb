@@ -68,7 +68,7 @@ First run automatically:
 ```bash
 muninn status
 # or
-curl http://localhost:8750/mcp/health
+curl http://127.0.0.1:8750/mcp/health
 ```
 
 **Stop it:**
@@ -92,7 +92,7 @@ muninn stop
 ## 3. Store Your First Memory
 
 ```bash
-curl -sX POST http://localhost:8475/api/engrams \
+curl -sX POST http://127.0.0.1:8475/api/engrams \
   -H 'Content-Type: application/json' \
   -d '{
     "concept": "payment incident",
@@ -109,7 +109,7 @@ You'll get back an engram ID. That memory now exists in MuninnDB with a relevanc
 ## 4. Activate — Retrieve What's Relevant Now
 
 ```bash
-curl -sX POST http://localhost:8475/api/activate \
+curl -sX POST http://127.0.0.1:8475/api/activate \
   -H 'Content-Type: application/json' \
   -d '{
     "context": ["debugging the payment retry logic"],
@@ -140,7 +140,7 @@ muninn init --tool claude --yes
 muninn init --tool cursor,claude --yes
 ```
 
-**Manual MCP config:** Point any MCP client to `http://localhost:8750/mcp`.
+**Manual MCP config:** Point any MCP client to `http://127.0.0.1:8750/mcp`.
 
 ---
 
@@ -188,7 +188,7 @@ import asyncio
 from muninn import MuninnClient
 
 async def main():
-    async with MuninnClient("http://localhost:8475") as m:
+    async with MuninnClient("http://127.0.0.1:8475") as m:
         # Write
         eid = await m.write(
             vault="default",
@@ -217,7 +217,7 @@ asyncio.run(main())
 
 ## 9. Change the Admin Password
 
-Log into the Web UI at `http://localhost:8476` with `root` / `password` and change the password from the settings page. Or via the shell:
+Log into the Web UI at `http://127.0.0.1:8476` with `root` / `password` and change the password from the settings page. Or via the shell:
 
 ```bash
 muninn shell

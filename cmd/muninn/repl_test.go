@@ -401,7 +401,7 @@ func TestShellValidateAdminSuccess(t *testing.T) {
 	srv := newAuthServer("session", "abc123")
 	defer srv.Close()
 
-	// This function hardcodes http://localhost:8476, so we can only test
+	// This function hardcodes http://127.0.0.1:8476, so we can only test
 	// the error case when no server is running on that port. We test the
 	// function by verifying it sends POST request to /api/auth/login and
 	// checks the response status. For this test, we verify it returns nil
@@ -421,7 +421,7 @@ func TestShellValidateAdminSuccess(t *testing.T) {
 
 // Test 20: shellValidateAdmin with invalid credentials
 func TestShellValidateAdminInvalidCredentials(t *testing.T) {
-	// Since shellValidateAdmin hardcodes http://localhost:8476,
+	// Since shellValidateAdmin hardcodes http://127.0.0.1:8476,
 	// we can't easily mock the response. Instead, test the error handling
 	// by calling it with wrong credentials when no server is available.
 	err := shellValidateAdmin("wronguser", "wrongpass")

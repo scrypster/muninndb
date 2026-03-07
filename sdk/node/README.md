@@ -24,7 +24,7 @@ import { MuninnClient } from "@muninndb/client";
 
 const client = new MuninnClient({
   token: "your-api-token",
-  // baseUrl defaults to http://localhost:8476
+  // baseUrl defaults to http://127.0.0.1:8476
 });
 
 // Write a memory
@@ -52,7 +52,7 @@ client.close();
 
 ```typescript
 const client = new MuninnClient({
-  baseUrl: "http://localhost:8476", // MuninnDB server URL
+  baseUrl: "http://127.0.0.1:8476", // MuninnDB server URL
   token: "your-api-token",         // Bearer token (required)
   timeout: 30_000,                 // Request timeout in ms (default: 30s)
   maxRetries: 3,                   // Retry attempts (default: 3)

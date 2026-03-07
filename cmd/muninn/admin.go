@@ -22,7 +22,7 @@ func printAdminUsage() {
 	fmt.Println("  -u <user>         Admin username (default: root)")
 	fmt.Println("  -p                Prompt for current password")
 	fmt.Println("  -p<password>      Inline current password (no space)")
-	fmt.Println("  -h <host:port>    Server host:port (default: localhost:8475)")
+	fmt.Println("  -h <host:port>    Server host:port (default: 127.0.0.1:8475)")
 }
 
 func runAdmin(args []string) {

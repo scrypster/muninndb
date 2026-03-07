@@ -172,7 +172,7 @@ var subcommandHelp = map[string]func(){
 				{"-u <user>", "Admin username (default: root)"},
 				{"-p", "Prompt for password"},
 				{"-p<password>", "Inline password (no space)"},
-				{"-h <host:port>", "Server host:port (default: localhost:8475)"},
+				{"-h <host:port>", "Server host:port (default: 127.0.0.1:8475)"},
 			},
 			[]string{
 				"muninn vault create myproject",
@@ -200,7 +200,7 @@ var subcommandHelp = map[string]func(){
 				{"-u <user>", "Admin username (default: root)"},
 				{"-p", "Prompt for password"},
 				{"-p<password>", "Inline password (no space)"},
-				{"-h <host:port>", "Server host:port (default: localhost:8475)"},
+				{"-h <host:port>", "Server host:port (default: 127.0.0.1:8475)"},
 			},
 			[]string{
 				"muninn api-key create --vault default --label my-agent",
@@ -218,7 +218,7 @@ var subcommandHelp = map[string]func(){
 				{"-u <user>", "Admin username (default: root)"},
 				{"-p", "Prompt for current password"},
 				{"-p<password>", "Inline current password (no space)"},
-				{"-h <host:port>", "Server host:port (default: localhost:8475)"},
+				{"-h <host:port>", "Server host:port (default: 127.0.0.1:8475)"},
 			},
 			[]string{
 				"muninn admin change-password",
@@ -322,7 +322,7 @@ func printHelp() {
 	fmt.Println("  MuninnDB exposes an MCP server that AI tools connect to for memory.")
 	fmt.Println("  Run " + cyan("muninn init") + " to configure Claude Desktop, Cursor, or Windsurf automatically.")
 	fmt.Println()
-	fmt.Println("  MCP endpoint: http://localhost:8750/mcp")
+	fmt.Println("  MCP endpoint: http://127.0.0.1:8750/mcp")
 	fmt.Printf("  %-28s %s\n", "MUNINN_MCP_URL", "Override MCP server URL (also used by 'muninn mcp' proxy)")
 	fmt.Printf("  %-28s %s\n", "MUNINNDB_DATA", "Override default data directory")
 	fmt.Println()
@@ -331,7 +331,7 @@ func printHelp() {
 	fmt.Println()
 	fmt.Printf("  %-8s %s\n", ":8474", "MBP  — binary protocol")
 	fmt.Printf("  %-8s %s\n", ":8475", "REST — JSON API")
-	fmt.Printf("  %-8s %s\n", ":8476", "UI   — web dashboard (http://localhost:8476)")
+	fmt.Printf("  %-8s %s\n", ":8476", "UI   — web dashboard (http://127.0.0.1:8476)")
 	fmt.Printf("  %-8s %s\n", ":8750", "MCP  — AI tool integration")
 	fmt.Println()
 

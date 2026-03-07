@@ -519,7 +519,7 @@ func TestClusterDisable_ServerError(t *testing.T) {
 
 func TestConfigureTools_VSCode(t *testing.T) {
 	out := captureStdout(func() {
-		configureTools([]int{3}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{3}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if !strings.Contains(out, "VS Code") && !strings.Contains(out, "settings.json") {
 		t.Logf("VS Code instructions: %s", out)
@@ -528,7 +528,7 @@ func TestConfigureTools_VSCode(t *testing.T) {
 
 func TestConfigureTools_Manual(t *testing.T) {
 	out := captureStdout(func() {
-		configureTools([]int{5}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{5}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if out == "" {
 		t.Log("manual instructions printed (may be empty depending on implementation)")
@@ -540,7 +540,7 @@ func TestConfigureTools_ClaudeDesktop(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureTools([]int{1}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{1}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for Claude Desktop, got: %s", out)
@@ -552,7 +552,7 @@ func TestConfigureTools_Cursor(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureTools([]int{2}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{2}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for Cursor, got: %s", out)
@@ -564,7 +564,7 @@ func TestConfigureTools_Windsurf(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureTools([]int{4}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{4}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for Windsurf, got: %s", out)
@@ -576,7 +576,7 @@ func TestConfigureTools_Multiple(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureTools([]int{1, 2, 3, 4, 5}, "http://localhost:8750/mcp", "tok")
+		configureTools([]int{1, 2, 3, 4, 5}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if !strings.Contains(out, "VS Code") {
 		t.Errorf("expected VS Code instructions in multi-tool output, got: %s", out)
@@ -888,7 +888,7 @@ func TestConfigureClaudeCode(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		if err := configureClaudeCode("http://localhost:8750/mcp", "tok"); err != nil {
+		if err := configureClaudeCode("http://127.0.0.1:8750/mcp", "tok"); err != nil {
 			t.Fatalf("error: %v", err)
 		}
 	})
@@ -920,7 +920,7 @@ func TestConfigureNamedToolsClaudeCode(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claude-code"}, "http://localhost:8750/mcp", "tok")
+		configureNamedTools([]string{"claude-code"}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for claude-code: %s", out)
@@ -932,7 +932,7 @@ func TestConfigureNamedToolsClaudeCodeAlias(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claudecode"}, "http://localhost:8750/mcp", "tok")
+		configureNamedTools([]string{"claudecode"}, "http://127.0.0.1:8750/mcp", "tok")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for claudecode alias: %s", out)

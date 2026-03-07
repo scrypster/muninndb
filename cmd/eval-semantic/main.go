@@ -5,8 +5,8 @@
 //
 // Usage:
 //
-//	go run ./cmd/eval-semantic -url http://localhost:8750 -token mdb_yourtoken
-//	go run ./cmd/eval-semantic -url http://localhost:8750 -token mdb_yourtoken -vault my-eval
+//	go run ./cmd/eval-semantic -url http://127.0.0.1:8750 -token mdb_yourtoken
+//	go run ./cmd/eval-semantic -url http://127.0.0.1:8750 -token mdb_yourtoken -vault my-eval
 //
 // The vault is cleared between runs by default (-clear=true).
 package main
@@ -286,7 +286,7 @@ func snippet(s string, n int) string {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	url := flag.String("url", "http://localhost:8475", "MuninnDB server URL")
+	url := flag.String("url", "http://127.0.0.1:8475", "MuninnDB server URL")
 	tok := flag.String("token", "", "API token (Bearer)")
 	vlt := flag.String("vault", "eval-demo", "Vault name")
 	skipSeed := flag.Bool("skip-seed", false, "Skip seeding (reuse existing vault)")
