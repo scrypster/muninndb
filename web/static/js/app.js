@@ -422,8 +422,14 @@ document.addEventListener('alpine:init', () => {
 
         // Always load these for settings
         this.loadVaults();
+      } else if (view === 'graph') {
+        // Clear graph state on vault change so stale nodes from the previous
+        // vault are not shown. User must click Load Graph again for the new vault.
+        if (this._cy) { this._cy.destroy(); this._cy = null; }
+        if (this._entityCy) { this._entityCy.destroy(); this._entityCy = null; }
+        this.graphLoaded = false;
+        this.entityGraphLoaded = false;
       }
-      // Graph loads on explicit button click
       if (view === 'cluster') {
         this.loadClusterDashboard();
       } else {
