@@ -197,6 +197,50 @@ Omit the `headers` block if you are running MuninnDB without token authenticatio
 > **Note:** OpenCode tools are exposed as `muninn_muninn_remember`, `muninn_muninn_recall`, etc. (server key + tool name prefix). Users preferring shorter names can register the server under the key `memory` instead, which yields `memory_muninn_remember`, `memory_muninn_recall`, etc.
 </details>
 
+<details>
+<summary>GitHub Copilot</summary>
+
+Add to `.vscode/mcp.json` in your workspace:
+
+```json
+{
+  "servers": {
+    "muninn": {
+      "type": "http",
+      "url": "http://127.0.0.1:8750/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_ADMIN_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Replace `YOUR_ADMIN_TOKEN` with the token from your `muninn.env` file. Omit the `headers` block if running without token auth. If Copilot shows an OAuth error, the `headers` block is missing — adding it resolves it. [Full Copilot setup guide →](docs/integrations/github-copilot.md)
+</details>
+
+<details>
+<summary>Codebuff</summary>
+
+Add to your Codebuff MCP config:
+
+```json
+{
+  "mcpServers": {
+    "muninn": {
+      "type": "http",
+      "url": "http://127.0.0.1:8750/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_ADMIN_TOKEN"
+      }
+    }
+  }
+}
+```
+
+For proactive memory behavior — Codebuff storing useful discoveries without being asked — add the memory instructions to your `AGENT.md`. [Full Codebuff setup guide →](docs/integrations/codebuff.md)
+</details>
+
 MuninnDB exposes **35 MCP tools** — store, activate, search, batch insert, get usage guidance, manage vaults, and more. On first connect, call `muninn_guide` for vault-aware instructions. No token required against the default vault. [Full MCP reference →](https://muninndb.com/docs)
 
 ---
