@@ -870,7 +870,10 @@ document.addEventListener('alpine:init', () => {
       const id = this.confirmForgetId;
       this.confirmForgetId = null;
       try {
-        await this.apiCall('/api/engrams/' + encodeURIComponent(id), { method: 'DELETE' });
+        await this.apiCall(
+          '/api/engrams/' + encodeURIComponent(id) + '?vault=' + encodeURIComponent(this.vault),
+          { method: 'DELETE' }
+        );
         this.addNotification('success', 'Memory forgotten');
         if (this.selectedMemory && this.selectedMemory.id === id) {
           this.selectedMemory = null;
@@ -931,7 +934,7 @@ document.addEventListener('alpine:init', () => {
       this.editMemorySaving = true;
       try {
         const resp = await this.apiCall(
-          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/evolve',
+          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/evolve?vault=' + encodeURIComponent(this.vault),
           {
             method: 'POST',
             body: JSON.stringify({
@@ -1098,10 +1101,12 @@ document.addEventListener('alpine:init', () => {
           return;
         }
 
-        // Load links for first 20 engrams in parallel
+        // Load links for the listed engrams using the active vault context.
         const nodeIdSet = new Set(engrams.map(e => e.id));
-        const linkPromises = engrams.slice(0, 20).map(e =>
-          this.apiCall('/api/engrams/' + encodeURIComponent(e.id) + '/links')
+        const linkPromises = engrams.map(e =>
+          this.apiCall(
+            '/api/engrams/' + encodeURIComponent(e.id) + '/links?vault=' + encodeURIComponent(this.vault)
+          )
             .then(resp => {
               const links = resp.links || [];
               return links.map(l => ({
