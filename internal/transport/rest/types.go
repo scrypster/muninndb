@@ -133,6 +133,9 @@ type EngineAPI interface {
 	GetContradictions(ctx context.Context, vault string) (*ContradictionsResponse, error)
 	ResolveContradiction(ctx context.Context, vault, idA, idB string) error
 	GetGuide(ctx context.Context, vault string) (string, error)
+	// ExportGraph builds the entity→relationship graph for the vault.
+	// If includeEngrams is true the entity types are enriched from the entity record table.
+	ExportGraph(ctx context.Context, vault string, includeEngrams bool) (*engine.ExportGraph, error)
 }
 
 // ── Web UI types ─────────────────────────────────────────────────────────
@@ -437,4 +440,24 @@ type HealthResponse struct {
 // ReadyResponse is returned by the ready check endpoint.
 type ReadyResponse struct {
 	Status string `json:"status"`
+}
+
+// EntityGraphResponse is returned by GET /api/admin/entity-graph.
+type EntityGraphResponse struct {
+	Nodes []EntityGraphNode `json:"nodes"`
+	Edges []EntityGraphEdge `json:"edges"`
+}
+
+// EntityGraphNode is a node in the entity graph.
+type EntityGraphNode struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// EntityGraphEdge is an edge in the entity graph.
+type EntityGraphEdge struct {
+	From    string  `json:"from"`
+	To      string  `json:"to"`
+	RelType string  `json:"rel_type"`
+	Weight  float32 `json:"weight"`
 }

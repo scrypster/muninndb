@@ -178,6 +178,11 @@ func (s *EmbedService) Dimension() int {
 	return s.dim
 }
 
+// MaxBatchSize delegates to the underlying provider's optimal batch size.
+func (s *EmbedService) MaxBatchSize() int {
+	return s.provider.MaxBatchSize()
+}
+
 // Close releases external connections.
 func (s *EmbedService) Close() error {
 	s.mu.Lock()

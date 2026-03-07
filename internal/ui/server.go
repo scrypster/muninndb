@@ -353,13 +353,13 @@ func (s *Server) broadcaster(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.broadcastStats(&prevCount)
+			s.broadcastStats(ctx, &prevCount)
 		}
 	}
 }
 
-func (s *Server) broadcastStats(prevCount *int64) {
-	resp, err := s.engine.Stat(context.Background(), &rest.StatRequest{})
+func (s *Server) broadcastStats(ctx context.Context, prevCount *int64) {
+	resp, err := s.engine.Stat(ctx, &rest.StatRequest{})
 	if err != nil {
 		return
 	}
@@ -381,28 +381,49 @@ func (s *Server) broadcastStats(prevCount *int64) {
 
 	// Count-diff: push memory_added if new engrams appeared.
 	if *prevCount > 0 && resp.EngramCount > *prevCount {
-		s.broadcastNewestEngram()
+		s.broadcastNewestEngram(ctx)
 	}
 	*prevCount = resp.EngramCount
 }
 
-func (s *Server) broadcastNewestEngram() {
-	resp, err := s.engine.ListEngrams(context.Background(), &rest.ListEngramsRequest{
-		Vault:  "default",
-		Limit:  1,
-		Offset: 0,
-	})
-	if err != nil || len(resp.Engrams) == 0 {
+func (s *Server) broadcastNewestEngram(ctx context.Context) {
+	// Search all vaults so users who only use non-default vaults see live-feed events.
+	vaults, err := s.engine.ListVaults(ctx)
+	if err != nil || len(vaults) == 0 {
 		return
 	}
-	e := resp.Engrams[0]
+
+	var newestID, newestConcept, newestVault string
+	var newestCreatedAt int64
+	for _, vault := range vaults {
+		resp, listErr := s.engine.ListEngrams(ctx, &rest.ListEngramsRequest{
+			Vault:  vault,
+			Limit:  1,
+			Offset: 0,
+			Sort:   "created",
+		})
+		if listErr != nil || len(resp.Engrams) == 0 {
+			continue
+		}
+		e := resp.Engrams[0]
+		if e.CreatedAt > newestCreatedAt {
+			newestCreatedAt = e.CreatedAt
+			newestID = e.ID
+			newestConcept = e.Concept
+			newestVault = e.Vault
+		}
+	}
+	if newestID == "" {
+		return
+	}
+
 	msg := statsMsg{
 		Type: "memory_added",
 		Data: map[string]interface{}{
-			"id":        e.ID,
-			"concept":   e.Concept,
-			"vault":     e.Vault,
-			"createdAt": e.CreatedAt,
+			"id":        newestID,
+			"concept":   newestConcept,
+			"vault":     newestVault,
+			"createdAt": newestCreatedAt,
 		},
 	}
 	data, err := json.Marshal(msg)

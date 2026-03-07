@@ -44,6 +44,12 @@ type EmbedPlugin interface {
 	// Dimension returns the embedding vector dimension (384, 768, 1024, 1536).
 	// Detected at Init time by sending a probe text to the provider.
 	Dimension() int
+
+	// MaxBatchSize returns the maximum number of texts per Embed call.
+	// The retroactive processor uses this to size micro-batches, so embeddings
+	// are generated at the provider's optimal batch size rather than a
+	// hardcoded constant.
+	MaxBatchSize() int
 }
 
 // EnrichPlugin generates summaries, entities, and relationships via LLM.

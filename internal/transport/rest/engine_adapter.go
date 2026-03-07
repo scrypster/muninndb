@@ -523,6 +523,10 @@ Available operations:
 	return guide, nil
 }
 
+func (w *RESTEngineWrapper) ExportGraph(ctx context.Context, vault string, includeEngrams bool) (*engine.ExportGraph, error) {
+	return w.engine.ExportGraph(ctx, vault, includeEngrams)
+}
+
 func (w *RESTEngineWrapper) GetBatchEngramLinks(ctx context.Context, req *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error) {
 	vault := req.Vault
 	if vault == "" {

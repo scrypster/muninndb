@@ -286,6 +286,10 @@ func (m *MockEngine) GetProcessorStats() []plugin.RetroactiveStats {
 	return nil
 }
 
+func (m *MockEngine) ExportGraph(ctx context.Context, vault string, includeEngrams bool) (*engine.ExportGraph, error) {
+	return &engine.ExportGraph{}, nil
+}
+
 // backupMockEngine embeds MockEngine but creates a real Pebble checkpoint so
 // the verification step has something to open.
 type backupMockEngine struct {

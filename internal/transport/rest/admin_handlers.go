@@ -437,6 +437,42 @@ func (s *Server) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleEntityGraph returns the entity→relationship graph for the vault.
+// This proxies engine.ExportGraph so the browser does not need to call the MCP
+// server directly — which fails in remote deployments where the MCP address
+// resolves to 127.0.0.1 from the server's perspective but not the browser's.
+func (s *Server) handleEntityGraph(w http.ResponseWriter, r *http.Request) {
+	vault := ctxVault(r)
+	if !isValidVaultName(vault) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid vault name")
+		return
+	}
+	includeEngrams := r.URL.Query().Get("include_engrams") != "false"
+
+	graph, err := s.engine.ExportGraph(r.Context(), vault, includeEngrams)
+	if err != nil {
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+
+	resp := EntityGraphResponse{
+		Nodes: make([]EntityGraphNode, 0, len(graph.Nodes)),
+		Edges: make([]EntityGraphEdge, 0, len(graph.Edges)),
+	}
+	for _, n := range graph.Nodes {
+		resp.Nodes = append(resp.Nodes, EntityGraphNode{ID: n.ID, Type: n.Type})
+	}
+	for _, e := range graph.Edges {
+		resp.Edges = append(resp.Edges, EntityGraphEdge{
+			From:    e.From,
+			To:      e.To,
+			RelType: e.RelType,
+			Weight:  e.Weight,
+		})
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
 // EmbedStatusResponse is the response for GET /api/admin/embed/status.
 type EmbedStatusResponse struct {
 	Provider      string `json:"provider"`

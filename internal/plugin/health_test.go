@@ -25,6 +25,7 @@ func (m *healthMockEmbed) Tier() PluginTier                                     
 func (m *healthMockEmbed) Init(_ context.Context, _ PluginConfig) error          { return nil }
 func (m *healthMockEmbed) Close() error                                          { return nil }
 func (m *healthMockEmbed) Dimension() int                                        { return m.dim }
+func (m *healthMockEmbed) MaxBatchSize() int                                     { return 32 }
 func (m *healthMockEmbed) Embed(_ context.Context, texts []string) ([]float32, error) {
 	m.callCount.Add(1)
 	if m.embedErr != nil {

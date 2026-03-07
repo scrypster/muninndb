@@ -184,7 +184,8 @@ func (p *testEmbedPlugin) Close() error                                        {
 func (p *testEmbedPlugin) Embed(_ context.Context, _ []string) ([]float32, error) {
 	return []float32{0.1, 0.2}, nil
 }
-func (p *testEmbedPlugin) Dimension() int { return 2 }
+func (p *testEmbedPlugin) Dimension() int    { return 2 }
+func (p *testEmbedPlugin) MaxBatchSize() int { return 32 }
 
 // ---------------------------------------------------------------------------
 // HandleReplicationStatus/Lag/Promote — exported wrappers (0% → covered)
