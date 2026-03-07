@@ -25,7 +25,8 @@ type mockEmbedPlugin struct {
 func (m *mockEmbedPlugin) Embed(ctx context.Context, texts []string) ([]float32, error) {
 	return make([]float32, len(texts)*384), nil
 }
-func (m *mockEmbedPlugin) Dimension() int { return 384 }
+func (m *mockEmbedPlugin) Dimension() int    { return 384 }
+func (m *mockEmbedPlugin) MaxBatchSize() int { return 32 }
 
 // mockEnrichPlugin is a mock enrich plugin
 type mockEnrichPlugin struct {

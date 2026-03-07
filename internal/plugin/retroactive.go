@@ -16,10 +16,6 @@ const pollInterval = 3 * time.Second
 // responsive; any remaining unprocessed engrams are picked up on the next tick.
 const maxBatchSize = 1000
 
-// embedMicroBatch is the number of engrams embedded in one ORT inference call.
-// Matches localMaxBatch in the embed package so the provider runs at full batch.
-const embedMicroBatch = 32
-
 // maxBackoff is the upper bound for exponential back-off when the store
 // returns persistent errors on CountWithoutFlag / ScanWithoutFlag.
 const maxBackoff = 5 * time.Minute
@@ -168,7 +164,7 @@ func (rp *RetroactiveProcessor) backoff(ctx context.Context, consecutiveErrors i
 // in one pass. Returns true on success (including zero-work passes), false if
 // a store-level error prevents processing (used by run() for backoff decisions).
 //
-// For EmbedPlugin: accumulates embedMicroBatch engrams and issues one ORT
+// For EmbedPlugin: accumulates up to MaxBatchSize() engrams and issues one
 // inference call per micro-batch, then scatters vectors back individually.
 // For EnrichPlugin: processes one engram at a time (LLM call per engram).
 func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
@@ -199,9 +195,15 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 	batchCount := 0
 
 	// For embed plugins, accumulate a micro-batch and embed in one ORT call.
+	// The batch size is determined by the plugin's MaxBatchSize() so the provider
+	// runs at its optimal throughput rather than a hardcoded constant.
 	embedPlugin, isEmbedPlugin := rp.plugin.(EmbedPlugin)
-	microEngrams := make([]*Engram, 0, embedMicroBatch)
-	microTexts := make([]string, 0, embedMicroBatch)
+	microBatchSize := 32 // fallback for the non-embed path (never used there)
+	if isEmbedPlugin {
+		microBatchSize = embedPlugin.MaxBatchSize()
+	}
+	microEngrams := make([]*Engram, 0, microBatchSize)
+	microTexts := make([]string, 0, microBatchSize)
 
 	flushMicroBatch := func() {
 		if !isEmbedPlugin || len(microEngrams) == 0 {
@@ -301,7 +303,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 			microEngrams = append(microEngrams, eng)
 			microTexts = append(microTexts, eng.Concept+" "+eng.Content)
 			batchCount++
-			if len(microEngrams) >= embedMicroBatch {
+			if len(microEngrams) >= microBatchSize {
 				flushMicroBatch()
 			}
 			if batchCount%100 == 0 {
