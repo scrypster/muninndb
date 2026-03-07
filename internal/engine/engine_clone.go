@@ -69,6 +69,10 @@ func (e *Engine) StartClone(ctx context.Context, sourceVault, newName string) (*
 
 	if !e.spawnJob(func() { e.runClone(job, wsSource, wsTarget, newName) }) {
 		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
+		if cleanupErr := e.store.DeleteVaultNameOnly(context.Background(), newName, wsTarget); cleanupErr != nil {
+			slog.Warn("start clone: failed to clean up reserved vault name during shutdown",
+				"vault", newName, "err", cleanupErr)
+		}
 		return job, nil // job is already failed; return it so the caller can report the job_id
 	}
 	return job, nil

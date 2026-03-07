@@ -315,6 +315,7 @@ func NewEngine(
 		jobManager:       vaultjob.NewManager(),
 	}
 	// Start async novelty worker to decouple O(N) Jaccard scan from write hot path.
+	// engine:spawn-ok — tracked by noveltyDone channel, drained in Stop()
 	go e.runNoveltyWorker()
 	// Start async FTS worker to decouple indexing from the write hot path.
 	// The engram is already durable in Pebble before this worker runs —
@@ -361,21 +362,25 @@ func NewEngine(
 		// Start periodic coherence flush goroutine.
 		e.coherenceFlushStop = make(chan struct{})
 		e.coherenceFlushDone = make(chan struct{})
+		// engine:spawn-ok — tracked by coherenceFlushDone channel, drained in Stop()
 		go e.runCoherenceFlush()
 	}
 
 	// Start periodic vault pruning sweep (runs every 60s with ±5s jitter).
 	// Only active for vaults with MaxEngrams > 0 or RetentionDays > 0.
+	// engine:spawn-ok — tracked by pruneDone channel, drained in Stop()
 	go e.runPruneWorker()
 
 	// Start daily idempotency receipt sweep — purges Pebble 0x19 entries
 	// older than 30 days to prevent unbounded disk growth.
 	e.idempotencySweepDone = make(chan struct{})
+	// engine:spawn-ok — tracked by idempotencySweepDone channel, drained in Stop()
 	go e.runIdempotencySweep()
 
 	// Start weekly archive GC sweep — true-prunes 0x25 edges that have been
 	// dormant for 3+ years, had low peak weight, and were never restored.
 	e.archiveGCDone = make(chan struct{})
+	// engine:spawn-ok — tracked by archiveGCDone channel, drained in Stop()
 	go e.runArchiveGCWorker()
 
 	return e
@@ -476,6 +481,7 @@ func (e *Engine) Stop() {
 		// call jobManager.Fail() / jobManager.Complete() — closing the manager
 		// first would race with those calls.
 		jobDone := make(chan struct{})
+		// engine:spawn-ok — local inline drain helper; closes jobDone and exits immediately after WG drains
 		go func() { e.jobWG.Wait(); close(jobDone) }()
 		select {
 		case <-jobDone:
@@ -508,6 +514,7 @@ func (e *Engine) Stop() {
 		// scoring store. Must complete before store.Close() (called by the caller
 		// immediately after Stop() returns).
 		ffDone := make(chan struct{})
+		// engine:spawn-ok — local inline drain helper; closes ffDone and exits immediately after WG drains
 		go func() { e.fireAndForgetWG.Wait(); close(ffDone) }()
 		select {
 		case <-ffDone:
@@ -533,6 +540,7 @@ func (e *Engine) spawnFireAndForget(fn func()) bool {
 		e.fireAndForgetWG.Done()         // Undo — engine is shutting down
 		return false
 	}
+	// engine:spawn-ok — tracked by fireAndForgetWG, drained in Stop() before store.Close()
 	go func() {
 		defer e.fireAndForgetWG.Done()
 		fn()
@@ -551,6 +559,7 @@ func (e *Engine) spawnJob(fn func()) bool {
 		e.jobWG.Done()                   // Undo — engine is shutting down
 		return false
 	}
+	// engine:spawn-ok — tracked by jobWG, drained in Stop() before jobManager.Close()
 	go func() {
 		defer e.jobWG.Done()
 		fn()
@@ -1652,6 +1661,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			break
 		}
 		wg.Add(1)
+		// engine:spawn-ok — tracked by local wg, drained by wg.Wait() a few lines below
 		go func(idx int, id [16]byte) {
 			defer wg.Done()
 			entries, err := e.prov.Get(ctx, wsPrefix, id)
