@@ -11,8 +11,30 @@ import (
 	"time"
 )
 
+// parseExplicitFlag scans osArgs for an explicit --name value or --name=value
+// occurrence and returns the value. Returns "" if the flag is not present.
+// Used to detect user-supplied values that must be forwarded to the daemon.
+func parseExplicitFlag(name string, osArgs []string) string {
+	long := "--" + name
+	short := "-" + name
+	for i, arg := range osArgs {
+		if (arg == long || arg == short) && i+1 < len(osArgs) {
+			return osArgs[i+1]
+		}
+		if after, ok := strings.CutPrefix(arg, long+"="); ok {
+			return after
+		}
+		if after, ok := strings.CutPrefix(arg, short+"="); ok {
+			return after
+		}
+	}
+	return ""
+}
+
 // buildDaemonArgs constructs the argument list for the forked daemon process.
-// It forwards --listen-host when non-default and --cors-origins when non-empty.
+// It forwards --listen-host when non-default, --cors-origins when non-empty,
+// and any explicitly provided per-service address flags (--rest-addr, --mbp-addr,
+// --grpc-addr, --mcp-addr, --ui-addr) so they take effect in the daemon.
 func buildDaemonArgs(dataDir string, dev bool, mcpToken string, osArgs []string, listenHostEnv, corsOriginsEnv string) []string {
 	args := []string{"--daemon", "--data", dataDir}
 	if dev {
@@ -26,24 +48,20 @@ func buildDaemonArgs(dataDir string, dev bool, mcpToken string, osArgs []string,
 	if listenHost != "127.0.0.1" {
 		args = append(args, "--listen-host", listenHost)
 	}
-	// --cors-origins: forward from flag or env
+	// --cors-origins: forward from flag or env (flag wins)
 	corsOrigins := corsOriginsEnv
-	for i, arg := range osArgs {
-		if (arg == "--cors-origins" || arg == "-cors-origins") && i+1 < len(osArgs) {
-			corsOrigins = osArgs[i+1]
-			break
-		}
-		if after, ok := strings.CutPrefix(arg, "--cors-origins="); ok {
-			corsOrigins = after
-			break
-		}
-		if after, ok := strings.CutPrefix(arg, "-cors-origins="); ok {
-			corsOrigins = after
-			break
-		}
+	if v := parseExplicitFlag("cors-origins", osArgs); v != "" {
+		corsOrigins = v
 	}
 	if corsOrigins != "" {
 		args = append(args, "--cors-origins", corsOrigins)
+	}
+	// Per-service address overrides: forward any that the user explicitly set.
+	// These take priority over --listen-host defaults inside the daemon.
+	for _, name := range []string{"rest-addr", "mbp-addr", "grpc-addr", "mcp-addr", "ui-addr", "metrics-addr"} {
+		if v := parseExplicitFlag(name, osArgs); v != "" {
+			args = append(args, "--"+name, v)
+		}
 	}
 	return args
 }
