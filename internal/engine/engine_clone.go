@@ -69,7 +69,7 @@ func (e *Engine) StartClone(ctx context.Context, sourceVault, newName string) (*
 
 	if !e.spawnJob(func() { e.runClone(job, wsSource, wsTarget, newName) }) {
 		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
-		return nil, nil
+		return job, nil // job is already failed; return it so the caller can report the job_id
 	}
 	return job, nil
 }
@@ -198,7 +198,7 @@ func (e *Engine) StartMerge(ctx context.Context, sourceVault, targetVault string
 
 	if !e.spawnJob(func() { e.runMerge(job, wsSource, wsTarget, sourceVault, targetVault, deleteSource) }) {
 		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
-		return nil, nil
+		return job, nil // job is already failed; return it so the caller can report the job_id
 	}
 	return job, nil
 }

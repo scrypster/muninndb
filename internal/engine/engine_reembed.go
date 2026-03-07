@@ -60,7 +60,7 @@ func (e *Engine) StartReembedVault(ctx context.Context, vaultName, modelName str
 
 	if !e.spawnJob(func() { e.runReembed(job, ws, vaultName) }) {
 		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
-		return nil, nil
+		return job, nil // job is already failed; return it so the caller can report the job_id
 	}
 	return job, nil
 }
