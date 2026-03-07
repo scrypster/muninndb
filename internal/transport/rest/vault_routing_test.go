@@ -2,7 +2,6 @@ package rest
 
 import (
 	"context"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/auth"
@@ -49,10 +48,10 @@ func newVaultTrackingServer(t *testing.T) (*Server, *vaultTrackingEngine, *auth.
 	t.Helper()
 	eng := &vaultTrackingEngine{}
 	store := newTestAuthStore(t)
-	store.SetVaultConfig(auth.VaultConfig{Name: "default", Public: true})
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "default", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
 	srv := NewServer("localhost:0", eng, store, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 	return srv, eng, store
 }
 
-// Compile-time sentinel — ensures the file is not empty if all tests are in later tasks.
-var _ = (*httptest.ResponseRecorder)(nil)
