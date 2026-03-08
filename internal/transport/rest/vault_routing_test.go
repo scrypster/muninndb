@@ -246,6 +246,24 @@ func TestVaultRouting_Write_BodyVault(t *testing.T) {
 	}
 }
 
+func TestHandleCreateEngram_RejectsBodyVaultMismatch(t *testing.T) {
+	srv, eng, _ := newVaultTrackingServer(t)
+
+	ctx := context.WithValue(context.Background(), auth.ContextVault, "ctx-vault")
+	body := strings.NewReader(`{"vault":"body-vault","concept":"test","content":"hello"}`)
+	req := httptest.NewRequest("POST", "/api/engrams", body).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCreateEngram(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteVault != "" {
+		t.Errorf("engine Write should not be called, got vault %q", eng.lastWriteVault)
+	}
+}
+
 func TestVaultRouting_Write_TextPlainBodyVaultMismatchRejected(t *testing.T) {
 	srv, eng, store := newVaultTrackingServer(t)
 	if err := store.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false}); err != nil {
@@ -488,6 +506,24 @@ func TestVaultRouting_WriteBatch_BodyVault(t *testing.T) {
 	}
 	if eng.lastWriteBatchVault != "myvault" {
 		t.Errorf("engine WriteBatch vault: want %q, got %q", "myvault", eng.lastWriteBatchVault)
+	}
+}
+
+func TestHandleBatchCreate_RejectsBodyVaultMismatch(t *testing.T) {
+	srv, eng, _ := newVaultTrackingServer(t)
+
+	ctx := context.WithValue(context.Background(), auth.ContextVault, "ctx-vault")
+	body := strings.NewReader(`{"engrams":[{"vault":"body-vault","concept":"a","content":"x"},{"concept":"b","content":"y"}]}`)
+	req := httptest.NewRequest("POST", "/api/engrams/batch", body).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleBatchCreate(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteBatchVault != "" {
+		t.Errorf("engine WriteBatch should not be called, got vault %q", eng.lastWriteBatchVault)
 	}
 }
 

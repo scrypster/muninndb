@@ -310,6 +310,28 @@ func TestAuthMiddleware_VaultIsolation(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_NonDefaultKeyRequiresExplicitVault(t *testing.T) {
+	s := newTestStore(t)
+	s.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false})
+	token, _, err := s.GenerateAPIKey("vault-a", "agent", "full", nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+
+	handler := s.VaultAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest("GET", "/api/engrams", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing explicit vault for non-default key: expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestAuthMiddleware_ValidKey_BodyVault(t *testing.T) {
 	s := newTestStore(t)
 	s.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false})

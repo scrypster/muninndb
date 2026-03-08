@@ -12,12 +12,18 @@ import (
 
 // VaultAuthMiddleware enforces vault-level API key auth.
 // Vault is resolved from ?vault= query param first, then from JSON request bodies
-// on body-based routes, and finally defaults to the key's vault (or "default"
-// for unauthenticated/public requests) when no explicit vault is provided.
+// on body-based routes, and finally defaults to "default" when no explicit
+// vault is provided.
 // Public vaults allow unauthenticated access in observe mode.
 // If a Bearer token is present, it is always validated regardless of vault visibility.
 func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		vault, resolveErr := resolveRequestVault(r, "default")
+		if resolveErr != nil {
+			writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
+			return
+		}
+
 		authHeader := r.Header.Get("Authorization")
 
 		if authHeader != "" {
@@ -25,11 +31,6 @@ func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			key, err := s.ValidateAPIKey(token)
 			if err != nil {
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
-				return
-			}
-			vault, resolveErr := resolveRequestVault(r, key.Vault)
-			if resolveErr != nil {
-				writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
 				return
 			}
 			// Enforce vault scoping: the key must be issued for the requested vault.
@@ -47,12 +48,6 @@ func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			ctx = context.WithValue(ctx, ContextMode, key.Mode)
 			ctx = context.WithValue(ctx, ContextAPIKey, &key)
 			next(w, r.WithContext(ctx))
-			return
-		}
-
-		vault, resolveErr := resolveRequestVault(r, "default")
-		if resolveErr != nil {
-			writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
 			return
 		}
 		// No key — check if vault is public
@@ -111,10 +106,9 @@ func (s *Store) VaultAuthWithAdminBypass(secret []byte, next http.HandlerFunc) h
 		// Admin session bypass — authenticated Web UI gets full access to any vault.
 		cookie, err := r.Cookie("muninn_session")
 		if err == nil && validateSessionToken(cookie.Value, secret) {
-			vault, resolveErr := resolveRequestVault(r, "default")
-			if resolveErr != nil {
-				writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
-				return
+			vault := r.URL.Query().Get("vault")
+			if vault == "" {
+				vault = "default"
 			}
 			ctx := context.WithValue(r.Context(), ContextVault, vault)
 			ctx = context.WithValue(ctx, ContextMode, "write")
