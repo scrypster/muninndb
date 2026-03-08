@@ -243,3 +243,24 @@ func TestRESTEngineWrapperRetryEnrich_PersistsDigestAndGraphData(t *testing.T) {
 		t.Fatalf("expected entity/relationship persistence without engram-association side effects, got %+v", links.Links)
 	}
 }
+
+func TestRESTEngineWrapperRetryEnrich_NilResultReturnsError(t *testing.T) {
+	eng, cleanup := newRESTRetryEnrichEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	vault := "rest-retry-enrich-nil"
+	writeResp, err := eng.Write(ctx, &WriteRequest{
+		Vault:   vault,
+		Concept: "retry enrich nil result",
+		Content: "plugin returned nil",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	wrapper := &RESTEngineWrapper{engine: eng, enricher: &restTestEnrichPlugin{}}
+	if _, err := wrapper.RetryEnrich(ctx, vault, writeResp.ID); err == nil {
+		t.Fatal("expected RetryEnrich to reject nil enrichment result")
+	}
+}

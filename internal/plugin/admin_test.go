@@ -25,15 +25,20 @@ type mockPluginStore struct {
 	updateDigestErr error
 	upsertEntityErr error
 	linkErr         error
+	coOccurErr      error
 	upsertRelErr    error
 	hnswInsertErr   error
 	autoLinkErr     error
 
 	setFlagCalls      int
+	setFlags          []uint8
 	updateEmbedCalls  int
 	hnswInsertCalls   int
 	autoLinkCalls     int
 	upsertEntityCalls int
+	linkCalls         int
+	upsertRelCalls    int
+	coOccurCalls      int
 }
 
 func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _ uint8) (int64, error) {
@@ -44,8 +49,9 @@ func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _ uint8) EngramIter
 	return m.scanResult
 }
 
-func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ ULID, _ uint8) error {
+func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ ULID, flag uint8) error {
 	m.setFlagCalls++
+	m.setFlags = append(m.setFlags, flag)
 	return m.setFlagErr
 }
 
@@ -68,10 +74,12 @@ func (m *mockPluginStore) UpsertEntity(_ context.Context, _ ExtractedEntity) err
 }
 
 func (m *mockPluginStore) LinkEngramToEntity(_ context.Context, _ ULID, _ string) error {
+	m.linkCalls++
 	return m.linkErr
 }
 
 func (m *mockPluginStore) UpsertRelationship(_ context.Context, _ ULID, _ ExtractedRelation) error {
+	m.upsertRelCalls++
 	return m.upsertRelErr
 }
 
@@ -86,7 +94,8 @@ func (m *mockPluginStore) AutoLinkByEmbedding(_ context.Context, _ ULID, _ []flo
 }
 
 func (m *mockPluginStore) IncrementEntityCoOccurrence(_ context.Context, _ ULID, _, _ string) error {
-	return nil
+	m.coOccurCalls++
+	return m.coOccurErr
 }
 
 // ---------------------------------------------------------------------------

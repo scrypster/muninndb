@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/cognitive"
@@ -459,45 +458,13 @@ func (w *RESTEngineWrapper) RetryEnrich(ctx context.Context, vault, engramID str
 	if enrichErr != nil {
 		return nil, fmt.Errorf("enrich: %w", enrichErr)
 	}
+	if result == nil {
+		return nil, fmt.Errorf("enrich returned nil result")
+	}
 
 	pStore := plugin.NewStoreAdapter(w.engine.Store(), w.hnswReg)
-
-	if err := pStore.UpdateDigest(ctx, plugin.ULID(ulid), result); err != nil {
-		return nil, fmt.Errorf("persist enriched digest: %w", err)
-	}
-
-	var linkedEntityNames []string
-	for _, entity := range result.Entities {
-		if err := pStore.UpsertEntity(ctx, entity); err != nil {
-			slog.Warn("retry enrich: failed to upsert entity", "id", engramID, "name", entity.Name, "err", err)
-			continue
-		}
-		if err := pStore.LinkEngramToEntity(ctx, plugin.ULID(ulid), entity.Name); err != nil {
-			slog.Warn("retry enrich: failed to link engram to entity", "id", engramID, "name", entity.Name, "err", err)
-			continue
-		}
-		linkedEntityNames = append(linkedEntityNames, entity.Name)
-	}
-	for i := 0; i < len(linkedEntityNames); i++ {
-		for j := i + 1; j < len(linkedEntityNames); j++ {
-			_ = pStore.IncrementEntityCoOccurrence(ctx, plugin.ULID(ulid), linkedEntityNames[i], linkedEntityNames[j])
-		}
-	}
-	if len(result.Entities) > 0 {
-		if err := pStore.SetDigestFlag(ctx, plugin.ULID(ulid), plugin.DigestEntities); err != nil {
-			slog.Warn("retry enrich: failed to set DigestEntities flag", "id", engramID, "err", err)
-		}
-	}
-
-	for _, rel := range result.Relationships {
-		if err := pStore.UpsertRelationship(ctx, plugin.ULID(ulid), rel); err != nil {
-			slog.Warn("retry enrich: failed to upsert relationship", "id", engramID, "err", err)
-		}
-	}
-	if len(result.Relationships) > 0 {
-		if err := pStore.SetDigestFlag(ctx, plugin.ULID(ulid), plugin.DigestRelationships); err != nil {
-			slog.Warn("retry enrich: failed to set DigestRelationships flag", "id", engramID, "err", err)
-		}
+	if err := plugin.PersistEnrichmentResult(ctx, pStore, plugin.ULID(ulid), result); err != nil {
+		return nil, err
 	}
 	return &RetryEnrichResponse{
 		EngramID:      engramID,

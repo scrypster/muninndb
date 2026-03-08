@@ -180,6 +180,10 @@ Provider comparison:
 | Anthropic | claude-haiku-4-5 | Low | Very good | Cost-sensitive production |
 | Anthropic | claude-sonnet-4-6 | Medium | Excellent | Quality-critical production |
 
+For OpenAI-compatible gateways, MuninnDB accepts enrich JSON returned in either
+`message.content` or `message.reasoning`. Some gateways emit structured JSON in
+`reasoning` while leaving `content` empty.
+
 ### Retroactive Enrichment
 
 Same guarantee as Tier 2: enable the plugin, walk away. The retroactive processor enriches existing engrams in the background — highest relevance first, zero impact on the read/write path.
@@ -198,6 +202,11 @@ Enrichment jobs are tracked. If an LLM call fails — rate limit, timeout, provi
 You can also check enrichment status via the REST admin endpoint `/api/admin/embed/status`, which includes tier information and plugin registration status.
 
 The retry mechanism means a temporary provider outage does not result in permanently un-enriched engrams. When the provider recovers, the queue processes automatically.
+
+Retry and retroactive enrichment only mark entity and relationship stages complete
+after the corresponding graph writes succeed. If persistence fails partway
+through, MuninnDB leaves the stage incomplete so the work can be retried instead
+of silently treating a partial write as finished.
 
 ---
 

@@ -51,6 +51,9 @@ func (a *pluginStoreAdapter) UpdateEmbedding(ctx context.Context, id ULID, vec [
 }
 
 func (a *pluginStoreAdapter) UpdateDigest(ctx context.Context, id ULID, result *EnrichmentResult) error {
+	if result == nil {
+		return fmt.Errorf("UpdateDigest: nil enrichment result")
+	}
 	return a.store.UpdateDigest(ctx, storage.ULID(id), result.Summary, result.KeyPoints, result.MemoryType, result.TypeLabel)
 }
 

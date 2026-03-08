@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -443,6 +444,9 @@ func (rp *RetroactiveProcessor) processEngram(ctx context.Context, eng *Engram) 
 		if err != nil {
 			return err
 		}
+		if result == nil {
+			return fmt.Errorf("enrich returned nil result")
+		}
 
 		// Only overwrite fields the caller didn't provide.
 		// hasSummary covers both eng.Summary != "" and DigestSummarized flag;
@@ -454,45 +458,15 @@ func (rp *RetroactiveProcessor) processEngram(ctx context.Context, eng *Engram) 
 			}
 		}
 
-		// Store the enrichment result
-		if err := rp.store.UpdateDigest(ctx, eng.ID, result); err != nil {
+		if hasEntities {
+			result.Entities = nil
+		}
+		if hasRelationships {
+			result.Relationships = nil
+		}
+
+		if err := PersistEnrichmentResult(ctx, rp.store, eng.ID, result); err != nil {
 			return err
-		}
-
-		// Upsert entities (only if caller didn't provide them)
-		if !hasEntities {
-			var linkedEntityNames []string
-			for _, entity := range result.Entities {
-				if err := rp.store.UpsertEntity(ctx, entity); err != nil {
-					slog.Warn("enrich: failed to upsert entity", "id", eng.ID.String(), "name", entity.Name, "err", err)
-					continue
-				}
-				if err := rp.store.LinkEngramToEntity(ctx, eng.ID, entity.Name); err != nil {
-					slog.Warn("enrich: failed to link engram to entity", "id", eng.ID.String(), "name", entity.Name, "err", err)
-					continue
-				}
-				linkedEntityNames = append(linkedEntityNames, entity.Name)
-			}
-			// Write co-occurrence pairs for entities co-appearing in this engram.
-			for i := 0; i < len(linkedEntityNames); i++ {
-				for j := i + 1; j < len(linkedEntityNames); j++ {
-					_ = rp.store.IncrementEntityCoOccurrence(ctx, eng.ID, linkedEntityNames[i], linkedEntityNames[j])
-				}
-			}
-		}
-
-		// Mark entity extraction complete so subsequent polls skip this stage.
-		if !hasEntities && len(result.Entities) > 0 {
-			if err := rp.store.SetDigestFlag(ctx, eng.ID, DigestEntities); err != nil {
-				slog.Warn("enrich: failed to set DigestEntities flag", "id", eng.ID.String(), "err", err)
-			}
-		}
-
-		// Upsert relationships
-		for _, rel := range result.Relationships {
-			if err := rp.store.UpsertRelationship(ctx, eng.ID, rel); err != nil {
-				slog.Warn("failed to upsert relationship", "error", err)
-			}
 		}
 
 		return nil

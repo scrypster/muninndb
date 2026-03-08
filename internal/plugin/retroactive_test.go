@@ -314,6 +314,63 @@ func TestRetroactiveProcessor_ProcessBatchEnrichError(t *testing.T) {
 	}
 }
 
+func TestRetroactiveProcessor_ProcessBatchEnrichNilResult(t *testing.T) {
+	eng := &Engram{Concept: "nil", Content: "content"}
+	iter := &mockIterator{engrams: []*Engram{eng}}
+
+	store := &mockPluginStore{countResult: 1, scanResult: iter}
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-nil", tier: TierEnrich},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	ok := rp.processBatch(context.Background())
+	if !ok {
+		t.Error("processBatch should return true even with enrich errors")
+	}
+
+	stats := rp.Stats()
+	if stats.Errors != 1 {
+		t.Errorf("expected Errors=1, got %d", stats.Errors)
+	}
+	if store.setFlagCalls != 0 {
+		t.Errorf("expected no digest flags to be set on nil result, got %d calls", store.setFlagCalls)
+	}
+}
+
+func TestRetroactiveProcessor_ProcessBatchEntityPersistenceError(t *testing.T) {
+	eng := &Engram{Concept: "retry", Content: "uses postgres"}
+	iter := &mockIterator{engrams: []*Engram{eng}}
+
+	store := &mockPluginStore{
+		countResult: 1,
+		scanResult:  iter,
+		linkErr:     errors.New("link fail"),
+	}
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-entity-fail", tier: TierEnrich},
+		enrichResult: &EnrichmentResult{
+			Entities: []ExtractedEntity{
+				{Name: "postgres", Type: "database", Confidence: 0.9},
+			},
+		},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	ok := rp.processBatch(context.Background())
+	if !ok {
+		t.Error("processBatch should return true even with enrich errors")
+	}
+
+	stats := rp.Stats()
+	if stats.Errors != 1 {
+		t.Errorf("expected Errors=1, got %d", stats.Errors)
+	}
+	if store.setFlagCalls != 0 {
+		t.Errorf("expected no digest flags to be set on entity persistence failure, got %v", store.setFlags)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // processBatch — SetDigestFlag error on enrich path
 // ---------------------------------------------------------------------------
