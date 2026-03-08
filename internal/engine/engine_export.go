@@ -90,10 +90,10 @@ func (e *Engine) StartImport(ctx context.Context, vaultName, embedderModel strin
 	}
 	if !e.spawnJob(func() { e.runImport(job, wsTarget, vaultName, r, opts) }) {
 		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
-		if cleanupErr := e.store.DeleteVaultNameOnly(context.Background(), vaultName, wsTarget); cleanupErr != nil {
-			slog.Warn("start import: failed to clean up reserved vault name during shutdown",
-				"vault", vaultName, "err", cleanupErr)
-		}
+		// Do NOT call DeleteVaultNameOnly here: the engine is shutting down and
+		// Pebble may already be closed, which would panic. The orphaned vault name
+		// entry is harmless — an incomplete import target with no engrams will
+		// simply appear as an empty vault until cleaned up by the operator.
 		return job, nil // job is already failed; return it so the caller can report the job_id
 	}
 	return job, nil
