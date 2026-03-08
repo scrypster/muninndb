@@ -519,11 +519,14 @@ document.addEventListener('alpine:init', () => {
         // the global broadcast values.
         this.loadStats();
       } else if (msg.type === 'memory_added') {
-        // Deduplicate: the server broadcasts memory_added for new engrams across all
-        // vaults. Guard against any edge-case double-delivery by ID.
+        // Deduplicate: guard against double-delivery of the same engram ID.
+        // Replace the array reference (instead of in-place unshift+pop) so that
+        // Alpine.js x-for can perform a clean diff — in-place mutations of both
+        // ends of the array confuse Alpine's DOM anchor tracking and produce the
+        // "can't access property 'after', v is undefined" crash.
         if (!this.liveFeed.some(item => item.id === msg.data.id)) {
-          this.liveFeed.unshift(msg.data);
-          if (this.liveFeed.length > 20) this.liveFeed.pop();
+          const next = [msg.data, ...this.liveFeed];
+          this.liveFeed = next.length > 20 ? next.slice(0, 20) : next;
         }
       }
     },
@@ -1256,32 +1259,33 @@ document.addEventListener('alpine:init', () => {
         (data.nodes || []).forEach(n => {
           const entityType = (n.type || 'other').toLowerCase();
           nodeIdSet.add(n.id);
+          // Cytoscape requires { data: { id, ... } } element format.
           nodes.push({
-            id: n.id,
-            label: n.id,
-            type: entityType,
-            title: n.id + ' (' + entityType + ')',
-            shape: 'dot',
-            size: 16,
-            color: this.getEntityTypeColor(entityType),
-            font: { size: 11, color: '#e2e8f0' },
-            borderWidth: 2,
-            borderWidthSelected: 3,
-            borderColor: 'rgba(255,255,255,0.2)'
+            data: {
+              id: n.id,
+              label: n.id,
+              type: entityType,
+              size: 16,
+              color: this.getEntityTypeColor(entityType),
+              borderWidth: 2,
+              borderWidthSelected: 3,
+              borderColor: 'rgba(255,255,255,0.2)',
+            },
           });
         });
 
         (data.edges || []).forEach(e => {
           if (nodeIdSet.has(e.from) && nodeIdSet.has(e.to)) {
+            // Cytoscape uses source/target (not from/to) and requires { data: { ... } }.
             edges.push({
-              from: e.from,
-              to: e.to,
-              label: e.rel_type,
-              arrows: 'to',
-              color: 'rgba(168,85,247,0.4)',
-              font: { size: 10, color: '#ccc' },
-              width: Math.max(1, (e.weight || 0.5) * 3),
-              smooth: { type: 'continuous' }
+              data: {
+                id: e.from + '-' + e.to + '-' + (e.rel_type || ''),
+                source: e.from,
+                target: e.to,
+                label: e.rel_type || '',
+                color: 'rgba(168,85,247,0.4)',
+                width: Math.max(1, (e.weight || 0.5) * 3),
+              },
             });
           }
         });
@@ -1294,7 +1298,6 @@ document.addEventListener('alpine:init', () => {
         // Reinit or destroy existing graph
         if (this._entityCy) { this._entityCy.destroy(); this._entityCy = null; }
 
-        // Create vis.Network-style data structure for Cytoscape
         const elements = nodes.concat(edges);
 
         this._entityCy = cytoscape({
@@ -1308,13 +1311,13 @@ document.addEventListener('alpine:init', () => {
                 'width': 'data(size)',
                 'height': 'data(size)',
                 'label': 'data(label)',
-                'color': 'data(font.color)',
-                'font-size': 'data(font.size)',
+                'color': '#e2e8f0',
+                'font-size': '11px',
                 'text-valign': 'center',
                 'text-halign': 'center',
                 'border-width': 'data(borderWidth)',
                 'border-color': 'data(borderColor)',
-                'text-background': true,
+                'text-background-opacity': 0.6,
                 'text-background-color': 'rgba(0,0,0,0.5)',
                 'text-background-padding': '2px',
                 'text-background-shape': 'roundrectangle',
@@ -1337,9 +1340,9 @@ document.addEventListener('alpine:init', () => {
                 'curve-style': 'bezier',
                 'opacity': 0.7,
                 'label': 'data(label)',
-                'color': 'data(font.color)',
-                'font-size': 'data(font.size)',
-                'text-background': true,
+                'color': '#ccc',
+                'font-size': '10px',
+                'text-background-opacity': 0.6,
                 'text-background-color': 'rgba(0,0,0,0.5)',
                 'text-background-padding': '2px',
                 'text-background-shape': 'roundrectangle'
