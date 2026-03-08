@@ -51,7 +51,7 @@ async def main():
         ids = []
         for mem in memories:
             eid = await client.write(
-                vault="demo",
+                vault="default",
                 concept=mem["concept"],
                 content=mem["content"],
                 tags=mem["tags"],
@@ -65,7 +65,7 @@ async def main():
         # Activate memory with a semantic query
         print("Activating memory with query: 'how does learning work in the brain?'")
         result = await client.activate(
-            vault="demo",
+            vault="default",
             context=["how does learning work", "neural mechanisms", "memory formation"],
             max_results=10,
             threshold=0.0,
