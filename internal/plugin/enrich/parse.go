@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -51,20 +52,15 @@ func ParseEntityResponse(raw string) ([]plugin.ExtractedEntity, error) {
 	raw = strings.TrimSpace(raw)
 	jsonStr := extractJSON(raw)
 
-	// Try to parse as wrapper object with "entities" key
-	var wrapper struct {
-		Entities []plugin.ExtractedEntity `json:"entities"`
-	}
-	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err == nil {
-		if wrapper.Entities == nil && strings.Contains(jsonStr, `"entities"`) {
+	if rawEntities, ok, err := extractTopLevelField(jsonStr, "entities"); err == nil && ok {
+		if isJSONNull(rawEntities) {
 			return nil, nil
 		}
-		if wrapper.Entities != nil {
-			// Validate and deduplicate
-			return validateAndDedupeEntities(wrapper.Entities), nil
+		var entities []plugin.ExtractedEntity
+		if err := json.Unmarshal(rawEntities, &entities); err != nil {
+			return nil, fmt.Errorf("invalid entity response JSON: %s", truncateForError(jsonStr))
 		}
-	} else {
-		// Fall through to direct-array parsing before surfacing the error.
+		return validateAndDedupeEntities(entities), nil
 	}
 
 	// Try to parse as direct array
@@ -81,33 +77,29 @@ func ParseRelationshipResponse(raw string) ([]plugin.ExtractedRelation, error) {
 	raw = strings.TrimSpace(raw)
 	jsonStr := extractJSON(raw)
 
-	// Try to parse as wrapper object with "relationships" key
-	// Use intermediate struct with "type" field for JSON parsing
-	var wrapper struct {
-		Relationships []struct {
+	if rawRelationships, ok, err := extractTopLevelField(jsonStr, "relationships"); err == nil && ok {
+		if isJSONNull(rawRelationships) {
+			return nil, nil
+		}
+		var wrapper []struct {
 			From   string  `json:"from"`
 			To     string  `json:"to"`
 			Type   string  `json:"type"`
 			Weight float32 `json:"weight"`
-		} `json:"relationships"`
-	}
-
-	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err == nil {
-		if wrapper.Relationships == nil && strings.Contains(jsonStr, `"relationships"`) {
-			return nil, nil
 		}
-		if wrapper.Relationships != nil {
-			var result []plugin.ExtractedRelation
-			for _, rel := range wrapper.Relationships {
-				result = append(result, plugin.ExtractedRelation{
-					FromEntity: rel.From,
-					ToEntity:   rel.To,
-					RelType:    rel.Type,
-					Weight:     rel.Weight,
-				})
-			}
-			return validateRelationships(result), nil
+		if err := json.Unmarshal(rawRelationships, &wrapper); err != nil {
+			return nil, fmt.Errorf("invalid relationship response JSON: %s", truncateForError(jsonStr))
 		}
+		var result []plugin.ExtractedRelation
+		for _, rel := range wrapper {
+			result = append(result, plugin.ExtractedRelation{
+				FromEntity: rel.From,
+				ToEntity:   rel.To,
+				RelType:    rel.Type,
+				Weight:     rel.Weight,
+			})
+		}
+		return validateRelationships(result), nil
 	}
 
 	// Try to parse as direct array
@@ -131,6 +123,19 @@ func ParseRelationshipResponse(raw string) ([]plugin.ExtractedRelation, error) {
 	}
 
 	return nil, fmt.Errorf("invalid relationship response JSON: %s", truncateForError(jsonStr))
+}
+
+func extractTopLevelField(jsonStr, field string) (json.RawMessage, bool, error) {
+	var wrapper map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
+		return nil, false, err
+	}
+	value, ok := wrapper[field]
+	return value, ok, nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
 // ParseClassificationResponse parses the JSON response from the classification call.

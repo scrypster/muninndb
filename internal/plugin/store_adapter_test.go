@@ -133,6 +133,15 @@ func TestStoreAdapter_UpsertRelationship_NotFound(t *testing.T) {
 	}
 }
 
+func TestStoreAdapter_UpdateDigest_NilResult(t *testing.T) {
+	store := openTestStore(t)
+	adapter := &pluginStoreAdapter{store: store}
+
+	if err := adapter.UpdateDigest(context.Background(), ULID{}, nil); err == nil {
+		t.Fatal("expected error for nil enrichment result")
+	}
+}
+
 func TestNewStoreAdapter(t *testing.T) {
 	adapter := NewStoreAdapter(nil, nil)
 	if adapter == nil {

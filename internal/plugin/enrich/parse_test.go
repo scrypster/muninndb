@@ -258,6 +258,28 @@ func TestParseRelationshipResponse_BadJSON(t *testing.T) {
 	}
 }
 
+func TestParseEntityResponse_NestedWrapperKeyReturnsError(t *testing.T) {
+	raw := `{"meta":{"entities":[]}}`
+	entities, err := ParseEntityResponse(raw)
+	if err == nil {
+		t.Fatal("expected parse error for nested entities wrapper")
+	}
+	if len(entities) != 0 {
+		t.Fatalf("expected 0 entities, got %d", len(entities))
+	}
+}
+
+func TestParseRelationshipResponse_NestedWrapperKeyReturnsError(t *testing.T) {
+	raw := `{"meta":{"relationships":[]}}`
+	rels, err := ParseRelationshipResponse(raw)
+	if err == nil {
+		t.Fatal("expected parse error for nested relationships wrapper")
+	}
+	if len(rels) != 0 {
+		t.Fatalf("expected 0 relationships, got %d", len(rels))
+	}
+}
+
 func TestParseClassification_BadJSON(t *testing.T) {
 	raw := `totally broken {{{`
 	memType, typeLabel, cat, subcat, tags, err := ParseClassificationResponse(raw)
