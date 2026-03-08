@@ -442,7 +442,10 @@ func (s *Server) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
 // server directly — which fails in remote deployments where the MCP address
 // resolves to 127.0.0.1 from the server's perspective but not the browser's.
 func (s *Server) handleEntityGraph(w http.ResponseWriter, r *http.Request) {
-	vault := ctxVault(r)
+	vault := r.URL.Query().Get("vault")
+	if vault == "" {
+		vault = "default"
+	}
 	if !isValidVaultName(vault) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid vault name")
 		return

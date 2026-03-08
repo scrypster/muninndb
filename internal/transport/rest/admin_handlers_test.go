@@ -675,3 +675,98 @@ func TestHandleRenameVault_DuplicateDetection(t *testing.T) {
 		t.Errorf("expected conflict=my-vault, got %q", resp["conflict"])
 	}
 }
+
+// TestEntityGraph_EmptyVaultDefaultsToDefault verifies that omitting the vault
+// query parameter defaults to the "default" vault.
+func TestEntityGraph_EmptyVaultDefaultsToDefault(t *testing.T) {
+	srv := newTestServer(t, newTestAuthStore(t))
+
+	req := httptest.NewRequest("GET", "/api/admin/entity-graph", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 with no vault param, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEntityGraph returns nodes/edges from the mock engine.
+func TestEntityGraph(t *testing.T) {
+	srv := newTestServer(t, newTestAuthStore(t))
+
+	req := httptest.NewRequest("GET", "/api/admin/entity-graph?vault=default", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp EntityGraphResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// MockEngine.ExportGraph returns empty graph — just verify the shape.
+	if resp.Nodes == nil {
+		t.Error("expected non-nil nodes slice")
+	}
+	if resp.Edges == nil {
+		t.Error("expected non-nil edges slice")
+	}
+}
+
+// TestEntityGraph_InvalidVault returns 400 for an invalid vault name.
+func TestEntityGraph_InvalidVault(t *testing.T) {
+	srv := newTestServer(t, newTestAuthStore(t))
+
+	req := httptest.NewRequest("GET", "/api/admin/entity-graph?vault=../../etc/passwd", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid vault, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEntityGraph_RequiresAdminAuth verifies 401 is returned when auth is
+// configured and no session cookie is present.
+func TestEntityGraph_RequiresAdminAuth(t *testing.T) {
+	store := newTestAuthStore(t)
+	secret := []byte("test-session-secret-32bytes-ok!!")
+	srv := NewServer("localhost:0", &MockEngine{}, store, secret, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/admin/entity-graph?vault=default", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without session cookie, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEntityGraph_AllowedWithValidSession verifies 200 with a valid session cookie.
+func TestEntityGraph_AllowedWithValidSession(t *testing.T) {
+	store := newTestAuthStore(t)
+	secret := []byte("test-session-secret-32bytes-ok!!")
+	srv := NewServer("localhost:0", &MockEngine{}, store, secret, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+
+	token, err := auth.NewSessionToken("admin", secret)
+	if err != nil {
+		t.Fatalf("NewSessionToken: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/admin/entity-graph?vault=default", nil)
+	req.AddCookie(&http.Cookie{Name: "muninn_session", Value: token})
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 with valid session cookie, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp EntityGraphResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Nodes == nil || resp.Edges == nil {
+		t.Error("expected non-nil nodes and edges")
+	}
+}

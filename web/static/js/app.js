@@ -21,7 +21,6 @@ document.addEventListener('alpine:init', () => {
     workerStats: [],
     liveFeed: [],
     _activityChart: null,
-    _prevEngramCount: 0,
     _prevVaultCount: 0,
 
     // Memories
@@ -508,13 +507,6 @@ document.addEventListener('alpine:init', () => {
 
     _handleLiveMessage(msg) {
       if (msg.type === 'stats_update') {
-        const newCount = msg.data.engramCount || 0;
-
-        // Count-diff: if engrams increased, fetch newest as live feed entry
-        if (this._prevEngramCount > 0 && newCount > this._prevEngramCount) {
-          this._fetchNewestEngram();
-        }
-
         // Vault count-diff: refresh vault list when a vault is added or removed.
         // Guard with > 0 on first message (learn current count without triggering a reload).
         const newVaultCount = msg.data.vaultCount || 0;
@@ -527,32 +519,19 @@ document.addEventListener('alpine:init', () => {
         // the global broadcast values.
         this.loadStats();
       } else if (msg.type === 'memory_added') {
-        this.liveFeed.unshift(msg.data);
-        if (this.liveFeed.length > 20) this.liveFeed.pop();
-      }
-    },
-
-    async _fetchNewestEngram() {
-      try {
-        const data = await this.apiCall(
-          '/api/engrams?vault=' + encodeURIComponent(this.vault) + '&limit=1&offset=0'
-        );
-        const e = (data.engrams || [])[0];
-        if (e) {
-          this.liveFeed.unshift({
-            id: e.id,
-            concept: e.concept,
-            vault: e.vault || this.vault,
-            createdAt: e.created_at,
-          });
+        // Deduplicate: the server broadcasts memory_added for new engrams across all
+        // vaults. Guard against any edge-case double-delivery by ID.
+        if (!this.liveFeed.some(item => item.id === msg.data.id)) {
+          this.liveFeed.unshift(msg.data);
           if (this.liveFeed.length > 20) this.liveFeed.pop();
         }
-      } catch (_) {}
+      }
     },
 
     // ── API helpers ────────────────────────────────────────────────────────
     async apiCall(url, opts = {}) {
       const res = await fetch(url, {
+        credentials: 'same-origin', // always send session cookie for admin endpoints
         headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
         ...opts,
       });
@@ -573,7 +552,6 @@ document.addEventListener('alpine:init', () => {
           storageBytes: data.storage_bytes  || data.storageBytes || 0,
           indexSize:    data.index_size     || data.indexSize    || 0,
         };
-        this._prevEngramCount = this.stats.engramCount;
       } catch (err) {
         this.addNotification('error', 'Stats: ' + err.message);
       }
