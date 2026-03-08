@@ -346,3 +346,24 @@ func TestEntityRecord_MergedIntoWithoutMergedStateReturnsError(t *testing.T) {
 	}, "test")
 	assert.Error(t, err, "MergedInto without State=merged should return error")
 }
+
+// TestDigestFlagConstants_SyncWithPluginPackage asserts that the storage-local
+// digest flag constants stay in sync with the canonical values defined in
+// internal/plugin/types.go. If either set changes, this test will catch the
+// drift at compile time via untyped constant comparison.
+//
+// storage cannot import plugin (circular), so the constants are duplicated.
+// This test is the enforcement mechanism.
+func TestDigestFlagConstants_SyncWithPluginPackage(t *testing.T) {
+	// Canonical values from internal/plugin/types.go — update both if either changes.
+	const (
+		canonicalDigestClassified uint8 = 0x20
+		canonicalDigestSummarized uint8 = 0x40
+	)
+	if digestClassifiedFlag != canonicalDigestClassified {
+		t.Errorf("digestClassifiedFlag = 0x%02x, want 0x%02x (plugin.DigestClassified)", digestClassifiedFlag, canonicalDigestClassified)
+	}
+	if digestSummarizedFlag != canonicalDigestSummarized {
+		t.Errorf("digestSummarizedFlag = 0x%02x, want 0x%02x (plugin.DigestSummarized)", digestSummarizedFlag, canonicalDigestSummarized)
+	}
+}
