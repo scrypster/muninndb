@@ -987,6 +987,7 @@ func runServer() {
 		if err := pluginRegistry.Register(enrichPlugin); err != nil {
 			slog.Warn("failed to register enrich plugin in registry", "err", err)
 		}
+		eng.SetEnrichPlugin(enrichPlugin)
 		if rew, ok := restWrapper.(*rest.RESTEngineWrapper); ok {
 			rew.SetEnricher(enrichPlugin)
 		}
