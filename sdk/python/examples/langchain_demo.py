@@ -35,7 +35,7 @@ from muninn import MuninnClient
 from muninn.langchain import MuninnDBMemory
 
 MUNINN_URL = "http://localhost:8475"
-VAULT = "langchain-demo"
+VAULT = "default"
 
 
 # ── Part 1: Seed some memories directly via the SDK ─────────────────────────
