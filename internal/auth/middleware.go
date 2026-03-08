@@ -1,24 +1,23 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
 
 // VaultAuthMiddleware enforces vault-level API key auth.
-// Vault is read from ?vault= query param (matches existing REST API convention).
+// Vault is resolved from ?vault= query param first, then from JSON request bodies
+// on body-based routes, and finally defaults to the key's vault (or "default"
+// for unauthenticated/public requests) when no explicit vault is provided.
 // Public vaults allow unauthenticated access in observe mode.
 // If a Bearer token is present, it is always validated regardless of vault visibility.
 func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		vault := r.URL.Query().Get("vault")
-		if vault == "" {
-			vault = "default"
-		}
-
 		authHeader := r.Header.Get("Authorization")
 
 		if authHeader != "" {
@@ -26,6 +25,11 @@ func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			key, err := s.ValidateAPIKey(token)
 			if err != nil {
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+				return
+			}
+			vault, resolveErr := resolveRequestVault(r, key.Vault)
+			if resolveErr != nil {
+				writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
 				return
 			}
 			// Enforce vault scoping: the key must be issued for the requested vault.
@@ -46,6 +50,11 @@ func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		vault, resolveErr := resolveRequestVault(r, "default")
+		if resolveErr != nil {
+			writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
+			return
+		}
 		// No key — check if vault is public
 		cfg, err := s.GetVaultConfig(vault)
 		if err != nil || !cfg.Public {
@@ -102,9 +111,10 @@ func (s *Store) VaultAuthWithAdminBypass(secret []byte, next http.HandlerFunc) h
 		// Admin session bypass — authenticated Web UI gets full access to any vault.
 		cookie, err := r.Cookie("muninn_session")
 		if err == nil && validateSessionToken(cookie.Value, secret) {
-			vault := r.URL.Query().Get("vault")
-			if vault == "" {
-				vault = "default"
+			vault, resolveErr := resolveRequestVault(r, "default")
+			if resolveErr != nil {
+				writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
+				return
 			}
 			ctx := context.WithValue(r.Context(), ContextVault, vault)
 			ctx = context.WithValue(ctx, ContextMode, "write")
@@ -123,3 +133,111 @@ func ObserveFromContext(ctx context.Context) bool {
 	return mode == "observe"
 }
 
+func resolveRequestVault(r *http.Request, defaultVault string) (string, error) {
+	queryVault := strings.TrimSpace(r.URL.Query().Get("vault"))
+	bodyVault, err := extractVaultFromRequestBody(r)
+	if err != nil {
+		return "", err
+	}
+	if queryVault != "" {
+		if bodyVault != "" && bodyVault != queryVault {
+			return "", fmt.Errorf("vault in request body must match query parameter")
+		}
+		return queryVault, nil
+	}
+	if bodyVault != "" {
+		return bodyVault, nil
+	}
+	return defaultVault, nil
+}
+
+func extractVaultFromRequestBody(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return "", nil
+	}
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	default:
+		return "", nil
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read request body for vault routing")
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	trimmedBody := bytes.TrimSpace(body)
+	if len(trimmedBody) == 0 {
+		return "", nil
+	}
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if contentType != "" && !strings.HasPrefix(contentType, "application/json") && !looksLikeJSONObject(trimmedBody) {
+		return "", nil
+	}
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmedBody, &envelope); err != nil {
+		return "", fmt.Errorf("invalid request body")
+	}
+
+	var resolved string
+	if raw, ok := envelope["vault"]; ok {
+		vault, err := decodeOptionalVault(raw)
+		if err != nil {
+			return "", err
+		}
+		resolved = vault
+	}
+
+	rawEngrams, ok := envelope["engrams"]
+	if !ok {
+		return resolved, nil
+	}
+
+	var items []struct {
+		Vault string `json:"vault"`
+	}
+	if err := json.Unmarshal(rawEngrams, &items); err != nil {
+		return "", fmt.Errorf("invalid request body")
+	}
+
+	for _, item := range items {
+		vault := strings.TrimSpace(item.Vault)
+		if vault == "" {
+			continue
+		}
+		if resolved == "" {
+			resolved = vault
+			continue
+		}
+		if resolved != vault {
+			return "", fmt.Errorf("request body references multiple vaults")
+		}
+	}
+	return resolved, nil
+}
+
+func looksLikeJSONObject(body []byte) bool {
+	return len(body) > 0 && body[0] == '{'
+}
+
+func decodeOptionalVault(raw json.RawMessage) (string, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", nil
+	}
+	var vault string
+	if err := json.Unmarshal(raw, &vault); err != nil {
+		return "", fmt.Errorf("invalid request body")
+	}
+	return strings.TrimSpace(vault), nil
+}
+
+func writeVaultRequestError(w http.ResponseWriter, status int, err error) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	payload, _ := json.Marshal(map[string]string{
+		"error": err.Error(),
+		"code":  "INVALID_VAULT_REQUEST",
+	})
+	w.Write(payload)
+}

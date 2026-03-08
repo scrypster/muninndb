@@ -1491,7 +1491,7 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 //
 // Query params:
 //
-//	vault     — vault name (default: "default")
+//	vault     — vault name (optional; must match the authenticated vault when provided)
 //	context   — (repeatable) subscription context strings for semantic matching
 //	threshold — float32 score threshold, default 0.5
 //	on_write  — "true"|"1" to receive a push on every qualifying write
@@ -1500,10 +1500,7 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	vault := q.Get("vault")
-	if vault == "" {
-		vault = "default"
-	}
+	vault := ctxVault(r)
 	contextStrs := q["context"]
 
 	threshold := float32(0.5)
