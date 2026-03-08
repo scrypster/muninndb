@@ -197,6 +197,15 @@ func (tc *TransitionCache) flushLoop() {
 
 // flushAndEvict writes dirty sources to Pebble and evicts cold entries.
 func (tc *TransitionCache) flushAndEvict() {
+	defer func() {
+		if r := recover(); r != nil {
+			// Swallow closed-DB panics from Pebble during engine shutdown.
+			if IsClosedPanic(r) {
+				return
+			}
+			slog.Error("transition cache: flush panicked", "panic", r)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := tc.Flush(ctx); err != nil {

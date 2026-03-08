@@ -37,7 +37,7 @@ func TestIsClosedPanic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isClosedPanic(tt.val)
+			got := IsClosedPanic(tt.val)
 			if got != tt.want {
 				t.Errorf("isClosedPanic(%v) = %v, want %v", tt.val, got, tt.want)
 			}

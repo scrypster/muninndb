@@ -2,11 +2,9 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
 	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -88,7 +86,7 @@ func (e *Engine) runClone(job *vaultjob.Job, wsSource, wsTarget [8]byte, newName
 		if r := recover(); r != nil {
 			// Swallow closed-DB panics — can occur if the 30s Stop() timeout
 			// expires and Pebble is closed before this goroutine exits.
-			if err, ok := r.(error); ok && errors.Is(err, pebble.ErrClosed) {
+			if storage.IsClosedPanic(r) {
 				e.jobManager.Fail(job, fmt.Errorf("engine closed during job"))
 				return
 			}
@@ -217,7 +215,7 @@ func (e *Engine) runMerge(job *vaultjob.Job, wsSource, wsTarget [8]byte, sourceV
 		if r := recover(); r != nil {
 			// Swallow closed-DB panics — can occur if the 30s Stop() timeout
 			// expires and Pebble is closed before this goroutine exits.
-			if err, ok := r.(error); ok && errors.Is(err, pebble.ErrClosed) {
+			if storage.IsClosedPanic(r) {
 				e.jobManager.Fail(job, fmt.Errorf("engine closed during job"))
 				return
 			}

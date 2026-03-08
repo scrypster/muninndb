@@ -1,8 +1,10 @@
 package fts
 
 import (
+	"fmt"
 	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,6 +70,16 @@ func NewWorker(idx *Index) *Worker {
 	for range n {
 		go func() {
 			defer w.wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					// Swallow closed-DB panics that surface as panics in the FTS
+					// indexing path when Pebble is torn down before all goroutines exit.
+					if ftsIsClosedPanic(r) || w.stopped.Load() {
+						return
+					}
+					slog.Error("fts: worker goroutine panicked", "panic", r)
+				}
+			}()
 			w.run()
 		}()
 	}
@@ -155,4 +167,13 @@ func (w *Worker) flush(jobs []IndexJob) {
 			)
 		}
 	}
+}
+
+// ftsIsClosedPanic reports whether a recovered panic value represents a
+// closed-DB condition from Pebble. Inlined here to avoid an import cycle
+// with the storage package. Must stay in sync with storage.IsClosedPanic.
+func ftsIsClosedPanic(r any) bool {
+	s := fmt.Sprintf("%v", r)
+	return strings.Contains(s, "pebble: closed") ||
+		strings.Contains(s, "pebble/record: closed")
 }

@@ -1,12 +1,10 @@
 package engine
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
 	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -107,7 +105,7 @@ func (e *Engine) runImport(job *vaultjob.Job, wsTarget [8]byte, vaultName string
 		if rec := recover(); rec != nil {
 			// Swallow closed-DB panics — can occur if the 30s Stop() timeout
 			// expires and Pebble is closed before this goroutine exits.
-			if err, ok := rec.(error); ok && errors.Is(err, pebble.ErrClosed) {
+			if storage.IsClosedPanic(rec) {
 				e.jobManager.Fail(job, fmt.Errorf("engine closed during job"))
 				return
 			}

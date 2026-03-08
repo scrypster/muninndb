@@ -2,12 +2,11 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 // StartReembedVault clears stale embeddings and digest flags for the named vault,
@@ -72,7 +71,7 @@ func (e *Engine) runReembed(job *vaultjob.Job, ws [8]byte, vaultName string) {
 		if r := recover(); r != nil {
 			// Swallow closed-DB panics — can occur if the 30s Stop() timeout
 			// expires and Pebble is closed before this goroutine exits.
-			if err, ok := r.(error); ok && errors.Is(err, pebble.ErrClosed) {
+			if storage.IsClosedPanic(r) {
 				e.jobManager.Fail(job, fmt.Errorf("engine closed during job"))
 				return
 			}

@@ -2,33 +2,12 @@ package storage
 
 import (
 	"errors"
-	"fmt"
 	"log/slog"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
 )
-
-// isClosedPanic reports whether the recovered panic value represents a
-// closed-DB condition from Pebble. Pebble surfaces this in several ways:
-//
-//   - An error value wrapping pebble.ErrClosed ("pebble: closed")
-//   - A formatted string from applyInternal containing "pebble: closed"
-//   - A string from the record package: "pebble/record: closed LogWriter"
-//
-// All three represent the same unrecoverable state: the DB has been closed.
-func isClosedPanic(r any) bool {
-	if err, ok := r.(error); ok {
-		return errors.Is(err, pebble.ErrClosed)
-	}
-	s := fmt.Sprintf("%v", r)
-	// "pebble: closed" — applyInternal / standard ErrClosed string path.
-	// "pebble/record: closed" — LogWriter torn down before the goroutine exits.
-	return strings.Contains(s, pebble.ErrClosed.Error()) ||
-		strings.Contains(s, "pebble/record: closed")
-}
 
 const walSyncInterval = 10 * time.Millisecond
 
@@ -125,7 +104,7 @@ func (s *walSyncer) doSync() {
 			// closed-db condition as a panic (not an error) when the WAL writer
 			// is already torn down. This is safe to ignore in all cases because
 			// the db is already in an unrecoverable state.
-			if isClosedPanic(r) {
+			if IsClosedPanic(r) {
 				return
 			}
 			if s.stopped.Load() {

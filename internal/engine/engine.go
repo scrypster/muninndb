@@ -405,6 +405,14 @@ func (e *Engine) runCoherenceFlush() {
 
 // flushCoherence serializes all vault coherence counters to Pebble.
 func (e *Engine) flushCoherence() {
+	defer func() {
+		if r := recover(); r != nil {
+			if storage.IsClosedPanic(r) {
+				return
+			}
+			slog.Error("engine: coherence flush panicked", "panic", r)
+		}
+	}()
 	if e.coherence == nil {
 		return
 	}
@@ -2626,6 +2634,13 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 // MaxEngrams, RetentionDays, and AssocDecayFactor policies. Runs every 60s with ±5s jitter.
 func (e *Engine) runPruneWorker() {
 	defer close(e.pruneDone)
+	defer func() {
+		if r := recover(); r != nil {
+			if !storage.IsClosedPanic(r) {
+				slog.Error("engine: prune worker panicked", "panic", r)
+			}
+		}
+	}()
 	jitter := time.Duration(rand.Intn(10)) * time.Second
 	timer := time.NewTimer(60*time.Second + jitter)
 	defer timer.Stop()
@@ -2667,6 +2682,13 @@ func (e *Engine) runPruneWorker() {
 // startup (to clean up existing accumulation) and then every 24 hours.
 func (e *Engine) runIdempotencySweep() {
 	defer close(e.idempotencySweepDone)
+	defer func() {
+		if r := recover(); r != nil {
+			if !storage.IsClosedPanic(r) {
+				slog.Error("engine: idempotency sweep panicked", "panic", r)
+			}
+		}
+	}()
 	const retention = 30 * 24 * time.Hour
 	sweep := func() {
 		n, err := e.store.PurgeExpiredIdempotency(e.stopCtx, retention)
@@ -2697,6 +2719,13 @@ func (e *Engine) runIdempotencySweep() {
 // daysSinceLastActivation > 1095, and restoredAt == 0 (never restored).
 func (e *Engine) runArchiveGCWorker() {
 	defer close(e.archiveGCDone)
+	defer func() {
+		if r := recover(); r != nil {
+			if !storage.IsClosedPanic(r) {
+				slog.Error("engine: archive GC worker panicked", "panic", r)
+			}
+		}
+	}()
 	ticker := time.NewTicker(7 * 24 * time.Hour)
 	defer ticker.Stop()
 	for {
@@ -2729,6 +2758,13 @@ func (e *Engine) GetNoveltyDrops() int64 {
 // scans and REFINES association writes entirely off the synchronous write hot path.
 func (e *Engine) runNoveltyWorker() {
 	defer close(e.noveltyDone)
+	defer func() {
+		if r := recover(); r != nil {
+			if !storage.IsClosedPanic(r) {
+				slog.Error("engine: novelty worker panicked", "panic", r)
+			}
+		}
+	}()
 	for {
 		select {
 		case <-e.stopCtx.Done():
