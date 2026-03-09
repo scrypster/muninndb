@@ -80,8 +80,6 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		return &ReplayEnrichmentResult{
 			Processed: 0,
 			Skipped:   0,
-			Failed:    0,
-			Remaining: 0,
 			StagesRun: validStages,
 			DryRun:    dryRun,
 		}, nil
@@ -112,8 +110,6 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		return &ReplayEnrichmentResult{
 			Processed: needed,
 			Skipped:   skipped,
-			Failed:    0,
-			Remaining: 0,
 			StagesRun: validStages,
 			DryRun:    true,
 		}, nil
@@ -134,17 +130,14 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		}
 
 		// Check if the context has been cancelled (deadline exceeded, manual cancel, etc.).
-		// Count all remaining non-nil engrams as Remaining and return early.
+		// Count all remaining non-nil engrams and return early.
 		if ctx.Err() != nil {
-			remaining := 0
-			for _, re := range engrams[i:] {
-				if re != nil {
-					remaining++
-				}
-			}
 			return &ReplayEnrichmentResult{
-				Processed: processed, Skipped: skipped, Failed: failed,
-				Remaining: remaining, StagesRun: validStages, DryRun: false,
+				Processed: processed,
+				Skipped:   skipped,
+				Failed:    failed,
+				Remaining: countNonNilEngrams(engrams[i:]),
+				StagesRun: validStages,
 			}, nil
 		}
 
@@ -256,10 +249,19 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		Processed: processed,
 		Skipped:   skipped,
 		Failed:    failed,
-		Remaining: 0,
 		StagesRun: validStages,
-		DryRun:    false,
 	}, nil
+}
+
+// countNonNilEngrams returns the number of non-nil entries in a slice of engram pointers.
+func countNonNilEngrams(engrams []*storage.Engram) int {
+	n := 0
+	for _, e := range engrams {
+		if e != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // SetEnrichPlugin registers an EnrichPlugin for use by ReplayEnrichment.

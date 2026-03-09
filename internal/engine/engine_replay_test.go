@@ -32,6 +32,31 @@ func (m *mockEnrichPlugin) Enrich(ctx context.Context, eng *storage.Engram) (*pl
 	}, nil
 }
 
+// writeTestEngrams creates n engrams in the given vault and returns the engine.
+func writeTestEngrams(t *testing.T, eng *Engine, ctx context.Context, vault string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		_, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   vault,
+			Content: fmt.Sprintf("content %d", i),
+			Concept: fmt.Sprintf("concept %d", i),
+		})
+		if err != nil {
+			t.Fatalf("Write[%d]: %v", i, err)
+		}
+	}
+}
+
+// assertResultInvariant checks that Processed + Skipped + Failed + Remaining == wantTotal.
+func assertResultInvariant(t *testing.T, result *ReplayEnrichmentResult, wantTotal int) {
+	t.Helper()
+	total := result.Processed + result.Skipped + result.Failed + result.Remaining
+	if total != wantTotal {
+		t.Errorf("invariant violated: Processed(%d) + Skipped(%d) + Failed(%d) + Remaining(%d) = %d, want %d",
+			result.Processed, result.Skipped, result.Failed, result.Remaining, total, wantTotal)
+	}
+}
+
 // TestReplayEnrichment_DryRunNoModification verifies that dry_run=true returns
 // a count of what would be processed without actually writing enrichment data.
 func TestReplayEnrichment_DryRunNoModification(t *testing.T) {
@@ -328,20 +353,9 @@ func TestReplayEnrichment_FailedCount(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
+	writeTestEngrams(t, eng, ctx, "default", 3)
 
-	// Write 3 engrams.
-	for i := 0; i < 3; i++ {
-		_, err := eng.Write(ctx, &mbp.WriteRequest{
-			Vault:   "default",
-			Content: fmt.Sprintf("content %d", i),
-			Concept: fmt.Sprintf("concept %d", i),
-		})
-		if err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-	}
-
-	// Mock enrichFn that fails on the 2nd call.
+	// Mock that fails on the 2nd call.
 	callCount := 0
 	mock := &mockEnrichPlugin{
 		enrichFn: func(_ context.Context, _ *storage.Engram) (*plugin.EnrichmentResult, error) {
@@ -371,13 +385,7 @@ func TestReplayEnrichment_FailedCount(t *testing.T) {
 	if result.Remaining != 0 {
 		t.Errorf("Remaining: got %d, want 0", result.Remaining)
 	}
-
-	// Invariant: Processed + Skipped + Failed + Remaining == total engrams fetched
-	total := result.Processed + result.Skipped + result.Failed + result.Remaining
-	if total != 3 {
-		t.Errorf("invariant violated: Processed(%d) + Skipped(%d) + Failed(%d) + Remaining(%d) = %d, want 3",
-			result.Processed, result.Skipped, result.Failed, result.Remaining, total)
-	}
+	assertResultInvariant(t, result, 3)
 }
 
 // TestReplayEnrichment_ContextCancellation verifies that when the context is
@@ -387,24 +395,13 @@ func TestReplayEnrichment_ContextCancellation(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-
-	// Write 5 engrams.
-	for i := 0; i < 5; i++ {
-		_, err := eng.Write(ctx, &mbp.WriteRequest{
-			Vault:   "default",
-			Content: fmt.Sprintf("content %d", i),
-			Concept: fmt.Sprintf("concept %d", i),
-		})
-		if err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-	}
+	writeTestEngrams(t, eng, ctx, "default", 5)
 
 	// Create a cancellable context for the replay call.
 	replayCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Mock enrichFn that cancels the context after 2 successful calls.
+	// Mock that cancels the context after 2 successful calls.
 	callCount := 0
 	mock := &mockEnrichPlugin{
 		enrichFn: func(_ context.Context, _ *storage.Engram) (*plugin.EnrichmentResult, error) {
@@ -431,13 +428,7 @@ func TestReplayEnrichment_ContextCancellation(t *testing.T) {
 	if result.Remaining <= 0 {
 		t.Errorf("Remaining: got %d, want > 0", result.Remaining)
 	}
-
-	// Invariant: Processed + Skipped + Failed + Remaining == total engrams fetched
-	total := result.Processed + result.Skipped + result.Failed + result.Remaining
-	if total != 5 {
-		t.Errorf("invariant violated: Processed(%d) + Skipped(%d) + Failed(%d) + Remaining(%d) = %d, want 5",
-			result.Processed, result.Skipped, result.Failed, result.Remaining, total)
-	}
+	assertResultInvariant(t, result, 5)
 }
 
 // TestReplayEnrichment_ContextAlreadyExpired verifies that when the context is
@@ -447,22 +438,11 @@ func TestReplayEnrichment_ContextAlreadyExpired(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-
-	// Write 3 engrams.
-	for i := 0; i < 3; i++ {
-		_, err := eng.Write(ctx, &mbp.WriteRequest{
-			Vault:   "default",
-			Content: fmt.Sprintf("content %d", i),
-			Concept: fmt.Sprintf("concept %d", i),
-		})
-		if err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-	}
+	writeTestEngrams(t, eng, ctx, "default", 3)
 
 	// Create an already-cancelled context.
 	expiredCtx, cancel := context.WithCancel(ctx)
-	cancel() // immediately cancel
+	cancel()
 
 	mock := &mockEnrichPlugin{}
 	eng.SetEnrichPlugin(mock)
@@ -481,11 +461,5 @@ func TestReplayEnrichment_ContextAlreadyExpired(t *testing.T) {
 	if result.Failed != 0 {
 		t.Errorf("Failed: got %d, want 0", result.Failed)
 	}
-
-	// Invariant
-	total := result.Processed + result.Skipped + result.Failed + result.Remaining
-	if total != 3 {
-		t.Errorf("invariant violated: Processed(%d) + Skipped(%d) + Failed(%d) + Remaining(%d) = %d, want 3",
-			result.Processed, result.Skipped, result.Failed, result.Remaining, total)
-	}
+	assertResultInvariant(t, result, 3)
 }
