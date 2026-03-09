@@ -64,6 +64,7 @@ document.addEventListener('alpine:init', () => {
     // Graph
     graphLoaded: false,
     graphTab: 'memory',
+    graphLabelMode: 'full', // 'full' | 'short' | 'none'
     _cy: null,
     entityGraphLoaded: false,
     entityGraphStatus: '',
@@ -301,14 +302,22 @@ document.addEventListener('alpine:init', () => {
       try {
         const h = await fetch('/api/health').then(r => r.json());
         this.appVersion = h.version || '';
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[muninn] health check failed:', err);
+      }
 
       // Load initial data (gated on auth check)
       await this.checkAuth();
 
-      // Fetch vault engram counts whenever the vault picker modal opens.
+      // Fetch vault list and engram counts whenever the vault picker modal opens.
+      // loadVaults() was previously missing here — the vault list would only
+      // refresh at login/auth-check, so newly created vaults wouldn't appear
+      // until page reload.
       this.$watch('vaultModalOpen', (open) => {
-        if (open) this.loadVaultStats();
+        if (open) {
+          this.loadVaults();
+          this.loadVaultStats();
+        }
       });
     },
 
@@ -500,7 +509,9 @@ document.addEventListener('alpine:init', () => {
         try {
           const msg = JSON.parse(e.data);
           this._handleLiveMessage(msg);
-        } catch (_) {}
+        } catch (err) {
+          console.warn('[muninn] failed to process live event:', err, e.data);
+        }
       };
 
       this._es = es;
@@ -528,6 +539,15 @@ document.addEventListener('alpine:init', () => {
         // the global broadcast values.
         this.loadStats();
       } else if (msg.type === 'memory_added') {
+        // Guard: skip malformed events missing required fields.
+        // A missing or undefined id causes Alpine x-for to use 'undefined' as
+        // a key, corrupting DOM anchor tracking and producing the
+        // "can't access property 'after', v is undefined" crash that cascades
+        // to break the entire Alpine reactivity system.
+        if (!msg.data || !msg.data.id) {
+          console.warn('[muninn] live feed received memory_added with missing id — skipping', msg.data);
+          return;
+        }
         // Deduplicate: guard against double-delivery of the same engram ID.
         // Replace the array reference (instead of in-place unshift+pop) so that
         // Alpine.js x-for can perform a clean diff — in-place mutations of both
@@ -578,7 +598,9 @@ document.addEventListener('alpine:init', () => {
           { name: 'Contradict',  state: data.contradict?.state ?? 0 },
           { name: 'Confidence',  state: data.confidence?.state ?? 0 },
         ];
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[muninn] worker stats failed:', err);
+      }
     },
 
     workerStateName(state) {
@@ -1148,18 +1170,22 @@ document.addEventListener('alpine:init', () => {
         const nodesToRender = filteredEngrams.length > 0 ? filteredEngrams : engrams;
 
         // Build node elements
-        const nodeElements = nodesToRender.map(e => ({
-          data: {
-            id: e.id,
-            label: e.concept || e.id.slice(0, 8),
-            size: connectedNodeIds.has(e.id) ? 20 + (e.confidence || 0.5) * 20 : 12,
-            color: !connectedNodeIds.has(e.id) ? '#64748b'
-                 : (e.confidence || 0) > 0.7 ? '#06b6d4'
-                 : (e.confidence || 0) > 0.4 ? '#a855f7' : '#eab308',
-            orphan: !connectedNodeIds.has(e.id),
-            snippet: (e.content || '').slice(0, 80),
-          },
-        }));
+        const nodeElements = nodesToRender.map(e => {
+          const fullLabel = e.concept || e.id.slice(0, 8);
+          return {
+            data: {
+              id: e.id,
+              label: fullLabel,
+              shortLabel: fullLabel.length > 20 ? fullLabel.slice(0, 18) + '…' : fullLabel,
+              size: connectedNodeIds.has(e.id) ? 20 + (e.confidence || 0.5) * 20 : 12,
+              color: !connectedNodeIds.has(e.id) ? '#64748b'
+                   : (e.confidence || 0) > 0.7 ? '#06b6d4'
+                   : (e.confidence || 0) > 0.4 ? '#a855f7' : '#eab308',
+              orphan: !connectedNodeIds.has(e.id),
+              snippet: (e.content || '').slice(0, 80),
+            },
+          };
+        });
 
         const elements = [...nodeElements, ...edges];
 
@@ -1207,13 +1233,47 @@ document.addEventListener('alpine:init', () => {
               style: { 'border-width': 3, 'border-color': '#06b6d4' },
             },
           ],
-          layout: { name: 'fcose', animate: true, animationDuration: 600 },
+          layout: {
+            name: 'fcose',
+            animate: true,
+            animationDuration: 600,
+            randomize: true,
+            padding: 40,
+            idealEdgeLength: 120,
+            nodeRepulsion: 6500,
+            edgeElasticity: 0.45,
+            gravity: 0.2,
+            numIter: 2500,
+            tile: true,
+            tilingPaddingVertical: 30,
+            tilingPaddingHorizontal: 30,
+          },
           wheelSensitivity: 0.3,
         });
 
-        // Fade edges in after nodes settle into position (fcose layout: 600ms).
-        // cy.one() fires once and removes itself — does not re-trigger on layout re-runs.
+        // Apply current label mode to the freshly initialised graph.
+        this._applyGraphLabelStyle();
+
+        // Resize Cytoscape when the container changes size (sidebar collapse,
+        // window resize, etc). Only resize() here — fit() is handled by layoutstop
+        // to avoid zooming in on pre-layout node positions.
+        if (this._cyResizeObserver) this._cyResizeObserver.disconnect();
+        const cyContainer = document.getElementById('cy');
+        if (cyContainer && typeof ResizeObserver !== 'undefined') {
+          let _cyResizeTimer = null;
+          this._cyResizeObserver = new ResizeObserver(() => {
+            clearTimeout(_cyResizeTimer);
+            _cyResizeTimer = setTimeout(() => {
+              if (this._cy) this._cy.resize();
+            }, 150);
+          });
+          this._cyResizeObserver.observe(cyContainer);
+        }
+
+        // Fade edges in and fit view after nodes settle (fcose layout: 600ms).
+        // cy.one() fires once and removes itself — does not re-trigger on re-runs.
         this._cy.one('layoutstop', () => {
+          this._cy.fit(undefined, 40);
           this._cy.edges().animate({
             style: { opacity: 0.6 },
             duration: 250,
@@ -1247,6 +1307,22 @@ document.addEventListener('alpine:init', () => {
     },
     graphFit() {
       if (this._cy) { this._cy.fit(); }
+    },
+    graphCycleLabel() {
+      const modes = ['full', 'short', 'none'];
+      const next = modes[(modes.indexOf(this.graphLabelMode) + 1) % modes.length];
+      this.graphLabelMode = next;
+      this._applyGraphLabelStyle();
+    },
+    _applyGraphLabelStyle() {
+      if (!this._cy) return;
+      const mode = this.graphLabelMode;
+      this._cy.nodes().forEach(node => {
+        const lbl = mode === 'full' ? node.data('label')
+                  : mode === 'short' ? node.data('shortLabel')
+                  : '';
+        node.style('label', lbl);
+      });
     },
 
     // ── Entity Graph ───────────────────────────────────────────────────────
@@ -1805,7 +1881,9 @@ document.addEventListener('alpine:init', () => {
         try {
           const secResp = await fetch('/api/admin/cluster/token', { credentials: 'same-origin' });
           if (secResp.ok) this.clusterSecurityPosture = await secResp.json();
-        } catch (_) {}
+        } catch (err) {
+          console.warn('[muninn] cluster security posture fetch failed:', err);
+        }
         await Promise.all([
           this._loadClusterNodes(),
           this._loadClusterHealth(),
@@ -1838,19 +1916,25 @@ document.addEventListener('alpine:init', () => {
         if (prevEpoch !== null && newEpoch !== prevEpoch && newEpoch > 0) {
           this._recordFailoverEvent(newEpoch, health);
         }
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[muninn] cluster nodes fetch failed:', err);
+      }
     },
 
     async _loadClusterHealth() {
       try {
         this.clusterHealth = await this.apiCall('/v1/cluster/health');
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[muninn] cluster health fetch failed:', err);
+      }
     },
 
     async _loadClusterCCS() {
       try {
         this.clusterCCS = await this.apiCall('/v1/cluster/cognitive/consistency');
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[muninn] cluster CCS fetch failed:', err);
+      }
     },
 
     _nodeStatus(node, health) {
@@ -2018,7 +2102,9 @@ document.addEventListener('alpine:init', () => {
           const data = JSON.parse(e.data);
           this.clusterFeed.unshift({ ...data, ts: new Date().toLocaleTimeString() });
           if (this.clusterFeed.length > 200) this.clusterFeed.pop();
-        } catch (_) {}
+        } catch (err) {
+          console.warn('[muninn] cluster feed parse error:', err, e.data);
+        }
       });
       this._clusterFeedSSE = es;
     },
@@ -2035,8 +2121,9 @@ document.addEventListener('alpine:init', () => {
       try {
         const resp = await fetch('/api/admin/cluster/token', { credentials: 'same-origin' });
         if (resp.ok) this.clusterToken = await resp.json();
-      } catch (_) {}
-      finally { this.clusterTokenLoading = false; }
+      } catch (err) {
+        console.warn('[muninn] cluster token load failed:', err);
+      } finally { this.clusterTokenLoading = false; }
     },
 
     async regenerateToken() {
@@ -2047,7 +2134,9 @@ document.addEventListener('alpine:init', () => {
           credentials: 'same-origin',
         });
         if (resp.ok) this.clusterToken = await resp.json();
-      } catch (_) {}
+      } catch (err) {
+        this.addNotification('error', 'Token regeneration failed: ' + err.message);
+      }
     },
 
     copyToken() {
@@ -2071,8 +2160,9 @@ document.addEventListener('alpine:init', () => {
           this.clusterSettingsSaved = true;
           setTimeout(() => { this.clusterSettingsSaved = false; }, 2500);
         }
-      } catch (_) {}
-      finally { this.clusterSettingsSaving = false; }
+      } catch (err) {
+        this.addNotification('error', 'Failed to save cluster settings: ' + err.message);
+      } finally { this.clusterSettingsSaving = false; }
     },
 
     async rotateTLS() {

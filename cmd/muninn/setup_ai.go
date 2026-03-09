@@ -420,114 +420,163 @@ func configureWindsurf(mcpURL, token string) error {
 	return nil
 }
 
-// openClawMCPEntry returns the JSON map for muninn's OpenClaw HTTP MCP entry.
-// OpenClaw reads MCP servers from provider.mcpServers; root-level mcpServers is
-// not a valid key and causes a fatal config validation error on startup.
-// The streamable-http transport connects directly to the running muninn daemon.
-func openClawMCPEntry(mcpURL, token string) map[string]any {
-	entry := map[string]any{
-		"transport": "streamable-http",
-		"url":       mcpURL,
+// cleanupOpenClawBadConfig removes the provider.mcpServers.muninn entry written
+// by v0.3.13-alpha, which caused a fatal "Unrecognized key: provider" startup
+// error in OpenClaw. If the file does not exist or has no provider key, this
+// is a no-op. Errors are silently ignored — cleanup is best-effort.
+func cleanupOpenClawBadConfig() {
+	path := openClawConfigPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // file doesn't exist — nothing to clean up
 	}
-	if token != "" {
-		entry["headers"] = map[string]any{
-			"Authorization": "Bearer " + token,
-		}
+	var cfg map[string]any
+	if json.Unmarshal(data, &cfg) != nil {
+		return // unreadable — leave it alone
 	}
-	return entry
-}
-
-// mergeOpenClawMCP upserts muninn into cfg["provider"]["mcpServers"],
-// preserving all other entries. OpenClaw validates root-level mcpServers as
-// an unrecognized key; MCP servers must be nested under provider.mcpServers.
-func mergeOpenClawMCP(cfg map[string]any, mcpURL, token string) {
 	provider, ok := cfg["provider"].(map[string]any)
 	if !ok {
-		provider = map[string]any{}
+		return // no provider key — already clean
 	}
 	servers, ok := provider["mcpServers"].(map[string]any)
 	if !ok {
-		servers = map[string]any{}
+		return
 	}
-	servers["muninn"] = openClawMCPEntry(mcpURL, token)
-	provider["mcpServers"] = servers
-	cfg["provider"] = provider
-}
-
-// configureOpenClaw writes the muninn HTTP MCP entry into OpenClaw's openclaw.json
-// under provider.mcpServers (the valid path — root-level mcpServers is rejected).
-func configureOpenClaw(mcpURL, token string) error {
-	path := openClawConfigPath()
-
-	// Peek at existing config to generate an accurate summary message.
-	hadProviderMCP := false
-	if existing, err := os.ReadFile(path); err == nil {
-		var peek map[string]any
-		if json.Unmarshal(existing, &peek) == nil {
-			if p, ok := peek["provider"].(map[string]any); ok {
-				hadProviderMCP = p["mcpServers"] != nil
-			}
-		}
+	if _, hasMuninn := servers["muninn"]; !hasMuninn {
+		return // our entry isn't there — nothing to do
 	}
-
-	_, err := writeAIToolConfig(path, func(cfg map[string]any) {
-		mergeOpenClawMCP(cfg, mcpURL, token)
-	})
+	delete(servers, "muninn")
+	if len(servers) == 0 {
+		delete(provider, "mcpServers")
+	}
+	if len(provider) == 0 {
+		delete(cfg, "provider")
+	}
+	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return err
+		return
 	}
-
-	var summary string
-	if hadProviderMCP {
-		summary = "updated provider.mcpServers.muninn in existing config (other servers preserved)"
-	} else {
-		summary = "added provider.mcpServers.muninn to config"
+	if err := os.WriteFile(path, append(out, '\n'), 0644); err != nil {
+		return
 	}
-	fmt.Printf("  ✓ OpenClaw: %s\n    %s\n", summary, path)
-	fmt.Println("  → Restart OpenClaw to activate MuninnDB memory")
-	return nil
+	fmt.Printf("  ✓ OpenClaw: removed stale provider.mcpServers.muninn from %s\n", path)
 }
 
 // openClawSkillContent is the SKILL.md content that teaches OpenClaw how to
-// use MuninnDB for persistent memory across sessions.
-// The YAML frontmatter is required for OpenClaw to recognize the skill.
+// use MuninnDB for persistent memory across sessions via its REST API.
+// OpenClaw has no native MCP support; all memory operations use curl over HTTP.
 const openClawSkillContent = `---
 name: muninndb-memory
-description: Persistent cognitive memory for AI agents — store and recall memories across sessions using MuninnDB.
-version: 1.0.0
+description: Persistent cognitive memory for AI agents — store and recall memories across sessions using MuninnDB's REST API via curl.
+version: 2.0.0
 metadata:
   openclaw:
     requires:
       bins:
-        - muninn
+        - curl
     emoji: "🧠"
     homepage: https://github.com/scrypster/muninndb
 ---
 
 # MuninnDB Memory
 
-MuninnDB is your persistent memory system, available via the "muninn" MCP server.
+MuninnDB is your persistent memory system. It runs locally and exposes a REST
+API at http://127.0.0.1:8475. Use curl via the exec/bash tool for all memory
+operations.
 
-## When to use memory
+## One-time setup
 
-- Store important facts, decisions, user preferences, and project context
-- Recall relevant memories at the start of each conversation
-- Be proactive — if the user shares something worth remembering, store it without being asked
+If MuninnDB requires an API key (set up during ` + "`muninn init`" + `):
 
-## Available tools
+` + "```" + `bash
+muninn api-key create --vault default --label openclaw
+# Copy the token (shown once) and store it:
+echo 'mk_YOUR_TOKEN_HERE' > ~/.muninn/openclaw.key && chmod 600 ~/.muninn/openclaw.key
+` + "```" + `
 
-- **muninn_remember** — store a memory (vault, concept, content)
-- **muninn_recall** — search memories by context (vault, context)
-- **muninn_read** — read a specific memory by ID (vault, id)
-- **muninn_link** — link two related memories (vault, source_id, target_id)
-- **muninn_guide** — learn MuninnDB best practices (call this on first connect)
-- **muninn_remember_batch** — store multiple memories in one call (vault, memories[])
+If no admin password was set, no API key is needed.
+
+## Auth helper
+
+Use this at the top of any memory operation:
+
+` + "```" + `bash
+MUNINN_URL="http://127.0.0.1:8475"
+MUNINN_TOKEN=$(cat ~/.muninn/openclaw.key 2>/dev/null || echo "")
+MUNINN_AUTH=""
+if [ -n "$MUNINN_TOKEN" ]; then MUNINN_AUTH="-H \"Authorization: Bearer $MUNINN_TOKEN\""; fi
+` + "```" + `
+
+## Operations
+
+### Store a memory
+
+` + "```" + `bash
+curl -s -X POST "$MUNINN_URL/api/engrams" \
+  -H "Content-Type: application/json" \
+  ${MUNINN_AUTH:+$MUNINN_AUTH} \
+  -d '{"concept":"<short label>","content":"<full text>","vault":"default"}'
+# Returns: {"id":"<ULID>","created_at":<unix_ns>}
+` + "```" + `
+
+### Recall — semantic search
+
+` + "```" + `bash
+curl -s -X POST "$MUNINN_URL/api/activate" \
+  -H "Content-Type: application/json" \
+  ${MUNINN_AUTH:+$MUNINN_AUTH} \
+  -d '{"context":["<search term>"],"vault":"default","max_results":10}'
+# Returns ranked array of matching memories with scores
+` + "```" + `
+
+### Read a memory by ID
+
+` + "```" + `bash
+curl -s "$MUNINN_URL/api/engrams/<ID>?vault=default" \
+  ${MUNINN_AUTH:+$MUNINN_AUTH}
+` + "```" + `
+
+### Link two memories
+
+` + "```" + `bash
+curl -s -X POST "$MUNINN_URL/api/link" \
+  -H "Content-Type: application/json" \
+  ${MUNINN_AUTH:+$MUNINN_AUTH} \
+  -d '{"source_id":"<ID1>","target_id":"<ID2>","rel_type":1,"vault":"default"}'
+` + "```" + `
+
+### Batch store
+
+` + "```" + `bash
+curl -s -X POST "$MUNINN_URL/api/engrams/batch" \
+  -H "Content-Type: application/json" \
+  ${MUNINN_AUTH:+$MUNINN_AUTH} \
+  -d '{"engrams":[{"concept":"label1","content":"text1","vault":"default"},{"concept":"label2","content":"text2","vault":"default"}]}'
+` + "```" + `
+
+### Guide — best practices
+
+` + "```" + `bash
+curl -s "$MUNINN_URL/api/guide?vault=default" \
+  ${MUNINN_AUTH:+$MUNINN_AUTH} | python3 -c "import sys,json; print(json.load(sys.stdin).get('guide',''))"
+` + "```" + `
 
 ## Usage pattern
 
-At the start of each session, call muninn_recall with relevant context to surface
-what you know. When the user shares preferences, facts, or decisions, call
-muninn_remember. Use vault "default" for general memories.
+1. **Session start** — recall relevant context:
+   ` + "`" + `{"context":["user preferences","current project","recent decisions"],"max_results":8}` + "`" + `
+2. **During session** — when the user shares facts, decisions, or preferences, store them immediately.
+3. **Be proactive** — don't wait to be asked. If something is worth remembering, store it.
+4. Use vault ` + "`" + `"default"` + "`" + ` unless the user specifies otherwise.
+
+## Troubleshooting
+
+If curl returns a connection error, MuninnDB is not running:
+` + "```" + `bash
+muninn start  # start the daemon
+` + "```" + `
+
+If you get ` + "`" + `{"code":"VAULT_LOCKED"}` + "`" + `, an API key is required — follow the one-time setup above.
 `
 
 // openClawSkillPath returns the path to the muninn SKILL.md for OpenClaw.
