@@ -64,6 +64,7 @@ document.addEventListener('alpine:init', () => {
     // Graph
     graphLoaded: false,
     graphTab: 'memory',
+    graphLabelMode: 'full', // 'full' | 'short' | 'none'
     _cy: null,
     entityGraphLoaded: false,
     entityGraphStatus: '',
@@ -1148,18 +1149,27 @@ document.addEventListener('alpine:init', () => {
         const nodesToRender = filteredEngrams.length > 0 ? filteredEngrams : engrams;
 
         // Build node elements
-        const nodeElements = nodesToRender.map(e => ({
-          data: {
-            id: e.id,
-            label: e.concept || e.id.slice(0, 8),
-            size: connectedNodeIds.has(e.id) ? 20 + (e.confidence || 0.5) * 20 : 12,
-            color: !connectedNodeIds.has(e.id) ? '#64748b'
-                 : (e.confidence || 0) > 0.7 ? '#06b6d4'
-                 : (e.confidence || 0) > 0.4 ? '#a855f7' : '#eab308',
-            orphan: !connectedNodeIds.has(e.id),
-            snippet: (e.content || '').slice(0, 80),
-          },
-        }));
+        const labelMode = this.graphLabelMode;
+        const nodeElements = nodesToRender.map(e => {
+          const fullLabel = e.concept || e.id.slice(0, 8);
+          const shortLabel = fullLabel.length > 20 ? fullLabel.slice(0, 18) + '…' : fullLabel;
+          const displayLabel = labelMode === 'full' ? fullLabel
+                             : labelMode === 'short' ? shortLabel : '';
+          return {
+            data: {
+              id: e.id,
+              label: fullLabel,
+              shortLabel: shortLabel,
+              displayLabel: displayLabel,
+              size: connectedNodeIds.has(e.id) ? 20 + (e.confidence || 0.5) * 20 : 12,
+              color: !connectedNodeIds.has(e.id) ? '#64748b'
+                   : (e.confidence || 0) > 0.7 ? '#06b6d4'
+                   : (e.confidence || 0) > 0.4 ? '#a855f7' : '#eab308',
+              orphan: !connectedNodeIds.has(e.id),
+              snippet: (e.content || '').slice(0, 80),
+            },
+          };
+        });
 
         const elements = [...nodeElements, ...edges];
 
@@ -1175,7 +1185,7 @@ document.addEventListener('alpine:init', () => {
                 'background-color': 'data(color)',
                 'width': 'data(size)',
                 'height': 'data(size)',
-                'label': 'data(label)',
+                'label': 'data(displayLabel)',
                 'color': '#e2e8f0',
                 'font-size': '11px',
                 'text-valign': 'bottom',
@@ -1247,6 +1257,22 @@ document.addEventListener('alpine:init', () => {
     },
     graphFit() {
       if (this._cy) { this._cy.fit(); }
+    },
+    graphCycleLabel() {
+      const modes = ['full', 'short', 'none'];
+      const next = modes[(modes.indexOf(this.graphLabelMode) + 1) % modes.length];
+      this.graphLabelMode = next;
+      this._applyGraphLabelStyle();
+    },
+    _applyGraphLabelStyle() {
+      if (!this._cy) return;
+      const mode = this.graphLabelMode;
+      this._cy.nodes().forEach(node => {
+        const lbl = mode === 'full' ? node.data('label')
+                  : mode === 'short' ? node.data('shortLabel')
+                  : '';
+        node.data('displayLabel', lbl);
+      });
     },
 
     // ── Entity Graph ───────────────────────────────────────────────────────
