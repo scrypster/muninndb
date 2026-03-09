@@ -305,9 +305,15 @@ document.addEventListener('alpine:init', () => {
       // Load initial data (gated on auth check)
       await this.checkAuth();
 
-      // Fetch vault engram counts whenever the vault picker modal opens.
+      // Fetch vault list and engram counts whenever the vault picker modal opens.
+      // loadVaults() was previously missing here — the vault list would only
+      // refresh at login/auth-check, so newly created vaults wouldn't appear
+      // until page reload.
       this.$watch('vaultModalOpen', (open) => {
-        if (open) this.loadVaultStats();
+        if (open) {
+          this.loadVaults();
+          this.loadVaultStats();
+        }
       });
     },
 
@@ -499,7 +505,9 @@ document.addEventListener('alpine:init', () => {
         try {
           const msg = JSON.parse(e.data);
           this._handleLiveMessage(msg);
-        } catch (_) {}
+        } catch (err) {
+          console.warn('[muninn] failed to process live event:', err, e.data);
+        }
       };
 
       this._es = es;
@@ -519,6 +527,15 @@ document.addEventListener('alpine:init', () => {
         // the global broadcast values.
         this.loadStats();
       } else if (msg.type === 'memory_added') {
+        // Guard: skip malformed events missing required fields.
+        // A missing or undefined id causes Alpine x-for to use 'undefined' as
+        // a key, corrupting DOM anchor tracking and producing the
+        // "can't access property 'after', v is undefined" crash that cascades
+        // to break the entire Alpine reactivity system.
+        if (!msg.data || !msg.data.id) {
+          console.warn('[muninn] live feed received memory_added with missing id — skipping', msg.data);
+          return;
+        }
         // Deduplicate: guard against double-delivery of the same engram ID.
         // Replace the array reference (instead of in-place unshift+pop) so that
         // Alpine.js x-for can perform a clean diff — in-place mutations of both
