@@ -1,0 +1,65 @@
+# MuninnDB systemd service unit
+#
+# Install:
+#   cp muninndb.service /etc/systemd/system/muninndb.service
+#   # Edit the file below to set your paths and credentials, then:
+#   systemctl daemon-reload
+#   systemctl enable muninndb
+#   systemctl start muninndb
+#
+# Assumptions:
+#   - Binary built from source at /opt/muninndb-src/muninndb-server
+#   - Data directory at /opt/muninndb/data
+#   - Adjust paths and Environment= values to match your setup
+#
+# After updating credentials, reload with:
+#   systemctl daemon-reload && systemctl restart muninndb
+
+[Unit]
+Description=MuninnDB Memory Server
+After=network.target
+
+[Service]
+Type=forking
+User=muninn
+Group=muninn
+
+# PIDFile must match your MUNINNDB_DATA path — muninn writes muninn.pid
+# inside the data directory on start and removes it on clean stop.
+PIDFile=/opt/muninndb/data/muninn.pid
+
+# --- Data ---
+# MUNINNDB_DATA overrides the default (~/.muninn/data).
+Environment=MUNINNDB_DATA=/opt/muninndb/data
+
+# --- Network ---
+# Default to localhost only. Change to 0.0.0.0 if remote access is needed.
+Environment=MUNINN_LISTEN_HOST=127.0.0.1
+Environment=MUNINN_CORS_ORIGINS=http://127.0.0.1:8476
+
+# --- Credentials ---
+# Store API keys and secrets in a separate file with restricted permissions:
+#   touch /etc/muninndb/env && chmod 600 /etc/muninndb/env
+#   chown muninn:muninn /etc/muninndb/env
+#
+# Example /etc/muninndb/env contents:
+#   MUNINN_OPENAI_KEY=sk-...
+#   MUNINN_VOYAGE_KEY=...
+#   MUNINN_ENRICH_URL=anthropic://claude-haiku-4-5-20251001
+#   MUNINN_ANTHROPIC_KEY=sk-ant-...
+#   MUNINN_OLLAMA_URL=ollama://localhost:11434/nomic-embed-text
+EnvironmentFile=-/etc/muninndb/env
+
+# --- Auth ---
+# Write your MCP bearer token to a file with restricted permissions:
+#   echo 'your-token' > /etc/muninndb/mcp.token && chmod 600 /etc/muninndb/mcp.token
+#   chown muninn:muninn /etc/muninndb/mcp.token
+# The server reads from ~/.muninn/mcp.token by default, or set MUNINN_MCP_TOKEN_FILE:
+Environment=MUNINN_MCP_TOKEN_FILE=/etc/muninndb/mcp.token
+
+ExecStart=/opt/muninndb-src/muninndb-server start
+ExecStop=/opt/muninndb-src/muninndb-server stop
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
