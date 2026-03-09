@@ -1235,9 +1235,25 @@ document.addEventListener('alpine:init', () => {
           wheelSensitivity: 0.3,
         });
 
-        // Fade edges in after nodes settle into position (fcose layout: 600ms).
-        // cy.one() fires once and removes itself — does not re-trigger on layout re-runs.
+        // Resize Cytoscape when the container changes size (sidebar collapse,
+        // window resize, etc). Only resize() here — fit() is handled by layoutstop.
+        if (this._cyResizeObserver) this._cyResizeObserver.disconnect();
+        const cyContainer = document.getElementById('cy');
+        if (cyContainer && typeof ResizeObserver !== 'undefined') {
+          let _cyResizeTimer = null;
+          this._cyResizeObserver = new ResizeObserver(() => {
+            clearTimeout(_cyResizeTimer);
+            _cyResizeTimer = setTimeout(() => {
+              if (this._cy) this._cy.resize();
+            }, 150);
+          });
+          this._cyResizeObserver.observe(cyContainer);
+        }
+
+        // Fade edges in and fit view after nodes settle (fcose layout: 600ms).
+        // cy.one() fires once and removes itself — does not re-trigger on re-runs.
         this._cy.one('layoutstop', () => {
+          this._cy.fit(undefined, 40);
           this._cy.edges().animate({
             style: { opacity: 0.6 },
             duration: 250,
