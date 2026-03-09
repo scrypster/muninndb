@@ -1217,7 +1217,21 @@ document.addEventListener('alpine:init', () => {
               style: { 'border-width': 3, 'border-color': '#06b6d4' },
             },
           ],
-          layout: { name: 'fcose', animate: true, animationDuration: 600 },
+          layout: {
+            name: 'fcose',
+            animate: true,
+            animationDuration: 600,
+            randomize: true,
+            padding: 40,
+            idealEdgeLength: 120,
+            nodeRepulsion: 6500,
+            edgeElasticity: 0.45,
+            gravity: 0.2,
+            numIter: 2500,
+            tile: true,
+            tilingPaddingVertical: 30,
+            tilingPaddingHorizontal: 30,
+          },
           wheelSensitivity: 0.3,
         });
 
