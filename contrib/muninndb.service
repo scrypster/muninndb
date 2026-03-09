@@ -1,0 +1,61 @@
+# MuninnDB systemd service unit
+#
+# Install:
+#   cp muninndb.service /etc/systemd/system/muninndb.service
+#   # Edit the file below to set your paths and credentials, then:
+#   systemctl daemon-reload
+#   systemctl enable muninndb
+#   systemctl start muninndb
+#
+# Assumptions:
+#   - Binary built from source at /opt/muninndb-src/muninndb-server
+#   - Data directory at /opt/muninndb/data
+#   - Adjust paths and Environment= values to match your setup
+#
+# After updating credentials, reload with:
+#   systemctl daemon-reload && systemctl restart muninndb
+
+[Unit]
+Description=MuninnDB Memory Server
+After=network.target
+
+[Service]
+Type=forking
+# PIDFile must match your MUNINNDB_DATA path — muninn writes muninn.pid
+# inside the data directory on start and removes it on clean stop.
+PIDFile=/opt/muninndb/data/muninn.pid
+
+# --- Data ---
+# MUNINNDB_DATA overrides the default (~/.muninn/data).
+Environment=MUNINNDB_DATA=/opt/muninndb/data
+
+# --- Network ---
+Environment=MUNINN_LISTEN_HOST=0.0.0.0
+Environment=MUNINN_CORS_ORIGINS=http://YOUR_SERVER_IP:8476
+
+# --- Embeddings (choose one, comment out the rest) ---
+# Local Ollama (no API key required):
+# Environment=MUNINN_OLLAMA_URL=ollama://localhost:11434/nomic-embed-text
+# OpenAI:
+Environment=MUNINN_OPENAI_KEY=sk-...
+# Voyage AI:
+# Environment=MUNINN_VOYAGE_KEY=...
+
+# --- LLM Enrichment (optional) ---
+# Anthropic:
+Environment=MUNINN_ENRICH_URL=anthropic://claude-haiku-4-5-20251001
+Environment=MUNINN_ANTHROPIC_KEY=sk-ant-...
+# OpenAI:
+# Environment=MUNINN_ENRICH_URL=openai://gpt-4o-mini
+# Environment=MUNINN_ENRICH_API_KEY=sk-...
+
+# --- Auth ---
+# The MCP bearer token is passed via --mcp-token flag.
+# Alternatively, write your token to ~/.muninn/mcp.token (no flag needed):
+#   echo 'your-token' > ~/.muninn/mcp.token && chmod 600 ~/.muninn/mcp.token
+ExecStart=/opt/muninndb-src/muninndb-server start --mcp-token your-mcp-token-here
+ExecStop=/opt/muninndb-src/muninndb-server stop
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
