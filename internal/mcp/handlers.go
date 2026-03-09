@@ -1308,6 +1308,8 @@ func (s *MCPServer) handleReplayEnrichment(ctx context.Context, w http.ResponseW
 	sendResult(w, id, textContent(mustJSON(map[string]any{
 		"processed":  result.Processed,
 		"skipped":    result.Skipped,
+		"failed":     result.Failed,
+		"remaining":  result.Remaining,
 		"stages_run": result.StagesRun,
 		"dry_run":    result.DryRun,
 	})))

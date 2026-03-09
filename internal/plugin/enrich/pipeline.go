@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -10,6 +11,11 @@ import (
 	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/storage"
 )
+
+// ErrNothingToEnrich is returned when all pipeline stages are skipped because
+// the engram already has inline data (e.g., Summary set by caller during Write).
+// This is distinct from a real failure where LLM/network errors caused stages to fail.
+var ErrNothingToEnrich = errors.New("enrich: nothing to enrich")
 
 // EnrichmentPipeline orchestrates the LLM calls per engram.
 // In full mode (default) it runs up to 4 calls: entity extraction,
@@ -125,7 +131,7 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 		if len(stageErrors) > 0 {
 			return nil, fmt.Errorf("enrich: all pipeline stages failed for engram %s: %s", eng.ID.String(), strings.Join(stageErrors, "; "))
 		}
-		return nil, fmt.Errorf("enrich: all pipeline stages produced empty results for engram %s", eng.ID.String())
+		return nil, fmt.Errorf("engram %s: %w", eng.ID.String(), ErrNothingToEnrich)
 	}
 
 	return result, nil

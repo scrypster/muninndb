@@ -581,7 +581,7 @@ func allToolDefinitions() []ToolDefinition {
 		// Enrichment replay
 		{
 			Name:        "muninn_replay_enrichment",
-			Description: "Re-run the enrichment pipeline for memories in a vault that are missing specific digest stages (entities, relationships, classification, summary). Use this to retroactively enrich memories that were stored before an LLM provider was configured, or to fill in specific pipeline stages that were skipped. Supports dry_run=true to preview what would be processed without writing.",
+			Description: "Re-run the enrichment pipeline for memories in a vault that are missing specific digest stages (entities, relationships, classification, summary). Use this to retroactively enrich memories that were stored before an LLM provider was configured, or to fill in specific pipeline stages that were skipped. Supports dry_run=true to preview what would be processed without writing. The response includes processed (successfully enriched), skipped (already enriched or nothing to enrich), failed (enrichment or persistence errors), and remaining (not reached before context deadline/cancellation) counts.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -134,6 +134,8 @@ func (f *fakeEngine) ReplayEnrichment(_ context.Context, _ string, _ []string, _
 	return &engine.ReplayEnrichmentResult{
 		Processed: 3,
 		Skipped:   1,
+		Failed:    0,
+		Remaining: 0,
 		StagesRun: []string{"entities", "relationships", "classification", "summary"},
 		DryRun:    dryRun,
 	}, nil

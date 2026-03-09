@@ -2252,6 +2252,12 @@ func TestHandleReplayEnrichment_HappyPath(t *testing.T) {
 	if _, ok := inner["skipped"]; !ok {
 		t.Error("response missing 'skipped' field")
 	}
+	if _, ok := inner["failed"]; !ok {
+		t.Error("response missing 'failed' field")
+	}
+	if _, ok := inner["remaining"]; !ok {
+		t.Error("response missing 'remaining' field")
+	}
 	if _, ok := inner["stages_run"]; !ok {
 		t.Error("response missing 'stages_run' field")
 	}
@@ -2301,6 +2307,26 @@ func TestHandleReplayEnrichment_EngineError(t *testing.T) {
 	resp := decodeResp(t, w.Body.String())
 	if resp.Error == nil || resp.Error.Code != -32000 {
 		t.Errorf("expected -32000 for engine error, got %v", resp.Error)
+	}
+}
+
+func TestHandleReplayEnrichment_FailedAndRemainingInResponse(t *testing.T) {
+	srv := newTestServerWith(&replayEnrichEngine{
+		result: &engine.ReplayEnrichmentResult{
+			Processed: 3, Skipped: 1, Failed: 2, Remaining: 4,
+			StagesRun: []string{"entities"}, DryRun: false,
+		},
+	})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_replay_enrichment","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	inner := extractInnerJSON(t, resp)
+
+	if failed, _ := inner["failed"].(float64); failed != 2 {
+		t.Errorf("failed: got %v, want 2", failed)
+	}
+	if remaining, _ := inner["remaining"].(float64); remaining != 4 {
+		t.Errorf("remaining: got %v, want 4", remaining)
 	}
 }
 

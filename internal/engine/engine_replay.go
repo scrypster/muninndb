@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/scrypster/muninndb/internal/plugin"
+	"github.com/scrypster/muninndb/internal/plugin/enrich"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -13,6 +15,8 @@ import (
 type ReplayEnrichmentResult struct {
 	Processed int
 	Skipped   int
+	Failed    int
+	Remaining int
 	StagesRun []string
 	DryRun    bool
 }
@@ -78,6 +82,8 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		return &ReplayEnrichmentResult{
 			Processed: 0,
 			Skipped:   0,
+			Failed:    0,
+			Remaining: 0,
 			StagesRun: validStages,
 			DryRun:    dryRun,
 		}, nil
@@ -95,6 +101,7 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		skipped := 0
 		for _, eng := range engrams {
 			if eng == nil {
+				skipped++
 				continue
 			}
 			// "not found" means no flags set yet — treat as 0.
@@ -108,6 +115,8 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		return &ReplayEnrichmentResult{
 			Processed: needed,
 			Skipped:   skipped,
+			Failed:    0,
+			Remaining: 0,
 			StagesRun: validStages,
 			DryRun:    true,
 		}, nil
@@ -120,10 +129,24 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 
 	processed := 0
 	skipped := 0
+	failed := 0
 
-	for _, eng := range engrams {
+	for i, eng := range engrams {
 		if eng == nil {
+			skipped++
 			continue
+		}
+
+		// Honour context cancellation (deadline, manual cancel) — report remaining work.
+		if ctx.Err() != nil {
+			return &ReplayEnrichmentResult{
+				Processed: processed,
+				Skipped:   skipped,
+				Failed:    failed,
+				Remaining: countNonNilEngrams(engrams[i:]),
+				StagesRun: validStages,
+				DryRun:    false,
+			}, nil
 		}
 
 		// Check which stages are already done.
@@ -137,11 +160,16 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		}
 
 		// Run enrichment for this engram.
-		// plugin.Engram is an alias for storage.Engram, so eng is passed directly.
 		result, enrichErr := e.enrichPlugin.Enrich(ctx, eng)
 		if enrichErr != nil {
+			if errors.Is(enrichErr, enrich.ErrNothingToEnrich) {
+				slog.Debug("replay enrichment: nothing to enrich, skipping", "id", eng.ID.String())
+				skipped++
+				continue
+			}
 			slog.Warn("replay enrichment: enrich failed, skipping",
 				"id", eng.ID.String(), "err", enrichErr)
+			failed++
 			continue
 		}
 
@@ -149,6 +177,7 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 		if updateErr := e.store.UpdateDigest(ctx, eng.ID, result.Summary, result.KeyPoints, result.MemoryType, result.TypeLabel); updateErr != nil {
 			slog.Warn("replay enrichment: UpdateDigest failed",
 				"id", eng.ID.String(), "err", updateErr)
+			failed++
 			continue
 		}
 
@@ -231,9 +260,21 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 	return &ReplayEnrichmentResult{
 		Processed: processed,
 		Skipped:   skipped,
+		Failed:    failed,
 		StagesRun: validStages,
 		DryRun:    false,
 	}, nil
+}
+
+// countNonNilEngrams returns the number of non-nil entries in a slice of engram pointers.
+func countNonNilEngrams(engrams []*storage.Engram) int {
+	n := 0
+	for _, eng := range engrams {
+		if eng != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // SetEnrichPlugin registers an EnrichPlugin for use by ReplayEnrichment.
