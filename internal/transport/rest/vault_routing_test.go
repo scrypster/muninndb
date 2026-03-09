@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/engine/trigger"
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -15,30 +16,31 @@ import (
 // that accepts a vault parameter.
 type vaultTrackingEngine struct {
 	MockEngine
-	lastWriteVault              string
-	lastWriteBatchVault         string
-	lastActivateVault           string
-	lastListVault               string
-	lastReadVault               string
-	lastForgetVault             string
-	lastLinkVault               string
-	lastStatVault               string
-	lastGetEngramLinksVault     string
-	lastGetBatchEngramLinksVault string
-	lastGetSessionVault         string
-	lastEvolveVault             string
-	lastConsolidateVault        string
-	lastDecideVault             string
-	lastRestoreVault            string
-	lastTraverseVault           string
-	lastExplainVault            string
-	lastUpdateStateVault        string
-	lastUpdateTagsVault         string
-	lastListDeletedVault        string
-	lastRetryEnrichVault        string
-	lastGetContradictionsVault      string
-	lastResolveContradictionVault   string
-	lastGetGuideVault               string
+	lastWriteVault                string
+	lastWriteBatchVault           string
+	lastActivateVault             string
+	lastSubscribeVault            string
+	lastListVault                 string
+	lastReadVault                 string
+	lastForgetVault               string
+	lastLinkVault                 string
+	lastStatVault                 string
+	lastGetEngramLinksVault       string
+	lastGetBatchEngramLinksVault  string
+	lastGetSessionVault           string
+	lastEvolveVault               string
+	lastConsolidateVault          string
+	lastDecideVault               string
+	lastRestoreVault              string
+	lastTraverseVault             string
+	lastExplainVault              string
+	lastUpdateStateVault          string
+	lastUpdateTagsVault           string
+	lastListDeletedVault          string
+	lastRetryEnrichVault          string
+	lastGetContradictionsVault    string
+	lastResolveContradictionVault string
+	lastGetGuideVault             string
 }
 
 func (e *vaultTrackingEngine) Write(ctx context.Context, req *WriteRequest) (*WriteResponse, error) {
@@ -49,6 +51,11 @@ func (e *vaultTrackingEngine) Write(ctx context.Context, req *WriteRequest) (*Wr
 func (e *vaultTrackingEngine) Activate(ctx context.Context, req *ActivateRequest) (*ActivateResponse, error) {
 	e.lastActivateVault = req.Vault
 	return e.MockEngine.Activate(ctx, req)
+}
+
+func (e *vaultTrackingEngine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeRequest, deliver trigger.DeliverFunc) (string, error) {
+	e.lastSubscribeVault = req.Vault
+	return e.MockEngine.SubscribeWithDeliver(ctx, req, deliver)
 }
 
 func (e *vaultTrackingEngine) ListEngrams(ctx context.Context, req *ListEngramsRequest) (*ListEngramsResponse, error) {
@@ -217,6 +224,74 @@ func TestVaultRouting_Write_ExplicitVault(t *testing.T) {
 	}
 }
 
+// TestVaultRouting_Write_BodyVault verifies that POST /api/engrams with a body
+// vault and no query param passes the body vault to the engine.
+func TestVaultRouting_Write_BodyVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"vault":"myvault","concept":"test","content":"hello"}`)
+	req := httptest.NewRequest("POST", "/api/engrams", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteVault != "myvault" {
+		t.Errorf("engine Write vault: want %q, got %q", "myvault", eng.lastWriteVault)
+	}
+}
+
+func TestHandleCreateEngram_RejectsBodyVaultMismatch(t *testing.T) {
+	srv, eng, _ := newVaultTrackingServer(t)
+
+	ctx := context.WithValue(context.Background(), auth.ContextVault, "ctx-vault")
+	body := strings.NewReader(`{"vault":"body-vault","concept":"test","content":"hello"}`)
+	req := httptest.NewRequest("POST", "/api/engrams", body).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleCreateEngram(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteVault != "" {
+		t.Errorf("engine Write should not be called, got vault %q", eng.lastWriteVault)
+	}
+}
+
+func TestVaultRouting_Write_TextPlainBodyVaultMismatchRejected(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false}); err != nil {
+		t.Fatalf("SetVaultConfig vault-a: %v", err)
+	}
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "vault-b", Public: false}); err != nil {
+		t.Fatalf("SetVaultConfig vault-b: %v", err)
+	}
+	token, _, err := store.GenerateAPIKey("vault-a", "agent", "full", nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+
+	body := strings.NewReader(`{"vault":"vault-b","concept":"test","content":"hello"}`)
+	req := httptest.NewRequest("POST", "/api/engrams", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "text/plain")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteVault != "" {
+		t.Errorf("engine Write should not be called, got vault %q", eng.lastWriteVault)
+	}
+}
+
 // TestVaultRouting_Activate_ExplicitVault verifies that POST /api/activate?vault=myvault
 // passes "myvault" to the engine.
 func TestVaultRouting_Activate_ExplicitVault(t *testing.T) {
@@ -227,6 +302,28 @@ func TestVaultRouting_Activate_ExplicitVault(t *testing.T) {
 
 	body := strings.NewReader(`{"context":["something"]}`)
 	req := httptest.NewRequest("POST", "/api/activate?vault=myvault", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastActivateVault != "myvault" {
+		t.Errorf("engine Activate vault: want %q, got %q", "myvault", eng.lastActivateVault)
+	}
+}
+
+// TestVaultRouting_Activate_BodyVault verifies that POST /api/activate with a
+// body vault and no query param passes the body vault to the engine.
+func TestVaultRouting_Activate_BodyVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"vault":"myvault","context":["query"]}`)
+	req := httptest.NewRequest("POST", "/api/activate", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
@@ -387,6 +484,71 @@ func TestVaultRouting_WriteBatch_ExplicitVault(t *testing.T) {
 	}
 	if eng.lastWriteBatchVault != "myvault" {
 		t.Errorf("engine WriteBatch vault: want %q, got %q", "myvault", eng.lastWriteBatchVault)
+	}
+}
+
+// TestVaultRouting_WriteBatch_BodyVault verifies that POST /api/engrams/batch
+// can infer the vault from per-item body fields when no query param is present.
+func TestVaultRouting_WriteBatch_BodyVault(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	body := strings.NewReader(`{"engrams":[{"vault":"myvault","concept":"a","content":"x"},{"concept":"b","content":"y"}]}`)
+	req := httptest.NewRequest("POST", "/api/engrams/batch", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteBatchVault != "myvault" {
+		t.Errorf("engine WriteBatch vault: want %q, got %q", "myvault", eng.lastWriteBatchVault)
+	}
+}
+
+func TestHandleBatchCreate_RejectsBodyVaultMismatch(t *testing.T) {
+	srv, eng, _ := newVaultTrackingServer(t)
+
+	ctx := context.WithValue(context.Background(), auth.ContextVault, "ctx-vault")
+	body := strings.NewReader(`{"engrams":[{"vault":"body-vault","concept":"a","content":"x"},{"concept":"b","content":"y"}]}`)
+	req := httptest.NewRequest("POST", "/api/engrams/batch", body).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleBatchCreate(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteBatchVault != "" {
+		t.Errorf("engine WriteBatch should not be called, got vault %q", eng.lastWriteBatchVault)
+	}
+}
+
+func TestVaultRouting_WriteBatch_TopLevelItemVaultMismatchRejected(t *testing.T) {
+	srv, eng, store := newVaultTrackingServer(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false}); err != nil {
+		t.Fatalf("SetVaultConfig vault-a: %v", err)
+	}
+	token, _, err := store.GenerateAPIKey("vault-a", "agent", "full", nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+
+	body := strings.NewReader(`{"vault":"vault-a","engrams":[{"vault":"vault-b","concept":"a","content":"x"}]}`)
+	req := httptest.NewRequest("POST", "/api/engrams/batch", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if eng.lastWriteBatchVault != "" {
+		t.Errorf("engine WriteBatch should not be called, got vault %q", eng.lastWriteBatchVault)
 	}
 }
 
@@ -767,5 +929,29 @@ func TestVaultRouting_ResolveContradiction_ExplicitVault(t *testing.T) {
 	}
 	if eng.lastResolveContradictionVault != "myvault" {
 		t.Errorf("engine ResolveContradiction vault: want %q, got %q", "myvault", eng.lastResolveContradictionVault)
+	}
+}
+
+// TestHandleSubscribe_UsesContextVault verifies that subscriptions use the
+// authenticated vault from context instead of re-reading the raw query param.
+func TestHandleSubscribe_UsesContextVault(t *testing.T) {
+	srv, eng, _ := newVaultTrackingServer(t)
+
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), auth.ContextVault, "myvault"))
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/subscribe", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.handleSubscribe(w, req)
+	}()
+
+	cancel()
+	<-done
+
+	if eng.lastSubscribeVault != "myvault" {
+		t.Errorf("engine Subscribe vault: want %q, got %q", "myvault", eng.lastSubscribeVault)
 	}
 }

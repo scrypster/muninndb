@@ -568,9 +568,12 @@ func (s *Server) handleCreateEngram(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
 		return
 	}
-	if req.Vault == "" {
-		req.Vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, req.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
+	req.Vault = vault
 	resp, err := s.engine.Write(r.Context(), &req)
 	if err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
@@ -597,10 +600,13 @@ func (s *Server) handleBatchCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqs := make([]*WriteRequest, len(body.Engrams))
+	vault, resolveErr := resolveBatchHandlerVault(r, body.Engrams)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
+	}
 	for i := range body.Engrams {
-		if body.Engrams[i].Vault == "" {
-			body.Engrams[i].Vault = ctxVault(r)
-		}
+		body.Engrams[i].Vault = vault
 		reqs[i] = &body.Engrams[i]
 	}
 
@@ -665,9 +671,12 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
 		return
 	}
-	if req.Vault == "" {
-		req.Vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, req.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
+	req.Vault = vault
 	// Apply recall mode preset if provided.
 	if req.Mode != "" {
 		preset, err := auth.LookupRecallMode(req.Mode)
@@ -728,9 +737,12 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
 		return
 	}
-	if req.Vault == "" {
-		req.Vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, req.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
+	req.Vault = vault
 	mbpReq := &mbp.LinkRequest{
 		SourceID: req.SourceID,
 		TargetID: req.TargetID,
@@ -803,6 +815,32 @@ func ctxVault(r *http.Request) string {
 		return v
 	}
 	return "default"
+}
+
+func resolveHandlerVault(r *http.Request, providedVault string) (string, error) {
+	resolvedVault := ctxVault(r)
+	if err := validateResolvedVault(providedVault, resolvedVault); err != nil {
+		return "", err
+	}
+	return resolvedVault, nil
+}
+
+func resolveBatchHandlerVault(r *http.Request, reqs []WriteRequest) (string, error) {
+	resolvedVault := ctxVault(r)
+	for i := range reqs {
+		if err := validateResolvedVault(reqs[i].Vault, resolvedVault); err != nil {
+			return "", fmt.Errorf("engrams[%d].vault: %w", i, err)
+		}
+	}
+	return resolvedVault, nil
+}
+
+func validateResolvedVault(providedVault, resolvedVault string) error {
+	providedVault = strings.TrimSpace(providedVault)
+	if providedVault == "" || providedVault == resolvedVault {
+		return nil
+	}
+	return fmt.Errorf("vault must match the authenticated request vault")
 }
 
 // Utility methods
@@ -1108,9 +1146,12 @@ func (s *Server) handleBatchGetEngramLinks(w http.ResponseWriter, r *http.Reques
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "'ids' exceeds maximum batch size of 200")
 		return
 	}
-	if req.Vault == "" {
-		req.Vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, req.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
+	req.Vault = vault
 	resp, err := s.engine.GetBatchEngramLinks(r.Context(), &req)
 	if err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
@@ -1245,9 +1286,10 @@ func (s *Server) handleConsolidateEngrams(w http.ResponseWriter, r *http.Request
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "'merged_content' is required")
 		return
 	}
-	vault := body.Vault
-	if vault == "" {
-		vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, body.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
 	resp, err := s.engine.Consolidate(r.Context(), vault, body.IDs, body.MergedContent)
 	if err != nil {
@@ -1267,9 +1309,10 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "'decision' and 'rationale' are required")
 		return
 	}
-	vault := body.Vault
-	if vault == "" {
-		vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, body.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
 	resp, err := s.engine.Decide(r.Context(), vault, body.Decision, body.Rationale, body.Alternatives, body.EvidenceIDs)
 	if err != nil {
@@ -1315,9 +1358,10 @@ func (s *Server) handleTraverse(w http.ResponseWriter, r *http.Request) {
 	if body.MaxNodes > 100 {
 		body.MaxNodes = 100
 	}
-	vault := body.Vault
-	if vault == "" {
-		vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, body.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
 	resp, err := s.engine.Traverse(r.Context(), vault, &body)
 	if err != nil {
@@ -1337,9 +1381,10 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "'engram_id' is required")
 		return
 	}
-	vault := body.Vault
-	if vault == "" {
-		vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, body.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
 	resp, err := s.engine.Explain(r.Context(), vault, &body)
 	if err != nil {
@@ -1369,9 +1414,10 @@ func (s *Server) handleSetState(w http.ResponseWriter, r *http.Request) {
 			"'state' must be one of: planning, active, paused, blocked, completed, cancelled, archived")
 		return
 	}
-	vault := body.Vault
-	if vault == "" {
-		vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, body.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
 	if err := s.engine.UpdateState(r.Context(), vault, id, body.State, body.Reason); err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
@@ -1395,9 +1441,10 @@ func (s *Server) handleUpdateTags(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
 		return
 	}
-	vault := body.Vault
-	if vault == "" {
-		vault = ctxVault(r)
+	vault, resolveErr := resolveHandlerVault(r, body.Vault)
+	if resolveErr != nil {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, resolveErr.Error())
+		return
 	}
 	if body.Tags == nil {
 		body.Tags = []string{}
@@ -1491,7 +1538,7 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 //
 // Query params:
 //
-//	vault     — vault name (default: "default")
+//	vault     — vault name (optional; must match the authenticated vault when provided)
 //	context   — (repeatable) subscription context strings for semantic matching
 //	threshold — float32 score threshold, default 0.5
 //	on_write  — "true"|"1" to receive a push on every qualifying write
@@ -1500,10 +1547,7 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	vault := q.Get("vault")
-	if vault == "" {
-		vault = "default"
-	}
+	vault := ctxVault(r)
 	contextStrs := q["context"]
 
 	threshold := float32(0.5)

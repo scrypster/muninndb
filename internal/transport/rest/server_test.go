@@ -155,7 +155,7 @@ func (m *MockEngine) Unsubscribe(ctx context.Context, subID string) error {
 	return nil
 }
 
-func (m *MockEngine) ClearVault(ctx context.Context, vaultName string) error { return nil }
+func (m *MockEngine) ClearVault(ctx context.Context, vaultName string) error  { return nil }
 func (m *MockEngine) DeleteVault(ctx context.Context, vaultName string) error { return nil }
 func (m *MockEngine) RenameVault(ctx context.Context, oldName, newName string) error {
 	return nil
@@ -1783,6 +1783,41 @@ func TestGetEngram_HappyPath(t *testing.T) {
 	}
 	if resp.Content == "" {
 		t.Error("expected non-empty Content in response")
+	}
+}
+
+type readFactEngine struct{ MockEngine }
+
+func (e *readFactEngine) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, error) {
+	return &ReadResponse{
+		ID:         "fact-id",
+		Concept:    "fact",
+		Content:    "fact content",
+		Confidence: 0.9,
+		MemoryType: 0,
+		TypeLabel:  "deployment_configuration",
+	}, nil
+}
+
+func TestGetEngram_IncludesZeroMemoryType(t *testing.T) {
+	server := NewServer("localhost:8080", &readFactEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/engrams/fact-id?vault=default", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got, ok := resp["memory_type"]; !ok {
+		t.Fatal("expected memory_type field to be present")
+	} else if got != float64(0) {
+		t.Fatalf("memory_type = %v, want 0", got)
 	}
 }
 

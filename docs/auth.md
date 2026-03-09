@@ -88,6 +88,7 @@ curl http://127.0.0.1:8475/api/engrams?vault=default \
 ```
 
 The key implicitly identifies the vault. If the key belongs to `default` and the request specifies a different vault, the request is rejected.
+For body-based REST routes, the vault must be supplied as `?vault=`. Some routes allow vault to be in the JSON body for compatibility but this will be deprecated soon. If both are present, they must match.
 
 ---
 
