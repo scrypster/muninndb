@@ -416,7 +416,7 @@
       </div><!-- /memoriesSubTab list -->
 
       <!-- Contradictions sub-tab (Item 1) -->
-      <div x-show="memoriesSubTab='contradictions'">
+      <div x-show="memoriesSubTab==='contradictions'">
         <p style="color:var(--text-muted);font-size:0.8125rem;margin:0 0 1.25rem;">
           Memory pairs flagged as potentially contradictory by the Contradiction Detection worker.
           Click <strong>View</strong> to inspect each memory in detail.
@@ -1486,7 +1486,7 @@
             </div>
             <template x-if="plugins.some(p => p.tier === 3) && !pluginCfg.enrichShowForm">
               <div style="display:flex;align-items:center;gap:0.625rem;flex-shrink:0;margin-left:1rem;">
-                <span class="badge-active" style="border-radius:9999px;padding:0.2rem 0.75rem;font-size:0.75rem;font-weight:600;">
+                <span class="badge-active" data-testid="enrich-active-badge" style="border-radius:9999px;padding:0.2rem 0.75rem;font-size:0.75rem;font-weight:600;">
                   Active &mdash; <span x-text="(plugins.find(p => p.tier === 3) || {}).provider || ''"></span>
                 </span>
               </div>
@@ -1563,7 +1563,7 @@
                 <template x-if="pluginCfg.ollamaDetected === true && pluginCfg.ollamaModels.length">
                   <div class="form-group">
                     <label>LLM model</label>
-                    <select class="input-field" x-model="pluginCfg.enrichOllamaModel">
+                    <select class="input-field" data-testid="input-enrich-ollama-model" x-model="pluginCfg.enrichOllamaModel">
                       <template x-for="m in pluginCfg.ollamaModels.filter(m => !m.toLowerCase().includes('embed'))" :key="m">
                         <option :value="m" x-text="m"></option>
                       </template>

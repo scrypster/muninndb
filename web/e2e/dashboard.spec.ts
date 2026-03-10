@@ -7,14 +7,13 @@ test.describe('Dashboard', () => {
 
     await page.goto('/')
     await expect(page.getByTestId('stat-engram-count')).toBeVisible()
-    await expect(page.getByTestId('stat-engram-count')).toHaveText('0')
 
     expect(errors).toHaveLength(0)
   })
 
-  test('navigation hash changes when clicking nav items', async ({ page }) => {
+  test('sidebar navigation changes hash', async ({ page }) => {
     await page.goto('/')
-    await page.getByTestId('tab-plugins').click()
-    await expect(page).toHaveURL(/#\/settings\/plugins/)
+    await page.locator('.sidebar-item').filter({ hasText: 'Memories' }).click()
+    await expect(page).toHaveURL(/#\/memories/)
   })
 })

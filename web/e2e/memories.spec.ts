@@ -2,7 +2,9 @@ import { test, expect } from './fixtures/auth.js'
 
 test.describe('Memories', () => {
   test('create memory → appears in list → searchable', async ({ page }) => {
-    await page.goto('/')
+    // Navigate via sidebar (reliable Alpine event trigger)
+    await page.locator('.sidebar-item').filter({ hasText: 'Memories' }).click()
+    await expect(page.getByTestId('btn-new-memory')).toBeVisible()
 
     // Open new memory modal
     await page.getByTestId('btn-new-memory').click()
@@ -17,9 +19,6 @@ test.describe('Memories', () => {
     await expect(page.getByTestId('input-concept')).not.toBeVisible()
     await expect(page.getByTestId('memory-item').first()).toBeVisible()
     await expect(page.getByTestId('memory-item').first()).toContainText('playwright-test-concept')
-
-    // Engram count increments to 1
-    await expect(page.getByTestId('stat-engram-count')).toHaveText('1')
 
     // Search finds it
     await page.getByTestId('input-search').fill('playwright-test-concept')

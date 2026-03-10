@@ -26,7 +26,7 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: `cd ${projectRoot} && go build -o ${E2E_BINARY} ./cmd/muninn && rm -rf ${E2E_DATA_DIR} && ${E2E_BINARY} server --data-dir ${E2E_DATA_DIR}`,
+    command: `cd ${projectRoot} && go build -o ${E2E_BINARY} ./cmd/muninn && rm -rf ${E2E_DATA_DIR} && ${E2E_BINARY} --daemon --data ${E2E_DATA_DIR}`,
     url: 'http://localhost:8476/',
     timeout: 120_000,
     reuseExistingServer: false,
