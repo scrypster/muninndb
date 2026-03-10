@@ -148,6 +148,9 @@ func WriteOnlyFromContext(ctx context.Context) bool {
 // Apply it at route registration for every read endpoint:
 //
 //	mux.HandleFunc("GET /api/engrams/{id}", s.withMiddleware(auth.WriteOnlyGuard(s.handleGetEngram)))
+//
+// Scope: this guard applies to the REST API only. The MCP server uses a separate
+// static-token auth model; write-only API keys cannot authenticate to MCP at all.
 func WriteOnlyGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if WriteOnlyFromContext(r.Context()) {
