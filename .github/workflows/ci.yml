@@ -283,6 +283,56 @@ jobs:
             kill $SERVER_PID 2>/dev/null || true
           fi
 
+  # ── Playwright E2E: browser-level UI regression tests ────────────────
+  playwright-e2e:
+    name: Playwright E2E tests
+    runs-on: ubuntu-latest
+    needs: go
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Restore embed assets from cache
+        uses: actions/cache@v4
+        with:
+          path: internal/plugin/embed/assets
+          key: embed-assets-ort-1.24.2-minilm-v2-linux
+
+      - name: Fetch embed assets if needed
+        run: |
+          if [ ! -f internal/plugin/embed/assets/model_int8.onnx ]; then
+            make fetch-model _ort-linux-amd64
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install web dependencies
+        run: cd web && npm ci
+
+      - name: Install Playwright browsers
+        run: cd web && npx playwright install chromium --with-deps
+
+      - name: Build web assets
+        run: cd web && npm run build
+
+      - name: Run Playwright E2E tests
+        run: cd web && npm run test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7
+
   # ── Shell script linting ─────────────────────────────────────────────
   shellcheck:
     name: Shellcheck

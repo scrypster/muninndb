@@ -1,2 +1,5 @@
 node_modules/
 static/dist/
+e2e/.auth.json
+playwright-report/
+test-results/
