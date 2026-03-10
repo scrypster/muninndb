@@ -102,9 +102,9 @@ func (s *Server) handleCreateAPIKey(authStore *auth.Store) http.HandlerFunc {
 			return
 		}
 		if req.Mode == "" {
-			req.Mode = "full" // default to full access when mode is not specified
+			req.Mode = auth.ModeFull // default to full access when mode is not specified
 		}
-		if req.Mode != "full" && req.Mode != "observe" && req.Mode != "write" {
+		if req.Mode != auth.ModeFull && req.Mode != auth.ModeObserve && req.Mode != auth.ModeWrite {
 			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "mode must be 'full', 'observe', or 'write'")
 			return
 		}

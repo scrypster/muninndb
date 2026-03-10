@@ -64,7 +64,7 @@ func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		ctx := context.WithValue(r.Context(), ContextVault, vault)
-		ctx = context.WithValue(ctx, ContextMode, "observe")
+		ctx = context.WithValue(ctx, ContextMode, ModeObserve)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -111,7 +111,7 @@ func (s *Store) VaultAuthWithAdminBypass(secret []byte, next http.HandlerFunc) h
 				vault = "default"
 			}
 			ctx := context.WithValue(r.Context(), ContextVault, vault)
-			ctx = context.WithValue(ctx, ContextMode, "full")
+			ctx = context.WithValue(ctx, ContextMode, ModeFull)
 			next(w, r.WithContext(ctx))
 			return
 		}
@@ -134,14 +134,14 @@ func (s *Store) VaultAuthWithAdminBypass(secret []byte, next http.HandlerFunc) h
 // Engine activation handlers use this to skip cognitive state mutations.
 func ObserveFromContext(ctx context.Context) bool {
 	mode, _ := ctx.Value(ContextMode).(string)
-	return mode == "observe"
+	return mode == ModeObserve
 }
 
 // WriteOnlyFromContext returns true if the request is in write-only (ingest) mode.
 // Write-only keys may call mutation endpoints but not read endpoints.
 func WriteOnlyFromContext(ctx context.Context) bool {
 	mode, _ := ctx.Value(ContextMode).(string)
-	return mode == "write"
+	return mode == ModeWrite
 }
 
 // WriteOnlyGuard is HTTP middleware that returns 403 for write-only mode requests.

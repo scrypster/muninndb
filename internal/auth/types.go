@@ -24,6 +24,13 @@ type VaultConfig struct {
 	Plasticity *PlasticityConfig `json:"plasticity,omitempty"` // per-vault cognitive pipeline config
 }
 
+// API key mode constants.
+const (
+	ModeFull    = "full"    // full read + write access
+	ModeObserve = "observe" // read-only; cognitive mutations suppressed at engine layer
+	ModeWrite   = "write"   // ingest-only; read endpoints blocked at middleware layer
+)
+
 type contextKey string
 
 const (

@@ -19,8 +19,8 @@ var ErrKeyNotFound = errors.New("api key not found")
 // Returns the raw token (shown once) and the key metadata.
 // expiresAt is optional; pass nil for a key that never expires.
 func (s *Store) GenerateAPIKey(vault, label, mode string, expiresAt *time.Time) (token string, key APIKey, err error) {
-	if mode != "full" && mode != "observe" && mode != "write" {
-		err = fmt.Errorf("mode must be 'full', 'observe', or 'write'")
+	if mode != ModeFull && mode != ModeObserve && mode != ModeWrite {
+		err = fmt.Errorf("mode must be %q, %q, or %q", ModeFull, ModeObserve, ModeWrite)
 		return
 	}
 
