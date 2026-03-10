@@ -25,6 +25,9 @@
 
   <!-- App JS (must load before Alpine deferred init) -->
   <script src="/static/js/app.js"></script>
+  <!-- plugin-config-utils: loaded as module after app.js sync execution,
+       before Alpine's deferred init — sets globalThis.MuninnPluginCfg -->
+  <script type="module" src="/static/js/plugin-config-utils.js"></script>
 
   <!-- Alpine.js (deferred — initializes after DOM + app.js registers components) -->
   <script defer src="/static/vendor/alpine-3.14.9.min.js"></script>

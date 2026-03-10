@@ -24,4 +24,9 @@ export default defineConfig({
       '/events': { target: 'http://localhost:8476', changeOrigin: true },
     },
   },
+  test: {
+    root: resolve(__dirname),  // look for tests in web/ not web/static/
+    environment: 'node',
+    globals: false,
+  },
 })
