@@ -759,7 +759,7 @@ document.addEventListener('alpine:init', () => {
         if (this.searchMode && this.searchMode !== 'balanced') {
             body.mode = this.searchMode;
         }
-        const data = await this.apiCall('/api/activate', {
+        const data = await this.apiCall('/api/activate?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify(body),
         });
@@ -798,42 +798,35 @@ document.addEventListener('alpine:init', () => {
       try {
         if (action === 'keep_a') {
           // A supersedes B; archive B
-          await fetch('/api/link', {
+          await this.apiCall('/api/link?vault=' + encodeURIComponent(vault), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source_id: idA, target_id: idB, rel_type: 4, weight: 1.0, vault }),
           });
-          await fetch('/api/engrams/' + encodeURIComponent(idB) + '/state', {
+          await this.apiCall('/api/engrams/' + encodeURIComponent(idB) + '/state?vault=' + encodeURIComponent(vault), {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ vault, state: 'archived' }),
           });
-          await fetch('/api/admin/contradictions/resolve', {
+          await this.apiCall('/api/admin/contradictions/resolve', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
           });
         } else if (action === 'keep_b') {
           // B supersedes A; archive A
-          await fetch('/api/link', {
+          await this.apiCall('/api/link?vault=' + encodeURIComponent(vault), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source_id: idB, target_id: idA, rel_type: 4, weight: 1.0, vault }),
           });
-          await fetch('/api/engrams/' + encodeURIComponent(idA) + '/state', {
+          await this.apiCall('/api/engrams/' + encodeURIComponent(idA) + '/state?vault=' + encodeURIComponent(vault), {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ vault, state: 'archived' }),
           });
-          await fetch('/api/admin/contradictions/resolve', {
+          await this.apiCall('/api/admin/contradictions/resolve', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
           });
         } else if (action === 'dismiss') {
-          await fetch('/api/admin/contradictions/resolve', {
+          await this.apiCall('/api/admin/contradictions/resolve', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
           });
         } else if (action === 'merge') {
@@ -909,7 +902,7 @@ document.addEventListener('alpine:init', () => {
         : [];
       try {
         // POST /api/engrams → WriteRequest: { concept, content, tags, vault, confidence }
-        await this.apiCall('/api/engrams', {
+        await this.apiCall('/api/engrams?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
             concept: form.concept,
@@ -996,7 +989,7 @@ document.addEventListener('alpine:init', () => {
       this.editTagsSaving = true;
       try {
         const resp = await this.apiCall(
-          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/tags',
+          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/tags?vault=' + encodeURIComponent(this.vault),
           {
             method: 'PUT',
             body: JSON.stringify({ vault: this.vault, tags }),
@@ -1033,7 +1026,7 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       try {
-        await this.apiCall('/api/link', {
+        await this.apiCall('/api/link?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
             source_id: this.linkModal.sourceId,
@@ -1122,7 +1115,7 @@ document.addEventListener('alpine:init', () => {
 
         // Load all engram links in a single batch call (replaces N+1 pattern).
         const nodeIdSet = new Set(engrams.map(e => e.id));
-        const batchResp = await this.apiCall('/api/engrams/links/batch', {
+        const batchResp = await this.apiCall('/api/engrams/links/batch?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
             ids: engrams.map(e => e.id),
@@ -2534,15 +2527,10 @@ document.addEventListener('alpine:init', () => {
     // ── Lifecycle state ────────────────────────────────────────────────────
     async updateLifecycleState(id, state) {
       try {
-        const res = await fetch('/api/engrams/' + encodeURIComponent(id) + '/state', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ vault: this.vault, state }),
-        });
-        if (!res.ok) {
-          const text = await res.text().catch(() => res.statusText);
-          throw new Error(res.status + ': ' + text);
-        }
+        const res = await this.apiCall(
+          '/api/engrams/' + encodeURIComponent(id) + '/state?vault=' + encodeURIComponent(this.vault),
+          { method: 'PUT', body: JSON.stringify({ vault: this.vault, state }) }
+        );
         if (this.selectedMemory && this.selectedMemory.id === id) {
           this.selectedMemory = { ...this.selectedMemory, state };
         }
@@ -2589,7 +2577,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.searchQuery.trim()) return;
       this.explainModal = { show: true, data: null, loading: true };
       try {
-        const data = await this.apiCall('/api/explain', {
+        const data = await this.apiCall('/api/explain?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
             vault: this.vault,
@@ -2642,7 +2630,7 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       try {
-        const data = await this.apiCall('/api/consolidate', {
+        const data = await this.apiCall('/api/consolidate?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
             vault: this.vault,
@@ -2682,7 +2670,7 @@ document.addEventListener('alpine:init', () => {
         .map(s => s.trim())
         .filter(Boolean);
       try {
-        const data = await this.apiCall('/api/decide', {
+        const data = await this.apiCall('/api/decide?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
             vault: this.vault,
