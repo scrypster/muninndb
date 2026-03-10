@@ -27,6 +27,12 @@ type ClusterConfig struct {
 	LeaseTTL int `yaml:"lease_ttl" json:"lease_ttl"`
 	// HeartbeatMS is the MSP heartbeat interval in milliseconds
 	HeartbeatMS int `yaml:"heartbeat_ms" json:"heartbeat_ms"`
+	// SDOWNBeats is the number of missed heartbeats before marking a peer SDOWN. Default: 3.
+	SDOWNBeats int `yaml:"sdown_beats" json:"sdown_beats"`
+	// CCSIntervalS is the interval in seconds between cross-cluster consistency checks. Default: 30.
+	CCSIntervalS int `yaml:"ccs_interval_seconds" json:"ccs_interval_seconds"`
+	// ReconcileHeal controls whether reconciliation runs after a partition heals. Default: true.
+	ReconcileHeal bool `yaml:"reconcile_on_heal" json:"reconcile_on_heal"`
 	// TLS holds mutual-TLS settings for inter-node connections.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 	// QuorumLossTimeoutSec is how long a Cortex tolerates lost quorum before
@@ -66,6 +72,9 @@ func clusterDefaults() ClusterConfig {
 		Role:                          "auto",
 		LeaseTTL:                      10,
 		HeartbeatMS:                   1000,
+		SDOWNBeats:                    3,
+		CCSIntervalS:                  30,
+		ReconcileHeal:                 true,
 		QuorumLossTimeoutSec:          5,
 		JoinTokenTTLMin:               15,
 		FailoverConvergenceTimeoutSec: 30,

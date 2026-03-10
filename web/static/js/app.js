@@ -2143,6 +2143,23 @@ document.addEventListener('alpine:init', () => {
       setTimeout(() => { this.clusterTokenCopied = false; }, 2000);
     },
 
+    async loadClusterSettings() {
+      try {
+        const resp = await fetch('/api/admin/cluster/settings', { credentials: 'same-origin' });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.clusterSettings = {
+            heartbeat_ms: data.heartbeat_ms ?? this.clusterSettings.heartbeat_ms,
+            sdown_beats: data.sdown_beats ?? this.clusterSettings.sdown_beats,
+            ccs_interval_seconds: data.ccs_interval_seconds ?? this.clusterSettings.ccs_interval_seconds,
+            reconcile_on_heal: data.reconcile_on_heal ?? this.clusterSettings.reconcile_on_heal,
+          };
+        }
+      } catch (err) {
+        // Non-fatal — form shows defaults; user can still save.
+      }
+    },
+
     async saveClusterSettings() {
       this.clusterSettingsSaving = true;
       this.clusterSettingsSaved = false;

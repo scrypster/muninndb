@@ -235,6 +235,24 @@ func (s *Server) handleAdminClusterRotateTLS(w http.ResponseWriter, r *http.Requ
 	s.sendJSON(w, http.StatusOK, map[string]any{"rotated": true})
 }
 
+func (s *Server) handleAdminClusterGetSettings(w http.ResponseWriter, r *http.Request) {
+	if s.dataDir == "" {
+		s.sendJSON(w, http.StatusOK, config.ClusterDefaults())
+		return
+	}
+	cfg, err := config.LoadClusterConfig(s.dataDir)
+	if err != nil {
+		s.sendError(r, w, http.StatusInternalServerError, ErrInternal, fmt.Sprintf("load config: %v", err))
+		return
+	}
+	s.sendJSON(w, http.StatusOK, map[string]any{
+		"heartbeat_ms":       cfg.HeartbeatMS,
+		"sdown_beats":        cfg.SDOWNBeats,
+		"ccs_interval_seconds": cfg.CCSIntervalS,
+		"reconcile_on_heal":  cfg.ReconcileHeal,
+	})
+}
+
 func (s *Server) handleAdminClusterSettings(w http.ResponseWriter, r *http.Request) {
 	var req clusterSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -256,7 +274,10 @@ func (s *Server) handleAdminClusterSettings(w http.ResponseWriter, r *http.Reque
 	if s.coordinator != nil && req.HeartbeatMS != nil {
 		s.coordinator.MSP().SetHeartbeatInterval(time.Duration(*req.HeartbeatMS) * time.Millisecond)
 	}
-	_ = s.applyAndPersistSettings(req)
+	if err := s.applyAndPersistSettings(req); err != nil {
+		s.sendError(r, w, http.StatusInternalServerError, ErrInternal, fmt.Sprintf("persist settings: %v", err))
+		return
+	}
 	s.sendJSON(w, http.StatusOK, map[string]any{"saved": true})
 }
 

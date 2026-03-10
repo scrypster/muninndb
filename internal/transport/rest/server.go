@@ -233,6 +233,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("DELETE /api/admin/cluster/nodes/{id}", s.withAdminMiddleware(s.handleAdminClusterRemoveNode))
 	mux.HandleFunc("POST /api/admin/cluster/failover", s.withAdminMiddleware(s.handleAdminClusterFailover))
 	mux.HandleFunc("POST /api/admin/cluster/tls/rotate", s.withAdminMiddleware(s.handleAdminClusterRotateTLS))
+	mux.HandleFunc("GET /api/admin/cluster/settings", s.withAdminMiddleware(s.handleAdminClusterGetSettings))
 	mux.HandleFunc("PUT /api/admin/cluster/settings", s.withAdminMiddleware(s.handleAdminClusterSettings))
 	mux.HandleFunc("POST /api/admin/cluster/nodes/test", s.withAdminMiddleware(s.handleAdminClusterTestNode))
 	mux.HandleFunc("GET /api/admin/cluster/events", s.withAdminMiddleware(s.handleAdminClusterEvents))
@@ -361,6 +362,15 @@ func (s *Server) applyAndPersistSettings(req clusterSettingsRequest) error {
 	}
 	if req.HeartbeatMS != nil {
 		cfg.HeartbeatMS = *req.HeartbeatMS
+	}
+	if req.SDOWNBeats != nil {
+		cfg.SDOWNBeats = *req.SDOWNBeats
+	}
+	if req.CCSIntervalS != nil {
+		cfg.CCSIntervalS = *req.CCSIntervalS
+	}
+	if req.ReconcileHeal != nil {
+		cfg.ReconcileHeal = *req.ReconcileHeal
 	}
 	return config.SaveClusterConfig(s.dataDir, cfg)
 }
