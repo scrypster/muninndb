@@ -212,8 +212,9 @@ func TestScheduler_Start(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	sched.Start(ctx)
+	done := sched.Start(ctx)
 	<-ctx.Done()
+	<-done // wait for the goroutine to finish any in-progress runOnce before temp dir cleanup
 
 	if stub.called.Load() == 0 {
 		t.Fatal("expected Checkpoint to be called at least once by the scheduler goroutine")

@@ -66,8 +66,14 @@ func New(cfg Config, eng Checkpointer) *Scheduler {
 }
 
 // Start launches the backup goroutine. It respects context cancellation.
-func (s *Scheduler) Start(ctx context.Context) {
-	go s.run(ctx)
+// The returned channel is closed when the goroutine has fully stopped.
+func (s *Scheduler) Start(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.run(ctx)
+	}()
+	return done
 }
 
 // GetStatus returns a thread-safe snapshot of the scheduler's current state.
