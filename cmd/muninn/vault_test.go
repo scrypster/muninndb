@@ -440,6 +440,41 @@ func TestRunVaultBehavior_SetMode_Success(t *testing.T) {
 	}
 }
 
+func TestRunVaultBehavior_SetInstructions_Success(t *testing.T) {
+	oldBase := vaultAdminBase
+	defer func() { vaultAdminBase = oldBase }()
+
+	var capturedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"config":null,"resolved":{"behavior_mode":"autonomous"}}`))
+			return
+		}
+		buf := new(strings.Builder)
+		io.Copy(buf, r.Body)
+		capturedBody = buf.String()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	vaultAdminBase = srv.URL
+
+	out := captureStdout(func() {
+		runVaultBehavior([]string{"default", "--mode", "custom", "--instructions", "remember only errors"})
+	})
+	if !strings.Contains(out, "custom") {
+		t.Errorf("expected 'custom' in success output, got: %q", out)
+	}
+	if !strings.Contains(capturedBody, "remember only errors") {
+		t.Errorf("PUT body should contain instructions, got: %q", capturedBody)
+	}
+	if !strings.Contains(capturedBody, "behavior_instructions") {
+		t.Errorf("PUT body should contain behavior_instructions key, got: %q", capturedBody)
+	}
+}
+
 func TestRunVaultBehavior_GetCurrentMode_Success(t *testing.T) {
 	oldBase := vaultAdminBase
 	defer func() { vaultAdminBase = oldBase }()

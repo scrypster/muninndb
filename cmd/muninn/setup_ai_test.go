@@ -1453,3 +1453,82 @@ func TestClaudeMDPath(t *testing.T) {
 		t.Errorf("unexpected path: %s", path)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Behavior mode content generation tests
+// ---------------------------------------------------------------------------
+
+// TestBuildClaudeMDMemoryBlock_ModeVariants verifies that each behavior mode
+// produces distinct, non-empty content with the correct proactivity instruction.
+func TestBuildClaudeMDMemoryBlock_ModeVariants(t *testing.T) {
+	cases := []struct {
+		mode   string
+		wantIn string
+	}{
+		{"autonomous", "proactive"},
+		{"prompted", "explicitly asks"},
+		{"selective", "Automatically store decisions"},
+		{"custom", "custom memory instructions"},
+		{"", "proactive"}, // empty = autonomous default
+	}
+	for _, tc := range cases {
+		got := buildClaudeMDMemoryBlock(tc.mode)
+		if !strings.Contains(got, "MuninnDB") {
+			t.Errorf("mode=%q: missing 'MuninnDB' in output", tc.mode)
+		}
+		if !strings.Contains(got, tc.wantIn) {
+			t.Errorf("mode=%q: expected %q in output, got:\n%s", tc.mode, tc.wantIn, got)
+		}
+	}
+	// Verify modes produce distinct outputs.
+	autonomous := buildClaudeMDMemoryBlock("autonomous")
+	prompted := buildClaudeMDMemoryBlock("prompted")
+	selective := buildClaudeMDMemoryBlock("selective")
+	if autonomous == prompted {
+		t.Error("autonomous and prompted should produce different CLAUDE.md blocks")
+	}
+	if autonomous == selective {
+		t.Error("autonomous and selective should produce different CLAUDE.md blocks")
+	}
+	if prompted == selective {
+		t.Error("prompted and selective should produce different CLAUDE.md blocks")
+	}
+}
+
+// TestBuildOpenClawSkillContent_ModeVariants verifies that each behavior mode
+// produces distinct usage pattern text in the SKILL.md content.
+func TestBuildOpenClawSkillContent_ModeVariants(t *testing.T) {
+	cases := []struct {
+		mode   string
+		wantIn string
+	}{
+		{"autonomous", "Be proactive"},
+		{"prompted", "ONLY store memories when the user explicitly asks"},
+		{"selective", "Automatically store"},
+		{"custom", "Be proactive"},   // custom falls through to proactive default
+		{"", "Be proactive"},
+	}
+	for _, tc := range cases {
+		got := buildOpenClawSkillContent(tc.mode)
+		if !strings.HasPrefix(got, "---\n") {
+			t.Errorf("mode=%q: must start with YAML frontmatter", tc.mode)
+		}
+		if !strings.Contains(got, tc.wantIn) {
+			t.Errorf("mode=%q: expected %q in output, got:\n%s", tc.mode, tc.wantIn, got)
+		}
+	}
+}
+
+// TestBuildOpenClawSkillContent_AllModesHaveUsagePattern verifies the ## Usage pattern
+// section is present for every mode.
+func TestBuildOpenClawSkillContent_AllModesHaveUsagePattern(t *testing.T) {
+	for _, mode := range []string{"", "autonomous", "prompted", "selective", "custom"} {
+		got := buildOpenClawSkillContent(mode)
+		if !strings.Contains(got, "## Usage pattern") {
+			t.Errorf("mode=%q: missing '## Usage pattern' section", mode)
+		}
+		if !strings.Contains(got, "/api/engrams") {
+			t.Errorf("mode=%q: missing REST API endpoint reference", mode)
+		}
+	}
+}
