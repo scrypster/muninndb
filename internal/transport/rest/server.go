@@ -182,16 +182,19 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/subscribe", s.withMiddleware(auth.WriteOnlyGuard(s.handleSubscribe)))
 
 	// Extended vault routes — operations that were previously MCP-only.
-	mux.HandleFunc("POST /api/engrams/{id}/evolve", s.withMiddleware(s.handleEvolve))
-	mux.HandleFunc("POST /api/consolidate", s.withMiddleware(s.handleConsolidateEngrams))
-	mux.HandleFunc("POST /api/decide", s.withMiddleware(s.handleDecide))
-	mux.HandleFunc("POST /api/engrams/{id}/restore", s.withMiddleware(s.handleRestore))
+	// These POST operations mutate existing engrams and return engram data in
+	// their response body — write-only keys must not be able to extract vault
+	// data via any response path.
+	mux.HandleFunc("POST /api/engrams/{id}/evolve", s.withMiddleware(auth.WriteOnlyGuard(s.handleEvolve)))
+	mux.HandleFunc("POST /api/consolidate", s.withMiddleware(auth.WriteOnlyGuard(s.handleConsolidateEngrams)))
+	mux.HandleFunc("POST /api/decide", s.withMiddleware(auth.WriteOnlyGuard(s.handleDecide)))
+	mux.HandleFunc("POST /api/engrams/{id}/restore", s.withMiddleware(auth.WriteOnlyGuard(s.handleRestore)))
 	mux.HandleFunc("POST /api/traverse", s.withMiddleware(auth.WriteOnlyGuard(s.handleTraverse)))
 	mux.HandleFunc("POST /api/explain", s.withMiddleware(auth.WriteOnlyGuard(s.handleExplain)))
 	mux.HandleFunc("PUT /api/engrams/{id}/state", s.withMiddleware(s.handleSetState))
 	mux.HandleFunc("PUT /api/engrams/{id}/tags", s.withMiddleware(s.handleUpdateTags))
 	mux.HandleFunc("GET /api/deleted", s.withMiddleware(auth.WriteOnlyGuard(s.handleListDeleted)))
-	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(s.handleRetryEnrich))
+	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(auth.WriteOnlyGuard(s.handleRetryEnrich)))
 	mux.HandleFunc("GET /api/contradictions", s.withMiddleware(auth.WriteOnlyGuard(s.handleContradictions)))
 	mux.HandleFunc("GET /api/guide", s.withMiddleware(auth.WriteOnlyGuard(s.handleGuide)))
 

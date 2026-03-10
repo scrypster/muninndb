@@ -12,7 +12,7 @@ type APIKey struct {
 	ID          string     `json:"id"`
 	Vault       string     `json:"vault"`
 	Label       string     `json:"label"`
-	Mode        string     `json:"mode"`      // "full" or "observe"
+	Mode        string     `json:"mode"`      // "full", "observe", or "write" (ingest-only)
 	CreatedAt   time.Time  `json:"created_at"`
 	StorageHash []byte     `json:"storage_hash"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"` // nil = never expires

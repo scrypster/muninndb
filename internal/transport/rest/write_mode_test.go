@@ -27,9 +27,10 @@ func newWriteModeTestServer(t *testing.T) *Server {
 	return newTestServer(t, store)
 }
 
-// TestWriteOnlyMode_ReadHandlersBlocked verifies all 14 read endpoints return 403
-// for write-only mode. This test will FAIL until Task 4 applies WriteOnlyGuard
-// at route registration.
+// TestWriteOnlyMode_ReadHandlersBlocked verifies all guarded endpoints return
+// 403 for write-only mode. The original 14 pure-read endpoints plus 5 POST
+// mutation endpoints that echo engram data in their response bodies are all
+// blocked to prevent data exfiltration through any response path.
 func TestWriteOnlyMode_ReadHandlersBlocked(t *testing.T) {
 	s := newWriteModeTestServer(t)
 
@@ -38,6 +39,7 @@ func TestWriteOnlyMode_ReadHandlersBlocked(t *testing.T) {
 		method  string
 		handler http.HandlerFunc
 	}{
+		// Original 14 read-only endpoints.
 		{"GetEngram", "GET", s.handleGetEngram},
 		{"Activate", "POST", s.handleActivate},
 		{"ListEngrams", "GET", s.handleListEngrams},
@@ -52,6 +54,13 @@ func TestWriteOnlyMode_ReadHandlersBlocked(t *testing.T) {
 		{"Contradictions", "GET", s.handleContradictions},
 		{"Guide", "GET", s.handleGuide},
 		{"Stats", "GET", s.handleStats},
+		// POST mutation endpoints that return full engram payloads — blocked to
+		// prevent data exfiltration via response body (hardening round 1).
+		{"Evolve", "POST", s.handleEvolve},
+		{"Consolidate", "POST", s.handleConsolidateEngrams},
+		{"Decide", "POST", s.handleDecide},
+		{"Restore", "POST", s.handleRestore},
+		{"RetryEnrich", "POST", s.handleRetryEnrich},
 	}
 
 	for _, tc := range cases {
@@ -68,8 +77,9 @@ func TestWriteOnlyMode_ReadHandlersBlocked(t *testing.T) {
 	}
 }
 
-// TestWriteOnlyMode_WriteHandlersNotBlocked verifies mutation endpoints are NOT
-// blocked for write-only mode (may fail for other reasons, but not 403).
+// TestWriteOnlyMode_WriteHandlersNotBlocked verifies pure ingest/mutation
+// endpoints that do NOT echo vault data are accessible with write-only keys
+// (may fail for other reasons, but must NOT return 403).
 func TestWriteOnlyMode_WriteHandlersNotBlocked(t *testing.T) {
 	s := newWriteModeTestServer(t)
 
@@ -80,14 +90,9 @@ func TestWriteOnlyMode_WriteHandlersNotBlocked(t *testing.T) {
 		{"CreateEngram", s.handleCreateEngram},
 		{"BatchCreate", s.handleBatchCreate},
 		{"Link", s.handleLink},
-		{"Evolve", s.handleEvolve},
-		{"Consolidate", s.handleConsolidateEngrams},
-		{"Decide", s.handleDecide},
 		{"DeleteEngram", s.handleDeleteEngram},
-		{"Restore", s.handleRestore},
 		{"SetState", s.handleSetState},
 		{"UpdateTags", s.handleUpdateTags},
-		{"RetryEnrich", s.handleRetryEnrich},
 	}
 
 	for _, tc := range cases {
