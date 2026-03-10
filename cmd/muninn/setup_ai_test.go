@@ -453,7 +453,7 @@ func TestConfigureOpenClawSkill_WritesFile(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		if err := configureOpenClawSkill(); err != nil {
+		if err := configureOpenClawSkill(""); err != nil {
 			t.Fatalf("configureOpenClawSkill: %v", err)
 		}
 	})
@@ -483,7 +483,7 @@ func TestConfigureOpenClawSkill_CreatesDirectory(t *testing.T) {
 	}
 
 	captureStdout(func() {
-		if err := configureOpenClawSkill(); err != nil {
+		if err := configureOpenClawSkill(""); err != nil {
 			t.Fatalf("configureOpenClawSkill: %v", err)
 		}
 	})
@@ -868,22 +868,22 @@ func TestConfigureWindsurfWritesConfig(t *testing.T) {
 // TestOpenClawSkillHasFrontmatter verifies the SKILL.md content includes valid YAML frontmatter
 // so that OpenClaw recognizes and loads the skill.
 func TestOpenClawSkillHasFrontmatter(t *testing.T) {
-	if !strings.HasPrefix(openClawSkillContent, "---\n") {
+	if !strings.HasPrefix(buildOpenClawSkillContent(""), "---\n") {
 		t.Error("SKILL.md must start with YAML frontmatter delimiter ---")
 	}
-	if !strings.Contains(openClawSkillContent, "name:") {
+	if !strings.Contains(buildOpenClawSkillContent(""), "name:") {
 		t.Error("SKILL.md frontmatter must include name field")
 	}
-	if !strings.Contains(openClawSkillContent, "description:") {
+	if !strings.Contains(buildOpenClawSkillContent(""), "description:") {
 		t.Error("SKILL.md frontmatter must include description field")
 	}
-	if !strings.Contains(openClawSkillContent, "metadata:") {
+	if !strings.Contains(buildOpenClawSkillContent(""), "metadata:") {
 		t.Error("SKILL.md frontmatter must include metadata section")
 	}
-	if !strings.Contains(openClawSkillContent, "bins:") {
+	if !strings.Contains(buildOpenClawSkillContent(""), "bins:") {
 		t.Error("SKILL.md frontmatter must include requires.bins")
 	}
-	if !strings.Contains(openClawSkillContent, "- curl") {
+	if !strings.Contains(buildOpenClawSkillContent(""), "- curl") {
 		t.Error("SKILL.md frontmatter requires.bins must list curl (REST API uses curl)")
 	}
 }
@@ -1028,7 +1028,7 @@ func TestConfigureNamedToolsCodex(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"codex"}, "http://127.0.0.1:8750/mcp", "tok123")
+		configureNamedTools([]string{"codex"}, "http://127.0.0.1:8750/mcp", "tok123", "")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for codex tool, got: %s", out)
@@ -1112,7 +1112,7 @@ func TestConfigureNamedToolsClaudeDesktop(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claude"}, "http://127.0.0.1:8750/mcp", "tok123")
+		configureNamedTools([]string{"claude"}, "http://127.0.0.1:8750/mcp", "tok123", "")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for claude tool, got: %s", out)
@@ -1131,7 +1131,7 @@ func TestConfigureNamedToolsClaudeDesktopAlias(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claude-desktop"}, "http://127.0.0.1:8750/mcp", "tok")
+		configureNamedTools([]string{"claude-desktop"}, "http://127.0.0.1:8750/mcp", "tok", "")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("claude-desktop alias should work: %s", out)
@@ -1144,7 +1144,7 @@ func TestConfigureNamedToolsCursor(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"cursor"}, "http://127.0.0.1:8750/mcp", "tok123")
+		configureNamedTools([]string{"cursor"}, "http://127.0.0.1:8750/mcp", "tok123", "")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for cursor tool, got: %s", out)
@@ -1162,7 +1162,7 @@ func TestConfigureNamedToolsWindsurf(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"windsurf"}, "http://127.0.0.1:8750/mcp", "tok123")
+		configureNamedTools([]string{"windsurf"}, "http://127.0.0.1:8750/mcp", "tok123", "")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for windsurf tool, got: %s", out)
@@ -1181,7 +1181,7 @@ func TestConfigureNamedToolsOpenClaw(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"openclaw"}, "http://127.0.0.1:8750/mcp", "tok123")
+		configureNamedTools([]string{"openclaw"}, "http://127.0.0.1:8750/mcp", "tok123", "")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for openclaw tool, got: %s", out)
@@ -1203,7 +1203,7 @@ func TestConfigureNamedToolsVSCode(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"vscode"}, "http://127.0.0.1:8750/mcp", "")
+		configureNamedTools([]string{"vscode"}, "http://127.0.0.1:8750/mcp", "", "")
 	})
 	if !strings.Contains(out, "VS Code") {
 		t.Errorf("expected VS Code instructions, got: %s", out)
@@ -1219,7 +1219,7 @@ func TestConfigureNamedToolsVSCodeAlias(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"vs-code"}, "http://127.0.0.1:8750/mcp", "")
+		configureNamedTools([]string{"vs-code"}, "http://127.0.0.1:8750/mcp", "", "")
 	})
 	if !strings.Contains(out, "VS Code") {
 		t.Errorf("expected VS Code instructions with vs-code alias: %s", out)
@@ -1232,7 +1232,7 @@ func TestConfigureNamedToolsManual(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"manual"}, "http://127.0.0.1:8750/mcp", "")
+		configureNamedTools([]string{"manual"}, "http://127.0.0.1:8750/mcp", "", "")
 	})
 	if !strings.Contains(out, "mcpServers") {
 		t.Errorf("expected manual instructions, got: %s", out)
@@ -1248,7 +1248,7 @@ func TestConfigureNamedToolsOtherAlias(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"other"}, "http://127.0.0.1:8750/mcp", "")
+		configureNamedTools([]string{"other"}, "http://127.0.0.1:8750/mcp", "", "")
 	})
 	if !strings.Contains(out, "mcpServers") {
 		t.Errorf("expected manual instructions with 'other' alias: %s", out)
@@ -1261,7 +1261,7 @@ func TestConfigureNamedToolsMultiple(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claude", "cursor"}, "http://127.0.0.1:8750/mcp", "tok123")
+		configureNamedTools([]string{"claude", "cursor"}, "http://127.0.0.1:8750/mcp", "tok123", "")
 	})
 
 	// Both should succeed
@@ -1286,7 +1286,7 @@ func TestConfigureNamedToolsUnknownToolSetupAI(t *testing.T) {
 	defer cleanup()
 
 	stderr := captureStderr(func() {
-		configureNamedTools([]string{"nonexistent"}, "http://127.0.0.1:8750/mcp", "")
+		configureNamedTools([]string{"nonexistent"}, "http://127.0.0.1:8750/mcp", "", "")
 	})
 	if !strings.Contains(stderr, "unknown tool") {
 		t.Errorf("expected error for unknown tool, got stderr: %s", stderr)
@@ -1299,7 +1299,7 @@ func TestConfigureClaudeMD_NewFile(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		if err := configureClaudeMD(); err != nil {
+		if err := configureClaudeMD(""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -1341,7 +1341,7 @@ func TestConfigureClaudeMD_PrependsToExisting(t *testing.T) {
 	os.WriteFile(path, []byte(existing), 0644)
 
 	out := captureStdout(func() {
-		if err := configureClaudeMD(); err != nil {
+		if err := configureClaudeMD(""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -1380,7 +1380,7 @@ func TestConfigureClaudeMD_AlreadyConfigured(t *testing.T) {
 	os.WriteFile(path, []byte(existing), 0644)
 
 	out := captureStdout(func() {
-		if err := configureClaudeMD(); err != nil {
+		if err := configureClaudeMD(""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -1401,7 +1401,7 @@ func TestConfigureClaudeMD_CreatesDirectory(t *testing.T) {
 	defer cleanup()
 
 	captureStdout(func() {
-		if err := configureClaudeMD(); err != nil {
+		if err := configureClaudeMD(""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})

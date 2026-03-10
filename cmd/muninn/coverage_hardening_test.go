@@ -1112,7 +1112,7 @@ func TestConfigureNamedTools_AllNames(t *testing.T) {
 	out := captureStdout(func() {
 		errs := configureNamedTools([]string{
 			"claude", "claude-code", "cursor", "windsurf", "openclaw", "vscode", "manual",
-		}, "http://127.0.0.1:8750/mcp", "tok")
+		}, "http://127.0.0.1:8750/mcp", "tok", "")
 		_ = errs
 	})
 	_ = out
@@ -1836,7 +1836,7 @@ func TestConfigureClaudeMD_NewFile_Hardened(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("USERPROFILE", home)
 
-	err := configureClaudeMD()
+	err := configureClaudeMD("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1858,7 +1858,7 @@ func TestConfigureClaudeMD_ExistingNoBlock(t *testing.T) {
 	os.MkdirAll(claudeDir, 0700)
 	os.WriteFile(filepath.Join(claudeDir, "CLAUDE.md"), []byte("existing content\n"), 0644)
 
-	err := configureClaudeMD()
+	err := configureClaudeMD("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1880,7 +1880,7 @@ func TestConfigureClaudeMD_AlreadyHasBlock(t *testing.T) {
 	os.MkdirAll(claudeDir, 0700)
 	os.WriteFile(filepath.Join(claudeDir, "CLAUDE.md"), []byte("# Memory\nmuninn_remember\n"), 0644)
 
-	err := configureClaudeMD()
+	err := configureClaudeMD("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1946,7 +1946,7 @@ func TestConfigureNamedTools_OpenClaw(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 
 	out := captureStdout(func() {
-		errs := configureNamedTools([]string{"openclaw"}, "http://127.0.0.1:8750/mcp", "tok")
+		errs := configureNamedTools([]string{"openclaw"}, "http://127.0.0.1:8750/mcp", "tok", "")
 		_ = errs
 	})
 	_ = out
@@ -2218,7 +2218,7 @@ func TestPromptClaudeMD_Yes(t *testing.T) {
 	}()
 
 	out := captureStdout(func() {
-		promptClaudeMD()
+		promptClaudeMD("")
 	})
 	if !strings.Contains(out, "CLAUDE.md") {
 		t.Logf("output: %s", out)
@@ -2241,7 +2241,7 @@ func TestPromptClaudeMD_No(t *testing.T) {
 	}()
 
 	out := captureStdout(func() {
-		promptClaudeMD()
+		promptClaudeMD("")
 	})
 	if !strings.Contains(out, "Optional") || !strings.Contains(out, "CLAUDE.md") {
 		t.Logf("output: %s", out)
@@ -2264,7 +2264,7 @@ func TestPromptClaudeMD_Empty(t *testing.T) {
 	}()
 
 	captureStdout(func() {
-		promptClaudeMD()
+		promptClaudeMD("")
 	})
 }
 

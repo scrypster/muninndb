@@ -920,7 +920,7 @@ func TestConfigureNamedToolsClaudeCode(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claude-code"}, "http://127.0.0.1:8750/mcp", "tok")
+		configureNamedTools([]string{"claude-code"}, "http://127.0.0.1:8750/mcp", "tok", "")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for claude-code: %s", out)
@@ -932,7 +932,7 @@ func TestConfigureNamedToolsClaudeCodeAlias(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		configureNamedTools([]string{"claudecode"}, "http://127.0.0.1:8750/mcp", "tok")
+		configureNamedTools([]string{"claudecode"}, "http://127.0.0.1:8750/mcp", "tok", "")
 	})
 	if !strings.Contains(out, "✓") {
 		t.Errorf("expected success marker for claudecode alias: %s", out)

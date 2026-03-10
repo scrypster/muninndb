@@ -462,10 +462,52 @@ func cleanupOpenClawBadConfig() {
 	fmt.Printf("  ✓ OpenClaw: removed stale provider.mcpServers.muninn from %s\n", path)
 }
 
-// openClawSkillContent is the SKILL.md content that teaches OpenClaw how to
-// use MuninnDB for persistent memory across sessions via its REST API.
+// buildOpenClawSkillContent returns the SKILL.md content parameterized by behavior mode.
 // OpenClaw has no native MCP support; all memory operations use curl over HTTP.
-const openClawSkillContent = `---
+// The Usage pattern section varies based on the vault's behavior mode.
+func buildOpenClawSkillContent(mode string) string {
+	usagePattern := openClawUsagePattern(mode)
+	return openClawSkillHeader + usagePattern + openClawSkillFooter
+}
+
+// openClawUsagePattern returns the ## Usage pattern section for a given behavior mode.
+func openClawUsagePattern(mode string) string {
+	switch mode {
+	case "prompted":
+		return `## Usage pattern
+
+1. **Session start** — recall relevant context:
+   ` + "`" + `{"context":["user preferences","current project","recent decisions"],"max_results":8}` + "`" + `
+2. **During session** — ONLY store memories when the user explicitly asks you to remember something.
+3. Do NOT store information proactively. Wait for explicit instructions like "remember this" or "save that".
+4. Use vault ` + "`" + `"default"` + "`" + ` unless the user specifies otherwise.
+
+`
+	case "selective":
+		return `## Usage pattern
+
+1. **Session start** — recall relevant context:
+   ` + "`" + `{"context":["user preferences","current project","recent decisions"],"max_results":8}` + "`" + `
+2. **Automatically store** decisions, errors, and user preferences without being asked.
+3. **For other information** — only store when the user explicitly asks.
+4. Use vault ` + "`" + `"default"` + "`" + ` unless the user specifies otherwise.
+
+`
+	default: // "autonomous" and "custom" both default to proactive behavior here
+		return `## Usage pattern
+
+1. **Session start** — recall relevant context:
+   ` + "`" + `{"context":["user preferences","current project","recent decisions"],"max_results":8}` + "`" + `
+2. **During session** — when the user shares facts, decisions, or preferences, store them immediately.
+3. **Be proactive** — don't wait to be asked. If something is worth remembering, store it.
+4. Use vault ` + "`" + `"default"` + "`" + ` unless the user specifies otherwise.
+
+`
+	}
+}
+
+// openClawSkillHeader is the portion of the SKILL.md before the ## Usage pattern section.
+const openClawSkillHeader = `---
 name: muninndb-memory
 description: Persistent cognitive memory for AI agents — store and recall memories across sessions using MuninnDB's REST API via curl.
 version: 2.0.0
@@ -560,16 +602,10 @@ curl -s -X POST "$MUNINN_URL/api/engrams/batch" \
 curl -s "$MUNINN_URL/api/guide?vault=default" \
   ${MUNINN_AUTH:+$MUNINN_AUTH} | python3 -c "import sys,json; print(json.load(sys.stdin).get('guide',''))"
 ` + "```" + `
+`
 
-## Usage pattern
-
-1. **Session start** — recall relevant context:
-   ` + "`" + `{"context":["user preferences","current project","recent decisions"],"max_results":8}` + "`" + `
-2. **During session** — when the user shares facts, decisions, or preferences, store them immediately.
-3. **Be proactive** — don't wait to be asked. If something is worth remembering, store it.
-4. Use vault ` + "`" + `"default"` + "`" + ` unless the user specifies otherwise.
-
-## Troubleshooting
+// openClawSkillFooter is the portion of the SKILL.md after the ## Usage pattern section.
+const openClawSkillFooter = `## Troubleshooting
 
 If curl returns a connection error, MuninnDB is not running:
 ` + "```" + `bash
@@ -596,12 +632,14 @@ func openClawSkillPath() string {
 }
 
 // configureOpenClawSkill writes the MuninnDB SKILL.md into OpenClaw's skills directory.
-func configureOpenClawSkill() error {
+// mode controls the ## Usage pattern section (autonomous, prompted, selective, custom).
+// Pass "" to use the default (autonomous) behavior.
+func configureOpenClawSkill(mode string) error {
 	path := openClawSkillPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create skill directory: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(openClawSkillContent), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(buildOpenClawSkillContent(mode)), 0644); err != nil {
 		return fmt.Errorf("write SKILL.md: %w", err)
 	}
 	fmt.Printf("  ✓ OpenClaw skill: wrote SKILL.md\n    %s\n", path)
@@ -769,7 +807,21 @@ func printManualInstructions(mcpURL, token string) {
 	fmt.Printf("    curl%s %s/mcp/health\n", curlAuth, mcpURL)
 }
 
-const claudeMDMemoryBlock = `# Memory Storage Preference
+// buildClaudeMDMemoryBlock returns the CLAUDE.md memory block parameterized by behavior mode.
+// The proactivity guidance at the end varies based on mode.
+func buildClaudeMDMemoryBlock(mode string) string {
+	var proactivity string
+	switch mode {
+	case "prompted":
+		proactivity = "Only store memories when the user explicitly asks (e.g. \"remember this\", \"save that\").\nNever store proactively."
+	case "selective":
+		proactivity = "Automatically store decisions, errors, and user preferences.\nFor other information, only store when the user explicitly asks."
+	case "custom":
+		proactivity = "Follow the custom memory instructions configured for this vault."
+	default: // "autonomous"
+		proactivity = "Be proactive — if the user shares something personal or important, store it without being asked."
+	}
+	return `# Memory Storage Preference
 
 When asked to remember something — or when the user shares any preference, fact,
 decision, or instruction worth remembering — **always use MuninnDB (muninn) MCP**.
@@ -782,9 +834,9 @@ Never use local auto memory. MuninnDB is the canonical memory system.
 - **Guide**: ` + "`mcp__muninn__muninn_guide`" + ` — call this on first connect to learn best practices
 - **Batch**: ` + "`mcp__muninn__muninn_remember_batch`" + ` (vault, memories[])
 
-Use vault "default" unless the user specifies otherwise. Be proactive — if the user
-shares something personal or important, store it without being asked.
+Use vault "default" unless the user specifies otherwise. ` + proactivity + `
 `
+}
 
 // claudeMDPath returns the path to ~/.claude/CLAUDE.md.
 func claudeMDPath() string {
@@ -793,9 +845,11 @@ func claudeMDPath() string {
 }
 
 // configureClaudeMD writes the MuninnDB memory preference block into ~/.claude/CLAUDE.md.
+// mode controls the proactivity guidance (autonomous, prompted, selective, custom). Pass "" for autonomous.
 // If the file already contains a MuninnDB block, it reports "already configured" and returns nil.
 // If the file exists without one, the block is prepended. If missing, the file is created.
-func configureClaudeMD() error {
+func configureClaudeMD(mode string) error {
+	block := buildClaudeMDMemoryBlock(mode)
 	path := claudeMDPath()
 
 	existing, err := os.ReadFile(path)
@@ -805,7 +859,7 @@ func configureClaudeMD() error {
 			return nil
 		}
 		// Prepend the block to existing content.
-		combined := claudeMDMemoryBlock + "\n---\n\n" + string(existing)
+		combined := block + "\n---\n\n" + string(existing)
 		if err := os.WriteFile(path, []byte(combined), 0644); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)
 		}
@@ -817,7 +871,7 @@ func configureClaudeMD() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create directory: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(claudeMDMemoryBlock), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(block), 0644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	fmt.Printf("  ✓ CLAUDE.md created: %s\n", path)

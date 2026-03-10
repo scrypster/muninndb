@@ -32,6 +32,7 @@ func printVaultUsage() {
 	fmt.Println("  rename      <old-name> <new-name>                  Rename a vault (metadata only)")
 	fmt.Println("  reembed     <name>                               Clear embeddings and re-embed with current model")
 	fmt.Println("  recall-mode <vault> [mode]                        Get or set default recall mode")
+	fmt.Println("  behavior    <vault> [--mode <mode>] [--instructions <text>]  Get or set vault behavior mode")
 	fmt.Println()
 	fmt.Println("Auth flags (MySQL-style, optional):")
 	fmt.Println("  -u <user>         Admin username (default: root)")
@@ -64,7 +65,7 @@ func runVault(args []string) {
 
 	// Validate the subcommand before authenticating so typos get fast feedback.
 	switch sub {
-	case "create", "delete", "clear", "clone", "merge", "rename", "export", "export-markdown", "import", "reindex-fts", "reembed", "recall-mode":
+	case "create", "delete", "clear", "clone", "merge", "rename", "export", "export-markdown", "import", "reindex-fts", "reembed", "recall-mode", "behavior":
 	default:
 		fmt.Printf("Unknown vault command: %q\n", sub)
 		printVaultUsage()
@@ -104,6 +105,8 @@ func runVault(args []string) {
 		runVaultReembed(subArgs)
 	case "recall-mode":
 		runVaultRecallMode(subArgs)
+	case "behavior":
+		runVaultBehavior(subArgs)
 	}
 }
 
@@ -1189,4 +1192,166 @@ func runVaultRecallMode(args []string) {
 	}
 
 	fmt.Printf("  Vault %q recall mode set to: %s\n", vaultName, newMode)
+}
+
+// ---------------------------------------------------------------------------
+// vault behavior
+// ---------------------------------------------------------------------------
+
+// runVaultBehavior implements `muninn vault behavior <vault> [--mode <m>] [--instructions <text>]`.
+// With no flags it prints the vault's current behavior mode.
+// With --mode (and optionally --instructions) it updates the vault's plasticity config.
+// PUT semantics are idempotent: calling with the same mode twice is safe.
+func runVaultBehavior(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: muninn vault behavior <vault> [--mode <mode>] [--instructions <text>]")
+		fmt.Println()
+		fmt.Println("  With no flags, prints the vault's current behavior mode.")
+		fmt.Println("  With --mode, sets the behavior mode for this vault.")
+		fmt.Println()
+		fmt.Println("  Valid modes: autonomous, prompted, selective, custom")
+		fmt.Println("  Use --instructions with --mode custom to provide freeform guidance.")
+		return
+	}
+
+	vaultName := args[0]
+	plasticityURL := fmt.Sprintf("%s/api/admin/vault/%s/plasticity", vaultAdminBase, url.PathEscape(vaultName))
+
+	// Parse optional flags.
+	var newMode, newInstructions string
+	for i := 1; i < len(args); i++ {
+		switch {
+		case args[i] == "--mode" && i+1 < len(args):
+			i++
+			newMode = args[i]
+		case strings.HasPrefix(args[i], "--mode="):
+			newMode = strings.TrimPrefix(args[i], "--mode=")
+		case args[i] == "--instructions" && i+1 < len(args):
+			i++
+			newInstructions = args[i]
+		case strings.HasPrefix(args[i], "--instructions="):
+			newInstructions = strings.TrimPrefix(args[i], "--instructions=")
+		}
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	if newMode == "" && newInstructions == "" {
+		// GET current behavior mode.
+		req, err := http.NewRequest("GET", plasticityURL, nil)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+		addSessionCookie(req)
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+			fmt.Println("Is muninn running? Try: muninn status")
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			printHTTPError(resp)
+			return
+		}
+		var data struct {
+			Resolved struct {
+				BehaviorMode         string `json:"behavior_mode"`
+				BehaviorInstructions string `json:"behavior_instructions"`
+			} `json:"resolved"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			fmt.Printf("Error parsing response: %v\n", err)
+			return
+		}
+		mode := data.Resolved.BehaviorMode
+		if mode == "" {
+			mode = "autonomous"
+		}
+		fmt.Printf("  Vault %q behavior mode: %s\n", vaultName, mode)
+		if data.Resolved.BehaviorInstructions != "" {
+			fmt.Printf("  Custom instructions: %s\n", data.Resolved.BehaviorInstructions)
+		}
+		return
+	}
+
+	// Validate mode if provided.
+	validModes := map[string]bool{"autonomous": true, "prompted": true, "selective": true, "custom": true}
+	if newMode != "" && !validModes[newMode] {
+		fmt.Printf("Error: invalid behavior mode %q (valid: autonomous, prompted, selective, custom)\n", newMode)
+		return
+	}
+
+	// GET current plasticity config so we do a merge-PUT (idempotent, non-destructive).
+	getReq, err := http.NewRequest("GET", plasticityURL, nil)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	addSessionCookie(getReq)
+	getResp, err := client.Do(getReq)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		return
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		printHTTPError(getResp)
+		return
+	}
+	var data struct {
+		Config json.RawMessage `json:"config"`
+	}
+	if err := json.NewDecoder(getResp.Body).Decode(&data); err != nil {
+		fmt.Printf("Error parsing response: %v\n", err)
+		return
+	}
+
+	var cfgMap map[string]any
+	if data.Config != nil && string(data.Config) != "null" {
+		if err := json.Unmarshal(data.Config, &cfgMap); err != nil {
+			cfgMap = map[string]any{}
+		}
+	} else {
+		cfgMap = map[string]any{}
+	}
+	if newMode != "" {
+		cfgMap["behavior_mode"] = newMode
+	}
+	if newInstructions != "" {
+		cfgMap["behavior_instructions"] = newInstructions
+	}
+
+	bodyBytes, err := json.Marshal(cfgMap)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	putReq, err := http.NewRequest("PUT", plasticityURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	putReq.Header.Set("Content-Type", "application/json")
+	addSessionCookie(putReq)
+
+	putResp, err := client.Do(putReq)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		return
+	}
+	defer putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		printHTTPError(putResp)
+		return
+	}
+
+	if newMode != "" {
+		fmt.Printf("  Vault %q behavior mode set to: %s\n", vaultName, newMode)
+	}
+	if newInstructions != "" {
+		fmt.Printf("  Vault %q custom instructions updated.\n", vaultName)
+	}
 }

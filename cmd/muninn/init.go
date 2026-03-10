@@ -2,10 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -173,7 +177,7 @@ func runInteractiveInit(mcpURL string, tokenFlag *string, noToken *bool, noStart
 	// Configure selected tools
 	if len(selectedTools) > 0 {
 		fmt.Println()
-		toolErrs := configureNamedTools(selectedTools, mcpURL, token)
+		toolErrs := configureNamedTools(selectedTools, mcpURL, token, behaviorMode)
 		if len(toolErrs) > 0 {
 			fmt.Println()
 			fmt.Printf("  ⚠  %d tool(s) failed to configure — check errors above.\n", len(toolErrs))
@@ -181,7 +185,7 @@ func runInteractiveInit(mcpURL string, tokenFlag *string, noToken *bool, noStart
 		}
 
 		if hasClaudeCode(selectedTools) {
-			promptClaudeMD()
+			promptClaudeMD(behaviorMode)
 		}
 	}
 
@@ -189,6 +193,9 @@ func runInteractiveInit(mcpURL string, tokenFlag *string, noToken *bool, noStart
 	if !*noStart {
 		fmt.Println()
 		runStart(true)
+		// Persist the behavior choice to the default vault now that the server is up.
+		// Retries once on failure; falls back to printing the manual command.
+		applyBehaviorToVault(behaviorMode, customInstructions)
 	}
 
 	// Success message
@@ -585,7 +592,7 @@ func runNonInteractiveInit(mcpURL, toolStr, tokenStr string, noToken, noStart, y
 
 	if len(tools) > 0 {
 		fmt.Println("Configuring AI tools:")
-		toolErrs := configureNamedTools(tools, mcpURL, token)
+		toolErrs := configureNamedTools(tools, mcpURL, token, "")
 		if len(toolErrs) > 0 {
 			fmt.Printf("\n  ⚠  %d tool(s) failed to configure:\n", len(toolErrs))
 			for _, e := range toolErrs {
@@ -595,7 +602,7 @@ func runNonInteractiveInit(mcpURL, toolStr, tokenStr string, noToken, noStart, y
 		}
 
 		if hasClaudeCode(tools) {
-			if err := configureClaudeMD(); err != nil {
+			if err := configureClaudeMD(""); err != nil {
 				fmt.Fprintf(os.Stderr, "  ⚠  CLAUDE.md: %v\n", err)
 			}
 		}
@@ -653,7 +660,9 @@ func configureTools(selected []int, mcpURL, token string) []string {
 }
 
 // configureNamedTools configures AI tools by name.
-func configureNamedTools(tools []string, mcpURL, token string) []string {
+// behaviorMode controls the ## Usage pattern section in SKILL.md / CLAUDE.md.
+// Pass "" to use the default (autonomous) behavior.
+func configureNamedTools(tools []string, mcpURL, token, behaviorMode string) []string {
 	var errs []string
 	for _, t := range tools {
 		switch t {
@@ -685,7 +694,7 @@ func configureNamedTools(tools []string, mcpURL, token string) []string {
 			// Also remove any provider.mcpServers.muninn entry written by v0.3.13-alpha,
 			// which caused a fatal "Unrecognized key: provider" startup error.
 			cleanupOpenClawBadConfig()
-			if err := configureOpenClawSkill(); err != nil {
+			if err := configureOpenClawSkill(behaviorMode); err != nil {
 				errs = append(errs, fmt.Sprintf("OpenClaw skill: %v", err))
 				fmt.Fprintf(os.Stderr, "  ✗ OpenClaw skill: %v\n", err)
 			}
@@ -757,16 +766,106 @@ func printBehaviorNote(mode, customInstructions string) {
 		fmt.Println("  Behavior: selective — decisions & errors auto-remembered.")
 	case "custom":
 		fmt.Println("  Behavior: custom — using your provided instructions.")
+		if customInstructions != "" {
+			fmt.Printf("  behavior-instructions: %s\n", customInstructions)
+		}
 	default:
 		fmt.Println("  Behavior: autonomous — AI will proactively remember.")
 	}
-	fmt.Println()
-	fmt.Println("  To apply this setting, run:")
-	cmd := fmt.Sprintf("    muninn vault config default --behavior %s", mode)
-	fmt.Println(cmd)
-	if mode == "custom" && customInstructions != "" {
-		fmt.Printf("    muninn vault config default --behavior-instructions %q\n", customInstructions)
+}
+
+// applyBehaviorToVault persists the chosen behavior mode to the default vault's
+// plasticity config via the admin API. Called after runStart so the server is up.
+//
+// Tries once immediately, retries after 2 s if the first attempt fails (the daemon
+// may still be initializing). On final failure it prints the manual command and
+// continues — a behavior-set failure must never abort the init wizard.
+//
+// The PUT is idempotent: calling with the same mode twice is safe.
+func applyBehaviorToVault(mode, customInstructions string) {
+	doApply := func() error {
+		// Attempt default-credential auto-login (root/password) — works on fresh installs.
+		// Do not prompt interactively; this is a background step inside init.
+		if err := loginAdmin("root", "password"); err != nil {
+			return err
+		}
+
+		plasticityURL := fmt.Sprintf("%s/api/admin/vault/default/plasticity", vaultAdminBase)
+		client := &http.Client{Timeout: 5 * time.Second}
+
+		// GET current config so we merge rather than overwrite.
+		getReq, err := http.NewRequest("GET", plasticityURL, nil)
+		if err != nil {
+			return err
+		}
+		addSessionCookie(getReq)
+		getResp, err := client.Do(getReq)
+		if err != nil {
+			return err
+		}
+		defer getResp.Body.Close()
+		if getResp.StatusCode != http.StatusOK {
+			return fmt.Errorf("GET plasticity: HTTP %d", getResp.StatusCode)
+		}
+
+		var data struct {
+			Config json.RawMessage `json:"config"`
+		}
+		if err := json.NewDecoder(getResp.Body).Decode(&data); err != nil {
+			return err
+		}
+		var cfgMap map[string]any
+		if data.Config != nil && string(data.Config) != "null" {
+			if err := json.Unmarshal(data.Config, &cfgMap); err != nil {
+				cfgMap = map[string]any{}
+			}
+		} else {
+			cfgMap = map[string]any{}
+		}
+		cfgMap["behavior_mode"] = mode
+		if customInstructions != "" {
+			cfgMap["behavior_instructions"] = customInstructions
+		}
+
+		bodyBytes, err := json.Marshal(cfgMap)
+		if err != nil {
+			return err
+		}
+		putReq, err := http.NewRequest("PUT", plasticityURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return err
+		}
+		putReq.Header.Set("Content-Type", "application/json")
+		addSessionCookie(putReq)
+		putResp, err := client.Do(putReq)
+		if err != nil {
+			return err
+		}
+		defer putResp.Body.Close()
+		if putResp.StatusCode != http.StatusOK {
+			return fmt.Errorf("PUT plasticity: HTTP %d", putResp.StatusCode)
+		}
+		return nil
 	}
+
+	err := doApply()
+	if err != nil {
+		// One retry after a short backoff — daemon may still be warming up.
+		time.Sleep(2 * time.Second)
+		err = doApply()
+	}
+
+	if err != nil {
+		// Non-fatal fallback: print the manual command so the user isn't left stranded.
+		fmt.Printf("  ⚠  Could not apply behavior setting automatically (%v)\n", err)
+		fmt.Println("  Apply it manually after the server starts:")
+		fmt.Printf("    muninn vault behavior default --mode %s\n", mode)
+		if customInstructions != "" {
+			fmt.Printf("    muninn vault behavior default --instructions %q\n", customInstructions)
+		}
+		return
+	}
+	fmt.Printf("  ✓ Vault behavior set to: %s\n", mode)
 }
 
 // hasClaudeCode returns true if "claude-code" or "claudecode" is in the tool list.
@@ -780,7 +879,9 @@ func hasClaudeCode(tools []string) bool {
 }
 
 // promptClaudeMD asks interactively whether to configure CLAUDE.md for MuninnDB memory.
-func promptClaudeMD() {
+// behaviorMode is passed through to configureClaudeMD so the proactivity guidance matches
+// the user's stated preference.
+func promptClaudeMD(behaviorMode string) {
 	fmt.Println()
 	fmt.Print("  Configure CLAUDE.md to prefer MuninnDB for memory? [Y/n]: ")
 
@@ -789,7 +890,7 @@ func promptClaudeMD() {
 	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
 
 	if answer == "" || answer == "y" || answer == "yes" {
-		if err := configureClaudeMD(); err != nil {
+		if err := configureClaudeMD(behaviorMode); err != nil {
 			fmt.Fprintf(os.Stderr, "  ⚠  CLAUDE.md: %v\n", err)
 		}
 	} else {

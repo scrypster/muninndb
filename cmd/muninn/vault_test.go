@@ -373,6 +373,103 @@ func TestFetchJobStatus_ReturnsNilOnConnectionRefused(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// vault behavior tests
+// ---------------------------------------------------------------------------
+
+func TestRunVaultBehavior_NoArgs_PrintsUsage(t *testing.T) {
+	out := captureStdout(func() {
+		runVaultBehavior([]string{})
+	})
+	if !strings.Contains(out, "Usage:") {
+		t.Errorf("expected Usage in output, got: %q", out)
+	}
+	if !strings.Contains(out, "behavior") {
+		t.Errorf("expected 'behavior' in usage, got: %q", out)
+	}
+}
+
+func TestRunVaultBehavior_InvalidMode_PrintsError(t *testing.T) {
+	oldBase := vaultAdminBase
+	defer func() { vaultAdminBase = oldBase }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"config":null,"resolved":{"behavior_mode":"autonomous"}}`))
+	}))
+	defer srv.Close()
+	vaultAdminBase = srv.URL
+
+	out := captureStdout(func() {
+		runVaultBehavior([]string{"default", "--mode", "invalid-mode"})
+	})
+	if !strings.Contains(out, "invalid behavior mode") {
+		t.Errorf("expected 'invalid behavior mode' error, got: %q", out)
+	}
+}
+
+func TestRunVaultBehavior_SetMode_Success(t *testing.T) {
+	oldBase := vaultAdminBase
+	defer func() { vaultAdminBase = oldBase }()
+
+	var capturedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"config":null,"resolved":{"behavior_mode":"autonomous"}}`))
+			return
+		}
+		buf := new(strings.Builder)
+		io.Copy(buf, r.Body)
+		capturedBody = buf.String()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	vaultAdminBase = srv.URL
+
+	out := captureStdout(func() {
+		runVaultBehavior([]string{"default", "--mode", "selective"})
+	})
+	if !strings.Contains(out, "selective") {
+		t.Errorf("expected 'selective' in success output, got: %q", out)
+	}
+	if !strings.Contains(capturedBody, "selective") {
+		t.Errorf("PUT body should contain 'selective', got: %q", capturedBody)
+	}
+}
+
+func TestRunVaultBehavior_GetCurrentMode_Success(t *testing.T) {
+	oldBase := vaultAdminBase
+	defer func() { vaultAdminBase = oldBase }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"config":null,"resolved":{"behavior_mode":"prompted","behavior_instructions":""}}`))
+	}))
+	defer srv.Close()
+	vaultAdminBase = srv.URL
+
+	out := captureStdout(func() {
+		runVaultBehavior([]string{"default"})
+	})
+	if !strings.Contains(out, "prompted") {
+		t.Errorf("expected 'prompted' in GET output, got: %q", out)
+	}
+}
+
+func TestRunVault_NoArgs_IncludesBehavior(t *testing.T) {
+	out := captureStdout(func() {
+		runVault([]string{})
+	})
+	if !strings.Contains(out, "behavior") {
+		t.Errorf("expected 'behavior' in usage, got: %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // RunVault usage includes clone and merge
 // ---------------------------------------------------------------------------
 

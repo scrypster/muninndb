@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -190,7 +192,7 @@ func TestConfigureNamedTools_OpenCode(t *testing.T) {
 	defer cleanup()
 
 	out := captureStdout(func() {
-		errs := configureNamedTools([]string{"opencode"}, "http://127.0.0.1:8750/mcp", "tok123")
+		errs := configureNamedTools([]string{"opencode"}, "http://127.0.0.1:8750/mcp", "tok123", "")
 		if len(errs) > 0 {
 			t.Errorf("unexpected errors: %v", errs)
 		}
@@ -216,7 +218,7 @@ func TestUnknownToolMessage_IncludesOpenCode(t *testing.T) {
 	_, cleanup := withTempHome(t)
 	defer cleanup()
 	stderr := captureStderr(func() {
-		configureNamedTools([]string{"notarealtool"}, "http://127.0.0.1:8750/mcp", "")
+		configureNamedTools([]string{"notarealtool"}, "http://127.0.0.1:8750/mcp", "", "")
 	})
 	if !strings.Contains(stderr, "opencode") {
 		t.Errorf("unknown-tool error should list 'opencode', got: %s", stderr)
@@ -280,7 +282,7 @@ func TestPrintWelcomeBanner(t *testing.T) {
 
 func TestConfigureNamedToolsUnknownTool(t *testing.T) {
 	out := captureStderr(func() {
-		configureNamedTools([]string{"unknowntool"}, "http://127.0.0.1:8750/mcp", "tok123")
+		configureNamedTools([]string{"unknowntool"}, "http://127.0.0.1:8750/mcp", "tok123", "")
 	})
 	if !strings.Contains(out, "unknown tool") {
 		t.Errorf("expected 'unknown tool' warning, got: %s", out)
@@ -356,7 +358,7 @@ func TestConfigureNamedToolsReturnsErrorsSlice(t *testing.T) {
 	var errs []string
 	captureStderr(func() {
 		captureStdout(func() {
-			errs = configureNamedTools([]string{"claude"}, "http://127.0.0.1:8750/mcp", "tok")
+			errs = configureNamedTools([]string{"claude"}, "http://127.0.0.1:8750/mcp", "tok", "")
 		})
 	})
 
@@ -369,5 +371,90 @@ func TestConfigureNamedToolsReturnsErrorsSlice(t *testing.T) {
 	}
 	if !strings.Contains(errs[0], "Claude Desktop") {
 		t.Errorf("error should identify 'Claude Desktop', got: %q", errs[0])
+	}
+}
+
+// TestApplyBehaviorToVault_FallbackOnAPIFailure is a regression / Opus-required
+// test for the init fallback path: when the MuninnDB API is unreachable (e.g.
+// the daemon hasn't started yet), applyBehaviorToVault must NOT abort — it
+// should print the manual command so the user can apply it themselves.
+func TestApplyBehaviorToVault_FallbackOnAPIFailure(t *testing.T) {
+	oldBase := vaultAdminBase
+	defer func() { vaultAdminBase = oldBase }()
+
+	// Point at a port that is definitely not listening.
+	vaultAdminBase = "http://127.0.0.1:19998"
+
+	out := captureStdout(func() {
+		applyBehaviorToVault("selective", "")
+	})
+
+	// Must print the manual fallback command — never abort silently.
+	if !strings.Contains(out, "muninn vault behavior") {
+		t.Errorf("fallback should print manual vault behavior command, got: %q", out)
+	}
+	if !strings.Contains(out, "selective") {
+		t.Errorf("fallback output should include the mode name, got: %q", out)
+	}
+}
+
+// TestApplyBehaviorToVault_FallbackIncludesInstructions verifies that when custom
+// instructions are provided and the API is unreachable, the fallback message
+// includes the instructions command as well.
+func TestApplyBehaviorToVault_FallbackIncludesInstructions(t *testing.T) {
+	oldBase := vaultAdminBase
+	defer func() { vaultAdminBase = oldBase }()
+
+	vaultAdminBase = "http://127.0.0.1:19998"
+
+	out := captureStdout(func() {
+		applyBehaviorToVault("custom", "remember everything")
+	})
+
+	if !strings.Contains(out, "--instructions") {
+		t.Errorf("fallback should include --instructions flag, got: %q", out)
+	}
+}
+
+// TestApplyBehaviorToVault_Success verifies the happy path: when the server
+// is up and responds correctly, applyBehaviorToVault prints the success message.
+func TestApplyBehaviorToVault_Success(t *testing.T) {
+	oldAdmin := vaultAdminBase
+	oldUI := vaultUIBase
+	defer func() { vaultAdminBase = oldAdmin; vaultUIBase = oldUI }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodPost:
+			// login endpoint — set a cookie so the session works
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "test-session"})
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"token":"test-token"}`))
+		case http.MethodGet:
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"config":null}`))
+		case http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+	vaultAdminBase = srv.URL
+	vaultUIBase = srv.URL
+
+	out := captureStdout(func() {
+		applyBehaviorToVault("autonomous", "")
+	})
+
+	// On success it should NOT print the manual fallback command.
+	if strings.Contains(out, "muninn vault behavior") {
+		t.Errorf("success path should not print fallback command, got: %q", out)
+	}
+	// Should print the confirmation.
+	if !strings.Contains(out, "autonomous") {
+		t.Errorf("success output should contain the mode name, got: %q", out)
 	}
 }
