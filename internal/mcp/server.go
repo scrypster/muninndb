@@ -26,7 +26,7 @@ type MCPServer struct {
 	srv       *http.Server
 	tlsConfig *tls.Config // nil = plain TCP
 
-	sseSessionsMu sync.Mutex
+	sseSessionsMu sync.RWMutex
 	sseSessions   map[string]*sseSession // sessionID → session
 	// NOTE: idempotencyLocks grows by one entry per unique op_id seen during the
 	// process lifetime. In practice op_id cardinality is low (client-generated,
@@ -331,9 +331,9 @@ func (s *MCPServer) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.sseSessionsMu.Lock()
+	s.sseSessionsMu.RLock()
 	sess, exists := s.sseSessions[sessionID]
-	s.sseSessionsMu.Unlock()
+	s.sseSessionsMu.RUnlock()
 	if !exists {
 		http.Error(w, "unknown session", http.StatusNotFound)
 		return
@@ -384,8 +384,8 @@ func (s *MCPServer) handleStreamablePost(w http.ResponseWriter, r *http.Request)
 
 // findSSEChannelsByToken returns all SSE channels matching the given auth token.
 func (s *MCPServer) findSSEChannelsByToken(token string) []chan []byte {
-	s.sseSessionsMu.Lock()
-	defer s.sseSessionsMu.Unlock()
+	s.sseSessionsMu.RLock()
+	defer s.sseSessionsMu.RUnlock()
 	var channels []chan []byte
 	for _, sess := range s.sseSessions {
 		if sess.authToken == token {
