@@ -938,7 +938,7 @@
       <div x-show="settingsTab==='keys'">
         <p style="color:var(--text-muted);font-size:0.8125rem;margin:0 0 1.25rem;">
           API keys let AI agents access MuninnDB without admin credentials.
-          Keys are scoped to a vault and a mode (full or observe).
+          Keys are scoped to a vault and a mode (full, observe, or write).
         </p>
 
         <!-- Create key form -->
@@ -962,6 +962,7 @@
               <select class="input-field" x-model="apiKeyForm.mode">
                 <option value="full">full</option>
                 <option value="observe">observe</option>
+                <option value="write">write (ingest-only)</option>
               </select>
             </div>
             <button class="btn-primary" @click="createApiKey()" :disabled="apiKeyLoading">Create</button>
@@ -1003,7 +1004,7 @@
                     <td style="padding:0.625rem 0.75rem 0.625rem 0;" x-text="key.label"></td>
                     <td style="padding:0.625rem 0.75rem;" x-text="key.vault"></td>
                     <td style="padding:0.625rem 0.75rem;">
-                      <span :class="key.mode==='full' ? 'badge-info' : 'badge-warning'" x-text="key.mode"></span>
+                      <span :class="key.mode==='full' ? 'badge-info' : key.mode==='write' ? 'badge-success' : 'badge-warning'" x-text="key.mode"></span>
                     </td>
                     <td style="padding:0.625rem 0.75rem;color:var(--text-secondary);font-size:0.8125rem;"
                       :title="key.expires_at ? 'Expires: ' + new Date(key.expires_at).toLocaleString() : 'This key never expires'"
