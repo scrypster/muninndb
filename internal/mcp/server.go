@@ -14,15 +14,12 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 // MCPServer serves the MCP JSON-RPC 2.0 protocol on a single HTTP mux.
 type MCPServer struct {
 	engine    EngineInterface
 	token     string // required Bearer token; empty = no auth
-	limiter   *rate.Limiter
 	srv       *http.Server
 	tlsConfig *tls.Config // nil = plain TCP
 
@@ -59,7 +56,6 @@ func New(addr string, eng EngineInterface, token string, tlsConfig *tls.Config) 
 	s := &MCPServer{
 		engine:      eng,
 		token:       token,
-		limiter:     rate.NewLimiter(rate.Limit(100), 200),
 		sseSessions: make(map[string]*sseSession),
 		tlsConfig:   tlsConfig,
 	}
@@ -112,7 +108,7 @@ func (s *MCPServer) Serve() error {
 // Shutdown gracefully stops the server.
 func (s *MCPServer) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
 
-// withMiddleware wraps a handler with: body size limit → rate limiter → auth check.
+// withMiddleware wraps a handler with: body size limit → auth check.
 func (s *MCPServer) withMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Enforce 1MB body limit before any processing.
@@ -124,12 +120,6 @@ func (s *MCPServer) withMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
-		if !s.limiter.Allow() {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32000,"message":"rate limited"}}`))
-			return
-		}
 		auth := authFromRequest(r, s.token)
 		if !auth.Authorized {
 			w.Header().Set("Content-Type", "application/json")
@@ -353,13 +343,6 @@ func (s *MCPServer) handleStreamablePost(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-
-	if !s.limiter.Allow() {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32000,"message":"rate limited"}}`))
-		return
-	}
 
 	auth := authFromRequest(r, s.token)
 	if !auth.Authorized {
