@@ -119,8 +119,8 @@ jobs:
     steps:
       - name: Trigger Dokploy redeploy
         run: |
-          curl -sf -X POST \
+          curl --fail-with-body -X POST \
             "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.DOKPLOY_API_TOKEN }}" \
-            -d '{"applicationId": "${{ secrets.DOKPLOY_APP_ID }}"}'
+            -d '{"json": {"applicationId": "${{ secrets.DOKPLOY_APP_ID }}"}}'
