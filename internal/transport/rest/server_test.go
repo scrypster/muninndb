@@ -479,13 +479,16 @@ func TestListEngramsDefaultVault(t *testing.T) {
 	if resp.Engrams == nil {
 		t.Error("expected engrams in response")
 	}
+	if resp.Limit != 50 {
+		t.Errorf("expected default limit 50, got %d", resp.Limit)
+	}
 }
 
 func TestListEngramsLimitClamping(t *testing.T) {
 	engine := &MockEngine{}
 	server := NewServer("localhost:8080", engine, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-	// Overlarge limit should be clamped to 100
+	// Overlarge limit should be clamped to 200
 	req := httptest.NewRequest("GET", "/api/engrams?vault=default&limit=500", nil)
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
@@ -498,8 +501,8 @@ func TestListEngramsLimitClamping(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
-	if resp.Limit > 100 {
-		t.Errorf("expected limit clamped to 100, got %d", resp.Limit)
+	if resp.Limit > 200 {
+		t.Errorf("expected limit clamped to 200, got %d", resp.Limit)
 	}
 }
 
@@ -1878,6 +1881,30 @@ func TestOpenAPISpec_CacheControl(t *testing.T) {
 	cc := w.Header().Get("Cache-Control")
 	if !strings.Contains(cc, "max-age") {
 		t.Errorf("expected Cache-Control to contain max-age, got %q", cc)
+	}
+}
+
+func TestOpenAPISpec_ListEngramsLimitContract(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/openapi.yaml", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "/api/engrams:") {
+		t.Fatal("expected /api/engrams path in openapi spec")
+	}
+	if !strings.Contains(body, "default: 50") {
+		t.Fatal("expected list engrams default limit 50 in openapi spec")
+	}
+	if !strings.Contains(body, "maximum: 200") {
+		t.Fatal("expected list engrams maximum limit 200 in openapi spec")
 	}
 }
 

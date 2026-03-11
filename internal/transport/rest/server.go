@@ -1063,8 +1063,10 @@ func (s *Server) handleListEngrams(w http.ResponseWriter, r *http.Request) {
 	vault := ctxVault(r)
 
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 || limit > 100 {
-		limit = 20
+	if limit <= 0 {
+		limit = 50
+	} else if limit > 200 {
+		limit = 200
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	if offset < 0 {

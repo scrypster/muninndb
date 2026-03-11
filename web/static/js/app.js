@@ -67,6 +67,7 @@ document.addEventListener('alpine:init', () => {
     _cy: null,
     entityGraphLoaded: false,
     entityGraphStatus: '',
+    entityGraphLabelMode: 'full',
     _entityCy: null,
 
     // Session
@@ -753,13 +754,12 @@ document.addEventListener('alpine:init', () => {
         // ActivateRequest uses context:[]string, max_results:int
         const body = {
             context: [this.searchQuery.trim()],
-            vault: this.vault,
             max_results: 20,
         };
         if (this.searchMode && this.searchMode !== 'balanced') {
             body.mode = this.searchMode;
         }
-        const data = await this.apiCall('/api/activate', {
+        const data = await this.apiCall('/api/activate?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify(body),
         });
@@ -798,15 +798,15 @@ document.addEventListener('alpine:init', () => {
       try {
         if (action === 'keep_a') {
           // A supersedes B; archive B
-          await fetch('/api/link', {
+          await fetch('/api/link?vault=' + encodeURIComponent(vault), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source_id: idA, target_id: idB, rel_type: 4, weight: 1.0, vault }),
+            body: JSON.stringify({ source_id: idA, target_id: idB, rel_type: 4, weight: 1.0 }),
           });
-          await fetch('/api/engrams/' + encodeURIComponent(idB) + '/state', {
+          await fetch('/api/engrams/' + encodeURIComponent(idB) + '/state?vault=' + encodeURIComponent(vault), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ vault, state: 'archived' }),
+            body: JSON.stringify({ state: 'archived' }),
           });
           await fetch('/api/admin/contradictions/resolve', {
             method: 'POST',
@@ -815,15 +815,15 @@ document.addEventListener('alpine:init', () => {
           });
         } else if (action === 'keep_b') {
           // B supersedes A; archive A
-          await fetch('/api/link', {
+          await fetch('/api/link?vault=' + encodeURIComponent(vault), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source_id: idB, target_id: idA, rel_type: 4, weight: 1.0, vault }),
+            body: JSON.stringify({ source_id: idB, target_id: idA, rel_type: 4, weight: 1.0 }),
           });
-          await fetch('/api/engrams/' + encodeURIComponent(idA) + '/state', {
+          await fetch('/api/engrams/' + encodeURIComponent(idA) + '/state?vault=' + encodeURIComponent(vault), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ vault, state: 'archived' }),
+            body: JSON.stringify({ state: 'archived' }),
           });
           await fetch('/api/admin/contradictions/resolve', {
             method: 'POST',
@@ -909,13 +909,12 @@ document.addEventListener('alpine:init', () => {
         : [];
       try {
         // POST /api/engrams → WriteRequest: { concept, content, tags, vault, confidence }
-        await this.apiCall('/api/engrams', {
+        await this.apiCall('/api/engrams?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
             concept: form.concept,
             content: form.content,
             tags,
-            vault: this.vault,
             confidence: parseFloat(form.confidence) || 0.8,
           }),
         });
@@ -996,10 +995,10 @@ document.addEventListener('alpine:init', () => {
       this.editTagsSaving = true;
       try {
         const resp = await this.apiCall(
-          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/tags',
+          '/api/engrams/' + encodeURIComponent(this.selectedMemory.id) + '/tags?vault=' + encodeURIComponent(this.vault),
           {
             method: 'PUT',
-            body: JSON.stringify({ vault: this.vault, tags }),
+            body: JSON.stringify({ tags }),
           }
         );
         this.selectedMemory = { ...this.selectedMemory, tags: resp.tags };
@@ -1033,14 +1032,13 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       try {
-        await this.apiCall('/api/link', {
+        await this.apiCall('/api/link?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
             source_id: this.linkModal.sourceId,
             target_id: this.linkModal.targetId.trim(),
             rel_type: parseInt(this.linkModal.relType, 10),
             weight: parseFloat(this.linkModal.weight),
-            vault: this.vault,
           }),
         });
         this.closeLinkModal();
@@ -1106,13 +1104,15 @@ document.addEventListener('alpine:init', () => {
 
     // ── Graph ──────────────────────────────────────────────────────────────
     graphShowOrphans: false,
+    graphLimit: 50,
 
     async loadGraph() {
       this.addNotification('info', 'Loading graph…');
       try {
         // Use GET /api/engrams for node listing
+        const limit = Math.max(1, Math.min(200, parseInt(this.graphLimit, 10) || 50));
         const data = await this.apiCall(
-          '/api/engrams?vault=' + encodeURIComponent(this.vault) + '&limit=50&offset=0'
+          '/api/engrams?vault=' + encodeURIComponent(this.vault) + '&limit=' + limit + '&offset=0'
         );
         const engrams = data.engrams || [];
         if (!engrams.length) {
@@ -1122,11 +1122,10 @@ document.addEventListener('alpine:init', () => {
 
         // Load all engram links in a single batch call (replaces N+1 pattern).
         const nodeIdSet = new Set(engrams.map(e => e.id));
-        const batchResp = await this.apiCall('/api/engrams/links/batch', {
+        const batchResp = await this.apiCall('/api/engrams/links/batch?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
             ids: engrams.map(e => e.id),
-            vault: this.vault,
           }),
         });
         const linksMap = batchResp.links || {};
@@ -1282,6 +1281,7 @@ document.addEventListener('alpine:init', () => {
         });
 
         this.graphLoaded = true;
+        this._applyGraphLabelStyle();
         const orphanCount = engrams.length - connectedNodeIds.size;
         const msg = 'Graph loaded (' + nodesToRender.length + ' nodes' +
           (orphanCount > 0 && !showOrphans ? ', ' + orphanCount + ' orphans hidden' : '') + ')';
@@ -1312,8 +1312,14 @@ document.addEventListener('alpine:init', () => {
       this._cy.nodes().forEach(node => {
         const lbl = mode === 'full' ? node.data('label')
                   : mode === 'short' ? node.data('shortLabel')
-                  : '';
-        node.style('label', lbl);
+                  : node.data('label');
+        node.style({
+          label: lbl,
+          'text-opacity': mode === 'none' ? 0 : 1,
+        });
+      });
+      this._cy.edges().forEach(edge => {
+        edge.style({ 'text-opacity': mode === 'none' ? 0 : 1 });
       });
     },
 
@@ -1341,6 +1347,7 @@ document.addEventListener('alpine:init', () => {
             data: {
               id: n.id,
               label: n.id,
+              shortLabel: n.id.length > 20 ? n.id.slice(0, 18) + '…' : n.id,
               type: entityType,
               size: 16,
               color: this.getEntityTypeColor(entityType),
@@ -1389,17 +1396,19 @@ document.addEventListener('alpine:init', () => {
                 'height': 'data(size)',
                 'label': 'data(label)',
                 'color': '#e2e8f0',
-                'font-size': '11px',
-                'text-valign': 'center',
+                'font-size': '10px',
+                'text-valign': 'bottom',
                 'text-halign': 'center',
+                'text-margin-y': 6,
                 'border-width': 'data(borderWidth)',
                 'border-color': 'data(borderColor)',
-                'text-background-opacity': 0.6,
-                'text-background-color': 'rgba(0,0,0,0.5)',
+                'text-background-opacity': 0.7,
+                'text-background-color': 'rgba(0,0,0,0.6)',
                 'text-background-padding': '2px',
                 'text-background-shape': 'roundrectangle',
-                'text-wrap': 'wrap',
-                'text-max-width': '80px'
+                'text-wrap': 'ellipsis',
+                'text-max-width': '100px',
+                'min-zoomed-font-size': 8
               }
             },
             {
@@ -1433,7 +1442,19 @@ document.addEventListener('alpine:init', () => {
             name: 'fcose',
             animate: true,
             animationDuration: 600,
-            animationEasing: 'ease-out'
+            animationEasing: 'ease-out',
+            randomize: true,
+            padding: 60,
+            idealEdgeLength: 250,
+            nodeRepulsion: 50000,
+            edgeElasticity: 0.1,
+            gravity: 0.02,
+            gravityRange: 1.5,
+            numIter: 5000,
+            tile: true,
+            tilingPaddingVertical: 60,
+            tilingPaddingHorizontal: 60,
+            nodeSeparation: 200
           },
           wheelSensitivity: 0.3
         });
@@ -1445,6 +1466,7 @@ document.addEventListener('alpine:init', () => {
         });
 
         this.entityGraphLoaded = true;
+        this._applyEntityGraphLabelStyle();
         this.entityGraphStatus = 'Loaded ' + nodes.length + ' entities, ' + edges.length + ' relationships';
         this.addNotification('success', this.entityGraphStatus);
       } catch (err) {
@@ -1483,6 +1505,28 @@ document.addEventListener('alpine:init', () => {
 
     entityGraphFit() {
       if (this._entityCy) { this._entityCy.fit(); }
+    },
+    entityGraphCycleLabel() {
+      const modes = ['full', 'short', 'none'];
+      const next = modes[(modes.indexOf(this.entityGraphLabelMode) + 1) % modes.length];
+      this.entityGraphLabelMode = next;
+      this._applyEntityGraphLabelStyle();
+    },
+    _applyEntityGraphLabelStyle() {
+      if (!this._entityCy) return;
+      const mode = this.entityGraphLabelMode;
+      this._entityCy.nodes().forEach(node => {
+        const lbl = mode === 'full' ? node.data('label')
+                  : mode === 'short' ? node.data('shortLabel')
+                  : node.data('label');
+        node.style({
+          label: lbl,
+          'text-opacity': mode === 'none' ? 0 : 1,
+        });
+      });
+      this._entityCy.edges().forEach(edge => {
+        edge.style({ 'text-opacity': mode === 'none' ? 0 : 1 });
+      });
     },
 
     // ── Session ────────────────────────────────────────────────────────────
@@ -2556,10 +2600,10 @@ document.addEventListener('alpine:init', () => {
     // ── Lifecycle state ────────────────────────────────────────────────────
     async updateLifecycleState(id, state) {
       try {
-        const res = await fetch('/api/engrams/' + encodeURIComponent(id) + '/state', {
+        const res = await fetch('/api/engrams/' + encodeURIComponent(id) + '/state?vault=' + encodeURIComponent(this.vault), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ vault: this.vault, state }),
+          body: JSON.stringify({ state }),
         });
         if (!res.ok) {
           const text = await res.text().catch(() => res.statusText);
@@ -2611,10 +2655,9 @@ document.addEventListener('alpine:init', () => {
       if (!this.searchQuery.trim()) return;
       this.explainModal = { show: true, data: null, loading: true };
       try {
-        const data = await this.apiCall('/api/explain', {
+        const data = await this.apiCall('/api/explain?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
-            vault: this.vault,
             engram_id: engramId,
             query: [this.searchQuery.trim()],
           }),
@@ -2664,10 +2707,9 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       try {
-        const data = await this.apiCall('/api/consolidate', {
+        const data = await this.apiCall('/api/consolidate?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
-            vault: this.vault,
             ids: this.selectedMemoryIds,
             merged_content: this.consolidateModal.mergedContent.trim(),
           }),
@@ -2704,10 +2746,9 @@ document.addEventListener('alpine:init', () => {
         .map(s => s.trim())
         .filter(Boolean);
       try {
-        const data = await this.apiCall('/api/decide', {
+        const data = await this.apiCall('/api/decide?vault=' + encodeURIComponent(this.vault), {
           method: 'POST',
           body: JSON.stringify({
-            vault: this.vault,
             decision: this.decideModal.decision.trim(),
             rationale: this.decideModal.rationale.trim(),
             alternatives,

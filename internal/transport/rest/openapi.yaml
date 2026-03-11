@@ -1574,7 +1574,8 @@ paths:
           in: query
           schema:
             type: integer
-            default: 20
+            default: 50
+            maximum: 200
         - name: offset
           in: query
           schema:
