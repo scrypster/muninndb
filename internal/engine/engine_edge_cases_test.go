@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -237,9 +236,6 @@ func TestRead_SoftDeleteNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Forget: %v", err)
 	}
-
-	// Allow async workers to process
-	time.Sleep(100 * time.Millisecond)
 
 	// Try to read it directly — should fail or return deleted state
 	_, readErr := eng.Read(ctx, &mbp.ReadRequest{

@@ -598,8 +598,14 @@ func TestClusterCoordinator_QuorumLoss_PreemptiveDemotion(t *testing.T) {
 	// This call should trigger demotion
 	coord.checkQuorumHealth()
 
-	// Give the async handleDemotion goroutine a moment to complete
-	time.Sleep(50 * time.Millisecond)
+	// Poll until the async handleDemotion goroutine completes demotion.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !coord.IsLeader() {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 
 	if coord.IsLeader() {
 		t.Error("expected demotion after sustained quorum loss")

@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -55,9 +54,6 @@ func TestActivation_Phase6_SkipsSoftDeletedEngrams(t *testing.T) {
 			t.Fatalf("Forget (soft delete) id=%s: %v", id, err)
 		}
 	}
-
-	// Allow any async workers to process the soft deletes.
-	time.Sleep(100 * time.Millisecond)
 
 	// Activate: query broadly so all 5 engrams would match without the filter.
 	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
