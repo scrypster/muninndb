@@ -119,8 +119,21 @@ jobs:
     steps:
       - name: Trigger Dokploy redeploy
         run: |
-          curl --fail-with-body -X POST \
-            "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ secrets.DOKPLOY_API_URL }}/application.deploy" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_KEY }}" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.DOKPLOY_API_TOKEN }}" \
-            -d '{"json": {"applicationId": "${{ secrets.DOKPLOY_APP_ID }}"}}'
+            -d "$(jq -n \
+              --arg id "${{ secrets.DOKPLOY_APP_ID }}" \
+              --arg title "deploy: ${GITHUB_SHA::7} by ${{ github.actor }}" \
+              --arg desc "Commit: ${{ github.sha }}" \
+              '{applicationId: $id, title: $title, description: $desc}')")
+
+          http_code=$(echo "$response" | tail -1)
+          body=$(echo "$response" | sed '$d')
+
+          if [ "$http_code" -ge 400 ]; then
+            echo "::error::Deploy trigger failed (HTTP $http_code): $body"
+            exit 1
+          fi
+          echo "Deploy triggered successfully"
