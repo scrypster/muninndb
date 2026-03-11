@@ -1004,8 +1004,9 @@ func runServer() {
 	corsOrigins := parseCORSOrigins(*corsOriginsFlag)
 	enrichInfo := resolveEnrichInfo(savedPluginCfg)
 	restServer := rest.NewServer(*restAddr, restWrapper, authStore, sessionSecret, corsOrigins, embedInfo, enrichInfo, pluginRegistry, *dataDir, clientTLS, rest.MCPInfo{
-		Addr:     *mcpAddr,
-		HasToken: *mcpToken != "",
+		Addr:        *mcpAddr,
+		HasToken:    *mcpToken != "",
+		ExternalURL: os.Getenv("MUNINN_MCP_EXTERNAL_URL"),
 	})
 	restServer.SetVersion(muninnVersion())
 

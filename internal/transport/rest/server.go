@@ -67,8 +67,9 @@ type Server struct {
 	enrichModel    string // model name, or ""
 
 	// MCP info — set at construction time for the /api/admin/mcp-info endpoint.
-	mcpAddr     string // MCP listen address, e.g. ":8750"
-	mcpHasToken bool   // whether a bearer token is configured
+	mcpAddr        string // MCP listen address, e.g. ":8750"
+	mcpHasToken    bool   // whether a bearer token is configured
+	mcpExternalURL string // optional public-facing MCP URL override
 
 	pluginRegistry *plugin.Registry
 
@@ -109,8 +110,9 @@ type EnrichInfo struct {
 
 // MCPInfo carries static MCP server metadata set at server construction time.
 type MCPInfo struct {
-	Addr     string // MCP listen address, e.g. ":8750"
-	HasToken bool   // whether a bearer token is configured
+	Addr        string // MCP listen address, e.g. ":8750"
+	HasToken    bool   // whether a bearer token is configured
+	ExternalURL string // optional override for the public-facing MCP URL (e.g. "https://muninn-mcp.example.com/mcp")
 }
 
 // NewServer creates a new REST server.
@@ -142,6 +144,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	if len(mcpInfo) > 0 {
 		s.mcpAddr = mcpInfo[0].Addr
 		s.mcpHasToken = mcpInfo[0].HasToken
+		s.mcpExternalURL = mcpInfo[0].ExternalURL
 	}
 	// Start background DB writability probe (non-blocking, avoids probing on every request).
 	go s.probeDBWritability()
