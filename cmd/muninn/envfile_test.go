@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -191,7 +192,8 @@ func TestWriteEnvFileTo_CreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("file not created: %v", err)
 	}
-	if info.Mode().Perm() != 0600 {
+	// Windows does not support Unix-style permission bits; chmod is a no-op there.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Errorf("expected 0600, got %o", info.Mode().Perm())
 	}
 	content, _ := os.ReadFile(path)
