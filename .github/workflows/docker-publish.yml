@@ -110,3 +110,17 @@ jobs:
         working-directory: /tmp/digests
         env:
           DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
+
+  deploy:
+    name: Deploy to Dokploy
+    needs: merge-manifests
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    steps:
+      - name: Trigger Dokploy redeploy
+        run: |
+          curl -sf -X POST \
+            "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.DOKPLOY_API_TOKEN }}" \
+            -d '{"applicationId": "${{ secrets.DOKPLOY_APP_ID }}"}'
