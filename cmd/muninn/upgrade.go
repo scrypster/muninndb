@@ -221,11 +221,10 @@ func runUpgrade(args []string) {
 			if pid, err := readPID(pidPath); err == nil {
 				if proc, err := os.FindProcess(pid); err == nil {
 					_ = stopProcess(proc)
-					for i := 0; i < 30; i++ {
-						if !isProcessRunning(pid) {
-							break
-						}
-						time.Sleep(100 * time.Millisecond)
+					if err := waitForProcessExit(pid, 35*time.Second); err != nil {
+						fmt.Fprintln(os.Stderr, "")
+						fmt.Fprintf(os.Stderr, "  muninn (pid %d) did not stop within 35s — aborting upgrade\n", pid)
+						osExit(1)
 					}
 				}
 			}
@@ -247,7 +246,11 @@ func runUpgrade(args []string) {
 		if daemonWasRunning {
 			fmt.Println()
 			fmt.Printf("  %-28s", "Restarting daemon...")
-			runStart(true)
+			if err := runStart(true); err != nil {
+				fmt.Println(" ✗")
+				fmt.Fprintf(os.Stderr, "  Failed to restart daemon: %v\n", err)
+				osExit(1)
+			}
 			fmt.Println(" ✓")
 			fmt.Println()
 			fmt.Printf("  Web UI → http://127.0.0.1:8476\n")
@@ -479,13 +482,9 @@ func selfUpdate(latest string) error {
 		if err := stopProcess(proc); err != nil {
 			return fmt.Errorf("stop daemon: %w", err)
 		}
-		// Wait up to 3s for process to exit
-		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) {
-			if !isProcessRunning(pid) {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
+		if err := waitForProcessExit(pid, 35*time.Second); err != nil {
+			os.Remove(pidPath)
+			return fmt.Errorf("daemon (pid %d) did not stop within 35s: %w", pid, err)
 		}
 		os.Remove(pidPath)
 		return nil
@@ -529,9 +528,28 @@ func selfUpdate(latest string) error {
 	// Restart daemon if it was running before
 	if daemonWasRunning {
 		fmt.Printf("  %-28s", "Restarting daemon...")
-		runStart(true) // manages its own output and error handling
+		if err := runStart(true); err != nil {
+			fmt.Println(" ✗")
+			return fmt.Errorf("restart failed: %w", err)
+		}
 		fmt.Println(" ✓")
 	}
 
 	return nil
+}
+
+// waitForProcessExit polls isProcessRunning every 100ms until the process
+// exits or the timeout elapses. Returns an error if the process is still
+// running after the timeout. A 300ms buffer is added after exit to let the
+// kernel fully release the Pebble flock before the caller proceeds.
+func waitForProcessExit(pid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !isProcessRunning(pid) {
+			time.Sleep(300 * time.Millisecond)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("process %d still running after %v", pid, timeout)
 }

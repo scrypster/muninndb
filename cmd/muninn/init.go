@@ -194,7 +194,9 @@ func runInteractiveInit(mcpURL string, tokenFlag *string, noToken *bool, noStart
 	// Auto: start server (no "start now?" prompt)
 	if !*noStart {
 		fmt.Println()
-		runStart(true)
+		if err := runStart(true); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: daemon did not start cleanly: %v\n", err)
+		}
 		// Persist the behavior choice to the default vault now that the server is up.
 		// Retries once on failure; falls back to printing the manual command.
 		applyBehaviorToVault(behaviorMode, customInstructions)
@@ -595,7 +597,9 @@ func runNonInteractiveInit(mcpURL, toolStr, tokenStr string, noToken, noStart, y
 	}
 
 	if !noStart {
-		runStart(true)
+		if err := runStart(true); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: daemon did not start cleanly: %v\n", err)
+		}
 		fmt.Println()
 	}
 

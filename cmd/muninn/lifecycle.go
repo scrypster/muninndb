@@ -68,7 +68,7 @@ func buildDaemonArgs(dataDir string, dev bool, osArgs []string, listenHostEnv, c
 }
 
 // runStart forks muninn as a background daemon and waits for health check.
-func runStart(webEnabled bool) {
+func runStart(webEnabled bool) error {
 	dataDir := defaultDataDir()
 	pidPath := filepath.Join(dataDir, "muninn.pid")
 
@@ -82,7 +82,7 @@ func runStart(webEnabled bool) {
 	if pid, err := readPID(pidPath); err == nil {
 		if isProcessRunning(pid) {
 			fmt.Printf("muninn already running (pid %d)\n", pid)
-			return
+			return nil
 		}
 		os.Remove(pidPath)
 	}
@@ -155,7 +155,7 @@ func runStart(webEnabled bool) {
 			printStatusDisplay(true)
 			fmt.Println("  Web UI → http://127.0.0.1:8476")
 			fmt.Println()
-			return
+			return nil
 		}
 	}
 	fmt.Fprintln(os.Stderr, "muninn started but health check timed out")
@@ -164,6 +164,7 @@ func runStart(webEnabled bool) {
 	printLastN(logFilePath(), 20, "")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  For more detail: muninn logs")
+	return fmt.Errorf("health check timed out")
 }
 
 // runStop signals the running daemon to shut down.
