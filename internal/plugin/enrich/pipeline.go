@@ -2,7 +2,6 @@ package enrich
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -15,7 +14,8 @@ import (
 // ErrNothingToEnrich is returned when all pipeline stages are skipped because
 // the engram already has inline data (e.g., Summary set by caller during Write).
 // This is distinct from a real failure where LLM/network errors caused stages to fail.
-var ErrNothingToEnrich = errors.New("enrich: nothing to enrich")
+// Defined in the plugin package; aliased here for backwards compatibility.
+var ErrNothingToEnrich = plugin.ErrNothingToEnrich
 
 // EnrichmentPipeline orchestrates the LLM calls per engram.
 // In full mode (default) it runs up to 4 calls: entity extraction,

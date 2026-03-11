@@ -1,6 +1,9 @@
 package plugin
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // PluginTier identifies the tier level of a plugin.
 type PluginTier int
@@ -43,6 +46,11 @@ type ExtractedRelation struct {
 	RelType    string  // "manages", "uses", "depends_on", "implements", "created_by"
 	Weight     float32 // 0.0-1.0 confidence in this relationship
 }
+
+// ErrNothingToEnrich is returned when all pipeline stages are skipped because
+// the engram already has inline data (e.g., Summary set by caller during Write).
+// This is distinct from a real failure where LLM/network errors caused stages to fail.
+var ErrNothingToEnrich = errors.New("enrich: nothing to enrich")
 
 // DigestFlags tracks which processing stages have been applied to an engram.
 // Stored in the ERF metadata Reserved section at offset 68 (first byte of Reserved).
