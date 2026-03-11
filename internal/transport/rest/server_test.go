@@ -501,7 +501,7 @@ func TestListEngramsLimitClamping(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
-	if resp.Limit > 200 {
+	if resp.Limit != 200 {
 		t.Errorf("expected limit clamped to 200, got %d", resp.Limit)
 	}
 }
@@ -1897,13 +1897,18 @@ func TestOpenAPISpec_ListEngramsLimitContract(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	if !strings.Contains(body, "/api/engrams:") {
+	pathIdx := strings.Index(body, "/api/engrams:")
+	if pathIdx == -1 {
 		t.Fatal("expected /api/engrams path in openapi spec")
 	}
-	if !strings.Contains(body, "default: 50") {
+	engramsSection := body[pathIdx:]
+	if nextPathIdx := strings.Index(engramsSection[1:], "\n/"); nextPathIdx != -1 {
+		engramsSection = engramsSection[:nextPathIdx+1]
+	}
+	if !strings.Contains(engramsSection, "default: 50") {
 		t.Fatal("expected list engrams default limit 50 in openapi spec")
 	}
-	if !strings.Contains(body, "maximum: 200") {
+	if !strings.Contains(engramsSection, "maximum: 200") {
 		t.Fatal("expected list engrams maximum limit 200 in openapi spec")
 	}
 }

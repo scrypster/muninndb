@@ -1111,6 +1111,7 @@ document.addEventListener('alpine:init', () => {
       try {
         // Use GET /api/engrams for node listing
         const limit = Math.max(1, Math.min(200, parseInt(this.graphLimit, 10) || 50));
+        this.graphLimit = limit;
         const data = await this.apiCall(
           '/api/engrams?vault=' + encodeURIComponent(this.vault) + '&limit=' + limit + '&offset=0'
         );
@@ -1281,7 +1282,6 @@ document.addEventListener('alpine:init', () => {
         });
 
         this.graphLoaded = true;
-        this._applyGraphLabelStyle();
         const orphanCount = engrams.length - connectedNodeIds.size;
         const msg = 'Graph loaded (' + nodesToRender.length + ' nodes' +
           (orphanCount > 0 && !showOrphans ? ', ' + orphanCount + ' orphans hidden' : '') + ')';
