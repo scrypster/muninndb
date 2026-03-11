@@ -424,24 +424,24 @@ type MCPInfoResponse struct {
 
 // handleMCPInfo returns the MCP endpoint URL and token status for the Connect UI.
 func (s *Server) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
-	addr := s.mcpAddr
-	if addr == "" {
-		addr = ":8750"
+	var mcpURL string
+	if s.mcpExternalURL != "" {
+		mcpURL = s.mcpExternalURL
+	} else {
+		addr := s.mcpAddr
+		if addr == "" {
+			addr = ":8750"
+		}
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = "127.0.0.1"
+			port = "8750"
+		}
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			host = "127.0.0.1"
+		}
+		mcpURL = "http://" + host + ":" + port + "/mcp"
 	}
-	// Use net.SplitHostPort to correctly handle all valid net.Listen address forms:
-	// bare ":port", "0.0.0.0:port", "host:port", and IPv6 bracket notation "[::1]:port".
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		// Fallback for misconfigured or empty addresses.
-		host = "127.0.0.1"
-		port = "8750"
-	}
-	// A wildcard listen address (empty string, 0.0.0.0, or ::) means the server
-	// is reachable on any interface; use 127.0.0.1 to avoid IPv6 dual-stack ambiguity.
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
-	mcpURL := "http://" + host + ":" + port + "/mcp"
 	s.sendJSON(w, http.StatusOK, MCPInfoResponse{
 		URL:             mcpURL,
 		TokenConfigured: s.mcpHasToken,

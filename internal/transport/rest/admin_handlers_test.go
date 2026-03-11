@@ -326,6 +326,31 @@ func TestMCPInfo_CustomPort(t *testing.T) {
 	}
 }
 
+// TestMCPInfo_ExternalURL verifies that ExternalURL overrides the derived URL.
+func TestMCPInfo_ExternalURL(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := NewServer("localhost:0", &MockEngine{}, store, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil, MCPInfo{
+		Addr:        ":8750",
+		HasToken:    true,
+		ExternalURL: "https://muninn-mcp.example.com/mcp",
+	})
+
+	req := httptest.NewRequest("GET", "/api/admin/mcp-info", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	var resp MCPInfoResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.URL != "https://muninn-mcp.example.com/mcp" {
+		t.Errorf("expected external URL override, got %q", resp.URL)
+	}
+	if !resp.TokenConfigured {
+		t.Error("expected token_configured=true")
+	}
+}
+
 // TestChangeAdminPasswordEmptyRejected tests that empty new_password is rejected
 func TestChangeAdminPasswordEmptyRejected(t *testing.T) {
 	store := newTestAuthStore(t)
