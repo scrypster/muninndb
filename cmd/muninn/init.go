@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -196,6 +198,20 @@ func runInteractiveInit(mcpURL string, tokenFlag *string, noToken *bool, noStart
 		// Persist the behavior choice to the default vault now that the server is up.
 		// Retries once on failure; falls back to printing the manual command.
 		applyBehaviorToVault(behaviorMode, customInstructions)
+	}
+
+	// Write ~/.muninn/muninn.env template (no-op if file already exists).
+	embedProviders := []string{"local", "ollama", "openai", "voyage", "cohere", "google", "jina", "mistral"}
+	embedProvider := "local"
+	if embedderIdx >= 0 && embedderIdx < len(embedProviders) {
+		embedProvider = embedProviders[embedderIdx]
+	}
+	if created, envErr := writeEnvFile(embedProvider, ""); envErr != nil {
+		slog.Warn("init: could not write muninn.env", "error", envErr)
+	} else if created {
+		home, _ := os.UserHomeDir()
+		fmt.Printf("  ✓ Config template written to %s\n", filepath.Join(home, ".muninn", "muninn.env"))
+		fmt.Println("  Edit this file to configure MuninnDB without shell exports.")
 	}
 
 	// Success message
@@ -606,6 +622,11 @@ func runNonInteractiveInit(mcpURL, toolStr, tokenStr string, noToken, noStart, y
 				fmt.Fprintf(os.Stderr, "  ⚠  CLAUDE.md: %v\n", err)
 			}
 		}
+	}
+
+	// Write ~/.muninn/muninn.env template with all vars commented (no-op if exists).
+	if _, envErr := writeEnvFile("local", ""); envErr != nil {
+		slog.Warn("init: could not write muninn.env", "error", envErr)
 	}
 
 	fmt.Println()

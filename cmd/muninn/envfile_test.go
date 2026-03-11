@@ -139,3 +139,85 @@ func TestLoadEnvFile_SymlinkSkipped(t *testing.T) {
 		t.Error("symlink should be rejected, MUNINN_SYM should not be set")
 	}
 }
+
+func TestBuildEnvFileContent_OllamaEmbedder(t *testing.T) {
+	content := buildEnvFileContent("ollama", "")
+	if !strings.Contains(content, "MUNINN_OLLAMA_URL=ollama://") {
+		t.Error("expected active MUNINN_OLLAMA_URL line")
+	}
+	if strings.Contains(content, "# MUNINN_OLLAMA_URL=") {
+		t.Error("MUNINN_OLLAMA_URL should be active, not commented")
+	}
+}
+
+func TestBuildEnvFileContent_OpenAIEmbedder(t *testing.T) {
+	content := buildEnvFileContent("openai", "")
+	if !strings.Contains(content, "MUNINN_OPENAI_KEY=") {
+		t.Error("expected active MUNINN_OPENAI_KEY line")
+	}
+	if strings.Contains(content, "# MUNINN_OPENAI_KEY=") {
+		t.Error("MUNINN_OPENAI_KEY should be active, not commented")
+	}
+}
+
+func TestBuildEnvFileContent_LocalEmbedder(t *testing.T) {
+	content := buildEnvFileContent("local", "")
+	// local embedder — MUNINN_OLLAMA_URL should be commented
+	if strings.Contains(content, "\nMUNINN_OLLAMA_URL=") {
+		t.Error("MUNINN_OLLAMA_URL should be commented for local embedder")
+	}
+}
+
+func TestBuildEnvFileContent_EnrichURL(t *testing.T) {
+	content := buildEnvFileContent("local", "anthropic://claude-haiku-4-5-20251001")
+	if !strings.Contains(content, "MUNINN_ENRICH_URL=anthropic://claude-haiku-4-5-20251001") {
+		t.Error("expected active MUNINN_ENRICH_URL line")
+	}
+}
+
+func TestWriteEnvFileTo_CreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "muninn.env")
+
+	created, err := writeEnvFileTo(path, "ollama", "")
+	if err != nil {
+		t.Fatalf("writeEnvFileTo: %v", err)
+	}
+	if !created {
+		t.Error("expected created=true for new file")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file not created: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("expected 0600, got %o", info.Mode().Perm())
+	}
+	content, _ := os.ReadFile(path)
+	if !strings.Contains(string(content), "MUNINN_OLLAMA_URL=ollama://") {
+		t.Error("expected active MUNINN_OLLAMA_URL in file")
+	}
+}
+
+func TestWriteEnvFileTo_NoOverwriteExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "muninn.env")
+	original := []byte("# user customized\nMUNINN_CUSTOM=yes\n")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := writeEnvFileTo(path, "ollama", "")
+	if err != nil {
+		t.Fatalf("writeEnvFileTo: %v", err)
+	}
+	if created {
+		t.Error("expected created=false for existing file")
+	}
+
+	after, _ := os.ReadFile(path)
+	if string(after) != string(original) {
+		t.Error("existing muninn.env should not be overwritten")
+	}
+}
