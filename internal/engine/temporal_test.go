@@ -54,7 +54,7 @@ func TestTemporalFilter_CreatedAfter(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Activate with created_after=tMid — should return mid and recent, NOT old
 	// The passesMetaFilter logic: created_after passes if eng.CreatedAt.After(t)
@@ -143,7 +143,7 @@ func TestTemporalFilter_CreatedBefore(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Activate with created_before=tMid+1s — should return old and mid, NOT recent
 	// passesMetaFilter: created_before passes if eng.CreatedAt.Before(t)
@@ -230,7 +230,7 @@ func TestTemporalFilter_CombinedRange(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Activate with created_after=(tOld+1s) AND created_before=(tRecent-1s)
 	// Only tMid should pass both filters.
@@ -352,7 +352,7 @@ func TestCustomCreatedAt_FilterUsesCustomTimestamp(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Filter: created_before = 5 days ago
 	// Only the backdated engram (10 days ago) should appear; the current engram (~now) should not.

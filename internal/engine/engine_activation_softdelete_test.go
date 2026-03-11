@@ -41,7 +41,7 @@ func TestActivation_Phase6_SkipsSoftDeletedEngrams(t *testing.T) {
 	}
 
 	// Allow the async FTS worker to index the written engrams.
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Soft-delete engrams at index 1 and 3.
 	deletedIDs := []string{ids[1], ids[3]}

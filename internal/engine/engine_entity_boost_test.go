@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -70,7 +69,7 @@ func TestEntityBoost_SurfacesEntityLinkedEngram(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for async FTS worker to index the written engrams.
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Query for "primary relational database" — should strongly match engram A.
 	// Threshold is low to allow entity-boosted engrams through.

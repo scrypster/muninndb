@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -39,7 +38,7 @@ func TestEngineClearVault_MemoriesGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Let FTS worker flush.
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	if err := eng.ClearVault(ctx, "clear-me"); err != nil {
 		t.Fatalf("ClearVault: %v", err)
@@ -87,7 +86,7 @@ func TestEngineDeleteVault_VaultNotListed(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq("to-delete", "some concept", "content")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	if err := eng.DeleteVault(ctx, "to-delete"); err != nil {
 		t.Fatalf("DeleteVault: %v", err)
@@ -114,7 +113,7 @@ func TestEngineDeleteVault_GlobalEngramCountDecreases(t *testing.T) {
 	eng.Write(ctx, writeReq("vault-del", "del1", "c"))
 	eng.Write(ctx, writeReq("vault-del", "del2", "c"))
 	eng.Write(ctx, writeReq("vault-del", "del3", "c"))
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	beforeCount := eng.engramCount.Load()
 	if err := eng.DeleteVault(ctx, "vault-del"); err != nil {
@@ -209,7 +208,7 @@ func TestEngineRenameVault_Success(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq("rename-src", "photosynthesis process", "plants convert light")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	if err := eng.RenameVault(ctx, "rename-src", "rename-dst"); err != nil {
 		t.Fatalf("RenameVault: %v", err)
@@ -266,7 +265,7 @@ func TestEngineRenameVault_Collision(t *testing.T) {
 
 	eng.Write(ctx, writeReq("vault-x", "c", "d"))
 	eng.Write(ctx, writeReq("vault-y", "e", "f"))
-	time.Sleep(200 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	err := eng.RenameVault(ctx, "vault-x", "vault-y")
 	if err == nil {
@@ -281,7 +280,7 @@ func TestEngineRenameVault_SameName(t *testing.T) {
 	ctx := context.Background()
 
 	eng.Write(ctx, writeReq("same-vault", "c", "d"))
-	time.Sleep(200 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	err := eng.RenameVault(ctx, "same-vault", "same-vault")
 	if err == nil {
@@ -295,7 +294,7 @@ func TestEngineClearVault_CoherenceGone(t *testing.T) {
 	ctx := context.Background()
 
 	eng.Write(ctx, writeReq("coh-vault", "test concept", "content"))
-	time.Sleep(200 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Confirm coherence entry exists before clearing (Snapshots returns entries for known vaults).
 	var hadEntry bool
@@ -334,7 +333,7 @@ func TestEngineRenameVault_AuthConfigMoved(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq("auth-rename-src", "concept", "content")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Set a vault config on the source vault.
 	if err := authStore.SetVaultConfig(auth.VaultConfig{Name: "auth-rename-src", Public: true}); err != nil {
@@ -372,7 +371,7 @@ func TestEngineRenameVault_CoherenceCountersMoved(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	if eng.coherence == nil {
 		t.Skip("coherence is nil — cannot test coherence rename")
@@ -409,7 +408,7 @@ func TestEngineRenameVault_VaultMuMoved(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq("mu-rename-src", "concept", "content")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Force a mutex entry to exist for the source vault by calling ClearVault
 	// (which calls getVaultMutex internally). Write again to re-populate data.
@@ -419,7 +418,7 @@ func TestEngineRenameVault_VaultMuMoved(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq("mu-rename-src", "concept2", "content2")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Capture the original mutex pointer so we can verify identity after rename.
 	origMu := eng.getVaultMutex("mu-rename-src")
@@ -453,7 +452,7 @@ func TestEngineRenameVault_ClosedDB(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq("db-close-vault", "c", "d")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Stop background workers first to avoid panics from closed DB.
 	eng.Stop()
@@ -498,7 +497,7 @@ func TestDeleteVault_CleansAuthStore(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq(vaultName, "concept", "content")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Explicitly configure the vault in authStore so there is an entry to clean up.
 	if err := authStore.SetVaultConfig(auth.VaultConfig{Name: vaultName, Public: true}); err != nil {
@@ -553,7 +552,7 @@ func TestDeleteVault_NotFoundAfterDelete(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq(vaultName, "concept", "content")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	if err := eng.DeleteVault(ctx, vaultName); err != nil {
 		t.Fatalf("first DeleteVault: %v", err)
@@ -589,7 +588,7 @@ func TestDeleteVault_VaultMuEntryRemoved(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq(vaultName, "concept", "content")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Populate the vaultMu entry.
 	eng.getVaultMutex(vaultName)
@@ -617,7 +616,7 @@ func TestEngineRenameVault_JobActive(t *testing.T) {
 	if _, err := eng.Write(ctx, writeReq("job-active-vault", "concept", "content")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Create a running job that targets this vault (simulates an in-progress clone).
 	job, err := eng.jobManager.Create("clone", "some-source", "job-active-vault")

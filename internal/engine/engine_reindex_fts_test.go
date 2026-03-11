@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -94,7 +93,7 @@ func TestReindexFTSVault_SearchWorksAfter(t *testing.T) {
 	}
 
 	// Allow the async FTS worker to process any pending jobs before reindex.
-	time.Sleep(150 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	count, err := eng.ReindexFTSVault(ctx, vaultName)
 	if err != nil {

@@ -149,7 +149,7 @@ func TestActivate_ConcurrentSafety(t *testing.T) {
 	}
 
 	// Wait for the async FTS worker to index the written engrams.
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Launch 10 concurrent Activate calls.
 	var wg sync.WaitGroup

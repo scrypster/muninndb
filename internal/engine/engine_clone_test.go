@@ -433,7 +433,7 @@ func TestEngineStartClone_MemoriesAccessible(t *testing.T) {
 	}
 
 	// Wait for FTS worker to process jobs.
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	job, err := eng.StartClone(ctx, "ma-source", "ma-cloned")
 	if err != nil {
@@ -487,7 +487,7 @@ func TestEngineStartMerge_AllMemoriesInTarget(t *testing.T) {
 		t.Fatalf("Write vault-b: %v", err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	job, err := eng.StartMerge(ctx, "am-vault-a", "am-vault-b", false)
 	if err != nil {

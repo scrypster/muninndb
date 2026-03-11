@@ -226,7 +226,7 @@ func TestRead_SoftDeleteNotFound(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Soft-delete it
 	_, err = eng.Forget(ctx, &mbp.ForgetRequest{
