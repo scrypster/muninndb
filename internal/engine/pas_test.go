@@ -93,7 +93,7 @@ func TestPAS_TransitionRecording(t *testing.T) {
 		}
 	}
 
-	time.Sleep(300 * time.Millisecond) // FTS indexing
+	awaitFTS(t, eng) // FTS indexing
 
 	// Activation 1: query about coffee brewing
 	resp1, err := eng.Activate(ctx, &mbp.ActivateRequest{
@@ -180,7 +180,7 @@ func TestPAS_TransitionBoostInScoreComponents(t *testing.T) {
 		}
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Build a transition pattern: login → dashboard (repeated to strengthen)
 	for i := 0; i < 3; i++ {
@@ -248,7 +248,7 @@ func TestPAS_DisabledByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      "test",
@@ -292,7 +292,7 @@ func TestPAS_VaultIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Activate in "test" vault
 	resp1, err := eng.Activate(ctx, &mbp.ActivateRequest{

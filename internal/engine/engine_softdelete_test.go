@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -27,7 +26,7 @@ func TestSoftDelete_FTSCleanup(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index the written engram.
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// 2. Search FTS for "purple elephant" — should find it before deletion.
 	respBefore, err := eng.Activate(ctx, &mbp.ActivateRequest{
@@ -52,9 +51,6 @@ func TestSoftDelete_FTSCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Forget (soft delete): %v", err)
 	}
-
-	// Allow any async workers to process.
-	time.Sleep(100 * time.Millisecond)
 
 	// 4. Search FTS for "purple elephant" again — should return 0 results.
 	respAfter, err := eng.Activate(ctx, &mbp.ActivateRequest{

@@ -138,6 +138,20 @@ func (a *ftsTrigAdapter) Search(ctx context.Context, ws [8]byte, query string, t
 	return out, nil
 }
 
+// awaitFTS drains the FTS worker by stopping it (which deterministically
+// processes all queued index jobs) and restarting it with a fresh worker.
+// This is the correct alternative to time.Sleep(300ms) when a test needs
+// to ensure FTS visibility before calling Activate.
+// The restarted worker will be stopped by eng.Stop() during cleanup.
+func awaitFTS(t *testing.T, eng *Engine) {
+	t.Helper()
+	if eng.ftsWorker == nil {
+		return
+	}
+	eng.ftsWorker.Stop()
+	eng.ftsWorker = fts.NewWorker(eng.fts)
+}
+
 // TestHelloVersionCheck ensures the engine accepts the protocol version string
 // "1" (as sent by the Web UI and MBP clients) and rejects other version strings.
 // Regression test for issue #19: engine incorrectly required "1.0" instead of "1".
@@ -249,7 +263,7 @@ func TestActivateReturnsResults(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index the written engrams (worker flushes every 100ms).
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Activate with a query that should match the Go engram
 	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
@@ -299,7 +313,7 @@ func TestActivateFTSRankingCorrect(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index the written engrams.
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	tests := []struct {
 		query   string
@@ -446,7 +460,7 @@ func TestActivateConfidenceAffectsScore(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index (same as TestActivateReturnsResults).
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      "test",
@@ -515,7 +529,7 @@ func TestEngineWorkersSubmit(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index (same as TestActivateReturnsResults).
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Activate (which should trigger worker submissions if workers were wired)
 	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
@@ -972,7 +986,7 @@ func TestActivateObserveModeDoesNotError(t *testing.T) {
 	}
 
 	// Allow async FTS worker to index (same as TestActivateReturnsResults).
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Normal activate (not observe mode) — baseline.
 	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
@@ -1225,7 +1239,7 @@ func TestEngine_LobeMode_CollectsEffects(t *testing.T) {
 	}
 
 	// Allow FTS worker to index
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      "test",
@@ -1329,7 +1343,7 @@ func TestEngine_CortexMode_NoForwarding(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	_, err = eng.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      "test",
@@ -1552,7 +1566,7 @@ func TestActivate_CancelledContext_PreventsProvenanceGoroutines(t *testing.T) {
 	}
 
 	// Allow the async FTS worker to index the written engrams.
-	time.Sleep(300 * time.Millisecond)
+	awaitFTS(t, eng)
 
 	// Sanity check: normal activate returns results, establishing a baseline.
 	normalResp, err := eng.Activate(ctx, &mbp.ActivateRequest{
