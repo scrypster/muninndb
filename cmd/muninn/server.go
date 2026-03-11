@@ -592,6 +592,8 @@ func parseListenHost(args []string, envVal string) string {
 }
 
 func runServer() {
+	loadEnvFile()
+
 	// Apply memory limits before any significant allocations.
 	applyMemoryLimits()
 

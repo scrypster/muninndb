@@ -88,6 +88,8 @@ func httpStatusToRPCError(status int) (code int, msg string) {
 //
 //	MUNINN_MCP_URL=https://127.0.0.1:8750/mcp muninn mcp
 func runMCPStdio() {
+	loadEnvFile()
+
 	if u := os.Getenv("MUNINN_MCP_URL"); u != "" {
 		mcpProxyURL = u
 	}
