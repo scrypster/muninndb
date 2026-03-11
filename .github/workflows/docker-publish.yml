@@ -1,6 +1,8 @@
 name: Docker
 
 on:
+  push:
+    branches: [develop]
   release:
     types: [published]
 
@@ -98,7 +100,8 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
 
       - name: Create and push manifest
         run: |
