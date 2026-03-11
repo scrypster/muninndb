@@ -1,6 +1,8 @@
 name: Docker
 
 on:
+  push:
+    branches: [develop]
   release:
     types: [published]
 
@@ -98,7 +100,8 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
 
       - name: Create and push manifest
         run: |
@@ -107,3 +110,17 @@ jobs:
         working-directory: /tmp/digests
         env:
           DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
+
+  deploy:
+    name: Deploy to Dokploy
+    needs: merge-manifests
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    steps:
+      - name: Trigger Dokploy redeploy
+        run: |
+          curl -sf -X POST \
+            "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.DOKPLOY_API_TOKEN }}" \
+            -d '{"applicationId": "${{ secrets.DOKPLOY_APP_ID }}"}'
