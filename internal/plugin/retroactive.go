@@ -388,6 +388,24 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 
 		// Non-embed (enrich) path: one-at-a-time as before.
 		if err := rp.processEngram(ctx, eng); err != nil {
+			if errors.Is(err, ErrNothingToEnrich) {
+				// Nothing to enrich is not a failure — mark the engram as
+				// enrichment-complete so it is not retried on the next scan.
+				slog.Debug("retroactive processor: nothing to enrich, marking complete",
+					"plugin", rp.plugin.Name(),
+					"engram_id", eng.ID.String())
+				if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, rp.flagBit); flagErr != nil {
+					slog.Warn("retroactive processor: failed to set digest flag after nothing-to-enrich",
+						"plugin", rp.plugin.Name(),
+						"engram_id", eng.ID.String(),
+						"error", flagErr)
+				}
+				rp.statsMu.Lock()
+				rp.stats.Processed++
+				rp.statsMu.Unlock()
+				batchCount++
+				continue
+			}
 			slog.Warn("retroactive processor: failed to process engram",
 				"plugin", rp.plugin.Name(),
 				"engram_id", eng.ID.String(),
