@@ -387,7 +387,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		}
 
 		// Non-embed (enrich) path: one-at-a-time as before.
-		if err := rp.processEngram(ctx, eng); err != nil {
+		if err := rp.processEnrichEngram(ctx, eng); err != nil {
 			if errors.Is(err, ErrNothingToEnrich) {
 				// Nothing to enrich is not a failure — mark the engram as
 				// enrichment-complete so it is not retried on the next scan.
@@ -485,34 +485,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 	return true
 }
 
-func (rp *RetroactiveProcessor) processEngram(ctx context.Context, eng *Engram) error {
-	// Check if this is an embed plugin
-	if embed, ok := rp.plugin.(EmbedPlugin); ok {
-		// Call Embed with the concept and content
-		text := eng.Concept + " " + eng.Content
-		vec, err := embed.Embed(ctx, []string{text})
-		if err != nil {
-			return err
-		}
-
-		// Store the embedding
-		if err := rp.store.UpdateEmbedding(ctx, eng.ID, vec); err != nil {
-			return err
-		}
-
-		// Insert into HNSW index
-		if err := rp.store.HNSWInsert(ctx, eng.ID, vec); err != nil {
-			return err
-		}
-
-		// Auto-link by embedding
-		if err := rp.store.AutoLinkByEmbedding(ctx, eng.ID, vec); err != nil {
-			return err
-		}
-
-		return nil
-	}
-
+func (rp *RetroactiveProcessor) processEnrichEngram(ctx context.Context, eng *Engram) error {
 	// Check if this is an enrich plugin
 	if enrich, ok := rp.plugin.(EnrichPlugin); ok {
 		// Read per-stage digest flags so we don't re-run stages the caller already provided.
