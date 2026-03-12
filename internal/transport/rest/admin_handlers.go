@@ -230,7 +230,11 @@ func (s *Server) handleChangeAdminPassword(authStore *auth.Store) http.HandlerFu
 			return
 		}
 		if req.NewPassword == "" {
-			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "new_password is required")
+			s.sendError(r, w, http.StatusBadRequest, ErrAuthFailed, "new_password is required")
+			return
+		}
+		if len(req.NewPassword) < 8 {
+			s.sendError(r, w, http.StatusBadRequest, ErrAuthFailed, "new_password must be at least 8 characters")
 			return
 		}
 		if err := authStore.ChangeAdminPassword(req.Username, req.NewPassword); err != nil {

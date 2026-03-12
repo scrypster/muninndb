@@ -654,7 +654,11 @@ func (s *Server) handleGetEngram(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.engine.Read(r.Context(), &ReadRequest{ID: id, Vault: ctxVault(r)})
 	if err != nil {
-		s.sendError(r, w, http.StatusNotFound, ErrEngramNotFound, err.Error())
+		if errors.Is(err, engine.ErrEngramNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrEngramNotFound, err.Error())
+		} else {
+			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		}
 		return
 	}
 	s.sendJSON(w, http.StatusOK, resp)
@@ -668,7 +672,11 @@ func (s *Server) handleDeleteEngram(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.engine.Forget(r.Context(), &ForgetRequest{ID: id, Vault: ctxVault(r)})
 	if err != nil {
-		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		if errors.Is(err, engine.ErrEngramNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrEngramNotFound, err.Error())
+		} else {
+			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		}
 		return
 	}
 	s.sendJSON(w, http.StatusOK, resp)
@@ -1348,7 +1356,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.engine.Restore(r.Context(), ctxVault(r), id)
 	if err != nil {
-		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		if errors.Is(err, engine.ErrEngramNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrEngramNotFound, err.Error())
+		} else {
+			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		}
 		return
 	}
 	s.sendJSON(w, http.StatusOK, resp)

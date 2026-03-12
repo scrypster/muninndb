@@ -1391,6 +1391,9 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 
 	eng, err := e.store.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, ErrEngramNotFound
+		}
 		return nil, fmt.Errorf("get engram: %w", err)
 	}
 
@@ -1999,6 +2002,9 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 
 	if req.Hard {
 		if err := e.store.DeleteEngram(ctx, wsPrefix, id); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return nil, ErrEngramNotFound
+			}
 			return nil, fmt.Errorf("hard delete: %w", err)
 		}
 		// Mark the node as deleted in the HNSW index so it is skipped in
@@ -2021,6 +2027,9 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 		// Read the engram before soft-deleting so we can clean up FTS index entries.
 		eng, readErr := e.store.GetEngram(ctx, wsPrefix, id)
 		if err := e.store.SoftDelete(ctx, wsPrefix, id); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return nil, ErrEngramNotFound
+			}
 			return nil, fmt.Errorf("soft delete: %w", err)
 		}
 		// Remove FTS posting-list entries so soft-deleted engrams do not appear in search.
@@ -2175,6 +2184,9 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 	}
 	eng, err := e.store.GetEngram(ctx, ws, ulid)
 	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, ErrEngramNotFound
+		}
 		return nil, fmt.Errorf("restore: %w", err)
 	}
 	if eng.State != storage.StateSoftDeleted {
