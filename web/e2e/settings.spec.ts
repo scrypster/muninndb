@@ -28,7 +28,7 @@ test.describe('Settings: Plugin Config Persistence', () => {
 
     // Save
     await page.getByTestId('btn-save-enrich').click()
-    await expect(page.locator('.toast.success')).toBeVisible()
+    await expect(page.locator('.toast.success').last()).toBeVisible()
 
     // Hard reload — the key assertion: config must survive this
     await page.reload()

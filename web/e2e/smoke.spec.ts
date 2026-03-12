@@ -39,7 +39,7 @@ test.describe('Smoke: Full Happy Path', () => {
     }
 
     await page.getByTestId('btn-save-enrich').click()
-    await expect(page.locator('.toast.success')).toBeVisible()
+    await expect(page.locator('.toast.success').last()).toBeVisible()
 
     await page.reload()
     await page.locator('.app-layout').waitFor({ state: 'visible' })
