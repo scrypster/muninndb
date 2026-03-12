@@ -911,16 +911,33 @@ func TestVaultRouting_GetGuide_ExplicitVault(t *testing.T) {
 }
 
 // TestVaultRouting_ResolveContradiction_ExplicitVault verifies that
-// POST /api/admin/contradictions/resolve passes the vault from the request body to the engine.
-// Note: this is an admin endpoint; vault is not set via ?vault= query param but via the body's
-// "vault" field, since withAdminMiddleware does not run VaultAuthMiddleware.
+// POST /api/admin/contradictions/resolve passes the vault from the query parameter to the engine.
+// AdminAPIMiddleware now resolves vault via ?vault= query param, consistent with other handlers.
 func TestVaultRouting_ResolveContradiction_ExplicitVault(t *testing.T) {
-	srv, eng, _ := newVaultTrackingServer(t)
+	eng := &vaultTrackingEngine{}
+	store := newTestAuthStore(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "default", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+	secret := []byte("test-secret-32-bytes-long-xxxx")
+	srv := NewServer("localhost:0", eng, store, secret, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-	// sessionSecret is "" in the test server, so admin auth is skipped.
-	body := strings.NewReader(`{"vault":"myvault","id_a":"a1","id_b":"b1"}`)
-	req := httptest.NewRequest("POST", "/api/admin/contradictions/resolve", body)
+	// Create a valid session token to authenticate with AdminAPIMiddleware.
+	token, err := auth.NewSessionToken("admin", secret)
+	if err != nil {
+		t.Fatalf("NewSessionToken: %v", err)
+	}
+
+	body := strings.NewReader(`{"id_a":"a1","id_b":"b1"}`)
+	req := httptest.NewRequest("POST", "/api/admin/contradictions/resolve?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{
+		Name:  "muninn_session",
+		Value: token,
+	})
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 

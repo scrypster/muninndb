@@ -93,7 +93,12 @@ func (s *Store) AdminAPIMiddleware(secret []byte, next http.HandlerFunc) http.Ha
 			w.Write([]byte(`{"error":{"code":"AUTH_FAILED","message":"admin session required"}}`))
 			return
 		}
-		next(w, r)
+		vault := r.URL.Query().Get("vault")
+		if vault == "" {
+			vault = "default"
+		}
+		ctx := context.WithValue(r.Context(), ContextVault, vault)
+		next(w, r.WithContext(ctx))
 	}
 }
 
