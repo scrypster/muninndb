@@ -220,16 +220,19 @@ func runUpgrade(args []string) {
 			pidPath := filepath.Join(defaultDataDir(), "muninn.pid")
 			if pid, err := readPID(pidPath); err == nil {
 				if proc, err := os.FindProcess(pid); err == nil {
-					if err := stopProcess(proc); err != nil {
-						fmt.Fprintln(os.Stderr, "")
-						fmt.Fprintf(os.Stderr, "  failed to signal daemon: %v\n", err)
-						osExit(1)
+					_ = stopProcess(proc)
+					deadline := time.Now().Add(15 * time.Second)
+					for time.Now().Before(deadline) {
+						if !isProcessRunning(pid) {
+							break
+						}
+						time.Sleep(100 * time.Millisecond)
 					}
-					if err := waitForProcessExit(pid, 35*time.Second); err != nil {
-						fmt.Fprintln(os.Stderr, "")
-						fmt.Fprintf(os.Stderr, "  muninn (pid %d) did not stop within 35s — aborting upgrade\n", pid)
-						osExit(1)
+					if isProcessRunning(pid) {
+						_ = proc.Kill()
+						time.Sleep(500 * time.Millisecond)
 					}
+					time.Sleep(200 * time.Millisecond)
 				}
 			}
 			os.Remove(pidPath)
@@ -486,10 +489,22 @@ func selfUpdate(latest string) error {
 		if err := stopProcess(proc); err != nil {
 			return fmt.Errorf("stop daemon: %w", err)
 		}
-		if err := waitForProcessExit(pid, 35*time.Second); err != nil {
-			os.Remove(pidPath)
-			return fmt.Errorf("daemon (pid %d) did not stop within 35s: %w", pid, err)
+		// Wait up to 15s for graceful exit (PebbleDB flush + WAL sync can take several seconds).
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			if !isProcessRunning(pid) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
+		// If still alive after graceful period, force-kill to unblock the upgrade.
+		if isProcessRunning(pid) {
+			_ = proc.Kill()
+			time.Sleep(500 * time.Millisecond)
+		}
+		// Brief grace period for the OS to release file locks (e.g. PebbleDB LOCK file)
+		// before the new binary attempts to open the same data directory.
+		time.Sleep(200 * time.Millisecond)
 		os.Remove(pidPath)
 		return nil
 	}); err != nil {

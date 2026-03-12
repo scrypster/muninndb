@@ -21,6 +21,7 @@ document.addEventListener('alpine:init', () => {
     workerStats: [],
     liveFeed: [],
     _activityChart: null,
+    _prevEngramCount: 0,
     _prevVaultCount: 0,
 
     // Memories
@@ -516,6 +517,23 @@ document.addEventListener('alpine:init', () => {
         }
       };
 
+      es.addEventListener('error', (e) => {
+        let msg = 'Live feed error';
+        try {
+          const data = JSON.parse(e.data);
+          if (data.error) msg = 'Live feed: ' + data.error;
+        } catch (_) {}
+        console.warn('[muninn] SSE error event:', msg);
+        this.addNotification('error', msg);
+        this.liveConnected = false;
+        es.close();
+        this._es = null;
+        window._muninnSSE = null;
+        const delay = Math.min(500 * Math.pow(1.5, this._esRetries), 30000);
+        this._esRetries++;
+        setTimeout(() => this.connectLive(), delay);
+      });
+
       this._es = es;
     },
 
@@ -799,43 +817,36 @@ document.addEventListener('alpine:init', () => {
       try {
         if (action === 'keep_a') {
           // A supersedes B; archive B
-          await fetch('/api/link?vault=' + encodeURIComponent(vault), {
+          await this.apiCall('/api/link?vault=' + encodeURIComponent(vault), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source_id: idA, target_id: idB, rel_type: 4, weight: 1.0 }),
+            body: JSON.stringify({ source_id: idA, target_id: idB, rel_type: 4, weight: 1.0, vault }),
           });
-          await fetch('/api/engrams/' + encodeURIComponent(idB) + '/state?vault=' + encodeURIComponent(vault), {
+          await this.apiCall('/api/engrams/' + encodeURIComponent(idB) + '/state?vault=' + encodeURIComponent(vault), {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ state: 'archived' }),
+            body: JSON.stringify({ vault, state: 'archived' }),
           });
-          await fetch('/api/admin/contradictions/resolve?vault=' + encodeURIComponent(vault), {
+          await this.apiCall('/api/admin/contradictions/resolve', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id_a: idA, id_b: idB }),
+            body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
           });
         } else if (action === 'keep_b') {
           // B supersedes A; archive A
-          await fetch('/api/link?vault=' + encodeURIComponent(vault), {
+          await this.apiCall('/api/link?vault=' + encodeURIComponent(vault), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source_id: idB, target_id: idA, rel_type: 4, weight: 1.0 }),
+            body: JSON.stringify({ source_id: idB, target_id: idA, rel_type: 4, weight: 1.0, vault }),
           });
-          await fetch('/api/engrams/' + encodeURIComponent(idA) + '/state?vault=' + encodeURIComponent(vault), {
+          await this.apiCall('/api/engrams/' + encodeURIComponent(idA) + '/state?vault=' + encodeURIComponent(vault), {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ state: 'archived' }),
+            body: JSON.stringify({ vault, state: 'archived' }),
           });
-          await fetch('/api/admin/contradictions/resolve?vault=' + encodeURIComponent(vault), {
+          await this.apiCall('/api/admin/contradictions/resolve', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id_a: idA, id_b: idB }),
+            body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
           });
         } else if (action === 'dismiss') {
-          await fetch('/api/admin/contradictions/resolve?vault=' + encodeURIComponent(vault), {
+          await this.apiCall('/api/admin/contradictions/resolve', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id_a: idA, id_b: idB }),
+            body: JSON.stringify({ vault, id_a: idA, id_b: idB }),
           });
         } else if (action === 'merge') {
           // Open consolidate modal pre-filled with both IDs
@@ -2634,15 +2645,10 @@ document.addEventListener('alpine:init', () => {
     // ── Lifecycle state ────────────────────────────────────────────────────
     async updateLifecycleState(id, state) {
       try {
-        const res = await fetch('/api/engrams/' + encodeURIComponent(id) + '/state?vault=' + encodeURIComponent(this.vault), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ state }),
-        });
-        if (!res.ok) {
-          const text = await res.text().catch(() => res.statusText);
-          throw new Error(res.status + ': ' + text);
-        }
+        const res = await this.apiCall(
+          '/api/engrams/' + encodeURIComponent(id) + '/state?vault=' + encodeURIComponent(this.vault),
+          { method: 'PUT', body: JSON.stringify({ vault: this.vault, state }) }
+        );
         if (this.selectedMemory && this.selectedMemory.id === id) {
           this.selectedMemory = { ...this.selectedMemory, state };
         }

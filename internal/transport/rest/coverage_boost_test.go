@@ -250,7 +250,7 @@ func TestGetEngram_EngineError_Boost(t *testing.T) {
 type readErrorEngine struct{ MockEngine }
 
 func (e *readErrorEngine) Read(_ context.Context, _ *ReadRequest) (*ReadResponse, error) {
-	return nil, errors.New("not found")
+	return nil, engine.ErrEngramNotFound
 }
 
 // ---------------------------------------------------------------------------
