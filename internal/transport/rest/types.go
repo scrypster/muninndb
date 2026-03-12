@@ -403,9 +403,8 @@ type ContradictionsResponse struct {
 
 // ResolveContradictionRequest is the body for POST /api/admin/contradictions/resolve.
 type ResolveContradictionRequest struct {
-	Vault string `json:"vault"`
-	IDA   string `json:"id_a"`
-	IDB   string `json:"id_b"`
+	IDA string `json:"id_a"`
+	IDB string `json:"id_b"`
 }
 
 // ResolveContradictionResponse is returned by the resolve-contradiction endpoint.

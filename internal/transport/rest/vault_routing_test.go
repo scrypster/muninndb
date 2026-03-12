@@ -910,16 +910,16 @@ func TestVaultRouting_GetGuide_ExplicitVault(t *testing.T) {
 	}
 }
 
-// TestVaultRouting_ResolveContradiction_ExplicitVault verifies that
-// POST /api/admin/contradictions/resolve passes the vault from the request body to the engine.
-// Note: this is an admin endpoint; vault is not set via ?vault= query param but via the body's
-// "vault" field, since withAdminMiddleware does not run VaultAuthMiddleware.
-func TestVaultRouting_ResolveContradiction_ExplicitVault(t *testing.T) {
+// TestVaultRouting_ResolveContradiction_UsesContextVault verifies that
+// POST /api/admin/contradictions/resolve uses the vault from the auth context,
+// not from the request body. The body "vault" field is ignored (issue #208).
+func TestVaultRouting_ResolveContradiction_UsesContextVault(t *testing.T) {
 	srv, eng, _ := newVaultTrackingServer(t)
 
-	// sessionSecret is "" in the test server, so admin auth is skipped.
-	body := strings.NewReader(`{"vault":"myvault","id_a":"a1","id_b":"b1"}`)
-	req := httptest.NewRequest("POST", "/api/admin/contradictions/resolve", body)
+	// Provide vault via context (as auth middleware would), not via the body.
+	ctx := context.WithValue(context.Background(), auth.ContextVault, "myvault")
+	body := strings.NewReader(`{"id_a":"a1","id_b":"b1"}`)
+	req := httptest.NewRequest("POST", "/api/admin/contradictions/resolve", body).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
