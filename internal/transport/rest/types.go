@@ -137,6 +137,9 @@ type EngineAPI interface {
 	// ExportGraph builds the entity→relationship graph for the vault.
 	// If includeEngrams is true the entity types are enriched from the entity record table.
 	ExportGraph(ctx context.Context, vault string, includeEngrams bool) (*engine.ExportGraph, error)
+	// EmbedStats returns the current stats for the embed retroactive processor.
+	// Returns a zero-value RetroactiveStats when no embed processor is registered.
+	EmbedStats() plugin.RetroactiveStats
 }
 
 // ── Web UI types ─────────────────────────────────────────────────────────

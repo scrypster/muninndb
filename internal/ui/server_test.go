@@ -188,6 +188,10 @@ func (m *mockEngine) ExportGraph(ctx context.Context, vault string, includeEngra
 	return &engine.ExportGraph{}, nil
 }
 
+func (m *mockEngine) EmbedStats() plugin.RetroactiveStats {
+	return plugin.RetroactiveStats{}
+}
+
 func makeMockFS() fs.FS {
 	return fstest.MapFS{
 		"static/dist/app.css":   &fstest.MapFile{Data: []byte("/* css */")},

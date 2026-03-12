@@ -218,6 +218,17 @@ func (e *Engine) GetProcessorStats() []plugin.RetroactiveStats {
 	return stats
 }
 
+// EmbedStats returns the current stats for the first embed retroactive processor.
+// Returns a zero-value RetroactiveStats when no embed processor is registered.
+func (e *Engine) EmbedStats() plugin.RetroactiveStats {
+	for _, p := range e.retroProcessors {
+		if p != nil && p.Mode() == "embed" {
+			return p.Stats()
+		}
+	}
+	return plugin.RetroactiveStats{}
+}
+
 // GetEnrichmentMode returns a human-readable string describing the active enrichment setup.
 // Returns "none" when no processors are configured, "plugin:<name>" when an enrich plugin
 // is active, or "inline" when only embed processors are registered.

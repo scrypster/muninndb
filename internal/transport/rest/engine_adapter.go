@@ -294,6 +294,10 @@ func (w *RESTEngineWrapper) GetProcessorStats() []plugin.RetroactiveStats {
 	return w.engine.GetProcessorStats()
 }
 
+func (w *RESTEngineWrapper) EmbedStats() plugin.RetroactiveStats {
+	return w.engine.EmbedStats()
+}
+
 // lifecycleStateLabel returns a human-readable label for a storage.LifecycleState.
 func lifecycleStateLabel(s storage.LifecycleState) string {
 	switch s {

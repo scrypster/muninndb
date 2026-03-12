@@ -2,6 +2,7 @@ package rest
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -811,5 +812,133 @@ func TestEntityGraph_AllowedWithValidSession(t *testing.T) {
 	}
 	if resp.Nodes == nil || resp.Edges == nil {
 		t.Error("expected non-nil nodes and edges")
+	}
+}
+
+// mockEngineWithStats embeds MockEngine but allows controlling EmbedStats and CountEmbedded.
+type mockEngineWithStats struct {
+	MockEngine
+	embedStats    plugin.RetroactiveStats
+	embeddedCount int64
+	totalCount    int64
+}
+
+func (m *mockEngineWithStats) EmbedStats() plugin.RetroactiveStats {
+	return m.embedStats
+}
+
+func (m *mockEngineWithStats) CountEmbedded(ctx context.Context) int64 {
+	return m.embeddedCount
+}
+
+func (m *mockEngineWithStats) Stat(ctx context.Context, req *StatRequest) (*StatResponse, error) {
+	return &StatResponse{
+		EngramCount:  m.totalCount,
+		VaultCount:   1,
+		StorageBytes: 1024,
+	}, nil
+}
+
+// TestHandleEmbedStatus_IncludesRateAndETA verifies that rate_per_sec and eta_seconds
+// are populated from EmbedStats when the server is actively indexing.
+func TestHandleEmbedStatus_IncludesRateAndETA(t *testing.T) {
+	eng := &mockEngineWithStats{
+		embedStats: plugin.RetroactiveStats{
+			RatePerSec: 1.5,
+			ETASeconds: 120,
+		},
+		embeddedCount: 50,  // less than total → indexing=true
+		totalCount:    100,
+	}
+	srv := NewServer("localhost:0", eng, nil, nil, nil, EmbedInfo{Provider: "ollama", Model: "nomic"}, EnrichInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/admin/embed/status", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp EmbedStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Indexing {
+		t.Error("expected indexing=true")
+	}
+	if resp.RatePerSec != 1.5 {
+		t.Errorf("expected rate_per_sec=1.5, got %v", resp.RatePerSec)
+	}
+	if resp.ETASeconds != 120 {
+		t.Errorf("expected eta_seconds=120, got %v", resp.ETASeconds)
+	}
+}
+
+// TestHandleEmbedStatus_ZeroRateWhenIdle verifies that rate_per_sec and eta_seconds
+// are 0 when the server is not actively indexing (all engrams already embedded).
+func TestHandleEmbedStatus_ZeroRateWhenIdle(t *testing.T) {
+	eng := &mockEngineWithStats{
+		embedStats: plugin.RetroactiveStats{
+			RatePerSec: 5.0,
+			ETASeconds: 999,
+		},
+		embeddedCount: 100,  // equal to total → indexing=false
+		totalCount:    100,
+	}
+	srv := NewServer("localhost:0", eng, nil, nil, nil, EmbedInfo{Provider: "ollama", Model: "nomic"}, EnrichInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/admin/embed/status", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp EmbedStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Indexing {
+		t.Error("expected indexing=false when all engrams are embedded")
+	}
+	if resp.RatePerSec != 0 {
+		t.Errorf("expected rate_per_sec=0 when idle, got %v", resp.RatePerSec)
+	}
+	if resp.ETASeconds != 0 {
+		t.Errorf("expected eta_seconds=0 when idle, got %v", resp.ETASeconds)
+	}
+}
+
+// TestHandleEmbedStatus_HardwareAccelerated verifies that hardware_accelerated
+// is reflected correctly in the response when set on the server.
+func TestHandleEmbedStatus_HardwareAccelerated(t *testing.T) {
+	trueVal := true
+	eng := &mockEngineWithStats{
+		embeddedCount: 100,
+		totalCount:    100,
+	}
+	srv := NewServer("localhost:0", eng, nil, nil, nil,
+		EmbedInfo{Provider: "ollama", Model: "nomic", HardwareAccelerated: &trueVal},
+		EnrichInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/admin/embed/status", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp EmbedStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.HardwareAccelerated == nil {
+		t.Fatal("expected hardware_accelerated to be non-nil")
+	}
+	if !*resp.HardwareAccelerated {
+		t.Error("expected hardware_accelerated=true")
 	}
 }

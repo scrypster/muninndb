@@ -286,6 +286,10 @@ func (m *MockEngine) GetProcessorStats() []plugin.RetroactiveStats {
 	return nil
 }
 
+func (m *MockEngine) EmbedStats() plugin.RetroactiveStats {
+	return plugin.RetroactiveStats{}
+}
+
 func (m *MockEngine) ExportGraph(ctx context.Context, vault string, includeEngrams bool) (*engine.ExportGraph, error) {
 	return &engine.ExportGraph{}, nil
 }

@@ -495,26 +495,43 @@ type EmbedStatusResponse struct {
 	EmbeddedCount int64  `json:"embedded_count"` // -1 = unknown
 	TotalCount    int64  `json:"total_count"`    // -1 = unknown
 	Indexing      bool   `json:"indexing"`
+	// RatePerSec is the current embedding rate in engrams per second; 0 when not indexing.
+	RatePerSec float64 `json:"rate_per_sec"`
+	// ETASeconds is the estimated seconds until indexing completes; 0 when not indexing or rate unknown.
+	ETASeconds int64 `json:"eta_seconds"`
+	// HardwareAccelerated is nil for cloud providers; true/false for Ollama (GPU vs CPU).
+	HardwareAccelerated *bool `json:"hardware_accelerated"`
 }
 
 // handleEmbedStatus returns the current embedder configuration and indexing state.
 func (s *Server) handleEmbedStatus(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.engine.Stat(r.Context(), &StatRequest{})
+	statResp, err := s.engine.Stat(r.Context(), &StatRequest{})
 	totalCount := int64(-1)
 	if err == nil {
-		totalCount = int64(resp.EngramCount)
+		totalCount = int64(statResp.EngramCount)
 	}
 
 	embeddedCount := s.engine.CountEmbedded(r.Context())
+	indexing := embeddedCount >= 0 && totalCount >= 0 && embeddedCount < totalCount
 
-	s.sendJSON(w, http.StatusOK, EmbedStatusResponse{
-		Provider:      s.embedProvider,
-		Model:         s.embedModel,
-		Enabled:       s.embedProvider != "" && s.embedProvider != "none",
-		EmbeddedCount: embeddedCount,
-		TotalCount:    totalCount,
-		Indexing:      embeddedCount >= 0 && totalCount >= 0 && embeddedCount < totalCount,
-	})
+	resp := EmbedStatusResponse{
+		Provider:            s.embedProvider,
+		Model:               s.embedModel,
+		Enabled:             s.embedProvider != "" && s.embedProvider != "none",
+		EmbeddedCount:       embeddedCount,
+		TotalCount:          totalCount,
+		Indexing:            indexing,
+		HardwareAccelerated: s.embedHardwareAccelerated,
+	}
+
+	// Only populate rate/ETA when actively indexing.
+	if indexing {
+		stats := s.engine.EmbedStats()
+		resp.RatePerSec = stats.RatePerSec
+		resp.ETASeconds = stats.ETASeconds
+	}
+
+	s.sendJSON(w, http.StatusOK, resp)
 }
 
 // PluginStatusResponse is one entry in GET /api/admin/plugins.

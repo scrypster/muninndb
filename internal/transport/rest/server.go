@@ -59,8 +59,9 @@ type Server struct {
 	tlsConfig     *tls.Config // nil = plain TCP
 
 	// Embedder info — set at construction time, static for the lifetime of the server.
-	embedProvider string // "ollama", "openai", "voyage", or "none"
-	embedModel    string // model name, or "" if none
+	embedProvider            string // "ollama", "openai", "voyage", or "none"
+	embedModel               string // model name, or "" if none
+	embedHardwareAccelerated *bool  // nil for cloud/noop providers; true/false for Ollama
 
 	// Enrichment info — set at construction time, static for the lifetime of the server.
 	enrichProvider string // "ollama", "openai", "anthropic", or ""
@@ -97,8 +98,9 @@ type Server struct {
 
 // EmbedInfo carries static embedder metadata set at server construction time.
 type EmbedInfo struct {
-	Provider string // "ollama", "openai", "voyage", or "none"
-	Model    string // model name, or ""
+	Provider            string // "ollama", "openai", "voyage", or "none"
+	Model               string // model name, or ""
+	HardwareAccelerated *bool  // nil for cloud/noop providers; true/false for Ollama
 }
 
 // EnrichInfo carries static enrichment metadata set at server construction time.
@@ -120,22 +122,23 @@ type MCPInfo struct {
 func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecret []byte, corsOrigins []string, embedInfo EmbedInfo, enrichInfo EnrichInfo, pluginRegistry *plugin.Registry, dataDir string, tlsConfig *tls.Config, mcpInfo ...MCPInfo) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		addr:           addr,
-		engine:         engine,
-		authStore:      authStore,
-		sessionSecret:  sessionSecret,
-		corsOrigins:    corsOrigins,
-		mux:            mux,
-		embedProvider:  embedInfo.Provider,
-		embedModel:     embedInfo.Model,
-		enrichProvider: enrichInfo.Provider,
-		enrichModel:    enrichInfo.Model,
-		pluginRegistry: pluginRegistry,
-		dataDir:        dataDir,
-		tlsConfig:      tlsConfig,
-		startTime:      time.Now(),
-		shutdown:       make(chan struct{}),
-		ready:          make(chan struct{}),
+		addr:                     addr,
+		engine:                   engine,
+		authStore:                authStore,
+		sessionSecret:            sessionSecret,
+		corsOrigins:              corsOrigins,
+		mux:                      mux,
+		embedProvider:            embedInfo.Provider,
+		embedModel:               embedInfo.Model,
+		embedHardwareAccelerated: embedInfo.HardwareAccelerated,
+		enrichProvider:           enrichInfo.Provider,
+		enrichModel:              enrichInfo.Model,
+		pluginRegistry:           pluginRegistry,
+		dataDir:                  dataDir,
+		tlsConfig:                tlsConfig,
+		startTime:                time.Now(),
+		shutdown:                 make(chan struct{}),
+		ready:                    make(chan struct{}),
 	}
 	// Subsystems are considered ready immediately unless explicitly marked otherwise.
 	s.subsystemsReady.Store(true)
