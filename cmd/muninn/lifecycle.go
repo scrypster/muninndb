@@ -185,36 +185,30 @@ func runStop() {
 		os.Exit(1)
 	}
 
-	// Wait for the process to actually exit before returning. The timeout is
-	// 35s — 5s beyond the daemon's own 30s internal shutdown deadline — so the
-	// CLI always outlasts the daemon's worst-case graceful shutdown, including
-	// Pebble WAL flush and fsync on slow disks.
-	deadline := time.Now().Add(35 * time.Second)
-	for time.Now().Before(deadline) {
-		if !isProcessRunning(pid) {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// If the process is still alive after 35s, do not silently proceed.
-	// Starting a new instance while the old one holds the Pebble lock will
-	// fail with "resource temporarily unavailable". Bail out explicitly so
-	// the user knows to investigate rather than seeing a confusing start failure.
-	if isProcessRunning(pid) {
+	if err := waitForProcessExit(pid, 35*time.Second); err != nil {
 		fmt.Fprintf(os.Stderr, "muninn (pid %d) did not stop within 35s — aborting\n", pid)
 		fmt.Fprintf(os.Stderr, "Check 'muninn logs' for details. You can force-kill with: kill -9 %d\n", pid)
 		os.Exit(1)
 	}
 
-	// 300ms buffer after process exit before returning. kill(pid,0) returning
-	// ESRCH means the process is gone from the kernel table, but flock(2) lock
-	// release is not guaranteed to be visible to other processes at exactly
-	// that instant. This covers the brief kernel cleanup window.
-	time.Sleep(300 * time.Millisecond)
-
 	fmt.Printf("muninn stopped (pid %d)\n", pid)
 	os.Remove(pidPath)
+}
+
+// waitForProcessExit polls isProcessRunning every 100ms until the process
+// exits or the timeout elapses. Returns an error if the process is still
+// running after the timeout. A 300ms buffer is added after exit to let the
+// kernel fully release the Pebble flock before the caller proceeds.
+func waitForProcessExit(pid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !isProcessRunning(pid) {
+			time.Sleep(300 * time.Millisecond)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("process %d still running after %v", pid, timeout)
 }
 
 // runStatus prints service health and exits. Uses shared printStatusDisplay.

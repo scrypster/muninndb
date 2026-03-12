@@ -220,7 +220,11 @@ func runUpgrade(args []string) {
 			pidPath := filepath.Join(defaultDataDir(), "muninn.pid")
 			if pid, err := readPID(pidPath); err == nil {
 				if proc, err := os.FindProcess(pid); err == nil {
-					_ = stopProcess(proc)
+					if err := stopProcess(proc); err != nil {
+						fmt.Fprintln(os.Stderr, "")
+						fmt.Fprintf(os.Stderr, "  failed to signal daemon: %v\n", err)
+						osExit(1)
+					}
 					if err := waitForProcessExit(pid, 35*time.Second); err != nil {
 						fmt.Fprintln(os.Stderr, "")
 						fmt.Fprintf(os.Stderr, "  muninn (pid %d) did not stop within 35s — aborting upgrade\n", pid)
@@ -538,18 +542,3 @@ func selfUpdate(latest string) error {
 	return nil
 }
 
-// waitForProcessExit polls isProcessRunning every 100ms until the process
-// exits or the timeout elapses. Returns an error if the process is still
-// running after the timeout. A 300ms buffer is added after exit to let the
-// kernel fully release the Pebble flock before the caller proceeds.
-func waitForProcessExit(pid int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !isProcessRunning(pid) {
-			time.Sleep(300 * time.Millisecond)
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("process %d still running after %v", pid, timeout)
-}
