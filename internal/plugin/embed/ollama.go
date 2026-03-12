@@ -74,10 +74,10 @@ func (p *OllamaProvider) Init(ctx context.Context, cfg ProviderHTTPConfig) (int,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
-	p.client = &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: transport,
-	}
+	// No client-level Timeout: all requests carry per-request context deadlines
+	// (set in probeEmbedEndpoint, embedBatchNew, etc.). A global Timeout would
+	// override context deadlines and silently kill large batch requests.
+	p.client = &http.Client{Transport: transport}
 
 	// Probe connectivity with root GET
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
