@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewerVersionAvailable(t *testing.T) {
@@ -386,3 +387,26 @@ func TestRunUpgrade_CheckOnly_UpdateAvailable(t *testing.T) {
 		t.Errorf("expected exit code 1 for --check with update available, got %d", exitCode)
 	}
 }
+
+// TestWaitForProcessExit_AlreadyDead verifies that waitForProcessExit returns
+// nil immediately for a PID that does not exist.
+func TestWaitForProcessExit_AlreadyDead(t *testing.T) {
+	// PID 99999999 is astronomically unlikely to exist on any real system.
+	if err := waitForProcessExit(99999999, 5*time.Second); err != nil {
+		t.Errorf("expected nil for dead PID, got: %v", err)
+	}
+}
+
+// TestWaitForProcessExit_Timeout verifies that waitForProcessExit returns an
+// error when the process is still alive after the timeout elapses.
+func TestWaitForProcessExit_Timeout(t *testing.T) {
+	// os.Getpid() is always alive — guaranteed to trigger the timeout path.
+	err := waitForProcessExit(os.Getpid(), 300*time.Millisecond)
+	if err == nil {
+		t.Error("expected error for alive PID (current process), got nil")
+	}
+}
+
+// Compile-time check: runStart must return error.
+// If this does not compile, the signature regression is caught immediately.
+var _ func(bool) error = runStart
