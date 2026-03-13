@@ -38,6 +38,7 @@ var allMCPTools = []string{
 	"muninn_where_left_off",
 	"muninn_find_by_entity",
 	"muninn_entity_state",
+	"muninn_entity_state_batch",
 	"muninn_remember_tree",
 	"muninn_recall_tree",
 	"muninn_entity_clusters",
@@ -620,6 +621,19 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_entity_state returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_entity_state_batch", func(t *testing.T) {
+		// muninn_entity_state_batch accepts an operations array; Alice was seeded above.
+		result := mcpTool(t, tok, "muninn_entity_state_batch", map[string]any{
+			"vault": vault,
+			"operations": []map[string]any{
+				{"entity_name": "Alice", "state": "active"},
+			},
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_entity_state_batch returned error field: %v", errVal)
 		}
 	})
 
