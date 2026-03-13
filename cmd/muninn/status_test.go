@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
@@ -93,6 +94,58 @@ func TestPrintStatusDisplayOutputContainsName(t *testing.T) {
 	})
 	if !strings.Contains(out, "muninn") {
 		t.Errorf("output should contain 'muninn', got: %s", out)
+	}
+}
+
+func TestProbeServicesWithAddrs_CustomPorts(t *testing.T) {
+	srv := newHealthServer()
+	defer srv.Close()
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+
+	addrs := daemonAddrs{
+		RestAddr: "127.0.0.1:" + port,
+		MCPAddr:  "127.0.0.1:" + port,
+		UIAddr:   "127.0.0.1:" + port,
+	}
+	svcs := probeServicesWithAddrs(addrs)
+	if len(svcs) != 3 {
+		t.Fatalf("expected 3 services, got %d", len(svcs))
+	}
+	for _, s := range svcs {
+		if !s.up {
+			t.Errorf("service %q should be up at custom port %s", s.name, port)
+		}
+	}
+}
+
+func TestProbeServicesWithAddrs_EmptyUsesDefaults(t *testing.T) {
+	// Empty addrs → hardcoded defaults. All down (no server running), but ports must match.
+	svcs := probeServicesWithAddrs(daemonAddrs{})
+	ports := map[string]int{"database": 8475, "mcp": 8750, "web ui": 8476}
+	for _, s := range svcs {
+		want := ports[s.name]
+		if s.port != want {
+			t.Errorf("service %q: got port %d, want %d", s.name, s.port, want)
+		}
+	}
+}
+
+func TestProbeServicesWithAddrs_ColonOnlyPort(t *testing.T) {
+	// ":8760" style (no host) — common when user passes --mcp-addr :8760
+	srv := newHealthServer()
+	defer srv.Close()
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+
+	addrs := daemonAddrs{
+		RestAddr: "127.0.0.1:" + port,
+		MCPAddr:  ":" + port, // colon-only style
+		UIAddr:   "127.0.0.1:" + port,
+	}
+	svcs := probeServicesWithAddrs(addrs)
+	for _, s := range svcs {
+		if !s.up {
+			t.Errorf("service %q should be up (colon-port style)", s.name)
+		}
 	}
 }
 

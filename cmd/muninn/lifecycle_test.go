@@ -162,3 +162,28 @@ func TestDefaultDataDirEnvOverride(t *testing.T) {
 		t.Errorf("defaultDataDir = %q, want %q (from MUNINNDB_DATA)", dir, testDir)
 	}
 }
+
+func TestMCPPortFromArgs_Default(t *testing.T) {
+	if got := mcpPortFromArgs(nil); got != defaultMCPPort {
+		t.Errorf("nil args: got %q, want %q", got, defaultMCPPort)
+	}
+}
+
+func TestMCPPortFromArgs_CustomPort(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--mcp-addr", ":8760"}, "8760"},
+		{[]string{"--mcp-addr", "0.0.0.0:8760"}, "8760"},
+		{[]string{"--mcp-addr", "127.0.0.1:8750"}, "8750"},
+		{[]string{"--other-flag", "value"}, defaultMCPPort},
+		{[]string{"--mcp-addr=:9000"}, "9000"},
+	}
+	for _, c := range cases {
+		got := mcpPortFromArgs(c.args)
+		if got != c.want {
+			t.Errorf("mcpPortFromArgs(%v) = %q, want %q", c.args, got, c.want)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -137,8 +138,10 @@ func runStart(webEnabled bool) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write PID file: %v\n", err)
 	}
 
-	// Wait for health check (up to 5s)
-	mcpHealthURL := "http://127.0.0.1:" + defaultMCPPort + "/mcp/health"
+	// Wait for health check (up to 5s).
+	// Use the actual MCP port from daemon args — may differ from defaultMCPPort
+	// when the user passed --mcp-addr.
+	mcpHealthURL := "http://127.0.0.1:" + mcpPortFromArgs(args) + "/mcp/health"
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
@@ -153,7 +156,6 @@ func runStart(webEnabled bool) error {
 			fmt.Printf("muninn started (pid %d)\n", cmd.Process.Pid)
 			fmt.Println()
 			printStatusDisplay(true)
-			fmt.Println("  Web UI → http://127.0.0.1:8476")
 			fmt.Println()
 			return nil
 		}
@@ -169,7 +171,8 @@ func runStart(webEnabled bool) error {
 
 // runStop signals the running daemon to shut down.
 func runStop() {
-	pidPath := filepath.Join(defaultDataDir(), "muninn.pid")
+	dataDir := defaultDataDir()
+	pidPath := filepath.Join(dataDir, "muninn.pid")
 	pid, err := readPID(pidPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -193,6 +196,18 @@ func runStop() {
 
 	fmt.Printf("muninn stopped (pid %d)\n", pid)
 	os.Remove(pidPath)
+	os.Remove(filepath.Join(dataDir, addrsFileName))
+}
+
+// mcpPortFromArgs extracts the MCP port from daemon args.
+// Returns defaultMCPPort if --mcp-addr is absent or unparseable.
+func mcpPortFromArgs(args []string) string {
+	if v := parseExplicitFlag("mcp-addr", args); v != "" {
+		if _, p, err := net.SplitHostPort(v); err == nil && p != "" {
+			return p
+		}
+	}
+	return defaultMCPPort
 }
 
 // waitForProcessExit polls isProcessRunning every 100ms until the process

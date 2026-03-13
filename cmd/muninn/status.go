@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -73,8 +75,17 @@ var probeServicesFn = probeServicesDefault
 // probeServices delegates to probeServicesFn for testability.
 func probeServices() []serviceStatus { return probeServicesFn() }
 
-// probeServicesDefault hits all health endpoints and returns statuses.
+// probeServicesDefault reads the actual bound addresses from the data directory
+// and probes the correct ports. Falls back to hardcoded defaults when the
+// sidecar file is absent (daemon stopped or pre-fix version).
 func probeServicesDefault() []serviceStatus {
+	addrs, _ := readAddrsFile(defaultDataDir())
+	return probeServicesWithAddrs(addrs)
+}
+
+// probeServicesWithAddrs is the testable implementation. addrs contains the
+// actual addresses the daemon bound to; empty strings fall back to defaults.
+func probeServicesWithAddrs(addrs daemonAddrs) []serviceStatus {
 	client := &http.Client{Timeout: 2 * time.Second}
 	probe := func(url string) bool {
 		resp, err := client.Get(url)
@@ -84,11 +95,29 @@ func probeServicesDefault() []serviceStatus {
 		resp.Body.Close()
 		return resp.StatusCode >= 200 && resp.StatusCode < 300
 	}
+	// portFrom extracts the port from an "host:port" address string.
+	// Returns fallback when addr is empty or unparseable.
+	portFrom := func(addr, fallback string) string {
+		if addr != "" {
+			if _, p, err := net.SplitHostPort(addr); err == nil && p != "" {
+				return p
+			}
+		}
+		return fallback
+	}
+
+	restPort := portFrom(addrs.RestAddr, "8475")
+	mcpPort := portFrom(addrs.MCPAddr, "8750")
+	uiPort := portFrom(addrs.UIAddr, "8476")
+
+	restPortInt, _ := strconv.Atoi(restPort)
+	mcpPortInt, _ := strconv.Atoi(mcpPort)
+	uiPortInt, _ := strconv.Atoi(uiPort)
 
 	return []serviceStatus{
-		{name: "database", port: 8475, up: probe("http://127.0.0.1:8475/api/health")},
-		{name: "mcp", port: 8750, up: probe("http://127.0.0.1:8750/mcp/health")},
-		{name: "web ui", port: 8476, up: probe("http://127.0.0.1:8476/")},
+		{name: "database", port: restPortInt, up: probe("http://127.0.0.1:" + restPort + "/api/health")},
+		{name: "mcp", port: mcpPortInt, up: probe("http://127.0.0.1:" + mcpPort + "/mcp/health")},
+		{name: "web ui", port: uiPortInt, up: probe("http://127.0.0.1:" + uiPort + "/")},
 	}
 }
 
@@ -162,7 +191,14 @@ func printStatusDisplay(compact bool) runState {
 		}
 		if state == stateRunning {
 			fmt.Println()
-			fmt.Println("  Web UI → http://127.0.0.1:8476")
+			uiPort := "8476"
+			for _, s := range svcs {
+				if s.name == "web ui" && s.port != 0 {
+					uiPort = strconv.Itoa(s.port)
+					break
+				}
+			}
+			fmt.Printf("  Web UI → http://127.0.0.1:%s\n", uiPort)
 			checkVersionHint()
 		}
 	}

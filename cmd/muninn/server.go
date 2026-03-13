@@ -654,6 +654,14 @@ func runServer() {
 	}
 	flag.Parse()
 
+	// Persist actual bound addresses so 'muninn status' and the startup health poll
+	// can probe the correct ports when non-default --*-addr flags are used.
+	_ = writeAddrsFile(*dataDir, daemonAddrs{
+		RestAddr: *restAddr,
+		MCPAddr:  *mcpAddr,
+		UIAddr:   *uiAddr,
+	})
+
 	// MCP token: --mcp-token flag is an explicit override (tests, container entrypoints).
 	// Default path reads from ~/.muninn/mcp.token so the token never appears in `ps` output.
 	if *mcpToken == "" {
