@@ -130,6 +130,11 @@ type ReadResponse struct {
 	// EmbedDim is the stored embedding dimensionality code (0 = no embedding).
 	// 1 = 384-dim, 2 = 768-dim, 3 = 1536-dim.
 	EmbedDim uint8 `msgpack:"embed_dim,omitempty" json:"embed_dim,omitempty"`
+
+	// Entities and EntityRelationships are populated by muninn_read to expose what
+	// was stored via inline enrichment. Empty when no entities/relationships were linked.
+	Entities            []InlineEntity             `msgpack:"entities,omitempty"              json:"entities,omitempty"`
+	EntityRelationships []InlineEntityRelationship `msgpack:"entity_relationships,omitempty"  json:"entity_relationships,omitempty"`
 }
 
 // ActivateRequest queries for relevant engrams.

@@ -57,6 +57,7 @@ testdata/bible/*.muninn
 # Planning and design docs — not committed
 docs/plans/
 docs/superpowers/
+.superpowers/
 
 # Evaluation tools and results — internal development only
 cmd/eval*/

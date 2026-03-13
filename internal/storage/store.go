@@ -204,6 +204,11 @@ type EngineStore interface {
 	// UpsertRelationshipRecord writes a vault-scoped relationship record.
 	UpsertRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error
 
+	// ScanEngramRelationships scans the 0x21 prefix for all entity relationship records
+	// sourced from a specific engram. More efficient than ScanRelationships for single-engram
+	// lookups because it uses the per-engram prefix (0x21|ws|engramID) rather than a full vault scan.
+	ScanEngramRelationships(ctx context.Context, ws [8]byte, engramID ULID, fn func(record RelationshipRecord) error) error
+
 	// ScanRelationships scans all vault-scoped relationship records at the 0x21 prefix.
 	// Calls fn for each RelationshipRecord until fn returns a non-nil error or the scan is exhausted.
 	// Use ScanEntityRelationships for per-entity queries — this method does a full vault scan.

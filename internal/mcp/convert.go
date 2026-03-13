@@ -40,20 +40,33 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 
 // readResponseToMemory converts a ReadResponse to a Memory for the muninn_read tool.
 // Returns the full content without truncation, and maps Summary when present.
+// Entities and EntityRelationships are included when populated by the engine.
 func readResponseToMemory(r *mbp.ReadResponse) Memory {
-	return Memory{
+	m := Memory{
 		ID:          r.ID,
 		Concept:     r.Concept,
 		Content:     r.Content, // full content, no truncation
 		Summary:     r.Summary,
 		Confidence:  r.Confidence,
 		Tags:        r.Tags,
-		State:      fmt.Sprintf("%d", r.State),
-		CreatedAt:  time.Unix(0, r.CreatedAt).UTC(),
-		LastAccess: time.Unix(0, r.LastAccess).UTC(),
+		State:       fmt.Sprintf("%d", r.State),
+		CreatedAt:   time.Unix(0, r.CreatedAt).UTC(),
+		LastAccess:  time.Unix(0, r.LastAccess).UTC(),
 		AccessCount: r.AccessCount,
 		Relevance:   r.Relevance,
 	}
+	for _, e := range r.Entities {
+		m.Entities = append(m.Entities, ReadEntity{Name: e.Name, Type: e.Type})
+	}
+	for _, rel := range r.EntityRelationships {
+		m.EntityRelationships = append(m.EntityRelationships, ReadEntityRel{
+			FromEntity: rel.FromEntity,
+			ToEntity:   rel.ToEntity,
+			RelType:    rel.RelType,
+			Weight:     rel.Weight,
+		})
+	}
+	return m
 }
 
 // textContent wraps a string in the MCP tools/call result envelope.

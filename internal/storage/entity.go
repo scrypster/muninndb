@@ -478,6 +478,28 @@ func (ps *PebbleStore) ScanRelationships(ctx context.Context, ws [8]byte, fn fun
 	return nil
 }
 
+// ScanEngramRelationships scans the 0x21 prefix for all entity relationship records
+// sourced from a specific engram. More efficient than ScanRelationships for single-engram
+// lookups because it uses the per-engram prefix (0x21|ws|engramID) rather than a full
+// vault scan.
+func (ps *PebbleStore) ScanEngramRelationships(ctx context.Context, ws [8]byte, engramID ULID, fn func(record RelationshipRecord) error) error {
+	relIter, err := PrefixIterator(ps.db, keys.RelationshipEngramPrefix(ws, [16]byte(engramID)))
+	if err != nil {
+		return fmt.Errorf("scan engram relationships: iter: %w", err)
+	}
+	defer relIter.Close()
+	for valid := relIter.First(); valid; valid = relIter.Next() {
+		var rec RelationshipRecord
+		if err := msgpack.Unmarshal(relIter.Value(), &rec); err != nil {
+			continue
+		}
+		if err := fn(rec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ScanEntityRelationships returns all relationship records where entityName appears
 // as fromEntity or toEntity, using the 0x26 relationship entity index for efficient
 // per-entity lookup. This avoids the O(all vault relationships) full scan of

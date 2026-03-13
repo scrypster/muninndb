@@ -913,6 +913,72 @@ func TestHandleRead_MissingID(t *testing.T) {
 	}
 }
 
+// readWithEntitiesEngine returns a ReadResponse with entities and entity relationships.
+type readWithEntitiesEngine struct{ fakeEngine }
+
+func (e *readWithEntitiesEngine) Read(_ context.Context, req *mbp.ReadRequest) (*mbp.ReadResponse, error) {
+	return &mbp.ReadResponse{
+		ID:      req.ID,
+		Concept: "test concept",
+		Content: "test content body",
+		Entities: []mbp.InlineEntity{
+			{Name: "Alice", Type: "person"},
+			{Name: "Bob", Type: "person"},
+		},
+		EntityRelationships: []mbp.InlineEntityRelationship{
+			{FromEntity: "Alice", ToEntity: "Bob", RelType: "manages", Weight: 1.0},
+		},
+	}, nil
+}
+
+func TestHandleRead_IncludesEntitiesAndRelationships(t *testing.T) {
+	srv := newTestServerWith(&readWithEntitiesEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_read","arguments":{"vault":"default","id":"abc-123"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	entities, ok := content["entities"].([]any)
+	if !ok || len(entities) != 2 {
+		t.Fatalf("expected 2 entities, got %v", content["entities"])
+	}
+	e0 := entities[0].(map[string]any)
+	if e0["name"] == nil {
+		t.Error("entity missing 'name' field")
+	}
+	if e0["type"] == nil {
+		t.Error("entity missing 'type' field")
+	}
+
+	rels, ok := content["entity_relationships"].([]any)
+	if !ok || len(rels) != 1 {
+		t.Fatalf("expected 1 entity_relationship, got %v", content["entity_relationships"])
+	}
+	r0 := rels[0].(map[string]any)
+	if r0["from_entity"] != "Alice" {
+		t.Errorf("from_entity = %v, want Alice", r0["from_entity"])
+	}
+	if r0["to_entity"] != "Bob" {
+		t.Errorf("to_entity = %v, want Bob", r0["to_entity"])
+	}
+	if r0["rel_type"] != "manages" {
+		t.Errorf("rel_type = %v, want manages", r0["rel_type"])
+	}
+}
+
+func TestHandleRead_NoEntitiesOmitsFields(t *testing.T) {
+	srv := newTestServerWith(&readWithDataEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_read","arguments":{"vault":"default","id":"abc-123"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	if _, ok := content["entities"]; ok {
+		t.Error("entities field should be omitted when empty")
+	}
+	if _, ok := content["entity_relationships"]; ok {
+		t.Error("entity_relationships field should be omitted when empty")
+	}
+}
+
 // ── muninn_forget ────────────────────────────────────────────────────────────
 
 // forgetWithChildrenEngine simulates a parent that has children registered in the ordinal index.

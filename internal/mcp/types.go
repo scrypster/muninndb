@@ -69,6 +69,24 @@ type Memory struct {
 	AccessCount uint32    `json:"access_count,omitempty"`
 	Relevance   float32   `json:"relevance,omitempty"`
 	SourceType  string    `json:"source_type,omitempty"`
+
+	// Populated only by muninn_read (omitted from recall responses).
+	Entities            []ReadEntity    `json:"entities,omitempty"`
+	EntityRelationships []ReadEntityRel `json:"entity_relationships,omitempty"`
+}
+
+// ReadEntity is a named entity linked to a specific engram.
+type ReadEntity struct {
+	Name string `json:"name"`
+	Type string `json:"type,omitempty"`
+}
+
+// ReadEntityRel is an entity-to-entity relationship sourced from a specific engram.
+type ReadEntityRel struct {
+	FromEntity string  `json:"from_entity"`
+	ToEntity   string  `json:"to_entity"`
+	RelType    string  `json:"rel_type"`
+	Weight     float32 `json:"weight,omitempty"`
 }
 
 type ContradictionPair struct {

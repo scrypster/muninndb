@@ -1433,6 +1433,35 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
 	})
 
+	// Collect entities linked to this engram (0x20 forward index).
+	var entities []mbp.InlineEntity
+	_ = e.store.ScanEngramEntities(ctx, wsPrefix, id, func(name string) error {
+		rec, err := e.store.GetEntityRecord(ctx, name)
+		if err != nil || rec == nil {
+			entities = append(entities, mbp.InlineEntity{Name: name})
+			return nil
+		}
+		entities = append(entities, mbp.InlineEntity{Name: rec.Name, Type: rec.Type})
+		return nil
+	})
+
+	// Collect entity-to-entity relationships sourced from this engram (0x21 prefix).
+	// co_occurs_with records are engine-generated side effects (not caller-provided) and
+	// are excluded — use muninn_entity to explore co-occurrence data.
+	var entityRels []mbp.InlineEntityRelationship
+	_ = e.store.ScanEngramRelationships(ctx, wsPrefix, id, func(r storage.RelationshipRecord) error {
+		if r.RelType == "co_occurs_with" {
+			return nil
+		}
+		entityRels = append(entityRels, mbp.InlineEntityRelationship{
+			FromEntity: r.FromEntity,
+			ToEntity:   r.ToEntity,
+			RelType:    r.RelType,
+			Weight:     r.Weight,
+		})
+		return nil
+	})
+
 	d := time.Since(readStart)
 	if e.latencyTracker != nil {
 		e.latencyTracker.Record(wsPrefix, "read", d)
@@ -1455,9 +1484,11 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		Summary:        eng.Summary,
 		KeyPoints:      eng.KeyPoints,
 		MemoryType:     uint8(eng.MemoryType),
-		TypeLabel:      eng.TypeLabel,
-		Classification: eng.Classification,
-		EmbedDim:       uint8(eng.EmbedDim),
+		TypeLabel:           eng.TypeLabel,
+		Classification:      eng.Classification,
+		EmbedDim:            uint8(eng.EmbedDim),
+		Entities:            entities,
+		EntityRelationships: entityRels,
 	}, nil
 }
 
