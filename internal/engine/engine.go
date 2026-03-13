@@ -153,6 +153,19 @@ type Engine struct {
 	// Set via SetEnrichPlugin after construction.
 	enrichPlugin plugin.EnrichPlugin
 
+	// replayEnrichTimeout, when positive, caps each per-engram LLM enrichment
+	// call during ReplayEnrichment. Decouples the per-request timeout from the
+	// MCP request context deadline. Set via SetReplayEnrichTimeout.
+	// Useful for Ollama cold-start scenarios (MUNINN_ENRICH_TIMEOUT env var).
+	replayEnrichTimeout time.Duration
+
+	// replayFailCounts tracks how many times each engram has consecutively
+	// failed enrichment during replay calls in this server session.
+	// After maxReplayFails failures, the engram is skipped by subsequent
+	// ReplayEnrichment calls. Keys are storage.ULID; values are int.
+	// Resets on server restart. Cleared per-engram by ResetReplayFailCount.
+	replayFailCounts sync.Map
+
 	// mergeMu serialises concurrent MergeEntity calls that touch the same entities.
 	// Uses a dedicated stripe array separate from the storage-layer entity locks to
 	// avoid reentrancy deadlock (UpsertEntityRecord acquires storage stripes internally).

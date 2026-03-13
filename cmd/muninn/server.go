@@ -640,6 +640,7 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_LOCAL_EMBED           Set to \"0\" to disable bundled ONNX embedder\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_ENRICH_URL            LLM enrichment endpoint URL (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_ENRICH_API_KEY        API key for enrichment (or MUNINN_ANTHROPIC_KEY)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_ENRICH_TIMEOUT        Per-engram LLM timeout for replay_enrichment (e.g. 60s, 2m; default: no extra timeout)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_WARN_THRESHOLD_MB  Emit a warning when HNSW in-memory vector bytes exceed N MB (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_MAX_MB             Skip HNSW insert (keep Pebble write) when memory exceeds N MB (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_LISTEN_HOST           Host to bind all servers to (e.g. 0.0.0.0 for LAN access)\n")
@@ -1043,6 +1044,14 @@ func runServer() {
 			slog.Warn("failed to register enrich plugin in registry", "err", err)
 		}
 		eng.SetEnrichPlugin(enrichPlugin)
+		if timeoutStr := os.Getenv("MUNINN_ENRICH_TIMEOUT"); timeoutStr != "" {
+			if d, err := time.ParseDuration(timeoutStr); err == nil && d > 0 {
+				eng.SetReplayEnrichTimeout(d)
+				slog.Info("replay enrichment per-engram timeout configured", "timeout", d)
+			} else if err != nil {
+				slog.Warn("MUNINN_ENRICH_TIMEOUT invalid, ignoring", "value", timeoutStr, "err", err)
+			}
+		}
 		if rew, ok := restWrapper.(*rest.RESTEngineWrapper); ok {
 			rew.SetEnricher(enrichPlugin)
 		}

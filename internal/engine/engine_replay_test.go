@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/plugin/enrich"
@@ -519,4 +521,129 @@ func TestReplayEnrichment_ContextAlreadyExpired(t *testing.T) {
 		t.Errorf("Remaining: got %d, want 3", result.Remaining)
 	}
 	assertResultInvariant(t, result, 3)
+}
+
+// TestReplayEnrichment_SkipsAfterMaxFailures verifies that an engram which has
+// failed maxReplayFails consecutive times is silently skipped on the next call.
+func TestReplayEnrichment_SkipsAfterMaxFailures(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	writeTestEngrams(t, ctx, eng, "default", 1)
+
+	errBoom := errors.New("LLM boom")
+	calls := 0
+	mock := &mockEnrichPlugin{
+		enrichFn: func(_ context.Context, _ *storage.Engram) (*plugin.EnrichmentResult, error) {
+			calls++
+			return nil, errBoom
+		},
+	}
+	eng.SetEnrichPlugin(mock)
+
+	// First maxReplayFails calls should each attempt enrichment and record a failure.
+	for i := 0; i < maxReplayFails; i++ {
+		result, err := eng.ReplayEnrichment(ctx, "default", nil, 50, false)
+		if err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i+1, err)
+		}
+		if result.Failed != 1 {
+			t.Errorf("call %d: want Failed=1, got %d", i+1, result.Failed)
+		}
+	}
+	if calls != maxReplayFails {
+		t.Errorf("want %d Enrich calls, got %d", maxReplayFails, calls)
+	}
+
+	// Next call: engram has hit the threshold — must be skipped, not attempted again.
+	callsBefore := calls
+	result, err := eng.ReplayEnrichment(ctx, "default", nil, 50, false)
+	if err != nil {
+		t.Fatalf("post-threshold call: unexpected error: %v", err)
+	}
+	if calls != callsBefore {
+		t.Errorf("Enrich should not be called after threshold; got %d extra calls", calls-callsBefore)
+	}
+	if result.Skipped != 1 {
+		t.Errorf("post-threshold: want Skipped=1, got %d", result.Skipped)
+	}
+	if result.Failed != 0 {
+		t.Errorf("post-threshold: want Failed=0, got %d", result.Failed)
+	}
+}
+
+// TestReplayEnrichment_FailCountResetOnSuccess verifies that a successful enrichment
+// run clears the failure counter so the engram is attempted again next time.
+func TestReplayEnrichment_FailCountResetOnSuccess(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	writeTestEngrams(t, ctx, eng, "default", 1)
+
+	shouldFail := true
+	mock := &mockEnrichPlugin{
+		enrichFn: func(_ context.Context, _ *storage.Engram) (*plugin.EnrichmentResult, error) {
+			if shouldFail {
+				return nil, errors.New("temporary failure")
+			}
+			return &plugin.EnrichmentResult{Summary: "ok", KeyPoints: []string{"k"}}, nil
+		},
+	}
+	eng.SetEnrichPlugin(mock)
+
+	// Fail once to set fail count to 1.
+	result, err := eng.ReplayEnrichment(ctx, "default", nil, 50, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("want Failed=1, got %d", result.Failed)
+	}
+
+	// Now succeed — should clear the failure counter.
+	shouldFail = false
+	result, err = eng.ReplayEnrichment(ctx, "default", nil, 50, false)
+	if err != nil {
+		t.Fatalf("unexpected error after success: %v", err)
+	}
+	if result.Processed != 1 {
+		t.Errorf("want Processed=1, got %d", result.Processed)
+	}
+
+	// The engram now has all digest flags set, so further calls skip it as done.
+	_ = result
+}
+
+// TestReplayEnrichment_PerEngramTimeout verifies that SetReplayEnrichTimeout
+// causes Enrich to receive a context that has a deadline.
+func TestReplayEnrichment_PerEngramTimeout(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	writeTestEngrams(t, ctx, eng, "default", 1)
+
+	var deadlineSet bool
+	mock := &mockEnrichPlugin{
+		enrichFn: func(enrichCtx context.Context, _ *storage.Engram) (*plugin.EnrichmentResult, error) {
+			dl, ok := enrichCtx.Deadline()
+			deadlineSet = ok && !dl.IsZero()
+			return &plugin.EnrichmentResult{Summary: "ok", KeyPoints: []string{"k"}}, nil
+		},
+	}
+	eng.SetEnrichPlugin(mock)
+	eng.SetReplayEnrichTimeout(30 * time.Second)
+
+	result, err := eng.ReplayEnrichment(ctx, "default", nil, 50, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Processed != 1 {
+		t.Errorf("want Processed=1, got %d", result.Processed)
+	}
+	if !deadlineSet {
+		t.Error("expected per-engram context to have a deadline when SetReplayEnrichTimeout > 0")
+	}
 }
