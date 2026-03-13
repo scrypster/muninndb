@@ -102,6 +102,10 @@ type EngineInterface interface {
 	// For state="merged", mergedInto must be the canonical entity name.
 	SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error
 
+	// SetEntityStateBatch applies multiple entity state updates sequentially.
+	// Returns one error per operation (nil = success). Partial success is preserved.
+	SetEntityStateBatch(ctx context.Context, ops []engine.EntityStateOp) []error
+
 	// GetEntityClusters returns entity pairs that frequently co-occur in the same engrams,
 	// sorted by count descending. Only pairs with count >= minCount are returned.
 	// Results are capped at topN entries.

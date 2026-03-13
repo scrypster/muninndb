@@ -333,6 +333,10 @@ func (a *mcpEngineAdapter) SetEntityState(ctx context.Context, entityName, state
 	return a.eng.SetEntityState(ctx, entityName, state, mergedInto, entityType)
 }
 
+func (a *mcpEngineAdapter) SetEntityStateBatch(ctx context.Context, ops []engine.EntityStateOp) []error {
+	return a.eng.SetEntityStateBatch(ctx, ops)
+}
+
 func (a *mcpEngineAdapter) ExportGraph(ctx context.Context, vault string, includeEngrams bool) (*engine.ExportGraph, error) {
 	return a.eng.ExportGraph(ctx, vault, includeEngrams)
 }

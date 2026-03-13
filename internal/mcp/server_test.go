@@ -115,6 +115,9 @@ func (f *fakeEngine) WriteIdempotency(_ context.Context, _, _ string) error {
 func (f *fakeEngine) SetEntityState(_ context.Context, _, _, _, _ string) error {
 	return nil
 }
+func (f *fakeEngine) SetEntityStateBatch(_ context.Context, ops []engine.EntityStateOp) []error {
+	return make([]error, len(ops))
+}
 func (f *fakeEngine) GetEntityClusters(_ context.Context, _ string, _, _ int) ([]EntityClusterResult, error) {
 	return []EntityClusterResult{}, nil
 }
@@ -257,8 +260,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 35 {
-		t.Errorf("expected 35 tools, got %d", len(tools))
+	if len(tools) != 36 {
+		t.Errorf("expected 36 tools, got %d", len(tools))
 	}
 }
 

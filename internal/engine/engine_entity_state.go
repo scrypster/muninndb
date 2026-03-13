@@ -41,3 +41,26 @@ func (e *Engine) SetEntityState(ctx context.Context, entityName, state, mergedIn
 
 	return e.store.UpsertEntityRecord(ctx, record, "mcp:entity_state")
 }
+
+// EntityStateOp is a single operation in a SetEntityStateBatch call.
+type EntityStateOp struct {
+	EntityName string
+	State      string
+	MergedInto string
+	EntityType string
+}
+
+// SetEntityStateBatch applies multiple entity state updates sequentially.
+// Returns one error per operation (nil = success). Never returns a top-level error —
+// partial success is preserved. Respects context cancellation between items.
+func (e *Engine) SetEntityStateBatch(ctx context.Context, ops []EntityStateOp) []error {
+	errs := make([]error, len(ops))
+	for i, op := range ops {
+		if ctx.Err() != nil {
+			errs[i] = ctx.Err()
+			continue
+		}
+		errs[i] = e.SetEntityState(ctx, op.EntityName, op.State, op.MergedInto, op.EntityType)
+	}
+	return errs
+}

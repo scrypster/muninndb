@@ -907,6 +907,75 @@ func (s *MCPServer) handleEntityState(ctx context.Context, w http.ResponseWriter
 	sendResult(w, id, textContent(string(out)))
 }
 
+func (s *MCPServer) handleEntityStateBatch(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	opsAny, ok := args["operations"].([]any)
+	if !ok || len(opsAny) == 0 {
+		sendError(w, id, -32602, "invalid params: 'operations' is required and must be a non-empty array")
+		return
+	}
+	if len(opsAny) > 50 {
+		sendError(w, id, -32602, "invalid params: 'operations' exceeds maximum of 50")
+		return
+	}
+
+	validEntityStates := map[string]bool{
+		"active": true, "deprecated": true, "merged": true, "resolved": true,
+	}
+
+	ops := make([]engine.EntityStateOp, 0, len(opsAny))
+	for i, opAny := range opsAny {
+		op, ok := opAny.(map[string]any)
+		if !ok {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: operations[%d] must be an object", i))
+			return
+		}
+		entityName, ok := op["entity_name"].(string)
+		if !ok || entityName == "" {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: operations[%d].entity_name is required", i))
+			return
+		}
+		state, ok := op["state"].(string)
+		if !ok || !validEntityStates[state] {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: operations[%d].state must be one of: active, deprecated, merged, resolved", i))
+			return
+		}
+		mergedInto, _ := op["merged_into"].(string)
+		if state == "merged" && mergedInto == "" {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: operations[%d].merged_into is required when state=merged", i))
+			return
+		}
+		entityType, _ := op["type"].(string)
+		ops = append(ops, engine.EntityStateOp{
+			EntityName: entityName,
+			State:      state,
+			MergedInto: mergedInto,
+			EntityType: entityType,
+		})
+	}
+
+	errs := s.engine.SetEntityStateBatch(ctx, ops)
+
+	type batchItemResult struct {
+		Index  int    `json:"index"`
+		Entity string `json:"entity"`
+		State  string `json:"state,omitempty"`
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	results := make([]batchItemResult, len(ops))
+	for i, op := range ops {
+		if errs[i] != nil {
+			results[i] = batchItemResult{Index: i, Entity: op.EntityName, Status: "error", Error: errs[i].Error()}
+		} else {
+			results[i] = batchItemResult{Index: i, Entity: op.EntityName, State: op.State, Status: "ok"}
+		}
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"results": results,
+		"total":   len(results),
+	})))
+}
+
 func (s *MCPServer) handleAddChild(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	parentID, ok := args["parent_id"].(string)
 	if !ok || parentID == "" {

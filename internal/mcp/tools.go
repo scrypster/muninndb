@@ -421,6 +421,32 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"entity_name", "state"},
 			},
 		},
+		// Batch entity lifecycle state tool
+		{
+			Name:        "muninn_entity_state_batch",
+			Description: "Update lifecycle state (and optionally type) for multiple entities in one call. More efficient than calling muninn_entity_state repeatedly. Maximum 50 per batch. Partial success supported — check per-item status in results.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"operations": map[string]any{
+						"type":        "array",
+						"description": "Array of entity state operations (max 50).",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"entity_name": map[string]any{"type": "string", "description": "Entity name to update"},
+								"state":       map[string]any{"type": "string", "description": "New state: active, deprecated, merged, or resolved"},
+								"merged_into": map[string]any{"type": "string", "description": "Canonical entity name (required when state=merged)"},
+								"type":        map[string]any{"type": "string", "description": "Correct the entity type. Omit to preserve existing."},
+							},
+							"required": []string{"entity_name", "state"},
+						},
+					},
+				},
+				"required": []string{"operations"},
+			},
+		},
 		// Hierarchical memory tools
 		{
 			Name:        "muninn_remember_tree",

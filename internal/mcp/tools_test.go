@@ -7,8 +7,8 @@ import (
 
 func TestAllToolDefinitionsCount(t *testing.T) {
 	tools := allToolDefinitions()
-	if len(tools) != 35 {
-		t.Errorf("expected 35 tools, got %d", len(tools))
+	if len(tools) != 36 {
+		t.Errorf("expected 36 tools, got %d", len(tools))
 	}
 }
 
@@ -82,6 +82,7 @@ func TestExpectedToolNames(t *testing.T) {
 		"muninn_find_by_entity",
 		// Entity lifecycle state
 		"muninn_entity_state",
+		"muninn_entity_state_batch",
 		// Entity cluster detection
 		"muninn_entity_clusters",
 		// Knowledge graph export

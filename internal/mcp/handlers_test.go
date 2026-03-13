@@ -1585,6 +1585,9 @@ func (e *slowIdempotentEngine) FindByEntity(ctx context.Context, vault, entityNa
 func (e *slowIdempotentEngine) SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error {
 	return (&fakeEngine{}).SetEntityState(ctx, entityName, state, mergedInto, entityType)
 }
+func (e *slowIdempotentEngine) SetEntityStateBatch(ctx context.Context, ops []engine.EntityStateOp) []error {
+	return (&fakeEngine{}).SetEntityStateBatch(ctx, ops)
+}
 func (e *slowIdempotentEngine) GetEntityClusters(ctx context.Context, vault string, minCount, topN int) ([]EntityClusterResult, error) {
 	return (&fakeEngine{}).GetEntityClusters(ctx, vault, minCount, topN)
 }
@@ -1805,6 +1808,136 @@ func TestHandleEntityStateWithoutTypeOmitsTypeField(t *testing.T) {
 	content := extractInnerJSON(t, resp)
 	if _, hasType := content["type"]; hasType {
 		t.Errorf("response should not include 'type' field when type was not provided")
+	}
+}
+
+// ── muninn_entity_state_batch tests ──────────────────────────────────────────
+
+type entityStateBatchEngine struct{ fakeEngine }
+
+func (e *entityStateBatchEngine) SetEntityStateBatch(_ context.Context, ops []engine.EntityStateOp) []error {
+	return make([]error, len(ops)) // all succeed
+}
+
+type entityStateBatchPartialErrEngine struct{ fakeEngine }
+
+func (e *entityStateBatchPartialErrEngine) SetEntityStateBatch(_ context.Context, ops []engine.EntityStateOp) []error {
+	errs := make([]error, len(ops))
+	if len(ops) > 0 {
+		errs[0] = fmt.Errorf("entity %q not found", ops[0].EntityName)
+	}
+	return errs
+}
+
+func TestHandleEntityStateBatch_HappyPath(t *testing.T) {
+	srv := newTestServerWith(&entityStateBatchEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state_batch","arguments":{"vault":"default","operations":[{"entity_name":"PostgreSQL","state":"deprecated"},{"entity_name":"Modbus","state":"active","type":"protocol"}]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	content := extractInnerJSON(t, resp)
+	results, ok := content["results"].([]any)
+	if !ok || len(results) != 2 {
+		t.Fatalf("expected 2 results, got %v", content["results"])
+	}
+	if total, _ := content["total"].(float64); int(total) != 2 {
+		t.Errorf("total = %v, want 2", content["total"])
+	}
+	for i, r := range results {
+		item := r.(map[string]any)
+		if item["status"] != "ok" {
+			t.Errorf("results[%d].status = %v, want ok", i, item["status"])
+		}
+	}
+}
+
+func TestHandleEntityStateBatch_PartialFailure(t *testing.T) {
+	srv := newTestServerWith(&entityStateBatchPartialErrEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state_batch","arguments":{"vault":"default","operations":[{"entity_name":"ghost","state":"deprecated"},{"entity_name":"Modbus","state":"deprecated"}]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected top-level error: %v", resp.Error)
+	}
+	content := extractInnerJSON(t, resp)
+	results, _ := content["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	first := results[0].(map[string]any)
+	if first["status"] != "error" {
+		t.Errorf("results[0].status = %v, want error", first["status"])
+	}
+	second := results[1].(map[string]any)
+	if second["status"] != "ok" {
+		t.Errorf("results[1].status = %v, want ok", second["status"])
+	}
+}
+
+func TestHandleEntityStateBatch_EmptyOperations(t *testing.T) {
+	srv := newTestServerWith(&entityStateBatchEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state_batch","arguments":{"vault":"default","operations":[]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for empty operations, got %v", resp.Error)
+	}
+}
+
+func TestHandleEntityStateBatch_ExceedsMax(t *testing.T) {
+	ops := make([]map[string]any, 51)
+	for i := range ops {
+		ops[i] = map[string]any{"entity_name": fmt.Sprintf("entity%d", i), "state": "deprecated"}
+	}
+	bodyBytes, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+		"params": map[string]any{
+			"name": "muninn_entity_state_batch",
+			"arguments": map[string]any{
+				"vault": "default", "operations": ops,
+			},
+		},
+	})
+	srv := newTestServerWith(&entityStateBatchEngine{})
+	w := postRPC(t, srv, string(bodyBytes))
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for >50 operations, got %v", resp.Error)
+	}
+}
+
+func TestHandleEntityStateBatch_InvalidState(t *testing.T) {
+	srv := newTestServerWith(&entityStateBatchEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state_batch","arguments":{"vault":"default","operations":[{"entity_name":"Modbus","state":"invalid_state"}]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for invalid state, got %v", resp.Error)
+	}
+}
+
+func TestHandleEntityStateBatch_MergedWithoutMergedInto(t *testing.T) {
+	srv := newTestServerWith(&entityStateBatchEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state_batch","arguments":{"vault":"default","operations":[{"entity_name":"Postgres","state":"merged"}]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for merged without merged_into, got %v", resp.Error)
+	}
+	if resp.Error != nil && !strings.Contains(resp.Error.Message, "merged_into") {
+		t.Errorf("expected error to mention merged_into, got: %q", resp.Error.Message)
+	}
+}
+
+func TestHandleEntityStateBatch_MissingEntityName(t *testing.T) {
+	srv := newTestServerWith(&entityStateBatchEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state_batch","arguments":{"vault":"default","operations":[{"state":"deprecated"}]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for missing entity_name, got %v", resp.Error)
 	}
 }
 
