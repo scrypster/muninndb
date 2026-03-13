@@ -188,7 +188,8 @@ func (s *EnrichService) SetBreakerStateChangeHook(registry interface {
 // Enrich processes one engram and returns enrichment data.
 // The call is gated by the internal circuit breaker: if the LLM provider has
 // been failing consecutively, ErrOpen is returned immediately without hitting
-// the network.
+// the network. If the breaker is nil (e.g. when constructing EnrichService
+// directly in tests), the pipeline is called without circuit-breaker gating.
 func (s *EnrichService) Enrich(ctx context.Context, eng *storage.Engram) (*plugin.EnrichmentResult, error) {
 	s.mu.Lock()
 	if s.closed {
@@ -199,6 +200,11 @@ func (s *EnrichService) Enrich(ctx context.Context, eng *storage.Engram) (*plugi
 
 	if s.pipeline == nil {
 		return nil, fmt.Errorf("enrich service not initialized")
+	}
+
+	// Fast path: no circuit breaker (test construction or future embedded use).
+	if s.breaker == nil {
+		return s.pipeline.Run(ctx, eng)
 	}
 
 	var result *plugin.EnrichmentResult
