@@ -517,9 +517,21 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// Done post-commit: if the process crashes here, counts will be slightly
 	// high (stale) but no links remain, so the worst case is an entity
 	// that isn't recognized as orphaned until the next decrement.
+	// DecrementEntityMentionCount automatically deletes the 0x1F record when
+	// the count reaches 0 and the 0x23 reverse index confirms no live links remain.
 	for _, name := range entityNames {
 		if err := ps.DecrementEntityMentionCount(ctx, name); err != nil {
 			slog.Warn("storage: failed to decrement entity mention count on delete", "entity", name, "engram", id.String(), "err", err)
+		}
+	}
+
+	// Decrement co-occurrence counts for every pair of entities that appeared
+	// in this engram. Deletes the 0x24 key when the pair count reaches 0.
+	for i := 0; i < len(entityNames); i++ {
+		for j := i + 1; j < len(entityNames); j++ {
+			if err := ps.DecrementEntityCoOccurrence(ctx, wsPrefix, entityNames[i], entityNames[j]); err != nil {
+				slog.Warn("storage: failed to decrement co-occurrence on delete", "a", entityNames[i], "b", entityNames[j], "engram", id.String(), "err", err)
+			}
 		}
 	}
 

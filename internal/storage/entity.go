@@ -525,6 +525,9 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 
 // DecrementEntityMentionCount decrements the MentionCount on the global entity
 // record for the given name, floored at 0. No-ops if the record does not exist.
+// When the count reaches 0, the 0x23 reverse index is scanned to confirm no live
+// engrams still reference the entity (counts can be stale-high after a crash);
+// if none are found, the 0x1F entity record is deleted.
 // Safe for concurrent calls — uses per-entity locking.
 func (ps *PebbleStore) DecrementEntityMentionCount(ctx context.Context, name string) error {
 	mu := ps.getEntityLock(name)
@@ -543,14 +546,85 @@ func (ps *PebbleStore) DecrementEntityMentionCount(ctx context.Context, name str
 	if existing.MentionCount < 0 {
 		existing.MentionCount = 0
 	}
-	existing.UpdatedAt = time.Now().UnixNano()
 
+	nameHash := keys.EntityNameHash(name)
+
+	// When count reaches 0, verify via the 0x23 reverse index — the ground truth
+	// for which engrams still reference this entity. Counts can be stale-high
+	// after a crash, so we don't trust the count alone. If no reverse links exist,
+	// the entity is genuinely orphaned and the 0x1F record is deleted.
+	if existing.MentionCount == 0 {
+		orphaned := true
+		revPrefix := keys.EntityReverseIndexPrefix(nameHash)
+		iter, iterErr := PrefixIterator(ps.db, revPrefix)
+		if iterErr == nil {
+			if iter.First() {
+				orphaned = false
+			}
+			iter.Close()
+		}
+		if orphaned {
+			return ps.db.Delete(keys.EntityKey(nameHash), pebble.NoSync)
+		}
+	}
+
+	existing.UpdatedAt = time.Now().UnixNano()
 	val, err := msgpack.Marshal(existing)
 	if err != nil {
 		return fmt.Errorf("decrement entity mention count: marshal: %w", err)
 	}
-	nameHash := keys.EntityNameHash(name)
 	return ps.db.Set(keys.EntityKey(nameHash), val, pebble.NoSync)
+}
+
+// DecrementEntityCoOccurrence decrements the co-occurrence count for a pair of
+// entity names within a vault. Deletes the 0x24 key when the count reaches 0.
+// Canonicalises pair order (hashA <= hashB) to match IncrementEntityCoOccurrence.
+// Safe for concurrent calls — uses per-pair locking.
+func (ps *PebbleStore) DecrementEntityCoOccurrence(ctx context.Context, ws [8]byte, nameA, nameB string) error {
+	hashA := keys.EntityNameHash(nameA)
+	hashB := keys.EntityNameHash(nameB)
+
+	// Canonicalize pair order: ensure hashA <= hashB byte-by-byte.
+	for i := 0; i < 8; i++ {
+		if hashA[i] < hashB[i] {
+			break
+		}
+		if hashA[i] > hashB[i] {
+			hashA, hashB = hashB, hashA
+			nameA, nameB = nameB, nameA
+			break
+		}
+	}
+
+	mu := ps.getCoOccurrenceLock(hashA, hashB)
+	mu.Lock()
+	defer mu.Unlock()
+
+	key := keys.CoOccurrenceKey(ws, hashA, hashB)
+
+	existing, err := Get(ps.db, key)
+	if err != nil {
+		return fmt.Errorf("co-occurrence decrement read: %w", err)
+	}
+	if existing == nil {
+		return nil
+	}
+
+	var rec coOccurrenceRecord
+	if err := msgpack.Unmarshal(existing, &rec); err != nil {
+		return fmt.Errorf("co-occurrence decrement unmarshal: %w", err)
+	}
+
+	if rec.Count <= 1 {
+		return ps.db.Delete(key, pebble.NoSync)
+	}
+
+	rec.Count--
+	val, err := msgpack.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("co-occurrence decrement marshal: %w", err)
+	}
+	return ps.db.Set(key, val, pebble.NoSync)
 }
 
 // deleteEntityLinks scans the 0x20 forward index and 0x21 relationship index for
