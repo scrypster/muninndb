@@ -527,10 +527,20 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 
 	// Decrement co-occurrence counts for every pair of entities that appeared
 	// in this engram. Deletes the 0x24 key when the pair count reaches 0.
-	for i := 0; i < len(entityNames); i++ {
-		for j := i + 1; j < len(entityNames); j++ {
-			if err := ps.DecrementEntityCoOccurrence(ctx, wsPrefix, entityNames[i], entityNames[j]); err != nil {
-				slog.Warn("storage: failed to decrement co-occurrence on delete", "a", entityNames[i], "b", entityNames[j], "engram", id.String(), "err", err)
+	// Capped at maxCoOccurrenceEntities to bound the O(n²) work on pathological
+	// engrams; entities beyond the cap have stale counts (minor, consistent with
+	// counts being best-effort across restarts).
+	const maxCoOccurrenceEntities = 50
+	coNames := entityNames
+	if len(coNames) > maxCoOccurrenceEntities {
+		slog.Warn("storage: engram has unusually many entities, co-occurrence cleanup capped",
+			"engram", id.String(), "entity_count", len(entityNames), "cap", maxCoOccurrenceEntities)
+		coNames = coNames[:maxCoOccurrenceEntities]
+	}
+	for i := 0; i < len(coNames); i++ {
+		for j := i + 1; j < len(coNames); j++ {
+			if err := ps.DecrementEntityCoOccurrence(ctx, wsPrefix, coNames[i], coNames[j]); err != nil {
+				slog.Warn("storage: failed to decrement co-occurrence on delete", "a", coNames[i], "b", coNames[j], "engram", id.String(), "err", err)
 			}
 		}
 	}
