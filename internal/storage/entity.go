@@ -127,7 +127,10 @@ func (ps *PebbleStore) UpsertEntityRecord(ctx context.Context, record EntityReco
 		if record.State == "" {
 			record.State = existing.State
 		}
-		if record.MergedInto == "" {
+		// Preserve MergedInto only when the entity remains merged.
+		// A caller explicitly transitioning to a non-merged state (e.g. "active")
+		// must clear MergedInto — preserving it would cause the validation below to reject the write.
+		if record.MergedInto == "" && record.State == "merged" {
 			record.MergedInto = existing.MergedInto
 		}
 		// Preserve higher confidence.
@@ -518,6 +521,97 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	}
 
 	return nil
+}
+
+// DecrementEntityMentionCount decrements the MentionCount on the global entity
+// record for the given name, floored at 0. No-ops if the record does not exist.
+// Safe for concurrent calls — uses per-entity locking.
+func (ps *PebbleStore) DecrementEntityMentionCount(ctx context.Context, name string) error {
+	mu := ps.getEntityLock(name)
+	mu.Lock()
+	defer mu.Unlock()
+
+	existing, err := ps.GetEntityRecord(ctx, name)
+	if err != nil {
+		return fmt.Errorf("decrement entity mention count: %w", err)
+	}
+	if existing == nil {
+		return nil
+	}
+
+	existing.MentionCount--
+	if existing.MentionCount < 0 {
+		existing.MentionCount = 0
+	}
+	existing.UpdatedAt = time.Now().UnixNano()
+
+	val, err := msgpack.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("decrement entity mention count: marshal: %w", err)
+	}
+	nameHash := keys.EntityNameHash(name)
+	return ps.db.Set(keys.EntityKey(nameHash), val, pebble.NoSync)
+}
+
+// deleteEntityLinks scans the 0x20 forward index and 0x21 relationship index for
+// the given engram, adding delete operations to batch for the 0x20 forward keys,
+// their corresponding 0x23 reverse keys, and all 0x21 relationship keys.
+// Returns the deduplicated entity names whose MentionCount should be decremented
+// post-commit. Callers are responsible for calling DecrementEntityMentionCount
+// for each name returned.
+// Only called from DeleteEngram (hard delete). SoftDelete intentionally preserves
+// entity links so that Restore can return the engram with associations intact.
+func (ps *PebbleStore) deleteEntityLinks(ws [8]byte, engramID [16]byte, batch *pebble.Batch) ([]string, error) {
+	seen := make(map[string]struct{})
+
+	// Scan 0x20 forward links: engram → entity.
+	iter, err := PrefixIterator(ps.db, keys.EntityEngramLinkPrefix(ws, engramID))
+	if err != nil {
+		return nil, fmt.Errorf("delete entity links: fwd iter: %w", err)
+	}
+	for valid := iter.First(); valid; valid = iter.Next() {
+		k := iter.Key()
+		entityName := string(iter.Value())
+		// Delete 0x20 forward key.
+		keyCopy := make([]byte, len(k))
+		copy(keyCopy, k)
+		batch.Delete(keyCopy, nil)
+		// Delete 0x23 reverse key.
+		if entityName != "" {
+			nameHash := keys.EntityNameHash(entityName)
+			batch.Delete(keys.EntityReverseIndexKey(nameHash, ws, engramID), nil)
+			seen[entityName] = struct{}{}
+		}
+	}
+	if err := iter.Close(); err != nil {
+		return nil, fmt.Errorf("delete entity links: fwd iter close: %w", err)
+	}
+
+	// Scan 0x21 relationship keys sourced from this engram.
+	relIter, err := PrefixIterator(ps.db, keys.RelationshipEngramPrefix(ws, engramID))
+	if err != nil {
+		// Return what we have — 0x20/0x23 are already queued in the batch.
+		entityNames := make([]string, 0, len(seen))
+		for name := range seen {
+			entityNames = append(entityNames, name)
+		}
+		return entityNames, fmt.Errorf("delete entity links: rel iter: %w", err)
+	}
+	for valid := relIter.First(); valid; valid = relIter.Next() {
+		k := relIter.Key()
+		keyCopy := make([]byte, len(k))
+		copy(keyCopy, k)
+		batch.Delete(keyCopy, nil)
+	}
+	if err := relIter.Close(); err != nil {
+		return nil, fmt.Errorf("delete entity links: rel iter close: %w", err)
+	}
+
+	entityNames := make([]string, 0, len(seen))
+	for name := range seen {
+		entityNames = append(entityNames, name)
+	}
+	return entityNames, nil
 }
 
 // ScanVaultEntityNames scans the 0x20 forward index for all distinct entity names

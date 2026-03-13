@@ -587,6 +587,16 @@ func RelationshipPrefix(ws [8]byte) []byte {
 	return key
 }
 
+// RelationshipEngramPrefix returns the 25-byte scan prefix for all relationship
+// records sourced from a specific engram (0x21 | ws(8) | engramID(16)).
+func RelationshipEngramPrefix(ws [8]byte, engramID [16]byte) []byte {
+	key := make([]byte, 1+8+16)
+	key[0] = 0x21
+	copy(key[1:9], ws[:])
+	copy(key[9:25], engramID[:])
+	return key
+}
+
 // CoOccurrenceKey constructs the entity co-occurrence index key (0x24 prefix).
 // Tracks how many times two entities appear in the same engram within a vault.
 // Key: 0x24 | wsPrefix(8) | nameHashA(8) | nameHashB(8) = 25 bytes

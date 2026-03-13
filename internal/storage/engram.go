@@ -500,11 +500,28 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		parentIter.Close()
 	}
 
+	// Entity graph cleanup: remove 0x20 forward links, 0x23 reverse links,
+	// and 0x21 relationship records sourced from this engram.
+	entityNames, err := ps.deleteEntityLinks(wsPrefix, [16]byte(id), batch)
+	if err != nil {
+		slog.Warn("storage: entity link cleanup failed on delete, links may be orphaned", "engram", id.String(), "err", err)
+	}
+
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("delete engram: %w", err)
 	}
 
 	ps.cache.Delete(wsPrefix, id)
+
+	// Decrement MentionCount on each entity that was linked to this engram.
+	// Done post-commit: if the process crashes here, counts will be slightly
+	// high (stale) but no links remain, so the worst case is an entity
+	// that isn't recognized as orphaned until the next decrement.
+	for _, name := range entityNames {
+		if err := ps.DecrementEntityMentionCount(ctx, name); err != nil {
+			slog.Warn("storage: failed to decrement entity mention count on delete", "entity", name, "engram", id.String(), "err", err)
+		}
+	}
 
 	// Decrement vault count synchronously to avoid a race where callers
 	// observe a stale count after DeleteEngram returns.
@@ -570,6 +587,9 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 
 	// Update cache (vault-scoped) and invalidate the metadata-only cache
 	// so subsequent GetMetadata calls see the updated StateSoftDeleted state.
+	// Note: entity links (0x20/0x23/0x21) are intentionally preserved on soft
+	// delete so that Restore can return the engram with its entity associations
+	// intact. Entity cleanup only happens on hard delete (DeleteEngram).
 	ps.cache.Set(wsPrefix, id, eng)
 	ps.metaCache.Remove([16]byte(id))
 
