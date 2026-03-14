@@ -125,6 +125,32 @@ const (
 	StateSoftDeleted LifecycleState = 0x7F
 )
 
+// String returns the human-readable name for a LifecycleState value.
+// It is the inverse of ParseLifecycleState and is the single source of
+// truth for state labels used by the REST, MCP, and embedded SDK layers.
+func (s LifecycleState) String() string {
+	switch s {
+	case StatePlanning:
+		return "planning"
+	case StateActive:
+		return "active"
+	case StatePaused:
+		return "paused"
+	case StateBlocked:
+		return "blocked"
+	case StateCompleted:
+		return "completed"
+	case StateCancelled:
+		return "cancelled"
+	case StateArchived:
+		return "archived"
+	case StateSoftDeleted:
+		return "soft_deleted"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(s))
+	}
+}
+
 // ParseLifecycleState parses a string lifecycle state name.
 func ParseLifecycleState(s string) (LifecycleState, error) {
 	states := map[string]LifecycleState{
