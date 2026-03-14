@@ -234,6 +234,9 @@ func TestReadOnlyMode_SemanticReadHandlersPassThrough(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			s.mux.ServeHTTP(w, req)
+			if w.Code == http.StatusUnauthorized {
+				t.Fatalf("observe key should authenticate semantic read endpoint, got 401: %s", w.Body.String())
+			}
 			if w.Code == http.StatusForbidden {
 				t.Fatalf("semantic read endpoint must remain available to observe keys")
 			}
@@ -268,6 +271,9 @@ func TestPublicVaultFullModeMutationsPassThrough(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			s.mux.ServeHTTP(w, req)
+			if w.Code == http.StatusUnauthorized {
+				t.Fatalf("public full-mode access should not require auth, got 401: %s", w.Body.String())
+			}
 			if w.Code == http.StatusForbidden {
 				t.Fatalf("expected non-403 response, got %d: %s", w.Code, w.Body.String())
 			}

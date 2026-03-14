@@ -875,8 +875,10 @@ components:
       type: object
       properties:
         code:
-          type: integer
-          description: "Machine-readable MBP error code."
+          oneOf:
+            - type: integer
+            - type: string
+          description: "Machine-readable error code. Handler-level errors use numeric MBP codes; middleware and auth errors may use string codes."
         message:
           type: string
         request_id:
