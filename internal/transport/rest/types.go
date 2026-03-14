@@ -267,7 +267,8 @@ type DecideRequest struct {
 
 // DecideResponse is returned by the decide endpoint.
 type DecideResponse struct {
-	ID string `json:"id"`
+	ID       string   `json:"id"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // RestoreResponse is returned by the restore endpoint.

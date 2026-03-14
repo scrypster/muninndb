@@ -48,9 +48,10 @@ type ToolDefinition struct {
 // MCP domain types (used by EngineInterface and handlers)
 
 type WriteResult struct {
-	ID      string `json:"id"`
-	Concept string `json:"concept"`
-	Hint    string `json:"hint,omitempty"`
+	ID       string   `json:"id"`
+	Concept  string   `json:"concept"`
+	Hint     string   `json:"hint,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type Memory struct {

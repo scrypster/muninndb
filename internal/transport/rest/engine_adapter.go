@@ -343,11 +343,11 @@ func (w *RESTEngineWrapper) Consolidate(ctx context.Context, vault string, ids [
 }
 
 func (w *RESTEngineWrapper) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*DecideResponse, error) {
-	newID, err := w.engine.Decide(ctx, vault, decision, rationale, alternatives, evidenceIDs)
+	res, err := w.engine.Decide(ctx, vault, decision, rationale, alternatives, evidenceIDs)
 	if err != nil {
 		return nil, err
 	}
-	return &DecideResponse{ID: newID.String()}, nil
+	return &DecideResponse{ID: res.ID.String(), Warnings: res.Warnings}, nil
 }
 
 func (w *RESTEngineWrapper) Restore(ctx context.Context, vault, engramID string) (*RestoreResponse, error) {

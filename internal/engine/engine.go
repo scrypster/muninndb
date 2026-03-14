@@ -2331,6 +2331,14 @@ type ConsolidateResult struct {
 	Warnings []string
 }
 
+// DecideResult is returned by Engine.Decide.
+// Warnings lists any evidence IDs that could not be linked to the decision;
+// the decision itself is always committed even when evidence linking partially fails.
+type DecideResult struct {
+	ID       storage.ULID
+	Warnings []string
+}
+
 // SessionResult holds the result of a Session query.
 type SessionResult struct {
 	Writes []EngineSessionEntry
@@ -2502,8 +2510,10 @@ func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time
 }
 
 // Decide records an explicit decision with rationale, alternatives, and supporting evidence.
-// It returns the ULID of the newly written decision engram.
-func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (storage.ULID, error) {
+// It returns a DecideResult containing the new engram ID and any non-fatal
+// evidence-link warnings. The decision is always committed; evidence linking
+// is best-effort (a bad evidence ID produces a warning, not a failure).
+func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*DecideResult, error) {
 	content := rationale
 	if len(alternatives) > 0 {
 		content += "\n---\nAlternatives:\n" + strings.Join(alternatives, "\n")
@@ -2516,9 +2526,10 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 		Tags:    []string{"decision"},
 	})
 	if err != nil {
-		return storage.ULID{}, fmt.Errorf("decide: write: %w", err)
+		return nil, fmt.Errorf("decide: write: %w", err)
 	}
 
+	var warnings []string
 	for _, eid := range evidenceIDs {
 		if _, err := e.Link(ctx, &mbp.LinkRequest{
 			SourceID: resp.ID,
@@ -2527,15 +2538,15 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 			Weight:   1.0,
 			Vault:    vault,
 		}); err != nil {
-			slog.Warn("decide: failed to link evidence", "decision_id", resp.ID, "evidence_id", eid, "err", err)
+			warnings = append(warnings, fmt.Sprintf("failed to link evidence %s: %v", eid, err))
 		}
 	}
 
 	decideULID, err := storage.ParseULID(resp.ID)
 	if err != nil {
-		return storage.ULID{}, fmt.Errorf("decide: parse id: %w", err)
+		return nil, fmt.Errorf("decide: parse id: %w", err)
 	}
-	return decideULID, nil
+	return &DecideResult{ID: decideULID, Warnings: warnings}, nil
 }
 
 // RecordAccess increments the access count and updates the last-accessed timestamp

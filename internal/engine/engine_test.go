@@ -636,12 +636,12 @@ func TestEngineDecide(t *testing.T) {
 
 	r, _ := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "evidence", Content: "supporting data"})
 
-	newID, err := eng.Decide(ctx, "test", "go with option A",
+	res, err := eng.Decide(ctx, "test", "go with option A",
 		"rationale text", []string{"option B", "option C"}, []string{r.ID})
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	if newID == (storage.ULID{}) {
+	if res.ID == (storage.ULID{}) {
 		t.Fatal("Decide returned zero ID")
 	}
 }

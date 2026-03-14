@@ -92,11 +92,11 @@ func (a *mcpEngineAdapter) Session(ctx context.Context, vault string, since time
 	return summary, nil
 }
 func (a *mcpEngineAdapter) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error) {
-	id, err := a.eng.Decide(ctx, vault, decision, rationale, alternatives, evidenceIDs)
+	res, err := a.eng.Decide(ctx, vault, decision, rationale, alternatives, evidenceIDs)
 	if err != nil {
 		return nil, err
 	}
-	return &WriteResult{ID: id.String()}, nil
+	return &WriteResult{ID: res.ID.String(), Warnings: res.Warnings}, nil
 }
 
 func (a *mcpEngineAdapter) Restore(ctx context.Context, vault, id string) (*RestoreResult, error) {
