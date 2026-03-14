@@ -34,7 +34,7 @@ func testEnvTB(tb testing.TB) (*Engine, func()) {
 	embedder := &noopEmbedder{}
 	actEngine := activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder)
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
-	eng := NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
 	return eng, func() {
 		eng.Stop()

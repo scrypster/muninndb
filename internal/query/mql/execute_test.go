@@ -37,7 +37,7 @@ func testEnv(t *testing.T) (*engine.Engine, func()) {
 	embedder := &noopEmbedder{}
 	actEngine := activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder)
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
-	eng := engine.NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := engine.NewEngine(engine.EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
 	return eng, func() {
 		eng.Stop()    // stop FTS worker, novelty worker, coherence flush, autoAssoc

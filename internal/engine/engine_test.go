@@ -39,7 +39,7 @@ func testEnv(t *testing.T) (*Engine, func()) {
 	embedder := &noopEmbedder{}
 	actEngine := activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder)
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
-	eng := NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
 	return eng, func() {
 		eng.Stop()    // stop FTS worker, novelty worker, coherence flush, autoAssoc
@@ -69,7 +69,7 @@ func testEnvWithDB(t *testing.T) (*Engine, *pebble.DB, func()) {
 	embedder := &noopEmbedder{}
 	actEngine := activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder)
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
-	eng := NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
 	return eng, db, func() {
 		eng.Stop()
@@ -510,7 +510,7 @@ func TestEngineWorkersSubmit(t *testing.T) {
 	actEngine := activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder)
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
 
-	eng := NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 	defer func() {
 		eng.Stop()    // stop FTS worker and other background goroutines before closing db
 		store.Close() // stop PebbleStore background workers and close db
@@ -599,17 +599,17 @@ func TestEngineConsolidate(t *testing.T) {
 	r1, _ := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "a", Content: "content a"})
 	r2, _ := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "b", Content: "content b"})
 
-	newID, archived, warnings, err := eng.Consolidate(ctx, "test", []string{r1.ID, r2.ID}, "merged content")
+	res, err := eng.Consolidate(ctx, "test", []string{r1.ID, r2.ID}, "merged content")
 	if err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
-	if newID == (storage.ULID{}) {
+	if res.MergedID == (storage.ULID{}) {
 		t.Fatal("Consolidate returned zero merged ID")
 	}
-	if len(archived) == 0 {
+	if len(res.Archived) == 0 {
 		t.Fatal("expected at least 1 archived ID")
 	}
-	_ = warnings
+	_ = res.Warnings
 }
 
 func TestEngineSession(t *testing.T) {
@@ -1121,7 +1121,7 @@ func TestActivate_PlasticityGatesHebbian(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	eng := NewEngine(store, as, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, AuthStore: as, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 	defer func() {
 		eng.Stop()
 		store.Close()
@@ -1153,7 +1153,7 @@ func TestActivate_PlasticityGatesHebbian(t *testing.T) {
 	}
 
 	// Also verify that nil authStore (default test path) gives no panic.
-	eng2 := NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng2 := NewEngine(EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 	defer func() {
 		eng2.Stop()
 	}()
@@ -1217,7 +1217,7 @@ func TestEngine_LobeMode_CollectsEffects(t *testing.T) {
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
 
 	// nil workers — simulates Lobe mode
-	eng := NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 	defer func() {
 		eng.Stop()
 		store.Close()
@@ -1322,7 +1322,7 @@ func TestEngine_CortexMode_NoForwarding(t *testing.T) {
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
 
 	// nil workers — but we do NOT wire a coordinator
-	eng := NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 	defer func() {
 		eng.Stop()
 		store.Close()
@@ -1662,7 +1662,7 @@ func TestEngineRead_AfterRestart(t *testing.T) {
 		embedder := &noopEmbedder{}
 		actEngine := activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder)
 		trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
-		eng := NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+		eng := NewEngine(EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 		return eng, func() {
 			eng.Stop()
 			store.Close()
@@ -1917,7 +1917,7 @@ func TestActivateCore_VaultDefaultRecallMode(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	eng := NewEngine(store, as, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, AuthStore: as, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 	defer func() {
 		eng.Stop()
 		store.Close()

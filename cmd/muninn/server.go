@@ -976,10 +976,18 @@ func runServer() {
 	actEngine.SetTransitionStore(store.TransitionCache())
 
 	// Build engine API - pass the full worker implementations
-	eng := engine.NewEngine(store, authStore, ftsIndex, actEngine, trigSystem,
-		hebbianWorkerImpl,
-		contradictWorkerImpl.Worker, confidenceWorkerImpl.Worker,
-		embedder, hnswRegistry)
+	eng := engine.NewEngine(engine.EngineConfig{
+		Store:            store,
+		AuthStore:        authStore,
+		FTSIndex:         ftsIndex,
+		ActivationEngine: actEngine,
+		TriggerSystem:    trigSystem,
+		HebbianWorker:    hebbianWorkerImpl,
+		ContradictWorker: contradictWorkerImpl.Worker,
+		ConfidenceWorker: confidenceWorkerImpl.Worker,
+		Embedder:         embedder,
+		HNSWRegistry:     hnswRegistry,
+	})
 
 	eng.SetTransitionWorker(transitionWorkerImpl)
 

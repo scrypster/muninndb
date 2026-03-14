@@ -39,7 +39,7 @@ func testPASEnv(t *testing.T) (*Engine, func()) {
 
 	authStore := auth.NewStore(db)
 
-	eng := NewEngine(store, authStore, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, AuthStore: authStore, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
 	tw := cognitive.NewTransitionWorker(context.Background(), store.TransitionCache())
 	eng.SetTransitionWorker(tw)

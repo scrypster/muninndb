@@ -331,14 +331,14 @@ func (w *RESTEngineWrapper) Evolve(ctx context.Context, vault, engramID, newCont
 }
 
 func (w *RESTEngineWrapper) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResponse, error) {
-	newID, archived, warnings, err := w.engine.Consolidate(ctx, vault, ids, mergedContent)
+	res, err := w.engine.Consolidate(ctx, vault, ids, mergedContent)
 	if err != nil {
 		return nil, err
 	}
 	return &ConsolidateResponse{
-		ID:       newID.String(),
-		Archived: archived,
-		Warnings: warnings,
+		ID:       res.MergedID.String(),
+		Archived: res.Archived,
+		Warnings: res.Warnings,
 	}, nil
 }
 

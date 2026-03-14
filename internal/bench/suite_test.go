@@ -91,7 +91,7 @@ func benchEnv(b *testing.B) (*engine.Engine, func()) {
 	actEngine := activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder)
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
 	as := auth.NewStore(db)
-	eng := engine.NewEngine(store, as, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := engine.NewEngine(engine.EngineConfig{Store: store, AuthStore: as, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
 	return eng, func() {
 		eng.Stop()

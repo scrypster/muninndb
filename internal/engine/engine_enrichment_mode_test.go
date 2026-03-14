@@ -54,7 +54,7 @@ func testEnvWithInlineMode(t *testing.T, inlineEnrichment string) (*Engine, func
 	embedder := &noopEmbedder{}
 	actEngine := activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder)
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
-	eng := NewEngine(store, authStore, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, AuthStore: authStore, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
 	return eng, func() {
 		eng.Stop()

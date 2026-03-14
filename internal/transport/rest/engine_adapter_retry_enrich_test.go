@@ -99,7 +99,7 @@ func newRESTRetryEnrichEnv(t *testing.T) (*engine.Engine, func()) {
 	embedder := &restNoopEmbedder{}
 	actEngine := activation.New(store, &restFTSAdapter{idx: ftsIdx}, nil, embedder)
 	trigSystem := trigger.New(store, &restFTSTriggerAdapter{idx: ftsIdx}, nil, embedder)
-	eng := engine.NewEngine(store, nil, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := engine.NewEngine(engine.EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
 	return eng, func() {
 		eng.Stop()

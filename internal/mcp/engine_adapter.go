@@ -70,11 +70,11 @@ func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent,
 	return &WriteResult{ID: id.String()}, nil
 }
 func (a *mcpEngineAdapter) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
-	newID, archived, warnings, err := a.eng.Consolidate(ctx, vault, ids, merged)
+	res, err := a.eng.Consolidate(ctx, vault, ids, merged)
 	if err != nil {
 		return nil, err
 	}
-	return &ConsolidateResult{ID: newID.String(), Archived: archived, Warnings: warnings}, nil
+	return &ConsolidateResult{ID: res.MergedID.String(), Archived: res.Archived, Warnings: res.Warnings}, nil
 }
 func (a *mcpEngineAdapter) Session(ctx context.Context, vault string, since time.Time) (*SessionSummary, error) {
 	res, err := a.eng.Session(ctx, vault, since)

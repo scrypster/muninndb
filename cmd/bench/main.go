@@ -86,11 +86,16 @@ func main() {
 	go contradictWorker.Worker.Run(benchCtx)
 	go confidenceWorker.Worker.Run(benchCtx)
 
-	eng := engine.NewEngine(store, nil, ftsIdx, actEngine, trigSystem,
-		hebbianWorker,
-		contradictWorker.Worker, confidenceWorker.Worker,
-		embedder, nil,
-	)
+	eng := engine.NewEngine(engine.EngineConfig{
+		Store:            store,
+		FTSIndex:         ftsIdx,
+		ActivationEngine: actEngine,
+		TriggerSystem:    trigSystem,
+		HebbianWorker:    hebbianWorker,
+		ContradictWorker: contradictWorker.Worker,
+		ConfidenceWorker: confidenceWorker.Worker,
+		Embedder:         embedder,
+	})
 	defer func() {
 		benchCancel()
 		hebbianWorker.Stop()

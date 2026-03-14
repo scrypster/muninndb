@@ -40,7 +40,7 @@ func testEnvWithAuth(t *testing.T) (*Engine, *auth.Store, *storage.PebbleStore, 
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
 
 	as := auth.NewStore(db)
-	eng := NewEngine(store, as, ftsIdx, actEngine, trigSystem, nil, nil, nil, embedder, nil)
+	eng := NewEngine(EngineConfig{Store: store, AuthStore: as, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
 	return eng, as, store, func() {
 		eng.Stop()

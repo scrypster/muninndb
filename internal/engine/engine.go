@@ -309,33 +309,23 @@ type noveltyJob struct {
 }
 
 // NewEngine creates a new Engine.
-func NewEngine(
-	store *storage.PebbleStore,
-	authStore *auth.Store,
-	ftsIdx *fts.Index,
-	act *activation.ActivationEngine,
-	trig *trigger.TriggerSystem,
-	hebbianWorker *cognitive.HebbianWorker,
-	contradictWorker *cognitive.Worker[cognitive.ContradictItem],
-	confidenceWorker *cognitive.Worker[cognitive.ConfidenceUpdate],
-	embedder activation.Embedder,
-	hnswRegistry *hnsw.Registry,
-) *Engine {
+func NewEngine(cfg EngineConfig) *Engine {
+	store := cfg.Store
 	stopCtx, stopCancel := context.WithCancel(context.Background())
 	e := &Engine{
 		store:            store,
-		authStore:        authStore,
-		fts:              ftsIdx,
-		activation:       act,
-		triggers:         trig,
-		hebbianWorker:    hebbianWorker,
-		contradictWorker: contradictWorker,
-		confidenceWorker: confidenceWorker,
+		authStore:        cfg.AuthStore,
+		fts:              cfg.FTSIndex,
+		activation:       cfg.ActivationEngine,
+		triggers:         cfg.TriggerSystem,
+		hebbianWorker:    cfg.HebbianWorker,
+		contradictWorker: cfg.ContradictWorker,
+		confidenceWorker: cfg.ConfidenceWorker,
 		activity:         cognitive.NewActivityTracker(),
-		embedder:         embedder,
-		autoAssoc:        autoassoc.New(stopCtx, store, ftsIdx),
-		neighborWorker:  autoassoc.NewNeighborWorker(stopCtx, store, hnswRegistry),
-		goalLinkWorker:  autoassoc.NewGoalLinkWorker(stopCtx, store, hnswRegistry),
+		embedder:         cfg.Embedder,
+		autoAssoc:        autoassoc.New(stopCtx, store, cfg.FTSIndex),
+		neighborWorker:  autoassoc.NewNeighborWorker(stopCtx, store, cfg.HNSWRegistry),
+		goalLinkWorker:  autoassoc.NewGoalLinkWorker(stopCtx, store, cfg.HNSWRegistry),
 		noveltyDet:       novelty.New(),
 		noveltyJobs:      make(chan noveltyJob, 256),
 		noveltyDone:      make(chan struct{}),
@@ -345,7 +335,7 @@ func NewEngine(
 		prov:             provenance.NewStore(store.GetDB()),
 		stopCtx:          stopCtx,
 		stopCancel:       stopCancel,
-		hnswRegistry:     hnswRegistry,
+		hnswRegistry:     cfg.HNSWRegistry,
 		jobManager:          vaultjob.NewManager(),
 		replayFailCounts:    make(map[storage.ULID]int),
 	}
@@ -355,8 +345,8 @@ func NewEngine(
 	// Start async FTS worker to decouple indexing from the write hot path.
 	// The engram is already durable in Pebble before this worker runs —
 	// it only controls keyword search visibility (eventual, ~100ms lag).
-	if ftsIdx != nil {
-		e.ftsWorker = fts.NewWorker(ftsIdx)
+	if cfg.FTSIndex != nil {
+		e.ftsWorker = fts.NewWorker(cfg.FTSIndex)
 	}
 	// Seed in-memory counter from persistent storage so Stat() is accurate after restart.
 	if count, err := store.CountEngrams(context.Background()); err == nil {
@@ -732,7 +722,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	if vaultName == "" {
 		vaultName = "default"
 	}
-	resolved := e.resolveVaultPlasticity(vaultName)
+	resolved := e.ResolveVaultPlasticity(vaultName)
 	inlineMode := resolved.InlineEnrichment
 
 	// Determine which caller-provided enrichment fields to use based on mode.
@@ -1095,7 +1085,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		if vaultName == "" {
 			vaultName = "default"
 		}
-		resolved := e.resolveVaultPlasticity(vaultName)
+		resolved := e.ResolveVaultPlasticity(vaultName)
 		inlineMode := resolved.InlineEnrichment
 
 		var callerSummary string
@@ -1497,16 +1487,15 @@ func (e *Engine) Activate(ctx context.Context, req *mbp.ActivateRequest) (*mbp.A
 	return e.activateCore(ctx, req, nil)
 }
 
-// ActivateWithStructuredFilter is like Activate but accepts a structured filter
-// (e.g., *query.Filter) that implements a Match(*storage.Engram) bool interface.
-// This allows the MQL executor to pass WHERE predicates for proper post-retrieval filtering.
-func (e *Engine) ActivateWithStructuredFilter(ctx context.Context, req *mbp.ActivateRequest, structuredFilter interface{}) (*mbp.ActivateResponse, error) {
+// ActivateWithStructuredFilter is like Activate but accepts a typed filter for
+// post-retrieval predicate evaluation (e.g., *query.Filter from MQL WHERE clauses).
+func (e *Engine) ActivateWithStructuredFilter(ctx context.Context, req *mbp.ActivateRequest, structuredFilter activation.EngramFilter) (*mbp.ActivateResponse, error) {
 	return e.activateCore(ctx, req, structuredFilter)
 }
 
 // activateCore is the shared implementation for Activate and ActivateWithStructuredFilter.
-// structuredFilter may be nil (plain Activate) or a non-nil filter value (structured query).
-func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, structuredFilter interface{}) (*mbp.ActivateResponse, error) {
+// structuredFilter may be nil (plain Activate) or a typed predicate (structured query).
+func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, structuredFilter activation.EngramFilter) (*mbp.ActivateResponse, error) {
 	// Pin a Pebble snapshot so all read phases see a consistent point-in-time view.
 	snap := e.store.NewSnapshot()
 	defer snap.Close()
@@ -2335,6 +2324,13 @@ func hashString(s string) uint32 {
 	return h
 }
 
+// ConsolidateResult is returned by Engine.Consolidate.
+type ConsolidateResult struct {
+	MergedID storage.ULID
+	Archived []string
+	Warnings []string
+}
+
 // SessionResult holds the result of a Session query.
 type SessionResult struct {
 	Writes []EngineSessionEntry
@@ -2434,10 +2430,10 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 }
 
 // Consolidate merges multiple engrams into a single new engram and archives the originals.
-// Returns the new merged ID, the list of archived IDs, and any non-fatal warnings.
-func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (storage.ULID, []string, []string, error) {
+// Returns a ConsolidateResult with the new ID, archived IDs, and any non-fatal warnings.
+func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error) {
 	if len(ids) > 50 {
-		return storage.ULID{}, nil, nil, fmt.Errorf("consolidate: too many ids (max 50, got %d)", len(ids))
+		return nil, fmt.Errorf("consolidate: too many ids (max 50, got %d)", len(ids))
 	}
 	mergedResp, err := e.Write(ctx, &mbp.WriteRequest{
 		Vault:   vault,
@@ -2445,7 +2441,7 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 		Content: mergedContent,
 	})
 	if err != nil {
-		return storage.ULID{}, nil, nil, fmt.Errorf("consolidate: write merged: %w", err)
+		return nil, fmt.Errorf("consolidate: write merged: %w", err)
 	}
 
 	var archived []string
@@ -2461,9 +2457,9 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 
 	mergedULID, err := storage.ParseULID(mergedResp.ID)
 	if err != nil {
-		return storage.ULID{}, archived, warnings, fmt.Errorf("consolidate: parse merged id: %w", err)
+		return nil, fmt.Errorf("consolidate: parse merged id: %w", err)
 	}
-	return mergedULID, archived, warnings, nil
+	return &ConsolidateResult{MergedID: mergedULID, Archived: archived, Warnings: warnings}, nil
 }
 
 // Session returns all engrams written to the vault after the given time.
@@ -2524,13 +2520,15 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 	}
 
 	for _, eid := range evidenceIDs {
-		_, _ = e.Link(ctx, &mbp.LinkRequest{
+		if _, err := e.Link(ctx, &mbp.LinkRequest{
 			SourceID: resp.ID,
 			TargetID: eid,
 			RelType:  uint16(storage.RelSupports),
 			Weight:   1.0,
 			Vault:    vault,
-		})
+		}); err != nil {
+			slog.Warn("decide: failed to link evidence", "decision_id", resp.ID, "evidence_id", eid, "err", err)
+		}
 	}
 
 	decideULID, err := storage.ParseULID(resp.ID)
@@ -2564,9 +2562,9 @@ func (e *Engine) RecordAccess(ctx context.Context, vault, id string) error {
 	return e.store.UpdateMetadata(ctx, ws, ulid, meta)
 }
 
-// resolveVaultPlasticity returns the resolved plasticity config for a vault,
+// ResolveVaultPlasticity returns the resolved plasticity config for a vault,
 // falling back to defaults when no authStore is configured.
-func (e *Engine) resolveVaultPlasticity(vaultName string) auth.ResolvedPlasticity {
+func (e *Engine) ResolveVaultPlasticity(vaultName string) auth.ResolvedPlasticity {
 	if e.authStore != nil {
 		vaultCfg, err := e.authStore.GetVaultConfig(vaultName)
 		if err == nil {
@@ -2574,11 +2572,6 @@ func (e *Engine) resolveVaultPlasticity(vaultName string) auth.ResolvedPlasticit
 		}
 	}
 	return auth.ResolvePlasticity(nil)
-}
-
-// ResolveVaultPlasticity returns the resolved plasticity config for a vault.
-func (e *Engine) ResolveVaultPlasticity(vaultName string) auth.ResolvedPlasticity {
-	return e.resolveVaultPlasticity(vaultName)
 }
 
 // PruneVault prunes a vault according to its resolved MaxEngrams and RetentionDays policy.
@@ -2590,7 +2583,7 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 	mu.Lock()
 	defer mu.Unlock()
 
-	resolved := e.resolveVaultPlasticity(vaultName)
+	resolved := e.ResolveVaultPlasticity(vaultName)
 	ws := e.store.ResolveVaultPrefix(vaultName)
 
 	var pruned int64
@@ -2732,7 +2725,7 @@ func (e *Engine) runPruneWorker() {
 		case <-timer.C:
 			vaults, _ := e.ListVaults(e.stopCtx)
 			for _, vaultName := range vaults {
-				resolved := e.resolveVaultPlasticity(vaultName)
+				resolved := e.ResolveVaultPlasticity(vaultName)
 				if resolved.MaxEngrams > 0 || resolved.RetentionDays > 0 {
 					if _, err := e.PruneVault(e.stopCtx, vaultName); err != nil {
 						slog.Debug("vault prune failed", "vault", vaultName, "err", err)
@@ -2740,7 +2733,7 @@ func (e *Engine) runPruneWorker() {
 				}
 			}
 			for _, vaultName := range vaults {
-				resolved := e.resolveVaultPlasticity(vaultName)
+				resolved := e.ResolveVaultPlasticity(vaultName)
 				if resolved.HebbianEnabled && resolved.AssocDecayFactor > 0 {
 					ws := e.store.ResolveVaultPrefix(vaultName)
 					removed, err := e.store.DecayAssocWeights(e.stopCtx, ws,

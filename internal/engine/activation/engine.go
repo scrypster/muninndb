@@ -129,6 +129,12 @@ type ScoredEngram struct {
 	Dormant     bool
 }
 
+// EngramFilter is a post-retrieval predicate applied as the final activation step.
+// Implemented by *query.Filter; any caller can implement this for custom filtering.
+type EngramFilter interface {
+	Match(*storage.Engram) bool
+}
+
 // ActivateRequest is the internal activation request form.
 type ActivateRequest struct {
 	VaultID          uint32
@@ -144,7 +150,7 @@ type ActivateRequest struct {
 	ReadOnly         bool   // when true, skip all write side-effects (observe mode)
 	Profile          string // traversal profile override: "default"|"causal"|"confirmatory"|"adversarial"|"structural"
 	VaultDefault     string // vault Plasticity default profile (set by engine.go, not by callers)
-	StructuredFilter interface{} // *query.Filter, applied as final post-retrieval predicate
+	StructuredFilter EngramFilter // applied as final post-retrieval predicate
 	// CandidatesPerIndex overrides the per-index candidate pool size for phase2.
 	// Zero means fall back to 30.
 	CandidatesPerIndex int
@@ -1269,21 +1275,17 @@ cgdnDone:
 	// Apply structured filter if provided (post-retrieval predicate).
 	// This is applied AFTER RRF scoring and confidence checks, as the final step.
 	if req.StructuredFilter != nil {
-		if qf, ok := req.StructuredFilter.(interface {
-			Match(*storage.Engram) bool
-		}); ok {
-			filtered := make([]scoredItem, 0, len(scored))
-			for _, s := range scored {
-				eng := engramByID[s.id]
-				if eng == nil {
-					continue
-				}
-				if qf.Match(eng) {
-					filtered = append(filtered, s)
-				}
+		filtered := make([]scoredItem, 0, len(scored))
+		for _, s := range scored {
+			eng := engramByID[s.id]
+			if eng == nil {
+				continue
 			}
-			scored = filtered
+			if req.StructuredFilter.Match(eng) {
+				filtered = append(filtered, s)
+			}
 		}
+		scored = filtered
 	}
 
 	activations := make([]ScoredEngram, 0, len(scored))
