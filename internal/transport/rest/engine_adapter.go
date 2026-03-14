@@ -419,8 +419,7 @@ func (w *RESTEngineWrapper) UpdateTags(ctx context.Context, vault, engramID stri
 	if err != nil {
 		return fmt.Errorf("invalid engram id: %w", err)
 	}
-	ws := w.engine.Store().ResolveVaultPrefix(vault)
-	return w.engine.Store().UpdateTags(ctx, ws, ulid, tags)
+	return w.engine.UpdateTags(ctx, vault, ulid, tags)
 }
 
 func (w *RESTEngineWrapper) ListDeleted(ctx context.Context, vault string, limit int) (*ListDeletedResponse, error) {
@@ -453,8 +452,7 @@ func (w *RESTEngineWrapper) RetryEnrich(ctx context.Context, vault, engramID str
 	if err != nil {
 		return nil, fmt.Errorf("invalid engram id: %w", err)
 	}
-	ws := w.engine.Store().ResolveVaultPrefix(vault)
-	eng, err := w.engine.Store().GetEngram(ctx, ws, ulid)
+	eng, err := w.engine.GetEngram(ctx, vault, ulid)
 	if err != nil {
 		return nil, fmt.Errorf("get engram: %w", err)
 	}
@@ -485,11 +483,10 @@ func (w *RESTEngineWrapper) GetContradictions(ctx context.Context, vault string)
 	if err != nil {
 		return nil, err
 	}
-	ws := w.engine.Store().ResolveVaultPrefix(vault)
 	items := make([]ContradictionItem, 0, len(pairs))
 	for _, pair := range pairs {
-		engA, errA := w.engine.Store().GetEngram(ctx, ws, pair[0])
-		engB, errB := w.engine.Store().GetEngram(ctx, ws, pair[1])
+		engA, errA := w.engine.GetEngram(ctx, vault, pair[0])
+		engB, errB := w.engine.GetEngram(ctx, vault, pair[1])
 		item := ContradictionItem{
 			IDa: pair[0].String(),
 			IDb: pair[1].String(),

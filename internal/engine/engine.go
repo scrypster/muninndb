@@ -659,9 +659,34 @@ func (e *Engine) generateEmbeddingBrief(ctx context.Context, items []mbp.Activat
 	return nil
 }
 
-// Store returns the underlying PebbleStore, used by the MCP adapter for direct storage access.
+// Store returns the underlying PebbleStore.
+// Prefer the typed engine methods (GetEngram, UpdateTags, CheckIdempotency, WriteIdempotency)
+// over direct Store() access. Store() is retained for HNSW plugin wiring that
+// requires the raw store adapter.
 func (e *Engine) Store() *storage.PebbleStore {
 	return e.store
+}
+
+// GetEngram fetches a single engram by vault and ULID.
+func (e *Engine) GetEngram(ctx context.Context, vault string, id storage.ULID) (*storage.Engram, error) {
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+	return e.store.GetEngram(ctx, wsPrefix, id)
+}
+
+// UpdateTags replaces the tags on an engram.
+func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, tags []string) error {
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+	return e.store.UpdateTags(ctx, wsPrefix, id, tags)
+}
+
+// CheckIdempotency looks up an op_id receipt. Returns nil, nil if not found.
+func (e *Engine) CheckIdempotency(ctx context.Context, opID string) (*storage.IdempotencyReceipt, error) {
+	return e.store.CheckIdempotency(ctx, opID)
+}
+
+// WriteIdempotency stores an idempotency receipt (op_id → engramID).
+func (e *Engine) WriteIdempotency(ctx context.Context, opID, engramID string) error {
+	return e.store.WriteIdempotency(ctx, opID, engramID)
 }
 
 // CountEmbedded returns the count of engrams that have had embeddings generated

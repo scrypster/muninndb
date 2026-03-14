@@ -203,10 +203,7 @@ func (a *mcpEngineAdapter) RetryEnrich(ctx context.Context, vault, id string) (*
 		return nil, fmt.Errorf("retry enrich: parse id: %w", err)
 	}
 
-	// Get the vault prefix and fetch the engram
-	store := a.eng.Store()
-	wsPrefix := store.ResolveVaultPrefix(vault)
-	eng, err := store.GetEngram(ctx, wsPrefix, ulid)
+	eng, err := a.eng.GetEngram(ctx, vault, ulid)
 	if err != nil {
 		return nil, fmt.Errorf("retry enrich: get engram: %w", err)
 	}
@@ -322,11 +319,11 @@ func (a *mcpEngineAdapter) FindByEntity(ctx context.Context, vault, entityName s
 }
 
 func (a *mcpEngineAdapter) CheckIdempotency(ctx context.Context, opID string) (*storage.IdempotencyReceipt, error) {
-	return a.eng.Store().CheckIdempotency(ctx, opID)
+	return a.eng.CheckIdempotency(ctx, opID)
 }
 
 func (a *mcpEngineAdapter) WriteIdempotency(ctx context.Context, opID, engramID string) error {
-	return a.eng.Store().WriteIdempotency(ctx, opID, engramID)
+	return a.eng.WriteIdempotency(ctx, opID, engramID)
 }
 
 func (a *mcpEngineAdapter) SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error {

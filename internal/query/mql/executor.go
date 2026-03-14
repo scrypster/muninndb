@@ -199,12 +199,13 @@ func buildFilter(f *query.Filter, pred Predicate) error {
 func convertFilterToMBPFilters(f *query.Filter) []mbp.Filter {
 	var filters []mbp.Filter
 
-	// State filters
+	// State filters — use storage.LifecycleState directly so passesMetaFilter's
+	// type assertion (f.Value.(storage.LifecycleState)) succeeds.
 	for _, state := range f.States {
 		filters = append(filters, mbp.Filter{
 			Field: "state",
 			Op:    "=",
-			Value: uint8(state),
+			Value: state,
 		})
 	}
 
@@ -226,12 +227,13 @@ func convertFilterToMBPFilters(f *query.Filter) []mbp.Filter {
 		})
 	}
 
-	// CreatedAfter filter
+	// CreatedAfter filter — use time.Time so extractTimeBounds' type assertion
+	// (f.Value.(time.Time)) succeeds and enables time-bounded candidate injection.
 	if f.CreatedAfter != nil {
 		filters = append(filters, mbp.Filter{
 			Field: "created_after",
 			Op:    ">=",
-			Value: f.CreatedAfter.Unix(),
+			Value: *f.CreatedAfter,
 		})
 	}
 
