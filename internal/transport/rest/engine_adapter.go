@@ -298,28 +298,10 @@ func (w *RESTEngineWrapper) EmbedStats() plugin.RetroactiveStats {
 	return w.engine.EmbedStats()
 }
 
-// lifecycleStateLabel returns a human-readable label for a storage.LifecycleState.
+// lifecycleStateLabel returns the human-readable label for a storage.LifecycleState.
+// Delegates to storage.LifecycleState.String() — the single source of truth.
 func lifecycleStateLabel(s storage.LifecycleState) string {
-	switch s {
-	case storage.StatePlanning:
-		return "planning"
-	case storage.StateActive:
-		return "active"
-	case storage.StatePaused:
-		return "paused"
-	case storage.StateBlocked:
-		return "blocked"
-	case storage.StateCompleted:
-		return "completed"
-	case storage.StateCancelled:
-		return "cancelled"
-	case storage.StateArchived:
-		return "archived"
-	case storage.StateSoftDeleted:
-		return "soft_deleted"
-	default:
-		return fmt.Sprintf("unknown(%d)", s)
-	}
+	return s.String()
 }
 
 func (w *RESTEngineWrapper) Evolve(ctx context.Context, vault, engramID, newContent, reason string) (*EvolveResponse, error) {

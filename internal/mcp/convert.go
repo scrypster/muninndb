@@ -1,9 +1,9 @@
 package mcp
 
 import (
-	"fmt"
 	"time"
 
+	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -49,7 +49,7 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		Summary:     r.Summary,
 		Confidence:  r.Confidence,
 		Tags:        r.Tags,
-		State:       fmt.Sprintf("%d", r.State),
+		State:       storage.LifecycleState(r.State).String(),
 		CreatedAt:   time.Unix(0, r.CreatedAt).UTC(),
 		LastAccess:  time.Unix(0, r.LastAccess).UTC(),
 		AccessCount: r.AccessCount,

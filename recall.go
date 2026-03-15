@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/engine"
+	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -70,27 +71,8 @@ func isNotFound(err error) bool {
 	return errors.Is(err, engine.ErrEngramNotFound)
 }
 
-// lifecycleStateName converts a raw state byte (from ReadResponse.State) to a
-// human-readable name. Values mirror internal/storage.LifecycleState constants.
+// lifecycleStateName converts a raw state byte to a human-readable name.
+// Delegates to storage.LifecycleState.String() — the single source of truth.
 func lifecycleStateName(state uint8) string {
-	switch state {
-	case 0x00:
-		return "planning"
-	case 0x01:
-		return "active"
-	case 0x02:
-		return "paused"
-	case 0x03:
-		return "blocked"
-	case 0x04:
-		return "completed"
-	case 0x05:
-		return "cancelled"
-	case 0x06:
-		return "archived"
-	case 0x7F:
-		return "soft_deleted"
-	default:
-		return "unknown"
-	}
+	return storage.LifecycleState(state).String()
 }
