@@ -518,6 +518,9 @@ document.addEventListener('alpine:init', () => {
       };
 
       es.addEventListener('error', (e) => {
+        // Connection-level errors have null data; onerror already handles those silently.
+        // Only process named 'event: error' server events (which carry non-null data).
+        if (!e.data) return;
         let msg = 'Live feed error';
         try {
           const data = JSON.parse(e.data);
