@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 // writeVaultMarkdownExport streams a .tgz archive to w containing:
@@ -258,28 +260,10 @@ func noteFileName(n markdownNote) string {
 	return fmt.Sprintf("%s-%s.md", slug, suffix)
 }
 
-// lifecycleStateLabelFromCode returns a human-readable label for a lifecycle state code.
+// lifecycleStateLabelFromCode returns the human-readable label for a lifecycle state code.
+// Delegates to storage.LifecycleState.String() — the single source of truth.
 func lifecycleStateLabelFromCode(code uint8) string {
-	switch code {
-	case 0:
-		return "planning"
-	case 1:
-		return "active"
-	case 2:
-		return "paused"
-	case 3:
-		return "blocked"
-	case 4:
-		return "completed"
-	case 5:
-		return "cancelled"
-	case 6:
-		return "archived"
-	case 127:
-		return "soft_deleted"
-	default:
-		return fmt.Sprintf("unknown(%d)", code)
-	}
+	return storage.LifecycleState(code).String()
 }
 
 // memoryTypeLabelFromCode returns a human-readable label for a memory type code.
