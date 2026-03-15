@@ -47,6 +47,16 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Flush implements http.Flusher so that long-lived handlers (e.g. SSE) receive
+// a Flusher-capable writer after passing through loggingMiddleware. Without this,
+// the w.(http.Flusher) type assertion in handleSubscribe always fails because
+// loggingMiddleware wraps w with statusRecorder before calling the handler.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // Server is an HTTP REST server for the MuninnDB engine.
 type Server struct {
 	addr          string
