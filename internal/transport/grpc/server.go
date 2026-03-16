@@ -45,6 +45,13 @@ type Server struct {
 	tlsConfig *tls.Config // nil = plain TCP
 }
 
+func denyReadOnlyMutation(ctx context.Context) error {
+	if auth.ReadOnlyFromContext(ctx) {
+		return status.Error(codes.PermissionDenied, "read-only key cannot write")
+	}
+	return nil
+}
+
 // NewServer creates a new gRPC server.
 // authStore is required and used to validate API keys on every inbound RPC.
 // tlsConfig, if non-nil, enables TLS using gRPC transport credentials.
@@ -89,6 +96,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, tlsConfig *
 //     codes.Unauthenticated regardless of vault visibility.
 //   - If no token is provided, the vault config is consulted. Non-public vaults
 //     (including unconfigured vaults, which default to fail-closed) require a key.
+//     Public vaults run in full mode.
 //
 // The vault name is read from the request if it implements VaultNamer; otherwise
 // "default" is used.
@@ -132,7 +140,7 @@ func (s *Server) authUnaryInterceptor(ctx context.Context, req any, _ *grpc.Unar
 	}
 
 	ctx = context.WithValue(ctx, auth.ContextVault, vault)
-	ctx = context.WithValue(ctx, auth.ContextMode, "observe")
+	ctx = context.WithValue(ctx, auth.ContextMode, auth.ModeFull)
 	return handler(ctx, req)
 }
 
@@ -176,14 +184,15 @@ func (s *Server) authStreamInterceptor(srv any, ss grpc.ServerStream, _ *grpc.St
 		return handler(srv, &wrappedStream{ss, ctx})
 	}
 
-	// No token — check default vault config (fail-closed).
+	// No token — check default vault config (fail-closed). Public default vault
+	// requests run in full mode.
 	cfg, err := s.authStore.GetVaultConfig("default")
 	if err != nil || !cfg.Public {
 		return status.Errorf(codes.Unauthenticated, "vault %q requires an API key", "default")
 	}
 
 	ctx = context.WithValue(ctx, auth.ContextVault, "default")
-	ctx = context.WithValue(ctx, auth.ContextMode, "observe")
+	ctx = context.WithValue(ctx, auth.ContextMode, auth.ModeFull)
 	return handler(srv, &wrappedStream{ss, ctx})
 }
 
@@ -234,6 +243,9 @@ func (s *Server) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloResp
 
 // Write implements the Write RPC.
 func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
+	if err := denyReadOnlyMutation(ctx); err != nil {
+		return nil, err
+	}
 	resp, err := s.engine.Write(ctx, req)
 	if err != nil {
 		slog.Error("write failed", "error", err)
@@ -244,6 +256,9 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 
 // BatchWrite implements the BatchWrite RPC.
 func (s *Server) BatchWrite(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error) {
+	if err := denyReadOnlyMutation(ctx); err != nil {
+		return nil, err
+	}
 	resp, err := s.engine.BatchWrite(ctx, req)
 	if err != nil {
 		slog.Error("batch write failed", "error", err)
@@ -264,6 +279,9 @@ func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRespons
 
 // Forget implements the Forget RPC.
 func (s *Server) Forget(ctx context.Context, req *pb.ForgetRequest) (*pb.ForgetResponse, error) {
+	if err := denyReadOnlyMutation(ctx); err != nil {
+		return nil, err
+	}
 	resp, err := s.engine.Forget(ctx, req)
 	if err != nil {
 		slog.Error("forget failed", "error", err)
@@ -284,6 +302,9 @@ func (s *Server) Stat(ctx context.Context, req *pb.StatRequest) (*pb.StatRespons
 
 // Link implements the Link RPC.
 func (s *Server) Link(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error) {
+	if err := denyReadOnlyMutation(ctx); err != nil {
+		return nil, err
+	}
 	resp, err := s.engine.Link(ctx, req)
 	if err != nil {
 		slog.Error("link failed", "error", err)

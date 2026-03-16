@@ -183,14 +183,24 @@ func newVaultTrackingServer(t *testing.T) (*Server, *vaultTrackingEngine, *auth.
 	return srv, eng, store
 }
 
+func authorizeFullVaultRequest(t *testing.T, store *auth.Store, req *http.Request, vault string) {
+	t.Helper()
+	token, _, err := store.GenerateAPIKey(vault, "agent", auth.ModeFull, nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+}
+
 // TestVaultRouting_Write_DefaultVault verifies that POST /api/engrams with no
 // vault param passes "default" to the engine.
 func TestVaultRouting_Write_DefaultVault(t *testing.T) {
-	srv, eng, _ := newVaultTrackingServer(t)
+	srv, eng, store := newVaultTrackingServer(t)
 
 	body := strings.NewReader(`{"concept":"test","content":"hello"}`)
 	req := httptest.NewRequest("POST", "/api/engrams", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "default")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -213,6 +223,7 @@ func TestVaultRouting_Write_ExplicitVault(t *testing.T) {
 	body := strings.NewReader(`{"concept":"test","content":"hello"}`)
 	req := httptest.NewRequest("POST", "/api/engrams?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -235,6 +246,7 @@ func TestVaultRouting_Write_BodyVault(t *testing.T) {
 	body := strings.NewReader(`{"vault":"myvault","concept":"test","content":"hello"}`)
 	req := httptest.NewRequest("POST", "/api/engrams", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -454,6 +466,7 @@ func TestVaultRouting_Forget_ExplicitVault(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("DELETE", "/api/engrams/some-id?vault=myvault", nil)
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -476,6 +489,7 @@ func TestVaultRouting_WriteBatch_ExplicitVault(t *testing.T) {
 	body := strings.NewReader(`{"engrams":[{"concept":"test","content":"hello"}]}`)
 	req := httptest.NewRequest("POST", "/api/engrams/batch?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -498,6 +512,7 @@ func TestVaultRouting_WriteBatch_BodyVault(t *testing.T) {
 	body := strings.NewReader(`{"engrams":[{"vault":"myvault","concept":"a","content":"x"},{"concept":"b","content":"y"}]}`)
 	req := httptest.NewRequest("POST", "/api/engrams/batch", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -563,6 +578,7 @@ func TestVaultRouting_Link_ExplicitVault(t *testing.T) {
 	body := strings.NewReader(`{"source_id":"id1","target_id":"id2","rel_type":1}`)
 	req := httptest.NewRequest("POST", "/api/link?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -667,6 +683,7 @@ func TestVaultRouting_Evolve_ExplicitVault(t *testing.T) {
 	body := strings.NewReader(`{"new_content":"updated","reason":"improvement"}`)
 	req := httptest.NewRequest("POST", "/api/engrams/some-id/evolve?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -689,6 +706,7 @@ func TestVaultRouting_Consolidate_ExplicitVault(t *testing.T) {
 	body := strings.NewReader(`{"ids":["id1","id2"],"merged_content":"merged"}`)
 	req := httptest.NewRequest("POST", "/api/consolidate?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -711,6 +729,7 @@ func TestVaultRouting_Decide_ExplicitVault(t *testing.T) {
 	body := strings.NewReader(`{"decision":"use postgres","rationale":"proven reliability"}`)
 	req := httptest.NewRequest("POST", "/api/decide?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -731,6 +750,7 @@ func TestVaultRouting_Restore_ExplicitVault(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("POST", "/api/engrams/some-id/restore?vault=myvault", nil)
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -797,6 +817,7 @@ func TestVaultRouting_UpdateState_ExplicitVault(t *testing.T) {
 	body := strings.NewReader(`{"state":"active"}`)
 	req := httptest.NewRequest("PUT", "/api/engrams/some-id/state?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -819,6 +840,7 @@ func TestVaultRouting_UpdateTags_ExplicitVault(t *testing.T) {
 	body := strings.NewReader(`{"tags":["a","b"]}`)
 	req := httptest.NewRequest("PUT", "/api/engrams/some-id/tags?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -859,6 +881,7 @@ func TestVaultRouting_RetryEnrich_ExplicitVault(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("POST", "/api/engrams/some-id/retry-enrich?vault=myvault", nil)
+	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 

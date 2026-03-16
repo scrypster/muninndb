@@ -178,12 +178,12 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/workers", s.withPublicMiddleware(s.handleWorkerStats))
 
 	// Authenticated vault routes — require Bearer API key.
-	mux.HandleFunc("POST /api/engrams/batch", s.withMiddleware(s.handleBatchCreate))
-	mux.HandleFunc("POST /api/engrams", s.withMiddleware(s.handleCreateEngram))
+	mux.HandleFunc("POST /api/engrams/batch", s.withMiddleware(auth.ReadOnlyGuard(s.handleBatchCreate)))
+	mux.HandleFunc("POST /api/engrams", s.withMiddleware(auth.ReadOnlyGuard(s.handleCreateEngram)))
 	mux.HandleFunc("GET /api/engrams/{id}", s.withMiddleware(auth.WriteOnlyGuard(s.handleGetEngram)))
-	mux.HandleFunc("DELETE /api/engrams/{id}", s.withMiddleware(s.handleDeleteEngram))
+	mux.HandleFunc("DELETE /api/engrams/{id}", s.withMiddleware(auth.ReadOnlyGuard(s.handleDeleteEngram)))
 	mux.HandleFunc("POST /api/activate", s.withMiddleware(auth.WriteOnlyGuard(s.handleActivate)))
-	mux.HandleFunc("POST /api/link", s.withMiddleware(s.handleLink))
+	mux.HandleFunc("POST /api/link", s.withMiddleware(auth.ReadOnlyGuard(s.handleLink)))
 	mux.HandleFunc("GET /api/stats", s.withMiddleware(auth.WriteOnlyGuard(s.handleStats)))
 	mux.HandleFunc("GET /api/engrams", s.withMiddleware(auth.WriteOnlyGuard(s.handleListEngrams)))
 	mux.HandleFunc("GET /api/engrams/{id}/links", s.withMiddleware(auth.WriteOnlyGuard(s.handleGetEngramLinks)))
@@ -198,16 +198,16 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	// These POST operations mutate existing engrams and return engram data in
 	// their response body — write-only keys must not be able to extract vault
 	// data via any response path.
-	mux.HandleFunc("POST /api/engrams/{id}/evolve", s.withMiddleware(auth.WriteOnlyGuard(s.handleEvolve)))
-	mux.HandleFunc("POST /api/consolidate", s.withMiddleware(auth.WriteOnlyGuard(s.handleConsolidateEngrams)))
-	mux.HandleFunc("POST /api/decide", s.withMiddleware(auth.WriteOnlyGuard(s.handleDecide)))
-	mux.HandleFunc("POST /api/engrams/{id}/restore", s.withMiddleware(auth.WriteOnlyGuard(s.handleRestore)))
+	mux.HandleFunc("POST /api/engrams/{id}/evolve", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleEvolve))))
+	mux.HandleFunc("POST /api/consolidate", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleConsolidateEngrams))))
+	mux.HandleFunc("POST /api/decide", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleDecide))))
+	mux.HandleFunc("POST /api/engrams/{id}/restore", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleRestore))))
 	mux.HandleFunc("POST /api/traverse", s.withMiddleware(auth.WriteOnlyGuard(s.handleTraverse)))
 	mux.HandleFunc("POST /api/explain", s.withMiddleware(auth.WriteOnlyGuard(s.handleExplain)))
-	mux.HandleFunc("PUT /api/engrams/{id}/state", s.withMiddleware(s.handleSetState))
-	mux.HandleFunc("PUT /api/engrams/{id}/tags", s.withMiddleware(s.handleUpdateTags))
+	mux.HandleFunc("PUT /api/engrams/{id}/state", s.withMiddleware(auth.ReadOnlyGuard(s.handleSetState)))
+	mux.HandleFunc("PUT /api/engrams/{id}/tags", s.withMiddleware(auth.ReadOnlyGuard(s.handleUpdateTags)))
 	mux.HandleFunc("GET /api/deleted", s.withMiddleware(auth.WriteOnlyGuard(s.handleListDeleted)))
-	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(auth.WriteOnlyGuard(s.handleRetryEnrich)))
+	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleRetryEnrich))))
 	mux.HandleFunc("GET /api/contradictions", s.withMiddleware(auth.WriteOnlyGuard(s.handleContradictions)))
 	mux.HandleFunc("GET /api/guide", s.withMiddleware(auth.WriteOnlyGuard(s.handleGuide)))
 

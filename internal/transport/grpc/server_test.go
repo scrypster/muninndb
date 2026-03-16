@@ -26,6 +26,7 @@ import (
 type mockEngine struct {
 	helloFn                func(ctx context.Context, req *pb.HelloRequest) (*pb.HelloResponse, error)
 	writeFn                func(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error)
+	batchWriteFn           func(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error)
 	readFn                 func(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error)
 	activateFn             func(ctx context.Context, req *pb.ActivateRequest) (*pb.ActivateResponse, error)
 	linkFn                 func(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error)
@@ -51,6 +52,9 @@ func (m *mockEngine) Write(ctx context.Context, req *pb.WriteRequest) (*pb.Write
 }
 
 func (m *mockEngine) BatchWrite(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error) {
+	if m.batchWriteFn != nil {
+		return m.batchWriteFn(ctx, req)
+	}
 	results := make([]*pb.BatchWriteItemResult, len(req.Requests))
 	for i := range req.Requests {
 		results[i] = &pb.BatchWriteItemResult{
@@ -374,7 +378,7 @@ func TestAuthUnaryInterceptor_InvalidKey(t *testing.T) {
 
 // TestAuthUnaryInterceptor_NoKeyPublicVault configures the default vault as
 // public, sends a request without any auth metadata, and verifies the handler
-// is called with vault "default" and mode "observe".
+// is called with vault "default" and mode "full".
 func TestAuthUnaryInterceptor_NoKeyPublicVault(t *testing.T) {
 	store := newTestAuthStore(t)
 	if err := store.SetVaultConfig(auth.VaultConfig{Name: "default", Public: true}); err != nil {
@@ -401,8 +405,8 @@ func TestAuthUnaryInterceptor_NoKeyPublicVault(t *testing.T) {
 	if capturedVault != "default" {
 		t.Errorf("vault = %q, want \"default\"", capturedVault)
 	}
-	if capturedMode != "observe" {
-		t.Errorf("mode = %q, want \"observe\"", capturedMode)
+	if capturedMode != "full" {
+		t.Errorf("mode = %q, want \"full\"", capturedMode)
 	}
 }
 
@@ -631,8 +635,8 @@ func TestAuthStreamInterceptor_NoKeyPublicVault(t *testing.T) {
 	if capturedVault != "default" {
 		t.Errorf("vault = %q, want \"default\"", capturedVault)
 	}
-	if capturedMode != "observe" {
-		t.Errorf("mode = %q, want \"observe\"", capturedMode)
+	if capturedMode != "full" {
+		t.Errorf("mode = %q, want \"full\"", capturedMode)
 	}
 }
 
@@ -687,6 +691,178 @@ func TestAuthStreamInterceptor_XApiKey(t *testing.T) {
 	}
 	if capturedMode != "observe" {
 		t.Errorf("mode = %q, want \"observe\"", capturedMode)
+	}
+}
+
+func TestPublicVaultFullMutatingUnaryRPCsAllowed(t *testing.T) {
+	store := newTestAuthStore(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "default", Public: true}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	writeCalled := false
+	batchWriteCalled := false
+	linkCalled := false
+	forgetCalled := false
+	srv := transportgrpc.NewServer(":0", &mockEngine{
+		writeFn: func(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
+			writeCalled = true
+			return &pb.WriteResponse{ID: "engram-123"}, nil
+		},
+		batchWriteFn: func(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error) {
+			batchWriteCalled = true
+			return &pb.BatchWriteResponse{}, nil
+		},
+		linkFn: func(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error) {
+			linkCalled = true
+			return &pb.LinkResponse{OK: true}, nil
+		},
+		forgetFn: func(ctx context.Context, req *pb.ForgetRequest) (*pb.ForgetResponse, error) {
+			forgetCalled = true
+			return &pb.ForgetResponse{OK: true}, nil
+		},
+	}, store, nil)
+
+	cases := []struct {
+		name   string
+		req    any
+		invoke func(context.Context, any) (any, error)
+		called *bool
+	}{
+		{
+			name:   "Write",
+			req:    &pb.WriteRequest{Vault: "default", Concept: "test", Content: "hello"},
+			invoke: func(ctx context.Context, req any) (any, error) { return srv.Write(ctx, req.(*pb.WriteRequest)) },
+			called: &writeCalled,
+		},
+		{
+			name: "BatchWrite",
+			req:  &pb.BatchWriteRequest{Requests: []*pb.WriteRequest{{Vault: "default", Concept: "a", Content: "x"}}},
+			invoke: func(ctx context.Context, req any) (any, error) {
+				return srv.BatchWrite(ctx, req.(*pb.BatchWriteRequest))
+			},
+			called: &batchWriteCalled,
+		},
+		{
+			name:   "Link",
+			req:    &pb.LinkRequest{Vault: "default", SourceID: "id1", TargetID: "id2", RelType: 1},
+			invoke: func(ctx context.Context, req any) (any, error) { return srv.Link(ctx, req.(*pb.LinkRequest)) },
+			called: &linkCalled,
+		},
+		{
+			name:   "Forget",
+			req:    &pb.ForgetRequest{Vault: "default", ID: "id1"},
+			invoke: func(ctx context.Context, req any) (any, error) { return srv.Forget(ctx, req.(*pb.ForgetRequest)) },
+			called: &forgetCalled,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			*tc.called = false
+			_, err := srv.TestableAuthUnaryInterceptor(context.Background(), tc.req, nil, func(ctx context.Context, req any) (any, error) {
+				return tc.invoke(ctx, req)
+			})
+			if err != nil {
+				t.Fatalf("expected success, got %v", err)
+			}
+			if !*tc.called {
+				t.Fatal("engine method should be called for public full-mode access")
+			}
+		})
+	}
+}
+
+func TestObserveKeyMutatingUnaryRPCsDenied(t *testing.T) {
+	store := newTestAuthStore(t)
+	token, _, err := store.GenerateAPIKey("default", "observer", auth.ModeObserve, nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+
+	writeCalled := false
+	batchWriteCalled := false
+	linkCalled := false
+	forgetCalled := false
+	srv := transportgrpc.NewServer(":0", &mockEngine{
+		writeFn: func(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
+			writeCalled = true
+			return &pb.WriteResponse{ID: "engram-123"}, nil
+		},
+		batchWriteFn: func(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error) {
+			batchWriteCalled = true
+			return &pb.BatchWriteResponse{}, nil
+		},
+		linkFn: func(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error) {
+			linkCalled = true
+			return &pb.LinkResponse{OK: true}, nil
+		},
+		forgetFn: func(ctx context.Context, req *pb.ForgetRequest) (*pb.ForgetResponse, error) {
+			forgetCalled = true
+			return &pb.ForgetResponse{OK: true}, nil
+		},
+	}, store, nil)
+
+	cases := []struct {
+		name   string
+		req    any
+		invoke func(context.Context, any) (any, error)
+		called *bool
+	}{
+		{
+			name:   "Write",
+			req:    &pb.WriteRequest{Vault: "default", Concept: "test", Content: "hello"},
+			invoke: func(ctx context.Context, req any) (any, error) { return srv.Write(ctx, req.(*pb.WriteRequest)) },
+			called: &writeCalled,
+		},
+		{
+			name: "BatchWrite",
+			req:  &pb.BatchWriteRequest{Requests: []*pb.WriteRequest{{Vault: "default", Concept: "a", Content: "x"}}},
+			invoke: func(ctx context.Context, req any) (any, error) {
+				return srv.BatchWrite(ctx, req.(*pb.BatchWriteRequest))
+			},
+			called: &batchWriteCalled,
+		},
+		{
+			name:   "Link",
+			req:    &pb.LinkRequest{Vault: "default", SourceID: "id1", TargetID: "id2", RelType: 1},
+			invoke: func(ctx context.Context, req any) (any, error) { return srv.Link(ctx, req.(*pb.LinkRequest)) },
+			called: &linkCalled,
+		},
+		{
+			name:   "Forget",
+			req:    &pb.ForgetRequest{Vault: "default", ID: "id1"},
+			invoke: func(ctx context.Context, req any) (any, error) { return srv.Forget(ctx, req.(*pb.ForgetRequest)) },
+			called: &forgetCalled,
+		},
+	}
+
+	md := metadata.Pairs("x-api-key", token)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			*tc.called = false
+			ctx := metadata.NewIncomingContext(context.Background(), md)
+			_, err := srv.TestableAuthUnaryInterceptor(ctx, tc.req, nil, func(ctx context.Context, req any) (any, error) {
+				return tc.invoke(ctx, req)
+			})
+			if err == nil {
+				t.Fatal("expected permission error, got nil")
+			}
+			st, ok := status.FromError(err)
+			if !ok {
+				t.Fatalf("error is not a gRPC status: %v", err)
+			}
+			if st.Code() != codes.PermissionDenied {
+				t.Fatalf("code = %v, want PermissionDenied", st.Code())
+			}
+			if st.Message() != "read-only key cannot write" {
+				t.Fatalf("message = %q, want %q", st.Message(), "read-only key cannot write")
+			}
+			if *tc.called {
+				t.Fatal("engine method should not be called for observe-mode access")
+			}
+		})
 	}
 }
 

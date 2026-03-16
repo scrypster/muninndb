@@ -119,7 +119,9 @@ func TestAuthMiddleware_PublicVaultNoKey(t *testing.T) {
 	// Unconfigured vaults now default to locked (fail-closed).
 	s.SetVaultConfig(auth.VaultConfig{Name: "default", Public: true})
 
+	var capturedMode string
 	handler := s.VaultAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		capturedMode, _ = r.Context().Value(auth.ContextMode).(string)
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -129,6 +131,9 @@ func TestAuthMiddleware_PublicVaultNoKey(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("public vault no key: expected 200, got %d", w.Code)
+	}
+	if capturedMode != auth.ModeFull {
+		t.Errorf("public vault no key: expected mode %q, got %q", auth.ModeFull, capturedMode)
 	}
 }
 
