@@ -101,11 +101,9 @@ func TestReindexFTSVault_SearchWorksAfter(t *testing.T) {
 		t.Errorf("ReindexFTSVault returned count %d, want 1", count)
 	}
 
-	// Build a standalone FTS index on the same DB to perform the search.
-	// testEnv uses fts.New(db) internally; we access it via the engine by
-	// calling ReindexFTSVault (which uses e.fts internally) and then search.
-	// We construct our own Index over the same DB to call Search directly.
-	ftsIdx := store.NewFTSIndex()
+	// Use the engine's own FTS index to search — same index used during
+	// ReindexFTSVault, so results are immediately visible.
+	ftsIdx := eng.fts
 
 	// Search for "run" — the Porter2 stem of "running".
 	results, err := ftsIdx.Search(ctx, ws, "run", 5)

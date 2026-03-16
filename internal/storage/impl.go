@@ -13,7 +13,6 @@ import (
 	"github.com/cockroachdb/pebble"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/hashicorp/golang-lru/v2/expirable"
-	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/provenance"
 	"github.com/scrypster/muninndb/internal/scoring"
 	"github.com/scrypster/muninndb/internal/storage/erf"
@@ -625,12 +624,6 @@ func (ps *PebbleStore) FTSVersionMarker(ws [8]byte) (byte, bool, error) {
 		return 0, false, nil
 	}
 	return val[0], true, nil
-}
-
-// NewFTSIndex returns a new FTS index backed by the store's Pebble database.
-// Callers are responsible for any lifecycle management of the returned index.
-func (ps *PebbleStore) NewFTSIndex() *fts.Index {
-	return fts.New(ps.db)
 }
 
 // TransitionCache returns the tiered PAS transition cache.
