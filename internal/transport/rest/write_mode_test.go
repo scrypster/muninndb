@@ -61,13 +61,16 @@ func TestWriteOnlyMode_ReadHandlersBlocked(t *testing.T) {
 		{"Contradictions", "GET", s.handleContradictions},
 		{"Guide", "GET", s.handleGuide},
 		{"Stats", "GET", s.handleStats},
-		// POST mutation endpoints that return full engram payloads — blocked to
-		// prevent data exfiltration via response body (hardening round 1).
+		// POST/PUT mutation endpoints that return vault data — blocked to
+		// prevent data exfiltration via response body (hardening rounds 1 & 2).
 		{"Evolve", "POST", s.handleEvolve},
 		{"Consolidate", "POST", s.handleConsolidateEngrams},
 		{"Decide", "POST", s.handleDecide},
 		{"Restore", "POST", s.handleRestore},
 		{"RetryEnrich", "POST", s.handleRetryEnrich},
+		// PUT mutation endpoints that return state/tag data — blocked in hardening round 2.
+		{"SetState", "PUT", s.handleSetState},
+		{"UpdateTags", "PUT", s.handleUpdateTags},
 	}
 
 	for _, tc := range cases {
@@ -98,8 +101,6 @@ func TestWriteOnlyMode_WriteHandlersNotBlocked(t *testing.T) {
 		{"BatchCreate", s.handleBatchCreate},
 		{"Link", s.handleLink},
 		{"DeleteEngram", s.handleDeleteEngram},
-		{"SetState", s.handleSetState},
-		{"UpdateTags", s.handleUpdateTags},
 	}
 
 	for _, tc := range cases {
@@ -307,6 +308,33 @@ func TestReadOnlyMode_PublicVaultSemanticReadEndpointsPassThrough(t *testing.T) 
 			s.mux.ServeHTTP(w, req)
 			if w.Code == http.StatusForbidden {
 				t.Fatalf("expected non-403 response, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+
+// TestWriteOnlyMode_FullModeCanMutateStateAndTags verifies that full-mode
+// sessions can call PUT state and PUT tags (regression for hardening round 2).
+func TestWriteOnlyMode_FullModeCanMutateStateAndTags(t *testing.T) {
+	s := newWriteModeTestServer(t)
+
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"SetState", s.handleSetState},
+		{"UpdateTags", s.handleUpdateTags},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPut, "/", nil)
+			req = withFullCtx(req)
+			w := httptest.NewRecorder()
+			auth.ReadOnlyGuard(auth.WriteOnlyGuard(tc.handler))(w, req)
+			if w.Code == http.StatusForbidden {
+				t.Errorf("%s: full mode must not return 403", tc.name)
 			}
 		})
 	}
