@@ -4,9 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/storage"
-	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 // TestReindexFTSVault_SetsVersionMarker verifies that ReindexFTSVault writes
@@ -56,15 +54,15 @@ func TestReindexFTSVault_SetsVersionMarker(t *testing.T) {
 	}
 
 	// Verify the version marker was set to 0x01.
-	versionKey := keys.FTSVersionKey(ws)
-	val, closer, err := store.GetDB().Get(versionKey)
+	ver, ok, err := store.FTSVersionMarker(ws)
 	if err != nil {
-		t.Fatalf("GetDB.Get(FTSVersionKey): %v — version marker was not written", err)
+		t.Fatalf("FTSVersionMarker: %v", err)
 	}
-	defer closer.Close()
-
-	if len(val) == 0 || val[0] != 0x01 {
-		t.Errorf("FTSVersionKey value = %v, want [0x01]", val)
+	if !ok {
+		t.Fatal("FTSVersionMarker not set after ReindexFTSVault")
+	}
+	if ver != 0x01 {
+		t.Errorf("FTSVersionMarker = 0x%02X, want 0x01", ver)
 	}
 }
 
@@ -107,7 +105,7 @@ func TestReindexFTSVault_SearchWorksAfter(t *testing.T) {
 	// testEnv uses fts.New(db) internally; we access it via the engine by
 	// calling ReindexFTSVault (which uses e.fts internally) and then search.
 	// We construct our own Index over the same DB to call Search directly.
-	ftsIdx := fts.New(store.GetDB())
+	ftsIdx := store.NewFTSIndex()
 
 	// Search for "run" — the Porter2 stem of "running".
 	results, err := ftsIdx.Search(ctx, ws, "run", 5)

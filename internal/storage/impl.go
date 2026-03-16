@@ -13,6 +13,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/provenance"
 	"github.com/scrypster/muninndb/internal/scoring"
 	"github.com/scrypster/muninndb/internal/storage/erf"
@@ -549,28 +550,12 @@ func (ps *PebbleStore) ReadCoherence(vaultPrefix [8]byte) ([7]int64, bool, error
 	return data, true, nil
 }
 
-// GetDB returns the underlying Pebble database instance.
-//
-// Deprecated: use purpose-built methods instead:
-//   - Checkpoint() for backup snapshots
-//   - PebbleMetrics() for observability
-//   - ScoringStore() for the scoring.Store instance
-//   - ProvenanceStore() for the provenance.Store instance
-//   - ClearFTSKeys() / SetFTSVersionMarker() for FTS reindex operations
-//
-// GetDB will be removed once all call sites are migrated.
-func (ps *PebbleStore) GetDB() *pebble.DB {
-	return ps.db
-}
-
 // Checkpoint creates a Pebble checkpoint (consistent on-disk snapshot) at destDir.
-// This is a purpose-built replacement for store.GetDB().Checkpoint(destDir).
 func (ps *PebbleStore) Checkpoint(destDir string) error {
 	return ps.db.Checkpoint(destDir)
 }
 
 // PebbleMetrics returns the raw Pebble metrics for observability and diagnostics.
-// This is a purpose-built replacement for store.GetDB().Metrics().
 func (ps *PebbleStore) PebbleMetrics() *pebble.Metrics {
 	return ps.db.Metrics()
 }
@@ -578,7 +563,6 @@ func (ps *PebbleStore) PebbleMetrics() *pebble.Metrics {
 // ScoringStore returns the scoring.Store that manages per-vault learnable weights.
 // The store is constructed once at PebbleStore creation and shared — callers must
 // not close it independently.
-// This is a purpose-built replacement for scoring.NewStore(store.GetDB()).
 func (ps *PebbleStore) ScoringStore() *scoring.Store {
 	return ps.scoringStore
 }
@@ -586,7 +570,6 @@ func (ps *PebbleStore) ScoringStore() *scoring.Store {
 // ProvenanceStore returns the provenance.Store used for audit trail appends.
 // The store is constructed once at PebbleStore creation and shared — callers must
 // not close it independently.
-// This is a purpose-built replacement for provenance.NewStore(store.GetDB()).
 func (ps *PebbleStore) ProvenanceStore() *provenance.Store {
 	return ps.provenance
 }
@@ -594,7 +577,6 @@ func (ps *PebbleStore) ProvenanceStore() *provenance.Store {
 // ClearFTSKeys deletes all FTS index keys for the given vault workspace prefix via
 // range tombstones. Prefixes cleared: 0x05 (posting lists), 0x06 (trigrams),
 // 0x08 (FTS global stats), 0x09 (per-term stats).
-// This is a purpose-built replacement for raw Pebble batch operations in engine_reindex_fts.go.
 func (ps *PebbleStore) ClearFTSKeys(ws, wsPlus [8]byte) error {
 	ftsPrefixes := []byte{0x05, 0x06, 0x08, 0x09}
 	batch := ps.db.NewBatch()
@@ -619,13 +601,36 @@ func (ps *PebbleStore) ClearFTSKeys(ws, wsPlus [8]byte) error {
 }
 
 // SetFTSVersionMarker writes the FTS schema version marker for the given workspace.
-// This is a purpose-built replacement for the raw db.Set in engine_reindex_fts.go.
 func (ps *PebbleStore) SetFTSVersionMarker(ws [8]byte, version byte) error {
 	versionKey := keys.FTSVersionKey(ws)
 	if err := ps.db.Set(versionKey, []byte{version}, pebble.Sync); err != nil {
 		return fmt.Errorf("storage: set FTS version marker: %w", err)
 	}
 	return nil
+}
+
+// FTSVersionMarker reads the FTS schema version marker for the given workspace.
+// Returns the version byte, true if set, or 0, false if not yet written.
+func (ps *PebbleStore) FTSVersionMarker(ws [8]byte) (byte, bool, error) {
+	versionKey := keys.FTSVersionKey(ws)
+	val, closer, err := ps.db.Get(versionKey)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("storage: get FTS version marker: %w", err)
+	}
+	defer closer.Close()
+	if len(val) == 0 {
+		return 0, false, nil
+	}
+	return val[0], true, nil
+}
+
+// NewFTSIndex returns a new FTS index backed by the store's Pebble database.
+// Callers are responsible for any lifecycle management of the returned index.
+func (ps *PebbleStore) NewFTSIndex() *fts.Index {
+	return fts.New(ps.db)
 }
 
 // TransitionCache returns the tiered PAS transition cache.

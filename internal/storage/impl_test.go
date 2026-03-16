@@ -958,14 +958,6 @@ func TestStoreCacheLen(t *testing.T) {
 	}
 }
 
-// TestGetDB verifies that GetDB returns the non-nil Pebble instance.
-func TestGetDB(t *testing.T) {
-	store := newTestStore(t)
-	if store.GetDB() == nil {
-		t.Error("expected GetDB() to return non-nil *pebble.DB")
-	}
-}
-
 // TestDiskSize verifies that DiskSize() returns > 0 after writing some engrams.
 func TestDiskSize(t *testing.T) {
 	store := newTestStore(t)
@@ -1007,13 +999,13 @@ func TestContextWithSnapshot(t *testing.T) {
 		t.Error("expected pebbleReader to return non-nil reader when snapshot is in ctx")
 	}
 	// Verify it really used the snapshot (not the live DB) by checking type.
-	if reader == store.GetDB() {
+	if reader == store.db {
 		t.Error("expected pebbleReader to return the snapshot, not the live DB")
 	}
 
 	// Without snapshot in ctx, pebbleReader should fall back to the live DB.
 	liveReader := store.pebbleReader(ctx)
-	if liveReader != store.GetDB() {
+	if liveReader != store.db {
 		t.Error("expected pebbleReader to return the live DB when no snapshot in ctx")
 	}
 }
