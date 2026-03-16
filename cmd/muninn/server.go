@@ -1100,7 +1100,7 @@ func runServer() {
 
 	// Build MCP server
 	mcpAdapter := mcp.NewEngineAdapter(eng, enrichPlugin, pStore)
-	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, clientTLS)
+	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, authStore, clientTLS)
 
 	// Build gRPC server
 	grpcAdapter := grpcpkg.NewEngineAdapter(eng)

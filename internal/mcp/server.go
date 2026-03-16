@@ -14,13 +14,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/auth"
 )
 
 // MCPServer serves the MCP JSON-RPC 2.0 protocol on a single HTTP mux.
 type MCPServer struct {
-	engine    EngineInterface
-	token     string // required Bearer token; empty = no auth
-	srv       *http.Server
+	engine   EngineInterface
+	token    string         // required Bearer token (mdb_ static token); empty = no auth
+	authKeys apiKeyValidator // optional: enables mk_ vault API key auth; nil = disabled
+	srv      *http.Server
 	tlsConfig *tls.Config // nil = plain TCP
 
 	sseSessionsMu sync.RWMutex
@@ -45,17 +48,19 @@ func (s *MCPServer) getIdempotencyLock(opID string) *sync.Mutex {
 }
 
 type sseSession struct {
-	ch        chan []byte
-	authToken string // bearer token used to establish the session
+	ch   chan []byte
+	auth AuthContext // auth context established when the SSE stream was opened
 }
 
 // New creates an MCPServer. addr is the listen address (e.g., ":8750").
-// token is the required Bearer token; pass "" to disable auth.
+// token is the required static Bearer token (mdb_ style); pass "" to disable auth.
+// keyAuth, if non-nil, enables mk_ vault API key authentication with automatic vault pinning.
 // tlsConfig, if non-nil, enables TLS on the listener.
-func New(addr string, eng EngineInterface, token string, tlsConfig *tls.Config) *MCPServer {
+func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator, tlsConfig *tls.Config) *MCPServer {
 	s := &MCPServer{
 		engine:      eng,
 		token:       token,
+		authKeys:    keyAuth,
 		sseSessions: make(map[string]*sseSession),
 		tlsConfig:   tlsConfig,
 	}
@@ -120,14 +125,14 @@ func (s *MCPServer) withMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
-		auth := authFromRequest(r, s.token)
-		if !auth.Authorized {
+		a := authFromRequest(r, s.token, s.authKeys)
+		if !a.Authorized {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32001,"message":"unauthorized"}}`))
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(contextWithAuth(r.Context(), a)))
 	}
 }
 
@@ -145,6 +150,7 @@ func (s *MCPServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a := authFromContext(r.Context())
 	switch {
 	case req.Method == "initialize":
 		s.handleInitialize(w, &req)
@@ -157,7 +163,7 @@ func (s *MCPServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 	case req.Method == "tools/list":
 		sendResult(w, req.ID, map[string]any{"tools": allToolDefinitions()})
 	case req.Method == "tools/call":
-		s.dispatchToolCall(ctx, w, &req)
+		s.dispatchToolCall(ctx, w, &req, a)
 	case req.Method == "":
 		sendError(w, req.ID, -32601, "method not found: method is required")
 	default:
@@ -165,7 +171,7 @@ func (s *MCPServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter, req *JSONRPCRequest) {
+func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter, req *JSONRPCRequest, a AuthContext) {
 	if req.Params == nil {
 		sendError(w, req.ID, -32602, "invalid params: params required")
 		return
@@ -176,10 +182,28 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		args = make(map[string]any)
 	}
 
-	vault, errMsg := resolveVault(nil, args)
+	// Resolve vault — pinned to key's vault when authenticated via mk_ API key.
+	vault, errMsg := resolveVault(a.Vault, args)
 	if errMsg != "" {
 		sendError(w, req.ID, -32602, "invalid params: "+errMsg)
 		return
+	}
+
+	// Mode enforcement for mk_ vault keys.
+	if a.IsAPIKey {
+		toolName := req.Params.Name
+		switch a.Mode {
+		case auth.ModeObserve:
+			if isMutatingTool(toolName) {
+				sendError(w, req.ID, -32001, "forbidden: read-only key cannot call mutating tool "+toolName)
+				return
+			}
+		case auth.ModeWrite:
+			if !isMutatingTool(toolName) {
+				sendError(w, req.ID, -32001, "forbidden: write-only key cannot call read tool "+toolName)
+				return
+			}
+		}
 	}
 
 	handlers := map[string]func(context.Context, http.ResponseWriter, json.RawMessage, string, map[string]any){
@@ -262,8 +286,8 @@ func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auth check
-	auth := authFromRequest(r, s.token)
-	if !auth.Authorized {
+	a := authFromRequest(r, s.token, s.authKeys)
+	if !a.Authorized {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -275,7 +299,7 @@ func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ch := make(chan []byte, 64)
 
 	s.sseSessionsMu.Lock()
-	s.sseSessions[sessionID] = &sseSession{ch: ch, authToken: auth.Token}
+	s.sseSessions[sessionID] = &sseSession{ch: ch, auth: a}
 	s.sseSessionsMu.Unlock()
 
 	defer func() {
@@ -330,6 +354,8 @@ func (s *MCPServer) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Thread the auth context established at SSE stream open time into the request.
+	r = r.WithContext(contextWithAuth(r.Context(), sess.auth))
 	s.processAndPushSSE(w, r, []chan []byte{sess.ch}, sessionID)
 }
 
@@ -345,18 +371,19 @@ func (s *MCPServer) handleStreamablePost(w http.ResponseWriter, r *http.Request)
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
-	auth := authFromRequest(r, s.token)
-	if !auth.Authorized {
+	a := authFromRequest(r, s.token, s.authKeys)
+	if !a.Authorized {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32001,"message":"unauthorized"}}`))
 		return
 	}
+	r = r.WithContext(contextWithAuth(r.Context(), a))
 
 	// If the client also has SSE streams open, route through the async
 	// SSE handler so the response is pushed to ALL matching event streams
 	// (some clients read from SSE even when they POST to the base URL).
-	sseChannels := s.findSSEChannelsByToken(auth.Token)
+	sseChannels := s.findSSEChannelsByToken(a.Token)
 	if len(sseChannels) > 0 {
 		s.processAndPushSSE(w, r, sseChannels, "streamable")
 		return
@@ -372,7 +399,7 @@ func (s *MCPServer) findSSEChannelsByToken(token string) []chan []byte {
 	defer s.sseSessionsMu.RUnlock()
 	var channels []chan []byte
 	for _, sess := range s.sseSessions {
-		if sess.authToken == token {
+		if sess.auth.Token == token {
 			channels = append(channels, sess.ch)
 		}
 	}
@@ -420,7 +447,7 @@ func (s *MCPServer) processAndPushSSE(w http.ResponseWriter, r *http.Request, ch
 	case req.Method == "tools/list":
 		sendResult(recorder, req.ID, map[string]any{"tools": allToolDefinitions()})
 	case req.Method == "tools/call":
-		s.dispatchToolCall(ctx, recorder, &req)
+		s.dispatchToolCall(ctx, recorder, &req, authFromContext(r.Context()))
 	case req.Method == "":
 		sendError(recorder, req.ID, -32601, "method not found: method is required")
 	default:

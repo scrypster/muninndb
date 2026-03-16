@@ -21,7 +21,7 @@ import (
 
 // newTestServerWith creates a server backed by the supplied engine.
 func newTestServerWith(eng EngineInterface) *MCPServer {
-	return New(":0", eng, "", nil)
+	return New(":0", eng, "", nil, nil)
 }
 
 // extractInnerJSON decodes the MCP textContent envelope and returns the inner

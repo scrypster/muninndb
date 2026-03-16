@@ -208,24 +208,21 @@ func TestSessionStore_DoubleClose(t *testing.T) {
 }
 
 func TestResolveVault_SessionPin(t *testing.T) {
-	sess := &mcpSession{vault: "project-a"}
-	vault, errMsg := resolveVault(sess, map[string]any{})
+	vault, errMsg := resolveVault("project-a", map[string]any{})
 	if vault != "project-a" || errMsg != "" {
 		t.Fatalf("got vault=%q err=%q", vault, errMsg)
 	}
 }
 
 func TestResolveVault_ArgMatchesPin(t *testing.T) {
-	sess := &mcpSession{vault: "project-a"}
-	vault, errMsg := resolveVault(sess, map[string]any{"vault": "project-a"})
+	vault, errMsg := resolveVault("project-a", map[string]any{"vault": "project-a"})
 	if vault != "project-a" || errMsg != "" {
 		t.Fatalf("got vault=%q err=%q", vault, errMsg)
 	}
 }
 
 func TestResolveVault_Mismatch(t *testing.T) {
-	sess := &mcpSession{vault: "project-a"}
-	_, errMsg := resolveVault(sess, map[string]any{"vault": "project-b"})
+	_, errMsg := resolveVault("project-a", map[string]any{"vault": "project-b"})
 	if errMsg == "" {
 		t.Fatal("expected vault mismatch error")
 	}
@@ -236,21 +233,21 @@ func TestResolveVault_Mismatch(t *testing.T) {
 
 func TestResolveVault_NonStringVault(t *testing.T) {
 	// A non-string vault arg is treated as absent (falls back to "default")
-	vault, errMsg := resolveVault(nil, map[string]any{"vault": 42})
+	vault, errMsg := resolveVault("", map[string]any{"vault": 42})
 	if vault != "default" || errMsg != "" {
 		t.Fatalf("expected default fallback for non-string vault, got vault=%q err=%q", vault, errMsg)
 	}
 }
 
 func TestResolveVault_NoSessionWithArg(t *testing.T) {
-	vault, errMsg := resolveVault(nil, map[string]any{"vault": "explicit"})
+	vault, errMsg := resolveVault("", map[string]any{"vault": "explicit"})
 	if vault != "explicit" || errMsg != "" {
 		t.Fatalf("got vault=%q err=%q", vault, errMsg)
 	}
 }
 
 func TestResolveVault_DefaultFallback(t *testing.T) {
-	vault, errMsg := resolveVault(nil, map[string]any{})
+	vault, errMsg := resolveVault("", map[string]any{})
 	if vault != "default" || errMsg != "" {
 		t.Fatalf("got vault=%q err=%q", vault, errMsg)
 	}

@@ -42,7 +42,7 @@ func TestSSESessions_ConcurrentReadWrite(t *testing.T) {
 			ch := make(chan []byte, 64)
 
 			srv.sseSessionsMu.Lock()
-			srv.sseSessions[id] = &sseSession{ch: ch, authToken: "tok"}
+			srv.sseSessions[id] = &sseSession{ch: ch, auth: AuthContext{Token: "tok"}}
 			srv.sseSessionsMu.Unlock()
 
 			runtime.Gosched()
@@ -81,9 +81,9 @@ func TestFindSSEChannelsByToken_ReturnsCorrectChannels(t *testing.T) {
 	ch3 := make(chan []byte, 4)
 
 	srv.sseSessionsMu.Lock()
-	srv.sseSessions["s1"] = &sseSession{ch: ch1, authToken: "token-a"}
-	srv.sseSessions["s2"] = &sseSession{ch: ch2, authToken: "token-b"}
-	srv.sseSessions["s3"] = &sseSession{ch: ch3, authToken: "token-a"}
+	srv.sseSessions["s1"] = &sseSession{ch: ch1, auth: AuthContext{Token: "token-a"}}
+	srv.sseSessions["s2"] = &sseSession{ch: ch2, auth: AuthContext{Token: "token-b"}}
+	srv.sseSessions["s3"] = &sseSession{ch: ch3, auth: AuthContext{Token: "token-a"}}
 	srv.sseSessionsMu.Unlock()
 
 	got := srv.findSSEChannelsByToken("token-a")
@@ -124,8 +124,8 @@ func BenchmarkFindSSEChannelsByToken_Parallel(b *testing.B) {
 	for i := 0; i < 5; i++ {
 		id := fmt.Sprintf("sess%d", i)
 		srv.sseSessions[id] = &sseSession{
-			ch:        make(chan []byte, 64),
-			authToken: "bench-token",
+			ch:   make(chan []byte, 64),
+			auth: AuthContext{Token: "bench-token"},
 		}
 	}
 

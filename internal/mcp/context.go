@@ -2,18 +2,48 @@
 package mcp
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/scrypster/muninndb/internal/auth"
 )
 
 const mcpSessionHeader = "Mcp-Session-Id"
 
-// authFromRequest extracts the Bearer token from the Authorization header.
-// Returns AuthContext{Authorized: true} if token matches or no token is required.
-func authFromRequest(r *http.Request, requiredToken string) AuthContext {
+// apiKeyValidator is the subset of auth.Store used by MCP for vault key auth.
+// Using an interface keeps the mcp package testable without a live Pebble store.
+type apiKeyValidator interface {
+	ValidateAPIKey(token string) (auth.APIKey, error)
+}
+
+// mcpAuthContextKey is the unexported key used to store AuthContext in request context.
+type mcpAuthContextKey struct{}
+
+// contextWithAuth returns a new context carrying the given AuthContext.
+func contextWithAuth(ctx context.Context, a AuthContext) context.Context {
+	return context.WithValue(ctx, mcpAuthContextKey{}, a)
+}
+
+// authFromContext retrieves the AuthContext stored by contextWithAuth.
+// Returns a zero-value AuthContext if none is present.
+func authFromContext(ctx context.Context) AuthContext {
+	a, _ := ctx.Value(mcpAuthContextKey{}).(AuthContext)
+	return a
+}
+
+// authFromRequest extracts the Bearer token from the Authorization header and
+// authenticates it in priority order:
+//
+//  1. Static mdb_ token (constant-time compare) — backward compatible, no vault pinning.
+//  2. mk_ vault API key (via apiKeyStore.ValidateAPIKey) — vault-pinned, mode-enforced.
+//
+// Returns AuthContext{Authorized: true} if the server has no token configured.
+// apiKeyStore may be nil to disable mk_ key auth (legacy mode).
+func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyValidator) AuthContext {
 	if requiredToken == "" {
 		return AuthContext{Authorized: true}
 	}
@@ -22,7 +52,23 @@ func authFromRequest(r *http.Request, requiredToken string) AuthContext {
 	if !found || token == "" {
 		return AuthContext{Authorized: false}
 	}
-	return AuthContext{Token: token, Authorized: subtle.ConstantTimeCompare([]byte(token), []byte(requiredToken)) == 1}
+	// 1. Static token — always tried first (constant-time to prevent timing attacks).
+	if subtle.ConstantTimeCompare([]byte(token), []byte(requiredToken)) == 1 {
+		return AuthContext{Token: token, Authorized: true}
+	}
+	// 2. Vault API key — only attempted for mk_ prefixed tokens when store is available.
+	if apiKeyStore != nil && strings.HasPrefix(token, "mk_") {
+		if key, err := apiKeyStore.ValidateAPIKey(token); err == nil {
+			return AuthContext{
+				Token:      token,
+				Authorized: true,
+				Vault:      key.Vault,
+				Mode:       key.Mode,
+				IsAPIKey:   true,
+			}
+		}
+	}
+	return AuthContext{Authorized: false}
 }
 
 // sessionFromRequest looks up a session by the Mcp-Session-Id header.
@@ -53,24 +99,24 @@ func validateSessionToken(sess *mcpSession, token string) string {
 
 // resolveVault determines the effective vault for a tool call.
 //
-// Resolution order (Opus-approved):
-//  1. Session pinned vault — if session exists and arg matches or is absent: use session vault
-//  2. Session pinned vault — if arg differs: return vault mismatch error
-//  3. No session + explicit arg: use arg
-//  4. No session + no arg: use "default"
+// Resolution order:
+//  1. pinnedVault non-empty (from mk_ key auth) + arg absent or matching → use pinnedVault
+//  2. pinnedVault non-empty + arg differs → vault mismatch error
+//  3. No pinned vault + explicit arg → use arg
+//  4. No pinned vault + no arg → use "default"
 //
 // Returns (vault, errMsg). errMsg is non-empty on error.
-func resolveVault(sess *mcpSession, args map[string]any) (vault string, errMsg string) {
+func resolveVault(pinnedVault string, args map[string]any) (vault string, errMsg string) {
 	argVault, hasArg := vaultFromArgs(args)
 
-	if sess != nil {
-		if !hasArg || argVault == "" || argVault == sess.vault {
-			return sess.vault, ""
+	if pinnedVault != "" {
+		if !hasArg || argVault == "" || argVault == pinnedVault {
+			return pinnedVault, ""
 		}
 		return "", fmt.Sprintf(
-			"vault mismatch: session pinned to %q but tool call specified %q — "+
-				"omit vault arg or match the session vault",
-			sess.vault, argVault,
+			"vault mismatch: key is scoped to %q but tool call specified %q — "+
+				"omit the vault arg or use a key scoped to that vault",
+			pinnedVault, argVault,
 		)
 	}
 
@@ -78,6 +124,34 @@ func resolveVault(sess *mcpSession, args map[string]any) (vault string, errMsg s
 		return argVault, ""
 	}
 	return "default", ""
+}
+
+// isMutatingTool returns true for MCP tools that write, modify, or delete data.
+// Used to enforce mode restrictions when authenticating via an mk_ vault API key.
+//
+// observe-mode keys: blocked from mutating tools.
+// write-mode keys:   blocked from non-mutating tools.
+func isMutatingTool(name string) bool {
+	switch name {
+	case "muninn_remember",
+		"muninn_remember_batch",
+		"muninn_remember_tree",
+		"muninn_add_child",
+		"muninn_forget",
+		"muninn_link",
+		"muninn_evolve",
+		"muninn_consolidate",
+		"muninn_decide",
+		"muninn_restore",
+		"muninn_retry_enrich",
+		"muninn_entity_state",
+		"muninn_entity_state_batch",
+		"muninn_merge_entity",
+		"muninn_replay_enrichment",
+		"muninn_feedback":
+		return true
+	}
+	return false
 }
 
 // vaultFromArgs extracts the vault parameter from tool arguments.

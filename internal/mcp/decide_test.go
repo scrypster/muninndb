@@ -102,7 +102,7 @@ func TestAuthFromRequest_ValidToken(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer "+requiredToken)
 
-	ctx := authFromRequest(req, requiredToken)
+	ctx := authFromRequest(req, requiredToken, nil)
 	if !ctx.Authorized {
 		t.Error("expected Authorized=true for matching token")
 	}
@@ -116,7 +116,7 @@ func TestAuthFromRequest_MissingHeader(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/mcp", nil)
 	// No Authorization header.
 
-	ctx := authFromRequest(req, requiredToken)
+	ctx := authFromRequest(req, requiredToken, nil)
 	if ctx.Authorized {
 		t.Error("expected Authorized=false when Authorization header is absent")
 	}
@@ -127,7 +127,7 @@ func TestAuthFromRequest_WrongToken(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer wrong-token")
 
-	ctx := authFromRequest(req, requiredToken)
+	ctx := authFromRequest(req, requiredToken, nil)
 	if ctx.Authorized {
 		t.Error("expected Authorized=false for wrong token")
 	}
@@ -138,7 +138,7 @@ func TestAuthFromRequest_NoTokenRequired(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/mcp", nil)
 	// No Authorization header.
 
-	ctx := authFromRequest(req, "")
+	ctx := authFromRequest(req, "", nil)
 	if !ctx.Authorized {
 		t.Error("expected Authorized=true when no token is required")
 	}
@@ -150,7 +150,7 @@ func TestAuthFromRequest_MalformedHeader(t *testing.T) {
 	// Missing "Bearer " prefix.
 	req.Header.Set("Authorization", "Token secret-token")
 
-	ctx := authFromRequest(req, requiredToken)
+	ctx := authFromRequest(req, requiredToken, nil)
 	if ctx.Authorized {
 		t.Error("expected Authorized=false when Authorization header lacks 'Bearer ' prefix")
 	}

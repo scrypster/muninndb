@@ -17,7 +17,7 @@ func (e *provenanceEngine) GetProvenance(_ context.Context, _, _ string) ([]Prov
 }
 
 func TestHandleProvenance_HappyPath(t *testing.T) {
-	srv := New(":0", &provenanceEngine{}, "", nil)
+	srv := New(":0", &provenanceEngine{}, "", nil, nil)
 	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_provenance","arguments":{"vault":"default","id":"01HXYZ"}}}`)
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
@@ -80,7 +80,7 @@ func (e *provenanceErrEngine) GetProvenance(_ context.Context, _, _ string) ([]P
 }
 
 func TestHandleProvenance_EngineError(t *testing.T) {
-	srv := New(":0", &provenanceErrEngine{}, "", nil)
+	srv := New(":0", &provenanceErrEngine{}, "", nil, nil)
 	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_provenance","arguments":{"vault":"default","id":"01HXYZ"}}}`)
 	var resp JSONRPCResponse
 	json.NewDecoder(w.Body).Decode(&resp)

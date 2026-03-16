@@ -164,7 +164,7 @@ func (f *fakeEngine) ListEntities(_ context.Context, _ string, _ int, _ string) 
 }
 
 func newTestServer() *MCPServer {
-	return New(":0", &fakeEngine{}, "", nil)
+	return New(":0", &fakeEngine{}, "", nil, nil)
 }
 
 func postRPC(t *testing.T, srv *MCPServer, body string) *httptest.ResponseRecorder {

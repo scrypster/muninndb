@@ -118,7 +118,7 @@ func TestDispatchToolCall_InvalidVaultFallsBackToDefault(t *testing.T) {
 
 func TestWithMiddleware_UnauthorizedRequest(t *testing.T) {
 	// Server with a required token — a request without the Bearer token must get 401.
-	srv := New(":0", &fakeEngine{}, "secret", nil)
+	srv := New(":0", &fakeEngine{}, "secret", nil, nil)
 	req := httptest.NewRequest("GET", "/mcp/tools", nil)
 	// No Authorization header.
 	w := httptest.NewRecorder()
@@ -130,7 +130,7 @@ func TestWithMiddleware_UnauthorizedRequest(t *testing.T) {
 
 func TestWithMiddleware_AuthorizedRequest(t *testing.T) {
 	// Correct Bearer token must succeed.
-	srv := New(":0", &fakeEngine{}, "secret", nil)
+	srv := New(":0", &fakeEngine{}, "secret", nil, nil)
 	req := httptest.NewRequest("GET", "/mcp/tools", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
@@ -154,7 +154,7 @@ func TestWithMiddleware_ContentLengthTooLarge(t *testing.T) {
 // ── handleStreamablePost: auth failure ───────────────────────────────────────
 
 func TestHandleStreamablePost_Unauthorized(t *testing.T) {
-	srv := New(":0", &fakeEngine{}, "secret", nil)
+	srv := New(":0", &fakeEngine{}, "secret", nil, nil)
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_status","arguments":{"vault":"default"}}}`
 	req := httptest.NewRequest("POST", "/mcp", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -235,8 +235,7 @@ func TestVaultFromArgs_InvalidName(t *testing.T) {
 // ── resolveVault with session ─────────────────────────────────────────────────
 
 func TestResolveVault_SessionPinned_ArgAbsent(t *testing.T) {
-	sess := &mcpSession{vault: "work"}
-	vault, errMsg := resolveVault(sess, map[string]any{})
+	vault, errMsg := resolveVault("work", map[string]any{})
 	if errMsg != "" {
 		t.Errorf("expected no error, got: %s", errMsg)
 	}
@@ -246,8 +245,7 @@ func TestResolveVault_SessionPinned_ArgAbsent(t *testing.T) {
 }
 
 func TestResolveVault_SessionPinned_ArgMatches(t *testing.T) {
-	sess := &mcpSession{vault: "work"}
-	vault, errMsg := resolveVault(sess, map[string]any{"vault": "work"})
+	vault, errMsg := resolveVault("work", map[string]any{"vault": "work"})
 	if errMsg != "" {
 		t.Errorf("expected no error, got: %s", errMsg)
 	}
@@ -257,8 +255,7 @@ func TestResolveVault_SessionPinned_ArgMatches(t *testing.T) {
 }
 
 func TestResolveVault_SessionPinned_ArgMismatch(t *testing.T) {
-	sess := &mcpSession{vault: "work"}
-	_, errMsg := resolveVault(sess, map[string]any{"vault": "personal"})
+	_, errMsg := resolveVault("work", map[string]any{"vault": "personal"})
 	if errMsg == "" {
 		t.Error("expected vault mismatch error, got empty")
 	}
@@ -268,7 +265,7 @@ func TestResolveVault_SessionPinned_ArgMismatch(t *testing.T) {
 }
 
 func TestResolveVault_NoSession_NoArg(t *testing.T) {
-	vault, errMsg := resolveVault(nil, map[string]any{})
+	vault, errMsg := resolveVault("", map[string]any{})
 	if errMsg != "" {
 		t.Errorf("expected no error, got: %s", errMsg)
 	}
