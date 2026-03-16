@@ -176,33 +176,17 @@ func writeJSON(v any) {
 	}
 }
 
-// extractOperation scans args for the first non-flag token (the operation name)
-// and returns it along with the remaining flag arguments (op removed).
-// Flags are tokens that start with "-"; flag values follow immediately or as
-// the next token if the flag uses "=" syntax or is a boolean.
+// extractOperation scans args for a known operation name (remember, recall,
+// read, forget) and returns it along with the remaining arguments (op removed).
+// Scanning for known tokens rather than using a flag-skipping heuristic means
+// flag values that start with "-" (e.g. negative numbers) and unrecognized
+// flags never interfere with operation detection.
 func extractOperation(args []string) (op string, rest []string) {
-	i := 0
-	for i < len(args) {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") {
-			// This is the operation name.
-			op = arg
+	for i, arg := range args {
+		switch arg {
+		case "remember", "recall", "read", "forget":
 			rest = append(args[:i:i], args[i+1:]...)
-			return op, rest
-		}
-		// It's a flag. Skip the value token too, but only when one actually
-		// follows and doesn't look like another flag. Without this guard a
-		// missing value causes the next token (the operation name) to be
-		// silently consumed as the flag's value, returning ("", args) and
-		// producing a confusing "unknown operation: " error.
-		if !strings.Contains(arg, "=") {
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i += 2 // flag + value
-			} else {
-				i++ // boolean flag or missing value — skip flag only
-			}
-		} else {
-			i++
+			return arg, rest
 		}
 	}
 	return "", args

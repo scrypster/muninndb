@@ -4,12 +4,10 @@ import (
 	"testing"
 )
 
-// TestExtractOperation_FlagParsing verifies that extractOperation correctly
-// identifies the operation name when flags with and without values are present.
-// Note: without a flag registry the parser cannot distinguish a boolean flag
-// from one that takes a value purely by position, so this test covers the
-// cases that are deterministically solvable.
-func TestExtractOperation_FlagParsing(t *testing.T) {
+// TestExtractOperation verifies that extractOperation correctly identifies the
+// operation name by scanning for known operation tokens, regardless of what
+// flags or flag values surround it.
+func TestExtractOperation(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
@@ -41,19 +39,39 @@ func TestExtractOperation_FlagParsing(t *testing.T) {
 			wantLen: 4,
 		},
 		{
-			// Before the fix: --verbose consumed --data-dir as its value (i+=2
-			// with no lookahead), so "/tmp" was returned as the operation name.
-			// After the fix, --verbose detects that its next token is also a flag
-			// and skips itself only (i++), allowing --data-dir to consume "/tmp"
-			// correctly and "remember" to be identified as the operation.
-			name:    "boolean flag before value-flag — regression guard",
+			// Known-ops scan is unaffected by any flags before the op name.
+			name:    "unrecognized flag before value-flag before op",
 			args:    []string{"--verbose", "--data-dir", "/tmp", "remember"},
 			wantOp:  "remember",
 			wantLen: 3,
 		},
 		{
-			// Flag at end of args with no value or operation following — must not
-			// panic and must return an empty operation cleanly.
+			// Flag value starting with "-" used to fool the old heuristic.
+			// Known-ops scan is immune to this entirely.
+			name:    "flag value starting with dash before op",
+			args:    []string{"--data-dir", "-custom-path", "remember"},
+			wantOp:  "remember",
+			wantLen: 2,
+		},
+		{
+			name:    "all four ops recognized",
+			args:    []string{"recall"},
+			wantOp:  "recall",
+			wantLen: 0,
+		},
+		{
+			name:    "read op",
+			args:    []string{"--vault", "myvault", "read", "--id", "abc"},
+			wantOp:  "read",
+			wantLen: 4,
+		},
+		{
+			name:    "forget op",
+			args:    []string{"forget", "--id", "abc"},
+			wantOp:  "forget",
+			wantLen: 2,
+		},
+		{
 			name:    "flag at end no op",
 			args:    []string{"--data-dir"},
 			wantOp:  "",
