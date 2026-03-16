@@ -79,6 +79,7 @@ type EngineAPI interface {
 	GetBatchEngramLinks(ctx context.Context, req *BatchGetEngramLinksRequest) (*BatchGetEngramLinksResponse, error)
 	ListVaults(ctx context.Context) ([]string, error)
 	GetSession(ctx context.Context, req *GetSessionRequest) (*GetSessionResponse, error)
+	GetActivityCounts(ctx context.Context, req *ActivityCountsRequest) (*ActivityCountsResponse, error)
 	WorkerStats() cognitive.EngineWorkerStats
 	// SubscribeWithDeliver registers a push subscription with a delivery function.
 	// Returns the subscription ID. The deliver func is called from a goroutine
@@ -235,6 +236,24 @@ type GetSessionResponse struct {
 	Total   int           `json:"total"`
 	Offset  int           `json:"offset"`
 	Limit   int           `json:"limit"`
+}
+
+// ActivityCountsRequest requests daily activity counts for a vault.
+type ActivityCountsRequest struct {
+	Vault string    `json:"vault"`
+	Since time.Time `json:"since"`
+	Until time.Time `json:"until"`
+}
+
+// ActivityCountItem is a single day's engram count.
+type ActivityCountItem struct {
+	Date  string `json:"date"`
+	Count int64  `json:"count"`
+}
+
+// ActivityCountsResponse returns per-day engram creation counts.
+type ActivityCountsResponse struct {
+	Counts []ActivityCountItem `json:"counts"`
 }
 
 // EvolveResponse is returned by the evolve endpoint.

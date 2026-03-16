@@ -20,7 +20,22 @@ document.addEventListener('alpine:init', () => {
     stats: { engramCount: 0, vaultCount: 0, storageBytes: 0, indexSize: 0 },
     workerStats: [],
     liveFeed: [],
-    _activityChart: null,
+    activityDays: 7,
+    activityUntil: '',
+    activityShowTable: false,
+    activityData: [],
+    activityLoading: false,
+    activityError: '',
+    activityPresets: [
+      { label: '7d', days: 7 },
+      { label: '14d', days: 14 },
+      { label: '30d', days: 30 },
+      { label: '60d', days: 60 },
+      { label: '90d', days: 90 },
+      { label: '180d', days: 180 },
+    ],
+    _activityFetchId: 0,
+    _activityResizeObserver: null,
     _prevEngramCount: 0,
     _prevVaultCount: 0,
 
@@ -391,6 +406,19 @@ document.addEventListener('alpine:init', () => {
         this._obsInterval = null;
       }
 
+      // Clean up activity chart resources when leaving dashboard.
+      if (view !== 'dashboard') {
+        const canvas = document.getElementById('activityChart');
+        if (canvas && canvas._chart) {
+          try { canvas._chart.destroy(); } catch (_) {}
+          canvas._chart = null;
+        }
+        if (this._activityResizeObserver) {
+          this._activityResizeObserver.disconnect();
+          this._activityResizeObserver = null;
+        }
+      }
+
       if (view === 'dashboard') {
         this.loadStats();
         // Chart init happens after DOM renders
@@ -662,66 +690,161 @@ document.addEventListener('alpine:init', () => {
     _initChart() {
       const canvas = document.getElementById('activityChart');
       if (!canvas) return;
-      if (this._activityChart) {
-        this._activityChart.destroy();
-        this._activityChart = null;
+
+      // Monotonic fetch ID — stale responses are discarded.
+      const fetchId = ++this._activityFetchId;
+
+      const days = Math.max(1, Math.min(180, this.activityDays || 7));
+      let url = '/api/activity-counts?vault=' + encodeURIComponent(this.vault) + '&days=' + days;
+      if (this.activityUntil) {
+        url += '&until=' + encodeURIComponent(this.activityUntil);
       }
 
-      // Last 7 days labels
-      const labels = [];
-      const now = new Date();
-      for (let i = 6; i >= 0; i--) {
-        const d = new Date(now);
-        d.setDate(d.getDate() - i);
-        labels.push(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+      this.activityLoading = true;
+      this.activityError = '';
+
+      this.apiCall(url).then(resp => {
+        // Stale response — a newer call superseded this one.
+        if (this._activityFetchId !== fetchId) return;
+
+        this.activityLoading = false;
+        const counts = resp.counts || [];
+        this.activityData = counts;
+
+        const labels = counts.map(c => c.date);
+        const data = counts.map(c => c.count);
+
+        // Dynamic tick grouping: estimate how many labels fit based on canvas width.
+        const canvasWidth = canvas.parentElement ? canvas.parentElement.clientWidth : canvas.width;
+        const maxTicks = Math.max(4, Math.floor(canvasWidth / 60));
+
+        this._renderActivityChart(canvas, labels, data, maxTicks);
+
+        // Set up a resize observer so tick density adapts to layout changes.
+        if (!this._activityResizeObserver && canvas.parentElement) {
+          this._activityResizeObserver = new ResizeObserver(() => {
+            const chart = canvas._chart;
+            if (!chart) return;
+            const w = canvas.parentElement ? canvas.parentElement.clientWidth : canvas.width;
+            const mt = Math.max(4, Math.floor(w / 60));
+            try {
+              chart.options.scales.x.ticks.maxTicksLimit = mt;
+              chart.update('none');
+            } catch (_) { /* best effort */ }
+          });
+          this._activityResizeObserver.observe(canvas.parentElement);
+        }
+      }).catch(err => {
+        if (this._activityFetchId !== fetchId) return;
+        this.activityLoading = false;
+        this.activityError = 'Failed to load activity data. ';
+      });
+    },
+
+    _renderActivityChart(canvas, labels, data, maxTicks) {
+      // Store chart instance on the canvas DOM element — NOT on `this` —
+      // because Alpine.js wraps component properties in reactive Proxies
+      // which cause infinite recursion when Chart.js traverses its own data.
+      const existing = canvas._chart;
+      if (existing) {
+        try {
+          existing.data.labels = labels;
+          existing.data.datasets[0].data = data;
+          existing.options.scales.x.ticks.maxTicksLimit = maxTicks;
+          existing.update();
+          return;
+        } catch (_) {
+          try { existing.destroy(); } catch (_) {}
+          canvas._chart = null;
+        }
       }
 
-      // Fetch session data for 7 days
-      const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
-      this.apiCall(
-        '/api/session?vault=' + encodeURIComponent(this.vault) +
-        '&since=' + encodeURIComponent(since) + '&limit=500'
-      ).then(resp => {
-        const entries = resp.entries || (Array.isArray(resp) ? resp : []);
-        const counts = new Array(7).fill(0);
-        entries.forEach(e => {
-          if (!e.created_at) return;
-          const diffMs = now - new Date(e.created_at * 1000);
-          const diffDays = Math.floor(diffMs / 86400000);
-          const idx = 6 - diffDays;
-          if (idx >= 0 && idx < 7) counts[idx]++;
-        });
-
-        this._activityChart = new Chart(canvas, {
-          type: 'bar',
-          data: {
-            labels,
-            datasets: [{
-              label: 'Engrams written',
-              data: counts,
-              backgroundColor: 'rgba(6,182,212,0.5)',
-              borderColor: '#06b6d4',
-              borderWidth: 1,
-              borderRadius: 4,
-            }],
-          },
-          options: {
-            responsive: true,
-            plugins: { legend: { display: false } },
-            scales: {
-              x: {
-                grid: { color: 'rgba(42,42,74,0.5)' },
-                ticks: { color: '#94a3b8' },
-              },
-              y: {
-                grid: { color: 'rgba(42,42,74,0.5)' },
-                ticks: { color: '#94a3b8', stepSize: 1 },
-                beginAtZero: true,
+      canvas._chart = new Chart(canvas, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Engrams written',
+            data,
+            backgroundColor: 'rgba(6,182,212,0.5)',
+            borderColor: '#06b6d4',
+            borderWidth: 1,
+            borderRadius: 4,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: function(items) { return items[0] ? items[0].label : ''; },
+                label: function(item) { return item.parsed.y + ' engram' + (item.parsed.y !== 1 ? 's' : ''); },
               },
             },
           },
+          scales: {
+            x: {
+              grid: { color: 'rgba(42,42,74,0.5)' },
+              ticks: {
+                color: '#94a3b8',
+                maxTicksLimit: maxTicks,
+                maxRotation: 45,
+                callback: function(value, index) {
+                  const label = this.getLabelForValue(value);
+                  const parts = label.split('-');
+                  if (parts.length === 3) {
+                    // Parse as UTC to avoid timezone-induced date shift.
+                    const d = new Date(label + 'T00:00:00Z');
+                    if (isNaN(d.getTime())) return label;
+                    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+                  }
+                  return label;
+                },
+              },
+            },
+            y: {
+              grid: { color: 'rgba(42,42,74,0.5)' },
+              ticks: { color: '#94a3b8' },
+              beginAtZero: true,
+            },
+          },
+        },
+      });
+    },
+
+    _copyActivityTable() {
+      const header = 'Date\tCount';
+      const rows = this.activityData.map(r => r.date + '\t' + r.count);
+      const total = this.activityData.reduce((s, r) => s + r.count, 0);
+      rows.push('Total\t' + total);
+      const text = header + '\n' + rows.join('\n');
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          this.addNotification('success', 'Activity data copied to clipboard');
+        }).catch(() => {
+          this._copyFallback(text);
         });
-      }).catch(() => {});
+      } else {
+        this._copyFallback(text);
+      }
+    },
+
+    _copyFallback(text) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        this.addNotification(ok ? 'success' : 'error', ok ? 'Activity data copied to clipboard' : 'Copy failed — please copy manually');
+      } catch (_) {
+        this.addNotification('error', 'Copy failed — please copy manually');
+      }
     },
 
     formatBytes(bytes) {

@@ -175,6 +175,7 @@
 
     <!-- ── Dashboard View ───────────────────────────────────────────── -->
     <div x-show="currentView==='dashboard'">
+      <div style="display:flex;flex-direction:column;height:calc(100vh - 3rem);min-height:600px;">
       <!-- Dashboard header -->
       <div style="display:flex;align-items:baseline;gap:0.875rem;margin-bottom:1.5rem;flex-wrap:wrap;">
         <h2 style="margin:0;">Dashboard</h2>
@@ -231,14 +232,56 @@
       </div>
 
       <!-- Activity chart + live feed -->
-      <div style="display:grid;grid-template-columns:2fr 1fr;gap:1.5rem;">
-        <div class="card-polished">
-          <h3 style="margin:0 0 1rem;color:var(--text-secondary);font-size:0.875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Activity (7 days)</h3>
-          <canvas id="activityChart" height="200"></canvas>
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:1.5rem;flex:1;min-height:320px;" class="activity-grid">
+        <div class="card-polished" style="display:flex;flex-direction:column;min-width:0;overflow:hidden;">
+          <!-- Activity header with controls -->
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;">
+            <h3 style="margin:0;color:var(--text-secondary);font-size:0.875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Activity</h3>
+            <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+              <!-- Preset buttons -->
+              <template x-for="p in activityPresets" :key="p.days">
+                <button type="button"
+                  @click="activityDays = p.days; activityUntil = ''; _initChart()"
+                  :class="activityDays === p.days && !activityUntil ? 'badge-info' : ''"
+                  :aria-pressed="(activityDays === p.days && !activityUntil).toString()"
+                  style="font-size:0.6875rem;padding:0.125rem 0.5rem;border-radius:9999px;cursor:pointer;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-secondary);"
+                  x-text="p.label"></button>
+              </template>
+              <!-- Custom days input -->
+              <label class="sr-only" for="activityDaysInput">Days</label>
+              <input id="activityDaysInput" type="number" min="1" max="180" x-model.number="activityDays"
+                @change="if(activityDays<1)activityDays=1;if(activityDays>180)activityDays=180;_initChart()"
+                style="width:3rem;font-size:0.6875rem;padding:0.125rem 0.25rem;border-radius:0.25rem;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-primary);text-align:center;"
+                aria-label="Number of days (1-180)">
+              <span style="font-size:0.6875rem;color:var(--text-muted);">days</span>
+              <!-- End date picker -->
+              <label class="sr-only" for="activityUntilInput">End date</label>
+              <input id="activityUntilInput" type="date" x-model="activityUntil"
+                @change="_initChart()"
+                style="font-size:0.6875rem;padding:0.125rem 0.25rem;border-radius:0.25rem;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-primary);"
+                aria-label="End date (default: today)">
+              <!-- Toggle data table -->
+              <button type="button" @click="activityShowTable = !activityShowTable"
+                :class="activityShowTable ? 'badge-info' : ''"
+                :aria-pressed="activityShowTable.toString()"
+                style="font-size:0.6875rem;padding:0.125rem 0.5rem;border-radius:9999px;cursor:pointer;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-secondary);"
+                aria-label="Toggle data table">📊 Table</button>
+            </div>
+          </div>
+          <!-- Loading indicator -->
+          <div x-show="activityLoading" style="text-align:center;padding:1rem;color:var(--text-muted);font-size:0.8125rem;">Loading activity data…</div>
+          <!-- Error state with retry -->
+          <div x-show="activityError && !activityLoading" style="text-align:center;padding:1rem;color:var(--danger,#ef4444);font-size:0.8125rem;">
+            <span x-text="activityError"></span>
+            <button type="button" @click="_initChart()" style="margin-left:0.5rem;font-size:0.75rem;padding:0.125rem 0.5rem;border-radius:0.25rem;cursor:pointer;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-secondary);">Retry</button>
+          </div>
+          <!-- Empty state -->
+          <div x-show="!activityLoading && !activityError && activityData.length > 0 && activityData.every(r => r.count === 0)" style="text-align:center;padding:1rem;color:var(--text-muted);font-size:0.8125rem;">No engrams written in this period.</div>
+          <div x-show="!activityLoading && !activityError" style="position:relative;width:100%;flex:1;min-height:200px;overflow:hidden;"><canvas id="activityChart" style="position:absolute;inset:0;width:100%;height:100%;"></canvas></div>
         </div>
-        <div class="card-polished">
+        <div class="card-polished" style="display:flex;flex-direction:column;min-width:0;">
           <h3 style="margin:0 0 1rem;color:var(--text-secondary);font-size:0.875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Live Feed</h3>
-          <div style="display:flex;flex-direction:column;gap:0.5rem;max-height:300px;overflow-y:auto;">
+          <div style="display:flex;flex-direction:column;gap:0.5rem;flex:1;overflow-y:auto;">
             <template x-for="item in liveFeed" :key="item.id">
               <div style="font-size:0.8125rem;padding:0.5rem;background:var(--bg-elevated);border-radius:0.375rem;">
                 <span class="badge-info" x-text="item.vault"></span>
@@ -252,6 +295,49 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- Activity data table modal -->
+      <div x-show="activityShowTable" x-transition.opacity class="modal-backdrop" @click.self="activityShowTable = false" @keydown.escape.window="activityShowTable = false" style="z-index:70;">
+        <div class="modal-box" style="max-width:480px;max-height:80vh;display:flex;flex-direction:column;" @click.stop>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+            <h3 style="margin:0;font-size:0.9375rem;color:var(--text-primary);font-weight:600;">Activity Data</h3>
+            <div style="display:flex;align-items:center;gap:0.5rem;">
+              <button type="button" @click="_copyActivityTable()"
+                style="font-size:0.6875rem;padding:0.25rem 0.625rem;border-radius:0.25rem;cursor:pointer;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-secondary);"
+                aria-label="Copy activity data as TSV">📋 Copy</button>
+              <button type="button" @click="activityShowTable = false"
+                style="font-size:1rem;padding:0.125rem 0.5rem;cursor:pointer;border:none;background:none;color:var(--text-muted);"
+                aria-label="Close table">✕</button>
+            </div>
+          </div>
+          <div style="flex:1;overflow-y:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:0.75rem;">
+              <thead>
+                <tr style="border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-surface);">
+                  <th scope="col" style="text-align:left;padding:0.375rem 0.5rem;color:var(--text-muted);">Date</th>
+                  <th scope="col" style="text-align:right;padding:0.375rem 0.5rem;color:var(--text-muted);">Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="row in activityData" :key="row.date">
+                  <tr style="border-bottom:1px solid var(--border-subtle, rgba(42,42,74,0.3));">
+                    <td style="padding:0.375rem 0.5rem;color:var(--text-primary);" x-text="row.date"></td>
+                    <td style="text-align:right;padding:0.375rem 0.5rem;color:var(--text-primary);" x-text="row.count"></td>
+                  </tr>
+                </template>
+              </tbody>
+              <tfoot>
+                <tr style="border-top:2px solid var(--border);">
+                  <td style="padding:0.375rem 0.5rem;color:var(--text-secondary);font-weight:600;">Total</td>
+                  <td style="text-align:right;padding:0.375rem 0.5rem;color:var(--text-secondary);font-weight:600;" x-text="activityData.reduce((s,r)=>s+r.count,0)"></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      </div>
+
       </div>
     </div>
 
