@@ -702,6 +702,7 @@ document.addEventListener('alpine:init', () => {
 
       this.activityLoading = true;
       this.activityError = '';
+      this.activityData = [];
 
       this.apiCall(url).then(resp => {
         // Stale response — a newer call superseded this one.
@@ -737,7 +738,11 @@ document.addEventListener('alpine:init', () => {
       }).catch(err => {
         if (this._activityFetchId !== fetchId) return;
         this.activityLoading = false;
-        this.activityError = 'Failed to load activity data. ';
+        let message = 'Failed to load activity data';
+        if (err && typeof err.message === 'string' && err.message.trim() !== '') {
+          message += ': ' + err.message;
+        }
+        this.activityError = message;
       });
     },
 

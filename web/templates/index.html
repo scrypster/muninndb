@@ -298,7 +298,7 @@
       </div>
 
       <!-- Activity data table modal -->
-      <div x-show="activityShowTable" x-transition.opacity class="modal-backdrop" @click.self="activityShowTable = false" @keydown.escape.window="activityShowTable = false" style="z-index:70;">
+      <div x-cloak x-show="activityShowTable" x-transition.opacity class="modal-backdrop" @click.self="activityShowTable = false" @keydown.escape.window="activityShowTable = false" style="z-index:70;">
         <div class="modal-box" style="max-width:480px;max-height:80vh;display:flex;flex-direction:column;" @click.stop>
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
             <h3 style="margin:0;font-size:0.9375rem;color:var(--text-primary);font-weight:600;">Activity Data</h3>
