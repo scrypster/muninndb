@@ -197,7 +197,7 @@
       </div>
 
       <!-- Stat cards -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:2rem;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:2rem;align-items:start;">
         <div class="stat-card" title="Total memories stored across all AI tool sessions in this vault">
           <div class="stat-value" data-testid="stat-engram-count" x-text="stats.engramCount.toLocaleString()">0</div>
           <div class="stat-label">Engrams</div>
@@ -215,17 +215,49 @@
           <div class="stat-label">Index Size</div>
         </div>
         <!-- Cognitive Workers card -->
-        <div class="stat-card" title="Background workers that continuously update memory relevance, strengthen associations, and detect contradictions">
-          <div class="stat-label">Cognitive Workers</div>
-          <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">Temporal · Associations · Contradictions</div>
-          <div style="display:flex;flex-direction:column;gap:0.5rem;margin-top:0.25rem;">
+        <div class="stat-card" style="min-width:0;gap:0;">
+          <!-- Header -->
+          <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:0.625rem;border-bottom:1px solid var(--border);margin-bottom:0.5rem;">
+            <div class="stat-label" style="margin:0;">Cognitive Workers</div>
+            <div style="display:flex;align-items:center;gap:0.4375rem;">
+              <span x-show="workerStats.some(w => w.state !== 2)" :style="workersOverallHealthStyle()" x-text="workersOverallHealthLabel()"></span>
+              <button @click="cognitiveInfoModal = true"
+                title="Learn about cognitive workers"
+                style="background:none;border:1px solid var(--border);border-radius:9999px;width:1.375rem;height:1.375rem;font-size:0.75rem;cursor:pointer;color:var(--text-muted);display:flex;align-items:center;justify-content:center;padding:0;line-height:1;flex-shrink:0;">?</button>
+            </div>
+          </div>
+          <!-- Per-worker rows -->
+          <div style="display:flex;flex-direction:column;gap:0;">
             <template x-for="w in workerStats" :key="w.name">
-              <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.8125rem;">
-                <span style="color:var(--text-secondary);" x-text="w.name"></span>
-                <span :class="workerStateBadge(w.state)" x-text="workerStateName(w.state)"
-                  style="font-size:0.6875rem;padding:0.125rem 0.5rem;border-radius:9999px;font-weight:600;"></span>
+              <div class="tip" :data-tip="workerTooltip(w)"
+                style="display:flex;align-items:center;justify-content:space-between;padding:0.4375rem 0;border-bottom:1px solid var(--border);">
+                <!-- Left: dot + name -->
+                <div style="display:flex;align-items:center;gap:0.4375rem;">
+                  <div :style="workerDotStyle(w.state)" style="width:6px;height:6px;border-radius:50%;flex-shrink:0;"></div>
+                  <span style="font-size:0.8125rem;color:var(--text-secondary);" x-text="w.name"></span>
+                </div>
+                <!-- Right: optional count + errors + state text -->
+                <div style="display:flex;align-items:center;gap:0.375rem;">
+                  <span x-show="w.processed > 0"
+                    style="font-size:0.6875rem;color:var(--text-muted);font-variant-numeric:tabular-nums;"
+                    x-text="formatWorkerProcessed(w.processed)"></span>
+                  <span x-show="w.errors > 0"
+                    style="font-size:0.625rem;padding:0.0625rem 0.3125rem;border-radius:9999px;background:#ef444422;color:#ef4444;font-weight:600;"
+                    x-text="w.errors + 'e'"></span>
+                  <span x-show="w.dropped > 0"
+                    style="font-size:0.625rem;padding:0.0625rem 0.3125rem;border-radius:9999px;background:#f9731622;color:#f97316;font-weight:600;"
+                    x-text="w.dropped + 'd'"></span>
+                  <span :style="workerStateStyle(w.state)"
+                    style="font-size:0.6875rem;font-weight:500;"
+                    x-text="workerStateName(w.state)"></span>
+                </div>
               </div>
             </template>
+          </div>
+          <!-- Last-run footer -->
+          <div x-show="workerStats.length > 0"
+            style="font-size:0.6875rem;color:var(--text-muted);padding-top:0.4375rem;text-align:right;">
+            Last run: <span x-text="workersLastRunSummary()"></span>
           </div>
         </div>
       </div>
@@ -3129,6 +3161,64 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
           :disabled="!decideModal.decision.trim()"
           :style="!decideModal.decision.trim() ? 'opacity:0.45;cursor:not-allowed;' : ''"
           @click="submitDecide()">Record Decision</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Cognitive Workers Info Modal ─────────────────────────────── -->
+  <div x-show="cognitiveInfoModal" x-cloak
+       class="modal-backdrop" @click.self="cognitiveInfoModal = false"
+       @keydown.escape.window="cognitiveInfoModal = false">
+    <div class="modal-box" style="max-width:580px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.125rem;">
+        <h2 style="margin:0;font-size:1.125rem;color:var(--text-secondary);">Cognitive Workers</h2>
+        <button class="btn-ghost" @click="cognitiveInfoModal = false">✕</button>
+      </div>
+      <p style="color:var(--text-muted);font-size:0.875rem;margin:0 0 1.125rem;line-height:1.6;">
+        Background workers continuously refine the memory graph — strengthening associations, detecting contradictions, and updating confidence scores — without requiring user interaction.
+      </p>
+
+      <!-- Hebbian -->
+      <div style="margin-bottom:0.875rem;padding:0.875rem;border-radius:0.625rem;border:1px solid var(--border);background:var(--bg-base);">
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.375rem;">
+          <span style="font-size:1rem;">🔗</span>
+          <span style="font-weight:600;color:var(--text-secondary);font-size:0.9375rem;">Hebbian &mdash; Associations</span>
+        </div>
+        <p style="margin:0 0 0.5rem;font-size:0.8125rem;color:var(--text-muted);line-height:1.6;">
+          Strengthens association weights between co-recalled memories using the Hebbian learning rule. Memories retrieved together become more strongly linked over time — <em style="color:var(--text-secondary);">"neurons that fire together, wire together."</em>
+        </p>
+        <code style="font-size:0.75rem;color:#a78bfa;background:var(--bg-card);padding:0.25rem 0.5rem;border-radius:0.375rem;display:inline-block;">
+          w&prime; = min(1.0,&nbsp;w &times; (1 + &eta;)<sup>n</sup>)
+        </code>
+      </div>
+
+      <!-- Contradiction -->
+      <div style="margin-bottom:0.875rem;padding:0.875rem;border-radius:0.625rem;border:1px solid var(--border);background:var(--bg-base);">
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.375rem;">
+          <span style="font-size:1rem;">⚡</span>
+          <span style="font-weight:600;color:var(--text-secondary);font-size:0.9375rem;">Contradict &mdash; Conflict Detection</span>
+        </div>
+        <p style="margin:0;font-size:0.8125rem;color:var(--text-muted);line-height:1.6;">
+          Scans relation-type pairs for logical incompatibilities (e.g., a memory cannot simultaneously <em>support</em> and <em>contradict</em> another). Scores severity against a compatibility matrix and flags conflicts so the recall layer can surface warnings instead of silently returning inconsistent data.
+        </p>
+      </div>
+
+      <!-- Confidence -->
+      <div style="padding:0.875rem;border-radius:0.625rem;border:1px solid var(--border);background:var(--bg-base);">
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.375rem;">
+          <span style="font-size:1rem;">📊</span>
+          <span style="font-weight:600;color:var(--text-secondary);font-size:0.9375rem;">Confidence &mdash; Belief Updating</span>
+        </div>
+        <p style="margin:0 0 0.5rem;font-size:0.8125rem;color:var(--text-muted);line-height:1.6;">
+          Updates per-memory confidence scores using Bayesian inference with Laplace smoothing. Each access event (recall, link, confirm, contradict) is a trial; the posterior is recalculated so frequently validated memories rank higher in search results.
+        </p>
+        <code style="font-size:0.75rem;color:#34d399;background:var(--bg-card);padding:0.25rem 0.5rem;border-radius:0.375rem;display:inline-block;">
+          P(belief) = (hits + &alpha;) / (trials + 2&alpha;)
+        </code>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;margin-top:1.125rem;">
+        <button class="btn-secondary" @click="cognitiveInfoModal = false">Close</button>
       </div>
     </div>
   </div>

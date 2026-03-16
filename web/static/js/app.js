@@ -19,6 +19,7 @@ document.addEventListener('alpine:init', () => {
     // Dashboard
     stats: { engramCount: 0, vaultCount: 0, storageBytes: 0, indexSize: 0 },
     workerStats: [],
+    cognitiveInfoModal: false,
     liveFeed: [],
     _activityChart: null,
     _prevEngramCount: 0,
@@ -330,7 +331,6 @@ document.addEventListener('alpine:init', () => {
         this.isAuthenticated = true;
         this.loadVaults();
         this.loadWorkerStats();
-        setInterval(() => this.loadWorkerStats(), 10000);
         this.connectLive();
       } catch (_) {
         this.isAuthenticated = false;
@@ -348,6 +348,7 @@ document.addEventListener('alpine:init', () => {
         this.isAuthenticated = true;
         this.loginForm = { username: '', password: '' };
         this.loadVaults();
+        this.loadWorkerStats();
         this.connectLive();
         this.navigateTo('dashboard');
       } catch (err) {
@@ -553,6 +554,23 @@ document.addEventListener('alpine:init', () => {
         // Re-fetch stats scoped to the selected vault instead of using
         // the global broadcast values.
         this.loadStats();
+      } else if (msg.type === 'workers_update') {
+        const d = msg.data;
+        if (d) {
+          const map = { Hebbian: d.hebbian, Contradict: d.contradict, Confidence: d.confidence };
+          this.workerStats = Object.entries(map)
+            .filter(([, w]) => w != null)
+            .map(([name, w]) => ({
+              name,
+              state:         w.state         ?? 0,
+              processed:     w.processed     ?? 0,
+              batches:       w.batches       ?? 0,
+              errors:        w.errors        ?? 0,
+              dropped:       w.dropped       ?? 0,
+              lastRun:       w.lastRun       ?? 0,
+              effectiveWait: w.effectiveWait ?? 0,
+            }));
+        }
       } else if (msg.type === 'memory_added') {
         // Guard: skip malformed events missing required fields.
         // A missing or undefined id causes Alpine x-for to use 'undefined' as
@@ -607,12 +625,19 @@ document.addEventListener('alpine:init', () => {
     async loadWorkerStats() {
       try {
         const data = await this.apiCall('/api/workers');
-        this.workerStats = [
-          { name: 'Temporal',    state: data.decay?.state      ?? 0 },
-          { name: 'Hebbian',     state: data.hebbian?.state    ?? 0 },
-          { name: 'Contradict',  state: data.contradict?.state ?? 0 },
-          { name: 'Confidence',  state: data.confidence?.state ?? 0 },
-        ];
+        const map = { Hebbian: data.hebbian, Contradict: data.contradict, Confidence: data.confidence };
+        this.workerStats = Object.entries(map)
+          .filter(([, d]) => d != null)
+          .map(([name, d]) => ({
+            name,
+            state:        d.state        ?? 0,
+            processed:    d.processed    ?? 0,
+            batches:      d.batches      ?? 0,
+            errors:       d.errors       ?? 0,
+            dropped:      d.dropped      ?? 0,
+            lastRun:      d.lastRun      ?? 0,
+            effectiveWait: d.effectiveWait ?? 0,
+          }));
       } catch (err) {
         console.warn('[muninn] worker stats failed:', err);
       }
@@ -625,6 +650,71 @@ document.addEventListener('alpine:init', () => {
     workerStateBadge(state) {
       const classes = ['badge-active', 'badge-idle', 'badge-dormant'];
       return classes[state] ?? 'badge-idle';
+    },
+
+    formatWorkerProcessed(n) {
+      if (!n) return '—';
+      if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+      if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k';
+      return String(n);
+    },
+
+    formatWorkerLastRun(nanos) {
+      if (!nanos) return 'never';
+      const ago = Date.now() - nanos / 1_000_000;
+      if (ago < 5_000)        return 'just now';
+      if (ago < 60_000)       return Math.floor(ago / 1_000) + 's ago';
+      if (ago < 3_600_000)    return Math.floor(ago / 60_000) + 'm ago';
+      if (ago < 86_400_000)   return Math.floor(ago / 3_600_000) + 'h ago';
+      return Math.floor(ago / 86_400_000) + 'd ago';
+    },
+
+    workerTooltip(w) {
+      const lines = [
+        `${w.name}  ·  ${this.workerStateName(w.state)}`,
+        `Processed: ${w.processed}  ·  Batches: ${w.batches}`,
+        `Last run: ${this.formatWorkerLastRun(w.lastRun)}`,
+      ];
+      if (w.errors  > 0) lines.push(`Errors: ${w.errors}`);
+      if (w.dropped > 0) lines.push(`Dropped: ${w.dropped}`);
+      return lines.join('\n');
+    },
+
+    workerDotStyle(state) {
+      const colors = ['#10b981', '#f59e0b', '#9ca3af']; // active, idle, dormant
+      return `background:${colors[state] ?? '#9ca3af'};`;
+    },
+
+    workerStateStyle(state) {
+      const styles = ['color:#10b981;', 'color:#f59e0b;', 'color:#9ca3af;'];
+      return styles[state] ?? 'color:#9ca3af;';
+    },
+
+    workersOverallHealthLabel() {
+      if (!this.workerStats.length) return 'Loading';
+      const active = this.workerStats.filter(w => w.state === 0).length;
+      const idle   = this.workerStats.filter(w => w.state === 1).length;
+      if (active === this.workerStats.length) return 'All Active';
+      if (active > 0) return active + ' Active';
+      if (idle   > 0) return idle + ' Idle';
+      return 'Dormant';
+    },
+
+    workersOverallHealthStyle() {
+      const base = 'font-size:0.6875rem;padding:0.1rem 0.5rem;border-radius:9999px;font-weight:600;';
+      if (!this.workerStats.length) return base + 'background:#6b728020;color:#6b7280;';
+      const active = this.workerStats.filter(w => w.state === 0).length;
+      const idle   = this.workerStats.filter(w => w.state === 1).length;
+      if (active === this.workerStats.length) return base + 'background:#10b98120;color:#10b981;';
+      if (active > 0) return base + 'background:#f59e0b20;color:#f59e0b;';
+      if (idle   > 0) return base + 'background:#f59e0b20;color:#f59e0b;';
+      return base + 'background:#6b728020;color:#6b7280;';
+    },
+
+    workersLastRunSummary() {
+      if (!this.workerStats.length) return '—';
+      const max = Math.max(...this.workerStats.map(w => w.lastRun || 0));
+      return this.formatWorkerLastRun(max);
     },
 
     async loadVaults() {
