@@ -191,6 +191,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/vaults", s.withMiddleware(auth.WriteOnlyGuard(s.handleListVaults)))
 	mux.HandleFunc("GET /api/vaults/stats", s.withAdminMiddleware(s.handleVaultStats()))
 	mux.HandleFunc("GET /api/session", s.withMiddleware(auth.WriteOnlyGuard(s.handleGetSession)))
+	mux.HandleFunc("GET /api/activity-counts", s.withMiddleware(auth.WriteOnlyGuard(s.handleGetActivityCounts)))
 	// SSE subscribe — long-lived; bypasses write timeout via ResponseController.
 	mux.HandleFunc("GET /api/subscribe", s.withMiddleware(auth.WriteOnlyGuard(s.handleSubscribe)))
 
@@ -204,8 +205,8 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("POST /api/engrams/{id}/restore", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleRestore))))
 	mux.HandleFunc("POST /api/traverse", s.withMiddleware(auth.WriteOnlyGuard(s.handleTraverse)))
 	mux.HandleFunc("POST /api/explain", s.withMiddleware(auth.WriteOnlyGuard(s.handleExplain)))
-	mux.HandleFunc("PUT /api/engrams/{id}/state", s.withMiddleware(auth.ReadOnlyGuard(s.handleSetState)))
-	mux.HandleFunc("PUT /api/engrams/{id}/tags", s.withMiddleware(auth.ReadOnlyGuard(s.handleUpdateTags)))
+	mux.HandleFunc("PUT /api/engrams/{id}/state", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleSetState))))
+	mux.HandleFunc("PUT /api/engrams/{id}/tags", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleUpdateTags))))
 	mux.HandleFunc("GET /api/deleted", s.withMiddleware(auth.WriteOnlyGuard(s.handleListDeleted)))
 	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleRetryEnrich))))
 	mux.HandleFunc("GET /api/contradictions", s.withMiddleware(auth.WriteOnlyGuard(s.handleContradictions)))
@@ -1281,6 +1282,53 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	resp, err := s.engine.GetSession(r.Context(), &GetSessionRequest{Vault: vault, Since: since, Limit: limit, Offset: offset})
+	if err != nil {
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleGetActivityCounts(w http.ResponseWriter, r *http.Request) {
+	vault := ctxVault(r)
+
+	// Validate days parameter — reject malformed input.
+	daysStr := r.URL.Query().Get("days")
+	days := 7
+	if daysStr != "" {
+		d, err := strconv.Atoi(daysStr)
+		if err != nil {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid 'days' parameter: must be an integer")
+			return
+		}
+		if d < 1 || d > 180 {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid 'days' parameter: must be between 1 and 180")
+			return
+		}
+		days = d
+	}
+
+	// Validate until parameter — reject malformed input, normalize to UTC end-of-day.
+	untilStr := r.URL.Query().Get("until")
+	var until time.Time
+	if untilStr != "" {
+		t, err := time.Parse("2006-01-02", untilStr)
+		if err != nil {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid 'until' parameter: expected YYYY-MM-DD format")
+			return
+		}
+		// End of that UTC day (ms-precision to match ULID granularity).
+		until = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999000000, time.UTC)
+	} else {
+		// Default: end of today in UTC.
+		now := time.Now().UTC()
+		until = time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 999000000, time.UTC)
+	}
+
+	// since = start of the first day in the window (UTC 00:00:00.000).
+	since := time.Date(until.Year(), until.Month(), until.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(days - 1))
+
+	resp, err := s.engine.GetActivityCounts(r.Context(), &ActivityCountsRequest{Vault: vault, Since: since, Until: until})
 	if err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return

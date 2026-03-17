@@ -6,7 +6,7 @@ MODEL_REPO  := Xenova/bge-small-en-v1.5
 HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
 ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
 
-.PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets web build test bench test-integration \
+.PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets web css build test bench test-integration \
         eval-bible-setup eval-bible eval-bible-full eval-bible-quick eval-bible-export eval-bible-fast \
         _ort-darwin-arm64 _ort-darwin-amd64 _ort-linux-amd64 _ort-linux-arm64 _ort-windows-amd64
 
@@ -105,6 +105,10 @@ clean-assets:
 ## web: compile Tailwind CSS via Vite (requires Node.js + npm).
 web:
 	@cd web && npm ci --silent && npm run build --silent
+
+## css: rebuild only the CSS bundle (faster than full web target; skips npm ci).
+css:
+	@cd web && npm run build --silent
 
 ## build: build the server binary (requires fetch-assets and web first).
 build: web

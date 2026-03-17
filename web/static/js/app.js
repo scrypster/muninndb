@@ -19,8 +19,24 @@ document.addEventListener('alpine:init', () => {
     // Dashboard
     stats: { engramCount: 0, vaultCount: 0, storageBytes: 0, indexSize: 0 },
     workerStats: [],
+    cognitiveInfoModal: false,
     liveFeed: [],
-    _activityChart: null,
+    activityDays: 7,
+    activityUntil: '',
+    activityShowTable: false,
+    activityData: [],
+    activityLoading: false,
+    activityError: '',
+    activityPresets: [
+      { label: '7d', days: 7 },
+      { label: '14d', days: 14 },
+      { label: '30d', days: 30 },
+      { label: '60d', days: 60 },
+      { label: '90d', days: 90 },
+      { label: '180d', days: 180 },
+    ],
+    _activityFetchId: 0,
+    _activityResizeObserver: null,
     _prevEngramCount: 0,
     _prevVaultCount: 0,
 
@@ -330,7 +346,6 @@ document.addEventListener('alpine:init', () => {
         this.isAuthenticated = true;
         this.loadVaults();
         this.loadWorkerStats();
-        setInterval(() => this.loadWorkerStats(), 10000);
         this.connectLive();
       } catch (_) {
         this.isAuthenticated = false;
@@ -348,6 +363,7 @@ document.addEventListener('alpine:init', () => {
         this.isAuthenticated = true;
         this.loginForm = { username: '', password: '' };
         this.loadVaults();
+        this.loadWorkerStats();
         this.connectLive();
         this.navigateTo('dashboard');
       } catch (err) {
@@ -389,6 +405,19 @@ document.addEventListener('alpine:init', () => {
       if (this._obsInterval) {
         clearInterval(this._obsInterval);
         this._obsInterval = null;
+      }
+
+      // Clean up activity chart resources when leaving dashboard.
+      if (view !== 'dashboard') {
+        const canvas = document.getElementById('activityChart');
+        if (canvas && canvas._chart) {
+          try { canvas._chart.destroy(); } catch (_) {}
+          canvas._chart = null;
+        }
+        if (this._activityResizeObserver) {
+          this._activityResizeObserver.disconnect();
+          this._activityResizeObserver = null;
+        }
       }
 
       if (view === 'dashboard') {
@@ -553,6 +582,23 @@ document.addEventListener('alpine:init', () => {
         // Re-fetch stats scoped to the selected vault instead of using
         // the global broadcast values.
         this.loadStats();
+      } else if (msg.type === 'workers_update') {
+        const d = msg.data;
+        if (d) {
+          const map = { Hebbian: d.hebbian, Contradict: d.contradict, Confidence: d.confidence };
+          this.workerStats = Object.entries(map)
+            .filter(([, w]) => w != null)
+            .map(([name, w]) => ({
+              name,
+              state:         w.state         ?? 0,
+              processed:     w.processed     ?? 0,
+              batches:       w.batches       ?? 0,
+              errors:        w.errors        ?? 0,
+              dropped:       w.dropped       ?? 0,
+              lastRun:       w.lastRun       ?? 0,
+              effectiveWait: w.effectiveWait ?? 0,
+            }));
+        }
       } else if (msg.type === 'memory_added') {
         // Guard: skip malformed events missing required fields.
         // A missing or undefined id causes Alpine x-for to use 'undefined' as
@@ -607,12 +653,19 @@ document.addEventListener('alpine:init', () => {
     async loadWorkerStats() {
       try {
         const data = await this.apiCall('/api/workers');
-        this.workerStats = [
-          { name: 'Temporal',    state: data.decay?.state      ?? 0 },
-          { name: 'Hebbian',     state: data.hebbian?.state    ?? 0 },
-          { name: 'Contradict',  state: data.contradict?.state ?? 0 },
-          { name: 'Confidence',  state: data.confidence?.state ?? 0 },
-        ];
+        const map = { Hebbian: data.hebbian, Contradict: data.contradict, Confidence: data.confidence };
+        this.workerStats = Object.entries(map)
+          .filter(([, d]) => d != null)
+          .map(([name, d]) => ({
+            name,
+            state:        d.state        ?? 0,
+            processed:    d.processed    ?? 0,
+            batches:      d.batches      ?? 0,
+            errors:       d.errors       ?? 0,
+            dropped:      d.dropped      ?? 0,
+            lastRun:      d.lastRun      ?? 0,
+            effectiveWait: d.effectiveWait ?? 0,
+          }));
       } catch (err) {
         console.warn('[muninn] worker stats failed:', err);
       }
@@ -625,6 +678,71 @@ document.addEventListener('alpine:init', () => {
     workerStateBadge(state) {
       const classes = ['badge-active', 'badge-idle', 'badge-dormant'];
       return classes[state] ?? 'badge-idle';
+    },
+
+    formatWorkerProcessed(n) {
+      if (!n) return '—';
+      if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+      if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'k';
+      return String(n);
+    },
+
+    formatWorkerLastRun(nanos) {
+      if (!nanos) return 'never';
+      const ago = Date.now() - nanos / 1_000_000;
+      if (ago < 5_000)        return 'just now';
+      if (ago < 60_000)       return Math.floor(ago / 1_000) + 's ago';
+      if (ago < 3_600_000)    return Math.floor(ago / 60_000) + 'm ago';
+      if (ago < 86_400_000)   return Math.floor(ago / 3_600_000) + 'h ago';
+      return Math.floor(ago / 86_400_000) + 'd ago';
+    },
+
+    workerTooltip(w) {
+      const lines = [
+        `${w.name}  ·  ${this.workerStateName(w.state)}`,
+        `Processed: ${w.processed}  ·  Batches: ${w.batches}`,
+        `Last run: ${this.formatWorkerLastRun(w.lastRun)}`,
+      ];
+      if (w.errors  > 0) lines.push(`Errors: ${w.errors}`);
+      if (w.dropped > 0) lines.push(`Dropped: ${w.dropped}`);
+      return lines.join('\n');
+    },
+
+    workerDotStyle(state) {
+      const colors = ['#10b981', '#f59e0b', '#9ca3af']; // active, idle, dormant
+      return `background:${colors[state] ?? '#9ca3af'};`;
+    },
+
+    workerStateStyle(state) {
+      const styles = ['color:#10b981;', 'color:#f59e0b;', 'color:#9ca3af;'];
+      return styles[state] ?? 'color:#9ca3af;';
+    },
+
+    workersOverallHealthLabel() {
+      if (!this.workerStats.length) return 'Loading';
+      const active = this.workerStats.filter(w => w.state === 0).length;
+      const idle   = this.workerStats.filter(w => w.state === 1).length;
+      if (active === this.workerStats.length) return 'All Active';
+      if (active > 0) return active + ' Active';
+      if (idle   > 0) return idle + ' Idle';
+      return 'Dormant';
+    },
+
+    workersOverallHealthStyle() {
+      const base = 'font-size:0.6875rem;padding:0.1rem 0.5rem;border-radius:9999px;font-weight:600;';
+      if (!this.workerStats.length) return base + 'background:#6b728020;color:#6b7280;';
+      const active = this.workerStats.filter(w => w.state === 0).length;
+      const idle   = this.workerStats.filter(w => w.state === 1).length;
+      if (active === this.workerStats.length) return base + 'background:#10b98120;color:#10b981;';
+      if (active > 0) return base + 'background:#f59e0b20;color:#f59e0b;';
+      if (idle   > 0) return base + 'background:#f59e0b20;color:#f59e0b;';
+      return base + 'background:#6b728020;color:#6b7280;';
+    },
+
+    workersLastRunSummary() {
+      if (!this.workerStats.length) return '—';
+      const max = Math.max(...this.workerStats.map(w => w.lastRun || 0));
+      return this.formatWorkerLastRun(max);
     },
 
     async loadVaults() {
@@ -662,66 +780,166 @@ document.addEventListener('alpine:init', () => {
     _initChart() {
       const canvas = document.getElementById('activityChart');
       if (!canvas) return;
-      if (this._activityChart) {
-        this._activityChart.destroy();
-        this._activityChart = null;
+
+      // Monotonic fetch ID — stale responses are discarded.
+      const fetchId = ++this._activityFetchId;
+
+      const days = Math.max(1, Math.min(180, this.activityDays || 7));
+      let url = '/api/activity-counts?vault=' + encodeURIComponent(this.vault) + '&days=' + days;
+      if (this.activityUntil) {
+        url += '&until=' + encodeURIComponent(this.activityUntil);
       }
 
-      // Last 7 days labels
-      const labels = [];
-      const now = new Date();
-      for (let i = 6; i >= 0; i--) {
-        const d = new Date(now);
-        d.setDate(d.getDate() - i);
-        labels.push(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+      this.activityLoading = true;
+      this.activityError = '';
+      this.activityData = [];
+
+      this.apiCall(url).then(resp => {
+        // Stale response — a newer call superseded this one.
+        if (this._activityFetchId !== fetchId) return;
+
+        this.activityLoading = false;
+        const counts = resp.counts || [];
+        this.activityData = counts;
+
+        const labels = counts.map(c => c.date);
+        const data = counts.map(c => c.count);
+
+        // Dynamic tick grouping: estimate how many labels fit based on canvas width.
+        const canvasWidth = canvas.parentElement ? canvas.parentElement.clientWidth : canvas.width;
+        const maxTicks = Math.max(4, Math.floor(canvasWidth / 60));
+
+        this._renderActivityChart(canvas, labels, data, maxTicks);
+
+        // Set up a resize observer so tick density adapts to layout changes.
+        if (!this._activityResizeObserver && canvas.parentElement) {
+          this._activityResizeObserver = new ResizeObserver(() => {
+            const chart = canvas._chart;
+            if (!chart) return;
+            const w = canvas.parentElement ? canvas.parentElement.clientWidth : canvas.width;
+            const mt = Math.max(4, Math.floor(w / 60));
+            try {
+              chart.options.scales.x.ticks.maxTicksLimit = mt;
+              chart.update('none');
+            } catch (_) { /* best effort */ }
+          });
+          this._activityResizeObserver.observe(canvas.parentElement);
+        }
+      }).catch(err => {
+        if (this._activityFetchId !== fetchId) return;
+        this.activityLoading = false;
+        let message = 'Failed to load activity data';
+        if (err && typeof err.message === 'string' && err.message.trim() !== '') {
+          message += ': ' + err.message;
+        }
+        this.activityError = message;
+      });
+    },
+
+    _renderActivityChart(canvas, labels, data, maxTicks) {
+      // Store chart instance on the canvas DOM element — NOT on `this` —
+      // because Alpine.js wraps component properties in reactive Proxies
+      // which cause infinite recursion when Chart.js traverses its own data.
+      const existing = canvas._chart;
+      if (existing) {
+        try {
+          existing.data.labels = labels;
+          existing.data.datasets[0].data = data;
+          existing.options.scales.x.ticks.maxTicksLimit = maxTicks;
+          existing.update();
+          return;
+        } catch (_) {
+          try { existing.destroy(); } catch (_) {}
+          canvas._chart = null;
+        }
       }
 
-      // Fetch session data for 7 days
-      const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
-      this.apiCall(
-        '/api/session?vault=' + encodeURIComponent(this.vault) +
-        '&since=' + encodeURIComponent(since) + '&limit=500'
-      ).then(resp => {
-        const entries = resp.entries || (Array.isArray(resp) ? resp : []);
-        const counts = new Array(7).fill(0);
-        entries.forEach(e => {
-          if (!e.created_at) return;
-          const diffMs = now - new Date(e.created_at * 1000);
-          const diffDays = Math.floor(diffMs / 86400000);
-          const idx = 6 - diffDays;
-          if (idx >= 0 && idx < 7) counts[idx]++;
-        });
-
-        this._activityChart = new Chart(canvas, {
-          type: 'bar',
-          data: {
-            labels,
-            datasets: [{
-              label: 'Engrams written',
-              data: counts,
-              backgroundColor: 'rgba(6,182,212,0.5)',
-              borderColor: '#06b6d4',
-              borderWidth: 1,
-              borderRadius: 4,
-            }],
-          },
-          options: {
-            responsive: true,
-            plugins: { legend: { display: false } },
-            scales: {
-              x: {
-                grid: { color: 'rgba(42,42,74,0.5)' },
-                ticks: { color: '#94a3b8' },
-              },
-              y: {
-                grid: { color: 'rgba(42,42,74,0.5)' },
-                ticks: { color: '#94a3b8', stepSize: 1 },
-                beginAtZero: true,
+      canvas._chart = new Chart(canvas, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Engrams written',
+            data,
+            backgroundColor: 'rgba(6,182,212,0.5)',
+            borderColor: '#06b6d4',
+            borderWidth: 1,
+            borderRadius: 4,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: function(items) { return items[0] ? items[0].label : ''; },
+                label: function(item) { return item.parsed.y + ' engram' + (item.parsed.y !== 1 ? 's' : ''); },
               },
             },
           },
+          scales: {
+            x: {
+              grid: { color: 'rgba(42,42,74,0.5)' },
+              ticks: {
+                color: '#94a3b8',
+                maxTicksLimit: maxTicks,
+                maxRotation: 45,
+                callback: function(value, index) {
+                  const label = this.getLabelForValue(value);
+                  const parts = label.split('-');
+                  if (parts.length === 3) {
+                    // Parse as UTC to avoid timezone-induced date shift.
+                    const d = new Date(label + 'T00:00:00Z');
+                    if (isNaN(d.getTime())) return label;
+                    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+                  }
+                  return label;
+                },
+              },
+            },
+            y: {
+              grid: { color: 'rgba(42,42,74,0.5)' },
+              ticks: { color: '#94a3b8' },
+              beginAtZero: true,
+            },
+          },
+        },
+      });
+    },
+
+    _copyActivityTable() {
+      const header = 'Date\tCount';
+      const rows = this.activityData.map(r => r.date + '\t' + r.count);
+      const total = this.activityData.reduce((s, r) => s + r.count, 0);
+      rows.push('Total\t' + total);
+      const text = header + '\n' + rows.join('\n');
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          this.addNotification('success', 'Activity data copied to clipboard');
+        }).catch(() => {
+          this._copyFallback(text);
         });
-      }).catch(() => {});
+      } else {
+        this._copyFallback(text);
+      }
+    },
+
+    _copyFallback(text) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        this.addNotification(ok ? 'success' : 'error', ok ? 'Activity data copied to clipboard' : 'Copy failed — please copy manually');
+      } catch (_) {
+        this.addNotification('error', 'Copy failed — please copy manually');
+      }
     },
 
     formatBytes(bytes) {

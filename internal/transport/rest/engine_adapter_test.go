@@ -58,6 +58,9 @@ func (m *mockEngineAPI) ListVaults(ctx context.Context) ([]string, error) {
 func (m *mockEngineAPI) GetSession(ctx context.Context, req *GetSessionRequest) (*GetSessionResponse, error) {
 	return nil, nil
 }
+func (m *mockEngineAPI) GetActivityCounts(ctx context.Context, req *ActivityCountsRequest) (*ActivityCountsResponse, error) {
+	return &ActivityCountsResponse{Counts: []ActivityCountItem{}}, nil
+}
 func (m *mockEngineAPI) WorkerStats() cognitive.EngineWorkerStats {
 	return cognitive.EngineWorkerStats{}
 }

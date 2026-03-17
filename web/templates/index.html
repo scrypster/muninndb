@@ -175,6 +175,7 @@
 
     <!-- ── Dashboard View ───────────────────────────────────────────── -->
     <div x-show="currentView==='dashboard'">
+      <div style="display:flex;flex-direction:column;height:calc(100vh - 3rem);min-height:600px;">
       <!-- Dashboard header -->
       <div style="display:flex;align-items:baseline;gap:0.875rem;margin-bottom:1.5rem;flex-wrap:wrap;">
         <h2 style="margin:0;">Dashboard</h2>
@@ -197,7 +198,7 @@
       </div>
 
       <!-- Stat cards -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:2rem;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:2rem;align-items:start;">
         <div class="stat-card" title="Total memories stored across all AI tool sessions in this vault">
           <div class="stat-value" data-testid="stat-engram-count" x-text="stats.engramCount.toLocaleString()">0</div>
           <div class="stat-label">Engrams</div>
@@ -215,30 +216,104 @@
           <div class="stat-label">Index Size</div>
         </div>
         <!-- Cognitive Workers card -->
-        <div class="stat-card" title="Background workers that continuously update memory relevance, strengthen associations, and detect contradictions">
-          <div class="stat-label">Cognitive Workers</div>
-          <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">Temporal · Associations · Contradictions</div>
-          <div style="display:flex;flex-direction:column;gap:0.5rem;margin-top:0.25rem;">
+        <div class="stat-card" style="min-width:0;gap:0;">
+          <!-- Header -->
+          <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:0.625rem;border-bottom:1px solid var(--border);margin-bottom:0.5rem;">
+            <div class="stat-label" style="margin:0;">Cognitive Workers</div>
+            <div style="display:flex;align-items:center;gap:0.4375rem;">
+              <span x-show="workerStats.some(w => w.state !== 2)" :style="workersOverallHealthStyle()" x-text="workersOverallHealthLabel()"></span>
+              <button @click="cognitiveInfoModal = true"
+                title="Learn about cognitive workers"
+                style="background:none;border:1px solid var(--border);border-radius:9999px;width:1.375rem;height:1.375rem;font-size:0.75rem;cursor:pointer;color:var(--text-muted);display:flex;align-items:center;justify-content:center;padding:0;line-height:1;flex-shrink:0;">?</button>
+            </div>
+          </div>
+          <!-- Per-worker rows -->
+          <div style="display:flex;flex-direction:column;gap:0;">
             <template x-for="w in workerStats" :key="w.name">
-              <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.8125rem;">
-                <span style="color:var(--text-secondary);" x-text="w.name"></span>
-                <span :class="workerStateBadge(w.state)" x-text="workerStateName(w.state)"
-                  style="font-size:0.6875rem;padding:0.125rem 0.5rem;border-radius:9999px;font-weight:600;"></span>
+              <div class="tip" :data-tip="workerTooltip(w)"
+                style="display:flex;align-items:center;justify-content:space-between;padding:0.4375rem 0;border-bottom:1px solid var(--border);">
+                <!-- Left: dot + name -->
+                <div style="display:flex;align-items:center;gap:0.4375rem;">
+                  <div :style="workerDotStyle(w.state)" style="width:6px;height:6px;border-radius:50%;flex-shrink:0;"></div>
+                  <span style="font-size:0.8125rem;color:var(--text-secondary);" x-text="w.name"></span>
+                </div>
+                <!-- Right: optional count + errors + state text -->
+                <div style="display:flex;align-items:center;gap:0.375rem;">
+                  <span x-show="w.processed > 0"
+                    style="font-size:0.6875rem;color:var(--text-muted);font-variant-numeric:tabular-nums;"
+                    x-text="formatWorkerProcessed(w.processed)"></span>
+                  <span x-show="w.errors > 0"
+                    style="font-size:0.625rem;padding:0.0625rem 0.3125rem;border-radius:9999px;background:#ef444422;color:#ef4444;font-weight:600;"
+                    x-text="w.errors + 'e'"></span>
+                  <span x-show="w.dropped > 0"
+                    style="font-size:0.625rem;padding:0.0625rem 0.3125rem;border-radius:9999px;background:#f9731622;color:#f97316;font-weight:600;"
+                    x-text="w.dropped + 'd'"></span>
+                  <span :style="workerStateStyle(w.state)"
+                    style="font-size:0.6875rem;font-weight:500;"
+                    x-text="workerStateName(w.state)"></span>
+                </div>
               </div>
             </template>
+          </div>
+          <!-- Last-run footer -->
+          <div x-show="workerStats.length > 0"
+            style="font-size:0.6875rem;color:var(--text-muted);padding-top:0.4375rem;text-align:right;">
+            Last run: <span x-text="workersLastRunSummary()"></span>
           </div>
         </div>
       </div>
 
       <!-- Activity chart + live feed -->
-      <div style="display:grid;grid-template-columns:2fr 1fr;gap:1.5rem;">
-        <div class="card-polished">
-          <h3 style="margin:0 0 1rem;color:var(--text-secondary);font-size:0.875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Activity (7 days)</h3>
-          <canvas id="activityChart" height="200"></canvas>
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:1.5rem;flex:1;min-height:320px;" class="activity-grid">
+        <div class="card-polished" style="display:flex;flex-direction:column;min-width:0;overflow:hidden;">
+          <!-- Activity header with controls -->
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;">
+            <h3 style="margin:0;color:var(--text-secondary);font-size:0.875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Activity</h3>
+            <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+              <!-- Preset buttons -->
+              <template x-for="p in activityPresets" :key="p.days">
+                <button type="button"
+                  @click="activityDays = p.days; activityUntil = ''; _initChart()"
+                  :class="activityDays === p.days && !activityUntil ? 'badge-info' : ''"
+                  :aria-pressed="(activityDays === p.days && !activityUntil).toString()"
+                  style="font-size:0.6875rem;padding:0.125rem 0.5rem;border-radius:9999px;cursor:pointer;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-secondary);"
+                  x-text="p.label"></button>
+              </template>
+              <!-- Custom days input -->
+              <label class="sr-only" for="activityDaysInput">Days</label>
+              <input id="activityDaysInput" type="number" min="1" max="180" x-model.number="activityDays"
+                @change="if(activityDays<1)activityDays=1;if(activityDays>180)activityDays=180;_initChart()"
+                style="width:3rem;font-size:0.6875rem;padding:0.125rem 0.25rem;border-radius:0.25rem;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-primary);text-align:center;"
+                aria-label="Number of days (1-180)">
+              <span style="font-size:0.6875rem;color:var(--text-muted);">days</span>
+              <!-- End date picker -->
+              <label class="sr-only" for="activityUntilInput">End date</label>
+              <input id="activityUntilInput" type="date" x-model="activityUntil"
+                @change="_initChart()"
+                style="font-size:0.6875rem;padding:0.125rem 0.25rem;border-radius:0.25rem;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-primary);"
+                aria-label="End date (default: today)">
+              <!-- Toggle data table -->
+              <button type="button" @click="activityShowTable = !activityShowTable"
+                :class="activityShowTable ? 'badge-info' : ''"
+                :aria-pressed="activityShowTable.toString()"
+                style="font-size:0.6875rem;padding:0.125rem 0.5rem;border-radius:9999px;cursor:pointer;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-secondary);"
+                aria-label="Toggle data table">📊 Table</button>
+            </div>
+          </div>
+          <!-- Loading indicator -->
+          <div x-show="activityLoading" style="text-align:center;padding:1rem;color:var(--text-muted);font-size:0.8125rem;">Loading activity data…</div>
+          <!-- Error state with retry -->
+          <div x-show="activityError && !activityLoading" style="text-align:center;padding:1rem;color:var(--danger,#ef4444);font-size:0.8125rem;">
+            <span x-text="activityError"></span>
+            <button type="button" @click="_initChart()" style="margin-left:0.5rem;font-size:0.75rem;padding:0.125rem 0.5rem;border-radius:0.25rem;cursor:pointer;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-secondary);">Retry</button>
+          </div>
+          <!-- Empty state -->
+          <div x-show="!activityLoading && !activityError && activityData.length > 0 && activityData.every(r => r.count === 0)" style="text-align:center;padding:1rem;color:var(--text-muted);font-size:0.8125rem;">No engrams written in this period.</div>
+          <div x-show="!activityLoading && !activityError" style="position:relative;width:100%;flex:1;min-height:200px;overflow:hidden;"><canvas id="activityChart" style="position:absolute;inset:0;width:100%;height:100%;"></canvas></div>
         </div>
-        <div class="card-polished">
+        <div class="card-polished" style="display:flex;flex-direction:column;min-width:0;">
           <h3 style="margin:0 0 1rem;color:var(--text-secondary);font-size:0.875rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Live Feed</h3>
-          <div style="display:flex;flex-direction:column;gap:0.5rem;max-height:300px;overflow-y:auto;">
+          <div style="display:flex;flex-direction:column;gap:0.5rem;flex:1;overflow-y:auto;">
             <template x-for="item in liveFeed" :key="item.id">
               <div style="font-size:0.8125rem;padding:0.5rem;background:var(--bg-elevated);border-radius:0.375rem;">
                 <span class="badge-info" x-text="item.vault"></span>
@@ -252,6 +327,49 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- Activity data table modal -->
+      <div x-cloak x-show="activityShowTable" x-transition.opacity class="modal-backdrop" @click.self="activityShowTable = false" @keydown.escape.window="activityShowTable = false" style="z-index:70;">
+        <div class="modal-box" style="max-width:480px;max-height:80vh;display:flex;flex-direction:column;" @click.stop>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+            <h3 style="margin:0;font-size:0.9375rem;color:var(--text-primary);font-weight:600;">Activity Data</h3>
+            <div style="display:flex;align-items:center;gap:0.5rem;">
+              <button type="button" @click="_copyActivityTable()"
+                style="font-size:0.6875rem;padding:0.25rem 0.625rem;border-radius:0.25rem;cursor:pointer;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-secondary);"
+                aria-label="Copy activity data as TSV">📋 Copy</button>
+              <button type="button" @click="activityShowTable = false"
+                style="font-size:1rem;padding:0.125rem 0.5rem;cursor:pointer;border:none;background:none;color:var(--text-muted);"
+                aria-label="Close table">✕</button>
+            </div>
+          </div>
+          <div style="flex:1;overflow-y:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:0.75rem;">
+              <thead>
+                <tr style="border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-surface);">
+                  <th scope="col" style="text-align:left;padding:0.375rem 0.5rem;color:var(--text-muted);">Date</th>
+                  <th scope="col" style="text-align:right;padding:0.375rem 0.5rem;color:var(--text-muted);">Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="row in activityData" :key="row.date">
+                  <tr style="border-bottom:1px solid var(--border-subtle, rgba(42,42,74,0.3));">
+                    <td style="padding:0.375rem 0.5rem;color:var(--text-primary);" x-text="row.date"></td>
+                    <td style="text-align:right;padding:0.375rem 0.5rem;color:var(--text-primary);" x-text="row.count"></td>
+                  </tr>
+                </template>
+              </tbody>
+              <tfoot>
+                <tr style="border-top:2px solid var(--border);">
+                  <td style="padding:0.375rem 0.5rem;color:var(--text-secondary);font-weight:600;">Total</td>
+                  <td style="text-align:right;padding:0.375rem 0.5rem;color:var(--text-secondary);font-weight:600;" x-text="activityData.reduce((s,r)=>s+r.count,0)"></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      </div>
+
       </div>
     </div>
 
@@ -3129,6 +3247,64 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
           :disabled="!decideModal.decision.trim()"
           :style="!decideModal.decision.trim() ? 'opacity:0.45;cursor:not-allowed;' : ''"
           @click="submitDecide()">Record Decision</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Cognitive Workers Info Modal ─────────────────────────────── -->
+  <div x-show="cognitiveInfoModal" x-cloak
+       class="modal-backdrop" @click.self="cognitiveInfoModal = false"
+       @keydown.escape.window="cognitiveInfoModal = false">
+    <div class="modal-box" style="max-width:580px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.125rem;">
+        <h2 style="margin:0;font-size:1.125rem;color:var(--text-secondary);">Cognitive Workers</h2>
+        <button class="btn-ghost" @click="cognitiveInfoModal = false">✕</button>
+      </div>
+      <p style="color:var(--text-muted);font-size:0.875rem;margin:0 0 1.125rem;line-height:1.6;">
+        Background workers continuously refine the memory graph — strengthening associations, detecting contradictions, and updating confidence scores — without requiring user interaction.
+      </p>
+
+      <!-- Hebbian -->
+      <div style="margin-bottom:0.875rem;padding:0.875rem;border-radius:0.625rem;border:1px solid var(--border);background:var(--bg-base);">
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.375rem;">
+          <span style="font-size:1rem;">🔗</span>
+          <span style="font-weight:600;color:var(--text-secondary);font-size:0.9375rem;">Hebbian &mdash; Associations</span>
+        </div>
+        <p style="margin:0 0 0.5rem;font-size:0.8125rem;color:var(--text-muted);line-height:1.6;">
+          Strengthens association weights between co-recalled memories using the Hebbian learning rule. Memories retrieved together become more strongly linked over time — <em style="color:var(--text-secondary);">"neurons that fire together, wire together."</em>
+        </p>
+        <code style="font-size:0.75rem;color:#a78bfa;background:var(--bg-card);padding:0.25rem 0.5rem;border-radius:0.375rem;display:inline-block;">
+          w&prime; = min(1.0,&nbsp;w &times; (1 + &eta;)<sup>n</sup>)
+        </code>
+      </div>
+
+      <!-- Contradiction -->
+      <div style="margin-bottom:0.875rem;padding:0.875rem;border-radius:0.625rem;border:1px solid var(--border);background:var(--bg-base);">
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.375rem;">
+          <span style="font-size:1rem;">⚡</span>
+          <span style="font-weight:600;color:var(--text-secondary);font-size:0.9375rem;">Contradict &mdash; Conflict Detection</span>
+        </div>
+        <p style="margin:0;font-size:0.8125rem;color:var(--text-muted);line-height:1.6;">
+          Scans relation-type pairs for logical incompatibilities (e.g., a memory cannot simultaneously <em>support</em> and <em>contradict</em> another). Scores severity against a compatibility matrix and flags conflicts so the recall layer can surface warnings instead of silently returning inconsistent data.
+        </p>
+      </div>
+
+      <!-- Confidence -->
+      <div style="padding:0.875rem;border-radius:0.625rem;border:1px solid var(--border);background:var(--bg-base);">
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.375rem;">
+          <span style="font-size:1rem;">📊</span>
+          <span style="font-weight:600;color:var(--text-secondary);font-size:0.9375rem;">Confidence &mdash; Belief Updating</span>
+        </div>
+        <p style="margin:0 0 0.5rem;font-size:0.8125rem;color:var(--text-muted);line-height:1.6;">
+          Updates per-memory confidence scores using Bayesian inference with Laplace smoothing. Each access event (recall, link, confirm, contradict) is a trial; the posterior is recalculated so frequently validated memories rank higher in search results.
+        </p>
+        <code style="font-size:0.75rem;color:#34d399;background:var(--bg-card);padding:0.25rem 0.5rem;border-radius:0.375rem;display:inline-block;">
+          P(belief) = (hits + &alpha;) / (trials + 2&alpha;)
+        </code>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;margin-top:1.125rem;">
+        <button class="btn-secondary" @click="cognitiveInfoModal = false">Close</button>
       </div>
     </div>
   </div>

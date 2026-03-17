@@ -36,6 +36,10 @@ type JSONRPCError struct {
 type AuthContext struct {
 	Token      string
 	Authorized bool
+	// Populated when authenticated via an mk_ vault API key (not the static mdb_ token).
+	Vault    string // vault the key is scoped to; empty for static-token auth
+	Mode     string // "full", "observe", or "write"; empty for static-token auth
+	IsAPIKey bool   // true when authed via an mk_ vault API key
 }
 
 // ToolDefinition is one entry in the tools/list response.

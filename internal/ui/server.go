@@ -350,8 +350,8 @@ type statsMsg struct {
 	Data interface{} `json:"data"`
 }
 
-// broadcaster polls engine.Stat every 5s and pushes stats_update to all SSE clients.
-// It also does count-diff to detect new engrams and push memory_added.
+// broadcaster polls engine.Stat every 5s and pushes stats_update + workers_update
+// to all SSE clients. It also does count-diff to detect new engrams and push memory_added.
 func (s *Server) broadcaster(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -388,6 +388,13 @@ func (s *Server) broadcastStats(ctx context.Context, prevCount *int64) {
 		return
 	}
 	s.hub.broadcast(data)
+
+	// Push worker stats on every tick so the dashboard card stays live.
+	ws := s.engine.WorkerStats()
+	workerData, err := json.Marshal(statsMsg{Type: "workers_update", Data: ws})
+	if err == nil {
+		s.hub.broadcast(workerData)
+	}
 
 	// Count-diff: push memory_added if new engrams appeared.
 	if *prevCount > 0 && resp.EngramCount > *prevCount {

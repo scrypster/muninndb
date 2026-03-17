@@ -28,7 +28,7 @@ func (e *entityAggEngine) ListEntities(_ context.Context, _ string, _ int, _ str
 }
 
 func TestHandleEntity_HappyPath(t *testing.T) {
-	srv := New(":0", &entityAggEngine{}, "", nil)
+	srv := New(":0", &entityAggEngine{}, "", nil, nil)
 	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_entity","arguments":{"vault":"default","name":"PostgreSQL"}}}`)
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
@@ -66,7 +66,7 @@ func TestHandleEntity_MissingName(t *testing.T) {
 }
 
 func TestHandleEntities_HappyPath(t *testing.T) {
-	srv := New(":0", &entityAggEngine{}, "", nil)
+	srv := New(":0", &entityAggEngine{}, "", nil, nil)
 	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_entities","arguments":{"vault":"default"}}}`)
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
@@ -100,7 +100,7 @@ func TestHandleEntities_HappyPath(t *testing.T) {
 
 func TestHandleEntities_NoVaultDefaultsToDefault(t *testing.T) {
 	// When vault is omitted, the server defaults to "default" — no error expected.
-	srv := New(":0", &entityAggEngine{}, "", nil)
+	srv := New(":0", &entityAggEngine{}, "", nil, nil)
 	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_entities","arguments":{}}}`)
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())

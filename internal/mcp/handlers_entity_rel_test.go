@@ -21,7 +21,7 @@ func (e *captureEntityRelEngine) Write(_ context.Context, req *mbp.WriteRequest)
 
 func TestHandleRemember_EntityRelationships_Parsed(t *testing.T) {
 	eng := &captureEntityRelEngine{}
-	srv := New(":0", eng, "", nil)
+	srv := New(":0", eng, "", nil, nil)
 	w := postRPC(t, srv, `{
         "jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"muninn_remember","arguments":{
@@ -56,7 +56,7 @@ func TestHandleRemember_EntityRelationships_Parsed(t *testing.T) {
 
 func TestHandleRemember_EntityRelationships_DefaultWeight(t *testing.T) {
 	eng := &captureEntityRelEngine{}
-	srv := New(":0", eng, "", nil)
+	srv := New(":0", eng, "", nil, nil)
 	w := postRPC(t, srv, `{
         "jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"muninn_remember","arguments":{
@@ -76,7 +76,7 @@ func TestHandleRemember_EntityRelationships_DefaultWeight(t *testing.T) {
 
 func TestHandleRemember_EntityRelationships_SkipsInvalid(t *testing.T) {
 	eng := &captureEntityRelEngine{}
-	srv := New(":0", eng, "", nil)
+	srv := New(":0", eng, "", nil, nil)
 	w := postRPC(t, srv, `{
         "jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"muninn_remember","arguments":{
