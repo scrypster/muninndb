@@ -317,7 +317,7 @@ func lifecycleStateLabel(s storage.LifecycleState) string {
 }
 
 func (w *RESTEngineWrapper) Evolve(ctx context.Context, vault, engramID, newContent, reason string) (*EvolveResponse, error) {
-	newID, err := w.engine.Evolve(ctx, vault, engramID, newContent, reason)
+	newID, err := w.engine.Evolve(ctx, vault, engramID, newContent, reason, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -391,7 +391,7 @@ func (w *RESTEngineWrapper) Traverse(ctx context.Context, vault string, req *Tra
 }
 
 func (w *RESTEngineWrapper) Explain(ctx context.Context, vault string, req *ExplainRequest) (*ExplainResponse, error) {
-	data, err := w.engine.Explain(ctx, vault, req.EngramID, req.Query)
+	data, err := w.engine.Explain(ctx, vault, req.EngramID, req.Query, nil)
 	if err != nil {
 		return nil, err
 	}

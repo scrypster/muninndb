@@ -246,7 +246,7 @@ func TestEvolve_ChainPreservesContent(t *testing.T) {
 	origID := resp.ID
 
 	// Evolve creates a new engram and soft-deletes the old one.
-	newID, err := eng.Evolve(ctx, "evolve-test", origID, "Updated content v2", "improvement")
+	newID, err := eng.Evolve(ctx, "evolve-test", origID, "Updated content v2", "improvement", nil)
 	require.NoError(t, err)
 	require.NotEqual(t, storage.ULID{}, newID, "evolved ID should not be the zero value")
 	require.NotEqual(t, origID, newID.String(), "evolved ID should differ from original ID")

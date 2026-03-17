@@ -579,7 +579,7 @@ func TestEngineEvolve(t *testing.T) {
 	}
 	oldID := resp.ID
 
-	newID, err := eng.Evolve(ctx, "test", oldID, "new content", "updated reasoning")
+	newID, err := eng.Evolve(ctx, "test", oldID, "new content", "updated reasoning", nil)
 	if err != nil {
 		t.Fatalf("Evolve: %v", err)
 	}
@@ -864,7 +864,7 @@ func TestEngineExplain(t *testing.T) {
 		Content: "JWT token authentication for REST APIs using bearer tokens.",
 	})
 
-	data, err := eng.Explain(ctx, "test", resp.ID, []string{"JWT", "authentication", "bearer"})
+	data, err := eng.Explain(ctx, "test", resp.ID, []string{"JWT", "authentication", "bearer"}, nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}

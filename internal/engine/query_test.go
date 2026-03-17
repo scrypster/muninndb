@@ -33,7 +33,7 @@ func TestEngineExplain_UnknownID(t *testing.T) {
 	// Use an ID that was never written to the vault.
 	unknownID := "01HNKZ5F0000000000000000"
 
-	data, err := eng.Explain(ctx, "test-vault", unknownID, []string{"anything"})
+	data, err := eng.Explain(ctx, "test-vault", unknownID, []string{"anything"}, nil)
 	if err != nil {
 		t.Fatalf("Explain with unknown ID returned unexpected error: %v", err)
 	}
@@ -69,6 +69,6 @@ func TestQueryMethodsCompilable(t *testing.T) {
 	_ = err
 
 	// Explain
-	_, err = eng.Explain(ctx, "vault", "01HNKZ5F0000000000000000", []string{"query"})
+	_, err = eng.Explain(ctx, "vault", "01HNKZ5F0000000000000000", []string{"query"}, nil)
 	_ = err
 }

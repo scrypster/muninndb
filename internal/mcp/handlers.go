@@ -16,6 +16,28 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+// parseEmbedding extracts and validates an optional "embedding" field from args.
+// Returns (nil, "") when the field is absent. Returns (nil, errMsg) on validation
+// failure. The caller is responsible for the vault dimension check when needed.
+func parseEmbeddingArg(args map[string]any) ([]float32, string) {
+	embAny, ok := args["embedding"].([]any)
+	if !ok || len(embAny) == 0 {
+		return nil, ""
+	}
+	if len(embAny) > 4096 {
+		return nil, "invalid params: 'embedding' exceeds maximum length of 4096"
+	}
+	embedding := make([]float32, len(embAny))
+	for i, v := range embAny {
+		f, ok := v.(float64)
+		if !ok {
+			return nil, fmt.Sprintf("invalid params: embedding[%d] must be a number", i)
+		}
+		embedding[i] = float32(f)
+	}
+	return embedding, ""
+}
+
 func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	opID, _ := args["op_id"].(string)
 	if opID != "" {
@@ -79,25 +101,15 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 	}
 	applyTypeArgs(args, req)
 	malformed := applyEnrichmentArgs(args, req)
-	if embAny, ok := args["embedding"].([]any); ok && len(embAny) > 0 {
-		if len(embAny) > 4096 {
-			sendError(w, id, -32602, "invalid params: 'embedding' exceeds maximum length of 4096")
+	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
+		sendError(w, id, -32602, errMsg)
+		return
+	} else if len(emb) > 0 {
+		if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(emb) != vaultDim {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding dimension %d does not match vault dimension %d", len(emb), vaultDim))
 			return
 		}
-		embedding := make([]float32, len(embAny))
-		for i, v := range embAny {
-			f, ok := v.(float64)
-			if !ok {
-				sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding[%d] must be a number", i))
-				return
-			}
-			embedding[i] = float32(f)
-		}
-		if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(embedding) != vaultDim {
-			sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding dimension %d does not match vault dimension %d", len(embedding), vaultDim))
-			return
-		}
-		req.Embedding = embedding
+		req.Embedding = emb
 	}
 
 	resp, err := s.engine.Write(ctx, req)
@@ -182,25 +194,15 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		}
 		applyTypeArgs(m, req)
 		malformed := applyEnrichmentArgs(m, req)
-		if embAny, ok := m["embedding"].([]any); ok && len(embAny) > 0 {
-			if len(embAny) > 4096 {
-				sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].embedding exceeds maximum length of 4096", i))
+		if emb, errMsg := parseEmbeddingArg(m); errMsg != "" {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].%s", i, strings.TrimPrefix(errMsg, "invalid params: ")))
+			return
+		} else if len(emb) > 0 {
+			if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(emb) != vaultDim {
+				sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].embedding dimension %d does not match vault dimension %d", i, len(emb), vaultDim))
 				return
 			}
-			embedding := make([]float32, len(embAny))
-			for j, v := range embAny {
-				f, ok := v.(float64)
-				if !ok {
-					sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].embedding[%d] must be a number", i, j))
-					return
-				}
-				embedding[j] = float32(f)
-			}
-			if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(embedding) != vaultDim {
-				sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].embedding dimension %d does not match vault dimension %d", i, len(embedding), vaultDim))
-				return
-			}
-			req.Embedding = embedding
+			req.Embedding = emb
 		}
 		reqs = append(reqs, req)
 		malformedCounts = append(malformedCounts, malformed)
@@ -352,25 +354,15 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		}
 		req.Filters = append(req.Filters, mbp.Filter{Field: "created_before", Op: "<", Value: t})
 	}
-	if embAny, ok := args["embedding"].([]any); ok && len(embAny) > 0 {
-		if len(embAny) > 4096 {
-			sendError(w, id, -32602, "invalid params: 'embedding' exceeds maximum length of 4096")
+	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
+		sendError(w, id, -32602, errMsg)
+		return
+	} else if len(emb) > 0 {
+		if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(emb) != vaultDim {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding dimension %d does not match vault dimension %d", len(emb), vaultDim))
 			return
 		}
-		embedding := make([]float32, len(embAny))
-		for i, v := range embAny {
-			f, ok := v.(float64)
-			if !ok {
-				sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding[%d] must be a number", i))
-				return
-			}
-			embedding[i] = float32(f)
-		}
-		if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(embedding) != vaultDim {
-			sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding dimension %d does not match vault dimension %d", len(embedding), vaultDim))
-			return
-		}
-		req.Embedding = embedding
+		req.Embedding = emb
 	}
 
 	resp, err := s.engine.Activate(ctx, req)
@@ -490,7 +482,18 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 		sendError(w, id, -32602, "invalid params: 'id', 'new_content', 'reason' are required")
 		return
 	}
-	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason)
+	var evolveEmb []float32
+	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
+		sendError(w, id, -32602, errMsg)
+		return
+	} else if len(emb) > 0 {
+		if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(emb) != vaultDim {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding dimension %d does not match vault dimension %d", len(emb), vaultDim))
+			return
+		}
+		evolveEmb = emb
+	}
+	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -670,10 +673,18 @@ func (s *MCPServer) handleExplain(ctx context.Context, w http.ResponseWriter, id
 		sendError(w, id, -32602, "invalid params: 'query' is required and must be a non-empty array of strings")
 		return
 	}
-	result, err := s.engine.Explain(ctx, vault, &ExplainRequest{
-		EngramID: engramID,
-		Query:    query,
-	})
+	explainReq := &ExplainRequest{EngramID: engramID, Query: query}
+	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
+		sendError(w, id, -32602, errMsg)
+		return
+	} else if len(emb) > 0 {
+		if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(emb) != vaultDim {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding dimension %d does not match vault dimension %d", len(emb), vaultDim))
+			return
+		}
+		explainReq.Embedding = emb
+	}
+	result, err := s.engine.Explain(ctx, vault, explainReq)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -1066,6 +1077,16 @@ func (s *MCPServer) handleAddChild(ctx context.Context, w http.ResponseWriter, i
 	if ord, ok := args["ordinal"].(float64); ok {
 		o := int32(ord)
 		child.Ordinal = &o
+	}
+	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
+		sendError(w, id, -32602, errMsg)
+		return
+	} else if len(emb) > 0 {
+		if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(emb) != vaultDim {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding dimension %d does not match vault dimension %d", len(emb), vaultDim))
+			return
+		}
+		child.Embedding = emb
 	}
 	result, err := s.engine.AddChild(ctx, vault, parentID, child)
 	if err != nil {

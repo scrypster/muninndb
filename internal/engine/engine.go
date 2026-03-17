@@ -883,11 +883,16 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	// When the caller provided an embedding, mark DigestEmbed so the retroactive
-	// processor does not overwrite it with a server-generated embedding.
+	// processor does not overwrite it, then insert into HNSW inline so the vector
+	// is searchable immediately (the retroactive processor skips DigestEmbed-flagged
+	// engrams and therefore never calls HNSWInsert for them).
 	if len(req.Embedding) > 0 {
 		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
 		if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
 			slog.Warn("engine: failed to set DigestEmbed flag", "id", id.String(), "err", err)
+		}
+		if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(id), req.Embedding); err != nil {
+			slog.Warn("engine: failed to insert client embedding into HNSW", "id", id.String(), "err", err)
 		}
 	}
 
@@ -1375,11 +1380,15 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 
 		// When the caller provided an embedding, mark DigestEmbed so the retroactive
-		// processor does not overwrite it with a server-generated embedding.
+		// processor does not overwrite it, then insert into HNSW inline so the vector
+		// is searchable immediately.
 		if len(reqs[i].Embedding) > 0 {
 			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
 			if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
 				slog.Warn("engine: batch: failed to set DigestEmbed flag", "id", id.String(), "err", err)
+			}
+			if err := e.hnswRegistry.Insert(ctx, p.wsPrefix, [16]byte(id), reqs[i].Embedding); err != nil {
+				slog.Warn("engine: batch: failed to insert client embedding into HNSW", "id", id.String(), "err", err)
 			}
 		}
 
@@ -2468,7 +2477,7 @@ type EngineSessionEntry struct {
 // It links the new engram to the old one with RelSupersedes and returns the new ID.
 // All three writes (new engram, supersedes association, old engram state) are committed
 // in a single atomic Pebble batch so a crash cannot leave the store in an inconsistent state.
-func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string) (storage.ULID, error) {
+func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (storage.ULID, error) {
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
 	// Parse the old ULID before any writes.
@@ -2501,6 +2510,7 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 		CreatedAt:  now,
 		UpdatedAt:  now,
 		LastAccess: now,
+		Embedding:  embedding,
 	}
 
 	// Build the supersedes association (new → old).
@@ -2533,6 +2543,18 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	// Persist vault name (idempotent).
 	if err := e.store.WriteVaultName(wsPrefix, vault); err != nil {
 		slog.Warn("engine: failed to persist vault name", "vault", vault, "err", err)
+	}
+
+	// When the caller provided an embedding, mark DigestEmbed and insert into
+	// HNSW inline (the retroactive processor skips DigestEmbed-flagged engrams).
+	if len(embedding) > 0 {
+		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(newULID))
+		if err := e.store.SetDigestFlag(ctx, newULID, existing|plugin.DigestEmbed); err != nil {
+			slog.Warn("engine: evolve: failed to set DigestEmbed flag", "id", newULID.String(), "err", err)
+		}
+		if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(newULID), embedding); err != nil {
+			slog.Warn("engine: evolve: failed to insert client embedding into HNSW", "id", newULID.String(), "err", err)
+		}
 	}
 
 	// Submit new engram to async FTS worker.

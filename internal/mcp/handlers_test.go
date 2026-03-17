@@ -1594,8 +1594,8 @@ func (e *slowIdempotentEngine) Stat(ctx context.Context, req *mbp.StatRequest) (
 func (e *slowIdempotentEngine) GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error) {
 	return (&fakeEngine{}).GetContradictions(ctx, vault)
 }
-func (e *slowIdempotentEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string) (*WriteResult, error) {
-	return (&fakeEngine{}).Evolve(ctx, vault, oldID, newContent, reason)
+func (e *slowIdempotentEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (*WriteResult, error) {
+	return (&fakeEngine{}).Evolve(ctx, vault, oldID, newContent, reason, embedding)
 }
 func (e *slowIdempotentEngine) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
 	return (&fakeEngine{}).Consolidate(ctx, vault, ids, merged)
@@ -2927,5 +2927,226 @@ func TestHandleRecall_EmbeddingOmittedIsAccepted(t *testing.T) {
 	}
 	if eng.lastActivate != nil && len(eng.lastActivate.Embedding) != 0 {
 		t.Errorf("expected no embedding forwarded, got %d elements", len(eng.lastActivate.Embedding))
+	}
+}
+
+// ── muninn_evolve embedding ───────────────────────────────────────────────────
+
+func TestHandleEvolve_EmbeddingForwarded(t *testing.T) {
+	eng := &embeddingCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_evolve","arguments":{"vault":"default","id":"01JTEST","new_content":"updated","reason":"fixing","embedding":[0.1,0.2,0.3]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
+
+func TestHandleEvolve_EmbeddingDimensionMismatch(t *testing.T) {
+	eng := &embeddingCapturingEngine{vaultDim: 3}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_evolve","arguments":{"vault":"default","id":"01JTEST","new_content":"updated","reason":"fixing","embedding":[0.1,0.2,0.3,0.4]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for dimension mismatch, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestHandleEvolve_EmbeddingNonNumericElement(t *testing.T) {
+	eng := &embeddingCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_evolve","arguments":{"vault":"default","id":"01JTEST","new_content":"updated","reason":"fixing","embedding":[0.1,"bad",0.3]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for non-numeric element, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestHandleEvolve_EmbeddingOversized(t *testing.T) {
+	eng := &embeddingCapturingEngine{}
+	srv := newTestServerWith(eng)
+	floats := make([]string, 4097)
+	for i := range floats {
+		floats[i] = "0.1"
+	}
+	body := fmt.Sprintf(
+		`{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_evolve","arguments":{"vault":"default","id":"01JTEST","new_content":"updated","reason":"fixing","embedding":[%s]}}}`,
+		strings.Join(floats, ","),
+	)
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for oversized embedding, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+// ── muninn_explain embedding ─────────────────────────────────────────────────
+
+func TestHandleExplain_EmbeddingAccepted(t *testing.T) {
+	eng := &embeddingCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_explain","arguments":{"vault":"default","engram_id":"01JTEST","query":["test"],"embedding":[0.1,0.2,0.3]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
+
+func TestHandleExplain_EmbeddingDimensionMismatch(t *testing.T) {
+	eng := &embeddingCapturingEngine{vaultDim: 3}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_explain","arguments":{"vault":"default","engram_id":"01JTEST","query":["test"],"embedding":[0.1,0.2,0.3,0.4]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for dimension mismatch, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestHandleExplain_EmbeddingNonNumericElement(t *testing.T) {
+	eng := &embeddingCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_explain","arguments":{"vault":"default","engram_id":"01JTEST","query":["test"],"embedding":[0.1,"bad"]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for non-numeric element, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestHandleExplain_EmbeddingOversized(t *testing.T) {
+	eng := &embeddingCapturingEngine{}
+	srv := newTestServerWith(eng)
+	floats := make([]string, 4097)
+	for i := range floats {
+		floats[i] = "0.1"
+	}
+	body := fmt.Sprintf(
+		`{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_explain","arguments":{"vault":"default","engram_id":"01JTEST","query":["test"],"embedding":[%s]}}}`,
+		strings.Join(floats, ","),
+	)
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for oversized embedding, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+// ── muninn_add_child embedding ────────────────────────────────────────────────
+
+type addChildCapturingEngine struct {
+	fakeEngine
+	lastChild *AddChildRequest
+	vaultDim  int
+}
+
+func (e *addChildCapturingEngine) AddChild(_ context.Context, _, _ string, child *AddChildRequest) (*AddChildResult, error) {
+	e.lastChild = child
+	return &AddChildResult{ChildID: "child-id", Ordinal: 1}, nil
+}
+
+func (e *addChildCapturingEngine) GetVaultEmbedDim(_ context.Context, _ string) int {
+	return e.vaultDim
+}
+
+func TestHandleAddChild_EmbeddingForwarded(t *testing.T) {
+	eng := &addChildCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_add_child","arguments":{"vault":"default","parent_id":"01JPARENT","concept":"child","content":"content","embedding":[0.1,0.2,0.3]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if eng.lastChild == nil {
+		t.Fatal("AddChild was not called")
+	}
+	if len(eng.lastChild.Embedding) != 3 {
+		t.Errorf("embedding length = %d, want 3", len(eng.lastChild.Embedding))
+	}
+}
+
+func TestHandleAddChild_EmbeddingDimensionMismatch(t *testing.T) {
+	eng := &addChildCapturingEngine{vaultDim: 3}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_add_child","arguments":{"vault":"default","parent_id":"01JPARENT","concept":"child","content":"content","embedding":[0.1,0.2,0.3,0.4]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for dimension mismatch, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestHandleAddChild_EmbeddingNonNumericElement(t *testing.T) {
+	eng := &addChildCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_add_child","arguments":{"vault":"default","parent_id":"01JPARENT","concept":"child","content":"content","embedding":[0.1,"bad"]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for non-numeric element, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestHandleAddChild_EmbeddingOversized(t *testing.T) {
+	eng := &addChildCapturingEngine{}
+	srv := newTestServerWith(eng)
+	floats := make([]string, 4097)
+	for i := range floats {
+		floats[i] = "0.1"
+	}
+	body := fmt.Sprintf(
+		`{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_add_child","arguments":{"vault":"default","parent_id":"01JPARENT","concept":"child","content":"content","embedding":[%s]}}}`,
+		strings.Join(floats, ","),
+	)
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for oversized embedding, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestHandleAddChild_EmbeddingOmittedIsAccepted(t *testing.T) {
+	eng := &addChildCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_add_child","arguments":{"vault":"default","parent_id":"01JPARENT","concept":"child","content":"content"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if eng.lastChild != nil && len(eng.lastChild.Embedding) != 0 {
+		t.Errorf("expected no embedding, got %d elements", len(eng.lastChild.Embedding))
 	}
 }
