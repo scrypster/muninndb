@@ -622,7 +622,7 @@ func runServer() {
 		uiAddrDefault = v
 	}
 	uiAddr := flag.String("ui-addr", uiAddrDefault, "Web UI HTTP listen address")
-	mcpToken := flag.String("mcp-token", "", "Bearer token override for MCP auth (leave empty to read from ~/.muninn/mcp.token)")
+	mcpToken := flag.String("mcp-token", "", "Bearer token override for MCP auth (leave empty to read from MUNINN_MCP_TOKEN env var or ~/.muninn/mcp.token)")
 	dev := flag.Bool("dev", false, "serve web assets from ./web directory (development mode)")
 	backupInterval := flag.String("backup-interval", "", "Automated backup interval (e.g. 6h, 30m); empty = disabled")
 	backupDir := flag.String("backup-dir", "", "Directory to write automated backups into")
@@ -653,6 +653,7 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_MAX_MB             Skip HNSW insert (keep Pebble write) when memory exceeds N MB (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_LISTEN_HOST           Host to bind all servers to (e.g. 0.0.0.0 for LAN access)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_CORS_ORIGINS          Comma-separated CORS allowed origins\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_MCP_TOKEN             Bearer token for MCP endpoint auth (Docker/compose alternative to --mcp-token)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_MEM_LIMIT_GB          Memory limit in GB (default: 4)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_GC_PERCENT            Go GC target percentage (default: 200)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_GLOBAL_RPS Global rate limit requests/sec (default: 1000)\n")
@@ -671,8 +672,13 @@ func runServer() {
 		UIAddr:   *uiAddr,
 	})
 
-	// MCP token: --mcp-token flag is an explicit override (tests, container entrypoints).
-	// Default path reads from ~/.muninn/mcp.token so the token never appears in `ps` output.
+	// MCP token resolution order (highest to lowest priority):
+	//   1. --mcp-token flag  — explicit override for tests / container entrypoints
+	//   2. MUNINN_MCP_TOKEN env var — preferred for Docker / docker-compose deployments
+	//   3. ~/.muninn/mcp.token file — keeps the token out of `ps` output on bare-metal
+	if *mcpToken == "" {
+		*mcpToken = os.Getenv("MUNINN_MCP_TOKEN")
+	}
 	if *mcpToken == "" {
 		*mcpToken = readTokenFile()
 	}
