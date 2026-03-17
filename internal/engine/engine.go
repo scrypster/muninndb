@@ -886,7 +886,9 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	// processor does not overwrite it with a server-generated embedding.
 	if len(req.Embedding) > 0 {
 		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
-		_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed)
+		if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
+			slog.Warn("engine: failed to set DigestEmbed flag", "id", id.String(), "err", err)
+		}
 	}
 
 	// Store caller-provided inline entities in the entity table (not as KeyPoints).
@@ -1369,6 +1371,15 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 						slog.Warn("engine: batch: failed to store entity relationship", "vault", p.vaultName, "engram", id.String(), "from", er.FromEntity, "to", er.ToEntity, "rel_type", er.RelType, "err", err)
 					}
 				}
+			}
+		}
+
+		// When the caller provided an embedding, mark DigestEmbed so the retroactive
+		// processor does not overwrite it with a server-generated embedding.
+		if len(reqs[i].Embedding) > 0 {
+			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
+			if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
+				slog.Warn("engine: batch: failed to set DigestEmbed flag", "id", id.String(), "err", err)
 			}
 		}
 

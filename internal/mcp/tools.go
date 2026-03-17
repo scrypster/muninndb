@@ -133,11 +133,11 @@ func allToolDefinitions() []ToolDefinition {
 									},
 									"description": "Typed entity-to-entity relationships for this memory.",
 								},
-							},
-							"embedding": map[string]any{
-								"type":        "array",
-								"items":       map[string]any{"type": "number"},
-								"description": "Optional pre-computed embedding vector for this memory. Must match the vault's embedding dimension.",
+								"embedding": map[string]any{
+									"type":        "array",
+									"items":       map[string]any{"type": "number"},
+									"description": "Optional pre-computed embedding vector for this memory. Must match the vault's embedding dimension.",
+								},
 							},
 							"required": []string{"content"},
 						},
