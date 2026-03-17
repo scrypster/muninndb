@@ -359,7 +359,7 @@ func TestHandleRememberTree_DuplicateConcept(t *testing.T) {
 	eng := &fakeEngineRememberTreeErr{
 		rememberTreeErr: fmt.Errorf("RememberTree: duplicate concept %q at depth 1", "Phase 1"),
 	}
-	srv := New(":0", eng, "", nil)
+	srv := New(":0", eng, "", nil, nil)
 
 	body := `{
 		"jsonrpc":"2.0","method":"tools/call","id":1,

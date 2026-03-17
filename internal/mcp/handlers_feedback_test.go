@@ -13,7 +13,7 @@ func (e *feedbackEngine) RecordFeedback(_ context.Context, _, _ string, _ bool) 
 }
 
 func TestHandleFeedback_HappyPath(t *testing.T) {
-	srv := New(":0", &feedbackEngine{}, "", nil)
+	srv := New(":0", &feedbackEngine{}, "", nil, nil)
 	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_feedback","arguments":{"vault":"default","engram_id":"01HXYZ","useful":false}}}`)
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
@@ -36,7 +36,7 @@ func TestHandleFeedback_HappyPath(t *testing.T) {
 
 func TestHandleFeedback_DefaultVault(t *testing.T) {
 	// Vault is optional — omitting it defaults to "default".
-	srv := New(":0", &feedbackEngine{}, "", nil)
+	srv := New(":0", &feedbackEngine{}, "", nil, nil)
 	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_feedback","arguments":{"engram_id":"01HXYZ"}}}`)
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())

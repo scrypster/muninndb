@@ -1349,6 +1349,31 @@ components:
         triggered:
           type: boolean
 
+    # ── Activity counts ─────────────────────────────────────────────────────
+
+    ActivityCountItem:
+      type: object
+      required: [date, count]
+      properties:
+        date:
+          type: string
+          format: date
+          description: "UTC calendar date (YYYY-MM-DD)."
+        count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Number of engrams created on this day."
+
+    ActivityCountsResponse:
+      type: object
+      required: [counts]
+      properties:
+        counts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityCountItem"
+
   responses:
     BadRequest:
       description: "Invalid request body or parameters."
@@ -2134,6 +2159,54 @@ paths:
                 $ref: "#/components/schemas/GetSessionResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /api/activity-counts:
+    get:
+      tags: [vault]
+      summary: "Per-day engram creation counts for a vault."
+      description: >
+        Returns the last `days` UTC calendar days of engram creation counts
+        ending on `until` (inclusive). All returned dates are UTC calendar
+        dates. Uses an efficient ULID key-header scan that never
+        deserializes engram values. Days that have zero writes are included
+        with a count of 0 so clients always get a contiguous series.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: vault
+          in: query
+          schema:
+            type: string
+            default: "default"
+        - name: days
+          in: query
+          description: "Number of UTC calendar days to include (1–180, default 7). Returns 400 if out of range or non-numeric."
+          schema:
+            type: integer
+            default: 7
+            minimum: 1
+            maximum: 180
+        - name: until
+          in: query
+          description: "End date in YYYY-MM-DD format (default: today UTC). Returns 400 if malformed."
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: "Daily activity counts."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivityCountsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   # ── Cognitive ─────────────────────────────────────────────────────────────
 

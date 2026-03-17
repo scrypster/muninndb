@@ -2,18 +2,51 @@
 package mcp
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
-	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/scrypster/muninndb/internal/auth"
 )
 
 const mcpSessionHeader = "Mcp-Session-Id"
 
-// authFromRequest extracts the Bearer token from the Authorization header.
-// Returns AuthContext{Authorized: true} if token matches or no token is required.
-func authFromRequest(r *http.Request, requiredToken string) AuthContext {
+// apiKeyValidator is the subset of auth.Store used by MCP for vault key auth.
+// Using an interface keeps the mcp package testable without a live Pebble store.
+type apiKeyValidator interface {
+	ValidateAPIKey(token string) (auth.APIKey, error)
+}
+
+// mcpAuthContextKey is the unexported key used to store AuthContext in request context.
+type mcpAuthContextKey struct{}
+
+// contextWithAuth returns a new context carrying the given AuthContext.
+func contextWithAuth(ctx context.Context, a AuthContext) context.Context {
+	return context.WithValue(ctx, mcpAuthContextKey{}, a)
+}
+
+// authFromContext retrieves the AuthContext stored by contextWithAuth.
+// Returns a zero-value AuthContext if none is present.
+func authFromContext(ctx context.Context) AuthContext {
+	a, _ := ctx.Value(mcpAuthContextKey{}).(AuthContext)
+	return a
+}
+
+// maxTokenLen caps the bearer token length to prevent abuse of the constant-time
+// compare (e.g., a 100 MB token would waste CPU). Real tokens are ≤ 100 chars.
+const maxTokenLen = 4096
+
+// authFromRequest extracts the Bearer token from the Authorization header and
+// authenticates it in priority order:
+//
+//  1. Static mdb_ token (constant-time compare) — backward compatible, no vault pinning.
+//  2. mk_ vault API key (via apiKeyStore.ValidateAPIKey) — vault-pinned, mode-enforced.
+//
+// Returns AuthContext{Authorized: true} if the server has no token configured.
+// apiKeyStore may be nil to disable mk_ key auth (legacy mode).
+func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyValidator) AuthContext {
 	if requiredToken == "" {
 		return AuthContext{Authorized: true}
 	}
@@ -22,7 +55,27 @@ func authFromRequest(r *http.Request, requiredToken string) AuthContext {
 	if !found || token == "" {
 		return AuthContext{Authorized: false}
 	}
-	return AuthContext{Token: token, Authorized: subtle.ConstantTimeCompare([]byte(token), []byte(requiredToken)) == 1}
+	// Reject absurdly long tokens before any crypto work.
+	if len(token) > maxTokenLen {
+		return AuthContext{Authorized: false}
+	}
+	// 1. Static token — always tried first (constant-time to prevent timing attacks).
+	if subtle.ConstantTimeCompare([]byte(token), []byte(requiredToken)) == 1 {
+		return AuthContext{Token: token, Authorized: true}
+	}
+	// 2. Vault API key — only attempted for mk_ prefixed tokens when store is available.
+	if apiKeyStore != nil && strings.HasPrefix(token, "mk_") {
+		if key, err := apiKeyStore.ValidateAPIKey(token); err == nil {
+			return AuthContext{
+				Token:      token,
+				Authorized: true,
+				Vault:      key.Vault,
+				Mode:       key.Mode,
+				IsAPIKey:   true,
+			}
+		}
+	}
+	return AuthContext{Authorized: false}
 }
 
 // sessionFromRequest looks up a session by the Mcp-Session-Id header.
@@ -53,25 +106,30 @@ func validateSessionToken(sess *mcpSession, token string) string {
 
 // resolveVault determines the effective vault for a tool call.
 //
-// Resolution order (Opus-approved):
-//  1. Session pinned vault — if session exists and arg matches or is absent: use session vault
-//  2. Session pinned vault — if arg differs: return vault mismatch error
-//  3. No session + explicit arg: use arg
-//  4. No session + no arg: use "default"
+// Resolution order:
+//  1. pinnedVault non-empty (from mk_ key auth) + arg absent or matching → use pinnedVault
+//  2. pinnedVault non-empty + arg differs → vault mismatch error
+//  3. No pinned vault + explicit arg → use arg (must be valid)
+//  4. No pinned vault + no arg → use "default"
 //
 // Returns (vault, errMsg). errMsg is non-empty on error.
-func resolveVault(sess *mcpSession, args map[string]any) (vault string, errMsg string) {
-	argVault, hasArg := vaultFromArgs(args)
+func resolveVault(pinnedVault string, args map[string]any) (vault string, errMsg string) {
+	argVault, hasArg, invalidArg := vaultFromArgs(args)
 
-	if sess != nil {
-		if !hasArg || argVault == "" || argVault == sess.vault {
-			return sess.vault, ""
+	// Reject explicitly provided but invalid vault names rather than silently
+	// falling back to "default" — fail-closed on malformed input.
+	if invalidArg {
+		return "", "invalid vault name: must be 1-64 lowercase alphanumeric, hyphen, or underscore characters"
+	}
+
+	if pinnedVault != "" {
+		if !hasArg || argVault == "" || argVault == pinnedVault {
+			return pinnedVault, ""
 		}
-		return "", fmt.Sprintf(
-			"vault mismatch: session pinned to %q but tool call specified %q — "+
-				"omit vault arg or match the session vault",
-			sess.vault, argVault,
-		)
+		// Do not echo the pinned vault name back to the client — it may be
+		// sensitive. The client already knows which vault they requested.
+		return "", "vault mismatch: this key is scoped to a specific vault — " +
+			"omit the vault arg or use a key scoped to the requested vault"
 	}
 
 	if hasArg && argVault != "" {
@@ -80,22 +138,87 @@ func resolveVault(sess *mcpSession, args map[string]any) (vault string, errMsg s
 	return "default", ""
 }
 
+// isMutatingTool returns true for MCP tools that write, modify, or delete data.
+// Used to enforce mode restrictions when authenticating via an mk_ vault API key.
+//
+// observe-mode keys: blocked from mutating tools.
+// write-mode keys:   blocked from non-mutating (read) tools.
+//
+// IMPORTANT: every tool in the dispatchToolCall handler map MUST appear in
+// exactly one of isMutatingTool or isReadOnlyTool. The test
+// TestToolClassification_CoversAllRegisteredHandlers enforces this invariant.
+func isMutatingTool(name string) bool {
+	switch name {
+	case "muninn_remember",
+		"muninn_remember_batch",
+		"muninn_remember_tree",
+		"muninn_add_child",
+		"muninn_forget",
+		"muninn_link",
+		"muninn_evolve",
+		"muninn_consolidate",
+		"muninn_decide",
+		"muninn_restore",
+		"muninn_retry_enrich",
+		"muninn_entity_state",
+		"muninn_entity_state_batch",
+		"muninn_merge_entity",
+		"muninn_replay_enrichment",
+		"muninn_feedback":
+		return true
+	}
+	return false
+}
+
+// isReadOnlyTool returns true for MCP tools that only read data.
+// This is the explicit counterpart of isMutatingTool — together they must
+// cover every registered tool name. Unknown tools are classified as neither,
+// which causes mode enforcement to reject them (fail-closed).
+func isReadOnlyTool(name string) bool {
+	switch name {
+	case "muninn_recall",
+		"muninn_read",
+		"muninn_status",
+		"muninn_session",
+		"muninn_contradictions",
+		"muninn_traverse",
+		"muninn_explain",
+		"muninn_state",
+		"muninn_list_deleted",
+		"muninn_guide",
+		"muninn_where_left_off",
+		"muninn_recall_tree",
+		"muninn_find_by_entity",
+		"muninn_entity_clusters",
+		"muninn_export_graph",
+		"muninn_similar_entities",
+		"muninn_entity_timeline",
+		"muninn_provenance",
+		"muninn_entity",
+		"muninn_entities":
+		return true
+	}
+	return false
+}
+
 // vaultFromArgs extracts the vault parameter from tool arguments.
-// Returns ("", false) if vault is missing or empty.
-// Validates that the vault name contains only lowercase letters, digits, hyphens, and underscores (max 64 chars).
-func vaultFromArgs(args map[string]any) (string, bool) {
+// Returns (name, present, invalid):
+//   - ("", false, false): vault key absent from args
+//   - ("", false, true):  vault key present but value is invalid (bad type, empty, bad chars)
+//   - (name, true, false): vault key present and valid
+func vaultFromArgs(args map[string]any) (string, bool, bool) {
 	v, ok := args["vault"]
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 	s, ok := v.(string)
 	if !ok || s == "" {
-		return "", false
+		return "", false, true
 	}
 	if !isValidVaultName(s) {
-		return "", false
+		return "", false, true
 	}
-	return s, true
+	return s, true, false
 }
 
 // isValidVaultName returns true if name is a valid vault name: 1–64 characters,

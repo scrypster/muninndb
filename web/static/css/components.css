@@ -630,3 +630,23 @@ html.light .app-sidebar { background: rgba(250,250,250,0.95); }
 .tip:hover::after {
   opacity: 1;
 }
+
+/* Screen-reader-only utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Responsive: stack activity grid on narrow screens */
+@media (max-width: 768px) {
+  .activity-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

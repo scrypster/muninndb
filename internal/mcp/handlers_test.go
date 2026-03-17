@@ -21,7 +21,7 @@ import (
 
 // newTestServerWith creates a server backed by the supplied engine.
 func newTestServerWith(eng EngineInterface) *MCPServer {
-	return New(":0", eng, "", nil)
+	return New(":0", eng, "", nil, nil)
 }
 
 // extractInnerJSON decodes the MCP textContent envelope and returns the inner
@@ -2503,19 +2503,33 @@ func TestHandleReplayEnrichment_HappyPath(t *testing.T) {
 }
 
 func TestHandleReplayEnrichment_MissingVault(t *testing.T) {
-	// When vault arg is empty string, resolveVault falls back to "default" (no error).
-	// Verify the handler succeeds with the default vault injection.
+	// When vault arg is absent entirely, resolveVault falls back to "default" (no error).
+	// An explicitly empty vault string is now rejected (fail-closed).
 	srv := newTestServerWith(&replayEnrichEngine{})
-	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_replay_enrichment","arguments":{"vault":""}}}`
+	// Omit vault arg entirely — should fall back to "default".
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_replay_enrichment","arguments":{}}}`
 	w := postRPC(t, srv, body)
 	resp := decodeResp(t, w.Body.String())
-	// resolveVault injects "default" when vault arg is absent or empty — no error expected.
 	if resp.Error != nil {
 		t.Errorf("expected success with default vault injection, got error: %v", resp.Error)
 	}
 	inner := extractInnerJSON(t, resp)
 	if _, ok := inner["processed"]; !ok {
 		t.Error("response missing 'processed' field")
+	}
+}
+
+func TestHandleReplayEnrichment_EmptyVaultString_Rejected(t *testing.T) {
+	// An explicitly empty vault string is now rejected (fail-closed).
+	srv := newTestServerWith(&replayEnrichEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_replay_enrichment","arguments":{"vault":""}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error for empty vault string")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("expected -32602, got %d", resp.Error.Code)
 	}
 }
 
