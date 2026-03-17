@@ -222,6 +222,18 @@ func (w *RESTEngineWrapper) GetSession(ctx context.Context, req *GetSessionReque
 	}, nil
 }
 
+func (w *RESTEngineWrapper) GetActivityCounts(ctx context.Context, req *ActivityCountsRequest) (*ActivityCountsResponse, error) {
+	dailyCounts, err := w.engine.ActivityCounts(ctx, req.Vault, req.Since, req.Until)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]ActivityCountItem, len(dailyCounts))
+	for i, dc := range dailyCounts {
+		items[i] = ActivityCountItem{Date: dc.Date, Count: dc.Count}
+	}
+	return &ActivityCountsResponse{Counts: items}, nil
+}
+
 func (w *RESTEngineWrapper) WorkerStats() cognitive.EngineWorkerStats {
 	return w.engine.WorkerStats()
 }

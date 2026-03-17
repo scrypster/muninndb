@@ -28,7 +28,10 @@ import (
 )
 
 // MockEngine is a mock implementation of EngineAPI for testing.
-type MockEngine struct{}
+type MockEngine struct {
+	lastActivityReq  *ActivityCountsRequest
+	activityCountsErr error
+}
 
 func (m *MockEngine) Hello(ctx context.Context, req *HelloRequest) (*HelloResponse, error) {
 	return &HelloResponse{
@@ -141,6 +144,19 @@ func (m *MockEngine) GetSession(ctx context.Context, req *GetSessionRequest) (*G
 			},
 		},
 	}, nil
+}
+
+func (m *MockEngine) GetActivityCounts(ctx context.Context, req *ActivityCountsRequest) (*ActivityCountsResponse, error) {
+	if m.activityCountsErr != nil {
+		return nil, m.activityCountsErr
+	}
+	m.lastActivityReq = req
+	// Build a contiguous response from the request range.
+	var items []ActivityCountItem
+	for d := req.Since; !d.After(req.Until); d = d.AddDate(0, 0, 1) {
+		items = append(items, ActivityCountItem{Date: d.Format("2006-01-02"), Count: 0})
+	}
+	return &ActivityCountsResponse{Counts: items}, nil
 }
 
 func (m *MockEngine) WorkerStats() cognitive.EngineWorkerStats {
@@ -2173,6 +2189,134 @@ func TestHandleVaultStats_RequiresAdminAuth(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without auth, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleActivityCounts_DefaultDays(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+	req := httptest.NewRequest("GET", "/api/activity-counts?vault=default", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp ActivityCountsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Default is 7 days — expect exactly 7 buckets.
+	if len(resp.Counts) != 7 {
+		t.Fatalf("expected 7 counts, got %d", len(resp.Counts))
+	}
+	// Verify the recorded request used default days (7) and UTC since/until.
+	if eng.lastActivityReq == nil {
+		t.Fatal("expected engine to receive request")
+	}
+	if eng.lastActivityReq.Since.Location() != time.UTC {
+		t.Errorf("expected Since in UTC, got %v", eng.lastActivityReq.Since.Location())
+	}
+	if eng.lastActivityReq.Until.Location() != time.UTC {
+		t.Errorf("expected Until in UTC, got %v", eng.lastActivityReq.Until.Location())
+	}
+}
+
+func TestHandleActivityCounts_CustomDays(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+	req := httptest.NewRequest("GET", "/api/activity-counts?vault=default&days=30", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp ActivityCountsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Counts) != 30 {
+		t.Fatalf("expected 30 counts for days=30, got %d", len(resp.Counts))
+	}
+}
+
+func TestHandleActivityCounts_InvalidDays(t *testing.T) {
+	tests := []struct {
+		name string
+		qs   string
+	}{
+		{"non-numeric", "days=abc"},
+		{"zero", "days=0"},
+		{"negative", "days=-5"},
+		{"over-max", "days=999"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewServer("localhost:8080", &MockEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+			req := httptest.NewRequest("GET", "/api/activity-counts?vault=default&"+tt.qs, nil)
+			w := httptest.NewRecorder()
+			server.mux.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for %s, got %d: %s", tt.qs, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleActivityCounts_InvalidUntil(t *testing.T) {
+	server := NewServer("localhost:8080", &MockEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+	req := httptest.NewRequest("GET", "/api/activity-counts?vault=default&until=not-a-date", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed until, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleActivityCounts_WithUntilDate(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+	req := httptest.NewRequest("GET", "/api/activity-counts?vault=default&days=7&until=2026-03-15", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp ActivityCountsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Counts) != 7 {
+		t.Fatalf("expected 7 counts, got %d", len(resp.Counts))
+	}
+	// Verify the computed Since/Until using the fixed until date.
+	if eng.lastActivityReq == nil {
+		t.Fatal("expected engine to receive request")
+	}
+	wantUntil := time.Date(2026, 3, 15, 23, 59, 59, 999000000, time.UTC)
+	wantSince := time.Date(2026, 3, 9, 0, 0, 0, 0, time.UTC)
+	if !eng.lastActivityReq.Until.Equal(wantUntil) {
+		t.Errorf("Until = %v, want %v", eng.lastActivityReq.Until, wantUntil)
+	}
+	if !eng.lastActivityReq.Since.Equal(wantSince) {
+		t.Errorf("Since = %v, want %v", eng.lastActivityReq.Since, wantSince)
+	}
+	// Verify first and last dates.
+	if resp.Counts[0].Date != "2026-03-09" {
+		t.Errorf("first date = %s, want 2026-03-09", resp.Counts[0].Date)
+	}
+	if resp.Counts[6].Date != "2026-03-15" {
+		t.Errorf("last date = %s, want 2026-03-15", resp.Counts[6].Date)
+	}
+}
+
+func TestHandleActivityCounts_EngineError(t *testing.T) {
+	eng := &MockEngine{activityCountsErr: fmt.Errorf("storage failure")}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+	req := httptest.NewRequest("GET", "/api/activity-counts?vault=default", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

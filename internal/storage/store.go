@@ -153,6 +153,12 @@ type EngineStore interface {
 	// by creation time (ascending), with offset/limit for pagination.
 	EngramsByCreatedSince(ctx context.Context, wsPrefix [8]byte, since time.Time, offset, limit int) ([]*Engram, error)
 
+	// CountEngramsByDay returns the number of engrams created on each day
+	// between since and until (inclusive). The returned map keys are dates in
+	// "YYYY-MM-DD" format (UTC). Scans only 0x01 key headers without
+	// deserializing values, so it is efficient for large ranges.
+	CountEngramsByDay(ctx context.Context, wsPrefix [8]byte, since, until time.Time) (map[string]int64, error)
+
 	// WriteOrdinal atomically writes the ordinal for childID within parentID.
 	// Overwrites any existing value.
 	WriteOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID, ordinal int32) error

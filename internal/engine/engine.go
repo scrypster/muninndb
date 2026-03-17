@@ -2596,6 +2596,28 @@ func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time
 	return result, nil
 }
 
+// DailyCount holds a single day's engram creation count.
+type DailyCount struct {
+	Date  string
+	Count int64
+}
+
+// ActivityCounts returns per-day engram counts between since and until for a vault.
+func (e *Engine) ActivityCounts(ctx context.Context, vault string, since, until time.Time) ([]DailyCount, error) {
+	ws := e.store.ResolveVaultPrefix(vault)
+	counts, err := e.store.CountEngramsByDay(ctx, ws, since, until)
+	if err != nil {
+		return nil, err
+	}
+	// Build a contiguous day list so the caller always gets every day in range.
+	var result []DailyCount
+	for d := since.UTC().Truncate(24 * time.Hour); !d.After(until.UTC().Truncate(24 * time.Hour)); d = d.Add(24 * time.Hour) {
+		day := d.Format("2006-01-02")
+		result = append(result, DailyCount{Date: day, Count: counts[day]})
+	}
+	return result, nil
+}
+
 // Decide records an explicit decision with rationale, alternatives, and supporting evidence.
 // It returns a DecideResult containing the new engram ID and any non-fatal
 // evidence-link warnings. The decision is always committed; evidence linking
