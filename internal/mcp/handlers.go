@@ -79,6 +79,26 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 	}
 	applyTypeArgs(args, req)
 	malformed := applyEnrichmentArgs(args, req)
+	if embAny, ok := args["embedding"].([]any); ok && len(embAny) > 0 {
+		if len(embAny) > 4096 {
+			sendError(w, id, -32602, "invalid params: 'embedding' exceeds maximum length of 4096")
+			return
+		}
+		embedding := make([]float32, len(embAny))
+		for i, v := range embAny {
+			f, ok := v.(float64)
+			if !ok {
+				sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding[%d] must be a number", i))
+				return
+			}
+			embedding[i] = float32(f)
+		}
+		if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(embedding) != vaultDim {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding dimension %d does not match vault dimension %d", len(embedding), vaultDim))
+			return
+		}
+		req.Embedding = embedding
+	}
 
 	resp, err := s.engine.Write(ctx, req)
 	if err != nil {
@@ -162,6 +182,26 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		}
 		applyTypeArgs(m, req)
 		malformed := applyEnrichmentArgs(m, req)
+		if embAny, ok := m["embedding"].([]any); ok && len(embAny) > 0 {
+			if len(embAny) > 4096 {
+				sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].embedding exceeds maximum length of 4096", i))
+				return
+			}
+			embedding := make([]float32, len(embAny))
+			for j, v := range embAny {
+				f, ok := v.(float64)
+				if !ok {
+					sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].embedding[%d] must be a number", i, j))
+					return
+				}
+				embedding[j] = float32(f)
+			}
+			if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(embedding) != vaultDim {
+				sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].embedding dimension %d does not match vault dimension %d", i, len(embedding), vaultDim))
+				return
+			}
+			req.Embedding = embedding
+		}
 		reqs = append(reqs, req)
 		malformedCounts = append(malformedCounts, malformed)
 	}
@@ -311,6 +351,26 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 			return
 		}
 		req.Filters = append(req.Filters, mbp.Filter{Field: "created_before", Op: "<", Value: t})
+	}
+	if embAny, ok := args["embedding"].([]any); ok && len(embAny) > 0 {
+		if len(embAny) > 4096 {
+			sendError(w, id, -32602, "invalid params: 'embedding' exceeds maximum length of 4096")
+			return
+		}
+		embedding := make([]float32, len(embAny))
+		for i, v := range embAny {
+			f, ok := v.(float64)
+			if !ok {
+				sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding[%d] must be a number", i))
+				return
+			}
+			embedding[i] = float32(f)
+		}
+		if vaultDim := s.engine.GetVaultEmbedDim(ctx, vault); vaultDim > 0 && len(embedding) != vaultDim {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: embedding dimension %d does not match vault dimension %d", len(embedding), vaultDim))
+			return
+		}
+		req.Embedding = embedding
 	}
 
 	resp, err := s.engine.Activate(ctx, req)

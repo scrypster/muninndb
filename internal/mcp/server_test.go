@@ -162,6 +162,9 @@ func (f *fakeEngine) GetEntityAggregate(_ context.Context, _, _ string, _ int) (
 func (f *fakeEngine) ListEntities(_ context.Context, _ string, _ int, _ string) ([]EntitySummary, error) {
 	return []EntitySummary{}, nil
 }
+func (f *fakeEngine) GetVaultEmbedDim(_ context.Context, _ string) int {
+	return 0
+}
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil, nil)

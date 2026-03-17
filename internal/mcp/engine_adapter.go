@@ -487,6 +487,10 @@ func (a *mcpEngineAdapter) GetEntityAggregate(ctx context.Context, vault, entity
 	return result, nil
 }
 
+func (a *mcpEngineAdapter) GetVaultEmbedDim(ctx context.Context, vault string) int {
+	return a.eng.GetVaultEmbedDim(ctx, vault)
+}
+
 func (a *mcpEngineAdapter) ListEntities(ctx context.Context, vault string, limit int, state string) ([]EntitySummary, error) {
 	records, err := a.eng.ListEntities(ctx, vault, limit, state)
 	if err != nil {

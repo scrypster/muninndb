@@ -64,6 +64,11 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "string",
 						"description": "Optional idempotency key. If set and a receipt exists for this key, the cached engram ID is returned without re-creating.",
 					},
+					"embedding": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "number"},
+						"description": "Optional pre-computed embedding vector (array of floats). When provided, the server skips its own embedding step and uses this vector directly. The dimension must match the vault's existing embedding dimension, or the call will be rejected. Omit to let the server embed via its configured provider.",
+					},
 				},
 				"required": []string{"content"},
 			},
@@ -129,6 +134,11 @@ func allToolDefinitions() []ToolDefinition {
 									"description": "Typed entity-to-entity relationships for this memory.",
 								},
 							},
+							"embedding": map[string]any{
+								"type":        "array",
+								"items":       map[string]any{"type": "number"},
+								"description": "Optional pre-computed embedding vector for this memory. Must match the vault's embedding dimension.",
+							},
 							"required": []string{"content"},
 						},
 					},
@@ -162,6 +172,11 @@ func allToolDefinitions() []ToolDefinition {
 					"before": map[string]any{
 						"type":        "string",
 						"description": "ISO 8601 timestamp (e.g. 2026-01-20T00:00:00Z). Only return memories created before this time.",
+					},
+					"embedding": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "number"},
+						"description": "Optional pre-computed query embedding vector (array of floats). When provided, the server uses this vector for semantic search instead of computing one from 'context'. The dimension must match the vault's existing embedding dimension, or the call will be rejected.",
 					},
 				},
 				"required": []string{"context"},

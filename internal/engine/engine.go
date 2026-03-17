@@ -736,6 +736,13 @@ func (e *Engine) GetEngram(ctx context.Context, vault string, id storage.ULID) (
 	return e.store.GetEngram(ctx, wsPrefix, id)
 }
 
+// GetVaultEmbedDim returns the embedding vector dimension currently in use by vault.
+// Derived from the HNSW index — returns 0 if no embeddings have been stored yet.
+func (e *Engine) GetVaultEmbedDim(_ context.Context, vault string) int {
+	ws := e.store.ResolveVaultPrefix(vault)
+	return e.hnswRegistry.VaultEmbedDim(ws)
+}
+
 // UpdateTags replaces the tags on an engram.
 func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, tags []string) error {
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
@@ -873,6 +880,13 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	id, err := e.store.WriteEngram(ctx, wsPrefix, eng)
 	if err != nil {
 		return nil, fmt.Errorf("write engram: %w", err)
+	}
+
+	// When the caller provided an embedding, mark DigestEmbed so the retroactive
+	// processor does not overwrite it with a server-generated embedding.
+	if len(req.Embedding) > 0 {
+		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
+		_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed)
 	}
 
 	// Store caller-provided inline entities in the entity table (not as KeyPoints).

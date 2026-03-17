@@ -1684,6 +1684,9 @@ func (e *slowIdempotentEngine) GetEntityAggregate(ctx context.Context, vault, en
 func (e *slowIdempotentEngine) ListEntities(ctx context.Context, vault string, limit int, state string) ([]EntitySummary, error) {
 	return (&fakeEngine{}).ListEntities(ctx, vault, limit, state)
 }
+func (e *slowIdempotentEngine) GetVaultEmbedDim(ctx context.Context, vault string) int {
+	return (&fakeEngine{}).GetVaultEmbedDim(ctx, vault)
+}
 
 // TestHandleRemember_ConcurrentSameOpID verifies that two concurrent
 // muninn_remember calls carrying the same op_id do not produce duplicate

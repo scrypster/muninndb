@@ -152,4 +152,9 @@ type EngineInterface interface {
 	// state filters by lifecycle state ("active", "deprecated", "merged", "resolved", "" = all).
 	// limit caps results (0 = default 50).
 	ListEntities(ctx context.Context, vault string, limit int, state string) ([]EntitySummary, error)
+
+	// GetVaultEmbedDim returns the embedding vector dimension currently in use by vault.
+	// Derived from the HNSW index — returns 0 if no embeddings have been stored yet
+	// (dimension not yet established; any client-provided dimension will be accepted).
+	GetVaultEmbedDim(ctx context.Context, vault string) int
 }
