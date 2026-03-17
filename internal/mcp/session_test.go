@@ -226,16 +226,23 @@ func TestResolveVault_Mismatch(t *testing.T) {
 	if errMsg == "" {
 		t.Fatal("expected vault mismatch error")
 	}
-	if !strings.Contains(errMsg, "project-a") || !strings.Contains(errMsg, "project-b") {
-		t.Fatalf("error message should name both vaults, got: %q", errMsg)
+	if !strings.Contains(errMsg, "vault mismatch") {
+		t.Fatalf("error message should mention vault mismatch, got: %q", errMsg)
+	}
+	// Security: pinned vault name should NOT be leaked in the error.
+	if strings.Contains(errMsg, "project-a") {
+		t.Fatalf("error message should not leak pinned vault name, got: %q", errMsg)
 	}
 }
 
 func TestResolveVault_NonStringVault(t *testing.T) {
-	// A non-string vault arg is treated as absent (falls back to "default")
-	vault, errMsg := resolveVault("", map[string]any{"vault": 42})
-	if vault != "default" || errMsg != "" {
-		t.Fatalf("expected default fallback for non-string vault, got vault=%q err=%q", vault, errMsg)
+	// A non-string vault arg is now rejected (fail-closed) instead of falling back to "default".
+	_, errMsg := resolveVault("", map[string]any{"vault": 42})
+	if errMsg == "" {
+		t.Fatal("expected error for non-string vault arg")
+	}
+	if !strings.Contains(errMsg, "invalid vault name") {
+		t.Fatalf("expected 'invalid vault name' error, got: %q", errMsg)
 	}
 }
 

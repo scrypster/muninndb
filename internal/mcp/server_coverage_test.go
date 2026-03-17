@@ -101,16 +101,18 @@ func TestDispatchToolCall_NilArguments(t *testing.T) {
 	}
 }
 
-func TestDispatchToolCall_InvalidVaultFallsBackToDefault(t *testing.T) {
-	// An invalid vault name in args is treated as absent and falls back to "default".
-	// This exercises the vaultFromArgs invalid-name path; the call still succeeds.
+func TestDispatchToolCall_InvalidVaultReturnsError(t *testing.T) {
+	// An invalid vault name in args is now rejected (fail-closed) instead of
+	// silently falling back to "default".
 	srv := newTestServer()
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_status","arguments":{"vault":"INVALID VAULT!"}}}`
 	w := postRPC(t, srv, body)
 	resp := decodeResp(t, w.Body.String())
-	// Should succeed because resolveVault falls back to "default" when vault is invalid.
-	if resp.Error != nil {
-		t.Errorf("expected fallback to default vault to succeed, got error: %v", resp.Error)
+	if resp.Error == nil {
+		t.Fatal("expected error for invalid vault name, got nil")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for invalid vault, got %d", resp.Error.Code)
 	}
 }
 
@@ -207,28 +209,28 @@ func TestIsValidVaultName_ValidChars(t *testing.T) {
 }
 
 func TestVaultFromArgs_NonStringType(t *testing.T) {
-	// vault value that is not a string should return ("", false).
+	// vault value that is not a string should return ("", false, true).
 	args := map[string]any{"vault": 42}
-	v, ok := vaultFromArgs(args)
-	if ok || v != "" {
-		t.Errorf("expected ('', false) for non-string vault, got (%q, %v)", v, ok)
+	v, ok, invalid := vaultFromArgs(args)
+	if ok || v != "" || !invalid {
+		t.Errorf("expected ('', false, true) for non-string vault, got (%q, %v, %v)", v, ok, invalid)
 	}
 }
 
 func TestVaultFromArgs_EmptyString(t *testing.T) {
 	args := map[string]any{"vault": ""}
-	v, ok := vaultFromArgs(args)
-	if ok || v != "" {
-		t.Errorf("expected ('', false) for empty vault string, got (%q, %v)", v, ok)
+	v, ok, invalid := vaultFromArgs(args)
+	if ok || v != "" || !invalid {
+		t.Errorf("expected ('', false, true) for empty vault string, got (%q, %v, %v)", v, ok, invalid)
 	}
 }
 
 func TestVaultFromArgs_InvalidName(t *testing.T) {
-	// Vault name with invalid characters returns ("", false).
+	// Vault name with invalid characters returns ("", false, true).
 	args := map[string]any{"vault": "INVALID!"}
-	v, ok := vaultFromArgs(args)
-	if ok || v != "" {
-		t.Errorf("expected ('', false) for invalid vault name, got (%q, %v)", v, ok)
+	v, ok, invalid := vaultFromArgs(args)
+	if ok || v != "" || !invalid {
+		t.Errorf("expected ('', false, true) for invalid vault name, got (%q, %v, %v)", v, ok, invalid)
 	}
 }
 

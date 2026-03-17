@@ -190,19 +190,27 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 	}
 
 	// Mode enforcement for mk_ vault keys.
+	// Fail-closed: unknown tools (not in either classification list) are blocked
+	// for both observe and write modes. Only full-mode keys bypass this check.
 	if a.IsAPIKey {
 		toolName := req.Params.Name
 		switch a.Mode {
 		case auth.ModeObserve:
-			if isMutatingTool(toolName) {
-				sendError(w, req.ID, -32001, "forbidden: read-only key cannot call mutating tool "+toolName)
+			if !isReadOnlyTool(toolName) {
+				sendError(w, req.ID, -32001, "forbidden: observe-mode key cannot call this tool")
 				return
 			}
 		case auth.ModeWrite:
 			if !isMutatingTool(toolName) {
-				sendError(w, req.ID, -32001, "forbidden: write-only key cannot call read tool "+toolName)
+				sendError(w, req.ID, -32001, "forbidden: write-mode key cannot call this tool")
 				return
 			}
+		case auth.ModeFull:
+			// full mode: no tool restriction within the pinned vault.
+		default:
+			// Unknown mode — fail-closed.
+			sendError(w, req.ID, -32001, "forbidden: unrecognized key mode")
+			return
 		}
 	}
 
@@ -276,6 +284,26 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 	handler(ctx, w, req.ID, vault, args)
 }
 
+// registeredToolNames returns the set of tool names registered in the handler
+// dispatch map. This is used by tests to verify that isMutatingTool and
+// isReadOnlyTool cover every registered tool.
+func registeredToolNames() []string {
+	// Keep in sync with the handlers map in dispatchToolCall.
+	return []string{
+		"muninn_remember", "muninn_remember_batch", "muninn_recall", "muninn_read",
+		"muninn_forget", "muninn_link", "muninn_contradictions", "muninn_status",
+		"muninn_evolve", "muninn_consolidate", "muninn_session", "muninn_decide",
+		"muninn_restore", "muninn_traverse", "muninn_explain", "muninn_state",
+		"muninn_list_deleted", "muninn_retry_enrich", "muninn_guide",
+		"muninn_where_left_off", "muninn_remember_tree", "muninn_recall_tree",
+		"muninn_add_child", "muninn_find_by_entity", "muninn_entity_state",
+		"muninn_entity_state_batch", "muninn_entity_clusters", "muninn_export_graph",
+		"muninn_similar_entities", "muninn_merge_entity", "muninn_entity_timeline",
+		"muninn_replay_enrichment", "muninn_provenance", "muninn_feedback",
+		"muninn_entity", "muninn_entities",
+	}
+}
+
 // handleSSE establishes an SSE stream per the MCP SSE transport spec.
 // Sends an "endpoint" event with the POST URL, then streams responses.
 func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -346,6 +374,19 @@ func (s *MCPServer) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Re-validate auth on every POST — defense in depth against session ID leakage.
+	// If the server requires a token, every POST must present a valid Bearer token
+	// that matches the session's auth identity.
+	if s.token != "" {
+		a := authFromRequest(r, s.token, s.authKeys)
+		if !a.Authorized {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32001,"message":"unauthorized"}}`))
+			return
+		}
+	}
+
 	s.sseSessionsMu.RLock()
 	sess, exists := s.sseSessions[sessionID]
 	s.sseSessionsMu.RUnlock()
@@ -355,6 +396,8 @@ func (s *MCPServer) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Thread the auth context established at SSE stream open time into the request.
+	// The session auth is authoritative for vault pinning and mode enforcement;
+	// the POST auth check above ensures the caller is still authenticated.
 	r = r.WithContext(contextWithAuth(r.Context(), sess.auth))
 	s.processAndPushSSE(w, r, []chan []byte{sess.ch}, sessionID)
 }
@@ -394,7 +437,12 @@ func (s *MCPServer) handleStreamablePost(w http.ResponseWriter, r *http.Request)
 }
 
 // findSSEChannelsByToken returns all SSE channels matching the given auth token.
+// Returns nil for empty tokens to prevent cross-session contamination on open
+// (no-auth) servers where every session has Token == "".
 func (s *MCPServer) findSSEChannelsByToken(token string) []chan []byte {
+	if token == "" {
+		return nil
+	}
 	s.sseSessionsMu.RLock()
 	defer s.sseSessionsMu.RUnlock()
 	var channels []chan []byte

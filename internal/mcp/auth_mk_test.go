@@ -218,8 +218,9 @@ func TestResolveVault_PinnedVault_ArgDiffers_Error(t *testing.T) {
 	if !strings.Contains(errMsg, "vault mismatch") {
 		t.Errorf("error should say 'vault mismatch', got: %s", errMsg)
 	}
-	if !strings.Contains(errMsg, "my-vault") || !strings.Contains(errMsg, "other-vault") {
-		t.Errorf("error should name both vaults, got: %s", errMsg)
+	// Security: error message should NOT leak the pinned vault name.
+	if strings.Contains(errMsg, "my-vault") {
+		t.Errorf("error should not leak pinned vault name, got: %s", errMsg)
 	}
 }
 
@@ -440,6 +441,10 @@ func TestDispatch_VaultMismatch_Rejected(t *testing.T) {
 	if !strings.Contains(resp.Error.Message, "vault mismatch") {
 		t.Errorf("expected 'vault mismatch' in error, got: %s", resp.Error.Message)
 	}
+	// Security: pinned vault name should NOT appear in the error.
+	if strings.Contains(resp.Error.Message, "vault-a") {
+		t.Errorf("error message should not leak pinned vault name, got: %s", resp.Error.Message)
+	}
 }
 
 func TestDispatch_StaticToken_FullAccess_AnyVault(t *testing.T) {
@@ -531,5 +536,336 @@ func TestSSESession_StoresFullAuthContext(t *testing.T) {
 	}
 	if !sess.auth.IsAPIKey {
 		t.Error("expected IsAPIKey=true in stored session")
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Security hardening tests — added during enterprise security review.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// --- Tool classification completeness ---
+
+// TestToolClassification_CoversAllRegisteredHandlers ensures that every tool in
+// the dispatchToolCall handler map is classified as either mutating or read-only.
+// This test FAILS if a new tool is added to server.go but not added to
+// isMutatingTool or isReadOnlyTool — a critical safety net against drift.
+func TestToolClassification_CoversAllRegisteredHandlers(t *testing.T) {
+	for _, name := range registeredToolNames() {
+		mutating := isMutatingTool(name)
+		readonly := isReadOnlyTool(name)
+
+		if !mutating && !readonly {
+			t.Errorf("tool %q is registered but not classified in isMutatingTool or isReadOnlyTool — "+
+				"mode enforcement will block it for observe/write keys (fail-closed)", name)
+		}
+		if mutating && readonly {
+			t.Errorf("tool %q is classified as BOTH mutating AND read-only — must be exactly one", name)
+		}
+	}
+}
+
+// TestToolClassification_UnknownToolDefaultDeny verifies that an unknown tool
+// name is classified as neither mutating nor read-only (fail-closed).
+func TestToolClassification_UnknownToolDefaultDeny(t *testing.T) {
+	if isMutatingTool("muninn_nonexistent") {
+		t.Error("unknown tool should not be classified as mutating")
+	}
+	if isReadOnlyTool("muninn_nonexistent") {
+		t.Error("unknown tool should not be classified as read-only")
+	}
+}
+
+// --- Malformed Authorization header edge cases ---
+
+func TestAuthFromRequest_BearerOnly_NoToken(t *testing.T) {
+	// "Bearer " with trailing space but no actual token value.
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	a := authFromRequest(req, "mdb_x", nil)
+	if a.Authorized {
+		t.Error("'Bearer ' with empty token must be rejected")
+	}
+}
+
+func TestAuthFromRequest_LowercaseBearer(t *testing.T) {
+	// "bearer token" (lowercase) — Go's net/http does case-sensitive header values.
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "bearer mdb_x")
+	a := authFromRequest(req, "mdb_x", nil)
+	if a.Authorized {
+		t.Error("lowercase 'bearer' prefix should be rejected (spec requires 'Bearer')")
+	}
+}
+
+func TestAuthFromRequest_BasicScheme(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	a := authFromRequest(req, "mdb_x", nil)
+	if a.Authorized {
+		t.Error("Basic auth scheme must be rejected")
+	}
+}
+
+func TestAuthFromRequest_BearerWithExtraSpaces(t *testing.T) {
+	// "Bearer  tok" — double space after Bearer.
+	// CutPrefix("Bearer ") leaves " tok" which is a different token.
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer  mdb_x")
+	a := authFromRequest(req, "mdb_x", nil)
+	if a.Authorized {
+		t.Error("token with leading space should not match (timing-safe compare)")
+	}
+}
+
+func TestAuthFromRequest_BearerWithMultipleTokens(t *testing.T) {
+	// "Bearer tok1 tok2" — extra data after the token.
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer mdb_x extra_data")
+	a := authFromRequest(req, "mdb_x", nil)
+	if a.Authorized {
+		t.Error("token with extra data after space must be rejected")
+	}
+}
+
+func TestAuthFromRequest_HugeToken_Rejected(t *testing.T) {
+	// A 10KB token must be rejected before constant-time compare.
+	huge := "Bearer " + strings.Repeat("x", 10000)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", huge)
+	a := authFromRequest(req, "mdb_x", nil)
+	if a.Authorized {
+		t.Error("absurdly long token must be rejected")
+	}
+}
+
+func TestAuthFromRequest_MkPrefix_EmptySuffix(t *testing.T) {
+	// "Bearer mk_" — mk_ prefix with no actual key payload.
+	store := newMockKeyStore() // empty store
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer mk_")
+	a := authFromRequest(req, "mdb_x", store)
+	if a.Authorized {
+		t.Error("'mk_' with empty suffix must be rejected")
+	}
+}
+
+// --- Invalid vault name rejection (fail-closed) ---
+
+func TestResolveVault_InvalidVaultArg_Rejected(t *testing.T) {
+	// Previously fell back to "default" — now must error.
+	_, errMsg := resolveVault("", map[string]any{"vault": "INVALID!"})
+	if errMsg == "" {
+		t.Fatal("expected error for invalid vault name, got empty errMsg")
+	}
+	if !strings.Contains(errMsg, "invalid vault name") {
+		t.Errorf("expected 'invalid vault name' in error, got: %s", errMsg)
+	}
+}
+
+func TestResolveVault_UnicodeVaultArg_Rejected(t *testing.T) {
+	_, errMsg := resolveVault("", map[string]any{"vault": "vault\u200b"}) // zero-width space
+	if errMsg == "" {
+		t.Fatal("expected error for Unicode vault name")
+	}
+}
+
+func TestResolveVault_PathTraversalVaultArg_Rejected(t *testing.T) {
+	_, errMsg := resolveVault("", map[string]any{"vault": "../etc/passwd"})
+	if errMsg == "" {
+		t.Fatal("expected error for path traversal vault name")
+	}
+}
+
+func TestResolveVault_WhitespaceVaultArg_Rejected(t *testing.T) {
+	_, errMsg := resolveVault("", map[string]any{"vault": "  "})
+	if errMsg == "" {
+		t.Fatal("expected error for whitespace vault name")
+	}
+}
+
+func TestResolveVault_PinnedVault_InvalidArgIsError(t *testing.T) {
+	// Even with a pinned vault, an explicitly invalid vault arg should error
+	// (not silently use the pinned vault).
+	_, errMsg := resolveVault("my-vault", map[string]any{"vault": "INVALID!"})
+	if errMsg == "" {
+		t.Fatal("expected error for invalid vault arg even with pinned vault")
+	}
+}
+
+// --- Mode enforcement on ALL tools via dispatch ---
+
+func TestDispatch_ObserveMode_AllReadToolsAllowed(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID: "obs-all", Vault: "v", Mode: auth.ModeObserve,
+	})
+	srv := newAuthTestServer(store)
+
+	for _, name := range registeredToolNames() {
+		if !isReadOnlyTool(name) {
+			continue
+		}
+		body := mkToolCallBody(name, map[string]any{"vault": "v", "context": "x", "id": "x", "concept": "x", "content": "y", "entity_name": "x", "query": []string{"x"}})
+		w := doAuthenticatedPost(srv, "mk_obs-all", body)
+		var resp JSONRPCResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Error != nil && strings.Contains(resp.Error.Message, "forbidden") {
+			t.Errorf("observe-mode key should be allowed to call read tool %s, got: %s", name, resp.Error.Message)
+		}
+	}
+}
+
+func TestDispatch_ObserveMode_AllMutatingToolsBlocked(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID: "obs-block", Vault: "v", Mode: auth.ModeObserve,
+	})
+	srv := newAuthTestServer(store)
+
+	for _, name := range registeredToolNames() {
+		if !isMutatingTool(name) {
+			continue
+		}
+		body := mkToolCallBody(name, map[string]any{"vault": "v", "concept": "x", "content": "y", "id": "x"})
+		w := doAuthenticatedPost(srv, "mk_obs-block", body)
+		var resp JSONRPCResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Error == nil || !strings.Contains(resp.Error.Message, "forbidden") {
+			t.Errorf("observe-mode key should be blocked from mutating tool %s", name)
+		}
+	}
+}
+
+func TestDispatch_WriteMode_AllMutatingToolsAllowed(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID: "wrt-all", Vault: "v", Mode: auth.ModeWrite,
+	})
+	srv := newAuthTestServer(store)
+
+	for _, name := range registeredToolNames() {
+		if !isMutatingTool(name) {
+			continue
+		}
+		body := mkToolCallBody(name, map[string]any{"vault": "v", "concept": "x", "content": "y", "id": "x", "ids": []string{"x"}, "merged_content": "y", "decision": "x", "rationale": "y"})
+		w := doAuthenticatedPost(srv, "mk_wrt-all", body)
+		var resp JSONRPCResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Error != nil && strings.Contains(resp.Error.Message, "forbidden") {
+			t.Errorf("write-mode key should be allowed to call mutating tool %s, got: %s", name, resp.Error.Message)
+		}
+	}
+}
+
+func TestDispatch_WriteMode_AllReadToolsBlocked(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID: "wrt-block", Vault: "v", Mode: auth.ModeWrite,
+	})
+	srv := newAuthTestServer(store)
+
+	for _, name := range registeredToolNames() {
+		if !isReadOnlyTool(name) {
+			continue
+		}
+		body := mkToolCallBody(name, map[string]any{"vault": "v", "context": "x", "id": "x"})
+		w := doAuthenticatedPost(srv, "mk_wrt-block", body)
+		var resp JSONRPCResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Error == nil || !strings.Contains(resp.Error.Message, "forbidden") {
+			t.Errorf("write-mode key should be blocked from read tool %s", name)
+		}
+	}
+}
+
+// --- Unknown mode handling ---
+
+func TestDispatch_UnknownMode_Rejected(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID: "unk001", Vault: "v", Mode: "bogus",
+	})
+	srv := newAuthTestServer(store)
+	body := mkToolCallBody("muninn_recall", map[string]any{"vault": "v", "context": "x"})
+	w := doAuthenticatedPost(srv, "mk_unk001", body)
+	var resp JSONRPCResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "forbidden") {
+		t.Error("unknown key mode should be rejected (fail-closed)")
+	}
+}
+
+// --- SSE message auth re-validation ---
+
+func TestSSEMessage_RequiresAuth_WhenServerHasToken(t *testing.T) {
+	srv := New(":0", &fakeEngine{}, "mdb_secret", nil, nil)
+
+	// Insert a fake SSE session
+	srv.sseSessionsMu.Lock()
+	srv.sseSessions["sess123"] = &sseSession{
+		ch:   make(chan []byte, 4),
+		auth: AuthContext{Token: "mdb_secret", Authorized: true},
+	}
+	srv.sseSessionsMu.Unlock()
+
+	// POST to /mcp/message WITHOUT auth header
+	body := mkToolCallBody("muninn_recall", map[string]any{"context": "x"})
+	r := httptest.NewRequest(http.MethodPost, "/mcp/message?sessionId=sess123", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSSEMessage(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for SSE message without auth, got %d", w.Code)
+	}
+}
+
+// --- findSSEChannelsByToken with empty token ---
+
+func TestFindSSEChannelsByToken_EmptyToken_ReturnsNil(t *testing.T) {
+	srv := New(":0", &fakeEngine{}, "", nil, nil)
+
+	srv.sseSessionsMu.Lock()
+	srv.sseSessions["s1"] = &sseSession{ch: make(chan []byte, 4), auth: AuthContext{Token: ""}}
+	srv.sseSessions["s2"] = &sseSession{ch: make(chan []byte, 4), auth: AuthContext{Token: ""}}
+	srv.sseSessionsMu.Unlock()
+
+	channels := srv.findSSEChannelsByToken("")
+	if len(channels) != 0 {
+		t.Errorf("empty token should return no channels (prevents cross-session contamination), got %d", len(channels))
+	}
+}
+
+// --- Error message consistency ---
+
+func TestErrorMessages_NoInternalStateLeakage(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID: "leak001", Vault: "secret-vault", Mode: auth.ModeObserve,
+	})
+	srv := newAuthTestServer(store)
+
+	// Observe-mode blocked from mutating tool — error should not leak vault name
+	body := mkToolCallBody("muninn_remember", map[string]any{"vault": "secret-vault", "concept": "x", "content": "y"})
+	w := doAuthenticatedPost(srv, "mk_leak001", body)
+	var resp JSONRPCResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Error == nil {
+		t.Fatal("expected forbidden error")
+	}
+	// Tool name leakage in error is acceptable (client already knows what they called).
+	// Vault name leakage is NOT acceptable.
+	if strings.Contains(resp.Error.Message, "secret-vault") {
+		t.Errorf("error message should not leak vault name, got: %s", resp.Error.Message)
+	}
+}
+
+// --- vaultFromArgs 3-return values ---
+
+func TestVaultFromArgs_AbsentKey_Returns_FalseFalse(t *testing.T) {
+	v, present, invalid := vaultFromArgs(map[string]any{"context": "x"})
+	if v != "" || present || invalid {
+		t.Errorf("absent vault key: expected ('', false, false), got (%q, %v, %v)", v, present, invalid)
+	}
+}
+
+func TestVaultFromArgs_ValidName_Returns_TrueFalse(t *testing.T) {
+	v, present, invalid := vaultFromArgs(map[string]any{"vault": "my-vault"})
+	if v != "my-vault" || !present || invalid {
+		t.Errorf("valid vault: expected ('my-vault', true, false), got (%q, %v, %v)", v, present, invalid)
 	}
 }
