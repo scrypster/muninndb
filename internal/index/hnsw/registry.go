@@ -140,6 +140,12 @@ func (r *Registry) VaultVectors(ws [8]byte) int {
 	return r.getOrCreate(ws).Len()
 }
 
+// VaultEmbedDim returns the vector dimension for the given vault's HNSW index.
+// Returns 0 if the vault has no indexed vectors yet (dimension not yet established).
+func (r *Registry) VaultEmbedDim(ws [8]byte) int {
+	return r.getOrCreate(ws).Dim()
+}
+
 // TotalVectorBytes returns the total in-memory vector size across all vaults.
 func (r *Registry) TotalVectorBytes() int64 {
 	r.mu.RLock()

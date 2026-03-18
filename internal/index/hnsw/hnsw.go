@@ -78,6 +78,17 @@ type Index struct {
 	deleted        sync.Map       // key: [16]byte id → struct{} (tombstoned hard-deleted nodes)
 }
 
+// Dim returns the vector dimension used by this index.
+// Returns 0 if the index is empty (no vectors inserted yet).
+func (idx *Index) Dim() int {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	for _, node := range idx.nodes {
+		return len(node.vec)
+	}
+	return 0
+}
+
 // Tombstone marks a node as deleted so it is skipped in future Search results.
 // The node's memory is reclaimed on the next full index rebuild.
 func (idx *Index) Tombstone(id [16]byte) {

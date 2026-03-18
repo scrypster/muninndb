@@ -23,7 +23,7 @@ func TestEvolve_AtomicBatch_OldSoftDeletedNewReadable(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "new content", "update")
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "new content", "update", nil)
 	if err != nil {
 		t.Fatalf("Evolve: %v", err)
 	}

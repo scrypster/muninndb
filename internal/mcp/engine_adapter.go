@@ -62,8 +62,8 @@ func (a *mcpEngineAdapter) GetContradictions(ctx context.Context, vault string) 
 	}
 	return result, nil
 }
-func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string) (*WriteResult, error) {
-	id, err := a.eng.Evolve(ctx, vault, oldID, newContent, reason)
+func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (*WriteResult, error) {
+	id, err := a.eng.Evolve(ctx, vault, oldID, newContent, reason, embedding)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (a *mcpEngineAdapter) Traverse(ctx context.Context, vault string, req *Trav
 }
 
 func (a *mcpEngineAdapter) Explain(ctx context.Context, vault string, req *ExplainRequest) (*ExplainResult, error) {
-	data, err := a.eng.Explain(ctx, vault, req.EngramID, req.Query)
+	data, err := a.eng.Explain(ctx, vault, req.EngramID, req.Query, req.Embedding)
 	if err != nil {
 		return nil, err
 	}
@@ -301,11 +301,12 @@ func (a *mcpEngineAdapter) GetEnrichmentMode(ctx context.Context) string {
 
 func (a *mcpEngineAdapter) AddChild(ctx context.Context, vault, parentID string, child *AddChildRequest) (*AddChildResult, error) {
 	input := &engine.AddChildInput{
-		Concept: child.Concept,
-		Content: child.Content,
-		Type:    child.Type,
-		Tags:    child.Tags,
-		Ordinal: child.Ordinal,
+		Concept:   child.Concept,
+		Content:   child.Content,
+		Type:      child.Type,
+		Tags:      child.Tags,
+		Ordinal:   child.Ordinal,
+		Embedding: child.Embedding,
 	}
 	r, err := a.eng.AddChild(ctx, vault, parentID, input)
 	if err != nil {
@@ -485,6 +486,10 @@ func (a *mcpEngineAdapter) GetEntityAggregate(ctx context.Context, vault, entity
 		result.UpdatedAt = time.Unix(0, rec.UpdatedAt).UTC().Format(time.RFC3339)
 	}
 	return result, nil
+}
+
+func (a *mcpEngineAdapter) GetVaultEmbedDim(ctx context.Context, vault string) int {
+	return a.eng.GetVaultEmbedDim(ctx, vault)
 }
 
 func (a *mcpEngineAdapter) ListEntities(ctx context.Context, vault string, limit int, state string) ([]EntitySummary, error) {

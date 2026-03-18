@@ -26,7 +26,7 @@ type EngineInterface interface {
 
 	// Higher-level cognitive operations (tools 1-11)
 	GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error)
-	Evolve(ctx context.Context, vault, oldID, newContent, reason string) (*WriteResult, error)
+	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (*WriteResult, error)
 	Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error)
 	Session(ctx context.Context, vault string, since time.Time) (*SessionSummary, error)
 	Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error)
@@ -152,4 +152,9 @@ type EngineInterface interface {
 	// state filters by lifecycle state ("active", "deprecated", "merged", "resolved", "" = all).
 	// limit caps results (0 = default 50).
 	ListEntities(ctx context.Context, vault string, limit int, state string) ([]EntitySummary, error)
+
+	// GetVaultEmbedDim returns the embedding vector dimension currently in use by vault.
+	// Derived from the HNSW index — returns 0 if no embeddings have been stored yet
+	// (dimension not yet established; any client-provided dimension will be accepted).
+	GetVaultEmbedDim(ctx context.Context, vault string) int
 }

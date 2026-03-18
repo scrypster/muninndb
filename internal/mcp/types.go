@@ -182,8 +182,9 @@ type TraversalEdge struct {
 
 // ExplainRequest defines the context for a score explanation.
 type ExplainRequest struct {
-	EngramID string
-	Query    []string
+	EngramID  string
+	Query     []string
+	Embedding []float32 // optional client-provided query embedding
 }
 
 // ExplainComponents holds the per-component score breakdown.
@@ -265,11 +266,12 @@ type RecallTreeResult struct {
 
 // AddChildRequest is the input for a single child node in muninn_add_child.
 type AddChildRequest struct {
-	Concept string   `json:"concept"`
-	Content string   `json:"content"`
-	Type    string   `json:"type,omitempty"`
-	Tags    []string `json:"tags,omitempty"`
-	Ordinal *int32   `json:"ordinal,omitempty"` // nil = append at end
+	Concept   string    `json:"concept"`
+	Content   string    `json:"content"`
+	Type      string    `json:"type,omitempty"`
+	Tags      []string  `json:"tags,omitempty"`
+	Ordinal   *int32    `json:"ordinal,omitempty"` // nil = append at end
+	Embedding []float32 `json:"embedding,omitempty"`
 }
 
 // AddChildResult is returned by AddChild.

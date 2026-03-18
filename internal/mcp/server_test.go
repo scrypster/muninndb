@@ -49,7 +49,7 @@ func (f *fakeEngine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatR
 func (f *fakeEngine) GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error) {
 	return nil, nil
 }
-func (f *fakeEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string) (*WriteResult, error) {
+func (f *fakeEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (*WriteResult, error) {
 	return &WriteResult{ID: "new-id"}, nil
 }
 func (f *fakeEngine) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
@@ -161,6 +161,9 @@ func (f *fakeEngine) GetEntityAggregate(_ context.Context, _, _ string, _ int) (
 
 func (f *fakeEngine) ListEntities(_ context.Context, _ string, _ int, _ string) ([]EntitySummary, error) {
 	return []EntitySummary{}, nil
+}
+func (f *fakeEngine) GetVaultEmbedDim(_ context.Context, _ string) int {
+	return 0
 }
 
 func newTestServer() *MCPServer {

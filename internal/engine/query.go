@@ -189,7 +189,7 @@ func (e *Engine) Traverse(ctx context.Context, vault, startID string, maxHops, m
 }
 
 // Explain runs activation with the given query and returns score details for engramID.
-func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []string) (*ExplainData, error) {
+func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []string, embedding []float32) (*ExplainData, error) {
 	const threshold = 0.0
 	// Run activation in observe mode so we get accurate scores without
 	// triggering Hebbian co-activation, activity tracking, or PAS transitions.
@@ -198,6 +198,7 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 	resp, err := e.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    query,
+		Embedding:  embedding,
 		MaxResults: 100,
 		Threshold:  threshold,
 	})
