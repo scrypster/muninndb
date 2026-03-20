@@ -110,7 +110,7 @@ Provider comparison:
 | Jina | `MUNINN_JINA_KEY` | jina-embeddings-v3 | 1024 | Per token | API |
 | Mistral | `MUNINN_MISTRAL_KEY` | mistral-embed | 1024 | Per token | API |
 
-`MUNINN_OPENAI_URL` can optionally override the OpenAI base URL for compatible endpoints (for example LocalAI or an internal gateway). If set to an invalid value, MuninnDB skips OpenAI initialization instead of falling back to `api.openai.com`.
+`MUNINN_OPENAI_URL` can optionally override the OpenAI base URL for compatible endpoints (for example LocalAI or an internal gateway). If set to an invalid value, MuninnDB skips OpenAI initialization instead of falling back to `api.openai.com`. This override also applies to the Enrich plugin when `MUNINN_ENRICH_URL` is set to an `openai://` provider — see [Tier 3](#4-tier-3-enrich-plugin) below.
 
 ### Retroactive Enrichment
 
@@ -162,6 +162,15 @@ muninn server
 # OpenAI — gpt-4o-mini for cost, gpt-4o for quality
 export MUNINN_ENRICH_URL="openai://gpt-4o-mini"
 export MUNINN_ENRICH_API_KEY="sk-..."
+muninn server
+
+# OpenAI-compatible gateway (LocalAI, Together AI, etc.)
+# MUNINN_OPENAI_URL applies to both the Embed and Enrich plugins when using openai:// URLs.
+# Note: use MUNINN_ENRICH_API_KEY for the enrich provider's API key — MUNINN_OPENAI_KEY
+# is used by the Embed plugin only and is not shared with the Enrich plugin.
+export MUNINN_ENRICH_URL="openai://your-model"
+export MUNINN_ENRICH_API_KEY="your-api-key"
+export MUNINN_OPENAI_URL="https://your-gateway.example.com/v1"
 muninn server
 
 # Anthropic
