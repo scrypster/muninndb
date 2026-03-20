@@ -456,6 +456,60 @@ func TestResolveOpenAIEmbedProviderURL(t *testing.T) {
 	}
 }
 
+func TestInjectOpenAIBaseURL(t *testing.T) {
+	tests := []struct {
+		name          string
+		enrichURL     string
+		openAIOverride string
+		want          string
+	}{
+		{
+			name:          "plain http override injected",
+			enrichURL:     "openai://qwen3",
+			openAIOverride: "https://api.infomaniak.com/2/ai/103246/openai/v1",
+			want:          "openai://qwen3?base_url=https%3A%2F%2Fapi.infomaniak.com%2F2%2Fai%2F103246%2Fopenai%2Fv1",
+		},
+		{
+			name:          "openai:// override with base_url param — extracts base_url",
+			enrichURL:     "openai://qwen3",
+			openAIOverride: "openai://text-embedding-3-small?base_url=http://localhost:8080/v1",
+			want:          "openai://qwen3?base_url=http%3A%2F%2Flocalhost%3A8080%2Fv1",
+		},
+		{
+			name:          "openai:// override without base_url — no injection (default api.openai.com)",
+			enrichURL:     "openai://qwen3",
+			openAIOverride: "openai://text-embedding-3-small",
+			want:          "openai://qwen3",
+		},
+		{
+			name:          "enrich URL already has base_url — not overridden",
+			enrichURL:     "openai://qwen3?base_url=http://other-host:9000/v1",
+			openAIOverride: "https://api.infomaniak.com/v1",
+			want:          "openai://qwen3?base_url=http://other-host:9000/v1",
+		},
+		{
+			name:          "empty override — no-op",
+			enrichURL:     "openai://qwen3",
+			openAIOverride: "",
+			want:          "openai://qwen3",
+		},
+		{
+			name:          "non-openai enrich URL — not touched",
+			enrichURL:     "anthropic://claude-3-haiku",
+			openAIOverride: "https://api.infomaniak.com/v1",
+			want:          "anthropic://claude-3-haiku",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := injectOpenAIBaseURL(tc.enrichURL, tc.openAIOverride)
+			if got != tc.want {
+				t.Errorf("injectOpenAIBaseURL(%q, %q)\n  got  %q\n  want %q", tc.enrichURL, tc.openAIOverride, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResolveOpenAIEmbedProviderURL_CaseInsensitiveScheme(t *testing.T) {
 	// URI schemes are case-insensitive per RFC 3986 — OPENAI:// should work like openai://
 	got, err := resolveOpenAIEmbedProviderURL("OPENAI://text-embedding-3-small?base_url=http://localhost:8080/v1")
