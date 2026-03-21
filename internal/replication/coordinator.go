@@ -379,7 +379,42 @@ func (c *ClusterCoordinator) runAsCortex(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// joinWithRetry attempts to join the Cortex at cortexAddr, retrying with
+// exponential backoff until success or ctx is canceled. Each attempt uses its
+// own 30 s timeout so a canceled startup context does not abort in-flight dials.
+func (c *ClusterCoordinator) joinWithRetry(ctx context.Context, cortexAddr, role string) (JoinResult, error) {
+	const maxAttempts = 10
+	const joinTimeout = 30 * time.Second
+	const maxBackoff = 30 * time.Second
+
+	backoff := time.Second
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		joinCtx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+		resp, err := c.joinClient.Join(joinCtx, cortexAddr)
+		cancel()
+		if err == nil {
+			return resp, nil
+		}
+		slog.Warn("cluster: join attempt failed, will retry",
+			"role", role, "attempt", attempt, "max", maxAttempts,
+			"cortex", cortexAddr, "backoff", backoff, "err", err)
+		select {
+		case <-ctx.Done():
+			return JoinResult{}, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+	return JoinResult{}, fmt.Errorf("failed to join cortex after %d attempts", maxAttempts)
+}
+
 // runAsLobe connects to seed, joins, then blocks while receiving replication.
+// Join attempts use a dedicated per-attempt context (not the parent) so a
+// canceled startup context does not kill in-flight dials. Retries use
+// exponential backoff capped at 30 s.
 func (c *ClusterCoordinator) runAsLobe(ctx context.Context) error {
 	c.roleMu.Lock()
 	c.role = RoleReplica
@@ -390,7 +425,7 @@ func (c *ClusterCoordinator) runAsLobe(ctx context.Context) error {
 	}
 
 	cortexAddr := c.cfg.Seeds[0]
-	resp, err := c.joinClient.Join(ctx, cortexAddr)
+	resp, err := c.joinWithRetry(ctx, cortexAddr, "lobe")
 	if err != nil {
 		return fmt.Errorf("cluster: join failed: %w", err)
 	}
@@ -428,7 +463,7 @@ func (c *ClusterCoordinator) runAsObserver(ctx context.Context) error {
 	}
 
 	cortexAddr := c.cfg.Seeds[0]
-	resp, err := c.joinClient.Join(ctx, cortexAddr)
+	resp, err := c.joinWithRetry(ctx, cortexAddr, "observer")
 	if err != nil {
 		return fmt.Errorf("cluster: observer join failed: %w", err)
 	}
