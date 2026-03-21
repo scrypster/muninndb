@@ -36,6 +36,9 @@ import (
 // Used at REST handler boundaries to return 400 instead of 500 when a caller
 // passes a malformed ID (e.g. a word like "rebuild" in the URL path).
 func isValidEngramID(id string) bool {
+	// ParseStrict is intentionally used over Parse: it rejects Crockford-confusable
+	// characters (I→1, L→1, O→0) rather than silently remapping them, so callers
+	// must supply IDs exactly as the system issued them.
 	_, err := ulid.ParseStrict(id)
 	return err == nil
 }
