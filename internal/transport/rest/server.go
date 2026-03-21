@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/oklog/ulid/v2"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/config"
 	"github.com/scrypster/muninndb/internal/engine"
@@ -30,6 +31,17 @@ import (
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 	"golang.org/x/time/rate"
 )
+
+// isValidEngramID returns true if id is a syntactically valid ULID.
+// Used at REST handler boundaries to return 400 instead of 500 when a caller
+// passes a malformed ID (e.g. a word like "rebuild" in the URL path).
+func isValidEngramID(id string) bool {
+	// ParseStrict is intentionally used over Parse: it rejects Crockford-confusable
+	// characters (I→1, L→1, O→0) rather than silently remapping them, so callers
+	// must supply IDs exactly as the system issued them.
+	_, err := ulid.ParseStrict(id)
+	return err == nil
+}
 
 // ctxKeyRequestID is the typed context key used to propagate the request ID
 // through the middleware chain to sendError.
@@ -673,6 +685,10 @@ func (s *Server) handleGetEngram(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	resp, err := s.engine.Read(r.Context(), &ReadRequest{ID: id, Vault: ctxVault(r)})
 	if err != nil {
 		if errors.Is(err, engine.ErrEngramNotFound) {
@@ -689,6 +705,10 @@ func (s *Server) handleDeleteEngram(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
 		return
 	}
 	resp, err := s.engine.Forget(r.Context(), &ForgetRequest{ID: id, Vault: ctxVault(r)})
@@ -1166,6 +1186,10 @@ func (s *Server) handleGetEngramLinks(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	vault := ctxVault(r)
 	resp, err := s.engine.GetEngramLinks(r.Context(), &GetEngramLinksRequest{ID: id, Vault: vault})
 	if err != nil {
@@ -1342,6 +1366,10 @@ func (s *Server) handleEvolve(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	var body struct {
 		NewContent string `json:"new_content"`
 		Reason     string `json:"reason"`
@@ -1422,6 +1450,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	resp, err := s.engine.Restore(r.Context(), ctxVault(r), id)
 	if err != nil {
 		if errors.Is(err, engine.ErrEngramNotFound) {
@@ -1498,6 +1530,10 @@ func (s *Server) handleSetState(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	var body SetStateRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
@@ -1532,6 +1568,10 @@ func (s *Server) handleUpdateTags(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
 		return
 	}
 	var body UpdateTagsRequest
@@ -1578,6 +1618,10 @@ func (s *Server) handleRetryEnrich(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
 		return
 	}
 	resp, err := s.engine.RetryEnrich(r.Context(), ctxVault(r), id)

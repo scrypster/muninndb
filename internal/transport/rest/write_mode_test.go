@@ -260,7 +260,7 @@ func TestPublicVaultFullModeMutationsPassThrough(t *testing.T) {
 	}{
 		{"CreateEngram", http.MethodPost, "/api/engrams?vault=default", `{"concept":"test","content":"hello"}`},
 		{"BatchCreate", http.MethodPost, "/api/engrams/batch?vault=default", `{"engrams":[{"concept":"a","content":"x"}]}`},
-		{"DeleteEngram", http.MethodDelete, "/api/engrams/some-id?vault=default", ``},
+		{"DeleteEngram", http.MethodDelete, "/api/engrams/" + testEngramID + "?vault=default", ``},
 		{"Link", http.MethodPost, "/api/link?vault=default", `{"source_id":"id1","target_id":"id2","rel_type":1}`},
 	}
 
