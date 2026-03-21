@@ -443,7 +443,7 @@ func TestVaultRouting_Read_ExplicitVault(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/api/engrams/some-id?vault=myvault", nil)
+	req := httptest.NewRequest("GET", "/api/engrams/"+testEngramID+"?vault=myvault", nil)
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -465,7 +465,7 @@ func TestVaultRouting_Forget_ExplicitVault(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	req := httptest.NewRequest("DELETE", "/api/engrams/some-id?vault=myvault", nil)
+	req := httptest.NewRequest("DELETE", "/api/engrams/"+testEngramID+"?vault=myvault", nil)
 	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)

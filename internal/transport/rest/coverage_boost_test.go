@@ -237,7 +237,7 @@ func TestGetEngram_EngineError_Boost(t *testing.T) {
 	eng := &readErrorEngine{}
 	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-	req := httptest.NewRequest("GET", "/api/engrams/some-id", nil)
+	req := httptest.NewRequest("GET", "/api/engrams/"+testEngramID, nil)
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
 
@@ -261,7 +261,7 @@ func TestDeleteEngram_EngineError(t *testing.T) {
 	eng := &forgetErrorEngine{}
 	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-	req := httptest.NewRequest("DELETE", "/api/engrams/01ARZ3NDEKTSV4RRFFQ69G5FAV", nil)
+	req := httptest.NewRequest("DELETE", "/api/engrams/"+testEngramID, nil)
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
 

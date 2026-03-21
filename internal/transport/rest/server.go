@@ -673,6 +673,10 @@ func (s *Server) handleGetEngram(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if len(id) != 26 {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id: must be a 26-character ULID")
+		return
+	}
 	resp, err := s.engine.Read(r.Context(), &ReadRequest{ID: id, Vault: ctxVault(r)})
 	if err != nil {
 		if errors.Is(err, engine.ErrEngramNotFound) {
@@ -689,6 +693,10 @@ func (s *Server) handleDeleteEngram(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	if len(id) != 26 {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id: must be a 26-character ULID")
 		return
 	}
 	resp, err := s.engine.Forget(r.Context(), &ForgetRequest{ID: id, Vault: ctxVault(r)})

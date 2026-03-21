@@ -27,6 +27,8 @@ import (
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
+const testEngramID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
 // MockEngine is a mock implementation of EngineAPI for testing.
 type MockEngine struct {
 	lastActivityReq  *ActivityCountsRequest
@@ -854,7 +856,7 @@ func TestDeleteEngram(t *testing.T) {
 	engine := &MockEngine{}
 	server := NewServer("localhost:8080", engine, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-	req := httptest.NewRequest("DELETE", "/api/engrams/01ARZ3NDEKTSV4RRFFQ69G5FAV", nil)
+	req := httptest.NewRequest("DELETE", "/api/engrams/"+testEngramID, nil)
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
 
@@ -1790,7 +1792,7 @@ func TestGetEngram_HappyPath(t *testing.T) {
 	eng := &MockEngine{}
 	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-	req := httptest.NewRequest("GET", "/api/engrams/test-id?vault=default", nil)
+	req := httptest.NewRequest("GET", "/api/engrams/"+testEngramID+"?vault=default", nil)
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
 
@@ -1825,7 +1827,7 @@ func (e *readFactEngine) Read(ctx context.Context, req *ReadRequest) (*ReadRespo
 func TestGetEngram_IncludesZeroMemoryType(t *testing.T) {
 	server := NewServer("localhost:8080", &readFactEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-	req := httptest.NewRequest("GET", "/api/engrams/fact-id?vault=default", nil)
+	req := httptest.NewRequest("GET", "/api/engrams/"+testEngramID+"?vault=default", nil)
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
 
@@ -1855,13 +1857,29 @@ func (e *readErrEngine) Read(ctx context.Context, req *ReadRequest) (*ReadRespon
 func TestGetEngram_EngineError(t *testing.T) {
 	server := NewServer("localhost:8080", &readErrEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-	req := httptest.NewRequest("GET", "/api/engrams/missing-id?vault=default", nil)
+	req := httptest.NewRequest("GET", "/api/engrams/"+testEngramID+"?vault=default", nil)
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
 
 	// handleGetEngram sends 404 on engine error.
 	if w.Code != http.StatusNotFound && w.Code != http.StatusInternalServerError {
 		t.Errorf("expected 404 or 500, got %d", w.Code)
+	}
+}
+
+// TestGetEngram_InvalidULID verifies that GET /api/engrams/{id} returns 400
+// when the path segment is not a valid 26-character ULID (e.g. "rebuild").
+func TestGetEngram_InvalidULID(t *testing.T) {
+	eng := &MockEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+
+	for _, badID := range []string{"rebuild", "short", "toolong-but-still-not-ulid-format"} {
+		req := httptest.NewRequest("GET", "/api/engrams/"+badID+"?vault=default", nil)
+		w := httptest.NewRecorder()
+		server.mux.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("id=%q: expected 400, got %d: %s", badID, w.Code, w.Body.String())
+		}
 	}
 }
 
