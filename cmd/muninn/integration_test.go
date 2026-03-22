@@ -39,7 +39,7 @@ func TestMain(m *testing.M) {
 	tmp.Close()
 	muninnBin = tmp.Name()
 
-	out, err := exec.Command("go", "build", "-o", muninnBin, ".").CombinedOutput()
+	out, err := exec.Command("go", "build", "-tags", "localassets", "-o", muninnBin, ".").CombinedOutput()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration: build failed: %v\n%s\n", err, out)
 		os.Remove(muninnBin)

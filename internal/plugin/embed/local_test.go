@@ -98,6 +98,18 @@ func TestReadAll_Empty(t *testing.T) {
 	}
 }
 
+// TestLocalAvailable asserts that the ONNX model and tokenizer were actually
+// embedded at build time. This test is only compiled with -tags localassets,
+// so a failure here means the assets are missing despite the build tag being
+// set — which would indicate a fetch-assets / go:embed problem.
+//
+// Crucially, if any go build command for the muninn binary is missing
+// -tags localassets, this test will not be compiled at all, meaning the
+// regression silently escapes. The scripts/check-build-tags.sh static check
+// closes that gap.
 func TestLocalAvailable(t *testing.T) {
-	_ = LocalAvailable()
+	if !LocalAvailable() {
+		t.Fatal("LocalAvailable() returned false: ONNX model or tokenizer was not embedded at build time. " +
+			"Run 'make fetch-assets' and rebuild with -tags localassets.")
+	}
 }
