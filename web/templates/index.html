@@ -1791,9 +1791,9 @@
               <div style="margin-bottom:1rem;">
                 <div style="font-size:0.8125rem;font-weight:600;color:var(--text-primary);margin-bottom:0.625rem;">Select provider</div>
                 <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-                  <template x-for="opt in [{val:'none',label:'None'},{val:'ollama',label:'Ollama (local)'},{val:'openai',label:'OpenAI'},{val:'anthropic',label:'Anthropic'}]" :key="opt.val">
+                  <template x-for="opt in [{val:'none',label:'None'},{val:'ollama',label:'Ollama (local)'},{val:'openai',label:'OpenAI'},{val:'anthropic',label:'Anthropic'},{val:'google',label:'Google'}]" :key="opt.val">
                     <button
-                      @click="pluginCfg.enrichProvider=opt.val;pluginCfg.enrichCmd=''"
+                      @click="pluginCfg.enrichProvider=opt.val;pluginCfg.enrichCmd='';if(opt.val==='google')pluginCfg.enrichModel='gemini-1.5-flash';if(opt.val==='anthropic')pluginCfg.enrichModel='claude-haiku-4-5-20251001'"
                       :class="pluginCfg.enrichProvider===opt.val ? 'tab-btn active' : 'tab-btn'"
                       x-text="opt.label">
                     </button>
@@ -1876,6 +1876,22 @@
                   <select class="input-field" x-model="pluginCfg.enrichModel">
                     <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001 (fastest)</option>
                     <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Google fields -->
+              <div x-show="pluginCfg.enrichProvider==='google'" style="margin-bottom:1rem;">
+                <div class="form-group" style="margin-bottom:0.75rem;">
+                  <label>Google API Key</label>
+                  <input class="input-field" type="password" x-model="pluginCfg.enrichApiKey" placeholder="AIza..." autocomplete="off" />
+                </div>
+                <div class="form-group">
+                  <label>Model</label>
+                  <select class="input-field" x-model="pluginCfg.enrichModel">
+                    <option value="gemini-1.5-flash">gemini-1.5-flash (recommended)</option>
+                    <option value="gemini-1.5-pro">gemini-1.5-pro</option>
+                    <option value="gemini-2.0-flash">gemini-2.0-flash</option>
                   </select>
                 </div>
               </div>
