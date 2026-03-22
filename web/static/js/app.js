@@ -216,7 +216,7 @@ document.addEventListener('alpine:init', () => {
       embedUrl: '',           // custom base URL for openai-compatible endpoints
       embedShowForm: false,
       embedError: '',
-      enrichProvider: 'none', // 'none' | 'ollama' | 'openai' | 'anthropic'
+      enrichProvider: 'none', // 'none' | 'ollama' | 'openai' | 'anthropic' | 'google'
       enrichOllamaModel: 'llama3.2',
       enrichModel: 'claude-haiku-4-5-20251001',
       enrichApiKey: '',
@@ -2569,8 +2569,9 @@ document.addEventListener('alpine:init', () => {
           ? `ollama://localhost:11434/${c.enrichOllamaModel}`
           : c.enrichProvider === 'openai' ? 'openai://gpt-4o-mini'
           : c.enrichProvider === 'anthropic' ? `anthropic://${c.enrichModel}`
+          : c.enrichProvider === 'google' ? `google://${c.enrichModel}`
           : '',
-        enrich_api_key: (c.enrichProvider === 'openai' || c.enrichProvider === 'anthropic') ? c.enrichApiKey : '',
+        enrich_api_key: (c.enrichProvider === 'openai' || c.enrichProvider === 'anthropic' || c.enrichProvider === 'google') ? c.enrichApiKey : '',
       };
 
       try {

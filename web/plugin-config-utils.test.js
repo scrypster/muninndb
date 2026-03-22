@@ -140,6 +140,27 @@ describe('parsePluginConfigResponse', () => {
 
     // ── Full round-trip scenarios ────────────────────────────────────────────
 
+    it('parses google enrich URL to model name', () => {
+        const r = parsePluginConfigResponse({
+            enrich_provider: 'google',
+            enrich_url: 'google://gemini-1.5-flash',
+            enrich_api_key: 'AIza-test',
+        });
+        expect(r.enrichProvider).toBe('google');
+        expect(r.enrichModel).toBe('gemini-1.5-flash');
+        expect(r.enrichApiKey).toBe('AIza-test');
+        expect(r.enrichOllamaModel).toBeNull();
+    });
+
+    it('does not parse google enrich URL when enrich_provider is not google', () => {
+        const r = parsePluginConfigResponse({
+            enrich_provider: 'openai',
+            enrich_url: 'google://gemini-1.5-flash',
+        });
+        expect(r.enrichProvider).toBe('openai');
+        expect(r.enrichModel).toBeNull();
+    });
+
     it('full anthropic enrich + ollama embed round-trip', () => {
         const r = parsePluginConfigResponse({
             embed_provider: 'ollama',

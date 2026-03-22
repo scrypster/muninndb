@@ -86,7 +86,7 @@ type Server struct {
 	embedHardwareAccelerated *bool  // nil for cloud/noop providers; true/false for Ollama
 
 	// Enrichment info — set at construction time, static for the lifetime of the server.
-	enrichProvider string // "ollama", "openai", "anthropic", or ""
+	enrichProvider string // "ollama", "openai", "anthropic", "google", or ""
 	enrichModel    string // model name, or ""
 
 	// MCP info — set at construction time for the /api/admin/mcp-info endpoint.
@@ -127,7 +127,7 @@ type EmbedInfo struct {
 
 // EnrichInfo carries static enrichment metadata set at server construction time.
 type EnrichInfo struct {
-	Provider string // "ollama", "openai", "anthropic", or ""
+	Provider string // "ollama", "openai", "anthropic", "google", or ""
 	Model    string // model name, or ""
 }
 

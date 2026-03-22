@@ -572,3 +572,176 @@ func TestAnthropicProvider_Close(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 }
+
+// --- Google ---
+
+func TestGoogleProvider_Name(t *testing.T) {
+	p := NewGoogleLLMProvider()
+	if p.Name() != "google" {
+		t.Fatalf("expected 'google', got %q", p.Name())
+	}
+}
+
+func TestGoogleProvider_Complete_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify path includes model name and generateContent action.
+		if r.URL.Path != "/v1beta/models/test-model:generateContent" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		// Google uses x-goog-api-key, not Authorization: Bearer.
+		if r.Header.Get("x-goog-api-key") != "test-key" {
+			t.Errorf("bad x-goog-api-key header: %q", r.Header.Get("x-goog-api-key"))
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("unexpected Authorization header — Google does not use Bearer auth")
+		}
+
+		var req googleGenerateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Contents) == 0 || req.Contents[0].Role != "user" {
+			t.Errorf("expected contents[0].role == 'user'")
+		}
+		if req.SystemInstruction == nil || len(req.SystemInstruction.Parts) == 0 {
+			t.Errorf("expected systemInstruction to be set")
+		}
+
+		resp := googleGenerateResponse{}
+		resp.Candidates = []struct {
+			Content struct {
+				Parts []googlePart `json:"parts"`
+			} `json:"content"`
+		}{
+			{Content: struct {
+				Parts []googlePart `json:"parts"`
+			}{Parts: []googlePart{{Text: "google response"}}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	p := NewGoogleLLMProvider()
+	p.baseURL = srv.URL
+	p.model = "test-model"
+	p.apiKey = "test-key"
+
+	got, err := p.Complete(context.Background(), "system prompt", "user msg")
+	if err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+	if got != "google response" {
+		t.Fatalf("expected 'google response', got %q", got)
+	}
+}
+
+func TestGoogleProvider_Complete_ErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte("rate limited"))
+	}))
+	defer srv.Close()
+
+	p := NewGoogleLLMProvider()
+	p.baseURL = srv.URL
+	p.model = "m"
+	p.apiKey = "k"
+
+	_, err := p.Complete(context.Background(), "s", "u")
+	if err == nil {
+		t.Fatal("expected error for 429 status")
+	}
+}
+
+func TestGoogleProvider_Complete_NoCandidates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := googleGenerateResponse{}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	p := NewGoogleLLMProvider()
+	p.baseURL = srv.URL
+	p.model = "m"
+	p.apiKey = "k"
+
+	_, err := p.Complete(context.Background(), "s", "u")
+	if err == nil {
+		t.Fatal("expected error for empty candidates")
+	}
+}
+
+func TestGoogleProvider_Complete_BadJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("{bad json"))
+	}))
+	defer srv.Close()
+
+	p := NewGoogleLLMProvider()
+	p.baseURL = srv.URL
+	p.model = "m"
+	p.apiKey = "k"
+
+	_, err := p.Complete(context.Background(), "s", "u")
+	if err == nil {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestGoogleProvider_Init_MissingKey(t *testing.T) {
+	p := NewGoogleLLMProvider()
+	err := p.Init(context.Background(), LLMProviderConfig{
+		BaseURL: "http://localhost",
+		Model:   "m",
+		APIKey:  "",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing API key")
+	}
+}
+
+func TestGoogleProvider_Init_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := googleGenerateResponse{}
+		resp.Candidates = []struct {
+			Content struct {
+				Parts []googlePart `json:"parts"`
+			} `json:"content"`
+		}{
+			{Content: struct {
+				Parts []googlePart `json:"parts"`
+			}{Parts: []googlePart{{Text: `{"ok":true}`}}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	p := NewGoogleLLMProvider()
+	err := p.Init(context.Background(), LLMProviderConfig{
+		BaseURL: srv.URL,
+		Model:   "test",
+		APIKey:  "key",
+	})
+	if err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+}
+
+func TestGoogleProvider_Init_ConnectivityFail(t *testing.T) {
+	p := NewGoogleLLMProvider()
+	err := p.Init(context.Background(), LLMProviderConfig{
+		BaseURL: "http://127.0.0.1:1", // unreachable port
+		Model:   "test",
+		APIKey:  "key",
+	})
+	if err == nil {
+		t.Fatal("expected error for unreachable host")
+	}
+}
+
+func TestGoogleProvider_Close(t *testing.T) {
+	p := NewGoogleLLMProvider()
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+}

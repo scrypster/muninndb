@@ -177,6 +177,11 @@ muninn server
 export MUNINN_ENRICH_URL="anthropic://claude-haiku-4-5-20251001"
 export MUNINN_ANTHROPIC_KEY="sk-ant-..."
 muninn server
+
+# Google
+export MUNINN_ENRICH_URL="google://gemini-1.5-flash"
+export MUNINN_GOOGLE_KEY="AIza..."  # or MUNINN_ENRICH_API_KEY
+muninn server
 ```
 
 Provider comparison:

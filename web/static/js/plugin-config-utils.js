@@ -26,6 +26,7 @@
  *   enrich_url "ollama://localhost:11434/{model}" → enrichOllamaModel
  *   enrich_url "anthropic://{model}"              → enrichModel
  *   enrich_url "openai://{model}"                 → enrichModel
+ *   enrich_url "google://{model}"                 → enrichModel
  *
  * @param {object|null} data - raw API response object
  * @returns {object|null} parsed state, or null when data is falsy
@@ -67,6 +68,10 @@ export function parsePluginConfigResponse(data) {
     } else if (result.enrichProvider === 'openai' && enrichUrl.startsWith('openai://')) {
         // "openai://gpt-4o-mini" → "gpt-4o-mini"
         const model = enrichUrl.replace('openai://', '');
+        if (model) result.enrichModel = model;
+    } else if (result.enrichProvider === 'google' && enrichUrl.startsWith('google://')) {
+        // "google://gemini-1.5-flash" → "gemini-1.5-flash"
+        const model = enrichUrl.replace('google://', '');
         if (model) result.enrichModel = model;
     }
 
