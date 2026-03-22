@@ -4,11 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  # workflow_dispatch allows manually triggering a Docker build for an existing
+  # tag (e.g. to publish v0.4.6-alpha after this workflow was added). When
+  # triggering manually, select the tag ref in the GitHub UI — GITHUB_REF will
+  # be set to refs/tags/<tag> and metadata-action will extract it correctly.
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to build (e.g. v0.4.6-alpha). Defaults to latest tag.'
-        required: false
 
 permissions:
   contents: read

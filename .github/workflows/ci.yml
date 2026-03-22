@@ -43,7 +43,7 @@ jobs:
         run: cd web && npm ci --ignore-scripts && npm run build
 
       - name: Build server
-        run: go build -o muninndb-server ./cmd/muninn/...
+        run: go build -tags localassets -o muninndb-server ./cmd/muninn/...
 
       - name: Run Go tests
         run: go test -tags localassets ./... -timeout 300s -race -coverprofile=coverage.out -covermode=atomic
@@ -145,7 +145,7 @@ jobs:
         run: cd web && npm ci --ignore-scripts && npm run build
 
       - name: Build server
-        run: go build -o muninn.exe ./cmd/muninn/...
+        run: go build -tags localassets -o muninn.exe ./cmd/muninn/...
 
       - name: Run unit tests
         run: go test -tags localassets ./cmd/muninn/... -timeout 120s -count=1
@@ -229,7 +229,7 @@ jobs:
         run: cd web && npm ci --ignore-scripts && npm run build
 
       - name: Build server
-        run: go build -o muninndb-server ./cmd/muninn/...
+        run: go build -tags localassets -o muninndb-server ./cmd/muninn/...
 
       - name: Start MuninnDB server
         run: |
