@@ -1,8 +1,14 @@
 name: Docker
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.4.6-alpha). Defaults to latest tag.'
+        required: false
 
 permissions:
   contents: read

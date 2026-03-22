@@ -112,7 +112,7 @@ css:
 
 ## build: build the server binary (requires fetch-assets and web first).
 build: web
-	@go build -o muninndb-server ./cmd/muninn/...
+	@go build -tags localassets -o muninndb-server ./cmd/muninn/...
 
 ## test: run unit tests across all packages.
 test:

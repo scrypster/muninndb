@@ -30,7 +30,7 @@ RUN cd web && npm ci --ignore-scripts && npm run build
 # Build the server binary.
 # CGO_ENABLED=0 would break the local ONNX embedder (dlopen at runtime).
 # The binary links against glibc — debian-slim provides it in the runtime stage.
-RUN go build -ldflags="-s -w" -o /muninndb-server ./cmd/muninn/...
+RUN go build -tags localassets -ldflags="-s -w" -o /muninndb-server ./cmd/muninn/...
 
 # Stage 2: Minimal runtime image
 FROM debian:bookworm-slim

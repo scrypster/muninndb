@@ -83,6 +83,7 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           go build \
+            -tags localassets \
             -ldflags "-X main.version=${GITHUB_REF_NAME}" \
             -o muninn-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/muninn/...
@@ -147,7 +148,7 @@ jobs:
 
       - name: Build binary
         run: |
-          go build -ldflags "-X main.version=$env:GITHUB_REF_NAME" -o muninn-windows-amd64.exe ./cmd/muninn/...
+          go build -tags localassets -ldflags "-X main.version=$env:GITHUB_REF_NAME" -o muninn-windows-amd64.exe ./cmd/muninn/...
         shell: pwsh
 
       - name: Package archive
