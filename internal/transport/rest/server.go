@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/oklog/ulid/v2"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/config"
 	"github.com/scrypster/muninndb/internal/engine"
@@ -30,6 +31,17 @@ import (
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 	"golang.org/x/time/rate"
 )
+
+// isValidEngramID returns true if id is a syntactically valid ULID.
+// Used at REST handler boundaries to return 400 instead of 500 when a caller
+// passes a malformed ID (e.g. a word like "rebuild" in the URL path).
+func isValidEngramID(id string) bool {
+	// ParseStrict is intentionally used over Parse: it rejects Crockford-confusable
+	// characters (I→1, L→1, O→0) rather than silently remapping them, so callers
+	// must supply IDs exactly as the system issued them.
+	_, err := ulid.ParseStrict(id)
+	return err == nil
+}
 
 // ctxKeyRequestID is the typed context key used to propagate the request ID
 // through the middleware chain to sendError.
@@ -74,7 +86,7 @@ type Server struct {
 	embedHardwareAccelerated *bool  // nil for cloud/noop providers; true/false for Ollama
 
 	// Enrichment info — set at construction time, static for the lifetime of the server.
-	enrichProvider string // "ollama", "openai", "anthropic", or ""
+	enrichProvider string // "ollama", "openai", "anthropic", "google", or ""
 	enrichModel    string // model name, or ""
 
 	// MCP info — set at construction time for the /api/admin/mcp-info endpoint.
@@ -115,7 +127,7 @@ type EmbedInfo struct {
 
 // EnrichInfo carries static enrichment metadata set at server construction time.
 type EnrichInfo struct {
-	Provider string // "ollama", "openai", "anthropic", or ""
+	Provider string // "ollama", "openai", "anthropic", "google", or ""
 	Model    string // model name, or ""
 }
 
@@ -233,7 +245,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/admin/vaults/{name}/job-status", s.withAdminMiddleware(s.handleVaultJobStatus))
 	mux.HandleFunc("GET /api/admin/vaults/{name}/export", s.withAdminMiddleware(s.handleExportVault))
 	mux.HandleFunc("GET /api/admin/vaults/{name}/export-markdown", s.withAdminMiddleware(s.handleExportVaultMarkdown))
-	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddleware(s.withLargeBody(s.handleImportVault)))
+	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddlewareNoSizeLimit(s.withLargeBody(s.handleImportVault)))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-fts", s.withAdminMiddleware(s.handleReindexFTSVault))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed", s.withAdminMiddleware(s.handleReembedVault))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.handleRenameVault))
@@ -513,6 +525,18 @@ func (s *Server) withAdminMiddleware(handler http.HandlerFunc) http.HandlerFunc 
 	return s.withPublicMiddleware(s.bodySizeMiddleware(s.authStore.AdminAPIMiddleware(s.sessionSecret, handler)))
 }
 
+// withAdminMiddlewareNoSizeLimit is like withAdminMiddleware but omits all body
+// size limits (both the 64 KB publicBodySizeMiddleware in withPublicMiddleware
+// and the 4 MB bodySizeMiddleware). Use this for routes that apply their own
+// limit (e.g. withLargeBody) so multiple MaxBytesReader wrappers don't compound.
+func (s *Server) withAdminMiddlewareNoSizeLimit(handler http.HandlerFunc) http.HandlerFunc {
+	if s.authStore == nil || len(s.sessionSecret) == 0 {
+		return s.recoveryMiddleware(s.requestIDMiddleware(s.loggingMiddleware(handler)))
+	}
+	return s.recoveryMiddleware(s.requestIDMiddleware(s.loggingMiddleware(
+		s.authStore.AdminAPIMiddleware(s.sessionSecret, handler))))
+}
+
 // bodySizeMiddleware limits request bodies to 4 MB to prevent resource exhaustion.
 func (s *Server) bodySizeMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	const maxBody = 4 << 20 // 4 MB
@@ -673,6 +697,10 @@ func (s *Server) handleGetEngram(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	resp, err := s.engine.Read(r.Context(), &ReadRequest{ID: id, Vault: ctxVault(r)})
 	if err != nil {
 		if errors.Is(err, engine.ErrEngramNotFound) {
@@ -689,6 +717,10 @@ func (s *Server) handleDeleteEngram(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
 		return
 	}
 	resp, err := s.engine.Forget(r.Context(), &ForgetRequest{ID: id, Vault: ctxVault(r)})
@@ -1166,6 +1198,10 @@ func (s *Server) handleGetEngramLinks(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	vault := ctxVault(r)
 	resp, err := s.engine.GetEngramLinks(r.Context(), &GetEngramLinksRequest{ID: id, Vault: vault})
 	if err != nil {
@@ -1342,6 +1378,10 @@ func (s *Server) handleEvolve(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	var body struct {
 		NewContent string `json:"new_content"`
 		Reason     string `json:"reason"`
@@ -1422,6 +1462,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	resp, err := s.engine.Restore(r.Context(), ctxVault(r), id)
 	if err != nil {
 		if errors.Is(err, engine.ErrEngramNotFound) {
@@ -1498,6 +1542,10 @@ func (s *Server) handleSetState(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
 		return
 	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
+		return
+	}
 	var body SetStateRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
@@ -1532,6 +1580,10 @@ func (s *Server) handleUpdateTags(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
 		return
 	}
 	var body UpdateTagsRequest
@@ -1578,6 +1630,10 @@ func (s *Server) handleRetryEnrich(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "missing engram id")
+		return
+	}
+	if !isValidEngramID(id) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid engram id format")
 		return
 	}
 	resp, err := s.engine.RetryEnrich(r.Context(), ctxVault(r), id)

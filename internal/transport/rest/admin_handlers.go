@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -910,8 +911,14 @@ func (s *Server) handleImportVault(w http.ResponseWriter, r *http.Request) {
 	}
 	resetMeta := r.URL.Query().Get("reset_metadata") == "true"
 
-	job, err := s.engine.StartImport(r.Context(), vaultName, s.embedModel, 0, resetMeta, r.Body)
+	// Use a pipe so the request body can be streamed to the background import
+	// goroutine without racing against the HTTP server closing r.Body when this
+	// handler returns. The handler copies r.Body → pw synchronously, so it
+	// blocks until the entire upload is received before sending 202.
+	pr, pw := io.Pipe()
+	job, err := s.engine.StartImport(r.Context(), vaultName, s.embedModel, 0, resetMeta, pr)
 	if err != nil {
+		pw.CloseWithError(err)
 		if errors.Is(err, engine.ErrVaultNotFound) {
 			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
 			return
@@ -923,6 +930,15 @@ func (s *Server) handleImportVault(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return
 	}
+
+	// Stream body into the pipe. The import goroutine reads from pr concurrently.
+	// This keeps r.Body alive for the duration of the upload.
+	if _, copyErr := io.Copy(pw, r.Body); copyErr != nil {
+		pw.CloseWithError(copyErr)
+	} else {
+		pw.Close()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})

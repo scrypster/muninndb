@@ -71,6 +71,8 @@ func NewEnrichService(providerURL string) (*EnrichService, error) {
 		prov = NewOpenAILLMProvider()
 	case plugin.SchemeAnthropic:
 		prov = NewAnthropicLLMProvider()
+	case plugin.SchemeGoogle:
+		prov = NewGoogleLLMProvider()
 	default:
 		return nil, fmt.Errorf("unsupported enrich provider scheme: %q", provCfg.Scheme)
 	}
@@ -252,6 +254,9 @@ func (s *EnrichService) createRateLimiter(scheme plugin.ProviderScheme) *TokenBu
 	case plugin.SchemeAnthropic:
 		// 8 requests per second for Anthropic (claude-haiku)
 		return NewTokenBucketLimiter(8.0, 8.0)
+	case plugin.SchemeGoogle:
+		// Gemini Flash paid tier: ~2000 RPM. Use 10 RPS as a conservative default.
+		return NewTokenBucketLimiter(10.0, 10.0)
 	default:
 		// Default: 5 requests per second
 		return NewTokenBucketLimiter(5.0, 5.0)

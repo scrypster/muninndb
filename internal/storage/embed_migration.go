@@ -8,14 +8,20 @@ import (
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
-// ClearEmbedFlagsForVault clears the DigestEmbed flag (bit 0x02) on every engram's
-// 0x11 digest record within the given vault, and range-deletes all 0x18 (embedding)
-// keys for the vault. This causes the RetroactiveProcessor to re-embed every engram
-// on its next scan cycle.
+// ClearEmbedFlagsForVault clears the DigestEmbed (0x02) and DigestEmbedFailed
+// (0x80) flags on every engram's 0x11 digest record within the given vault, and
+// range-deletes all 0x18 (embedding) keys for the vault. This causes the
+// RetroactiveProcessor to re-embed every engram on its next scan cycle,
+// including engrams that previously failed to embed.
 //
-// Returns the number of digest flags that were cleared.
+// Engrams that have no existing digest record are written a zero record so they
+// are explicitly tracked and eligible for re-embedding.
+//
+// Returns the number of digest records that were written (created or updated).
 func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) (int64, error) {
 	const DigestEmbed uint8 = 0x02
+	const DigestEmbedFailed uint8 = 0x80
+	const embedMask uint8 = DigestEmbed | DigestEmbedFailed
 
 	wsPlus, err := keys.IncrementWSPrefix(ws)
 	if err != nil {
@@ -71,15 +77,17 @@ func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) 
 
 		raw, err := ps.getDigestFlagsRaw(id)
 		if err != nil {
-			// No digest record yet — nothing to clear.
-			continue
+			// No digest record yet. Write a zero record so the RetroactiveProcessor
+			// treats this engram as pending (Bug 3 fix: imported engrams are now
+			// explicitly queued for embedding).
+			raw = 0
 		}
-		if raw&DigestEmbed == 0 {
-			// Already cleared.
+		if raw&embedMask == 0 {
+			// Both embed flags already clear — nothing to do.
 			continue
 		}
 
-		raw &^= DigestEmbed
+		raw &^= embedMask
 		flagKey := keys.DigestFlagsKey(id)
 		if err := batch.Set(flagKey, []byte{raw}, nil); err != nil {
 			return cleared, fmt.Errorf("clear embed flags: batch set: %w", err)

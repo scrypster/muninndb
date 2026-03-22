@@ -187,6 +187,43 @@ func resolveEnrichInfo(cfg plugincfg.PluginConfig) rest.EnrichInfo {
 	return rest.EnrichInfo{}
 }
 
+// injectOpenAIBaseURL injects openAIOverride (the value of MUNINN_OPENAI_URL) as
+// a base_url query param into an openai:// enrich URL, mirroring how the embed
+// provider handles the same env var. No-ops when:
+//   - enrichURL is not an openai:// URL
+//   - enrichURL already has an explicit base_url param
+//   - openAIOverride is empty or resolves to the default api.openai.com
+func injectOpenAIBaseURL(enrichURL, openAIOverride string) string {
+	if !strings.HasPrefix(strings.ToLower(enrichURL), "openai://") {
+		return enrichURL
+	}
+	parsed, err := neturl.Parse(enrichURL)
+	if err != nil || parsed.Query().Get("base_url") != "" {
+		return enrichURL
+	}
+	if openAIOverride == "" {
+		return enrichURL
+	}
+	// If MUNINN_OPENAI_URL is itself an openai:// URL, extract its base_url param.
+	// If it's a plain http(s) URL, use it directly as the base URL.
+	baseURL := openAIOverride
+	if strings.HasPrefix(strings.ToLower(openAIOverride), "openai://") {
+		p, err := neturl.Parse(openAIOverride)
+		if err != nil {
+			return enrichURL
+		}
+		b := p.Query().Get("base_url")
+		if b == "" {
+			return enrichURL // openai:// with no base_url = default api.openai.com, nothing to inject
+		}
+		baseURL = b
+	}
+	q := parsed.Query()
+	q.Set("base_url", baseURL)
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
+}
+
 // resolveOpenAIEmbedProviderURL resolves an OpenAI embed URL override into a
 // provider URL that ParseProviderURL can handle. Supports both:
 //   - openai://text-embedding-3-small?base_url=http://localhost:8080
@@ -433,6 +470,7 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 //	ollama://localhost:11434/llama3.2          (local, no key required)
 //	openai://gpt-4o-mini                       (MUNINN_ENRICH_API_KEY required)
 //	anthropic://claude-haiku-4-5-20251001      (MUNINN_ANTHROPIC_KEY or MUNINN_ENRICH_API_KEY)
+//	google://gemini-1.5-flash                  (MUNINN_GOOGLE_KEY or MUNINN_ENRICH_API_KEY)
 //
 // Returns nil without error if MUNINN_ENRICH_URL is not set — LLM enrichment
 // is optional. Logs a warning on init failure so the server starts without
@@ -455,6 +493,7 @@ func buildEnricher(ctx context.Context, cfg plugincfg.PluginConfig) plugin.Enric
 		return nil
 	}
 
+	enrichURL = injectOpenAIBaseURL(enrichURL, strings.TrimSpace(os.Getenv("MUNINN_OPENAI_URL")))
 	slog.Info("initializing enrich plugin", "url", enrichURL)
 	svc, err := enrichpkg.NewEnrichService(enrichURL)
 	if err != nil {
@@ -466,6 +505,9 @@ func buildEnricher(ctx context.Context, cfg plugincfg.PluginConfig) plugin.Enric
 	apiKey := os.Getenv("MUNINN_ENRICH_API_KEY")
 	if apiKey == "" {
 		apiKey = os.Getenv("MUNINN_ANTHROPIC_KEY")
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("MUNINN_GOOGLE_KEY")
 	}
 	if apiKey == "" {
 		apiKey = cfg.EnrichAPIKey // saved config fallback

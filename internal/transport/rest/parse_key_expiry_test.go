@@ -138,7 +138,7 @@ func TestHandleSetState_EngineError(t *testing.T) {
 	server := NewServer("localhost:8080", &updateStateErrEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
 	body := `{"state":"active"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/engrams/test-id/state", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/engrams/" + testEngramID + "/state", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
@@ -167,7 +167,7 @@ func TestHandleListDeleted_EngineError(t *testing.T) {
 func TestHandleRetryEnrich_EngineError(t *testing.T) {
 	server := NewServer("localhost:8080", &retryEnrichErrRESTEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/engrams/test-id/retry-enrich", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/engrams/" + testEngramID + "/retry-enrich", nil)
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
 
@@ -182,7 +182,7 @@ func TestHandleEvolve_EngineError(t *testing.T) {
 	server := NewServer("localhost:8080", &evolveErrEngine{}, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
 	body := `{"new_content":"updated content","reason":"fixing a bug"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/engrams/test-id/evolve", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/engrams/" + testEngramID + "/evolve", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.mux.ServeHTTP(w, req)
