@@ -310,6 +310,64 @@ func TestExtractJSON_PlainCodeFences(t *testing.T) {
 	}
 }
 
+// TestExtractJSON_DuplicateOutput covers models (e.g. llama3.2) that repeat
+// their JSON output in a single completion. The parser must return only the
+// first complete object and ignore everything after it.
+func TestExtractJSON_DuplicateOutput(t *testing.T) {
+	raw := `{"entities": [{"name": "foo", "type": "tool"}]} {"entities": [{"name": "bar", "type": "tool"}]}`
+	extracted := extractJSON(raw)
+	// Must stop at the end of the first object — second object must not appear.
+	if contains(extracted, `"bar"`) {
+		t.Fatalf("extractJSON grabbed both duplicate objects: %q", extracted)
+	}
+	if !contains(extracted, `"foo"`) {
+		t.Fatalf("extractJSON dropped the first object: %q", extracted)
+	}
+}
+
+// TestParseEntityResponse_DuplicateOutput is the end-to-end version of the
+// above: ParseEntityResponse must succeed and return only the first object's
+// entities when the LLM repeats itself.
+func TestParseEntityResponse_DuplicateOutput(t *testing.T) {
+	raw := `{"entities": [{"name": "fb-automate", "type": "tool", "confidence": 1.0}]} {"entities": [{"name": "reply-comment", "type": "project", "confidence": 0.7}]}`
+	entities, err := ParseEntityResponse(raw)
+	if err != nil {
+		t.Fatalf("ParseEntityResponse failed on duplicate output: %v", err)
+	}
+	if len(entities) != 1 {
+		t.Fatalf("expected 1 entity from first object, got %d: %+v", len(entities), entities)
+	}
+	if entities[0].Name != "fb-automate" {
+		t.Fatalf("expected 'fb-automate', got %q", entities[0].Name)
+	}
+}
+
+// TestParseSummarizeResponse_DuplicateOutput ensures summarization parsing
+// handles the llama3.2 duplicate-output pattern.
+func TestParseSummarizeResponse_DuplicateOutput(t *testing.T) {
+	raw := `{"summary": "first summary", "key_points": ["point A"]} {"summary": "second summary", "key_points": ["point B"]}`
+	summary, keyPoints, err := ParseSummarizeResponse(raw)
+	if err != nil {
+		t.Fatalf("ParseSummarizeResponse failed on duplicate output: %v", err)
+	}
+	if summary != "first summary" {
+		t.Fatalf("expected 'first summary', got %q", summary)
+	}
+	if len(keyPoints) != 1 || keyPoints[0] != "point A" {
+		t.Fatalf("expected ['point A'], got %v", keyPoints)
+	}
+}
+
+// TestExtractJSON_BracketInsideString ensures brackets inside quoted strings
+// do not confuse the depth counter.
+func TestExtractJSON_BracketInsideString(t *testing.T) {
+	raw := `{"key": "value with } brace and { another"}`
+	extracted := extractJSON(raw)
+	if extracted != raw {
+		t.Fatalf("extractJSON mangled JSON with brackets in string: %q", extracted)
+	}
+}
+
 func TestExtractJSON_NoJSON(t *testing.T) {
 	raw := "no json here"
 	extracted := extractJSON(raw)
