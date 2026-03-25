@@ -28,7 +28,8 @@ An intent-organized reading guide. Start with what you want to understand.
 ## If you want to use MuninnDB
 
 1. **[Quickstart](quickstart.md)** — Getting MuninnDB running and making your first memory writes.
-2. **[Feature Reference](feature-reference.md)** — Complete reference for all 35 MCP tools and their parameters.
+2. **[Agent Prompting](agent-prompting.md)** — System prompt patterns that make agents save proactively, not just reactively.
+3. **[Feature Reference](feature-reference.md)** — Complete reference for all 35 MCP tools and their parameters.
 
 ---
 

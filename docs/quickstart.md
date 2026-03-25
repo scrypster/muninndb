@@ -46,7 +46,7 @@ This downloads the latest release, extracts to `%LOCALAPPDATA%\muninn`, and adds
 ```bash
 git clone https://github.com/scrypster/muninndb.git
 cd muninndb
-go build -o muninn ./cmd/muninn/...
+go build -tags localassets -o muninn ./cmd/muninn/...
 ```
 
 ---
@@ -229,6 +229,7 @@ muninn shell
 
 | | |
 |---|---|
+| [Agent Prompting](agent-prompting.md) | System prompt patterns that make agents save proactively, not just reactively |
 | [How Memory Works](how-memory-works.md) | Why temporal priority + Hebbian + confidence + PAS produces genuine memory |
 | [Architecture](architecture.md) | The ERF format, 6-phase engine, four wire protocols |
 | [Auth & Vaults](auth.md) | Multiple vaults, API keys, full vs. observe mode |
