@@ -974,7 +974,7 @@ document.addEventListener('alpine:init', () => {
         if (f.minConf > 0) url += '&min_confidence=' + f.minConf;
         if (f.maxConf > 0) url += '&max_confidence=' + f.maxConf;
         const data = await this.apiCall(url);
-        this.memories = data.engrams || [];
+        this.memories = (data.engrams || []).map(e => ({ ...e, createdAt: e.created_at }));
         this.totalMemories = data.total || 0;
       } catch (err) {
         this.addNotification('error', 'Load failed: ' + err.message);
@@ -1090,7 +1090,7 @@ document.addEventListener('alpine:init', () => {
           const resp = await fetch('/api/engrams/' + encodeURIComponent(m.id) + '?vault=' + encodeURIComponent(this.vault));
           if (resp.ok) {
             const full = await resp.json();
-            m = { ...m, ...full };
+            m = { ...m, ...full, createdAt: full.created_at || m.createdAt };
           }
         } catch (e) { /* fall through with partial data */ }
       }
@@ -1773,7 +1773,8 @@ document.addEventListener('alpine:init', () => {
           '&since=' + encodeURIComponent(since) + '&limit=100'
         );
         // GetSessionResponse has { entries: [] } or raw array
-        this.sessionEntries = data.entries || (Array.isArray(data) ? data : []);
+        const raw = data.entries || (Array.isArray(data) ? data : []);
+        this.sessionEntries = raw.map(e => ({ ...e, createdAt: e.created_at }));
       } catch (err) {
         this.addNotification('error', 'Session: ' + err.message);
       }
