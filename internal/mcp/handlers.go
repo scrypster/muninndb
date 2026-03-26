@@ -375,10 +375,14 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	for i := range resp.Activations {
 		memories = append(memories, activationToMemory(&resp.Activations[i]))
 	}
-	sendResult(w, id, textContent(mustJSON(map[string]any{
+	result := map[string]any{
 		"memories": memories,
 		"total":    resp.TotalFound,
-	})))
+	}
+	if len(memories) == 0 {
+		result["hint"] = "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."
+	}
+	sendResult(w, id, textContent(mustJSON(result)))
 }
 
 func (s *MCPServer) handleRead(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
