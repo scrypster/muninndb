@@ -8,7 +8,7 @@ This guide is for users running MuninnDB on a **publicly accessible cloud server
 
 ## How it works
 
-Claude.com and ChatGPT only allow you to configure an MCP URL — they cannot send custom headers like `Authorization: Bearer`. MuninnDB's token auth requires that header. The workaround is to use **Traefik as a reverse proxy** to:
+Claude.com and ChatGPT only allow you to configure an MCP URL — they cannot send custom headers like `Authorization: Bearer`. MuninnDB's token auth requires that header. The workaround is to use **Traefik v3 as a reverse proxy** to:
 
 1. Accept requests at a secret URL (`https://muninn.example.com/mcp?vault_key=<secret>`)
 2. Only route requests that include the correct `vault_key` query parameter
@@ -23,14 +23,14 @@ The secret lives in Traefik's routing rule, not in MuninnDB itself. MuninnDB run
 > **Read this before proceeding.**
 
 **URL query parameters are a security anti-pattern for secrets.** The `vault_key` value will appear in:
-- Traefik access logs (disable or scrub the `/mcp` route — see below)
+- Traefik access logs (disable per-router — see below)
 - Browser history if you ever open the URL directly
 - Any HTTP proxy or CDN logs between the client and your server
 - Error messages and monitoring tools that log full request URLs
 
 **Mitigations:**
 - Use a long random secret (`openssl rand -hex 24` generates 48 characters)
-- Disable or redact Traefik access logs for the MuninnDB router
+- Disable Traefik access logs for the MuninnDB router (see below)
 - Use HTTPS — the query param is encrypted in transit over TLS
 - Rotate the key if you suspect it has been exposed
 - Do not share the full URL in chat, email, or any logged channel
@@ -43,7 +43,8 @@ This is a practical workaround, not a hardened auth solution. It is appropriate 
 
 - A cloud VM with a publicly accessible domain name (e.g. `muninn.example.com`)
 - Docker and Docker Compose installed
-- Traefik running as your reverse proxy (or you can add it alongside MuninnDB)
+- **Traefik v3** running as your reverse proxy — the `Query()` matcher syntax used here requires v3; see below for the v2 equivalent
+- A Docker network shared between Traefik and MuninnDB (commonly named `traefik` or `proxy`)
 - A DNS A record pointing your domain to the VM's IP
 - Let's Encrypt or another TLS certificate provider configured in Traefik
 
@@ -67,10 +68,16 @@ Copy the output — this is your `VAULT_KEY`.
 VAULT_KEY=your-generated-secret-here
 ```
 
+> **Note:** `${VAULT_KEY}` is resolved by Docker Compose from `.env` at `docker compose up` time. If you change `.env`, recreate the container (`docker compose up -d --force-recreate`) for the new value to take effect.
+
 ### 3. Create `docker-compose.yaml`
 
 ```yaml
 name: muninn-example-com
+
+networks:
+  traefik:
+    external: true  # must match the network your Traefik instance is on
 
 services:
   muninn:
@@ -78,6 +85,8 @@ services:
     container_name: muninn.example.com
     hostname: muninn
     restart: always
+    networks:
+      - traefik
 
     volumes:
       - ./data:/data
@@ -99,15 +108,22 @@ services:
 
     labels:
       - traefik.enable=true
-      # Only route requests that include the correct vault_key query parameter
+      # Only route requests that include the correct vault_key query parameter (Traefik v3 syntax)
       - traefik.http.routers.muninn.rule=Host(`muninn.example.com`) && PathPrefix(`/mcp`) && Query(`vault_key`,`${VAULT_KEY}`)
       - traefik.http.routers.muninn.tls=true
       - traefik.http.routers.muninn.tls.certresolver=lets-encrypt
       - traefik.http.routers.muninn.service=muninn
       - traefik.http.services.muninn.loadbalancer.server.port=8750
+      # Disable access logs for this router to keep vault_key out of log files
+      - traefik.http.routers.muninn.observability.accesslogs=false
 ```
 
-> **Watchtower:** The original setup from the community contributor includes `com.centurylinklabs.watchtower.enable=true` for automatic image updates. Add it if you run Watchtower — it keeps your MuninnDB instance current.
+**Traefik v2 users:** Replace the `Query()` matcher with the v2 single-argument syntax:
+```
+traefik.http.routers.muninn.rule=Host(`muninn.example.com`) && PathPrefix(`/mcp`) && Query(`vault_key=${VAULT_KEY}`)
+```
+
+> **Watchtower:** The original community setup includes `com.centurylinklabs.watchtower.enable=true` for automatic image updates. Add it if you run Watchtower.
 
 ### 4. Start
 
@@ -121,50 +137,33 @@ Verify it's running:
 curl -sf "https://muninn.example.com/mcp/health?vault_key=your-secret" | jq .
 ```
 
-A request without the key should return nothing (Traefik drops it — no route matches).
+A request without the key will return a **404** — Traefik has no matching route for it.
 
 ---
 
 ## Connect Claude.com
 
-1. Go to **Claude.com → Settings → Integrations → Add Integration**
+1. Go to **Claude.com → Settings → Connectors → Add custom connector**
 2. Set the MCP URL to:
    ```
    https://muninn.example.com/mcp?vault_key=your-secret
    ```
 3. Save and start a new conversation
 
-Verify the connection by asking Claude to call `muninn_guide`.
+Verify by asking Claude to call `muninn_guide`.
 
 ---
 
 ## Connect ChatGPT
 
-1. Go to **ChatGPT → Settings → Connectors → Add custom connector**
-2. Set the MCP URL to:
+ChatGPT's MCP connector support requires **Developer Mode**, available on Pro, Plus, Business, Enterprise, and Education plans.
+
+1. Go to **ChatGPT → Settings → Apps → Advanced → Enable Developer Mode**
+2. Create a new connector and set the MCP URL to:
    ```
    https://muninn.example.com/mcp?vault_key=your-secret
    ```
 3. Save and start a new conversation
-
----
-
-## Disable Traefik access logs for this route
-
-By default, Traefik logs the full request URL — including your `vault_key`. To suppress logs for the MuninnDB router, add to your Traefik static config:
-
-```yaml
-# traefik.yaml
-accessLog:
-  filters:
-    statusCodes:
-      - "200-499"
-  fields:
-    headers:
-      defaultMode: drop
-```
-
-Or disable access logging entirely for the route by not enabling it in the first place. Consult the [Traefik access log docs](https://doc.traefik.io/traefik/observability/access-logs/) for filtering by router name.
 
 ---
 
@@ -202,11 +201,13 @@ See [Agent Prompting](../agent-prompting.md) for more detail on this pattern.
 
 | Symptom | Fix |
 |---------|-----|
-| Request returns no response | Traefik route not matched — verify `vault_key` param matches `.env` exactly |
+| Request returns 404 | Traefik route not matched — verify `vault_key` param matches `.env` exactly, and that the container was recreated after any `.env` change |
 | `connection refused` | MuninnDB container not healthy — check `docker compose logs muninn` |
+| Traefik can't reach MuninnDB | Ensure both services are on the same Docker network (`traefik.enable=true` is not enough) |
 | TLS cert error | Let's Encrypt cert not yet issued — wait a minute and retry |
-| Tools not appearing in Claude/ChatGPT | Restart the integration after saving the URL |
+| Tools not appearing in Claude/ChatGPT | Restart/reconnect the integration after saving the URL |
 | Agent not storing proactively | Add the system prompt above to your Project instructions |
+| ChatGPT connector option missing | Developer Mode must be enabled first (Settings → Apps → Advanced) |
 
 ---
 
