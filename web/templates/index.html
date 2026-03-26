@@ -3271,11 +3271,12 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
   <div x-show="cognitiveInfoModal" x-cloak
        class="modal-backdrop" @click.self="cognitiveInfoModal = false"
        @keydown.escape.window="cognitiveInfoModal = false">
-    <div class="modal-box" style="max-width:580px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.125rem;">
+    <div class="modal-box" style="max-width:580px;max-height:90vh;display:flex;flex-direction:column;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.125rem;flex-shrink:0;">
         <h2 style="margin:0;font-size:1.125rem;color:var(--text-secondary);">Cognitive Workers</h2>
         <button class="btn-ghost" @click="cognitiveInfoModal = false">✕</button>
       </div>
+      <div style="overflow-y:auto;flex:1;min-height:0;">
       <p style="color:var(--text-muted);font-size:0.875rem;margin:0 0 1.125rem;line-height:1.6;">
         Background workers continuously refine the memory graph — strengthening associations, detecting contradictions, and updating confidence scores — without requiring user interaction.
       </p>
@@ -3292,6 +3293,28 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
         <code style="font-size:0.75rem;color:#a78bfa;background:var(--bg-card);padding:0.25rem 0.5rem;border-radius:0.375rem;display:inline-block;">
           w&prime; = min(1.0,&nbsp;w &times; (1 + &eta;)<sup>n</sup>)
         </code>
+        <svg viewBox="0 0 460 60" fill="none" style="width:100%;display:block;margin-top:0.75rem;" aria-hidden="true">
+          <defs>
+            <marker id="arr-h" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+              <path d="M0,0.5 L6,3.5 L0,6.5Z" style="fill:var(--border)"/>
+            </marker>
+          </defs>
+          <rect x="4"   y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--accent);stroke-width:1.5;"/>
+          <rect x="120" y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--border);stroke-width:1;"/>
+          <rect x="236" y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--border);stroke-width:1;"/>
+          <rect x="352" y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--accent);stroke-width:1.5;"/>
+          <line x1="109" y1="30" x2="119" y2="30" style="stroke:var(--border);stroke-width:1.5;" marker-end="url(#arr-h)"/>
+          <line x1="225" y1="30" x2="235" y2="30" style="stroke:var(--border);stroke-width:1.5;" marker-end="url(#arr-h)"/>
+          <line x1="341" y1="30" x2="351" y2="30" style="stroke:var(--border);stroke-width:1.5;" marker-end="url(#arr-h)"/>
+          <text x="56"  y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Co-recall</text>
+          <text x="56"  y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">memories fire</text>
+          <text x="172" y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Hebbian</text>
+          <text x="172" y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">worker runs</text>
+          <text x="288" y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:#a78bfa;font-weight:600;">Weight update</text>
+          <text x="288" y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">capped at 1.0</text>
+          <text x="404" y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Link stronger</text>
+          <text x="404" y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">next recall ↑</text>
+        </svg>
       </div>
 
       <!-- Contradiction -->
@@ -3300,9 +3323,31 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
           <span style="font-size:1rem;">⚡</span>
           <span style="font-weight:600;color:var(--text-secondary);font-size:0.9375rem;">Contradict &mdash; Conflict Detection</span>
         </div>
-        <p style="margin:0;font-size:0.8125rem;color:var(--text-muted);line-height:1.6;">
+        <p style="margin:0 0 0.5rem;font-size:0.8125rem;color:var(--text-muted);line-height:1.6;">
           Scans relation-type pairs for logical incompatibilities (e.g., a memory cannot simultaneously <em>support</em> and <em>contradict</em> another). Scores severity against a compatibility matrix and flags conflicts so the recall layer can surface warnings instead of silently returning inconsistent data.
         </p>
+        <svg viewBox="0 0 460 60" fill="none" style="width:100%;display:block;" aria-hidden="true">
+          <defs>
+            <marker id="arr-c" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+              <path d="M0,0.5 L6,3.5 L0,6.5Z" style="fill:var(--border)"/>
+            </marker>
+          </defs>
+          <rect x="4"   y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--warning);stroke-width:1.5;"/>
+          <rect x="120" y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--border);stroke-width:1;"/>
+          <rect x="236" y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--border);stroke-width:1;"/>
+          <rect x="352" y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--warning);stroke-width:1.5;"/>
+          <line x1="109" y1="30" x2="119" y2="30" style="stroke:var(--border);stroke-width:1.5;" marker-end="url(#arr-c)"/>
+          <line x1="225" y1="30" x2="235" y2="30" style="stroke:var(--border);stroke-width:1.5;" marker-end="url(#arr-c)"/>
+          <line x1="341" y1="30" x2="351" y2="30" style="stroke:var(--border);stroke-width:1.5;" marker-end="url(#arr-c)"/>
+          <text x="56"  y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Memories</text>
+          <text x="56"  y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">linked</text>
+          <text x="172" y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Contradict</text>
+          <text x="172" y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">worker scans</text>
+          <text x="288" y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Compat matrix</text>
+          <text x="288" y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">severity scored</text>
+          <text x="404" y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Conflict flagged</text>
+          <text x="404" y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--warning);">conflict stored</text>
+        </svg>
       </div>
 
       <!-- Confidence -->
@@ -3312,14 +3357,37 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
           <span style="font-weight:600;color:var(--text-secondary);font-size:0.9375rem;">Confidence &mdash; Belief Updating</span>
         </div>
         <p style="margin:0 0 0.5rem;font-size:0.8125rem;color:var(--text-muted);line-height:1.6;">
-          Updates per-memory confidence scores using Bayesian inference with Laplace smoothing. Each access event (recall, link, confirm, contradict) is a trial; the posterior is recalculated so frequently validated memories rank higher in search results.
+          Updates per-memory confidence scores using iterative Bayesian belief updating. Each access event (recall, co-activation, user confirm, contradiction) carries an evidence strength; the posterior is recalculated so frequently validated memories rank higher and contradicted memories rank lower.
         </p>
         <code style="font-size:0.75rem;color:#34d399;background:var(--bg-card);padding:0.25rem 0.5rem;border-radius:0.375rem;display:inline-block;">
-          P(belief) = (hits + &alpha;) / (trials + 2&alpha;)
+          P&#x2032; = (P &times; ev) / (P &times; ev + (1&minus;P)(1&minus;ev))
         </code>
+        <svg viewBox="0 0 460 60" fill="none" style="width:100%;display:block;margin-top:0.75rem;" aria-hidden="true">
+          <defs>
+            <marker id="arr-co" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+              <path d="M0,0.5 L6,3.5 L0,6.5Z" style="fill:var(--border)"/>
+            </marker>
+          </defs>
+          <rect x="4"   y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--success);stroke-width:1.5;"/>
+          <rect x="120" y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--border);stroke-width:1;"/>
+          <rect x="236" y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--border);stroke-width:1;"/>
+          <rect x="352" y="11" width="104" height="38" rx="5" style="fill:var(--bg-elevated);stroke:var(--success);stroke-width:1.5;"/>
+          <line x1="109" y1="30" x2="119" y2="30" style="stroke:var(--border);stroke-width:1.5;" marker-end="url(#arr-co)"/>
+          <line x1="225" y1="30" x2="235" y2="30" style="stroke:var(--border);stroke-width:1.5;" marker-end="url(#arr-co)"/>
+          <line x1="341" y1="30" x2="351" y2="30" style="stroke:var(--border);stroke-width:1.5;" marker-end="url(#arr-co)"/>
+          <text x="56"  y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Access event</text>
+          <text x="56"  y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">+ evidence score</text>
+          <text x="172" y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Confidence</text>
+          <text x="172" y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">worker runs</text>
+          <text x="288" y="27" text-anchor="middle" font-size="9.5" font-family="inherit" style="fill:#34d399;font-weight:600;">Bayes update</text>
+          <text x="288" y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">posterior chained</text>
+          <text x="404" y="27" text-anchor="middle" font-size="10" font-family="inherit" style="fill:var(--text-secondary);font-weight:600;">Score shifts</text>
+          <text x="404" y="41" text-anchor="middle" font-size="9"  font-family="inherit" style="fill:var(--text-muted);">up or down</text>
+        </svg>
       </div>
 
-      <div style="display:flex;justify-content:flex-end;margin-top:1.125rem;">
+      </div><!-- end scroll area -->
+      <div style="display:flex;justify-content:flex-end;margin-top:1.125rem;flex-shrink:0;">
         <button class="btn-secondary" @click="cognitiveInfoModal = false">Close</button>
       </div>
     </div>
