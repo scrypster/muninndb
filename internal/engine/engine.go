@@ -1186,6 +1186,7 @@ type preparedBatchItem struct {
 	callerRelationships       []mbp.InlineRelationship
 	callerEntityRelationships []mbp.InlineEntityRelationship
 	skipBackgroundEnrich      bool
+	contentHash               [32]byte // SHA-256 of content for dedup
 }
 
 // WriteBatch writes multiple engrams in a single Pebble batch commit, then
@@ -1212,6 +1213,21 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	for i, req := range reqs {
 		wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 		e.activity.Record(wsPrefix)
+
+		// ── Content-hash dedup: same O(1) check as single Write ──────
+		contentHash := storage.ContentHash(req.Content)
+		if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
+			if eng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && eng.State != storage.StateSoftDeleted {
+				responses[i] = &mbp.WriteResponse{
+					ID:        existingID.String(),
+					CreatedAt: eng.CreatedAt.UnixNano(),
+					Hint:      "duplicate_content",
+				}
+				continue
+			}
+			// Engram was soft-deleted or not found — remove stale hash mapping and proceed.
+			_ = e.store.DeleteContentHash(ctx, wsPrefix, contentHash)
+		}
 
 		vaultName := req.Vault
 		if vaultName == "" {
@@ -1288,29 +1304,48 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			callerRelationships:       callerRelationships,
 			callerEntityRelationships: req.EntityRelationships,
 			skipBackgroundEnrich:      skipBG,
+			contentHash:               contentHash,
 		}
 		validCount++
 	}
 
-	// Phase 2: Single Pebble batch commit for all valid engrams.
-	ids, batchErrs := e.store.WriteEngramBatch(ctx, items)
+	// Phase 2: Single Pebble batch commit for all valid (non-dedup'd) engrams.
+	// Build a filtered items slice excluding dedup'd and errored items so
+	// WriteEngramBatch never sees nil Engram pointers.
+	filteredItems := make([]storage.EngramBatchItem, 0, validCount)
+	filteredIdx := make([]int, 0, validCount) // maps filtered position → original index
 	for i := range reqs {
-		if errs[i] != nil {
-			continue // already failed in prepare phase
+		if responses[i] != nil || errs[i] != nil {
+			continue // dedup'd or errored in Phase 1
 		}
-		if batchErrs[i] != nil {
-			errs[i] = fmt.Errorf("write engram: %w", batchErrs[i])
+		filteredIdx = append(filteredIdx, i)
+		filteredItems = append(filteredItems, items[i])
+	}
+	batchIDs, batchErrs := e.store.WriteEngramBatch(ctx, filteredItems)
+	ids := make([]storage.ULID, n)
+	for fi, origIdx := range filteredIdx {
+		if batchErrs[fi] != nil {
+			errs[origIdx] = fmt.Errorf("write engram: %w", batchErrs[fi])
 			continue
 		}
-		responses[i] = &mbp.WriteResponse{
-			ID:        ids[i].String(),
+		ids[origIdx] = batchIDs[fi]
+		responses[origIdx] = &mbp.WriteResponse{
+			ID:        batchIDs[fi].String(),
 			CreatedAt: time.Now().UnixNano(),
+		}
+		// Store content hash → engram ID mapping for future dedup lookups.
+		if err := e.store.PutContentHash(ctx, prepared[origIdx].wsPrefix, prepared[origIdx].contentHash, batchIDs[fi]); err != nil {
+			slog.Warn("engine: batch: failed to store content hash", "id", batchIDs[fi].String(), "err", err)
 		}
 	}
 
 	// Phase 3: Post-commit async work for each successfully written engram.
 	for i := range reqs {
-		if errs[i] != nil {
+		if errs[i] != nil || responses[i] == nil {
+			continue
+		}
+		// Skip dedup'd items (they have no new engram to process).
+		if responses[i].Hint == "duplicate_content" {
 			continue
 		}
 		p := &prepared[i]
@@ -2207,12 +2242,26 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 	}
 
 	if req.Hard {
+		// Read the engram before hard-deleting so we can clean up the
+		// content-hash mapping (the record is gone after DeleteEngram).
+		eng, _ := e.store.GetEngram(ctx, wsPrefix, id)
+
 		if err := e.store.DeleteEngram(ctx, wsPrefix, id); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return nil, ErrEngramNotFound
 			}
 			return nil, fmt.Errorf("hard delete: %w", err)
 		}
+
+		// Remove content-hash → engram ID mapping so the hash slot is freed
+		// and the same content can be stored again.
+		if eng != nil {
+			contentHash := storage.ContentHash(eng.Content)
+			if err := e.store.DeleteContentHash(ctx, wsPrefix, contentHash); err != nil {
+				slog.Warn("engine: failed to delete content hash after hard delete", "id", req.ID, "err", err)
+			}
+		}
+
 		// Mark the node as deleted in the HNSW index so it is skipped in
 		// future Search results. Memory is reclaimed on the next rebuild.
 		if e.hnswRegistry != nil {
@@ -2579,6 +2628,16 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	}
 	if err := batch.Commit(); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch commit: %w", err)
+	}
+
+	// ── Content-hash bookkeeping: delete old mapping, add new mapping ──
+	oldHash := storage.ContentHash(oldEng.Content)
+	if err := e.store.DeleteContentHash(ctx, wsPrefix, oldHash); err != nil {
+		slog.Warn("engine: evolve: failed to delete old content hash", "id", oldID, "err", err)
+	}
+	newHash := storage.ContentHash(newContent)
+	if err := e.store.PutContentHash(ctx, wsPrefix, newHash, newULID); err != nil {
+		slog.Warn("engine: evolve: failed to store new content hash", "id", newULID.String(), "err", err)
 	}
 
 	// Persist vault name (idempotent).
