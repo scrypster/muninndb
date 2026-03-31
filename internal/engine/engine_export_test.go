@@ -18,12 +18,12 @@ func TestEngineExportVault(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Write some engrams.
+	// Write some engrams (unique content to avoid content-hash dedup).
 	for i := 0; i < 3; i++ {
 		_, err := eng.Write(ctx, &mbp.WriteRequest{
 			Vault:   "export-src",
 			Concept: "concept",
-			Content: "test content",
+			Content: fmt.Sprintf("test content %d", i),
 		})
 		if err != nil {
 			t.Fatalf("Write: %v", err)
@@ -61,12 +61,12 @@ func TestEngineStartImport(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Write some engrams to source vault.
+	// Write some engrams to source vault (unique content to avoid content-hash dedup).
 	for i := 0; i < 2; i++ {
 		_, err := eng.Write(ctx, &mbp.WriteRequest{
 			Vault:   "import-src",
 			Concept: "concept",
-			Content: "test content",
+			Content: fmt.Sprintf("test content %d", i),
 		})
 		if err != nil {
 			t.Fatalf("Write: %v", err)
@@ -97,13 +97,13 @@ func TestEngineExportImportRoundTrip(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Write 5 engrams to the source vault.
+	// Write 5 engrams to the source vault (unique content to avoid content-hash dedup).
 	const engramCount = 5
 	for i := 0; i < engramCount; i++ {
 		_, err := eng.Write(ctx, &mbp.WriteRequest{
 			Vault:   "rt-src-vault",
 			Concept: fmt.Sprintf("concept-%d", i),
-			Content: "round-trip test",
+			Content: fmt.Sprintf("round-trip test %d", i),
 		})
 		if err != nil {
 			t.Fatalf("Write engram %d: %v", i, err)

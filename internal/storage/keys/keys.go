@@ -758,3 +758,16 @@ func DreamStateKey(vaultPrefix [8]byte) []byte {
 	copy(key[1:], vaultPrefix[:])
 	return key
 }
+
+// ContentHashKey constructs the content-hash dedup index key (0x28 prefix).
+// Maps a SHA-256 content hash to the engram ID within a vault, enabling O(1)
+// exact-duplicate detection at write time.
+// Key: 0x28 | wsPrefix(8) | sha256(32) = 41 bytes
+// Value: engramID(16) bytes
+func ContentHashKey(ws [8]byte, hash [32]byte) []byte {
+	key := make([]byte, 1+8+32)
+	key[0] = 0x28
+	copy(key[1:9], ws[:])
+	copy(key[9:41], hash[:])
+	return key
+}

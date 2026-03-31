@@ -812,6 +812,21 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 	e.activity.Record(wsPrefix)
 
+	// ── Content-hash dedup: O(1) exact-duplicate check ──────────────
+	contentHash := storage.ContentHash(req.Content)
+	if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
+		// A mapping exists — verify the engram is still live (not soft-deleted).
+		if eng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && eng.State != storage.StateSoftDeleted {
+			return &mbp.WriteResponse{
+				ID:        existingID.String(),
+				CreatedAt: eng.CreatedAt.UnixNano(),
+				Hint:      "duplicate_content",
+			}, nil
+		}
+		// Engram was soft-deleted or not found — remove stale hash mapping and proceed.
+		_ = e.store.DeleteContentHash(ctx, wsPrefix, contentHash)
+	}
+
 	// Resolve inline enrichment mode for this vault.
 	vaultName := req.Vault
 	if vaultName == "" {
@@ -880,6 +895,11 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	id, err := e.store.WriteEngram(ctx, wsPrefix, eng)
 	if err != nil {
 		return nil, fmt.Errorf("write engram: %w", err)
+	}
+
+	// Store content hash → engram ID mapping for future dedup lookups.
+	if err := e.store.PutContentHash(ctx, wsPrefix, contentHash, id); err != nil {
+		slog.Warn("engine: failed to store content hash", "id", id.String(), "err", err)
 	}
 
 	// When the caller provided an embedding, mark DigestEmbed so the retroactive

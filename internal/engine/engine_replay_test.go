@@ -68,11 +68,11 @@ func TestReplayEnrichment_DryRunNoModification(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Write two engrams (no enrich plugin set).
+	// Write two engrams (no enrich plugin set; unique content to avoid content-hash dedup).
 	for i := 0; i < 2; i++ {
 		_, err := eng.Write(ctx, &mbp.WriteRequest{
 			Vault:   "default",
-			Content: "content for engram",
+			Content: fmt.Sprintf("content for engram %d", i),
 			Concept: "test concept",
 		})
 		if err != nil {

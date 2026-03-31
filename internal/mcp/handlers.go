@@ -123,7 +123,9 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		}
 	}
 	result := WriteResult{ID: resp.ID, Concept: req.Concept}
-	if len(content) > 500 {
+	if resp.Hint != "" {
+		result.Hint = resp.Hint
+	} else if len(content) > 500 {
 		result.Hint = "Tip: memories work best when each one captures a single concept. For future writes, consider using muninn_remember_batch to store multiple focused memories at once."
 	}
 	if malformed > 0 {
