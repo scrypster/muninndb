@@ -97,6 +97,9 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	fmt.Fprintf(&b, "- Memories stored: %d\n", stats.EngramCount)
 	fmt.Fprintf(&b, "- Behavior mode: %s\n", resolved.BehaviorMode)
 	fmt.Fprintf(&b, "- Hebbian learning: %s\n", enabledStr(resolved.HebbianEnabled))
+	if resolved.LTPThreshold > 0 {
+		fmt.Fprintf(&b, "- Hebbian LTP: enabled (threshold %d, decay factor %.1fx, weight floor %.2f)\n", resolved.LTPThreshold, resolved.LTPDecayFactor, resolved.LTPWeightFloor)
+	}
 	fmt.Fprintf(&b, "- Predictive activation (PAS): %s\n", enabledStr(resolved.PredictiveActivation))
 	fmt.Fprintf(&b, "- Graph hop depth: %d\n", resolved.HopDepth)
 	fmt.Fprintf(&b, "- Temporal decay: %s\n", enabledStr(resolved.TemporalEnabled))
