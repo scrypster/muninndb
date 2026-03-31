@@ -42,6 +42,13 @@ type DecayCandidate struct {
 	AccessCount uint32
 	Stability   float32
 	Relevance   float32 // current relevance at submission time; used as oldVal in OnDecayUpdate
+
+	// Per-vault hybrid decay model parameters (from ResolvedPlasticity).
+	// When DecayModel is empty or "exponential", HybridRetention falls back
+	// to pure Ebbinghaus — identical to the previous behavior.
+	DecayModel          string
+	PowerLawExponent    float64
+	DecayTransitionDays float64
 }
 
 // EbbinghausWithFloor computes the Ebbinghaus retention with a floor value.
@@ -72,6 +79,9 @@ func EbbinghausWithFloor(daysSinceAccess, stability, floor float64) float64 {
 //
 // Academic basis: Wixted & Ebbesen (1991), Wixted (2004), Anderson & Schooler (1991).
 func HybridRetention(daysSinceAccess, stability, floor float64, decayModel string, powerLawExponent, transitionDays float64) float64 {
+	if daysSinceAccess < 0 {
+		daysSinceAccess = 0
+	}
 	if stability <= 0 {
 		stability = DefaultStability
 	}
@@ -227,7 +237,7 @@ func (dw *DecayWorker) processBatch(ctx context.Context, batch []DecayCandidate)
 	now := time.Now()
 	for _, c := range batch {
 		daysSince := now.Sub(c.LastAccess).Hours() / 24.0
-		newRelevance := EbbinghausWithFloor(daysSince, float64(c.Stability), DefaultFloor)
+		newRelevance := HybridRetention(daysSince, float64(c.Stability), DefaultFloor, c.DecayModel, c.PowerLawExponent, c.DecayTransitionDays)
 
 		// Average spacing = total lifespan / number of accesses.
 		// Using lifespan (now - CreatedAt) divided by AccessCount gives the true

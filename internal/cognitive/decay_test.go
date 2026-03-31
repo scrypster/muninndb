@@ -283,3 +283,118 @@ func TestHybridRetention_ZeroStabilityUsesDefault(t *testing.T) {
 		t.Errorf("zero stability should use default: got %v, want %v", got, want)
 	}
 }
+
+// TestHybridRetention_NegativeDaysClampedToZero verifies that negative
+// daysSinceAccess is clamped to zero (retention = 1.0).
+func TestHybridRetention_NegativeDaysClampedToZero(t *testing.T) {
+	for _, model := range []string{"exponential", "hybrid"} {
+		got := HybridRetention(-5.0, 14.0, DefaultFloor, model, 0.5, 3.0)
+		if math.Abs(got-1.0) > 1e-12 {
+			t.Errorf("model=%s: negative days should clamp to 0 (retention=1.0), got %v", model, got)
+		}
+	}
+}
+
+// TestProcessBatch_HybridDecayModel is an integration test verifying the full
+// chain: DecayCandidate with DecayModel="hybrid" -> processBatch -> HybridRetention.
+// This is the test that would have caught the dead-code issue where processBatch
+// was calling EbbinghausWithFloor directly instead of HybridRetention.
+func TestProcessBatch_HybridDecayModel(t *testing.T) {
+	ws := [8]byte{0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 0, 0}
+	id := [16]byte{1, 2, 3, 4}
+
+	var capturedRelevance float32
+
+	store := &stubDecayStore{
+		onUpdateRelevance: func(ctx context.Context, gotWS [8]byte, gotID [16]byte, rel, stab float32) error {
+			capturedRelevance = rel
+			return nil
+		},
+	}
+
+	dw := NewDecayWorker(store)
+	ctx := context.Background()
+
+	// Use 60 days since last access. With stability=14 and transition=3,
+	// the hybrid model retains significantly more than pure exponential
+	// at this time horizon (power-law heavy tail).
+	lastAccess := time.Now().Add(-60 * 24 * time.Hour)
+
+	batch := []DecayCandidate{{
+		WS:                  ws,
+		ID:                  id,
+		CreatedAt:           time.Now().Add(-90 * 24 * time.Hour),
+		LastAccess:          lastAccess,
+		AccessCount:         5,
+		Stability:           DefaultStability,
+		DecayModel:          "hybrid",
+		PowerLawExponent:    0.5,
+		DecayTransitionDays: 3.0,
+	}}
+	if err := dw.processBatch(ctx, batch); err != nil {
+		t.Fatalf("processBatch: %v", err)
+	}
+
+	// Compute the expected hybrid retention value.
+	daysSince := time.Since(lastAccess).Hours() / 24.0
+	expectedHybrid := HybridRetention(daysSince, DefaultStability, DefaultFloor, "hybrid", 0.5, 3.0)
+	expectedExponential := EbbinghausWithFloor(daysSince, DefaultStability, DefaultFloor)
+
+	// The hybrid value must differ from pure exponential at 60 days.
+	// This is the key assertion: if processBatch were still calling
+	// EbbinghausWithFloor, capturedRelevance would equal expectedExponential.
+	if math.Abs(float64(capturedRelevance)-expectedExponential) < 0.001 {
+		t.Errorf("processBatch appears to use exponential, not hybrid: got %v, exponential would be %v",
+			capturedRelevance, expectedExponential)
+	}
+
+	// The captured relevance should match what HybridRetention computes.
+	if math.Abs(float64(capturedRelevance)-expectedHybrid) > 0.01 {
+		t.Errorf("processBatch hybrid relevance: got %v, want ~%v", capturedRelevance, expectedHybrid)
+	}
+
+	// Sanity: hybrid retains more than exponential at 60 days.
+	if expectedHybrid <= expectedExponential {
+		t.Errorf("hybrid (%v) should retain more than exponential (%v) at 60 days",
+			expectedHybrid, expectedExponential)
+	}
+}
+
+// TestProcessBatch_DefaultDecayModel verifies that processBatch with an empty
+// DecayModel (the default) produces the same result as EbbinghausWithFloor,
+// ensuring backward compatibility.
+func TestProcessBatch_DefaultDecayModel(t *testing.T) {
+	ws := [8]byte{0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 0, 0}
+	id := [16]byte{1, 2, 3, 4}
+
+	var capturedRelevance float32
+
+	store := &stubDecayStore{
+		onUpdateRelevance: func(ctx context.Context, gotWS [8]byte, gotID [16]byte, rel, stab float32) error {
+			capturedRelevance = rel
+			return nil
+		},
+	}
+
+	dw := NewDecayWorker(store)
+	ctx := context.Background()
+
+	lastAccess := time.Now().Add(-24 * time.Hour)
+	batch := []DecayCandidate{{
+		WS:          ws,
+		ID:          id,
+		CreatedAt:   time.Now().Add(-30 * 24 * time.Hour),
+		LastAccess:  lastAccess,
+		AccessCount: 5,
+		Stability:   DefaultStability,
+		// DecayModel intentionally left empty — should default to exponential.
+	}}
+	if err := dw.processBatch(ctx, batch); err != nil {
+		t.Fatalf("processBatch: %v", err)
+	}
+
+	expected := EbbinghausWithFloor(1.0, DefaultStability, DefaultFloor)
+	if math.Abs(float64(capturedRelevance)-expected) > 0.01 {
+		t.Errorf("default decay model should match Ebbinghaus: got %v, want ~%v", capturedRelevance, expected)
+	}
+}
