@@ -54,6 +54,11 @@ type Weights struct {
 	ACTRDecay    float32 // power-law decay exponent d (0 → default 0.5)
 	ACTRHebScale float32 // Hebbian scaling inside softplus (0 → default 4.0)
 	DisableACTR  bool    // when true, force legacy weighted-sum scoring (overrides UseACTR)
+	// RRF fusion mode: when true, use Phase 3 RRF scores directly as the scoring
+	// basis in Phase 6, bypassing ACT-R/CGDN/weighted-sum recomputation.
+	// Rank-based and scale-invariant (Cormack et al. 2009). Cognitive boosts
+	// (Hebbian, PAS transition, confidence) are applied after fusion.
+	UseRRFFusion bool
 }
 
 type resolvedWeights struct {
@@ -89,6 +94,12 @@ type resolvedWeights struct {
 	UseACTR      bool
 	ACTRDecay    float64 // power-law decay exponent d (default 0.5 per Anderson 1993)
 	ACTRHebScale float64 // Hebbian scaling factor inside softplus (default 4.0)
+
+	// RRF fusion: when UseRRFFusion=true, Phase 6 uses the Phase 3 RRF score
+	// directly as the scoring basis. Cognitive boosts (Hebbian, transition,
+	// confidence) are applied multiplicatively after fusion.
+	// This is rank-based and scale-invariant — robust to score scale mismatches.
+	UseRRFFusion bool
 }
 
 // Filter is a query filter applied in Phase 6.
@@ -1158,6 +1169,42 @@ func (e *ActivationEngine) phase6Score(
 	now := time.Now()
 	scored := make([]scoredItem, 0, len(all))
 
+	// RRF fusion path: use Phase 3 RRF scores directly as the final score basis.
+	// Rank-based and scale-invariant (Cormack et al. 2009). Cognitive boosts
+	// (Hebbian, transition, confidence) are applied after fusion.
+	if w.UseRRFFusion {
+		for _, c := range all {
+			eng := engramByID[c.id]
+			if eng == nil || !passesMetaFilter(eng, req.Filters) {
+				continue
+			}
+			final := computeRRFScore(c.rrfScore, c.hebbianBoost, c.transitionBoost, eng)
+			if final < req.Threshold {
+				continue
+			}
+			// Populate ScoreComponents for observability: report the individual
+			// signal scores so callers can understand the composition even though
+			// the final score is rank-based.
+			normalizedFTS := math.Tanh(c.ftsScore)
+			scored = append(scored, scoredItem{
+				id:    c.id,
+				final: final,
+				components: ScoreComponents{
+					SemanticSimilarity: c.vectorScore,
+					FullTextRelevance:  normalizedFTS,
+					HebbianBoost:       c.hebbianBoost,
+					TransitionBoost:    c.transitionBoost,
+					Confidence:         float64(eng.Confidence),
+					Raw:                c.rrfScore * (1.0 + c.hebbianBoost + c.transitionBoost),
+					Final:              final,
+				},
+				hopPath: c.hopPath,
+			})
+		}
+		sort.Slice(scored, func(i, j int) bool { return scored[i].final > scored[j].final })
+		goto cgdnDone
+	}
+
 	// CGDN path: two-pass scoring with divisive normalization.
 	// Pass 1 computes gated activations a(d) for all candidates; Pass 2 normalizes.
 	// This replicates lateral inhibition in hippocampal retrieval: cognitive state
@@ -1512,6 +1559,32 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	}
 }
 
+// computeRRFScore computes the final score for a candidate using the Phase 3
+// RRF score directly as the scoring basis (Cormack et al. 2009).
+//
+// Unlike ACT-R/CGDN/weighted-sum which recompute scores from individual signal
+// components, RRF fusion uses the rank-based score from Phase 3 and applies
+// cognitive modifiers after fusion:
+//
+//   raw = rrfScore × (1 + hebbianBoost + transitionBoost)
+//   final = raw × confidence
+//
+// This is scale-invariant: documents with the same ranks but different raw score
+// magnitudes produce the same RRF score. Robust to score scale mismatches between
+// BM25 (unbounded), HNSW cosine similarity [0,1], and graph traversal scores.
+//
+// Parameters match fusedCandidate fields so the function works with both
+// fusedCandidate (Phase 3 output) and scoringCandidate (Phase 6 local type).
+func computeRRFScore(rrfScore, hebbianBoost, transitionBoost float64, eng *storage.Engram) float64 {
+	// Cognitive boost: Hebbian and transition boosts amplify the RRF score.
+	// The (1 + boost) formulation ensures zero boost = no change, and positive
+	// boosts provide multiplicative amplification proportional to association strength.
+	cognitiveMultiplier := 1.0 + hebbianBoost + transitionBoost
+	raw := rrfScore * cognitiveMultiplier
+	conf := float64(eng.Confidence)
+	return raw * conf
+}
+
 // computeGatedActivation computes the raw gated activation a(d) for CGDN.
 //
 // Formula (Hebbian-Rescue CGDN):
@@ -1605,6 +1678,7 @@ func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {
 		Recency:            float64(req.Recency),
 		UseCGDN:            req.UseCGDN,
 		UseACTR:            !req.DisableACTR,
+		UseRRFFusion:       req.UseRRFFusion,
 	}
 	// Apply CGDN defaults when enabled.
 	if req.UseCGDN {
