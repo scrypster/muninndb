@@ -18,9 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Sidebar nav items are now scrollable when viewport height is too small, keeping the logo and footer pinned.
-- Collapsed sidebar footer icons no longer overflow into the right border.
-- "New Vault" action moved from sidebar footer into the vault picker modal to reclaim vertical space.
-- Sidebar footer icons (theme toggle, keyboard shortcuts) replaced with consistent SVG icons in bordered containers.
+- Collapsed sidebar footer icons no longer overflow into the right border; icons render borderless when collapsed and bordered when expanded.
+- "New Vault" action moved from sidebar footer into the vault picker modal to reclaim vertical space for nav items.
+- Sidebar footer icons (theme toggle, keyboard shortcuts) replaced with consistent SVG icons matching the existing icon family.
+- Version label merged into the footer icon row instead of occupying its own line.
+- Sidebar footer padding and gaps tightened to maximize nav item visibility on short viewports.
 - Enrich now accepts OpenAI-compatible JSON responses returned in `message.reasoning` when `message.content` is empty, including structured reasoning payloads.
 - Retry and retroactive enrichment now only mark entity and relationship stages complete after successful persistence, avoiding partial-state retries, nil-result crashes, and silent graph-write failures.
 - Entity and relationship response parsing now rejects nested wrapper keys like `meta.entities` / `meta.relationships` instead of treating them as valid empty results.
