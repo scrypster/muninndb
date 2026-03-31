@@ -125,22 +125,18 @@
         <span class="vault-item-name" x-text="vault"></span>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0;opacity:0.35;"><path d="M6 9l6 6 6-6"/></svg>
       </button>
-      <!-- New Vault button (icon only when collapsed, full label when expanded) -->
-      <button class="sidebar-newvault-btn" @click="createVault()" title="New Vault">
-        <svg class="sidebar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        <span class="sidebar-newvault-label">New Vault</span>
-      </button>
-
-      <!-- Live dot + theme toggle (always visible) -->
+      <!-- Live dot + theme toggle + help (always visible) -->
       <div class="sidebar-footer-row">
         <span class="ws-dot" :class="liveConnected ? 'connected' : 'disconnected'"
           :title="liveConnected ? 'Live connected' : 'Reconnecting...'"></span>
-        <button class="btn-ghost" style="font-size:1.125rem;padding:0.25rem 0.375rem;line-height:1;" @click="toggleTheme()" title="Toggle theme">◐</button>
-        <button class="btn-ghost" style="font-size:0.8125rem;padding:0.25rem 0.375rem;line-height:1;opacity:0.6;" @click="showShortcutsHelp=true" title="Keyboard shortcuts (?)">?</button>
+        <button class="sidebar-footer-icon" @click="toggleTheme()" title="Toggle theme">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>
+        </button>
+        <button class="sidebar-footer-icon" @click="showShortcutsHelp=true" title="Keyboard shortcuts (?)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </button>
+        <span x-show="appVersion" x-text="appVersion" class="sidebar-version-label"></span>
       </div>
-
-      <!-- Version label -->
-      <span x-show="appVersion" x-text="appVersion" style="font-size:0.625rem;color:var(--text-muted);opacity:0.5;user-select:none;"></span>
 
       <!-- Sign out (visible when authenticated) -->
       <button class="sidebar-item" x-show="isAuthenticated" @click="showSignOutConfirm = true" title="Sign out">
@@ -2765,6 +2761,13 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
           </div>
         </template>
         <div x-show="vaults.filter(v => v.toLowerCase().includes(vaultPickerSearch.toLowerCase())).length===0" style="padding:1.25rem;text-align:center;color:var(--text-muted);font-size:0.875rem;">No vaults found</div>
+      </div>
+      <!-- New Vault action -->
+      <div style="border-top:1px solid var(--border);padding:0.5rem;">
+        <button class="vault-modal-item" style="width:100%;border-radius:0.375rem;" @click="vaultModalOpen=false; vaultPickerSearch=''; createVault()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          <span>New Vault</span>
+        </button>
       </div>
     </div>
   </div>
