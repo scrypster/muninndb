@@ -100,6 +100,11 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	fmt.Fprintf(&b, "- Predictive activation (PAS): %s\n", enabledStr(resolved.PredictiveActivation))
 	fmt.Fprintf(&b, "- Graph hop depth: %d\n", resolved.HopDepth)
 	fmt.Fprintf(&b, "- Temporal decay: %s\n", enabledStr(resolved.TemporalEnabled))
+	if resolved.DecayModel == "hybrid" {
+		fmt.Fprintf(&b, "- Decay model: hybrid (exponential + power-law, transition at %.0f days, exponent %.2f)\n", resolved.DecayTransitionDays, resolved.PowerLawExponent)
+	} else {
+		fmt.Fprintf(&b, "- Decay model: exponential (classic Ebbinghaus)\n")
+	}
 	fmt.Fprintf(&b, "- Inline enrichment: %s\n", resolved.InlineEnrichment)
 	if resolved.MaxEngrams > 0 {
 		fmt.Fprintf(&b, "- Max engrams: %d\n", resolved.MaxEngrams)
