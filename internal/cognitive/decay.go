@@ -56,6 +56,56 @@ func EbbinghausWithFloor(daysSinceAccess, stability, floor float64) float64 {
 	return r
 }
 
+// HybridRetention computes retention using either pure exponential or a hybrid
+// exponential + power-law model.
+//
+// For decayModel "exponential" (or any unrecognized value), this is identical
+// to EbbinghausWithFloor — pure exponential decay with a floor.
+//
+// For decayModel "hybrid":
+//   - t < transitionDays: R = e^(-t/S)  (exponential, same as Ebbinghaus)
+//   - t >= transitionDays: R = R_transition * (t/transitionDays)^(-powerLawExponent)
+//     where R_transition = e^(-transitionDays/S) ensures continuity at the boundary.
+//
+// The power-law tail decays more slowly than the exponential, preserving older
+// memories that survive the initial fast-decay phase.
+//
+// Academic basis: Wixted & Ebbesen (1991), Wixted (2004), Anderson & Schooler (1991).
+func HybridRetention(daysSinceAccess, stability, floor float64, decayModel string, powerLawExponent, transitionDays float64) float64 {
+	if stability <= 0 {
+		stability = DefaultStability
+	}
+
+	if decayModel != "hybrid" {
+		// Default / exponential / unknown: pure Ebbinghaus
+		r := math.Exp(-daysSinceAccess / stability)
+		if r < floor {
+			return floor
+		}
+		return r
+	}
+
+	// Hybrid model
+	if daysSinceAccess < transitionDays {
+		// Exponential phase (t < transitionDays)
+		r := math.Exp(-daysSinceAccess / stability)
+		if r < floor {
+			return floor
+		}
+		return r
+	}
+
+	// Power-law phase (t >= transitionDays)
+	// R_transition ensures continuity: the power-law starts exactly where
+	// the exponential left off at t = transitionDays.
+	rTransition := math.Exp(-transitionDays / stability)
+	r := rTransition * math.Pow(daysSinceAccess/transitionDays, -powerLawExponent)
+	if r < floor {
+		return floor
+	}
+	return r
+}
+
 // ComputeStability computes new stability from access count and spacing.
 func ComputeStability(accessCount uint32, avgDaysBetweenAccesses float64) float64 {
 	base := math.Log1p(float64(accessCount)) * StabilityGrowthRate

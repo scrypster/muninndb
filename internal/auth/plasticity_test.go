@@ -498,3 +498,100 @@ func TestPlasticityConfig_ArchiveThreshold_Override(t *testing.T) {
 		t.Errorf("overridden ArchiveThreshold: got %v, want 0.10", r.ArchiveThreshold)
 	}
 }
+
+// --- Hybrid decay model plasticity tests ---
+
+func TestPlasticityConfig_DecayModel_DefaultExponential(t *testing.T) {
+	r := ResolvePlasticity(nil)
+	if r.DecayModel != "exponential" {
+		t.Errorf("default DecayModel: got %q, want %q", r.DecayModel, "exponential")
+	}
+}
+
+func TestPlasticityConfig_DecayModel_AllPresetsDefaultExponential(t *testing.T) {
+	presets := []string{"default", "reference", "scratchpad", "knowledge-graph"}
+	for _, name := range presets {
+		r := ResolvePlasticity(&PlasticityConfig{Preset: name})
+		if r.DecayModel != "exponential" {
+			t.Errorf("preset %q: DecayModel = %q, want %q", name, r.DecayModel, "exponential")
+		}
+	}
+}
+
+func TestPlasticityConfig_DecayModel_OverrideHybrid(t *testing.T) {
+	model := "hybrid"
+	r := ResolvePlasticity(&PlasticityConfig{DecayModel: &model})
+	if r.DecayModel != "hybrid" {
+		t.Errorf("override: DecayModel = %q, want %q", r.DecayModel, "hybrid")
+	}
+}
+
+func TestPlasticityConfig_DecayModel_InvalidFallsToExponential(t *testing.T) {
+	model := "invalid-model"
+	r := ResolvePlasticity(&PlasticityConfig{DecayModel: &model})
+	if r.DecayModel != "exponential" {
+		t.Errorf("invalid model should fall to exponential, got %q", r.DecayModel)
+	}
+}
+
+func TestPlasticityConfig_PowerLawExponent_Default(t *testing.T) {
+	r := ResolvePlasticity(nil)
+	if r.PowerLawExponent != 0.5 {
+		t.Errorf("default PowerLawExponent: got %v, want 0.5", r.PowerLawExponent)
+	}
+}
+
+func TestPlasticityConfig_PowerLawExponent_Override(t *testing.T) {
+	val := 0.7
+	r := ResolvePlasticity(&PlasticityConfig{PowerLawExponent: &val})
+	if r.PowerLawExponent != 0.7 {
+		t.Errorf("override PowerLawExponent: got %v, want 0.7", r.PowerLawExponent)
+	}
+}
+
+func TestPlasticityConfig_PowerLawExponent_ClampLow(t *testing.T) {
+	val := -1.0
+	r := ResolvePlasticity(&PlasticityConfig{PowerLawExponent: &val})
+	if r.PowerLawExponent != 0.01 {
+		t.Errorf("negative PowerLawExponent should clamp to 0.01, got %v", r.PowerLawExponent)
+	}
+}
+
+func TestPlasticityConfig_PowerLawExponent_ClampHigh(t *testing.T) {
+	val := 5.0
+	r := ResolvePlasticity(&PlasticityConfig{PowerLawExponent: &val})
+	if r.PowerLawExponent != 2.0 {
+		t.Errorf("high PowerLawExponent should clamp to 2.0, got %v", r.PowerLawExponent)
+	}
+}
+
+func TestPlasticityConfig_DecayTransitionDays_Default(t *testing.T) {
+	r := ResolvePlasticity(nil)
+	if r.DecayTransitionDays != 3.0 {
+		t.Errorf("default DecayTransitionDays: got %v, want 3.0", r.DecayTransitionDays)
+	}
+}
+
+func TestPlasticityConfig_DecayTransitionDays_Override(t *testing.T) {
+	val := 5.0
+	r := ResolvePlasticity(&PlasticityConfig{DecayTransitionDays: &val})
+	if r.DecayTransitionDays != 5.0 {
+		t.Errorf("override DecayTransitionDays: got %v, want 5.0", r.DecayTransitionDays)
+	}
+}
+
+func TestPlasticityConfig_DecayTransitionDays_ClampLow(t *testing.T) {
+	val := 0.0
+	r := ResolvePlasticity(&PlasticityConfig{DecayTransitionDays: &val})
+	if r.DecayTransitionDays != 0.1 {
+		t.Errorf("zero DecayTransitionDays should clamp to 0.1, got %v", r.DecayTransitionDays)
+	}
+}
+
+func TestPlasticityConfig_DecayTransitionDays_ClampHigh(t *testing.T) {
+	val := 100.0
+	r := ResolvePlasticity(&PlasticityConfig{DecayTransitionDays: &val})
+	if r.DecayTransitionDays != 30.0 {
+		t.Errorf("high DecayTransitionDays should clamp to 30.0, got %v", r.DecayTransitionDays)
+	}
+}

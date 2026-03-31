@@ -51,6 +51,11 @@ type PlasticityConfig struct {
 	// RecallMode is the default recall mode for this vault: "semantic"|"recent"|"balanced"|"deep".
 	// nil = use "balanced" (engine defaults).
 	RecallMode *string `json:"recall_mode,omitempty"`
+
+	// Hybrid decay model parameters
+	DecayModel          *string  `json:"decay_model,omitempty"`           // "exponential" (default) or "hybrid"
+	PowerLawExponent    *float64 `json:"power_law_exponent,omitempty"`    // power-law exponent (default 0.5)
+	DecayTransitionDays *float64 `json:"decay_transition_days,omitempty"` // days before switching to power-law (default 3.0)
 }
 
 // ResolvedPlasticity is the fully-merged configuration after applying preset defaults
@@ -95,6 +100,10 @@ type ResolvedPlasticity struct {
 	EnrichmentEnabled bool `json:"enrichment_enabled"`
 	// RecallMode is the default recall mode for this vault.
 	RecallMode string `json:"recall_mode"`
+	// Hybrid decay model parameters
+	DecayModel          string  `json:"decay_model"`           // "exponential" or "hybrid"
+	PowerLawExponent    float64 `json:"power_law_exponent"`    // power-law exponent (default 0.5)
+	DecayTransitionDays float64 `json:"decay_transition_days"` // transition point in days (default 3.0)
 }
 
 type plasticityPreset struct {
@@ -120,9 +129,12 @@ type plasticityPreset struct {
 	AssocMinWeight       float32
 	ArchiveThreshold     float64
 	BehaviorMode         string
-	InlineEnrichment  string
-	EnrichmentEnabled bool
-	RecallMode        string
+	InlineEnrichment    string
+	EnrichmentEnabled   bool
+	RecallMode          string
+	DecayModel          string
+	PowerLawExponent    float64
+	DecayTransitionDays float64
 }
 
 var plasticityPresets = map[string]plasticityPreset{
@@ -151,6 +163,9 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
+		DecayModel:           "exponential",
+		PowerLawExponent:     0.5,
+		DecayTransitionDays:  3.0,
 	},
 	"reference": {
 		HebbianEnabled:       true,
@@ -177,6 +192,9 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
+		DecayModel:           "exponential",
+		PowerLawExponent:     0.5,
+		DecayTransitionDays:  3.0,
 	},
 	"scratchpad": {
 		HebbianEnabled:       false,
@@ -203,6 +221,9 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
+		DecayModel:           "exponential",
+		PowerLawExponent:     0.5,
+		DecayTransitionDays:  3.0,
 	},
 	"knowledge-graph": {
 		HebbianEnabled:       true,
@@ -229,6 +250,9 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
+		DecayModel:           "exponential",
+		PowerLawExponent:     0.5,
+		DecayTransitionDays:  3.0,
 	},
 }
 
@@ -270,6 +294,9 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		InlineEnrichment:     p.InlineEnrichment,
 		EnrichmentEnabled:    p.EnrichmentEnabled,
 		RecallMode:           p.RecallMode,
+		DecayModel:           p.DecayModel,
+		PowerLawExponent:     p.PowerLawExponent,
+		DecayTransitionDays:  p.DecayTransitionDays,
 	}
 
 	if cfg == nil {
@@ -426,6 +453,33 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 	if cfg.RecallMode != nil && ValidRecallMode(*cfg.RecallMode) {
 		r.RecallMode = *cfg.RecallMode
 	}
+	if cfg.DecayModel != nil {
+		if validDecayModel(*cfg.DecayModel) {
+			r.DecayModel = *cfg.DecayModel
+		} else {
+			r.DecayModel = "exponential"
+		}
+	}
+	if cfg.PowerLawExponent != nil {
+		v := *cfg.PowerLawExponent
+		if v < 0.01 {
+			v = 0.01
+		}
+		if v > 2.0 {
+			v = 2.0
+		}
+		r.PowerLawExponent = v
+	}
+	if cfg.DecayTransitionDays != nil {
+		v := *cfg.DecayTransitionDays
+		if v < 0.1 {
+			v = 0.1
+		}
+		if v > 30.0 {
+			v = 30.0
+		}
+		r.DecayTransitionDays = v
+	}
 
 	return r
 }
@@ -450,6 +504,15 @@ var validInlineEnrichments = map[string]bool{
 
 func validInlineEnrichment(s string) bool {
 	return validInlineEnrichments[s]
+}
+
+var validDecayModels = map[string]bool{
+	"exponential": true,
+	"hybrid":      true,
+}
+
+func validDecayModel(s string) bool {
+	return validDecayModels[s]
 }
 
 // ValidRecallMode returns true if s is a known recall mode name.
