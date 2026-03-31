@@ -1200,3 +1200,95 @@ func TestPhase4_75_ArchiveRestoreRunsDuringActivation(t *testing.T) {
 		t.Logf("Phase 4.75 populated %d RestoredEdges in ActivateResult", len(result.RestoredEdges))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test: UseRRFFusion produces different scores from ACT-R default
+// ---------------------------------------------------------------------------
+//
+// This integration test verifies that the RRF scoring path is actually reached
+// when UseRRFFusion=true is set on the Weights struct (which is how
+// engine.go wires ScoringFusion="rrf" from plasticity config). The test runs
+// the same data through both ACT-R (default) and RRF paths and asserts the
+// scores differ — proving the RRF code path was taken.
+func TestUseRRFFusion_ProducesDifferentScoresFromACTR(t *testing.T) {
+	store := newStubStore()
+
+	eng1 := &storage.Engram{
+		Concept:    "rrf integration test",
+		Content:    "test engram for rrf vs actr comparison",
+		Confidence: 0.8,
+		Stability:  30.0,
+		Relevance:  0.5,
+	}
+	store.writeEngram(eng1)
+
+	var ftsResults []activation.ScoredID
+	for id := range store.metas {
+		ftsResults = append(ftsResults, activation.ScoredID{ID: id, Score: 0.6})
+	}
+
+	// Run with ACT-R (default path)
+	ftsACTR := &stubFTS{results: ftsResults}
+	engACTR := newTestEngine(store, ftsACTR, nil)
+	resultACTR, err := engACTR.Run(context.Background(), &activation.ActivateRequest{
+		Context:    []string{"test engram"},
+		Threshold:  0.0,
+		MaxResults: 10,
+		Weights: &activation.Weights{
+			SemanticSimilarity: 0.6,
+			FullTextRelevance:  0.4,
+			UseACTR:            true,
+			ACTRDecay:          0.5,
+			ACTRHebScale:       4.0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run ACT-R: %v", err)
+	}
+
+	// Run with RRF fusion (the path wired by ScoringFusion="rrf" in plasticity).
+	// RRF scores are rank-based and small (e.g. 1/(60+1) ~ 0.016) so we use a
+	// low threshold. The engine floor-clamps Threshold<=0 to 0.05.
+	ftsRRF := &stubFTS{results: ftsResults}
+	engRRF := newTestEngine(store, ftsRRF, nil)
+	resultRRF, err := engRRF.Run(context.Background(), &activation.ActivateRequest{
+		Context:    []string{"test engram"},
+		Threshold:  0.001,
+		MaxResults: 10,
+		Weights: &activation.Weights{
+			SemanticSimilarity: 0.6,
+			FullTextRelevance:  0.4,
+			UseRRFFusion:       true,
+			DisableACTR:        true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run RRF: %v", err)
+	}
+
+	// Both paths should return results.
+	if len(resultACTR.Activations) == 0 {
+		t.Fatal("ACT-R path returned no results")
+	}
+	if len(resultRRF.Activations) == 0 {
+		t.Fatal("RRF path returned no results")
+	}
+
+	// Scores must be positive in both paths.
+	actrScore := resultACTR.Activations[0].Score
+	rrfScore := resultRRF.Activations[0].Score
+	if actrScore <= 0 {
+		t.Errorf("ACT-R score should be positive, got %v", actrScore)
+	}
+	if rrfScore <= 0 {
+		t.Errorf("RRF score should be positive, got %v", rrfScore)
+	}
+
+	// The two scoring formulas are fundamentally different (ACT-R computes
+	// base-level activation via power-law decay; RRF uses rank-based fusion).
+	// With identical inputs, their scores must differ.
+	if actrScore == rrfScore {
+		t.Errorf("ACT-R and RRF scores should differ: actr=%v rrf=%v", actrScore, rrfScore)
+	}
+	t.Logf("ACT-R score=%v, RRF score=%v (different as expected)", actrScore, rrfScore)
+}

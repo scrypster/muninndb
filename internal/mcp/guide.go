@@ -108,7 +108,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 		fmt.Fprintf(&b, "- Retention: %.0f days\n", resolved.RetentionDays)
 	}
 	if resolved.ScoringFusion == "rrf" {
-		fmt.Fprintf(&b, "- Scoring fusion: RRF (k=%d)\n", resolved.RRF_K)
+		fmt.Fprintf(&b, "- Scoring fusion: RRF (rank-based, scale-invariant)\n")
 	} else if resolved.ScoringFusion == "weighted_sum" {
 		fmt.Fprintf(&b, "- Scoring fusion: weighted sum\n")
 	} else {

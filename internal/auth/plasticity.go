@@ -57,9 +57,6 @@ type PlasticityConfig struct {
 	// "weighted_sum" = use legacy weighted-sum scoring (DisableACTR implied).
 	// nil/empty = default (ACT-R scoring, unchanged behavior).
 	ScoringFusion *string `json:"scoring_fusion,omitempty"`
-	// RRF_K is the RRF smoothing constant (default 60). Only used when ScoringFusion="rrf".
-	// Higher k values compress rank differences; lower k values amplify top-rank advantage.
-	RRF_K *int `json:"rrf_k,omitempty"`
 }
 
 // ResolvedPlasticity is the fully-merged configuration after applying preset defaults
@@ -106,8 +103,6 @@ type ResolvedPlasticity struct {
 	RecallMode string `json:"recall_mode"`
 	// ScoringFusion selects Phase 6 scoring strategy: "" (default=ACT-R), "rrf", or "weighted_sum".
 	ScoringFusion string `json:"scoring_fusion"`
-	// RRF_K is the RRF smoothing constant (default 60). Only meaningful when ScoringFusion="rrf".
-	RRF_K int `json:"rrf_k"`
 }
 
 type plasticityPreset struct {
@@ -137,7 +132,6 @@ type plasticityPreset struct {
 	EnrichmentEnabled bool
 	RecallMode        string
 	ScoringFusion     string // "" = default (ACT-R), "rrf", "weighted_sum"
-	RRF_K             int    // default 60
 }
 
 var plasticityPresets = map[string]plasticityPreset{
@@ -166,7 +160,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
-		RRF_K:                60,
+
 	},
 	"reference": {
 		HebbianEnabled:       true,
@@ -193,7 +187,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
-		RRF_K:                60,
+
 	},
 	"scratchpad": {
 		HebbianEnabled:       false,
@@ -220,7 +214,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
-		RRF_K:                60,
+
 	},
 	"knowledge-graph": {
 		HebbianEnabled:       true,
@@ -247,7 +241,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
-		RRF_K:                60,
+
 	},
 }
 
@@ -290,7 +284,6 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		EnrichmentEnabled:    p.EnrichmentEnabled,
 		RecallMode:           p.RecallMode,
 		ScoringFusion:        p.ScoringFusion,
-		RRF_K:                p.RRF_K,
 	}
 
 	if cfg == nil {
@@ -454,17 +447,6 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 			r.ScoringFusion = "" // invalid → default (ACT-R)
 		}
 	}
-	if cfg.RRF_K != nil {
-		k := *cfg.RRF_K
-		if k < 1 {
-			k = 1
-		}
-		if k > 1000 {
-			k = 1000
-		}
-		r.RRF_K = k
-	}
-
 	return r
 }
 

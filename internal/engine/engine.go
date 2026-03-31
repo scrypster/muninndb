@@ -1736,6 +1736,16 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			ACTRDecay:    actrDecay,
 			ACTRHebScale: actrHebScale,
 		}
+
+		// Wire ScoringFusion from plasticity config to activation weights.
+		if resolved.ScoringFusion == "rrf" {
+			actReq.Weights.UseRRFFusion = true
+			actReq.Weights.DisableACTR = true
+			actReq.Weights.UseACTR = false
+		} else if resolved.ScoringFusion == "weighted_sum" {
+			actReq.Weights.DisableACTR = true
+			actReq.Weights.UseACTR = false
+		}
 	}
 
 	// Gate CGDN behind vault's ExperimentalCGDN flag.

@@ -3,7 +3,7 @@ package auth
 import "testing"
 
 // ---------------------------------------------------------------------------
-// Tests for ScoringFusion and RRF_K plasticity parameters
+// Tests for ScoringFusion plasticity parameter
 // ---------------------------------------------------------------------------
 
 func TestScoringFusion_DefaultEmpty(t *testing.T) {
@@ -44,47 +44,6 @@ func TestScoringFusion_InvalidFallsToEmpty(t *testing.T) {
 	r := ResolvePlasticity(&PlasticityConfig{ScoringFusion: &mode})
 	if r.ScoringFusion != "" {
 		t.Errorf("invalid mode should fall back to empty, got %q", r.ScoringFusion)
-	}
-}
-
-func TestRRFK_DefaultIs60(t *testing.T) {
-	r := ResolvePlasticity(nil)
-	if r.RRF_K != 60 {
-		t.Errorf("default RRF_K should be 60, got %d", r.RRF_K)
-	}
-}
-
-func TestRRFK_AllPresetsDefault60(t *testing.T) {
-	presets := []string{"default", "reference", "scratchpad", "knowledge-graph"}
-	for _, name := range presets {
-		r := ResolvePlasticity(&PlasticityConfig{Preset: name})
-		if r.RRF_K != 60 {
-			t.Errorf("preset %q: RRF_K should be 60, got %d", name, r.RRF_K)
-		}
-	}
-}
-
-func TestRRFK_Override(t *testing.T) {
-	k := 40
-	r := ResolvePlasticity(&PlasticityConfig{RRF_K: &k})
-	if r.RRF_K != 40 {
-		t.Errorf("override: want RRF_K=40, got %d", r.RRF_K)
-	}
-}
-
-func TestRRFK_ClampedLow(t *testing.T) {
-	k := 0
-	r := ResolvePlasticity(&PlasticityConfig{RRF_K: &k})
-	if r.RRF_K != 1 {
-		t.Errorf("zero should clamp to 1, got %d", r.RRF_K)
-	}
-}
-
-func TestRRFK_ClampedHigh(t *testing.T) {
-	k := 10000
-	r := ResolvePlasticity(&PlasticityConfig{RRF_K: &k})
-	if r.RRF_K != 1000 {
-		t.Errorf("above 1000 should clamp to 1000, got %d", r.RRF_K)
 	}
 }
 
