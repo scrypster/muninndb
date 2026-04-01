@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /api/activity-counts` endpoint returning per-day engram creation counts for a vault. Accepts `days` (1–180, default 7) and optional `until` (YYYY-MM-DD) query parameters. Malformed or out-of-range values return 400. Backed by an efficient ULID key-header scan with zero-filled contiguous day ranges.
 
 ### Changed
+- Settings → API Keys: renamed "Create New Key" heading to "Create New API Key" for clarity.
+- Settings → Admin: renamed "Change Admin Password" heading to "Change Admin Credentials".
 - Web UI: unified tab navigation across Memories, Graph, and Settings pages with a consistent bordered-tab style replacing the previous mix of underline, button, and pill patterns.
 - Public vault unauthenticated access now runs in `full` mode. Previously, requests to an open vault with no API key ran as `observe`, silently preventing cognitive-state writes. Public vaults are now genuinely open — callers get `full` access unless they present an explicit `observe` key.
 
