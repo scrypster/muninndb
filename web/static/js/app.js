@@ -49,6 +49,7 @@ document.addEventListener('alpine:init', () => {
     memoriesLoading: false,
     memoryFilters: { sort: 'created', tags: '', state: '', minConf: 0, maxConf: 0 },
     selectedMemory: null,
+    detailExpanded: false,
     showNewMemoryModal: false,
     newMemoryForm: { concept: '', content: '', tagsRaw: '', confidence: 0.8 },
     confirmForgetId: null,
