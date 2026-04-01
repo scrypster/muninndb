@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /api/activity-counts` endpoint returning per-day engram creation counts for a vault. Accepts `days` (1–180, default 7) and optional `until` (YYYY-MM-DD) query parameters. Malformed or out-of-range values return 400. Backed by an efficient ULID key-header scan with zero-filled contiguous day ranges.
 
 ### Changed
+- Web UI: unified tab navigation across Memories, Graph, and Settings pages with a consistent bordered-tab style replacing the previous mix of underline, button, and pill patterns.
 - Public vault unauthenticated access now runs in `full` mode. Previously, requests to an open vault with no API key ran as `observe`, silently preventing cognitive-state writes. Public vaults are now genuinely open — callers get `full` access unless they present an explicit `observe` key.
 
 ### Fixed
@@ -23,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sidebar footer icons (theme toggle, keyboard shortcuts) replaced with consistent SVG icons matching the existing icon family.
 - Version label merged into the footer icon row instead of occupying its own line.
 - Sidebar footer padding and gaps tightened to maximize nav item visibility on short viewports.
+- Memories page search-mode segmented control (Balanced/Semantic/Recent/Deep) now matches adjacent button height and font size, includes dividers between options, and preserves padding when Alpine.js re-renders dynamic styles.
 - Enrich now accepts OpenAI-compatible JSON responses returned in `message.reasoning` when `message.content` is empty, including structured reasoning payloads.
 - Retry and retroactive enrichment now only mark entity and relationship stages complete after successful persistence, avoiding partial-state retries, nil-result crashes, and silent graph-write failures.
 - Entity and relationship response parsing now rejects nested wrapper keys like `meta.entities` / `meta.relationships` instead of treating them as valid empty results.
