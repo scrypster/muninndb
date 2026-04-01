@@ -8,7 +8,7 @@
 
 ## Release Checklist
 
-- [ ] `CHANGELOG.md` updated with changes
+- [ ] ~~`CHANGELOG.md`~~ — maintainers update this at release time, no action needed
 - [ ] OpenAPI spec (`internal/transport/rest/openapi.yaml`) updated if API routes changed
 - [ ] SDK types updated if request/response schemas changed (Python, Node, PHP)
 - [ ] `docs/` updated if user-facing behavior changed
