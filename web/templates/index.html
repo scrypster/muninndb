@@ -1289,51 +1289,47 @@
 
                 <!-- Default -->
                 <div @click="plasticityForm.showAdvanced=false; plasticityForm.preset='default'; onPlasticityPresetChange()"
-                     :style="plasticityForm.preset==='default' && !plasticityForm.showAdvanced ? 'border:2px solid #6366f1;background:rgba(99,102,241,0.12);' : 'border:1px solid var(--border);background:var(--bg-elevated);'"
-                     style="border-radius:0.625rem;padding:0.875rem;cursor:pointer;transition:all 0.15s;">
+                     :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.preset==='default' && !plasticityForm.showAdvanced ? 'border:2px solid #6366f1;background:rgba(99,102,241,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
                   <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;">Default</div>
                   <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">General use</div>
                   <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
-                    <span style="font-size:0.65rem;background:rgba(99,102,241,0.2);color:#a5b4fc;border-radius:9999px;padding:0.1rem 0.4rem;">2-hop</span>
-                    <span style="font-size:0.65rem;background:rgba(99,102,241,0.2);color:#a5b4fc;border-radius:9999px;padding:0.1rem 0.4rem;">Hebbian</span>
-                    <span style="font-size:0.65rem;background:rgba(99,102,241,0.2);color:#a5b4fc;border-radius:9999px;padding:0.1rem 0.4rem;">Temporal</span>
+                    <span :style="'font-size:0.65rem;background:rgba(99,102,241,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#a5b4fc' : '#4338ca')">2-hop</span>
+                    <span :style="'font-size:0.65rem;background:rgba(99,102,241,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#a5b4fc' : '#4338ca')">Hebbian</span>
+                    <span :style="'font-size:0.65rem;background:rgba(99,102,241,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#a5b4fc' : '#4338ca')">Temporal</span>
                   </div>
                 </div>
 
                 <!-- Reference -->
                 <div @click="plasticityForm.showAdvanced=false; plasticityForm.preset='reference'; onPlasticityPresetChange()"
-                     :style="plasticityForm.preset==='reference' && !plasticityForm.showAdvanced ? 'border:2px solid #10b981;background:rgba(16,185,129,0.12);' : 'border:1px solid var(--border);background:var(--bg-elevated);'"
-                     style="border-radius:0.625rem;padding:0.875rem;cursor:pointer;transition:all 0.15s;">
+                     :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.preset==='reference' && !plasticityForm.showAdvanced ? 'border:2px solid #10b981;background:rgba(16,185,129,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
                   <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;">Reference</div>
                   <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">Docs &amp; facts</div>
                   <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
-                    <span style="font-size:0.65rem;background:rgba(16,185,129,0.2);color:#6ee7b7;border-radius:9999px;padding:0.1rem 0.4rem;">3-hop</span>
-                    <span style="font-size:0.65rem;background:rgba(16,185,129,0.2);color:#6ee7b7;border-radius:9999px;padding:0.1rem 0.4rem;">No fading</span>
+                    <span :style="'font-size:0.65rem;background:rgba(16,185,129,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#6ee7b7' : '#047857')">3-hop</span>
+                    <span :style="'font-size:0.65rem;background:rgba(16,185,129,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#6ee7b7' : '#047857')">No fading</span>
                   </div>
                 </div>
 
                 <!-- Scratchpad -->
                 <div @click="plasticityForm.showAdvanced=false; plasticityForm.preset='scratchpad'; onPlasticityPresetChange()"
-                     :style="plasticityForm.preset==='scratchpad' && !plasticityForm.showAdvanced ? 'border:2px solid #f59e0b;background:rgba(245,158,11,0.12);' : 'border:1px solid var(--border);background:var(--bg-elevated);'"
-                     style="border-radius:0.625rem;padding:0.875rem;cursor:pointer;transition:all 0.15s;">
+                     :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.preset==='scratchpad' && !plasticityForm.showAdvanced ? 'border:2px solid #f59e0b;background:rgba(245,158,11,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
                   <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;">Scratchpad</div>
                   <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">Short-lived drafts</div>
                   <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
-                    <span style="font-size:0.65rem;background:rgba(245,158,11,0.2);color:#fcd34d;border-radius:9999px;padding:0.1rem 0.4rem;">Fast fading</span>
-                    <span style="font-size:0.65rem;background:rgba(245,158,11,0.2);color:#fcd34d;border-radius:9999px;padding:0.1rem 0.4rem;">No assoc.</span>
+                    <span :style="'font-size:0.65rem;background:rgba(245,158,11,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#fcd34d' : '#b45309')">Fast fading</span>
+                    <span :style="'font-size:0.65rem;background:rgba(245,158,11,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#fcd34d' : '#b45309')">No assoc.</span>
                   </div>
                 </div>
 
                 <!-- Knowledge Graph -->
                 <div @click="plasticityForm.showAdvanced=false; plasticityForm.preset='knowledge-graph'; onPlasticityPresetChange()"
-                     :style="plasticityForm.preset==='knowledge-graph' && !plasticityForm.showAdvanced ? 'border:2px solid #ec4899;background:rgba(236,72,153,0.12);' : 'border:1px solid var(--border);background:var(--bg-elevated);'"
-                     style="border-radius:0.625rem;padding:0.875rem;cursor:pointer;transition:all 0.15s;">
+                     :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.preset==='knowledge-graph' && !plasticityForm.showAdvanced ? 'border:2px solid #ec4899;background:rgba(236,72,153,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
                   <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;">Knowledge Graph</div>
                   <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">Dense concepts</div>
                   <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
-                    <span style="font-size:0.65rem;background:rgba(236,72,153,0.2);color:#f9a8d4;border-radius:9999px;padding:0.1rem 0.4rem;">4-hop</span>
-                    <span style="font-size:0.65rem;background:rgba(236,72,153,0.2);color:#f9a8d4;border-radius:9999px;padding:0.1rem 0.4rem;">Strong assoc.</span>
-                    <span style="font-size:0.65rem;background:rgba(236,72,153,0.2);color:#f9a8d4;border-radius:9999px;padding:0.1rem 0.4rem;">Slow fading</span>
+                    <span :style="'font-size:0.65rem;background:rgba(236,72,153,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#f9a8d4' : '#be185d')">4-hop</span>
+                    <span :style="'font-size:0.65rem;background:rgba(236,72,153,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#f9a8d4' : '#be185d')">Strong assoc.</span>
+                    <span :style="'font-size:0.65rem;background:rgba(236,72,153,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#f9a8d4' : '#be185d')">Slow fading</span>
                   </div>
                 </div>
               </div>
@@ -1348,9 +1344,8 @@
                   {id:'deep',      label:'Deep',      desc:'4-hop graph'}
                 ]" :key="rm.id">
                   <div @click="plasticityForm.recallMode = rm.id"
-                       :style="plasticityForm.recallMode === rm.id ? 'border:2px solid var(--accent);background:rgba(99,102,241,0.12);' : 'border:1px solid var(--border);background:var(--bg-elevated);'"
-                       style="border-radius:0.625rem;padding:0.75rem;cursor:pointer;transition:all 0.15s;">
-                    <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.125rem;" x-text="rm.label"></div>
+                       :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.recallMode === rm.id ? 'border:2px solid var(--accent);background:rgba(99,102,241,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
+                    <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;" x-text="rm.label"></div>
                     <div style="font-size:0.75rem;color:var(--text-muted);" x-text="rm.desc"></div>
                   </div>
                 </template>
@@ -1412,9 +1407,11 @@
             </div>
 
             <!-- Right: radar chart -->
-            <div>
+            <div style="min-width:0;overflow:visible;">
               <p style="font-size:0.8125rem;font-weight:600;color:var(--text-secondary);margin:0 0 0.75rem;text-transform:uppercase;letter-spacing:0.05em;">Preset Comparison</p>
-              <canvas id="plasticityChart" style="max-height:320px;"></canvas>
+              <div style="padding:0 1.5rem;">
+                <canvas id="plasticityChart" style="max-height:320px;"></canvas>
+              </div>
             </div>
           </div>
         </div>

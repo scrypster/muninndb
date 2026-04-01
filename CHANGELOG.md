@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Version label merged into the footer icon row instead of occupying its own line.
 - Sidebar footer padding and gaps tightened to maximize nav item visibility on short viewports.
 - Memories page search-mode segmented control (Balanced/Semantic/Recent/Deep) now matches adjacent button height and font size, includes dividers between options, and preserves padding when Alpine.js re-renders dynamic styles.
+- Settings page Plasticity preset and recall mode cards now have proper padding, with border-width compensation preventing layout jitter on selection.
+- Settings page Plasticity preset pill labels are now readable in light mode (switched from pastel to saturated text colors) while preserving dark-mode colors.
+- Settings page Preset Comparison radar chart no longer clips the "Associative Learning" axis label.
 - Enrich now accepts OpenAI-compatible JSON responses returned in `message.reasoning` when `message.content` is empty, including structured reasoning payloads.
 - Retry and retroactive enrichment now only mark entity and relationship stages complete after successful persistence, avoiding partial-state retries, nil-result crashes, and silent graph-write failures.
 - Entity and relationship response parsing now rejects nested wrapper keys like `meta.entities` / `meta.relationships` instead of treating them as valid empty results.
