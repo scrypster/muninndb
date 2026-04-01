@@ -1568,7 +1568,12 @@
               <!-- Provider selector pills -->
               <div style="margin-bottom:1rem;">
                 <div style="font-size:0.8125rem;font-weight:600;color:var(--text-primary);margin-bottom:0.625rem;">Select provider</div>
-                <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <div class="tab-bar" style="margin-top:0;margin-bottom:1rem;">
+                  <button
+                    @click="pluginCfg.embedProvider='none';pluginCfg.embedCmd=''"
+                    :class="pluginCfg.embedProvider==='none' ? 'tab-btn active' : 'tab-btn'">
+                    None
+                  </button>
                   <button
                     @click="pluginCfg.embedProvider='voyage';pluginCfg.embedCmd=''"
                     :class="pluginCfg.embedProvider==='voyage' ? 'tab-btn active' : 'tab-btn'"
@@ -1778,7 +1783,7 @@
               <!-- Provider selector pills -->
               <div style="margin-bottom:1rem;">
                 <div style="font-size:0.8125rem;font-weight:600;color:var(--text-primary);margin-bottom:0.625rem;">Select provider</div>
-                <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <div class="tab-bar" style="margin-top:0;margin-bottom:1rem;">
                   <template x-for="opt in [{val:'none',label:'None'},{val:'ollama',label:'Ollama (local)'},{val:'openai',label:'OpenAI'},{val:'anthropic',label:'Anthropic'},{val:'google',label:'Google'}]" :key="opt.val">
                     <button
                       @click="pluginCfg.enrichProvider=opt.val;pluginCfg.enrichCmd='';if(opt.val==='google')pluginCfg.enrichModel='gemini-1.5-flash';if(opt.val==='anthropic')pluginCfg.enrichModel='claude-haiku-4-5-20251001'"
@@ -1885,7 +1890,7 @@
               </div>
 
               <!-- Verbose LLM logs -->
-              <div style="display:flex;align-items:flex-start;gap:0.75rem;padding:0.75rem 0;border-top:1px solid var(--border);">
+              <div style="display:flex;align-items:flex-start;gap:0.75rem;padding:0.75rem 0;">
                 <input type="checkbox" id="llmVerboseLogs" :checked="pluginCfg.llm_verbose_logs === true"
                   @change="pluginCfg.llm_verbose_logs = $event.target.checked || undefined"
                   style="margin-top:0.125rem;cursor:pointer;" />
