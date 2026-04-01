@@ -26,12 +26,12 @@ func assertNear(t *testing.T, name string, got, want, tol float64) {
 }
 
 // expectedBaseLevel returns the B(M) value that computeACTR will produce
-// for the given parameters, including the 1-day additive offset and the
-// bLevelCap. Tests should use this instead of inlining the formula.
+// for the given parameters, including the bLevelCap. Tests should use this
+// instead of inlining the formula so they stay in sync with production code.
 func expectedBaseLevel(n, ageDays, d float64) float64 {
-	const bmAgeOffset = 1.0
-	ageForBM := ageDays + bmAgeOffset
-	bl := math.Log(n) - d*math.Log(ageForBM/n)
+	const ageFloorDays = 1.0 / (24.0 * 60.0)
+	effectiveAge := math.Max(ageDays, ageFloorDays)
+	bl := math.Log(n) - d*math.Log(effectiveAge/n)
 	bLevelCap := math.Log(math.Exp(actrDenominator) - 1)
 	if bl > bLevelCap {
 		bl = bLevelCap
@@ -93,7 +93,7 @@ func TestComputeACTR_OldEngram_NoHebbian(t *testing.T) {
 
 	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
 	n := 1.0
-	// n=1, ageDays=30: B(M) = ln(1) - 0.5*ln(31) ≈ -1.72 (offset adds 1 day) — well below cap.
+	// n=1, ageDays=30: B(M) = ln(1) - 0.5*ln(30) ≈ -1.70 — well below cap.
 	baseLevel := expectedBaseLevel(n, 30.0, 0.5)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.0)
 
@@ -151,7 +151,7 @@ func TestComputeACTR_HighAccessCount(t *testing.T) {
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
 	// Confirm the cap fired: uncapped value >> bLevelCap.
-	uncappedBL := math.Log(n) - 0.5*math.Log((7.0+1.0)/n)
+	uncappedBL := math.Log(n) - 0.5*math.Log(7.0/n)
 	bLevelCap := math.Log(math.Exp(actrDenominator) - 1)
 	if uncappedBL <= bLevelCap {
 		t.Errorf("test setup: uncappedBL=%.4f must exceed bLevelCap=%.4f", uncappedBL, bLevelCap)
@@ -301,7 +301,7 @@ func TestComputeACTR_CustomDecayAndHebScale(t *testing.T) {
 
 	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
 	n := 4.0
-	// n=4, ageDays=10: ageForBM=11, B(M)=ln(4)-0.8*ln(11/4)≈0.35 — not capped.
+	// n=4, ageDays=10: B(M)=ln(4)-0.8*ln(10/4)≈0.65 — not capped.
 	baseLevel := expectedBaseLevel(n, 10.0, 0.8)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 2.0, hebbianBoost)
 
