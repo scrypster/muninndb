@@ -1452,9 +1452,8 @@
               Merge Into…
             </button>
             <button @click="exportVault()" :disabled="vaultExporting"
-                    style="padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;border-radius:0.5rem;border:1px solid #34d399;color:#10b981;background:transparent;cursor:pointer;transition:background 0.15s;"
-                    onmouseover="this.style.background='rgba(52,211,153,0.08)'" onmouseout="this.style.background='transparent'"
-                    :style="vaultExporting ? 'opacity:0.55;cursor:not-allowed;' : ''">
+                    :style="'padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;border-radius:0.5rem;border:1px solid #34d399;color:#10b981;background:transparent;cursor:pointer;transition:background 0.15s;' + (vaultExporting ? 'opacity:0.55;cursor:not-allowed;' : '')"
+                    onmouseover="this.style.background='rgba(52,211,153,0.08)'" onmouseout="this.style.background='transparent'">
               <span x-text="vaultExporting ? 'Exporting…' : 'Export Vault'"></span>
             </button>
             <button @click="openImportModal()"
@@ -1463,9 +1462,8 @@
               Import Vault…
             </button>
             <button @click="reindexFTS()" :disabled="reindexing"
-                    style="padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;border-radius:0.5rem;border:1px solid #60a5fa;color:#3b82f6;background:transparent;cursor:pointer;transition:background 0.15s;"
-                    onmouseover="this.style.background='rgba(96,165,250,0.08)'" onmouseout="this.style.background='transparent'"
-                    :style="reindexing ? 'opacity:0.55;cursor:not-allowed;' : ''">
+                    :style="'padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;border-radius:0.5rem;border:1px solid #60a5fa;color:#3b82f6;background:transparent;cursor:pointer;transition:background 0.15s;' + (reindexing ? 'opacity:0.55;cursor:not-allowed;' : '')"
+                    onmouseover="this.style.background='rgba(96,165,250,0.08)'" onmouseout="this.style.background='transparent'">
               <span x-text="reindexing ? 'Reindexing…' : 'Reindex FTS'"></span>
             </button>
           </div>
