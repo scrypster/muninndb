@@ -76,14 +76,18 @@ func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) 
 		copy(id[:], k[9:25])
 
 		raw, err := ps.getDigestFlagsRaw(id)
-		if err != nil {
-			// No digest record yet. Write a zero record so the RetroactiveProcessor
-			// treats this engram as pending (Bug 3 fix: imported engrams are now
-			// explicitly queued for embedding).
+		noRecord := err != nil
+		if noRecord {
 			raw = 0
 		}
-		if raw&embedMask == 0 {
-			// Both embed flags already clear — nothing to do.
+
+		// If an existing record already has both flags clear, there is nothing to
+		// do — skip it. But if there is NO record at all (noRecord), we must fall
+		// through and write the zero record so the RetroactiveProcessor explicitly
+		// sees this engram as pending embedding (fixes the silent skip introduced
+		// by the Bug 3 guard: raw=0 caused raw&embedMask==0 to be true, meaning
+		// the zero write was never reached for freshly imported engrams).
+		if !noRecord && raw&embedMask == 0 {
 			continue
 		}
 
