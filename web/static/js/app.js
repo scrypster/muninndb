@@ -927,18 +927,19 @@ document.addEventListener('alpine:init', () => {
     },
 
     _copyFallback(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
       try {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
         ta.select();
         const ok = document.execCommand('copy');
-        document.body.removeChild(ta);
         this.addNotification(ok ? 'success' : 'error', ok ? 'Activity data copied to clipboard' : 'Copy failed — please copy manually');
       } catch (_) {
         this.addNotification('error', 'Copy failed — please copy manually');
+      } finally {
+        document.body.removeChild(ta);
       }
     },
 
@@ -2097,15 +2098,14 @@ document.addEventListener('alpine:init', () => {
         }
       }
       // execCommand fallback — works on HTTP and older browsers.
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
       try {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
         ta.select();
         const ok = document.execCommand('copy');
-        document.body.removeChild(ta);
         if (ok) {
           this.connectCopied = true;
           setTimeout(() => { this.connectCopied = false; }, 2000);
@@ -2115,6 +2115,8 @@ document.addEventListener('alpine:init', () => {
         }
       } catch (_) {
         this.addNotification('error', 'Copy failed — please select and copy manually');
+      } finally {
+        document.body.removeChild(ta);
       }
     },
 
@@ -2478,9 +2480,29 @@ document.addEventListener('alpine:init', () => {
 
     copyToken() {
       if (!this.clusterToken?.token) return;
-      navigator.clipboard.writeText(this.clusterToken.token).catch(() => {});
-      this.clusterTokenCopied = true;
-      setTimeout(() => { this.clusterTokenCopied = false; }, 2000);
+      const text = this.clusterToken.token;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          this.clusterTokenCopied = true;
+          setTimeout(() => { this.clusterTokenCopied = false; }, 2000);
+        }).catch(() => {});
+        return;
+      }
+      // execCommand fallback for non-secure contexts (plain HTTP LAN installs).
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      try {
+        ta.select();
+        if (document.execCommand('copy')) {
+          this.clusterTokenCopied = true;
+          setTimeout(() => { this.clusterTokenCopied = false; }, 2000);
+        }
+      } finally {
+        document.body.removeChild(ta);
+      }
     },
 
     async loadClusterSettings() {
