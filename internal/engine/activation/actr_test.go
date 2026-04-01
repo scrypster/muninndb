@@ -26,13 +26,12 @@ func assertNear(t *testing.T, name string, got, want, tol float64) {
 }
 
 // expectedACTRRaw computes the expected Raw score from first principles.
+// Note: no upper clamp — computeACTR now returns the unclamped value so that
+// the ACT-R scoring path can apply per-query normalization (issue #331 fix).
 func expectedACTRRaw(contentMatch, baseLevel, hebScale, hebbianBoost float64) float64 {
 	totalActivation := baseLevel + hebScale*hebbianBoost
 	contextualPrior := softplus(totalActivation)
 	raw := contentMatch * contextualPrior / actrDenominator
-	if raw > 1.0 {
-		return 1.0
-	}
 	if raw < 0.0 {
 		return 0.0
 	}
@@ -184,6 +183,9 @@ func TestComputeACTR_ConfidenceMultiplication(t *testing.T) {
 }
 
 func TestComputeACTR_ScoreClamping(t *testing.T) {
+	// computeACTR no longer applies an upper clamp — clamping to [0,1] is the
+	// caller's responsibility after per-query normalization (issue #331 fix).
+	// Verify that the raw value above 1.0 is returned unchanged.
 	now := time.Now()
 	eng := &storage.Engram{
 		Confidence:  1.0,
@@ -193,13 +195,10 @@ func TestComputeACTR_ScoreClamping(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	// Perfect match + very high FTS + Hebbian + many accesses → exceeds 1.0 before clamp.
+	// Perfect match + very high FTS + Hebbian + many accesses → exceeds 1.0.
 	sc := computeACTR(1.0, 10.0, 1.0, 0.0, eng, 0, now, w)
 
-	if sc.Raw > 1.0 {
-		t.Errorf("Raw=%v, must be clamped to <= 1.0", sc.Raw)
-	}
-	// Verify it actually hit the ceiling (pre-clamp value exceeds 1.0).
+	// Compute expected unclamped value.
 	contentMatch := 0.35*1.0 + 0.25*math.Tanh(10.0)
 	n := 51.0
 	ageDays := 1.0 / (24.0 * 60.0) // floor: 1 minute
@@ -207,9 +206,13 @@ func TestComputeACTR_ScoreClamping(t *testing.T) {
 	totalActivation := baseLevel + 4.0*1.0
 	unclamped := contentMatch * softplus(totalActivation) / actrDenominator
 	if unclamped <= 1.0 {
-		t.Fatalf("Pre-clamp value=%.4f, test requires it to exceed 1.0", unclamped)
+		t.Fatalf("unclamped=%.4f, test requires > 1.0 to be meaningful", unclamped)
 	}
-	assertNear(t, "Raw", sc.Raw, 1.0, 1e-9)
+	// computeACTR must now return the unclamped value — the caller normalises.
+	if sc.Raw <= 1.0 {
+		t.Errorf("Raw=%.4f, expected > 1.0 (no longer clamped in computeACTR)", sc.Raw)
+	}
+	assertNear(t, "Raw (unclamped)", sc.Raw, unclamped, 1e-9)
 }
 
 func TestComputeACTR_ZeroLastAccess(t *testing.T) {
@@ -383,5 +386,54 @@ func TestComputeACTR_DecayFactorReportedCorrectly(t *testing.T) {
 
 			assertNear(t, "DecayFactor", sc.DecayFactor, wantDecay, 1e-6)
 		})
+	}
+}
+
+// TestACTR_PerQueryNormalization_RankingPreserved verifies that per-query
+// normalization restores relative ranking when multiple fresh engrams saturate
+// above 1.0. Before the fix (issue #331), the hard clamp at 1.0 collapsed all
+// saturated scores to the same value — ranking became arbitrary tie-breaking.
+//
+// Uses AccessCount=5 (n=6) with LastAccess=now to produce a high base-level
+// activation (B(M) ≈ 6.3), which pushes raw above 1.0 for both engrams even
+// though their content match scores differ — matching the small-vault scenario
+// reported in the issue.
+func TestACTR_PerQueryNormalization_RankingPreserved(t *testing.T) {
+	now := time.Now()
+	w := actrDefaultWeights()
+
+	// Both engrams have high base-level activation (AccessCount=5, just accessed)
+	// so both produce raw > 1.0. They differ only in semantic relevance.
+	engHigh := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
+	engLow := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
+
+	// vectorScore=0.9 vs 0.4; same ftsScore — only content match differs.
+	scHigh := computeACTR(0.9, 1.0, 0.0, 0.0, engHigh, 0, now, w)
+	scLow := computeACTR(0.4, 1.0, 0.0, 0.0, engLow, 0, now, w)
+
+	// Precondition: both raw scores must exceed 1.0 (saturation zone).
+	if scHigh.Raw <= 1.0 {
+		t.Fatalf("precondition: scHigh.Raw=%.4f must exceed 1.0 (check AccessCount/LastAccess)", scHigh.Raw)
+	}
+	if scLow.Raw <= 1.0 {
+		t.Fatalf("precondition: scLow.Raw=%.4f must exceed 1.0 (check AccessCount/LastAccess)", scLow.Raw)
+	}
+
+	// Simulate per-query normalization (mirrors the ACT-R scoring path in engine.go).
+	maxRaw := math.Max(scHigh.Raw, scLow.Raw)
+	normHigh := math.Min(scHigh.Raw/maxRaw, 1.0)
+	normLow := math.Min(scLow.Raw/maxRaw, 1.0)
+
+	// After normalization the higher-content-match engram must outscore the lower one.
+	if normHigh <= normLow {
+		t.Errorf("normHigh=%.4f <= normLow=%.4f: high-relevance engram must rank above low-relevance", normHigh, normLow)
+	}
+	// The top scorer anchors at exactly 1.0.
+	if math.Abs(normHigh-1.0) > 1e-9 {
+		t.Errorf("top normalized score=%.10f, want 1.0", normHigh)
+	}
+	// Scores must not be identical (the old saturation bug: both clamped to 1.0).
+	if normHigh == normLow {
+		t.Error("normalized scores are identical — saturation not resolved")
 	}
 }

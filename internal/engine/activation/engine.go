@@ -1232,20 +1232,48 @@ func (e *ActivationEngine) phase6Score(
 		goto cgdnDone
 	}
 
-	// ACT-R path: single-pass, per-engram. No global normalization needed.
-	// Score = ContentMatch × softplus(BaseLevelActivation + scale×Hebbian + scale×Transition) × Confidence
+	// ACT-R path: two-pass with per-query normalization.
+	// Pass 1 collects raw scores; for fresh engrams softplus(B(M)) exceeds the
+	// median-activation denominator, so raw > 1.0. The old hard clamp at 1.0
+	// collapsed all saturated scores to the same value, destroying ranking in
+	// new vaults (issue #331). Pass 2 rescales by the query's max raw score
+	// when saturation occurred. For mature vaults where max raw ≤ 1.0 the
+	// scale factor is 1.0 — behaviour is identical to the old path.
 	if w.UseACTR {
+		type actrCandidate struct {
+			id         storage.ULID
+			components ScoreComponents
+			hopPath    []storage.ULID
+		}
+		actrCands := make([]actrCandidate, 0, len(all))
+		maxRaw := 0.0
 		for _, c := range all {
 			eng := engramByID[c.id]
 			if eng == nil || !passesMetaFilter(eng, req.Filters) {
 				continue
 			}
 			components := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w)
-			final := components.Raw * components.Confidence
+			if components.Raw > maxRaw {
+				maxRaw = components.Raw
+			}
+			actrCands = append(actrCands, actrCandidate{id: c.id, components: components, hopPath: c.hopPath})
+		}
+		// Rescale all raw scores by 1/maxRaw when any candidate saturated above 1.0.
+		// This preserves the [0,1] contract and relative ranking without altering the
+		// formula for mature vaults where scores already spread below 1.0.
+		scale := 1.0
+		if maxRaw > 1.0 {
+			scale = 1.0 / maxRaw
+		}
+		for _, cc := range actrCands {
+			raw := math.Min(cc.components.Raw*scale, 1.0)
+			final := raw * cc.components.Confidence
 			if final < req.Threshold {
 				continue
 			}
-			scored = append(scored, scoredItem{id: c.id, final: final, components: components, hopPath: c.hopPath})
+			cc.components.Raw = raw
+			cc.components.Final = final
+			scored = append(scored, scoredItem{id: cc.id, final: final, components: cc.components, hopPath: cc.hopPath})
 		}
 		sort.Slice(scored, func(i, j int) bool { return scored[i].final > scored[j].final })
 		goto cgdnDone
@@ -1449,11 +1477,10 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 
 	// Final raw score: ContentMatch gates contextual prior.
 	// Normalize by actrDenominator = 1 + softplus(0) ≈ 1.693 so that a median-activation
-	// memory with perfect content match produces raw ≈ 1.0. Clamp to [0, 1] for contract.
+	// memory with perfect content match produces raw ≈ 1.0. The upper bound is enforced
+	// after per-query normalization in the ACT-R scoring path (see caller) — not here —
+	// so the caller can see true relative magnitudes before rescaling.
 	raw := contentMatch * contextualPrior / actrDenominator
-	if raw > 1.0 {
-		raw = 1.0
-	}
 	if raw < 0.0 {
 		raw = 0.0
 	}
