@@ -62,8 +62,9 @@
 /* Badges */
 .badge-success  { background: rgba(34,197,94,0.15);  color: var(--success); border-radius: 9999px; padding: 0.125rem 0.625rem; font-size: 0.75rem; font-weight: 600; }
 .badge-danger   { background: rgba(239,68,68,0.15);  color: var(--danger);  border-radius: 9999px; padding: 0.125rem 0.625rem; font-size: 0.75rem; font-weight: 600; }
-.badge-warning  { display: inline-block; background: rgba(245,158,11,0.15); color: var(--warning); border-radius: 9999px; padding: 0.125rem 0.625rem; font-size: 0.75rem; font-weight: 600; white-space: nowrap; margin: 0.125rem; user-select: all; }
-.badge-info     { display: inline-block; background: rgba(59,130,246,0.15); color: var(--info);    border-radius: 9999px; padding: 0.125rem 0.625rem; font-size: 0.75rem; font-weight: 600; white-space: nowrap; margin: 0.125rem; user-select: all; }
+.badge-warning  { background: rgba(245,158,11,0.15); color: var(--warning); border-radius: 9999px; padding: 0.125rem 0.625rem; font-size: 0.75rem; font-weight: 600; }
+.badge-info     { background: rgba(59,130,246,0.15); color: var(--info);    border-radius: 9999px; padding: 0.125rem 0.625rem; font-size: 0.75rem; font-weight: 600; }
+.badge-tag      { display: inline-block; white-space: nowrap; margin: 0.125rem; user-select: all; }
 .badge-active   { background: rgba(16,185,129,0.15); color: #10b981; }
 .badge-idle     { background: rgba(234,179,8,0.15);  color: #eab308; }
 .badge-dormant  { background: rgba(100,116,139,0.15); color: #64748b; }

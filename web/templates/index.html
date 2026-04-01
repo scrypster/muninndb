@@ -667,7 +667,7 @@
               <!-- Read-only tag chips -->
               <div x-show="!editingTags" style="line-height:1.8;">
                 <template x-for="tag in (selectedMemory.tags || [])" :key="tag">
-                  <span class="badge-warning" x-text="tag"></span>
+                  <span class="badge-warning badge-tag" x-text="tag"></span>
                 </template>
                 <span x-show="!(selectedMemory.tags && selectedMemory.tags.length)" style="color:var(--text-muted);font-size:0.875rem;">none</span>
               </div>
