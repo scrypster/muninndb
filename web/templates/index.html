@@ -578,13 +578,31 @@
 
       <!-- Detail panel (slide-in) -->
       <div x-show="selectedMemory !== null"
-        style="position:fixed;right:0;top:0;height:100vh;width:400px;background:var(--bg-surface);border-left:1px solid var(--border);padding:1.5rem;overflow-y:auto;z-index:40;"
+        :style="'position:fixed;right:0;top:0;height:100vh;z-index:40;transition:width 0.2s ease;width:' + (detailExpanded ? '80%' : '400px') + ';'"
         x-transition:enter="transition ease-out duration-200"
         x-transition:enter-start="transform translate-x-full"
         x-transition:enter-end="transform translate-x-0"
         x-transition:leave="transition ease-in duration-150"
         x-transition:leave-start="transform translate-x-0"
         x-transition:leave-end="transform translate-x-full">
+        <!-- Expand/collapse toggle on left border -->
+        <!-- Expand/collapse: semicircle on left border -->
+        <button @click="detailExpanded = !detailExpanded"
+          style="position:absolute;left:0;top:50%;transform:translate(-50%,-50%);width:1.75rem;height:1.75rem;border:none;background:none;cursor:pointer;padding:0;z-index:42;"
+          :title="detailExpanded ? 'Collapse panel' : 'Expand panel'">
+          <!-- Left half with border -->
+          <div style="position:absolute;inset:0;border-radius:50%;border:1px solid var(--border);background:var(--bg-surface);clip-path:inset(-1px 50% -1px -1px);pointer-events:none;"></div>
+          <!-- Right half without border, covers panel border -->
+          <div style="position:absolute;inset:0;border-radius:50%;background:var(--bg-surface);clip-path:inset(0 0 0 50%);pointer-events:none;"></div>
+          <!-- Chevron -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+            style="position:absolute;top:50%;left:50%;color:var(--text-muted);pointer-events:none;"
+            :style="'position:absolute;top:50%;left:50%;color:var(--text-muted);pointer-events:none;transform:translate(-50%,-50%)' + (detailExpanded ? ' rotate(180deg)' : '')">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+        </button>
+        <!-- Scrollable content -->
+        <div style="height:100%;background:var(--bg-surface);border-left:1px solid var(--border);padding:1.5rem;overflow-y:auto;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
           <!-- Item 7: Prev/Next navigation -->
           <div style="display:flex;align-items:center;gap:0.375rem;flex:1;min-width:0;">
@@ -601,19 +619,18 @@
               :style="selectedMemoryIndex() >= memories.length - 1 ? 'opacity:0.3;cursor:not-allowed;' : ''"
               title="Next memory">&rsaquo;</button>
           </div>
-          <button class="btn-ghost" @click="selectedMemory=null" style="flex-shrink:0;">✕</button>
-        </div>
-        <!-- Action buttons row -->
-        <div x-show="selectedMemory && !editingMemory" style="display:flex;gap:0.5rem;margin-bottom:1rem;">
-          <button class="btn-ghost" style="font-size:0.8125rem;padding:0.25rem 0.625rem;" @click="startEditMemory()">Edit</button>
-          <button class="btn-ghost" style="font-size:0.8125rem;padding:0.25rem 0.625rem;" @click="openLinkModal(selectedMemory.id)">Link</button>
+          <button class="btn-ghost" @click="selectedMemory=null;detailExpanded=false" style="flex-shrink:0;">✕</button>
         </div>
         <template x-if="selectedMemory">
           <div>
             <div class="form-group" style="margin-bottom:1rem;">
-              <label>Content</label>
+              <div style="display:flex;align-items:center;gap:0.5rem;">
+                <label style="margin:0;">Content</label>
+                <button x-show="!editingMemory" class="btn-ghost" style="font-size:0.75rem;padding:0.1rem 0.4rem;color:var(--primary);" @click="startEditMemory()">Edit</button>
+                <button x-show="!editingMemory" class="btn-ghost" style="font-size:0.75rem;padding:0.1rem 0.4rem;color:var(--primary);" @click="openLinkModal(selectedMemory.id)">Link Memory</button>
+              </div>
               <!-- Read-only view -->
-              <p x-show="!editingMemory" style="color:var(--text-primary);line-height:1.6;white-space:pre-wrap;" x-text="selectedMemory.content"></p>
+              <p x-show="!editingMemory" style="color:var(--text-primary);font-size:0.875rem;line-height:1.6;white-space:pre-wrap;" x-text="selectedMemory.content"></p>
               <!-- Edit mode -->
               <template x-if="editingMemory">
                 <div>
@@ -643,12 +660,12 @@
               <div class="confidence-bar"><div class="confidence-fill" :style="'width:' + Math.round((selectedMemory.confidence || 0) * 100) + '%'"></div></div>
             </div>
             <div class="form-group" style="margin-bottom:1rem;">
-              <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.375rem;">
+              <div style="display:flex;align-items:center;gap:0.5rem;">
                 <label style="margin:0;">Tags</label>
-                <button x-show="!editingTags" class="btn-ghost" style="font-size:0.75rem;padding:0.1rem 0.4rem;" @click="startEditTags()">Edit</button>
+                <button x-show="!editingTags" class="btn-ghost" style="font-size:0.75rem;padding:0.1rem 0.4rem;color:var(--primary);" @click="startEditTags()">Edit</button>
               </div>
               <!-- Read-only tag chips -->
-              <div x-show="!editingTags" style="display:flex;flex-wrap:wrap;gap:0.25rem;">
+              <div x-show="!editingTags" style="line-height:1.8;">
                 <template x-for="tag in (selectedMemory.tags || [])" :key="tag">
                   <span class="badge-warning" x-text="tag"></span>
                 </template>
@@ -687,7 +704,7 @@
             </div>
             <div class="form-group">
               <label>Created</label>
-              <span style="color:var(--text-secondary);" x-text="selectedMemory.createdAt ? new Date(selectedMemory.createdAt * 1000).toLocaleString() : 'unknown'"></span>
+              <span style="color:var(--text-secondary);font-size:0.875rem;" x-text="selectedMemory.createdAt ? new Date(selectedMemory.createdAt * 1000).toLocaleString() : 'unknown'"></span>
             </div>
             <div class="form-group" style="margin-top:1rem;">
               <label>Lifecycle State</label>
@@ -705,6 +722,7 @@
             </div>
           </div>
         </template>
+        </div><!-- /scrollable content -->
       </div>
     </div>
 

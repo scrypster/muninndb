@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Memory detail panel now has an expand/collapse toggle (chevron on the left border) that widens the panel to 80% for viewing large memories.
+
+### Changed
+- Memory detail panel: moved Edit and Link Memory actions inline with the Content label as compact teal-colored text buttons, matching the existing Tags Edit button style.
+- Memory detail panel: reduced content text font size to 0.875rem for consistency with labels and other field values.
+
 - Dashboard activity panel overhaul: selectable timeframe presets (7d–180d, capped at 180 days), end-date picker, dynamic x-axis tick grouping based on chart width, and a raw data table toggle with copy-to-clipboard. Includes loading, error, and empty-state feedback.
 - `GET /api/activity-counts` endpoint returning per-day engram creation counts for a vault. Accepts `days` (1–180, default 7) and optional `until` (YYYY-MM-DD) query parameters. Malformed or out-of-range values return 400. Backed by an efficient ULID key-header scan with zero-filled contiguous day ranges.
 
@@ -18,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public vault unauthenticated access now runs in `full` mode. Previously, requests to an open vault with no API key ran as `observe`, silently preventing cognitive-state writes. Public vaults are now genuinely open — callers get `full` access unless they present an explicit `observe` key.
 
 ### Fixed
+- Memory detail panel tag badges no longer break mid-word at hyphens (`white-space: nowrap`) and wrap correctly as whole units using inline-block layout.
+- Memory detail panel tag badges now select individually on double-click instead of selecting across multiple badges (`user-select: all`).
+- Memory detail panel Created timestamp font size now matches its label.
 - Sidebar nav items are now scrollable when viewport height is too small, keeping the logo and footer pinned.
 - Collapsed sidebar footer icons no longer overflow into the right border; icons render borderless when collapsed and bordered when expanded.
 - "New Vault" action moved from sidebar footer into the vault picker modal to reclaim vertical space for nav items.
