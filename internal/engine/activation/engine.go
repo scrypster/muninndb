@@ -1432,7 +1432,9 @@ func softplus(x float64) float64 {
 
 // computeACTR computes the ACT-R scoring components for a candidate engram.
 // Formula (Anderson 1993):
-//   B(M) = ln(n+1) - d × ln(max(ageDays,ageFloor) / (n+1))   [base-level activation]
+//   B(M) = min(ln(n+1) - d × ln(max(ageDays,bmFloor) / (n+1)), bLevelCap)  [base-level activation]
+//   where bmFloor  = 1 day  (smooth ramp: prevents divergence as ageDays→0)
+//         bLevelCap = ln(exp(actrDenominator)-1) ≈ 1.489  (saturation threshold)
 //   Score = ContentMatch × softplus(B(M) + scale×Hebbian) × Confidence
 //
 // ContentMatch gates the score: zero semantic relevance = zero score regardless of recency.
@@ -1460,11 +1462,22 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	if lastAccess.IsZero() || lastAccess.Year() < 2000 {
 		lastAccess = now
 	}
-	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute — sub-hour precision for intraday recall
+	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute — kept for Recency/DecayFactor reporting
+	const bmAgeOffset  = 1.0                  // 1-day additive ramp — prevents B(M) diverging as ageDays→0
 	ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, ageFloorDays)
 	n := float64(eng.AccessCount + 1) // +1 avoids ln(0) for never-accessed engrams
 	d := w.ACTRDecay                  // power-law forgetting exponent (default 0.5)
-	baseLevel := math.Log(n) - d*math.Log(math.Max(ageDays, ageFloorDays)/n)
+	// ageForBM uses the additive offset so B(M) stays bounded for sub-day engrams
+	// while converging to ageDays for mature engrams (ageDays >> bmAgeOffset).
+	ageForBM := ageDays + bmAgeOffset
+	baseLevel := math.Log(n) - d*math.Log(ageForBM/n)
+	// Cap baseLevel at the unique value where softplus(baseLevel) = actrDenominator.
+	// Above this threshold, base-level alone pushes raw above contentMatch — breaking
+	// the semantic gating contract. Hebbian boosts may still legitimately exceed it.
+	bLevelCap := math.Log(math.Exp(actrDenominator) - 1) // ≈ 1.489
+	if baseLevel > bLevelCap {
+		baseLevel = bLevelCap
+	}
 
 	// Total activation = base-level + scaled Hebbian boost + scaled transition boost.
 	// ACTRHebScale (default 4.0) amplifies both Hebbian and transition signals so
