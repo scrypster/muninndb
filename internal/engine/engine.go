@@ -2094,6 +2094,9 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 		if meta.State == storage.StateSoftDeleted {
 			return nil, ErrEngramSoftDeleted
 		}
+		if meta.State == storage.StateArchived {
+			return nil, ErrEngramArchived
+		}
 	}
 
 	assoc := &storage.Association{
@@ -2372,8 +2375,8 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 		}
 		return nil, fmt.Errorf("restore: %w", err)
 	}
-	if eng.State != storage.StateSoftDeleted {
-		return nil, fmt.Errorf("restore: engram %s is not soft-deleted (state=%d)", id, eng.State)
+	if eng.State != storage.StateSoftDeleted && eng.State != storage.StateArchived {
+		return nil, fmt.Errorf("restore: engram %s is not soft-deleted or archived (state=%d)", id, eng.State)
 	}
 	meta := &storage.EngramMeta{
 		State:       storage.StateActive,

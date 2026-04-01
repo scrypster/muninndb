@@ -26,7 +26,7 @@ func (e *Engine) WhereLeftOff(ctx context.Context, vault string, limit int) ([]*
 		if err != nil || eng == nil {
 			return nil
 		}
-		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateCompleted {
+		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateCompleted || eng.State == storage.StateArchived {
 			return nil
 		}
 		results = append(results, eng)

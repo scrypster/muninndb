@@ -470,7 +470,7 @@ func (e *Engine) recallTreeNode(
 			// Filter out: missing metadata (hard-deleted ghost), completed, or
 			// soft-deleted children. StateSoftDeleted != StateCompleted so both
 			// states must be checked explicitly.
-			if !ok || meta == nil || meta.State == storage.StateCompleted || meta.State == storage.StateSoftDeleted {
+			if !ok || meta == nil || meta.State == storage.StateCompleted || meta.State == storage.StateSoftDeleted || meta.State == storage.StateArchived {
 				continue
 			}
 		}

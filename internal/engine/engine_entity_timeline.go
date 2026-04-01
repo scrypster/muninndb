@@ -69,8 +69,8 @@ func (e *Engine) GetEntityTimeline(ctx context.Context, vault string, entityName
 			return nil // skip missing/deleted
 		}
 
-		// Skip soft-deleted engrams.
-		if eng.State == storage.StateSoftDeleted {
+		// Skip soft-deleted and archived engrams.
+		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
 			return nil
 		}
 

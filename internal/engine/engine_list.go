@@ -62,6 +62,12 @@ func (e *Engine) ListEngrams(ctx context.Context, params ListEngramsParams) (*Li
 				return nil
 			}
 		}
+		// Always exclude archived unless explicitly requested.
+		if eng.State == storage.StateArchived {
+			if stateFilter == nil || *stateFilter != storage.StateArchived {
+				return nil
+			}
+		}
 
 		// State filter.
 		if stateFilter != nil && eng.State != *stateFilter {

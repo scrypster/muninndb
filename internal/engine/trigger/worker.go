@@ -355,7 +355,7 @@ func (w *TriggerWorker) sweepVault(ctx context.Context, vaultID uint32, ws [8]by
 		for _, sub := range group.subs {
 			for _, c := range candidates {
 				meta := metaByID[c.ID]
-				if meta == nil || meta.State == storage.StateSoftDeleted {
+				if meta == nil || meta.State == storage.StateSoftDeleted || meta.State == storage.StateArchived {
 					continue
 				}
 
@@ -378,7 +378,7 @@ func (w *TriggerWorker) sweepVault(ctx context.Context, vaultID uint32, ws [8]by
 				}
 
 				eng := engramByID[c.ID]
-				if eng == nil || eng.State == storage.StateSoftDeleted {
+				if eng == nil || eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
 					continue
 				}
 

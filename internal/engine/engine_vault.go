@@ -20,6 +20,10 @@ var ErrEngramNotFound = errors.New("engram not found")
 // been soft-deleted. Use errors.Is to check for this error in callers.
 var ErrEngramSoftDeleted = errors.New("engram is soft-deleted")
 
+// ErrEngramArchived is returned when an operation targets an engram that has
+// been archived. Use errors.Is to check for this error in callers.
+var ErrEngramArchived = errors.New("engram is archived")
+
 // ErrVaultNameCollision is returned when a rename or clone targets a vault name
 // that already exists. Use errors.Is to check for this error in callers.
 var ErrVaultNameCollision = errors.New("vault name already exists")

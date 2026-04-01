@@ -60,7 +60,7 @@ func (e *Engine) GetEntityAggregate(ctx context.Context, vault, entityName strin
 		if err != nil || eng == nil {
 			return nil // skip missing/deleted
 		}
-		if eng.State == storage.StateSoftDeleted {
+		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
 			return nil
 		}
 		engrams = append(engrams, eng)
