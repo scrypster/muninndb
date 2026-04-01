@@ -1162,7 +1162,7 @@ func (e *ActivationEngine) phase6Score(
 	// Filter out soft-deleted engrams (defense-in-depth; HNSW has no delete method).
 	var active []*storage.Engram
 	for _, eng := range allEngrams {
-		if eng != nil && eng.State != storage.StateSoftDeleted {
+		if eng != nil && eng.State != storage.StateSoftDeleted && eng.State != storage.StateArchived {
 			active = append(active, eng)
 		}
 	}

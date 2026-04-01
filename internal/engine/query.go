@@ -146,7 +146,7 @@ func (e *Engine) Traverse(ctx context.Context, vault, startID string, maxHops, m
 			}
 			eng := engrams[i]
 			if eng != nil {
-				if eng.State != storage.StateSoftDeleted {
+				if eng.State != storage.StateSoftDeleted && eng.State != storage.StateArchived {
 					nodes = append(nodes, TraversalNode{
 						ID:      eng.ID,
 						Concept: eng.Concept,

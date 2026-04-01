@@ -240,7 +240,7 @@ func (w *TriggerWorker) handleContradiction(ctx context.Context, event Contradic
 
 		for _, id := range []storage.ULID{event.EngramA, event.EngramB} {
 			eng := byID[id]
-			if eng == nil || eng.State == storage.StateSoftDeleted {
+			if eng == nil || eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
 				continue
 			}
 			w.deliver.Send(sub, &ActivationPush{

@@ -1433,3 +1433,115 @@ func TestRRF_CGDNConflict_RRFTakesPrecedence(t *testing.T) {
 		t.Errorf("score must be positive, got %v", score)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Archived engram filtering — regression tests for the StateArchived leak
+// ---------------------------------------------------------------------------
+
+// TestArchivedEngram_ExcludedFromRecall verifies that engrams with
+// StateArchived are not returned by activation/recall. The dream engine
+// archives consolidated engrams; they must not surface in normal recall
+// even though they are still present in the HNSW index.
+func TestArchivedEngram_ExcludedFromRecall(t *testing.T) {
+	store := newStubStore()
+
+	active := &storage.Engram{
+		Concept:    "active engram",
+		Content:    "this is active",
+		Confidence: 1.0,
+		Stability:  30.0,
+		State:      storage.StateActive,
+	}
+	archived := &storage.Engram{
+		Concept:    "archived engram",
+		Content:    "this was archived by dream engine",
+		Confidence: 1.0,
+		Stability:  30.0,
+		State:      storage.StateArchived,
+	}
+	store.writeEngram(active)
+	store.writeEngram(archived)
+
+	// Both appear as HNSW candidates (HNSW has no delete — defense-in-depth filter needed).
+	fts := &stubFTS{results: []activation.ScoredID{
+		{ID: active.ID, Score: 0.9},
+		{ID: archived.ID, Score: 0.9},
+	}}
+	hnsw := &stubHNSW{results: []activation.ScoredID{
+		{ID: active.ID, Score: 0.9},
+		{ID: archived.ID, Score: 0.9},
+	}}
+
+	eng := newTestEngine(store, fts, hnsw)
+	result, err := eng.Run(context.Background(), &activation.ActivateRequest{
+		Context:    []string{"engram"},
+		Threshold:  0.0,
+		MaxResults: 10,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, a := range result.Activations {
+		if a.Engram != nil && a.Engram.ID == archived.ID {
+			t.Errorf("archived engram appeared in recall results — StateArchived must be filtered")
+		}
+	}
+	var found bool
+	for _, a := range result.Activations {
+		if a.Engram != nil && a.Engram.ID == active.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("active engram missing from recall results")
+	}
+}
+
+// TestSoftDeletedEngram_ExcludedFromRecall verifies the existing soft-delete
+// filter still works after the archived-filter change (regression guard).
+func TestSoftDeletedEngram_ExcludedFromRecall(t *testing.T) {
+	store := newStubStore()
+
+	active := &storage.Engram{
+		Concept:    "active",
+		Content:    "active content",
+		Confidence: 1.0,
+		Stability:  30.0,
+		State:      storage.StateActive,
+	}
+	deleted := &storage.Engram{
+		Concept:    "deleted",
+		Content:    "soft deleted content",
+		Confidence: 1.0,
+		Stability:  30.0,
+		State:      storage.StateSoftDeleted,
+	}
+	store.writeEngram(active)
+	store.writeEngram(deleted)
+
+	fts := &stubFTS{results: []activation.ScoredID{
+		{ID: active.ID, Score: 0.9},
+		{ID: deleted.ID, Score: 0.9},
+	}}
+	hnsw := &stubHNSW{results: []activation.ScoredID{
+		{ID: active.ID, Score: 0.9},
+		{ID: deleted.ID, Score: 0.9},
+	}}
+
+	eng := newTestEngine(store, fts, hnsw)
+	result, err := eng.Run(context.Background(), &activation.ActivateRequest{
+		Context:    []string{"content"},
+		Threshold:  0.0,
+		MaxResults: 10,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, a := range result.Activations {
+		if a.Engram != nil && a.Engram.ID == deleted.ID {
+			t.Errorf("soft-deleted engram appeared in recall results")
+		}
+	}
+}

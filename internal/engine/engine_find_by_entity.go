@@ -33,7 +33,7 @@ func (e *Engine) FindByEntity(ctx context.Context, vault, entityName string, lim
 		if err != nil || eng == nil {
 			return nil // skip missing/deleted
 		}
-		if eng.State == storage.StateSoftDeleted {
+		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
 			return nil
 		}
 		results = append(results, eng)
