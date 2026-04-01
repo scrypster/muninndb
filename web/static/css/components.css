@@ -106,6 +106,22 @@
 }
 .input-field:focus { border-color: var(--primary); }
 
+/* Native select & option dark-mode readability */
+select {
+  color-scheme: dark;
+}
+select option {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+html.light select {
+  color-scheme: light;
+}
+html.light select option {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
 .form-group { display: flex; flex-direction: column; gap: 0.375rem; }
 .form-group label { font-size: 0.875rem; font-weight: 500; color: var(--text-secondary); }
 
