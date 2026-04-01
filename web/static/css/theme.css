@@ -3,6 +3,7 @@
   --bg-base:    #0a0a0a;
   --bg-surface: #1a1a2e;
   --bg-elevated:#16213e;
+  --bg-card:    #1e2a45;
   --border:     #2a2a4a;
   --text-primary:   #e2e8f0;
   --text-secondary: #94a3b8;
@@ -22,6 +23,7 @@ html.light {
   --bg-base:    #fafafa;
   --bg-surface: #ffffff;
   --bg-elevated:#f1f5f9;
+  --bg-card:    #f8fafc;
   --border:     #e2e8f0;
   --text-primary:   #0f172a;
   --text-secondary: #475569;
