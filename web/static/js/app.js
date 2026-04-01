@@ -1985,7 +1985,7 @@ document.addEventListener('alpine:init', () => {
                 datasets: [{
                     data: this._plasticityData[p],
                     borderColor: c.border,
-                    backgroundColor: c.bg,
+                    backgroundColor: this.isDarkMode ? c.bg.replace('0.35)', '0.5)') : c.bg,
                     borderWidth: 2.5,
                     pointRadius: 5,
                     pointBackgroundColor: c.border,
@@ -1998,8 +1998,8 @@ document.addEventListener('alpine:init', () => {
                 scales: { r: {
                     min: 0, max: 1,
                     ticks: { display: false },
-                    grid: { color: this.isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' },
-                    angleLines: { color: this.isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' },
+                    grid: { color: this.isDarkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.08)' },
+                    angleLines: { color: this.isDarkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.08)' },
                     pointLabels: { color: this.isDarkMode ? '#9ca3af' : '#6b7280', font: { size: 11 } },
                 }},
                 plugins: { legend: { display: false } },
@@ -2035,7 +2035,7 @@ document.addEventListener('alpine:init', () => {
             const c = this._plasticityColors[p];
             ds.data             = this._plasticityData[p];
             ds.borderColor      = c.border;
-            ds.backgroundColor  = c.bg;
+            ds.backgroundColor  = this.isDarkMode ? c.bg.replace('0.35)', '0.5)') : c.bg;
             ds.pointBackgroundColor = c.border;
         }
         chart.update();

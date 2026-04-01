@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settings page Plasticity preset and recall mode cards now have proper padding, with border-width compensation preventing layout jitter on selection.
 - Settings page Plasticity preset pill labels are now readable in light mode (switched from pastel to saturated text colors) while preserving dark-mode colors.
 - Settings page Preset Comparison radar chart no longer clips the "Associative Learning" axis label.
+- Settings page Preset Comparison radar chart web and grid lines are now visible in dark mode (increased fill opacity and grid line contrast).
 - Sidebar nav items are now scrollable when viewport height is too small, keeping the logo and footer pinned.
 - Collapsed sidebar footer icons no longer overflow into the right border; icons render borderless when collapsed and bordered when expanded.
 - "New Vault" action moved from sidebar footer into the vault picker modal to reclaim vertical space for nav items.
