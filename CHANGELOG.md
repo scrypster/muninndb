@@ -18,7 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public vault unauthenticated access now runs in `full` mode. Previously, requests to an open vault with no API key ran as `observe`, silently preventing cognitive-state writes. Public vaults are now genuinely open — callers get `full` access unless they present an explicit `observe` key.
 
 ### Fixed
-- Vault Actions "Export Vault" and "Reindex FTS" buttons now render with their intended colored borders instead of appearing unstyled (Alpine `:style` was overwriting static `style` attributes).
 - Sidebar nav items are now scrollable when viewport height is too small, keeping the logo and footer pinned.
 - Collapsed sidebar footer icons no longer overflow into the right border; icons render borderless when collapsed and bordered when expanded.
 - "New Vault" action moved from sidebar footer into the vault picker modal to reclaim vertical space for nav items.
