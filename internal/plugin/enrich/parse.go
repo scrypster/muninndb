@@ -9,6 +9,25 @@ import (
 	"github.com/scrypster/muninndb/internal/plugin"
 )
 
+// knownEntityTypes mirrors the entity types recognised by the UI colour map
+// in web/static/js/app.js:getEntityTypeColor. Extend both together.
+var knownEntityTypes = map[string]bool{
+	"person":       true,
+	"organization": true,
+	"project":      true,
+	"tool":         true,
+	"framework":    true,
+	"language":     true,
+	"database":     true,
+	"service":      true,
+	"technology":   true,
+	"location":     true,
+	"concept":      true,
+	"product":      true,
+	"event":        true,
+	"other":        true,
+}
+
 // extractJSON finds and returns the first valid JSON structure in a string.
 // Handles markdown code fences and trailing text.
 func extractJSON(s string) string {
@@ -277,26 +296,7 @@ func validateAndDedupeEntities(entities []plugin.ExtractedEntity) []plugin.Extra
 func normalizeEntityType(t string) string {
 	t = strings.ToLower(strings.TrimSpace(t))
 
-	// Allowlist mirrors the entity types recognised by the UI colour map
-	// in web/static/js/app.js:getEntityTypeColor. Extend both together.
-	validTypes := map[string]bool{
-		"person":       true,
-		"organization": true,
-		"project":      true,
-		"tool":         true,
-		"framework":    true,
-		"language":     true,
-		"database":     true,
-		"service":      true,
-		"technology":   true,
-		"location":     true,
-		"concept":      true,
-		"product":      true,
-		"event":        true,
-		"other":        true,
-	}
-
-	if validTypes[t] || t == "" {
+	if knownEntityTypes[t] || t == "" {
 		return t
 	}
 
