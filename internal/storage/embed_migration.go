@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/cockroachdb/pebble"
@@ -76,7 +77,10 @@ func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) 
 		copy(id[:], k[9:25])
 
 		raw, err := ps.getDigestFlagsRaw(id)
-		noRecord := err != nil
+		noRecord := errors.Is(err, pebble.ErrNotFound)
+		if err != nil && !noRecord {
+			return cleared, fmt.Errorf("clear embed flags: get digest: %w", err)
+		}
 		if noRecord {
 			raw = 0
 		}
