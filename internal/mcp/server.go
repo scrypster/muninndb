@@ -348,11 +348,16 @@ func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("mcp: SSE stream open", "session", sessionID[:8])
 	ctx := r.Context()
+	keepalive := time.NewTicker(30 * time.Second)
+	defer keepalive.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Info("mcp: SSE stream closed", "session", sessionID[:8])
 			return
+		case <-keepalive.C:
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
 		case data, ok := <-ch:
 			if !ok {
 				slog.Info("mcp: SSE channel closed", "session", sessionID[:8])
