@@ -18,9 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public vault unauthenticated access now runs in `full` mode. Previously, requests to an open vault with no API key ran as `observe`, silently preventing cognitive-state writes. Public vaults are now genuinely open — callers get `full` access unless they present an explicit `observe` key.
 
 ### Fixed
-- Plugins page LLM Enrichment and Semantic Embedding provider selectors now use the `tab-bar` component for consistent bordered-tab styling with bottom border.
-- Plugins page Semantic Embedding provider selector now includes a "None" tab (matching LLM Enrichment) so the default state shows an active selection instead of no tab highlighted.
-- Plugins page LLM Enrichment "Verbose LLM logs" section no longer renders a duplicate border below the provider tabs.
 - Sidebar nav items are now scrollable when viewport height is too small, keeping the logo and footer pinned.
 - Collapsed sidebar footer icons no longer overflow into the right border; icons render borderless when collapsed and bordered when expanded.
 - "New Vault" action moved from sidebar footer into the vault picker modal to reclaim vertical space for nav items.
