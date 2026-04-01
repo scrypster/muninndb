@@ -146,18 +146,46 @@ func TestParseRelationships_ValidJSON(t *testing.T) {
 // TestNormalizeEntityType tests entity type normalization and validation.
 func TestNormalizeEntityType_Valid(t *testing.T) {
 	tests := map[string]string{
+		// Known types — returned as-is after normalisation.
 		"person":       "person",
 		"PERSON":       "person",
 		"database":     "database",
 		"tool":         "tool",
-		"unknown":      "service", // should normalize to service
 		"ORGANIZATION": "organization",
+		// UI-colour-map types that were previously missing from the allowlist
+		// and were silently coerced to "service".
+		"technology": "technology",
+		"location":   "location",
+		"concept":    "concept",
+		"product":    "product",
+		"event":      "event",
+		// Unknown types are passed through (not coerced to "service").
+		"unknown":  "unknown",
+		"library":  "library",
+		"LIBRARY":  "library", // still normalised to lowercase
 	}
 
 	for input, expected := range tests {
 		result := normalizeEntityType(input)
 		if result != expected {
-			t.Fatalf("normalizeEntityType(%q): expected %q, got %q", input, expected, result)
+			t.Errorf("normalizeEntityType(%q): got %q, want %q", input, result, expected)
+		}
+	}
+}
+
+// TestNormalizeEntityType_UnknownPassThrough verifies that unknown entity types
+// are returned as their normalised string rather than silently coerced to
+// "service". This prevents data corruption when an LLM returns a valid semantic
+// type (e.g. "library", "concept", "event") that is not yet in the allowlist.
+func TestNormalizeEntityType_UnknownPassThrough(t *testing.T) {
+	unknownTypes := []string{"library", "algorithm", "protocol", "api", "config", "file"}
+	for _, typ := range unknownTypes {
+		result := normalizeEntityType(typ)
+		if result == "service" {
+			t.Errorf("normalizeEntityType(%q) = %q, must not coerce unknown types to \"service\"", typ, result)
+		}
+		if result != typ {
+			t.Errorf("normalizeEntityType(%q) = %q, want pass-through %q", typ, result, typ)
 		}
 	}
 }
