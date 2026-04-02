@@ -110,6 +110,9 @@ html.light .seg-btn:hover:not(.seg-active) {
   color: var(--text-primary);
   padding: 0.5rem 0.75rem;
   width: 100%;
+  height: 2.375rem;
+  font-size: 0.875rem;
+  font-family: inherit;
   outline: none;
   transition: border-color 0.15s;
 }
