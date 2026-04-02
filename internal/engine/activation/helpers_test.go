@@ -1451,6 +1451,7 @@ func TestPhase6Score_DormantFlag(t *testing.T) {
 	fused := []fusedCandidate{{id: eng1.ID, rrfScore: 0.5, ftsScore: 1.0}}
 	p1 := &phase1Result{queryStr: "test"}
 
+	// Default mode is ACT-R — Dormant should be false (dormancy is implicit).
 	result, err := e.phase6Score(context.Background(), &ActivateRequest{
 		MaxResults: 10, Threshold: 0.0,
 	}, [8]byte{}, fused, nil, p1)
@@ -1459,8 +1460,27 @@ func TestPhase6Score_DormantFlag(t *testing.T) {
 		t.Fatalf("phase6Score: %v", err)
 	}
 	for _, a := range result.Activations {
+		if a.Engram.ID == eng1.ID && a.Dormant {
+			t.Error("ACT-R mode: engram should not be marked Dormant (dormancy is implicit via scoring)")
+		}
+	}
+
+	// Legacy mode (DisableACTR) — Dormant should reflect Relevance.
+	result2, err := e.phase6Score(context.Background(), &ActivateRequest{
+		MaxResults: 10, Threshold: 0.0,
+		Weights: &Weights{
+			DisableACTR:        true,
+			SemanticSimilarity: 0.35,
+			FullTextRelevance:  0.25,
+			DecayFactor:        0.20,
+		},
+	}, [8]byte{}, fused, nil, p1)
+	if err != nil {
+		t.Fatalf("phase6Score legacy: %v", err)
+	}
+	for _, a := range result2.Activations {
 		if a.Engram.ID == eng1.ID && !a.Dormant {
-			t.Error("engram with low Relevance should have Dormant=true")
+			t.Error("legacy mode: engram with Relevance=0.01 should have Dormant=true")
 		}
 	}
 }

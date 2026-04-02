@@ -1344,7 +1344,7 @@ cgdnDone:
 			Why:         why,
 			HopPath:     append([]storage.ULID(nil), s.hopPath...),
 			HopConcepts: hopConcepts,
-			Dormant:     eng.Relevance <= minFloor*1.1,
+			Dormant:     !w.UseACTR && eng.Relevance <= minFloor*1.1,
 		})
 	}
 

@@ -323,27 +323,27 @@ func TestActivationLogRingBuffer(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Engram with very low relevance (0.01) comes back Dormant == true
+// Test 4: Dormant flag respects scoring mode
 // ---------------------------------------------------------------------------
 
-func TestDormantFlagSetWhenRelevanceLow(t *testing.T) {
+func TestDormantFlag_ACTRMode_AlwaysFalse(t *testing.T) {
 	store := newStubStore()
-	dormant := &storage.Engram{
+	eng := &storage.Engram{
 		Concept:    "dormant engram",
 		Content:    "barely alive",
 		Confidence: 1.0,
 		Stability:  30.0,
-		// Relevance 0.01 is well below minFloor*1.1 = 0.05*1.1 = 0.055
-		Relevance: 0.01,
+		Relevance:  0.01, // well below minFloor*1.1 = 0.055
 	}
-	store.writeEngram(dormant)
+	store.writeEngram(eng)
 
-	fts := &stubFTS{results: []activation.ScoredID{{ID: dormant.ID, Score: 0.8}}}
-	hnsw := &stubHNSW{results: []activation.ScoredID{{ID: dormant.ID, Score: 0.8}}}
+	fts := &stubFTS{results: []activation.ScoredID{{ID: eng.ID, Score: 0.8}}}
+	hnsw := &stubHNSW{results: []activation.ScoredID{{ID: eng.ID, Score: 0.8}}}
 
-	eng := newTestEngine(store, fts, hnsw)
+	e := newTestEngine(store, fts, hnsw)
 
-	result, err := eng.Run(context.Background(), &activation.ActivateRequest{
+	// Default mode is ACT-R — Dormant should be false regardless of Relevance.
+	result, err := e.Run(context.Background(), &activation.ActivateRequest{
 		Context:    []string{"barely alive"},
 		Threshold:  0.0,
 		MaxResults: 5,
@@ -351,21 +351,58 @@ func TestDormantFlagSetWhenRelevanceLow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(result.Activations) == 0 {
-		t.Fatal("expected dormant engram to appear in results")
+	for _, a := range result.Activations {
+		if a.Engram.ID == eng.ID && a.Dormant {
+			t.Error("ACT-R mode: Dormant should be false (dormancy is implicit via scoring)")
+		}
 	}
+}
 
+func TestDormantFlag_LegacyMode_SetWhenRelevanceLow(t *testing.T) {
+	store := newStubStore()
+	eng := &storage.Engram{
+		Concept:    "dormant engram",
+		Content:    "barely alive",
+		Confidence: 1.0,
+		Stability:  30.0,
+		Relevance:  0.01,
+	}
+	store.writeEngram(eng)
+
+	fts := &stubFTS{results: []activation.ScoredID{{ID: eng.ID, Score: 0.8}}}
+	hnsw := &stubHNSW{results: []activation.ScoredID{{ID: eng.ID, Score: 0.8}}}
+
+	e := newTestEngine(store, fts, hnsw)
+
+	// Legacy weighted-sum mode (DisableACTR) — Dormant should reflect Relevance.
+	result, err := e.Run(context.Background(), &activation.ActivateRequest{
+		Context:    []string{"barely alive"},
+		Threshold:  0.0,
+		MaxResults: 5,
+		Weights: &activation.Weights{
+			DisableACTR:        true,
+			SemanticSimilarity: 0.35,
+			FullTextRelevance:  0.25,
+			DecayFactor:        0.20,
+			HebbianBoost:       0.10,
+			AccessFrequency:    0.05,
+			Recency:            0.05,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	found := false
 	for _, a := range result.Activations {
-		if a.Engram.ID == dormant.ID {
+		if a.Engram.ID == eng.ID {
 			found = true
 			if !a.Dormant {
-				t.Errorf("engram with Relevance=0.01: Dormant=false, want true")
+				t.Error("legacy mode: engram with Relevance=0.01 should be Dormant=true")
 			}
 		}
 	}
 	if !found {
-		t.Fatal("dormant engram not found in activations")
+		t.Fatal("engram not found in results")
 	}
 }
 
