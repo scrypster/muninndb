@@ -167,7 +167,7 @@
   </button>
 
   <!-- Main content area -->
-  <main class="app-main">
+  <main class="app-main" :style="currentView === 'logs' ? 'max-width:none;' : ''">
 
     <!-- ── Dashboard View ───────────────────────────────────────────── -->
     <div x-show="currentView==='dashboard'">
