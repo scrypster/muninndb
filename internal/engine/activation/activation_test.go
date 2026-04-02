@@ -1292,3 +1292,107 @@ func TestUseRRFFusion_ProducesDifferentScoresFromACTR(t *testing.T) {
 	}
 	t.Logf("ACT-R score=%v, RRF score=%v (different as expected)", actrScore, rrfScore)
 }
+
+// ---------------------------------------------------------------------------
+// Test: RRF results are returned even with the default threshold (0.05).
+// This is a regression test for the ship-blocker where RRF scores (~0.04 max
+// for 2 signals) were all below the default 0.05 threshold, causing zero results.
+// The fix auto-lowers the threshold to 0.001 when UseRRFFusion is detected.
+// ---------------------------------------------------------------------------
+
+func TestRRF_ReturnsResultsWithDefaultThreshold(t *testing.T) {
+	store := newStubStore()
+
+	eng1 := &storage.Engram{
+		Concept:    "rrf threshold regression",
+		Content:    "engram that must survive default threshold with RRF scoring",
+		Confidence: 1.0,
+		Stability:  30.0,
+		Relevance:  0.8,
+	}
+	store.writeEngram(eng1)
+
+	ftsResults := []activation.ScoredID{{ID: eng1.ID, Score: 0.8}}
+	fts := &stubFTS{results: ftsResults}
+	hnsw := &stubHNSW{results: []activation.ScoredID{{ID: eng1.ID, Score: 0.7}}}
+
+	eng := newTestEngine(store, fts, hnsw)
+
+	// Threshold=0 triggers the default path (0.05) which used to filter all
+	// RRF results. After the fix, Run() detects UseRRFFusion and lowers the
+	// threshold to 0.001 automatically.
+	result, err := eng.Run(context.Background(), &activation.ActivateRequest{
+		Context:    []string{"rrf threshold"},
+		Threshold:  0, // triggers default 0.05
+		MaxResults: 10,
+		Weights: &activation.Weights{
+			UseRRFFusion: true,
+			DisableACTR:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.Activations) == 0 {
+		t.Fatal("RRF with default threshold returned 0 results -- threshold auto-lowering is broken")
+	}
+	t.Logf("RRF returned %d results with auto-lowered threshold (score=%v)",
+		len(result.Activations), result.Activations[0].Score)
+}
+
+// ---------------------------------------------------------------------------
+// Test: When both UseRRFFusion and UseCGDN are enabled, RRF takes precedence
+// and CGDN is silently disabled. The guard in phase6Score logs a warning and
+// clears UseCGDN so the RRF path executes.
+// ---------------------------------------------------------------------------
+
+func TestRRF_CGDNConflict_RRFTakesPrecedence(t *testing.T) {
+	store := newStubStore()
+
+	eng1 := &storage.Engram{
+		Concept:    "conflict test",
+		Content:    "engram for RRF vs CGDN conflict test",
+		Confidence: 1.0,
+		Stability:  30.0,
+		Relevance:  0.8,
+	}
+	store.writeEngram(eng1)
+
+	ftsResults := []activation.ScoredID{{ID: eng1.ID, Score: 0.7}}
+	fts := &stubFTS{results: ftsResults}
+
+	eng := newTestEngine(store, fts, nil)
+
+	// Both RRF and CGDN enabled -- RRF should win.
+	result, err := eng.Run(context.Background(), &activation.ActivateRequest{
+		Context:    []string{"conflict test"},
+		Threshold:  0.0,
+		MaxResults: 10,
+		Weights: &activation.Weights{
+			UseRRFFusion:       true,
+			UseCGDN:            true,
+			SemanticSimilarity: 0.5,
+			FullTextRelevance:  0.5,
+			DisableACTR:        true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run with RRF+CGDN: %v", err)
+	}
+
+	// Should return results (RRF path executed, not CGDN).
+	if len(result.Activations) == 0 {
+		t.Fatal("RRF+CGDN conflict: expected results from RRF path")
+	}
+
+	// Verify the scores are RRF-scale (small, rank-based) not CGDN-scale.
+	// RRF scores for a single signal are in [0, ~0.016]; with confidence and
+	// boost multiplier, still well under 0.1.
+	score := result.Activations[0].Score
+	if score > 0.5 {
+		t.Errorf("score %v looks like CGDN (expected small RRF-scale score)", score)
+	}
+	if score <= 0 {
+		t.Errorf("score must be positive, got %v", score)
+	}
+}

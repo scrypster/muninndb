@@ -333,4 +333,21 @@ func TestResolveWeights_UseRRFFusion(t *testing.T) {
 			t.Error("default config should not use RRF fusion")
 		}
 	})
+
+	t.Run("rrf_and_cgdn_both_set", func(t *testing.T) {
+		w := resolveWeights(&Weights{
+			UseRRFFusion: true,
+			UseCGDN:      true,
+			DisableACTR:  true,
+		}, DefaultWeights{})
+		// resolveWeights propagates both flags; the guard in phase6Score
+		// clears UseCGDN at runtime. Verify both are set here (the guard
+		// is tested in the integration test TestRRF_CGDNConflict_RRFTakesPrecedence).
+		if !w.UseRRFFusion {
+			t.Error("expected UseRRFFusion=true")
+		}
+		if !w.UseCGDN {
+			t.Error("expected UseCGDN=true from resolveWeights (guard is in phase6Score)")
+		}
+	})
 }

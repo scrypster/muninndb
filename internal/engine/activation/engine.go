@@ -373,6 +373,14 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 		req.Threshold = 0.05
 	}
 
+	// After threshold default is set, adjust for RRF mode.
+	// RRF scores are typically in [0, 0.05] range -- much lower than ACT-R.
+	// Apply an RRF-appropriate threshold to avoid filtering all results.
+	w := resolveWeights(req.Weights, e.weights)
+	if w.UseRRFFusion && req.Threshold >= 0.01 {
+		req.Threshold = 0.001
+	}
+
 	// Phase 1: embed + tokenize
 	p1, err := e.phase1(ctx, req)
 	if err != nil {
@@ -1070,6 +1078,14 @@ func (e *ActivationEngine) phase6Score(
 ) (*ActivateResult, error) {
 
 	w := resolveWeights(req.Weights, e.weights)
+
+	// Guard: RRF and CGDN are mutually exclusive scoring paths.
+	// If both are enabled, RRF takes precedence (checked first below).
+	// Log the conflict so operators can fix their plasticity config.
+	if w.UseRRFFusion && w.UseCGDN {
+		slog.Warn("scoring: both RRF and CGDN enabled -- RRF takes precedence, CGDN ignored")
+		w.UseCGDN = false
+	}
 
 	type scoringCandidate struct {
 		id              storage.ULID
