@@ -2275,33 +2275,30 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
           </div>
 
           <!-- Form -->
-          <div x-show="!clusterEnableLoading" style="display:flex;flex-direction:column;gap:1rem;">
-            <div>
-              <label style="display:block;font-size:0.75rem;font-weight:500;margin-bottom:0.375rem;color:var(--text-muted);">Role</label>
-              <select x-model="clusterEnableForm.role" style="width:100%;font-size:0.875rem;border-radius:0.375rem;padding:0.5rem 0.75rem;background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-primary);">
+          <div x-show="!clusterEnableLoading">
+            <div class="form-group" style="margin-bottom:1rem;">
+              <label>Role</label>
+              <select x-model="clusterEnableForm.role" class="input-field">
                 <option value="primary">Primary (Cortex)</option>
                 <option value="replica">Replica (Lobe)</option>
                 <option value="sentinel">Sentinel</option>
                 <option value="observer">Observer</option>
               </select>
             </div>
-            <div>
-              <label style="display:block;font-size:0.75rem;font-weight:500;margin-bottom:0.375rem;color:var(--text-muted);">Bind Address</label>
-              <input x-model="clusterEnableForm.bindAddr" type="text" placeholder="10.0.0.1:7777"
-                style="width:100%;font-size:0.875rem;border-radius:0.375rem;padding:0.5rem 0.75rem;background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-primary);box-sizing:border-box;">
+            <div class="form-group" style="margin-bottom:1rem;">
+              <label>Bind Address</label>
+              <input x-model="clusterEnableForm.bindAddr" type="text" placeholder="10.0.0.1:7777" class="input-field">
             </div>
-            <div x-show="clusterEnableForm.role !== 'primary'">
-              <label style="display:block;font-size:0.75rem;font-weight:500;margin-bottom:0.375rem;color:var(--text-muted);">Cortex Address</label>
-              <input x-model="clusterEnableForm.cortexAddr" type="text" placeholder="10.0.0.1:7777"
-                style="width:100%;font-size:0.875rem;border-radius:0.375rem;padding:0.5rem 0.75rem;background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-primary);box-sizing:border-box;">
+            <div class="form-group" x-show="clusterEnableForm.role !== 'primary'" style="margin-bottom:1rem;">
+              <label>Cortex Address</label>
+              <input x-model="clusterEnableForm.cortexAddr" type="text" placeholder="10.0.0.1:7777" class="input-field">
             </div>
-            <div>
-              <label style="display:block;font-size:0.75rem;font-weight:500;margin-bottom:0.375rem;color:var(--text-muted);">
+            <div class="form-group" style="margin-bottom:1rem;">
+              <label>
                 Cluster Secret <span style="font-weight:400;color:var(--text-muted);">(recommended)</span>
               </label>
-              <input x-model="clusterEnableForm.clusterSecret" type="password" placeholder="Leave empty for open cluster"
-                style="width:100%;font-size:0.875rem;border-radius:0.375rem;padding:0.5rem 0.75rem;background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-primary);box-sizing:border-box;">
-              <p x-show="!clusterEnableForm.clusterSecret" style="margin:0.25rem 0 0;font-size:0.75rem;color:#eab308;">
+              <input x-model="clusterEnableForm.clusterSecret" type="password" placeholder="Leave empty for open cluster" class="input-field">
+              <p x-show="!clusterEnableForm.clusterSecret" style="margin:0;font-size:0.75rem;color:#eab308;">
                 &#9888; Without a secret, any node can join this cluster
               </p>
             </div>
