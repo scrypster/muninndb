@@ -68,6 +68,9 @@ html.light .seg-btn:hover:not(.seg-active) {
   background: rgba(0, 0, 0, 0.04) !important;
 }
 
+/* Compact button modifier */
+.btn-sm { padding: 0.3rem 0.75rem; font-size: 0.8125rem; }
+
 /* Badges */
 .badge-success  { background: rgba(34,197,94,0.15);  color: var(--success); border-radius: 9999px; padding: 0.125rem 0.625rem; font-size: 0.75rem; font-weight: 600; }
 .badge-danger   { background: rgba(239,68,68,0.15);  color: var(--danger);  border-radius: 9999px; padding: 0.125rem 0.625rem; font-size: 0.75rem; font-weight: 600; }

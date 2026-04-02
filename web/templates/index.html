@@ -399,7 +399,7 @@
       </p>
 
       <!-- Filter bar -->
-      <div style="display:flex;gap:0.625rem;margin-bottom:1rem;align-items:center;flex-wrap:wrap;padding:0.625rem 0.75rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:0.5rem;">
+      <div style="display:flex;gap:0.625rem;margin-bottom:0.5rem;align-items:center;flex-wrap:wrap;padding:0.4rem 0.75rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:0.5rem;">
         <span style="font-size:0.75rem;font-weight:600;color:var(--text-secondary);white-space:nowrap;">Browse filters</span>
         <!-- Sort -->
         <select x-model="memoryFilters.sort" style="font-size:0.8125rem;padding:0.25rem 0.5rem;background:var(--bg-card);border:1px solid var(--border);border-radius:0.375rem;color:var(--text-primary);" title="Sort order">
@@ -436,29 +436,29 @@
         <button class="btn-secondary" style="font-size:0.8125rem;padding:0.25rem 0.75rem;"
           @click="memoryFilters={sort:'created',tags:'',state:'',minConf:0,maxConf:0};page=0;loadMemories()">Reset</button>
       </div>
-      <div style="display:flex;gap:1rem;margin-bottom:1.5rem;align-items:center;flex-wrap:wrap;">
+      <div style="display:flex;gap:0.625rem;margin-bottom:1.5rem;align-items:center;flex-wrap:wrap;">
         <input id="memory-search-input" data-testid="input-search" class="input-field" placeholder="Search memories… (semantic, try natural language)" x-model="searchQuery"
-          @keydown.enter="searchMemories()" style="flex:1;min-width:200px;" />
+          @keydown.enter="searchMemories()" style="flex:1;min-width:200px;height:auto;padding:0.3rem 0.75rem;font-size:0.8125rem;" />
         <!-- Recall mode segmented control (Item 3: tooltips) -->
-        <div style="display:inline-flex;border:1px solid var(--border);border-radius:0.5rem;overflow:hidden;">
+        <div style="display:inline-flex;border:1px solid var(--border);border-radius:0.5rem;overflow:hidden;font-size:0.8125rem;">
           <button @click="searchMode = 'balanced'" class="seg-btn" :class="searchMode === 'balanced' && 'seg-active'"
-            :style="'padding:0.5rem 1rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'balanced' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
+            :style="'padding:0.3rem 0.75rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'balanced' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Blend keyword + semantic search with temporal decay (default)">Balanced</button>
           <button @click="searchMode = 'semantic'" class="seg-btn" :class="searchMode === 'semantic' && 'seg-active'"
-            :style="'padding:0.5rem 1rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'semantic' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
+            :style="'padding:0.3rem 0.75rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'semantic' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Pure vector similarity — best for concept matching">Semantic</button>
           <button @click="searchMode = 'recent'" class="seg-btn" :class="searchMode === 'recent' && 'seg-active'"
-            :style="'padding:0.5rem 1rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'recent' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
+            :style="'padding:0.3rem 0.75rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'recent' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Prioritize recently created memories">Recent</button>
           <button @click="searchMode = 'deep'" class="seg-btn" :class="searchMode === 'deep' && 'seg-active'"
-            :style="'padding:0.5rem 1rem;border:none;cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'deep' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
+            :style="'padding:0.3rem 0.75rem;border:none;cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'deep' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Exhaustive graph traversal — slower but finds distant connections">Deep</button>
         </div>
-        <button class="btn-primary" @click="searchMemories()">Search</button>
-        <button class="btn-secondary" @click="page=0;searchQuery='';loadMemories()">Browse All</button>
-        <button class="btn-primary" data-testid="btn-new-memory" @click="showNewMemoryModal=true" title="New memory (n)">+ New Memory</button>
-        <button class="btn-secondary" @click="openDecideModal()" title="Record a decision">Record Decision</button>
-        <button class="btn-secondary"
+        <button class="btn-primary btn-sm" @click="searchMemories()">Search</button>
+        <button class="btn-secondary btn-sm" @click="page=0;searchQuery='';loadMemories()">Browse All</button>
+        <button class="btn-primary btn-sm" data-testid="btn-new-memory" @click="showNewMemoryModal=true" title="New memory (n)">+ New Memory</button>
+        <button class="btn-secondary btn-sm" @click="openDecideModal()" title="Record a decision">Record Decision</button>
+        <button class="btn-secondary btn-sm"
           :style="multiSelectMode ? 'background:rgba(6,182,212,0.15);border-color:var(--accent);color:var(--accent);' : ''"
           @click="toggleMultiSelect()" title="Select multiple memories to consolidate">Select</button>
         <button x-show="multiSelectMode && selectedMemoryIds.length >= 2"
