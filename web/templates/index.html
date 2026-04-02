@@ -41,7 +41,7 @@
     <!-- Logo (top of sidebar, replaces toggle) -->
     <div class="sidebar-logo">
       <a href="https://muninndb.com" target="_blank" rel="noopener"><img src="/static/logo.jpg" alt="MuninnDB" /></a>
-      <span class="sidebar-label" style="font-weight:700;font-size:0.9375rem;letter-spacing:0.01em;">MuninnDB</span>
+      <span class="sidebar-label" style="font-weight:700;font-size:1.0625rem;letter-spacing:0.01em;line-height:1;">MuninnDB</span>
     </div>
 
     <!-- Nav items -->
@@ -174,7 +174,7 @@
       <div style="display:flex;flex-direction:column;height:calc(100vh - 3rem);min-height:600px;">
       <!-- Dashboard header -->
       <div style="display:flex;align-items:baseline;gap:0.875rem;margin-bottom:1.5rem;flex-wrap:wrap;">
-        <h2 style="margin:0;">Dashboard</h2>
+        <h2 class="page-title">Dashboard</h2>
         <div class="vault-chip" @click="vaultModalOpen=true" style="cursor:pointer;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.7;"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/><path d="M3 12a9 3 0 0018 0"/></svg>
           <span class="vault-chip-btn" x-text="vault"></span>
@@ -373,7 +373,7 @@
     <div x-show="currentView==='memories'">
       <!-- Memories header -->
       <div style="display:flex;align-items:baseline;gap:0.875rem;margin-bottom:1.5rem;flex-wrap:wrap;">
-        <h2 style="margin:0;">Memories</h2>
+        <h2 class="page-title">Memories</h2>
         <div class="vault-chip" @click="vaultModalOpen=true" style="cursor:pointer;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.7;"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/><path d="M3 12a9 3 0 0018 0"/></svg>
           <span class="vault-chip-btn" x-text="vault"></span>
@@ -731,7 +731,7 @@
     <div style="height:calc(100vh - 7rem);display:flex;flex-direction:column;">
       <!-- Graph header -->
       <div style="display:flex;align-items:baseline;gap:0.875rem;margin-bottom:1.5rem;flex-wrap:wrap;">
-        <h2 style="margin:0;">Graph</h2>
+        <h2 class="page-title">Graph</h2>
         <div class="vault-chip" @click="vaultModalOpen=true" style="cursor:pointer;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.7;"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/><path d="M3 12a9 3 0 0018 0"/></svg>
           <span class="vault-chip-btn" x-text="vault"></span>
@@ -816,7 +816,7 @@
 
     <!-- ── Observability View ─────────────────────────────────────── -->
     <div x-show="currentView==='observability'">
-      <h2 style="margin:0 0 1.5rem 0;">Observability</h2>
+      <h2 class="page-title" style="margin-bottom:1.5rem;">Observability</h2>
 
       <template x-if="obs">
         <div>
@@ -1063,7 +1063,7 @@
     <!-- ── Settings View ────────────────────────────────────────────── -->
     <div x-show="currentView==='settings'">
       <div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:0;">
-        <h2 style="margin:0;">Settings</h2>
+        <h2 class="page-title">Settings</h2>
       </div>
 
       <!-- Sub-navigation tabs -->
@@ -2175,7 +2175,7 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
     <!-- ── Session View ─────────────────────────────────────────────── -->
     <div x-show="currentView==='session'">
       <div style="display:flex;align-items:baseline;gap:0.875rem;margin-bottom:0.25rem;flex-wrap:wrap;">
-        <h2 style="margin:0;">Session Timeline</h2>
+        <h2 class="page-title">Session Timeline</h2>
         <div class="vault-chip" @click="vaultModalOpen=true" style="cursor:pointer;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.7;"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/><path d="M3 12a9 3 0 0018 0"/></svg>
           <span class="vault-chip-btn" x-text="vault"></span>
@@ -2213,7 +2213,7 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
          style="display:flex;flex-direction:column;height:calc(100vh - 3rem);">
       <!-- Toolbar -->
       <div style="display:flex;align-items:center;gap:0.625rem;margin-bottom:0.625rem;flex-shrink:0;">
-        <h2 style="margin:0;font-size:1.125rem;">Server Logs</h2>
+        <h2 class="page-title">Server Logs</h2>
         <select x-model="levelFilter" style="background:var(--bg-elevated);color:var(--text-secondary);font-size:0.75rem;padding:0.25rem 0.5rem;border-radius:0.25rem;border:1px solid var(--border);">
           <option value="">All levels</option>
           <option value="DEBUG">DEBUG</option>
@@ -2253,7 +2253,7 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
     <div x-show="currentView==='cluster'" x-init="loadClusterEvents()">
       <!-- Cluster header -->
       <div style="display:flex;align-items:baseline;gap:0.875rem;margin-bottom:1.5rem;flex-wrap:wrap;">
-        <h2 style="margin:0;">Cluster</h2>
+        <h2 class="page-title">Cluster</h2>
       </div>
 
       <!-- Cluster disabled state: Enable Cluster card -->
