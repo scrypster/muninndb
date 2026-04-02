@@ -813,13 +813,27 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	e.activity.Record(wsPrefix)
 
 	// ── Content-hash dedup: O(1) exact-duplicate check ──────────────
+	// NOTE: This check is best-effort — concurrent writes of identical content
+	// can both pass GetContentHash before either stores. This is acceptable for
+	// a dedup optimization (not a uniqueness constraint). The window is negligible
+	// for MCP stdio (single-threaded client).
 	contentHash := storage.ContentHash(req.Content)
 	if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
 		// A mapping exists — verify the engram is still live (not soft-deleted).
-		if eng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && eng.State != storage.StateSoftDeleted {
+		if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && existingEng.State != storage.StateSoftDeleted {
+			// Reinforce: increment access count and update LastAccess
+			// to signal that this content is being re-experienced.
+			_ = e.store.UpdateMetadata(ctx, wsPrefix, existingID, &storage.EngramMeta{
+				AccessCount: existingEng.AccessCount + 1,
+				LastAccess:  time.Now(),
+				State:       existingEng.State,
+				Confidence:  existingEng.Confidence,
+				Relevance:   existingEng.Relevance,
+				Stability:   existingEng.Stability,
+			})
 			return &mbp.WriteResponse{
 				ID:        existingID.String(),
-				CreatedAt: eng.CreatedAt.UnixNano(),
+				CreatedAt: existingEng.CreatedAt.UnixNano(),
 				Hint:      "duplicate_content",
 			}, nil
 		}
@@ -1215,12 +1229,23 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		e.activity.Record(wsPrefix)
 
 		// ── Content-hash dedup: same O(1) check as single Write ──────
+		// NOTE: Intra-batch dedup is not performed — items within the same batch
+		// cannot see each other's hashes during Phase 1. This is a known limitation.
 		contentHash := storage.ContentHash(req.Content)
 		if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
-			if eng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && eng.State != storage.StateSoftDeleted {
+			if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && existingEng.State != storage.StateSoftDeleted {
+				// Reinforce: increment access count and update LastAccess.
+				_ = e.store.UpdateMetadata(ctx, wsPrefix, existingID, &storage.EngramMeta{
+					AccessCount: existingEng.AccessCount + 1,
+					LastAccess:  time.Now(),
+					State:       existingEng.State,
+					Confidence:  existingEng.Confidence,
+					Relevance:   existingEng.Relevance,
+					Stability:   existingEng.Stability,
+				})
 				responses[i] = &mbp.WriteResponse{
 					ID:        existingID.String(),
-					CreatedAt: eng.CreatedAt.UnixNano(),
+					CreatedAt: existingEng.CreatedAt.UnixNano(),
 					Hint:      "duplicate_content",
 				}
 				continue
@@ -2459,6 +2484,11 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 	if err := e.store.UpdateMetadata(ctx, ws, ulid, meta); err != nil {
 		return nil, fmt.Errorf("restore update: %w", err)
 	}
+
+	// Re-add content-hash mapping so future writes detect this engram as a duplicate.
+	contentHash := storage.ContentHash(eng.Content)
+	_ = e.store.PutContentHash(ctx, ws, contentHash, ulid)
+
 	eng.State = storage.StateActive
 	return eng, nil
 }

@@ -22,7 +22,7 @@ import (
 //  3. Commit the range tombstones for all 20 vault-scoped data prefixes.
 //  4. Evict all in-memory caches (L1, assocCache, metaCache, recentActiveCache).
 //
-// Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17
+// Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17, 0x28
 // Prefixes NOT cleared (global or name keys):
 //   - 0x0E vault meta key (preserved by Clear, deleted by DeleteVaultNameOnly)
 //   - 0x0F name index    (global by name hash, deleted by DeleteVaultNameOnly)
@@ -51,12 +51,13 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 		ps.provWork.Drain()
 	}
 
-	// Step 3: DeleteRange for all 20 vault-scoped data prefixes.
+	// Step 3: DeleteRange for all 21 vault-scoped data prefixes.
 	// 0x0E (vault meta), 0x0F (name index), 0x11 (digest flags) are intentionally excluded.
 	dataPrefixes := []byte{
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x09, 0x0A, 0x0B, 0x0C, 0x0D,
 		0x10, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x28, // content-hash dedup index
 	}
 	wsPlus, err := incrementWS(ws)
 	if err != nil {

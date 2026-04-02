@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -242,6 +243,189 @@ func TestEvolveThenWriteOldContentNoDup(t *testing.T) {
 	}
 	if resp3.Hint == "duplicate_content" {
 		t.Error("re-write of evolved-away content should not trigger duplicate_content hint")
+	}
+}
+
+// TestWriteClearVaultThenRewrite verifies that writing content, clearing the vault,
+// and re-writing the same content succeeds (no stale hash blocks the re-write).
+func TestWriteClearVaultThenRewrite(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	vault := "clear-hash-test"
+	content := "content that will survive vault clear"
+
+	// Write original.
+	resp1, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vault,
+		Content: content,
+		Concept: "original",
+	})
+	if err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if resp1.Hint != "" {
+		t.Errorf("first write should have no hint, got %q", resp1.Hint)
+	}
+
+	// Clear the vault — must remove 0x28 content-hash keys.
+	if err := eng.ClearVault(ctx, vault); err != nil {
+		t.Fatalf("ClearVault: %v", err)
+	}
+
+	// Re-write same content — should succeed with a NEW engram ID (hash was cleared).
+	resp2, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vault,
+		Content: content,
+		Concept: "recreated",
+	})
+	if err != nil {
+		t.Fatalf("re-write after clear: %v", err)
+	}
+	if resp2.ID == resp1.ID {
+		t.Error("re-write after ClearVault should create a new engram, got same ID")
+	}
+	if resp2.Hint == "duplicate_content" {
+		t.Error("re-write after ClearVault should not have duplicate_content hint")
+	}
+}
+
+// TestRestoreThenRewriteIsDuplicate verifies that restoring a soft-deleted engram
+// re-adds its content-hash mapping, so a subsequent write of the same content
+// returns the restored engram as a duplicate.
+func TestRestoreThenRewriteIsDuplicate(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	vault := "restore-hash-test"
+	content := "content to restore and re-check"
+
+	// Write original.
+	resp1, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vault,
+		Content: content,
+		Concept: "original",
+	})
+	if err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+
+	// Soft-delete the engram.
+	wsPrefix := eng.store.ResolveVaultPrefix(vault)
+	id1, err := storage.ParseULID(resp1.ID)
+	if err != nil {
+		t.Fatalf("parse ULID: %v", err)
+	}
+	if err := eng.store.SoftDelete(ctx, wsPrefix, id1); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+
+	// Verify the hash slot is now stale — writing same content should create new engram.
+	resp2, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vault,
+		Content: content,
+		Concept: "after-soft-delete",
+	})
+	if err != nil {
+		t.Fatalf("write after soft-delete: %v", err)
+	}
+	if resp2.ID == resp1.ID {
+		t.Error("write after soft-delete should create a new engram, got original ID")
+	}
+
+	// Soft-delete the second engram too.
+	id2, err := storage.ParseULID(resp2.ID)
+	if err != nil {
+		t.Fatalf("parse ULID: %v", err)
+	}
+	if err := eng.store.SoftDelete(ctx, wsPrefix, id2); err != nil {
+		t.Fatalf("soft delete second: %v", err)
+	}
+
+	// Restore the second engram — this should re-add the content-hash mapping.
+	_, err = eng.Restore(ctx, vault, resp2.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	// Now writing the same content should detect the restored engram as a duplicate.
+	resp3, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vault,
+		Content: content,
+		Concept: "after-restore",
+	})
+	if err != nil {
+		t.Fatalf("write after restore: %v", err)
+	}
+	if resp3.ID != resp2.ID {
+		t.Errorf("write after restore should return restored engram ID %q, got %q", resp2.ID, resp3.ID)
+	}
+	if resp3.Hint != "duplicate_content" {
+		t.Errorf("write after restore should have hint 'duplicate_content', got %q", resp3.Hint)
+	}
+}
+
+// TestDuplicateWriteReinforcesAccessCount verifies that writing duplicate content
+// increments the existing engram's access count and updates LastAccess.
+func TestDuplicateWriteReinforcesAccessCount(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	vault := "reinforce-test"
+	content := "content to be reinforced"
+
+	// Write original.
+	resp1, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vault,
+		Content: content,
+		Concept: "original",
+	})
+	if err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+
+	// Read the engram to get its initial access count.
+	wsPrefix := eng.store.ResolveVaultPrefix(vault)
+	id1, err := storage.ParseULID(resp1.ID)
+	if err != nil {
+		t.Fatalf("parse ULID: %v", err)
+	}
+	engBefore, err := eng.store.GetEngram(ctx, wsPrefix, id1)
+	if err != nil {
+		t.Fatalf("get engram before: %v", err)
+	}
+	accessBefore := engBefore.AccessCount
+	lastAccessBefore := engBefore.LastAccess
+
+	// Small sleep to ensure LastAccess will differ.
+	time.Sleep(5 * time.Millisecond)
+
+	// Write duplicate — should reinforce.
+	resp2, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vault,
+		Content: content,
+		Concept: "duplicate",
+	})
+	if err != nil {
+		t.Fatalf("duplicate write: %v", err)
+	}
+	if resp2.Hint != "duplicate_content" {
+		t.Fatalf("expected duplicate_content hint, got %q", resp2.Hint)
+	}
+
+	// Read the engram again — access count should be incremented.
+	engAfter, err := eng.store.GetEngram(ctx, wsPrefix, id1)
+	if err != nil {
+		t.Fatalf("get engram after: %v", err)
+	}
+	if engAfter.AccessCount != accessBefore+1 {
+		t.Errorf("access count should be %d, got %d", accessBefore+1, engAfter.AccessCount)
+	}
+	if !engAfter.LastAccess.After(lastAccessBefore) {
+		t.Error("LastAccess should be updated after duplicate write")
 	}
 }
 
