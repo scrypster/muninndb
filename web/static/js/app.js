@@ -264,7 +264,7 @@ document.addEventListener('alpine:init', () => {
         const parts = hash.split('/');
         const raw = parts[0];
         // Only use known views
-        const known = ['dashboard', 'memories', 'graph', 'session', 'settings', 'logs', 'cluster'];
+        const known = ['dashboard', 'memories', 'graph', 'session', 'observability', 'settings', 'logs', 'cluster'];
         this.currentView = known.includes(raw) ? raw : 'dashboard';
 
         // Parse settings sub-tab if entering settings view
