@@ -441,16 +441,16 @@
           @keydown.enter="searchMemories()" style="flex:1;min-width:200px;" />
         <!-- Recall mode segmented control (Item 3: tooltips) -->
         <div style="display:inline-flex;border:1px solid var(--border);border-radius:0.5rem;overflow:hidden;">
-          <button @click="searchMode = 'balanced'"
+          <button @click="searchMode = 'balanced'" class="seg-btn" :class="searchMode === 'balanced' && 'seg-active'"
             :style="'padding:0.5rem 1rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'balanced' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Blend keyword + semantic search with temporal decay (default)">Balanced</button>
-          <button @click="searchMode = 'semantic'"
+          <button @click="searchMode = 'semantic'" class="seg-btn" :class="searchMode === 'semantic' && 'seg-active'"
             :style="'padding:0.5rem 1rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'semantic' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Pure vector similarity — best for concept matching">Semantic</button>
-          <button @click="searchMode = 'recent'"
+          <button @click="searchMode = 'recent'" class="seg-btn" :class="searchMode === 'recent' && 'seg-active'"
             :style="'padding:0.5rem 1rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'recent' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Prioritize recently created memories">Recent</button>
-          <button @click="searchMode = 'deep'"
+          <button @click="searchMode = 'deep'" class="seg-btn" :class="searchMode === 'deep' && 'seg-active'"
             :style="'padding:0.5rem 1rem;border:none;cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'deep' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Exhaustive graph traversal — slower but finds distant connections">Deep</button>
         </div>
@@ -1962,11 +1962,11 @@
         <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">
           <span style="font-size:0.875rem;font-weight:500;color:var(--text-muted);">Platform:</span>
           <div style="display:inline-flex;border:1px solid var(--border);border-radius:0.5rem;overflow:hidden;">
-            <button @click="connectPlatform='macos'"
+            <button @click="connectPlatform='macos'" class="seg-btn" :class="connectPlatform==='macos' && 'seg-active'"
               :style="'padding:0.5rem 1rem;font-size:0.8125rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (connectPlatform==='macos' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')">macOS</button>
-            <button @click="connectPlatform='linux'"
+            <button @click="connectPlatform='linux'" class="seg-btn" :class="connectPlatform==='linux' && 'seg-active'"
               :style="'padding:0.5rem 1rem;font-size:0.8125rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (connectPlatform==='linux' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')">Linux</button>
-            <button @click="connectPlatform='windows'"
+            <button @click="connectPlatform='windows'" class="seg-btn" :class="connectPlatform==='windows' && 'seg-active'"
               :style="'padding:0.5rem 1rem;font-size:0.8125rem;border:none;cursor:pointer;transition:all 0.15s;font-weight:600;' + (connectPlatform==='windows' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')">Windows</button>
           </div>
         </div>
