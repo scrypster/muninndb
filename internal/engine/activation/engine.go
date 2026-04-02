@@ -1335,7 +1335,7 @@ cgdnDone:
 		}
 		var why string
 		if req.IncludeWhy {
-			why = buildWhy(eng, s.components, s.hopPath, hopConcepts, p1.queryStr)
+			why = buildWhy(eng, s.components, s.hopPath, hopConcepts, p1.queryStr, w.UseACTR)
 		}
 		activations = append(activations, ScoredEngram{
 			Engram:      eng,
@@ -1633,7 +1633,7 @@ func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {
 	return rw
 }
 
-func buildWhy(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, hopConcepts []string, queryStr string) string {
+func buildWhy(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, hopConcepts []string, queryStr string, useACTR bool) string {
 	var parts []string
 
 	signals := map[string]float64{
@@ -1683,7 +1683,7 @@ func buildWhy(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, ho
 		parts = append(parts, fmt.Sprintf("confidence is low (%.0f%%)", c.Confidence*100))
 	}
 
-	if eng.Relevance <= minFloor*1.1 {
+	if !useACTR && eng.Relevance <= minFloor*1.1 {
 		parts = append(parts, "dormant (low decay relevance)")
 	}
 

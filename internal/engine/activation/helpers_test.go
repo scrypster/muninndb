@@ -2,6 +2,7 @@ package activation
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -328,7 +329,7 @@ func TestComputeComponents_CachedLastAccess(t *testing.T) {
 func TestBuildWhy_SemanticDominant(t *testing.T) {
 	eng := &storage.Engram{Relevance: 0.5}
 	c := ScoreComponents{SemanticSimilarity: 0.9, FullTextRelevance: 0.1, DecayFactor: 0.1, Confidence: 0.8}
-	why := buildWhy(eng, c, nil, nil, "test query")
+	why := buildWhy(eng, c, nil, nil, "test query", true)
 	if why == "" {
 		t.Error("expected non-empty why string")
 	}
@@ -337,7 +338,7 @@ func TestBuildWhy_SemanticDominant(t *testing.T) {
 func TestBuildWhy_FTSDominant(t *testing.T) {
 	eng := &storage.Engram{Relevance: 0.5}
 	c := ScoreComponents{SemanticSimilarity: 0.1, FullTextRelevance: 0.9, DecayFactor: 0.1, Confidence: 0.8}
-	why := buildWhy(eng, c, nil, nil, "test query that is very long and exceeds forty characters for truncation testing")
+	why := buildWhy(eng, c, nil, nil, "test query that is very long and exceeds forty characters for truncation testing", true)
 	if why == "" {
 		t.Error("expected non-empty why string")
 	}
@@ -348,7 +349,7 @@ func TestBuildWhy_WithHopPath(t *testing.T) {
 	c := ScoreComponents{HebbianBoost: 0.9, Confidence: 0.8}
 	path := []storage.ULID{{1}, {2}, {3}}
 	concepts := []string{"alpha", "beta", "gamma"}
-	why := buildWhy(eng, c, path, concepts, "")
+	why := buildWhy(eng, c, path, concepts, "", true)
 	if why == "" {
 		t.Error("expected non-empty why string with hops")
 	}
@@ -357,18 +358,24 @@ func TestBuildWhy_WithHopPath(t *testing.T) {
 func TestBuildWhy_LowConfidence(t *testing.T) {
 	eng := &storage.Engram{Relevance: 0.5}
 	c := ScoreComponents{SemanticSimilarity: 0.8, Confidence: 0.3}
-	why := buildWhy(eng, c, nil, nil, "test")
+	why := buildWhy(eng, c, nil, nil, "test", true)
 	if why == "" {
 		t.Error("expected non-empty why string")
 	}
 }
 
-func TestBuildWhy_DormantEngram(t *testing.T) {
+func TestBuildWhy_DormantEngram_LegacyMode(t *testing.T) {
 	eng := &storage.Engram{Relevance: minFloor * 1.05}
 	c := ScoreComponents{DecayFactor: 0.9, Confidence: 0.8}
-	why := buildWhy(eng, c, nil, nil, "")
-	if why == "" {
-		t.Error("expected non-empty why string for dormant engram")
+	// Legacy mode: dormant annotation should appear.
+	why := buildWhy(eng, c, nil, nil, "", false)
+	if !strings.Contains(why, "dormant") {
+		t.Error("legacy mode: expected dormant annotation for low-relevance engram")
+	}
+	// ACT-R mode: dormant annotation should NOT appear.
+	why2 := buildWhy(eng, c, nil, nil, "", true)
+	if strings.Contains(why2, "dormant") {
+		t.Error("ACT-R mode: dormant annotation should not appear")
 	}
 }
 
@@ -376,7 +383,7 @@ func TestBuildWhy_HopPathWithoutConcepts(t *testing.T) {
 	eng := &storage.Engram{Relevance: 0.5}
 	c := ScoreComponents{HebbianBoost: 0.9, Confidence: 0.8}
 	path := []storage.ULID{{1}, {2}}
-	why := buildWhy(eng, c, path, nil, "")
+	why := buildWhy(eng, c, path, nil, "", true)
 	if why == "" {
 		t.Error("expected non-empty why string")
 	}
