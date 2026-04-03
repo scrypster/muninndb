@@ -441,11 +441,11 @@ func TestActivateConfidenceAffectsScore(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	// Two identical engrams differing only in confidence
+	// Two engrams with similar content differing in confidence (unique content to avoid content-hash dedup).
 	if _, err := eng.Write(ctx, &mbp.WriteRequest{
 		Vault:      "test",
 		Concept:    "high confidence fact",
-		Content:    "Go is a compiled programming language built at Google for systems work.",
+		Content:    "Go is a compiled programming language built at Google for systems work. [high]",
 		Confidence: 1.0,
 	}); err != nil {
 		t.Fatalf("Write high confidence: %v", err)
@@ -453,7 +453,7 @@ func TestActivateConfidenceAffectsScore(t *testing.T) {
 	if _, err := eng.Write(ctx, &mbp.WriteRequest{
 		Vault:      "test",
 		Concept:    "low confidence fact",
-		Content:    "Go is a compiled programming language built at Google for systems work.",
+		Content:    "Go is a compiled programming language built at Google for systems work. [low]",
 		Confidence: 0.2,
 	}); err != nil {
 		t.Fatalf("Write low confidence: %v", err)
@@ -830,10 +830,10 @@ func TestEngineTraverseBoundedHops(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	// Build a 4-hop chain: a → b → c → d → e
+	// Build a 4-hop chain: a → b → c → d → e (unique content to avoid content-hash dedup).
 	nodes := make([]string, 5)
 	for i := range nodes {
-		r, _ := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "node", Content: "content"})
+		r, _ := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "node", Content: fmt.Sprintf("node content %d", i)})
 		nodes[i] = r.ID
 	}
 	for i := 0; i < 4; i++ {
@@ -1014,13 +1014,13 @@ func TestCoherenceRegistryAfterWrite(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	// Write a few engrams to a named vault.
+	// Write a few engrams to a named vault (unique content to avoid content-hash dedup).
 	vault := "coh-test"
 	for i := 0; i < 3; i++ {
 		if _, err := eng.Write(ctx, &mbp.WriteRequest{
 			Vault:   vault,
 			Concept: "coherence subject",
-			Content: "content for coherence counter test",
+			Content: fmt.Sprintf("content for coherence counter test %d", i),
 		}); err != nil {
 			t.Fatalf("Write[%d]: %v", i, err)
 		}

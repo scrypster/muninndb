@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -165,8 +166,9 @@ func TestClearVault_Idempotent(t *testing.T) {
 	const vaultName = "idempotent-clear-vault"
 
 	// Write 3 engrams using eng.Write — this also registers the vault name.
+	// Unique content to avoid content-hash dedup.
 	for i := 0; i < 3; i++ {
-		if _, err := eng.Write(ctx, writeReq(vaultName, "concept", "content")); err != nil {
+		if _, err := eng.Write(ctx, writeReq(vaultName, "concept", fmt.Sprintf("content %d", i))); err != nil {
 			t.Fatalf("Write[%d]: %v", i, err)
 		}
 	}
@@ -364,9 +366,9 @@ func TestEngineRenameVault_CoherenceCountersMoved(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	// Write a few engrams to build up coherence counters.
+	// Write a few engrams to build up coherence counters (unique content to avoid content-hash dedup).
 	for i := 0; i < 3; i++ {
-		if _, err := eng.Write(ctx, writeReq("coh-rename-src", "concept", "content")); err != nil {
+		if _, err := eng.Write(ctx, writeReq("coh-rename-src", "concept", fmt.Sprintf("content %d", i))); err != nil {
 			t.Fatal(err)
 		}
 	}

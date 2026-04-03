@@ -46,6 +46,7 @@ var vaultScopedExportPrefixes = []byte{
 	0x18, // standalone embeddings (ERF v2 EmbeddingKey)
 	0x1A, // episode keys (EpisodeKey + EpisodeFrameKey)
 	0x1B, // FTS schema version marker
+	0x28, // content-hash dedup index
 }
 
 const exportBatchSize = 512

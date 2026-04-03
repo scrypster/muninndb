@@ -100,6 +100,7 @@ type WriteRequest struct {
 type WriteResponse struct {
 	ID        string `msgpack:"id"         json:"id"`
 	CreatedAt int64  `msgpack:"created_at" json:"created_at"`
+	Hint      string `msgpack:"hint,omitempty" json:"hint,omitempty"`
 }
 
 // ReadRequest retrieves an engram by ID.
