@@ -45,6 +45,10 @@ type CoActivationEvent struct {
 	WS      [8]byte
 	At      time.Time
 	Engrams []CoActivatedEngram
+	// LTP is the per-vault LTP configuration resolved from the vault's plasticity config.
+	// When nil, LTP is disabled for this event. This allows per-vault LTP settings
+	// even though the HebbianWorker is shared across all vaults.
+	LTP *LTPConfig
 }
 
 // CoActivatedEngram is one engram in a co-activation event.
@@ -80,6 +84,11 @@ type HebbianWorker struct {
 	// Must not block — the trigger system drops events if its channel is full.
 	OnWeightUpdate func(ws [8]byte, id [16]byte, field string, oldVal, newVal float64)
 
+	// LTP (Long-Term Potentiation) configuration and state.
+	// When ltpCfg is nil, LTP is disabled and behavior is unchanged.
+	ltpCfg   *LTPConfig
+	ltpState *ltpState
+
 	// internal stop channel for tests and lifecycle management.
 	stopCh chan struct{}
 	doneCh chan struct{}
@@ -109,10 +118,18 @@ func NewHebbianWorker(store HebbianStore) *HebbianWorker {
 //
 //	hw := NewHebbianWorkerWithDB(store, db, myCallback)  // safe: set before goroutine starts
 func NewHebbianWorkerWithDB(store HebbianStore, db *pebble.DB, onWeightUpdate func(ws [8]byte, id [16]byte, field string, oldVal, newVal float64)) *HebbianWorker {
+	return NewHebbianWorkerWithLTP(store, db, onWeightUpdate, nil)
+}
+
+// NewHebbianWorkerWithLTP creates a new Hebbian worker with optional LTP configuration.
+// When ltpCfg is nil, LTP is disabled and behavior is identical to NewHebbianWorkerWithDB.
+func NewHebbianWorkerWithLTP(store HebbianStore, db *pebble.DB, onWeightUpdate func(ws [8]byte, id [16]byte, field string, oldVal, newVal float64), ltpCfg *LTPConfig) *HebbianWorker {
 	hw := &HebbianWorker{
 		store:          store,
 		db:             db,
 		OnWeightUpdate: onWeightUpdate, // set BEFORE the background goroutine starts
+		ltpCfg:         ltpCfg,
+		ltpState:       newLTPState(),
 		stopCh:         make(chan struct{}),
 		doneCh:         make(chan struct{}),
 	}
@@ -151,6 +168,16 @@ func (hw *HebbianWorker) Run(ctx context.Context) {
 	<-hw.doneCh
 }
 
+// IsPotentiated returns true if the given association pair is LTP-potentiated
+// for the specified workspace. Returns false if LTP state is unavailable.
+// Potentiation can occur via worker-level LTP config or per-event LTP config.
+func (hw *HebbianWorker) IsPotentiated(ws [8]byte, pair pairKey) bool {
+	if hw.ltpState == nil {
+		return false
+	}
+	return hw.ltpState.isPotentiated(ws, pair)
+}
+
 // Stop signals the HebbianWorker to flush pending work and shut down.
 // Blocks until the worker goroutine has exited.
 func (hw *HebbianWorker) Stop() {
@@ -176,6 +203,7 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 		count  int
 		signal float64
 		ws     [8]byte
+		ltp    *LTPConfig // per-vault LTP config from the event (nil = use worker default)
 	}
 	pairs := make(map[pairKey]*pairStats)
 
@@ -187,8 +215,11 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 				if ps, ok := pairs[key]; ok {
 					ps.count++
 					ps.signal += signal
+					if ps.ltp == nil {
+						ps.ltp = event.LTP // keep non-nil LTP from later events
+					}
 				} else {
-					pairs[key] = &pairStats{count: 1, signal: signal, ws: event.WS}
+					pairs[key] = &pairStats{count: 1, signal: signal, ws: event.WS, ltp: event.LTP}
 				}
 			}
 		}
@@ -235,6 +266,27 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 			countDelta = math.MaxUint32
 		} else {
 			countDelta = uint32(stats.count)
+		}
+
+		// LTP: track co-activation count and enforce weight floor for potentiated pairs.
+		// Event-level LTP config (from vault plasticity) takes precedence; fall back
+		// to worker-level config for backward compatibility with direct construction.
+		//
+		// NOTE: The dream engine (consolidation/transitive.go) updates association
+		// weights via direct store.UpdateAssocWeight() calls, bypassing HebbianWorker.
+		// Dream can set weights below the LTP floor. This is a known interaction —
+		// coordinating with dream is tracked separately.
+		ltpCfg := stats.ltp
+		if ltpCfg == nil {
+			ltpCfg = hw.ltpCfg
+		}
+		if ltpCfg != nil && ltpCfg.Threshold > 0 {
+			hw.ltpState.addCount(stats.ws, pair, countDelta, ltpCfg.Threshold)
+			if hw.ltpState.isPotentiated(stats.ws, pair) && ltpCfg.WeightFloor > 0 {
+				if newWeight < ltpCfg.WeightFloor {
+					newWeight = ltpCfg.WeightFloor
+				}
+			}
 		}
 
 		updates = append(updates, AssocWeightUpdate{

@@ -57,6 +57,13 @@ type PlasticityConfig struct {
 	// "weighted_sum" = use legacy weighted-sum scoring (DisableACTR implied).
 	// nil/empty = default (ACT-R scoring, unchanged behavior).
 	ScoringFusion *string `json:"scoring_fusion,omitempty"`
+
+	// Long-Term Potentiation (LTP) for Hebbian associations.
+	// Associations co-activated beyond LTPThreshold become potentiated,
+	// enforcing a higher weight floor that resists decay.
+	// All zero/nil = disabled (backward compatible).
+	LTPThreshold   *int     `json:"ltp_threshold,omitempty"`    // co-activation count to trigger LTP (0 = disabled)
+	LTPWeightFloor *float32 `json:"ltp_weight_floor,omitempty"` // minimum weight for potentiated edges (0–1; 0 = disabled)
 }
 
 // ResolvedPlasticity is the fully-merged configuration after applying preset defaults
@@ -103,6 +110,9 @@ type ResolvedPlasticity struct {
 	RecallMode string `json:"recall_mode"`
 	// ScoringFusion selects Phase 6 scoring strategy: "" (default=ACT-R), "rrf", or "weighted_sum".
 	ScoringFusion string `json:"scoring_fusion"`
+	// LTP (Long-Term Potentiation) resolved values. Zero = disabled.
+	LTPThreshold   int     `json:"ltp_threshold"`
+	LTPWeightFloor float32 `json:"ltp_weight_floor"`
 }
 
 type plasticityPreset struct {
@@ -132,6 +142,8 @@ type plasticityPreset struct {
 	EnrichmentEnabled bool
 	RecallMode        string
 	ScoringFusion     string // "" = default (ACT-R), "rrf", "weighted_sum"
+	LTPThreshold      int
+	LTPWeightFloor    float32
 }
 
 var plasticityPresets = map[string]plasticityPreset{
@@ -284,6 +296,8 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		EnrichmentEnabled:    p.EnrichmentEnabled,
 		RecallMode:           p.RecallMode,
 		ScoringFusion:        p.ScoringFusion,
+		LTPThreshold:         p.LTPThreshold,
+		LTPWeightFloor:       p.LTPWeightFloor,
 	}
 
 	if cfg == nil {
@@ -446,6 +460,24 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		} else {
 			r.ScoringFusion = "" // invalid → default (ACT-R)
 		}
+	}
+	// LTP overrides
+	if cfg.LTPThreshold != nil {
+		v := *cfg.LTPThreshold
+		if v < 0 {
+			v = 0
+		}
+		r.LTPThreshold = v
+	}
+	if cfg.LTPWeightFloor != nil {
+		v := float32(*cfg.LTPWeightFloor)
+		if v < 0 {
+			v = 0
+		}
+		if v > 1 {
+			v = 1
+		}
+		r.LTPWeightFloor = v
 	}
 	return r
 }

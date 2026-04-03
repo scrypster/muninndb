@@ -1981,10 +1981,19 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 					Score: scored.Score,
 				}
 			}
+			// Build per-vault LTP config from resolved plasticity.
+			var ltpCfg *cognitive.LTPConfig
+			if resolved.LTPThreshold > 0 {
+				ltpCfg = &cognitive.LTPConfig{
+					Threshold:   resolved.LTPThreshold,
+					WeightFloor: resolved.LTPWeightFloor,
+				}
+			}
 			hebW.Submit(cognitive.CoActivationEvent{
 				WS:      wsPrefix,
 				At:      time.Now(),
 				Engrams: coActivatedEngrams,
+				LTP:     ltpCfg,
 			})
 		} else if e.coordinator != nil {
 			lobeCoActivations = make([]mbp.CoActivationRef, len(result.Activations))
