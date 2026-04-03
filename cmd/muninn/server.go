@@ -25,6 +25,7 @@ import (
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/backup"
 	"github.com/scrypster/muninndb/internal/cognitive"
+	"github.com/scrypster/muninndb/internal/consolidation"
 	plugincfg "github.com/scrypster/muninndb/internal/config"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/activation"
@@ -1194,6 +1195,12 @@ func runServer() {
 	go func() {
 		<-sigCh
 		slog.Info("shutdown signal received — starting graceful shutdown")
+		// Set dream-due flag so next start triggers dream.
+		if err := store.WriteDreamDue(time.Now()); err != nil {
+			slog.Warn("failed to set dream-due flag", "error", err)
+		} else {
+			slog.Info("dream-due flag set for next start")
+		}
 		cancel()
 		<-sigCh
 		slog.Error("second signal received — forcing immediate exit")
@@ -1321,6 +1328,93 @@ func runServer() {
 		obsProcs = append(obsProcs, enrichProcessor)
 	}
 	eng.SetRetroactiveProcessors(obsProcs...)
+
+	// Dream-on-start: check dream_due flag and run dream if gates pass.
+	if flaggedAt, due, err := store.ReadDreamDue(); err != nil {
+		slog.Warn("dream-on-start: failed to read dream-due flag", "error", err)
+	} else if due {
+		dreamTimeout := 60 * time.Second
+		if ts := os.Getenv("MUNINN_DREAM_TIMEOUT"); ts != "" {
+			if d, err := time.ParseDuration(ts); err == nil && d > 0 {
+				dreamTimeout = d
+			}
+		}
+		slog.Info("dream-on-start: dream-due flag set, running dream",
+			"flagged_at", flaggedAt, "timeout", dreamTimeout)
+
+		dreamCtx, dreamCancel := context.WithTimeout(ctx, dreamTimeout)
+
+		// Build LLM providers for dream Phase 2b.
+		var dreamOllama, dreamAnthropic, dreamOpenAI consolidation.LLMProvider
+		if ollamaURL := os.Getenv("MUNINN_OLLAMA_URL"); ollamaURL != "" {
+			p := enrichpkg.NewOllamaLLMProvider()
+			model := os.Getenv("MUNINN_OLLAMA_MODEL")
+			if model == "" {
+				model = "llama3.2"
+			}
+			pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := p.Init(pctx, enrichpkg.LLMProviderConfig{BaseURL: ollamaURL, Model: model}); err != nil {
+				slog.Warn("dream-on-start: ollama init failed", "error", err)
+			} else {
+				dreamOllama = p
+			}
+			pcancel()
+		}
+		if apiKey := os.Getenv("MUNINN_ANTHROPIC_KEY"); apiKey != "" {
+			p := enrichpkg.NewAnthropicLLMProvider()
+			model := os.Getenv("MUNINN_ANTHROPIC_MODEL")
+			if model == "" {
+				model = "claude-sonnet-4-20250514"
+			}
+			pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := p.Init(pctx, enrichpkg.LLMProviderConfig{
+				BaseURL: "https://api.anthropic.com", Model: model, APIKey: apiKey,
+			}); err != nil {
+				slog.Warn("dream-on-start: anthropic init failed", "error", err)
+			} else {
+				dreamAnthropic = p
+			}
+			pcancel()
+		}
+		if apiKey := os.Getenv("MUNINN_OPENAI_KEY"); apiKey != "" {
+			p := enrichpkg.NewOpenAILLMProvider()
+			model := os.Getenv("MUNINN_OPENAI_MODEL")
+			if model == "" {
+				model = "gpt-4o-mini"
+			}
+			baseURL := os.Getenv("MUNINN_OPENAI_URL")
+			if baseURL == "" {
+				baseURL = "https://api.openai.com"
+			}
+			pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := p.Init(pctx, enrichpkg.LLMProviderConfig{
+				BaseURL: baseURL, Model: model, APIKey: apiKey,
+			}); err != nil {
+				slog.Warn("dream-on-start: openai init failed", "error", err)
+			} else {
+				dreamOpenAI = p
+			}
+			pcancel()
+		}
+
+		dreamWorker := consolidation.NewWorker(eng)
+		dreamWorker.OllamaLLM = dreamOllama
+		dreamWorker.AnthropicLLM = dreamAnthropic
+		dreamWorker.OpenAILLM = dreamOpenAI
+		dreamReport, err := dreamWorker.DreamOnce(dreamCtx, consolidation.DreamOpts{Force: false})
+		dreamCancel()
+
+		if err != nil {
+			slog.Warn("dream-on-start: dream failed (flag preserved for retry)", "error", err)
+		} else {
+			slog.Info("dream-on-start: completed",
+				"duration", dreamReport.TotalDuration,
+				"vaults", len(dreamReport.Reports))
+			if err := store.ClearDreamDue(); err != nil {
+				slog.Warn("dream-on-start: failed to clear dream-due flag", "error", err)
+			}
+		}
+	}
 
 	// Start servers
 	errCh := make(chan error, 3)

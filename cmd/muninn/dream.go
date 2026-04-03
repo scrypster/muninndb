@@ -14,6 +14,8 @@ import (
 	"time"
 
 	muninn "github.com/scrypster/muninndb"
+	"github.com/scrypster/muninndb/internal/consolidation"
+	"github.com/scrypster/muninndb/internal/plugin/enrich"
 )
 
 func runDream(args []string) {
@@ -59,10 +61,69 @@ func runDream(args []string) {
 		}
 	}()
 
+	// Build LLM providers from env vars.
+	var ollamaP, anthropicP, openaiP consolidation.LLMProvider
+
+	if ollamaURL := os.Getenv("MUNINN_OLLAMA_URL"); ollamaURL != "" {
+		p := enrich.NewOllamaLLMProvider()
+		model := os.Getenv("MUNINN_OLLAMA_MODEL")
+		if model == "" {
+			model = "llama3.2"
+		}
+		initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := p.Init(initCtx, enrich.LLMProviderConfig{BaseURL: ollamaURL, Model: model}); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: ollama init failed: %v\n", err)
+		} else {
+			ollamaP = p
+		}
+		cancel()
+	}
+
+	if apiKey := os.Getenv("MUNINN_ANTHROPIC_KEY"); apiKey != "" {
+		p := enrich.NewAnthropicLLMProvider()
+		model := os.Getenv("MUNINN_ANTHROPIC_MODEL")
+		if model == "" {
+			model = "claude-sonnet-4-20250514"
+		}
+		initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := p.Init(initCtx, enrich.LLMProviderConfig{
+			BaseURL: "https://api.anthropic.com", Model: model, APIKey: apiKey,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: anthropic init failed: %v\n", err)
+		} else {
+			anthropicP = p
+		}
+		cancel()
+	}
+
+	if apiKey := os.Getenv("MUNINN_OPENAI_KEY"); apiKey != "" {
+		p := enrich.NewOpenAILLMProvider()
+		model := os.Getenv("MUNINN_OPENAI_MODEL")
+		if model == "" {
+			model = "gpt-4o-mini"
+		}
+		baseURL := os.Getenv("MUNINN_OPENAI_URL")
+		if baseURL == "" {
+			baseURL = "https://api.openai.com"
+		}
+		initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := p.Init(initCtx, enrich.LLMProviderConfig{
+			BaseURL: baseURL, Model: model, APIKey: apiKey,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: openai init failed: %v\n", err)
+		} else {
+			openaiP = p
+		}
+		cancel()
+	}
+
 	report, err := db.Dream(ctx, muninn.DreamOpts{
-		DryRun: *dryRun,
-		Force:  *force,
-		Scope:  *scope,
+		DryRun:            *dryRun,
+		Force:             *force,
+		Scope:             *scope,
+		OllamaProvider:    ollamaP,
+		AnthropicProvider: anthropicP,
+		OpenAIProvider:    openaiP,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -98,6 +159,18 @@ func printDreamReport(report *muninn.DreamReport, dryRun bool) {
 		if r.MergedEngrams > 0 {
 			changes = append(changes, fmt.Sprintf("merged %d", r.MergedEngrams))
 		}
+		if r.LLMMerged > 0 {
+			changes = append(changes, fmt.Sprintf("LLM merged %d", r.LLMMerged))
+		}
+		if r.LLMContradictions > 0 {
+			changes = append(changes, fmt.Sprintf("resolved %d contradictions", r.LLMContradictions))
+		}
+		if r.StabilityStrengthened > 0 {
+			changes = append(changes, fmt.Sprintf("strengthened %d", r.StabilityStrengthened))
+		}
+		if r.StabilityWeakened > 0 {
+			changes = append(changes, fmt.Sprintf("weakened %d", r.StabilityWeakened))
+		}
 		if r.InferredEdges > 0 {
 			changes = append(changes, fmt.Sprintf("inferred %d edges", r.InferredEdges))
 		}
@@ -108,7 +181,12 @@ func printDreamReport(report *muninn.DreamReport, dryRun bool) {
 	}
 
 	if len(report.Skipped) > 0 {
-		fmt.Printf("\nSkipped (legal): %s\n", strings.Join(report.Skipped, ", "))
+		fmt.Printf("\nSkipped: %s\n", strings.Join(report.Skipped, ", "))
+	}
+
+	if report.JournalEntry != "" {
+		fmt.Println()
+		fmt.Println(report.JournalEntry)
 	}
 }
 

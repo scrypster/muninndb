@@ -19,6 +19,7 @@ type DreamReport struct {
 	Reports       []*ConsolidationReport
 	Skipped       []string // vault names skipped (legal, no LLM, etc.)
 	TotalDuration time.Duration
+	JournalEntry  string // formatted journal markdown
 }
 
 // DreamOnce runs a single dream consolidation pass across vaults.
@@ -27,9 +28,6 @@ type DreamReport struct {
 func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, error) {
 	start := time.Now()
 	dreport := &DreamReport{}
-
-	// TODO: enforce trigger gates (time >= 12h + volume >= 3 engrams) when Force is false.
-	// ReadDreamState/WriteDreamState are implemented but gate logic is deferred to PR #2.
 
 	// Resolve which vaults to process.
 	var vaults []string
@@ -61,6 +59,9 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 		MaxTransitive:  w.MaxTransitive,
 		DryRun:         opts.DryRun,
 		DedupThreshold: 0.85,
+		OllamaLLM:     w.OllamaLLM,
+		AnthropicLLM:  w.AnthropicLLM,
+		OpenAILLM:     w.OpenAILLM,
 	}
 
 	for _, vault := range vaults {
@@ -95,6 +96,34 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 			continue
 		}
 
+		// Enforce trigger gates unless Force is set.
+		if !opts.Force {
+			lastDream, engramsAtDream, found, gateErr := store.ReadDreamState(wsPrefix)
+			if gateErr != nil {
+				// Fail open: proceed on read error.
+				slog.Warn("dream: failed to read dream state, proceeding", "vault", vault, "error", gateErr)
+			} else if found {
+				elapsed := time.Since(lastDream)
+				timeGatePassed := elapsed >= 12*time.Hour
+				currentCount := int64(0)
+				if summary != nil {
+					currentCount = int64(summary.EngramCount)
+				}
+				volumeGatePassed := currentCount-engramsAtDream >= 3
+				if !timeGatePassed || !volumeGatePassed {
+					slog.Info("dream: skipping vault (gates not met)",
+						"vault", vault,
+						"time_since_last", elapsed.Round(time.Second),
+						"new_engrams", currentCount-engramsAtDream)
+					dreport.Skipped = append(dreport.Skipped, vault)
+					report.Duration = time.Since(report.StartedAt)
+					dreport.Reports = append(dreport.Reports, report)
+					continue
+				}
+			}
+			// If not found (first dream), gates pass — proceed.
+		}
+
 		// Phase 1: Activation Replay
 		if err := dw.runPhase1Replay(ctx, store, wsPrefix, report); err != nil {
 			slog.Warn("dream: phase 1 (replay) failed", "vault", vault, "error", err)
@@ -107,17 +136,58 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 			report.Errors = append(report.Errors, "phase2_dedup: "+err.Error())
 		}
 
-		// Phase 2b: LLM Consolidation (future PR)
-		// Phase 3: Schema Promotion (future PR)
-		// Phase 4: Bidirectional Stability (future PR)
-		// Phase 5: Transitive Inference (future PR)
+		// Phase 2b: LLM Consolidation
+		if err := dw.runPhase2bLLMConsolidation(ctx, store, wsPrefix, report, vault, report.DedupClustersForLLM); err != nil {
+			slog.Warn("dream: phase 2b (LLM consolidation) failed", "vault", vault, "error", err)
+			report.Errors = append(report.Errors, "phase2b_llm: "+err.Error())
+		}
+
+		// Phase 3: Schema Promotion
+		if err := dw.runPhase3SchemaPromotion(ctx, store, wsPrefix, report); err != nil {
+			slog.Warn("dream: phase 3 (schema promotion) failed", "vault", vault, "error", err)
+			report.Errors = append(report.Errors, "phase3_schema_promotion: "+err.Error())
+		}
+
+		// Phase 4: Bidirectional Stability
+		if err := dw.runPhase4BidirectionalStability(ctx, store, wsPrefix, report, vault); err != nil {
+			slog.Warn("dream: phase 4 (stability) failed", "vault", vault, "error", err)
+			report.Errors = append(report.Errors, "phase4_stability: "+err.Error())
+		}
+
+		// Phase 5: Transitive Inference
+		if err := dw.runPhase5TransitiveInference(ctx, store, wsPrefix, report); err != nil {
+			slog.Warn("dream: phase 5 (transitive inference) failed", "vault", vault, "error", err)
+			report.Errors = append(report.Errors, "phase5_transitive_inference: "+err.Error())
+		}
 
 		report.Duration = time.Since(report.StartedAt)
+
+		if !opts.DryRun {
+			currentCount := int64(0)
+			if report.Orient != nil {
+				currentCount = int64(report.Orient.EngramCount)
+			}
+			if err := store.WriteDreamState(wsPrefix, time.Now(), currentCount); err != nil {
+				slog.Warn("dream: failed to write dream state", "vault", vault, "error", err)
+			}
+		}
+
 		dreport.Reports = append(dreport.Reports, report)
 
 		slog.Info("dream: vault completed", "vault", vault, "duration", report.Duration,
 			"merged", report.MergedEngrams)
 	}
+
+	// Phase 6: Dream Journal
+	journalEntry := formatJournalEntry(dreport, time.Now())
+	if !opts.DryRun {
+		if path, err := appendJournal(journalEntry); err != nil {
+			slog.Warn("dream: failed to write journal", "error", err)
+		} else {
+			slog.Info("dream: journal appended", "path", path)
+		}
+	}
+	dreport.JournalEntry = journalEntry
 
 	dreport.TotalDuration = time.Since(start)
 	return dreport, nil

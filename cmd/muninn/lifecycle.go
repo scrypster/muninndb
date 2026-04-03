@@ -230,6 +230,7 @@ func waitForProcessExit(pid int, timeout time.Duration) error {
 func runStatus() {
 	state := printStatusDisplay(false)
 	if state == stateStopped {
+		printDreamStatus()
 		osExit(1)
 	}
 }

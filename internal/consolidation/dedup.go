@@ -65,6 +65,7 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 	// Find clusters of similar engrams (naive O(n²) pairwise comparison)
 	type cluster struct {
 		members []*storage.Engram // all members of the cluster
+		maxSim  float32           // highest pairwise similarity in cluster
 	}
 	visited := make(map[storage.ULID]bool)
 	var clusters []cluster
@@ -87,6 +88,9 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 			if sim >= similarityThreshold {
 				clust.members = append(clust.members, withEmbed[j].engram)
 				visited[withEmbed[j].engram.ID] = true
+				if sim > clust.maxSim {
+					clust.maxSim = sim
+				}
 			}
 		}
 
@@ -98,8 +102,27 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 
 	report.DedupClusters = len(clusters)
 
-	// Process each cluster: keep representative, archive others
+	// Split clusters: high-similarity (>= 0.95) auto-merge, lower ones go to LLM review.
+	var autoMergeClusters []cluster
 	for _, clust := range clusters {
+		if clust.maxSim >= 0.95 {
+			autoMergeClusters = append(autoMergeClusters, clust)
+		} else {
+			// Collect for LLM review (Phase 2b)
+			dc := DedupCluster{Members: make([]ClusterMember, 0, len(clust.members))}
+			for _, m := range clust.members {
+				dc.Members = append(dc.Members, ClusterMember{
+					ID:      m.ID.String(),
+					Concept: m.Concept,
+					Content: m.Content,
+				})
+			}
+			report.DedupClustersForLLM = append(report.DedupClustersForLLM, dc)
+		}
+	}
+
+	// Process each auto-merge cluster: keep representative, archive others
+	for _, clust := range autoMergeClusters {
 		if len(clust.members) < 2 {
 			continue
 		}

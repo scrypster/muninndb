@@ -771,3 +771,14 @@ func ContentHashKey(ws [8]byte, hash [32]byte) []byte {
 	copy(key[9:41], hash[:])
 	return key
 }
+
+// DreamDueKey returns the Pebble key for the global dream-due flag.
+// Key layout: [0x27][8 zero bytes] (uses zero vault prefix for global scope)
+// Value layout: 8 bytes (flagged_at int64, BigEndian)
+func DreamDueKey() []byte {
+	key := make([]byte, 9)
+	key[0] = 0x27
+	// Remaining 8 bytes are zero — distinguishes from per-vault dream state
+	// because vault prefixes are non-zero (FNV-1a hash).
+	return key
+}
