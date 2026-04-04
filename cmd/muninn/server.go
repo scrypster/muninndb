@@ -933,6 +933,10 @@ func runServer() {
 	}
 
 	authStore := auth.NewStore(db)
+	if os.Getenv("MUNINN_DEFAULT_VAULT_PUBLIC") == "true" {
+		authStore.DefaultPublic = true
+		slog.Info("MUNINN_DEFAULT_VAULT_PUBLIC=true: unconfigured vaults will be public")
+	}
 	secretPath := filepath.Join(*dataDir, "auth_secret")
 	sessionSecret, err := auth.Bootstrap(authStore, secretPath)
 	if err != nil {
