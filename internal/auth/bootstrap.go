@@ -27,7 +27,8 @@ func Bootstrap(store *Store, secretPath string) (secret []byte, err error) {
 
 	// Create root admin if none exists
 	if !store.AdminExists() {
-		adminPassword := os.Getenv("MUNINN_ADMIN_PASSWORD")
+		envPassword := os.Getenv("MUNINN_ADMIN_PASSWORD")
+		adminPassword := envPassword
 		if adminPassword == "" {
 			adminPassword = "password"
 		}
@@ -35,7 +36,7 @@ func Bootstrap(store *Store, secretPath string) (secret []byte, err error) {
 			return nil, fmt.Errorf("create root admin: %w", err)
 		}
 
-		if os.Getenv("MUNINN_ADMIN_PASSWORD") != "" {
+		if envPassword != "" {
 			fmt.Println("┌──────────────────────────────────────────────────┐")
 			fmt.Println("│            MuninnDB — First Run Setup             │")
 			fmt.Println("│                                                    │")

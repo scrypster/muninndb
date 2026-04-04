@@ -586,14 +586,24 @@ func runStartupMigrations(ctx context.Context, store *storage.PebbleStore) {
 // handleClusterConn reads MBP frames from an incoming cluster TCP connection
 // and dispatches them to the coordinator. Exits when the connection is closed.
 //
-// The first frame from a Lobe is always a TypeJoinRequest whose payload
-// contains the Lobe's stable node ID. We route that frame to
-// HandleIncomingJoin, which registers the live conn under the real node ID so
-// that peer.Send works immediately. All subsequent frames use that node ID.
+// Protocol: the first frame MUST be TypeJoinRequest. On success, ownership of
+// conn transfers to the PeerConn inside ConnManager (HandleIncomingJoin →
+// RegisterConn). After that, this goroutine no longer closes conn on exit —
+// the coordinator's cleanup owns it. If the join fails or a protocol violation
+// occurs, this goroutine closes conn via the deferred call.
 func handleClusterConn(conn net.Conn, coord *replication.ClusterCoordinator) {
-	defer conn.Close()
-	// Use the ephemeral remote addr until the Lobe's node ID is known.
-	fromNodeID := conn.RemoteAddr().String()
+	// connOwned flips to false once HandleIncomingJoin succeeds and the
+	// PeerConn takes ownership, preventing a double-close on goroutine exit.
+	connOwned := true
+	defer func() {
+		if connOwned {
+			conn.Close()
+		}
+	}()
+
+	fromNodeID := conn.RemoteAddr().String() // ephemeral until join completes
+	joined := false
+
 	for {
 		frame, err := mbp.ReadFrame(conn)
 		if err != nil {
@@ -606,7 +616,15 @@ func handleClusterConn(conn net.Conn, coord *replication.ClusterCoordinator) {
 				return
 			}
 			fromNodeID = nodeID
+			joined = true
+			connOwned = false // PeerConn now owns conn
 			continue
+		}
+		// Reject any frame that arrives before the join handshake completes.
+		// A well-behaved Lobe always sends TypeJoinRequest first.
+		if !joined {
+			log.Printf("[cluster] unexpected frame type 0x%02x from %s before join; closing", frame.Type, fromNodeID)
+			return
 		}
 		if err := coord.HandleIncomingFrame(fromNodeID, frame.Type, frame.Payload); err != nil {
 			log.Printf("[cluster] frame error from %s: %v", fromNodeID, err)
