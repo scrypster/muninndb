@@ -102,10 +102,14 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 
 	report.DedupClusters = len(clusters)
 
-	// Split clusters: auto-merge only if ALL members have >= 0.95 similarity to seed.
+	// Split clusters: auto-merge only if ALL members have >= 0.99 similarity to seed.
+	// The 0.99 threshold is conservative because sentence-embedding models (e.g.
+	// nomic-embed-text) encode structure more than individual fact tokens —
+	// "Purple is my colour" vs "Cyan is my colour" can score 0.95+.
+	// Everything in the 0.85–0.99 range goes to Phase 2b for LLM adjudication.
 	var autoMergeClusters []cluster
 	for _, clust := range clusters {
-		if clust.minSim >= 0.95 {
+		if clust.minSim >= 0.99 {
 			autoMergeClusters = append(autoMergeClusters, clust)
 		} else {
 			// Collect for LLM review (Phase 2b)
