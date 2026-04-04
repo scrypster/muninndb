@@ -1,0 +1,100 @@
+name: Symbol Impact Analysis
+
+on:
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  impact:
+    name: Cymbal Impact Analysis
+    runs-on: ubuntu-latest
+    # Informational only — never blocks the gate.
+    continue-on-error: true
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Pin to digest for reproducibility and supply-chain safety.
+      - name: Pull cymbal image
+        run: docker pull ghcr.io/1broseidon/cymbal@sha256:43f0bb34b73ac6580a0a2daaa6673d95ad28860dd4ff29f441515af3aedca607
+
+      - name: Analyse impact
+        id: analyse
+        run: |
+          cymbal() { docker run --rm -v "$PWD":/workspace ghcr.io/1broseidon/cymbal@sha256:43f0bb34b73ac6580a0a2daaa6673d95ad28860dd4ff29f441515af3aedca607 "$@"; }
+
+          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD -- '*.go')
+          if [ -z "$CHANGED" ]; then
+            echo "No Go files changed."
+            echo '[]' > impact-report.json
+            echo "has_impact=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # cymbal auto-indexes on first query — no explicit index step needed.
+          SYMBOLS=$(echo "$CHANGED" \
+            | tr '\n' '\0' \
+            | xargs -0 -I{} cymbal outline {} --json 2>/dev/null \
+            | jq -r '.symbols[]?.name' 2>/dev/null \
+            | sort -u)
+
+          if [ -z "$SYMBOLS" ]; then
+            echo "No symbols extracted from changed files."
+            echo '[]' > impact-report.json
+            echo "has_impact=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "### Changed symbols"
+          echo "$SYMBOLS"
+          echo ""
+
+          echo "$SYMBOLS" | xargs -r cymbal impact --json 2>/dev/null \
+            | tee impact-report.json
+
+          # Ensure valid JSON; fall back to empty array if cymbal produced nothing.
+          if ! jq empty impact-report.json 2>/dev/null; then
+            echo '[]' > impact-report.json
+          fi
+
+          ENTRIES=$(jq 'if type == "array" then length else 0 end' impact-report.json 2>/dev/null || echo 0)
+          echo "### $ENTRIES impact entries"
+
+          if [ "$ENTRIES" -gt 0 ]; then
+            echo "has_impact=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_impact=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment impact on PR
+        if: steps.analyse.outputs.has_impact == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY=$(cat <<'DELIM'
+          ### 🔍 Cymbal Impact Analysis
+
+          **Changed symbols and their upstream callers:**
+
+          ```json
+          DELIM
+          )
+          BODY+=$'\n'
+          BODY+=$(head -100 impact-report.json)
+          BODY+=$'\n```'
+
+          gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY"
+
+      - name: Upload impact report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cymbal-impact-report
+          path: impact-report.json
+          retention-days: 14
