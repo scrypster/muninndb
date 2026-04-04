@@ -27,21 +27,36 @@ func Bootstrap(store *Store, secretPath string) (secret []byte, err error) {
 
 	// Create root admin if none exists
 	if !store.AdminExists() {
-		if err = store.CreateAdmin("root", "password"); err != nil {
+		adminPassword := os.Getenv("MUNINN_ADMIN_PASSWORD")
+		if adminPassword == "" {
+			adminPassword = "password"
+		}
+		if err = store.CreateAdmin("root", adminPassword); err != nil {
 			return nil, fmt.Errorf("create root admin: %w", err)
 		}
 
-		fmt.Println("┌──────────────────────────────────────────────────┐")
-		fmt.Println("│            MuninnDB — First Run Setup             │")
-		fmt.Println("│                                                    │")
-		fmt.Println("│  Admin username : root                             │")
-		fmt.Println("│  Admin password : password                         │")
-		fmt.Println("│                                                    │")
-		fmt.Println("│  Default vault  : public (no API key required)     │")
-		fmt.Println("│                                                    │")
-		fmt.Println("│  Change your password and review vault settings    │")
-		fmt.Println("│  in the admin UI before exposing to a network.     │")
-		fmt.Println("└──────────────────────────────────────────────────┘")
+		if os.Getenv("MUNINN_ADMIN_PASSWORD") != "" {
+			fmt.Println("┌──────────────────────────────────────────────────┐")
+			fmt.Println("│            MuninnDB — First Run Setup             │")
+			fmt.Println("│                                                    │")
+			fmt.Println("│  Admin username : root                             │")
+			fmt.Println("│  Admin password : (set via MUNINN_ADMIN_PASSWORD)  │")
+			fmt.Println("│                                                    │")
+			fmt.Println("│  Default vault  : public (no API key required)     │")
+			fmt.Println("└──────────────────────────────────────────────────┘")
+		} else {
+			fmt.Println("┌──────────────────────────────────────────────────┐")
+			fmt.Println("│            MuninnDB — First Run Setup             │")
+			fmt.Println("│                                                    │")
+			fmt.Println("│  Admin username : root                             │")
+			fmt.Println("│  Admin password : password                         │")
+			fmt.Println("│                                                    │")
+			fmt.Println("│  Default vault  : public (no API key required)     │")
+			fmt.Println("│                                                    │")
+			fmt.Println("│  Change your password and review vault settings    │")
+			fmt.Println("│  in the admin UI before exposing to a network.     │")
+			fmt.Println("└──────────────────────────────────────────────────┘")
+		}
 	}
 
 	// Ensure at least one vault config exists. Covers both fresh installs

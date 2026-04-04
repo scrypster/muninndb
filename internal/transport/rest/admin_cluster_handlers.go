@@ -17,6 +17,7 @@ type enableClusterRequest struct {
 	Role          string `json:"role"`
 	BindAddr      string `json:"bind_addr"`
 	ClusterSecret string `json:"cluster_secret"`
+	Secret        string `json:"secret"`      // alias for cluster_secret
 	CortexAddr    string `json:"cortex_addr"`
 }
 
@@ -95,6 +96,11 @@ func (s *Server) handleAdminClusterEnable(w http.ResponseWriter, r *http.Request
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidClusterRequest, "cortex_addr is required for non-primary roles")
 		return
 	}
+	// Accept "secret" as a convenience alias for "cluster_secret".
+	if req.ClusterSecret == "" {
+		req.ClusterSecret = req.Secret
+	}
+
 	// Start from defaults so fields like LeaseTTL and HeartbeatMS are never
 	// persisted as zero (which would cause a crash on the next restart).
 	cfg := config.ClusterDefaults()

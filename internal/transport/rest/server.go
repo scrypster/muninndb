@@ -366,6 +366,14 @@ func (s *Server) enableClusterRuntime(ctx context.Context, cfg config.ClusterCon
 		if err := config.SaveClusterConfig(s.dataDir, cfg); err != nil {
 			return fmt.Errorf("persist config: %w", err)
 		}
+		// Reload after saving so auto-generated fields (NodeID) are populated
+		// before the coordinator is created. Without this, the coordinator
+		// starts with an empty NodeID and the node cannot rejoin after restart.
+		reloaded, err := config.LoadClusterConfig(s.dataDir)
+		if err != nil {
+			return fmt.Errorf("reload config after save: %w", err)
+		}
+		cfg = reloaded
 	}
 	if s.coordinatorFactory != nil {
 		coord, err := s.coordinatorFactory(ctx, cfg)

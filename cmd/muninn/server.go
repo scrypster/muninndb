@@ -585,14 +585,29 @@ func runStartupMigrations(ctx context.Context, store *storage.PebbleStore) {
 
 // handleClusterConn reads MBP frames from an incoming cluster TCP connection
 // and dispatches them to the coordinator. Exits when the connection is closed.
+//
+// The first frame from a Lobe is always a TypeJoinRequest whose payload
+// contains the Lobe's stable node ID. We route that frame to
+// HandleIncomingJoin, which registers the live conn under the real node ID so
+// that peer.Send works immediately. All subsequent frames use that node ID.
 func handleClusterConn(conn net.Conn, coord *replication.ClusterCoordinator) {
 	defer conn.Close()
+	// Use the ephemeral remote addr until the Lobe's node ID is known.
+	fromNodeID := conn.RemoteAddr().String()
 	for {
 		frame, err := mbp.ReadFrame(conn)
 		if err != nil {
 			return // connection closed or error
 		}
-		fromNodeID := conn.RemoteAddr().String()
+		if frame.Type == mbp.TypeJoinRequest {
+			nodeID, err := coord.HandleIncomingJoin(conn, frame.Payload)
+			if err != nil {
+				log.Printf("[cluster] join error from %s: %v", fromNodeID, err)
+				return
+			}
+			fromNodeID = nodeID
+			continue
+		}
 		if err := coord.HandleIncomingFrame(fromNodeID, frame.Type, frame.Payload); err != nil {
 			log.Printf("[cluster] frame error from %s: %v", fromNodeID, err)
 		}

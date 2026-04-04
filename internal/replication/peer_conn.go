@@ -31,6 +31,17 @@ func NewPeerConn(nodeID, addr string) *PeerConn {
 	}
 }
 
+// NewPeerConnFromConn wraps an already-established inbound TCP connection as a
+// PeerConn. Used on the Cortex side when a Lobe dials in: the conn exists but
+// the Lobe's stable listen address (addr) comes from the JoinRequest payload.
+func NewPeerConnFromConn(nodeID, addr string, conn net.Conn) *PeerConn {
+	return &PeerConn{
+		nodeID: nodeID,
+		addr:   addr,
+		conn:   conn,
+	}
+}
+
 // NodeID returns the remote node ID.
 func (p *PeerConn) NodeID() string { return p.nodeID }
 
