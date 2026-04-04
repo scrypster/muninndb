@@ -45,6 +45,9 @@ jobs:
         if: steps.detect.outputs.has_changes == 'true'
         run: |
           # Run all cymbal commands in a single container so the index persists.
+          # Note: the cymbal image does not include jq, so we use plain-text
+          # outline output with grep for symbol extraction, and write JSON
+          # impact output to the mounted volume for host-side processing.
           docker run --rm \
             -v "$PWD":/workspace \
             -v /tmp/changed-files.txt:/tmp/changed-files.txt:ro \
@@ -56,11 +59,13 @@ jobs:
               # Build index once
               cymbal index . 2>&1 | tail -1
 
-              # Extract symbols from changed files
+              # Extract symbols from changed files using plain-text output.
+              # Outline format: "kind name (Lstart-end)" — grep extracts the name.
               SYMBOLS=""
               while IFS= read -r file; do
-                OUT=$(cymbal outline "$file" --json 2>/dev/null || true)
-                NAMES=$(echo "$OUT" | jq -r ".symbols[]?.name" 2>/dev/null || true)
+                NAMES=$(cymbal outline "$file" 2>/dev/null \
+                  | grep -oP "^(?:function|method|constant|type|struct|interface|variable|enum|trait|impl)\s+\K\S+" \
+                  || true)
                 if [ -n "$NAMES" ]; then
                   SYMBOLS=$(printf "%s\n%s" "$SYMBOLS" "$NAMES")
                 fi
@@ -78,23 +83,19 @@ jobs:
               echo "$SYMBOLS"
               echo ""
 
-              # Run impact analysis — pass all symbols at once
+              # Run impact analysis — write JSON to mounted volume.
+              # Use xargs to handle large symbol lists; -n 200 keeps each
+              # invocation well under ARG_MAX.
               printf "%s\n" "$SYMBOLS" \
                 | xargs -r -n 200 cymbal impact --json 2>/dev/null \
-                | jq -s "map(select(type == \"array\")) | add // []" \
                 | tee impact-report.json || true
 
-              # Validate JSON output
-              if ! jq empty impact-report.json 2>/dev/null; then
-                echo "[]" > impact-report.json
-              fi
-
-              ENTRIES=$(jq "if type == \"array\" then length else 0 end" impact-report.json 2>/dev/null || echo 0)
-              echo "### $ENTRIES impact entries"
+              ENTRIES=$(grep -c "\"caller\"" impact-report.json 2>/dev/null || echo 0)
+              echo "### ~$ENTRIES impact entries"
             '
 
-          # Check if impact report has entries (for the comment step)
-          if [ -f impact-report.json ] && [ "$(jq 'if type == "array" then length else 0 end' impact-report.json 2>/dev/null || echo 0)" -gt 0 ]; then
+          # Host-side: validate and normalize the JSON report.
+          if [ -f impact-report.json ] && jq -e '.results | length > 0' impact-report.json >/dev/null 2>&1; then
             echo "has_impact=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_impact=false" >> "$GITHUB_OUTPUT"
