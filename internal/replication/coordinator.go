@@ -620,11 +620,9 @@ func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (
 	}
 
 	// Register the live inbound conn so peer.Send succeeds immediately.
-	c.mgr.RegisterConn(req.NodeID, req.Addr, conn)
-	peer, ok := c.mgr.GetPeer(req.NodeID)
-	if !ok {
-		return "", fmt.Errorf("cluster: peer %s not found after RegisterConn", req.NodeID)
-	}
+	// RegisterConn returns the PeerConn it created under the write lock,
+	// eliminating the TOCTOU gap of a separate GetPeer call.
+	peer := c.mgr.RegisterConn(req.NodeID, req.Addr, conn)
 
 	resp := c.joinHandler.HandleJoinRequest(req, peer)
 	respPayload, err := msgpack.Marshal(resp)
@@ -692,45 +690,6 @@ func (c *ClusterCoordinator) HandleIncomingFrame(fromNodeID string, frameType ui
 			return fmt.Errorf("unmarshal CortexClaim: %w", err)
 		}
 		c.election.HandleCortexClaim(claim)
-		return nil
-
-	case mbp.TypeJoinRequest:
-		var req mbp.JoinRequest
-		if err := msgpack.Unmarshal(payload, &req); err != nil {
-			return fmt.Errorf("unmarshal JoinRequest: %w", err)
-		}
-		peer, ok := c.mgr.GetPeer(fromNodeID)
-		if !ok {
-			// Create a peer for the joining node
-			c.mgr.AddPeer(req.NodeID, req.Addr)
-			peer, ok = c.mgr.GetPeer(req.NodeID)
-			if !ok {
-				return errors.New("failed to create peer for joining node")
-			}
-		}
-		resp := c.joinHandler.HandleJoinRequest(req, peer)
-		respPayload, err := msgpack.Marshal(resp)
-		if err != nil {
-			return fmt.Errorf("marshal JoinResponse: %w", err)
-		}
-		_ = peer.Send(mbp.TypeJoinResponse, respPayload)
-
-		// Phase 2: stream snapshot immediately after JoinResponse on same conn.
-		if resp.NeedsSnapshot {
-			c.IncrementSnapshotCount()
-			go func() {
-				defer c.DecrementSnapshotCount()
-				ctx := context.Background()
-				if _, err := c.joinHandler.StreamSnapshot(ctx, peer); err != nil {
-					slog.Error("cluster: snapshot stream failed; closing connection so lobe can reconnect and retry",
-						"lobe", req.NodeID, "err", err)
-					// Close the connection so the Lobe's blocking reads return an
-					// error immediately. Without this, the Lobe waits forever for
-					// a snapshot that was never completed.
-					_ = peer.Close()
-				}
-			}()
-		}
 		return nil
 
 	case mbp.TypeLeave:
