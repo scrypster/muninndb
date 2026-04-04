@@ -9,6 +9,72 @@ import (
 	"github.com/scrypster/muninndb/internal/consolidation"
 )
 
+// dreamRequest is the request body for POST /api/dream
+type dreamRequest struct {
+	DryRun bool   `json:"dry_run"`
+	Force  bool   `json:"force"`
+	Scope  string `json:"scope,omitempty"` // limit to single vault ("" = all)
+}
+
+// dreamResponse wraps a DreamReport for JSON serialization.
+type dreamResponse struct {
+	TotalDuration string                  `json:"total_duration"`
+	Skipped       []string                `json:"skipped,omitempty"`
+	Reports       []consolidationResponse `json:"reports"`
+}
+
+// handleDream processes POST /api/dream
+func (s *Server) handleDream() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req dreamRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
+			return
+		}
+
+		ew, ok := s.engine.(*RESTEngineWrapper)
+		if !ok {
+			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, "engine type not supported for dream")
+			return
+		}
+		worker := consolidation.NewWorker(ew.engine)
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+		defer cancel()
+
+		report, err := worker.DreamOnce(ctx, consolidation.DreamOpts{
+			DryRun: req.DryRun,
+			Force:  req.Force,
+			Scope:  req.Scope,
+		})
+		if err != nil {
+			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+			return
+		}
+
+		resp := dreamResponse{
+			TotalDuration: report.TotalDuration.String(),
+			Skipped:       report.Skipped,
+		}
+		for _, r := range report.Reports {
+			resp.Reports = append(resp.Reports, consolidationResponse{
+				Vault:          r.Vault,
+				StartedAt:      r.StartedAt,
+				Duration:       r.Duration.String(),
+				DedupClusters:  r.DedupClusters,
+				MergedEngrams:  r.MergedEngrams,
+				PromotedNodes:  r.PromotedNodes,
+				DecayedEngrams: r.DecayedEngrams,
+				InferredEdges:  r.InferredEdges,
+				DryRun:         r.DryRun,
+				Errors:         r.Errors,
+			})
+		}
+
+		s.sendJSON(w, http.StatusOK, resp)
+	}
+}
+
 // consolidationRequest is the request body for POST /v1/vaults/{vault}/consolidate
 type consolidationRequest struct {
 	DryRun bool `json:"dry_run"`

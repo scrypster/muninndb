@@ -223,6 +223,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleRetryEnrich))))
 	mux.HandleFunc("GET /api/contradictions", s.withMiddleware(auth.WriteOnlyGuard(s.handleContradictions)))
 	mux.HandleFunc("GET /api/guide", s.withMiddleware(auth.WriteOnlyGuard(s.handleGuide)))
+	mux.HandleFunc("POST /api/dream", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleDream()))))
 
 	// Admin routes — require valid admin session cookie, return JSON 401 on failure.
 	mux.HandleFunc("POST /api/admin/keys", s.withAdminMiddleware(s.handleCreateAPIKey(authStore)))
