@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 // OpenAILLMProvider is an HTTP client for OpenAI's /v1/chat/completions endpoint.
@@ -51,7 +53,8 @@ type openaiChatResponse struct {
 func NewOpenAILLMProvider() *OpenAILLMProvider {
 	return &OpenAILLMProvider{
 		client: &http.Client{
-			Timeout: 300 * time.Second,
+			Timeout:   300 * time.Second,
+			Transport: plugin.WrapTransport(nil),
 		},
 	}
 }

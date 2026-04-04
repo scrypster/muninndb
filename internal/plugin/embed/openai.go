@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"sort"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 type OpenAIProvider struct {
@@ -55,7 +57,7 @@ func (p *OpenAIProvider) Init(ctx context.Context, cfg ProviderHTTPConfig) (int,
 	}
 	p.client = &http.Client{
 		Timeout:   10 * time.Second,
-		Transport: transport,
+		Transport: plugin.WrapTransport(transport),
 	}
 
 	// Embed probe text to detect dimension

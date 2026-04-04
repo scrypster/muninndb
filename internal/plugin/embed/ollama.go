@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 // OllamaProvider implements Provider for local Ollama instances.
@@ -77,7 +79,7 @@ func (p *OllamaProvider) Init(ctx context.Context, cfg ProviderHTTPConfig) (int,
 	// No client-level Timeout: all requests carry per-request context deadlines
 	// (set in probeEmbedEndpoint, embedBatchNew, etc.). A global Timeout would
 	// override context deadlines and silently kill large batch requests.
-	p.client = &http.Client{Transport: transport}
+	p.client = &http.Client{Transport: plugin.WrapTransport(transport)}
 
 	// Probe connectivity with root GET
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"sort"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 type MistralProvider struct {
@@ -54,7 +56,7 @@ func (p *MistralProvider) Init(ctx context.Context, cfg ProviderHTTPConfig) (int
 	}
 	p.client = &http.Client{
 		Timeout:   10 * time.Second,
-		Transport: transport,
+		Transport: plugin.WrapTransport(transport),
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

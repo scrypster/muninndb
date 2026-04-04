@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 // AnthropicLLMProvider is an HTTP client for Anthropic's /v1/messages endpoint.
@@ -44,7 +46,8 @@ type anthropicMessagesResponse struct {
 func NewAnthropicLLMProvider() *AnthropicLLMProvider {
 	return &AnthropicLLMProvider{
 		client: &http.Client{
-			Timeout: 300 * time.Second,
+			Timeout:   300 * time.Second,
+			Transport: plugin.WrapTransport(nil),
 		},
 	}
 }

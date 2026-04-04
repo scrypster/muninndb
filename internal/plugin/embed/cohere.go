@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 type CohereProvider struct {
@@ -52,7 +54,7 @@ func (p *CohereProvider) Init(ctx context.Context, cfg ProviderHTTPConfig) (int,
 	}
 	p.client = &http.Client{
 		Timeout:   10 * time.Second,
-		Transport: transport,
+		Transport: plugin.WrapTransport(transport),
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

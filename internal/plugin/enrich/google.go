@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 // GoogleLLMProvider is an HTTP client for Google's Gemini generateContent endpoint.
@@ -56,7 +58,10 @@ type googleGenerateResponse struct {
 // NewGoogleLLMProvider creates a new Google Gemini provider.
 func NewGoogleLLMProvider() *GoogleLLMProvider {
 	return &GoogleLLMProvider{
-		client: &http.Client{Timeout: 300 * time.Second},
+		client: &http.Client{
+			Timeout:   300 * time.Second,
+			Transport: plugin.WrapTransport(nil),
+		},
 	}
 }
 

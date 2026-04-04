@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 // OllamaLLMProvider is an HTTP client for Ollama's /api/chat endpoint.
@@ -45,7 +47,8 @@ type ollamaChatResponse struct {
 func NewOllamaLLMProvider() *OllamaLLMProvider {
 	return &OllamaLLMProvider{
 		client: &http.Client{
-			Timeout: 300 * time.Second,
+			Timeout:   300 * time.Second,
+			Transport: plugin.WrapTransport(nil),
 		},
 	}
 }

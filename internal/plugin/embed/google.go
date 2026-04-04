@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 type GoogleProvider struct {
@@ -72,7 +74,7 @@ func (p *GoogleProvider) Init(ctx context.Context, cfg ProviderHTTPConfig) (int,
 	}
 	p.client = &http.Client{
 		Timeout:   10 * time.Second,
-		Transport: transport,
+		Transport: plugin.WrapTransport(transport),
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
