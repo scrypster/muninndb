@@ -1352,7 +1352,7 @@ func runServer() {
 			if model == "" {
 				model = "llama3.2"
 			}
-			pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
+			pctx, pcancel := context.WithTimeout(dreamCtx, 10*time.Second)
 			if err := p.Init(pctx, enrichpkg.LLMProviderConfig{BaseURL: ollamaURL, Model: model}); err != nil {
 				slog.Warn("dream-on-start: ollama init failed", "error", err)
 			} else {
@@ -1366,7 +1366,7 @@ func runServer() {
 			if model == "" {
 				model = "claude-sonnet-4-20250514"
 			}
-			pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
+			pctx, pcancel := context.WithTimeout(dreamCtx, 10*time.Second)
 			if err := p.Init(pctx, enrichpkg.LLMProviderConfig{
 				BaseURL: "https://api.anthropic.com", Model: model, APIKey: apiKey,
 			}); err != nil {
@@ -1386,7 +1386,7 @@ func runServer() {
 			if baseURL == "" {
 				baseURL = "https://api.openai.com"
 			}
-			pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
+			pctx, pcancel := context.WithTimeout(dreamCtx, 10*time.Second)
 			if err := p.Init(pctx, enrichpkg.LLMProviderConfig{
 				BaseURL: baseURL, Model: model, APIKey: apiKey,
 			}); err != nil {

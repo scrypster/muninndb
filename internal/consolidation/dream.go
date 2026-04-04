@@ -178,6 +178,8 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 			"merged", report.MergedEngrams)
 	}
 
+	dreport.TotalDuration = time.Since(start)
+
 	// Phase 6: Dream Journal
 	journalEntry := formatJournalEntry(dreport, time.Now())
 	if !opts.DryRun {
@@ -188,7 +190,5 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 		}
 	}
 	dreport.JournalEntry = journalEntry
-
-	dreport.TotalDuration = time.Since(start)
 	return dreport, nil
 }

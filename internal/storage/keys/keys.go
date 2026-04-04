@@ -779,6 +779,6 @@ func DreamDueKey() []byte {
 	key := make([]byte, 9)
 	key[0] = 0x27
 	// Remaining 8 bytes are zero — distinguishes from per-vault dream state
-	// because vault prefixes are non-zero (FNV-1a hash).
+	// because vault prefixes are non-zero (SipHash).
 	return key
 }
