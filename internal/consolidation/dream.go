@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -22,12 +25,57 @@ type DreamReport struct {
 	JournalEntry  string // formatted journal markdown
 }
 
+// parseDreamPhases parses a comma-separated list of phase identifiers from
+// MUNINN_DREAM_PHASES. Returns nil when raw is empty (all phases enabled).
+// On invalid input, logs a warning and returns nil (all phases).
+func parseDreamPhases(raw string) map[string]bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	valid := map[string]bool{
+		"0": true, "1": true, "2": true, "2b": true,
+		"3": true, "4": true, "5": true, "6": true,
+	}
+	phases := map[string]bool{}
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !valid[p] {
+			slog.Warn("dream: invalid phase in MUNINN_DREAM_PHASES, falling back to all phases",
+				"invalid", p, "raw", raw)
+			return nil
+		}
+		phases[p] = true
+	}
+	if len(phases) == 0 {
+		return nil
+	}
+	return phases
+}
+
+func phaseEnabled(phases map[string]bool, phase string) bool {
+	return phases == nil || phases[phase]
+}
+
 // DreamOnce runs a single dream consolidation pass across vaults.
 // In dream mode, the dedup threshold is lowered to 0.85 to surface
 // near-duplicate candidates for future LLM review (Phase 2b).
 func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, error) {
 	start := time.Now()
 	dreport := &DreamReport{}
+
+	phases := parseDreamPhases(os.Getenv("MUNINN_DREAM_PHASES"))
+	if phases != nil {
+		enabled := make([]string, 0, len(phases))
+		for p := range phases {
+			enabled = append(enabled, p)
+		}
+		sort.Strings(enabled)
+		slog.Info("dream: phases enabled", "phases", enabled)
+	}
 
 	// Resolve which vaults to process.
 	var vaults []string
@@ -78,12 +126,18 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 		}
 
 		// Phase 0: Orient
-		summary, err := dw.runPhase0Orient(ctx, store, wsPrefix, vault)
-		if err != nil {
-			slog.Warn("dream: phase 0 (orient) failed", "vault", vault, "error", err)
-			report.Errors = append(report.Errors, "phase0_orient: "+err.Error())
+		var summary *VaultSummary
+		if phaseEnabled(phases, "0") {
+			var err error
+			summary, err = dw.runPhase0Orient(ctx, store, wsPrefix, vault)
+			if err != nil {
+				slog.Warn("dream: phase 0 (orient) failed", "vault", vault, "error", err)
+				report.Errors = append(report.Errors, "phase0_orient: "+err.Error())
+			}
+			report.Orient = summary
+		} else {
+			slog.Debug("dream: skipping phase 0 (not in MUNINN_DREAM_PHASES)")
 		}
-		report.Orient = summary
 
 		// Skip legal vaults entirely.
 		if summary != nil && summary.IsLegal {
@@ -125,39 +179,63 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 		}
 
 		// Phase 1: Activation Replay
-		if err := dw.runPhase1Replay(ctx, store, wsPrefix, report); err != nil {
-			slog.Warn("dream: phase 1 (replay) failed", "vault", vault, "error", err)
-			report.Errors = append(report.Errors, "phase1_replay: "+err.Error())
+		if phaseEnabled(phases, "1") {
+			if err := dw.runPhase1Replay(ctx, store, wsPrefix, report); err != nil {
+				slog.Warn("dream: phase 1 (replay) failed", "vault", vault, "error", err)
+				report.Errors = append(report.Errors, "phase1_replay: "+err.Error())
+			}
+		} else {
+			slog.Debug("dream: skipping phase 1 (not in MUNINN_DREAM_PHASES)")
 		}
 
 		// Phase 2: Semantic Deduplication (threshold 0.85 in dream mode)
-		if err := dw.runPhase2Dedup(ctx, store, wsPrefix, report, vault); err != nil {
-			slog.Warn("dream: phase 2 (dedup) failed", "vault", vault, "error", err)
-			report.Errors = append(report.Errors, "phase2_dedup: "+err.Error())
+		if phaseEnabled(phases, "2") {
+			if err := dw.runPhase2Dedup(ctx, store, wsPrefix, report, vault); err != nil {
+				slog.Warn("dream: phase 2 (dedup) failed", "vault", vault, "error", err)
+				report.Errors = append(report.Errors, "phase2_dedup: "+err.Error())
+			}
+		} else {
+			slog.Debug("dream: skipping phase 2 (not in MUNINN_DREAM_PHASES)")
 		}
 
 		// Phase 2b: LLM Consolidation
-		if err := dw.runPhase2bLLMConsolidation(ctx, store, wsPrefix, report, vault, report.DedupClustersForLLM); err != nil {
-			slog.Warn("dream: phase 2b (LLM consolidation) failed", "vault", vault, "error", err)
-			report.Errors = append(report.Errors, "phase2b_llm: "+err.Error())
+		if phaseEnabled(phases, "2b") {
+			if err := dw.runPhase2bLLMConsolidation(ctx, store, wsPrefix, report, vault, report.DedupClustersForLLM); err != nil {
+				slog.Warn("dream: phase 2b (LLM consolidation) failed", "vault", vault, "error", err)
+				report.Errors = append(report.Errors, "phase2b_llm: "+err.Error())
+			}
+		} else {
+			slog.Debug("dream: skipping phase 2b (not in MUNINN_DREAM_PHASES)")
 		}
 
 		// Phase 3: Schema Promotion
-		if err := dw.runPhase3SchemaPromotion(ctx, store, wsPrefix, report); err != nil {
-			slog.Warn("dream: phase 3 (schema promotion) failed", "vault", vault, "error", err)
-			report.Errors = append(report.Errors, "phase3_schema_promotion: "+err.Error())
+		if phaseEnabled(phases, "3") {
+			if err := dw.runPhase3SchemaPromotion(ctx, store, wsPrefix, report); err != nil {
+				slog.Warn("dream: phase 3 (schema promotion) failed", "vault", vault, "error", err)
+				report.Errors = append(report.Errors, "phase3_schema_promotion: "+err.Error())
+			}
+		} else {
+			slog.Debug("dream: skipping phase 3 (not in MUNINN_DREAM_PHASES)")
 		}
 
 		// Phase 4: Bidirectional Stability
-		if err := dw.runPhase4BidirectionalStability(ctx, store, wsPrefix, report, vault); err != nil {
-			slog.Warn("dream: phase 4 (stability) failed", "vault", vault, "error", err)
-			report.Errors = append(report.Errors, "phase4_stability: "+err.Error())
+		if phaseEnabled(phases, "4") {
+			if err := dw.runPhase4BidirectionalStability(ctx, store, wsPrefix, report, vault); err != nil {
+				slog.Warn("dream: phase 4 (stability) failed", "vault", vault, "error", err)
+				report.Errors = append(report.Errors, "phase4_stability: "+err.Error())
+			}
+		} else {
+			slog.Debug("dream: skipping phase 4 (not in MUNINN_DREAM_PHASES)")
 		}
 
 		// Phase 5: Transitive Inference
-		if err := dw.runPhase5TransitiveInference(ctx, store, wsPrefix, report); err != nil {
-			slog.Warn("dream: phase 5 (transitive inference) failed", "vault", vault, "error", err)
-			report.Errors = append(report.Errors, "phase5_transitive_inference: "+err.Error())
+		if phaseEnabled(phases, "5") {
+			if err := dw.runPhase5TransitiveInference(ctx, store, wsPrefix, report); err != nil {
+				slog.Warn("dream: phase 5 (transitive inference) failed", "vault", vault, "error", err)
+				report.Errors = append(report.Errors, "phase5_transitive_inference: "+err.Error())
+			}
+		} else {
+			slog.Debug("dream: skipping phase 5 (not in MUNINN_DREAM_PHASES)")
 		}
 
 		report.Duration = time.Since(report.StartedAt)
@@ -181,14 +259,18 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 	dreport.TotalDuration = time.Since(start)
 
 	// Phase 6: Dream Journal
-	journalEntry := formatJournalEntry(dreport, time.Now())
-	if !opts.DryRun {
-		if path, err := appendJournal(journalEntry); err != nil {
-			slog.Warn("dream: failed to write journal", "error", err)
-		} else {
-			slog.Info("dream: journal appended", "path", path)
+	if phaseEnabled(phases, "6") {
+		journalEntry := formatJournalEntry(dreport, time.Now())
+		if !opts.DryRun {
+			if path, err := appendJournal(journalEntry); err != nil {
+				slog.Warn("dream: failed to write journal", "error", err)
+			} else {
+				slog.Info("dream: journal appended", "path", path)
+			}
 		}
+		dreport.JournalEntry = journalEntry
+	} else {
+		slog.Debug("dream: skipping phase 6 (not in MUNINN_DREAM_PHASES)")
 	}
-	dreport.JournalEntry = journalEntry
 	return dreport, nil
 }
