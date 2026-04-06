@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Opt into Node.js 24 for all actions now, ahead of the forced migration
+# on June 2, 2026. Silences deprecation warnings for actions/checkout,
+# actions/setup-node, actions/cache, etc.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ── Go: build + test ────────────────────────────────────────────────────
   go:
