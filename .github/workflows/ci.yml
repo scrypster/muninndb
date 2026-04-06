@@ -369,7 +369,7 @@ jobs:
           node-version: '20'
 
       - name: Lint OpenAPI spec
-        run: npx --yes @redocly/cli@latest lint internal/transport/rest/openapi.yaml
+        run: npx --yes @redocly/cli@1.25.14 lint internal/transport/rest/openapi.yaml
 
       - name: Check route count parity (informational)
         run: |

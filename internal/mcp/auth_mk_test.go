@@ -191,6 +191,62 @@ func TestAuthFromRequest_EmptyRequiredToken(t *testing.T) {
 	}
 }
 
+// TestAuthFromRequest_OpenServer_ValidMkKey verifies that a valid mk_ key is
+// fully enforced (vault pinned) even when no static token is configured.
+// This is the regression test for the open-server vault isolation bypass.
+func TestAuthFromRequest_OpenServer_ValidMkKey(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID:    "vaultkey1",
+		Vault: "personal",
+		Mode:  "full",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer mk_vaultkey1")
+
+	a := authFromRequest(req, "", store) // no static token = open-server mode
+
+	if !a.Authorized {
+		t.Fatal("valid mk_ key must be authorized in open-server mode")
+	}
+	if !a.IsAPIKey {
+		t.Error("expected IsAPIKey=true")
+	}
+	if a.Vault != "personal" {
+		t.Errorf("expected vault=personal, got %q", a.Vault)
+	}
+}
+
+// TestAuthFromRequest_OpenServer_InvalidMkKey verifies that an invalid mk_ key
+// is rejected (not silently upgraded to open access) in open-server mode.
+func TestAuthFromRequest_OpenServer_InvalidMkKey(t *testing.T) {
+	store := newMockKeyStore() // empty — no valid keys
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer mk_badkey")
+
+	a := authFromRequest(req, "", store) // no static token = open-server mode
+
+	if a.Authorized {
+		t.Error("invalid mk_ key must not fall through to open access")
+	}
+}
+
+// TestAuthFromRequest_OpenServer_NoKey verifies that a request with no token
+// still gets open access when no static token is configured and no mk_ key is
+// presented (plain open-server mode, unchanged behaviour).
+func TestAuthFromRequest_OpenServer_NoKey(t *testing.T) {
+	store := newMockKeyStore()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+
+	a := authFromRequest(req, "", store)
+
+	if !a.Authorized {
+		t.Error("no key presented in open-server mode must still authorize")
+	}
+	if a.IsAPIKey {
+		t.Error("expected IsAPIKey=false for unauthenticated open-server request")
+	}
+}
+
 // --- resolveVault unit tests ---
 
 func TestResolveVault_PinnedVault_ArgAbsent(t *testing.T) {
