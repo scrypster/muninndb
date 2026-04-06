@@ -383,9 +383,9 @@ func (s *MCPServer) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-validate auth on every POST — defense in depth against session ID leakage.
-	// If the server requires a token, every POST must present a valid Bearer token
-	// that matches the session's auth identity.
-	if s.token != "" {
+	// Run whenever any auth mechanism is active (static token or mk_ key store),
+	// not just when a static token is configured.
+	if s.token != "" || s.authKeys != nil {
 		a := authFromRequest(r, s.token, s.authKeys)
 		if !a.Authorized {
 			w.Header().Set("Content-Type", "application/json")
