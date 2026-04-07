@@ -212,8 +212,7 @@ func printStatusDisplay(compact bool) runState {
 
 // printDreamStatus reads dream state from Pebble and prints a summary.
 // Only called when the server is stopped (no live API available).
-func printDreamStatus() {
-	dataDir := defaultDataDir()
+func printDreamStatus(dataDir string) {
 	dbPath := filepath.Join(dataDir, "pebble")
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
