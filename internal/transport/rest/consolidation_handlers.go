@@ -38,6 +38,8 @@ func (s *Server) handleDream() http.HandlerFunc {
 			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, "engine type not supported for dream")
 			return
 		}
+		// TODO: concurrent dream requests can interleave mutations — add a
+		// sync.Mutex or return 409 Conflict if a dream is already in progress.
 		worker := consolidation.NewWorker(ew.engine)
 		worker.OllamaLLM = s.dreamOllama
 		worker.AnthropicLLM = s.dreamAnthropic

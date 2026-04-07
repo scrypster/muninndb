@@ -158,6 +158,8 @@ func parseDreamResponse(raw string) (*DreamLLMResponse, error) {
 }
 
 // buildClusterPrompt formats dedup clusters into a user prompt for the LLM.
+// TODO: engram content is interpolated as-is — a crafted engram could attempt
+// prompt injection. Consider JSON-encoding cluster members to reduce the attack surface.
 func buildClusterPrompt(clusters []DedupCluster, vault string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Vault: %s\n\n", vault)
