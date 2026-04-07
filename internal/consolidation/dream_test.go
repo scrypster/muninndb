@@ -350,6 +350,56 @@ func TestParseDreamPhases_AllBlanks(t *testing.T) {
 	}
 }
 
+// TestDreamOnce_Phase0Disabled_VolumeGateStillWorks verifies that when phase 0
+// is disabled via MUNINN_DREAM_PHASES, the volume gate still correctly counts
+// engrams (via the always-run Orient) and does not skip the vault.
+func TestDreamOnce_Phase0Disabled_VolumeGateStillWorks(t *testing.T) {
+	// Disable phase 0 — only enable phases 2 and 5.
+	t.Setenv("MUNINN_DREAM_PHASES", "2,5")
+
+	store, db, cleanup := testStoreWithDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	vault := "no_phase0"
+	wsPrefix := store.ResolveVaultPrefix(vault)
+
+	// Write 4 engrams (above volume gate of 3).
+	for i := 0; i < 4; i++ {
+		writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
+			Concept: fmt.Sprintf("concept_%d", i), Content: "content", Confidence: 0.8,
+			Relevance: 0.6, Stability: 20, Embedding: []float32{1, 0, 0},
+		})
+	}
+
+	// Write dream state 13 hours ago with 0 engrams at that time.
+	if err := store.WriteDreamState(wsPrefix, time.Now().Add(-13*time.Hour), 0); err != nil {
+		t.Fatalf("WriteDreamState: %v", err)
+	}
+
+	mock := &mockEngineInterface{store: store}
+	w := NewWorker(mock)
+
+	report, err := w.DreamOnce(ctx, DreamOpts{Force: false, Scope: vault})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Vault must NOT be skipped — Orient always runs for gate logic even
+	// when phase 0 is disabled.
+	if slices.Contains(report.Skipped, vault) {
+		t.Errorf("vault %q should NOT be in Skipped when volume gate passes, got Skipped=%v", vault, report.Skipped)
+	}
+	if len(report.Reports) != 1 {
+		t.Fatalf("expected 1 report, got %d", len(report.Reports))
+	}
+
+	// Phase 0 is disabled, so report.Orient should be nil (not exposed).
+	if report.Reports[0].Orient != nil {
+		t.Error("expected Orient=nil when phase 0 is disabled")
+	}
+}
+
 func TestDreamOnce_PhasesSchemaAndTransitiveRun(t *testing.T) {
 	// Enable phases 3 and 5 explicitly — safe defaults exclude phase 3.
 	t.Setenv("MUNINN_DREAM_PHASES", "0,2,3,5")

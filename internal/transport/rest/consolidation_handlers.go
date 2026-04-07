@@ -21,6 +21,7 @@ type dreamResponse struct {
 	TotalDuration string                  `json:"total_duration"`
 	Skipped       []string                `json:"skipped,omitempty"`
 	Reports       []consolidationResponse `json:"reports"`
+	JournalEntry  string                  `json:"journal_entry,omitempty"`
 }
 
 // handleDream processes POST /api/dream
@@ -58,19 +59,25 @@ func (s *Server) handleDream() http.HandlerFunc {
 		resp := dreamResponse{
 			TotalDuration: report.TotalDuration.String(),
 			Skipped:       report.Skipped,
+			JournalEntry:  report.JournalEntry,
 		}
 		for _, r := range report.Reports {
 			resp.Reports = append(resp.Reports, consolidationResponse{
-				Vault:          r.Vault,
-				StartedAt:      r.StartedAt,
-				Duration:       r.Duration.String(),
-				DedupClusters:  r.DedupClusters,
-				MergedEngrams:  r.MergedEngrams,
-				PromotedNodes:  r.PromotedNodes,
-				DecayedEngrams: r.DecayedEngrams,
-				InferredEdges:  r.InferredEdges,
-				DryRun:         r.DryRun,
-				Errors:         r.Errors,
+				Vault:                 r.Vault,
+				StartedAt:             r.StartedAt,
+				Duration:              r.Duration.String(),
+				DedupClusters:         r.DedupClusters,
+				MergedEngrams:         r.MergedEngrams,
+				PromotedNodes:         r.PromotedNodes,
+				DecayedEngrams:        r.DecayedEngrams,
+				InferredEdges:         r.InferredEdges,
+				StabilityStrengthened: r.StabilityStrengthened,
+				StabilityWeakened:     r.StabilityWeakened,
+				LLMMerged:             r.LLMMerged,
+				LLMContradictions:     r.LLMContradictions,
+				Journal:               r.Journal,
+				DryRun:                r.DryRun,
+				Errors:                r.Errors,
 			})
 		}
 
@@ -85,16 +92,21 @@ type consolidationRequest struct {
 
 // consolidationResponse wraps a ConsolidationReport for JSON serialization
 type consolidationResponse struct {
-	Vault          string        `json:"vault"`
-	StartedAt      time.Time     `json:"started_at"`
-	Duration       string        `json:"duration"`
-	DedupClusters  int           `json:"dedup_clusters"`
-	MergedEngrams  int           `json:"merged_engrams"`
-	PromotedNodes  int           `json:"promoted_nodes"`
-	DecayedEngrams int           `json:"decayed_engrams"`
-	InferredEdges  int           `json:"inferred_edges"`
-	DryRun         bool          `json:"dry_run"`
-	Errors         []string      `json:"errors,omitempty"`
+	Vault                 string   `json:"vault"`
+	StartedAt             time.Time `json:"started_at"`
+	Duration              string   `json:"duration"`
+	DedupClusters         int      `json:"dedup_clusters"`
+	MergedEngrams         int      `json:"merged_engrams"`
+	PromotedNodes         int      `json:"promoted_nodes"`
+	DecayedEngrams        int      `json:"decayed_engrams"`
+	InferredEdges         int      `json:"inferred_edges"`
+	StabilityStrengthened int      `json:"stability_strengthened,omitempty"`
+	StabilityWeakened     int      `json:"stability_weakened,omitempty"`
+	LLMMerged             int      `json:"llm_merged,omitempty"`
+	LLMContradictions     int      `json:"llm_contradictions,omitempty"`
+	Journal               string   `json:"journal,omitempty"`
+	DryRun                bool     `json:"dry_run"`
+	Errors                []string `json:"errors,omitempty"`
 }
 
 // handleConsolidate processes POST /v1/vaults/{vault}/consolidate

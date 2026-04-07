@@ -59,7 +59,8 @@ func (w *Worker) runPhase4BidirectionalStability(ctx context.Context, store *sto
 		var newStability float32
 		var changed bool
 
-		if eng.AccessCount >= highAccessThreshold && eng.Relevance >= highRelevanceMin {
+		wasStrengthened := eng.AccessCount >= highAccessThreshold && eng.Relevance >= highRelevanceMin
+		if wasStrengthened {
 			// High-signal: strengthen stability.
 			newStability = eng.Stability * 1.2
 			changed = true
@@ -83,7 +84,7 @@ func (w *Worker) runPhase4BidirectionalStability(ctx context.Context, store *sto
 			if err := store.UpdateRelevance(ctx, wsPrefix, eng.ID, eng.Relevance, newStability); err != nil {
 				slog.Warn("dream phase4 (stability): failed to update engram", "id", eng.ID, "error", err)
 				// Undo count increment on write failure.
-				if eng.AccessCount >= highAccessThreshold && eng.Relevance >= highRelevanceMin {
+				if wasStrengthened {
 					strengthened--
 				} else {
 					weakened--

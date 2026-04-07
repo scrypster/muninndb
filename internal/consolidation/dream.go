@@ -141,18 +141,14 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 			DryRun:    opts.DryRun,
 		}
 
-		// Phase 0: Orient
-		var summary *VaultSummary
+		// Always run Orient for gate logic; only report it if the phase is enabled.
+		summary, err := dw.runPhase0Orient(ctx, store, wsPrefix, vault)
+		if err != nil {
+			slog.Warn("dream: phase 0 (orient) failed", "vault", vault, "error", err)
+			report.Errors = append(report.Errors, "phase0_orient: "+err.Error())
+		}
 		if phaseEnabled(phases, "0") {
-			var err error
-			summary, err = dw.runPhase0Orient(ctx, store, wsPrefix, vault)
-			if err != nil {
-				slog.Warn("dream: phase 0 (orient) failed", "vault", vault, "error", err)
-				report.Errors = append(report.Errors, "phase0_orient: "+err.Error())
-			}
 			report.Orient = summary
-		} else {
-			slog.Debug("dream: skipping phase 0 (not in MUNINN_DREAM_PHASES)")
 		}
 
 		// Skip legal vaults entirely.
