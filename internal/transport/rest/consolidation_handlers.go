@@ -38,6 +38,9 @@ func (s *Server) handleDream() http.HandlerFunc {
 			return
 		}
 		worker := consolidation.NewWorker(ew.engine)
+		worker.OllamaLLM = s.dreamOllama
+		worker.AnthropicLLM = s.dreamAnthropic
+		worker.OpenAILLM = s.dreamOpenAI
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 		defer cancel()

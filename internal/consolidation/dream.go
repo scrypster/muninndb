@@ -25,39 +25,53 @@ type DreamReport struct {
 	JournalEntry  string // formatted journal markdown
 }
 
+// defaultDreamPhaseList is the safe set of phases that run when MUNINN_DREAM_PHASES
+// is unset. Excluded: 1 (replay, -0.011), 2b (LLM, -0.011), 3 (schema, +0.004
+// neutral), 4 (stability, -0.014), 6 (journal, +0.003 neutral). Only phases with
+// clearly positive ablation deltas are included.
+var defaultDreamPhaseList = []string{"0", "2", "5"}
+
+func newDefaultDreamPhases() map[string]bool {
+	m := make(map[string]bool, len(defaultDreamPhaseList))
+	for _, p := range defaultDreamPhaseList {
+		m[p] = true
+	}
+	return m
+}
+
 // parseDreamPhases parses a comma-separated list of phase identifiers from
-// MUNINN_DREAM_PHASES. Returns nil when raw is empty (all phases enabled).
-// On invalid input, logs a warning and returns nil (all phases).
-func parseDreamPhases(raw string) map[string]bool {
+// MUNINN_DREAM_PHASES. Returns a fresh copy of the safe defaults {0, 2, 5}
+// when raw is empty or on invalid input (with a warning).
+func parseDreamPhases(raw string) (phases map[string]bool, isDefault bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return newDefaultDreamPhases(), true
 	}
 	valid := map[string]bool{
 		"0": true, "1": true, "2": true, "2b": true,
 		"3": true, "4": true, "5": true, "6": true,
 	}
-	phases := map[string]bool{}
+	phases = map[string]bool{}
 	for _, p := range strings.Split(raw, ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
 		if !valid[p] {
-			slog.Warn("dream: invalid phase in MUNINN_DREAM_PHASES, falling back to all phases",
+			slog.Warn("dream: invalid phase in MUNINN_DREAM_PHASES, falling back to safe defaults (0,2,5)",
 				"invalid", p, "raw", raw)
-			return nil
+			return newDefaultDreamPhases(), true
 		}
 		phases[p] = true
 	}
 	if len(phases) == 0 {
-		return nil
+		return newDefaultDreamPhases(), true
 	}
-	return phases
+	return phases, false
 }
 
 func phaseEnabled(phases map[string]bool, phase string) bool {
-	return phases == nil || phases[phase]
+	return phases[phase]
 }
 
 // DreamOnce runs a single dream consolidation pass across vaults.
@@ -67,8 +81,10 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 	start := time.Now()
 	dreport := &DreamReport{}
 
-	phases := parseDreamPhases(os.Getenv("MUNINN_DREAM_PHASES"))
-	if phases != nil {
+	phases, usingDefaults := parseDreamPhases(os.Getenv("MUNINN_DREAM_PHASES"))
+	if usingDefaults {
+		slog.Info("dream: using safe default phases (0,2,5)")
+	} else {
 		enabled := make([]string, 0, len(phases))
 		for p := range phases {
 			enabled = append(enabled, p)

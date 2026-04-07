@@ -216,6 +216,9 @@ func TestDreamOnce_GatesPass_EnoughTimeAndVolume(t *testing.T) {
 }
 
 func TestDreamOnce_FullPipeline_WithMockLLM(t *testing.T) {
+	// Enable all phases — the safe defaults exclude 2b, 4, and 6.
+	t.Setenv("MUNINN_DREAM_PHASES", "0,1,2,2b,3,4,5,6")
+
 	store, db, cleanup := testStoreWithDB(t)
 	defer cleanup()
 
@@ -297,7 +300,60 @@ func TestDreamOnce_FullPipeline_WithMockLLM(t *testing.T) {
 	}
 }
 
+func TestParseDreamPhases_Empty(t *testing.T) {
+	phases, isDefault := parseDreamPhases("")
+	if !isDefault {
+		t.Error("expected isDefault=true for empty input")
+	}
+	if len(phases) != 3 {
+		t.Fatalf("expected 3 default phases, got %d", len(phases))
+	}
+	for _, p := range []string{"0", "2", "5"} {
+		if !phases[p] {
+			t.Errorf("expected default phase %q to be enabled", p)
+		}
+	}
+}
+
+func TestParseDreamPhases_Explicit(t *testing.T) {
+	phases, isDefault := parseDreamPhases("0,2b,5")
+	if isDefault {
+		t.Error("expected isDefault=false for explicit input")
+	}
+	if len(phases) != 3 {
+		t.Fatalf("expected 3 phases, got %d: %v", len(phases), phases)
+	}
+	for _, p := range []string{"0", "2b", "5"} {
+		if !phases[p] {
+			t.Errorf("expected phase %q to be enabled", p)
+		}
+	}
+}
+
+func TestParseDreamPhases_Invalid(t *testing.T) {
+	phases, isDefault := parseDreamPhases("0,bogus,5")
+	if !isDefault {
+		t.Error("expected isDefault=true for invalid input")
+	}
+	if len(phases) != 3 {
+		t.Fatalf("expected 3 default phases (fallback), got %d", len(phases))
+	}
+}
+
+func TestParseDreamPhases_AllBlanks(t *testing.T) {
+	phases, isDefault := parseDreamPhases(", , ,")
+	if !isDefault {
+		t.Error("expected isDefault=true for all-blanks input")
+	}
+	if len(phases) != 3 {
+		t.Fatalf("expected 3 default phases (fallback), got %d", len(phases))
+	}
+}
+
 func TestDreamOnce_PhasesSchemaAndTransitiveRun(t *testing.T) {
+	// Enable phases 3 and 5 explicitly — safe defaults exclude phase 3.
+	t.Setenv("MUNINN_DREAM_PHASES", "0,2,3,5")
+
 	store, db, cleanup := testStoreWithDB(t)
 	defer cleanup()
 

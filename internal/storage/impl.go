@@ -604,7 +604,7 @@ func (ps *PebbleStore) ReadDreamDue() (time.Time, bool, error) {
 
 // ClearDreamDue removes the global dream-due flag.
 func (ps *PebbleStore) ClearDreamDue() error {
-	return ps.db.Delete(keys.DreamDueKey(), pebble.NoSync)
+	return ps.db.Delete(keys.DreamDueKey(), pebble.Sync)
 }
 
 // Checkpoint creates a Pebble checkpoint (consistent on-disk snapshot) at destDir.

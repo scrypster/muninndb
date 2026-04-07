@@ -1333,6 +1333,10 @@ func runServer() {
 	}
 	eng.SetRetroactiveProcessors(obsProcs...)
 
+	// Build dream LLM providers once — shared by dream-on-start and the REST endpoint.
+	dreamOllama, dreamAnthropic, dreamOpenAI := buildDreamProviders(ctx)
+	restServer.SetDreamProviders(dreamOllama, dreamAnthropic, dreamOpenAI)
+
 	// Dream-on-start: check dream_due flag and run dream if gates pass.
 	if flaggedAt, due, err := store.ReadDreamDue(); err != nil {
 		slog.Warn("dream-on-start: failed to read dream-due flag", "error", err)
@@ -1347,59 +1351,6 @@ func runServer() {
 			"flagged_at", flaggedAt, "timeout", dreamTimeout)
 
 		dreamCtx, dreamCancel := context.WithTimeout(ctx, dreamTimeout)
-
-		// Build LLM providers for dream Phase 2b.
-		var dreamOllama, dreamAnthropic, dreamOpenAI consolidation.LLMProvider
-		if ollamaURL := os.Getenv("MUNINN_OLLAMA_URL"); ollamaURL != "" {
-			p := enrichpkg.NewOllamaLLMProvider()
-			model := os.Getenv("MUNINN_OLLAMA_MODEL")
-			if model == "" {
-				model = "llama3.2"
-			}
-			pctx, pcancel := context.WithTimeout(dreamCtx, 10*time.Second)
-			if err := p.Init(pctx, enrichpkg.LLMProviderConfig{BaseURL: ollamaURL, Model: model}); err != nil {
-				slog.Warn("dream-on-start: ollama init failed", "error", err)
-			} else {
-				dreamOllama = p
-			}
-			pcancel()
-		}
-		if apiKey := os.Getenv("MUNINN_ANTHROPIC_KEY"); apiKey != "" {
-			p := enrichpkg.NewAnthropicLLMProvider()
-			model := os.Getenv("MUNINN_ANTHROPIC_MODEL")
-			if model == "" {
-				model = "claude-sonnet-4-20250514"
-			}
-			pctx, pcancel := context.WithTimeout(dreamCtx, 10*time.Second)
-			if err := p.Init(pctx, enrichpkg.LLMProviderConfig{
-				BaseURL: "https://api.anthropic.com", Model: model, APIKey: apiKey,
-			}); err != nil {
-				slog.Warn("dream-on-start: anthropic init failed", "error", err)
-			} else {
-				dreamAnthropic = p
-			}
-			pcancel()
-		}
-		if apiKey := os.Getenv("MUNINN_OPENAI_KEY"); apiKey != "" {
-			p := enrichpkg.NewOpenAILLMProvider()
-			model := os.Getenv("MUNINN_OPENAI_MODEL")
-			if model == "" {
-				model = "gpt-4o-mini"
-			}
-			baseURL := os.Getenv("MUNINN_OPENAI_URL")
-			if baseURL == "" {
-				baseURL = "https://api.openai.com"
-			}
-			pctx, pcancel := context.WithTimeout(dreamCtx, 10*time.Second)
-			if err := p.Init(pctx, enrichpkg.LLMProviderConfig{
-				BaseURL: baseURL, Model: model, APIKey: apiKey,
-			}); err != nil {
-				slog.Warn("dream-on-start: openai init failed", "error", err)
-			} else {
-				dreamOpenAI = p
-			}
-			pcancel()
-		}
 
 		dreamWorker := consolidation.NewWorker(eng)
 		dreamWorker.OllamaLLM = dreamOllama
