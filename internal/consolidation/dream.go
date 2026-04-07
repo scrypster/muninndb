@@ -254,8 +254,8 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 
 		if !opts.DryRun {
 			currentCount := int64(0)
-			if report.Orient != nil {
-				currentCount = int64(report.Orient.EngramCount)
+			if summary != nil {
+				currentCount = int64(summary.EngramCount)
 			}
 			if err := store.WriteDreamState(wsPrefix, time.Now(), currentCount); err != nil {
 				slog.Warn("dream: failed to write dream state", "vault", vault, "error", err)
