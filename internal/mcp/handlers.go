@@ -1320,6 +1320,7 @@ var relTypeMap = map[string]storage.RelType{
 	"blocks":             storage.RelBlocks,
 	"resolves":           storage.RelResolves,
 	"refines":            storage.RelRefines,
+	"same_episode":       storage.RelSameEpisode,
 }
 
 // relTypeFromString converts a relation string to a uint16 RelType value.

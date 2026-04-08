@@ -286,6 +286,7 @@ func TestRelTypeToString_AllKnownTypes(t *testing.T) {
 		"supports", "contradicts", "depends_on", "supersedes", "relates_to",
 		"is_part_of", "causes", "preceded_by", "followed_by", "created_by_person",
 		"belongs_to_project", "references", "implements", "blocks", "resolves", "refines",
+		"same_episode",
 	}
 	for _, name := range knownTypes {
 		code := storage.RelType(relTypeFromString(name))
