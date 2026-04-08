@@ -755,10 +755,15 @@ func convertTreeNodeInput(n TreeNodeInput) engine.TreeNodeInput {
 	return out
 }
 
-// convertTreeNode converts engine.TreeNode → mcp.TreeNode recursively.
 func (a *mcpEngineAdapter) CompleteEpisode(ctx context.Context, vault string, seedID string) ([]engine.CompletedEngram, error) {
 	return a.eng.CompleteEpisode(ctx, vault, seedID)
 }
+
+func (a *mcpEngineAdapter) CompleteEpisodeWithContext(ctx context.Context, vault string, seedID string) (*engine.NarrativeContext, error) {
+	return a.eng.CompleteEpisodeWithContext(ctx, vault, seedID)
+}
+
+// convertTreeNode converts engine.TreeNode → mcp.TreeNode recursively.
 
 func convertTreeNode(n *engine.TreeNode) *TreeNode {
 	if n == nil {

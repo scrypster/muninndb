@@ -177,6 +177,10 @@ type EngineInterface interface {
 	// all members of the episode, ordered by creation time ascending.
 	CompleteEpisode(ctx context.Context, vault string, seedID string) ([]engine.CompletedEngram, error)
 
+	// CompleteEpisodeWithContext returns the full episode plus narrative context:
+	// boundary engrams, duration, and topic hint.
+	CompleteEpisodeWithContext(ctx context.Context, vault string, seedID string) (*engine.NarrativeContext, error)
+
 	// ListEpisodes returns groups of engrams connected by same_episode associations,
 	// sorted by StartTime descending. limit caps the number of episodes returned.
 	ListEpisodes(ctx context.Context, vault string, limit int) ([]EpisodeResult, error)
