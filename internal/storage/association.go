@@ -877,3 +877,39 @@ func (ps *PebbleStore) GetContradictions(ctx context.Context, wsPrefix [8]byte) 
 	}
 	return pairs, nil
 }
+
+// ScanAssociationsByType scans all forward associations (0x03 prefix) in a vault
+// and calls fn for each edge whose RelType matches relType. This is an O(all-assocs)
+// scan — use sparingly. The fn callback receives (sourceID, targetID).
+func (ps *PebbleStore) ScanAssociationsByType(ctx context.Context, wsPrefix [8]byte, relType RelType, fn func(src, dst ULID) error) error {
+	lower := keys.AssocFwdRangeStart(wsPrefix)
+	upper := keys.AssocFwdRangeEnd(wsPrefix)
+	iter, err := ps.db.NewIter(&pebble.IterOptions{
+		LowerBound: lower,
+		UpperBound: upper,
+	})
+	if err != nil {
+		return fmt.Errorf("scan assoc by type: create iter: %w", err)
+	}
+	defer iter.Close()
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		k := iter.Key()
+		// Key layout: 0x03 | ws(8) | srcID(16) | weightComplement(4) | dstID(16) = 45 bytes
+		if len(k) < 45 {
+			continue
+		}
+		val := iter.Value()
+		rt, _, _, _, _, _, _ := decodeAssocValue(val)
+		if rt != relType {
+			continue
+		}
+		var src, dst ULID
+		copy(src[:], k[9:25])
+		copy(dst[:], k[29:45])
+		if err := fn(src, dst); err != nil {
+			return err
+		}
+	}
+	return nil
+}

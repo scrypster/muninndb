@@ -189,6 +189,12 @@ func (f *fakeEngine) DetectLocusMembers(_ context.Context, _, _ string, _ int) (
 func (f *fakeEngine) CompleteEpisode(_ context.Context, _ string, _ string) ([]engine.CompletedEngram, error) {
 	return nil, nil
 }
+func (f *fakeEngine) ListEpisodes(_ context.Context, _ string, _ int) ([]EpisodeResult, error) {
+	return []EpisodeResult{}, nil
+}
+func (f *fakeEngine) GetEpisodeMembers(_ context.Context, _, _ string) ([]EpisodeMember, error) {
+	return []EpisodeMember{}, nil
+}
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil, nil)
@@ -287,8 +293,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 40 {
-		t.Errorf("expected 40 tools, got %d", len(tools))
+	if len(tools) != 42 {
+		t.Errorf("expected 42 tools, got %d", len(tools))
 	}
 }
 

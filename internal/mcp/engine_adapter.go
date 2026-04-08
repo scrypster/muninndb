@@ -616,6 +616,61 @@ func (a *mcpEngineAdapter) DetectLoci(ctx context.Context, vault string, minEdge
 	return result, nil
 }
 
+func (a *mcpEngineAdapter) ListEpisodes(ctx context.Context, vault string, limit int) ([]EpisodeResult, error) {
+	episodes, err := a.eng.ListEpisodes(ctx, vault, limit)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]EpisodeResult, len(episodes))
+	for i, ep := range episodes {
+		results[i] = EpisodeResult{
+			ID:        ep.ID,
+			StartTime: ep.StartTime.UTC().Format(time.RFC3339),
+			EndTime:   ep.EndTime.UTC().Format(time.RFC3339),
+			Size:      ep.Size,
+			Members:   ep.Members,
+		}
+	}
+	return results, nil
+}
+
+func (a *mcpEngineAdapter) GetEpisodeMembers(ctx context.Context, vault, episodeID string) ([]EpisodeMember, error) {
+	// Direct BFS lookup: walk same_episode edges from the episode's first engram.
+	// This avoids the recency limit imposed by ListEpisodes.
+	startID, err := storage.ParseULID(episodeID)
+	if err != nil {
+		return nil, fmt.Errorf("episode member %q: %w", episodeID, err)
+	}
+	episode, err := a.eng.GetEpisodeByMember(ctx, vault, startID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch each engram via the engine's public GetEngram method.
+	members := make([]EpisodeMember, 0, len(episode.Members))
+	for _, idStr := range episode.Members {
+		id, err := storage.ParseULID(idStr)
+		if err != nil {
+			return nil, fmt.Errorf("episode member %q: %w", idStr, err)
+		}
+		eng, err := a.eng.GetEngram(ctx, vault, id)
+		if err != nil {
+			return nil, fmt.Errorf("episode member %q: %w", idStr, err)
+		}
+		if eng == nil {
+			continue
+		}
+		members = append(members, EpisodeMember{
+			ID:        eng.ID.String(),
+			Concept:   eng.Concept,
+			Summary:   eng.Summary,
+			State:     lifecycleStateLabel(eng.State),
+			CreatedAt: eng.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return members, nil
+}
+
 func (a *mcpEngineAdapter) DetectLocusMembers(ctx context.Context, vault, locusLabel string, minEdgeWeight int) (*LocusMembersResult, error) {
 	loci, err := a.eng.DetectLoci(ctx, vault, minEdgeWeight)
 	if err != nil {
