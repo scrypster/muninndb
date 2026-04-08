@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -19,6 +20,34 @@ type ReplayActivator interface {
 type ReplayStore interface {
 	ListVaults(ctx context.Context) ([]string, error)
 	RecentEngrams(ctx context.Context, vault string, limit int) ([]ReplayEngram, error)
+}
+
+// ConsolidationStore provides episode access and summary storage for the
+// hippocampal→neocortical consolidation path during replay.
+//
+// TODO: Return episode ID and member IDs alongside concepts for dedup and
+// RelIsPartOf linking. Current simplified interface is sufficient for the noop
+// default and will be expanded when wiring the real store.
+type ConsolidationStore interface {
+	// GetEpisodeConcepts returns the concepts of engrams in an episode
+	// identified by seedID (the first member's ULID string).
+	GetEpisodeConcepts(ctx context.Context, vault string, seedID string) ([]string, error)
+
+	// StoreConsolidation persists a summary engram and links it to episode
+	// members via RelIsPartOf associations.
+	StoreConsolidation(ctx context.Context, vault string, summary string, memberIDs []string) error
+}
+
+// noopConsolidationStore is a no-op implementation used when no real store is
+// wired. All operations succeed without side effects.
+type noopConsolidationStore struct{}
+
+func (noopConsolidationStore) GetEpisodeConcepts(_ context.Context, _ string, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (noopConsolidationStore) StoreConsolidation(_ context.Context, _ string, _ string, _ []string) error {
+	return nil
 }
 
 // ReplayEngram is the minimal engram representation needed for replay.
@@ -47,11 +76,12 @@ type ReplayMetrics struct {
 // It is NOT an event-driven Worker[T]. It follows the periodic background
 // goroutine pattern (like runPruneWorker / runCoherenceFlush).
 type ReplayWorker struct {
-	config    ReplayConfig
-	activator ReplayActivator
-	store     ReplayStore
-	stopCh    chan struct{}
-	done      chan struct{}
+	config             ReplayConfig
+	activator          ReplayActivator
+	store              ReplayStore
+	consolidationStore ConsolidationStore
+	stopCh             chan struct{}
+	done               chan struct{}
 
 	// metrics — thread-safe via sync/atomic
 	cyclesCompleted atomic.Uint64
@@ -65,11 +95,24 @@ type ReplayWorker struct {
 // NewReplayWorker creates a new hippocampal replay worker.
 func NewReplayWorker(config ReplayConfig, activator ReplayActivator, store ReplayStore) *ReplayWorker {
 	return &ReplayWorker{
-		config:    config,
-		activator: activator,
-		store:     store,
-		stopCh:    make(chan struct{}),
-		done:      make(chan struct{}),
+		config:             config,
+		activator:          activator,
+		store:              store,
+		consolidationStore: noopConsolidationStore{},
+		stopCh:             make(chan struct{}),
+		done:               make(chan struct{}),
+	}
+}
+
+// SetConsolidationStore wires a real ConsolidationStore for episode summary
+// generation during replay. Call before Run().
+//
+// Note: EnableConsolidation in ReplayConfig has no effect without calling
+// SetConsolidationStore with a non-nil, non-noop implementation. The default
+// noopConsolidationStore silently discards all consolidation operations.
+func (rw *ReplayWorker) SetConsolidationStore(cs ConsolidationStore) {
+	if cs != nil {
+		rw.consolidationStore = cs
 	}
 }
 
@@ -199,6 +242,88 @@ func (rw *ReplayWorker) replayCycle(ctx context.Context) {
 		}
 	}
 
-	slog.Info("replay: consolidation cycle complete",
+	slog.Info("replay: activation pass complete",
 		"total_activated", totalActivated)
+
+	// Phase 2: Consolidation — generate episode summaries if enabled.
+	if rw.config.EnableConsolidation {
+		rw.consolidateCycle(ctx, vaults)
+	}
+}
+
+// consolidateCycle runs the consolidation pass across all vaults, generating
+// summary engrams for episodes that meet the minimum size threshold.
+func (rw *ReplayWorker) consolidateCycle(ctx context.Context, vaults []string) {
+	if _, isNoop := rw.consolidationStore.(noopConsolidationStore); isNoop {
+		slog.Warn("replay: consolidation enabled but no real store wired (call SetConsolidationStore)")
+		return
+	}
+
+	minSize := rw.config.ConsolidationMinSize
+	if minSize <= 0 {
+		minSize = 3
+	}
+
+	var totalConsolidated int
+	for _, vault := range vaults {
+		if ctx.Err() != nil {
+			return
+		}
+
+		// Use RecentEngrams as seed IDs. Each engram might belong to an episode;
+		// we deduplicate by tracking which seedIDs we've already consolidated.
+		engrams, err := rw.store.RecentEngrams(ctx, vault, rw.config.MaxEngrams)
+		if err != nil {
+			slog.Warn("replay: consolidation: failed to get recent engrams",
+				"vault", vault, "error", err)
+			continue
+		}
+
+		consolidated := map[string]bool{} // track processed seedIDs
+		for _, eg := range engrams {
+			if ctx.Err() != nil {
+				return
+			}
+
+			seedID := fmt.Sprintf("%x", eg.ID)
+			if consolidated[seedID] {
+				continue
+			}
+
+			concepts, err := rw.consolidationStore.GetEpisodeConcepts(ctx, vault, seedID)
+			if err != nil {
+				slog.Debug("replay: consolidation: get episode concepts failed",
+					"vault", vault, "seed", seedID, "error", err)
+				continue
+			}
+			if len(concepts) < minSize {
+				consolidated[seedID] = true
+				continue
+			}
+
+			summary := buildConsolidationSummary(concepts)
+			if err := rw.consolidationStore.StoreConsolidation(ctx, vault, summary, nil); err != nil {
+				slog.Warn("replay: consolidation: store failed",
+					"vault", vault, "seed", seedID, "error", err)
+				continue
+			}
+
+			consolidated[seedID] = true
+			totalConsolidated++
+
+			slog.Debug("replay: consolidated episode",
+				"vault", vault, "seed", seedID, "members", len(concepts))
+		}
+	}
+
+	if totalConsolidated > 0 {
+		slog.Info("replay: consolidation pass complete",
+			"total_consolidated", totalConsolidated)
+	}
+}
+
+// buildConsolidationSummary generates a simple summary from episode member concepts.
+// No LLM dependency — concatenates concepts with semicolons.
+func buildConsolidationSummary(concepts []string) string {
+	return "Episode summary: " + strings.Join(concepts, "; ")
 }

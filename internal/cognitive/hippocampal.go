@@ -88,14 +88,25 @@ type ReplayConfig struct {
 	// MaxEngrams is the maximum number of recent engrams to replay per vault
 	// per cycle. Default: 100.
 	MaxEngrams int `json:"max_engrams"`
+
+	// EnableConsolidation generates episode summaries during replay.
+	// When true, the replay cycle will identify episode clusters and produce
+	// consolidated summary engrams — the hippocampal→neocortical transfer.
+	EnableConsolidation bool `json:"enable_consolidation"`
+
+	// ConsolidationMinSize is the minimum number of episode members required
+	// to trigger summary generation. Default: 3.
+	ConsolidationMinSize int `json:"consolidation_min_size"`
 }
 
 // DefaultReplayConfig returns a ReplayConfig with production-ready defaults.
 func DefaultReplayConfig() ReplayConfig {
 	return ReplayConfig{
-		Interval:     6 * time.Hour,
-		LearningRate: 0.005,
-		MaxEngrams:   100,
+		Interval:             6 * time.Hour,
+		LearningRate:         0.005,
+		MaxEngrams:           100,
+		EnableConsolidation:  false,
+		ConsolidationMinSize: 3,
 	}
 }
 
