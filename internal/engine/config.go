@@ -21,6 +21,7 @@ type EngineConfig struct {
 	HebbianWorker    *cognitive.HebbianWorker                       // nil → no Hebbian learning
 	ContradictWorker *cognitive.Worker[cognitive.ContradictItem]    // nil → no contradiction detection
 	ConfidenceWorker *cognitive.Worker[cognitive.ConfidenceUpdate]  // nil → no confidence decay
+	EpisodeWorker    *cognitive.EpisodeWorker                       // nil → no episode segmentation
 	Embedder         activation.Embedder                            // nil → no semantic search
 	HNSWRegistry     *hnsw.Registry                                 // nil → no HNSW indexes
 }

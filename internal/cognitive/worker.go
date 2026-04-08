@@ -269,6 +269,7 @@ type EngineWorkerStats struct {
 	Hebbian    WorkerStats `json:"hebbian"`
 	Contradict WorkerStats `json:"contradict"`
 	Confidence WorkerStats `json:"confidence"`
+	Episode    WorkerStats `json:"episode"`
 }
 
 // StartAll runs multiple workers via errgroup. Returns first error.

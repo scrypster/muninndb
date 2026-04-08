@@ -54,7 +54,7 @@ type Engine struct {
 	// Cognitive Worker Subsystem
 	// ──────────────────────────────────────────────────────────────────
 	//
-	// Four background workers drive the cognitive pipeline:
+	// Five background workers drive the cognitive pipeline:
 	//
 	//   HebbianWorker          – Hebbian learning: strengthens association
 	//                            weights between co-activated engrams.
@@ -62,17 +62,20 @@ type Engine struct {
 	//                            whose claims conflict with existing knowledge.
 	//   Worker[ConfidenceUpdate] – Confidence decay: adjusts confidence
 	//                              scores over time based on access patterns.
+	//   EpisodeWorker          – Hippocampal episode segmentation: detects
+	//                            episode boundaries via cosine similarity and
+	//                            creates same_episode associations.
 	//   TransitionWorker       – PAS state transitions: moves engrams
 	//                            through lifecycle states (active → stable
 	//                            → archived) based on scoring signals.
 	//
 	// Hot-Swap Design
 	//
-	// cogMu is an RWMutex that guards all four worker pointers. It exists
+	// cogMu is an RWMutex that guards all five worker pointers. It exists
 	// because worker assignment changes at runtime during cluster role
 	// transitions. Three operations interact with it:
 	//
-	//   cogWorkers()             – acquires RLock, snapshots all four
+	//   cogWorkers()             – acquires RLock, snapshots all five
 	//                              pointers, releases lock, returns the
 	//                              snapshot. Safe to use after unlock even
 	//                              if a concurrent hot-swap occurs.
@@ -80,7 +83,7 @@ type Engine struct {
 	//                              election → OnBecameCortex). Acquires
 	//                              write lock, sets all workers, releases.
 	//   ClearCognitiveWorkers()  – called on Lobe demotion (OnBecameLobe).
-	//                              Sets all four pointers to nil under
+	//                              Sets all five pointers to nil under
 	//                              write lock. Lobe nodes perform no local
 	//                              cognitive processing; effects are
 	//                              forwarded to the Cortex.
@@ -110,6 +113,7 @@ type Engine struct {
 	hebbianWorker    *cognitive.HebbianWorker
 	contradictWorker *cognitive.Worker[cognitive.ContradictItem]
 	confidenceWorker *cognitive.Worker[cognitive.ConfidenceUpdate]
+	episodeWorker    *cognitive.EpisodeWorker
 	transitionWorker *cognitive.TransitionWorker
 	activity         *cognitive.ActivityTracker
 	embedder         activation.Embedder // optional embedder for embedding-based brief scoring
@@ -329,6 +333,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		hebbianWorker:    cfg.HebbianWorker,
 		contradictWorker: cfg.ContradictWorker,
 		confidenceWorker: cfg.ConfidenceWorker,
+		episodeWorker:    cfg.EpisodeWorker,
 		activity:         cognitive.NewActivityTracker(),
 		embedder:         cfg.Embedder,
 		autoAssoc:        autoassoc.New(stopCtx, store, cfg.FTSIndex),
@@ -1052,7 +1057,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	// Submit to contradiction worker for post-write analysis.
-	_, contraW, _ := e.cogWorkers()
+	_, contraW, _, epW := e.cogWorkers()
 	if contraW != nil {
 		contraAssocs := make([]cognitive.ContradictAssoc, len(eng.Associations))
 		for i, assoc := range eng.Associations {
@@ -1072,7 +1077,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 				if e.triggers != nil {
 					e.triggers.NotifyContradiction(wsVaultID(wsPrefix), storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
 				}
-				_, _, cw := e.cogWorkers()
+				_, _, cw, _ := e.cogWorkers()
 				if cw != nil {
 					cw.Submit(cognitive.ConfidenceUpdate{
 						WS:       wsPrefix,
@@ -1088,6 +1093,20 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 					})
 				}
 			},
+		})
+	}
+
+	// Submit to episode worker for hippocampal episode segmentation.
+	if epW != nil && len(eng.Embedding) > 0 {
+		eventTime := eng.CreatedAt
+		if eventTime.IsZero() {
+			eventTime = time.Now()
+		}
+		epW.Submit(cognitive.EpisodeEvent{
+			WS:        wsPrefix,
+			EngramID:  [16]byte(id),
+			Embedding: eng.Embedding,
+			At:        eventTime,
 		})
 	}
 
@@ -1501,7 +1520,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			}
 		}
 
-		_, contraW, _ := e.cogWorkers()
+		_, contraW, _, epW := e.cogWorkers()
 		if contraW != nil {
 			contraAssocs := make([]cognitive.ContradictAssoc, len(p.eng.Associations))
 			for j, assoc := range p.eng.Associations {
@@ -1522,12 +1541,26 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 					if e.triggers != nil {
 						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
 					}
-					_, _, cw := e.cogWorkers()
+					_, _, cw, _ := e.cogWorkers()
 					if cw != nil {
 						cw.Submit(cognitive.ConfidenceUpdate{WS: wsPrefix, EngramID: ev.EngramA, Evidence: cognitive.EvidenceContradiction, Source: "contradiction_detected"})
 						cw.Submit(cognitive.ConfidenceUpdate{WS: wsPrefix, EngramID: ev.EngramB, Evidence: cognitive.EvidenceContradiction, Source: "contradiction_detected"})
 					}
 				},
+			})
+		}
+
+		// Submit to episode worker for hippocampal episode segmentation.
+		if epW != nil && len(p.eng.Embedding) > 0 {
+			eventTime := p.eng.CreatedAt
+			if eventTime.IsZero() {
+				eventTime = time.Now()
+			}
+			epW.Submit(cognitive.EpisodeEvent{
+				WS:        p.wsPrefix,
+				EngramID:  [16]byte(id),
+				Embedding: p.eng.Embedding,
+				At:        eventTime,
 			})
 		}
 
@@ -1972,7 +2005,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// On Lobe nodes (hebbianWorker == nil) collect refs for forwarding to Cortex instead.
 	var lobeCoActivations []mbp.CoActivationRef
 	if len(result.Activations) > 0 && !auth.ObserveFromContext(ctx) && resolved.HebbianEnabled {
-		hebW, _, _ := e.cogWorkers()
+		hebW, _, _, _ := e.cogWorkers()
 		if hebW != nil {
 			coActivatedEngrams := make([]cognitive.CoActivatedEngram, len(result.Activations))
 			for i, scored := range result.Activations {
@@ -2203,7 +2236,7 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 	// When a "contradicts" link is explicitly created via Link(), notify the
 	// ContradictWorker so it can flag the pair and drive confidence updates.
 	if storage.RelType(req.RelType) == storage.RelContradicts {
-		_, linkContra, linkConf := e.cogWorkers()
+		_, linkContra, linkConf, _ := e.cogWorkers()
 		if linkContra != nil {
 			linkContra.Submit(cognitive.ContradictItem{
 				WS:          wsPrefix,
@@ -2227,7 +2260,7 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 					if e.triggers != nil {
 						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "explicit_link")
 					}
-					_, _, cw := e.cogWorkers()
+					_, _, cw, _ := e.cogWorkers()
 					if cw != nil {
 						cw.Submit(cognitive.ConfidenceUpdate{
 							WS:       wsPrefix,
@@ -2418,6 +2451,13 @@ func (e *Engine) SetCognitiveWorkers(
 	e.cogMu.Unlock()
 }
 
+// SetEpisodeWorker sets the episode segmentation worker. Thread-safe.
+func (e *Engine) SetEpisodeWorker(ew *cognitive.EpisodeWorker) {
+	e.cogMu.Lock()
+	e.episodeWorker = ew
+	e.cogMu.Unlock()
+}
+
 // SetTransitionWorker sets the PAS transition worker. Thread-safe.
 func (e *Engine) SetTransitionWorker(tw *cognitive.TransitionWorker) {
 	e.cogMu.Lock()
@@ -2433,6 +2473,7 @@ func (e *Engine) ClearCognitiveWorkers() {
 	e.hebbianWorker = nil
 	e.contradictWorker = nil
 	e.confidenceWorker = nil
+	e.episodeWorker = nil
 	e.transitionWorker = nil
 	e.cogMu.Unlock()
 }
@@ -2440,16 +2481,16 @@ func (e *Engine) ClearCognitiveWorkers() {
 // cogWorkers returns thread-safe snapshots of the cognitive worker pointers.
 // Safe to use after return even if ClearCognitiveWorkers runs concurrently,
 // because the old worker objects remain valid (just won't receive new events).
-func (e *Engine) cogWorkers() (*cognitive.HebbianWorker, *cognitive.Worker[cognitive.ContradictItem], *cognitive.Worker[cognitive.ConfidenceUpdate]) {
+func (e *Engine) cogWorkers() (*cognitive.HebbianWorker, *cognitive.Worker[cognitive.ContradictItem], *cognitive.Worker[cognitive.ConfidenceUpdate], *cognitive.EpisodeWorker) {
 	e.cogMu.RLock()
-	h, ct, cf := e.hebbianWorker, e.contradictWorker, e.confidenceWorker
+	h, ct, cf, ep := e.hebbianWorker, e.contradictWorker, e.confidenceWorker, e.episodeWorker
 	e.cogMu.RUnlock()
-	return h, ct, cf
+	return h, ct, cf, ep
 }
 
 // WorkerStats returns the current statistics for all cognitive workers.
 func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
-	heb, contra, conf := e.cogWorkers()
+	heb, contra, conf, ep := e.cogWorkers()
 	stats := cognitive.EngineWorkerStats{}
 	if heb != nil {
 		stats.Hebbian = heb.Stats()
@@ -2459,6 +2500,9 @@ func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 	}
 	if conf != nil {
 		stats.Confidence = conf.Stats()
+	}
+	if ep != nil {
+		stats.Episode = ep.Stats()
 	}
 	return stats
 }
@@ -2558,6 +2602,7 @@ func relTypeFromString(rel string) uint16 {
 		"belongs_to_project": storage.RelBelongsToProject, "references": storage.RelReferences,
 		"implements": storage.RelImplements, "blocks": storage.RelBlocks,
 		"resolves": storage.RelResolves, "refines": storage.RelRefines,
+		"same_episode": storage.RelSameEpisode,
 	}
 	if v, ok := m[rel]; ok {
 		return uint16(v)
