@@ -640,6 +640,33 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{},
 			},
 		},
+		// Hippocampal emergent loci
+		{
+			Name:        "muninn_loci",
+			Description: "Detect emergent communities (loci) in the entity co-occurrence graph using label propagation. Inspired by hippocampal place cells — discovers dense clusters of entities that frequently appear together. Returns navigable 'places' in memory space.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":           vaultProp,
+					"min_edge_weight": map[string]any{"type": "integer", "description": "Minimum co-occurrence count to include an edge (default 2)."},
+					"max_results":     map[string]any{"type": "integer", "description": "Maximum number of loci to return (default 20)."},
+				},
+				"required": []string{},
+			},
+		},
+		{
+			Name:        "muninn_locus_members",
+			Description: "Get all entities and sample engrams for a specific locus (community). Use muninn_loci first to discover loci, then pass a locus_label here to drill into its contents.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":           vaultProp,
+					"locus_label":     map[string]any{"type": "string", "description": "Label of the locus to inspect (from muninn_loci output)."},
+					"min_edge_weight": map[string]any{"type": "integer", "description": "Minimum co-occurrence count (default 2). Should match the value used in muninn_loci."},
+				},
+				"required": []string{"locus_label"},
+			},
+		},
 		// Knowledge graph export
 		{
 			Name:        "muninn_export_graph",

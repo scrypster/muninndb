@@ -164,4 +164,12 @@ type EngineInterface interface {
 	// Derived from the HNSW index — returns 0 if no embeddings have been stored yet
 	// (dimension not yet established; any client-provided dimension will be accepted).
 	GetVaultEmbedDim(ctx context.Context, vault string) int
+
+	// DetectLoci discovers emergent communities in the entity co-occurrence graph
+	// using label propagation. Returns communities sorted by size descending.
+	DetectLoci(ctx context.Context, vault string, minEdgeWeight int) ([]LociResult, error)
+
+	// DetectLocusMembers runs DetectLoci then returns entities and sample engrams
+	// for the community matching locusLabel.
+	DetectLocusMembers(ctx context.Context, vault, locusLabel string, minEdgeWeight int) (*LocusMembersResult, error)
 }

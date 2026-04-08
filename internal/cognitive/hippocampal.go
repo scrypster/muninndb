@@ -19,6 +19,13 @@ type HippocampalConfig struct {
 	EnableSeparation bool `json:"enable_separation"`
 
 	SeparationConfig SeparationConfig `json:"separation_config"`
+
+	// EnableLoci is reserved for a future background worker that maintains
+	// cached communities. On-demand MCP tools (muninn_loci, muninn_locus_members)
+	// are always available regardless of this flag.
+	EnableLoci bool `json:"enable_loci"`
+
+	LociConfig LociConfig `json:"loci_config"`
 }
 
 // EpisodeConfig holds tuning parameters for the episode segmentation worker.
@@ -49,6 +56,11 @@ type SeparationConfig struct {
 	ContextMismatchFn string
 }
 
+// LociConfig holds parameters for label propagation community detection.
+type LociConfig struct {
+	MaxIterations int `json:"max_iterations"` // label propagation max iterations (default: 100)
+}
+
 // DefaultHippocampalConfig returns a HippocampalConfig with all features
 // disabled and sane defaults for the tuning knobs.
 func DefaultHippocampalConfig() HippocampalConfig {
@@ -57,6 +69,8 @@ func DefaultHippocampalConfig() HippocampalConfig {
 		EpisodeConfig:    DefaultEpisodeConfig(),
 		EnableSeparation: false,
 		SeparationConfig: DefaultSeparationConfig(),
+		EnableLoci:       false,
+		LociConfig:       DefaultLociConfig(),
 	}
 }
 
@@ -74,5 +88,12 @@ func DefaultSeparationConfig() SeparationConfig {
 	return SeparationConfig{
 		RepulsionAlpha:    0.3,
 		ContextMismatchFn: "entity",
+	}
+}
+
+// DefaultLociConfig returns LociConfig with sensible defaults.
+func DefaultLociConfig() LociConfig {
+	return LociConfig{
+		MaxIterations: 100,
 	}
 }

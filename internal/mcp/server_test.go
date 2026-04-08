@@ -180,6 +180,12 @@ func (f *fakeEngine) ListEntities(_ context.Context, _ string, _ int, _ string) 
 func (f *fakeEngine) GetVaultEmbedDim(_ context.Context, _ string) int {
 	return 0
 }
+func (f *fakeEngine) DetectLoci(_ context.Context, _ string, _ int) ([]LociResult, error) {
+	return []LociResult{}, nil
+}
+func (f *fakeEngine) DetectLocusMembers(_ context.Context, _, _ string, _ int) (*LocusMembersResult, error) {
+	return &LocusMembersResult{Label: "test", Members: []LocusMemberDetail{}, Size: 0}, nil
+}
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil, nil)
@@ -278,8 +284,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 38 {
-		t.Errorf("expected 38 tools, got %d", len(tools))
+	if len(tools) != 40 {
+		t.Errorf("expected 40 tools, got %d", len(tools))
 	}
 }
 
