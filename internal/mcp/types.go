@@ -354,6 +354,36 @@ type EntityClusterResult struct {
 	Count   int    `json:"count"`
 }
 
+// LociResult is one emergent community returned by muninn_loci.
+type LociResult struct {
+	ID       int      `json:"id"`
+	Label    string   `json:"label"`
+	Members  []string `json:"members"`
+	Size     int      `json:"size"`
+	Cohesion float64  `json:"cohesion"`
+}
+
+// LocusMembersResult contains all entities and sample engrams for a specific locus.
+type LocusMembersResult struct {
+	Label   string              `json:"label"`
+	Members []LocusMemberDetail `json:"members"`
+	Size    int                 `json:"size"`
+}
+
+// LocusMemberDetail is an entity within a locus plus its sample engrams.
+type LocusMemberDetail struct {
+	Entity  string              `json:"entity"`
+	Engrams []LocusEngramEntry  `json:"engrams"`
+}
+
+// LocusEngramEntry is a minimal engram representation for locus member listing.
+type LocusEngramEntry struct {
+	ID      string `json:"id"`
+	Concept string `json:"concept"`
+	Summary string `json:"summary,omitempty"`
+	State   string `json:"state"`
+}
+
 // --- Cognitive push notification param types ---
 // These are pre-serialized to json.RawMessage at emission sites.
 

@@ -598,6 +598,72 @@ func (a *mcpEngineAdapter) ListEntities(ctx context.Context, vault string, limit
 	return summaries, nil
 }
 
+func (a *mcpEngineAdapter) DetectLoci(ctx context.Context, vault string, minEdgeWeight int) ([]LociResult, error) {
+	loci, err := a.eng.DetectLoci(ctx, vault, minEdgeWeight)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]LociResult, len(loci))
+	for i, l := range loci {
+		result[i] = LociResult{
+			ID:       l.ID,
+			Label:    l.Label,
+			Members:  l.Members,
+			Size:     l.Size,
+			Cohesion: l.Cohesion,
+		}
+	}
+	return result, nil
+}
+
+func (a *mcpEngineAdapter) DetectLocusMembers(ctx context.Context, vault, locusLabel string, minEdgeWeight int) (*LocusMembersResult, error) {
+	loci, err := a.eng.DetectLoci(ctx, vault, minEdgeWeight)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the locus matching the label.
+	var members []string
+	for _, l := range loci {
+		if l.Label == locusLabel {
+			members = l.Members
+			break
+		}
+	}
+	if members == nil {
+		return nil, fmt.Errorf("locus not found: %q", locusLabel)
+	}
+
+	// For each member entity, look up sample engrams.
+	details := make([]LocusMemberDetail, 0, len(members))
+	for _, entity := range members {
+		engrams, findErr := a.eng.FindByEntity(ctx, vault, entity, 5)
+		if findErr != nil {
+			slog.Warn("locus members: FindByEntity failed", "entity", entity, "err", findErr)
+			continue
+		}
+		entries := make([]LocusEngramEntry, 0, len(engrams))
+		for _, eg := range engrams {
+			entries = append(entries, LocusEngramEntry{
+				ID:      eg.ID.String(),
+				Concept: eg.Concept,
+				Summary: eg.Summary,
+				State:   lifecycleStateLabel(eg.State),
+			})
+		}
+		details = append(details, LocusMemberDetail{
+			Entity:  entity,
+			Engrams: entries,
+		})
+	}
+
+	return &LocusMembersResult{
+		Label:   locusLabel,
+		Members: details,
+		Size:    len(details),
+	}, nil
+}
+
 // provenanceSourceString converts a provenance.SourceType to its string label.
 func provenanceSourceString(s provenance.SourceType) string {
 	switch s {

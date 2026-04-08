@@ -1139,6 +1139,81 @@ func (s *MCPServer) handleEntityClusters(ctx context.Context, w http.ResponseWri
 	})))
 }
 
+func (s *MCPServer) handleLoci(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	minEdgeWeight := 2
+	if v, ok := args["min_edge_weight"].(float64); ok {
+		minEdgeWeight = int(v)
+	}
+	if minEdgeWeight < 1 {
+		minEdgeWeight = 1
+	}
+	maxResults := 20
+	if v, ok := args["max_results"].(float64); ok {
+		maxResults = int(v)
+	}
+	if maxResults < 1 {
+		maxResults = 1
+	}
+
+	loci, err := s.engine.DetectLoci(ctx, vault, minEdgeWeight)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if loci == nil {
+		loci = []LociResult{}
+	}
+	if len(loci) > maxResults {
+		loci = loci[:maxResults]
+	}
+
+	// Build compact output: omit full member lists, include top entities.
+	type lociEntry struct {
+		ID          int      `json:"id"`
+		Label       string   `json:"label"`
+		MemberCount int      `json:"member_count"`
+		Cohesion    float64  `json:"cohesion"`
+		TopEntities []string `json:"top_entities"`
+	}
+	entries := make([]lociEntry, len(loci))
+	for i, l := range loci {
+		top := l.Members
+		if len(top) > 5 {
+			top = top[:5]
+		}
+		entries[i] = lociEntry{
+			ID:          l.ID,
+			Label:       l.Label,
+			MemberCount: l.Size,
+			Cohesion:    l.Cohesion,
+			TopEntities: top,
+		}
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"loci":  entries,
+		"count": len(entries),
+	})))
+}
+
+func (s *MCPServer) handleLocusMembers(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	locusLabel, ok := args["locus_label"].(string)
+	if !ok || locusLabel == "" {
+		sendError(w, id, -32602, "invalid params: 'locus_label' is required")
+		return
+	}
+
+	minEdgeWeight := 2
+	if v, ok := args["min_edge_weight"].(float64); ok && v >= 1 {
+		minEdgeWeight = int(v)
+	}
+	result, err := s.engine.DetectLocusMembers(ctx, vault, locusLabel, minEdgeWeight)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(result)))
+}
+
 func (s *MCPServer) handleExportGraph(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	format := "json-ld"
 	if f, ok := args["format"].(string); ok && f != "" {
