@@ -114,3 +114,22 @@ func (a *confidenceStoreAdapter) GetConfidence(ctx context.Context, ws [8]byte, 
 func (a *confidenceStoreAdapter) UpdateConfidence(ctx context.Context, ws [8]byte, id [16]byte, confidence float32) error {
 	return a.store.UpdateConfidence(ctx, ws, storage.ULID(id), confidence)
 }
+
+// separationStoreAdapter adapts storage.EngineStore to cognitive.SeparationStore.
+type separationStoreAdapter struct {
+	store storage.EngineStore
+}
+
+// NewSeparationStoreAdapter returns a SeparationStore backed by the given EngineStore.
+func NewSeparationStoreAdapter(store storage.EngineStore) SeparationStore {
+	return &separationStoreAdapter{store: store}
+}
+
+func (a *separationStoreAdapter) GetEngramEntities(ctx context.Context, ws [8]byte, engramID [16]byte) ([]string, error) {
+	var entities []string
+	err := a.store.ScanEngramEntities(ctx, ws, storage.ULID(engramID), func(name string) error {
+		entities = append(entities, name)
+		return nil
+	})
+	return entities, err
+}

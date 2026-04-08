@@ -24,4 +24,5 @@ type EngineConfig struct {
 	EpisodeWorker    *cognitive.EpisodeWorker                       // nil → no episode segmentation
 	Embedder         activation.Embedder                            // nil → no semantic search
 	HNSWRegistry     *hnsw.Registry                                 // nil → no HNSW indexes
+	HippocampalConfig *cognitive.HippocampalConfig                  // nil → hippocampal features disabled
 }

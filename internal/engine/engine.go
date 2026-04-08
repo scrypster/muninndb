@@ -210,7 +210,8 @@ type Engine struct {
 	vaultOpWG      sync.WaitGroup
 	vaultOpStopped atomic.Bool
 
-	hnswRegistry *hnsw.Registry // per-vault HNSW indexes (shared with activation)
+	hnswRegistry     *hnsw.Registry              // per-vault HNSW indexes (shared with activation)
+	separationScorer *cognitive.SeparationScorer // nil = hippocampal pattern separation disabled
 
 	// vaultMu provides per-vault mutual exclusion for destructive vault operations
 	// (PruneVault, ReindexFTSVault, ClearVault). Maps string vault name → *sync.Mutex.
@@ -351,6 +352,11 @@ func NewEngine(cfg EngineConfig) *Engine {
 		hnswRegistry:     cfg.HNSWRegistry,
 		jobManager:          vaultjob.NewManager(),
 		replayFailCounts:    make(map[storage.ULID]int),
+	}
+	// Wire hippocampal pattern separation if enabled.
+	if cfg.HippocampalConfig != nil && cfg.HippocampalConfig.EnableSeparation {
+		sepStore := cognitive.NewSeparationStoreAdapter(store)
+		e.separationScorer = cognitive.NewSeparationScorer(sepStore, cfg.HippocampalConfig.SeparationConfig)
 	}
 	// Start async novelty worker to decouple O(N) Jaccard scan from write hot path.
 	// engine:spawn-ok — tracked by noveltyDone channel, drained in Stop()
@@ -1939,6 +1945,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	if actReq.MaxResults > 0 && len(result.Activations) > actReq.MaxResults {
 		result.Activations = result.Activations[:actReq.MaxResults]
 	}
+
+	// Hippocampal pattern separation: penalise cross-context candidates.
+	// Uses entity Jaccard similarity between top-seed entities and each candidate
+	// to reduce interference from engrams that are semantically similar but belong
+	// to a different entity context (e.g. "auth migration" in project A vs B).
+	result.Activations = e.applySeparation(ctx, wsPrefix, result.Activations)
 
 	// Convert result.Activations to []mbp.ActivationItem
 	items := make([]mbp.ActivationItem, len(result.Activations))
