@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,6 +29,17 @@ type ReplayEngram struct {
 	Vault   string
 }
 
+// ReplayMetrics holds effectiveness counters for the replay worker.
+// All fields are read via atomic loads and are safe for concurrent access.
+type ReplayMetrics struct {
+	CyclesCompleted   uint64        // total replay cycles run
+	EngramsReplayed   uint64        // total engrams replayed across all cycles
+	VaultsProcessed   uint64        // total vaults processed
+	LastCycleDuration time.Duration // wall-clock duration of most recent cycle
+	LastCycleAt       time.Time     // completion time of most recent cycle
+	Errors            uint64        // activation errors during replay
+}
+
 // ReplayWorker periodically runs synthetic ACTIVATE calls on recent engrams
 // to strengthen Hebbian associations and trigger PAS transitions. This is the
 // biological analogue of hippocampal sleep replay / memory consolidation.
@@ -40,6 +52,14 @@ type ReplayWorker struct {
 	store     ReplayStore
 	stopCh    chan struct{}
 	done      chan struct{}
+
+	// metrics — thread-safe via sync/atomic
+	cyclesCompleted atomic.Uint64
+	engramsReplayed atomic.Uint64
+	vaultsProcessed atomic.Uint64
+	lastCycleDur    atomic.Int64 // stored as time.Duration (int64 nanoseconds)
+	lastCycleAt     atomic.Int64 // stored as UnixNano
+	errors          atomic.Uint64
 }
 
 // NewReplayWorker creates a new hippocampal replay worker.
@@ -87,12 +107,35 @@ func (rw *ReplayWorker) Done() <-chan struct{} {
 	return rw.done
 }
 
+// Metrics returns a snapshot of the replay effectiveness counters.
+// Safe to call concurrently while the worker is running.
+func (rw *ReplayWorker) Metrics() ReplayMetrics {
+	var lastAt time.Time
+	if nanos := rw.lastCycleAt.Load(); nanos != 0 {
+		lastAt = time.Unix(0, nanos)
+	}
+	return ReplayMetrics{
+		CyclesCompleted:   rw.cyclesCompleted.Load(),
+		EngramsReplayed:   rw.engramsReplayed.Load(),
+		VaultsProcessed:   rw.vaultsProcessed.Load(),
+		LastCycleDuration: time.Duration(rw.lastCycleDur.Load()),
+		LastCycleAt:       lastAt,
+		Errors:            rw.errors.Load(),
+	}
+}
+
 // replayCycle runs one full replay pass across all vaults.
 func (rw *ReplayWorker) replayCycle(ctx context.Context) {
+	cycleStart := time.Now()
+
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("replay: cycle panicked", "panic", r)
 		}
+		// Record cycle timing regardless of success/panic.
+		rw.lastCycleDur.Store(int64(time.Since(cycleStart)))
+		rw.lastCycleAt.Store(time.Now().UnixNano())
+		rw.cyclesCompleted.Add(1)
 	}()
 
 	vaults, err := rw.store.ListVaults(ctx)
@@ -122,6 +165,8 @@ func (rw *ReplayWorker) replayCycle(ctx context.Context) {
 			continue
 		}
 
+		rw.vaultsProcessed.Add(1)
+
 		slog.Debug("replay: replaying vault",
 			"vault", vault, "engrams", len(engrams))
 
@@ -142,12 +187,14 @@ func (rw *ReplayWorker) replayCycle(ctx context.Context) {
 			}
 
 			if err := rw.activator.SyntheticActivate(ctx, vault, queryCtx); err != nil {
+				rw.errors.Add(1)
 				slog.Debug("replay: synthetic activate failed",
 					"vault", vault,
 					"engram", fmt.Sprintf("%x", eg.ID),
 					"error", err)
 				continue
 			}
+			rw.engramsReplayed.Add(1)
 			totalActivated++
 		}
 	}
