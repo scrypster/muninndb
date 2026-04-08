@@ -189,6 +189,9 @@ func (f *fakeEngine) DetectLocusMembers(_ context.Context, _, _ string, _ int) (
 func (f *fakeEngine) CompleteEpisode(_ context.Context, _ string, _ string) ([]engine.CompletedEngram, error) {
 	return nil, nil
 }
+func (f *fakeEngine) CompleteEpisodeWithContext(_ context.Context, _ string, _ string) (*engine.NarrativeContext, error) {
+	return &engine.NarrativeContext{}, nil
+}
 func (f *fakeEngine) ListEpisodes(_ context.Context, _ string, _ int) ([]EpisodeResult, error) {
 	return []EpisodeResult{}, nil
 }

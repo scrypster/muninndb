@@ -380,16 +380,17 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	}
 
 	// Pattern completion mode: take the top activation result and return
-	// all members of its episode via same_episode association walking.
+	// all members of its episode via same_episode association walking,
+	// enriched with narrative context (boundary engrams, duration, topic hint).
 	if completionMode && len(resp.Activations) > 0 {
 		seedID := resp.Activations[0].ID
-		episode, epErr := s.engine.CompleteEpisode(ctx, vault, seedID)
+		nc, epErr := s.engine.CompleteEpisodeWithContext(ctx, vault, seedID)
 		if epErr != nil {
 			sendError(w, id, -32000, "completion error: "+epErr.Error())
 			return
 		}
 		var memories []Memory
-		for _, ce := range episode {
+		for _, ce := range nc.Members {
 			memories = append(memories, Memory{
 				ID:        ce.ID,
 				Concept:   ce.Concept,
@@ -400,12 +401,26 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 			})
 		}
 		result := map[string]any{
-			"memories":  memories,
-			"total":     len(memories),
-			"mode":      "complete",
-			"seed_id":   seedID,
+			"memories":   memories,
+			"total":      len(memories),
+			"mode":       "complete",
+			"seed_id":    seedID,
 			"seed_score": resp.Activations[0].Score,
 		}
+		// Narrative context fields.
+		narrative := map[string]any{
+			"duration_ms": nc.Duration.Milliseconds(),
+		}
+		if nc.BeforeID != "" {
+			narrative["before_id"] = nc.BeforeID
+		}
+		if nc.AfterID != "" {
+			narrative["after_id"] = nc.AfterID
+		}
+		if nc.TopicHint != "" {
+			narrative["topic_hint"] = nc.TopicHint
+		}
+		result["narrative"] = narrative
 		if len(memories) == 0 {
 			result["hint"] = "Top activation result has no episode associations. Try mode='ranked' or use muninn_traverse to explore its neighbourhood."
 		}
