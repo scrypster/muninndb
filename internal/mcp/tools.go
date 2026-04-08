@@ -824,5 +824,30 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{},
 			},
 		},
+		// Episode management tools
+		{
+			Name:        "muninn_episodes",
+			Description: "List recent episodes in a vault. Episodes are groups of consecutive memories linked by same_episode associations during hippocampal episode segmentation. Returns episodes sorted by start time (most recent first).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"limit": map[string]any{"type": "integer", "description": "Max episodes to return (default 10, max 100)."},
+				},
+				"required": []string{},
+			},
+		},
+		{
+			Name:        "muninn_episode_members",
+			Description: "Get full engram details for all members of a specific episode. Use muninn_episodes first to discover episodes, then pass an episode ID here to see its contents.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":      vaultProp,
+					"episode_id": map[string]any{"type": "string", "description": "ID of the episode (first engram ID from muninn_episodes output)."},
+				},
+				"required": []string{"episode_id"},
+			},
+		},
 	}
 }

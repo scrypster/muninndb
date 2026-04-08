@@ -1827,3 +1827,49 @@ func (s *MCPServer) handleEntityTimeline(ctx context.Context, w http.ResponseWri
 	}
 	sendResult(w, id, textContent(mustJSON(timeline)))
 }
+
+func (s *MCPServer) handleEpisodes(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	limit := 10
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	episodes, err := s.engine.ListEpisodes(ctx, vault, limit)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if episodes == nil {
+		episodes = []EpisodeResult{}
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"episodes": episodes,
+		"count":    len(episodes),
+	})))
+}
+
+func (s *MCPServer) handleEpisodeMembers(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	episodeID, ok := args["episode_id"].(string)
+	if !ok || episodeID == "" {
+		sendError(w, id, -32602, "invalid params: 'episode_id' is required")
+		return
+	}
+	members, err := s.engine.GetEpisodeMembers(ctx, vault, episodeID)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if members == nil {
+		members = []EpisodeMember{}
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"episode_id": episodeID,
+		"members":    members,
+		"count":      len(members),
+	})))
+}

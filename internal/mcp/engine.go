@@ -176,4 +176,12 @@ type EngineInterface interface {
 	// CompleteEpisode walks same_episode associations from seedID to return
 	// all members of the episode, ordered by creation time ascending.
 	CompleteEpisode(ctx context.Context, vault string, seedID string) ([]engine.CompletedEngram, error)
+
+	// ListEpisodes returns groups of engrams connected by same_episode associations,
+	// sorted by StartTime descending. limit caps the number of episodes returned.
+	ListEpisodes(ctx context.Context, vault string, limit int) ([]EpisodeResult, error)
+
+	// GetEpisodeMembers returns full engrams for a specific episode, identified
+	// by the first engram ID in the episode.
+	GetEpisodeMembers(ctx context.Context, vault, episodeID string) ([]EpisodeMember, error)
 }

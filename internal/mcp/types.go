@@ -469,3 +469,21 @@ type EntitySummary struct {
 	MentionCount int32   `json:"mention_count"`
 	FirstSeen    string  `json:"first_seen,omitempty"` // RFC3339
 }
+
+// EpisodeResult is one episode returned by muninn_episodes.
+type EpisodeResult struct {
+	ID        string `json:"id"`         // ID of the first engram in the episode
+	StartTime string `json:"start_time"` // RFC3339
+	EndTime   string `json:"end_time"`   // RFC3339
+	Size      int    `json:"size"`       // number of engrams
+	Members   []string `json:"members"`  // engram IDs (ULIDs as strings)
+}
+
+// EpisodeMember is one engram within an episode, returned by muninn_episode_members.
+type EpisodeMember struct {
+	ID        string `json:"id"`
+	Concept   string `json:"concept"`
+	Summary   string `json:"summary,omitempty"`
+	State     string `json:"state"`
+	CreatedAt string `json:"created_at"` // RFC3339
+}
