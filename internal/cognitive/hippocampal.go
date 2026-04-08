@@ -31,6 +31,13 @@ type HippocampalConfig struct {
 	EnableLoci bool `json:"enable_loci"`
 
 	LociConfig LociConfig `json:"loci_config"`
+
+	// EnableReplay activates the hippocampal replay worker, which periodically
+	// runs synthetic ACTIVATE calls on recent engrams to strengthen Hebbian
+	// associations. Biological analogue: hippocampal sleep replay / consolidation.
+	EnableReplay bool `json:"enable_replay"`
+
+	ReplayConfig ReplayConfig `json:"replay_config"`
 }
 
 // EpisodeConfig holds tuning parameters for the episode segmentation worker.
@@ -66,6 +73,32 @@ type LociConfig struct {
 	MaxIterations int `json:"max_iterations"` // label propagation max iterations (default: 100)
 }
 
+// ReplayConfig holds tuning parameters for the hippocampal replay worker.
+type ReplayConfig struct {
+	// Interval is how often the replay cycle runs. Default: 6 hours.
+	Interval time.Duration `json:"interval"`
+
+	// LearningRate is the dampened Hebbian learning rate for replay-triggered
+	// activations. Lower than the normal rate (0.01) to avoid runaway
+	// reinforcement. Default: 0.005.
+	// NOTE: currently informational — the Hebbian worker uses a fixed rate.
+	// This field is logged and reserved for future per-activation rate control.
+	LearningRate float64 `json:"learning_rate"`
+
+	// MaxEngrams is the maximum number of recent engrams to replay per vault
+	// per cycle. Default: 100.
+	MaxEngrams int `json:"max_engrams"`
+}
+
+// DefaultReplayConfig returns a ReplayConfig with production-ready defaults.
+func DefaultReplayConfig() ReplayConfig {
+	return ReplayConfig{
+		Interval:     6 * time.Hour,
+		LearningRate: 0.005,
+		MaxEngrams:   100,
+	}
+}
+
 // DefaultHippocampalConfig returns a HippocampalConfig with all features
 // disabled and sane defaults for the tuning knobs.
 func DefaultHippocampalConfig() HippocampalConfig {
@@ -76,6 +109,8 @@ func DefaultHippocampalConfig() HippocampalConfig {
 		SeparationConfig: DefaultSeparationConfig(),
 		EnableLoci:       false,
 		LociConfig:       DefaultLociConfig(),
+		EnableReplay:     false,
+		ReplayConfig:     DefaultReplayConfig(),
 	}
 }
 
