@@ -172,4 +172,8 @@ type EngineInterface interface {
 	// DetectLocusMembers runs DetectLoci then returns entities and sample engrams
 	// for the community matching locusLabel.
 	DetectLocusMembers(ctx context.Context, vault, locusLabel string, minEdgeWeight int) (*LocusMembersResult, error)
+
+	// CompleteEpisode walks same_episode associations from seedID to return
+	// all members of the episode, ordered by creation time ascending.
+	CompleteEpisode(ctx context.Context, vault string, seedID string) ([]engine.CompletedEngram, error)
 }
