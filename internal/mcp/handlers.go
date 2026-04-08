@@ -293,13 +293,18 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	// Mode shortcuts: resolve preset if provided.
 	var modePreset RecallMode
+	completionMode := false
 	if modeStr, ok := args["mode"].(string); ok && modeStr != "" {
-		preset, modeErr := lookupMode(modeStr)
-		if modeErr != nil {
-			sendError(w, id, -32602, modeErr.Error())
-			return
+		if modeStr == "complete" {
+			completionMode = true
+		} else {
+			preset, modeErr := lookupMode(modeStr)
+			if modeErr != nil {
+				sendError(w, id, -32602, modeErr.Error())
+				return
+			}
+			modePreset = preset
 		}
-		modePreset = preset
 	}
 
 	req := &mbp.ActivateRequest{
@@ -371,6 +376,40 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	resp, err := s.engine.Activate(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+
+	// Pattern completion mode: take the top activation result and return
+	// all members of its episode via same_episode association walking.
+	if completionMode && len(resp.Activations) > 0 {
+		seedID := resp.Activations[0].ID
+		episode, epErr := s.engine.CompleteEpisode(ctx, vault, seedID)
+		if epErr != nil {
+			sendError(w, id, -32000, "completion error: "+epErr.Error())
+			return
+		}
+		var memories []Memory
+		for _, ce := range episode {
+			memories = append(memories, Memory{
+				ID:        ce.ID,
+				Concept:   ce.Concept,
+				Content:   ce.Content,
+				Summary:   ce.Summary,
+				State:     ce.State,
+				CreatedAt: ce.CreatedAt,
+			})
+		}
+		result := map[string]any{
+			"memories":  memories,
+			"total":     len(memories),
+			"mode":      "complete",
+			"seed_id":   seedID,
+			"seed_score": resp.Activations[0].Score,
+		}
+		if len(memories) == 0 {
+			result["hint"] = "Top activation result has no episode associations. Try mode='ranked' or use muninn_traverse to explore its neighbourhood."
+		}
+		sendResult(w, id, textContent(mustJSON(result)))
 		return
 	}
 

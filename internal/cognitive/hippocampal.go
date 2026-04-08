@@ -20,6 +20,11 @@ type HippocampalConfig struct {
 
 	SeparationConfig SeparationConfig `json:"separation_config"`
 
+	// EnableCompletion enables pattern completion mode for ACTIVATE.
+	// When true, the 'complete' recall mode is available, which returns the
+	// full episode containing the top activation result.
+	EnableCompletion bool `json:"enable_completion"`
+
 	// EnableLoci is reserved for a future background worker that maintains
 	// cached communities. On-demand MCP tools (muninn_loci, muninn_locus_members)
 	// are always available regardless of this flag.

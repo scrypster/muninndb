@@ -186,6 +186,9 @@ func (f *fakeEngine) DetectLoci(_ context.Context, _ string, _ int) ([]LociResul
 func (f *fakeEngine) DetectLocusMembers(_ context.Context, _, _ string, _ int) (*LocusMembersResult, error) {
 	return &LocusMembersResult{Label: "test", Members: []LocusMemberDetail{}, Size: 0}, nil
 }
+func (f *fakeEngine) CompleteEpisode(_ context.Context, _ string, _ string) ([]engine.CompletedEngram, error) {
+	return nil, nil
+}
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil, nil)
