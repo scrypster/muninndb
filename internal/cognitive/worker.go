@@ -266,10 +266,11 @@ func (w *Worker[T]) Stats() WorkerStats {
 
 // EngineWorkerStats holds the combined statistics for all cognitive workers.
 type EngineWorkerStats struct {
-	Hebbian    WorkerStats `json:"hebbian"`
-	Contradict WorkerStats `json:"contradict"`
-	Confidence WorkerStats `json:"confidence"`
-	Episode    WorkerStats `json:"episode"`
+	Hebbian    WorkerStats   `json:"hebbian"`
+	Contradict WorkerStats   `json:"contradict"`
+	Confidence WorkerStats   `json:"confidence"`
+	Episode    WorkerStats   `json:"episode"`
+	Replay     ReplayMetrics `json:"replay"`
 }
 
 // StartAll runs multiple workers via errgroup. Returns first error.

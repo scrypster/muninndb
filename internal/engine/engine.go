@@ -2563,6 +2563,12 @@ func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 	if ep != nil {
 		stats.Episode = ep.Stats()
 	}
+	e.cogMu.RLock()
+	rw := e.replayWorker
+	e.cogMu.RUnlock()
+	if rw != nil {
+		stats.Replay = rw.Metrics()
+	}
 	return stats
 }
 
