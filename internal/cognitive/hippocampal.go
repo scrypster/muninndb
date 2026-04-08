@@ -12,6 +12,13 @@ type HippocampalConfig struct {
 
 	// Episode tuning knobs — only used when EnableEpisodes is true.
 	EpisodeConfig EpisodeConfig `json:"episode_config"`
+
+	// EnableSeparation activates hippocampal pattern separation.
+	// When true, cross-context ACTIVATE results are penalised using entity
+	// Jaccard similarity as a context mismatch signal.
+	EnableSeparation bool `json:"enable_separation"`
+
+	SeparationConfig SeparationConfig `json:"separation_config"`
 }
 
 // EpisodeConfig holds tuning parameters for the episode segmentation worker.
@@ -29,12 +36,27 @@ type EpisodeConfig struct {
 	AssociationWeight float32 `json:"association_weight"`
 }
 
+// SeparationConfig tunes the pattern separation scoring adjustment.
+type SeparationConfig struct {
+	// RepulsionAlpha is the maximum score penalty applied to cross-context
+	// candidates. A candidate with zero entity overlap receives a multiplier
+	// of (1.0 - RepulsionAlpha). Must be in [0, 1). Zero disables the penalty. Default: 0.3.
+	RepulsionAlpha float64
+
+	// ContextMismatchFn selects the method used to detect context mismatch.
+	// Currently only "entity" is supported: Jaccard similarity over the
+	// entity sets of the query and candidate engrams. Default: "entity".
+	ContextMismatchFn string
+}
+
 // DefaultHippocampalConfig returns a HippocampalConfig with all features
 // disabled and sane defaults for the tuning knobs.
 func DefaultHippocampalConfig() HippocampalConfig {
 	return HippocampalConfig{
-		EnableEpisodes: false,
-		EpisodeConfig:  DefaultEpisodeConfig(),
+		EnableEpisodes:   false,
+		EpisodeConfig:    DefaultEpisodeConfig(),
+		EnableSeparation: false,
+		SeparationConfig: DefaultSeparationConfig(),
 	}
 }
 
@@ -44,5 +66,13 @@ func DefaultEpisodeConfig() EpisodeConfig {
 		SimilarityThreshold: 0.5,
 		TimeGap:             30 * time.Minute,
 		AssociationWeight:   0.3,
+	}
+}
+
+// DefaultSeparationConfig returns conservative separation defaults.
+func DefaultSeparationConfig() SeparationConfig {
+	return SeparationConfig{
+		RepulsionAlpha:    0.3,
+		ContextMismatchFn: "entity",
 	}
 }
