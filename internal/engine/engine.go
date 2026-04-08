@@ -127,6 +127,8 @@ type Engine struct {
 	pruneDone            chan struct{}             // signals prune worker shutdown
 	idempotencySweepDone chan struct{}             // signals idempotency sweep worker shutdown
 	archiveGCDone        chan struct{}             // signals archive GC worker shutdown
+	replayWorker         *cognitive.ReplayWorker  // nil → no hippocampal replay
+	replayWorkerDone     chan struct{}             // signals replay worker shutdown
 	coherence            *coherence.Registry       // per-vault incremental coherence counters
 	scoring              *scoring.Store            // per-vault learnable scoring weights
 	prov                 *provenance.Store         // audit trail per-engram
@@ -427,6 +429,22 @@ func NewEngine(cfg EngineConfig) *Engine {
 	// engine:spawn-ok — tracked by archiveGCDone channel, drained in Stop()
 	go e.runArchiveGCWorker()
 
+	// Start hippocampal replay worker if enabled via HippocampalConfig.
+	// The worker is constructed here (not pre-built in EngineConfig) because it
+	// needs the Engine as its ReplayActivator — which doesn't exist until NewEngine
+	// finishes building the Engine struct.
+	if cfg.HippocampalConfig != nil && cfg.HippocampalConfig.EnableReplay {
+		storeAdapter := cognitive.NewReplayStoreAdapter(store)
+		rw := cognitive.NewReplayWorker(cfg.HippocampalConfig.ReplayConfig, e, storeAdapter)
+		e.replayWorker = rw
+		e.replayWorkerDone = make(chan struct{})
+		// engine:spawn-ok — tracked by replayWorkerDone channel, drained in Stop()
+		go func() {
+			defer close(e.replayWorkerDone)
+			rw.Run(e.stopCtx)
+		}()
+	}
+
 	return e
 }
 
@@ -518,6 +536,19 @@ func (e *Engine) Stop() {
 		if e.ftsWorker != nil {
 			e.ftsWorker.Stop()
 		}
+		// Drain hippocampal replay worker BEFORE closing the activation pipeline.
+		// Replay calls SyntheticActivate → Activate, so an in-flight replay cycle
+		// would race against a closed activation engine if we shut activation down first.
+		if e.replayWorker != nil {
+			e.replayWorker.Stop()
+			if e.replayWorkerDone != nil {
+				select {
+				case <-e.replayWorkerDone:
+				case <-time.After(5 * time.Second):
+					slog.Warn("engine: replay worker did not exit within 5s")
+				}
+			}
+		}
 		// Close the activation engine's drainLog goroutine. Must happen after FTS
 		// worker stops (writes may reference activation) but before other cleanup.
 		if e.activation != nil {
@@ -575,7 +606,6 @@ func (e *Engine) Stop() {
 				slog.Warn("engine: archive GC worker did not exit within 5s")
 			}
 		}
-
 		// Drain fire-and-forget goroutines last — they write to Pebble via the
 		// scoring store. Must complete before store.Close() (called by the caller
 		// immediately after Stop() returns).
@@ -1733,6 +1763,23 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 // Activate implements mbp.EngineAPI.Activate.
 func (e *Engine) Activate(ctx context.Context, req *mbp.ActivateRequest) (*mbp.ActivateResponse, error) {
 	return e.activateCore(ctx, req, nil)
+}
+
+// SyntheticActivate runs a synthetic activation through the normal ACTIVATE
+// pipeline. Used by the hippocampal replay worker to trigger Hebbian learning,
+// PAS transitions, and contradiction detection without external input.
+func (e *Engine) SyntheticActivate(ctx context.Context, vault string, queryContext string) error {
+	// TODO: Thread ReplayConfig.LearningRate into the Hebbian submit path.
+	// Currently, synthetic activations use the same learning rate as real ones.
+	// This is acceptable for the initial implementation but should be addressed
+	// to prevent self-reinforcement during aggressive replay cycles.
+	req := &mbp.ActivateRequest{
+		Context:    []string{queryContext},
+		Vault:      vault,
+		MaxResults: 10,
+	}
+	_, err := e.Activate(ctx, req)
+	return err
 }
 
 // ActivateWithStructuredFilter is like Activate but accepts a typed filter for
