@@ -1,0 +1,49 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+)
+
+var datasets = map[string]string{
+	"locomo10.json":                "https://raw.githubusercontent.com/snap-research/LocOMo/main/data/locomo10.json",
+	"longmemeval_s_cleaned.json":   "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json",
+}
+
+func ensureDatasets(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for name, url := range datasets {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			continue // already downloaded
+		}
+		fmt.Fprintf(os.Stderr, "downloading %s...\n", name)
+		if err := downloadFile(url, path); err != nil {
+			return fmt.Errorf("download %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func downloadFile(url, dest string) error {
+	resp, err := http.Get(url) //nolint:gosec
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(f, resp.Body)
+	return err
+}
