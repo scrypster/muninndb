@@ -11,7 +11,8 @@ import (
 
 // Store provides auth persistence on top of the shared Pebble database.
 type Store struct {
-	db *pebble.DB
+	db            *pebble.DB
+	DefaultPublic bool // when true, unconfigured vaults default to public (for dev/test)
 }
 
 func NewStore(db *pebble.DB) *Store {
