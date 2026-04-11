@@ -13,10 +13,8 @@ type DreamOpts struct {
 	Force  bool   // bypass trigger gates
 	Scope  string // limit to single vault ("" = all)
 
-	// LLM providers for Phase 2b (optional).
-	OllamaProvider    consolidation.LLMProvider
-	AnthropicProvider consolidation.LLMProvider
-	OpenAIProvider    consolidation.LLMProvider
+	// Providers holds LLM providers for Phase 2b, ordered by preference (optional).
+	Providers []consolidation.LLMProvider
 }
 
 // DreamReport is the result of a dream consolidation pass.
@@ -29,9 +27,7 @@ type DreamReport = consolidation.DreamReport
 func (db *DB) Dream(ctx context.Context, opts DreamOpts) (*DreamReport, error) {
 	w := consolidation.NewWorker(db.eng)
 
-	w.OllamaLLM = opts.OllamaProvider
-	w.AnthropicLLM = opts.AnthropicProvider
-	w.OpenAILLM = opts.OpenAIProvider
+	w.Providers = opts.Providers
 
 	report, err := w.DreamOnce(ctx, consolidation.DreamOpts{
 		DryRun: opts.DryRun,

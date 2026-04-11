@@ -11,9 +11,12 @@ import (
 )
 
 // buildDreamProviders initialises LLM providers for dream Phase 2b from
-// environment variables. Each provider is optional; nil is returned for
-// any that are not configured or fail to init.
-func buildDreamProviders(ctx context.Context) (ollama, anthropic, openai consolidation.LLMProvider) {
+// environment variables. Returns a slice ordered by preference: local (Ollama)
+// first, then restricted-safe (Anthropic), then open-only (OpenAI). Only
+// successfully initialised providers are included.
+func buildDreamProviders(ctx context.Context) []consolidation.LLMProvider {
+	var providers []consolidation.LLMProvider
+
 	if ollamaURL := os.Getenv("MUNINN_OLLAMA_URL"); ollamaURL != "" {
 		p := enrichpkg.NewOllamaLLMProvider()
 		model := os.Getenv("MUNINN_OLLAMA_MODEL")
@@ -24,7 +27,7 @@ func buildDreamProviders(ctx context.Context) (ollama, anthropic, openai consoli
 		if err := p.Init(pctx, enrichpkg.LLMProviderConfig{BaseURL: ollamaURL, Model: model}); err != nil {
 			slog.Warn("dream: ollama LLM init failed", "error", err)
 		} else {
-			ollama = p
+			providers = append(providers, p)
 		}
 		pcancel()
 	}
@@ -41,7 +44,7 @@ func buildDreamProviders(ctx context.Context) (ollama, anthropic, openai consoli
 		}); err != nil {
 			slog.Warn("dream: anthropic LLM init failed", "error", err)
 		} else {
-			anthropic = p
+			providers = append(providers, p)
 		}
 		pcancel()
 	}
@@ -62,10 +65,10 @@ func buildDreamProviders(ctx context.Context) (ollama, anthropic, openai consoli
 		}); err != nil {
 			slog.Warn("dream: openai LLM init failed", "error", err)
 		} else {
-			openai = p
+			providers = append(providers, p)
 		}
 		pcancel()
 	}
 
-	return ollama, anthropic, openai
+	return providers
 }

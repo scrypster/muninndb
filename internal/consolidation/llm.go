@@ -29,19 +29,19 @@ func vaultTrustTier(vault string) trustTier {
 	return trustOpen
 }
 
-func resolveProvider(vault string, ollama, anthropic, openai LLMProvider) LLMProvider {
+// resolveProvider picks the first eligible provider from the ordered slice for
+// the vault's trust tier. Restricted vaults (work, personal) skip providers
+// whose Name() returns "openai". Legal vaults skip all providers.
+func resolveProvider(vault string, providers []LLMProvider) LLMProvider {
 	tier := vaultTrustTier(vault)
 	if tier == trustSkip {
 		return nil
 	}
-	if ollama != nil {
-		return ollama
-	}
-	if anthropic != nil {
-		return anthropic
-	}
-	if tier == trustOpen && openai != nil {
-		return openai
+	for _, p := range providers {
+		if tier == trustRestricted && p.Name() == "openai" {
+			continue
+		}
+		return p
 	}
 	return nil
 }
@@ -185,7 +185,7 @@ func (w *Worker) runPhase2bLLMConsolidation(
 	vault string,
 	clusters []DedupCluster,
 ) error {
-	provider := resolveProvider(vault, w.OllamaLLM, w.AnthropicLLM, w.OpenAILLM)
+	provider := resolveProvider(vault, w.Providers)
 	if provider == nil {
 		slog.Info("dream: phase 2b skipped (no eligible LLM provider for vault)", "vault", vault)
 		return nil

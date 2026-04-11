@@ -254,10 +254,10 @@ func TestDreamOnce_FullPipeline_WithMockLLM(t *testing.T) {
 
 	mock := &mockEngineInterface{store: store}
 	w := NewWorker(mock)
-	w.OllamaLLM = &mockLLMProvider{
+	w.Providers = []LLMProvider{&mockLLMProvider{
 		name:     "mock",
 		response: `{"merges":[],"contradictions":[],"cross_vault_suggestions":[],"stability_recommendations":[],"journal":"Reviewed 4 engrams. Docker networking notes are similar but not identical."}`,
-	}
+	}}
 
 	report, err := w.DreamOnce(ctx, DreamOpts{Force: true, Scope: vault})
 	if err != nil {

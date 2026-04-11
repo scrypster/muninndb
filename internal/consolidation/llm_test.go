@@ -47,7 +47,7 @@ func TestVaultTrustTier_OpenVaults(t *testing.T) {
 
 func TestResolveProvider_SkipVault(t *testing.T) {
 	ollama := &mockLLMProvider{name: "ollama"}
-	if got := resolveProvider("legal", ollama, nil, nil); got != nil {
+	if got := resolveProvider("legal", []LLMProvider{ollama}); got != nil {
 		t.Errorf("resolveProvider(legal) = %v, want nil", got)
 	}
 }
@@ -55,34 +55,34 @@ func TestResolveProvider_SkipVault(t *testing.T) {
 func TestResolveProvider_RestrictedAllowsOllama(t *testing.T) {
 	ollama := &mockLLMProvider{name: "ollama"}
 	openai := &mockLLMProvider{name: "openai"}
-	got := resolveProvider("work", ollama, nil, openai)
+	got := resolveProvider("work", []LLMProvider{ollama, openai})
 	if got != ollama {
-		t.Errorf("resolveProvider(work, ollama, nil, openai) = %v, want ollama", got)
+		t.Errorf("resolveProvider(work) = %v, want ollama", got)
 	}
 }
 
 func TestResolveProvider_RestrictedAllowsAnthropic(t *testing.T) {
 	anthropic := &mockLLMProvider{name: "anthropic"}
 	openai := &mockLLMProvider{name: "openai"}
-	got := resolveProvider("personal", nil, anthropic, openai)
+	got := resolveProvider("personal", []LLMProvider{anthropic, openai})
 	if got != anthropic {
-		t.Errorf("resolveProvider(personal, nil, anthropic, openai) = %v, want anthropic", got)
+		t.Errorf("resolveProvider(personal) = %v, want anthropic", got)
 	}
 }
 
 func TestResolveProvider_RestrictedBlocksOpenAI(t *testing.T) {
 	openai := &mockLLMProvider{name: "openai"}
-	got := resolveProvider("work", nil, nil, openai)
+	got := resolveProvider("work", []LLMProvider{openai})
 	if got != nil {
-		t.Errorf("resolveProvider(work, nil, nil, openai) = %v, want nil", got)
+		t.Errorf("resolveProvider(work, [openai]) = %v, want nil", got)
 	}
 }
 
 func TestResolveProvider_OpenAllowsAny(t *testing.T) {
 	openai := &mockLLMProvider{name: "openai"}
-	got := resolveProvider("projects", nil, nil, openai)
+	got := resolveProvider("projects", []LLMProvider{openai})
 	if got != openai {
-		t.Errorf("resolveProvider(projects, nil, nil, openai) = %v, want openai", got)
+		t.Errorf("resolveProvider(projects) = %v, want openai", got)
 	}
 }
 
@@ -90,9 +90,9 @@ func TestResolveProvider_Priority(t *testing.T) {
 	ollama := &mockLLMProvider{name: "ollama"}
 	anthropic := &mockLLMProvider{name: "anthropic"}
 	openai := &mockLLMProvider{name: "openai"}
-	got := resolveProvider("default", ollama, anthropic, openai)
+	got := resolveProvider("default", []LLMProvider{ollama, anthropic, openai})
 	if got != ollama {
-		t.Errorf("resolveProvider(default, ollama, anthropic, openai) = %v, want ollama", got)
+		t.Errorf("resolveProvider(default) = %v, want ollama (first in slice)", got)
 	}
 }
 

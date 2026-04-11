@@ -36,11 +36,10 @@ type Worker struct {
 	MaxTransitive  int           // max inferred edges per run (default 1000)
 	DryRun         bool          // if true, no mutations occur
 	DedupThreshold float32       // cosine similarity threshold for dedup (0 = use default 0.95)
-	// LLM providers for dream Phase 2b consolidation (all optional).
-	// resolveProvider selects the appropriate provider per-vault based on trust tier.
-	OllamaLLM    LLMProvider
-	AnthropicLLM LLMProvider
-	OpenAILLM    LLMProvider
+	// Providers holds LLM providers for dream Phase 2b consolidation, ordered by
+	// preference (e.g. local first, then cloud). resolveProvider picks the first
+	// eligible provider for each vault's trust tier.
+	Providers []LLMProvider
 }
 
 // NewWorker creates a new consolidation worker with sensible defaults.

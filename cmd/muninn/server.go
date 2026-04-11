@@ -1334,8 +1334,8 @@ func runServer() {
 	eng.SetRetroactiveProcessors(obsProcs...)
 
 	// Build dream LLM providers once — shared by dream-on-start and the REST endpoint.
-	dreamOllama, dreamAnthropic, dreamOpenAI := buildDreamProviders(ctx)
-	restServer.SetDreamProviders(dreamOllama, dreamAnthropic, dreamOpenAI)
+	dreamProviders := buildDreamProviders(ctx)
+	restServer.SetDreamProviders(dreamProviders)
 
 	// Dream-on-start: check dream_due flag and run dream if gates pass.
 	if flaggedAt, due, err := store.ReadDreamDue(); err != nil {
@@ -1353,9 +1353,7 @@ func runServer() {
 		dreamCtx, dreamCancel := context.WithTimeout(ctx, dreamTimeout)
 
 		dreamWorker := consolidation.NewWorker(eng)
-		dreamWorker.OllamaLLM = dreamOllama
-		dreamWorker.AnthropicLLM = dreamAnthropic
-		dreamWorker.OpenAILLM = dreamOpenAI
+		dreamWorker.Providers = dreamProviders
 		dreamReport, err := dreamWorker.DreamOnce(dreamCtx, consolidation.DreamOpts{Force: false})
 		dreamCancel()
 

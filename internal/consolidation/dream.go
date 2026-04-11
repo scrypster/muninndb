@@ -123,9 +123,7 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 		MaxTransitive:  w.MaxTransitive,
 		DryRun:         opts.DryRun,
 		DedupThreshold: 0.85,
-		OllamaLLM:     w.OllamaLLM,
-		AnthropicLLM:  w.AnthropicLLM,
-		OpenAILLM:     w.OpenAILLM,
+		Providers:      w.Providers,
 	}
 
 	for _, vault := range vaults {

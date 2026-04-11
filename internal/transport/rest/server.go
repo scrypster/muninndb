@@ -90,10 +90,8 @@ type Server struct {
 	enrichProvider string // "ollama", "openai", "anthropic", "google", or ""
 	enrichModel    string // model name, or ""
 
-	// Dream LLM providers — optional, set via SetDreamProviders.
-	dreamOllama    consolidation.LLMProvider
-	dreamAnthropic consolidation.LLMProvider
-	dreamOpenAI    consolidation.LLMProvider
+	// Dream LLM providers — optional, ordered by preference, set via SetDreamProviders.
+	dreamProviders []consolidation.LLMProvider
 
 	// MCP info — set at construction time for the /api/admin/mcp-info endpoint.
 	mcpAddr     string // MCP listen address, e.g. ":8750"
@@ -331,10 +329,9 @@ func (s *Server) SetDataDir(dir string) { s.dataDir = dir }
 func (s *Server) SetVersion(v string) { s.version = v }
 
 // SetDreamProviders configures optional LLM providers for the /api/dream endpoint.
-func (s *Server) SetDreamProviders(ollama, anthropic, openai consolidation.LLMProvider) {
-	s.dreamOllama = ollama
-	s.dreamAnthropic = anthropic
-	s.dreamOpenAI = openai
+// Providers are tried in order; the first eligible one for the vault's trust tier wins.
+func (s *Server) SetDreamProviders(providers []consolidation.LLMProvider) {
+	s.dreamProviders = providers
 }
 
 // probeDBWritability runs a periodic background check of data directory writability.

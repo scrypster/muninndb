@@ -60,15 +60,13 @@ func runDream(args []string) {
 	}()
 
 	// Build LLM providers from env vars.
-	ollamaP, anthropicP, openaiP := buildDreamProviders(ctx)
+	providers := buildDreamProviders(ctx)
 
 	report, err := db.Dream(ctx, muninn.DreamOpts{
-		DryRun:            *dryRun,
-		Force:             *force,
-		Scope:             *scope,
-		OllamaProvider:    ollamaP,
-		AnthropicProvider: anthropicP,
-		OpenAIProvider:    openaiP,
+		DryRun:    *dryRun,
+		Force:     *force,
+		Scope:     *scope,
+		Providers: providers,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
