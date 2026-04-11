@@ -32,10 +32,9 @@ type openaiChatRequest struct {
 
 // openaiMessage is a message in the OpenAI chat API.
 type openaiMessage struct {
-	Role             string          `json:"role"`
-	Content          string          `json:"content"`
-	Reasoning        json.RawMessage `json:"reasoning,omitempty"`
-	ReasoningContent json.RawMessage `json:"reasoning_content,omitempty"` // llama.cpp / turbo3 thinking models
+	Role      string          `json:"role"`
+	Content   string          `json:"content"`
+	Reasoning json.RawMessage `json:"reasoning,omitempty"`
 }
 
 // openaiResponseFormat specifies JSON response format for OpenAI.
@@ -144,13 +143,12 @@ func (p *OpenAILLMProvider) Complete(ctx context.Context, system, user string) (
 	if content := strings.TrimSpace(msg.Content); content != "" {
 		return content, nil
 	}
-	// Try OpenAI-style "reasoning" field first, then llama.cpp "reasoning_content".
-	for _, raw := range []json.RawMessage{msg.Reasoning, msg.ReasoningContent} {
-		if text, err := reasoningPayload(raw); err != nil {
-			return "", fmt.Errorf("failed to parse reasoning payload: %w", err)
-		} else if text != "" {
-			return text, nil
-		}
+	reasoning, err := reasoningPayload(msg.Reasoning)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse openai reasoning payload: %w", err)
+	}
+	if reasoning != "" {
+		return reasoning, nil
 	}
 
 	return "", fmt.Errorf("openai response has no content or reasoning")
