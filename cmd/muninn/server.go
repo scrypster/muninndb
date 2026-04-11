@@ -25,6 +25,7 @@ import (
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/backup"
 	"github.com/scrypster/muninndb/internal/cognitive"
+	"github.com/scrypster/muninndb/internal/consolidation"
 	plugincfg "github.com/scrypster/muninndb/internal/config"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/activation"
@@ -932,6 +933,10 @@ func runServer() {
 	}
 
 	authStore := auth.NewStore(db)
+	if os.Getenv("MUNINN_DEFAULT_VAULT_PUBLIC") == "true" {
+		authStore.DefaultPublic = true
+		slog.Info("MUNINN_DEFAULT_VAULT_PUBLIC=true: unconfigured vaults will be public")
+	}
 	secretPath := filepath.Join(*dataDir, "auth_secret")
 	sessionSecret, err := auth.Bootstrap(authStore, secretPath)
 	if err != nil {
@@ -1194,6 +1199,12 @@ func runServer() {
 	go func() {
 		<-sigCh
 		slog.Info("shutdown signal received — starting graceful shutdown")
+		// Set dream-due flag so next start triggers dream.
+		if err := store.WriteDreamDue(time.Now()); err != nil {
+			slog.Warn("failed to set dream-due flag", "error", err)
+		} else {
+			slog.Info("dream-due flag set for next start")
+		}
 		cancel()
 		<-sigCh
 		slog.Error("second signal received — forcing immediate exit")
@@ -1321,6 +1332,42 @@ func runServer() {
 		obsProcs = append(obsProcs, enrichProcessor)
 	}
 	eng.SetRetroactiveProcessors(obsProcs...)
+
+	// Build dream LLM providers once — shared by dream-on-start and the REST endpoint.
+	dreamProviders := buildDreamProviders(ctx)
+	restServer.SetDreamProviders(dreamProviders)
+
+	// Dream-on-start: check dream_due flag and run dream if gates pass.
+	if flaggedAt, due, err := store.ReadDreamDue(); err != nil {
+		slog.Warn("dream-on-start: failed to read dream-due flag", "error", err)
+	} else if due {
+		dreamTimeout := 60 * time.Second
+		if ts := os.Getenv("MUNINN_DREAM_TIMEOUT"); ts != "" {
+			if d, err := time.ParseDuration(ts); err == nil && d > 0 {
+				dreamTimeout = d
+			}
+		}
+		slog.Info("dream-on-start: dream-due flag set, running dream",
+			"flagged_at", flaggedAt, "timeout", dreamTimeout)
+
+		dreamCtx, dreamCancel := context.WithTimeout(ctx, dreamTimeout)
+
+		dreamWorker := consolidation.NewWorker(eng)
+		dreamWorker.Providers = dreamProviders
+		dreamReport, err := dreamWorker.DreamOnce(dreamCtx, consolidation.DreamOpts{Force: false})
+		dreamCancel()
+
+		if err != nil {
+			slog.Warn("dream-on-start: dream failed (flag preserved for retry)", "error", err)
+		} else {
+			slog.Info("dream-on-start: completed",
+				"duration", dreamReport.TotalDuration,
+				"vaults", len(dreamReport.Reports))
+			if err := store.ClearDreamDue(); err != nil {
+				slog.Warn("dream-on-start: failed to clear dream-due flag", "error", err)
+			}
+		}
+	}
 
 	// Start servers
 	errCh := make(chan error, 3)

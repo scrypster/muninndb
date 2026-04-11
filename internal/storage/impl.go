@@ -577,6 +577,36 @@ func (ps *PebbleStore) ReadDreamState(vaultPrefix [8]byte) (time.Time, int64, bo
 	return time.Unix(0, nanos), engramCount, true, nil
 }
 
+// WriteDreamDue sets the global dream-due flag, recording when it was flagged.
+func (ps *PebbleStore) WriteDreamDue(flaggedAt time.Time) error {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(flaggedAt.UnixNano()))
+	return ps.db.Set(keys.DreamDueKey(), buf, pebble.Sync)
+}
+
+// ReadDreamDue reads the global dream-due flag.
+// Returns (flaggedAt, true, nil) if set, (zero, false, nil) if not set.
+func (ps *PebbleStore) ReadDreamDue() (time.Time, bool, error) {
+	val, closer, err := ps.db.Get(keys.DreamDueKey())
+	if errors.Is(err, pebble.ErrNotFound) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("read dream due: %w", err)
+	}
+	defer closer.Close()
+	if len(val) != 8 {
+		return time.Time{}, false, fmt.Errorf("dream due: unexpected value length %d", len(val))
+	}
+	nanos := int64(binary.BigEndian.Uint64(val))
+	return time.Unix(0, nanos), true, nil
+}
+
+// ClearDreamDue removes the global dream-due flag.
+func (ps *PebbleStore) ClearDreamDue() error {
+	return ps.db.Delete(keys.DreamDueKey(), pebble.Sync)
+}
+
 // Checkpoint creates a Pebble checkpoint (consistent on-disk snapshot) at destDir.
 func (ps *PebbleStore) Checkpoint(destDir string) error {
 	return ps.db.Checkpoint(destDir)
