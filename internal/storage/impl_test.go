@@ -1219,3 +1219,58 @@ func TestWriteDreamStateOverwrite(t *testing.T) {
 		t.Errorf("count: got %d, want 47", gotCount)
 	}
 }
+
+// TestWriteReadDreamDue verifies round-trip persistence of the global dream-due flag.
+func TestWriteReadDreamDue(t *testing.T) {
+	dir, err := os.MkdirTemp("", "muninndb-dream-due-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := OpenPebble(dir, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	defer store.Close()
+
+	// Before writing: flag should not be set.
+	_, ok, err := store.ReadDreamDue()
+	if err != nil {
+		t.Fatalf("ReadDreamDue on empty store: %v", err)
+	}
+	if ok {
+		t.Error("ReadDreamDue on empty store returned ok=true, want false")
+	}
+
+	// Write the flag and read it back.
+	wantTime := time.Date(2026, 3, 29, 10, 0, 0, 0, time.UTC)
+	if err := store.WriteDreamDue(wantTime); err != nil {
+		t.Fatalf("WriteDreamDue: %v", err)
+	}
+
+	gotTime, ok, err := store.ReadDreamDue()
+	if err != nil {
+		t.Fatalf("ReadDreamDue after write: %v", err)
+	}
+	if !ok {
+		t.Fatal("ReadDreamDue returned ok=false after write")
+	}
+	if !gotTime.Equal(wantTime) {
+		t.Errorf("ReadDreamDue time: got %v, want %v", gotTime, wantTime)
+	}
+
+	// Clear the flag and verify it's gone.
+	if err := store.ClearDreamDue(); err != nil {
+		t.Fatalf("ClearDreamDue: %v", err)
+	}
+
+	_, ok, err = store.ReadDreamDue()
+	if err != nil {
+		t.Fatalf("ReadDreamDue after clear: %v", err)
+	}
+	if ok {
+		t.Error("ReadDreamDue returned ok=true after clear, want false")
+	}
+}

@@ -12,6 +12,9 @@ type DreamOpts struct {
 	DryRun bool
 	Force  bool   // bypass trigger gates
 	Scope  string // limit to single vault ("" = all)
+
+	// Providers holds LLM providers for Phase 2b, ordered by preference (optional).
+	Providers []consolidation.LLMProvider
 }
 
 // DreamReport is the result of a dream consolidation pass.
@@ -23,6 +26,8 @@ type DreamReport = consolidation.DreamReport
 // It uses a lowered dedup threshold (0.85) to surface near-duplicates.
 func (db *DB) Dream(ctx context.Context, opts DreamOpts) (*DreamReport, error) {
 	w := consolidation.NewWorker(db.eng)
+
+	w.Providers = opts.Providers
 
 	report, err := w.DreamOnce(ctx, consolidation.DreamOpts{
 		DryRun: opts.DryRun,

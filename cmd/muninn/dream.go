@@ -59,10 +59,14 @@ func runDream(args []string) {
 		}
 	}()
 
+	// Build LLM providers from env vars.
+	providers := buildDreamProviders(ctx)
+
 	report, err := db.Dream(ctx, muninn.DreamOpts{
-		DryRun: *dryRun,
-		Force:  *force,
-		Scope:  *scope,
+		DryRun:    *dryRun,
+		Force:     *force,
+		Scope:     *scope,
+		Providers: providers,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -98,6 +102,18 @@ func printDreamReport(report *muninn.DreamReport, dryRun bool) {
 		if r.MergedEngrams > 0 {
 			changes = append(changes, fmt.Sprintf("merged %d", r.MergedEngrams))
 		}
+		if r.LLMMerged > 0 {
+			changes = append(changes, fmt.Sprintf("LLM merged %d", r.LLMMerged))
+		}
+		if r.LLMContradictions > 0 {
+			changes = append(changes, fmt.Sprintf("resolved %d contradictions", r.LLMContradictions))
+		}
+		if r.StabilityStrengthened > 0 {
+			changes = append(changes, fmt.Sprintf("strengthened %d", r.StabilityStrengthened))
+		}
+		if r.StabilityWeakened > 0 {
+			changes = append(changes, fmt.Sprintf("weakened %d", r.StabilityWeakened))
+		}
 		if r.InferredEdges > 0 {
 			changes = append(changes, fmt.Sprintf("inferred %d edges", r.InferredEdges))
 		}
@@ -108,7 +124,12 @@ func printDreamReport(report *muninn.DreamReport, dryRun bool) {
 	}
 
 	if len(report.Skipped) > 0 {
-		fmt.Printf("\nSkipped (legal): %s\n", strings.Join(report.Skipped, ", "))
+		fmt.Printf("\nSkipped: %s\n", strings.Join(report.Skipped, ", "))
+	}
+
+	if report.JournalEntry != "" {
+		fmt.Println()
+		fmt.Println(report.JournalEntry)
 	}
 }
 

@@ -18,4 +18,17 @@ type ConsolidationReport struct {
 	// Dream-specific fields (populated by DreamOnce, nil/zero for RunOnce)
 	Orient       *VaultSummary // Phase 0 vault summary
 	LegalSkipped int           // legal engrams skipped in Phase 2b
+
+	// Dream-specific: Phase 4 bidirectional stability
+	StabilityStrengthened int // engrams with stability increased
+	StabilityWeakened     int // engrams with stability decreased
+
+	// Dream-specific: Phase 2b LLM consolidation
+	LLMMerged         int    // engrams merged by LLM recommendation
+	LLMContradictions int    // contradictions resolved by LLM
+	LLMSuggestions    int    // cross-vault suggestions from LLM
+	Journal           string // narrative from LLM (Phase 6)
+
+	// Phase 2 near-duplicate clusters for LLM review (transient, not serialized)
+	DedupClustersForLLM []DedupCluster `json:"-"`
 }

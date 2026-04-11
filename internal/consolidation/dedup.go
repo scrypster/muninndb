@@ -65,6 +65,7 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 	// Find clusters of similar engrams (naive O(n²) pairwise comparison)
 	type cluster struct {
 		members []*storage.Engram // all members of the cluster
+		minSim  float32           // lowest pairwise similarity to seed in cluster
 	}
 	visited := make(map[storage.ULID]bool)
 	var clusters []cluster
@@ -74,7 +75,7 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 			continue
 		}
 
-		clust := cluster{members: []*storage.Engram{withEmbed[i].engram}}
+		clust := cluster{members: []*storage.Engram{withEmbed[i].engram}, minSim: 1.0}
 		visited[withEmbed[i].engram.ID] = true
 
 		// Find all engrams similar to this one
@@ -87,6 +88,9 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 			if sim >= similarityThreshold {
 				clust.members = append(clust.members, withEmbed[j].engram)
 				visited[withEmbed[j].engram.ID] = true
+				if sim < clust.minSim {
+					clust.minSim = sim
+				}
 			}
 		}
 
@@ -98,8 +102,31 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 
 	report.DedupClusters = len(clusters)
 
-	// Process each cluster: keep representative, archive others
+	// Split clusters: auto-merge only if ALL members have >= 0.99 similarity to seed.
+	// The 0.99 threshold is conservative because sentence-embedding models (e.g.
+	// nomic-embed-text) encode structure more than individual fact tokens —
+	// "Purple is my colour" vs "Cyan is my colour" can score 0.95+.
+	// Everything in the 0.85–0.99 range goes to Phase 2b for LLM adjudication.
+	var autoMergeClusters []cluster
 	for _, clust := range clusters {
+		if clust.minSim >= 0.99 {
+			autoMergeClusters = append(autoMergeClusters, clust)
+		} else {
+			// Collect for LLM review (Phase 2b)
+			dc := DedupCluster{Members: make([]ClusterMember, 0, len(clust.members))}
+			for _, m := range clust.members {
+				dc.Members = append(dc.Members, ClusterMember{
+					ID:      m.ID.String(),
+					Concept: m.Concept,
+					Content: m.Content,
+				})
+			}
+			report.DedupClustersForLLM = append(report.DedupClustersForLLM, dc)
+		}
+	}
+
+	// Process each auto-merge cluster: keep representative, archive others
+	for _, clust := range autoMergeClusters {
 		if len(clust.members) < 2 {
 			continue
 		}
