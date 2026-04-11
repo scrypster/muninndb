@@ -50,12 +50,11 @@ func (j *LocalJudge) Score(ctx context.Context, question, expectedAnswer, retrie
 
 func (j *OpenRouterJudge) Score(ctx context.Context, question, expectedAnswer, retrievedContent, questionType string) (string, error) {
 	// Rate limit: 20 req/min → minimum 3s between calls.
+	// Hold lock during sleep to prevent concurrent goroutines from passing the check.
 	j.mu.Lock()
 	elapsed := time.Since(j.lastCall)
 	if elapsed < 3*time.Second {
-		j.mu.Unlock()
 		time.Sleep(3*time.Second - elapsed)
-		j.mu.Lock()
 	}
 	j.lastCall = time.Now()
 	j.mu.Unlock()
@@ -153,7 +152,8 @@ func callChatCompletion(ctx context.Context, baseURL, model, apiKey, prompt stri
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("judge request: %w", err)
 	}

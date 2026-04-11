@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 var datasets = map[string]string{
@@ -31,7 +32,8 @@ func ensureDatasets(dir string) error {
 }
 
 func downloadFile(url, dest string) error {
-	resp, err := http.Get(url) //nolint:gosec
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Get(url) //nolint:gosec
 	if err != nil {
 		return err
 	}
@@ -39,11 +41,16 @@ func downloadFile(url, dest string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	f, err := os.Create(dest)
+	tmp := dest + ".tmp"
+	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	f.Close()
+	return os.Rename(tmp, dest)
 }

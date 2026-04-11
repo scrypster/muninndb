@@ -60,12 +60,12 @@ type SeparationConfig struct {
 	// RepulsionAlpha is the maximum score penalty applied to cross-context
 	// candidates. A candidate with zero entity overlap receives a multiplier
 	// of (1.0 - RepulsionAlpha). Must be in [0, 1). Zero disables the penalty. Default: 0.3.
-	RepulsionAlpha float64
+	RepulsionAlpha float64 `json:"repulsion_alpha"`
 
 	// ContextMismatchFn selects the method used to detect context mismatch.
 	// Currently only "entity" is supported: Jaccard similarity over the
 	// entity sets of the query and candidate engrams. Default: "entity".
-	ContextMismatchFn string
+	ContextMismatchFn string `json:"context_mismatch_fn"`
 }
 
 // LociConfig holds parameters for label propagation community detection.

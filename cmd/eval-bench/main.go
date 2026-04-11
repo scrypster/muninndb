@@ -78,8 +78,6 @@ func main() {
 			return NewEvalEngine(tmpDir, hippo, sharedEmbedder)
 		}
 	}
-	_ = embedderName // used later for Supabase uploads
-
 	switch *mode {
 	case "baseline":
 		hippo := cognitive.DefaultHippocampalConfig()

@@ -911,5 +911,8 @@ func (ps *PebbleStore) ScanAssociationsByType(ctx context.Context, wsPrefix [8]b
 			return err
 		}
 	}
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("scan assoc by type: iter error: %w", err)
+	}
 	return nil
 }

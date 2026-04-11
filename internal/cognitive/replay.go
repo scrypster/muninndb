@@ -223,8 +223,8 @@ func (rw *ReplayWorker) replayCycle(ctx context.Context) {
 			queryCtx := eg.Concept
 			if eg.Content != "" {
 				snippet := eg.Content
-				if len(snippet) > 200 {
-					snippet = snippet[:200]
+				if len([]rune(snippet)) > 200 {
+					snippet = string([]rune(snippet)[:200])
 				}
 				queryCtx = fmt.Sprintf("%s: %s", eg.Concept, snippet)
 			}
