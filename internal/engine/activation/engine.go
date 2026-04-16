@@ -1096,6 +1096,7 @@ func (e *ActivationEngine) phase6Score(
 		rrfScore        float64
 		hopPath         []storage.ULID
 		relType         uint16
+		isTraversed     bool // true for BFS-only candidates; vectorScore is computed post-load
 	}
 
 	// Deduplicate: fused candidates take priority; traversed candidates are
@@ -1122,11 +1123,14 @@ func (e *ActivationEngine) phase6Score(
 			if _, dup := seen[t.id]; dup {
 				continue
 			}
+			// Map BFS propagated score to hebbianBoost so the ACT-R/CGDN spreading
+			// activation term fires. vectorScore is computed after engrams are loaded.
 			all = append(all, scoringCandidate{
-				id:       t.id,
-				rrfScore: t.propagated,
-				hopPath:  t.hopPath,
-				relType:  t.relType,
+				id:           t.id,
+				hebbianBoost: math.Min(t.propagated, 1.0),
+				hopPath:      t.hopPath,
+				relType:      t.relType,
+				isTraversed:  true,
 			})
 		}
 	}
@@ -1172,6 +1176,22 @@ func (e *ActivationEngine) phase6Score(
 	for _, eng := range allEngrams {
 		if eng != nil {
 			engramByID[eng.ID] = eng
+		}
+	}
+
+	// Compute vectorScore for BFS-traversed candidates now that engrams are loaded.
+	// Fused candidates already have vectorScore from the Phase 2 HNSW search.
+	// Traversed candidates get cosine similarity against the query embedding so that
+	// ACT-R/CGDN contentMatch is non-zero and the BFS spreading activation can take effect.
+	// ftsScore is left at zero: BM25 requires corpus-level IDF statistics unavailable here.
+	if len(p1.embedding) > 0 {
+		for i := range all {
+			if !all[i].isTraversed {
+				continue
+			}
+			if eng := engramByID[all[i].id]; eng != nil && len(eng.Embedding) > 0 {
+				all[i].vectorScore = float64(cosineSimilarity32(p1.embedding, eng.Embedding))
+			}
 		}
 	}
 
@@ -1491,6 +1511,31 @@ func softplus(x float64) float64 {
 		return x // avoid overflow: softplus(x) ≈ x for large x
 	}
 	return math.Log1p(math.Exp(x))
+}
+
+// cosineSimilarity32 computes cosine similarity between two float32 vectors.
+// Returns 0 for empty or mismatched-length inputs.
+// Uses the same unrolled 4-wide dot product as the HNSW index for consistency.
+func cosineSimilarity32(a, b []float32) float32 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var dot, na, nb float32
+	i := 0
+	for ; i+3 < len(a); i += 4 {
+		dot += a[i]*b[i] + a[i+1]*b[i+1] + a[i+2]*b[i+2] + a[i+3]*b[i+3]
+		na += a[i]*a[i] + a[i+1]*a[i+1] + a[i+2]*a[i+2] + a[i+3]*a[i+3]
+		nb += b[i]*b[i] + b[i+1]*b[i+1] + b[i+2]*b[i+2] + b[i+3]*b[i+3]
+	}
+	for ; i < len(a); i++ {
+		dot += a[i] * b[i]
+		na += a[i] * a[i]
+		nb += b[i] * b[i]
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / (float32(math.Sqrt(float64(na))) * float32(math.Sqrt(float64(nb))))
 }
 
 // computeACTR computes the ACT-R scoring components for a candidate engram.

@@ -1352,6 +1352,194 @@ func TestPhase6Score_WithTraversedCandidates(t *testing.T) {
 	}
 }
 
+// TestPhase6Score_TraversedCandidateACTR_NonZeroScore verifies the fix for issue #371:
+// BFS-traversed candidates must receive a non-zero ACT-R score when both the query and
+// engram have embeddings. Before the fix, vectorScore was 0 for all traversed candidates,
+// making contentMatch=0 and therefore ACT-R raw=0 regardless of the BFS propagated score.
+func TestPhase6Score_TraversedCandidateACTR_NonZeroScore(t *testing.T) {
+	store := newInternalStubStore()
+	e := newTestActivationEngine(store)
+	defer e.Close()
+
+	// Seed engram: directly matched by query (in fused set).
+	eng1 := &storage.Engram{
+		Concept: "microservices", Content: "Project Alpha uses microservices",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+		Embedding: []float32{1, 0, 0},
+	}
+	// Traversed engram: discovered via BFS from eng1, not directly matched but related.
+	// Embedding is non-orthogonal to the query so cosine similarity > 0.
+	eng2 := &storage.Engram{
+		Concept: "scaling issues", Content: "Microservices cause scaling issues in our infrastructure",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+		Embedding: []float32{0.6, 0.8, 0},
+	}
+	store.addEngram(eng1)
+	store.addEngram(eng2)
+
+	fused := []fusedCandidate{{id: eng1.ID, rrfScore: 0.5, vectorScore: 1.0, ftsScore: 1.5}}
+	traversed := []traversedCandidate{{
+		id:         eng2.ID,
+		propagated: 0.3,
+		hopPath:    []storage.ULID{eng1.ID, eng2.ID},
+		relType:    uint16(storage.RelSupports),
+	}}
+	// Query embedding points in the same general direction as eng2 (non-zero cosine similarity).
+	p1 := &phase1Result{
+		queryStr:  "risks for Project Alpha",
+		embedding: []float32{1, 0, 0},
+	}
+
+	result, err := e.phase6Score(context.Background(), &ActivateRequest{
+		MaxResults: 10,
+		Threshold:  0.01, // non-zero: proves score > 0, not just "engram passed nil-check"
+	}, [8]byte{}, fused, traversed, p1)
+	if err != nil {
+		t.Fatalf("phase6Score: %v", err)
+	}
+
+	var traversedScore float64
+	for _, a := range result.Activations {
+		if a.Engram.ID == eng2.ID {
+			traversedScore = a.Score
+		}
+	}
+	if traversedScore <= 0 {
+		t.Errorf("traversed candidate score should be > 0 with embeddings and propagated=0.3, got %f", traversedScore)
+	}
+	// Verify vectorScore was computed and wired into components.
+	for _, a := range result.Activations {
+		if a.Engram.ID == eng2.ID {
+			if a.Components.SemanticSimilarity <= 0 {
+				t.Errorf("traversed candidate SemanticSimilarity should be > 0, got %f", a.Components.SemanticSimilarity)
+			}
+			if a.Components.HebbianBoost <= 0 {
+				t.Errorf("traversed candidate HebbianBoost should be > 0 (from BFS propagated score), got %f", a.Components.HebbianBoost)
+			}
+		}
+	}
+}
+
+// TestPhase6Score_TraversedCandidateACTR_NoEmbedding verifies backward compatibility:
+// traversed candidates without embeddings (or without a query embedding) still pass
+// through at threshold=0.0, preserving existing behaviour for deployments without HNSW.
+func TestPhase6Score_TraversedCandidateACTR_NoEmbedding(t *testing.T) {
+	store := newInternalStubStore()
+	e := newTestActivationEngine(store)
+	defer e.Close()
+
+	eng1 := &storage.Engram{
+		Concept: "seed", Content: "seed content",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+	}
+	eng2 := &storage.Engram{
+		Concept: "discovered", Content: "discovered via BFS — no embedding",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+		// no Embedding field — vectorScore will remain 0
+	}
+	store.addEngram(eng1)
+	store.addEngram(eng2)
+
+	fused := []fusedCandidate{{id: eng1.ID, rrfScore: 0.5, ftsScore: 1.0}}
+	traversed := []traversedCandidate{{
+		id:         eng2.ID,
+		propagated: 0.3,
+		hopPath:    []storage.ULID{eng1.ID, eng2.ID},
+		relType:    uint16(storage.RelSupports),
+	}}
+	p1 := &phase1Result{queryStr: "test"} // no query embedding
+
+	result, err := e.phase6Score(context.Background(), &ActivateRequest{
+		MaxResults: 10,
+		Threshold:  0.0,
+	}, [8]byte{}, fused, traversed, p1)
+	if err != nil {
+		t.Fatalf("phase6Score: %v", err)
+	}
+
+	found := false
+	for _, a := range result.Activations {
+		if a.Engram.ID == eng2.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("traversed candidate should appear at threshold=0.0 even without embeddings")
+	}
+}
+
+// TestCosineSimilarity32 verifies the cosineSimilarity32 helper used in the BFS fix.
+func TestCosineSimilarity32(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b []float32
+		want float32
+		tol  float32
+	}{
+		{
+			name: "identical unit vectors",
+			a:    []float32{1, 0, 0},
+			b:    []float32{1, 0, 0},
+			want: 1.0,
+			tol:  1e-6,
+		},
+		{
+			name: "orthogonal vectors",
+			a:    []float32{1, 0, 0},
+			b:    []float32{0, 1, 0},
+			want: 0.0,
+			tol:  1e-6,
+		},
+		{
+			name: "opposite vectors",
+			a:    []float32{1, 0, 0},
+			b:    []float32{-1, 0, 0},
+			want: -1.0,
+			tol:  1e-6,
+		},
+		{
+			name: "45-degree angle",
+			a:    []float32{1, 0},
+			b:    []float32{1, 1},
+			want: float32(1.0 / 1.4142135), // 1/√2 ≈ 0.7071
+			tol:  1e-5,
+		},
+		{
+			name: "empty vectors",
+			a:    []float32{},
+			b:    []float32{},
+			want: 0.0,
+			tol:  0,
+		},
+		{
+			name: "mismatched lengths",
+			a:    []float32{1, 2},
+			b:    []float32{1},
+			want: 0.0,
+			tol:  0,
+		},
+		{
+			name: "zero vector",
+			a:    []float32{0, 0, 0},
+			b:    []float32{1, 0, 0},
+			want: 0.0,
+			tol:  0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cosineSimilarity32(tc.a, tc.b)
+			diff := got - tc.want
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > tc.tol {
+				t.Errorf("cosineSimilarity32(%v, %v) = %f, want %f (tol %f)", tc.a, tc.b, got, tc.want, tc.tol)
+			}
+		})
+	}
+}
+
 func TestPhase6Score_IncludeWhy(t *testing.T) {
 	store := newInternalStubStore()
 	e := newTestActivationEngine(store)
