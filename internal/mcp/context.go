@@ -41,30 +41,20 @@ const maxTokenLen = 4096
 // authFromRequest extracts the Bearer token from the Authorization header and
 // authenticates it in priority order:
 //
-//  1. Static mdb_ token (constant-time compare) — backward compatible, no vault pinning.
-//  2. mk_ vault API key (via apiKeyStore.ValidateAPIKey) — vault-pinned, mode-enforced.
+//  1. mk_ vault API key (via apiKeyStore.ValidateAPIKey) — vault-pinned, mode-enforced.
+//     Checked first so vault isolation applies even when no static token is configured.
+//  2. Static mdb_ token (constant-time compare) — backward compatible, no vault pinning.
+//  3. Open-server mode — if no static token configured and no mk_ key present, allow.
 //
-// Returns AuthContext{Authorized: true} if the server has no token configured.
 // apiKeyStore may be nil to disable mk_ key auth (legacy mode).
 func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyValidator) AuthContext {
-	if requiredToken == "" {
-		return AuthContext{Authorized: true}
-	}
 	header := r.Header.Get("Authorization")
 	token, found := strings.CutPrefix(header, "Bearer ")
-	if !found || token == "" {
-		return AuthContext{Authorized: false}
-	}
-	// Reject absurdly long tokens before any crypto work.
-	if len(token) > maxTokenLen {
-		return AuthContext{Authorized: false}
-	}
-	// 1. Static token — always tried first (constant-time to prevent timing attacks).
-	if subtle.ConstantTimeCompare([]byte(token), []byte(requiredToken)) == 1 {
-		return AuthContext{Token: token, Authorized: true}
-	}
-	// 2. Vault API key — only attempted for mk_ prefixed tokens when store is available.
-	if apiKeyStore != nil && strings.HasPrefix(token, "mk_") {
+
+	// 1. mk_ vault API key — always checked first, regardless of whether a static
+	// token is configured. Presenting a scoped key is an explicit opt-in to vault
+	// isolation; an invalid or revoked key must never fall through to open access.
+	if found && token != "" && strings.HasPrefix(token, "mk_") && apiKeyStore != nil {
 		if key, err := apiKeyStore.ValidateAPIKey(token); err == nil {
 			return AuthContext{
 				Token:      token,
@@ -74,6 +64,25 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 				IsAPIKey:   true,
 			}
 		}
+		// Invalid mk_ key: fail-closed. Do not fall through to open-server mode.
+		return AuthContext{Authorized: false}
+	}
+
+	// 2. Open-server mode — no static token required and no mk_ key presented.
+	if requiredToken == "" {
+		return AuthContext{Authorized: true}
+	}
+
+	// 3. Static token validation.
+	if !found || token == "" {
+		return AuthContext{Authorized: false}
+	}
+	// Reject absurdly long tokens before any crypto work.
+	if len(token) > maxTokenLen {
+		return AuthContext{Authorized: false}
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(requiredToken)) == 1 {
+		return AuthContext{Token: token, Authorized: true}
 	}
 	return AuthContext{Authorized: false}
 }
