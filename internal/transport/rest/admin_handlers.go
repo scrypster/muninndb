@@ -723,6 +723,19 @@ func (s *Server) handleDeleteVault(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.engine.DeleteVault(r.Context(), name); err != nil {
 		if errors.Is(err, engine.ErrVaultNotFound) {
+			// Vault may exist only in auth config (created via UI but no engrams written yet).
+			// Clean up the phantom vault so the UI can remove it cleanly.
+			if s.authStore != nil {
+				if cfgs, cfgErr := s.authStore.ListVaultConfigs(); cfgErr == nil {
+					for _, cfg := range cfgs {
+						if cfg.Name == name {
+							_ = s.authStore.DeleteVaultConfig(name)
+							w.WriteHeader(http.StatusNoContent)
+							return
+						}
+					}
+				}
+			}
 			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
 			return
 		}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/vaultjob"
 )
@@ -113,6 +114,43 @@ func TestHandleDeleteVault_NotFound(t *testing.T) {
 	w := serveVault(srv, "DELETE", "/api/admin/vaults/missing", nil, nil)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+
+func TestHandleDeleteVault_PhantomVault_AuthConfigOnly(t *testing.T) {
+	// Vault exists in auth config but was never written to Pebble (phantom vault).
+	// DELETE should clean up the auth config entry and return 204, not 404.
+	store := newTestAuthStore(t)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "phantom"}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+	eng := &vaultErrEngine{deleteErr: fmt.Errorf("vault %q: %w", "phantom", engine.ErrVaultNotFound)}
+	srv := NewServer("localhost:0", eng, store, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+	w := serveVault(srv, "DELETE", "/api/admin/vaults/phantom", nil, nil)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 for phantom vault, got %d: %s", w.Code, w.Body.String())
+	}
+	// Confirm the auth config entry was removed.
+	cfgs, err := store.ListVaultConfigs()
+	if err != nil {
+		t.Fatalf("ListVaultConfigs: %v", err)
+	}
+	for _, cfg := range cfgs {
+		if cfg.Name == "phantom" {
+			t.Fatal("phantom vault config was not removed from auth store")
+		}
+	}
+}
+
+func TestHandleDeleteVault_NotFound_NoAuthConfig(t *testing.T) {
+	// Vault exists in neither engine nor auth config — should return 404.
+	store := newTestAuthStore(t)
+	eng := &vaultErrEngine{deleteErr: fmt.Errorf("vault %q: %w", "ghost", engine.ErrVaultNotFound)}
+	srv := NewServer("localhost:0", eng, store, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+	w := serveVault(srv, "DELETE", "/api/admin/vaults/ghost", nil, nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for truly missing vault, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
