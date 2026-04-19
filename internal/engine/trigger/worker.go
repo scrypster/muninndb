@@ -330,7 +330,9 @@ func (w *TriggerWorker) sweepVault(ctx context.Context, vaultID uint32, ws [8]by
 		}
 		metaByID := make(map[storage.ULID]*storage.EngramMeta, len(metas))
 		for _, m := range metas {
-			metaByID[m.ID] = m
+    		if m != nil {
+        		metaByID[m.ID] = m
+    		}
 		}
 
 		vecScores := make(map[storage.ULID]float64, len(candidates))
