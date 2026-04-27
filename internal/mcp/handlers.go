@@ -1470,7 +1470,8 @@ func (s *MCPServer) handleGetEnrichmentCandidates(ctx context.Context, w http.Re
 	if limit > 200 {
 		limit = 200
 	}
-	result, err := s.engine.GetEnrichmentCandidates(ctx, vault, stages, limit)
+	cursor, _ := args["cursor"].(string) // optional; "" means start from beginning
+	result, err := s.engine.GetEnrichmentCandidates(ctx, vault, stages, cursor, limit)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return

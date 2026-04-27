@@ -81,7 +81,7 @@ func (f *fakeEngine) ListDeleted(ctx context.Context, vault string, limit int) (
 func (f *fakeEngine) RetryEnrich(ctx context.Context, vault string, id string) (*RetryEnrichResult, error) {
 	return &RetryEnrichResult{EngramID: id, PluginsQueued: []string{}, AlreadyComplete: []string{}}, nil
 }
-func (f *fakeEngine) GetEnrichmentCandidates(_ context.Context, _ string, stages []string, _ int) (*EnrichmentCandidatesResult, error) {
+func (f *fakeEngine) GetEnrichmentCandidates(_ context.Context, _ string, stages []string, _ string, _ int) (*EnrichmentCandidatesResult, error) {
 	if len(stages) == 0 {
 		stages = []string{"entities", "relationships", "classification", "summary"}
 	}
