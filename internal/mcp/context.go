@@ -163,7 +163,8 @@ func isMutatingTool(name string) bool {
 		"muninn_entity_state_batch",
 		"muninn_merge_entity",
 		"muninn_replay_enrichment",
-		"muninn_feedback":
+		"muninn_feedback",
+		"muninn_trust":
 		return true
 	}
 	return false

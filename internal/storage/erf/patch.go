@@ -53,3 +53,25 @@ func PatchAllMeta(raw []byte, updatedAt, lastAccess time.Time, confidence, relev
 	binary.BigEndian.PutUint32(raw[len(raw)-TrailerSize:], crc32val)
 	return nil
 }
+
+// GetTrust reads the trust byte from a raw ERF record without a full decode.
+// Returns 0x00 (unset/inferred) if the record is too short.
+func GetTrust(raw []byte) uint8 {
+	if len(raw) < VariableDataStart+TrailerSize {
+		return 0x00
+	}
+	return raw[OffsetTrust]
+}
+
+// PatchTrust updates the trust byte in a raw ERF record in-place and
+// recomputes the CRC32 trailer. Does NOT touch the CRC16 (covers bytes 0-5 only).
+// raw must be a mutable copy of the 0x01 record (Get() already returns a copy).
+func PatchTrust(raw []byte, trust uint8) error {
+	if len(raw) < VariableDataStart+TrailerSize {
+		return errors.New("erf: record too short for PatchTrust")
+	}
+	raw[OffsetTrust] = trust
+	crc32val := ComputeCRC32(raw[:len(raw)-TrailerSize])
+	binary.BigEndian.PutUint32(raw[len(raw)-TrailerSize:], crc32val)
+	return nil
+}

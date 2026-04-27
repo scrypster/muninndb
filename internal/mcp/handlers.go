@@ -1719,3 +1719,29 @@ func (s *MCPServer) handleEntityTimeline(ctx context.Context, w http.ResponseWri
 	}
 	sendResult(w, id, textContent(mustJSON(timeline)))
 }
+
+func (s *MCPServer) handleSetTrust(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok := args["id"].(string)
+	if !ok || engramID == "" {
+		sendError(w, id, -32602, "invalid params: 'id' is required")
+		return
+	}
+	trustStr, ok := args["trust"].(string)
+	if !ok || trustStr == "" {
+		sendError(w, id, -32602, "invalid params: 'trust' is required (one of: verified, inferred, external, untrusted)")
+		return
+	}
+	if _, err := storage.ParseTrustLevel(trustStr); err != nil {
+		sendError(w, id, -32602, "invalid params: "+err.Error())
+		return
+	}
+	if err := s.engine.SetTrust(ctx, vault, engramID, trustStr); err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"id":    engramID,
+		"trust": trustStr,
+		"ok":    true,
+	})))
+}

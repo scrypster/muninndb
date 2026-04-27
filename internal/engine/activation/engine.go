@@ -168,6 +168,9 @@ type ActivateRequest struct {
 	// PAS: Predictive Activation Signal — sequential transition tracking.
 	PASEnabled       bool // when true, inject transition candidates in Phase 2
 	PASMaxInjections int  // max transition candidates to inject (0 = default 5)
+	// ExcludeUntrusted: when true, engrams with TrustUntrusted (0x04) are silently
+	// excluded from activation results. Set by the engine from vault PlasticityConfig.
+	ExcludeUntrusted bool
 }
 
 // ActivateResult is what the transport layer serializes and returns.
@@ -1168,11 +1171,22 @@ func (e *ActivationEngine) phase6Score(
 	}
 
 	// Filter out soft-deleted engrams (defense-in-depth; HNSW has no delete method).
+	// Also filter untrusted engrams when ExcludeUntrusted is set in the request.
 	var active []*storage.Engram
 	for _, eng := range allEngrams {
-		if eng != nil && eng.State != storage.StateSoftDeleted && eng.State != storage.StateArchived {
-			active = append(active, eng)
+		if eng == nil {
+			continue
 		}
+		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
+			continue
+		}
+		// Hard trust filter: skip engrams with TrustUntrusted (0x04) when requested.
+		// TrustUnset (0x00) is intentionally passed through — it is the zero-value
+		// backward-compat alias for TrustInferred, not an "unknown" or untrusted value.
+		if req.ExcludeUntrusted && eng.Trust == storage.TrustUntrusted {
+			continue
+		}
+		active = append(active, eng)
 	}
 	allEngrams = active
 

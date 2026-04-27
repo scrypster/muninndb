@@ -166,4 +166,8 @@ type EngineInterface interface {
 	// Derived from the HNSW index — returns 0 if no embeddings have been stored yet
 	// (dimension not yet established; any client-provided dimension will be accepted).
 	GetVaultEmbedDim(ctx context.Context, vault string) int
+
+	// SetTrust sets the trust label of an engram.
+	// trust must be one of "verified", "inferred", "external", "untrusted".
+	SetTrust(ctx context.Context, vault, id, trust string) error
 }

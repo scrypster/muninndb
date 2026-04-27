@@ -875,6 +875,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		Embedding:  req.Embedding,
 		MemoryType: storage.MemoryType(req.MemoryType),
 		TypeLabel:  req.TypeLabel,
+		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
 	}
 
 	// Apply caller-provided summary directly to the engram.
@@ -1285,6 +1286,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			Embedding:  req.Embedding,
 			MemoryType: storage.MemoryType(req.MemoryType),
 			TypeLabel:  req.TypeLabel,
+			Trust:      storage.TrustInferred, // all new MCP writes default to inferred
 		}
 
 		if callerSummary != "" {
@@ -1686,6 +1688,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		TypeLabel:           eng.TypeLabel,
 		Classification:      eng.Classification,
 		EmbedDim:            uint8(eng.EmbedDim),
+		Trust:               uint8(eng.Trust),
 		Entities:            entities,
 		EntityRelationships: entityRels,
 	}, nil
@@ -1749,6 +1752,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// PAS: Predictive Activation Signal config from vault Plasticity.
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
+	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
 
 	// Set defaults
 	if actReq.MaxResults == 0 {
@@ -1923,6 +1927,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			LastAccess:  scored.Engram.LastAccess.UnixNano(),
 			AccessCount: scored.Engram.AccessCount,
 			Relevance:   scored.Engram.Relevance,
+			Trust:       uint8(scored.Engram.Trust),
 		}
 
 		items[i].ScoreComponents = mbp.ScoreComponents{
@@ -2529,6 +2534,28 @@ func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state stri
 	return e.store.UpdateMetadata(ctx, ws, ulid, meta)
 }
 
+// SetTrust changes the trust label of an engram identified by id (string ULID).
+// trust must be one of "verified", "inferred", "external", "untrusted".
+// Returns an error if the engram is not found or trust is invalid.
+func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
+	level, err := storage.ParseTrustLevel(trust)
+	if err != nil {
+		return fmt.Errorf("parse trust: %w", err)
+	}
+	ws := e.store.ResolveVaultPrefix(vault)
+	ulid, err := storage.ParseULID(id)
+	if err != nil {
+		return fmt.Errorf("parse id: %w", err)
+	}
+	if err := e.store.UpdateTrust(ctx, ws, ulid, level); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return ErrEngramNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 // ListDeleted returns soft-deleted engrams in the vault, up to limit.
 func (e *Engine) ListDeleted(ctx context.Context, vault string, limit int) ([]*storage.Engram, error) {
 	ws := e.store.ResolveVaultPrefix(vault)
@@ -2640,6 +2667,7 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 		UpdatedAt:  now,
 		LastAccess: now,
 		Embedding:  embedding,
+		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
 	}
 
 	// Build the supersedes association (new → old).

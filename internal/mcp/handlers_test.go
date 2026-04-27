@@ -873,6 +873,48 @@ func TestHandleRecallEmptySourceTypeOmitted(t *testing.T) {
 	}
 }
 
+// recallWithTrustEngine returns an ActivateResponse with a single ActivationItem
+// where Trust is set to TrustVerified, so that activationToMemory propagation can be verified.
+type recallWithTrustEngine struct{ fakeEngine }
+
+func (e *recallWithTrustEngine) Activate(_ context.Context, req *mbp.ActivateRequest) (*mbp.ActivateResponse, error) {
+	return &mbp.ActivateResponse{
+		Activations: []mbp.ActivationItem{
+			{
+				ID:      "trust-001",
+				Concept: "trust concept",
+				Content: "trust content",
+				Score:   0.8,
+				Trust:   uint8(storage.TrustVerified),
+			},
+		},
+	}, nil
+}
+
+func TestHandleRecall_IncludesTrust(t *testing.T) {
+	srv := newTestServerWith(&recallWithTrustEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["test"]}}}`
+	w := postRPC(t, srv, body)
+	outer := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	memories, ok := outer["memories"].([]any)
+	if !ok || len(memories) == 0 {
+		t.Fatalf("expected non-empty memories array, got %T %v", outer["memories"], outer["memories"])
+	}
+	mem, ok := memories[0].(map[string]any)
+	if !ok {
+		t.Fatalf("memories[0] should be an object, got %T", memories[0])
+	}
+
+	trust, ok := mem["trust"].(string)
+	if !ok {
+		t.Fatalf("expected trust field to be a string, got %T (%v)", mem["trust"], mem["trust"])
+	}
+	if trust != "verified" {
+		t.Errorf("trust = %q, want %q", trust, "verified")
+	}
+}
+
 // ── muninn_read ──────────────────────────────────────────────────────────────
 
 // readWithDataEngine returns a populated ReadResponse so shape assertions are meaningful.
@@ -976,6 +1018,33 @@ func TestHandleRead_NoEntitiesOmitsFields(t *testing.T) {
 	}
 	if _, ok := content["entity_relationships"]; ok {
 		t.Error("entity_relationships field should be omitted when empty")
+	}
+}
+
+// readWithTrustEngine returns a ReadResponse with Trust set to TrustInferred.
+type readWithTrustEngine struct{ fakeEngine }
+
+func (e *readWithTrustEngine) Read(_ context.Context, req *mbp.ReadRequest) (*mbp.ReadResponse, error) {
+	return &mbp.ReadResponse{
+		ID:      req.ID,
+		Concept: "test concept",
+		Content: "test content body",
+		Trust:   uint8(storage.TrustInferred),
+	}, nil
+}
+
+func TestHandleRead_IncludesTrust(t *testing.T) {
+	srv := newTestServerWith(&readWithTrustEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_read","arguments":{"vault":"default","id":"abc-123"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	trust, ok := content["trust"].(string)
+	if !ok {
+		t.Fatalf("expected trust field to be a string, got %T (%v)", content["trust"], content["trust"])
+	}
+	if trust != "inferred" {
+		t.Errorf("trust = %q, want %q", trust, "inferred")
 	}
 }
 
@@ -1687,6 +1756,9 @@ func (e *slowIdempotentEngine) ListEntities(ctx context.Context, vault string, l
 }
 func (e *slowIdempotentEngine) GetVaultEmbedDim(ctx context.Context, vault string) int {
 	return (&fakeEngine{}).GetVaultEmbedDim(ctx, vault)
+}
+func (e *slowIdempotentEngine) SetTrust(ctx context.Context, vault, id, trust string) error {
+	return (&fakeEngine{}).SetTrust(ctx, vault, id, trust)
 }
 
 // TestHandleRemember_ConcurrentSameOpID verifies that two concurrent
@@ -3342,4 +3414,52 @@ func TestHandleAddChild_EmbeddingOmittedIsAccepted(t *testing.T) {
 	if eng.lastChild != nil && len(eng.lastChild.Embedding) != 0 {
 		t.Errorf("expected no embedding, got %d elements", len(eng.lastChild.Embedding))
 	}
+}
+
+// ── muninn_trust ─────────────────────────────────────────────────────────────
+
+func TestHandleSetTrust(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		srv := newTestServer()
+		body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_trust","arguments":{"vault":"default","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","trust":"verified"}}}`
+		w := postRPC(t, srv, body)
+		resp := decodeResp(t, w.Body.String())
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %v", resp.Error)
+		}
+		inner := extractInnerJSON(t, resp)
+		if ok, _ := inner["ok"].(bool); !ok {
+			t.Errorf("expected ok=true in response, got %v", inner["ok"])
+		}
+	})
+
+	t.Run("missing id", func(t *testing.T) {
+		srv := newTestServer()
+		body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_trust","arguments":{"vault":"default","trust":"verified"}}}`
+		w := postRPC(t, srv, body)
+		resp := decodeResp(t, w.Body.String())
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Errorf("expected -32602 for missing id, got %v", resp.Error)
+		}
+	})
+
+	t.Run("missing trust", func(t *testing.T) {
+		srv := newTestServer()
+		body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_trust","arguments":{"vault":"default","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}}}`
+		w := postRPC(t, srv, body)
+		resp := decodeResp(t, w.Body.String())
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Errorf("expected -32602 for missing trust, got %v", resp.Error)
+		}
+	})
+
+	t.Run("invalid trust level", func(t *testing.T) {
+		srv := newTestServer()
+		body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_trust","arguments":{"vault":"default","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","trust":"bogus"}}}`
+		w := postRPC(t, srv, body)
+		resp := decodeResp(t, w.Body.String())
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Errorf("expected -32602 for invalid trust level, got %v", resp.Error)
+		}
+	})
 }
