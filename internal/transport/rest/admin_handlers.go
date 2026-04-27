@@ -729,7 +729,10 @@ func (s *Server) handleDeleteVault(w http.ResponseWriter, r *http.Request) {
 				if cfgs, cfgErr := s.authStore.ListVaultConfigs(); cfgErr == nil {
 					for _, cfg := range cfgs {
 						if cfg.Name == name {
-							_ = s.authStore.DeleteVaultConfig(name)
+							if delErr := s.authStore.DeleteVaultConfig(name); delErr != nil {
+								s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, delErr.Error())
+								return
+							}
 							w.WriteHeader(http.StatusNoContent)
 							return
 						}
