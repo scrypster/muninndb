@@ -596,6 +596,10 @@ func (a *mcpEngineAdapter) GetVaultEmbedDim(ctx context.Context, vault string) i
 	return a.eng.GetVaultEmbedDim(ctx, vault)
 }
 
+func (a *mcpEngineAdapter) SetTrust(ctx context.Context, vault, id, trust string) error {
+	return a.eng.SetTrust(ctx, vault, id, trust)
+}
+
 func (a *mcpEngineAdapter) ListEntities(ctx context.Context, vault string, limit int, state string) ([]EntitySummary, error) {
 	records, err := a.eng.ListEntities(ctx, vault, limit, state)
 	if err != nil {

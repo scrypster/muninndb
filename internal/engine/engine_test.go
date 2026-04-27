@@ -2269,3 +2269,39 @@ func TestEvolve_AutoStampsTrustInferred(t *testing.T) {
 		t.Errorf("ReadResponse.Trust = %d, want %d (TrustInferred)", readResp.Trust, uint8(storage.TrustInferred))
 	}
 }
+
+func TestEngine_SetTrust(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	resp, err := eng.Write(context.Background(), &mbp.WriteRequest{
+		Vault:   "default",
+		Content: "content for set-trust test",
+		Concept: "set-trust concept",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if err := eng.SetTrust(context.Background(), "default", resp.ID, "verified"); err != nil {
+		t.Fatalf("SetTrust: %v", err)
+	}
+
+	readResp, err := eng.Read(context.Background(), &mbp.ReadRequest{ID: resp.ID, Vault: "default"})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if readResp.Trust != uint8(storage.TrustVerified) {
+		t.Errorf("Trust = %d, want %d (TrustVerified)", readResp.Trust, storage.TrustVerified)
+	}
+
+	if err := eng.SetTrust(context.Background(), "default", resp.ID, "bogus"); err == nil {
+		t.Error("expected error for invalid trust string")
+	}
+
+	// SetTrust on a nonexistent engram returns an error
+	fakeID := "01ARZ3NDEKTSV4RRFFQ69G5FAV" // valid ULID format but no such engram
+	if err := eng.SetTrust(context.Background(), "default", fakeID, "verified"); err == nil {
+		t.Error("expected error for nonexistent engram")
+	}
+}

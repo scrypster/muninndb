@@ -2533,6 +2533,28 @@ func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state stri
 	return e.store.UpdateMetadata(ctx, ws, ulid, meta)
 }
 
+// SetTrust changes the trust label of an engram identified by id (string ULID).
+// trust must be one of "verified", "inferred", "external", "untrusted".
+// Returns an error if the engram is not found or trust is invalid.
+func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
+	level, err := storage.ParseTrustLevel(trust)
+	if err != nil {
+		return fmt.Errorf("parse trust: %w", err)
+	}
+	ws := e.store.ResolveVaultPrefix(vault)
+	ulid, err := storage.ParseULID(id)
+	if err != nil {
+		return fmt.Errorf("parse id: %w", err)
+	}
+	if err := e.store.UpdateTrust(ctx, ws, ulid, level); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return ErrEngramNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 // ListDeleted returns soft-deleted engrams in the vault, up to limit.
 func (e *Engine) ListDeleted(ctx context.Context, vault string, limit int) ([]*storage.Engram, error) {
 	ws := e.store.ResolveVaultPrefix(vault)

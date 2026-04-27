@@ -180,6 +180,7 @@ func (f *fakeEngine) ListEntities(_ context.Context, _ string, _ int, _ string) 
 func (f *fakeEngine) GetVaultEmbedDim(_ context.Context, _ string) int {
 	return 0
 }
+func (f *fakeEngine) SetTrust(_ context.Context, _, _, _ string) error { return nil }
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil, nil)
