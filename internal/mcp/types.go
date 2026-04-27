@@ -74,6 +74,7 @@ type Memory struct {
 	AccessCount uint32    `json:"access_count,omitempty"`
 	Relevance   float32   `json:"relevance,omitempty"`
 	SourceType  string    `json:"source_type,omitempty"`
+	Trust       string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
 
 	// Populated only by muninn_read (omitted from recall responses).
 	Entities            []ReadEntity    `json:"entities,omitempty"`
@@ -245,6 +246,7 @@ type EnrichmentCandidatesResult struct {
 	Items           []EnrichmentCandidate `json:"items"`
 	StagesRequested []string              `json:"stages_requested"`
 	Count           int                   `json:"count"`
+	NextCursor      string                `json:"next_cursor,omitempty"`
 }
 
 // ApplyEnrichmentEntity is one externally generated entity.
