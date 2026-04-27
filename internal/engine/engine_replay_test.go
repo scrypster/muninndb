@@ -805,6 +805,59 @@ func TestReplayEnrichment_NothingToEnrich_CountedAsSkipped(t *testing.T) {
 	assertResultInvariant(t, result, 3)
 }
 
+// TestGetEnrichmentCandidates_AdaptiveBatch verifies that GetEnrichmentCandidates
+// finds unenriched engrams that appear after a run of fully-enriched ones,
+// exercising the "skip enriched, find unenriched at end" behavior of the
+// adaptive batch loop.
+func TestGetEnrichmentCandidates_AdaptiveBatch(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const vault = "default"
+
+	// Write 25 fully enriched + 1 unenriched at the end.
+	enrichedCount := 25
+	ids := make([]storage.ULID, enrichedCount+1)
+	for i := 0; i <= enrichedCount; i++ {
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   vault,
+			Content: fmt.Sprintf("content %d", i),
+			Concept: fmt.Sprintf("concept %d", i),
+		})
+		if err != nil {
+			t.Fatalf("Write %d: %v", i, err)
+		}
+		id, err := storage.ParseULID(resp.ID)
+		if err != nil {
+			t.Fatalf("ParseULID %d: %v", i, err)
+		}
+		ids[i] = id
+	}
+	allFlags := []uint8{plugin.DigestEntities, plugin.DigestRelationships, plugin.DigestClassified, plugin.DigestSummarized}
+	for i := 0; i < enrichedCount; i++ {
+		for _, flag := range allFlags {
+			if err := eng.store.SetDigestFlag(ctx, ids[i], flag); err != nil {
+				t.Fatalf("SetDigestFlag(%d): %v", i, err)
+			}
+		}
+	}
+
+	// The unenriched engram is ids[enrichedCount].
+	// With limit=5, batchSize starts at max(50, 20)=50, which covers all 26 engrams.
+	// All 25 enriched ones are skipped, and the 1 unenriched is found.
+	candidates, _, _, err := eng.GetEnrichmentCandidates(ctx, vault, nil, storage.ULID{}, 5)
+	if err != nil {
+		t.Fatalf("GetEnrichmentCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates count: got %d, want 1", len(candidates))
+	}
+	if candidates[0].ID != ids[enrichedCount] {
+		t.Errorf("candidate: got %s, want %s", candidates[0].ID, ids[enrichedCount])
+	}
+}
+
 // TestReplayEnrichment_ContextAlreadyExpired verifies that when the context is
 // already cancelled before the loop starts, all engrams are counted as Remaining.
 func TestReplayEnrichment_ContextAlreadyExpired(t *testing.T) {

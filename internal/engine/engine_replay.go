@@ -424,6 +424,9 @@ func (e *Engine) GetEnrichmentCandidates(ctx context.Context, vault string, stag
 			candidatesThisBatch++
 			lastCheckedID = id
 		}
+		// cursor advances to the last ID examined in this batch.
+		// When we break early (limit reached), lastCheckedID points to the
+		// limit-th candidate — the next call starts strictly after it.
 		cursor = lastCheckedID
 
 		// If we hit the limit early, there may be more engrams — return a non-zero cursor.
