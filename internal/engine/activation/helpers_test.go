@@ -1468,6 +1468,61 @@ func TestPhase6Score_TraversedCandidateACTR_NoEmbedding(t *testing.T) {
 	}
 }
 
+// TestPhase6Score_TraversedCandidateRRF_NonZeroScore is a regression test for a bug
+// introduced in the original #392 fix: setting hebbianBoost but leaving rrfScore=0 caused
+// traversed candidates to score 0 in RRF mode (final = rrfScore × (1+hebbianBoost) = 0),
+// silently filtering them out at any threshold > 0. The fix sets rrfScore = t.propagated
+// alongside hebbianBoost so RRF mode still scores traversed candidates.
+func TestPhase6Score_TraversedCandidateRRF_NonZeroScore(t *testing.T) {
+	store := newInternalStubStore()
+	e := newTestActivationEngine(store)
+	defer e.Close()
+
+	eng1 := &storage.Engram{
+		Concept: "seed", Content: "seed content",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+	}
+	eng2 := &storage.Engram{
+		Concept: "discovered", Content: "discovered via BFS",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+	}
+	store.addEngram(eng1)
+	store.addEngram(eng2)
+
+	fused := []fusedCandidate{{id: eng1.ID, rrfScore: 0.5, ftsScore: 1.0}}
+	traversed := []traversedCandidate{{
+		id:         eng2.ID,
+		propagated: 0.3,
+		hopPath:    []storage.ULID{eng1.ID, eng2.ID},
+		relType:    uint16(storage.RelSupports),
+	}}
+	p1 := &phase1Result{queryStr: "test"}
+
+	result, err := e.phase6Score(context.Background(), &ActivateRequest{
+		MaxResults: 10,
+		Threshold:  0.01, // above zero: filtered if rrfScore is 0
+		Weights:    &Weights{UseRRFFusion: true},
+	}, [8]byte{}, fused, traversed, p1)
+	if err != nil {
+		t.Fatalf("phase6Score: %v", err)
+	}
+
+	var traversedScore float64
+	found := false
+	for _, a := range result.Activations {
+		if a.Engram.ID == eng2.ID {
+			found = true
+			traversedScore = a.Score
+		}
+	}
+	if !found {
+		t.Error("traversed candidate should appear in RRF mode results at threshold=0.01")
+	}
+	if traversedScore <= 0 {
+		t.Errorf("traversed candidate score should be > 0 in RRF mode with propagated=0.3, got %f", traversedScore)
+	}
+}
+
 // TestCosineSimilarity32 verifies the cosineSimilarity32 helper used in the BFS fix.
 func TestCosineSimilarity32(t *testing.T) {
 	cases := []struct {

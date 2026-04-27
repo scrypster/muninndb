@@ -1123,10 +1123,14 @@ func (e *ActivationEngine) phase6Score(
 			if _, dup := seen[t.id]; dup {
 				continue
 			}
-			// Map BFS propagated score to hebbianBoost so the ACT-R/CGDN spreading
-			// activation term fires. vectorScore is computed after engrams are loaded.
+			// Route the BFS propagated score to both rrfScore (for RRF mode) and
+			// hebbianBoost (for ACT-R/CGDN spreading activation).
+			// rrfScore must be non-zero: RRF final = rrfScore × (1 + hebbianBoost + ...)
+			// so zero rrfScore silences traversed candidates in RRF mode at any threshold > 0.
+			// vectorScore is computed after engrams are loaded.
 			all = append(all, scoringCandidate{
 				id:           t.id,
+				rrfScore:     t.propagated,
 				hebbianBoost: math.Min(t.propagated, 1.0),
 				hopPath:      t.hopPath,
 				relType:      t.relType,
