@@ -2112,3 +2112,160 @@ func TestEngineTraverse_EdgeRelTypePopulated(t *testing.T) {
 		t.Errorf("edge RelType = %v (%d), want storage.RelSupports (%d)", edges[0].RelType, edges[0].RelType, storage.RelSupports)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestWrite_AutoStampsTrustInferred: Write should auto-stamp TrustInferred
+// ---------------------------------------------------------------------------
+
+// TestWrite_AutoStampsTrustInferred verifies that Write auto-stamps TrustInferred
+// on new engrams and that Trust is propagated through Read and Activate responses.
+func TestWrite_AutoStampsTrustInferred(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Write an engram without specifying Trust
+	writeResp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   "test",
+		Concept: "trust inference test",
+		Content: "This engram should get TrustInferred automatically.",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if writeResp.ID == "" {
+		t.Fatal("expected non-empty ID from Write")
+	}
+
+	// Read it back and verify Trust == TrustInferred
+	readResp, err := eng.Read(ctx, &mbp.ReadRequest{
+		Vault: "test",
+		ID:    writeResp.ID,
+	})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if readResp.Trust != uint8(storage.TrustInferred) {
+		t.Errorf("ReadResponse.Trust = %d, want %d (TrustInferred)", readResp.Trust, uint8(storage.TrustInferred))
+	}
+}
+
+// TestWriteBatch_AutoStampsTrustInferred verifies that WriteBatch auto-stamps
+// TrustInferred on new engrams and that Trust is visible via Read.
+func TestWriteBatch_AutoStampsTrustInferred(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	reqs := []*mbp.WriteRequest{
+		{
+			Vault:   "test",
+			Concept: "batch trust test",
+			Content: "This batch engram should get TrustInferred automatically.",
+		},
+	}
+
+	responses, errs := eng.WriteBatch(ctx, reqs)
+	if len(responses) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(responses))
+	}
+	if errs[0] != nil {
+		t.Fatalf("WriteBatch: %v", errs[0])
+	}
+	if responses[0] == nil || responses[0].ID == "" {
+		t.Fatal("expected non-empty ID from WriteBatch")
+	}
+
+	readResp, err := eng.Read(ctx, &mbp.ReadRequest{
+		Vault: "test",
+		ID:    responses[0].ID,
+	})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if readResp.Trust != uint8(storage.TrustInferred) {
+		t.Errorf("ReadResponse.Trust = %d, want %d (TrustInferred)", readResp.Trust, uint8(storage.TrustInferred))
+	}
+}
+
+// TestActivate_TrustPropagation verifies that Trust is propagated into
+// ActivationItem results returned by Activate.
+func TestActivate_TrustPropagation(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   "test",
+		Concept: "trust activation test",
+		Content: "Trust propagation through activation results.",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	awaitFTS(t, eng)
+
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      "test",
+		Context:    []string{"trust propagation activation results"},
+		MaxResults: 10,
+		Threshold:  0.01,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if len(resp.Activations) == 0 {
+		t.Fatal("Activate returned 0 results, want >= 1")
+	}
+
+	found := false
+	for _, item := range resp.Activations {
+		if item.Concept == "trust activation test" {
+			found = true
+			if item.Trust != uint8(storage.TrustInferred) {
+				t.Errorf("ActivationItem.Trust = %d, want %d (TrustInferred)", item.Trust, uint8(storage.TrustInferred))
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("did not find 'trust activation test' engram in Activate results")
+	}
+}
+
+// TestEvolve_AutoStampsTrustInferred verifies that Evolve auto-stamps
+// TrustInferred on the new engram it creates.
+func TestEvolve_AutoStampsTrustInferred(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	writeResp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   "test",
+		Concept: "evolve trust test",
+		Content: "Original content before evolution.",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	newULID, err := eng.Evolve(ctx, "test", writeResp.ID, "Evolved content after trust stamp.", "trust test evolution", nil)
+	if err != nil {
+		t.Fatalf("Evolve: %v", err)
+	}
+	if newULID == (storage.ULID{}) {
+		t.Fatal("Evolve returned zero ID")
+	}
+
+	readResp, err := eng.Read(ctx, &mbp.ReadRequest{
+		Vault: "test",
+		ID:    newULID.String(),
+	})
+	if err != nil {
+		t.Fatalf("Read new engram: %v", err)
+	}
+	if readResp.Trust != uint8(storage.TrustInferred) {
+		t.Errorf("ReadResponse.Trust = %d, want %d (TrustInferred)", readResp.Trust, uint8(storage.TrustInferred))
+	}
+}

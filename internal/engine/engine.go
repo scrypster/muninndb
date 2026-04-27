@@ -875,6 +875,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		Embedding:  req.Embedding,
 		MemoryType: storage.MemoryType(req.MemoryType),
 		TypeLabel:  req.TypeLabel,
+		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
 	}
 
 	// Apply caller-provided summary directly to the engram.
@@ -1285,6 +1286,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			Embedding:  req.Embedding,
 			MemoryType: storage.MemoryType(req.MemoryType),
 			TypeLabel:  req.TypeLabel,
+			Trust:      storage.TrustInferred, // all new MCP writes default to inferred
 		}
 
 		if callerSummary != "" {
@@ -1686,6 +1688,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		TypeLabel:           eng.TypeLabel,
 		Classification:      eng.Classification,
 		EmbedDim:            uint8(eng.EmbedDim),
+		Trust:               uint8(eng.Trust),
 		Entities:            entities,
 		EntityRelationships: entityRels,
 	}, nil
@@ -1923,6 +1926,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			LastAccess:  scored.Engram.LastAccess.UnixNano(),
 			AccessCount: scored.Engram.AccessCount,
 			Relevance:   scored.Engram.Relevance,
+			Trust:       uint8(scored.Engram.Trust),
 		}
 
 		items[i].ScoreComponents = mbp.ScoreComponents{
@@ -2640,6 +2644,7 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 		UpdatedAt:  now,
 		LastAccess: now,
 		Embedding:  embedding,
+		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
 	}
 
 	// Build the supersedes association (new → old).
