@@ -30,7 +30,7 @@ const (
 	OffsetEmbedDim    = 67
 	OffsetMemoryType  = 68 // uint8, first byte of formerly-reserved area
 	OffsetClassification = 69 // uint16, big-endian
-	OffsetReserved    = 71 // 29 bytes reserved (was 32)
+	OffsetTrust       = 71 // uint8; first byte of the formerly-reserved area (bytes 72-99 remain reserved)
 
 	// Offset table field offsets (relative to record start)
 	OffsetConceptOff   = 108

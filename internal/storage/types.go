@@ -77,6 +77,7 @@ type Engram struct {
 	MemoryType     MemoryType
 	TypeLabel      string // free-form label, e.g. "architectural_decision", "coding_pattern"
 	Classification uint16 // concept-cluster ID
+	Trust          TrustLevel // provenance confidence label (OffsetTrust in ERF)
 }
 
 // EngramMeta is the 100-byte fixed metadata section.
@@ -286,6 +287,56 @@ func ParseMemoryType(s string) (MemoryType, bool) {
 		return TypeReference, true
 	default:
 		return TypeFact, false
+	}
+}
+
+// TrustLevel encodes the provenance confidence of an engram's content (uint8 on disk, offset 71).
+// 0x00 (TrustUnset) is the zero value for backward compatibility — all existing engrams read as "inferred".
+type TrustLevel uint8
+
+const (
+	TrustUnset     TrustLevel = 0x00 // zero value; displays as "inferred" for existing records
+	TrustVerified  TrustLevel = 0x01 // human-confirmed or admin-certified
+	TrustInferred  TrustLevel = 0x02 // AI-generated or system-inferred (default on new writes)
+	TrustExternal  TrustLevel = 0x03 // imported from an external system
+	TrustUntrusted TrustLevel = 0x04 // flagged as unreliable
+)
+
+// String returns the canonical string label for a TrustLevel.
+// TrustUnset and unknown values return "inferred" for display purposes.
+func (t TrustLevel) String() string {
+	switch t {
+	case TrustVerified:
+		return "verified"
+	case TrustInferred:
+		return "inferred"
+	case TrustExternal:
+		return "external"
+	case TrustUntrusted:
+		return "untrusted"
+	default: // TrustUnset (0x00) and unknown values — display as "inferred" for backward compatibility
+		return "inferred"
+	}
+}
+
+// ParseTrustLevel parses a trust level string into a TrustLevel.
+// Returns an error for unrecognized strings.
+// Note: "inferred" maps to TrustInferred (0x02), not TrustUnset (0x00).
+// Existing engrams with TrustUnset (zero-initialized) display as "inferred" via String()
+// but ParseTrustLevel will produce TrustInferred when written back — both are semantically
+// equivalent and the distinction is invisible to clients.
+func ParseTrustLevel(s string) (TrustLevel, error) {
+	switch s {
+	case "verified":
+		return TrustVerified, nil
+	case "inferred":
+		return TrustInferred, nil
+	case "external":
+		return TrustExternal, nil
+	case "untrusted":
+		return TrustUntrusted, nil
+	default:
+		return 0, fmt.Errorf("unknown trust level %q: must be one of verified, inferred, external, untrusted", s)
 	}
 }
 
