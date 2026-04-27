@@ -645,6 +645,10 @@ func (s *Server) handleCreateEngram(w http.ResponseWriter, r *http.Request) {
 	req.Vault = vault
 	resp, err := s.engine.Write(r.Context(), &req)
 	if err != nil {
+		if errors.Is(err, engine.ErrInvalidID) {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+			return
+		}
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return
 	}
