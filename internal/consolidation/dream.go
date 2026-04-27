@@ -60,7 +60,8 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 		MaxDedup:       w.MaxDedup,
 		MaxTransitive:  w.MaxTransitive,
 		DryRun:         opts.DryRun,
-		DedupThreshold: 0.85,
+		DedupThreshold:    0.85,
+		MinDedupVaultSize: w.MinDedupVaultSize,
 	}
 
 	for _, vault := range vaults {
@@ -102,7 +103,32 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 		}
 
 		// Phase 2: Semantic Deduplication (threshold 0.85 in dream mode)
-		if err := dw.runPhase2Dedup(ctx, store, wsPrefix, report, vault); err != nil {
+		//
+		// Guard: skip dedup when the vault is too small. Removing even a single
+		// cluster from a small vault can shift the per-query normalization anchor
+		// in the ACT-R scoring path, flipping top-1 results for unrelated queries.
+		// At MinDedupVaultSize (default 20) a 3-engram cluster removal represents
+		// at most a 15% reduction; below this threshold the landscape is too
+		// sensitive to dedup mutations to guarantee retrieval recall is preserved.
+		// See: https://github.com/scrypster/muninndb/issues/311
+		minSize := dw.MinDedupVaultSize
+		if minSize <= 0 {
+			minSize = 20
+		}
+		// embedCount is the number of engrams that actually participate in
+		// dedup (Phase 2 operates only on embedding-bearing engrams). Using
+		// WithEmbed rather than EngramCount avoids counting embed-less engrams
+		// that would never affect the normalization anchor.
+		// When summary is nil (Phase 0 failed), vault size is unknown — skip
+		// dedup defensively rather than proceeding blind.
+		embedCount := 0
+		if summary != nil {
+			embedCount = summary.WithEmbed
+		}
+		if summary == nil || embedCount < minSize {
+			slog.Info("dream: skipping phase 2 dedup — vault below minimum size",
+				"vault", vault, "engrams_with_embed", embedCount, "min", minSize)
+		} else if err := dw.runPhase2Dedup(ctx, store, wsPrefix, report, vault); err != nil {
 			slog.Warn("dream: phase 2 (dedup) failed", "vault", vault, "error", err)
 			report.Errors = append(report.Errors, "phase2_dedup: "+err.Error())
 		}
