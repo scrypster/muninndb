@@ -2481,7 +2481,7 @@ type enrichmentCandidatesEngine struct {
 	err    error
 }
 
-func (e *enrichmentCandidatesEngine) GetEnrichmentCandidates(_ context.Context, _ string, _ []string, _ int) (*EnrichmentCandidatesResult, error) {
+func (e *enrichmentCandidatesEngine) GetEnrichmentCandidates(_ context.Context, _ string, _ []string, _ string, _ int) (*EnrichmentCandidatesResult, error) {
 	if e.err != nil {
 		return nil, e.err
 	}
@@ -2672,6 +2672,63 @@ func TestHandleGetEnrichmentCandidates_InvalidStages(t *testing.T) {
 	}
 	if resp.Error.Code != -32602 {
 		t.Fatalf("expected -32602, got %d", resp.Error.Code)
+	}
+}
+
+type enrichmentCandidatesCursorCapture struct {
+	fakeEngine
+	cursor *string
+}
+
+func (e *enrichmentCandidatesCursorCapture) GetEnrichmentCandidates(_ context.Context, _ string, _ []string, afterCursor string, _ int) (*EnrichmentCandidatesResult, error) {
+	*e.cursor = afterCursor
+	return &EnrichmentCandidatesResult{Items: []EnrichmentCandidate{}, StagesRequested: []string{}, Count: 0}, nil
+}
+
+func TestHandleGetEnrichmentCandidates_CursorPassedThrough(t *testing.T) {
+	capturedCursor := ""
+	eng := &enrichmentCandidatesCursorCapture{cursor: &capturedCursor}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_get_enrichment_candidates","arguments":{"vault":"default","cursor":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: code=%d msg=%s", resp.Error.Code, resp.Error.Message)
+	}
+	if capturedCursor != "01ARZ3NDEKTSV4RRFFQ69G5FAV" {
+		t.Errorf("cursor: got %q, want %q", capturedCursor, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	}
+}
+
+func TestHandleGetEnrichmentCandidates_NextCursorInResponse(t *testing.T) {
+	eng := &enrichmentCandidatesEngine{result: &EnrichmentCandidatesResult{
+		Items:           []EnrichmentCandidate{},
+		StagesRequested: []string{"entities"},
+		Count:           0,
+		NextCursor:      "01HN5BQZ00000000000000001",
+	}}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_get_enrichment_candidates","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	inner := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+	if got, _ := inner["next_cursor"].(string); got != "01HN5BQZ00000000000000001" {
+		t.Errorf("next_cursor: got %q, want %q", got, "01HN5BQZ00000000000000001")
+	}
+}
+
+func TestHandleGetEnrichmentCandidates_InvalidCursor(t *testing.T) {
+	srv := newTestServerWith(&enrichmentCandidatesEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_get_enrichment_candidates","arguments":{"vault":"default","cursor":"not-a-valid-ulid"}}}`
+	w := postRPC(t, srv, body)
+	if w.Code != 200 {
+		t.Fatalf("status: %d", w.Code)
+	}
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected error response for invalid cursor")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code: got %d, want -32602", resp.Error.Code)
 	}
 }
 

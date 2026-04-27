@@ -1470,7 +1470,14 @@ func (s *MCPServer) handleGetEnrichmentCandidates(ctx context.Context, w http.Re
 	if limit > 200 {
 		limit = 200
 	}
-	result, err := s.engine.GetEnrichmentCandidates(ctx, vault, stages, limit)
+	cursor, _ := args["cursor"].(string) // optional; "" means start from beginning
+	if cursor != "" {
+		if _, err := storage.ParseULID(cursor); err != nil {
+			sendError(w, id, -32602, "invalid params: cursor is not a valid ULID")
+			return
+		}
+	}
+	result, err := s.engine.GetEnrichmentCandidates(ctx, vault, stages, cursor, limit)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return

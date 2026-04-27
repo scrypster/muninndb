@@ -245,6 +245,7 @@ type EnrichmentCandidatesResult struct {
 	Items           []EnrichmentCandidate `json:"items"`
 	StagesRequested []string              `json:"stages_requested"`
 	Count           int                   `json:"count"`
+	NextCursor      string                `json:"next_cursor,omitempty"`
 }
 
 // ApplyEnrichmentEntity is one externally generated entity.

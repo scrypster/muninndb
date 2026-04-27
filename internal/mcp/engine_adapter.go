@@ -414,11 +414,23 @@ func (a *mcpEngineAdapter) ReplayEnrichment(ctx context.Context, vault string, s
 	return a.eng.ReplayEnrichment(ctx, vault, stages, limit, dryRun)
 }
 
-func (a *mcpEngineAdapter) GetEnrichmentCandidates(ctx context.Context, vault string, stages []string, limit int) (*EnrichmentCandidatesResult, error) {
-	candidates, stagesRequested, err := a.eng.GetEnrichmentCandidates(ctx, vault, stages, limit)
+func (a *mcpEngineAdapter) GetEnrichmentCandidates(ctx context.Context, vault string, stages []string, afterCursor string, limit int) (*EnrichmentCandidatesResult, error) {
+	// Parse the opaque cursor string to a storage.ULID.
+	// Empty string → zero ULID (start from beginning).
+	var afterID storage.ULID
+	if afterCursor != "" {
+		id, err := storage.ParseULID(afterCursor)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		afterID = id
+	}
+
+	candidates, stagesRequested, nextID, err := a.eng.GetEnrichmentCandidates(ctx, vault, stages, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
+
 	items := make([]EnrichmentCandidate, len(candidates))
 	for i, c := range candidates {
 		items[i] = EnrichmentCandidate{
@@ -439,10 +451,18 @@ func (a *mcpEngineAdapter) GetEnrichmentCandidates(ctx context.Context, vault st
 			},
 		}
 	}
+
+	// Encode next cursor. Zero ULID means exhausted → empty string (omitempty hides it).
+	var nextCursor string
+	if nextID != (storage.ULID{}) {
+		nextCursor = nextID.String()
+	}
+
 	return &EnrichmentCandidatesResult{
 		Items:           items,
 		StagesRequested: stagesRequested,
 		Count:           len(items),
+		NextCursor:      nextCursor,
 	}, nil
 }
 

@@ -342,10 +342,17 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 
 // GetEnrichmentCandidates returns active engrams missing at least one requested
 // stage without invoking any enrichment plugin.
-func (e *Engine) GetEnrichmentCandidates(ctx context.Context, vault string, stages []string, limit int) ([]EnrichmentCandidate, []string, error) {
+//
+// afterID is an exclusive cursor — pass a zero ULID to start from the beginning.
+// The returned nextCursor is the last ULID examined; pass it as afterID on the
+// next call to continue. A zero nextCursor means all engrams have been scanned.
+//
+// Adaptive batch sizing: starts at limit*4, doubles (up to 2000) if a batch
+// yields 0 candidates — this converges quickly for highly-enriched vaults.
+func (e *Engine) GetEnrichmentCandidates(ctx context.Context, vault string, stages []string, afterID storage.ULID, limit int) ([]EnrichmentCandidate, []string, storage.ULID, error) {
 	stageMask, validStages, _, err := normalizeEnrichmentStages(stages)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, storage.ULID{}, err
 	}
 	if limit <= 0 {
 		limit = 50
@@ -355,43 +362,88 @@ func (e *Engine) GetEnrichmentCandidates(ctx context.Context, vault string, stag
 	}
 
 	ws := e.store.ResolveVaultPrefix(vault)
-	ids, err := e.store.ListByState(ctx, ws, storage.StateActive, limit)
-	if err != nil {
-		return nil, nil, fmt.Errorf("get enrichment candidates: list active engrams: %w", err)
-	}
-	if len(ids) == 0 {
-		return nil, validStages, nil
-	}
-
-	engrams, err := e.store.GetEngrams(ctx, ws, ids)
-	if err != nil {
-		return nil, nil, fmt.Errorf("get enrichment candidates: get engrams: %w", err)
+	cursor := afterID
+	candidates := make([]EnrichmentCandidate, 0, limit)
+	batchSize := limit * 4
+	if batchSize < 50 {
+		batchSize = 50
 	}
 
-	candidates := make([]EnrichmentCandidate, 0, len(engrams))
-	for _, eng := range engrams {
-		if eng == nil {
-			continue
+	for len(candidates) < limit {
+		ids, err := e.store.ListByStateFrom(ctx, ws, storage.StateActive, cursor, batchSize)
+		if err != nil {
+			return nil, nil, storage.ULID{}, fmt.Errorf("get enrichment candidates: list active engrams: %w", err)
 		}
-		flags, _ := e.store.GetDigestFlags(ctx, plugin.ULID(eng.ID))
-		if flags&stageMask == stageMask {
-			continue
+		if len(ids) == 0 {
+			// Exhausted — signal with zero cursor.
+			return candidates, validStages, storage.ULID{}, nil
 		}
-		candidates = append(candidates, EnrichmentCandidate{
-			ID:            eng.ID,
-			Concept:       eng.Concept,
-			Content:       eng.Content,
-			Summary:       eng.Summary,
-			MemoryType:    eng.MemoryType.String(),
-			TypeLabel:     eng.TypeLabel,
-			CreatedAt:     eng.CreatedAt,
-			UpdatedAt:     eng.UpdatedAt,
-			MissingStages: missingStagesForFlags(flags, validStages),
-			DigestFlags:   flags,
-		})
+
+		engramSlice, err := e.store.GetEngrams(ctx, ws, ids)
+		if err != nil {
+			return nil, nil, storage.ULID{}, fmt.Errorf("get enrichment candidates: get engrams: %w", err)
+		}
+		// Build map for O(1) lookup by ID.
+		engramMap := make(map[storage.ULID]*storage.Engram, len(engramSlice))
+		for _, eng := range engramSlice {
+			if eng != nil {
+				engramMap[eng.ID] = eng
+			}
+		}
+
+		lastCheckedID := cursor
+		candidatesThisBatch := 0
+		hitLimit := false
+		for _, id := range ids {
+			if len(candidates) >= limit {
+				hitLimit = true
+				break
+			}
+			eng := engramMap[id]
+			if eng == nil {
+				lastCheckedID = id
+				continue
+			}
+			flags, _ := e.store.GetDigestFlags(ctx, plugin.ULID(eng.ID))
+			if flags&stageMask == stageMask {
+				lastCheckedID = id
+				continue
+			}
+			candidates = append(candidates, EnrichmentCandidate{
+				ID:            eng.ID,
+				Concept:       eng.Concept,
+				Content:       eng.Content,
+				Summary:       eng.Summary,
+				MemoryType:    eng.MemoryType.String(),
+				TypeLabel:     eng.TypeLabel,
+				CreatedAt:     eng.CreatedAt,
+				UpdatedAt:     eng.UpdatedAt,
+				MissingStages: missingStagesForFlags(flags, validStages),
+				DigestFlags:   flags,
+			})
+			candidatesThisBatch++
+			lastCheckedID = id
+		}
+		// cursor advances to the last ID examined in this batch.
+		// When we break early (limit reached), lastCheckedID points to the
+		// limit-th candidate — the next call starts strictly after it.
+		cursor = lastCheckedID
+
+		// If we hit the limit early, there may be more engrams — return a non-zero cursor.
+		if hitLimit {
+			break
+		}
+
+		// Adaptive sizing: double batch if no candidates found this round.
+		if candidatesThisBatch == 0 {
+			batchSize *= 2
+			if batchSize > 2000 {
+				batchSize = 2000
+			}
+		}
 	}
 
-	return candidates, validStages, nil
+	return candidates, validStages, cursor, nil
 }
 
 // ApplyEnrichment persists explicit agent-generated enrichment output.
