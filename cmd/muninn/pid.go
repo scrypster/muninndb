@@ -48,7 +48,10 @@ func writePID(path string, pid int) error {
 func readPID(path string) (int, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return 0, fmt.Errorf("no PID file at %s (is muninn running?): %w", path, err)
+		return 0, fmt.Errorf(
+			"no PID file at %s — muninn may not be running (try 'muninn start'),\n"+
+				"or it may be managed by systemd (try 'systemctl status muninndb'): %w",
+			path, err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil {
