@@ -56,3 +56,6 @@ func daemonExtraSetup(cmd *exec.Cmd) {
 	}
 	cmd.SysProcAttr.HideWindow = true
 }
+
+// isPebbleLockHeld is not implemented on Windows; always returns false.
+func isPebbleLockHeld(_ string) bool { return false }

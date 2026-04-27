@@ -2,7 +2,6 @@ package rest
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -1103,17 +1102,15 @@ func withClusterAuth(secret string, clusterActive bool) func(http.Handler) http.
 				return
 			}
 
-			// Extract Bearer token.
-			authHeader := r.Header.Get("Authorization")
-			const prefix = "Bearer "
-			if !strings.HasPrefix(authHeader, prefix) {
+			// Extract and validate Bearer token. auth.ValidateStaticToken enforces
+			// a length cap before the constant-time compare to prevent DoS via
+			// large Authorization header allocations.
+			token, found := auth.ParseBearerToken(r.Header.Get("Authorization"))
+			if !found {
 				writeError(w, http.StatusUnauthorized, "cluster_auth_required", "cluster authorization required")
 				return
 			}
-			token := authHeader[len(prefix):]
-
-			// Constant-time comparison to prevent timing attacks.
-			if subtle.ConstantTimeCompare([]byte(token), []byte(secret)) != 1 {
+			if !auth.ValidateStaticToken(token, secret) {
 				writeError(w, http.StatusUnauthorized, "cluster_auth_failed", "invalid cluster token")
 				return
 			}

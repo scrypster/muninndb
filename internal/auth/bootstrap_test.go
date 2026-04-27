@@ -79,6 +79,63 @@ func TestBootstrap_Idempotent(t *testing.T) {
 	}
 }
 
+// TestBootstrap_EnvPasswordAppliedOnExistingInstance is a regression test for
+// MUNINN_ADMIN_PASSWORD being silently ignored on existing (non-first-run) instances.
+// When the env var is set at startup and an admin already exists, Bootstrap must
+// update the root password so that containerised deployments can rotate credentials.
+func TestBootstrap_EnvPasswordAppliedOnExistingInstance(t *testing.T) {
+	store := newTestStore(t)
+	tmpDir := t.TempDir()
+	secretPath := filepath.Join(tmpDir, "auth_secret")
+
+	// First bootstrap — creates root with default "password".
+	if _, err := auth.Bootstrap(store, secretPath); err != nil {
+		t.Fatalf("Bootstrap first run: %v", err)
+	}
+
+	// Simulate operator setting MUNINN_ADMIN_PASSWORD before restarting an
+	// existing instance.
+	t.Setenv("MUNINN_ADMIN_PASSWORD", "my-secure-password")
+
+	// Second bootstrap — existing instance with env var set.
+	if _, err := auth.Bootstrap(store, secretPath); err != nil {
+		t.Fatalf("Bootstrap second run: %v", err)
+	}
+
+	// The new password from the env var must now be valid.
+	if err := store.ValidateAdmin("root", "my-secure-password"); err != nil {
+		t.Errorf("regression: MUNINN_ADMIN_PASSWORD not applied to existing instance: %v", err)
+	}
+	// The old default password must no longer work.
+	if err := store.ValidateAdmin("root", "password"); err == nil {
+		t.Error("regression: old default password still valid after MUNINN_ADMIN_PASSWORD was set")
+	}
+}
+
+// TestBootstrap_EnvPasswordNotSetIdempotent verifies that when MUNINN_ADMIN_PASSWORD
+// is NOT set, a second bootstrap does not overwrite a manually-changed password.
+func TestBootstrap_EnvPasswordNotSetIdempotent(t *testing.T) {
+	store := newTestStore(t)
+	tmpDir := t.TempDir()
+	secretPath := filepath.Join(tmpDir, "auth_secret")
+
+	if _, err := auth.Bootstrap(store, secretPath); err != nil {
+		t.Fatalf("Bootstrap first run: %v", err)
+	}
+	if err := store.ChangeAdminPassword("root", "manual-change"); err != nil {
+		t.Fatalf("ChangeAdminPassword: %v", err)
+	}
+
+	// Env var is not set — second bootstrap must not touch the password.
+	if _, err := auth.Bootstrap(store, secretPath); err != nil {
+		t.Fatalf("Bootstrap second run: %v", err)
+	}
+
+	if err := store.ValidateAdmin("root", "manual-change"); err != nil {
+		t.Errorf("manually-set password was overwritten when MUNINN_ADMIN_PASSWORD is unset: %v", err)
+	}
+}
+
 // TestBootstrap_SecretFileExists verifies that if a secret file already exists
 // Bootstrap reuses it without overwriting.
 func TestBootstrap_SecretFileExists(t *testing.T) {

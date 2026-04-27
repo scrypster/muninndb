@@ -14,6 +14,16 @@
 #
 # After updating credentials, reload with:
 #   systemctl daemon-reload && systemctl restart muninndb
+#
+# WARNING: lifecycle conflict — do NOT run 'muninn start', 'muninn stop',
+# or 'muninn restart' while this service is enabled. These CLI commands and
+# systemd both own the process; running them concurrently races on the
+# Pebble database lock and can put systemd into a permanent Restart=on-failure
+# loop. While this unit is active, use systemctl to control MuninnDB:
+#   systemctl start muninndb   (instead of: muninn start)
+#   systemctl stop muninndb    (instead of: muninn stop)
+#   systemctl restart muninndb (instead of: muninn restart)
+#   systemctl status muninndb  (instead of: muninn status)
 
 [Unit]
 Description=MuninnDB Memory Server

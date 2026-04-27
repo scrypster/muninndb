@@ -150,8 +150,12 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 	cb := h.OnLobeJoined
 	h.mu.Unlock()
 
-	// Register with ConnManager outside the members lock to avoid lock ordering issues.
-	h.mgr.AddPeer(req.NodeID, req.Addr)
+	// NOTE: do NOT call h.mgr.AddPeer here. The coordinator already called
+	// mgr.RegisterConn(nodeID, addr, conn) with the live inbound TCP connection
+	// before invoking HandleJoinRequest. Calling AddPeer would close that live
+	// connection and replace it with a disconnected PeerConn{conn: nil},
+	// causing the immediately-following peer.Send(JoinResponse) to return
+	// ErrNotConnected.
 
 	if cb != nil {
 		cb(info)
