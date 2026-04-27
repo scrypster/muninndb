@@ -174,7 +174,7 @@ func TestHandleStreamablePost_Unauthorized(t *testing.T) {
 func TestIsValidVaultName_TooLong(t *testing.T) {
 	// 65-char lowercase vault name must be invalid.
 	name := strings.Repeat("a", 65)
-	if isValidVaultName(name) {
+	if auth.IsValidVaultName(name) {
 		t.Error("expected isValidVaultName to return false for 65-char name")
 	}
 }
@@ -182,19 +182,19 @@ func TestIsValidVaultName_TooLong(t *testing.T) {
 func TestIsValidVaultName_MaxLength(t *testing.T) {
 	// 64-char lowercase vault name must be valid.
 	name := strings.Repeat("a", 64)
-	if !isValidVaultName(name) {
+	if !auth.IsValidVaultName(name) {
 		t.Error("expected isValidVaultName to return true for 64-char name")
 	}
 }
 
 func TestIsValidVaultName_Empty(t *testing.T) {
-	if isValidVaultName("") {
+	if auth.IsValidVaultName("") {
 		t.Error("expected isValidVaultName to return false for empty string")
 	}
 }
 
 func TestIsValidVaultName_Uppercase(t *testing.T) {
-	if isValidVaultName("MyVault") {
+	if auth.IsValidVaultName("MyVault") {
 		t.Error("expected isValidVaultName to return false for uppercase chars")
 	}
 }
@@ -202,7 +202,7 @@ func TestIsValidVaultName_Uppercase(t *testing.T) {
 func TestIsValidVaultName_ValidChars(t *testing.T) {
 	cases := []string{"default", "my-vault", "vault_1", "a0-b_c"}
 	for _, name := range cases {
-		if !isValidVaultName(name) {
+		if !auth.IsValidVaultName(name) {
 			t.Errorf("expected isValidVaultName to return true for %q", name)
 		}
 	}
