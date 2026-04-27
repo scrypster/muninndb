@@ -837,6 +837,10 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.engine.Link(r.Context(), mbpReq)
 	if err != nil {
+		if errors.Is(err, engine.ErrInvalidID) {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+			return
+		}
 		if errors.Is(err, engine.ErrEngramNotFound) {
 			s.sendError(r, w, http.StatusNotFound, ErrEngramNotFound, err.Error())
 			return

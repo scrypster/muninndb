@@ -2162,12 +2162,12 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 
 	sourceID, err := storage.ParseULID(req.SourceID)
 	if err != nil {
-		return nil, fmt.Errorf("parse source id: %w", err)
+		return nil, fmt.Errorf("%w: source_id %q: %v", ErrInvalidID, req.SourceID, err)
 	}
 
 	targetID, err := storage.ParseULID(req.TargetID)
 	if err != nil {
-		return nil, fmt.Errorf("parse target id: %w", err)
+		return nil, fmt.Errorf("%w: target_id %q: %v", ErrInvalidID, req.TargetID, err)
 	}
 
 	// Guard: reject links to/from soft-deleted engrams. A single batched

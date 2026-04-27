@@ -382,6 +382,29 @@ func (e *linkGenericErrorEngine) Link(_ context.Context, _ *mbp.LinkRequest) (*L
 	return nil, errors.New("generic link error")
 }
 
+type linkInvalidIDEngine struct{ MockEngine }
+
+func (e *linkInvalidIDEngine) Link(_ context.Context, _ *mbp.LinkRequest) (*LinkResponse, error) {
+	return nil, fmt.Errorf("%w: source_id %q: parse ulid: bad", engine.ErrInvalidID, "nonexistent-1")
+}
+
+func TestHandleLink_InvalidID_Returns400(t *testing.T) {
+	// Regression test for #395: invalid (non-ULID) source_id or target_id must
+	// return 400 Bad Request, not 500 Internal Server Error.
+	eng := &linkInvalidIDEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+
+	body := `{"source_id":"nonexistent-1","target_id":"nonexistent-2","rel_type":1}`
+	req := httptest.NewRequest("POST", "/api/link", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleStats — error path (60% → better coverage)
 // ---------------------------------------------------------------------------
