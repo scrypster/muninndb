@@ -585,6 +585,7 @@ func (s *MCPServer) handleInitialize(w http.ResponseWriter, req *JSONRPCRequest)
 			"name":    "muninn",
 			"version": "1.0.0",
 		},
+		"instructions": mcpInstructions,
 	})
 }
 
