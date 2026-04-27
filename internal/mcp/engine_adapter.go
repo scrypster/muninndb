@@ -415,7 +415,7 @@ func (a *mcpEngineAdapter) ReplayEnrichment(ctx context.Context, vault string, s
 }
 
 func (a *mcpEngineAdapter) GetEnrichmentCandidates(ctx context.Context, vault string, stages []string, limit int) (*EnrichmentCandidatesResult, error) {
-	candidates, stagesRequested, err := a.eng.GetEnrichmentCandidates(ctx, vault, stages, limit)
+	candidates, stagesRequested, _, err := a.eng.GetEnrichmentCandidates(ctx, vault, stages, storage.ULID{}, limit)
 	if err != nil {
 		return nil, err
 	}

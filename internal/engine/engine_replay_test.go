@@ -276,7 +276,7 @@ func TestGetEnrichmentCandidates_ReturnsOnlyMissingStages(t *testing.T) {
 		}
 	}
 
-	candidates, stages, err := eng.GetEnrichmentCandidates(ctx, vault, nil, 10)
+	candidates, stages, _, err := eng.GetEnrichmentCandidates(ctx, vault, nil, storage.ULID{}, 10)
 	if err != nil {
 		t.Fatalf("GetEnrichmentCandidates: %v", err)
 	}
@@ -292,6 +292,131 @@ func TestGetEnrichmentCandidates_ReturnsOnlyMissingStages(t *testing.T) {
 	wantMissing := []string{"relationships", "classification", "summary"}
 	if fmt.Sprint(candidates[0].MissingStages) != fmt.Sprint(wantMissing) {
 		t.Fatalf("missing stages: got %v, want %v", candidates[0].MissingStages, wantMissing)
+	}
+}
+
+func TestGetEnrichmentCandidates_CursorPaginates(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const vault = "default"
+
+	// Write 6 engrams; mark the first 4 fully enriched, leave last 2 unenriched.
+	ids := make([]storage.ULID, 6)
+	for i := 0; i < 6; i++ {
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   vault,
+			Content: fmt.Sprintf("engram %d", i),
+			Concept: fmt.Sprintf("concept %d", i),
+		})
+		if err != nil {
+			t.Fatalf("Write %d: %v", i, err)
+		}
+		id, err := storage.ParseULID(resp.ID)
+		if err != nil {
+			t.Fatalf("ParseULID %d: %v", i, err)
+		}
+		ids[i] = id
+	}
+	allFlags := []uint8{plugin.DigestEntities, plugin.DigestRelationships, plugin.DigestClassified, plugin.DigestSummarized}
+	for i := 0; i < 4; i++ {
+		for _, flag := range allFlags {
+			if err := eng.store.SetDigestFlag(ctx, ids[i], flag); err != nil {
+				t.Fatalf("SetDigestFlag(%d, 0x%02x): %v", i, flag, err)
+			}
+		}
+	}
+
+	// Page 1: limit=1 should return engram at index 4 (first unenriched).
+	candidates1, _, cursor1, err := eng.GetEnrichmentCandidates(ctx, vault, nil, storage.ULID{}, 1)
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if len(candidates1) != 1 {
+		t.Fatalf("page1 count: got %d, want 1", len(candidates1))
+	}
+	if candidates1[0].ID != ids[4] {
+		t.Errorf("page1 candidate: got %s, want %s", candidates1[0].ID, ids[4])
+	}
+	if cursor1 == (storage.ULID{}) {
+		t.Error("page1: expected non-zero cursor")
+	}
+
+	// Page 2: continue from cursor1, should return engram at index 5.
+	candidates2, _, cursor2, err := eng.GetEnrichmentCandidates(ctx, vault, nil, cursor1, 1)
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if len(candidates2) != 1 {
+		t.Fatalf("page2 count: got %d, want 1", len(candidates2))
+	}
+	if candidates2[0].ID != ids[5] {
+		t.Errorf("page2 candidate: got %s, want %s", candidates2[0].ID, ids[5])
+	}
+
+	// Page 3: exhausted — cursor2 should be zero.
+	candidates3, _, cursor3, err := eng.GetEnrichmentCandidates(ctx, vault, nil, cursor2, 1)
+	if err != nil {
+		t.Fatalf("page3: %v", err)
+	}
+	if len(candidates3) != 0 {
+		t.Fatalf("page3 count: got %d, want 0", len(candidates3))
+	}
+	if cursor3 != (storage.ULID{}) {
+		t.Errorf("page3: expected zero cursor (exhausted), got %s", cursor3)
+	}
+}
+
+func TestGetEnrichmentCandidates_SkipsEnrichedAtStart(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const vault = "default"
+
+	// Write 3 engrams. First 2 fully enriched, last one not.
+	ids := make([]storage.ULID, 3)
+	for i := 0; i < 3; i++ {
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   vault,
+			Content: fmt.Sprintf("content %d", i),
+			Concept: fmt.Sprintf("concept %d", i),
+		})
+		if err != nil {
+			t.Fatalf("Write %d: %v", i, err)
+		}
+		id, err := storage.ParseULID(resp.ID)
+		if err != nil {
+			t.Fatalf("ParseULID %d: %v", i, err)
+		}
+		ids[i] = id
+	}
+	allFlags := []uint8{plugin.DigestEntities, plugin.DigestRelationships, plugin.DigestClassified, plugin.DigestSummarized}
+	for _, flag := range allFlags {
+		if err := eng.store.SetDigestFlag(ctx, ids[0], flag); err != nil {
+			t.Fatalf("SetDigestFlag(0): %v", err)
+		}
+		if err := eng.store.SetDigestFlag(ctx, ids[1], flag); err != nil {
+			t.Fatalf("SetDigestFlag(1): %v", err)
+		}
+	}
+
+	// Without cursor fix, a limit=2 call would scan only ids[0] and ids[1],
+	// both enriched, and return 0 candidates. With the fix it continues.
+	candidates, _, cursor, err := eng.GetEnrichmentCandidates(ctx, vault, nil, storage.ULID{}, 2)
+	if err != nil {
+		t.Fatalf("GetEnrichmentCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates: got %d, want 1", len(candidates))
+	}
+	if candidates[0].ID != ids[2] {
+		t.Errorf("candidate id: got %s, want %s", candidates[0].ID, ids[2])
+	}
+	// ids[2] was the last engram — cursor should be zero (exhausted).
+	if cursor != (storage.ULID{}) {
+		t.Errorf("cursor should be zero (exhausted), got %s", cursor)
 	}
 }
 
