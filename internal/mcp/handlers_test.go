@@ -3415,3 +3415,51 @@ func TestHandleAddChild_EmbeddingOmittedIsAccepted(t *testing.T) {
 		t.Errorf("expected no embedding, got %d elements", len(eng.lastChild.Embedding))
 	}
 }
+
+// ── muninn_trust ─────────────────────────────────────────────────────────────
+
+func TestHandleSetTrust(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		srv := newTestServer()
+		body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_trust","arguments":{"vault":"default","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","trust":"verified"}}}`
+		w := postRPC(t, srv, body)
+		resp := decodeResp(t, w.Body.String())
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %v", resp.Error)
+		}
+		inner := extractInnerJSON(t, resp)
+		if ok, _ := inner["ok"].(bool); !ok {
+			t.Errorf("expected ok=true in response, got %v", inner["ok"])
+		}
+	})
+
+	t.Run("missing id", func(t *testing.T) {
+		srv := newTestServer()
+		body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_trust","arguments":{"vault":"default","trust":"verified"}}}`
+		w := postRPC(t, srv, body)
+		resp := decodeResp(t, w.Body.String())
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Errorf("expected -32602 for missing id, got %v", resp.Error)
+		}
+	})
+
+	t.Run("missing trust", func(t *testing.T) {
+		srv := newTestServer()
+		body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_trust","arguments":{"vault":"default","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}}}`
+		w := postRPC(t, srv, body)
+		resp := decodeResp(t, w.Body.String())
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Errorf("expected -32602 for missing trust, got %v", resp.Error)
+		}
+	})
+
+	t.Run("invalid trust level", func(t *testing.T) {
+		srv := newTestServer()
+		body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_trust","arguments":{"vault":"default","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","trust":"bogus"}}}`
+		w := postRPC(t, srv, body)
+		resp := decodeResp(t, w.Body.String())
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Errorf("expected -32602 for invalid trust level, got %v", resp.Error)
+		}
+	})
+}
