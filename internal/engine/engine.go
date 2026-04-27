@@ -1752,6 +1752,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// PAS: Predictive Activation Signal config from vault Plasticity.
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
+	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
 
 	// Set defaults
 	if actReq.MaxResults == 0 {
