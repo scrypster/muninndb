@@ -892,7 +892,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	for i, a := range req.Associations {
 		targetID, err := storage.ParseULID(a.TargetID)
 		if err != nil {
-			return nil, fmt.Errorf("parse target id: %w", err)
+			return nil, fmt.Errorf("%w: association target_id %q: %v", ErrInvalidID, a.TargetID, err)
 		}
 		assocs[i] = storage.Association{
 			TargetID:      targetID,

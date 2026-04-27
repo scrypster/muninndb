@@ -510,6 +510,29 @@ func (e *writeErrorEngine) Write(_ context.Context, _ *WriteRequest) (*WriteResp
 	return nil, errors.New("write failed")
 }
 
+type writeInvalidIDEngine struct{ MockEngine }
+
+func (e *writeInvalidIDEngine) Write(_ context.Context, _ *WriteRequest) (*WriteResponse, error) {
+	return nil, fmt.Errorf("%w: association target_id %q: parse ulid: bad", engine.ErrInvalidID, "not-a-ulid")
+}
+
+func TestCreateEngram_InvalidAssociationTargetID_Returns400(t *testing.T) {
+	// Regression test for #399: invalid target_id in inline associations must return
+	// 400 Bad Request, not 500 Internal Server Error.
+	eng := &writeInvalidIDEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+
+	body := `{"concept":"test","content":"test","associations":[{"target_id":"not-a-ulid","rel_type":1}]}`
+	req := httptest.NewRequest("POST", "/api/engrams", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid association target_id, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleEvolve — error paths (75%)
 // ---------------------------------------------------------------------------
