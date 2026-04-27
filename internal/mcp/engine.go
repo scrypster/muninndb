@@ -164,4 +164,28 @@ type EngineInterface interface {
 	// Derived from the HNSW index — returns 0 if no embeddings have been stored yet
 	// (dimension not yet established; any client-provided dimension will be accepted).
 	GetVaultEmbedDim(ctx context.Context, vault string) int
+
+	// DetectLoci discovers emergent communities in the entity co-occurrence graph
+	// using label propagation. Returns communities sorted by size descending.
+	DetectLoci(ctx context.Context, vault string, minEdgeWeight int) ([]LociResult, error)
+
+	// DetectLocusMembers runs DetectLoci then returns entities and sample engrams
+	// for the community matching locusLabel.
+	DetectLocusMembers(ctx context.Context, vault, locusLabel string, minEdgeWeight int) (*LocusMembersResult, error)
+
+	// CompleteEpisode walks same_episode associations from seedID to return
+	// all members of the episode, ordered by creation time ascending.
+	CompleteEpisode(ctx context.Context, vault string, seedID string) ([]engine.CompletedEngram, error)
+
+	// CompleteEpisodeWithContext returns the full episode plus narrative context:
+	// boundary engrams, duration, and topic hint.
+	CompleteEpisodeWithContext(ctx context.Context, vault string, seedID string) (*engine.NarrativeContext, error)
+
+	// ListEpisodes returns groups of engrams connected by same_episode associations,
+	// sorted by StartTime descending. limit caps the number of episodes returned.
+	ListEpisodes(ctx context.Context, vault string, limit int) ([]EpisodeResult, error)
+
+	// GetEpisodeMembers returns full engrams for a specific episode, identified
+	// by the first engram ID in the episode.
+	GetEpisodeMembers(ctx context.Context, vault, episodeID string) ([]EpisodeMember, error)
 }

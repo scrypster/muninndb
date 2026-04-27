@@ -293,13 +293,18 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	// Mode shortcuts: resolve preset if provided.
 	var modePreset RecallMode
+	completionMode := false
 	if modeStr, ok := args["mode"].(string); ok && modeStr != "" {
-		preset, modeErr := lookupMode(modeStr)
-		if modeErr != nil {
-			sendError(w, id, -32602, modeErr.Error())
-			return
+		if modeStr == "complete" {
+			completionMode = true
+		} else {
+			preset, modeErr := lookupMode(modeStr)
+			if modeErr != nil {
+				sendError(w, id, -32602, modeErr.Error())
+				return
+			}
+			modePreset = preset
 		}
-		modePreset = preset
 	}
 
 	req := &mbp.ActivateRequest{
@@ -371,6 +376,55 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	resp, err := s.engine.Activate(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+
+	// Pattern completion mode: take the top activation result and return
+	// all members of its episode via same_episode association walking,
+	// enriched with narrative context (boundary engrams, duration, topic hint).
+	if completionMode && len(resp.Activations) > 0 {
+		seedID := resp.Activations[0].ID
+		nc, epErr := s.engine.CompleteEpisodeWithContext(ctx, vault, seedID)
+		if epErr != nil {
+			sendError(w, id, -32000, "completion error: "+epErr.Error())
+			return
+		}
+		var memories []Memory
+		for _, ce := range nc.Members {
+			memories = append(memories, Memory{
+				ID:        ce.ID,
+				Concept:   ce.Concept,
+				Content:   ce.Content,
+				Summary:   ce.Summary,
+				State:     ce.State,
+				CreatedAt: ce.CreatedAt,
+			})
+		}
+		result := map[string]any{
+			"memories":   memories,
+			"total":      len(memories),
+			"mode":       "complete",
+			"seed_id":    seedID,
+			"seed_score": resp.Activations[0].Score,
+		}
+		// Narrative context fields.
+		narrative := map[string]any{
+			"duration_ms": nc.Duration.Milliseconds(),
+		}
+		if nc.BeforeID != "" {
+			narrative["before_id"] = nc.BeforeID
+		}
+		if nc.AfterID != "" {
+			narrative["after_id"] = nc.AfterID
+		}
+		if nc.TopicHint != "" {
+			narrative["topic_hint"] = nc.TopicHint
+		}
+		result["narrative"] = narrative
+		if len(memories) == 0 {
+			result["hint"] = "Top activation result has no episode associations. Try mode='ranked' or use muninn_traverse to explore its neighbourhood."
+		}
+		sendResult(w, id, textContent(mustJSON(result)))
 		return
 	}
 
@@ -1139,6 +1193,81 @@ func (s *MCPServer) handleEntityClusters(ctx context.Context, w http.ResponseWri
 	})))
 }
 
+func (s *MCPServer) handleLoci(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	minEdgeWeight := 2
+	if v, ok := args["min_edge_weight"].(float64); ok {
+		minEdgeWeight = int(v)
+	}
+	if minEdgeWeight < 1 {
+		minEdgeWeight = 1
+	}
+	maxResults := 20
+	if v, ok := args["max_results"].(float64); ok {
+		maxResults = int(v)
+	}
+	if maxResults < 1 {
+		maxResults = 1
+	}
+
+	loci, err := s.engine.DetectLoci(ctx, vault, minEdgeWeight)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if loci == nil {
+		loci = []LociResult{}
+	}
+	if len(loci) > maxResults {
+		loci = loci[:maxResults]
+	}
+
+	// Build compact output: omit full member lists, include top entities.
+	type lociEntry struct {
+		ID          int      `json:"id"`
+		Label       string   `json:"label"`
+		MemberCount int      `json:"member_count"`
+		Cohesion    float64  `json:"cohesion"`
+		TopEntities []string `json:"top_entities"`
+	}
+	entries := make([]lociEntry, len(loci))
+	for i, l := range loci {
+		top := l.Members
+		if len(top) > 5 {
+			top = top[:5]
+		}
+		entries[i] = lociEntry{
+			ID:          l.ID,
+			Label:       l.Label,
+			MemberCount: l.Size,
+			Cohesion:    l.Cohesion,
+			TopEntities: top,
+		}
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"loci":  entries,
+		"count": len(entries),
+	})))
+}
+
+func (s *MCPServer) handleLocusMembers(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	locusLabel, ok := args["locus_label"].(string)
+	if !ok || locusLabel == "" {
+		sendError(w, id, -32602, "invalid params: 'locus_label' is required")
+		return
+	}
+
+	minEdgeWeight := 2
+	if v, ok := args["min_edge_weight"].(float64); ok && v >= 1 {
+		minEdgeWeight = int(v)
+	}
+	result, err := s.engine.DetectLocusMembers(ctx, vault, locusLabel, minEdgeWeight)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(result)))
+}
+
 func (s *MCPServer) handleExportGraph(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	format := "json-ld"
 	if f, ok := args["format"].(string); ok && f != "" {
@@ -1320,6 +1449,7 @@ var relTypeMap = map[string]storage.RelType{
 	"blocks":             storage.RelBlocks,
 	"resolves":           storage.RelResolves,
 	"refines":            storage.RelRefines,
+	"same_episode":       storage.RelSameEpisode,
 }
 
 // relTypeFromString converts a relation string to a uint16 RelType value.
@@ -1711,4 +1841,50 @@ func (s *MCPServer) handleEntityTimeline(ctx context.Context, w http.ResponseWri
 		return
 	}
 	sendResult(w, id, textContent(mustJSON(timeline)))
+}
+
+func (s *MCPServer) handleEpisodes(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	limit := 10
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	episodes, err := s.engine.ListEpisodes(ctx, vault, limit)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if episodes == nil {
+		episodes = []EpisodeResult{}
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"episodes": episodes,
+		"count":    len(episodes),
+	})))
+}
+
+func (s *MCPServer) handleEpisodeMembers(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	episodeID, ok := args["episode_id"].(string)
+	if !ok || episodeID == "" {
+		sendError(w, id, -32602, "invalid params: 'episode_id' is required")
+		return
+	}
+	members, err := s.engine.GetEpisodeMembers(ctx, vault, episodeID)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if members == nil {
+		members = []EpisodeMember{}
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"episode_id": episodeID,
+		"members":    members,
+		"count":      len(members),
+	})))
 }

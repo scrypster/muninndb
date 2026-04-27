@@ -598,6 +598,127 @@ func (a *mcpEngineAdapter) ListEntities(ctx context.Context, vault string, limit
 	return summaries, nil
 }
 
+func (a *mcpEngineAdapter) DetectLoci(ctx context.Context, vault string, minEdgeWeight int) ([]LociResult, error) {
+	loci, err := a.eng.DetectLoci(ctx, vault, minEdgeWeight)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]LociResult, len(loci))
+	for i, l := range loci {
+		result[i] = LociResult{
+			ID:       l.ID,
+			Label:    l.Label,
+			Members:  l.Members,
+			Size:     l.Size,
+			Cohesion: l.Cohesion,
+		}
+	}
+	return result, nil
+}
+
+func (a *mcpEngineAdapter) ListEpisodes(ctx context.Context, vault string, limit int) ([]EpisodeResult, error) {
+	episodes, err := a.eng.ListEpisodes(ctx, vault, limit)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]EpisodeResult, len(episodes))
+	for i, ep := range episodes {
+		results[i] = EpisodeResult{
+			ID:        ep.ID,
+			StartTime: ep.StartTime.UTC().Format(time.RFC3339),
+			EndTime:   ep.EndTime.UTC().Format(time.RFC3339),
+			Size:      ep.Size,
+			Members:   ep.Members,
+		}
+	}
+	return results, nil
+}
+
+func (a *mcpEngineAdapter) GetEpisodeMembers(ctx context.Context, vault, episodeID string) ([]EpisodeMember, error) {
+	// Direct BFS lookup: walk same_episode edges from the episode's first engram.
+	// This avoids the recency limit imposed by ListEpisodes.
+	startID, err := storage.ParseULID(episodeID)
+	if err != nil {
+		return nil, fmt.Errorf("episode member %q: %w", episodeID, err)
+	}
+	episode, err := a.eng.GetEpisodeByMember(ctx, vault, startID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch each engram via the engine's public GetEngram method.
+	members := make([]EpisodeMember, 0, len(episode.Members))
+	for _, idStr := range episode.Members {
+		id, err := storage.ParseULID(idStr)
+		if err != nil {
+			return nil, fmt.Errorf("episode member %q: %w", idStr, err)
+		}
+		eng, err := a.eng.GetEngram(ctx, vault, id)
+		if err != nil {
+			return nil, fmt.Errorf("episode member %q: %w", idStr, err)
+		}
+		if eng == nil {
+			continue
+		}
+		members = append(members, EpisodeMember{
+			ID:        eng.ID.String(),
+			Concept:   eng.Concept,
+			Summary:   eng.Summary,
+			State:     lifecycleStateLabel(eng.State),
+			CreatedAt: eng.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return members, nil
+}
+
+func (a *mcpEngineAdapter) DetectLocusMembers(ctx context.Context, vault, locusLabel string, minEdgeWeight int) (*LocusMembersResult, error) {
+	loci, err := a.eng.DetectLoci(ctx, vault, minEdgeWeight)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the locus matching the label.
+	var members []string
+	for _, l := range loci {
+		if l.Label == locusLabel {
+			members = l.Members
+			break
+		}
+	}
+	if members == nil {
+		return nil, fmt.Errorf("locus not found: %q", locusLabel)
+	}
+
+	// For each member entity, look up sample engrams.
+	details := make([]LocusMemberDetail, 0, len(members))
+	for _, entity := range members {
+		engrams, findErr := a.eng.FindByEntity(ctx, vault, entity, 5)
+		if findErr != nil {
+			slog.Warn("locus members: FindByEntity failed", "entity", entity, "err", findErr)
+			continue
+		}
+		entries := make([]LocusEngramEntry, 0, len(engrams))
+		for _, eg := range engrams {
+			entries = append(entries, LocusEngramEntry{
+				ID:      eg.ID.String(),
+				Concept: eg.Concept,
+				Summary: eg.Summary,
+				State:   lifecycleStateLabel(eg.State),
+			})
+		}
+		details = append(details, LocusMemberDetail{
+			Entity:  entity,
+			Engrams: entries,
+		})
+	}
+
+	return &LocusMembersResult{
+		Label:   locusLabel,
+		Members: details,
+		Size:    len(details),
+	}, nil
+}
+
 // provenanceSourceString converts a provenance.SourceType to its string label.
 func provenanceSourceString(s provenance.SourceType) string {
 	switch s {
@@ -634,7 +755,16 @@ func convertTreeNodeInput(n TreeNodeInput) engine.TreeNodeInput {
 	return out
 }
 
+func (a *mcpEngineAdapter) CompleteEpisode(ctx context.Context, vault string, seedID string) ([]engine.CompletedEngram, error) {
+	return a.eng.CompleteEpisode(ctx, vault, seedID)
+}
+
+func (a *mcpEngineAdapter) CompleteEpisodeWithContext(ctx context.Context, vault string, seedID string) (*engine.NarrativeContext, error) {
+	return a.eng.CompleteEpisodeWithContext(ctx, vault, seedID)
+}
+
 // convertTreeNode converts engine.TreeNode → mcp.TreeNode recursively.
+
 func convertTreeNode(n *engine.TreeNode) *TreeNode {
 	if n == nil {
 		return nil

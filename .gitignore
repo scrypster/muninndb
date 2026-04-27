@@ -59,8 +59,7 @@ docs/plans/
 docs/superpowers/
 .superpowers/
 
-# Evaluation tools and results — internal development only
-cmd/eval*/
+# Evaluation results and one-off scripts — internal development only
 eval-results/
 scripts/eval-*
 /eval-bible

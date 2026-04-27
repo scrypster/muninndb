@@ -201,12 +201,16 @@ func isReadOnlyTool(name string) bool {
 		"muninn_recall_tree",
 		"muninn_find_by_entity",
 		"muninn_entity_clusters",
+		"muninn_loci",
+		"muninn_locus_members",
 		"muninn_export_graph",
 		"muninn_similar_entities",
 		"muninn_entity_timeline",
 		"muninn_provenance",
 		"muninn_entity",
-		"muninn_entities":
+		"muninn_entities",
+		"muninn_episodes",
+		"muninn_episode_members":
 		return true
 	}
 	return false

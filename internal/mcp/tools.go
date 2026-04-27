@@ -162,8 +162,8 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"mode": map[string]any{
 						"type":        "string",
-						"enum":        []string{"semantic", "recent", "balanced", "deep"},
-						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)",
+						"enum":        []string{"semantic", "recent", "balanced", "deep", "complete"},
+						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)\n• complete  — pattern completion: runs ACTIVATE, takes the top result, returns the full episode containing it (CA3 autoassociative recall)",
 					},
 					"since": map[string]any{
 						"type":        "string",
@@ -640,6 +640,33 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{},
 			},
 		},
+		// Hippocampal emergent loci
+		{
+			Name:        "muninn_loci",
+			Description: "Detect emergent communities (loci) in the entity co-occurrence graph using label propagation. Inspired by hippocampal place cells — discovers dense clusters of entities that frequently appear together. Returns navigable 'places' in memory space.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":           vaultProp,
+					"min_edge_weight": map[string]any{"type": "integer", "description": "Minimum co-occurrence count to include an edge (default 2)."},
+					"max_results":     map[string]any{"type": "integer", "description": "Maximum number of loci to return (default 20)."},
+				},
+				"required": []string{},
+			},
+		},
+		{
+			Name:        "muninn_locus_members",
+			Description: "Get all entities and sample engrams for a specific locus (community). Use muninn_loci first to discover loci, then pass a locus_label here to drill into its contents.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":           vaultProp,
+					"locus_label":     map[string]any{"type": "string", "description": "Label of the locus to inspect (from muninn_loci output)."},
+					"min_edge_weight": map[string]any{"type": "integer", "description": "Minimum co-occurrence count (default 2). Should match the value used in muninn_loci."},
+				},
+				"required": []string{"locus_label"},
+			},
+		},
 		// Knowledge graph export
 		{
 			Name:        "muninn_export_graph",
@@ -795,6 +822,31 @@ func allToolDefinitions() []ToolDefinition {
 					"state": map[string]any{"type": "string", "description": "Filter by state: active, deprecated, merged, resolved"},
 				},
 				"required": []string{},
+			},
+		},
+		// Episode management tools
+		{
+			Name:        "muninn_episodes",
+			Description: "List recent episodes in a vault. Episodes are groups of consecutive memories linked by same_episode associations during hippocampal episode segmentation. Returns episodes sorted by start time (most recent first).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"limit": map[string]any{"type": "integer", "description": "Max episodes to return (default 10, max 100)."},
+				},
+				"required": []string{},
+			},
+		},
+		{
+			Name:        "muninn_episode_members",
+			Description: "Get full engram details for all members of a specific episode. Use muninn_episodes first to discover episodes, then pass an episode ID here to see its contents.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":      vaultProp,
+					"episode_id": map[string]any{"type": "string", "description": "ID of the episode (first engram ID from muninn_episodes output)."},
+				},
+				"required": []string{"episode_id"},
 			},
 		},
 	}
