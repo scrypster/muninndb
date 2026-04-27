@@ -10,7 +10,15 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/engine/circuit"
 )
+
+// errLLMFailed is an unexported sentinel wrapping errors that originate from
+// the LLM call itself (bad output, nil result, parse error). It signals a
+// permanent failure for the engram — distinct from transient failures (circuit
+// open, context cancelled) and storage errors (persistence after a successful
+// LLM call). Only the enrich path uses this sentinel.
+var errLLMFailed = errors.New("enrich: llm call failed")
 
 // pollInterval is how often the processor checks for newly written, unembedded engrams.
 const pollInterval = 3 * time.Second
@@ -108,12 +116,13 @@ func (rp *RetroactiveProcessor) Mode() string {
 }
 
 // skipFlags returns the digest flags that should be excluded from scanning.
-// Embed processors skip DigestEmbedFailed engrams to avoid infinite retry loops.
+// Both embed and enrich processors skip permanently-failed engrams to prevent
+// infinite retry loops that trip the circuit breaker and block other memories.
 func (rp *RetroactiveProcessor) skipFlags() uint8 {
 	if rp.flagBit == DigestEmbed {
 		return DigestEmbedFailed
 	}
-	return 0
+	return DigestEnrichFailed
 }
 
 func (rp *RetroactiveProcessor) run(ctx context.Context) {
@@ -434,6 +443,17 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 			rp.statsMu.Lock()
 			rp.stats.Errors++
 			rp.statsMu.Unlock()
+			// LLM-originated failures (bad output, parse error) are permanent for
+			// this engram. Mark DigestEnrichFailed so the processor does not retry
+			// it indefinitely, which would trip the circuit breaker and block
+			// enrichment for all other memories. Storage/persistence errors are NOT
+			// marked — they are transient and should be retried when storage recovers.
+			if errors.Is(err, errLLMFailed) {
+				if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, DigestEnrichFailed); flagErr != nil {
+					slog.Warn("retroactive processor: failed to set DigestEnrichFailed",
+						"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", flagErr)
+				}
+			}
 			continue
 		}
 
@@ -535,10 +555,17 @@ func (rp *RetroactiveProcessor) processEnrichEngram(ctx context.Context, eng *En
 		// Call Enrich for missing fields.
 		result, err := enrich.Enrich(ctx, eng)
 		if err != nil {
-			return err
+			// Transient: circuit open, context cancelled/deadline exceeded.
+			// Do not wrap — the caller must not mark the engram as permanently failed.
+			if errors.Is(err, circuit.ErrOpen) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			// Permanent LLM failure (bad output, HTTP error, parse error).
+			// Wrap with errLLMFailed so the caller can mark DigestEnrichFailed.
+			return fmt.Errorf("%w: %v", errLLMFailed, err)
 		}
 		if result == nil {
-			return fmt.Errorf("enrich returned nil result")
+			return errLLMFailed
 		}
 
 		// Only overwrite fields the caller didn't provide.

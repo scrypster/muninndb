@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/engine/circuit"
 )
 
 // ---------------------------------------------------------------------------
@@ -312,6 +313,14 @@ func TestRetroactiveProcessor_ProcessBatchEnrichError(t *testing.T) {
 	if stats.Errors != 1 {
 		t.Errorf("expected Errors=1, got %d", stats.Errors)
 	}
+	// LLM errors are permanent: DigestEnrichFailed must be set to prevent
+	// infinite retry loops that trip the circuit breaker (regression test for #390).
+	if store.setFlagCalls != 1 {
+		t.Errorf("expected DigestEnrichFailed flag to be set after LLM error, got %d calls", store.setFlagCalls)
+	}
+	if len(store.setFlags) == 0 || store.setFlags[0] != DigestEnrichFailed {
+		t.Errorf("expected flag %d (DigestEnrichFailed), got %v", DigestEnrichFailed, store.setFlags)
+	}
 }
 
 func TestRetroactiveProcessor_ProcessBatchEnrichNilResult(t *testing.T) {
@@ -321,6 +330,8 @@ func TestRetroactiveProcessor_ProcessBatchEnrichNilResult(t *testing.T) {
 	store := &mockPluginStore{countResult: 1, scanResult: iter}
 	enrichPlugin := &enrichMockForRetro{
 		mockPlugin: mockPlugin{name: "enrich-nil", tier: TierEnrich},
+		// enrichResult and enrichErr both zero: Enrich returns (nil, nil).
+		// processEnrichEngram treats nil result as a permanent LLM failure.
 	}
 	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
 
@@ -333,8 +344,12 @@ func TestRetroactiveProcessor_ProcessBatchEnrichNilResult(t *testing.T) {
 	if stats.Errors != 1 {
 		t.Errorf("expected Errors=1, got %d", stats.Errors)
 	}
-	if store.setFlagCalls != 0 {
-		t.Errorf("expected no digest flags to be set on nil result, got %d calls", store.setFlagCalls)
+	// Nil result is a permanent LLM failure: DigestEnrichFailed must be set.
+	if store.setFlagCalls != 1 {
+		t.Errorf("expected DigestEnrichFailed flag to be set on nil result, got %d calls", store.setFlagCalls)
+	}
+	if len(store.setFlags) == 0 || store.setFlags[0] != DigestEnrichFailed {
+		t.Errorf("expected flag %d, got %v", DigestEnrichFailed, store.setFlags)
 	}
 }
 
@@ -768,5 +783,89 @@ func TestRetroactiveProcessor_ProcessBatchNilEngram(t *testing.T) {
 	// Only the non-nil engram should be processed
 	if enrichPlugin.callCount != 1 {
 		t.Errorf("expected 1 enrich call (skipping nil), got %d", enrichPlugin.callCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for issue #390: ghost queue + circuit breaker deadlock
+// ---------------------------------------------------------------------------
+
+// TestRetroactiveProcessor_CircuitOpen_NoEnrichFailedFlag verifies that when
+// the circuit breaker is open (transient systemic failure), the engram is NOT
+// marked with DigestEnrichFailed. The circuit will reset on its own; the engram
+// should be retried once the provider recovers.
+func TestRetroactiveProcessor_CircuitOpen_NoEnrichFailedFlag(t *testing.T) {
+	eng := &Engram{Concept: "valid", Content: "content"}
+	iter := &mockIterator{engrams: []*Engram{eng}}
+
+	store := &mockPluginStore{countResult: 1, scanResult: iter}
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-circuit", tier: TierEnrich},
+		enrichErr:  circuit.ErrOpen, // circuit breaker is open — transient
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	ok := rp.processBatch(context.Background())
+	if !ok {
+		t.Error("processBatch should return true even when circuit is open")
+	}
+
+	stats := rp.Stats()
+	if stats.Errors != 1 {
+		t.Errorf("expected Errors=1, got %d", stats.Errors)
+	}
+	// Circuit-open is transient: DigestEnrichFailed must NOT be set.
+	if store.setFlagCalls != 0 {
+		t.Errorf("DigestEnrichFailed must not be set for circuit-open errors, got %d flag calls", store.setFlagCalls)
+	}
+}
+
+// TestRetroactiveProcessor_PersistenceError_NoEnrichFailedFlag verifies that
+// when enrichment succeeds (LLM returns valid output) but storage persistence
+// fails, the engram is NOT marked with DigestEnrichFailed. The storage error is
+// transient; the engram should be retried when storage recovers.
+func TestRetroactiveProcessor_PersistenceError_NoEnrichFailedFlag(t *testing.T) {
+	eng := &Engram{Concept: "valid", Content: "content"}
+	iter := &mockIterator{engrams: []*Engram{eng}}
+
+	store := &mockPluginStore{
+		countResult: 1,
+		scanResult:  iter,
+		linkErr:     errors.New("storage unavailable"), // persistence fails, not LLM
+	}
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-persist-fail", tier: TierEnrich},
+		enrichResult: &EnrichmentResult{
+			Summary: "good summary",
+			Entities: []ExtractedEntity{
+				{Name: "postgres", Type: "database", Confidence: 0.9},
+			},
+		},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	ok := rp.processBatch(context.Background())
+	if !ok {
+		t.Error("processBatch should return true even with persistence errors")
+	}
+
+	// Storage error: DigestEnrichFailed must NOT be set — the engram should be
+	// retried when storage recovers.
+	if store.setFlagCalls != 0 {
+		t.Errorf("DigestEnrichFailed must not be set for storage errors, got %d flag calls (flags: %v)", store.setFlagCalls, store.setFlags)
+	}
+}
+
+// TestRetroactiveProcessor_SkipFlags_Enrich verifies that the enrich processor
+// passes DigestEnrichFailed as skipFlags so engrams that failed LLM enrichment
+// are excluded from future scans. This is the core fix for the infinite-retry
+// loop that tripped the circuit breaker in issue #390.
+func TestRetroactiveProcessor_SkipFlags_Enrich(t *testing.T) {
+	rp := NewRetroactiveProcessor(&mockPluginStore{}, &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-skipflags", tier: TierEnrich},
+	}, DigestEnrich)
+
+	if got := rp.skipFlags(); got != DigestEnrichFailed {
+		t.Errorf("enrich processor skipFlags() = %d, want DigestEnrichFailed (%d)", got, DigestEnrichFailed)
 	}
 }
