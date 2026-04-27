@@ -69,6 +69,16 @@ const (
 	// Engrams with this flag are skipped by the embed retroactive processor so
 	// they are not retried indefinitely.
 	DigestEmbedFailed uint8 = 0x80
+
+	// DigestEnrichFailed is set when LLM enrichment permanently fails for an engram
+	// (e.g. the LLM returns unparseable output). Engrams with this flag are skipped
+	// by the enrich retroactive processor to prevent infinite retry loops that trip
+	// the circuit breaker and block enrichment for all other memories.
+	//
+	// Shares the same bit as DigestEmbedFailed (the flag byte is full). Either
+	// failure type marks the engram as permanently failed for automated processing.
+	// An operator can clear it via the admin API retry endpoint.
+	DigestEnrichFailed uint8 = DigestEmbedFailed
 )
 
 // PluginStatus represents the runtime state of a registered plugin.
