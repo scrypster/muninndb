@@ -84,8 +84,32 @@ func (ps *PebbleStore) RecentActive(ctx context.Context, wsPrefix [8]byte, topK 
 // ListByState returns up to limit engram IDs whose state matches the given
 // lifecycle state, scanned from the 0x0B state secondary index.
 func (ps *PebbleStore) ListByState(ctx context.Context, wsPrefix [8]byte, state LifecycleState, limit int) ([]ULID, error) {
-	lower := keys.StateIndexKey(wsPrefix, uint8(state), [16]byte{})
+	return ps.ListByStateFrom(ctx, wsPrefix, state, ULID{}, limit)
+}
+
+// ListByStateFrom is the cursor-based variant of ListByState.
+// afterID is the exclusive lower-bound cursor — pass a zero ULID to start from the beginning.
+// The lower bound is computed as append(StateIndexKey(ws, state, afterID), 0x00), which
+// creates a 27-byte key strictly greater than the 26-byte cursor key, excluding afterID.
+// Returns at most limit IDs in state-index order (ULID / insertion order).
+func (ps *PebbleStore) ListByStateFrom(ctx context.Context, wsPrefix [8]byte, state LifecycleState, afterID ULID, limit int) ([]ULID, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	// Upper bound: the first key of the next state byte.
+	// StateActive = 0x01 which is well below 255, but guard explicitly.
+	if uint8(state) == 255 {
+		return nil, nil
+	}
 	upper := keys.StateIndexKey(wsPrefix, uint8(state)+1, [16]byte{})
+
+	// Lower bound: strictly after the cursor.
+	// If afterID is zero (all-zero bytes), append(afterKey, 0x00) is a 27-byte key
+	// greater than the all-zero 26-byte key — this correctly starts from the beginning
+	// of the state partition for this vault.
+	afterKey := keys.StateIndexKey(wsPrefix, uint8(state), afterID)
+	lower := append(afterKey, 0x00) // 27 bytes > any 26-byte key with same prefix
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {
@@ -93,7 +117,6 @@ func (ps *PebbleStore) ListByState(ctx context.Context, wsPrefix [8]byte, state 
 	}
 	defer iter.Close()
 
-	// Key: 0x0B | ws(8) | state(1) | id(16) = 26 bytes; ULID starts at offset 10.
 	const idOffset = 10
 	const keyLen = 26
 
@@ -106,6 +129,9 @@ func (ps *PebbleStore) ListByState(ctx context.Context, wsPrefix [8]byte, state 
 		var id ULID
 		copy(id[:], k[idOffset:idOffset+16])
 		ids = append(ids, id)
+	}
+	if err := iter.Error(); err != nil {
+		return nil, err
 	}
 	return ids, nil
 }

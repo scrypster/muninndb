@@ -132,6 +132,11 @@ type EngineStore interface {
 	// using the 0x0B state secondary index.
 	ListByState(ctx context.Context, wsPrefix [8]byte, state LifecycleState, limit int) ([]ULID, error)
 
+	// ListByStateFrom is the cursor-based variant of ListByState.
+	// afterID is the exclusive starting cursor — pass a zero ULID to start from the beginning.
+	// Returns at most limit IDs strictly after afterID in index order.
+	ListByStateFrom(ctx context.Context, wsPrefix [8]byte, state LifecycleState, afterID ULID, limit int) ([]ULID, error)
+
 	// VaultPrefix computes the 8-byte SipHash prefix for a vault name.
 	VaultPrefix(vault string) [8]byte
 
