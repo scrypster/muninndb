@@ -57,7 +57,7 @@ func encodeInto(b *erfBuffer, eng *Engram) error {
 	b.buf[OffsetEmbedDim] = eng.EmbedDim
 	b.buf[OffsetMemoryType] = eng.MemoryType
 	binary.BigEndian.PutUint16(b.buf[OffsetClassification:OffsetClassification+2], eng.Classification)
-	// TODO(task-2): write eng.Trust at OffsetTrust (b.buf[OffsetTrust] = eng.Trust)
+	b.buf[OffsetTrust] = eng.Trust
 
 	conceptBytes := []byte(eng.Concept)
 	createdByBytes := []byte(eng.CreatedBy)
@@ -208,7 +208,7 @@ func encodeV2Into(b *erfBuffer, eng *Engram) error {
 	b.buf[OffsetEmbedDim] = eng.EmbedDim
 	b.buf[OffsetMemoryType] = eng.MemoryType
 	binary.BigEndian.PutUint16(b.buf[OffsetClassification:OffsetClassification+2], eng.Classification)
-	// TODO(task-2): write eng.Trust at OffsetTrust (b.buf[OffsetTrust] = eng.Trust)
+	b.buf[OffsetTrust] = eng.Trust
 
 	conceptBytes := []byte(eng.Concept)
 	createdByBytes := []byte(eng.CreatedBy)
