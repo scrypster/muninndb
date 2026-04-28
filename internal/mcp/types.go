@@ -79,6 +79,17 @@ type Memory struct {
 	// Populated only by muninn_read (omitted from recall responses).
 	Entities            []ReadEntity    `json:"entities,omitempty"`
 	EntityRelationships []ReadEntityRel `json:"entity_relationships,omitempty"`
+	Annotations         *MemoryAnnotations `json:"annotations,omitempty"`
+}
+
+// MemoryAnnotations contains contextual metadata about a recalled memory,
+// populated only when muninn_recall is called with annotate=true.
+type MemoryAnnotations struct {
+	Stale         bool     `json:"stale"`
+	StaleDays     float64  `json:"stale_days"`
+	ConflictsWith []string `json:"conflicts_with,omitempty"`
+	SupersededBy  string   `json:"superseded_by,omitempty"`
+	LastVerified  string   `json:"last_verified,omitempty"` // RFC3339
 }
 
 // ReadEntity is a named entity linked to a specific engram.
