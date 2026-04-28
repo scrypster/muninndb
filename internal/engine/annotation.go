@@ -33,13 +33,13 @@ func (e *Engine) GetAnnotations(ctx context.Context, vault, id string) (*Annotat
 	ws := e.store.ResolveVaultPrefix(vault)
 	rawID, err := storage.ParseULID(id)
 	if err != nil {
-		return nil, fmt.Errorf("GetAnnotations: parse id: %w", err)
+		return nil, fmt.Errorf("parse id: %w", err)
 	}
 
 	// Forward associations: engrams THIS one contradicts (RelContradicts).
 	forward, err := e.store.GetAssociations(ctx, ws, []storage.ULID{rawID}, 100)
 	if err != nil {
-		return nil, fmt.Errorf("GetAnnotations: get associations: %w", err)
+		return nil, fmt.Errorf("get associations: %w", err)
 	}
 	var conflictsWith []string
 	for _, a := range forward[rawID] {
@@ -51,7 +51,7 @@ func (e *Engine) GetAnnotations(ctx context.Context, vault, id string) (*Annotat
 	// Reverse associations: engrams that supersede THIS one (RelSupersedes pointing TO this engram).
 	reverse, err := e.store.GetReverseAssociations(ctx, ws, rawID, 10)
 	if err != nil {
-		return nil, fmt.Errorf("GetAnnotations: get reverse associations: %w", err)
+		return nil, fmt.Errorf("get reverse associations: %w", err)
 	}
 	var supersededBy string
 	for _, a := range reverse {
