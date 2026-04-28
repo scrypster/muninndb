@@ -79,7 +79,9 @@ type Memory struct {
 	// Populated only by muninn_read (omitted from recall responses).
 	Entities            []ReadEntity    `json:"entities,omitempty"`
 	EntityRelationships []ReadEntityRel `json:"entity_relationships,omitempty"`
-	Annotations         *MemoryAnnotations `json:"annotations,omitempty"`
+
+	// Populated only by muninn_recall when annotate=true.
+	Annotations *MemoryAnnotations `json:"annotations,omitempty"`
 }
 
 // MemoryAnnotations contains contextual metadata about a recalled memory,
