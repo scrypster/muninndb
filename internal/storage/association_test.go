@@ -743,3 +743,47 @@ func TestDecayAssocWeights_ArchivesStrongEdge(t *testing.T) {
 		t.Fatalf("archive value should be 30 bytes, got %d", len(val))
 	}
 }
+
+func TestGetReverseAssociations(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("reverse-assoc-test")
+
+	idA := NewULID()
+	idB := NewULID()
+
+	assoc := &Association{
+		TargetID:   idB,
+		Weight:     0.9,
+		RelType:    RelSupersedes,
+		Confidence: 1.0,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.WriteAssociation(ctx, ws, idA, idB, assoc); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+
+	// GetReverseAssociations on B — should return A with RelSupersedes.
+	results, err := store.GetReverseAssociations(ctx, ws, idB, 10)
+	if err != nil {
+		t.Fatalf("GetReverseAssociations: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 reverse association, got %d", len(results))
+	}
+	if results[0].TargetID != idA {
+		t.Errorf("TargetID = %v, want idA", results[0].TargetID)
+	}
+	if results[0].RelType != RelSupersedes {
+		t.Errorf("RelType = %v, want RelSupersedes", results[0].RelType)
+	}
+
+	// GetReverseAssociations on A — should return nothing (A is the source).
+	resultsA, err := store.GetReverseAssociations(ctx, ws, idA, 10)
+	if err != nil {
+		t.Fatalf("GetReverseAssociations on A: %v", err)
+	}
+	if len(resultsA) != 0 {
+		t.Errorf("expected 0 reverse associations on A (it's the source), got %d", len(resultsA))
+	}
+}

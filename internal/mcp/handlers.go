@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +17,10 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 	"golang.org/x/text/unicode/norm"
 )
+
+// annotationStaleDays is the threshold for marking a recalled memory as stale.
+// Memories not accessed in more than this many days are flagged stale=true.
+const annotationStaleDays = 30.0
 
 // parseEmbedding extracts and validates an optional "embedding" field from args.
 // Returns (nil, "") when the field is absent. Returns (nil, errMsg) on validation
@@ -368,6 +373,8 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		req.Embedding = emb
 	}
 
+	annotate, _ := args["annotate"].(bool)
+
 	resp, err := s.engine.Activate(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
@@ -378,6 +385,19 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	for i := range resp.Activations {
 		memories = append(memories, activationToMemory(&resp.Activations[i]))
 	}
+
+	if annotate {
+		for i, item := range resp.Activations {
+			ann, err := s.engine.GetAnnotations(ctx, vault, item.ID)
+			if err != nil || ann == nil {
+				// Non-fatal: log and skip annotations for this result.
+				slog.Warn("handleRecall: GetAnnotations failed", "id", item.ID, "err", err)
+				continue
+			}
+			memories[i].Annotations = buildAnnotations(&item, ann)
+		}
+	}
+
 	result := map[string]any{
 		"memories": memories,
 		"total":    resp.TotalFound,
@@ -1718,6 +1738,23 @@ func (s *MCPServer) handleEntityTimeline(ctx context.Context, w http.ResponseWri
 		return
 	}
 	sendResult(w, id, textContent(mustJSON(timeline)))
+}
+
+// buildAnnotations constructs a MemoryAnnotations from engine annotation data
+// and the activation item. Staleness is derived from item.LastAccess (nanoseconds
+// Unix timestamp).
+func buildAnnotations(item *mbp.ActivationItem, data *engine.AnnotationData) *MemoryAnnotations {
+	staleDays := math.Round(time.Since(time.Unix(0, item.LastAccess)).Hours()/24.0*10) / 10
+	ann := &MemoryAnnotations{
+		Stale:         staleDays > annotationStaleDays,
+		StaleDays:     staleDays,
+		ConflictsWith: data.ConflictsWith,
+		SupersededBy:  data.SupersededBy,
+	}
+	if data.LastVerified != nil {
+		ann.LastVerified = data.LastVerified.UTC().Format(time.RFC3339)
+	}
+	return ann
 }
 
 func (s *MCPServer) handleSetTrust(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
