@@ -14,10 +14,19 @@ import (
 // Package-level session state set by runVault before dispatching subcommands.
 // Tests don't touch these, so doVaultRequestForce and friends work unchanged.
 var (
-	vaultAdminBase = "http://127.0.0.1:8475" // REST API
-	vaultUIBase    = "http://127.0.0.1:8476" // login endpoint lives here
-	vaultCookie    string                   // muninn_session value
+	vaultAdminBase = envOrDefault("MUNINN_ADMIN_URL", "http://127.0.0.1:8475") // REST API
+	vaultUIBase    = envOrDefault("MUNINN_UI_URL", "http://127.0.0.1:8476")    // login endpoint lives here
+	vaultCookie    string                                                      // muninn_session value
 )
+
+// envOrDefault returns the value of envVar (with any trailing slash trimmed)
+// when set and non-empty, otherwise the supplied fallback.
+func envOrDefault(envVar, fallback string) string {
+	if v := strings.TrimRight(os.Getenv(envVar), "/"); v != "" {
+		return v
+	}
+	return fallback
+}
 
 // parseAdminFlags extracts MySQL-style auth flags (-u, -p, -h) from args and
 // returns the remaining (non-auth) args. Sets package-level vaultAdminBase,
@@ -66,23 +75,33 @@ func parseAdminFlags(args []string) (remaining []string, username, password stri
 	return
 }
 
-// setHostPorts updates vaultAdminBase and vaultUIBase from a host or host:port.
+// setHostPorts updates vaultAdminBase and vaultUIBase from an argument that
+// may be a bare host, host:port, or a full URL with explicit scheme. Without
+// a scheme the legacy default (http://) is preserved for backwards
+// compatibility; with a "https://" or "http://" prefix that scheme is honored
+// for both the admin and UI base URLs.
 // If only a host is given (no port), the defaults (:8475/:8476) are used.
 // If host:port is given, the UI port is assumed to be port+1.
-func setHostPorts(hostPort string) {
-	if !strings.Contains(hostPort, ":") {
-		vaultAdminBase = "http://" + hostPort + ":8475"
-		vaultUIBase = "http://" + hostPort + ":8476"
+func setHostPorts(arg string) {
+	scheme, rest := "http://", arg
+	if strings.HasPrefix(arg, "https://") {
+		scheme, rest = "https://", strings.TrimPrefix(arg, "https://")
+	} else if strings.HasPrefix(arg, "http://") {
+		rest = strings.TrimPrefix(arg, "http://")
+	}
+	if !strings.Contains(rest, ":") {
+		vaultAdminBase = scheme + rest + ":8475"
+		vaultUIBase = scheme + rest + ":8476"
 		return
 	}
-	parts := strings.SplitN(hostPort, ":", 2)
-	vaultAdminBase = "http://" + hostPort
+	parts := strings.SplitN(rest, ":", 2)
+	vaultAdminBase = scheme + rest
 	// Derive UI port: attempt port+1, fallback to same host with :8476.
 	var port int
 	if _, err := fmt.Sscanf(parts[1], "%d", &port); err == nil {
-		vaultUIBase = fmt.Sprintf("http://%s:%d", parts[0], port+1)
+		vaultUIBase = fmt.Sprintf("%s%s:%d", scheme, parts[0], port+1)
 	} else {
-		vaultUIBase = "http://" + parts[0] + ":8476"
+		vaultUIBase = scheme + parts[0] + ":8476"
 	}
 }
 
