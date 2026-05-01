@@ -498,3 +498,18 @@ func TestPlasticityConfig_ArchiveThreshold_Override(t *testing.T) {
 		t.Errorf("overridden ArchiveThreshold: got %v, want 0.10", r.ArchiveThreshold)
 	}
 }
+
+func TestResolvePlasticity_ExcludeUntrusted(t *testing.T) {
+	// Default: ExcludeUntrusted is false
+	r := ResolvePlasticity(nil)
+	if r.ExcludeUntrusted {
+		t.Error("default ExcludeUntrusted should be false")
+	}
+
+	// Explicit true
+	tr := true
+	r2 := ResolvePlasticity(&PlasticityConfig{ExcludeUntrusted: &tr})
+	if !r2.ExcludeUntrusted {
+		t.Error("ExcludeUntrusted should be true when config sets it")
+	}
+}

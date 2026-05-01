@@ -175,9 +175,11 @@ func (h *AdminHandler) handleAdd(w http.ResponseWriter, ctx context.Context, req
 		flagBit = DigestEnrich
 	}
 
-	skipFlags := uint8(0)
+	var skipFlags uint8
 	if flagBit == DigestEmbed {
 		skipFlags = DigestEmbedFailed
+	} else {
+		skipFlags = DigestEnrichFailed
 	}
 	total, err := h.store.CountWithoutFlag(ctx, flagBit, skipFlags)
 	if err != nil {

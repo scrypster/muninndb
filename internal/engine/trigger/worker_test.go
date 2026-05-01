@@ -39,6 +39,26 @@ func (m *mockTriggerStore) GetMetadata(_ context.Context, _ [8]byte, ids []stora
 	return out, nil
 }
 
+// mockTriggerStoreWithNils mirrors the real storage.GetMetadata contract: it
+// returns a nil entry for every requested ID that is not in the metas map.
+// Used to reproduce the sweepVault nil-dereference (issue #393).
+type mockTriggerStoreWithNils struct {
+	mockTriggerStore
+}
+
+func (m *mockTriggerStoreWithNils) GetMetadata(_ context.Context, _ [8]byte, ids []storage.ULID) ([]*storage.EngramMeta, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*storage.EngramMeta, len(ids))
+	for i, id := range ids {
+		if meta, ok := m.metas[id]; ok {
+			out[i] = meta
+		}
+		// else out[i] stays nil — same contract as real storage
+	}
+	return out, nil
+}
+
 func (m *mockTriggerStore) GetEngrams(_ context.Context, _ [8]byte, ids []storage.ULID) ([]*storage.Engram, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -58,7 +78,6 @@ func (m *mockTriggerStore) GetEmbedding(_ context.Context, _ [8]byte, _ storage.
 func (m *mockTriggerStore) VaultPrefix(_ string) [8]byte {
 	return [8]byte{}
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -322,4 +341,60 @@ func TestTriggerWorker_ChannelClose(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("TriggerWorker.Run did not exit after channel close")
 	}
+}
+
+// TestSweepVault_NilMetadataEntry is a regression test for issue #393.
+//
+// The real storage.GetMetadata contract returns nil for engrams that have been
+// deleted or whose keys are missing — callers must nil-check each entry.
+// HNSW can reference stale IDs (indexed before deletion), so sweepVault was
+// crashing with a nil pointer dereference when it tried to access m.ID without
+// checking for nil. This test uses mockTriggerStoreWithNils (same nil contract)
+// to reproduce the crash condition and verify the fix.
+func TestSweepVault_NilMetadataEntry(t *testing.T) {
+	registry := newRegistry()
+	deliver := &DeliveryRouter{registry: registry}
+
+	// staleID is in the HNSW index but has been deleted from storage — GetMetadata
+	// will return nil for it (real contract; reproduced by mockTriggerStoreWithNils).
+	staleID := storage.NewULID()
+	store := &mockTriggerStoreWithNils{
+		mockTriggerStore: mockTriggerStore{
+			metas:   make(map[storage.ULID]*storage.EngramMeta),
+			engrams: make(map[storage.ULID]*storage.Engram),
+		},
+	}
+	// Intentionally do NOT add staleID to store.metas — it simulates a deleted engram.
+
+	hnsw := &mockHNSW{results: []ScoredID{{ID: staleID, Score: 0.9}}}
+
+	sub := &Subscription{
+		ID:             "sweep-nil-sub",
+		VaultID:        5,
+		Context:        []string{"nil metadata test"},
+		Threshold:      0.0,
+		DeltaThreshold: 0.0,
+		embedding:      []float32{0.5, 0.5, 0.5, 0.5},
+		expiresAt:      time.Now().Add(1 * time.Hour),
+		Deliver: func(_ context.Context, _ *ActivationPush) error {
+			return nil
+		},
+		pushedScores: make(map[storage.ULID]float64),
+		rateLimiter:  newTokenBucket(10),
+	}
+	registry.Add(sub)
+
+	worker := &TriggerWorker{
+		registry:     registry,
+		embedCache:   newEmbedCache(),
+		store:        store,
+		hnsw:         hnsw,
+		deliver:      deliver,
+		writeEvents:  make(chan *EngramEvent, 1),
+		cogEvents:    make(chan CognitiveEvent, 1),
+		contraEvents: make(chan ContradictEvent, 1),
+	}
+
+	// Must not panic.
+	worker.handleSweep(context.Background())
 }

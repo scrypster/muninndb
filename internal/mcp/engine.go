@@ -137,7 +137,9 @@ type EngineInterface interface {
 
 	// GetEnrichmentCandidates returns active engrams missing one or more requested
 	// enrichment stages without invoking any enrichment plugin.
-	GetEnrichmentCandidates(ctx context.Context, vault string, stages []string, limit int) (*EnrichmentCandidatesResult, error)
+	// afterCursor is an opaque string cursor from a previous call's next_cursor field.
+	// Pass "" to start from the beginning. Returns next_cursor="" when exhausted.
+	GetEnrichmentCandidates(ctx context.Context, vault string, stages []string, afterCursor string, limit int) (*EnrichmentCandidatesResult, error)
 
 	// ApplyEnrichment persists explicit externally generated enrichment output.
 	ApplyEnrichment(ctx context.Context, vault string, req *ApplyEnrichmentRequest) (*ApplyEnrichmentResult, error)
@@ -188,4 +190,8 @@ type EngineInterface interface {
 	// GetEpisodeMembers returns full engrams for a specific episode, identified
 	// by the first engram ID in the episode.
 	GetEpisodeMembers(ctx context.Context, vault, episodeID string) ([]EpisodeMember, error)
+
+	// SetTrust sets the trust label of an engram.
+	// trust must be one of "verified", "inferred", "external", "untrusted".
+	SetTrust(ctx context.Context, vault, id, trust string) error
 }

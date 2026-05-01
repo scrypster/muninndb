@@ -254,6 +254,9 @@ func TestDreamOnce_FullPipeline_WithMockLLM(t *testing.T) {
 
 	mock := &mockEngineInterface{store: store}
 	w := NewWorker(mock)
+	// This all-phases smoke test uses a deliberately tiny vault to exercise the
+	// LLM review path; lower the Phase 2 size guard for this test only.
+	w.MinDedupVaultSize = 1
 	w.Providers = []LLMProvider{&mockLLMProvider{
 		name:     "mock",
 		response: `{"merges":[],"contradictions":[],"cross_vault_suggestions":[],"stability_recommendations":[],"journal":"Reviewed 4 engrams. Docker networking notes are similar but not identical."}`,
