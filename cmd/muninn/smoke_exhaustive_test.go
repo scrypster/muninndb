@@ -44,6 +44,8 @@ var allMCPTools = []string{
 	"muninn_remember_tree",
 	"muninn_recall_tree",
 	"muninn_entity_clusters",
+	"muninn_loci",
+	"muninn_locus_members",
 	"muninn_export_graph",
 	"muninn_add_child",
 	"muninn_similar_entities",
@@ -51,6 +53,8 @@ var allMCPTools = []string{
 	"muninn_replay_enrichment",
 	"muninn_provenance",
 	"muninn_entity_timeline",
+	"muninn_episodes",
+	"muninn_episode_members",
 	"muninn_feedback",
 	"muninn_trust",
 	"muninn_entity",
@@ -728,6 +732,48 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		}
 	})
 
+	t.Run("muninn_loci", func(t *testing.T) {
+		result := mcpTool(t, tok, "muninn_loci", map[string]any{
+			"vault":           vault,
+			"min_edge_weight": 1,
+			"max_results":     10,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_loci returned error field: %v", errVal)
+		}
+		if _, ok := result["loci"].([]any); !ok {
+			t.Errorf("expected loci array in result, got: %v", result)
+		}
+	})
+
+	t.Run("muninn_locus_members", func(t *testing.T) {
+		lociResult := mcpTool(t, tok, "muninn_loci", map[string]any{
+			"vault":           vault,
+			"min_edge_weight": 1,
+			"max_results":     10,
+		})
+		loci, _ := lociResult["loci"].([]any)
+		if len(loci) == 0 {
+			t.Skip("no loci detected from smoke seed data")
+		}
+		first, _ := loci[0].(map[string]any)
+		label, _ := first["label"].(string)
+		if label == "" {
+			t.Fatalf("first locus missing label: %v", first)
+		}
+		result := mcpTool(t, tok, "muninn_locus_members", map[string]any{
+			"vault":           vault,
+			"locus_label":     label,
+			"min_edge_weight": 1,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_locus_members returned error field: %v", errVal)
+		}
+		if _, ok := result["members"].([]any); !ok {
+			t.Errorf("expected members array in result, got: %v", result)
+		}
+	})
+
 	t.Run("muninn_export_graph", func(t *testing.T) {
 		result := mcpTool(t, tok, "muninn_export_graph", map[string]any{
 			"vault": vault,
@@ -826,6 +872,32 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_entity_timeline returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_episodes", func(t *testing.T) {
+		result := mcpTool(t, tok, "muninn_episodes", map[string]any{
+			"vault": vault,
+			"limit": 10,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_episodes returned error field: %v", errVal)
+		}
+		if _, ok := result["episodes"].([]any); !ok {
+			t.Errorf("expected episodes array in result, got: %v", result)
+		}
+	})
+
+	t.Run("muninn_episode_members", func(t *testing.T) {
+		result := mcpTool(t, tok, "muninn_episode_members", map[string]any{
+			"vault":      vault,
+			"episode_id": idA,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_episode_members returned error field: %v", errVal)
+		}
+		if _, ok := result["members"].([]any); !ok {
+			t.Errorf("expected members array in result, got: %v", result)
 		}
 	})
 
