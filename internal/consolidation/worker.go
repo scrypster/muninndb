@@ -20,6 +20,13 @@ type EngineInterface interface {
 	UpdateLifecycleState(ctx context.Context, vault, id, state string) error
 }
 
+// LLMProvider is the interface for LLM completions used in dream consolidation.
+// Compatible with enrich.LLMProvider — any existing provider can be reused.
+type LLMProvider interface {
+	Name() string
+	Complete(ctx context.Context, system, user string) (string, error)
+}
+
 // Worker is the main consolidation worker that periodically runs a 5-phase
 // consolidation pipeline to reduce redundancy and strengthen associations.
 type Worker struct {
@@ -30,6 +37,10 @@ type Worker struct {
 	DryRun            bool          // if true, no mutations occur
 	DedupThreshold    float32       // cosine similarity threshold for dedup (0 = use default 0.95)
 	MinDedupVaultSize int           // minimum active engrams required to run Phase 2 dedup (default 20)
+	// Providers holds LLM providers for dream Phase 2b consolidation, ordered by
+	// preference (e.g. local first, then cloud). resolveProvider picks the first
+	// eligible provider for each vault's trust tier.
+	Providers []LLMProvider
 }
 
 // NewWorker creates a new consolidation worker with sensible defaults.

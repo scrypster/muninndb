@@ -32,6 +32,9 @@ func (s *Store) GetVaultConfig(vault string) (VaultConfig, error) {
 		// Fail-closed: any vault that has never been explicitly configured
 		// requires an API key. Operators should call SetVaultConfig to
 		// establish an explicit policy for each vault.
+		if s.DefaultPublic {
+			return VaultConfig{Name: vault, Public: true}, nil
+		}
 		if _, already := warnedUnconfiguredVaults.LoadOrStore(vault, struct{}{}); !already {
 			slog.Warn("vault has no explicit config — defaulting to locked access (fail-closed); call SetVaultConfig to set an explicit policy",
 				"vault", vault,

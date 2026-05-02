@@ -328,7 +328,11 @@ func TestGetEnrichmentCandidates_CursorPaginates(t *testing.T) {
 		}
 	}
 
-	// Page 1: limit=1 should return engram at index 4 (first unenriched).
+	// Page 1: limit=1 should return the first unenriched engram in state-index order.
+	expected := []storage.ULID{ids[4], ids[5]}
+	if expected[1].String() < expected[0].String() {
+		expected[0], expected[1] = expected[1], expected[0]
+	}
 	candidates1, _, cursor1, err := eng.GetEnrichmentCandidates(ctx, vault, nil, storage.ULID{}, 1)
 	if err != nil {
 		t.Fatalf("page1: %v", err)
@@ -336,14 +340,14 @@ func TestGetEnrichmentCandidates_CursorPaginates(t *testing.T) {
 	if len(candidates1) != 1 {
 		t.Fatalf("page1 count: got %d, want 1", len(candidates1))
 	}
-	if candidates1[0].ID != ids[4] {
-		t.Errorf("page1 candidate: got %s, want %s", candidates1[0].ID, ids[4])
+	if candidates1[0].ID != expected[0] {
+		t.Errorf("page1 candidate: got %s, want %s", candidates1[0].ID, expected[0])
 	}
 	if cursor1 == (storage.ULID{}) {
 		t.Error("page1: expected non-zero cursor")
 	}
 
-	// Page 2: continue from cursor1, should return engram at index 5.
+	// Page 2: continue from cursor1, should return the second unenriched engram.
 	candidates2, _, cursor2, err := eng.GetEnrichmentCandidates(ctx, vault, nil, cursor1, 1)
 	if err != nil {
 		t.Fatalf("page2: %v", err)
@@ -351,8 +355,8 @@ func TestGetEnrichmentCandidates_CursorPaginates(t *testing.T) {
 	if len(candidates2) != 1 {
 		t.Fatalf("page2 count: got %d, want 1", len(candidates2))
 	}
-	if candidates2[0].ID != ids[5] {
-		t.Errorf("page2 candidate: got %s, want %s", candidates2[0].ID, ids[5])
+	if candidates2[0].ID != expected[1] {
+		t.Errorf("page2 candidate: got %s, want %s", candidates2[0].ID, expected[1])
 	}
 
 	// Page 3: exhausted — cursor2 should be zero.

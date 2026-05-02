@@ -5,8 +5,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 // checkVersionHint prints a one-liner if a newer version is available.
@@ -205,6 +208,41 @@ func printStatusDisplay(compact bool) runState {
 
 	fmt.Println()
 	return state
+}
+
+// printDreamStatus reads dream state from Pebble and prints a summary.
+// Only called when the server is stopped (no live API available).
+func printDreamStatus(dataDir string) {
+	dbPath := filepath.Join(dataDir, "pebble")
+
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return
+	}
+
+	db, err := storage.OpenPebble(dbPath, storage.DefaultOptions())
+	if err != nil {
+		return // can't open — server may be running
+	}
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 10})
+	defer store.Close()
+
+	vaults, err := store.ListVaultNames()
+	if err != nil || len(vaults) == 0 {
+		return
+	}
+
+	fmt.Println("  Dream:")
+	for _, vault := range vaults {
+		wsPrefix := store.ResolveVaultPrefix(vault)
+		lastDream, engramsAtDream, found, err := store.ReadDreamState(wsPrefix)
+		if err != nil || !found {
+			continue
+		}
+		ago := time.Since(lastDream).Round(time.Minute)
+		fmt.Printf("    %-14s  last: %s (%s ago), engrams at dream: %d\n",
+			vault, lastDream.UTC().Format(time.RFC3339), ago, engramsAtDream)
+	}
+	fmt.Println()
 }
 
 // isatty returns true if stdout is an interactive terminal.

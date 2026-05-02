@@ -189,6 +189,7 @@ const (
 	RelBlocks           RelType = 0x000E
 	RelResolves         RelType = 0x000F
 	RelRefines          RelType = 0x0010 // near-duplicate refinement (write-time novelty)
+	RelSameEpisode      RelType = 0x0011 // hippocampal episode segmentation
 	RelUserDefined      RelType = 0x8000
 )
 

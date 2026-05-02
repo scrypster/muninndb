@@ -356,6 +356,36 @@ type EntityClusterResult struct {
 	Count   int    `json:"count"`
 }
 
+// LociResult is one emergent community returned by muninn_loci.
+type LociResult struct {
+	ID       int      `json:"id"`
+	Label    string   `json:"label"`
+	Members  []string `json:"members"`
+	Size     int      `json:"size"`
+	Cohesion float64  `json:"cohesion"`
+}
+
+// LocusMembersResult contains all entities and sample engrams for a specific locus.
+type LocusMembersResult struct {
+	Label   string              `json:"label"`
+	Members []LocusMemberDetail `json:"members"`
+	Size    int                 `json:"size"`
+}
+
+// LocusMemberDetail is an entity within a locus plus its sample engrams.
+type LocusMemberDetail struct {
+	Entity  string              `json:"entity"`
+	Engrams []LocusEngramEntry  `json:"engrams"`
+}
+
+// LocusEngramEntry is a minimal engram representation for locus member listing.
+type LocusEngramEntry struct {
+	ID      string `json:"id"`
+	Concept string `json:"concept"`
+	Summary string `json:"summary,omitempty"`
+	State   string `json:"state"`
+}
+
 // --- Cognitive push notification param types ---
 // These are pre-serialized to json.RawMessage at emission sites.
 
@@ -440,4 +470,22 @@ type EntitySummary struct {
 	State        string  `json:"state"`
 	MentionCount int32   `json:"mention_count"`
 	FirstSeen    string  `json:"first_seen,omitempty"` // RFC3339
+}
+
+// EpisodeResult is one episode returned by muninn_episodes.
+type EpisodeResult struct {
+	ID        string `json:"id"`         // ID of the first engram in the episode
+	StartTime string `json:"start_time"` // RFC3339
+	EndTime   string `json:"end_time"`   // RFC3339
+	Size      int    `json:"size"`       // number of engrams
+	Members   []string `json:"members"`  // engram IDs (ULIDs as strings)
+}
+
+// EpisodeMember is one engram within an episode, returned by muninn_episode_members.
+type EpisodeMember struct {
+	ID        string `json:"id"`
+	Concept   string `json:"concept"`
+	Summary   string `json:"summary,omitempty"`
+	State     string `json:"state"`
+	CreatedAt string `json:"created_at"` // RFC3339
 }

@@ -739,6 +739,40 @@ func (ps *PebbleStore) GetChildrenByParent(ctx context.Context, wsPrefix [8]byte
 	return children, nil
 }
 
+// GetReverseAssociationsByType returns the source IDs of all engrams that have
+// an association of the given RelType targeting the specified engram. Scans the
+// 0x04 reverse index and filters by RelType in the value bytes.
+func (ps *PebbleStore) GetReverseAssociationsByType(ctx context.Context, wsPrefix [8]byte, targetID ULID, relType RelType) ([]ULID, error) {
+	prefix := keys.AssocRevPrefixForID(wsPrefix, [16]byte(targetID))
+	iter, err := PrefixIterator(ps.db, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("GetReverseAssociationsByType prefix iter: %w", err)
+	}
+	defer iter.Close()
+
+	// Reverse key: 0x04 | ws(8) | dstID(16) | weightComplement(4) | srcID(16) = 45 bytes
+	// srcID is at offset 29.
+	var sources []ULID
+	for iter.First(); iter.Valid(); iter.Next() {
+		k := iter.Key()
+		if len(k) < 45 {
+			continue
+		}
+		val := iter.Value()
+		rt, _, _, _, _, _, _ := decodeAssocValue(val)
+		if rt != relType {
+			continue
+		}
+		var srcID ULID
+		copy(srcID[:], k[29:45])
+		sources = append(sources, srcID)
+	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("GetReverseAssociationsByType scan: %w", err)
+	}
+	return sources, nil
+}
+
 // FlagContradiction writes the 0x0A contradiction key for pair (a,b).
 func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error {
 	batch := ps.db.NewBatch()
@@ -842,4 +876,40 @@ func (ps *PebbleStore) GetContradictions(ctx context.Context, wsPrefix [8]byte) 
 		}
 	}
 	return pairs, nil
+}
+
+// ScanAssociationsByType scans all forward associations (0x03 prefix) in a vault
+// and calls fn for each edge whose RelType matches relType. This is an O(all-assocs)
+// scan — use sparingly. The fn callback receives (sourceID, targetID).
+func (ps *PebbleStore) ScanAssociationsByType(ctx context.Context, wsPrefix [8]byte, relType RelType, fn func(src, dst ULID) error) error {
+	lower := keys.AssocFwdRangeStart(wsPrefix)
+	upper := keys.AssocFwdRangeEnd(wsPrefix)
+	iter, err := ps.db.NewIter(&pebble.IterOptions{
+		LowerBound: lower,
+		UpperBound: upper,
+	})
+	if err != nil {
+		return fmt.Errorf("scan assoc by type: create iter: %w", err)
+	}
+	defer iter.Close()
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		k := iter.Key()
+		// Key layout: 0x03 | ws(8) | srcID(16) | weightComplement(4) | dstID(16) = 45 bytes
+		if len(k) < 45 {
+			continue
+		}
+		val := iter.Value()
+		rt, _, _, _, _, _, _ := decodeAssocValue(val)
+		if rt != relType {
+			continue
+		}
+		var src, dst ULID
+		copy(src[:], k[9:25])
+		copy(dst[:], k[29:45])
+		if err := fn(src, dst); err != nil {
+			return err
+		}
+	}
+	return nil
 }

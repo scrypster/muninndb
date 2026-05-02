@@ -22,6 +22,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/config"
+	"github.com/scrypster/muninndb/internal/consolidation"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
 	"github.com/scrypster/muninndb/internal/metrics"
@@ -87,6 +88,9 @@ type Server struct {
 	// Enrichment info — set at construction time, static for the lifetime of the server.
 	enrichProvider string // "ollama", "openai", "anthropic", "google", or ""
 	enrichModel    string // model name, or ""
+
+	// Dream LLM providers — optional, ordered by preference, set via SetDreamProviders.
+	dreamProviders []consolidation.LLMProvider
 
 	// MCP info — set at construction time for the /api/admin/mcp-info endpoint.
 	mcpAddr     string // MCP listen address, e.g. ":8750"
@@ -222,6 +226,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleRetryEnrich))))
 	mux.HandleFunc("GET /api/contradictions", s.withMiddleware(auth.WriteOnlyGuard(s.handleContradictions)))
 	mux.HandleFunc("GET /api/guide", s.withMiddleware(auth.WriteOnlyGuard(s.handleGuide)))
+	mux.HandleFunc("POST /api/dream", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleDream()))))
 
 	// Admin routes — require valid admin session cookie, return JSON 401 on failure.
 	mux.HandleFunc("POST /api/admin/keys", s.withAdminMiddleware(s.handleCreateAPIKey(authStore)))
@@ -321,6 +326,12 @@ func (s *Server) SetDataDir(dir string) { s.dataDir = dir }
 
 // SetVersion sets the version string reported by the health endpoint.
 func (s *Server) SetVersion(v string) { s.version = v }
+
+// SetDreamProviders configures optional LLM providers for the /api/dream endpoint.
+// Providers are tried in order; the first eligible one for the vault's trust tier wins.
+func (s *Server) SetDreamProviders(providers []consolidation.LLMProvider) {
+	s.dreamProviders = providers
+}
 
 // probeDBWritability runs a periodic background check of data directory writability.
 // It writes and deletes a small sentinel file every 30 seconds rather than on every
