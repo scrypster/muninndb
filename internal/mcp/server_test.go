@@ -81,7 +81,7 @@ func (f *fakeEngine) ListDeleted(ctx context.Context, vault string, limit int) (
 func (f *fakeEngine) RetryEnrich(ctx context.Context, vault string, id string) (*RetryEnrichResult, error) {
 	return &RetryEnrichResult{EngramID: id, PluginsQueued: []string{}, AlreadyComplete: []string{}}, nil
 }
-func (f *fakeEngine) GetEnrichmentCandidates(_ context.Context, _ string, stages []string, _ int) (*EnrichmentCandidatesResult, error) {
+func (f *fakeEngine) GetEnrichmentCandidates(_ context.Context, _ string, stages []string, _ string, _ int) (*EnrichmentCandidatesResult, error) {
 	if len(stages) == 0 {
 		stages = []string{"entities", "relationships", "classification", "summary"}
 	}
@@ -198,6 +198,11 @@ func (f *fakeEngine) ListEpisodes(_ context.Context, _ string, _ int) ([]Episode
 func (f *fakeEngine) GetEpisodeMembers(_ context.Context, _, _ string) ([]EpisodeMember, error) {
 	return []EpisodeMember{}, nil
 }
+func (f *fakeEngine) SetTrust(_ context.Context, _, _, _ string) error { return nil }
+
+func (f *fakeEngine) GetAnnotations(_ context.Context, _, _ string) (*engine.AnnotationData, error) {
+	return nil, nil
+}
 
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil, nil)
@@ -296,8 +301,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 42 {
-		t.Errorf("expected 42 tools, got %d", len(tools))
+	if len(tools) != 43 {
+		t.Errorf("expected 43 tools, got %d", len(tools))
 	}
 }
 

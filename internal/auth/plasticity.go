@@ -64,6 +64,10 @@ type PlasticityConfig struct {
 	// All zero/nil = disabled (backward compatible).
 	LTPThreshold   *int     `json:"ltp_threshold,omitempty"`    // co-activation count to trigger LTP (0 = disabled)
 	LTPWeightFloor *float32 `json:"ltp_weight_floor,omitempty"` // minimum weight for potentiated edges (0–1; 0 = disabled)
+
+	// ExcludeUntrusted controls whether untrusted engrams are filtered from ACTIVATE results.
+	// nil = false (default: include all engrams regardless of trust).
+	ExcludeUntrusted *bool `json:"exclude_untrusted,omitempty"`
 }
 
 // ResolvedPlasticity is the fully-merged configuration after applying preset defaults
@@ -113,6 +117,8 @@ type ResolvedPlasticity struct {
 	// LTP (Long-Term Potentiation) resolved values. Zero = disabled.
 	LTPThreshold   int     `json:"ltp_threshold"`
 	LTPWeightFloor float32 `json:"ltp_weight_floor"`
+	// ExcludeUntrusted: when true, ACTIVATE silently skips engrams with TrustUntrusted.
+	ExcludeUntrusted bool `json:"exclude_untrusted"`
 }
 
 type plasticityPreset struct {
@@ -460,6 +466,9 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		} else {
 			r.ScoringFusion = "" // invalid → default (ACT-R)
 		}
+	}
+	if cfg.ExcludeUntrusted != nil {
+		r.ExcludeUntrusted = *cfg.ExcludeUntrusted
 	}
 	// LTP overrides
 	if cfg.LTPThreshold != nil {

@@ -85,6 +85,12 @@ type EngineStore interface {
 	// weight-sorted descending, up to maxPerNode per source.
 	GetAssociations(ctx context.Context, wsPrefix [8]byte, ids []ULID, maxPerNode int) (map[ULID][]Association, error)
 
+	// GetReverseAssociations returns all associations that TARGET the given id,
+	// by scanning the 0x04 reverse index. The returned Association.TargetID
+	// is the SOURCE engram (the engram that points TO id). Results are capped
+	// at maxPerNode entries.
+	GetReverseAssociations(ctx context.Context, wsPrefix [8]byte, id ULID, maxPerNode int) ([]Association, error)
+
 	// RecentActive returns up to topK engram IDs with the highest relevance
 	// in the vault. Uses the 0x10 relevance bucket index for O(k) scanning.
 	RecentActive(ctx context.Context, wsPrefix [8]byte, topK int) ([]ULID, error)
@@ -131,6 +137,11 @@ type EngineStore interface {
 	// ListByState returns up to limit engram IDs whose lifecycle state matches,
 	// using the 0x0B state secondary index.
 	ListByState(ctx context.Context, wsPrefix [8]byte, state LifecycleState, limit int) ([]ULID, error)
+
+	// ListByStateFrom is the cursor-based variant of ListByState.
+	// afterID is the exclusive starting cursor — pass a zero ULID to start from the beginning.
+	// Returns at most limit IDs strictly after afterID in index order.
+	ListByStateFrom(ctx context.Context, wsPrefix [8]byte, state LifecycleState, afterID ULID, limit int) ([]ULID, error)
 
 	// VaultPrefix computes the 8-byte SipHash prefix for a vault name.
 	VaultPrefix(vault string) [8]byte

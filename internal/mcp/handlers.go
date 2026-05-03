@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +17,10 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 	"golang.org/x/text/unicode/norm"
 )
+
+// annotationStaleDays is the threshold for marking a recalled memory as stale.
+// Memories not accessed in more than this many days are flagged stale=true.
+const annotationStaleDays = 30.0
 
 // parseEmbedding extracts and validates an optional "embedding" field from args.
 // Returns (nil, "") when the field is absent. Returns (nil, errMsg) on validation
@@ -373,6 +378,8 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		req.Embedding = emb
 	}
 
+	annotate, _ := args["annotate"].(bool)
+
 	resp, err := s.engine.Activate(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
@@ -432,6 +439,19 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	for i := range resp.Activations {
 		memories = append(memories, activationToMemory(&resp.Activations[i]))
 	}
+
+	if annotate {
+		for i, item := range resp.Activations {
+			ann, err := s.engine.GetAnnotations(ctx, vault, item.ID)
+			if err != nil || ann == nil {
+				// Non-fatal: log and skip annotations for this result.
+				slog.Warn("handleRecall: GetAnnotations failed", "id", item.ID, "err", err)
+				continue
+			}
+			memories[i].Annotations = buildAnnotations(&item, ann)
+		}
+	}
+
 	result := map[string]any{
 		"memories": memories,
 		"total":    resp.TotalFound,
@@ -1600,7 +1620,14 @@ func (s *MCPServer) handleGetEnrichmentCandidates(ctx context.Context, w http.Re
 	if limit > 200 {
 		limit = 200
 	}
-	result, err := s.engine.GetEnrichmentCandidates(ctx, vault, stages, limit)
+	cursor, _ := args["cursor"].(string) // optional; "" means start from beginning
+	if cursor != "" {
+		if _, err := storage.ParseULID(cursor); err != nil {
+			sendError(w, id, -32602, "invalid params: cursor is not a valid ULID")
+			return
+		}
+	}
+	result, err := s.engine.GetEnrichmentCandidates(ctx, vault, stages, cursor, limit)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -1886,5 +1913,48 @@ func (s *MCPServer) handleEpisodeMembers(ctx context.Context, w http.ResponseWri
 		"episode_id": episodeID,
 		"members":    members,
 		"count":      len(members),
+	})))
+}
+
+// buildAnnotations constructs a MemoryAnnotations from engine annotation data
+// and the activation item. Staleness is derived from item.LastAccess (nanoseconds
+// Unix timestamp).
+func buildAnnotations(item *mbp.ActivationItem, data *engine.AnnotationData) *MemoryAnnotations {
+	staleDays := math.Round(time.Since(time.Unix(0, item.LastAccess)).Hours()/24.0*10) / 10
+	ann := &MemoryAnnotations{
+		Stale:         staleDays > annotationStaleDays,
+		StaleDays:     staleDays,
+		ConflictsWith: data.ConflictsWith,
+		SupersededBy:  data.SupersededBy,
+	}
+	if data.LastVerified != nil {
+		ann.LastVerified = data.LastVerified.UTC().Format(time.RFC3339)
+	}
+	return ann
+}
+
+func (s *MCPServer) handleSetTrust(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok := args["id"].(string)
+	if !ok || engramID == "" {
+		sendError(w, id, -32602, "invalid params: 'id' is required")
+		return
+	}
+	trustStr, ok := args["trust"].(string)
+	if !ok || trustStr == "" {
+		sendError(w, id, -32602, "invalid params: 'trust' is required (one of: verified, inferred, external, untrusted)")
+		return
+	}
+	if _, err := storage.ParseTrustLevel(trustStr); err != nil {
+		sendError(w, id, -32602, "invalid params: "+err.Error())
+		return
+	}
+	if err := s.engine.SetTrust(ctx, vault, engramID, trustStr); err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"id":    engramID,
+		"trust": trustStr,
+		"ok":    true,
 	})))
 }

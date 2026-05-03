@@ -366,7 +366,7 @@ func TestNoBareGoSpawnsWithoutMarker(t *testing.T) {
 func TestRunJobRecoversPebbleClosed(t *testing.T) {
 	ctx := context.Background()
 
-	eng, db, cleanup := testEnvWithDB(t)
+	eng, store, cleanup := testEnvWithStore(t)
 	defer cleanup()
 
 	// Write an engram to create a source vault.
@@ -382,9 +382,11 @@ func TestRunJobRecoversPebbleClosed(t *testing.T) {
 	// finish and release the DB before we close it.
 	eng.Stop()
 
-	// Now close the DB; no engine goroutines are using it at this point.
-	if err := db.Close(); err != nil {
-		t.Fatalf("db.Close: %v", err)
+	// Close via store.Close() (not db.Close() directly) so the counterCoalescer
+	// goroutine is drained first. Calling db.Close() directly would leave the
+	// coalescer's 100ms ticker running and cause a flaky panic in adjacent tests.
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close: %v", err)
 	}
 
 	// Create a synthetic job to track recovery state.

@@ -144,6 +144,7 @@ func Decode(data []byte) (*Engram, error) {
 	eng.EmbedDim = data[OffsetEmbedDim]
 	eng.MemoryType = data[OffsetMemoryType]
 	eng.Classification = binary.BigEndian.Uint16(data[OffsetClassification : OffsetClassification+2])
+	eng.Trust = data[OffsetTrust]
 
 	// Parse tagged extension fields between the end of variable data and CRC32 trailer.
 	varEnd := maxVarEnd(conceptOff, uint32(conceptLen), createdByOff, uint32(createdByLen),

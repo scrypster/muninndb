@@ -4,14 +4,21 @@ package mcp
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"net/http"
-	"strings"
 
 	"github.com/scrypster/muninndb/internal/auth"
 )
 
 const mcpSessionHeader = "Mcp-Session-Id"
+
+// mcpInstructions is returned in the initialize response to tell MCP clients
+// how to use MuninnDB. Kept concise — call muninn_guide for the full guide.
+const mcpInstructions = `MuninnDB is a long-term memory server for AI agents. ` +
+	`Use muninn_where_left_off at session start. ` +
+	`Store with muninn_remember (include type, summary, entities). ` +
+	`Update with muninn_evolve, not forget+remember. ` +
+	`Keep memories atomic — one concept each. ` +
+	`Call muninn_guide for the full reference.`
 
 // apiKeyValidator is the subset of auth.Store used by MCP for vault key auth.
 // Using an interface keeps the mcp package testable without a live Pebble store.
@@ -34,10 +41,6 @@ func authFromContext(ctx context.Context) AuthContext {
 	return a
 }
 
-// maxTokenLen caps the bearer token length to prevent abuse of the constant-time
-// compare (e.g., a 100 MB token would waste CPU). Real tokens are ≤ 100 chars.
-const maxTokenLen = 4096
-
 // authFromRequest extracts the Bearer token from the Authorization header and
 // authenticates it in priority order:
 //
@@ -48,13 +51,12 @@ const maxTokenLen = 4096
 //
 // apiKeyStore may be nil to disable mk_ key auth (legacy mode).
 func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyValidator) AuthContext {
-	header := r.Header.Get("Authorization")
-	token, found := strings.CutPrefix(header, "Bearer ")
+	token, found := auth.ParseBearerToken(r.Header.Get("Authorization"))
 
 	// 1. mk_ vault API key — always checked first, regardless of whether a static
 	// token is configured. Presenting a scoped key is an explicit opt-in to vault
 	// isolation; an invalid or revoked key must never fall through to open access.
-	if found && token != "" && strings.HasPrefix(token, "mk_") && apiKeyStore != nil {
+	if found && len(token) > 3 && token[:3] == "mk_" && apiKeyStore != nil {
 		if key, err := apiKeyStore.ValidateAPIKey(token); err == nil {
 			return AuthContext{
 				Token:      token,
@@ -73,15 +75,11 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 		return AuthContext{Authorized: true}
 	}
 
-	// 3. Static token validation.
-	if !found || token == "" {
+	// 3. Static token validation — constant-time compare with length cap.
+	if !found {
 		return AuthContext{Authorized: false}
 	}
-	// Reject absurdly long tokens before any crypto work.
-	if len(token) > maxTokenLen {
-		return AuthContext{Authorized: false}
-	}
-	if subtle.ConstantTimeCompare([]byte(token), []byte(requiredToken)) == 1 {
+	if auth.ValidateStaticToken(token, requiredToken) {
 		return AuthContext{Token: token, Authorized: true}
 	}
 	return AuthContext{Authorized: false}
@@ -174,7 +172,8 @@ func isMutatingTool(name string) bool {
 		"muninn_entity_state_batch",
 		"muninn_merge_entity",
 		"muninn_replay_enrichment",
-		"muninn_feedback":
+		"muninn_feedback",
+		"muninn_trust":
 		return true
 	}
 	return false
@@ -230,22 +229,9 @@ func vaultFromArgs(args map[string]any) (string, bool, bool) {
 	if !ok || s == "" {
 		return "", false, true
 	}
-	if !isValidVaultName(s) {
+	if !auth.IsValidVaultName(s) {
 		return "", false, true
 	}
 	return s, true, false
 }
 
-// isValidVaultName returns true if name is a valid vault name: 1–64 characters,
-// containing only lowercase letters, digits, hyphens, and underscores.
-func isValidVaultName(name string) bool {
-	if len(name) == 0 || len(name) > 64 {
-		return false
-	}
-	for _, r := range name {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
-			return false
-		}
-	}
-	return true
-}

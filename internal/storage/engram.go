@@ -376,6 +376,48 @@ func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id
 	return nil
 }
 
+// UpdateTrust updates the trust label of an engram in-place using PatchTrust.
+// Invalidates the L1 and metadata caches. Appends a provenance entry.
+func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULID, trust TrustLevel) error {
+	engramKey := keys.EngramKey(wsPrefix, [16]byte(id))
+	rawBytes, err := Get(ps.db, engramKey)
+	if err != nil {
+		return fmt.Errorf("get engram raw: %w", err)
+	}
+	if rawBytes == nil {
+		return fmt.Errorf("engram not found")
+	}
+
+	if err := erf.PatchTrust(rawBytes, uint8(trust)); err != nil {
+		return fmt.Errorf("patch trust: %w", err)
+	}
+
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+
+	batch.Set(engramKey, rawBytes, nil)
+	metaKey := keys.MetaKey(wsPrefix, [16]byte(id))
+	batch.Set(metaKey, erf.MetaKeySlice(rawBytes), nil)
+
+	// Invalidate L1 and metadata caches before commit — cached structs are stale.
+	ps.cache.Delete(wsPrefix, id)
+	ps.metaCache.Remove([16]byte(id))
+
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return fmt.Errorf("commit batch: %w", err)
+	}
+
+	ps.provWork.Submit(wsPrefix, id, provenance.ProvenanceEntry{
+		Timestamp: time.Now(),
+		Source:    provenance.SourceHuman,
+		AgentID:   "system:set-trust",
+		Operation: "update-trust",
+		Note:      trust.String(),
+	})
+
+	return nil
+}
+
 // DeleteEngram performs a hard delete: removes the engram, all association keys,
 // and all secondary indexes. Reads the engram first to gather index data.
 func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id ULID) error {
@@ -790,6 +832,7 @@ func toERFEngram(eng *Engram) *erf.Engram {
 		MemoryType:     uint8(eng.MemoryType),
 		TypeLabel:      eng.TypeLabel,
 		Classification: eng.Classification,
+		Trust:          uint8(eng.Trust),
 	}
 }
 
@@ -829,6 +872,7 @@ func fromERFEngram(e *erf.Engram) *Engram {
 		MemoryType:     MemoryType(e.MemoryType),
 		TypeLabel:      e.TypeLabel,
 		Classification: e.Classification,
+		Trust:          TrustLevel(e.Trust),
 	}
 }
 

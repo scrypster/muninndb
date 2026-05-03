@@ -135,6 +135,7 @@ func (e *Engine) RememberTree(ctx context.Context, req *RememberTreeRequest) (*R
 			Concept: item.input.Concept,
 			Content: item.input.Content,
 			Tags:    item.input.Tags,
+			Trust:   storage.TrustInferred, // all new MCP writes default to inferred
 		}
 		if item.input.Type != "" {
 			if mt, ok := storage.ParseMemoryType(item.input.Type); ok {
@@ -246,6 +247,7 @@ func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *Ad
 		Content:   input.Content,
 		Tags:      input.Tags,
 		Embedding: input.Embedding,
+		Trust:     storage.TrustInferred, // all new MCP writes default to inferred
 	}
 	if input.Type != "" {
 		if mt, ok := storage.ParseMemoryType(input.Type); ok {

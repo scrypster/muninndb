@@ -178,6 +178,10 @@ func allToolDefinitions() []ToolDefinition {
 						"items":       map[string]any{"type": "number"},
 						"description": "Optional pre-computed query embedding vector (array of floats). When provided, the server uses this vector for semantic search instead of computing one from 'context'. The dimension must match the vault's existing embedding dimension, or the call will be rejected.",
 					},
+					"annotate": map[string]any{
+						"type":        "boolean",
+						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false.",
+					},
 				},
 				"required": []string{"context"},
 			},
@@ -405,6 +409,10 @@ func allToolDefinitions() []ToolDefinition {
 					"limit": map[string]any{
 						"type":        "integer",
 						"description": "Maximum number of candidate memories to return in this call (default 50, max 200).",
+					},
+					"cursor": map[string]any{
+						"type":        "string",
+						"description": "Opaque pagination cursor returned by a previous call as next_cursor. Omit or pass an empty string to start from the beginning.",
 					},
 				},
 				"required": []string{},
@@ -847,6 +855,30 @@ func allToolDefinitions() []ToolDefinition {
 					"episode_id": map[string]any{"type": "string", "description": "ID of the episode (first engram ID from muninn_episodes output)."},
 				},
 				"required": []string{"episode_id"},
+			},
+		},
+		// Trust label
+		{
+			Name:        "muninn_trust",
+			Description: "Set the trust level of an engram. Trust levels control how much confidence to place in a memory. Use 'verified' for human-confirmed facts, 'inferred' for AI-generated memories (default), 'external' for imported data, and 'untrusted' to flag unreliable memories. Untrusted memories can be excluded from recall by enabling ExcludeUntrusted in vault config.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{
+						"type":        "string",
+						"description": "ULID of the engram to update",
+					},
+					"trust": map[string]any{
+						"type":        "string",
+						"enum":        []string{"verified", "inferred", "external", "untrusted"},
+						"description": "Trust level to assign",
+					},
+					"vault": map[string]any{
+						"type":        "string",
+						"description": "Vault containing the engram (default: \"default\")",
+					},
+				},
+				"required": []string{"id", "trust"},
 			},
 		},
 	}

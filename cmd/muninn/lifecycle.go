@@ -88,6 +88,23 @@ func runStart(webEnabled bool) error {
 		os.Remove(pidPath)
 	}
 
+	// Guard against dual-ownership conflict with systemd (or any external
+	// process that already holds the Pebble flock). If we spawn a child that
+	// immediately exits due to lock contention, systemd's Restart=on-failure
+	// loop kicks in and both sides race forever.
+	if isPebbleLockHeld(dataDir) {
+		fmt.Fprintln(os.Stderr, "error: another process is already holding the MuninnDB database lock.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "If MuninnDB is managed by systemd, use systemctl instead of the CLI:")
+		fmt.Fprintln(os.Stderr, "  systemctl status muninndb")
+		fmt.Fprintln(os.Stderr, "  systemctl start  muninndb")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "If no daemon should be running, find and stop the process holding the lock:")
+		fmt.Fprintf(os.Stderr, "  fuser %s/pebble/LOCK\n", dataDir)
+		fmt.Fprintf(os.Stderr, "  lsof  %s/pebble/LOCK\n", dataDir)
+		os.Exit(1)
+	}
+
 	// Ensure data directory exists
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create data dir: %v\n", err)

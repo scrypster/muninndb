@@ -7,8 +7,8 @@ import (
 
 func TestAllToolDefinitionsCount(t *testing.T) {
 	tools := allToolDefinitions()
-	if len(tools) != 42 {
-		t.Errorf("expected 42 tools, got %d", len(tools))
+	if len(tools) != 43 {
+		t.Errorf("expected 43 tools, got %d", len(tools))
 	}
 }
 

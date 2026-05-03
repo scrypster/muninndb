@@ -531,10 +531,10 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 	defer iter.Close()
 
 	type assocEntry struct {
-		src    [16]byte
-		dst    [16]byte
-		oldW   float32
-		newW   float32
+		src     [16]byte
+		dst     [16]byte
+		oldW    float32
+		newW    float32
 		remove  bool
 		archive bool
 		// Preserved from existing Pebble value:
@@ -771,6 +771,51 @@ func (ps *PebbleStore) GetReverseAssociationsByType(ctx context.Context, wsPrefi
 		return nil, fmt.Errorf("GetReverseAssociationsByType scan: %w", err)
 	}
 	return sources, nil
+}
+
+// GetReverseAssociations returns all associations that TARGET id by scanning
+// the 0x04 reverse index. The returned Association.TargetID is the SOURCE
+// engram (the engram that points TO id). Results are capped at maxPerNode entries.
+// Reverse key layout: 0x04 | ws(8) | dstID(16) | weightComplement(4) | srcID(16) = 45 bytes
+func (ps *PebbleStore) GetReverseAssociations(ctx context.Context, wsPrefix [8]byte, id ULID, maxPerNode int) ([]Association, error) {
+	prefix := keys.AssocRevPrefixForID(wsPrefix, [16]byte(id))
+	iter, err := PrefixIterator(ps.db, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("GetReverseAssociations prefix iter: %w", err)
+	}
+	defer iter.Close()
+
+	var results []Association
+	for iter.First(); iter.Valid() && (maxPerNode <= 0 || len(results) < maxPerNode); iter.Next() {
+		k := iter.Key()
+		if len(k) < 45 {
+			continue
+		}
+		var srcID ULID
+		copy(srcID[:], k[29:45])
+
+		var wc [4]byte
+		copy(wc[:], k[25:29])
+		weight := keys.WeightFromComplement(wc)
+
+		relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, restoredAt := decodeAssocValue(iter.Value())
+
+		results = append(results, Association{
+			TargetID:          srcID,
+			Weight:            weight,
+			RelType:           relType,
+			Confidence:        confidence,
+			CreatedAt:         createdAt,
+			LastActivated:     lastActivated,
+			PeakWeight:        peakWeight,
+			CoActivationCount: coActivationCount,
+			RestoredAt:        restoredAt,
+		})
+	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("GetReverseAssociations scan: %w", err)
+	}
+	return results, nil
 }
 
 // FlagContradiction writes the 0x0A contradiction key for pair (a,b).

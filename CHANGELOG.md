@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.4.10] - 2026-04-02
+
 ### Added
 - Dashboard activity panel overhaul: selectable timeframe presets (7d–180d, capped at 180 days), end-date picker, dynamic x-axis tick grouping based on chart width, and a raw data table toggle with copy-to-clipboard. Includes loading, error, and empty-state feedback.
 - `GET /api/activity-counts` endpoint returning per-day engram creation counts for a vault. Accepts `days` (1–180, default 7) and optional `until` (YYYY-MM-DD) query parameters. Malformed or out-of-range values return 400. Backed by an efficient ULID key-header scan with zero-filled contiguous day ranges.
@@ -33,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Vault-scoped REST routes are setup to deprecate vault passed in the body in a later release.
 - REST read responses now include `memory_type: 0` for fact-classified memories instead of omitting the field.
 - Observe-mode API keys now return `403` on semantically mutating REST and gRPC routes while preserving access to read-like POST endpoints such as activation, traversal, explanation, and batch link reads.
+- ACT-R scoring: `bLevelCap` prevents base-level saturation in fresh vaults; two-pass per-query normalization ensures scores stay in [0, 1] range.
+- Archived engrams (dream engine) now filtered at all retrieval points — query, find-by-entity, trigger worker sweeps.
+- Dormant flag now gated on `!UseACTR`; in ACT-R mode the flag is derived from activation score rather than the Ebbinghaus relevance field.
+- Web UI: form class consistency, segmented control hover state, uniform input/button sizing, memory filter bar density, page title branding, logs page full-width layout, observability view hash routing.
+- SSE keepalive uses spec-compliant comment frame (`: keepalive`) to prevent proxy idle timeouts.
+- Entity type allowlist expanded from 8 to 14 types; unknown types pass through without coercion.
+- Clipboard API guarded by secure-context check with `execCommand` fallback for HTTP installs.
+- Pebble `ErrNotFound` distinguished from other errors in embed migration path.
 
 ---
 
@@ -186,7 +198,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Comparison Links
 
-[Unreleased]: https://github.com/scrypster/muninndb/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/scrypster/muninndb/compare/v0.4.10...HEAD
+[0.4.10]: https://github.com/scrypster/muninndb/compare/v0.4.9-alpha...v0.4.10
 [0.2.6]: https://github.com/scrypster/muninndb/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/scrypster/muninndb/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/scrypster/muninndb/compare/v0.2.3...v0.2.4

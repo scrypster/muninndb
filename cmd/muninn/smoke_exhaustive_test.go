@@ -52,6 +52,7 @@ var allMCPTools = []string{
 	"muninn_provenance",
 	"muninn_entity_timeline",
 	"muninn_feedback",
+	"muninn_trust",
 	"muninn_entity",
 	"muninn_entities",
 	"muninn_loci",
@@ -841,6 +842,17 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_feedback returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_trust", func(t *testing.T) {
+		result := mcpTool(t, tok, "muninn_trust", map[string]any{
+			"vault": vault,
+			"id":    idA,
+			"trust": "verified",
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_trust returned error field: %v", errVal)
 		}
 	})
 

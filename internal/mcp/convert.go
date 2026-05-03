@@ -35,6 +35,7 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		AccessCount: item.AccessCount,
 		Relevance:   item.Relevance,
 		SourceType:  item.SourceType,
+		Trust:       storage.TrustLevel(item.Trust).String(),
 	}
 }
 
@@ -54,6 +55,7 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		LastAccess:  time.Unix(0, r.LastAccess).UTC(),
 		AccessCount: r.AccessCount,
 		Relevance:   r.Relevance,
+		Trust:       storage.TrustLevel(r.Trust).String(),
 	}
 	for _, e := range r.Entities {
 		m.Entities = append(m.Entities, ReadEntity{Name: e.Name, Type: e.Type})
