@@ -55,6 +55,10 @@ var allMCPTools = []string{
 	"muninn_trust",
 	"muninn_entity",
 	"muninn_entities",
+	"muninn_loci",
+	"muninn_locus_members",
+	"muninn_episodes",
+	"muninn_episode_members",
 }
 
 // adminLogin POSTs to the UI login endpoint (:8476) and returns the muninn_session cookie.
@@ -869,6 +873,46 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_entities returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_loci", func(t *testing.T) {
+		result := mcpTool(t, tok, "muninn_loci", map[string]any{
+			"vault": vault,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_loci returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_locus_members", func(t *testing.T) {
+		// Expected to return an error for nonexistent locus — verify the tool is callable.
+		_, err := mcpToolNoFail(t, tok, "muninn_locus_members", map[string]any{
+			"vault":       vault,
+			"locus_label": "nonexistent",
+		})
+		if err == nil {
+			t.Log("muninn_locus_members: unexpectedly succeeded for nonexistent locus")
+		}
+	})
+
+	t.Run("muninn_episodes", func(t *testing.T) {
+		result := mcpTool(t, tok, "muninn_episodes", map[string]any{
+			"vault": vault,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_episodes returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_episode_members", func(t *testing.T) {
+		// Expected to return an error for nonexistent episode — verify the tool is callable.
+		_, err := mcpToolNoFail(t, tok, "muninn_episode_members", map[string]any{
+			"vault":      vault,
+			"episode_id": "00000000000000000000000000",
+		})
+		if err == nil {
+			t.Log("muninn_episode_members: unexpectedly succeeded for zero episode ID")
 		}
 	})
 }

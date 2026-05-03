@@ -708,6 +708,7 @@ func TestRelTypeFromString_AllTypes(t *testing.T) {
 		{"blocks", uint16(storage.RelBlocks)},
 		{"resolves", uint16(storage.RelResolves)},
 		{"refines", uint16(storage.RelRefines)},
+		{"same_episode", uint16(storage.RelSameEpisode)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {

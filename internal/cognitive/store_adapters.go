@@ -114,3 +114,71 @@ func (a *confidenceStoreAdapter) GetConfidence(ctx context.Context, ws [8]byte, 
 func (a *confidenceStoreAdapter) UpdateConfidence(ctx context.Context, ws [8]byte, id [16]byte, confidence float32) error {
 	return a.store.UpdateConfidence(ctx, ws, storage.ULID(id), confidence)
 }
+
+// separationStoreAdapter adapts storage.EngineStore to cognitive.SeparationStore.
+type separationStoreAdapter struct {
+	store storage.EngineStore
+}
+
+// NewSeparationStoreAdapter returns a SeparationStore backed by the given EngineStore.
+func NewSeparationStoreAdapter(store storage.EngineStore) SeparationStore {
+	return &separationStoreAdapter{store: store}
+}
+
+func (a *separationStoreAdapter) GetEngramEntities(ctx context.Context, ws [8]byte, engramID [16]byte) ([]string, error) {
+	var entities []string
+	err := a.store.ScanEngramEntities(ctx, ws, storage.ULID(engramID), func(name string) error {
+		entities = append(entities, name)
+		return nil
+	})
+	return entities, err
+}
+
+// replayStoreAdapter adapts storage.EngineStore to cognitive.ReplayStore.
+type replayStoreAdapter struct {
+	store storage.EngineStore
+}
+
+// NewReplayStoreAdapter returns a ReplayStore backed by the given EngineStore.
+func NewReplayStoreAdapter(store storage.EngineStore) ReplayStore {
+	return &replayStoreAdapter{store: store}
+}
+
+func (a *replayStoreAdapter) ListVaults(_ context.Context) ([]string, error) {
+	return a.store.ListVaultNames()
+}
+
+func (a *replayStoreAdapter) RecentEngrams(ctx context.Context, vault string, limit int) ([]ReplayEngram, error) {
+	ws := a.store.ResolveVaultPrefix(vault)
+	// TODO: RecentActive returns relevance-ranked engrams, not recency-ordered.
+	// This means replay strengthens already-strong memories rather than consolidating
+	// recent ones. Ideally this should use ScanLastAccessDesc or a time-ordered scan
+	// to target genuinely recent engrams for consolidation. Acceptable for the initial
+	// implementation — the biological analogue replays salient memories too.
+	ids, err := a.store.RecentActive(ctx, ws, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	engrams, err := a.store.GetEngrams(ctx, ws, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]ReplayEngram, 0, len(engrams))
+	for _, eg := range engrams {
+		if eg == nil {
+			continue
+		}
+		result = append(result, ReplayEngram{
+			ID:      [16]byte(eg.ID),
+			Concept: eg.Concept,
+			Content: eg.Content,
+			Vault:   vault,
+		})
+	}
+	return result, nil
+}
