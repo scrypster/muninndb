@@ -178,6 +178,10 @@ func allToolDefinitions() []ToolDefinition {
 						"items":       map[string]any{"type": "number"},
 						"description": "Optional pre-computed query embedding vector (array of floats). When provided, the server uses this vector for semantic search instead of computing one from 'context'. The dimension must match the vault's existing embedding dimension, or the call will be rejected.",
 					},
+					"annotate": map[string]any{
+						"type":        "boolean",
+						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false.",
+					},
 				},
 				"required": []string{"context"},
 			},
