@@ -60,6 +60,13 @@ func (e *evolveErrEngine) Evolve(_ context.Context, _, _, _, _ string, _ []float
 	return nil, fmt.Errorf("evolve storage error")
 }
 
+// updateContentErrEngine returns an error from UpdateContent.
+type updateContentErrEngine struct{ fakeEngine }
+
+func (e *updateContentErrEngine) UpdateContent(_ context.Context, _, _, _, _ string, _ float32) (*WriteResult, error) {
+	return nil, fmt.Errorf("update content storage error")
+}
+
 // consolidateErrEngine returns an error from Consolidate.
 type consolidateErrEngine struct{ fakeEngine }
 
@@ -627,6 +634,96 @@ func TestHandleEvolve_MissingID(t *testing.T) {
 func TestHandleEvolve_EngineError(t *testing.T) {
 	srv := newTestServerWith(&evolveErrEngine{})
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_evolve","arguments":{"vault":"default","id":"old-id","new_content":"updated","reason":"stale"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32000 {
+		t.Errorf("expected -32000 for engine error, got %v", resp.Error)
+	}
+}
+
+// ── handleUpdate paths ────────────────────────────────────────────────────────
+
+func TestHandleUpdate_HappyPath(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_update","arguments":{"vault":"default","id":"01JTEST","new_content":"updated content","reason":"sprint11_v3_upgrade"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	content := extractInnerJSON(t, resp)
+	if _, ok := content["id"]; !ok {
+		t.Error("response missing field: 'id'")
+	}
+	// Critical contract: returned ID should equal the input ID (in-place semantics).
+	if got := content["id"]; got != "01JTEST" {
+		t.Errorf("expected id to equal input id 01JTEST, got %v", got)
+	}
+}
+
+func TestHandleUpdate_HappyPathWithConfidence(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_update","arguments":{"vault":"default","id":"01JTEST","new_content":"updated","reason":"r","new_confidence":0.85}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
+
+func TestHandleUpdate_MissingID(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_update","arguments":{"vault":"default","new_content":"updated","reason":"r"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for missing id, got %v", resp.Error)
+	}
+}
+
+func TestHandleUpdate_MissingContent(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_update","arguments":{"vault":"default","id":"01JTEST","reason":"r"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for missing new_content, got %v", resp.Error)
+	}
+}
+
+func TestHandleUpdate_MissingReason(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_update","arguments":{"vault":"default","id":"01JTEST","new_content":"updated"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for missing reason, got %v", resp.Error)
+	}
+}
+
+func TestHandleUpdate_BadConfidenceOutOfRange(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_update","arguments":{"vault":"default","id":"01JTEST","new_content":"x","reason":"r","new_confidence":1.5}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for out-of-range confidence, got %v", resp.Error)
+	}
+}
+
+func TestHandleUpdate_BadConfidenceWrongType(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_update","arguments":{"vault":"default","id":"01JTEST","new_content":"x","reason":"r","new_confidence":"high"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("expected -32602 for non-numeric confidence, got %v", resp.Error)
+	}
+}
+
+func TestHandleUpdate_EngineError(t *testing.T) {
+	srv := newTestServerWith(&updateContentErrEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_update","arguments":{"vault":"default","id":"01JTEST","new_content":"x","reason":"r"}}}`
 	w := postRPC(t, srv, body)
 	resp := decodeResp(t, w.Body.String())
 	if resp.Error == nil || resp.Error.Code != -32000 {

@@ -214,6 +214,59 @@ func (b *pebbleStoreBatch) UpdateEngramState(ctx context.Context, ws [8]byte, id
 	return nil
 }
 
+// UpdateEngramContent queues a content update for an existing engram into the batch.
+// Reads the current engram, mutates Content (and optionally Confidence), and queues
+// updated 0x01 + 0x02 key writes. All secondary indexes (associations, tags, creator,
+// relevance, LastAccess, state) are left untouched — only content changes.
+//
+// newConfidence < 0 is the sentinel for "do not change confidence".
+//
+// Caller is responsible for content-hash bookkeeping (DeleteContentHash on the old
+// content, PutContentHash for the new content) — this method does not touch the hash
+// index, so callers must read the old engram's content before calling and pass it to
+// the hash bookkeeping themselves. Same split of responsibility as Engine.Evolve.
+//
+// The returned previous-content string is the engram's content before this batch
+// commits, so callers can compute the old hash without a second read.
+func (b *pebbleStoreBatch) UpdateEngramContent(ctx context.Context, ws [8]byte, id ULID, newContent string, newConfidence float32) (string, error) {
+	if b.committed {
+		return "", fmt.Errorf("batch already committed")
+	}
+	eng, err := b.ps.GetEngram(ctx, ws, id)
+	if err != nil {
+		return "", fmt.Errorf("update content: read engram: %w", err)
+	}
+	if eng == nil {
+		return "", fmt.Errorf("update content: engram %s not found", id.String())
+	}
+	oldContent := eng.Content
+	eng.Content = newContent
+	if newConfidence >= 0 {
+		eng.Confidence = newConfidence
+	}
+	eng.UpdatedAt = time.Now()
+
+	erfEng := toERFEngram(eng)
+	erfBytes, err := erf.EncodeV2(erfEng)
+	if err != nil {
+		return "", fmt.Errorf("update content: encode: %w", err)
+	}
+	id16 := [16]byte(id)
+
+	// Update 0x01 full engram record and 0x02 metadata slice.
+	// Skip all secondary indexes — they are unaffected by content mutation.
+	if err := b.batch.Set(keys.EngramKey(ws, id16), erfBytes, nil); err != nil {
+		return "", fmt.Errorf("update content: set engram key: %w", err)
+	}
+	if err := b.batch.Set(keys.MetaKey(ws, id16), erf.MetaKeySlice(erfBytes), nil); err != nil {
+		return "", err
+	}
+	// Track for cache invalidation in Commit (reuses stateUpdatedIDs because the
+	// invalidation behaviour is identical — drop L1 cache so reads see new bytes).
+	b.stateUpdatedIDs = append(b.stateUpdatedIDs, stateUpdate{ws: ws, id: id})
+	return oldContent, nil
+}
+
 // Commit atomically flushes all queued writes to Pebble and runs post-commit
 // side effects (vault counters, WAL entries, provenance).
 func (b *pebbleStoreBatch) Commit() error {

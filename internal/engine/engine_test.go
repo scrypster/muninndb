@@ -591,6 +591,100 @@ func TestEngineEvolve(t *testing.T) {
 	}
 }
 
+func TestEngineUpdateContent_SameIDReturned(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "stable", Content: "v1 content"})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	oldID := resp.ID
+
+	returnedID, err := eng.UpdateContent(ctx, "test", oldID, "v2 content", "test update", -1.0)
+	if err != nil {
+		t.Fatalf("UpdateContent: %v", err)
+	}
+	if returnedID.String() != oldID {
+		t.Fatalf("UpdateContent must return same ID; got %s want %s", returnedID.String(), oldID)
+	}
+}
+
+func TestEngineUpdateContent_ContentReplaced(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp, _ := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "c", Content: "before"})
+
+	if _, err := eng.UpdateContent(ctx, "test", resp.ID, "after", "replace test", -1.0); err != nil {
+		t.Fatalf("UpdateContent: %v", err)
+	}
+
+	got, err := eng.Read(ctx, &mbp.ReadRequest{Vault: "test", IDs: []string{resp.ID}})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got.Engrams) != 1 {
+		t.Fatalf("expected 1 engram, got %d", len(got.Engrams))
+	}
+	if got.Engrams[0].Content != "after" {
+		t.Fatalf("content not replaced; got %q want %q", got.Engrams[0].Content, "after")
+	}
+	// Concept must be preserved (no "(evolved)" suffix that Evolve would add).
+	if got.Engrams[0].Concept != "c" {
+		t.Fatalf("concept changed; got %q want %q", got.Engrams[0].Concept, "c")
+	}
+}
+
+func TestEngineUpdateContent_ConfidenceUnchangedWhenSentinel(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp, _ := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "c", Content: "x", Confidence: 0.5})
+
+	if _, err := eng.UpdateContent(ctx, "test", resp.ID, "y", "no conf change", -1.0); err != nil {
+		t.Fatalf("UpdateContent: %v", err)
+	}
+
+	got, _ := eng.Read(ctx, &mbp.ReadRequest{Vault: "test", IDs: []string{resp.ID}})
+	if got.Engrams[0].Confidence != 0.5 {
+		t.Fatalf("confidence should be unchanged with sentinel; got %f want 0.5", got.Engrams[0].Confidence)
+	}
+}
+
+func TestEngineUpdateContent_ConfidenceSetWhenProvided(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp, _ := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "c", Content: "x", Confidence: 0.5})
+
+	if _, err := eng.UpdateContent(ctx, "test", resp.ID, "y", "conf change", 0.95); err != nil {
+		t.Fatalf("UpdateContent: %v", err)
+	}
+
+	got, _ := eng.Read(ctx, &mbp.ReadRequest{Vault: "test", IDs: []string{resp.ID}})
+	if got.Engrams[0].Confidence != 0.95 {
+		t.Fatalf("confidence not updated; got %f want 0.95", got.Engrams[0].Confidence)
+	}
+}
+
+func TestEngineUpdateContent_NotFound(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Generate a syntactically valid but non-existent ULID.
+	bogus := storage.NewULID().String()
+	_, err := eng.UpdateContent(ctx, "test", bogus, "new", "should fail", -1.0)
+	if err == nil {
+		t.Fatal("UpdateContent on non-existent id should error")
+	}
+}
+
 func TestEngineConsolidate(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()

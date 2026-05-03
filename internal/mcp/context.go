@@ -165,6 +165,7 @@ func isMutatingTool(name string) bool {
 		"muninn_forget",
 		"muninn_link",
 		"muninn_evolve",
+		"muninn_update",
 		"muninn_consolidate",
 		"muninn_decide",
 		"muninn_restore",

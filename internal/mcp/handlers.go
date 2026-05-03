@@ -508,6 +508,39 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 
+// handleUpdate mutates content (and optionally confidence) on an existing engram
+// in place. Unlike Evolve, the ID is preserved — entities, associations, concept,
+// and tags all stay intact. Used for v=2 → v=3 deep-extraction upgrades that must
+// not break inbound entity references.
+func (s *MCPServer) handleUpdate(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok1 := args["id"].(string)
+	newContent, ok2 := args["new_content"].(string)
+	reason, ok3 := args["reason"].(string)
+	if !ok1 || !ok2 || !ok3 || engramID == "" || newContent == "" || reason == "" {
+		sendError(w, id, -32602, "invalid params: 'id', 'new_content', 'reason' are required")
+		return
+	}
+	newConfidence := float32(-1) // sentinel: do not change confidence
+	if rawConf, present := args["new_confidence"]; present && rawConf != nil {
+		c, ok := rawConf.(float64)
+		if !ok {
+			sendError(w, id, -32602, "invalid params: 'new_confidence' must be a number")
+			return
+		}
+		if c < 0.0 || c > 1.0 {
+			sendError(w, id, -32602, "invalid params: 'new_confidence' must be in [0.0, 1.0]")
+			return
+		}
+		newConfidence = float32(c)
+	}
+	result, err := s.engine.UpdateContent(ctx, vault, engramID, newContent, reason, newConfidence)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(result)))
+}
+
 func (s *MCPServer) handleConsolidate(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	idsAny, ok := args["ids"].([]any)
 	if !ok || len(idsAny) == 0 {

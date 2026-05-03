@@ -69,6 +69,13 @@ func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent,
 	}
 	return &WriteResult{ID: id.String()}, nil
 }
+func (a *mcpEngineAdapter) UpdateContent(ctx context.Context, vault, id, newContent, reason string, newConfidence float32) (*WriteResult, error) {
+	ulid, err := a.eng.UpdateContent(ctx, vault, id, newContent, reason, newConfidence)
+	if err != nil {
+		return nil, err
+	}
+	return &WriteResult{ID: ulid.String()}, nil
+}
 func (a *mcpEngineAdapter) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
 	res, err := a.eng.Consolidate(ctx, vault, ids, merged)
 	if err != nil {

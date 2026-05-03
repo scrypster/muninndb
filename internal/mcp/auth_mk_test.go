@@ -299,7 +299,7 @@ func TestResolveVault_NoPinned_NoArg_DefaultsToDefault(t *testing.T) {
 func TestIsMutatingTool_MutatingSet(t *testing.T) {
 	mutating := []string{
 		"muninn_remember", "muninn_remember_batch", "muninn_remember_tree",
-		"muninn_add_child", "muninn_forget", "muninn_link", "muninn_evolve",
+		"muninn_add_child", "muninn_forget", "muninn_link", "muninn_evolve", "muninn_update",
 		"muninn_consolidate", "muninn_decide", "muninn_restore",
 		"muninn_retry_enrich", "muninn_entity_state", "muninn_entity_state_batch",
 		"muninn_merge_entity", "muninn_replay_enrichment", "muninn_feedback",

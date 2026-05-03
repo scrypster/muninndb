@@ -33,6 +33,11 @@ type StoreBatch interface {
 	// Reads the current engram from the underlying store, sets its state, and queues
 	// updated 0x01 and 0x02 key writes.
 	UpdateEngramState(ctx context.Context, ws [8]byte, id ULID, newState LifecycleState) error
+	// UpdateEngramContent queues an in-place content (and optionally confidence)
+	// update for an existing engram. Returns the previous content so callers can
+	// compute the old hash for content-hash bookkeeping. newConfidence < 0 means
+	// "do not change confidence". All secondary indexes are left untouched.
+	UpdateEngramContent(ctx context.Context, ws [8]byte, id ULID, newContent string, newConfidence float32) (string, error)
 	// Commit atomically commits all queued writes.
 	Commit() error
 	// Discard releases the batch without writing anything.

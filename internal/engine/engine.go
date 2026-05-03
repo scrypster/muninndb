@@ -2710,6 +2710,70 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	return newULID, nil
 }
 
+// UpdateContent mutates content (and optionally confidence) on an existing engram
+// in place. Returns the same ULID as input. Preserves Concept, Tags, Associations,
+// CreatedAt, all secondary indexes, and entity links — only Content (and possibly
+// Confidence) and UpdatedAt change.
+//
+// Caller passes newConfidence < 0 to leave confidence unchanged.
+//
+// Side effects: content-hash bookkeeping (delete old, put new), FTS re-index with
+// new content, WAL OpEngramUpdate entry, provenance "update" entry. No HNSW change
+// (embedding unchanged).
+func (e *Engine) UpdateContent(ctx context.Context, vault, idStr, newContent, reason string, newConfidence float32) (storage.ULID, error) {
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+
+	ulid, err := storage.ParseULID(idStr)
+	if err != nil {
+		return storage.ULID{}, fmt.Errorf("update: parse id: %w", err)
+	}
+
+	// Read existing engram so we can capture concept + creator for FTS re-index.
+	// The batch op below also reads it, but we need concept/creator out here.
+	existing, err := e.store.GetEngram(ctx, wsPrefix, ulid)
+	if err != nil {
+		return storage.ULID{}, fmt.Errorf("update: read engram: %w", err)
+	}
+	if existing == nil {
+		return storage.ULID{}, fmt.Errorf("update: engram %s not found", idStr)
+	}
+
+	// Single atomic batch: in-place content + metadata write.
+	batch := e.store.NewBatch()
+	defer batch.Discard()
+
+	oldContent, err := batch.UpdateEngramContent(ctx, wsPrefix, ulid, newContent, newConfidence)
+	if err != nil {
+		return storage.ULID{}, fmt.Errorf("update: batch update: %w", err)
+	}
+	if err := batch.Commit(); err != nil {
+		return storage.ULID{}, fmt.Errorf("update: batch commit: %w", err)
+	}
+
+	// Content-hash bookkeeping: delete old mapping, add new mapping.
+	oldHash := storage.ContentHash(oldContent)
+	if err := e.store.DeleteContentHash(ctx, wsPrefix, oldHash); err != nil {
+		slog.Warn("engine: update: failed to delete old content hash", "id", idStr, "err", err)
+	}
+	newHash := storage.ContentHash(newContent)
+	if err := e.store.PutContentHash(ctx, wsPrefix, newHash, ulid); err != nil {
+		slog.Warn("engine: update: failed to store new content hash", "id", idStr, "err", err)
+	}
+
+	// Re-submit to FTS worker so the index reflects new content.
+	if e.ftsWorker != nil {
+		e.ftsWorker.Submit(fts.IndexJob{
+			WS:        wsPrefix,
+			ID:        [16]byte(ulid),
+			Concept:   existing.Concept,
+			CreatedBy: existing.CreatedBy,
+			Content:   newContent,
+		})
+	}
+
+	return ulid, nil
+}
+
 // Consolidate merges multiple engrams into a single new engram and archives the originals.
 // Returns a ConsolidateResult with the new ID, archived IDs, and any non-fatal warnings.
 func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error) {

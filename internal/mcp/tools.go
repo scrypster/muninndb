@@ -266,6 +266,21 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
+			Name:        "muninn_update",
+			Description: "Update content (and optionally confidence) on an existing memory in place. Preserves ID, concept, tags, entities, and associations. Use when correcting or enriching an existing memory without breaking inbound references — unlike muninn_evolve, this does not create a new version chain.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":          vaultProp,
+					"id":             map[string]any{"type": "string", "description": "ID of the memory to update in place."},
+					"new_content":    map[string]any{"type": "string", "description": "Replacement content."},
+					"reason":         map[string]any{"type": "string", "description": "Why this memory is being updated."},
+					"new_confidence": map[string]any{"type": "number", "description": "Optional new confidence in [0.0, 1.0]. Omit to leave unchanged."},
+				},
+				"required": []string{"id", "new_content", "reason"},
+			},
+		},
+		{
 			Name:        "muninn_consolidate",
 			Description: "Merge multiple related memories into one. Archives the originals. Maximum 50 IDs.",
 			InputSchema: map[string]any{
