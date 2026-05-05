@@ -145,6 +145,7 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return nil, err
 	}
+	ps.replicateBatch(batch)
 
 	// Invalidate assocCache for src and all restored dst nodes.
 	ps.assocCache.Remove(assocCacheKey(ws, ULID(srcID)))
