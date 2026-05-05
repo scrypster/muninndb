@@ -19,6 +19,23 @@ func openRepHookDB(t *testing.T) (*pebble.DB, func()) {
 	return db, func() { _ = db.Close() }
 }
 
+// opBatchCounter returns a PebbleStoreConfig with RepLogAppend set to count
+// batch writes (op==3), and a function that returns the current count.
+func opBatchCounter(t *testing.T) (storage.PebbleStoreConfig, func() int32) {
+	t.Helper()
+	var count atomic.Int32
+	return storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 {
+				count.Add(1)
+			}
+			return nil
+		},
+	}, func() int32 {
+		return count.Load()
+	}
+}
+
 // TestRepLogHook_NilCallback verifies WriteEngram does not panic when
 // RepLogAppend is nil (non-cluster deployments).
 func TestRepLogHook_NilCallback(t *testing.T) {
@@ -217,5 +234,26 @@ func TestRepLogHook_WriteAssociation(t *testing.T) {
 	}
 	if batchCount.Load() <= before {
 		t.Error("WriteAssociation: RepLogAppend not called")
+	}
+}
+
+// TestRepLogHook_WriteEntityEngramLink verifies callback fires on entity link write.
+func TestRepLogHook_WriteEntityEngramLink(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	cfg, count := opBatchCounter(t)
+	store := storage.NewPebbleStore(db, cfg)
+	ws := store.VaultPrefix("entity-vault")
+	ctx := context.Background()
+
+	id, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "entity test", Content: "body"})
+	before := count()
+
+	if err := store.WriteEntityEngramLink(ctx, ws, id, "Alice"); err != nil {
+		t.Fatalf("WriteEntityEngramLink: %v", err)
+	}
+	if count() <= before {
+		t.Error("WriteEntityEngramLink: RepLogAppend not called")
 	}
 }
