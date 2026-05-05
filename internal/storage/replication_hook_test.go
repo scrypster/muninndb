@@ -185,3 +185,37 @@ func TestRepLogHook_DeleteEngram(t *testing.T) {
 		t.Error("DeleteEngram: RepLogAppend not called")
 	}
 }
+
+// TestRepLogHook_WriteAssociation verifies callback fires on WriteAssociation.
+func TestRepLogHook_WriteAssociation(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	var batchCount atomic.Int32
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 {
+				batchCount.Add(1)
+			}
+			return nil
+		},
+	})
+
+	ws := store.VaultPrefix("assoc-vault")
+	ctx := context.Background()
+
+	src, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "src", Content: "s"})
+	dst, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "dst", Content: "d"})
+	before := batchCount.Load()
+
+	if err := store.WriteAssociation(ctx, ws, src, dst, &storage.Association{
+		TargetID: dst,
+		Weight:   0.8,
+		RelType:  storage.RelRelatesTo,
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+	if batchCount.Load() <= before {
+		t.Error("WriteAssociation: RepLogAppend not called")
+	}
+}
