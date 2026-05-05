@@ -2863,7 +2863,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── Vault import ───────────────────────────────────────────────────────
     openImportModal() {
-      this.importModal = { show: true, vaultName: '', file: null, resetMeta: false };
+      this.importModal = { show: true, vaultName: '', file: null, resetMeta: false, uploading: false };
     },
 
     async startImport() {
@@ -2872,6 +2872,7 @@ document.addEventListener('alpine:init', () => {
         vault: this.importModal.vaultName,
         reset_metadata: this.importModal.resetMeta ? 'true' : 'false',
       });
+      this.importModal.uploading = true;
       try {
         const res = await fetch('/api/admin/vaults/import?' + params.toString(), {
           method: 'POST',
@@ -2891,6 +2892,8 @@ document.addEventListener('alpine:init', () => {
         });
       } catch (e) {
         this.addNotification('error', 'Import failed: ' + (e?.message || 'unknown error'));
+      } finally {
+        this.importModal.uploading = false;
       }
     },
 

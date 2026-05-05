@@ -462,6 +462,10 @@ html.light .app-sidebar { background: rgba(250,250,250,0.95); }
   animation: slideIn 0.2s ease;
 }
 @keyframes slideIn { from { transform: translateX(100%); opacity:0; } to { transform: translateX(0); opacity:1; } }
+@keyframes indeterminate {
+  0%   { transform: translateX(-150%); }
+  100% { transform: translateX(350%); }
+}
 .toast.success { border-color: var(--success); }
 .toast.error   { border-color: var(--danger); }
 .toast.info    { border-color: var(--info); }

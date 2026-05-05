@@ -3049,6 +3049,12 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
         <input type="checkbox" x-model="importModal.resetMeta" />
         Reset metadata (timestamps, access counts)
       </label>
+      <div x-show="importModal.uploading" style="margin-bottom:1rem;">
+        <p style="font-size:0.75rem;color:var(--text-muted);margin:0 0 0.25rem;">Uploading…</p>
+        <div style="height:0.5rem;background:var(--border-color,#e5e7eb);border-radius:9999px;overflow:hidden;">
+          <div style="height:100%;width:40%;background:#f59e0b;border-radius:9999px;animation:indeterminate 1.5s ease-in-out infinite;"></div>
+        </div>
+      </div>
       <div x-show="activeJob" style="margin-bottom:1rem;">
         <p style="font-size:0.75rem;color:var(--text-muted);margin:0 0 0.25rem;"
            x-text="activeJob?.phase === 'indexing' ? 'Re-indexing...' : 'Importing...'"></p>
@@ -3062,10 +3068,11 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
       <div style="display:flex;justify-content:flex-end;gap:0.75rem;">
         <button class="btn-secondary" @click="importModal.show = false; clearActiveJob()">Cancel</button>
         <button @click="startImport()"
-                :disabled="!importModal.vaultName || !importModal.file || activeJob?.status === 'running'"
+                :disabled="!importModal.vaultName || !importModal.file || importModal.uploading || activeJob?.status === 'running'"
                 style="padding:0.5rem 1rem;font-size:0.875rem;font-weight:500;background:#f59e0b;color:#fff;border:none;border-radius:0.5rem;cursor:pointer;"
-                :style="(!importModal.vaultName || !importModal.file || activeJob?.status === 'running') ? 'opacity:0.45;cursor:not-allowed;' : 'opacity:1;cursor:pointer;'">
-          Import
+                :style="(!importModal.vaultName || !importModal.file || importModal.uploading || activeJob?.status === 'running') ? 'opacity:0.45;cursor:not-allowed;' : 'opacity:1;cursor:pointer;'">
+          <span x-show="!importModal.uploading">Import</span>
+          <span x-show="importModal.uploading">Uploading…</span>
         </button>
       </div>
     </div>
