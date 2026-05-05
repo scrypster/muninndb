@@ -167,6 +167,46 @@ func TestEngineExportImportRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStartImport_OrphanedVaultCleanup(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	badData := bytes.NewReader([]byte("this is not a muninn archive"))
+
+	job, err := eng.StartImport(ctx, "orphan-vault", "", 0, false, badData)
+	if err != nil {
+		t.Fatalf("StartImport: %v", err)
+	}
+
+	// Wait for job to fail.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		j, ok := eng.GetVaultJob(job.ID)
+		if !ok {
+			t.Fatalf("job %q not found", job.ID)
+		}
+		if j.GetStatus() == vaultjob.StatusError {
+			break
+		}
+		if j.GetStatus() == vaultjob.StatusDone {
+			t.Fatal("expected job to fail with bad data, but it succeeded")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Vault name must NOT appear in the listing.
+	names, err := eng.store.ListVaultNames()
+	if err != nil {
+		t.Fatalf("ListVaultNames: %v", err)
+	}
+	for _, n := range names {
+		if n == "orphan-vault" {
+			t.Error("orphaned vault name still registered after failed import")
+		}
+	}
+}
+
 func TestStartImport_DeadlockOnError(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()

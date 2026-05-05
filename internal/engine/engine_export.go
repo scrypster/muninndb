@@ -140,6 +140,14 @@ func (e *Engine) runImport(job *vaultjob.Job, wsTarget [8]byte, vaultName string
 	if err != nil {
 		metrics.ImportJobsTotal.WithLabelValues("failed").Inc()
 		e.jobManager.Fail(job, fmt.Errorf("import phase: %w", err))
+		// Clean up the reserved vault name so it does not linger as a ghost entry.
+		// Skip if the engine is shutting down — Pebble may already be closed.
+		if ctx.Err() == nil {
+			if cleanupErr := e.store.DeleteVaultNameOnly(context.Background(), vaultName, wsTarget); cleanupErr != nil {
+				slog.Error("runImport: failed to clean up orphaned vault name after phase 1 failure",
+					"vault", vaultName, "err", cleanupErr)
+			}
+		}
 		return
 	}
 	job.CopyCurrent.Store(result.EngramCount)
