@@ -11,6 +11,15 @@ import (
 
 const mcpSessionHeader = "Mcp-Session-Id"
 
+// mcpInstructions is returned in the initialize response to tell MCP clients
+// how to use MuninnDB. Kept concise — call muninn_guide for the full guide.
+const mcpInstructions = `MuninnDB is a long-term memory server for AI agents. ` +
+	`Use muninn_where_left_off at session start. ` +
+	`Store with muninn_remember (include type, summary, entities). ` +
+	`Update with muninn_evolve, not forget+remember. ` +
+	`Keep memories atomic — one concept each. ` +
+	`Call muninn_guide for the full reference.`
+
 // apiKeyValidator is the subset of auth.Store used by MCP for vault key auth.
 // Using an interface keeps the mcp package testable without a live Pebble store.
 type apiKeyValidator interface {
