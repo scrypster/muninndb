@@ -1,6 +1,10 @@
 package audit_test
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -99,5 +103,38 @@ func TestMultiSink_FanOut(t *testing.T) {
 	defer mu.Unlock()
 	if counts[0] != 5 || counts[1] != 5 {
 		t.Errorf("want [5 5], got %v", counts)
+	}
+}
+
+func TestStdoutSink_Write(t *testing.T) {
+	s := audit.NewStdoutSink()
+	err := s.Write(audit.AuditEvent{Action: "test", Result: "ok"})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	_ = s.Close()
+}
+
+func TestWebhookSink_PostsJSON(t *testing.T) {
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	s := audit.NewWebhookSink(srv.URL, 10*time.Millisecond)
+	_ = s.Write(audit.AuditEvent{Action: "vault.delete", Result: "ok"})
+	_ = s.Close()
+
+	if len(received) == 0 {
+		t.Fatal("webhook received no data")
+	}
+	var events []audit.AuditEvent
+	if err := json.Unmarshal(received, &events); err != nil {
+		t.Fatalf("invalid JSON: %v — body: %s", err, received)
+	}
+	if len(events) == 0 || events[0].Action != "vault.delete" {
+		t.Errorf("unexpected events: %v", events)
 	}
 }
