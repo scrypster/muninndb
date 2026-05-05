@@ -11,34 +11,35 @@ import (
 )
 
 // VaultAuthMiddleware enforces vault-level API key auth.
-// Vault is resolved from ?vault= query param first, then from JSON request bodies
-// on body-based routes, and finally defaults to "default" when no explicit
-// vault is provided.
-// Public vaults allow unauthenticated access in full mode.
-// If a Bearer token is present, it is always validated regardless of vault visibility.
+//
+// Authenticated path (Bearer token present):
+//   - Token is validated BEFORE any body parsing to prevent unauthenticated DoS
+//     amplification via large body reads.
+//   - Vault is determined entirely from the validated key; no body parsing occurs.
+//   - If a ?vault= query param is supplied, it is checked against the key vault
+//     (query-only, no body read).
+//
+// Unauthenticated path (no Bearer token):
+//   - Vault is resolved from ?vault= query param, then JSON body, then "default".
+//   - Request is allowed only if the resolved vault is configured as public.
 func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		vault, resolveErr := resolveRequestVault(r, "default")
-		if resolveErr != nil {
-			writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
-			return
-		}
-
 		authHeader := r.Header.Get("Authorization")
 
 		if authHeader != "" {
+			// Authenticated path: validate token BEFORE any body parsing.
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 			key, err := s.ValidateAPIKey(token)
 			if err != nil {
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
 				return
 			}
-			// Enforce vault scoping: the key must be issued for the requested vault.
-			if key.Vault != vault {
+			// Check query-param vault against the key's vault (no body parse needed).
+			if queryVault := strings.TrimSpace(r.URL.Query().Get("vault")); queryVault != "" && queryVault != key.Vault {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				errMsg, _ := json.Marshal(map[string]string{
-					"error": fmt.Sprintf("api key is not authorized for vault %q", vault),
+					"error": fmt.Sprintf("api key is not authorized for vault %q", queryVault),
 					"code":  "VAULT_KEY_MISMATCH",
 				})
 				w.Write(errMsg)
@@ -50,7 +51,13 @@ func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r.WithContext(ctx))
 			return
 		}
-		// No key — check if vault is public
+
+		// Unauthenticated path: resolve vault (query + body) then check if public.
+		vault, resolveErr := resolveRequestVault(r, "default")
+		if resolveErr != nil {
+			writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
+			return
+		}
 		cfg, err := s.GetVaultConfig(vault)
 		if err != nil || !cfg.Public {
 			w.Header().Set("Content-Type", "application/json")
