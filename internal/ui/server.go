@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/scrypster/muninndb/internal/audit"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/logging"
@@ -312,6 +313,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		if s.auditLog != nil {
 			s.auditLog.Log(audit.AuditEvent{
 				Timestamp: time.Now().UTC(),
+				EventID:   ulid.Make().String(),
 				ActorType: "admin",
 				ActorID:   req.Username,
 				Action:    "auth.login_failed",
@@ -339,6 +341,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if s.auditLog != nil {
 		s.auditLog.Log(audit.AuditEvent{
 			Timestamp: time.Now().UTC(),
+			EventID:   ulid.Make().String(),
 			ActorType: "admin",
 			ActorID:   req.Username,
 			Action:    "auth.login",
@@ -354,6 +357,7 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 	if s.auditLog != nil {
 		s.auditLog.Log(audit.AuditEvent{
 			Timestamp: time.Now().UTC(),
+			EventID:   ulid.Make().String(),
 			ActorType: "admin",
 			ActorID:   "admin",
 			Action:    "auth.logout",
