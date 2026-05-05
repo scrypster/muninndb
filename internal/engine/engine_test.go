@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
@@ -48,9 +47,11 @@ func testEnv(t *testing.T) (*Engine, func()) {
 	}
 }
 
-// testEnvWithDB is like testEnv but also returns the underlying *pebble.DB
-// for tests that need to simulate closed-DB conditions.
-func testEnvWithDB(t *testing.T) (*Engine, *pebble.DB, func()) {
+// testEnvWithStore is like testEnv but also returns the underlying *storage.PebbleStore
+// for tests that need to simulate closed-DB conditions. The caller must call
+// store.Close() (not db.Close() directly) so that the counterCoalescer goroutine
+// is drained before the DB is closed — preventing flaky panics in adjacent tests.
+func testEnvWithStore(t *testing.T) (*Engine, *storage.PebbleStore, func()) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "muninndb-engine-test-*")
 	if err != nil {
@@ -71,7 +72,7 @@ func testEnvWithDB(t *testing.T) (*Engine, *pebble.DB, func()) {
 	trigSystem := trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder)
 	eng := NewEngine(EngineConfig{Store: store, FTSIndex: ftsIdx, ActivationEngine: actEngine, TriggerSystem: trigSystem, Embedder: embedder})
 
-	return eng, db, func() {
+	return eng, store, func() {
 		eng.Stop()
 		// store.Close() may panic or error if db was already closed by the test;
 		// recover gracefully so cleanup always removes the temp dir.
