@@ -918,8 +918,9 @@ func runServer() {
 
 	// Wire ClusterCoordinator when cluster mode is enabled.
 	var coordinator *replication.ClusterCoordinator
+	var repLog *replication.ReplicationLog
 	if clusterCfg.Enabled {
-		repLog := replication.NewReplicationLog(db)
+		repLog = replication.NewReplicationLog(db)
 		applier := replication.NewApplier(db)
 		epochStore, err := replication.NewEpochStore(db)
 		if err != nil {
@@ -969,7 +970,14 @@ func runServer() {
 	}
 
 	// Build storage layer
-	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 10000})
+	storeCfg := storage.PebbleStoreConfig{CacheSize: 10000}
+	if clusterCfg.Enabled {
+		storeCfg.RepLogAppend = func(op uint8, key, value []byte) error {
+			_, err := repLog.Append(replication.WALOp(op), key, value)
+			return err
+		}
+	}
+	store := storage.NewPebbleStore(db, storeCfg)
 
 	// Run startup migrations before the engine is built.
 	runStartupMigrations(context.Background(), store)

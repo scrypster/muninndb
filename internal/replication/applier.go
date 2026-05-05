@@ -78,8 +78,38 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 	case OpDelete:
 		batch.Delete(entry.Key, nil)
 	case OpBatch:
-		// OpBatch is reserved for future use (multi-op atomic writes)
-		batch.Set(entry.Key, entry.Value, nil)
+		// entry.Value is a Pebble batch repr (from batch.Repr() on the primary).
+		// Apply the repr atomically, then persist lastApplied in a separate batch.
+		// SetRepr replaces the batch contents entirely; we must commit it as-is
+		// (adding ops after SetRepr causes a batch-count inconsistency in Pebble).
+		// The outer `batch` (created before the switch) is NOT used in this path —
+		// it is simply closed by its deferred Close(). A dedicated `reprBatch` applies
+		// the data, and a separate `markerBatch` writes the lastApplied sequence marker.
+		reprBatch := a.db.NewBatch()
+		defer reprBatch.Close()
+		if err := reprBatch.SetRepr(entry.Value); err != nil {
+			return fmt.Errorf("apply batch repr at seq %d: %w", entry.Seq, err)
+		}
+		if err := reprBatch.Commit(pebble.NoSync); err != nil {
+			return err
+		}
+		seqBuf := make([]byte, 8)
+		binary.BigEndian.PutUint64(seqBuf, entry.Seq)
+		markerBatch := a.db.NewBatch()
+		defer markerBatch.Close()
+		markerBatch.Set(lastAppliedKey(), seqBuf, nil)
+		if err := markerBatch.Commit(pebble.NoSync); err != nil {
+			return err
+		}
+		a.lastApplied = entry.Seq
+		a.appliedSince++
+		if a.appliedSince >= applierSyncInterval {
+			if err := a.db.LogData(nil, pebble.Sync); err != nil {
+				return err
+			}
+			a.appliedSince = 0
+		}
+		return nil
 	case OpCognitive, OpIndex, OpMeta:
 		// All cognitive, index, and metadata operations are applied as key-value writes.
 		// The Op field is metadata for filtering; the persistence semantics are identical.
