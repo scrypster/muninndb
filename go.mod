@@ -1,6 +1,6 @@
 module github.com/scrypster/muninndb
 
-go 1.25.0
+go 1.26.2
 
 toolchain go1.26.2
 
