@@ -1729,6 +1729,7 @@ func (s *Server) handleResolveContradiction(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.sendJSON(w, http.StatusOK, ResolveContradictionResponse{Resolved: true})
+	s.EmitAudit(r, "contradiction.resolve", "vault", vault, "ok", nil)
 }
 
 func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
