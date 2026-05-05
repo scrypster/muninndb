@@ -3,7 +3,6 @@ package audit
 import (
 	"io"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -57,10 +56,11 @@ func (c Config) bufferSize() int {
 // Logger asynchronously fans audit events out to one or more Sinks.
 // A nil *Logger is safe: Log and Close are no-ops.
 type Logger struct {
-	ch     chan AuditEvent
-	sinks  []Sink
-	wg     sync.WaitGroup
-	closed atomic.Bool
+	ch        chan AuditEvent
+	sinks     []Sink
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	done      chan struct{} // closed by Close to signal shutdown
 }
 
 // New creates a Logger that drains events to all provided sinks.
@@ -68,6 +68,7 @@ func New(cfg Config, sinks ...Sink) *Logger {
 	l := &Logger{
 		ch:    make(chan AuditEvent, cfg.bufferSize()),
 		sinks: sinks,
+		done:  make(chan struct{}),
 	}
 	l.wg.Add(1)
 	go l.run()
@@ -76,26 +77,37 @@ func New(cfg Config, sinks ...Sink) *Logger {
 
 // Log enqueues an event. Never blocks. Safe to call on a nil *Logger.
 func (l *Logger) Log(e AuditEvent) {
-	if l == nil || l.closed.Load() {
+	if l == nil {
 		return
+	}
+	// Recover from the rare race where Close() closes l.ch between
+	// the done check and the channel send.
+	defer func() { recover() }() //nolint:errcheck
+	select {
+	case <-l.done:
+		return
+	default:
 	}
 	select {
 	case l.ch <- e:
+	case <-l.done:
 	default:
 	}
 }
 
-// Close flushes pending events, closes sinks, waits for drain goroutine.
-// Safe to call on a nil *Logger.
+// Close flushes pending events, closes sinks, and waits for the drain goroutine.
+// Safe to call on a nil *Logger. Safe to call multiple times concurrently.
 func (l *Logger) Close() error {
 	if l == nil {
 		return nil
 	}
-	l.closed.Store(true)
-	close(l.ch)
+	l.closeOnce.Do(func() {
+		close(l.done)
+		close(l.ch)
+	})
 	l.wg.Wait()
 	for _, s := range l.sinks {
-		_ = s.Close()
+		_ = s.Close() // best-effort; sink close errors are intentionally dropped
 	}
 	return nil
 }
