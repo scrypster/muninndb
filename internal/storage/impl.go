@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,11 @@ type PebbleStoreConfig struct {
 	// When true, the existing walSyncer provides durability within 10ms.
 	// Default false preserves the previous per-write fsync behavior.
 	NoSyncEngrams bool
+	// RepLogAppend, when non-nil, is called after every successful batch.Commit()
+	// on data-bearing write paths. op=3 (OpBatch) with value=batch.Repr() captures
+	// all keys atomically. Non-fatal: errors are logged, not returned.
+	// Only populated when cluster mode is enabled.
+	RepLogAppend func(op uint8, key, value []byte) error
 }
 
 // PebbleStore is the concrete Pebble-backed implementation of EngineStore.
@@ -81,6 +87,8 @@ type PebbleStore struct {
 	// during BFS traversal: if the filter says "no," skip the scan entirely.
 	// Rebuilt on startup and after GC runs via RebuildArchiveBloom.
 	archiveBloom *archiveBloom
+	// repLogAppend is the cluster replication callback. nil in non-cluster mode.
+	repLogAppend func(op uint8, key, value []byte) error
 }
 
 // assocCacheEntry holds a cached association list.
@@ -191,6 +199,7 @@ func NewPebbleStore(db *pebble.DB, cfg PebbleStoreConfig) *PebbleStore {
 	ps.provWork = newProvenanceWorker(prov)
 	ps.transCache = NewTransitionCache(ps)
 	ps.archiveBloom = ps.RebuildArchiveBloom()
+	ps.repLogAppend = cfg.RepLogAppend
 	return ps
 }
 
@@ -204,6 +213,23 @@ func (ps *PebbleStore) CacheLen() int {
 func (ps *PebbleStore) SetWAL(mol *wal.MOL, gc *wal.GroupCommitter) {
 	ps.mol = mol
 	ps.gc = gc
+}
+
+// replicateBatch appends the batch's complete key-value set to the replication
+// log as a single OpBatch entry (op=3). Captures batch.Repr() which remains
+// valid after Commit() and before Close(). Non-fatal: logs errors.
+// Must be called after a successful batch.Commit() and before batch.Close().
+func (ps *PebbleStore) replicateBatch(b *pebble.Batch) {
+	if ps.repLogAppend == nil {
+		return
+	}
+	repr := b.Repr()
+	if len(repr) == 0 {
+		return
+	}
+	if err := ps.repLogAppend(3, nil, repr); err != nil { // 3 = OpBatch
+		slog.Warn("replication log batch append failed", "err", err)
+	}
 }
 
 // VaultPrefix computes the 8-byte SipHash prefix for a vault name.
@@ -313,6 +339,8 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	if err := batch.Commit(syncOption); err != nil {
 		return ULID{}, fmt.Errorf("commit batch: %w", err)
 	}
+
+	ps.replicateBatch(batch)
 
 	// NOTE: Intentionally NOT caching on write to avoid flooding L1 cache.
 
@@ -478,6 +506,8 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		}
 		return ids, errs
 	}
+
+	ps.replicateBatch(batch)
 
 	// Post-commit: vault counters, WAL/MOL, provenance — per item.
 	for i := range items {
