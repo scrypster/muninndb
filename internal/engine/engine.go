@@ -914,8 +914,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		eng.Summary = callerSummary
 	}
 
-	// Set custom CreatedAt if provided
+	// Set custom CreatedAt if provided; validate bounds to prevent provenance
+	// falsification and ULID overflow.
 	if req.CreatedAt != nil {
+		if err := validateCreatedAt(*req.CreatedAt); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+		}
 		eng.CreatedAt = *req.CreatedAt
 	}
 
@@ -1325,6 +1329,10 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			eng.Summary = callerSummary
 		}
 		if req.CreatedAt != nil {
+			if validateErr := validateCreatedAt(*req.CreatedAt); validateErr != nil {
+				errs[i] = fmt.Errorf("%w: %v", ErrInvalidRequest, validateErr)
+				continue
+			}
 			eng.CreatedAt = *req.CreatedAt
 		}
 

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -2304,5 +2305,123 @@ func TestEngine_SetTrust(t *testing.T) {
 	fakeID := "01ARZ3NDEKTSV4RRFFQ69G5FAV" // valid ULID format but no such engram
 	if err := eng.SetTrust(context.Background(), "default", fakeID, "verified"); err == nil {
 		t.Error("expected error for nonexistent engram")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: WriteRequest.CreatedAt bounds validation
+// ---------------------------------------------------------------------------
+
+func TestEngineWrite_CreatedAtFuture(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	future := time.Now().Add(10 * time.Minute)
+	_, err := eng.Write(context.Background(), &mbp.WriteRequest{
+		Vault:     "test",
+		Concept:   "x",
+		Content:   "test",
+		CreatedAt: &future,
+	})
+	if err == nil {
+		t.Error("expected error for future CreatedAt, got nil")
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest, got: %v", err)
+	}
+}
+
+func TestEngineWrite_CreatedAtTooOld(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ancient := time.Date(1999, 12, 31, 0, 0, 0, 0, time.UTC)
+	_, err := eng.Write(context.Background(), &mbp.WriteRequest{
+		Vault:     "test",
+		Concept:   "x",
+		Content:   "test",
+		CreatedAt: &ancient,
+	})
+	if err == nil {
+		t.Error("expected error for CreatedAt before 2000-01-01, got nil")
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest, got: %v", err)
+	}
+}
+
+func TestEngineWrite_CreatedAtValid(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	past := time.Now().Add(-24 * time.Hour)
+	_, err := eng.Write(context.Background(), &mbp.WriteRequest{
+		Vault:     "test",
+		Concept:   "x",
+		Content:   "test",
+		CreatedAt: &past,
+	})
+	if err != nil {
+		t.Errorf("expected no error for valid past CreatedAt, got: %v", err)
+	}
+}
+
+func TestEngineWriteBatch_CreatedAtFuture(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	future := time.Now().Add(10 * time.Minute)
+	_, errs := eng.WriteBatch(context.Background(), []*mbp.WriteRequest{
+		{
+			Vault:     "test",
+			Concept:   "x",
+			Content:   "test",
+			CreatedAt: &future,
+		},
+	})
+	if len(errs) == 0 || errs[0] == nil {
+		t.Error("expected error for future CreatedAt in batch, got nil")
+	}
+	if !errors.Is(errs[0], ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest, got: %v", errs[0])
+	}
+}
+
+func TestEngineWriteBatch_CreatedAtTooOld(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ancient := time.Date(1999, 12, 31, 0, 0, 0, 0, time.UTC)
+	_, errs := eng.WriteBatch(context.Background(), []*mbp.WriteRequest{
+		{
+			Vault:     "test",
+			Concept:   "x",
+			Content:   "test",
+			CreatedAt: &ancient,
+		},
+	})
+	if len(errs) == 0 || errs[0] == nil {
+		t.Error("expected error for CreatedAt before 2000-01-01 in batch, got nil")
+	}
+	if !errors.Is(errs[0], ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest, got: %v", errs[0])
+	}
+}
+
+func TestEngineWriteBatch_CreatedAtValid(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	past := time.Now().Add(-24 * time.Hour)
+	_, errs := eng.WriteBatch(context.Background(), []*mbp.WriteRequest{
+		{
+			Vault:     "test",
+			Concept:   "x",
+			Content:   "test",
+			CreatedAt: &past,
+		},
+	})
+	if len(errs) > 0 && errs[0] != nil {
+		t.Errorf("expected no error for valid past CreatedAt in batch, got: %v", errs[0])
 	}
 }
