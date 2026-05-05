@@ -129,3 +129,59 @@ func TestRepLogHook_EndToEnd(t *testing.T) {
 		t.Fatal("replica DB has no 0x01 engram keys after applying batch repr")
 	}
 }
+
+// TestRepLogHook_SoftDelete verifies callback fires on SoftDelete.
+func TestRepLogHook_SoftDelete(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	var batchCount atomic.Int32
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 {
+				batchCount.Add(1)
+			}
+			return nil
+		},
+	})
+	ws := store.VaultPrefix("softdel-vault")
+	ctx := context.Background()
+
+	id, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "soft", Content: "body"})
+	before := batchCount.Load()
+
+	if err := store.SoftDelete(ctx, ws, id); err != nil {
+		t.Fatalf("SoftDelete: %v", err)
+	}
+	if batchCount.Load() <= before {
+		t.Error("SoftDelete: RepLogAppend not called")
+	}
+}
+
+// TestRepLogHook_DeleteEngram verifies callback fires on hard delete.
+func TestRepLogHook_DeleteEngram(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	var batchCount atomic.Int32
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 {
+				batchCount.Add(1)
+			}
+			return nil
+		},
+	})
+	ws := store.VaultPrefix("del-vault")
+	ctx := context.Background()
+
+	id, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "del", Content: "body"})
+	before := batchCount.Load()
+
+	if err := store.DeleteEngram(ctx, ws, id); err != nil {
+		t.Fatalf("DeleteEngram: %v", err)
+	}
+	if batchCount.Load() <= before {
+		t.Error("DeleteEngram: RepLogAppend not called")
+	}
+}
