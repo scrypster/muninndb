@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -335,7 +334,7 @@ func TestGetEnrichmentCandidates_CursorPaginates(t *testing.T) {
 	// to write order. Sort by raw bytes (Pebble key order) to get the
 	// expected pagination sequence.
 	unenriched := []storage.ULID{ids[4], ids[5]}
-	if bytes.Compare(unenriched[0][:], unenriched[1][:]) > 0 {
+	if storage.CompareULIDs(unenriched[0], unenriched[1]) > 0 {
 		unenriched[0], unenriched[1] = unenriched[1], unenriched[0]
 	}
 
