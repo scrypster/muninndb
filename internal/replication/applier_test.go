@@ -356,3 +356,52 @@ func TestApplier_Apply_AllOpTypes_Idempotent(t *testing.T) {
 		t.Errorf("cognitive_key value = %q, want %q", string(val), "cognitive_value")
 	}
 }
+
+// TestApplier_OpBatch_PersistsLastApplied verifies that the lastApplied sequence
+// marker is persisted to disk after an OpBatch commit, so that a restarted Applier
+// resumes from the correct position without re-applying the batch.
+func TestApplier_OpBatch_PersistsLastApplied(t *testing.T) {
+	dir := t.TempDir()
+
+	// Phase 1: apply an OpBatch entry.
+	{
+		db, err := pebble.Open(dir, &pebble.Options{})
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		applier := NewApplier(db)
+
+		srcBatch := db.NewBatch()
+		srcBatch.Set([]byte{0x01, 0xCC}, []byte("persist-test"), nil)
+		repr := make([]byte, len(srcBatch.Repr()))
+		copy(repr, srcBatch.Repr())
+		srcBatch.Close()
+
+		if err := applier.Apply(ReplicationEntry{
+			Seq:   42,
+			Op:    OpBatch,
+			Key:   nil,
+			Value: repr,
+		}); err != nil {
+			db.Close()
+			t.Fatalf("Apply: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+
+	// Phase 2: reopen DB and verify lastApplied is 42.
+	{
+		db, err := pebble.Open(dir, &pebble.Options{})
+		if err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		defer db.Close()
+
+		applier := NewApplier(db)
+		if got := applier.LastApplied(); got != 42 {
+			t.Errorf("LastApplied after restart = %d, want 42", got)
+		}
+	}
+}

@@ -79,11 +79,12 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 		batch.Delete(entry.Key, nil)
 	case OpBatch:
 		// entry.Value is a Pebble batch repr (from batch.Repr() on the primary).
-		// Apply the repr atomically, then persist lastApplied in the outer batch.
+		// Apply the repr atomically, then persist lastApplied in a separate batch.
 		// SetRepr replaces the batch contents entirely; we must commit it as-is
 		// (adding ops after SetRepr causes a batch-count inconsistency in Pebble).
-		// The outer `batch` (empty, just created above) is used for the lastApplied
-		// marker and is closed by its own defer.
+		// The outer `batch` (created before the switch) is NOT used in this path —
+		// it is simply closed by its deferred Close(). A dedicated `reprBatch` applies
+		// the data, and a separate `markerBatch` writes the lastApplied sequence marker.
 		reprBatch := a.db.NewBatch()
 		defer reprBatch.Close()
 		if err := reprBatch.SetRepr(entry.Value); err != nil {
