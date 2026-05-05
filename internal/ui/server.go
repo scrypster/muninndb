@@ -122,6 +122,9 @@ func NewServer(webFS fs.FS, engine rest.EngineAPI, apiHandler http.Handler, auth
 		mux.HandleFunc("/events", s.handleSSE)
 	}
 	mux.Handle("/api/", apiHandler)
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/static/logo.jpg", http.StatusMovedPermanently)
+	})
 	mux.HandleFunc("/", s.handleSPA)
 
 	s.mux = mux
