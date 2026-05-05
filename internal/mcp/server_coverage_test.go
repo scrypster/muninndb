@@ -36,6 +36,10 @@ func TestHandleRPC_Initialize(t *testing.T) {
 	if _, ok := result["protocolVersion"]; !ok {
 		t.Error("response missing 'protocolVersion'")
 	}
+	instr, ok := result["instructions"].(string)
+	if !ok || instr == "" {
+		t.Error("response missing 'instructions'")
+	}
 }
 
 func TestHandleRPC_Ping(t *testing.T) {

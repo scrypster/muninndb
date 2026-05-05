@@ -126,6 +126,7 @@ func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, s
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	// Invalidate source node's cached association list so BFS traversal
 	// sees the new edge immediately instead of waiting for TTL expiry.
@@ -412,6 +413,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	ps.assocCache.Remove(assocCacheKey(wsPrefix, a))
 	return nil
@@ -482,6 +484,7 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	// Invalidate assoc cache for all updated source nodes.
 	// Deduplicate to avoid redundant removals when a source appears multiple times.
@@ -586,6 +589,7 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		if err := batch.Commit(pebble.NoSync); err != nil {
 			return fmt.Errorf("decay assoc chunk commit: %w", err)
 		}
+		ps.replicateBatch(batch)
 		chunk = chunk[:0]
 		return nil
 	}
@@ -811,6 +815,7 @@ func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, 
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	return nil
 }
@@ -834,6 +839,7 @@ func (ps *PebbleStore) ResolveContradiction(ctx context.Context, wsPrefix [8]byt
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("resolve contradiction: %w", err)
 	}
+	ps.replicateBatch(batch)
 	return nil
 }
 
