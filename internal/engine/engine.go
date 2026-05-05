@@ -221,17 +221,19 @@ type Engine struct {
 
 	// contentHashLocks serialises the GetContentHash → WriteEngram → PutContentHash
 	// sequence per (vault, content-hash) stripe, preventing TOCTOU duplicates under
-	// concurrent REST writes. Uses 256 FNV-32a stripes for constant memory overhead.
-	contentHashLocks [256]sync.Mutex
+	// concurrent REST writes. Uses contentHashStripes FNV-32a stripes for constant memory overhead.
+	contentHashLocks [contentHashStripes]sync.Mutex
 }
 
+const contentHashStripes = 256
+
 // contentHashLock returns the stripe mutex for the given (vault prefix, content hash) pair.
-// Uses FNV-32a to spread locks across 256 stripes.
+// Uses FNV-32a to spread locks across contentHashStripes stripes.
 func (e *Engine) contentHashLock(wsPrefix [8]byte, hash [32]byte) *sync.Mutex {
 	h := fnv.New32a()
 	h.Write(wsPrefix[:])
 	h.Write(hash[:])
-	return &e.contentHashLocks[h.Sum32()%256]
+	return &e.contentHashLocks[h.Sum32()%contentHashStripes]
 }
 
 // SetOnWrite registers a callback invoked after every successful Write.
@@ -831,15 +833,27 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	// Locked per (vault, content-hash) stripe to prevent TOCTOU duplicates under
 	// concurrent REST writes: two goroutines with identical content must not both
 	// pass GetContentHash before either calls PutContentHash.
+	// unlockContentHash is idempotent — safe to call from any return path and
+	// from defer, eliminating the risk of a lock leak on future code changes.
 	contentHash := storage.ContentHash(req.Content)
 	contentHashMu := e.contentHashLock(wsPrefix, contentHash)
 	contentHashMu.Lock()
+	var contentHashUnlocked bool
+	unlockContentHash := func() {
+		if !contentHashUnlocked {
+			contentHashUnlocked = true
+			contentHashMu.Unlock()
+		}
+	}
+	defer unlockContentHash()
 	if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
 		// A mapping exists — verify the engram is still live (not soft-deleted).
 		if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && existingEng.State != storage.StateSoftDeleted {
 			// Reinforce: increment access count and update LastAccess
 			// to signal that this content is being re-experienced.
-			contentHashMu.Unlock()
+			// Release the stripe lock before UpdateMetadata — the dedup decision
+			// is already made and UpdateMetadata doesn't need protection.
+			unlockContentHash()
 			_ = e.store.UpdateMetadata(ctx, wsPrefix, existingID, &storage.EngramMeta{
 				AccessCount: existingEng.AccessCount + 1,
 				LastAccess:  time.Now(),
@@ -926,7 +940,6 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	// Write to store
 	id, err := e.store.WriteEngram(ctx, wsPrefix, eng)
 	if err != nil {
-		contentHashMu.Unlock()
 		return nil, fmt.Errorf("write engram: %w", err)
 	}
 
@@ -934,7 +947,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	if err := e.store.PutContentHash(ctx, wsPrefix, contentHash, id); err != nil {
 		slog.Warn("engine: failed to store content hash", "id", id.String(), "err", err)
 	}
-	contentHashMu.Unlock()
+	unlockContentHash() // release stripe lock — PutContentHash is done
 
 	// When the caller provided an embedding, mark DigestEmbed so the retroactive
 	// processor does not overwrite it, then insert into HNSW inline so the vector
