@@ -65,6 +65,10 @@ func runShell() {
 	if mcpURL == "" {
 		mcpURL = "http://127.0.0.1:8750"
 	}
+	uiBase := os.Getenv("MUNINNDB_UI_URL")
+	if uiBase == "" {
+		uiBase = "http://127.0.0.1:8476"
+	}
 
 	// Detect first run (no config file = user hasn't used 'use <vault>' before)
 	_, configErr := os.Stat(configPath())
@@ -84,7 +88,7 @@ func runShell() {
 	}
 
 	// Auto-authenticate with default credentials; prompt only if that fails
-	sessionCookie, authErr := autoAuth("http://127.0.0.1:8476")
+	sessionCookie, authErr := autoAuth(uiBase)
 	if authErr != nil {
 		// Default creds failed — prompt once
 		fmt.Print("Username: ")
@@ -100,12 +104,12 @@ func runShell() {
 			os.Exit(1)
 		}
 
-		if err := shellValidateAdmin(username, string(passBytes)); err != nil {
+		if err := shellValidateAdmin(uiBase, username, string(passBytes)); err != nil {
 			fmt.Fprintln(os.Stderr, "Authentication failed.")
 			os.Exit(1)
 		}
 		// Refresh cookie after explicit login
-		sessionCookie, _ = autoAuth("http://127.0.0.1:8476")
+		sessionCookie, _ = autoAuth(uiBase)
 	}
 
 	r.sessionCookie = sessionCookie
@@ -286,15 +290,15 @@ func (r *replState) printRotatingTip() {
 }
 
 // shellValidateAdmin validates admin credentials against the running UI server's
-// login endpoint (POST http://127.0.0.1:8476/api/auth/login).
+// login endpoint (POST <uiBase>/api/auth/login).
 // Returns nil on success, non-nil on auth failure or network error.
-func shellValidateAdmin(username, password string) error {
+func shellValidateAdmin(uiBase, username, password string) error {
 	body, _ := json.Marshal(map[string]string{
 		"username": username,
 		"password": password,
 	})
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post("http://127.0.0.1:8476/api/auth/login", "application/json", bytes.NewReader(body))
+	resp, err := client.Post(uiBase+"/api/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("connect to server: %w", err)
 	}
