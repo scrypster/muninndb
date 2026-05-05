@@ -695,6 +695,10 @@ func (s *Server) handleCreateEngram(w http.ResponseWriter, r *http.Request) {
 			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
 			return
 		}
+		if errors.Is(err, engine.ErrInvalidRequest) {
+			s.sendError(r, w, http.StatusUnprocessableEntity, ErrInvalidEngram, err.Error())
+			return
+		}
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return
 	}

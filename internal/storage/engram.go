@@ -290,6 +290,7 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	// Update LastAccess index (best effort — index inconsistency is non-fatal).
 	if !meta.LastAccess.IsZero() {
@@ -363,6 +364,7 @@ func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	// Append provenance entry via persistent worker (best effort — drops if full).
 	ps.provWork.Submit(wsPrefix, id, provenance.ProvenanceEntry{
@@ -406,6 +408,7 @@ func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULI
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	ps.provWork.Submit(wsPrefix, id, provenance.ProvenanceEntry{
 		Timestamp: time.Now(),
@@ -430,7 +433,11 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		batch.Delete(keys.EngramKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.MetaKey(wsPrefix, [16]byte(id)), nil)
 		ps.cache.Delete(wsPrefix, id)
-		return batch.Commit(pebble.NoSync)
+		if err := batch.Commit(pebble.NoSync); err != nil {
+			return err
+		}
+		ps.replicateBatch(batch)
+		return nil
 	}
 
 	batch := ps.db.NewBatch()
@@ -556,6 +563,7 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("delete engram: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	ps.cache.Delete(wsPrefix, id)
 
@@ -652,6 +660,7 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	// Update cache (vault-scoped) and invalidate the metadata-only cache
 	// so subsequent GetMetadata calls see the updated StateSoftDeleted state.
@@ -708,6 +717,7 @@ func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	return nil
 }
@@ -787,6 +797,7 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	// Update cache (vault-scoped).
 	ps.cache.Set(wsPrefix, id, eng)

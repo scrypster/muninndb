@@ -85,6 +85,12 @@ type EngineStore interface {
 	// weight-sorted descending, up to maxPerNode per source.
 	GetAssociations(ctx context.Context, wsPrefix [8]byte, ids []ULID, maxPerNode int) (map[ULID][]Association, error)
 
+	// GetReverseAssociations returns all associations that TARGET the given id,
+	// by scanning the 0x04 reverse index. The returned Association.TargetID
+	// is the SOURCE engram (the engram that points TO id). Results are capped
+	// at maxPerNode entries.
+	GetReverseAssociations(ctx context.Context, wsPrefix [8]byte, id ULID, maxPerNode int) ([]Association, error)
+
 	// RecentActive returns up to topK engram IDs with the highest relevance
 	// in the vault. Uses the 0x10 relevance bucket index for O(k) scanning.
 	RecentActive(ctx context.Context, wsPrefix [8]byte, topK int) ([]ULID, error)

@@ -600,6 +600,10 @@ func (a *mcpEngineAdapter) SetTrust(ctx context.Context, vault, id, trust string
 	return a.eng.SetTrust(ctx, vault, id, trust)
 }
 
+func (a *mcpEngineAdapter) GetAnnotations(ctx context.Context, vault, id string) (*engine.AnnotationData, error) {
+	return a.eng.GetAnnotations(ctx, vault, id)
+}
+
 func (a *mcpEngineAdapter) ListEntities(ctx context.Context, vault string, limit int, state string) ([]EntitySummary, error) {
 	records, err := a.eng.ListEntities(ctx, vault, limit, state)
 	if err != nil {

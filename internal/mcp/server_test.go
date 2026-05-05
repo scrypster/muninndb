@@ -182,6 +182,10 @@ func (f *fakeEngine) GetVaultEmbedDim(_ context.Context, _ string) int {
 }
 func (f *fakeEngine) SetTrust(_ context.Context, _, _, _ string) error { return nil }
 
+func (f *fakeEngine) GetAnnotations(_ context.Context, _, _ string) (*engine.AnnotationData, error) {
+	return nil, nil
+}
+
 func newTestServer() *MCPServer {
 	return New(":0", &fakeEngine{}, "", nil, nil)
 }

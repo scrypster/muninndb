@@ -225,7 +225,11 @@ func (ps *PebbleStore) WriteEntityEngramLink(ctx context.Context, ws [8]byte, en
 	if err := batch.Set(revKey, nil, nil); err != nil {
 		return fmt.Errorf("write entity link rev: %w", err)
 	}
-	return batch.Commit(pebble.NoSync)
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	ps.replicateBatch(batch)
+	return nil
 }
 
 // RelinkEntityEngramLink atomically moves a vault-scoped engram link from fromEntity
@@ -258,7 +262,11 @@ func (ps *PebbleStore) RelinkEntityEngramLink(ctx context.Context, ws [8]byte, e
 	if err := batch.Delete(keys.EntityReverseIndexKey(fromHash, ws, id), nil); err != nil {
 		return fmt.Errorf("relink entity engram link: del rev: %w", err)
 	}
-	return batch.Commit(pebble.NoSync)
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	ps.replicateBatch(batch)
+	return nil
 }
 
 // DeleteEntityEngramLink deletes the 0x20 forward key and 0x23 reverse key for a
@@ -278,7 +286,11 @@ func (ps *PebbleStore) DeleteEntityEngramLink(ctx context.Context, ws [8]byte, e
 	if err := batch.Delete(revKey, nil); err != nil {
 		return fmt.Errorf("delete entity link rev: %w", err)
 	}
-	return batch.Commit(pebble.NoSync)
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	ps.replicateBatch(batch)
+	return nil
 }
 
 // ScanEntityEngrams scans the 0x23 reverse index for all vault-scoped engrams
@@ -713,6 +725,7 @@ func (ps *PebbleStore) RelinkRelationshipEntity(ctx context.Context, ws [8]byte,
 			batch.Close()
 			return fmt.Errorf("relink relationship entity: commit: %w", err)
 		}
+		ps.replicateBatch(batch)
 		batch.Close()
 	}
 	return nil
@@ -745,7 +758,11 @@ func (ps *PebbleStore) UpsertRelationshipRecord(ctx context.Context, ws [8]byte,
 	if err := batch.Set(idxToKey, nil, nil); err != nil {
 		return fmt.Errorf("upsert relationship record: set 0x26 to: %w", err)
 	}
-	return batch.Commit(pebble.NoSync)
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	ps.replicateBatch(batch)
+	return nil
 }
 
 const (
@@ -827,6 +844,7 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("UpdateDigest: commit: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	return nil
 }

@@ -1,0 +1,259 @@
+package storage_test
+
+import (
+	"context"
+	"sync/atomic"
+	"testing"
+
+	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/storage"
+)
+
+func openRepHookDB(t *testing.T) (*pebble.DB, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	return db, func() { _ = db.Close() }
+}
+
+// opBatchCounter returns a PebbleStoreConfig with RepLogAppend set to count
+// batch writes (op==3), and a function that returns the current count.
+func opBatchCounter(t *testing.T) (storage.PebbleStoreConfig, func() int32) {
+	t.Helper()
+	var count atomic.Int32
+	return storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 {
+				count.Add(1)
+			}
+			return nil
+		},
+	}, func() int32 {
+		return count.Load()
+	}
+}
+
+// TestRepLogHook_NilCallback verifies WriteEngram does not panic when
+// RepLogAppend is nil (non-cluster deployments).
+func TestRepLogHook_NilCallback(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{})
+	ws := store.VaultPrefix("nil-hook-vault")
+	ctx := context.Background()
+
+	if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept: "no callback",
+		Content: "should not panic",
+	}); err != nil {
+		t.Fatalf("WriteEngram with nil callback: %v", err)
+	}
+}
+
+// TestRepLogHook_WriteEngram fires once per WriteEngram call.
+func TestRepLogHook_WriteEngram(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	var callCount atomic.Int32
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 {
+				callCount.Add(1)
+			}
+			return nil
+		},
+	})
+
+	ws := store.VaultPrefix("write-vault")
+	ctx := context.Background()
+
+	if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept: "test",
+		Content: "body",
+	}); err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	if got := callCount.Load(); got != 1 {
+		t.Errorf("WriteEngram: RepLogAppend called %d times, want 1", got)
+	}
+}
+
+// TestRepLogHook_EndToEnd verifies that the batch repr captured via RepLogAppend
+// can be applied to a second Pebble instance (simulating what Applier.Apply does
+// for OpBatch). This is the direct regression test for issue #409.
+func TestRepLogHook_EndToEnd(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	dir2 := t.TempDir()
+	db2, err := pebble.Open(dir2, &pebble.Options{})
+	if err != nil {
+		t.Fatalf("open replica pebble: %v", err)
+	}
+	defer db2.Close()
+
+	var capturedRepr []byte
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 && capturedRepr == nil {
+				capturedRepr = append([]byte(nil), value...)
+			}
+			return nil
+		},
+	})
+
+	ws := store.VaultPrefix("e2e-vault")
+	ctx := context.Background()
+
+	if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept: "end-to-end",
+		Content: "replica should receive this",
+	}); err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	if len(capturedRepr) == 0 {
+		t.Fatal("no batch repr captured by RepLogAppend")
+	}
+
+	// Apply to replica DB — exactly what Applier.Apply does for OpBatch.
+	replicaBatch := db2.NewBatch()
+	defer replicaBatch.Close()
+	if err := replicaBatch.SetRepr(capturedRepr); err != nil {
+		t.Fatalf("SetRepr on replica: %v", err)
+	}
+	if err := replicaBatch.Commit(pebble.NoSync); err != nil {
+		t.Fatalf("replica batch commit: %v", err)
+	}
+
+	// Confirm replica has the 0x01-prefixed engram key.
+	iter, err := db2.NewIter(&pebble.IterOptions{
+		LowerBound: []byte{0x01},
+		UpperBound: []byte{0x02},
+	})
+	if err != nil {
+		t.Fatalf("NewIter: %v", err)
+	}
+	defer iter.Close()
+
+	if !iter.First() {
+		t.Fatal("replica DB has no 0x01 engram keys after applying batch repr")
+	}
+}
+
+// TestRepLogHook_SoftDelete verifies callback fires on SoftDelete.
+func TestRepLogHook_SoftDelete(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	var batchCount atomic.Int32
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 {
+				batchCount.Add(1)
+			}
+			return nil
+		},
+	})
+	ws := store.VaultPrefix("softdel-vault")
+	ctx := context.Background()
+
+	id, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "soft", Content: "body"})
+	before := batchCount.Load()
+
+	if err := store.SoftDelete(ctx, ws, id); err != nil {
+		t.Fatalf("SoftDelete: %v", err)
+	}
+	if batchCount.Load() <= before {
+		t.Error("SoftDelete: RepLogAppend not called")
+	}
+}
+
+// TestRepLogHook_DeleteEngram verifies callback fires on hard delete.
+func TestRepLogHook_DeleteEngram(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	var batchCount atomic.Int32
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 {
+				batchCount.Add(1)
+			}
+			return nil
+		},
+	})
+	ws := store.VaultPrefix("del-vault")
+	ctx := context.Background()
+
+	id, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "del", Content: "body"})
+	before := batchCount.Load()
+
+	if err := store.DeleteEngram(ctx, ws, id); err != nil {
+		t.Fatalf("DeleteEngram: %v", err)
+	}
+	if batchCount.Load() <= before {
+		t.Error("DeleteEngram: RepLogAppend not called")
+	}
+}
+
+// TestRepLogHook_WriteAssociation verifies callback fires on WriteAssociation.
+func TestRepLogHook_WriteAssociation(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	var batchCount atomic.Int32
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{
+		RepLogAppend: func(op uint8, key, value []byte) error {
+			if op == 3 {
+				batchCount.Add(1)
+			}
+			return nil
+		},
+	})
+
+	ws := store.VaultPrefix("assoc-vault")
+	ctx := context.Background()
+
+	src, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "src", Content: "s"})
+	dst, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "dst", Content: "d"})
+	before := batchCount.Load()
+
+	if err := store.WriteAssociation(ctx, ws, src, dst, &storage.Association{
+		TargetID: dst,
+		Weight:   0.8,
+		RelType:  storage.RelRelatesTo,
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+	if batchCount.Load() <= before {
+		t.Error("WriteAssociation: RepLogAppend not called")
+	}
+}
+
+// TestRepLogHook_WriteEntityEngramLink verifies callback fires on entity link write.
+func TestRepLogHook_WriteEntityEngramLink(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	cfg, count := opBatchCounter(t)
+	store := storage.NewPebbleStore(db, cfg)
+	ws := store.VaultPrefix("entity-vault")
+	ctx := context.Background()
+
+	id, _ := store.WriteEngram(ctx, ws, &storage.Engram{Concept: "entity test", Content: "body"})
+	before := count()
+
+	if err := store.WriteEntityEngramLink(ctx, ws, id, "Alice"); err != nil {
+		t.Fatalf("WriteEntityEngramLink: %v", err)
+	}
+	if count() <= before {
+		t.Error("WriteEntityEngramLink: RepLogAppend not called")
+	}
+}

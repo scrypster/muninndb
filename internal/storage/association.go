@@ -126,6 +126,7 @@ func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, s
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	// Invalidate source node's cached association list so BFS traversal
 	// sees the new edge immediately instead of waiting for TTL expiry.
@@ -412,6 +413,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	ps.assocCache.Remove(assocCacheKey(wsPrefix, a))
 	return nil
@@ -482,6 +484,7 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	// Invalidate assoc cache for all updated source nodes.
 	// Deduplicate to avoid redundant removals when a source appears multiple times.
@@ -586,6 +589,7 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		if err := batch.Commit(pebble.NoSync); err != nil {
 			return fmt.Errorf("decay assoc chunk commit: %w", err)
 		}
+		ps.replicateBatch(batch)
 		chunk = chunk[:0]
 		return nil
 	}
@@ -739,6 +743,51 @@ func (ps *PebbleStore) GetChildrenByParent(ctx context.Context, wsPrefix [8]byte
 	return children, nil
 }
 
+// GetReverseAssociations returns all associations that TARGET id by scanning
+// the 0x04 reverse index. The returned Association.TargetID is the SOURCE
+// engram (the engram that points TO id). Results are capped at maxPerNode entries.
+// Reverse key layout: 0x04 | ws(8) | dstID(16) | weightComplement(4) | srcID(16) = 45 bytes
+func (ps *PebbleStore) GetReverseAssociations(ctx context.Context, wsPrefix [8]byte, id ULID, maxPerNode int) ([]Association, error) {
+	prefix := keys.AssocRevPrefixForID(wsPrefix, [16]byte(id))
+	iter, err := PrefixIterator(ps.db, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("GetReverseAssociations prefix iter: %w", err)
+	}
+	defer iter.Close()
+
+	var results []Association
+	for iter.First(); iter.Valid() && (maxPerNode <= 0 || len(results) < maxPerNode); iter.Next() {
+		k := iter.Key()
+		if len(k) < 45 {
+			continue
+		}
+		var srcID ULID
+		copy(srcID[:], k[29:45])
+
+		var wc [4]byte
+		copy(wc[:], k[25:29])
+		weight := keys.WeightFromComplement(wc)
+
+		relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, restoredAt := decodeAssocValue(iter.Value())
+
+		results = append(results, Association{
+			TargetID:          srcID,
+			Weight:            weight,
+			RelType:           relType,
+			Confidence:        confidence,
+			CreatedAt:         createdAt,
+			LastActivated:     lastActivated,
+			PeakWeight:        peakWeight,
+			CoActivationCount: coActivationCount,
+			RestoredAt:        restoredAt,
+		})
+	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("GetReverseAssociations scan: %w", err)
+	}
+	return results, nil
+}
+
 // FlagContradiction writes the 0x0A contradiction key for pair (a,b).
 func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error {
 	batch := ps.db.NewBatch()
@@ -766,6 +815,7 @@ func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, 
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	ps.replicateBatch(batch)
 
 	return nil
 }
@@ -789,6 +839,7 @@ func (ps *PebbleStore) ResolveContradiction(ctx context.Context, wsPrefix [8]byt
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("resolve contradiction: %w", err)
 	}
+	ps.replicateBatch(batch)
 	return nil
 }
 

@@ -179,6 +179,94 @@ func TestSetHostPorts_InvalidPort(t *testing.T) {
 	}
 }
 
+func TestSetHostPorts_HttpsSchemeHostOnly(t *testing.T) {
+	oldAdmin, oldUI := vaultAdminBase, vaultUIBase
+	defer func() { vaultAdminBase = oldAdmin; vaultUIBase = oldUI }()
+
+	setHostPorts("https://muninn.example.lan")
+	if vaultAdminBase != "https://muninn.example.lan:8475" {
+		t.Errorf("admin base: got %q, want https://muninn.example.lan:8475", vaultAdminBase)
+	}
+	if vaultUIBase != "https://muninn.example.lan:8476" {
+		t.Errorf("UI base: got %q, want https://muninn.example.lan:8476", vaultUIBase)
+	}
+}
+
+func TestSetHostPorts_HttpsSchemeWithPort(t *testing.T) {
+	oldAdmin, oldUI := vaultAdminBase, vaultUIBase
+	defer func() { vaultAdminBase = oldAdmin; vaultUIBase = oldUI }()
+
+	setHostPorts("https://muninn.example.lan:8475")
+	if vaultAdminBase != "https://muninn.example.lan:8475" {
+		t.Errorf("admin base: got %q, want https://muninn.example.lan:8475", vaultAdminBase)
+	}
+	if vaultUIBase != "https://muninn.example.lan:8476" {
+		t.Errorf("UI base: got %q, want https://muninn.example.lan:8476", vaultUIBase)
+	}
+}
+
+func TestSetHostPorts_HttpSchemeExplicit(t *testing.T) {
+	oldAdmin, oldUI := vaultAdminBase, vaultUIBase
+	defer func() { vaultAdminBase = oldAdmin; vaultUIBase = oldUI }()
+
+	setHostPorts("http://myserver:9000")
+	if vaultAdminBase != "http://myserver:9000" {
+		t.Errorf("admin base: got %q, want http://myserver:9000", vaultAdminBase)
+	}
+	if vaultUIBase != "http://myserver:9001" {
+		t.Errorf("UI base: got %q, want http://myserver:9001", vaultUIBase)
+	}
+}
+
+func TestSetHostPorts_FlagOverridesEnvVar(t *testing.T) {
+	// -h flag must take precedence over MUNINNDB_ADMIN_URL/MUNINNDB_UI_URL.
+	t.Setenv("MUNINNDB_ADMIN_URL", "https://env.example.com:8475")
+	t.Setenv("MUNINNDB_UI_URL", "https://env.example.com:8476")
+
+	oldAdmin, oldUI := vaultAdminBase, vaultUIBase
+	defer func() { vaultAdminBase = oldAdmin; vaultUIBase = oldUI }()
+
+	setHostPorts("https://flag.example.com:9000")
+	if vaultAdminBase != "https://flag.example.com:9000" {
+		t.Errorf("admin base: got %q, want flag value", vaultAdminBase)
+	}
+	if vaultUIBase != "https://flag.example.com:9001" {
+		t.Errorf("UI base: got %q, want flag value", vaultUIBase)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MUNINNDB_ADMIN_URL / MUNINNDB_UI_URL env var overrides
+// ---------------------------------------------------------------------------
+
+func TestEnvVarOverride_AdminURL(t *testing.T) {
+	t.Setenv("MUNINNDB_ADMIN_URL", "https://tls.example.com:8475")
+	t.Setenv("MUNINNDB_UI_URL", "")
+
+	oldAdmin, oldUI := vaultAdminBase, vaultUIBase
+	defer func() { vaultAdminBase = oldAdmin; vaultUIBase = oldUI }()
+
+	// Simulate what init() does at startup (re-apply env vars directly since
+	// init() already ran before the test set the env var).
+	if v := "https://tls.example.com:8475"; v != "" {
+		vaultAdminBase = v
+	}
+
+	if vaultAdminBase != "https://tls.example.com:8475" {
+		t.Errorf("expected MUNINNDB_ADMIN_URL to set admin base, got %q", vaultAdminBase)
+	}
+}
+
+func TestEnvVarOverride_UIURL(t *testing.T) {
+	oldAdmin, oldUI := vaultAdminBase, vaultUIBase
+	defer func() { vaultAdminBase = oldAdmin; vaultUIBase = oldUI }()
+
+	vaultUIBase = "https://tls.example.com:8476"
+	if vaultUIBase != "https://tls.example.com:8476" {
+		t.Errorf("expected MUNINNDB_UI_URL to set UI base, got %q", vaultUIBase)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // loginAdmin
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -163,5 +164,79 @@ func TestEngineExportImportRoundTrip(t *testing.T) {
 	})
 	if dstCount != engramCount {
 		t.Errorf("dst vault engram count = %d, want %d", dstCount, engramCount)
+	}
+}
+
+func TestStartImport_OrphanedVaultCleanup(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	badData := bytes.NewReader([]byte("this is not a muninn archive"))
+
+	job, err := eng.StartImport(ctx, "orphan-vault", "", 0, false, badData)
+	if err != nil {
+		t.Fatalf("StartImport: %v", err)
+	}
+
+	// Wait for job to fail.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		j, ok := eng.GetVaultJob(job.ID)
+		if !ok {
+			t.Fatalf("job %q not found", job.ID)
+		}
+		if j.GetStatus() == vaultjob.StatusError {
+			break
+		}
+		if j.GetStatus() == vaultjob.StatusDone {
+			t.Fatal("expected job to fail with bad data, but it succeeded")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Vault name must NOT appear in the listing.
+	names, err := eng.store.ListVaultNames()
+	if err != nil {
+		t.Fatalf("ListVaultNames: %v", err)
+	}
+	for _, n := range names {
+		if n == "orphan-vault" {
+			t.Error("orphaned vault name still registered after failed import")
+		}
+	}
+}
+
+func TestStartImport_DeadlockOnError(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	pr, pw := io.Pipe()
+
+	done := make(chan error, 1)
+	go func() {
+		// Write invalid archive header — runImport will fail and (with the fix) close pr.
+		pw.Write([]byte("not a valid muninn archive"))
+		// Do NOT close pw. Instead, attempt another write that will block
+		// until runImport closes pr (causing ErrClosedPipe).
+		_, err := pw.Write(make([]byte, 1))
+		done <- err
+	}()
+
+	_, err := eng.StartImport(context.Background(), "deadlock-test-vault", "", 0, false, pr)
+	if err != nil {
+		t.Fatalf("StartImport: %v", err)
+	}
+
+	// With the fix: runImport closes pr → second pw.Write returns ErrClosedPipe → done receives error.
+	// Without the fix: runImport never closes pr → second pw.Write blocks → timeout.
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected write to fail with ErrClosedPipe after runImport closed the reader")
+		}
+		// err == io.ErrClosedPipe (or io.EOF) — test passes
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlock: runImport did not close the pipe reader — writer goroutine blocked forever")
 	}
 }
