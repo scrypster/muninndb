@@ -286,7 +286,8 @@ func (r *replState) printRotatingTip() {
 }
 
 // shellValidateAdmin validates admin credentials against the running UI server's
-// login endpoint (POST http://127.0.0.1:8476/api/auth/login).
+// login endpoint (POST <vaultUIBase>/api/auth/login). The base URL respects
+// the MUNINN_UI_URL environment variable when set.
 // Returns nil on success, non-nil on auth failure or network error.
 func shellValidateAdmin(username, password string) error {
 	body, _ := json.Marshal(map[string]string{
@@ -294,7 +295,7 @@ func shellValidateAdmin(username, password string) error {
 		"password": password,
 	})
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post("http://127.0.0.1:8476/api/auth/login", "application/json", bytes.NewReader(body))
+	resp, err := client.Post(vaultUIBase+"/api/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("connect to server: %w", err)
 	}
