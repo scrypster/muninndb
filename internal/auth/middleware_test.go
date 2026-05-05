@@ -1,7 +1,9 @@
 package auth_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -407,7 +409,11 @@ func TestAuthMiddleware_VaultIsolation(t *testing.T) {
 	}
 }
 
-func TestAuthMiddleware_NonDefaultKeyRequiresExplicitVault(t *testing.T) {
+// TestAuthMiddleware_KeyVaultUsedDirectly verifies that for authenticated requests
+// the vault is taken from the API key itself — no ?vault= query param required.
+// This replaces the old "non-default key requires explicit vault" behaviour that
+// was only enforceable because body/query were parsed before auth.
+func TestAuthMiddleware_KeyVaultUsedDirectly(t *testing.T) {
 	s := newTestStore(t)
 	s.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false})
 	token, _, err := s.GenerateAPIKey("vault-a", "agent", "full", nil)
@@ -415,17 +421,23 @@ func TestAuthMiddleware_NonDefaultKeyRequiresExplicitVault(t *testing.T) {
 		t.Fatalf("GenerateAPIKey: %v", err)
 	}
 
+	var capturedVault string
 	handler := s.VaultAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		capturedVault, _ = r.Context().Value(auth.ContextVault).(string)
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// No ?vault= param — vault comes from the key, not the URL.
 	req := httptest.NewRequest("GET", "/api/engrams", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	handler(w, req)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("missing explicit vault for non-default key: expected 401, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("key vault used directly: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedVault != "vault-a" {
+		t.Errorf("captured vault: want %q, got %q", "vault-a", capturedVault)
 	}
 }
 
@@ -480,7 +492,10 @@ func TestAuthMiddleware_PublicVaultInBodyNoKey(t *testing.T) {
 	}
 }
 
-func TestAuthMiddleware_QueryBodyVaultMismatch(t *testing.T) {
+// TestAuthMiddleware_QueryVaultMatchesKey verifies that ?vault= matching the key
+// vault passes, and that body vault fields are irrelevant for authenticated requests
+// (body is not parsed for vault routing when a Bearer token is present).
+func TestAuthMiddleware_QueryVaultMatchesKey(t *testing.T) {
 	s := newTestStore(t)
 	s.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false})
 	token, _, err := s.GenerateAPIKey("vault-a", "agent", "full", nil)
@@ -488,18 +503,24 @@ func TestAuthMiddleware_QueryBodyVaultMismatch(t *testing.T) {
 		t.Fatalf("GenerateAPIKey: %v", err)
 	}
 
+	var capturedVault string
 	handler := s.VaultAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		capturedVault, _ = r.Context().Value(auth.ContextVault).(string)
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// ?vault= matches key vault — body has a different vault field but that is ignored.
 	req := httptest.NewRequest("POST", "/api/engrams?vault=vault-a", strings.NewReader(`{"vault":"vault-b","concept":"c","content":"body"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("query/body mismatch: expected 400, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("query matches key vault: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedVault != "vault-a" {
+		t.Errorf("captured vault: want %q, got %q", "vault-a", capturedVault)
 	}
 }
 
@@ -531,6 +552,10 @@ func TestAuthMiddleware_BatchBodyVault(t *testing.T) {
 	}
 }
 
+// TestAuthMiddleware_BatchBodyMixedVaults verifies that for authenticated requests,
+// mixed vault fields inside the batch body are irrelevant to the middleware —
+// body is not parsed for vault routing when a Bearer token is present.
+// Cross-vault enforcement at the payload level is the responsibility of the handler.
 func TestAuthMiddleware_BatchBodyMixedVaults(t *testing.T) {
 	s := newTestStore(t)
 	s.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false})
@@ -539,7 +564,9 @@ func TestAuthMiddleware_BatchBodyMixedVaults(t *testing.T) {
 		t.Fatalf("GenerateAPIKey: %v", err)
 	}
 
+	handlerCalled := false
 	handler := s.VaultAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -549,12 +576,20 @@ func TestAuthMiddleware_BatchBodyMixedVaults(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("mixed batch body vaults: expected 400, got %d: %s", w.Code, w.Body.String())
+	// Middleware does not parse the body for authenticated requests, so mixed body
+	// vaults are passed through to the handler (which enforces payload consistency).
+	if w.Code != http.StatusOK {
+		t.Fatalf("mixed batch body vaults with valid key: expected 200 (middleware skips body), got %d: %s", w.Code, w.Body.String())
+	}
+	if !handlerCalled {
+		t.Error("inner handler should have been called")
 	}
 }
 
-func TestAuthMiddleware_TextPlainJSONBodyVaultMismatch(t *testing.T) {
+// TestAuthMiddleware_BodyVaultIgnoredForAuthenticatedRequests verifies that for
+// authenticated requests the body is not read at all — regardless of Content-Type
+// or body vault fields. Vault is taken entirely from the validated key.
+func TestAuthMiddleware_BodyVaultIgnoredForAuthenticatedRequests(t *testing.T) {
 	s := newTestStore(t)
 	s.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false})
 	token, _, err := s.GenerateAPIKey("vault-a", "agent", "full", nil)
@@ -562,22 +597,85 @@ func TestAuthMiddleware_TextPlainJSONBodyVaultMismatch(t *testing.T) {
 		t.Fatalf("GenerateAPIKey: %v", err)
 	}
 
+	var capturedVault string
 	handler := s.VaultAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		capturedVault, _ = r.Context().Value(auth.ContextVault).(string)
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// Body has a different vault and content-type is text/plain — none of that
+	// matters; middleware never reads the body for authenticated requests.
 	req := httptest.NewRequest("POST", "/api/engrams", strings.NewReader(`{"vault":"vault-b","concept":"c","content":"body"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "text/plain")
 	w := httptest.NewRecorder()
 	handler(w, req)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("text/plain JSON mismatch: expected 401, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("body vault ignored for authenticated requests: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedVault != "vault-a" {
+		t.Errorf("captured vault: want %q, got %q", "vault-a", capturedVault)
 	}
 }
 
-func TestAuthMiddleware_BatchBodyTopLevelVaultMismatch(t *testing.T) {
+// TestVaultAuthMiddleware_AuthenticatedSkipsBodyParse verifies that when a valid
+// Bearer token is present, the middleware does NOT read the request body before
+// validating the token — preventing unauthenticated DoS body-parse amplification.
+func TestVaultAuthMiddleware_AuthenticatedSkipsBodyParse(t *testing.T) {
+	s := newTestStore(t)
+	s.SetVaultConfig(auth.VaultConfig{Name: "myvault", Public: false})
+	token, _, err := s.GenerateAPIKey("myvault", "agent", "full", nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+
+	// Build a 4 MB body to simulate an expensive parse target.
+	largBody := bytes.Repeat([]byte(`{"vault":"myvault","concept":"x","content":"`+strings.Repeat("a", 100)+`"}`), 10000)
+
+	handlerCalled := false
+	var bodyAfterMiddleware []byte
+	handler := s.VaultAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		// Body must still be readable by the downstream handler — middleware must
+		// not consume it (or must restore it) when taking the authenticated path.
+		bodyAfterMiddleware, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest("POST", "/api/engrams?vault=myvault", bytes.NewReader(largBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("valid Bearer + large body: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !handlerCalled {
+		t.Fatal("inner handler was not called")
+	}
+	// The body must be intact (not consumed by middleware).
+	if len(bodyAfterMiddleware) != len(largBody) {
+		t.Errorf("body was consumed by middleware: downstream got %d bytes, want %d", len(bodyAfterMiddleware), len(largBody))
+	}
+
+	// Also verify: an invalid token is rejected immediately — body irrelevant.
+	req2 := httptest.NewRequest("POST", "/api/engrams", bytes.NewReader(largBody))
+	req2.Header.Set("Authorization", "Bearer mk_thisisabadinvalidtoken")
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	handler(w2, req2)
+	if w2.Code != http.StatusUnauthorized {
+		t.Errorf("invalid token: expected 401, got %d", w2.Code)
+	}
+}
+
+// TestAuthMiddleware_BatchBodyTopLevelVaultIgnoredForAuthenticatedRequests verifies
+// that for authenticated requests, even conflicting vault fields within the batch
+// body (top-level vs per-item) are irrelevant to the middleware. Payload validation
+// is delegated to the handler.
+func TestAuthMiddleware_BatchBodyTopLevelVaultIgnoredForAuthenticatedRequests(t *testing.T) {
 	s := newTestStore(t)
 	s.SetVaultConfig(auth.VaultConfig{Name: "vault-a", Public: false})
 	token, _, err := s.GenerateAPIKey("vault-a", "agent", "full", nil)
@@ -585,7 +683,9 @@ func TestAuthMiddleware_BatchBodyTopLevelVaultMismatch(t *testing.T) {
 		t.Fatalf("GenerateAPIKey: %v", err)
 	}
 
+	handlerCalled := false
 	handler := s.VaultAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -595,7 +695,12 @@ func TestAuthMiddleware_BatchBodyTopLevelVaultMismatch(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("batch top-level mismatch: expected 400, got %d: %s", w.Code, w.Body.String())
+	// Middleware does not parse the body, so internal vault conflicts in the
+	// payload pass through to the handler for enforcement.
+	if w.Code != http.StatusOK {
+		t.Fatalf("batch top-level vault with valid key: expected 200 (middleware skips body), got %d: %s", w.Code, w.Body.String())
+	}
+	if !handlerCalled {
+		t.Error("inner handler should have been called")
 	}
 }
