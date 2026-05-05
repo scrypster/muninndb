@@ -2,8 +2,6 @@ module github.com/scrypster/muninndb
 
 go 1.26.2
 
-toolchain go1.26.2
-
 require (
 	github.com/bits-and-blooms/bloom/v3 v3.7.1
 	github.com/cockroachdb/pebble v1.1.5
