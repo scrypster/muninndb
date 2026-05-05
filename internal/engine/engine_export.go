@@ -99,7 +99,13 @@ func (e *Engine) StartImport(ctx context.Context, vaultName, embedderModel strin
 		ExpectedModel:     embedderModel,
 		ExpectedDimension: dimension,
 	}
-	if !e.spawnJob(func() { e.runImport(job, wsTarget, vaultName, r, opts) }) {
+	var rc io.ReadCloser
+	if c, ok := r.(io.ReadCloser); ok {
+		rc = c
+	} else {
+		rc = io.NopCloser(r)
+	}
+	if !e.spawnJob(func() { e.runImport(job, wsTarget, vaultName, rc, opts) }) {
 		e.jobManager.Fail(job, fmt.Errorf("engine is shutting down"))
 		// Do NOT call DeleteVaultNameOnly here: the engine is shutting down and
 		// Pebble may already be closed, which would panic. The orphaned vault name
@@ -110,7 +116,7 @@ func (e *Engine) StartImport(ctx context.Context, vaultName, embedderModel strin
 	return job, nil
 }
 
-func (e *Engine) runImport(job *vaultjob.Job, wsTarget [8]byte, vaultName string, r io.Reader, opts storage.ImportOpts) {
+func (e *Engine) runImport(job *vaultjob.Job, wsTarget [8]byte, vaultName string, r io.ReadCloser, opts storage.ImportOpts) {
 	// Use engine lifecycle context so the goroutine exits when Stop() is called.
 	ctx := e.stopCtx
 
@@ -127,6 +133,7 @@ func (e *Engine) runImport(job *vaultjob.Job, wsTarget [8]byte, vaultName string
 			slog.Error("import job panicked", "job_id", job.ID, "vault", vaultName, "panic", rec)
 		}
 	}()
+	defer r.Close()
 
 	// Phase 1: import data from archive.
 	result, err := e.store.ImportVaultData(ctx, wsTarget, vaultName, opts, r)
