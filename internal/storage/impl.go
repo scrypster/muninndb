@@ -228,7 +228,7 @@ func (ps *PebbleStore) replicateBatch(b *pebble.Batch) {
 		return
 	}
 	if err := ps.repLogAppend(3, nil, repr); err != nil { // 3 = OpBatch
-		slog.Warn("replication log batch append failed", "err", err)
+		slog.Warn("storage: replication log batch append failed", "err", err)
 	}
 }
 

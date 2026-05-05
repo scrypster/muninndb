@@ -62,8 +62,8 @@ func TestRepLogHook_WriteEngram(t *testing.T) {
 		t.Fatalf("WriteEngram: %v", err)
 	}
 
-	if got := callCount.Load(); got == 0 {
-		t.Error("WriteEngram: RepLogAppend not called")
+	if got := callCount.Load(); got != 1 {
+		t.Errorf("WriteEngram: RepLogAppend called %d times, want 1", got)
 	}
 }
 
