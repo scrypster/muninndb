@@ -241,6 +241,7 @@ var subcommandHelp = map[string]func(){
 				"muninn admin change-password -u root -p",
 			})
 	},
+	"audit": printAuditUsage,
 	"mcp": func() {
 		printSubcommandUsage("mcp", "stdio→HTTP MCP proxy for OpenClaw", "muninn mcp",
 			[][2]string{
