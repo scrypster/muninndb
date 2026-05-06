@@ -24,7 +24,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"MetaKey", MetaKey(ws, id)},
 		{"AssocFwdKey", AssocFwdKey(ws, id, 0.5, id)},
 		{"AssocRevKey", AssocRevKey(ws, id, 0.5, id)},
-		{"FTSPostingKey", FTSPostingKey(ws, "test", id)},
+		{"FTSPostingKey", FTSPostingKey(ws, "test", 0x01, id)},
 		{"TrigramKey", TrigramKey(ws, trigram, id)},
 		{"HNSWNodeKey", HNSWNodeKey(ws, id, 0)},
 		{"FTSStatsKey", FTSStatsKey(ws)},

@@ -222,7 +222,7 @@ func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, conte
 				Field:  field,
 				DocLen: docLen,
 			}
-			key := keys.FTSPostingKey(ws, term, id)
+			key := keys.FTSPostingKey(ws, term, field, id)
 			val := encodePosting(pv)
 			batch.Set(key, val, nil)
 		}
@@ -289,9 +289,12 @@ func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, cont
 	batch := idx.db.NewBatch()
 
 	for term := range termSet {
-		// Delete posting-list key for this (term, engram) pair.
-		key := keys.FTSPostingKey(ws, term, id)
-		batch.Delete(key, nil)
+		// Delete posting-list keys for this engram across all fields.
+		// Deleting a non-existent key is a no-op in Pebble.
+		for _, field := range []uint8{FieldConcept, FieldContent, FieldTags, FieldCreatedBy} {
+			key := keys.FTSPostingKey(ws, term, field, id)
+			batch.Delete(key, nil)
+		}
 
 		// Delete trigram keys for this term.
 		for _, tri := range Trigrams(term) {
@@ -403,14 +406,15 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 // than the Search() loop body, which would otherwise defer all closes until
 // Search() returns (and risk double-close on the last iterator).
 func (idx *Index) searchToken(ws [8]byte, term string, scores map[[16]byte]float64, idf, avgdl float64) error {
-	// Prefix scan for this term
-	lowerBound := keys.FTSPostingKey(ws, term, [16]byte{})
-	// Upper bound: increment the separator byte after the term prefix.
-	// Allocate one byte longer than lowerBound so sepPos is always in bounds
-	// even when the term extends to the last position of lowerBound.
-	upperBound := make([]byte, len(lowerBound)+1)
+	// Prefix scan for this term across all fields.
+	// Key format: 0x05 | ws[8] | term | 0x00 | field[1] | id[16]
+	// Use field=0x00 for lower bound; upper bound stops at the 0x00 separator + 0x01.
+	lowerBound := keys.FTSPostingKey(ws, term, 0x00, [16]byte{})
+	// Upper bound: increment the separator byte after the term so the scan covers
+	// all field values (0x00–0xFF) for this term.
+	upperBound := make([]byte, len(lowerBound))
 	copy(upperBound, lowerBound)
-	// Increment the separator byte position
+	// sepPos is the index of the 0x00 separator byte: prefix(1) + ws(8) + term.
 	sepPos := 1 + 8 + len(term)
 	upperBound[sepPos] = 0x01
 
@@ -423,13 +427,17 @@ func (idx *Index) searchToken(ws [8]byte, term string, scores map[[16]byte]float
 	}
 	defer iter.Close()
 
+	// Key layout: 0x05[1] | ws[8] | term[n] | 0x00[1] | field[1] | id[16]
+	minKeyLen := 1 + 8 + len(term) + 1 + 1 + 16
+	idOffset := 1 + 8 + len(term) + 1 + 1 // skip prefix, ws, term, separator, field
+
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := iter.Key()
-		if len(key) < 1+8+len(term)+1+16 {
+		if len(key) < minKeyLen {
 			continue
 		}
 		var engramID [16]byte
-		copy(engramID[:], key[1+8+len(term)+1:])
+		copy(engramID[:], key[idOffset:])
 
 		val := iter.Value()
 		pv := decodePosting(val)
