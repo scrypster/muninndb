@@ -50,6 +50,15 @@ type ScoredID struct {
 	Score float64
 }
 
+// FullTextIndex is the text index boundary used by Engine.
+// Implementations include *Index (native) and search/adapters (bleve).
+type FullTextIndex interface {
+	IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string, createdAt int64) error
+	Search(ctx context.Context, ws [8]byte, query string, topK int) ([]ScoredID, error)
+	DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string, createdAt int64) error
+	InvalidateIDFCache()
+}
+
 // PostingValue is the 7-byte per-posting entry value.
 type PostingValue struct {
 	TF     float32
