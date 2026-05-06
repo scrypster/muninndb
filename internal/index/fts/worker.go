@@ -24,12 +24,18 @@ type IndexJob struct {
 	CreatedBy string
 	Content   string
 	Tags      []string
+	CreatedAt int64 // epoch seconds
 }
 
-// indexer is the interface Worker depends on for indexing engrams.
-// *Index satisfies this interface.
+// Indexer is the minimal text indexing boundary used by Worker.
+type Indexer interface {
+	IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string, createdAt int64) error
+}
+
+// indexer is the internal interface Worker depends on for indexing engrams.
+// *Index satisfies this interface; adapters/search backends also implement it.
 type indexer interface {
-	IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error
+	IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string, createdAt int64) error
 }
 
 // Worker processes FTS indexing jobs asynchronously off the write hot path.
@@ -64,7 +70,7 @@ func (w *Worker) SetClearing(ws [8]byte, clearing bool) {
 // NewWorker creates and starts an async FTS indexing worker pool.
 // Spawns NumCPU goroutines all reading from a shared 32768-entry channel.
 // Call Stop() to drain and shut down on engine shutdown.
-func NewWorker(idx *Index) *Worker {
+func NewWorker(idx Indexer) *Worker {
 	return newWorkerWithIndex(idx)
 }
 
@@ -79,8 +85,8 @@ func newWorkerWithIndex(idx indexer) *Worker {
 		stopCh: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
+	w.wg.Add(n)
 	for range n {
-		w.wg.Add(1)
 		go w.runLoop()
 	}
 	return w
@@ -98,7 +104,8 @@ func (w *Worker) runLoop() {
 					if ftsIsClosedPanic(r) || w.stopped.Load() {
 						return
 					}
-					slog.Error("fts: worker goroutine panicked, restarting", "panic", r)
+					// Log non-closed-DB panics and restart the goroutine.
+					slog.Error("fts: worker goroutine panicked (restarting)", "panic", r)
 				}
 			}()
 			w.run()
@@ -138,62 +145,70 @@ func (w *Worker) Dropped() int64 {
 }
 
 func (w *Worker) run() {
-	ticker := time.NewTicker(workerInterval)
-	defer ticker.Stop()
-
-	batch := make([]IndexJob, 0, workerBatchSize)
-
+	var batch []IndexJob
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
-		w.flush(batch)
+		for _, job := range batch {
+			// Check clearingVaults purely as an optimization so that
+			// IndexEngram sees a consistent state on multi-goroutine runs.
+			if _, clearing := w.clearingVaults.Load(job.WS); clearing {
+				continue
+			}
+			if err := w.idx.IndexEngram(job.WS, job.ID, job.Concept, job.CreatedBy, job.Content, job.Tags, job.CreatedAt); err != nil {
+				slog.Warn("fts: IndexEngram failed", "id", fmt.Sprintf("%x", job.ID), "err", err)
+			}
+		}
 		batch = batch[:0]
 	}
 
+	timer := time.NewTimer(workerInterval)
+	defer timer.Stop()
+
 	for {
 		select {
-		case job := <-w.input:
+		case job, ok := <-w.input:
+			if !ok {
+				flush()
+				return
+			}
 			batch = append(batch, job)
 			if len(batch) >= workerBatchSize {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				flush()
+				timer.Reset(workerInterval)
 			}
+		case <-timer.C:
+			flush()
+			timer.Reset(workerInterval)
 		case <-w.stopCh:
-			// Drain remaining items from the input channel before exiting.
+			// Drain remaining jobs in the channel before exiting.
 			for {
 				select {
-				case job := <-w.input:
+				case job, ok := <-w.input:
+					if !ok {
+						flush()
+						return
+					}
 					batch = append(batch, job)
 				default:
 					flush()
 					return
 				}
 			}
-		case <-ticker.C:
-			flush()
 		}
 	}
 }
 
-func (w *Worker) flush(jobs []IndexJob) {
-	for _, job := range jobs {
-		if _, dropping := w.clearingVaults.Load(job.WS); dropping {
-			continue
-		}
-		if err := w.idx.IndexEngram(job.WS, job.ID, job.Concept, job.CreatedBy, job.Content, job.Tags); err != nil {
-			slog.Warn("fts: worker failed to index engram",
-				"engram_id", job.ID,
-				"err", err,
-			)
-		}
+func ftsIsClosedPanic(r interface{}) bool {
+	if s, ok := r.(string); ok {
+		return strings.Contains(s, "closed")
 	}
-}
-
-// ftsIsClosedPanic reports whether a recovered panic value represents a
-// closed-DB condition from Pebble. Inlined here to avoid an import cycle
-// with the storage package. Must stay in sync with storage.IsClosedPanic.
-func ftsIsClosedPanic(r any) bool {
-	s := fmt.Sprintf("%v", r)
-	return strings.Contains(s, "pebble: closed") ||
-		strings.Contains(s, "pebble/record: closed")
+	return false
 }
