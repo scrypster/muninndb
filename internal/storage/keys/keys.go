@@ -68,14 +68,18 @@ func AssocRevKey(ws [8]byte, dst [16]byte, weight float32, src [16]byte) []byte 
 }
 
 // FTSPostingKey constructs the FTS posting list entry key (0x05 prefix).
-func FTSPostingKey(ws [8]byte, term string, id [16]byte) []byte {
+// Format: 0x05 | ws[8] | term | 0x00 | field[1] | id[16]
+// The field byte ensures each (term, field, engram) triple has a unique key,
+// preventing multi-field postings from overwriting each other.
+func FTSPostingKey(ws [8]byte, term string, field uint8, id [16]byte) []byte {
 	termBytes := []byte(term)
-	key := make([]byte, 1+8+len(termBytes)+1+16)
+	key := make([]byte, 1+8+len(termBytes)+1+1+16)
 	key[0] = 0x05
 	copy(key[1:9], ws[:])
 	copy(key[9:9+len(termBytes)], termBytes)
-	key[9+len(termBytes)] = 0x00
-	copy(key[10+len(termBytes):], id[:])
+	key[9+len(termBytes)] = 0x00 // separator
+	key[10+len(termBytes)] = field
+	copy(key[11+len(termBytes):], id[:])
 	return key
 }
 

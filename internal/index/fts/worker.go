@@ -26,6 +26,12 @@ type IndexJob struct {
 	Tags      []string
 }
 
+// indexer is the interface Worker depends on for indexing engrams.
+// *Index satisfies this interface.
+type indexer interface {
+	IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error
+}
+
 // Worker processes FTS indexing jobs asynchronously off the write hot path.
 // Jobs are distributed across NumCPU goroutines reading from a shared buffered channel.
 // If the queue is full, the job is dropped and a warning is logged — the engram is
@@ -33,7 +39,7 @@ type IndexJob struct {
 // Stale FTS entries for deleted engrams are harmless: Phase 6 of activation filters
 // nil metadata results, so orphaned posting list entries never surface in results.
 type Worker struct {
-	idx            *Index
+	idx            indexer
 	input          chan IndexJob
 	stopCh         chan struct{}
 	stopped        atomic.Bool
@@ -59,6 +65,13 @@ func (w *Worker) SetClearing(ws [8]byte, clearing bool) {
 // Spawns NumCPU goroutines all reading from a shared 32768-entry channel.
 // Call Stop() to drain and shut down on engine shutdown.
 func NewWorker(idx *Index) *Worker {
+	return newWorkerWithIndex(idx)
+}
+
+// newWorkerWithIndex creates and starts an async FTS indexing worker pool using
+// the provided indexer. This is the real constructor logic, extracted to allow
+// injection of a stub indexer in tests.
+func newWorkerWithIndex(idx indexer) *Worker {
 	n := runtime.NumCPU()
 	w := &Worker{
 		idx:    idx,
@@ -66,24 +79,31 @@ func NewWorker(idx *Index) *Worker {
 		stopCh: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
-	w.wg.Add(n)
 	for range n {
-		go func() {
-			defer w.wg.Done()
+		w.wg.Add(1)
+		go w.runLoop()
+	}
+	return w
+}
+
+// runLoop is the per-goroutine entry point. It wraps run() in a restart loop:
+// after a non-fatal panic, the goroutine re-enters run() instead of exiting.
+// wg.Done() only fires when the worker is cleanly stopped.
+func (w *Worker) runLoop() {
+	defer w.wg.Done()
+	for !w.stopped.Load() {
+		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					// Swallow closed-DB panics that surface as panics in the FTS
-					// indexing path when Pebble is torn down before all goroutines exit.
 					if ftsIsClosedPanic(r) || w.stopped.Load() {
 						return
 					}
-					slog.Error("fts: worker goroutine panicked", "panic", r)
+					slog.Error("fts: worker goroutine panicked, restarting", "panic", r)
 				}
 			}()
 			w.run()
 		}()
 	}
-	return w
 }
 
 // Submit enqueues an FTS index job. Non-blocking — drops and warns if queue is full.
