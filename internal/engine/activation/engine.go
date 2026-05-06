@@ -376,11 +376,11 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 		req.Threshold = 0.05
 	}
 
-	// RRF scores are rank-based and always in [0, 0.05] — user-configured
-	// thresholds (designed for ACT-R [0, 1]) are not meaningful under RRF.
-	// Always set an RRF-appropriate threshold.
+	// After threshold default is set, adjust for RRF mode.
+	// RRF scores are typically in [0, 0.05] range — much lower than ACT-R.
+	// Apply an RRF-appropriate threshold to avoid filtering all results.
 	w := resolveWeights(req.Weights, e.weights)
-	if w.UseRRFFusion {
+	if w.UseRRFFusion && req.Threshold >= float64(float32(0.01)) {
 		req.Threshold = 0.001
 	}
 
