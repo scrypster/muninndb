@@ -57,12 +57,19 @@ type PostingValue struct {
 	DocLen uint16
 }
 
+// idfKey is the composite cache key for the IDF value of a term within a vault.
+// Keying by (ws, term) prevents cross-vault IDF contamination.
+type idfKey struct {
+	ws   [8]byte
+	term string
+}
+
 // Index is the FTS inverted index backed by Pebble.
 type Index struct {
 	db       *pebble.DB
 	mu       sync.RWMutex
-	// In-memory IDF cache: term → idf
-	idfCache map[string]float64
+	// In-memory IDF cache: (vault, term) → idf
+	idfCache map[idfKey]float64
 	// versionCache caches the FTS schema version per vault (0=legacy dual-path, 1=stemmed-only).
 	// Populated lazily on first Search() for each vault; FTSVersionKey is write-once.
 	versionCache sync.Map // key: [8]byte wsPrefix, value: byte
@@ -71,7 +78,7 @@ type Index struct {
 func New(db *pebble.DB) *Index {
 	return &Index{
 		db:       db,
-		idfCache: make(map[string]float64, 1024),
+		idfCache: make(map[idfKey]float64, 1024),
 	}
 }
 
@@ -80,7 +87,7 @@ func New(db *pebble.DB) *Index {
 // from influencing BM25 scoring.
 func (idx *Index) InvalidateIDFCache() {
 	idx.mu.Lock()
-	idx.idfCache = make(map[string]float64)
+	idx.idfCache = make(map[idfKey]float64)
 	idx.mu.Unlock()
 }
 
@@ -247,7 +254,7 @@ func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, conte
 		batch.Set(tkey, dfBuf[:], nil)
 
 		// Invalidate IDF cache for this term so it's recalculated on next search.
-		delete(idx.idfCache, term)
+		delete(idx.idfCache, idfKey{ws, term})
 	}
 
 	// Commit single atomic batch: posting lists + DF updates land together.
@@ -303,7 +310,7 @@ func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, cont
 		}
 
 		// Invalidate IDF cache for this term — DF is now stale.
-		delete(idx.idfCache, term)
+		delete(idx.idfCache, idfKey{ws, term})
 	}
 
 	err := batch.Commit(pebble.Sync)
@@ -510,8 +517,9 @@ func (idx *Index) readStats(ws [8]byte) FTSStats {
 }
 
 func (idx *Index) getIDF(ws [8]byte, term string, N float64) float64 {
+	k := idfKey{ws, term}
 	idx.mu.RLock()
-	idf, ok := idx.idfCache[term]
+	idf, ok := idx.idfCache[k]
 	idx.mu.RUnlock()
 	if ok {
 		return idf
@@ -531,10 +539,10 @@ func (idx *Index) getIDF(ws [8]byte, term string, N float64) float64 {
 	defer idx.mu.Unlock()
 	// Double-check: another goroutine may have populated the cache while we
 	// held no lock (between RUnlock above and this Lock).
-	if cached, ok := idx.idfCache[term]; ok {
+	if cached, ok := idx.idfCache[k]; ok {
 		return cached
 	}
-	idx.idfCache[term] = idf
+	idx.idfCache[k] = idf
 	return idf
 }
 

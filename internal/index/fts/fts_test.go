@@ -465,3 +465,43 @@ func TestMultiFieldPostingNoOverwrite(t *testing.T) {
 		t.Errorf("id1 score %v <= id2 score %v; expected multi-field boost", results[0].Score, results[1].Score)
 	}
 }
+
+// TestIDFCacheVaultIsolation verifies that IDF values are cached per (vault, term)
+// pair, not globally by term. Before the fix, idfCache was keyed by term only:
+// vault A's cached IDF for "robot" would be returned for vault B's search,
+// producing incorrect BM25 scores in multi-vault setups.
+func TestIDFCacheVaultIsolation(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	idx := New(db)
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 100})
+	wsA := store.VaultPrefix("vault-a")
+	wsB := store.VaultPrefix("vault-b")
+	ctx := context.Background()
+
+	// vault-a: index 10 engrams, only 1 contains "robot" → high IDF (rare term)
+	for i := 0; i < 9; i++ {
+		id := [16]byte{byte(i + 1)}
+		_ = idx.IndexEngram(wsA, id, "unrelated topic", "", "cooking baking gardening", nil)
+	}
+	idRobotA := [16]byte{10}
+	_ = idx.IndexEngram(wsA, idRobotA, "robot", "", "robot automation", nil)
+
+	// vault-b: index 3 engrams, all contain "robot" → low IDF (common term)
+	for i := 0; i < 3; i++ {
+		id := [16]byte{byte(i + 20)}
+		_ = idx.IndexEngram(wsB, id, "robot", "", "robot", nil)
+	}
+
+	// Warm the IDF cache for vault-a by running a search.
+	_, _ = idx.Search(ctx, wsA, "robot", 10)
+
+	// vault-b IDF for "robot" must be lower than vault-a's (it's common in vault-b).
+	idfA := idx.getIDF(wsA, "robot", float64(10))
+	idfB := idx.getIDF(wsB, "robot", float64(3))
+
+	if idfA <= idfB {
+		t.Errorf("idfA (%v) should be > idfB (%v): robot is rare in vault-a but common in vault-b", idfA, idfB)
+	}
+}
