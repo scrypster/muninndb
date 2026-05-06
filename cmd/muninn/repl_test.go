@@ -401,52 +401,34 @@ func TestShellValidateAdminSuccess(t *testing.T) {
 	srv := newAuthServer("session", "abc123")
 	defer srv.Close()
 
-	// This function hardcodes http://127.0.0.1:8476, so we can only test
-	// the error case when no server is running on that port. We test the
-	// function by verifying it sends POST request to /api/auth/login and
-	// checks the response status. For this test, we verify it returns nil
-	// when given a valid response, but since it's hardcoded, we test by
-	// calling it and checking error type handling.
-
-	// Test with unreachable server (expected in test env)
-	err := shellValidateAdmin("admin", "password")
-	if err == nil {
-		// Server might actually be running, which is fine for the test
-		t.Log("shellValidateAdmin succeeded (server appears to be running)")
-	} else {
-		// Expected case: connection error or auth failure
-		t.Logf("shellValidateAdmin returned error as expected: %v", err)
+	if err := shellValidateAdmin(srv.URL, "admin", "password"); err != nil {
+		t.Errorf("shellValidateAdmin: expected nil, got %v", err)
 	}
 }
 
 // Test 20: shellValidateAdmin with invalid credentials
 func TestShellValidateAdminInvalidCredentials(t *testing.T) {
-	// Since shellValidateAdmin hardcodes http://127.0.0.1:8476,
-	// we can't easily mock the response. Instead, test the error handling
-	// by calling it with wrong credentials when no server is available.
-	err := shellValidateAdmin("wronguser", "wrongpass")
-	// Should return an error (either connection error or auth failure)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	err := shellValidateAdmin(srv.URL, "wronguser", "wrongpass")
 	if err == nil {
-		t.Log("shellValidateAdmin succeeded (server may be running with permissive auth)")
-	} else {
-		// Expected in test environment
-		if !strings.Contains(err.Error(), "connect") && !strings.Contains(err.Error(), "status") {
-			t.Errorf("expected connection or status error, got: %v", err)
-		}
+		t.Error("shellValidateAdmin: expected error for bad credentials, got nil")
+	}
+	if !strings.Contains(err.Error(), "status") {
+		t.Errorf("expected status error, got: %v", err)
 	}
 }
 
-// Test 21: shellValidateAdmin connection timeout
-func TestShellValidateAdminConnectionTimeout(t *testing.T) {
-	// Call shellValidateAdmin which hardcodes :8476
-	// In test env without server running, should get connection error
-	err := shellValidateAdmin("test", "test")
+// Test 21: shellValidateAdmin connection error
+func TestShellValidateAdminConnectionError(t *testing.T) {
+	err := shellValidateAdmin("http://127.0.0.1:19999", "test", "test")
 	if err == nil {
-		t.Log("shellValidateAdmin succeeded (server appears to be running)")
-	} else {
-		// Expected: "connect to server" error message
-		if !strings.Contains(err.Error(), "connect") {
-			t.Logf("got error: %v", err)
-		}
+		t.Error("shellValidateAdmin: expected connection error, got nil")
+	}
+	if !strings.Contains(err.Error(), "connect") {
+		t.Errorf("expected 'connect' in error, got: %v", err)
 	}
 }

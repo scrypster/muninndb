@@ -227,14 +227,16 @@ func TestFTS_DualPathSearch(t *testing.T) {
 	// We use Pebble directly to bypass IndexEngram's stemming.
 	{
 		// Construct key manually: same layout as keys.FTSPostingKey
+		// Format: 0x05 | ws[8] | term | 0x00 | field[1] | id[16]
 		term := "running"
 		termBytes := []byte(term)
-		key := make([]byte, 1+8+len(termBytes)+1+16)
+		key := make([]byte, 1+8+len(termBytes)+1+1+16)
 		key[0] = 0x05
 		copy(key[1:9], ws[:])
 		copy(key[9:9+len(termBytes)], termBytes)
 		key[9+len(termBytes)] = 0x00
-		copy(key[10+len(termBytes):], id2[:])
+		key[10+len(termBytes)] = 0x03 // FieldContent
+		copy(key[11+len(termBytes):], id2[:])
 
 		// Encode a minimal 7-byte PostingValue: TF=1, Field=0x03 (content), DocLen=5.
 		import_pv := make([]byte, 7)
@@ -391,7 +393,7 @@ func TestFTS_ReindexedVaultSkipsDualPath(t *testing.T) {
 
 	// Write a raw "running" posting for id2 ONLY — simulating legacy data.
 	// This bypasses IndexEngram intentionally so there's no stemmed posting for id2.
-	postingKey := keys.FTSPostingKey(ws, "running", id2)
+	postingKey := keys.FTSPostingKey(ws, "running", FieldContent, id2)
 	if err := db.Set(postingKey, []byte{}, pebble.NoSync); err != nil {
 		t.Fatalf("Set raw posting: %v", err)
 	}
@@ -423,5 +425,83 @@ func TestFTS_ReindexedVaultSkipsDualPath(t *testing.T) {
 	}
 	if foundID2 {
 		t.Errorf("expected id2 (raw 'running' only) to NOT be found after reindex, but it was. Raw fallback was not skipped.")
+	}
+}
+
+// TestMultiFieldPostingNoOverwrite verifies that a term appearing in multiple
+// fields (concept AND content) contributes scores from both fields, not just
+// the last one written. Before the fix, FTSPostingKey had no field byte and
+// the last field's batch.Set overwrote all earlier ones.
+func TestMultiFieldPostingNoOverwrite(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	idx := New(db)
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 100})
+	ws := store.VaultPrefix("multifield")
+	ctx := context.Background()
+
+	// "rocket" appears in both concept and content — both fields should contribute.
+	id1 := [16]byte{1}
+	_ = idx.IndexEngram(ws, id1, "rocket science", "", "the rocket launches at dawn", nil)
+
+	// id2 has "rocket" only in content.
+	id2 := [16]byte{2}
+	_ = idx.IndexEngram(ws, id2, "space travel", "", "the rocket propels us forward", nil)
+
+	results, err := idx.Search(ctx, ws, "rocket", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("Search returned %d results, want 2", len(results))
+	}
+	// id1 has "rocket" in concept (weight 3.0) + content (weight 1.0) → higher score.
+	// id2 has "rocket" only in content (weight 1.0) → lower score.
+	if results[0].ID != id1 {
+		t.Errorf("top result = %x, want id1 (%x); multi-field boost not applied", results[0].ID, id1)
+	}
+	if results[0].Score <= results[1].Score {
+		t.Errorf("id1 score %v <= id2 score %v; expected multi-field boost", results[0].Score, results[1].Score)
+	}
+}
+
+// TestIDFCacheVaultIsolation verifies that IDF values are cached per (vault, term)
+// pair, not globally by term. Before the fix, idfCache was keyed by term only:
+// vault A's cached IDF for "robot" would be returned for vault B's search,
+// producing incorrect BM25 scores in multi-vault setups.
+func TestIDFCacheVaultIsolation(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	idx := New(db)
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 100})
+	wsA := store.VaultPrefix("vault-a")
+	wsB := store.VaultPrefix("vault-b")
+	ctx := context.Background()
+
+	// vault-a: index 10 engrams, only 1 contains "robot" → high IDF (rare term)
+	for i := 0; i < 9; i++ {
+		id := [16]byte{byte(i + 1)}
+		_ = idx.IndexEngram(wsA, id, "unrelated topic", "", "cooking baking gardening", nil)
+	}
+	idRobotA := [16]byte{10}
+	_ = idx.IndexEngram(wsA, idRobotA, "robot", "", "robot automation", nil)
+
+	// vault-b: index 3 engrams, all contain "robot" → low IDF (common term)
+	for i := 0; i < 3; i++ {
+		id := [16]byte{byte(i + 20)}
+		_ = idx.IndexEngram(wsB, id, "robot", "", "robot", nil)
+	}
+
+	// Warm the IDF cache for vault-a by running a search.
+	_, _ = idx.Search(ctx, wsA, "robot", 10)
+
+	// vault-b IDF for "robot" must be lower than vault-a's (it's common in vault-b).
+	idfA := idx.getIDF(wsA, "robot", float64(10))
+	idfB := idx.getIDF(wsB, "robot", float64(3))
+
+	if idfA <= idfB {
+		t.Errorf("idfA (%v) should be > idfB (%v): robot is rare in vault-a but common in vault-b", idfA, idfB)
 	}
 }

@@ -108,6 +108,10 @@ func main() {
 			runAdmin(rest)
 			return
 		}
+		if sub == "audit" || strings.HasPrefix(sub, "audit:") {
+			runAudit(rest)
+			return
+		}
 		if strings.HasPrefix(sub, "cluster:") {
 			runCluster(rest)
 			return

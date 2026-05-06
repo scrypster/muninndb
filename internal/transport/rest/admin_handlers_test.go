@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/scrypster/muninndb/internal/audit"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/config"
 	"github.com/scrypster/muninndb/internal/plugin"
@@ -940,5 +942,72 @@ func TestHandleEmbedStatus_HardwareAccelerated(t *testing.T) {
 	}
 	if !*resp.HardwareAccelerated {
 		t.Error("expected hardware_accelerated=true")
+	}
+}
+
+// TestRevokeAPIKey_EmitsAuditEvent verifies that revoking an API key emits an
+// audit event with action="api_key.revoke".
+func TestRevokeAPIKey_EmitsAuditEvent(t *testing.T) {
+	var mu sync.Mutex
+	var got []audit.AuditEvent
+	sink := audit.SinkFunc(func(e audit.AuditEvent) error {
+		mu.Lock()
+		got = append(got, e)
+		mu.Unlock()
+		return nil
+	})
+	l := audit.New(audit.Config{BufferSize: 16}, sink)
+
+	store := newTestAuthStore(t)
+	srv := newTestServer(t, store)
+	srv.SetAuditLogger(l)
+
+	// Create a key first.
+	body, _ := json.Marshal(map[string]string{"vault": "default", "label": "to-revoke", "mode": "full"})
+	createReq := httptest.NewRequest("POST", "/api/admin/keys", bytes.NewReader(body))
+	createReq.Header.Set("Content-Type", "application/json")
+	createW := httptest.NewRecorder()
+	srv.mux.ServeHTTP(createW, createReq)
+	if createW.Code != http.StatusCreated {
+		t.Fatalf("setup: create key failed: %s", createW.Body.String())
+	}
+
+	var createResp map[string]interface{}
+	json.NewDecoder(createW.Body).Decode(&createResp)
+	keyMeta := createResp["key"].(map[string]interface{})
+	keyID := keyMeta["id"].(string)
+
+	// Revoke the key.
+	revokeReq := httptest.NewRequest("DELETE", "/api/admin/keys/"+keyID+"?vault=default", nil)
+	revokeW := httptest.NewRecorder()
+	srv.mux.ServeHTTP(revokeW, revokeReq)
+	if revokeW.Code != http.StatusOK {
+		t.Fatalf("expected 200 on revoke, got %d: %s", revokeW.Code, revokeW.Body.String())
+	}
+
+	_ = l.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Find the api_key.revoke event (there may also be an api_key.create event).
+	var revokeEvent *audit.AuditEvent
+	for i := range got {
+		if got[i].Action == "api_key.revoke" {
+			revokeEvent = &got[i]
+			break
+		}
+	}
+	if revokeEvent == nil {
+		t.Fatalf("no api_key.revoke audit event found; got %d events: %v", len(got), got)
+	}
+	if revokeEvent.TargetType != "api_key" {
+		t.Errorf("want TargetType=api_key, got %q", revokeEvent.TargetType)
+	}
+	if revokeEvent.TargetID != keyID {
+		t.Errorf("want TargetID=%q, got %q", keyID, revokeEvent.TargetID)
+	}
+	if revokeEvent.Result != "ok" {
+		t.Errorf("want Result=ok, got %q", revokeEvent.Result)
 	}
 }

@@ -3463,3 +3463,95 @@ func TestHandleSetTrust(t *testing.T) {
 		}
 	})
 }
+
+// ── muninn_recall annotate ───────────────────────────────────────────────────
+
+// recallAnnotateEngine is a test double for annotation tests.
+type recallAnnotateEngine struct {
+	fakeEngine
+	annData *engine.AnnotationData
+}
+
+func (e *recallAnnotateEngine) Activate(_ context.Context, _ *mbp.ActivateRequest) (*mbp.ActivateResponse, error) {
+	return &mbp.ActivateResponse{
+		Activations: []mbp.ActivationItem{{
+			ID:         "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			Concept:    "test",
+			Content:    "content",
+			Score:      0.9,
+			LastAccess: time.Now().Add(-45 * 24 * time.Hour).UnixNano(), // 45 days ago → stale
+		}},
+	}, nil
+}
+
+func (e *recallAnnotateEngine) GetAnnotations(_ context.Context, _, _ string) (*engine.AnnotationData, error) {
+	return e.annData, nil
+}
+
+func TestHandleRecall_Annotate(t *testing.T) {
+	conflictID := "01HHHHHHHHHHHHHHHHHHHHHHHA"
+	supersederID := "01HHHHHHHHHHHHHHHHHHHHHHHB"
+	lastVerified := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	eng := &recallAnnotateEngine{
+		annData: &engine.AnnotationData{
+			ConflictsWith: []string{conflictID},
+			SupersededBy:  supersederID,
+			LastVerified:  &lastVerified,
+		},
+	}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"context":["test"],"annotate":true}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	outer := extractInnerJSON(t, resp)
+
+	mems, ok := outer["memories"].([]interface{})
+	if !ok || len(mems) == 0 {
+		t.Fatalf("expected memories array, got %v", outer["memories"])
+	}
+	mem0 := mems[0].(map[string]interface{})
+	ann, ok := mem0["annotations"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected annotations object, got %T: %v", mem0["annotations"], mem0["annotations"])
+	}
+
+	if stale, _ := ann["stale"].(bool); !stale {
+		t.Errorf("stale should be true for 45-day-old engram, got %v", ann["stale"])
+	}
+	staleDays, _ := ann["stale_days"].(float64)
+	if staleDays < 44 || staleDays > 46 {
+		t.Errorf("stale_days = %v, want ~45", staleDays)
+	}
+	conflicts, _ := ann["conflicts_with"].([]interface{})
+	if len(conflicts) != 1 || conflicts[0].(string) != conflictID {
+		t.Errorf("conflicts_with = %v, want [%s]", conflicts, conflictID)
+	}
+	if sup, _ := ann["superseded_by"].(string); sup != supersederID {
+		t.Errorf("superseded_by = %q, want %q", sup, supersederID)
+	}
+	if lv, _ := ann["last_verified"].(string); lv != "2026-01-15T10:30:00Z" {
+		t.Errorf("last_verified = %q, want 2026-01-15T10:30:00Z", lv)
+	}
+}
+
+func TestHandleRecall_AnnotateFalse_NoAnnotations(t *testing.T) {
+	// Without annotate=true, annotations must be absent even if GetAnnotations would return data.
+	eng := &recallAnnotateEngine{
+		annData: &engine.AnnotationData{ConflictsWith: []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+	}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"context":["test"]}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	outer := extractInnerJSON(t, resp)
+
+	mems, ok := outer["memories"].([]interface{})
+	if !ok || len(mems) == 0 {
+		t.Fatalf("expected memories array, got %v", outer["memories"])
+	}
+	mem0 := mems[0].(map[string]interface{})
+	if _, hasAnn := mem0["annotations"]; hasAnn {
+		t.Error("annotations should be absent when annotate=false (or not set)")
+	}
+}

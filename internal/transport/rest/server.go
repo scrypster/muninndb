@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/oklog/ulid/v2"
+	"github.com/scrypster/muninndb/internal/audit"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/config"
 	"github.com/scrypster/muninndb/internal/engine"
@@ -104,6 +105,8 @@ type Server struct {
 
 	// coordinator is the optional cluster coordinator; nil when cluster is disabled.
 	coordinator *replication.ClusterCoordinator
+
+	auditLog *audit.Logger
 
 	// Health check fields.
 	startTime       time.Time
@@ -292,6 +295,50 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	}
 
 	return s
+}
+
+// SetAuditLogger attaches an audit.Logger to the server. Must be called before
+// Serve. Safe to call with nil (disables audit logging).
+func (s *Server) SetAuditLogger(l *audit.Logger) {
+	s.auditLog = l
+}
+
+// EmitAudit records a single admin action. No-op when no audit logger is configured.
+// Exported so it can be called from tests and UI server wrappers.
+func (s *Server) EmitAudit(r *http.Request, action, targetType, targetID, result string, meta map[string]string) {
+	if s.auditLog == nil {
+		return
+	}
+	e := audit.AuditEvent{
+		Timestamp:  time.Now().UTC(),
+		EventID:    ulid.Make().String(),
+		ActorType:  "admin",
+		ActorID:    "admin",
+		Action:     action,
+		TargetType: targetType,
+		TargetID:   targetID,
+		Result:     result,
+		ClientIP:   r.RemoteAddr,
+		Metadata:   meta,
+	}
+	if rid, ok := r.Context().Value(ctxKeyRequestID{}).(string); ok {
+		e.RequestID = rid
+	}
+	s.auditLog.Log(e)
+}
+
+// emitAuditErr is the error-path variant. Sets Result "error" and captures err.Error().
+func (s *Server) emitAuditErr(r *http.Request, action, targetType, targetID string, err error, meta map[string]string) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+		if meta == nil {
+			meta = map[string]string{"error": err.Error()}
+		} else {
+			meta["error"] = err.Error()
+		}
+	}
+	s.EmitAudit(r, action, targetType, targetID, result, meta)
 }
 
 // Handler returns the HTTP handler for the REST API, so it can be mounted on another mux.
@@ -646,6 +693,10 @@ func (s *Server) handleCreateEngram(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, engine.ErrInvalidID) {
 			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+			return
+		}
+		if errors.Is(err, engine.ErrInvalidRequest) {
+			s.sendError(r, w, http.StatusUnprocessableEntity, ErrInvalidEngram, err.Error())
 			return
 		}
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
@@ -1682,6 +1733,7 @@ func (s *Server) handleResolveContradiction(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.sendJSON(w, http.StatusOK, ResolveContradictionResponse{Resolved: true})
+	s.EmitAudit(r, "contradiction.resolve", "vault", vault, "ok", nil)
 }
 
 func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {

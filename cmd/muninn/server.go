@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/scrypster/muninndb/internal/audit"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/backup"
 	"github.com/scrypster/muninndb/internal/cognitive"
@@ -256,6 +257,49 @@ func sanitizeProviderURLForLog(providerURL string) string {
 		return parsed.String()
 	}
 	return providerURL
+}
+
+// buildAuditLogger constructs the audit.Logger from env config and data dir.
+// Returns nil only if all sinks fail to initialize.
+// The file sink is enabled by default (MUNINN_AUDIT_FILE="-" to disable).
+func buildAuditLogger(dataDir string) *audit.Logger {
+	cfg := audit.ConfigFromEnv(dataDir)
+	var sinks []audit.Sink
+
+	if cfg.FilePath != "" {
+		fs, err := audit.NewFileSink(cfg.FilePath)
+		if err != nil {
+			slog.Warn("audit: file sink disabled", "path", cfg.FilePath, "err", err)
+		} else {
+			sinks = append(sinks, fs)
+			slog.Info("audit: writing to file", "path", cfg.FilePath)
+		}
+	}
+
+	if cfg.Stdout {
+		sinks = append(sinks, audit.NewStdoutSink())
+		slog.Info("audit: stdout sink enabled")
+	}
+
+	if cfg.Syslog {
+		ss, err := audit.NewSyslogSink()
+		if err != nil {
+			slog.Warn("audit: syslog sink disabled", "err", err)
+		} else {
+			sinks = append(sinks, ss)
+			slog.Info("audit: syslog sink enabled")
+		}
+	}
+
+	if cfg.WebhookURL != "" {
+		sinks = append(sinks, audit.NewWebhookSink(cfg.WebhookURL, 0))
+		slog.Info("audit: webhook sink enabled", "url", cfg.WebhookURL)
+	}
+
+	if len(sinks) == 0 {
+		return nil
+	}
+	return audit.New(audit.Config{BufferSize: cfg.BufferSize}, sinks...)
 }
 
 func openAIEmbedLogAttrs(providerURL string) []any {
@@ -918,8 +962,9 @@ func runServer() {
 
 	// Wire ClusterCoordinator when cluster mode is enabled.
 	var coordinator *replication.ClusterCoordinator
+	var repLog *replication.ReplicationLog
 	if clusterCfg.Enabled {
-		repLog := replication.NewReplicationLog(db)
+		repLog = replication.NewReplicationLog(db)
 		applier := replication.NewApplier(db)
 		epochStore, err := replication.NewEpochStore(db)
 		if err != nil {
@@ -969,7 +1014,14 @@ func runServer() {
 	}
 
 	// Build storage layer
-	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 10000})
+	storeCfg := storage.PebbleStoreConfig{CacheSize: 10000}
+	if clusterCfg.Enabled {
+		storeCfg.RepLogAppend = func(op uint8, key, value []byte) error {
+			_, err := repLog.Append(replication.WALOp(op), key, value)
+			return err
+		}
+	}
+	store := storage.NewPebbleStore(db, storeCfg)
 
 	// Run startup migrations before the engine is built.
 	runStartupMigrations(context.Background(), store)
@@ -1174,6 +1226,11 @@ func runServer() {
 	})
 	restServer.SetVersion(muninnVersion())
 
+	auditLogger := buildAuditLogger(*dataDir)
+	if auditLogger != nil {
+		restServer.SetAuditLogger(auditLogger)
+	}
+
 	// Shared plugin store — bridges raw storage to the plugin.PluginStore interface.
 	// Created here so it can be shared by the MCP adapter (RetryEnrich) and both
 	// retroactive processors (embed + enrich) which are started below.
@@ -1359,6 +1416,9 @@ func runServer() {
 		slog.Error("create ui server", "err", err)
 		os.Exit(1)
 	}
+	if auditLogger != nil {
+		uiSrv.SetAuditLogger(auditLogger)
+	}
 	// Wire broadcast callback now that uiSrv is available.
 	ring.SetOnAdd(func(e logging.LogEntry) {
 		data, _ := json.Marshal(map[string]any{
@@ -1440,6 +1500,9 @@ func runServer() {
 		}
 		if err := uiSrv.Stop(netShutCtx); err != nil {
 			slog.Error("ui server shutdown error", "err", err)
+		}
+		if auditLogger != nil {
+			_ = auditLogger.Close()
 		}
 		// Stop cluster coordinator before closing the DB (coordinator holds DB references).
 		if coordinator != nil {

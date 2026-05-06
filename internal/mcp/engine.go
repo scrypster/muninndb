@@ -170,4 +170,9 @@ type EngineInterface interface {
 	// SetTrust sets the trust label of an engram.
 	// trust must be one of "verified", "inferred", "external", "untrusted".
 	SetTrust(ctx context.Context, vault, id, trust string) error
+
+	// GetAnnotations returns annotation metadata for a single engram.
+	// Used to populate muninn_recall annotation objects when annotate=true.
+	// Returns a non-nil *engine.AnnotationData (possibly with empty fields) on success.
+	GetAnnotations(ctx context.Context, vault, id string) (*engine.AnnotationData, error)
 }

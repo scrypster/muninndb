@@ -50,6 +50,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	slog.Info("backup: starting online backup", "output", req.OutputDir)
 
 	if err := os.MkdirAll(req.OutputDir, 0700); err != nil {
+		s.emitAuditErr(r, "backup.trigger", "system", "backup", err, nil)
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError,
 			"failed to create output directory: "+err.Error())
 		return
@@ -58,6 +59,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	checkpointDir := filepath.Join(req.OutputDir, "pebble")
 	if err := s.engine.Checkpoint(checkpointDir); err != nil {
 		os.RemoveAll(req.OutputDir)
+		s.emitAuditErr(r, "backup.trigger", "system", "backup", err, nil)
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError,
 			"pebble checkpoint failed: "+err.Error())
 		return
@@ -66,6 +68,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 
 	if err := backupVerifyCheckpoint(checkpointDir); err != nil {
 		os.RemoveAll(req.OutputDir)
+		s.emitAuditErr(r, "backup.trigger", "system", "backup", err, nil)
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError,
 			"backup verification failed: "+err.Error())
 		return
@@ -94,6 +97,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	size := backupDirSize(req.OutputDir)
 
 	slog.Info("backup: complete", "output", req.OutputDir, "size", size, "elapsed", elapsed)
+	s.EmitAudit(r, "backup.trigger", "system", "backup", "ok", nil)
 
 	s.sendJSON(w, http.StatusOK, BackupResponse{
 		OutputDir: req.OutputDir,
