@@ -380,7 +380,7 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	// RRF scores are typically in [0, 0.05] range — much lower than ACT-R.
 	// Apply an RRF-appropriate threshold to avoid filtering all results.
 	w := resolveWeights(req.Weights, e.weights)
-	if w.UseRRFFusion && req.Threshold >= float64(float32(0.01)) {
+	if w.UseRRFFusion && req.Threshold >= 0.0099 {
 		req.Threshold = 0.001
 	}
 
