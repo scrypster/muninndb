@@ -76,7 +76,7 @@ func (e *Engine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, 
 	var indexed int64
 	scanErr := e.store.ScanEngrams(opCtx, ws, func(eng *storage.Engram) error {
 		if e.fts != nil {
-			if err := e.fts.IndexEngram(ws, [16]byte(eng.ID), eng.Concept, eng.CreatedBy, eng.Content, eng.Tags); err != nil {
+			if err := e.fts.IndexEngram(ws, [16]byte(eng.ID), eng.Concept, eng.CreatedBy, eng.Content, eng.Tags, eng.CreatedAt.Unix()); err != nil {
 				slog.Warn("reindex-fts: IndexEngram failed", "vault", vaultName, "id", eng.ID, "err", err)
 				metrics.FTSIndexFailures.WithLabelValues(vaultName).Inc()
 			}

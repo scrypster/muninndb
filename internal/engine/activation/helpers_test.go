@@ -1898,7 +1898,7 @@ type simpleHNSW struct {
 	results []ScoredID
 }
 
-func (h *simpleHNSW) Search(_ context.Context, _ [8]byte, _ []float32, topK int) ([]ScoredID, error) {
+func (h *simpleHNSW) Search(_ context.Context, _ [8]byte, _ []float32, topK int, _ []Filter) ([]ScoredID, error) {
 	if topK > len(h.results) {
 		topK = len(h.results)
 	}

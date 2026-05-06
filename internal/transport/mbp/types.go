@@ -180,6 +180,7 @@ type Weights struct {
 	ACTRDecay    float32 `msgpack:"actr_decay,omitempty" json:"actr_decay,omitempty"`         // power-law exponent d (default 0.5)
 	ACTRHebScale float32 `msgpack:"actr_heb_scale,omitempty" json:"actr_heb_scale,omitempty"` // Hebbian amplifier (default 4.0)
 	DisableACTR  bool    `msgpack:"disable_actr,omitempty" json:"disable_actr,omitempty"`     // when true, use legacy weighted-sum scoring instead of ACT-R
+	UseRRFFusion bool    `msgpack:"use_rrf_fusion,omitempty" json:"use_rrf_fusion,omitempty"` // RRF rank-based fusion (scale-invariant)
 }
 
 // Filter restricts activation results.

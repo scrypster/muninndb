@@ -12,7 +12,7 @@ import (
 // hnswActivationAdapter adapts *hnswpkg.Registry to activation.HNSWIndex.
 type hnswActivationAdapter struct{ reg *hnswpkg.Registry }
 
-func (a *hnswActivationAdapter) Search(ctx context.Context, ws [8]byte, vec []float32, topK int) ([]ScoredID, error) {
+func (a *hnswActivationAdapter) Search(ctx context.Context, ws [8]byte, vec []float32, topK int, _ []Filter) ([]ScoredID, error) {
 	results, err := a.reg.Search(ctx, ws, vec, topK)
 	if err != nil {
 		return nil, err
