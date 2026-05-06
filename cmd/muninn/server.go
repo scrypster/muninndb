@@ -33,6 +33,10 @@ import (
 	"github.com/scrypster/muninndb/internal/index/fts"
 	hnswpkg "github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/logging"
+	"github.com/scrypster/muninndb/internal/search"
+	searchadapters "github.com/scrypster/muninndb/internal/search/adapters"
+	searchbleve "github.com/scrypster/muninndb/internal/search/bleve"
+	"github.com/scrypster/muninndb/internal/search/native"
 	"github.com/scrypster/muninndb/internal/mcp"
 	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/metrics/latency"
@@ -770,6 +774,7 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_ENRICH_TIMEOUT        Per-engram LLM timeout for replay_enrichment (e.g. 60s, 2m; default: no extra timeout)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_WARN_THRESHOLD_MB  Emit a warning when HNSW in-memory vector bytes exceed N MB (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_MAX_MB             Skip HNSW insert (keep Pebble write) when memory exceeds N MB (optional)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_SEARCH_BACKEND        Search backend: \"native\" (default) or \"bleve\"\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_LISTEN_HOST           Host to bind all servers to (e.g. 0.0.0.0 for LAN access)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_CORS_ORIGINS          Comma-separated CORS allowed origins\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_MCP_TOKEN             Bearer token for MCP endpoint auth (Docker/compose alternative to --mcp-token)\n")
@@ -1098,11 +1103,42 @@ func runServer() {
 		}
 	}
 
-	// Build activation engine
-	actEngine := activation.New(store, activation.NewFTSAdapter(ftsIndex), activation.NewHNSWAdapter(hnswRegistry), embedder)
+	// Resolve search backend (native by default, bleve when configured).
+	//
+	//   MUNINN_SEARCH_BACKEND  – "native" (default) uses Pebble FTS + HNSW;
+	//                            "bleve" uses Bleve for persistent text indexing.
+	//                            Vector dimension is derived lazily from the
+	//                            configured embedder (embedPlugin.Dimension()).
+	searchBackendType := strings.ToLower(strings.TrimSpace(os.Getenv("MUNINN_SEARCH_BACKEND")))
+	var searchBackend search.Backend
+	switch searchBackendType {
+	case "bleve":
+		blevePath := filepath.Join(*dataDir, "search.bleve")
+		bleveDim := 0
+		if embedPlugin != nil {
+			bleveDim = embedPlugin.Dimension()
+		}
+		backend, err := searchbleve.Open(searchbleve.Config{
+			Path:      blevePath,
+			VectorDim: bleveDim,
+		})
+		if err != nil {
+			slog.Warn("bleve search backend failed to open, falling back to native", "err", err)
+			searchBackend = native.New(ftsIndex, hnswRegistry)
+		} else {
+			searchBackend = backend
+			slog.Info("search backend: bleve", "path", blevePath, "vector_dim", bleveDim)
+		}
+	default:
+		searchBackend = native.New(ftsIndex, hnswRegistry)
+		slog.Info("search backend: native")
+	}
 
-	// Build trigger system
-	trigSystem := trigger.New(store, trigger.NewFTSAdapter(ftsIndex), trigger.NewHNSWAdapter(hnswRegistry), embedder)
+	// Build activation engine — route through the unified search backend.
+	actEngine := activation.New(store, searchadapters.ActivationFTS{B: searchBackend}, searchadapters.ActivationVector{B: searchBackend}, embedder)
+
+	// Build trigger system — route through the unified search backend.
+	trigSystem := trigger.New(store, searchadapters.TriggerFTS{B: searchBackend}, searchadapters.TriggerVector{B: searchBackend}, embedder)
 
 	// Signal handling context — created early so workers can inherit it for graceful shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1116,18 +1152,20 @@ func runServer() {
 	transitionWorkerImpl := cognitive.NewTransitionWorker(ctx, store.TransitionCache())
 	actEngine.SetTransitionStore(store.TransitionCache())
 
-	// Build engine API - pass the full worker implementations
+	// Build engine API — pass the full worker implementations.
+	// FTSIndex and HNSWRegistry are routed through the unified search backend
+	// so both native (Pebble FTS+HNSW) and bleve backends share the same wiring.
 	eng := engine.NewEngine(engine.EngineConfig{
 		Store:            store,
 		AuthStore:        authStore,
-		FTSIndex:         ftsIndex,
+		FTSIndex:         searchadapters.FTSIndex{B: searchBackend},
 		ActivationEngine: actEngine,
 		TriggerSystem:    trigSystem,
 		HebbianWorker:    hebbianWorkerImpl,
 		ContradictWorker: contradictWorkerImpl.Worker,
 		ConfidenceWorker: confidenceWorkerImpl.Worker,
 		Embedder:         embedder,
-		HNSWRegistry:     hnswRegistry,
+		HNSWRegistry:     searchadapters.HNSWRegistry{B: searchBackend},
 	})
 
 	eng.SetTransitionWorker(transitionWorkerImpl)
@@ -1234,7 +1272,7 @@ func runServer() {
 	// Shared plugin store — bridges raw storage to the plugin.PluginStore interface.
 	// Created here so it can be shared by the MCP adapter (RetryEnrich) and both
 	// retroactive processors (embed + enrich) which are started below.
-	pStore := plugin.NewStoreAdapter(store, hnswRegistry)
+	pStore := plugin.NewStoreAdapter(store, searchadapters.HNSWRegistry{B: searchBackend})
 
 	// Build MCP server
 	mcpAdapter := mcp.NewEngineAdapter(eng, enrichPlugin, pStore)
@@ -1527,6 +1565,13 @@ func runServer() {
 		// GroupCommitter is torn down.
 		if err := store.Close(); err != nil {
 			slog.Error("store close error", "err", err)
+		}
+		// Close the search backend after the store (native backend references
+		// Pebble-based FTS/HNSW; bleve backend owns independent index files).
+		if searchBackend != nil {
+			if err := searchBackend.Close(); err != nil {
+				slog.Error("search backend close error", "err", err)
+			}
 		}
 		gc.Stop()
 	}()

@@ -50,6 +50,15 @@ type ScoredID struct {
 	Score float64
 }
 
+// FullTextIndex is the text index boundary used by Engine.
+// Implementations include *Index (native) and search/adapters (bleve).
+type FullTextIndex interface {
+	IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string, createdAt int64) error
+	Search(ctx context.Context, ws [8]byte, query string, topK int) ([]ScoredID, error)
+	DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string, createdAt int64) error
+	InvalidateIDFCache()
+}
+
 // PostingValue is the 7-byte per-posting entry value.
 type PostingValue struct {
 	TF     float32
@@ -188,7 +197,7 @@ func fieldWeight(field uint8) float64 {
 
 // IndexEngram writes FTS posting list entries for an engram.
 // ws is the 8-byte workspace prefix. id is the ULID.
-func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error {
+func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string, createdAt int64) error {
 	// Collect all (term, field, docLen) tuples
 	termCounts := make(map[string]map[uint8]int)
 	addTerms := func(text string, field uint8) {
@@ -272,7 +281,7 @@ func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, conte
 // DeleteEngram removes FTS posting-list and trigram entries for an engram.
 // Called from SoftDelete to prevent soft-deleted engrams from appearing in search results.
 // Does NOT update global stats (stats are approximate; no need to recount on soft delete).
-func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error {
+func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string, createdAt int64) error {
 	// Collect all unique terms that were indexed for this engram.
 	termSet := make(map[string]struct{})
 	addTerms := func(text string) {

@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Data / temp
+/opt/
+/tmp/
+*.muninn
+*.bleve
+*.log
+
+# Build artifacts
+muninndb-server
+muninn-test
+muninn-debug
+
+# Node/web (not needed for vector tests)
+web/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

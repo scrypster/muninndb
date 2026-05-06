@@ -340,6 +340,7 @@ func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *Ad
 			Concept: child.Concept,
 			Content: child.Content,
 			Tags:    child.Tags,
+			CreatedAt: child.CreatedAt.Unix(),
 		})
 	}
 

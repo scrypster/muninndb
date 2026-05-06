@@ -219,7 +219,7 @@ type FTSIndex interface {
 
 // HNSWIndex is the vector search interface.
 type HNSWIndex interface {
-	Search(ctx context.Context, ws [8]byte, vec []float32, topK int) ([]ScoredID, error)
+	Search(ctx context.Context, ws [8]byte, vec []float32, topK int, filters []Filter) ([]ScoredID, error)
 }
 
 // Embedder converts text to a vector embedding.
@@ -377,10 +377,10 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	}
 
 	// After threshold default is set, adjust for RRF mode.
-	// RRF scores are typically in [0, 0.05] range -- much lower than ACT-R.
+	// RRF scores are typically in [0, 0.05] range — much lower than ACT-R.
 	// Apply an RRF-appropriate threshold to avoid filtering all results.
 	w := resolveWeights(req.Weights, e.weights)
-	if w.UseRRFFusion && req.Threshold >= 0.01 {
+	if w.UseRRFFusion && req.Threshold >= float64(float32(0.01)) {
 		req.Threshold = 0.001
 	}
 
@@ -596,7 +596,7 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 	})
 
 	g.Go(func() error {
-		results, err := e.hnsw.Search(gctx, ws, p1.embedding, k)
+		results, err := e.hnsw.Search(gctx, ws, p1.embedding, k, req.Filters)
 		if err != nil {
 			slog.Warn("activation: hnsw search degraded", "vault", req.VaultID, "err", err)
 			return nil

@@ -26,10 +26,25 @@ type Registry struct {
 	maxBytes           int64 // skip HNSW insert when total vector bytes exceed this
 
 	// throttle state for periodic memory warnings (one warn per 60 s max)
-	lastWarnNano  atomic.Int64 // Unix nano of last slog.Warn emission
-	hardLimitHit  atomic.Bool  // true after the first hard-limit hit (changes log level)
-	lastHardNano  atomic.Int64 // Unix nano of last hard-limit log emission
+	lastWarnNano atomic.Int64 // Unix nano of last slog.Warn emission
+	hardLimitHit atomic.Bool  // true after the first hard-limit hit (changes log level)
+	lastHardNano atomic.Int64 // Unix nano of last hard-limit log emission
 }
+
+// RegistryIndex is the vector-index boundary used by engine subsystems.
+// Registry implements it, and alternate search backends can provide adapters.
+type RegistryIndex interface {
+	Insert(ctx context.Context, ws [8]byte, id [16]byte, vec []float32) error
+	Search(ctx context.Context, ws [8]byte, vec []float32, topK int) ([]ScoredID, error)
+	VaultEmbedDim(ws [8]byte) int
+	VaultVectors(ws [8]byte) int
+	VaultVectorBytes(ws [8]byte) int64
+	TotalVectorBytes() int64
+	ResetVault(ws [8]byte)
+	TombstoneNode(ws [8]byte, id [16]byte)
+}
+
+var _ RegistryIndex = (*Registry)(nil)
 
 // warnThrottleInterval is the minimum gap between repeated memory-warning log lines.
 const warnThrottleInterval = 60 * time.Second
