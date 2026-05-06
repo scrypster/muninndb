@@ -20,12 +20,12 @@ import (
 // All methods accept a context and pass it through to the engine.
 type RESTEngineWrapper struct {
 	engine   *engine.Engine
-	hnswReg  *hnswpkg.Registry
+	hnswReg  hnswpkg.RegistryIndex
 	enricher plugin.EnrichPlugin
 }
 
 // NewEngineWrapper returns an EngineAPI backed by eng with optional HNSW stat injection.
-func NewEngineWrapper(eng *engine.Engine, hnswReg *hnswpkg.Registry) EngineAPI {
+func NewEngineWrapper(eng *engine.Engine, hnswReg hnswpkg.RegistryIndex) EngineAPI {
 	return &RESTEngineWrapper{engine: eng, hnswReg: hnswReg}
 }
 

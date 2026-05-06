@@ -1,0 +1,100 @@
+# ── Vector integration test image ────────────────────────────────────────────
+# Self-contained Docker image that builds FAISS, compiles muninndb, and runs
+# the full bleve+FAISS integration test suite inside the container.
+#
+# Build:  docker build -f Dockerfile.faiss -t muninndb-faiss .
+# Run:    docker run --rm muninndb-faiss
+# Shell:  docker run --rm -it muninndb-faiss /bin/bash
+# ──────────────────────────────────────────────────────────────────────────────
+
+# =============================================================================
+# Stage 0 — Build FAISS C shared library from the blevesearch fork
+# =============================================================================
+FROM debian:bookworm-slim AS faiss
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      git ca-certificates build-essential cmake libopenblas-dev libgflags-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /faiss
+
+# blevesearch/faiss provides the C API consumed by go-faiss.
+# Using the HEAD of the 'bleve' branch — matches what the host has pre-built
+# (includes headers required by go-faiss v1.0.34 like IndexBinary_c_ex.h).
+RUN git clone --depth 1 --branch bleve https://github.com/blevesearch/faiss.git . \
+    && git log -1 --oneline
+
+RUN cmake -B build \
+      -DFAISS_ENABLE_GPU=OFF \
+      -DFAISS_ENABLE_C_API=ON \
+      -DBUILD_SHARED_LIBS=ON \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DFAISS_ENABLE_PYTHON=OFF \
+      -DFAISS_OPT_LEVEL=generic \
+      -DBUILD_TESTING=OFF \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      . \
+    && make -C build -j$(nproc) \
+    && make -C build install
+
+# =============================================================================
+# Stage 1 — Go builder + test runner
+# =============================================================================
+FROM golang:1.25-bookworm AS builder
+
+ENV GOTOOLCHAIN=auto
+
+# go-faiss links against both the C wrapper and the core C++ library.
+# libfaiss.so has a runtime dependency on LAPACK (via OpenBLAS).
+ENV CGO_LDFLAGS="-lfaiss_c -lfaiss -lopenblas"
+ENV CGO_CFLAGS="-I/usr/local/include"
+
+ARG TARGETARCH
+
+WORKDIR /src
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      curl make ca-certificates libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js for Tailwind/Vite CSS build
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Dependencies layer (cached when go.mod/go.sum unchanged) ──────────────────
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Fetch ONNX model + ORT native library for the local embedder.
+RUN make fetch-model _ort-linux-${TARGETARCH}
+
+# Build web assets (Tailwind CSS via Vite)
+RUN cd web && npm ci --ignore-scripts && npm run build
+
+# ── FAISS libraries & headers from stage 0 ──────────────────────────────────
+COPY --from=faiss /usr/local/lib/libfaiss_c.so /usr/local/lib/
+COPY --from=faiss /usr/local/lib/libfaiss.so   /usr/local/lib/
+COPY --from=faiss /usr/local/include/faiss/     /usr/local/include/faiss/
+RUN ldconfig
+
+# Build the server binary with local embedder + FAISS vector support.
+RUN go build -tags localassets,vectors -ldflags="-s -w" -o /muninndb-server ./cmd/muninn/...
+
+# ── Defaults for bleve+FAISS deployment ──────────────────────────────────────
+ENV MUNINN_SEARCH_BACKEND=bleve
+
+# ── Run the vector integration test suite ───────────────────────────────────
+# Pre-coordinates ULID monotonicity: ULID (ms precision) must advance between
+# the two test groups to avoid duplicate IDs. The short sleep covers slow CI.
+CMD go test -tags vectors -count=1 -v -timeout 120s \
+        ./internal/search/bleve \
+        -run 'TestBleveFAISSVectorSearch|TestBackendBuildsPersistentBleveVectorIndex' \
+    && sleep 1 \
+    && go test -tags vectors -count=1 -v -timeout 120s \
+        ./internal/transport/rest \
+        -run TestBleveBackendWiringServesRESTVectorActivationAndBuildsFAISSIndex

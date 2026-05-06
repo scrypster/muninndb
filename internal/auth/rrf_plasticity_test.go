@@ -8,17 +8,23 @@ import "testing"
 
 func TestScoringFusion_DefaultEmpty(t *testing.T) {
 	r := ResolvePlasticity(nil)
-	if r.ScoringFusion != "" {
-		t.Errorf("default ScoringFusion should be empty (ACT-R), got %q", r.ScoringFusion)
+	if r.ScoringFusion != "rrf" {
+		t.Errorf("default ScoringFusion should be rrf, got %q", r.ScoringFusion)
 	}
 }
 
 func TestScoringFusion_AllPresetsDefaultEmpty(t *testing.T) {
-	presets := []string{"default", "reference", "scratchpad", "knowledge-graph"}
-	for _, name := range presets {
+	// Only "default" preset now uses RRF; other presets still default to ACT-R ("").
+	presets := map[string]string{
+		"default":          "rrf",
+		"reference":        "",
+		"scratchpad":       "",
+		"knowledge-graph":  "",
+	}
+	for name, want := range presets {
 		r := ResolvePlasticity(&PlasticityConfig{Preset: name})
-		if r.ScoringFusion != "" {
-			t.Errorf("preset %q: ScoringFusion should be empty, got %q", name, r.ScoringFusion)
+		if r.ScoringFusion != want {
+			t.Errorf("preset %q: ScoringFusion want %q, got %q", name, want, r.ScoringFusion)
 		}
 	}
 }

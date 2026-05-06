@@ -8,15 +8,18 @@ import (
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
-// pluginStoreAdapter wraps *storage.PebbleStore and the HNSW registry to
-// implement the plugin.PluginStore interface.
+// pluginStoreAdapter wraps *storage.PebbleStore and the vector index registry
+// to implement plugin.PluginStore. The hnsw parameter should be a
+// search/adapters.HNSWRegistry when using bleve so Insert/Search fan out to FAISS.
 type pluginStoreAdapter struct {
 	store *storage.PebbleStore
-	hnsw  *hnswpkg.Registry
+	hnsw  hnswpkg.RegistryIndex
 }
 
-// NewStoreAdapter returns a PluginStore backed by the given PebbleStore and HNSW registry.
-func NewStoreAdapter(store *storage.PebbleStore, hnsw *hnswpkg.Registry) PluginStore {
+// NewStoreAdapter returns a PluginStore backed by the given PebbleStore and
+// vector index registry. For bleve backends, pass searchadapters.HNSWRegistry
+// so vector operations fan out to FAISS automatically.
+func NewStoreAdapter(store *storage.PebbleStore, hnsw hnswpkg.RegistryIndex) PluginStore {
 	return &pluginStoreAdapter{store: store, hnsw: hnsw}
 }
 

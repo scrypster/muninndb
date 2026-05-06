@@ -1,20 +1,23 @@
 # Stage 1: Fetch assets and build
 # go:embed directives require the ORT native library and ONNX model to exist at compile time.
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 ENV GOTOOLCHAIN=auto
 
 WORKDIR /src
 
 ARG TARGETARCH
+ARG SKIP_WEB_BUILD=0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl make ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js for Tailwind/Vite CSS build
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# Node.js for Tailwind/Vite CSS build (skipped when SKIP_WEB_BUILD=1)
+RUN if [ "$SKIP_WEB_BUILD" != "1" ]; then \
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+      && apt-get install -y --no-install-recommends nodejs \
+      && rm -rf /var/lib/apt/lists/* ; \
+    fi
 
 COPY . .
 
@@ -24,8 +27,10 @@ COPY . .
 # - libonnxruntime_linux_{arch}.so:   required by local_assets_linux_{arch}.go go:embed
 RUN make fetch-model _ort-linux-${TARGETARCH}
 
-# Build web assets (Tailwind CSS via Vite)
-RUN cd web && npm ci --ignore-scripts && npm run build
+# Build web assets (Tailwind CSS via Vite). Set SKIP_WEB_BUILD=1 to skip.
+RUN if [ "$SKIP_WEB_BUILD" != "1" ]; then \
+      cd web && npm ci --ignore-scripts && npm run build ; \
+    fi
 
 # Build the server binary.
 # CGO_ENABLED=0 would break the local ONNX embedder (dlopen at runtime).

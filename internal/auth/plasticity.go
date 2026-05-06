@@ -112,7 +112,7 @@ type ResolvedPlasticity struct {
 	EnrichmentEnabled bool `json:"enrichment_enabled"`
 	// RecallMode is the default recall mode for this vault.
 	RecallMode string `json:"recall_mode"`
-	// ScoringFusion selects Phase 6 scoring strategy: "" (default=ACT-R), "rrf", or "weighted_sum".
+	// ScoringFusion selects Phase 6 scoring strategy: "" (ACT-R), "rrf", or "weighted_sum".
 	ScoringFusion string `json:"scoring_fusion"`
 	// LTP (Long-Term Potentiation) resolved values. Zero = disabled.
 	LTPThreshold   int     `json:"ltp_threshold"`
@@ -147,7 +147,7 @@ type plasticityPreset struct {
 	InlineEnrichment  string
 	EnrichmentEnabled bool
 	RecallMode        string
-	ScoringFusion     string // "" = default (ACT-R), "rrf", "weighted_sum"
+	ScoringFusion     string // "" = ACT-R, "rrf" (default preset), "weighted_sum"
 	LTPThreshold      int
 	LTPWeightFloor    float32
 }
@@ -178,6 +178,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
+		ScoringFusion:        "rrf",
 
 	},
 	"reference": {

@@ -46,7 +46,7 @@ type CognitiveForwarder interface {
 type Engine struct {
 	store       *storage.PebbleStore
 	authStore   *auth.Store // nil = use Plasticity defaults (e.g. in tests)
-	fts         *fts.Index
+	fts         fts.FullTextIndex
 	ftsWorker   *fts.Worker // async FTS indexing — decoupled from write hot path
 	activation  *activation.ActivationEngine
 	triggers    *trigger.TriggerSystem
@@ -207,7 +207,7 @@ type Engine struct {
 	vaultOpWG      sync.WaitGroup
 	vaultOpStopped atomic.Bool
 
-	hnswRegistry *hnsw.Registry // per-vault HNSW indexes (shared with activation)
+	hnswRegistry hnsw.RegistryIndex // per-vault vector indexes (shared with activation)
 
 	// vaultMu provides per-vault mutual exclusion for destructive vault operations
 	// (PruneVault, ReindexFTSVault, ClearVault). Maps string vault name → *sync.Mutex.
@@ -349,8 +349,8 @@ func NewEngine(cfg EngineConfig) *Engine {
 		activity:         cognitive.NewActivityTracker(),
 		embedder:         cfg.Embedder,
 		autoAssoc:        autoassoc.New(stopCtx, store, cfg.FTSIndex),
-		neighborWorker:  autoassoc.NewNeighborWorker(stopCtx, store, cfg.HNSWRegistry),
-		goalLinkWorker:  autoassoc.NewGoalLinkWorker(stopCtx, store, cfg.HNSWRegistry),
+		neighborWorker:   autoassoc.NewNeighborWorker(stopCtx, store, cfg.HNSWRegistry),
+		goalLinkWorker:   autoassoc.NewGoalLinkWorker(stopCtx, store, cfg.HNSWRegistry),
 		noveltyDet:       novelty.New(),
 		noveltyJobs:      make(chan noveltyJob, 256),
 		noveltyDone:      make(chan struct{}),
@@ -361,8 +361,8 @@ func NewEngine(cfg EngineConfig) *Engine {
 		stopCtx:          stopCtx,
 		stopCancel:       stopCancel,
 		hnswRegistry:     cfg.HNSWRegistry,
-		jobManager:          vaultjob.NewManager(),
-		replayFailCounts:    make(map[storage.ULID]int),
+		jobManager:       vaultjob.NewManager(),
+		replayFailCounts: make(map[storage.ULID]int),
 	}
 	// Start async novelty worker to decouple O(N) Jaccard scan from write hot path.
 	// engine:spawn-ok — tracked by noveltyDone channel, drained in Stop()
@@ -754,8 +754,11 @@ func (e *Engine) GetEngram(ctx context.Context, vault string, id storage.ULID) (
 }
 
 // GetVaultEmbedDim returns the embedding vector dimension currently in use by vault.
-// Derived from the HNSW index — returns 0 if no embeddings have been stored yet.
+// Delegates to the configured vector index boundary.
 func (e *Engine) GetVaultEmbedDim(_ context.Context, vault string) int {
+	if e.hnswRegistry == nil {
+		return 0
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	return e.hnswRegistry.VaultEmbedDim(ws)
 }
@@ -954,16 +957,16 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	unlockContentHash() // release stripe lock — PutContentHash is done
 
 	// When the caller provided an embedding, mark DigestEmbed so the retroactive
-	// processor does not overwrite it, then insert into HNSW inline so the vector
-	// is searchable immediately (the retroactive processor skips DigestEmbed-flagged
-	// engrams and therefore never calls HNSWInsert for them).
+	// processor does not overwrite it, then insert through the configured vector index.
 	if len(req.Embedding) > 0 {
 		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
 		if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
 			slog.Warn("engine: failed to set DigestEmbed flag", "id", id.String(), "err", err)
 		}
-		if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(id), req.Embedding); err != nil {
-			slog.Warn("engine: failed to insert client embedding into HNSW", "id", id.String(), "err", err)
+		if e.hnswRegistry != nil {
+			if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(id), req.Embedding); err != nil {
+				slog.Warn("engine: failed to insert client embedding into HNSW", "id", id.String(), "err", err)
+			}
 		}
 	}
 
@@ -1085,6 +1088,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 			CreatedBy: eng.CreatedBy,
 			Content:   eng.Content,
 			Tags:      eng.Tags,
+			CreatedAt: eng.CreatedAt.Unix(),
 		})
 	}
 
@@ -1510,15 +1514,16 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 
 		// When the caller provided an embedding, mark DigestEmbed so the retroactive
-		// processor does not overwrite it, then insert into HNSW inline so the vector
-		// is searchable immediately.
+		// processor does not overwrite it, then insert through the configured vector index.
 		if len(reqs[i].Embedding) > 0 {
 			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
 			if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
 				slog.Warn("engine: batch: failed to set DigestEmbed flag", "id", id.String(), "err", err)
 			}
-			if err := e.hnswRegistry.Insert(ctx, p.wsPrefix, [16]byte(id), reqs[i].Embedding); err != nil {
-				slog.Warn("engine: batch: failed to insert client embedding into HNSW", "id", id.String(), "err", err)
+			if e.hnswRegistry != nil {
+				if err := e.hnswRegistry.Insert(ctx, p.wsPrefix, [16]byte(id), reqs[i].Embedding); err != nil {
+					slog.Warn("engine: batch: failed to insert client embedding into HNSW", "id", id.String(), "err", err)
+				}
 			}
 		}
 
@@ -1833,6 +1838,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			DisableACTR:        req.Weights.DisableACTR,
 			ACTRDecay:          req.Weights.ACTRDecay,
 			ACTRHebScale:       req.Weights.ACTRHebScale,
+			UseRRFFusion:       req.Weights.UseRRFFusion,
 		}
 	} else {
 		actrDecay := float32(0.5)
@@ -2368,7 +2374,7 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 		}
 		// Remove FTS posting-list entries so soft-deleted engrams do not appear in search.
 		if readErr == nil && eng != nil && e.fts != nil {
-			if ftErr := e.fts.DeleteEngram(wsPrefix, [16]byte(id), eng.Concept, eng.CreatedBy, eng.Content, eng.Tags); ftErr != nil {
+			if ftErr := e.fts.DeleteEngram(wsPrefix, [16]byte(id), eng.Concept, eng.CreatedBy, eng.Content, eng.Tags, eng.CreatedAt.Unix()); ftErr != nil {
 				slog.Warn("engine: fts cleanup failed after soft delete", "id", req.ID, "error", ftErr)
 			}
 		}
@@ -2752,15 +2758,17 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 		slog.Warn("engine: failed to persist vault name", "vault", vault, "err", err)
 	}
 
-	// When the caller provided an embedding, mark DigestEmbed and insert into
-	// HNSW inline (the retroactive processor skips DigestEmbed-flagged engrams).
+	// When the caller provided an embedding, mark DigestEmbed, then insert through
+	// the configured vector index.
 	if len(embedding) > 0 {
 		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(newULID))
 		if err := e.store.SetDigestFlag(ctx, newULID, existing|plugin.DigestEmbed); err != nil {
 			slog.Warn("engine: evolve: failed to set DigestEmbed flag", "id", newULID.String(), "err", err)
 		}
-		if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(newULID), embedding); err != nil {
-			slog.Warn("engine: evolve: failed to insert client embedding into HNSW", "id", newULID.String(), "err", err)
+		if e.hnswRegistry != nil {
+			if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(newULID), embedding); err != nil {
+				slog.Warn("engine: evolve: failed to insert client embedding into HNSW", "id", newULID.String(), "err", err)
+			}
 		}
 	}
 
@@ -2772,6 +2780,7 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 			Concept:   newEng.Concept,
 			CreatedBy: newEng.CreatedBy,
 			Content:   newEng.Content,
+			CreatedAt: newEng.CreatedAt.Unix(),
 		})
 	}
 

@@ -43,7 +43,7 @@ func TestIndexEngramUpdatesStats(t *testing.T) {
 	ctx := context.Background()
 
 	id := [16]byte{1}
-	err := idx.IndexEngram(ws, id, "Go programming language", "", "Go is a compiled language", []string{"golang"})
+	err := idx.IndexEngram(ws, id, "Go programming language", "", "Go is a compiled language", []string{"golang"}, 0)
 	if err != nil {
 		t.Fatalf("IndexEngram: %v", err)
 	}
@@ -84,9 +84,9 @@ func TestFTSRankingOrder(t *testing.T) {
 	id2 := [16]byte{2}
 	id3 := [16]byte{3}
 
-	_ = idx.IndexEngram(ws, id1, "Go programming language", "", "Go is a statically typed compiled language", []string{"golang", "compiled"})
-	_ = idx.IndexEngram(ws, id2, "PostgreSQL database", "", "PostgreSQL is a relational database system", []string{"database", "sql"})
-	_ = idx.IndexEngram(ws, id3, "Machine learning", "", "Machine learning algorithms learn from data", []string{"ml", "ai"})
+	_ = idx.IndexEngram(ws, id1, "Go programming language", "", "Go is a statically typed compiled language", []string{"golang", "compiled"}, 0)
+	_ = idx.IndexEngram(ws, id2, "PostgreSQL database", "", "PostgreSQL is a relational database system", []string{"database", "sql"}, 0)
+	_ = idx.IndexEngram(ws, id3, "Machine learning", "", "Machine learning algorithms learn from data", []string{"ml", "ai"}, 0)
 
 	// Query about compiled language should rank Go first
 	results, err := idx.Search(ctx, ws, "compiled programming language", 10)
@@ -126,7 +126,7 @@ func TestFTSMultipleEngrams(t *testing.T) {
 	// Index 3 engrams all containing the word "system"
 	for i := 0; i < 3; i++ {
 		id := [16]byte{byte(i + 1)}
-		_ = idx.IndexEngram(ws, id, "system concept", "", "this is a system component", nil)
+		_ = idx.IndexEngram(ws, id, "system concept", "", "this is a system component", nil, 0)
 	}
 
 	stats := idx.readStats(ws)
@@ -164,7 +164,7 @@ func TestFTS_DualPathSearch(t *testing.T) {
 	var id1 [16]byte
 	id1[15] = 1
 
-	err := idx.IndexEngram(ws, id1, "running dogs", "", "they run fast", nil)
+	err := idx.IndexEngram(ws, id1, "running dogs", "", "they run fast", nil, 0)
 	if err != nil {
 		t.Fatalf("IndexEngram: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestFTS_DeleteEngram(t *testing.T) {
 	tags := []string{"delete", "test"}
 
 	// Step 1: Index the engram.
-	if err := idx.IndexEngram(ws, id, concept, createdBy, content, tags); err != nil {
+	if err := idx.IndexEngram(ws, id, concept, createdBy, content, tags, 0); err != nil {
 		t.Fatalf("IndexEngram: %v", err)
 	}
 
@@ -338,7 +338,7 @@ func TestFTS_DeleteEngram(t *testing.T) {
 	}
 
 	// Step 3: Delete the engram from the FTS index.
-	if err := idx.DeleteEngram(ws, id, concept, createdBy, content, tags); err != nil {
+	if err := idx.DeleteEngram(ws, id, concept, createdBy, content, tags, 0); err != nil {
 		t.Fatalf("DeleteEngram: %v", err)
 	}
 
@@ -369,7 +369,7 @@ func TestFTS_DeleteEngram_NotIndexed(t *testing.T) {
 	// This exercises the early-return path: len(termSet) == 0 → return nil.
 	// Tests the empty-token early-return path in DeleteEngram.
 	neverIndexedID := [16]byte{0xFF, 0xEE, 0xDD, 0xCC}
-	err := idx.DeleteEngram(ws, neverIndexedID, "", "", "", nil)
+	err := idx.DeleteEngram(ws, neverIndexedID, "", "", "", nil, 0)
 	if err != nil {
 		t.Errorf("DeleteEngram on never-indexed id with empty fields: expected nil error, got %v", err)
 	}
@@ -387,7 +387,7 @@ func TestFTS_ReindexedVaultSkipsDualPath(t *testing.T) {
 
 	// Index engram id1 properly via IndexEngram so TermStatsKey and FTSStatsKey are written.
 	// "run quickly" → stemmed tokens include "run"; id1 will be findable via the stemmed path.
-	if err := idx.IndexEngram(ws, id1, "run quickly", "", "", nil); err != nil {
+	if err := idx.IndexEngram(ws, id1, "run quickly", "", "", nil, 0); err != nil {
 		t.Fatalf("IndexEngram: %v", err)
 	}
 

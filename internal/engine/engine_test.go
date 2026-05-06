@@ -424,6 +424,7 @@ func TestActivateThresholdFiltering(t *testing.T) {
 		Context:    []string{"golang concurrency channels goroutines"},
 		MaxResults: 10,
 		Threshold:  0.99,
+		Weights:    &mbp.Weights{UseRRFFusion: false}, // keep ACT-R for threshold test
 	})
 	if err != nil {
 		t.Fatalf("Activate: %v", err)

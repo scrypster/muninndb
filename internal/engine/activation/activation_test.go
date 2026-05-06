@@ -150,7 +150,7 @@ type stubHNSW struct {
 	results []activation.ScoredID
 }
 
-func (h *stubHNSW) Search(_ context.Context, _ [8]byte, _ []float32, topK int) ([]activation.ScoredID, error) {
+func (h *stubHNSW) Search(_ context.Context, _ [8]byte, _ []float32, topK int, _ []activation.Filter) ([]activation.ScoredID, error) {
 	if topK > len(h.results) {
 		topK = len(h.results)
 	}
@@ -175,7 +175,7 @@ func (e *stubEmbedder) Tokenize(text string) []string {
 // emptyHNSW is a zero-result HNSW stub for cases where no vector hits are needed.
 type emptyHNSW struct{}
 
-func (h *emptyHNSW) Search(_ context.Context, _ [8]byte, _ []float32, _ int) ([]activation.ScoredID, error) {
+func (h *emptyHNSW) Search(_ context.Context, _ [8]byte, _ []float32, _ int, _ []activation.Filter) ([]activation.ScoredID, error) {
 	return nil, nil
 }
 
@@ -866,7 +866,7 @@ func TestProfileUsed_DefaultFallback(t *testing.T) {
 // errorHNSW implements activation.HNSWIndex but always returns an error from Search.
 type errorHNSW struct{}
 
-func (h *errorHNSW) Search(_ context.Context, _ [8]byte, _ []float32, _ int) ([]activation.ScoredID, error) {
+func (h *errorHNSW) Search(_ context.Context, _ [8]byte, _ []float32, _ int, _ []activation.Filter) ([]activation.ScoredID, error) {
 	return nil, fmt.Errorf("hnsw: index not ready")
 }
 
