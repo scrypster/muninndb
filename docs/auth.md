@@ -65,8 +65,11 @@ vault: default
 |------|-------|------------------------|----------|
 | `full` | Yes | **Yes** — temporal scores refresh, Hebbian weights update, access counts increment | AI agents, primary integrations, anything that is *part of* the brain |
 | `observe` | Yes | **No** — mutating REST routes and gRPC RPCs return `403` before the engine is reached; engine-layer cognitive mutations are also suppressed | Dashboards, analytics, read-only partners, exports |
+| `write` | No | **Yes** — write/ingest routes are allowed, read endpoints are blocked | Ingest pipelines that should not read vault contents |
 
 The `observe` mode exists because the vault's cognitive state is the thing of value. A dashboard reading engrams 1000 times a day should not inflate access counts and distort what the AI agent sees as relevant. `observe` keys see the brain; they don't affect it, and semantically mutating REST routes are rejected.
+
+The REST API accepts `full`, `observe`, and `write`. The current `muninn api-key create` CLI accepts `full` and `observe`; create `write` keys through `POST /api/admin/keys` if needed.
 
 ### Key format
 
@@ -127,6 +130,8 @@ Response:
 ```bash
 curl "http://127.0.0.1:8475/api/admin/keys?vault=default"
 ```
+
+If `vault` is omitted, the server lists keys for `default`.
 
 Token values are not returned. You see the key metadata (ID, label, mode, created date) only.
 

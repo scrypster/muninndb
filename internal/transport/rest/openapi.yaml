@@ -904,8 +904,11 @@ components:
           maxLength: 256
         mode:
           type: string
-          enum: ["full", "observe"]
+          enum: ["full", "observe", "write"]
           default: "full"
+        expires:
+          type: string
+          description: "Optional expiry as Nd, Ny, YYYY-MM-DD, or RFC3339 timestamp. Examples: 90d, 1y, 2027-01-01."
 
     APIKey:
       type: object
@@ -921,6 +924,10 @@ components:
         created_at:
           type: string
           format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
 
     CreateAPIKeyResponse:
       type: object
