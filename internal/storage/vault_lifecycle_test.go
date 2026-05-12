@@ -98,6 +98,98 @@ func TestClearVault_CrossVaultSafety(t *testing.T) {
 	}
 }
 
+func TestClearVault_RemovesEntityGraphForVault(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	wsA := store.VaultPrefix("entity-vault-a")
+	wsB := store.VaultPrefix("entity-vault-b")
+
+	engA, err := store.WriteEngram(ctx, wsA, &Engram{Concept: "A", Content: "a", Confidence: 1.0, Stability: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engB, err := store.WriteEngram(ctx, wsB, &Engram{Concept: "B", Content: "b", Confidence: 1.0, Stability: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"Shared", "OnlyA", "Shared", "OnlyB"} {
+		if err := store.UpsertEntityRecord(ctx, EntityRecord{Name: name, Type: "test", Confidence: 1}, "test"); err != nil {
+			t.Fatalf("UpsertEntityRecord %q: %v", name, err)
+		}
+	}
+	if err := store.WriteEntityEngramLink(ctx, wsA, engA, "Shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteEntityEngramLink(ctx, wsA, engA, "OnlyA"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteEntityEngramLink(ctx, wsB, engB, "Shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteEntityEngramLink(ctx, wsB, engB, "OnlyB"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertRelationshipRecord(ctx, wsA, engA, RelationshipRecord{FromEntity: "Shared", ToEntity: "OnlyA", RelType: "uses", Weight: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertRelationshipRecord(ctx, wsB, engB, RelationshipRecord{FromEntity: "Shared", ToEntity: "OnlyB", RelType: "uses", Weight: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IncrementEntityCoOccurrence(ctx, wsA, "Shared", "OnlyA"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IncrementEntityCoOccurrence(ctx, wsB, "Shared", "OnlyB"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.ClearVault(ctx, wsA); err != nil {
+		t.Fatalf("ClearVault: %v", err)
+	}
+
+	for _, p := range []byte{0x20, 0x21, 0x24, 0x26} {
+		assertNoVaultPrefixKeys(t, store, p, wsA)
+	}
+	assertNoEntityReverseIndexKeysForVault(t, store, wsA)
+
+	var namesA []string
+	if err := store.ScanVaultEntityNames(ctx, wsA, func(name string) error {
+		namesA = append(namesA, name)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(namesA) != 0 {
+		t.Fatalf("expected no entity names for cleared vault, got %v", namesA)
+	}
+
+	var sharedLinks [][8]byte
+	if err := store.ScanEntityEngrams(ctx, "Shared", func(gotWS [8]byte, id ULID) error {
+		sharedLinks = append(sharedLinks, gotWS)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sharedLinks) != 1 || sharedLinks[0] != wsB {
+		t.Fatalf("expected Shared to keep only vault B reverse link, got %v", sharedLinks)
+	}
+
+	onlyA, err := store.GetEntityRecord(ctx, "OnlyA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyA != nil {
+		t.Fatalf("expected orphaned entity OnlyA to be deleted, got %+v", onlyA)
+	}
+	shared, err := store.GetEntityRecord(ctx, "Shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared == nil {
+		t.Fatal("expected Shared entity record to survive because vault B still references it")
+	}
+}
+
 func TestClearVault_L1CacheEvicted(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -171,5 +263,46 @@ func TestDeleteVault_0x11OrphansNotDeleted(t *testing.T) {
 	}
 	if flags&0x01 == 0 {
 		t.Error("digest flag should survive vault deletion")
+	}
+}
+
+func assertNoVaultPrefixKeys(t *testing.T, store *PebbleStore, prefix byte, ws [8]byte) {
+	t.Helper()
+	wsPlus, err := incrementWS(ws)
+	if err != nil {
+		t.Fatalf("incrementWS: %v", err)
+	}
+	lo := make([]byte, 9)
+	lo[0] = prefix
+	copy(lo[1:], ws[:])
+	hi := make([]byte, 9)
+	hi[0] = prefix
+	copy(hi[1:], wsPlus[:])
+	iter, err := store.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	if err != nil {
+		t.Fatalf("NewIter for prefix 0x%02X: %v", prefix, err)
+	}
+	defer iter.Close()
+	if iter.First() {
+		t.Fatalf("prefix 0x%02X still has vault keys after ClearVault", prefix)
+	}
+}
+
+func assertNoEntityReverseIndexKeysForVault(t *testing.T, store *PebbleStore, ws [8]byte) {
+	t.Helper()
+	iter, err := store.db.NewIter(&pebble.IterOptions{LowerBound: []byte{0x23}, UpperBound: []byte{0x24}})
+	if err != nil {
+		t.Fatalf("NewIter for prefix 0x23: %v", err)
+	}
+	defer iter.Close()
+	for valid := iter.First(); valid; valid = iter.Next() {
+		k := iter.Key()
+		if len(k) == 33 {
+			var gotWS [8]byte
+			copy(gotWS[:], k[9:17])
+			if gotWS == ws {
+				t.Fatal("entity reverse index still has vault keys after ClearVault")
+			}
+		}
 	}
 }

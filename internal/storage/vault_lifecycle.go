@@ -19,17 +19,24 @@ import (
 //     concurrent writer from re-seeding the counter from the stale persisted value.
 //  2. Evict the in-memory vaultCounters entry — any subsequent write that races
 //     here now seeds from a scan of the (already range-tombstoned) key space → 0.
-//  3. Commit the range tombstones for all 20 vault-scoped data prefixes.
+//  3. Commit the range tombstones for all vault-scoped data prefixes.
 //  4. Evict all in-memory caches (L1, assocCache, metaCache, recentActiveCache).
 //
-// Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17, 0x28
+// Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17,
+// 0x20–0x21, 0x24, 0x26, 0x28
 // Prefixes NOT cleared (global or name keys):
 //   - 0x0E vault meta key (preserved by Clear, deleted by DeleteVaultNameOnly)
 //   - 0x0F name index    (global by name hash, deleted by DeleteVaultNameOnly)
 //   - 0x11 digest flags  (globally keyed by ULID — orphans are acceptable)
+//   - 0x1F entity records (global by entity hash; orphan records are pruned
+//     after vault-scoped links are removed)
 func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error) {
 	// Capture count before anything is deleted.
 	vaultCount := ps.GetVaultCount(ctx, ws)
+	entityMentions, err := ps.collectVaultEntityMentions(ws)
+	if err != nil {
+		return 0, fmt.Errorf("clear vault: collect entity mentions: %w", err)
+	}
 
 	// Step 1: point-delete VaultCountKey from Pebble FIRST (prevents stale re-seed).
 	// 0x15 | ws[8] = 9 bytes — the short form of the count key (not the EpisodeKey).
@@ -51,12 +58,16 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 		ps.provWork.Drain()
 	}
 
-	// Step 3: DeleteRange for all 21 vault-scoped data prefixes.
+	// Step 3: DeleteRange for all vault-scoped data prefixes.
 	// 0x0E (vault meta), 0x0F (name index), 0x11 (digest flags) are intentionally excluded.
 	dataPrefixes := []byte{
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x09, 0x0A, 0x0B, 0x0C, 0x0D,
 		0x10, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x20, // engram entity links
+		0x21, // entity relationship records
+		0x24, // entity co-occurrence index
+		0x26, // relationship entity index
 		0x28, // content-hash dedup index
 	}
 	wsPlus, err := incrementWS(ws)
@@ -79,8 +90,18 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 			return 0, fmt.Errorf("clear vault: delete range 0x%02X: %w", p, err)
 		}
 	}
+	if err := ps.deleteVaultEntityReverseIndex(batch, ws); err != nil {
+		return 0, fmt.Errorf("clear vault: delete entity reverse index: %w", err)
+	}
 	if err := batch.Commit(pebble.Sync); err != nil {
 		return 0, fmt.Errorf("clear vault: commit: %w", err)
+	}
+	for name, count := range entityMentions {
+		for i := 0; i < count; i++ {
+			if err := ps.DecrementEntityMentionCount(ctx, name); err != nil {
+				return 0, fmt.Errorf("clear vault: decrement entity %q: %w", name, err)
+			}
+		}
 	}
 
 	// Step 4: evict all in-memory caches.
@@ -106,6 +127,66 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	ps.recentActiveCache.Delete(ws)
 
 	return vaultCount, nil
+}
+
+func (ps *PebbleStore) collectVaultEntityMentions(ws [8]byte) (map[string]int, error) {
+	prefix := make([]byte, 9)
+	prefix[0] = 0x20
+	copy(prefix[1:], ws[:])
+	wsPlus, err := incrementWS(ws)
+	if err != nil {
+		return nil, err
+	}
+	upperBound := make([]byte, 9)
+	upperBound[0] = 0x20
+	copy(upperBound[1:], wsPlus[:])
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	mentions := make(map[string]int)
+	for valid := iter.First(); valid; valid = iter.Next() {
+		name := string(iter.Value())
+		if name != "" {
+			mentions[name]++
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, err
+	}
+	return mentions, nil
+}
+
+func (ps *PebbleStore) deleteVaultEntityReverseIndex(batch *pebble.Batch, ws [8]byte) error {
+	iter, err := ps.db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte{0x23},
+		UpperBound: []byte{0x24},
+	})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
+	for valid := iter.First(); valid; valid = iter.Next() {
+		k := iter.Key()
+		if len(k) != 33 {
+			continue
+		}
+		var gotWS [8]byte
+		copy(gotWS[:], k[9:17])
+		if gotWS != ws {
+			continue
+		}
+		keyCopy := make([]byte, len(k))
+		copy(keyCopy, k)
+		if err := batch.Delete(keyCopy, nil); err != nil {
+			return err
+		}
+	}
+	return iter.Error()
 }
 
 // DeleteVaultNameOnly removes the vault name registration keys (0x0E and 0x0F)

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -131,6 +132,99 @@ func TestEngineDeleteVault_GlobalEngramCountDecreases(t *testing.T) {
 	// from a persistent scan at startup and can skew if prior tests left state.
 	if afterCount < 0 {
 		t.Errorf("engramCount went negative after DeleteVault: %d (floor guard failed)", afterCount)
+	}
+}
+
+func TestEngineDeleteVault_RemovesEntityGraph(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const deletedVault = "delete-entity-graph-a"
+	const keptVault = "delete-entity-graph-b"
+
+	respA, err := eng.Write(ctx, writeReq(deletedVault, "delete me", "content a"))
+	if err != nil {
+		t.Fatalf("Write deleted vault: %v", err)
+	}
+	respB, err := eng.Write(ctx, writeReq(keptVault, "keep me", "content b"))
+	if err != nil {
+		t.Fatalf("Write kept vault: %v", err)
+	}
+	idA, err := storage.ParseULID(respA.ID)
+	if err != nil {
+		t.Fatalf("ParseULID A: %v", err)
+	}
+	idB, err := storage.ParseULID(respB.ID)
+	if err != nil {
+		t.Fatalf("ParseULID B: %v", err)
+	}
+	wsA := eng.store.ResolveVaultPrefix(deletedVault)
+	wsB := eng.store.ResolveVaultPrefix(keptVault)
+
+	for _, name := range []string{"SharedEntity", "OnlyDeletedVault", "SharedEntity", "OnlyKeptVault"} {
+		if err := eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{Name: name, Type: "test", Confidence: 1}, "test"); err != nil {
+			t.Fatalf("UpsertEntityRecord %q: %v", name, err)
+		}
+	}
+	if err := eng.store.WriteEntityEngramLink(ctx, wsA, idA, "SharedEntity"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.store.WriteEntityEngramLink(ctx, wsA, idA, "OnlyDeletedVault"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.store.WriteEntityEngramLink(ctx, wsB, idB, "SharedEntity"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.store.WriteEntityEngramLink(ctx, wsB, idB, "OnlyKeptVault"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.store.UpsertRelationshipRecord(ctx, wsA, idA, storage.RelationshipRecord{FromEntity: "SharedEntity", ToEntity: "OnlyDeletedVault", RelType: "uses", Weight: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.store.UpsertRelationshipRecord(ctx, wsB, idB, storage.RelationshipRecord{FromEntity: "SharedEntity", ToEntity: "OnlyKeptVault", RelType: "uses", Weight: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.DeleteVault(ctx, deletedVault); err != nil {
+		t.Fatalf("DeleteVault: %v", err)
+	}
+
+	deletedEntities, err := eng.ListEntities(ctx, deletedVault, 50, "")
+	if err != nil {
+		t.Fatalf("ListEntities deleted vault: %v", err)
+	}
+	if len(deletedEntities) != 0 {
+		t.Fatalf("expected deleted vault to have no entities, got %+v", deletedEntities)
+	}
+	deletedRefs, err := eng.FindByEntity(ctx, deletedVault, "SharedEntity", 50)
+	if err != nil {
+		t.Fatalf("FindByEntity deleted vault: %v", err)
+	}
+	if len(deletedRefs) != 0 {
+		t.Fatalf("expected deleted vault to have no SharedEntity refs, got %d", len(deletedRefs))
+	}
+	onlyDeleted, err := eng.store.GetEntityRecord(ctx, "OnlyDeletedVault")
+	if err != nil {
+		t.Fatalf("GetEntityRecord OnlyDeletedVault: %v", err)
+	}
+	if onlyDeleted != nil {
+		t.Fatalf("expected orphan entity to be removed, got %+v", onlyDeleted)
+	}
+
+	keptEntities, err := eng.ListEntities(ctx, keptVault, 50, "")
+	if err != nil {
+		t.Fatalf("ListEntities kept vault: %v", err)
+	}
+	if len(keptEntities) != 2 {
+		t.Fatalf("expected kept vault entities to remain, got %+v", keptEntities)
+	}
+	keptRefs, err := eng.FindByEntity(ctx, keptVault, "SharedEntity", 50)
+	if err != nil {
+		t.Fatalf("FindByEntity kept vault: %v", err)
+	}
+	if len(keptRefs) != 1 || keptRefs[0].ID != idB {
+		t.Fatalf("expected kept vault SharedEntity ref to remain, got %+v", keptRefs)
 	}
 }
 
