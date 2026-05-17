@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 func TestClearVault_AllPrefixesGone(t *testing.T) {
@@ -33,9 +34,10 @@ func TestClearVault_AllPrefixesGone(t *testing.T) {
 		t.Errorf("expected vault count >= 1, got %d", n)
 	}
 
-	// All 20 vault-scoped prefixes must be empty
+	// All vault-scoped prefixes must be empty
 	vaultPrefixes := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-		0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x10, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17}
+		0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x10, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x22, 0x25, 0x27}
 	for _, p := range vaultPrefixes {
 		lo := make([]byte, 9)
 		lo[0] = p
@@ -304,5 +306,67 @@ func assertNoEntityReverseIndexKeysForVault(t *testing.T, store *PebbleStore, ws
 				t.Fatal("entity reverse index still has vault keys after ClearVault")
 			}
 		}
+	}
+}
+
+// TestClearVault_ClearsLastAccessArchiveAssocDreamState verifies that the three
+// previously-missing prefixes (0x22 last-access, 0x25 archive-assoc, 0x27 dream state)
+// are removed by ClearVault. Regression test for the pre-existing gap found during
+// PR #436 review.
+func TestClearVault_ClearsLastAccessArchiveAssocDreamState(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("test-missing-prefixes")
+	_ = ctx
+
+	wsPlus, err := incrementWS(ws)
+	if err != nil {
+		t.Fatalf("incrementWS: %v", err)
+	}
+
+	// Plant a 0x22 last-access key
+	laKey := keys.LastAccessIndexKey(ws, 1000, [16]byte{1})
+	if err := store.db.Set(laKey, nil, pebble.NoSync); err != nil {
+		t.Fatalf("set 0x22: %v", err)
+	}
+
+	// Plant a 0x25 archive-assoc key
+	archKey := keys.ArchiveAssocKey(ws, [16]byte{2}, [16]byte{3})
+	if err := store.db.Set(archKey, nil, pebble.NoSync); err != nil {
+		t.Fatalf("set 0x25: %v", err)
+	}
+
+	// Plant a 0x27 dream-state key
+	dreamKey := keys.DreamStateKey(ws)
+	if err := store.db.Set(dreamKey, []byte{0x01}, pebble.NoSync); err != nil {
+		t.Fatalf("set 0x27: %v", err)
+	}
+
+	if _, err := store.ClearVault(context.Background(), ws); err != nil {
+		t.Fatalf("ClearVault: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		prefix byte
+	}{
+		{"last-access (0x22)", 0x22},
+		{"archive-assoc (0x25)", 0x25},
+		{"dream-state (0x27)", 0x27},
+	} {
+		lo := make([]byte, 9)
+		lo[0] = tc.prefix
+		copy(lo[1:], ws[:])
+		hi := make([]byte, 9)
+		hi[0] = tc.prefix
+		copy(hi[1:], wsPlus[:])
+		iter, err := store.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+		if err != nil {
+			t.Fatalf("NewIter %s: %v", tc.name, err)
+		}
+		if iter.First() {
+			t.Errorf("prefix %s still has keys after ClearVault", tc.name)
+		}
+		iter.Close()
 	}
 }
