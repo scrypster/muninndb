@@ -157,8 +157,9 @@ func runStart(webEnabled bool) error {
 
 	// Wait for health check (up to 5s).
 	// Use the actual MCP port from daemon args — may differ from defaultMCPPort
-	// when the user passed --mcp-addr.
-	mcpHealthURL := "http://127.0.0.1:" + mcpPortFromArgs(args) + "/mcp/health"
+	// when the user passed --mcp-addr. Honours MUNINNDB_MCP_URL for TLS
+	// deployments (see #410 / #424 for the admin-CLI equivalents).
+	mcpHealthURL := healthURL("MUNINNDB_MCP_URL", mcpPortFromArgs(args)) + "/mcp/health"
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)

@@ -6,8 +6,24 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// healthURL builds a base URL for a service health probe.
+// If envVar is set, it's used verbatim as the base URL (trailing slash
+// trimmed), matching the MUNINNDB_ADMIN_URL / MUNINNDB_UI_URL convention
+// established in vault_auth.go (see #410 / #424). Otherwise falls back to
+// http://127.0.0.1:<port>, preserving the legacy default for non-TLS
+// deployments.
+//
+// Callers append the per-service path (e.g. "/api/health").
+func healthURL(envVar, port string) string {
+	if v := os.Getenv(envVar); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "http://127.0.0.1:" + port
+}
 
 // checkVersionHint prints a one-liner if a newer version is available.
 // Returns immediately if the check takes more than 3 seconds.
@@ -115,9 +131,9 @@ func probeServicesWithAddrs(addrs daemonAddrs) []serviceStatus {
 	uiPortInt, _ := strconv.Atoi(uiPort)
 
 	return []serviceStatus{
-		{name: "database", port: restPortInt, up: probe("http://127.0.0.1:" + restPort + "/api/health")},
-		{name: "mcp", port: mcpPortInt, up: probe("http://127.0.0.1:" + mcpPort + "/mcp/health")},
-		{name: "web ui", port: uiPortInt, up: probe("http://127.0.0.1:" + uiPort + "/")},
+		{name: "database", port: restPortInt, up: probe(healthURL("MUNINNDB_ADMIN_URL", restPort) + "/api/health")},
+		{name: "mcp", port: mcpPortInt, up: probe(healthURL("MUNINNDB_MCP_URL", mcpPort) + "/mcp/health")},
+		{name: "web ui", port: uiPortInt, up: probe(healthURL("MUNINNDB_UI_URL", uiPort) + "/")},
 	}
 }
 
