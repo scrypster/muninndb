@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -49,8 +51,24 @@ func mcpCall(baseURL, toolName string, args map[string]any) (map[string]any, err
 }
 
 func (r *replState) cmdShowVaults() {
+	addrs, _ := readAddrsFile(defaultDataDir())
+	restPort := "8475"
+	if addrs.RestAddr != "" {
+		if _, p, err := net.SplitHostPort(addrs.RestAddr); err == nil && p != "" {
+			restPort = p
+		}
+	}
+	apiURL := healthURL("MUNINNDB_ADMIN_URL", addrs.Scheme, restPort) + "/api/vaults"
+
 	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest("GET", "http://127.0.0.1:8475/api/vaults", nil)
+	if strings.HasPrefix(apiURL, "https://") {
+		// localhost admin REPL talking to its own server — skip cert
+		// verification so an internal-CA TLS deployment still works.
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		}
+	}
+	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
@@ -70,7 +88,7 @@ func (r *replState) cmdShowVaults() {
 		// Fallback: show static message
 		fmt.Println("  default   (built-in)")
 		fmt.Println()
-		fmt.Println("  For full vault list, open: http://127.0.0.1:8476")
+		fmt.Printf("  For full vault list, open: %s\n", webUIDisplay(addrs)[0])
 		return
 	}
 
@@ -346,11 +364,12 @@ func (r *replState) cmdShowStats() {
 		return
 	}
 	resp.Body.Close()
+	addrs, _ := readAddrsFile(defaultDataDir())
 	fmt.Println("Server: running")
 	fmt.Println("  MBP  :8474   binary protocol")
 	fmt.Println("  REST :8475   JSON API")
 	fmt.Println("  MCP  :8750   AI tool integration")
-	fmt.Println("  UI   :8476   http://127.0.0.1:8476")
+	fmt.Printf("  UI   :8476   %s\n", webUIDisplay(addrs)[0])
 	if r.vault != "" {
 		fmt.Println()
 		result, err := mcpCall(r.mcpURL, "muninn_status", map[string]any{"vault": r.vault})

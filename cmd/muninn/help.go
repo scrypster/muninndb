@@ -93,7 +93,10 @@ var subcommandHelp = map[string]func(){
 	},
 	"status": func() {
 		printSubcommandUsage("status", "show service health and ports", "muninn status", nil,
-			[]string{"muninn status"})
+			[]string{
+				"muninn status",
+				"MUNINNDB_ADMIN_URL=https://host:8475 muninn status   # TLS: override probe URLs",
+			})
 	},
 	"shell": func() {
 		printSubcommandUsage("shell", "interactive memory shell", "muninn shell", nil,
@@ -344,6 +347,9 @@ func printHelp() {
 	fmt.Println("  MCP endpoint: http://127.0.0.1:8750/mcp")
 	fmt.Printf("  %-28s %s\n", "MUNINN_MCP_URL", "Override MCP server URL (also used by 'muninn mcp' proxy)")
 	fmt.Printf("  %-28s %s\n", "MUNINNDB_DATA", "Override default data directory")
+	fmt.Printf("  %-28s %s\n", "MUNINNDB_ADMIN_URL", "TLS: base URL for 'muninn status'/admin REST probes")
+	fmt.Printf("  %-28s %s\n", "MUNINNDB_UI_URL", "TLS: base URL for 'muninn status' Web UI probe")
+	fmt.Printf("  %-28s %s\n", "MUNINNDB_MCP_URL", "TLS: base URL for 'muninn status'/'start' MCP probe")
 	fmt.Println()
 
 	fmt.Println(bold("PORTS"))

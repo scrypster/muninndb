@@ -172,20 +172,37 @@ func TestLoadSaveDefaultVault(t *testing.T) {
 	}
 }
 
-// TestCmdShowVaults401Fallback tests cmdShowVaults with connection error.
-func TestCmdShowVaults401Fallback(t *testing.T) {
-	// When the server is unreachable, cmdShowVaults should handle gracefully
-	r := &replState{mcpURL: "http://localhost:9998"}
+// TestCmdShowVaultsConnectionError verifies cmdShowVaults degrades gracefully
+// when the server is unreachable.
+func TestCmdShowVaultsConnectionError(t *testing.T) {
+	t.Setenv("MUNINNDB_DATA", t.TempDir())
+	t.Setenv("MUNINNDB_ADMIN_URL", "http://127.0.0.1:19998") // nothing listening
+	r := &replState{}
 	errOut := captureStderr(func() {
 		captureStdout(func() {
 			r.cmdShowVaults()
 		})
 	})
-	// Should print error message to stderr or handle gracefully
-	// (error message is written to stderr, not stdout)
-	if !strings.Contains(errOut, "Error connecting to server") && !strings.Contains(errOut, "muninn start") {
-		// If not in stderr, the function should at least complete without panic
-		t.Logf("cmdShowVaults handled connection error gracefully")
+	if !strings.Contains(errOut, "Error connecting to server") {
+		t.Errorf("expected a connection-error message on stderr, got: %q", errOut)
+	}
+}
+
+// TestCmdShowVaults401FallbackMessage verifies the 401 fallback prints the
+// scheme-aware Web UI URL (from webUIDisplay), not a hardcoded http://localhost.
+func TestCmdShowVaults401FallbackMessage(t *testing.T) {
+	t.Setenv("MUNINNDB_DATA", t.TempDir())
+	srv := newJSONServer(http.StatusUnauthorized, `{"error":"unauthorized"}`)
+	defer srv.Close()
+	t.Setenv("MUNINNDB_ADMIN_URL", srv.URL)
+	t.Setenv("MUNINNDB_UI_URL", "https://ui.example.lan:8476")
+
+	r := &replState{}
+	out := captureStdout(func() {
+		r.cmdShowVaults()
+	})
+	if !strings.Contains(out, "https://ui.example.lan:8476") {
+		t.Errorf("401 fallback should show the scheme-aware Web UI URL, got: %q", out)
 	}
 }
 

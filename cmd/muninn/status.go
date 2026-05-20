@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,15 +16,18 @@ import (
 // If envVar is set, it's used verbatim as the base URL (trailing slash
 // trimmed), matching the MUNINNDB_ADMIN_URL / MUNINNDB_UI_URL convention
 // established in vault_auth.go (see #410 / #424). Otherwise falls back to
-// http://127.0.0.1:<port>, preserving the legacy default for non-TLS
-// deployments.
+// <scheme>://127.0.0.1:<port>; an empty scheme is treated as "http",
+// preserving the legacy default for non-TLS deployments.
 //
 // Callers append the per-service path (e.g. "/api/health").
-func healthURL(envVar, port string) string {
+func healthURL(envVar, scheme, port string) string {
 	if v := os.Getenv(envVar); v != "" {
 		return strings.TrimRight(v, "/")
 	}
-	return "http://127.0.0.1:" + port
+	if scheme == "" {
+		scheme = "http"
+	}
+	return scheme + "://127.0.0.1:" + port
 }
 
 // checkVersionHint prints a one-liner if a newer version is available.
@@ -60,10 +65,11 @@ const (
 )
 
 type serviceStatus struct {
-	name string
-	port int
-	up   bool
-	note string // optional: "not responding"
+	name   string
+	port   int
+	up     bool
+	scheme string // scheme the probe reached the service on ("http"/"https"/"")
+	note   string // optional: "not responding"
 }
 
 // overallState computes the aggregate state from individual service statuses.
@@ -99,18 +105,60 @@ func probeServicesDefault() []serviceStatus {
 	return probeServicesWithAddrs(addrs)
 }
 
-// probeServicesWithAddrs is the testable implementation. addrs contains the
-// actual addresses the daemon bound to; empty strings fall back to defaults.
-func probeServicesWithAddrs(addrs daemonAddrs) []serviceStatus {
-	client := &http.Client{Timeout: 2 * time.Second}
-	probe := func(url string) bool {
-		resp, err := client.Get(url)
-		if err != nil {
-			return false
+// probeHealth reports whether the service health endpoint at url is up (a 2xx
+// response) and the scheme that actually worked ("http" or "https"; "" when
+// down). If an http:// probe fails — transport error or non-2xx — it retries
+// once over https://, so a TLS deployment is detected with no configuration;
+// the returned scheme then lets callers correct a stale display URL. An
+// https:// URL (e.g. an env-var override) is probed directly.
+//
+// The https attempt skips certificate verification: this is a localhost
+// liveness check, not a security boundary, and an internal-CA or self-signed
+// cert must not make a healthy server look [down].
+func probeHealth(url string) (up bool, scheme string) {
+	switch {
+	case strings.HasPrefix(url, "https://"):
+		if probeOnce(url, true) {
+			return true, "https"
 		}
-		resp.Body.Close()
-		return resp.StatusCode >= 200 && resp.StatusCode < 300
+		return false, ""
+	case strings.HasPrefix(url, "http://"):
+		if probeOnce(url, false) {
+			return true, "http"
+		}
+		// The http probe failed — the server may actually speak TLS on this
+		// port. Retry once over https before concluding it is down.
+		if probeOnce("https://"+strings.TrimPrefix(url, "http://"), true) {
+			return true, "https"
+		}
+		return false, ""
+	default:
+		return probeOnce(url, false), ""
 	}
+}
+
+// probeOnce performs a single health-check GET. When insecure is set the TLS
+// client skips certificate verification (see probeHealth for the rationale).
+func probeOnce(url string, insecure bool) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	if insecure {
+		client.Transport = &http.Transport{
+			// localhost liveness probe, not a security boundary
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		}
+	}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+// probeServicesWithAddrs is the testable implementation. addrs contains the
+// actual addresses (and scheme) the daemon bound to; empty fields fall back to
+// the default ports and an "http" scheme.
+func probeServicesWithAddrs(addrs daemonAddrs) []serviceStatus {
 	// portFrom extracts the port from an "host:port" address string.
 	// Returns fallback when addr is empty or unparseable.
 	portFrom := func(addr, fallback string) string {
@@ -130,11 +178,76 @@ func probeServicesWithAddrs(addrs daemonAddrs) []serviceStatus {
 	mcpPortInt, _ := strconv.Atoi(mcpPort)
 	uiPortInt, _ := strconv.Atoi(uiPort)
 
-	return []serviceStatus{
-		{name: "database", port: restPortInt, up: probe(healthURL("MUNINNDB_ADMIN_URL", restPort) + "/api/health")},
-		{name: "mcp", port: mcpPortInt, up: probe(healthURL("MUNINNDB_MCP_URL", mcpPort) + "/mcp/health")},
-		{name: "web ui", port: uiPortInt, up: probe(healthURL("MUNINNDB_UI_URL", uiPort) + "/")},
+	svcs := []serviceStatus{
+		{name: "database", port: restPortInt},
+		{name: "mcp", port: mcpPortInt},
+		{name: "web ui", port: uiPortInt},
 	}
+	urls := []string{
+		healthURL("MUNINNDB_ADMIN_URL", addrs.Scheme, restPort) + "/api/health",
+		healthURL("MUNINNDB_MCP_URL", addrs.Scheme, mcpPort) + "/mcp/health",
+		healthURL("MUNINNDB_UI_URL", addrs.Scheme, uiPort) + "/",
+	}
+	// Probe concurrently: with the http→https retry a serial sweep could take
+	// several seconds when services are unreachable. Each goroutine writes its
+	// own fixed index, so result order stays [database, mcp, web ui].
+	var wg sync.WaitGroup
+	for i := range svcs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			svcs[i].up, svcs[i].scheme = probeHealth(urls[i])
+		}(i)
+	}
+	wg.Wait()
+	return svcs
+}
+
+// webUIDisplay returns the Web UI URL(s) to show the operator, derived from the
+// daemon's recorded bind address. It always returns at least one element, so
+// callers may safely index [0].
+//   - MUNINNDB_UI_URL set        → that URL, verbatim.
+//   - UI bound to loopback/empty → just the localhost URL.
+//   - UI bound to 0.0.0.0 / LAN  → the routable host first (os.Hostname), then
+//     the localhost URL as an always-works fallback.
+func webUIDisplay(addrs daemonAddrs) []string {
+	if v := os.Getenv("MUNINNDB_UI_URL"); v != "" {
+		return []string{strings.TrimRight(v, "/")}
+	}
+	scheme := addrs.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	host, port := "", "8476"
+	if addrs.UIAddr != "" {
+		if h, p, err := net.SplitHostPort(addrs.UIAddr); err == nil {
+			host = h
+			if p != "" {
+				port = p
+			}
+		}
+	}
+	local := scheme + "://127.0.0.1:" + port
+	if hostIsRoutable(host) {
+		if hn, err := os.Hostname(); err == nil && hn != "" {
+			return []string{scheme + "://" + hn + ":" + port, local}
+		}
+	}
+	return []string{local}
+}
+
+// hostIsRoutable reports whether host is a non-loopback bind — i.e. the UI is
+// reachable beyond this machine, so a routable hostname is worth showing
+// alongside the localhost URL.
+func hostIsRoutable(host string) bool {
+	switch host {
+	case "", "127.0.0.1", "::1", "localhost":
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return !ip.IsLoopback()
+	}
+	return true
 }
 
 // printStatusDisplay prints the unified status view.
@@ -207,14 +320,21 @@ func printStatusDisplay(compact bool) runState {
 		}
 		if state == stateRunning {
 			fmt.Println()
-			uiPort := "8476"
-			for _, s := range svcs {
-				if s.name == "web ui" && s.port != 0 {
-					uiPort = strconv.Itoa(s.port)
-					break
+			addrs, _ := readAddrsFile(defaultDataDir())
+			// If the daemon predates the muninn.addrs scheme field, fall back
+			// to the scheme the probe actually reached the Web UI on.
+			if addrs.Scheme == "" {
+				for _, s := range svcs {
+					if s.name == "web ui" && s.scheme != "" {
+						addrs.Scheme = s.scheme
+					}
 				}
 			}
-			fmt.Printf("  Web UI → http://127.0.0.1:%s\n", uiPort)
+			lines := webUIDisplay(addrs)
+			fmt.Printf("  Web UI → %s\n", lines[0])
+			for _, l := range lines[1:] {
+				fmt.Printf("           %s\n", l)
+			}
 			checkVersionHint()
 		}
 	}

@@ -71,6 +71,14 @@ func newHealthServer() *httptest.Server {
 	}))
 }
 
+// newTLSHealthServer starts a TLS-only test server that returns 200 on any
+// request. Caller must call Close() when done.
+func newTLSHealthServer() *httptest.Server {
+	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+}
+
 // newJSONServer starts a test HTTP server that returns the given JSON body with status.
 func newJSONServer(status int, body string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
