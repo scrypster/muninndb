@@ -205,10 +205,10 @@ func TestCmdShowVaultsEmptyList(t *testing.T) {
 func TestFormatVaultTableMissingFields(t *testing.T) {
 	// Vaults with missing optional fields should not panic
 	vaults := []map[string]any{
-		{"name": "vault-no-count"},                    // no memory_count
-		{"name": "vault-no-time", "memory_count": float64(5)},  // no last_active
-		{"memory_count": float64(3)},                  // no name
-		{},                                             // completely empty
+		{"name": "vault-no-count"},                            // no memory_count
+		{"name": "vault-no-time", "memory_count": float64(5)}, // no last_active
+		{"memory_count": float64(3)},                          // no name
+		{},                                                    // completely empty
 	}
 	out := captureStdout(func() {
 		formatVaultTable(vaults)
@@ -229,14 +229,14 @@ func TestFormatVaultTableNormalVaults(t *testing.T) {
 	now := time.Now()
 	vaults := []map[string]any{
 		{
-			"name": "personal",
+			"name":         "personal",
 			"memory_count": float64(47),
-			"last_active": now.Format(time.RFC3339),
+			"last_active":  now.Format(time.RFC3339),
 		},
 		{
-			"name": "work",
+			"name":         "work",
 			"memory_count": float64(12),
-			"last_active": now.Add(-2*time.Hour).Format(time.RFC3339),
+			"last_active":  now.Add(-2 * time.Hour).Format(time.RFC3339),
 		},
 	}
 	out := captureStdout(func() {
@@ -266,9 +266,9 @@ func TestFormatVaultTableNormalVaults(t *testing.T) {
 func TestFormatVaultTableLongNames(t *testing.T) {
 	vaults := []map[string]any{
 		{
-			"name": "a-very-long-vault-name-for-testing",
+			"name":         "a-very-long-vault-name-for-testing",
 			"memory_count": float64(99),
-			"last_active": time.Now().Format(time.RFC3339),
+			"last_active":  time.Now().Format(time.RFC3339),
 		},
 	}
 	// Should not panic and should handle truncation gracefully
@@ -435,9 +435,9 @@ func TestLoadDefaultVaultInvalidJSON(t *testing.T) {
 func TestFormatVaultTableZeroMemories(t *testing.T) {
 	vaults := []map[string]any{
 		{
-			"name": "empty-vault",
+			"name":         "empty-vault",
 			"memory_count": float64(0),
-			"last_active": time.Now().Format(time.RFC3339),
+			"last_active":  time.Now().Format(time.RFC3339),
 		},
 	}
 	out := captureStdout(func() {
