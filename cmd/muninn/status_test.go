@@ -431,3 +431,31 @@ func TestWebUIDisplay_EnvOverride(t *testing.T) {
 		t.Errorf("MUNINNDB_UI_URL override should win outright: got %v", lines)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// isLoopbackURL
+// ---------------------------------------------------------------------------
+
+func TestIsLoopbackURL(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"loopback ipv4", "https://127.0.0.1:8475/api/vaults", true},
+		{"loopback ipv4 range", "https://127.5.6.7:8475", true},
+		{"localhost", "https://localhost:8475", true},
+		{"loopback ipv6", "https://[::1]:8475", true},
+		{"http loopback", "http://127.0.0.1:8475", true},
+		{"lan ip", "https://172.20.50.63:8475", false},
+		{"public host", "https://muninn.example.com:8475", false},
+		{"malformed", "https://%zz", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLoopbackURL(tc.url); got != tc.want {
+				t.Errorf("isLoopbackURL(%q) = %v, want %v", tc.url, got, tc.want)
+			}
+		})
+	}
+}

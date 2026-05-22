@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,6 +206,22 @@ func TestCmdShowVaults401FallbackMessage(t *testing.T) {
 	})
 	if !strings.Contains(out, "https://ui.example.lan:8476") {
 		t.Errorf("401 fallback should show the scheme-aware Web UI URL, got: %q", out)
+	}
+}
+
+// TestIsTLSCertError verifies a certificate-verification failure is told apart
+// from a plain connection error, so cmdShowVaults can give the right hint.
+func TestIsTLSCertError(t *testing.T) {
+	certErr := &url.Error{Op: "Get", URL: "https://x", Err: &tls.CertificateVerificationError{}}
+	if !isTLSCertError(certErr) {
+		t.Error("wrapped tls.CertificateVerificationError should be detected")
+	}
+	plain := &url.Error{Op: "Get", URL: "https://x", Err: errors.New("connection refused")}
+	if isTLSCertError(plain) {
+		t.Error("plain connection error must not be flagged as a cert error")
+	}
+	if isTLSCertError(nil) {
+		t.Error("nil error must not be flagged")
 	}
 }
 

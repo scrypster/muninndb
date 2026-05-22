@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -50,6 +51,15 @@ func mcpCall(baseURL, toolName string, args map[string]any) (map[string]any, err
 	return res, nil
 }
 
+// isTLSCertError reports whether err is a TLS certificate verification failure
+// (untrusted CA, hostname mismatch, expired cert) rather than a plain
+// connection failure such as a refused or timed-out dial. Since Go 1.20 the
+// handshake wraps every verification failure in tls.CertificateVerificationError.
+func isTLSCertError(err error) bool {
+	var certErr *tls.CertificateVerificationError
+	return errors.As(err, &certErr)
+}
+
 func (r *replState) cmdShowVaults() {
 	addrs, _ := readAddrsFile(defaultDataDir())
 	restPort := "8475"
@@ -61,9 +71,11 @@ func (r *replState) cmdShowVaults() {
 	apiURL := healthURL("MUNINNDB_ADMIN_URL", addrs.Scheme, restPort) + "/api/vaults"
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	if strings.HasPrefix(apiURL, "https://") {
-		// localhost admin REPL talking to its own server — skip cert
-		// verification so an internal-CA TLS deployment still works.
+	if strings.HasPrefix(apiURL, "https://") && isLoopbackURL(apiURL) {
+		// Skip cert verification only for a loopback target: an internal-CA
+		// TLS deployment talking to its own server can't be impersonated.
+		// For an off-host MUNINNDB_ADMIN_URL verification stays on — this
+		// request carries the admin session cookie.
 		client.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 		}
@@ -78,6 +90,12 @@ func (r *replState) cmdShowVaults() {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if isTLSCertError(err) {
+			fmt.Fprintf(os.Stderr, "Error: TLS certificate verification failed for %s: %v\n", apiURL, err)
+			fmt.Println("The server's certificate is not trusted. Install its CA into the system")
+			fmt.Println("trust store, or point MUNINNDB_ADMIN_URL at a loopback address.")
+			return
+		}
 		fmt.Fprintf(os.Stderr, "Error connecting to server: %v\n", err)
 		fmt.Println("Is muninn running? Try: muninn start")
 		return
