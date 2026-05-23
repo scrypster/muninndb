@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/cockroachdb/pebble"
@@ -106,6 +107,93 @@ func TestDedup_IdenticalEmbeddings_MergesCluster(t *testing.T) {
 	}
 	if archived.State != storage.StateArchived {
 		t.Errorf("duplicate engram state = %v, want archived", archived.State)
+	}
+}
+
+// TestDedup_AccessCountAbsorbsArchivedDuplicates verifies the representative
+// engram absorbs the AccessCount of each archived duplicate (+1 per archived
+// member). This preserves the frequency-of-occurrence signal for write-only
+// engrams (auto-ingest, daily captures) that never reach the recall path's
+// implicit AccessCount auto-bump. Without this, downstream skills must run
+// their own per-vault feedback cron jobs to compensate.
+func TestDedup_AccessCountAbsorbsArchivedDuplicates(t *testing.T) {
+	store, db, cleanup := testStoreWithDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	vault := "dedup_accesscount_bump"
+	wsPrefix := store.ResolveVaultPrefix(vault)
+
+	embed := []float32{1, 0, 0, 0}
+
+	// 1 representative + 3 duplicates → representative should end with AccessCount += 3.
+	repID := writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
+		Concept: "rep", Content: "rep content", Confidence: 0.9, Relevance: 0.9,
+		Stability: 30, Embedding: embed, AccessCount: 5,
+	})
+	for i := 0; i < 3; i++ {
+		writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
+			Concept: fmt.Sprintf("dup-%d", i), Content: fmt.Sprintf("dup %d", i),
+			Confidence: 0.5, Relevance: 0.5,
+			Stability: 30, Embedding: embed, AccessCount: 0,
+		})
+	}
+
+	mock := &mockEngineInterface{store: store}
+	w := &Worker{Engine: mock, MaxDedup: 100, MaxTransitive: 100}
+	report := &ConsolidationReport{}
+
+	if err := w.runPhase2Dedup(ctx, store, wsPrefix, report, vault); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := store.GetEngram(ctx, wsPrefix, repID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const wantAccess uint32 = 5 + 3
+	if rep.AccessCount != wantAccess {
+		t.Errorf("representative AccessCount = %d, want %d (5 starting + 3 absorbed from archived dupes)",
+			rep.AccessCount, wantAccess)
+	}
+}
+
+// TestDedup_DryRun_DoesNotBumpAccessCount verifies the frequency-absorption
+// bump only happens when mutations are enabled — DryRun must leave AccessCount
+// unchanged, matching the existing no-mutation contract for the archive step.
+func TestDedup_DryRun_DoesNotBumpAccessCount(t *testing.T) {
+	store, db, cleanup := testStoreWithDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	vault := "dedup_dryrun_accesscount"
+	wsPrefix := store.ResolveVaultPrefix(vault)
+
+	embed := []float32{1, 0, 0, 0}
+	repID := writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
+		Concept: "rep", Content: "rep", Confidence: 0.9, Relevance: 0.9,
+		Stability: 30, Embedding: embed, AccessCount: 2,
+	})
+	writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
+		Concept: "dup", Content: "dup", Confidence: 0.5, Relevance: 0.5,
+		Stability: 30, Embedding: embed, AccessCount: 0,
+	})
+
+	mock := &mockEngineInterface{store: store}
+	w := &Worker{Engine: mock, MaxDedup: 100, MaxTransitive: 100, DryRun: true}
+	report := &ConsolidationReport{}
+
+	if err := w.runPhase2Dedup(ctx, store, wsPrefix, report, vault); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := store.GetEngram(ctx, wsPrefix, repID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.AccessCount != 2 {
+		t.Errorf("DryRun mutated AccessCount: got %d, want 2", rep.AccessCount)
 	}
 }
 
