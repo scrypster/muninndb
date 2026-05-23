@@ -252,18 +252,19 @@ func hostIsRoutable(host string) bool {
 }
 
 // isLoopbackURL reports whether rawURL targets this machine — its host is
-// empty, "localhost", or a loopback IP. It is the URL-level guard for deciding
-// when skipping TLS certificate verification is safe: a loopback peer cannot
-// be impersonated, an off-host peer can. Unparseable input is treated as
-// non-loopback so callers fail closed (keep verification on).
+// "localhost", a loopback IP, or any address in the 127.0.0.0/8 range. It is
+// the URL-level guard for deciding when skipping TLS certificate verification
+// is safe: a loopback peer cannot be impersonated, an off-host peer can.
+// Unparseable input is treated as non-loopback so callers fail closed (keep
+// verification on).
 func isLoopbackURL(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
-	host := u.Hostname()
+	host := strings.ToLower(u.Hostname())
 	switch host {
-	case "", "127.0.0.1", "::1", "localhost":
+	case "127.0.0.1", "::1", "localhost":
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {

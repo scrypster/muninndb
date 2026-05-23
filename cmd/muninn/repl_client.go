@@ -53,8 +53,8 @@ func mcpCall(baseURL, toolName string, args map[string]any) (map[string]any, err
 
 // isTLSCertError reports whether err is a TLS certificate verification failure
 // (untrusted CA, hostname mismatch, expired cert) rather than a plain
-// connection failure such as a refused or timed-out dial. Since Go 1.20 the
-// handshake wraps every verification failure in tls.CertificateVerificationError.
+// connection failure such as a refused or timed-out dial. The handshake wraps
+// every verification failure in tls.CertificateVerificationError.
 func isTLSCertError(err error) bool {
 	var certErr *tls.CertificateVerificationError
 	return errors.As(err, &certErr)
