@@ -642,8 +642,16 @@ func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (
 				slog.Error("cluster: snapshot stream failed; closing connection so lobe can reconnect and retry",
 					"lobe", req.NodeID, "err", err)
 				_ = peer.Close()
+				return
 			}
+			// Snapshot complete — only NOW is it safe to start the streamer.
+			// See JoinHandler.FireOnLobeJoined doc for the race this avoids.
+			c.joinHandler.FireOnLobeJoined(req.NodeID)
 		}()
+	} else {
+		// No snapshot path: JoinResponse already on the wire, safe to start
+		// the streamer immediately.
+		c.joinHandler.FireOnLobeJoined(req.NodeID)
 	}
 	return req.NodeID, nil
 }

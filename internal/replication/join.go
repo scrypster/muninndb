@@ -147,7 +147,6 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 
 	h.mu.Lock()
 	h.members[req.NodeID] = info
-	cb := h.OnLobeJoined
 	h.mu.Unlock()
 
 	// NOTE: do NOT call h.mgr.AddPeer here. The coordinator already called
@@ -156,10 +155,14 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 	// connection and replace it with a disconnected PeerConn{conn: nil},
 	// causing the immediately-following peer.Send(JoinResponse) to return
 	// ErrNotConnected.
-
-	if cb != nil {
-		cb(info)
-	}
+	//
+	// NOTE: OnLobeJoined is NOT fired here. Firing it inline would spawn the
+	// NetworkStreamer goroutine before the caller has sent the JoinResponse
+	// frame on the shared PeerConn — racing the streamer's first ReplEntry
+	// frame against the JoinResponse frame and corrupting the lobe-side
+	// handshake parser (issue: cortex join-race / #409 follow-up). The caller
+	// must invoke FireOnLobeJoined(nodeID) after JoinResponse (+ Snapshot)
+	// have been fully written to the wire.
 
 	resp := mbp.JoinResponse{
 		Accepted: true,
@@ -176,6 +179,22 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 	}
 
 	return resp
+}
+
+// FireOnLobeJoined invokes the OnLobeJoined callback for a previously-registered
+// lobe. Callers must invoke this only AFTER the JoinResponse (and, when
+// applicable, the post-join snapshot stream) has been fully written to the
+// shared PeerConn — otherwise the streamer's first ReplEntry frame can race
+// the JoinResponse frame and break the lobe-side handshake parser.
+func (h *JoinHandler) FireOnLobeJoined(nodeID string) {
+	h.mu.RLock()
+	info, ok := h.members[nodeID]
+	cb := h.OnLobeJoined
+	h.mu.RUnlock()
+	if !ok || cb == nil {
+		return
+	}
+	cb(info)
 }
 
 // StreamSnapshot sends a full Pebble snapshot to the peer over conn.
