@@ -1800,7 +1800,7 @@
                 <div class="tab-bar" style="margin-top:0;margin-bottom:1rem;">
                   <template x-for="opt in [{val:'none',label:'None'},{val:'ollama',label:'Ollama (local)'},{val:'openai',label:'OpenAI'},{val:'anthropic',label:'Anthropic'},{val:'google',label:'Google'}]" :key="opt.val">
                     <button
-                      @click="pluginCfg.enrichProvider=opt.val;pluginCfg.enrichCmd='';if(opt.val==='google')pluginCfg.enrichModel='gemini-1.5-flash';if(opt.val==='anthropic')pluginCfg.enrichModel='claude-haiku-4-5-20251001'"
+                      @click="pluginCfg.enrichProvider=opt.val;pluginCfg.enrichCmd='';if(opt.val==='google')pluginCfg.enrichModel='gemini-2.5-flash';if(opt.val==='anthropic')pluginCfg.enrichModel='claude-haiku-4-5-20251001'"
                       :class="pluginCfg.enrichProvider===opt.val ? 'tab-btn active' : 'tab-btn'"
                       x-text="opt.label">
                     </button>
@@ -1896,10 +1896,11 @@
                 <div class="form-group">
                   <label>Model</label>
                   <select class="input-field" x-model="pluginCfg.enrichModel">
-                    <option value="gemini-1.5-flash">gemini-1.5-flash (recommended)</option>
+                    <option value="gemini-1.5-flash">gemini-1.5-flash</option>
                     <option value="gemini-1.5-pro">gemini-1.5-pro</option>
                     <option value="gemini-2.0-flash">gemini-2.0-flash</option>
-                    <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                    <option value="gemini-2.5-flash">gemini-2.5-flash (recommended)</option>
+                    <option value="gemini-2.5-pro">gemini-2.5-pro</option>
                   </select>
                 </div>
               </div>
