@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"time"
@@ -162,7 +163,7 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 
 		// Update representative with merged tags (best-effort)
 		if !w.DryRun && len(mergedTags) != len(representative.Tags) {
-			_ = store.UpdateMetadata(ctx, wsPrefix, representative.ID, &storage.EngramMeta{
+			if err := store.UpdateMetadata(ctx, wsPrefix, representative.ID, &storage.EngramMeta{
 				State:       representative.State,
 				Confidence:  representative.Confidence,
 				Relevance:   representative.Relevance,
@@ -170,10 +171,16 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 				AccessCount: representative.AccessCount,
 				UpdatedAt:   representative.UpdatedAt,
 				LastAccess:  representative.LastAccess,
-			})
+			}); err != nil {
+				slog.Warn("consolidation phase 2: failed to update representative metadata", "id", representative.ID, "error", err)
+				report.Errors = append(report.Errors, fmt.Sprintf("dedup: UpdateMetadata %s: %v", representative.ID, err))
+			}
 			// Persist the merged tags — UpdateMetadata patches only fixed-size metadata
 			// fields and does not touch the variable-length tag list.
-			_ = store.UpdateTags(ctx, wsPrefix, representative.ID, mergedTags)
+			if err := store.UpdateTags(ctx, wsPrefix, representative.ID, mergedTags); err != nil {
+				slog.Warn("consolidation phase 2: failed to update representative tags", "id", representative.ID, "error", err)
+				report.Errors = append(report.Errors, fmt.Sprintf("dedup: UpdateTags %s: %v", representative.ID, err))
+			}
 		}
 	}
 
