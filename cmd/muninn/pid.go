@@ -14,12 +14,25 @@ import (
 // the startup health poll can probe the correct ports when non-default
 // --*-addr flags are used.
 type daemonAddrs struct {
+	// Scheme is "http" or "https" — the scheme the daemon's client-facing
+	// listeners serve. An empty Scheme (e.g. a sidecar written by an older
+	// daemon that predates this field) is treated as "http" by readers.
+	Scheme   string `json:"scheme"`
 	RestAddr string `json:"rest_addr"`
 	MCPAddr  string `json:"mcp_addr"`
 	UIAddr   string `json:"ui_addr"`
 }
 
 const addrsFileName = "muninn.addrs"
+
+// schemeFor reports the scheme the daemon's client-facing listeners serve:
+// "https" when both a TLS cert and key are configured, "http" otherwise.
+func schemeFor(tlsCert, tlsKey string) string {
+	if tlsCert != "" && tlsKey != "" {
+		return "https"
+	}
+	return "http"
+}
 
 func writeAddrsFile(dataDir string, addrs daemonAddrs) error {
 	b, err := json.Marshal(addrs)

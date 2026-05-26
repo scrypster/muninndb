@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,9 +51,36 @@ func mcpCall(baseURL, toolName string, args map[string]any) (map[string]any, err
 	return res, nil
 }
 
+// isTLSCertError reports whether err is a TLS certificate verification failure
+// (untrusted CA, hostname mismatch, expired cert) rather than a plain
+// connection failure such as a refused or timed-out dial. The handshake wraps
+// every verification failure in tls.CertificateVerificationError.
+func isTLSCertError(err error) bool {
+	var certErr *tls.CertificateVerificationError
+	return errors.As(err, &certErr)
+}
+
 func (r *replState) cmdShowVaults() {
+	addrs, _ := readAddrsFile(defaultDataDir())
+	restPort := "8475"
+	if addrs.RestAddr != "" {
+		if _, p, err := net.SplitHostPort(addrs.RestAddr); err == nil && p != "" {
+			restPort = p
+		}
+	}
+	apiURL := healthURL("MUNINNDB_ADMIN_URL", addrs.Scheme, restPort) + "/api/vaults"
+
 	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest("GET", "http://127.0.0.1:8475/api/vaults", nil)
+	if strings.HasPrefix(apiURL, "https://") && isLoopbackURL(apiURL) {
+		// Skip cert verification only for a loopback target: an internal-CA
+		// TLS deployment talking to its own server can't be impersonated.
+		// For an off-host MUNINNDB_ADMIN_URL verification stays on — this
+		// request carries the admin session cookie.
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		}
+	}
+	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
@@ -60,6 +90,12 @@ func (r *replState) cmdShowVaults() {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if isTLSCertError(err) {
+			fmt.Fprintf(os.Stderr, "Error: TLS certificate verification failed for %s: %v\n", apiURL, err)
+			fmt.Println("The server's certificate is not trusted. Install its CA into the system")
+			fmt.Println("trust store, or point MUNINNDB_ADMIN_URL at a loopback address.")
+			return
+		}
 		fmt.Fprintf(os.Stderr, "Error connecting to server: %v\n", err)
 		fmt.Println("Is muninn running? Try: muninn start")
 		return
@@ -70,7 +106,7 @@ func (r *replState) cmdShowVaults() {
 		// Fallback: show static message
 		fmt.Println("  default   (built-in)")
 		fmt.Println()
-		fmt.Println("  For full vault list, open: http://127.0.0.1:8476")
+		fmt.Printf("  For full vault list, open: %s\n", webUIDisplay(addrs)[0])
 		return
 	}
 
@@ -346,11 +382,12 @@ func (r *replState) cmdShowStats() {
 		return
 	}
 	resp.Body.Close()
+	addrs, _ := readAddrsFile(defaultDataDir())
 	fmt.Println("Server: running")
 	fmt.Println("  MBP  :8474   binary protocol")
 	fmt.Println("  REST :8475   JSON API")
 	fmt.Println("  MCP  :8750   AI tool integration")
-	fmt.Println("  UI   :8476   http://127.0.0.1:8476")
+	fmt.Printf("  UI   :8476   %s\n", webUIDisplay(addrs)[0])
 	if r.vault != "" {
 		fmt.Println()
 		result, err := mcpCall(r.mcpURL, "muninn_status", map[string]any{"vault": r.vault})

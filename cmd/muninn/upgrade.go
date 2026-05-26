@@ -260,7 +260,12 @@ func runUpgrade(args []string) {
 			}
 			fmt.Println(" ✓")
 			fmt.Println()
-			fmt.Printf("  Web UI → http://127.0.0.1:8476\n")
+			addrs, _ := readAddrsFile(defaultDataDir())
+			uiLines := webUIDisplay(addrs)
+			fmt.Printf("  Web UI → %s\n", uiLines[0])
+			for _, l := range uiLines[1:] {
+				fmt.Printf("           %s\n", l)
+			}
 			fmt.Println()
 		}
 

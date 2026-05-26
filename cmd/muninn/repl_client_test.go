@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,20 +175,53 @@ func TestLoadSaveDefaultVault(t *testing.T) {
 	}
 }
 
-// TestCmdShowVaults401Fallback tests cmdShowVaults with connection error.
-func TestCmdShowVaults401Fallback(t *testing.T) {
-	// When the server is unreachable, cmdShowVaults should handle gracefully
-	r := &replState{mcpURL: "http://localhost:9998"}
+// TestCmdShowVaultsConnectionError verifies cmdShowVaults degrades gracefully
+// when the server is unreachable.
+func TestCmdShowVaultsConnectionError(t *testing.T) {
+	t.Setenv("MUNINNDB_DATA", t.TempDir())
+	t.Setenv("MUNINNDB_ADMIN_URL", "http://127.0.0.1:19998") // nothing listening
+	r := &replState{}
 	errOut := captureStderr(func() {
 		captureStdout(func() {
 			r.cmdShowVaults()
 		})
 	})
-	// Should print error message to stderr or handle gracefully
-	// (error message is written to stderr, not stdout)
-	if !strings.Contains(errOut, "Error connecting to server") && !strings.Contains(errOut, "muninn start") {
-		// If not in stderr, the function should at least complete without panic
-		t.Logf("cmdShowVaults handled connection error gracefully")
+	if !strings.Contains(errOut, "Error connecting to server") {
+		t.Errorf("expected a connection-error message on stderr, got: %q", errOut)
+	}
+}
+
+// TestCmdShowVaults401FallbackMessage verifies the 401 fallback prints the
+// scheme-aware Web UI URL (from webUIDisplay), not a hardcoded http://localhost.
+func TestCmdShowVaults401FallbackMessage(t *testing.T) {
+	t.Setenv("MUNINNDB_DATA", t.TempDir())
+	srv := newJSONServer(http.StatusUnauthorized, `{"error":"unauthorized"}`)
+	defer srv.Close()
+	t.Setenv("MUNINNDB_ADMIN_URL", srv.URL)
+	t.Setenv("MUNINNDB_UI_URL", "https://ui.example.lan:8476")
+
+	r := &replState{}
+	out := captureStdout(func() {
+		r.cmdShowVaults()
+	})
+	if !strings.Contains(out, "https://ui.example.lan:8476") {
+		t.Errorf("401 fallback should show the scheme-aware Web UI URL, got: %q", out)
+	}
+}
+
+// TestIsTLSCertError verifies a certificate-verification failure is told apart
+// from a plain connection error, so cmdShowVaults can give the right hint.
+func TestIsTLSCertError(t *testing.T) {
+	certErr := &url.Error{Op: "Get", URL: "https://x", Err: &tls.CertificateVerificationError{}}
+	if !isTLSCertError(certErr) {
+		t.Error("wrapped tls.CertificateVerificationError should be detected")
+	}
+	plain := &url.Error{Op: "Get", URL: "https://x", Err: errors.New("connection refused")}
+	if isTLSCertError(plain) {
+		t.Error("plain connection error must not be flagged as a cert error")
+	}
+	if isTLSCertError(nil) {
+		t.Error("nil error must not be flagged")
 	}
 }
 
@@ -205,10 +241,10 @@ func TestCmdShowVaultsEmptyList(t *testing.T) {
 func TestFormatVaultTableMissingFields(t *testing.T) {
 	// Vaults with missing optional fields should not panic
 	vaults := []map[string]any{
-		{"name": "vault-no-count"},                    // no memory_count
-		{"name": "vault-no-time", "memory_count": float64(5)},  // no last_active
-		{"memory_count": float64(3)},                  // no name
-		{},                                             // completely empty
+		{"name": "vault-no-count"},                            // no memory_count
+		{"name": "vault-no-time", "memory_count": float64(5)}, // no last_active
+		{"memory_count": float64(3)},                          // no name
+		{},                                                    // completely empty
 	}
 	out := captureStdout(func() {
 		formatVaultTable(vaults)
@@ -229,14 +265,14 @@ func TestFormatVaultTableNormalVaults(t *testing.T) {
 	now := time.Now()
 	vaults := []map[string]any{
 		{
-			"name": "personal",
+			"name":         "personal",
 			"memory_count": float64(47),
-			"last_active": now.Format(time.RFC3339),
+			"last_active":  now.Format(time.RFC3339),
 		},
 		{
-			"name": "work",
+			"name":         "work",
 			"memory_count": float64(12),
-			"last_active": now.Add(-2*time.Hour).Format(time.RFC3339),
+			"last_active":  now.Add(-2 * time.Hour).Format(time.RFC3339),
 		},
 	}
 	out := captureStdout(func() {
@@ -266,9 +302,9 @@ func TestFormatVaultTableNormalVaults(t *testing.T) {
 func TestFormatVaultTableLongNames(t *testing.T) {
 	vaults := []map[string]any{
 		{
-			"name": "a-very-long-vault-name-for-testing",
+			"name":         "a-very-long-vault-name-for-testing",
 			"memory_count": float64(99),
-			"last_active": time.Now().Format(time.RFC3339),
+			"last_active":  time.Now().Format(time.RFC3339),
 		},
 	}
 	// Should not panic and should handle truncation gracefully
@@ -435,9 +471,9 @@ func TestLoadDefaultVaultInvalidJSON(t *testing.T) {
 func TestFormatVaultTableZeroMemories(t *testing.T) {
 	vaults := []map[string]any{
 		{
-			"name": "empty-vault",
+			"name":         "empty-vault",
 			"memory_count": float64(0),
-			"last_active": time.Now().Format(time.RFC3339),
+			"last_active":  time.Now().Format(time.RFC3339),
 		},
 	}
 	out := captureStdout(func() {

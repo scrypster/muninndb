@@ -299,6 +299,9 @@ curl http://127.0.0.1:8750/mcp/health
 | `MUNINN_GC_PERCENT` | `200` | GOGC tuning |
 | `MUNINN_CORS_ORIGINS` | `""` | Comma-separated allowed CORS origins |
 | `MUNINN_MCP_URL` | `http://127.0.0.1:8750/mcp` | Override MCP endpoint used by `muninn mcp` proxy (OpenClaw) |
+| `MUNINNDB_ADMIN_URL` | auto-detected | Override the REST/admin base URL probed by `muninn status` & admin CLI (TLS deployments) |
+| `MUNINNDB_UI_URL` | auto-detected | Override the Web UI base URL probed by `muninn status` (TLS deployments) |
+| `MUNINNDB_MCP_URL` | auto-detected | Override the MCP base URL probed by `muninn status` / `muninn start` (TLS deployments) |
 
 ---
 

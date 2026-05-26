@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"time"
@@ -143,7 +144,14 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 			mergedTags = append(mergedTags, tag)
 		}
 
-		// Archive non-representative members
+		// Archive non-representative members and count archived duplicates so
+		// the representative can absorb their frequency signal. Without this
+		// bump, semantic-duplicate write-only engrams (e.g. daily auto-ingest
+		// captures from agent harnesses) would never reach the recall path
+		// that auto-increments AccessCount in storage/cache/domain.go — losing
+		// the "this content recurred N times" signal that downstream skills
+		// currently emulate via per-vault feedback cron jobs.
+		archivedCount := uint32(0)
 		for _, member := range clust.members {
 			if member.ID == representative.ID {
 				continue
@@ -157,12 +165,18 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 				}
 			}
 
+			archivedCount++
 			report.MergedEngrams++
 		}
 
-		// Update representative with merged tags (best-effort)
-		if !w.DryRun && len(mergedTags) != len(representative.Tags) {
-			_ = store.UpdateMetadata(ctx, wsPrefix, representative.ID, &storage.EngramMeta{
+		// Persist representative updates when anything changed: tag-merge
+		// added tags, or frequency-absorption bumped AccessCount.
+		tagsChanged := len(mergedTags) != len(representative.Tags)
+		if !w.DryRun && archivedCount > 0 {
+			representative.AccessCount += archivedCount
+		}
+		if !w.DryRun && (tagsChanged || archivedCount > 0) {
+			if err := store.UpdateMetadata(ctx, wsPrefix, representative.ID, &storage.EngramMeta{
 				State:       representative.State,
 				Confidence:  representative.Confidence,
 				Relevance:   representative.Relevance,
@@ -170,10 +184,18 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 				AccessCount: representative.AccessCount,
 				UpdatedAt:   representative.UpdatedAt,
 				LastAccess:  representative.LastAccess,
-			})
-			// Persist the merged tags — UpdateMetadata patches only fixed-size metadata
-			// fields and does not touch the variable-length tag list.
-			_ = store.UpdateTags(ctx, wsPrefix, representative.ID, mergedTags)
+			}); err != nil {
+				slog.Warn("consolidation phase 2: failed to update representative metadata", "id", representative.ID, "error", err)
+				report.Errors = append(report.Errors, fmt.Sprintf("dedup: UpdateMetadata %s: %v", representative.ID, err))
+			}
+			if tagsChanged {
+				// Persist merged tags — UpdateMetadata patches only fixed-size
+				// metadata fields and does not touch the variable-length tag list.
+				if err := store.UpdateTags(ctx, wsPrefix, representative.ID, mergedTags); err != nil {
+					slog.Warn("consolidation phase 2: failed to update representative tags", "id", representative.ID, "error", err)
+					report.Errors = append(report.Errors, fmt.Sprintf("dedup: UpdateTags %s: %v", representative.ID, err))
+				}
+			}
 		}
 	}
 

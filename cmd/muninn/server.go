@@ -783,14 +783,6 @@ func runServer() {
 	}
 	flag.Parse()
 
-	// Persist actual bound addresses so 'muninn status' and the startup health poll
-	// can probe the correct ports when non-default --*-addr flags are used.
-	_ = writeAddrsFile(*dataDir, daemonAddrs{
-		RestAddr: *restAddr,
-		MCPAddr:  *mcpAddr,
-		UIAddr:   *uiAddr,
-	})
-
 	// MCP token resolution order (highest to lowest priority):
 	//   1. --mcp-token flag  — explicit override for tests / container entrypoints
 	//   2. MUNINN_MCP_TOKEN env var — preferred for Docker / docker-compose deployments
@@ -809,6 +801,17 @@ func runServer() {
 	if *tlsKey == "" {
 		*tlsKey = os.Getenv("MUNINN_TLS_KEY")
 	}
+
+	// Persist actual bound addresses + scheme so 'muninn status' and the startup
+	// health poll can probe the correct ports and scheme when non-default
+	// --*-addr flags or TLS are in use. Written after the TLS env fallbacks so
+	// Scheme reflects both --tls-cert flags and MUNINN_TLS_CERT/_KEY env vars.
+	_ = writeAddrsFile(*dataDir, daemonAddrs{
+		Scheme:   schemeFor(*tlsCert, *tlsKey),
+		RestAddr: *restAddr,
+		MCPAddr:  *mcpAddr,
+		UIAddr:   *uiAddr,
+	})
 
 	// Backup env fallbacks — flags take priority; env vars are the fallback.
 	if *backupInterval == "" {

@@ -2,9 +2,7 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -157,20 +155,14 @@ func runStart(webEnabled bool) error {
 
 	// Wait for health check (up to 5s).
 	// Use the actual MCP port from daemon args — may differ from defaultMCPPort
-	// when the user passed --mcp-addr. Honours MUNINNDB_MCP_URL for TLS
-	// deployments (see #410 / #424 for the admin-CLI equivalents).
-	mcpHealthURL := healthURL("MUNINNDB_MCP_URL", mcpPortFromArgs(args)) + "/mcp/health"
+	// when the user passed --mcp-addr. probeHealth's http→https retry makes the
+	// poll succeed against a TLS deployment with no MUNINNDB_MCP_URL set, so
+	// `muninn start` no longer times out (and boot-loops) under TLS.
+	mcpHealthURL := healthURL("MUNINNDB_MCP_URL", "http", mcpPortFromArgs(args)) + "/mcp/health"
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
-		resp, err := http.Get(mcpHealthURL)
-		if err != nil {
-			continue
-		}
-		// Always drain and close body to allow connection reuse and prevent leaks.
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode == 200 {
+		if up, _ := probeHealth(mcpHealthURL); up {
 			fmt.Printf("muninn started (pid %d)\n", cmd.Process.Pid)
 			fmt.Println()
 			printStatusDisplay(true)
