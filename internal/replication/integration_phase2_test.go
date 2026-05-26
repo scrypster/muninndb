@@ -267,15 +267,23 @@ func TestP2Integration_SnapshotJoin(t *testing.T) {
 // Test 1b: Wire order -- JoinResponse must precede any ReplEntry on the wire
 // ---------------------------------------------------------------------------
 
-// TestP2Integration_JoinResponseBeforeReplEntry verifies the wire-ordering
-// invariant that the deferred-callback fix exists to protect: on a real
+// TestP2Integration_JoinResponseBeforeReplEntry is an end-to-end check of the
+// wire-ordering invariant the deferred-callback fix protects: on a real
 // connection the TypeJoinResponse frame must reach the lobe before any
 // TypeReplEntry frame from the streamer. If FireOnLobeJoined fired inline inside
 // HandleJoinRequest, the streamer's first ReplEntry could overtake the
 // JoinResponse and corrupt the lobe-side handshake parser (#409 follow-up).
-// The unit test TestJoinHandler_HandleJoinRequest_DoesNotFireCallback covers the
-// callback timing inside JoinHandler; this test closes the loop end-to-end over
-// a net.Pipe driven by the coordinator's HandleIncomingJoin + NetworkStreamer.
+//
+// Scope note: this test observes the wire only, so it cannot *deterministically*
+// fail a hypothetical inline-fire regression — there the streamer goroutine and
+// the coordinator's JoinResponse send would race for PeerConn's send mutex, and
+// the test would catch the bug only on schedules where ReplEntry wins. The
+// deterministic guard against reintroducing the inline fire is the unit test
+// TestJoinHandler_HandleJoinRequest_DoesNotFireCallback, which asserts the
+// callback is not invoked inside HandleJoinRequest at all. This test complements
+// it by proving the assembled coordinator path (HandleIncomingJoin +
+// NetworkStreamer) actually puts JoinResponse on the wire first, with a real
+// streamer producing ReplEntry frames behind it.
 func TestP2Integration_JoinResponseBeforeReplEntry(t *testing.T) {
 	cortex := newTestNode(t, "cortex-wo", "primary")
 	if err := cortex.epochStore.ForceSet(4); err != nil {
@@ -338,11 +346,12 @@ func TestP2Integration_JoinResponseBeforeReplEntry(t *testing.T) {
 	if order[0] != mbp.TypeJoinResponse {
 		t.Fatalf("first frame = 0x%02x, want TypeJoinResponse 0x%02x", order[0], mbp.TypeJoinResponse)
 	}
-	// A ReplEntry, once present, must never have arrived first.
-	for i, ft := range order {
-		if ft == mbp.TypeReplEntry && i == 0 {
-			t.Fatal("TypeReplEntry arrived before JoinResponse — handshake race")
-		}
+	// The reader loop stops at the first ReplEntry, so the last recorded frame
+	// must be one. Asserting it confirms the streamer actually ran and produced
+	// a ReplEntry *after* the JoinResponse — otherwise the test could pass
+	// trivially against a coordinator that never starts the streamer at all.
+	if order[len(order)-1] != mbp.TypeReplEntry {
+		t.Fatalf("expected a TypeReplEntry to follow JoinResponse, got frame sequence %v", order)
 	}
 	t.Logf("wire order ok: %d frames, first=JoinResponse, ReplEntry seen after", len(order))
 }
