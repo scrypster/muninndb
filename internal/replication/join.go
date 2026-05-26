@@ -55,7 +55,12 @@ func NewJoinHandlerWithDB(localNodeID, clusterSecret string, epochStore *EpochSt
 }
 
 // HandleJoinRequest processes a JoinRequest from a connecting Lobe.
-// On success: registers the Lobe in mgr, adds to members map, calls OnLobeJoined.
+// On success it adds the Lobe to the members map and returns an accepted
+// JoinResponse. It deliberately does NOT register the conn in mgr (the
+// coordinator already did so via RegisterConn before calling this) and does
+// NOT fire OnLobeJoined. The caller must invoke FireOnLobeJoined(req.NodeID)
+// only after the JoinResponse — and any post-join snapshot — has been written
+// to the wire. See FireOnLobeJoined for the handshake race this split avoids.
 //
 // Epoch validation: we reject a JoinRequest only when epoch == 0, meaning the
 // cluster has not yet elected a Cortex and cannot safely accept new members.
@@ -191,7 +196,17 @@ func (h *JoinHandler) FireOnLobeJoined(nodeID string) {
 	info, ok := h.members[nodeID]
 	cb := h.OnLobeJoined
 	h.mu.RUnlock()
-	if !ok || cb == nil {
+	if !ok {
+		// The lobe is not (or no longer) a member. This means a mis-ordered or
+		// duplicate FireOnLobeJoined call — never legitimate. Warn so the bug
+		// surfaces instead of disappearing as a silent no-op.
+		slog.Warn("join: FireOnLobeJoined called for unregistered node; skipping callback",
+			"node", nodeID)
+		return
+	}
+	if cb == nil {
+		// No callback wired (e.g. handler used without a coordinator). Legitimate
+		// no-op — nothing to warn about.
 		return
 	}
 	cb(info)

@@ -1431,3 +1431,81 @@ func TestCoordinator_SetReconcileOnHeal(t *testing.T) {
 	}
 
 }
+
+// TestClusterCoordinator_HandleIncomingJoin_SnapshotFails_NoCallback covers the
+// snapshot branch of the deferred-callback contract: when StreamSnapshot fails,
+// HandleIncomingJoin must NOT fire OnLobeJoined. Firing it would start a
+// NetworkStreamer against a lobe that never received a complete snapshot,
+// streaming ReplEntry frames the lobe cannot apply. On failure the peer is
+// closed so the lobe reconnects and retries the snapshot from scratch.
+func TestClusterCoordinator_HandleIncomingJoin_SnapshotFails_NoCallback(t *testing.T) {
+	coord, db := newTestCoordinator(t, "primary")
+	if err := coord.epochStore.ForceSet(2); err != nil {
+		t.Fatalf("ForceSet: %v", err)
+	}
+
+	// Upgrade the join handler to a DB-aware one so the JoinResponse signals
+	// NeedsSnapshot=true and HandleIncomingJoin takes the snapshot path.
+	coord.joinHandler = NewJoinHandlerWithDB(coord.cfg.NodeID, "", coord.epochStore, coord.repLog, db, coord.mgr)
+	joined := make(chan NodeInfo, 1)
+	coord.joinHandler.OnLobeJoined = func(info NodeInfo) { joined <- info }
+
+	// net.Pipe stands in for the inbound lobe conn. The lobe reads the
+	// JoinResponse frame, then drops the connection — so the snapshot stream
+	// write fails with a broken pipe.
+	cortexConn, lobeConn := net.Pipe()
+	t.Cleanup(func() { cortexConn.Close(); lobeConn.Close() })
+
+	lobeReadDone := make(chan struct{})
+	go func() {
+		defer close(lobeReadDone)
+		if _, err := mbp.ReadFrame(lobeConn); err != nil {
+			return
+		}
+		lobeConn.Close() // drop conn so the following snapshot write fails
+	}()
+
+	req := mbp.JoinRequest{
+		NodeID:          "lobe-snapfail",
+		Addr:            "127.0.0.1:9999",
+		ProtocolVersion: mbp.CurrentProtocolVersion,
+	}
+	payload, err := msgpack.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal JoinRequest: %v", err)
+	}
+
+	nodeID, err := coord.HandleIncomingJoin(cortexConn, payload)
+	if err != nil {
+		t.Fatalf("HandleIncomingJoin: %v", err)
+	}
+	if nodeID != "lobe-snapfail" {
+		t.Fatalf("nodeID = %q, want lobe-snapfail", nodeID)
+	}
+
+	<-lobeReadDone
+
+	// Wait for the snapshot goroutine to finish. IncrementSnapshotCount runs
+	// synchronously inside HandleIncomingJoin before the goroutine is spawned,
+	// and the goroutine decrements via defer — so SnapshotInProgress() flips
+	// back to false exactly when the (failed) snapshot attempt completes.
+	deadline := time.Now().Add(3 * time.Second)
+	for coord.SnapshotInProgress() {
+		if time.Now().After(deadline) {
+			t.Fatal("snapshot goroutine did not finish within 3s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// StreamSnapshot failed → OnLobeJoined must not have fired.
+	select {
+	case info := <-joined:
+		t.Fatalf("OnLobeJoined fired for %q after StreamSnapshot failed — would start a streamer against an incompletely-snapshotted lobe", info.NodeID)
+	default:
+	}
+
+	// The peer should have been closed so the lobe can reconnect and retry.
+	if peer, ok := coord.mgr.GetPeer("lobe-snapfail"); ok && peer.IsConnected() {
+		t.Error("peer still connected after snapshot failure — expected it to be closed for lobe retry")
+	}
+}

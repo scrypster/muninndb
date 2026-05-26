@@ -264,6 +264,90 @@ func TestP2Integration_SnapshotJoin(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1b: Wire order -- JoinResponse must precede any ReplEntry on the wire
+// ---------------------------------------------------------------------------
+
+// TestP2Integration_JoinResponseBeforeReplEntry verifies the wire-ordering
+// invariant that the deferred-callback fix exists to protect: on a real
+// connection the TypeJoinResponse frame must reach the lobe before any
+// TypeReplEntry frame from the streamer. If FireOnLobeJoined fired inline inside
+// HandleJoinRequest, the streamer's first ReplEntry could overtake the
+// JoinResponse and corrupt the lobe-side handshake parser (#409 follow-up).
+// The unit test TestJoinHandler_HandleJoinRequest_DoesNotFireCallback covers the
+// callback timing inside JoinHandler; this test closes the loop end-to-end over
+// a net.Pipe driven by the coordinator's HandleIncomingJoin + NetworkStreamer.
+func TestP2Integration_JoinResponseBeforeReplEntry(t *testing.T) {
+	cortex := newTestNode(t, "cortex-wo", "primary")
+	if err := cortex.epochStore.ForceSet(4); err != nil {
+		t.Fatalf("ForceSet: %v", err)
+	}
+	// Pre-populate the replication log so the streamer has entries to drain and
+	// send the instant it starts (NetworkStreamer.Stream drains from seq 0).
+	appendEntries(t, cortex, "wo", 20)
+
+	// Cancel streamers/conns on teardown to avoid a leaked streamer goroutine.
+	t.Cleanup(func() { _ = cortex.coord.Stop() })
+
+	// net.Pipe stands in for the inbound lobe connection.
+	cortexConn, lobeConn := net.Pipe()
+	t.Cleanup(func() { cortexConn.Close(); lobeConn.Close() })
+
+	// Lobe side: record the type of every frame in arrival order until the first
+	// ReplEntry is seen (or the pipe closes).
+	orderCh := make(chan []uint8, 1)
+	go func() {
+		var order []uint8
+		for {
+			frame, err := mbp.ReadFrame(lobeConn)
+			if err != nil {
+				break
+			}
+			order = append(order, frame.Type)
+			if frame.Type == mbp.TypeReplEntry {
+				break // enough to assert ordering
+			}
+		}
+		orderCh <- order
+	}()
+
+	req := mbp.JoinRequest{
+		NodeID:          "lobe-wo",
+		Addr:            "127.0.0.1:9700",
+		ProtocolVersion: mbp.CurrentProtocolVersion,
+	}
+	payload, err := msgpack.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal JoinRequest: %v", err)
+	}
+
+	if _, err := cortex.coord.HandleIncomingJoin(cortexConn, payload); err != nil {
+		t.Fatalf("HandleIncomingJoin: %v", err)
+	}
+
+	var order []uint8
+	select {
+	case order = <-orderCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for frames on lobe side")
+	}
+
+	if len(order) == 0 {
+		t.Fatal("no frames received on lobe side")
+	}
+	// The very first frame on the wire must be the JoinResponse.
+	if order[0] != mbp.TypeJoinResponse {
+		t.Fatalf("first frame = 0x%02x, want TypeJoinResponse 0x%02x", order[0], mbp.TypeJoinResponse)
+	}
+	// A ReplEntry, once present, must never have arrived first.
+	for i, ft := range order {
+		if ft == mbp.TypeReplEntry && i == 0 {
+			t.Fatal("TypeReplEntry arrived before JoinResponse — handshake race")
+		}
+	}
+	t.Logf("wire order ok: %d frames, first=JoinResponse, ReplEntry seen after", len(order))
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: Cognitive Forwarding -- Lobe side effects reach Cortex HebbianWorker
 // ---------------------------------------------------------------------------
 
