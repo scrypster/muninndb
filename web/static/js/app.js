@@ -787,6 +787,13 @@ document.addEventListener('alpine:init', () => {
 
       const days = Math.max(1, Math.min(180, this.activityDays || 7));
       let url = '/api/activity-counts?vault=' + encodeURIComponent(this.vault) + '&days=' + days;
+      // Send the viewer's IANA timezone so the server buckets activity by the
+      // local calendar day instead of UTC. The server falls back to UTC if the
+      // name is missing or unrecognized.
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) {
+        url += '&tz=' + encodeURIComponent(tz);
+      }
       if (this.activityUntil) {
         url += '&until=' + encodeURIComponent(this.activityUntil);
       }
@@ -890,7 +897,11 @@ document.addEventListener('alpine:init', () => {
                   const label = this.getLabelForValue(value);
                   const parts = label.split('-');
                   if (parts.length === 3) {
-                    // Parse as UTC to avoid timezone-induced date shift.
+                    // The server returns each label as a YYYY-MM-DD calendar day
+                    // already bucketed in the requested timezone. Render it as a
+                    // date-only value (parse and format in UTC) so the displayed
+                    // month/day matches the bucket exactly and is not shifted
+                    // again by the browser's local offset.
                     const d = new Date(label + 'T00:00:00Z');
                     if (isNaN(d.getTime())) return label;
                     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });

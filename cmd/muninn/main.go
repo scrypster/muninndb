@@ -4,6 +4,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	// Embed the IANA timezone database so time.LoadLocation works even on
+	// minimal runtime images (e.g. debian-slim) that ship without system
+	// tzdata. Required for the Activity chart's timezone-aware day bucketing.
+	_ "time/tzdata"
 )
 
 func main() {

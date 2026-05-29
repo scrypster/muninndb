@@ -2856,7 +2856,10 @@ type DailyCount struct {
 	Count int64
 }
 
-// ActivityCounts returns per-day engram counts between since and until for a vault.
+// ActivityCounts returns per-day engram counts between since and until
+// (inclusive) for a vault. Days are bucketed in the timezone of the since
+// argument's Location, and until is assumed to share that location; pass
+// UTC-located times for UTC-day buckets.
 func (e *Engine) ActivityCounts(ctx context.Context, vault string, since, until time.Time) ([]DailyCount, error) {
 	ws := e.store.ResolveVaultPrefix(vault)
 	counts, err := e.store.CountEngramsByDay(ctx, ws, since, until)
@@ -2864,8 +2867,17 @@ func (e *Engine) ActivityCounts(ctx context.Context, vault string, since, until 
 		return nil, err
 	}
 	// Build a contiguous day list so the caller always gets every day in range.
+	// Iterate calendar days in the location of the since argument so the day
+	// boundaries match how CountEngramsByDay bucketed the engrams. until is
+	// taken to share that location (the REST handler builds both together), so
+	// its own Location is intentionally not consulted. AddDate advances by a
+	// calendar day (not a fixed 24h), keeping the list correct across
+	// daylight-saving transitions.
+	loc := since.Location()
+	first := time.Date(since.Year(), since.Month(), since.Day(), 0, 0, 0, 0, loc)
+	last := time.Date(until.Year(), until.Month(), until.Day(), 0, 0, 0, 0, loc)
 	var result []DailyCount
-	for d := since.UTC().Truncate(24 * time.Hour); !d.After(until.UTC().Truncate(24 * time.Hour)); d = d.Add(24 * time.Hour) {
+	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
 		day := d.Format("2006-01-02")
 		result = append(result, DailyCount{Date: day, Count: counts[day]})
 	}
