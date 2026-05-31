@@ -2697,7 +2697,7 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	now := time.Now()
 	newEng := &storage.Engram{
 		ID:         newULID,
-		Concept:    oldEng.Concept + " (evolved)",
+		Concept:    oldEng.Concept,
 		Content:    newContent,
 		Tags:       oldEng.Tags,
 		Confidence: 1.0,
