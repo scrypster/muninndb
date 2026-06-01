@@ -29,6 +29,8 @@
   <!-- plugin-config-utils: loaded as module after app.js sync execution,
        before Alpine's deferred init — sets globalThis.MuninnPluginCfg -->
   <script type="module" src="/static/js/plugin-config-utils.js"></script>
+  <!-- time-utils: created_at unit normalization helpers — sets globalThis.MuninnTime -->
+  <script type="module" src="/static/js/time-utils.js"></script>
 
   <!-- Alpine.js (deferred — initializes after DOM + app.js registers components) -->
   <script defer src="/static/vendor/alpine-3.14.9.min.js"></script>
@@ -315,7 +317,7 @@
               <div style="font-size:0.8125rem;padding:0.5rem;background:var(--bg-elevated);border-radius:0.375rem;">
                 <span class="badge-info" x-text="item.vault"></span>
                 <span style="color:var(--text-primary);margin-left:0.5rem;" x-text="item.concept"></span>
-                <div style="color:var(--text-muted);font-size:0.75rem;margin-top:0.25rem;" x-text="new Date(item.createdAt * 1000).toLocaleTimeString()"></div>
+                <div style="color:var(--text-muted);font-size:0.75rem;margin-top:0.25rem;" x-text="new Date(item.createdAt).toLocaleTimeString()"></div>
               </div>
             </template>
             <div x-show="liveFeed.length === 0" style="color:var(--text-muted);font-size:0.875rem;padding:0.5rem;">
@@ -498,7 +500,7 @@
               <!-- Embedding status dot -->
               <span :title="m.embed_dim && m.embed_dim > 0 ? 'Embedded' : 'No embedding'"
                 :style="'width:7px;height:7px;border-radius:50%;flex-shrink:0;background:' + (m.embed_dim && m.embed_dim > 0 ? '#22c55e' : '#9ca3af')"></span>
-              <span style="font-size:0.75rem;color:var(--text-muted);" x-text="m.createdAt ? new Date(m.createdAt * 1000).toLocaleDateString() : ''"></span>
+              <span style="font-size:0.75rem;color:var(--text-muted);" x-text="m.createdAt ? new Date(m.createdAt).toLocaleDateString() : ''"></span>
             </div>
           </div>
         </template>
@@ -705,7 +707,7 @@
             </div>
             <div class="form-group">
               <label>Created</label>
-              <span style="color:var(--text-secondary);font-size:0.875rem;" x-text="selectedMemory.createdAt ? new Date(selectedMemory.createdAt * 1000).toLocaleString() : 'unknown'"></span>
+              <span style="color:var(--text-secondary);font-size:0.875rem;" x-text="selectedMemory.createdAt ? new Date(selectedMemory.createdAt).toLocaleString() : 'unknown'"></span>
             </div>
             <div class="form-group" style="margin-top:1rem;">
               <label>Lifecycle State</label>
@@ -2200,7 +2202,7 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
             <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
               <span class="badge-info" x-text="entry.concept || entry.id.slice(0,8)"></span>
               <span style="color:var(--text-secondary);font-size:0.875rem;flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;" x-text="entry.content || ''"></span>
-              <span style="font-size:0.75rem;color:var(--text-muted);white-space:nowrap;" x-text="entry.createdAt ? new Date(entry.createdAt * 1000).toLocaleString() : ''"></span>
+              <span style="font-size:0.75rem;color:var(--text-muted);white-space:nowrap;" x-text="entry.createdAt ? new Date(entry.createdAt).toLocaleString() : ''"></span>
             </div>
           </div>
         </template>
