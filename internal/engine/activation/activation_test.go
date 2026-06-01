@@ -1378,6 +1378,57 @@ func TestRRF_ReturnsResultsWithDefaultThreshold(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test: RRF preserves user-set explicit threshold instead of overriding it.
+// Regression: the old two-step threshold logic forced every RRF threshold
+// >= 0.01 to 0.001, discarding the user's explicitly set value. After the fix,
+// Run() only defaults the threshold when it is unset (<= 0). Any explicitly
+// set non-zero threshold must be preserved. Here we set Threshold=0.50 which
+// is far above RRF scores (~0.02-0.04), so the result must be empty.
+// ---------------------------------------------------------------------------
+
+func TestRRF_RespectsExplicitThreshold(t *testing.T) {
+	store := newStubStore()
+
+	eng1 := &storage.Engram{
+		Concept:    "rrf explicit threshold",
+		Content:    "engram that must be filtered by user's explicit high threshold",
+		Confidence: 1.0,
+		Stability:  30.0,
+		Relevance:  0.8,
+	}
+	store.writeEngram(eng1)
+
+	ftsResults := []activation.ScoredID{{ID: eng1.ID, Score: 0.8}}
+	fts := &stubFTS{results: ftsResults}
+	hnsw := &stubHNSW{results: []activation.ScoredID{{ID: eng1.ID, Score: 0.7}}}
+
+	eng := newTestEngine(store, fts, hnsw)
+
+	// Explicitly set a high threshold (0.50) — user wants high-confidence
+	// results only. RRF scores are rank-based and typically ~0.02-0.04, so
+	// none should pass the 0.50 bar. The old code would force-override
+	// this to 0.001, causing results to leak through.
+	result, err := eng.Run(context.Background(), &activation.ActivateRequest{
+		Context:    []string{"rrf explicit threshold"},
+		Threshold:  0.50,
+		MaxResults: 10,
+		Weights: &activation.Weights{
+			UseRRFFusion: true,
+			DisableACTR:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(result.Activations) != 0 {
+		t.Errorf("RRF with explicit Threshold=0.50 must return 0 results (got %d). "+
+			"User's explicitly set threshold is NOT being respected — it is being overridden.",
+			len(result.Activations))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test: When both UseRRFFusion and UseCGDN are enabled, RRF takes precedence
 // and CGDN is silently disabled. The guard in phase6Score logs a warning and
 // clears UseCGDN so the RRF path executes.

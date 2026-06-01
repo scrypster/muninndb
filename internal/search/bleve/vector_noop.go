@@ -1,4 +1,4 @@
-//go:build !vectors
+//go:build bleve && !vectors
 
 package bleve
 

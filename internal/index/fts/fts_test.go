@@ -443,11 +443,11 @@ func TestMultiFieldPostingNoOverwrite(t *testing.T) {
 
 	// "rocket" appears in both concept and content — both fields should contribute.
 	id1 := [16]byte{1}
-	_ = idx.IndexEngram(ws, id1, "rocket science", "", "the rocket launches at dawn", nil)
+	_ = idx.IndexEngram(ws, id1, "rocket science", "", "the rocket launches at dawn", nil, 0)
 
 	// id2 has "rocket" only in content.
 	id2 := [16]byte{2}
-	_ = idx.IndexEngram(ws, id2, "space travel", "", "the rocket propels us forward", nil)
+	_ = idx.IndexEngram(ws, id2, "space travel", "", "the rocket propels us forward", nil, 0)
 
 	results, err := idx.Search(ctx, ws, "rocket", 10)
 	if err != nil {
@@ -483,15 +483,15 @@ func TestIDFCacheVaultIsolation(t *testing.T) {
 	// vault-a: index 10 engrams, only 1 contains "robot" → high IDF (rare term)
 	for i := 0; i < 9; i++ {
 		id := [16]byte{byte(i + 1)}
-		_ = idx.IndexEngram(wsA, id, "unrelated topic", "", "cooking baking gardening", nil)
+		_ = idx.IndexEngram(wsA, id, "unrelated topic", "", "cooking baking gardening", nil, 0)
 	}
 	idRobotA := [16]byte{10}
-	_ = idx.IndexEngram(wsA, idRobotA, "robot", "", "robot automation", nil)
+	_ = idx.IndexEngram(wsA, idRobotA, "robot", "", "robot automation", nil, 0)
 
 	// vault-b: index 3 engrams, all contain "robot" → low IDF (common term)
 	for i := 0; i < 3; i++ {
 		id := [16]byte{byte(i + 20)}
-		_ = idx.IndexEngram(wsB, id, "robot", "", "robot", nil)
+		_ = idx.IndexEngram(wsB, id, "robot", "", "robot", nil, 0)
 	}
 
 	// Warm the IDF cache for vault-a by running a search.

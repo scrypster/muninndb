@@ -1,3 +1,5 @@
+//go:build bleve
+
 package bleve
 
 import (

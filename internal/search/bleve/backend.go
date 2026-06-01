@@ -1,3 +1,5 @@
+//go:build bleve
+
 package bleve
 
 import (
@@ -20,6 +22,11 @@ import (
 // Backend implements search.Backend using Bleve for full-text search.
 // FTS and vector indexes are stored separately so the vector index can be
 // rebuilt on dimension changes without losing FTS data.
+//
+// Note: HNSW memory metrics and warn threshold configuration
+// (MUNINN_HNSW_WARN_THRESHOLD_MB, MUNINN_HNSW_MAX_MB) do not apply to the
+// bleve backend. Vectors are indexed through Bleve's integrated FAISS/KNN
+// path, not through the native HNSW registry.
 type Backend struct {
 	cfg  Config
 	mu   sync.RWMutex

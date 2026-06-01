@@ -1,4 +1,4 @@
-//go:build vectors
+//go:build vectors && bleve
 
 package bleve_test
 

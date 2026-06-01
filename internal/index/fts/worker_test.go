@@ -12,7 +12,7 @@ type panicIndex struct {
 	callCount  atomic.Int64
 }
 
-func (p *panicIndex) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error {
+func (p *panicIndex) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string, _ int64) error {
 	p.callCount.Add(1)
 	if p.panicCount.Add(-1) >= 0 {
 		panic("synthetic fts panic")

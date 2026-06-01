@@ -35,7 +35,7 @@ import (
 	"github.com/scrypster/muninndb/internal/logging"
 	"github.com/scrypster/muninndb/internal/search"
 	searchadapters "github.com/scrypster/muninndb/internal/search/adapters"
-	searchbleve "github.com/scrypster/muninndb/internal/search/bleve"
+	searchfactory "github.com/scrypster/muninndb/internal/search/factory"
 	"github.com/scrypster/muninndb/internal/search/native"
 	"github.com/scrypster/muninndb/internal/mcp"
 	"github.com/scrypster/muninndb/internal/metrics"
@@ -774,7 +774,7 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_ENRICH_TIMEOUT        Per-engram LLM timeout for replay_enrichment (e.g. 60s, 2m; default: no extra timeout)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_WARN_THRESHOLD_MB  Emit a warning when HNSW in-memory vector bytes exceed N MB (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_MAX_MB             Skip HNSW insert (keep Pebble write) when memory exceeds N MB (optional)\n")
-		fmt.Fprintf(os.Stderr, "  MUNINN_SEARCH_BACKEND        Search backend: \"native\" (default) or \"bleve\"\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_SEARCH_BACKEND        Search backend: \"native\" (default) or \"bleve\" (requires -tags bleve build)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_LISTEN_HOST           Host to bind all servers to (e.g. 0.0.0.0 for LAN access)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_CORS_ORIGINS          Comma-separated CORS allowed origins\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_MCP_TOKEN             Bearer token for MCP endpoint auth (Docker/compose alternative to --mcp-token)\n")
@@ -1121,7 +1121,7 @@ func runServer() {
 		if embedPlugin != nil {
 			bleveDim = embedPlugin.Dimension()
 		}
-		backend, err := searchbleve.Open(searchbleve.Config{
+		backend, err := searchfactory.OpenBleve(searchfactory.BleveConfig{
 			Path:      blevePath,
 			VectorDim: bleveDim,
 		})

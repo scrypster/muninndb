@@ -75,3 +75,8 @@ sdk/python/*.egg-info/
 sdk/muninndb/dist/
 sdk/muninndb/*.egg-info/
 sdk/php/vendor/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

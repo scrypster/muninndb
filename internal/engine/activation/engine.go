@@ -372,17 +372,20 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	if req.MaxResults <= 0 {
 		req.MaxResults = 10
 	}
-	if req.Threshold <= 0 {
-		req.Threshold = 0.05
-	}
-
-	// After threshold default is set, adjust for RRF mode.
-	// RRF scores are typically in [0, 0.05] range — much lower than ACT-R.
-	// Apply an RRF-appropriate threshold to avoid filtering all results.
+	// Resolve weights first so we know whether RRF fusion is active.
 	w := resolveWeights(req.Weights, e.weights)
-	if w.UseRRFFusion && req.Threshold >= float64(float32(0.01)) {
-		req.Threshold = 0.001
+
+	// Default threshold only when unset (<= 0 indicates user did not provide one).
+	if req.Threshold <= 0 {
+		if w.UseRRFFusion {
+			// RRF scores are rank-based and typically in [0, ~0.05] range —
+			// much lower than ACT-R scores. Use an RRF-appropriate default.
+			req.Threshold = 0.001
+		} else {
+			req.Threshold = 0.05
+		}
 	}
+	// If user explicitly set a non-zero threshold, preserve it as-is.
 
 	// Phase 1: embed + tokenize
 	p1, err := e.phase1(ctx, req)

@@ -1,9 +1,9 @@
-# ── Vector integration test image ────────────────────────────────────────────
-# Self-contained Docker image that builds FAISS, compiles muninndb, and runs
-# the full bleve+FAISS integration test suite inside the container.
+# ── FAISS-enabled production image ───────────────────────────────────────────
+# Self-contained Docker image that builds FAISS, compiles muninndb with vector
+# support, and runs the MuninnDB server with the bleve+FAISS backend enabled.
 #
-# Build:  docker build -f Dockerfile.faiss -t muninndb-faiss .
-# Run:    docker run --rm muninndb-faiss
+# Build:  docker build --network host -f Dockerfile.faiss -t muninndb-faiss .
+# Run:    docker run --rm -p 8474:8474 -p 8475:8475 -p 8476:8476 -p 8477:8477 -p 8750:8750 -v muninn-data:/data muninndb-faiss
 # Shell:  docker run --rm -it muninndb-faiss /bin/bash
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -85,16 +85,34 @@ RUN ldconfig
 # Build the server binary with local embedder + FAISS vector support.
 RUN go build -tags localassets,vectors -ldflags="-s -w" -o /muninndb-server ./cmd/muninn/...
 
-# ── Defaults for bleve+FAISS deployment ──────────────────────────────────────
+# =============================================================================
+# Stage 2 — Minimal FAISS runtime image
+# =============================================================================
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ca-certificates curl libopenblas0-pthread libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=faiss /usr/local/lib/libfaiss_c.so /usr/local/lib/
+COPY --from=faiss /usr/local/lib/libfaiss.so   /usr/local/lib/
+COPY --from=builder /muninndb-server /usr/local/bin/muninndb-server
+RUN ldconfig
+
+# Persistent data volume — Pebble DB, WAL, auth secrets, FTS, and FAISS index
+# state live here.
+VOLUME ["/data"]
+
+# MBP protocol  8474
+# REST API       8475
+# Web UI         8476
+# gRPC           8477
+# MCP / AI tools 8750
+EXPOSE 8474 8475 8476 8477 8750
+
+# Defaults for bleve+FAISS deployment.
 ENV MUNINN_SEARCH_BACKEND=bleve
 
-# ── Run the vector integration test suite ───────────────────────────────────
-# Pre-coordinates ULID monotonicity: ULID (ms precision) must advance between
-# the two test groups to avoid duplicate IDs. The short sleep covers slow CI.
-CMD go test -tags vectors -count=1 -v -timeout 120s \
-        ./internal/search/bleve \
-        -run 'TestBleveFAISSVectorSearch|TestBackendBuildsPersistentBleveVectorIndex' \
-    && sleep 1 \
-    && go test -tags vectors -count=1 -v -timeout 120s \
-        ./internal/transport/rest \
-        -run TestBleveBackendWiringServesRESTVectorActivationAndBuildsFAISSIndex
+ENTRYPOINT ["/usr/local/bin/muninndb-server"]
+CMD ["--daemon", "--data", "/data"]

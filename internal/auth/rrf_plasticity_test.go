@@ -8,15 +8,15 @@ import "testing"
 
 func TestScoringFusion_DefaultEmpty(t *testing.T) {
 	r := ResolvePlasticity(nil)
-	if r.ScoringFusion != "rrf" {
-		t.Errorf("default ScoringFusion should be rrf, got %q", r.ScoringFusion)
+	if r.ScoringFusion != "" {
+		t.Errorf("default ScoringFusion should be empty (ACT-R), got %q", r.ScoringFusion)
 	}
 }
 
 func TestScoringFusion_AllPresetsDefaultEmpty(t *testing.T) {
-	// Only "default" preset now uses RRF; other presets still default to ACT-R ("").
+	// All presets default to ACT-R (""). RRF is opt-in via explicit override.
 	presets := map[string]string{
-		"default":          "rrf",
+		"default":          "",
 		"reference":        "",
 		"scratchpad":       "",
 		"knowledge-graph":  "",

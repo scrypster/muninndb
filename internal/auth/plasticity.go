@@ -147,7 +147,7 @@ type plasticityPreset struct {
 	InlineEnrichment  string
 	EnrichmentEnabled bool
 	RecallMode        string
-	ScoringFusion     string // "" = ACT-R, "rrf" (default preset), "weighted_sum"
+	ScoringFusion     string // "" = ACT-R, "rrf", "weighted_sum"
 	LTPThreshold      int
 	LTPWeightFloor    float32
 }
@@ -178,7 +178,6 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
-		ScoringFusion:        "rrf",
 
 	},
 	"reference": {

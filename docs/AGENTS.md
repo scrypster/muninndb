@@ -8,11 +8,13 @@ This repo uses **three build tags** that gate entire subsystems. Using the wrong
 |-----|--------|-------------|
 | `localassets` | Enables bundled ONNX embedder via `go:embed` | **ALL production binary builds** (Dockerfile, Makefile, CI, goreleaser). Without it, `LocalAvailable()` always returns false and semantic search silently no-ops. |
 | `vectors` | Enables bleve+FAISS vector search | Vector indexing, KNN search, vector tests. Without it, stub methods return `ErrVectorSearchUnavailable`. |
+| `bleve` | Enables the Bleve search backend (BM25 + optional FAISS) | Bleve text indexing, persistent search, bleve-backed FTS. Without it, `searchfactory.OpenBleve()` returns `ErrBleveBackendUnavailable` and server falls back to native. Required alongside `vectors` for full bleve vector support. |
 | `integration` | Gates integration tests | CLI lifecycle tests, replication tests, plugin integration tests that need a live server. |
 
 **Rule:** `go build ./cmd/muninn/...` → must have `-tags localassets`.  
 **Rule:** `go test` for vector code → must have `-tags vectors`.  
-**Rule:** `go test ./...` without tags → runs non-vector, non-integration tests. Fine for quick iteration.
+**Rule:** `go test` for bleve code → must have `-tags bleve`.  
+**Rule:** `go test ./...` without tags → runs non-bleve, non-vector, non-integration tests. Fine for quick iteration.
 
 Validation: `scripts/check-build-tags.sh` fails CI if any muninn binary build command misses `-tags localassets`.
 
@@ -24,6 +26,10 @@ Validation: `scripts/check-build-tags.sh` fails CI if any muninn binary build co
 //go:build vectors          → internal/search/bleve/integration_test.go
 //go:build vectors          → internal/transport/rest/search_backend_vectors_test.go
 //go:build !vectors         → internal/search/bleve/{vector_noop,mapping_noop,backend_noop_test}.go
+
+//go:build bleve            → internal/search/factory/{factory_bleve}.go
+//go:build bleve            → internal/search/bleve/{backend,config,filter}.go
+//go:build !bleve           → internal/search/factory/{factory_nobleve}.go
 
 //go:build localassets      → internal/plugin/embed/local_assets_*.go  (per-platform)
 //go:build !localassets     → internal/plugin/embed/local_assets_noembed.go
@@ -77,14 +83,14 @@ The `search/adapters/` package bridges search backends to `internal/index/fts` w
 
 ## Docker Build Quirks
 
-### Vector test image (`Dockerfile.faiss`)
+### FAISS production image (`Dockerfile.faiss`)
 
-Multi-stage: FAISS C library built from source → Go test runner.
+Multi-stage: FAISS C library built from source → Go builder with `localassets,vectors` → minimal Debian runtime with `MUNINN_SEARCH_BACKEND=bleve`.
 
 ```bash
 # Build requires --network host (GitHub clone fails on Docker bridge in constrained networks)
-docker build --network host -f Dockerfile.faiss -t muninndb-vector-test .
-docker run --rm --network host muninndb-vector-test
+docker build --network host -f Dockerfile.faiss -t muninndb-faiss .
+docker run --rm -p 8474:8474 -p 8475:8475 -p 8476:8476 -p 8477:8477 -p 8750:8750 -v muninn-data:/data muninndb-faiss
 ```
 
 **FAISS build stage gotchas (hard-earned):**
@@ -112,8 +118,8 @@ go test ./...
 CGO_LDFLAGS="-lfaiss_c -lfaiss -lopenblas" go test -tags vectors -count=1 -v ./internal/search/bleve/...
 CGO_LDFLAGS="-lfaiss_c -lfaiss -lopenblas" go test -tags vectors -count=1 -v ./internal/transport/rest/...
 
-# Run vector tests in Docker (fully self-contained):
-docker build --network host -f Dockerfile.faiss -t muninndb-vector-test . && docker run --rm muninndb-vector-test
+# Build FAISS-enabled production image:
+docker build --network host -f Dockerfile.faiss -t muninndb-faiss .
 
 # Integration tests (needs no muninn already running on :8750):
 go test -tags localassets,integration -v -timeout 120s ./cmd/muninn/...
@@ -167,3 +173,51 @@ Pre-build hook: `make fetch-assets` (fetches ORT libs for all platforms before c
 - **Module:** `github.com/scrypster/muninndb`
 - **Repo:** `https://github.com/scrypster/muninndb`
 - **License:** BSL 1.1 (auto-converts to Apache 2.0 on Feb 26, 2030)
+
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
+## Beads Issue Tracker
+
+This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+
+### Quick Reference
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
+
+### Rules
+
+- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `bd prime` for detailed command reference and session close protocol
+- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+
+## Session Completion
+
+**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **PUSH TO REMOTE** - This is MANDATORY:
+   ```bash
+   git pull --rebase
+   git push
+   git status  # MUST show "up to date with origin"
+   ```
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
+
+**CRITICAL RULES:**
+- Work is NOT complete until `git push` succeeds
+- NEVER stop before pushing - that leaves work stranded locally
+- NEVER say "ready to push when you are" - YOU must push
+- If push fails, resolve and retry until it succeeds
+<!-- END BEADS INTEGRATION -->
