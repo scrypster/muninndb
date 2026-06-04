@@ -39,13 +39,13 @@ func (b *Backend) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, conte
 	return b.FTS.IndexEngram(ws, id, concept, createdBy, content, tags, 0)
 }
 
-// DeleteText is intentionally a no-op for the native backend: the engine
-// calls fts.Index.DeleteEngram directly, where the original tokenized fields
-// are available to remove exact posting keys. Future contributors should not
-// mistake this lack of implementation for a bug — deletion happens at the
-// engine layer, not through this adapter.
-func (b *Backend) DeleteText(_ context.Context, ws [8]byte, id [16]byte) error {
-	return nil
+// DeleteText removes the text index entries for an engram from the native FTS index.
+// Uses the engram's text fields to tokenize and remove the exact posting-list keys.
+func (b *Backend) DeleteText(_ context.Context, ws [8]byte, eng *storage.Engram) error {
+	if b == nil || b.FTS == nil || eng == nil {
+		return nil
+	}
+	return b.FTS.DeleteEngram(ws, [16]byte(eng.ID), eng.Concept, eng.CreatedBy, eng.Content, eng.Tags, eng.CreatedAt.Unix())
 }
 
 // SearchText delegates to the native FTS index.

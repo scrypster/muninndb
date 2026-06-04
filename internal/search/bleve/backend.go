@@ -302,8 +302,13 @@ func (b *Backend) IndexText(_ context.Context, ws [8]byte, eng *storage.Engram) 
 }
 
 // DeleteText removes the document from both FTS and vector indexes.
-func (b *Backend) DeleteText(_ context.Context, ws [8]byte, id [16]byte) error {
-	key := docID(ws, id)
+// Only the engram ID is used for deletion; Bleve looks up documents by key,
+// not by tokenized fields.
+func (b *Backend) DeleteText(_ context.Context, ws [8]byte, eng *storage.Engram) error {
+	if b == nil || eng == nil {
+		return nil
+	}
+	key := docID(ws, [16]byte(eng.ID))
 	b.mu.Lock()
 	delete(b.docs, key)
 	b.mu.Unlock()

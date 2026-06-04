@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 const (
@@ -207,8 +208,5 @@ func (w *Worker) run() {
 }
 
 func ftsIsClosedPanic(r interface{}) bool {
-	if s, ok := r.(string); ok {
-		return strings.Contains(s, "closed")
-	}
-	return false
+	return storage.IsClosedPanic(r)
 }

@@ -16,7 +16,7 @@ type Hit struct {
 // TextIndexer writes and removes text-search documents.
 type TextIndexer interface {
 	IndexText(ctx context.Context, ws [8]byte, eng *storage.Engram) error
-	DeleteText(ctx context.Context, ws [8]byte, id [16]byte) error
+	DeleteText(ctx context.Context, ws [8]byte, eng *storage.Engram) error
 }
 
 // TextSearcher finds documents by text query.

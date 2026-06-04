@@ -130,27 +130,36 @@ func TestBackendReindexVaultIndexesTextAndVector(t *testing.T) {
 	}
 }
 
-func TestBackendDeleteTextNoopDocumentsNativeLegacyContract(t *testing.T) {
+func TestBackendDeleteTextRemovesFTSIndexEntries(t *testing.T) {
 	backend, _, ws := newTestBackend(t)
 	ctx := context.Background()
 	id := storage.ULID{4}
 	eng := &storage.Engram{
 		ID:      id,
-		Concept: "Delete text noop",
-		Content: "Native DeleteText cannot remove postings without original token fields",
+		Concept: "Delete text works",
+		Content: "Native DeleteText now receives text fields and removes FTS posting entries",
 	}
 
 	if err := backend.IndexText(ctx, ws, eng); err != nil {
 		t.Fatalf("IndexText: %v", err)
 	}
-	if err := backend.DeleteText(ctx, ws, [16]byte(id)); err != nil {
+	// Verify the engram is searchable before deletion.
+	hits, err := backend.SearchText(ctx, ws, "posting entries", 10)
+	if err != nil {
+		t.Fatalf("SearchText before delete: %v", err)
+	}
+	if len(hits) == 0 || hits[0].ID != [16]byte(id) {
+		t.Fatalf("expected engram to be searchable before DeleteText, got hits=%v", hits)
+	}
+
+	if err := backend.DeleteText(ctx, ws, eng); err != nil {
 		t.Fatalf("DeleteText: %v", err)
 	}
-	hits, err := backend.SearchText(ctx, ws, "original token fields", 10)
+	hits, err = backend.SearchText(ctx, ws, "posting entries", 10)
 	if err != nil {
-		t.Fatalf("SearchText: %v", err)
+		t.Fatalf("SearchText after delete: %v", err)
 	}
-	if len(hits) == 0 {
-		t.Fatal("DeleteText is currently a native no-op; expected existing text hit to remain")
+	if len(hits) != 0 {
+		t.Fatalf("DeleteText should have removed FTS entries, but got %d hits", len(hits))
 	}
 }
