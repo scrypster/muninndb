@@ -51,6 +51,7 @@ import (
 )
 
 const defaultMCPPort = "8750"
+const defaultRESTPort = "8475"
 const defaultOpenAIEmbedProviderURL = "openai://text-embedding-3-small"
 
 const vaultUpgradeWarning = `

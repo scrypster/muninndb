@@ -3,6 +3,7 @@ package rest
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -326,6 +327,26 @@ func TestMCPInfo_CustomPort(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp.URL != "http://127.0.0.1:9999/mcp" {
 		t.Errorf("unexpected URL for custom port: %q", resp.URL)
+	}
+}
+
+// TestMCPInfo_TLS verifies the returned URL uses https when the server is
+// configured with a TLS config (the condition under which Serve enables TLS).
+func TestMCPInfo_TLS(t *testing.T) {
+	store := newTestAuthStore(t)
+	srv := NewServer("localhost:0", &MockEngine{}, store, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", &tls.Config{}, MCPInfo{
+		Addr:     ":8750",
+		HasToken: true,
+	})
+
+	req := httptest.NewRequest("GET", "/api/admin/mcp-info", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	var resp MCPInfoResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.URL != "https://127.0.0.1:8750/mcp" {
+		t.Errorf("expected https URL under TLS, got %q", resp.URL)
 	}
 }
 
@@ -849,7 +870,7 @@ func TestHandleEmbedStatus_IncludesRateAndETA(t *testing.T) {
 			RatePerSec: 1.5,
 			ETASeconds: 120,
 		},
-		embeddedCount: 50,  // less than total → indexing=true
+		embeddedCount: 50, // less than total → indexing=true
 		totalCount:    100,
 	}
 	srv := NewServer("localhost:0", eng, nil, nil, nil, EmbedInfo{Provider: "ollama", Model: "nomic"}, EnrichInfo{}, nil, "", nil)
@@ -885,7 +906,7 @@ func TestHandleEmbedStatus_ZeroRateWhenIdle(t *testing.T) {
 			RatePerSec: 5.0,
 			ETASeconds: 999,
 		},
-		embeddedCount: 100,  // equal to total → indexing=false
+		embeddedCount: 100, // equal to total → indexing=false
 		totalCount:    100,
 	}
 	srv := NewServer("localhost:0", eng, nil, nil, nil, EmbedInfo{Provider: "ollama", Model: "nomic"}, EnrichInfo{}, nil, "", nil)

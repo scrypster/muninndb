@@ -70,16 +70,10 @@ func (r *replState) cmdShowVaults() {
 	}
 	apiURL := healthURL("MUNINNDB_ADMIN_URL", addrs.Scheme, restPort) + "/api/vaults"
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	if strings.HasPrefix(apiURL, "https://") && isLoopbackURL(apiURL) {
-		// Skip cert verification only for a loopback target: an internal-CA
-		// TLS deployment talking to its own server can't be impersonated.
-		// For an off-host MUNINNDB_ADMIN_URL verification stays on — this
-		// request carries the admin session cookie.
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}
-	}
+	// Loopback https skips cert verification (internal-CA self-inspection); an
+	// off-host MUNINNDB_ADMIN_URL stays verified — this request carries the admin
+	// session cookie. See httpClientForURL.
+	client := httpClientForURL(apiURL, 5*time.Second)
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

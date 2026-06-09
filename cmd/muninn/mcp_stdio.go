@@ -92,8 +92,17 @@ func runMCPStdio() {
 
 	if u := os.Getenv("MUNINN_MCP_URL"); u != "" {
 		mcpProxyURL = u
+	} else {
+		mcpProxyURL = defaultMCPProxyURL()
 	}
 	runMCPStdioWith(os.Stdin, os.Stdout)
+}
+
+// defaultMCPProxyURL is the proxy target when MUNINN_MCP_URL is unset: loopback
+// on the canonical MCP port, with the scheme the local daemon actually serves
+// (so the proxy uses https against a local TLS daemon).
+func defaultMCPProxyURL() string {
+	return localScheme() + "://127.0.0.1:" + defaultMCPPort + "/mcp"
 }
 
 // runMCPStdioWith is the testable implementation of the proxy loop.
@@ -103,7 +112,7 @@ func runMCPStdio() {
 // includes it in all subsequent requests. This keeps the daemon's per-session
 // state consistent across the lifetime of a single client session.
 func runMCPStdioWith(in io.Reader, out io.Writer) {
-	client := &http.Client{Timeout: 35 * time.Second}
+	client := httpClientForURL(mcpProxyURL, 35*time.Second)
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20) // 1 MB max line
 

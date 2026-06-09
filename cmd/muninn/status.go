@@ -273,6 +273,23 @@ func isLoopbackURL(rawURL string) bool {
 	return false
 }
 
+// httpClientForURL returns an http.Client for rawURL. It skips TLS verification
+// only for a loopback https target — a self-signed/internal-CA daemon on the
+// same machine, where the cert can't be impersonated — matching probeOnce's
+// loopback rationale. A remote https endpoint keeps full verification.
+func httpClientForURL(rawURL string, timeout time.Duration) *http.Client {
+	c := &http.Client{Timeout: timeout}
+	// ToLower: the scheme is case-insensitive, and isLoopbackURL (via url.Parse)
+	// already is — keep this prefix check consistent with it.
+	if strings.HasPrefix(strings.ToLower(rawURL), "https://") && isLoopbackURL(rawURL) {
+		c.Transport = &http.Transport{
+			// loopback self-signed/internal-CA cert, not a security boundary
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		}
+	}
+	return c
+}
+
 // printStatusDisplay prints the unified status view.
 // compact=true omits the trailing hint lines (used before dropping into shell).
 // Returns the overall state so callers can act on it.
