@@ -56,7 +56,7 @@ func svcsAllUp() []serviceStatus {
 func TestFormatDoctor(t *testing.T) {
 	addrs := daemonAddrs{Scheme: "https", RestAddr: "0.0.0.0:8475", MCPAddr: "127.0.0.1:8750", UIAddr: "127.0.0.1:8476"}
 
-	healthy, _ := makeCert(t, "vm-muninndb", []string{"vm-muninndb", "localhost"}, time.Now().Add(300*24*time.Hour))
+	healthy, _ := makeCert(t, "muninn.example", []string{"muninn.example", "localhost"}, time.Now().Add(300*24*time.Hour))
 	expiring, _ := makeCert(t, "soon", nil, time.Now().Add(10*24*time.Hour))
 	expired, _ := makeCert(t, "old", nil, time.Now().Add(-1*time.Hour))
 
@@ -78,7 +78,7 @@ func TestFormatDoctor(t *testing.T) {
 		{
 			name:   "https healthy, live socket",
 			report: doctorReport{svcs: svcsAllUp(), scheme: "https", addrs: addrs, cert: healthy, certSource: "live socket", tlsVersion: tls.VersionTLS13, cipher: tls.TLS_AES_128_GCM_SHA256},
-			want:   []string{"enabled (https)", "CN=vm-muninndb", "dns sans", "days remaining", "(from live socket)", "0.0.0.0:8475"},
+			want:   []string{"enabled (https)", "CN=muninn.example", "dns sans", "days remaining", "(from live socket)", "0.0.0.0:8475"},
 		},
 		{
 			name:   "expiring soon",
