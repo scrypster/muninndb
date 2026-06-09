@@ -467,7 +467,11 @@ func cleanupOpenClawBadConfig() {
 // The Usage pattern section varies based on the vault's behavior mode.
 func buildOpenClawSkillContent(mode string) string {
 	usagePattern := openClawUsagePattern(mode)
-	return openClawSkillHeader + usagePattern + openClawSkillFooter
+	// The header embeds the REST base URL twice (prose + MUNINN_URL); rewrite the
+	// compiled-in http default to the scheme-aware client URL so a TLS deployment
+	// gets https. A non-TLS deployment leaves it unchanged.
+	header := strings.ReplaceAll(openClawSkillHeader, "http://127.0.0.1:8475", clientRESTURL())
+	return header + usagePattern + openClawSkillFooter
 }
 
 // openClawUsagePattern returns the ## Usage pattern section for a given behavior mode.

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -142,6 +143,12 @@ func clientMCPURL() string {
 // clientUIURL is the Web UI URL shown to the operator, scheme-aware.
 func clientUIURL() string {
 	return tlsSchemeFromEnv() + "://127.0.0.1:8476"
+}
+
+// clientRESTURL is the REST API base written into generated AI-tool guides
+// (e.g. the OpenClaw SKILL.md curl examples), scheme-aware.
+func clientRESTURL() string {
+	return tlsSchemeFromEnv() + "://127.0.0.1:8475"
 }
 
 // enableTLSFromFlagsOrPrompt resolves TLS for the interactive wizard. Explicit
@@ -321,6 +328,10 @@ func runInteractiveInit(tokenFlag *string, noToken *bool, noStart *bool, tlsCert
 		if err := runStart(true); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: daemon did not start cleanly: %v\n", err)
 		}
+		// Point our admin/UI base URLs at the daemon we just started (scheme + port
+		// from muninn.addrs) so the loopback login + plasticity calls below reach it
+		// under TLS or a non-default port instead of failing against http://:8475.
+		alignLocalAdminBasesToDaemon()
 		// Persist the behavior choice to the default vault now that the server is up.
 		// Retries once on failure; falls back to printing the manual command.
 		applyBehaviorToVault(behaviorMode, customInstructions)
@@ -950,6 +961,32 @@ func printBehaviorNote(mode, customInstructions string) {
 	}
 }
 
+// alignLocalAdminBasesToDaemon points the package-level admin/UI base URLs at the
+// running daemon's actual scheme + port (from the muninn.addrs sidecar) so the
+// wizard's own loopback admin calls (loginAdmin, plasticity) reach a daemon it
+// just started with TLS or on a non-default port. Operator overrides
+// (MUNINNDB_ADMIN_URL / MUNINNDB_UI_URL) are respected and left untouched.
+func alignLocalAdminBasesToDaemon() {
+	addrs, err := readAddrsFile(defaultDataDir())
+	if err != nil {
+		return // sidecar unreadable — keep the compiled-in http defaults
+	}
+	scheme := addrs.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	if os.Getenv("MUNINNDB_ADMIN_URL") == "" {
+		if _, port, err := net.SplitHostPort(addrs.RestAddr); err == nil && port != "" {
+			vaultAdminBase = scheme + "://127.0.0.1:" + port
+		}
+	}
+	if os.Getenv("MUNINNDB_UI_URL") == "" {
+		if _, port, err := net.SplitHostPort(addrs.UIAddr); err == nil && port != "" {
+			vaultUIBase = scheme + "://127.0.0.1:" + port
+		}
+	}
+}
+
 // applyBehaviorToVault persists the chosen behavior mode to the default vault's
 // plasticity config via the admin API. Called after runStart so the server is up.
 //
@@ -968,6 +1005,13 @@ func applyBehaviorToVault(mode, customInstructions string) {
 
 		plasticityURL := fmt.Sprintf("%s/api/admin/vault/default/plasticity", vaultAdminBase)
 		client := &http.Client{Timeout: 5 * time.Second}
+		if strings.HasPrefix(plasticityURL, "https://") && isLoopbackURL(plasticityURL) {
+			// Loopback https: skip cert verification (internal-CA self-talk can't be
+			// impersonated). Off-host stays verified. Unifies to httpClientForURL once #468 lands.
+			client.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			}
+		}
 
 		// GET current config so we merge rather than overwrite.
 		getReq, err := http.NewRequest("GET", plasticityURL, nil)

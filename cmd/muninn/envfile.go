@@ -79,7 +79,7 @@ func buildEnvFileContent(embedProvider, enrichURL string) string {
 	b.WriteString("# ── Network ──────────────────────────────────────────────\n")
 	b.WriteString("# MUNINN_LISTEN_HOST=127.0.0.1\n")
 	b.WriteString("# MUNINN_UI_ADDR=127.0.0.1:8476\n")
-	b.WriteString("# MUNINN_MCP_URL=http://127.0.0.1:8750/mcp\n")
+	fmt.Fprintf(&b, "# MUNINN_MCP_URL=%s://127.0.0.1:%s/mcp\n", tlsSchemeFromEnv(), defaultMCPPort)
 	b.WriteString("# MUNINN_CORS_ORIGINS=\n")
 	b.WriteString("\n")
 

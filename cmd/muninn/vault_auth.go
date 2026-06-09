@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -149,8 +150,16 @@ func loginAdmin(username, password string) error {
 		"username": username,
 		"password": password,
 	})
+	loginURL := vaultUIBase + "/api/auth/login"
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(vaultUIBase+"/api/auth/login", "application/json",
+	if strings.HasPrefix(loginURL, "https://") && isLoopbackURL(loginURL) {
+		// Loopback https: skip cert verification (internal-CA self-talk can't be
+		// impersonated). Off-host stays verified. Unifies to httpClientForURL once #468 lands.
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		}
+	}
+	resp, err := client.Post(loginURL, "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Errorf("connect to MuninnDB: %w", err)
