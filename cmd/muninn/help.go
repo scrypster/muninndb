@@ -65,12 +65,15 @@ var subcommandHelp = map[string]func(){
 				{"--token <tok>", "Use a specific MCP token (skip generation)"},
 				{"--no-token", "Disable token auth (open MCP endpoint)"},
 				{"--no-start", "Configure tools but don't start the server"},
+				{"--tls-cert <p>", "TLS certificate (PEM) — serve clients over https"},
+				{"--tls-key <p>", "TLS private key (PEM)"},
 				{"--yes", "Accept all defaults (non-interactive)"},
 			},
 			[]string{
 				"muninn init",
 				"muninn init --tool claude,cursor --yes",
 				"muninn init --tool manual --no-token",
+				"muninn init --tool claude --tls-cert cert.pem --tls-key key.pem --yes",
 			})
 	},
 	"start": func() {

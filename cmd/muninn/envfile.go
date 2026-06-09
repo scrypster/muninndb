@@ -34,7 +34,7 @@ func buildEnvFileContent(embedProvider, enrichURL string) string {
 	allEmbed := []embedEntry{
 		{"ollama", "MUNINN_OLLAMA_URL", "ollama://localhost:11434/nomic-embed-text"},
 		{"openai", "MUNINN_OPENAI_KEY", "sk-..."},
-		{"openai", "MUNINN_OPENAI_URL", ""},  // optional, always commented
+		{"openai", "MUNINN_OPENAI_URL", ""}, // optional, always commented
 		{"voyage", "MUNINN_VOYAGE_KEY", "pa-..."},
 		{"cohere", "MUNINN_COHERE_KEY", "..."},
 		{"google", "MUNINN_GOOGLE_KEY", "..."},
@@ -125,35 +125,69 @@ func writeEnvFileTo(path, embedProvider, enrichURL string) (bool, error) {
 	if _, err := os.Lstat(path); err == nil {
 		return false, nil
 	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return false, err
-	}
-
-	content := buildEnvFileContent(embedProvider, enrichURL)
-
-	// Atomic write: temp file → chmod 0600 → rename.
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".muninn_env_*.tmp")
-	if err != nil {
-		return false, err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // clean up on failure
-
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		return false, err
-	}
-	if err := tmp.Close(); err != nil {
-		return false, err
-	}
-	if err := os.Chmod(tmpName, 0600); err != nil {
-		return false, err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := atomicWriteFile(path, buildEnvFileContent(embedProvider, enrichURL)); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// atomicWriteFile writes content to path via a temp file → chmod 0600 → rename,
+// creating the parent directory if needed. The 0600 mode matches mcp.token and
+// the env file (both may hold secrets/paths).
+func atomicWriteFile(path, content string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".muninn_env_*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // clean up on failure
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// upsertEnvFileVar sets `key=value` as an active line in the env file at path,
+// replacing any existing line for key — commented or active, with or without an
+// "export " prefix (matching loadEnvFile's parsing) — and otherwise appending
+// it. All other lines are preserved. The file is created if absent; the write
+// is atomic at 0600. The literal "=" in the match guards against a key that is
+// a prefix of a longer one (MUNINN_TLS_CERT vs MUNINN_TLS_CERTIFICATE).
+func upsertEnvFileVar(path, key, value string) error {
+	content := ""
+	if b, err := os.ReadFile(path); err == nil {
+		content = string(b)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	newLine := key + "=" + value
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		t = strings.TrimSpace(strings.TrimPrefix(t, "#"))
+		t = strings.TrimPrefix(t, "export ")
+		if strings.HasPrefix(t, key+"=") {
+			lines[i] = newLine
+			return atomicWriteFile(path, strings.Join(lines, "\n"))
+		}
+	}
+	// Not found — append, normalizing to exactly one trailing newline.
+	base := strings.TrimRight(content, "\n")
+	if base != "" {
+		base += "\n"
+	}
+	return atomicWriteFile(path, base+newLine+"\n")
 }
 
 const envFileName = ".muninn/muninn.env"

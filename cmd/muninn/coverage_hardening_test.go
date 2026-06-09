@@ -786,7 +786,7 @@ func TestRunNonInteractiveInit(t *testing.T) {
 	t.Setenv("MUNINNDB_DATA", filepath.Join(home, "data"))
 
 	out := captureStdout(func() {
-		runNonInteractiveInit("http://127.0.0.1:8750/mcp", "manual", "", false, true, true)
+		runNonInteractiveInit("manual", "", false, true, true, "", "")
 	})
 	if !strings.Contains(out, "Manual") && !strings.Contains(out, "manual") &&
 		!strings.Contains(out, "mcpServers") && !strings.Contains(out, "curl") {
@@ -1417,7 +1417,7 @@ func TestRunNonInteractiveInit_WithTools(t *testing.T) {
 	t.Setenv("MUNINNDB_DATA", filepath.Join(home, "data"))
 
 	out := captureStdout(func() {
-		runNonInteractiveInit("http://127.0.0.1:8750/mcp", "vscode,manual", "", true, true, true)
+		runNonInteractiveInit("vscode,manual", "", true, true, true, "", "")
 	})
 	_ = out
 }
@@ -1429,7 +1429,7 @@ func TestRunNonInteractiveInit_WithToken(t *testing.T) {
 	t.Setenv("MUNINNDB_DATA", filepath.Join(home, "data"))
 
 	out := captureStdout(func() {
-		runNonInteractiveInit("http://127.0.0.1:8750/mcp", "", "mdb_customtoken", false, true, true)
+		runNonInteractiveInit("", "mdb_customtoken", false, true, true, "", "")
 	})
 	if !strings.Contains(out, "Token") || !strings.Contains(out, "mcp.token") {
 		t.Logf("output: %s", out)
@@ -1444,7 +1444,7 @@ func TestRunNonInteractiveInit_GenerateToken(t *testing.T) {
 	t.Setenv("MUNINNDB_DATA", filepath.Join(home, ".muninn", "data"))
 
 	out := captureStdout(func() {
-		runNonInteractiveInit("http://127.0.0.1:8750/mcp", "", "", false, true, true)
+		runNonInteractiveInit("", "", false, true, true, "", "")
 	})
 	_ = out
 }
@@ -2199,7 +2199,7 @@ func TestRunStatus_Stopped(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// init.go: promptClaudeMD (stdin-based) 
+// init.go: promptClaudeMD (stdin-based)
 // ---------------------------------------------------------------------------
 
 func TestPromptClaudeMD_Yes(t *testing.T) {
