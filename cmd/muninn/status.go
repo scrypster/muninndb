@@ -209,8 +209,10 @@ func probeServicesWithAddrs(addrs daemonAddrs) []serviceStatus {
 // callers may safely index [0].
 //   - MUNINNDB_UI_URL set        → that URL, verbatim.
 //   - UI bound to loopback/empty → just the localhost URL.
-//   - UI bound to 0.0.0.0 / LAN  → the routable host first (os.Hostname), then
-//     the localhost URL as an always-works fallback.
+//   - UI bound to 0.0.0.0 / LAN  → a routable host first, then the localhost URL
+//     as an always-works fallback. Under TLS, the routable host is the cert's
+//     DNS SAN (addrs.CertHost) when available, so the printed URL passes TLS
+//     verification; otherwise it falls back to os.Hostname().
 func webUIDisplay(addrs daemonAddrs) []string {
 	if v := os.Getenv("MUNINNDB_UI_URL"); v != "" {
 		return []string{strings.TrimRight(v, "/")}
@@ -230,11 +232,24 @@ func webUIDisplay(addrs daemonAddrs) []string {
 	}
 	local := scheme + "://127.0.0.1:" + port
 	if hostIsRoutable(host) {
-		if hn, err := os.Hostname(); err == nil && hn != "" {
+		if hn := routableUIHost(scheme, addrs.CertHost); hn != "" {
 			return []string{scheme + "://" + hn + ":" + port, local}
 		}
 	}
 	return []string{local}
+}
+
+// routableUIHost picks the host for the routable Web UI URL: under TLS, the
+// cert's DNS SAN (so the URL passes verification) when the daemon recorded one,
+// otherwise os.Hostname(). Returns "" only if os.Hostname() fails and no SAN.
+func routableUIHost(scheme, certHost string) string {
+	if scheme == "https" && certHost != "" {
+		return certHost
+	}
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return ""
 }
 
 // hostIsRoutable reports whether host is a non-loopback bind — i.e. the UI is

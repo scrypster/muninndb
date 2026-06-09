@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,6 +23,12 @@ type daemonAddrs struct {
 	RestAddr string `json:"rest_addr"`
 	MCPAddr  string `json:"mcp_addr"`
 	UIAddr   string `json:"ui_addr"`
+	// CertHost is a routable DNS SAN from the client-facing TLS certificate, if
+	// any — so 'muninn status' can print a Web UI URL that passes TLS
+	// verification instead of an os.Hostname() that the cert may not cover.
+	// Empty for http, for an older daemon, or for a cert with no routable DNS SAN.
+	// Recorded at startup; a cert rotated in place without a restart leaves it stale.
+	CertHost string `json:"cert_host"`
 }
 
 const addrsFileName = "muninn.addrs"
@@ -32,6 +40,33 @@ func schemeFor(tlsCert, tlsKey string) string {
 		return "https"
 	}
 	return "http"
+}
+
+// certRoutableHost returns the first routable, non-wildcard DNS SAN of the
+// client-facing TLS certificate, or "" if TLS is off, the cert can't be read,
+// or it has no such name. Best-effort: any error yields "" (the authoritative
+// cert load + validation happens separately at server startup). Wildcards are
+// skipped (they pass hostIsRoutable but make no usable URL); single-label names
+// are kept (the cert certifies them, so the URL verifies — resolution is the
+// operator's concern, same as os.Hostname()).
+func certRoutableHost(tlsCert, tlsKey string) string {
+	if tlsCert == "" || tlsKey == "" {
+		return ""
+	}
+	cert, err := tls.LoadX509KeyPair(tlsCert, tlsKey)
+	if err != nil || len(cert.Certificate) == 0 {
+		return ""
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return ""
+	}
+	for _, name := range leaf.DNSNames {
+		if !strings.Contains(name, "*") && hostIsRoutable(name) {
+			return name
+		}
+	}
+	return ""
 }
 
 func writeAddrsFile(dataDir string, addrs daemonAddrs) error {

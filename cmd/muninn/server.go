@@ -811,6 +811,9 @@ func runServer() {
 		RestAddr: *restAddr,
 		MCPAddr:  *mcpAddr,
 		UIAddr:   *uiAddr,
+		// Best-effort parse of the cert's routable DNS SAN for the Web UI URL.
+		// "" on any error; the authoritative cert load + validation is below.
+		CertHost: certRoutableHost(*tlsCert, *tlsKey),
 	})
 
 	// Backup env fallbacks — flags take priority; env vars are the fallback.
