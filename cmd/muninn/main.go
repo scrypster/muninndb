@@ -7,6 +7,14 @@ import (
 )
 
 func main() {
+	// Load ~/.muninn/muninn.env before dispatching any subcommand, so the
+	// lifecycle/status CLI sees the same config the daemon does. Without this,
+	// MUNINNDB_DATA (or MUNINNDB_*_URL) set only in muninn.env left 'muninn
+	// status'/'stop' looking at the default data dir while the daemon the same
+	// file configured ran elsewhere. Shell env still wins (loader is set-if-
+	// unset); runServer/runMCPStdio also call it, which is a harmless no-op.
+	loadEnvFile()
+
 	if len(os.Args) < 2 {
 		runDefault()
 		return
