@@ -177,13 +177,34 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// Authenticate (if needed)
+	// Authenticate and establish the connection's vault scope. The scope is
+	// enforced on every subsequent frame (see dispatchFrame handlers), closing
+	// the gap where a "none" session could read/write any vault and a keyed
+	// session could name a vault other than its key's.
+	if s.authStore == nil {
+		s.writeErrorFrame(conn, helloFrame.CorrelationID, ErrAuthFailed, "server misconfigured: vault auth unavailable")
+		return
+	}
+	scope := &vaultScope{}
 	if helloReq.AuthMethod == "token" {
-		if _, err := s.authStore.ValidateAPIKey(helloReq.Token); err != nil {
+		key, err := s.authStore.ValidateAPIKey(helloReq.Token)
+		if err != nil {
 			s.writeErrorFrame(conn, helloFrame.CorrelationID, ErrAuthFailed, "invalid token")
 			return
 		}
+		scope.key = &key
 	}
+	connCtx = withVaultScope(connCtx, scope)
+
+	// Resolve and validate the HELLO vault under the new scope, then pin the
+	// request to it so the engine registers (and the response advertises) the
+	// authorized vault rather than a client-supplied one.
+	resolvedVault, err := s.scopeVault(connCtx, helloReq.Vault)
+	if err != nil {
+		s.writeErrorFrame(conn, helloFrame.CorrelationID, ErrAuthFailed, err.Error())
+		return
+	}
+	helloReq.Vault = resolvedVault
 
 	// Call engine's Hello handler
 	helloResp, err := s.engine.Hello(connCtx, &helloReq)
@@ -322,6 +343,13 @@ func (s *Server) handleWrite(ctx context.Context, corrID uint64, payload []byte,
 		return
 	}
 
+	resolved, err := s.scopeVault(ctx, req.Vault)
+	if err != nil {
+		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		return
+	}
+	req.Vault = resolved
+
 	resp, err := s.engine.Write(ctx, &req)
 	if err != nil {
 		s.queueErrorFrame(writeCh, corrID, ErrStorageError, err.Error())
@@ -337,6 +365,13 @@ func (s *Server) handleRead(ctx context.Context, corrID uint64, payload []byte, 
 		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid read request")
 		return
 	}
+
+	resolved, err := s.scopeVault(ctx, req.Vault)
+	if err != nil {
+		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		return
+	}
+	req.Vault = resolved
 
 	resp, err := s.engine.Read(ctx, &req)
 	if err != nil {
@@ -354,6 +389,13 @@ func (s *Server) handleActivate(ctx context.Context, corrID uint64, payload []by
 		return
 	}
 
+	resolved, err := s.scopeVault(ctx, req.Vault)
+	if err != nil {
+		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		return
+	}
+	req.Vault = resolved
+
 	resp, err := s.engine.Activate(ctx, &req)
 	if err != nil {
 		s.queueErrorFrame(writeCh, corrID, ErrIndexError, err.Error())
@@ -369,6 +411,13 @@ func (s *Server) handleSubscribe(ctx context.Context, corrID uint64, payload []b
 		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid subscribe request")
 		return
 	}
+
+	resolved, err := s.scopeVault(ctx, req.Vault)
+	if err != nil {
+		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		return
+	}
+	req.Vault = resolved
 
 	resp, err := s.engine.Subscribe(ctx, &req)
 	if err != nil {
@@ -402,6 +451,13 @@ func (s *Server) handleLink(ctx context.Context, corrID uint64, payload []byte, 
 		return
 	}
 
+	resolved, err := s.scopeVault(ctx, req.Vault)
+	if err != nil {
+		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		return
+	}
+	req.Vault = resolved
+
 	resp, err := s.engine.Link(ctx, &req)
 	if err != nil {
 		s.queueErrorFrame(writeCh, corrID, ErrInvalidAssociation, err.Error())
@@ -418,6 +474,13 @@ func (s *Server) handleForget(ctx context.Context, corrID uint64, payload []byte
 		return
 	}
 
+	resolved, err := s.scopeVault(ctx, req.Vault)
+	if err != nil {
+		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		return
+	}
+	req.Vault = resolved
+
 	resp, err := s.engine.Forget(ctx, &req)
 	if err != nil {
 		s.queueErrorFrame(writeCh, corrID, ErrStorageError, err.Error())
@@ -433,6 +496,13 @@ func (s *Server) handleStat(ctx context.Context, corrID uint64, payload []byte, 
 		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid stat request")
 		return
 	}
+
+	resolved, err := s.scopeVault(ctx, req.Vault)
+	if err != nil {
+		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		return
+	}
+	req.Vault = resolved
 
 	resp, err := s.engine.Stat(ctx, &req)
 	if err != nil {

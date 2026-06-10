@@ -10,6 +10,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
+	"github.com/scrypster/muninndb/internal/auth"
 )
 
 // ---------------------------------------------------------------------------
@@ -61,8 +65,21 @@ func (e *stubEngine) Stat(_ context.Context, _ *StatRequest) (*StatResponse, err
 // Test helpers
 // ---------------------------------------------------------------------------
 
-func newTestServer(eng EngineAPI) *Server {
-	return &Server{engine: eng, shutdown: make(chan struct{})}
+// newTestServer builds a server whose default vault is public, so the existing
+// dispatch tests (which handshake with auth_method "none" and use the default
+// vault) operate without an API key. Vault-isolation behaviour is covered
+// separately in vault_scope_test.go.
+func newTestServer(t *testing.T, eng EngineAPI) *Server {
+	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
+	if err != nil {
+		panic("open test auth db: " + err.Error())
+	}
+	t.Cleanup(func() { db.Close() })
+	store := auth.NewStore(db)
+	if err := store.SetVaultConfig(auth.VaultConfig{Name: "default", Public: true}); err != nil {
+		panic("set default vault config: " + err.Error())
+	}
+	return &Server{engine: eng, authStore: store, shutdown: make(chan struct{})}
 }
 
 func startTestConn(t *testing.T, s *Server) (client net.Conn, wait func()) {
@@ -623,7 +640,7 @@ func TestProtocolVersionConstants(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServer_DispatchAllHandlers(t *testing.T) {
-	s := newTestServer(&stubEngine{})
+	s := newTestServer(t, &stubEngine{})
 	c, wait := startTestConn(t, s)
 	defer wait()
 	doHandshake(t, c)
@@ -659,7 +676,7 @@ func TestServer_DispatchAllHandlers(t *testing.T) {
 }
 
 func TestServer_PingEchoData(t *testing.T) {
-	s := newTestServer(&stubEngine{})
+	s := newTestServer(t, &stubEngine{})
 	c, wait := startTestConn(t, s)
 	defer wait()
 	doHandshake(t, c)
@@ -678,7 +695,7 @@ func TestServer_PingEchoData(t *testing.T) {
 }
 
 func TestServer_EngineError(t *testing.T) {
-	s := newTestServer(&stubEngine{writeErr: fmt.Errorf("disk full")})
+	s := newTestServer(t, &stubEngine{writeErr: fmt.Errorf("disk full")})
 	c, wait := startTestConn(t, s)
 	defer wait()
 	doHandshake(t, c)
@@ -700,7 +717,7 @@ func TestServer_EngineError(t *testing.T) {
 }
 
 func TestServer_InvalidPayload(t *testing.T) {
-	s := newTestServer(&stubEngine{})
+	s := newTestServer(t, &stubEngine{})
 	c, wait := startTestConn(t, s)
 	defer wait()
 	doHandshake(t, c)
@@ -720,7 +737,7 @@ func TestServer_InvalidPayload(t *testing.T) {
 }
 
 func TestServer_UnknownFrameType(t *testing.T) {
-	s := newTestServer(&stubEngine{})
+	s := newTestServer(t, &stubEngine{})
 	c, wait := startTestConn(t, s)
 	defer wait()
 	doHandshake(t, c)
@@ -747,7 +764,7 @@ func TestServer_UnknownFrameType(t *testing.T) {
 }
 
 func TestServer_NonHelloFirst(t *testing.T) {
-	s := newTestServer(&stubEngine{})
+	s := newTestServer(t, &stubEngine{})
 	c, wait := startTestConn(t, s)
 	defer wait()
 
@@ -774,7 +791,7 @@ func TestServer_NonHelloFirst(t *testing.T) {
 }
 
 func TestServer_InvalidHelloPayload(t *testing.T) {
-	s := newTestServer(&stubEngine{})
+	s := newTestServer(t, &stubEngine{})
 	c, wait := startTestConn(t, s)
 	defer wait()
 
@@ -793,7 +810,7 @@ func TestServer_InvalidHelloPayload(t *testing.T) {
 }
 
 func TestServer_HelloBadVersion(t *testing.T) {
-	s := newTestServer(&stubEngine{})
+	s := newTestServer(t, &stubEngine{})
 	c, wait := startTestConn(t, s)
 	defer wait()
 
@@ -821,7 +838,7 @@ func TestServer_HelloBadVersion(t *testing.T) {
 }
 
 func TestServer_WriteResponsePayload(t *testing.T) {
-	s := newTestServer(&stubEngine{})
+	s := newTestServer(t, &stubEngine{})
 	c, wait := startTestConn(t, s)
 	defer wait()
 	doHandshake(t, c)
@@ -843,7 +860,7 @@ func TestServer_WriteResponsePayload(t *testing.T) {
 }
 
 func TestServer_StatResponsePayload(t *testing.T) {
-	s := newTestServer(&stubEngine{})
+	s := newTestServer(t, &stubEngine{})
 	c, wait := startTestConn(t, s)
 	defer wait()
 	doHandshake(t, c)
