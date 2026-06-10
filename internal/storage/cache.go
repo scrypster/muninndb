@@ -43,6 +43,13 @@ func NewL1Cache(maxSize int) *L1Cache {
 // Get retrieves an engram from the cache.
 // Returns (engram, found). The vault prefix is included in the lookup
 // so engrams from different vaults are never served to each other.
+//
+// IMMUTABILITY CONTRACT: the returned *Engram is shared — the same pointer may
+// be handed to concurrent readers (and is also what GetEngrams returns). Treat
+// it as read-only. Callers that need to change an engram must deep-copy first
+// (as the write path does before invoking triggers) or go through an Update*
+// method, which persists the change and invalidates this entry. Mutating the
+// returned struct in place is a data race against concurrent recalls.
 func (c *L1Cache) Get(ws [8]byte, id ULID) (*Engram, bool) {
 	val, ok := c.data.Load(cacheKeyFor(ws, id))
 	if !ok {

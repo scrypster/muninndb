@@ -171,9 +171,16 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 
 		// Persist representative updates when anything changed: tag-merge
 		// added tags, or frequency-absorption bumped AccessCount.
+		//
+		// Compute the new access count locally — do NOT mutate representative.
+		// GetEngrams returns pointers into the L1 cache that concurrent recalls
+		// may be reading (see the immutability contract on storage.L1Cache.Get);
+		// mutating the shared struct here is a data race. UpdateMetadata persists
+		// the value and invalidates the cache, so the next read is fresh.
 		tagsChanged := len(mergedTags) != len(representative.Tags)
+		newAccessCount := representative.AccessCount
 		if !w.DryRun && archivedCount > 0 {
-			representative.AccessCount += archivedCount
+			newAccessCount += archivedCount
 		}
 		if !w.DryRun && (tagsChanged || archivedCount > 0) {
 			if err := store.UpdateMetadata(ctx, wsPrefix, representative.ID, &storage.EngramMeta{
@@ -181,7 +188,7 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 				Confidence:  representative.Confidence,
 				Relevance:   representative.Relevance,
 				Stability:   representative.Stability,
-				AccessCount: representative.AccessCount,
+				AccessCount: newAccessCount,
 				UpdatedAt:   representative.UpdatedAt,
 				LastAccess:  representative.LastAccess,
 			}); err != nil {
