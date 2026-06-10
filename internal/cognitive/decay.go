@@ -49,6 +49,12 @@ func EbbinghausWithFloor(daysSinceAccess, stability, floor float64) float64 {
 	if stability <= 0 {
 		stability = DefaultStability
 	}
+	// Clamp clock skew: a LastAccess in the future yields a negative elapsed
+	// time, which would make exp(-neg/stability) exceed 1 (retention is defined
+	// on [floor, 1]). Treat a future access as "just accessed".
+	if daysSinceAccess < 0 {
+		daysSinceAccess = 0
+	}
 	r := math.Exp(-daysSinceAccess / stability)
 	if r < floor {
 		return floor
@@ -80,7 +86,7 @@ type schedEntry struct {
 // schedHeap is a min-heap ordered by nextCheck.
 type schedHeap []*schedEntry
 
-func (h schedHeap) Len() int            { return len(h) }
+func (h schedHeap) Len() int           { return len(h) }
 func (h schedHeap) Less(i, j int) bool { return h[i].nextCheck.Before(h[j].nextCheck) }
 func (h schedHeap) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
@@ -187,6 +193,9 @@ func (dw *DecayWorker) processBatch(ctx context.Context, batch []DecayCandidate)
 		// accessed recently but rarely (e.g., 1-day daysSince / 3 accesses = 0.33d
 		// instead of the correct 365d/3 = 121d for an engram created a year ago).
 		lifespanDays := now.Sub(c.CreatedAt).Hours() / 24.0
+		if lifespanDays < 0 { // clock skew: CreatedAt in the future
+			lifespanDays = 0
+		}
 		divisor := float64(c.AccessCount)
 		if divisor < 1 {
 			divisor = 1

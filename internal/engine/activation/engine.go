@@ -158,9 +158,9 @@ type ActivateRequest struct {
 	IncludeWhy       bool
 	Weights          *Weights
 	Filters          []Filter
-	ReadOnly         bool   // when true, skip all write side-effects (observe mode)
-	Profile          string // traversal profile override: "default"|"causal"|"confirmatory"|"adversarial"|"structural"
-	VaultDefault     string // vault Plasticity default profile (set by engine.go, not by callers)
+	ReadOnly         bool         // when true, skip all write side-effects (observe mode)
+	Profile          string       // traversal profile override: "default"|"causal"|"confirmatory"|"adversarial"|"structural"
+	VaultDefault     string       // vault Plasticity default profile (set by engine.go, not by callers)
 	StructuredFilter EngramFilter // applied as final post-retrieval predicate
 	// CandidatesPerIndex overrides the per-index candidate pool size for phase2.
 	// Zero means fall back to 30.
@@ -179,7 +179,7 @@ type ActivateResult struct {
 	Activations   []ScoredEngram
 	TotalFound    int
 	LatencyMs     float64
-	ProfileUsed   string      // resolved traversal profile name (e.g. "default", "causal")
+	ProfileUsed   string        // resolved traversal profile name (e.g. "default", "causal")
 	RestoredEdges []mbp.EdgeRef // edges lazily restored from archive during Phase 4.75
 }
 
@@ -276,11 +276,11 @@ func New(store ActivationStore, fts FTSIndex, hnsw HNSWIndex, embedder Embedder)
 	if hnsw == nil {
 		scale := float32(1.0 / 0.65)
 		w.SemanticSimilarity = 0
-		w.FullTextRelevance = 0.25 * scale  // ≈ 0.385
-		w.DecayFactor = 0.20 * scale        // ≈ 0.308
-		w.HebbianBoost = 0.10 * scale       // ≈ 0.154
-		w.AccessFrequency = 0.05 * scale    // ≈ 0.077
-		w.Recency = 0.05 * scale            // ≈ 0.077
+		w.FullTextRelevance = 0.25 * scale // ≈ 0.385
+		w.DecayFactor = 0.20 * scale       // ≈ 0.308
+		w.HebbianBoost = 0.10 * scale      // ≈ 0.154
+		w.AccessFrequency = 0.05 * scale   // ≈ 0.077
+		w.Recency = 0.05 * scale           // ≈ 0.077
 	}
 	e := &ActivationEngine{
 		store:    store,
@@ -731,6 +731,9 @@ func (e *ActivationEngine) phase4HebbianBoost(ctx context.Context, ws [8]byte, v
 	const halfLife = 3600.0
 	for _, entry := range recent {
 		age := float64(now - entry.At.Unix())
+		if age < 0 { // clock skew: activation timestamped in the future
+			age = 0
+		}
 		recencyW := math.Exp(-age / halfLife)
 		for _, id := range entry.EngramIDs {
 			if w, ok := recentWeights[id]; !ok || recencyW > w {
@@ -866,10 +869,10 @@ func (e *ActivationEngine) phase4_5TransitionBoost(ctx context.Context, ws [8]by
 
 // traversedCandidate is one node discovered via BFS.
 type traversedCandidate struct {
-	id        storage.ULID
+	id         storage.ULID
 	propagated float64
-	hopPath   []storage.ULID
-	relType   uint16
+	hopPath    []storage.ULID
+	relType    uint16
 }
 
 // resolveProfile implements the C-B-A traversal profile resolution chain:
@@ -1265,7 +1268,9 @@ func (e *ActivationEngine) phase6Score(
 	// multiplicatively gates content relevance, then candidates compete via division.
 	if w.UseCGDN {
 		type cgdnItem struct {
-			c          interface{ getBase() (storage.ULID, float64, float64, float64, []storage.ULID) }
+			c interface {
+				getBase() (storage.ULID, float64, float64, float64, []storage.ULID)
+			}
 			eng        *storage.Engram
 			activation float64
 			components ScoreComponents
@@ -1476,6 +1481,12 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 		lastAccess = eng.LastAccess
 	}
 	daysSince := now.Sub(lastAccess).Hours() / 24.0
+	// Clamp clock skew: a future LastAccess (NTP step, or a cache timestamp
+	// ahead of wall clock) yields a negative daysSince, which would push recency
+	// and the decay factor above 1.0. Treat it as "just accessed".
+	if daysSince < 0 {
+		daysSince = 0
+	}
 	recency := math.Exp(-daysSince * math.Log(2) / recencyHalfLifeDays)
 
 	decayFactor := math.Max(0.05, math.Exp(-daysSince/float64(eng.Stability)))
@@ -1558,11 +1569,12 @@ func cosineSimilarity32(a, b []float32) float32 {
 
 // computeACTR computes the ACT-R scoring components for a candidate engram.
 // Formula (Anderson 1993):
-//   B(M) = min(ln(n+1) - d × ln(max(ageDays,ageFloor) / (n+1)), bLevelCap)  [base-level activation]
-//   where bLevelCap = ln(exp(actrDenominator)-1) ≈ 1.489 is the unique value at which
-//   softplus(B(M)) = actrDenominator, i.e. base-level alone would push raw = contentMatch.
-//   Capping here preserves score absoluteness and threshold semantics across queries.
-//   Score = ContentMatch × softplus(B(M) + scale×Hebbian) × Confidence
+//
+//	B(M) = min(ln(n+1) - d × ln(max(ageDays,ageFloor) / (n+1)), bLevelCap)  [base-level activation]
+//	where bLevelCap = ln(exp(actrDenominator)-1) ≈ 1.489 is the unique value at which
+//	softplus(B(M)) = actrDenominator, i.e. base-level alone would push raw = contentMatch.
+//	Capping here preserves score absoluteness and threshold semantics across queries.
+//	Score = ContentMatch × softplus(B(M) + scale×Hebbian) × Confidence
 //
 // ContentMatch gates the score: zero semantic relevance = zero score regardless of recency.
 // B(M) + scale×Hebbian are additive: Hebbian can rescue old but linked memories.
@@ -1645,8 +1657,8 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 // components, RRF fusion uses the rank-based score from Phase 3 and applies
 // cognitive modifiers after fusion:
 //
-//   raw = rrfScore × (1 + hebbianBoost + transitionBoost)
-//   final = raw × confidence
+//	raw = rrfScore × (1 + hebbianBoost + transitionBoost)
+//	final = raw × confidence
 //
 // This is scale-invariant: documents with the same ranks but different raw score
 // magnitudes produce the same RRF score. Robust to score scale mismatches between
@@ -1667,27 +1679,28 @@ func computeRRFScore(rrfScore, hebbianBoost, transitionBoost float64, eng *stora
 // computeGatedActivation computes the raw gated activation a(d) for CGDN.
 //
 // Formula (Hebbian-Rescue CGDN):
-//   rescue(d) = max(0, hebbianBoost - ε) * λ
-//   g(d)      = clamp(decayFactor^α + rescue(d), 0, 1)
-//   a(d)      = (w_semantic*vectorScore + w_fts*normalizedFTS) * g(d)
+//
+//	rescue(d) = max(0, hebbianBoost - ε) * λ
+//	g(d)      = clamp(decayFactor^α + rescue(d), 0, 1)
+//	a(d)      = (w_semantic*vectorScore + w_fts*normalizedFTS) * g(d)
 //
 // The Hebbian rescue term (additive, not multiplicative) is the key.
 // Multiplicative gating `decay × hebbian` suppresses Hebbian-linked old memories
 // because decay dominates. The additive rescue replicates hippocampal CA3 pattern
 // completion where Hebbian activation partially RESTORES decayed memories:
 //
-//   Fresh, no Hebbian link:  g ≈ 0.85^1.5 + 0 ≈ 0.78  (high gate — surfaces)
-//   Stale, no Hebbian link:  g ≈ 0.05^1.5 + 0 ≈ 0.01  (near-zero — suppressed)
-//   Stale, Hebbian link 0.5: g ≈ 0.05^1.5 + 0.5*λ ≈ 0.01 + 0.40 = 0.41 (rescued!)
-//   Stale, no Hebbian link:  g ≈ 0.05^1.5 + 0 ≈ 0.01  (still suppressed)
+//	Fresh, no Hebbian link:  g ≈ 0.85^1.5 + 0 ≈ 0.78  (high gate — surfaces)
+//	Stale, no Hebbian link:  g ≈ 0.05^1.5 + 0 ≈ 0.01  (near-zero — suppressed)
+//	Stale, Hebbian link 0.5: g ≈ 0.05^1.5 + 0.5*λ ≈ 0.01 + 0.40 = 0.41 (rescued!)
+//	Stale, no Hebbian link:  g ≈ 0.05^1.5 + 0 ≈ 0.01  (still suppressed)
 //
 // This creates a 41x advantage for the Hebbian-linked stale vs unlinked stale,
 // replicating retrieval-induced forgetting counteraction (Anderson & Bjork 1994)
 // and memory reconsolidation (Nader et al. 2000).
 func computeGatedActivation(vectorScore, normalizedFTS, decayFactor, hebbianBoost float64, w resolvedWeights) float64 {
 	const (
-		epsilon       = 0.01 // Hebbian floor — prevents zero rescue for unlinked engrams
-		rescueLambda  = 0.8  // Hebbian rescue strength — how much Hebbian can restore decay
+		epsilon      = 0.01 // Hebbian floor — prevents zero rescue for unlinked engrams
+		rescueLambda = 0.8  // Hebbian rescue strength — how much Hebbian can restore decay
 	)
 	rescue := math.Max(0, hebbianBoost-epsilon) * rescueLambda
 	gate := math.Pow(decayFactor, w.CGDNAlpha) + rescue
