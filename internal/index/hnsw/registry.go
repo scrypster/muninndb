@@ -26,9 +26,9 @@ type Registry struct {
 	maxBytes           int64 // skip HNSW insert when total vector bytes exceed this
 
 	// throttle state for periodic memory warnings (one warn per 60 s max)
-	lastWarnNano  atomic.Int64 // Unix nano of last slog.Warn emission
-	hardLimitHit  atomic.Bool  // true after the first hard-limit hit (changes log level)
-	lastHardNano  atomic.Int64 // Unix nano of last hard-limit log emission
+	lastWarnNano atomic.Int64 // Unix nano of last slog.Warn emission
+	hardLimitHit atomic.Bool  // true after the first hard-limit hit (changes log level)
+	lastHardNano atomic.Int64 // Unix nano of last hard-limit log emission
 }
 
 // warnThrottleInterval is the minimum gap between repeated memory-warning log lines.

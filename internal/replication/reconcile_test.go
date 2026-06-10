@@ -140,7 +140,7 @@ func TestReconciler_NoDeviation(t *testing.T) {
 	}
 
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	lobeID := "lobe-recon"
 	coord.joinHandler.mu.Lock()
@@ -227,7 +227,7 @@ func TestReconciler_PartialDeviation(t *testing.T) {
 	}
 
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	lobeID := "lobe-partial"
 	coord.joinHandler.mu.Lock()
@@ -319,7 +319,7 @@ func TestReconciler_MissingKeys(t *testing.T) {
 	}
 
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	lobeID := "lobe-missing"
 	coord.joinHandler.mu.Lock()
@@ -385,7 +385,7 @@ func TestReconciler_Timeout(t *testing.T) {
 	weights := map[[16]byte]float64{{1}: 0.5, {2}: 0.8, {3}: 0.3}
 
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	silentLobeID := "lobe-silent"
 	respondingLobeID := "lobe-responding"
@@ -479,7 +479,7 @@ func TestReconciler_ConcurrentRunPrevented(t *testing.T) {
 	weights := map[[16]byte]float64{{1}: 0.5}
 
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	lobeID := "lobe-concurrent"
 	coord.joinHandler.mu.Lock()
@@ -535,7 +535,7 @@ func TestReconciler_ConcurrentRunPrevented(t *testing.T) {
 
 func TestReconciler_CoordinatorTrigger(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	// Without reconciler wired, TriggerReconciliation should error.
 	_, err := coord.TriggerReconciliation(context.Background(), []string{"lobe-1"})
@@ -701,7 +701,7 @@ func TestReconciliationTriggeredOnReconnect(t *testing.T) {
 
 func TestReconciler_FrameDispatch(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	sampler := &mockHebbianSampler{
 		keys:    [][16]byte{{1}},

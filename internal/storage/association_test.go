@@ -227,7 +227,6 @@ func TestGetContradictions_WithPairs(t *testing.T) {
 	}
 }
 
-
 // TestResolveContradiction verifies that ResolveContradiction removes both
 // directions of the contradiction marker and GetContradictions no longer returns the pair.
 func TestResolveContradiction(t *testing.T) {

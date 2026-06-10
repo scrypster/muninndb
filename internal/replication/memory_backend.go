@@ -12,9 +12,9 @@ import (
 // In production, replace with an etcd or Consul backend via the LeaseBackend interface.
 type MemoryLeaseBackend struct {
 	mu      sync.Mutex
-	holder  string        // current lease holder
-	expires time.Time     // lease expiration time
-	token   uint64        // fencing token (incremented on each lease change)
+	holder  string            // current lease holder
+	expires time.Time         // lease expiration time
+	token   uint64            // fencing token (incremented on each lease change)
 	genLock map[string]uint64 // generation lock per node (for optimistic concurrency)
 }
 

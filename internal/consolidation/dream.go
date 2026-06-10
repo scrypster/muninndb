@@ -55,11 +55,11 @@ func (w *Worker) DreamOnce(ctx context.Context, opts DreamOpts) (*DreamReport, e
 	// This prevents data races if DreamOnce is called while the background
 	// consolidation scheduler is running on the same Worker.
 	dw := &Worker{
-		Engine:         w.Engine,
-		Schedule:       w.Schedule,
-		MaxDedup:       w.MaxDedup,
-		MaxTransitive:  w.MaxTransitive,
-		DryRun:         opts.DryRun,
+		Engine:            w.Engine,
+		Schedule:          w.Schedule,
+		MaxDedup:          w.MaxDedup,
+		MaxTransitive:     w.MaxTransitive,
+		DryRun:            opts.DryRun,
 		DedupThreshold:    0.85,
 		MinDedupVaultSize: w.MinDedupVaultSize,
 	}

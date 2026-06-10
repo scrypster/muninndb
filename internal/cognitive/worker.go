@@ -37,10 +37,10 @@ type WorkerStats struct {
 
 // Worker is the generic goroutine lifecycle for cognitive workers.
 type Worker[T any] struct {
-	input     chan T
-	process   func(ctx context.Context, batch []T) error
-	batchSize int
-	maxWait   atomic.Int64
+	input       chan T
+	process     func(ctx context.Context, batch []T) error
+	batchSize   int
+	maxWait     atomic.Int64
 	baseMaxWait time.Duration // original maxWait, never changes
 
 	adaptiveScaling bool

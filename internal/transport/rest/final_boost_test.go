@@ -217,10 +217,10 @@ type testEnrichPlugin struct {
 	name string
 }
 
-func (p *testEnrichPlugin) Name() string                   { return p.name }
-func (p *testEnrichPlugin) Tier() plugin.PluginTier        { return plugin.TierEnrich }
+func (p *testEnrichPlugin) Name() string                                        { return p.name }
+func (p *testEnrichPlugin) Tier() plugin.PluginTier                             { return plugin.TierEnrich }
 func (p *testEnrichPlugin) Init(_ context.Context, _ plugin.PluginConfig) error { return nil }
-func (p *testEnrichPlugin) Close() error                   { return nil }
+func (p *testEnrichPlugin) Close() error                                        { return nil }
 func (p *testEnrichPlugin) Enrich(_ context.Context, _ *plugin.Engram) (*plugin.EnrichmentResult, error) {
 	return &plugin.EnrichmentResult{}, nil
 }

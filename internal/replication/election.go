@@ -58,8 +58,8 @@ type Election struct {
 	mu sync.Mutex
 
 	// Callbacks -- nil-checked before invocation. Called without mu held.
-	OnPromoted  func(epoch uint64)             // this node became Cortex
-	OnDemoted   func()                         // this node lost Cortex status
+	OnPromoted  func(epoch uint64)                  // this node became Cortex
+	OnDemoted   func()                              // this node lost Cortex status
 	OnNewLeader func(leaderID string, epoch uint64) // another node became Cortex
 
 	// voters tracks which nodeIDs are eligible to vote (Cortex, Lobe, Sentinel).

@@ -20,10 +20,10 @@ import (
 
 // MCPServer serves the MCP JSON-RPC 2.0 protocol on a single HTTP mux.
 type MCPServer struct {
-	engine   EngineInterface
-	token    string         // required Bearer token (mdb_ static token); empty = no auth
-	authKeys apiKeyValidator // optional: enables mk_ vault API key auth; nil = disabled
-	srv      *http.Server
+	engine    EngineInterface
+	token     string          // required Bearer token (mdb_ static token); empty = no auth
+	authKeys  apiKeyValidator // optional: enables mk_ vault API key auth; nil = disabled
+	srv       *http.Server
 	tlsConfig *tls.Config // nil = plain TCP
 
 	sseSessionsMu sync.RWMutex
@@ -228,15 +228,15 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		"muninn_session":        s.handleSession,
 		"muninn_decide":         s.handleDecide,
 		// Epic 18: tools 12-17
-		"muninn_restore":      s.handleRestore,
-		"muninn_traverse":     s.handleTraverse,
-		"muninn_explain":      s.handleExplain,
-		"muninn_state":        s.handleState,
-		"muninn_list_deleted": s.handleListDeleted,
-		"muninn_retry_enrich": s.handleRetryEnrich,
+		"muninn_restore":                   s.handleRestore,
+		"muninn_traverse":                  s.handleTraverse,
+		"muninn_explain":                   s.handleExplain,
+		"muninn_state":                     s.handleState,
+		"muninn_list_deleted":              s.handleListDeleted,
+		"muninn_retry_enrich":              s.handleRetryEnrich,
 		"muninn_get_enrichment_candidates": s.handleGetEnrichmentCandidates,
 		"muninn_apply_enrichment":          s.handleApplyEnrichment,
-		"muninn_guide":        s.handleGuide,
+		"muninn_guide":                     s.handleGuide,
 		// Hierarchical memory tools
 		"muninn_where_left_off": s.handleWhereLeftOff,
 

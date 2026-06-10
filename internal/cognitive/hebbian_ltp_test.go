@@ -117,8 +117,8 @@ func TestLTP_PotentiationAfterThreshold(t *testing.T) {
 	store := newLTPMockStore()
 
 	ltpCfg := &LTPConfig{
-		Threshold:   3,    // low threshold for testing
-		WeightFloor: 0.3,  // should be enforced once potentiated
+		Threshold:   3,   // low threshold for testing
+		WeightFloor: 0.3, // should be enforced once potentiated
 	}
 	hw := NewHebbianWorkerWithLTP(store, nil, nil, ltpCfg)
 
@@ -156,8 +156,8 @@ func TestLTP_PotentiatedWeightFloor(t *testing.T) {
 	store := newLTPMockStore()
 
 	ltpCfg := &LTPConfig{
-		Threshold:   2,    // low threshold
-		WeightFloor: 0.3,  // weight floor for potentiated associations
+		Threshold:   2,   // low threshold
+		WeightFloor: 0.3, // weight floor for potentiated associations
 	}
 	hw := NewHebbianWorkerWithLTP(store, nil, nil, ltpCfg)
 
@@ -206,7 +206,7 @@ func TestLTP_CounterPersistsAcrossPasses(t *testing.T) {
 	store := newLTPMockStore()
 
 	ltpCfg := &LTPConfig{
-		Threshold:   10,   // high threshold so we can observe accumulation
+		Threshold:   10, // high threshold so we can observe accumulation
 		WeightFloor: 0.3,
 	}
 	hw := NewHebbianWorkerWithLTP(store, nil, nil, ltpCfg)

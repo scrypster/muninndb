@@ -171,8 +171,8 @@ func TestRestore(t *testing.T) {
 
 func TestTraverse(t *testing.T) {
 	srv := httptest.NewServer(mockHandler(200, TraverseResponse{
-		Nodes: []TraversalNode{{ID: "n1", Concept: "start", HopDist: 0}},
-		Edges: []TraversalEdge{},
+		Nodes:          []TraversalNode{{ID: "n1", Concept: "start", HopDist: 0}},
+		Edges:          []TraversalEdge{},
 		TotalReachable: 1,
 		QueryMs:        2.5,
 	}))

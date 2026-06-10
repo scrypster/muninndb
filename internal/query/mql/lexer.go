@@ -8,7 +8,7 @@ import (
 // Lexer tokenizes an MQL query string.
 type Lexer struct {
 	input string
-	pos   int // current position
+	pos   int  // current position
 	ch    rune // current character
 }
 

@@ -333,8 +333,8 @@ func TestCopyDir_Roundtrip(t *testing.T) {
 	dstDir := filepath.Join(t.TempDir(), "copy")
 
 	files := map[string]string{
-		"a.txt":        "alpha",
-		"sub/b.txt":    "beta",
+		"a.txt":          "alpha",
+		"sub/b.txt":      "beta",
 		"sub/deep/c.txt": "gamma",
 	}
 
@@ -371,8 +371,8 @@ func TestDirSize(t *testing.T) {
 	dir := t.TempDir()
 
 	files := map[string][]byte{
-		"file1.txt":     []byte("hello"),        // 5 bytes
-		"sub/file2.txt": []byte("world!!"),      // 7 bytes
+		"file1.txt":     []byte("hello"),   // 5 bytes
+		"sub/file2.txt": []byte("world!!"), // 7 bytes
 	}
 	var expectedTotal int64
 	for relPath, content := range files {

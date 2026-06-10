@@ -340,7 +340,7 @@ func TestScoredSentence_TokenCount(t *testing.T) {
 	model := &mockEmbeddingModel{
 		dim: 1,
 		responses: map[string][]float32{
-			"One": {1},
+			"One":           {1},
 			"One two three": {1},
 		},
 	}
@@ -378,10 +378,10 @@ func TestScorer_ThresholdFiltering(t *testing.T) {
 	model := &mockEmbeddingModel{
 		dim: 3,
 		responses: map[string][]float32{
-			"Very similar text.":        {1, 0, 0},
-			"Somewhat different.":       {0.5, 0.5, 0},
-			"Completely orthogonal.":    {0, 1, 0},
-			"Opposite direction.":       {-1, 0, 0},
+			"Very similar text.":     {1, 0, 0},
+			"Somewhat different.":    {0.5, 0.5, 0},
+			"Completely orthogonal.": {0, 1, 0},
+			"Opposite direction.":    {-1, 0, 0},
 		},
 	}
 

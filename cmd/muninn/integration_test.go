@@ -99,7 +99,7 @@ func startDaemon(t *testing.T, dataDir string) {
 	}
 	t.Cleanup(func() {
 		muninnCmd(dataDir, "stop").Run() //nolint:errcheck — ignore if already stopped
-		waitForDead(5 * time.Second)    // ensure port is free before the next test
+		waitForDead(5 * time.Second)     // ensure port is free before the next test
 	})
 }
 

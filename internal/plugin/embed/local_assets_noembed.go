@@ -26,7 +26,7 @@ func LocalAvailable() bool {
 // Init always returns an error directing the caller to use a network provider.
 type LocalProvider struct{}
 
-func (p *LocalProvider) Name() string { return "local" }
+func (p *LocalProvider) Name() string      { return "local" }
 func (p *LocalProvider) MaxBatchSize() int { return 0 }
 func (p *LocalProvider) Init(_ context.Context, _ ProviderHTTPConfig) (int, error) {
 	return 0, errLocalUnavailable

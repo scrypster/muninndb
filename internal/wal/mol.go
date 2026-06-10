@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	MOLMagic   uint32 = 0x4D4F4C20 // "MOL "
-	EntryHeaderSize = 32 + 4        // 32 bytes header + 4 bytes CRC32 trailer
+	MOLMagic        uint32 = 0x4D4F4C20 // "MOL "
+	EntryHeaderSize        = 32 + 4     // 32 bytes header + 4 bytes CRC32 trailer
 
 	OpEngramWrite  uint16 = 0x0001
 	OpEngramUpdate uint16 = 0x0002
@@ -51,7 +51,7 @@ var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
 // MOLEntry is one logical operation in the write-ahead log.
 type MOLEntry struct {
 	SeqNum     uint64
-	Timestamp  int64  // Unix nanoseconds
+	Timestamp  int64 // Unix nanoseconds
 	OpType     uint16
 	VaultID    uint32
 	PayloadLen uint32
@@ -715,9 +715,9 @@ func AppendAsync(gc *GroupCommitter, entry *MOLEntry) {
 // like "/path/mol-42.log" → 42. Returns 0 on parse failure, which sorts
 // unparseable filenames first (safe: they'll fail to open cleanly).
 func extractMOLSeq(path string) uint64 {
-	base := filepath.Base(path)                // "mol-42.log"
-	base = strings.TrimPrefix(base, "mol-")    // "42.log"
-	base = strings.TrimSuffix(base, ".log")    // "42"
+	base := filepath.Base(path)             // "mol-42.log"
+	base = strings.TrimPrefix(base, "mol-") // "42.log"
+	base = strings.TrimSuffix(base, ".log") // "42"
 	n, _ := strconv.ParseUint(base, 10, 64)
 	return n
 }

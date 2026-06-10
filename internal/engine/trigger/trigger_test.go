@@ -61,14 +61,14 @@ func (e *stubTrigEmbedder) Embed(_ context.Context, _ []string) ([]float32, erro
 // without going through TriggerSystem.Subscribe (which requires a live embedder).
 func newMinimalSub(id string, vaultID uint32, ttl time.Duration) *Subscription {
 	sub := &Subscription{
-		ID:          id,
-		VaultID:     vaultID,
-		Threshold:   0.0,
-		RateLimit:   10,
-		TTL:         ttl,
-		rateLimiter: newTokenBucket(10),
+		ID:           id,
+		VaultID:      vaultID,
+		Threshold:    0.0,
+		RateLimit:    10,
+		TTL:          ttl,
+		rateLimiter:  newTokenBucket(10),
 		pushedScores: make(map[storage.ULID]float64),
-		createdAt:   time.Now(),
+		createdAt:    time.Now(),
 	}
 	if ttl > 0 {
 		sub.expiresAt = sub.createdAt.Add(ttl)
@@ -292,7 +292,7 @@ func TestEmbedCacheMaxSize(t *testing.T) {
 	over := embedCacheMax + 10
 	for i := 0; i < over; i++ {
 		// Build a unique key per iteration.
-		key := []string{"key", string(rune(i/26+65)), string(rune(i%26+65)), "x"}
+		key := []string{"key", string(rune(i/26 + 65)), string(rune(i%26 + 65)), "x"}
 		cache.Set(key, []float32{float32(i)})
 	}
 
@@ -321,8 +321,8 @@ func TestTriggerSystemStartStop(t *testing.T) {
 
 	// Channel to detect when the worker goroutine exits.
 	done := make(chan struct{})
-	origRun := ts.worker.Run  // save reference for wrapping
-	_ = origRun               // not wrapping — we just time the cancel below
+	origRun := ts.worker.Run // save reference for wrapping
+	_ = origRun              // not wrapping — we just time the cancel below
 
 	ts.Start(ctx)
 

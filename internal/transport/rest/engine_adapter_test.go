@@ -13,7 +13,7 @@ import (
 // mockEngineAPI implements EngineAPI for testing the RESTEngineWrapper's
 // offset/limit slicing and stat injection logic without needing a real engine.
 type mockEngineAPI struct {
-	EngineAPI // embed for unused methods
+	EngineAPI    // embed for unused methods
 	activateResp *ActivateResponse
 	activateErr  error
 	statResp     *StatResponse

@@ -16,10 +16,10 @@ func TestCurrentAttentionDecay(t *testing.T) {
 	halfLife := 1 * time.Minute
 
 	tests := []struct {
-		name              string
-		initialAttention  float32
-		elapsed           time.Duration
-		expectedFraction  float32 // fraction of initial attention remaining
+		name             string
+		initialAttention float32
+		elapsed          time.Duration
+		expectedFraction float32 // fraction of initial attention remaining
 	}{
 		{
 			name:             "no decay at t=0",
@@ -256,9 +256,9 @@ func TestSessionClosePromotion(t *testing.T) {
 	id2 := types.NewULID()
 	id3 := types.NewULID()
 
-	wm.Add(id1, 0.9, "context1")  // > 0.6, will be promoted
-	wm.Add(id2, 0.5, "context2")  // < 0.6, won't be promoted
-	wm.Add(id3, 0.7, "context3")  // > 0.6, will be promoted
+	wm.Add(id1, 0.9, "context1") // > 0.6, will be promoted
+	wm.Add(id2, 0.5, "context2") // < 0.6, won't be promoted
+	wm.Add(id3, 0.7, "context3") // > 0.6, will be promoted
 
 	// Close session and get promotion candidates
 	candidates, ok := manager.Close("session1")
@@ -442,9 +442,9 @@ func TestManagerDelete(t *testing.T) {
 // TestPromotionDelta tests the promotion delta calculation.
 func TestPromotionDelta(t *testing.T) {
 	tests := []struct {
-		name       string
-		attention  float32
-		expected   float32
+		name      string
+		attention float32
+		expected  float32
 	}{
 		{
 			name:      "zero attention",

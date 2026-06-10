@@ -507,7 +507,8 @@ func TestFindSimilarEntities_ThresholdZero_ExcludesZeroSimPairs(t *testing.T) {
 // against a realistic entity set.  Run with -bench=. -benchtime=5s to get stable numbers.
 //
 // Measured baseline on Apple M4 Max (50 entities, threshold=0.5):
-//   BenchmarkFindSimilarEntities-16  5382  606529 ns/op  (~0.6ms)
+//
+//	BenchmarkFindSimilarEntities-16  5382  606529 ns/op  (~0.6ms)
 //
 // If this regresses above ~5ms for 50 entities the O(n²) path has been reintroduced.
 func BenchmarkFindSimilarEntities(b *testing.B) {

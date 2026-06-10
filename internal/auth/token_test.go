@@ -66,7 +66,7 @@ func TestIsValidVaultName(t *testing.T) {
 	}
 	invalid := []string{
 		"", "UPPER", "with space", "with/slash", "../etc/passwd",
-		"vault\u200b", // zero-width space
+		"vault\u200b",           // zero-width space
 		strings.Repeat("a", 65), // 65 chars
 		"vault!", "vault@name",
 	}

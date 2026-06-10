@@ -39,7 +39,7 @@ func (m *mockHebbianSampler) GetAssocWeightsForKeys(keys [][16]byte) (map[[16]by
 // always returns score=1.0 and assessment="excellent".
 func TestCCS_SingleNode_PerfectScore(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	store := &mockHebbianSampler{
 		keys:    [][16]byte{{1}, {2}, {3}},
@@ -136,7 +136,7 @@ func TestCCS_HashComputation(t *testing.T) {
 // non-matching (score=0.0) hash scenarios.
 func TestCCS_Protocol_MockLobe(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	lobeID := "lobe-ccs-test"
 
@@ -285,7 +285,7 @@ func TestCCS_Protocol_MockLobe(t *testing.T) {
 // the timeout results in score=0.0 for that node.
 func TestCCS_NoResponse_ZeroScore(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
-	simulatePromotion(coord,1)
+	simulatePromotion(coord, 1)
 
 	lobeID := "lobe-silent"
 	coord.joinHandler.mu.Lock()

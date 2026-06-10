@@ -117,7 +117,6 @@ func TestHandleDeleteVault_NotFound(t *testing.T) {
 	}
 }
 
-
 func TestHandleDeleteVault_PhantomVault_AuthConfigOnly(t *testing.T) {
 	// Vault exists in auth config but was never written to Pebble (phantom vault).
 	// DELETE should clean up the auth config entry and return 204, not 404.

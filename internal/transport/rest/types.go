@@ -24,6 +24,7 @@ type ReadResponse = mbp.ReadResponse
 type ActivateRequest = mbp.ActivateRequest
 type ActivateResponse = mbp.ActivateResponse
 type ActivationItem = mbp.ActivationItem
+
 // LinkRequest is the REST-specific link request with proper JSON tags.
 // The mbp.LinkRequest only has msgpack tags which don't decode from JSON.
 type LinkRequest struct {
@@ -41,26 +42,26 @@ type StatResponse = mbp.StatResponse
 type ErrorCode = mbp.ErrorCode
 
 const (
-	ErrOK                   = mbp.ErrOK
-	ErrEngramNotFound       = mbp.ErrEngramNotFound
-	ErrVaultNotFound        = mbp.ErrVaultNotFound
-	ErrInvalidEngram        = mbp.ErrInvalidEngram
-	ErrIdempotencyViolation = mbp.ErrIdempotencyViolation
-	ErrInvalidAssociation   = mbp.ErrInvalidAssociation
-	ErrSubscriptionNotFound = mbp.ErrSubscriptionNotFound
-	ErrThresholdInvalid     = mbp.ErrThresholdInvalid
-	ErrHopDepthExceeded     = mbp.ErrHopDepthExceeded
-	ErrWeightsInvalid       = mbp.ErrWeightsInvalid
-	ErrAuthFailed           = mbp.ErrAuthFailed
-	ErrVaultForbidden       = mbp.ErrVaultForbidden
+	ErrOK                    = mbp.ErrOK
+	ErrEngramNotFound        = mbp.ErrEngramNotFound
+	ErrVaultNotFound         = mbp.ErrVaultNotFound
+	ErrInvalidEngram         = mbp.ErrInvalidEngram
+	ErrIdempotencyViolation  = mbp.ErrIdempotencyViolation
+	ErrInvalidAssociation    = mbp.ErrInvalidAssociation
+	ErrSubscriptionNotFound  = mbp.ErrSubscriptionNotFound
+	ErrThresholdInvalid      = mbp.ErrThresholdInvalid
+	ErrHopDepthExceeded      = mbp.ErrHopDepthExceeded
+	ErrWeightsInvalid        = mbp.ErrWeightsInvalid
+	ErrAuthFailed            = mbp.ErrAuthFailed
+	ErrVaultForbidden        = mbp.ErrVaultForbidden
 	ErrRateLimited           = mbp.ErrRateLimited
 	ErrMaxResultsExceeded    = mbp.ErrMaxResultsExceeded
 	ErrInvalidClusterRequest = mbp.ErrInvalidClusterRequest
 	ErrStorageError          = mbp.ErrStorageError
-	ErrIndexError           = mbp.ErrIndexError
-	ErrEnrichmentError      = mbp.ErrEnrichmentError
-	ErrShardUnavailable     = mbp.ErrShardUnavailable
-	ErrInternal             = mbp.ErrInternal
+	ErrIndexError            = mbp.ErrIndexError
+	ErrEnrichmentError       = mbp.ErrEnrichmentError
+	ErrShardUnavailable      = mbp.ErrShardUnavailable
+	ErrInternal              = mbp.ErrInternal
 )
 
 // EngineAPI is the interface the REST server requires from the engine.
@@ -303,12 +304,12 @@ type RestoreResponse struct {
 
 // TraverseRequest is the body for POST /api/traverse.
 type TraverseRequest struct {
-	Vault           string   `json:"vault"`
-	StartID         string   `json:"start_id"`
-	MaxHops         int      `json:"max_hops,omitempty"`
-	MaxNodes        int      `json:"max_nodes,omitempty"`
-	RelTypes        []string `json:"rel_types,omitempty"`
-	FollowEntities  bool     `json:"follow_entities,omitempty"`
+	Vault          string   `json:"vault"`
+	StartID        string   `json:"start_id"`
+	MaxHops        int      `json:"max_hops,omitempty"`
+	MaxNodes       int      `json:"max_nodes,omitempty"`
+	RelTypes       []string `json:"rel_types,omitempty"`
+	FollowEntities bool     `json:"follow_entities,omitempty"`
 }
 
 // TraversalNode is a single node in a graph traversal result.

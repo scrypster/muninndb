@@ -32,17 +32,17 @@ type Limits struct {
 
 // WriteRequest message
 type WriteRequest struct {
-	Concept       string        `protobuf:"bytes,1,opt,name=concept"`
-	Content       string        `protobuf:"bytes,2,opt,name=content"`
-	Tags          []string      `protobuf:"bytes,3,rep,name=tags"`
-	Confidence    float32       `protobuf:"fixed32,4,opt,name=confidence"`
-	Stability     float32       `protobuf:"fixed32,5,opt,name=stability"`
-	Vault         string        `protobuf:"bytes,6,opt,name=vault"`
-	IdempotentID  string        `protobuf:"bytes,7,opt,name=idempotent_id"`
-	Associations  []Association `protobuf:"bytes,8,rep,name=associations"`
-	Embedding     []float32     `protobuf:"fixed32,9,rep,name=embedding"`
-	MemoryType    uint32        `protobuf:"varint,10,opt,name=memory_type"`
-	TypeLabel     string        `protobuf:"bytes,11,opt,name=type_label"`
+	Concept      string        `protobuf:"bytes,1,opt,name=concept"`
+	Content      string        `protobuf:"bytes,2,opt,name=content"`
+	Tags         []string      `protobuf:"bytes,3,rep,name=tags"`
+	Confidence   float32       `protobuf:"fixed32,4,opt,name=confidence"`
+	Stability    float32       `protobuf:"fixed32,5,opt,name=stability"`
+	Vault        string        `protobuf:"bytes,6,opt,name=vault"`
+	IdempotentID string        `protobuf:"bytes,7,opt,name=idempotent_id"`
+	Associations []Association `protobuf:"bytes,8,rep,name=associations"`
+	Embedding    []float32     `protobuf:"fixed32,9,rep,name=embedding"`
+	MemoryType   uint32        `protobuf:"varint,10,opt,name=memory_type"`
+	TypeLabel    string        `protobuf:"bytes,11,opt,name=type_label"`
 }
 
 // WriteResponse message
@@ -150,15 +150,15 @@ type Association struct {
 
 // ActivateRequest message
 type ActivateRequest struct {
-	Context   []string       `protobuf:"bytes,1,rep,name=context"`
-	Threshold float32        `protobuf:"fixed32,2,opt,name=threshold"`
-	MaxResults int32         `protobuf:"varint,3,opt,name=max_results"`
-	MaxHops   int32          `protobuf:"varint,4,opt,name=max_hops"`
-	IncludeWhy bool          `protobuf:"varint,5,opt,name=include_why"`
-	Vault     string         `protobuf:"bytes,6,opt,name=vault"`
-	Weights   *Weights       `protobuf:"bytes,7,opt,name=weights"`
-	Filters   []Filter       `protobuf:"bytes,8,rep,name=filters"`
-	Embedding []float32      `protobuf:"fixed32,9,rep,name=embedding"`
+	Context    []string  `protobuf:"bytes,1,rep,name=context"`
+	Threshold  float32   `protobuf:"fixed32,2,opt,name=threshold"`
+	MaxResults int32     `protobuf:"varint,3,opt,name=max_results"`
+	MaxHops    int32     `protobuf:"varint,4,opt,name=max_hops"`
+	IncludeWhy bool      `protobuf:"varint,5,opt,name=include_why"`
+	Vault      string    `protobuf:"bytes,6,opt,name=vault"`
+	Weights    *Weights  `protobuf:"bytes,7,opt,name=weights"`
+	Filters    []Filter  `protobuf:"bytes,8,rep,name=filters"`
+	Embedding  []float32 `protobuf:"fixed32,9,rep,name=embedding"`
 }
 
 // Weights message
@@ -180,25 +180,25 @@ type Filter struct {
 
 // ActivateResponse message
 type ActivateResponse struct {
-	QueryID     string            `protobuf:"bytes,1,opt,name=query_id"`
-	TotalFound  int32             `protobuf:"varint,2,opt,name=total_found"`
-	Activations []ActivationItem  `protobuf:"bytes,3,rep,name=activations"`
-	LatencyMs   float64           `protobuf:"fixed64,4,opt,name=latency_ms"`
-	Frame       int32             `protobuf:"varint,5,opt,name=frame"`
-	TotalFrames int32             `protobuf:"varint,6,opt,name=total_frames"`
+	QueryID     string           `protobuf:"bytes,1,opt,name=query_id"`
+	TotalFound  int32            `protobuf:"varint,2,opt,name=total_found"`
+	Activations []ActivationItem `protobuf:"bytes,3,rep,name=activations"`
+	LatencyMs   float64          `protobuf:"fixed64,4,opt,name=latency_ms"`
+	Frame       int32            `protobuf:"varint,5,opt,name=frame"`
+	TotalFrames int32            `protobuf:"varint,6,opt,name=total_frames"`
 }
 
 // ActivationItem message
 type ActivationItem struct {
-	ID               string            `protobuf:"bytes,1,opt,name=id"`
-	Concept          string            `protobuf:"bytes,2,opt,name=concept"`
-	Content          string            `protobuf:"bytes,3,opt,name=content"`
-	Score            float32           `protobuf:"fixed32,4,opt,name=score"`
-	Confidence       float32           `protobuf:"fixed32,5,opt,name=confidence"`
-	ScoreComponents  *ScoreComponents  `protobuf:"bytes,6,opt,name=score_components"`
-	Why              string            `protobuf:"bytes,7,opt,name=why"`
-	HopPath          []string          `protobuf:"bytes,8,rep,name=hop_path"`
-	Dormant          bool              `protobuf:"varint,9,opt,name=dormant"`
+	ID              string           `protobuf:"bytes,1,opt,name=id"`
+	Concept         string           `protobuf:"bytes,2,opt,name=concept"`
+	Content         string           `protobuf:"bytes,3,opt,name=content"`
+	Score           float32          `protobuf:"fixed32,4,opt,name=score"`
+	Confidence      float32          `protobuf:"fixed32,5,opt,name=confidence"`
+	ScoreComponents *ScoreComponents `protobuf:"bytes,6,opt,name=score_components"`
+	Why             string           `protobuf:"bytes,7,opt,name=why"`
+	HopPath         []string         `protobuf:"bytes,8,rep,name=hop_path"`
+	Dormant         bool             `protobuf:"varint,9,opt,name=dormant"`
 }
 
 // ScoreComponents message
@@ -233,9 +233,9 @@ type SubscribeResponse struct {
 
 // ActivationPush message
 type ActivationPush struct {
-	SubscriptionID string         `protobuf:"bytes,1,opt,name=subscription_id"`
+	SubscriptionID string          `protobuf:"bytes,1,opt,name=subscription_id"`
 	Activation     *ActivationItem `protobuf:"bytes,2,opt,name=activation"`
-	Trigger        string         `protobuf:"bytes,3,opt,name=trigger"`
-	PushNumber     int32          `protobuf:"varint,4,opt,name=push_number"`
-	At             int64          `protobuf:"varint,5,opt,name=at"`
+	Trigger        string          `protobuf:"bytes,3,opt,name=trigger"`
+	PushNumber     int32           `protobuf:"varint,4,opt,name=push_number"`
+	At             int64           `protobuf:"varint,5,opt,name=at"`
 }

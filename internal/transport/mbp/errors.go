@@ -5,26 +5,26 @@ type ErrorCode uint16
 
 // Error code constants.
 const (
-	ErrOK                   ErrorCode = 1000
-	ErrEngramNotFound       ErrorCode = 4001
-	ErrVaultNotFound        ErrorCode = 4002
-	ErrInvalidEngram        ErrorCode = 4003
-	ErrIdempotencyViolation ErrorCode = 4004
-	ErrInvalidAssociation   ErrorCode = 4005
-	ErrSubscriptionNotFound ErrorCode = 4006
-	ErrThresholdInvalid     ErrorCode = 4007
-	ErrHopDepthExceeded     ErrorCode = 4008
-	ErrWeightsInvalid       ErrorCode = 4009
-	ErrAuthFailed           ErrorCode = 4010
-	ErrVaultForbidden       ErrorCode = 4011
-	ErrRateLimited          ErrorCode = 4012
-	ErrMaxResultsExceeded   ErrorCode = 4013
+	ErrOK                    ErrorCode = 1000
+	ErrEngramNotFound        ErrorCode = 4001
+	ErrVaultNotFound         ErrorCode = 4002
+	ErrInvalidEngram         ErrorCode = 4003
+	ErrIdempotencyViolation  ErrorCode = 4004
+	ErrInvalidAssociation    ErrorCode = 4005
+	ErrSubscriptionNotFound  ErrorCode = 4006
+	ErrThresholdInvalid      ErrorCode = 4007
+	ErrHopDepthExceeded      ErrorCode = 4008
+	ErrWeightsInvalid        ErrorCode = 4009
+	ErrAuthFailed            ErrorCode = 4010
+	ErrVaultForbidden        ErrorCode = 4011
+	ErrRateLimited           ErrorCode = 4012
+	ErrMaxResultsExceeded    ErrorCode = 4013
 	ErrInvalidClusterRequest ErrorCode = 4014
-	ErrStorageError         ErrorCode = 5001
-	ErrIndexError           ErrorCode = 5002
-	ErrEnrichmentError      ErrorCode = 5003
-	ErrShardUnavailable     ErrorCode = 5004
-	ErrInternal             ErrorCode = 5005
+	ErrStorageError          ErrorCode = 5001
+	ErrIndexError            ErrorCode = 5002
+	ErrEnrichmentError       ErrorCode = 5003
+	ErrShardUnavailable      ErrorCode = 5004
+	ErrInternal              ErrorCode = 5005
 )
 
 // ErrorPayload is the msgpack body of a TypeError frame.

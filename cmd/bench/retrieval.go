@@ -39,32 +39,32 @@ var conceptDefinitions = []string{
 
 // conceptContent maps concepts to descriptive content for embedding.
 var conceptContent = map[string]string{
-	"memory consolidation":   "The process of transferring information from short-term to long-term memory through biochemical changes in the brain.",
-	"neural plasticity":      "The ability of the nervous system to change its activity in response to intrinsic or extrinsic stimuli.",
-	"sleep learning":         "The phenomenon where memories formed during the day are consolidated and strengthened during sleep.",
-	"attention mechanism":    "The selective focusing of conscious awareness on particular aspects of the environment.",
-	"episodic recall":        "The retrieval of specific autobiographical events or experiences with temporal and spatial context.",
-	"semantic network":       "An organized representation of concepts and their relationships in memory.",
-	"working memory":         "The temporary storage and manipulation of information required for ongoing cognitive tasks.",
-	"long-term potentiation": "A persistent strengthening of synapses based on recent patterns of activity.",
-	"synaptic pruning":       "The selective elimination of unused synaptic connections during development.",
-	"cognitive load":         "The amount of working memory resources required to perform a task.",
-	"retrieval practice":     "The act of retrieving information from memory, which strengthens the memory trace.",
-	"spacing effect":         "Improved retention through spaced repetition compared to massed practice.",
-	"primacy effect":         "The tendency to recall items early in a sequence better than later items.",
-	"recency effect":         "The tendency to recall items late in a sequence better than earlier items.",
-	"interference theory":    "The theory that forgetting occurs due to interference from similar memories.",
+	"memory consolidation":     "The process of transferring information from short-term to long-term memory through biochemical changes in the brain.",
+	"neural plasticity":        "The ability of the nervous system to change its activity in response to intrinsic or extrinsic stimuli.",
+	"sleep learning":           "The phenomenon where memories formed during the day are consolidated and strengthened during sleep.",
+	"attention mechanism":      "The selective focusing of conscious awareness on particular aspects of the environment.",
+	"episodic recall":          "The retrieval of specific autobiographical events or experiences with temporal and spatial context.",
+	"semantic network":         "An organized representation of concepts and their relationships in memory.",
+	"working memory":           "The temporary storage and manipulation of information required for ongoing cognitive tasks.",
+	"long-term potentiation":   "A persistent strengthening of synapses based on recent patterns of activity.",
+	"synaptic pruning":         "The selective elimination of unused synaptic connections during development.",
+	"cognitive load":           "The amount of working memory resources required to perform a task.",
+	"retrieval practice":       "The act of retrieving information from memory, which strengthens the memory trace.",
+	"spacing effect":           "Improved retention through spaced repetition compared to massed practice.",
+	"primacy effect":           "The tendency to recall items early in a sequence better than later items.",
+	"recency effect":           "The tendency to recall items late in a sequence better than earlier items.",
+	"interference theory":      "The theory that forgetting occurs due to interference from similar memories.",
 	"context-dependent memory": "Improved recall when environmental context matches encoding context.",
-	"state-dependent memory": "Improved recall when internal physiological state matches encoding state.",
-	"encoding specificity":   "Memory performance is improved when information available at retrieval matches encoding context.",
-	"depth of processing":    "Memory retention improves with deeper, more meaningful processing of information.",
-	"elaborative encoding":   "Memory strategy involving connecting new information to existing knowledge structures.",
+	"state-dependent memory":   "Improved recall when internal physiological state matches encoding state.",
+	"encoding specificity":     "Memory performance is improved when information available at retrieval matches encoding context.",
+	"depth of processing":      "Memory retention improves with deeper, more meaningful processing of information.",
+	"elaborative encoding":     "Memory strategy involving connecting new information to existing knowledge structures.",
 }
 
 // QueryGroundTruth defines a query and its known top-5 most relevant concepts.
 type QueryGroundTruth struct {
-	Query    string
-	TopFive  []int // indices into conceptDefinitions
+	Query   string
+	TopFive []int // indices into conceptDefinitions
 }
 
 // queryGroundTruths maps natural language queries to their ground-truth relevant concepts.
@@ -213,13 +213,13 @@ func benchmarkRetrieval(ctx context.Context, eng *engine.Engine, vaultName strin
 
 		// Compute metrics for top-20 results
 		var (
-			hitsAt1   = 0
-			hitsAt5   = 0
-			hitsAt10  = 0
-			hitsAt20  = 0
-			firstHit  = 0
-			dcg       = 0.0
-			idcg      = 0.0
+			hitsAt1  = 0
+			hitsAt5  = 0
+			hitsAt10 = 0
+			hitsAt20 = 0
+			firstHit = 0
+			dcg      = 0.0
+			idcg     = 0.0
 		)
 
 		for i := 0; i < 5; i++ {

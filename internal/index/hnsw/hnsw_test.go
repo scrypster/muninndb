@@ -61,7 +61,6 @@ func insertVector(t *testing.T, idx *hnsw.Index, db *pebble.DB, id [16]byte, vec
 	idx.Insert(id, vec)
 }
 
-
 // TestCosineSimilarityIdentical verifies that the similarity of a vector with
 // itself is 1.0.
 func TestCosineSimilarityIdentical(t *testing.T) {

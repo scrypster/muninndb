@@ -389,10 +389,11 @@ func TestHandleRememberTree_DuplicateConcept(t *testing.T) {
 // semantics at the MCP handler layer.
 //
 // Current handler logic (handlers.go):
-//   maxDepth := 10                                  // default when absent
-//   if d, ok := args["max_depth"].(float64); ok {
-//       maxDepth = int(d)                           // overrides with 0 if caller passes 0
-//   }
+//
+//	maxDepth := 10                                  // default when absent
+//	if d, ok := args["max_depth"].(float64); ok {
+//	    maxDepth = int(d)                           // overrides with 0 if caller passes 0
+//	}
 //
 // This means:
 //   - absent max_depth → 10 (handler default, engine interprets 10 as "depth 10")

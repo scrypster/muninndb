@@ -27,9 +27,9 @@ const (
 // The callback is invoked while the breaker's lock is NOT held, so it is
 // safe to call registry methods or emit logs without risk of deadlock.
 type StateChangeEvent struct {
-	From          State
-	To            State
-	FailureCount  int
+	From           State
+	To             State
+	FailureCount   int
 	OutageDuration time.Duration // non-zero only when recovering (Open→Closed or HalfOpen→Closed)
 }
 
@@ -44,8 +44,8 @@ type Breaker struct {
 	halfOpenUsed     bool
 
 	// Configuration
-	maxFails    int           // consecutive failures before opening
-	resetAfter  time.Duration // time open before half-open probe
+	maxFails   int           // consecutive failures before opening
+	resetAfter time.Duration // time open before half-open probe
 
 	// OnStateChange is called (outside the lock) whenever the circuit transitions
 	// between states. It may be nil. Set it once at construction time via

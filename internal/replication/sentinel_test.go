@@ -5,8 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cockroachdb/pebble/vfs"
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/scrypster/muninndb/internal/config"

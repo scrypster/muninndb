@@ -27,7 +27,7 @@ func TestRestoreArchivedEdges_RestoresTopN(t *testing.T) {
 		val := encodeArchiveValue(RelSupports, 0.9, now.Add(-24*time.Hour), int32(now.Add(-time.Duration(daysAgo)*24*time.Hour).Unix()), peak, coAct, 0)
 		_ = store.db.Set(key, val[:], pebble.Sync)
 	}
-	writeArchive(dst1, 0.9, 10, 1)  // score = 0.9*10/1 = 9.0
+	writeArchive(dst1, 0.9, 10, 1) // score = 0.9*10/1 = 9.0
 	writeArchive(dst2, 0.5, 2, 30) // score = 0.5*2/30 = 0.033
 
 	restored, err := store.RestoreArchivedEdges(ctx, ws, [16]byte(src), 10)
@@ -79,7 +79,7 @@ func TestRestoreArchivedEdges_RestoresTopByConsolidation(t *testing.T) {
 		val := encodeArchiveValue(RelSupports, 0.9, now.Add(-24*time.Hour), int32(now.Add(-time.Duration(daysAgo)*24*time.Hour).Unix()), peak, coAct, 0)
 		_ = store.db.Set(key, val[:], pebble.Sync)
 	}
-	writeArchive(dst1, 0.9, 10, 1)  // score = 0.9*10/1 = 9.0
+	writeArchive(dst1, 0.9, 10, 1) // score = 0.9*10/1 = 9.0
 	writeArchive(dst2, 0.5, 2, 30) // score = 0.5*2/30 = 0.033
 
 	restored, err := store.RestoreArchivedEdges(ctx, ws, [16]byte(src), 10)

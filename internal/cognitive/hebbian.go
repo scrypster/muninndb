@@ -76,8 +76,8 @@ func canonicalPair(x, y [16]byte) pairKey {
 // HebbianWorker strengthens co-activated associations.
 type HebbianWorker struct {
 	*Worker[CoActivationEvent]
-	store       HebbianStore
-	db *pebble.DB // optional, reserved for future persistence
+	store HebbianStore
+	db    *pebble.DB // optional, reserved for future persistence
 
 	// OnWeightUpdate is called after each association weight update.
 	// Used by the Engine to forward cognitive events to the trigger system.
@@ -190,7 +190,6 @@ func (hw *HebbianWorker) Stop() {
 	<-hw.doneCh
 }
 
-
 func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationEvent) error {
 	// Collect unique vault workspace prefixes in this batch.
 	wsSet := make(map[[8]byte]struct{})
@@ -230,10 +229,10 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 	// Collect all updates into a batch for atomic commit.
 	var updates []AssocWeightUpdate
 	var callbacks []struct {
-		ws   [8]byte
-		id   [16]byte
-		old  float64
-		new  float64
+		ws  [8]byte
+		id  [16]byte
+		old float64
+		new float64
 	}
 
 	for pair, stats := range pairs {
@@ -299,10 +298,10 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 
 		if hw.OnWeightUpdate != nil {
 			callbacks = append(callbacks, struct {
-				ws   [8]byte
-				id   [16]byte
-				old  float64
-				new  float64
+				ws  [8]byte
+				id  [16]byte
+				old float64
+				new float64
 			}{stats.ws, pair.a, float64(current), float64(newWeight)})
 		}
 	}

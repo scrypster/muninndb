@@ -19,10 +19,10 @@ const (
 	k1 = 1.2
 	b  = 0.75
 
-	FieldConcept    = uint8(0x01)
-	FieldTags       = uint8(0x02)
-	FieldContent    = uint8(0x03)
-	FieldCreatedBy  = uint8(0x04)
+	FieldConcept   = uint8(0x01)
+	FieldTags      = uint8(0x02)
+	FieldContent   = uint8(0x03)
+	FieldCreatedBy = uint8(0x04)
 
 	fieldWeightConcept   = 3.0
 	fieldWeightTags      = 2.0
@@ -66,8 +66,8 @@ type idfKey struct {
 
 // Index is the FTS inverted index backed by Pebble.
 type Index struct {
-	db       *pebble.DB
-	mu       sync.RWMutex
+	db *pebble.DB
+	mu sync.RWMutex
 	// In-memory IDF cache: (vault, term) → idf
 	idfCache map[idfKey]float64
 	// versionCache caches the FTS schema version per vault (0=legacy dual-path, 1=stemmed-only).

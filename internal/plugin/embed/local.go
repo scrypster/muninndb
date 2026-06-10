@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	localModelDim   = 384  // bge-small-en-v1.5 output dimension
-	localMaxTokens  = 256  // model max sequence length
-	localMaxBatch   = 64   // texts per ORT inference call (DynamicAdvancedSession)
+	localModelDim   = 384 // bge-small-en-v1.5 output dimension
+	localMaxTokens  = 256 // model max sequence length
+	localMaxBatch   = 64  // texts per ORT inference call (DynamicAdvancedSession)
 	ortSentinelFile = ".ort_extracted"
 )
 
@@ -266,9 +266,9 @@ func ensureExtracted(ctx context.Context, modelDir string) error {
 	slog.Info("extracting bundled local embed assets", "dir", modelDir)
 
 	files := map[string][]byte{
-		"model_int8.onnx":      embeddedModel,
-		"tokenizer.json":       embeddedTokenizer,
-		nativeLibFilename:      embeddedNativeLib,
+		"model_int8.onnx": embeddedModel,
+		"tokenizer.json":  embeddedTokenizer,
+		nativeLibFilename: embeddedNativeLib,
 	}
 
 	var sentinelHash string

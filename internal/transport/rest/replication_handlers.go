@@ -112,4 +112,3 @@ func (s *Server) HandleReplicationLag(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandlePromoteReplica(w http.ResponseWriter, r *http.Request) {
 	s.handleReplicationPromote(w, r)
 }
-

@@ -534,10 +534,10 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 	defer iter.Close()
 
 	type assocEntry struct {
-		src    [16]byte
-		dst    [16]byte
-		oldW   float32
-		newW   float32
+		src     [16]byte
+		dst     [16]byte
+		oldW    float32
+		newW    float32
 		remove  bool
 		archive bool
 		// Preserved from existing Pebble value:

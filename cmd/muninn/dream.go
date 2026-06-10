@@ -111,4 +111,3 @@ func printDreamReport(report *muninn.DreamReport, dryRun bool) {
 		fmt.Printf("\nSkipped (legal): %s\n", strings.Join(report.Skipped, ", "))
 	}
 }
-

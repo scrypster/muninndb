@@ -21,9 +21,9 @@ func TestLevenshtein(t *testing.T) {
 		{"a", "", 1},
 		{"", "a", 1},
 		{"search", "search", 0},
-		{"sarch", "search", 1},   // 1 insertion
-		{"serach", "search", 2},  // 2 edits (r and a swapped = delete + insert)
-		{"forget", "forgot", 1},  // 1 substitution (e→o)
+		{"sarch", "search", 1},  // 1 insertion
+		{"serach", "search", 2}, // 2 edits (r and a swapped = delete + insert)
+		{"forget", "forgot", 1}, // 1 substitution (e→o)
 		{"xyz", "abc", 3},
 	}
 	for _, tt := range tests {
@@ -244,7 +244,7 @@ func TestPrintEmbedderNote(t *testing.T) {
 		choice string
 		want   string
 	}{
-		{"1", ""},         // local — no output
+		{"1", ""}, // local — no output
 		{"2", "Ollama"},
 		{"3", "OpenAI"},
 		{"4", "Voyage"},
@@ -252,8 +252,8 @@ func TestPrintEmbedderNote(t *testing.T) {
 		{"6", "Google"},
 		{"7", "Jina"},
 		{"8", "Mistral"},
-		{"9", ""},         // unknown — no output (falls to default)
-		{"", ""},          // empty — falls to default
+		{"9", ""}, // unknown — no output (falls to default)
+		{"", ""},  // empty — falls to default
 	}
 	for _, tc := range cases {
 		out := captureStdout(func() {
@@ -301,12 +301,12 @@ func TestParseToolNumbersComprehensive(t *testing.T) {
 		{"1 2 3", []int{1, 2, 3}},
 		{"1,2,3", []int{1, 2, 3}},
 		{"1, 2, 3", []int{1, 2, 3}},
-		{"1 1 2", []int{1, 2}},      // deduplication
+		{"1 1 2", []int{1, 2}}, // deduplication
 		{"", []int(nil)},
-		{"abc", []int(nil)},         // no digits
-		{"10", []int{1}},            // only extracts first digit of "10" → 1
+		{"abc", []int(nil)}, // no digits
+		{"10", []int{1}},    // only extracts first digit of "10" → 1
 		{"9", []int{9}},
-		{"0", []int(nil)},           // 0 is skipped (not 1-9)
+		{"0", []int(nil)}, // 0 is skipped (not 1-9)
 	}
 	for _, tc := range cases {
 		got := parseToolNumbers(tc.input)

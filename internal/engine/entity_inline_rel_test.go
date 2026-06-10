@@ -58,9 +58,9 @@ func TestWrite_InlineEntityRelationships_DefaultWeight(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := eng.Write(ctx, &mbp.WriteRequest{
-		Vault:   "rel-weight-test",
-		Concept: "test",
-		Content: "A uses B.",
+		Vault:    "rel-weight-test",
+		Concept:  "test",
+		Content:  "A uses B.",
 		Entities: []mbp.InlineEntity{{Name: "A", Type: "service"}, {Name: "B", Type: "service"}},
 		EntityRelationships: []mbp.InlineEntityRelationship{
 			{FromEntity: "A", ToEntity: "B", RelType: "uses"}, // no weight — should default to 0.9

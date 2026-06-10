@@ -61,11 +61,12 @@ func (p *Parser) error(msg string) error {
 // Parse parses the token stream and returns a Query.
 // Dispatches to the appropriate query parser based on the first keyword.
 // Grammar:
-//  ACTIVATE FROM <vault> CONTEXT [<term>, ...] [WHERE <predicate>] [MAX_RESULTS <n>] [HOPS <n>] [MIN_RELEVANCE <f>]
-//  RECALL EPISODE <episode_id_string> [FRAMES <n>]
-//  TRAVERSE FROM <engram_id_string> HOPS <n> [MIN_WEIGHT <f>]
-//  CONSOLIDATE VAULT <vault_name> [DRY_RUN]
-//  WORKING_MEMORY SESSION <session_id_string>
+//
+//	ACTIVATE FROM <vault> CONTEXT [<term>, ...] [WHERE <predicate>] [MAX_RESULTS <n>] [HOPS <n>] [MIN_RELEVANCE <f>]
+//	RECALL EPISODE <episode_id_string> [FRAMES <n>]
+//	TRAVERSE FROM <engram_id_string> HOPS <n> [MIN_WEIGHT <f>]
+//	CONSOLIDATE VAULT <vault_name> [DRY_RUN]
+//	WORKING_MEMORY SESSION <session_id_string>
 func (p *Parser) Parse() (Query, error) {
 	tok := p.current()
 

@@ -9,14 +9,14 @@ type PlasticityConfig struct {
 
 	// Optional overrides (nil = use preset value)
 	HebbianEnabled    *bool    `json:"hebbian_enabled,omitempty"`
-	TemporalEnabled      *bool    `json:"temporal_enabled,omitempty"`
+	TemporalEnabled   *bool    `json:"temporal_enabled,omitempty"`
 	AutoLinkNeighbors *bool    `json:"auto_link_neighbors,omitempty"` // semantic neighbor auto-linking
-	HopDepth          *int     `json:"hop_depth,omitempty"`            // BFS hops 0–8
-	SemanticWeight    *float32 `json:"semantic_weight,omitempty"`      // 0–1
-	FTSWeight         *float32 `json:"fts_weight,omitempty"`           // 0–1
-	RelevanceFloor        *float32 `json:"relevance_floor,omitempty"`          // 0–1
-	TemporalHalflife    *float32 `json:"temporal_halflife,omitempty"`      // days
-	TraversalProfile  *string  `json:"traversal_profile,omitempty"`    // "default"|"causal"|"confirmatory"|"adversarial"|"structural"; empty = use auto-inference
+	HopDepth          *int     `json:"hop_depth,omitempty"`           // BFS hops 0–8
+	SemanticWeight    *float32 `json:"semantic_weight,omitempty"`     // 0–1
+	FTSWeight         *float32 `json:"fts_weight,omitempty"`          // 0–1
+	RelevanceFloor    *float32 `json:"relevance_floor,omitempty"`     // 0–1
+	TemporalHalflife  *float32 `json:"temporal_halflife,omitempty"`   // days
+	TraversalProfile  *string  `json:"traversal_profile,omitempty"`   // "default"|"causal"|"confirmatory"|"adversarial"|"structural"; empty = use auto-inference
 	// ACT-R parameters (new, preferred over Ebbinghaus fields)
 	ACTRDecay    *float64 `json:"actr_decay,omitempty"`     // power-law exponent d (default 0.5)
 	ACTRHebScale *float64 `json:"actr_heb_scale,omitempty"` // Hebbian amplifier (default 4.0)
@@ -35,10 +35,10 @@ type PlasticityConfig struct {
 	// Association edge decay (applied each prune pass, ~60s)
 	AssocDecayFactor *float32 `json:"assoc_decay_factor,omitempty"` // multiplier per pass (e.g. 0.95 = 5% decay); 0 = disabled
 	AssocMinWeight   *float32 `json:"assoc_min_weight,omitempty"`   // edges below this are deleted (e.g. 0.05)
-	ArchiveThreshold *float64 `json:"archive_threshold,omitempty"` // consolidation score threshold for archiving (default 0.05)
+	ArchiveThreshold *float64 `json:"archive_threshold,omitempty"`  // consolidation score threshold for archiving (default 0.05)
 
 	// Behavior mode controls how AI agents use memory
-	BehaviorMode         *string `json:"behavior_mode,omitempty"`          // "autonomous"|"prompted"|"selective"|"custom"
+	BehaviorMode         *string `json:"behavior_mode,omitempty"`         // "autonomous"|"prompted"|"selective"|"custom"
 	BehaviorInstructions *string `json:"behavior_instructions,omitempty"` // freeform text for "custom" mode
 
 	// Inline enrichment controls how caller-provided enrichment interacts with background enrichment
@@ -77,15 +77,15 @@ type PlasticityConfig struct {
 // The engine may normalize or use them as-is depending on the activation context.
 type ResolvedPlasticity struct {
 	HebbianEnabled    bool    `json:"hebbian_enabled"`
-	TemporalEnabled      bool    `json:"temporal_enabled"`
+	TemporalEnabled   bool    `json:"temporal_enabled"`
 	AutoLinkNeighbors bool    `json:"auto_link_neighbors"`
 	HopDepth          int     `json:"hop_depth"`
 	SemanticWeight    float32 `json:"semantic_weight"`
 	FTSWeight         float32 `json:"fts_weight"`
-	RelevanceFloor        float32 `json:"relevance_floor"`
-	TemporalHalflife    float32 `json:"temporal_halflife"` // days
+	RelevanceFloor    float32 `json:"relevance_floor"`
+	TemporalHalflife  float32 `json:"temporal_halflife"` // days
 	HebbianWeight     float32 `json:"hebbian_weight"`
-	TemporalWeight       float32 `json:"temporal_weight"`
+	TemporalWeight    float32 `json:"temporal_weight"`
 	RecencyWeight     float32 `json:"recency_weight"`
 	TraversalProfile  string  `json:"traversal_profile"` // empty string = use auto-inference
 	// ACT-R parameters (new, preferred over Ebbinghaus fields)
@@ -122,17 +122,17 @@ type ResolvedPlasticity struct {
 }
 
 type plasticityPreset struct {
-	HebbianEnabled    bool
+	HebbianEnabled       bool
 	TemporalEnabled      bool
-	AutoLinkNeighbors bool
-	HopDepth          int
-	SemanticWeight    float32
-	FTSWeight         float32
-	RelevanceFloor        float32
-	TemporalHalflife    float32
-	HebbianWeight     float32
+	AutoLinkNeighbors    bool
+	HopDepth             int
+	SemanticWeight       float32
+	FTSWeight            float32
+	RelevanceFloor       float32
+	TemporalHalflife     float32
+	HebbianWeight        float32
 	TemporalWeight       float32
-	RecencyWeight     float32
+	RecencyWeight        float32
 	ACTRDecay            float64
 	ACTRHebScale         float64
 	ExperimentalCGDN     bool
@@ -144,12 +144,12 @@ type plasticityPreset struct {
 	AssocMinWeight       float32
 	ArchiveThreshold     float64
 	BehaviorMode         string
-	InlineEnrichment  string
-	EnrichmentEnabled bool
-	RecallMode        string
-	ScoringFusion     string // "" = default (ACT-R), "rrf", "weighted_sum"
-	LTPThreshold      int
-	LTPWeightFloor    float32
+	InlineEnrichment     string
+	EnrichmentEnabled    bool
+	RecallMode           string
+	ScoringFusion        string // "" = default (ACT-R), "rrf", "weighted_sum"
+	LTPThreshold         int
+	LTPWeightFloor       float32
 }
 
 var plasticityPresets = map[string]plasticityPreset{
@@ -178,7 +178,6 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
-
 	},
 	"reference": {
 		HebbianEnabled:       true,
@@ -205,7 +204,6 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
-
 	},
 	"scratchpad": {
 		HebbianEnabled:       false,
@@ -232,7 +230,6 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
-
 	},
 	"knowledge-graph": {
 		HebbianEnabled:       true,
@@ -259,7 +256,6 @@ var plasticityPresets = map[string]plasticityPreset{
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",
-
 	},
 }
 

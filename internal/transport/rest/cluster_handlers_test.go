@@ -231,7 +231,7 @@ func TestClusterStatus_Thresholds(t *testing.T) {
 		expected string
 	}{
 		{replication.RolePrimary, 0, "ok"},
-		{replication.RolePrimary, 5000, "ok"},    // primary lag is always ok
+		{replication.RolePrimary, 5000, "ok"}, // primary lag is always ok
 		{replication.RoleReplica, 0, "ok"},
 		{replication.RoleReplica, 999, "ok"},
 		{replication.RoleReplica, 1000, "degraded"},

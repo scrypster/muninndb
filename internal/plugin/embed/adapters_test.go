@@ -14,14 +14,14 @@ type stubEmbedPlugin struct {
 	dim         int
 }
 
-func (s *stubEmbedPlugin) Name() string           { return "stub" }
+func (s *stubEmbedPlugin) Name() string            { return "stub" }
 func (s *stubEmbedPlugin) Tier() plugin.PluginTier { return plugin.TierEmbed }
 func (s *stubEmbedPlugin) Init(_ context.Context, _ plugin.PluginConfig) error {
 	return nil
 }
-func (s *stubEmbedPlugin) Close() error       { return nil }
-func (s *stubEmbedPlugin) Dimension() int     { return s.dim }
-func (s *stubEmbedPlugin) MaxBatchSize() int  { return 32 }
+func (s *stubEmbedPlugin) Close() error      { return nil }
+func (s *stubEmbedPlugin) Dimension() int    { return s.dim }
+func (s *stubEmbedPlugin) MaxBatchSize() int { return 32 }
 func (s *stubEmbedPlugin) Embed(_ context.Context, _ []string) ([]float32, error) {
 	return s.embedResult, s.embedErr
 }

@@ -223,7 +223,7 @@ type ActivationItem struct {
 	LastAccess      int64           `msgpack:"last_access,omitempty"       json:"last_access,omitempty"`
 	AccessCount     uint32          `msgpack:"access_count,omitempty"      json:"access_count,omitempty"`
 	Relevance       float32         `msgpack:"relevance,omitempty"         json:"relevance,omitempty"`
-	SourceType string `msgpack:"source_type,omitempty" json:"source_type,omitempty"`
+	SourceType      string          `msgpack:"source_type,omitempty" json:"source_type,omitempty"`
 	// Trust is the TrustLevel uint8. omitempty intentional — see ReadResponse.Trust comment.
 	Trust uint8 `msgpack:"trust,omitempty" json:"trust,omitempty"`
 }

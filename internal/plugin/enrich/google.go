@@ -22,8 +22,8 @@ type GoogleLLMProvider struct {
 
 // googleGenerateRequest is the request structure for Gemini generateContent.
 type googleGenerateRequest struct {
-	Contents          []googleContent       `json:"contents"`
-	SystemInstruction *googleSystemContent  `json:"systemInstruction,omitempty"`
+	Contents          []googleContent        `json:"contents"`
+	SystemInstruction *googleSystemContent   `json:"systemInstruction,omitempty"`
 	GenerationConfig  googleGenerationConfig `json:"generationConfig"`
 }
 

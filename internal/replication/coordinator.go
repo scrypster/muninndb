@@ -52,13 +52,13 @@ const defaultQuorumLossTimeout = 5 * time.Second
 // It owns and orchestrates: ConnManager, MSP, Election, JoinHandler, JoinClient,
 // ReplicationLog, Applier, EpochStore, and per-Lobe NetworkStreamers.
 type ClusterCoordinator struct {
-	cfg        *config.ClusterConfig
-	repLog     *ReplicationLog
-	applier    *Applier
-	epochStore *EpochStore
-	mgr        *ConnManager
-	msp        *MSP
-	election   *Election
+	cfg          *config.ClusterConfig
+	repLog       *ReplicationLog
+	applier      *Applier
+	epochStore   *EpochStore
+	mgr          *ConnManager
+	msp          *MSP
+	election     *Election
 	joinHandler  *JoinHandler
 	joinClient   *JoinClient
 	tokenManager *JoinTokenManager

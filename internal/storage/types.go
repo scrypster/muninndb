@@ -75,8 +75,8 @@ type Engram struct {
 	Summary        string    // extractive first 2 sentences
 	KeyPoints      []string  // top 5 sentences by IDF rarity
 	MemoryType     MemoryType
-	TypeLabel      string // free-form label, e.g. "architectural_decision", "coding_pattern"
-	Classification uint16 // concept-cluster ID
+	TypeLabel      string     // free-form label, e.g. "architectural_decision", "coding_pattern"
+	Classification uint16     // concept-cluster ID
 	Trust          TrustLevel // provenance confidence label (OffsetTrust in ERF)
 }
 

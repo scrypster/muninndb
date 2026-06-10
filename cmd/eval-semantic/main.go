@@ -108,18 +108,18 @@ var targetEngrams = []writeReq{
 
 var probes = []probe{
 	{
-		Query:   "can't disconnect from the job when it's time to relax",
-		Targets: []string{"Late evening status check spiral"},
+		Query:     "can't disconnect from the job when it's time to relax",
+		Targets:   []string{"Late evening status check spiral"},
 		Rationale: `query="can't/disconnect/job/time/relax"  target="opened/laptop/quick/look/hours/dinner/cold/family/alerts/settled/refreshing/brain/walk/away/green/night"`,
 	},
 	{
-		Query:   "depleted from shouldering it all with zero acknowledgment",
-		Targets: []string{"Crossed the marathon finish line by myself"},
+		Query:     "depleted from shouldering it all with zero acknowledgment",
+		Targets:   []string{"Crossed the marathon finish line by myself"},
 		Rationale: `query="depleted/shouldering/all/zero/acknowledgment"  target="finished/run/myself/legs/gave/mile/nobody/waiting/drove/home/medal/drawer"`,
 	},
 	{
-		Query:   "completely overwhelmed by how beautiful it was",
-		Targets: []string{"Top of the ridge, valley below"},
+		Query:     "completely overwhelmed by how beautiful it was",
+		Targets:   []string{"Top of the ridge, valley below"},
 		Rationale: `query="completely/overwhelmed/beautiful"  target="came/over/ridge/stopped/whole/valley/below/color/spread/everything/expected/stood/cold"`,
 	},
 }

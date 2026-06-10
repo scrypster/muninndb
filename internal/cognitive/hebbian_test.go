@@ -99,7 +99,10 @@ func TestOnWeightUpdateFiredOnCoActivation(t *testing.T) {
 	}
 	hw.OnWeightUpdate = func(_ [8]byte, _ [16]byte, field string, old, new float64) {
 		mu.Lock()
-		updates = append(updates, struct{ field string; old, new float64 }{field, old, new})
+		updates = append(updates, struct {
+			field    string
+			old, new float64
+		}{field, old, new})
 		mu.Unlock()
 	}
 
@@ -107,8 +110,8 @@ func TestOnWeightUpdateFiredOnCoActivation(t *testing.T) {
 	idB := [16]byte{2}
 
 	event := CoActivationEvent{
-		WS:  [8]byte{0, 0, 0, 1},
-		At:  time.Now(),
+		WS: [8]byte{0, 0, 0, 1},
+		At: time.Now(),
 		Engrams: []CoActivatedEngram{
 			{ID: idA, Score: 0.9},
 			{ID: idB, Score: 0.8},
@@ -150,8 +153,8 @@ func TestOnWeightUpdateOldLessThanNew(t *testing.T) {
 	idB := [16]byte{4}
 
 	hw.Submit(CoActivationEvent{
-		WS:  [8]byte{0, 0, 0, 2},
-		At:  time.Now(),
+		WS: [8]byte{0, 0, 0, 2},
+		At: time.Now(),
 		Engrams: []CoActivatedEngram{
 			{ID: idA, Score: 1.0},
 			{ID: idB, Score: 1.0},
@@ -185,8 +188,8 @@ func TestNilOnWeightUpdateDoesNotPanic(t *testing.T) {
 	}()
 
 	hw.Submit(CoActivationEvent{
-		WS:  [8]byte{0, 0, 0, 3},
-		At:  time.Now(),
+		WS: [8]byte{0, 0, 0, 3},
+		At: time.Now(),
 		Engrams: []CoActivatedEngram{
 			{ID: [16]byte{5}, Score: 0.7},
 			{ID: [16]byte{6}, Score: 0.7},
@@ -213,8 +216,8 @@ func TestOnWeightUpdateFieldName(t *testing.T) {
 	}
 
 	hw.Submit(CoActivationEvent{
-		WS:  [8]byte{0, 0, 0, 4},
-		At:  time.Now(),
+		WS: [8]byte{0, 0, 0, 4},
+		At: time.Now(),
 		Engrams: []CoActivatedEngram{
 			{ID: [16]byte{7}, Score: 0.8},
 			{ID: [16]byte{8}, Score: 0.8},
@@ -253,8 +256,8 @@ func TestOnWeightUpdateCalledPerPair(t *testing.T) {
 
 	// 3 engrams → 3 pairs: (A,B), (A,C), (B,C)
 	hw.Submit(CoActivationEvent{
-		WS:  [8]byte{0, 0, 0, 5},
-		At:  time.Now(),
+		WS: [8]byte{0, 0, 0, 5},
+		At: time.Now(),
 		Engrams: []CoActivatedEngram{
 			{ID: [16]byte{9}, Score: 0.9},
 			{ID: [16]byte{10}, Score: 0.8},
@@ -273,7 +276,6 @@ func TestOnWeightUpdateCalledPerPair(t *testing.T) {
 		t.Errorf("expected >= 3 OnWeightUpdate calls for 3-engram event, got %d", count)
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // Test 7: Atomic batch write - all updates committed together

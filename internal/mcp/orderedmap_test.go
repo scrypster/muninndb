@@ -471,8 +471,8 @@ func TestToolDefinition_MarshalJSON_StructureIntegrity(t *testing.T) {
 		Description string `json:"description"`
 		InputSchema struct {
 			Type       string                       `json:"type"`
-			Properties map[string]map[string]string  `json:"properties"`
-			Required   []string                      `json:"required"`
+			Properties map[string]map[string]string `json:"properties"`
+			Required   []string                     `json:"required"`
 		} `json:"inputSchema"`
 	}
 	if err := json.Unmarshal(b, &parsed); err != nil {

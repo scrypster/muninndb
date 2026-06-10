@@ -25,15 +25,15 @@ func opBatchCounter(t *testing.T) (storage.PebbleStoreConfig, func() int32) {
 	t.Helper()
 	var count atomic.Int32
 	return storage.PebbleStoreConfig{
-		RepLogAppend: func(op uint8, key, value []byte) error {
-			if op == 3 {
-				count.Add(1)
-			}
-			return nil
-		},
-	}, func() int32 {
-		return count.Load()
-	}
+			RepLogAppend: func(op uint8, key, value []byte) error {
+				if op == 3 {
+					count.Add(1)
+				}
+				return nil
+			},
+		}, func() int32 {
+			return count.Load()
+		}
 }
 
 // TestRepLogHook_NilCallback verifies WriteEngram does not panic when

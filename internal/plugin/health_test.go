@@ -20,12 +20,12 @@ type healthMockEmbed struct {
 	callCount atomic.Int32
 }
 
-func (m *healthMockEmbed) Name() string                                          { return m.name }
-func (m *healthMockEmbed) Tier() PluginTier                                      { return TierEmbed }
-func (m *healthMockEmbed) Init(_ context.Context, _ PluginConfig) error          { return nil }
-func (m *healthMockEmbed) Close() error                                          { return nil }
-func (m *healthMockEmbed) Dimension() int                                        { return m.dim }
-func (m *healthMockEmbed) MaxBatchSize() int                                     { return 32 }
+func (m *healthMockEmbed) Name() string                                 { return m.name }
+func (m *healthMockEmbed) Tier() PluginTier                             { return TierEmbed }
+func (m *healthMockEmbed) Init(_ context.Context, _ PluginConfig) error { return nil }
+func (m *healthMockEmbed) Close() error                                 { return nil }
+func (m *healthMockEmbed) Dimension() int                               { return m.dim }
+func (m *healthMockEmbed) MaxBatchSize() int                            { return 32 }
 func (m *healthMockEmbed) Embed(_ context.Context, texts []string) ([]float32, error) {
 	m.callCount.Add(1)
 	if m.embedErr != nil {
@@ -41,10 +41,10 @@ type healthMockEnrich struct {
 	callCount atomic.Int32
 }
 
-func (m *healthMockEnrich) Name() string                                         { return m.name }
-func (m *healthMockEnrich) Tier() PluginTier                                     { return TierEnrich }
-func (m *healthMockEnrich) Init(_ context.Context, _ PluginConfig) error         { return nil }
-func (m *healthMockEnrich) Close() error                                         { return nil }
+func (m *healthMockEnrich) Name() string                                 { return m.name }
+func (m *healthMockEnrich) Tier() PluginTier                             { return TierEnrich }
+func (m *healthMockEnrich) Init(_ context.Context, _ PluginConfig) error { return nil }
+func (m *healthMockEnrich) Close() error                                 { return nil }
 func (m *healthMockEnrich) Enrich(_ context.Context, _ *Engram) (*EnrichmentResult, error) {
 	m.callCount.Add(1)
 	if m.enrichErr != nil {

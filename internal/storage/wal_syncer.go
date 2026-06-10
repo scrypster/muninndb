@@ -57,7 +57,7 @@ type walSyncer struct {
 	db           *pebble.DB
 	stop         chan struct{}
 	done         chan struct{}
-	stopped      atomic.Bool  // set true before signalling the goroutine to stop
+	stopped      atomic.Bool   // set true before signalling the goroutine to stop
 	lastWALBytes atomic.Uint64 // WAL bytes written at the last sync; used to detect idle
 	syncCount    atomic.Int64  // total doSync() calls; exposed for tests
 }

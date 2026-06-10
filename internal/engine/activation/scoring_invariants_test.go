@@ -38,28 +38,28 @@ func TestScoringInvariant_RawScoreBounded(t *testing.T) {
 	yesterday := now.Add(-24 * time.Hour)
 
 	cases := []struct {
-		name        string
-		vectorScore float64
-		ftsScore    float64
+		name         string
+		vectorScore  float64
+		ftsScore     float64
 		hebbianBoost float64
-		eng         *storage.Engram
-		weights     resolvedWeights
+		eng          *storage.Engram
+		weights      resolvedWeights
 	}{
 		{
-			name:         "all zeros",
-			vectorScore:  0, ftsScore: 0, hebbianBoost: 0,
+			name:        "all zeros",
+			vectorScore: 0, ftsScore: 0, hebbianBoost: 0,
 			eng:     makeEngram(0, 1, 1, yesterday),
 			weights: defaultTestWeights(),
 		},
 		{
-			name:         "all maximums",
-			vectorScore:  1, ftsScore: 100, hebbianBoost: 1,
+			name:        "all maximums",
+			vectorScore: 1, ftsScore: 100, hebbianBoost: 1,
 			eng:     makeEngram(1000, 365, 1, yesterday),
 			weights: defaultTestWeights(),
 		},
 		{
-			name:         "weights sum > 1 with all components = 1",
-			vectorScore:  1, ftsScore: 1, hebbianBoost: 1,
+			name:        "weights sum > 1 with all components = 1",
+			vectorScore: 1, ftsScore: 1, hebbianBoost: 1,
 			eng: makeEngram(100, 30, 1, yesterday),
 			weights: resolvedWeights{
 				SemanticSimilarity: 1.0,
@@ -71,24 +71,24 @@ func TestScoringInvariant_RawScoreBounded(t *testing.T) {
 			},
 		},
 		{
-			name:         "large ftsScore drives weighted FTS above 1",
-			vectorScore:  0, ftsScore: 1e9, hebbianBoost: 0,
+			name:        "large ftsScore drives weighted FTS above 1",
+			vectorScore: 0, ftsScore: 1e9, hebbianBoost: 0,
 			eng: makeEngram(0, 1, 1, yesterday),
 			weights: resolvedWeights{
 				FullTextRelevance: 2.0, // exaggerated weight
 			},
 		},
 		{
-			name:         "vector score 1 with extreme weight",
-			vectorScore:  1, ftsScore: 0, hebbianBoost: 0,
+			name:        "vector score 1 with extreme weight",
+			vectorScore: 1, ftsScore: 0, hebbianBoost: 0,
 			eng: makeEngram(0, 1, 1, yesterday),
 			weights: resolvedWeights{
 				SemanticSimilarity: 999.0,
 			},
 		},
 		{
-			name:         "negative vector score (guard)",
-			vectorScore:  -5, ftsScore: -3, hebbianBoost: -1,
+			name:        "negative vector score (guard)",
+			vectorScore: -5, ftsScore: -3, hebbianBoost: -1,
 			eng: makeEngram(0, 1, 1, yesterday),
 			weights: resolvedWeights{
 				SemanticSimilarity: 1.0,
@@ -97,8 +97,8 @@ func TestScoringInvariant_RawScoreBounded(t *testing.T) {
 			},
 		},
 		{
-			name:         "fresh engram high confidence",
-			vectorScore:  0.9, ftsScore: 5, hebbianBoost: 0.8,
+			name:        "fresh engram high confidence",
+			vectorScore: 0.9, ftsScore: 5, hebbianBoost: 0.8,
 			eng:     makeEngram(50, 30, 0.95, now),
 			weights: defaultTestWeights(),
 		},

@@ -12,10 +12,10 @@ type mockPlugin struct {
 	closed bool
 }
 
-func (m *mockPlugin) Name() string                               { return m.name }
-func (m *mockPlugin) Tier() PluginTier                           { return m.tier }
+func (m *mockPlugin) Name() string                                     { return m.name }
+func (m *mockPlugin) Tier() PluginTier                                 { return m.tier }
 func (m *mockPlugin) Init(ctx context.Context, cfg PluginConfig) error { return nil }
-func (m *mockPlugin) Close() error                              { m.closed = true; return nil }
+func (m *mockPlugin) Close() error                                     { m.closed = true; return nil }
 
 // mockEmbedPlugin is a mock embed plugin
 type mockEmbedPlugin struct {

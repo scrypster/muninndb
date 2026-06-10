@@ -34,10 +34,10 @@ const (
 // CopyCurrent and IndexCurrent use atomic operations.
 type Job struct {
 	// Immutable after Create — no lock needed.
-	ID        string
-	Operation string // "clone" | "merge"
-	Source    string
-	Target    string
+	ID         string
+	Operation  string // "clone" | "merge"
+	Source     string
+	Target     string
 	CopyTotal  int64
 	IndexTotal int64
 	StartedAt  time.Time
@@ -270,4 +270,3 @@ func (m *Manager) gc() {
 		}
 	}
 }
-

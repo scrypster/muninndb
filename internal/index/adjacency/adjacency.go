@@ -13,27 +13,27 @@ import (
 )
 
 const (
-	hopPenalty    = 0.7
-	minHopScore   = 0.05
-	maxBFSNodes   = 500
+	hopPenalty      = 0.7
+	minHopScore     = 0.05
+	maxBFSNodes     = 500
 	maxEdgesPerNode = 20
 )
 
 // AssocEntry is a parsed association from the graph.
 type AssocEntry struct {
-	TargetID  [16]byte
-	Weight    float32
+	TargetID   [16]byte
+	Weight     float32
 	Confidence float32
-	RelType   uint16
+	RelType    uint16
 }
 
 // TraversalResult is a node found via BFS traversal.
 type TraversalResult struct {
-	ID        [16]byte
-	Score     float64
-	HopPath   [][16]byte
-	RelType   uint16
-	HopDepth  int
+	ID       [16]byte
+	Score    float64
+	HopPath  [][16]byte
+	RelType  uint16
+	HopDepth int
 }
 
 // Graph provides BFS traversal over the association adjacency store.

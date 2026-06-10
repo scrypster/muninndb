@@ -25,7 +25,7 @@ type LLMStats struct {
 type ObservabilitySnapshot struct {
 	System     SystemStats                   `json:"system"`
 	Storage    StorageStats                  `json:"storage"`
-	Processors []ProcessorStats             `json:"processors"`
+	Processors []ProcessorStats              `json:"processors"`
 	Workers    WorkerStatsSnapshot           `json:"cognitive_workers"`
 	Vaults     map[string]VaultObservability `json:"vaults"`
 	LLM        *LLMStats                     `json:"llm,omitempty"`

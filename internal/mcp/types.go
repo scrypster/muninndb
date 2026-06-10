@@ -279,15 +279,15 @@ type ApplyEnrichmentRelationship struct {
 
 // ApplyEnrichmentRequest contains explicit enrichment output from an MCP agent.
 type ApplyEnrichmentRequest struct {
-	ID               string                      `json:"id"`
-	ExpectedUpdatedAt string                     `json:"expected_updated_at"`
-	Summary          string                      `json:"summary,omitempty"`
-	MemoryType       string                      `json:"memory_type,omitempty"`
-	TypeLabel        string                      `json:"type_label,omitempty"`
-	Entities         []ApplyEnrichmentEntity     `json:"entities,omitempty"`
-	Relationships    []ApplyEnrichmentRelationship `json:"relationships,omitempty"`
-	StagesCompleted  []string                    `json:"stages_completed,omitempty"`
-	Source           string                      `json:"source,omitempty"`
+	ID                string                        `json:"id"`
+	ExpectedUpdatedAt string                        `json:"expected_updated_at"`
+	Summary           string                        `json:"summary,omitempty"`
+	MemoryType        string                        `json:"memory_type,omitempty"`
+	TypeLabel         string                        `json:"type_label,omitempty"`
+	Entities          []ApplyEnrichmentEntity       `json:"entities,omitempty"`
+	Relationships     []ApplyEnrichmentRelationship `json:"relationships,omitempty"`
+	StagesCompleted   []string                      `json:"stages_completed,omitempty"`
+	Source            string                        `json:"source,omitempty"`
 }
 
 // ApplyEnrichmentResult is returned by muninn_apply_enrichment.
@@ -437,8 +437,8 @@ type EntityAggregate struct {
 	Confidence    float32               `json:"confidence"`
 	State         string                `json:"state"`
 	MentionCount  int32                 `json:"mention_count"`
-	FirstSeen     string                `json:"first_seen,omitempty"`  // RFC3339
-	UpdatedAt     string                `json:"updated_at,omitempty"`  // RFC3339
+	FirstSeen     string                `json:"first_seen,omitempty"` // RFC3339
+	UpdatedAt     string                `json:"updated_at,omitempty"` // RFC3339
 	MergedInto    string                `json:"merged_into,omitempty"`
 	Engrams       []EntityEngramSummary `json:"engrams"`
 	Relationships []EntityRelSummary    `json:"relationships"`

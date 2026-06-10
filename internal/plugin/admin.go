@@ -28,16 +28,16 @@ type AdminRequest struct {
 	Tier     string            `json:"tier"`     // "embed" or "enrich"
 	Provider string            `json:"provider"` // provider URL
 	APIKey   string            `json:"api_key"`
-	Name     string            `json:"name"`     // for remove
+	Name     string            `json:"name"` // for remove
 	Options  map[string]string `json:"options"`
 }
 
 // AdminResponse is the JSON response.
 type AdminResponse struct {
-	OK              bool   `json:"ok"`
-	PluginName      string `json:"plugin_name,omitempty"`
-	RetroactiveTotal int64 `json:"retroactive_total,omitempty"`
-	Message         string `json:"message,omitempty"`
+	OK               bool   `json:"ok"`
+	PluginName       string `json:"plugin_name,omitempty"`
+	RetroactiveTotal int64  `json:"retroactive_total,omitempty"`
+	Message          string `json:"message,omitempty"`
 }
 
 // NewAdminHandler creates a new admin handler.

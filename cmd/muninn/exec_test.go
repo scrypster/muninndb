@@ -114,11 +114,11 @@ func TestExec_MissingRequiredFlags(t *testing.T) {
 	dir := t.TempDir()
 
 	cases := [][]string{
-		{"remember", "--concept", "only concept"},  // missing --content
-		{"remember", "--content", "only content"},  // missing --concept
-		{"recall"},                                  // missing --query
-		{"read"},                                    // missing --id
-		{"forget"},                                  // missing --id
+		{"remember", "--concept", "only concept"}, // missing --content
+		{"remember", "--content", "only content"}, // missing --concept
+		{"recall"}, // missing --query
+		{"read"},   // missing --id
+		{"forget"}, // missing --id
 	}
 	for _, args := range cases {
 		_, _, code := execOp(t, dir, args...)

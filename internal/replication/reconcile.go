@@ -51,11 +51,11 @@ var ErrReconciliationInProgress = errors.New("reconciliation already in progress
 
 // Reconciler runs post-partition cognitive reconciliation.
 type Reconciler struct {
-	sampler HebbianSampler
-	store   HebbianStoreWriter
-	coord   *ClusterCoordinator
-	topK    int // number of engrams to check (default 500)
-	mu      sync.Mutex
+	sampler    HebbianSampler
+	store      HebbianStoreWriter
+	coord      *ClusterCoordinator
+	topK       int // number of engrams to check (default 500)
+	mu         sync.Mutex
 	lastResult ReconcileResult
 	running    atomic.Bool
 

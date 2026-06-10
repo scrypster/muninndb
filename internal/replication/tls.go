@@ -129,12 +129,12 @@ func (ct *ClusterTLS) bootstrapCA(certPath, keyPath string) error {
 	}
 
 	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "muninndb-cluster-ca"},
-		NotBefore:    time.Now().Add(-1 * time.Minute),
-		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour), // 10 years
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:         true,
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "muninndb-cluster-ca"},
+		NotBefore:             time.Now().Add(-1 * time.Minute),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour), // 10 years
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 		MaxPathLen:            1,
 	}

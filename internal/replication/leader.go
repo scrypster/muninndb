@@ -22,7 +22,7 @@ type LeaderElector struct {
 	isLeader atomic.Bool
 	token    atomic.Uint64
 
-	mu    sync.Mutex
+	mu     sync.Mutex
 	runCtx context.Context
 	cancel context.CancelFunc
 }

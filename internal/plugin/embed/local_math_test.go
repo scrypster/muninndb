@@ -9,9 +9,9 @@ import (
 func TestMeanPool(t *testing.T) {
 	// 3 tokens, dim=2.  Token 0 and 2 are active (mask=1), token 1 is padding (mask=0).
 	hidden := []float32{
-		1, 2,   // token 0
+		1, 2, // token 0
 		10, 10, // token 1 (padding — excluded)
-		3, 4,   // token 2
+		3, 4, // token 2
 	}
 	mask := []int64{1, 0, 1}
 

@@ -425,10 +425,10 @@ func TestJoinClient_Join_Success(t *testing.T) {
 	client := NewJoinClient("lobe-1", "127.0.0.1:9100", "", es, nil, mgr)
 
 	serverResp := mbp.JoinResponse{
-		Accepted: true,
-		CortexID: "cortex-1",
+		Accepted:   true,
+		CortexID:   "cortex-1",
 		CortexAddr: "127.0.0.1:8000",
-		Epoch:    5,
+		Epoch:      5,
 	}
 
 	clientConn, reqCh := mockCortexJoin(t, serverResp)

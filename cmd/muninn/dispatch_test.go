@@ -9,7 +9,7 @@ func TestParseSubcommand(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{}, ""},           // no args → printQuickStart
+		{[]string{}, ""}, // no args → printQuickStart
 		{[]string{"shell"}, "shell"},
 		{[]string{"start"}, "start"},
 		{[]string{"stop"}, "stop"},
@@ -19,8 +19,8 @@ func TestParseSubcommand(t *testing.T) {
 		{[]string{"stop", "web"}, "stop:web"},
 		{[]string{"show", "vaults"}, "show:vaults"},
 		{[]string{"help"}, "help"},
-		{[]string{"start", "--dev"}, "start"},   // flags are not subcommands
-		{[]string{"init", "--yes"}, "init"},     // flags are not subcommands
+		{[]string{"start", "--dev"}, "start"}, // flags are not subcommands
+		{[]string{"init", "--yes"}, "init"},   // flags are not subcommands
 	}
 	for _, tc := range cases {
 		got := parseSubcommand(tc.args)

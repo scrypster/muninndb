@@ -17,10 +17,10 @@ import (
 
 // stubStore implements activation.ActivationStore using in-memory maps.
 type stubStore struct {
-	engrams  map[storage.ULID]*storage.Engram
-	metas    map[storage.ULID]*storage.EngramMeta
-	assocs   map[storage.ULID][]storage.Association
-	recent   []storage.ULID
+	engrams map[storage.ULID]*storage.Engram
+	metas   map[storage.ULID]*storage.EngramMeta
+	assocs  map[storage.ULID][]storage.Association
+	recent  []storage.ULID
 }
 
 func newStubStore() *stubStore {
@@ -770,12 +770,12 @@ func TestCalcCandidatesPerIndex(t *testing.T) {
 	}{
 		{0, 30},
 		{-1, 30},
-		{1, 1},        // tiny vault: full scan
-		{50, 50},      // small vault: full scan
-		{100, 100},    // small vault: full scan
-		{999, 999},    // small vault: full scan
-		{1000, 1000},  // boundary: still full scan
-		{1001, 31},    // sqrt(1001)≈31, above small-vault threshold
+		{1, 1},       // tiny vault: full scan
+		{50, 50},     // small vault: full scan
+		{100, 100},   // small vault: full scan
+		{999, 999},   // small vault: full scan
+		{1000, 1000}, // boundary: still full scan
+		{1001, 31},   // sqrt(1001)≈31, above small-vault threshold
 		{10000, 100},
 		{40000, 200},  // sqrt(40000)=200, hits ceiling
 		{100000, 200}, // above ceiling, clamped

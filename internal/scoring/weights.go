@@ -7,12 +7,12 @@ import (
 
 // Dimension indices for the 6-dimensional weight vector.
 const (
-	DimFTS         = 0  // full-text search score
-	DimHNSW        = 1  // vector similarity score
-	DimHebbian     = 2  // Hebbian association boost
-	DimDecay       = 3  // decay/recency factor
-	DimRecency     = 4  // creation recency
-	DimAssociation = 5  // graph association weight
+	DimFTS         = 0 // full-text search score
+	DimHNSW        = 1 // vector similarity score
+	DimHebbian     = 2 // Hebbian association boost
+	DimDecay       = 3 // decay/recency factor
+	DimRecency     = 4 // creation recency
+	DimAssociation = 5 // graph association weight
 	NumDims        = 6
 )
 
@@ -28,8 +28,8 @@ type VaultWeights struct {
 // FeedbackSignal encodes implicit feedback from access patterns.
 type FeedbackSignal struct {
 	EngramID    [16]byte
-	Accessed    bool                     // true = positive signal (retrieved AND accessed within 5 min)
-	ScoreVector [NumDims]float64         // the score components that produced this result
+	Accessed    bool             // true = positive signal (retrieved AND accessed within 5 min)
+	ScoreVector [NumDims]float64 // the score components that produced this result
 	Timestamp   time.Time
 }
 

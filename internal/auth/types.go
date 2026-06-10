@@ -12,15 +12,15 @@ type APIKey struct {
 	ID          string     `json:"id"`
 	Vault       string     `json:"vault"`
 	Label       string     `json:"label"`
-	Mode        string     `json:"mode"`      // "full", "observe", or "write" (ingest-only)
+	Mode        string     `json:"mode"` // "full", "observe", or "write" (ingest-only)
 	CreatedAt   time.Time  `json:"created_at"`
 	StorageHash []byte     `json:"storage_hash"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"` // nil = never expires
 }
 
 type VaultConfig struct {
-	Name       string           `json:"name"`
-	Public     bool             `json:"public"`
+	Name       string            `json:"name"`
+	Public     bool              `json:"public"`
 	Plasticity *PlasticityConfig `json:"plasticity,omitempty"` // per-vault cognitive pipeline config
 }
 

@@ -1778,7 +1778,7 @@ func TestPhase6Score_CachedLastAccess(t *testing.T) {
 	eng1 := &storage.Engram{
 		Concept: "cached", Content: "content",
 		Confidence: 1.0, Stability: 30.0, Relevance: 0.8,
-		State: storage.StateActive,
+		State:      storage.StateActive,
 		LastAccess: time.Now().Add(-48 * time.Hour),
 	}
 	store.addEngram(eng1)
@@ -1806,7 +1806,7 @@ func TestPhase6Score_CachedLastAccess(t *testing.T) {
 func TestComputeComponents_ZeroStability(t *testing.T) {
 	eng := &storage.Engram{
 		Confidence: 1.0, Stability: 0.0, AccessCount: 5,
-		CreatedAt: time.Now().Add(-24 * time.Hour),
+		CreatedAt:  time.Now().Add(-24 * time.Hour),
 		LastAccess: time.Now().Add(-1 * time.Hour),
 	}
 	w := resolvedWeights{DecayFactor: 1.0}
@@ -1835,7 +1835,7 @@ func TestComputeComponents_VeryHighAccessCount(t *testing.T) {
 func TestComputeComponents_AllWeightsZero(t *testing.T) {
 	eng := &storage.Engram{
 		Confidence: 1.0, Stability: 30.0, AccessCount: 5,
-		CreatedAt: time.Now().Add(-24 * time.Hour),
+		CreatedAt:  time.Now().Add(-24 * time.Hour),
 		LastAccess: time.Now().Add(-1 * time.Hour),
 	}
 	w := resolvedWeights{}

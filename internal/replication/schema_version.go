@@ -12,7 +12,8 @@ import (
 // encoding, replication log format, snapshot format, or cognitive state.
 //
 // Version history:
-//   1 = initial versioned release (HA beta)
+//
+//	1 = initial versioned release (HA beta)
 const CurrentSchemaVersion uint64 = 1
 
 func schemaVersionKey() []byte {

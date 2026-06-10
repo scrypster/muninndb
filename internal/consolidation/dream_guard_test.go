@@ -253,7 +253,7 @@ func TestDream_LegalVault_ZeroWrites(t *testing.T) {
 	wsPrefix := store.ResolveVaultPrefix(vault)
 
 	// Write a clear duplicate pair into the legal vault — if dedup ran, one would be archived.
-	dup      := []float32{1.0, 0.0, 0.0, 0.0}
+	dup := []float32{1.0, 0.0, 0.0, 0.0}
 	dupClose := []float32{0.97, 0.24310, 0.0, 0.0}
 	id1 := writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
 		Concept: "clause-a", Content: "Party A agrees to pay Party B.", Confidence: 0.9,
@@ -308,7 +308,7 @@ func TestDream_LegalAdjacent_IsProcessed(t *testing.T) {
 
 	// Write 20 engrams including a clear duplicate pair. If the vault is incorrectly
 	// treated as legal, dedup will be skipped and MergedEngrams will be 0.
-	dup      := []float32{1.0, 0.0, 0.0, 0.0}
+	dup := []float32{1.0, 0.0, 0.0, 0.0}
 	dupClose := []float32{0.97, 0.24310, 0.0, 0.0}
 
 	writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
@@ -358,7 +358,7 @@ func TestDream_LegalAdjacent_IsProcessed(t *testing.T) {
 func TestDream_MinDedupVaultSize_Configurable(t *testing.T) {
 	t.Parallel()
 
-	dup      := []float32{1.0, 0.0, 0.0, 0.0}
+	dup := []float32{1.0, 0.0, 0.0, 0.0}
 	dupClose := []float32{0.97, 0.24310, 0.0, 0.0}
 
 	// sub-test: MinDedupVaultSize=10, vault=15 engrams -> dedup runs.
@@ -453,7 +453,7 @@ func TestDream_WithEmbedCount_GuardIgnoresNoEmbedEngrams(t *testing.T) {
 	const vault = "embed-count-guard"
 	wsPrefix := store.ResolveVaultPrefix(vault)
 
-	dup      := []float32{1.0, 0.0, 0.0, 0.0}
+	dup := []float32{1.0, 0.0, 0.0, 0.0}
 	dupClose := []float32{0.97, 0.24310, 0.0, 0.0}
 
 	// 8 engrams WITH embeddings (including a duplicate pair that WOULD merge if dedup ran).

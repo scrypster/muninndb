@@ -23,12 +23,12 @@ const (
 
 // Client is the MuninnDB REST API client.
 type Client struct {
-	baseURL       string
-	token         string
-	httpClient    *http.Client
-	timeout       time.Duration
-	maxRetries    int
-	retryBackoff  time.Duration
+	baseURL      string
+	token        string
+	httpClient   *http.Client
+	timeout      time.Duration
+	maxRetries   int
+	retryBackoff time.Duration
 }
 
 // NewClient creates a new MuninnDB client.
@@ -347,11 +347,11 @@ func (c *Client) Consolidate(ctx context.Context, vault string, ids []string, me
 // Decide records a decision as an engram.
 func (c *Client) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*DecideResponse, error) {
 	payload := struct {
-		Vault       string   `json:"vault"`
-		Decision    string   `json:"decision"`
-		Rationale   string   `json:"rationale"`
+		Vault        string   `json:"vault"`
+		Decision     string   `json:"decision"`
+		Rationale    string   `json:"rationale"`
 		Alternatives []string `json:"alternatives,omitempty"`
-		EvidenceIDs []string `json:"evidence_ids,omitempty"`
+		EvidenceIDs  []string `json:"evidence_ids,omitempty"`
 	}{Vault: vault, Decision: decision, Rationale: rationale, Alternatives: alternatives, EvidenceIDs: evidenceIDs}
 
 	body, err := json.Marshal(payload)

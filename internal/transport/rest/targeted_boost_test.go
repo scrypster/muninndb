@@ -372,7 +372,7 @@ func TestHandleEvolve_MissingContent(t *testing.T) {
 	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
 	body := bytes.NewReader([]byte(`{"new_content":"","reason":""}`))
-	req := httptest.NewRequest("PUT", "/api/engrams/" + testEngramID + "/evolve", body)
+	req := httptest.NewRequest("PUT", "/api/engrams/"+testEngramID+"/evolve", body)
 	req.SetPathValue("id", testEngramID)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

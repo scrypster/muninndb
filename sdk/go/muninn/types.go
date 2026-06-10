@@ -70,13 +70,13 @@ type BatchWriteResponse struct {
 
 // ActivateRequest represents a request to activate memory.
 type ActivateRequest struct {
-	Vault     string   `json:"vault"`
-	Context   []string `json:"context"`
-	MaxResults int     `json:"max_results,omitempty"`
-	Threshold float64  `json:"threshold,omitempty"`
-	MaxHops   int      `json:"max_hops,omitempty"`
-	IncludeWhy bool    `json:"include_why,omitempty"`
-	BriefMode string   `json:"brief_mode,omitempty"`
+	Vault      string   `json:"vault"`
+	Context    []string `json:"context"`
+	MaxResults int      `json:"max_results,omitempty"`
+	Threshold  float64  `json:"threshold,omitempty"`
+	MaxHops    int      `json:"max_hops,omitempty"`
+	IncludeWhy bool     `json:"include_why,omitempty"`
+	BriefMode  string   `json:"brief_mode,omitempty"`
 }
 
 // ActivationItem represents a single activated memory item.
@@ -102,21 +102,21 @@ type BriefSentence struct {
 
 // ActivateResponse represents a response from activating memory.
 type ActivateResponse struct {
-	QueryID    string             `json:"query_id"`
-	TotalFound int                `json:"total_found"`
-	Activations []ActivationItem  `json:"activations"`
-	LatencyMs  float64            `json:"latency_ms,omitempty"`
-	Brief      []BriefSentence    `json:"brief,omitempty"`
+	QueryID     string           `json:"query_id"`
+	TotalFound  int              `json:"total_found"`
+	Activations []ActivationItem `json:"activations"`
+	LatencyMs   float64          `json:"latency_ms,omitempty"`
+	Brief       []BriefSentence  `json:"brief,omitempty"`
 }
 
 // CoherenceResult contains coherence metrics for a vault.
 type CoherenceResult struct {
-	Score                  float64 `json:"score"`
-	OrphanRatio            float64 `json:"orphan_ratio"`
-	ContradictionDensity   float64 `json:"contradiction_density"`
-	DuplicationPressure    float64 `json:"duplication_pressure"`
-	TemporalVariance       float64 `json:"temporal_variance"`
-	TotalEngrams           int     `json:"total_engrams"`
+	Score                float64 `json:"score"`
+	OrphanRatio          float64 `json:"orphan_ratio"`
+	ContradictionDensity float64 `json:"contradiction_density"`
+	DuplicationPressure  float64 `json:"duplication_pressure"`
+	TemporalVariance     float64 `json:"temporal_variance"`
+	TotalEngrams         int     `json:"total_engrams"`
 }
 
 // StatsResponse represents the response from the stats endpoint.
@@ -144,9 +144,9 @@ type ForgetRequest struct {
 
 // Push represents an SSE push event from subscription.
 type Push struct {
-	SubscriptionID string `json:"subscription_id"`
-	Trigger        string `json:"trigger"`
-	PushNumber     int    `json:"push_number"`
+	SubscriptionID string  `json:"subscription_id"`
+	Trigger        string  `json:"trigger"`
+	PushNumber     int     `json:"push_number"`
 	EngramID       *string `json:"engram_id,omitempty"`
 	At             *int64  `json:"at,omitempty"`
 }
@@ -224,14 +224,14 @@ type ExplainComponents struct {
 
 // ExplainResponse represents a response from explaining an engram's score.
 type ExplainResponse struct {
-	EngramID   string            `json:"engram_id"`
-	Concept    string            `json:"concept"`
-	FinalScore float64           `json:"final_score"`
-	Components ExplainComponents `json:"components"`
-	FTSMatches []string          `json:"fts_matches"`
-	AssocPath  []string          `json:"assoc_path"`
-	WouldReturn bool             `json:"would_return"`
-	Threshold  float64           `json:"threshold"`
+	EngramID    string            `json:"engram_id"`
+	Concept     string            `json:"concept"`
+	FinalScore  float64           `json:"final_score"`
+	Components  ExplainComponents `json:"components"`
+	FTSMatches  []string          `json:"fts_matches"`
+	AssocPath   []string          `json:"assoc_path"`
+	WouldReturn bool              `json:"would_return"`
+	Threshold   float64           `json:"threshold"`
 }
 
 // SetStateResponse represents a response from setting engram state.

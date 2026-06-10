@@ -109,7 +109,7 @@ func (m *mockEngine) DeleteVault(ctx context.Context, vaultName string) error { 
 func (m *mockEngine) RenameVault(ctx context.Context, oldName, newName string) error {
 	return nil
 }
-func (m *mockEngine) GetVaultJob(jobID string) (*vaultjob.Job, bool)          { return nil, false }
+func (m *mockEngine) GetVaultJob(jobID string) (*vaultjob.Job, bool) { return nil, false }
 func (m *mockEngine) StartClone(ctx context.Context, sourceVault, newName string) (*vaultjob.Job, error) {
 	return &vaultjob.Job{ID: "mock-clone-job", Operation: "clone", Source: sourceVault, Target: newName}, nil
 }
@@ -198,9 +198,9 @@ func (m *mockEngine) EmbedStats() plugin.RetroactiveStats {
 
 func makeMockFS() fs.FS {
 	return fstest.MapFS{
-		"static/dist/app.css":   &fstest.MapFile{Data: []byte("/* css */")},
-		"static/logo.jpg":       &fstest.MapFile{Data: []byte("img")},
-		"templates/index.html":  &fstest.MapFile{Data: []byte("<html><body>MuninnDB</body></html>")},
+		"static/dist/app.css":  &fstest.MapFile{Data: []byte("/* css */")},
+		"static/logo.jpg":      &fstest.MapFile{Data: []byte("img")},
+		"templates/index.html": &fstest.MapFile{Data: []byte("<html><body>MuninnDB</body></html>")},
 	}
 }
 

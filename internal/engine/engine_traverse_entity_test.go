@@ -290,7 +290,6 @@ func TestTraverse_FollowEntities_SoftDeletedViaEntity(t *testing.T) {
 	require.False(t, foundB, "soft-deleted engram B should NOT appear in traversal, even via entity hop")
 }
 
-
 // TestTraverse_FollowEntities_ArchivedViaEntity verifies that archived engrams
 // are excluded from traversal results, even when follow_entities=true.
 func TestTraverse_FollowEntities_ArchivedViaEntity(t *testing.T) {

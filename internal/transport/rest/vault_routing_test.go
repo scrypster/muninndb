@@ -450,7 +450,7 @@ func TestVaultRouting_Read_ExplicitVault(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/api/engrams/" + testEngramID + "?vault=myvault", nil)
+	req := httptest.NewRequest("GET", "/api/engrams/"+testEngramID+"?vault=myvault", nil)
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -472,7 +472,7 @@ func TestVaultRouting_Forget_ExplicitVault(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	req := httptest.NewRequest("DELETE", "/api/engrams/" + testEngramID + "?vault=myvault", nil)
+	req := httptest.NewRequest("DELETE", "/api/engrams/"+testEngramID+"?vault=myvault", nil)
 	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
@@ -625,7 +625,7 @@ func TestVaultRouting_GetEngramLinks_ExplicitVault(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/api/engrams/" + testEngramID + "/links?vault=myvault", nil)
+	req := httptest.NewRequest("GET", "/api/engrams/"+testEngramID+"/links?vault=myvault", nil)
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
 
@@ -688,7 +688,7 @@ func TestVaultRouting_Evolve_ExplicitVault(t *testing.T) {
 	}
 
 	body := strings.NewReader(`{"new_content":"updated","reason":"improvement"}`)
-	req := httptest.NewRequest("POST", "/api/engrams/" + testEngramID + "/evolve?vault=myvault", body)
+	req := httptest.NewRequest("POST", "/api/engrams/"+testEngramID+"/evolve?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
 	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
@@ -756,7 +756,7 @@ func TestVaultRouting_Restore_ExplicitVault(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/api/engrams/" + testEngramID + "/restore?vault=myvault", nil)
+	req := httptest.NewRequest("POST", "/api/engrams/"+testEngramID+"/restore?vault=myvault", nil)
 	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)
@@ -822,7 +822,7 @@ func TestVaultRouting_UpdateState_ExplicitVault(t *testing.T) {
 	}
 
 	body := strings.NewReader(`{"state":"active"}`)
-	req := httptest.NewRequest("PUT", "/api/engrams/" + testEngramID + "/state?vault=myvault", body)
+	req := httptest.NewRequest("PUT", "/api/engrams/"+testEngramID+"/state?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
 	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
@@ -845,7 +845,7 @@ func TestVaultRouting_UpdateTags_ExplicitVault(t *testing.T) {
 	}
 
 	body := strings.NewReader(`{"tags":["a","b"]}`)
-	req := httptest.NewRequest("PUT", "/api/engrams/" + testEngramID + "/tags?vault=myvault", body)
+	req := httptest.NewRequest("PUT", "/api/engrams/"+testEngramID+"/tags?vault=myvault", body)
 	req.Header.Set("Content-Type", "application/json")
 	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
@@ -887,7 +887,7 @@ func TestVaultRouting_RetryEnrich_ExplicitVault(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/api/engrams/" + testEngramID + "/retry-enrich?vault=myvault", nil)
+	req := httptest.NewRequest("POST", "/api/engrams/"+testEngramID+"/retry-enrich?vault=myvault", nil)
 	authorizeFullVaultRequest(t, store, req, "myvault")
 	w := httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, req)

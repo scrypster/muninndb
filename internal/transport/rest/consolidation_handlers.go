@@ -16,16 +16,16 @@ type consolidationRequest struct {
 
 // consolidationResponse wraps a ConsolidationReport for JSON serialization
 type consolidationResponse struct {
-	Vault          string        `json:"vault"`
-	StartedAt      time.Time     `json:"started_at"`
-	Duration       string        `json:"duration"`
-	DedupClusters  int           `json:"dedup_clusters"`
-	MergedEngrams  int           `json:"merged_engrams"`
-	PromotedNodes  int           `json:"promoted_nodes"`
-	DecayedEngrams int           `json:"decayed_engrams"`
-	InferredEdges  int           `json:"inferred_edges"`
-	DryRun         bool          `json:"dry_run"`
-	Errors         []string      `json:"errors,omitempty"`
+	Vault          string    `json:"vault"`
+	StartedAt      time.Time `json:"started_at"`
+	Duration       string    `json:"duration"`
+	DedupClusters  int       `json:"dedup_clusters"`
+	MergedEngrams  int       `json:"merged_engrams"`
+	PromotedNodes  int       `json:"promoted_nodes"`
+	DecayedEngrams int       `json:"decayed_engrams"`
+	InferredEdges  int       `json:"inferred_edges"`
+	DryRun         bool      `json:"dry_run"`
+	Errors         []string  `json:"errors,omitempty"`
 }
 
 // handleConsolidate processes POST /v1/vaults/{vault}/consolidate

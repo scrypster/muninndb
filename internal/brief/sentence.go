@@ -19,7 +19,7 @@ func Split(text string, maxLen int) []string {
 		current.WriteRune(r)
 
 		// Check for sentence-ending punctuation followed by space or end of text
-		if (r == '.' || r == '?' || r == '!') {
+		if r == '.' || r == '?' || r == '!' {
 			// Lookahead: check if next character is space or end
 			isEndOfSentence := false
 			if i+1 >= len(runes) {

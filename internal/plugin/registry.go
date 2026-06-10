@@ -10,12 +10,12 @@ import (
 // Registry is the thread-safe plugin registry. Singleton per engine instance.
 type Registry struct {
 	mu        sync.RWMutex
-	plugins   map[string]Plugin     // name -> plugin
-	embed     EmbedPlugin           // at most one
-	enrich    EnrichPlugin          // at most one
-	healthy   map[string]bool       // name -> health status
-	lastCheck map[string]time.Time  // name -> time of last SetHealthy/SetUnhealthy call
-	lastError map[string]string     // name -> last error message (empty if healthy)
+	plugins   map[string]Plugin    // name -> plugin
+	embed     EmbedPlugin          // at most one
+	enrich    EnrichPlugin         // at most one
+	healthy   map[string]bool      // name -> health status
+	lastCheck map[string]time.Time // name -> time of last SetHealthy/SetUnhealthy call
+	lastError map[string]string    // name -> last error message (empty if healthy)
 }
 
 // NewRegistry creates an empty plugin registry.

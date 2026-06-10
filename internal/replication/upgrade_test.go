@@ -30,12 +30,12 @@ func TestRollingUpgrade_DataConsistency(t *testing.T) {
 		t.Fatalf("pebble.Open for node-B: %v", err)
 	}
 	nodeB := &testNode{
-		id:         "node-B",
-		repLog:     NewReplicationLog(bDB),
-		applier:    NewApplier(bDB),
-		db:         bDB,
-		dbDir:      bDir,
-		t:          t,
+		id:      "node-B",
+		repLog:  NewReplicationLog(bDB),
+		applier: NewApplier(bDB),
+		db:      bDB,
+		dbDir:   bDir,
+		t:       t,
 	}
 	bEpoch, err := NewEpochStore(bDB)
 	if err != nil {

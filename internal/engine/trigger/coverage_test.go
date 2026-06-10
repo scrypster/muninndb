@@ -381,12 +381,12 @@ func TestHandleCognitive_StoreErrorNoOp(t *testing.T) {
 
 	var pushCount atomic.Int32
 	sub := &Subscription{
-		ID:          "cog-err-sub",
-		VaultID:     5,
-		Threshold:   0.0,
-		Deliver:     func(_ context.Context, _ *ActivationPush) error { pushCount.Add(1); return nil },
+		ID:           "cog-err-sub",
+		VaultID:      5,
+		Threshold:    0.0,
+		Deliver:      func(_ context.Context, _ *ActivationPush) error { pushCount.Add(1); return nil },
 		pushedScores: make(map[storage.ULID]float64),
-		rateLimiter: newTokenBucket(100),
+		rateLimiter:  newTokenBucket(100),
 	}
 	registry.Add(sub)
 

@@ -343,4 +343,3 @@ func TestAddChild_WritesAll_Atomically(t *testing.T) {
 	require.True(t, found, "ordinal must exist")
 	assert.Equal(t, int32(1), ordinal)
 }
-

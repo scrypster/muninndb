@@ -119,22 +119,22 @@ func TestFilter_Tags_AND(t *testing.T) {
 
 	engrams := []*storage.Engram{
 		{
-			ID:       storage.NewULID(),
-			Concept:  "both",
-			Tags:     []string{"important", "urgent"},
-			State:    storage.StateActive,
+			ID:      storage.NewULID(),
+			Concept: "both",
+			Tags:    []string{"important", "urgent"},
+			State:   storage.StateActive,
 		},
 		{
-			ID:       storage.NewULID(),
-			Concept:  "one",
-			Tags:     []string{"important", "review"},
-			State:    storage.StateActive,
+			ID:      storage.NewULID(),
+			Concept: "one",
+			Tags:    []string{"important", "review"},
+			State:   storage.StateActive,
 		},
 		{
-			ID:       storage.NewULID(),
-			Concept:  "neither",
-			Tags:     []string{"review"},
-			State:    storage.StateActive,
+			ID:      storage.NewULID(),
+			Concept: "neither",
+			Tags:    []string{"review"},
+			State:   storage.StateActive,
 		},
 	}
 

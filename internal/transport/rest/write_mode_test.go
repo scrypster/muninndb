@@ -313,7 +313,6 @@ func TestReadOnlyMode_PublicVaultSemanticReadEndpointsPassThrough(t *testing.T) 
 	}
 }
 
-
 // TestWriteOnlyMode_FullModeCanMutateStateAndTags verifies that full-mode
 // sessions can call PUT state and PUT tags (regression for hardening round 2).
 func TestWriteOnlyMode_FullModeCanMutateStateAndTags(t *testing.T) {

@@ -41,9 +41,9 @@ type MSP struct {
 	// that have reported it SDOWN. Not yet populated from gossip.
 	votedDown map[string]map[string]struct{}
 
-	OnSDown      func(nodeID string)          // called when a peer goes SDOWN
-	OnODown      func(nodeID string)          // called when quorum agrees SDOWN
-	OnRecover    func(nodeID string)          // called when SDOWN peer recovers
+	OnSDown       func(nodeID string)          // called when a peer goes SDOWN
+	OnODown       func(nodeID string)          // called when quorum agrees SDOWN
+	OnRecover     func(nodeID string)          // called when SDOWN peer recovers
 	OnAddrChanged func(nodeID, newAddr string) // called when a peer advertises a new address
 }
 

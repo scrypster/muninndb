@@ -1008,7 +1008,6 @@ func TestIntegration_PartitionRecovery(t *testing.T) {
 // 4. Verify final lastApplied = 13 (correct).
 // 5. Verify entries 8, 9, 10 appear exactly once in storage (no double-apply).
 // 6. Verify no errors from applying duplicate entries.
-//
 func TestIntegration_ApplierIdempotency_AcrossLeaderChange(t *testing.T) {
 	// Create a test node (Lobe) that will apply entries.
 	nodeLobeC := newTestNode(t, "node-C", "replica")

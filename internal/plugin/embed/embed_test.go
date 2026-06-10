@@ -369,8 +369,8 @@ func (m *mockHardwareProvider) Init(_ context.Context, _ ProviderHTTPConfig) (in
 func (m *mockHardwareProvider) EmbedBatch(_ context.Context, texts []string) ([]float32, error) {
 	return make([]float32, len(texts)*m.dims), nil
 }
-func (m *mockHardwareProvider) MaxBatchSize() int    { return 1 }
-func (m *mockHardwareProvider) Close() error         { return nil }
+func (m *mockHardwareProvider) MaxBatchSize() int         { return 1 }
+func (m *mockHardwareProvider) Close() error              { return nil }
 func (m *mockHardwareProvider) HardwareAccelerated() bool { return m.accelerated }
 
 func TestEmbedService_HardwareAccelerated_Delegates(t *testing.T) {

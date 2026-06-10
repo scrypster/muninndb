@@ -8,10 +8,10 @@ import (
 
 // TokenBucketLimiter implements token bucket rate limiting.
 type TokenBucketLimiter struct {
-	rate     float64      // requests per second
-	bucket   float64      // current tokens
-	max      float64      // max burst
-	lastTick time.Time    // last refill time
+	rate     float64   // requests per second
+	bucket   float64   // current tokens
+	max      float64   // max burst
+	lastTick time.Time // last refill time
 	mu       sync.Mutex
 }
 

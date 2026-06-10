@@ -230,4 +230,3 @@ func vaultFromArgs(args map[string]any) (string, bool, bool) {
 	}
 	return s, true, false
 }
-

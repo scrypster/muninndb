@@ -6,10 +6,10 @@ import "time"
 type ActivateQuery struct {
 	Vault        string
 	Context      []string
-	Where        Predicate   // nil if no WHERE clause
-	MaxResults   int         // 0 = use default
-	Hops         int         // 0 = use default
-	MinRelevance float32     // 0 = use default
+	Where        Predicate // nil if no WHERE clause
+	MaxResults   int       // 0 = use default
+	Hops         int       // 0 = use default
+	MinRelevance float32   // 0 = use default
 }
 
 // Predicate is the base interface for WHERE predicates.
@@ -29,8 +29,8 @@ func (*StatePredicate) predicateNode() {}
 // Op: ">" or ">="
 // Value: threshold (0.0-1.0)
 type ScorePredicate struct {
-	Field string  // "relevance" or "confidence"
-	Op    string  // ">" or ">="
+	Field string // "relevance" or "confidence"
+	Op    string // ">" or ">="
 	Value float32
 }
 

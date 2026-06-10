@@ -17,20 +17,20 @@ const (
 	TrailerSize     = 4
 
 	// Metadata field offsets (relative to record start)
-	OffsetID          = 8
-	OffsetCreatedAt   = 24
-	OffsetUpdatedAt   = 32
-	OffsetLastAccess  = 40
-	OffsetConfidence  = 48
-	OffsetRelevance   = 52
-	OffsetStability   = 56
-	OffsetAccessCount = 60
-	OffsetState       = 64
-	OffsetAssocCount  = 65
-	OffsetEmbedDim    = 67
-	OffsetMemoryType  = 68 // uint8, first byte of formerly-reserved area
+	OffsetID             = 8
+	OffsetCreatedAt      = 24
+	OffsetUpdatedAt      = 32
+	OffsetLastAccess     = 40
+	OffsetConfidence     = 48
+	OffsetRelevance      = 52
+	OffsetStability      = 56
+	OffsetAccessCount    = 60
+	OffsetState          = 64
+	OffsetAssocCount     = 65
+	OffsetEmbedDim       = 67
+	OffsetMemoryType     = 68 // uint8, first byte of formerly-reserved area
 	OffsetClassification = 69 // uint16, big-endian
-	OffsetTrust       = 71 // uint8; first byte of the formerly-reserved area (bytes 72-99 remain reserved)
+	OffsetTrust          = 71 // uint8; first byte of the formerly-reserved area (bytes 72-99 remain reserved)
 
 	// Offset table field offsets (relative to record start)
 	OffsetConceptOff   = 108
@@ -53,10 +53,10 @@ const (
 	AssocRecordSize = 40
 
 	// Limits
-	MaxConceptBytes           = 512
-	MaxCreatedByBytes         = 64
-	MaxContentBytes           = 16 * 1024 // 16KB
-	ContentCompressThreshold  = 512       // zstd compress content > this size
+	MaxConceptBytes          = 512
+	MaxCreatedByBytes        = 64
+	MaxContentBytes          = 16 * 1024 // 16KB
+	ContentCompressThreshold = 512       // zstd compress content > this size
 
 	// CRC
 	CRC16Polynomial = 0x1021 // CRC-16/CCITT-FALSE
@@ -91,9 +91,9 @@ const (
 // Tagged extension field prefixes. Written after variable data, before CRC32 trailer.
 // Format: tag(1) | len(2, big-endian) | data(len).
 const (
-	TagTypeLabel  uint8 = 0x19 // free-form TypeLabel string
-	TagSummary    uint8 = 0x1A // abstractive summary (UTF-8 string)
-	TagKeyPoints  uint8 = 0x1B // semantic key points (msgpack []string)
+	TagTypeLabel uint8 = 0x19 // free-form TypeLabel string
+	TagSummary   uint8 = 0x1A // abstractive summary (UTF-8 string)
+	TagKeyPoints uint8 = 0x1B // semantic key points (msgpack []string)
 )
 
 // appendTaggedString appends a tagged length-prefixed UTF-8 string to buf.

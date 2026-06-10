@@ -132,10 +132,14 @@ func TestEnrichService_Init_ProviderError(t *testing.T) {
 
 type failingInitProvider struct{}
 
-func (f *failingInitProvider) Name() string                                           { return "fail" }
-func (f *failingInitProvider) Init(_ context.Context, _ LLMProviderConfig) error      { return context.DeadlineExceeded }
-func (f *failingInitProvider) Complete(_ context.Context, _, _ string) (string, error) { return "", nil }
-func (f *failingInitProvider) Close() error                                           { return nil }
+func (f *failingInitProvider) Name() string { return "fail" }
+func (f *failingInitProvider) Init(_ context.Context, _ LLMProviderConfig) error {
+	return context.DeadlineExceeded
+}
+func (f *failingInitProvider) Complete(_ context.Context, _, _ string) (string, error) {
+	return "", nil
+}
+func (f *failingInitProvider) Close() error { return nil }
 
 func TestEnrichService_Enrich_NotInitialized(t *testing.T) {
 	es := &EnrichService{

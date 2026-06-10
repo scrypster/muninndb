@@ -18,12 +18,12 @@ import (
 // JoinHandler handles incoming JoinRequests on the Cortex side.
 // It is safe for concurrent access.
 type JoinHandler struct {
-	localNodeID  string
+	localNodeID   string
 	clusterSecret string
-	epochStore   *EpochStore
-	repLog       *ReplicationLog
-	db           *pebble.DB // non-nil when snapshot streaming is supported
-	mgr          *ConnManager
+	epochStore    *EpochStore
+	repLog        *ReplicationLog
+	db            *pebble.DB // non-nil when snapshot streaming is supported
+	mgr           *ConnManager
 
 	members map[string]NodeInfo
 	mu      sync.RWMutex
@@ -96,7 +96,7 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 	// Protocol version check
 	if req.ProtocolVersion > mbp.CurrentProtocolVersion {
 		return mbp.JoinResponse{
-			Accepted:    false,
+			Accepted: false,
 			RejectReason: fmt.Sprintf(
 				"protocol version %d is not supported by this Cortex (max supported: %d). "+
 					"This Lobe binary is newer than the Cortex — upgrade the Cortex first.",
@@ -108,7 +108,7 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 	}
 	if req.ProtocolVersion < mbp.MinSupportedProtocolVersion {
 		return mbp.JoinResponse{
-			Accepted:    false,
+			Accepted: false,
 			RejectReason: fmt.Sprintf(
 				"protocol version %d is no longer supported (minimum: %d, current: %d). "+
 					"Upgrade this Lobe to a binary that speaks protocol version >= %d.",
@@ -269,13 +269,13 @@ type JoinResult struct {
 
 // JoinClient handles the Lobe-side join handshake.
 type JoinClient struct {
-	localNodeID  string
-	localAddr    string
+	localNodeID   string
+	localAddr     string
 	clusterSecret string
-	epochStore   *EpochStore
-	applier      *Applier
-	db           *pebble.DB // non-nil to enable snapshot reception
-	mgr          *ConnManager
+	epochStore    *EpochStore
+	applier       *Applier
+	db            *pebble.DB // non-nil to enable snapshot reception
+	mgr           *ConnManager
 }
 
 // NewJoinClient creates a JoinClient for a Lobe node.

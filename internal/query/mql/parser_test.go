@@ -254,11 +254,11 @@ func TestParse_CreatorPredicate(t *testing.T) {
 // TestParse_ScorePredicate tests relevance and confidence predicates.
 func TestParse_ScorePredicate(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		field    string
-		op       string
-		value    float32
+		name  string
+		input string
+		field string
+		op    string
+		value float32
 	}{
 		{
 			name:  "relevance >",

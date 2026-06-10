@@ -161,7 +161,7 @@ type Result struct {
 	OrphanRatio          float64
 	ContradictionDensity float64
 	DuplicationPressure  float64
-	TemporalVariance        float64
+	TemporalVariance     float64
 	TotalEngrams         int64
 }
 
@@ -183,7 +183,7 @@ func (c *VaultCounters) Snapshot(vaultName string) Result {
 		OrphanRatio:          orphanRatio,
 		ContradictionDensity: contradictionDensity,
 		DuplicationPressure:  duplicationPressure,
-		TemporalVariance:        temporalVariance,
+		TemporalVariance:     temporalVariance,
 		TotalEngrams:         int64(n),
 	}
 }

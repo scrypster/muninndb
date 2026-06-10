@@ -17,7 +17,7 @@ type enableClusterRequest struct {
 	Role          string `json:"role"`
 	BindAddr      string `json:"bind_addr"`
 	ClusterSecret string `json:"cluster_secret"`
-	Secret        string `json:"secret"`      // alias for cluster_secret
+	Secret        string `json:"secret"` // alias for cluster_secret
 	CortexAddr    string `json:"cortex_addr"`
 }
 
@@ -258,10 +258,10 @@ func (s *Server) handleAdminClusterGetSettings(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.sendJSON(w, http.StatusOK, map[string]any{
-		"heartbeat_ms":       cfg.HeartbeatMS,
-		"sdown_beats":        cfg.SDOWNBeats,
+		"heartbeat_ms":         cfg.HeartbeatMS,
+		"sdown_beats":          cfg.SDOWNBeats,
 		"ccs_interval_seconds": cfg.CCSIntervalS,
-		"reconcile_on_heal":  cfg.ReconcileHeal,
+		"reconcile_on_heal":    cfg.ReconcileHeal,
 	})
 }
 

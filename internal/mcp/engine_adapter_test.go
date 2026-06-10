@@ -11,15 +11,17 @@ import (
 
 // mockPluginStore records calls to PluginStore methods used by RetryEnrich.
 type mockPluginStore struct {
-	updateDigestCalls         int
-	upsertEntityCalls         int
-	linkEngramToEntityCalls   int
-	setDigestFlagCalls        int
-	upsertRelationshipCalls   int
+	updateDigestCalls          int
+	upsertEntityCalls          int
+	linkEngramToEntityCalls    int
+	setDigestFlagCalls         int
+	upsertRelationshipCalls    int
 	incrementCoOccurrenceCalls int
 }
 
-func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint8) (int64, error) { return 0, nil }
+func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint8) (int64, error) {
+	return 0, nil
+}
 func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _, _ uint8) plugin.EngramIterator {
 	return nil
 }

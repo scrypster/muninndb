@@ -25,12 +25,12 @@ func FormatGraphJSONLD(g *ExportGraph) (string, error) {
 
 	for i, edge := range g.Edges {
 		e := map[string]any{
-			"@type":         "muninn:Relationship",
-			"@id":           fmt.Sprintf("muninn:rel/%s/%s/%s", edge.From, edge.RelType, edge.To),
-			"muninn:from":   "muninn:entity/" + edge.From,
-			"muninn:to":     "muninn:entity/" + edge.To,
+			"@type":          "muninn:Relationship",
+			"@id":            fmt.Sprintf("muninn:rel/%s/%s/%s", edge.From, edge.RelType, edge.To),
+			"muninn:from":    "muninn:entity/" + edge.From,
+			"muninn:to":      "muninn:entity/" + edge.To,
 			"muninn:relType": edge.RelType,
-			"muninn:weight": edge.Weight,
+			"muninn:weight":  edge.Weight,
 		}
 		_ = i
 		graph = append(graph, e)
@@ -53,8 +53,8 @@ func FormatGraphJSONLD(g *ExportGraph) (string, error) {
 
 // graphMLDoc is the top-level XML document for GraphML serialisation.
 type graphMLDoc struct {
-	XMLName xml.Name   `xml:"graphml"`
-	Xmlns   string     `xml:"xmlns,attr"`
+	XMLName xml.Name     `xml:"graphml"`
+	Xmlns   string       `xml:"xmlns,attr"`
 	Keys    []graphMLKey `xml:"key"`
 	Graph   graphMLGraph `xml:"graph"`
 }

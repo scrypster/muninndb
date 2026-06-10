@@ -84,7 +84,7 @@ func TestActivationLogRecentForVault(t *testing.T) {
 func TestActivationLogCapacity(t *testing.T) {
 	log := &activation.ActivationLog{}
 
-	const cap = 1000  // must match vaultLogCap in log.go
+	const cap = 1000 // must match vaultLogCap in log.go
 	const writes = cap + 200
 
 	base := time.Now()

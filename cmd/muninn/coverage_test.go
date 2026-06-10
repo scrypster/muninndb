@@ -71,9 +71,9 @@ func TestParseBehaviorChoice(t *testing.T) {
 
 func TestPrintBehaviorNote(t *testing.T) {
 	cases := []struct {
-		mode    string
-		custom  string
-		wantIn  string
+		mode   string
+		custom string
+		wantIn string
 	}{
 		{"autonomous", "", "autonomous"},
 		{"prompted", "", "prompted"},
@@ -637,10 +637,10 @@ func TestRunStopService_Unknown(t *testing.T) {
 
 func TestParseSemver(t *testing.T) {
 	cases := []struct {
-		input              string
-		wantMaj, wantMin   int
-		wantPat            int
-		wantOK             bool
+		input            string
+		wantMaj, wantMin int
+		wantPat          int
+		wantOK           bool
 	}{
 		{"v1.2.3", 1, 2, 3, true},
 		{"1.2.3", 1, 2, 3, true},

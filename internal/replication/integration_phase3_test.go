@@ -857,6 +857,6 @@ func TestP3Integration_ClockSkewResilience(t *testing.T) {
 		return nodeA.coord.msp.IsSDown("node-B")
 	}, "SDOWN to be triggered after heartbeats stop")
 
-	t.Logf("ClockSkewResilience: 20ms delay on 50ms heartbeat did not cause false SDOWN; "+
+	t.Logf("ClockSkewResilience: 20ms delay on 50ms heartbeat did not cause false SDOWN; " +
 		"stopping heartbeats correctly triggered SDOWN")
 }

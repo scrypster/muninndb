@@ -12,8 +12,8 @@ import (
 // Only GetMetadata is implemented; all other methods panic to catch unexpected calls.
 type mockEngineStore struct {
 	storage.EngineStore // embed to satisfy the interface with panics for unimplemented methods
-	metadataResult []*storage.EngramMeta
-	metadataErr    error
+	metadataResult      []*storage.EngramMeta
+	metadataErr         error
 }
 
 func (m *mockEngineStore) GetMetadata(ctx context.Context, ws [8]byte, ids []storage.ULID) ([]*storage.EngramMeta, error) {

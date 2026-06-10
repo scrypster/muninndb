@@ -75,8 +75,8 @@ func (p *OllamaLLMProvider) Init(ctx context.Context, cfg LLMProviderConfig) err
 // Complete sends a chat completion request to Ollama.
 func (p *OllamaLLMProvider) Complete(ctx context.Context, system, user string) (string, error) {
 	req := ollamaChatRequest{
-		Model:   p.model,
-		Stream:  false,
+		Model:  p.model,
+		Stream: false,
 		Messages: []ollamaMessage{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},

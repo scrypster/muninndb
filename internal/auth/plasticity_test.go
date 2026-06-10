@@ -78,11 +78,21 @@ func TestResolvePlasticity_InvalidPresetFallsToDefault(t *testing.T) {
 }
 
 func TestValidPlasticityPreset(t *testing.T) {
-	if !ValidPlasticityPreset("default")         { t.Error("default should be valid") }
-	if !ValidPlasticityPreset("reference")       { t.Error("reference should be valid") }
-	if !ValidPlasticityPreset("scratchpad")      { t.Error("scratchpad should be valid") }
-	if !ValidPlasticityPreset("knowledge-graph") { t.Error("knowledge-graph should be valid") }
-	if ValidPlasticityPreset("bogus")            { t.Error("bogus should not be valid") }
+	if !ValidPlasticityPreset("default") {
+		t.Error("default should be valid")
+	}
+	if !ValidPlasticityPreset("reference") {
+		t.Error("reference should be valid")
+	}
+	if !ValidPlasticityPreset("scratchpad") {
+		t.Error("scratchpad should be valid")
+	}
+	if !ValidPlasticityPreset("knowledge-graph") {
+		t.Error("knowledge-graph should be valid")
+	}
+	if ValidPlasticityPreset("bogus") {
+		t.Error("bogus should not be valid")
+	}
 }
 
 func TestPlasticityConfig_TraversalProfileField(t *testing.T) {

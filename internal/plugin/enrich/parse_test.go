@@ -160,9 +160,9 @@ func TestNormalizeEntityType_Valid(t *testing.T) {
 		"product":    "product",
 		"event":      "event",
 		// Unknown types are passed through (not coerced to "service").
-		"unknown":  "unknown",
-		"library":  "library",
-		"LIBRARY":  "library", // still normalised to lowercase
+		"unknown": "unknown",
+		"library": "library",
+		"LIBRARY": "library", // still normalised to lowercase
 	}
 
 	for input, expected := range tests {

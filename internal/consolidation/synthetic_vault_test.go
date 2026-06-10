@@ -15,15 +15,15 @@ import (
 type syntheticClass int
 
 const (
-	classDuplicateA       syntheticClass = iota // cosine >= 0.95 — representative (higher confidence)
-	classDuplicateB                             // cosine >= 0.95 — should be archived after dedup
-	classNearDuplicateA                         // cosine 0.85–0.95 — review band, must NOT be auto-merged
-	classNearDuplicateB                         // cosine 0.85–0.95 — review band, must NOT be auto-merged
-	classUniqueA                                // orthogonal — must survive dedup unchanged
-	classUniqueB                                // orthogonal — must survive dedup unchanged
-	classTemporalOld                            // same entity, older fact — may be superseded
-	classTemporalNew                            // same entity, newer fact — should win
-	classLowAccessUnique                        // rarely accessed, old — must not be weakened
+	classDuplicateA      syntheticClass = iota // cosine >= 0.95 — representative (higher confidence)
+	classDuplicateB                            // cosine >= 0.95 — should be archived after dedup
+	classNearDuplicateA                        // cosine 0.85–0.95 — review band, must NOT be auto-merged
+	classNearDuplicateB                        // cosine 0.85–0.95 — review band, must NOT be auto-merged
+	classUniqueA                               // orthogonal — must survive dedup unchanged
+	classUniqueB                               // orthogonal — must survive dedup unchanged
+	classTemporalOld                           // same entity, older fact — may be superseded
+	classTemporalNew                           // same entity, newer fact — should win
+	classLowAccessUnique                       // rarely accessed, old — must not be weakened
 )
 
 // syntheticVaultEntry is one labeled engram in a synthetic vault.
@@ -56,12 +56,12 @@ func buildSyntheticVault(
 	t.Helper()
 
 	// Unit vectors — all cosine similarities verified analytically.
-	dupAEmbed   := []float32{1.000000, 0.000000, 0.000000, 0.000000}
-	dupBEmbed   := []float32{0.970000, 0.243105, 0.000000, 0.000000}  // cosine(dupA,dupB) = 0.9700
-	nearAEmbed  := []float32{0.000000, 1.000000, 0.000000, 0.000000}
-	nearBEmbed  := []float32{0.000000, 0.900000, 0.435890, 0.000000}  // cosine(nearA,nearB) = 0.9000
-	uniAEmbed   := []float32{0.000000, 0.000000, 1.000000, 0.000000}
-	uniBEmbed   := []float32{0.000000, 0.000000, 0.000000, 1.000000}
+	dupAEmbed := []float32{1.000000, 0.000000, 0.000000, 0.000000}
+	dupBEmbed := []float32{0.970000, 0.243105, 0.000000, 0.000000} // cosine(dupA,dupB) = 0.9700
+	nearAEmbed := []float32{0.000000, 1.000000, 0.000000, 0.000000}
+	nearBEmbed := []float32{0.000000, 0.900000, 0.435890, 0.000000} // cosine(nearA,nearB) = 0.9000
+	uniAEmbed := []float32{0.000000, 0.000000, 1.000000, 0.000000}
+	uniBEmbed := []float32{0.000000, 0.000000, 0.000000, 1.000000}
 	temporalEmbed := []float32{0.300000, 0.300000, 0.300000, 0.854400}
 	lowAccEmbed := []float32{0.200000, 0.200000, 0.200000, 0.938083}
 
@@ -77,9 +77,9 @@ func buildSyntheticVault(
 	old := now.Add(-60 * 24 * time.Hour) // 60 days ago
 
 	type spec struct {
-		class   syntheticClass
-		engram  *storage.Engram
-		embed   []float32
+		class  syntheticClass
+		engram *storage.Engram
+		embed  []float32
 	}
 
 	specs := []spec{
@@ -197,7 +197,7 @@ func buildSyntheticVault(
 				Confidence:  0.95,
 				Relevance:   0.9,
 				Stability:   50,
-				AccessCount: 1,  // rarely accessed
+				AccessCount: 1, // rarely accessed
 				CreatedAt:   old,
 				LastAccess:  old, // last accessed 60 days ago
 			},

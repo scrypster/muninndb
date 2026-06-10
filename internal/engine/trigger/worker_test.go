@@ -15,9 +15,9 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockTriggerStore struct {
-	mu       sync.Mutex
-	metas    map[storage.ULID]*storage.EngramMeta
-	engrams  map[storage.ULID]*storage.Engram
+	mu      sync.Mutex
+	metas   map[storage.ULID]*storage.EngramMeta
+	engrams map[storage.ULID]*storage.Engram
 }
 
 func newMockTriggerStore() *mockTriggerStore {

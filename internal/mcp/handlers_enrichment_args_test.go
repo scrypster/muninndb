@@ -26,8 +26,8 @@ func TestApplyEnrichmentArgs_PlainStringEntityIsSkipped(t *testing.T) {
 func TestApplyEnrichmentArgs_PlainStringEntityMalformedCount(t *testing.T) {
 	args := map[string]any{
 		"entities": []any{
-			"PostgreSQL",                                          // malformed: plain string
-			map[string]any{"name": "Go", "type": "language"},    // valid
+			"PostgreSQL", // malformed: plain string
+			map[string]any{"name": "Go", "type": "language"}, // valid
 		},
 	}
 	req := &mbp.WriteRequest{}

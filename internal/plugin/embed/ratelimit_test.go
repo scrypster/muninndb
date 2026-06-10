@@ -128,5 +128,3 @@ func TestTokenBucketLimiter_HighRate(t *testing.T) {
 		}
 	}
 }
-
-

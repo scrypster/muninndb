@@ -864,7 +864,6 @@ func TestConfigureWindsurfWritesConfig(t *testing.T) {
 	}
 }
 
-
 // TestOpenClawSkillHasFrontmatter verifies the SKILL.md content includes valid YAML frontmatter
 // so that OpenClaw recognizes and loads the skill.
 func TestOpenClawSkillHasFrontmatter(t *testing.T) {
@@ -1505,7 +1504,7 @@ func TestBuildOpenClawSkillContent_ModeVariants(t *testing.T) {
 		{"autonomous", "Be proactive"},
 		{"prompted", "ONLY store memories when the user explicitly asks"},
 		{"selective", "Automatically store"},
-		{"custom", "Be proactive"},   // custom falls through to proactive default
+		{"custom", "Be proactive"}, // custom falls through to proactive default
 		{"", "Be proactive"},
 	}
 	for _, tc := range cases {

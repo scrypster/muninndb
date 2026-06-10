@@ -561,4 +561,3 @@ func selfUpdate(latest string) error {
 
 	return nil
 }
-

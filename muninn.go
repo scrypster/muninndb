@@ -160,10 +160,10 @@ func Open(dataDir string, opts ...func(*Options)) (*DB, error) {
 // Close flushes all pending writes and releases the exclusive database lock.
 // After Close returns, the DB must not be used.
 func (db *DB) Close() error {
-	db.cancel()          // signals contradW and confidW goroutines to stop
-	db.workers.Wait()    // wait for contradW and confidW to flush and exit
-	db.eng.Stop()        // coherence flush, novelty/FTS drain, job drain
-	db.hebbW.Stop()      // AFTER eng.Stop — flushes buffered Hebbian writes
+	db.cancel()       // signals contradW and confidW goroutines to stop
+	db.workers.Wait() // wait for contradW and confidW to flush and exit
+	db.eng.Stop()     // coherence flush, novelty/FTS drain, job drain
+	db.hebbW.Stop()   // AFTER eng.Stop — flushes buffered Hebbian writes
 	db.transW.Stop()
 	return db.store.Close()
 }

@@ -48,7 +48,7 @@ type PebbleStore struct {
 	noSyncEngrams bool
 	vaultCounters sync.Map          // [8]byte -> *vaultCounter
 	provenance    *provenance.Store // Provenance chain for tracking engram creation/updates
-	scoringStore  *scoring.Store   // Per-vault learnable scoring weights
+	scoringStore  *scoring.Store    // Per-vault learnable scoring weights
 	walSync       *walSyncer        // Periodic WAL fsync — covers all pebble.NoSync writes
 	counterFlush  *counterCoalescer // Coalesces vault count Pebble writes (100ms timer)
 	provWork      *provenanceWorker // NumCPU goroutines for provenance appends
@@ -76,7 +76,7 @@ type PebbleStore struct {
 	// All transition reads/writes go through this layer; Pebble is only hit on
 	// cold-start loads and periodic flushes.
 	transCache *TransitionCache
-	closeOnce   sync.Once
+	closeOnce  sync.Once
 	// entityLocks and coOccurrenceLocks use fixed-size striped mutex arrays instead of
 	// sync.Map to bound memory growth. sync.Map grows unbounded (one entry per unique key
 	// ever seen); stripedMutex uses a constant 256 × sizeof(sync.Mutex) ≈ 6 KB.

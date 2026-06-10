@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	TopTerms    = 30    // terms per fingerprint
-	Threshold   = 0.70  // Jaccard similarity threshold
-	CacheSize   = 1000  // LRU capacity per vault (uint32 key)
-	NumShards   = 16    // shards to reduce lock contention
+	TopTerms  = 30   // terms per fingerprint
+	Threshold = 0.70 // Jaccard similarity threshold
+	CacheSize = 1000 // LRU capacity per vault (uint32 key)
+	NumShards = 16   // shards to reduce lock contention
 )
 
 // Fingerprint is a set of the top TopTerms terms from an engram.

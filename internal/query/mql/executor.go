@@ -286,11 +286,11 @@ func executeTraverse(ctx context.Context, eng Engine, q *TraverseQuery) (interfa
 
 	// For now, return a placeholder response. In production, use engine to walk graph.
 	return map[string]interface{}{
-		"query_type":  "traverse",
-		"start_id":    q.StartID,
-		"hops":        q.Hops,
-		"min_weight":  q.MinWeight,
-		"status":      "not_yet_implemented",
+		"query_type": "traverse",
+		"start_id":   q.StartID,
+		"hops":       q.Hops,
+		"min_weight": q.MinWeight,
+		"status":     "not_yet_implemented",
 	}, nil
 }
 

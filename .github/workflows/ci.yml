@@ -26,6 +26,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Formatting gate — fast, no build needed. Fails if any tracked Go file
+      # is not gofmt-clean.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l $(git ls-files '*.go'))
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            echo "Run: gofmt -w \$(git ls-files '*.go')"
+            exit 1
+          fi
+
       # Cache the binary assets (ORT library + ONNX model).
       # These are ~130MB total and don't change between commits unless the
       # ORT version or model changes. The cache key includes both versions.
@@ -50,6 +62,9 @@ jobs:
 
       - name: Build server
         run: go build -tags localassets -o muninndb-server ./cmd/muninn/...
+
+      - name: go vet
+        run: go vet -tags localassets ./...
 
       - name: Run Go tests
         run: go test -tags localassets ./... -timeout 300s -race -coverprofile=coverage.out -covermode=atomic

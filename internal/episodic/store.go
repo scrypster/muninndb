@@ -36,8 +36,8 @@ type EpisodicStore interface {
 
 // PebbleEpisodicStore is the Pebble-backed implementation of EpisodicStore.
 type PebbleEpisodicStore struct {
-	db        *pebble.DB
-	appendMu  sync.Mutex // serializes AppendFrame to prevent frame position collisions
+	db       *pebble.DB
+	appendMu sync.Mutex // serializes AppendFrame to prevent frame position collisions
 }
 
 // NewPebbleEpisodicStore creates a new episodic store backed by Pebble.
@@ -48,10 +48,10 @@ func NewPebbleEpisodicStore(db *pebble.DB) *PebbleEpisodicStore {
 // CreateEpisode creates a new open episode with the given title.
 func (s *PebbleEpisodicStore) CreateEpisode(ctx context.Context, ws [8]byte, title string) (*Episode, error) {
 	ep := &Episode{
-		ID:        types.NewULID(),
-		Title:     title,
-		CreatedAt: time.Now().UTC(),
-		ClosedAt:  nil,
+		ID:         types.NewULID(),
+		Title:      title,
+		CreatedAt:  time.Now().UTC(),
+		ClosedAt:   nil,
 		FrameCount: 0,
 	}
 

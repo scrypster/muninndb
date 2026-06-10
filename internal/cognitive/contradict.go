@@ -63,11 +63,11 @@ type ContradictionEvent struct {
 
 // ContradictItem is submitted to the contradiction worker.
 type ContradictItem struct {
-	WS            [8]byte
-	EngramID      [16]byte
-	ConceptHash   uint32
-	Associations  []ContradictAssoc
-	OnFound       func(ContradictionEvent)
+	WS           [8]byte
+	EngramID     [16]byte
+	ConceptHash  uint32
+	Associations []ContradictAssoc
+	OnFound      func(ContradictionEvent)
 }
 
 // ContradictWorker detects contradictions between engrams.
