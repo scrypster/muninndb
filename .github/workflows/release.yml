@@ -176,6 +176,25 @@ jobs:
         with:
           merge-multiple: true
 
+      - name: Generate checksums
+        run: |
+          # SHA-256 over every published asset in the standard sha256sum format
+          # ("<hash>  <filename>"). install.sh / install.ps1 download this file
+          # and verify the binary they fetched against the matching line.
+          sha256sum \
+            muninn-darwin-arm64 \
+            muninn-darwin-amd64 \
+            muninn-linux-amd64 \
+            muninn-linux-arm64 \
+            muninn-windows-amd64.exe \
+            muninn_${GITHUB_REF_NAME}_darwin_arm64.tar.gz \
+            muninn_${GITHUB_REF_NAME}_darwin_amd64.tar.gz \
+            muninn_${GITHUB_REF_NAME}_linux_amd64.tar.gz \
+            muninn_${GITHUB_REF_NAME}_linux_arm64.tar.gz \
+            muninn_${GITHUB_REF_NAME}_windows_amd64.zip \
+            > checksums.txt
+          cat checksums.txt
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -202,7 +221,8 @@ jobs:
             muninn_${GITHUB_REF_NAME}_darwin_amd64.tar.gz \
             muninn_${GITHUB_REF_NAME}_linux_amd64.tar.gz \
             muninn_${GITHUB_REF_NAME}_linux_arm64.tar.gz \
-            muninn_${GITHUB_REF_NAME}_windows_amd64.zip
+            muninn_${GITHUB_REF_NAME}_windows_amd64.zip \
+            checksums.txt
 
   # ── Update Homebrew formula with new version + SHA256s ──────────────────
   update-formula:

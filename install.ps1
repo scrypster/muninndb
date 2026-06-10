@@ -60,6 +60,39 @@ try {
     Abort "Download failed: $_"
 }
 
+# Verify checksum against the release checksums.txt. A mismatch is fatal; a
+# missing checksums file (older release) only warns. Integrity verification,
+# not a substitute for signed releases.
+Write-Host "  Verifying checksum..." -NoNewline
+$sumsAsset = $release.assets | Where-Object { $_.name -eq "checksums.txt" }
+if ($sumsAsset) {
+    try {
+        $sums = (Invoke-WebRequest -Uri $sumsAsset.browser_download_url -UseBasicParsing).Content
+    } catch {
+        $sums = ""
+    }
+    $expected = $null
+    foreach ($line in ($sums -split "`n")) {
+        if ($line.Trim().EndsWith($assetName)) {
+            $expected = ($line.Trim() -split '\s+')[0]
+            break
+        }
+    }
+    if ($expected) {
+        $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+        if ($actual -ne $expected.ToLower()) {
+            Remove-Item $zipPath -ErrorAction SilentlyContinue
+            Write-Host " FAILED" -ForegroundColor Red
+            Abort "Checksum verification failed - refusing to install.`n  expected: $expected`n  actual:   $actual"
+        }
+        Write-Host " ok" -ForegroundColor Green
+    } else {
+        Write-Host " skipped (no entry for $assetName)" -ForegroundColor DarkGray
+    }
+} else {
+    Write-Host " skipped (no checksums.txt in release)" -ForegroundColor DarkGray
+}
+
 # Extract
 Write-Host "  Extracting..." -NoNewline
 if (Test-Path $installDir) {

@@ -58,6 +58,42 @@ if [ "${HTTP_CODE}" != "200" ]; then
   echo "  Download manually: https://github.com/${REPO}/releases/tag/${TAG}" >&2
   exit 1
 fi
+
+# ── Verify checksum ──────────────────────────────────────────────────────────
+# Fetch the release checksums file and verify the downloaded binary against it.
+# A mismatch is fatal. If the release predates checksums.txt, or no SHA-256 tool
+# is available, warn and continue rather than block installs — this is integrity
+# verification, not a substitute for signed releases.
+SUMS_URL="https://github.com/${REPO}/releases/download/${TAG}/checksums.txt"
+EXPECTED=$(curl -fsSL "${SUMS_URL}" 2>/dev/null \
+  | grep " ${BIN_NAME}-${PLATFORM}$" | awk '{print $1}' | head -1)
+
+if [ -z "${EXPECTED}" ]; then
+  echo "  ⚠  No checksum published for this release — skipping verification." >&2
+else
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL=$(sha256sum "${TMP}" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL=$(shasum -a 256 "${TMP}" | awk '{print $1}')
+  else
+    ACTUAL=""
+    echo "  ⚠  No sha256sum/shasum tool found — skipping checksum verification." >&2
+  fi
+
+  if [ -n "${ACTUAL}" ]; then
+    if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+      rm -f "${TMP}"
+      echo "" >&2
+      echo "muninn: CHECKSUM VERIFICATION FAILED — refusing to install" >&2
+      echo "  expected: ${EXPECTED}" >&2
+      echo "  actual:   ${ACTUAL}" >&2
+      echo "  The downloaded binary does not match the published checksum." >&2
+      exit 1
+    fi
+    echo "  Checksum verified."
+  fi
+fi
+
 chmod +x "${TMP}"
 
 # ── Install ──────────────────────────────────────────────────────────────────
