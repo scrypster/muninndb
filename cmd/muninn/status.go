@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -66,11 +68,12 @@ const (
 )
 
 type serviceStatus struct {
-	name   string
-	port   int
-	up     bool
-	scheme string // scheme the probe reached the service on ("http"/"https"/"")
-	note   string // optional: "not responding"
+	name    string
+	port    int
+	up      bool
+	scheme  string // scheme the probe reached the service on ("http"/"https"/"")
+	note    string // optional: "not responding"
+	certErr bool   // probe failed specifically due to TLS certificate verification
 }
 
 // overallState computes the aggregate state from individual service statuses.
@@ -119,32 +122,41 @@ func probeServicesDefault() []serviceStatus {
 // An off-host https URL (e.g. a MUNINNDB_*_URL env override) keeps full
 // verification, consistent with httpClientForURL — so a remote server behind
 // an untrusted cert reads as [down] rather than silently probed insecurely.
-func probeHealth(url string) (up bool, scheme string) {
+// probeHealth additionally reports certErr=true when an https probe failed
+// specifically because the certificate didn't verify (untrusted CA, hostname
+// mismatch, or expired) — distinct from a connection refusal/timeout — so the
+// status display can tell "server up, cert untrusted" apart from "down".
+func probeHealth(url string) (up bool, scheme string, certErr bool) {
 	switch {
 	case strings.HasPrefix(url, "https://"):
-		if probeOnce(url, isLoopbackURL(url)) {
-			return true, "https"
+		ok, err := probeOnce(url, isLoopbackURL(url))
+		if ok {
+			return true, "https", false
 		}
-		return false, ""
+		return false, "", isCertVerificationError(err)
 	case strings.HasPrefix(url, "http://"):
-		if probeOnce(url, false) {
-			return true, "http"
+		if ok, _ := probeOnce(url, false); ok {
+			return true, "http", false
 		}
 		// The http probe failed — the server may actually speak TLS on this
 		// port. Retry once over https before concluding it is down.
 		httpsURL := "https://" + strings.TrimPrefix(url, "http://")
-		if probeOnce(httpsURL, isLoopbackURL(httpsURL)) {
-			return true, "https"
+		ok, err := probeOnce(httpsURL, isLoopbackURL(httpsURL))
+		if ok {
+			return true, "https", false
 		}
-		return false, ""
+		return false, "", isCertVerificationError(err)
 	default:
-		return probeOnce(url, false), ""
+		ok, _ := probeOnce(url, false)
+		return ok, "", false
 	}
 }
 
-// probeOnce performs a single health-check GET. When insecure is set the TLS
-// client skips certificate verification (see probeHealth for the rationale).
-func probeOnce(url string, insecure bool) bool {
+// probeOnce performs a single health-check GET and returns the underlying error
+// so callers can distinguish a TLS trust failure from a dead server. When
+// insecure is set the TLS client skips certificate verification (see probeHealth
+// for the rationale).
+func probeOnce(url string, insecure bool) (bool, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	if insecure {
 		client.Transport = insecureLoopbackTransport
@@ -154,10 +166,25 @@ func probeOnce(url string, insecure bool) bool {
 	}
 	resp, err := client.Get(url)
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	return resp.StatusCode >= 200 && resp.StatusCode < 300, nil
+}
+
+// isCertVerificationError reports whether err is a TLS certificate trust or
+// validity failure (untrusted CA, hostname mismatch, expired/not-yet-valid) —
+// as opposed to a connection refusal or timeout.
+func isCertVerificationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ce *tls.CertificateVerificationError
+	var ua x509.UnknownAuthorityError
+	var he x509.HostnameError
+	var ci x509.CertificateInvalidError
+	return errors.As(err, &ce) || errors.As(err, &ua) ||
+		errors.As(err, &he) || errors.As(err, &ci)
 }
 
 // probeServicesWithAddrs is the testable implementation. addrs contains the
@@ -201,7 +228,7 @@ func probeServicesWithAddrs(addrs daemonAddrs) []serviceStatus {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			svcs[i].up, svcs[i].scheme = probeHealth(urls[i])
+			svcs[i].up, svcs[i].scheme, svcs[i].certErr = probeHealth(urls[i])
 		}(i)
 	}
 	wg.Wait()
@@ -378,16 +405,30 @@ func printStatusDisplay(compact bool) runState {
 	// Degraded: surface which service is down and how to fix
 	if state == stateDegraded {
 		fmt.Println()
+		certIssue := false
 		for _, s := range svcs {
-			if !s.up {
-				fmt.Printf("  %s is not responding", s.name)
-				if s.name == "mcp" {
-					fmt.Print(" — your AI tools won't have memory access")
-				}
-				fmt.Println(".")
+			if s.up {
+				continue
 			}
+			if s.certErr {
+				certIssue = true
+				fmt.Printf("  %s is reachable but its TLS certificate failed verification", s.name)
+			} else {
+				fmt.Printf("  %s is not responding", s.name)
+			}
+			if s.name == "mcp" {
+				fmt.Print(" — your AI tools won't have memory access")
+			}
+			fmt.Println(".")
 		}
-		fmt.Println("  Run: muninn restart")
+		if certIssue {
+			// A restart won't fix a trust problem — the server is up.
+			fmt.Println("  The server is up but its certificate isn't trusted. Check that the")
+			fmt.Println("  cert is valid for this host and that your CA is trusted (or, for a")
+			fmt.Println("  remote endpoint, that MUNINNDB_*_URL points at a host the cert covers).")
+		} else {
+			fmt.Println("  Run: muninn restart")
+		}
 	}
 
 	if !compact {

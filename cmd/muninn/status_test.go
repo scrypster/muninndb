@@ -286,7 +286,7 @@ func TestHealthURL_SchemeApplied(t *testing.T) {
 func TestProbeHealth_HTTPServer(t *testing.T) {
 	srv := newHealthServer()
 	defer srv.Close()
-	up, scheme := probeHealth(srv.URL + "/")
+	up, scheme, _ := probeHealth(srv.URL + "/")
 	if !up {
 		t.Error("probeHealth should report a plain-HTTP server up")
 	}
@@ -301,7 +301,7 @@ func TestProbeHealth_RetriesHTTPS(t *testing.T) {
 	srv := newTLSHealthServer()
 	defer srv.Close()
 	httpURL := "http://" + strings.TrimPrefix(srv.URL, "https://")
-	up, scheme := probeHealth(httpURL)
+	up, scheme, _ := probeHealth(httpURL)
 	if !up {
 		t.Error("probeHealth should detect a TLS server via http→https retry")
 	}
@@ -309,14 +309,14 @@ func TestProbeHealth_RetriesHTTPS(t *testing.T) {
 		t.Errorf("retry scheme = %q, want https", scheme)
 	}
 	// A direct https:// URL (env-override style) is probed without retry.
-	if up, scheme := probeHealth(srv.URL); !up || scheme != "https" {
+	if up, scheme, _ := probeHealth(srv.URL); !up || scheme != "https" {
 		t.Errorf("direct https probe: up=%v scheme=%q, want true/https", up, scheme)
 	}
 }
 
 func TestProbeHealth_DownServer(t *testing.T) {
 	// Nothing listening — both the http attempt and the https retry must fail.
-	if up, scheme := probeHealth("http://127.0.0.1:19998/"); up || scheme != "" {
+	if up, scheme, _ := probeHealth("http://127.0.0.1:19998/"); up || scheme != "" {
 		t.Errorf("unreachable server: up=%v scheme=%q, want false/empty", up, scheme)
 	}
 }

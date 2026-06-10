@@ -175,11 +175,28 @@ func TestProbeOnce_VerifiesWhenSecure(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
-	if probeOnce(ts.URL, false) {
+	ok, err := probeOnce(ts.URL, false)
+	if ok {
 		t.Error("a self-signed server must read as down when verification is on")
 	}
-	if !probeOnce(ts.URL, true) {
+	// The failure must be classifiable as a cert problem (not a generic outage),
+	// so the status display can say "untrusted cert" instead of "Run: muninn restart".
+	if !isCertVerificationError(err) {
+		t.Errorf("expected a cert-verification error, got: %v", err)
+	}
+	if ok, _ := probeOnce(ts.URL, true); !ok {
 		t.Error("the same server must read as up when verification is skipped")
+	}
+}
+
+func TestIsCertVerificationError(t *testing.T) {
+	// A connection-refused / timeout error is NOT a cert problem.
+	_, err := probeOnce("https://127.0.0.1:1/health", false) // nothing listens on port 1
+	if isCertVerificationError(err) {
+		t.Errorf("a connection error must not be classified as a cert error: %v", err)
+	}
+	if isCertVerificationError(nil) {
+		t.Error("nil must not be a cert error")
 	}
 }
 
@@ -190,7 +207,7 @@ func TestProbeHealthLoopbackSelfSigned(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
-	up, scheme := probeHealth(ts.URL)
+	up, scheme, _ := probeHealth(ts.URL)
 	if !up || scheme != "https" {
 		t.Errorf("probeHealth(%q) = (%v, %q), want (true, https)", ts.URL, up, scheme)
 	}
