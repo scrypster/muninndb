@@ -162,7 +162,7 @@ func runStart(webEnabled bool) error {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
-		if up, _ := probeHealth(mcpHealthURL); up {
+		if up, _, _ := probeHealth(mcpHealthURL); up {
 			fmt.Printf("muninn started (pid %d)\n", cmd.Process.Pid)
 			fmt.Println()
 			printStatusDisplay(true)

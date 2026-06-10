@@ -66,3 +66,43 @@ func TestEvolve_AtomicBatch_OldSoftDeletedNewReadable(t *testing.T) {
 	assert.Equal(t, oldULID, assocs[0].TargetID, "association must point to old engram")
 	assert.Equal(t, storage.RelSupersedes, assocs[0].RelType, "association type must be RelSupersedes")
 }
+
+// TestEvolve_ConceptStableAcrossRepeatedEvolution verifies that the concept field
+// is inherited verbatim from the predecessor on every Evolve call, with no suffix
+// added or accumulated. Lineage is recorded via the RelSupersedes association, not
+// by mutating the concept string. Without this guarantee, callers that use concept
+// names as stable references (canonical-engram patterns) see the reference drift
+// further on every update: "topic" → "topic (evolved)" → "topic (evolved) (evolved)".
+func TestEvolve_ConceptStableAcrossRepeatedEvolution(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const originalConcept = "fact: example service — canonical specs"
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "test", Concept: originalConcept, Content: "v1",
+	})
+	require.NoError(t, err)
+
+	// First evolution: concept must equal original (no suffix).
+	id1, err := eng.Evolve(ctx, "test", resp.ID, "v2", "first update", nil)
+	require.NoError(t, err)
+
+	ws := eng.store.ResolveVaultPrefix("test")
+	eng1, err := eng.store.GetEngram(ctx, ws, id1)
+	require.NoError(t, err)
+	require.NotNil(t, eng1)
+	assert.Equal(t, originalConcept, eng1.Concept,
+		"concept must be inherited verbatim from predecessor, no suffix")
+
+	// Second evolution: concept must still equal original (no accumulation).
+	id2, err := eng.Evolve(ctx, "test", id1.String(), "v3", "second update", nil)
+	require.NoError(t, err)
+
+	eng2, err := eng.store.GetEngram(ctx, ws, id2)
+	require.NoError(t, err)
+	require.NotNil(t, eng2)
+	assert.Equal(t, originalConcept, eng2.Concept,
+		"concept must remain stable across repeated evolutions, no accumulating suffix")
+}

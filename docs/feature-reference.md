@@ -206,7 +206,7 @@ The ACTIVATE pipeline has **6 phases**:
 | Retry enrichment | — | — | `muninn_retry_enrich` |
 | Get usage guide | — | — | `muninn_guide` |
 | Get session activity | `GET /api/session` | — | `muninn_session` |
-| Get activity counts | `GET /api/activity-counts?days=N&until=YYYY-MM-DD` | — | — |
+| Get activity counts | `GET /api/activity-counts?days=N&until=YYYY-MM-DD&tz=IANA` | — | — |
 | Get contradictions | — | — | `muninn_contradictions` |
 | Stats + coherence | `GET /api/stats` | `Stat()` | `muninn_status` |
 | List engrams | `GET /api/engrams` | — | — |

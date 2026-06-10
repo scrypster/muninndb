@@ -50,8 +50,9 @@ An intent-organized reading guide. Start with what you want to understand.
 ## If you want to deploy MuninnDB
 
 1. **[Self-Hosting](self-hosting.md)** — Deployment options, environment variables, and data directory setup.
-2. **[Cluster Operations](cluster-operations.md)** — Multi-node clustering, replication, and leader election.
-3. **[Claude.com / ChatGPT via Traefik](integrations/traefik-claude-chatgpt.md)** — Connect a cloud-hosted MuninnDB to Claude.com Connectors or ChatGPT's MCP support.
+2. **[TLS](tls.md)** — Serve clients over HTTPS: certificates, env vars, verification, and the reverse-proxy alternative.
+3. **[Cluster Operations](cluster-operations.md)** — Multi-node clustering, replication, and leader election.
+4. **[Claude.com / ChatGPT via Traefik](integrations/traefik-claude-chatgpt.md)** — Connect a cloud-hosted MuninnDB to Claude.com Connectors or ChatGPT's MCP support.
 
 ---
 

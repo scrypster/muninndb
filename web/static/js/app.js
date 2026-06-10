@@ -616,7 +616,10 @@ document.addEventListener('alpine:init', () => {
         // ends of the array confuse Alpine's DOM anchor tracking and produce the
         // "can't access property 'after', v is undefined" crash.
         if (!this.liveFeed.some(item => item.id === msg.data.id)) {
-          const next = [msg.data, ...this.liveFeed];
+          // The memory_added event carries createdAt in SECONDS (backend
+          // .Unix()) → normalize to ms so the frontend convention holds.
+          const item = { ...msg.data, createdAt: this.secondsToMillis(msg.data.createdAt) };
+          const next = [item, ...this.liveFeed];
           this.liveFeed = next.length > 20 ? next.slice(0, 20) : next;
         }
       }
@@ -634,6 +637,24 @@ document.addEventListener('alpine:init', () => {
         throw new Error(res.status + ': ' + text);
       }
       return res.json();
+    },
+
+    // ── created_at unit normalization ────────────────────────────────────────
+    // The REST API returns created_at in INCONSISTENT units depending on the
+    // endpoint (the backend types are shared with the MCP/gRPC transports, so
+    // they cannot be changed here):
+    //   • /api/engrams and /api/session use .Unix()      → SECONDS
+    //   • /api/activate and /api/engrams/{id} use UnixNano() → NANOSECONDS
+    // To keep the frontend consistent, every mapping site normalizes created_at
+    // to epoch MILLISECONDS via these helpers, and templates render the value
+    // directly with `new Date(createdAt)` (no `* 1000`). The pure converters
+    // live in time-utils.js (exposed as globalThis.MuninnTime) so they can be
+    // unit-tested under Vitest.
+    secondsToMillis(value) {
+      return MuninnTime.secondsToMillis(value);
+    },
+    nanosToMillis(value) {
+      return MuninnTime.nanosToMillis(value);
     },
 
     // ── Dashboard ──────────────────────────────────────────────────────────
@@ -787,6 +808,13 @@ document.addEventListener('alpine:init', () => {
 
       const days = Math.max(1, Math.min(180, this.activityDays || 7));
       let url = '/api/activity-counts?vault=' + encodeURIComponent(this.vault) + '&days=' + days;
+      // Send the viewer's IANA timezone so the server buckets activity by the
+      // local calendar day instead of UTC. The server falls back to UTC if the
+      // name is missing or unrecognized.
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) {
+        url += '&tz=' + encodeURIComponent(tz);
+      }
       if (this.activityUntil) {
         url += '&until=' + encodeURIComponent(this.activityUntil);
       }
@@ -890,7 +918,11 @@ document.addEventListener('alpine:init', () => {
                   const label = this.getLabelForValue(value);
                   const parts = label.split('-');
                   if (parts.length === 3) {
-                    // Parse as UTC to avoid timezone-induced date shift.
+                    // The server returns each label as a YYYY-MM-DD calendar day
+                    // already bucketed in the requested timezone. Render it as a
+                    // date-only value (parse and format in UTC) so the displayed
+                    // month/day matches the bucket exactly and is not shifted
+                    // again by the browser's local offset.
                     const d = new Date(label + 'T00:00:00Z');
                     if (isNaN(d.getTime())) return label;
                     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -976,7 +1008,8 @@ document.addEventListener('alpine:init', () => {
         if (f.minConf > 0) url += '&min_confidence=' + f.minConf;
         if (f.maxConf > 0) url += '&max_confidence=' + f.maxConf;
         const data = await this.apiCall(url);
-        this.memories = (data.engrams || []).map(e => ({ ...e, createdAt: e.created_at }));
+        // /api/engrams returns created_at in SECONDS → normalize to ms.
+        this.memories = (data.engrams || []).map(e => ({ ...e, createdAt: this.secondsToMillis(e.created_at) }));
         this.totalMemories = data.total || 0;
       } catch (err) {
         this.addNotification('error', 'Load failed: ' + err.message);
@@ -1013,7 +1046,8 @@ document.addEventListener('alpine:init', () => {
           content: a.content,
           confidence: a.confidence || a.score || 0,
           vault: this.vault,
-          createdAt: a.created_at || 0,
+          // /api/activate returns created_at in NANOSECONDS → normalize to ms.
+          createdAt: this.nanosToMillis(a.created_at),
         }));
         this.totalMemories = this.memories.length;
         this.page = 0;
@@ -1092,7 +1126,9 @@ document.addEventListener('alpine:init', () => {
           const resp = await fetch('/api/engrams/' + encodeURIComponent(m.id) + '?vault=' + encodeURIComponent(this.vault));
           if (resp.ok) {
             const full = await resp.json();
-            m = { ...m, ...full, createdAt: full.created_at || m.createdAt };
+            // /api/engrams/{id} returns created_at in NANOSECONDS → normalize to
+            // ms; fall back to m.createdAt (already ms) when absent.
+            m = { ...m, ...full, createdAt: this.nanosToMillis(full.created_at) || m.createdAt };
           }
         } catch (e) { /* fall through with partial data */ }
       }
@@ -1776,7 +1812,8 @@ document.addEventListener('alpine:init', () => {
         );
         // GetSessionResponse has { entries: [] } or raw array
         const raw = data.entries || (Array.isArray(data) ? data : []);
-        this.sessionEntries = raw.map(e => ({ ...e, createdAt: e.created_at }));
+        // /api/session returns created_at in SECONDS → normalize to ms.
+        this.sessionEntries = raw.map(e => ({ ...e, createdAt: this.secondsToMillis(e.created_at) }));
       } catch (err) {
         this.addNotification('error', 'Session: ' + err.message);
       }

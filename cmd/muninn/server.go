@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -42,6 +43,7 @@ import (
 	"github.com/scrypster/muninndb/internal/replication"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/storage/migrate"
+	"github.com/scrypster/muninndb/internal/tlsutil"
 	grpcpkg "github.com/scrypster/muninndb/internal/transport/grpc"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 	"github.com/scrypster/muninndb/internal/transport/rest"
@@ -51,6 +53,7 @@ import (
 )
 
 const defaultMCPPort = "8750"
+const defaultRESTPort = "8475"
 const defaultOpenAIEmbedProviderURL = "openai://text-embedding-3-small"
 
 const vaultUpgradeWarning = `
@@ -811,6 +814,9 @@ func runServer() {
 		RestAddr: *restAddr,
 		MCPAddr:  *mcpAddr,
 		UIAddr:   *uiAddr,
+		// Best-effort parse of the cert's routable DNS SAN for the Web UI URL.
+		// "" on any error; the authoritative cert load + validation is below.
+		CertHost: certRoutableHost(*tlsCert, *tlsKey),
 	})
 
 	// Backup env fallbacks — flags take priority; env vars are the fallback.
@@ -857,11 +863,24 @@ func runServer() {
 			slog.Error("tls: failed to load certificate", "cert", *tlsCert, "err", err)
 			os.Exit(1)
 		}
+
+		logAttrs := []any{"cert", *tlsCert}
+		if leaf, perr := x509.ParseCertificate(cert.Certificate[0]); perr == nil {
+			remaining := tlsutil.CheckCertExpiry(slog.Default(), leaf, "client-facing")
+			logAttrs = append(logAttrs,
+				"subject", leaf.Subject.CommonName,
+				"not_after", leaf.NotAfter.UTC().Format(time.RFC3339),
+				"days_remaining", tlsutil.DaysRemaining(remaining))
+		} else {
+			slog.Warn("tls: failed to parse certificate leaf for expiry check",
+				"cert", *tlsCert, "err", perr)
+		}
+
 		clientTLS = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
 		}
-		slog.Info("tls: client-facing TLS enabled", "cert", *tlsCert)
+		slog.Info("tls: client-facing TLS enabled", logAttrs...)
 	}
 
 	// Validate address flags early so misconfigurations are caught before any

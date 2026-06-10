@@ -38,7 +38,9 @@ func (e *Engine) ExportVault(ctx context.Context, vaultName, embedderModel strin
 		return nil, fmt.Errorf("export vault %q: %w", vaultName, ErrVaultNotFound)
 	}
 
-	ws := e.store.VaultPrefix(vaultName)
+	// Use ResolveVaultPrefix so vaults whose name has been changed via RenameVault
+	// (ws ≠ siphash(currentName)) are exported via their actual stored workspace.
+	ws := e.store.ResolveVaultPrefix(vaultName)
 	opts := storage.ExportOpts{
 		EmbedderModel: embedderModel,
 		Dimension:     dimension,

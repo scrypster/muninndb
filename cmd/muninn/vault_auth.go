@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -151,17 +150,7 @@ func loginAdmin(username, password string) error {
 		"password": password,
 	})
 	loginURL := vaultUIBase + "/api/auth/login"
-	client := &http.Client{Timeout: 5 * time.Second}
-	// ToLower: the scheme is case-insensitive; keep this consistent with
-	// isLoopbackURL (which lowercases via url.Parse).
-	if strings.HasPrefix(strings.ToLower(loginURL), "https://") && isLoopbackURL(loginURL) {
-		// Loopback https: skip cert verification — the connection never leaves
-		// this machine. Off-host stays verified. Unifies to httpClientForURL
-		// once #468 lands.
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}
-	}
+	client := httpClientForURL(loginURL, 5*time.Second)
 	resp, err := client.Post(loginURL, "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {

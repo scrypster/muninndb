@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"github.com/scrypster/muninndb/internal/tlsutil"
 )
 
 // version is set at build time via -ldflags "-X main.version=vX.Y.Z"
@@ -295,11 +297,6 @@ func parseLeafCert(certPath string) *x509.Certificate {
 	}
 }
 
-// certExpiryWarnWindow mirrors internal/tlsutil.ExpiryWarnWindow (added by
-// #456); duplicated here only because that package is not on this branch's
-// base. Unify onto tlsutil once #456 lands.
-const certExpiryWarnWindow = 30 * 24 * time.Hour
-
 // warnIfCertExpiring notes an expired, not-yet-valid, or soon-to-expire cert at
 // init time, so the operator is not handed a "✓ TLS enabled" banner over a cert
 // clients will reject. Non-fatal: the daemon decides whether to serve (and #456
@@ -318,10 +315,9 @@ func warnIfCertExpiring(certPath string) {
 	case now.Before(c.NotBefore):
 		fmt.Printf("  ⚠  The TLS certificate is not valid until %s.\n",
 			c.NotBefore.UTC().Format("2006-01-02"))
-	case c.NotAfter.Sub(now) < certExpiryWarnWindow:
-		days := int((c.NotAfter.Sub(now) + 24*time.Hour - 1) / (24 * time.Hour)) // round up
+	case c.NotAfter.Sub(now) < tlsutil.ExpiryWarnWindow:
 		fmt.Printf("  ⚠  The TLS certificate expires in %d day(s), on %s.\n",
-			days, c.NotAfter.UTC().Format("2006-01-02"))
+			tlsutil.DaysRemaining(c.NotAfter.Sub(now)), c.NotAfter.UTC().Format("2006-01-02"))
 	}
 }
 

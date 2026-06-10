@@ -392,26 +392,32 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 		return
 	}
 
-	if level > idx.maxLevel {
-		idx.entryPoint = id
-		idx.maxLevel = level
-	}
-
+	// Traverse from the EXISTING entry point and link the new node into the
+	// graph BEFORE any entry-point promotion. Promoting first would make
+	// ep == id below: searchLayer then sees only the new node itself, the node
+	// links to nothing (or to itself), and every promotion orphans the entire
+	// prior graph — fragmenting the index a little more on each maxLevel raise.
 	ep := idx.entryPoint
+	oldMaxLevel := idx.maxLevel
 	var epVec []float32
 	if epNode := idx.nodes[ep]; epNode != nil {
 		epVec = epNode.vec
 	}
 
-	// Phase 1: greedy descent from maxLevel to level+1 (only if epVec exists)
+	// Phase 1: greedy descent from oldMaxLevel to level+1 (only if epVec exists)
 	if epVec != nil {
-		for l := idx.maxLevel; l > level; l-- {
+		for l := oldMaxLevel; l > level; l-- {
 			epVec = idx.greedyDescend(ep, epVec, vector, l, &ep)
 		}
 	}
 
-	// Phase 2: insert at each layer from min(level, maxLevel) down to 0
-	for l := min(level, idx.maxLevel); l >= 0; l-- {
+	// Neighbors whose layer lists we mutate must be re-persisted, or the
+	// back-edges exist only in memory and every restart sheds them — leaving
+	// the on-disk graph forward-only and barely navigable after reload.
+	mutated := make(map[[16]byte]*HNSWNode)
+
+	// Phase 2: insert at each layer from min(level, oldMaxLevel) down to 0
+	for l := min(level, oldMaxLevel); l >= 0; l-- {
 		neighbors := idx.searchLayer(ep, vector, idx.efC(), l)
 		M := M
 		if l == 0 {
@@ -439,11 +445,15 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 			nbNode.layers[l] = append(nbNode.layers[l], id)
 			maxConn := maxConnections(l)
 			if len(nbNode.layers[l]) > maxConn {
-				// Prune: keep strongest connections
-				// Simple pruning: truncate (production would use heuristic select)
-				nbNode.layers[l] = nbNode.layers[l][:maxConn]
+				// Prune: keep the maxConn NEAREST neighbors by distance to this
+				// node's vector. Plain truncation ([:maxConn]) would always drop
+				// the just-appended edge once the layer is full — late-inserted
+				// nodes then accumulate zero in-edges and become unreachable,
+				// silently degrading the graph as the vault grows.
+				nbNode.layers[l] = idx.pruneNeighbors(nbNode.vec, nbNode.layers[l], maxConn)
 			}
 			nbNode.mu.Unlock()
+			mutated[nb.id] = nbNode
 		}
 
 		if len(neighbors) > 0 {
@@ -451,8 +461,47 @@ func (idx *Index) Insert(id [16]byte, vector []float32) {
 		}
 	}
 
+	// Promote to entry point only after the node is linked into the graph.
+	if level > idx.maxLevel {
+		idx.entryPoint = id
+		idx.maxLevel = level
+	}
+
 	idx.persistWg.Add(1)
 	go idx.persistNode(id, node)
+	for nbID, nbNode := range mutated {
+		idx.persistWg.Add(1)
+		go idx.persistNode(nbID, nbNode)
+	}
+}
+
+// pruneNeighbors keeps the keep nearest neighbor ids to baseVec, measured by
+// cosine distance. Neighbors whose node or vector is missing sort last so they
+// are pruned first. Caller must hold the owning node's mutex; neighbor vectors
+// are immutable after insert, so reading them without their locks is safe.
+func (idx *Index) pruneNeighbors(baseVec []float32, ids [][16]byte, keep int) [][16]byte {
+	if len(ids) <= keep {
+		return ids
+	}
+	type nd struct {
+		id   [16]byte
+		dist float64
+	}
+	scored := make([]nd, 0, len(ids))
+	for _, nid := range ids {
+		n := idx.nodes[nid]
+		if n == nil || len(n.vec) == 0 || len(baseVec) == 0 {
+			scored = append(scored, nd{nid, 2.0}) // missing vector: prune first
+			continue
+		}
+		scored = append(scored, nd{nid, 1.0 - float64(CosineSimilarity(baseVec, n.vec))})
+	}
+	sort.Slice(scored, func(i, j int) bool { return scored[i].dist < scored[j].dist })
+	out := make([][16]byte, keep)
+	for i := 0; i < keep; i++ {
+		out[i] = scored[i].id
+	}
+	return out
 }
 
 func (idx *Index) greedyDescend(ep [16]byte, epVec, query []float32, l int, newEP *[16]byte) []float32 {
@@ -661,6 +710,14 @@ func (idx *Index) LoadFromPebble() error {
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := iter.Key()
 		if len(key) < 26 {
+			continue
+		}
+
+		// Only load nodes belonging to this index's vault. The 0x07 range is
+		// shared by all vaults; without this filter every per-vault index loads
+		// every vault's nodes — bloating memory and surfacing cross-vault IDs
+		// that can never resolve in the querying vault.
+		if [8]byte(key[1:9]) != idx.ws {
 			continue
 		}
 

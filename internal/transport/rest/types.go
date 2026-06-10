@@ -239,6 +239,9 @@ type GetSessionResponse struct {
 }
 
 // ActivityCountsRequest requests daily activity counts for a vault.
+// The Location of Since (which Until is expected to match) selects the timezone
+// used to bucket counts into calendar days; UTC-located times produce UTC-day
+// buckets.
 type ActivityCountsRequest struct {
 	Vault string    `json:"vault"`
 	Since time.Time `json:"since"`
