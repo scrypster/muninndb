@@ -471,6 +471,13 @@ func buildOpenClawSkillContent(mode string) string {
 	// compiled-in http default to the scheme-aware client URL so a TLS deployment
 	// gets https. A non-TLS deployment leaves it unchanged.
 	header := strings.ReplaceAll(openClawSkillHeader, "http://127.0.0.1:8475", clientRESTURL())
+	if strings.HasPrefix(clientRESTURL(), "https://") {
+		// curl verifies certificates — under a self-signed/internal CA every
+		// example here fails with a trust error unless told where the CA lives.
+		header = strings.ReplaceAll(header,
+			"Use curl via the exec/bash tool for all memory\noperations.",
+			"Use curl via the exec/bash tool for all memory\noperations. The server uses TLS with a locally managed certificate — if curl\nreports a certificate error, ask the operator for the CA file and add\n`--cacert <path-to-ca.crt>` to every curl command below.")
+	}
 	return header + usagePattern + openClawSkillFooter
 }
 
@@ -808,7 +815,12 @@ func printManualInstructions(mcpURL, token string) {
 	if token != "" {
 		curlAuth = fmt.Sprintf(` -H "Authorization: Bearer %s"`, token)
 	}
-	fmt.Printf("    curl%s %s/mcp/health\n", curlAuth, mcpURL)
+	// mcpURL already ends in /mcp; the health endpoint lives at <base>/mcp/health.
+	// (Printing mcpURL+"/mcp/health" produced a doubled /mcp/mcp/health that 404s.)
+	fmt.Printf("    curl%s %s/health\n", curlAuth, mcpURL)
+	if strings.HasPrefix(strings.ToLower(mcpURL), "https://") {
+		fmt.Println("    (self-signed/internal CA: add --cacert <ca.crt>)")
+	}
 }
 
 // buildClaudeMDMemoryBlock returns the CLAUDE.md memory block parameterized by behavior mode.

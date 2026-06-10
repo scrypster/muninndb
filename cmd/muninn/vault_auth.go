@@ -152,9 +152,12 @@ func loginAdmin(username, password string) error {
 	})
 	loginURL := vaultUIBase + "/api/auth/login"
 	client := &http.Client{Timeout: 5 * time.Second}
-	if strings.HasPrefix(loginURL, "https://") && isLoopbackURL(loginURL) {
-		// Loopback https: skip cert verification (internal-CA self-talk can't be
-		// impersonated). Off-host stays verified. Unifies to httpClientForURL once #468 lands.
+	// ToLower: the scheme is case-insensitive; keep this consistent with
+	// isLoopbackURL (which lowercases via url.Parse).
+	if strings.HasPrefix(strings.ToLower(loginURL), "https://") && isLoopbackURL(loginURL) {
+		// Loopback https: skip cert verification — the connection never leaves
+		// this machine. Off-host stays verified. Unifies to httpClientForURL
+		// once #468 lands.
 		client.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 		}

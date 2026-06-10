@@ -157,13 +157,56 @@ func atomicWriteFile(path, content string) error {
 	return os.Rename(tmpName, path)
 }
 
-// upsertEnvFileVar sets `key=value` as an active line in the env file at path,
-// replacing any existing line for key — commented or active, with or without an
-// "export " prefix (matching loadEnvFile's parsing) — and otherwise appending
-// it. All other lines are preserved. The file is created if absent; the write
-// is atomic at 0600. The literal "=" in the match guards against a key that is
-// a prefix of a longer one (MUNINN_TLS_CERT vs MUNINN_TLS_CERTIFICATE).
+// upsertEnvFileVar sets `key=value` as an active line in the env file at path.
+// See upsertEnvFileVars for the matching rules.
 func upsertEnvFileVar(path, key, value string) error {
+	return upsertEnvFileVars(path, [][2]string{{key, value}})
+}
+
+// envLineMatchesKey reports whether an env-file line is, or would activate to,
+// an assignment of key. It mirrors loadEnvFile's parsing exactly — optional
+// "export " prefix, whitespace around the key ("KEY = value") — plus one
+// leading "#" so a commented template line can be activated in place. Mirroring
+// the loader matters: any form the loader accepts that this misses would leave
+// a stale assignment behind that (first-active-line-wins) shadows the new one.
+func envLineMatchesKey(line, key string) bool {
+	t := strings.TrimSpace(line)
+	t = strings.TrimSpace(strings.TrimPrefix(t, "#"))
+	t = strings.TrimPrefix(t, "export ")
+	k, _, ok := strings.Cut(t, "=")
+	return ok && strings.TrimSpace(k) == key
+}
+
+// activeEnvLineMatchesKey is envLineMatchesKey restricted to active
+// (uncommented) assignments — the ones loadEnvFile would actually apply.
+func activeEnvLineMatchesKey(line, key string) bool {
+	t := strings.TrimSpace(line)
+	if strings.HasPrefix(t, "#") {
+		return false
+	}
+	t = strings.TrimPrefix(t, "export ")
+	k, _, ok := strings.Cut(t, "=")
+	return ok && strings.TrimSpace(k) == key
+}
+
+// upsertEnvFileVars applies the given key=value pairs to the env file at path
+// in ONE read + ONE atomic 0600 write, so related settings (a TLS cert/key
+// pair) can never be persisted half. For each key the first matching line —
+// commented or active, with or without an "export " prefix, with or without
+// spaces around the "=" — is replaced; keys with no match are appended. All
+// other lines are preserved (including their CRLF endings). The file is
+// created if absent. A symlinked or oversized file is refused: the loader
+// would reject both, so writing through them would persist settings the
+// daemon never sees (and destroy the symlink).
+func upsertEnvFileVars(path string, pairs [][2]string) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink — refusing to replace it (the daemon also refuses to load symlinked env files)", path)
+		}
+		if info.Size() > envFileMaxBytes {
+			return fmt.Errorf("%s exceeds the %d-byte limit the daemon will load — not writing", path, envFileMaxBytes)
+		}
+	}
 	content := ""
 	if b, err := os.ReadFile(path); err == nil {
 		content = string(b)
@@ -171,23 +214,48 @@ func upsertEnvFileVar(path, key, value string) error {
 		return err
 	}
 
-	newLine := key + "=" + value
 	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		t := strings.TrimSpace(line)
-		t = strings.TrimSpace(strings.TrimPrefix(t, "#"))
-		t = strings.TrimPrefix(t, "export ")
-		if strings.HasPrefix(t, key+"=") {
-			lines[i] = newLine
-			return atomicWriteFile(path, strings.Join(lines, "\n"))
+	var missing []string
+	for _, kv := range pairs {
+		key, value := kv[0], kv[1]
+		found := false
+		for i, line := range lines {
+			if !found && envLineMatchesKey(line, key) {
+				lines[i] = key + "=" + value
+				if strings.HasSuffix(line, "\r") {
+					lines[i] += "\r" // keep the file's CRLF endings intact
+				}
+				found = true
+				continue
+			}
+			// Neutralize any LATER active assignment of the same key: the loader
+			// is first-active-line-wins, so it would be dead anyway — but left
+			// active it reads as the effective config and traps future hand-edits.
+			if found && activeEnvLineMatchesKey(line, key) {
+				lines[i] = "# superseded by muninn init: " + line
+			}
+		}
+		if !found {
+			missing = append(missing, key+"="+kv[1])
 		}
 	}
-	// Not found — append, normalizing to exactly one trailing newline.
-	base := strings.TrimRight(content, "\n")
-	if base != "" {
-		base += "\n"
+
+	out := strings.Join(lines, "\n")
+	if len(missing) > 0 {
+		// Append the rest, normalizing to exactly one trailing newline.
+		out = strings.TrimRight(out, "\n")
+		if out != "" {
+			out += "\n"
+		}
+		out += strings.Join(missing, "\n") + "\n"
 	}
-	return atomicWriteFile(path, base+newLine+"\n")
+	// Guard the POST-write size too: the appended/neutralized lines could push a
+	// file that was just under the limit over it, after which the daemon would
+	// silently skip the whole file and the new setting would not survive a restart.
+	if int64(len(out)) > envFileMaxBytes {
+		return fmt.Errorf("%s would exceed the %d-byte limit the daemon will load — not writing", path, envFileMaxBytes)
+	}
+	return atomicWriteFile(path, out)
 }
 
 const envFileName = ".muninn/muninn.env"
