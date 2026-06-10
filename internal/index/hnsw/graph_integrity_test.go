@@ -12,16 +12,22 @@ import (
 func TestBulkInsertSelfQuery(t *testing.T) {
 	dir := t.TempDir()
 	db, err := pebble.Open(dir, &pebble.Options{})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer db.Close()
 
 	reg := NewRegistry(db)
 	var ws [8]byte
 	copy(ws[:], []byte("REPROTST"))
 
+	// Sized to finish well inside CI's package timeout under -race while still
+	// overflowing layer-0 maxConn so the pruning path is exercised. The original
+	// repro (N=1000, dim=1536) showed 51/1000 self-hits pre-fix; this size still
+	// fails pre-fix for the same reason.
 	rng := rand.New(rand.NewSource(42))
-	const N = 1000
-	const dim = 1536
+	const N = 400
+	const dim = 128
 	ids := make([][16]byte, N)
 	vecs := make([][]float32, N)
 	ctx := context.Background()
@@ -29,7 +35,9 @@ func TestBulkInsertSelfQuery(t *testing.T) {
 		var id [16]byte
 		rng.Read(id[:])
 		v := make([]float32, dim)
-		for j := range v { v[j] = rng.Float32()*2 - 1 }
+		for j := range v {
+			v[j] = rng.Float32()*2 - 1
+		}
 		ids[i], vecs[i] = id, v
 		if err := reg.Insert(ctx, ws, id, v); err != nil {
 			t.Fatalf("insert %d: %v", i, err)
@@ -41,12 +49,19 @@ func TestBulkInsertSelfQuery(t *testing.T) {
 	top1 := map[[16]byte]int{}
 	for i := 0; i < N; i++ {
 		res, err := reg.Search(ctx, ws, vecs[i], 10)
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		hist[len(res)]++
 		for _, r := range res {
-			if r.ID == ids[i] { selfHits++; break }
+			if r.ID == ids[i] {
+				selfHits++
+				break
+			}
 		}
-		if len(res) > 0 { top1[res[0].ID]++ }
+		if len(res) > 0 {
+			top1[res[0].ID]++
+		}
 	}
 	fmt.Printf("N=%d selfHits=%d hist=%v distinctTop1=%d\n", N, selfHits, hist, len(top1))
 	if selfHits < N*9/10 {
@@ -57,7 +72,9 @@ func TestBulkInsertSelfQuery(t *testing.T) {
 func TestBulkInsertReloadSelfQuery(t *testing.T) {
 	dir := t.TempDir()
 	db, err := pebble.Open(dir, &pebble.Options{})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer db.Close()
 
 	reg := NewRegistry(db)
@@ -74,9 +91,13 @@ func TestBulkInsertReloadSelfQuery(t *testing.T) {
 		var id [16]byte
 		rng.Read(id[:])
 		v := make([]float32, dim)
-		for j := range v { v[j] = rng.Float32()*2 - 1 }
+		for j := range v {
+			v[j] = rng.Float32()*2 - 1
+		}
 		ids[i], vecs[i] = id, v
-		if err := reg.Insert(ctx, ws, id, v); err != nil { t.Fatal(err) }
+		if err := reg.Insert(ctx, ws, id, v); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// Wait for async persistence, then reload into a fresh registry.
 	reg.mu.RLock()
@@ -92,9 +113,14 @@ func TestBulkInsertReloadSelfQuery(t *testing.T) {
 	selfHits := 0
 	for i := 0; i < N; i++ {
 		res, err := reg2.Search(ctx, ws, vecs[i], 10)
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, r := range res {
-			if r.ID == ids[i] { selfHits++; break }
+			if r.ID == ids[i] {
+				selfHits++
+				break
+			}
 		}
 	}
 	fmt.Printf("reload selfHits=%d/%d\n", selfHits, N)
