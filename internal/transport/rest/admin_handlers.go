@@ -621,7 +621,27 @@ func (s *Server) handleGetPluginConfig(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, "failed to load plugin config: "+err.Error())
 		return
 	}
+	// Never return provider API keys in cleartext — the admin UI only needs to
+	// confirm which key is set, not read it back.
+	cfg.EmbedAPIKey = maskSecret(cfg.EmbedAPIKey)
+	cfg.EnrichAPIKey = maskSecret(cfg.EnrichAPIKey)
 	s.sendJSON(w, http.StatusOK, cfg)
+}
+
+// maskSecret returns a display-safe form of a secret: empty stays empty;
+// otherwise a fixed bullet prefix hides the value (and its length), with the
+// last four characters shown so an admin can tell which key is configured.
+// A real provider key never contains bullets, so the masked form is
+// unambiguous and the save path can detect "unchanged" by re-masking.
+func maskSecret(s string) string {
+	if s == "" {
+		return ""
+	}
+	const mask = "••••••••"
+	if len(s) <= 4 {
+		return mask
+	}
+	return mask + s[len(s)-4:]
 }
 
 // handlePutPluginConfig saves plugin configuration to disk.
@@ -636,10 +656,25 @@ func (s *Server) handlePutPluginConfig(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body: "+err.Error())
 		return
 	}
+	// Preserve any API key the client sent back unchanged — i.e. equal to the
+	// masked value GET returned — so the mask is never persisted as the real
+	// key. A retyped key won't match the mask and is saved as-is; an explicit
+	// empty value clears the key.
+	if existing, err := plugincfg.LoadPluginConfig(s.dataDir); err == nil {
+		if cfg.EmbedAPIKey == maskSecret(existing.EmbedAPIKey) {
+			cfg.EmbedAPIKey = existing.EmbedAPIKey
+		}
+		if cfg.EnrichAPIKey == maskSecret(existing.EnrichAPIKey) {
+			cfg.EnrichAPIKey = existing.EnrichAPIKey
+		}
+	}
 	if err := plugincfg.SavePluginConfig(s.dataDir, cfg); err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, "failed to save plugin config: "+err.Error())
 		return
 	}
+	// Echo the saved config back masked so the response never carries cleartext.
+	cfg.EmbedAPIKey = maskSecret(cfg.EmbedAPIKey)
+	cfg.EnrichAPIKey = maskSecret(cfg.EnrichAPIKey)
 	s.sendJSON(w, http.StatusOK, cfg)
 	s.EmitAudit(r, "plugin.config_update", "plugin", "config", "ok", nil)
 }
