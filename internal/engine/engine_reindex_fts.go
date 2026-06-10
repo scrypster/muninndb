@@ -47,7 +47,12 @@ func (e *Engine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, 
 		return 0, fmt.Errorf("vault %q: %w", vaultName, ErrVaultNotFound)
 	}
 
-	ws := e.store.VaultPrefix(vaultName)
+	// Use ResolveVaultPrefix so a vault renamed via RenameVault
+	// (ws != siphash(currentName)) is reindexed at its actual stored workspace.
+	// With raw VaultPrefix(name) here, reindex on a renamed vault would scan an
+	// empty prefix and report success while reindexing nothing (issue #480,
+	// sibling of #454).
+	ws := e.store.ResolveVaultPrefix(vaultName)
 
 	// Prevent the FTS worker from submitting new jobs during the re-index window.
 	if e.ftsWorker != nil {
