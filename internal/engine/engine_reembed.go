@@ -50,7 +50,9 @@ func (e *Engine) StartReembedVault(ctx context.Context, vaultName, modelName str
 		return nil, fmt.Errorf("vault %q: %w", vaultName, ErrVaultNotFound)
 	}
 
-	ws := e.store.VaultPrefix(vaultName)
+	// Use ResolveVaultPrefix so reembed targets the actual workspace of vaults
+	// that have been renamed (ws ≠ siphash(currentName)).
+	ws := e.store.ResolveVaultPrefix(vaultName)
 
 	// Count engrams to set progress totals.
 	engramCount := e.store.GetVaultCount(ctx, ws)

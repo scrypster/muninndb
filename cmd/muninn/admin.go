@@ -128,10 +128,9 @@ func runAdminChangePassword(username string, args []string) {
 		return
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("PUT",
-		fmt.Sprintf("%s/api/admin/password", vaultAdminBase),
-		bytes.NewReader(bodyBytes))
+	reqURL := fmt.Sprintf("%s/api/admin/password", vaultAdminBase)
+	client := httpClientForURL(reqURL, 10*time.Second)
+	req, err := http.NewRequest("PUT", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return

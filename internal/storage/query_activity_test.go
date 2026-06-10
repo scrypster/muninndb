@@ -109,3 +109,56 @@ func TestCountEngramsByDay(t *testing.T) {
 		}
 	})
 }
+
+// TestCountEngramsByDay_Timezone verifies that the day buckets are keyed in the
+// location of the since argument: the same engram lands in different calendar
+// days depending on the requested timezone.
+func TestCountEngramsByDay_Timezone(t *testing.T) {
+	store := openTestStore(t)
+	ws := store.VaultPrefix("activity-tz-test")
+	ctx := context.Background()
+
+	// 02:00 UTC on 2025-03-15 is still the evening of 2025-03-14 in a UTC-8 zone.
+	instant := time.Date(2025, 3, 15, 2, 0, 0, 0, time.UTC)
+	if _, err := store.WriteEngram(ctx, ws, &Engram{
+		Concept:   "tz engram",
+		Content:   "content",
+		CreatedAt: instant,
+	}); err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	// FixedZone keeps the test independent of the system tzdata.
+	west := time.FixedZone("UTC-8", -8*60*60)
+
+	t.Run("UTC buckets on 2025-03-15", func(t *testing.T) {
+		since := time.Date(2025, 3, 14, 0, 0, 0, 0, time.UTC)
+		until := time.Date(2025, 3, 15, 23, 59, 59, 999000000, time.UTC)
+		counts, err := store.CountEngramsByDay(ctx, ws, since, until)
+		if err != nil {
+			t.Fatalf("CountEngramsByDay: %v", err)
+		}
+		if got := counts["2025-03-15"]; got != 1 {
+			t.Errorf("UTC: 2025-03-15 = %d, want 1 (counts=%v)", got, counts)
+		}
+		if got := counts["2025-03-14"]; got != 0 {
+			t.Errorf("UTC: 2025-03-14 = %d, want 0", got)
+		}
+	})
+
+	t.Run("UTC-8 buckets on 2025-03-14", func(t *testing.T) {
+		// The same window expressed in the western zone.
+		since := time.Date(2025, 3, 13, 0, 0, 0, 0, west)
+		until := time.Date(2025, 3, 14, 23, 59, 59, 999000000, west)
+		counts, err := store.CountEngramsByDay(ctx, ws, since, until)
+		if err != nil {
+			t.Fatalf("CountEngramsByDay: %v", err)
+		}
+		if got := counts["2025-03-14"]; got != 1 {
+			t.Errorf("UTC-8: 2025-03-14 = %d, want 1 (counts=%v)", got, counts)
+		}
+		if got := counts["2025-03-15"]; got != 0 {
+			t.Errorf("UTC-8: 2025-03-15 = %d, want 0", got)
+		}
+	})
+}

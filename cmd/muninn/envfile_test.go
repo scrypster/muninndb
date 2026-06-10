@@ -21,6 +21,24 @@ func TestLoadEnvFile_SetsVars(t *testing.T) {
 	}
 }
 
+// TestLoadEnvFile_SetsDataDirForCLI pins the intent of wiring loadEnvFile() into
+// main(): MUNINNDB_DATA set only in muninn.env must steer the CLI's data dir
+// (via defaultDataDir), so 'muninn status'/'stop' look where the daemon — which
+// loads the same file — actually wrote its PID/addrs sidecar.
+func TestLoadEnvFile_SetsDataDirForCLI(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "custom-data")
+	path := filepath.Join(dir, "muninn.env")
+	os.WriteFile(path, []byte("MUNINNDB_DATA="+dataDir+"\n"), 0600)
+
+	t.Setenv("MUNINNDB_DATA", "")
+	os.Unsetenv("MUNINNDB_DATA")
+	loadEnvFileFrom(path)
+	if got := defaultDataDir(); got != dataDir {
+		t.Errorf("defaultDataDir() = %q, want %q (muninn.env's MUNINNDB_DATA must steer the CLI)", got, dataDir)
+	}
+}
+
 func TestLoadEnvFile_ShellEnvWins(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "muninn.env")

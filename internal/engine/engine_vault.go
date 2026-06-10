@@ -75,7 +75,11 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 		return fmt.Errorf("vault %q: %w", vaultName, ErrVaultNotFound)
 	}
 
-	ws := e.store.VaultPrefix(vaultName)
+	// Use ResolveVaultPrefix so renamed vaults (ws ≠ siphash(currentName))
+	// are cleared at their actual workspace. With raw VaultPrefix(name) here,
+	// ClearVault on a renamed vault would silently range-delete an empty
+	// prefix and leave the real engrams orphaned.
+	ws := e.store.ResolveVaultPrefix(vaultName)
 
 	// NOTE: Jobs already mid-flush may write ghost FTS entries after the range
 	// tombstones land. This is harmless — activation filtering skips engrams
@@ -134,10 +138,11 @@ var ErrVaultJobActive = fmt.Errorf("vault has an active clone/merge job in progr
 // It calls ClearVault (which adjusts engramCount and in-memory state),
 // then deletes the vault name keys from storage.
 //
-// Note: ws must be captured BEFORE calling ClearVault, because ClearVault
-// evicts vaultPrefixCache for the vault name. After ClearVault,
-// store.VaultPrefix would still return the SipHash but the name is no longer
-// registered — DeleteVaultNameOnly needs the ws captured before eviction.
+// Note: ws is resolved via ResolveVaultPrefix BEFORE calling ClearVault,
+// because ClearVault evicts vaultPrefixCache for the vault name. After
+// eviction, a subsequent ResolveVaultPrefix call would still read the
+// persisted 0x0F index — but for renamed vaults we need the index lookup
+// (not raw SipHash) to find the real ws, so we capture it up front.
 func (e *Engine) DeleteVault(ctx context.Context, vaultName string) error {
 	if !e.beginVaultOp() {
 		return fmt.Errorf("engine is shutting down")
@@ -160,7 +165,9 @@ func (e *Engine) deleteVault(ctx context.Context, vaultName string) error {
 	}
 
 	// Capture ws BEFORE ClearVault evicts the in-memory name cache.
-	ws := e.store.VaultPrefix(vaultName)
+	// ResolveVaultPrefix so renamed vaults (ws ≠ siphash(currentName))
+	// have their actual workspace passed to DeleteVaultNameOnly.
+	ws := e.store.ResolveVaultPrefix(vaultName)
 
 	if err := e.clearVault(ctx, vaultName); err != nil {
 		return fmt.Errorf("delete vault (clear phase): %w", err)

@@ -2165,11 +2165,12 @@ paths:
       tags: [vault]
       summary: "Per-day engram creation counts for a vault."
       description: >
-        Returns the last `days` UTC calendar days of engram creation counts
-        ending on `until` (inclusive). All returned dates are UTC calendar
-        dates. Uses an efficient ULID key-header scan that never
-        deserializes engram values. Days that have zero writes are included
-        with a count of 0 so clients always get a contiguous series.
+        Returns the last `days` calendar days of engram creation counts
+        ending on `until` (inclusive). Counts are bucketed by calendar day in
+        the timezone given by `tz` (UTC when `tz` is omitted or unrecognized).
+        Uses an efficient ULID key-header scan that never deserializes engram
+        values. Days that have zero writes are included with a count of 0 so
+        clients always get a contiguous series.
       security:
         - BearerAuth: []
       parameters:
@@ -2180,7 +2181,7 @@ paths:
             default: "default"
         - name: days
           in: query
-          description: "Number of UTC calendar days to include (1–180, default 7). Returns 400 if out of range or non-numeric."
+          description: "Number of calendar days to include (1–180, default 7). Returns 400 if out of range or non-numeric."
           schema:
             type: integer
             default: 7
@@ -2188,10 +2189,21 @@ paths:
             maximum: 180
         - name: until
           in: query
-          description: "End date in YYYY-MM-DD format (default: today UTC). Returns 400 if malformed."
+          description: "End date in YYYY-MM-DD format, interpreted in `tz` (default: today in `tz`). Returns 400 if malformed."
           schema:
             type: string
             format: date
+        - name: tz
+          in: query
+          description: >
+            IANA timezone name (e.g. `America/Los_Angeles`) used to bucket
+            counts into calendar days and to interpret `until`. Missing,
+            unrecognized, or overly long (>64 chars) values silently fall back
+            to UTC; this parameter never causes an error.
+          schema:
+            type: string
+            default: "UTC"
+            example: "America/Los_Angeles"
       responses:
         "200":
           description: "Daily activity counts."

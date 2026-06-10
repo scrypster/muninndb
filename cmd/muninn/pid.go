@@ -34,6 +34,16 @@ func schemeFor(tlsCert, tlsKey string) string {
 	return "http"
 }
 
+// localScheme reports the scheme the local daemon is serving ("https"/"http"),
+// read from the muninn.addrs sidecar. Defaults to "http" when the sidecar is
+// absent (an older or stopped daemon) — matching the readers' empty-Scheme rule.
+func localScheme() string {
+	if addrs, err := readAddrsFile(defaultDataDir()); err == nil && addrs.Scheme != "" {
+		return addrs.Scheme
+	}
+	return "http"
+}
+
 func writeAddrsFile(dataDir string, addrs daemonAddrs) error {
 	b, err := json.Marshal(addrs)
 	if err != nil {
