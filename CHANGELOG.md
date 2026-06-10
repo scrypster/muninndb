@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.6.2] - 2026-06-10
+
 ### Security
 - **Vault isolation on the binary transports** — MBP (8474) and gRPC (8477) now enforce the same fail-closed vault model as REST/MCP: a keyed session is pinned to its key's vault (cross-vault access rejected, even to a public vault), an unauthenticated session may reach only public vaults, and a missing auth store fails closed (#484).
 - **LLM provider API keys masked** in the admin plugin-config API; a retyped key is saved, an untouched (masked) field is preserved (#488).
@@ -35,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 - `storage.ErrNotFound` sentinel replaces `strings.Contains(err, "not found")` matching at the engine boundary (#491).
 - De-flaked the WAL syncer timing tests (#486).
+
+### Upgrade notes
+- The HNSW fix (#471) repairs the indexing algorithm but not graphs already degraded on disk by the old defects. If semantic recall has been returning too few results, run one `muninn vault reembed <vault>` per affected vault on this build to rebuild a correct graph.
 
 ---
 
