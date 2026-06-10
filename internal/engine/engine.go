@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -349,8 +350,8 @@ func NewEngine(cfg EngineConfig) *Engine {
 		activity:         cognitive.NewActivityTracker(),
 		embedder:         cfg.Embedder,
 		autoAssoc:        autoassoc.New(stopCtx, store, cfg.FTSIndex),
-		neighborWorker:  autoassoc.NewNeighborWorker(stopCtx, store, cfg.HNSWRegistry),
-		goalLinkWorker:  autoassoc.NewGoalLinkWorker(stopCtx, store, cfg.HNSWRegistry),
+		neighborWorker:   autoassoc.NewNeighborWorker(stopCtx, store, cfg.HNSWRegistry),
+		goalLinkWorker:   autoassoc.NewGoalLinkWorker(stopCtx, store, cfg.HNSWRegistry),
 		noveltyDet:       novelty.New(),
 		noveltyJobs:      make(chan noveltyJob, 256),
 		noveltyDone:      make(chan struct{}),
@@ -361,8 +362,8 @@ func NewEngine(cfg EngineConfig) *Engine {
 		stopCtx:          stopCtx,
 		stopCancel:       stopCancel,
 		hnswRegistry:     cfg.HNSWRegistry,
-		jobManager:          vaultjob.NewManager(),
-		replayFailCounts:    make(map[storage.ULID]int),
+		jobManager:       vaultjob.NewManager(),
+		replayFailCounts: make(map[storage.ULID]int),
 	}
 	// Start async novelty worker to decouple O(N) Jaccard scan from write hot path.
 	// engine:spawn-ok — tracked by noveltyDone channel, drained in Stop()
@@ -1656,7 +1657,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 
 	eng, err := e.store.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, storage.ErrNotFound) {
 			return nil, ErrEngramNotFound
 		}
 		return nil, fmt.Errorf("get engram: %w", err)
@@ -1710,21 +1711,21 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 	metrics.ReadDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
 
 	return &mbp.ReadResponse{
-		ID:             eng.ID.String(),
-		Concept:        eng.Concept,
-		Content:        eng.Content,
-		Confidence:     eng.Confidence,
-		Relevance:      eng.Relevance,
-		Stability:      eng.Stability,
-		AccessCount:    eng.AccessCount,
-		Tags:           eng.Tags,
-		State:          uint8(eng.State),
-		CreatedAt:      eng.CreatedAt.UnixNano(),
-		UpdatedAt:      eng.UpdatedAt.UnixNano(),
-		LastAccess:     eng.LastAccess.UnixNano(),
-		Summary:        eng.Summary,
-		KeyPoints:      eng.KeyPoints,
-		MemoryType:     uint8(eng.MemoryType),
+		ID:                  eng.ID.String(),
+		Concept:             eng.Concept,
+		Content:             eng.Content,
+		Confidence:          eng.Confidence,
+		Relevance:           eng.Relevance,
+		Stability:           eng.Stability,
+		AccessCount:         eng.AccessCount,
+		Tags:                eng.Tags,
+		State:               uint8(eng.State),
+		CreatedAt:           eng.CreatedAt.UnixNano(),
+		UpdatedAt:           eng.UpdatedAt.UnixNano(),
+		LastAccess:          eng.LastAccess.UnixNano(),
+		Summary:             eng.Summary,
+		KeyPoints:           eng.KeyPoints,
+		MemoryType:          uint8(eng.MemoryType),
 		TypeLabel:           eng.TypeLabel,
 		Classification:      eng.Classification,
 		EmbedDim:            uint8(eng.EmbedDim),
@@ -2326,7 +2327,7 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 		eng, _ := e.store.GetEngram(ctx, wsPrefix, id)
 
 		if err := e.store.DeleteEngram(ctx, wsPrefix, id); err != nil {
-			if strings.Contains(err.Error(), "not found") {
+			if errors.Is(err, storage.ErrNotFound) {
 				return nil, ErrEngramNotFound
 			}
 			return nil, fmt.Errorf("hard delete: %w", err)
@@ -2361,7 +2362,7 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 		// Read the engram before soft-deleting so we can clean up FTS index entries.
 		eng, readErr := e.store.GetEngram(ctx, wsPrefix, id)
 		if err := e.store.SoftDelete(ctx, wsPrefix, id); err != nil {
-			if strings.Contains(err.Error(), "not found") {
+			if errors.Is(err, storage.ErrNotFound) {
 				return nil, ErrEngramNotFound
 			}
 			return nil, fmt.Errorf("soft delete: %w", err)
@@ -2518,7 +2519,7 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 	}
 	eng, err := e.store.GetEngram(ctx, ws, ulid)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, storage.ErrNotFound) {
 			return nil, ErrEngramNotFound
 		}
 		return nil, fmt.Errorf("restore: %w", err)
@@ -2588,7 +2589,7 @@ func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
 		return fmt.Errorf("parse id: %w", err)
 	}
 	if err := e.store.UpdateTrust(ctx, ws, ulid, level); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, storage.ErrNotFound) {
 			return ErrEngramNotFound
 		}
 		return err

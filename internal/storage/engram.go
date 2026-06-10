@@ -29,7 +29,7 @@ func (ps *PebbleStore) GetEngram(ctx context.Context, wsPrefix [8]byte, id ULID)
 		return nil, fmt.Errorf("get engram: %w", err)
 	}
 	if val == nil {
-		return nil, fmt.Errorf("engram not found")
+		return nil, fmt.Errorf("engram %w", ErrNotFound)
 	}
 
 	// Decode
@@ -239,7 +239,7 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 		return err
 	}
 	if len(oldMetas) == 0 || oldMetas[0] == nil {
-		return fmt.Errorf("engram not found")
+		return fmt.Errorf("engram %w", ErrNotFound)
 	}
 	oldState := oldMetas[0].State
 	var prevLastAccessMillis int64
@@ -254,7 +254,7 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 		return fmt.Errorf("get engram raw: %w", err)
 	}
 	if rawBytes == nil {
-		return fmt.Errorf("engram not found")
+		return fmt.Errorf("engram %w", ErrNotFound)
 	}
 
 	// Patch all mutable metadata fields in-place and recompute CRC32.
@@ -322,7 +322,7 @@ func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id
 		return err
 	}
 	if len(metas) == 0 || metas[0] == nil {
-		return fmt.Errorf("engram not found")
+		return fmt.Errorf("engram %w", ErrNotFound)
 	}
 	oldRelevance := metas[0].Relevance
 
@@ -333,7 +333,7 @@ func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id
 		return fmt.Errorf("get engram raw: %w", err)
 	}
 	if rawBytes == nil {
-		return fmt.Errorf("engram not found")
+		return fmt.Errorf("engram %w", ErrNotFound)
 	}
 
 	// Patch relevance/stability/updatedAt in-place and recompute CRC32.
@@ -387,7 +387,7 @@ func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULI
 		return fmt.Errorf("get engram raw: %w", err)
 	}
 	if rawBytes == nil {
-		return fmt.Errorf("engram not found")
+		return fmt.Errorf("engram %w", ErrNotFound)
 	}
 
 	if err := erf.PatchTrust(rawBytes, uint8(trust)); err != nil {
@@ -749,7 +749,7 @@ func (ps *PebbleStore) GetConfidence(ctx context.Context, wsPrefix [8]byte, id U
 		return 0.0, fmt.Errorf("get metadata: %w", err)
 	}
 	if val == nil {
-		return 0.0, fmt.Errorf("metadata not found")
+		return 0.0, fmt.Errorf("metadata %w", ErrNotFound)
 	}
 
 	// Decode metadata to extract confidence
