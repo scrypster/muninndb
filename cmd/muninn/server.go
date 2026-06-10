@@ -721,6 +721,30 @@ func parseListenHost(args []string, envVal string) string {
 	return host
 }
 
+// isLoopbackHost reports whether binding to host keeps the server reachable
+// only from the local machine. An empty host means Go binds all interfaces
+// (":port"), so it is treated as non-loopback. A non-IP hostname other than
+// "localhost" is treated as non-loopback since it can resolve anywhere.
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "":
+		return false
+	case "localhost":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// shouldWarnDefaultPasswordExposure reports whether the server is reachable
+// off-host while the admin still has the default password — the combination
+// that warrants a prominent security warning at startup.
+func shouldWarnDefaultPasswordExposure(listenHost string, defaultPasswordInUse bool) bool {
+	return defaultPasswordInUse && !isLoopbackHost(listenHost)
+}
+
 func runServer() {
 	loadEnvFile()
 
@@ -1004,6 +1028,24 @@ func runServer() {
 	if err != nil {
 		slog.Error("auth bootstrap failed", "err", err)
 		os.Exit(1)
+	}
+
+	// Loud warning when the server is reachable off-host while the admin still
+	// has the default password — an open-server posture. We warn rather than
+	// refuse so the zero-config quickstart and the shipped docker-compose keep
+	// working; the message tells the operator exactly how to close the gap.
+	if shouldWarnDefaultPasswordExposure(listenHost, authStore.ValidateAdmin("root", "password") == nil) {
+		slog.Warn("SECURITY: bound to a non-loopback address with the default admin password still set",
+			"listen_host", listenHost)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  ⚠  SECURITY WARNING")
+		fmt.Fprintf(os.Stderr, "     muninn is listening on %s (reachable from other hosts) while the\n", listenHost)
+		fmt.Fprintln(os.Stderr, "     admin account still uses the default password 'password'.")
+		fmt.Fprintln(os.Stderr, "     Anyone who can reach this host can take over the server.")
+		fmt.Fprintln(os.Stderr, "     Fix now: log in to the Web UI and change the password, or set")
+		fmt.Fprintln(os.Stderr, "     MUNINN_ADMIN_PASSWORD before starting. Bind to 127.0.0.1 if you")
+		fmt.Fprintln(os.Stderr, "     only need local access.")
+		fmt.Fprintln(os.Stderr, "")
 	}
 
 	// Open MOL (Write-Ahead Log)
