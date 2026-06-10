@@ -100,3 +100,50 @@ func TestActivityCounts(t *testing.T) {
 		}
 	})
 }
+
+// TestActivityCounts_Timezone verifies that both the contiguous day list and
+// the engram counts honor the location carried by the since/until arguments,
+// so an engram created just after midnight UTC is attributed to the previous
+// local day in a zone behind UTC.
+func TestActivityCounts_Timezone(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	vault := "activity-tz-test"
+	ws := eng.store.VaultPrefix(vault)
+
+	// 02:00 UTC on 2025-06-12 is still 2025-06-11 in a UTC-8 zone.
+	instant := time.Date(2025, 6, 12, 2, 0, 0, 0, time.UTC)
+	if _, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:   "tz",
+		Content:   "content",
+		CreatedAt: instant,
+	}); err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	// FixedZone keeps the test independent of the system tzdata.
+	west := time.FixedZone("UTC-8", -8*60*60)
+	since := time.Date(2025, 6, 10, 0, 0, 0, 0, west)
+	until := time.Date(2025, 6, 11, 23, 59, 59, 999000000, west)
+
+	result, err := eng.ActivityCounts(ctx, vault, since, until)
+	if err != nil {
+		t.Fatalf("ActivityCounts: %v", err)
+	}
+
+	// Day list must be expressed in the west zone: 06-10, 06-11.
+	expected := []DailyCount{
+		{Date: "2025-06-10", Count: 0},
+		{Date: "2025-06-11", Count: 1},
+	}
+	if len(result) != len(expected) {
+		t.Fatalf("expected %d days, got %d: %v", len(expected), len(result), result)
+	}
+	for i, want := range expected {
+		if result[i].Date != want.Date || result[i].Count != want.Count {
+			t.Errorf("result[%d] = {%s, %d}, want {%s, %d}", i, result[i].Date, result[i].Count, want.Date, want.Count)
+		}
+	}
+}

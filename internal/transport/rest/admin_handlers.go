@@ -470,7 +470,15 @@ func (s *Server) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
-	mcpURL := "http://" + host + ":" + port + "/mcp"
+	// Reflect the scheme the daemon actually serves. s.tlsConfig is non-nil iff
+	// client-facing TLS is enabled (it's what Serve wraps the listener with) and
+	// is more reliable than r.TLS here, which is nil when this endpoint is reached
+	// over loopback behind the UI reverse-proxy.
+	scheme := "http"
+	if s.tlsConfig != nil {
+		scheme = "https"
+	}
+	mcpURL := scheme + "://" + host + ":" + port + "/mcp"
 	s.sendJSON(w, http.StatusOK, MCPInfoResponse{
 		URL:             mcpURL,
 		TokenConfigured: s.mcpHasToken,

@@ -59,6 +59,15 @@ Environment=MUNINN_ANTHROPIC_KEY=sk-ant-...
 # Environment=MUNINN_ENRICH_URL=openai://gpt-4o-mini
 # Environment=MUNINN_ENRICH_API_KEY=sk-...
 
+# --- TLS (optional) ---
+# Serve clients over https. Set BOTH or neither. See docs/tls.md.
+# NOTE: ~/.muninn/muninn.env is NOT loaded under systemd (no $HOME), so TLS
+# for a systemd deployment MUST be set here via Environment= (or EnvironmentFile=).
+# Environment=MUNINN_TLS_CERT=/etc/muninndb/cert.pem
+# Environment=MUNINN_TLS_KEY=/etc/muninndb/key.pem
+# Alternatively load from a separate file (systemd EnvironmentFile format is
+# KEY=VALUE, NOT muninn.env format): EnvironmentFile=-/etc/muninndb/muninndb.env
+
 # --- Auth ---
 # The MCP bearer token is passed via --mcp-token flag.
 # Alternatively, write your token to ~/.muninn/mcp.token (no flag needed):

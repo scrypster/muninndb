@@ -297,8 +297,9 @@ func shellValidateAdmin(uiBase, username, password string) error {
 		"username": username,
 		"password": password,
 	})
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(uiBase+"/api/auth/login", "application/json", bytes.NewReader(body))
+	loginURL := uiBase + "/api/auth/login"
+	client := httpClientForURL(loginURL, 5*time.Second)
+	resp, err := client.Post(loginURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("connect to server: %w", err)
 	}
@@ -316,8 +317,9 @@ func autoAuth(uiBase string) (string, error) {
 		"username": "root",
 		"password": "password",
 	})
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(uiBase+"/api/auth/login", "application/json", bytes.NewReader(body))
+	loginURL := uiBase + "/api/auth/login"
+	client := httpClientForURL(loginURL, 5*time.Second)
+	resp, err := client.Post(loginURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("connect to server: %w", err)
 	}
@@ -333,7 +335,6 @@ func autoAuth(uiBase string) (string, error) {
 	// No cookie found but 200 — auth succeeded without session cookie
 	return "", nil
 }
-
 
 // knownCommands lists all valid REPL commands for typo suggestion.
 var knownCommands = []string{

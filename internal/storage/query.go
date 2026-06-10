@@ -258,11 +258,19 @@ func (ps *PebbleStore) CountEngrams(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// CountEngramsByDay counts engrams per UTC day between since and until
-// (inclusive) for a single vault. It scans only the 0x01 key prefix and
-// extracts the millisecond timestamp from each ULID without reading values,
+// CountEngramsByDay counts engrams per calendar day between since and until
+// (inclusive) for a single vault. Days are bucketed in the timezone of the
+// since argument's Location (pass UTC-located times for UTC-day buckets), and
+// until is assumed to share that location. It scans only the 0x01 key prefix
+// and extracts the millisecond timestamp from each ULID without reading values,
 // making it efficient even for large date ranges.
 func (ps *PebbleStore) CountEngramsByDay(ctx context.Context, wsPrefix [8]byte, since, until time.Time) (map[string]int64, error) {
+	// Day buckets are keyed in the location of the since argument, so callers
+	// control whether counts are grouped by the UTC or a local-timezone
+	// calendar day. The [since, until] scan below is absolute-time based (ULID
+	// epoch ms) and is therefore unaffected by the bucketing location.
+	loc := since.Location()
+
 	minID := ulidMinFromTime(since)
 	maxID := ulidMaxFromTime(until)
 
@@ -292,7 +300,7 @@ func (ps *PebbleStore) CountEngramsByDay(ctx context.Context, wsPrefix [8]byte, 
 		}
 		// Extract 48-bit ms timestamp from the ULID portion (bytes 9-14).
 		ms := uint64(binary.BigEndian.Uint32(key[9:13]))<<16 | uint64(binary.BigEndian.Uint16(key[13:15]))
-		t := time.Unix(int64(ms/1000), int64(ms%1000)*1e6).UTC()
+		t := time.Unix(int64(ms/1000), int64(ms%1000)*1e6).In(loc)
 		day := t.Format("2006-01-02")
 		counts[day]++
 	}

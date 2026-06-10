@@ -64,7 +64,8 @@ func (e *Engine) StartClone(ctx context.Context, sourceVault, newName string) (*
 		return nil, fmt.Errorf("start clone: %w", err)
 	}
 
-	wsSource := e.store.VaultPrefix(sourceVault)
+	// ResolveVaultPrefix to handle renamed source vaults (ws ≠ siphash(currentName)).
+	wsSource := e.store.ResolveVaultPrefix(sourceVault)
 
 	// Count engrams in source to set CopyTotal/IndexTotal for progress tracking.
 	sourceCount := e.store.GetVaultCount(ctx, wsSource)
@@ -203,8 +204,10 @@ func (e *Engine) StartMerge(ctx context.Context, sourceVault, targetVault string
 		return nil, fmt.Errorf("start merge: %w", err)
 	}
 
-	wsSource := e.store.VaultPrefix(sourceVault)
-	wsTarget := e.store.VaultPrefix(targetVault)
+	// Both source and target are existing vaults — use ResolveVaultPrefix so
+	// renamed vaults (ws ≠ siphash(currentName)) merge correctly.
+	wsSource := e.store.ResolveVaultPrefix(sourceVault)
+	wsTarget := e.store.ResolveVaultPrefix(targetVault)
 
 	sourceCount := e.store.GetVaultCount(ctx, wsSource)
 	job.CopyTotal = sourceCount

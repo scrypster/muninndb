@@ -16,8 +16,9 @@ import (
 )
 
 func mcpHealthCheck(baseURL string) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(baseURL + "/mcp/health")
+	healthEndpoint := baseURL + "/mcp/health"
+	client := httpClientForURL(healthEndpoint, 2*time.Second)
+	resp, err := client.Get(healthEndpoint)
 	if err != nil {
 		return false
 	}
@@ -35,7 +36,8 @@ func mcpCall(baseURL, toolName string, args map[string]any) (map[string]any, err
 			"arguments": args,
 		},
 	})
-	resp, err := http.Post(baseURL+"/mcp", "application/json", bytes.NewReader(body))
+	mcpEndpoint := baseURL + "/mcp"
+	resp, err := httpClientForURL(mcpEndpoint, 0).Post(mcpEndpoint, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -70,16 +72,10 @@ func (r *replState) cmdShowVaults() {
 	}
 	apiURL := healthURL("MUNINNDB_ADMIN_URL", addrs.Scheme, restPort) + "/api/vaults"
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	if strings.HasPrefix(apiURL, "https://") && isLoopbackURL(apiURL) {
-		// Skip cert verification only for a loopback target: an internal-CA
-		// TLS deployment talking to its own server can't be impersonated.
-		// For an off-host MUNINNDB_ADMIN_URL verification stays on — this
-		// request carries the admin session cookie.
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}
-	}
+	// Loopback https skips cert verification (internal-CA self-inspection); an
+	// off-host MUNINNDB_ADMIN_URL stays verified — this request carries the admin
+	// session cookie. See httpClientForURL.
+	client := httpClientForURL(apiURL, 5*time.Second)
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -374,8 +370,9 @@ func (r *replState) cmdShowContradictions() {
 }
 
 func (r *replState) cmdShowStats() {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(r.mcpURL + "/mcp/health")
+	healthEndpoint := r.mcpURL + "/mcp/health"
+	client := httpClientForURL(healthEndpoint, 2*time.Second)
+	resp, err := client.Get(healthEndpoint)
 	if err != nil || resp.StatusCode != 200 {
 		fmt.Println("Server: not running")
 		fmt.Println("Start with: muninn start")

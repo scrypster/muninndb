@@ -254,7 +254,7 @@ If each user had their own relevance weights, the vault would have N brains inst
 | Token storage | SHA-256 hash only — plaintext never persisted |
 | Admin passwords | bcrypt with default cost |
 | Session tokens | HMAC-SHA256 signed, 24h TTL, HttpOnly cookie |
-| Transport | HTTP by default; run behind TLS-terminating proxy in production |
+| Transport | HTTP by default; serve TLS natively (see [tls.md](tls.md)) or behind a TLS-terminating proxy |
 | Key revocation | Immediate, no grace period |
 | Observe isolation | Enforced at both the transport layer (`ReadOnlyGuard` on REST, `denyReadOnlyMutation` on gRPC) and the engine activation layer — not just an honor system |
 | Encryption at rest | Not built-in — use OS/volume encryption; see [self-hosting guide](self-hosting.md#encryption-at-rest) |

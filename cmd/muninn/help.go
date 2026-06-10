@@ -98,6 +98,18 @@ var subcommandHelp = map[string]func(){
 				"MUNINNDB_ADMIN_URL=https://host:8475 muninn status   # TLS: override probe URLs",
 			})
 	},
+	"doctor": func() {
+		printSubcommandUsage("doctor", "diagnose TLS state, bind addresses, and certificate",
+			"muninn doctor [-v]",
+			[][2]string{
+				{"-v, --verbose", "Show SANs, serial, signature algorithm, TLS version/cipher, chain"},
+			},
+			[]string{
+				"muninn doctor",
+				"muninn doctor -v",
+				"MUNINN_TLS_CERT=/path/cert.pem muninn doctor   # inspect cert while server is stopped",
+			})
+	},
 	"shell": func() {
 		printSubcommandUsage("shell", "interactive memory shell", "muninn shell", nil,
 			[]string{
@@ -312,6 +324,7 @@ func printHelp() {
 	fmt.Printf("  %-32s %s\n", cyan("muninn stop"), "Stop the running server")
 	fmt.Printf("  %-32s %s\n", cyan("muninn restart"), "Stop and restart")
 	fmt.Printf("  %-32s %s\n", cyan("muninn status"), "Show which services are running")
+	fmt.Printf("  %-32s %s\n", cyan("muninn doctor"), "Diagnose TLS state, bind addresses, and cert")
 	fmt.Printf("  %-32s %s\n", cyan("muninn"), "Status check / drop into interactive shell")
 	fmt.Printf("  %-32s %s\n", cyan("muninn shell"), "Interactive shell (alias: bare muninn when running)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn logs"), "Show last 25 lines + tail")
@@ -344,7 +357,7 @@ func printHelp() {
 	fmt.Println("  MuninnDB exposes an MCP server that AI tools connect to for memory.")
 	fmt.Println("  Run " + cyan("muninn init") + " to configure Claude Desktop, Cursor, or Windsurf automatically.")
 	fmt.Println()
-	fmt.Println("  MCP endpoint: http://127.0.0.1:8750/mcp")
+	fmt.Printf("  MCP endpoint: %s://127.0.0.1:%s/mcp\n", localScheme(), defaultMCPPort)
 	fmt.Printf("  %-28s %s\n", "MUNINN_MCP_URL", "Override MCP server URL (also used by 'muninn mcp' proxy)")
 	fmt.Printf("  %-28s %s\n", "MUNINNDB_DATA", "Override default data directory")
 	fmt.Printf("  %-28s %s\n", "MUNINNDB_ADMIN_URL", "TLS: base URL for 'muninn status'/admin REST probes")

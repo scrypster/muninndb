@@ -144,10 +144,9 @@ func runVaultCreate(args []string) {
 		return
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("PUT",
-		fmt.Sprintf("%s/api/admin/vaults/config", vaultAdminBase),
-		bytes.NewReader(bodyBytes))
+	reqURL := fmt.Sprintf("%s/api/admin/vaults/config", vaultAdminBase)
+	client := httpClientForURL(reqURL, 10*time.Second)
+	req, err := http.NewRequest("PUT", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
@@ -225,7 +224,8 @@ func runVaultList(args []string) {
 		}
 	}
 
-	resp, err := http.Get(vaultAdminBase + "/api/vaults")
+	apiURL := vaultAdminBase + "/api/vaults"
+	resp, err := httpClientForURL(apiURL, 0).Get(apiURL)
 	if err != nil {
 		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
 		fmt.Println("Is muninn running? Try: muninn status")
@@ -311,7 +311,7 @@ func confirmVaultAction(name, action string) bool {
 }
 
 func doVaultRequestForce(method, reqURL, successMsg string, force bool) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpClientForURL(reqURL, 10*time.Second)
 	req, err := http.NewRequest(method, reqURL, nil)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -377,7 +377,7 @@ func runVaultClone(args []string) {
 	req.Header.Set("Content-Type", "application/json")
 	addSessionCookie(req)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpClientForURL(req.URL.String(), 10*time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
@@ -429,7 +429,7 @@ func runVaultRename(args []string) {
 	req.Header.Set("Content-Type", "application/json")
 	addSessionCookie(req)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpClientForURL(req.URL.String(), 10*time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
@@ -511,7 +511,7 @@ func runVaultMerge(args []string) {
 	req.Header.Set("Content-Type", "application/json")
 	addSessionCookie(req)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpClientForURL(req.URL.String(), 10*time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
@@ -558,7 +558,7 @@ func runVaultReindexFTS(args []string) {
 	fmt.Printf("Re-indexing FTS for vault %q...\n", vaultName)
 
 	reqURL := fmt.Sprintf("%s/api/admin/vaults/%s/reindex-fts", vaultAdminBase, url.PathEscape(vaultName))
-	client := &http.Client{Timeout: 30 * time.Minute}
+	client := httpClientForURL(reqURL, 30*time.Minute)
 	req, err := http.NewRequest("POST", reqURL, nil)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -617,7 +617,7 @@ func runVaultReembed(args []string) {
 	fmt.Printf("Re-embedding vault %q...\n", vaultName)
 
 	reqURL := fmt.Sprintf("%s/api/admin/vaults/%s/reembed", vaultAdminBase, url.PathEscape(vaultName))
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := httpClientForURL(reqURL, 30*time.Second)
 	req, err := http.NewRequest("POST", reqURL, nil)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -733,7 +733,7 @@ func pollProgressBar(jobID, vaultName string) {
 func fetchJobStatus(jobID, vaultName string) *statusSnap {
 	u := fmt.Sprintf("%s/api/admin/vaults/%s/job-status?job_id=%s",
 		vaultAdminBase, url.PathEscape(vaultName), url.QueryEscape(jobID))
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := httpClientForURL(u, 5*time.Second)
 	req, _ := http.NewRequest("GET", u, nil)
 	addSessionCookie(req)
 	resp, err := client.Do(req)
@@ -824,7 +824,7 @@ func runVaultExport(args []string) {
 
 	fmt.Printf("Exporting vault %q to %q...\n", vaultName, outputFile)
 
-	client := &http.Client{Timeout: 30 * time.Minute}
+	client := httpClientForURL(exportURL, 30*time.Minute)
 	req, err := http.NewRequest("GET", exportURL, nil)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -928,7 +928,7 @@ func runVaultExportMarkdown(args []string) {
 func exportVaultMarkdownOne(vaultName, outputFile string) error {
 	exportURL := fmt.Sprintf("%s/api/admin/vaults/%s/export-markdown", vaultAdminBase, url.PathEscape(vaultName))
 
-	client := &http.Client{Timeout: 30 * time.Minute}
+	client := httpClientForURL(exportURL, 30*time.Minute)
 	req, err := http.NewRequest("GET", exportURL, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -959,7 +959,8 @@ func exportVaultMarkdownOne(vaultName, outputFile string) error {
 }
 
 func listVaultNamesAdmin() ([]string, error) {
-	resp, err := http.Get(vaultAdminBase + "/api/vaults")
+	apiURL := vaultAdminBase + "/api/vaults"
+	resp, err := httpClientForURL(apiURL, 0).Get(apiURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1027,7 +1028,7 @@ func runVaultImport(args []string) {
 
 	fmt.Printf("Importing %q into vault %q...\n", filePath, vaultName)
 
-	client := &http.Client{Timeout: 30 * time.Minute}
+	client := httpClientForURL(importURL, 30*time.Minute)
 	req, err := http.NewRequest("POST", importURL, f)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -1081,7 +1082,7 @@ func runVaultRecallMode(args []string) {
 
 	if len(args) == 1 {
 		// GET current recall mode
-		client := &http.Client{Timeout: 5 * time.Second}
+		client := httpClientForURL(plasticityURL, 5*time.Second)
 		req, err := http.NewRequest("GET", plasticityURL, nil)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
@@ -1127,7 +1128,7 @@ func runVaultRecallMode(args []string) {
 	}
 
 	// GET current plasticity config
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := httpClientForURL(plasticityURL, 5*time.Second)
 	getReq, err := http.NewRequest("GET", plasticityURL, nil)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -1234,7 +1235,7 @@ func runVaultBehavior(args []string) {
 		}
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := httpClientForURL(plasticityURL, 5*time.Second)
 
 	if newMode == "" && newInstructions == "" {
 		// GET current behavior mode.
