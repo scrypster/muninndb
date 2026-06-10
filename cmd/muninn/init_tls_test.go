@@ -133,6 +133,82 @@ func TestWarnIfDaemonSchemeMismatch(t *testing.T) {
 	})
 }
 
+// writeCertWithValidity writes a cert-only PEM (IP SAN 127.0.0.1) valid over
+// [notBefore, notAfter] and returns its path.
+func writeCertWithValidity(t *testing.T, notBefore, notAfter time.Time) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "cert.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestWarnIfCertExpiring(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name                string
+		notBefore, notAfter time.Time
+		wantSubstr          string // "" => no output
+	}{
+		{"healthy (1 year)", now.Add(-time.Hour), now.Add(365 * 24 * time.Hour), ""},
+		{"expired", now.Add(-48 * time.Hour), now.Add(-24 * time.Hour), "expired on"},
+		{"not yet valid", now.Add(24 * time.Hour), now.Add(365 * 24 * time.Hour), "not valid until"},
+		{"expires soon", now.Add(-time.Hour), now.Add(10 * 24 * time.Hour), "expires in"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := writeCertWithValidity(t, c.notBefore, c.notAfter)
+			out := captureStdout(func() { warnIfCertExpiring(path) })
+			if c.wantSubstr == "" {
+				if out != "" {
+					t.Errorf("expected no warning, got:\n%s", out)
+				}
+				return
+			}
+			if !strings.Contains(out, c.wantSubstr) {
+				t.Errorf("expected %q, got:\n%s", c.wantSubstr, out)
+			}
+		})
+	}
+}
+
+func TestConfigTokenOverride(t *testing.T) {
+	t.Run("flag wins over env", func(t *testing.T) {
+		t.Setenv("MUNINN_MCP_TOKEN", "env-tok")
+		if got := configTokenOverride("flag-tok"); got != "flag-tok" {
+			t.Errorf("got %q, want flag-tok", got)
+		}
+	})
+	t.Run("env used when no flag (matches daemon precedence)", func(t *testing.T) {
+		t.Setenv("MUNINN_MCP_TOKEN", "env-tok")
+		if got := configTokenOverride(""); got != "env-tok" {
+			t.Errorf("got %q, want env-tok", got)
+		}
+	})
+	t.Run("empty when neither set (falls back to the file token)", func(t *testing.T) {
+		t.Setenv("MUNINN_MCP_TOKEN", "")
+		if got := configTokenOverride(""); got != "" {
+			t.Errorf("got %q, want empty (caller uses loadOrGenerateToken)", got)
+		}
+	})
+}
+
 func TestClientMCPURL(t *testing.T) {
 	// Pin the data dir: clientScheme consults a RUNNING daemon's muninn.addrs,
 	// and the host running these tests may have a live (possibly TLS) daemon.

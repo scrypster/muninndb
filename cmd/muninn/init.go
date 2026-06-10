@@ -204,6 +204,21 @@ func clientRESTURL() string {
 	return clientScheme() + "://127.0.0.1:8475"
 }
 
+// configTokenOverride returns the token to embed in generated tool configs
+// WITHOUT touching the mcp.token file: an explicit --token flag, else
+// MUNINN_MCP_TOKEN from the environment (now visible since runInit loads
+// muninn.env). This mirrors the daemon's own precedence — --mcp-token flag >
+// MUNINN_MCP_TOKEN env > ~/.muninn/mcp.token file (server.go) — so the configs
+// authenticate against the token the daemon actually uses, instead of the file
+// token the daemon would ignore when MUNINN_MCP_TOKEN is set. Returns "" when
+// neither is set, so the caller falls back to loadOrGenerateToken (the file).
+func configTokenOverride(tokenFlag string) string {
+	if tokenFlag != "" {
+		return tokenFlag
+	}
+	return os.Getenv("MUNINN_MCP_TOKEN")
+}
+
 // ambientTLSPair returns the env-configured TLS pair when it is set and valid,
 // else ("",""). Used so a pair inherited from the shell or muninn.env enables
 // the same persistence and messaging as explicit flags — without it, an
@@ -253,7 +268,61 @@ func enableTLSFromFlagsOrPrompt(certFlag, keyFlag string) (cert, key string) {
 	os.Setenv("MUNINN_TLS_KEY", key)
 	fmt.Println("  ✓ TLS enabled — clients will connect over https")
 	warnIfCertNotLoopback(cert)
+	warnIfCertExpiring(cert)
 	return cert, key
+}
+
+// parseLeafCert reads a PEM file and returns its first parseable CERTIFICATE
+// block (the leaf), skipping any leading private-key block in a combined PEM.
+// Returns nil on any read/parse failure.
+func parseLeafCert(certPath string) *x509.Certificate {
+	b, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil
+	}
+	for {
+		var block *pem.Block
+		block, b = pem.Decode(b)
+		if block == nil {
+			return nil
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		if c, err := x509.ParseCertificate(block.Bytes); err == nil {
+			return c
+		}
+	}
+}
+
+// certExpiryWarnWindow mirrors internal/tlsutil.ExpiryWarnWindow (added by
+// #456); duplicated here only because that package is not on this branch's
+// base. Unify onto tlsutil once #456 lands.
+const certExpiryWarnWindow = 30 * 24 * time.Hour
+
+// warnIfCertExpiring notes an expired, not-yet-valid, or soon-to-expire cert at
+// init time, so the operator is not handed a "✓ TLS enabled" banner over a cert
+// clients will reject. Non-fatal: the daemon decides whether to serve (and #456
+// warns at startup); init must simply not present silent success. Neither
+// validateTLSPair (tls.LoadX509KeyPair) nor VerifyHostname inspects validity.
+func warnIfCertExpiring(certPath string) {
+	c := parseLeafCert(certPath)
+	if c == nil {
+		return
+	}
+	now := time.Now()
+	switch {
+	case now.After(c.NotAfter):
+		fmt.Printf("  ⚠  The TLS certificate expired on %s — clients will reject it.\n",
+			c.NotAfter.UTC().Format("2006-01-02"))
+	case now.Before(c.NotBefore):
+		fmt.Printf("  ⚠  The TLS certificate is not valid until %s.\n",
+			c.NotBefore.UTC().Format("2006-01-02"))
+	case c.NotAfter.Sub(now) < certExpiryWarnWindow:
+		days := int((c.NotAfter.Sub(now) + 24*time.Hour - 1) / (24 * time.Hour)) // round up
+		fmt.Printf("  ⚠  The TLS certificate expires in %d day(s), on %s.\n",
+			days, c.NotAfter.UTC().Format("2006-01-02"))
+	}
 }
 
 // warnIfCertNotLoopback notes when the certificate covers neither 127.0.0.1
@@ -261,27 +330,7 @@ func enableTLSFromFlagsOrPrompt(certFlag, keyFlag string) (cert, key string) {
 // tool configs point external MCP/REST clients at https://127.0.0.1 — and
 // those clients DO verify, so they would reject the connection.
 func warnIfCertNotLoopback(certPath string) {
-	b, err := os.ReadFile(certPath)
-	if err != nil {
-		return
-	}
-	// Find the leaf CERTIFICATE block: a combined PEM may put the private key
-	// first, and pem.Decode returns blocks in file order.
-	var c *x509.Certificate
-	for {
-		var block *pem.Block
-		block, b = pem.Decode(b)
-		if block == nil {
-			break
-		}
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-		if parsed, err := x509.ParseCertificate(block.Bytes); err == nil {
-			c = parsed
-			break
-		}
-	}
+	c := parseLeafCert(certPath)
 	if c == nil {
 		return
 	}
@@ -416,8 +465,8 @@ func runInteractiveInit(tokenFlag *string, noToken *bool, noStart *bool, tlsCert
 	// Auto: generate token (no prompt)
 	var token string
 	if !*noToken {
-		if *tokenFlag != "" {
-			token = *tokenFlag
+		if override := configTokenOverride(*tokenFlag); override != "" {
+			token = override
 		} else {
 			dataDir := defaultDataDir()
 			var isNew bool
@@ -879,12 +928,13 @@ func runNonInteractiveInit(toolStr, tokenStr string, noToken, noStart, yes bool,
 		os.Setenv("MUNINN_TLS_CERT", tlsCert)
 		os.Setenv("MUNINN_TLS_KEY", tlsKey)
 		warnIfCertNotLoopback(tlsCert)
+		warnIfCertExpiring(tlsCert)
 	}
 
 	var token string
 	if !noToken {
-		if tokenStr != "" {
-			token = tokenStr
+		if override := configTokenOverride(tokenStr); override != "" {
+			token = override
 		} else {
 			dataDir := defaultDataDir()
 			var err error
