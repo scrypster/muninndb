@@ -113,13 +113,16 @@ func probeServicesDefault() []serviceStatus {
 // the returned scheme then lets callers correct a stale display URL. An
 // https:// URL (e.g. an env-var override) is probed directly.
 //
-// The https attempt skips certificate verification: this is a localhost
-// liveness check, not a security boundary, and an internal-CA or self-signed
-// cert must not make a healthy server look [down].
+// The https attempt skips certificate verification only for a loopback URL:
+// there it is a localhost liveness check, not a security boundary, and an
+// internal-CA or self-signed cert must not make a healthy server look [down].
+// An off-host https URL (e.g. a MUNINNDB_*_URL env override) keeps full
+// verification, consistent with httpClientForURL — so a remote server behind
+// an untrusted cert reads as [down] rather than silently probed insecurely.
 func probeHealth(url string) (up bool, scheme string) {
 	switch {
 	case strings.HasPrefix(url, "https://"):
-		if probeOnce(url, true) {
+		if probeOnce(url, isLoopbackURL(url)) {
 			return true, "https"
 		}
 		return false, ""
@@ -129,7 +132,8 @@ func probeHealth(url string) (up bool, scheme string) {
 		}
 		// The http probe failed — the server may actually speak TLS on this
 		// port. Retry once over https before concluding it is down.
-		if probeOnce("https://"+strings.TrimPrefix(url, "http://"), true) {
+		httpsURL := "https://" + strings.TrimPrefix(url, "http://")
+		if probeOnce(httpsURL, isLoopbackURL(httpsURL)) {
 			return true, "https"
 		}
 		return false, ""
@@ -143,10 +147,10 @@ func probeHealth(url string) (up bool, scheme string) {
 func probeOnce(url string, insecure bool) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	if insecure {
-		client.Transport = &http.Transport{
-			// localhost liveness probe, not a security boundary
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}
+		client.Transport = insecureLoopbackTransport
+		// Same as httpClientForURL: an insecure (loopback) probe must not carry
+		// the verification skip off-host via a redirect.
+		client.CheckRedirect = loopbackOnlyRedirect
 	}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -254,9 +258,12 @@ func hostIsRoutable(host string) bool {
 // isLoopbackURL reports whether rawURL targets this machine — its host is
 // "localhost", a loopback IP, or any address in the 127.0.0.0/8 range. It is
 // the URL-level guard for deciding when skipping TLS certificate verification
-// is safe: a loopback peer cannot be impersonated, an off-host peer can.
-// Unparseable input is treated as non-loopback so callers fail closed (keep
-// verification on).
+// is acceptable: a loopback connection never leaves the machine, an off-host
+// one can be intercepted in transit. (Loopback is a convenience boundary, not
+// a hard one — when the daemon is down, another local process could bind its
+// port. Verifying against the muninn-managed CA instead is a possible future
+// hardening.) Unparseable input is treated as non-loopback so callers fail
+// closed (keep verification on).
 func isLoopbackURL(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -273,21 +280,52 @@ func isLoopbackURL(rawURL string) bool {
 	return false
 }
 
+// insecureLoopbackTransport is shared by every client httpClientForURL builds
+// for a loopback https target, so repeated calls (REPL commands, the job-status
+// poll) reuse TLS connections instead of handshaking — and abandoning idle
+// sockets — per request. Idle bounds match http.DefaultTransport's spirit.
+var insecureLoopbackTransport = &http.Transport{
+	// loopback self-signed/internal-CA cert; see isLoopbackURL for the rationale
+	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+	MaxIdleConns:    10,
+	IdleConnTimeout: 90 * time.Second,
+}
+
 // httpClientForURL returns an http.Client for rawURL. It skips TLS verification
 // only for a loopback https target — a self-signed/internal-CA daemon on the
-// same machine, where the cert can't be impersonated — matching probeOnce's
-// loopback rationale. A remote https endpoint keeps full verification.
+// same machine — matching probeOnce's loopback rationale. A remote https
+// endpoint keeps full verification. The insecure client also refuses to follow
+// any redirect away from loopback: the verification skip (and a 307/308's
+// replayed request body) must never travel to an off-host peer.
 func httpClientForURL(rawURL string, timeout time.Duration) *http.Client {
 	c := &http.Client{Timeout: timeout}
 	// ToLower: the scheme is case-insensitive, and isLoopbackURL (via url.Parse)
 	// already is — keep this prefix check consistent with it.
 	if strings.HasPrefix(strings.ToLower(rawURL), "https://") && isLoopbackURL(rawURL) {
-		c.Transport = &http.Transport{
-			// loopback self-signed/internal-CA cert, not a security boundary
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}
+		c.Transport = insecureLoopbackTransport
+		c.CheckRedirect = loopbackOnlyRedirect
 	}
 	return c
+}
+
+// maxRedirects mirrors net/http's default cap. A custom CheckRedirect REPLACES
+// the default policy entirely, so any guard that sets one must re-impose the
+// hop limit itself — otherwise a loopback responder that redirects to itself in
+// a cycle is followed forever (bounded only by Client.Timeout, and not at all
+// for the timeout-0 clients in the REPL/vault paths).
+const maxRedirects = 10
+
+// loopbackOnlyRedirect refuses any redirect whose target leaves loopback (the
+// verification skip and a 307/308's replayed body must never reach an off-host
+// peer) and re-imposes net/http's default hop cap.
+func loopbackOnlyRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if !isLoopbackURL(req.URL.String()) {
+		return fmt.Errorf("refusing redirect from loopback TLS endpoint to non-loopback %q", req.URL)
+	}
+	return nil
 }
 
 // printStatusDisplay prints the unified status view.
