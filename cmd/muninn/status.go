@@ -103,20 +103,30 @@ func resolveScheme(addrs daemonAddrs, svcs []serviceStatus) string {
 }
 
 // overallState computes the aggregate state from individual service statuses.
+//
+// A certErr service is treated as REACHABLE: a TLS verification failure means
+// the daemon answered the handshake and only trust failed, so the server is up.
+// This keeps an all-cert-fail deployment in stateDegraded (a fixable trust
+// problem) instead of stateStopped (which would wrongly tell the user to start
+// an already-running server). See #481.
 func overallState(svcs []serviceStatus) runState {
-	up, down := 0, 0
+	reachable, down, certErrs := 0, 0, 0
 	for _, s := range svcs {
-		if s.up {
-			up++
-		} else {
+		switch {
+		case s.up:
+			reachable++
+		case s.certErr:
+			reachable++
+			certErrs++
+		default:
 			down++
 		}
 	}
-	if down == 0 {
-		return stateRunning
-	}
-	if up == 0 {
+	if reachable == 0 && down > 0 {
 		return stateStopped
+	}
+	if down == 0 && certErrs == 0 {
+		return stateRunning
 	}
 	return stateDegraded
 }
@@ -436,6 +446,7 @@ func printStatusDisplay(compact bool) runState {
 	if state == stateDegraded {
 		fmt.Println()
 		certIssue := false
+		downIssue := false
 		for _, s := range svcs {
 			if s.up {
 				continue
@@ -444,6 +455,7 @@ func printStatusDisplay(compact bool) runState {
 				certIssue = true
 				fmt.Printf("  %s is reachable but its TLS certificate failed verification", s.name)
 			} else {
+				downIssue = true
 				fmt.Printf("  %s is not responding", s.name)
 			}
 			if s.name == "mcp" {
@@ -451,12 +463,16 @@ func printStatusDisplay(compact bool) runState {
 			}
 			fmt.Println(".")
 		}
+		// Cert failures and genuine outages can coexist; surface guidance for
+		// each kind that is present rather than letting a cert issue hide that
+		// another service genuinely needs a restart (#481).
 		if certIssue {
 			// A restart won't fix a trust problem — the server is up.
 			fmt.Println("  The server is up but its certificate isn't trusted. Check that the")
 			fmt.Println("  cert is valid for this host and that your CA is trusted (or, for a")
 			fmt.Println("  remote endpoint, that MUNINNDB_*_URL points at a host the cert covers).")
-		} else {
+		}
+		if downIssue {
 			fmt.Println("  Run: muninn restart")
 		}
 	}
