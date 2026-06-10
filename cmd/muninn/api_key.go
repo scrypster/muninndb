@@ -139,10 +139,9 @@ func runAPIKeyCreate(args []string) {
 		return
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("POST",
-		fmt.Sprintf("%s/api/admin/keys", vaultAdminBase),
-		bytes.NewReader(bodyBytes))
+	reqURL := fmt.Sprintf("%s/api/admin/keys", vaultAdminBase)
+	client := httpClientForURL(reqURL, 10*time.Second)
+	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
@@ -226,7 +225,7 @@ func runAPIKeyList(args []string) {
 		reqURL += "?vault=" + url.QueryEscape(vault)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpClientForURL(reqURL, 10*time.Second)
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -328,7 +327,7 @@ func runAPIKeyRevoke(args []string) {
 		reqURL += "?vault=" + url.QueryEscape(vault)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpClientForURL(reqURL, 10*time.Second)
 	req, err := http.NewRequest("DELETE", reqURL, nil)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

@@ -149,8 +149,9 @@ func loginAdmin(username, password string) error {
 		"username": username,
 		"password": password,
 	})
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(vaultUIBase+"/api/auth/login", "application/json",
+	loginURL := vaultUIBase + "/api/auth/login"
+	client := httpClientForURL(loginURL, 5*time.Second)
+	resp, err := client.Post(loginURL, "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Errorf("connect to MuninnDB: %w", err)

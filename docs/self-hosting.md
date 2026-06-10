@@ -493,7 +493,7 @@ Ensure that path is on an encrypted filesystem before storing sensitive data.
 Encryption at rest protects data that is **stored on disk while the system is off or the volume is locked**. It does not protect:
 
 - **The running process.** Once MuninnDB starts and the volume is unlocked, data is decrypted in memory. Any process with sufficient OS privileges can read process memory.
-- **Network exposure.** Data in transit between clients and MuninnDB is not covered by disk encryption. Run MuninnDB behind a TLS-terminating reverse proxy in any networked deployment. See the [auth documentation](auth.md) for the transport security property.
+- **Network exposure.** Data in transit between clients and MuninnDB is not covered by disk encryption. In any networked deployment, serve TLS natively (see the [TLS guide](tls.md)) or run MuninnDB behind a TLS-terminating reverse proxy. See the [auth documentation](auth.md) for the transport security property.
 - **API key compromise.** A stolen API key grants access to vault data over the network regardless of disk encryption state. Rotate keys immediately if compromise is suspected.
 - **Backup files.** If you copy the `pebble/` directory or snapshot the volume without encryption, those copies are unprotected. Apply the same encryption controls to your backup destination.
 

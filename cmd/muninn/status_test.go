@@ -450,7 +450,7 @@ func TestIsLoopbackURL(t *testing.T) {
 		{"loopback ipv6", "https://[::1]:8475", true},
 		{"loopback ipv4-mapped ipv6", "https://[::ffff:127.0.0.1]:8475", true},
 		{"http loopback", "http://127.0.0.1:8475", true},
-		{"lan ip", "https://172.20.50.63:8475", false},
+		{"non-loopback ip", "https://203.0.113.10:8475", false},
 		{"public host", "https://muninn.example.com:8475", false},
 		{"empty string", "", false},
 		{"malformed", "https://%zz", false},

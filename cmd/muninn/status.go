@@ -76,6 +76,32 @@ type serviceStatus struct {
 	certErr bool   // probe failed specifically due to TLS certificate verification
 }
 
+// portFromAddr extracts the port from a "host:port" address, returning fallback
+// when addr is empty or unparseable.
+func portFromAddr(addr, fallback string) string {
+	if addr != "" {
+		if _, p, err := net.SplitHostPort(addr); err == nil && p != "" {
+			return p
+		}
+	}
+	return fallback
+}
+
+// resolveScheme returns the daemon's client-facing scheme. When the sidecar
+// predates the Scheme field (empty), it recovers the scheme the web-ui health
+// probe actually reached, so a legacy TLS daemon is not misreported as http.
+func resolveScheme(addrs daemonAddrs, svcs []serviceStatus) string {
+	if addrs.Scheme != "" {
+		return addrs.Scheme
+	}
+	for _, s := range svcs {
+		if s.name == "web ui" && s.scheme != "" {
+			return s.scheme
+		}
+	}
+	return ""
+}
+
 // overallState computes the aggregate state from individual service statuses.
 func overallState(svcs []serviceStatus) runState {
 	up, down := 0, 0
@@ -191,20 +217,9 @@ func isCertVerificationError(err error) bool {
 // actual addresses (and scheme) the daemon bound to; empty fields fall back to
 // the default ports and an "http" scheme.
 func probeServicesWithAddrs(addrs daemonAddrs) []serviceStatus {
-	// portFrom extracts the port from an "host:port" address string.
-	// Returns fallback when addr is empty or unparseable.
-	portFrom := func(addr, fallback string) string {
-		if addr != "" {
-			if _, p, err := net.SplitHostPort(addr); err == nil && p != "" {
-				return p
-			}
-		}
-		return fallback
-	}
-
-	restPort := portFrom(addrs.RestAddr, "8475")
-	mcpPort := portFrom(addrs.MCPAddr, "8750")
-	uiPort := portFrom(addrs.UIAddr, "8476")
+	restPort := portFromAddr(addrs.RestAddr, "8475")
+	mcpPort := portFromAddr(addrs.MCPAddr, "8750")
+	uiPort := portFromAddr(addrs.UIAddr, "8476")
 
 	restPortInt, _ := strconv.Atoi(restPort)
 	mcpPortInt, _ := strconv.Atoi(mcpPort)
@@ -440,15 +455,7 @@ func printStatusDisplay(compact bool) runState {
 		if state == stateRunning {
 			fmt.Println()
 			addrs, _ := readAddrsFile(defaultDataDir())
-			// If the daemon predates the muninn.addrs scheme field, fall back
-			// to the scheme the probe actually reached the Web UI on.
-			if addrs.Scheme == "" {
-				for _, s := range svcs {
-					if s.name == "web ui" && s.scheme != "" {
-						addrs.Scheme = s.scheme
-					}
-				}
-			}
+			addrs.Scheme = resolveScheme(addrs, svcs)
 			lines := webUIDisplay(addrs)
 			fmt.Printf("  Web UI → %s\n", lines[0])
 			for _, l := range lines[1:] {
