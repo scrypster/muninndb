@@ -9,6 +9,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Vault isolation on the binary transports** — MBP (8474) and gRPC (8477) now enforce the same fail-closed vault model as REST/MCP: a keyed session is pinned to its key's vault (cross-vault access rejected, even to a public vault), an unauthenticated session may reach only public vaults, and a missing auth store fails closed (#484).
+- **LLM provider API keys masked** in the admin plugin-config API; a retyped key is saved, an untouched (masked) field is preserved (#488).
+- **Installer checksum verification** — releases now publish `checksums.txt`; `install.sh` / `install.ps1` verify the downloaded binary and refuse to install on mismatch (#489).
+- **Startup warning** when bound to a non-loopback address while the admin still has the default password (#490).
+
+### Added
+- TLS is now a first-class mode (epic #443): TLS setup in `muninn init` (#465), `muninn doctor` self-describes TLS state / bind addresses / cert details (#463), startup cert-expiry warning (#456), `docs/tls.md` + TLS-aware systemd unit (#466), Web UI host derived from the cert DNS SAN (#467).
+
+### Changed
+- Scheme-aware CLI URLs and clients throughout — printed URLs, generated AI-tool configs, and admin/vault HTTP clients honour `https` under TLS (#468, #469, #478); `muninn status` distinguishes a TLS trust failure from a dead server and no longer reads an all-cert-failure as "stopped" (#477, #481).
+- `muninn.env` is loaded before every subcommand, so lifecycle/status commands share the daemon's config (#476).
+- Activity chart buckets by the viewer's local calendar day (#458).
+- `go` directive bumped to 1.26.4 to clear govulncheck stdlib advisories (#464).
+
+### Fixed
+- **HNSW graph integrity** — link-before-promote, distance-based neighbor pruning, vault-scoped index load, and back-edge persistence; repairs silent degradation of semantic recall to a single reachable cluster (#471, also resolves #462).
+- `Evolve` no longer appends ` (evolved)` to the concept; lineage stays in the supersedes graph (#459).
+- Renamed-vault correctness — bulk vault operations and FTS reindex resolve the stored workspace prefix instead of the SipHash of the current name (#454, #480).
+- Consolidation dedup no longer mutates the cache-shared representative engram in place — was a data race against concurrent recalls (#492).
+- Decay/recency scoring clamps clock skew — a future `LastAccess`/`CreatedAt` no longer pushes retention above 1 (#493).
+- Memory detail panel "Created: Invalid Date" for search results (#461).
+
+### Internal
+- `storage.ErrNotFound` sentinel replaces `strings.Contains(err, "not found")` matching at the engine boundary (#491).
+- De-flaked the WAL syncer timing tests (#486).
+
+---
+
+## [0.6.1] - 2026-05-26
+
+### Fixed
+- `fix(cluster)` — defer the `OnLobeJoined` callback until the `JoinResponse` + snapshot are fully on the wire, so the streamer no longer races the handshake and corrupts the lobe-side parser (#449, #448 Bug 1).
+- `fix(cli)` — auto-detect TLS in `muninn status` / `muninn start` health probes (#444).
+
+### Changed
+- `feat(consolidation)` — the representative node absorbs the `AccessCount` of merged duplicates during dedup (#447).
+- `feat(enrichment)` — Gemini 2.5 Flash added as a Google enrichment option and promoted to the default Google model (#450, #452).
+- `chore(consolidation)` — dedup metadata-update errors are now surfaced in the consolidation report (#451).
+
+---
+
+## [0.6.0] - 2026-05-20
+
+### Added
+- **Audit logging** — structured audit trail with file, stdout, syslog, and webhook sinks; `audit tail/export/stats` CLI commands (#418).
+- **Retrieval annotations** — staleness, conflict, and trust metadata on recall responses (#388).
+- **MCP `initialize` instructions** response.
+
+### Fixed
+- `fix(fts)` — auto-restart worker goroutines after a panic; include the field byte in the BM25 posting key (multi-field terms were silently overwritten); scope the IDF cache per `(vault, term)` (#430).
+- `fix(storage)` — vault deletion now clears all per-vault prefixes and entity-graph data and prunes orphaned global entity records (#435, #436, #438).
+- `fix(cli)` — `muninn status` / `start` probes honour `MUNINNDB_{ADMIN,MCP,UI}_URL` (#439, #440).
+- `fix(engine)` — content-hash dedup race, enrichment ghost-queue deadlock, trigger nil-metadata crash.
+- `fix(auth)` — validate the Bearer token before parsing the body to prevent DoS amplification (#416).
+- `fix(import)` — pipe deadlock and orphaned vault name on a failed import (#412).
+
+### Security
+- gRPC bumped to v1.79.3; govulncheck added to CI.
+
+---
+
+## [0.5.1] - 2026-05-06
+
+### Fixed
+- `fix(fts)` — auto-restart FTS worker goroutines after a panic (a panicked worker was never replaced, eventually making all new writes unsearchable until restart); include the field byte in the BM25 posting key; scope the IDF cache by `(vault, term)` (#430).
+
+---
+
+## [0.5.0] - 2026-04-27
+
+### Added
+- **Per-engram trust/taint labels** (#387) — `TrustLevel` (`verified`/`inferred`/`external`/`untrusted`) stored at a fixed ERF offset (zero-migration); all writes auto-stamp `inferred`; trust is visible in `muninn_read`/`muninn_recall`; new `muninn_trust` MCP tool; `ExcludeUntrusted` per-vault plasticity option.
+- **Cursor pagination** for `muninn_get_enrichment_candidates` so large vaults no longer miss candidates (#362).
+
+### Fixed
+- `fix(engine)` — 400 for invalid inline association target IDs (#399).
+- `fix(rest)` — 400 instead of 500 for invalid engram IDs in `/api/link` (#395).
+- `fix(enrich)` — prevent infinite retry loops that deadlocked the circuit breaker (#390).
+- `fix(trigger)` — guard against nil metadata in `sweepVault` / `handleCognitive` (#393).
+- `fix(activation)` — restore the RRF score for BFS-traversed candidates in the ACT-R/CGDN paths.
+- `fix(rest)` — delete phantom vaults that existed only in auth config.
+
+### Internal
+- `refactor(auth)` — extract `ParseBearerToken`, `ValidateStaticToken`, `IsValidVaultName` into the shared `internal/auth` package.
+
+---
+
+## [0.4.12-alpha] - 2026-04-06
+
+### Fixed
+- **MCP vault-isolation bypass** — `mk_` vault-scoped keys now enforce vault pinning in open-server mode (no static token); previously any MCP caller could reach any vault by naming it. Invalid/revoked `mk_` keys fail closed; SSE message-endpoint auth re-validation tightened (#368).
+
+---
+
+## [0.4.11-alpha] - 2026-04-05
+
+### Added
+- **Long-Term Potentiation (LTP)** — Hebbian associations strengthen over repeated co-activation; configurable via plasticity config.
+- **Reciprocal Rank Fusion (RRF)** scoring strategy, selectable alongside ACT-R and Ebbinghaus.
+- **Content-hash deduplication** at write time.
+- **Agent-managed enrichment via MCP** — `muninn_get_enrichment_candidates` / `muninn_apply_enrichment`.
+- **`X-Client-Name: MuninnDB`** header on outbound LLM (embed/enrich) requests.
+
+### Fixed
+- **Cluster join handshake (4 bugs)** — register the live `net.Conn` before responding; remove the epoch guard so a Cortex restart re-triggers election; accept both `secret` and `cluster_secret` JSON fields; honour `MUNINN_ADMIN_PASSWORD` at bootstrap.
+
 ---
 
 ## [0.4.10] - 2026-04-02
