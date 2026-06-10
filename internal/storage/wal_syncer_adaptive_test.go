@@ -174,8 +174,14 @@ func TestWALSyncer_SyncCountAccurate(t *testing.T) {
 		if err := db.Set(key, key, pebble.NoSync); err != nil {
 			t.Fatalf("cycle %d write: %v", cycle, err)
 		}
-		// Wait for the sync to fire.
-		deadline := time.Now().Add(10 * walSyncInterval)
+		// Wait for the sync to fire. The deadline is a generous fixed wall-clock
+		// bound (not a small multiple of walSyncInterval): time.Ticker guarantees
+		// a *minimum* tick interval, not a maximum, so on a contended CI runner
+		// the syncer goroutine can be starved well past a few intervals. A tight
+		// 10×interval (100ms) deadline made this flake ("cycle 2: got 2"); 2s
+		// gives a heavily loaded runner ample room while a healthy run still
+		// passes in a couple of intervals.
+		deadline := time.Now().Add(2 * time.Second)
 		want := int64(cycle + 1)
 		for time.Now().Before(deadline) {
 			if s.syncCount.Load() >= want {
