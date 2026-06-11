@@ -86,6 +86,7 @@ func (c *ClusterCoordinator) runPeerDiscovery(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	backoff := make(map[string]time.Time) // seed addr → next eligible dial time
+	seedOwner := make(map[string]string)  // seed addr → real node-id learned for it
 	for {
 		select {
 		case <-ctx.Done():
@@ -96,45 +97,59 @@ func (c *ClusterCoordinator) runPeerDiscovery(ctx context.Context) {
 			if seed == c.advertiseAddr || c.mgr.HasLivePeerAt(seed) {
 				continue
 			}
+			// Skip a seed already covered by a live conn to its node — this is how
+			// a Lobe avoids re-dialing its Cortex when the advertised address (the
+			// PeerConn key) differs from the dialed seed string (DNS vs IP).
+			if owner, ok := seedOwner[seed]; ok {
+				if p, ok2 := c.mgr.GetPeer(owner); ok2 && p.IsConnected() {
+					continue
+				}
+			}
 			if t, ok := backoff[seed]; ok && time.Now().Before(t) {
 				continue
 			}
-			if err := c.helloDial(ctx, seed); err != nil {
+			nodeID, err := c.helloDial(ctx, seed)
+			if err != nil {
 				jitter := time.Duration(rand.Int63n(int64(interval) + 1))
 				backoff[seed] = time.Now().Add(5*time.Second + jitter)
-			} else {
-				delete(backoff, seed)
+				continue
 			}
+			if nodeID != "" {
+				seedOwner[seed] = nodeID
+			}
+			delete(backoff, seed)
 		}
 	}
 }
 
 // helloDial dials a seed and runs the handshake from the initiating side.
-func (c *ClusterCoordinator) helloDial(ctx context.Context, seedAddr string) error {
+// Returns the peer's node-id (even when the conn was not adopted by the
+// tie-break — the caller uses it to stop re-dialing an already-covered seed).
+func (c *ClusterCoordinator) helloDial(ctx context.Context, seedAddr string) (string, error) {
 	var d net.Dialer
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	conn, err := d.DialContext(dialCtx, "tcp", seedAddr)
 	cancel()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := writeHelloFrame(conn, c.localHello()); err != nil {
 		conn.Close()
-		return err
+		return "", err
 	}
 	frame, err := mbp.ReadFrame(conn)
 	if err != nil || frame.Type != mbp.TypePeerHello {
 		conn.Close()
-		return fmt.Errorf("hello: bad reply from %s", seedAddr)
+		return "", fmt.Errorf("hello: bad reply from %s", seedAddr)
 	}
 	var peer mbp.PeerHello
 	if err := msgpack.Unmarshal(frame.Payload, &peer); err != nil {
 		conn.Close()
-		return err
+		return "", err
 	}
 	if peer.NodeID == "" || peer.NodeID == c.cfg.NodeID || !c.verifyHello(peer) {
 		conn.Close()
-		return fmt.Errorf("hello: invalid peer from %s", seedAddr)
+		return "", fmt.Errorf("hello: invalid peer from %s", seedAddr)
 	}
 	// Our OUTBOUND conn is canonical iff we are the lower node-id.
 	p, adopted := c.adoptHelloPeer(conn, peer, c.cfg.NodeID < peer.NodeID)
@@ -143,7 +158,7 @@ func (c *ClusterCoordinator) helloDial(ctx context.Context, seedAddr string) err
 		// votes, and claims are processed.
 		go c.readPeerFrames(ctx, p, peer.NodeID)
 	}
-	return nil
+	return peer.NodeID, nil
 }
 
 // HandleIncomingHello is the accept side: validate, reply, tie-break, adopt.
