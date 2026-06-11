@@ -680,9 +680,14 @@ func handleClusterConn(conn net.Conn, coord *replication.ClusterCoordinator) {
 			return // connection closed or error
 		}
 		if frame.Type == mbp.TypeJoinRequest {
-			nodeID, err := coord.HandleIncomingJoin(conn, frame.Payload)
+			nodeID, adopted, err := coord.HandleIncomingJoin(conn, frame.Payload)
 			if err != nil {
 				log.Printf("[cluster] join error from %s: %v", fromNodeID, err)
+				return
+			}
+			if !adopted {
+				// Non-leader rejected the join with a redirect (already written to
+				// the raw conn). The conn was NOT registered, so close it here.
 				return
 			}
 			fromNodeID = nodeID

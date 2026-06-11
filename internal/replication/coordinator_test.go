@@ -1455,6 +1455,10 @@ func TestClusterCoordinator_HandleIncomingJoin_SnapshotFails_NoCallback(t *testi
 	if err := coord.epochStore.ForceSet(2); err != nil {
 		t.Fatalf("ForceSet: %v", err)
 	}
+	// Only the leader accepts joins (#533); mark this cortex as leader.
+	coord.roleMu.Lock()
+	coord.role = RolePrimary
+	coord.roleMu.Unlock()
 
 	// Upgrade the join handler to a DB-aware one so the JoinResponse signals
 	// NeedsSnapshot=true and HandleIncomingJoin takes the snapshot path.
@@ -1487,7 +1491,7 @@ func TestClusterCoordinator_HandleIncomingJoin_SnapshotFails_NoCallback(t *testi
 		t.Fatalf("marshal JoinRequest: %v", err)
 	}
 
-	nodeID, err := coord.HandleIncomingJoin(cortexConn, payload)
+	nodeID, _, err := coord.HandleIncomingJoin(cortexConn, payload)
 	if err != nil {
 		t.Fatalf("HandleIncomingJoin: %v", err)
 	}

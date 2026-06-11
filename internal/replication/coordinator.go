@@ -630,6 +630,18 @@ func (c *ClusterCoordinator) streamReplication(ctx context.Context, role string,
 		if resp.CortexID != "" && resp.Conn != nil {
 			c.mgr.RegisterConn(resp.CortexID, cortexAddr, resp.Conn)
 			c.reconcileJoinedPeer(resp.CortexID, cortexAddr, RolePrimary)
+			// Adopt the Cortex named by the JoinResponse as our leader, so the
+			// election layer knows currentLeader even if its CortexClaim broadcast
+			// raced ahead of our join (reliable leader discovery, #531 PR1). This is
+			// what lets OnODown tell a leader's death from a mere lobe's.
+			if resp.CortexID != c.cfg.NodeID {
+				c.election.HandleCortexClaim(mbp.CortexClaim{
+					CortexID:     resp.CortexID,
+					CortexAddr:   cortexAddr,
+					Epoch:        resp.Epoch,
+					FencingToken: resp.Epoch,
+				})
+			}
 		}
 
 		streamErr := c.streamFromCortex(ctx, resp.Conn, resp.CortexID)
@@ -1188,10 +1200,41 @@ func (c *ClusterCoordinator) checkQuorumHealth() {
 // so that peer.Send works immediately (no dial required), processes the join
 // request, and returns the joining node's stable ID so that handleClusterConn
 // can use it for all subsequent frames on the same connection.
-func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (string, error) {
+func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (string, bool, error) {
 	var req mbp.JoinRequest
 	if err := msgpack.Unmarshal(payload, &req); err != nil {
-		return "", fmt.Errorf("unmarshal JoinRequest: %w", err)
+		return "", false, fmt.Errorf("unmarshal JoinRequest: %w", err)
+	}
+
+	// Leadership gate BEFORE registering the conn (#533): only the leader accepts
+	// joins. A non-leader must NOT RegisterConn the joiner here — that would evict
+	// an existing live conn (e.g. the lobe↔lobe hello conn carrying SDOWN gossip)
+	// and replace it with a throwaway rejected-join conn, silently breaking
+	// failover. Reply with a redirect on the raw conn and let the caller close it.
+	if !c.IsLeader() {
+		ldr := c.election.CurrentLeader()
+		var ldrAddr string
+		if ldr != "" && ldr != c.cfg.NodeID {
+			if p, ok := c.mgr.GetPeer(ldr); ok {
+				ldrAddr = p.Addr()
+			}
+		}
+		resp := mbp.JoinResponse{
+			Accepted:     false,
+			RejectReason: "not cortex",
+			Epoch:        c.epochStore.Load(),
+			CortexID:     ldr,
+			CortexAddr:   ldrAddr,
+		}
+		if respPayload, err := msgpack.Marshal(resp); err == nil {
+			_ = mbp.WriteFrame(conn, &mbp.Frame{
+				Version:       0x01,
+				Type:          mbp.TypeJoinResponse,
+				PayloadLength: uint32(len(respPayload)),
+				Payload:       respPayload,
+			})
+		}
+		return req.NodeID, false, nil
 	}
 
 	// Register the live inbound conn so peer.Send succeeds immediately.
@@ -1202,10 +1245,10 @@ func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (
 	resp := c.joinHandler.HandleJoinRequest(req, peer)
 	respPayload, err := msgpack.Marshal(resp)
 	if err != nil {
-		return req.NodeID, fmt.Errorf("marshal JoinResponse: %w", err)
+		return req.NodeID, false, fmt.Errorf("marshal JoinResponse: %w", err)
 	}
 	if err := peer.Send(mbp.TypeJoinResponse, respPayload); err != nil {
-		return req.NodeID, fmt.Errorf("cluster: send JoinResponse to %s: %w", req.NodeID, err)
+		return req.NodeID, false, fmt.Errorf("cluster: send JoinResponse to %s: %w", req.NodeID, err)
 	}
 
 	// Replace the seed placeholder with this joiner's real identity in MSP + voters
@@ -1240,7 +1283,7 @@ func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (
 		// the streamer immediately.
 		c.joinHandler.FireOnLobeJoined(req.NodeID)
 	}
-	return req.NodeID, nil
+	return req.NodeID, true, nil
 }
 
 // HandleIncomingFrame dispatches an incoming MBP frame from a peer to the right handler.

@@ -289,6 +289,10 @@ func TestP2Integration_JoinResponseBeforeReplEntry(t *testing.T) {
 	if err := cortex.epochStore.ForceSet(4); err != nil {
 		t.Fatalf("ForceSet: %v", err)
 	}
+	// Only the leader accepts joins (#533); mark this cortex as leader.
+	cortex.coord.roleMu.Lock()
+	cortex.coord.role = RolePrimary
+	cortex.coord.roleMu.Unlock()
 	// Pre-populate the replication log so the streamer has entries to drain and
 	// send the instant it starts (NetworkStreamer.Stream drains from seq 0).
 	appendEntries(t, cortex, "wo", 20)
@@ -328,7 +332,7 @@ func TestP2Integration_JoinResponseBeforeReplEntry(t *testing.T) {
 		t.Fatalf("marshal JoinRequest: %v", err)
 	}
 
-	if _, err := cortex.coord.HandleIncomingJoin(cortexConn, payload); err != nil {
+	if _, _, err := cortex.coord.HandleIncomingJoin(cortexConn, payload); err != nil {
 		t.Fatalf("HandleIncomingJoin: %v", err)
 	}
 
