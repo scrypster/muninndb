@@ -29,6 +29,11 @@ type Registry struct {
 	lastWarnNano atomic.Int64 // Unix nano of last slog.Warn emission
 	hardLimitHit atomic.Bool  // true after the first hard-limit hit (changes log level)
 	lastHardNano atomic.Int64 // Unix nano of last hard-limit log emission
+
+	// loadErrHook is a test-only seam: when non-nil, it is installed on every
+	// lazily-created Index so LoadFromPebble fails deterministically, exercising
+	// the no-cache-on-error path in getOrCreate. Always nil in production.
+	loadErrHook func() error
 }
 
 // warnThrottleInterval is the minimum gap between repeated memory-warning log lines.
@@ -107,9 +112,16 @@ func (r *Registry) getOrCreate(ws [8]byte) *Index {
 	} else {
 		idx = New(r.db, ws)
 	}
-	// Load any previously persisted nodes; log errors — empty index is still usable.
+	idx.loadErrHook = r.loadErrHook // nil in production
+	// Load any previously persisted nodes. On failure, do NOT cache the index:
+	// caching a known-empty index would pin it for the rest of the process
+	// lifetime (the fast path always returns the cached value), turning a
+	// transient load error into permanent silent recall loss. Returning the
+	// uncached empty index lets this request degrade gracefully while the next
+	// access retries the load. (issue #499)
 	if err := idx.LoadFromPebble(); err != nil {
-		slog.Error("hnsw: failed to load graph from pebble", "vault", ws, "error", err)
+		slog.Error("hnsw: failed to load graph from pebble; not caching index (load will be retried on next access)", "vault", ws, "error", err)
+		return idx
 	}
 	r.indexes[ws] = idx
 	return idx

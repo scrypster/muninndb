@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/storage/keys"
@@ -76,6 +77,12 @@ type Index struct {
 	efConstruction int            // beam width during insert; 0 → uses EfConstruction constant
 	efSearch       int            // beam width during query; 0 → uses EfSearch constant
 	deleted        sync.Map       // key: [16]byte id → struct{} (tombstoned hard-deleted nodes)
+
+	// loadErrHook is a test-only seam: when non-nil, LoadFromPebble returns the
+	// hook's result immediately, allowing tests to exercise the failed-load path
+	// (e.g. the registry's no-cache-on-error behaviour) without corrupting Pebble.
+	// Always nil in production.
+	loadErrHook func() error
 }
 
 // Dim returns the vector dimension used by this index.
@@ -690,8 +697,21 @@ func decodeNeighbors(buf []byte) [][16]byte {
 // LoadFromPebble reads all HNSW nodes from Pebble into memory.
 // Loads into temporary structures first and only applies on success to maintain consistency.
 func (idx *Index) LoadFromPebble() error {
-	lowerBound := []byte{0x07}
+	if idx.loadErrHook != nil {
+		return idx.loadErrHook()
+	}
+
+	start := time.Now()
+
+	// Scope the iterator to this vault's keyspace. The 0x07 range is shared by
+	// all vaults; bounding it to 0x07‖ws … 0x07‖(ws+1) means Pebble only visits
+	// this vault's keys instead of scanning the whole 0x07 keyspace and skipping
+	// foreign keys per-key. The in-loop ws check below remains as a safety net.
+	lowerBound := append([]byte{0x07}, idx.ws[:]...)
 	upperBound := []byte{0x08}
+	if wsPlus, err := keys.IncrementWSPrefix(idx.ws); err == nil {
+		upperBound = append([]byte{0x07}, wsPlus[:]...)
+	}
 
 	iter, err := idx.db.NewIter(&pebble.IterOptions{
 		LowerBound: lowerBound,
@@ -755,12 +775,27 @@ func (idx *Index) LoadFromPebble() error {
 		return fmt.Errorf("hnsw: LoadFromPebble incomplete read: %w", err)
 	}
 
+	// Count vectors that were actually restored (nodes carrying a 0xFF slot).
+	vectorCount := 0
+	for _, node := range tempNodes {
+		if node.vec != nil {
+			vectorCount++
+		}
+	}
+
 	// Only apply to index if load completed successfully
 	idx.mu.Lock()
-	defer idx.mu.Unlock()
 	idx.nodes = tempNodes
 	idx.maxLevel = tempMaxLevel
 	idx.entryPoint = tempEntryPoint
+	idx.mu.Unlock()
+
+	slog.Info("hnsw: loaded graph from pebble",
+		"vault", idx.ws,
+		"nodes", len(tempNodes),
+		"vectors", vectorCount,
+		"duration", time.Since(start),
+	)
 
 	return nil
 }
