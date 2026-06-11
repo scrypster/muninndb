@@ -1921,20 +1921,22 @@ func TestHandleEntityStateMergedWithoutMergedInto(t *testing.T) {
 }
 
 func TestHandleEntityStateWithType(t *testing.T) {
-	// Verify that providing a "type" field succeeds and is reflected in the response.
+	// Verify that providing a valid "type" field succeeds and is reflected in
+	// the response after normalisation (issue #501: types are now normalised
+	// and unknown values coerced to "other", matching muninn_remember).
 	srv := newTestServerWith(&entityStateEngine{})
-	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state","arguments":{"vault":"default","entity_name":"Modbus","state":"active","type":"protocol"}}}`
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_entity_state","arguments":{"vault":"default","entity_name":"PostgreSQL","state":"active","type":"Database"}}}`
 	w := postRPC(t, srv, body)
 	resp := decodeResp(t, w.Body.String())
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
 	content := extractInnerJSON(t, resp)
-	if content["type"] != "protocol" {
-		t.Errorf("type = %v, want protocol", content["type"])
+	if content["type"] != "database" {
+		t.Errorf("type = %v, want database (normalized)", content["type"])
 	}
-	if content["entity"] != "Modbus" {
-		t.Errorf("entity = %v, want Modbus", content["entity"])
+	if content["entity"] != "PostgreSQL" {
+		t.Errorf("entity = %v, want PostgreSQL", content["entity"])
 	}
 }
 

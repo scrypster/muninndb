@@ -5,6 +5,15 @@ func allToolDefinitions() []ToolDefinition {
 		"type":        "string",
 		"description": "Vault name to scope the operation (default: 'default'). Optional when connected via a vault-pinned MCP session.",
 	}
+	// entityTypeEnum lists the 14 recognised entity types (the single source of
+	// truth is validEntityTypes in handlers.go). Any other value is coerced to
+	// "other" on every user-facing write path, so advertising the enum lets MCP
+	// clients validate before sending. Keep this in sync with validEntityTypes.
+	entityTypeEnum := []string{
+		"person", "organization", "location", "concept", "technology",
+		"project", "tool", "database", "service", "framework",
+		"language", "product", "event", "other",
+	}
 	return []ToolDefinition{
 		{
 			Name:        "muninn_remember",
@@ -28,7 +37,7 @@ func allToolDefinitions() []ToolDefinition {
 							"type": "object",
 							"properties": map[string]any{
 								"name": map[string]any{"type": "string", "description": "Entity name (e.g. 'PostgreSQL', 'Auth Service')."},
-								"type": map[string]any{"type": "string", "description": "Entity type (e.g. 'database', 'service', 'person', 'project')."},
+								"type": map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Entity type. One of the 14 recognised types (e.g. 'database', 'service', 'person', 'project'); any other value is stored as 'other'."},
 							},
 							"required": []string{"name", "type"},
 						},
@@ -437,7 +446,7 @@ func allToolDefinitions() []ToolDefinition {
 							"type": "object",
 							"properties": map[string]any{
 								"name":       map[string]any{"type": "string"},
-								"type":       map[string]any{"type": "string"},
+								"type":       map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Entity type. One of the 14 recognised types; any other value is stored as 'other'."},
 								"confidence": map[string]any{"type": "number"},
 							},
 							"required": []string{"name", "type"},
@@ -517,7 +526,7 @@ func allToolDefinitions() []ToolDefinition {
 					"entity_name": map[string]any{"type": "string", "description": "The entity name to update"},
 					"state":       map[string]any{"type": "string", "description": "New state: active, deprecated, merged, or resolved"},
 					"merged_into": map[string]any{"type": "string", "description": "Canonical entity name (required when state=merged)"},
-					"type":        map[string]any{"type": "string", "description": "Correct the entity type (e.g. 'directive', 'protocol', 'module'). Omit to preserve the existing type."},
+					"type":        map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve the existing type."},
 					"vault":       vaultProp,
 				},
 				"required": []string{"entity_name", "state"},
@@ -540,7 +549,7 @@ func allToolDefinitions() []ToolDefinition {
 								"entity_name": map[string]any{"type": "string", "description": "Entity name to update"},
 								"state":       map[string]any{"type": "string", "description": "New state: active, deprecated, merged, or resolved"},
 								"merged_into": map[string]any{"type": "string", "description": "Canonical entity name (required when state=merged)"},
-								"type":        map[string]any{"type": "string", "description": "Correct the entity type. Omit to preserve existing."},
+								"type":        map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve existing."},
 							},
 							"required": []string{"entity_name", "state"},
 						},

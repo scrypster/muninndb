@@ -987,7 +987,11 @@ func (s *MCPServer) handleEntityState(ctx context.Context, w http.ResponseWriter
 		sendError(w, id, -32602, "invalid params: 'merged_into' is required when state=merged")
 		return
 	}
+	// Normalise + coerce unknown types to "other" so this deliberate user
+	// action behaves identically to muninn_remember (issue #501). Empty stays
+	// empty: the engine reads "" as "preserve the existing type".
 	entityType, _ := args["type"].(string)
+	entityType = normalizeEntityType(entityType)
 
 	if err := s.engine.SetEntityState(ctx, entityName, state, mergedInto, entityType); err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
@@ -1043,6 +1047,7 @@ func (s *MCPServer) handleEntityStateBatch(ctx context.Context, w http.ResponseW
 			return
 		}
 		entityType, _ := op["type"].(string)
+		entityType = normalizeEntityType(entityType)
 		ops = append(ops, engine.EntityStateOp{
 			EntityName: entityName,
 			State:      state,
@@ -1221,14 +1226,40 @@ func applyTypeArgs(args map[string]any, req *mbp.WriteRequest) {
 	}
 }
 
-// applyEnrichmentArgs parses optional inline enrichment fields (summary, entities,
-// relationships) from MCP tool call arguments onto the WriteRequest.
+// validEntityTypes is the single source of truth for the 14 recognised entity
+// types accepted on every user-facing MCP write path (remember, remember_batch,
+// entity_state, entity_state_batch, apply_enrichment).
 var validEntityTypes = map[string]bool{
 	"person": true, "organization": true, "location": true, "concept": true,
 	"technology": true, "project": true, "tool": true, "database": true,
 	"service": true, "framework": true, "language": true, "product": true,
 	"event": true, "other": true,
 }
+
+// normalizeEntityType lowercases and trims an entity type, then coerces any
+// unrecognised value to "other" — matching muninn_remember's inline-entity
+// behavior so all user-facing write paths treat the same input identically.
+//
+// An empty type is preserved as empty: callers use "" to mean "omitted", which
+// the engine interprets as "leave the existing type unchanged". Coercing "" to
+// "other" would silently overwrite a previously-correct type, so it is excluded.
+//
+// This intentionally does NOT govern the server-side enrich plugin (internal/
+// plugin/enrich/parse.go), which deliberately passes unknown LLM-produced types
+// through per #334; coercion here only covers the explicit MCP write paths.
+func normalizeEntityType(typ string) string {
+	typ = strings.ToLower(strings.TrimSpace(typ))
+	if typ == "" {
+		return ""
+	}
+	if !validEntityTypes[typ] {
+		return "other"
+	}
+	return typ
+}
+
+// applyEnrichmentArgs parses optional inline enrichment fields (summary, entities,
+// relationships) from MCP tool call arguments onto the WriteRequest.
 
 func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
 	malformed := 0
@@ -1248,12 +1279,9 @@ func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
 			name, _ := eMap["name"].(string)
 			typ, _ := eMap["type"].(string)
 			name = strings.TrimSpace(norm.NFKC.String(name))
-			typ = strings.ToLower(strings.TrimSpace(typ))
+			typ = normalizeEntityType(typ)
 			if name == "" || typ == "" {
 				continue
-			}
-			if !validEntityTypes[typ] {
-				typ = "other"
 			}
 			req.Entities = append(req.Entities, mbp.InlineEntity{Name: name, Type: typ})
 		}
@@ -1545,10 +1573,13 @@ func (s *MCPServer) handleApplyEnrichment(ctx context.Context, w http.ResponseWr
 			}
 			name, _ := m["name"].(string)
 			etype, _ := m["type"].(string)
-			if name == "" || etype == "" {
+			if name == "" || strings.TrimSpace(etype) == "" {
 				sendError(w, id, -32602, fmt.Sprintf("invalid params: entities[%d] requires non-empty 'name' and 'type'", i))
 				return
 			}
+			// Normalise + coerce unknown types to "other" so apply_enrichment
+			// matches muninn_remember instead of storing the type verbatim (#501).
+			etype = normalizeEntityType(etype)
 			entity := ApplyEnrichmentEntity{Name: name, Type: etype}
 			if v, ok := m["confidence"].(float64); ok {
 				entity.Confidence = float32(v)
