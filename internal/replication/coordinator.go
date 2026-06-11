@@ -379,8 +379,40 @@ func (c *ClusterCoordinator) runAsCortex(ctx context.Context) error {
 		return fmt.Errorf("cluster: election failed: %w", err)
 	}
 
+	// A node explicitly configured role=primary is the designated leader. If the
+	// bootstrap election did not immediately promote it (its seeds are registered
+	// as voters but are not up yet to vote, so self-vote is short of quorum),
+	// assert leadership directly so it reports as Cortex instead of "unknown".
+	c.bootstrapPromoteIfDesignatedPrimary()
+
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+// bootstrapPromoteIfDesignatedPrimary asserts leadership for a node explicitly
+// configured role=primary when the bootstrap election left it a candidate —
+// typically because its seeds count toward quorum but have not voted yet (#516
+// part 1). It is guarded two ways: only for an explicit "primary" (auto-role
+// nodes use the normal election), and only while still a candidate — if another
+// node had claimed the epoch we would be a follower, so we never override a real
+// leader. This mirrors the existing crash-recovery promotion path.
+func (c *ClusterCoordinator) bootstrapPromoteIfDesignatedPrimary() {
+	if c.cfg.Role != "primary" || c.IsLeader() {
+		return
+	}
+	c.election.mu.Lock()
+	if c.election.state != ElectionCandidate {
+		c.election.mu.Unlock()
+		return
+	}
+	epoch := c.election.candidateEpoch
+	c.election.state = ElectionLeader
+	c.election.currentLeader = c.cfg.NodeID
+	c.election.mu.Unlock()
+
+	slog.Info("cluster: designated primary asserting leadership at bootstrap",
+		"node", c.cfg.NodeID, "epoch", epoch)
+	c.handlePromotion(epoch)
 }
 
 // joinWithRetry attempts to join the Cortex, cycling through all seeds on each
@@ -497,7 +529,32 @@ func (c *ClusterCoordinator) streamFromCortex(ctx context.Context, conn net.Conn
 			// A single malformed/failed frame must not tear down the stream.
 			slog.Warn("cluster: failed to apply streamed frame", "type", frame.Type, "err", err)
 		}
+		// After applying a replication entry, report our progress so the Cortex
+		// can track replica lag (#516 part 3). The Cortex reads these acks via
+		// handleClusterConn → HandleIncomingFrame → UpdateReplicaSeq.
+		if frame.Type == mbp.TypeReplEntry {
+			c.sendReplAck(conn)
+		}
 	}
+}
+
+// sendReplAck reports this node's last-applied seq to the Cortex over the
+// replication connection. Best-effort: a write error is non-fatal — the next
+// entry's ack carries the latest seq, or the stream reconnects.
+func (c *ClusterCoordinator) sendReplAck(conn net.Conn) {
+	if c.applier == nil || conn == nil {
+		return
+	}
+	payload, err := msgpack.Marshal(mbp.ReplAck{NodeID: c.cfg.NodeID, LastSeq: c.applier.LastApplied()})
+	if err != nil {
+		return
+	}
+	_ = mbp.WriteFrame(conn, &mbp.Frame{
+		Version:       0x01,
+		Type:          mbp.TypeReplAck,
+		PayloadLength: uint32(len(payload)),
+		Payload:       payload,
+	})
 }
 
 // runAsSentinel starts MSP only, participates in voting, no data.
@@ -605,6 +662,52 @@ func (c *ClusterCoordinator) FencingToken() uint64 {
 // Alias for KnownNodes for API compatibility.
 func (c *ClusterCoordinator) ClusterMembers() []NodeInfo {
 	return c.KnownNodes()
+}
+
+// ReconciledMembers returns the cluster member list with joined Lobes shown by
+// their real join-handshake identity (node-id, role, last applied seq) instead
+// of the synthetic seed-<addr> MSP placeholders (#516). Used for status
+// reporting; the raw KnownNodes()/MSP view is left untouched for internal logic.
+func (c *ClusterCoordinator) ReconciledMembers() []NodeInfo {
+	base := c.KnownNodes()
+	members := base
+	if c.joinHandler != nil {
+		members = reconcileMembers(base, c.joinHandler.Members())
+	}
+	// Overlay the latest acked seq per replica (#516 part 3) so the reported
+	// last_seq reflects live progress, not the value captured at join time.
+	for i := range members {
+		if v, ok := c.replicaSeqs.Load(members[i].NodeID); ok {
+			members[i].LastSeq = v.(uint64)
+		}
+	}
+	return members
+}
+
+// reconcileMembers replaces a base (MSP) entry with the matching joined member
+// when their addresses match, and appends any joined member not present in base.
+func reconcileMembers(base, joined []NodeInfo) []NodeInfo {
+	joinedByAddr := make(map[string]NodeInfo, len(joined))
+	for _, m := range joined {
+		joinedByAddr[m.Addr] = m
+	}
+	out := make([]NodeInfo, 0, len(base)+len(joined))
+	seen := make(map[string]bool, len(joined))
+	for _, n := range base {
+		if m, ok := joinedByAddr[n.Addr]; ok {
+			out = append(out, m)
+			seen[m.Addr] = true
+		} else {
+			out = append(out, n)
+		}
+	}
+	for _, m := range joined {
+		if !seen[m.Addr] {
+			out = append(out, m)
+			seen[m.Addr] = true
+		}
+	}
+	return out
 }
 
 // checkQuorumHealth is called periodically (from the MSP tick goroutine via

@@ -112,7 +112,7 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 
 // membersFromCoordinator converts coordinator node info into clusterMemberInfo slices.
 func membersFromCoordinator(coord *replication.ClusterCoordinator) []clusterMemberInfo {
-	nodes := coord.ClusterMembers()
+	nodes := coord.ReconciledMembers()
 	members := make([]clusterMemberInfo, 0, len(nodes))
 	for _, n := range nodes {
 		members = append(members, clusterMemberInfo{
