@@ -149,7 +149,7 @@ func TestClusterCoordinator_Role_ThreadSafe(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for j := 0; j < 50; j++ {
-			coord.handleDemotion()
+			coord.handleDemotion(causeClaim)
 		}
 	}()
 
@@ -170,7 +170,7 @@ func TestClusterCoordinator_IsLeader(t *testing.T) {
 	}
 
 	// Simulate demotion
-	coord.handleDemotion()
+	coord.handleDemotion(causeClaim)
 	if coord.IsLeader() {
 		t.Error("expected IsLeader=false after demotion")
 	}
@@ -419,7 +419,7 @@ func TestClusterCoordinator_ReplicationLag(t *testing.T) {
 	}
 
 	// As Lobe (replica), lag = currentSeq - lastApplied
-	coord.handleDemotion()
+	coord.handleDemotion(causeClaim)
 
 	// Append some entries to the log
 	coord.repLog.Append(OpSet, []byte("k1"), []byte("v1"))
@@ -484,7 +484,7 @@ func TestClusterCoordinator_OnBecameLobe_Callback(t *testing.T) {
 	}
 
 	simulatePromotion(coord, 1)
-	coord.handleDemotion()
+	coord.handleDemotion(causeClaim)
 
 	if !called {
 		t.Error("expected OnBecameLobe to be called")
@@ -502,7 +502,7 @@ func TestClusterCoordinator_NilCallbacksSafe(t *testing.T) {
 	coord.OnBecameLobe = nil
 
 	simulatePromotion(coord, 1)
-	coord.handleDemotion()
+	coord.handleDemotion(causeClaim)
 }
 
 func TestClusterCoordinator_Accessors(t *testing.T) {

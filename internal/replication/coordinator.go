@@ -40,6 +40,33 @@ const (
 	StateDraining NodeState = 1
 )
 
+// demotionCause distinguishes why a Cortex stepped down, which determines its
+// recovery path in the supervisor loop (#522 Step 3).
+type demotionCause uint8
+
+const (
+	causeClaim      demotionCause = iota // another node legitimately leads (claim/handoff)
+	causeQuorumLoss                      // pre-emptive self-demotion; no other leader exists
+)
+
+// runMode is a state of the post-leadership supervisor loop (#522 Step 3).
+type runMode uint8
+
+const (
+	modeLeading       runMode = iota // hold leadership until demoted
+	modeFollowing                    // join/stream from a known leader until promoted
+	modeWaitingQuorum                // no leader; wait for quorum to return, then re-elect
+)
+
+// roleEvent is pushed to roleCh on every promotion/demotion so the supervisor
+// loop can transition promptly. Every term also re-derives authoritative state
+// (IsLeader / CurrentLeader) on entry/tick, so a dropped or duplicate event only
+// delays a transition by at most one heartbeat — it can never wedge the loop.
+type roleEvent struct {
+	promoted bool
+	cause    demotionCause // valid when !promoted
+}
+
 // ErrDraining is returned when a write is attempted while the node is draining.
 var ErrDraining = errors.New("node is draining: not accepting new writes")
 
@@ -68,6 +95,9 @@ type ClusterCoordinator struct {
 	role   NodeRole
 	roleMu sync.RWMutex
 
+	// roleCh carries promotion/demotion events to the supervisor loop (#522 Step 3).
+	roleCh chan roleEvent
+
 	// Per-Lobe streamers (Cortex only): lobeID -> cancel func
 	streamers   map[string]context.CancelFunc
 	streamersMu sync.Mutex
@@ -75,7 +105,12 @@ type ClusterCoordinator struct {
 	// quorumLostSince is the time when this Cortex first noticed it could not
 	// reach a quorum of live peers. Zero value means quorum is healthy.
 	quorumLostSince time.Time
-	quorumMu        sync.Mutex
+	// hadQuorum latches true once a leadership term has observed a live quorum,
+	// gating pre-emptive quorum-loss demotion so a node still forming its first
+	// quorum at bootstrap is exempt. Cleared on demotion (#522 Step 3; the
+	// periodic demotion that consumes it lands in PR B / #520).
+	hadQuorum bool
+	quorumMu  sync.Mutex
 
 	// Cognitive workers (Cortex only): receive forwarded side effects from Lobes.
 	hebbianWorker hebbianSubmitter
@@ -176,6 +211,7 @@ func NewClusterCoordinator(
 		joinClient:  joinClient,
 		role:        RoleUnknown,
 		streamers:   make(map[string]context.CancelFunc),
+		roleCh:      make(chan roleEvent, 4),
 		reconDelay:  reconDelay,
 	}
 	// Default reconcile-on-heal to enabled; matches config default (ReconcileHeal=true).
@@ -195,7 +231,9 @@ func NewClusterCoordinator(
 		c.handlePromotion(epoch)
 	}
 	election.OnDemoted = func() {
-		c.handleDemotion()
+		// OnDemoted is fired only by HandleCortexClaim, which has already set
+		// currentLeader to the claimant — a known leader exists.
+		c.handleDemotion(causeClaim)
 	}
 	election.OnNewLeader = func(leaderID string, epoch uint64) {
 		c.handleNewLeader(leaderID, epoch)
@@ -379,8 +417,7 @@ func (c *ClusterCoordinator) runAsCortex(ctx context.Context) error {
 		if err := c.epochStore.PersistRole(""); err != nil {
 			slog.Warn("cluster: failed to clear persisted role after crash-recovery", "err", err)
 		}
-		<-ctx.Done()
-		return ctx.Err()
+		return c.supervise(ctx, modeLeading)
 	}
 
 	// Always start an election on normal startup (epoch 0 = first boot,
@@ -398,8 +435,7 @@ func (c *ClusterCoordinator) runAsCortex(ctx context.Context) error {
 	// assert leadership directly so it reports as Cortex instead of "unknown".
 	c.bootstrapPromoteIfDesignatedPrimary()
 
-	<-ctx.Done()
-	return ctx.Err()
+	return c.supervise(ctx, c.initialCortexMode())
 }
 
 // bootstrapPromoteIfDesignatedPrimary asserts leadership for a node explicitly
@@ -476,21 +512,36 @@ func (c *ClusterCoordinator) runAsLobe(ctx context.Context) error {
 		return errors.New("cluster: lobe requires at least one seed address")
 	}
 
-	return c.streamReplication(ctx, "lobe")
+	// Run through the supervisor starting as a follower, so that a Lobe which
+	// wins an election (e.g. on Cortex ODOWN) transitions to leadership instead
+	// of staying wedged inside the stream loop (#522 Step 3 inverse zombie).
+	return c.supervise(ctx, modeFollowing)
 }
 
 // streamReplication runs the join → read-stream → reconnect loop shared by the
 // Lobe and Observer roles. The Cortex streams replication frames over the SAME
 // connection used for the join handshake (#448 Bug 2), so the role keeps that
 // connection open and reads from it; if the stream drops, it rejoins.
-func (c *ClusterCoordinator) streamReplication(ctx context.Context, role string) error {
+func (c *ClusterCoordinator) streamReplication(ctx context.Context, role string, seeds []string) error {
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		resp, err := c.joinWithRetry(ctx, c.cfg.Seeds, role)
+		resp, err := c.joinWithRetry(ctx, seeds, role)
 		if err != nil {
-			return fmt.Errorf("cluster: %s join failed: %w", role, err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Non-fatal: the leader may not be up yet (or this node is a demoted
+			// Cortex whose seeds are its now-down lobes). Back off and keep trying
+			// rather than exiting the cluster goroutine (#522 Step 3).
+			slog.Warn("cluster: join attempts exhausted, will retry", "role", role, "err", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
+			continue
 		}
 		slog.Info("cluster: joined", "role", role, "cortex", resp.CortexID, "epoch", resp.Epoch)
 
@@ -500,8 +551,8 @@ func (c *ClusterCoordinator) streamReplication(ctx context.Context, role string)
 		// send (#522 Step 1). CortexAddr comes from the JoinResponse (Step 0);
 		// fall back to the dialed seed for an older Cortex that didn't send it.
 		cortexAddr := resp.CortexAddr
-		if cortexAddr == "" && len(c.cfg.Seeds) > 0 {
-			cortexAddr = c.cfg.Seeds[0]
+		if cortexAddr == "" && len(seeds) > 0 {
+			cortexAddr = seeds[0]
 		}
 		if resp.CortexID != "" && resp.Conn != nil {
 			c.mgr.RegisterConn(resp.CortexID, cortexAddr, resp.Conn)
@@ -694,7 +745,161 @@ func (c *ClusterCoordinator) runAsObserver(ctx context.Context) error {
 		return errors.New("cluster: observer requires at least one seed address")
 	}
 
-	return c.streamReplication(ctx, "observer")
+	// Observers never lead, so they don't need the supervisor — just stream.
+	return c.streamReplication(ctx, "observer", c.cfg.Seeds)
+}
+
+// supervise runs the post-leadership state machine that replaces the terminal
+// `<-ctx.Done()` parks. It transitions between leading, following, and waiting-
+// for-quorum on promotion/demotion events and never exits except on ctx cancel,
+// so a demoted Cortex (or a promoted Lobe) can never become a zombie (#522 Step 3).
+func (c *ClusterCoordinator) supervise(ctx context.Context, mode runMode) error {
+	for ctx.Err() == nil {
+		switch mode {
+		case modeLeading:
+			mode = c.leadTerm(ctx)
+		case modeFollowing:
+			mode = c.followTerm(ctx)
+		case modeWaitingQuorum:
+			mode = c.waitQuorumTerm(ctx)
+		}
+	}
+	return ctx.Err()
+}
+
+// initialCortexMode derives the supervisor's starting mode after runAsCortex's
+// election preamble: leading if we won, following if a claim was already seen,
+// else waiting for quorum (an auto/primary node that hasn't reached quorum yet).
+func (c *ClusterCoordinator) initialCortexMode() runMode {
+	if c.IsLeader() {
+		return modeLeading
+	}
+	if ldr := c.election.CurrentLeader(); ldr != "" && ldr != c.cfg.NodeID {
+		return modeFollowing
+	}
+	return modeWaitingQuorum
+}
+
+// leadTerm holds leadership until a demotion event arrives, then routes to the
+// recovery mode the demotion cause dictates.
+func (c *ClusterCoordinator) leadTerm(ctx context.Context) runMode {
+	for {
+		select {
+		case <-ctx.Done():
+			return modeLeading
+		case ev := <-c.roleCh:
+			if ev.promoted {
+				continue // already leading; ignore a duplicate promote
+			}
+			if ev.cause == causeQuorumLoss {
+				return modeWaitingQuorum
+			}
+			return modeFollowing
+		}
+	}
+}
+
+// followTerm joins and streams from a known leader until this node is promoted.
+// streamReplication runs under a per-term context so a promotion cleanly tears
+// down the stream before this node starts leading.
+func (c *ClusterCoordinator) followTerm(ctx context.Context) runMode {
+	termCtx, termCancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = c.streamReplication(termCtx, "lobe", c.followSeeds())
+	}()
+	defer func() { termCancel(); <-done }()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return modeFollowing
+		case <-done:
+			return modeFollowing // streamReplication only returns on ctx cancel
+		case ev := <-c.roleCh:
+			if ev.promoted {
+				return modeLeading
+			}
+			// A further demotion while following: stay following if a leader is
+			// still known, else wait for quorum and re-elect.
+			if ldr := c.election.CurrentLeader(); ldr == "" || ldr == c.cfg.NodeID {
+				return modeWaitingQuorum
+			}
+		}
+	}
+}
+
+// waitQuorumTerm holds, leaderless, until a live voter quorum returns, then
+// starts a fresh election (rate-limited). Defects to following if a higher claim
+// appears. This is how a quorum-loss-demoted node resumes leadership when its
+// lobes rejoin — without thrashing (re-election needs a real vote quorum).
+func (c *ClusterCoordinator) waitQuorumTerm(ctx context.Context) runMode {
+	hb := c.heartbeatInterval()
+	ticker := time.NewTicker(hb)
+	defer ticker.Stop()
+	backoff := hb
+	var nextElection time.Time // zero = eligible now
+
+	for {
+		select {
+		case <-ctx.Done():
+			return modeWaitingQuorum
+		case ev := <-c.roleCh:
+			if ev.promoted {
+				return modeLeading
+			}
+		case <-ticker.C:
+		}
+
+		if c.IsLeader() {
+			return modeLeading
+		}
+		if ldr := c.election.CurrentLeader(); ldr != "" && ldr != c.cfg.NodeID {
+			return modeFollowing // a higher claim appeared — follow, never assert
+		}
+		if c.aliveVoters() >= c.election.Quorum() && (nextElection.IsZero() || !time.Now().Before(nextElection)) {
+			if err := c.election.StartElection(ctx); err != nil {
+				slog.Warn("cluster: re-election attempt failed", "node", c.cfg.NodeID, "err", err)
+			}
+			nextElection = time.Now().Add(backoff)
+			if backoff < 8*hb {
+				backoff *= 2
+			}
+		}
+	}
+}
+
+// followSeeds returns the seed list to dial as a follower, with the known
+// leader's address tried first (a demoted Cortex's configured seeds are its
+// lobes; the actual leader must be tried before them).
+func (c *ClusterCoordinator) followSeeds() []string {
+	seeds := append([]string(nil), c.cfg.Seeds...)
+	if ldr := c.election.CurrentLeader(); ldr != "" && ldr != c.cfg.NodeID {
+		if p, ok := c.mgr.GetPeer(ldr); ok && p.Addr() != "" {
+			seeds = append([]string{p.Addr()}, seeds...)
+		}
+	}
+	return seeds
+}
+
+// aliveVoters counts self plus live MSP peers that are registered voters — the
+// correct population for quorum decisions (LivePeers alone includes observers).
+func (c *ClusterCoordinator) aliveVoters() int {
+	count := 1 // self
+	for _, p := range c.msp.LivePeers() {
+		if c.election.IsVoter(p.NodeID) {
+			count++
+		}
+	}
+	return count
+}
+
+func (c *ClusterCoordinator) heartbeatInterval() time.Duration {
+	if c.cfg.HeartbeatMS > 0 {
+		return time.Duration(c.cfg.HeartbeatMS) * time.Millisecond
+	}
+	return time.Second
 }
 
 // IsObserver returns true if this node is currently an Observer.
@@ -867,8 +1072,12 @@ func (c *ClusterCoordinator) checkQuorumHealth() {
 	c.quorumMu.Unlock()
 
 	if needsDemotion {
-		c.nodeState.Store(uint32(StateDraining))
-		go c.handleDemotion()
+		// Pre-emptive quorum-loss demotion: no successor exists, so release the
+		// election's leader state (else StartElection stays blocked) and demote
+		// with the quorum-loss cause so the supervisor enters WAITING_QUORUM and
+		// resumes leadership when quorum returns (#522 Step 3).
+		c.election.StepDown()
+		c.handleDemotion(causeQuorumLoss)
 	}
 }
 
@@ -1088,16 +1297,35 @@ func (c *ClusterCoordinator) handlePromotion(epoch uint64) {
 
 	slog.Info("cluster: promoted to Cortex", "epoch", epoch, "node", c.cfg.NodeID)
 
+	c.pushRoleEvent(roleEvent{promoted: true})
+
 	if c.OnBecameCortex != nil {
 		c.OnBecameCortex(epoch)
 	}
 }
 
+// pushRoleEvent delivers a role transition to the supervisor loop without
+// blocking. If the buffer is full the event is dropped — terms re-derive
+// authoritative state each tick, so a dropped event only delays a transition.
+func (c *ClusterCoordinator) pushRoleEvent(ev roleEvent) {
+	select {
+	case c.roleCh <- ev:
+	default:
+	}
+}
+
 // handleDemotion is called when this node loses Cortex status.
-func (c *ClusterCoordinator) handleDemotion() {
+func (c *ClusterCoordinator) handleDemotion(cause demotionCause) {
 	c.roleMu.Lock()
 	c.role = RoleReplica
 	c.roleMu.Unlock()
+
+	// A new leadership term is over: clear the "observed a live quorum" latch so
+	// the next term's pre-emptive quorum-loss demotion is gated afresh (#522).
+	c.quorumMu.Lock()
+	c.hadQuorum = false
+	c.quorumLostSince = time.Time{}
+	c.quorumMu.Unlock()
 
 	// Stop all streamers (no longer primary)
 	c.streamersMu.Lock()
@@ -1110,7 +1338,10 @@ func (c *ClusterCoordinator) handleDemotion() {
 	// Reset draining state: this node is now a Lobe and accepts no writes anyway.
 	c.nodeState.Store(uint32(StateNormal))
 
-	slog.Info("cluster: demoted from Cortex", "node", c.cfg.NodeID)
+	slog.Info("cluster: demoted from Cortex", "node", c.cfg.NodeID, "cause", cause)
+
+	// Hand the supervisor loop the recovery cue (#522 Step 3).
+	c.pushRoleEvent(roleEvent{promoted: false, cause: cause})
 
 	// Fire engine callback
 	if c.OnBecameLobe != nil {
@@ -1471,10 +1702,11 @@ func (c *ClusterCoordinator) GracefulFailover(ctx context.Context, targetNodeID 
 		return ctx.Err()
 	}
 
-	// Step 6: Handoff succeeded — demote self and clear draining state.
+	// Step 6: Handoff succeeded — demote self and clear draining state. The
+	// handoff target is the new leader, so follow it (causeClaim).
 	handoffSucceeded = true
 	c.nodeState.Store(uint32(StateNormal))
-	c.handleDemotion()
+	c.handleDemotion(causeClaim)
 
 	slog.Info("cluster: graceful failover complete", "target", targetNodeID, "epoch", epoch)
 	return nil

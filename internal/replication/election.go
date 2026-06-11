@@ -116,6 +116,30 @@ func (e *Election) UnregisterVoter(nodeID string) {
 	delete(e.voters, nodeID)
 }
 
+// IsVoter reports whether nodeID is a registered voter.
+func (e *Election) IsVoter(nodeID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.voters[nodeID]
+	return ok
+}
+
+// StepDown relinquishes leadership without a successor (used by the pre-emptive
+// quorum-loss demotion, which has no claimant). state→Idle so a later
+// StartElection is not blocked by errAlreadyCandidate; currentLeader is cleared
+// only if it still points at us — a concurrent HandleCortexClaim that already
+// installed another leader wins (#522 Step 3).
+func (e *Election) StepDown() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.state == ElectionLeader {
+		e.state = ElectionIdle
+	}
+	if e.currentLeader == e.localNodeID {
+		e.currentLeader = ""
+	}
+}
+
 // StartElection initiates a new election from this node.
 // Returns an error if this node is already a candidate or leader.
 //
