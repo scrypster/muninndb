@@ -20,6 +20,7 @@ type PeerState struct {
 	LastSeen    time.Time
 	MissedBeats int
 	SDown       bool
+	odownFired  bool // OnODown latch — fired once per SDOWN episode (#522 Step 4c)
 }
 
 // MSP manages heartbeats and failure detection for a node.
@@ -131,6 +132,12 @@ func (m *MSP) handleHeartbeat(fromNodeID, fromAddr string) {
 	p.LastSeen = time.Now()
 	p.MissedBeats = 0
 	p.SDown = false
+	if wasSDown {
+		// Recovery: clear the ODOWN latch and accumulated down-votes so a future
+		// SDOWN episode is judged afresh (#522 Step 4c).
+		p.odownFired = false
+		delete(m.votedDown, fromNodeID)
+	}
 
 	// Update address if the peer advertises a new one (pod restart, IP change).
 	if fromAddr != "" && fromAddr != p.Addr {
@@ -302,15 +309,61 @@ func (m *MSP) tick(pingPayload []byte, pingInterval time.Duration, missedThresho
 			// Observers do not participate in ODOWN voting: their SDOWN state
 			// is not counted toward the quorum needed to declare ODOWN.
 			if !isObserver {
+				// Gossip our down-vote so other voters can reach ODOWN (#522 Step 4c).
+				go m.gossipSDown(nodeID)
+
 				// Check ODOWN under the same lock snapshot.
 				votes := 1
 				if voters, ok := m.votedDown[nodeID]; ok {
 					votes += len(voters)
 				}
-				if votes >= effectiveQuorum && m.OnODown != nil {
+				if votes >= effectiveQuorum && !p.odownFired && m.OnODown != nil {
+					p.odownFired = true
 					go m.OnODown(nodeID)
 				}
 			}
 		}
+	}
+}
+
+// gossipSDown broadcasts this node's "I see target as down" vote so other voters
+// can accumulate it toward ODOWN (#522 Step 4c).
+func (m *MSP) gossipSDown(targetID string) {
+	payload, err := msgpack.Marshal(mbp.SDownNotification{
+		SenderID:  m.localNodeID,
+		TargetID:  targetID,
+		Timestamp: time.Now().UnixNano(),
+	})
+	if err != nil {
+		return
+	}
+	m.mgr.Broadcast(mbp.TypeSDown, payload)
+}
+
+// RecordDownVote records a peer's down-vote for target and fires OnODown once if
+// we also see the target as SDOWN and the votes reach quorum (#522 Step 4c).
+func (m *MSP) RecordDownVote(sender, target string) {
+	if sender == "" || target == "" || sender == m.localNodeID {
+		return
+	}
+	m.mu.Lock()
+	if m.votedDown[target] == nil {
+		m.votedDown[target] = make(map[string]struct{})
+	}
+	m.votedDown[target][sender] = struct{}{}
+
+	fire := false
+	if p, ok := m.peers[target]; ok && p.SDown && !p.odownFired && p.Role != RoleObserver {
+		votes := 1 + len(m.votedDown[target])
+		if votes >= m.nonObserverQuorumLocked() {
+			p.odownFired = true
+			fire = true
+		}
+	}
+	onODown := m.OnODown
+	m.mu.Unlock()
+
+	if fire && onODown != nil {
+		go onODown(target)
 	}
 }

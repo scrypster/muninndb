@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"math/rand"
 	"net"
@@ -28,10 +29,10 @@ func helloHMAC(secret, nodeID, addr string, role uint8) []byte {
 	return h.Sum(nil)
 }
 
-// configuredRole maps the config role string to a NodeRole for PeerHello. "auto"
-// advertises a voting (non-observer) role.
-func (c *ClusterCoordinator) configuredRole() NodeRole {
-	switch c.cfg.Role {
+// roleFromConfigString maps a config role string to a NodeRole. "auto" (and any
+// unknown value) maps to a voting (non-observer) role that can lead.
+func roleFromConfigString(role string) NodeRole {
+	switch role {
 	case "primary":
 		return RolePrimary
 	case "replica":
@@ -43,6 +44,11 @@ func (c *ClusterCoordinator) configuredRole() NodeRole {
 	default:
 		return RolePrimary // auto: a voter that can lead
 	}
+}
+
+// configuredRole is this node's role for PeerHello/JoinRequest advertisement.
+func (c *ClusterCoordinator) configuredRole() NodeRole {
+	return roleFromConfigString(c.cfg.Role)
 }
 
 func (c *ClusterCoordinator) localHello() mbp.PeerHello {
@@ -214,6 +220,31 @@ func (c *ClusterCoordinator) sendClaim(p *PeerConn) {
 		return
 	}
 	_ = p.Send(mbp.TypeCortexClaim, payload)
+}
+
+// startElectionWithJitter starts a failover election after a deterministic
+// per-node delay (0–1 heartbeat) so concurrent ODOWN-triggered candidates stagger
+// instead of splitting the vote, then retries a bounded number of times if it
+// stays a stuck candidate — but only while no leader has emerged (#522 Step 4c).
+func (c *ClusterCoordinator) startElectionWithJitter() {
+	hb := c.heartbeatInterval()
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(c.cfg.NodeID))
+	time.Sleep(time.Duration(uint64(h.Sum32()) % uint64(hb)))
+
+	for attempt := 0; attempt < 4; attempt++ {
+		if c.IsLeader() {
+			return
+		}
+		if ldr := c.election.CurrentLeader(); ldr != "" && ldr != c.cfg.NodeID {
+			return // someone else won
+		}
+		c.election.ResetCandidate() // clear any prior stuck candidacy so we can retry
+		if err := c.election.StartElection(context.Background()); err != nil {
+			slog.Debug("cluster: failover election start", "err", err)
+		}
+		time.Sleep(4 * hb) // wait for the outcome (promotion or a new leader's claim)
+	}
 }
 
 // readPeerFrames reads frames from a hello-dialed (outbound) conn and dispatches

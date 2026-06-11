@@ -124,6 +124,16 @@ func (e *Election) IsVoter(nodeID string) bool {
 	return ok
 }
 
+// ResetCandidate moves a stuck candidate back to Idle so a fresh election can be
+// started (used after a split vote that never reached quorum, #522 Step 4c).
+func (e *Election) ResetCandidate() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.state == ElectionCandidate {
+		e.state = ElectionIdle
+	}
+}
+
 // StepDown relinquishes leadership without a successor (used by the pre-emptive
 // quorum-loss demotion, which has no claimant). state→Idle so a later
 // StartElection is not blocked by errAlreadyCandidate; currentLeader is cleared

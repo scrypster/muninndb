@@ -87,6 +87,7 @@ type JoinRequest struct {
 	LastApplied     uint64   `msgpack:"last_applied"`
 	Capabilities    []string `msgpack:"capabilities"`
 	SecretHash      []byte   `msgpack:"secret_hash"`
+	Role            uint8    `msgpack:"role,omitempty"` // joiner's NodeRole; 0 = legacy = replica (#529)
 	ProtocolVersion uint16   `msgpack:"proto_ver,omitempty"`
 }
 

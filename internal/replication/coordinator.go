@@ -196,6 +196,7 @@ func NewClusterCoordinator(
 	joinHandler := NewJoinHandler(cfg.NodeID, cfg.ClusterSecret, epochStore, repLog, mgr)
 	joinHandler.localAddr = advertiseAddr
 	joinClient := NewJoinClient(cfg.NodeID, advertiseAddr, cfg.ClusterSecret, epochStore, applier, mgr)
+	joinClient.localRole = roleFromConfigString(cfg.Role)
 
 	reconDelay := time.Duration(cfg.ReconDelayMs) * time.Millisecond
 	if reconDelay <= 0 {
@@ -251,9 +252,7 @@ func NewClusterCoordinator(
 			slog.Info("cluster: sentinel node observed ODOWN, skipping election start", "down_node", nodeID)
 			return
 		}
-		if err := c.election.StartElection(context.Background()); err != nil {
-			slog.Error("cluster: failed to start election after ODOWN", "err", err)
-		}
+		c.startElectionWithJitter()
 	}
 
 	// Wire OnSDown to check quorum health — if we are Cortex and lose quorum
@@ -1157,10 +1156,16 @@ func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (
 		return req.NodeID, fmt.Errorf("cluster: send JoinResponse to %s: %w", req.NodeID, err)
 	}
 
-	// Replace the seed placeholder with this Lobe's real identity in MSP + voters
-	// so heartbeats and votes keyed by its node-id are no longer dropped (#522).
+	// Replace the seed placeholder with this joiner's real identity in MSP + voters
+	// so heartbeats and votes keyed by its node-id are no longer dropped (#522). Use
+	// the joiner's advertised role (0 = legacy = replica) so a joining Observer is
+	// not registered as a voter (#529).
 	if resp.Accepted {
-		c.reconcileJoinedPeer(req.NodeID, req.Addr, RoleReplica)
+		joinerRole := NodeRole(req.Role)
+		if joinerRole == RoleUnknown {
+			joinerRole = RoleReplica
+		}
+		c.reconcileJoinedPeer(req.NodeID, req.Addr, joinerRole)
 	}
 
 	if resp.NeedsSnapshot {
@@ -1261,6 +1266,14 @@ func (c *ClusterCoordinator) HandleIncomingFrame(fromNodeID string, frameType ui
 			return fmt.Errorf("unmarshal ReplAck: %w", err)
 		}
 		c.UpdateReplicaSeq(ack.NodeID, ack.LastSeq)
+		return nil
+
+	case mbp.TypeSDown:
+		var msg mbp.SDownNotification
+		if err := msgpack.Unmarshal(payload, &msg); err != nil {
+			return fmt.Errorf("unmarshal SDownNotification: %w", err)
+		}
+		c.msp.RecordDownVote(msg.SenderID, msg.TargetID)
 		return nil
 
 	case mbp.TypeCogForward:

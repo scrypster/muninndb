@@ -279,6 +279,7 @@ type JoinResult struct {
 type JoinClient struct {
 	localNodeID   string
 	localAddr     string
+	localRole     NodeRole // this node's configured role, advertised in JoinRequest (#529)
 	clusterSecret string
 	epochStore    *EpochStore
 	applier       *Applier
@@ -379,6 +380,7 @@ func (c *JoinClient) joinConn(ctx context.Context, conn net.Conn) (JoinResult, e
 		Addr:            c.localAddr,
 		LastApplied:     lastApplied,
 		SecretHash:      secretHash,
+		Role:            uint8(c.localRole),
 		ProtocolVersion: mbp.CurrentProtocolVersion,
 	}
 
