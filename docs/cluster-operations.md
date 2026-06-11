@@ -39,11 +39,16 @@ MuninnDB uses a **Cortex/Lobe** model (internally: leader/replica terminology):
 
 ## 2. Initial Cluster Setup
 
+> **Just want to try it locally?** The [`contrib/cluster/`](../contrib/cluster/)
+> directory has a runnable `docker compose` example (1 Cortex + 2 Lobes) with a
+> step-by-step replication check. Start there, then come back here for production
+> operations.
+
 ### Prerequisites
 
 - **Network**: All nodes must reach each other on the cluster bind port (typically 8474, MBP protocol).
 - **Ports**:
-  - Cluster inter-node: `bind_addr` (default `:8474`, same as MBP)
+  - Cluster inter-node: `bind_addr` (default `:8474`, same as MBP). **In containers**, where MBP binds `0.0.0.0:8474`, give the cluster its own port (e.g. `:8479`) — a `0.0.0.0` MBP bind already owns 8474 on every interface, so a same-port cluster listener fails with `address already in use` and joins then fail with `unexpected frame type 0xff`.
   - REST API: 8475
   - gRPC: 8477
   - MCP: 8750

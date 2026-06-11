@@ -1,0 +1,70 @@
+name: muninn-cluster
+
+# A runnable 1 Cortex + 2 Lobe MuninnDB cluster for local evaluation.
+# See README.md in this directory for the quickstart and how to verify replication.
+#
+# IMPORTANT — cluster port vs MBP port:
+#   Inside containers the server binds MBP on 0.0.0.0:8474 (so it's reachable),
+#   which already covers every interface on that port. The cluster therefore
+#   needs its OWN port for MUNINN_CLUSTER_BIND_ADDR — here 8479 — otherwise its
+#   listener collides with MBP ("address already in use") and joins fail with
+#   "unexpected frame type 0xff". On bare metal where MBP binds a single
+#   interface (e.g. 127.0.0.1:8474) you can reuse 8474 on a different interface.
+
+x-common: &common
+  build:
+    context: ../..
+  image: muninndb:latest
+  restart: unless-stopped
+  environment: &common-env
+    MUNINN_LISTEN_HOST: "0.0.0.0"
+    MUNINN_CLUSTER_ENABLED: "true"
+    # Use a strong shared secret in any real deployment.
+    MUNINN_CLUSTER_SECRET: "change-me-cluster-secret"
+    MUNINN_CLUSTER_HEARTBEAT_MS: "1000"
+    MUNINN_CLUSTER_LEASE_TTL: "10"
+    MUNINN_ADMIN_PASSWORD: "change-me-admin"
+
+services:
+  cortex:
+    <<: *common
+    container_name: muninn-cortex
+    hostname: cortex
+    environment:
+      <<: *common-env
+      MUNINN_CLUSTER_NODE_ID: "cortex"
+      MUNINN_CLUSTER_ROLE: "primary"
+      MUNINN_CLUSTER_BIND_ADDR: "cortex:8479"
+      MUNINN_CLUSTER_SEEDS: "lobe1:8479,lobe2:8479"
+    ports:
+      - "8475:8475"   # cortex REST  → http://localhost:8475
+      - "8476:8476"   # cortex Web UI → http://localhost:8476
+      - "8750:8750"   # cortex MCP/health
+
+  lobe1:
+    <<: *common
+    container_name: muninn-lobe1
+    hostname: lobe1
+    depends_on: [cortex]
+    environment:
+      <<: *common-env
+      MUNINN_CLUSTER_NODE_ID: "lobe1"
+      MUNINN_CLUSTER_ROLE: "replica"
+      MUNINN_CLUSTER_BIND_ADDR: "lobe1:8479"
+      MUNINN_CLUSTER_SEEDS: "cortex:8479"
+    ports:
+      - "18475:8475"  # lobe1 REST → http://localhost:18475
+
+  lobe2:
+    <<: *common
+    container_name: muninn-lobe2
+    hostname: lobe2
+    depends_on: [cortex]
+    environment:
+      <<: *common-env
+      MUNINN_CLUSTER_NODE_ID: "lobe2"
+      MUNINN_CLUSTER_ROLE: "replica"
+      MUNINN_CLUSTER_BIND_ADDR: "lobe2:8479"
+      MUNINN_CLUSTER_SEEDS: "cortex:8479"
+    ports:
+      - "28475:8475"  # lobe2 REST → http://localhost:28475
