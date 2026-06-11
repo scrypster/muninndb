@@ -677,6 +677,12 @@ func handleClusterConn(conn net.Conn, coord *replication.ClusterCoordinator) {
 	for {
 		frame, err := mbp.ReadFrame(conn)
 		if err != nil {
+			// The inbound conn died. If it had been adopted as a peer's registered
+			// conn, evict it (unless already replaced) so the peer's restart isn't
+			// blocked by a stale live-looking PeerConn (#534).
+			if joined {
+				coord.EvictConn(fromNodeID, conn)
+			}
 			return // connection closed or error
 		}
 		if frame.Type == mbp.TypeJoinRequest {

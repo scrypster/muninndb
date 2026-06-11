@@ -286,6 +286,9 @@ func (c *ClusterCoordinator) readPeerFrames(ctx context.Context, p *PeerConn, no
 	for {
 		ft, payload, err := p.Receive()
 		if err != nil {
+			// The conn is dead — evict it (if not already replaced) so a restarted
+			// peer's new conn is accepted and discovery re-dials it (#534).
+			c.mgr.EvictPeerConn(nodeID, p)
 			return
 		}
 		if err := c.HandleIncomingFrame(nodeID, ft, payload); err != nil {

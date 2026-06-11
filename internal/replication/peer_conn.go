@@ -52,6 +52,12 @@ func NewPeerConn(nodeID, addr string) *PeerConn {
 // PeerConn. Used on the Cortex side when a Lobe dials in: the conn exists but
 // the Lobe's stable listen address (addr) comes from the JoinRequest payload.
 func NewPeerConnFromConn(nodeID, addr string, conn net.Conn) *PeerConn {
+	// TCP keepalive is a cheap backstop for detecting a silently-dead peer (the
+	// primary detection is read/write errors + MSP SDOWN, #534).
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(15 * time.Second)
+	}
 	return &PeerConn{
 		nodeID: nodeID,
 		addr:   addr,
@@ -116,8 +122,24 @@ func (p *PeerConn) Send(frameType uint8, payload []byte) error {
 	// Bound the write so a wedged peer can't block the shared heartbeat tick.
 	_ = p.conn.SetWriteDeadline(time.Now().Add(sendWriteTimeout))
 	err := mbp.WriteFrame(p.conn, f)
+	if err != nil {
+		// A write error (incl. timeout) means the conn is dead or wedged — mark it
+		// closed so IsConnected reports false and a restarted peer's new conn can
+		// replace it via RegisterConnKind / discovery re-dial (#534).
+		_ = p.conn.Close()
+		p.conn = nil
+		p.closed = true
+		return err
+	}
 	_ = p.conn.SetWriteDeadline(time.Time{}) // clear for subsequent reads/writes
 	return err
+}
+
+// Is reports whether this PeerConn currently wraps the given net.Conn (identity).
+func (p *PeerConn) Is(conn net.Conn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.conn == conn
 }
 
 // Receive reads one MBP frame from the connection.

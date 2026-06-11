@@ -61,6 +61,33 @@ func (m *ConnManager) AddPeer(nodeID, addr string) {
 	m.peers[nodeID] = NewPeerConn(nodeID, addr)
 }
 
+// EvictIfConn disconnects the peer for nodeID IFF it still wraps the given conn
+// (identity check, so a replacement conn is never evicted). The entry is kept so
+// its address survives for re-dial, but marked disconnected — so a restarted
+// peer's new hello/join is accepted and discovery re-dials it (#534).
+func (m *ConnManager) EvictIfConn(nodeID string, conn net.Conn) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.peers[nodeID]
+	if !ok || !p.Is(conn) {
+		return false
+	}
+	_ = p.Close()
+	return true
+}
+
+// EvictPeerConn disconnects the peer for nodeID IFF the registered PeerConn is
+// exactly p (so a replacement is never evicted), keeping the entry for re-dial.
+func (m *ConnManager) EvictPeerConn(nodeID string, p *PeerConn) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.peers[nodeID] != p {
+		return false
+	}
+	_ = p.Close()
+	return true
+}
+
 // HasLivePeerAt reports whether any registered peer with this advertised address
 // currently has a live connection — used by the discovery loop to skip seeds
 // already covered by a join or hello conn (#522 Step 4).

@@ -1195,6 +1195,13 @@ func (c *ClusterCoordinator) checkQuorumHealth() {
 	}
 }
 
+// EvictConn disconnects the registered peer for nodeID if it still wraps conn —
+// called by the connection handler when an inbound conn's read loop exits, so a
+// killed peer's stale PeerConn doesn't block its restart (#534).
+func (c *ClusterCoordinator) EvictConn(nodeID string, conn net.Conn) {
+	c.mgr.EvictIfConn(nodeID, conn)
+}
+
 // HandleIncomingJoin processes a TypeJoinRequest frame on a raw inbound conn
 // whose node ID is not yet known. It registers the live conn under req.NodeID
 // so that peer.Send works immediately (no dial required), processes the join
