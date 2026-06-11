@@ -498,9 +498,43 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 		if err != nil {
 			return nil, fmt.Errorf("phase1 embed: %w", err)
 		}
+		// Embed returns a flat len(texts)*dim slice — each phrase's vector
+		// concatenated. A multi-phrase context must be pooled back into a single
+		// dim-sized query vector; feeding the raw N*dim slice to the dim-sized
+		// HNSW index makes CosineSimilarity's length guard return 0 for every
+		// node, silently zeroing the vector signal for any 2+ phrase context (#498).
+		if n := len(req.Context); n > 1 && len(vec) > 0 && len(vec)%n == 0 {
+			vec = meanPoolEmbeddings(vec, n)
+		}
 		result.embedding = vec
 	}
 	return result, nil
+}
+
+// meanPoolEmbeddings averages n equal-length vectors concatenated in flat
+// (dim = len(flat)/n) and L2-normalizes the result into a single dim-sized
+// query vector. Callers must ensure len(flat) is a positive multiple of n.
+func meanPoolEmbeddings(flat []float32, n int) []float32 {
+	dim := len(flat) / n
+	pooled := make([]float32, dim)
+	for p := 0; p < n; p++ {
+		base := p * dim
+		for i := 0; i < dim; i++ {
+			pooled[i] += flat[base+i]
+		}
+	}
+	var norm float64
+	for i := range pooled {
+		pooled[i] /= float32(n)
+		norm += float64(pooled[i]) * float64(pooled[i])
+	}
+	if norm > 0 {
+		inv := float32(1.0 / math.Sqrt(norm))
+		for i := range pooled {
+			pooled[i] *= inv
+		}
+	}
+	return pooled
 }
 
 // phase2 retrieves candidates from FTS, HNSW, and decay pool in parallel.
