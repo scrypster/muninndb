@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"math/rand"
 	"net"
@@ -222,11 +221,11 @@ func (c *ClusterCoordinator) sendClaim(p *PeerConn) {
 	_ = p.Send(mbp.TypeCortexClaim, payload)
 }
 
-// startElectionWithJitter starts a failover election after a deterministic
+// startElectionWithJitter starts a failover election after a randomized
 // per-node delay (0–1 heartbeat) so concurrent ODOWN-triggered candidates stagger
 // instead of splitting the vote, then retries a bounded number of times if it
 // stays a stuck candidate — but only while no leader has emerged (#522 Step 4c).
-func (c *ClusterCoordinator) startElectionWithJitter() {
+func (c *ClusterCoordinator) startElectionWithJitter(ctx context.Context) {
 	// Single-flight: a concurrent ODOWN event must not spawn a second election
 	// driver that could ResetCandidate a candidacy this one is about to win.
 	if !c.electing.CompareAndSwap(false, true) {
@@ -235,22 +234,47 @@ func (c *ClusterCoordinator) startElectionWithJitter() {
 	defer c.electing.Store(false)
 
 	hb := c.heartbeatInterval()
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(c.cfg.NodeID))
-	time.Sleep(time.Duration(uint64(h.Sum32()) % uint64(hb)))
+	// Randomized initial delay (NOT a deterministic per-node constant) so two
+	// nodes that reach ODOWN together desynchronize their first start; the later
+	// one then sees the earlier's higher-epoch VoteRequest and grants it (#531 PR1).
+	sleepCtx(ctx, randDuration(0, hb))
 
-	for attempt := 0; attempt < 4; attempt++ {
+	for ctx.Err() == nil {
 		if c.IsLeader() {
 			return
 		}
-		if ldr := c.election.CurrentLeader(); ldr != "" && ldr != c.cfg.NodeID {
-			return // someone else won
+		if ldr := c.election.CurrentLeader(); ldr != "" && ldr != c.cfg.NodeID && !c.msp.IsSDown(ldr) {
+			return // a live leader emerged
 		}
-		c.election.ResetCandidate() // clear any prior stuck candidacy so we can retry
-		if err := c.election.StartElection(context.Background()); err != nil {
-			slog.Debug("cluster: failover election start", "err", err)
+		// Don't burn epochs without a live voter quorum (e.g. a total partition).
+		if c.aliveVoters() >= c.election.Quorum() {
+			c.election.ResetCandidate()
+			if err := c.election.StartElection(ctx); err != nil {
+				slog.Debug("cluster: failover election start", "err", err)
+			}
 		}
-		time.Sleep(4 * hb) // wait for the outcome (promotion or a new leader's claim)
+		// Re-randomized election timeout each round breaks any lockstep, so the
+		// split-vote probability is independent per round → converges w.p. 1. No
+		// attempt cap: keep trying until a leader (self or a live other) emerges.
+		sleepCtx(ctx, randDuration(3*hb, 6*hb))
+	}
+}
+
+// randDuration returns a uniformly random duration in [min, max).
+func randDuration(min, max time.Duration) time.Duration {
+	if max <= min {
+		return min
+	}
+	return min + time.Duration(rand.Int63n(int64(max-min)))
+}
+
+// sleepCtx sleeps for d or until ctx is done, whichever comes first.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
 	}
 }
 

@@ -33,6 +33,9 @@ type JoinHandler struct {
 	OnLobeJoined func(info NodeInfo)
 	// OnLobeLeft is called (without mu held) when a Lobe leaves.
 	OnLobeLeft func(nodeID string)
+	// LeaderInfo reports whether this node is the current leader, and if not, the
+	// leader it knows (for join redirects). Only the leader accepts joins (#533).
+	LeaderInfo func() (isLeader bool, leaderID, leaderAddr string)
 }
 
 // NewJoinHandler creates a JoinHandler for the Cortex.
@@ -141,6 +144,24 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 			RejectReason: "cluster not yet bootstrapped (epoch 0)",
 			Epoch:        currentEpoch,
 			CortexID:     h.localNodeID,
+		}
+	}
+
+	// Leadership gate (#533): only the current leader may accept a join. A
+	// non-leader rejects with a redirect to the leader it knows, so a Lobe that
+	// dialed the wrong node (e.g. another Lobe during a failover) doesn't get a
+	// bogus "you joined me" and start following a non-leader — the root cause of
+	// the mutual-join split-brain.
+	if h.LeaderInfo != nil {
+		isLeader, leaderID, leaderAddr := h.LeaderInfo()
+		if !isLeader {
+			return mbp.JoinResponse{
+				Accepted:     false,
+				RejectReason: "not cortex",
+				Epoch:        currentEpoch,
+				CortexID:     leaderID,
+				CortexAddr:   leaderAddr,
+			}
 		}
 	}
 

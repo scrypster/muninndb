@@ -103,6 +103,9 @@ type ClusterCoordinator struct {
 	// electing single-flights the ODOWN-triggered failover election driver so
 	// concurrent ODOWN events don't spawn racing election loops (#522 Step 4c).
 	electing atomic.Bool
+	// runCtx is the lifetime context captured at Run() start, so callbacks wired
+	// before Run (e.g. OnODown) can launch ctx-aware loops (#531 PR1).
+	runCtx context.Context
 
 	// Per-Lobe streamers (Cortex only): lobeID -> cancel func
 	streamers   map[string]context.CancelFunc
@@ -247,15 +250,19 @@ func NewClusterCoordinator(
 		c.handleNewLeader(leaderID, epoch)
 	}
 
-	// Wire MSP callbacks: trigger election when Cortex goes ODOWN.
-	// Sentinels participate in ODOWN voting but never start elections themselves.
+	// Wire MSP callbacks: trigger a failover election only when the LEADER goes
+	// ODOWN. A non-leader (lobe) dying while a healthy leader is known must not
+	// start an election (#531 PR1). Sentinels never start elections.
 	msp.OnODown = func(nodeID string) {
-		slog.Warn("cluster: ODOWN detected, triggering election", "down_node", nodeID)
 		if c.IsSentinel() {
-			slog.Info("cluster: sentinel node observed ODOWN, skipping election start", "down_node", nodeID)
 			return
 		}
-		c.startElectionWithJitter()
+		if ldr := c.election.CurrentLeader(); ldr != "" && ldr != nodeID && !c.msp.IsSDown(ldr) {
+			return // a different, live leader is known — this is a lobe death, not a failover
+		}
+		slog.Warn("cluster: ODOWN detected, triggering failover election", "down_node", nodeID)
+		c.election.ClearLeader(nodeID) // forget the dead leader so we can re-elect
+		c.startElectionWithJitter(c.runCtx)
 	}
 
 	// Wire OnSDown to check quorum health — if we are Cortex and lose quorum
@@ -324,6 +331,20 @@ func NewClusterCoordinator(
 	joinHandler.OnLobeLeft = func(nodeID string) {
 		c.stopStreamerForLobe(nodeID)
 	}
+	// Only the leader accepts joins; a non-leader redirects to the leader it knows (#533).
+	joinHandler.LeaderInfo = func() (bool, string, string) {
+		if c.IsLeader() {
+			return true, c.cfg.NodeID, c.advertiseAddr
+		}
+		ldr := c.election.CurrentLeader()
+		var addr string
+		if ldr != "" && ldr != c.cfg.NodeID {
+			if p, ok := c.mgr.GetPeer(ldr); ok {
+				addr = p.Addr()
+			}
+		}
+		return false, ldr, addr
+	}
 
 	return c
 }
@@ -335,6 +356,7 @@ func NewClusterCoordinator(
 // If cfg.Role == "observer": joins replication stream, applies locally, no voting
 func (c *ClusterCoordinator) Run(ctx context.Context) error {
 	c.started.Store(true)
+	c.runCtx = ctx
 
 	// Observers do not participate in voting — do not register as voter.
 	if c.cfg.Role != "observer" {
@@ -441,6 +463,7 @@ func (c *ClusterCoordinator) runAsCortex(ctx context.Context) error {
 		c.election.currentLeader = c.cfg.NodeID
 		c.election.mu.Unlock()
 		c.handlePromotion(currentEpoch)
+		c.election.broadcastClaim(currentEpoch) // announce so peers learn the leader (#531 PR1)
 		// Clear the crash-recovery breadcrumb now that in-memory promotion is
 		// complete. Without this, every subsequent clean restart re-enters this
 		// path instead of going through a normal election. (#176)
@@ -492,6 +515,11 @@ func (c *ClusterCoordinator) bootstrapPromoteIfDesignatedPrimary() {
 	slog.Info("cluster: designated primary asserting leadership at bootstrap",
 		"node", c.cfg.NodeID, "epoch", epoch)
 	c.handlePromotion(epoch)
+	// Announce leadership so followers learn currentLeader through the normal
+	// channel (bootstrap-assert bypasses tryPromote, which is the only other
+	// broadcaster). Without this, peers never see a claim from a designated
+	// primary and can't redirect joins to it (#531 PR1).
+	c.election.broadcastClaim(epoch)
 }
 
 // joinWithRetry attempts to join the Cortex, cycling through all seeds on each
@@ -504,13 +532,28 @@ func (c *ClusterCoordinator) joinWithRetry(ctx context.Context, seeds []string, 
 	const maxBackoff = 30 * time.Second
 
 	backoff := time.Second
+	var redirect string // a leader address learned from a "not cortex" redirect (#533)
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		cortexAddr := seeds[(attempt-1)%len(seeds)]
+		cortexAddr := redirect
+		if cortexAddr == "" {
+			cortexAddr = seeds[(attempt-1)%len(seeds)]
+		}
+		redirect = ""
 		joinCtx, cancel := context.WithTimeout(context.Background(), joinTimeout)
 		resp, err := c.joinClient.Join(joinCtx, cortexAddr)
 		cancel()
 		if err == nil {
 			return resp, nil
+		}
+		// Redirect: a non-leader rejected us and pointed at the leader it knows.
+		// Try that address immediately (no backoff) instead of cycling seeds, so
+		// a Lobe finds the real Cortex fast after a failover (#533).
+		if resp.CortexAddr != "" && resp.CortexAddr != cortexAddr {
+			if ctx.Err() != nil {
+				return JoinResult{}, ctx.Err()
+			}
+			redirect = resp.CortexAddr
+			continue
 		}
 		slog.Warn("cluster: join attempt failed, will retry",
 			"role", role, "attempt", attempt, "max", maxAttempts,
@@ -905,7 +948,9 @@ func (c *ClusterCoordinator) waitQuorumTerm(ctx context.Context) runMode {
 		if ldr := c.election.CurrentLeader(); ldr != "" && ldr != c.cfg.NodeID {
 			return modeFollowing // a higher claim appeared — follow, never assert
 		}
-		if c.aliveVoters() >= c.election.Quorum() && (nextElection.IsZero() || !time.Now().Before(nextElection)) {
+		if !c.electing.Load() && c.aliveVoters() >= c.election.Quorum() && (nextElection.IsZero() || !time.Now().Before(nextElection)) {
+			// Yield if the ODOWN-triggered failover driver is already electing, so
+			// the two drivers don't race the same node into split candidacies (#531 PR1).
 			if err := c.election.StartElection(ctx); err != nil {
 				slog.Warn("cluster: re-election attempt failed", "node", c.cfg.NodeID, "err", err)
 			}

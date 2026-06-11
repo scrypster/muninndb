@@ -134,6 +134,20 @@ func (e *Election) ResetCandidate() {
 	}
 }
 
+// ClearLeader forgets currentLeader if it points at deadID (the known leader has
+// gone ODOWN), so the failover driver and followSeeds stop trusting it. A Follower
+// whose leader died returns to Idle so a fresh StartElection is unblocked (#531).
+func (e *Election) ClearLeader(deadID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.currentLeader == deadID {
+		e.currentLeader = ""
+	}
+	if e.state == ElectionFollower {
+		e.state = ElectionIdle
+	}
+}
+
 // StepDown relinquishes leadership without a successor (used by the pre-emptive
 // quorum-loss demotion, which has no claimant). state→Idle so a later
 // StartElection is not blocked by errAlreadyCandidate; currentLeader is cleared
