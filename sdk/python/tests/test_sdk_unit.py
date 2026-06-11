@@ -323,3 +323,63 @@ async def test_auth_error_raises_muninn_auth_error():
     async with mock_client() as c:
         with pytest.raises(MuninnAuthError):
             await c.read("secret", vault="default")
+
+
+# ---------------------------------------------------------------------------
+# SSE push parsing (issue #437) — nested engram + score/why fields
+# ---------------------------------------------------------------------------
+
+def test_subscribe_sends_push_on_write_param():
+    """subscribe(push_on_write=True) must send the push_on_write query param.
+
+    This is the param the server now accepts (alongside on_write) to fire pushes.
+    """
+    client = MuninnClient(BASE_URL, token="tok")
+    stream = client.subscribe(vault="default", push_on_write=True)
+    params = stream._params  # type: ignore[attr-defined]
+    assert params.get("push_on_write") == "true"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_subscribe_parses_nested_engram_push():
+    """The SSE parser must read the nested engram object plus score/why that the
+    server actually sends (issue #437), not the flat engram_id it used to look for.
+    """
+    sse_body = (
+        "event: push\n"
+        'data: {"subscription_id":"sub-1","trigger":"on_write","push_number":1,'
+        '"score":0.31,"at":1700000000,'
+        '"engram":{"id":"01ENGRAM","concept":"cats","content":"about cats"},'
+        '"why":"matched context"}\n'
+        "\n"
+    )
+    respx.get(f"{BASE_URL}/api/subscribe").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            text=sse_body,
+        )
+    )
+
+    async with mock_client() as c:
+        stream = c.subscribe(vault="default", push_on_write=True)
+        pushes = []
+        async for push in stream:
+            pushes.append(push)
+            await stream.close()
+            break
+
+    assert len(pushes) == 1
+    p = pushes[0]
+    assert p.subscription_id == "sub-1"
+    assert p.trigger == "on_write"
+    assert p.push_number == 1
+    assert p.score == pytest.approx(0.31)
+    assert p.why == "matched context"
+    assert p.engram is not None
+    assert p.engram.id == "01ENGRAM"
+    assert p.engram.concept == "cats"
+    assert p.engram.content == "about cats"
+    # engram_id is back-filled from the nested engram.id for backwards compat.
+    assert p.engram_id == "01ENGRAM"

@@ -6,7 +6,7 @@ import json
 import httpx
 
 from .errors import MuninnConnectionError
-from .types import Push
+from .types import Push, PushEngram
 
 
 class SSEStream:
@@ -85,12 +85,30 @@ class SSEStream:
                                 try:
                                     data = json.loads(data_str)
                                     if event_type == "push":
+                                        # The server sends the engram as a nested
+                                        # object plus top-level score/why fields.
+                                        engram_obj = data.get("engram")
+                                        engram = None
+                                        engram_id = data.get("engram_id")
+                                        if isinstance(engram_obj, dict):
+                                            engram = PushEngram(
+                                                id=engram_obj.get("id"),
+                                                concept=engram_obj.get("concept"),
+                                                content=engram_obj.get("content"),
+                                            )
+                                            # Populate flat engram_id from the
+                                            # nested id for backwards compat.
+                                            if engram_id is None:
+                                                engram_id = engram_obj.get("id")
                                         yield Push(
                                             subscription_id=data.get("subscription_id", ""),
                                             trigger=data.get("trigger", ""),
                                             push_number=data.get("push_number", 0),
-                                            engram_id=data.get("engram_id"),
+                                            engram_id=engram_id,
                                             at=data.get("at"),
+                                            score=data.get("score"),
+                                            engram=engram,
+                                            why=data.get("why"),
                                         )
                                     # ignore subscribed and other event types
                                 except json.JSONDecodeError:

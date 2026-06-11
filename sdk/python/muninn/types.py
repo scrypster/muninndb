@@ -140,6 +140,15 @@ class StatResponse:
 
 
 @dataclass
+class PushEngram:
+    """Engram payload nested inside an SSE push event."""
+
+    id: str | None = None
+    concept: str | None = None
+    content: str | None = None
+
+
+@dataclass
 class Push:
     """SSE push event from subscription."""
 
@@ -148,6 +157,9 @@ class Push:
     push_number: int
     engram_id: str | None = None
     at: int | None = None
+    score: float | None = None
+    engram: PushEngram | None = None
+    why: str | None = None
 
 
 @dataclass

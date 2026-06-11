@@ -36,6 +36,7 @@ const testEngramID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 type MockEngine struct {
 	lastActivityReq   *ActivityCountsRequest
 	activityCountsErr error
+	lastSubscribeReq  *mbp.SubscribeRequest
 }
 
 func (m *MockEngine) Hello(ctx context.Context, req *HelloRequest) (*HelloResponse, error) {
@@ -169,6 +170,7 @@ func (m *MockEngine) WorkerStats() cognitive.EngineWorkerStats {
 }
 
 func (m *MockEngine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeRequest, deliver trigger.DeliverFunc) (string, error) {
+	m.lastSubscribeReq = req
 	return "mock-sub", nil
 }
 

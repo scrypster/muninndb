@@ -69,6 +69,15 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
+// Unwrap exposes the underlying http.ResponseWriter so that
+// http.NewResponseController can reach the network connection. Without this,
+// the SetWriteDeadline call in handleSubscribe (which clears the REST server's
+// 15s WriteTimeout for long-lived SSE streams) silently fails and SSE
+// connections on the REST port are killed after 15 seconds. See issue #437.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
 // Server is an HTTP REST server for the MuninnDB engine.
 type Server struct {
 	addr          string
@@ -1775,6 +1784,7 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 //	context   — (repeatable) subscription context strings for semantic matching
 //	threshold — float32 score threshold, default 0.5
 //	on_write  — "true"|"1" to receive a push on every qualifying write
+//	            (alias: "push_on_write", which is what the SDKs send)
 //	ttl       — subscription TTL in seconds, 0 = no expiry
 //	rate      — max pushes/sec, default 10
 func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
@@ -1812,7 +1822,14 @@ func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	} else if rateLimit > 1000 {
 		rateLimit = 1000
 	}
-	pushOnWrite := q.Get("on_write") == "true" || q.Get("on_write") == "1"
+	// Accept both "on_write" (original server param) and "push_on_write" (the name
+	// all three SDKs — Python, Node, Swift — actually send). Accepting both keeps
+	// existing SDK clients working without a breaking rename. See issue #437.
+	pushOnWriteParam := func(name string) bool {
+		v := q.Get(name)
+		return v == "true" || v == "1"
+	}
+	pushOnWrite := pushOnWriteParam("on_write") || pushOnWriteParam("push_on_write")
 
 	// Set SSE headers before any write to the body.
 	w.Header().Set("Content-Type", "text/event-stream")

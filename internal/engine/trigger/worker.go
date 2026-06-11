@@ -112,6 +112,24 @@ func (w *TriggerWorker) handleWrite(ctx context.Context, event *EngramEvent) {
 
 	engramVec := event.Engram.Embedding
 
+	// KNOWN LIMITATION (issue #437, deferred — needs a design decision):
+	// On a freshly-written engram, event.Engram.Embedding is usually empty
+	// because embeddings are computed asynchronously by the retroactive
+	// processor (internal/plugin/retroactive.go), which inserts the vector
+	// into HNSW ~50ms later and calls only its own rp.Notify() scan loop — it
+	// does NOT call back into the trigger system to re-evaluate PushOnWrite
+	// subscriptions with the now-available vector. As a result, vectorScore is
+	// 0 here for new writes, so context/threshold-filtered subscriptions cannot
+	// semantically differentiate writes at push time (they still fire for
+	// Threshold=0 via the non-vector components below).
+	//
+	// The naive fix (an OnEmbed callback that re-runs handleWrite after the
+	// embedding lands) introduces a double-push design question: clients would
+	// receive a baseline push immediately AND a second vector-scored push once
+	// embedding completes. Whether to emit both, suppress the baseline, or delay
+	// the first push until embedding completes is an unresolved design choice,
+	// so it is intentionally NOT implemented here. See the PR for #437.
+
 	for _, sub := range subs {
 		if !sub.PushOnWrite {
 			continue
