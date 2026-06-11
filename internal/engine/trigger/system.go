@@ -29,6 +29,7 @@ const (
 	writeEventBufSize  = 1024
 	cogEventBufSize    = 4096
 	contraEventBufSize = 256
+	embedEventBufSize  = 1024
 	embedCacheTTL      = 5 * time.Minute
 	embedCacheMax      = 1000
 	sweepTopK          = 200
@@ -112,6 +113,16 @@ type ContradictEvent struct {
 	EngramB  storage.ULID
 	Severity float64
 	Type     string
+}
+
+// EmbedEvent fires when an engram's embedding finishes computing asynchronously
+// (the retroactive embed processor runs ~tens of ms after the write). It lets
+// the worker re-evaluate PushOnWrite subscriptions with the now-available vector
+// so a vector-scored match on a freshly-written engram is not missed (#512).
+type EmbedEvent struct {
+	VaultID   uint32
+	Engram    *storage.Engram
+	Embedding []float32
 }
 
 // ScoredID is an index search result.
@@ -373,6 +384,7 @@ type TriggerSystem struct {
 	WriteEvents      chan *EngramEvent
 	CognitiveEvents  chan CognitiveEvent
 	ContradictEvents chan ContradictEvent
+	EmbedEvents      chan *EmbedEvent
 }
 
 // New creates a TriggerSystem with optional config. Pass zero-value TriggerConfig
@@ -392,6 +404,7 @@ func New(store TriggerStore, fts FTSIndex, hnsw HNSWIndex, embedder Embedder, cf
 	writeEvents := make(chan *EngramEvent, writeEventBufSize)
 	cogEvents := make(chan CognitiveEvent, cogEventBufSize)
 	contraEvents := make(chan ContradictEvent, contraEventBufSize)
+	embedEvents := make(chan *EmbedEvent, embedEventBufSize)
 	deliver := &DeliveryRouter{registry: registry}
 
 	worker := &TriggerWorker{
@@ -405,6 +418,7 @@ func New(store TriggerStore, fts FTSIndex, hnsw HNSWIndex, embedder Embedder, cf
 		writeEvents:  writeEvents,
 		cogEvents:    cogEvents,
 		contraEvents: contraEvents,
+		embedEvents:  embedEvents,
 	}
 
 	return &TriggerSystem{
@@ -417,6 +431,7 @@ func New(store TriggerStore, fts FTSIndex, hnsw HNSWIndex, embedder Embedder, cf
 		WriteEvents:      writeEvents,
 		CognitiveEvents:  cogEvents,
 		ContradictEvents: contraEvents,
+		EmbedEvents:      embedEvents,
 	}
 }
 
@@ -471,6 +486,20 @@ func (ts *TriggerSystem) Unsubscribe(id string) {
 func (ts *TriggerSystem) NotifyWrite(vaultID uint32, eng *storage.Engram, isNew bool) {
 	select {
 	case ts.WriteEvents <- &EngramEvent{VaultID: vaultID, Engram: eng, IsNew: isNew}:
+	default:
+		// Drop — buffer full, sweep will catch it
+	}
+}
+
+// NotifyEmbed re-evaluates PushOnWrite subscriptions for an engram whose
+// embedding just finished computing asynchronously (#512). Non-blocking; drops
+// on a full buffer (the periodic sweep is the backstop).
+func (ts *TriggerSystem) NotifyEmbed(vaultID uint32, eng *storage.Engram, vec []float32) {
+	if eng == nil || len(vec) == 0 {
+		return
+	}
+	select {
+	case ts.EmbedEvents <- &EmbedEvent{VaultID: vaultID, Engram: eng, Embedding: vec}:
 	default:
 		// Drop — buffer full, sweep will catch it
 	}

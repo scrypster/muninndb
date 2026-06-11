@@ -52,6 +52,17 @@ type RetroactiveProcessor struct {
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
 	notifyCh chan struct{} // buffered(1); non-blocking send from Notify()
+
+	// onEmbed, when set, is called after an engram's embedding is computed and
+	// inserted into HNSW. The engine uses it to re-evaluate push subscriptions
+	// with the now-available vector (#512). Only set on the embed processor.
+	onEmbed func(eng *Engram, vec []float32)
+}
+
+// SetOnEmbed registers a callback invoked after each engram's embedding is
+// computed and inserted into the index. Must be called before Start.
+func (rp *RetroactiveProcessor) SetOnEmbed(fn func(eng *Engram, vec []float32)) {
+	rp.onEmbed = fn
 }
 
 // NewRetroactiveProcessor creates a new processor for a plugin.
@@ -331,6 +342,11 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 			if storeErr := rp.store.HNSWInsert(ctx, eng.ID, vec); storeErr != nil {
 				slog.Warn("retroactive processor: HNSWInsert failed",
 					"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", storeErr)
+			} else if rp.onEmbed != nil {
+				// The vector is now searchable — let the engine re-evaluate push
+				// subscriptions with it (#512). Copy first: vec is a sub-slice of
+				// the batch result and the callback hands it to an async consumer.
+				rp.onEmbed(eng, append([]float32(nil), vec...))
 			}
 			if storeErr := rp.store.AutoLinkByEmbedding(ctx, eng.ID, vec); storeErr != nil {
 				slog.Warn("retroactive processor: AutoLinkByEmbedding failed",

@@ -1437,6 +1437,9 @@ func runServer() {
 	var retroProcessor *plugin.RetroactiveProcessor
 	if embedPlugin != nil {
 		retroProcessor = plugin.NewRetroactiveProcessor(pStore, embedPlugin, plugin.DigestEmbed)
+		// Re-evaluate push subscriptions once each engram's embedding lands (#512),
+		// so vector-scored matches on freshly-written engrams are not missed.
+		retroProcessor.SetOnEmbed(eng.ReevaluatePushOnEmbed)
 		retroProcessor.Start(ctx)
 		slog.Info("retroactive embed processor started")
 	}

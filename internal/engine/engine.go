@@ -250,6 +250,22 @@ func (e *Engine) SetLatencyTracker(t *latency.Tracker) {
 	e.latencyTracker = t
 }
 
+// ReevaluatePushOnEmbed re-evaluates push subscriptions for an engram whose
+// embedding just finished computing asynchronously (#512). It resolves the
+// engram's vault and forwards to the trigger system, which pushes the engram to
+// any subscription it now matches semantically but was not already delivered to
+// at write time. Wired to the embed retroactive processor's OnEmbed callback.
+func (e *Engine) ReevaluatePushOnEmbed(eng *storage.Engram, vec []float32) {
+	if e.triggers == nil || eng == nil || len(vec) == 0 {
+		return
+	}
+	ws, ok := e.store.FindVaultPrefix(eng.ID)
+	if !ok {
+		return
+	}
+	e.triggers.NotifyEmbed(wsVaultID(ws), eng, vec)
+}
+
 // SetRetroactiveProcessors registers background processors for observability.
 // Must be called before the engine starts serving requests (not safe for concurrent use with Observability).
 func (e *Engine) SetRetroactiveProcessors(procs ...*plugin.RetroactiveProcessor) {

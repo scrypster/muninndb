@@ -55,6 +55,7 @@ type TriggerWorker struct {
 	writeEvents  <-chan *EngramEvent
 	cogEvents    <-chan CognitiveEvent
 	contraEvents <-chan ContradictEvent
+	embedEvents  <-chan *EmbedEvent
 }
 
 // Run starts the trigger event loop.
@@ -85,6 +86,12 @@ func (w *TriggerWorker) Run(ctx context.Context) error {
 			}
 			w.handleCognitive(ctx, event)
 
+		case event, ok := <-w.embedEvents:
+			if !ok {
+				return nil
+			}
+			w.handleEmbed(ctx, event)
+
 		case <-sweep.C:
 			w.handleSweep(ctx)
 			w.registry.PruneExpired()
@@ -112,23 +119,15 @@ func (w *TriggerWorker) handleWrite(ctx context.Context, event *EngramEvent) {
 
 	engramVec := event.Engram.Embedding
 
-	// KNOWN LIMITATION (issue #437, deferred — needs a design decision):
 	// On a freshly-written engram, event.Engram.Embedding is usually empty
-	// because embeddings are computed asynchronously by the retroactive
-	// processor (internal/plugin/retroactive.go), which inserts the vector
-	// into HNSW ~50ms later and calls only its own rp.Notify() scan loop — it
-	// does NOT call back into the trigger system to re-evaluate PushOnWrite
-	// subscriptions with the now-available vector. As a result, vectorScore is
-	// 0 here for new writes, so context/threshold-filtered subscriptions cannot
-	// semantically differentiate writes at push time (they still fire for
-	// Threshold=0 via the non-vector components below).
-	//
-	// The naive fix (an OnEmbed callback that re-runs handleWrite after the
-	// embedding lands) introduces a double-push design question: clients would
-	// receive a baseline push immediately AND a second vector-scored push once
-	// embedding completes. Whether to emit both, suppress the baseline, or delay
-	// the first push until embedding completes is an unresolved design choice,
-	// so it is intentionally NOT implemented here. See the PR for #437.
+	// because embeddings are computed asynchronously by the retroactive processor
+	// (internal/plugin/retroactive.go) ~tens of ms later. So vectorScore is 0
+	// here, and context/threshold-filtered subscriptions can only fire via the
+	// non-vector components below (decay, recency, confidence) at write time.
+	// Once the embedding lands, the processor calls back into the engine, which
+	// invokes handleEmbed (below) to re-evaluate these subscriptions with the
+	// now-available vector — pushing a newly-matching engram exactly once, since
+	// handleEmbed skips anything already delivered here (pushedScores dedup) (#512).
 
 	for _, sub := range subs {
 		if !sub.PushOnWrite {
@@ -154,6 +153,62 @@ func (w *TriggerWorker) handleWrite(ctx context.Context, event *EngramEvent) {
 		}
 
 		// T4: rate-limit write pushes before delivery.
+		if !sub.rateLimiter.TryConsume() {
+			continue
+		}
+
+		w.deliver.Send(sub, &ActivationPush{
+			SubscriptionID: sub.ID,
+			Engram:         event.Engram,
+			Score:          score,
+			Trigger:        TriggerNewWrite,
+			At:             time.Now(),
+		})
+
+		sub.mu.Lock()
+		sub.pushedScores[event.Engram.ID] = score
+		sub.pushCount++
+		sub.mu.Unlock()
+	}
+}
+
+// handleEmbed re-evaluates PushOnWrite subscriptions after an engram's embedding
+// finishes computing asynchronously (#512). handleWrite runs at write time with
+// vectorScore=0 (the embedding is not ready yet), so a context/threshold-filtered
+// subscription that should match semantically cannot fire then. Once the vector
+// lands, this pushes engrams that NOW match — but only those NOT already
+// delivered at write time (dedup via pushedScores), so a write-time match is
+// never double-pushed. The result is a single, correctly vector-scored push.
+func (w *TriggerWorker) handleEmbed(ctx context.Context, event *EmbedEvent) {
+	if event == nil || event.Engram == nil || len(event.Embedding) == 0 {
+		return
+	}
+	subs := w.registry.ForVault(event.VaultID)
+	if len(subs) == 0 {
+		return
+	}
+
+	meta := engramToMeta(event.Engram)
+	for _, sub := range subs {
+		if !sub.PushOnWrite {
+			continue
+		}
+		sub.mu.Lock()
+		_, already := sub.pushedScores[event.Engram.ID]
+		subVec := sub.embedding
+		sub.mu.Unlock()
+
+		// Already delivered at write time, or the subscription has no vector to
+		// compare against — leave it to the write-time path either way.
+		if already || len(subVec) == 0 {
+			continue
+		}
+
+		vectorScore := cosineSimilarity(subVec, event.Embedding)
+		score, above := TriggerScore(sub, meta, vectorScore, 0)
+		if !above {
+			continue
+		}
 		if !sub.rateLimiter.TryConsume() {
 			continue
 		}
