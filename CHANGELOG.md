@@ -11,6 +11,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.3] - 2026-06-11
+
+Hotfix release for issues found in production immediately after v0.6.2. Every
+fix ships with a regression test.
+
+### Fixed
+- **Multi-phrase semantic recall returned 0 results.** For a `context` of 2+
+  phrases, the query embedding was the flat N×dim concatenation of the
+  per-phrase vectors, fed to the dim-sized HNSW index — so the cosine length
+  guard zeroed every score. The query embedding is now mean-pooled into a single
+  dim-sized vector. Single-phrase recall was unaffected. (#498)
+- **`merge_entity` on case-variant names destroyed engram links.** Entity names
+  are hashed case-insensitively, so merging "Foo" into "foo" made source and
+  target the same key; the relink batch's Set+Delete then silently removed the
+  link to both casings. Now guarded at both the merge and relink layers. (#503)
+- **SSE push events were never delivered to SDK clients.** The server read
+  `on_write` while all SDKs send `push_on_write`; the status recorder also
+  lacked `Unwrap()`, killing SSE streams at the write deadline. Both fixed, plus
+  the Python SDK now parses the nested `engram` push payload. (#437)
+- **Inline-enriched memories were reported as un-enriched forever.**
+  Caller-supplied summary/relationships/type now set the matching digest flags,
+  so the enrichment-candidates query no longer returns them. (#500)
+- **HNSW: a failed index load was cached as a permanently empty index.** The
+  load is now retried on the next access; load outcomes are logged; the restore
+  iterator is scoped to the vault. (#499)
+- **`muninn_recall` serialization.** `content` no longer duplicates `summary`,
+  lifecycle `state` is populated, and scores no longer carry float32 noise. (#502)
+- **Local embedder mislabeled.** It was labeled `all-MiniLM-L6-v2` but is
+  `bge-small-en-v1.5`; additionally the Windows release binary shipped MiniLM
+  bytes under BGE pooling. Both corrected. (#455)
+- **Failed LLM-enrichment init now surfaces the real error** instead of
+  reporting only "Not configured". (#453)
+- **Entity-type validation is now consistent** across `remember`,
+  `entity_state`, and `apply_enrichment` (normalize + coerce on every
+  user-facing path). (#501)
+
+---
+
 ## [0.6.2] - 2026-06-10
 
 ### Security
