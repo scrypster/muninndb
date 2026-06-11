@@ -279,6 +279,14 @@ func (e *Election) HandleVoteResponse(resp mbp.VoteResponse) {
 		return
 	}
 
+	// Count votes only from registered voters, so the vote tally (numerator) is
+	// drawn from the same population as the quorum (denominator). A vote from an
+	// unknown/stale node must never help complete quorum (#522 Step 2).
+	if _, ok := e.voters[resp.VoterID]; !ok {
+		e.mu.Unlock()
+		return
+	}
+
 	// Record the vote.
 	if e.votes[resp.Epoch] == nil {
 		e.votes[resp.Epoch] = make(map[string]bool)
