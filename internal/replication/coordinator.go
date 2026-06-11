@@ -367,6 +367,24 @@ func (c *ClusterCoordinator) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Periodically re-evaluate quorum health so a Cortex that loses quorum
+	// actually self-demotes within the timeout (#520). Previously this ran only
+	// on MSP SDOWN transitions, so sustained quorum loss set the timer once and
+	// never re-checked. Safe now that liveness is accurate (Step 1) and demotion
+	// recovers via the supervisor (PR A); the hadQuorum gate exempts bootstrap.
+	go func() {
+		ticker := time.NewTicker(heartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.checkQuorumHealth()
+			}
+		}
+	}()
+
 	// Start periodic WAL pruning (only prunes on Cortex when replicas are caught up).
 	c.startPeriodicPrune(ctx)
 
@@ -1047,16 +1065,26 @@ func (c *ClusterCoordinator) checkQuorumHealth() {
 		return
 	}
 
-	livePeers := c.msp.LivePeers()
 	quorum := c.election.Quorum()
-	// Count: self (1) + live peers
-	totalAlive := 1 + len(livePeers)
+	// Count self + live REGISTERED voters — the correct quorum population (plain
+	// LivePeers would also count non-voting observers, #522 Step 3).
+	totalAlive := c.aliveVoters()
 
 	c.quorumMu.Lock()
 
 	if totalAlive >= quorum {
-		// Quorum restored — reset timer
+		// Quorum healthy: latch hadQuorum for this term and reset the loss timer.
+		c.hadQuorum = true
 		c.quorumLostSince = time.Time{}
+		c.quorumMu.Unlock()
+		return
+	}
+
+	// Quorum is not met. Only a leader that has HELD a live quorum this term
+	// pre-emptively demotes — a node still forming its first quorum (a designated
+	// primary awaiting lobe joins at bootstrap) is exempt, so the periodic check
+	// can never tear down a healthy bootstrap (#522 Step 3 / #520).
+	if !c.hadQuorum {
 		c.quorumMu.Unlock()
 		return
 	}

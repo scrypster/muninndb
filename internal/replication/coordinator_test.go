@@ -580,17 +580,23 @@ func TestClusterCoordinator_QuorumLoss_PreemptiveDemotion(t *testing.T) {
 		t.Fatal("expected to be leader after promotion")
 	}
 
-	// Register 2 voters (self + peer-1) so quorum=2, but peer-1 is SDOWN
+	// Register 2 voters (self + peer-1) so quorum=2.
 	coord.election.RegisterVoter(coord.cfg.NodeID)
 	coord.election.RegisterVoter("peer-1")
 	coord.msp.AddPeer("peer-1", "127.0.0.1:9020", RoleReplica)
+
+	// Establish a live quorum first (peer-1 alive) — pre-emptive demotion only
+	// applies once a live quorum has been held this term (#522 Step 3 hadQuorum gate).
+	coord.checkQuorumHealth()
+
+	// Now peer-1 goes SDOWN → quorum lost.
 	coord.msp.mu.Lock()
 	if p, ok := coord.msp.peers["peer-1"]; ok {
 		p.SDown = true
 	}
 	coord.msp.mu.Unlock()
 
-	// First call: sets quorumLostSince
+	// First call after loss: sets quorumLostSince
 	coord.checkQuorumHealth()
 	if coord.IsLeader() {
 		// Should still be leader — timeout hasn't elapsed
