@@ -478,15 +478,21 @@ func TestClusterCoordinator_OnBecameCortex_Callback(t *testing.T) {
 func TestClusterCoordinator_OnBecameLobe_Callback(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "auto")
 
-	var called bool
+	called := make(chan struct{}, 1)
 	coord.OnBecameLobe = func() {
-		called = true
+		select {
+		case called <- struct{}{}:
+		default:
+		}
 	}
 
 	simulatePromotion(coord, 1)
 	coord.handleDemotion(causeClaim)
 
-	if !called {
+	// OnBecameLobe fires asynchronously (it must not block the MSP tick goroutine).
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
 		t.Error("expected OnBecameLobe to be called")
 	}
 	if coord.Role() != RoleReplica {

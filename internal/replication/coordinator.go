@@ -781,12 +781,24 @@ func (c *ClusterCoordinator) initialCortexMode() runMode {
 }
 
 // leadTerm holds leadership until a demotion event arrives, then routes to the
-// recovery mode the demotion cause dictates.
+// recovery mode the demotion cause dictates. A backstop ticker re-derives role
+// from authoritative state so that even if a demotion event were ever dropped
+// (unreachable in practice — the loop drains roleCh while leading), the node
+// still recovers instead of staying parked as a leader-but-Replica zombie.
 func (c *ClusterCoordinator) leadTerm(ctx context.Context) runMode {
+	ticker := time.NewTicker(c.heartbeatInterval())
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return modeLeading
+		case <-ticker.C:
+			if !c.IsLeader() {
+				if ldr := c.election.CurrentLeader(); ldr != "" && ldr != c.cfg.NodeID {
+					return modeFollowing
+				}
+				return modeWaitingQuorum
+			}
 		case ev := <-c.roleCh:
 			if ev.promoted {
 				continue // already leading; ignore a duplicate promote
@@ -1343,9 +1355,12 @@ func (c *ClusterCoordinator) handleDemotion(cause demotionCause) {
 	// Hand the supervisor loop the recovery cue (#522 Step 3).
 	c.pushRoleEvent(roleEvent{promoted: false, cause: cause})
 
-	// Fire engine callback
+	// Fire the engine callback asynchronously: this path runs on the MSP tick
+	// goroutine (via checkQuorumHealth), and OnBecameLobe stops cognitive workers
+	// which may block — it must not stall heartbeat processing. The role flip
+	// above already gates writes, so the worker teardown can complete out of band.
 	if c.OnBecameLobe != nil {
-		c.OnBecameLobe()
+		go c.OnBecameLobe()
 	}
 }
 
