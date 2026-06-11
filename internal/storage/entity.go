@@ -246,6 +246,15 @@ func (ps *PebbleStore) RelinkEntityEngramLink(ctx context.Context, ws [8]byte, e
 	toHash := keys.EntityNameHash(toEntity)
 	id := [16]byte(engramID)
 
+	// Entity names are hashed case-insensitively, so case/whitespace/NFKC
+	// variants collide on the same key. If from and to normalize to the same
+	// entity, the Set(toHash)+Delete(fromHash) below would target identical keys
+	// and the Delete would win — silently destroying the link. There is nothing
+	// to relink in that case (#503).
+	if fromHash == toHash {
+		return nil
+	}
+
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 	// Write new links for toEntity.

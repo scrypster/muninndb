@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/scrypster/muninndb/internal/storage"
+	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 // SimilarEntityPair represents a pair of entity names that are likely the same.
@@ -113,6 +114,13 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 	}
 	if entityA == entityB {
 		return nil, fmt.Errorf("merge_entity: entity_a and entity_b must be different")
+	}
+	// Entity storage keys are hashed case-insensitively (lowercase + NFKC), so
+	// names that differ only by case/whitespace normalize to the SAME entity.
+	// Merging them would relink an engram from a key to itself, and the
+	// underlying Set+Delete batch would destroy the link (#503). Reject up front.
+	if keys.EntityNameHash(entityA) == keys.EntityNameHash(entityB) {
+		return nil, fmt.Errorf("merge_entity: %q and %q normalize to the same entity (entity names are case-insensitive); nothing to merge", entityA, entityB)
 	}
 
 	// Serialise concurrent merges that touch either entity.
