@@ -195,12 +195,17 @@ func (w *TriggerWorker) handleEmbed(ctx context.Context, event *EmbedEvent) {
 		}
 		sub.mu.Lock()
 		_, already := sub.pushedScores[event.Engram.ID]
-		subVec := sub.embedding
 		sub.mu.Unlock()
+		if already {
+			continue // already delivered at write time — no double-push
+		}
 
-		// Already delivered at write time, or the subscription has no vector to
-		// compare against — leave it to the write-time path either way.
-		if already || len(subVec) == 0 {
+		// Compute the subscription's context embedding on demand (it is created
+		// without one and otherwise only filled lazily by the periodic sweep).
+		// Without this, an embed event arriving before the first sweep would have
+		// no vector to compare and the whole point of the re-evaluation is lost.
+		subVec := w.subEmbedding(ctx, sub)
+		if len(subVec) == 0 {
 			continue
 		}
 
@@ -331,6 +336,63 @@ func (w *TriggerWorker) handleContradiction(ctx context.Context, event Contradic
 	}
 }
 
+// subEmbedding returns the subscription's context embedding, computing and
+// caching it on first use. Subscriptions are created without an embedding; it is
+// filled here (by the sweep or by handleEmbed) the first time a vector is needed.
+// Returns nil if there is no embedder or the context cannot be embedded.
+func (w *TriggerWorker) subEmbedding(ctx context.Context, sub *Subscription) []float32 {
+	sub.mu.Lock()
+	vec := sub.embedding
+	subCtx := sub.Context
+	sub.mu.Unlock()
+
+	if len(vec) > 0 {
+		return vec
+	}
+	if w.embedder == nil || len(subCtx) == 0 {
+		return nil
+	}
+	computed, err := w.embedder.Embed(ctx, subCtx)
+	if err != nil || len(computed) == 0 {
+		return nil
+	}
+	// Embed returns the flat concatenation of per-phrase vectors. Pool a
+	// multi-phrase context into a single dim-sized vector so cosine against a
+	// per-engram vector is meaningful (mirrors the activation-path fix in #498).
+	if n := len(subCtx); n > 1 && len(computed)%n == 0 {
+		computed = meanPoolVec(computed, n)
+	}
+	sub.mu.Lock()
+	sub.embedding = computed
+	sub.mu.Unlock()
+	return computed
+}
+
+// meanPoolVec averages n equal-length sub-vectors concatenated in flat and
+// L2-normalizes the result, collapsing a multi-phrase embedding into one vector.
+func meanPoolVec(flat []float32, n int) []float32 {
+	dim := len(flat) / n
+	pooled := make([]float32, dim)
+	for p := 0; p < n; p++ {
+		base := p * dim
+		for i := 0; i < dim; i++ {
+			pooled[i] += flat[base+i]
+		}
+	}
+	var norm float64
+	for i := range pooled {
+		pooled[i] /= float32(n)
+		norm += float64(pooled[i]) * float64(pooled[i])
+	}
+	if norm > 0 {
+		inv := float32(1.0 / math.Sqrt(norm))
+		for i := range pooled {
+			pooled[i] *= inv
+		}
+	}
+	return pooled
+}
+
 func (w *TriggerWorker) handleSweep(ctx context.Context) {
 	vaults := w.registry.ActiveVaults()
 	for _, vaultID := range vaults {
@@ -355,29 +417,12 @@ func (w *TriggerWorker) sweepVault(ctx context.Context, vaultID uint32, ws [8]by
 	groups := make(map[[32]byte]*vecGroup)
 
 	for _, sub := range subs {
-		sub.mu.Lock()
-		vec := sub.embedding
-		subCtx := sub.Context
-		sub.mu.Unlock()
-
-		if len(vec) == 0 {
-			if w.embedder != nil {
-				computed, err := w.embedder.Embed(ctx, subCtx)
-				if err != nil {
-					continue
-				}
-				sub.mu.Lock()
-				sub.embedding = computed
-				vec = computed
-				sub.mu.Unlock()
-			}
-		}
-
+		vec := w.subEmbedding(ctx, sub)
 		if len(vec) == 0 {
 			continue
 		}
 
-		fp := contextFingerprint(subCtx)
+		fp := contextFingerprint(sub.Context)
 		if g, ok := groups[fp]; ok {
 			g.subs = append(g.subs, sub)
 		} else {
