@@ -221,10 +221,12 @@ func (c *ClusterCoordinator) sendClaim(p *PeerConn) {
 	_ = p.Send(mbp.TypeCortexClaim, payload)
 }
 
-// startElectionWithJitter starts a failover election after a randomized
-// per-node delay (0–1 heartbeat) so concurrent ODOWN-triggered candidates stagger
-// instead of splitting the vote, then retries a bounded number of times if it
-// stays a stuck candidate — but only while no leader has emerged (#522 Step 4c).
+// startElectionWithJitter starts a failover election after a randomized delay
+// (0–1 heartbeat) so concurrent ODOWN-triggered candidates stagger instead of
+// splitting the vote, then retries on a re-randomized timeout until a leader
+// emerges (self or a live other). The loop is intentionally unbounded — it gives
+// up only when ctx is cancelled — so a transient split always eventually resolves
+// (#531 PR1). Rate-limited by the per-round sleep, so it never hot-spins.
 func (c *ClusterCoordinator) startElectionWithJitter(ctx context.Context) {
 	// Single-flight: a concurrent ODOWN event must not spawn a second election
 	// driver that could ResetCandidate a candidacy this one is about to win.
