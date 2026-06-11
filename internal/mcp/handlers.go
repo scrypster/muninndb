@@ -362,6 +362,47 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		}
 		req.Filters = append(req.Filters, mbp.Filter{Field: "created_before", Op: "<", Value: t})
 	}
+
+	// Tag filters: tags_all (AND), tags_any (OR), tag_filter (prefix value range).
+	parseStringArrayArg := func(v any) []string {
+		arr, ok := v.([]any)
+		if !ok {
+			return nil
+		}
+		out := make([]string, 0, len(arr))
+		for _, e := range arr {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if tags := parseStringArrayArg(args["tags_all"]); len(tags) > 0 {
+		req.Filters = append(req.Filters, mbp.Filter{Field: "tags_all", Op: "all", Value: tags})
+	}
+	if tags := parseStringArrayArg(args["tags_any"]); len(tags) > 0 {
+		req.Filters = append(req.Filters, mbp.Filter{Field: "tags_any", Op: "any", Value: tags})
+	}
+	if tf, ok := args["tag_filter"].(map[string]any); ok {
+		prefix, _ := tf["prefix"].(string)
+		if prefix == "" {
+			sendError(w, id, -32602, "invalid 'tag_filter': 'prefix' is required")
+			return
+		}
+		op, bound := "", ""
+		for _, cmp := range []string{"lte", "gte", "lt", "gt", "eq"} {
+			if b, ok := tf[cmp].(string); ok {
+				op, bound = cmp, b
+				break
+			}
+		}
+		if op == "" {
+			sendError(w, id, -32602, "invalid 'tag_filter': one of lte/gte/lt/gt/eq (string) is required")
+			return
+		}
+		req.Filters = append(req.Filters, mbp.Filter{Field: "tag_prefix", Op: op, Value: [2]string{prefix, bound}})
+	}
+
 	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
 		sendError(w, id, -32602, errMsg)
 		return

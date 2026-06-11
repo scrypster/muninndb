@@ -1775,9 +1775,117 @@ func passesMetaFilter(eng *storage.Engram, filters []Filter) bool {
 					return false
 				}
 			}
+		case "tags_all":
+			// All listed tags must be present on the engram (AND).
+			if want := asStringSlice(f.Value); len(want) > 0 {
+				set := tagSet(eng.Tags)
+				for _, w := range want {
+					if _, ok := set[w]; !ok {
+						return false
+					}
+				}
+			}
+		case "tags_any":
+			// At least one listed tag must be present (OR).
+			if want := asStringSlice(f.Value); len(want) > 0 {
+				set := tagSet(eng.Tags)
+				matched := false
+				for _, w := range want {
+					if _, ok := set[w]; ok {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return false
+				}
+			}
+		case "tag_prefix":
+			// Value is [prefix, bound]; for each engram tag beginning with
+			// prefix, compare the remainder lexically against bound per Op
+			// (lte/gte/lt/gt/eq). Matches if ANY such tag satisfies the bound.
+			// String comparison suffices for ISO dates and other sortable
+			// key:value tag conventions.
+			if pb := asPair(f.Value); pb != nil {
+				prefix, bound := pb[0], pb[1]
+				matched := false
+				for _, tag := range eng.Tags {
+					if !strings.HasPrefix(tag, prefix) {
+						continue
+					}
+					v := tag[len(prefix):]
+					switch f.Op {
+					case "lte":
+						matched = v <= bound
+					case "gte":
+						matched = v >= bound
+					case "lt":
+						matched = v < bound
+					case "gt":
+						matched = v > bound
+					case "eq", "":
+						matched = v == bound
+					}
+					if matched {
+						break
+					}
+				}
+				if !matched {
+					return false
+				}
+			}
 		}
 	}
 	return true
+}
+
+// tagSet builds a lookup set from an engram's tags.
+func tagSet(tags []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		set[t] = struct{}{}
+	}
+	return set
+}
+
+// asStringSlice coerces a filter Value to []string, accepting both the
+// in-process []string and a msgpack-decoded []interface{} of strings.
+func asStringSlice(v interface{}) []string {
+	switch s := v.(type) {
+	case []string:
+		return s
+	case []interface{}:
+		out := make([]string, 0, len(s))
+		for _, e := range s {
+			if str, ok := e.(string); ok {
+				out = append(out, str)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// asPair coerces a tag_prefix Value to a [prefix, bound] pair, accepting the
+// in-process [2]string and a msgpack-decoded []interface{}/[]string of two.
+func asPair(v interface{}) *[2]string {
+	switch p := v.(type) {
+	case [2]string:
+		return &p
+	case []string:
+		if len(p) == 2 {
+			return &[2]string{p[0], p[1]}
+		}
+	case []interface{}:
+		if len(p) == 2 {
+			a, ok1 := p[0].(string)
+			b, ok2 := p[1].(string)
+			if ok1 && ok2 {
+				return &[2]string{a, b}
+			}
+		}
+	}
+	return nil
 }
 
 func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {

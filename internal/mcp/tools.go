@@ -182,6 +182,29 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "string",
 						"description": "ISO 8601 timestamp (e.g. 2026-01-20T00:00:00Z). Only return memories created before this time.",
 					},
+					"tags_all": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Only return memories carrying ALL of these tags (exact match, AND).",
+					},
+					"tags_any": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Only return memories carrying AT LEAST ONE of these tags (exact match, OR).",
+					},
+					"tag_filter": map[string]any{
+						"type":        "object",
+						"description": "Filter by a key:value tag convention via lexical comparison of the value after a prefix. Example: {\"prefix\":\"due:\",\"lte\":\"2026-06-17\"} matches memories tagged due:<date> where date <= 2026-06-17 (ISO dates sort lexically). A memory matches if any of its tags with that prefix satisfies the bound.",
+						"properties": map[string]any{
+							"prefix": map[string]any{"type": "string", "description": "Tag key prefix to match, e.g. \"due:\" or \"status:\"."},
+							"lte":    map[string]any{"type": "string", "description": "Value (after prefix) must be <= this."},
+							"gte":    map[string]any{"type": "string", "description": "Value must be >= this."},
+							"lt":     map[string]any{"type": "string", "description": "Value must be < this."},
+							"gt":     map[string]any{"type": "string", "description": "Value must be > this."},
+							"eq":     map[string]any{"type": "string", "description": "Value must equal this."},
+						},
+						"required": []string{"prefix"},
+					},
 					"embedding": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "number"},
