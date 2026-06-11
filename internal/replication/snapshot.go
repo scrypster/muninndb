@@ -280,8 +280,16 @@ func (r *SnapshotReceiver) WipeForResnapshot() error {
 	batchSize := 0
 
 	for valid := iter.First(); valid; valid = iter.Next() {
-		key := make([]byte, len(iter.Key()))
-		copy(key, iter.Key())
+		k := iter.Key()
+		// Preserve cluster meta (cluster_epoch, node_role) under the 0x19 0x03
+		// prefix — it is fencing state, not snapshot data. Wiping the epoch would
+		// make a re-snapshotting node (e.g. a deferring ex-primary) restart at
+		// epoch 0, breaking fencing (#531 PR3).
+		if len(k) >= 2 && k[0] == 0x19 && k[1] == 0x03 {
+			continue
+		}
+		key := make([]byte, len(k))
+		copy(key, k)
 		if err := batch.Delete(key, nil); err != nil {
 			batch.Close()
 			return fmt.Errorf("snapshot wipe: delete: %w", err)

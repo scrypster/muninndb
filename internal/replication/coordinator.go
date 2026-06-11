@@ -473,6 +473,35 @@ func (c *ClusterCoordinator) runAsCortex(ctx context.Context) error {
 		return c.supervise(ctx, modeLeading)
 	}
 
+	// A designated primary with seeds first probes for an existing leader BEFORE
+	// starting an election — a failover may have promoted another node while we
+	// were down. If a leader at epoch ≥ ours exists, follow it (no epoch bump, no
+	// assert) so we don't flap the cluster or lose the failover leader's writes
+	// (#531). The probe is reliable (synchronous request/response, immune to stale
+	// conns / claim timing). A fresh cluster (no seed reachable) skips this fast.
+	if c.cfg.Role == "primary" && len(c.cfg.Seeds) > 0 {
+		ldrID, ldrAddr, ldrEpoch, found, maxEpoch := c.probeForLeader(ctx)
+		if found && ldrEpoch >= currentEpoch {
+			slog.Info("cluster: existing cortex found at startup; deferring instead of retaking leadership",
+				"node", c.cfg.NodeID, "cortex", ldrID, "epoch", ldrEpoch)
+			c.election.HandleCortexClaim(mbp.CortexClaim{
+				CortexID: ldrID, CortexAddr: ldrAddr, Epoch: ldrEpoch, FencingToken: ldrEpoch,
+			})
+			return c.supervise(ctx, modeFollowing)
+		}
+		if maxEpoch > currentEpoch {
+			// The cluster moved on (an election is in flight) but no leader has
+			// settled. Elect normally — NEVER force-assert into someone else's
+			// term — and let the supervisor's waitQuorumTerm re-elect as needed.
+			slog.Info("cluster: peers ahead of our epoch but no leader yet; electing without force-assert",
+				"node", c.cfg.NodeID, "our_epoch", currentEpoch, "max_peer_epoch", maxEpoch)
+			if err := c.election.StartElection(ctx); err != nil {
+				return fmt.Errorf("cluster: election failed: %w", err)
+			}
+			return c.supervise(ctx, c.initialCortexMode())
+		}
+	}
+
 	// Always start an election on normal startup (epoch 0 = first boot,
 	// epoch > 0 = restart after clean shutdown or crash before handoff).
 	// The crash-mid-handoff recovery path above handles the only case where we
@@ -520,6 +549,58 @@ func (c *ClusterCoordinator) bootstrapPromoteIfDesignatedPrimary() {
 	// broadcaster). Without this, peers never see a claim from a designated
 	// primary and can't redirect joins to it (#531 PR1).
 	c.election.broadcastClaim(epoch)
+}
+
+// probeForLeader polls the seeds for the current leader using side-effect-free
+// probes (#531 PR3). It returns the leader's id/addr/epoch if one is found, plus
+// the highest epoch observed across all responses (so the caller can avoid
+// force-asserting into an in-flight election). Up to 3 passes (one per heartbeat);
+// returns early if a pass reaches no seed at all (a fresh cluster — assert fast).
+func (c *ClusterCoordinator) probeForLeader(ctx context.Context) (ldrID, ldrAddr string, ldrEpoch uint64, found bool, maxEpoch uint64) {
+	hb := c.heartbeatInterval()
+	maxEpoch = c.epochStore.Load()
+	for pass := 0; pass < 3; pass++ {
+		anyResponse := false
+		for _, seed := range c.cfg.Seeds {
+			if seed == c.advertiseAddr {
+				continue
+			}
+			pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			resp, err := c.joinClient.Probe(pctx, seed)
+			cancel()
+			if err != nil {
+				continue
+			}
+			anyResponse = true
+			if resp.Epoch > maxEpoch {
+				maxEpoch = resp.Epoch
+			}
+			if resp.Accepted && resp.CortexID != "" {
+				return resp.CortexID, seed, resp.Epoch, true, maxEpoch // responder is the leader
+			}
+			// Redirect: probe the named leader to confirm + get its authoritative epoch.
+			if resp.CortexID != "" && resp.CortexID != c.cfg.NodeID && resp.CortexAddr != "" {
+				rctx, rcancel := context.WithTimeout(ctx, 2*time.Second)
+				rresp, rerr := c.joinClient.Probe(rctx, resp.CortexAddr)
+				rcancel()
+				if rerr == nil && rresp.Accepted && rresp.CortexID != "" {
+					if rresp.Epoch > maxEpoch {
+						maxEpoch = rresp.Epoch
+					}
+					return rresp.CortexID, resp.CortexAddr, rresp.Epoch, true, maxEpoch
+				}
+			}
+		}
+		if !anyResponse {
+			return "", "", 0, false, maxEpoch // no seed reachable → fresh cluster
+		}
+		select {
+		case <-ctx.Done():
+			return "", "", 0, false, maxEpoch
+		case <-time.After(hb):
+		}
+	}
+	return "", "", 0, false, maxEpoch
 }
 
 // joinWithRetry attempts to join the Cortex, cycling through all seeds on each
@@ -1211,6 +1292,34 @@ func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (
 	var req mbp.JoinRequest
 	if err := msgpack.Unmarshal(payload, &req); err != nil {
 		return "", false, fmt.Errorf("unmarshal JoinRequest: %w", err)
+	}
+
+	// Side-effect-free leader-discovery probe (#531 PR3): answer who the leader is
+	// on the raw conn, WITHOUT registering the conn, adding a member, or streaming
+	// a snapshot. A returning designated primary uses this to find the current
+	// leader before deciding whether to assert or defer.
+	if req.Probe {
+		isLeader := c.IsLeader()
+		ldrID, ldrAddr := c.cfg.NodeID, c.advertiseAddr
+		if !isLeader {
+			ldrID = c.election.CurrentLeader()
+			ldrAddr = ""
+			if ldrID != "" && ldrID != c.cfg.NodeID {
+				if p, ok := c.mgr.GetPeer(ldrID); ok {
+					ldrAddr = p.Addr()
+				}
+			}
+		}
+		resp := mbp.JoinResponse{Accepted: isLeader, CortexID: ldrID, CortexAddr: ldrAddr, Epoch: c.epochStore.Load()}
+		if respPayload, err := msgpack.Marshal(resp); err == nil {
+			_ = mbp.WriteFrame(conn, &mbp.Frame{
+				Version:       0x01,
+				Type:          mbp.TypeJoinResponse,
+				PayloadLength: uint32(len(respPayload)),
+				Payload:       respPayload,
+			})
+		}
+		return req.NodeID, false, nil
 	}
 
 	// Leadership gate BEFORE registering the conn (#533): only the leader accepts
