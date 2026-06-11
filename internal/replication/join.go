@@ -19,6 +19,7 @@ import (
 // It is safe for concurrent access.
 type JoinHandler struct {
 	localNodeID   string
+	localAddr     string // this Cortex's advertised address (for JoinResponse.CortexAddr)
 	clusterSecret string
 	epochStore    *EpochStore
 	repLog        *ReplicationLog
@@ -170,9 +171,10 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 	// have been fully written to the wire.
 
 	resp := mbp.JoinResponse{
-		Accepted: true,
-		CortexID: h.localNodeID,
-		Epoch:    currentEpoch,
+		Accepted:   true,
+		CortexID:   h.localNodeID,
+		CortexAddr: h.localAddr,
+		Epoch:      currentEpoch,
 	}
 
 	// Phase 2: if this handler has a DB, every joining Lobe gets a snapshot.

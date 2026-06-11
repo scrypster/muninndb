@@ -6,12 +6,18 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // ErrNotConnected is returned when Send or Receive is called before Connect.
 var ErrNotConnected = errors.New("peer not connected")
+
+// sendWriteTimeout bounds a single frame write so one peer with a full TCP
+// buffer cannot stall the shared MSP tick goroutine (which broadcasts heartbeats
+// to every peer sequentially) and cascade false SDOWNs.
+const sendWriteTimeout = 5 * time.Second
 
 // PeerConn is a single persistent TCP connection to one remote peer.
 // It is safe for concurrent Send calls.
@@ -96,7 +102,11 @@ func (p *PeerConn) Send(frameType uint8, payload []byte) error {
 		PayloadLength: uint32(len(payload)),
 		Payload:       payload,
 	}
-	return mbp.WriteFrame(p.conn, f)
+	// Bound the write so a wedged peer can't block the shared heartbeat tick.
+	_ = p.conn.SetWriteDeadline(time.Now().Add(sendWriteTimeout))
+	err := mbp.WriteFrame(p.conn, f)
+	_ = p.conn.SetWriteDeadline(time.Time{}) // clear for subsequent reads/writes
+	return err
 }
 
 // Receive reads one MBP frame from the connection.

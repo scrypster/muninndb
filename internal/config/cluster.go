@@ -15,9 +15,14 @@ import (
 
 // ClusterConfig holds configuration for multi-node cluster mode.
 type ClusterConfig struct {
-	Enabled       bool     `yaml:"enabled" json:"enabled"`
-	NodeID        string   `yaml:"node_id" json:"node_id"`
-	BindAddr      string   `yaml:"bind_addr" json:"bind_addr"`
+	Enabled  bool   `yaml:"enabled" json:"enabled"`
+	NodeID   string `yaml:"node_id" json:"node_id"`
+	BindAddr string `yaml:"bind_addr" json:"bind_addr"`
+	// AdvertiseAddr is the host:port other nodes use to reach this one. Defaults
+	// to BindAddr; set it explicitly when BindAddr is a wildcard (e.g.
+	// 0.0.0.0:8479 in containers) so peer-identity reconciliation and dials use a
+	// routable address rather than the unmatchable wildcard.
+	AdvertiseAddr string   `yaml:"advertise_addr" json:"advertise_addr"`
 	Seeds         []string `yaml:"seeds" json:"seeds"`
 	ClusterSecret string   `yaml:"cluster_secret" json:"cluster_secret"`
 	// "auto" | "primary" | "replica" | "sentinel" | "observer"
@@ -106,6 +111,12 @@ func LoadClusterConfig(dataDir string) (ClusterConfig, error) {
 	applyEnvOverrides(&cfg)
 	autoNodeID(&cfg, dataDir)
 
+	// AdvertiseAddr defaults to BindAddr — most deployments bind a routable
+	// address and need no separate advertise address.
+	if cfg.AdvertiseAddr == "" {
+		cfg.AdvertiseAddr = cfg.BindAddr
+	}
+
 	// Default AutoGenDir to dataDir/cluster-tls if TLS is enabled but no dir specified.
 	if cfg.TLS.Enabled && cfg.TLS.AutoGenDir == "" {
 		cfg.TLS.AutoGenDir = filepath.Join(dataDir, "cluster-tls")
@@ -187,6 +198,9 @@ func applyEnvOverrides(cfg *ClusterConfig) {
 	}
 	if v := os.Getenv("MUNINN_CLUSTER_BIND_ADDR"); v != "" {
 		cfg.BindAddr = v
+	}
+	if v := os.Getenv("MUNINN_CLUSTER_ADVERTISE_ADDR"); v != "" {
+		cfg.AdvertiseAddr = v
 	}
 	if v := os.Getenv("MUNINN_CLUSTER_SEEDS"); v != "" {
 		var seeds []string

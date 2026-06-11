@@ -61,6 +61,23 @@ func (m *ConnManager) AddPeer(nodeID, addr string) {
 	m.peers[nodeID] = NewPeerConn(nodeID, addr)
 }
 
+// UpdatePeerAddr updates a peer's advertised address WITHOUT disturbing its live
+// connection (adds a disconnected peer if none exists). Used for address-change
+// gossip — the previous path (AddPeer) closed the live conn and tore down the
+// replication stream on any benign addr readvertisement (#522 Step 0).
+func (m *ConnManager) UpdatePeerAddr(nodeID, addr string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if existing, ok := m.peers[nodeID]; ok {
+		existing.mu.Lock()
+		existing.addr = addr
+		existing.mu.Unlock()
+		return
+	}
+	m.peers[nodeID] = NewPeerConn(nodeID, addr)
+}
+
 // RegisterConn registers an already-established inbound connection as a peer
 // and returns the new PeerConn. Unlike AddPeer, the PeerConn wraps the live
 // conn so Send works immediately without a separate Connect call. If a peer

@@ -143,11 +143,20 @@ func NewClusterCoordinator(
 	applier *Applier,
 	epochStore *EpochStore,
 ) *ClusterCoordinator {
+	// The address other nodes use to reach this one. Defaults to BindAddr (the
+	// config loader applies the same default; this fallback covers callers that
+	// build ClusterConfig directly, e.g. tests).
+	advertiseAddr := cfg.AdvertiseAddr
+	if advertiseAddr == "" {
+		advertiseAddr = cfg.BindAddr
+	}
+
 	mgr := NewConnManager(cfg.NodeID)
-	msp := NewMSP(cfg.NodeID, cfg.BindAddr, mgr)
+	msp := NewMSP(cfg.NodeID, advertiseAddr, mgr)
 	election := NewElection(cfg.NodeID, epochStore, mgr)
 	joinHandler := NewJoinHandler(cfg.NodeID, cfg.ClusterSecret, epochStore, repLog, mgr)
-	joinClient := NewJoinClient(cfg.NodeID, cfg.BindAddr, cfg.ClusterSecret, epochStore, applier, mgr)
+	joinHandler.localAddr = advertiseAddr
+	joinClient := NewJoinClient(cfg.NodeID, advertiseAddr, cfg.ClusterSecret, epochStore, applier, mgr)
 
 	reconDelay := time.Duration(cfg.ReconDelayMs) * time.Millisecond
 	if reconDelay <= 0 {
@@ -257,7 +266,10 @@ func NewClusterCoordinator(
 	msp.OnAddrChanged = func(nodeID, newAddr string) {
 		slog.Info("cluster: peer address changed, updating connection manager",
 			"node", nodeID, "new_addr", newAddr)
-		c.mgr.AddPeer(nodeID, newAddr)
+		// Metadata-only: must NOT close the live connection (a benign addr
+		// readvertisement would otherwise tear down the replication stream). A
+		// genuinely dead conn is detected via MSP SDOWN / read errors (#522).
+		c.mgr.UpdatePeerAddr(nodeID, newAddr)
 	}
 
 	// Wire join handler callbacks
