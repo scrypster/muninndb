@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -573,25 +574,71 @@ func (c *ClusterCoordinator) streamFromCortex(ctx context.Context, conn net.Conn
 // sendReplAck reports this node's last-applied seq to the Cortex over the
 // replication connection. Best-effort: a write error is non-fatal — the next
 // entry's ack carries the latest seq, or the stream reconnects.
-// reconcileJoinedPeer replaces the seed-<addr> placeholder that matches addr
-// with the real joined node-id in MSP and the voter set, conserving the voter
-// count (rename, never add) (#522 Step 1). Without this the Cortex's MSP and
-// votes are keyed by seed-ids while heartbeats/votes arrive under real ids and
-// get dropped, and the never-heartbeated seed placeholder drives a false SDOWN.
-// Idempotent: a rejoin simply re-asserts the same real id.
+// reconcileJoinedPeer replaces a seed-<addr> placeholder with the real joined
+// node-id in MSP and the voter set (#522 Step 1). Without this the Cortex's MSP
+// and votes are keyed by seed-ids while heartbeats/votes arrive under real ids
+// and get dropped, and the never-heartbeated seed placeholder drives a false
+// SDOWN.
+//
+// It CONSERVES the voter count by construction so quorum can never inflate, even
+// when the dialed/seed address string differs from the advertised address (DNS
+// seed vs pod IP, 0.0.0.0 binds, etc.): on a genuinely new join it retires
+// exactly one seed placeholder — the address-matching one if present, otherwise
+// an arbitrary remaining seed (logged loudly). A rejoin (node already known)
+// retires nothing, so it cannot deflate the set or steal another node's seed
+// slot. The real identity is added BEFORE the seed is retired so a concurrent
+// quorum read can only momentarily over-count (safe), never under-count.
 func (c *ClusterCoordinator) reconcileJoinedPeer(nodeID, addr string, role NodeRole) {
 	if nodeID == "" {
 		return
 	}
-	// Drop any placeholder for this address registered under a different id.
+	isVoter := c.cfg.Role != "observer"
+
+	alreadyKnown := false
 	for _, p := range c.msp.AllPeers() {
-		if p.NodeID != nodeID && p.Addr == addr {
-			c.msp.RemovePeer(p.NodeID)
-			c.election.UnregisterVoter(p.NodeID)
+		if p.NodeID == nodeID {
+			alreadyKnown = true
+			break
 		}
 	}
+
 	c.msp.AddPeer(nodeID, addr, role)
-	c.election.RegisterVoter(nodeID)
+	if isVoter {
+		c.election.RegisterVoter(nodeID)
+	}
+	if alreadyKnown {
+		return // rejoin — already counted; retire nothing.
+	}
+
+	// New join: retire exactly one seed placeholder to conserve the voter count.
+	var matched, anySeed string
+	for _, p := range c.msp.AllPeers() {
+		if p.NodeID == nodeID || !strings.HasPrefix(p.NodeID, "seed-") {
+			continue
+		}
+		if p.Addr == addr {
+			matched = p.NodeID
+			break
+		}
+		if anySeed == "" {
+			anySeed = p.NodeID
+		}
+	}
+	retire := matched
+	if retire == "" {
+		retire = anySeed
+		if retire != "" {
+			slog.Warn("cluster: joined peer address did not match any seed; retiring a seed placeholder to conserve quorum (set advertise_addr to match the seed addresses)",
+				"node", nodeID, "addr", addr, "retired_seed", retire)
+		}
+	}
+	if retire != "" {
+		c.msp.RemovePeer(retire)
+		c.mgr.RemovePeer(retire)
+		if isVoter {
+			c.election.UnregisterVoter(retire)
+		}
+	}
 }
 
 func (c *ClusterCoordinator) sendReplAck(cortexID string, conn net.Conn) {
