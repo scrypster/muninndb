@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"math"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
@@ -9,27 +10,35 @@ import (
 
 const contentPreviewLen = 500
 
+// roundScore widens a float32 score to float64 while stripping float32 quantization
+// noise (e.g. float64(float32(1.15)) = 1.149999976...). Rounding to 6 decimals keeps
+// meaningful precision while serializing clean values. See #502.
+func roundScore(f float32) float64 {
+	return math.Round(float64(f)*1e6) / 1e6
+}
+
 // activationToMemory converts an mbp.ActivationItem to an MCP Memory for recall responses.
-// Prefers Summary when available; falls back to a content preview (500 chars) so that
-// recall returns discovery-oriented data rather than a raw content slice.
+// Summary-first by design (#112): Summary carries the enrichment summary, while Content
+// carries the real engram content (truncated to a preview). The summary is never copied
+// into Content, so the same string is not serialized twice (#502).
 func activationToMemory(item *mbp.ActivationItem) Memory {
-	// Use the enrichment-generated summary when present; otherwise preview content.
-	displayContent := item.Summary
-	if displayContent == "" {
-		displayContent = item.Content
-		if len(displayContent) > contentPreviewLen {
-			displayContent = displayContent[:contentPreviewLen] + "..."
-		}
+	// Content is the real engram content, truncated to a preview length. The summary
+	// stays in its own field; recall never overwrites Content with Summary.
+	previewContent := item.Content
+	if len(previewContent) > contentPreviewLen {
+		previewContent = previewContent[:contentPreviewLen] + "..."
 	}
 	return Memory{
 		ID:          item.ID,
 		Concept:     item.Concept,
-		Content:     displayContent,
+		Content:     previewContent,
 		Summary:     item.Summary,
-		Score:       float64(item.Score),
-		VectorScore: float64(item.ScoreComponents.SemanticSimilarity),
+		Score:       roundScore(item.Score),
+		VectorScore: roundScore(item.ScoreComponents.SemanticSimilarity),
 		Confidence:  item.Confidence,
 		Why:         item.Why,
+		// Map the lifecycle state label the same way the read path does (#502).
+		State:       storage.LifecycleState(item.State).String(),
 		CreatedAt:   time.Unix(0, item.CreatedAt).UTC(),
 		LastAccess:  time.Unix(0, item.LastAccess).UTC(),
 		AccessCount: item.AccessCount,

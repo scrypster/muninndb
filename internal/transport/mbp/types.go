@@ -224,6 +224,8 @@ type ActivationItem struct {
 	AccessCount     uint32          `msgpack:"access_count,omitempty"      json:"access_count,omitempty"`
 	Relevance       float32         `msgpack:"relevance,omitempty"         json:"relevance,omitempty"`
 	SourceType      string          `msgpack:"source_type,omitempty" json:"source_type,omitempty"`
+	// State is the LifecycleState uint8, so recall can label engram lifecycle state.
+	State uint8 `msgpack:"state,omitempty" json:"state,omitempty"`
 	// Trust is the TrustLevel uint8. omitempty intentional — see ReadResponse.Trust comment.
 	Trust uint8 `msgpack:"trust,omitempty" json:"trust,omitempty"`
 }

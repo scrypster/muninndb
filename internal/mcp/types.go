@@ -61,14 +61,14 @@ type WriteResult struct {
 type Memory struct {
 	ID          string    `json:"id"`
 	Concept     string    `json:"concept"`
-	Content     string    `json:"content"` // recall: summary or 500-char preview; read: full content
+	Content     string    `json:"content"` // recall: real content (truncated); read: full content
 	Summary     string    `json:"summary,omitempty"`
 	Score       float64   `json:"score,omitempty"`
 	VectorScore float64   `json:"vector_score,omitempty"`
 	Confidence  float32   `json:"confidence"`
 	Why         string    `json:"why,omitempty"`
 	Tags        []string  `json:"tags,omitempty"`
-	State       string    `json:"state"`
+	State       string    `json:"state,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	LastAccess  time.Time `json:"last_access"`
 	AccessCount uint32    `json:"access_count,omitempty"`

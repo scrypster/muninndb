@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -281,22 +282,91 @@ func TestReadResponseToMemory_MapsSummaryField(t *testing.T) {
 	}
 }
 
-// TestActivationToMemory_PrefersSummary verifies that muninn_recall uses the
-// enrichment summary when present instead of the truncated content preview.
+// TestActivationToMemory_PrefersSummary verifies that muninn_recall keeps the
+// enrichment summary in Summary while Content carries the real engram content
+// (not a duplicate of the summary). Regression test for #502 defect (a).
 func TestActivationToMemory_PrefersSummary(t *testing.T) {
+	const realContent = "this is the full long content that goes well beyond any preview limit"
 	item := &mbp.ActivationItem{
 		ID:      "recall-with-summary",
 		Concept: "concept",
-		Content: "this is the full long content that goes well beyond any preview limit",
+		Content: realContent,
 		Summary: "short enriched summary",
 	}
 	m := activationToMemory(item)
 	if m.Summary != "short enriched summary" {
 		t.Errorf("Summary = %q, want %q", m.Summary, "short enriched summary")
 	}
-	// Content field should carry the summary as the display value when present.
-	if m.Content != "short enriched summary" {
-		t.Errorf("Content (display) = %q, want summary %q", m.Content, "short enriched summary")
+	// Content must be the real engram content, never a duplicate of the summary.
+	if m.Content == m.Summary {
+		t.Errorf("Content duplicates Summary (#502 (a)): both = %q", m.Content)
+	}
+	if m.Content != realContent {
+		t.Errorf("Content = %q, want real content %q", m.Content, realContent)
+	}
+}
+
+// TestActivationToMemory_StatePopulated verifies that the lifecycle state is
+// carried through recall and labelled like the read path. Regression for #502 (b).
+func TestActivationToMemory_StatePopulated(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:      "recall-state",
+		Content: "content",
+		State:   uint8(storage.StateActive),
+	}
+	m := activationToMemory(item)
+	if m.State != "active" {
+		t.Errorf("State = %q, want %q", m.State, "active")
+	}
+}
+
+// TestActivationToMemory_StateMapsNonDefault verifies that a non-default lifecycle
+// state is carried through recall and labelled. Regression for #502 (b): recall
+// used to always emit an empty state because mbp.ActivationItem had no State field.
+func TestActivationToMemory_StateMapsNonDefault(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:      "recall-completed",
+		Content: "content",
+		State:   uint8(storage.StateCompleted),
+	}
+	m := activationToMemory(item)
+	if m.State != "completed" {
+		t.Errorf("State = %q, want %q", m.State, "completed")
+	}
+}
+
+// TestActivationToMemory_StateOmittedWhenEmpty verifies that Memory.State carries
+// the omitempty tag so a genuinely empty state label is not serialized as
+// "state":"". Regression for #502 (b).
+func TestActivationToMemory_StateOmittedWhenEmpty(t *testing.T) {
+	// A Memory with an empty State (e.g. a non-recall construction) must omit it.
+	b, err := json.Marshal(Memory{ID: "x"})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if v, present := got["state"]; present {
+		t.Errorf("empty state should be omitted, got state=%v", v)
+	}
+}
+
+// TestActivationToMemory_ScoreNoFloat32Noise verifies that widening the float32
+// score to float64 does not reproduce quantization noise. Regression for #502 (c).
+func TestActivationToMemory_ScoreNoFloat32Noise(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:    "noisy-score",
+		Score: 1.15,
+	}
+	item.ScoreComponents.SemanticSimilarity = 0.85
+	m := activationToMemory(item)
+	if m.Score != 1.15 {
+		t.Errorf("Score = %v, want clean 1.15 (no float32 noise)", m.Score)
+	}
+	if m.VectorScore != 0.85 {
+		t.Errorf("VectorScore = %v, want clean 0.85 (no float32 noise)", m.VectorScore)
 	}
 }
 

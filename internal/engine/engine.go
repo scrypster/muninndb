@@ -1034,6 +1034,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	// Store caller-provided entity-to-entity relationships in the 0x21 relationship index.
+	wroteEntityRelationships := false
 	if len(req.EntityRelationships) > 0 {
 		wsER, _ := e.store.FindVaultPrefix(id)
 		for _, er := range req.EntityRelationships {
@@ -1052,7 +1053,34 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 				Source:     "inline",
 			}); err != nil {
 				slog.Warn("engine: failed to store entity relationship", "vault", req.Vault, "engram", id.String(), "from", er.FromEntity, "to", er.ToEntity, "rel_type", er.RelType, "err", err)
+				continue
 			}
+			wroteEntityRelationships = true
+		}
+	}
+
+	// Mark per-stage digest flags for inline (caller-supplied) enrichment so
+	// GetEnrichmentCandidates does not report these memories as un-enriched (#500).
+	// Mirror the existing DigestEntities-on-inline pattern: only set a stage's flag
+	// when that stage's data is actually present from the caller.
+	//   - summary supplied        -> DigestSummarized
+	//   - entity relationships     -> DigestRelationships
+	//   - type/classification      -> DigestClassified (req.TypeLabel is set whenever
+	//                                 the caller supplies a type or type_label)
+	var inlineStageFlags uint8
+	if callerSummary != "" {
+		inlineStageFlags |= plugin.DigestSummarized
+	}
+	if wroteEntityRelationships {
+		inlineStageFlags |= plugin.DigestRelationships
+	}
+	if req.TypeLabel != "" {
+		inlineStageFlags |= plugin.DigestClassified
+	}
+	if inlineStageFlags != 0 {
+		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
+		if flagErr := e.store.SetDigestFlag(ctx, id, existing|inlineStageFlags); flagErr != nil {
+			slog.Warn("engine: failed to set inline enrichment stage flags", "id", id.String(), "flags", inlineStageFlags, "error", flagErr)
 		}
 	}
 
@@ -1484,6 +1512,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 
 		// Store caller-provided entity-to-entity relationships in the 0x21 relationship index.
+		wroteEntityRelationships := false
 		if len(p.callerEntityRelationships) > 0 {
 			wsER, ok := e.store.FindVaultPrefix(id)
 			if !ok {
@@ -1505,8 +1534,31 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 						Source:     "inline",
 					}); err != nil {
 						slog.Warn("engine: batch: failed to store entity relationship", "vault", p.vaultName, "engram", id.String(), "from", er.FromEntity, "to", er.ToEntity, "rel_type", er.RelType, "err", err)
+						continue
 					}
+					wroteEntityRelationships = true
 				}
+			}
+		}
+
+		// Mark per-stage digest flags for inline (caller-supplied) enrichment so
+		// GetEnrichmentCandidates does not report these memories as un-enriched (#500).
+		// Mirror the single-write path: only set a stage's flag when that stage's data
+		// is actually present from the caller.
+		var inlineStageFlags uint8
+		if p.callerSummary != "" {
+			inlineStageFlags |= plugin.DigestSummarized
+		}
+		if wroteEntityRelationships {
+			inlineStageFlags |= plugin.DigestRelationships
+		}
+		if p.eng.TypeLabel != "" {
+			inlineStageFlags |= plugin.DigestClassified
+		}
+		if inlineStageFlags != 0 {
+			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
+			if flagErr := e.store.SetDigestFlag(ctx, id, existing|inlineStageFlags); flagErr != nil {
+				slog.Warn("engine: batch: failed to set inline enrichment stage flags", "id", id.String(), "flags", inlineStageFlags, "error", flagErr)
 			}
 		}
 
@@ -1968,6 +2020,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			LastAccess:  scored.Engram.LastAccess.UnixNano(),
 			AccessCount: scored.Engram.AccessCount,
 			Relevance:   scored.Engram.Relevance,
+			State:       uint8(scored.Engram.State),
 			Trust:       uint8(scored.Engram.Trust),
 		}
 

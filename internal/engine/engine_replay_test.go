@@ -295,6 +295,121 @@ func TestGetEnrichmentCandidates_ReturnsOnlyMissingStages(t *testing.T) {
 	}
 }
 
+// TestGetEnrichmentCandidates_InlineEnrichedNotCandidate verifies that an engram
+// written with caller-supplied summary, entity relationships, and type/classification
+// (inline enrichment) has its per-stage digest flags set at write time, so it is NOT
+// reported as an enrichment candidate. Regression test for #500.
+func TestGetEnrichmentCandidates_InlineEnrichedNotCandidate(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const vault = "default"
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:      vault,
+		Content:    "the full content of this memory",
+		Concept:    "inline enriched concept",
+		MemoryType: uint8(storage.TypeFact),
+		TypeLabel:  "fact",
+		Summary:    "one-line summary",
+		Entities: []mbp.InlineEntity{
+			{Name: "Example Entity", Type: "concept"},
+			{Name: "Other Entity", Type: "concept"},
+		},
+		EntityRelationships: []mbp.InlineEntityRelationship{
+			{FromEntity: "Example Entity", ToEntity: "Other Entity", RelType: "relates_to", Weight: 0.9},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Write(inline): %v", err)
+	}
+	id, err := storage.ParseULID(resp.ID)
+	if err != nil {
+		t.Fatalf("ParseULID: %v", err)
+	}
+
+	flags, err := eng.store.GetDigestFlags(ctx, plugin.ULID(id))
+	if err != nil {
+		t.Fatalf("GetDigestFlags: %v", err)
+	}
+	for _, f := range []struct {
+		name string
+		bit  uint8
+	}{
+		{"DigestEntities", plugin.DigestEntities},
+		{"DigestRelationships", plugin.DigestRelationships},
+		{"DigestClassified", plugin.DigestClassified},
+		{"DigestSummarized", plugin.DigestSummarized},
+	} {
+		if flags&f.bit == 0 {
+			t.Errorf("flag %s (0x%02x) not set after inline write; flags=0x%02x", f.name, f.bit, flags)
+		}
+	}
+
+	candidates, _, _, err := eng.GetEnrichmentCandidates(ctx, vault, nil, storage.ULID{}, 10)
+	if err != nil {
+		t.Fatalf("GetEnrichmentCandidates: %v", err)
+	}
+	for _, c := range candidates {
+		if c.ID == id {
+			t.Fatalf("fully inline-enriched engram reported as candidate; missing_stages=%v, flags=0x%02x",
+				c.MissingStages, c.DigestFlags)
+		}
+	}
+}
+
+// TestRememberBatch_InlineEnrichedSetsFlags verifies the batch write path sets
+// per-stage digest flags for caller-supplied enrichment data. Regression for #500.
+func TestRememberBatch_InlineEnrichedSetsFlags(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const vault = "default"
+
+	resps, errs := eng.WriteBatch(ctx, []*mbp.WriteRequest{{
+		Vault:      vault,
+		Content:    "batch full content",
+		Concept:    "batch inline enriched",
+		MemoryType: uint8(storage.TypeFact),
+		TypeLabel:  "fact",
+		Summary:    "batch summary",
+		Entities: []mbp.InlineEntity{
+			{Name: "Batch Entity A", Type: "concept"},
+			{Name: "Batch Entity B", Type: "concept"},
+		},
+		EntityRelationships: []mbp.InlineEntityRelationship{
+			{FromEntity: "Batch Entity A", ToEntity: "Batch Entity B", RelType: "relates_to", Weight: 0.9},
+		},
+	}})
+	if errs[0] != nil {
+		t.Fatalf("WriteBatch: %v", errs[0])
+	}
+	id, err := storage.ParseULID(resps[0].ID)
+	if err != nil {
+		t.Fatalf("ParseULID: %v", err)
+	}
+
+	flags, err := eng.store.GetDigestFlags(ctx, plugin.ULID(id))
+	if err != nil {
+		t.Fatalf("GetDigestFlags: %v", err)
+	}
+	for _, f := range []struct {
+		name string
+		bit  uint8
+	}{
+		{"DigestEntities", plugin.DigestEntities},
+		{"DigestRelationships", plugin.DigestRelationships},
+		{"DigestClassified", plugin.DigestClassified},
+		{"DigestSummarized", plugin.DigestSummarized},
+	} {
+		if flags&f.bit == 0 {
+			t.Errorf("batch: flag %s (0x%02x) not set; flags=0x%02x", f.name, f.bit, flags)
+		}
+	}
+}
+
 func TestGetEnrichmentCandidates_CursorPaginates(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
