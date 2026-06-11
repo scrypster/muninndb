@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -172,5 +173,66 @@ func TestRegistrySetHealthy(t *testing.T) {
 	r.SetHealthy("test-embed", true)
 	if !r.HasEmbed() {
 		t.Error("HasEmbed() should return true when marked healthy")
+	}
+}
+
+func TestRegistryRegisterFailedSurfacesError(t *testing.T) {
+	r := NewRegistry()
+
+	// An enrich plugin failed to initialize (e.g. invalid/unavailable model).
+	r.RegisterFailed("enrich-google", TierEnrich, fmt.Errorf("google returned status 404: model no longer available"))
+
+	list := r.List()
+	var found *PluginStatus
+	for i := range list {
+		if list[i].Name == "enrich-google" {
+			found = &list[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("RegisterFailed plugin should appear in List() so the UI can show the failure instead of 'Not configured'")
+	}
+	if found.Healthy {
+		t.Error("failed plugin should be reported unhealthy")
+	}
+	if found.Tier != TierEnrich {
+		t.Errorf("expected tier %d, got %d", TierEnrich, found.Tier)
+	}
+	if found.Error == "" {
+		t.Error("failed plugin must carry the init error message, not an empty string")
+	}
+	// HasEnrich must remain false — the plugin is not usable.
+	if r.HasEnrich() {
+		t.Error("HasEnrich() should remain false for a failed-init plugin")
+	}
+}
+
+func TestRegistryRegisterSupersedesFailure(t *testing.T) {
+	r := NewRegistry()
+	r.RegisterFailed("enrich-google", TierEnrich, fmt.Errorf("transient init error"))
+
+	enrich := &mockEnrichPlugin{
+		mockPlugin: mockPlugin{name: "enrich-google", tier: TierEnrich},
+	}
+	if err := r.Register(enrich); err != nil {
+		t.Fatalf("register after failure should succeed: %v", err)
+	}
+
+	list := r.List()
+	count := 0
+	for _, p := range list {
+		if p.Name == "enrich-google" {
+			count++
+			if !p.Healthy {
+				t.Error("after successful register the plugin should be healthy")
+			}
+			if p.Error != "" {
+				t.Error("successful register should clear the recorded init error")
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly one entry for enrich-google, got %d", count)
 	}
 }

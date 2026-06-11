@@ -1500,18 +1500,32 @@ func TestRenderBar_OverflowPct(t *testing.T) {
 func TestBuildEnricher_NoConfig(t *testing.T) {
 	t.Setenv("MUNINN_ENRICH_URL", "")
 	cfg := plugincfg.PluginConfig{}
-	result := buildEnricher(context.Background(), cfg)
+	result, failure := buildEnricher(context.Background(), cfg)
 	if result != nil {
 		t.Error("expected nil when no enrich URL is set")
+	}
+	if failure != nil {
+		t.Error("expected no init failure when no enrich URL is set")
 	}
 }
 
 func TestBuildEnricher_InvalidURL(t *testing.T) {
 	t.Setenv("MUNINN_ENRICH_URL", "invalid://not-a-real-provider")
 	cfg := plugincfg.PluginConfig{}
-	result := buildEnricher(context.Background(), cfg)
+	result, failure := buildEnricher(context.Background(), cfg)
 	if result != nil {
 		t.Error("expected nil for invalid URL scheme")
+	}
+	// Issue #453: a configured-but-failed enrich provider must surface the
+	// init error so the UI can show it instead of "Not configured".
+	if failure == nil {
+		t.Fatal("expected an init failure to be surfaced for an invalid configured URL")
+	}
+	if failure.err == nil {
+		t.Error("init failure must carry the underlying error")
+	}
+	if failure.name == "" {
+		t.Error("init failure must carry a plugin name so it can be recorded in the registry")
 	}
 }
 
@@ -1520,9 +1534,12 @@ func TestBuildEnricher_FromSavedConfig(t *testing.T) {
 	cfg := plugincfg.PluginConfig{
 		EnrichURL: "invalid://saved-but-bad",
 	}
-	result := buildEnricher(context.Background(), cfg)
+	result, failure := buildEnricher(context.Background(), cfg)
 	if result != nil {
 		t.Error("expected nil for invalid saved URL")
+	}
+	if failure == nil {
+		t.Fatal("expected an init failure to be surfaced for an invalid saved URL")
 	}
 }
 
@@ -1530,9 +1547,13 @@ func TestBuildEnricher_OllamaURL(t *testing.T) {
 	t.Setenv("MUNINN_ENRICH_URL", "ollama://localhost:1/llama3.2")
 	t.Setenv("MUNINN_ENRICH_API_KEY", "")
 	t.Setenv("MUNINN_ANTHROPIC_KEY", "")
-	result := buildEnricher(context.Background(), plugincfg.PluginConfig{})
+	result, failure := buildEnricher(context.Background(), plugincfg.PluginConfig{})
 	if result != nil {
 		t.Log("ollama enricher init failed as expected (no server)")
+	}
+	// Connectivity to localhost:1 should fail, surfacing a failure with a name.
+	if failure != nil && failure.name == "" {
+		t.Error("init failure must carry a plugin name")
 	}
 }
 
@@ -1540,16 +1561,16 @@ func TestBuildEnricher_OpenAIURL(t *testing.T) {
 	t.Setenv("MUNINN_ENRICH_URL", "openai://gpt-4o-mini")
 	t.Setenv("MUNINN_ENRICH_API_KEY", "fake-key")
 	t.Setenv("MUNINN_ANTHROPIC_KEY", "")
-	result := buildEnricher(context.Background(), plugincfg.PluginConfig{})
-	_ = result
+	result, failure := buildEnricher(context.Background(), plugincfg.PluginConfig{})
+	_, _ = result, failure
 }
 
 func TestBuildEnricher_AnthropicURL(t *testing.T) {
 	t.Setenv("MUNINN_ENRICH_URL", "anthropic://claude-haiku-4-5-20251001")
 	t.Setenv("MUNINN_ENRICH_API_KEY", "")
 	t.Setenv("MUNINN_ANTHROPIC_KEY", "fake-anthropic-key")
-	result := buildEnricher(context.Background(), plugincfg.PluginConfig{})
-	_ = result
+	result, failure := buildEnricher(context.Background(), plugincfg.PluginConfig{})
+	_, _ = result, failure
 }
 
 func TestBuildEnricher_SavedConfigFallback(t *testing.T) {
@@ -1560,8 +1581,8 @@ func TestBuildEnricher_SavedConfigFallback(t *testing.T) {
 		EnrichURL:    "ollama://localhost:1/llama3.2",
 		EnrichAPIKey: "",
 	}
-	result := buildEnricher(context.Background(), cfg)
-	_ = result
+	result, failure := buildEnricher(context.Background(), cfg)
+	_, _ = result, failure
 }
 
 func TestBuildEnricher_SavedConfigAPIKey(t *testing.T) {
@@ -1572,8 +1593,8 @@ func TestBuildEnricher_SavedConfigAPIKey(t *testing.T) {
 		EnrichURL:    "openai://gpt-4o-mini",
 		EnrichAPIKey: "saved-key",
 	}
-	result := buildEnricher(context.Background(), cfg)
-	_ = result
+	result, failure := buildEnricher(context.Background(), cfg)
+	_, _ = result, failure
 }
 
 // ---------------------------------------------------------------------------

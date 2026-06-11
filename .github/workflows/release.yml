@@ -120,14 +120,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: internal/plugin/embed/assets
-          key: embed-assets-ort-1.24.2-minilm-v2-windows-amd64
+          key: embed-assets-ort-1.24.2-bge-small-en-v1.5-windows-amd64
 
       - name: Fetch model assets
         if: steps.asset-cache-win.outputs.cache-hit != 'true'
         run: |
           New-Item -ItemType Directory -Path internal/plugin/embed/assets -Force | Out-Null
-          Invoke-WebRequest -Uri "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_int8.onnx" -OutFile "internal/plugin/embed/assets/model_int8.onnx"
-          Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json" -OutFile "internal/plugin/embed/assets/tokenizer.json"
+          Invoke-WebRequest -Uri "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_int8.onnx" -OutFile "internal/plugin/embed/assets/model_int8.onnx"
+          Invoke-WebRequest -Uri "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json" -OutFile "internal/plugin/embed/assets/tokenizer.json"
         shell: pwsh
 
       - name: Fetch ORT DLL

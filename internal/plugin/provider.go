@@ -61,7 +61,7 @@ func ParseProviderURL(raw string) (*ProviderConfig, error) {
 			model = strings.TrimPrefix(parsed.Path, "/")
 		}
 		if model == "" {
-			model = "all-MiniLM-L6-v2"
+			model = "bge-small-en-v1.5"
 		}
 		config.Model = model
 		return config, nil

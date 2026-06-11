@@ -168,3 +168,34 @@ func TestParseMalformedURL(t *testing.T) {
 		}
 	}
 }
+
+// TestParseLocalURL_DefaultModel asserts the default model reported for a
+// local:// URL that omits a model name. The bundled ONNX asset is
+// bge-small-en-v1.5 (see Makefile MODEL_REPO and embed/local.go), so the
+// self-reported default must match — this guards against the label drift
+// reported in issue #455 (the default was previously "all-MiniLM-L6-v2").
+func TestParseLocalURL_DefaultModel(t *testing.T) {
+	cfg, err := ParseProviderURL("local://")
+	if err != nil {
+		t.Fatalf("unexpected error parsing local:// URL: %v", err)
+	}
+	if cfg.Scheme != SchemeLocal {
+		t.Errorf("expected scheme %q, got %q", SchemeLocal, cfg.Scheme)
+	}
+	if cfg.Model != "bge-small-en-v1.5" {
+		t.Errorf("default local model = %q, want %q (must match the bundled ONNX asset)", cfg.Model, "bge-small-en-v1.5")
+	}
+}
+
+// TestParseLocalURL_ExplicitModel confirms the parser still accepts any model
+// name in a local:// URL, so legacy saved configs referencing the old label
+// (e.g. local://all-MiniLM-L6-v2) keep parsing without error.
+func TestParseLocalURL_ExplicitModel(t *testing.T) {
+	cfg, err := ParseProviderURL("local://all-MiniLM-L6-v2")
+	if err != nil {
+		t.Fatalf("unexpected error parsing legacy local:// URL: %v", err)
+	}
+	if cfg.Model != "all-MiniLM-L6-v2" {
+		t.Errorf("model = %q, want the explicit value to be preserved", cfg.Model)
+	}
+}

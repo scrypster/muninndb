@@ -10,12 +10,13 @@ import (
 // Registry is the thread-safe plugin registry. Singleton per engine instance.
 type Registry struct {
 	mu        sync.RWMutex
-	plugins   map[string]Plugin    // name -> plugin
-	embed     EmbedPlugin          // at most one
-	enrich    EnrichPlugin         // at most one
-	healthy   map[string]bool      // name -> health status
-	lastCheck map[string]time.Time // name -> time of last SetHealthy/SetUnhealthy call
-	lastError map[string]string    // name -> last error message (empty if healthy)
+	plugins   map[string]Plugin     // name -> plugin
+	embed     EmbedPlugin           // at most one
+	enrich    EnrichPlugin          // at most one
+	healthy   map[string]bool       // name -> health status
+	lastCheck map[string]time.Time  // name -> time of last SetHealthy/SetUnhealthy call
+	lastError map[string]string     // name -> last error message (empty if healthy)
+	failed    map[string]PluginTier // name -> tier of a plugin that failed to init (no live instance)
 }
 
 // NewRegistry creates an empty plugin registry.
@@ -25,6 +26,33 @@ func NewRegistry() *Registry {
 		healthy:   make(map[string]bool),
 		lastCheck: make(map[string]time.Time),
 		lastError: make(map[string]string),
+		failed:    make(map[string]PluginTier),
+	}
+}
+
+// RegisterFailed records a plugin that failed to initialize and therefore has
+// no live instance to Register. It surfaces in List() as an unhealthy entry
+// with the init error populated, so the UI can distinguish a genuinely absent
+// plugin ("Not configured") from one that was configured but failed to start
+// (e.g. an invalid/unavailable enrich model). A subsequent successful
+// Register of the same name clears the recorded failure.
+func (r *Registry) RegisterFailed(name string, tier PluginTier, err error) {
+	if name == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// A live plugin of the same name takes precedence over a recorded failure.
+	if _, exists := r.plugins[name]; exists {
+		return
+	}
+	r.failed[name] = tier
+	r.healthy[name] = false
+	r.lastCheck[name] = time.Now()
+	if err != nil {
+		r.lastError[name] = err.Error()
+	} else {
+		r.lastError[name] = "plugin initialization failed"
 	}
 }
 
@@ -81,6 +109,8 @@ func (r *Registry) Register(p Plugin) error {
 	r.healthy[name] = true // Start healthy
 	r.lastCheck[name] = time.Now()
 	r.lastError[name] = ""
+	// A successful registration supersedes any prior recorded init failure.
+	delete(r.failed, name)
 
 	return nil
 }
@@ -106,6 +136,7 @@ func (r *Registry) Unregister(name string) error {
 	delete(r.healthy, name)
 	delete(r.lastCheck, name)
 	delete(r.lastError, name)
+	delete(r.failed, name)
 
 	// Clear embed or enrich reference if this was the active plugin
 	tier := p.Tier()
@@ -137,7 +168,7 @@ func (r *Registry) List() []PluginStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	result := make([]PluginStatus, 0, len(r.plugins))
+	result := make([]PluginStatus, 0, len(r.plugins)+len(r.failed))
 	for name, p := range r.plugins {
 		status := PluginStatus{
 			Name:      name,
@@ -147,6 +178,20 @@ func (r *Registry) List() []PluginStatus {
 			Error:     r.lastError[name],
 		}
 		result = append(result, status)
+	}
+	// Include plugins that failed to initialize (no live instance) so the
+	// status endpoint reports the failure instead of silently omitting them.
+	for name, tier := range r.failed {
+		if _, live := r.plugins[name]; live {
+			continue // a live registration supersedes the recorded failure
+		}
+		result = append(result, PluginStatus{
+			Name:      name,
+			Tier:      tier,
+			Healthy:   false,
+			LastCheck: r.lastCheck[name],
+			Error:     r.lastError[name],
+		})
 	}
 
 	return result

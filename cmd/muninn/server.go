@@ -428,7 +428,7 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 		case "local":
 			if os.Getenv(localEmbed) != "0" && embedpkg.LocalAvailable() {
 				slog.Info("initializing bundled local ONNX embedder from saved config", "data_dir", dataDir)
-				if svc := tryEmbedService("local://all-MiniLM-L6-v2", plugin.PluginConfig{DataDir: dataDir}); svc != nil {
+				if svc := tryEmbedService("local://bge-small-en-v1.5", plugin.PluginConfig{DataDir: dataDir}); svc != nil {
 					return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
 				}
 				slog.Warn("bundled local embedder init failed (saved config), falling back")
@@ -495,7 +495,7 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 	// "none" as their provider.
 	if cfg.EmbedProvider != "none" && os.Getenv(localEmbed) != "0" && embedpkg.LocalAvailable() {
 		slog.Info("initializing bundled local ONNX embedder", "data_dir", dataDir)
-		if svc := tryEmbedService("local://all-MiniLM-L6-v2", plugin.PluginConfig{DataDir: dataDir}); svc != nil {
+		if svc := tryEmbedService("local://bge-small-en-v1.5", plugin.PluginConfig{DataDir: dataDir}); svc != nil {
 			return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
 		}
 		slog.Warn("bundled local embedder init failed, falling back to noop")
@@ -522,12 +522,24 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 // Returns nil without error if MUNINN_ENRICH_URL is not set — LLM enrichment
 // is optional. Logs a warning on init failure so the server starts without
 // enrichment rather than refusing to start.
+// enrichInitFailure carries the details of an enrich plugin that was configured
+// but failed to initialize. It is recorded in the plugin registry so the status
+// endpoint (and the UI) can surface the real error instead of collapsing the
+// case to "Not configured" (issue #453).
+type enrichInitFailure struct {
+	name string // plugin name (e.g. "enrich-google"); falls back to "enrich" if unknown
+	err  error  // the init/parse error
+}
+
 // buildEnricher constructs an EnrichService. Priority:
 //  1. MUNINN_ENRICH_URL env var
 //  2. Saved plugin_config.json (cfg parameter)
 //
-// Returns nil (no error) if neither is set — LLM enrichment is optional.
-func buildEnricher(ctx context.Context, cfg plugincfg.PluginConfig) plugin.EnrichPlugin {
+// Returns (nil, nil) if neither is set — LLM enrichment is optional. If an
+// enrich URL is configured but the provider fails to parse or initialize,
+// returns (nil, *enrichInitFailure) so the caller can record the failure in
+// the plugin registry; LLM enrichment stays disabled either way.
+func buildEnricher(ctx context.Context, cfg plugincfg.PluginConfig) (plugin.EnrichPlugin, *enrichInitFailure) {
 	enrichURL := os.Getenv("MUNINN_ENRICH_URL")
 
 	// Fall back to saved config if env var is not set.
@@ -537,7 +549,7 @@ func buildEnricher(ctx context.Context, cfg plugincfg.PluginConfig) plugin.Enric
 
 	if enrichURL == "" {
 		slog.Info("no enrich plugin configured, LLM enrichment disabled")
-		return nil
+		return nil, nil
 	}
 
 	enrichURL = injectOpenAIBaseURL(enrichURL, strings.TrimSpace(os.Getenv("MUNINN_OPENAI_URL")))
@@ -545,7 +557,7 @@ func buildEnricher(ctx context.Context, cfg plugincfg.PluginConfig) plugin.Enric
 	svc, err := enrichpkg.NewEnrichService(enrichURL)
 	if err != nil {
 		slog.Warn("enrich plugin URL parse failed, LLM enrichment disabled", "err", err)
-		return nil
+		return nil, &enrichInitFailure{name: enrichFailureName(enrichURL), err: err}
 	}
 
 	// MUNINN_ANTHROPIC_KEY is an alias for MUNINN_ENRICH_API_KEY when using Anthropic.
@@ -561,11 +573,22 @@ func buildEnricher(ctx context.Context, cfg plugincfg.PluginConfig) plugin.Enric
 	}
 	if err := svc.Init(ctx, plugin.PluginConfig{APIKey: apiKey}); err != nil {
 		slog.Warn("enrich plugin init failed (LLM provider may be down), LLM enrichment disabled", "err", err)
-		return nil
+		return nil, &enrichInitFailure{name: svc.Name(), err: err}
 	}
 
 	slog.Info("enrich plugin initialized", "url", enrichURL)
-	return svc
+	return svc, nil
+}
+
+// enrichFailureName derives a stable plugin name from an enrich URL for the
+// case where the service could not be constructed (so svc.Name() is unavailable).
+// Mirrors the "enrich-<scheme>" naming used by the enrich providers; falls back
+// to "enrich" when the scheme cannot be parsed.
+func enrichFailureName(enrichURL string) string {
+	if provCfg, err := plugin.ParseProviderURL(enrichURL); err == nil && provCfg.Scheme != "" {
+		return "enrich-" + string(provCfg.Scheme)
+	}
+	return "enrich"
 }
 
 // parseCORSOrigins splits a comma-separated MUNINN_CORS_ORIGINS env var into a slice.
@@ -1131,7 +1154,7 @@ func runServer() {
 
 	// Build enrich plugin (optional): env vars → saved config.
 	enrichCtx, enrichCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	enrichPlugin := buildEnricher(enrichCtx, savedPluginCfg)
+	enrichPlugin, enrichInitErr := buildEnricher(enrichCtx, savedPluginCfg)
 	enrichCancel()
 
 	// Build HNSW registry (multi-vault, lazy-loading)
@@ -1251,6 +1274,12 @@ func runServer() {
 		if err := pluginRegistry.Register(embedPlugin); err != nil {
 			slog.Warn("failed to register embed plugin in registry", "err", err)
 		}
+	}
+	// Surface a configured-but-failed enrich plugin in the registry so the status
+	// endpoint reports the init error instead of the plugin being silently absent
+	// (which the UI reads as "Not configured"). See issue #453.
+	if enrichInitErr != nil {
+		pluginRegistry.RegisterFailed(enrichInitErr.name, plugin.TierEnrich, enrichInitErr.err)
 	}
 	if enrichPlugin != nil {
 		if err := pluginRegistry.Register(enrichPlugin); err != nil {
