@@ -431,15 +431,73 @@ func (c *ClusterCoordinator) runAsLobe(ctx context.Context) error {
 		return errors.New("cluster: lobe requires at least one seed address")
 	}
 
-	resp, err := c.joinWithRetry(ctx, c.cfg.Seeds, "lobe")
-	if err != nil {
-		return fmt.Errorf("cluster: join failed: %w", err)
+	return c.streamReplication(ctx, "lobe")
+}
+
+// streamReplication runs the join → read-stream → reconnect loop shared by the
+// Lobe and Observer roles. The Cortex streams replication frames over the SAME
+// connection used for the join handshake (#448 Bug 2), so the role keeps that
+// connection open and reads from it; if the stream drops, it rejoins.
+func (c *ClusterCoordinator) streamReplication(ctx context.Context, role string) error {
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		resp, err := c.joinWithRetry(ctx, c.cfg.Seeds, role)
+		if err != nil {
+			return fmt.Errorf("cluster: %s join failed: %w", role, err)
+		}
+		slog.Info("cluster: joined", "role", role, "cortex", resp.CortexID, "epoch", resp.Epoch)
+
+		streamErr := c.streamFromCortex(ctx, resp.Conn, resp.CortexID)
+		if resp.Conn != nil {
+			resp.Conn.Close()
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		slog.Warn("cluster: replication stream ended, rejoining", "role", role, "err", streamErr)
+
+		// Brief backoff before rejoin so a flapping Cortex doesn't spin us.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
 	}
+}
 
-	slog.Info("cluster: joined as lobe", "cortex", resp.CortexID, "epoch", resp.Epoch)
+// streamFromCortex reads replication frames from the Cortex over the live join
+// connection and dispatches each via HandleIncomingFrame, until the connection
+// errors or ctx is cancelled. Returns nil on ctx cancellation; the read error
+// otherwise. Closing conn on ctx cancellation unblocks the in-flight ReadFrame.
+func (c *ClusterCoordinator) streamFromCortex(ctx context.Context, conn net.Conn, cortexID string) error {
+	if conn == nil {
+		return fmt.Errorf("cluster: no connection to cortex")
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-stop:
+		}
+	}()
 
-	<-ctx.Done()
-	return ctx.Err()
+	for {
+		frame, err := mbp.ReadFrame(conn)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if err := c.HandleIncomingFrame(cortexID, frame.Type, frame.Payload); err != nil {
+			// A single malformed/failed frame must not tear down the stream.
+			slog.Warn("cluster: failed to apply streamed frame", "type", frame.Type, "err", err)
+		}
+	}
 }
 
 // runAsSentinel starts MSP only, participates in voting, no data.
@@ -468,15 +526,7 @@ func (c *ClusterCoordinator) runAsObserver(ctx context.Context) error {
 		return errors.New("cluster: observer requires at least one seed address")
 	}
 
-	resp, err := c.joinWithRetry(ctx, c.cfg.Seeds, "observer")
-	if err != nil {
-		return fmt.Errorf("cluster: observer join failed: %w", err)
-	}
-
-	slog.Info("cluster: joined as observer", "cortex", resp.CortexID, "epoch", resp.Epoch)
-
-	<-ctx.Done()
-	return ctx.Err()
+	return c.streamReplication(ctx, "observer")
 }
 
 // IsObserver returns true if this node is currently an Observer.

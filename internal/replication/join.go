@@ -265,6 +265,12 @@ type JoinResult struct {
 	// in the snapshot header (authoritative). Otherwise it equals the Lobe's
 	// own LastApplied at join time.
 	StreamFromSeq uint64
+
+	// Conn is the live connection to the Cortex. On a successful Join it is
+	// returned OPEN — the Cortex streams replication frames over this same
+	// connection, so the Lobe keeps it and reads from it (see runAsLobe). The
+	// caller owns closing it. Nil for joinConn callers that pass their own conn.
+	Conn net.Conn
 }
 
 // JoinClient handles the Lobe-side join handshake.
@@ -310,9 +316,17 @@ func (c *JoinClient) Join(ctx context.Context, cortexAddr string) (JoinResult, e
 	if err != nil {
 		return JoinResult{}, fmt.Errorf("join: dial %s: %w", cortexAddr, err)
 	}
-	defer conn.Close()
 
-	return c.joinConn(ctx, conn)
+	result, err := c.joinConn(ctx, conn)
+	if err != nil {
+		// The handshake failed — close the conn here. On success we deliberately
+		// leave it OPEN: the Cortex streams replication frames over this same
+		// connection (#448 Bug 2), so the caller (runAsLobe) keeps and reads it.
+		conn.Close()
+		return result, err
+	}
+	result.Conn = conn
+	return result, nil
 }
 
 // joinConn performs the join handshake over an already-established net.Conn.
