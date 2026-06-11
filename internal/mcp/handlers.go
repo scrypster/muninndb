@@ -1260,7 +1260,6 @@ func normalizeEntityType(typ string) string {
 
 // applyEnrichmentArgs parses optional inline enrichment fields (summary, entities,
 // relationships) from MCP tool call arguments onto the WriteRequest.
-
 func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
 	malformed := 0
 	if summary, ok := args["summary"].(string); ok && summary != "" {
