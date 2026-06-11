@@ -61,6 +61,20 @@ func (m *ConnManager) AddPeer(nodeID, addr string) {
 	m.peers[nodeID] = NewPeerConn(nodeID, addr)
 }
 
+// HasLivePeerAt reports whether any registered peer with this advertised address
+// currently has a live connection — used by the discovery loop to skip seeds
+// already covered by a join or hello conn (#522 Step 4).
+func (m *ConnManager) HasLivePeerAt(addr string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, p := range m.peers {
+		if p.addr == addr && p.conn != nil && !p.closed {
+			return true
+		}
+	}
+	return false
+}
+
 // UpdatePeerAddr updates a peer's advertised address WITHOUT disturbing its live
 // connection (adds a disconnected peer if none exists). Used for address-change
 // gossip — the previous path (AddPeer) closed the live conn and tore down the
@@ -90,8 +104,41 @@ func (m *ConnManager) RegisterConn(nodeID, addr string, conn net.Conn) *PeerConn
 		_ = existing.Close()
 	}
 	p := NewPeerConnFromConn(nodeID, addr, conn)
+	p.kind = kindJoin // RegisterConn is used only by the join/replication path
 	m.peers[nodeID] = p
 	return p
+}
+
+// RegisterConnKind registers a connection with a kind, enforcing the #522 Step 4
+// precedence so a pair converges on exactly one connection without flapping:
+//   - a live join conn is never evicted by a hello conn;
+//   - a non-canonical hello (the higher node-id's outbound) never evicts a live
+//     conn — only fills an empty/dead slot;
+//   - otherwise (canonical hello = lower node-id's dial, or a join) it replaces.
+//
+// Returns the adopted PeerConn and whether it was adopted (false ⇒ the caller
+// must close conn — its existing registration stands).
+func (m *ConnManager) RegisterConnKind(nodeID, addr string, conn net.Conn, kind connKind, canonical bool) (*PeerConn, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing, ok := m.peers[nodeID]
+	liveExisting := ok && existing.conn != nil && !existing.closed
+	if liveExisting {
+		if existing.kind == kindJoin && kind != kindJoin {
+			return existing, false // never evict a live join with a hello
+		}
+		if kind == kindHello && !canonical {
+			return existing, false // non-canonical hello yields to the live conn
+		}
+	}
+	if ok {
+		_ = existing.Close()
+	}
+	p := NewPeerConnFromConn(nodeID, addr, conn)
+	p.kind = kind
+	m.peers[nodeID] = p
+	return p, true
 }
 
 // RemovePeer closes and removes the peer identified by nodeID.

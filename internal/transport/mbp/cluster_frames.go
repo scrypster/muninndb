@@ -23,6 +23,21 @@ type CortexClaim struct {
 	CortexAddr   string `msgpack:"cortex_addr"`
 }
 
+// PeerHello is the authenticated peer-discovery handshake (#522 Step 4). Nodes
+// with no join relationship (two primaries, sentinels, lobe↔lobe) dial each
+// configured seed and exchange these to establish identified connections that
+// feed MSP liveness and elections. SecretHash = HMAC-SHA256(clusterSecret,
+// node_id + "\n" + addr + "\n" + string(role)) — it covers role because role
+// gates voter registration on the receiving side.
+type PeerHello struct {
+	NodeID          string `msgpack:"node_id"`
+	Addr            string `msgpack:"addr"`  // sender's advertised address
+	Role            uint8  `msgpack:"role"`  // sender's NodeRole
+	Epoch           uint64 `msgpack:"epoch"` // informational only (no fencing)
+	SecretHash      []byte `msgpack:"secret_hash"`
+	ProtocolVersion uint16 `msgpack:"proto_ver,omitempty"`
+}
+
 // ReplEntry is a single entry in the replication stream.
 type ReplEntry struct {
 	Seq         uint64 `msgpack:"seq"`

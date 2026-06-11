@@ -376,6 +376,17 @@ func (e *Election) tryPromote(epoch uint64) {
 	e.mu.Unlock()
 
 	// Broadcast CortexClaim to all peers.
+	e.broadcastClaim(epoch)
+
+	// Invoke callback without lock held.
+	if onPromoted != nil {
+		onPromoted(epoch)
+	}
+}
+
+// broadcastClaim marshals and broadcasts a CortexClaim for the given epoch to
+// all connected peers. Factored out so the equal-epoch tie-break can re-assert.
+func (e *Election) broadcastClaim(epoch uint64) {
 	claim := mbp.CortexClaim{
 		CortexID:     e.localNodeID,
 		Epoch:        epoch,
@@ -387,11 +398,6 @@ func (e *Election) tryPromote(epoch uint64) {
 		return
 	}
 	e.mgr.Broadcast(mbp.TypeCortexClaim, payload)
-
-	// Invoke callback without lock held.
-	if onPromoted != nil {
-		onPromoted(epoch)
-	}
 }
 
 // HandleCortexClaim processes an incoming CortexClaim from another node.
@@ -410,6 +416,22 @@ func (e *Election) HandleCortexClaim(claim mbp.CortexClaim) {
 	// Reject stale claims.
 	if claim.Epoch < currentEpoch {
 		e.mu.Unlock()
+		return
+	}
+
+	// Equal-epoch dueling-leaders tie-break (#519, #522 Step 4): two nodes both
+	// asserted leadership at the same epoch — only reachable when more than one is
+	// misconfigured role=primary (each force-promotes with a single self-vote).
+	// Resolve deterministically by lowest node-id: the lower id keeps leadership
+	// (ignores the conflicting claim and re-asserts), the higher id falls through
+	// to the demotion path below. Without this, two equal-epoch leaders mutually
+	// demote and the cluster can end up leaderless or flapping.
+	if claim.Epoch == currentEpoch && e.state == ElectionLeader &&
+		claim.CortexID != e.localNodeID && e.localNodeID < claim.CortexID {
+		e.mu.Unlock()
+		slog.Warn("cluster: equal-epoch CortexClaim from a higher node-id; keeping leadership (lowest id wins), re-asserting. Ensure exactly one node is configured role=primary.",
+			"claimant", claim.CortexID, "epoch", claim.Epoch, "self", e.localNodeID)
+		e.broadcastClaim(claim.Epoch)
 		return
 	}
 

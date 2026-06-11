@@ -98,6 +98,9 @@ type ClusterCoordinator struct {
 	// roleCh carries promotion/demotion events to the supervisor loop (#522 Step 3).
 	roleCh chan roleEvent
 
+	// advertiseAddr is this node's routable address (used in PeerHello, #522 Step 4).
+	advertiseAddr string
+
 	// Per-Lobe streamers (Cortex only): lobeID -> cancel func
 	streamers   map[string]context.CancelFunc
 	streamersMu sync.Mutex
@@ -200,19 +203,20 @@ func NewClusterCoordinator(
 	}
 
 	c := &ClusterCoordinator{
-		cfg:         cfg,
-		repLog:      repLog,
-		applier:     applier,
-		epochStore:  epochStore,
-		mgr:         mgr,
-		msp:         msp,
-		election:    election,
-		joinHandler: joinHandler,
-		joinClient:  joinClient,
-		role:        RoleUnknown,
-		streamers:   make(map[string]context.CancelFunc),
-		roleCh:      make(chan roleEvent, 4),
-		reconDelay:  reconDelay,
+		cfg:           cfg,
+		repLog:        repLog,
+		applier:       applier,
+		epochStore:    epochStore,
+		mgr:           mgr,
+		msp:           msp,
+		election:      election,
+		joinHandler:   joinHandler,
+		joinClient:    joinClient,
+		role:          RoleUnknown,
+		streamers:     make(map[string]context.CancelFunc),
+		roleCh:        make(chan roleEvent, 4),
+		advertiseAddr: advertiseAddr,
+		reconDelay:    reconDelay,
 	}
 	// Default reconcile-on-heal to enabled; matches config default (ReconcileHeal=true).
 	c.reconcileOnHeal.Store(1)
@@ -384,6 +388,12 @@ func (c *ClusterCoordinator) Run(ctx context.Context) error {
 			}
 		}
 	}()
+
+	// Start peer discovery so nodes with no join relationship (two primaries,
+	// sentinels, lobe↔lobe) establish identified connections (#522 Step 4).
+	if len(c.cfg.Seeds) > 0 {
+		go c.runPeerDiscovery(ctx)
+	}
 
 	// Start periodic WAL pruning (only prunes on Cortex when replicas are caught up).
 	c.startPeriodicPrune(ctx)
@@ -661,7 +671,8 @@ func (c *ClusterCoordinator) reconcileJoinedPeer(nodeID, addr string, role NodeR
 	if nodeID == "" {
 		return
 	}
-	isVoter := c.cfg.Role != "observer"
+	// A voter only if neither this node nor the peer is an observer (#529).
+	isVoter := c.cfg.Role != "observer" && role != RoleObserver
 
 	alreadyKnown := false
 	for _, p := range c.msp.AllPeers() {

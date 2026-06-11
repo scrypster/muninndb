@@ -96,6 +96,9 @@ const (
 	TypeReconReply uint8 = 0x3E // lobe replies with its weights for those keys
 	TypeReconSync  uint8 = 0x3F // cortex sends corrected weights to divergent lobe
 	TypeReconAck   uint8 = 0x40 // lobe confirms weights applied
+
+	// Cluster: peer discovery (#522 Step 4)
+	TypePeerHello uint8 = 0x41 // authenticated peer-discovery handshake
 )
 
 // Errors

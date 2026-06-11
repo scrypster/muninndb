@@ -690,8 +690,23 @@ func handleClusterConn(conn net.Conn, coord *replication.ClusterCoordinator) {
 			connOwned = false // PeerConn now owns conn
 			continue
 		}
-		// Reject any frame that arrives before the join handshake completes.
-		// A well-behaved Lobe always sends TypeJoinRequest first.
+		// PeerHello discovery handshake (#522 Step 4) — an alternative first frame
+		// for peers that don't join (two primaries, sentinels, lobe↔lobe).
+		if frame.Type == mbp.TypePeerHello {
+			nodeID, adopted, err := coord.HandleIncomingHello(conn, frame.Payload)
+			if err != nil {
+				log.Printf("[cluster] hello error from %s: %v", fromNodeID, err)
+				return
+			}
+			if !adopted {
+				return // tie-break loser: conn deliberately closed in adoptHelloPeer
+			}
+			fromNodeID = nodeID
+			joined = true
+			connOwned = false // PeerConn now owns conn
+			continue
+		}
+		// Reject any frame that arrives before a join/hello handshake completes.
 		if !joined {
 			log.Printf("[cluster] unexpected frame type 0x%02x from %s before join; closing", frame.Type, fromNodeID)
 			return

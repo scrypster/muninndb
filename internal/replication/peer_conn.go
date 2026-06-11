@@ -19,12 +19,23 @@ var ErrNotConnected = errors.New("peer not connected")
 // to every peer sequentially) and cascade false SDOWNs.
 const sendWriteTimeout = 5 * time.Second
 
+// connKind records how a PeerConn was established, which drives the
+// simultaneous-dial / hello-vs-join precedence in RegisterConnKind (#522 Step 4).
+type connKind uint8
+
+const (
+	kindSeed  connKind = iota // disconnected placeholder from the seed list
+	kindJoin                  // established via the join/replication handshake
+	kindHello                 // established via the PeerHello discovery handshake
+)
+
 // PeerConn is a single persistent TCP connection to one remote peer.
 // It is safe for concurrent Send calls.
 type PeerConn struct {
 	nodeID string
 	addr   string
 	conn   net.Conn
+	kind   connKind
 	mu     sync.Mutex
 	closed bool
 }
