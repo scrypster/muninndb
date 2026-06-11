@@ -347,6 +347,13 @@ func (m *MSP) RecordDownVote(sender, target string) {
 		return
 	}
 	m.mu.Lock()
+	// The sender must be a known, non-observer voter: observers are excluded from
+	// the ODOWN quorum denominator (nonObserverQuorumLocked), so counting their
+	// votes in the numerator could spuriously fail over a healthy Cortex (#522 Step 4c).
+	if sp, ok := m.peers[sender]; ok && sp.Role == RoleObserver {
+		m.mu.Unlock()
+		return
+	}
 	if m.votedDown[target] == nil {
 		m.votedDown[target] = make(map[string]struct{})
 	}

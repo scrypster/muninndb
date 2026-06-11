@@ -100,6 +100,9 @@ type ClusterCoordinator struct {
 
 	// advertiseAddr is this node's routable address (used in PeerHello, #522 Step 4).
 	advertiseAddr string
+	// electing single-flights the ODOWN-triggered failover election driver so
+	// concurrent ODOWN events don't spawn racing election loops (#522 Step 4c).
+	electing atomic.Bool
 
 	// Per-Lobe streamers (Cortex only): lobeID -> cancel func
 	streamers   map[string]context.CancelFunc
@@ -704,7 +707,10 @@ func (c *ClusterCoordinator) reconcileJoinedPeer(nodeID, addr string, role NodeR
 		}
 	}
 	retire := matched
-	if retire == "" {
+	if retire == "" && isVoter {
+		// Only a voter join may retire an arbitrary (non-address-matching) seed —
+		// an observer that matches no seed must not retire and unregister an
+		// unrelated voter placeholder (#529).
 		retire = anySeed
 		if retire != "" {
 			slog.Warn("cluster: joined peer address did not match any seed; retiring a seed placeholder to conserve quorum (set advertise_addr to match the seed addresses)",
@@ -714,9 +720,10 @@ func (c *ClusterCoordinator) reconcileJoinedPeer(nodeID, addr string, role NodeR
 	if retire != "" {
 		c.msp.RemovePeer(retire)
 		c.mgr.RemovePeer(retire)
-		if isVoter {
-			c.election.UnregisterVoter(retire)
-		}
+		// A seed placeholder is always registered as a voter at startup, so a
+		// retired seed must always be unregistered — even on an observer join,
+		// where the "expected voter" turned out to be a non-voting observer.
+		c.election.UnregisterVoter(retire)
 	}
 }
 
@@ -1273,7 +1280,10 @@ func (c *ClusterCoordinator) HandleIncomingFrame(fromNodeID string, frameType ui
 		if err := msgpack.Unmarshal(payload, &msg); err != nil {
 			return fmt.Errorf("unmarshal SDownNotification: %w", err)
 		}
-		c.msp.RecordDownVote(msg.SenderID, msg.TargetID)
+		// Key the vote by the authenticated frame source, not the payload's
+		// SenderID — otherwise one peer could forge many sender ids to drive ODOWN
+		// unilaterally (#522 Step 4c). Gossip is one-hop, so fromNodeID is the voter.
+		c.msp.RecordDownVote(fromNodeID, msg.TargetID)
 		return nil
 
 	case mbp.TypeCogForward:

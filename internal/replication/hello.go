@@ -227,6 +227,13 @@ func (c *ClusterCoordinator) sendClaim(p *PeerConn) {
 // instead of splitting the vote, then retries a bounded number of times if it
 // stays a stuck candidate — but only while no leader has emerged (#522 Step 4c).
 func (c *ClusterCoordinator) startElectionWithJitter() {
+	// Single-flight: a concurrent ODOWN event must not spawn a second election
+	// driver that could ResetCandidate a candidacy this one is about to win.
+	if !c.electing.CompareAndSwap(false, true) {
+		return
+	}
+	defer c.electing.Store(false)
+
 	hb := c.heartbeatInterval()
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(c.cfg.NodeID))

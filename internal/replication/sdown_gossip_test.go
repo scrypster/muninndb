@@ -43,6 +43,31 @@ func TestRecordDownVote_FiresODownAtQuorum(t *testing.T) {
 	}
 }
 
+// An observer's gossiped down-vote must NOT count toward ODOWN: observers are
+// excluded from the quorum denominator, so counting them could spuriously fail
+// over a healthy Cortex (#522 Step 4c review).
+func TestRecordDownVote_ObserverSenderDoesNotCount(t *testing.T) {
+	c, _ := newTestCoordinator(t, "auto")
+	msp := c.msp
+	msp.AddPeer("target", "t:1", RoleReplica)
+	msp.AddPeer("obs-1", "o:1", RoleObserver)
+	// non-observer population = self + target = 2 → quorum 2.
+
+	msp.mu.Lock()
+	msp.peers["target"].SDown = true
+	msp.mu.Unlock()
+
+	fired := make(chan string, 1)
+	msp.OnODown = func(id string) { fired <- id }
+
+	msp.RecordDownVote("obs-1", "target") // observer vote — must be ignored
+	select {
+	case <-fired:
+		t.Error("an observer sender's vote must not count toward the ODOWN quorum")
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 // A down-vote must NOT trigger ODOWN if this node does not also see the target
 // as SDOWN — ODOWN requires local agreement, not just remote reports.
 func TestRecordDownVote_NoODownWithoutLocalSDown(t *testing.T) {
