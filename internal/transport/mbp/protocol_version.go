@@ -7,7 +7,8 @@ package mbp
 //
 //	0 = legacy (pre-versioned binaries)
 //	1 = initial versioned release
-const CurrentProtocolVersion uint16 = 1
+//	2 = JoinRequest HMAC covers Role field (#538)
+const CurrentProtocolVersion uint16 = 2
 
 // MinSupportedProtocolVersion is the oldest protocol version this binary will
 // accept from connecting peers. Peers below this version are hard-rejected.

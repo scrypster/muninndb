@@ -1304,7 +1304,7 @@ func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (
 	if req.Probe {
 		// Authenticate the probe so an unauthenticated party can't learn cluster
 		// topology (parity with the normal join's secret check, #531 PR3 review).
-		if !c.joinHandler.ValidSecret(req.NodeID, req.SecretHash) {
+		if !c.joinHandler.ValidSecret(req.NodeID, req.Role, req.ProtocolVersion, req.SecretHash) {
 			return req.NodeID, false, nil
 		}
 		isLeader := c.IsLeader()

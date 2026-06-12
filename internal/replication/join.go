@@ -58,14 +58,19 @@ func NewJoinHandlerWithDB(localNodeID, clusterSecret string, epochStore *EpochSt
 	return h
 }
 
-// ValidSecret reports whether secretHash is a valid HMAC of nodeID under the
-// cluster secret (always true in open mode). Used to authenticate probes (#531 PR3).
-func (h *JoinHandler) ValidSecret(nodeID string, secretHash []byte) bool {
+// ValidSecret reports whether secretHash is a valid HMAC of nodeID (+ role for
+// protocol v2+) under the cluster secret. Always true in open mode.
+// Used to authenticate probes (#531 PR3). The role+protoVer gate matches the
+// logic in HandleJoinRequest so probe and join auth stay in parity (#538).
+func (h *JoinHandler) ValidSecret(nodeID string, role uint8, protoVer uint16, secretHash []byte) bool {
 	if h.clusterSecret == "" {
 		return true
 	}
 	expected := hmac.New(sha256.New, []byte(h.clusterSecret))
 	expected.Write([]byte(nodeID))
+	if protoVer >= 2 {
+		expected.Write([]byte{role})
+	}
 	return hmac.Equal(secretHash, expected.Sum(nil))
 }
 
@@ -94,10 +99,14 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 		}
 	}
 
-	// Validate cluster secret if configured
+	// Validate cluster secret if configured. Protocol v2+ covers Role in the HMAC
+	// to prevent role spoofing (#538); v1 senders use nodeID-only for rolling-upgrade compat.
 	if h.clusterSecret != "" {
 		expectedHash := hmac.New(sha256.New, []byte(h.clusterSecret))
 		expectedHash.Write([]byte(req.NodeID))
+		if req.ProtocolVersion >= 2 {
+			expectedHash.Write([]byte{req.Role})
+		}
 		if !hmac.Equal(req.SecretHash, expectedHash.Sum(nil)) {
 			return mbp.JoinResponse{
 				Accepted:     false,
@@ -361,6 +370,7 @@ func (c *JoinClient) Probe(ctx context.Context, cortexAddr string) (mbp.JoinResp
 	if c.clusterSecret != "" {
 		h := hmac.New(sha256.New, []byte(c.clusterSecret))
 		h.Write([]byte(c.localNodeID))
+		h.Write([]byte{uint8(c.localRole)})
 		secretHash = h.Sum(nil)
 	}
 	req := mbp.JoinRequest{
@@ -454,11 +464,12 @@ func (c *JoinClient) joinConn(ctx context.Context, conn net.Conn) (JoinResult, e
 		lastApplied = c.applier.LastApplied()
 	}
 
-	// Compute HMAC-SHA256 of nodeID using clusterSecret
+	// Compute HMAC-SHA256 of nodeID+role (#538: role covered at proto v2+).
 	var secretHash []byte
 	if c.clusterSecret != "" {
 		h := hmac.New(sha256.New, []byte(c.clusterSecret))
 		h.Write([]byte(c.localNodeID))
+		h.Write([]byte{uint8(c.localRole)})
 		secretHash = h.Sum(nil)
 	}
 
