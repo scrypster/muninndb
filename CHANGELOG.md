@@ -11,6 +11,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.0] - 2026-06-12
+
+The headline of this release is a complete overhaul of the cluster subsystem.
+The Cortex/Lobe replication layer existed in previous releases but was not
+reliably functional in real multi-node deployments. Every known correctness
+issue has been addressed and Docker-validated end-to-end. High-availability
+deployments are now production-ready.
+
+### Added
+
+- **Automatic failover.** When the Cortex goes down, Lobes detect SDOWN via
+  gossip, accumulate votes, and the first node with quorum wins a jittered
+  Raft-style election. Failover completes without operator intervention. (#532)
+- **Returning-primary deference.** A restarted former Cortex probes the cluster
+  before asserting leadership. If a failover leader is already in place, it
+  defers, receives a snapshot, and follows — no split-brain, no data loss. (#537)
+- **PeerHello discovery mesh.** Nodes with no join relationship (two primaries,
+  sentinels) dial configured seeds and exchange authenticated `PeerHello` frames
+  to establish identified connections, feeding MSP liveness and elections. (#530)
+- **Equal-epoch tie-break.** When two primaries discover each other at the same
+  epoch (split-brain bootstrap), the lower node-id keeps leadership and the
+  other demotes cleanly. (#530)
+- **Periodic quorum-loss self-demotion.** A Cortex that loses quorum demotes
+  itself on a configurable interval. Recovery is automatic — once quorum is
+  restored, it re-elects at a fresh epoch. Gated by a `hadQuorum` latch to
+  prevent false demotion during bootstrap. (#527)
+- **`muninn_evolve` concept rename.** The `concept` field is now an optional
+  parameter. Omit to inherit the predecessor's label verbatim (existing
+  behavior); supply a new string to rename it. Fixes the class of orientation
+  bugs where a concept encoding mutable state ("answer owed", "PR blocked")
+  could never be corrected without destroying the ULID lineage. (#483)
+- **Server-side tag filters on recall.** `tags_all`, `tags_any`, and
+  `tag_filter` (key-prefix + lexical bounds) are now first-class params on
+  `muninn_recall`. Composes with semantic search and temporal filters. (#479)
+- **SSE push re-evaluation on embed.** A `PushOnWrite` subscription that
+  couldn't match at write time (vector score was 0, embedding not yet ready)
+  is re-evaluated once the retroactive processor inserts the embedding. Fires
+  exactly once; deduplicates against write-time deliveries. (#512)
+
+### Fixed
+
+- **Demotion zombie eliminated.** After demotion the Cortex goroutine previously
+  parked at `<-ctx.Done()`, leaving the node in a half-leader state. Replaced
+  with a supervisor state machine (`modeLeading / modeFollowing /
+  modeWaitingQuorum`) that drives correct transitions. (#526)
+- **Convergent failover election.** Stale connections from the old topology were
+  not evicted after a failover, causing new join attempts to land on dead peers.
+  Leader-gated joins, `ClearLeader` on ODOWN, and `EvictIfConn` on connection
+  death bring the cluster to a stable single-leader state reliably. (#535, #536)
+- **Lobe identity reconciliation on join.** A Lobe that reconnected under a
+  different address was registered as a new member while the old entry persisted,
+  inflating membership counts and breaking quorum calculations. (#524)
+- **Voter count in `HandleVoteResponse`** — only registered voters counted,
+  resolving phantom-voter quorum inflation. (#525)
+- **Cluster topology in `/v1/cluster/info`** was reporting stale or incorrect
+  member lists after topology changes. (#518)
+- **Lobe replication stream.** A Lobe was closing the join connection
+  immediately after handshake; the Cortex streams replication entries over the
+  same connection, so the stream was immediately broken. (#515)
+- **JoinRequest.Role HMAC coverage.** The join HMAC covered only `node_id`,
+  leaving the `Role` field unauthenticated. Protocol v2 covers `nodeID + role`;
+  v1 nodes remain accepted during rolling upgrades. (#539)
+
+### Internal
+
+- MSP `odownFired` latch prevents duplicate ODOWN callbacks per episode.
+- `connKind` priority ordering (`kindJoin > kindHello > kindSeed`) prevents
+  inferior connections from evicting established ones.
+- TCP keepalive (15 s) set on all adopted peer connections.
+- MBP protocol version bumped to 2.
+
+---
+
 ## [0.6.3] - 2026-06-11
 
 Hotfix release for issues found in production immediately after v0.6.2. Every
