@@ -561,7 +561,11 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 		}
 		evolveEmb = emb
 	}
-	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb)
+	var evolveConcept string
+	if c, ok := args["concept"].(string); ok {
+		evolveConcept = c
+	}
+	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb, evolveConcept)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return

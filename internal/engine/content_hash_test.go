@@ -224,7 +224,7 @@ func TestEvolveThenWriteOldContentNoDup(t *testing.T) {
 	}
 
 	// Evolve A → B (soft-deletes A, creates B).
-	_, err = eng.Evolve(ctx, vault, resp1.ID, contentB, "update", nil)
+	_, err = eng.Evolve(ctx, vault, resp1.ID, contentB, "update", nil, "")
 	if err != nil {
 		t.Fatalf("evolve: %v", err)
 	}

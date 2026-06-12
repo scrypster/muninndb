@@ -317,7 +317,7 @@ func lifecycleStateLabel(s storage.LifecycleState) string {
 }
 
 func (w *RESTEngineWrapper) Evolve(ctx context.Context, vault, engramID, newContent, reason string) (*EvolveResponse, error) {
-	newID, err := w.engine.Evolve(ctx, vault, engramID, newContent, reason, nil)
+	newID, err := w.engine.Evolve(ctx, vault, engramID, newContent, reason, nil, "")
 	if err != nil {
 		return nil, err
 	}

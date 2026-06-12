@@ -581,7 +581,7 @@ func TestEngineEvolve(t *testing.T) {
 	}
 	oldID := resp.ID
 
-	newID, err := eng.Evolve(ctx, "test", oldID, "new content", "updated reasoning", nil)
+	newID, err := eng.Evolve(ctx, "test", oldID, "new content", "updated reasoning", nil, "")
 	if err != nil {
 		t.Fatalf("Evolve: %v", err)
 	}
@@ -2252,7 +2252,7 @@ func TestEvolve_AutoStampsTrustInferred(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	newULID, err := eng.Evolve(ctx, "test", writeResp.ID, "Evolved content after trust stamp.", "trust test evolution", nil)
+	newULID, err := eng.Evolve(ctx, "test", writeResp.ID, "Evolved content after trust stamp.", "trust test evolution", nil, "")
 	if err != nil {
 		t.Fatalf("Evolve: %v", err)
 	}

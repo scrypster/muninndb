@@ -62,8 +62,8 @@ func (a *mcpEngineAdapter) GetContradictions(ctx context.Context, vault string) 
 	}
 	return result, nil
 }
-func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (*WriteResult, error) {
-	id, err := a.eng.Evolve(ctx, vault, oldID, newContent, reason, embedding)
+func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (*WriteResult, error) {
+	id, err := a.eng.Evolve(ctx, vault, oldID, newContent, reason, embedding, concept)
 	if err != nil {
 		return nil, err
 	}

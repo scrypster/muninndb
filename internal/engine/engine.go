@@ -2740,10 +2740,9 @@ type EngineSessionEntry struct {
 }
 
 // Evolve creates a new version of an existing engram and soft-deletes the old one.
-// It links the new engram to the old one with RelSupersedes and returns the new ID.
-// All three writes (new engram, supersedes association, old engram state) are committed
-// in a single atomic Pebble batch so a crash cannot leave the store in an inconsistent state.
-func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (storage.ULID, error) {
+// concept overrides the inherited concept label; empty string inherits verbatim (#483).
+// All three writes are committed in a single atomic Pebble batch.
+func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (storage.ULID, error) {
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
 	// Parse the old ULID before any writes.
@@ -2765,9 +2764,12 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	// supersedes association within the same batch.
 	newULID := storage.NewULID()
 	now := time.Now()
+	if concept == "" {
+		concept = oldEng.Concept
+	}
 	newEng := &storage.Engram{
 		ID:         newULID,
-		Concept:    oldEng.Concept,
+		Concept:    concept,
 		Content:    newContent,
 		Tags:       oldEng.Tags,
 		Confidence: 1.0,

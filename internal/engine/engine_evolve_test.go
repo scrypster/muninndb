@@ -23,7 +23,7 @@ func TestEvolve_AtomicBatch_OldSoftDeletedNewReadable(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "new content", "update", nil)
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "new content", "update", nil, "")
 	if err != nil {
 		t.Fatalf("Evolve: %v", err)
 	}
@@ -68,11 +68,9 @@ func TestEvolve_AtomicBatch_OldSoftDeletedNewReadable(t *testing.T) {
 }
 
 // TestEvolve_ConceptStableAcrossRepeatedEvolution verifies that the concept field
-// is inherited verbatim from the predecessor on every Evolve call, with no suffix
-// added or accumulated. Lineage is recorded via the RelSupersedes association, not
-// by mutating the concept string. Without this guarantee, callers that use concept
-// names as stable references (canonical-engram patterns) see the reference drift
-// further on every update: "topic" → "topic (evolved)" → "topic (evolved) (evolved)".
+// is inherited verbatim from the predecessor on every Evolve call when no new
+// concept is provided. Lineage is recorded via RelSupersedes, not by mutating
+// the concept string.
 func TestEvolve_ConceptStableAcrossRepeatedEvolution(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
@@ -85,8 +83,8 @@ func TestEvolve_ConceptStableAcrossRepeatedEvolution(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// First evolution: concept must equal original (no suffix).
-	id1, err := eng.Evolve(ctx, "test", resp.ID, "v2", "first update", nil)
+	// First evolution with empty concept: must inherit original verbatim.
+	id1, err := eng.Evolve(ctx, "test", resp.ID, "v2", "first update", nil, "")
 	require.NoError(t, err)
 
 	ws := eng.store.ResolveVaultPrefix("test")
@@ -96,8 +94,8 @@ func TestEvolve_ConceptStableAcrossRepeatedEvolution(t *testing.T) {
 	assert.Equal(t, originalConcept, eng1.Concept,
 		"concept must be inherited verbatim from predecessor, no suffix")
 
-	// Second evolution: concept must still equal original (no accumulation).
-	id2, err := eng.Evolve(ctx, "test", id1.String(), "v3", "second update", nil)
+	// Second evolution with empty concept: must still equal original.
+	id2, err := eng.Evolve(ctx, "test", id1.String(), "v3", "second update", nil, "")
 	require.NoError(t, err)
 
 	eng2, err := eng.store.GetEngram(ctx, ws, id2)
@@ -105,4 +103,35 @@ func TestEvolve_ConceptStableAcrossRepeatedEvolution(t *testing.T) {
 	require.NotNil(t, eng2)
 	assert.Equal(t, originalConcept, eng2.Concept,
 		"concept must remain stable across repeated evolutions, no accumulating suffix")
+}
+
+// TestEvolve_ConceptRenameWhenProvided verifies that when a non-empty concept is
+// supplied, the new version takes that concept rather than inheriting the predecessor's.
+// This lets callers correct concepts that encode mutable state (#483).
+func TestEvolve_ConceptRenameWhenProvided(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "test", Concept: "answer owed to Alice on #895", Content: "v1",
+	})
+	require.NoError(t, err)
+
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "answer sent — closed", "paid the debt", nil, "answer to Alice on #895 — CLOSED")
+	require.NoError(t, err)
+
+	ws := eng.store.ResolveVaultPrefix("test")
+	newEng, err := eng.store.GetEngram(ctx, ws, newID)
+	require.NoError(t, err)
+	require.NotNil(t, newEng)
+	assert.Equal(t, "answer to Alice on #895 — CLOSED", newEng.Concept,
+		"provided concept must be used instead of inheriting predecessor's")
+
+	// Predecessor concept is unchanged (it just becomes soft-deleted).
+	oldULID, _ := storage.ParseULID(resp.ID)
+	oldEng, err := eng.store.GetEngram(ctx, ws, oldULID)
+	require.NoError(t, err)
+	assert.Equal(t, "answer owed to Alice on #895", oldEng.Concept,
+		"predecessor concept must not be mutated")
 }

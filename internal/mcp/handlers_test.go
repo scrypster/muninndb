@@ -1664,8 +1664,8 @@ func (e *slowIdempotentEngine) Stat(ctx context.Context, req *mbp.StatRequest) (
 func (e *slowIdempotentEngine) GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error) {
 	return (&fakeEngine{}).GetContradictions(ctx, vault)
 }
-func (e *slowIdempotentEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32) (*WriteResult, error) {
-	return (&fakeEngine{}).Evolve(ctx, vault, oldID, newContent, reason, embedding)
+func (e *slowIdempotentEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (*WriteResult, error) {
+	return (&fakeEngine{}).Evolve(ctx, vault, oldID, newContent, reason, embedding, concept)
 }
 func (e *slowIdempotentEngine) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
 	return (&fakeEngine{}).Consolidate(ctx, vault, ids, merged)

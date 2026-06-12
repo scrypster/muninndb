@@ -292,6 +292,10 @@ func allToolDefinitions() []ToolDefinition {
 					"id":          map[string]any{"type": "string", "description": "ID of the memory to evolve."},
 					"new_content": map[string]any{"type": "string", "description": "Updated information."},
 					"reason":      map[string]any{"type": "string", "description": "Why this memory is being updated."},
+					"concept": map[string]any{
+						"type":        "string",
+						"description": "Optional new label for the memory. When omitted the concept is inherited verbatim. Use this to correct concepts that encode mutable state (e.g. change \"answer owed\" to \"answer sent — closed\").",
+					},
 					"embedding": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "number"},
