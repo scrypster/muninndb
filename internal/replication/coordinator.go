@@ -484,6 +484,9 @@ func (c *ClusterCoordinator) runAsCortex(ctx context.Context) error {
 		if found && ldrEpoch >= currentEpoch {
 			slog.Info("cluster: existing cortex found at startup; deferring instead of retaking leadership",
 				"node", c.cfg.NodeID, "cortex", ldrID, "epoch", ldrEpoch)
+			c.roleMu.Lock()
+			c.role = RoleReplica // we're following, not leading — report as a replica
+			c.roleMu.Unlock()
 			c.election.HandleCortexClaim(mbp.CortexClaim{
 				CortexID: ldrID, CortexAddr: ldrAddr, Epoch: ldrEpoch, FencingToken: ldrEpoch,
 			})
