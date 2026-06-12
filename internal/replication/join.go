@@ -58,6 +58,17 @@ func NewJoinHandlerWithDB(localNodeID, clusterSecret string, epochStore *EpochSt
 	return h
 }
 
+// ValidSecret reports whether secretHash is a valid HMAC of nodeID under the
+// cluster secret (always true in open mode). Used to authenticate probes (#531 PR3).
+func (h *JoinHandler) ValidSecret(nodeID string, secretHash []byte) bool {
+	if h.clusterSecret == "" {
+		return true
+	}
+	expected := hmac.New(sha256.New, []byte(h.clusterSecret))
+	expected.Write([]byte(nodeID))
+	return hmac.Equal(secretHash, expected.Sum(nil))
+}
+
 // HandleJoinRequest processes a JoinRequest from a connecting Lobe.
 // On success it adds the Lobe to the members map and returns an accepted
 // JoinResponse. It deliberately does NOT register the conn in mgr (the

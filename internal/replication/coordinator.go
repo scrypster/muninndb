@@ -1302,6 +1302,11 @@ func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (
 	// a snapshot. A returning designated primary uses this to find the current
 	// leader before deciding whether to assert or defer.
 	if req.Probe {
+		// Authenticate the probe so an unauthenticated party can't learn cluster
+		// topology (parity with the normal join's secret check, #531 PR3 review).
+		if !c.joinHandler.ValidSecret(req.NodeID, req.SecretHash) {
+			return req.NodeID, false, nil
+		}
 		isLeader := c.IsLeader()
 		ldrID, ldrAddr := c.cfg.NodeID, c.advertiseAddr
 		if !isLeader {
