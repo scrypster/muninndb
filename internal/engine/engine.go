@@ -2203,6 +2203,34 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	}
 	wg.Wait()
 
+	// Persist the surfaced set as a recall event (issue #573): the engrams
+	// this recall actually returned (post entity-boost, post truncation),
+	// keyed by a time-ordered event ULID. Skipped in observe mode — a pure
+	// read must not write the signal that calibration reads. On success the
+	// event ID becomes the response query_id, so a later muninn_decide can
+	// be joined offline against exactly what this recall surfaced.
+	queryID := e.fastQueryID()
+	if len(items) > 0 && !auth.ObserveFromContext(ctx) {
+		eventID := storage.NewULID()
+		entries := make([]storage.RecallSurfacedEntry, len(items))
+		for i, item := range items {
+			entries[i] = storage.RecallSurfacedEntry{ID: item.ID, Score: item.Score}
+		}
+		ev := &storage.RecallEvent{
+			Context:    req.Context,
+			Threshold:  float32(actReq.Threshold),
+			SurfacedAt: time.Now().UnixNano(),
+			Entries:    entries,
+		}
+		if err := e.store.WriteRecallEvent(ctx, wsPrefix, eventID, ev); err != nil {
+			// Persistence is best-effort: a failed sink write degrades
+			// calibration ground truth, never the recall itself.
+			slog.Warn("activate: persist recall event failed", "err", err)
+		} else {
+			queryID = eventID.String()
+		}
+	}
+
 	// Submit co-activations to Hebbian worker (skipped in observe mode or when disabled by Plasticity).
 	// On Lobe nodes (hebbianWorker == nil) collect refs for forwarding to Cortex instead.
 	var lobeCoActivations []mbp.CoActivationRef
@@ -2331,7 +2359,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	metrics.ActivateDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
 
 	return &mbp.ActivateResponse{
-		QueryID:     e.fastQueryID(),
+		QueryID:     queryID,
 		TotalFound:  result.TotalFound,
 		Activations: items,
 		LatencyMs:   result.LatencyMs,

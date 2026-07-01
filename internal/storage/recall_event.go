@@ -1,0 +1,187 @@
+package storage
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+	"sync/atomic"
+	"time"
+
+	"github.com/cockroachdb/pebble"
+	"github.com/oklog/ulid/v2"
+	"github.com/vmihailenco/msgpack/v5"
+
+	"github.com/scrypster/muninndb/internal/storage/keys"
+)
+
+const (
+	// recallEventRetentionDays is how long persisted recall events are kept.
+	// Pinned rather than configurable: calibration ground truth wants weeks
+	// to months of events, and the records are small (one per recall).
+	recallEventRetentionDays = 90
+
+	// recallEventPruneInterval amortizes retention pruning: every Nth
+	// WriteRecallEvent per process also prunes the writing vault's expired
+	// events. Keeps retention maintenance inside the write path — no
+	// background job or external hook required.
+	recallEventPruneInterval = 256
+)
+
+// recallEventWriteSeq drives the amortized prune schedule.
+var recallEventWriteSeq atomic.Uint64
+
+// RecallSurfacedEntry is one engram surfaced by a recall, with the final
+// score the caller saw (post entity-boost, post truncation).
+type RecallSurfacedEntry struct {
+	ID    string  `msgpack:"id"`
+	Score float32 `msgpack:"score"`
+}
+
+// RecallEvent is the persisted record of what one recall surfaced (issue
+// #573). Together with the decision→evidence edges written by Decide(), it
+// makes scoring ground truth regenerable by rule: positives = surfaced AND
+// cited; negatives = surfaced minus cited, per event.
+type RecallEvent struct {
+	// Context is the query context the caller passed to the recall.
+	Context []string `msgpack:"context,omitempty"`
+	// Threshold is the effective score threshold the recall ran with.
+	Threshold float32 `msgpack:"threshold,omitempty"`
+	// SurfacedAt is the event wall-clock time in Unix nanoseconds.
+	SurfacedAt int64 `msgpack:"surfaced_at"`
+	// Entries are the surfaced engrams in returned order.
+	Entries []RecallSurfacedEntry `msgpack:"entries"`
+}
+
+// WriteRecallEvent persists ev under (wsPrefix, eventID). Event IDs are
+// ULIDs, so keys within a vault sort by event time. Every
+// recallEventPruneInterval-th call also prunes the vault's events older
+// than the retention window.
+func (ps *PebbleStore) WriteRecallEvent(ctx context.Context, wsPrefix [8]byte, eventID ULID, ev *RecallEvent) error {
+	if ev == nil {
+		return fmt.Errorf("write recall event: nil event")
+	}
+	val, err := msgpack.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("recall event marshal: %w", err)
+	}
+	key := keys.RecallEventKey(wsPrefix, [16]byte(eventID))
+	if err := ps.db.Set(key, val, pebble.NoSync); err != nil {
+		return fmt.Errorf("write recall event: %w", err)
+	}
+	if recallEventWriteSeq.Add(1)%recallEventPruneInterval == 0 {
+		cutoff := time.Now().AddDate(0, 0, -recallEventRetentionDays)
+		if _, err := ps.PruneRecallEvents(ctx, wsPrefix, cutoff); err != nil {
+			return fmt.Errorf("write recall event: amortized prune: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetRecallEvent fetches one recall event. Returns nil, nil when absent.
+func (ps *PebbleStore) GetRecallEvent(ctx context.Context, wsPrefix [8]byte, eventID ULID) (*RecallEvent, error) {
+	key := keys.RecallEventKey(wsPrefix, [16]byte(eventID))
+	val, closer, err := ps.db.Get(key)
+	if err == pebble.ErrNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get recall event: %w", err)
+	}
+	defer closer.Close()
+	var ev RecallEvent
+	if err := msgpack.Unmarshal(val, &ev); err != nil {
+		return nil, fmt.Errorf("recall event unmarshal: %w", err)
+	}
+	return &ev, nil
+}
+
+// ScanRecallEvents iterates all recall events in a vault in event-time order
+// (ULID key order). fn may return a non-nil error to stop the scan; that
+// error is returned to the caller.
+func (ps *PebbleStore) ScanRecallEvents(ctx context.Context, wsPrefix [8]byte, fn func(eventID ULID, ev *RecallEvent) error) error {
+	prefix := keys.RecallEventPrefix(wsPrefix)
+	iter, err := ps.db.NewIter(&pebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: prefixUpperBound(prefix),
+	})
+	if err != nil {
+		return fmt.Errorf("scan recall events: iter: %w", err)
+	}
+	defer iter.Close()
+
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		k := iter.Key()
+		if len(k) != 25 { // 1 + 8 + 16
+			continue
+		}
+		var id ULID
+		copy(id[:], k[9:25])
+		var ev RecallEvent
+		if err := msgpack.Unmarshal(iter.Value(), &ev); err != nil {
+			return fmt.Errorf("recall event unmarshal (%s): %w", id.String(), err)
+		}
+		if err := fn(id, &ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PruneRecallEvents deletes all recall events in a vault whose event time is
+// before the cutoff, using the ULID timestamp embedded in the key — no value
+// reads needed. Returns the number of events deleted.
+func (ps *PebbleStore) PruneRecallEvents(ctx context.Context, wsPrefix [8]byte, before time.Time) (int, error) {
+	prefix := keys.RecallEventPrefix(wsPrefix)
+	// Smallest possible ULID at the cutoff timestamp: 6-byte big-endian
+	// milliseconds, zero entropy. Every key below it is older than cutoff.
+	var bound [16]byte
+	ms := ulid.Timestamp(before)
+	binary.BigEndian.PutUint64(bound[:8], ms<<16) // left-align 48-bit ms into first 6 bytes
+	upper := keys.RecallEventKey(wsPrefix, bound)
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upper})
+	if err != nil {
+		return 0, fmt.Errorf("prune recall events: iter: %w", err)
+	}
+	batch := ps.db.NewBatch()
+	count := 0
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if err := ctx.Err(); err != nil {
+			iter.Close()
+			batch.Close()
+			return 0, err
+		}
+		if err := batch.Delete(iter.Key(), nil); err != nil {
+			iter.Close()
+			batch.Close()
+			return 0, fmt.Errorf("prune recall events: delete: %w", err)
+		}
+		count++
+	}
+	iter.Close()
+	if count == 0 {
+		batch.Close()
+		return 0, nil
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return 0, fmt.Errorf("prune recall events: commit: %w", err)
+	}
+	return count, nil
+}
+
+// prefixUpperBound returns the smallest key greater than every key with the
+// given prefix, for use as an exclusive iterator upper bound.
+func prefixUpperBound(prefix []byte) []byte {
+	upper := make([]byte, len(prefix))
+	copy(upper, prefix)
+	for i := len(upper) - 1; i >= 0; i-- {
+		upper[i]++
+		if upper[i] != 0 {
+			return upper[:i+1]
+		}
+	}
+	return nil // prefix was all 0xFF — no upper bound
+}

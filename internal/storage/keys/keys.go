@@ -786,6 +786,28 @@ func ContentHashKey(ws [8]byte, hash [32]byte) []byte {
 	return key
 }
 
+// RecallEventKey constructs the recall-event record key (0x29 prefix).
+// Persists the surfaced set of one recall, keyed by a time-ordered event
+// ULID (issue #573).
+// Key: 0x29 | wsPrefix(8) | eventID(16) = 25 bytes
+// Value: msgpack-encoded RecallEvent
+func RecallEventKey(ws [8]byte, eventID [16]byte) []byte {
+	key := make([]byte, 1+8+16)
+	key[0] = 0x29
+	copy(key[1:9], ws[:])
+	copy(key[9:25], eventID[:])
+	return key
+}
+
+// RecallEventPrefix returns the 9-byte scan prefix for all recall events in
+// a vault. ULID key ordering means iteration runs in event-time order.
+func RecallEventPrefix(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = 0x29
+	copy(key[1:9], ws[:])
+	return key
+}
+
 // LeaseKey constructs the ownership-lease sidecar key (0x2A prefix) for an engram.
 // The lease is a work-queue checkout attribute stored next to the engram it
 // guards, not a separate lock object.
