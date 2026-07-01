@@ -87,9 +87,11 @@ type EngineInterface interface {
 	// LastAccess descending. limit caps results (default 10, max 50).
 	WhereLeftOff(ctx context.Context, vault string, limit int) ([]WhereLeftOffEntry, error)
 
-	// FindByEntity returns all engrams that mention the given entity name,
-	// scanned from the 0x23 reverse index. Results are limited to limit entries.
-	FindByEntity(ctx context.Context, vault, entityName string, limit int) ([]*storage.Engram, error)
+	// FindByEntity returns engrams that mention the given entity name,
+	// scanned from the 0x23 reverse index; on zero exact matches the vault's
+	// entity names are fuzzy-resolved by token overlap and the result reports
+	// which entity actually served the lookup. Results are limited to limit entries.
+	FindByEntity(ctx context.Context, vault, entityName string, limit int) (*engine.FindByEntityResult, error)
 
 	// CheckIdempotency looks up an op_id receipt. Returns nil, nil if not found.
 	CheckIdempotency(ctx context.Context, opID string) (*storage.IdempotencyReceipt, error)

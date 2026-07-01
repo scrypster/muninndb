@@ -44,11 +44,13 @@ func TestFindByEntity_ExcludesArchived(t *testing.T) {
 	require.NoError(t, err)
 
 	// FindByEntity must return only the active engram.
-	results, err := eng.FindByEntity(ctx, vault, "SharedEntity", 50)
+	res, err := eng.FindByEntity(ctx, vault, "SharedEntity", 50)
 	require.NoError(t, err)
+	require.Equal(t, "SharedEntity", res.MatchedEntity)
+	require.False(t, res.Fuzzy, "exact lookup must not be marked fuzzy")
 
 	var foundActive, foundArchived bool
-	for _, r := range results {
+	for _, r := range res.Engrams {
 		if r.ID == idA {
 			foundActive = true
 		}
@@ -93,11 +95,11 @@ func TestFindByEntity_ExcludesSoftDeleted(t *testing.T) {
 	err = eng.store.SoftDelete(ctx, ws, idB)
 	require.NoError(t, err)
 
-	results, err := eng.FindByEntity(ctx, vault, "SharedEntity2", 50)
+	res, err := eng.FindByEntity(ctx, vault, "SharedEntity2", 50)
 	require.NoError(t, err)
 
 	var foundActive, foundDeleted bool
-	for _, r := range results {
+	for _, r := range res.Engrams {
 		if r.ID == idA {
 			foundActive = true
 		}
