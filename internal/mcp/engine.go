@@ -173,6 +173,20 @@ type EngineInterface interface {
 	// trust must be one of "verified", "inferred", "external", "untrusted".
 	SetTrust(ctx context.Context, vault, id, trust string) error
 
+	// CompareAndSet atomically transitions an engram's lifecycle state, applying
+	// setState only if the current state matches expectState (nil bounds are
+	// skipped). Returns whether it applied plus the current state and lease owner.
+	CompareAndSet(ctx context.Context, vault, id string, expectState, setState *string) (applied bool, state, owner string, err error)
+
+	// Claim takes or refreshes an advisory ownership lease on an engram for
+	// work-queue coordination. Returns one of acquired/refreshed/reclaimed/conflict,
+	// and (on conflict) the live owner plus its heartbeat.
+	Claim(ctx context.Context, vault, id, owner string, ttlSecs int64) (status, curOwner string, heartbeat int64, err error)
+
+	// Release relinquishes a lease held by owner. Idempotent: released is false
+	// when the engram was unleased or held by someone else.
+	Release(ctx context.Context, vault, id, owner string) (released bool, curOwner string, err error)
+
 	// GetAnnotations returns annotation metadata for a single engram.
 	// Used to populate muninn_recall annotation objects when annotate=true.
 	// Returns a non-nil *engine.AnnotationData (possibly with empty fields) on success.
