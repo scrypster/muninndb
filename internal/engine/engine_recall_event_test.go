@@ -43,7 +43,7 @@ func TestRecall_PersistsRecallEvent(t *testing.T) {
 	require.NoError(t, err, "query_id must be a ULID when the recall event was persisted, got %q", resp.QueryID)
 
 	ws := eng.store.ResolveVaultPrefix(vault)
-	ev, err := eng.store.GetRecallEvent(ctx, ws, eventID)
+	ev, err := eng.store.GetRecallEvent(ctx, ws, eventID, storage.RecallPurposeCalibration)
 	require.NoError(t, err)
 	require.NotNil(t, ev, "recall event must be persisted")
 
@@ -87,7 +87,7 @@ func TestRecall_ObserveModeDoesNotPersist(t *testing.T) {
 
 	ws := eng.store.ResolveVaultPrefix(vault)
 	count := 0
-	require.NoError(t, eng.store.ScanRecallEvents(ctx, ws, func(_ storage.ULID, _ *storage.RecallEvent) error {
+	require.NoError(t, eng.store.ScanRecallEvents(ctx, ws, storage.RecallPurposeCalibration, func(_ storage.ULID, _ *storage.RecallEvent) error {
 		count++
 		return nil
 	}))
@@ -116,7 +116,7 @@ func TestRecall_NoResultsNoEvent(t *testing.T) {
 
 	ws := eng.store.ResolveVaultPrefix(vault)
 	count := 0
-	require.NoError(t, eng.store.ScanRecallEvents(ctx, ws, func(_ storage.ULID, _ *storage.RecallEvent) error {
+	require.NoError(t, eng.store.ScanRecallEvents(ctx, ws, storage.RecallPurposeCalibration, func(_ storage.ULID, _ *storage.RecallEvent) error {
 		count++
 		return nil
 	}))

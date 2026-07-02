@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -29,6 +30,34 @@ const (
 
 // recallEventWriteSeq drives the amortized prune schedule.
 var recallEventWriteSeq atomic.Uint64
+
+// RecallEventPurpose declares why a reader is accessing recall events.
+// Recall events are calibration instrument data, not a memory surface:
+// nothing may recall FROM them, and every read path is purpose-gated
+// against a closed allowlist by construction — an unknown purpose is
+// refused loudly, not logged quietly. Widening the allowlist requires
+// editing validRecallPurposes, so any change to who may read this data is
+// a reviewable diff rather than a remembered promise (issue #573).
+type RecallEventPurpose string
+
+// RecallPurposeCalibration marks reads by scoring-calibration tooling —
+// fitting weights against recorded ground truth. The only permitted purpose.
+const RecallPurposeCalibration RecallEventPurpose = "calibration"
+
+// validRecallPurposes is the closed allowlist for recall-event reads.
+var validRecallPurposes = map[RecallEventPurpose]struct{}{
+	RecallPurposeCalibration: {},
+}
+
+// checkRecallPurpose refuses reads whose purpose is not in the allowlist.
+func checkRecallPurpose(action string, purpose RecallEventPurpose) error {
+	if _, ok := validRecallPurposes[purpose]; !ok {
+		slog.Error("storage: recall-event read refused — purpose not in allowlist",
+			"action", action, "purpose", string(purpose))
+		return fmt.Errorf("%s: recall events are purpose-gated instrument data; purpose %q is not in the allowlist", action, purpose)
+	}
+	return nil
+}
 
 // RecallSurfacedEntry is one engram surfaced by a recall, with the final
 // score the caller saw (post entity-boost, post truncation).
@@ -78,7 +107,12 @@ func (ps *PebbleStore) WriteRecallEvent(ctx context.Context, wsPrefix [8]byte, e
 }
 
 // GetRecallEvent fetches one recall event. Returns nil, nil when absent.
-func (ps *PebbleStore) GetRecallEvent(ctx context.Context, wsPrefix [8]byte, eventID ULID) (*RecallEvent, error) {
+// Reads are purpose-gated and logged — see RecallEventPurpose.
+func (ps *PebbleStore) GetRecallEvent(ctx context.Context, wsPrefix [8]byte, eventID ULID, purpose RecallEventPurpose) (*RecallEvent, error) {
+	if err := checkRecallPurpose("get recall event", purpose); err != nil {
+		return nil, err
+	}
+	slog.Info("storage: recall event read", "action", "get", "purpose", string(purpose), "event_id", eventID.String())
 	key := keys.RecallEventKey(wsPrefix, [16]byte(eventID))
 	val, closer, err := ps.db.Get(key)
 	if err == pebble.ErrNotFound {
@@ -98,7 +132,12 @@ func (ps *PebbleStore) GetRecallEvent(ctx context.Context, wsPrefix [8]byte, eve
 // ScanRecallEvents iterates all recall events in a vault in event-time order
 // (ULID key order). fn may return a non-nil error to stop the scan; that
 // error is returned to the caller.
-func (ps *PebbleStore) ScanRecallEvents(ctx context.Context, wsPrefix [8]byte, fn func(eventID ULID, ev *RecallEvent) error) error {
+// Reads are purpose-gated and logged — see RecallEventPurpose.
+func (ps *PebbleStore) ScanRecallEvents(ctx context.Context, wsPrefix [8]byte, purpose RecallEventPurpose, fn func(eventID ULID, ev *RecallEvent) error) error {
+	if err := checkRecallPurpose("scan recall events", purpose); err != nil {
+		return err
+	}
+	slog.Info("storage: recall event read", "action", "scan", "purpose", string(purpose))
 	prefix := keys.RecallEventPrefix(wsPrefix)
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
@@ -169,6 +208,7 @@ func (ps *PebbleStore) PruneRecallEvents(ctx context.Context, wsPrefix [8]byte, 
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return 0, fmt.Errorf("prune recall events: commit: %w", err)
 	}
+	slog.Info("storage: recall events pruned", "count", count)
 	return count, nil
 }
 

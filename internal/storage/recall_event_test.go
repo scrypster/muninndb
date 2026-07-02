@@ -27,7 +27,7 @@ func TestRecallEvent_WriteGetRoundtrip(t *testing.T) {
 	}
 	require.NoError(t, store.WriteRecallEvent(ctx, ws, id, ev))
 
-	got, err := store.GetRecallEvent(ctx, ws, id)
+	got, err := store.GetRecallEvent(ctx, ws, id, RecallPurposeCalibration)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, ev.Context, got.Context)
@@ -36,7 +36,7 @@ func TestRecallEvent_WriteGetRoundtrip(t *testing.T) {
 	require.Equal(t, ev.Entries, got.Entries)
 
 	// Absent event: nil, nil.
-	absent, err := store.GetRecallEvent(ctx, ws, NewULID())
+	absent, err := store.GetRecallEvent(ctx, ws, NewULID(), RecallPurposeCalibration)
 	require.NoError(t, err)
 	require.Nil(t, absent)
 }
@@ -66,7 +66,7 @@ func TestRecallEvent_ScanOrder(t *testing.T) {
 	}))
 
 	var seen []ULID
-	require.NoError(t, store.ScanRecallEvents(ctx, ws, func(id ULID, ev *RecallEvent) error {
+	require.NoError(t, store.ScanRecallEvents(ctx, ws, RecallPurposeCalibration, func(id ULID, ev *RecallEvent) error {
 		seen = append(seen, id)
 		return nil
 	}))
@@ -96,10 +96,42 @@ func TestRecallEvent_Prune(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, deleted, "both events older than the cutoff must be pruned")
 
-	gone, err := store.GetRecallEvent(ctx, ws, oldA)
+	gone, err := store.GetRecallEvent(ctx, ws, oldA, RecallPurposeCalibration)
 	require.NoError(t, err)
 	require.Nil(t, gone)
-	kept, err := store.GetRecallEvent(ctx, ws, fresh)
+	kept, err := store.GetRecallEvent(ctx, ws, fresh, RecallPurposeCalibration)
 	require.NoError(t, err)
 	require.NotNil(t, kept, "event newer than the cutoff must survive")
+}
+
+// TestRecallEvent_PurposeGate verifies the read fence: recall events are
+// purpose-gated instrument data, and reads without an allowlisted purpose
+// fail loudly by construction — no watcher required.
+func TestRecallEvent_PurposeGate(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.ResolveVaultPrefix("recall-event-fence")
+
+	id := NewULID()
+	require.NoError(t, store.WriteRecallEvent(ctx, ws, id, &RecallEvent{
+		SurfacedAt: time.Now().UnixNano(),
+		Entries:    []RecallSurfacedEntry{{ID: NewULID().String(), Score: 0.5}},
+	}))
+
+	// Empty purpose: refused.
+	_, err := store.GetRecallEvent(ctx, ws, id, "")
+	require.Error(t, err, "read with empty purpose must be refused")
+	require.Contains(t, err.Error(), "purpose-gated")
+
+	// Unknown purpose: refused — narrative reading is not a purpose.
+	_, err = store.GetRecallEvent(ctx, ws, id, "narrative")
+	require.Error(t, err, "read with non-allowlisted purpose must be refused")
+
+	err = store.ScanRecallEvents(ctx, ws, "recall", func(ULID, *RecallEvent) error { return nil })
+	require.Error(t, err, "scan with non-allowlisted purpose must be refused")
+
+	// Allowlisted purpose: permitted.
+	got, err := store.GetRecallEvent(ctx, ws, id, RecallPurposeCalibration)
+	require.NoError(t, err)
+	require.NotNil(t, got)
 }
