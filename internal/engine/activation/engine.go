@@ -171,6 +171,12 @@ type ActivateRequest struct {
 	// ExcludeUntrusted: when true, engrams with TrustUntrusted (0x04) are silently
 	// excluded from activation results. Set by the engine from vault PlasticityConfig.
 	ExcludeUntrusted bool
+	// CallerOwner is the ownership-lease identity of the recall caller. Engrams
+	// held by a live lease owned by someone else are hidden (work-queue checkout),
+	// unless IncludeLeased is set. Empty means the caller owns no leases.
+	CallerOwner string
+	// IncludeLeased disables lease-based visibility filtering (admin/debugging).
+	IncludeLeased bool
 }
 
 // ActivateResult is what the transport layer serializes and returns.
@@ -197,6 +203,9 @@ type ActivateResponseFrame struct {
 type ActivationStore interface {
 	GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([]*storage.EngramMeta, error)
 	GetEngrams(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([]*storage.Engram, error)
+	// GetLeases batch-reads ownership leases, one per id in order (zero Lease for
+	// unleased engrams). Used for work-queue recall visibility filtering.
+	GetLeases(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([]storage.Lease, error)
 	GetAssociations(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error)
 	RecentActive(ctx context.Context, wsPrefix [8]byte, topK int) ([]storage.ULID, error)
 	VaultPrefix(vault string) [8]byte
@@ -1213,6 +1222,24 @@ func (e *ActivationEngine) phase6Score(
 		return nil, fmt.Errorf("phase6 get engrams: %w", err)
 	}
 
+	// Ownership-lease work-queue visibility (#548): hide engrams checked out by a
+	// live lease owned by someone other than the caller, mirroring how soft-deleted
+	// engrams are excluded. Staleness is evaluated here against the server clock, so
+	// an expired lease never hides anything. Skipped entirely when IncludeLeased is
+	// set (admin/debug opt-out).
+	leaseFilterNow := time.Now()
+	var leaseByID map[storage.ULID]storage.Lease
+	if !req.IncludeLeased {
+		leases, err := e.store.GetLeases(ctx, ws, ids)
+		if err != nil {
+			return nil, fmt.Errorf("phase6 get leases: %w", err)
+		}
+		leaseByID = make(map[storage.ULID]storage.Lease, len(ids))
+		for i, id := range ids {
+			leaseByID[id] = leases[i]
+		}
+	}
+
 	// Filter out soft-deleted engrams (defense-in-depth; HNSW has no delete method).
 	// Also filter untrusted engrams when ExcludeUntrusted is set in the request.
 	var active []*storage.Engram
@@ -1228,6 +1255,12 @@ func (e *ActivationEngine) phase6Score(
 		// backward-compat alias for TrustInferred, not an "unknown" or untrusted value.
 		if req.ExcludeUntrusted && eng.Trust == storage.TrustUntrusted {
 			continue
+		}
+		// Work-queue checkout: hide engrams under a live foreign lease.
+		if !req.IncludeLeased {
+			if l := leaseByID[eng.ID]; l.Live(leaseFilterNow) && l.Owner != req.CallerOwner {
+				continue
+			}
 		}
 		active = append(active, eng)
 	}

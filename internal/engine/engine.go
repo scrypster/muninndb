@@ -1938,6 +1938,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	actReq.PASMaxInjections = resolved.PASMaxInjections
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
 
+	// Ownership-lease work-queue visibility (#548): hide engrams checked out by a
+	// live foreign lease unless the caller opts in.
+	actReq.CallerOwner = req.CallerOwner
+	actReq.IncludeLeased = req.IncludeLeased
+
 	// Set defaults
 	if actReq.MaxResults == 0 {
 		actReq.MaxResults = 20
@@ -2693,30 +2698,28 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 }
 
 // UpdateLifecycleState transitions an engram to the named lifecycle state.
+// The write goes through the stripe-locked CompareAndSet path (with no guard),
+// so its read-modify-write is atomic and serializes with any concurrent
+// transition on the same engram — closing the former TOCTOU.
 func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state string) error {
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
 		return fmt.Errorf("parse id: %w", err)
 	}
-	eng, err := e.store.GetEngram(ctx, ws, ulid)
-	if err != nil {
-		return fmt.Errorf("get engram: %w", err)
-	}
 	newState, err := storage.ParseLifecycleState(state)
 	if err != nil {
 		return err
 	}
-	meta := &storage.EngramMeta{
-		State:       newState,
-		Confidence:  eng.Confidence,
-		Relevance:   eng.Relevance,
-		Stability:   eng.Stability,
-		AccessCount: eng.AccessCount,
-		UpdatedAt:   time.Now(),
-		LastAccess:  eng.LastAccess,
+	if _, err := e.store.CompareAndSet(ctx, ws, ulid,
+		storage.CASCondition{},
+		storage.CASMutation{State: &newState}); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("get engram: %w", err)
+		}
+		return err
 	}
-	return e.store.UpdateMetadata(ctx, ws, ulid, meta)
+	return nil
 }
 
 // SetTrust changes the trust label of an engram identified by id (string ULID).
