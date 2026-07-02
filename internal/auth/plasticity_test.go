@@ -523,3 +523,18 @@ func TestResolvePlasticity_ExcludeUntrusted(t *testing.T) {
 		t.Error("ExcludeUntrusted should be true when config sets it")
 	}
 }
+
+func TestMultiUser_Default(t *testing.T) {
+	r := ResolvePlasticity(nil)
+	if r.MultiUser {
+		t.Error("default: want MultiUser=false (single-user guidance)")
+	}
+}
+
+func TestMultiUser_Override(t *testing.T) {
+	on := true
+	r := ResolvePlasticity(&PlasticityConfig{MultiUser: &on})
+	if !r.MultiUser {
+		t.Error("override: want MultiUser=true")
+	}
+}

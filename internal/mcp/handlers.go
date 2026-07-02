@@ -444,7 +444,11 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		"total":    resp.TotalFound,
 	}
 	if len(memories) == 0 {
-		result["hint"] = "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."
+		hint := "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."
+		if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.MultiUser {
+			hint = "No results matched. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global). For semantic recall, provide more specific context."
+		}
+		result["hint"] = hint
 	}
 	sendResult(w, id, textContent(mustJSON(result)))
 }
@@ -846,10 +850,14 @@ func (s *MCPServer) handleWhereLeftOff(ctx context.Context, w http.ResponseWrite
 	if entries == nil {
 		entries = []WhereLeftOffEntry{}
 	}
+	hint := "These are your most recently accessed memories. Use them to orient yourself for this session."
+	if p, perr := s.engine.GetVaultPlasticity(ctx, vault); perr == nil && p != nil && p.MultiUser {
+		hint = "These are the most recently accessed memories across ALL users of this shared vault — not necessarily yours. For your own session context, use muninn_recall scoped to your per-user tag."
+	}
 	sendResult(w, id, textContent(mustJSON(map[string]any{
 		"memories": entries,
 		"count":    len(entries),
-		"hint":     "These are your most recently accessed memories. Use them to orient yourself for this session.",
+		"hint":     hint,
 	})))
 }
 

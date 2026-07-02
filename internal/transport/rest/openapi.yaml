@@ -949,6 +949,13 @@ components:
         preset:
           type: string
           enum: [default, reference, scratchpad, knowledge-graph]
+        multi_user:
+          type: boolean
+          nullable: true
+          description: >-
+            Vault is shared by multiple users/agents — guidance surfaces
+            (muninn_guide, recall hints) steer clients to per-user scoped
+            recall instead of vault-global recency tools.
         hebbian_enabled:
           type: boolean
           nullable: true

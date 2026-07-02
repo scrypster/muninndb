@@ -43,9 +43,15 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 		b.WriteString("Before starting any task, recall relevant memories. ")
 		b.WriteString("After completing work, remember key outcomes.\n\n")
 		b.WriteString("**Session start pattern:** At the start of every session, call recall twice:\n")
-		b.WriteString("1. `muninn_recall(context=[\"session start\"], mode=\"recent\")` — restores recent continuity regardless of topic.\n")
-		b.WriteString("2. Once the user provides context, call `muninn_recall(context=[<user topic>])` for semantic relevance.\n")
-		b.WriteString("Alternatively, use `muninn_where_left_off` — it is purpose-built for session resumption.\n")
+		if resolved.MultiUser {
+			b.WriteString("1. `muninn_recall(context=[\"<your per-user tag>\", \"session start\"], mode=\"recent\")` — restores YOUR recent continuity. This vault is shared: unscoped recency surfaces other users' work.\n")
+			b.WriteString("2. Once the user provides context, call `muninn_recall(context=[<user topic>])` for semantic relevance.\n")
+			b.WriteString("Avoid `muninn_where_left_off` and `muninn_session` here — they return vault-global recency across all users (admin/audit use).\n")
+		} else {
+			b.WriteString("1. `muninn_recall(context=[\"session start\"], mode=\"recent\")` — restores recent continuity regardless of topic.\n")
+			b.WriteString("2. Once the user provides context, call `muninn_recall(context=[<user topic>])` for semantic relevance.\n")
+			b.WriteString("Alternatively, use `muninn_where_left_off` — it is purpose-built for session resumption.\n")
+		}
 	}
 
 	// Enrichment guidance based on behavior mode + inline enrichment setting
@@ -72,7 +78,11 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- **muninn_remember** — Store a new memory\n")
 	b.WriteString("- **muninn_remember_batch** — Store multiple memories at once (max 50)\n")
 	b.WriteString("- **muninn_recall** — Search memories by semantic context (use mode='recent' at session start)\n")
-	b.WriteString("- **muninn_where_left_off** — Resume a previous session; returns recent activity summary\n")
+	if resolved.MultiUser {
+		b.WriteString("- **muninn_where_left_off** — Recent activity across ALL users of this shared vault (admin/audit; not for session start)\n")
+	} else {
+		b.WriteString("- **muninn_where_left_off** — Resume a previous session; returns recent activity summary\n")
+	}
 	b.WriteString("- **muninn_read** — Fetch a single memory by ID\n")
 	b.WriteString("- **muninn_forget** — Soft-delete a memory\n")
 	b.WriteString("- **muninn_link** — Create associations between memories\n")
@@ -80,7 +90,11 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- **muninn_status** — Get vault health and stats\n")
 	b.WriteString("- **muninn_evolve** — Update a memory with new information\n")
 	b.WriteString("- **muninn_consolidate** — Merge related memories into one\n")
-	b.WriteString("- **muninn_session** — Get recent memory activity summary\n")
+	if resolved.MultiUser {
+		b.WriteString("- **muninn_session** — Recent memory activity across ALL users of this shared vault (admin/audit)\n")
+	} else {
+		b.WriteString("- **muninn_session** — Get recent memory activity summary\n")
+	}
 	b.WriteString("- **muninn_decide** — Record a decision with rationale\n")
 	b.WriteString("- **muninn_restore** — Recover a soft-deleted memory\n")
 	b.WriteString("- **muninn_traverse** — Explore the memory graph from a starting node\n")
@@ -96,6 +110,9 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("\n## Vault Configuration\n\n")
 	fmt.Fprintf(&b, "- Memories stored: %d\n", stats.EngramCount)
 	fmt.Fprintf(&b, "- Behavior mode: %s\n", resolved.BehaviorMode)
+	if resolved.MultiUser {
+		b.WriteString("- Shared vault (multi-user): yes\n")
+	}
 	fmt.Fprintf(&b, "- Hebbian learning: %s\n", enabledStr(resolved.HebbianEnabled))
 	if resolved.LTPThreshold > 0 {
 		fmt.Fprintf(&b, "- Hebbian LTP: enabled (threshold %d, weight floor %.2f)\n", resolved.LTPThreshold, resolved.LTPWeightFloor)
@@ -160,7 +177,11 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 
 	// Tips
 	b.WriteString("\n## Tips\n\n")
-	b.WriteString("- Use muninn_where_left_off at session start — purpose-built for resuming where you left off.\n")
+	if resolved.MultiUser {
+		b.WriteString("- This vault is shared: scope recalls to your own work (include your per-user tag in the context); muninn_where_left_off and muninn_session are vault-global (admin/audit).\n")
+	} else {
+		b.WriteString("- Use muninn_where_left_off at session start — purpose-built for resuming where you left off.\n")
+	}
 	b.WriteString("- Use muninn_recall with mode='recent' when you need continuity but lack specific context.\n")
 	b.WriteString("- Use muninn_recall with mode='deep' for thorough searches across the memory graph.\n")
 	b.WriteString("- Use muninn_link to connect related memories and strengthen the knowledge graph.\n")

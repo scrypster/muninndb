@@ -229,3 +229,39 @@ func TestGenerateGuide_InlineEnrichmentInConfig(t *testing.T) {
 		t.Error("vault config should show inline enrichment setting")
 	}
 }
+
+func TestGenerateGuide_MultiUserVault(t *testing.T) {
+	on := true
+	r := auth.ResolvePlasticity(&auth.PlasticityConfig{MultiUser: &on})
+	guide := generateGuide("team", r, engineStats{})
+
+	if strings.Contains(guide, "purpose-built") {
+		t.Error("multi-user guide must not recommend where_left_off for session start")
+	}
+	if !strings.Contains(guide, "per-user tag") {
+		t.Error("multi-user guide should recommend per-user scoped recall")
+	}
+	if !strings.Contains(guide, "Shared vault (multi-user): yes") {
+		t.Error("multi-user guide should surface the setting in Vault Configuration")
+	}
+	if !strings.Contains(guide, "Recent activity across ALL users") {
+		t.Error("multi-user tool list should flag where_left_off as vault-global")
+	}
+	if strings.Contains(guide, "Resume a previous session") {
+		t.Error("multi-user tool list must not present where_left_off as session resumption")
+	}
+	if !strings.Contains(guide, "Recent memory activity across ALL users") {
+		t.Error("multi-user tool list should flag muninn_session as vault-global")
+	}
+}
+
+func TestGenerateGuide_SingleUserKeepsWhereLeftOff(t *testing.T) {
+	r := auth.ResolvePlasticity(nil)
+	guide := generateGuide("default", r, engineStats{})
+	if !strings.Contains(guide, "purpose-built for session resumption") {
+		t.Error("single-user guide should keep the where_left_off session-start tip")
+	}
+	if !strings.Contains(guide, "Resume a previous session") {
+		t.Error("single-user tool list should keep the plain where_left_off entry")
+	}
+}

@@ -1973,6 +1973,10 @@ document.addEventListener('alpine:init', () => {
                 '/api/admin/vault/' + encodeURIComponent(this.vault) + '/plasticity'
             );
             const cfg = data.config || {};
+            // Keep the raw stored config: savePlasticity merges it into the PUT
+            // payload so fields this panel does not edit (multi_user,
+            // behavior_mode, …) survive a save (the PUT replaces the whole config).
+            this.plasticityRawConfig = cfg;
             this.plasticityForm.preset         = cfg.preset || 'default';
             this.plasticityForm.hebbianEnabled = data.resolved?.hebbian_enabled ?? true;
             this.plasticityForm.temporalEnabled   = data.resolved?.temporal_enabled   ?? true;
@@ -2092,7 +2096,7 @@ document.addEventListener('alpine:init', () => {
         this.plasticitySaveOk = false;
         this.plasticitySaveErr = '';
         try {
-            const payload = { version: 1, preset: this.plasticityForm.preset };
+            const payload = { ...(this.plasticityRawConfig || {}), version: 1, preset: this.plasticityForm.preset };
             payload.recall_mode = this.plasticityForm.recallMode;
             if (this.plasticityForm.showAdvanced) {
                 if (this.plasticityForm.hopDepth       !== null) payload.hop_depth       = this.plasticityForm.hopDepth;
