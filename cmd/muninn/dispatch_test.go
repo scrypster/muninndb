@@ -21,6 +21,12 @@ func TestParseSubcommand(t *testing.T) {
 		{[]string{"help"}, "help"},
 		{[]string{"start", "--dev"}, "start"}, // flags are not subcommands
 		{[]string{"init", "--yes"}, "init"},   // flags are not subcommands
+		// Joined container tokens main.go must route (a joined token with no
+		// route dies as Unknown command while help documents it as valid):
+		{[]string{"exec", "read"}, "exec:read"},
+		{[]string{"exec", "recall", "--query", "x"}, "exec:recall"},
+		{[]string{"logs", "50"}, "logs:50"},
+		{[]string{"cluster", "info"}, "cluster:info"},
 	}
 	for _, tc := range cases {
 		got := parseSubcommand(tc.args)
