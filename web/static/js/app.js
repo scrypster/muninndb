@@ -2106,6 +2106,17 @@ document.addEventListener('alpine:init', () => {
                 if (this.plasticityForm.temporalHalflife !== null) payload.temporal_halflife = this.plasticityForm.temporalHalflife;
                 payload.hebbian_enabled = this.plasticityForm.hebbianEnabled;
                 payload.temporal_enabled   = this.plasticityForm.temporalEnabled;
+            } else {
+                // Advanced panel is collapsed: reset any overrides carried over from
+                // plasticityRawConfig so the preset's defaults apply, matching the
+                // form (which shows no override in this state).
+                delete payload.hop_depth;
+                delete payload.semantic_weight;
+                delete payload.fts_weight;
+                delete payload.relevance_floor;
+                delete payload.temporal_halflife;
+                delete payload.hebbian_enabled;
+                delete payload.temporal_enabled;
             }
             await this.apiCall(
                 '/api/admin/vault/' + encodeURIComponent(this.vault) + '/plasticity',
