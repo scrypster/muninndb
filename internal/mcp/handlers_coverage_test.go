@@ -624,6 +624,27 @@ func TestHandleEvolve_MissingID(t *testing.T) {
 	}
 }
 
+func TestHandleEvolve_MissingFieldsNamed(t *testing.T) {
+	srv := newTestServer()
+	// Only 'new_content' supplied → error must name the two missing fields
+	// ('id' and 'reason') and omit the one that was provided.
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_evolve","arguments":{"vault":"default","new_content":"updated"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("expected -32602 for missing fields, got %v", resp.Error)
+	}
+	if !strings.Contains(resp.Error.Message, "'id'") {
+		t.Errorf("error should name missing 'id', got: %s", resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "'reason'") {
+		t.Errorf("error should name missing 'reason', got: %s", resp.Error.Message)
+	}
+	if strings.Contains(resp.Error.Message, "'new_content'") {
+		t.Errorf("error should not name the supplied 'new_content', got: %s", resp.Error.Message)
+	}
+}
+
 func TestHandleEvolve_EngineError(t *testing.T) {
 	srv := newTestServerWith(&evolveErrEngine{})
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_evolve","arguments":{"vault":"default","id":"old-id","new_content":"updated","reason":"stale"}}}`
