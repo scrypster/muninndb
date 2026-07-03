@@ -2,6 +2,7 @@ package activation
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -2275,5 +2276,61 @@ func TestPhase6Score_MetaFilterExcludes(t *testing.T) {
 		if a.Engram.State != storage.StateActive {
 			t.Errorf("meta filter should only allow StateActive, got %v", a.Engram.State)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// phase1 BM25 fallback: embedding backend down → no error, empty embedding
+// ---------------------------------------------------------------------------
+
+// failingEmbedder simulates an unreachable embedding backend.
+type failingEmbedder struct{ err error }
+
+func (e *failingEmbedder) Embed(_ context.Context, _ []string) ([]float32, error) {
+	return nil, e.err
+}
+
+func (e *failingEmbedder) Tokenize(text string) []string { return strings.Fields(text) }
+
+// minimalHNSW is a non-nil HNSW stub so phase1's embedder branch is entered.
+type minimalHNSW struct{}
+
+func (h *minimalHNSW) Search(_ context.Context, _ [8]byte, _ []float32, _ int) ([]ScoredID, error) {
+	return nil, nil
+}
+
+// TestPhase1_EmbedError_DegradesToBM25 verifies that when the embedding
+// backend returns an error (e.g. connection refused), phase1 returns a
+// result with no embedding (BM25-only path) instead of propagating the error.
+func TestPhase1_EmbedError_DegradesToBM25(t *testing.T) {
+	store := newInternalStubStore()
+	embedErr := errors.New("dial tcp 127.0.0.1:11435: connect: connection refused")
+
+	e := &ActivationEngine{
+		store:    store,
+		hnsw:     &minimalHNSW{},
+		embedder: &failingEmbedder{err: embedErr},
+		assocLog: &ActivationLog{},
+		logCh:    make(chan logItem, 4096),
+		logDone:  make(chan struct{}),
+	}
+	go e.drainLog()
+
+	req := &ActivateRequest{
+		VaultID: 1,
+		Context: []string{"test recall context"},
+	}
+	result, err := e.phase1(context.Background(), req)
+	if err != nil {
+		t.Fatalf("phase1 should not return error when embed fails: %v", err)
+	}
+	if result == nil {
+		t.Fatal("phase1 returned nil result")
+	}
+	if len(result.embedding) != 0 {
+		t.Errorf("expected empty embedding on embed failure, got len=%d", len(result.embedding))
+	}
+	if result.queryStr != "test recall context" {
+		t.Errorf("queryStr = %q, want %q", result.queryStr, "test recall context")
 	}
 }

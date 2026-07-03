@@ -69,7 +69,7 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 
 	content, ok := args["content"].(string)
 	if !ok || strings.TrimSpace(content) == "" {
-		sendError(w, id, -32602, "invalid params: 'content' is required")
+		sendError(w, id, -32602, "invalid params: 'content' is required (non-empty string)")
 		return
 	}
 	req := &mbp.WriteRequest{
@@ -444,7 +444,11 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		"total":    resp.TotalFound,
 	}
 	if len(memories) == 0 {
-		result["hint"] = "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."
+		hint := "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."
+		if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.MultiUser {
+			hint = "No results matched. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global). For semantic recall, provide more specific context."
+		}
+		result["hint"] = hint
 	}
 	sendResult(w, id, textContent(mustJSON(result)))
 }
@@ -547,7 +551,17 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	newContent, ok2 := args["new_content"].(string)
 	reason, ok3 := args["reason"].(string)
 	if !ok1 || !ok2 || !ok3 || engramID == "" || newContent == "" || reason == "" {
-		sendError(w, id, -32602, "invalid params: 'id', 'new_content', 'reason' are required")
+		var missing []string
+		if !ok1 || engramID == "" {
+			missing = append(missing, "'id' (engram ID to update)")
+		}
+		if !ok2 || newContent == "" {
+			missing = append(missing, "'new_content' (replacement text)")
+		}
+		if !ok3 || reason == "" {
+			missing = append(missing, "'reason' (why the memory changed)")
+		}
+		sendError(w, id, -32602, fmt.Sprintf("invalid params: missing required field(s): %s", strings.Join(missing, ", ")))
 		return
 	}
 	var evolveEmb []float32
@@ -846,10 +860,14 @@ func (s *MCPServer) handleWhereLeftOff(ctx context.Context, w http.ResponseWrite
 	if entries == nil {
 		entries = []WhereLeftOffEntry{}
 	}
+	hint := "These are your most recently accessed memories. Use them to orient yourself for this session."
+	if p, perr := s.engine.GetVaultPlasticity(ctx, vault); perr == nil && p != nil && p.MultiUser {
+		hint = "These are the most recently accessed memories across ALL users of this shared vault — not necessarily yours. For your own session context, use muninn_recall scoped to your per-user tag."
+	}
 	sendResult(w, id, textContent(mustJSON(map[string]any{
 		"memories": entries,
 		"count":    len(entries),
-		"hint":     "These are your most recently accessed memories. Use them to orient yourself for this session.",
+		"hint":     hint,
 	})))
 }
 

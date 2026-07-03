@@ -496,7 +496,13 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 	if e.embedder != nil && e.hnsw != nil {
 		vec, err := e.embedder.Embed(ctx, req.Context)
 		if err != nil {
-			return nil, fmt.Errorf("phase1 embed: %w", err)
+			// Embedding backend unreachable (e.g. connection refused on the
+			// embedding endpoint). Degrade to BM25+decay recall instead of
+			// aborting: FTS still returns useful results, and phase2 already
+			// takes the FTS-only path when len(embedding)==0.
+			slog.Warn("activation: embed backend unreachable, degrading to BM25-only recall",
+				"vault", req.VaultID, "error", err)
+			return result, nil
 		}
 		// Embed returns a flat len(texts)*dim slice — each phrase's vector
 		// concatenated. A multi-phrase context must be pooled back into a single

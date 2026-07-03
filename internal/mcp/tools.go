@@ -320,7 +320,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_session",
-			Description: "Get a summary of recent memory activity since a timestamp.",
+			Description: "Get a summary of recent memory activity since a timestamp — vault-wide: in a vault shared by multiple users or agents this includes other users' activity (admin/audit use there).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -516,7 +516,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_where_left_off",
-			Description: "Surface what was being worked on at the end of the last session. Returns the most recently accessed active memories, sorted by recency. Call this at session start to orient yourself before any user queries.",
+			Description: "Surface what was being worked on at the end of the last session. Returns the most recently accessed active memories, sorted by recency — vault-wide: in a vault shared by multiple users or agents this includes other users' activity, so prefer a tag-scoped muninn_recall there. In single-user vaults, call at session start to orient yourself before any user queries.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

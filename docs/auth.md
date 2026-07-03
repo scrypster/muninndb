@@ -222,6 +222,7 @@ curl -X PUT "http://127.0.0.1:8475/api/admin/vault/default/plasticity" \
 | `preset` | string | `default` \| `reference` \| `scratchpad` \| `knowledge-graph` | Base cognitive profile; overrides applied on top |
 | `hebbian_enabled` | bool | — | Enable/disable Hebbian weight updates (coactivation learning) |
 | `temporal_enabled` | bool | — | Enable/disable time-based temporal scoring |
+| `multi_user` | bool | — | Vault shared by multiple users/agents: guide + recall hints steer clients to per-user scoped recall; `where_left_off`/`session` flagged vault-global |
 | `hop_depth` | int | 0–8 | BFS hops for associative retrieval; higher = broader context |
 | `semantic_weight` | float | 0–1 | Multiplier for semantic similarity in fusion scoring |
 | `fts_weight` | float | 0–1 | Multiplier for full-text keyword match scoring |
