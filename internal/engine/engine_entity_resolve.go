@@ -45,13 +45,20 @@ func entityTokens(name string) []string {
 }
 
 // resolveEntityFuzzy ranks the vault's entity names against the query by
-// token overlap. A candidate qualifies when it shares at least one
-// non-stopword token with the query, or when its concatenated token string
-// equals the query's (bridging concatenation variants such as "TokenArcade"
-// vs "Token Arcade"). Candidates are ranked by Jaccard overlap of token
-// sets — concatenation equality ranks as 1.0 — with a lexicographic
-// tie-break for determinism. The match rule is set-membership; Jaccard is
-// used only for ranking, so there is no similarity threshold to tune.
+// token overlap. A candidate qualifies when its token set contains, or is
+// contained by, the query's token set (one is a subset of the other), or
+// when its concatenated token string equals the query's (bridging
+// concatenation variants such as "TokenArcade" vs "Token Arcade").
+// Containment — not mere overlap — is deliberate: a query sharing only one
+// token with an unrelated multi-word entity (e.g. "Token Arcade" vs "Arcade
+// Fire") must not qualify just because nothing better exists in the vault.
+// Every token-level variant this resolves (dropped/added articles, split or
+// joined words) is a subset/superset or exact-token-set relationship, so
+// containment loses no real case while ruling out coincidental partial
+// overlap. Candidates are ranked by Jaccard overlap of token sets —
+// concatenation equality ranks as 1.0 — with a lexicographic tie-break for
+// determinism; containment is the only threshold, so there is no similarity
+// number to tune.
 //
 // Vaults hold few distinct entity names, so this is an in-memory scan over
 // the 0x20 forward index (ScanVaultEntityNames) — no new index required.
@@ -87,7 +94,10 @@ func (e *Engine) resolveEntityFuzzy(ctx context.Context, ws [8]byte, query strin
 			}
 		}
 		joinedEqual := strings.Join(tokens, "") == qJoined
-		if shared == 0 && !joinedEqual {
+		// Containment: one token set must be a subset of the other — shared
+		// equals the size of whichever set is smaller.
+		contained := shared == len(set) || shared == len(qSet)
+		if !contained && !joinedEqual {
 			return nil
 		}
 		score := float64(shared) / float64(len(set)+len(qSet)-shared)
