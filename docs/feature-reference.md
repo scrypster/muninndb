@@ -341,6 +341,7 @@ Every cognitive behavior is tunable per vault:
 | `pas_max_injections` | 5 | 0–10 | Max PAS candidates to inject |
 | `behavior_mode` | `"autonomous"` | autonomous/prompted/selective/custom | How the AI should use memory (see below) |
 | `behavior_instructions` | `""` | string | Custom instructions for "custom" mode |
+| `multi_user` | false | bool | Vault is shared by multiple users/agents: guide + recall hints steer clients to per-user scoped recall; `muninn_where_left_off`/`muninn_session` are flagged vault-global (admin/audit) |
 | `inline_enrichment` | `"caller_preferred"` | caller_only/caller_preferred/background_only/disabled | How inline vs background enrichment interact (see below) |
 | `enrichment_enabled` | true | bool | Kill switch for all enrichment on this vault |
 | `max_engrams` | 0 (unlimited) | int | Auto-prune when exceeded |

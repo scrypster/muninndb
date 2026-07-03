@@ -3557,3 +3557,52 @@ func TestHandleRecall_AnnotateFalse_NoAnnotations(t *testing.T) {
 		t.Error("annotations should be absent when annotate=false (or not set)")
 	}
 }
+
+// multiUserEngine reports a multi-user (shared) vault from GetVaultPlasticity.
+type multiUserEngine struct{ fakeEngine }
+
+func (e *multiUserEngine) GetVaultPlasticity(_ context.Context, _ string) (*auth.ResolvedPlasticity, error) {
+	r := auth.ResolvePlasticity(nil)
+	r.MultiUser = true
+	return &r, nil
+}
+
+func TestHandleWhereLeftOff_MultiUserHint(t *testing.T) {
+	srv := newTestServerWith(&multiUserEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_where_left_off","arguments":{"vault":"default"}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+	hint, _ := content["hint"].(string)
+	if !strings.Contains(hint, "ALL users") {
+		t.Errorf("multi-user where_left_off hint should flag vault-global results, got %q", hint)
+	}
+	if strings.Contains(hint, "your most recently accessed memories") {
+		t.Errorf("multi-user where_left_off hint must not claim the results are the caller's own, got %q", hint)
+	}
+}
+
+func TestHandleRecall_EmptyHint_MultiUser(t *testing.T) {
+	// fakeEngine.Activate returns no activations, so the empty-result hint fires.
+	srv := newTestServerWith(&multiUserEngine{})
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["nothing matches"]}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+	hint, _ := content["hint"].(string)
+	if !strings.Contains(hint, "per-user tag") {
+		t.Errorf("multi-user empty-recall hint should recommend per-user scoped recall, got %q", hint)
+	}
+	if strings.Contains(hint, "or use muninn_where_left_off") {
+		t.Errorf("multi-user empty-recall hint must not recommend where_left_off, got %q", hint)
+	}
+}
+
+func TestHandleRecall_EmptyHint_SingleUser(t *testing.T) {
+	srv := newTestServer()
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["nothing matches"]}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+	hint, _ := content["hint"].(string)
+	if !strings.Contains(hint, "muninn_where_left_off") {
+		t.Errorf("single-user empty-recall hint should keep the where_left_off suggestion, got %q", hint)
+	}
+}
