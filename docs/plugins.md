@@ -101,7 +101,7 @@ Provider comparison:
 
 | Provider | Env Var | Model (default) | Dimensions | Cost | Privacy |
 |----------|---------|-----------------|------------|------|---------|
-| Bundled local | On by default | all-MiniLM-L6-v2 | 384 | Zero | Full (local) |
+| Bundled local | On by default | bge-small-en-v1.5 (English-only) | 384 | Zero | Full (local) |
 | Ollama | `MUNINN_OLLAMA_URL` | configurable | varies | Zero (local) | Full (local) |
 | OpenAI | `MUNINN_OPENAI_KEY` | text-embedding-3-small | 1536 | Per token | API |
 | Voyage AI | `MUNINN_VOYAGE_KEY` | voyage-3 | 1024 | Per token | API |
@@ -111,6 +111,65 @@ Provider comparison:
 | Mistral | `MUNINN_MISTRAL_KEY` | mistral-embed | 1024 | Per token | API |
 
 `MUNINN_OPENAI_URL` can optionally override the OpenAI base URL for compatible endpoints (for example LocalAI or an internal gateway). If set to an invalid value, MuninnDB skips OpenAI initialization instead of falling back to `api.openai.com`. This override also applies to the Enrich plugin when `MUNINN_ENRICH_URL` is set to an `openai://` provider — see [Tier 3](#4-tier-3-enrich-plugin) below.
+
+### Language Coverage
+
+The bundled local model is `bge-small-en-v1.5` — the `en` is a language tag.
+It is an English embedding model. That is a property of the chosen model, not
+a MuninnDB defect: within English it is a solid default, and it keeps Tier 2
+zero-config and offline.
+
+For non-English text the model still produces a vector — nothing fails,
+nothing is logged — but the vectors organize by **language** rather than by
+**meaning**: two unrelated German memories land closer together than a German
+memory and its English paraphrase. On a non-English or mixed-language vault
+this surfaces as:
+
+- Non-English semantic queries return the same cluster of same-language
+  memories, regardless of topic.
+- English queries on the same vault behave normally.
+- Queries that share words with the stored text still work in any language,
+  because the FTS stream matches them. The fusion keeps returning plausible
+  results, so the degradation is partial — and easy to miss.
+
+**Five-minute self-test.** If your vault holds non-English content:
+
+1. Store three memories in your language, on clearly unrelated topics.
+2. Query each topic with a same-language *paraphrase* — reworded so it shares
+   no distinctive keywords with the stored text (otherwise FTS answers the
+   query and hides the vector behavior).
+3. Repeat step 2 with English paraphrases of the same three questions.
+
+If the same-language queries all return roughly the same result set regardless
+of topic, while the English paraphrases each retrieve the right memory, your
+vault is affected.
+
+**Switching to a multilingual provider.** Any external provider serving a
+multilingual embedding model resolves this. Self-hosted example with Ollama:
+
+```bash
+# any multilingual embedding model Ollama serves, e.g. bge-m3
+export MUNINN_OLLAMA_URL="ollama://localhost:11434/bge-m3"
+muninn server
+```
+
+Several hosted providers in the table above also serve multilingual models —
+check your provider's model documentation. The same choice can be persisted in
+`plugin_config.json` in the data directory (`embed_provider`, `embed_url`,
+`embed_api_key`) or set in the web admin UI; environment variables take
+precedence over saved config.
+
+Two things to plan for when switching models:
+
+- **Re-embed the vault.** Vectors from different models are not comparable:
+  similarities across models are meaningless, and when the dimensions differ,
+  memories embedded with the previous model drop out of semantic recall
+  entirely. After switching, run `muninn vault reembed <name>` for each
+  affected vault — it clears the stored embeddings and re-embeds with the
+  current model.
+- **Scores shift.** Different models produce different similarity-score
+  distributions. If you have tuned anything against absolute vector scores,
+  re-check it after the switch.
 
 ### Retroactive Enrichment
 
@@ -228,7 +287,7 @@ of silently treating a partial write as finished.
 
 Both plugins guarantee retroactive enrichment. This is worth stating plainly, because the alternative is the norm everywhere else.
 
-Most vector database integrations require you to re-index when you switch embedding models. Most enrichment pipelines require you to write a migration that runs against existing data, wait for it to complete, verify it, and then cut over. If the migration fails halfway through, you figure out where it stopped and re-run from there.
+Most vector database integrations require a manual re-index before existing data becomes searchable. Most enrichment pipelines require you to write a migration that runs against existing data, wait for it to complete, verify it, and then cut over. If the migration fails halfway through, you figure out where it stopped and re-run from there.
 
 MuninnDB plugins do not work this way. Install a plugin against a vault with ten thousand engrams. The plugin handles the backfill. You handle your application.
 

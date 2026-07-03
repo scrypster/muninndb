@@ -146,7 +146,7 @@ muninn init --tool cursor,claude --yes
 
 ## 6. Choose an Embedder
 
-The bundled local embedder (all-MiniLM-L6-v2, 384-dim) is included and works offline with no API key. It's the default. For higher quality or different dimensions:
+The bundled local embedder (bge-small-en-v1.5, 384-dim) is included and works offline with no API key. It's the default. It is an English-only model — for non-English or mixed-language memories, pick a multilingual external provider (see [Language Coverage](plugins.md#language-coverage)). For higher quality, different dimensions, or other languages:
 
 | Embedder | Config | Notes |
 |----------|--------|-------|
