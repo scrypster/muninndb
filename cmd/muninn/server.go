@@ -422,6 +422,14 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 		}
 	}
 
+	// explicitExternalProvider is true when the saved config names a specific
+	// non-local provider. If that provider fails to initialize below, step 3
+	// must not substitute a different embedding model into a vault that may
+	// already hold vectors from the configured one — silently mixing
+	// dimensions/models is worse than disabling semantic search until the
+	// configured provider is reachable again (issue #582).
+	explicitExternalProvider := cfg.EmbedProvider != "" && cfg.EmbedProvider != "none" && cfg.EmbedProvider != "local"
+
 	// 2. Saved config fallback
 	if cfg.EmbedProvider != "" && cfg.EmbedProvider != "none" {
 		switch cfg.EmbedProvider {
@@ -491,9 +499,11 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 	}
 
 	// 3. Bundled local ONNX model — on by default when embedded at build time.
-	// Skip only if the user explicitly opts out (MUNINN_LOCAL_EMBED=0) or chose
-	// "none" as their provider.
-	if cfg.EmbedProvider != "none" && os.Getenv(localEmbed) != "0" && embedpkg.LocalAvailable() {
+	// Skip if the user explicitly opts out (MUNINN_LOCAL_EMBED=0), chose "none"
+	// as their provider, or explicitly configured a different provider that
+	// failed to initialize above (explicitExternalProvider) — substituting a
+	// different embedding model for one the user configured is never safe.
+	if !explicitExternalProvider && cfg.EmbedProvider != "none" && os.Getenv(localEmbed) != "0" && embedpkg.LocalAvailable() {
 		slog.Info("initializing bundled local ONNX embedder", "data_dir", dataDir)
 		if svc := tryEmbedService("local://bge-small-en-v1.5", plugin.PluginConfig{DataDir: dataDir}); svc != nil {
 			return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
@@ -502,6 +512,19 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 	}
 
 	// 4. Noop
+	if explicitExternalProvider {
+		slog.Error("configured embed provider unreachable at startup, refusing to substitute a different model — semantic similarity disabled",
+			"embed_provider", cfg.EmbedProvider, "embed_url", cfg.EmbedURL)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintf(os.Stderr, "  ⚠  Configured embed provider %q could not be reached at startup.\n", cfg.EmbedProvider)
+		fmt.Fprintln(os.Stderr, "     Semantic search is DISABLED, not silently switched to a different model —")
+		fmt.Fprintln(os.Stderr, "     substituting models would split this vault into incompatible embedding spaces.")
+		fmt.Fprintln(os.Stderr, "     Fix the provider and restart, or run `muninn vault plasticity` / edit plugin_config.json")
+		fmt.Fprintln(os.Stderr, "     to switch providers, then `muninn vault reembed <name>` if you do change models.")
+		fmt.Fprintln(os.Stderr, "")
+		return activation.NewNoopEmbedder(), nil, nil
+	}
+
 	slog.Warn("no embedder configured, semantic similarity disabled")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  ⚠  No embedder configured — semantic search disabled.")
