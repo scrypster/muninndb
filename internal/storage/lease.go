@@ -12,7 +12,7 @@ import (
 
 // Lease is an advisory ownership lease attached to an engram, giving a fleet of
 // agents that share a vault work-queue semantics over the memories they process.
-// It is stored as a sidecar record (0x29 key prefix) next to the engram it
+// It is stored as a sidecar record (0x2A key prefix) next to the engram it
 // guards — an attribute of the work-memory itself, not a free-standing lock.
 // A zero Lease (empty Owner) means the engram is unleased.
 //

@@ -53,6 +53,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"EntityReverseIndexKey", EntityReverseIndexKey([8]byte{}, [8]byte{}, [16]byte{})},
 		{"LastAccessIndexKey", LastAccessIndexKey([8]byte{}, 0, [16]byte{})},
 		{"DreamStateKey", DreamStateKey([8]byte{1, 2, 3, 4, 5, 6, 7, 8})},
+		{"LeaseKey", LeaseKey(ws, id)},
 	}
 
 	seen := make(map[byte]string)
