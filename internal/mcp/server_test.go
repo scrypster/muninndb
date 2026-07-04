@@ -118,8 +118,8 @@ func (f *fakeEngine) GetEnrichmentMode(_ context.Context) string {
 func (f *fakeEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([]WhereLeftOffEntry, error) {
 	return []WhereLeftOffEntry{}, nil
 }
-func (f *fakeEngine) FindByEntity(_ context.Context, _, _ string, _ int) ([]*storage.Engram, error) {
-	return nil, nil
+func (f *fakeEngine) FindByEntity(_ context.Context, _, _ string, _ int) (*engine.FindByEntityResult, error) {
+	return &engine.FindByEntityResult{}, nil
 }
 func (f *fakeEngine) CheckIdempotency(_ context.Context, _ string) (*storage.IdempotencyReceipt, error) {
 	return nil, nil

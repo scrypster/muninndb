@@ -996,11 +996,15 @@ func (s *MCPServer) handleFindByEntity(ctx context.Context, w http.ResponseWrite
 	if limit > 50 {
 		limit = 50
 	}
-	engrams, err := s.engine.FindByEntity(ctx, vault, entityName, limit)
+	res, err := s.engine.FindByEntity(ctx, vault, entityName, limit)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
+	if res == nil {
+		res = &engine.FindByEntityResult{}
+	}
+	engrams := res.Engrams
 	type engramEntry struct {
 		ID      string `json:"id"`
 		Concept string `json:"concept"`
@@ -1016,11 +1020,23 @@ func (s *MCPServer) handleFindByEntity(ctx context.Context, w http.ResponseWrite
 			State:   lifecycleStateLabel(e.State),
 		})
 	}
-	out, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"entity":  entityName,
 		"engrams": entries,
 		"count":   len(entries),
-	})
+	}
+	// Report the resolution when the serving entity differs from the query
+	// (fuzzy match) — never substitute silently (issue #571).
+	if res.MatchedEntity != "" {
+		payload["matched_entity"] = res.MatchedEntity
+	}
+	if res.Fuzzy {
+		payload["fuzzy"] = true
+		if len(res.Candidates) > 0 {
+			payload["other_candidates"] = res.Candidates
+		}
+	}
+	out, _ := json.Marshal(payload)
 	sendResult(w, id, textContent(string(out)))
 }
 

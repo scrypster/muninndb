@@ -315,7 +315,7 @@ func (a *mcpEngineAdapter) AddChild(ctx context.Context, vault, parentID string,
 	return &AddChildResult{ChildID: r.ChildID, Ordinal: r.Ordinal}, nil
 }
 
-func (a *mcpEngineAdapter) FindByEntity(ctx context.Context, vault, entityName string, limit int) ([]*storage.Engram, error) {
+func (a *mcpEngineAdapter) FindByEntity(ctx context.Context, vault, entityName string, limit int) (*engine.FindByEntityResult, error) {
 	return a.eng.FindByEntity(ctx, vault, entityName, limit)
 }
 

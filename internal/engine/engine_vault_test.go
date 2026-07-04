@@ -201,8 +201,8 @@ func TestEngineDeleteVault_RemovesEntityGraph(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindByEntity deleted vault: %v", err)
 	}
-	if len(deletedRefs) != 0 {
-		t.Fatalf("expected deleted vault to have no SharedEntity refs, got %d", len(deletedRefs))
+	if len(deletedRefs.Engrams) != 0 {
+		t.Fatalf("expected deleted vault to have no SharedEntity refs, got %d", len(deletedRefs.Engrams))
 	}
 	onlyDeleted, err := eng.store.GetEntityRecord(ctx, "OnlyDeletedVault")
 	if err != nil {
@@ -223,8 +223,8 @@ func TestEngineDeleteVault_RemovesEntityGraph(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindByEntity kept vault: %v", err)
 	}
-	if len(keptRefs) != 1 || keptRefs[0].ID != idB {
-		t.Fatalf("expected kept vault SharedEntity ref to remain, got %+v", keptRefs)
+	if len(keptRefs.Engrams) != 1 || keptRefs.Engrams[0].ID != idB {
+		t.Fatalf("expected kept vault SharedEntity ref to remain, got %+v", keptRefs.Engrams)
 	}
 }
 

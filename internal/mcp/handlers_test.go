@@ -1280,14 +1280,17 @@ func TestHandleStatus_IncludesEnrichmentMode(t *testing.T) {
 
 type findByEntityEngine struct{ fakeEngine }
 
-func (f *findByEntityEngine) FindByEntity(_ context.Context, _, name string, _ int) ([]*storage.Engram, error) {
+func (f *findByEntityEngine) FindByEntity(_ context.Context, _, name string, _ int) (*engine.FindByEntityResult, error) {
 	if name == "PostgreSQL" {
 		id := storage.NewULID()
-		return []*storage.Engram{
-			{ID: id, Concept: "DB choice", Summary: "Chose PostgreSQL"},
+		return &engine.FindByEntityResult{
+			Engrams: []*storage.Engram{
+				{ID: id, Concept: "DB choice", Summary: "Chose PostgreSQL"},
+			},
+			MatchedEntity: "PostgreSQL",
 		}, nil
 	}
-	return nil, nil
+	return &engine.FindByEntityResult{}, nil
 }
 
 func TestHandleFindByEntity_HappyPath(t *testing.T) {
@@ -1359,9 +1362,9 @@ type findByEntityCapturingEngine struct {
 	lastLimit int
 }
 
-func (f *findByEntityCapturingEngine) FindByEntity(_ context.Context, _, _ string, limit int) ([]*storage.Engram, error) {
+func (f *findByEntityCapturingEngine) FindByEntity(_ context.Context, _, _ string, limit int) (*engine.FindByEntityResult, error) {
 	f.lastLimit = limit
-	return []*storage.Engram{}, nil
+	return &engine.FindByEntityResult{}, nil
 }
 
 func TestHandleFindByEntity_LimitCapped(t *testing.T) {
@@ -1715,7 +1718,7 @@ func (e *slowIdempotentEngine) GetEnrichmentMode(ctx context.Context) string {
 func (e *slowIdempotentEngine) WhereLeftOff(ctx context.Context, vault string, limit int) ([]WhereLeftOffEntry, error) {
 	return (&fakeEngine{}).WhereLeftOff(ctx, vault, limit)
 }
-func (e *slowIdempotentEngine) FindByEntity(ctx context.Context, vault, entityName string, limit int) ([]*storage.Engram, error) {
+func (e *slowIdempotentEngine) FindByEntity(ctx context.Context, vault, entityName string, limit int) (*engine.FindByEntityResult, error) {
 	return (&fakeEngine{}).FindByEntity(ctx, vault, entityName, limit)
 }
 func (e *slowIdempotentEngine) SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error {

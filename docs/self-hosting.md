@@ -97,7 +97,7 @@ MuninnDB uses embeddings for semantic search and activation. Configure with envi
 
 ### Bundled (no API key, no internet) — default
 
-The bundled `all-MiniLM-L6-v2` INT8 model (384-dim, ~80MB) is active automatically when the binary was built with embedded assets. No configuration needed.
+The bundled `bge-small-en-v1.5` INT8 model (384-dim, ~80MB, English-only) is active automatically when the binary was built with embedded assets. No configuration needed. For non-English content, see [Language Coverage](plugins.md#language-coverage).
 
 To disable it and fall back to noop (or use a cloud provider instead):
 

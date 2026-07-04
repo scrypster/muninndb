@@ -532,7 +532,7 @@ func allToolDefinitions() []ToolDefinition {
 		// Entity reverse index tool
 		{
 			Name:        "muninn_find_by_entity",
-			Description: "Return all memories that mention a given named entity. Uses the entity reverse index for fast O(matches) lookup.",
+			Description: "Return all memories that mention a given named entity. Uses the entity reverse index for fast O(matches) lookup. When the exact name has no matches, vault entity names are fuzzy-matched by token overlap (case/articles/separators ignored, e.g. 'knock' finds 'The Knock') and the response reports the resolution via matched_entity + fuzzy.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
