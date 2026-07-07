@@ -159,6 +159,11 @@ func resolveEmbedInfo(cfg plugincfg.PluginConfig) rest.EmbedInfo {
 		return rest.EmbedInfo{Provider: "jina", Model: "jina-embeddings-v3"}
 	case "mistral":
 		return rest.EmbedInfo{Provider: "mistral", Model: "mistral-embed"}
+	case "local":
+		// User-supplied model (#583); the bundled default is reported below.
+		if cfg.EmbedModelPath != "" && cfg.EmbedTokenizerPath != "" {
+			return rest.EmbedInfo{Provider: "local", Model: filepath.Base(cfg.EmbedModelPath)}
+		}
 	case "none":
 		return rest.EmbedInfo{Provider: "none", Model: ""}
 	}
@@ -344,6 +349,41 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 		}
 	}
 
+	// User-supplied local ONNX model configuration (issue #583), validated up
+	// front: an explicit misconfiguration fails startup rather than being
+	// silently ignored or substituted — the principle #582 established.
+	// (The provider re-validates paths/pooling at Init for non-server callers;
+	// the checks here are the ones that must fire before the env-provider
+	// precedence chain, or that only this layer can see.)
+	hasModelPaths := cfg.EmbedModelPath != "" || cfg.EmbedTokenizerPath != ""
+	hasUserModelKeys := hasModelPaths || cfg.EmbedPooling != "" || cfg.EmbedMaxTokens != 0 ||
+		cfg.EmbedQueryPrefix != "" || cfg.EmbedPassagePrefix != ""
+	userLocalModel := hasModelPaths && cfg.EmbedProvider == "local"
+	if hasUserModelKeys && cfg.EmbedProvider != "local" {
+		slog.Warn("user local model settings (embed_model_path, embed_pooling, prefixes, …) are configured but embed_provider is not \"local\" — they are inactive",
+			"embed_provider", cfg.EmbedProvider)
+	}
+	if hasUserModelKeys && !hasModelPaths && cfg.EmbedProvider == "local" {
+		slog.Warn("embed_pooling, embed_max_tokens and prefix settings apply only to a user-supplied model (embed_model_path) — they are inactive for the bundled local model")
+	}
+	if userLocalModel {
+		if cfg.EmbedModelPath == "" || cfg.EmbedTokenizerPath == "" {
+			return nil, nil, fmt.Errorf("embed_model_path and embed_tokenizer_path must both be set (got model=%q, tokenizer=%q)", cfg.EmbedModelPath, cfg.EmbedTokenizerPath)
+		}
+		if os.Getenv(localEmbed) == "0" {
+			return nil, nil, fmt.Errorf("%s=0 conflicts with the configured user local embed model (embed_model_path) — unset one of them", localEmbed)
+		}
+		// An env provider would silently win over the explicitly configured
+		// user model (env precedence) and could quietly embed at the wrong
+		// dimension — the exact failure class of #582. Explicit configurations
+		// must not fight each other: fail loud.
+		for _, v := range []string{ollamaURL, openaiKey, voyageKey, cohereKey, googleKey, jinaKey, mistralKey} {
+			if os.Getenv(v) != "" {
+				return nil, nil, fmt.Errorf("%s conflicts with the configured user local embed model (embed_model_path) — unset one of them", v)
+			}
+		}
+	}
+
 	tryEmbedService := func(providerURL string, pcfg plugin.PluginConfig) *embedpkg.EmbedService {
 		logURL := sanitizeProviderURLForLog(providerURL)
 		svc, err := embedpkg.NewEmbedService(providerURL)
@@ -434,6 +474,43 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 	if cfg.EmbedProvider != "" && cfg.EmbedProvider != "none" {
 		switch cfg.EmbedProvider {
 		case "local":
+			if userLocalModel {
+				svc, err := embedpkg.NewEmbedService("local://user-model")
+				if err != nil {
+					return nil, nil, fmt.Errorf("user local embed model: %w", err)
+				}
+				slog.Info("initializing user-supplied local ONNX embedder from saved config",
+					"model_path", cfg.EmbedModelPath, "tokenizer_path", cfg.EmbedTokenizerPath)
+				if err := svc.Init(ctx, plugin.PluginConfig{
+					DataDir:            dataDir,
+					LocalModelPath:     cfg.EmbedModelPath,
+					LocalTokenizerPath: cfg.EmbedTokenizerPath,
+					LocalPooling:       cfg.EmbedPooling,
+					LocalMaxTokens:     cfg.EmbedMaxTokens,
+				}); err != nil {
+					_ = svc.Close()
+					// Fail loud (#583): an explicitly configured user model never
+					// falls back to the bundled one — a broken path, tokenizer, or
+					// probe is a deterministic configuration error the operator
+					// must fix, unlike a transient provider outage (#582/#585).
+					return nil, nil, fmt.Errorf("user-supplied local embed model failed to initialize (refusing to fall back to the bundled model): %w", err)
+				}
+				// A filename hinting at the e5 family combined with e5-unsuitable
+				// settings is the silent-degradation class this feature guards
+				// against — warn, since a filename guess is not certain enough
+				// to error on.
+				if strings.Contains(strings.ToLower(filepath.Base(cfg.EmbedModelPath)), "e5") {
+					if cfg.EmbedQueryPrefix == "" && cfg.EmbedPassagePrefix == "" {
+						slog.Warn("model filename suggests the e5 family, which requires instruction prefixes for retrieval quality — set embed_query_prefix (e.g. \"query: \") and embed_passage_prefix (e.g. \"passage: \"), or results will look plausible but quietly degraded")
+					}
+					if cfg.EmbedPooling != "mean" {
+						slog.Warn("model filename suggests the e5 family, which is mean-pooled — set embed_pooling to \"mean\", or results will look plausible but quietly degraded",
+							"embed_pooling", cfg.EmbedPooling)
+					}
+				}
+				return embedpkg.NewEmbedServiceAdapter(embedpkg.NewPrefixedEmbedPlugin(svc, cfg.EmbedQueryPrefix)),
+					embedpkg.NewPrefixedEmbedPlugin(svc, cfg.EmbedPassagePrefix), nil
+			}
 			if os.Getenv(localEmbed) != "0" && embedpkg.LocalAvailable() {
 				slog.Info("initializing bundled local ONNX embedder from saved config", "data_dir", dataDir)
 				if svc := tryEmbedService("local://bge-small-en-v1.5", plugin.PluginConfig{DataDir: dataDir}); svc != nil {

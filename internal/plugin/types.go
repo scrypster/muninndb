@@ -19,6 +19,13 @@ type PluginConfig struct {
 	APIKey      string            // for cloud providers (OpenAI, Anthropic, Voyage)
 	Options     map[string]string // provider-specific options (e.g., "batch_size": "32")
 	DataDir     string            // plugin-specific data directory under the main data dir
+
+	// User-supplied local ONNX model overrides (local embed provider only,
+	// issue #583). Both paths set together; dimension is probed at init.
+	LocalModelPath     string // path to a user-supplied .onnx model file
+	LocalTokenizerPath string // path to its HuggingFace tokenizer.json
+	LocalPooling       string // "cls" (default) or "mean"
+	LocalMaxTokens     int    // max sequence length; 0 = provider default
 }
 
 // EnrichmentResult is what the enrich plugin returns for one engram.
