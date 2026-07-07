@@ -49,18 +49,24 @@ func NewFTSAdapter(idx *fts.Index) FTSIndex {
 	return &ftsActivationAdapter{idx: idx}
 }
 
-// noopEmbedder is a stub embedder that returns zero vectors.
+// noopEmbedder is a stub embedder used when no embedding provider is
+// configured. It returns no embedding at all, which routes recall through the
+// FTS-only fast path in phase2 — the same degradation contract as an
+// unreachable embed backend (#578). Returning fixed-size zero vectors instead
+// would send every recall through a pointless HNSW walk that scores 0 against
+// each node, and would trip the vault dimension guard (#582) on any vault
+// whose vectors are not 384-dimensional.
 type noopEmbedder struct{}
 
 func (e *noopEmbedder) Embed(ctx context.Context, texts []string) ([]float32, error) {
-	return make([]float32, len(texts)*384), nil
+	return nil, nil
 }
 
 func (e *noopEmbedder) Tokenize(text string) []string {
 	return strings.Fields(text)
 }
 
-// NewNoopEmbedder returns an Embedder that returns zero vectors.
+// NewNoopEmbedder returns an Embedder that produces no embeddings.
 func NewNoopEmbedder() Embedder {
 	return &noopEmbedder{}
 }

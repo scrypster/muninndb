@@ -2,6 +2,7 @@ package activation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -14,6 +15,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	hnswpkg "github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -638,7 +640,16 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 	g.Go(func() error {
 		results, err := e.hnsw.Search(gctx, ws, p1.embedding, k)
 		if err != nil {
-			slog.Warn("activation: hnsw search degraded", "vault", req.VaultID, "err", err)
+			var dimErr *hnswpkg.DimMismatchError
+			if errors.As(err, &dimErr) {
+				// The active embedder's dimension does not match this vault's
+				// existing vectors (#582). FTS results below still apply — same
+				// degrade-not-abort contract as an unreachable embed backend (#578).
+				slog.Warn("activation: query embedding dimension does not match vault vectors — recall degraded to BM25-only; run `muninn vault reembed` after changing embedding models",
+					"vault", req.VaultID, "query_dim", dimErr.Got, "vault_dim", dimErr.Want)
+			} else {
+				slog.Warn("activation: hnsw search degraded", "vault", req.VaultID, "err", err)
+			}
 			return nil
 		}
 		sets.vector = results

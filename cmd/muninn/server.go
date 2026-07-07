@@ -676,6 +676,40 @@ func runStartupMigrations(ctx context.Context, store *storage.PebbleStore) {
 	slog.Info("startup migration complete", "vaults", len(names))
 }
 
+// warnVaultDimMismatches compares the active embedder's dimension against each
+// vault's stored embedding dimension (read from the first persisted embedding,
+// without loading any HNSW graph) and prints a prominent warning per mismatch.
+// Advisory only: the per-operation guards in the HNSW registry and the plugin
+// store adapter do the actual refusing (issue #582).
+func warnVaultDimMismatches(store *storage.PebbleStore, embedderDim int) {
+	if embedderDim <= 0 {
+		return
+	}
+	names, err := store.ListVaultNames()
+	if err != nil {
+		slog.Warn("vault dimension check: failed to list vault names", "err", err)
+		return
+	}
+	for _, name := range names {
+		dim, err := store.VaultEmbedDimOnDisk(store.ResolveVaultPrefix(name))
+		if err != nil {
+			slog.Warn("vault dimension check failed", "vault", name, "err", err)
+			continue
+		}
+		if dim == 0 || dim == embedderDim {
+			continue
+		}
+		slog.Error("vault embedding dimension does not match active embedder — new embeddings for this vault will be refused until it is re-embedded",
+			"vault", name, "vault_dim", dim, "embedder_dim", embedderDim)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintf(os.Stderr, "  ⚠  Vault %q holds %d-dimensional embeddings but the active embedder produces %d dimensions.\n", name, dim, embedderDim)
+		fmt.Fprintln(os.Stderr, "     New memories in this vault will NOT be semantically searchable, and semantic")
+		fmt.Fprintln(os.Stderr, "     queries against it degrade to full-text search only.")
+		fmt.Fprintf(os.Stderr, "     Run `muninn vault reembed %s` to re-embed it with the active model.\n", name)
+		fmt.Fprintln(os.Stderr, "")
+	}
+}
+
 // handleClusterConn reads MBP frames from an incoming cluster TCP connection
 // and dispatches them to the coordinator. Exits when the connection is closed.
 //
@@ -1199,6 +1233,15 @@ func runServer() {
 			v := h.HardwareAccelerated()
 			embedInfo.HardwareAccelerated = &v
 		}
+	}
+
+	// Warn loudly when the active embedder's dimension differs from a vault's
+	// existing vectors: per-operation guards will refuse mismatched embeddings
+	// rather than silently splitting the vault (issue #582). Advisory only —
+	// a mismatched vault keeps serving FTS recall (#578 contract), and one
+	// legacy vault must not prevent the server from starting for the others.
+	if embedPlugin != nil {
+		warnVaultDimMismatches(store, embedPlugin.Dimension())
 	}
 
 	// Build enrich plugin (optional): env vars → saved config.

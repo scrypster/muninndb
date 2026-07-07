@@ -47,7 +47,37 @@ func (a *pluginStoreAdapter) UpdateEmbedding(ctx context.Context, id ULID, vec [
 	if !ok {
 		return fmt.Errorf("UpdateEmbedding: engram %s not found", id.String())
 	}
+	// Refuse an embedding whose dimension differs from the vault's established
+	// dimension (issue #582) — checked before the embedding is persisted, so a
+	// mismatched vector is never stranded in storage. HNSWInsert has the same
+	// guard, but by then the 0x18 embedding key would already be written.
+	if err := a.checkVaultDim(ws, len(vec)); err != nil {
+		return err
+	}
 	return a.store.UpdateEmbedding(ctx, ws, storage.ULID(id), vec)
+}
+
+// CheckEmbedDim implements PluginStore (issue #582).
+func (a *pluginStoreAdapter) CheckEmbedDim(_ context.Context, id ULID, dim int) error {
+	ws, ok := a.store.FindVaultPrefix(storage.ULID(id))
+	if !ok {
+		return fmt.Errorf("CheckEmbedDim: engram %s not found", id.String())
+	}
+	return a.checkVaultDim(ws, dim)
+}
+
+// checkVaultDim compares dim against the vault's established dimension. The
+// peek deliberately avoids Registry.VaultEmbedDim: that would lazy-load and
+// pin the whole graph of a vault the caller may be about to refuse. Prefer
+// the cached index; fall back to one Pebble seek.
+func (a *pluginStoreAdapter) checkVaultDim(ws [8]byte, dim int) error {
+	want := a.hnsw.CachedVaultDim(ws)
+	if want == 0 {
+		// Best-effort: an error here just skips the pre-check; the
+		// Registry.Insert backstop still enforces the invariant.
+		want, _ = a.store.VaultEmbedDimOnDisk(ws)
+	}
+	return hnswpkg.CheckDim(want, dim)
 }
 
 func (a *pluginStoreAdapter) UpdateDigest(ctx context.Context, id ULID, result *EnrichmentResult) error {

@@ -168,3 +168,44 @@ func (ps *PebbleStore) SetEmbedModel(ws [8]byte, model string) error {
 	}
 	return ps.db.Set(key, []byte(model), pebble.Sync)
 }
+
+// VaultEmbedDimOnDisk returns the embedding dimension established by a vault's
+// stored vectors, without loading its HNSW graph into memory: it reads the
+// first persisted embedding (0x18) key for the vault. The stored value is
+// 8 bytes of quantization parameters followed by one byte per vector component
+// (the same layout migration v1 derives dimensions from). Returns 0 when the
+// vault has no stored embeddings.
+func (ps *PebbleStore) VaultEmbedDimOnDisk(ws [8]byte) (int, error) {
+	wsPlus, err := keys.IncrementWSPrefix(ws)
+	if err != nil {
+		return 0, fmt.Errorf("vault embed dim: increment ws: %w", err)
+	}
+
+	lo := make([]byte, 9)
+	lo[0] = 0x18
+	copy(lo[1:], ws[:])
+	hi := make([]byte, 9)
+	hi[0] = 0x18
+	copy(hi[1:], wsPlus[:])
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{
+		LowerBound: lo,
+		UpperBound: hi,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("vault embed dim: create iter: %w", err)
+	}
+	defer iter.Close()
+
+	if !iter.First() {
+		return 0, nil
+	}
+	val, err := iter.ValueAndErr()
+	if err != nil {
+		return 0, fmt.Errorf("vault embed dim: read value: %w", err)
+	}
+	if len(val) <= 8 {
+		return 0, nil
+	}
+	return len(val) - 8, nil
+}
