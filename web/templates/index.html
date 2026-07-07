@@ -1372,6 +1372,22 @@
                 </template>
               </div>
 
+              <!-- Search Scoring -->
+              <p style="font-size:0.8125rem;font-weight:600;color:var(--text-secondary);margin:0 0 0.75rem;text-transform:uppercase;letter-spacing:0.05em;">Search Scoring</p>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.625rem;margin-bottom:1.25rem;">
+                <template x-for="sf in [
+                  {id:'',             label:'ACT-R (default)', desc:'Cognitive decay + Hebbian'},
+                  {id:'rrf',          label:'RRF',             desc:'Reciprocal rank fusion'},
+                  {id:'weighted_sum', label:'Weighted Sum',    desc:'Linear blend of signals'}
+                ]" :key="sf.id">
+                  <div @click="plasticityForm.scoringFusion = sf.id"
+                       :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.scoringFusion === sf.id ? 'border:2px solid var(--accent);background:rgba(99,102,241,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
+                    <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;" x-text="sf.label"></div>
+                    <div style="font-size:0.75rem;color:var(--text-muted);" x-text="sf.desc"></div>
+                  </div>
+                </template>
+              </div>
+
               <!-- Advanced overrides -->
               <div style="margin-bottom:1.25rem;">
                 <label style="font-size:0.8125rem;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:0.5rem;">

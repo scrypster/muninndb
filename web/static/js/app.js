@@ -204,6 +204,7 @@ document.addEventListener('alpine:init', () => {
       relevanceFloor: null,
       temporalHalflife: null,
       recallMode: 'balanced',
+      scoringFusion: '',
     },
     plasticitySaving: false,
     plasticitySaveOk: false,
@@ -1986,6 +1987,7 @@ document.addEventListener('alpine:init', () => {
             this.plasticityForm.relevanceFloor     = cfg.relevance_floor     ?? null;
             this.plasticityForm.temporalHalflife = cfg.temporal_halflife ?? null;
             this.plasticityForm.recallMode = cfg.recall_mode || data.resolved?.recall_mode || 'balanced';
+            this.plasticityForm.scoringFusion = cfg.scoring_fusion ?? data.resolved?.scoring_fusion ?? '';
         } catch (err) {
             console.error('loadPlasticity error:', err);
             this.plasticitySaveErr = 'Failed to load Plasticity settings';
@@ -1999,6 +2001,7 @@ document.addEventListener('alpine:init', () => {
         this.plasticityForm.temporalHalflife = null;
         this.plasticityForm.hebbianEnabled = true;
         this.plasticityForm.temporalEnabled   = true;
+        this.plasticityForm.scoringFusion = '';
         this._updatePlasticityChart();
     },
     _plasticityData: {
@@ -2098,6 +2101,7 @@ document.addEventListener('alpine:init', () => {
         try {
             const payload = { ...(this.plasticityRawConfig || {}), version: 1, preset: this.plasticityForm.preset };
             payload.recall_mode = this.plasticityForm.recallMode;
+            payload.scoring_fusion = this.plasticityForm.scoringFusion;
             if (this.plasticityForm.showAdvanced) {
                 if (this.plasticityForm.hopDepth       !== null) payload.hop_depth       = this.plasticityForm.hopDepth;
                 if (this.plasticityForm.semanticWeight !== null) payload.semantic_weight = this.plasticityForm.semanticWeight;
