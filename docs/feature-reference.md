@@ -351,7 +351,7 @@ Every cognitive behavior is tunable per vault:
 - **default** — balanced, all features on, autonomous behavior
 - **reference** — long-term knowledge, minimal decay, strong Hebbian, autonomous behavior
 - **scratchpad** — short-lived, high recency bias, no Hebbian, PAS off, selective behavior
-- **working** — default cognition (Hebbian + PAS on) with 7-day auto-eviction and selective behavior; for shared workflow scratch vaults (RFC #597)
+- **working** — default cognition (Hebbian + PAS on) with 7-day auto-eviction and selective behavior; for shared workflow scratch vaults, pair with `multi_user` (RFC #597)
 - **knowledge-graph** — deep traversal (4 hops), strong Hebbian (8.0 scale), autonomous behavior
 
 ### Behavior Modes (How the AI Uses Memory)
