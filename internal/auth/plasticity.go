@@ -5,7 +5,7 @@ package auth
 // Non-nil pointer fields override the chosen preset value.
 type PlasticityConfig struct {
 	Version int    `json:"version,omitempty"` // schema version, currently 1
-	Preset  string `json:"preset,omitempty"`  // "default" | "reference" | "scratchpad" | "knowledge-graph"
+	Preset  string `json:"preset,omitempty"`  // "default" | "reference" | "scratchpad" | "knowledge-graph" | "working"
 
 	// Optional overrides (nil = use preset value)
 	HebbianEnabled    *bool    `json:"hebbian_enabled,omitempty"`
