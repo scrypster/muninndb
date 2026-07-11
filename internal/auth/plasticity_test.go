@@ -1,6 +1,9 @@
 package auth
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestResolvePlasticity_NilUsesDefault(t *testing.T) {
 	r := ResolvePlasticity(nil)
@@ -565,5 +568,16 @@ func TestMultiUser_Override(t *testing.T) {
 	r := ResolvePlasticity(&PlasticityConfig{MultiUser: &on})
 	if !r.MultiUser {
 		t.Error("override: want MultiUser=true")
+	}
+}
+
+func TestResolvePlasticity_WorkingEqualsDefaultPlusTwoDeltas(t *testing.T) {
+	d := ResolvePlasticity(&PlasticityConfig{Preset: "default"})
+	w := ResolvePlasticity(&PlasticityConfig{Preset: "working"})
+	// working is defined as default + exactly these two deltas.
+	d.RetentionDays = 7
+	d.BehaviorMode = "selective"
+	if !reflect.DeepEqual(d, w) {
+		t.Errorf("working must equal default + {RetentionDays:7, BehaviorMode:selective}\ndefault+δ: %+v\nworking:   %+v", d, w)
 	}
 }
