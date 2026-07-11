@@ -75,7 +75,7 @@ func TestPlasticity_LTP_Clamping(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPlasticity_LTP_PresetsHaveZeroDefaults(t *testing.T) {
-	for _, preset := range []string{"default", "reference", "scratchpad", "knowledge-graph"} {
+	for _, preset := range []string{"default", "reference", "scratchpad", "knowledge-graph", "working"} {
 		cfg := &PlasticityConfig{Preset: preset}
 		r := ResolvePlasticity(cfg)
 
