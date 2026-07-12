@@ -161,7 +161,7 @@ func (s *MCPServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 	case req.Method == "ping":
 		sendResult(w, req.ID, map[string]any{})
 	case req.Method == "tools/list":
-		sendResult(w, req.ID, map[string]any{"tools": allToolDefinitions()})
+		sendResult(w, req.ID, map[string]any{"tools": exposedToolDefinitions(r)})
 	case req.Method == "tools/call":
 		s.dispatchToolCall(ctx, w, &req, a)
 	case req.Method == "":
@@ -509,7 +509,7 @@ func (s *MCPServer) processAndPushSSE(w http.ResponseWriter, r *http.Request, ch
 	case req.Method == "ping":
 		sendResult(recorder, req.ID, map[string]any{})
 	case req.Method == "tools/list":
-		sendResult(recorder, req.ID, map[string]any{"tools": allToolDefinitions()})
+		sendResult(recorder, req.ID, map[string]any{"tools": exposedToolDefinitions(r)})
 	case req.Method == "tools/call":
 		s.dispatchToolCall(ctx, recorder, &req, authFromContext(r.Context()))
 	case req.Method == "":
@@ -599,7 +599,7 @@ func (s *MCPServer) handleInitialize(w http.ResponseWriter, req *JSONRPCRequest)
 
 func (s *MCPServer) handleListTools(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"tools": allToolDefinitions()})
+	json.NewEncoder(w).Encode(map[string]any{"tools": exposedToolDefinitions(r)})
 }
 
 func (s *MCPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
