@@ -5,7 +5,7 @@ package auth
 // Non-nil pointer fields override the chosen preset value.
 type PlasticityConfig struct {
 	Version int    `json:"version,omitempty"` // schema version, currently 1
-	Preset  string `json:"preset,omitempty"`  // "default" | "reference" | "scratchpad" | "knowledge-graph"
+	Preset  string `json:"preset,omitempty"`  // "default" | "reference" | "scratchpad" | "knowledge-graph" | "working"
 
 	// Optional overrides (nil = use preset value)
 	HebbianEnabled    *bool    `json:"hebbian_enabled,omitempty"`
@@ -263,6 +263,35 @@ var plasticityPresets = map[string]plasticityPreset{
 		AssocMinWeight:       0.03,
 		ArchiveThreshold:     0.05,
 		BehaviorMode:         "autonomous",
+		InlineEnrichment:     "caller_preferred",
+		EnrichmentEnabled:    true,
+		RecallMode:           "balanced",
+	},
+	"working": {
+		// default-derived cognition (Hebbian + PAS on) for a shared workflow
+		// vault, with two changes: scratch auto-evaporates, and agents get
+		// "selective" persistence guidance. See RFC #597.
+		HebbianEnabled:       true,
+		TemporalEnabled:      true,
+		AutoLinkNeighbors:    true,
+		HopDepth:             2,
+		SemanticWeight:       0.6,
+		FTSWeight:            0.3,
+		RelevanceFloor:       0.05,
+		TemporalHalflife:     30,
+		HebbianWeight:        0.5,
+		TemporalWeight:       0.4,
+		RecencyWeight:        0.3,
+		ACTRDecay:            0.5,
+		ACTRHebScale:         4.0,
+		PredictiveActivation: true,
+		PASMaxInjections:     5,
+		MaxEngrams:           0,
+		RetentionDays:        7,
+		AssocDecayFactor:     0.95,
+		AssocMinWeight:       0.05,
+		ArchiveThreshold:     0.05,
+		BehaviorMode:         "selective",
 		InlineEnrichment:     "caller_preferred",
 		EnrichmentEnabled:    true,
 		RecallMode:           "balanced",

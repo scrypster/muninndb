@@ -370,3 +370,45 @@ func TestClearVault_ClearsLastAccessArchiveAssocDreamState(t *testing.T) {
 		iter.Close()
 	}
 }
+
+// TestClearVault_ClearsLeaseSidecar verifies that ClearVault removes the
+// ownership-lease sidecar (0x2A) alongside the other vault-scoped prefixes,
+// so a Clear+Recreate does not leave a stale lease behind.
+func TestClearVault_ClearsLeaseSidecar(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("test-clear-lease")
+
+	id, err := store.WriteEngram(ctx, ws, &Engram{Concept: "leased", Content: "work item", Confidence: 1.0, Stability: 30})
+	if err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	lease := Lease{Owner: "hostA:sess1", Heartbeat: 1000, TTLSeconds: 60}
+	if _, err := store.CompareAndSet(ctx, ws, id, CASCondition{}, CASMutation{Lease: &lease}); err != nil {
+		t.Fatalf("CompareAndSet put lease: %v", err)
+	}
+
+	if _, err := store.ClearVault(ctx, ws); err != nil {
+		t.Fatalf("ClearVault: %v", err)
+	}
+
+	wsPlus, err := incrementWS(ws)
+	if err != nil {
+		t.Fatalf("incrementWS: %v", err)
+	}
+	lo := make([]byte, 9)
+	lo[0] = 0x2A
+	copy(lo[1:], ws[:])
+	hi := make([]byte, 9)
+	hi[0] = 0x2A
+	copy(hi[1:], wsPlus[:])
+	iter, err := store.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	if err != nil {
+		t.Fatalf("NewIter lease prefix: %v", err)
+	}
+	if iter.First() {
+		t.Error("lease sidecar (0x2A) still has keys after ClearVault")
+	}
+	iter.Close()
+}

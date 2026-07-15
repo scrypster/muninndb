@@ -82,6 +82,10 @@ func (s *stubStore) GetEngrams(_ context.Context, _ [8]byte, ids []storage.ULID)
 	return out, nil
 }
 
+func (s *stubStore) GetLeases(_ context.Context, _ [8]byte, ids []storage.ULID) ([]storage.Lease, error) {
+	return make([]storage.Lease, len(ids)), nil
+}
+
 func (s *stubStore) GetAssociations(_ context.Context, _ [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error) {
 	result := make(map[storage.ULID][]storage.Association)
 	for _, id := range ids {

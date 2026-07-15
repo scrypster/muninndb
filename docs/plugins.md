@@ -171,6 +171,53 @@ Two things to plan for when switching models:
   distributions. If you have tuned anything against absolute vector scores,
   re-check it after the switch.
 
+### User-Supplied Local ONNX Model
+
+The local provider can also serve a model you supply instead of the bundled
+`bge-small-en-v1.5` — the in-process alternative to an external provider,
+keeping the zero-network, single-binary properties. Typical use: a
+multilingual model on a vault that fails the self-test above.
+
+```json
+{
+  "embed_provider": "local",
+  "embed_model_path": "/opt/models/multilingual-e5-small/model_quantized.onnx",
+  "embed_tokenizer_path": "/opt/models/multilingual-e5-small/tokenizer.json",
+  "embed_pooling": "mean",
+  "embed_max_tokens": 512,
+  "embed_query_prefix": "query: ",
+  "embed_passage_prefix": "passage: "
+}
+```
+
+- **Both paths are required** — a `.onnx` model file and its HuggingFace
+  `tokenizer.json`. The model must take BERT-style inputs (`input_ids`,
+  `attention_mask`, optionally `token_type_ids`) and produce a hidden-state
+  tensor; the provider reads the model's declared inputs and feeds exactly
+  those. Quantized exports (e.g. the Xenova ONNX conversions on Hugging Face)
+  keep downloads small and run well on CPU.
+- **Dimension is probed, never declared.** At startup the provider runs one
+  real inference and takes the output dimension from the returned tensor
+  shape. There is no dimension knob to get wrong.
+- **Init fails loudly.** A missing file, unloadable tokenizer, or failed probe
+  stops server startup with a clear error. A configured user model is never
+  silently replaced by the bundled one — the same principle #582 established
+  for explicitly configured network providers.
+- **Pooling must match the model family** (`embed_pooling`): `cls` (default)
+  for bge-style models, `mean` for e5-style models. Wrong pooling degrades
+  quality silently — check the model's documentation.
+- **Instruction prefixes**: e5-family models require `"query: "` /
+  `"passage: "` prefixes for retrieval quality. `embed_query_prefix` is
+  prepended to recall queries, `embed_passage_prefix` to stored memories.
+  The server warns when the model filename looks like the e5 family and no
+  prefixes are configured.
+- **Requires a `localassets` build** (all official release binaries): the
+  bundled ONNX runtime library serves the user model too.
+- **Re-embed after switching**, exactly as with any model change:
+  `muninn vault reembed <name>`. If the new model's dimension differs from a
+  vault's existing vectors, the server refuses mismatched embeddings and says
+  so at startup instead of silently splitting the vault.
+
 ### Retroactive Enrichment
 
 Install the Embed plugin against a vault with existing data. You don't re-index manually. You don't write a migration script. You start the plugin and walk away.

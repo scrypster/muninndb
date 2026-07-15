@@ -432,6 +432,7 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		defer batch.Close()
 		batch.Delete(keys.EngramKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.MetaKey(wsPrefix, [16]byte(id)), nil)
+		batch.Delete(keys.LeaseKey(wsPrefix, [16]byte(id)), nil)
 		ps.cache.Delete(wsPrefix, id)
 		if err := batch.Commit(pebble.NoSync); err != nil {
 			return err
@@ -446,6 +447,7 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// Primary records
 	batch.Delete(keys.EngramKey(wsPrefix, [16]byte(id)), nil)
 	batch.Delete(keys.MetaKey(wsPrefix, [16]byte(id)), nil)
+	batch.Delete(keys.LeaseKey(wsPrefix, [16]byte(id)), nil)
 
 	// Secondary indexes
 	batch.Delete(keys.StateIndexKey(wsPrefix, uint8(eng.State), [16]byte(id)), nil)

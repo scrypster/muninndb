@@ -28,7 +28,12 @@ type LocalProvider struct{}
 
 func (p *LocalProvider) Name() string      { return "local" }
 func (p *LocalProvider) MaxBatchSize() int { return 0 }
-func (p *LocalProvider) Init(_ context.Context, _ ProviderHTTPConfig) (int, error) {
+func (p *LocalProvider) Init(_ context.Context, cfg ProviderHTTPConfig) (int, error) {
+	if cfg.LocalModelPath != "" || cfg.LocalTokenizerPath != "" {
+		// The ONNX runtime shared library ships with the embedded assets, so a
+		// user-supplied model (#583) needs a localassets build too.
+		return 0, fmt.Errorf("user-supplied local embed model requires a binary built with -tags localassets (this build has no ONNX runtime)")
+	}
 	return 0, errLocalUnavailable
 }
 func (p *LocalProvider) EmbedBatch(_ context.Context, _ []string) ([]float32, error) {

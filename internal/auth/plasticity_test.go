@@ -1,6 +1,9 @@
 package auth
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestResolvePlasticity_NilUsesDefault(t *testing.T) {
 	r := ResolvePlasticity(nil)
@@ -42,6 +45,32 @@ func TestResolvePlasticity_KnowledgeGraphPreset(t *testing.T) {
 	r := ResolvePlasticity(&PlasticityConfig{Preset: "knowledge-graph"})
 	if r.HopDepth != 4 {
 		t.Errorf("knowledge-graph HopDepth want 4, got %d", r.HopDepth)
+	}
+}
+
+func TestResolvePlasticity_WorkingPreset(t *testing.T) {
+	r := ResolvePlasticity(&PlasticityConfig{Preset: "working"})
+	// Keystone: scratch actually evaporates.
+	if r.RetentionDays != 7 {
+		t.Errorf("working RetentionDays want 7, got %v", r.RetentionDays)
+	}
+	// Workspace-style: Hebbian + PAS stay ON (not scratchpad-derived).
+	if !r.HebbianEnabled {
+		t.Error("working: want HebbianEnabled=true")
+	}
+	if !r.PredictiveActivation {
+		t.Error("working: want PredictiveActivation=true")
+	}
+	if r.HopDepth != 2 {
+		t.Errorf("working HopDepth want 2 (default-derived), got %d", r.HopDepth)
+	}
+	// Transient-vault guidance signal (engine-neutral).
+	if r.BehaviorMode != "selective" {
+		t.Errorf("working BehaviorMode want %q, got %q", "selective", r.BehaviorMode)
+	}
+	// Guards against silent drift if default is later edited.
+	if r.ACTRDecay != 0.5 {
+		t.Errorf("working ACTRDecay want 0.5 (default-derived), got %v", r.ACTRDecay)
 	}
 }
 
@@ -89,6 +118,9 @@ func TestValidPlasticityPreset(t *testing.T) {
 	}
 	if !ValidPlasticityPreset("knowledge-graph") {
 		t.Error("knowledge-graph should be valid")
+	}
+	if !ValidPlasticityPreset("working") {
+		t.Error("working should be valid")
 	}
 	if ValidPlasticityPreset("bogus") {
 		t.Error("bogus should not be valid")
@@ -259,7 +291,7 @@ func TestBehaviorMode_CustomWithInstructions(t *testing.T) {
 }
 
 func TestBehaviorMode_AllPresetsHaveMode(t *testing.T) {
-	presets := []string{"default", "reference", "scratchpad", "knowledge-graph"}
+	presets := []string{"default", "reference", "scratchpad", "knowledge-graph", "working"}
 	for _, preset := range presets {
 		t.Run(preset, func(t *testing.T) {
 			r := ResolvePlasticity(&PlasticityConfig{Preset: preset})
@@ -280,7 +312,7 @@ func TestInlineEnrichment_DefaultPreset(t *testing.T) {
 }
 
 func TestInlineEnrichment_AllPresetsHaveValue(t *testing.T) {
-	presets := []string{"default", "reference", "scratchpad", "knowledge-graph"}
+	presets := []string{"default", "reference", "scratchpad", "knowledge-graph", "working"}
 	for _, preset := range presets {
 		t.Run(preset, func(t *testing.T) {
 			r := ResolvePlasticity(&PlasticityConfig{Preset: preset})
@@ -355,7 +387,7 @@ func TestEnrichmentEnabled_ExplicitTrue(t *testing.T) {
 }
 
 func TestEnrichmentEnabled_AllPresetsDefaultTrue(t *testing.T) {
-	presets := []string{"default", "reference", "scratchpad", "knowledge-graph"}
+	presets := []string{"default", "reference", "scratchpad", "knowledge-graph", "working"}
 	for _, name := range presets {
 		r := ResolvePlasticity(&PlasticityConfig{Preset: name})
 		if !r.EnrichmentEnabled {
@@ -383,7 +415,7 @@ func TestValidRecallMode_Invalid(t *testing.T) {
 }
 
 func TestRecallMode_AllPresetsDefaultBalanced(t *testing.T) {
-	presets := []string{"default", "reference", "scratchpad", "knowledge-graph"}
+	presets := []string{"default", "reference", "scratchpad", "knowledge-graph", "working"}
 	for _, name := range presets {
 		r := ResolvePlasticity(&PlasticityConfig{Preset: name})
 		if r.RecallMode != "balanced" {
@@ -536,5 +568,16 @@ func TestMultiUser_Override(t *testing.T) {
 	r := ResolvePlasticity(&PlasticityConfig{MultiUser: &on})
 	if !r.MultiUser {
 		t.Error("override: want MultiUser=true")
+	}
+}
+
+func TestResolvePlasticity_WorkingEqualsDefaultPlusTwoDeltas(t *testing.T) {
+	d := ResolvePlasticity(&PlasticityConfig{Preset: "default"})
+	w := ResolvePlasticity(&PlasticityConfig{Preset: "working"})
+	// working is defined as default + exactly these two deltas.
+	d.RetentionDays = 7
+	d.BehaviorMode = "selective"
+	if !reflect.DeepEqual(d, w) {
+		t.Errorf("working must equal default + {RetentionDays:7, BehaviorMode:selective}\ndefault+δ: %+v\nworking:   %+v", d, w)
 	}
 }

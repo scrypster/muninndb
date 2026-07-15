@@ -320,6 +320,34 @@ func TestDeleteEngram_RemovesRecord(t *testing.T) {
 	}
 }
 
+// TestDeleteEngram_RemovesLeaseSidecar verifies that hard-deleting a leased
+// engram removes its ownership-lease sidecar too, so a stale-owner claim
+// cannot orphan a lease key.
+func TestDeleteEngram_RemovesLeaseSidecar(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("deleteengram-lease")
+
+	id := writeTestEngram(t, store, ws, "leased", "will be deleted while leased")
+
+	lease := Lease{Owner: "hostA:sess1", Heartbeat: 1000, TTLSeconds: 60}
+	if _, err := store.CompareAndSet(ctx, ws, id, CASCondition{}, CASMutation{Lease: &lease}); err != nil {
+		t.Fatalf("CompareAndSet put lease: %v", err)
+	}
+
+	if err := store.DeleteEngram(ctx, ws, id); err != nil {
+		t.Fatalf("DeleteEngram: %v", err)
+	}
+
+	got, err := store.GetLease(ctx, ws, id)
+	if err != nil {
+		t.Fatalf("GetLease after delete: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("expected lease sidecar to be gone after DeleteEngram, got %+v", got)
+	}
+}
+
 // TestDeleteEngram_AutoCleansOrdinalKey verifies that DeleteEngram atomically removes
 // any ordinal keys where the deleted engram is the child.
 func TestDeleteEngram_AutoCleansOrdinalKey(t *testing.T) {

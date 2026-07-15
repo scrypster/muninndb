@@ -5,21 +5,19 @@ import (
 	"testing"
 )
 
-func TestNoopEmbedderReturnsZeroVector(t *testing.T) {
+// TestNoopEmbedderReturnsNoEmbedding pins the noop contract: no embedding at
+// all, so recall takes the FTS-only fast path (len(embedding)==0 in phase2)
+// instead of walking HNSW with a zero vector — and a fixed 384-dim stub can
+// never trip the vault dimension guard (#582) on non-384-dim vaults.
+func TestNoopEmbedderReturnsNoEmbedding(t *testing.T) {
 	e := NewNoopEmbedder()
 	texts := []string{"hello", "world", "test"}
 	vecs, err := e.Embed(context.Background(), texts)
 	if err != nil {
 		t.Fatalf("Embed returned unexpected error: %v", err)
 	}
-	expectedLen := len(texts) * 384
-	if len(vecs) != expectedLen {
-		t.Fatalf("expected %d floats, got %d", expectedLen, len(vecs))
-	}
-	for i, v := range vecs {
-		if v != 0 {
-			t.Fatalf("expected zero vector at index %d, got %f", i, v)
-		}
+	if len(vecs) != 0 {
+		t.Fatalf("expected no embedding from noop embedder, got %d floats", len(vecs))
 	}
 }
 

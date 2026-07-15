@@ -23,6 +23,7 @@ type mockPluginStore struct {
 	getFlagsErr     error
 	updateEmbedErr  error
 	updateDigestErr error
+	checkDimErr     error
 	upsertEntityErr error
 	linkErr         error
 	coOccurErr      error
@@ -32,6 +33,7 @@ type mockPluginStore struct {
 
 	setFlagCalls      int
 	setFlags          []uint8
+	checkDimCalls     int
 	updateEmbedCalls  int
 	hnswInsertCalls   int
 	autoLinkCalls     int
@@ -86,6 +88,11 @@ func (m *mockPluginStore) UpsertRelationship(_ context.Context, _ ULID, _ Extrac
 func (m *mockPluginStore) HNSWInsert(_ context.Context, _ ULID, _ []float32) error {
 	m.hnswInsertCalls++
 	return m.hnswInsertErr
+}
+
+func (m *mockPluginStore) CheckEmbedDim(_ context.Context, _ ULID, _ int) error {
+	m.checkDimCalls++
+	return m.checkDimErr
 }
 
 func (m *mockPluginStore) AutoLinkByEmbedding(_ context.Context, _ ULID, _ []float32) error {

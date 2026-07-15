@@ -315,6 +315,14 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		Profile:    profile,
 	}
 
+	// Ownership-lease work-queue visibility (#548).
+	if caller, ok := args["caller"].(string); ok {
+		req.CallerOwner = caller
+	}
+	if includeLeased, ok := args["include_leased"].(bool); ok {
+		req.IncludeLeased = includeLeased
+	}
+
 	// Apply non-zero mode preset fields.
 	// Explicit caller threshold/limit args always win (already parsed above).
 	if modePreset.Threshold > 0 {
@@ -1889,5 +1897,86 @@ func (s *MCPServer) handleSetTrust(ctx context.Context, w http.ResponseWriter, i
 		"id":    engramID,
 		"trust": trustStr,
 		"ok":    true,
+	})))
+}
+
+func (s *MCPServer) handleCompareAndSet(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok := args["id"].(string)
+	if !ok || engramID == "" {
+		sendError(w, id, -32602, "invalid params: 'id' is required")
+		return
+	}
+	var expectState, setState *string
+	if v, ok := args["expect_state"].(string); ok && v != "" {
+		expectState = &v
+	}
+	if v, ok := args["set_state"].(string); ok && v != "" {
+		setState = &v
+	}
+	if setState == nil {
+		sendError(w, id, -32602, "invalid params: 'set_state' is required")
+		return
+	}
+	applied, state, owner, err := s.engine.CompareAndSet(ctx, vault, engramID, expectState, setState)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"id":      engramID,
+		"applied": applied,
+		"current": map[string]any{"state": state, "owner": owner},
+	})))
+}
+
+func (s *MCPServer) handleClaim(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok := args["id"].(string)
+	if !ok || engramID == "" {
+		sendError(w, id, -32602, "invalid params: 'id' is required")
+		return
+	}
+	owner, ok := args["owner"].(string)
+	if !ok || owner == "" {
+		sendError(w, id, -32602, "invalid params: 'owner' is required")
+		return
+	}
+	ttlFloat, ok := args["ttl_secs"].(float64)
+	if !ok || ttlFloat <= 0 {
+		sendError(w, id, -32602, "invalid params: 'ttl_secs' is required and must be a positive number")
+		return
+	}
+	status, curOwner, heartbeat, err := s.engine.Claim(ctx, vault, engramID, owner, int64(ttlFloat))
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"id":        engramID,
+		"status":    status,
+		"owner":     curOwner,
+		"heartbeat": heartbeat,
+	})))
+}
+
+func (s *MCPServer) handleRelease(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok := args["id"].(string)
+	if !ok || engramID == "" {
+		sendError(w, id, -32602, "invalid params: 'id' is required")
+		return
+	}
+	owner, ok := args["owner"].(string)
+	if !ok || owner == "" {
+		sendError(w, id, -32602, "invalid params: 'owner' is required")
+		return
+	}
+	released, curOwner, err := s.engine.Release(ctx, vault, engramID, owner)
+	if err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"id":       engramID,
+		"released": released,
+		"owner":    curOwner,
 	})))
 }
