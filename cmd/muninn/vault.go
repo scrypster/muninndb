@@ -1432,7 +1432,7 @@ func applyPlasticitySet(kv string, kinds map[string]reflect.Kind, changes map[st
 		return fmt.Errorf("unknown plasticity field %q", key)
 	}
 	if key == "preset" && !auth.ValidPlasticityPreset(val) {
-		return fmt.Errorf("unknown preset %q (valid: default, reference, scratchpad, knowledge-graph)", val)
+		return fmt.Errorf("unknown preset %q (valid: default, reference, scratchpad, knowledge-graph, working)", val)
 	}
 	coerced, err := coercePlasticityValue(kind, val)
 	if err != nil {
@@ -1454,7 +1454,7 @@ func runVaultPlasticity(args []string) {
 		fmt.Println("Usage: muninn vault plasticity <vault> [--preset <name>] [--set <key>=<value>]...")
 		fmt.Println()
 		fmt.Println("  With no flags, prints the vault's resolved plasticity config.")
-		fmt.Println("  --preset <name>     Set the preset: default, reference, scratchpad, knowledge-graph")
+		fmt.Println("  --preset <name>     Set the preset: default, reference, scratchpad, knowledge-graph, working")
 		fmt.Println("  --set <key>=<value> Set an individual override field (repeatable).")
 		fmt.Println()
 		fmt.Println("  Example: muninn vault plasticity research --preset knowledge-graph")
