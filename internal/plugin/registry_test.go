@@ -21,9 +21,11 @@ func (m *mockPlugin) Close() error                                     { m.close
 // mockEmbedPlugin is a mock embed plugin
 type mockEmbedPlugin struct {
 	mockPlugin
+	embedCalls int
 }
 
 func (m *mockEmbedPlugin) Embed(ctx context.Context, texts []string) ([]float32, error) {
+	m.embedCalls++
 	return make([]float32, len(texts)*384), nil
 }
 func (m *mockEmbedPlugin) Dimension() int    { return 384 }

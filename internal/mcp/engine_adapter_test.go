@@ -58,6 +58,9 @@ func (m *mockPluginStore) UpsertRelationship(_ context.Context, _ plugin.ULID, _
 func (m *mockPluginStore) HNSWInsert(_ context.Context, _ plugin.ULID, _ []float32) error {
 	return nil
 }
+func (m *mockPluginStore) CheckEmbedDim(_ context.Context, _ plugin.ULID, _ int) error {
+	return nil
+}
 func (m *mockPluginStore) AutoLinkByEmbedding(_ context.Context, _ plugin.ULID, _ []float32) error {
 	return nil
 }

@@ -790,6 +790,28 @@ func (e *Engine) GetVaultEmbedDim(_ context.Context, vault string) int {
 	return e.hnswRegistry.VaultEmbedDim(ws)
 }
 
+// validateClientEmbeddingDim refuses a caller-supplied embedding whose
+// dimension differs from the vault's established dimension (issue #582),
+// BEFORE anything is persisted — the MCP layer already enforces this with
+// -32602; checking here extends the same contract to every other transport
+// (MBP, gRPC, SDKs, embedded library). The dimension peek never loads a
+// graph: cached index first, one Pebble seek otherwise. Registry.Insert
+// remains the atomic authority; this check exists so a refused vector is
+// never persisted first.
+func (e *Engine) validateClientEmbeddingDim(wsPrefix [8]byte, vec []float32) error {
+	if len(vec) == 0 || e.hnswRegistry == nil {
+		return nil
+	}
+	want := e.hnswRegistry.CachedVaultDim(wsPrefix)
+	if want == 0 && e.store != nil {
+		want, _ = e.store.VaultEmbedDimOnDisk(wsPrefix)
+	}
+	if err := hnsw.CheckDim(want, len(vec)); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+	}
+	return nil
+}
+
 // UpdateTags replaces the tags on an engram.
 func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, tags []string) error {
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
@@ -984,6 +1006,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 	eng.Associations = assocs
 
+	// Refuse a mismatched caller-supplied embedding before anything is
+	// persisted (issue #582).
+	if err := e.validateClientEmbeddingDim(wsPrefix, req.Embedding); err != nil {
+		return nil, err
+	}
+
 	// Write to store
 	id, err := e.store.WriteEngram(ctx, wsPrefix, eng)
 	if err != nil {
@@ -1003,17 +1031,21 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		}
 	}
 
-	// When the caller provided an embedding, mark DigestEmbed so the retroactive
-	// processor does not overwrite it, then insert into HNSW inline so the vector
-	// is searchable immediately (the retroactive processor skips DigestEmbed-flagged
-	// engrams and therefore never calls HNSWInsert for them).
+	// When the caller provided an embedding, insert into HNSW inline so the
+	// vector is searchable immediately, then mark DigestEmbed so the
+	// retroactive processor does not overwrite it. Insert first: if it is
+	// refused (e.g. a dimension race lost against a concurrent first insert,
+	// #582), the engram stays unflagged and the retroactive processor embeds
+	// it with the server's own embedder instead — self-healing rather than a
+	// stranded, never-searchable memory.
 	if len(req.Embedding) > 0 {
-		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
-		if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
-			slog.Warn("engine: failed to set DigestEmbed flag", "id", id.String(), "err", err)
-		}
 		if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(id), req.Embedding); err != nil {
-			slog.Warn("engine: failed to insert client embedding into HNSW", "id", id.String(), "err", err)
+			slog.Warn("engine: client embedding not inserted into HNSW; engram left for the retroactive processor", "id", id.String(), "err", err)
+		} else {
+			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
+			if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
+				slog.Warn("engine: failed to set DigestEmbed flag", "id", id.String(), "err", err)
+			}
 		}
 	}
 
@@ -1464,6 +1496,13 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		callerProvidedAny := callerSummary != "" || len(callerEntities) > 0
 		skipBG := (inlineMode == "caller_only" && callerProvidedAny) || inlineMode == "disabled"
 
+		// Refuse a mismatched caller-supplied embedding before anything is
+		// persisted (issue #582).
+		if err := e.validateClientEmbeddingDim(wsPrefix, req.Embedding); err != nil {
+			errs[i] = err
+			continue
+		}
+
 		items[i] = storage.EngramBatchItem{WSPrefix: wsPrefix, Engram: eng}
 		prepared[i] = preparedBatchItem{
 			wsPrefix:                  wsPrefix,
@@ -1653,16 +1692,17 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			}
 		}
 
-		// When the caller provided an embedding, mark DigestEmbed so the retroactive
-		// processor does not overwrite it, then insert into HNSW inline so the vector
-		// is searchable immediately.
+		// When the caller provided an embedding, insert into HNSW inline first
+		// and only mark DigestEmbed on success — a refused insert (#582) leaves
+		// the engram for the retroactive processor to embed server-side.
 		if len(reqs[i].Embedding) > 0 {
-			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
-			if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
-				slog.Warn("engine: batch: failed to set DigestEmbed flag", "id", id.String(), "err", err)
-			}
 			if err := e.hnswRegistry.Insert(ctx, p.wsPrefix, [16]byte(id), reqs[i].Embedding); err != nil {
-				slog.Warn("engine: batch: failed to insert client embedding into HNSW", "id", id.String(), "err", err)
+				slog.Warn("engine: batch: client embedding not inserted into HNSW; engram left for the retroactive processor", "id", id.String(), "err", err)
+			} else {
+				existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
+				if err := e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed); err != nil {
+					slog.Warn("engine: batch: failed to set DigestEmbed flag", "id", id.String(), "err", err)
+				}
 			}
 		}
 
@@ -1937,6 +1977,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
+
+	// Ownership-lease work-queue visibility (#548): hide engrams checked out by a
+	// live foreign lease unless the caller opts in.
+	actReq.CallerOwner = req.CallerOwner
+	actReq.IncludeLeased = req.IncludeLeased
 
 	// Set defaults
 	if actReq.MaxResults == 0 {
@@ -2693,30 +2738,28 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 }
 
 // UpdateLifecycleState transitions an engram to the named lifecycle state.
+// The write goes through the stripe-locked CompareAndSet path (with no guard),
+// so its read-modify-write is atomic and serializes with any concurrent
+// transition on the same engram — closing the former TOCTOU.
 func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state string) error {
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
 		return fmt.Errorf("parse id: %w", err)
 	}
-	eng, err := e.store.GetEngram(ctx, ws, ulid)
-	if err != nil {
-		return fmt.Errorf("get engram: %w", err)
-	}
 	newState, err := storage.ParseLifecycleState(state)
 	if err != nil {
 		return err
 	}
-	meta := &storage.EngramMeta{
-		State:       newState,
-		Confidence:  eng.Confidence,
-		Relevance:   eng.Relevance,
-		Stability:   eng.Stability,
-		AccessCount: eng.AccessCount,
-		UpdatedAt:   time.Now(),
-		LastAccess:  eng.LastAccess,
+	if _, err := e.store.CompareAndSet(ctx, ws, ulid,
+		storage.CASCondition{},
+		storage.CASMutation{State: &newState}); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("get engram: %w", err)
+		}
+		return err
 	}
-	return e.store.UpdateMetadata(ctx, ws, ulid, meta)
+	return nil
 }
 
 // SetTrust changes the trust label of an engram identified by id (string ULID).
@@ -2820,6 +2863,12 @@ type EngineSessionEntry struct {
 func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (storage.ULID, error) {
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
+	// Refuse a mismatched caller-supplied embedding before anything is
+	// persisted (issue #582).
+	if err := e.validateClientEmbeddingDim(wsPrefix, embedding); err != nil {
+		return storage.ULID{}, err
+	}
+
 	// Parse the old ULID before any writes.
 	oldULID, err := storage.ParseULID(oldID)
 	if err != nil {
@@ -2899,15 +2948,17 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 		slog.Warn("engine: failed to persist vault name", "vault", vault, "err", err)
 	}
 
-	// When the caller provided an embedding, mark DigestEmbed and insert into
-	// HNSW inline (the retroactive processor skips DigestEmbed-flagged engrams).
+	// When the caller provided an embedding, insert into HNSW inline first and
+	// only mark DigestEmbed on success — a refused insert (#582) leaves the
+	// engram for the retroactive processor to embed server-side.
 	if len(embedding) > 0 {
-		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(newULID))
-		if err := e.store.SetDigestFlag(ctx, newULID, existing|plugin.DigestEmbed); err != nil {
-			slog.Warn("engine: evolve: failed to set DigestEmbed flag", "id", newULID.String(), "err", err)
-		}
 		if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(newULID), embedding); err != nil {
-			slog.Warn("engine: evolve: failed to insert client embedding into HNSW", "id", newULID.String(), "err", err)
+			slog.Warn("engine: evolve: client embedding not inserted into HNSW; engram left for the retroactive processor", "id", newULID.String(), "err", err)
+		} else {
+			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(newULID))
+			if err := e.store.SetDigestFlag(ctx, newULID, existing|plugin.DigestEmbed); err != nil {
+				slog.Warn("engine: evolve: failed to set DigestEmbed flag", "id", newULID.String(), "err", err)
+			}
 		}
 	}
 

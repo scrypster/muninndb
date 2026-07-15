@@ -14,7 +14,7 @@ func TestScoringFusion_DefaultEmpty(t *testing.T) {
 }
 
 func TestScoringFusion_AllPresetsDefaultEmpty(t *testing.T) {
-	presets := []string{"default", "reference", "scratchpad", "knowledge-graph"}
+	presets := []string{"default", "reference", "scratchpad", "knowledge-graph", "working"}
 	for _, name := range presets {
 		r := ResolvePlasticity(&PlasticityConfig{Preset: name})
 		if r.ScoringFusion != "" {

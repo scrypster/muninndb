@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Bump Go toolchain to 1.26.5, fixing [GO-2026-5856](https://pkg.go.dev/vuln/GO-2026-5856)
+  (Encrypted Client Hello privacy leak in `crypto/tls`), reachable via the gRPC server,
+  MCP server, WAL recovery, `doctor` cert dial, and plugin transport.
+
 ---
 
 ## [0.7.0] - 2026-06-12

@@ -82,6 +82,9 @@ type PebbleStore struct {
 	// ever seen); stripedMutex uses a constant 256 × sizeof(sync.Mutex) ≈ 6 KB.
 	entityLocks       stripedMutex // prevents TOCTOU in UpsertEntityRecord
 	coOccurrenceLocks stripedMutex // prevents TOCTOU in IncrementEntityCoOccurrence
+	// casLocks serialises the read-compare-write of CompareAndSet per engram,
+	// closing the lifecycle-state TOCTOU and backing the ownership lease.
+	casLocks stripedMutex
 	// archiveBloom is an in-memory Bloom filter over src engram IDs that have
 	// archived associations in the 0x25 namespace. Gates the 0x25 prefix scan
 	// during BFS traversal: if the filter says "no," skip the scan entirely.

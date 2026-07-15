@@ -16,6 +16,17 @@ type PluginConfig struct {
 	EmbedURL      string `json:"embed_url"`      // provider URL override (ollama) or OpenAI base/provider URL override
 	EmbedAPIKey   string `json:"embed_api_key"`  // API key (openai, voyage)
 
+	// User-supplied local ONNX model, active when EmbedProvider is "local"
+	// (issue #583). Both paths must be set together; the model's output
+	// dimension is probed at init, never declared. Init fails loudly on any
+	// problem — a user-supplied model never falls back to the bundled one.
+	EmbedModelPath     string `json:"embed_model_path,omitempty"`     // path to the .onnx model file
+	EmbedTokenizerPath string `json:"embed_tokenizer_path,omitempty"` // path to the HuggingFace tokenizer.json
+	EmbedPooling       string `json:"embed_pooling,omitempty"`        // "cls" (default) or "mean"
+	EmbedMaxTokens     int    `json:"embed_max_tokens,omitempty"`     // max sequence length (default 256)
+	EmbedQueryPrefix   string `json:"embed_query_prefix,omitempty"`   // prepended to recall queries (e.g. "query: " for e5-family models)
+	EmbedPassagePrefix string `json:"embed_passage_prefix,omitempty"` // prepended to stored texts (e.g. "passage: " for e5-family models)
+
 	// Enrich provider settings
 	EnrichProvider string `json:"enrich_provider"` // "ollama", "openai", "anthropic"
 	EnrichURL      string `json:"enrich_url"`      // full provider URL

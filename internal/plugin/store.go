@@ -52,6 +52,15 @@ type PluginStore interface {
 	// HNSWInsert inserts a vector into the HNSW index.
 	HNSWInsert(ctx context.Context, id ULID, vec []float32) error
 
+	// CheckEmbedDim reports whether an embedding of the given dimension would
+	// be accepted for the vault that contains the engram (issue #582). Returns
+	// nil when the vault has no established dimension yet. Used by the
+	// retroactive processor to skip engrams of a mismatched vault BEFORE
+	// paying for inference — the mismatch is a vault-level configuration
+	// condition, so the engrams stay pending (not failure-flagged) and embed
+	// normally once the configuration or the vault is fixed.
+	CheckEmbedDim(ctx context.Context, id ULID, dim int) error
+
 	// AutoLinkByEmbedding finds the top-K nearest neighbors by embedding and
 	// creates RELATES_TO associations with weight = similarity * 0.8.
 	// K = 5 (hardcoded, matching the design doc).

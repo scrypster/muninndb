@@ -1,6 +1,6 @@
 module github.com/scrypster/muninndb
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/bits-and-blooms/bloom/v3 v3.7.1

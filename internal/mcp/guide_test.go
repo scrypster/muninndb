@@ -108,6 +108,24 @@ func TestGenerateGuide_ScratchpadConfig(t *testing.T) {
 	}
 }
 
+func TestGenerateGuide_WorkingConfig(t *testing.T) {
+	r := auth.ResolvePlasticity(&auth.PlasticityConfig{Preset: "working"})
+	guide := generateGuide("wf", r, engineStats{})
+
+	if !strings.Contains(guide, "Hebbian learning: enabled") {
+		t.Error("working should show Hebbian enabled")
+	}
+	if !strings.Contains(guide, "Predictive activation (PAS): enabled") {
+		t.Error("working should show PAS enabled")
+	}
+	if !strings.Contains(guide, "Behavior mode: selective") {
+		t.Error("working preset should show selective behavior mode")
+	}
+	if !strings.Contains(guide, "Retention: 7 days") {
+		t.Error("working should surface its 7-day retention")
+	}
+}
+
 func TestGenerateGuide_TipsSection(t *testing.T) {
 	r := auth.ResolvePlasticity(nil)
 	guide := generateGuide("default", r, engineStats{})

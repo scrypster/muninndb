@@ -228,6 +228,12 @@ func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *Ad
 		return nil, fmt.Errorf("add child: parse parent id: %w", err)
 	}
 
+	// Refuse a mismatched caller-supplied embedding before anything is
+	// persisted (issue #582).
+	if err := e.validateClientEmbeddingDim(ws, input.Embedding); err != nil {
+		return nil, err
+	}
+
 	// Verify parent exists and is active or archived.
 	parentEng, err := e.store.GetEngram(ctx, ws, pid)
 	if err != nil {
@@ -312,15 +318,17 @@ func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *Ad
 		}
 	}
 
-	// When the caller provided an embedding, mark DigestEmbed and insert into
-	// HNSW inline (the retroactive processor skips DigestEmbed-flagged engrams).
+	// When the caller provided an embedding, insert into HNSW inline first and
+	// only mark DigestEmbed on success — a refused insert (#582) leaves the
+	// engram for the retroactive processor to embed server-side.
 	if len(input.Embedding) > 0 {
-		existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(child.ID))
-		if err := e.store.SetDigestFlag(ctx, child.ID, existing|plugin.DigestEmbed); err != nil {
-			slog.Warn("engine: add child: failed to set DigestEmbed flag", "id", child.ID.String(), "err", err)
-		}
 		if err := e.hnswRegistry.Insert(ctx, ws, [16]byte(child.ID), input.Embedding); err != nil {
-			slog.Warn("engine: add child: failed to insert client embedding into HNSW", "id", child.ID.String(), "err", err)
+			slog.Warn("engine: add child: client embedding not inserted into HNSW; engram left for the retroactive processor", "id", child.ID.String(), "err", err)
+		} else {
+			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(child.ID))
+			if err := e.store.SetDigestFlag(ctx, child.ID, existing|plugin.DigestEmbed); err != nil {
+				slog.Warn("engine: add child: failed to set DigestEmbed flag", "id", child.ID.String(), "err", err)
+			}
 		}
 	}
 

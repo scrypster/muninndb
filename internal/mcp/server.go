@@ -232,6 +232,9 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		"muninn_traverse":                  s.handleTraverse,
 		"muninn_explain":                   s.handleExplain,
 		"muninn_state":                     s.handleState,
+		"muninn_compare_and_set":           s.handleCompareAndSet,
+		"muninn_claim":                     s.handleClaim,
+		"muninn_release":                   s.handleRelease,
 		"muninn_list_deleted":              s.handleListDeleted,
 		"muninn_retry_enrich":              s.handleRetryEnrich,
 		"muninn_get_enrichment_candidates": s.handleGetEnrichmentCandidates,
@@ -308,6 +311,7 @@ func registeredToolNames() []string {
 		"muninn_replay_enrichment", "muninn_provenance", "muninn_feedback",
 		"muninn_entity", "muninn_entities",
 		"muninn_trust",
+		"muninn_compare_and_set", "muninn_claim", "muninn_release",
 	}
 }
 

@@ -83,17 +83,52 @@ type Index struct {
 	// (e.g. the registry's no-cache-on-error behaviour) without corrupting Pebble.
 	// Always nil in production.
 	loadErrHook func() error
+
+	// dim is the vault's established vector dimension; 0 until the first
+	// vector is inserted or loaded. On load it is taken from the vector with
+	// the smallest ID, so it is deterministic per process AND across restarts
+	// (and agrees with the storage layer's first-key derivation) even for a
+	// legacy vault that already holds mixed dimensions. Guarded by mu.
+	dim int
+
+	// loadErr is set by the registry when LoadFromPebble failed for this
+	// (uncached) index, so writes can refuse instead of treating the vault as
+	// empty — inserting into a vault whose real dimension is unknown could
+	// recreate the #582 split. Set once before the index escapes getOrCreate.
+	loadErr error
 }
 
-// Dim returns the vector dimension used by this index.
+// Dim returns the vault's established vector dimension.
 // Returns 0 if the index is empty (no vectors inserted yet).
 func (idx *Index) Dim() int {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	for _, node := range idx.nodes {
-		return len(node.vec)
+	return idx.dim
+}
+
+// LoadError reports the load failure recorded for this index, if any.
+func (idx *Index) LoadError() error {
+	return idx.loadErr
+}
+
+// establishDim atomically checks a vector's dimension against the vault's
+// established dimension, establishing it on first use — check and
+// establishment happen under one lock, so two concurrent first inserts with
+// different dimensions cannot both pass (one establishes, the other is
+// refused). The established dimension deliberately survives the deletion of
+// the vector that set it: refusing until a reload/reset is safer than letting
+// the dimension flap.
+func (idx *Index) establishDim(n int) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.dim == 0 {
+		idx.dim = n
+		return nil
 	}
-	return 0
+	if idx.dim != n {
+		return &DimMismatchError{Got: n, Want: idx.dim}
+	}
+	return nil
 }
 
 // Tombstone marks a node as deleted so it is skipped in future Search results.
@@ -824,11 +859,27 @@ func (idx *Index) LoadFromPebble() error {
 		rebuilt = true
 	}
 
+	// Derive the vault's dimension from the vector with the smallest ID —
+	// deterministic across calls and restarts (map iteration is random), and
+	// consistent with the storage layer's first-embedding-key derivation.
+	tempDim := 0
+	var dimID [16]byte
+	for id, node := range tempNodes {
+		if node.vec == nil {
+			continue
+		}
+		if tempDim == 0 || string(id[:]) < string(dimID[:]) {
+			tempDim = len(node.vec)
+			dimID = id
+		}
+	}
+
 	// Only apply to index if load completed successfully
 	idx.mu.Lock()
 	idx.nodes = tempNodes
 	idx.maxLevel = tempMaxLevel
 	idx.entryPoint = tempEntryPoint
+	idx.dim = tempDim
 	idx.mu.Unlock()
 
 	slog.Info("hnsw: loaded graph from pebble",

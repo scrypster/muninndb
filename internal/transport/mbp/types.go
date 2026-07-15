@@ -158,6 +158,13 @@ type ActivateRequest struct {
 	DisableHops bool      `msgpack:"disable_hops,omitempty" json:"disable_hops,omitempty"` // when true, override default hop traversal to 0
 	Profile     string    `json:"profile,omitempty" msgpack:"profile,omitempty"`           // traversal profile override: ""|"default"|"causal"|"confirmatory"|"adversarial"|"structural"
 	Mode        string    `json:"mode,omitempty" msgpack:"mode,omitempty"`                 // recall mode preset: "semantic"|"recent"|"balanced"|"deep"
+	// CallerOwner is the lease-owner identity of the recall caller. Engrams held by
+	// a live lease owned by someone else are hidden (work-queue checkout); the
+	// caller's own leased engrams are returned normally. Empty means the caller
+	// owns no leases, so any live foreign lease hides its engram.
+	CallerOwner string `json:"caller_owner,omitempty" msgpack:"caller_owner,omitempty"`
+	// IncludeLeased disables lease-based visibility filtering (admin/debugging).
+	IncludeLeased bool `json:"include_leased,omitempty" msgpack:"include_leased,omitempty"`
 }
 
 // Weights defines scoring weight distribution.

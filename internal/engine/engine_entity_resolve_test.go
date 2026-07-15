@@ -165,3 +165,26 @@ func TestFindByEntity_NoPhantomMatch(t *testing.T) {
 	require.Empty(t, res.Engrams, "an article must not fuzzy-match every article-bearing entity")
 	require.False(t, res.Fuzzy)
 }
+
+// TestFindByEntity_NoPartialOverlapMatch verifies that a query sharing only
+// one token with an unrelated multi-word entity does not qualify as a fuzzy
+// match, even when it is the only candidate in the vault. "Token Arcade" and
+// "Arcade Fire" share the token "arcade" but neither entity's token set is a
+// subset of the other's — this is coincidental overlap, not a token-level
+// variant of the same identity, and must not be served as a match.
+func TestFindByEntity_NoPartialOverlapMatch(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "fuzzy-partial-overlap"
+	ws := eng.store.ResolveVaultPrefix(vault)
+	linkEntityEngram(t, eng, ws, "band-doc", "Arcade Fire")
+
+	res, err := eng.FindByEntity(ctx, vault, "Token Arcade", 20)
+	require.NoError(t, err)
+	require.Empty(t, res.Engrams, "one shared token on an otherwise unrelated multi-word entity must not match")
+	require.Empty(t, res.MatchedEntity)
+	require.False(t, res.Fuzzy)
+}

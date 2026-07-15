@@ -168,7 +168,7 @@ curl -X PUT http://127.0.0.1:8475/api/admin/vaults/config \
 
 Plasticity controls the cognitive pipeline for a vault — how it learns, forgets, and traverses connections between engrams. Each vault can have its own plasticity settings independent of others.
 
-**Four preset profiles** are available: `default` (balanced Hebbian + temporal), `reference` (preserves with strong Hebbian bonds), `scratchpad` (rapid fading, minimal history), and `knowledge-graph` (rich traversal, strong associative learning).
+**Five preset profiles** are available: `default` (balanced Hebbian + temporal), `reference` (preserves with strong Hebbian bonds), `scratchpad` (rapid fading, minimal history), `knowledge-graph` (rich traversal, strong associative learning), and `working` (default cognition with 7-day auto-eviction for shared workflow scratch vaults; pair with `multi_user` per RFC #597).
 
 Get the current plasticity configuration for a vault:
 
@@ -219,7 +219,7 @@ curl -X PUT "http://127.0.0.1:8475/api/admin/vault/default/plasticity" \
 
 | Field | Type | Range | Purpose |
 |-------|------|-------|---------|
-| `preset` | string | `default` \| `reference` \| `scratchpad` \| `knowledge-graph` | Base cognitive profile; overrides applied on top |
+| `preset` | string | `default` \| `reference` \| `scratchpad` \| `knowledge-graph` \| `working` | Base cognitive profile; overrides applied on top |
 | `hebbian_enabled` | bool | — | Enable/disable Hebbian weight updates (coactivation learning) |
 | `temporal_enabled` | bool | — | Enable/disable time-based temporal scoring |
 | `multi_user` | bool | — | Vault shared by multiple users/agents: guide + recall hints steer clients to per-user scoped recall; `where_left_off`/`session` flagged vault-global |

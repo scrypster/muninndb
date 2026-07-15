@@ -38,6 +38,12 @@ type ProviderHTTPConfig struct {
 	Model   string // "nomic-embed-text" or "text-embedding-3-small"
 	APIKey  string // empty for Ollama, required for cloud providers
 	DataDir string // local data directory for asset extraction (local provider only)
+
+	// User-supplied local ONNX model overrides (local provider only, #583).
+	LocalModelPath     string // path to a user-supplied .onnx model file
+	LocalTokenizerPath string // path to its HuggingFace tokenizer.json
+	LocalPooling       string // "cls" (default) or "mean"
+	LocalMaxTokens     int    // max sequence length; 0 = provider default
 }
 
 // EmbedService implements plugin.EmbedPlugin.
@@ -114,10 +120,14 @@ func (s *EmbedService) Init(ctx context.Context, cfg plugin.PluginConfig) error 
 	s.cfg = cfg
 
 	provHTTPCfg := ProviderHTTPConfig{
-		BaseURL: s.provCfg.BaseURL,
-		Model:   s.provCfg.Model,
-		APIKey:  cfg.APIKey,
-		DataDir: cfg.DataDir,
+		BaseURL:            s.provCfg.BaseURL,
+		Model:              s.provCfg.Model,
+		APIKey:             cfg.APIKey,
+		DataDir:            cfg.DataDir,
+		LocalModelPath:     cfg.LocalModelPath,
+		LocalTokenizerPath: cfg.LocalTokenizerPath,
+		LocalPooling:       cfg.LocalPooling,
+		LocalMaxTokens:     cfg.LocalMaxTokens,
 	}
 
 	slog.Info("initializing embed provider",

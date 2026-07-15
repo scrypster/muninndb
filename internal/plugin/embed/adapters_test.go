@@ -87,3 +87,56 @@ func TestEmbedServiceAdapter_Tokenize_Empty(t *testing.T) {
 		t.Errorf("expected 0 tokens for empty string, got %d", len(tokens))
 	}
 }
+
+// recordingEmbedPlugin captures the texts passed to Embed so prefix wrapping
+// can be asserted.
+type recordingEmbedPlugin struct {
+	stubEmbedPlugin
+	gotTexts []string
+	hardware bool
+}
+
+func (r *recordingEmbedPlugin) Embed(_ context.Context, texts []string) ([]float32, error) {
+	r.gotTexts = append([]string(nil), texts...)
+	return r.embedResult, r.embedErr
+}
+
+func (r *recordingEmbedPlugin) HardwareAccelerated() bool { return r.hardware }
+
+func TestNewPrefixedEmbedPlugin_EmptyPrefixReturnsUnwrapped(t *testing.T) {
+	stub := &recordingEmbedPlugin{}
+	if got := NewPrefixedEmbedPlugin(stub, ""); got != plugin.EmbedPlugin(stub) {
+		t.Fatal("empty prefix must return the plugin unchanged")
+	}
+}
+
+func TestNewPrefixedEmbedPlugin_PrependsPrefix(t *testing.T) {
+	stub := &recordingEmbedPlugin{}
+	wrapped := NewPrefixedEmbedPlugin(stub, "passage: ")
+
+	if _, err := wrapped.Embed(context.Background(), []string{"alpha", "beta"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	want := []string{"passage: alpha", "passage: beta"}
+	if len(stub.gotTexts) != len(want) {
+		t.Fatalf("inner plugin saw %d texts, want %d", len(stub.gotTexts), len(want))
+	}
+	for i := range want {
+		if stub.gotTexts[i] != want[i] {
+			t.Errorf("text[%d] = %q, want %q", i, stub.gotTexts[i], want[i])
+		}
+	}
+}
+
+func TestPrefixedEmbedPlugin_ForwardsHardwareFlag(t *testing.T) {
+	stub := &recordingEmbedPlugin{hardware: true}
+	wrapped := NewPrefixedEmbedPlugin(stub, "query: ")
+
+	h, ok := wrapped.(plugin.HardwareAwarePlugin)
+	if !ok {
+		t.Fatal("prefixed plugin must still satisfy HardwareAwarePlugin")
+	}
+	if !h.HardwareAccelerated() {
+		t.Error("hardware flag not forwarded")
+	}
+}

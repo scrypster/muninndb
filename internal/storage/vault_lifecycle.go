@@ -23,7 +23,7 @@ import (
 //  4. Evict all in-memory caches (L1, assocCache, metaCache, recentActiveCache).
 //
 // Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17,
-// 0x20–0x22, 0x24–0x28
+// 0x20–0x22, 0x24–0x28, 0x2A
 // Prefixes NOT cleared (global or name keys):
 //   - 0x0E vault meta key (preserved by Clear, deleted by DeleteVaultNameOnly)
 //   - 0x0F name index    (global by name hash, deleted by DeleteVaultNameOnly)
@@ -72,6 +72,7 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 		0x26, // relationship entity index
 		0x27, // dream state
 		0x28, // content-hash dedup index
+		0x2A, // ownership-lease sidecar
 	}
 	wsPlus, err := incrementWS(ws)
 	if err != nil {

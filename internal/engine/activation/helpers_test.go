@@ -458,6 +458,10 @@ func (s *internalStubStore) GetEngrams(_ context.Context, _ [8]byte, ids []stora
 	return out, nil
 }
 
+func (s *internalStubStore) GetLeases(_ context.Context, _ [8]byte, ids []storage.ULID) ([]storage.Lease, error) {
+	return make([]storage.Lease, len(ids)), nil
+}
+
 func (s *internalStubStore) GetAssociations(_ context.Context, _ [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error) {
 	result := make(map[storage.ULID][]storage.Association)
 	for _, id := range ids {

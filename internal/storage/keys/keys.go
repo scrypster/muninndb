@@ -783,3 +783,16 @@ func ContentHashKey(ws [8]byte, hash [32]byte) []byte {
 	copy(key[9:41], hash[:])
 	return key
 }
+
+// LeaseKey constructs the ownership-lease sidecar key (0x2A prefix) for an engram.
+// The lease is a work-queue checkout attribute stored next to the engram it
+// guards, not a separate lock object.
+// Key: 0x2A | wsPrefix(8) | ulid(16) = 25 bytes
+// Value: JSON-encoded lease {owner, heartbeat, ttl}.
+func LeaseKey(ws [8]byte, id [16]byte) []byte {
+	key := make([]byte, 1+8+16)
+	key[0] = 0x2A
+	copy(key[1:9], ws[:])
+	copy(key[9:25], id[:])
+	return key
+}

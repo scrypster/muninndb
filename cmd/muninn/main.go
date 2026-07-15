@@ -127,6 +127,17 @@ func main() {
 			runAudit(rest)
 			return
 		}
+		// "exec read"/"logs 50" join to "exec:read"/"logs:50" like every
+		// two-word form; without these routes the joined tokens fell through
+		// to Unknown command while the help text documented them as valid.
+		if strings.HasPrefix(sub, "exec:") {
+			runExec(rest)
+			return
+		}
+		if strings.HasPrefix(sub, "logs:") {
+			runLogs(rest)
+			return
+		}
 		if strings.HasPrefix(sub, "cluster:") {
 			runCluster(rest)
 			return

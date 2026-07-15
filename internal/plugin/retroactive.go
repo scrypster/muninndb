@@ -11,6 +11,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/engine/circuit"
+	hnswpkg "github.com/scrypster/muninndb/internal/index/hnsw"
 )
 
 // errLLMFailed is an unexported sentinel wrapping errors that originate from
@@ -285,6 +286,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 
 	startTime := time.Now()
 	batchCount := 0
+	dimSkipped := 0 // engrams skipped for a vault-dimension mismatch this pass (#582)
 
 	// For embed plugins, accumulate a micro-batch and embed in one ORT call.
 	// The batch size is determined by the plugin's MaxBatchSize() so the provider
@@ -332,14 +334,43 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		for i, eng := range microEngrams {
 			vec := vecs[i*dim : (i+1)*dim]
 			if storeErr := rp.store.UpdateEmbedding(ctx, eng.ID, vec); storeErr != nil {
-				slog.Warn("retroactive processor: UpdateEmbedding failed",
-					"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", storeErr)
+				var dimErr *hnswpkg.DimMismatchError
+				if errors.As(storeErr, &dimErr) {
+					// Vault-level condition (#582), not an engram failure: leave
+					// the engram pending — deliberately NO DigestEmbedFailed — so
+					// it embeds normally once the vault is re-embedded or the
+					// configuration is fixed. (DigestEmbedFailed shares bit 0x80
+					// with DigestEnrichFailed; stamping it here would also stop
+					// enrichment.) The pre-scan CheckEmbedDim makes this branch a
+					// rare race, not the steady state.
+					slog.Warn("retroactive processor: embedding dimension mismatch — engram left pending until the vault is re-embedded (`muninn vault reembed`)",
+						"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(),
+						"embedder_dim", dimErr.Got, "vault_dim", dimErr.Want)
+				} else {
+					slog.Warn("retroactive processor: UpdateEmbedding failed",
+						"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", storeErr)
+				}
 				rp.statsMu.Lock()
 				rp.stats.Errors++
 				rp.statsMu.Unlock()
 				continue
 			}
 			if storeErr := rp.store.HNSWInsert(ctx, eng.ID, vec); storeErr != nil {
+				var dimErr *hnswpkg.DimMismatchError
+				if errors.As(storeErr, &dimErr) {
+					// Refused by the registry's atomic guard (#582) — e.g. a
+					// concurrent first insert established a different dimension
+					// after the UpdateEmbedding pre-check passed. Leave the
+					// engram pending (no processed flag, no push notification):
+					// the next pass re-evaluates it against the settled vault.
+					slog.Warn("retroactive processor: HNSW refused embedding dimension — engram left pending",
+						"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(),
+						"embedder_dim", dimErr.Got, "vault_dim", dimErr.Want)
+					rp.statsMu.Lock()
+					rp.stats.Errors++
+					rp.statsMu.Unlock()
+					continue
+				}
 				slog.Warn("retroactive processor: HNSWInsert failed",
 					"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", storeErr)
 			} else if rp.onEmbed != nil {
@@ -419,6 +450,19 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		}
 
 		if isEmbedPlugin {
+			// Skip engrams of a vault whose established dimension does not
+			// match the active embedder BEFORE paying for inference (#582).
+			// Deliberately no failure flag: the mismatch is a vault-level
+			// configuration condition (resolved by `muninn vault reembed` or
+			// a config fix), and skipped engrams embed normally afterwards.
+			// Skips do not count toward the per-pass cap — one cheap check
+			// per engram per pass, no inference, no hot re-notify loop.
+			if dim := embedPlugin.Dimension(); dim > 0 {
+				if dimErr := rp.store.CheckEmbedDim(ctx, eng.ID, dim); dimErr != nil {
+					dimSkipped++
+					continue
+				}
+			}
 			// Accumulate into micro-batch; flush when full.
 			microEngrams = append(microEngrams, eng)
 			microTexts = append(microTexts, eng.Concept+" "+eng.Content)
@@ -520,6 +564,13 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 
 	// Flush any remaining micro-batch at end of iterator.
 	flushMicroBatch()
+
+	// One summary line per pass instead of one per engram — a mismatched
+	// vault can hold thousands of pending engrams.
+	if dimSkipped > 0 {
+		slog.Warn("retroactive processor: engrams skipped — vault embedding dimension does not match the active embedder; run `muninn vault reembed` to re-embed them",
+			"plugin", rp.plugin.Name(), "skipped", dimSkipped)
+	}
 
 	rp.statsMu.Lock()
 	rp.stats.Status = "idle"

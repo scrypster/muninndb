@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	plugincfg "github.com/scrypster/muninndb/internal/config"
+	"github.com/scrypster/muninndb/internal/engine/activation"
 )
 
 // storage import is intentionally omitted — PebbleStore requires *pebble.DB.
@@ -1831,6 +1832,86 @@ func TestBuildEmbedder_AllEnvVarsTried(t *testing.T) {
 	}
 }
 
+// TestBuildEmbedder_ExplicitProviderFailure_DoesNotSubstituteModel covers
+// issue #582: when plugin_config.json explicitly names a non-local provider
+// and that provider is unreachable at boot, buildEmbedder must not fall
+// through to the bundled 384-dim local ONNX model — silently mixing
+// embedding models/dimensions in a populated vault is worse than disabling
+// semantic search. It must land on noop with a diagnostic naming the
+// configured provider, not the generic "no embedder configured" message
+// (which implies nothing was ever configured).
+//
+// LocalAvailable() is false in this test binary (no -tags localassets), so
+// the pre-fix code would already have skipped step 3 for the same reason
+// this test's build does — the fix is exercised for real by CI, which
+// builds with -tags localassets and real model assets. This test instead
+// pins the new branch/diagnostic itself, independent of asset availability.
+func TestBuildEmbedder_ExplicitProviderFailure_DoesNotSubstituteModel(t *testing.T) {
+	t.Setenv("MUNINN_OLLAMA_URL", "")
+	t.Setenv("MUNINN_OPENAI_KEY", "")
+	t.Setenv("MUNINN_VOYAGE_KEY", "")
+	t.Setenv("MUNINN_COHERE_KEY", "")
+	t.Setenv("MUNINN_GOOGLE_KEY", "")
+	t.Setenv("MUNINN_JINA_KEY", "")
+	t.Setenv("MUNINN_MISTRAL_KEY", "")
+
+	cfg := plugincfg.PluginConfig{EmbedProvider: "ollama", EmbedURL: "http://localhost:1/bad"}
+	var embedder activation.Embedder
+	stderr := captureStderr(func() {
+		var err error
+		embedder, _, err = buildEmbedder(context.Background(), cfg, t.TempDir())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	if embedder == nil {
+		t.Error("expected noop embedder fallback")
+	}
+	if !strings.Contains(stderr, `"ollama"`) {
+		t.Errorf("expected diagnostic naming the failed provider, got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "Semantic search is DISABLED, not silently switched to a different model") {
+		t.Errorf("expected the explicit-provider-failure diagnostic, got: %s", stderr)
+	}
+	if strings.Contains(stderr, "No embedder configured") {
+		t.Errorf("must not show the generic unconfigured message when a provider was explicitly configured, got: %s", stderr)
+	}
+}
+
+// TestBuildEmbedder_NoProviderConfigured_KeepsGenericMessage is the control
+// for the test above: with nothing configured at all, the pre-existing
+// generic "no embedder configured" diagnostic must still fire — the new
+// explicit-provider branch must not fire when EmbedProvider is empty/"none".
+func TestBuildEmbedder_NoProviderConfigured_KeepsGenericMessage(t *testing.T) {
+	t.Setenv("MUNINN_OLLAMA_URL", "")
+	t.Setenv("MUNINN_OPENAI_KEY", "")
+	t.Setenv("MUNINN_VOYAGE_KEY", "")
+	t.Setenv("MUNINN_COHERE_KEY", "")
+	t.Setenv("MUNINN_GOOGLE_KEY", "")
+	t.Setenv("MUNINN_JINA_KEY", "")
+	t.Setenv("MUNINN_MISTRAL_KEY", "")
+	t.Setenv("MUNINN_LOCAL_EMBED", "0")
+
+	cfg := plugincfg.PluginConfig{EmbedProvider: "none"}
+	var embedder activation.Embedder
+	stderr := captureStderr(func() {
+		var err error
+		embedder, _, err = buildEmbedder(context.Background(), cfg, t.TempDir())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	if embedder == nil {
+		t.Error("expected noop embedder")
+	}
+	if !strings.Contains(stderr, "No embedder configured") {
+		t.Errorf("expected the generic unconfigured message, got: %s", stderr)
+	}
+	if strings.Contains(stderr, "Semantic search is DISABLED, not silently switched") {
+		t.Errorf("must not show the explicit-provider-failure diagnostic when nothing was configured, got: %s", stderr)
+	}
+}
+
 // runStartupMigrations requires a real PebbleStore — tested via integration.
 
 // ---------------------------------------------------------------------------
@@ -2393,5 +2474,121 @@ func TestRunVaultDelete_CancelledByUser(t *testing.T) {
 	})
 	if !strings.Contains(out, "Cancelled") {
 		t.Errorf("expected 'Cancelled': %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildEmbedder: user-supplied local ONNX model (#583)
+// ---------------------------------------------------------------------------
+
+func TestBuildEmbedder_UserModelHalfConfigured_Errors(t *testing.T) {
+	clearEmbedEnv(t)
+	t.Setenv("MUNINN_LOCAL_EMBED", "")
+
+	cfg := plugincfg.PluginConfig{EmbedProvider: "local", EmbedModelPath: "/nonexistent/model.onnx"}
+	embedder, plug, err := buildEmbedder(context.Background(), cfg, t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error when only one of embed_model_path/embed_tokenizer_path is set")
+	}
+	if !strings.Contains(err.Error(), "embed_tokenizer_path") {
+		t.Errorf("error should name the missing key, got: %v", err)
+	}
+	if embedder != nil || plug != nil {
+		t.Error("no embedder may be returned on a user-model configuration error")
+	}
+}
+
+func TestBuildEmbedder_UserModelConflictsWithLocalEmbedOff(t *testing.T) {
+	clearEmbedEnv(t) // leaves MUNINN_LOCAL_EMBED=0, which this test needs
+
+	dir := t.TempDir()
+	cfg := plugincfg.PluginConfig{
+		EmbedProvider:      "local",
+		EmbedModelPath:     filepath.Join(dir, "m.onnx"),
+		EmbedTokenizerPath: filepath.Join(dir, "t.json"),
+	}
+	_, _, err := buildEmbedder(context.Background(), cfg, t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error when MUNINN_LOCAL_EMBED=0 conflicts with a configured user model")
+	}
+	if !strings.Contains(err.Error(), "MUNINN_LOCAL_EMBED") {
+		t.Errorf("error should name the conflicting env var, got: %v", err)
+	}
+}
+
+// TestBuildEmbedder_UserModelBrokenPaths_NoFallback pins the #583 fail-loud
+// contract at the buildEmbedder level: a configured user model whose files do
+// not exist is a hard error — never the bundled model, never noop-with-a-
+// warning. In a localassets build the failure comes from provider init
+// (missing files); in a noembed build it comes earlier (no ONNX runtime).
+// Both build variants must produce an error.
+func TestBuildEmbedder_UserModelBrokenPaths_NoFallback(t *testing.T) {
+	clearEmbedEnv(t)
+	t.Setenv("MUNINN_LOCAL_EMBED", "") // must not trip the =0 conflict check
+
+	dir := t.TempDir()
+	cfg := plugincfg.PluginConfig{
+		EmbedProvider:      "local",
+		EmbedModelPath:     filepath.Join(dir, "does-not-exist.onnx"),
+		EmbedTokenizerPath: filepath.Join(dir, "does-not-exist.json"),
+	}
+	embedder, plug, err := buildEmbedder(context.Background(), cfg, t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error for a user model whose files do not exist")
+	}
+	if embedder != nil || plug != nil {
+		t.Error("no embedder may be returned when the configured user model fails to initialize")
+	}
+}
+
+// TestBuildEmbedder_UserModelConflictsWithEnvProvider pins that an embed
+// provider env var plus a configured user local model is a hard startup error
+// — env precedence would silently override the explicit model, the exact
+// silent-substitution class of #582.
+func TestBuildEmbedder_UserModelConflictsWithEnvProvider(t *testing.T) {
+	clearEmbedEnv(t)
+	t.Setenv("MUNINN_LOCAL_EMBED", "")
+	t.Setenv("MUNINN_OLLAMA_URL", "ollama://localhost:1/some-model")
+
+	dir := t.TempDir()
+	cfg := plugincfg.PluginConfig{
+		EmbedProvider:      "local",
+		EmbedModelPath:     filepath.Join(dir, "m.onnx"),
+		EmbedTokenizerPath: filepath.Join(dir, "t.json"),
+	}
+	_, _, err := buildEmbedder(context.Background(), cfg, t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error when an env provider conflicts with a configured user model")
+	}
+	if !strings.Contains(err.Error(), "MUNINN_OLLAMA_URL") {
+		t.Errorf("error should name the conflicting env var, got: %v", err)
+	}
+}
+
+// TestBuildEmbedder_UserModelKeysInactive_OtherProvider pins that user-model
+// keys configured alongside a non-"local" provider are inactive (warned, not
+// fatal): the explicitly configured provider still governs the outcome.
+func TestBuildEmbedder_UserModelKeysInactive_OtherProvider(t *testing.T) {
+	clearEmbedEnv(t) // leaves MUNINN_LOCAL_EMBED=0, which this test wants
+
+	cfg := plugincfg.PluginConfig{
+		EmbedProvider:      "ollama",
+		EmbedURL:           "http://localhost:1/bad",
+		EmbedModelPath:     "/nonexistent/model.onnx",
+		EmbedTokenizerPath: "/nonexistent/tokenizer.json",
+	}
+	var embedder activation.Embedder
+	stderr := captureStderr(func() {
+		var err error
+		embedder, _, err = buildEmbedder(context.Background(), cfg, t.TempDir())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	if embedder == nil {
+		t.Error("expected noop embedder fallback for the failed explicit provider")
+	}
+	if !strings.Contains(stderr, `"ollama"`) {
+		t.Errorf("expected diagnostic naming the failed provider, got: %s", stderr)
 	}
 }

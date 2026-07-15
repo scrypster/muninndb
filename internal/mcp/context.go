@@ -175,7 +175,10 @@ func isMutatingTool(name string) bool {
 		"muninn_merge_entity",
 		"muninn_replay_enrichment",
 		"muninn_feedback",
-		"muninn_trust":
+		"muninn_trust",
+		"muninn_compare_and_set",
+		"muninn_claim",
+		"muninn_release":
 		return true
 	}
 	return false

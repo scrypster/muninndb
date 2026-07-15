@@ -2,6 +2,7 @@ package hnsw
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -9,6 +10,31 @@ import (
 
 	"github.com/cockroachdb/pebble"
 )
+
+// DimMismatchError reports a vector whose dimension differs from the dimension
+// already established by a vault's existing vectors. Mixing dimensions inside
+// one vault silently splits it into mutually invisible embedding spaces
+// (issue #582): CosineSimilarity scores length-mismatched pairs 0, so a
+// mismatched vector would be stored but never surface in semantic search.
+type DimMismatchError struct {
+	Got  int // dimension of the offending vector
+	Want int // dimension established by the vault's existing vectors
+}
+
+func (e *DimMismatchError) Error() string {
+	return fmt.Sprintf("embedding dimension %d does not match vault dimension %d — run `muninn vault reembed <vault>` after changing embedding models", e.Got, e.Want)
+}
+
+// CheckDim is the single definition of the vault-dimension invariant: a vault
+// whose dimension is established (want > 0) only accepts vectors of exactly
+// that dimension; an empty vault (want == 0) accepts any — the first insert
+// establishes it.
+func CheckDim(want, got int) error {
+	if want > 0 && got != want {
+		return &DimMismatchError{Got: got, Want: want}
+	}
+	return nil
+}
 
 // Registry is a multi-vault HNSW index registry.
 // It lazily creates and caches one *Index per vault workspace prefix.
@@ -121,6 +147,10 @@ func (r *Registry) getOrCreate(ws [8]byte) *Index {
 	// access retries the load. (issue #499)
 	if err := idx.LoadFromPebble(); err != nil {
 		slog.Error("hnsw: failed to load graph from pebble; not caching index (load will be retried on next access)", "vault", ws, "error", err)
+		// Record the failure so Insert refuses writes instead of treating the
+		// vault as empty (Dim()==0 would let a mismatched vector through and
+		// recreate the #582 split). Reads keep their degraded-empty behavior.
+		idx.loadErr = err
 		return idx
 	}
 	r.indexes[ws] = idx
@@ -129,8 +159,14 @@ func (r *Registry) getOrCreate(ws [8]byte) *Index {
 
 // Search implements activation.HNSWIndex and trigger.HNSWIndex.
 // It delegates to the per-vault Index.
+// A query vector whose dimension differs from the vault's established
+// dimension returns a *DimMismatchError instead of silently scoring 0 against
+// every node (issue #582); callers already degrade to FTS on search errors.
 func (r *Registry) Search(ctx context.Context, ws [8]byte, vec []float32, topK int) ([]ScoredID, error) {
 	idx := r.getOrCreate(ws)
+	if err := CheckDim(idx.Dim(), len(vec)); err != nil {
+		return nil, err
+	}
 	return idx.Search(ctx, vec, topK)
 }
 
@@ -156,6 +192,18 @@ func (r *Registry) VaultVectors(ws [8]byte) int {
 // Returns 0 if the vault has no indexed vectors yet (dimension not yet established).
 func (r *Registry) VaultEmbedDim(ws [8]byte) int {
 	return r.getOrCreate(ws).Dim()
+}
+
+// CachedVaultDim returns the vault's vector dimension when its index is
+// already in memory, and 0 otherwise — unlike VaultEmbedDim it never triggers
+// a graph load, so callers that only need a cheap dimension peek (e.g. the
+// write-side dimension guard) don't pull a whole vault into memory just to
+// refuse a vector.
+func (r *Registry) CachedVaultDim(ws [8]byte) int {
+	if idx := r.get(ws); idx != nil {
+		return idx.Dim()
+	}
+	return 0
 }
 
 // TotalVectorBytes returns the total in-memory vector size across all vaults.
@@ -256,6 +304,22 @@ func (r *Registry) maybeLogMemoryPressure(totalBytes int64) (skipInsert bool) {
 // FTS remains intact; only semantic (HNSW) search degrades gracefully.
 func (r *Registry) Insert(ctx context.Context, ws [8]byte, id [16]byte, vec []float32) error {
 	idx := r.getOrCreate(ws)
+
+	// A vault whose graph failed to load has an UNKNOWN dimension — refuse
+	// the write rather than fail open (Dim()==0 would accept anything and
+	// could recreate the #582 split). The load is retried on next access, so
+	// a transient read error only defers the insert.
+	if err := idx.LoadError(); err != nil {
+		return fmt.Errorf("hnsw: refusing insert, vault graph failed to load (retried on next access): %w", err)
+	}
+
+	// Refuse a vector whose dimension differs from the vault's established
+	// dimension (issue #582) — check and first-insert establishment are
+	// atomic, and both happen before StoreVector so a mismatched vector is
+	// never persisted.
+	if err := idx.establishDim(len(vec)); err != nil {
+		return err
+	}
 
 	// Store vector first so the graph can fetch it during traversal.
 	if err := idx.StoreVector(id, vec); err != nil {
