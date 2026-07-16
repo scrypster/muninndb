@@ -203,7 +203,7 @@ func (f *fakeEngine) GetAnnotations(_ context.Context, _, _ string) (*engine.Ann
 }
 
 func newTestServer() *MCPServer {
-	return New(":0", &fakeEngine{}, "", nil, nil)
+	return New(":0", &fakeEngine{}, "", nil, nil, nil)
 }
 
 func postRPC(t *testing.T, srv *MCPServer, body string) *httptest.ResponseRecorder {

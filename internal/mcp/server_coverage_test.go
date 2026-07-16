@@ -124,7 +124,7 @@ func TestDispatchToolCall_InvalidVaultReturnsError(t *testing.T) {
 
 func TestWithMiddleware_UnauthorizedRequest(t *testing.T) {
 	// Server with a required token — a request without the Bearer token must get 401.
-	srv := New(":0", &fakeEngine{}, "secret", nil, nil)
+	srv := New(":0", &fakeEngine{}, "secret", nil, nil, nil)
 	req := httptest.NewRequest("GET", "/mcp/tools", nil)
 	// No Authorization header.
 	w := httptest.NewRecorder()
@@ -136,7 +136,7 @@ func TestWithMiddleware_UnauthorizedRequest(t *testing.T) {
 
 func TestWithMiddleware_AuthorizedRequest(t *testing.T) {
 	// Correct Bearer token must succeed.
-	srv := New(":0", &fakeEngine{}, "secret", nil, nil)
+	srv := New(":0", &fakeEngine{}, "secret", nil, nil, nil)
 	req := httptest.NewRequest("GET", "/mcp/tools", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
@@ -160,7 +160,7 @@ func TestWithMiddleware_ContentLengthTooLarge(t *testing.T) {
 // ── handleStreamablePost: auth failure ───────────────────────────────────────
 
 func TestHandleStreamablePost_Unauthorized(t *testing.T) {
-	srv := New(":0", &fakeEngine{}, "secret", nil, nil)
+	srv := New(":0", &fakeEngine{}, "secret", nil, nil, nil)
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_status","arguments":{"vault":"default"}}}`
 	req := httptest.NewRequest("POST", "/mcp", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

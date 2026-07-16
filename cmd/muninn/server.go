@@ -1500,7 +1500,11 @@ func runServer() {
 
 	// Build MCP server
 	mcpAdapter := mcp.NewEngineAdapter(eng, enrichPlugin, pStore)
-	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, authStore, clientTLS)
+	// capAuth is nil for now (RFC #597 Task 2): cap_ capability tokens are
+	// recognized by authFromRequest but not yet minted or wired to the live
+	// store. Task 4 flips this to authStore once muninn_create_workflow_vault
+	// ships.
+	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, authStore, nil, clientTLS)
 
 	// Build gRPC server
 	grpcAdapter := grpcpkg.NewEngineAdapter(eng)

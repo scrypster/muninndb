@@ -21,8 +21,9 @@ import (
 // MCPServer serves the MCP JSON-RPC 2.0 protocol on a single HTTP mux.
 type MCPServer struct {
 	engine    EngineInterface
-	token     string          // required Bearer token (mdb_ static token); empty = no auth
-	authKeys  apiKeyValidator // optional: enables mk_ vault API key auth; nil = disabled
+	token     string              // required Bearer token (mdb_ static token); empty = no auth
+	authKeys  apiKeyValidator     // optional: enables mk_ vault API key auth; nil = disabled
+	capKeys   capabilityValidator // optional: enables cap_ capability auth (RFC #597); nil = disabled
 	srv       *http.Server
 	tlsConfig *tls.Config // nil = plain TCP
 
@@ -55,12 +56,14 @@ type sseSession struct {
 // New creates an MCPServer. addr is the listen address (e.g., ":8750").
 // token is the required static Bearer token (mdb_ style); pass "" to disable auth.
 // keyAuth, if non-nil, enables mk_ vault API key authentication with automatic vault pinning.
+// capAuth, if non-nil, enables cap_ capability token authentication (RFC #597).
 // tlsConfig, if non-nil, enables TLS on the listener.
-func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator, tlsConfig *tls.Config) *MCPServer {
+func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator, capAuth capabilityValidator, tlsConfig *tls.Config) *MCPServer {
 	s := &MCPServer{
 		engine:      eng,
 		token:       token,
 		authKeys:    keyAuth,
+		capKeys:     capAuth,
 		sseSessions: make(map[string]*sseSession),
 		tlsConfig:   tlsConfig,
 	}
@@ -125,7 +128,7 @@ func (s *MCPServer) withMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
-		a := authFromRequest(r, s.token, s.authKeys)
+		a := authFromRequest(r, s.token, s.authKeys, s.capKeys)
 		if !a.Authorized {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -325,7 +328,7 @@ func (s *MCPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auth check
-	a := authFromRequest(r, s.token, s.authKeys)
+	a := authFromRequest(r, s.token, s.authKeys, s.capKeys)
 	if !a.Authorized {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -394,7 +397,7 @@ func (s *MCPServer) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 	// Run whenever any auth mechanism is active (static token or mk_ key store),
 	// not just when a static token is configured.
 	if s.token != "" || s.authKeys != nil {
-		a := authFromRequest(r, s.token, s.authKeys)
+		a := authFromRequest(r, s.token, s.authKeys, s.capKeys)
 		if !a.Authorized {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -430,7 +433,7 @@ func (s *MCPServer) handleStreamablePost(w http.ResponseWriter, r *http.Request)
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
-	a := authFromRequest(r, s.token, s.authKeys)
+	a := authFromRequest(r, s.token, s.authKeys, s.capKeys)
 	if !a.Authorized {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
