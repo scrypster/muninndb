@@ -138,6 +138,27 @@ var subcommandHelp = map[string]func(){
 	"exec": func() {
 		printExecHelp()
 	},
+	"remember": func() {
+		printSubcommandUsage("remember", "store a memory via the running daemon's REST API",
+			"muninn remember --concept <label> (--content <text> | --content-file <path>) [flags]",
+			[][2]string{
+				{"--concept <label>", "Short label for the memory (required)"},
+				{"--content <text>", "Full text of the memory (inline)"},
+				{"--content-file <path>", "Read the full text from a file; '-' reads stdin (REST caps bodies at 4 MB)"},
+				{"--summary <text>", "One-line summary (inline enrichment)"},
+				{"--tags <a,b,c>", "Comma-separated tags"},
+				{"--entities <list>", "Inline entities: Name or Name:type, comma-separated"},
+				{"--vault <name>", "Vault name (default: derived from the API key, else \"default\")"},
+				{"--op-id <key>", "Idempotency key — safe retries return the original engram id"},
+				{"--key-file <path>", "Vault API key file (default: ~/.muninn/api.key; mk_* key, 0600)"},
+			},
+			[]string{
+				`muninn remember --concept "standup" --content "Fixed the auth bug"`,
+				`muninn remember --concept "design notes" --content-file notes.md --tags design,q3`,
+				`git log -1 | muninn remember --concept "release" --content-file - --vault work`,
+				`muninn api-key create --vault work --label cli   # then store the mk_ key in ~/.muninn/api.key (chmod 600)`,
+			})
+	},
 	"dream": func() {
 		printSubcommandUsage("dream", "LLM-driven memory consolidation", "muninn dream [flags]",
 			[][2]string{
@@ -337,6 +358,7 @@ func printHelp() {
 	fmt.Printf("  %-32s %s\n", cyan("muninn vault <command>"), "Vault management (create, list, delete, clear, clone, merge, export, import)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn api-key <command>"), "API key management (create, list, revoke)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn admin change-password"), "Change the admin password")
+	fmt.Printf("  %-32s %s\n", cyan("muninn remember [flags]"), "Store a memory via the running daemon (REST)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn exec <op> [flags]"), "One-shot remember/recall/read/forget (no daemon needed)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn dream [--dry-run]"), "LLM-driven memory consolidation (server must be stopped)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn backup --output <dir>"), "Offline point-in-time backup (server must be stopped)")
