@@ -959,14 +959,16 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 	t.Run("muninn_create_workflow_vault", func(t *testing.T) {
 		// Privileged tool: requires opt-in (MUNINN_AGENT_VAULT_CREATE) + a full-mode
 		// mk_ key. The smoke daemon uses a static token with opt-in off, so the guard
-		// must reject this call — the error is expected (it proves the gate fires).
-		result := mcpTool(t, tok, "muninn_create_workflow_vault", map[string]any{
+		// must reject this call. Use mcpToolNoFail (the tool legitimately errors here)
+		// and assert the opt-in-disabled rejection fired — proves the gate works.
+		_, err := mcpToolNoFail(t, tok, "muninn_create_workflow_vault", map[string]any{
 			"name": "wf-smoke",
 		})
-		if errVal, hasErr := result["error"]; !hasErr {
-			t.Errorf("muninn_create_workflow_vault: expected guard rejection (static token, opt-in off), got: %v", result)
-		} else {
-			t.Logf("muninn_create_workflow_vault rejected as expected: %v", errVal)
+		if err == nil {
+			t.Fatalf("muninn_create_workflow_vault: expected guard rejection (static token, opt-in off), got success")
+		}
+		if !strings.Contains(err.Error(), "disabled") {
+			t.Errorf("muninn_create_workflow_vault: unexpected error %q (want the opt-in-disabled rejection)", err)
 		}
 	})
 }
