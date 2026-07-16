@@ -113,6 +113,7 @@ func TestAll_ConstSliceComplete(t *testing.T) {
 		{"RelEntityIndex", RelEntityIndex},
 		{"DreamState", DreamState},
 		{"ContentHash", ContentHash},
+		{"RecallEvent", RecallEvent},
 		{"Lease", Lease},
 		// Capability (0x40/0x41)
 		{"Capability", Capability},

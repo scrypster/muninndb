@@ -135,3 +135,40 @@ func TestRecallEvent_PurposeGate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 }
+
+// TestRecallEvent_ClearVaultRemovesEvents is the privacy regression from the
+// #574 review: RecallEvent.Context stores raw, unredacted query text, so a
+// cleared vault must not leave its recall events behind for the remainder of
+// the retention window. A sibling vault's events must survive untouched.
+func TestRecallEvent_ClearVaultRemovesEvents(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.ResolveVaultPrefix("recall-event-cleared")
+	otherWS := store.ResolveVaultPrefix("recall-event-survivor")
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, store.WriteRecallEvent(ctx, ws, NewULID(), &RecallEvent{
+			Context:    []string{"private query text"},
+			SurfacedAt: time.Now().UnixNano(),
+			Entries:    []RecallSurfacedEntry{{ID: NewULID().String(), Score: 0.5}},
+		}))
+	}
+	require.NoError(t, store.WriteRecallEvent(ctx, otherWS, NewULID(), &RecallEvent{
+		Context:    []string{"unrelated vault query"},
+		SurfacedAt: time.Now().UnixNano(),
+		Entries:    []RecallSurfacedEntry{{ID: NewULID().String(), Score: 0.5}},
+	}))
+
+	_, err := store.ClearVault(ctx, ws)
+	require.NoError(t, err)
+
+	cleared := 0
+	require.NoError(t, store.ScanRecallEvents(ctx, ws, RecallPurposeCalibration,
+		func(ULID, *RecallEvent) error { cleared++; return nil }))
+	require.Zero(t, cleared, "cleared vault must retain no recall events (raw query text)")
+
+	survived := 0
+	require.NoError(t, store.ScanRecallEvents(ctx, otherWS, RecallPurposeCalibration,
+		func(ULID, *RecallEvent) error { survived++; return nil }))
+	require.Equal(t, 1, survived, "sibling vault's events must survive the clear")
+}

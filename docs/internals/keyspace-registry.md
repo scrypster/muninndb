@@ -67,6 +67,7 @@ prefix — see the vault-reuse note at the bottom).
 | 0x26 | ws+entityHash(8)+engramID | — | rel-entity index |
 | 0x27 | ws | 16B dream state | |
 | 0x28 | ws+sha256(32) | engramID(16) | content-hash dedup |
+| 0x29 | ws+eventULID(16) | msgpack RecallEvent | recall-event calibration record (#573); event-time key order; reads purpose-gated |
 | **0x2A** | ws+ulid | JSON Lease{owner,heartbeat,ttl} | ownership-lease sidecar (advisory) |
 
 ## Auth prefixes (`internal/auth/keys.go`)
@@ -91,7 +92,7 @@ prefix — see the vault-reuse note at the bottom).
 
 ## Free bytes
 
-`0x29`, `0x2B`–`0x3F`, `0x42`+ are free for new storage/auth keys. (`0x29`/`0x40`/`0x41`
+`0x2B`–`0x3F` and `0x46`+ are free for new storage/auth keys. (`0x29`/`0x40`/`0x41`
 also appear in `internal/transport/mbp/frame.go` as **wire opcodes** — a different
 keyspace; coincidental, safe, but confusing. Prefer `0x2B+` for new storage prefixes.)
 

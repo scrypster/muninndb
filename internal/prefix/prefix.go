@@ -51,6 +51,7 @@ const (
 	RelEntityIndex     byte = 0x26
 	DreamState         byte = 0x27
 	ContentHash        byte = 0x28
+	RecallEvent        byte = 0x29
 	Lease              byte = 0x2A
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
@@ -127,6 +128,7 @@ var registry = []Entry{
 	{RelEntityIndex, "storage", "RelEntityIndex", "vault-scoped-data"},
 	{DreamState, "storage", "DreamState", "vault-scoped-data"},
 	{ContentHash, "storage", "ContentHash", "vault-scoped-data"},
+	{RecallEvent, "storage", "RecallEvent", "vault-scoped-data"},
 	{Lease, "storage", "Lease", "lease"},
 	{Capability, "capability", "Capability", "capability"},
 	{CapabilityVaultIdx, "capability", "CapabilityVaultIdx", "capability"},

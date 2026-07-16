@@ -257,3 +257,28 @@ func TestRepLogHook_WriteEntityEngramLink(t *testing.T) {
 		t.Error("WriteEntityEngramLink: RepLogAppend not called")
 	}
 }
+
+// TestRepLogHook_WriteRecallEvent verifies callback fires on recall-event
+// writes. Regression for the #574 review: a bare db.Set left Lobe-served
+// recalls' events stranded on the serving node, outside the replicated
+// calibration dataset.
+func TestRepLogHook_WriteRecallEvent(t *testing.T) {
+	db, cleanup := openRepHookDB(t)
+	defer cleanup()
+
+	cfg, count := opBatchCounter(t)
+	store := storage.NewPebbleStore(db, cfg)
+	ws := store.VaultPrefix("recall-event-rep-vault")
+	ctx := context.Background()
+
+	before := count()
+	if err := store.WriteRecallEvent(ctx, ws, storage.NewULID(), &storage.RecallEvent{
+		Context: []string{"replicated query"},
+		Entries: []storage.RecallSurfacedEntry{{ID: storage.NewULID().String(), Score: 0.7}},
+	}); err != nil {
+		t.Fatalf("WriteRecallEvent: %v", err)
+	}
+	if count() <= before {
+		t.Error("WriteRecallEvent: RepLogAppend not called")
+	}
+}

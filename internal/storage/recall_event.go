@@ -85,6 +85,11 @@ type RecallEvent struct {
 // ULIDs, so keys within a vault sort by event time. Every
 // recallEventPruneInterval-th call also prunes the vault's events older
 // than the retention window.
+//
+// The write goes through a replicated batch like every other storage write:
+// in a cluster, recalls are exactly the read traffic served by Lobe replicas,
+// and an unreplicated event write would strand the calibration record on
+// whichever node happened to serve the recall.
 func (ps *PebbleStore) WriteRecallEvent(ctx context.Context, wsPrefix [8]byte, eventID ULID, ev *RecallEvent) error {
 	if ev == nil {
 		return fmt.Errorf("write recall event: nil event")
@@ -94,9 +99,13 @@ func (ps *PebbleStore) WriteRecallEvent(ctx context.Context, wsPrefix [8]byte, e
 		return fmt.Errorf("recall event marshal: %w", err)
 	}
 	key := keys.RecallEventKey(wsPrefix, [16]byte(eventID))
-	if err := ps.db.Set(key, val, pebble.NoSync); err != nil {
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+	batch.Set(key, val, nil)
+	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("write recall event: %w", err)
 	}
+	ps.replicateBatch(batch)
 	if recallEventWriteSeq.Add(1)%recallEventPruneInterval == 0 {
 		cutoff := time.Now().AddDate(0, 0, -recallEventRetentionDays)
 		if _, err := ps.PruneRecallEvents(ctx, wsPrefix, cutoff); err != nil {
