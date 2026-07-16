@@ -1985,6 +1985,23 @@ func (s *MCPServer) handleRelease(ctx context.Context, w http.ResponseWriter, id
 	})))
 }
 
+// isWorkflowVaultName reports whether name is a valid workflow-vault identifier:
+// it MUST start with the "wf-" namespace prefix and satisfy the general vault
+// name format (1-64 chars, lowercase alphanumeric, hyphen, underscore).
+// This is the structural anti-clobber guard (RedTeam finding CRITICAL #1):
+// it makes muninn_create_workflow_vault incapable of targeting an operator
+// vault such as "default" or "production", because those names lack the prefix.
+func isWorkflowVaultName(name string) bool {
+	const prefix = "wf-"
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	if len(name) <= len(prefix) {
+		return false // "wf-" alone has no body
+	}
+	return auth.IsValidVaultName(name)
+}
+
 // handleCreateWorkflowVault implements muninn_create_workflow_vault (RFC #597).
 // It creates a shared working vault and mints a scoped, TTL'd cap_ capability
 // token for worker agents. The tool is privileged: dispatchToolCall's recursion
@@ -2005,8 +2022,25 @@ func (s *MCPServer) handleCreateWorkflowVault(ctx context.Context, w http.Respon
 			return
 		}
 		name = "wf-" + hex.EncodeToString(rb)
-	} else if !auth.IsValidVaultName(name) {
-		sendError(w, id, -32602, "invalid vault name: must be 1-64 lowercase alphanumeric, hyphen, or underscore")
+	} else if !isWorkflowVaultName(name) {
+		// Structural anti-clobber guard (RedTeam finding CRITICAL #1): a caller-
+		// supplied name MUST be namespaced to workflow vaults (wf-*). This makes
+		// the tool structurally incapable of targeting an operator vault
+		// (default, production, etc.) — IsValidVaultName alone was format-only
+		// and allowed any well-formed name, so SetVaultConfig could overwrite
+		// an existing vault's config and mint a cap_ against it.
+		sendError(w, id, -32602, "invalid vault name: must start with 'wf-' and be workflow-scoped (1-64 lowercase alphanumeric or hyphen)")
+		return
+	}
+
+	// Existence check (RedTeam finding CRITICAL #1): reject if the vault is
+	// already registered. RegisterVaultName is idempotent and SetVaultConfig is
+	// a destructive overwrite, so without this gate a second call against an
+	// existing wf-* vault would silently clobber its config + mint a fresh cap.
+	// Auto-generated names should not collide in practice (4 bytes of entropy)
+	// but are checked anyway — cheap and fails-closed.
+	if s.engine.VaultNameExists(name) {
+		sendError(w, id, -32602, "vault already exists: "+name)
 		return
 	}
 

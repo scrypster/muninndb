@@ -245,6 +245,14 @@ func (e *Engine) RegisterVaultName(name string) error {
 	return e.store.WriteVaultName(ws, name)
 }
 
+// VaultNameExists reports whether a vault with the given name is registered.
+// Delegates to PebbleStore.VaultNameExists (0x0F name→prefix index lookup).
+// Used by muninn_create_workflow_vault to reject names that already exist,
+// preventing cross-vault config clobber (RFC #597 RedTeam finding).
+func (e *Engine) VaultNameExists(name string) bool {
+	return e.store.VaultNameExists(name)
+}
+
 // RenameVault atomically renames a vault. This is a metadata-only operation —
 // no engram data is moved or modified. Returns ErrVaultNotFound if oldName
 // doesn't exist, ErrVaultJobActive if a clone/merge job targets the vault,
