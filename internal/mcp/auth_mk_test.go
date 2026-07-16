@@ -358,7 +358,7 @@ func doAuthenticatedPost(srv *MCPServer, token string, body []byte) *httptest.Re
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleRPC(w, r.WithContext(contextWithAuth(r.Context(), authFromRequest(r, srv.token, srv.authKeys, nil))))
+	srv.handleRPC(w, r.WithContext(contextWithAuth(r.Context(), authFromRequest(r, srv.token, srv.authKeys, srv.capKeys))))
 	return w
 }
 

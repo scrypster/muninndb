@@ -192,10 +192,12 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		return
 	}
 
-	// Mode enforcement for mk_ vault keys.
+	// Mode enforcement for mk_ vault keys and cap_ capability tokens (RFC #597).
 	// Fail-closed: unknown tools (not in either classification list) are blocked
-	// for both observe and write modes. Only full-mode keys bypass this check.
-	if a.IsAPIKey {
+	// for both observe and write modes. Only full-mode credentials bypass this
+	// check. The body switches on a.Mode, which is populated for both credential
+	// types, so only the guard condition needed to include capabilities.
+	if a.IsAPIKey || a.IsCapability {
 		toolName := req.Params.Name
 		switch a.Mode {
 		case auth.ModeObserve:
