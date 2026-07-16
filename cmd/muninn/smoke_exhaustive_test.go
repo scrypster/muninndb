@@ -51,6 +51,7 @@ var allMCPTools = []string{
 	"muninn_add_child",
 	"muninn_similar_entities",
 	"muninn_merge_entity",
+	"muninn_create_workflow_vault",
 	"muninn_replay_enrichment",
 	"muninn_provenance",
 	"muninn_entity_timeline",
@@ -952,6 +953,20 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_entities returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_create_workflow_vault", func(t *testing.T) {
+		// Privileged tool: requires opt-in (MUNINN_AGENT_VAULT_CREATE) + a full-mode
+		// mk_ key. The smoke daemon uses a static token with opt-in off, so the guard
+		// must reject this call — the error is expected (it proves the gate fires).
+		result := mcpTool(t, tok, "muninn_create_workflow_vault", map[string]any{
+			"name": "wf-smoke",
+		})
+		if errVal, hasErr := result["error"]; !hasErr {
+			t.Errorf("muninn_create_workflow_vault: expected guard rejection (static token, opt-in off), got: %v", result)
+		} else {
+			t.Logf("muninn_create_workflow_vault rejected as expected: %v", errVal)
 		}
 	})
 }
