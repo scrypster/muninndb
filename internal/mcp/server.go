@@ -455,6 +455,23 @@ func (s *MCPServer) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Re-validate the cached session credential before dispatch (RedTeam finding
+	// CRITICAL #2). The POST's authFromRequest above only checks .Authorized; the
+	// dispatch context below is set to sess.auth (cached at SSE-open). Without
+	// this re-validation, a cap_ token's TTL expiry or revocation is NEVER
+	// re-checked for an active SSE session — the TTL/revocation mitigation is
+	// defeated on /mcp/message. We keep dispatching on sess.auth (the SSE session
+	// model depends on it for vault pinning) — we just refuse to dispatch if the
+	// cached credential is no longer valid.
+	if sess.auth.IsCapability && s.capKeys != nil {
+		if _, err := s.capKeys.ValidateCapability(sess.auth.Token); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32001,"message":"session credential no longer valid (expired or revoked)"}}`))
+			return
+		}
+	}
+
 	// Thread the auth context established at SSE stream open time into the request.
 	// The session auth is authoritative for vault pinning and mode enforcement;
 	// the POST auth check above ensures the caller is still authenticated.
