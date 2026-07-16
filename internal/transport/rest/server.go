@@ -247,6 +247,8 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/admin/plugins", s.withAdminMiddleware(s.handlePlugins))
 	mux.HandleFunc("GET /api/admin/vault/{name}/plasticity", s.withAdminMiddleware(s.handleGetVaultPlasticity(authStore)))
 	mux.HandleFunc("PUT /api/admin/vault/{name}/plasticity", s.withAdminMiddleware(s.handlePutVaultPlasticity(authStore)))
+	mux.HandleFunc("GET /api/admin/vaults/{name}/capabilities", s.withAdminMiddleware(s.handleListCapabilities(authStore)))
+	mux.HandleFunc("DELETE /api/admin/vaults/{name}/capabilities/{capID}", s.withAdminMiddleware(s.handleRevokeCapability(authStore)))
 	mux.HandleFunc("GET /api/admin/plugin-config", s.withAdminMiddleware(s.handleGetPluginConfig))
 	mux.HandleFunc("PUT /api/admin/plugin-config", s.withAdminMiddleware(s.handlePutPluginConfig))
 	mux.HandleFunc("DELETE /api/admin/vaults/{name}", s.withAdminMiddleware(s.handleDeleteVault))
