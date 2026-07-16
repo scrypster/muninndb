@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -234,5 +236,141 @@ func TestCreateWorkflowVault_AutoName(t *testing.T) {
 	name, _ := result["vault"].(string)
 	if !strings.HasPrefix(name, "wf-") || len(name) != len("wf-")+8 {
 		t.Errorf("auto-name = %q, want wf-<8hex>", name)
+	}
+}
+
+// TestCreateWorkflowVault_Namespace_RejectsOperatorVault (RedTeam CRITICAL #1):
+// a caller-supplied name without the wf- prefix must be rejected even when
+// otherwise well-formed. This proves the structural anti-clobber guard: a
+// full-mode key scoped to one vault cannot pass name="default" or
+// name="production" to overwrite an operator vault's config.
+func TestCreateWorkflowVault_Namespace_RejectsOperatorVault(t *testing.T) {
+	store := newWorkflowTestStore(t)
+	mkToken, _, err := store.GenerateAPIKey("admin", "admin", auth.ModeFull, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", &fakeEngine{}, "", store, store, nil)
+	srv.agentVaultCreate = true
+
+	cases := []struct {
+		name  string
+		vault string
+	}{
+		{"default", "default"},
+		{"production", "production"},
+		{"missing-prefix", "my-vault"},
+		{"prefix-only", "wf-"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := mkToolCallBody("muninn_create_workflow_vault", map[string]any{"name": tc.vault})
+			w := doAuthenticatedPost(srv, mkToken, body)
+			assertRPCError(t, w, -32602, "wf-")
+		})
+	}
+}
+
+// TestCreateWorkflowVault_RecursionGuard_ViaSSEPost (RedTeam NOTABLE #5):
+// exercises the recursion guard through the SSE message path
+// (handleSSEMessage → processAndPushSSE → dispatchToolCall), a different
+// production dispatch route than doAuthenticatedPost (which hits handleRPC).
+// A cap_ bearer opening an SSE session and then POSTing
+// muninn_create_workflow_vault must be rejected by the IsAPIKey guard inside
+// dispatchToolCall — proving the guard fires in real SSE routing.
+func TestCreateWorkflowVault_RecursionGuard_ViaSSEPost(t *testing.T) {
+	store := newWorkflowTestStore(t)
+	exp := time.Now().Add(time.Hour)
+	capToken, _, err := store.GenerateCapability("wf-existing", "worker", auth.ModeFull, "workflow_vault", &exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(":0", &fakeEngine{}, "", store, store, nil)
+	srv.agentVaultCreate = true
+
+	// Simulate an SSE session opened with the cap_ token: register the session
+	// the way handleSSE does, caching the cap_ auth context.
+	srv.sseSessionsMu.Lock()
+	srv.sseSessions["sess-cap"] = &sseSession{
+		ch:   make(chan []byte, 4),
+		auth: AuthContext{Token: capToken, Authorized: true, Vault: "wf-existing", Mode: auth.ModeFull, IsCapability: true},
+	}
+	srv.sseSessionsMu.Unlock()
+
+	body := mkToolCallBody("muninn_create_workflow_vault", map[string]any{})
+	r := httptest.NewRequest(http.MethodPost, "/mcp/message?sessionId=sess-cap", bytes.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+capToken)
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSSEMessage(w, r)
+
+	// The SSE POST writes the JSON-RPC response into both the POST body and the
+	// SSE channel. The POST body carries the dispatch result — assert the
+	// recursion guard fired with the IsAPIKey-specific message.
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v\nbody: %s", err, w.Body.String())
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected recursion-guard rejection, got success result: %v", resp.Result)
+	}
+	if resp.Error.Code != -32001 {
+		t.Errorf("error code = %d, want -32001 (msg: %s)", resp.Error.Code, resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "full-mode mk_ key") {
+		t.Errorf("error message %q does not contain 'full-mode mk_ key' — guard may not have fired", resp.Error.Message)
+	}
+}
+
+// TestSSEMessage_CapRevokedMidSession_RejectedOnPost (RedTeam CRITICAL #2 + #5):
+// proves the per-POST re-validation of cached SSE credentials. Opens an SSE
+// session with a valid cap_, then revokes the cap_ mid-session, then POSTs
+// WITHOUT re-sending the bearer token — simulating the MCP SSE client pattern
+// where the bearer is sent only on the GET (SSE open) and subsequent POSTs
+// rely on the session ID. Without Fix 2 the POST passes (authFromRequest
+// falls through to open-server mode because there's no static token and no
+// bearer on the POST) and dispatches on the cached, now-revoked sess.auth;
+// with Fix 2 the POST is rejected because ValidateCapability(sess.auth.Token)
+// catches the revocation. This is the RED-sanity test for Fix 2.
+func TestSSEMessage_CapRevokedMidSession_RejectedOnPost(t *testing.T) {
+	store := newWorkflowTestStore(t)
+	exp := time.Now().Add(time.Hour)
+	capToken, cap, err := store.GenerateCapability("wf-session", "worker", auth.ModeFull, "workflow_vault", &exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Server has NO static token (""), only cap_ auth. This is the deployment
+	// shape where the confused-deputy is exploitable without Fix 2: a POST
+	// without a bearer falls through authFromRequest to open-server mode.
+	srv := New(":0", &fakeEngine{}, "", store, store, nil)
+	srv.agentVaultCreate = true
+
+	// Open SSE session with the cap_ token (valid at open time).
+	srv.sseSessionsMu.Lock()
+	srv.sseSessions["sess-revoke"] = &sseSession{
+		ch:   make(chan []byte, 4),
+		auth: AuthContext{Token: capToken, Authorized: true, Vault: "wf-session", Mode: auth.ModeFull, IsCapability: true},
+	}
+	srv.sseSessionsMu.Unlock()
+
+	// Revoke the capability mid-session.
+	if err := store.RevokeCapability("wf-session", cap.ID); err != nil {
+		t.Fatalf("revoke capability: %v", err)
+	}
+
+	// POST WITHOUT Authorization header — simulates the client pattern where
+	// the bearer is sent only on the GET. The POST auth check falls through to
+	// open-server mode (no static token, no bearer), so only Fix 2's
+	// sess.auth re-validation catches the revoked cap_.
+	body := mkToolCallBody("muninn_recall", map[string]any{"context": []string{"x"}})
+	r := httptest.NewRequest(http.MethodPost, "/mcp/message?sessionId=sess-revoke", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSSEMessage(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 after cap_ revoked mid-session (POST without bearer), got %d (body: %s)", w.Code, w.Body.String())
 	}
 }
