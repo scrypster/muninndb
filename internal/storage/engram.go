@@ -424,6 +424,21 @@ func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULI
 // DeleteEngram performs a hard delete: removes the engram, all association keys,
 // and all secondary indexes. Reads the engram first to gather index data.
 func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id ULID) error {
+	// Serialize against CompareAndSet on the same engram: hold the per-engram
+	// stripe lock across the read + delete-batch-commit, mirroring what
+	// CompareAndSet does. Otherwise a concurrent CAS can read the engram, this
+	// delete can commit, and the CAS's later metadata/lease write lands after
+	// the delete — resurrecting a record the caller believes is gone. Under the
+	// lock the two paths serialize: a CAS that loses the race reads not-found
+	// and writes nothing.
+	//
+	// The lock only needs to span the read and the batch commit: once the batch
+	// is committed the metadata/lease are gone, so a later CAS reads not-found.
+	// Post-commit cleanup (replication, cache, entity counts) is unlocked to
+	// keep the stripe free during the O(n) entity work.
+	mu := ps.casLocks.For(id[:])
+	mu.Lock()
+
 	// Read engram to collect secondary index data for cleanup.
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
@@ -433,11 +448,13 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		batch.Delete(keys.EngramKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.MetaKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.LeaseKey(wsPrefix, [16]byte(id)), nil)
-		ps.cache.Delete(wsPrefix, id)
 		if err := batch.Commit(pebble.NoSync); err != nil {
+			mu.Unlock()
 			return err
 		}
+		mu.Unlock()
 		ps.replicateBatch(batch)
+		ps.cache.Delete(wsPrefix, id)
 		return nil
 	}
 
@@ -563,8 +580,10 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	}
 
 	if err := batch.Commit(pebble.NoSync); err != nil {
+		mu.Unlock()
 		return fmt.Errorf("delete engram: %w", err)
 	}
+	mu.Unlock()
 	ps.replicateBatch(batch)
 
 	ps.cache.Delete(wsPrefix, id)

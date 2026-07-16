@@ -64,7 +64,7 @@ func TestAuthFromRequest_MkToken_ValidFullMode(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mk_abc123")
 
-	a := authFromRequest(req, "mdb_statictoken", store)
+	a := authFromRequest(req, "mdb_statictoken", store, nil)
 
 	if !a.Authorized {
 		t.Fatal("expected Authorized=true for valid mk_ key")
@@ -92,7 +92,7 @@ func TestAuthFromRequest_MkToken_ObserveMode(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mk_obs999")
 
-	a := authFromRequest(req, "mdb_x", store)
+	a := authFromRequest(req, "mdb_x", store, nil)
 
 	if !a.Authorized {
 		t.Fatal("expected Authorized=true")
@@ -111,7 +111,7 @@ func TestAuthFromRequest_MkToken_WriteMode(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mk_wrt777")
 
-	a := authFromRequest(req, "mdb_x", store)
+	a := authFromRequest(req, "mdb_x", store, nil)
 
 	if a.Mode != auth.ModeWrite {
 		t.Errorf("expected write mode, got %q", a.Mode)
@@ -123,7 +123,7 @@ func TestAuthFromRequest_MkToken_Expired(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mk_expired")
 
-	a := authFromRequest(req, "mdb_x", store)
+	a := authFromRequest(req, "mdb_x", store, nil)
 
 	if a.Authorized {
 		t.Error("expected Authorized=false for expired/revoked key")
@@ -135,7 +135,7 @@ func TestAuthFromRequest_MkToken_NilStore(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mk_somekey")
 
-	a := authFromRequest(req, "mdb_static", nil)
+	a := authFromRequest(req, "mdb_static", nil, nil)
 
 	if a.Authorized {
 		t.Error("expected Authorized=false when apiKeyStore is nil")
@@ -146,7 +146,7 @@ func TestAuthFromRequest_StaticToken_BackwardCompat(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mdb_mytoken")
 
-	a := authFromRequest(req, "mdb_mytoken", nil)
+	a := authFromRequest(req, "mdb_mytoken", nil, nil)
 
 	if !a.Authorized {
 		t.Fatal("static mdb_ token must still work")
@@ -163,7 +163,7 @@ func TestAuthFromRequest_StaticToken_WrongValue(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mdb_wrong")
 
-	a := authFromRequest(req, "mdb_correct", nil)
+	a := authFromRequest(req, "mdb_correct", nil, nil)
 
 	if a.Authorized {
 		t.Error("wrong static token must be rejected")
@@ -173,7 +173,7 @@ func TestAuthFromRequest_StaticToken_WrongValue(t *testing.T) {
 func TestAuthFromRequest_NoToken(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 
-	a := authFromRequest(req, "mdb_x", nil)
+	a := authFromRequest(req, "mdb_x", nil, nil)
 
 	if a.Authorized {
 		t.Error("missing token must be rejected")
@@ -184,7 +184,7 @@ func TestAuthFromRequest_EmptyRequiredToken(t *testing.T) {
 	// Server started with no token = open access.
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 
-	a := authFromRequest(req, "", nil)
+	a := authFromRequest(req, "", nil, nil)
 
 	if !a.Authorized {
 		t.Error("no required token = should always authorize")
@@ -203,7 +203,7 @@ func TestAuthFromRequest_OpenServer_ValidMkKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mk_vaultkey1")
 
-	a := authFromRequest(req, "", store) // no static token = open-server mode
+	a := authFromRequest(req, "", store, nil) // no static token = open-server mode
 
 	if !a.Authorized {
 		t.Fatal("valid mk_ key must be authorized in open-server mode")
@@ -223,7 +223,7 @@ func TestAuthFromRequest_OpenServer_InvalidMkKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mk_badkey")
 
-	a := authFromRequest(req, "", store) // no static token = open-server mode
+	a := authFromRequest(req, "", store, nil) // no static token = open-server mode
 
 	if a.Authorized {
 		t.Error("invalid mk_ key must not fall through to open access")
@@ -237,7 +237,7 @@ func TestAuthFromRequest_OpenServer_NoKey(t *testing.T) {
 	store := newMockKeyStore()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 
-	a := authFromRequest(req, "", store)
+	a := authFromRequest(req, "", store, nil)
 
 	if !a.Authorized {
 		t.Error("no key presented in open-server mode must still authorize")
@@ -350,7 +350,7 @@ func mkToolCallBody(toolName string, args map[string]any) []byte {
 // testServer wraps MCPServer with a mock engine and key store for integration tests.
 func newAuthTestServer(keyStore apiKeyValidator) *MCPServer {
 	eng := &fakeEngine{}
-	return New(":0", eng, "mdb_static", keyStore, nil)
+	return New(":0", eng, "mdb_static", keyStore, nil, nil)
 }
 
 func doAuthenticatedPost(srv *MCPServer, token string, body []byte) *httptest.ResponseRecorder {
@@ -358,7 +358,7 @@ func doAuthenticatedPost(srv *MCPServer, token string, body []byte) *httptest.Re
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleRPC(w, r.WithContext(contextWithAuth(r.Context(), authFromRequest(r, srv.token, srv.authKeys))))
+	srv.handleRPC(w, r.WithContext(contextWithAuth(r.Context(), authFromRequest(r, srv.token, srv.authKeys, srv.capKeys))))
 	return w
 }
 
@@ -514,7 +514,7 @@ func TestDispatch_StaticToken_FullAccess_AnyVault(t *testing.T) {
 		})
 		r := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 		r.Header.Set("Authorization", "Bearer mdb_static")
-		a := authFromRequest(r, srv.token, srv.authKeys)
+		a := authFromRequest(r, srv.token, srv.authKeys, nil)
 		w := httptest.NewRecorder()
 		srv.handleRPC(w, r.WithContext(contextWithAuth(r.Context(), a)))
 
@@ -564,14 +564,14 @@ func TestSSESession_StoresFullAuthContext(t *testing.T) {
 		Vault: "sse-vault",
 		Mode:  auth.ModeObserve,
 	})
-	srv := New(":0", &fakeEngine{}, "mdb_static", store, nil)
+	srv := New(":0", &fakeEngine{}, "mdb_static", store, nil, nil)
 
 	// Manually insert a session as handleSSE would after auth
 	a := authFromRequest(func() *http.Request {
 		r := httptest.NewRequest(http.MethodGet, "/mcp", nil)
 		r.Header.Set("Authorization", "Bearer mk_sse001")
 		return r
-	}(), "mdb_static", store)
+	}(), "mdb_static", store, nil)
 
 	srv.sseSessionsMu.Lock()
 	srv.sseSessions["test-session"] = &sseSession{
@@ -637,7 +637,7 @@ func TestAuthFromRequest_BearerOnly_NoToken(t *testing.T) {
 	// "Bearer " with trailing space but no actual token value.
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer ")
-	a := authFromRequest(req, "mdb_x", nil)
+	a := authFromRequest(req, "mdb_x", nil, nil)
 	if a.Authorized {
 		t.Error("'Bearer ' with empty token must be rejected")
 	}
@@ -647,7 +647,7 @@ func TestAuthFromRequest_LowercaseBearer(t *testing.T) {
 	// "bearer token" (lowercase) — Go's net/http does case-sensitive header values.
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "bearer mdb_x")
-	a := authFromRequest(req, "mdb_x", nil)
+	a := authFromRequest(req, "mdb_x", nil, nil)
 	if a.Authorized {
 		t.Error("lowercase 'bearer' prefix should be rejected (spec requires 'Bearer')")
 	}
@@ -656,7 +656,7 @@ func TestAuthFromRequest_LowercaseBearer(t *testing.T) {
 func TestAuthFromRequest_BasicScheme(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
-	a := authFromRequest(req, "mdb_x", nil)
+	a := authFromRequest(req, "mdb_x", nil, nil)
 	if a.Authorized {
 		t.Error("Basic auth scheme must be rejected")
 	}
@@ -667,7 +667,7 @@ func TestAuthFromRequest_BearerWithExtraSpaces(t *testing.T) {
 	// CutPrefix("Bearer ") leaves " tok" which is a different token.
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer  mdb_x")
-	a := authFromRequest(req, "mdb_x", nil)
+	a := authFromRequest(req, "mdb_x", nil, nil)
 	if a.Authorized {
 		t.Error("token with leading space should not match (timing-safe compare)")
 	}
@@ -677,7 +677,7 @@ func TestAuthFromRequest_BearerWithMultipleTokens(t *testing.T) {
 	// "Bearer tok1 tok2" — extra data after the token.
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mdb_x extra_data")
-	a := authFromRequest(req, "mdb_x", nil)
+	a := authFromRequest(req, "mdb_x", nil, nil)
 	if a.Authorized {
 		t.Error("token with extra data after space must be rejected")
 	}
@@ -688,7 +688,7 @@ func TestAuthFromRequest_HugeToken_Rejected(t *testing.T) {
 	huge := "Bearer " + strings.Repeat("x", 10000)
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", huge)
-	a := authFromRequest(req, "mdb_x", nil)
+	a := authFromRequest(req, "mdb_x", nil, nil)
 	if a.Authorized {
 		t.Error("absurdly long token must be rejected")
 	}
@@ -699,7 +699,7 @@ func TestAuthFromRequest_MkPrefix_EmptySuffix(t *testing.T) {
 	store := newMockKeyStore() // empty store
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer mk_")
-	a := authFromRequest(req, "mdb_x", store)
+	a := authFromRequest(req, "mdb_x", store, nil)
 	if a.Authorized {
 		t.Error("'mk_' with empty suffix must be rejected")
 	}
@@ -800,6 +800,14 @@ func TestDispatch_WriteMode_AllMutatingToolsAllowed(t *testing.T) {
 		if !isMutatingTool(name) {
 			continue
 		}
+		// muninn_create_workflow_vault is a privileged mutating tool: although
+		// classified mutating (so observe-mode keys are blocked by mode
+		// enforcement), it additionally requires a full-mode mk_ key via the
+		// recursion guard. Write-mode is correctly rejected. See
+		// TestCreateWorkflowVault_NonFullKeyRejected.
+		if name == "muninn_create_workflow_vault" {
+			continue
+		}
 		body := mkToolCallBody(name, map[string]any{"vault": "v", "concept": "x", "content": "y", "id": "x", "ids": []string{"x"}, "merged_content": "y", "decision": "x", "rationale": "y"})
 		w := doAuthenticatedPost(srv, "mk_wrt-all", body)
 		var resp JSONRPCResponse
@@ -849,7 +857,7 @@ func TestDispatch_UnknownMode_Rejected(t *testing.T) {
 // --- SSE message auth re-validation ---
 
 func TestSSEMessage_RequiresAuth_WhenServerHasToken(t *testing.T) {
-	srv := New(":0", &fakeEngine{}, "mdb_secret", nil, nil)
+	srv := New(":0", &fakeEngine{}, "mdb_secret", nil, nil, nil)
 
 	// Insert a fake SSE session
 	srv.sseSessionsMu.Lock()
@@ -874,7 +882,7 @@ func TestSSEMessage_RequiresAuth_WhenServerHasToken(t *testing.T) {
 // --- findSSEChannelsByToken with empty token ---
 
 func TestFindSSEChannelsByToken_EmptyToken_ReturnsNil(t *testing.T) {
-	srv := New(":0", &fakeEngine{}, "", nil, nil)
+	srv := New(":0", &fakeEngine{}, "", nil, nil, nil)
 
 	srv.sseSessionsMu.Lock()
 	srv.sseSessions["s1"] = &sseSession{ch: make(chan []byte, 4), auth: AuthContext{Token: ""}}

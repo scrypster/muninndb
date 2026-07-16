@@ -2,12 +2,16 @@ package mcp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1979,4 +1983,126 @@ func (s *MCPServer) handleRelease(ctx context.Context, w http.ResponseWriter, id
 		"released": released,
 		"owner":    curOwner,
 	})))
+}
+
+// isWorkflowVaultName reports whether name is a valid workflow-vault identifier:
+// it MUST start with the "wf-" namespace prefix and satisfy the general vault
+// name format (1-64 chars, lowercase alphanumeric, hyphen, underscore).
+// This is the structural anti-clobber guard (RedTeam finding CRITICAL #1):
+// it makes muninn_create_workflow_vault incapable of targeting an operator
+// vault such as "default" or "production", because those names lack the prefix.
+func isWorkflowVaultName(name string) bool {
+	const prefix = "wf-"
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	if len(name) <= len(prefix) {
+		return false // "wf-" alone has no body
+	}
+	return auth.IsValidVaultName(name)
+}
+
+// handleCreateWorkflowVault implements muninn_create_workflow_vault (RFC #597).
+// It creates a shared working vault and mints a scoped, TTL'd cap_ capability
+// token for worker agents. The tool is privileged: dispatchToolCall's recursion
+// guard verifies an mk_ full-mode key BEFORE this handler runs, so capabilities
+// (IsCapability, not IsAPIKey) can never reach it — structural recursion
+// prevention. The capability_secret is shown ONCE.
+func (s *MCPServer) handleCreateWorkflowVault(ctx context.Context, w http.ResponseWriter, id json.RawMessage, _ string, args map[string]any) {
+	if s.authStore == nil {
+		sendError(w, id, -32603, "vault creation unavailable: auth store not configured on this server")
+		return
+	}
+
+	name, _ := args["name"].(string)
+	if name == "" {
+		rb := make([]byte, 4)
+		if _, err := rand.Read(rb); err != nil {
+			sendError(w, id, -32603, "generate vault name: "+err.Error())
+			return
+		}
+		name = "wf-" + hex.EncodeToString(rb)
+	} else if !isWorkflowVaultName(name) {
+		// Structural anti-clobber guard (RedTeam finding CRITICAL #1): a caller-
+		// supplied name MUST be namespaced to workflow vaults (wf-*). This makes
+		// the tool structurally incapable of targeting an operator vault
+		// (default, production, etc.) — IsValidVaultName alone was format-only
+		// and allowed any well-formed name, so SetVaultConfig could overwrite
+		// an existing vault's config and mint a cap_ against it.
+		sendError(w, id, -32602, "invalid vault name: must start with 'wf-' and be workflow-scoped (1-64 lowercase alphanumeric or hyphen)")
+		return
+	}
+
+	// Existence check (RedTeam finding CRITICAL #1): reject if the vault is
+	// already registered. RegisterVaultName is idempotent and SetVaultConfig is
+	// a destructive overwrite, so without this gate a second call against an
+	// existing wf-* vault would silently clobber its config + mint a fresh cap.
+	// Auto-generated names should not collide in practice (4 bytes of entropy)
+	// but are checked anyway — cheap and fails-closed.
+	if s.engine.VaultNameExists(name) {
+		sendError(w, id, -32602, "vault already exists: "+name)
+		return
+	}
+
+	label, _ := args["label"].(string)
+	if label == "" {
+		label = "agent-minted"
+	}
+
+	// TTL floor + cap (RedTeam finding NOTABLE #4): floor sub-hour fractions
+	// (0.5h → int(0)=0 → born-expired) to 1h; cap at 168h (7 days, the working
+	// preset retention) — minting a cap that outlives the vault's data is
+	// pointless and the prior 24*365 ceiling contradicted the documented 168h
+	// default.
+	const ttlCeiling = 168
+	ttlHours := ttlCeiling
+	if v, ok := args["ttl_hours"].(float64); ok && v > 0 {
+		ttlHours = int(v) // JSON numbers arrive as float64
+		if ttlHours < 1 {
+			ttlHours = 1 // floor: reject sub-hour truncation to zero
+		}
+		if ttlHours > ttlCeiling {
+			ttlHours = ttlCeiling // cap: don't outlive the vault's 7-day retention
+		}
+	}
+	if ev := os.Getenv("MUNINN_WORKFLOW_CAP_TTL_HOURS"); ev != "" {
+		if n, err := strconv.Atoi(ev); err == nil && n > 0 && n < ttlHours {
+			ttlHours = n // env is a fleet-wide ceiling; a smaller caller ttl_hours is honored
+		}
+	}
+
+	// 1. Register vault name (idempotent 2-key write in the engine's vault registry).
+	if err := s.engine.RegisterVaultName(name); err != nil {
+		sendError(w, id, -32603, "register vault: "+err.Error())
+		return
+	}
+
+	// 2. Configure the vault: working preset (default cognition + 7-day
+	// auto-evaporation) + multi_user (guidance steers toward per-user recall).
+	mu := true
+	if err := s.authStore.SetVaultConfig(auth.VaultConfig{
+		Name:       name,
+		Plasticity: &auth.PlasticityConfig{Preset: "working", MultiUser: &mu},
+	}); err != nil {
+		sendError(w, id, -32603, "set vault config: "+err.Error())
+		return
+	}
+
+	// 3. Mint a full-mode capability with the TTL. The token is shown once.
+	expiresAt := time.Now().Add(time.Duration(ttlHours) * time.Hour)
+	token, cap, err := s.authStore.GenerateCapability(name, label, auth.ModeFull, "workflow_vault", &expiresAt)
+	if err != nil {
+		sendError(w, id, -32603, "mint capability: "+err.Error())
+		return
+	}
+
+	sendResult(w, id, map[string]any{
+		"vault":             name,
+		"capability_id":     cap.ID,
+		"capability_secret": token, // shown once
+		"mode":              auth.ModeFull,
+		"expires_at":        expiresAt.Format(time.RFC3339),
+		"auto_evap_days":    7,
+		"warning":           "capability_secret is shown once; distribute it to worker agents. The vault auto-evaporates engrams after 7 days.",
+	})
 }

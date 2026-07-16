@@ -1382,6 +1382,65 @@ func TestRRF_ReturnsResultsWithDefaultThreshold(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test: Run() applies a mode-appropriate DEFAULT threshold only when the caller
+// leaves Threshold <= 0, and never overrides an explicit user-set value.
+//
+// Regression for the threshold-preservation bug: previously any explicit
+// threshold >= 0.01 was silently trampled down to 0.001 whenever RRF was on,
+// which made the API's threshold parameter meaningless under RRF.
+//
+// Run() mutates req.Threshold in place, so we assert on it after the call.
+// ---------------------------------------------------------------------------
+
+func TestRun_ThresholdDefaulting(t *testing.T) {
+	store := newStubStore()
+	eng1 := &storage.Engram{
+		Concept:    "threshold defaulting",
+		Content:    "engram for threshold defaulting behavior",
+		Confidence: 1.0,
+		Stability:  30.0,
+		Relevance:  0.8,
+	}
+	store.writeEngram(eng1)
+	ftsResults := []activation.ScoredID{{ID: eng1.ID, Score: 0.8}}
+
+	cases := []struct {
+		name      string
+		threshold float64
+		rrf       bool
+		want      float64
+	}{
+		{"explicit value preserved under RRF", 0.02, true, 0.02},
+		{"explicit value preserved without RRF", 0.02, false, 0.02},
+		{"no threshold defaults to 0.001 under RRF", 0, true, 0.001},
+		{"no threshold defaults to 0.05 without RRF", 0, false, 0.05},
+		{"negative threshold defaults to 0.001 under RRF", -1, true, 0.001},
+		{"negative threshold defaults to 0.05 without RRF", -1, false, 0.05},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := newTestEngine(store, &stubFTS{results: ftsResults}, nil)
+			req := &activation.ActivateRequest{
+				Context:    []string{"threshold"},
+				Threshold:  tc.threshold,
+				MaxResults: 10,
+				Weights: &activation.Weights{
+					UseRRFFusion: tc.rrf,
+					DisableACTR:  tc.rrf,
+				},
+			}
+			if _, err := eng.Run(context.Background(), req); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if req.Threshold != tc.want {
+				t.Errorf("Threshold = %v, want %v", req.Threshold, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test: When both UseRRFFusion and UseCGDN are enabled, RRF takes precedence
 // and CGDN is silently disabled. The guard in phase6Score logs a warning and
 // clears UseCGDN so the RRF path executes.

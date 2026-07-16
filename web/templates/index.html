@@ -1353,6 +1353,18 @@
                     <span :style="'font-size:0.65rem;background:rgba(236,72,153,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#f9a8d4' : '#be185d')">Slow fading</span>
                   </div>
                 </div>
+
+                <!-- Working -->
+                <div @click="plasticityForm.showAdvanced=false; plasticityForm.preset='working'; onPlasticityPresetChange()"
+                     :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.preset==='working' && !plasticityForm.showAdvanced ? 'border:2px solid #14b8a6;background:rgba(20,184,166,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
+                  <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;">Working</div>
+                  <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">Shared workflow scratch</div>
+                  <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
+                    <span :style="'font-size:0.65rem;background:rgba(20,184,166,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#5eead4' : '#0f766e')">2-hop</span>
+                    <span :style="'font-size:0.65rem;background:rgba(20,184,166,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#5eead4' : '#0f766e')">Hebbian</span>
+                    <span :style="'font-size:0.65rem;background:rgba(20,184,166,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#5eead4' : '#0f766e')">7-day evap.</span>
+                  </div>
+                </div>
               </div>
 
               <!-- Default Recall Mode -->
@@ -1368,6 +1380,22 @@
                        :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.recallMode === rm.id ? 'border:2px solid var(--accent);background:rgba(99,102,241,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
                     <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;" x-text="rm.label"></div>
                     <div style="font-size:0.75rem;color:var(--text-muted);" x-text="rm.desc"></div>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Search Scoring -->
+              <p style="font-size:0.8125rem;font-weight:600;color:var(--text-secondary);margin:0 0 0.75rem;text-transform:uppercase;letter-spacing:0.05em;">Search Scoring</p>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.625rem;margin-bottom:1.25rem;">
+                <template x-for="sf in [
+                  {id:'',             label:'ACT-R (default)', desc:'Cognitive decay + Hebbian'},
+                  {id:'rrf',          label:'RRF',             desc:'Reciprocal rank fusion'},
+                  {id:'weighted_sum', label:'Weighted Sum',    desc:'Linear blend of signals'}
+                ]" :key="sf.id">
+                  <div @click="plasticityForm.scoringFusion = sf.id"
+                       :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.scoringFusion === sf.id ? 'border:2px solid var(--accent);background:rgba(99,102,241,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
+                    <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;" x-text="sf.label"></div>
+                    <div style="font-size:0.75rem;color:var(--text-muted);" x-text="sf.desc"></div>
                   </div>
                 </template>
               </div>

@@ -914,5 +914,18 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"id", "trust"},
 			},
 		},
+		// RFC #597: privileged workflow-vault creation (recursion-guarded in dispatchToolCall).
+		{
+			Name:        "muninn_create_workflow_vault",
+			Description: "Create a shared working vault for an agentic workflow and mint a scoped, TTL'd capability token a worker agent can use to access it. The vault uses the `working` preset (default cognition + 7-day auto-evaporation) with multi_user enabled. Requires a full-mode mk_ key and the MUNINN_AGENT_VAULT_CREATE opt-in. The returned capability_secret is shown once — distribute it to worker agents out-of-band. Recursion-safe: a capability cannot call this tool.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":      map[string]any{"type": "string", "description": "Vault name (optional; auto-generates wf-<8hex> if omitted). MUST start with 'wf-' and be 1-64 lowercase alphanum/hyphen/underscore. Names lacking the wf- prefix are rejected (prevents cross-vault clobber)."},
+					"label":     map[string]any{"type": "string", "default": "agent-minted", "description": "Label stamped on the minted capability (for audit/listing)."},
+					"ttl_hours": map[string]any{"type": "integer", "default": 168, "minimum": float64(1), "maximum": float64(168), "description": "Capability lifetime in hours (1-168; default 168 = 7d, matching the working preset retention). Sub-hour values floor to 1; values above 168 clamp to 168."},
+				},
+			},
+		},
 	}
 }

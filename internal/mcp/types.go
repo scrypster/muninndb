@@ -40,6 +40,11 @@ type AuthContext struct {
 	Vault    string // vault the key is scoped to; empty for static-token auth
 	Mode     string // "full", "observe", or "write"; empty for static-token auth
 	IsAPIKey bool   // true when authed via an mk_ vault API key
+	// IsCapability is true when authed via a cap_ capability token (RFC #597).
+	// Capabilities are distinct from mk_ API keys: they cannot mint further
+	// vaults, so the recursion guard in dispatchToolCall (Task 4) gates
+	// muninn_create_workflow_vault on IsAPIKey, not merely Authorized.
+	IsCapability bool // true when authed via a cap_ capability token
 }
 
 // ToolDefinition is one entry in the tools/list response.

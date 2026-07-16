@@ -94,6 +94,94 @@ For body-based REST routes, the vault must be supplied as `?vault=`. Some routes
 
 ---
 
+## Workflow capabilities (`cap_`)
+
+Capabilities are a second vault credential type, designed for **short-lived, scoped access** in agentic workflows. Where an `mk_` key is a long-lived integration credential you create and rotate by hand, a `cap_` token is minted programmatically, carries a mandatory expiry, and cannot escalate its own privileges.
+
+| | `mk_` API key | `cap_` capability |
+|---|---|---|
+| Lifetime | Long-lived, until revoked | **TTL-bound** (default 168h / 7d) |
+| Created by | Admin, via the admin API | `muninn_create_workflow_vault` tool, programmatically |
+| Can mint vaults? | Yes (with `full` mode + opt-in) | **No** — structural recursion guard |
+| Auth identity | `IsAPIKey` | `IsCapability` |
+| Mode-enforced | Yes (`full` / `observe` / `write`) | Yes — same guards |
+
+### Capability format
+
+```
+cap_xK9mP2nQ4rT7wY1aZb3cD5eF6gH7iJ8kL9m
+│   └─────────────────────────────────── 32 random bytes, base64url encoded
+└── prefix identifies MuninnDB capabilities
+```
+
+Like `mk_` keys, the raw bytes are generated with `crypto/rand` and only a SHA-256 hash is persisted — the token itself is the credential. The defining difference is the mandatory `ExpiresAt`: a capability with no TTL is refused at mint time.
+
+### How capabilities authenticate
+
+A `cap_` token resolves to `IsCapability=true`, distinct from `IsAPIKey`. This distinction is load-bearing:
+
+- **Mode-enforced identically.** A `full` cap can mutate cognitive state; an `observe` cap cannot — the same `ReadOnlyGuard` / `denyReadOnlyMutation` paths apply.
+- **Rejected at the privileged tool boundary.** `muninn_create_workflow_vault` requires `IsAPIKey && full`. Because capabilities authenticate as `IsCapability`, they are rejected at dispatch. Recursion is structurally impossible, not merely policy.
+
+**MCP-only authentication.** `cap_` tokens are resolved on **MCP transports only** (stdio, SSE, HTTP-streamable). The REST (port 8475) and gRPC transports call only `ValidateAPIKey`, so they accept `mk_` keys but **not** `cap_` tokens — a `cap_` bearer on REST/gRPC is rejected as an invalid key. Use `mk_` keys to drive those transports, or reach the vault over MCP with the `cap_` token.
+
+### Minting capabilities — `muninn_create_workflow_vault`
+
+The MCP tool `muninn_create_workflow_vault` creates a workflow vault and mints a full-mode capability for it in one call. It is **opt-in and off by default**.
+
+**Opt-in (operator):**
+
+```bash
+export MUNINN_AGENT_VAULT_CREATE=1
+```
+
+When unset (or any value other than `1`), the tool returns `forbidden: agent vault creation disabled` even if the caller holds a valid full-mode `mk_` key. The caller must also be an `mk_` key in `full` mode — a `cap_` bearer is rejected by the recursion guard.
+
+**Call (MCP):**
+
+```json
+{
+  "name": "wf-acme-sprint",
+  "label": "acme-worker",
+  "ttl_hours": 168
+}
+```
+
+| Arg | Default | Notes |
+|-----|---------|-------|
+| `name` | auto `wf-<8hex>` | 1-64 lowercase alphanumeric / hyphen / underscore |
+| `label` | `agent-minted` | Stamped on the capability for audit and listing |
+| `ttl_hours` | `168` (7 days) | Matches the `working` preset's 7-day retention |
+
+**Response:**
+
+```json
+{
+  "vault": "wf-acme-sprint",
+  "capability_id": "A1B2C3D4",
+  "capability_secret": "cap_xK9m...",
+  "mode": "full",
+  "expires_at": "2026-07-23T12:19:21Z",
+  "auto_evap_days": 7,
+  "warning": "capability_secret is shown once; distribute it to worker agents. The vault auto-evaporates engrams after 7 days."
+}
+```
+
+The vault is created with the `working` preset (default cognition + 7-day auto-evaporation) and `multi_user` enabled, so the agent guide steers worker agents toward per-user-scoped recall. `capability_secret` is returned **once** — distribute it to worker agents out-of-band.
+
+### TTL configuration
+
+- **Per-call:** the `ttl_hours` arg (default `168`).
+- **Operator-wide ceiling:** `MUNINN_WORKFLOW_CAP_TTL_HOURS` clamps the per-call value — when set, a caller's `ttl_hours` is honored only up to this fleet-wide maximum, and any larger request is capped.
+
+### Security notes
+
+- **Bearer token.** A `cap_` is a bearer credential — anyone holding it can access the vault at its mode until it expires or is revoked. The TTL bounds exposure if a token leaks via logs or transcripts; it does not prevent the leak. Distribute secrets out-of-band and never log them.
+- **Shown once.** `capability_secret` appears in the MCP response and never again. The store holds only a SHA-256 hash.
+- **Recursion-proof by construction.** The privileged tool checks `IsAPIKey && full` at dispatch. Capabilities authenticate as `IsCapability` and cannot satisfy that check, so no capability can mint another capability — a leaked `cap_` cannot spiral into unauthorized vault creation.
+
+---
+
 ## Managing keys
 
 ### Create a key (admin only)
@@ -168,7 +256,7 @@ curl -X PUT http://127.0.0.1:8475/api/admin/vaults/config \
 
 Plasticity controls the cognitive pipeline for a vault — how it learns, forgets, and traverses connections between engrams. Each vault can have its own plasticity settings independent of others.
 
-**Four preset profiles** are available: `default` (balanced Hebbian + temporal), `reference` (preserves with strong Hebbian bonds), `scratchpad` (rapid fading, minimal history), and `knowledge-graph` (rich traversal, strong associative learning).
+**Five preset profiles** are available: `default` (balanced Hebbian + temporal), `reference` (preserves with strong Hebbian bonds), `scratchpad` (rapid fading, minimal history), `knowledge-graph` (rich traversal, strong associative learning), and `working` (default cognition with 7-day auto-eviction for shared workflow scratch vaults; pair with `multi_user` per RFC #597).
 
 Get the current plasticity configuration for a vault:
 
@@ -219,7 +307,7 @@ curl -X PUT "http://127.0.0.1:8475/api/admin/vault/default/plasticity" \
 
 | Field | Type | Range | Purpose |
 |-------|------|-------|---------|
-| `preset` | string | `default` \| `reference` \| `scratchpad` \| `knowledge-graph` | Base cognitive profile; overrides applied on top |
+| `preset` | string | `default` \| `reference` \| `scratchpad` \| `knowledge-graph` \| `working` | Base cognitive profile; overrides applied on top |
 | `hebbian_enabled` | bool | — | Enable/disable Hebbian weight updates (coactivation learning) |
 | `temporal_enabled` | bool | — | Enable/disable time-based temporal scoring |
 | `multi_user` | bool | — | Vault shared by multiple users/agents: guide + recall hints steer clients to per-user scoped recall; `where_left_off`/`session` flagged vault-global |
@@ -259,6 +347,7 @@ If each user had their own relevance weights, the vault would have N brains inst
 | Key revocation | Immediate, no grace period |
 | Observe isolation | Enforced at both the transport layer (`ReadOnlyGuard` on REST, `denyReadOnlyMutation` on gRPC) and the engine activation layer — not just an honor system |
 | Encryption at rest | Not built-in — use OS/volume encryption; see [self-hosting guide](self-hosting.md#encryption-at-rest) |
+| Capability tokens | TTL-bound bearer; SHA-256 hash only (plaintext never persisted); recursion-guarded at dispatch — `IsAPIKey` is required to mint, so no `cap_` can mint another |
 
 ---
 

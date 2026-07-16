@@ -28,6 +28,13 @@ type apiKeyValidator interface {
 	ValidateAPIKey(token string) (auth.APIKey, error)
 }
 
+// capabilityValidator is the subset of auth.Store used by MCP for cap_ token
+// auth (RFC #597). Kept as an interface so the mcp package remains testable
+// without a live Pebble store; the real implementation is *auth.Store.
+type capabilityValidator interface {
+	ValidateCapability(token string) (auth.Capability, error)
+}
+
 // mcpAuthContextKey is the unexported key used to store AuthContext in request context.
 type mcpAuthContextKey struct{}
 
@@ -52,7 +59,10 @@ func authFromContext(ctx context.Context) AuthContext {
 //  3. Open-server mode — if no static token configured and no mk_ key present, allow.
 //
 // apiKeyStore may be nil to disable mk_ key auth (legacy mode).
-func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyValidator) AuthContext {
+// capStore may be nil to disable cap_ capability auth (pre-RFC #597 mode);
+// when non-nil, an invalid or expired cap_ token fails closed (never falls
+// through to open-server), mirroring the mk_ posture.
+func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyValidator, capStore capabilityValidator) AuthContext {
 	token, found := auth.ParseBearerToken(r.Header.Get("Authorization"))
 
 	// 1. mk_ vault API key — always checked first, regardless of whether a static
@@ -69,6 +79,24 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 			}
 		}
 		// Invalid mk_ key: fail-closed. Do not fall through to open-server mode.
+		return AuthContext{Authorized: false}
+	}
+
+	// 1b. cap_ capability token — vault-pinned, mode-enforced, TTL'd (RFC #597).
+	// Checked before the open-server fallthrough: an invalid or expired cap_
+	// token must NOT drop into open-server mode. When capStore is nil, cap_
+	// auth is disabled and the branch is skipped (backward-compatible).
+	if found && len(token) > 4 && token[:4] == "cap_" && capStore != nil {
+		if cap, err := capStore.ValidateCapability(token); err == nil {
+			return AuthContext{
+				Token:        token,
+				Authorized:   true,
+				Vault:        cap.Vault,
+				Mode:         cap.Mode,
+				IsCapability: true,
+			}
+		}
+		// Invalid cap_ token: fail-closed.
 		return AuthContext{Authorized: false}
 	}
 
@@ -178,7 +206,8 @@ func isMutatingTool(name string) bool {
 		"muninn_trust",
 		"muninn_compare_and_set",
 		"muninn_claim",
-		"muninn_release":
+		"muninn_release",
+		"muninn_create_workflow_vault":
 		return true
 	}
 	return false

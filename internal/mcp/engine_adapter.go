@@ -23,6 +23,19 @@ type mcpEngineAdapter struct {
 	pStore   plugin.PluginStore // needed by RetryEnrich to persist entities/relationships
 }
 
+// RegisterVaultName registers a vault name (idempotent 2-key write).
+// Delegates to engine.Engine.RegisterVaultName (RFC #597: muninn_create_workflow_vault).
+func (a *mcpEngineAdapter) RegisterVaultName(name string) error {
+	return a.eng.RegisterVaultName(name)
+}
+
+// VaultNameExists reports whether a vault name is already registered.
+// Delegates to engine.Engine.VaultNameExists (RFC #597 RedTeam fix:
+// existence-check before minting into a caller-supplied name).
+func (a *mcpEngineAdapter) VaultNameExists(name string) bool {
+	return a.eng.VaultNameExists(name)
+}
+
 // NewEngineAdapter returns an EngineInterface backed by eng with optional enricher.
 // pStore is used by RetryEnrich to persist entity and relationship data; pass nil when
 // no enrichment plugin is configured (RetryEnrich will error before using pStore).

@@ -21,7 +21,7 @@ jobs:
             goos: darwin
             goarch: arm64
             ort_target: _ort-darwin-arm64
-            cache_key: embed-assets-ort-1.24.2-minilm-v2-darwin-arm64
+            cache_key: embed-assets-ort-1.24.2-bge-small-en-v1.5-darwin-arm64
             cc: ""
 
           - runner: macos-14         # Cross-compile Intel from arm64 runner
@@ -29,21 +29,21 @@ jobs:
             goarch: amd64
             ort_target: _ort-darwin-amd64
             # ORT dropped Intel Mac support after v1.23.2; this pin is intentional.
-            cache_key: embed-assets-ort-1.23.2-minilm-v2-darwin-amd64
+            cache_key: embed-assets-ort-1.23.2-bge-small-en-v1.5-darwin-amd64
             cc: "clang -arch x86_64"
 
           - runner: ubuntu-latest    # Linux x86-64
             goos: linux
             goarch: amd64
             ort_target: _ort-linux-amd64
-            cache_key: embed-assets-ort-1.24.2-minilm-v2-linux-amd64
+            cache_key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux-amd64
             cc: ""
 
           - runner: ubuntu-24.04-arm  # Native linux/arm64 runner
             goos: linux
             goarch: arm64
             ort_target: _ort-linux-arm64
-            cache_key: embed-assets-ort-1.24.2-minilm-v2-linux-arm64
+            cache_key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux-arm64
             cc: ""
 
     steps:

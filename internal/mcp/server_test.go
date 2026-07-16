@@ -20,6 +20,12 @@ import (
 // fakeEngine implements EngineInterface for tests.
 type fakeEngine struct{}
 
+func (f *fakeEngine) RegisterVaultName(name string) error { return nil }
+
+// VaultNameExists defaults to false (no pre-existing vault) so workflow-vault
+// creation tests proceed. Tests needing collision behaviour wrap a real engine.
+func (f *fakeEngine) VaultNameExists(name string) bool { return false }
+
 func (f *fakeEngine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	return &mbp.WriteResponse{ID: "fake-id"}, nil
 }
@@ -203,7 +209,7 @@ func (f *fakeEngine) GetAnnotations(_ context.Context, _, _ string) (*engine.Ann
 }
 
 func newTestServer() *MCPServer {
-	return New(":0", &fakeEngine{}, "", nil, nil)
+	return New(":0", &fakeEngine{}, "", nil, nil, nil)
 }
 
 func postRPC(t *testing.T, srv *MCPServer, body string) *httptest.ResponseRecorder {
@@ -299,8 +305,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 42 {
-		t.Errorf("expected 42 tools, got %d", len(tools))
+	if len(tools) != 43 {
+		t.Errorf("expected 43 tools, got %d", len(tools))
 	}
 }
 
