@@ -2020,8 +2020,8 @@ func (s *MCPServer) handleCreateWorkflowVault(ctx context.Context, w http.Respon
 		ttlHours = int(v) // JSON numbers arrive as float64
 	}
 	if ev := os.Getenv("MUNINN_WORKFLOW_CAP_TTL_HOURS"); ev != "" {
-		if n, err := strconv.Atoi(ev); err == nil && n > 0 {
-			ttlHours = n // env override (operators can clamp fleet-wide)
+		if n, err := strconv.Atoi(ev); err == nil && n > 0 && n < ttlHours {
+			ttlHours = n // env is a fleet-wide ceiling; a smaller caller ttl_hours is honored
 		}
 	}
 

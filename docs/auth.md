@@ -123,10 +123,7 @@ A `cap_` token resolves to `IsCapability=true`, distinct from `IsAPIKey`. This d
 - **Mode-enforced identically.** A `full` cap can mutate cognitive state; an `observe` cap cannot — the same `ReadOnlyGuard` / `denyReadOnlyMutation` paths apply.
 - **Rejected at the privileged tool boundary.** `muninn_create_workflow_vault` requires `IsAPIKey && full`. Because capabilities authenticate as `IsCapability`, they are rejected at dispatch. Recursion is structurally impossible, not merely policy.
 
-```bash
-curl http://127.0.0.1:8475/api/engrams?vault=wf-acme12 \
-  -H "Authorization: Bearer cap_xK9m..."
-```
+**MCP-only authentication.** `cap_` tokens are resolved on **MCP transports only** (stdio, SSE, HTTP-streamable). The REST (port 8475) and gRPC transports call only `ValidateAPIKey`, so they accept `mk_` keys but **not** `cap_` tokens — a `cap_` bearer on REST/gRPC is rejected as an invalid key. Use `mk_` keys to drive those transports, or reach the vault over MCP with the `cap_` token.
 
 ### Minting capabilities — `muninn_create_workflow_vault`
 
@@ -175,7 +172,7 @@ The vault is created with the `working` preset (default cognition + 7-day auto-e
 ### TTL configuration
 
 - **Per-call:** the `ttl_hours` arg (default `168`).
-- **Operator-wide clamp:** `MUNINN_WORKFLOW_CAP_TTL_HOURS` overrides the default when set, letting operators pin a fleet-wide ceiling that individual calls cannot exceed.
+- **Operator-wide ceiling:** `MUNINN_WORKFLOW_CAP_TTL_HOURS` clamps the per-call value — when set, a caller's `ttl_hours` is honored only up to this fleet-wide maximum, and any larger request is capped.
 
 ### Security notes
 
