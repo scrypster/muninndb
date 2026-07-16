@@ -22,6 +22,16 @@ var mcpProxyURL = "http://127.0.0.1:" + defaultMCPPort + "/mcp"
 // tests can redirect it without forking a process.
 var mcpStderr io.Writer = os.Stderr
 
+// mcpToolset is the toolset preference forwarded to the daemon as the
+// X-Muninn-Toolset header on every outbound request. Stdio clients cannot set
+// HTTP headers themselves, so the proxy is their only channel: set
+// MUNINN_MCP_TOOLSET in the client's env block for the `muninn mcp` command.
+// Empty means no header — the daemon falls back to its own default. The value
+// is forwarded as-is: the daemon owns validation and fails open on unknown
+// values, so the proxy stays a dumb pipe. Overridable in tests via direct
+// assignment.
+var mcpToolset string
+
 // jsonRPCErrorResponse is a JSON-RPC 2.0 error response structure.
 type jsonRPCErrorResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -87,6 +97,11 @@ func httpStatusToRPCError(status int) (code int, msg string) {
 // MUNINN_MCP_URL overrides the target endpoint for non-default port or TLS setups:
 //
 //	MUNINN_MCP_URL=https://127.0.0.1:8750/mcp muninn mcp
+//
+// MUNINN_MCP_TOOLSET selects the toolset tools/list advertises for this client;
+// the proxy forwards it as the X-Muninn-Toolset header on every request:
+//
+//	MUNINN_MCP_TOOLSET=core muninn mcp
 func runMCPStdio() {
 	loadEnvFile()
 
@@ -95,6 +110,7 @@ func runMCPStdio() {
 	} else {
 		mcpProxyURL = defaultMCPProxyURL()
 	}
+	mcpToolset = strings.TrimSpace(os.Getenv("MUNINN_MCP_TOOLSET"))
 	runMCPStdioWith(os.Stdin, os.Stdout)
 }
 
@@ -142,6 +158,10 @@ func runMCPStdioWith(in io.Reader, out io.Writer) {
 		req.Header.Set("Content-Type", "application/json")
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		// Forward the client's toolset preference; see mcpToolset.
+		if mcpToolset != "" {
+			req.Header.Set("X-Muninn-Toolset", mcpToolset)
 		}
 		// Forward the MCP session ID on all requests after initialize.
 		if sessionID != "" {

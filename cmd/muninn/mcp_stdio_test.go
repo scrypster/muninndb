@@ -283,6 +283,55 @@ func TestRunMCPStdioWith_ContentTypeHeader(t *testing.T) {
 	}
 }
 
+// TestRunMCPStdioWith_ToolsetHeaderForwarded verifies the proxy forwards the
+// client-side toolset preference as X-Muninn-Toolset — stdio clients have no
+// other channel to reach the daemon's per-client toolset switch.
+func TestRunMCPStdioWith_ToolsetHeaderForwarded(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Muninn-Toolset")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	withMCPProxyURL(t, srv.URL)
+
+	orig := mcpToolset
+	mcpToolset = "core"
+	t.Cleanup(func() { mcpToolset = orig })
+
+	in := strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n")
+	var out bytes.Buffer
+	runMCPStdioWith(in, &out)
+
+	if got != "core" {
+		t.Errorf("X-Muninn-Toolset = %q, want \"core\"", got)
+	}
+}
+
+// TestRunMCPStdioWith_NoToolsetHeaderWhenUnset verifies no header is sent when
+// the client sets no preference, leaving the daemon's own default in charge.
+func TestRunMCPStdioWith_NoToolsetHeaderWhenUnset(t *testing.T) {
+	var present bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, present = r.Header["X-Muninn-Toolset"]
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	withMCPProxyURL(t, srv.URL)
+
+	orig := mcpToolset
+	mcpToolset = ""
+	t.Cleanup(func() { mcpToolset = orig })
+
+	in := strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n")
+	var out bytes.Buffer
+	runMCPStdioWith(in, &out)
+
+	if present {
+		t.Error("X-Muninn-Toolset header sent despite no client preference")
+	}
+}
+
 func TestRunMCPStdioWith_MultipleRequests(t *testing.T) {
 	responses := []string{
 		`{"jsonrpc":"2.0","id":1,"result":{"pong":true}}`,

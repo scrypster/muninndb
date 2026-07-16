@@ -247,6 +247,26 @@ To override the daemon endpoint (non-default port, TLS):
 MUNINN_MCP_URL=https://my-server:8750/mcp muninn mcp
 ```
 
+To advertise the lean `core` toolset to this client only (trims the schema
+overhead in the client's context window; every tool remains callable), set
+`MUNINN_MCP_TOOLSET` in the client's env block — the proxy forwards it as the
+`X-Muninn-Toolset` header:
+```json
+{
+  "mcpServers": {
+    "muninn": {
+      "command": "muninn",
+      "args": ["mcp"],
+      "transport": "stdio",
+      "env": { "MUNINN_MCP_TOOLSET": "core" }
+    }
+  }
+}
+```
+
+HTTP-transport clients that support custom headers can set `X-Muninn-Toolset`
+directly in their MCP config instead.
+
 **Windsurf** — `~/.codeium/windsurf/mcp_config.json`
 ```json
 {
@@ -299,6 +319,7 @@ curl http://127.0.0.1:8750/mcp/health
 | `MUNINN_GC_PERCENT` | `200` | GOGC tuning |
 | `MUNINN_CORS_ORIGINS` | `""` | Comma-separated allowed CORS origins |
 | `MUNINN_MCP_URL` | `http://127.0.0.1:8750/mcp` | Override MCP endpoint used by `muninn mcp` proxy (OpenClaw) |
+| `MUNINN_MCP_TOOLSET` | `full` | Toolset advertised by MCP `tools/list`: `full` or `core` (every tool stays callable either way). On the daemon: the default for all clients. On the `muninn mcp` proxy: forwarded per-client as the `X-Muninn-Toolset` request header, which takes precedence over the daemon default. Unknown values fall back to the next layer with a logged warning |
 | `MUNINNDB_ADMIN_URL` | auto-detected | Override the REST/admin base URL probed by `muninn status` & admin CLI (TLS deployments) |
 | `MUNINNDB_UI_URL` | auto-detected | Override the Web UI base URL probed by `muninn status` (TLS deployments) |
 | `MUNINNDB_MCP_URL` | auto-detected | Override the MCP base URL probed by `muninn status` / `muninn start` (TLS deployments) |

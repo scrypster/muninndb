@@ -1,7 +1,10 @@
 package mcp
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -96,4 +99,28 @@ func TestExposedToolDefinitions(t *testing.T) {
 			t.Fatalf("got %d tools, want %d (fall back to env)", got, len(coreToolNames))
 		}
 	})
+}
+
+// TestWarnUnknownToolset_PerDistinctValue guards that each distinct unknown
+// toolset value logs its own warning — a second client's different typo must
+// not be swallowed by a process-lifetime Once — while repeats stay silent.
+func TestWarnUnknownToolset_PerDistinctValue(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	t.Setenv("MUNINN_MCP_TOOLSET", "")
+
+	resolveToolset(reqWithToolsetHeader(t, "typo-alpha"))
+	resolveToolset(reqWithToolsetHeader(t, "typo-beta"))
+	resolveToolset(reqWithToolsetHeader(t, "typo-alpha")) // repeat: must stay silent
+
+	logs := buf.String()
+	if got := strings.Count(logs, "typo-alpha"); got != 1 {
+		t.Errorf("typo-alpha warned %d times, want exactly 1\nlogs:\n%s", got, logs)
+	}
+	if got := strings.Count(logs, "typo-beta"); got != 1 {
+		t.Errorf("typo-beta warned %d times, want exactly 1\nlogs:\n%s", got, logs)
+	}
 }

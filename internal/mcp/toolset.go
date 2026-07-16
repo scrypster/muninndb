@@ -28,7 +28,19 @@ var coreToolNames = map[string]bool{
 	"muninn_guide":          true,
 }
 
-var toolsetWarnOnce sync.Once
+// toolsetWarned tracks which unknown toolset values have already been logged,
+// keyed by (source, value), so each distinct typo warns exactly once per
+// process — not only the first one ever (a second client's different typo
+// must not go silent).
+var toolsetWarned sync.Map
+
+// warnUnknownToolset logs one warning per distinct (source, value) pair.
+func warnUnknownToolset(source, value, fallback string) {
+	if _, seen := toolsetWarned.LoadOrStore(source+"\x00"+value, true); !seen {
+		slog.Warn("mcp: unknown toolset value, falling back",
+			"source", source, "value", value, "fallback", fallback)
+	}
+}
 
 // resolveToolset picks the toolset for one request. Precedence: the
 // X-Muninn-Toolset request header (lets each client choose in its own MCP
@@ -43,9 +55,7 @@ func resolveToolset(r *http.Request) string {
 		case "":
 			// no header — fall through to env
 		default:
-			toolsetWarnOnce.Do(func() {
-				slog.Warn("mcp: unknown X-Muninn-Toolset header, falling back to daemon default", "value", v)
-			})
+			warnUnknownToolset("X-Muninn-Toolset header", v, "daemon default")
 		}
 	}
 	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("MUNINN_MCP_TOOLSET"))); v {
@@ -54,9 +64,7 @@ func resolveToolset(r *http.Request) string {
 	case "":
 		return "full"
 	default:
-		toolsetWarnOnce.Do(func() {
-			slog.Warn("mcp: unknown MUNINN_MCP_TOOLSET value, serving full toolset", "value", v)
-		})
+		warnUnknownToolset("MUNINN_MCP_TOOLSET env", v, "full")
 		return "full"
 	}
 }
