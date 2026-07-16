@@ -923,7 +923,7 @@ func allToolDefinitions() []ToolDefinition {
 				"properties": map[string]any{
 					"name":      map[string]any{"type": "string", "description": "Vault name (optional; auto-generates wf-<8hex> if omitted). MUST start with 'wf-' and be 1-64 lowercase alphanum/hyphen/underscore. Names lacking the wf- prefix are rejected (prevents cross-vault clobber)."},
 					"label":     map[string]any{"type": "string", "default": "agent-minted", "description": "Label stamped on the minted capability (for audit/listing)."},
-					"ttl_hours": map[string]any{"type": "integer", "default": 168, "description": "Capability lifetime in hours (default 168 = 7d, matching the working preset retention)."},
+					"ttl_hours": map[string]any{"type": "integer", "default": 168, "minimum": float64(1), "maximum": float64(168), "description": "Capability lifetime in hours (1-168; default 168 = 7d, matching the working preset retention). Sub-hour values floor to 1; values above 168 clamp to 168."},
 				},
 			},
 		},

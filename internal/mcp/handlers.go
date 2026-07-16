@@ -2049,9 +2049,21 @@ func (s *MCPServer) handleCreateWorkflowVault(ctx context.Context, w http.Respon
 		label = "agent-minted"
 	}
 
-	ttlHours := 168
-	if v, ok := args["ttl_hours"].(float64); ok && v > 0 && v <= 24*365 {
+	// TTL floor + cap (RedTeam finding NOTABLE #4): floor sub-hour fractions
+	// (0.5h → int(0)=0 → born-expired) to 1h; cap at 168h (7 days, the working
+	// preset retention) — minting a cap that outlives the vault's data is
+	// pointless and the prior 24*365 ceiling contradicted the documented 168h
+	// default.
+	const ttlCeiling = 168
+	ttlHours := ttlCeiling
+	if v, ok := args["ttl_hours"].(float64); ok && v > 0 {
 		ttlHours = int(v) // JSON numbers arrive as float64
+		if ttlHours < 1 {
+			ttlHours = 1 // floor: reject sub-hour truncation to zero
+		}
+		if ttlHours > ttlCeiling {
+			ttlHours = ttlCeiling // cap: don't outlive the vault's 7-day retention
+		}
 	}
 	if ev := os.Getenv("MUNINN_WORKFLOW_CAP_TTL_HOURS"); ev != "" {
 		if n, err := strconv.Atoi(ev); err == nil && n > 0 && n < ttlHours {
