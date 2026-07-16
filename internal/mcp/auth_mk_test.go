@@ -800,6 +800,14 @@ func TestDispatch_WriteMode_AllMutatingToolsAllowed(t *testing.T) {
 		if !isMutatingTool(name) {
 			continue
 		}
+		// muninn_create_workflow_vault is a privileged mutating tool: although
+		// classified mutating (so observe-mode keys are blocked by mode
+		// enforcement), it additionally requires a full-mode mk_ key via the
+		// recursion guard. Write-mode is correctly rejected. See
+		// TestCreateWorkflowVault_NonFullKeyRejected.
+		if name == "muninn_create_workflow_vault" {
+			continue
+		}
 		body := mkToolCallBody(name, map[string]any{"vault": "v", "concept": "x", "content": "y", "id": "x", "ids": []string{"x"}, "merged_content": "y", "decision": "x", "rationale": "y"})
 		w := doAuthenticatedPost(srv, "mk_wrt-all", body)
 		var resp JSONRPCResponse

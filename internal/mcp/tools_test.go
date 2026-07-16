@@ -7,8 +7,8 @@ import (
 
 func TestAllToolDefinitionsCount(t *testing.T) {
 	tools := allToolDefinitions()
-	if len(tools) != 42 {
-		t.Errorf("expected 42 tools, got %d", len(tools))
+	if len(tools) != 43 {
+		t.Errorf("expected 43 tools, got %d", len(tools))
 	}
 }
 
@@ -38,7 +38,15 @@ func TestAllToolNamesUnique(t *testing.T) {
 
 func TestAllToolsHaveVaultParam(t *testing.T) {
 	tools := allToolDefinitions()
+	// Privileged meta-tools that operate above vault scoping — e.g. one that
+	// creates new vaults — legitimately omit the vault parameter.
+	noVaultParam := map[string]bool{
+		"muninn_create_workflow_vault": true,
+	}
 	for _, tool := range tools {
+		if noVaultParam[tool.Name] {
+			continue
+		}
 		schema, ok := tool.InputSchema.(map[string]any)
 		if !ok {
 			t.Errorf("tool %s: inputSchema is not a map", tool.Name)

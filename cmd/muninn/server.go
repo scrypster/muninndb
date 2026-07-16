@@ -1500,11 +1500,12 @@ func runServer() {
 
 	// Build MCP server
 	mcpAdapter := mcp.NewEngineAdapter(eng, enrichPlugin, pStore)
-	// capAuth is nil for now (RFC #597 Task 2): cap_ capability tokens are
-	// recognized by authFromRequest but not yet minted or wired to the live
-	// store. Task 4 flips this to authStore once muninn_create_workflow_vault
-	// ships.
-	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, authStore, nil, clientTLS)
+	// capAuth wires the live *auth.Store as the cap_ capability validator AND
+	// (via type assertion inside mcp.New) the create-workflow-vault handler's
+	// store for SetVaultConfig + GenerateCapability. With this, cap_ tokens
+	// authenticate on every transport and muninn_create_workflow_vault (opt-in
+	// via MUNINN_AGENT_VAULT_CREATE) can mint workflow capabilities (RFC #597).
+	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, authStore, authStore, clientTLS)
 
 	// Build gRPC server
 	grpcAdapter := grpcpkg.NewEngineAdapter(eng)

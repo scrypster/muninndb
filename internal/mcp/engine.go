@@ -191,4 +191,8 @@ type EngineInterface interface {
 	// Used to populate muninn_recall annotation objects when annotate=true.
 	// Returns a non-nil *engine.AnnotationData (possibly with empty fields) on success.
 	GetAnnotations(ctx context.Context, vault, id string) (*engine.AnnotationData, error)
+
+	// RegisterVaultName registers a vault name in the engine's vault registry
+	// (idempotent 2-key write). Used by muninn_create_workflow_vault (RFC #597).
+	RegisterVaultName(name string) error
 }

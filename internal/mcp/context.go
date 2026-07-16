@@ -206,7 +206,8 @@ func isMutatingTool(name string) bool {
 		"muninn_trust",
 		"muninn_compare_and_set",
 		"muninn_claim",
-		"muninn_release":
+		"muninn_release",
+		"muninn_create_workflow_vault":
 		return true
 	}
 	return false

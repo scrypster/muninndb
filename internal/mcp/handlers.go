@@ -2,12 +2,16 @@ package mcp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1979,4 +1983,80 @@ func (s *MCPServer) handleRelease(ctx context.Context, w http.ResponseWriter, id
 		"released": released,
 		"owner":    curOwner,
 	})))
+}
+
+// handleCreateWorkflowVault implements muninn_create_workflow_vault (RFC #597).
+// It creates a shared working vault and mints a scoped, TTL'd cap_ capability
+// token for worker agents. The tool is privileged: dispatchToolCall's recursion
+// guard verifies an mk_ full-mode key BEFORE this handler runs, so capabilities
+// (IsCapability, not IsAPIKey) can never reach it — structural recursion
+// prevention. The capability_secret is shown ONCE.
+func (s *MCPServer) handleCreateWorkflowVault(ctx context.Context, w http.ResponseWriter, id json.RawMessage, _ string, args map[string]any) {
+	if s.authStore == nil {
+		sendError(w, id, -32603, "vault creation unavailable: auth store not configured on this server")
+		return
+	}
+
+	name, _ := args["name"].(string)
+	if name == "" {
+		rb := make([]byte, 4)
+		if _, err := rand.Read(rb); err != nil {
+			sendError(w, id, -32603, "generate vault name: "+err.Error())
+			return
+		}
+		name = "wf-" + hex.EncodeToString(rb)
+	} else if !auth.IsValidVaultName(name) {
+		sendError(w, id, -32602, "invalid vault name: must be 1-64 lowercase alphanumeric, hyphen, or underscore")
+		return
+	}
+
+	label, _ := args["label"].(string)
+	if label == "" {
+		label = "agent-minted"
+	}
+
+	ttlHours := 168
+	if v, ok := args["ttl_hours"].(float64); ok && v > 0 && v <= 24*365 {
+		ttlHours = int(v) // JSON numbers arrive as float64
+	}
+	if ev := os.Getenv("MUNINN_WORKFLOW_CAP_TTL_HOURS"); ev != "" {
+		if n, err := strconv.Atoi(ev); err == nil && n > 0 {
+			ttlHours = n // env override (operators can clamp fleet-wide)
+		}
+	}
+
+	// 1. Register vault name (idempotent 2-key write in the engine's vault registry).
+	if err := s.engine.RegisterVaultName(name); err != nil {
+		sendError(w, id, -32603, "register vault: "+err.Error())
+		return
+	}
+
+	// 2. Configure the vault: working preset (default cognition + 7-day
+	// auto-evaporation) + multi_user (guidance steers toward per-user recall).
+	mu := true
+	if err := s.authStore.SetVaultConfig(auth.VaultConfig{
+		Name:       name,
+		Plasticity: &auth.PlasticityConfig{Preset: "working", MultiUser: &mu},
+	}); err != nil {
+		sendError(w, id, -32603, "set vault config: "+err.Error())
+		return
+	}
+
+	// 3. Mint a full-mode capability with the TTL. The token is shown once.
+	expiresAt := time.Now().Add(time.Duration(ttlHours) * time.Hour)
+	token, cap, err := s.authStore.GenerateCapability(name, label, auth.ModeFull, "workflow_vault", &expiresAt)
+	if err != nil {
+		sendError(w, id, -32603, "mint capability: "+err.Error())
+		return
+	}
+
+	sendResult(w, id, map[string]any{
+		"vault":             name,
+		"capability_id":     cap.ID,
+		"capability_secret": token, // shown once
+		"mode":              auth.ModeFull,
+		"expires_at":        expiresAt.Format(time.RFC3339),
+		"auto_evap_days":    7,
+		"warning":           "capability_secret is shown once; distribute it to worker agents. The vault auto-evaporates engrams after 7 days.",
+	})
 }
