@@ -5,8 +5,8 @@ const (
 	prefixAPIKey         byte = 0x12
 	prefixAPIKeyVIdx     byte = 0x13
 	prefixVaultCfg       byte = 0x14
-	prefixCapability     byte = 0x15
-	prefixCapabilityVIdx byte = 0x16
+	prefixCapability     byte = 0x40
+	prefixCapabilityVIdx byte = 0x41
 )
 
 func adminUserKey(username string) []byte {
