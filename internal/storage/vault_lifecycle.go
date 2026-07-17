@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
@@ -61,18 +62,13 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	// Step 3: DeleteRange for all vault-scoped data prefixes.
 	// 0x0E (vault meta), 0x0F (name index), 0x11 (digest flags) are intentionally excluded.
 	dataPrefixes := []byte{
-		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-		0x09, 0x0A, 0x0B, 0x0C, 0x0D,
-		0x10, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-		0x20, // engram entity links
-		0x21, // entity relationship records
-		0x22, // last-access index
-		0x24, // entity co-occurrence index
-		0x25, // archived association index
-		0x26, // relationship entity index
-		0x27, // dream state
-		0x28, // content-hash dedup index
-		0x2A, // ownership-lease sidecar
+		prefix.Engram, prefix.Meta, prefix.AssocFwd, prefix.AssocRev,
+		prefix.FTSPosting, prefix.Trigram, prefix.HNSWNode, prefix.FTSStats,
+		prefix.TermStats, prefix.Contradiction, prefix.StateIndex, prefix.TagIndex,
+		prefix.CreatorIndex, prefix.RelevanceBucket, prefix.Coherence, prefix.VaultWeights,
+		prefix.AssocWeightIndex, prefix.VaultCount, prefix.Provenance, prefix.BucketMigration,
+		prefix.EntityEngramLink, prefix.Relationship, prefix.LastAccess, prefix.CoOccurrence,
+		prefix.ArchiveAssoc, prefix.RelEntityIndex, prefix.DreamState, prefix.ContentHash, prefix.Lease,
 	}
 	wsPlus, err := incrementWS(ws)
 	if err != nil {
@@ -134,18 +130,18 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 }
 
 func (ps *PebbleStore) collectVaultEntityMentions(ws [8]byte) (map[string]int, error) {
-	prefix := make([]byte, 9)
-	prefix[0] = 0x20
-	copy(prefix[1:], ws[:])
+	prefixPre := make([]byte, 9)
+	prefixPre[0] = prefix.EntityEngramLink
+	copy(prefixPre[1:], ws[:])
 	wsPlus, err := incrementWS(ws)
 	if err != nil {
 		return nil, err
 	}
 	upperBound := make([]byte, 9)
-	upperBound[0] = 0x20
+	upperBound[0] = prefix.EntityEngramLink
 	copy(upperBound[1:], wsPlus[:])
 
-	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound})
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefixPre, UpperBound: upperBound})
 	if err != nil {
 		return nil, err
 	}
@@ -166,8 +162,8 @@ func (ps *PebbleStore) collectVaultEntityMentions(ws [8]byte) (map[string]int, e
 
 func (ps *PebbleStore) deleteVaultEntityReverseIndex(batch *pebble.Batch, ws [8]byte) error {
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
-		LowerBound: []byte{0x23},
-		UpperBound: []byte{0x24},
+		LowerBound: []byte{prefix.EntityReverseIndex},
+		UpperBound: []byte{prefix.CoOccurrence},
 	})
 	if err != nil {
 		return err

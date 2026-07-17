@@ -62,6 +62,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 	"github.com/vmihailenco/msgpack/v5"
@@ -1047,12 +1048,12 @@ func (ps *PebbleStore) deleteEntityLinks(ws [8]byte, engramID [16]byte, batch *p
 // FindSimilarEntities). fn is called exactly once per identity, with the first-seen
 // casing as the representative name.
 func (ps *PebbleStore) ScanVaultEntityNames(ctx context.Context, ws [8]byte, fn func(name string) error) error {
-	prefix := make([]byte, 1+8)
-	prefix[0] = 0x20
-	copy(prefix[1:9], ws[:])
+	prefixPre := make([]byte, 1+8)
+	prefixPre[0] = prefix.EntityEngramLink
+	copy(prefixPre[1:9], ws[:])
 
-	upperBound := make([]byte, len(prefix))
-	copy(upperBound, prefix)
+	upperBound := make([]byte, len(prefixPre))
+	copy(upperBound, prefixPre)
 	for i := len(upperBound) - 1; i >= 0; i-- {
 		upperBound[i]++
 		if upperBound[i] != 0 {
@@ -1060,7 +1061,7 @@ func (ps *PebbleStore) ScanVaultEntityNames(ctx context.Context, ws [8]byte, fn 
 		}
 	}
 
-	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound})
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefixPre, UpperBound: upperBound})
 	if err != nil {
 		return fmt.Errorf("scan vault entity names: iter: %w", err)
 	}

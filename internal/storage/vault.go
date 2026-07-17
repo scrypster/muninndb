@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
@@ -73,8 +74,8 @@ func (ps *PebbleStore) BackfillVaultNames() error {
 	// Collect unique vault prefixes from 0x01 keys.
 	seen := make(map[[8]byte]struct{})
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
-		LowerBound: []byte{0x01},
-		UpperBound: []byte{0x02},
+		LowerBound: []byte{prefix.Engram},
+		UpperBound: []byte{prefix.Meta},
 	})
 	if err != nil {
 		return err
@@ -182,8 +183,8 @@ func (ps *PebbleStore) RenameVault(ws [8]byte, oldName, newName string) error {
 // ListVaultNames scans the 0x0E prefix and returns all known vault names.
 func (ps *PebbleStore) ListVaultNames() ([]string, error) {
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
-		LowerBound: []byte{0x0E},
-		UpperBound: []byte{0x0F},
+		LowerBound: []byte{prefix.VaultMeta},
+		UpperBound: []byte{prefix.VaultNameIndex},
 	})
 	if err != nil {
 		return nil, err

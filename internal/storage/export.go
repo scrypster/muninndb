@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 )
 
 // vaultScopedExportPrefixes lists every prefix scoped by a vault workspace
@@ -23,30 +24,12 @@ import (
 // global/name keys excluded from the data stream (written by WriteVaultName
 // on import). 0x11 (DigestFlagsKey) is globally keyed by ULID — excluded.
 var vaultScopedExportPrefixes = []byte{
-	0x01, // engrams (full record)
-	0x02, // metadata-only
-	0x03, // forward associations
-	0x04, // reverse associations
-	0x05, // FTS posting lists
-	0x06, // trigrams
-	0x07, // HNSW node neighbors
-	0x08, // FTS global stats
-	0x09, // per-term FTS stats
-	0x0A, // contradictions
-	0x0B, // state secondary index
-	0x0C, // tag secondary index
-	0x0D, // creator secondary index
-	0x10, // relevance bucket index
-	0x12, // coherence counters
-	0x13, // vault scoring weights
-	0x14, // association weight index
-	0x15, // vault count key
-	0x16, // provenance
-	0x17, // bucket migration state
-	0x18, // standalone embeddings (ERF v2 EmbeddingKey)
-	0x1A, // episode keys (EpisodeKey + EpisodeFrameKey)
-	0x1B, // FTS schema version marker
-	0x28, // content-hash dedup index
+	prefix.Engram, prefix.Meta, prefix.AssocFwd, prefix.AssocRev,
+	prefix.FTSPosting, prefix.Trigram, prefix.HNSWNode, prefix.FTSStats,
+	prefix.TermStats, prefix.Contradiction, prefix.StateIndex, prefix.TagIndex,
+	prefix.CreatorIndex, prefix.RelevanceBucket, prefix.Coherence, prefix.VaultWeights,
+	prefix.AssocWeightIndex, prefix.VaultCount, prefix.Provenance, prefix.BucketMigration,
+	prefix.Embedding, prefix.Episode, prefix.FTSVersion, prefix.ContentHash,
 }
 
 const exportBatchSize = 512

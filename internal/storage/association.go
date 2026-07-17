@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
@@ -522,7 +523,7 @@ const assocDecayGraceWindow = 5 * time.Minute
 func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error) {
 	// Build scan prefix: 0x03 | wsPrefix (9 bytes).
 	scanPrefix := make([]byte, 9)
-	scanPrefix[0] = 0x03
+	scanPrefix[0] = prefix.AssocFwd
 	copy(scanPrefix[1:9], wsPrefix[:])
 
 	// The iterator snapshot is fixed at creation time — mutations committed in

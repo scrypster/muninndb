@@ -3,6 +3,7 @@ package storage
 import (
 	"github.com/bits-and-blooms/bloom/v3"
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 )
 
 // archiveBloom is an in-memory Bloom filter over src engram IDs that have
@@ -38,8 +39,8 @@ func (b *archiveBloom) MayContain(id [16]byte) bool {
 // Called on startup and after GC runs.
 func (ps *PebbleStore) RebuildArchiveBloom() *archiveBloom {
 	// Scan 0x25 | * (all vaults).
-	startKey := []byte{0x25}
-	endKey := []byte{0x26} // exclusive upper bound for prefix 0x25
+	startKey := []byte{prefix.ArchiveAssoc}
+	endKey := []byte{prefix.RelEntityIndex} // exclusive upper bound for prefix 0x25
 
 	iterOpts := &pebble.IterOptions{
 		LowerBound: startKey,

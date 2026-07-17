@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 	"github.com/scrypster/muninndb/internal/types"
@@ -16,8 +17,8 @@ import (
 // missing the given digest flag bit. Engrams that have any skipFlags bit set
 // are excluded from the count (e.g. permanently-failed engrams).
 func (ps *PebbleStore) CountWithoutFlag(ctx context.Context, flag, skipFlags uint8) (int64, error) {
-	lowerBound := []byte{0x01}
-	upperBound := []byte{0x02}
+	lowerBound := []byte{prefix.Engram}
+	upperBound := []byte{prefix.Meta}
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: lowerBound,
@@ -60,8 +61,8 @@ func (ps *PebbleStore) CountWithoutFlag(ctx context.Context, flag, skipFlags uin
 // given digest flag bit set. It scans the 0x11 DigestFlags key space directly
 // (a global key space — no vault scope needed).
 func (ps *PebbleStore) CountWithFlag(ctx context.Context, flag uint8) (int64, error) {
-	lowerBound := []byte{0x11}
-	upperBound := []byte{0x12}
+	lowerBound := []byte{prefix.DigestFlags}
+	upperBound := []byte{prefix.Coherence}
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: lowerBound,
@@ -86,8 +87,8 @@ func (ps *PebbleStore) CountWithFlag(ctx context.Context, flag uint8) (int64, er
 // missing the given digest flag bit. Engrams that have any skipFlags bit set
 // are skipped during iteration.
 func (ps *PebbleStore) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint8) *PluginEngramIterator {
-	lowerBound := []byte{0x01}
-	upperBound := []byte{0x02}
+	lowerBound := []byte{prefix.Engram}
+	upperBound := []byte{prefix.Meta}
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: lowerBound,
@@ -204,8 +205,8 @@ func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id
 func (ps *PebbleStore) FindVaultPrefix(id ULID) ([8]byte, bool) {
 	// Build a scan: look for any key 0x01 | * | id(16)
 	// We scan the full 0x01 range and look for the id suffix.
-	lowerBound := []byte{0x01}
-	upperBound := []byte{0x02}
+	lowerBound := []byte{prefix.Engram}
+	upperBound := []byte{prefix.Meta}
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: lowerBound,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/provenance"
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
@@ -922,10 +923,10 @@ func (ps *PebbleStore) ScanEngrams(ctx context.Context, ws [8]byte, fn func(*Eng
 	}
 
 	lo := make([]byte, 9)
-	lo[0] = 0x01
+	lo[0] = prefix.Engram
 	copy(lo[1:], ws[:])
 	hi := make([]byte, 9)
-	hi[0] = 0x01
+	hi[0] = prefix.Engram
 	copy(hi[1:], wsNext[:])
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
@@ -936,10 +937,10 @@ func (ps *PebbleStore) ScanEngrams(ctx context.Context, ws [8]byte, fn func(*Eng
 
 	// Second iterator for 0x18 embedding keys — sorted by ws|id, same order as 0x01.
 	eLo := make([]byte, 9)
-	eLo[0] = 0x18
+	eLo[0] = prefix.Embedding
 	copy(eLo[1:], ws[:])
 	eHi := make([]byte, 9)
-	eHi[0] = 0x18
+	eHi[0] = prefix.Embedding
 	copy(eHi[1:], wsNext[:])
 
 	embedIter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: eLo, UpperBound: eHi})

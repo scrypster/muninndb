@@ -9,6 +9,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/oklog/ulid/v2"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
@@ -37,7 +38,7 @@ func (ps *PebbleStore) RecentActive(ctx context.Context, wsPrefix [8]byte, topK 
 	// Build upper bound: 0x10 | wsPrefix | 0xFF | {FF...}
 	// This keeps the scan within the wsPrefix namespace
 	upperBound := make([]byte, 1+8+1+16)
-	upperBound[0] = 0x10
+	upperBound[0] = prefix.RelevanceBucket
 	copy(upperBound[1:9], wsPrefix[:])
 	upperBound[9] = 0xFF
 	for i := 10; i < 26; i++ {
@@ -188,7 +189,7 @@ func (ps *PebbleStore) EngramsByCreatedSince(ctx context.Context, wsPrefix [8]by
 		}
 	}
 	upperKey := make([]byte, 1+8)
-	upperKey[0] = 0x01
+	upperKey[0] = prefix.Engram
 	copy(upperKey[1:9], upperWS[:])
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
@@ -241,8 +242,8 @@ func (ps *PebbleStore) EngramsByCreatedSince(ctx context.Context, wsPrefix [8]by
 // the 0x01 key prefix. Called once at startup to seed the in-memory counter.
 func (ps *PebbleStore) CountEngrams(ctx context.Context) (int64, error) {
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
-		LowerBound: []byte{0x01},
-		UpperBound: []byte{0x02},
+		LowerBound: []byte{prefix.Engram},
+		UpperBound: []byte{prefix.Meta},
 	})
 	if err != nil {
 		return 0, err
@@ -493,7 +494,7 @@ func (ps *PebbleStore) MigrateBuckets(ctx context.Context, wsPrefix [8]byte) err
 		}
 	}
 	upper := make([]byte, 1+8)
-	upper[0] = 0x02
+	upper[0] = prefix.Meta
 	copy(upper[1:9], upperWS[:])
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
@@ -522,7 +523,7 @@ func (ps *PebbleStore) MigrateBuckets(ctx context.Context, wsPrefix [8]byte) err
 		for _, e := range chunk {
 			// Delete the specific old-scheme bucket key
 			oldKey := make([]byte, 1+8+1+16)
-			oldKey[0] = 0x10
+			oldKey[0] = prefix.RelevanceBucket
 			copy(oldKey[1:9], wsPrefix[:])
 			oldKey[9] = e.oldBucket
 			copy(oldKey[10:26], e.id[:])
@@ -603,13 +604,13 @@ func (ps *PebbleStore) LowestRelevanceIDs(ctx context.Context, wsPrefix [8]byte,
 	// Build scan bounds: 0x10 | wsPrefix | [0x00..0xFF]
 	// Lower: 0x10 | wsPrefix | 0x00 | {0...}
 	lowerBound := make([]byte, 1+8+1+16)
-	lowerBound[0] = 0x10
+	lowerBound[0] = prefix.RelevanceBucket
 	copy(lowerBound[1:9], wsPrefix[:])
 	// bucket byte and id bytes remain 0x00 — minimum key in wsPrefix bucket space
 
 	// Upper: 0x10 | wsPrefix | 0xFF | {FF...}
 	upperBound := make([]byte, 1+8+1+16)
-	upperBound[0] = 0x10
+	upperBound[0] = prefix.RelevanceBucket
 	copy(upperBound[1:9], wsPrefix[:])
 	upperBound[9] = 0xFF
 	for i := 10; i < 26; i++ {

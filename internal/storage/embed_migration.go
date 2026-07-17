@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
@@ -31,10 +32,10 @@ func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) 
 
 	// Step 1: Range-delete all 0x18 embedding keys for this vault.
 	lo := make([]byte, 9)
-	lo[0] = 0x18
+	lo[0] = prefix.Embedding
 	copy(lo[1:], ws[:])
 	hi := make([]byte, 9)
-	hi[0] = 0x18
+	hi[0] = prefix.Embedding
 	copy(hi[1:], wsPlus[:])
 
 	if err := ps.db.DeleteRange(lo, hi, pebble.Sync); err != nil {
@@ -45,10 +46,10 @@ func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) 
 	// digest flag, clear bit 0x02, and write back. Skip engrams where the bit is
 	// already cleared.
 	engramLo := make([]byte, 9)
-	engramLo[0] = 0x01
+	engramLo[0] = prefix.Engram
 	copy(engramLo[1:], ws[:])
 	engramHi := make([]byte, 9)
-	engramHi[0] = 0x01
+	engramHi[0] = prefix.Engram
 	copy(engramHi[1:], wsPlus[:])
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
@@ -132,10 +133,10 @@ func (ps *PebbleStore) ClearHNSWForVault(ws [8]byte) error {
 	}
 
 	lo := make([]byte, 9)
-	lo[0] = 0x07
+	lo[0] = prefix.HNSWNode
 	copy(lo[1:], ws[:])
 	hi := make([]byte, 9)
-	hi[0] = 0x07
+	hi[0] = prefix.HNSWNode
 	copy(hi[1:], wsPlus[:])
 
 	if err := ps.db.DeleteRange(lo, hi, pebble.Sync); err != nil {
@@ -182,10 +183,10 @@ func (ps *PebbleStore) VaultEmbedDimOnDisk(ws [8]byte) (int, error) {
 	}
 
 	lo := make([]byte, 9)
-	lo[0] = 0x18
+	lo[0] = prefix.Embedding
 	copy(lo[1:], ws[:])
 	hi := make([]byte, 9)
-	hi[0] = 0x18
+	hi[0] = prefix.Embedding
 	copy(hi[1:], wsPlus[:])
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
