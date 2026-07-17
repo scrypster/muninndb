@@ -1,12 +1,14 @@
 package auth
 
+import "github.com/scrypster/muninndb/internal/prefix"
+
 const (
-	prefixAdminUser      byte = 0x11
-	prefixAPIKey         byte = 0x12
-	prefixAPIKeyVIdx     byte = 0x13
-	prefixVaultCfg       byte = 0x14
-	prefixCapability     byte = 0x40
-	prefixCapabilityVIdx byte = 0x41
+	prefixAdminUser      = prefix.AdminUser
+	prefixAPIKey         = prefix.APIKey
+	prefixAPIKeyVIdx     = prefix.APIKeyVaultIdx
+	prefixVaultCfg       = prefix.VaultConfig
+	prefixCapability     = prefix.Capability
+	prefixCapabilityVIdx = prefix.CapabilityVaultIdx
 )
 
 func adminUserKey(username string) []byte {

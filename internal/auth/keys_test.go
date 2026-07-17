@@ -8,12 +8,14 @@ import (
 // the 0x40/0x41 capability prefixes were relocated off storage's 0x15/0x16
 // keyspace (commit 0553a07). This test asserts the prefixes don't collide
 // with the storage layer's range (0x01–0x2A) or auth's own range
-// (0x11–0x14). Reverting 0x40→0x15 (or any value in either range) would
-// fail this test, catching the regression before it ships.
+// (0x42–0x45, relocated from 0x11–0x14 by #611). Reverting 0x40→0x15 (or
+// any value in either range) would fail this test, catching the regression
+// before it ships.
 //
 // The storage prefix range is sourced from the keys package; we hard-code
 // the known bounds here so this test stays in the auth package without an
 // import cycle. If storage extends past 0x2A, update storageMaxPrefix.
+// Task 5 will refine both ranges to source from prefix.All().
 func TestCapabilityPrefixesNoCollision(t *testing.T) {
 	// Known storage prefix bounds (internal/storage/keys/keys.go).
 	// As of this writing, the highest storage prefix is 0x2A (LeaseKey).
@@ -21,9 +23,9 @@ func TestCapabilityPrefixesNoCollision(t *testing.T) {
 	const storageMaxPrefix = 0x2A
 
 	// Auth's own non-capability prefixes (admin user, API key, API key vIdx,
-	// vault config).
-	const authOwnMin = 0x11
-	const authOwnMax = 0x14
+	// vault config) — relocated to 0x42–0x45 by #611.
+	const authOwnMin = 0x42
+	const authOwnMax = 0x45
 
 	capPrefixes := []struct {
 		name string
