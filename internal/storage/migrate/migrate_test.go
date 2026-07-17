@@ -167,6 +167,22 @@ func TestRunner_Idempotent(t *testing.T) {
 	}
 }
 
+func TestRunner_RefusesNewerThanKnown(t *testing.T) {
+	db := openTestDB(t)
+	// Simulate a DB written by a newer binary that registered migration v3.
+	if err := writeMigrationVersion(db, 3); err != nil {
+		t.Fatal(err)
+	}
+	// This (older) binary only knows about migrations v1 and v2.
+	r := NewRunner(db)
+	r.Register(Migration{Version: 1, Description: "v1", Up: func(*pebble.DB) error { return nil }})
+	r.Register(Migration{Version: 2, Description: "v2", Up: func(*pebble.DB) error { return nil }})
+
+	if _, err := r.Run(); err == nil {
+		t.Fatal("expected error when stored migration version (3) > max registered (2), got nil")
+	}
+}
+
 func TestRunner_OutOfOrder(t *testing.T) {
 	db := openTestDB(t)
 	r := NewRunner(db)

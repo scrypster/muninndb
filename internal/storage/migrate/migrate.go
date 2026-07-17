@@ -56,6 +56,28 @@ func (r *Runner) Run() (applied int, err error) {
 		return 0, fmt.Errorf("migrate: read version: %w", err)
 	}
 
+	// Downgrade guard: refuse to proceed if the DB's stored migration version
+	// is newer than the highest version this binary registered. Without this
+	// check, an older binary would silently no-op (every registered Version is
+	// <= current) and then misinterpret keys written by the newer schema — the
+	// silent-skip downgrade hazard (#611).
+	//
+	// This protects ALL future migrations at the migration layer. It does NOT
+	// cover the cluster rolling-upgrade window: a pre-upgrade replica that has
+	// not yet seen the refuse-newer check can still read relocated-key writes
+	// from a post-upgrade peer. That is an operational constraint documented
+	// in the PR; binary downgrade / mixed-version clusters must be handled
+	// out-of-band.
+	maxRegistered := 0
+	for _, m := range r.migrations {
+		if m.Version > maxRegistered {
+			maxRegistered = m.Version
+		}
+	}
+	if current > maxRegistered {
+		return 0, fmt.Errorf("migrate: stored migration version %d is newer than this binary knows (%d); refusing to start (downgrade not supported)", current, maxRegistered)
+	}
+
 	for _, m := range r.migrations {
 		if m.Version <= current {
 			continue
