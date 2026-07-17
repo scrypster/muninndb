@@ -8,6 +8,8 @@ import (
 
 	"github.com/dchest/siphash"
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/scrypster/muninndb/internal/prefix"
 )
 
 // SipHash keys for vault prefix computation
@@ -28,7 +30,7 @@ func VaultPrefix(vault string) [8]byte {
 // Key: 0x01 | wsPrefix(8) | ulid(16) = 25 bytes
 func EngramKey(ws [8]byte, id [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x01
+	key[0] = prefix.Engram
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
@@ -37,7 +39,7 @@ func EngramKey(ws [8]byte, id [16]byte) []byte {
 // MetaKey constructs the key for metadata-only record (0x02 prefix).
 func MetaKey(ws [8]byte, id [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x02
+	key[0] = prefix.Meta
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
@@ -46,7 +48,7 @@ func MetaKey(ws [8]byte, id [16]byte) []byte {
 // AssocFwdKey constructs the forward association key (0x03 prefix).
 func AssocFwdKey(ws [8]byte, src [16]byte, weight float32, dst [16]byte) []byte {
 	key := make([]byte, 1+8+16+4+16)
-	key[0] = 0x03
+	key[0] = prefix.AssocFwd
 	copy(key[1:9], ws[:])
 	copy(key[9:25], src[:])
 	wc := WeightComplement(weight)
@@ -58,7 +60,7 @@ func AssocFwdKey(ws [8]byte, src [16]byte, weight float32, dst [16]byte) []byte 
 // AssocRevKey constructs the reverse association key (0x04 prefix).
 func AssocRevKey(ws [8]byte, dst [16]byte, weight float32, src [16]byte) []byte {
 	key := make([]byte, 1+8+16+4+16)
-	key[0] = 0x04
+	key[0] = prefix.AssocRev
 	copy(key[1:9], ws[:])
 	copy(key[9:25], dst[:])
 	wc := WeightComplement(weight)
@@ -74,7 +76,7 @@ func AssocRevKey(ws [8]byte, dst [16]byte, weight float32, src [16]byte) []byte 
 func FTSPostingKey(ws [8]byte, term string, field uint8, id [16]byte) []byte {
 	termBytes := []byte(term)
 	key := make([]byte, 1+8+len(termBytes)+1+1+16)
-	key[0] = 0x05
+	key[0] = prefix.FTSPosting
 	copy(key[1:9], ws[:])
 	copy(key[9:9+len(termBytes)], termBytes)
 	key[9+len(termBytes)] = 0x00 // separator
@@ -86,7 +88,7 @@ func FTSPostingKey(ws [8]byte, term string, field uint8, id [16]byte) []byte {
 // TrigramKey constructs the trigram index key (0x06 prefix).
 func TrigramKey(ws [8]byte, trigram [3]byte, id [16]byte) []byte {
 	key := make([]byte, 1+8+3+16)
-	key[0] = 0x06
+	key[0] = prefix.Trigram
 	copy(key[1:9], ws[:])
 	copy(key[9:12], trigram[:])
 	copy(key[12:28], id[:])
@@ -96,7 +98,7 @@ func TrigramKey(ws [8]byte, trigram [3]byte, id [16]byte) []byte {
 // HNSWNodeKey constructs the HNSW node neighbor list key (0x07 prefix).
 func HNSWNodeKey(ws [8]byte, id [16]byte, layer uint8) []byte {
 	key := make([]byte, 1+8+16+1)
-	key[0] = 0x07
+	key[0] = prefix.HNSWNode
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	key[25] = layer
@@ -106,7 +108,7 @@ func HNSWNodeKey(ws [8]byte, id [16]byte, layer uint8) []byte {
 // FTSStatsKey constructs the global FTS stats key (0x08 prefix).
 func FTSStatsKey(ws [8]byte) []byte {
 	key := make([]byte, 1+8+5)
-	key[0] = 0x08
+	key[0] = prefix.FTSStats
 	copy(key[1:9], ws[:])
 	copy(key[9:14], []byte("stats"))
 	return key
@@ -116,7 +118,7 @@ func FTSStatsKey(ws [8]byte) []byte {
 func TermStatsKey(ws [8]byte, term string) []byte {
 	termBytes := []byte(term)
 	key := make([]byte, 1+8+len(termBytes))
-	key[0] = 0x09
+	key[0] = prefix.TermStats
 	copy(key[1:9], ws[:])
 	copy(key[9:], termBytes)
 	return key
@@ -125,7 +127,7 @@ func TermStatsKey(ws [8]byte, term string) []byte {
 // ContradictionKeyPrefix returns the 9-byte scan prefix for all contradictions in a vault.
 func ContradictionKeyPrefix(ws [8]byte) []byte {
 	key := make([]byte, 9)
-	key[0] = 0x0A
+	key[0] = prefix.Contradiction
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -133,7 +135,7 @@ func ContradictionKeyPrefix(ws [8]byte) []byte {
 // ContradictionKey constructs the contradiction index key (0x0A prefix).
 func ContradictionKey(ws [8]byte, conceptHash uint32, relType uint16, id [16]byte) []byte {
 	key := make([]byte, 1+8+4+2+16)
-	key[0] = 0x0A
+	key[0] = prefix.Contradiction
 	copy(key[1:9], ws[:])
 	binary.BigEndian.PutUint32(key[9:13], conceptHash)
 	binary.BigEndian.PutUint16(key[13:15], relType)
@@ -144,7 +146,7 @@ func ContradictionKey(ws [8]byte, conceptHash uint32, relType uint16, id [16]byt
 // StateIndexKey constructs the state secondary index key (0x0B prefix).
 func StateIndexKey(ws [8]byte, state uint8, id [16]byte) []byte {
 	key := make([]byte, 1+8+1+16)
-	key[0] = 0x0B
+	key[0] = prefix.StateIndex
 	copy(key[1:9], ws[:])
 	key[9] = state
 	copy(key[10:26], id[:])
@@ -154,7 +156,7 @@ func StateIndexKey(ws [8]byte, state uint8, id [16]byte) []byte {
 // TagIndexKey constructs the tag secondary index key (0x0C prefix).
 func TagIndexKey(ws [8]byte, tagHash uint32, id [16]byte) []byte {
 	key := make([]byte, 1+8+4+16)
-	key[0] = 0x0C
+	key[0] = prefix.TagIndex
 	copy(key[1:9], ws[:])
 	binary.BigEndian.PutUint32(key[9:13], tagHash)
 	copy(key[13:29], id[:])
@@ -164,7 +166,7 @@ func TagIndexKey(ws [8]byte, tagHash uint32, id [16]byte) []byte {
 // CreatorIndexKey constructs the creator secondary index key (0x0D prefix).
 func CreatorIndexKey(ws [8]byte, creatorHash uint32, id [16]byte) []byte {
 	key := make([]byte, 1+8+4+16)
-	key[0] = 0x0D
+	key[0] = prefix.CreatorIndex
 	copy(key[1:9], ws[:])
 	binary.BigEndian.PutUint32(key[9:13], creatorHash)
 	copy(key[13:29], id[:])
@@ -176,7 +178,7 @@ func CreatorIndexKey(ws [8]byte, creatorHash uint32, id [16]byte) []byte {
 // Key: 0x0E | wsPrefix(8) = 9 bytes
 func VaultMetaKey(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x0E
+	key[0] = prefix.VaultMeta
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -189,7 +191,7 @@ func VaultMetaKey(ws [8]byte) []byte {
 func VaultNameIndexKey(name string) []byte {
 	nameHash := siphash.Hash(sipKey0, sipKey1, []byte(name))
 	key := make([]byte, 1+8)
-	key[0] = 0x0F
+	key[0] = prefix.VaultNameIndex
 	binary.BigEndian.PutUint64(key[1:], nameHash)
 	return key
 }
@@ -200,7 +202,7 @@ func VaultNameIndexKey(name string) []byte {
 // Higher relevance values produce lower bucket numbers (sort first in ascending scan).
 func RelevanceBucketKey(ws [8]byte, relevance float32, id [16]byte) []byte {
 	key := make([]byte, 1+8+1+16)
-	key[0] = 0x10
+	key[0] = prefix.RelevanceBucket
 	copy(key[1:9], ws[:])
 
 	// Calculate storedBucket
@@ -227,7 +229,7 @@ func RelevanceBucketKey(ws [8]byte, relevance float32, id [16]byte) []byte {
 // Key: 0x11 | id(16) = 17 bytes (global — no vault scope needed since ULIDs are globally unique)
 func DigestFlagsKey(id [16]byte) []byte {
 	key := make([]byte, 1+16)
-	key[0] = 0x11
+	key[0] = prefix.DigestFlags
 	copy(key[1:17], id[:])
 	return key
 }
@@ -237,7 +239,7 @@ func DigestFlagsKey(id [16]byte) []byte {
 // Value layout: 56 bytes (7 × BigEndian int64)
 func CoherenceKey(vaultPrefix [8]byte) []byte {
 	key := make([]byte, 9)
-	key[0] = 0x12
+	key[0] = prefix.Coherence
 	copy(key[1:], vaultPrefix[:])
 	return key
 }
@@ -246,7 +248,7 @@ func CoherenceKey(vaultPrefix [8]byte) []byte {
 // Key: 0x13 | wsPrefix(8) = 9 bytes
 func VaultWeightsKey(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x13
+	key[0] = prefix.VaultWeights
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -257,7 +259,7 @@ func VaultWeightsKey(ws [8]byte) []byte {
 // Key: 0x14 | wsPrefix(8) | src(16) | dst(16) = 41 bytes
 func AssocWeightIndexKey(ws [8]byte, src [16]byte, dst [16]byte) []byte {
 	key := make([]byte, 1+8+16+16)
-	key[0] = 0x14
+	key[0] = prefix.AssocWeightIndex
 	copy(key[1:9], ws[:])
 	copy(key[9:25], src[:])
 	copy(key[25:41], dst[:])
@@ -268,7 +270,7 @@ func AssocWeightIndexKey(ws [8]byte, src [16]byte, dst [16]byte) []byte {
 // associations within a vault (0x03 prefix scan lower bound).
 func AssocFwdRangeStart(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x03
+	key[0] = prefix.AssocFwd
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -278,7 +280,7 @@ func AssocFwdRangeStart(ws [8]byte) []byte {
 // last byte, standard Pebble upper-bound idiom).
 func AssocFwdRangeEnd(ws [8]byte) []byte {
 	end := make([]byte, 1+8)
-	end[0] = 0x03
+	end[0] = prefix.AssocFwd
 	copy(end[1:9], ws[:])
 	// Increment the last byte of ws portion in the key to get exclusive upper bound.
 	for i := len(end) - 1; i >= 1; i-- {
@@ -294,7 +296,7 @@ func AssocFwdRangeEnd(ws [8]byte) []byte {
 // associations from a given source engram (0x03 | ws(8) | src(16)).
 func AssocFwdPrefixForID(ws [8]byte, id [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x03
+	key[0] = prefix.AssocFwd
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
@@ -305,7 +307,7 @@ func AssocFwdPrefixForID(ws [8]byte, id [16]byte) []byte {
 // (0x04 | ws(8) | dstID(16)).
 func AssocRevPrefixForID(ws [8]byte, id [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x04
+	key[0] = prefix.AssocRev
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
@@ -318,7 +320,7 @@ func AssocRevPrefixForID(ws [8]byte, id [16]byte) []byte {
 // 0x15 is the sole user of this prefix. EpisodeKey uses 0x1A.
 func VaultCountKey(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x15
+	key[0] = prefix.VaultCount
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -329,7 +331,7 @@ func VaultCountKey(ws [8]byte) []byte {
 // for a given engram.
 func ProvenanceKey(ws [8]byte, id [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x16
+	key[0] = prefix.Provenance
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
@@ -364,7 +366,7 @@ func ProvenanceKeyUpperBound(ws [8]byte, id [16]byte) []byte {
 // The BigEndian timestamp ensures chronological scan order.
 func ProvenanceSuffixKey(ws [8]byte, id [16]byte, ts uint64, seq uint32) []byte {
 	key := make([]byte, 1+8+16+8+4)
-	key[0] = 0x16
+	key[0] = prefix.Provenance
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	binary.BigEndian.PutUint64(key[25:33], ts)
@@ -376,7 +378,7 @@ func ProvenanceSuffixKey(ws [8]byte, id [16]byte, ts uint64, seq uint32) []byte 
 // Key: 0x1A | wsPrefix(8) | episodeID(16) = 25 bytes
 func EpisodeKey(ws [8]byte, id [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x1A
+	key[0] = prefix.Episode
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
@@ -386,7 +388,7 @@ func EpisodeKey(ws [8]byte, id [16]byte) []byte {
 // Key: 0x1A | wsPrefix(8) | episodeID(16) | 0xFF | position(4) = 30 bytes
 func EpisodeFrameKey(ws [8]byte, episodeID [16]byte, position uint32) []byte {
 	key := make([]byte, 1+8+16+1+4)
-	key[0] = 0x1A
+	key[0] = prefix.Episode
 	copy(key[1:9], ws[:])
 	copy(key[9:25], episodeID[:])
 	key[25] = 0xFF
@@ -399,7 +401,7 @@ func EpisodeFrameKey(ws [8]byte, episodeID [16]byte, position uint32) []byte {
 // Value: [version uint8][optional cursor [16]byte] — used by MigrateBuckets.
 func BucketMigrationKey(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x17
+	key[0] = prefix.BucketMigration
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -409,7 +411,7 @@ func BucketMigrationKey(ws [8]byte) []byte {
 // Key: 0x18 | wsPrefix(8) | ulid(16) = 25 bytes
 func EmbeddingKey(ws [8]byte, id [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x18
+	key[0] = prefix.Embedding
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
@@ -421,7 +423,7 @@ func EmbeddingKey(ws [8]byte, id [16]byte) []byte {
 // Once set to 1, dual-path query fallback is skipped (all tokens are stemmed).
 func FTSVersionKey(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x1B
+	key[0] = prefix.FTSVersion
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -430,7 +432,7 @@ func FTSVersionKey(ws [8]byte) []byte {
 // Key: 0x1C | wsPrefix(8) | srcID(16) | dstID(16) = 41 bytes
 func TransitionKey(ws [8]byte, src [16]byte, dst [16]byte) []byte {
 	key := make([]byte, 1+8+16+16)
-	key[0] = 0x1C
+	key[0] = prefix.Transition
 	copy(key[1:9], ws[:])
 	copy(key[9:25], src[:])
 	copy(key[25:41], dst[:])
@@ -441,7 +443,7 @@ func TransitionKey(ws [8]byte, src [16]byte, dst [16]byte) []byte {
 // targets from a given source engram (0x1C | ws(8) | src(16)).
 func TransitionPrefixForSrc(ws [8]byte, src [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x1C
+	key[0] = prefix.Transition
 	copy(key[1:9], ws[:])
 	copy(key[9:25], src[:])
 	return key
@@ -468,7 +470,7 @@ func WeightFromComplement(wc [4]byte) float32 {
 // Value: UTF-8 model name string. Empty/missing = not tracked.
 func EmbedModelKey(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x1D
+	key[0] = prefix.EmbedModel
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -478,7 +480,7 @@ func EmbedModelKey(ws [8]byte) []byte {
 // Key: 0x1E | wsPrefix(8) | parentID(16) | childID(16) = 41 bytes
 func OrdinalKey(ws [8]byte, parentID [16]byte, childID [16]byte) []byte {
 	key := make([]byte, 1+8+16+16)
-	key[0] = 0x1E
+	key[0] = prefix.Ordinal
 	copy(key[1:9], ws[:])
 	copy(key[9:25], parentID[:])
 	copy(key[25:41], childID[:])
@@ -490,7 +492,7 @@ func OrdinalKey(ws [8]byte, parentID [16]byte, childID [16]byte) []byte {
 // Used by ListChildOrdinals to scan all children of a parent.
 func OrdinalPrefixForParent(ws [8]byte, parentID [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x1E
+	key[0] = prefix.Ordinal
 	copy(key[1:9], ws[:])
 	copy(key[9:25], parentID[:])
 	return key
@@ -501,7 +503,7 @@ func OrdinalPrefixForParent(ws [8]byte, parentID [16]byte) []byte {
 // where the deleted engram is a child.
 func OrdinalWorkspacePrefix(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x1E
+	key[0] = prefix.Ordinal
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -551,7 +553,7 @@ func EntityNameHash(name string) [8]byte {
 // Key: 0x1F | nameHash(8) = 9 bytes
 func EntityKey(nameHash [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x1F
+	key[0] = prefix.Entity
 	copy(key[1:9], nameHash[:])
 	return key
 }
@@ -560,7 +562,7 @@ func EntityKey(nameHash [8]byte) []byte {
 // Key: 0x20 | wsPrefix(8) | engramID(16) | nameHash(8) = 33 bytes
 func EntityEngramLinkKey(ws [8]byte, engramID [16]byte, nameHash [8]byte) []byte {
 	key := make([]byte, 1+8+16+8)
-	key[0] = 0x20
+	key[0] = prefix.EntityEngramLink
 	copy(key[1:9], ws[:])
 	copy(key[9:25], engramID[:])
 	copy(key[25:33], nameHash[:])
@@ -571,7 +573,7 @@ func EntityEngramLinkKey(ws [8]byte, engramID [16]byte, nameHash [8]byte) []byte
 // from a given engram (0x20 | ws(8) | engramID(16)).
 func EntityEngramLinkPrefix(ws [8]byte, engramID [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x20
+	key[0] = prefix.EntityEngramLink
 	copy(key[1:9], ws[:])
 	copy(key[9:25], engramID[:])
 	return key
@@ -581,7 +583,7 @@ func EntityEngramLinkPrefix(ws [8]byte, engramID [16]byte) []byte {
 // Key: 0x21 | ws(8) | engramID(16) | fromNameHash(8) | relTypeByte(1) | toNameHash(8) = 42 bytes
 func RelationshipKey(ws [8]byte, engramID [16]byte, fromHash [8]byte, relTypeByte uint8, toHash [8]byte) []byte {
 	key := make([]byte, 1+8+16+8+1+8)
-	key[0] = 0x21
+	key[0] = prefix.Relationship
 	copy(key[1:9], ws[:])
 	copy(key[9:25], engramID[:])
 	copy(key[25:33], fromHash[:])
@@ -594,7 +596,7 @@ func RelationshipKey(ws [8]byte, engramID [16]byte, fromHash [8]byte, relTypeByt
 // in a given vault (0x21 | wsPrefix(8)).
 func RelationshipPrefix(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x21
+	key[0] = prefix.Relationship
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -603,7 +605,7 @@ func RelationshipPrefix(ws [8]byte) []byte {
 // records sourced from a specific engram (0x21 | ws(8) | engramID(16)).
 func RelationshipEngramPrefix(ws [8]byte, engramID [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x21
+	key[0] = prefix.Relationship
 	copy(key[1:9], ws[:])
 	copy(key[9:25], engramID[:])
 	return key
@@ -616,7 +618,7 @@ func RelationshipEngramPrefix(ws [8]byte, engramID [16]byte) []byte {
 // Value: msgpack(coOccurrenceRecord{NameA, NameB, Count uint32}).
 func CoOccurrenceKey(ws [8]byte, hashA, hashB [8]byte) []byte {
 	key := make([]byte, 1+8+8+8)
-	key[0] = 0x24
+	key[0] = prefix.CoOccurrence
 	copy(key[1:9], ws[:])
 	copy(key[9:17], hashA[:])
 	copy(key[17:25], hashB[:])
@@ -627,7 +629,7 @@ func CoOccurrenceKey(ws [8]byte, hashA, hashB [8]byte) []byte {
 // in a given vault (0x24 | wsPrefix(8)).
 func CoOccurrencePrefix(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x24
+	key[0] = prefix.CoOccurrence
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -638,7 +640,7 @@ func CoOccurrencePrefix(ws [8]byte) []byte {
 // Value: empty (all data is encoded in the key).
 func EntityReverseIndexKey(nameHash [8]byte, ws [8]byte, engramID [16]byte) []byte {
 	key := make([]byte, 1+8+8+16)
-	key[0] = 0x23
+	key[0] = prefix.EntityReverseIndex
 	copy(key[1:9], nameHash[:])
 	copy(key[9:17], ws[:])
 	copy(key[17:33], engramID[:])
@@ -649,7 +651,7 @@ func EntityReverseIndexKey(nameHash [8]byte, ws [8]byte, engramID [16]byte) []by
 // that mention a given entity (0x23 | nameHash(8)).
 func EntityReverseIndexPrefix(nameHash [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x23
+	key[0] = prefix.EntityReverseIndex
 	copy(key[1:9], nameHash[:])
 	return key
 }
@@ -661,7 +663,7 @@ func EntityReverseIndexPrefix(nameHash [8]byte) []byte {
 // Value: empty (all data is in the key).
 func LastAccessIndexKey(ws [8]byte, lastAccessMillis int64, engramID [16]byte) []byte {
 	key := make([]byte, 1+8+8+16)
-	key[0] = 0x22
+	key[0] = prefix.LastAccess
 	copy(key[1:9], ws[:])
 	inverted := ^uint64(lastAccessMillis)
 	binary.BigEndian.PutUint64(key[9:17], inverted)
@@ -673,7 +675,7 @@ func LastAccessIndexKey(ws [8]byte, lastAccessMillis int64, engramID [16]byte) [
 // entries in a vault (0x22 | ws(8)). Ascending scan yields most-recently-accessed first.
 func LastAccessIndexPrefix(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x22
+	key[0] = prefix.LastAccess
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -685,7 +687,7 @@ func LastAccessIndexPrefix(ws [8]byte) []byte {
 func IdempotencyKey(opID string) []byte {
 	hashVal := siphash.Hash(sipKey0, sipKey1, []byte(opID))
 	key := make([]byte, 1+8)
-	key[0] = 0x19
+	key[0] = prefix.Idempotency
 	binary.BigEndian.PutUint64(key[1:], hashVal)
 	return key
 }
@@ -697,7 +699,7 @@ func IdempotencyKey(opID string) []byte {
 // Value: empty (all data is encoded in the key).
 func RelEntityIndexKey(ws [8]byte, entityHash [8]byte, engramID [16]byte) []byte {
 	key := make([]byte, 1+8+8+16)
-	key[0] = 0x26
+	key[0] = prefix.RelEntityIndex
 	copy(key[1:9], ws[:])
 	copy(key[9:17], entityHash[:])
 	copy(key[17:33], engramID[:])
@@ -708,7 +710,7 @@ func RelEntityIndexKey(ws [8]byte, entityHash [8]byte, engramID [16]byte) []byte
 // engrams for a given entity in a vault (0x26 | ws(8) | entityHash(8)).
 func RelEntityIndexPrefix(ws [8]byte, entityHash [8]byte) []byte {
 	key := make([]byte, 1+8+8)
-	key[0] = 0x26
+	key[0] = prefix.RelEntityIndex
 	copy(key[1:9], ws[:])
 	copy(key[9:17], entityHash[:])
 	return key
@@ -720,7 +722,7 @@ func RelEntityIndexPrefix(ws [8]byte, entityHash [8]byte) []byte {
 // Key: 0x25 | wsPrefix(8) | src(16) | dst(16) = 41 bytes
 func ArchiveAssocKey(ws [8]byte, src [16]byte, dst [16]byte) []byte {
 	key := make([]byte, 1+8+16+16)
-	key[0] = 0x25
+	key[0] = prefix.ArchiveAssoc
 	copy(key[1:9], ws[:])
 	copy(key[9:25], src[:])
 	copy(key[25:41], dst[:])
@@ -731,7 +733,7 @@ func ArchiveAssocKey(ws [8]byte, src [16]byte, dst [16]byte) []byte {
 // associations from a given source engram (0x25 | ws(8) | src(16)).
 func ArchiveAssocPrefixForID(ws [8]byte, src [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x25
+	key[0] = prefix.ArchiveAssoc
 	copy(key[1:9], ws[:])
 	copy(key[9:25], src[:])
 	return key
@@ -741,7 +743,7 @@ func ArchiveAssocPrefixForID(ws [8]byte, src [16]byte) []byte {
 // archived associations within a vault (0x25 | ws(8)).
 func ArchiveAssocRangeStart(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
-	key[0] = 0x25
+	key[0] = prefix.ArchiveAssoc
 	copy(key[1:9], ws[:])
 	return key
 }
@@ -750,7 +752,7 @@ func ArchiveAssocRangeStart(ws [8]byte) []byte {
 // archived associations within a vault. Increments the ws portion.
 func ArchiveAssocRangeEnd(ws [8]byte) []byte {
 	end := make([]byte, 1+8)
-	end[0] = 0x25
+	end[0] = prefix.ArchiveAssoc
 	copy(end[1:9], ws[:])
 	for i := len(end) - 1; i >= 1; i-- {
 		end[i]++
@@ -766,7 +768,7 @@ func ArchiveAssocRangeEnd(ws [8]byte) []byte {
 // Value layout: 16 bytes (last_dream_at int64 + engrams_at_dream int64, BigEndian)
 func DreamStateKey(vaultPrefix [8]byte) []byte {
 	key := make([]byte, 9)
-	key[0] = 0x27
+	key[0] = prefix.DreamState
 	copy(key[1:], vaultPrefix[:])
 	return key
 }
@@ -778,7 +780,7 @@ func DreamStateKey(vaultPrefix [8]byte) []byte {
 // Value: engramID(16) bytes
 func ContentHashKey(ws [8]byte, hash [32]byte) []byte {
 	key := make([]byte, 1+8+32)
-	key[0] = 0x28
+	key[0] = prefix.ContentHash
 	copy(key[1:9], ws[:])
 	copy(key[9:41], hash[:])
 	return key
@@ -791,7 +793,7 @@ func ContentHashKey(ws [8]byte, hash [32]byte) []byte {
 // Value: JSON-encoded lease {owner, heartbeat, ttl}.
 func LeaseKey(ws [8]byte, id [16]byte) []byte {
 	key := make([]byte, 1+8+16)
-	key[0] = 0x2A
+	key[0] = prefix.Lease
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key

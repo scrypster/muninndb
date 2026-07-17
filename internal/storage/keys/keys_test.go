@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/scrypster/muninndb/internal/prefix"
 )
 
 func TestKeyPrefixesAreUnique(t *testing.T) {
@@ -315,5 +317,92 @@ func TestArchiveAssocPrefixForID_Length(t *testing.T) {
 	}
 	if prefix[0] != 0x25 {
 		t.Errorf("prefix byte: got 0x%02X, want 0x25", prefix[0])
+	}
+}
+
+// TestKeyConstructors_UseRegistryBytes [RT-FIX RT8] asserts every key and
+// range-bound constructor sources its first byte from the prefix registry.
+// TestKeyPrefixesAreUnique only checks uniqueness — a two-pair byte swap would
+// slip past it. This test pins the byte↔name mapping so the literal→const
+// refactor is provably behavior-noop.
+func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
+	var ws [8]byte
+	var id16 [16]byte
+	var id32 [32]byte
+	var u8 [8]byte
+	var tri [3]byte
+
+	cases := []struct {
+		name string
+		got  byte
+		want byte
+	}{
+		{"Engram", EngramKey(ws, id16)[0], prefix.Engram},
+		{"Meta", MetaKey(ws, id16)[0], prefix.Meta},
+		{"AssocFwd", AssocFwdKey(ws, id16, 0, id16)[0], prefix.AssocFwd},
+		{"AssocRev", AssocRevKey(ws, id16, 0, id16)[0], prefix.AssocRev},
+		{"FTSPosting", FTSPostingKey(ws, "", 0, id16)[0], prefix.FTSPosting},
+		{"Trigram", TrigramKey(ws, tri, id16)[0], prefix.Trigram},
+		{"HNSWNode", HNSWNodeKey(ws, id16, 0)[0], prefix.HNSWNode},
+		{"FTSStats", FTSStatsKey(ws)[0], prefix.FTSStats},
+		{"TermStats", TermStatsKey(ws, "")[0], prefix.TermStats},
+		{"ContradictionKeyPrefix", ContradictionKeyPrefix(ws)[0], prefix.Contradiction},
+		{"ContradictionKey", ContradictionKey(ws, 0, 0, id16)[0], prefix.Contradiction},
+		{"StateIndex", StateIndexKey(ws, 0, id16)[0], prefix.StateIndex},
+		{"TagIndex", TagIndexKey(ws, 0, id16)[0], prefix.TagIndex},
+		{"CreatorIndex", CreatorIndexKey(ws, 0, id16)[0], prefix.CreatorIndex},
+		{"VaultMeta", VaultMetaKey(ws)[0], prefix.VaultMeta},
+		{"VaultNameIndex", VaultNameIndexKey("")[0], prefix.VaultNameIndex},
+		{"RelevanceBucket", RelevanceBucketKey(ws, 0, id16)[0], prefix.RelevanceBucket},
+		{"DigestFlags", DigestFlagsKey(id16)[0], prefix.DigestFlags},
+		{"Coherence", CoherenceKey(u8)[0], prefix.Coherence},
+		{"VaultWeights", VaultWeightsKey(ws)[0], prefix.VaultWeights},
+		{"AssocWeightIndex", AssocWeightIndexKey(ws, id16, id16)[0], prefix.AssocWeightIndex},
+		{"AssocFwdRangeStart", AssocFwdRangeStart(ws)[0], prefix.AssocFwd},
+		{"AssocFwdRangeEnd", AssocFwdRangeEnd(ws)[0], prefix.AssocFwd},
+		{"AssocFwdPrefixForID", AssocFwdPrefixForID(ws, id16)[0], prefix.AssocFwd},
+		{"AssocRevPrefixForID", AssocRevPrefixForID(ws, id16)[0], prefix.AssocRev},
+		{"VaultCount", VaultCountKey(ws)[0], prefix.VaultCount},
+		{"Provenance", ProvenanceKey(ws, id16)[0], prefix.Provenance},
+		{"ProvenanceKeyUpperBound", ProvenanceKeyUpperBound(ws, id16)[0], prefix.Provenance},
+		{"ProvenanceSuffix", ProvenanceSuffixKey(ws, id16, 0, 0)[0], prefix.Provenance},
+		{"Episode", EpisodeKey(ws, id16)[0], prefix.Episode},
+		{"EpisodeFrame", EpisodeFrameKey(ws, id16, 0)[0], prefix.Episode},
+		{"BucketMigration", BucketMigrationKey(ws)[0], prefix.BucketMigration},
+		{"Embedding", EmbeddingKey(ws, id16)[0], prefix.Embedding},
+		{"Idempotency", IdempotencyKey("")[0], prefix.Idempotency},
+		{"FTSVersion", FTSVersionKey(ws)[0], prefix.FTSVersion},
+		{"Transition", TransitionKey(ws, id16, id16)[0], prefix.Transition},
+		{"TransitionPrefixForSrc", TransitionPrefixForSrc(ws, id16)[0], prefix.Transition},
+		{"EmbedModel", EmbedModelKey(ws)[0], prefix.EmbedModel},
+		{"Ordinal", OrdinalKey(ws, id16, id16)[0], prefix.Ordinal},
+		{"OrdinalPrefixForParent", OrdinalPrefixForParent(ws, id16)[0], prefix.Ordinal},
+		{"OrdinalWorkspacePrefix", OrdinalWorkspacePrefix(ws)[0], prefix.Ordinal},
+		{"Entity", EntityKey(u8)[0], prefix.Entity},
+		{"EntityEngramLink", EntityEngramLinkKey(ws, id16, u8)[0], prefix.EntityEngramLink},
+		{"EntityEngramLinkPrefix", EntityEngramLinkPrefix(ws, id16)[0], prefix.EntityEngramLink},
+		{"Relationship", RelationshipKey(ws, id16, u8, 0, u8)[0], prefix.Relationship},
+		{"RelationshipPrefix", RelationshipPrefix(ws)[0], prefix.Relationship},
+		{"RelationshipEngramPrefix", RelationshipEngramPrefix(ws, id16)[0], prefix.Relationship},
+		{"CoOccurrence", CoOccurrenceKey(ws, u8, u8)[0], prefix.CoOccurrence},
+		{"CoOccurrencePrefix", CoOccurrencePrefix(ws)[0], prefix.CoOccurrence},
+		{"EntityReverseIndex", EntityReverseIndexKey(u8, ws, id16)[0], prefix.EntityReverseIndex},
+		{"EntityReverseIndexPrefix", EntityReverseIndexPrefix(u8)[0], prefix.EntityReverseIndex},
+		{"LastAccessIndex", LastAccessIndexKey(ws, 0, id16)[0], prefix.LastAccess},
+		{"LastAccessIndexPrefix", LastAccessIndexPrefix(ws)[0], prefix.LastAccess},
+		{"RelEntityIndex", RelEntityIndexKey(ws, u8, id16)[0], prefix.RelEntityIndex},
+		{"RelEntityIndexPrefix", RelEntityIndexPrefix(ws, u8)[0], prefix.RelEntityIndex},
+		{"ArchiveAssoc", ArchiveAssocKey(ws, id16, id16)[0], prefix.ArchiveAssoc},
+		{"ArchiveAssocPrefixForID", ArchiveAssocPrefixForID(ws, id16)[0], prefix.ArchiveAssoc},
+		{"ArchiveAssocRangeStart", ArchiveAssocRangeStart(ws)[0], prefix.ArchiveAssoc},
+		{"ArchiveAssocRangeEnd", ArchiveAssocRangeEnd(ws)[0], prefix.ArchiveAssoc},
+		{"DreamState", DreamStateKey(u8)[0], prefix.DreamState},
+		{"ContentHash", ContentHashKey(ws, id32)[0], prefix.ContentHash},
+		{"Lease", LeaseKey(ws, id16)[0], prefix.Lease},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s: got 0x%02x want 0x%02x", c.name, c.got, c.want)
+		}
 	}
 }
