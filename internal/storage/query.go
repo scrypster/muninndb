@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -340,8 +341,13 @@ func (ps *PebbleStore) ListByStateInRange(ctx context.Context, wsPrefix [8]byte,
 	return ids, nil
 }
 
-// ListByTagInRange returns engram IDs with the given tag created between since and until.
-// Leverages ULID time-ordering in the tag index for an O(results) scan.
+// ListByTagInRange returns engram IDs with the given tag created between since and until,
+// newest-first. Leverages ULID time-ordering in the tag index for an O(results) scan.
+//
+// Iteration runs Last->Prev (descending ULID order) so that when the result is
+// truncated at limit, the entries sacrificed are the OLDEST, not the newest.
+// This matters for the activation pipeline's tag-candidate seeding: a truncated
+// scan must retain the most recent matches, which are the likeliest recall hits.
 func (ps *PebbleStore) ListByTagInRange(ctx context.Context, wsPrefix [8]byte, tag string, since, until time.Time, limit int) ([]ULID, error) {
 	if limit <= 0 {
 		limit = 50
@@ -359,7 +365,7 @@ func (ps *PebbleStore) ListByTagInRange(ctx context.Context, wsPrefix [8]byte, t
 	const idOffset = 13 // 0x0C(1) + ws(8) + tagHash(4) = 13
 	const keyLen = 29
 	var ids []ULID
-	for valid := iter.First(); valid && len(ids) < limit; valid = iter.Next() {
+	for valid := iter.Last(); valid && len(ids) < limit; valid = iter.Prev() {
 		k := iter.Key()
 		if len(k) < keyLen {
 			continue
@@ -368,7 +374,173 @@ func (ps *PebbleStore) ListByTagInRange(ctx context.Context, wsPrefix [8]byte, t
 		copy(id[:], k[idOffset:idOffset+16])
 		ids = append(ids, id)
 	}
+	// Surface any iteration error rather than silently returning a partial scan.
+	if err := iter.Error(); err != nil {
+		return nil, err
+	}
 	return ids, nil
+}
+
+// dedupeStrings returns items with duplicates removed, preserving first-seen
+// order. Returns the input unchanged when there is nothing to dedupe, and never
+// mutates the caller's backing array otherwise.
+func dedupeStrings(items []string) []string {
+	if len(items) < 2 {
+		return items
+	}
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	for _, s := range items {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// ListByTagsAllInRange returns engram IDs carrying EVERY tag in tags, created
+// within [since, until], newest-first, capped at limit.
+//
+// It runs a K-way sorted-stream intersection directly over the tag index. Each
+// tag's 0x0C index is ULID-time-ordered, so one bounded iterator per tag walks
+// its members newest-first (Last->Prev); the classic descending-merge advances
+// whichever streams are ahead of the trailing head until all heads agree, emits
+// the shared ID, and advances all. Because the intersection happens DURING the
+// scan, limit bounds the OUTPUT (the newest matches), never the per-stream input
+// windows — so an arbitrary number of single-tag decoys costs iterator steps,
+// not correctness. Truncation at limit deterministically sacrifices the OLDEST
+// true positives (newest-first order).
+//
+// The index keys the ULID under Hash(tag) (4-byte), so a hash collision can let a
+// non-matching engram pass this hash-level intersection; callers that need exact
+// tag semantics (e.g. the activation post-filter) remain the correctness gate.
+//
+// An empty tags slice returns nil; a single (or all-duplicate) tag delegates to
+// ListByTagInRange. Duplicate tag values are collapsed first so a repeated tag
+// never opens a redundant iterator over the same stream.
+func (ps *PebbleStore) ListByTagsAllInRange(ctx context.Context, wsPrefix [8]byte, tags []string, since, until time.Time, limit int) ([]ULID, error) {
+	tags = dedupeStrings(tags)
+	if len(tags) == 0 {
+		return nil, nil
+	}
+	if len(tags) == 1 {
+		return ps.ListByTagInRange(ctx, wsPrefix, tags[0], since, until, limit)
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	minID := ulidMinFromTime(since)
+	maxID := ulidMaxFromTime(until)
+
+	const idOffset = 13 // 0x0C(1) + ws(8) + tagHash(4) = 13
+	const keyLen = 29
+
+	// Open one bounded, newest-first iterator per distinct tag.
+	iters := make([]*pebble.Iterator, 0, len(tags))
+	defer func() {
+		for _, it := range iters {
+			it.Close()
+		}
+	}()
+	for _, tag := range tags {
+		tagHash := keys.Hash(tag)
+		lower := keys.TagIndexKey(wsPrefix, tagHash, minID)
+		upper := keys.TagIndexKey(wsPrefix, tagHash, maxID)
+		it, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+		if err != nil {
+			return nil, err
+		}
+		iters = append(iters, it)
+	}
+
+	// head returns the current ULID at an iterator, or reports invalid.
+	head := func(it *pebble.Iterator) (ULID, bool) {
+		if !it.Valid() {
+			return ULID{}, false
+		}
+		k := it.Key()
+		if len(k) < keyLen {
+			return ULID{}, false
+		}
+		var id ULID
+		copy(id[:], k[idOffset:idOffset+16])
+		return id, true
+	}
+
+	// checkErrs surfaces any accumulated iterator error. A stream going invalid
+	// means exhaustion (Error()==nil) OR a genuine read fault; only the latter is
+	// an error, so this is checked before returning any success result.
+	checkErrs := func() error {
+		for _, it := range iters {
+			if err := it.Error(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Position every stream at its greatest (newest) in-range ULID.
+	for _, it := range iters {
+		if !it.Last() {
+			// Empty stream (or read fault) -> intersection is empty.
+			if err := checkErrs(); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
+	}
+
+	var out []ULID
+	for len(out) < limit {
+		// Collect current heads; a single exhausted stream ends the intersection.
+		heads := make([]ULID, len(iters))
+		minIdx, maxIdx := 0, 0
+		exhausted := false
+		for i, it := range iters {
+			h, ok := head(it)
+			if !ok {
+				exhausted = true
+				break
+			}
+			heads[i] = h
+			if bytes.Compare(h[:], heads[minIdx][:]) < 0 {
+				minIdx = i
+			}
+			if bytes.Compare(h[:], heads[maxIdx][:]) > 0 {
+				maxIdx = i
+			}
+		}
+		if exhausted {
+			break
+		}
+
+		if heads[minIdx] == heads[maxIdx] {
+			// All heads agree: emit and advance every stream one step (Prev).
+			out = append(out, heads[minIdx])
+			for _, it := range iters {
+				it.Prev()
+			}
+			continue
+		}
+
+		// Advance every stream whose head is strictly greater than the trailing
+		// (minimum) head: those values are too large to ever match the trailing
+		// stream and must descend toward it.
+		minHead := heads[minIdx]
+		for i, it := range iters {
+			if bytes.Compare(heads[i][:], minHead[:]) > 0 {
+				it.Prev()
+			}
+		}
+	}
+	// Surface any iteration error rather than silently returning a partial scan.
+	if err := checkErrs(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ListByCreatorInRange returns engram IDs by creator created between since and until.
