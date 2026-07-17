@@ -472,6 +472,20 @@ func (s *MCPServer) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Re-validate mk_ API keys too (issue #615): same confused-deputy shape as
+	// the cap_ branch above. A revoked mk_ key whose AuthContext was cached at
+	// SSE-open would otherwise keep dispatching on sess.auth until the session
+	// times out. auth.Store.ValidateAPIKey fails-closed on a revoked (deleted)
+	// key, so this is the mk_ analogue of the cap_ re-validation added for #612.
+	if sess.auth.IsAPIKey && s.authKeys != nil {
+		if _, err := s.authKeys.ValidateAPIKey(sess.auth.Token); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32001,"message":"session credential no longer valid (expired or revoked)"}}`))
+			return
+		}
+	}
+
 	// Thread the auth context established at SSE stream open time into the request.
 	// The session auth is authoritative for vault pinning and mode enforcement;
 	// the POST auth check above ensures the caller is still authenticated.

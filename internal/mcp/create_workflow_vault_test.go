@@ -392,3 +392,47 @@ func TestCreateWorkflowVault_RejectsExistingVault(t *testing.T) {
 	w := doAuthenticatedPost(srv, mkToken, body)
 	assertRPCError(t, w, -32602, "vault already exists: wf-taken")
 }
+
+// TestSSEMessage_APIKeyRevokedMidSession_RejectedOnPost (issue #615): the mk_
+// analogue of TestSSEMessage_CapRevokedMidSession_RejectedOnPost. Opens an SSE
+// session with a valid full-mode mk_ key, revokes it mid-session, then POSTs
+// WITHOUT re-sending the bearer. On a server with no static token, the POST
+// falls through authFromRequest to open-server mode; without Fix #615 the cached
+// sess.auth (IsAPIKey) keeps dispatching on the revoked key. With the IsAPIKey
+// re-validation block, ValidateAPIKey catches the revocation → 401.
+func TestSSEMessage_APIKeyRevokedMidSession_RejectedOnPost(t *testing.T) {
+	store := newWorkflowTestStore(t)
+	mkToken, key, err := store.GenerateAPIKey("wf-mk", "worker", auth.ModeFull, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No static token; authKeys + capKeys both wired to the store.
+	srv := New(":0", &fakeEngine{}, "", store, store, nil)
+	srv.agentVaultCreate = true
+
+	// Open SSE session with the mk_ token (valid at open time).
+	srv.sseSessionsMu.Lock()
+	srv.sseSessions["sess-mk-revoke"] = &sseSession{
+		ch:   make(chan []byte, 4),
+		auth: AuthContext{Token: mkToken, Authorized: true, Vault: "wf-mk", Mode: auth.ModeFull, IsAPIKey: true},
+	}
+	srv.sseSessionsMu.Unlock()
+
+	// Revoke the mk_ key mid-session. RevokeAPIKey deletes the record, so
+	// ValidateAPIKey then returns an error for the token.
+	if err := store.RevokeAPIKey("wf-mk", key.ID); err != nil {
+		t.Fatalf("revoke api key: %v", err)
+	}
+
+	// POST without Authorization header — bearer sent only on the GET.
+	body := mkToolCallBody("muninn_recall", map[string]any{"context": []string{"x"}})
+	r := httptest.NewRequest(http.MethodPost, "/mcp/message?sessionId=sess-mk-revoke", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSSEMessage(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 after mk_ revoked mid-session (POST without bearer), got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
