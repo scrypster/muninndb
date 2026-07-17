@@ -215,6 +215,16 @@ type ActivationStore interface {
 	// Returns 0 if not in cache; callers fall back to eng.LastAccess.
 	EngramLastAccessNs(wsPrefix [8]byte, id storage.ULID) int64
 	EngramIDsByCreatedRange(ctx context.Context, wsPrefix [8]byte, since, until time.Time, limit int) ([]storage.ULID, error)
+	// ListByTagInRange returns engram IDs carrying tag, created within [since, until],
+	// newest-first (see storage.PebbleStore.ListByTagInRange). Used for tag-scoped
+	// candidate seeding so tag-filtered recall does not miss engrams absent from the
+	// FTS/HNSW/decay pools.
+	ListByTagInRange(ctx context.Context, wsPrefix [8]byte, tag string, since, until time.Time, limit int) ([]storage.ULID, error)
+	// ListByTagsAllInRange returns engram IDs carrying EVERY tag, created within
+	// [since, until], newest-first, via a K-way stream intersection so that limit
+	// bounds the intersection OUTPUT and never truncates a per-tag input window
+	// (see storage.PebbleStore.ListByTagsAllInRange). Used for tags_all seeding.
+	ListByTagsAllInRange(ctx context.Context, wsPrefix [8]byte, tags []string, since, until time.Time, limit int) ([]storage.ULID, error)
 	// RestoreArchivedEdgesTransitive lazily restores archived edges for src and
 	// its direct neighbors, returning the set of restored destination IDs.
 	RestoreArchivedEdgesTransitive(ctx context.Context, wsPrefix [8]byte, src storage.ULID, maxDirect int, maxTransitive int) ([]storage.ULID, error)
@@ -559,6 +569,7 @@ type candidateSets struct {
 	vector     []ScoredID
 	decay      []storage.ULID
 	time       []storage.ULID // from time-bounded range scan when since/before filters present
+	tag        []storage.ULID // from tag-index scan when tags_all/tags_any filters present
 	transition []storage.ULID // PAS: transition-predicted candidates from previous activation
 }
 
@@ -586,6 +597,69 @@ func extractTimeBounds(filters []Filter) (time.Time, time.Time, bool) {
 	return since, before, hasBounds
 }
 
+// extractTagFilters extracts tags_all/tags_any tag lists from the filter list.
+// Values are coerced with asStringSlice, matching passesMetaFilter's own
+// interpretation of these fields.
+func extractTagFilters(filters []Filter) (tagsAll, tagsAny []string) {
+	for _, f := range filters {
+		switch f.Field {
+		case "tags_all":
+			tagsAll = append(tagsAll, asStringSlice(f.Value)...)
+		case "tags_any":
+			tagsAny = append(tagsAny, asStringSlice(f.Value)...)
+		}
+	}
+	return tagsAll, tagsAny
+}
+
+// seedTagCandidates queries the tag index for the requested tags and returns a
+// deduped candidate set within [since, until], newest-first per tag.
+//
+//   - tags_all: a K-way stream intersection over the tag index
+//     (ListByTagsAllInRange), so limit bounds the intersection OUTPUT and never
+//     truncates a per-tag input window — a true positive is found even when every
+//     per-tag newest-first window is full of single-tag decoys.
+//   - tags_any: union of the per-tag newest-first scans (ListByTagInRange).
+//   - both present: union of the tags_all intersection and the tags_any union.
+//
+// The tag index stores Hash(tag) (4-byte), so a seeded ID can be a hash-collision
+// false positive; passesMetaFilter in phase 6 remains the correctness gate.
+func (e *ActivationEngine) seedTagCandidates(ctx context.Context, ws [8]byte, tagsAll, tagsAny []string, since, until time.Time, limit int) []storage.ULID {
+	seen := make(map[storage.ULID]struct{})
+	var seed []storage.ULID
+	add := func(ids []storage.ULID) {
+		for _, id := range ids {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			seed = append(seed, id)
+		}
+	}
+
+	if len(tagsAll) > 0 {
+		// ListByTagsAllInRange collapses duplicate tags itself, so tagsAll needs no
+		// dedupe here.
+		if ids, err := e.store.ListByTagsAllInRange(ctx, ws, tagsAll, since, until, limit); err == nil {
+			add(ids)
+		}
+	}
+
+	// Dedupe tags_any so a repeated tag does not trigger a redundant index scan.
+	seenTag := make(map[string]struct{}, len(tagsAny))
+	for _, tag := range tagsAny {
+		if _, ok := seenTag[tag]; ok {
+			continue
+		}
+		seenTag[tag] = struct{}{}
+		if ids, err := e.store.ListByTagInRange(ctx, ws, tag, since, until, limit); err == nil {
+			add(ids)
+		}
+	}
+
+	return seed
+}
+
 func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 *phase1Result, ws [8]byte) (*candidateSets, error) {
 	var sets candidateSets
 	k := req.CandidatesPerIndex
@@ -595,6 +669,20 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 
 	// Extract time bounds from filters for Phase 3: time-bounded candidate injection.
 	since, before, hasTimeBounds := extractTimeBounds(req.Filters)
+
+	// Extract tag filters for tag-scoped candidate seeding. The tag scans reuse the
+	// time window (zero since → epoch; zero before → now) so tag-filtered recall
+	// combined with explicit time bounds respects both via the ULID-ordered index.
+	tagsAll, tagsAny := extractTagFilters(req.Filters)
+	hasTagFilters := len(tagsAll) > 0 || len(tagsAny) > 0
+	tagSince := since
+	if tagSince.IsZero() {
+		tagSince = time.Unix(0, 0)
+	}
+	tagUntil := before
+	if tagUntil.IsZero() {
+		tagUntil = time.Now()
+	}
 
 	// Fast path: when HNSW is nil, there is nothing to parallelize.
 	// FTS and RecentActive are both in-memory with sub-10µs latency.
@@ -618,6 +706,11 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 			}
 			ids, _ := e.store.EngramIDsByCreatedRange(ctx, ws, since, before, k*3)
 			sets.time = ids
+		}
+
+		// Tag-scoped candidate seeding (fast path).
+		if hasTagFilters {
+			sets.tag = e.seedTagCandidates(ctx, ws, tagsAll, tagsAny, tagSince, tagUntil, k*3)
 		}
 
 		// PAS: transition candidate retrieval (fast path)
@@ -690,6 +783,14 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 		})
 	}
 
+	// Tag-scoped candidate seeding (parallel with other indices)
+	if hasTagFilters {
+		g.Go(func() error {
+			sets.tag = e.seedTagCandidates(gctx, ws, tagsAll, tagsAny, tagSince, tagUntil, k*3)
+			return nil
+		})
+	}
+
 	// PAS: transition candidate retrieval (parallel with other indices)
 	if req.PASEnabled && e.transStore != nil {
 		g.Go(func() error {
@@ -711,6 +812,7 @@ type fusedCandidate struct {
 	ftsScore        float64
 	vectorScore     float64
 	inDecayPool     bool
+	inTagPool       bool
 	hebbianBoost    float64
 	transitionBoost float64
 }
@@ -721,12 +823,13 @@ const (
 	rrfK_Transition = 50.0 // PAS: between HNSW and FTS, strong but not dominant
 	rrfK_Decay      = 120.0
 	rrfK_Time       = 100.0 // time-bounded range scan; lower than decay to deprioritize vs semantic relevance
+	rrfK_Tag        = 100.0 // tag-index scan; same tier as time — the post-filter is the correctness gate
 )
 
 // phase3RRF merges candidate lists via Reciprocal Rank Fusion.
 // Uses index-into-slice instead of map-of-pointers to reduce heap allocations.
 func phase3RRF(sets *candidateSets) []fusedCandidate {
-	totalCap := len(sets.fts) + len(sets.vector) + len(sets.decay) + len(sets.time) + len(sets.transition)
+	totalCap := len(sets.fts) + len(sets.vector) + len(sets.decay) + len(sets.time) + len(sets.tag) + len(sets.transition)
 	result := make([]fusedCandidate, 0, totalCap)
 	index := make(map[storage.ULID]int, totalCap)
 
@@ -762,6 +865,13 @@ func phase3RRF(sets *candidateSets) []fusedCandidate {
 	for rank, id := range sets.time {
 		c := getOrCreate(id)
 		c.rrfScore += 1.0 / (rrfK_Time + float64(rank+1))
+	}
+
+	// Tag-scoped candidate injection via RRF
+	for rank, id := range sets.tag {
+		c := getOrCreate(id)
+		c.rrfScore += 1.0 / (rrfK_Tag + float64(rank+1))
+		c.inTagPool = true
 	}
 
 	// PAS: transition-predicted candidate injection via RRF
@@ -1162,6 +1272,7 @@ func (e *ActivationEngine) phase6Score(
 		hopPath         []storage.ULID
 		relType         uint16
 		isTraversed     bool // true for BFS-only candidates; vectorScore is computed post-load
+		inTagPool       bool // true for tag-seeded candidates; vectorScore is computed post-load when zero
 	}
 
 	// Deduplicate: fused candidates take priority; traversed candidates are
@@ -1176,6 +1287,7 @@ func (e *ActivationEngine) phase6Score(
 			hebbianBoost:    c.hebbianBoost,
 			transitionBoost: c.transitionBoost,
 			rrfScore:        c.rrfScore,
+			inTagPool:       c.inTagPool,
 		})
 	}
 	// Only run dedup if there are traversed candidates to merge.
@@ -1283,14 +1395,18 @@ func (e *ActivationEngine) phase6Score(
 		}
 	}
 
-	// Compute vectorScore for BFS-traversed candidates now that engrams are loaded.
-	// Fused candidates already have vectorScore from the Phase 2 HNSW search.
-	// Traversed candidates get cosine similarity against the query embedding so that
-	// ACT-R/CGDN contentMatch is non-zero and the BFS spreading activation can take effect.
+	// Compute vectorScore for candidates that entered the pipeline without an HNSW
+	// score now that engrams are loaded. Two cases need this:
+	//   - BFS-traversed candidates (never in the HNSW pool).
+	//   - Tag-seeded candidates that appear in no other pool (vectorScore == 0):
+	//     without this, ACT-R/CGDN/legacy contentMatch is zero and the tag hit is
+	//     threshold-dropped one layer below the seeding fix (caveat 1 of #607).
+	// A non-zero vectorScore from the HNSW pool is never overwritten.
 	// ftsScore is left at zero: BM25 requires corpus-level IDF statistics unavailable here.
 	if len(p1.embedding) > 0 {
 		for i := range all {
-			if !all[i].isTraversed {
+			needsCosine := all[i].isTraversed || (all[i].inTagPool && all[i].vectorScore == 0)
+			if !needsCosine {
 				continue
 			}
 			if eng := engramByID[all[i].id]; eng != nil && len(eng.Embedding) > 0 {

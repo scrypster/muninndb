@@ -1,8 +1,10 @@
 package activation
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -413,7 +415,13 @@ func newInternalStubStore() *internalStubStore {
 
 func (s *internalStubStore) addEngram(eng *storage.Engram) {
 	if eng.ID == (storage.ULID{}) {
-		eng.ID = storage.NewULID()
+		// Mirror PebbleStore.WriteEngram: derive the ULID from CreatedAt when set
+		// so the tag/time indexes are ULID-time-ordered exactly as in production.
+		if !eng.CreatedAt.IsZero() {
+			eng.ID = storage.NewULIDWithTime(eng.CreatedAt)
+		} else {
+			eng.ID = storage.NewULID()
+		}
 	}
 	if eng.Confidence == 0 {
 		eng.Confidence = 1.0
@@ -489,6 +497,80 @@ func (s *internalStubStore) EngramLastAccessNs(_ [8]byte, id storage.ULID) int64
 
 func (s *internalStubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
 	return nil, nil
+}
+
+// ListByTagInRange scans the full engram set for the tag within [since, until]
+// and returns matches newest-first (ULID descending), truncated at limit —
+// consistent with the real PebbleStore's newest-first / oldest-truncated order.
+func (s *internalStubStore) ListByTagInRange(_ context.Context, _ [8]byte, tag string, since, until time.Time, limit int) ([]storage.ULID, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var matched []storage.ULID
+	for id, eng := range s.engrams {
+		hasTag := false
+		for _, t := range eng.Tags {
+			if t == tag {
+				hasTag = true
+				break
+			}
+		}
+		if !hasTag {
+			continue
+		}
+		if (!since.IsZero() && eng.CreatedAt.Before(since)) || (!until.IsZero() && eng.CreatedAt.After(until)) {
+			continue
+		}
+		matched = append(matched, id)
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		return bytes.Compare(matched[i][:], matched[j][:]) > 0
+	})
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, nil
+}
+
+// ListByTagsAllInRange returns engrams carrying EVERY tag, newest-first within
+// [since, until], with limit bounding the OUTPUT (exact set intersection over the
+// full engram set — mirrors the real store's hash-level stream intersection minus
+// collision false positives).
+func (s *internalStubStore) ListByTagsAllInRange(_ context.Context, _ [8]byte, tags []string, since, until time.Time, limit int) ([]storage.ULID, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var matched []storage.ULID
+	for id, eng := range s.engrams {
+		all := true
+		for _, tag := range tags {
+			has := false
+			for _, t := range eng.Tags {
+				if t == tag {
+					has = true
+					break
+				}
+			}
+			if !has {
+				all = false
+				break
+			}
+		}
+		if !all {
+			continue
+		}
+		if (!since.IsZero() && eng.CreatedAt.Before(since)) || (!until.IsZero() && eng.CreatedAt.After(until)) {
+			continue
+		}
+		matched = append(matched, id)
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		return bytes.Compare(matched[i][:], matched[j][:]) > 0
+	})
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, nil
 }
 
 func (s *internalStubStore) RestoreArchivedEdgesTransitive(_ context.Context, _ [8]byte, _ storage.ULID, _, _ int) ([]storage.ULID, error) {
