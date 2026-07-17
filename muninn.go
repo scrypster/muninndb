@@ -92,16 +92,7 @@ func Open(dataDir string, opts ...func(*Options)) (*DB, error) {
 	}
 
 	migRunner := migrate.NewRunner(rawDB)
-	migRunner.Register(migrate.Migration{
-		Version:     1,
-		Description: "backfill embed_dim in ERF records for existing embeddings",
-		Up:          migrate.BackfillEmbedDim,
-	})
-	migRunner.Register(migrate.Migration{
-		Version:     2,
-		Description: "backfill relationship entity index (0x26) for GetEntityAggregate optimisation",
-		Up:          migrate.BackfillRelEntityIndex,
-	})
+	migrate.RegisterMigrations(migRunner)
 	if _, err := migRunner.Run(); err != nil {
 		_ = rawDB.Close()
 		return nil, fmt.Errorf("muninndb: migration: %w", err)

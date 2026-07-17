@@ -1182,16 +1182,7 @@ func runServer() {
 
 	// Run versioned schema migrations before the storage layer is built.
 	migRunner := migrate.NewRunner(db)
-	migRunner.Register(migrate.Migration{
-		Version:     1,
-		Description: "backfill embed_dim in ERF records for existing embeddings",
-		Up:          migrate.BackfillEmbedDim,
-	})
-	migRunner.Register(migrate.Migration{
-		Version:     2,
-		Description: "backfill relationship entity index (0x26) for GetEntityAggregate optimisation",
-		Up:          migrate.BackfillRelEntityIndex,
-	})
+	migrate.RegisterMigrations(migRunner)
 	if applied, err := migRunner.Run(); err != nil {
 		slog.Error("migration failed", "err", err)
 		db.Close()

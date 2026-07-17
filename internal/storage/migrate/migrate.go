@@ -38,6 +38,19 @@ func (r *Runner) Register(m Migration) {
 	r.migrations = append(r.migrations, m)
 }
 
+// RegisterMigrations registers all known migrations with the runner. Called by
+// both muninn.Open (embedded/library) and runServer (daemon) so the two paths
+// cannot drift on which migrations are registered — the latent gap that left v3
+// (#611, RelocateAuthPrefixes) referenced only from tests.
+//
+// Add every new migration here. The Runner sorts by Version before execution,
+// so append order does not matter, but keep versions ascending for readability.
+func RegisterMigrations(r *Runner) {
+	r.Register(Migration{Version: 1, Description: "backfill embed_dim in ERF records for existing embeddings", Up: BackfillEmbedDim})
+	r.Register(Migration{Version: 2, Description: "backfill relationship entity index (0x26) for GetEntityAggregate optimisation", Up: BackfillRelEntityIndex})
+	r.Register(Migration{Version: 3, Description: "relocate auth prefixes 0x11–0x14 to 0x42–0x45 (#611)", Up: RelocateAuthPrefixes})
+}
+
 // Run executes all registered migrations whose version exceeds the currently
 // stored migration version, in ascending version order. Each successful
 // migration durably updates the stored version before proceeding to the next.
