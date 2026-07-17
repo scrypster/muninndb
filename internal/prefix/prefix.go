@@ -11,47 +11,47 @@ package prefix
 // Source-of-truth prefix bytes. Storage unchanged; auth RELOCATED 0x11–0x14 → 0x42–0x45.
 const (
 	// Storage (0x01–0x2A)
-	Engram byte = 0x01
-	Meta   byte = 0x02
-	AssocFwd          byte = 0x03
-	AssocRev          byte = 0x04
-	FTSPosting        byte = 0x05
-	Trigram           byte = 0x06
-	HNSWNode          byte = 0x07
-	FTSStats          byte = 0x08
-	TermStats         byte = 0x09
-	Contradiction     byte = 0x0A
-	StateIndex        byte = 0x0B
-	TagIndex          byte = 0x0C
-	CreatorIndex      byte = 0x0D
-	VaultMeta         byte = 0x0E
-	VaultNameIndex    byte = 0x0F
-	RelevanceBucket   byte = 0x10
-	DigestFlags       byte = 0x11
-	Coherence         byte = 0x12
-	VaultWeights      byte = 0x13
-	AssocWeightIndex  byte = 0x14
-	VaultCount        byte = 0x15
-	Provenance        byte = 0x16
-	BucketMigration   byte = 0x17
-	Embedding         byte = 0x18
-	Idempotency       byte = 0x19
-	Episode           byte = 0x1A
-	FTSVersion        byte = 0x1B
-	Transition        byte = 0x1C
-	EmbedModel        byte = 0x1D
-	Ordinal           byte = 0x1E
-	Entity            byte = 0x1F
-	EntityEngramLink  byte = 0x20
-	Relationship      byte = 0x21
-	LastAccess        byte = 0x22
+	Engram             byte = 0x01
+	Meta               byte = 0x02
+	AssocFwd           byte = 0x03
+	AssocRev           byte = 0x04
+	FTSPosting         byte = 0x05
+	Trigram            byte = 0x06
+	HNSWNode           byte = 0x07
+	FTSStats           byte = 0x08
+	TermStats          byte = 0x09
+	Contradiction      byte = 0x0A
+	StateIndex         byte = 0x0B
+	TagIndex           byte = 0x0C
+	CreatorIndex       byte = 0x0D
+	VaultMeta          byte = 0x0E
+	VaultNameIndex     byte = 0x0F
+	RelevanceBucket    byte = 0x10
+	DigestFlags        byte = 0x11
+	Coherence          byte = 0x12
+	VaultWeights       byte = 0x13
+	AssocWeightIndex   byte = 0x14
+	VaultCount         byte = 0x15
+	Provenance         byte = 0x16
+	BucketMigration    byte = 0x17
+	Embedding          byte = 0x18
+	Idempotency        byte = 0x19
+	Episode            byte = 0x1A
+	FTSVersion         byte = 0x1B
+	Transition         byte = 0x1C
+	EmbedModel         byte = 0x1D
+	Ordinal            byte = 0x1E
+	Entity             byte = 0x1F
+	EntityEngramLink   byte = 0x20
+	Relationship       byte = 0x21
+	LastAccess         byte = 0x22
 	EntityReverseIndex byte = 0x23
-	CoOccurrence      byte = 0x24
-	ArchiveAssoc      byte = 0x25
-	RelEntityIndex    byte = 0x26
-	DreamState        byte = 0x27
-	ContentHash       byte = 0x28
-	Lease             byte = 0x2A
+	CoOccurrence       byte = 0x24
+	ArchiveAssoc       byte = 0x25
+	RelEntityIndex     byte = 0x26
+	DreamState         byte = 0x27
+	ContentHash        byte = 0x28
+	Lease              byte = 0x2A
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
 	CapabilityVaultIdx byte = 0x41
@@ -79,7 +79,9 @@ func All() []Entry { return registry }
 // Category returns the partition category for a prefix (Task 5's per-list guards).
 func Category(b byte) string {
 	for _, e := range registry {
-		if e.Byte == b { return e.Cat }
+		if e.Byte == b {
+			return e.Cat
+		}
 	}
 	return ""
 }
