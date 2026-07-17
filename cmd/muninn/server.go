@@ -953,6 +953,7 @@ func runServer() {
 	uiAddr := flag.String("ui-addr", uiAddrDefault, "Web UI HTTP listen address")
 	mcpToken := flag.String("mcp-token", "", "Bearer token override for MCP auth (leave empty to read from MUNINN_MCP_TOKEN env var or ~/.muninn/mcp.token)")
 	dev := flag.Bool("dev", false, "serve web assets from ./web directory (development mode)")
+	forceMigrationRerun := flag.Bool("force-migration-rerun", false, "Reset the stored migration version to 0 and exit without starting the server. The next normal start re-applies every registered migration (all are idempotent). Operator recovery path for a wedged/partial migration (#611). Always back up the DB before a migration-bearing upgrade; use this flag to recover from a wedged/partial migration.")
 	backupInterval := flag.String("backup-interval", "", "Automated backup interval (e.g. 6h, 30m); empty = disabled")
 	backupDir := flag.String("backup-dir", "", "Directory to write automated backups into")
 	backupRetain := flag.Int("backup-retain", 5, "Number of automated backups to keep")
@@ -1152,6 +1153,27 @@ func runServer() {
 	// NOTE: db.Close() is NOT deferred here because store.Close() (called
 	// during the ordered shutdown sequence) internally closes the Pebble DB
 	// after flushing its own background workers.
+
+	// --force-migration-rerun: reset the stored migration version to 0 and
+	// exit. The next normal start re-applies every registered migration.
+	// This is the operator recovery path for a wedged/partial migration
+	// (#611, Task 7b / RT5): if a version was stamped but the operator needs
+	// to force a re-run (e.g. recover from a partial state), this resets
+	// the marker so the existing Runner re-applies the migrations on the
+	// next Open. It does NOT run migrations itself — that keeps the path
+	// simple and reuses the hardened Runner's fail-loud semantics.
+	if *forceMigrationRerun {
+		if err := migrate.ForceRerunMigrations(db); err != nil {
+			slog.Error("force-migration-rerun failed", "err", err)
+			_ = db.Close()
+			os.Exit(1)
+		}
+		slog.Info("migration version reset to 0; all registered migrations will re-run on next start",
+			"data_dir", *dataDir)
+		fmt.Fprintln(os.Stderr, "migration version reset to 0; re-run on next start. Re-run `muninn start` (without this flag) to apply.")
+		_ = db.Close()
+		os.Exit(0)
+	}
 
 	if err := replication.CheckAndSetSchemaVersion(db); err != nil {
 		slog.Error("schema version check", "err", err)
