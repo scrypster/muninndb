@@ -374,3 +374,21 @@ func TestSSEMessage_CapRevokedMidSession_RejectedOnPost(t *testing.T) {
 		t.Errorf("expected 401 after cap_ revoked mid-session (POST without bearer), got %d (body: %s)", w.Code, w.Body.String())
 	}
 }
+
+// TestCreateWorkflowVault_RejectsExistingVault closes the coverage gap on the
+// "vault already exists" rejection branch (issue #614). fakeEngine.VaultNameExists
+// is toggled true for "wf-taken", so the handler must reject with -32602 and
+// MUST NOT proceed to RegisterVaultName/SetVaultConfig/GenerateCapability.
+func TestCreateWorkflowVault_RejectsExistingVault(t *testing.T) {
+	store := newWorkflowTestStore(t)
+	mkToken, _, err := store.GenerateAPIKey("admin", "admin", auth.ModeFull, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", &fakeEngine{existingVaults: map[string]bool{"wf-taken": true}}, "", store, store, nil)
+	srv.agentVaultCreate = true
+
+	body := mkToolCallBody("muninn_create_workflow_vault", map[string]any{"name": "wf-taken"})
+	w := doAuthenticatedPost(srv, mkToken, body)
+	assertRPCError(t, w, -32602, "vault already exists: wf-taken")
+}

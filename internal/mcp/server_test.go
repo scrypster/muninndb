@@ -18,13 +18,18 @@ import (
 )
 
 // fakeEngine implements EngineInterface for tests.
-type fakeEngine struct{}
+type fakeEngine struct {
+	existingVaults map[string]bool
+}
 
 func (f *fakeEngine) RegisterVaultName(name string) error { return nil }
 
-// VaultNameExists defaults to false (no pre-existing vault) so workflow-vault
-// creation tests proceed. Tests needing collision behaviour wrap a real engine.
-func (f *fakeEngine) VaultNameExists(name string) bool { return false }
+// VaultNameExists is map-backed so tests can simulate a pre-existing vault
+// (issue #614). A nil map (the zero value) returns false for every name,
+// preserving all existing tests that construct &fakeEngine{}.
+func (f *fakeEngine) VaultNameExists(name string) bool {
+	return f.existingVaults != nil && f.existingVaults[name]
+}
 
 func (f *fakeEngine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	return &mbp.WriteResponse{ID: "fake-id"}, nil
