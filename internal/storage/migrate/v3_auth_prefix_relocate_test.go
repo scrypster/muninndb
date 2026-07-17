@@ -68,10 +68,12 @@ func TestRelocateAuthPrefixes_RekeysAndLeavesStorage(t *testing.T) {
 	if err := db.Set(digestKey, digestVal, pebble.Sync); err != nil {
 		t.Fatalf("seed digest: %v", err)
 	}
-	// AssocWeightIndex @0x14: 41-byte key, value containing the 0x6E756C6C "null" bits
-	// that the storage layer uses as a sentinel. The migration must not touch this.
+	// AssocWeightIndex @0x14: 41-byte key, 4-byte big-endian float32 weight
+	// (mirrors the real storage write at association.go:410-412). The migration
+	// must not touch this — a 4-byte value is structurally impossible for any
+	// vaultCfg JSON ('{"...":...}' is many B).
 	awKey := append([]byte{prefix.AssocWeightIndex}, make([]byte, 40)...)
-	awVal := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x6E, 0x75, 0x6C, 0x6C}
+	awVal := binary.BigEndian.AppendUint32([]byte{}, 0x3F800000) // 1.0f32
 	if err := db.Set(awKey, awVal, pebble.Sync); err != nil {
 		t.Fatalf("seed aw: %v", err)
 	}

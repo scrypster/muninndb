@@ -152,21 +152,17 @@ func relocatePrefix(db *pebble.DB, oldPfx, newPfx byte) error {
 func isAuthKey(pfx byte, key, val []byte) (bool, error) {
 	switch pfx {
 	case prefix.DigestFlags: // old 0x11 — admin was colocated here
-		// [RT-FIX RT2] Value-shape gate. Storage DigestFlags is a 1-byte uint8
-		// flag; an admin user's value is multi-byte JSON starting with '{'.
+		// [RT-FIX RT2] Value-shape gate. Storage DigestFlags value is a 1-byte
+		// uint8 bitfield; an admin user's value is multi-byte JSON (never 1B).
 		// Without the value gate, a 16-char username admin (key 1+16=17B)
 		// collides with storage's 1+16-byte-ULID key (also 17B) and is silently
 		// orphaned at 0x11 — invisible to AdminExists post-migration → Bootstrap
 		// creates default root/password → silent lockout + security regression.
 		//
-		// Discriminate on the JSON marker byte rather than a length equality,
-		// because auth values are always JSON object literals ('{...}') and
-		// storage binary values never start with '{' (the first byte is the
-		// uint8 bitfield, range 0x00–0xFF but never deliberately '{'=0x7B).
-		// This survives future storage value-shape changes without needing the
-		// migration touched.
-		if len(key) == 17 && (len(val) == 0 || val[0] != '{') {
-			return false, nil // storage DigestFlags (1 + 16 ULID, 1-byte value) — leave
+		// Exact length is tighter than a JSON-marker byte: a 1-byte value is
+		// structurally impossible for any admin JSON ('{"...":...}' is many B).
+		if len(key) == 17 && len(val) == 1 {
+			return false, nil // storage DigestFlags (1 + 16 ULID, 1-byte bitfield) — leave
 		}
 		var u auth.AdminUser
 		if err := json.Unmarshal(val, &u); err != nil {
@@ -181,19 +177,19 @@ func isAuthKey(pfx byte, key, val []byte) (bool, error) {
 		return len(key) >= prefix.MinAPIKeyVIdxLen, nil
 	case prefix.AssocWeightIndex: // old 0x14 — vaultCfg was colocated here
 		// [RT-FIX RT2] Value-shape gate. Storage AssocWeightIndex value is a
-		// fixed-width binary struct (26 bytes per encodeAssocValue; legacy
-		// 18/22/30); a vault config's value is multi-byte JSON starting with '{'.
+		// 4-byte big-endian float32 weight (association.go:410-412); a vault
+		// config's value is multi-byte JSON (never 4B).
 		// Without the value gate, a 40-char vault name (key 1+40=41B) collides
 		// with storage's 41B key and is silently orphaned at 0x14 — invisible
 		// post-migration, loses the vault's plasticity/public config.
 		//
-		// The RT brief specified `len(val) == 4`, but encodeAssocValue produces
-		// 26 bytes (the brief confused the 4-byte peakWeight/coActivationCount
-		// FIELDS for the whole value). Discriminating on the JSON marker byte
-		// is both empirically correct AND more durable — it survives future
-		// storage value-width changes without the migration being touched.
-		if len(key) == 41 && (len(val) == 0 || val[0] != '{') {
-			return false, nil // storage AssocWeightIndex (41B key, binary value) — leave
+		// Truth check: encodeAssocValue writes to AssocFwdKey (0x03)/AssocRevKey
+		// (0x04), NOT to AssocWeightIndex (0x14). The earlier comment claiming
+		// 26-byte 0x14 values confused the 0x03/0x04 struct for the 0x14 weight.
+		// Exact length is tighter than a JSON-marker byte: a 4-byte value is
+		// structurally impossible for any vaultCfg JSON ('{"...":...}' is many B).
+		if len(key) == 41 && len(val) == 4 {
+			return false, nil // storage AssocWeightIndex (41B key, 4-byte float32 weight) — leave
 		}
 		var c auth.VaultConfig
 		if err := json.Unmarshal(val, &c); err != nil {
