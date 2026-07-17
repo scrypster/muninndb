@@ -181,6 +181,93 @@ func TestRelocateAuthPrefixes_RekeysAndLeavesStorage(t *testing.T) {
 	closer.Close()
 }
 
+// TestRelocateAuthPrefixes_LengthCollisionDoesNotOrphanAuth is the RT regression
+// test for the isAuthKey length-short-circuit bug: when a real auth record's
+// KEY length happens to equal the storage family's key length on the SAME
+// prefix byte, the length-only short-circuit misclassified it as storage and
+// silently LEFT it at the old prefix (orphaned).
+//
+// Two collisions are covered:
+//
+//  1. DigestFlags @0x11: storage key is 1+16=17B; an admin with a 16-char
+//     username is 1+16=17B — same length, different value shape (storage value
+//     is 1 byte; admin JSON is multi-byte starting with '{').
+//  2. AssocWeightIndex @0x14: storage key is 41B; a vaultCfg with a 40-char
+//     vault name is 1+40=41B — same length, different value shape (storage
+//     value is 4-byte weight; vaultCfg JSON is multi-byte starting with '{').
+//
+// Post-migration the orphaned admin would be invisible to AdminExists (which
+// scans 0x42), causing Bootstrap to create default root/password — silent
+// lockout + security regression. This test would have caught both.
+func TestRelocateAuthPrefixes_LengthCollisionDoesNotOrphanAuth(t *testing.T) {
+	db := openTestDB(t)
+
+	// 16-char username admin at 0x11 — key length 1+16=17, COLLIDES with
+	// storage DigestFlags (1+16-byte ULID). The pre-fix length short-circuit
+	// returned "storage, leave it" and silently orphaned this admin.
+	const adminUser = "administrator123" // exactly 16 chars (13+3)
+	if len(adminUser) != 16 {
+		t.Fatalf("admin seed length = %d, want 16", len(adminUser))
+	}
+	adminJSON, _ := json.Marshal(auth.AdminUser{Username: adminUser, PassHash: []byte("ph")})
+	adminOldKey := append([]byte{prefix.DigestFlags}, []byte(adminUser)...)
+	if err := db.Set(adminOldKey, adminJSON, pebble.Sync); err != nil {
+		t.Fatalf("seed 16-char admin: %v", err)
+	}
+
+	// 40-char vault name vaultCfg at 0x14 — key length 1+40=41, COLLIDES with
+	// storage AssocWeightIndex (41B). Same silent-orphan failure mode.
+	const vaultName = "abcdefghijklmnopqrstuvwxyz0123456789abcd" // exactly 40 chars
+	if len(vaultName) != 40 {
+		t.Fatalf("vault name seed length = %d, want 40", len(vaultName))
+	}
+	cfgJSON, _ := json.Marshal(auth.VaultConfig{Name: vaultName})
+	cfgOldKey := append([]byte{prefix.AssocWeightIndex}, []byte(vaultName)...)
+	if err := db.Set(cfgOldKey, cfgJSON, pebble.Sync); err != nil {
+		t.Fatalf("seed 40-char vaultCfg: %v", err)
+	}
+
+	if err := RelocateAuthPrefixes(db); err != nil {
+		t.Fatalf("relocate (length-collision case): %v", err)
+	}
+
+	// The 16-char admin MUST now be at 0x42 (AdminUser) — NOT orphaned at 0x11.
+	newAdminKey := append([]byte{prefix.AdminUser}, []byte(adminUser)...)
+	v, closer, err := db.Get(newAdminKey)
+	if err != nil {
+		t.Fatalf("16-char admin NOT relocated to 0x42 (orphaned at 0x11): %v", err)
+	}
+	var u auth.AdminUser
+	if err := json.Unmarshal(v, &u); err != nil {
+		t.Fatalf("unmarshal 16-char admin: %v", err)
+	}
+	closer.Close()
+	if u.Username != adminUser {
+		t.Fatalf("admin username round-trip = %q, want %q", u.Username, adminUser)
+	}
+	if _, _, err := db.Get(adminOldKey); !errors.Is(err, pebble.ErrNotFound) {
+		t.Fatalf("16-char admin old key at 0x11 still present (expected relocated, not orphaned): %v", err)
+	}
+
+	// The 40-char vaultCfg MUST now be at 0x45 (VaultConfig) — NOT orphaned at 0x14.
+	newCfgKey := append([]byte{prefix.VaultConfig}, []byte(vaultName)...)
+	v, closer, err = db.Get(newCfgKey)
+	if err != nil {
+		t.Fatalf("40-char vaultCfg NOT relocated to 0x45 (orphaned at 0x14): %v", err)
+	}
+	var c auth.VaultConfig
+	if err := json.Unmarshal(v, &c); err != nil {
+		t.Fatalf("unmarshal 40-char vaultCfg: %v", err)
+	}
+	closer.Close()
+	if c.Name != vaultName {
+		t.Fatalf("vaultCfg name round-trip = %q, want %q", c.Name, vaultName)
+	}
+	if _, _, err := db.Get(cfgOldKey); !errors.Is(err, pebble.ErrNotFound) {
+		t.Fatalf("40-char vaultCfg old key at 0x14 still present (expected relocated, not orphaned): %v", err)
+	}
+}
+
 // TestRelocateAuthPrefixes_FailLoudOnCorruptedAuthValue proves the RT4 fail-loud
 // path: a value at 0x11 that is NOT a valid admin JSON document causes the
 // migration to return a non-nil error and refuse to silently orphan it.

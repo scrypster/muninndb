@@ -50,6 +50,37 @@ func TestForceRerunMigrations_FreshDBIsNoOp(t *testing.T) {
 	}
 }
 
+// TestForceRerunMigrations_RefusesNewerBinaryDB proves the downgrade-bypass
+// guard: if the DB was last written by a NEWER binary (stored version > this
+// binary's MaxRegisteredVersion), ForceRerunMigrations REFUSES instead of
+// resetting to 0. Without this, an operator facing the refuse-newer error on
+// startup could --force-migration-rerun to reset to 0, then an older binary
+// would happily re-apply v1/v2/v3 against a newer-schema DB.
+//
+// The version key MUST remain at the newer-binary value (not deleted) so the
+// next start with a properly-upgraded binary still sees the correct version.
+func TestForceRerunMigrations_RefusesNewerBinaryDB(t *testing.T) {
+	db := openTestDB(t)
+
+	newerVersion := MaxRegisteredVersion() + 10 // simulate a future vN+10 binary
+	if err := writeMigrationVersion(db, newerVersion); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ForceRerunMigrations(db); err == nil {
+		t.Fatal("ForceRerunMigrations on a newer-binary DB: expected error (refuse-newer), got nil (downgrade-bypass surface)")
+	}
+
+	// Version MUST be unchanged — refuse-newer must NOT delete the version key.
+	got, err := readMigrationVersion(db)
+	if err != nil {
+		t.Fatalf("readMigrationVersion after refused reset: %v", err)
+	}
+	if got != newerVersion {
+		t.Fatalf("stored version after refused reset = %d, want %d (refuse-newer must not delete)", got, newerVersion)
+	}
+}
+
 // TestForceRerunMigrations_NextRunReappliesAll stamps version 3, resets,
 // then runs a fresh Runner with migrations v1/v2/v3 registered and asserts
 // all three re-apply — proving the reset actually triggers a re-run on the

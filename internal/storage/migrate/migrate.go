@@ -48,7 +48,29 @@ func (r *Runner) Register(m Migration) {
 func RegisterMigrations(r *Runner) {
 	r.Register(Migration{Version: 1, Description: "backfill embed_dim in ERF records for existing embeddings", Up: BackfillEmbedDim})
 	r.Register(Migration{Version: 2, Description: "backfill relationship entity index (0x26) for GetEntityAggregate optimisation", Up: BackfillRelEntityIndex})
-	r.Register(Migration{Version: 3, Description: "relocate auth prefixes 0x11–0x14 to 0x42–0x45 (#611)", Up: RelocateAuthPrefixes})
+	r.Register(Migration{ Version: 3, Description: "relocate auth prefixes 0x11–0x14 to 0x42–0x45 (#611)", Up: RelocateAuthPrefixes})
+}
+
+// MaxRegisteredVersion returns the highest migration version this binary knows.
+// It registers into a throwaway Runner so the version list has a single source
+// of truth (RegisterMigrations) — bumping a version in RegisterMigrations
+// automatically flows through here without a second constant to keep in sync.
+//
+// Used by ForceRerunMigrations to refuse a recovery that would bypass the
+// refuse-newer invariant: if the DB was last written by a newer binary
+// (stored version > MaxRegisteredVersion), resetting to 0 and re-applying
+// only this binary's migrations would leave newer-schema data un-migrated
+// against an older binary — a downgrade-bypass surface.
+func MaxRegisteredVersion() int {
+	r := &Runner{}
+	RegisterMigrations(r)
+	max := 0
+	for _, m := range r.migrations {
+		if m.Version > max {
+			max = m.Version
+		}
+	}
+	return max
 }
 
 // Run executes all registered migrations whose version exceeds the currently
