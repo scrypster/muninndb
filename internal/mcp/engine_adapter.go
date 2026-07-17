@@ -382,15 +382,23 @@ func (a *mcpEngineAdapter) WhereLeftOff(ctx context.Context, vault string, limit
 		if eng == nil {
 			continue
 		}
-		entries = append(entries, WhereLeftOffEntry{
-			ID:         eng.ID.String(),
-			Concept:    eng.Concept,
-			Summary:    eng.Summary,
-			LastAccess: eng.LastAccess,
-			State:      lifecycleStateLabel(eng.State),
-		})
+		entries = append(entries, whereLeftOffEntryFromEngram(eng))
 	}
 	return entries, nil
+}
+
+// whereLeftOffEntryFromEngram projects a stored engram onto the
+// muninn_where_left_off result shape.
+func whereLeftOffEntryFromEngram(eng *storage.Engram) WhereLeftOffEntry {
+	return WhereLeftOffEntry{
+		ID:         eng.ID.String(),
+		Concept:    eng.Concept,
+		Summary:    eng.Summary,
+		LastAccess: eng.LastAccess,
+		State:      lifecycleStateLabel(eng.State),
+		Type:       eng.MemoryType.String(),
+		TypeLabel:  eng.TypeLabel,
+	}
 }
 
 // lifecycleStateLabel converts a storage.LifecycleState to a display string.

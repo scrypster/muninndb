@@ -235,6 +235,11 @@ type ActivationItem struct {
 	State uint8 `msgpack:"state,omitempty" json:"state,omitempty"`
 	// Trust is the TrustLevel uint8. omitempty intentional — see ReadResponse.Trust comment.
 	Trust uint8 `msgpack:"trust,omitempty" json:"trust,omitempty"`
+	// MemoryType is the stored MemoryType uint8 (see storage.MemoryType).
+	// omitempty intentional — absent means TypeFact (0), the zero value.
+	MemoryType uint8 `msgpack:"memory_type,omitempty" json:"memory_type,omitempty"`
+	// TypeLabel is the writer's free-form type label; empty when none was stored.
+	TypeLabel string `msgpack:"type_label,omitempty" json:"type_label,omitempty"`
 }
 
 // ScoreComponents breaks down the activation score.

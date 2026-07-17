@@ -1391,6 +1391,8 @@ func (e *whereLeftOffEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([
 			Summary:    "working on feature X",
 			LastAccess: time.Now().Add(-5 * time.Minute),
 			State:      "active",
+			Type:       "task",
+			TypeLabel:  "feature_work",
 		},
 		{
 			ID:         "entry-2",
@@ -1454,10 +1456,16 @@ func TestHandleWhereLeftOff_ResponseShape(t *testing.T) {
 	if !ok {
 		t.Fatal("memories[0] is not an object")
 	}
-	for _, field := range []string{"id", "concept", "last_access", "state"} {
+	for _, field := range []string{"id", "concept", "last_access", "state", "type"} {
 		if _, ok := entry[field]; !ok {
 			t.Errorf("memory entry missing field: %q", field)
 		}
+	}
+	if entry["type"] != "task" {
+		t.Errorf("entry type = %v, want %q", entry["type"], "task")
+	}
+	if entry["type_label"] != "feature_work" {
+		t.Errorf("entry type_label = %v, want %q", entry["type_label"], "feature_work")
 	}
 
 	count, ok := content["count"].(float64)

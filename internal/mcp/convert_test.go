@@ -393,3 +393,50 @@ func TestActivationToMemory_FallsBackToTruncated(t *testing.T) {
 		t.Error("truncated content must end with '...'")
 	}
 }
+
+// TestActivationToMemoryMapsType verifies muninn_recall exposes the stored
+// memory type as its canonical label plus the writer's free-form type_label.
+func TestActivationToMemoryMapsType(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:         "typed-recall",
+		MemoryType: uint8(storage.TypeDecision),
+		TypeLabel:  "architectural_decision",
+	}
+	m := activationToMemory(item)
+	if m.Type != "decision" {
+		t.Errorf("Type = %q, want %q", m.Type, "decision")
+	}
+	if m.TypeLabel != "architectural_decision" {
+		t.Errorf("TypeLabel = %q, want %q", m.TypeLabel, "architectural_decision")
+	}
+}
+
+// TestActivationToMemoryTypeZeroValueIsFact pins the zero-value story: an
+// engram stored without an explicit type (MemoryType 0) presents as "fact",
+// so the field is always present and never reads as "type not exposed".
+func TestActivationToMemoryTypeZeroValueIsFact(t *testing.T) {
+	m := activationToMemory(&mbp.ActivationItem{ID: "untyped-recall"})
+	if m.Type != "fact" {
+		t.Errorf("Type = %q, want %q", m.Type, "fact")
+	}
+	if m.TypeLabel != "" {
+		t.Errorf("TypeLabel = %q, want empty", m.TypeLabel)
+	}
+}
+
+// TestReadResponseToMemoryMapsType verifies muninn_read maps MemoryType and
+// TypeLabel from the wire response (which has always carried them).
+func TestReadResponseToMemoryMapsType(t *testing.T) {
+	r := &mbp.ReadResponse{
+		ID:         "typed-read",
+		MemoryType: uint8(storage.TypeProcedure),
+		TypeLabel:  "runbook",
+	}
+	m := readResponseToMemory(r)
+	if m.Type != "procedure" {
+		t.Errorf("Type = %q, want %q", m.Type, "procedure")
+	}
+	if m.TypeLabel != "runbook" {
+		t.Errorf("TypeLabel = %q, want %q", m.TypeLabel, "runbook")
+	}
+}

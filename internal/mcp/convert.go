@@ -38,7 +38,10 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		Confidence:  item.Confidence,
 		Why:         item.Why,
 		// Map the lifecycle state label the same way the read path does (#502).
-		State:       storage.LifecycleState(item.State).String(),
+		State: storage.LifecycleState(item.State).String(),
+		// Type mirrors the vocabulary muninn_remember accepts (storage.ParseMemoryType).
+		Type:        storage.MemoryType(item.MemoryType).String(),
+		TypeLabel:   item.TypeLabel,
 		CreatedAt:   time.Unix(0, item.CreatedAt).UTC(),
 		LastAccess:  time.Unix(0, item.LastAccess).UTC(),
 		AccessCount: item.AccessCount,
@@ -60,6 +63,8 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		Confidence:  r.Confidence,
 		Tags:        r.Tags,
 		State:       storage.LifecycleState(r.State).String(),
+		Type:        storage.MemoryType(r.MemoryType).String(),
+		TypeLabel:   r.TypeLabel,
 		CreatedAt:   time.Unix(0, r.CreatedAt).UTC(),
 		LastAccess:  time.Unix(0, r.LastAccess).UTC(),
 		AccessCount: r.AccessCount,

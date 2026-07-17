@@ -2425,3 +2425,46 @@ func TestEngineWriteBatch_CreatedAtValid(t *testing.T) {
 		t.Errorf("expected no error for valid past CreatedAt in batch, got: %v", errs[0])
 	}
 }
+
+// TestActivateCarriesMemoryType verifies that recall results carry the stored
+// memory type end to end: write with an explicit type, activate, and the
+// ActivationItem must expose MemoryType and TypeLabel. Before this field
+// existed on ActivationItem, recall was the only read surface that dropped
+// type at the wire rather than in presentation.
+func TestActivateCarriesMemoryType(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:      "test",
+		Concept:    "Migration decision for the storage layer",
+		Content:    "We decided to migrate the storage layer to Pebble for compaction control.",
+		MemoryType: uint8(storage.TypeDecision),
+		TypeLabel:  "architectural_decision",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	awaitFTS(t, eng)
+
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      "test",
+		Context:    []string{"storage layer migration"},
+		MaxResults: 10,
+		Threshold:  0.01,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if len(resp.Activations) == 0 {
+		t.Fatal("Activate returned 0 results, want >= 1")
+	}
+	top := resp.Activations[0]
+	if top.MemoryType != uint8(storage.TypeDecision) {
+		t.Errorf("MemoryType = %d, want %d (decision)", top.MemoryType, uint8(storage.TypeDecision))
+	}
+	if top.TypeLabel != "architectural_decision" {
+		t.Errorf("TypeLabel = %q, want %q", top.TypeLabel, "architectural_decision")
+	}
+}

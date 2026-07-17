@@ -1018,18 +1018,22 @@ func (s *MCPServer) handleFindByEntity(ctx context.Context, w http.ResponseWrite
 	}
 	engrams := res.Engrams
 	type engramEntry struct {
-		ID      string `json:"id"`
-		Concept string `json:"concept"`
-		Summary string `json:"summary,omitempty"`
-		State   string `json:"state"`
+		ID        string `json:"id"`
+		Concept   string `json:"concept"`
+		Summary   string `json:"summary,omitempty"`
+		State     string `json:"state"`
+		Type      string `json:"type"`
+		TypeLabel string `json:"type_label,omitempty"`
 	}
 	entries := make([]engramEntry, 0, len(engrams))
 	for _, e := range engrams {
 		entries = append(entries, engramEntry{
-			ID:      e.ID.String(),
-			Concept: e.Concept,
-			Summary: e.Summary,
-			State:   lifecycleStateLabel(e.State),
+			ID:        e.ID.String(),
+			Concept:   e.Concept,
+			Summary:   e.Summary,
+			State:     lifecycleStateLabel(e.State),
+			Type:      e.MemoryType.String(),
+			TypeLabel: e.TypeLabel,
 		})
 	}
 	payload := map[string]any{

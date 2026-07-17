@@ -74,6 +74,8 @@ type Memory struct {
 	Why         string    `json:"why,omitempty"`
 	Tags        []string  `json:"tags,omitempty"`
 	State       string    `json:"state,omitempty"`
+	Type        string    `json:"type"`                 // canonical MemoryType label ("fact", "decision", ...); always present
+	TypeLabel   string    `json:"type_label,omitempty"` // writer-supplied free-form label, e.g. "architectural_decision"
 	CreatedAt   time.Time `json:"created_at"`
 	LastAccess  time.Time `json:"last_access"`
 	AccessCount uint32    `json:"access_count,omitempty"`
@@ -365,6 +367,8 @@ type WhereLeftOffEntry struct {
 	Summary    string    `json:"summary,omitempty"`
 	LastAccess time.Time `json:"last_access"`
 	State      string    `json:"state"`
+	Type       string    `json:"type"`                 // canonical MemoryType label; always present
+	TypeLabel  string    `json:"type_label,omitempty"` // writer-supplied free-form label
 }
 
 // EntityClusterResult is one entity co-occurrence pair returned by muninn_entity_clusters.
