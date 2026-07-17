@@ -2,30 +2,30 @@ package auth
 
 import (
 	"testing"
+
+	"github.com/scrypster/muninndb/internal/prefix"
 )
 
 // TestCapabilityPrefixesNoCollision (RedTeam NOTABLE #5 regression guard):
 // the 0x40/0x41 capability prefixes were relocated off storage's 0x15/0x16
 // keyspace (commit 0553a07). This test asserts the prefixes don't collide
-// with the storage layer's range (0x01–0x2A) or auth's own range
-// (0x42–0x45, relocated from 0x11–0x14 by #611). Reverting 0x40→0x15 (or
-// any value in either range) would fail this test, catching the regression
-// before it ships.
-//
-// The storage prefix range is sourced from the keys package; we hard-code
-// the known bounds here so this test stays in the auth package without an
-// import cycle. If storage extends past 0x2A, update storageMaxPrefix.
-// Task 5 will refine both ranges to source from prefix.All().
+// with any storage or auth-own prefix registered in prefix.All(). Reverting
+// 0x40→0x15 (or any value already claimed by another owner) would fail this
+// test, catching the regression before it ships.
 func TestCapabilityPrefixesNoCollision(t *testing.T) {
-	// Known storage prefix bounds (internal/storage/keys/keys.go).
-	// As of this writing, the highest storage prefix is 0x2A (LeaseKey).
-	const storageMinPrefix = 0x01
-	const storageMaxPrefix = 0x2A
-
-	// Auth's own non-capability prefixes (admin user, API key, API key vIdx,
-	// vault config) — relocated to 0x42–0x45 by #611.
-	const authOwnMin = 0x42
-	const authOwnMax = 0x45
+	// Build the set of every registered prefix byte grouped by owner, sourced
+	// from the registry (prefix.All()). Task 5 dropped the hardcoded bounds
+	// (0x01–0x2A storage / 0x42–0x45 auth) in favour of the registry so that
+	// adding a new prefix anywhere in the range automatically tightens this
+	// guard.
+	type owner struct {
+		name string
+		cat  string
+	}
+	owners := make(map[byte]owner, len(prefix.All()))
+	for _, e := range prefix.All() {
+		owners[e.Byte] = owner{name: e.Owner + "/" + e.Name, cat: e.Cat}
+	}
 
 	capPrefixes := []struct {
 		name string
@@ -36,14 +36,15 @@ func TestCapabilityPrefixesNoCollision(t *testing.T) {
 	}
 
 	for _, p := range capPrefixes {
-		// Must be ABOVE both ranges — not inside storage's, not inside auth's own.
-		if p.val >= storageMinPrefix && p.val <= storageMaxPrefix {
-			t.Errorf("%s = 0x%02X collides with storage prefix range [0x%02X, 0x%02X] — capabilities would corrupt storage keys",
-				p.name, p.val, storageMinPrefix, storageMaxPrefix)
-		}
-		if p.val >= authOwnMin && p.val <= authOwnMax {
-			t.Errorf("%s = 0x%02X collides with auth's own prefix range [0x%02X, 0x%02X] — capabilities would corrupt API key or vault config records",
-				p.name, p.val, authOwnMin, authOwnMax)
+		// Must not collide with any NON-capability registered prefix. The
+		// capability entries themselves (capability/Capability,
+		// capability/CapabilityVaultIdx) are expected to match their own
+		// byte — that's the registry recording the allocation, not a
+		// collision.
+		if existing, ok := owners[p.val]; ok && existing.name != "capability/Capability" && existing.name != "capability/CapabilityVaultIdx" {
+			t.Errorf("%s = 0x%02X collides with already-registered prefix %s — "+
+				"two keyspaces would overlap",
+				p.name, p.val, existing.name)
 		}
 	}
 

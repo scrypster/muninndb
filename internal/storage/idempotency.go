@@ -73,7 +73,7 @@ func (ps *PebbleStore) PurgeExpiredIdempotency(ctx context.Context, maxAge time.
 	var toDelete [][]byte
 	for iter.SeekGE(lower); iter.Valid(); iter.Next() {
 		k := iter.Key()
-		if len(k) == 0 || k[0] != 0x19 {
+		if len(k) == 0 || k[0] != prefix.Idempotency {
 			break
 		}
 		val := iter.Value()

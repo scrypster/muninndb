@@ -635,11 +635,18 @@ func (ps *PebbleStore) ProvenanceStore() *provenance.Store {
 	return ps.provenance
 }
 
+// clearFTSKeysPrefixes lists every FTS-index prefix that ClearFTSKeys deletes
+// via range tombstones. Hoisted to package scope so the per-list partition
+// guard (TestClearFTSKeysPrefixes_Scope) can pin its membership directly.
+var clearFTSKeysPrefixes = []byte{
+	prefix.FTSPosting, prefix.Trigram, prefix.FTSStats, prefix.TermStats,
+}
+
 // ClearFTSKeys deletes all FTS index keys for the given vault workspace prefix via
 // range tombstones. Prefixes cleared: 0x05 (posting lists), 0x06 (trigrams),
 // 0x08 (FTS global stats), 0x09 (per-term stats).
 func (ps *PebbleStore) ClearFTSKeys(ws, wsPlus [8]byte) error {
-	ftsPrefixes := []byte{prefix.FTSPosting, prefix.Trigram, prefix.FTSStats, prefix.TermStats}
+	ftsPrefixes := clearFTSKeysPrefixes
 	batch := ps.db.NewBatch()
 	for _, p := range ftsPrefixes {
 		lo := make([]byte, 9)

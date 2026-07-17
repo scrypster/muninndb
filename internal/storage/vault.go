@@ -193,7 +193,7 @@ func (ps *PebbleStore) ListVaultNames() ([]string, error) {
 
 	var names []string
 	for valid := iter.First(); valid; valid = iter.Next() {
-		if len(iter.Key()) == 9 && iter.Key()[0] == 0x0E {
+		if len(iter.Key()) == 9 && iter.Key()[0] == prefix.VaultMeta {
 			val := make([]byte, len(iter.Value()))
 			copy(val, iter.Value())
 			names = append(names, string(val))

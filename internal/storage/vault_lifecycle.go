@@ -10,6 +10,26 @@ import (
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
+// clearVaultDataPrefixes lists every vault-scoped data prefix that ClearVault
+// deletes via range tombstones. It is hoisted to package scope so that the
+// per-list partition guard (TestClearVaultDataPrefixes_Scope) can pin its
+// membership directly.
+//
+// 0x0E (vault meta key), 0x0F (name index), 0x11 (digest flags), 0x1F (entity
+// records) are intentionally excluded — they are global or name keys cleared
+// separately by DeleteVaultNameOnly / entity prune. 0x23 (entity reverse index)
+// is deleted row-by-row in deleteVaultEntityReverseIndex (the row layout embeds
+// the vault prefix mid-key, so a prefix-range tombstone cannot target it).
+var clearVaultDataPrefixes = []byte{
+	prefix.Engram, prefix.Meta, prefix.AssocFwd, prefix.AssocRev,
+	prefix.FTSPosting, prefix.Trigram, prefix.HNSWNode, prefix.FTSStats,
+	prefix.TermStats, prefix.Contradiction, prefix.StateIndex, prefix.TagIndex,
+	prefix.CreatorIndex, prefix.RelevanceBucket, prefix.Coherence, prefix.VaultWeights,
+	prefix.AssocWeightIndex, prefix.VaultCount, prefix.Provenance, prefix.BucketMigration,
+	prefix.EntityEngramLink, prefix.Relationship, prefix.LastAccess, prefix.CoOccurrence,
+	prefix.ArchiveAssoc, prefix.RelEntityIndex, prefix.DreamState, prefix.ContentHash, prefix.Lease,
+}
+
 // ClearVault deletes all data keys for a vault using Pebble range tombstones.
 // The vault name registration (0x0E, 0x0F) is preserved — use DeleteVaultNameOnly
 // to remove those after clearing.
@@ -61,15 +81,7 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 
 	// Step 3: DeleteRange for all vault-scoped data prefixes.
 	// 0x0E (vault meta), 0x0F (name index), 0x11 (digest flags) are intentionally excluded.
-	dataPrefixes := []byte{
-		prefix.Engram, prefix.Meta, prefix.AssocFwd, prefix.AssocRev,
-		prefix.FTSPosting, prefix.Trigram, prefix.HNSWNode, prefix.FTSStats,
-		prefix.TermStats, prefix.Contradiction, prefix.StateIndex, prefix.TagIndex,
-		prefix.CreatorIndex, prefix.RelevanceBucket, prefix.Coherence, prefix.VaultWeights,
-		prefix.AssocWeightIndex, prefix.VaultCount, prefix.Provenance, prefix.BucketMigration,
-		prefix.EntityEngramLink, prefix.Relationship, prefix.LastAccess, prefix.CoOccurrence,
-		prefix.ArchiveAssoc, prefix.RelEntityIndex, prefix.DreamState, prefix.ContentHash, prefix.Lease,
-	}
+	dataPrefixes := clearVaultDataPrefixes
 	wsPlus, err := incrementWS(ws)
 	if err != nil {
 		return 0, fmt.Errorf("clear vault: %w", err)

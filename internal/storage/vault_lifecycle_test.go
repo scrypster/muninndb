@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
@@ -149,7 +150,7 @@ func TestClearVault_RemovesEntityGraphForVault(t *testing.T) {
 		t.Fatalf("ClearVault: %v", err)
 	}
 
-	for _, p := range []byte{0x20, 0x21, 0x24, 0x26} {
+	for _, p := range []byte{prefix.EntityEngramLink, prefix.Relationship, prefix.CoOccurrence, prefix.RelEntityIndex} {
 		assertNoVaultPrefixKeys(t, store, p, wsA)
 	}
 	assertNoEntityReverseIndexKeysForVault(t, store, wsA)

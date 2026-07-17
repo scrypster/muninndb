@@ -202,8 +202,8 @@ func (ps *PebbleStore) CloneVaultData(
 
 			k := iter.Key()
 
-			// Skip the 9-byte VaultCountKey (0x15 | ws[8]) — written separately.
-			if p == 0x15 && len(k) == 9 {
+			// Skip the 9-byte VaultCountKey (prefix.VaultCount | ws[8]) — written separately.
+			if p == prefix.VaultCount && len(k) == 9 {
 				continue
 			}
 
@@ -397,13 +397,13 @@ func (ps *PebbleStore) MergeVaultData(
 	for _, p := range vaultScopedSwapPrefixes {
 		// Prefix-level skip: FTS stats and keeper-target prefixes.
 		switch p {
-		case 0x08, 0x09:
+		case prefix.FTSStats, prefix.TermStats:
 			// FTS global stats / per-term stats — rebuilt by reindexVault after merge.
 			continue
-		case 0x13:
+		case prefix.VaultWeights:
 			// Vault scoring weights — keep target's weights, don't overwrite with source.
 			continue
-		case 0x17:
+		case prefix.BucketMigration:
 			// Bucket migration state — keep target state, don't overwrite.
 			continue
 		}
@@ -443,7 +443,7 @@ func (ps *PebbleStore) MergeVaultData(
 
 			// Per-key strategy based on prefix.
 			switch p {
-			case 0x15:
+			case prefix.VaultCount:
 				// VaultCountKey (9 bytes): skip — recomputed in Phase 4.
 				// Episode keys (>9 bytes): UNION.
 				if len(k) == 9 {
