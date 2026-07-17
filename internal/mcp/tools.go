@@ -3,7 +3,7 @@ package mcp
 func allToolDefinitions() []ToolDefinition {
 	vaultProp := map[string]any{
 		"type":        "string",
-		"description": "Vault name to scope the operation (default: 'default'). Optional when connected via a vault-pinned MCP session.",
+		"description": "Vault name to scope the operation (default: 'default'). Optional when authenticating via a vault-pinned mk_ key.",
 	}
 	// entityTypeEnum lists the 14 recognised entity types (the single source of
 	// truth is validEntityTypes in handlers.go). Any other value is coerced to

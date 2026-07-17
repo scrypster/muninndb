@@ -5,7 +5,6 @@ package mcp
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -345,85 +344,6 @@ func TestHandleListDeleted_NilSliceNormalized(t *testing.T) {
 	count, _ := content["count"].(float64)
 	if int(count) != 0 {
 		t.Errorf("expected count=0, got %v", count)
-	}
-}
-
-// ── sessionFromRequest ─────────────────────────────────────────────────────────
-
-// fakeSessionStore is a minimal sessionStore for testing sessionFromRequest.
-type fakeSessionStore struct {
-	sessions map[string]*mcpSession
-}
-
-func newFakeSessionStore() *fakeSessionStore {
-	return &fakeSessionStore{sessions: make(map[string]*mcpSession)}
-}
-
-func (s *fakeSessionStore) Get(id string) (*mcpSession, bool) {
-	sess, ok := s.sessions[id]
-	return sess, ok
-}
-
-func (s *fakeSessionStore) Create(_ string, _ [32]byte) (string, error) { return "", nil }
-func (s *fakeSessionStore) Touch(_ string)                              {}
-func (s *fakeSessionStore) MarkInitialized(_ string) error              { return nil }
-func (s *fakeSessionStore) ByVault(_ string) []*mcpSession              { return nil }
-func (s *fakeSessionStore) DroppedCount(_ string) int64                 { return 0 }
-func (s *fakeSessionStore) Close()                                      {}
-
-func TestSessionFromRequest_NoHeader(t *testing.T) {
-	store := newFakeSessionStore()
-	req, _ := http.NewRequest("POST", "/mcp", nil)
-	sess, id := sessionFromRequest(req, store)
-	if sess != nil || id != "" {
-		t.Errorf("expected (nil, '') with no header, got (%v, %q)", sess, id)
-	}
-}
-
-func TestSessionFromRequest_UnknownSessionID(t *testing.T) {
-	store := newFakeSessionStore()
-	req, _ := http.NewRequest("POST", "/mcp", nil)
-	req.Header.Set(mcpSessionHeader, "nonexistent-id")
-	sess, id := sessionFromRequest(req, store)
-	if sess != nil {
-		t.Error("expected nil session for unknown session ID")
-	}
-	if id != "nonexistent-id" {
-		t.Errorf("expected session ID to be returned, got %q", id)
-	}
-}
-
-func TestSessionFromRequest_ValidSession(t *testing.T) {
-	store := newFakeSessionStore()
-	store.sessions["test-session"] = &mcpSession{vault: "default"}
-	req, _ := http.NewRequest("POST", "/mcp", nil)
-	req.Header.Set(mcpSessionHeader, "test-session")
-	sess, id := sessionFromRequest(req, store)
-	if sess == nil {
-		t.Error("expected non-nil session for known session ID")
-	}
-	if id != "test-session" {
-		t.Errorf("expected session ID 'test-session', got %q", id)
-	}
-}
-
-// ── validateSessionToken ───────────────────────────────────────────────────────
-
-func TestValidateSessionToken_Matching(t *testing.T) {
-	token := "my-secret-token"
-	h := sha256.Sum256([]byte(token))
-	sess := &mcpSession{tokenHash: h}
-	if msg := validateSessionToken(sess, token); msg != "" {
-		t.Errorf("expected empty error for matching token, got: %s", msg)
-	}
-}
-
-func TestValidateSessionToken_Mismatch(t *testing.T) {
-	token := "my-secret-token"
-	h := sha256.Sum256([]byte(token))
-	sess := &mcpSession{tokenHash: h}
-	if msg := validateSessionToken(sess, "wrong-token"); msg == "" {
-		t.Error("expected error for mismatched token, got empty")
 	}
 }
 

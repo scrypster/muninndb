@@ -3,7 +3,6 @@ package mcp
 
 import (
 	"context"
-	"crypto/sha256"
 	"net/http"
 
 	"github.com/scrypster/muninndb/internal/auth"
@@ -113,32 +112,6 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 		return AuthContext{Token: token, Authorized: true}
 	}
 	return AuthContext{Authorized: false}
-}
-
-// sessionFromRequest looks up a session by the Mcp-Session-Id header.
-// Returns (nil, "") if no header present.
-// Returns (nil, sessionID) if header present but session not found or expired.
-func sessionFromRequest(r *http.Request, store sessionStore) (sess *mcpSession, sessionID string) {
-	sessionID = r.Header.Get(mcpSessionHeader)
-	if sessionID == "" {
-		return nil, ""
-	}
-	sess, ok := store.Get(sessionID)
-	if !ok {
-		return nil, sessionID
-	}
-	return sess, sessionID
-}
-
-// validateSessionToken checks that the bearer token matches the session's token hash.
-// Returns an error string if invalid, "" if valid.
-// Precondition: sess must not be nil.
-func validateSessionToken(sess *mcpSession, token string) string {
-	h := sha256.Sum256([]byte(token))
-	if h != sess.tokenHash {
-		return "token does not match session"
-	}
-	return ""
 }
 
 // resolveVault determines the effective vault for a tool call.
