@@ -318,6 +318,8 @@ components:
           type: string
         content:
           type: string
+        summary:
+          type: string
         score:
           type: number
           format: float
@@ -334,6 +336,31 @@ components:
             type: string
         dormant:
           type: boolean
+        created_at:
+          type: integer
+          format: int64
+        last_access:
+          type: integer
+          format: int64
+        access_count:
+          type: integer
+          format: int64
+        relevance:
+          type: number
+          format: float
+        source_type:
+          type: string
+        state:
+          type: integer
+          format: uint8
+        trust:
+          type: integer
+          format: uint8
+        memory_type:
+          type: integer
+          format: uint8
+        type_label:
+          type: string
 
     BriefSentence:
       type: object
