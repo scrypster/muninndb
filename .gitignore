@@ -75,3 +75,9 @@ sdk/python/*.egg-info/
 sdk/muninndb/dist/
 sdk/muninndb/*.egg-info/
 sdk/php/vendor/
+
+# Maintainer-private AI tooling: voice, contributor profiles, response-drafting,
+# and the consolidated soft-spot/attack-surface appendix. Local-only, never pushed.
+.claude/maintainer/
+.claude/skills/triage-issue/
+.claude/skills/review-pr/
