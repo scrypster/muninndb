@@ -27,6 +27,18 @@ you actually find in the live code, the live code wins — say so in your review
 enforce the stale claim.** (The invariants doc itself instructs this; a doc that's
 confidently wrong is worse than none.)
 
+## The rubric is the authority
+
+**Follow `docs/internals/review-rubric.md` literally.** It is the gated protocol that makes a
+review dependable regardless of how strong the model running it is: pick the risk tier by its
+objective path/keyword rules, run every evidence gate in scope, and attach real pasted output
+for each. Your verdict is bounded by its confidence floor — **APPROVE only when every in-scope
+gate passed with attached evidence; when you can't satisfy a gate with evidence, DEFER, never
+approve-on-faith.** If the change is Tier 3 (auth, on-disk format, migration, concurrency,
+crypto, replication, deps), a second independent adversarial pass is required (gate G6); if
+you are the sole reviewer, say so and do not issue a final solo APPROVE on a Tier-3 change —
+flag that it needs the refute pass. The rules below are how you carry the rubric out.
+
 ## Operating rules
 
 1. **Confirm the commit before asserting anything.** Run `git branch --show-current` and
