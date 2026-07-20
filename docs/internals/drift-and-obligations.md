@@ -40,8 +40,9 @@ for any PR that touches a synced surface.
 7. **`proto/muninn/v1/service.proto`** → regenerate `proto/gen/go/...`. No CI step verifies
    the generated code is current — the reviewer must confirm regen ran.
 
-8. **A new Pebble prefix** → see `keyspace-registry.md`: disjoint, documented in `keys.go`,
-   and bump `storageMaxPrefix` in `keys_test.go` if ≥ 0x2B.
+8. **A new Pebble prefix** → see `keyspace-registry.md`: disjoint, and added to
+   `internal/prefix/prefix.All()` (the single source of truth). The disjointness tests in
+   `internal/prefix/prefix_test.go` auto-tighten — there is no `storageMaxPrefix` to bump.
 
 9. **Any `go build` of the muninn binary** → must keep `-tags localassets`. Enforced by
    `scripts/check-build-tags.sh` (CI `shellcheck` job), but that script only scans the
@@ -105,7 +106,8 @@ rather than in the default `go test ./...` path.
 - **RED-sanity verification**: a bug-fix/race-fix test must be shown to fail without the fix.
 - **Preset-pinning `reflect.DeepEqual` tests** for derived config (#599).
 - **Registry-parity smoke** for the MCP tool surface (`smoke_exhaustive_test.go`).
-- **Cross-package disjointness test** for Pebble prefixes (`TestCapabilityPrefixesNoCollision`).
+- **Cross-package disjointness test** for Pebble prefixes, derived from `prefix.All()`
+  (`TestAll_NoDuplicateBytes`/`TestAll_OwnerGroupsPairwiseDisjoint` in `internal/prefix/prefix_test.go`).
 - **Coverage test that enumerates all handlers** so a new tool can't escape mode
   classification (`TestToolClassification_CoversAllRegisteredHandlers`).
 - **`-race` on anything touching** storage, the Hebbian/PAS workers, the pruner,

@@ -32,7 +32,7 @@ Format: **[INV-n]** assertion — `file:anchor` — *why it matters / what break
 
 ## Storage & durability invariants
 
-- **[STO-1]** A new Pebble prefix must be disjoint from the keyspace registry and documented where the registry lives; the disjointness cross-check must cover it. On current `develop` that means `keys/keys.go` doc comments + bumping `storageMaxPrefix` in `keys_test.go` if ≥ 0x2B; **once PR #618 (#611) merges** it means adding the prefix to `internal/prefix/prefix.All()` (the test auto-tightens, no constant to bump). Check `ls internal/prefix/` to see which world you're in. — see `keyspace-registry.md`.
+- **[STO-1]** A new Pebble prefix must be disjoint from the keyspace registry and added to it; the disjointness cross-check must cover it. The registry lives in `internal/prefix/prefix.go`: add the prefix to `prefix.All()` and the disjointness tests (`TestAll_NoDuplicateBytes`, `TestAll_OwnerGroupsPairwiseDisjoint` in `internal/prefix/prefix_test.go`) auto-tighten to cover it — there is **no `storageMaxPrefix` constant to bump** (removed with #618's registry consolidation). — see `keyspace-registry.md`.
 - **[STO-2]** Any path mutating engram **state or lease** must hold `casLocks.For(id)` across read→commit, as `CompareAndSet` (`storage/lease.go`) and `DeleteEngram` (`storage/engram.go`) do. *A new unlocked state-mutating path reopens the #594 resurrection race.*
 - **[STO-3]** CAS state changes go through `UpdateMetadata` (keeps 0x0B index, caches, provenance, replication consistent) — never a direct 0x02 write — `storage/lease.go`.
 - **[STO-4]** The engram lease (0x2A) is **advisory**: recall/claim paths consult it; normal writes must not start consulting it without an RFC — `storage/lease.go`, `engine/engine_lease.go`.
@@ -54,7 +54,7 @@ Format: **[INV-n]** assertion — `file:anchor` — *why it matters / what break
 - **[SEC-7]** A vault-pinned credential rejects any differing `vault` argument and never echoes the pinned name — `internal/mcp/context.go` (also REST/gRPC/MBP). *No cross-vault action, no name leak.*
 - **[SEC-8]** Unconfigured vaults are locked (fail-closed, `Public:false`) on REST/gRPC/MBP — `internal/auth/vault_config.go`.
 - **[SEC-9]** Toolset filtering is **advertisement-only**; dispatch never consults it; unknown values fail **open to full** — `internal/mcp/toolset.go`. *Presentation preference, not a security boundary.*
-- **[SEC-10]** SSE per-POST: a cached `cap_` session credential is re-validated before dispatch — `internal/mcp/server.go`. *Closes the #612 confused-deputy.* **Known open gap: the symmetric `mk_` re-validation does NOT exist (#615/#617) — a revoked mk_ SSE session can survive. A PR touching the SSE POST path should fix or at least not widen this.**
+- **[SEC-10]** SSE per-POST: both a cached `cap_` and a cached `mk_` session credential are re-validated (live key-store read) before dispatch, so a revoked or expired credential cannot keep dispatching on an open SSE session — `internal/mcp/server.go`. *The cap_ half closed the #612 confused-deputy; the mk_ half closed the symmetric gap in #617 (was #615). A PR touching the SSE POST path must not reopen either.*
 - **[SEC-11]** Vault names are `[a-z0-9_-]{1,64}` everywhere via `IsValidVaultName` — `internal/auth/token.go`.
 - **[SEC-12]** Static-token compares are constant-time with a length cap; keys/caps are looked up by SHA-256(secret) — raw secrets are never stored — `internal/auth/token.go`, `keys_store.go`, `capability_store.go`.
 - **[SEC-13]** Any new client write path in a cluster deployment must either gate on `IsLeader()`/Cortex-origin or replicate its mutation — no transport does this today, which is exactly bug #596. Background workers that mutate replicated state (e.g. the pruner) inherit the same obligation.
@@ -64,7 +64,7 @@ Format: **[INV-n]** assertion — `file:anchor` — *why it matters / what break
 ## Known open wounds
 
 Several of these invariants sit next to known-imperfect code. The individual issues are
-tracked publicly (#596, #605, #607, #611, #615/#617, …); a reviewer should recognize when a
+tracked publicly (#596, #605, #607, …); a reviewer should recognize when a
 PR is touching one and either fix or at least not widen it. The consolidated map of soft
 spots and trust-surface weaknesses is kept in the maintainer-private tier
 (`.claude/maintainer/soft-spots.md`) rather than concentrated here — cite the individual
