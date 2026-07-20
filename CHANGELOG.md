@@ -9,11 +9,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.9.0] - 2026-07-20
+
+Adds an agent-oriented credential and multi-agent workflow layer (capability
+tokens and self-provisioned workflow vaults), a `working` plasticity preset,
+recall-event calibration ground truth, and a `muninn remember` CLI write verb,
+alongside a keyspace-collision fix that ships a one-time on-disk migration.
+
+> **Upgrade note — on-disk migration.** This release relocates the auth
+> subsystem's internal Pebble key prefixes to resolve a latent collision with
+> storage keys (#611). A one-time v3 migration rewrites existing admin-user,
+> API-key, and vault-config records on the first start after upgrade. It is
+> idempotent and crash-safe, but **back up your data directory before
+> upgrading**, as with any storage-format change. No action is needed beyond
+> starting the new binary.
+
+### Added
+
+- **Capability tokens (`cap_`) and agent-provisioned workflow vaults.** A new
+  TTL-bound, MCP-only credential type plus a `muninn_create_workflow_vault` tool
+  that lets an agent mint a scoped, expiring `wf-*` vault for a fleet.
+  Capabilities are structurally non-recursive (a capability can never mint
+  another) and the tool is opt-in (`MUNINN_AGENT_VAULT_CREATE`, default off).
+  (#612, RFC #597)
+- **Toolset profiles for `tools/list`.** A `core`/`full` switch via the
+  `MUNINN_MCP_TOOLSET` env var or a per-connection `X-Muninn-Toolset` header
+  trims the advertised tool set to cut per-session schema overhead. Advertisement
+  only — every tool stays callable. Defaults to `full`, fails open on unknown
+  values. (#604, implements #588)
+- **`working` plasticity preset.** `default` cognition (Hebbian + PAS on) plus a
+  7-day retention window, so a shared workflow vault auto-evaporates through the
+  background pruner. (#599, RFC #597)
+- **Recall-event sink.** The set of engrams surfaced by each recall is persisted
+  as calibration ground truth, behind a purpose-gated read allowlist so it can
+  never leak back into recall, replicated like every other write, and cleared
+  with its vault. (#574, closes #573)
+- **`muninn remember` CLI verb.** Store a memory against a running daemon over
+  the REST surface, with `--content-file` for large or JSON-fragile payloads,
+  authenticating from a `0600` key file. (#613, closes #610)
+- **Stored memory type surfaced on reads.** `read`, `recall`, `where_left_off`,
+  and `find_by_entity` now return the stored `memory_type` and `type_label`.
+  (#616)
+- **Search Scoring setting** in the management console. (#590)
+
+### Changed
+
+- **Auth Pebble key prefixes relocated (`0x11`–`0x14` → `0x42`–`0x45`),**
+  resolving a latent collision with storage keys in the shared database (see the
+  upgrade note above). Ships a v3 on-disk migration and a cross-package
+  prefix-disjointness test so the collision class can't recur. (#618, closes
+  #611)
+
+### Fixed
+
+- **Tag-scoped recall no longer silently misses engrams.** `tags_all` /
+  `tags_any` were post-filters over the candidate pool; they now seed candidates
+  from the tag index, so a tagged engram can no longer be structurally absent
+  from a tag-scoped recall. (#619, closes #607)
+- **Revoked or expired `mk_` API keys can no longer keep dispatching on an open
+  MCP SSE session.** The cached session credential is re-validated on every POST,
+  symmetric with the existing `cap_` re-validation. (#617, RFC #597; see
+  Security)
+- **Late HNSW inserts stay reachable.** A node born with zero in-edges could be
+  permanently unfindable; the fresh back-edge is now protected during prune and
+  small orphan sets are repaired on load. (#621, closes #620)
+- **Explicit recall threshold preserved under RRF fusion** instead of being
+  clobbered to the RRF floor. (#590)
+- **`DeleteEngram` serialized with `CompareAndSet`'s per-engram stripe lock,**
+  closing a race that could resurrect a just-deleted engram. (#594)
+
+### Security
+
+- **Revoked `mk_` MCP SSE sessions closed.** A revoked or expired API key could
+  keep serving a long-lived SSE session; it is now re-validated on every POST
+  before dispatch. (#617)
+
+---
+
+## [0.8.0] - 2026-07-09
+
+### Added
+
+- **Atomic compare-and-set + ownership lease on engrams.** A low-level CAS
+  primitive (`PebbleStore.CompareAndSet`), layered into an advisory ownership
+  lease (`Claim`/`Release`), giving a fleet of agents sharing a vault
+  work-queue semantics — no two agents grab the same item. Closes a
+  pre-existing lifecycle-state TOCTOU as a side effect. (#576, closes #548)
+- **Fuzzy entity resolve behind exact `find_by_entity` lookup.** Exact match
+  is tried first; fuzzy token-set-containment matching is the fallback, not
+  the default, avoiding over-eager matches. (#571, #572, tightened in #581)
+- **Vault dimension guard.** Each vault's embedding dimension is established
+  atomically on first insert and enforced on every write path. On mismatch,
+  recall degrades to BM25-only instead of silently mixing embedding spaces.
+  (#589, closes #582)
+- **User-supplied local ONNX embedding model.** New `embed_model_path` /
+  `embed_tokenizer_path` config lets operators point at their own model
+  instead of the bundled one; dimension is probed via real inference at
+  init, never hardcoded. (#589, closes #583)
+- **`vault plasticity` CLI command** to get/set per-vault plasticity
+  settings. (#551)
+- **`multi_user` vault setting** with shared-vault session-start guidance.
+  (#575)
+- **gRPC `ListVaults` and `BatchForget` RPCs**, with per-item vault
+  resolution and auth requirements. (#557, #558)
+
+### Fixed
+
+- **Embed provider silent fallback eliminated.** An explicitly configured
+  embed provider is never silently substituted for a different model. (#585)
+- **BM25 fallback when the embed backend is unreachable**, with precise
+  `-32602` error messages instead of an opaque failure. (#578)
+- **Plasticity panel reset.** Advanced plasticity overrides no longer leak
+  stale values into the save payload when the panel is collapsed. (#579)
+- **CLI joined `exec:`/`logs:` tokens** now route to their handlers instead
+  of being misparsed. (#580)
+- **Idempotent write paths.** Idempotency keys are wired through gRPC and
+  REST write paths and deduped within a batch. (#560, plus follow-up fix)
+- **Entity scan dedup** by normalized identity instead of raw casing.
+- **HNSW graph rebuild** from vectors when the restored structure is
+  disconnected.
+- **`vault create` registration** in the Pebble index, repairing a
+  split-brain window in reindex-fts/export. (#547)
+- **Google enrichment truncation.** The Google provider's `MaxOutputTokens`
+  was raised from 4096 to 8192, and LLM parse failures are now counted in the
+  stats, so long enrichments are no longer silently truncated.
+
 ### Security
 
 - Bump Go toolchain to 1.26.5, fixing [GO-2026-5856](https://pkg.go.dev/vuln/GO-2026-5856)
-  (Encrypted Client Hello privacy leak in `crypto/tls`), reachable via the gRPC server,
-  MCP server, WAL recovery, `doctor` cert dial, and plugin transport.
+  (Encrypted Client Hello privacy leak in `crypto/tls`), reachable via the gRPC
+  server, MCP server, WAL recovery, `doctor` cert dial, and plugin transport.
+  (#591)
+
+> **Correction (see #602):** the originally-tagged 0.8.0 changelog listed an
+> entity-boost recall-flood fix (#569) under Fixed. That fix did not make the
+> 0.8.0 cut — #569 remains open and its PR (#570) is still in review — so the
+> entry has been removed here. The fuzzy-entity work that did ship (#581) is
+> covered under "Fuzzy entity resolve" above.
 
 ---
 
