@@ -35,6 +35,7 @@ type EngineAPI interface {
 	Subscribe(ctx context.Context, req *pb.SubscribeRequest) (*pb.SubscribeResponse, error)
 	SubscribeWithDeliver(ctx context.Context, req *pb.SubscribeRequest, deliver trigger.DeliverFunc) (string, error)
 	Unsubscribe(ctx context.Context, subID string) error
+	AdjustConfidence(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error)
 }
 
 // Server implements the MuninnDB gRPC service.
@@ -415,6 +416,27 @@ func (s *Server) Link(ctx context.Context, req *pb.LinkRequest) (*pb.LinkRespons
 	resp, err := s.engine.Link(ctx, req)
 	if err != nil {
 		slog.Error("link failed", "error", err)
+		return nil, err
+	}
+	return resp, nil
+}
+
+// AdjustConfidence implements the AdjustConfidence RPC. Mirrors Link:
+// denyReadOnlyMutation rejects observe-mode keys, resolveRequestVault rewrites
+// req.Vault to the canonical bound vault, then the engine adapter handles ULID
+// parsing and the documented sentinel→codes mapping.
+func (s *Server) AdjustConfidence(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error) {
+	if err := denyReadOnlyMutation(ctx); err != nil {
+		return nil, err
+	}
+	vault, err := s.resolveRequestVault(ctx, req.Vault)
+	if err != nil {
+		return nil, err
+	}
+	req.Vault = vault
+	resp, err := s.engine.AdjustConfidence(ctx, req)
+	if err != nil {
+		slog.Error("adjust_confidence failed", "error", err)
 		return nil, err
 	}
 	return resp, nil

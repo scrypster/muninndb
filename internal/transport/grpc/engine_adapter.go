@@ -2,11 +2,15 @@ package grpc
 
 import (
 	"context"
+	"errors"
 
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
+	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 	pb "github.com/scrypster/muninndb/proto/gen/go/muninn/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // grpcEngineAdapter adapts *engine.Engine to grpcpkg.EngineAPI, translating
@@ -203,4 +207,47 @@ func (a *grpcEngineAdapter) SubscribeWithDeliver(ctx context.Context, req *pb.Su
 
 func (a *grpcEngineAdapter) Unsubscribe(ctx context.Context, subID string) error {
 	return a.eng.Unsubscribe(ctx, subID)
+}
+
+// AdjustConfidence adapts the AdjustConfidence RPC to engine.Engine.AdjustConfidence.
+// ULID parsing failures return codes.InvalidArgument without reaching the engine;
+// engine sentinel errors (ErrInvalidArgument, ErrSelfContradiction, ErrEngramNotFound)
+// are mapped to the codes the engine contract documents (400 / INVALID_ARGUMENT and
+// 404 / NOT_FOUND). All other errors surface as the engine returned them.
+func (a *grpcEngineAdapter) AdjustConfidence(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error) {
+	id, err := storage.ParseULID(req.EngramId)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "engram_id %q: %v", req.EngramId, err)
+	}
+	hasContra := req.ContradictedById != ""
+	var other storage.ULID
+	if hasContra {
+		other, err = storage.ParseULID(req.ContradictedById)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "contradicted_by_id %q: %v", req.ContradictedById, err)
+		}
+	} else {
+		other = id
+	}
+	newConf, err := a.eng.AdjustConfidence(ctx, req.Vault, id, req.Delta, other, hasContra, req.Reason)
+	if err != nil {
+		return nil, mapAdjustConfidenceError(err)
+	}
+	return &pb.AdjustConfidenceResponse{NewConfidence: newConf}, nil
+}
+
+// mapAdjustConfidenceError maps the engine sentinel errors that AdjustConfidence
+// documents (engine_vault.go: "REST/gRPC handlers map it to 400/INVALID_ARGUMENT")
+// onto the corresponding gRPC codes. It is local to this RPC because the existing
+// Link/Forget adapter surface does not currently perform sentinel→code mapping
+// (those errors surface as codes.Unknown); AdjustConfidence was specified to do so.
+func mapAdjustConfidenceError(err error) error {
+	switch {
+	case errors.Is(err, engine.ErrInvalidArgument), errors.Is(err, engine.ErrSelfContradiction):
+		return status.Errorf(codes.InvalidArgument, "%v", err)
+	case errors.Is(err, engine.ErrEngramNotFound):
+		return status.Errorf(codes.NotFound, "%v", err)
+	default:
+		return err
+	}
 }
