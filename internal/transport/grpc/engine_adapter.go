@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -229,7 +230,7 @@ func (a *grpcEngineAdapter) AdjustConfidence(ctx context.Context, req *pb.Adjust
 	} else {
 		other = id
 	}
-	newConf, err := a.eng.AdjustConfidence(ctx, req.Vault, id, req.Delta, other, hasContra, req.Reason)
+	newConf, err := a.eng.AdjustConfidence(ctx, req.Vault, id, req.Delta, other, hasContra, req.Reason, callerFromContext(ctx))
 	if err != nil {
 		return nil, mapAdjustConfidenceError(err)
 	}
@@ -250,4 +251,23 @@ func mapAdjustConfidenceError(err error) error {
 	default:
 		return err
 	}
+}
+
+// callerFromContext extracts a human-readable caller identifier from the
+// authenticated principal in ctx. authUnaryInterceptor sets auth.ContextAPIKey
+// to the validated *auth.APIKey on the mk_ path; the public-vault path leaves
+// it unset. Returns the key Label (operator-assigned, stable, human-readable),
+// falling back to the key ID when Label is empty, and "anonymous" when no key
+// is present — so the audit log always carries a non-empty caller field.
+//
+// Mirrors the MCP transport's AuthContext.IsAPIKey extraction (context.go),
+// read from the same context value the gRPC interceptor already populates.
+func callerFromContext(ctx context.Context) string {
+	if key, ok := ctx.Value(auth.ContextAPIKey).(*auth.APIKey); ok && key != nil {
+		if key.Label != "" {
+			return key.Label
+		}
+		return key.ID
+	}
+	return "anonymous"
 }

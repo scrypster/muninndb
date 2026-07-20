@@ -2544,7 +2544,7 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 // cogWorkers() submit pattern. Source string is "external_contradiction" to
 // distinguish external bridge signal from the internal "contradiction_detected"
 // path emitted by Link/ContradictWorker.
-func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.ULID, delta float32, other storage.ULID, hasContra bool, reason string) (float32, error) {
+func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.ULID, delta float32, other storage.ULID, hasContra bool, reason, caller string) (float32, error) {
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
 	if math.IsNaN(float64(delta)) || math.IsInf(float64(delta), 0) {
@@ -2605,7 +2605,7 @@ func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.
 	slog.Info("adjust_confidence",
 		"engram_id", id.String(), "delta", delta, "prior", current, "new", newConf,
 		"contradicted_by", other.String(), "has_contra", hasContra,
-		"reason", reason, "vault", vault)
+		"reason", reason, "caller", caller, "vault", vault)
 
 	return newConf, nil
 }

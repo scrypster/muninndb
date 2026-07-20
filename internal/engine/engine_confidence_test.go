@@ -154,7 +154,7 @@ func TestEngineAdjustConfidence_Clamps(t *testing.T) {
 		if err := e.Store().UpdateConfidence(context.Background(), ws, id, 0.5); err != nil {
 			t.Fatalf("re-seed UpdateConfidence: %v", err)
 		}
-		got, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, c.delta, id, false, "t")
+		got, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, c.delta, id, false, "t", "test")
 		if err != nil {
 			t.Fatalf("delta %v: %v", c.delta, err)
 		}
@@ -168,7 +168,7 @@ func TestEngineAdjustConfidence_Clamps(t *testing.T) {
 func TestEngineAdjustConfidence_RejectsNaNAndInf(t *testing.T) {
 	e, ws, id := seedEngineWithEngram(t, 0.5)
 	for _, bad := range []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
-		if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, bad, id, false, "t"); err == nil {
+		if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, bad, id, false, "t", "test"); err == nil {
 			t.Fatalf("delta %v: expected error, got nil", bad)
 		}
 	}
@@ -177,7 +177,7 @@ func TestEngineAdjustConfidence_RejectsNaNAndInf(t *testing.T) {
 // TestEngineAdjustConfidence_RejectsSelfContradiction (RED-sanity).
 func TestEngineAdjustConfidence_RejectsSelfContradiction(t *testing.T) {
 	e, ws, id := seedEngineWithEngram(t, 0.5)
-	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, -0.1, id, true, "t"); err == nil {
+	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, -0.1, id, true, "t", "test"); err == nil {
 		t.Fatal("expected self-contradiction error, got nil")
 	}
 }
@@ -186,7 +186,7 @@ func TestEngineAdjustConfidence_RejectsSelfContradiction(t *testing.T) {
 func TestEngineAdjustConfidence_NotFoundOnUnknownEngram(t *testing.T) {
 	e, ws, _ := seedEngineWithEngram(t, 0.5)
 	unknown := storage.NewULID()
-	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), unknown, -0.1, unknown, false, "t"); err == nil {
+	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), unknown, -0.1, unknown, false, "t", "test"); err == nil {
 		t.Fatal("expected NotFound for unknown engram, got nil")
 	}
 }
@@ -195,7 +195,7 @@ func TestEngineAdjustConfidence_NotFoundOnUnknownEngram(t *testing.T) {
 func TestEngineAdjustConfidence_NotFoundOnUnknownContradictionTarget(t *testing.T) {
 	e, ws, id := seedEngineWithEngram(t, 0.5)
 	ghost := storage.NewULID()
-	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, -0.1, ghost, true, "t"); err == nil {
+	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, -0.1, ghost, true, "t", "test"); err == nil {
 		t.Fatal("expected NotFound for unknown contradicted_by_id, got nil")
 	}
 }
@@ -204,7 +204,7 @@ func TestEngineAdjustConfidence_NotFoundOnUnknownContradictionTarget(t *testing.
 // Every rejection path leaves the engram's confidence unchanged.
 func TestEngineAdjustConfidence_RejectionMutatesNothing(t *testing.T) {
 	e, ws, id := seedEngineWithEngram(t, 0.5)
-	_, _ = e.AdjustConfidence(context.Background(), vaultOf(ws), id, float32(math.NaN()), id, false, "t")
+	_, _ = e.AdjustConfidence(context.Background(), vaultOf(ws), id, float32(math.NaN()), id, false, "t", "test")
 	if got := readConfidence(t, e, ws, id); got != 0.5 {
 		t.Fatalf("confidence mutated after NaN rejection: %v", got)
 	}
@@ -217,7 +217,7 @@ func TestEngineAdjustConfidence_BareDeltaDoesNotSubmit(t *testing.T) {
 	cw := &recordingConfidenceWorker{}
 	e.SetCognitiveWorkers(nil, nil, cw.AsWorker())
 
-	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, 0.1, id, false, "t"); err != nil {
+	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, 0.1, id, false, "t", "test"); err != nil {
 		t.Fatal(err)
 	}
 	cw.drain()
@@ -234,7 +234,7 @@ func TestEngineAdjustConfidence_ContradictionSubmitsEvidenceForBoth(t *testing.T
 	cw := &recordingConfidenceWorker{}
 	e.SetCognitiveWorkers(nil, nil, cw.AsWorker())
 
-	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, 0.0, other, true, "rag-bridge"); err != nil {
+	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, 0.0, other, true, "rag-bridge", "test"); err != nil {
 		t.Fatal(err)
 	}
 	cw.drain()
