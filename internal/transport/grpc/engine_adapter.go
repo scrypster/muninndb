@@ -245,7 +245,7 @@ func mapAdjustConfidenceError(err error) error {
 	switch {
 	case errors.Is(err, engine.ErrInvalidArgument), errors.Is(err, engine.ErrSelfContradiction):
 		return status.Errorf(codes.InvalidArgument, "%v", err)
-	case errors.Is(err, engine.ErrEngramNotFound):
+	case errors.Is(err, engine.ErrEngramNotFound), errors.Is(err, storage.ErrNotFound):
 		return status.Errorf(codes.NotFound, "%v", err)
 	default:
 		return err

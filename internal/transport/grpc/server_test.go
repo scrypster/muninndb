@@ -1694,6 +1694,8 @@ func TestMapAdjustConfidenceError_Sentinels(t *testing.T) {
 		{"ErrSelfContradiction bare", engine.ErrSelfContradiction, codes.InvalidArgument},
 		{"ErrEngramNotFound bare", engine.ErrEngramNotFound, codes.NotFound},
 		{"ErrEngramNotFound wrapped", fmt.Errorf("read meta: %w", engine.ErrEngramNotFound), codes.NotFound},
+		{"storage.ErrNotFound bare", storage.ErrNotFound, codes.NotFound},
+		{"storage.ErrNotFound wrapped (engram deleted by concurrent Forget)", fmt.Errorf("engram %w", storage.ErrNotFound), codes.NotFound},
 		{"unrelated error passes through", errors.New("disk full"), codes.Unknown},
 		{"nil error", nil, codes.OK},
 	}
