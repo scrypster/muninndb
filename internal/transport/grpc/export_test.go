@@ -32,3 +32,11 @@ func TestableNewEngineAdapter(eng *engine.Engine) EngineAPI {
 func TestableMapAdjustConfidenceError(err error) error {
 	return mapAdjustConfidenceError(err)
 }
+
+// TestableCallerFromContext exposes the unexported caller-extraction helper
+// for direct table-driven testing. Pins the three branches: API key with
+// Label (preferred), ID fallback when Label is empty, and "anonymous" for
+// the public-vault path where the interceptor sets no key.
+func TestableCallerFromContext(ctx context.Context) string {
+	return callerFromContext(ctx)
+}

@@ -247,3 +247,40 @@ func TestEngineAdjustConfidence_ContradictionSubmitsEvidenceForBoth(t *testing.T
 		}
 	}
 }
+
+// TestEngineAdjustConfidence_ContradictionPersistsMarker verifies the 0x0A
+// contradiction marker is actually durable after Engine.AdjustConfidence
+// returns, read back through the engine's own public read path
+// (Engine.GetContradictions). The storage-layer test
+// (TestUpdateConfidenceWithContradiction_AtomicConfidenceAndMarker) already
+// pins the batched write; this test pins the engine contract — that a caller
+// who passes hasContra=true can observe the marker via the engine surface,
+// not just the raw store. Regression guard: if a future refactor of
+// AdjustConfidence drops the contradiction arm of the composed write (e.g.,
+// calls UpdateConfidence instead of UpdateConfidenceWithContradiction), the
+// marker disappears and this test fails.
+func TestEngineAdjustConfidence_ContradictionPersistsMarker(t *testing.T) {
+	e, ws, id := seedEngineWithEngram(t, 0.5)
+	other := seedSecondEngram(t, e, ws)
+
+	if _, err := e.AdjustConfidence(context.Background(), vaultOf(ws), id, -0.1, other, true, "rag-bridge", "test"); err != nil {
+		t.Fatalf("AdjustConfidence: %v", err)
+	}
+
+	pairs, err := e.GetContradictions(context.Background(), vaultOf(ws))
+	if err != nil {
+		t.Fatalf("GetContradictions: %v", err)
+	}
+	want := [2]storage.ULID{id, other}
+	wantRev := [2]storage.ULID{other, id}
+	found := false
+	for _, p := range pairs {
+		if p == want || p == wantRev {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("contradiction marker for {%s,%s} not persisted; pairs=%v", id, other, pairs)
+	}
+}

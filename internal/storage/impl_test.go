@@ -1307,6 +1307,14 @@ func TestUpdateConfidenceWithContradiction_AtomicConfidenceAndMarker(t *testing.
 	if !contradictionMarkerExists(t, store, ws, id, other) {
 		t.Fatal("expected 0x0A marker pair after hasContra write")
 	}
+	// The 0x0A marker lives in a separate keyspace from the confidence field.
+	// The composed write must touch only `id`'s confidence — `other`'s engram
+	// is unchanged. Regression guard: a future refactor that writes the marker
+	// pair by iterating both engrams' confidence keys would silently corrupt
+	// `other`'s confidence; this assertion catches that.
+	if got, _ := store.GetConfidence(context.Background(), ws, other); got != 0.5 {
+		t.Fatalf("other confidence mutated by composed write: got %v, want 0.5", got)
+	}
 }
 
 // TestUpdateConfidenceWithContradiction_NoMarkerWhenHasContraFalse verifies the
