@@ -2531,6 +2531,85 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 	return &mbp.LinkResponse{OK: true}, nil
 }
 
+// AdjustConfidence applies a signed delta to engram id's confidence (clamped to
+// [0,1]) and, when hasContra, mirrors the internal OnFound: persists the 0x0A
+// contradiction marker for (id, other) AND submits EvidenceContradiction to the
+// ConfidenceWorker for both engrams. Returns the new absolute confidence.
+//
+// All validation precedes any write. A bare delta (hasContra=false) does NOT
+// submit to the ConfidenceWorker (§D3 carve-out — processBatch would otherwise
+// clobber the explicit value).
+//
+// Mirrors Engine.Link's vault resolution + GetMetadata existence pattern +
+// cogWorkers() submit pattern. Source string is "external_contradiction" to
+// distinguish external bridge signal from the internal "contradiction_detected"
+// path emitted by Link/ContradictWorker.
+func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.ULID, delta float32, other storage.ULID, hasContra bool, reason string) (float32, error) {
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+
+	if math.IsNaN(float64(delta)) || math.IsInf(float64(delta), 0) {
+		return 0, fmt.Errorf("%w: delta is NaN or Inf", ErrInvalidArgument)
+	}
+	if hasContra && other == id {
+		return 0, ErrSelfContradiction
+	}
+
+	// Existence check — mirror Engine.Link's batched GetMetadata (nil meta = NotFound).
+	ids := []storage.ULID{id}
+	if hasContra {
+		ids = []storage.ULID{id, other}
+	}
+	metas, err := e.store.GetMetadata(ctx, wsPrefix, ids)
+	if err != nil {
+		return 0, fmt.Errorf("adjust confidence: read meta: %w", err)
+	}
+	for _, m := range metas {
+		if m == nil {
+			return 0, ErrEngramNotFound
+		}
+	}
+
+	// Current confidence (for the clamp + the audit prior).
+	current, err := e.store.GetConfidence(ctx, wsPrefix, id)
+	if err != nil {
+		return 0, ErrEngramNotFound
+	}
+
+	// Clamp to [0,1].
+	newConf := current + delta
+	if newConf < 0 {
+		newConf = 0
+	} else if newConf > 1 {
+		newConf = 1
+	}
+
+	// Atomic write (confidence + marker in one batch — no partial-failure window).
+	if err := e.store.UpdateConfidenceWithContradiction(ctx, wsPrefix, id, newConf, other, hasContra); err != nil {
+		return 0, fmt.Errorf("adjust confidence: write: %w", err)
+	}
+
+	// Mirror OnFound: submit EvidenceContradiction for both engrams (only when hasContra).
+	if hasContra {
+		if _, _, cw := e.cogWorkers(); cw != nil {
+			cw.Submit(cognitive.ConfidenceUpdate{
+				WS: wsPrefix, EngramID: [16]byte(id),
+				Evidence: cognitive.EvidenceContradiction, Source: "external_contradiction",
+			})
+			cw.Submit(cognitive.ConfidenceUpdate{
+				WS: wsPrefix, EngramID: [16]byte(other),
+				Evidence: cognitive.EvidenceContradiction, Source: "external_contradiction",
+			})
+		}
+	}
+
+	slog.Info("adjust_confidence",
+		"engram_id", id.String(), "delta", delta, "prior", current, "new", newConf,
+		"contradicted_by", other.String(), "has_contra", hasContra,
+		"reason", reason, "vault", vault)
+
+	return newConf, nil
+}
+
 // Forget implements mbp.EngineAPI.Forget.
 func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.ForgetResponse, error) {
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
