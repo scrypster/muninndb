@@ -829,6 +829,56 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	return nil
 }
 
+// UpdateConfidenceWithContradiction atomically updates engram confidence and,
+// when hasContra, writes the 0x0A contradiction marker for the (id, other) pair
+// in a single Pebble batch — no partial-failure window between the confidence
+// write and the marker. Mirrors UpdateConfidence (0x01+0x02 via erf.Encode) and
+// FlagContradiction (canonical-ordered 0x0A pair), composed.
+func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, wsPrefix [8]byte, id ULID, confidence float32, other ULID, hasContra bool) error {
+	eng, err := ps.GetEngram(ctx, wsPrefix, id)
+	if err != nil {
+		return err
+	}
+	eng.Confidence = confidence
+	eng.UpdatedAt = time.Now()
+
+	erfEng := toERFEngram(eng)
+	erfBytes, err := erf.Encode(erfEng)
+	if err != nil {
+		return fmt.Errorf("encode engram: %w", err)
+	}
+
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+
+	id16 := [16]byte(id)
+	batch.Set(keys.EngramKey(wsPrefix, id16), erfBytes, nil)
+	metaSlice := erfBytes
+	if len(metaSlice) > erf.MetaKeySize {
+		metaSlice = metaSlice[:erf.MetaKeySize]
+	}
+	batch.Set(keys.MetaKey(wsPrefix, id16), metaSlice, nil)
+
+	if hasContra {
+		aBytes := [16]byte(id)
+		bBytes := [16]byte(other)
+		if CompareULIDs(id, other) > 0 {
+			aBytes, bBytes = bBytes, aBytes
+		}
+		batch.Set(keys.ContradictionKey(wsPrefix, 0, 0, aBytes), bBytes[:], nil)
+		batch.Set(keys.ContradictionKey(wsPrefix, 0, 0, bBytes), aBytes[:], nil)
+	}
+
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return fmt.Errorf("commit batch: %w", err)
+	}
+	ps.replicateBatch(batch)
+
+	ps.cache.Set(wsPrefix, id, eng)
+	ps.metaCache.Remove(id16)
+	return nil
+}
+
 // toERFEngram converts storage.Engram to erf.Engram.
 func toERFEngram(eng *Engram) *erf.Engram {
 	erfAssocs := make([]erf.Association, len(eng.Associations))
