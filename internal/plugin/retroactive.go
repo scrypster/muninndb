@@ -1,12 +1,15 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -54,10 +57,20 @@ type RetroactiveProcessor struct {
 	wg       sync.WaitGroup
 	notifyCh chan struct{} // buffered(1); non-blocking send from Notify()
 
+	// vaultGuards establish a clear boundary without stopping processing for
+	// unrelated vaults. Plugin calls hold the read side through persistence;
+	// ClearVault invalidates the generation, then takes the write side.
+	vaultGuards sync.Map // map[[8]byte]*retroactiveVaultGuard
+
 	// onEmbed, when set, is called after an engram's embedding is computed and
 	// inserted into HNSW. The engine uses it to re-evaluate push subscriptions
 	// with the now-available vector (#512). Only set on the embed processor.
 	onEmbed func(eng *Engram, vec []float32)
+}
+
+type retroactiveVaultGuard struct {
+	mu         sync.RWMutex
+	generation atomic.Uint64
 }
 
 // SetOnEmbed registers a callback invoked after each engram's embedding is
@@ -84,6 +97,56 @@ func (rp *RetroactiveProcessor) Notify() {
 	case rp.notifyCh <- struct{}{}:
 	default:
 	}
+}
+
+// BeginVaultClear invalidates scans that started before a destructive clear and
+// waits for an already-admitted plugin call for this vault to finish persisting.
+// The returned function releases the clear boundary and wakes the processor.
+func (rp *RetroactiveProcessor) BeginVaultClear(ws [8]byte) func() {
+	guard := rp.vaultGuard(ws)
+	// The first increment invalidates scans that predate the clear request.
+	guard.generation.Add(1)
+	guard.mu.Lock()
+	return func() {
+		// The second increment invalidates scans opened while the clear held the
+		// writer lock. Only scans starting after this release observe the final
+		// generation and may admit work from the rebuilt Pebble view.
+		guard.generation.Add(1)
+		guard.mu.Unlock()
+		rp.Notify()
+	}
+}
+
+func (rp *RetroactiveProcessor) vaultGuard(ws [8]byte) *retroactiveVaultGuard {
+	guard, _ := rp.vaultGuards.LoadOrStore(ws, &retroactiveVaultGuard{})
+	return guard.(*retroactiveVaultGuard)
+}
+
+func (rp *RetroactiveProcessor) vaultGeneration(ws [8]byte) uint64 {
+	guard, ok := rp.vaultGuards.Load(ws)
+	if !ok {
+		return 0
+	}
+	return guard.(*retroactiveVaultGuard).generation.Load()
+}
+
+func (rp *RetroactiveProcessor) snapshotVaultGenerations() map[[8]byte]uint64 {
+	snapshot := make(map[[8]byte]uint64)
+	rp.vaultGuards.Range(func(key, value any) bool {
+		snapshot[key.([8]byte)] = value.(*retroactiveVaultGuard).generation.Load()
+		return true
+	})
+	return snapshot
+}
+
+func (rp *RetroactiveProcessor) lockCurrentVault(ws [8]byte, snapshot map[[8]byte]uint64) (*retroactiveVaultGuard, bool) {
+	guard := rp.vaultGuard(ws)
+	guard.mu.RLock()
+	if guard.generation.Load() != snapshot[ws] {
+		guard.mu.RUnlock()
+		return nil, false
+	}
+	return guard, true
 }
 
 // Start launches the background processing goroutine.
@@ -248,6 +311,11 @@ func (rp *RetroactiveProcessor) backoff(ctx context.Context, consecutiveErrors i
 // inference call per micro-batch, then scatters vectors back individually.
 // For EnrichPlugin: processes one engram at a time (LLM call per engram).
 func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
+	// Capture generations before opening the Pebble snapshot. A vault clear
+	// increments its generation before waiting for an in-flight call, so an old
+	// iterator can never gain admission after the clear boundary advances.
+	scanGenerations := rp.snapshotVaultGenerations()
+
 	// Reset rate/ETA at the start of every pass so stale values from a prior
 	// pass don't leak into the embed-status API response while the processor is idle.
 	rp.statsMu.Lock()
@@ -298,11 +366,63 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 	}
 	microEngrams := make([]*Engram, 0, microBatchSize)
 	microTexts := make([]string, 0, microBatchSize)
+	microVaults := make([][8]byte, 0, microBatchSize)
+	passInvalidated := false
 
 	flushMicroBatch := func() {
 		if !isEmbedPlugin || len(microEngrams) == 0 {
 			return
 		}
+
+		vaultSet := make(map[[8]byte]struct{}, len(microVaults))
+		for _, ws := range microVaults {
+			vaultSet[ws] = struct{}{}
+		}
+		vaults := make([][8]byte, 0, len(vaultSet))
+		for ws := range vaultSet {
+			vaults = append(vaults, ws)
+		}
+		sort.Slice(vaults, func(i, j int) bool {
+			return bytes.Compare(vaults[i][:], vaults[j][:]) < 0
+		})
+
+		locked := make(map[[8]byte]*retroactiveVaultGuard, len(vaults))
+		stale := make(map[[8]byte]bool)
+		for _, ws := range vaults {
+			guard, current := rp.lockCurrentVault(ws, scanGenerations)
+			if !current {
+				stale[ws] = true
+				passInvalidated = true
+				continue
+			}
+			locked[ws] = guard
+		}
+		defer func() {
+			for _, guard := range locked {
+				guard.mu.RUnlock()
+			}
+		}()
+
+		if len(stale) > 0 {
+			liveEngrams := microEngrams[:0]
+			liveTexts := microTexts[:0]
+			liveVaults := microVaults[:0]
+			for i, ws := range microVaults {
+				if stale[ws] {
+					continue
+				}
+				liveEngrams = append(liveEngrams, microEngrams[i])
+				liveTexts = append(liveTexts, microTexts[i])
+				liveVaults = append(liveVaults, ws)
+			}
+			microEngrams = liveEngrams
+			microTexts = liveTexts
+			microVaults = liveVaults
+			if len(microEngrams) == 0 {
+				return
+			}
+		}
+
 		vecs, embedErr := embedPlugin.Embed(ctx, microTexts)
 		if embedErr != nil {
 			ids := make([]string, len(microEngrams))
@@ -328,6 +448,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 			rp.statsMu.Unlock()
 			microEngrams = microEngrams[:0]
 			microTexts = microTexts[:0]
+			microVaults = microVaults[:0]
 			return
 		}
 		dim := len(vecs) / len(microEngrams)
@@ -397,6 +518,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		}
 		microEngrams = microEngrams[:0]
 		microTexts = microTexts[:0]
+		microVaults = microVaults[:0]
 
 		// Rate/ETA fires after every micro-batch (not gated on %100 — always update).
 		// Use pass-local count (flushedProcessed - passStart) so rate reflects this
@@ -449,6 +571,7 @@ engramLoop:
 		if eng == nil {
 			continue
 		}
+		ws := iter.CurrentWS()
 
 		if isEmbedPlugin {
 			// Skip engrams of a vault whose established dimension does not
@@ -467,9 +590,14 @@ engramLoop:
 			// Accumulate into micro-batch; flush when full.
 			microEngrams = append(microEngrams, eng)
 			microTexts = append(microTexts, eng.Concept+" "+eng.Content)
+			microVaults = append(microVaults, ws)
 			batchCount++
 			if len(microEngrams) >= microBatchSize {
 				flushMicroBatch()
+				if passInvalidated {
+					rp.Notify()
+					break
+				}
 			}
 			if batchCount%100 == 0 {
 				runtime.Gosched()
@@ -478,6 +606,12 @@ engramLoop:
 		}
 
 		// Non-embed (enrich) path: one-at-a-time as before.
+		guard, current := rp.lockCurrentVault(ws, scanGenerations)
+		if !current {
+			passInvalidated = true
+			rp.Notify()
+			break
+		}
 		if err := rp.processEnrichEngram(ctx, eng); err != nil {
 			if errors.Is(err, ErrNothingToEnrich) {
 				// Nothing to enrich is not a failure — mark the engram as
@@ -495,6 +629,7 @@ engramLoop:
 				rp.stats.Processed++
 				rp.statsMu.Unlock()
 				batchCount++
+				guard.mu.RUnlock()
 				continue
 			}
 			slog.Warn("retroactive processor: failed to process engram",
@@ -530,6 +665,7 @@ engramLoop:
 				// retries once the provider recovers.
 				break engramLoop
 			}
+			guard.mu.RUnlock()
 			continue
 		}
 
@@ -541,6 +677,7 @@ engramLoop:
 			rp.statsMu.Lock()
 			rp.stats.Errors++
 			rp.statsMu.Unlock()
+			guard.mu.RUnlock()
 			continue
 		}
 
@@ -548,6 +685,7 @@ engramLoop:
 		rp.stats.Processed++
 		processed := rp.stats.Processed
 		rp.statsMu.Unlock()
+		guard.mu.RUnlock()
 
 		batchCount++
 
@@ -580,6 +718,9 @@ engramLoop:
 
 	// Flush any remaining micro-batch at end of iterator.
 	flushMicroBatch()
+	if passInvalidated {
+		rp.Notify()
+	}
 
 	// One summary line per pass instead of one per engram — a mismatched
 	// vault can hold thousands of pending engrams.

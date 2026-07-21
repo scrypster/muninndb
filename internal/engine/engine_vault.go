@@ -91,6 +91,21 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 	// prefix and leave the real engrams orphaned.
 	ws := e.store.ResolveVaultPrefix(vaultName)
 
+	// Establish the clear boundary before deleting storage. Each processor
+	// invalidates its current scan and waits only for an already-admitted call
+	// from this vault to finish persistence; unrelated vaults remain active.
+	finishProcessorClears := make([]func(), 0, len(e.retroProcessors))
+	for _, processor := range e.retroProcessors {
+		if processor != nil {
+			finishProcessorClears = append(finishProcessorClears, processor.BeginVaultClear(ws))
+		}
+	}
+	defer func() {
+		for i := len(finishProcessorClears) - 1; i >= 0; i-- {
+			finishProcessorClears[i]()
+		}
+	}()
+
 	// NOTE: Jobs already mid-flush may write ghost FTS entries after the range
 	// tombstones land. This is harmless — activation filtering skips engrams
 	// with no metadata, and ghost posting list entries are reclaimed by Pebble
