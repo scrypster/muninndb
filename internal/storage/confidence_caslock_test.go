@@ -152,3 +152,48 @@ func TestUpdateConfidenceWithContradiction_NoResurrectionUnderConcurrentDelete(t
 		}
 	}
 }
+
+// TestUpdateConfidence_NoResurrectionUnderConcurrentDelete is the ABSOLUTE-setter
+// analogue of the delta-path test above. PebbleStore.UpdateConfidence (the
+// absolute set, reachable from Engine.AdjustConfidence via the ConfidenceWorker
+// when hasContra=true) is also a GetEngram → batch.Set(0x01|0x02) → Commit
+// read-modify-write, so it can resurrect a concurrently deleted engram in exactly
+// the same way (#626). The invariant is identical: once DeleteEngram returns, the
+// engram MUST NOT be readable — GetEngram reads the 0x01/0x02 keys, so a non-nil
+// result means UpdateConfidence committed its payload write after the delete's
+// batch, restoring the record without its 0x0B state index. Without the
+// per-engram stripe lock on UpdateConfidence this fails ~1/500 under -race; run
+// with -race -count=3 to surface it reliably. Mirrors the delta-path test's
+// 200-trial cadence.
+func TestUpdateConfidence_NoResurrectionUnderConcurrentDelete(t *testing.T) {
+	store, cleanup := newTestStoreHelper(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := store.VaultPrefix("conf-abs-resurrect")
+
+	for i := 0; i < 200; i++ {
+		id := writeLeaseTestEngram(t, store, ws)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = store.DeleteEngram(ctx, ws, id)
+		}()
+		go func() {
+			defer wg.Done()
+			// Absolute set. Returns ErrNotFound if the delete won the race —
+			// acceptable; the invariant is only about post-delete resurrection.
+			_ = store.UpdateConfidence(ctx, ws, id, 0.5)
+		}()
+		wg.Wait()
+
+		// After both return the engram MUST NOT be readable. GetEngram reads the
+		// 0x01/0x02 keys; a non-nil engram means UpdateConfidence committed its
+		// payload write AFTER DeleteEngram's batch and resurrected the record.
+		eng, err := store.GetEngram(ctx, ws, id)
+		if err == nil && eng != nil {
+			t.Fatalf("iter %d: engram resurrected after DeleteEngram returned via absolute UpdateConfidence: %+v", i, eng)
+		}
+	}
+}

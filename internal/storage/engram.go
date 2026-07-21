@@ -784,10 +784,30 @@ func (ps *PebbleStore) GetConfidence(ctx context.Context, wsPrefix [8]byte, id U
 }
 
 // UpdateConfidence updates the confidence in 0x02 metadata (and 0x01 full engram).
+// UpdateConfidence performs an ABSOLUTE set of an engram's confidence (unlike the
+// delta-based UpdateConfidenceWithContradiction). It is a read-modify-write over
+// the 0x01/0x02 keys and therefore races a concurrent DeleteEngram exactly like
+// the delta primitive: a delete committing between this method's GetEngram read
+// and its batch.Commit would be undone by the batch.Set(0x01|0x02), resurrecting
+// the deleted engram's payload/meta keys without its 0x0B state index (the #594 /
+// #626 resurrection class). The per-engram stripe lock (casLocks.For(id) — the
+// SAME striped mutex CompareAndSet, DeleteEngram, and the delta primitive use)
+// is held across the whole critical section, and the engram cache is dropped
+// before the authoritative GetEngram read, so this path serializes with same-id
+// delete/CAS and always reads committed Pebble state. Mirrors the locking shape
+// of UpdateConfidenceWithContradiction above; only the set semantics differ.
 func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, id ULID, confidence float32) error {
+	mu := ps.casLocks.For(id[:])
+	mu.Lock()
+	// Drop any stale cache entry left by a racing DeleteEngram between its
+	// batch.Commit and its post-commit cache.Delete, so the GetEngram below
+	// reads authoritative Pebble state (see UpdateConfidenceWithContradiction).
+	ps.cache.Delete(wsPrefix, id)
+
 	// Read current engram
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
+		mu.Unlock()
 		return err
 	}
 
@@ -799,6 +819,7 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	erfEng := toERFEngram(eng)
 	erfBytes, err := erf.Encode(erfEng)
 	if err != nil {
+		mu.Unlock()
 		return fmt.Errorf("encode engram: %w", err)
 	}
 
@@ -817,14 +838,18 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	batch.Set(metaKey, metaSlice505, nil)
 
 	if err := batch.Commit(pebble.NoSync); err != nil {
+		mu.Unlock()
 		return fmt.Errorf("commit batch: %w", err)
 	}
-	ps.replicateBatch(batch)
-
-	// Update cache (vault-scoped).
+	// Cache mutation under the stripe lock (see UpdateConfidenceWithContradiction):
+	// otherwise a racing DeleteEngram's post-commit cache.Delete can land before
+	// this cache.Set, re-caching an engram Pebble has already deleted.
 	ps.cache.Set(wsPrefix, id, eng)
 	// Invalidate metadata cache — cached metadata is stale.
 	ps.metaCache.Remove([16]byte(id))
+	mu.Unlock()
+
+	ps.replicateBatch(batch)
 
 	return nil
 }
