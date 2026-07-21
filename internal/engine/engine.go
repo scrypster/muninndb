@@ -2569,22 +2569,15 @@ func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.
 		}
 	}
 
-	// Current confidence (for the clamp + the audit prior).
-	current, err := e.store.GetConfidence(ctx, wsPrefix, id)
+	// Atomic delta write: the storage method holds the per-engram stripe lock
+	// across read+add+clamp+commit, closing the lost-update race (#559). The
+	// prior confidence read and the [0,1] clamp have moved INTO the locked
+	// storage method (UpdateConfidenceWithContradiction) — an external unlocked
+	// read here would re-open the race, so we do not call GetConfidence. The
+	// returned (prior, newConf) come from inside the locked section so the
+	// audit log below reports the same values that were committed.
+	prior, newConf, err := e.store.UpdateConfidenceWithContradiction(ctx, wsPrefix, id, delta, other, hasContra)
 	if err != nil {
-		return 0, ErrEngramNotFound
-	}
-
-	// Clamp to [0,1].
-	newConf := current + delta
-	if newConf < 0 {
-		newConf = 0
-	} else if newConf > 1 {
-		newConf = 1
-	}
-
-	// Atomic write (confidence + marker in one batch — no partial-failure window).
-	if err := e.store.UpdateConfidenceWithContradiction(ctx, wsPrefix, id, newConf, other, hasContra); err != nil {
 		return 0, fmt.Errorf("adjust confidence: write: %w", err)
 	}
 
@@ -2603,7 +2596,7 @@ func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.
 	}
 
 	slog.Info("adjust_confidence",
-		"engram_id", id.String(), "delta", delta, "prior", current, "new", newConf,
+		"engram_id", id.String(), "delta", delta, "prior", prior, "new", newConf,
 		"contradicted_by", other.String(), "has_contra", hasContra,
 		"reason", reason, "caller", caller, "vault", vault)
 

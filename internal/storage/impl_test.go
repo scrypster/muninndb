@@ -1287,8 +1287,10 @@ func contradictionMarkerExists(t *testing.T, store *PebbleStore, ws [8]byte, a, 
 }
 
 // TestUpdateConfidenceWithContradiction_AtomicConfidenceAndMarker verifies the
-// composed write sets confidence and, when hasContra, the 0x0A marker pair — in
-// one batch. Mirrors the inputs of TestFlagContradiction (impl_test.go:610).
+// composed write applies a delta and, when hasContra, writes the 0x0A marker
+// pair — in one batch. Mirrors the inputs of TestFlagContradiction (impl_test.go:610).
+// Delta-based since #559: the method takes a delta, does read+add+clamp inside
+// the stripe lock, and returns (prior, newConf).
 func TestUpdateConfidenceWithContradiction_AtomicConfidenceAndMarker(t *testing.T) {
 	store, ws, id, other := setupContradictionFixture(t)
 
@@ -1296,13 +1298,22 @@ func TestUpdateConfidenceWithContradiction_AtomicConfidenceAndMarker(t *testing.
 	seedEngram(t, store, ws, id, 0.5)
 	seedEngram(t, store, ws, other, 0.5)
 
-	if err := store.UpdateConfidenceWithContradiction(
-		context.Background(), ws, id, 0.9, other, true); err != nil {
+	// +0.4 delta from a 0.5 seed → 0.9 (mid-range, no clamp).
+	prior, newConf, err := store.UpdateConfidenceWithContradiction(
+		context.Background(), ws, id, 0.4, other, true)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	if prior != 0.5 {
+		t.Fatalf("prior = %v, want 0.5 (seed)", prior)
+	}
+	// float32 approximate equality — 0.5+0.4 is not exactly representable.
+	if newConf-0.9 > 1e-6 || 0.9-newConf > 1e-6 {
+		t.Fatalf("newConf = %v, want ≈ 0.9", newConf)
+	}
 
-	if got, _ := store.GetConfidence(context.Background(), ws, id); got != 0.9 {
-		t.Fatalf("confidence = %v, want 0.9", got)
+	if got, _ := store.GetConfidence(context.Background(), ws, id); got-0.9 > 1e-6 || 0.9-got > 1e-6 {
+		t.Fatalf("confidence = %v, want ≈ 0.9", got)
 	}
 	if !contradictionMarkerExists(t, store, ws, id, other) {
 		t.Fatal("expected 0x0A marker pair after hasContra write")
@@ -1323,12 +1334,21 @@ func TestUpdateConfidenceWithContradiction_NoMarkerWhenHasContraFalse(t *testing
 	store, ws, id, other := setupContradictionFixture(t)
 	seedEngram(t, store, ws, id, 0.5)
 
-	if err := store.UpdateConfidenceWithContradiction(
-		context.Background(), ws, id, 0.2, other, false); err != nil {
+	// -0.3 delta from a 0.5 seed → 0.2.
+	prior, newConf, err := store.UpdateConfidenceWithContradiction(
+		context.Background(), ws, id, -0.3, other, false)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if got, _ := store.GetConfidence(context.Background(), ws, id); got != 0.2 {
-		t.Fatalf("confidence = %v, want 0.2", got)
+	if prior != 0.5 {
+		t.Fatalf("prior = %v, want 0.5 (seed)", prior)
+	}
+	// float32 approximate equality — 0.5-0.3 is not exactly representable.
+	if newConf-0.2 > 1e-6 || 0.2-newConf > 1e-6 {
+		t.Fatalf("newConf = %v, want ≈ 0.2", newConf)
+	}
+	if got, _ := store.GetConfidence(context.Background(), ws, id); got-0.2 > 1e-6 || 0.2-got > 1e-6 {
+		t.Fatalf("confidence = %v, want ≈ 0.2", got)
 	}
 	if contradictionMarkerExists(t, store, ws, id, other) {
 		t.Fatal("expected NO 0x0A marker when hasContra=false")

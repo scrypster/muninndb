@@ -284,3 +284,24 @@ func TestEngineAdjustConfidence_ContradictionPersistsMarker(t *testing.T) {
 		t.Fatalf("contradiction marker for {%s,%s} not persisted; pairs=%v", id, other, pairs)
 	}
 }
+
+// NOTE on the engine-layer lost-update test (deliberately absent here, present
+// at the storage layer — see TestUpdateConfidenceWithContradiction_NoLostUpdate-
+// UnderConcurrentDeltas in internal/storage/confidence_caslock_test.go).
+//
+// #559's lost-update fix lives entirely in the storage method: the read+add+
+// clamp moved inside the stripe lock. Engine.AdjustConfidence is now a thin
+// pass-through — it validates (NaN/Inf, self-contradiction, existence) and
+// forwards the delta to UpdateConfidenceWithContradiction, using the returned
+// (prior, newConf) for the audit. TestEngineAdjustConfidence_Clamps and the
+// other Task-3 engine tests cover the engine path end-to-end and pass as-is.
+//
+// A direct engine-layer concurrency test (50 goroutines calling
+// Engine.AdjustConfidence concurrently) is blocked by a SEPARATE pre-existing
+// race the detector flags under -race: Engine.AdjustConfidence's existence
+// check (unlocked e.store.GetMetadata at engine.go:2532) races against another
+// caller's post-commit cache.Set/metaCache.Remove inside UpdateConfidence-
+// WithContradiction. That cache race is independent of #559 (the stripe lock
+// correctly serializes the confidence RMW; only the auxiliary cache mutation
+// and the existence-check read race) and is out of scope for this PR. The
+// storage-layer test is the load-bearing proof of the lost-update fix.

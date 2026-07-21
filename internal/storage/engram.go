@@ -829,19 +829,26 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	return nil
 }
 
-// UpdateConfidenceWithContradiction atomically updates engram confidence and,
+// UpdateConfidenceWithContradiction atomically applies a confidence delta and,
 // when hasContra, writes the 0x0A contradiction marker for the (id, other) pair
 // in a single Pebble batch — no partial-failure window between the confidence
 // write and the marker. Mirrors UpdateConfidence (0x01+0x02 via erf.Encode) and
 // FlagContradiction (canonical-ordered 0x0A pair), composed.
 //
-// The read-modify-write (GetEngram → mutate → batch.Set 0x01|0x02 → Commit)
-// holds the per-engram stripe lock across the read and the commit, mirroring
-// DeleteEngram and CompareAndSet. Without the lock two failures are reachable:
+// Delta-based (closes #559's lost-update race): the read+add+clamp happens
+// INSIDE the locked section, not in the caller. The per-engram stripe lock
+// (casLocks.For(id)) is acquired before the GetEngram read and held across
+// batch.Commit — the same shape as PebbleStore.CompareAndSet (lease.go:157) and
+// DeleteEngram. So N concurrent +delta calls on the same id serialize: each
+// observes the prior writer's committed state and accumulates, instead of all
+// reading the same pre-write value and overwriting each other. The method
+// returns (prior, newConf) so the engine can audit without a second unlocked
+// read that would re-open the race.
 //
-//   - Lost update: concurrent callers race the RMW. Most batch.Commit calls
-//     land on a stale engram view and overwrite each other, so N concurrent
-//     +delta adjustments collapse to a handful of effective writes.
+// Two failure classes the lock defends against:
+//
+//   - Lost update (#559): concurrent callers race the RMW. With the read inside
+//     the lock, each +delta call sees its predecessor's commit and adds to it.
 //   - Resurrection (#594 class): a racing DeleteEngram can commit between this
 //     function's GetEngram read and its batch.Commit, after which the
 //     batch.Set(0x01|0x02) + Commit resurrects the deleted engram's keys.
@@ -859,7 +866,10 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 // engram. Dropping the cache under the lock forces a fresh Pebble read that
 // observes the delete's committed state. Mirrors the authoritative-read-under-
 // lock expectation without altering DeleteEngram's post-commit cleanup order.
-func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, wsPrefix [8]byte, id ULID, confidence float32, other ULID, hasContra bool) error {
+//
+// The caller is responsible for rejecting NaN/Inf deltas before invoking; this
+// method assumes delta is finite.
+func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, wsPrefix [8]byte, id ULID, delta float32, other ULID, hasContra bool) (prior, newConf float32, err error) {
 	mu := ps.casLocks.For(id[:])
 	mu.Lock()
 	// Drop any stale cache entry left by a racing DeleteEngram between its
@@ -870,16 +880,26 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
 		mu.Unlock()
-		return err
+		return 0, 0, err
 	}
-	eng.Confidence = confidence
+	// Read+add+clamp UNDER the stripe lock — the lost-update fix (#559). The
+	// engine-side read that used to live in Engine.AdjustConfidence is gone;
+	// the prior value returned below comes from this locked read.
+	prior = eng.Confidence
+	newConf = prior + delta
+	if newConf < 0 {
+		newConf = 0
+	} else if newConf > 1 {
+		newConf = 1
+	}
+	eng.Confidence = newConf
 	eng.UpdatedAt = time.Now()
 
 	erfEng := toERFEngram(eng)
 	erfBytes, err := erf.Encode(erfEng)
 	if err != nil {
 		mu.Unlock()
-		return fmt.Errorf("encode engram: %w", err)
+		return 0, 0, fmt.Errorf("encode engram: %w", err)
 	}
 
 	batch := ps.db.NewBatch()
@@ -905,14 +925,14 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		mu.Unlock()
-		return fmt.Errorf("commit batch: %w", err)
+		return 0, 0, fmt.Errorf("commit batch: %w", err)
 	}
 	mu.Unlock()
 	ps.replicateBatch(batch)
 
 	ps.cache.Set(wsPrefix, id, eng)
 	ps.metaCache.Remove(id16)
-	return nil
+	return prior, newConf, nil
 }
 
 // toERFEngram converts storage.Engram to erf.Engram.

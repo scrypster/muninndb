@@ -29,7 +29,9 @@ func TestUpdateConfidenceWithContradiction_SerializesWithCAS(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- store.UpdateConfidenceWithContradiction(ctx, ws, id, 0.5, id, false)
+		// Delta-based API (#559): method now returns (prior, newConf, err).
+		_, _, err := store.UpdateConfidenceWithContradiction(ctx, ws, id, 0.5, id, false)
+		done <- err
 	}()
 
 	select {
@@ -53,32 +55,59 @@ func TestUpdateConfidenceWithContradiction_SerializesWithCAS(t *testing.T) {
 	}
 }
 
-// NOTE on the lost-update test class (deliberately absent).
+// TestUpdateConfidenceWithContradiction_NoLostUpdateUnderConcurrentDeltas is the
+// lost-update test the NOTE below used to document as absent. N concurrent
+// +delta calls on the same id must each observe the prior writer's commit and
+// accumulate — the per-engram stripe lock acquired inside this method now spans
+// the read+add+clamp+commit, so the calls serialize.
 //
-// The lost-update race reported by scrypster — "50 concurrent +0.01
-// AdjustConfidence calls on the same id from 0.0 landed at 0.02–0.06" —
-// lives at the ENGINE layer, not at this storage layer. Engine.AdjustConfidence
-// does `current, _ := GetConfidence(...); newConf := current+delta;
-// UpdateConfidenceWithContradiction(ctx, ws, id, newConf, ...)` — the read is
-// OUTSIDE UpdateConfidenceWithContradiction, so the per-engram stripe lock
-// acquired inside the storage function cannot span the read that computes the
-// absolute target. Empirically confirmed: 50 concurrent "+0.01" RMW calls
-// against the same id land at 0.02 WITH the storage lock and 0.04–0.07
-// WITHOUT it — the storage lock cannot make this test green because the loss
-// is determined entirely by the unlocked external read, not by the storage
-// RMW. A meaningful lost-update test for this pattern belongs in
-// internal/engine (call Engine.AdjustConfidence with delta=0.01 fifty times)
-// and requires an engine-layer fix (engine holds the stripe lock across its
-// read+write, OR the storage exposes an AdjustConfidence(delta) API that does
-// read+add+write atomically under the lock). Both are out of scope for this
-// PR, which closes the #594-class resurrection race documented below.
-//
-// The storage-level race the stripe lock DOES fix for this function is the
-// resurrection race — a concurrent DeleteEngram committing between this
-// function's GetEngram read and its batch.Commit, after which the engram-key
-// Set re-creates the deleted record. That is covered by
-// TestUpdateConfidenceWithContradiction_NoResurrectionUnderConcurrentDelete
-// below.
+// Before #559's delta-based refactor, Engine.AdjustConfidence did its confidence
+// read OUTSIDE this storage method (via GetConfidence) and passed an ABSOLUTE
+// target; the stripe lock acquired here could not span that external read, so
+// 50 concurrent +0.01 calls landed at ≈0.02 (last absolute-writer wins). With
+// the read+add+clamp moved inside the locked method, the 50 deltas accumulate
+// to ≈0.5. Run with -race -count=N to confirm stability.
+func TestUpdateConfidenceWithContradiction_NoLostUpdateUnderConcurrentDeltas(t *testing.T) {
+	store, cleanup := newTestStoreHelper(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := store.VaultPrefix("conf-lostupdate")
+	id := writeLeaseTestEngram(t, store, ws)
+
+	// Pin the seed at exactly 0.0 so the expected accumulation is N*delta.
+	if err := store.UpdateConfidence(ctx, ws, id, 0.0); err != nil {
+		t.Fatalf("seed UpdateConfidence: %v", err)
+	}
+
+	const N = 50
+	const delta = float32(0.01)
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			// hasContra=false: bare delta path, no marker work, no other-id
+			// needed — isolates the confidence RMW.
+			_, _, _ = store.UpdateConfidenceWithContradiction(ctx, ws, id, delta, id, false)
+		}()
+	}
+	wg.Wait()
+
+	got, err := store.GetConfidence(ctx, ws, id)
+	if err != nil {
+		t.Fatalf("GetConfidence: %v", err)
+	}
+	// Expected ≈ 50 × 0.01 = 0.5. The lower bound 0.45 EXCLUDES the broken-
+	// behaviour result (~0.02 = a single delta landing, last-writer-wins) with
+	// headroom for float32 accumulation noise. The upper bound guards against
+	// a runaway clamp bug. This assertion is the load-bearing one: if it fails
+	// low, deltas were lost.
+	const want = float32(0.5)
+	if got < 0.45 || got > want+0.01 {
+		t.Fatalf("lost-update: final confidence = %v, want ≈ %v (50 × +0.01); "+
+			"< 0.45 means deltas were lost (pre-fix behaviour landed ≈ 0.02)", got, want)
+	}
+}
 
 // TestUpdateConfidenceWithContradiction_NoResurrectionUnderConcurrentDelete
 // races UpdateConfidenceWithContradiction against DeleteEngram on the same id,
@@ -108,8 +137,9 @@ func TestUpdateConfidenceWithContradiction_NoResurrectionUnderConcurrentDelete(t
 		}()
 		go func() {
 			defer wg.Done()
+			// Delta-based API (#559): returns (prior, newConf, err).
 			// Returns ErrNotFound if the delete won the race — acceptable.
-			_ = store.UpdateConfidenceWithContradiction(ctx, ws, id, 0.5, id, false)
+			_, _, _ = store.UpdateConfidenceWithContradiction(ctx, ws, id, 0.5, id, false)
 		}()
 		wg.Wait()
 
