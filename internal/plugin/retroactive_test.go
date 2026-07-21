@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -18,15 +19,119 @@ type enrichMockForRetro struct {
 	mockPlugin
 	enrichResult *EnrichmentResult
 	enrichErr    error
+	enrichFunc   func(context.Context, *Engram) (*EnrichmentResult, error)
 	callCount    int
 }
 
-func (m *enrichMockForRetro) Enrich(_ context.Context, _ *Engram) (*EnrichmentResult, error) {
+func (m *enrichMockForRetro) Enrich(ctx context.Context, eng *Engram) (*EnrichmentResult, error) {
 	m.callCount++
+	if m.enrichFunc != nil {
+		return m.enrichFunc(ctx, eng)
+	}
 	if m.enrichErr != nil {
 		return nil, m.enrichErr
 	}
 	return m.enrichResult, nil
+}
+
+func TestRetroactiveProcessor_RetryableProviderErrorRemainsPendingThenEnriches(t *testing.T) {
+	eng := &Engram{Concept: "pending", Content: "content"}
+	store := &mockPluginStore{countResult: 1}
+	attempt := 0
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-throttled", tier: TierEnrich},
+		enrichFunc: func(context.Context, *Engram) (*EnrichmentResult, error) {
+			attempt++
+			if attempt == 1 {
+				return nil, fmt.Errorf("pipeline: %w", &ProviderError{
+					Provider:      "fake",
+					StatusCode:    429,
+					Retryable:     true,
+					RetryAfter:    time.Second,
+					HasRetryAfter: true,
+				})
+			}
+			return &EnrichmentResult{Summary: "enriched"}, nil
+		},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	store.scanResult = &mockIterator{engrams: []*Engram{eng, &Engram{Concept: "later", Content: "content"}}}
+	rp.processBatch(context.Background())
+	if enrichPlugin.callCount != 1 {
+		t.Fatalf("calls after throttle = %d, want 1 (batch must stop globally)", enrichPlugin.callCount)
+	}
+	if store.setFlagCalls != 0 {
+		t.Fatalf("429 set digest flags %v; engram must remain pending", store.setFlags)
+	}
+
+	store.scanResult = &mockIterator{engrams: []*Engram{eng}}
+	rp.processBatch(context.Background())
+	if enrichPlugin.callCount != 2 {
+		t.Fatalf("calls after recovery = %d, want 2", enrichPlugin.callCount)
+	}
+	if rp.Stats().Processed != 1 {
+		t.Fatalf("processed = %d, want original engram enriched", rp.Stats().Processed)
+	}
+	for _, flag := range store.setFlags {
+		if flag == DigestEnrichFailed {
+			t.Fatalf("DigestEnrichFailed was set because of 429: %v", store.setFlags)
+		}
+	}
+}
+
+func TestProcessEnrichEngram_RetryableWrappingPreservesMetadata(t *testing.T) {
+	providerErr := &ProviderError{Provider: "fake", StatusCode: 503, Retryable: true}
+	store := &mockPluginStore{}
+	rp := NewRetroactiveProcessor(store, &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "wrapped", tier: TierEnrich},
+		enrichErr:  fmt.Errorf("service: %w", providerErr),
+	}, DigestEnrich)
+
+	err := rp.processEnrichEngram(context.Background(), &Engram{})
+	var got *ProviderError
+	if !errors.As(err, &got) || got != providerErr {
+		t.Fatalf("retryability metadata was not preserved: %v", err)
+	}
+}
+
+func TestProcessEnrichEngram_PermanentProviderWrappingPreservesMetadata(t *testing.T) {
+	providerErr := &ProviderError{Provider: "fake", StatusCode: 401, Retryable: false}
+	store := &mockPluginStore{}
+	rp := NewRetroactiveProcessor(store, &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "auth-failed", tier: TierEnrich},
+		enrichErr:  fmt.Errorf("pipeline: %w", providerErr),
+	}, DigestEnrich)
+
+	err := rp.processEnrichEngram(context.Background(), &Engram{})
+	if errors.Is(err, errLLMFailed) {
+		t.Fatalf("systemic authentication error became per-engram failure: %v", err)
+	}
+	var got *ProviderError
+	if !errors.As(err, &got) || got != providerErr {
+		t.Fatalf("provider metadata was not preserved: %v", err)
+	}
+}
+
+func TestRetroactiveProcessor_AuthenticationFailureRemainsPendingAndStopsBatch(t *testing.T) {
+	eng := &Engram{Concept: "pending", Content: "content"}
+	store := &mockPluginStore{
+		countResult: 2,
+		scanResult:  &mockIterator{engrams: []*Engram{eng, &Engram{Concept: "later"}}},
+	}
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "auth-failed", tier: TierEnrich},
+		enrichErr:  &ProviderError{Provider: "fake", StatusCode: 401, Retryable: false},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	rp.processBatch(context.Background())
+	if enrichPlugin.callCount != 1 {
+		t.Fatalf("provider calls = %d, want 1 after systemic auth failure", enrichPlugin.callCount)
+	}
+	if store.setFlagCalls != 0 {
+		t.Fatalf("authentication failure set permanent flags: %v", store.setFlags)
+	}
 }
 
 // ---------------------------------------------------------------------------

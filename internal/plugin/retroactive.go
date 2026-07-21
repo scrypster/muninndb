@@ -428,6 +428,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		}
 	}
 
+engramLoop:
 	for iter.Next() {
 		select {
 		case <-ctx.Done():
@@ -503,6 +504,14 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 			rp.statsMu.Lock()
 			rp.stats.Errors++
 			rp.statsMu.Unlock()
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return true
+			}
+			if errors.Is(err, circuit.ErrOpen) || IsProviderError(err) {
+				// Systemic provider condition: stop this pass so the processor cannot
+				// fan a throttle or configuration outage across the pending queue.
+				break engramLoop
+			}
 			// LLM-originated failures (bad output, parse error) are permanent for
 			// this engram. Mark DigestEnrichFailed so the processor does not retry
 			// it indefinitely, which would trip the circuit breaker and block
@@ -627,9 +636,15 @@ func (rp *RetroactiveProcessor) processEnrichEngram(ctx context.Context, eng *En
 			if errors.Is(err, circuit.ErrOpen) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
-			// Permanent LLM failure (bad output, HTTP error, parse error).
+			if IsRetryableProviderError(err) {
+				return fmt.Errorf("transient enrichment provider failure: %w", err)
+			}
+			if IsProviderError(err) {
+				return fmt.Errorf("enrichment provider failure: %w", err)
+			}
+			// Permanent per-engram LLM failure (bad output or parse error).
 			// Wrap with errLLMFailed so the caller can mark DigestEnrichFailed.
-			return fmt.Errorf("%w: %v", errLLMFailed, err)
+			return fmt.Errorf("%w: %w", errLLMFailed, err)
 		}
 		if result == nil {
 			return errLLMFailed
