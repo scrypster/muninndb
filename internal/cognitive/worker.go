@@ -15,7 +15,26 @@ const (
 	WorkerStateActive  WorkerState = 0
 	WorkerStateIdle    WorkerState = 1
 	WorkerStateDormant WorkerState = 2
+	WorkerStateStopped WorkerState = 3
 )
+
+// String returns the stable API representation of a worker state. Keep this
+// symbolic contract additive to the legacy numeric state field so clients do
+// not need to duplicate Go enum values.
+func (s WorkerState) String() string {
+	switch s {
+	case WorkerStateActive:
+		return "active"
+	case WorkerStateIdle:
+		return "idle"
+	case WorkerStateDormant:
+		return "dormant"
+	case WorkerStateStopped:
+		return "stopped"
+	default:
+		return "unknown"
+	}
+}
 
 const (
 	defaultIdleThreshold    = 5 * time.Minute
@@ -32,7 +51,16 @@ type WorkerStats struct {
 	Dropped       uint64        `json:"dropped"`
 	LastRun       int64         `json:"lastRun"` // Unix nanoseconds
 	State         WorkerState   `json:"state"`
+	Status        string        `json:"status"`
+	Enabled       bool          `json:"enabled"`
 	EffectiveWait time.Duration `json:"effectiveWait"` // current actual tick interval
+}
+
+// DisabledWorkerStats describes a worker that is not configured on this node.
+// Counter and numeric state fields intentionally retain their zero values for
+// compatibility with existing /api/workers consumers.
+func DisabledWorkerStats() WorkerStats {
+	return WorkerStats{Status: "disabled"}
 }
 
 // Worker is the generic goroutine lifecycle for cognitive workers.
@@ -131,6 +159,8 @@ func (w *Worker[T]) SubmitBatch(items []T) {
 
 // Run starts the worker loop. Blocks until ctx is done.
 func (w *Worker[T]) Run(ctx context.Context) error {
+	defer w.state.Store(int32(WorkerStateStopped))
+
 	batch := make([]T, 0, w.batchSize)
 	ticker := time.NewTicker(time.Duration(w.maxWait.Load()))
 	defer ticker.Stop()
@@ -253,13 +283,16 @@ func (w *Worker[T]) Run(ctx context.Context) error {
 
 // Stats returns current telemetry.
 func (w *Worker[T]) Stats() WorkerStats {
+	state := WorkerState(w.state.Load())
 	return WorkerStats{
 		Processed:     w.processed.Load(),
 		Batches:       w.batches.Load(),
 		Errors:        w.errors.Load(),
 		Dropped:       w.dropped.Load(),
 		LastRun:       w.lastRun.Load(),
-		State:         WorkerState(w.state.Load()),
+		State:         state,
+		Status:        state.String(),
+		Enabled:       true,
 		EffectiveWait: time.Duration(w.maxWait.Load()),
 	}
 }
@@ -269,6 +302,27 @@ type EngineWorkerStats struct {
 	Hebbian    WorkerStats `json:"hebbian"`
 	Contradict WorkerStats `json:"contradict"`
 	Confidence WorkerStats `json:"confidence"`
+}
+
+// Normalize fills the additive symbolic fields when an EngineAPI
+// implementation returns legacy zero-value stats. This keeps the public REST
+// contract authoritative even for disabled/unconfigured worker slots.
+func (s EngineWorkerStats) Normalize() EngineWorkerStats {
+	normalize := func(stats WorkerStats) WorkerStats {
+		if stats.Status != "" {
+			return stats
+		}
+		if stats.Enabled {
+			stats.Status = stats.State.String()
+		} else {
+			stats.Status = "disabled"
+		}
+		return stats
+	}
+	s.Hebbian = normalize(s.Hebbian)
+	s.Contradict = normalize(s.Contradict)
+	s.Confidence = normalize(s.Confidence)
+	return s
 }
 
 // StartAll runs multiple workers via errgroup. Returns first error.

@@ -2715,7 +2715,11 @@ func (e *Engine) cogWorkers() (*cognitive.HebbianWorker, *cognitive.Worker[cogni
 // WorkerStats returns the current statistics for all cognitive workers.
 func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 	heb, contra, conf := e.cogWorkers()
-	stats := cognitive.EngineWorkerStats{}
+	stats := cognitive.EngineWorkerStats{
+		Hebbian:    cognitive.DisabledWorkerStats(),
+		Contradict: cognitive.DisabledWorkerStats(),
+		Confidence: cognitive.DisabledWorkerStats(),
+	}
 	if heb != nil {
 		stats.Hebbian = heb.Stats()
 	}
