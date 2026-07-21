@@ -927,11 +927,19 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 		mu.Unlock()
 		return 0, 0, fmt.Errorf("commit batch: %w", err)
 	}
-	mu.Unlock()
-	ps.replicateBatch(batch)
-
+	// Cache mutation under the stripe lock (was post-Unlock): otherwise a
+	// racing DeleteEngram's post-commit cache.Delete can land before this
+	// cache.Set, which then re-caches an engram Pebble has already deleted
+	// -- resurrecting it under a post-Wait read (caught on CI). Inside the
+	// critical section the cache mutation is atomic with the commit;
+	// DeleteEngram's cache.Delete always runs after we release.
+	// replicateBatch stays post-commit (no local-cache effect).
 	ps.cache.Set(wsPrefix, id, eng)
 	ps.metaCache.Remove(id16)
+	mu.Unlock()
+
+	ps.replicateBatch(batch)
+
 	return prior, newConf, nil
 }
 
