@@ -3,6 +3,7 @@ package plugin
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -43,9 +44,40 @@ func IsRetryableProviderError(err error) bool {
 }
 
 // IsProviderError reports whether err contains a provider failure, regardless
-// of retryability. Provider failures are systemic; they are never evidence
-// that an individual engram's content is permanently malformed.
+// of retryability.
 func IsProviderError(err error) bool {
 	var providerErr *ProviderError
 	return errors.As(err, &providerErr)
+}
+
+// isPermanentContentStatus reports whether an HTTP status indicates the request
+// itself is the problem — the engram's content is too large or malformed and
+// will fail identically on every retry. These are per-engram permanent failures,
+// distinct from systemic conditions (auth/config 401/403, throttling 429, or
+// upstream 5xx) that affect the provider rather than this specific engram.
+func isPermanentContentStatus(code int) bool {
+	switch code {
+	case http.StatusBadRequest, // 400 (e.g. context_length_exceeded)
+		http.StatusNotFound,              // 404 (e.g. unknown model/deployment)
+		http.StatusRequestEntityTooLarge, // 413 (payload too large)
+		http.StatusUnprocessableEntity:   // 422 (content rejected)
+		return true
+	default:
+		return false
+	}
+}
+
+// IsPermanentContent reports whether the failure is caused by this engram's
+// content and will therefore fail identically on every retry. Such engrams must
+// be latched with DigestEnrichFailed so the batch continues and followers drain,
+// rather than breaking the pass and wedging every engram sorted after it (#587).
+func (e *ProviderError) IsPermanentContent() bool {
+	return !e.Retryable && isPermanentContentStatus(e.StatusCode)
+}
+
+// IsPermanentContentProviderError reports whether err contains a content-caused
+// provider failure that is permanent for the originating engram.
+func IsPermanentContentProviderError(err error) bool {
+	var providerErr *ProviderError
+	return errors.As(err, &providerErr) && providerErr.IsPermanentContent()
 }

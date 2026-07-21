@@ -134,6 +134,92 @@ func TestRetroactiveProcessor_AuthenticationFailureRemainsPendingAndStopsBatch(t
 	}
 }
 
+// flagAwareStore faithfully models PebbleStore's flag-driven scan: it stores
+// per-engram digest flags and, on every pass, ScanWithoutFlag restarts from the
+// keyspace head and excludes engrams whose flags intersect flagBit or skipFlags.
+// This is the exact substrate the #587 wedge needs to reproduce — a content 4xx
+// that sorts first must LATCH so it is skipped next pass, otherwise it re-breaks
+// every pass and starves every follower.
+type flagAwareStore struct {
+	mockPluginStore
+	engrams []*Engram // fixed keyspace order
+	flags   map[ULID]uint8
+}
+
+func newFlagAwareStore(engrams ...*Engram) *flagAwareStore {
+	return &flagAwareStore{engrams: engrams, flags: make(map[ULID]uint8)}
+}
+
+func (s *flagAwareStore) pending(flagBit, skipFlags uint8) []*Engram {
+	var out []*Engram
+	for _, e := range s.engrams {
+		if f := s.flags[e.ID]; f&flagBit != 0 || f&skipFlags != 0 {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func (s *flagAwareStore) CountWithoutFlag(_ context.Context, flagBit, skipFlags uint8) (int64, error) {
+	return int64(len(s.pending(flagBit, skipFlags))), nil
+}
+
+func (s *flagAwareStore) ScanWithoutFlag(_ context.Context, flagBit, skipFlags uint8) EngramIterator {
+	return &mockIterator{engrams: s.pending(flagBit, skipFlags)}
+}
+
+func (s *flagAwareStore) SetDigestFlag(_ context.Context, id ULID, flag uint8) error {
+	s.flags[id] |= flag
+	return nil
+}
+
+func (s *flagAwareStore) GetDigestFlags(_ context.Context, id ULID) (uint8, error) {
+	return s.flags[id], nil
+}
+
+// TestRetroactiveProcessor_ContentFourxxLatchesAndFollowersDrain pins the #587
+// fix: a non-retryable content HTTP 400 on the engram that sorts FIRST must be
+// stamped DigestEnrichFailed and NOT break the pass, so the follower enriches.
+// Before the fix this wedged forever — the 400 broke every pass at the head and
+// no engram sorted after it was ever reached.
+func TestRetroactiveProcessor_ContentFourxxLatchesAndFollowersDrain(t *testing.T) {
+	first := &Engram{ID: ULID{1}, Concept: "content-400", Content: "oversized"}
+	second := &Engram{ID: ULID{2}, Concept: "enrichable", Content: "content"}
+	store := newFlagAwareStore(first, second)
+
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-content-400", tier: TierEnrich},
+		enrichFunc: func(_ context.Context, e *Engram) (*EnrichmentResult, error) {
+			if e.ID == first.ID {
+				return nil, fmt.Errorf("pipeline: %w", &ProviderError{
+					Provider:   "fake",
+					StatusCode: 400,
+					Retryable:  false,
+				})
+			}
+			return &EnrichmentResult{Summary: "enriched"}, nil
+		},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	// Multiple passes: even one pass suffices with the fix, but repeated passes
+	// prove the head engram does not re-break the batch.
+	for i := 0; i < 3; i++ {
+		rp.processBatch(context.Background())
+	}
+
+	if store.flags[first.ID]&DigestEnrichFailed == 0 {
+		t.Fatalf("first engram (content 400) was not latched with DigestEnrichFailed; flags=%#x", store.flags[first.ID])
+	}
+	if store.flags[second.ID]&DigestEnrich == 0 {
+		t.Fatalf("follower engram never enriched — batch wedged on the content 400 (#587); flags=%#x", store.flags[second.ID])
+	}
+	if rp.Stats().Processed != 1 {
+		t.Fatalf("processed = %d, want 1 (the follower)", rp.Stats().Processed)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Constructor & field tests
 // ---------------------------------------------------------------------------

@@ -507,21 +507,28 @@ engramLoop:
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return true
 			}
-			if errors.Is(err, circuit.ErrOpen) || IsProviderError(err) {
-				// Systemic provider condition: stop this pass so the processor cannot
-				// fan a throttle or configuration outage across the pending queue.
-				break engramLoop
-			}
-			// LLM-originated failures (bad output, parse error) are permanent for
-			// this engram. Mark DigestEnrichFailed so the processor does not retry
-			// it indefinitely, which would trip the circuit breaker and block
-			// enrichment for all other memories. Storage/persistence errors are NOT
-			// marked — they are transient and should be retried when storage recovers.
+			// Permanent per-engram failures — LLM-originated (bad output, parse
+			// error) or content-caused provider 4xx (400/413/422/404). Mark
+			// DigestEnrichFailed so the processor does not retry indefinitely
+			// (which would trip the circuit breaker) and, crucially, so
+			// ScanWithoutFlag excludes this engram on the next pass. A content 4xx
+			// that sorts first would otherwise re-break every pass and wedge every
+			// follower forever (#587). Continue so the rest of the batch drains.
+			// Storage/persistence errors are NOT latched — they are transient and
+			// retried once storage recovers.
 			if errors.Is(err, errLLMFailed) {
 				if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, DigestEnrichFailed); flagErr != nil {
 					slog.Warn("retroactive processor: failed to set DigestEnrichFailed",
 						"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", flagErr)
 				}
+				continue
+			}
+			if errors.Is(err, circuit.ErrOpen) || IsProviderError(err) {
+				// Systemic provider condition (throttle, auth/config outage,
+				// transport): stop this pass so the processor cannot fan the
+				// failure across the pending queue. The engram stays pending and
+				// retries once the provider recovers.
+				break engramLoop
 			}
 			continue
 		}
@@ -638,6 +645,13 @@ func (rp *RetroactiveProcessor) processEnrichEngram(ctx context.Context, eng *En
 			}
 			if IsRetryableProviderError(err) {
 				return fmt.Errorf("transient enrichment provider failure: %w", err)
+			}
+			if IsPermanentContentProviderError(err) {
+				// Content-caused 4xx (400/413/422/404): this engram's content is
+				// too large or malformed and will fail identically forever. Wrap
+				// with errLLMFailed so the caller stamps DigestEnrichFailed and
+				// continues, exactly as develop did for LLM failures (#587).
+				return fmt.Errorf("%w: %w", errLLMFailed, err)
 			}
 			if IsProviderError(err) {
 				return fmt.Errorf("enrichment provider failure: %w", err)
