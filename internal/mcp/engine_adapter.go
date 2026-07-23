@@ -332,6 +332,10 @@ func (a *mcpEngineAdapter) FindByEntity(ctx context.Context, vault, entityName s
 	return a.eng.FindByEntity(ctx, vault, entityName, limit)
 }
 
+func (a *mcpEngineAdapter) FindByConcept(ctx context.Context, vault, concept string, limit int) ([]*storage.Engram, error) {
+	return a.eng.FindByConcept(ctx, vault, concept, limit)
+}
+
 func (a *mcpEngineAdapter) CheckIdempotency(ctx context.Context, opID string) (*storage.IdempotencyReceipt, error) {
 	return a.eng.CheckIdempotency(ctx, opID)
 }

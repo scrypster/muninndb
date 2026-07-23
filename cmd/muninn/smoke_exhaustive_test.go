@@ -42,6 +42,7 @@ var allMCPTools = []string{
 	"muninn_guide",
 	"muninn_where_left_off",
 	"muninn_find_by_entity",
+	"muninn_find_by_concept",
 	"muninn_entity_state",
 	"muninn_entity_state_batch",
 	"muninn_remember_tree",

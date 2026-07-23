@@ -290,6 +290,9 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		// Entity reverse index
 		"muninn_find_by_entity": s.handleFindByEntity,
 
+		// Concept reverse index — direct exact-Concept lookup
+		"muninn_find_by_concept": s.handleFindByConcept,
+
 		// Entity lifecycle state
 		"muninn_entity_state":       s.handleEntityState,
 		"muninn_entity_state_batch": s.handleEntityStateBatch,
@@ -348,7 +351,7 @@ func registeredToolNames() []string {
 		"muninn_list_deleted", "muninn_retry_enrich", "muninn_get_enrichment_candidates",
 		"muninn_apply_enrichment", "muninn_guide",
 		"muninn_where_left_off", "muninn_remember_tree", "muninn_recall_tree",
-		"muninn_add_child", "muninn_find_by_entity", "muninn_entity_state",
+		"muninn_add_child", "muninn_find_by_entity", "muninn_find_by_concept", "muninn_entity_state",
 		"muninn_entity_state_batch", "muninn_entity_clusters", "muninn_export_graph",
 		"muninn_similar_entities", "muninn_merge_entity", "muninn_entity_timeline",
 		"muninn_replay_enrichment", "muninn_provenance", "muninn_feedback",

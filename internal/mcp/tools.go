@@ -592,6 +592,20 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"entity_name"},
 			},
 		},
+		// Concept reverse index tool — direct exact-Concept lookup
+		{
+			Name:        "muninn_find_by_concept",
+			Description: "Return memories whose Concept field exactly matches the given string. Uses the 0x2B concept reverse index for O(matches) lookup, independent of entity-graph size. Concepts are NOT unique in MuninnDB — multiple writes with the same Concept produce distinct ULIDs, so this returns all matches (excluding soft-deleted/archived) ordered newest-first by ULID, capped to limit.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"concept": map[string]any{"type": "string", "description": "The exact Concept string to match (max 512 bytes, same constraint as Engram.Concept)"},
+					"vault":   vaultProp,
+					"limit":   map[string]any{"type": "integer", "description": "Max results (1-50, default 1)"},
+				},
+				"required": []string{"concept"},
+			},
+		},
 		// Entity lifecycle state tool
 		{
 			Name:        "muninn_entity_state",

@@ -1,6 +1,6 @@
 # Key-Space Schema
 
-MuninnDB stores all state in a single Pebble instance using a prefix-partitioned key space. Each prefix byte (0x01–0x24) identifies a distinct data type, and keys are constructed by dedicated functions in the `storage` package — never assembled ad hoc. Most prefixes are vault-scoped: the key begins with a workspace prefix (`wsPrefix`) derived from a SipHash of the vault name. A handful of prefixes are global (cross-vault) and omit the workspace prefix entirely.
+MuninnDB stores all state in a single Pebble instance using a prefix-partitioned key space. Each allocated prefix byte identifies a distinct data type, and keys are constructed by dedicated functions in the `storage` package - never assembled ad hoc. Most prefixes are vault-scoped: the key begins with a workspace prefix (`wsPrefix`) derived from a SipHash of the vault name. A handful of prefixes are global (cross-vault) and omit the workspace prefix entirely.
 
 This document is the authoritative reference for every prefix in the system. Update it before merging any change that introduces or modifies a key layout.
 
@@ -57,6 +57,10 @@ This document is the authoritative reference for every prefix in the system. Upd
 | 0x23 | Entity Reverse Index | Cross-vault | `nameHash(8) \| ws(8) \| engramID(16)` | NoSync | Entity←engram reverse lookup across vaults. Always written atomically with 0x20. |
 | 0x24 | Entity Co-occurrence | Vault | `ws(8) \| hashA(8) \| hashB(8)` | NoSync | Pairwise entity co-occurrence count. Hash pair is canonically ordered (hashA < hashB). |
 | 0x27 | Dream State | Vault | `ws(8)` | NoSync→Sync | Per-vault dream consolidation state (last run time, engram count at run). Also used for global dream-due flag with zero vault prefix. |
+| 0x28 | Content Hash Dedup | Vault | `ws(8) \| sha256(32)` | NoSync | SHA-256 content hash → engram ID. Powers exact-duplicate detection at write time. |
+| 0x29 | Recall Event | Vault | `ws(8) \| eventID(16)` | NoSync | Recall-event calibration record, ordered by event ULID. |
+| 0x2A | Lease | Vault | `ws(8) \| id(16)` | NoSync | Advisory ownership lease sidecar. |
+| 0x2B | Concept Index | Vault | `ws(8) \| conceptHash(4) \| id(16)` | NoSync | Reverse index from FNV-1a hash of the Engram.Concept string back to engram IDs. Powers `muninn_find_by_concept` for direct exact-Concept lookups. Concepts are not unique; lookup uses a prefix scan plus full-Concept comparison to filter hash collisions. |
 
 \* Engram (0x01) and Metadata (0x02) default to Sync. When `NoSyncEngrams=true`, they move to NoSync tier (WAL syncer provides ≤10ms durability).
 
@@ -80,9 +84,9 @@ A self-contained FTS engine built on Pebble primitives. Posting lists (0x05) map
 
 Added in the entity extraction pipeline. Entities are globally registered (0x1F) with confidence-preserving merge semantics — if two vaults extract the same entity, the higher confidence wins. Forward links (0x20) and reverse links (0x23) connect engrams to entities bidirectionally and are always written as an atomic pair. Relationship records (0x21) capture typed relations (manages, depends_on, contradicts, etc.) between entity pairs scoped to a source engram. Co-occurrence counts (0x24) track how often two entities appear together, using canonically ordered hash pairs to avoid duplicates.
 
-### Secondary Index Layer (0x0A, 0x0B, 0x0C, 0x0D, 0x10, 0x22)
+### Secondary Index Layer (0x0A, 0x0B, 0x0C, 0x0D, 0x10, 0x22, 0x2B)
 
-Derived indexes that accelerate filtered queries. Each maps a single attribute (lifecycle state, tag, creator, relevance score, contradiction relationship) to the set of engram IDs matching that value. These are always rebuildable from engram metadata — they are optimization structures, not source-of-truth data. The relevance bucket index (0x10) uses inverted bucket values so a forward Pebble scan returns the highest-relevance engrams first.
+Derived indexes that accelerate filtered queries. Each maps a single attribute (lifecycle state, tag, creator, relevance score, contradiction relationship, concept) to the set of engram IDs matching that value. These are always rebuildable from engram metadata — they are optimization structures, not source-of-truth data. The relevance bucket index (0x10) uses inverted bucket values so a forward Pebble scan returns the highest-relevance engrams first. The concept index (0x2B) uses an FNV-1a 32-bit hash + ULID suffix and is written atomically with the engram body in `WriteEngram`, mirroring the tag/creator index pattern.
 
 ### Configuration and Metadata (0x0E, 0x0F, 0x11, 0x12, 0x13, 0x15, 0x17, 0x19, 0x1D)
 
@@ -100,7 +104,7 @@ Several key groups are always written in the same Pebble `Batch` to maintain cro
 
 | Keys | Operation | Guarantee |
 |---|---|---|
-| 0x01 + 0x02 | `WriteEngram` | Engram body and metadata are never out of sync. |
+| 0x01 + 0x02 + 0x2B | `WriteEngram` | Engram body, metadata, and concept index are never out of sync (concept index written iff `Concept != ""`). |
 | 0x20 + 0x23 | `WriteEntityEngramLink` | Forward and reverse entity links are never orphaned. |
 | 0x03 + 0x04 + 0x14 | `WriteAssociation` | All three association indexes reflect the same edge state. |
 | 0x1A frame + 0x1A FrameCount | `AppendFrame` | Frame content and the episode's frame counter advance atomically. Uses `pebble.Sync`. |

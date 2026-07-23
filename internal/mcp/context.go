@@ -206,6 +206,7 @@ func isReadOnlyTool(name string) bool {
 		"muninn_where_left_off",
 		"muninn_recall_tree",
 		"muninn_find_by_entity",
+		"muninn_find_by_concept",
 		"muninn_entity_clusters",
 		"muninn_export_graph",
 		"muninn_similar_entities",
