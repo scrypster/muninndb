@@ -102,6 +102,18 @@ func TestGetEntityTimeline_LimitCaps(t *testing.T) {
 	if timeline.MentionCount != 5 {
 		t.Errorf("Expected mention count 5 (total), got %d", timeline.MentionCount)
 	}
+	if len(timeline.Entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(timeline.Entries))
+	}
+	newest := timeline.Entries[len(timeline.Entries)-1].CreatedAt
+	oldestKept := timeline.Entries[0].CreatedAt
+	if now.Sub(newest) > time.Second {
+		t.Errorf("capped timeline missing newest mention: got %v, want near %v", newest, now)
+	}
+	expectedOldestKept := now.Add(-2 * time.Hour)
+	if oldestKept.Sub(expectedOldestKept).Abs() > time.Second {
+		t.Errorf("capped timeline retained wrong window: got %v, want near %v", oldestKept, expectedOldestKept)
+	}
 }
 
 func TestGetEntityTimeline_EntityNotFound(t *testing.T) {

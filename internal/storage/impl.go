@@ -331,6 +331,14 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	laKey := keys.LastAccessIndexKey(wsPrefix, laMillis, [16]byte(eng.ID))
 	batch.Set(laKey, nil, nil)
 
+	// 0x2B: concept index - vault-scoped reverse index for direct concept-key
+	// lookups. Powers FindByConcept for callers that know the deterministic
+	// concept string (e.g., COP-format observations). Concepts are NOT unique;
+	// lookup uses prefix scan + full-Concept compare to handle collisions.
+	if eng.Concept != "" {
+		batch.Set(keys.ConceptIndexKey(wsPrefix, keys.Hash(eng.Concept), [16]byte(eng.ID)), []byte{}, nil)
+	}
+
 	// Commit — default: one fsync per user-submitted engram (pebble.Sync).
 	// User content is the irreplaceable asset; immediate durability is the
 	// correct tradeoff for a write-light memory store.
@@ -493,6 +501,12 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		if err := batch.Set(laKey, nil, nil); err != nil {
 			errs[i] = fmt.Errorf("write engram batch: last access index: %w", err)
 			continue
+		}
+
+		// 0x2B: concept index - powers FindByConcept. Concepts are not unique;
+		// multiple engrams with the same Concept are all indexed.
+		if eng.Concept != "" {
+			batch.Set(keys.ConceptIndexKey(ws, keys.Hash(eng.Concept), id16), []byte{}, nil)
 		}
 
 		ids[i] = eng.ID

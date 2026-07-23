@@ -205,10 +205,18 @@ type EngineStore interface {
 	// that exists when WriteEntityEngramLink and DeleteEntityEngramLink are called separately.
 	RelinkEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, fromEntity, toEntity string) error
 
-	// ScanEntityEngrams scans the 0x23 reverse index for all vault-scoped (ws, engramID)
-	// pairs that mention the given entity name. Calls fn for each pair until fn returns
-	// a non-nil error or the index is exhausted.
+	// ScanEntityEngrams scans the 0x23 reverse index for all vault-scoped
+	// (ws, engramID) pairs that mention the given entity name, oldest-first.
 	ScanEntityEngrams(ctx context.Context, entityName string, fn func(ws [8]byte, engramID ULID) error) error
+
+	// ScanEntityEngramsReverse scans the same index newest-first.
+	ScanEntityEngramsReverse(ctx context.Context, entityName string, fn func(ws [8]byte, engramID ULID) error) error
+
+	// ScanConceptIndex scans the 0x2B concept index for a single (vault, conceptHash)
+	// pair, calling fn for each candidate engram ID. Hash collisions are NOT filtered
+	// here — the caller must hydrate each engram and compare the full Concept string.
+	// Matches the pattern of TagIndex (0x0C) and CreatorIndex (0x0D).
+	ScanConceptIndex(ctx context.Context, wsPrefix [8]byte, conceptHash uint32, fn func(engramID ULID) error) error
 
 	// ScanEngramEntities scans the 0x20 forward index for all entities mentioned
 	// by the given engram in vault ws. Calls fn for each entity name.

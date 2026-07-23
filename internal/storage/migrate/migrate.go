@@ -48,7 +48,8 @@ func (r *Runner) Register(m Migration) {
 func RegisterMigrations(r *Runner) {
 	r.Register(Migration{Version: 1, Description: "backfill embed_dim in ERF records for existing embeddings", Up: BackfillEmbedDim})
 	r.Register(Migration{Version: 2, Description: "backfill relationship entity index (0x26) for GetEntityAggregate optimisation", Up: BackfillRelEntityIndex})
-	r.Register(Migration{Version: 3, Description: "relocate auth prefixes 0x11–0x14 to 0x42–0x45 (#611)", Up: RelocateAuthPrefixes})
+	r.Register(Migration{Version: 3, Description: "relocate auth prefixes 0x11-0x14 to 0x42-0x45 (#611)", Up: RelocateAuthPrefixes})
+	r.Register(Migration{Version: 4, Description: "backfill exact-concept reverse index (0x2B)", Up: BackfillConceptIndex})
 }
 
 // MaxRegisteredVersion returns the highest migration version this binary knows.

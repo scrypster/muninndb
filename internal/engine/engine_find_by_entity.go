@@ -77,11 +77,11 @@ func (e *Engine) FindByEntity(ctx context.Context, vault, entityName string, lim
 	return &FindByEntityResult{}, nil
 }
 
-// entityEngrams scans the 0x23 reverse index for live engrams in ws linked
-// to entityName, up to limit entries.
+// entityEngrams scans the 0x23 reverse index newest-first for live engrams in
+// ws linked to entityName, up to limit entries.
 func (e *Engine) entityEngrams(ctx context.Context, ws [8]byte, entityName string, limit int) ([]*storage.Engram, error) {
 	var results []*storage.Engram
-	err := e.store.ScanEntityEngrams(ctx, entityName, func(gotWS [8]byte, id storage.ULID) error {
+	err := e.store.ScanEntityEngramsReverse(ctx, entityName, func(gotWS [8]byte, id storage.ULID) error {
 		if gotWS != ws {
 			return nil // different vault — skip
 		}

@@ -474,6 +474,10 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	for _, tag := range eng.Tags {
 		batch.Delete(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(id)), nil)
 	}
+	// 0x2B: concept index cleanup (mirrors WriteEngram write-path).
+	if eng.Concept != "" {
+		batch.Delete(keys.ConceptIndexKey(wsPrefix, keys.Hash(eng.Concept), [16]byte(id)), nil)
+	}
 
 	// Association forward/reverse keys — scan live Pebble keys rather than
 	// trusting the inline ERF associations, which may have stale weights if

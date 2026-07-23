@@ -26,10 +26,9 @@ type EntityTimeline struct {
 	Count        int             `json:"count"`
 }
 
-// GetEntityTimeline returns a chronological view of when an entity first appeared
-// in memory and how it has evolved. Scans the entity reverse index (0x23) to find
-// all engrams mentioning the entity, then collects timeline entries sorted by
-// creation time (oldest first). Results are capped at limit.
+// GetEntityTimeline returns a chronological view of an entity's most recent
+// mentions. It scans the entity reverse index newest-first so a capped result
+// retains recent history, then sorts that retained window oldest-first for display.
 func (e *Engine) GetEntityTimeline(ctx context.Context, vault string, entityName string, limit int) (*EntityTimeline, error) {
 	if entityName == "" {
 		return nil, fmt.Errorf("entity_name is required")
@@ -55,7 +54,7 @@ func (e *Engine) GetEntityTimeline(ctx context.Context, vault string, entityName
 
 	// Scan all engrams mentioning this entity.
 	var entries []TimelineEntry
-	err = e.store.ScanEntityEngrams(ctx, entityName, func(gotWS [8]byte, id storage.ULID) error {
+	err = e.store.ScanEntityEngramsReverse(ctx, entityName, func(gotWS [8]byte, id storage.ULID) error {
 		if gotWS != ws {
 			return nil // different vault — skip
 		}

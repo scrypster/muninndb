@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/stretchr/testify/require"
@@ -64,6 +65,38 @@ func TestFindByEntity_ExcludesArchived(t *testing.T) {
 
 // TestFindByEntity_ExcludesSoftDeleted verifies that soft-deleted engrams do not
 // appear in FindByEntity results.
+func TestFindByEntity_NewestFirst(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "find-by-entity-newest"
+	const entity = "OrderedEntity"
+	ws := eng.store.ResolveVaultPrefix(vault)
+	require.NoError(t, eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+		Name: entity, Type: "concept", Source: "inline",
+	}, "inline"))
+
+	ids := make([]storage.ULID, 5)
+	for i := range ids {
+		createdAt := time.Now().Add(time.Duration(i) * time.Minute)
+		id, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+			Concept: "ordered", Content: "observation", CreatedAt: createdAt,
+		})
+		require.NoError(t, err)
+		require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, id, entity))
+		ids[i] = id
+	}
+
+	res, err := eng.FindByEntity(ctx, vault, entity, 3)
+	require.NoError(t, err)
+	require.Len(t, res.Engrams, 3)
+	for i := range res.Engrams {
+		require.Equal(t, ids[len(ids)-1-i], res.Engrams[i].ID)
+	}
+}
+
 func TestFindByEntity_ExcludesSoftDeleted(t *testing.T) {
 	t.Parallel()
 	eng, cleanup := testEnv(t)

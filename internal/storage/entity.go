@@ -304,12 +304,22 @@ func (ps *PebbleStore) DeleteEntityEngramLink(ctx context.Context, ws [8]byte, e
 }
 
 // ScanEntityEngrams scans the 0x23 reverse index for all vault-scoped engrams
-// that mention the given entity name. Calls fn for each (ws, engramID) pair.
+// that mention the given entity name, oldest-first.
 func (ps *PebbleStore) ScanEntityEngrams(ctx context.Context, entityName string, fn func(ws [8]byte, engramID ULID) error) error {
+	return ps.scanEntityEngrams(ctx, entityName, false, fn)
+}
+
+// ScanEntityEngramsReverse scans the same index newest-first. Engram IDs are
+// ULIDs, so descending key order is descending creation time within each vault.
+func (ps *PebbleStore) ScanEntityEngramsReverse(ctx context.Context, entityName string, fn func(ws [8]byte, engramID ULID) error) error {
+	return ps.scanEntityEngrams(ctx, entityName, true, fn)
+}
+
+func (ps *PebbleStore) scanEntityEngrams(ctx context.Context, entityName string, reverse bool, fn func(ws [8]byte, engramID ULID) error) error {
 	nameHash := keys.EntityNameHash(entityName)
-	prefix := keys.EntityReverseIndexPrefix(nameHash)
-	upperBound := make([]byte, len(prefix))
-	copy(upperBound, prefix)
+	keyPrefix := keys.EntityReverseIndexPrefix(nameHash)
+	upperBound := make([]byte, len(keyPrefix))
+	copy(upperBound, keyPrefix)
 	for i := len(upperBound) - 1; i >= 0; i-- {
 		upperBound[i]++
 		if upperBound[i] != 0 {
@@ -317,27 +327,38 @@ func (ps *PebbleStore) ScanEntityEngrams(ctx context.Context, entityName string,
 		}
 	}
 
-	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound})
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: keyPrefix, UpperBound: upperBound})
 	if err != nil {
 		return fmt.Errorf("scan entity engrams: iter: %w", err)
 	}
 	defer iter.Close()
 
-	for valid := iter.First(); valid; valid = iter.Next() {
+	visit := func() error {
 		k := iter.Key()
 		if len(k) != 33 { // 1 + 8 + 8 + 16
-			continue
+			return nil
 		}
 		var ws [8]byte
 		copy(ws[:], k[9:17])
 		var idBytes [16]byte
 		copy(idBytes[:], k[17:33])
-		id := ULID(idBytes)
-		if err := fn(ws, id); err != nil {
+		return fn(ws, ULID(idBytes))
+	}
+
+	if reverse {
+		for valid := iter.Last(); valid; valid = iter.Prev() {
+			if err := visit(); err != nil {
+				return err
+			}
+		}
+		return iter.Error()
+	}
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if err := visit(); err != nil {
 			return err
 		}
 	}
-	return nil
+	return iter.Error()
 }
 
 // ScanEngramEntities scans the 0x20 forward index for all entities mentioned

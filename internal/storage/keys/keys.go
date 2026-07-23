@@ -820,3 +820,23 @@ func LeaseKey(ws [8]byte, id [16]byte) []byte {
 	copy(key[9:25], id[:])
 	return key
 }
+
+// ConceptIndexKey constructs the concept-text secondary index key (0x2B prefix).
+// Key: 0x2B | wsPrefix(8) | conceptHash(4) | id(16) = 29 bytes.
+func ConceptIndexKey(ws [8]byte, conceptHash uint32, id [16]byte) []byte {
+	key := make([]byte, 1+8+4+16)
+	key[0] = prefix.ConceptIndex
+	copy(key[1:9], ws[:])
+	binary.BigEndian.PutUint32(key[9:13], conceptHash)
+	copy(key[13:29], id[:])
+	return key
+}
+
+// ConceptIndexPrefix returns the 13-byte scan prefix for a concept hash.
+func ConceptIndexPrefix(ws [8]byte, conceptHash uint32) []byte {
+	key := make([]byte, 1+8+4)
+	key[0] = prefix.ConceptIndex
+	copy(key[1:9], ws[:])
+	binary.BigEndian.PutUint32(key[9:13], conceptHash)
+	return key
+}

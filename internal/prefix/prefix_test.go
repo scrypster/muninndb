@@ -72,7 +72,7 @@ func TestAll_ConstSliceComplete(t *testing.T) {
 		name string
 		b    byte
 	}{
-		// Storage (0x01–0x2A)
+		// Storage (0x01-0x2B)
 		{"Engram", Engram},
 		{"Meta", Meta},
 		{"AssocFwd", AssocFwd},
@@ -115,6 +115,7 @@ func TestAll_ConstSliceComplete(t *testing.T) {
 		{"ContentHash", ContentHash},
 		{"RecallEvent", RecallEvent},
 		{"Lease", Lease},
+		{"ConceptIndex", ConceptIndex},
 		// Capability (0x40/0x41)
 		{"Capability", Capability},
 		{"CapabilityVaultIdx", CapabilityVaultIdx},

@@ -47,9 +47,10 @@ func (e *Engine) GetEntityAggregate(ctx context.Context, vault, entityName strin
 
 	ws := e.store.ResolveVaultPrefix(vault)
 
-	// 2. Engrams that mention this entity (vault-scoped via ScanEntityEngrams reverse index)
+	// 2. Engrams that mention this entity, newest-first so a capped aggregate
+	// retains the most recent observations.
 	var engrams []*storage.Engram
-	scanErr := e.store.ScanEntityEngrams(ctx, entityName, func(gotWS [8]byte, id storage.ULID) error {
+	scanErr := e.store.ScanEntityEngramsReverse(ctx, entityName, func(gotWS [8]byte, id storage.ULID) error {
 		if gotWS != ws {
 			return nil // different vault — skip
 		}
