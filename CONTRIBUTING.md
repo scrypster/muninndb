@@ -8,7 +8,7 @@ The project is under the [Business Source License 1.1](LICENSE) and has a provis
 
 ---
 
-## How to contribute
+## How to Contribute
 
 1. **Bug reports or ideas** — Open an issue. Even a one-line "this broke my agent workflow" helps.
 2. **Code changes** — Fork, make the change, open a PR.
@@ -27,7 +27,7 @@ go run ./cmd/muninn/... start
 
 See the [README](README.md) for full install options and configuration.
 
-## Running tests
+## Running Tests
 
 Basic unit tests (no assets required):
 
@@ -44,7 +44,7 @@ go test -tags localassets ./...
 
 ---
 
-## Branch model (Git Flow)
+## Branch Model (Git Flow)
 
 We use a **develop → main** flow:
 
