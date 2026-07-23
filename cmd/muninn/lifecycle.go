@@ -186,22 +186,35 @@ func runStop() {
 	pid, err := readPID(pidPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		osExit(1)
+		return
+	}
+	if !isProcessRunning(pid) {
+		// Stale PID file: the daemon crashed or was kill -9'd without cleanup.
+		// Signalling this dead PID would fail with "process already finished";
+		// instead remove the stale sidecars and report the daemon as stopped.
+		fmt.Printf("muninn not running (removed stale PID file for pid %d)\n", pid)
+		os.Remove(pidPath)
+		os.Remove(filepath.Join(dataDir, addrsFileName))
+		return
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "process not found: %v\n", err)
-		os.Exit(1)
+		osExit(1)
+		return
 	}
 	if err := stopProcess(proc); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to stop: %v\n", err)
-		os.Exit(1)
+		osExit(1)
+		return
 	}
 
 	if err := waitForProcessExit(pid, 35*time.Second); err != nil {
 		fmt.Fprintf(os.Stderr, "muninn (pid %d) did not stop within 35s — aborting\n", pid)
 		fmt.Fprintf(os.Stderr, "Check 'muninn logs' for details. You can force-kill with: kill -9 %d\n", pid)
-		os.Exit(1)
+		osExit(1)
+		return
 	}
 
 	fmt.Printf("muninn stopped (pid %d)\n", pid)

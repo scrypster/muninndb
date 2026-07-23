@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -160,6 +161,41 @@ func TestDefaultDataDirEnvOverride(t *testing.T) {
 	dir := defaultDataDir()
 	if dir != testDir {
 		t.Errorf("defaultDataDir = %q, want %q (from MUNINNDB_DATA)", dir, testDir)
+	}
+}
+
+// TestRunStop_StalePIDFile verifies that a stale PID file — left behind when the
+// daemon crashed or was kill -9'd without cleanup — does not make 'muninn stop'
+// fail with "process already finished". Stop must detect the dead PID, remove the
+// stale sidecars, and succeed.
+func TestRunStop_StalePIDFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MUNINNDB_DATA", dir)
+
+	pidPath := filepath.Join(dir, "muninn.pid")
+	if err := writePID(pidPath, 99999999); err != nil { // dead PID, per TestIsProcessRunningDeadProcess
+		t.Fatalf("writePID: %v", err)
+	}
+	addrsPath := filepath.Join(dir, addrsFileName)
+	if err := writeAddrsFile(dir, daemonAddrs{RestAddr: "127.0.0.1:8475"}); err != nil {
+		t.Fatalf("writeAddrsFile: %v", err)
+	}
+
+	origExit := osExit
+	exitCode := -1
+	osExit = func(code int) { exitCode = code }
+	defer func() { osExit = origExit }()
+
+	runStop()
+
+	if exitCode != -1 {
+		t.Errorf("runStop exited with code %d on a stale PID file; want no exit", exitCode)
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Errorf("stale PID file not removed: stat err = %v", err)
+	}
+	if _, err := os.Stat(addrsPath); !os.IsNotExist(err) {
+		t.Errorf("stale addrs file not removed: stat err = %v", err)
 	}
 }
 
