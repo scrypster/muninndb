@@ -1910,6 +1910,18 @@ func computeGatedActivation(vectorScore, normalizedFTS, decayFactor, hebbianBoos
 	return contentRelevance * gate
 }
 
+// PassesMetaFilter evaluates the request's filter predicates against a full
+// engram, for callers outside this package.
+//
+// Phase 6 is the correctness gate for everything the pipeline itself retrieves,
+// but passes that run after Run returns — the entity-boost spread activation in
+// particular — can introduce engrams the pipeline never saw. Those candidates
+// have never been filtered, so they must be checked here before being surfaced
+// (issue #654).
+func PassesMetaFilter(eng *storage.Engram, filters []Filter) bool {
+	return passesMetaFilter(eng, filters)
+}
+
 // passesMetaFilter evaluates filter predicates against a full engram.
 // Accepts *storage.Engram directly — avoids a separate GetMetadata call in phase6.
 func passesMetaFilter(eng *storage.Engram, filters []Filter) bool {

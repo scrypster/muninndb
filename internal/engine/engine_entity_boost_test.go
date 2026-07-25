@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -158,7 +160,7 @@ func TestEntityBoost_ApplyEntityBoostDirect(t *testing.T) {
 	}
 
 	// Apply entity boost.
-	boosted := eng.applyEntityBoost(ctx, ws, initialResults)
+	boosted := eng.applyEntityBoost(ctx, ws, initialResults, nil, false)
 
 	// Build ID set from boosted results.
 	idSet := make(map[storage.ULID]float64, len(boosted))
@@ -234,4 +236,197 @@ func TestEntityBoost_MaxResultsRespectedAfterBoost(t *testing.T) {
 				i, resp.Activations[i].Score, resp.Activations[i-1].Score)
 		}
 	}
+}
+
+// TestEntityBoost_InjectedResultsRespectMetaFilters pins issue #654: engrams
+// injected by the entity-boost pass have never been through phase 6, so the
+// request's meta filters must be applied to them here. Before the fix, a recall
+// scoped by tags_all or created_after returned entity-linked engrams matching
+// neither constraint.
+//
+// The two halves are asserted separately on purpose. Filtering the injection
+// path is the fix; filtering engrams already in results would be a regression,
+// since those passed phase 6 on the way in and dropping them would silently
+// shrink legitimate result sets.
+func TestEntityBoost_InjectedResultsRespectMetaFilters(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "boost-filter-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	require.NoError(t, eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+		Name: "Shared", Type: "concept", Source: "inline",
+	}, "inline"))
+
+	// Seed: in the result set already, carries the tag.
+	seed := &storage.Engram{Concept: "seed", Content: "seed content", Confidence: 0.9, Tags: []string{"keep"}}
+	idSeed, err := eng.store.WriteEngram(ctx, ws, seed)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idSeed, "Shared"))
+
+	// Matching: entity-linked and carries the tag. Must still be injected —
+	// the fix must not suppress legitimate injections.
+	match := &storage.Engram{Concept: "match", Content: "tagged neighbour", Confidence: 0.8, Tags: []string{"keep"}}
+	idMatch, err := eng.store.WriteEngram(ctx, ws, match)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idMatch, "Shared"))
+
+	// Violating: entity-linked but does NOT carry the tag. Must not appear.
+	violating := &storage.Engram{Concept: "violating", Content: "untagged neighbour", Confidence: 0.8, Tags: []string{"other"}}
+	idViolating, err := eng.store.WriteEngram(ctx, ws, violating)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idViolating, "Shared"))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, idSeed)
+	require.NoError(t, err)
+	require.NotNil(t, fullSeed)
+
+	filters := []activation.Filter{{Field: "tags_all", Op: "eq", Value: []string{"keep"}}}
+	boosted := eng.applyEntityBoost(ctx, ws,
+		[]activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}, filters, false)
+
+	got := make(map[storage.ULID]float64, len(boosted))
+	for _, r := range boosted {
+		got[r.Engram.ID] = r.Score
+	}
+
+	_, violatingFound := got[idViolating]
+	assert.False(t, violatingFound,
+		"engram carrying none of the requested tags must not be injected by entity boost (#654)")
+
+	_, matchFound := got[idMatch]
+	assert.True(t, matchFound,
+		"entity-linked engram that satisfies the filter must still be injected")
+
+	_, seedFound := got[idSeed]
+	assert.True(t, seedFound,
+		"engrams already in the result set passed phase 6 and must not be re-filtered out")
+}
+
+// TestEntityBoost_InjectedResultsRespectTimeFilters covers the same bypass on
+// created_after, the form in which it was originally observed on a live daemon:
+// a recall bounded to the current day returned entity-linked engrams from two
+// weeks earlier, each scored purely by entity boost with no content score.
+func TestEntityBoost_InjectedResultsRespectTimeFilters(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "boost-time-filter-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	require.NoError(t, eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+		Name: "Timed", Type: "concept", Source: "inline",
+	}, "inline"))
+
+	now := time.Now()
+	cutoff := now.Add(-24 * time.Hour)
+
+	seed := &storage.Engram{Concept: "seed", Content: "recent seed", Confidence: 0.9, CreatedAt: now}
+	idSeed, err := eng.store.WriteEngram(ctx, ws, seed)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idSeed, "Timed"))
+
+	old := &storage.Engram{
+		Concept: "old", Content: "two weeks old", Confidence: 0.8,
+		CreatedAt: now.Add(-14 * 24 * time.Hour),
+	}
+	idOld, err := eng.store.WriteEngram(ctx, ws, old)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idOld, "Timed"))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, idSeed)
+	require.NoError(t, err)
+	require.NotNil(t, fullSeed)
+
+	filters := []activation.Filter{{Field: "created_after", Op: "gt", Value: cutoff}}
+	boosted := eng.applyEntityBoost(ctx, ws,
+		[]activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}, filters, false)
+
+	for _, r := range boosted {
+		if r.Engram.ID == idOld {
+			t.Fatalf("engram created %s violates the created_after bound %s but was injected by entity boost (#654)",
+				r.Engram.CreatedAt, cutoff)
+		}
+	}
+}
+
+// TestEntityBoost_InjectedResultsRespectExcludeUntrusted pins the trust half of
+// the same bypass. ExcludeUntrusted is a vault operator's standing posture, not
+// a per-call convenience — the plasticity config documents untrusted engrams as
+// filtered from ACTIVATE results, and the MCP tool surface advertises that to
+// end users. Phase 6 honors it; the injection path did not.
+//
+// The check mirrors phase 6 exactly: only TrustUntrusted is excluded.
+// TrustUnset is the zero-value backward-compat alias for TrustInferred and must
+// still be injected, which the third assertion pins.
+func TestEntityBoost_InjectedResultsRespectExcludeUntrusted(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "boost-trust-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	require.NoError(t, eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+		Name: "Trusted", Type: "concept", Source: "inline",
+	}, "inline"))
+
+	seed := &storage.Engram{Concept: "seed", Content: "seed", Confidence: 0.9, Trust: storage.TrustInferred}
+	idSeed, err := eng.store.WriteEngram(ctx, ws, seed)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idSeed, "Trusted"))
+
+	untrusted := &storage.Engram{Concept: "untrusted", Content: "untrusted neighbour", Confidence: 0.8, Trust: storage.TrustUntrusted}
+	idUntrusted, err := eng.store.WriteEngram(ctx, ws, untrusted)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idUntrusted, "Trusted"))
+
+	unset := &storage.Engram{Concept: "unset", Content: "unset-trust neighbour", Confidence: 0.8, Trust: storage.TrustUnset}
+	idUnset, err := eng.store.WriteEngram(ctx, ws, unset)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idUnset, "Trusted"))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, idSeed)
+	require.NoError(t, err)
+	require.NotNil(t, fullSeed)
+
+	// Guard: the fixture really is untrusted, so a failure indicts the boost
+	// pass rather than the write path.
+	predUntrusted, err := eng.store.GetEngram(ctx, ws, idUntrusted)
+	require.NoError(t, err)
+	require.Equal(t, storage.TrustUntrusted, predUntrusted.Trust, "precondition: fixture is untrusted")
+
+	boosted := eng.applyEntityBoost(ctx, ws,
+		[]activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}, nil, true)
+
+	got := make(map[storage.ULID]struct{}, len(boosted))
+	for _, r := range boosted {
+		got[r.Engram.ID] = struct{}{}
+	}
+
+	_, untrustedFound := got[idUntrusted]
+	assert.False(t, untrustedFound,
+		"TrustUntrusted engram must not be injected when ExcludeUntrusted is set (#654)")
+
+	_, unsetFound := got[idUnset]
+	assert.True(t, unsetFound,
+		"TrustUnset is the backward-compat alias for TrustInferred and must still be injected, as in phase 6")
+
+	// With the posture off, the untrusted engram is injected normally.
+	boostedOff := eng.applyEntityBoost(ctx, ws,
+		[]activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}, nil, false)
+	offFound := false
+	for _, r := range boostedOff {
+		if r.Engram.ID == idUntrusted {
+			offFound = true
+		}
+	}
+	assert.True(t, offFound,
+		"with ExcludeUntrusted unset the untrusted engram must still be injected")
 }

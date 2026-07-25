@@ -2133,7 +2133,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// After BFS produces a scored set, any engram sharing a named entity with a
 	// top-N result receives a small boost. This surfaces entity-linked engrams
 	// that have no direct association edge to the query-matching engrams.
-	result.Activations = e.applyEntityBoost(ctx, wsPrefix, result.Activations)
+	result.Activations = e.applyEntityBoost(ctx, wsPrefix, result.Activations, actReq.Filters, actReq.ExcludeUntrusted)
 	// Re-apply MaxResults: entity boost may have appended engrams beyond the limit.
 	// applyEntityBoost re-sorts by score descending, so truncation preserves top-K.
 	if actReq.MaxResults > 0 && len(result.Activations) > actReq.MaxResults {

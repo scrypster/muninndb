@@ -26,7 +26,13 @@ const (
 // the 0x23 reverse index. Each such engram receives a score boost of
 // entityBoostFactor (or is added to the result set with that score if it was
 // not already returned by BFS). Results are re-sorted by score descending.
-func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []activation.ScoredEngram) []activation.ScoredEngram {
+//
+// filters and excludeUntrusted carry the request's exclusion rules. They must be
+// applied to engrams injected here, because this pass runs after activation.Run
+// has returned and therefore after phase 6, the pipeline's correctness gate.
+// Engrams already in results need no re-check — they passed phase 6 on the way
+// in — so only the injection path consults them (issue #654).
+func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, filters []activation.Filter, excludeUntrusted bool) []activation.ScoredEngram {
 	if len(results) == 0 {
 		return results
 	}
@@ -67,6 +73,20 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []act
 						return nil
 					}
 					if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
+						return nil
+					}
+					// This engram was never in the pipeline's candidate pool,
+					// so it has not been through phase 6. Apply the request's
+					// exclusion rules before surfacing it (issue #654).
+					//
+					// The trust check mirrors phase 6 exactly: only
+					// TrustUntrusted is excluded. TrustUnset is the zero-value
+					// backward-compat alias for TrustInferred and passes
+					// through, as it does in the pipeline.
+					if excludeUntrusted && eng.Trust == storage.TrustUntrusted {
+						return nil
+					}
+					if !activation.PassesMetaFilter(eng, filters) {
 						return nil
 					}
 					results = append(results, activation.ScoredEngram{
