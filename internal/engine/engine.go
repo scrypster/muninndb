@@ -2993,11 +2993,26 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	if concept == "" {
 		concept = oldEng.Concept
 	}
+	// MemoryType and TypeLabel are inherited alongside Concept and Tags. Evolve
+	// exposes no parameter for either, so leaving them unset reset the type to
+	// the MemoryType zero value, Fact — a decision or procedure was silently
+	// relabelled a fact on every evolve, and again at each hop down a supersede
+	// chain (issue #653).
+	//
+	// Summary is deliberately NOT inherited. It is content-derived (see the
+	// field doc on storage.Engram), and Evolve replaces the content, so the
+	// predecessor's summary is false of the successor. Leaving it empty is also
+	// what lets the summarize stage regenerate it: engramHasSummary and the
+	// retroactive processor both treat a non-empty Summary as caller-authoritative
+	// and skip the stage, which would pin the stale text permanently and leave
+	// KeyPoints — produced only by that stage — empty forever.
 	newEng := &storage.Engram{
 		ID:         newULID,
 		Concept:    concept,
 		Content:    newContent,
 		Tags:       oldEng.Tags,
+		MemoryType: oldEng.MemoryType,
+		TypeLabel:  oldEng.TypeLabel,
 		Confidence: 1.0,
 		Stability:  30.0,
 		State:      storage.StateActive,
