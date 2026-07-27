@@ -89,9 +89,19 @@ func newWorkerWithIndex(idx indexer) *Worker {
 // runLoop is the per-goroutine entry point. It wraps run() in a restart loop:
 // after a non-fatal panic, the goroutine re-enters run() instead of exiting.
 // wg.Done() only fires when the worker is cleanly stopped.
+//
+// run() is entered at least once, before the stopped flag is consulted. That
+// ordering is what makes Stop()'s drain guarantee hold: Stop sets `stopped`
+// and only then closes stopCh, so a goroutine that had not been scheduled yet
+// would — with the check at the top — observe stopped==true, skip run()
+// entirely, and return without draining. Every queued job then sat in the
+// channel buffer forever: durable engrams that were never indexed and so could
+// not be recalled. Entering run() first costs nothing (stopCh is already
+// closed, so run() takes its drain branch and returns immediately) and turns
+// the guarantee into something the code actually enforces.
 func (w *Worker) runLoop() {
 	defer w.wg.Done()
-	for !w.stopped.Load() {
+	for {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -103,6 +113,9 @@ func (w *Worker) runLoop() {
 			}()
 			w.run()
 		}()
+		if w.stopped.Load() {
+			return
+		}
 	}
 }
 
