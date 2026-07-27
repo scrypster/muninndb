@@ -6,12 +6,6 @@ on:
   pull_request:
     branches: [main, develop]
 
-# Opt into Node.js 24 for all actions now, ahead of the forced migration
-# on June 2, 2026. Silences deprecation warnings for actions/checkout,
-# actions/setup-node, actions/cache, etc.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   # ── Go: build + test ────────────────────────────────────────────────────
   go:
@@ -19,9 +13,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -43,7 +37,7 @@ jobs:
       # ORT version or model changes. The cache key includes both versions.
       - name: Cache embed assets
         id: asset-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux
@@ -53,7 +47,7 @@ jobs:
         if: steps.asset-cache.outputs.cache-hit != 'true'
         run: make fetch-model _ort-linux-amd64
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -73,7 +67,7 @@ jobs:
         run: go tool cover -func=coverage.out | tail -1
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage
           path: coverage.out
@@ -85,15 +79,15 @@ jobs:
     needs: go
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Restore embed assets from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux
@@ -105,7 +99,7 @@ jobs:
             make fetch-model _ort-linux-amd64
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -123,16 +117,16 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Cache embed assets (Windows)
         id: asset-cache-win
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-windows
@@ -163,7 +157,7 @@ jobs:
           Write-Host "DLL size: $((Get-Item 'internal/plugin/embed/assets/onnxruntime_windows_amd64.dll').Length / 1MB) MB"
         shell: pwsh
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -227,15 +221,15 @@ jobs:
     needs: cli-integration  # run after CLI tests so all integration jobs are sequential
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Restore embed assets from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux
@@ -247,7 +241,7 @@ jobs:
             make fetch-model _ort-linux-amd64
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -275,7 +269,7 @@ jobs:
           curl -sf http://localhost:8750/mcp/health
           curl -sf http://localhost:8476/api/health
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -316,15 +310,15 @@ jobs:
     needs: go
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Restore embed assets from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux
@@ -335,7 +329,7 @@ jobs:
             make fetch-model _ort-linux-amd64
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -353,7 +347,7 @@ jobs:
 
       - name: Upload Playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-report
           path: web/playwright-report/
@@ -365,7 +359,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run shellcheck
         run: shellcheck install.sh scripts/check-build-tags.sh
@@ -379,7 +373,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check openapi.yaml exists
         run: |
@@ -390,7 +384,7 @@ jobs:
           fi
           echo "openapi.yaml found ($(wc -c < internal/transport/rest/openapi.yaml) bytes)"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -427,9 +421,9 @@ jobs:
     name: Vulnerability scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -454,9 +448,9 @@ jobs:
     name: Node SDK build & test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: npm
