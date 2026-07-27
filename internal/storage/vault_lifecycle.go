@@ -30,6 +30,7 @@ var clearVaultDataPrefixes = []byte{
 	prefix.ArchiveAssoc, prefix.RelEntityIndex, prefix.DreamState, prefix.ContentHash,
 	prefix.RecallEvent, // recall events hold raw query text; must not outlive a cleared vault
 	prefix.Lease,
+	prefix.UpsertKey, // upsert forward-index pins — must not outlive a cleared vault
 }
 
 // ClearVault deletes all data keys for a vault using Pebble range tombstones.

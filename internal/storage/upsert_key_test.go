@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 
@@ -267,5 +268,92 @@ func TestUpsertEngram_Hit_SoftDeleted_Recreates(t *testing.T) {
 	}
 	if got.Content != "v2" {
 		t.Errorf("new engram content: got %q, want %q", got.Content, "v2")
+	}
+}
+
+// TestUpsertEngram_Hit_HardDeleted_Recreates: when the forward index points at
+// a hard-deleted engram (0x01 gone — e.g. after Forget, or ClearVault left 0x2B
+// dangling), the upsert must treat it as a stale pointer and create fresh, NOT
+// error forever. Pre-fix this returned "load pinned engram: engram not found"
+// because GetEngram returns (nil, ErrNotFound), not (nil, nil), so the
+// `pinned == nil` guard was dead code.
+func TestUpsertEngram_Hit_HardDeleted_Recreates(t *testing.T) {
+	store := openTestStore(t)
+	ws := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	keyHash := [32]byte{0x55}
+	eng1 := &Engram{Concept: "c", Content: "v1"}
+	id1, _, err := store.UpsertEngram(context.Background(), ws, eng1, keyHash)
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+
+	// Hard-delete the pinned engram. DeleteEngram does NOT sweep 0x2B, so the
+	// forward-index entry → id1 now dangles (0x01 for id1 is gone).
+	if err := store.DeleteEngram(context.Background(), ws, id1); err != nil {
+		t.Fatalf("hard delete: %v", err)
+	}
+
+	// Re-upsert on the same key: the stale pointer must NOT error — recreate.
+	eng2 := &Engram{Concept: "c", Content: "v2"}
+	id2, created, err := store.UpsertEngram(context.Background(), ws, eng2, keyHash)
+	if err != nil {
+		t.Fatalf("recreate after hard-delete returned error (the dead-guard bug): %v", err)
+	}
+	if !created {
+		t.Fatal("expected created=true (recreate from a stale/hard-deleted pointer)")
+	}
+	if id2 == id1 {
+		t.Fatal("recreate should mint a new ULID, not reuse the deleted one")
+	}
+
+	// The 0x2B entry is re-pointed to the fresh engram.
+	uk, _ := store.GetUpsertKey(context.Background(), ws, keyHash)
+	if uk != id2 {
+		t.Errorf("upsert-key not re-pointed to the new id: got %x, want %x", uk[:], id2[:])
+	}
+}
+
+// TestUpsertEngram_MergeSerializesWithCASLock: the merge path must hold
+// casLocks.For(pinnedID) across read→commit (invariant STO-2), so it serializes
+// with a concurrent DeleteEngram / CompareAndSet / AdjustConfidence on the same
+// ULID. Holding the stripe lock externally stands in for an in-flight CAS: a
+// correct upsertMerge must block until it is released (the #594
+// lost-update/resurrection race). Mirrors TestDeleteEngramSerializesWithCompareAndSet.
+func TestUpsertEngram_MergeSerializesWithCASLock(t *testing.T) {
+	store := openTestStore(t)
+	ws := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	keyHash := [32]byte{0x66}
+	id1, _, err := store.UpsertEngram(context.Background(), ws, &Engram{Concept: "c", Content: "v1"}, keyHash)
+	if err != nil {
+		t.Fatalf("seed upsert: %v", err)
+	}
+
+	// Hold the CAS stripe lock for the pinned engram (stands in for an in-flight
+	// concurrent DeleteEngram/CAS/AdjustConfidence on the same ULID).
+	mu := store.casLocks.For(id1[:])
+	mu.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = store.UpsertEngram(context.Background(), ws, &Engram{Concept: "c", Content: "v2"}, keyHash)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		mu.Unlock()
+		t.Fatal("UpsertEngram merge completed while the pinned engram's CAS stripe lock was held; " +
+			"it does not serialize with DeleteEngram/CompareAndSet — #594 race reopened")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: the merge is blocked on the stripe lock.
+	}
+
+	mu.Unlock()
+
+	select {
+	case <-done:
+		// merge completed after the lock was released — correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("UpsertEngram merge did not complete after releasing the CAS stripe lock")
 	}
 }

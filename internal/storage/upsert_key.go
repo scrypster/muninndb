@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -65,14 +66,27 @@ func (ps *PebbleStore) UpsertEngram(ctx context.Context, wsPrefix [8]byte, eng *
 		return ps.upsertCreate(ctx, wsPrefix, eng, keyHash)
 	}
 
-	// Hit — load the pinned engram to decide merge vs stale-pointer-recreate.
+	// Hit. STO-2 (docs/internals/invariants.md): hold casLocks.For(existing)
+	// across read→commit so a concurrent DeleteEngram / CompareAndSet /
+	// AdjustConfidence on the SAME ULID cannot interleave — lost-update,
+	// resurrection, confidence-clobber (the #594 race). Disjoint from the
+	// engine's upsertKeyLock (keyed on the idempotent_id hash), so no deadlock.
+	mu := ps.casLocks.For(existing[:])
+	mu.Lock()
+	defer mu.Unlock()
+
 	pinned, err := ps.GetEngram(ctx, wsPrefix, existing)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			// Stale pointer: the forward index references a hard-deleted/absent
+			// engram (Forget removed 0x01, or ClearVault left 0x2B dangling).
+			// Treat as a miss → create fresh; upsertCreate re-points 0x2B.
+			return ps.upsertCreate(ctx, wsPrefix, eng, keyHash)
+		}
 		return ULID{}, false, fmt.Errorf("upsert: load pinned engram: %w", err)
 	}
-	if pinned == nil || pinned.State != StateActive {
-		// Stale pointer (tombstone or hard-deleted) — create fresh; the 0x2B
-		// entry is re-pointed to the new id by upsertCreate's Set.
+	if pinned.State != StateActive {
+		// Soft-deleted/archived tombstone → create fresh (re-points 0x2B).
 		return ps.upsertCreate(ctx, wsPrefix, eng, keyHash)
 	}
 	return ps.upsertMerge(wsPrefix, pinned, eng, keyHash)
