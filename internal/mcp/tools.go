@@ -73,6 +73,10 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "string",
 						"description": "Optional idempotency key. If set and a receipt exists for this key, the cached engram ID is returned without re-creating.",
 					},
+					"upsert_mode": map[string]any{
+						"type":        "boolean",
+						"description": "Optional. With op_id set, merge onto the engram pinned by op_id instead of creating a new one — create on first use, update-in-place on subsequent writes. Content/tags/concept/type overwrite; cognitive state (confidence, access count, associations) is preserved. Requires op_id. Differs from plain op_id retries, which return the original unchanged.",
+					},
 					"embedding": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "number"},

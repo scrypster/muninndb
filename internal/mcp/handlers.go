@@ -50,7 +50,12 @@ func parseEmbeddingArg(args map[string]any) ([]float32, string) {
 
 func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	opID, _ := args["op_id"].(string)
-	if opID != "" {
+	upsertMode, _ := args["upsert_mode"].(bool)
+	// Upsert uses the durable 0x2B forward index (keyed by op_id) and merges on
+	// change — it must NOT go through the receipt-based dedup below (which would
+	// return the original engram on retry instead of merging). The engine's
+	// upsertKeyLock serializes concurrent upserts on the same key.
+	if opID != "" && !upsertMode {
 		// Acquire a per-op_id mutex to prevent TOCTOU races: without this lock,
 		// two concurrent requests with the same op_id could both pass the nil
 		// receipt check and each call Write, producing duplicate engrams.
@@ -74,6 +79,10 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 	content, ok := args["content"].(string)
 	if !ok || strings.TrimSpace(content) == "" {
 		sendError(w, id, -32602, "invalid params: 'content' is required (non-empty string)")
+		return
+	}
+	if upsertMode && strings.TrimSpace(opID) == "" {
+		sendError(w, id, -32602, "invalid params: 'upsert_mode' requires 'op_id' (the key the engram is pinned to)")
 		return
 	}
 	req := &mbp.WriteRequest{
@@ -122,12 +131,18 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		req.Embedding = emb
 	}
 
+	if upsertMode {
+		req.UpsertMode = true
+		req.IdempotentID = opID // the durable upsert key (0x2B forward index)
+	}
 	resp, err := s.engine.Write(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
-	if opID != "" {
+	// Upsert is tracked by the durable forward index, not a receipt — don't
+	// write one (a receipt would make a later non-upsert retry return stale).
+	if opID != "" && !upsertMode {
 		if err := s.engine.WriteIdempotency(ctx, opID, resp.ID); err != nil {
 			slog.Warn("mcp: failed to record idempotency receipt", "op_id", opID, "engram_id", resp.ID, "err", err)
 		}

@@ -43,6 +43,7 @@ type WriteRequest struct {
 	Embedding    []float32     `protobuf:"fixed32,9,rep,name=embedding"`
 	MemoryType   uint32        `protobuf:"varint,10,opt,name=memory_type"`
 	TypeLabel    string        `protobuf:"bytes,11,opt,name=type_label"`
+	UpsertMode   bool          `protobuf:"varint,12,opt,name=upsert_mode"`
 }
 
 // WriteResponse message
