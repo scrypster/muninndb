@@ -320,6 +320,28 @@ func TestArchiveAssocPrefixForID_Length(t *testing.T) {
 	}
 }
 
+func TestUpsertKeyKey_Layout(t *testing.T) {
+	ws := [8]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	hash := [32]byte{0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+		0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF}
+
+	key := UpsertKeyKey(ws, hash)
+
+	// Total length: 1 (prefix) + 8 (ws) + 32 (sha256) = 41 bytes
+	if len(key) != 41 {
+		t.Fatalf("expected 41 bytes, got %d", len(key))
+	}
+	if key[0] != 0x2B {
+		t.Errorf("prefix byte: got 0x%02X, want 0x2B", key[0])
+	}
+	if !bytes.Equal(key[1:9], ws[:]) {
+		t.Error("ws mismatch")
+	}
+	if !bytes.Equal(key[9:41], hash[:]) {
+		t.Error("hash mismatch")
+	}
+}
+
 // TestKeyConstructors_UseRegistryBytes [RT-FIX RT8] asserts every key and
 // range-bound constructor sources its first byte from the prefix registry.
 // TestKeyPrefixesAreUnique only checks uniqueness — a two-pair byte swap would
@@ -399,6 +421,7 @@ func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
 		{"DreamState", DreamStateKey(u8)[0], prefix.DreamState},
 		{"ContentHash", ContentHashKey(ws, id32)[0], prefix.ContentHash},
 		{"Lease", LeaseKey(ws, id16)[0], prefix.Lease},
+		{"UpsertKey", UpsertKeyKey(ws, id32)[0], prefix.UpsertKey},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

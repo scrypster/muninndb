@@ -820,3 +820,17 @@ func LeaseKey(ws [8]byte, id [16]byte) []byte {
 	copy(key[9:25], id[:])
 	return key
 }
+
+// UpsertKeyKey constructs the upsert forward-index key (0x2B prefix).
+// Maps sha256(idempotent_id) → the engram ID it is pinned to within a vault,
+// enabling O(1) upsert-key lookup at write time (issue #556). Mirrors
+// ContentHashKey's shape exactly — vault-scoped, sha256-suffixed, ULID value.
+// Key: 0x2B | wsPrefix(8) | sha256(32) = 41 bytes
+// Value: engramID(16) bytes
+func UpsertKeyKey(ws [8]byte, hash [32]byte) []byte {
+	key := make([]byte, 1+8+32)
+	key[0] = prefix.UpsertKey
+	copy(key[1:9], ws[:])
+	copy(key[9:41], hash[:])
+	return key
+}
