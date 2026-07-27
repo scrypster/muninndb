@@ -443,3 +443,33 @@ jobs:
 
       - name: Run govulncheck
         run: govulncheck ./...
+
+  # ── Node SDK: typecheck + unit tests ──────────────────────────────────
+  # Cheap and standalone: the tests mock HTTP with msw, so no server or embed
+  # assets are needed. This job exists because the Node SDK was previously
+  # compiled for the first time by publish-sdk.yml at tag time — a TypeScript
+  # break or a bad lockfile would not surface until an npm publish was already
+  # under way. Python has had an equivalent gate; Node did not.
+  node-sdk:
+    name: Node SDK build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+
+      - name: Install
+        run: npm ci --ignore-scripts
+        working-directory: sdk/node
+
+      - name: Typecheck and build
+        run: npm run build
+        working-directory: sdk/node
+
+      - name: Unit tests
+        run: npm test
+        working-directory: sdk/node
