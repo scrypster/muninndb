@@ -86,3 +86,8 @@ sdk/php/vendor/
 .claude/maintainer/
 .claude/skills/triage-issue/
 .claude/skills/review-pr/
+.claude/skills/merge-orchestration/
+
+# scratch browser-automation / screenshot output (workspace convention keeps these
+# at the workspace root; this is a backstop in case a tool writes into the repo)
+.artifacts/
