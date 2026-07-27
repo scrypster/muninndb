@@ -1,6 +1,7 @@
 package fts
 
 import (
+	"fmt"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -88,5 +89,68 @@ func TestWorkerStopDrainsJobsSubmittedBeforeStart(t *testing.T) {
 		if got := stub.indexed.Load(); got != 1 {
 			t.Fatalf("iteration %d: Stop() did not drain the queue — indexed %d jobs, want 1", i, got)
 		}
+	}
+}
+
+// slowIndex blocks each IndexEngram call briefly so jobs are provably still in
+// flight when Flush is called.
+type slowIndex struct {
+	indexed atomic.Int64
+	delay   time.Duration
+}
+
+func (s *slowIndex) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error {
+	time.Sleep(s.delay)
+	s.indexed.Add(1)
+	return nil
+}
+
+// TestWorkerFlushWaitsForPendingJobs verifies Flush's contract: when it returns
+// nil, every job accepted before the call has reached the indexer.
+func TestWorkerFlushWaitsForPendingJobs(t *testing.T) {
+	const jobs = 200
+	stub := &slowIndex{delay: 50 * time.Microsecond}
+	w := newWorkerWithIndex(stub)
+	defer w.Stop()
+
+	for i := range jobs {
+		if !w.Submit(IndexJob{Concept: fmt.Sprintf("job-%d", i)}) {
+			t.Fatalf("Submit %d rejected", i)
+		}
+	}
+
+	if err := w.Flush(10 * time.Second); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got := stub.indexed.Load(); got != jobs {
+		t.Errorf("Flush returned with work outstanding: indexed %d, want %d", got, jobs)
+	}
+}
+
+// Flush must not block for the full timeout once the worker is stopped — Stop
+// drains synchronously, so anything still pending will never be picked up.
+func TestWorkerFlushReportsAfterStop(t *testing.T) {
+	w := newWorkerWithIndex(&countingIndex{})
+	w.Stop()
+
+	start := time.Now()
+	err := w.Flush(5 * time.Second)
+	elapsed := time.Since(start)
+
+	// Nothing was queued, so a stopped-but-empty worker still flushes cleanly.
+	if err != nil {
+		t.Fatalf("Flush on a drained stopped worker should succeed, got %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("Flush took %s on an empty stopped worker; should return immediately", elapsed)
+	}
+}
+
+// Flush is a no-op when nothing was ever submitted.
+func TestWorkerFlushNoJobs(t *testing.T) {
+	w := newWorkerWithIndex(&countingIndex{})
+	defer w.Stop()
+	if err := w.Flush(2 * time.Second); err != nil {
+		t.Fatalf("Flush with no jobs: %v", err)
 	}
 }

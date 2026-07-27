@@ -140,18 +140,27 @@ func (a *ftsTrigAdapter) Search(ctx context.Context, ws [8]byte, query string, t
 	return out, nil
 }
 
-// awaitFTS drains the FTS worker by stopping it (which deterministically
-// processes all queued index jobs) and restarting it with a fresh worker.
-// This is the correct alternative to time.Sleep(300ms) when a test needs
-// to ensure FTS visibility before calling Activate.
-// The restarted worker will be stopped by eng.Stop() during cleanup.
+// awaitFTS blocks until every index job submitted so far has been applied, so a
+// following Activate sees the writes. Use it instead of time.Sleep when a test
+// depends on FTS visibility.
+//
+// It previously stopped the worker and installed a replacement, relying on
+// Stop()'s drain as a flush. That worked but was indirect, and it was silently
+// wrong until #675: a Stop() that raced worker startup skipped the drain, the
+// queued jobs stayed in the discarded worker's buffer, and the replacement began
+// with an empty channel — so the engram was never indexed and recall came back
+// empty. It failed roughly 1 run in 5 under CI load.
+//
+// Flush waits on the worker's pending count instead, which asks the question the
+// tests actually care about, leaves the worker running, and cannot lose a job.
 func awaitFTS(t *testing.T, eng *Engine) {
 	t.Helper()
 	if eng.ftsWorker == nil {
 		return
 	}
-	eng.ftsWorker.Stop()
-	eng.ftsWorker = fts.NewWorker(eng.fts)
+	if err := eng.ftsWorker.Flush(10 * time.Second); err != nil {
+		t.Fatalf("awaitFTS: %v", err)
+	}
 }
 
 // TestHelloVersionCheck ensures the engine accepts the protocol version string

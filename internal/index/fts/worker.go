@@ -39,11 +39,18 @@ type indexer interface {
 // Stale FTS entries for deleted engrams are harmless: Phase 6 of activation filters
 // nil metadata results, so orphaned posting list entries never surface in results.
 type Worker struct {
-	idx            indexer
-	input          chan IndexJob
-	stopCh         chan struct{}
-	stopped        atomic.Bool
-	dropped        atomic.Int64
+	idx    indexer
+	input  chan IndexJob
+	stopCh chan struct{}
+	// flushNow wakes idle goroutines so Flush does not have to wait out a full
+	// workerInterval tick. Buffered and best-effort: a send that would block is
+	// discarded, because a goroutine that is already awake will flush anyway.
+	flushNow chan struct{}
+	stopped  atomic.Bool
+	dropped  atomic.Int64
+	// pending counts jobs accepted by Submit but not yet handed to the indexer.
+	// Flush waits for it to reach zero.
+	pending        atomic.Int64
 	wg             sync.WaitGroup
 	done           chan struct{}
 	clearingVaults sync.Map // [8]byte → struct{}{}
@@ -74,10 +81,11 @@ func NewWorker(idx *Index) *Worker {
 func newWorkerWithIndex(idx indexer) *Worker {
 	n := runtime.NumCPU()
 	w := &Worker{
-		idx:    idx,
-		input:  make(chan IndexJob, workerBufSize),
-		stopCh: make(chan struct{}),
-		done:   make(chan struct{}),
+		idx:      idx,
+		input:    make(chan IndexJob, workerBufSize),
+		stopCh:   make(chan struct{}),
+		flushNow: make(chan struct{}, 1),
+		done:     make(chan struct{}),
 	}
 	for range n {
 		w.wg.Add(1)
@@ -127,6 +135,7 @@ func (w *Worker) Submit(job IndexJob) bool {
 	}
 	select {
 	case w.input <- job:
+		w.pending.Add(1)
 		return true
 	default:
 		n := w.dropped.Add(1)
@@ -148,6 +157,41 @@ func (w *Worker) Stop() {
 // Dropped returns the cumulative number of jobs dropped due to queue pressure.
 func (w *Worker) Dropped() int64 {
 	return w.dropped.Load()
+}
+
+// Flush blocks until every job accepted by Submit before this call has been
+// handed to the indexer, or until timeout elapses. It does not stop the worker.
+//
+// Use it when a caller needs FTS visibility to be guaranteed rather than
+// eventual — tests asserting on recall results, and any admin path that must
+// not report success while writes are still unsearchable. It is not needed on
+// the normal write path, which is deliberately decoupled from indexing.
+//
+// Jobs rejected by Submit (queue full, or worker stopped) were never counted,
+// so Flush makes no promise about them; check the Submit return value or
+// Dropped() for that.
+func (w *Worker) Flush(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if w.pending.Load() == 0 {
+			return nil
+		}
+		if w.stopped.Load() {
+			// Stop() drains synchronously, so anything still pending here is
+			// never going to be picked up. Report rather than spin to timeout.
+			return fmt.Errorf("fts: flush abandoned, worker stopped with %d jobs pending", w.pending.Load())
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("fts: flush timed out after %s with %d jobs pending", timeout, w.pending.Load())
+		}
+		// Nudge an idle goroutine rather than waiting out the workerInterval
+		// tick. Best-effort: if the buffer is full a wake is already queued.
+		select {
+		case w.flushNow <- struct{}{}:
+		default:
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
 }
 
 func (w *Worker) run() {
@@ -182,6 +226,8 @@ func (w *Worker) run() {
 					return
 				}
 			}
+		case <-w.flushNow:
+			flush()
 		case <-ticker.C:
 			flush()
 		}
@@ -189,16 +235,32 @@ func (w *Worker) run() {
 }
 
 func (w *Worker) flush(jobs []IndexJob) {
+	// Each job decrements pending exactly once, and only after it is fully dealt
+	// with — indexed, failed, or skipped for a clearing vault. Decrementing on
+	// entry instead would let pending reach zero while IndexEngram was still
+	// running for the last batch, so Flush would return before the write was
+	// actually searchable.
+	done := 0
+	defer func() {
+		// IndexEngram panicking aborts the batch (the goroutine then restarts,
+		// see runLoop). Release the counter for the jobs we never reached, or
+		// Flush would wait out its timeout on work that will never happen.
+		if rem := len(jobs) - done; rem > 0 {
+			w.pending.Add(int64(-rem))
+		}
+	}()
+
 	for _, job := range jobs {
-		if _, dropping := w.clearingVaults.Load(job.WS); dropping {
-			continue
+		if _, dropping := w.clearingVaults.Load(job.WS); !dropping {
+			if err := w.idx.IndexEngram(job.WS, job.ID, job.Concept, job.CreatedBy, job.Content, job.Tags); err != nil {
+				slog.Warn("fts: worker failed to index engram",
+					"engram_id", job.ID,
+					"err", err,
+				)
+			}
 		}
-		if err := w.idx.IndexEngram(job.WS, job.ID, job.Concept, job.CreatedBy, job.Content, job.Tags); err != nil {
-			slog.Warn("fts: worker failed to index engram",
-				"engram_id", job.ID,
-				"err", err,
-			)
-		}
+		done++
+		w.pending.Add(-1)
 	}
 }
 
