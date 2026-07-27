@@ -14,7 +14,7 @@ services:
       - muninndb-data:/data
     environment:
       # ── Embedder ──────────────────────────────────────────────────────────
-      # Bundled all-MiniLM-L6-v2 is on by default — no config needed.
+      # Bundled bge-small-en-v1.5 (384-dim, English) is on by default — no config needed.
       # To switch to a cloud provider, set one of the vars below and
       # optionally add MUNINN_LOCAL_EMBED: "0" to suppress the bundled model.
 

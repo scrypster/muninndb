@@ -47,9 +47,9 @@ jobs:
             cc: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -59,7 +59,7 @@ jobs:
       # never get reused after a version bump.
       - name: Cache embed assets
         id: asset-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: ${{ matrix.cache_key }}
@@ -68,7 +68,7 @@ jobs:
         if: steps.asset-cache.outputs.cache-hit != 'true'
         run: make fetch-model ${{ matrix.ort_target }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -95,7 +95,7 @@ jobs:
           rm muninn
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: muninn-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -108,16 +108,16 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Cache embed assets (Windows)
         id: asset-cache-win
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-windows-amd64
@@ -139,7 +139,7 @@ jobs:
           Copy-Item $dll.FullName -Destination "internal/plugin/embed/assets/onnxruntime_windows_amd64.dll"
         shell: pwsh
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -159,7 +159,7 @@ jobs:
         shell: pwsh
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: muninn-windows-amd64
           path: |
@@ -172,7 +172,7 @@ jobs:
     needs: [build, build-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           merge-multiple: true
 
@@ -231,7 +231,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout homebrew-tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: scrypster/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

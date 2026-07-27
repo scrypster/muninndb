@@ -108,9 +108,13 @@ Distilled from real decisions across the project's history (each traced to its P
    the project's own tooling build — a whole analysis pass ran against a branch missing six
    merged PRs.)
 
-2. **Build and test the actual change**, not just the diff: `go build ./... && go vet ./...
-   && gofmt -l .` plus the relevant `go test`. Use `-race` for anything touching storage,
-   the Hebbian/PAS workers, the pruner, replication, or MCP session state.
+2. **Build and test the actual change**, not just the diff — and **keep `-tags localassets`**:
+   `go build -tags localassets ./... && go vet -tags localassets ./... && gofmt -l .` plus the
+   relevant `go test -tags localassets`. CI builds, vets, and tests everything with that tag
+   (obligation #9), so a bare `go build ./...` exercises a different code path than the gate
+   you have to pass. It needs the embed assets — `make fetch-assets` once. Use `-race` for
+   anything touching storage, the Hebbian/PAS workers, the pruner, replication, or MCP
+   session state.
 
 3. **RED-sanity-check bug fixes.** A test for a fixed bug or closed race must be shown to
    *fail without the fix*. A test that passes both ways proves nothing.
@@ -119,6 +123,8 @@ Distilled from real decisions across the project's history (each traced to its P
    the keyspace registry, and `docs/internals/drift-and-obligations.md`. Touching an MCP
    handler means updating the registry smoke test; adding a Pebble prefix means checking the
    collision guard; changing a preset means updating the web UI and adding a pinning test; etc.
+   Four of those obligations now warn automatically via `.claude/hooks/drift-guard.mjs`
+   (marked 🪝 in that doc) — a reminder, not a gate, and no substitute for walking the list.
 
 **Keep CI fast and cheap.** The full gate must stay **under ~10 minutes** (baseline ~6–7
 min; job map in `drift-and-obligations.md`). Unit and invariant tests are nearly free —

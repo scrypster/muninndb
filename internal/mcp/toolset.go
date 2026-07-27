@@ -13,8 +13,10 @@ import (
 // export, entity surgery, tree memory, consolidation, ...) remains fully
 // callable via tools/call — the toolset only filters what tools/list
 // ADVERTISES, because advertised schemas ride in every MCP client's context
-// window whether or not they are used (~41KB / ~10k tokens for the full
-// 39-tool surface, vs ~1/4 of that for this set).
+// window whether or not they are used (~10k tokens for the full 43-tool
+// surface, vs ~1/4 of that for this set). The count tracks the classification
+// table in context.go and allMCPTools in cmd/muninn/smoke_exhaustive_test.go —
+// obligation #1 in docs/internals/drift-and-obligations.md.
 var coreToolNames = map[string]bool{
 	"muninn_recall":         true,
 	"muninn_remember":       true,

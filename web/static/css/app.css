@@ -3,6 +3,20 @@
 @import './base.css';
 @import './components.css';
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4: one import replaces the v3 @tailwind base/components/utilities trio. */
+@import 'tailwindcss';
+
+/*
+ * v4 auto-detects template sources by scanning up from this file, which would find
+ * static/ but not the sibling templates/ directory (Vite's root is static/). These
+ * mirror the `content` array from the old tailwind.config.js, relative to this file.
+ */
+@source '../**/*.{html,js}';
+@source '../../templates/**/*.html';
+
+/*
+ * Replaces `darkMode: 'class'`. No `dark:` utilities are in use today — the theme
+ * switches via CSS custom properties in theme.css and a `.light` class — but keeping
+ * the variant means adding one later behaves the way v3 did.
+ */
+@custom-variant dark (&:where(.dark, .dark *));

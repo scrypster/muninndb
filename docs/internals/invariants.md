@@ -64,8 +64,10 @@ Format: **[INV-n]** assertion — `file:anchor` — *why it matters / what break
 ## Known open wounds
 
 Several of these invariants sit next to known-imperfect code. The individual issues are
-tracked publicly (#596, #605, #607, …); a reviewer should recognize when a
-PR is touching one and either fix or at least not widen it. The consolidated map of soft
-spots and trust-surface weaknesses is kept in the maintainer-private tier
-(`.claude/maintainer/soft-spots.md`) rather than concentrated here — cite the individual
-issue, not a one-stop list.
+tracked publicly (#596, #605, #607, …); a reviewer should recognize when a PR is touching
+one and either fix or at least not widen it. Cite the individual issue rather than building
+a one-stop list here — a consolidated weakness map is more useful to an attacker than to a
+reviewer, who is only ever looking at one diff.
+
+Found something that isn't tracked? See [`SECURITY.md`](../../.github/SECURITY.md) — report
+it privately rather than opening a public issue.
