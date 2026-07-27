@@ -82,9 +82,11 @@ and remain the reviewer's job.
 - **Presets are hand-duplicated** Go ↔ web UI with no parity test.
 - **SDK type drift is warning-only** — no CI gate keeps Python/Node/PHP in sync with
   `types.go`.
-- **`govulncheck@latest` is unpinned** in CI — non-reproducible vuln-check runs.
-- **Doc drift**: `middleware.go` claims write-mode keys can't authenticate to MCP (false);
-  a `toolset.go` comment says "39 tools" (now 42).
+- ~~**`govulncheck@latest` is unpinned** in CI~~ — fixed, pinned to v1.6.0.
+- ~~**Doc drift**: `middleware.go` claims write-mode keys can't authenticate to MCP (false);
+  a `toolset.go` comment says "39 tools"~~ — both corrected. The real count is **43**
+  (context.go's classification table and `allMCPTools` agree), and MCP does accept
+  write-mode keys, restricting them by tool rather than rejecting them.
 
 ## CI map and budget
 
