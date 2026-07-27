@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -225,6 +226,12 @@ type Engine struct {
 	// concurrent REST writes. Uses contentHashStripes FNV-32a stripes for constant memory overhead.
 	contentHashLocks [contentHashStripes]sync.Mutex
 
+	// upsertKeyLocks serialises the GetUpsertKey → UpsertEngram sequence per
+	// (vault, upsert-key) stripe, preventing two concurrent upserts on the same
+	// idempotent_id from both observing a miss and creating two engrams. Mirrors
+	// contentHashLocks; the storage layer trusts the caller holds this lock.
+	upsertKeyLocks [upsertKeyStripes]sync.Mutex
+
 	// idempotencyLocks provides per-op_id mutexes to prevent TOCTOU races in the
 	// idempotency check → write → store-receipt window. Mirrors the pattern used by
 	// MCPServer.idempotencyLocks but lives on the engine so gRPC and REST callers
@@ -233,6 +240,9 @@ type Engine struct {
 }
 
 const contentHashStripes = 256
+
+// upsertKeyStripes is the stripe count for upsertKeyLocks (mirrors contentHashStripes).
+const upsertKeyStripes = 256
 
 // getIdempotencyLock returns (or lazily creates) a per-op_id mutex. Prevents TOCTOU
 // races in the check → write → store-receipt window for concurrent calls sharing an op_id.
@@ -248,6 +258,15 @@ func (e *Engine) contentHashLock(wsPrefix [8]byte, hash [32]byte) *sync.Mutex {
 	h.Write(wsPrefix[:])
 	h.Write(hash[:])
 	return &e.contentHashLocks[h.Sum32()%contentHashStripes]
+}
+
+// upsertKeyLock returns the stripe mutex for the given (vault prefix, upsert-key
+// hash) pair. Mirrors contentHashLock — FNV-32a over wsPrefix + sha256(key).
+func (e *Engine) upsertKeyLock(wsPrefix [8]byte, keyHash [32]byte) *sync.Mutex {
+	h := fnv.New32a()
+	h.Write(wsPrefix[:])
+	h.Write(keyHash[:])
+	return &e.upsertKeyLocks[h.Sum32()%upsertKeyStripes]
 }
 
 // SetOnWrite registers a callback invoked after every successful Write.
@@ -881,6 +900,15 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 	e.activity.Record(wsPrefix)
 
+	// ── Upsert mode: key-pinned create-or-merge (#556) ──────────────────
+	// When upsert_mode is set, the durable 0x2B forward index (keyed by
+	// idempotent_id) decides create-vs-merge — not the content-hash dedup below.
+	// The whole path returns from writeUpsert, which does its own atomic storage
+	// write (store.UpsertEngram co-commits engram + content-hash + upsert-key).
+	if req.UpsertMode {
+		return e.writeUpsert(ctx, wsPrefix, req)
+	}
+
 	// ── Idempotency check: op_id dedup (must run before content-hash dedup) ──
 	// If the caller set idempotent_id, return the existing engram ID immediately.
 	// This runs first so that a re-submission with changed content still returns
@@ -1328,6 +1356,127 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}, nil
 }
 
+// writeUpsert implements the upsert_mode write path (#556). It pins the engram
+// to sha256(idempotent_id) via store.UpsertEngram (create-or-merge-in-place,
+// crash-atomic across engram + content-hash + upsert-key), holding the
+// upsertKeyLock stripe across the call so two concurrent writes on the same key
+// cannot both create. Cognitive state is preserved on merge; AccessCount is NOT
+// bumped (differs from content-hash dedup).
+//
+// v1 scope: runs the search-critical side effects (HNSW insert for caller
+// embeddings, FTS submit, vault-name, triggers + counters on create). It does
+// NOT run the caller-enrichment / analytics hooks of the default path (inline
+// entities/relationships, contradiction, novelty, auto-association, neighbor
+// linking) — upsert targets content-addressed re-ingest (e.g. the go-rag
+// bridge), which does not carry those. Hook parity is a follow-up if needed.
+func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
+	start := time.Now()
+
+	if req.IdempotentID == "" {
+		return nil, fmt.Errorf("%w: upsert_mode requires a non-empty idempotent_id", ErrInvalidRequest)
+	}
+	if err := e.validateClientEmbeddingDim(wsPrefix, req.Embedding); err != nil {
+		return nil, err
+	}
+
+	keyHash := sha256.Sum256([]byte(req.IdempotentID))
+	mu := e.upsertKeyLock(wsPrefix, keyHash)
+	mu.Lock()
+	defer mu.Unlock()
+
+	eng := &storage.Engram{
+		Concept:    req.Concept,
+		Content:    req.Content,
+		Tags:       req.Tags,
+		Confidence: req.Confidence,
+		Stability:  req.Stability,
+		Embedding:  req.Embedding,
+		MemoryType: storage.MemoryType(req.MemoryType),
+		TypeLabel:  req.TypeLabel,
+		Summary:    req.Summary,
+		Trust:      storage.TrustInferred,
+	}
+	if req.CreatedAt != nil {
+		if err := validateCreatedAt(*req.CreatedAt); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+		}
+		eng.CreatedAt = *req.CreatedAt
+	}
+
+	id, created, err := e.store.UpsertEngram(ctx, wsPrefix, eng, keyHash)
+	if err != nil {
+		return nil, fmt.Errorf("upsert: %w", err)
+	}
+
+	vaultName := req.Vault
+	if vaultName == "" {
+		vaultName = "default"
+	}
+
+	// Inline caller embedding into HNSW (same self-healing note as Write).
+	if len(req.Embedding) > 0 {
+		if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(id), req.Embedding); err != nil {
+			slog.Warn("engine: upsert embedding not inserted into HNSW; engram left for the retroactive processor", "id", id.String(), "err", err)
+		} else {
+			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
+			_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed)
+		}
+	}
+
+	// Keyword-search visibility.
+	if e.ftsWorker != nil {
+		e.ftsWorker.Submit(fts.IndexJob{
+			WS:        wsPrefix,
+			ID:        [16]byte(id),
+			Concept:   eng.Concept,
+			CreatedBy: eng.CreatedBy,
+			Content:   eng.Content,
+			Tags:      eng.Tags,
+		})
+	}
+
+	_ = e.store.WriteVaultName(wsPrefix, vaultName)
+
+	// Counters + triggers fire only on a fresh create (merge preserves the
+	// existing engram's cognitive state and counts).
+	if created {
+		e.engramCount.Add(1)
+		if e.coherence != nil {
+			e.coherence.GetOrCreate(vaultName).RecordWrite(eng.Confidence)
+		}
+		if e.triggers != nil {
+			engCopy := *eng
+			engCopy.Tags = append([]string(nil), eng.Tags...)
+			engCopy.Associations = append([]storage.Association(nil), eng.Associations...)
+			if eng.Embedding != nil {
+				engCopy.Embedding = append([]float32(nil), eng.Embedding...)
+			}
+			e.triggers.NotifyWrite(wsVaultID(wsPrefix), &engCopy, true)
+		}
+	}
+
+	if fn, ok := e.onWrite.Load().(func()); ok && fn != nil {
+		fn()
+	}
+
+	hint := "upsert-merged"
+	if created {
+		hint = "upsert-created"
+	}
+	metrics.EngineWritesTotal.Inc()
+	d := time.Since(start)
+	if e.latencyTracker != nil {
+		e.latencyTracker.Record(wsPrefix, "write", d)
+	}
+	metrics.WriteDuration.WithLabelValues(vaultName).Observe(d.Seconds())
+
+	return &mbp.WriteResponse{
+		ID:        id.String(),
+		CreatedAt: time.Now().UnixNano(),
+		Hint:      hint,
+	}, nil
+}
+
 // MaxBatchSize is the maximum number of items allowed in a single WriteBatch call.
 const MaxBatchSize = 50
 
@@ -1381,6 +1530,21 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	for i, req := range reqs {
 		wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 		e.activity.Record(wsPrefix)
+
+		// ── Upsert mode: route through the per-item upsert path (#556) ──
+		// writeUpsert holds its own upsertKeyLock, calls store.UpsertEngram,
+		// and runs the search-critical hooks. Per-item — no cross-item atomicity,
+		// matching WriteBatch's existing per-item contract. Intra-batch same-key
+		// items dedup naturally: B sees A's just-committed forward-index entry.
+		if req.UpsertMode {
+			resp, err := e.writeUpsert(ctx, wsPrefix, req)
+			if err != nil {
+				errs[i] = err
+			} else {
+				responses[i] = resp
+			}
+			continue
+		}
 
 		// ── Idempotency check (must precede content-hash dedup) ──────
 		if req.IdempotentID != "" {
@@ -1572,6 +1736,11 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 		// Skip dedup'd items (they have no new engram to process).
 		if responses[i].Hint == "duplicate_content" || responses[i].Hint == "idempotent" {
+			continue
+		}
+		// Skip upsert-routed items — writeUpsert already committed them and ran
+		// their own hooks; prepared[i]/ids[i] were never populated for these.
+		if responses[i].Hint == "upsert-created" || responses[i].Hint == "upsert-merged" {
 			continue
 		}
 		p := &prepared[i]
