@@ -1384,6 +1384,28 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	mu.Lock()
 	defer mu.Unlock()
 
+	// Also hold the content-hash stripe so the upsert path's 0x28 write
+	// serializes with the default Write path (GetContentHash→PutContentHash
+	// under contentHashLock). Without it, a concurrent default-Write + upsert
+	// with identical content can produce two engrams sharing one hash slot.
+	// Lock order upsertKeyLock → contentHashLock is one-way (no other path
+	// takes both), so no deadlock. The merge's OLD-content delete is left
+	// unlocked — it races only with a default-Write dedup of content the
+	// merge is moving away from (benign).
+	chMu := e.contentHashLock(wsPrefix, storage.ContentHash(req.Content))
+	chMu.Lock()
+	defer chMu.Unlock()
+
+	// Best-effort capture of the pre-merge engram, so a content-changing merge
+	// can sweep its stale FTS postings (fts.DeleteEngram, mirroring Forget)
+	// before the new content is indexed. Outside casLocks, so technically racy
+	// with a concurrent Delete/CAS — acceptable: FTS is derived and self-heals
+	// on reindex; upsertKeyLock already serializes concurrent upserts per key.
+	var oldFTS *storage.Engram
+	if exID, gErr := e.store.GetUpsertKey(ctx, wsPrefix, keyHash); gErr == nil && exID != (storage.ULID{}) {
+		oldFTS, _ = e.store.GetEngram(ctx, wsPrefix, exID)
+	}
+
 	eng := &storage.Engram{
 		Concept:    req.Concept,
 		Content:    req.Content,
@@ -1406,6 +1428,15 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	id, created, err := e.store.UpsertEngram(ctx, wsPrefix, eng, keyHash)
 	if err != nil {
 		return nil, fmt.Errorf("upsert: %w", err)
+	}
+
+	// Sweep stale FTS postings when a merge changed the content (mirrors
+	// Engine.Forget). The new content is indexed by the ftsWorker.Submit below.
+	// e.fts may be nil in minimal test engines.
+	if e.fts != nil && oldFTS != nil && oldFTS.Content != eng.Content {
+		if ftErr := e.fts.DeleteEngram(wsPrefix, [16]byte(id), oldFTS.Concept, oldFTS.CreatedBy, oldFTS.Content, oldFTS.Tags); ftErr != nil {
+			slog.Warn("engine: upsert: failed to sweep stale FTS postings", "id", id.String(), "err", ftErr)
+		}
 	}
 
 	vaultName := req.Vault
