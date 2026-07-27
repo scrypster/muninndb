@@ -1147,3 +1147,40 @@ func (ps *PebbleStore) ScanEngrams(ctx context.Context, ws [8]byte, fn func(*Eng
 	}
 	return iter.Error()
 }
+
+// ScanEngramsByState scans the 0x0B state secondary index for all engrams in
+// vault ws currently in the given lifecycle state, calling fn with each ID.
+// Index-only: no engram records are read.
+func (ps *PebbleStore) ScanEngramsByState(ctx context.Context, ws [8]byte, state LifecycleState, fn func(id ULID) error) error {
+	scanPrefix := keys.StateIndexKey(ws, uint8(state), [16]byte{})[:10]
+	upperBound := make([]byte, len(scanPrefix))
+	copy(upperBound, scanPrefix)
+	for i := len(upperBound) - 1; i >= 0; i-- {
+		upperBound[i]++
+		if upperBound[i] != 0 {
+			break
+		}
+	}
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: scanPrefix, UpperBound: upperBound})
+	if err != nil {
+		return fmt.Errorf("scan engrams by state: iter: %w", err)
+	}
+	defer iter.Close()
+
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		k := iter.Key()
+		if len(k) != 26 { // 1 + 8 + 1 + 16
+			continue
+		}
+		var idBytes [16]byte
+		copy(idBytes[:], k[10:26])
+		if err := fn(ULID(idBytes)); err != nil {
+			return err
+		}
+	}
+	return iter.Error()
+}

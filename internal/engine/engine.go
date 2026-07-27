@@ -125,6 +125,8 @@ type Engine struct {
 	pruneDone            chan struct{}             // signals prune worker shutdown
 	idempotencySweepDone chan struct{}             // signals idempotency sweep worker shutdown
 	archiveGCDone        chan struct{}             // signals archive GC worker shutdown
+	evolveRepairDone     chan struct{}             // signals evolve entity-link repair completion
+	evolveRepairDelay    time.Duration             // startup delay before the repair pass
 	coherence            *coherence.Registry       // per-vault incremental coherence counters
 	scoring              *scoring.Store            // per-vault learnable scoring weights
 	prov                 *provenance.Store         // audit trail per-engram
@@ -463,6 +465,16 @@ func NewEngine(cfg EngineConfig) *Engine {
 	// engine:spawn-ok — tracked by archiveGCDone channel, drained in Stop()
 	go e.runArchiveGCWorker()
 
+	// One-shot startup repair (after a delay) for supersede-successors
+	// stripped of their entity links by the pre-fix Evolve path (#622).
+	e.evolveRepairDelay = defaultEvolveRepairDelay()
+	if cfg.EvolveRepairDelay != nil {
+		e.evolveRepairDelay = *cfg.EvolveRepairDelay
+	}
+	e.evolveRepairDone = make(chan struct{})
+	// engine:spawn-ok — tracked by evolveRepairDone channel, drained in Stop()
+	go e.runEvolveEntityLinkRepair()
+
 	return e
 }
 
@@ -609,6 +621,15 @@ func (e *Engine) Stop() {
 			case <-e.archiveGCDone:
 			case <-time.After(5 * time.Second):
 				slog.Warn("engine: archive GC worker did not exit within 5s")
+			}
+		}
+
+		// Wait for the evolve entity-link repair pass to exit.
+		if e.evolveRepairDone != nil {
+			select {
+			case <-e.evolveRepairDone:
+			case <-time.After(5 * time.Second):
+				slog.Warn("engine: evolve entity-link repair did not exit within 5s")
 			}
 		}
 

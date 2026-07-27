@@ -820,3 +820,15 @@ func LeaseKey(ws [8]byte, id [16]byte) []byte {
 	copy(key[9:25], id[:])
 	return key
 }
+
+// EvolveRepairMarkKey constructs the per-vault evolve entity-link repair
+// watermark key (0x2B prefix). Value: one byte, the repair-pass version that
+// last completed cleanly over the vault. Presence at the current version lets
+// startup skip the full soft-deleted scan on an already-healed vault.
+// Key: 0x2B | wsPrefix(8) = 9 bytes
+func EvolveRepairMarkKey(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.EvolveRepairMark
+	copy(key[1:9], ws[:])
+	return key
+}

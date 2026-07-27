@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"time"
+
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/cognitive"
 	"github.com/scrypster/muninndb/internal/engine/activation"
@@ -23,4 +25,9 @@ type EngineConfig struct {
 	ConfidenceWorker *cognitive.Worker[cognitive.ConfidenceUpdate] // nil → no confidence decay
 	Embedder         activation.Embedder                           // nil → no semantic search
 	HNSWRegistry     *hnsw.Registry                                // nil → no HNSW indexes
+
+	// EvolveRepairDelay overrides the startup delay before the one-shot evolve
+	// entity-link repair pass (#622). nil → 60s plus jitter, matching the
+	// prune worker. Tests set a small value to exercise the pass promptly.
+	EvolveRepairDelay *time.Duration
 }

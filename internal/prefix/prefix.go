@@ -10,7 +10,7 @@ package prefix
 
 // Source-of-truth prefix bytes. Storage unchanged; auth RELOCATED 0x11–0x14 → 0x42–0x45.
 const (
-	// Storage (0x01–0x2A)
+	// Storage (0x01–0x2B)
 	Engram             byte = 0x01
 	Meta               byte = 0x02
 	AssocFwd           byte = 0x03
@@ -53,6 +53,7 @@ const (
 	ContentHash        byte = 0x28
 	RecallEvent        byte = 0x29
 	Lease              byte = 0x2A
+	EvolveRepairMark   byte = 0x2B
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
 	CapabilityVaultIdx byte = 0x41
@@ -130,6 +131,7 @@ var registry = []Entry{
 	{ContentHash, "storage", "ContentHash", "vault-scoped-data"},
 	{RecallEvent, "storage", "RecallEvent", "vault-scoped-data"},
 	{Lease, "storage", "Lease", "lease"},
+	{EvolveRepairMark, "storage", "EvolveRepairMark", "vault-scoped-data"},
 	{Capability, "capability", "Capability", "capability"},
 	{CapabilityVaultIdx, "capability", "CapabilityVaultIdx", "capability"},
 	{AdminUser, "auth", "AdminUser", "auth"},
