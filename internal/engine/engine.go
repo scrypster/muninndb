@@ -3023,6 +3023,28 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
 	}
 
+	// Carry the predecessor's entity links and relationship records forward
+	// (#622): Evolve wrote no 0x20/0x23 links and no 0x21/0x26 relationship
+	// records for the successor, so every evolved memory silently vanished
+	// from FindByEntity and entity scoring from the moment it was evolved.
+	// The link and relationship keys are queued into the same atomic batch as
+	// the engram writes; the mention-count and co-occurrence ledgers are funded
+	// post-commit (see below).
+	var carriedEntities []string
+	var carriedRels []storage.RelationshipRecord
+	if err := e.store.ScanEngramEntities(ctx, wsPrefix, oldULID, func(name string) error {
+		carriedEntities = append(carriedEntities, name)
+		return nil
+	}); err != nil {
+		return storage.ULID{}, fmt.Errorf("evolve: scan predecessor entities: %w", err)
+	}
+	if err := e.store.ScanEngramRelationships(ctx, wsPrefix, oldULID, func(rec storage.RelationshipRecord) error {
+		carriedRels = append(carriedRels, rec)
+		return nil
+	}); err != nil {
+		return storage.ULID{}, fmt.Errorf("evolve: scan predecessor relationships: %w", err)
+	}
+
 	// Build the supersedes association (new → old).
 	supersedes := &storage.Association{
 		TargetID:      oldULID,
@@ -3046,8 +3068,62 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	if err := batch.UpdateEngramState(ctx, wsPrefix, oldULID, storage.StateSoftDeleted); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch update old state: %w", err)
 	}
+	for _, name := range carriedEntities {
+		if err := batch.WriteEntityEngramLink(ctx, wsPrefix, newULID, name); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: batch carry entity link: %w", err)
+		}
+	}
+	for _, rec := range carriedRels {
+		if err := batch.WriteRelationshipRecord(ctx, wsPrefix, newULID, rec); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: batch carry relationship: %w", err)
+		}
+	}
 	if err := batch.Commit(); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch commit: %w", err)
+	}
+
+	// Fund the ledgers for the carried links. The mention-count and
+	// co-occurrence ledgers are one increment per link key created, one
+	// decrement per link key destroyed: DeleteEngram decrements both
+	// unconditionally for every link it removes, so a carried link with no
+	// matching increment becomes an unfunded liability that the pruner cashes
+	// in — hard-delete the predecessor and MentionCount under-reads while the
+	// successor is still linked, and a co-occurrence pair drops to zero and
+	// vanishes from ScanEntityClusters while both entities are still mentioned
+	// together. Done post-commit, mirroring DeleteEngram's post-commit
+	// decrements: a crash here leaves counts slightly low with the links
+	// intact, the mirror image of DeleteEngram's slightly-high stale case.
+	for _, name := range carriedEntities {
+		if err := e.store.IncrementEntityMentionCount(ctx, name); err != nil {
+			slog.Warn("engine: evolve: failed to increment mention count for carried entity", "entity", name, "engram", newULID.String(), "err", err)
+		}
+	}
+	// Cap mirrors DeleteEngram's maxCoOccurrenceEntities. Beyond the cap the
+	// ledger is best-effort on both sides — DeleteEngram's first-50 comes from
+	// map iteration, so the truncated subsets need not be identical — matching
+	// the pre-existing behaviour for >50-entity engrams rather than fixing it.
+	const maxCoOccurrenceEntities = 50
+	coNames := carriedEntities
+	if len(coNames) > maxCoOccurrenceEntities {
+		slog.Warn("engine: evolve: engram has unusually many carried entities, co-occurrence funding capped",
+			"engram", newULID.String(), "entity_count", len(carriedEntities), "cap", maxCoOccurrenceEntities)
+		coNames = coNames[:maxCoOccurrenceEntities]
+	}
+	for i := 0; i < len(coNames); i++ {
+		for j := i + 1; j < len(coNames); j++ {
+			if err := e.store.IncrementEntityCoOccurrence(ctx, wsPrefix, coNames[i], coNames[j]); err != nil {
+				slog.Warn("engine: evolve: failed to increment co-occurrence for carried pair", "a", coNames[i], "b", coNames[j], "engram", newULID.String(), "err", err)
+			}
+		}
+	}
+
+	// Mark entity extraction complete when the successor carries a curated set,
+	// so the retroactive enrichment provider does not re-extract over it.
+	if len(carriedEntities) > 0 {
+		existingFlags, _ := e.store.GetDigestFlags(ctx, plugin.ULID(newULID))
+		if err := e.store.SetDigestFlag(ctx, newULID, existingFlags|plugin.DigestEntities); err != nil {
+			slog.Warn("engine: evolve: failed to set DigestEntities flag", "id", newULID.String(), "err", err)
+		}
 	}
 
 	// ── Content-hash bookkeeping: delete old mapping, add new mapping ──

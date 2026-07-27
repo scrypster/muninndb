@@ -12,6 +12,7 @@ import (
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 	"github.com/scrypster/muninndb/internal/wal"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // stateUpdate records a (workspace, id) pair whose state was changed via
@@ -211,6 +212,54 @@ func (b *pebbleStoreBatch) UpdateEngramState(ctx context.Context, ws [8]byte, id
 	}
 	// Track for cache invalidation in Commit.
 	b.stateUpdatedIDs = append(b.stateUpdatedIDs, stateUpdate{ws: ws, id: id})
+	return nil
+}
+
+// WriteEntityEngramLink queues the 0x20 forward and 0x23 reverse entity-link keys
+// into the batch. Mirrors PebbleStore.WriteEntityEngramLink key construction; it
+// does not touch the 0x1F entity record. The mention-count ledger is one
+// increment per link key created and one decrement per link key destroyed
+// (DeleteEngram decrements unconditionally), so callers creating links through
+// this method must fund them — post-commit, via IncrementEntityMentionCount —
+// or the counts go stale-low once the linked engrams are hard-deleted (#622).
+func (b *pebbleStoreBatch) WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error {
+	if b.committed {
+		return fmt.Errorf("batch already committed")
+	}
+	nameHash := keys.EntityNameHash(entityName)
+	if err := b.batch.Set(keys.EntityEngramLinkKey(ws, [16]byte(engramID), nameHash), []byte(entityName), nil); err != nil {
+		return fmt.Errorf("batch write entity link fwd: %w", err)
+	}
+	if err := b.batch.Set(keys.EntityReverseIndexKey(nameHash, ws, [16]byte(engramID)), nil, nil); err != nil {
+		return fmt.Errorf("batch write entity link rev: %w", err)
+	}
+	return nil
+}
+
+// WriteRelationshipRecord queues the 0x21 relationship record and both 0x26
+// relationship-entity index keys into the batch. Same value encoding as
+// PebbleStore.UpsertRelationshipRecord.
+func (b *pebbleStoreBatch) WriteRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error {
+	if b.committed {
+		return fmt.Errorf("batch already committed")
+	}
+	record.UpdatedAt = time.Now().UnixNano()
+	val, err := msgpack.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("batch relationship record marshal: %w", err)
+	}
+	fromHash := keys.EntityNameHash(record.FromEntity)
+	toHash := keys.EntityNameHash(record.ToEntity)
+	relTypeByte := relTypeByteFromString(record.RelType)
+	if err := b.batch.Set(keys.RelationshipKey(ws, [16]byte(engramID), fromHash, relTypeByte, toHash), val, nil); err != nil {
+		return fmt.Errorf("batch relationship record: set 0x21: %w", err)
+	}
+	if err := b.batch.Set(keys.RelEntityIndexKey(ws, fromHash, [16]byte(engramID)), nil, nil); err != nil {
+		return fmt.Errorf("batch relationship record: set 0x26 from: %w", err)
+	}
+	if err := b.batch.Set(keys.RelEntityIndexKey(ws, toHash, [16]byte(engramID)), nil, nil); err != nil {
+		return fmt.Errorf("batch relationship record: set 0x26 to: %w", err)
+	}
 	return nil
 }
 

@@ -33,6 +33,18 @@ type StoreBatch interface {
 	// Reads the current engram from the underlying store, sets its state, and queues
 	// updated 0x01 and 0x02 key writes.
 	UpdateEngramState(ctx context.Context, ws [8]byte, id ULID, newState LifecycleState) error
+	// WriteEntityEngramLink queues the 0x20 forward and 0x23 reverse entity-link
+	// keys into the batch. Like PebbleStore.WriteEntityEngramLink, it does not
+	// touch the 0x1F entity record — callers that need the record created must
+	// use UpsertEntityRecord separately, and callers carrying links to an
+	// existing record must fund the mention-count ledger post-commit via
+	// IncrementEntityMentionCount (one increment per link created, matching
+	// DeleteEngram's one decrement per link destroyed).
+	WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error
+	// WriteRelationshipRecord queues the 0x21 relationship record and both 0x26
+	// relationship-entity index keys into the batch. Same encoding as
+	// PebbleStore.UpsertRelationshipRecord.
+	WriteRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error
 	// Commit atomically commits all queued writes.
 	Commit() error
 	// Discard releases the batch without writing anything.
