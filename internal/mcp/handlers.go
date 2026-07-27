@@ -591,7 +591,30 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	if c, ok := args["concept"].(string); ok {
 		evolveConcept = c
 	}
-	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb, evolveConcept)
+	// Optional inline entities — same shape and normalization as remember's.
+	// When present they REPLACE the entity links otherwise carried forward
+	// from the predecessor.
+	var evolveEntities []mbp.InlineEntity
+	if entitiesAny, ok := args["entities"].([]any); ok {
+		for i, eAny := range entitiesAny {
+			if i >= 20 {
+				break
+			}
+			eMap, ok := eAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := eMap["name"].(string)
+			typ, _ := eMap["type"].(string)
+			name = strings.TrimSpace(norm.NFKC.String(name))
+			typ = normalizeEntityType(typ)
+			if name == "" || typ == "" {
+				continue
+			}
+			evolveEntities = append(evolveEntities, mbp.InlineEntity{Name: name, Type: typ})
+		}
+	}
+	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb, evolveConcept, evolveEntities)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return

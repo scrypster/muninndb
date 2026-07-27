@@ -309,6 +309,18 @@ func allToolDefinitions() []ToolDefinition {
 						"items":       map[string]any{"type": "number"},
 						"description": "Optional pre-computed embedding vector for the new version. When provided, the server skips its own embedding step. Must match the vault's existing embedding dimension.",
 					},
+					"entities": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"name": map[string]any{"type": "string"},
+								"type": map[string]any{"type": "string", "description": "One of: person, organization, location, product, concept, event, other."},
+							},
+							"required": []string{"name", "type"},
+						},
+						"description": "Optional replacement entities for the new version, for when the update changes what the memory is about. When omitted, the predecessor's entity links carry forward unchanged. Maximum 20.",
+					},
 				},
 				"required": []string{"id", "new_content", "reason"},
 			},

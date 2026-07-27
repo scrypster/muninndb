@@ -60,7 +60,7 @@ func (f *fakeEngine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatR
 func (f *fakeEngine) GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error) {
 	return nil, nil
 }
-func (f *fakeEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (*WriteResult, error) {
+func (f *fakeEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity) (*WriteResult, error) {
 	return &WriteResult{ID: "new-id"}, nil
 }
 func (f *fakeEngine) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {

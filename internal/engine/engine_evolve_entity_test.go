@@ -68,7 +68,7 @@ func TestEvolve_CarriesEntityLinks(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "PostgreSQL 17 runs payments now", "version bump", nil, "")
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "PostgreSQL 17 runs payments now", "version bump", nil, "", nil)
 	require.NoError(t, err)
 
 	ws := eng.store.ResolveVaultPrefix("test")
@@ -129,7 +129,7 @@ func TestEvolve_MentionCountConservation(t *testing.T) {
 	require.Equal(t, 1, coOccurrenceCount(t, eng, ws, "Ada", "Grace"),
 		"write funds one co-occurrence")
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "Ada still pairs with Grace", "refresh", nil, "")
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "Ada still pairs with Grace", "refresh", nil, "", nil)
 	require.NoError(t, err)
 
 	rec, err = eng.store.GetEntityRecord(ctx, "ada")
@@ -175,10 +175,59 @@ func TestEvolve_CarriesRelationshipRecords(t *testing.T) {
 	require.NotEmpty(t, engramRelationships(t, eng, ws, oldULID),
 		"precondition: inline entity pair produces a co_occurs_with record")
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "A still talks to B", "refresh", nil, "")
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "A still talks to B", "refresh", nil, "", nil)
 	require.NoError(t, err)
 
 	recs := engramRelationships(t, eng, ws, newID)
 	require.Len(t, recs, 1)
 	require.Equal(t, "co_occurs_with", recs[0].RelType)
+}
+
+// TestEvolve_InlineEntitiesReplaceCarry: caller-provided entities on evolve
+// replace the carried set — the update changed what the memory is about.
+//
+// "Replace" is only meaningful while the carry is live, so the test proves
+// both arms on the same predecessor shape: an evolve without inline entities
+// carries Alice forward (the control — with the carry disabled this leg
+// fails, so the replace assertions cannot pass vacuously), and an evolve
+// WITH inline entities yields Bob only, not a merge.
+func TestEvolve_InlineEntitiesReplaceCarry(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	write := func(content string) string {
+		t.Helper()
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault: "test", Concept: "owner", Content: content,
+			Entities: []mbp.InlineEntity{{Name: "Alice", Type: "person"}},
+		})
+		require.NoError(t, err)
+		return resp.ID
+	}
+	ws := eng.store.ResolveVaultPrefix("test")
+
+	// Control arm: no inline entities — the carry must be live.
+	controlID, err := eng.Evolve(ctx, "test", write("Alice owns the deploy"), "Alice still owns the deploy", "refresh", nil, "", nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Alice"}, engramEntities(t, eng, ws, controlID),
+		"control: without inline entities the predecessor's links carry forward")
+
+	// Replace arm: inline entities suppress that live carry.
+	newID, err := eng.Evolve(ctx, "test", write("Alice owns the other deploy"), "Bob owns the deploy now", "handover", nil, "",
+		[]mbp.InlineEntity{{Name: "Bob", Type: "person"}})
+	require.NoError(t, err)
+
+	names := engramEntities(t, eng, ws, newID)
+	require.Equal(t, []string{"Bob"}, names,
+		"inline entities must replace the predecessor's links, not merge with them")
+
+	// Inline entities are genuinely new mentions: the record must exist.
+	rec, err := eng.store.GetEntityRecord(ctx, "bob")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+
+	flags, err := eng.store.GetDigestFlags(ctx, plugin.ULID(newID))
+	require.NoError(t, err)
+	require.NotZero(t, flags&plugin.DigestEntities)
 }

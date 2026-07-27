@@ -23,7 +23,7 @@ func TestEvolve_AtomicBatch_OldSoftDeletedNewReadable(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "new content", "update", nil, "")
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "new content", "update", nil, "", nil)
 	if err != nil {
 		t.Fatalf("Evolve: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestEvolve_ConceptStableAcrossRepeatedEvolution(t *testing.T) {
 	require.NoError(t, err)
 
 	// First evolution with empty concept: must inherit original verbatim.
-	id1, err := eng.Evolve(ctx, "test", resp.ID, "v2", "first update", nil, "")
+	id1, err := eng.Evolve(ctx, "test", resp.ID, "v2", "first update", nil, "", nil)
 	require.NoError(t, err)
 
 	ws := eng.store.ResolveVaultPrefix("test")
@@ -95,7 +95,7 @@ func TestEvolve_ConceptStableAcrossRepeatedEvolution(t *testing.T) {
 		"concept must be inherited verbatim from predecessor, no suffix")
 
 	// Second evolution with empty concept: must still equal original.
-	id2, err := eng.Evolve(ctx, "test", id1.String(), "v3", "second update", nil, "")
+	id2, err := eng.Evolve(ctx, "test", id1.String(), "v3", "second update", nil, "", nil)
 	require.NoError(t, err)
 
 	eng2, err := eng.store.GetEngram(ctx, ws, id2)
@@ -118,7 +118,7 @@ func TestEvolve_ConceptRenameWhenProvided(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "answer sent — closed", "paid the debt", nil, "answer to Alice on #895 — CLOSED")
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "answer sent — closed", "paid the debt", nil, "answer to Alice on #895 — CLOSED", nil)
 	require.NoError(t, err)
 
 	ws := eng.store.ResolveVaultPrefix("test")
@@ -180,7 +180,7 @@ func TestEvolve_InheritsMemoryTypeAndTypeLabel(t *testing.T) {
 	require.Equal(t, originalSummary, pred.Summary, "precondition: predecessor summary")
 	require.Equal(t, storage.TypeDecision, pred.MemoryType, "precondition: predecessor type")
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "v2", "update", nil, "")
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "v2", "update", nil, "", nil)
 	require.NoError(t, err)
 
 	succ, err := eng.store.GetEngram(ctx, ws, newID)
@@ -216,7 +216,7 @@ func TestEvolve_TypeSurvivesSupersedeChain(t *testing.T) {
 	ws := eng.store.ResolveVaultPrefix("test")
 	id := resp.ID
 	for hop := 1; hop <= 3; hop++ {
-		newID, err := eng.Evolve(ctx, "test", id, "content", "update", nil, "")
+		newID, err := eng.Evolve(ctx, "test", id, "content", "update", nil, "", nil)
 		require.NoError(t, err, "evolve hop %d", hop)
 
 		got, err := eng.store.GetEngram(ctx, ws, newID)
