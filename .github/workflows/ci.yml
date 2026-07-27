@@ -467,3 +467,34 @@ jobs:
       - name: Unit tests
         run: npm test
         working-directory: sdk/node
+
+  # ── Web console: unit tests ───────────────────────────────────────────
+  # web/ has carried vitest suites for a while (time-utils, plugin-config-utils,
+  # and now worker-status-utils) that nothing ever ran. `npm run test:e2e`
+  # covers Playwright, but plain `npm test` was never wired up, so the JS unit
+  # coverage was decorative. Two things had to be true before this job could
+  # exist: vitest had to stop globbing the Playwright specs (fixed by the
+  # test.exclude in web/vite.config.js), and the suite had to be green.
+  #
+  # Kept separate from the Go job rather than appended to it, so a failing JS
+  # assertion reports as a web failure instead of "Go build & test". It runs in
+  # parallel and needs no server, no Go toolchain, and no embed assets.
+  web-unit:
+    name: Web console unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci --ignore-scripts
+        working-directory: web
+
+      - name: Unit tests
+        run: npm test
+        working-directory: web

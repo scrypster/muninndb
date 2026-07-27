@@ -103,17 +103,20 @@ wall-clock. Jobs (from `.github/workflows/ci.yml`, real recent timings):
 | Job | ~duration | Notes |
 |---|---|---|
 | `go` (build & test) | 3.5–4 min | gofmt gate, embed-asset cache, web build, `go build -tags localassets`, `go vet`, **`go test -race -tags localassets ./...`**, coverage |
-| `windows` (build & smoke) | 2.5–3 min | parallel to `go`; **wrong-model drift, see above** |
+| `windows` (build & smoke) | 2–3 min | parallel to `go`; now fetches the same bge-small-en-v1.5 the release ships |
 | `shellcheck` | 10–45s | lints scripts + runs `check-build-tags.sh` |
 | `api-spec-validation` | 15–20s | Redocly lint + informational route-count diff |
-| `vuln-check` | 30–90s | `govulncheck` (unpinned) |
+| `vuln-check` | 15–60s | `govulncheck`, pinned to v1.6.0 |
 | `cli-integration` | 1.5–2 min | **runs after `go`** (sequential); this is where the MCP registry-parity smoke test runs |
 | `playwright-e2e` | 1.5–2 min | management-console E2E (thin: ~5 specs) |
-| `python-sdk` | 1.5–2 min | **serialized after `cli-integration`** "so integration jobs are sequential" — this coupling is not a real data dependency and costs ~1.5 min of avoidable critical path |
+| `python-sdk` | 1–2 min | **serialized after `cli-integration`** "so integration jobs are sequential" — this coupling is not a real data dependency and costs ~1.5 min of avoidable critical path |
+| `node-sdk` | 15–20s | `npm ci` + `tsc` + vitest for `sdk/node`. Before it existed the SDK was first compiled by `publish-sdk.yml` at tag time |
+| `web-unit` | 15–25s | `npm test` for `web/`. Before it existed the vitest suites there ran nowhere |
 
 Critical path: `go` → (`cli-integration` ∥ `playwright-e2e`) → `python-sdk`. What's cached:
-embed assets (~130MB, keyed by ORT+model+platform), Go module cache. npm is **not** cached
-(re-`npm ci` in four jobs). Race detector runs only in the `go` job.
+embed assets (~130MB, keyed by ORT+model+platform), Go module cache, and npm for the two
+lockfile-scoped jobs (`node-sdk`, `web-unit`). npm is **not** cached in the jobs that build
+the web bundle as a side effect. Race detector runs only in the `go` job.
 
 **When adding tests:** unit + invariant tests are nearly free — prefer them. Integration,
 Playwright, `-race`, and asset-gated tests cost real minutes. Reach for end-to-end
