@@ -33,6 +33,8 @@ and remain the reviewer's job.
    (`web/static/js/app.js`), and any docs table. Presets are **hand-duplicated** across Go
    and the web UI with no parity test — a known drift surface. If you add a preset, also
    add a `reflect.DeepEqual`-style pinning test if it's derived from another (see #599). 🪝
+   Preset *names* are pinned across Go and all four web sites by
+   `TestPlasticityPresets_WebConsoleParity`; values are still on you.
 
 5. **The embed model or ORT version** (`Makefile`) → update **all** of: `ci.yml` cache keys
    (Linux *and* Windows jobs), `release.yml` matrix cache keys (5 platforms), and the
@@ -79,7 +81,12 @@ and remain the reviewer's job.
 - ~~**`muninn upgrade` has no checksum verification** (#600)~~ — fixed. `selfUpdate` now
   fetches `checksums.txt`, hashes the whole downloaded archive, and verifies before
   anything executes it. Fails closed if the file is unreachable or the asset isn't listed.
-- **Presets are hand-duplicated** Go ↔ web UI with no parity test.
+- ~~**Presets are hand-duplicated** Go ↔ web UI with no parity test.~~ — partially closed.
+  `TestPlasticityPresets_WebConsoleParity` (`internal/auth/`) now pins preset *names* across
+  the Go table and all four web sites. The preset *values* are still hand-duplicated: the
+  radar-chart numbers in `_plasticityData` are hand-tuned for visual separation and are
+  deliberately not asserted (see the test's comment), and the prose in
+  `plasticityPresetDescription` cites values that nothing checks.
 - **SDK type drift is warning-only** — no CI gate keeps Python/Node/PHP in sync with
   `types.go`.
 - ~~**`govulncheck@latest` is unpinned** in CI~~ — fixed, pinned to v1.6.0.
