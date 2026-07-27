@@ -50,6 +50,13 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []act
 		seenInResults[r.Engram.ID] = i
 	}
 
+	// Candidates rejected once stay rejected: the fetch and every exclusion
+	// check depend only on the candidate, never on which seed reached it. A
+	// candidate sharing entities with several seeds would otherwise be
+	// re-fetched and re-checked per seed — common under restrictive filters,
+	// where most of a dense entity neighbourhood is rejected.
+	rejected := make(map[storage.ULID]struct{})
+
 	// For each seed engram, iterate its entity links (0x20 forward index).
 	for _, topEng := range seeds {
 		_ = e.store.ScanEngramEntities(ctx, ws, topEng.Engram.ID, func(entityName string) error {
@@ -67,12 +74,17 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []act
 					// Boost existing result.
 					results[idx].Score += entityBoostFactor
 				} else {
+					if _, wasRejected := rejected[engramID]; wasRejected {
+						return nil
+					}
 					// Fetch engram and add as a new entity-boosted result.
 					eng, err := e.store.GetEngram(ctx, ws, engramID)
 					if err != nil || eng == nil {
+						rejected[engramID] = struct{}{}
 						return nil
 					}
 					if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
+						rejected[engramID] = struct{}{}
 						return nil
 					}
 					// This engram was never in the pipeline's candidate pool,
@@ -84,9 +96,11 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []act
 					// backward-compat alias for TrustInferred and passes
 					// through, as it does in the pipeline.
 					if excludeUntrusted && eng.Trust == storage.TrustUntrusted {
+						rejected[engramID] = struct{}{}
 						return nil
 					}
 					if !activation.PassesMetaFilter(eng, filters) {
+						rejected[engramID] = struct{}{}
 						return nil
 					}
 					results = append(results, activation.ScoredEngram{

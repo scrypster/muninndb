@@ -430,3 +430,90 @@ func TestEntityBoost_InjectedResultsRespectExcludeUntrusted(t *testing.T) {
 	assert.True(t, offFound,
 		"with ExcludeUntrusted unset the untrusted engram must still be injected")
 }
+
+// TestEntityBoost_ActivateWiresRequestFiltersIntoBoost drives the real Activate
+// entry point rather than applyEntityBoost directly. The direct-call tests
+// above prove the function filters correctly; this one proves activateCore
+// actually passes the request's filters into it — un-wiring the call site to
+// (nil, false) leaves every direct-call test green and turns only this red, so
+// a later refactor of activateCore cannot silently reopen #654.
+//
+// Filter values are typed the way activateCore's verbatim conversion delivers
+// them to passesMetaFilter: created_after must be a time.Time — with a string
+// the type assertion fails open and the negative assertion would pass for the
+// wrong reason. The positive assertions guard the same trap from the other
+// side: a filter that is silently ignored (or an injection pass that never
+// ran) cannot produce a false green, because the satisfying neighbour must
+// still arrive via the boost path.
+func TestEntityBoost_ActivateWiresRequestFiltersIntoBoost(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "boost-wiring-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	now := time.Now()
+	cutoff := now.Add(-24 * time.Hour)
+
+	// Seed: strong FTS match for the query, entity-linked, inside the window.
+	respSeed, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vault,
+		Concept: "primary database choice",
+		Content: "We use PostgreSQL as the primary relational database for all transactional workloads",
+		Entities: []mbp.InlineEntity{
+			{Name: "PostgreSQL", Type: "database"},
+		},
+	})
+	require.NoError(t, err)
+
+	// Recent neighbour: entity-linked, content deliberately unrelated to the
+	// query so it can only arrive via the boost path. Inside the window.
+	recent := &storage.Engram{
+		Concept: "recent neighbour", Content: "streaming replication failover runbook",
+		Confidence: 0.8, CreatedAt: now.Add(-time.Hour),
+	}
+	idRecent, err := eng.store.WriteEngram(ctx, ws, recent)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idRecent, "PostgreSQL"))
+
+	// Old neighbour: entity-linked, outside the window. Before the wiring fix
+	// this came back on a created_after-bounded recall, scored purely by boost.
+	old := &storage.Engram{
+		Concept: "old neighbour", Content: "legacy connection pool sizing notes",
+		Confidence: 0.8, CreatedAt: now.Add(-14 * 24 * time.Hour),
+	}
+	idOld, err := eng.store.WriteEngram(ctx, ws, old)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idOld, "PostgreSQL"))
+
+	awaitFTS(t, eng)
+
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      vault,
+		Context:    []string{"primary relational database"},
+		MaxResults: 20,
+		Threshold:  0.01,
+		Filters: []mbp.Filter{
+			{Field: "created_after", Op: "gt", Value: cutoff},
+		},
+	})
+	require.NoError(t, err)
+
+	got := make(map[string]struct{}, len(resp.Activations))
+	for _, item := range resp.Activations {
+		got[item.ID] = struct{}{}
+	}
+
+	_, seedFound := got[respSeed.ID]
+	require.True(t, seedFound, "seed satisfies the filter and matches the query; its absence means the request itself failed, not the boost pass")
+
+	_, recentFound := got[idRecent.String()]
+	assert.True(t, recentFound,
+		"filter-satisfying entity neighbour must be injected — proves the boost pass ran and the filter was actually evaluated, not ignored")
+
+	_, oldFound := got[idOld.String()]
+	assert.False(t, oldFound,
+		"engram outside the created_after bound must not be injected by entity boost on a real Activate request (#654)")
+}
