@@ -357,3 +357,26 @@ func TestUpsertEngram_MergeSerializesWithCASLock(t *testing.T) {
 		t.Fatal("UpsertEngram merge did not complete after releasing the CAS stripe lock")
 	}
 }
+
+// TestUpsertEngram_Merge_OverwritesMemoryType: the request's MemoryType must
+// overwrite the existing engram's on merge (a re-ingested doc can change type).
+// Pre-fix upsertMerge copied every content field EXCEPT MemoryType, freezing
+// the classification at the first write's value.
+func TestUpsertEngram_Merge_OverwritesMemoryType(t *testing.T) {
+	store := openTestStore(t)
+	ws := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	keyHash := [32]byte{0x77}
+	id1, _, err := store.UpsertEngram(context.Background(), ws,
+		&Engram{Content: "v1", MemoryType: MemoryType(3)}, keyHash)
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if _, _, err := store.UpsertEngram(context.Background(), ws,
+		&Engram{Content: "v2", MemoryType: MemoryType(5)}, keyHash); err != nil {
+		t.Fatalf("merge upsert: %v", err)
+	}
+	got, _ := store.GetEngram(context.Background(), ws, id1)
+	if got.MemoryType != MemoryType(5) {
+		t.Errorf("MemoryType not overwritten on merge: got %v, want 5", got.MemoryType)
+	}
+}

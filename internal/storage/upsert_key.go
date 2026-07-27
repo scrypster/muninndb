@@ -109,6 +109,7 @@ func (ps *PebbleStore) upsertCreate(ctx context.Context, wsPrefix [8]byte, eng *
 	if err := sb.Commit(); err != nil {
 		return ULID{}, false, fmt.Errorf("upsert create: commit: %w", err)
 	}
+	ps.replicateBatch(sb.batch)
 	return eng.ID, true, nil
 }
 
@@ -128,6 +129,7 @@ func (ps *PebbleStore) upsertMerge(wsPrefix [8]byte, existing *Engram, req *Engr
 	merged.Tags = req.Tags
 	merged.TypeLabel = req.TypeLabel
 	merged.Summary = req.Summary
+	merged.MemoryType = req.MemoryType
 	merged.UpdatedAt = time.Now()
 	if len(req.Embedding) > 0 {
 		merged.Embedding = req.Embedding
@@ -185,5 +187,6 @@ func (ps *PebbleStore) upsertMerge(wsPrefix [8]byte, existing *Engram, req *Engr
 	if err := sb.Commit(); err != nil {
 		return ULID{}, false, fmt.Errorf("upsert merge: commit: %w", err)
 	}
+	ps.replicateBatch(sb.batch)
 	return merged.ID, false, nil
 }
