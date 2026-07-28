@@ -21,11 +21,34 @@ func SplitRawTagKV(tag string) (tagKey, value string, ok bool) {
 	return tag[:idx], tag[idx+1:], true
 }
 
+// ValidateRawTagValue reports whether tag is safe to index in the 0x2B
+// raw-tag-range keyspace. A key:value tag whose value contains a 0x00 (NUL)
+// byte is rejected, since 0x00 is the reserved separator between value and id
+// in the key layout; a value containing it would corrupt range-scan ordering.
+// Bare tags (no ':') are never indexed and always pass.
+//
+// This is the single source of truth for raw-tag write validity. Callers that
+// queue an engram's other keys into a SHARED batch MUST validate every tag with
+// this BEFORE the first batch.Set for that item — WriteEngramBatch does — so a
+// rejected item never leaves a half-written, partially-indexed engram behind
+// (the batch is committed as a whole; a mid-item `continue` cannot un-queue the
+// Sets already added). WriteRawTagIndexEntry calls this too, so single-write
+// paths and the v4 migration share the exact same rule.
+func ValidateRawTagValue(tag string) error {
+	_, value, ok := SplitRawTagKV(tag)
+	if !ok {
+		return nil
+	}
+	if strings.IndexByte(value, 0x00) >= 0 {
+		return fmt.Errorf("raw tag index: tag value contains a NUL byte, rejected: %q", tag)
+	}
+	return nil
+}
+
 // WriteRawTagIndexEntry queues a single 0x2B raw-tag-range index entry for tag
 // on id into batch. Tags without a ':' are silently skipped (not indexed).
-// Returns an error — and queues nothing — if the tag's value contains a 0x00
-// (NUL) byte, since 0x00 is the reserved separator between value and id in the
-// 0x2B key layout; a value containing it would corrupt range-scan ordering.
+// Returns an error — and queues nothing — if the tag's value fails
+// ValidateRawTagValue (NUL byte in value).
 //
 // Exported so internal/storage/migrate's eager backfill migration can reuse
 // the exact same encode-and-validate logic used by every live write path.
@@ -34,8 +57,8 @@ func WriteRawTagIndexEntry(batch *pebble.Batch, ws [8]byte, tag string, id [16]b
 	if !ok {
 		return nil
 	}
-	if strings.IndexByte(value, 0x00) >= 0 {
-		return fmt.Errorf("raw tag index: tag value contains a NUL byte, rejected: %q", tag)
+	if err := ValidateRawTagValue(tag); err != nil {
+		return err
 	}
 	k := keys.RawTagRangeKey(ws, keys.Hash(tagKey), []byte(value), id)
 	return batch.Set(k, nil, nil)

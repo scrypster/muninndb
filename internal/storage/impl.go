@@ -458,6 +458,30 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 			continue
 		}
 
+		// Validate every tag BEFORE queueing any Set for this item. The batch is
+		// shared and committed as a whole, so a mid-item `continue` cannot un-queue
+		// Sets already added — validating a NUL tag value only after the engram/meta/
+		// index keys were queued would report the item failed yet still commit a
+		// half-indexed engram (missing creator/relevance/last-access keys → invisible
+		// to the pruner and where_left_off). Reject up front instead.
+		// Validate every tag BEFORE queueing any Set for this item. The batch is
+		// shared and committed as a whole, so a mid-item `continue` cannot un-queue
+		// Sets already added — validating a NUL tag value only after the engram/meta/
+		// index keys were queued would report the item failed yet still commit a
+		// half-indexed engram (missing creator/relevance/last-access keys → invisible
+		// to the pruner and where_left_off). Reject up front instead.
+		tagErr := error(nil)
+		for _, tag := range eng.Tags {
+			if err := ValidateRawTagValue(tag); err != nil {
+				tagErr = fmt.Errorf("write engram batch: raw tag index: %w", err)
+				break
+			}
+		}
+		if tagErr != nil {
+			errs[i] = tagErr
+			continue
+		}
+
 		id16 := [16]byte(eng.ID)
 		batch.Set(keys.EngramKey(ws, id16), erfBytes, nil)
 		batch.Set(keys.MetaKey(ws, id16), erf.MetaKeySlice(erfBytes), nil)

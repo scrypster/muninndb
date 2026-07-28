@@ -265,10 +265,14 @@ func (e *Engine) getIdempotencyLock(opID string) *sync.Mutex {
 }
 
 // shouldDedupReinforce reports whether id is due for a content-hash dedup
-// reinforcement (#682), and if so, atomically claims the slot by recording
-// now — a second concurrent caller for the same id within the cap window
-// observes the claim and returns false, so at most one TouchAccess per id per
-// dedupReinforceCap window is issued even under concurrent duplicate writes.
+// reinforcement (#682). This is a SOFT rate cap, not a strict mutex: the
+// first-ever hit for an id is claimed atomically (LoadOrStore), but the
+// cap-window-elapsed path below is check-then-Store, so two callers that race
+// past the window for the same id can both reinforce once. That is acceptable —
+// the cap only bounds runaway reinforcement from repeated duplicate writes to
+// roughly one per window; an occasional extra bump under a rare exact race does
+// not distort decay. If it ever needs to be strict, switch the elapsed path to
+// CompareAndSwap on a comparable stored value.
 func (e *Engine) shouldDedupReinforce(id storage.ULID) bool {
 	now := time.Now()
 	v, loaded := e.dedupReinforceTimes.LoadOrStore(id, now)
@@ -279,7 +283,7 @@ func (e *Engine) shouldDedupReinforce(id storage.ULID) bool {
 	if now.Sub(last) < dedupReinforceCap {
 		return false
 	}
-	// Cap window elapsed — claim it for this call.
+	// Cap window elapsed — claim it for this call (soft: see doc comment).
 	e.dedupReinforceTimes.Store(id, now)
 	return true
 }

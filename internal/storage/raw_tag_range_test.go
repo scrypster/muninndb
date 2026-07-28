@@ -48,6 +48,63 @@ func TestRawTagRange_RejectsNulInValue(t *testing.T) {
 	}
 }
 
+// TestWriteEngramBatch_NulTag_NoPartialCommit is the regression for the batch
+// partial-commit defect: an item rejected for a NUL tag value must be reported
+// failed AND leave no engram behind. Because WriteEngramBatch queues every
+// item's keys into one shared Pebble batch and commits it as a whole, validating
+// the tag only after the engram/meta/index keys were already Set would report
+// the item failed yet still commit a half-indexed, orphaned engram. A sibling
+// good item in the same batch must still commit.
+func TestWriteEngramBatch_NulTag_NoPartialCommit(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("batch-nul-test")
+
+	good := &Engram{Concept: "good", Content: "good sibling", Tags: []string{"due:2026-07-20"}, Confidence: 1.0, Stability: 30}
+	bad := &Engram{Concept: "bad", Content: "nul tag victim", Tags: []string{"due:2026\x0007-27"}, Confidence: 1.0, Stability: 30}
+
+	ids, errs := store.WriteEngramBatch(ctx, []EngramBatchItem{
+		{WSPrefix: ws, Engram: good},
+		{WSPrefix: ws, Engram: bad},
+	})
+
+	if errs[1] == nil {
+		t.Fatal("expected item 1 (NUL tag) to be reported failed, got nil error")
+	}
+	if !strings.Contains(errs[1].Error(), "NUL") {
+		t.Errorf("item 1 error should mention NUL, got: %v", errs[1])
+	}
+	if errs[0] != nil {
+		t.Errorf("item 0 (good) should commit, got error: %v", errs[0])
+	}
+
+	// The good sibling must be retrievable.
+	if ids[0] == (ULID{}) {
+		t.Error("item 0 should have a committed ULID")
+	} else if _, err := store.GetEngram(ctx, ws, ids[0]); err != nil {
+		t.Errorf("good item not retrievable after batch: %v", err)
+	}
+
+	// CRITICAL: the rejected item must NOT have been committed. ids[1] is the
+	// zero ULID on failure, but the engram was assigned an ID internally before
+	// the rejection — scan the whole vault's engram keyspace and assert only the
+	// good engram exists.
+	lower := keys.EngramKey(ws, [16]byte{})[:9] // 0x01 | ws — the engram-range prefix
+	upper := keys.PrefixUpperBound(lower)
+	iter, err := store.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		t.Fatalf("new iter: %v", err)
+	}
+	defer iter.Close()
+	count := 0
+	for valid := iter.First(); valid; valid = iter.Next() {
+		count++
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 engram committed (the good sibling), found %d — the rejected NUL-tag item leaked a partial commit", count)
+	}
+}
+
 // TestRawTagRange_ClearVaultRemoves verifies that ClearVault removes all
 // 0x2B raw-tag-range entries for the vault, and that recreating a vault with
 // the SAME name afterward does not resurrect stale raw-tag entries under the

@@ -338,7 +338,19 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 	// (internal/transport/grpc/server.go:172) and REST (internal/auth/middleware.go:49)
 	// already do this; the MCP surface must match so observe-mode credentials get
 	// ReadOnly=true and skip Hebbian/PAS/activation-log side effects.
-	ctx = context.WithValue(ctx, auth.ContextMode, a.Mode)
+	//
+	// An authorized session with no explicit mode — the static mdb_ token and the
+	// open-server (zero-config) deployment, which both have full tool access — is
+	// mapped to ModeFull, matching REST's public path (internal/auth/middleware.go:74).
+	// Without this, resolveTrust (SEC-14) would reject trust=verified on the default
+	// deployment even though the caller has full access. mk_/cap_ sessions carry
+	// their real key/cap Mode and are left untouched, so an observe key still cannot
+	// stamp verified.
+	mode := a.Mode
+	if mode == "" && a.Authorized {
+		mode = auth.ModeFull
+	}
+	ctx = context.WithValue(ctx, auth.ContextMode, mode)
 
 	handler(ctx, w, req.ID, vault, args)
 }

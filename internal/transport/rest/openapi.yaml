@@ -69,6 +69,10 @@ components:
           format: uint8
         type_label:
           type: string
+        trust:
+          type: string
+          enum: [verified, inferred, external, untrusted]
+          description: "Provenance trust level. Default 'inferred'. 'verified' requires a full or write credential (observe is rejected)."
         summary:
           type: string
           description: "Pre-computed summary (bypasses background enrichment)."
@@ -177,6 +181,10 @@ components:
           format: uint8
         type_label:
           type: string
+        trust:
+          type: string
+          enum: [verified, inferred, external, untrusted]
+          description: "Provenance trust level. Default 'inferred'. 'verified' requires a full or write credential."
         classification:
           type: integer
           format: int32
@@ -256,6 +264,9 @@ components:
           default: 0
         include_why:
           type: boolean
+        read_only:
+          type: boolean
+          description: "When true, suppress reinforcement side effects (TouchAccess and implicit feedback) for this recall. Always effectively true for observe-mode credentials."
         weights:
           $ref: "#/components/schemas/Weights"
         filters:
@@ -361,6 +372,11 @@ components:
           format: uint8
         type_label:
           type: string
+        tags:
+          type: array
+          items:
+            type: string
+          description: "The engram's tags (S4), so callers can filter low-salience entries client-side."
 
     BriefSentence:
       type: object

@@ -89,10 +89,11 @@ prefix — see the vault-reuse note at the bottom).
 
 ## Free bytes
 
-`0x2B`–`0x3F` and `0x46`+ are free for new storage/auth keys (0x40–0x45 are now
-allocated: 0x40/0x41 capability, 0x42–0x45 auth). (`0x29`/`0x40`/`0x41`
-also appear in `internal/transport/mbp/frame.go` as **wire opcodes** — a different
-keyspace; coincidental, safe, but confusing. Prefer `0x2B+` for new storage prefixes.)
+`0x2C`–`0x3F` and `0x46`+ are free for new storage/auth keys (0x2B is now
+allocated: raw-tag-range index (S1); 0x40–0x45 are allocated: 0x40/0x41
+capability, 0x42–0x45 auth). (`0x29`/`0x40`/`0x41` also appear in
+`internal/transport/mbp/frame.go` as **wire opcodes** — a different keyspace;
+coincidental, safe, but confusing. Prefer `0x2C+` for new storage prefixes.)
 
 ## Live hazards a reviewer must know
 

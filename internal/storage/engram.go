@@ -902,8 +902,9 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 // has a stale view of State to accidentally index against.
 //
 // Trust and Confidence are never part of the write: reinforcement moves only
-// AccessCount/LastAccess, by construction (COG-1/COG-2 — access frequency is
-// not evidence of correctness).
+// AccessCount/LastAccess, by construction — access frequency is not evidence of
+// correctness, so it must not move Confidence (cf. COG-10: co-activation never
+// updates confidence).
 func (ps *PebbleStore) TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULID) error {
 	mu := ps.casLocks.For(id[:])
 	mu.Lock()

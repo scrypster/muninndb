@@ -5,22 +5,27 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // captureTrustEngine records the Trust label the handler places on the
-// downstream engine WriteRequest, for both single and batch remember. The
-// engine-level gate (verified requires write/full) is proven in
-// internal/engine/trust_write_test.go; this test proves the MCP handler
-// actually reads the `trust` arg and forwards it, closing the surface seam.
+// downstream engine WriteRequest, and the credential mode dispatchToolCall
+// injected into ctx. The engine-level gate (verified requires write/full) is
+// proven in internal/engine/trust_write_test.go; this test proves the MCP
+// handler reads the `trust` arg and forwards it, and that an authorized
+// mode-less session (static token / open-server) reaches the engine as
+// ModeFull so the SEC-14 gate accepts verified on the default deployment.
 type captureTrustEngine struct {
 	fakeEngine
 	gotTrust      string
+	gotMode       string
 	gotBatchTrust []string
 }
 
 func (e *captureTrustEngine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	e.gotTrust = req.Trust
+	e.gotMode, _ = ctx.Value(auth.ContextMode).(string)
 	return &mbp.WriteResponse{ID: "fake-id"}, nil
 }
 
@@ -84,5 +89,33 @@ func TestRememberBatch_TrustArg_ForwardedToEngine(t *testing.T) {
 		if eng.gotBatchTrust[i] != want[i] {
 			t.Errorf("batch item %d trust = %q, want %q", i, eng.gotBatchTrust[i], want[i])
 		}
+	}
+}
+
+// TestOpenServer_InjectsFullMode: on the default zero-config (open-server)
+// deployment — no key auth, empty static token — an authorized session must
+// reach the engine as ModeFull, not "". Before the fix, dispatchToolCall
+// injected a.Mode ("") verbatim, so resolveTrust (SEC-14) rejected
+// trust=verified on the most common deployment, silently killing the S8 happy
+// path. This asserts the mode-less authorized session is mapped to ModeFull so
+// verified is accepted.
+func TestOpenServer_InjectsFullMode(t *testing.T) {
+	eng := &captureTrustEngine{}
+	srv := New(":0", eng, "", nil, nil, nil)
+
+	body := mkToolCallBody("muninn_remember", map[string]any{
+		"vault": "default", "content": "open-server verified", "trust": "verified",
+	})
+	w := doAuthenticatedPost(srv, "", body)
+
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error.Message)
+	}
+	if eng.gotMode != auth.ModeFull {
+		t.Errorf("open-server session reached engine as mode %q, want %q — resolveTrust would reject verified", eng.gotMode, auth.ModeFull)
 	}
 }
