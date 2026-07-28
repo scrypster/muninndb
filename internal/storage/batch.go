@@ -128,7 +128,7 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 	for _, tag := range eng.Tags {
 		b.batch.Set(keys.TagIndexKey(wsPrefix, keys.Hash(tag), id16), []byte{}, nil)
 	}
-	// 0x2B: ordered raw-tag-range index (key:value tags only)
+	// 0x2C: ordered raw-tag-range index (key:value tags only)
 	for _, tag := range eng.Tags {
 		if err := WriteRawTagIndexEntry(b.batch, wsPrefix, tag, id16); err != nil {
 			return err

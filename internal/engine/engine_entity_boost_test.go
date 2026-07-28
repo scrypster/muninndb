@@ -157,8 +157,8 @@ func TestEntityBoost_ApplyEntityBoostDirect(t *testing.T) {
 		{Engram: fullA, Score: 0.8},
 	}
 
-	// Apply entity boost.
-	boosted := eng.applyEntityBoost(ctx, ws, initialResults)
+	// Apply entity boost (threshold 0 — this test's seed clears any bar).
+	boosted := eng.applyEntityBoost(ctx, ws, initialResults, 0.0)
 
 	// Build ID set from boosted results.
 	idSet := make(map[storage.ULID]float64, len(boosted))
@@ -179,6 +179,62 @@ func TestEntityBoost_ApplyEntityBoostDirect(t *testing.T) {
 	// Engram C must NOT be in results (different entity, no entity link written).
 	_, cFound := idSet[idC]
 	require.False(t, cFound, "engram C (different entity) should not be in boosted results")
+}
+
+// TestEntityBoost_BelowThresholdSeedDoesNotSpread guards the S1 interaction:
+// the tag-filter threshold bypass admits content-unrelated due-reminders into
+// the result set with a Score below the relevance threshold. Such a result must
+// NOT act as a spread-activation seed, or its entities would drag arbitrary
+// entity-linked engrams into recall. Same A→B entity-link setup as the direct
+// test above, but A is a below-threshold admission (Score 0.02 < threshold 0.05),
+// so B must not surface.
+func TestEntityBoost_BelowThresholdSeedDoesNotSpread(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "boost-below-threshold-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	engramA := &storage.Engram{Concept: "due-a", Content: "Send the founder agreement to the lawyer", Confidence: 0.9}
+	idA, err := eng.store.WriteEngram(ctx, ws, engramA)
+	require.NoError(t, err)
+	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{Name: "Lawyer", Type: "person", Source: "inline"}, "inline")
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idA, "Lawyer"))
+
+	engramB := &storage.Engram{Concept: "unrelated-b", Content: "Lawyer notes from an unrelated matter", Confidence: 0.8}
+	idB, err := eng.store.WriteEngram(ctx, ws, engramB)
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idB, "Lawyer"))
+
+	fullA, err := eng.store.GetEngram(ctx, ws, idA)
+	require.NoError(t, err)
+
+	// A is admitted below the threshold (as the S1 tag bypass would do).
+	initialResults := []activation.ScoredEngram{{Engram: fullA, Score: 0.02}}
+
+	const threshold = 0.05
+	boosted := eng.applyEntityBoost(ctx, ws, initialResults, threshold)
+
+	idSet := make(map[storage.ULID]struct{}, len(boosted))
+	for _, r := range boosted {
+		idSet[r.Engram.ID] = struct{}{}
+	}
+	// A stays in the result (the bypass admitted it), but it must not have seeded.
+	require.Contains(t, idSet, idA, "A (the tag-bypassed admission) stays in results")
+	_, bFound := idSet[idB]
+	require.False(t, bFound, "B must NOT be pulled in: a below-threshold admission must not seed entity boost")
+
+	// Control: with threshold 0, A is a legitimate seed and B does surface — proves
+	// the exclusion is what suppresses B, not a broken setup.
+	ctrl := eng.applyEntityBoost(ctx, ws, []activation.ScoredEngram{{Engram: fullA, Score: 0.02}}, 0.0)
+	ctrlSet := make(map[storage.ULID]struct{}, len(ctrl))
+	for _, r := range ctrl {
+		ctrlSet[r.Engram.ID] = struct{}{}
+	}
+	require.Contains(t, ctrlSet, idB, "control: with threshold 0, A seeds and B surfaces")
 }
 
 // TestEntityBoost_MaxResultsRespectedAfterBoost verifies that max_results is

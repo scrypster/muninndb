@@ -12,7 +12,7 @@ import (
 // SplitRawTagKV splits a tag on its FIRST ':' into (tagKey, value). Only tags
 // containing ':' get a raw-tag-range index entry — this gates the index to
 // key:value shaped tags (e.g. "due:2026-07-27") to bound write-amplification;
-// bare tags (e.g. "important") never get a 0x2B entry.
+// bare tags (e.g. "important") never get a 0x2C entry.
 func SplitRawTagKV(tag string) (tagKey, value string, ok bool) {
 	idx := strings.IndexByte(tag, ':')
 	if idx < 0 {
@@ -21,7 +21,7 @@ func SplitRawTagKV(tag string) (tagKey, value string, ok bool) {
 	return tag[:idx], tag[idx+1:], true
 }
 
-// ValidateRawTagValue reports whether tag is safe to index in the 0x2B
+// ValidateRawTagValue reports whether tag is safe to index in the 0x2C
 // raw-tag-range keyspace. A key:value tag whose value contains a 0x00 (NUL)
 // byte is rejected, since 0x00 is the reserved separator between value and id
 // in the key layout; a value containing it would corrupt range-scan ordering.
@@ -45,7 +45,7 @@ func ValidateRawTagValue(tag string) error {
 	return nil
 }
 
-// WriteRawTagIndexEntry queues a single 0x2B raw-tag-range index entry for tag
+// WriteRawTagIndexEntry queues a single 0x2C raw-tag-range index entry for tag
 // on id into batch. Tags without a ':' are silently skipped (not indexed).
 // Returns an error — and queues nothing — if the tag's value fails
 // ValidateRawTagValue (NUL byte in value).
@@ -64,7 +64,7 @@ func WriteRawTagIndexEntry(batch *pebble.Batch, ws [8]byte, tag string, id [16]b
 	return batch.Set(k, nil, nil)
 }
 
-// DeleteRawTagIndexEntry queues the deletion of tag's 0x2B raw-tag-range index
+// DeleteRawTagIndexEntry queues the deletion of tag's 0x2C raw-tag-range index
 // entry for id from batch, mirroring WriteRawTagIndexEntry's key derivation.
 // Tags without a ':' were never indexed and are silently skipped. Unlike the
 // write path this does not reject NUL-containing values — a value that was
@@ -83,7 +83,7 @@ func DeleteRawTagIndexEntry(batch *pebble.Batch, ws [8]byte, tag string, id [16]
 	batch.Delete(k, nil)
 }
 
-// ScanRawTagRange scans the 0x2B raw-tag-range index for tagKey within
+// ScanRawTagRange scans the 0x2C raw-tag-range index for tagKey within
 // [lower, upper) — bounds produced by keys.RawTagRangeBound (optionally
 // combined via keys.CombineRawTagRangeBounds for a two-sided range) — and
 // returns the matching engram IDs. Ascending order; if limit > 0 the scan

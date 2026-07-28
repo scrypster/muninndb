@@ -26,17 +26,30 @@ const (
 // the 0x23 reverse index. Each such engram receives a score boost of
 // entityBoostFactor (or is added to the result set with that score if it was
 // not already returned by BFS). Results are re-sorted by score descending.
-func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []activation.ScoredEngram) []activation.ScoredEngram {
+func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, threshold float64) []activation.ScoredEngram {
 	if len(results) == 0 {
 		return results
 	}
 
-	// Seed the boost from at most entityBoostTopN top results.
-	seedCount := len(results)
-	if seedCount > entityBoostTopN {
-		seedCount = entityBoostTopN
+	// Seed the boost from at most entityBoostTopN top results, but ONLY from
+	// results that genuinely cleared the relevance threshold. A result whose
+	// Score is below the threshold is in the set only because it matched an
+	// explicit tag filter (the S1 threshold bypass surfaces due:<=today style
+	// reminders regardless of content relevance) — its named entities must not
+	// become spread-activation seeds, or a content-unrelated reminder would drag
+	// arbitrary entity-linked engrams into recall through a side door. results is
+	// score-sorted descending, so above-threshold results are the prefix; we take
+	// the top-N of those.
+	seeds := make([]activation.ScoredEngram, 0, entityBoostTopN)
+	for _, r := range results {
+		if len(seeds) >= entityBoostTopN {
+			break
+		}
+		if r.Score < threshold {
+			continue
+		}
+		seeds = append(seeds, r)
 	}
-	seeds := results[:seedCount]
 
 	// Build a reverse lookup: ULID → index in results slice.
 	seenInResults := make(map[storage.ULID]int, len(results))

@@ -10,14 +10,14 @@ import (
 )
 
 // BackfillRawTagRange scans all existing 0x01 (engram) records across every
-// vault and writes the corresponding 0x2B ordered raw-tag-range index entries
+// vault and writes the corresponding 0x2C ordered raw-tag-range index entries
 // (S1) for any key:value tags found. New writes populate this index
 // automatically (see WriteRawTagIndexEntry callers in internal/storage);
 // this migration is the EAGER, one-time backfill for engrams written before
 // the index existed — required so that pre-existing `due:` (and similar)
 // tags become queryable via bounded range scans immediately, not lazily.
 //
-// The migration is idempotent: writing an already-present 0x2B key is a no-op
+// The migration is idempotent: writing an already-present 0x2C key is a no-op
 // (empty value, same key bytes).
 //
 // A tag whose value contains a 0x00 (NUL) byte would be rejected by a live

@@ -12,8 +12,8 @@ import (
 
 // writePreUpgradeEngram writes a raw 0x01 engram record directly (ERF-encoded,
 // via erf.Encode) WITHOUT going through storage.PebbleStore.WriteEngram —
-// simulating an engram that was written before the 0x2B raw-tag-range index
-// existed. No 0x2B entry is written for it, exactly like data from a binary
+// simulating an engram that was written before the 0x2C raw-tag-range index
+// existed. No 0x2C entry is written for it, exactly like data from a binary
 // that predates S1.
 func writePreUpgradeEngram(t *testing.T, db *pebble.DB, ws [8]byte, id [16]byte, tags []string) {
 	t.Helper()
@@ -39,7 +39,7 @@ func writePreUpgradeEngram(t *testing.T, db *pebble.DB, ws [8]byte, id [16]byte,
 }
 
 // TestRawTagRange_Backfill is the pre-upgrade acceptance case: engrams
-// written before the 0x2B index existed (no raw-tag-range entries at all)
+// written before the 0x2C index existed (no raw-tag-range entries at all)
 // must become queryable via ScanRawTagRange-style range bounds after running
 // BackfillRawTagRange once. This proves the migration is EAGER (a one-time,
 // version-gated backfill) rather than lazy — pre-existing due: tags must
@@ -60,7 +60,7 @@ func TestRawTagRange_Backfill(t *testing.T) {
 	writePreUpgradeEngram(t, db, ws, id2, []string{"due:2026-02-20"})
 	writePreUpgradeEngram(t, db, ws, id3, []string{"no-colon-tag"})
 
-	// Before migration: no 0x2B entries exist at all (simulating pre-S1 data).
+	// Before migration: no 0x2C entries exist at all (simulating pre-S1 data).
 	tagKeyHash := keys.Hash("due")
 	prefixBytes := keys.RawTagRangePrefix(ws, tagKeyHash)
 	upperAll := keys.PrefixUpperBound(prefixBytes)
@@ -69,7 +69,7 @@ func TestRawTagRange_Backfill(t *testing.T) {
 		t.Fatalf("new iter: %v", err)
 	}
 	if iter.First() {
-		t.Fatal("expected no 0x2B entries before migration (simulating pre-upgrade data)")
+		t.Fatal("expected no 0x2C entries before migration (simulating pre-upgrade data)")
 	}
 	iter.Close()
 
@@ -106,10 +106,10 @@ func TestRawTagRange_Backfill(t *testing.T) {
 		t.Error("id3 has no key:value tag and must not appear in the due: range")
 	}
 
-	// The no-colon tag must never have produced a 0x2B entry anywhere.
-	allIter, err := db.NewIter(&pebble.IterOptions{LowerBound: []byte{0x2B}, UpperBound: []byte{0x2C}})
+	// The no-colon tag must never have produced a 0x2C entry anywhere.
+	allIter, err := db.NewIter(&pebble.IterOptions{LowerBound: []byte{0x2C}, UpperBound: []byte{0x2D}})
 	if err != nil {
-		t.Fatalf("new iter over all 0x2B: %v", err)
+		t.Fatalf("new iter over all 0x2C: %v", err)
 	}
 	defer allIter.Close()
 	count := 0
@@ -117,7 +117,7 @@ func TestRawTagRange_Backfill(t *testing.T) {
 		count++
 	}
 	if count != 2 {
-		t.Errorf("expected exactly 2 total 0x2B entries after backfill (one per due: tag), got %d", count)
+		t.Errorf("expected exactly 2 total 0x2C entries after backfill (one per due: tag), got %d", count)
 	}
 }
 

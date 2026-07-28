@@ -11,7 +11,7 @@ import (
 
 // TestRawTagRange_RejectsNulInValue verifies that a tag whose value (the part
 // after the first ':') contains a 0x00 (NUL) byte is rejected at write time
-// with an error, and that no 0x2B index entry is written for it — a NUL byte
+// with an error, and that no 0x2C index entry is written for it — a NUL byte
 // in the value would corrupt the value/id separator the raw-tag-range index
 // depends on for ordering.
 func TestRawTagRange_RejectsNulInValue(t *testing.T) {
@@ -34,7 +34,7 @@ func TestRawTagRange_RejectsNulInValue(t *testing.T) {
 		t.Errorf("expected error to mention NUL byte, got: %v", err)
 	}
 
-	// No 0x2B entries should exist for this vault at all — the whole write
+	// No 0x2C entries should exist for this vault at all — the whole write
 	// must have been rejected, not partially applied.
 	lower := keys.RawTagRangePrefix(ws, keys.Hash("due"))
 	upper := keys.PrefixUpperBound(lower)
@@ -44,7 +44,7 @@ func TestRawTagRange_RejectsNulInValue(t *testing.T) {
 	}
 	defer iter.Close()
 	if iter.First() {
-		t.Errorf("unexpected 0x2B entry written despite rejected tag: %x", iter.Key())
+		t.Errorf("unexpected 0x2C entry written despite rejected tag: %x", iter.Key())
 	}
 }
 
@@ -106,7 +106,7 @@ func TestWriteEngramBatch_NulTag_NoPartialCommit(t *testing.T) {
 }
 
 // TestRawTagRange_ClearVaultRemoves verifies that ClearVault removes all
-// 0x2B raw-tag-range entries for the vault, and that recreating a vault with
+// 0x2C raw-tag-range entries for the vault, and that recreating a vault with
 // the SAME name afterward does not resurrect stale raw-tag entries under the
 // reused workspace prefix (e.g. a stale "due:" entry causing a false-positive
 // reminder hit for a brand-new, unrelated vault).
@@ -135,7 +135,7 @@ func TestRawTagRange_ClearVaultRemoves(t *testing.T) {
 	lower := keys.RawTagRangePrefix(ws, keys.Hash("due"))
 	upper := keys.PrefixUpperBound(lower)
 	if !hasAnyKeyInRange(t, store, lower, upper) {
-		t.Fatal("expected a 0x2B entry to exist before ClearVault")
+		t.Fatal("expected a 0x2C entry to exist before ClearVault")
 	}
 
 	if _, err := store.ClearVault(ctx, ws); err != nil {
@@ -143,7 +143,7 @@ func TestRawTagRange_ClearVaultRemoves(t *testing.T) {
 	}
 
 	if hasAnyKeyInRange(t, store, lower, upper) {
-		t.Error("0x2B raw-tag-range entries survived ClearVault")
+		t.Error("0x2C raw-tag-range entries survived ClearVault")
 	}
 
 	// Simulate vault-name reuse: same name, same derived workspace prefix,

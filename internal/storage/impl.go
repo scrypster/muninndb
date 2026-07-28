@@ -320,7 +320,7 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 		batch.Set(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(eng.ID)), []byte{}, nil)
 	}
 
-	// 0x2B: ordered raw-tag-range index (key:value tags only)
+	// 0x2C: ordered raw-tag-range index (key:value tags only)
 	for _, tag := range eng.Tags {
 		if err := WriteRawTagIndexEntry(batch, wsPrefix, tag, [16]byte(eng.ID)); err != nil {
 			return ULID{}, err
