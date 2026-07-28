@@ -49,6 +49,12 @@ var ErrInvalidID = errors.New("invalid engram id")
 // it to HTTP 422 Unprocessable Entity.
 var ErrInvalidRequest = errors.New("invalid request")
 
+// ErrAppendForbidden is returned when an append-mode credential attempts an
+// operation that modifies or deletes an existing engram (Evolve, Forget).
+// Append-mode may create new memories and read, never destroy or overwrite —
+// enforced here at the engine so it holds on every transport, not just MCP.
+var ErrAppendForbidden = errors.New("append-mode credential cannot modify or delete existing memories")
+
 // ClearVault removes all memories from a vault. The vault name remains registered.
 // It evicts all in-memory state (HNSW, FTS IDF cache, novelty fingerprints, coherence
 // counters, activity tracking) and adjusts the global engramCount.

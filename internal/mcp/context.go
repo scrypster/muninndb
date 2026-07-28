@@ -218,6 +218,22 @@ func isReadOnlyTool(name string) bool {
 	return false
 }
 
+// isAdditiveTool returns true for the subset of mutating tools that only CREATE
+// new engrams and never modify or delete existing ones. Append-mode credentials
+// (auth.ModeAppend — the flush write credential) may call these plus read tools,
+// but NOT the destructive mutating tools (evolve/forget/trust/merge/…). Keep this
+// a strict subset of isMutatingTool.
+func isAdditiveTool(name string) bool {
+	switch name {
+	case "muninn_remember",
+		"muninn_remember_batch",
+		"muninn_remember_tree",
+		"muninn_add_child":
+		return true
+	}
+	return false
+}
+
 // resolveReadOnly computes the effective read-only decision (S3) for
 // muninn_recall, muninn_read, and muninn_where_left_off:
 //

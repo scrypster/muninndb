@@ -225,6 +225,15 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 				sendError(w, req.ID, -32001, "forbidden: write-mode key cannot call this tool")
 				return
 			}
+		case auth.ModeAppend:
+			// Append: read + create-new only. Destructive/modifying mutating
+			// tools (forget/evolve/trust/merge/…) are refused. The engine also
+			// refuses Evolve/Forget for append-mode as a transport-agnostic
+			// backstop, so this is defense in depth, not the only gate.
+			if !isReadOnlyTool(toolName) && !isAdditiveTool(toolName) {
+				sendError(w, req.ID, -32001, "forbidden: append-mode key cannot call this tool (create-new and read only)")
+				return
+			}
 		case auth.ModeFull:
 			// full mode: no tool restriction within the pinned vault.
 		default:

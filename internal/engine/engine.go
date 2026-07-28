@@ -2718,6 +2718,9 @@ func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.
 
 // Forget implements mbp.EngineAPI.Forget.
 func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.ForgetResponse, error) {
+	if auth.AppendFromContext(ctx) {
+		return nil, ErrAppendForbidden
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 
 	id, err := storage.ParseULID(req.ID)
@@ -3076,6 +3079,9 @@ type EngineSessionEntry struct {
 // concept overrides the inherited concept label; empty string inherits verbatim (#483).
 // All three writes are committed in a single atomic Pebble batch.
 func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (storage.ULID, error) {
+	if auth.AppendFromContext(ctx) {
+		return storage.ULID{}, ErrAppendForbidden
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
 	// Refuse a mismatched caller-supplied embedding before anything is
