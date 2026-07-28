@@ -56,7 +56,7 @@ func (e *linkErrEngine) Link(_ context.Context, _ *mbp.LinkRequest) (*mbp.LinkRe
 // evolveErrEngine returns an error from Evolve.
 type evolveErrEngine struct{ fakeEngine }
 
-func (e *evolveErrEngine) Evolve(_ context.Context, _, _, _, _ string, _ []float32, _ string, _ time.Time) (*WriteResult, error) {
+func (e *evolveErrEngine) Evolve(_ context.Context, _, _, _, _ string, _ []float32, _ string, _ time.Time, _ *float32) (*WriteResult, error) {
 	return nil, fmt.Errorf("evolve storage error")
 }
 

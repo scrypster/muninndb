@@ -47,6 +47,24 @@ func parseValidityArgs(args map[string]any, req *mbp.WriteRequest) string {
 	return ""
 }
 
+// parseImportanceArg extracts the optional "importance" arg as a *float32.
+// Returns nil when absent (unset — the use-time type-table default applies).
+// Clamping/quantization (explicit 0 → 0.01) is the engine's job
+// (importanceFromRequest); this only converts presence. A non-number value is
+// rejected by the caller via the ok flag.
+func parseImportanceArg(args map[string]any) (*float32, bool) {
+	raw, present := args["importance"]
+	if !present {
+		return nil, true
+	}
+	f, ok := raw.(float64)
+	if !ok {
+		return nil, false
+	}
+	v := float32(f)
+	return &v, true
+}
+
 // parseEmbedding extracts and validates an optional "embedding" field from args.
 // Returns (nil, "") when the field is absent. Returns (nil, errMsg) on validation
 // failure. The caller is responsible for the vault dimension check when needed.
@@ -133,6 +151,12 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 	if errMsg := parseValidityArgs(args, req); errMsg != "" {
 		sendError(w, id, -32602, errMsg)
 		return
+	}
+	if imp, ok := parseImportanceArg(args); !ok {
+		sendError(w, id, -32602, "invalid params: 'importance' must be a number in [0,1]")
+		return
+	} else if imp != nil {
+		req.Importance = imp
 	}
 	applyTypeArgs(args, req)
 	if t, ok := args["trust"].(string); ok {
@@ -235,6 +259,12 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		if errMsg := parseValidityArgs(m, req); errMsg != "" {
 			sendError(w, id, -32602, fmt.Sprintf("memories[%d]: %s", i, errMsg))
 			return
+		}
+		if imp, ok := parseImportanceArg(m); !ok {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].importance must be a number in [0,1]", i))
+			return
+		} else if imp != nil {
+			req.Importance = imp
 		}
 		applyTypeArgs(m, req)
 		if t, ok := m["trust"].(string); ok {
@@ -702,7 +732,14 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 		}
 		effectiveAt = t
 	}
-	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb, evolveConcept, effectiveAt)
+	// importance: optional override for the successor; absent inherits the
+	// predecessor's explicit importance (unset stays unset).
+	evolveImportance, impOK := parseImportanceArg(args)
+	if !impOK {
+		sendError(w, id, -32602, "invalid params: 'importance' must be a number in [0,1]")
+		return
+	}
+	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb, evolveConcept, effectiveAt, evolveImportance)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -1147,22 +1184,27 @@ func (s *MCPServer) handleFindByEntity(ctx context.Context, w http.ResponseWrite
 	}
 	engrams := res.Engrams
 	type engramEntry struct {
-		ID        string `json:"id"`
-		Concept   string `json:"concept"`
-		Summary   string `json:"summary,omitempty"`
-		State     string `json:"state"`
-		Type      string `json:"type"`
-		TypeLabel string `json:"type_label,omitempty"`
+		ID               string  `json:"id"`
+		Concept          string  `json:"concept"`
+		Summary          string  `json:"summary,omitempty"`
+		State            string  `json:"state"`
+		Type             string  `json:"type"`
+		TypeLabel        string  `json:"type_label,omitempty"`
+		Importance       float64 `json:"importance"`
+		ImportanceSource string  `json:"importance_source"`
 	}
 	entries := make([]engramEntry, 0, len(engrams))
 	for _, e := range engrams {
+		imp, impSrc := importanceFields(e.Importance, e.MemoryType, e.Trust)
 		entries = append(entries, engramEntry{
-			ID:        e.ID.String(),
-			Concept:   e.Concept,
-			Summary:   e.Summary,
-			State:     lifecycleStateLabel(e.State),
-			Type:      e.MemoryType.String(),
-			TypeLabel: e.TypeLabel,
+			ID:               e.ID.String(),
+			Concept:          e.Concept,
+			Summary:          e.Summary,
+			State:            lifecycleStateLabel(e.State),
+			Type:             e.MemoryType.String(),
+			TypeLabel:        e.TypeLabel,
+			Importance:       imp,
+			ImportanceSource: impSrc,
 		})
 	}
 	payload := map[string]any{

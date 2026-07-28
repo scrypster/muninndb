@@ -62,11 +62,25 @@ func EbbinghausWithFloor(daysSinceAccess, stability, floor float64) float64 {
 	return r
 }
 
-// ComputeStability computes new stability from access count and spacing.
-func ComputeStability(accessCount uint32, avgDaysBetweenAccesses float64) float64 {
+// ImportanceStabilityFactor scales how strongly importance boosts stability:
+// stability is multiplied by (1 + ImportanceStabilityFactor*importance), so an
+// importance-1.0 memory is twice as decay-resistant as an importance-0 one.
+const ImportanceStabilityFactor = 1.0
+
+// ComputeStability computes new stability from access count, spacing, and
+// importance (the use-time EffectiveImportance in [0,1]; pass 0 for none).
+// Importance multiplies the pre-clamp stability by
+// (1 + ImportanceStabilityFactor*importance); the [DefaultStability,
+// MaxStability] clamps are unchanged.
+func ComputeStability(accessCount uint32, avgDaysBetweenAccesses, importance float64) float64 {
+	if importance < 0 {
+		importance = 0
+	} else if importance > 1 {
+		importance = 1
+	}
 	base := math.Log1p(float64(accessCount)) * StabilityGrowthRate
 	spacing := math.Tanh(avgDaysBetweenAccesses / SpacingOptimal)
-	stability := base * (1 + SpacingBonusFactor*spacing)
+	stability := base * (1 + SpacingBonusFactor*spacing) * (1 + ImportanceStabilityFactor*importance)
 	if stability > MaxStability {
 		stability = MaxStability
 	}
@@ -201,7 +215,10 @@ func (dw *DecayWorker) processBatch(ctx context.Context, batch []DecayCandidate)
 			divisor = 1
 		}
 		avgSpacing := lifespanDays / divisor
-		newStability := ComputeStability(c.AccessCount, avgSpacing)
+		// Importance 0: the DecayWorker is currently unwired (no production
+		// callers); importance plumbing into DecayCandidate lands when the
+		// worker is wired (deferred — see the importance/two-strength design).
+		newStability := ComputeStability(c.AccessCount, avgSpacing, 0)
 
 		// Capture oldRelevance before the update (carried from the activation path).
 		oldRelevance := c.Relevance

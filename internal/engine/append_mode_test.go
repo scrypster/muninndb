@@ -113,7 +113,7 @@ func guardedOps(eng *Engine, ap context.Context) map[string]func() error {
 		"ReplayEnrichment":     func() error { _, e := eng.ReplayEnrichment(ap, v, nil, 10, false); return e },
 		"ApplyEnrichment":      func() error { _, e := eng.ApplyEnrichment(ap, v, &EnrichmentApplyRequest{}); return e },
 		"Evolve":               func() error { _, e := eng.Evolve(ap, v, id, "new", "r", nil, ""); return e },
-		"EvolveAt":             func() error { _, e := eng.EvolveAt(ap, v, id, "new", "r", nil, "", time.Time{}); return e },
+		"EvolveAt":             func() error { _, e := eng.EvolveAt(ap, v, id, "new", "r", nil, "", time.Time{}, nil); return e },
 		"Forget":               func() error { _, e := eng.Forget(ap, &mbp.ForgetRequest{Vault: v, ID: id}); return e },
 		"Restore":              func() error { _, e := eng.Restore(ap, v, id); return e },
 		"Link":                 func() error { _, e := eng.Link(ap, &mbp.LinkRequest{Vault: v, SourceID: id, TargetID: id}); return e },

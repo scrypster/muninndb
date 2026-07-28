@@ -142,7 +142,7 @@ func TestEvolveAt_StampsPredecessorValidUntil(t *testing.T) {
 	}
 
 	effectiveAt := time.Now().Add(-2 * time.Hour).UTC()
-	newID, err := eng.EvolveAt(ctx, vault, resp.ID, "runway is 9 months (July figure)", "updated figure", nil, "", effectiveAt)
+	newID, err := eng.EvolveAt(ctx, vault, resp.ID, "runway is 9 months (July figure)", "updated figure", nil, "", effectiveAt, nil)
 	if err != nil {
 		t.Fatalf("EvolveAt: %v", err)
 	}
@@ -494,12 +494,12 @@ func TestEvolveAt_RejectsEpochAndInverted(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	epoch := time.Unix(0, 0).UTC()
-	if _, err := eng.EvolveAt(ctx, vault, resp.ID, "new", "reason", nil, "", epoch); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := eng.EvolveAt(ctx, vault, resp.ID, "new", "reason", nil, "", epoch, nil); !errors.Is(err, ErrInvalidRequest) {
 		t.Errorf("epoch effective_at: err = %v, want ErrInvalidRequest", err)
 	}
 	// Inverted: effective_at before the predecessor's start (created ~now).
 	past := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
-	if _, err := eng.EvolveAt(ctx, vault, resp.ID, "new", "reason", nil, "", past); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := eng.EvolveAt(ctx, vault, resp.ID, "new", "reason", nil, "", past, nil); !errors.Is(err, ErrInvalidRequest) {
 		t.Errorf("inverted effective_at: err = %v, want ErrInvalidRequest", err)
 	}
 }

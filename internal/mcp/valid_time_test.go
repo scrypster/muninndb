@@ -44,7 +44,7 @@ func (e *validityCapturingEngine) Forget(_ context.Context, req *mbp.ForgetReque
 	return &mbp.ForgetResponse{OK: true}, nil
 }
 
-func (e *validityCapturingEngine) Evolve(_ context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, effectiveAt time.Time) (*WriteResult, error) {
+func (e *validityCapturingEngine) Evolve(_ context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, effectiveAt time.Time, importance *float32) (*WriteResult, error) {
 	e.lastEvolveAt = effectiveAt
 	return &WriteResult{ID: "01JVALIDTIME0000000000TEST"}, nil
 }

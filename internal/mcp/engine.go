@@ -29,7 +29,9 @@ type EngineInterface interface {
 	// Evolve replaces a memory with a new version. effectiveAt is the
 	// valid-time moment the new version became true (predecessor's ValidUntil
 	// stamp = successor's ValidFrom); the zero time defaults to now.
-	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, effectiveAt time.Time) (*WriteResult, error)
+	// importance overrides the successor's caller-asserted importance; nil
+	// inherits the predecessor's explicit importance (unset stays unset).
+	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, effectiveAt time.Time, importance *float32) (*WriteResult, error)
 	Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error)
 	Session(ctx context.Context, vault string, since time.Time) (*SessionSummary, error)
 	Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error)

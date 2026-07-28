@@ -52,7 +52,7 @@ func TestEbbinghausWithFloor(t *testing.T) {
 func TestComputeStabilityMonotonicallyGrows(t *testing.T) {
 	prev := 0.0
 	for _, n := range []uint32{1, 2, 5, 10, 20, 50, 100} {
-		s := ComputeStability(n, 7.0)
+		s := ComputeStability(n, 7.0, 0)
 		if s <= prev && n > 1 {
 			t.Errorf("stability did not grow: count=%d s=%v prev=%v", n, s, prev)
 		}
@@ -63,9 +63,45 @@ func TestComputeStabilityMonotonicallyGrows(t *testing.T) {
 	}
 }
 
+// TestComputeStabilityImportanceBoost verifies the importance multiplier:
+// pre-clamp stability scales by (1 + ImportanceStabilityFactor*importance),
+// so importance=1 doubles a mid-range stability; the [DefaultStability,
+// MaxStability] clamps are unchanged; out-of-range importance is clamped.
+func TestComputeStabilityImportanceBoost(t *testing.T) {
+	base := ComputeStability(5, 7.0, 0)
+	boosted := ComputeStability(5, 7.0, 1.0)
+	if base >= MaxStability {
+		t.Fatalf("test premise broken: base %v already at cap", base)
+	}
+	want := base * (1 + ImportanceStabilityFactor)
+	if diff := boosted - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("ComputeStability(5,7,1) = %v, want %v (double the importance-0 value)", boosted, want)
+	}
+	// Half importance sits exactly between.
+	half := ComputeStability(5, 7.0, 0.5)
+	if half <= base || half >= boosted {
+		t.Errorf("importance=0.5 stability %v not between %v and %v", half, base, boosted)
+	}
+	// Clamps unchanged: the cap still binds.
+	if got := ComputeStability(100000, 30.0, 1.0); got != MaxStability {
+		t.Errorf("cap broken: %v != %v", got, MaxStability)
+	}
+	// Floor still binds for tiny inputs.
+	if got := ComputeStability(0, 0, 1.0); got != DefaultStability {
+		t.Errorf("floor broken: %v != %v", got, DefaultStability)
+	}
+	// Out-of-range importance is clamped, not amplified.
+	if got := ComputeStability(5, 7.0, 5.0); got != boosted {
+		t.Errorf("importance clamp broken: imp=5 gives %v, want %v", got, boosted)
+	}
+	if got := ComputeStability(5, 7.0, -1.0); got != base {
+		t.Errorf("negative importance clamp broken: %v, want %v", got, base)
+	}
+}
+
 // TestComputeStabilityCapsAtMax verifies that stability never exceeds MaxStability.
 func TestComputeStabilityCapsAtMax(t *testing.T) {
-	s := ComputeStability(100000, 30.0)
+	s := ComputeStability(100000, 30.0, 0)
 	if s > MaxStability {
 		t.Errorf("stability %v exceeds MaxStability %v", s, MaxStability)
 	}

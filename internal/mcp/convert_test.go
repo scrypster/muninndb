@@ -484,3 +484,62 @@ func TestReadResponseToMemoryMapsType(t *testing.T) {
 		t.Errorf("TypeLabel = %q, want %q", m.TypeLabel, "runbook")
 	}
 }
+
+// TestActivationToMemoryImportanceExplicit verifies muninn_recall exposes an
+// explicitly asserted importance verbatim with importance_source="explicit".
+func TestActivationToMemoryImportanceExplicit(t *testing.T) {
+	m := activationToMemory(&mbp.ActivationItem{
+		ID:         "imp-recall",
+		Importance: 0.85,
+		MemoryType: uint8(storage.TypeObservation), // table would say 0.3 — must not apply
+	})
+	if m.Importance != 0.85 {
+		t.Errorf("Importance = %v, want 0.85", m.Importance)
+	}
+	if m.ImportanceSource != "explicit" {
+		t.Errorf("ImportanceSource = %q, want %q", m.ImportanceSource, "explicit")
+	}
+}
+
+// TestActivationToMemoryImportanceDerived verifies the unset (stored 0) case:
+// the effective value comes from the memory-type table (+ verified trust
+// bump) and is labeled "derived" — the caller can tell asserted from assumed.
+func TestActivationToMemoryImportanceDerived(t *testing.T) {
+	m := activationToMemory(&mbp.ActivationItem{
+		ID:         "imp-derived",
+		MemoryType: uint8(storage.TypeDecision),
+	})
+	if m.Importance != 0.6 {
+		t.Errorf("derived decision Importance = %v, want 0.6", m.Importance)
+	}
+	if m.ImportanceSource != "derived" {
+		t.Errorf("ImportanceSource = %q, want %q", m.ImportanceSource, "derived")
+	}
+	// Verified trust bumps the derived value (+0.1).
+	mv := activationToMemory(&mbp.ActivationItem{
+		ID:         "imp-derived-verified",
+		MemoryType: uint8(storage.TypeDecision),
+		Trust:      uint8(storage.TrustVerified),
+	})
+	if mv.Importance != 0.7 {
+		t.Errorf("derived verified decision Importance = %v, want 0.7", mv.Importance)
+	}
+	// Zero-value item: fact table entry, still always present.
+	mz := activationToMemory(&mbp.ActivationItem{ID: "imp-zero"})
+	if mz.Importance != 0.4 || mz.ImportanceSource != "derived" {
+		t.Errorf("zero-value item = (%v, %q), want (0.4, derived)", mz.Importance, mz.ImportanceSource)
+	}
+}
+
+// TestReadResponseToMemoryImportance verifies muninn_read maps importance the
+// same way (explicit wins; unset derives from type+trust).
+func TestReadResponseToMemoryImportance(t *testing.T) {
+	m := readResponseToMemory(&mbp.ReadResponse{ID: "imp-read", Importance: 0.42})
+	if m.Importance != 0.42 || m.ImportanceSource != "explicit" {
+		t.Errorf("explicit read = (%v, %q), want (0.42, explicit)", m.Importance, m.ImportanceSource)
+	}
+	md := readResponseToMemory(&mbp.ReadResponse{ID: "imp-read-d", MemoryType: uint8(storage.TypeProcedure)})
+	if md.Importance != 0.5 || md.ImportanceSource != "derived" {
+		t.Errorf("derived read = (%v, %q), want (0.5, derived)", md.Importance, md.ImportanceSource)
+	}
+}

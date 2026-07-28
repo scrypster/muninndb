@@ -54,6 +54,11 @@ components:
           type: number
           format: float
           default: 0
+        importance:
+          type: number
+          format: float
+          nullable: true
+          description: "Caller-asserted priority in [0,1]; omitted = unset (a use-time default derives from memory_type). Explicit 0 is stored as 0.01."
         created_at:
           type: string
           format: date-time
@@ -151,6 +156,10 @@ components:
         stability:
           type: number
           format: float
+        importance:
+          type: number
+          format: float
+          description: "Stored caller-asserted importance; 0 = unset (effective value is derived at read time from memory_type/trust)."
         access_count:
           type: integer
           format: int64

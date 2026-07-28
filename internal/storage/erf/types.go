@@ -53,6 +53,7 @@ type EngramMeta struct {
 	AssocCount  uint16
 	EmbedDim    uint8 // EmbedDimension
 	MemoryType  uint8
+	Trust       uint8     // TrustLevel (OffsetTrust); needed for use-time EffectiveImportance
 	ValidFrom   time.Time // decode default: CreatedAt when raw bytes are zero
 	ValidUntil  time.Time // zero = open / "current"
 	Importance  float32   // 0 = unset

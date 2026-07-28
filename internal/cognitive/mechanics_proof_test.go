@@ -101,9 +101,9 @@ func TestProveDecay_Monotonic(t *testing.T) {
 // TestProveDecay_StabilityGrowthWithAccess verifies that repeated accesses build stability.
 func TestProveDecay_StabilityGrowthWithAccess(t *testing.T) {
 	// More accesses → higher stability → slower decay
-	s1 := cognitive.ComputeStability(1, 7.0)
-	s10 := cognitive.ComputeStability(10, 7.0)
-	s100 := cognitive.ComputeStability(100, 7.0)
+	s1 := cognitive.ComputeStability(1, 7.0, 0)
+	s10 := cognitive.ComputeStability(10, 7.0, 0)
+	s100 := cognitive.ComputeStability(100, 7.0, 0)
 
 	t.Logf("Stability: 1-access=%.2f, 10-access=%.2f, 100-access=%.2f (max=%.0f)",
 		s1, s10, s100, cognitive.MaxStability)
@@ -136,8 +136,8 @@ func TestProveDecay_StabilityGrowthWithAccess(t *testing.T) {
 // TestProveDecay_SpacedRepetitionBeatsConcentrated verifies spaced accesses beat cramming.
 func TestProveDecay_SpacedRepetitionBeatsConcentrated(t *testing.T) {
 	// Same number of accesses but spread out vs. crammed
-	stabSpaced := cognitive.ComputeStability(20, 14.0) // 20 accesses, 2 weeks apart
-	stabCrammed := cognitive.ComputeStability(20, 0.1) // 20 accesses, ~2.4 hours apart
+	stabSpaced := cognitive.ComputeStability(20, 14.0, 0) // 20 accesses, 2 weeks apart
+	stabCrammed := cognitive.ComputeStability(20, 0.1, 0) // 20 accesses, ~2.4 hours apart
 
 	t.Logf("Spaced (2wk intervals): %.2f days stability", stabSpaced)
 	t.Logf("Crammed (2hr intervals): %.2f days stability", stabCrammed)

@@ -190,6 +190,19 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- When a fact stops being true (but wasn't wrong), use `muninn_forget(id, not_true_since=...)` instead of deleting — the memory is kept with a closed window.\n")
 	b.WriteString("- `muninn_evolve` closes the old version's window automatically (optional `effective_at` if the change happened earlier than you recorded it).\n")
 
+	// Importance (the priority axis)
+	b.WriteString("\n## Importance\n\n")
+	b.WriteString("`importance` (0.0-1.0, on `muninn_remember`/`muninn_remember_batch`/`muninn_evolve`) is the priority axis — ")
+	b.WriteString("orthogonal to `confidence` (is it true?) and access counts (is it used?).\n")
+	b.WriteString("- What it does: important memories decay slower (retrieval strength fades at up to half speed, dream consolidation fades them less) ")
+	b.WriteString("and memories with effective importance >= 0.7 are never deleted by the capacity (max_engrams) pruner. RetentionDays age limits still apply.\n")
+	b.WriteString("- What it does NOT do: it never boosts recall ranking — two equally recent matches rank the same regardless of importance.\n")
+	b.WriteString("- Omit it and a default is derived at use time from the memory type (decision/goal/constraint/identity 0.6; preference/procedure 0.5; ")
+	b.WriteString("fact/reference/issue 0.4; observation/event/task 0.3; +0.1 when trust=verified). The derived value is never stored — ")
+	b.WriteString("read surfaces return `importance` plus `importance_source` (\"explicit\" or \"derived\").\n")
+	b.WriteString("- Set it explicitly (e.g. 0.9) for memories that must survive long dormancy: pivotal decisions, hard constraints, identity facts.\n")
+	b.WriteString("- `muninn_evolve` inherits the predecessor's explicit importance unless you override it.\n")
+
 	// Tips
 	b.WriteString("\n## Tips\n\n")
 	if resolved.MultiUser {

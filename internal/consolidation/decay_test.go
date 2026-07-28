@@ -57,9 +57,72 @@ func TestDecayAcceleration_AllCriteriaMet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedRel := float32(0.2 * 0.5)
+	// Importance-modulated decay: an untyped engram is a fact with derived
+	// importance 0.4, so the multiplier is 0.5 + 0.5*0.4 = 0.7 (imp=0 would be
+	// the historical straight halving; no stored engram derives to exactly 0).
+	expectedRel := float32(0.2) * (0.5 + 0.5*eng.EffectiveImportance())
 	if updated.Relevance != expectedRel {
 		t.Errorf("relevance = %v, want %v", updated.Relevance, expectedRel)
+	}
+}
+
+// TestDecayAcceleration_ImportanceModulated pins the two ends of the
+// importance-modulated dream decay: explicit importance 1.0 → relevance is
+// untouched (multiplier 1.0); explicit near-zero importance (0.01, the
+// quantized explicit zero) → relevance is halved (multiplier ~0.505).
+func TestDecayAcceleration_ImportanceModulated(t *testing.T) {
+	store, cleanup := testStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	wsPrefix := store.ResolveVaultPrefix("decay_imp")
+	oldTime := time.Now().Add(-40 * 24 * time.Hour)
+
+	mk := func(concept string, imp float32) storage.ULID {
+		id, err := store.WriteEngram(ctx, wsPrefix, &storage.Engram{
+			Concept:     concept,
+			Content:     "content " + concept,
+			Confidence:  0.5,
+			Relevance:   0.2,
+			Stability:   30.0,
+			AccessCount: 1,
+			CreatedAt:   oldTime,
+			UpdatedAt:   oldTime,
+			LastAccess:  oldTime,
+			Importance:  imp,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	criticalID := mk("critical", 1.0)
+	trivialID := mk("trivial", 0.01)
+
+	w := &Worker{MaxTransitive: 100}
+	report := &ConsolidationReport{}
+	if err := w.runPhase4DecayAcceleration(ctx, store, wsPrefix, report); err != nil {
+		t.Fatal(err)
+	}
+
+	critical, err := store.GetEngram(ctx, wsPrefix, criticalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if critical.Relevance != 0.2 {
+		t.Errorf("importance=1.0 engram decayed: relevance = %v, want 0.2 (no decay)", critical.Relevance)
+	}
+
+	trivial, err := store.GetEngram(ctx, wsPrefix, trivialID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTrivial := float32(0.2) * (0.5 + 0.5*0.01)
+	if trivial.Relevance != wantTrivial {
+		t.Errorf("importance=0.01 engram: relevance = %v, want %v (~halved)", trivial.Relevance, wantTrivial)
+	}
+	if trivial.Relevance >= critical.Relevance {
+		t.Errorf("modulation inverted: trivial %v >= critical %v", trivial.Relevance, critical.Relevance)
 	}
 }
 

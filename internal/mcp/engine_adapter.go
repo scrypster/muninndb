@@ -75,8 +75,8 @@ func (a *mcpEngineAdapter) GetContradictions(ctx context.Context, vault string) 
 	}
 	return result, nil
 }
-func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, effectiveAt time.Time) (*WriteResult, error) {
-	id, err := a.eng.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, effectiveAt)
+func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, effectiveAt time.Time, importance *float32) (*WriteResult, error) {
+	id, err := a.eng.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, effectiveAt, importance)
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +390,7 @@ func (a *mcpEngineAdapter) WhereLeftOff(ctx context.Context, vault string, limit
 // whereLeftOffEntryFromEngram projects a stored engram onto the
 // muninn_where_left_off result shape.
 func whereLeftOffEntryFromEngram(eng *storage.Engram) WhereLeftOffEntry {
-	return WhereLeftOffEntry{
+	entry := WhereLeftOffEntry{
 		ID:         eng.ID.String(),
 		Concept:    eng.Concept,
 		Summary:    eng.Summary,
@@ -400,6 +400,8 @@ func whereLeftOffEntryFromEngram(eng *storage.Engram) WhereLeftOffEntry {
 		TypeLabel:  eng.TypeLabel,
 		Tags:       eng.Tags,
 	}
+	entry.Importance, entry.ImportanceSource = importanceFields(eng.Importance, eng.MemoryType, eng.Trust)
+	return entry
 }
 
 // lifecycleStateLabel converts a storage.LifecycleState to a display string.

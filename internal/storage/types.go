@@ -161,9 +161,10 @@ type EngramMeta struct {
 	AssocCount  uint16
 	EmbedDim    EmbedDimension
 	MemoryType  MemoryType
-	ValidFrom   time.Time // decode default: CreatedAt when the raw field is zero
-	ValidUntil  time.Time // zero = open / "current"
-	Importance  float32   // 0 = unset
+	Trust       TrustLevel // provenance trust label; feeds use-time EffectiveImportance
+	ValidFrom   time.Time  // decode default: CreatedAt when the raw field is zero
+	ValidUntil  time.Time  // zero = open / "current"
+	Importance  float32    // 0 = unset
 }
 
 // Association represents a directed, weighted link between two engrams.

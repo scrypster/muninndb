@@ -1,8 +1,12 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +117,158 @@ func TestPruneVault_MaxEngrams(t *testing.T) {
 	wantPruned := totalBefore - 3
 	if pruned < wantPruned {
 		t.Errorf("expected at least %d pruned, got %d", wantPruned, pruned)
+	}
+}
+
+// TestPruneVault_COG20_HighImportanceExempt is the COG-20 pin: an engram with
+// EffectiveImportance >= HighImportanceFloor is never hard-deleted by the
+// MaxEngrams (retrieval-strength) prune path, even when it has the LOWEST
+// ACT-R base-level of every candidate — the next-worst engrams are deleted
+// instead. The important engram is also EXPIRED on the valid-time axis
+// (closed ValidUntil in the past), pinning the composition rule: the
+// exemption performs no validity check, so an expired-but-important fact
+// stays reachable via as_of forever (modulo RetentionDays).
+func TestPruneVault_COG20_HighImportanceExempt(t *testing.T) {
+	eng, as, store, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vaultName = "cog20test"
+	ws := store.VaultPrefix(vaultName)
+	if err := store.WriteVaultName(ws, vaultName); err != nil {
+		t.Fatalf("WriteVaultName: %v", err)
+	}
+
+	now := time.Now()
+	write := func(concept string, relevance float32, lastAccess time.Time, importance float32, validUntil time.Time) storage.ULID {
+		t.Helper()
+		id, err := store.WriteEngram(ctx, ws, &storage.Engram{
+			Concept:    concept,
+			Content:    "cog20 " + concept,
+			Relevance:  relevance,
+			CreatedAt:  now.Add(-120 * 24 * time.Hour),
+			LastAccess: lastAccess,
+			Importance: importance,
+			ValidUntil: validUntil,
+		})
+		if err != nil {
+			t.Fatalf("WriteEngram %s: %v", concept, err)
+		}
+		return id
+	}
+
+	// The important engram is the WORST candidate on every axis the pruner
+	// looks at: lowest relevance (first out of the bucket index prefilter) and
+	// oldest LastAccess (lowest B(M) in the rescoring phase). Without the
+	// COG-20 exemption it is deleted first. It is also already expired.
+	importantID := write("important-but-cold", 0.0, now.Add(-100*24*time.Hour), 0.9, now.Add(-24*time.Hour))
+	staleA := write("stale-a", 0.1, now.Add(-90*24*time.Hour), 0, time.Time{})
+	staleB := write("stale-b", 0.2, now.Add(-80*24*time.Hour), 0, time.Time{})
+	write("fresh-a", 0.3, now, 0, time.Time{})
+	write("fresh-b", 0.4, now, 0, time.Time{})
+
+	// Snapshot the counter (it may run ahead of the write count — see
+	// TestPruneVault_MaxEngrams) and configure MaxEngrams for an excess of
+	// exactly 2, so the two worst NON-exempt candidates are pruned.
+	totalBefore := store.GetVaultCount(ctx, ws)
+	if err := as.SetVaultConfig(auth.VaultConfig{
+		Name: vaultName, Public: true,
+		Plasticity: &auth.PlasticityConfig{MaxEngrams: ptr(int(totalBefore) - 2)},
+	}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	pruned, err := eng.PruneVault(ctx, vaultName)
+	if err != nil {
+		t.Fatalf("PruneVault: %v", err)
+	}
+	if pruned != 2 {
+		t.Errorf("pruned = %d, want 2 (excess with enough non-exempt candidates)", pruned)
+	}
+
+	// The important engram must survive despite being the lowest-B(M) candidate.
+	if _, err := store.GetEngram(ctx, ws, importantID); err != nil {
+		t.Fatalf("COG-20 violated: high-importance engram was pruned: %v", err)
+	}
+	// The next-worst (stale, unimportant) engrams are the ones deleted.
+	if _, err := store.GetEngram(ctx, ws, staleA); err == nil {
+		t.Errorf("stale-a should have been pruned in the important engram's place")
+	}
+	if _, err := store.GetEngram(ctx, ws, staleB); err == nil {
+		t.Errorf("stale-b should have been pruned in the important engram's place")
+	}
+	if count := store.GetVaultCount(ctx, ws); count != totalBefore-2 {
+		t.Errorf("vault count after prune = %d, want %d", count, totalBefore-2)
+	}
+}
+
+// TestPruneVault_ImportanceExemptionWarns verifies the degrade-loudly rule:
+// when high-importance exemptions leave the vault over MaxEngrams
+// (pruned < excess), PruneVault logs a WARN naming the vault — and does NOT
+// loop or delete protected engrams to force the target.
+func TestPruneVault_ImportanceExemptionWarns(t *testing.T) {
+	eng, as, store, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vaultName = "cog20warn"
+	ws := store.VaultPrefix(vaultName)
+	if err := store.WriteVaultName(ws, vaultName); err != nil {
+		t.Fatalf("WriteVaultName: %v", err)
+	}
+
+	now := time.Now()
+	// 4 protected engrams + 1 prunable; MaxEngrams=3 → excess=2 but only 1
+	// non-exempt candidate exists → pruned=1 < excess=2 → WARN.
+	for i := 0; i < 4; i++ {
+		if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+			Concept:    fmt.Sprintf("protected-%d", i),
+			Content:    fmt.Sprintf("cog20warn protected %d", i),
+			CreatedAt:  now.Add(-120 * 24 * time.Hour),
+			LastAccess: now.Add(-100 * 24 * time.Hour),
+			Importance: 0.9,
+		}); err != nil {
+			t.Fatalf("WriteEngram protected-%d: %v", i, err)
+		}
+	}
+	if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "prunable",
+		Content:    "cog20warn prunable",
+		CreatedAt:  now.Add(-120 * 24 * time.Hour),
+		LastAccess: now.Add(-100 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("WriteEngram prunable: %v", err)
+	}
+
+	// Excess of exactly 2, but only 1 non-exempt candidate exists.
+	totalBefore := store.GetVaultCount(ctx, ws)
+	if err := as.SetVaultConfig(auth.VaultConfig{
+		Name: vaultName, Public: true,
+		Plasticity: &auth.PlasticityConfig{MaxEngrams: ptr(int(totalBefore) - 2)},
+	}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	// Capture WARN records emitted during the prune.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	pruned, err := eng.PruneVault(ctx, vaultName)
+	slog.SetDefault(prev)
+	if err != nil {
+		t.Fatalf("PruneVault: %v", err)
+	}
+
+	if pruned != 1 {
+		t.Errorf("pruned = %d, want 1 (only the single non-exempt candidate)", pruned)
+	}
+	if count := store.GetVaultCount(ctx, ws); count != totalBefore-1 {
+		t.Errorf("vault count = %d, want %d (exemptions leave it over MaxEngrams)", count, totalBefore-1)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "high-importance exemptions left vault over MaxEngrams") ||
+		!strings.Contains(logged, vaultName) {
+		t.Errorf("expected WARN about exemptions leaving vault over MaxEngrams; got logs:\n%s", logged)
 	}
 }
 
