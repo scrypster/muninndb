@@ -56,6 +56,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"LastAccessIndexKey", LastAccessIndexKey([8]byte{}, 0, [16]byte{})},
 		{"DreamStateKey", DreamStateKey([8]byte{1, 2, 3, 4, 5, 6, 7, 8})},
 		{"LeaseKey", LeaseKey(ws, id)},
+		{"EvolveRepairMarkKey", EvolveRepairMarkKey(ws)},
 	}
 
 	seen := make(map[byte]string)
@@ -331,8 +332,8 @@ func TestUpsertKeyKey_Layout(t *testing.T) {
 	if len(key) != 41 {
 		t.Fatalf("expected 41 bytes, got %d", len(key))
 	}
-	if key[0] != 0x2B {
-		t.Errorf("prefix byte: got 0x%02X, want 0x2B", key[0])
+	if key[0] != 0x2D {
+		t.Errorf("prefix byte: got 0x%02X, want 0x2D", key[0])
 	}
 	if !bytes.Equal(key[1:9], ws[:]) {
 		t.Error("ws mismatch")
@@ -421,6 +422,7 @@ func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
 		{"DreamState", DreamStateKey(u8)[0], prefix.DreamState},
 		{"ContentHash", ContentHashKey(ws, id32)[0], prefix.ContentHash},
 		{"Lease", LeaseKey(ws, id16)[0], prefix.Lease},
+		{"EvolveRepairMark", EvolveRepairMarkKey(ws)[0], prefix.EvolveRepairMark},
 		{"UpsertKey", UpsertKeyKey(ws, id32)[0], prefix.UpsertKey},
 	}
 	for _, c := range cases {

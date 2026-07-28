@@ -135,3 +135,96 @@ func TestEvolve_ConceptRenameWhenProvided(t *testing.T) {
 	assert.Equal(t, "answer owed to Alice on #895", oldEng.Concept,
 		"predecessor concept must not be mutated")
 }
+
+// TestEvolve_InheritsMemoryTypeAndTypeLabel verifies that MemoryType and
+// TypeLabel are carried to the successor, alongside Concept and Tags.
+//
+// Evolve exposes no parameter for either, so before #653 they were simply
+// absent from the successor's struct literal and MemoryType fell back to its
+// zero value, Fact. A stored decision or procedure silently became a fact, and
+// a caller filtering or routing on memory type saw the successor as a different
+// kind of thing than the predecessor.
+//
+// Summary is asserted to be EMPTY on the successor, not inherited: it is
+// content-derived, Evolve replaces the content, and a non-empty Summary would
+// suppress the summarize stage that regenerates both it and KeyPoints.
+func TestEvolve_InheritsMemoryTypeAndTypeLabel(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const (
+		originalSummary   = "one-line summary describing the predecessor content"
+		originalTypeLabel = "architectural_decision"
+	)
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:      "test",
+		Concept:    "Original",
+		Content:    "v1",
+		Summary:    originalSummary,
+		MemoryType: uint8(storage.TypeDecision),
+		TypeLabel:  originalTypeLabel,
+	})
+	require.NoError(t, err)
+
+	ws := eng.store.ResolveVaultPrefix("test")
+
+	// Guard: the predecessor really carries what the test claims it does, so a
+	// failure below indicts Evolve rather than Write.
+	oldULID, err := storage.ParseULID(resp.ID)
+	require.NoError(t, err)
+	pred, err := eng.store.GetEngram(ctx, ws, oldULID)
+	require.NoError(t, err)
+	require.NotNil(t, pred)
+	require.Equal(t, originalSummary, pred.Summary, "precondition: predecessor summary")
+	require.Equal(t, storage.TypeDecision, pred.MemoryType, "precondition: predecessor type")
+
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "v2", "update", nil, "")
+	require.NoError(t, err)
+
+	succ, err := eng.store.GetEngram(ctx, ws, newID)
+	require.NoError(t, err)
+	require.NotNil(t, succ)
+
+	assert.Empty(t, succ.Summary,
+		"summary must NOT be inherited: it describes the predecessor's content, and a "+
+			"non-empty value suppresses the summarize stage that regenerates it and KeyPoints")
+	assert.Equal(t, storage.TypeDecision, succ.MemoryType,
+		"memory type must be inherited, not reset to the zero value (Fact)")
+	assert.Equal(t, originalTypeLabel, succ.TypeLabel,
+		"free-form type label must be inherited")
+}
+
+// TestEvolve_TypeSurvivesSupersedeChain pins the compounding case: the type must
+// not decay at any hop. A single-hop assertion would still pass if inheritance
+// read from a default-filled intermediate rather than the true predecessor.
+func TestEvolve_TypeSurvivesSupersedeChain(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:      "test",
+		Concept:    "Chained",
+		Content:    "v1",
+		Summary:    "summary v1",
+		MemoryType: uint8(storage.TypeProcedure),
+	})
+	require.NoError(t, err)
+
+	ws := eng.store.ResolveVaultPrefix("test")
+	id := resp.ID
+	for hop := 1; hop <= 3; hop++ {
+		newID, err := eng.Evolve(ctx, "test", id, "content", "update", nil, "")
+		require.NoError(t, err, "evolve hop %d", hop)
+
+		got, err := eng.store.GetEngram(ctx, ws, newID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, storage.TypeProcedure, got.MemoryType,
+			"type must survive hop %d of the supersede chain", hop)
+
+		id = newID.String()
+	}
+}

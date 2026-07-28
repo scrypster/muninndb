@@ -20,6 +20,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // --- Mock apiKeyValidator ---
@@ -931,5 +933,62 @@ func TestVaultFromArgs_ValidName_Returns_TrueFalse(t *testing.T) {
 	v, present, invalid := vaultFromArgs(map[string]any{"vault": "my-vault"})
 	if v != "my-vault" || !present || invalid {
 		t.Errorf("valid vault: expected ('my-vault', true, false), got (%q, %v, %v)", v, present, invalid)
+	}
+}
+
+// --- COG-11: observe-mode credential must propagate ContextMode into ctx ---
+//
+// internal/engine/engine.go:2005 sets actReq.ReadOnly = auth.ObserveFromContext(ctx),
+// which only returns true if ctx carries auth.ContextMode == auth.ModeObserve. gRPC
+// (internal/transport/grpc/server.go:172) and REST (internal/auth/middleware.go:49)
+// both inject this value into ctx before invoking business logic. The MCP dispatch
+// path (dispatchToolCall) must do the same so that engine.Activate — reached via
+// handleRecall — receives a ctx that reports observe mode. This spy engine captures
+// the ctx handed to Activate so the test can assert on it directly, mirroring exactly
+// what engine.go:2005 evaluates (auth.ObserveFromContext(ctx)).
+type ctxSpyEngine struct {
+	fakeEngine
+	capturedCtx context.Context
+}
+
+func (e *ctxSpyEngine) Activate(ctx context.Context, req *mbp.ActivateRequest) (*mbp.ActivateResponse, error) {
+	e.capturedCtx = ctx
+	return &mbp.ActivateResponse{}, nil
+}
+
+func TestDispatchToolCall_ObserveMode_PropagatesContextModeToEngine(t *testing.T) {
+	spy := &ctxSpyEngine{}
+	srv := New(":0", spy, "", nil, nil, nil)
+
+	req := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"ctx-mode-1"`),
+		Params: &JSONRPCParams{
+			Name: "muninn_recall",
+			Arguments: map[string]any{
+				"vault":   "v",
+				"context": "test",
+			},
+		},
+	}
+
+	a := AuthContext{
+		Authorized: true,
+		Vault:      "v",
+		Mode:       auth.ModeObserve,
+		IsAPIKey:   true,
+	}
+
+	w := httptest.NewRecorder()
+	srv.dispatchToolCall(context.Background(), w, req, a)
+
+	if spy.capturedCtx == nil {
+		t.Fatal("engine.Activate was never called — cannot verify ctx propagation")
+	}
+	if !auth.ObserveFromContext(spy.capturedCtx) {
+		t.Error("expected auth.ObserveFromContext(ctx) to be true for an observe-mode MCP credential, got false — " +
+			"dispatchToolCall did not inject auth.ContextMode into ctx before invoking the handler, so " +
+			"engine.go:2005 would set actReq.ReadOnly=false and fire Hebbian/PAS side effects for an observe-mode call")
 	}
 }

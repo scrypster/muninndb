@@ -10,7 +10,7 @@ package prefix
 
 // Source-of-truth prefix bytes. Storage unchanged; auth RELOCATED 0x11–0x14 → 0x42–0x45.
 const (
-	// Storage (0x01–0x2A)
+	// Storage (0x01–0x2D)
 	Engram             byte = 0x01
 	Meta               byte = 0x02
 	AssocFwd           byte = 0x03
@@ -53,7 +53,21 @@ const (
 	ContentHash        byte = 0x28
 	RecallEvent        byte = 0x29
 	Lease              byte = 0x2A
-	UpsertKey          byte = 0x2B
+	// EvolveRepairMark (0x2B) — vault-scoped watermark for the one-time startup
+	// repair of evolve-stripped successors (#681/#622). Idempotent: presence of
+	// the mark means the repair already ran for that vault.
+	EvolveRepairMark byte = 0x2B
+	// RawTagRange (0x2C) — ordered raw-tag secondary index (S1). Unlike
+	// TagIndex (0x0C, keyed by Hash(tag) with no range scans), RawTagRange keys
+	// on Hash(tagKey) with the raw tag VALUE bytes sorted after it, enabling
+	// bounded range scans for key:value tag conventions (e.g. "due:2026-07-27").
+	// See docs/internals/keyspace-registry.md for the exact key layout.
+	RawTagRange byte = 0x2C
+	// UpsertKey (0x2D) — durable upsert forward index (#556): sha256 of the
+	// caller's idempotent_id → the engram ID it is pinned to. Relocated from
+	// 0x2B (the Inc-1 allocation) because upstream #681/#570 landed
+	// EvolveRepairMark (0x2B) and RawTagRange (0x2C) during review.
+	UpsertKey byte = 0x2D
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
 	CapabilityVaultIdx byte = 0x41
@@ -131,6 +145,8 @@ var registry = []Entry{
 	{ContentHash, "storage", "ContentHash", "vault-scoped-data"},
 	{RecallEvent, "storage", "RecallEvent", "vault-scoped-data"},
 	{Lease, "storage", "Lease", "lease"},
+	{EvolveRepairMark, "storage", "EvolveRepairMark", "vault-scoped-data"},
+	{RawTagRange, "storage", "RawTagRange", "vault-scoped-data"},
 	{UpsertKey, "storage", "UpsertKey", "vault-scoped-data"},
 	{Capability, "capability", "Capability", "capability"},
 	{CapabilityVaultIdx, "capability", "CapabilityVaultIdx", "capability"},

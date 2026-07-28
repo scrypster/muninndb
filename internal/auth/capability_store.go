@@ -22,8 +22,8 @@ var errCapabilityNoExpiry = errors.New("capability requires an ExpiresAt (nil fo
 // GenerateCapability creates a new cap_ token for the given vault.
 // ttl is required (pass a non-nil ExpiresAt); returns the raw token (shown once) and metadata.
 func (s *Store) GenerateCapability(vault, label, mode, origin string, expiresAt *time.Time) (token string, cap Capability, err error) {
-	if mode != ModeFull && mode != ModeObserve && mode != ModeWrite {
-		err = fmt.Errorf("mode must be %q, %q, or %q", ModeFull, ModeObserve, ModeWrite)
+	if mode != ModeFull && mode != ModeObserve && mode != ModeWrite && mode != ModeAppend {
+		err = fmt.Errorf("mode must be %q, %q, %q, or %q", ModeFull, ModeObserve, ModeWrite, ModeAppend)
 		return
 	}
 	if expiresAt == nil {

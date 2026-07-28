@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "_comment": "Project-owned, committed so contributors get the same guards. Wires .claude/hooks/drift-guard.mjs, which enforces the path-shaped cross-surface obligations in docs/internals/drift-and-obligations.md. Replaces the two .claude/hookify.*.local.md rule files, which nothing ever executed.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/drift-guard.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

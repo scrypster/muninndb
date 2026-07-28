@@ -2,8 +2,16 @@ package enrich
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/scrypster/muninndb/internal/config"
+	"github.com/scrypster/muninndb/internal/engine/circuit"
 	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/storage"
 )
@@ -187,6 +195,254 @@ func TestEnrichService_Enrich_Success(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestEnrichService_HTTP429Then200HonorsRetryAfter(t *testing.T) {
+	now := time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	readNow := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	advance := func(wait time.Duration) {
+		clockMu.Lock()
+		now = now.Add(wait)
+		clockMu.Unlock()
+	}
+	var requestMu sync.Mutex
+	var requestTimes []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestMu.Lock()
+		requestTimes = append(requestTimes, readNow())
+		attempt := len(requestTimes)
+		requestMu.Unlock()
+		if attempt == 1 {
+			w.Header().Set("Retry-After", "5")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"recovered\",\"key_points\":[\"ok\"]}"}}]}`))
+	}))
+	defer srv.Close()
+
+	provider := NewOpenAILLMProvider()
+	provider.baseURL = srv.URL
+	provider.model = "test"
+	provider.apiKey = "test-key"
+	pipeline := NewPipeline(provider, NewTokenBucketLimiter(100, 100))
+	pipeline.SetConfig(&config.PluginConfig{EnrichMode: "light"})
+	es := &EnrichService{
+		provider: provider,
+		pipeline: pipeline,
+		breaker:  circuit.New(5, time.Hour),
+		nowFn:    readNow,
+		waitFn: func(_ context.Context, wait time.Duration) error {
+			advance(wait)
+			return nil
+		},
+		jitterFn: func(wait time.Duration) time.Duration { return wait },
+	}
+	eng := &storage.Engram{ID: storage.NewULID(), Concept: "original", Content: "pending"}
+
+	if _, err := es.Enrich(context.Background(), eng); !plugin.IsRetryableProviderError(err) {
+		t.Fatalf("first Enrich error = %v, want typed 429", err)
+	}
+	result, err := es.Enrich(context.Background(), eng)
+	if err != nil || result == nil || result.Summary != "recovered" {
+		t.Fatalf("recovery result = (%#v, %v)", result, err)
+	}
+	requestMu.Lock()
+	defer requestMu.Unlock()
+	if len(requestTimes) != 2 {
+		t.Fatalf("requests = %d, want 2", len(requestTimes))
+	}
+	if got := requestTimes[1].Sub(requestTimes[0]); got < 5*time.Second {
+		t.Fatalf("second request after %v, want at least 5s", got)
+	}
+}
+
+func TestEnrichService_OlderConcurrentSuccessCannotClearNewThrottle(t *testing.T) {
+	now := time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	readNow := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	var waitsMu sync.Mutex
+	var waits []time.Duration
+	entered := make(chan int, 2)
+	releaseThrottle := make(chan struct{})
+	releaseOlderSuccess := make(chan struct{})
+	var calls atomic.Int32
+	mock := NewMockLLMProvider()
+	mock.customComplete = func(context.Context, string, string) (string, error) {
+		call := int(calls.Add(1))
+		if call <= 2 {
+			entered <- call
+		}
+		switch call {
+		case 1:
+			<-releaseThrottle
+			return "", &plugin.ProviderError{
+				Provider: "fake", StatusCode: 429, Retryable: true,
+				RetryAfter: 5 * time.Second, HasRetryAfter: true,
+			}
+		case 2:
+			<-releaseOlderSuccess
+		}
+		return `{"summary":"ok","key_points":[]}`, nil
+	}
+	pipeline := NewPipeline(mock, NewTokenBucketLimiter(100, 100))
+	pipeline.SetConfig(&config.PluginConfig{EnrichMode: "light"})
+	es := &EnrichService{
+		provider: mock,
+		pipeline: pipeline,
+		breaker:  circuit.New(5, time.Hour),
+		nowFn:    readNow,
+		waitFn: func(_ context.Context, wait time.Duration) error {
+			waitsMu.Lock()
+			waits = append(waits, wait)
+			waitsMu.Unlock()
+			clockMu.Lock()
+			now = now.Add(wait)
+			clockMu.Unlock()
+			return nil
+		},
+		jitterFn: func(wait time.Duration) time.Duration { return wait },
+	}
+	eng := &storage.Engram{ID: storage.NewULID()}
+	results := make(chan error, 2)
+	go func() { _, err := es.Enrich(context.Background(), eng); results <- err }()
+	go func() { _, err := es.Enrich(context.Background(), eng); results <- err }()
+	<-entered
+	<-entered // both calls were admitted before either outcome
+
+	close(releaseThrottle)
+	if err := <-results; !plugin.IsRetryableProviderError(err) {
+		t.Fatalf("first completed result = %v, want throttle", err)
+	}
+	close(releaseOlderSuccess)
+	if err := <-results; err != nil {
+		t.Fatalf("older concurrent call = %v, want success", err)
+	}
+
+	if _, err := es.Enrich(context.Background(), eng); err != nil {
+		t.Fatalf("post-throttle request failed: %v", err)
+	}
+	waitsMu.Lock()
+	defer waitsMu.Unlock()
+	if len(waits) != 1 || waits[0] != 5*time.Second {
+		t.Fatalf("waits = %v, want [5s]; older success cleared newer throttle", waits)
+	}
+}
+
+func TestEnrichService_RepeatedThrottleUsesBoundedExponentialBackoff(t *testing.T) {
+	now := time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)
+	var waits []time.Duration
+	requests := 0
+	mock := NewMockLLMProvider()
+	mock.customComplete = func(context.Context, string, string) (string, error) {
+		requests++
+		return "", &plugin.ProviderError{Provider: "fake", StatusCode: 429, Retryable: true}
+	}
+	pipeline := NewPipeline(mock, NewTokenBucketLimiter(100, 100))
+	pipeline.SetConfig(&config.PluginConfig{EnrichMode: "light"})
+	es := &EnrichService{
+		provider: mock,
+		pipeline: pipeline,
+		breaker:  circuit.New(100, time.Hour),
+		nowFn:    func() time.Time { return now },
+		waitFn: func(_ context.Context, wait time.Duration) error {
+			waits = append(waits, wait)
+			now = now.Add(wait)
+			return nil
+		},
+		jitterFn: func(wait time.Duration) time.Duration { return wait },
+	}
+	eng := &storage.Engram{ID: storage.NewULID()}
+
+	for range 4 {
+		if _, err := es.Enrich(context.Background(), eng); !plugin.IsRetryableProviderError(err) {
+			t.Fatalf("Enrich error = %v, want retryable throttle", err)
+		}
+	}
+	if requests != 4 {
+		t.Fatalf("requests = %d, want exactly one per attempt", requests)
+	}
+	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	if len(waits) != len(want) {
+		t.Fatalf("waits = %v, want %v", waits, want)
+	}
+	for i := range want {
+		if waits[i] != want[i] {
+			t.Fatalf("waits = %v, want %v", waits, want)
+		}
+	}
+}
+
+func TestExponentialProviderBackoffIsCapped(t *testing.T) {
+	if got := exponentialProviderBackoff(100); got != providerBackoffMax {
+		t.Fatalf("backoff = %v, want cap %v", got, providerBackoffMax)
+	}
+}
+
+func TestEnrichService_BackpressureWaitHonorsContextCancellation(t *testing.T) {
+	now := time.Now()
+	mock := NewMockLLMProvider()
+	requests := 0
+	mock.customComplete = func(context.Context, string, string) (string, error) {
+		requests++
+		return "", &plugin.ProviderError{
+			Provider: "fake", StatusCode: 429, Retryable: true,
+			RetryAfter: time.Minute, HasRetryAfter: true,
+		}
+	}
+	pipeline := NewPipeline(mock, NewTokenBucketLimiter(100, 100))
+	pipeline.SetConfig(&config.PluginConfig{EnrichMode: "light"})
+	es := &EnrichService{
+		provider: mock,
+		pipeline: pipeline,
+		breaker:  circuit.New(5, time.Hour),
+		nowFn:    func() time.Time { return now },
+		waitFn: func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		jitterFn: func(wait time.Duration) time.Duration { return wait },
+	}
+	eng := &storage.Engram{ID: storage.NewULID()}
+	_, _ = es.Enrich(context.Background(), eng)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := es.Enrich(ctx, eng)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Enrich error = %v, want context.Canceled", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, canceled wait must not call provider again", requests)
+	}
+}
+
+func TestEnrichService_AuthenticationFailureStillOpensCircuit(t *testing.T) {
+	mock := NewMockLLMProvider()
+	mock.customComplete = func(context.Context, string, string) (string, error) {
+		return "", &plugin.ProviderError{Provider: "fake", StatusCode: 401, Retryable: false}
+	}
+	pipeline := NewPipeline(mock, NewTokenBucketLimiter(100, 100))
+	pipeline.SetConfig(&config.PluginConfig{EnrichMode: "light"})
+	es := &EnrichService{provider: mock, pipeline: pipeline, breaker: circuit.New(1, time.Hour)}
+	eng := &storage.Engram{ID: storage.NewULID()}
+
+	if _, err := es.Enrich(context.Background(), eng); err == nil || plugin.IsRetryableProviderError(err) {
+		t.Fatalf("first Enrich error = %v, want observable non-retryable auth failure", err)
+	}
+	if _, err := es.Enrich(context.Background(), eng); !errors.Is(err, circuit.ErrOpen) {
+		t.Fatalf("second Enrich error = %v, want circuit.ErrOpen", err)
 	}
 }
 

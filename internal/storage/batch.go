@@ -12,6 +12,7 @@ import (
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 	"github.com/scrypster/muninndb/internal/wal"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // stateUpdate records a (workspace, id) pair whose state was changed via
@@ -127,6 +128,12 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 	for _, tag := range eng.Tags {
 		b.batch.Set(keys.TagIndexKey(wsPrefix, keys.Hash(tag), id16), []byte{}, nil)
 	}
+	// 0x2C: ordered raw-tag-range index (key:value tags only)
+	for _, tag := range eng.Tags {
+		if err := WriteRawTagIndexEntry(b.batch, wsPrefix, tag, id16); err != nil {
+			return err
+		}
+	}
 	// 0x0D: creator index
 	b.batch.Set(keys.CreatorIndexKey(wsPrefix, keys.Hash(eng.CreatedBy), id16), []byte{}, nil)
 	// 0x10: relevance bucket key
@@ -177,40 +184,112 @@ func (b *pebbleStoreBatch) WriteOrdinal(ctx context.Context, ws [8]byte, parentI
 // Reads the current engram from the underlying store, sets its state, and queues
 // updated 0x01 and 0x02 key writes plus the 0x0B state index transition.
 func (b *pebbleStoreBatch) UpdateEngramState(ctx context.Context, ws [8]byte, id ULID, newState LifecycleState) error {
+	return b.mutateEngram(ctx, ws, id, "update state", func(eng *Engram) {
+		eng.State = newState
+	})
+}
+
+// SupersedeEngram queues a soft-delete plus a ValidUntil stamp in one
+// re-encode. Used by Evolve so both changes land in the same atomic batch.
+// A pre-existing closed ValidUntil is preserved.
+func (b *pebbleStoreBatch) SupersedeEngram(ctx context.Context, ws [8]byte, id ULID, validUntil time.Time) error {
+	return b.mutateEngram(ctx, ws, id, "supersede", func(eng *Engram) {
+		eng.State = StateSoftDeleted
+		if eng.ValidUntil.IsZero() {
+			eng.ValidUntil = validUntil
+		}
+	})
+}
+
+// mutateEngram reads the current engram from the underlying store, applies
+// mutate, and queues updated 0x01 and 0x02 key writes plus the 0x0B state
+// index transition when the state changed.
+func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID, op string, mutate func(*Engram)) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
 	}
 	eng, err := b.ps.GetEngram(ctx, ws, id)
 	if err != nil {
-		return fmt.Errorf("update state: read engram: %w", err)
+		return fmt.Errorf("%s: read engram: %w", op, err)
 	}
 	if eng == nil {
-		return fmt.Errorf("update state: engram %s not found", id.String())
+		return fmt.Errorf("%s: engram %s not found", op, id.String())
 	}
 	oldState := eng.State
-	eng.State = newState
+	mutate(eng)
+	newState := eng.State
 	eng.UpdatedAt = time.Now()
 
 	erfEng := toERFEngram(eng)
 	erfBytes, err := erf.EncodeV2(erfEng)
 	if err != nil {
-		return fmt.Errorf("update state: encode: %w", err)
+		return fmt.Errorf("%s: encode: %w", op, err)
 	}
 	id16 := [16]byte(id)
 
 	// Transition 0x0B state index: remove old entry, write new entry.
-	b.batch.Delete(keys.StateIndexKey(ws, uint8(oldState), id16), nil)
-	b.batch.Set(keys.StateIndexKey(ws, uint8(newState), id16), []byte{}, nil)
+	if oldState != newState {
+		b.batch.Delete(keys.StateIndexKey(ws, uint8(oldState), id16), nil)
+		b.batch.Set(keys.StateIndexKey(ws, uint8(newState), id16), []byte{}, nil)
+	}
 
 	// Update 0x01 full engram record and 0x02 metadata slice.
 	if err := b.batch.Set(keys.EngramKey(ws, id16), erfBytes, nil); err != nil {
-		return fmt.Errorf("update state: set engram key: %w", err)
+		return fmt.Errorf("%s: set engram key: %w", op, err)
 	}
 	if err := b.batch.Set(keys.MetaKey(ws, id16), erf.MetaKeySlice(erfBytes), nil); err != nil {
 		return err
 	}
 	// Track for cache invalidation in Commit.
 	b.stateUpdatedIDs = append(b.stateUpdatedIDs, stateUpdate{ws: ws, id: id})
+	return nil
+}
+
+// WriteEntityEngramLink queues the 0x20 forward and 0x23 reverse entity-link keys
+// into the batch. Mirrors PebbleStore.WriteEntityEngramLink key construction; it
+// does not touch the 0x1F entity record. The mention-count ledger is one
+// increment per link key created and one decrement per link key destroyed
+// (DeleteEngram decrements unconditionally), so callers creating links through
+// this method must fund them — post-commit, via IncrementEntityMentionCount —
+// or the counts go stale-low once the linked engrams are hard-deleted (#622).
+func (b *pebbleStoreBatch) WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error {
+	if b.committed {
+		return fmt.Errorf("batch already committed")
+	}
+	nameHash := keys.EntityNameHash(entityName)
+	if err := b.batch.Set(keys.EntityEngramLinkKey(ws, [16]byte(engramID), nameHash), []byte(entityName), nil); err != nil {
+		return fmt.Errorf("batch write entity link fwd: %w", err)
+	}
+	if err := b.batch.Set(keys.EntityReverseIndexKey(nameHash, ws, [16]byte(engramID)), nil, nil); err != nil {
+		return fmt.Errorf("batch write entity link rev: %w", err)
+	}
+	return nil
+}
+
+// WriteRelationshipRecord queues the 0x21 relationship record and both 0x26
+// relationship-entity index keys into the batch. Same value encoding as
+// PebbleStore.UpsertRelationshipRecord.
+func (b *pebbleStoreBatch) WriteRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error {
+	if b.committed {
+		return fmt.Errorf("batch already committed")
+	}
+	record.UpdatedAt = time.Now().UnixNano()
+	val, err := msgpack.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("batch relationship record marshal: %w", err)
+	}
+	fromHash := keys.EntityNameHash(record.FromEntity)
+	toHash := keys.EntityNameHash(record.ToEntity)
+	relTypeByte := relTypeByteFromString(record.RelType)
+	if err := b.batch.Set(keys.RelationshipKey(ws, [16]byte(engramID), fromHash, relTypeByte, toHash), val, nil); err != nil {
+		return fmt.Errorf("batch relationship record: set 0x21: %w", err)
+	}
+	if err := b.batch.Set(keys.RelEntityIndexKey(ws, fromHash, [16]byte(engramID)), nil, nil); err != nil {
+		return fmt.Errorf("batch relationship record: set 0x26 from: %w", err)
+	}
+	if err := b.batch.Set(keys.RelEntityIndexKey(ws, toHash, [16]byte(engramID)), nil, nil); err != nil {
+		return fmt.Errorf("batch relationship record: set 0x26 to: %w", err)
+	}
 	return nil
 }
 

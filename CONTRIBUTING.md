@@ -8,9 +8,11 @@ The project is under the [Business Source License 1.1](LICENSE) and has a provis
 
 ---
 
-## How to contribute
+## How to Contribute
 
 1. **Bug reports or ideas** — Open an issue. Even a one-line "this broke my agent workflow" helps.
+   **Security vulnerabilities are the exception — please don't open a public issue.** See
+   [SECURITY.md](.github/SECURITY.md) and report it privately.
 2. **Code changes** — Fork, make the change, open a PR.
    - Small fixes (typos, docs, tests) → we'll merge quickly.
    - New features (extra embedders, SDK improvements, UI) → open an issue first so we can align on the cognitive model.
@@ -27,7 +29,7 @@ go run ./cmd/muninn/... start
 
 See the [README](README.md) for full install options and configuration.
 
-## Running tests
+## Running Tests
 
 Basic unit tests (no assets required):
 
@@ -44,7 +46,7 @@ go test -tags localassets ./...
 
 ---
 
-## Branch model (Git Flow)
+## Branch Model (Git Flow)
 
 We use a **develop → main** flow:
 

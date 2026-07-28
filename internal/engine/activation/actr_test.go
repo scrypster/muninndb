@@ -62,7 +62,7 @@ func TestComputeACTR_FreshEngram(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.9, 2.0, 0.0, 0.0, eng, 0, now, w)
+	sc := computeACTR(0.9, 2.0, 0.0, 0.0, eng, 0, now, w, false)
 
 	contentMatch := 0.35*0.9 + 0.25*math.Tanh(2.0)
 	n := 2.0 // AccessCount(1) + 1
@@ -89,7 +89,7 @@ func TestComputeACTR_OldEngram_NoHebbian(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.7, 1.0, 0.0, 0.0, eng, 0, now, w)
+	sc := computeACTR(0.7, 1.0, 0.0, 0.0, eng, 0, now, w, false)
 
 	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
 	n := 1.0
@@ -113,7 +113,7 @@ func TestComputeACTR_OldEngram_WithHebbian(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.7, 1.0, 0.8, 0.0, eng, 0, now, w)
+	sc := computeACTR(0.7, 1.0, 0.8, 0.0, eng, 0, now, w, false)
 
 	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
 	n := 1.0
@@ -123,7 +123,7 @@ func TestComputeACTR_OldEngram_WithHebbian(t *testing.T) {
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
 
 	// Hebbian must rescue the memory: compare with no-Hebbian case.
-	scNoHeb := computeACTR(0.7, 1.0, 0.0, 0.0, eng, 0, now, w)
+	scNoHeb := computeACTR(0.7, 1.0, 0.0, 0.0, eng, 0, now, w, false)
 	if sc.Raw <= scNoHeb.Raw*2 {
 		t.Errorf("Hebbian rescue too weak: with=%.4f, without=%.4f, ratio=%.1fx",
 			sc.Raw, scNoHeb.Raw, sc.Raw/scNoHeb.Raw)
@@ -140,7 +140,7 @@ func TestComputeACTR_HighAccessCount(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.7, 1.5, 0.0, 0.0, eng, 0, now, w)
+	sc := computeACTR(0.7, 1.5, 0.0, 0.0, eng, 0, now, w, false)
 
 	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.5)
 	n := 101.0
@@ -172,7 +172,7 @@ func TestComputeACTR_ZeroContentMatch(t *testing.T) {
 	w := actrDefaultWeights()
 
 	// High activation but zero content relevance.
-	sc := computeACTR(0, 0, 0.9, 0.0, eng, 0, now, w)
+	sc := computeACTR(0, 0, 0.9, 0.0, eng, 0, now, w, false)
 
 	if sc.Raw != 0.0 {
 		t.Errorf("Zero content match: Raw=%v, want exactly 0.0", sc.Raw)
@@ -192,7 +192,7 @@ func TestComputeACTR_ConfidenceMultiplication(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w)
+	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w, false)
 
 	assertNear(t, "Confidence", sc.Confidence, 0.5, 1e-9)
 	assertNear(t, "Final", sc.Final, sc.Raw*0.5, 1e-9)
@@ -216,7 +216,7 @@ func TestComputeACTR_ScoreClamping(t *testing.T) {
 
 	// Hebbian=1.0 pushes totalActivation well above bLevelCap — raw still exceeds 1.0.
 	// This is the case the two-pass safety net handles (Hebbian-boosted engrams).
-	sc := computeACTR(1.0, 10.0, 1.0, 0.0, eng, 0, now, w)
+	sc := computeACTR(1.0, 10.0, 1.0, 0.0, eng, 0, now, w, false)
 
 	contentMatch := 0.35*1.0 + 0.25*math.Tanh(10.0)
 	n := 51.0
@@ -243,7 +243,7 @@ func TestComputeACTR_ZeroLastAccess(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w)
+	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w, false)
 
 	// Zero LastAccess → treated as "just now" → ageDays = ageFloor (1 minute)
 	contentMatch := 0.35*0.8 + 0.25*math.Tanh(1.0)
@@ -266,7 +266,7 @@ func TestComputeACTR_PreY2KLastAccess(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w)
+	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w, false)
 
 	// Pre-Y2K → treated as "just now", identical to zero-time case.
 	engZero := &storage.Engram{
@@ -275,7 +275,7 @@ func TestComputeACTR_PreY2KLastAccess(t *testing.T) {
 		AccessCount: 0,
 		LastAccess:  time.Time{},
 	}
-	scZero := computeACTR(0.8, 1.0, 0.0, 0.0, engZero, 0, now, w)
+	scZero := computeACTR(0.8, 1.0, 0.0, 0.0, engZero, 0, now, w, false)
 
 	assertNear(t, "Raw (PreY2K == ZeroTime)", sc.Raw, scZero.Raw, 1e-9)
 	assertNear(t, "Final (PreY2K == ZeroTime)", sc.Final, scZero.Final, 1e-9)
@@ -297,7 +297,7 @@ func TestComputeACTR_CustomDecayAndHebScale(t *testing.T) {
 	w.ACTRDecay = 0.8
 	w.ACTRHebScale = 2.0
 
-	sc := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, 0, now, w)
+	sc := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, 0, now, w, false)
 
 	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
 	n := 4.0
@@ -309,7 +309,7 @@ func TestComputeACTR_CustomDecayAndHebScale(t *testing.T) {
 
 	// Must differ from default parameters.
 	wDef := actrDefaultWeights()
-	scDef := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, 0, now, wDef)
+	scDef := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, 0, now, wDef, false)
 	if math.Abs(sc.Raw-scDef.Raw) < 1e-6 {
 		t.Error("Custom params should produce different Raw than defaults")
 	}
@@ -397,7 +397,7 @@ func TestComputeACTR_DecayFactorReportedCorrectly(t *testing.T) {
 			}
 			w := actrDefaultWeights()
 
-			sc := computeACTR(0.5, 0.5, 0.0, 0.0, eng, 0, now, w)
+			sc := computeACTR(0.5, 0.5, 0.0, 0.0, eng, 0, now, w, false)
 
 			effectiveAgeDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 1.0/(24.0*60.0))
 			wantDecay := math.Max(0.05, math.Exp(-effectiveAgeDays/float64(tt.stability)))
@@ -435,7 +435,7 @@ func TestComputeACTR_FreshVault_NoDivergence(t *testing.T) {
 				AccessCount: uint32(tc.accessCount),
 				LastAccess:  now,
 			}
-			sc := computeACTR(tc.vectorScore, 0.0, 0.0, 0.0, eng, 0, now, w)
+			sc := computeACTR(tc.vectorScore, 0.0, 0.0, 0.0, eng, 0, now, w, false)
 			contentMatch := w.SemanticSimilarity * tc.vectorScore
 			if sc.Raw > contentMatch+1e-9 {
 				t.Errorf("Raw=%.6f exceeds contentMatch=%.6f — base-level saturated past content gate",
@@ -457,8 +457,8 @@ func TestComputeACTR_FreshVault_Differentiated(t *testing.T) {
 	engHigh := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 	engLow := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 
-	scHigh := computeACTR(0.9, 1.0, 0.0, 0.0, engHigh, 0, now, w)
-	scLow := computeACTR(0.4, 1.0, 0.0, 0.0, engLow, 0, now, w)
+	scHigh := computeACTR(0.9, 1.0, 0.0, 0.0, engHigh, 0, now, w, false)
+	scLow := computeACTR(0.4, 1.0, 0.0, 0.0, engLow, 0, now, w, false)
 
 	if scHigh.Raw <= scLow.Raw {
 		t.Errorf("scHigh.Raw=%.6f <= scLow.Raw=%.6f: higher content match must rank above lower",
@@ -487,13 +487,124 @@ func TestComputeACTR_TwoPassSafetyNet_HebbianCanStillSaturate(t *testing.T) {
 	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 
 	// Strong Hebbian (1.0) with scale 4.0 adds 4.0 to totalActivation.
-	scNoHeb := computeACTR(0.9, 1.0, 0.0, 0.0, eng, 0, now, w)
-	scHeb := computeACTR(0.9, 1.0, 1.0, 0.0, eng, 0, now, w)
+	scNoHeb := computeACTR(0.9, 1.0, 0.0, 0.0, eng, 0, now, w, false)
+	scHeb := computeACTR(0.9, 1.0, 1.0, 0.0, eng, 0, now, w, false)
 
 	if scNoHeb.Raw > 1.0 {
 		t.Errorf("zero-Hebbian Raw=%.6f must not exceed 1.0 after root-cause fix", scNoHeb.Raw)
 	}
 	if scHeb.Raw <= 1.0 {
 		t.Errorf("strong-Hebbian Raw=%.6f must exceed 1.0 (two-pass safety net required)", scHeb.Raw)
+	}
+}
+
+// --- S1 tag-match floor (COG-5 amendment) ---
+//
+// Under default ACT-R scoring, contentMatch = SemanticSimilarity*vectorScore +
+// FullTextRelevance*normalizedFTS. A candidate seeded purely because it matched
+// an explicit tag filter (inTagPool=true) can have vectorScore=0 and ftsScore=0
+// — a content-unrelated reminder-style tag hit — which drives contentMatch, and
+// therefore Raw/Final, to exactly zero. That silently discards a candidate the
+// user explicitly asked for via tags_all/tags_any/tag_prefix. tagMatchFloor
+// rescues this: when inTagPool is true, contentMatch is floored at tagMatchFloor
+// before feeding the rest of the ACT-R formula, so Raw becomes
+// tagMatchFloor * contextualPrior/actrDenominator instead of zero.
+
+// TestComputeACTR_TagPoolFloor_RescuesZeroContentMatch is the RED/GREEN case:
+// before the floor, a zero-content-match, tag-pool candidate scores exactly 0
+// (see TestComputeACTR_ZeroContentMatch, which pins the non-tag-pool case at
+// exactly 0 and must stay that way). With inTagPool=true it must score > 0.
+func TestComputeACTR_TagPoolFloor_RescuesZeroContentMatch(t *testing.T) {
+	now := time.Now()
+	eng := &storage.Engram{
+		Confidence:  1.0,
+		Stability:   30.0,
+		AccessCount: 50,
+		LastAccess:  now,
+	}
+	w := actrDefaultWeights()
+
+	// Zero vector/FTS signal (content-unrelated tag hit), same as
+	// TestComputeACTR_ZeroContentMatch, but inTagPool=true this time.
+	sc := computeACTR(0, 0, 0.9, 0.0, eng, 0, now, w, true)
+
+	if sc.Raw <= 0.0 {
+		t.Fatalf("tag-pool candidate with zero content match: Raw=%v, want > 0 (floor must rescue it)", sc.Raw)
+	}
+	if sc.Final <= 0.0 {
+		t.Fatalf("tag-pool candidate with zero content match: Final=%v, want > 0 (floor must rescue it)", sc.Final)
+	}
+
+	// Exact expected value: contentMatch floored to tagMatchFloor, then the
+	// normal ACT-R formula (same base-level/Hebbian as this test's inputs).
+	hebScale := 4.0
+	baseLevel := expectedBaseLevel(51.0, 1.0/(24.0*60.0), 0.5) // n=AccessCount+1, ageDays=ageFloor (fresh)
+	wantRaw := expectedACTRRaw(tagMatchFloor, baseLevel, hebScale, 0.9)
+	assertNear(t, "Raw (tag-pool floor)", sc.Raw, wantRaw, 1e-9)
+
+	// Sanity: confirm the non-tag-pool sibling is still exactly zero, i.e. the
+	// floor is scoped to inTagPool and does not leak into ordinary scoring.
+	scNotTagPool := computeACTR(0, 0, 0.9, 0.0, eng, 0, now, w, false)
+	if scNotTagPool.Raw != 0.0 {
+		t.Errorf("non-tag-pool candidate with zero content match: Raw=%v, want exactly 0.0 (floor must not apply)", scNotTagPool.Raw)
+	}
+}
+
+// TestComputeACTR_TagPoolFloor_DoesNotAffectGenuineMatch verifies the floor is
+// a max(), not an additive bump: when contentMatch already exceeds
+// tagMatchFloor, inTagPool must not change the score at all.
+func TestComputeACTR_TagPoolFloor_DoesNotAffectGenuineMatch(t *testing.T) {
+	now := time.Now()
+	eng := &storage.Engram{
+		Confidence:  1.0,
+		Stability:   30.0,
+		AccessCount: 5,
+		LastAccess:  now.Add(-2 * 24 * time.Hour),
+	}
+	w := actrDefaultWeights()
+
+	// vectorScore=0.9, ftsScore=1.0 -> contentMatch = 0.35*0.9+0.25*tanh(1.0) ≈ 0.505,
+	// comfortably above tagMatchFloor (0.1).
+	scTagPool := computeACTR(0.9, 1.0, 0.0, 0.0, eng, 0, now, w, true)
+	scPlain := computeACTR(0.9, 1.0, 0.0, 0.0, eng, 0, now, w, false)
+
+	assertNear(t, "Raw (genuine match, inTagPool should be a no-op)", scTagPool.Raw, scPlain.Raw, 1e-12)
+	assertNear(t, "Final (genuine match, inTagPool should be a no-op)", scTagPool.Final, scPlain.Final, 1e-12)
+}
+
+// TestComputeACTR_TagPoolFloor_GenuineMatchOutranksFlooredTagOnly is the
+// ranking-safety requirement from the S1 spec: tagMatchFloor must be low
+// enough that a genuine content match (contentMatch in the typical 0.5-0.9
+// relevance band) still outranks a floored, content-unrelated tag-only hit,
+// even when both candidates share identical recency/access/confidence —
+// i.e. the floor rescues a tag hit from being *dropped*, it must never let a
+// tag-only hit *outrank* real relevance.
+func TestComputeACTR_TagPoolFloor_GenuineMatchOutranksFlooredTagOnly(t *testing.T) {
+	now := time.Now()
+	// Identical recency/access/confidence for both candidates so the only
+	// difference in score is content relevance vs. the tag floor.
+	eng := &storage.Engram{
+		Confidence:  1.0,
+		Stability:   30.0,
+		AccessCount: 5,
+		LastAccess:  now,
+	}
+	w := actrDefaultWeights()
+
+	// Genuine content match: vectorScore=0.9 alone gives contentMatch=0.35*0.9=0.315,
+	// already well within the 0.5-0.9 "typical genuine match" band once FTS is added.
+	genuine := computeACTR(0.9, 2.0, 0.0, 0.0, eng, 0, now, w, false)
+	// Tag-only hit: zero vector/FTS signal, rescued only by the floor.
+	tagOnly := computeACTR(0.0, 0.0, 0.0, 0.0, eng, 0, now, w, true)
+
+	if tagOnly.Raw <= 0.0 {
+		t.Fatalf("floored tag-only candidate must score > 0, got Raw=%v", tagOnly.Raw)
+	}
+	if genuine.Raw <= tagOnly.Raw {
+		t.Errorf("genuine content match (Raw=%.6f) must outrank floored tag-only hit (Raw=%.6f)",
+			genuine.Raw, tagOnly.Raw)
+	}
+	if tagMatchFloor >= 0.5 {
+		t.Errorf("tagMatchFloor=%.4f is too high: must stay below the typical genuine content-match band (0.5-0.9) to preserve ranking", tagMatchFloor)
 	}
 }

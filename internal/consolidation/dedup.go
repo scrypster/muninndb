@@ -126,15 +126,35 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 			continue
 		}
 
-		// Merge tags from all members into representative
-		tagSet := make(map[string]bool)
-		for _, tag := range representative.Tags {
-			tagSet[tag] = true
-		}
+		// Pattern-separation guard, applied BEFORE any absorption: a high embedding
+		// similarity is not proof of duplication. A member that differs from the
+		// survivor on a load-bearing token (a number, a date, a negation) is a
+		// DISTINCT fact — an update or a contradiction — and must be neither
+		// archived NOR have its tags/frequency folded into the survivor (which would
+		// cross-label a fact the guard just declared distinct). Partition first so
+		// only true duplicates are absorbed; recall's supersedes-aware ranking /
+		// contradiction surfacing handle the separated pair.
+		absorbable := make([]*storage.Engram, 0, len(clust.members))
 		for _, member := range clust.members {
 			if member.ID == representative.ID {
 				continue
 			}
+			if divergesOnLoadBearingToken(representative, member) {
+				report.DedupSeparated++
+				slog.Debug("consolidation phase 2: separation guard refused merge",
+					"survivor", representative.ID, "kept", member.ID)
+				continue
+			}
+			absorbable = append(absorbable, member)
+		}
+
+		// Merge tags from the survivor + only the ABSORBABLE (true-duplicate)
+		// members — never from a separation-skipped member.
+		tagSet := make(map[string]bool)
+		for _, tag := range representative.Tags {
+			tagSet[tag] = true
+		}
+		for _, member := range absorbable {
 			for _, tag := range member.Tags {
 				tagSet[tag] = true
 			}
@@ -144,19 +164,15 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 			mergedTags = append(mergedTags, tag)
 		}
 
-		// Archive non-representative members and count archived duplicates so
-		// the representative can absorb their frequency signal. Without this
-		// bump, semantic-duplicate write-only engrams (e.g. daily auto-ingest
-		// captures from agent harnesses) would never reach the recall path
-		// that auto-increments AccessCount in storage/cache/domain.go — losing
-		// the "this content recurred N times" signal that downstream skills
-		// currently emulate via per-vault feedback cron jobs.
+		// Archive the absorbable duplicates and count them so the representative can
+		// absorb their frequency signal. Without this bump, semantic-duplicate
+		// write-only engrams (e.g. daily auto-ingest captures from agent harnesses)
+		// would never reach the recall path that auto-increments AccessCount in
+		// storage/cache/domain.go — losing the "this content recurred N times"
+		// signal that downstream skills currently emulate via per-vault feedback
+		// cron jobs.
 		archivedCount := uint32(0)
-		for _, member := range clust.members {
-			if member.ID == representative.ID {
-				continue
-			}
-
+		for _, member := range absorbable {
 			if !w.DryRun {
 				// Archive the member (soft delete)
 				if err := w.Engine.UpdateLifecycleState(ctx, vault, member.ID.String(), "archived"); err != nil {

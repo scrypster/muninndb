@@ -2,8 +2,10 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -34,8 +36,10 @@ type LLMProviderConfig struct {
 // defaultBreaker thresholds: 5 consecutive failures open the circuit;
 // it probes again after 30 s.
 const (
-	breakerMaxFails   = 5
-	breakerResetAfter = 30 * time.Second
+	breakerMaxFails    = 5
+	breakerResetAfter  = 30 * time.Second
+	providerBackoffMin = time.Second
+	providerBackoffMax = time.Minute
 )
 
 // EnrichService implements plugin.EnrichPlugin.
@@ -54,6 +58,17 @@ type EnrichService struct {
 	// so it is always non-nil. OnStateChange may be wired after construction
 	// (before concurrent use) to emit logs and update the plugin registry.
 	breaker *circuit.Breaker
+
+	// backpressure is provider-wide: a transient response from any engram
+	// delays every subsequent call through this service. The function seams
+	// keep time-based behavior deterministic in tests.
+	backpressureMu    sync.Mutex
+	retryNotBefore    time.Time
+	retryableFailures int
+	backpressureGen   uint64
+	nowFn             func() time.Time
+	waitFn            func(context.Context, time.Duration) error
+	jitterFn          func(time.Duration) time.Duration
 }
 
 // NewEnrichService creates an EnrichService from a provider URL.
@@ -84,6 +99,9 @@ func NewEnrichService(providerURL string) (*EnrichService, error) {
 		provCfg:  provCfg,
 		name:     name,
 		breaker:  circuit.New(breakerMaxFails, breakerResetAfter),
+		nowFn:    time.Now,
+		waitFn:   waitContext,
+		jitterFn: addBackoffJitter,
 	}
 
 	return es, nil
@@ -203,19 +221,132 @@ func (s *EnrichService) Enrich(ctx context.Context, eng *storage.Engram) (*plugi
 	if s.pipeline == nil {
 		return nil, fmt.Errorf("enrich service not initialized")
 	}
+	admissionGen, err := s.waitForProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// Fast path: no circuit breaker (test construction or future embedded use).
 	if s.breaker == nil {
-		return s.pipeline.Run(ctx, eng)
+		result, err := s.pipeline.Run(ctx, eng)
+		s.recordProviderOutcome(err, admissionGen)
+		return result, err
 	}
 
 	var result *plugin.EnrichmentResult
-	err := s.breaker.Do(func() error {
+	err = s.breaker.Do(func() error {
 		var runErr error
 		result, runErr = s.pipeline.Run(ctx, eng)
 		return runErr
 	})
+	s.recordProviderOutcome(err, admissionGen)
 	return result, err
+}
+
+func (s *EnrichService) waitForProvider(ctx context.Context) (uint64, error) {
+	for {
+		s.backpressureMu.Lock()
+		now := s.now()
+		wait := s.retryNotBefore.Sub(now)
+		generation := s.backpressureGen
+		s.backpressureMu.Unlock()
+		if wait <= 0 {
+			return generation, nil
+		}
+		if err := s.wait(ctx, wait); err != nil {
+			return 0, err
+		}
+	}
+}
+
+func (s *EnrichService) recordProviderOutcome(err error, admissionGen uint64) {
+	if err == nil {
+		s.backpressureMu.Lock()
+		// A success may have been admitted before a concurrent request created
+		// a newer throttle. Only an outcome from the active generation can clear
+		// provider-wide backpressure.
+		if admissionGen == s.backpressureGen {
+			s.retryableFailures = 0
+			s.retryNotBefore = time.Time{}
+		}
+		s.backpressureMu.Unlock()
+		return
+	}
+
+	var providerErr *plugin.ProviderError
+	if !errors.As(err, &providerErr) || !providerErr.Retryable {
+		return
+	}
+
+	s.backpressureMu.Lock()
+	defer s.backpressureMu.Unlock()
+	s.backpressureGen++
+	s.retryableFailures++
+	delay := time.Duration(0)
+	if providerErr.HasRetryAfter && providerErr.RetryAfter > 0 {
+		delay = providerErr.RetryAfter
+	} else {
+		delay = exponentialProviderBackoff(s.retryableFailures)
+		delay = s.jitter(delay)
+		if delay > providerBackoffMax {
+			delay = providerBackoffMax
+		}
+	}
+	until := s.now().Add(delay)
+	if until.After(s.retryNotBefore) {
+		s.retryNotBefore = until
+	}
+}
+
+func exponentialProviderBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	shift := attempt - 1
+	if shift > 6 {
+		shift = 6
+	}
+	delay := providerBackoffMin * time.Duration(1<<shift)
+	if delay > providerBackoffMax {
+		return providerBackoffMax
+	}
+	return delay
+}
+
+func addBackoffJitter(delay time.Duration) time.Duration {
+	return delay + time.Duration(rand.Float64()*0.25*float64(delay))
+}
+
+func waitContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *EnrichService) now() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
+}
+
+func (s *EnrichService) wait(ctx context.Context, delay time.Duration) error {
+	if s.waitFn != nil {
+		return s.waitFn(ctx, delay)
+	}
+	return waitContext(ctx, delay)
+}
+
+func (s *EnrichService) jitter(delay time.Duration) time.Duration {
+	if s.jitterFn != nil {
+		return s.jitterFn(delay)
+	}
+	return addBackoffJitter(delay)
 }
 
 // LLMStats returns a point-in-time snapshot of LLM call metrics.

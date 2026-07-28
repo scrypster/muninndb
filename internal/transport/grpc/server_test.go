@@ -3,6 +3,7 @@ package grpc_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
 	"github.com/scrypster/muninndb/internal/storage"
 	transportgrpc "github.com/scrypster/muninndb/internal/transport/grpc"
@@ -37,6 +39,7 @@ type mockEngine struct {
 	subscribeFn            func(ctx context.Context, req *pb.SubscribeRequest) (*pb.SubscribeResponse, error)
 	subscribeWithDeliverFn func(ctx context.Context, req *pb.SubscribeRequest, deliver trigger.DeliverFunc) (string, error)
 	unsubscribeFn          func(ctx context.Context, subID string) error
+	adjustConfidenceFn     func(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error)
 }
 
 func (m *mockEngine) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloResponse, error) {
@@ -139,6 +142,13 @@ func (m *mockEngine) Unsubscribe(ctx context.Context, subID string) error {
 		return m.unsubscribeFn(ctx, subID)
 	}
 	return nil
+}
+
+func (m *mockEngine) AdjustConfidence(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error) {
+	if m.adjustConfidenceFn != nil {
+		return m.adjustConfidenceFn(ctx, req)
+	}
+	return &pb.AdjustConfidenceResponse{NewConfidence: 0}, nil
 }
 
 // newTestAuthStore opens an in-memory pebble database and returns an auth.Store.
@@ -725,6 +735,7 @@ func TestPublicVaultFullMutatingUnaryRPCsAllowed(t *testing.T) {
 	linkCalled := false
 	forgetCalled := false
 	batchForgetCalled := false
+	adjustConfidenceCalled := false
 	srv := transportgrpc.NewServer(":0", &mockEngine{
 		writeFn: func(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 			writeCalled = true
@@ -745,6 +756,10 @@ func TestPublicVaultFullMutatingUnaryRPCsAllowed(t *testing.T) {
 		batchForgetFn: func(ctx context.Context, req *pb.BatchForgetRequest) (*pb.BatchForgetResponse, error) {
 			batchForgetCalled = true
 			return &pb.BatchForgetResponse{}, nil
+		},
+		adjustConfidenceFn: func(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error) {
+			adjustConfidenceCalled = true
+			return &pb.AdjustConfidenceResponse{NewConfidence: 0.5}, nil
 		},
 	}, store, nil)
 
@@ -787,6 +802,14 @@ func TestPublicVaultFullMutatingUnaryRPCsAllowed(t *testing.T) {
 				return srv.BatchForget(ctx, req.(*pb.BatchForgetRequest))
 			},
 			called: &batchForgetCalled,
+		},
+		{
+			name: "AdjustConfidence",
+			req:  &pb.AdjustConfidenceRequest{Vault: "default", EngramId: "01HZXQJ8C7QK6V3RJBN1P0G9YZ", Delta: 0.1},
+			invoke: func(ctx context.Context, req any) (any, error) {
+				return srv.AdjustConfidence(ctx, req.(*pb.AdjustConfidenceRequest))
+			},
+			called: &adjustConfidenceCalled,
 		},
 	}
 
@@ -818,6 +841,7 @@ func TestObserveKeyMutatingUnaryRPCsDenied(t *testing.T) {
 	linkCalled := false
 	forgetCalled := false
 	batchForgetCalled := false
+	adjustConfidenceCalled := false
 	srv := transportgrpc.NewServer(":0", &mockEngine{
 		writeFn: func(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 			writeCalled = true
@@ -838,6 +862,10 @@ func TestObserveKeyMutatingUnaryRPCsDenied(t *testing.T) {
 		batchForgetFn: func(ctx context.Context, req *pb.BatchForgetRequest) (*pb.BatchForgetResponse, error) {
 			batchForgetCalled = true
 			return &pb.BatchForgetResponse{}, nil
+		},
+		adjustConfidenceFn: func(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error) {
+			adjustConfidenceCalled = true
+			return &pb.AdjustConfidenceResponse{NewConfidence: 0.5}, nil
 		},
 	}, store, nil)
 
@@ -880,6 +908,14 @@ func TestObserveKeyMutatingUnaryRPCsDenied(t *testing.T) {
 				return srv.BatchForget(ctx, req.(*pb.BatchForgetRequest))
 			},
 			called: &batchForgetCalled,
+		},
+		{
+			name: "AdjustConfidence",
+			req:  &pb.AdjustConfidenceRequest{Vault: "default", EngramId: "01HZXQJ8C7QK6V3RJBN1P0G9YZ", Delta: 0.1},
+			invoke: func(ctx context.Context, req any) (any, error) {
+				return srv.AdjustConfidence(ctx, req.(*pb.AdjustConfidenceRequest))
+			},
+			called: &adjustConfidenceCalled,
 		},
 	}
 
@@ -1562,5 +1598,113 @@ func TestListVaults_Error(t *testing.T) {
 	_, err := srv.ListVaults(ctx, &pb.ListVaultsRequest{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AdjustConfidence RPC tests
+// ---------------------------------------------------------------------------
+
+// valid26ULID is a fixed, lexicographically-valid 26-char ULID used across the
+// AdjustConfidence RPC tests. The adapter only parses it; it never reaches the
+// engine when the parse fails, and the mock ignores the value on success.
+const valid26ULID = "01HZXQJ8C7QK6V3RJBN1P0G9YZ"
+
+func TestServer_AdjustConfidence_Success(t *testing.T) {
+	eng := &mockEngine{
+		adjustConfidenceFn: func(_ context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error) {
+			if req.EngramId != valid26ULID {
+				t.Errorf("EngramId = %q, want %q", req.EngramId, valid26ULID)
+			}
+			if req.Delta != 0.3 {
+				t.Errorf("Delta = %v, want 0.3", req.Delta)
+			}
+			if req.Vault != "default" {
+				t.Errorf("Vault = %q, want %q", req.Vault, "default")
+			}
+			return &pb.AdjustConfidenceResponse{NewConfidence: 0.8}, nil
+		},
+	}
+	srv := newPublicTestServer(t, eng)
+
+	resp, err := srv.AdjustConfidence(context.Background(), &pb.AdjustConfidenceRequest{
+		Vault: "default", EngramId: valid26ULID, Delta: 0.3,
+	})
+	if err != nil {
+		t.Fatalf("AdjustConfidence: %v", err)
+	}
+	if resp.NewConfidence != 0.8 {
+		t.Fatalf("NewConfidence = %v, want 0.8", resp.NewConfidence)
+	}
+}
+
+func TestServer_AdjustConfidence_Error(t *testing.T) {
+	eng := &mockEngine{
+		adjustConfidenceFn: func(_ context.Context, _ *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error) {
+			return nil, errors.New("engine unavailable")
+		},
+	}
+	srv := newPublicTestServer(t, eng)
+
+	_, err := srv.AdjustConfidence(context.Background(), &pb.AdjustConfidenceRequest{
+		Vault: "default", EngramId: valid26ULID, Delta: 0.1,
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+// TestGRPCEngineAdapter_AdjustConfidence_BadULID_InvalidArgument exercises the
+// adapter's ULID-parsing branch directly. A nil engine is safe because the
+// parser returns before the engine is dereferenced.
+func TestGRPCEngineAdapter_AdjustConfidence_BadULID_InvalidArgument(t *testing.T) {
+	adapter := transportgrpc.TestableNewEngineAdapter(nil)
+
+	_, err := adapter.AdjustConfidence(context.Background(), &pb.AdjustConfidenceRequest{
+		Vault: "default", EngramId: "not-a-ulid", Delta: 0.1,
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("err code = %v (%v), want InvalidArgument", status.Code(err), err)
+	}
+}
+
+func TestGRPCEngineAdapter_AdjustConfidence_BadContradictedBy_InvalidArgument(t *testing.T) {
+	adapter := transportgrpc.TestableNewEngineAdapter(nil)
+
+	_, err := adapter.AdjustConfidence(context.Background(), &pb.AdjustConfidenceRequest{
+		Vault: "default", EngramId: valid26ULID, Delta: 0.1,
+		ContradictedById: "nope",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("err code = %v (%v), want InvalidArgument", status.Code(err), err)
+	}
+}
+
+// TestMapAdjustConfidenceError_Sentinels verifies the engine sentinel → gRPC
+// code mapping that the engine_vault.go docstring pins ("REST/gRPC handlers
+// map it to 400/INVALID_ARGUMENT").
+func TestMapAdjustConfidenceError_Sentinels(t *testing.T) {
+	cases := []struct {
+		name string
+		in   error
+		want codes.Code
+	}{
+		{"ErrInvalidArgument bare", engine.ErrInvalidArgument, codes.InvalidArgument},
+		{"ErrInvalidArgument wrapped", fmt.Errorf("%w: delta is NaN", engine.ErrInvalidArgument), codes.InvalidArgument},
+		{"ErrSelfContradiction bare", engine.ErrSelfContradiction, codes.InvalidArgument},
+		{"ErrEngramNotFound bare", engine.ErrEngramNotFound, codes.NotFound},
+		{"ErrEngramNotFound wrapped", fmt.Errorf("read meta: %w", engine.ErrEngramNotFound), codes.NotFound},
+		{"storage.ErrNotFound bare", storage.ErrNotFound, codes.NotFound},
+		{"storage.ErrNotFound wrapped (engram deleted by concurrent Forget)", fmt.Errorf("engram %w", storage.ErrNotFound), codes.NotFound},
+		{"unrelated error passes through", errors.New("disk full"), codes.Unknown},
+		{"nil error", nil, codes.OK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := transportgrpc.TestableMapAdjustConfidenceError(tc.in)
+			if status.Code(err) != tc.want {
+				t.Fatalf("code = %v (%v), want %v", status.Code(err), err, tc.want)
+			}
+		})
 	}
 }

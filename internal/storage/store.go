@@ -33,6 +33,25 @@ type StoreBatch interface {
 	// Reads the current engram from the underlying store, sets its state, and queues
 	// updated 0x01 and 0x02 key writes.
 	UpdateEngramState(ctx context.Context, ws [8]byte, id ULID, newState LifecycleState) error
+	// SupersedeEngram queues a soft-delete PLUS a ValidUntil stamp for an
+	// existing engram in one re-encode (the evolve write path, COG-19:
+	// invalidation is a stamp, never a delete. The soft-delete hides the
+	// predecessor from the present; the stamp records when it stopped being
+	// true). An already-closed ValidUntil is preserved (evolving an
+	// already-expired fact must not destroy the earlier window end).
+	SupersedeEngram(ctx context.Context, ws [8]byte, id ULID, validUntil time.Time) error
+	// WriteEntityEngramLink queues the 0x20 forward and 0x23 reverse entity-link
+	// keys into the batch. Like PebbleStore.WriteEntityEngramLink, it does not
+	// touch the 0x1F entity record — callers that need the record created must
+	// use UpsertEntityRecord separately, and callers carrying links to an
+	// existing record must fund the mention-count ledger post-commit via
+	// IncrementEntityMentionCount (one increment per link created, matching
+	// DeleteEngram's one decrement per link destroyed).
+	WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error
+	// WriteRelationshipRecord queues the 0x21 relationship record and both 0x26
+	// relationship-entity index keys into the batch. Same encoding as
+	// PebbleStore.UpsertRelationshipRecord.
+	WriteRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error
 	// Commit atomically commits all queued writes.
 	Commit() error
 	// Discard releases the batch without writing anything.
@@ -66,6 +85,12 @@ type EngineStore interface {
 	// UpdateMetadata writes only the metadata fields that changed (state, confidence,
 	// relevance_bucket, access count, timestamps). Updates both 0x01 and 0x02 keys.
 	UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id ULID, meta *EngramMeta) error
+
+	// TouchAccess bumps AccessCount (+1) and LastAccess (=now) under the
+	// per-engram stripe lock, leaving every other field (State, Confidence,
+	// Relevance, Stability) untouched. The single reinforcement primitive
+	// (#682) — see PebbleStore.TouchAccess for the locking rationale.
+	TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULID) error
 
 	// UpdateRelevance updates the relevance and stability of an engram.
 	// Moves the relevance bucket key (0x10) from the old bucket to the new bucket,

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/scrypster/muninndb/internal/auth"
 )
 
 // ErrVaultNotFound is returned when an operation references a vault that does not exist.
@@ -15,6 +17,16 @@ var ErrVaultNotFound = errors.New("vault not found")
 // ErrEngramNotFound is returned when an operation references an engram that does not exist.
 // Use errors.Is to check for this error in callers.
 var ErrEngramNotFound = errors.New("engram not found")
+
+// ErrInvalidArgument is returned when a caller-supplied scalar is out of the
+// representable range (NaN, Inf, etc.). REST/gRPC handlers map it to 400/INVALID_ARGUMENT.
+// Use errors.Is to check for this error in callers.
+var ErrInvalidArgument = errors.New("invalid argument")
+
+// ErrSelfContradiction is returned when AdjustConfidence is asked to mark an
+// engram as contradicting itself (id == other with hasContra=true). The
+// contradiction graph is irreflexive by construction.
+var ErrSelfContradiction = errors.New("self-contradiction rejected")
 
 // ErrEngramSoftDeleted is returned when an operation targets an engram that has
 // been soft-deleted. Use errors.Is to check for this error in callers.
@@ -39,10 +51,55 @@ var ErrInvalidID = errors.New("invalid engram id")
 // it to HTTP 422 Unprocessable Entity.
 var ErrInvalidRequest = errors.New("invalid request")
 
+// ErrAppendForbidden is returned when an append-mode credential attempts an
+// operation that modifies or deletes an EXISTING engram, entity, or lease.
+// Append-mode may create new memories and read; it may not destroy or overwrite.
+// Enforced here at the engine (via refuseAppend) so the guarantee holds on every
+// transport — the MCP dispatch gate alone would leave REST/gRPC/MBP open.
+var ErrAppendForbidden = errors.New("append-mode credential cannot modify or delete existing memories")
+
+// refuseAppend returns ErrAppendForbidden when the request credential is
+// append-mode. EVERY engine method that modifies or deletes an existing engram/
+// entity/lease/enrichment must call this at its top. It is the single chokepoint
+// for the append guarantee at the engine layer; TestAppendMode_RefusesEveryDestructiveOp
+// exercises each such method so a newly-added destructive method missing this
+// call fails CI (principle #6: pin the derived guarantee, don't trust a blacklist).
+//
+// Accepted residuals — all reinforcement, never destruction. refuseAppend guards
+// the destructive surface (overwrite/evolve/archive/re-trust/delete of existing
+// content/confidence/state/tags/lifecycle); it deliberately does NOT guard the
+// "strengthens with use" side effects that both the write and read paths drive on
+// EXISTING engrams:
+//   - additive remember on a content-hash duplicate → TouchAccess (#682).
+//   - the read path (Read/Activate/recall) under an append credential is NOT
+//     forced read-only (resolveReadOnly forces it only for observe), so it drives
+//     RecordFeedback (per-vault adaptive scoring weights), TouchAccess (access
+//     count / last-access), and Hebbian LTP + PAS on existing associations.
+//
+// None overwrite content/confidence/state/tags/lifecycle or delete — they only
+// reinforce, which is the product promise's first word. Documented identically on
+// auth.ModeAppend. (If future work needs append reads to leave existing state
+// byte-identical, force resolveReadOnly for append too; today it does not.)
+//
+// Scope note on the census: TestAppendMode_MethodCensus forces every exported
+// method into a bucket (real anti-rot — it caught Restore/PruneVault), but it does
+// not behaviorally prove the read-only/infra members are non-destructive; that
+// classification is a human judgment. More rot-resistant than a checklist, not
+// structurally rot-proof.
+func (e *Engine) refuseAppend(ctx context.Context) error {
+	if auth.AppendFromContext(ctx) {
+		return ErrAppendForbidden
+	}
+	return nil
+}
+
 // ClearVault removes all memories from a vault. The vault name remains registered.
 // It evicts all in-memory state (HNSW, FTS IDF cache, novelty fingerprints, coherence
 // counters, activity tracking) and adjusts the global engramCount.
 func (e *Engine) ClearVault(ctx context.Context, vaultName string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	if !e.beginVaultOp() {
 		return fmt.Errorf("engine is shutting down")
 	}
@@ -144,6 +201,9 @@ var ErrVaultJobActive = fmt.Errorf("vault has an active clone/merge job in progr
 // persisted 0x0F index — but for renamed vaults we need the index lookup
 // (not raw SipHash) to find the real ws, so we capture it up front.
 func (e *Engine) DeleteVault(ctx context.Context, vaultName string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	if !e.beginVaultOp() {
 		return fmt.Errorf("engine is shutting down")
 	}
@@ -258,6 +318,9 @@ func (e *Engine) VaultNameExists(name string) bool {
 // doesn't exist, ErrVaultJobActive if a clone/merge job targets the vault,
 // or an error if newName already exists.
 func (e *Engine) RenameVault(ctx context.Context, oldName, newName string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	if !e.beginVaultOp() {
 		return fmt.Errorf("engine is shutting down")
 	}

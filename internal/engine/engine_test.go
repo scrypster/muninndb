@@ -140,18 +140,27 @@ func (a *ftsTrigAdapter) Search(ctx context.Context, ws [8]byte, query string, t
 	return out, nil
 }
 
-// awaitFTS drains the FTS worker by stopping it (which deterministically
-// processes all queued index jobs) and restarting it with a fresh worker.
-// This is the correct alternative to time.Sleep(300ms) when a test needs
-// to ensure FTS visibility before calling Activate.
-// The restarted worker will be stopped by eng.Stop() during cleanup.
+// awaitFTS blocks until every index job submitted so far has been applied, so a
+// following Activate sees the writes. Use it instead of time.Sleep when a test
+// depends on FTS visibility.
+//
+// It previously stopped the worker and installed a replacement, relying on
+// Stop()'s drain as a flush. That worked but was indirect, and it was silently
+// wrong until #675: a Stop() that raced worker startup skipped the drain, the
+// queued jobs stayed in the discarded worker's buffer, and the replacement began
+// with an empty channel — so the engram was never indexed and recall came back
+// empty. It failed roughly 1 run in 5 under CI load.
+//
+// Flush waits on the worker's pending count instead, which asks the question the
+// tests actually care about, leaves the worker running, and cannot lose a job.
 func awaitFTS(t *testing.T, eng *Engine) {
 	t.Helper()
 	if eng.ftsWorker == nil {
 		return
 	}
-	eng.ftsWorker.Stop()
-	eng.ftsWorker = fts.NewWorker(eng.fts)
+	if err := eng.ftsWorker.Flush(10 * time.Second); err != nil {
+		t.Fatalf("awaitFTS: %v", err)
+	}
 }
 
 // TestHelloVersionCheck ensures the engine accepts the protocol version string
@@ -2466,5 +2475,45 @@ func TestActivateCarriesMemoryType(t *testing.T) {
 	}
 	if top.TypeLabel != "architectural_decision" {
 		t.Errorf("TypeLabel = %q, want %q", top.TypeLabel, "architectural_decision")
+	}
+}
+
+// TestRecall_ReturnsTags is a RED-first regression test for S4: muninn_recall
+// (Activate) must return the stored tags on each activation item so callers
+// don't need a follow-up muninn_read just to see them.
+func TestRecall_ReturnsTags(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   "test",
+		Concept: "Tagged memory about the deploy pipeline",
+		Content: "The deploy pipeline now runs canary checks before promoting.",
+		Tags:    []string{"deploy", "pipeline"},
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	awaitFTS(t, eng)
+
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      "test",
+		Context:    []string{"deploy pipeline canary"},
+		MaxResults: 10,
+		Threshold:  0.01,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if len(resp.Activations) == 0 {
+		t.Fatal("Activate returned 0 results, want >= 1")
+	}
+	top := resp.Activations[0]
+	if len(top.Tags) != 2 {
+		t.Fatalf("Tags len = %d, want 2 (got %v)", len(top.Tags), top.Tags)
+	}
+	if top.Tags[0] != "deploy" || top.Tags[1] != "pipeline" {
+		t.Errorf("Tags = %v, want [deploy pipeline]", top.Tags)
 	}
 }

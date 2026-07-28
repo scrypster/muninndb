@@ -33,12 +33,17 @@ type InlineRelationship struct {
 
 // WriteRequest represents a request to write an engram.
 type WriteRequest struct {
-	Vault         string                 `json:"vault"`
-	Concept       string                 `json:"concept"`
-	Content       string                 `json:"content"`
-	Tags          []string               `json:"tags,omitempty"`
-	Confidence    float64                `json:"confidence,omitempty"`
-	Stability     float64                `json:"stability,omitempty"`
+	Vault      string   `json:"vault"`
+	Concept    string   `json:"concept"`
+	Content    string   `json:"content"`
+	Tags       []string `json:"tags,omitempty"`
+	Confidence float64  `json:"confidence,omitempty"`
+	Stability  float64  `json:"stability,omitempty"`
+	// Importance is the caller-asserted priority in [0,1]. Pointer so an
+	// explicit 0 is distinct from unset (nil = server derives a use-time
+	// default from the memory type). The server clamps to [0,1] and quantizes
+	// an explicit 0 to 0.01.
+	Importance    *float64               `json:"importance,omitempty"`
 	Embedding     []float64              `json:"embedding,omitempty"`
 	Associations  map[string]interface{} `json:"associations,omitempty"`
 	MemoryType    *int                   `json:"memory_type,omitempty"`

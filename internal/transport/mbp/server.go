@@ -186,6 +186,17 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 	scope := &vaultScope{}
+	// Credential mode for the whole connection. A keyed session carries its
+	// key's real mode (so an observe key stays observe); a credential-less
+	// session (open/localhost MBP) is full access. This mirrors gRPC
+	// (internal/transport/grpc/server.go:172,184) and REST
+	// (internal/auth/middleware.go). Without it, ctx has no auth.ContextMode on
+	// MBP, so (a) resolveTrust (SEC-14) over-blocks a legitimate full/write key's
+	// trust=verified write, and (b) an observe key's reads still reinforce
+	// (COG-11), because auth.ObserveFromContext returns false. Use the key's
+	// actual mode — a blanket ModeFull here would let an observe MBP key stamp
+	// verified, turning the over-block into a real SEC-14 under-block.
+	connMode := auth.ModeFull
 	if helloReq.AuthMethod == "token" {
 		key, err := s.authStore.ValidateAPIKey(helloReq.Token)
 		if err != nil {
@@ -193,8 +204,10 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 		scope.key = &key
+		connMode = key.Mode
 	}
 	connCtx = withVaultScope(connCtx, scope)
+	connCtx = context.WithValue(connCtx, auth.ContextMode, connMode)
 
 	// Resolve and validate the HELLO vault under the new scope, then pin the
 	// request to it so the engine registers (and the response advertises) the

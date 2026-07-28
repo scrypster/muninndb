@@ -38,6 +38,15 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
+// dedupReinforceCap is the minimum interval between content-hash dedup
+// reinforcements (#682) for a single engram. It applies ONLY to the
+// content-hash/dedup "re-experienced" channel (Write and WriteBatch), never to
+// explicit read-by-id (engine.Read) — five explicit reads of the same engram
+// must still land AccessCount at 5. Without this cap, re-submitting identical
+// content in a tight loop (e.g. a flaky retry) would runaway-inflate
+// AccessCount in a way no human/agent "access" actually occurred.
+const dedupReinforceCap = 24 * time.Hour
+
 // CognitiveForwarder is implemented by ClusterCoordinator on Lobe nodes.
 // Using an interface avoids an import cycle between engine and replication.
 type CognitiveForwarder interface {
@@ -126,6 +135,8 @@ type Engine struct {
 	pruneDone            chan struct{}             // signals prune worker shutdown
 	idempotencySweepDone chan struct{}             // signals idempotency sweep worker shutdown
 	archiveGCDone        chan struct{}             // signals archive GC worker shutdown
+	evolveRepairDone     chan struct{}             // signals evolve entity-link repair completion
+	evolveRepairDelay    time.Duration             // startup delay before the repair pass
 	coherence            *coherence.Registry       // per-vault incremental coherence counters
 	scoring              *scoring.Store            // per-vault learnable scoring weights
 	prov                 *provenance.Store         // audit trail per-engram
@@ -237,6 +248,20 @@ type Engine struct {
 	// MCPServer.idempotencyLocks but lives on the engine so gRPC and REST callers
 	// get the same protection.
 	idempotencyLocks sync.Map
+
+	// dedupReinforceTimes tracks, per engram ID, the last time the content-hash
+	// dedup channel (#682) reinforced it via TouchAccess — keyed separately
+	// from Engram.LastAccess because LastAccess is set to "now" by the ORIGINAL
+	// write too, so gating on LastAccess directly would make the very first
+	// duplicate-content submission (the common case: a retry moments after the
+	// original write) look like it's already "within the cap window" and
+	// wrongly skip reinforcement. This map remembers only dedup-channel
+	// touches, so the 1/day cap (dedupReinforceCap) applies to repeated
+	// dedup hits, not to the first one. In-memory/process-local — a soft
+	// anti-runaway cap, not a security invariant — same pattern as
+	// idempotencyLocks above; bounded by the number of distinct engrams that
+	// have ever received a duplicate-content write.
+	dedupReinforceTimes sync.Map
 }
 
 const contentHashStripes = 256
@@ -249,6 +274,30 @@ const upsertKeyStripes = 256
 func (e *Engine) getIdempotencyLock(opID string) *sync.Mutex {
 	v, _ := e.idempotencyLocks.LoadOrStore(opID, &sync.Mutex{})
 	return v.(*sync.Mutex)
+}
+
+// shouldDedupReinforce reports whether id is due for a content-hash dedup
+// reinforcement (#682). This is a SOFT rate cap, not a strict mutex: the
+// first-ever hit for an id is claimed atomically (LoadOrStore), but the
+// cap-window-elapsed path below is check-then-Store, so two callers that race
+// past the window for the same id can both reinforce once. That is acceptable —
+// the cap only bounds runaway reinforcement from repeated duplicate writes to
+// roughly one per window; an occasional extra bump under a rare exact race does
+// not distort decay. If it ever needs to be strict, switch the elapsed path to
+// CompareAndSwap on a comparable stored value.
+func (e *Engine) shouldDedupReinforce(id storage.ULID) bool {
+	now := time.Now()
+	v, loaded := e.dedupReinforceTimes.LoadOrStore(id, now)
+	if !loaded {
+		return true // first time this id has hit the dedup channel
+	}
+	last := v.(time.Time)
+	if now.Sub(last) < dedupReinforceCap {
+		return false
+	}
+	// Cap window elapsed — claim it for this call (soft: see doc comment).
+	e.dedupReinforceTimes.Store(id, now)
+	return true
 }
 
 // contentHashLock returns the stripe mutex for the given (vault prefix, content hash) pair.
@@ -482,6 +531,16 @@ func NewEngine(cfg EngineConfig) *Engine {
 	// engine:spawn-ok — tracked by archiveGCDone channel, drained in Stop()
 	go e.runArchiveGCWorker()
 
+	// One-shot startup repair (after a delay) for supersede-successors
+	// stripped of their entity links by the pre-fix Evolve path (#622).
+	e.evolveRepairDelay = defaultEvolveRepairDelay()
+	if cfg.EvolveRepairDelay != nil {
+		e.evolveRepairDelay = *cfg.EvolveRepairDelay
+	}
+	e.evolveRepairDone = make(chan struct{})
+	// engine:spawn-ok — tracked by evolveRepairDone channel, drained in Stop()
+	go e.runEvolveEntityLinkRepair()
+
 	return e
 }
 
@@ -628,6 +687,15 @@ func (e *Engine) Stop() {
 			case <-e.archiveGCDone:
 			case <-time.After(5 * time.Second):
 				slog.Warn("engine: archive GC worker did not exit within 5s")
+			}
+		}
+
+		// Wait for the evolve entity-link repair pass to exit.
+		if e.evolveRepairDone != nil {
+			select {
+			case <-e.evolveRepairDone:
+			case <-time.After(5 * time.Second):
+				slog.Warn("engine: evolve entity-link repair did not exit within 5s")
 			}
 		}
 
@@ -833,6 +901,9 @@ func (e *Engine) validateClientEmbeddingDim(wsPrefix [8]byte, vec []float32) err
 
 // UpdateTags replaces the tags on an engram.
 func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, tags []string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 	return e.store.UpdateTags(ctx, wsPrefix, id, tags)
 }
@@ -894,6 +965,49 @@ func (e *Engine) Hello(ctx context.Context, req *mbp.HelloRequest) (*mbp.HelloRe
 	}, nil
 }
 
+// resolveTrust validates a caller-supplied trust label and enforces the S8/D4
+// credential gate: the elevated "verified" level (human-confirmed / admin-
+// certified) may only be set by a write or full credential, never by an
+// observe credential. An empty label defaults to TrustInferred — the level for
+// all AI-generated content — preserving the pre-S8 behaviour for callers that
+// do not pass trust. source_type is provenance-derived and never a write
+// argument, so trust is the sole discriminator the write path exposes.
+func resolveTrust(ctx context.Context, label string) (storage.TrustLevel, error) {
+	if label == "" {
+		return storage.TrustInferred, nil
+	}
+	level, err := storage.ParseTrustLevel(label)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	if level == storage.TrustVerified {
+		mode, _ := ctx.Value(auth.ContextMode).(string)
+		if mode != auth.ModeFull && mode != auth.ModeWrite {
+			return 0, fmt.Errorf("%w: trust=verified requires a write or full credential", ErrInvalidRequest)
+		}
+	}
+	return level, nil
+}
+
+// importanceFromRequest resolves an optional caller-asserted importance into
+// the stored representation: nil → 0 (unset — the use-time type-table default
+// applies at read/decay/prune time). An explicit value is clamped to [0,1],
+// and an explicit 0.0 (or negative) is quantized to 0.01 so the stored 0
+// keeps meaning "unset" — behaviorally identical, one fewer flag byte.
+func importanceFromRequest(p *float32) float32 {
+	if p == nil {
+		return 0
+	}
+	v := *p
+	if v > 1 {
+		v = 1
+	}
+	if v <= 0 {
+		v = 0.01
+	}
+	return v
+}
+
 // Write implements mbp.EngineAPI.Write.
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	writeStart := time.Now()
@@ -940,28 +1054,38 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 	defer unlockContentHash()
 	if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
-		// A mapping exists — verify the engram is still live (not soft-deleted).
-		if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && existingEng.State != storage.StateSoftDeleted {
-			// Reinforce: increment access count and update LastAccess
-			// to signal that this content is being re-experienced.
-			// Release the stripe lock before UpdateMetadata — the dedup decision
-			// is already made and UpdateMetadata doesn't need protection.
+		// A mapping exists — verify the engram is still live (not soft-deleted)
+		// AND still current on the valid-time axis. Re-remembering content
+		// identical to an EXPIRED engram must NOT reinforce the expired record:
+		// two same-content facts with disjoint validity windows are two facts,
+		// so we fall through to write a new engram (PutContentHash below then
+		// repoints the hash at the new, current one).
+		if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil &&
+			existingEng.State != storage.StateSoftDeleted && !existingEng.IsExpired(time.Now()) {
+			// Reinforce: increment access count and update LastAccess to signal
+			// that this content is being re-experienced. Release the stripe
+			// lock before TouchAccess — the dedup decision is already made and
+			// the per-engram reinforcement below has its own lock (#682).
+			//
+			// 1/day cap (dedup channel ONLY — explicit read-by-id is uncapped,
+			// see engine.Read): re-submitting identical content in a tight loop
+			// must not runaway-inflate AccessCount the way N distinct reads-by-id
+			// legitimately do. shouldDedupReinforce (not LastAccess age) is the
+			// gate — see its doc comment for why LastAccess alone can't tell "the
+			// first duplicate right after the original write" apart from "already
+			// reinforced recently".
 			unlockContentHash()
-			_ = e.store.UpdateMetadata(ctx, wsPrefix, existingID, &storage.EngramMeta{
-				AccessCount: existingEng.AccessCount + 1,
-				LastAccess:  time.Now(),
-				State:       existingEng.State,
-				Confidence:  existingEng.Confidence,
-				Relevance:   existingEng.Relevance,
-				Stability:   existingEng.Stability,
-			})
+			if e.shouldDedupReinforce(existingID) {
+				_ = e.store.TouchAccess(ctx, wsPrefix, existingID)
+			}
 			return &mbp.WriteResponse{
 				ID:        existingID.String(),
 				CreatedAt: existingEng.CreatedAt.UnixNano(),
 				Hint:      "duplicate_content",
 			}, nil
 		}
-		// Engram was soft-deleted or not found — remove stale hash mapping and proceed.
+		// Engram was soft-deleted, expired, or not found — remove the stale hash
+		// mapping and proceed to write a fresh engram.
 		_ = e.store.DeleteContentHash(ctx, wsPrefix, contentHash)
 	}
 
@@ -989,6 +1113,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		callerRelationships = req.Relationships
 	}
 
+	// Resolve trust (S8): default inferred; "verified" gated to write/full creds.
+	trust, trustErr := resolveTrust(ctx, req.Trust)
+	if trustErr != nil {
+		return nil, trustErr
+	}
+
 	// Build storage.Engram from request
 	eng := &storage.Engram{
 		Concept:    req.Concept,
@@ -996,10 +1126,11 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		Tags:       req.Tags,
 		Confidence: req.Confidence,
 		Stability:  req.Stability,
+		Importance: importanceFromRequest(req.Importance),
 		Embedding:  req.Embedding,
 		MemoryType: storage.MemoryType(req.MemoryType),
 		TypeLabel:  req.TypeLabel,
-		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
+		Trust:      trust,
 	}
 
 	// Apply caller-provided summary directly to the engram.
@@ -1014,6 +1145,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 			return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 		}
 		eng.CreatedAt = *req.CreatedAt
+	}
+
+	// Valid-time bounds (half-open [valid_from, valid_until)). ValidFrom
+	// defaults to CreatedAt at decode time, so leaving it unset is free.
+	if err := applyValidity(eng, req.ValidFrom, req.ValidUntil); err != nil {
+		return nil, err
 	}
 
 	// Convert associations
@@ -1601,16 +1738,18 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		// cannot see each other's hashes during Phase 1. This is a known limitation.
 		contentHash := storage.ContentHash(req.Content)
 		if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
-			if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && existingEng.State != storage.StateSoftDeleted {
-				// Reinforce: increment access count and update LastAccess.
-				_ = e.store.UpdateMetadata(ctx, wsPrefix, existingID, &storage.EngramMeta{
-					AccessCount: existingEng.AccessCount + 1,
-					LastAccess:  time.Now(),
-					State:       existingEng.State,
-					Confidence:  existingEng.Confidence,
-					Relevance:   existingEng.Relevance,
-					Stability:   existingEng.Stability,
-				})
+			// Same live-AND-current check as the single-Write path: an EXPIRED
+			// engram (closed ValidUntil <= now) must not be reinforced — write a
+			// new engram with its own validity window instead.
+			if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil &&
+				existingEng.State != storage.StateSoftDeleted && !existingEng.IsExpired(time.Now()) {
+				// Reinforce via TouchAccess (#682) — same locked primitive and
+				// same 1/day dedup-channel cap as the single-Write path above;
+				// this unlocked GetEngram→UpdateMetadata pair was the identical
+				// STO-2 race, just in the batch path.
+				if e.shouldDedupReinforce(existingID) {
+					_ = e.store.TouchAccess(ctx, wsPrefix, existingID)
+				}
 				responses[i] = &mbp.WriteResponse{
 					ID:        existingID.String(),
 					CreatedAt: existingEng.CreatedAt.UnixNano(),
@@ -1644,16 +1783,25 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			callerRelationships = req.Relationships
 		}
 
+		// Resolve trust (S8): default inferred; "verified" gated to write/full
+		// creds. A bad/ungated trust fails only this item, not the whole batch.
+		trust, trustErr := resolveTrust(ctx, req.Trust)
+		if trustErr != nil {
+			errs[i] = trustErr
+			continue
+		}
+
 		eng := &storage.Engram{
 			Concept:    req.Concept,
 			Content:    req.Content,
 			Tags:       req.Tags,
 			Confidence: req.Confidence,
 			Stability:  req.Stability,
+			Importance: importanceFromRequest(req.Importance),
 			Embedding:  req.Embedding,
 			MemoryType: storage.MemoryType(req.MemoryType),
 			TypeLabel:  req.TypeLabel,
-			Trust:      storage.TrustInferred, // all new MCP writes default to inferred
+			Trust:      trust,
 		}
 
 		if callerSummary != "" {
@@ -1665,6 +1813,10 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 				continue
 			}
 			eng.CreatedAt = *req.CreatedAt
+		}
+		if validityErr := applyValidity(eng, req.ValidFrom, req.ValidUntil); validityErr != nil {
+			errs[i] = validityErr
+			continue
 		}
 
 		assocs := make([]storage.Association, len(req.Associations))
@@ -2046,17 +2198,40 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		return nil, fmt.Errorf("get engram: %w", err)
 	}
 
-	// Fire implicit positive feedback signal asynchronously — read = accessed.
-	// spawnFireAndForget ensures Stop() drains this goroutine before DB close.
-	e.spawnFireAndForget(func() {
-		signal := scoring.FeedbackSignal{
-			EngramID:    [16]byte(id),
-			Accessed:    true,
-			ScoreVector: scoring.DefaultWeights(),
-			Timestamp:   time.Now(),
+	// S3: effective read-only = observe-mode credential OR an explicit
+	// req.ReadOnly (already the effective decision computed by the
+	// MCP/REST/gRPC handler). A read-only read must skip BOTH write side
+	// effects below — the implicit feedback signal AND #682's reinforcement —
+	// closing the brief→"verify before acting"→read→reinforce loop for
+	// observe credentials.
+	readOnly := auth.ObserveFromContext(ctx) || req.ReadOnly
+
+	if !readOnly {
+		// Fire implicit positive feedback signal asynchronously — read = accessed.
+		// spawnFireAndForget ensures Stop() drains this goroutine before DB close.
+		e.spawnFireAndForget(func() {
+			signal := scoring.FeedbackSignal{
+				EngramID:    [16]byte(id),
+				Accessed:    true,
+				ScoreVector: scoring.DefaultWeights(),
+				Timestamp:   time.Now(),
+			}
+			e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
+		})
+
+		// #682: reinforce AccessCount/LastAccess for this explicit read-by-id,
+		// gated on the vault's ReinforceOnRead plasticity flag (default true).
+		// Fire-and-forget on e.stopCtx (not the request ctx) — mirrors the
+		// feedback signal above: reinforcement is gated by engine lifecycle,
+		// not request lifecycle, so a client disconnect must not abort it.
+		// Uncapped (unlike the dedup channel): N explicit reads-by-id must
+		// land AccessCount at N.
+		if e.ResolveVaultPlasticity(req.Vault).ReinforceOnRead {
+			e.spawnFireAndForget(func() {
+				_ = e.store.TouchAccess(e.stopCtx, wsPrefix, id)
+			})
 		}
-		e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
-	})
+	}
 
 	// Collect entities linked to this engram (0x20 forward index).
 	var entities []mbp.InlineEntity
@@ -2113,9 +2288,22 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		Classification:      eng.Classification,
 		EmbedDim:            uint8(eng.EmbedDim),
 		Trust:               uint8(eng.Trust),
+		ValidFrom:           eng.EffectiveValidFrom().UnixNano(),
+		ValidUntil:          validUntilNano(eng.ValidUntil),
+		IsCurrent:           eng.ValidUntil.IsZero(),
+		Importance:          eng.Importance,
 		Entities:            entities,
 		EntityRelationships: entityRels,
 	}, nil
+}
+
+// validUntilNano converts an optional ValidUntil to UnixNano, keeping 0 as the
+// "open window" sentinel.
+func validUntilNano(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
 }
 
 // Activate implements mbp.EngineAPI.Activate.
@@ -2178,6 +2366,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	actReq.PASMaxInjections = resolved.PASMaxInjections
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
 
+	// Valid-time gate (COG-19): as_of / include_invalid flow into phase-6
+	// filtering; the final gate below re-applies them to entity-boost injections.
+	actReq.AsOf = req.AsOf
+	actReq.IncludeInvalid = req.IncludeInvalid
+
 	// Ownership-lease work-queue visibility (#548): hide engrams checked out by a
 	// live foreign lease unless the caller opts in.
 	actReq.CallerOwner = req.CallerOwner
@@ -2202,7 +2395,10 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	}
 
 	// Fix 4: Observe mode is a pure read — skip activation log side effects.
-	actReq.ReadOnly = auth.ObserveFromContext(ctx)
+	// S3: an explicit req.ReadOnly (already the effective value computed by the
+	// MCP/REST/gRPC handler — credential-observe OR request read_only) also
+	// forces this; it can only ADD read-only-ness, never remove it.
+	actReq.ReadOnly = auth.ObserveFromContext(ctx) || req.ReadOnly
 
 	// Convert weights if provided; otherwise apply preset weights from Plasticity config.
 	// All scoring goes through ACT-R; legacy temporal path is kept in code but not reachable for now.
@@ -2333,9 +2529,45 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// After BFS produces a scored set, any engram sharing a named entity with a
 	// top-N result receives a small boost. This surfaces entity-linked engrams
 	// that have no direct association edge to the query-matching engrams.
-	result.Activations = e.applyEntityBoost(ctx, wsPrefix, result.Activations)
-	// Re-apply MaxResults: entity boost may have appended engrams beyond the limit.
-	// applyEntityBoost re-sorts by score descending, so truncation preserves top-K.
+	preBoost := len(result.Activations)
+	result.Activations = e.applyEntityBoost(ctx, wsPrefix, vaultSize, result.Activations, actReq)
+	// Injected engrams count as found: on the boost path, total <
+	// len(activations) was the #569 bypass fingerprint. This covers entity
+	// boost only — applySupersession below may still inject promoted heads
+	// without a TotalFound bump. Known imprecision (scoped follow-up, PR #570
+	// review): an engram that scored above threshold in the pipeline but was
+	// truncated past MaxResults and then re-injected here is counted twice.
+	result.TotalFound += len(result.Activations) - preBoost
+
+	// Supersedes-aware ranking: promote the current fact over any superseded one
+	// it replaces (injecting it if the query didn't retrieve it), so recall never
+	// leads with a fact it knows is stale. Runs after entity boost and BEFORE
+	// truncation so an injected head is not cut. Pure read-path ranking (no writes).
+	result.Activations = e.applySupersession(ctx, wsPrefix, result.Activations, actReq.MaxResults)
+
+	// Final valid-time gate (COG-19: default recall never returns an engram whose
+	// ValidUntil <= now). Phase-6 already gated scored candidates, and entity-boost
+	// injections now enforce the full phase-6 contract (filters, trust, lease,
+	// validity — #569) at injection, but supersession still injects promoted heads
+	// past PassesMetaFilter, so the shared predicate must hold at the last cut
+	// before truncation. Runs AFTER supersession
+	// on purpose: a manual supersede's now-expired predecessor is dropped only once
+	// its current head has been promoted/injected, so a query matching only the
+	// stale phrasing still returns the current fact.
+	// NOTE: filter into a NEW slice — the activation engine's async log-drain
+	// goroutine may still be reading the backing array returned by Run(), so
+	// in-place compaction (Activations[:0]) is a data race.
+	gateNow := time.Now()
+	kept := make([]activation.ScoredEngram, 0, len(result.Activations))
+	for _, s := range result.Activations {
+		if activation.PassesValidity(s.Engram, req.AsOf, req.IncludeInvalid, gateNow) {
+			kept = append(kept, s)
+		}
+	}
+	result.Activations = kept
+
+	// Re-apply MaxResults: entity boost / supersession / the validity gate may have
+	// changed the set. All re-sort or preserve score order, so truncation keeps top-K.
 	if actReq.MaxResults > 0 && len(result.Activations) > actReq.MaxResults {
 		result.Activations = result.Activations[:actReq.MaxResults]
 	}
@@ -2360,7 +2592,28 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			Trust:       uint8(scored.Engram.Trust),
 			MemoryType:  uint8(scored.Engram.MemoryType),
 			TypeLabel:   scored.Engram.TypeLabel,
+			Tags:        scored.Engram.Tags,
+			Importance:  scored.Engram.Importance,
 		}
+
+		// Supersession annotation from the supersedes-aware ranking phase (always-on
+		// when this result is superseded; empty otherwise). Zero ULID → omit.
+		if (scored.CurrentVersion != storage.ULID{}) {
+			items[i].CurrentVersion = scored.CurrentVersion.String()
+		}
+		if (scored.SupersededBy != storage.ULID{}) {
+			items[i].SupersededBy = scored.SupersededBy.String()
+		}
+		// Valid-time annotations: ValidFrom only when explicitly divergent from
+		// CreatedAt; ValidUntil when the window is closed; Expired when the
+		// window closed at or before now (reachable only under include_invalid).
+		if !scored.Engram.ValidFrom.IsZero() && !scored.Engram.ValidFrom.Equal(scored.Engram.CreatedAt) {
+			items[i].ValidFrom = scored.Engram.ValidFrom.UnixNano()
+		}
+		if !scored.Engram.ValidUntil.IsZero() {
+			items[i].ValidUntil = scored.Engram.ValidUntil.UnixNano()
+		}
+		items[i].Expired = scored.Engram.IsExpired(gateNow)
 
 		items[i].ScoreComponents = mbp.ScoreComponents{
 			SemanticSimilarity: float32(scored.Components.SemanticSimilarity),
@@ -2368,6 +2621,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			DecayFactor:        float32(scored.Components.DecayFactor),
 			HebbianBoost:       float32(scored.Components.HebbianBoost),
 			TransitionBoost:    float32(scored.Components.TransitionBoost),
+			EntityBoost:        float32(scored.Components.EntityBoost),
 			AccessFrequency:    float32(scored.Components.AccessFrequency),
 			Recency:            float32(scored.Components.Recency),
 			Raw:                float32(scored.Components.Raw),
@@ -2623,6 +2877,9 @@ func (e *Engine) Unsubscribe(ctx context.Context, subID string) error {
 
 // Link implements mbp.EngineAPI.Link.
 func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkResponse, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 
 	sourceID, err := storage.ParseULID(req.SourceID)
@@ -2663,6 +2920,19 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 
 	if err := e.store.WriteAssociation(ctx, wsPrefix, sourceID, targetID, assoc); err != nil {
 		return nil, fmt.Errorf("write association: %w", err)
+	}
+
+	// An explicit RelSupersedes link closes the target's validity window at
+	// write time (valid-time axis, COG-19: a stamp, never a delete). Skipped
+	// when the window is already closed — an earlier stamp records when the
+	// fact actually stopped being true and must not be moved. Best-effort:
+	// the association is already committed, and the legacy read-time
+	// supersession chain-walk still demotes unstamped targets.
+	if storage.RelType(req.RelType) == storage.RelSupersedes {
+		if _, stampErr := e.store.StampValidUntil(ctx, wsPrefix, targetID, time.Now(), true); stampErr != nil {
+			slog.Warn("engine: link: failed to stamp ValidUntil on superseded target",
+				"target", targetID.String(), "err", stampErr)
+		}
 	}
 
 	// When a "contradicts" link is explicitly created via Link(), notify the
@@ -2731,13 +3001,120 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 	return &mbp.LinkResponse{OK: true}, nil
 }
 
+// AdjustConfidence applies a signed delta to engram id's confidence (clamped to
+// [0,1]) and, when hasContra, mirrors the internal OnFound: persists the 0x0A
+// contradiction marker for (id, other) AND submits EvidenceContradiction to the
+// ConfidenceWorker for both engrams. Returns the new absolute confidence.
+//
+// All validation precedes any write. A bare delta (hasContra=false) does NOT
+// submit to the ConfidenceWorker (§D3 carve-out — processBatch would otherwise
+// clobber the explicit value).
+//
+// Mirrors Engine.Link's vault resolution + GetMetadata existence pattern +
+// cogWorkers() submit pattern. Source string is "external_contradiction" to
+// distinguish external bridge signal from the internal "contradiction_detected"
+// path emitted by Link/ContradictWorker.
+func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.ULID, delta float32, other storage.ULID, hasContra bool, reason, caller string) (float32, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return 0, err
+	}
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+
+	if math.IsNaN(float64(delta)) || math.IsInf(float64(delta), 0) {
+		return 0, fmt.Errorf("%w: delta is NaN or Inf", ErrInvalidArgument)
+	}
+	if hasContra && other == id {
+		return 0, ErrSelfContradiction
+	}
+
+	// Existence check — mirror Engine.Link's batched GetMetadata (nil meta = NotFound).
+	ids := []storage.ULID{id}
+	if hasContra {
+		ids = []storage.ULID{id, other}
+	}
+	metas, err := e.store.GetMetadata(ctx, wsPrefix, ids)
+	if err != nil {
+		return 0, fmt.Errorf("adjust confidence: read meta: %w", err)
+	}
+	for _, m := range metas {
+		if m == nil {
+			return 0, ErrEngramNotFound
+		}
+	}
+
+	// Atomic delta write: the storage method holds the per-engram stripe lock
+	// across read+add+clamp+commit, closing the lost-update race (#559). The
+	// prior confidence read and the [0,1] clamp have moved INTO the locked
+	// storage method (UpdateConfidenceWithContradiction) — an external unlocked
+	// read here would re-open the race, so we do not call GetConfidence. The
+	// returned (prior, newConf) come from inside the locked section so the
+	// audit log below reports the same values that were committed.
+	prior, newConf, err := e.store.UpdateConfidenceWithContradiction(ctx, wsPrefix, id, delta, other, hasContra)
+	if err != nil {
+		return 0, fmt.Errorf("adjust confidence: write: %w", err)
+	}
+
+	// Mirror OnFound: submit EvidenceContradiction for both engrams (only when hasContra).
+	if hasContra {
+		if _, _, cw := e.cogWorkers(); cw != nil {
+			cw.Submit(cognitive.ConfidenceUpdate{
+				WS: wsPrefix, EngramID: [16]byte(id),
+				Evidence: cognitive.EvidenceContradiction, Source: "external_contradiction",
+			})
+			cw.Submit(cognitive.ConfidenceUpdate{
+				WS: wsPrefix, EngramID: [16]byte(other),
+				Evidence: cognitive.EvidenceContradiction, Source: "external_contradiction",
+			})
+		}
+	}
+
+	slog.Info("adjust_confidence",
+		"engram_id", id.String(), "delta", delta, "prior", prior, "new", newConf,
+		"contradicted_by", other.String(), "has_contra", hasContra,
+		"reason", reason, "caller", caller, "vault", vault)
+
+	return newConf, nil
+}
+
 // Forget implements mbp.EngineAPI.Forget.
 func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.ForgetResponse, error) {
+	if auth.AppendFromContext(ctx) {
+		return nil, ErrAppendForbidden
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 
 	id, err := storage.ParseULID(req.ID)
 	if err != nil {
 		return nil, fmt.Errorf("parse id: %w", err)
+	}
+
+	// not_true_since: invalidate on the valid-time axis instead of deleting.
+	// The engram stays ACTIVE with a closed validity window — default recall
+	// drops it (COG-19), as_of/include_invalid still see it. This is an
+	// explicit caller assertion of WHEN the fact stopped being true, so it
+	// overwrites any prior stamp (onlyIfOpen=false).
+	if req.NotTrueSince != nil {
+		if req.Hard {
+			return nil, fmt.Errorf("%w: not_true_since cannot be combined with hard=true — invalidation is a stamp, deletion is deletion", ErrInvalidRequest)
+		}
+		// Guard the stamp instant BEFORE writing: reject the epoch/uninitialized
+		// sentinel (which would decode as "open" and silently NOT invalidate while
+		// the response claims it did) and an inverted window (invalid before the
+		// fact existed). Mirrors applyValidity, which the stamp path bypasses.
+		eng, err := e.store.GetEngram(ctx, wsPrefix, id)
+		if err != nil || eng == nil {
+			return nil, ErrEngramNotFound
+		}
+		if err := validateStampTime(*req.NotTrueSince, eng.EffectiveValidFrom()); err != nil {
+			return nil, err
+		}
+		if _, err := e.store.StampValidUntil(ctx, wsPrefix, id, *req.NotTrueSince, false); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return nil, ErrEngramNotFound
+			}
+			return nil, fmt.Errorf("stamp not_true_since: %w", err)
+		}
+		return &mbp.ForgetResponse{OK: true}, nil
 	}
 
 	if req.Hard {
@@ -2931,6 +3308,9 @@ func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 // Restore un-deletes a soft-deleted engram by restoring its state to StateActive.
 // Returns an error if the engram does not exist or was hard-deleted.
 func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
@@ -2959,6 +3339,17 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 		return nil, fmt.Errorf("restore update: %w", err)
 	}
 
+	// Restore re-opens the validity window: without this, a restored engram
+	// whose predecessor-stamp (evolve/supersedes) is in the past would be
+	// invisible to default recall — restore would be a recall no-op.
+	if !eng.ValidUntil.IsZero() {
+		if _, err := e.store.StampValidUntil(ctx, ws, ulid, time.Time{}, false); err != nil {
+			slog.Warn("engine: restore: failed to clear ValidUntil stamp", "id", id, "err", err)
+		} else {
+			eng.ValidUntil = time.Time{}
+		}
+	}
+
 	// Re-add content-hash mapping so future writes detect this engram as a duplicate.
 	contentHash := storage.ContentHash(eng.Content)
 	_ = e.store.PutContentHash(ctx, ws, contentHash, ulid)
@@ -2972,6 +3363,9 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 // so its read-modify-write is atomic and serializes with any concurrent
 // transition on the same engram — closing the former TOCTOU.
 func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
@@ -2996,6 +3390,9 @@ func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state stri
 // trust must be one of "verified", "inferred", "external", "untrusted".
 // Returns an error if the engram is not found or trust is invalid.
 func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	level, err := storage.ParseTrustLevel(trust)
 	if err != nil {
 		return fmt.Errorf("parse trust: %w", err)
@@ -3089,8 +3486,30 @@ type EngineSessionEntry struct {
 
 // Evolve creates a new version of an existing engram and soft-deletes the old one.
 // concept overrides the inherited concept label; empty string inherits verbatim (#483).
+// entities, when non-empty, REPLACE the entity links otherwise carried forward
+// from the predecessor — the update changed what the memory is about.
 // All three writes are committed in a single atomic Pebble batch.
 func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (storage.ULID, error) {
+	return e.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, nil, nil, time.Time{})
+}
+
+// EvolveAt is Evolve with three optional extras. entities, when non-nil,
+// replaces the carried entity set (the update changed what the memory is
+// about); nil carries the predecessor's entities forward as before. importance
+// overrides the successor's caller-asserted importance (clamped [0,1], explicit
+// 0 quantized to 0.01, same rules as Write); nil inherits the predecessor's
+// explicitly asserted importance verbatim (an unset predecessor stays unset, so
+// a type-derived default keeps deriving from the inherited MemoryType rather
+// than being frozen into the record). effectiveAt is the application-time moment
+// the new version became true — it becomes the successor's ValidFrom and the
+// predecessor's ValidUntil stamp (half-open [from, until) windows meet exactly);
+// the zero time defaults to now.
+func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (storage.ULID, error) {
+	// Append-mode credentials cannot evolve (modify an existing memory). Guarding
+	// EvolveAt covers Evolve too, since Evolve delegates here (#687 + valid-time).
+	if auth.AppendFromContext(ctx) {
+		return storage.ULID{}, ErrAppendForbidden
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
 	// Refuse a mismatched caller-supplied embedding before anything is
@@ -3118,14 +3537,48 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	// supersedes association within the same batch.
 	newULID := storage.NewULID()
 	now := time.Now()
+	// effectiveAt is the valid-time boundary between predecessor and successor:
+	// old.ValidUntil = new.ValidFrom = effectiveAt (half-open windows meet
+	// exactly, no overlap and no gap). Default: the evolve moment.
+	if effectiveAt.IsZero() {
+		effectiveAt = now
+	} else if err := validateStampTime(effectiveAt, oldEng.EffectiveValidFrom()); err != nil {
+		// An explicit effective_at must be a real instant after the predecessor
+		// began: epoch would collapse the successor's ValidFrom to CreatedAt AND
+		// leave the predecessor's ValidUntil raw-0 (= open), silently un-superseding.
+		return storage.ULID{}, err
+	}
 	if concept == "" {
 		concept = oldEng.Concept
+	}
+	// MemoryType and TypeLabel are inherited alongside Concept and Tags. Evolve
+	// exposes no parameter for either, so leaving them unset reset the type to
+	// the MemoryType zero value, Fact — a decision or procedure was silently
+	// relabelled a fact on every evolve, and again at each hop down a supersede
+	// chain (issue #653).
+	//
+	// Summary is deliberately NOT inherited. It is content-derived (see the
+	// field doc on storage.Engram), and Evolve replaces the content, so the
+	// predecessor's summary is false of the successor. Leaving it empty is also
+	// what lets the summarize stage regenerate it: engramHasSummary and the
+	// retroactive processor both treat a non-empty Summary as caller-authoritative
+	// and skip the stage, which would pin the stale text permanently and leave
+	// KeyPoints — produced only by that stage — empty forever.
+	// Importance: explicit override wins; otherwise inherit the predecessor's
+	// stored (explicit-only) value. Unset stays unset — never freeze the
+	// use-time type-table default into the record.
+	newImportance := oldEng.Importance
+	if importance != nil {
+		newImportance = importanceFromRequest(importance)
 	}
 	newEng := &storage.Engram{
 		ID:         newULID,
 		Concept:    concept,
 		Content:    newContent,
 		Tags:       oldEng.Tags,
+		MemoryType: oldEng.MemoryType,
+		TypeLabel:  oldEng.TypeLabel,
+		Importance: newImportance,
 		Confidence: 1.0,
 		Stability:  30.0,
 		State:      storage.StateActive,
@@ -3134,6 +3587,32 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 		LastAccess: now,
 		Embedding:  embedding,
 		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
+		ValidFrom:  effectiveAt,
+	}
+
+	// Carry the predecessor's entity links and relationship records forward
+	// (#622): Evolve wrote no 0x20/0x23 links and no 0x21/0x26 relationship
+	// records for the successor, so every evolved memory silently vanished
+	// from FindByEntity and entity scoring from the moment it was evolved.
+	// The link and relationship keys are queued into the same atomic batch as
+	// the engram writes; the mention-count and co-occurrence ledgers are funded
+	// post-commit (see below). Caller-supplied inline entities suppress the
+	// carry entirely — they replace the set rather than merging with it.
+	var carriedEntities []string
+	var carriedRels []storage.RelationshipRecord
+	if len(entities) == 0 {
+		if err := e.store.ScanEngramEntities(ctx, wsPrefix, oldULID, func(name string) error {
+			carriedEntities = append(carriedEntities, name)
+			return nil
+		}); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: scan predecessor entities: %w", err)
+		}
+		if err := e.store.ScanEngramRelationships(ctx, wsPrefix, oldULID, func(rec storage.RelationshipRecord) error {
+			carriedRels = append(carriedRels, rec)
+			return nil
+		}); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: scan predecessor relationships: %w", err)
+		}
 	}
 
 	// Build the supersedes association (new → old).
@@ -3156,11 +3635,113 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	if err := batch.WriteAssociation(ctx, wsPrefix, newULID, oldULID, supersedes); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch write association: %w", err)
 	}
-	if err := batch.UpdateEngramState(ctx, wsPrefix, oldULID, storage.StateSoftDeleted); err != nil {
-		return storage.ULID{}, fmt.Errorf("evolve: batch update old state: %w", err)
+	// Supersede = soft-delete (hidden from the present) + ValidUntil stamp
+	// (re-opens the record for as_of time-travel only) in the same atomic
+	// batch. Invalidation is always a stamp, never a delete (COG-19).
+	if err := batch.SupersedeEngram(ctx, wsPrefix, oldULID, effectiveAt); err != nil {
+		return storage.ULID{}, fmt.Errorf("evolve: batch supersede old: %w", err)
+	}
+	for _, name := range carriedEntities {
+		if err := batch.WriteEntityEngramLink(ctx, wsPrefix, newULID, name); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: batch carry entity link: %w", err)
+		}
+	}
+	for _, rec := range carriedRels {
+		if err := batch.WriteRelationshipRecord(ctx, wsPrefix, newULID, rec); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: batch carry relationship: %w", err)
+		}
 	}
 	if err := batch.Commit(); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch commit: %w", err)
+	}
+
+	// Fund the ledgers for the carried links. The mention-count and
+	// co-occurrence ledgers are one increment per link key created, one
+	// decrement per link key destroyed: DeleteEngram decrements both
+	// unconditionally for every link it removes, so a carried link with no
+	// matching increment becomes an unfunded liability that the pruner cashes
+	// in — hard-delete the predecessor and MentionCount under-reads while the
+	// successor is still linked, and a co-occurrence pair drops to zero and
+	// vanishes from ScanEntityClusters while both entities are still mentioned
+	// together. Done post-commit, mirroring DeleteEngram's post-commit
+	// decrements: a crash here leaves counts slightly low with the links
+	// intact, the mirror image of DeleteEngram's slightly-high stale case.
+	for _, name := range carriedEntities {
+		if err := e.store.IncrementEntityMentionCount(ctx, name); err != nil {
+			slog.Warn("engine: evolve: failed to increment mention count for carried entity", "entity", name, "engram", newULID.String(), "err", err)
+		}
+	}
+	// Cap mirrors DeleteEngram's maxCoOccurrenceEntities. Beyond the cap the
+	// ledger is best-effort on both sides — DeleteEngram's first-50 comes from
+	// map iteration, so the truncated subsets need not be identical — matching
+	// the pre-existing behaviour for >50-entity engrams rather than fixing it.
+	const maxCoOccurrenceEntities = 50
+	coNames := carriedEntities
+	if len(coNames) > maxCoOccurrenceEntities {
+		slog.Warn("engine: evolve: engram has unusually many carried entities, co-occurrence funding capped",
+			"engram", newULID.String(), "entity_count", len(carriedEntities), "cap", maxCoOccurrenceEntities)
+		coNames = coNames[:maxCoOccurrenceEntities]
+	}
+	for i := 0; i < len(coNames); i++ {
+		for j := i + 1; j < len(coNames); j++ {
+			if err := e.store.IncrementEntityCoOccurrence(ctx, wsPrefix, coNames[i], coNames[j]); err != nil {
+				slog.Warn("engine: evolve: failed to increment co-occurrence for carried pair", "a", coNames[i], "b", coNames[j], "engram", newULID.String(), "err", err)
+			}
+		}
+	}
+
+	// Caller-supplied inline entities replace the carry: the update changed what
+	// the memory is about. These are genuinely new mentions, so they take the
+	// same path remember's inline entities do — record upsert (which funds the
+	// mention count), link, and co-occurrence bookkeeping included.
+	if len(entities) > 0 {
+		var linkedEntityNames []string
+		for _, ent := range entities {
+			typ := strings.ToLower(strings.TrimSpace(ent.Type))
+			if typ == "" {
+				typ = "other"
+			}
+			record := storage.EntityRecord{
+				Name:       ent.Name,
+				Type:       typ,
+				Confidence: 1.0,
+			}
+			if err := e.store.UpsertEntityRecord(ctx, record, "inline"); err != nil {
+				slog.Warn("engine: evolve: failed to store inline entity", "name", ent.Name, "err", err)
+				continue
+			}
+			if err := e.store.WriteEntityEngramLink(ctx, wsPrefix, newULID, ent.Name); err != nil {
+				slog.Warn("engine: evolve: failed to link inline entity", "name", ent.Name, "err", err)
+				continue
+			}
+			linkedEntityNames = append(linkedEntityNames, ent.Name)
+		}
+		for i := 0; i < len(linkedEntityNames); i++ {
+			for j := i + 1; j < len(linkedEntityNames); j++ {
+				if err := e.store.IncrementEntityCoOccurrence(ctx, wsPrefix, linkedEntityNames[i], linkedEntityNames[j]); err != nil {
+					slog.Warn("engine: evolve: failed to increment co-occurrence", "vault", vault, "engram", newULID.String(), "entity_a", linkedEntityNames[i], "entity_b", linkedEntityNames[j], "err", err)
+				}
+				if err := e.store.UpsertRelationshipRecord(ctx, wsPrefix, newULID, storage.RelationshipRecord{
+					FromEntity: linkedEntityNames[i],
+					ToEntity:   linkedEntityNames[j],
+					RelType:    "co_occurs_with",
+					Weight:     0.3,
+					Source:     "co-occurrence",
+				}); err != nil {
+					slog.Warn("engine: evolve: failed to upsert co_occurs_with relationship", "vault", vault, "engram", newULID.String(), "entity_a", linkedEntityNames[i], "entity_b", linkedEntityNames[j], "err", err)
+				}
+			}
+		}
+	}
+
+	// Mark entity extraction complete whenever the successor carries a curated
+	// set (carried or inline), so the retroactive enrichment provider does not
+	// re-extract over it.
+	if len(carriedEntities) > 0 || len(entities) > 0 {
+		existingFlags, _ := e.store.GetDigestFlags(ctx, plugin.ULID(newULID))
+		if err := e.store.SetDigestFlag(ctx, newULID, existingFlags|plugin.DigestEntities); err != nil {
+			slog.Warn("engine: evolve: failed to set DigestEntities flag", "id", newULID.String(), "err", err)
+		}
 	}
 
 	// ── Content-hash bookkeeping: delete old mapping, add new mapping ──
@@ -3209,6 +3790,9 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 // Consolidate merges multiple engrams into a single new engram and archives the originals.
 // Returns a ConsolidateResult with the new ID, archived IDs, and any non-fatal warnings.
 func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	if len(ids) > 50 {
 		return nil, fmt.Errorf("consolidate: too many ids (max 50, got %d)", len(ids))
 	}
@@ -3317,6 +3901,9 @@ func (e *Engine) ActivityCounts(ctx context.Context, vault string, since, until 
 // evidence-link warnings. The decision is always committed; evidence linking
 // is best-effort (a bad evidence ID produces a warning, not a failure).
 func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*DecideResult, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	content := rationale
 	if len(alternatives) > 0 {
 		content += "\n---\nAlternatives:\n" + strings.Join(alternatives, "\n")
@@ -3354,26 +3941,24 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 
 // RecordAccess increments the access count and updates the last-accessed timestamp
 // for the engram identified by id in the given vault.
+//
+// Thin wrapper over storage.TouchAccess (#682) — previously this did its own
+// unlocked GetEngram→UpdateMetadata read-modify-write, which raced
+// CompareAndSet/DeleteEngram on the same id (STO-2). TouchAccess holds the
+// per-engram stripe lock across the whole RMW.
 func (e *Engine) RecordAccess(ctx context.Context, vault, id string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
 		return fmt.Errorf("record_access: parse id: %w", err)
 	}
-	eng, err := e.store.GetEngram(ctx, ws, ulid)
-	if err != nil {
-		return fmt.Errorf("record_access: get engram: %w", err)
+	if err := e.store.TouchAccess(ctx, ws, ulid); err != nil {
+		return fmt.Errorf("record_access: %w", err)
 	}
-	meta := &storage.EngramMeta{
-		State:       eng.State,
-		Confidence:  eng.Confidence,
-		Relevance:   eng.Relevance,
-		Stability:   eng.Stability,
-		AccessCount: eng.AccessCount + 1,
-		UpdatedAt:   eng.UpdatedAt,
-		LastAccess:  time.Now(),
-	}
-	return e.store.UpdateMetadata(ctx, ws, ulid, meta)
+	return nil
 }
 
 // ResolveVaultPlasticity returns the resolved plasticity config for a vault,
@@ -3393,6 +3978,9 @@ func (e *Engine) ResolveVaultPlasticity(vaultName string) auth.ResolvedPlasticit
 // persist in the relevance bucket index and cause an infinite prune loop.
 // Returns the number of engrams pruned.
 func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return 0, err
+	}
 	if !e.beginVaultOp() {
 		return 0, fmt.Errorf("engine is shutting down")
 	}
@@ -3435,6 +4023,14 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			// Phase 2: load metadata and compute real ACT-R base-level score for each candidate.
 			// B(M) = ln(n+1) - d * ln(max(ageDays, 0.1) / n)  where d=0.5 (standard decay).
 			// Engrams with low B(M) are stale and rarely accessed — safest to delete.
+			//
+			// COG-20: candidates with EffectiveImportance >= HighImportanceFloor
+			// are exempt from this retrieval-strength prune path — an important
+			// memory is never deleted just because it is cold. The exemption
+			// deliberately performs NO validity check: an expired-but-important
+			// fact stays findable via as_of (valid-time gives time travel;
+			// importance guarantees the destination still exists). RetentionDays
+			// below remains an authoritative age policy and is NOT exempt.
 			type scoredCandidate struct {
 				id    storage.ULID
 				score float64
@@ -3442,31 +4038,43 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			const actrDecay = 0.5
 			now := time.Now()
 			scored := make([]scoredCandidate, 0, len(candidates))
+			var exempted int
 
 			if len(candidates) > 0 {
 				metas, err := e.store.GetMetadata(opCtx, ws, candidates)
 				if err != nil {
-					// Fall back: delete candidates in index order without rescoring.
+					// Degrade loudly, never importance-blind: without metadata we
+					// cannot honor the COG-20 exemption, so skip this MaxEngrams
+					// pass entirely (the prune worker retries in ~60s) instead of
+					// deleting candidates in index order.
+					slog.Warn("prune vault: metadata load failed; skipping MaxEngrams prune this cycle (COG-20 exemption needs metadata)",
+						"vault", vaultName, "excess", excess, "err", err)
 					metas = nil
 				}
-				for i, id := range candidates {
-					var b float64
-					if metas != nil && i < len(metas) && metas[i] != nil {
-						m := metas[i]
-						lastAccess := m.LastAccess
-						if lastAccess.IsZero() || lastAccess.Year() < 2000 {
-							lastAccess = now
+				if metas != nil {
+					for i, id := range candidates {
+						var b float64
+						if i < len(metas) && metas[i] != nil {
+							m := metas[i]
+							if m.EffectiveImportance() >= storage.HighImportanceFloor {
+								exempted++
+								continue // COG-20: never pruned by the MaxEngrams path
+							}
+							lastAccess := m.LastAccess
+							if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+								lastAccess = now
+							}
+							ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 0.1)
+							n := float64(m.AccessCount + 1)
+							b = math.Log(n) - actrDecay*math.Log(math.Max(ageDays, 0.1)/n)
 						}
-						ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 0.1)
-						n := float64(m.AccessCount + 1)
-						b = math.Log(n) - actrDecay*math.Log(math.Max(ageDays, 0.1)/n)
+						scored = append(scored, scoredCandidate{id: id, score: b})
 					}
-					scored = append(scored, scoredCandidate{id: id, score: b})
+					// Sort ascending: lowest base-level (worst engrams) first.
+					sort.Slice(scored, func(i, j int) bool {
+						return scored[i].score < scored[j].score
+					})
 				}
-				// Sort ascending: lowest base-level (worst engrams) first.
-				sort.Slice(scored, func(i, j int) bool {
-					return scored[i].score < scored[j].score
-				})
 			}
 
 			// Delete the bottom `excess` by ACT-R base-level score (or all available if fewer).
@@ -3491,6 +4099,15 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 					}
 				}
 				pruned++
+			}
+
+			// Degrade loudly, no loop (COG-15/COG-20): if importance exemptions
+			// left the vault over MaxEngrams, say so — a vault marking most of
+			// its memories >= HighImportanceFloor cannot shrink via this path.
+			if pruned < excess && exempted > 0 {
+				slog.Warn("prune vault: high-importance exemptions left vault over MaxEngrams",
+					"vault", vaultName, "excess", excess, "pruned", pruned, "exempted", exempted,
+					"floor", storage.HighImportanceFloor)
 			}
 		}
 	}
@@ -3731,6 +4348,9 @@ func (e *Engine) GetProvenance(ctx context.Context, vault, id string) ([]provena
 // useful=false signals negative feedback (retrieved but not helpful);
 // useful=true signals positive feedback (retrieved and helpful).
 func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, useful bool) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(engramID)
 	if err != nil {
@@ -3748,5 +4368,20 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 	e.spawnFireAndForget(func() {
 		e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
 	})
+
+	// #682: useful=true is an explicit positive signal — reinforce
+	// AccessCount/LastAccess the same as an explicit read. This is NEW wiring
+	// (previously feedback only updated vault-level scoring weights, never
+	// per-engram AccessCount). useful=false records negative feedback only;
+	// it must not decrement or otherwise touch AccessCount. Unconditional
+	// (not gated by ReinforceOnRead — that flag governs the passive
+	// read-implies-access channel; an explicit "this was useful" signal is a
+	// different, always-on channel) and uncapped, mirroring explicit
+	// read-by-id.
+	if useful {
+		e.spawnFireAndForget(func() {
+			_ = e.store.TouchAccess(e.stopCtx, wsPrefix, ulid)
+		})
+	}
 	return nil
 }

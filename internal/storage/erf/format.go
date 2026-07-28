@@ -31,6 +31,9 @@ const (
 	OffsetMemoryType     = 68 // uint8, first byte of formerly-reserved area
 	OffsetClassification = 69 // uint16, big-endian
 	OffsetTrust          = 71 // uint8; first byte of the formerly-reserved area (bytes 72-99 remain reserved)
+	OffsetValidFrom      = 72 // uint64 UnixNano big-endian; 0 = valid from CreatedAt (legacy default)
+	OffsetValidUntil     = 80 // uint64 UnixNano big-endian; 0 = open / "current" (legacy default)
+	OffsetImportance     = 88 // float32 big-endian; 0 = unset (legacy default). Bytes 92-99 remain reserved.
 
 	// Offset table field offsets (relative to record start)
 	OffsetConceptOff   = 108

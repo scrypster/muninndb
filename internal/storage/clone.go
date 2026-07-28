@@ -48,7 +48,7 @@ var vaultScopedSwapPrefixes = []byte{
 	prefix.Trigram, prefix.HNSWNode, prefix.FTSStats, prefix.TermStats,
 	prefix.Contradiction, prefix.StateIndex, prefix.TagIndex, prefix.CreatorIndex,
 	prefix.RelevanceBucket, prefix.AssocWeightIndex, prefix.VaultCount, prefix.Provenance,
-	prefix.BucketMigration, prefix.ContentHash,
+	prefix.BucketMigration, prefix.ContentHash, prefix.RawTagRange,
 }
 
 const cloneBatchSize = 512

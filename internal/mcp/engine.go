@@ -26,7 +26,13 @@ type EngineInterface interface {
 
 	// Higher-level cognitive operations (tools 1-11)
 	GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error)
-	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (*WriteResult, error)
+	// Evolve replaces a memory with a new version. entities, when non-nil,
+	// replaces the carried entity set. importance overrides the successor's
+	// caller-asserted importance (nil inherits the predecessor's explicit
+	// importance, unset stays unset). effectiveAt is the valid-time moment the
+	// new version became true (predecessor's ValidUntil stamp = successor's
+	// ValidFrom); the zero time defaults to now.
+	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (*WriteResult, error)
 	Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error)
 	Session(ctx context.Context, vault string, since time.Time) (*SessionSummary, error)
 	Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error)
@@ -85,7 +91,10 @@ type EngineInterface interface {
 
 	// WhereLeftOff returns the most recently accessed active engrams, sorted by
 	// LastAccess descending. limit caps results (default 10, max 50).
-	WhereLeftOff(ctx context.Context, vault string, limit int) ([]WhereLeftOffEntry, error)
+	// excludeTypeLabels is an opt-in salience filter (S5): engrams whose
+	// type_label is in the set are skipped and the scan keeps going to fill
+	// limit. A nil/empty excludeTypeLabels is a no-op (default behavior).
+	WhereLeftOff(ctx context.Context, vault string, limit int, excludeTypeLabels []string) ([]WhereLeftOffEntry, error)
 
 	// FindByEntity returns engrams that mention the given entity name,
 	// scanned from the 0x23 reverse index; on zero exact matches the vault's
