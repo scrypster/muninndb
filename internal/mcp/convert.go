@@ -47,6 +47,7 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		Summary:     item.Summary,
 		Score:       roundScore(item.Score),
 		VectorScore: roundScore(item.ScoreComponents.SemanticSimilarity),
+		EntityBoost: roundScore(item.ScoreComponents.EntityBoost),
 		Confidence:  item.Confidence,
 		Why:         item.Why,
 		// Map the lifecycle state label the same way the read path does (#502).

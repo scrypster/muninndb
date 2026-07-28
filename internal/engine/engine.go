@@ -2308,7 +2308,15 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// After BFS produces a scored set, any engram sharing a named entity with a
 	// top-N result receives a small boost. This surfaces entity-linked engrams
 	// that have no direct association edge to the query-matching engrams.
-	result.Activations = e.applyEntityBoost(ctx, wsPrefix, result.Activations, actReq.Threshold)
+	preBoost := len(result.Activations)
+	result.Activations = e.applyEntityBoost(ctx, wsPrefix, vaultSize, result.Activations, actReq)
+	// Injected engrams count as found: on the boost path, total <
+	// len(activations) was the #569 bypass fingerprint. This covers entity
+	// boost only — applySupersession below may still inject promoted heads
+	// without a TotalFound bump. Known imprecision (scoped follow-up, PR #570
+	// review): an engram that scored above threshold in the pipeline but was
+	// truncated past MaxResults and then re-injected here is counted twice.
+	result.TotalFound += len(result.Activations) - preBoost
 
 	// Supersedes-aware ranking: promote the current fact over any superseded one
 	// it replaces (injecting it if the query didn't retrieve it), so recall never
@@ -2317,9 +2325,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	result.Activations = e.applySupersession(ctx, wsPrefix, result.Activations, actReq.MaxResults)
 
 	// Final valid-time gate (COG-19: default recall never returns an engram whose
-	// ValidUntil <= now). Phase-6 already gated scored candidates, but entity boost
-	// AND supersession inject engrams that bypass passesMetaFilter, so the shared
-	// predicate must hold at the last cut before truncation. Runs AFTER supersession
+	// ValidUntil <= now). Phase-6 already gated scored candidates, and entity-boost
+	// injections now enforce the full phase-6 contract (filters, trust, lease,
+	// validity — #569) at injection, but supersession still injects promoted heads
+	// past PassesMetaFilter, so the shared predicate must hold at the last cut
+	// before truncation. Runs AFTER supersession
 	// on purpose: a manual supersede's now-expired predecessor is dropped only once
 	// its current head has been promoted/injected, so a query matching only the
 	// stale phrasing still returns the current fact.
@@ -2390,6 +2400,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			DecayFactor:        float32(scored.Components.DecayFactor),
 			HebbianBoost:       float32(scored.Components.HebbianBoost),
 			TransitionBoost:    float32(scored.Components.TransitionBoost),
+			EntityBoost:        float32(scored.Components.EntityBoost),
 			AccessFrequency:    float32(scored.Components.AccessFrequency),
 			Recency:            float32(scored.Components.Recency),
 			Raw:                float32(scored.Components.Raw),

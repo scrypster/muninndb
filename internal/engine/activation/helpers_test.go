@@ -14,7 +14,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Tests for package-internal helpers: extractTimeBounds, passesMetaFilter,
+// Tests for package-internal helpers: extractTimeBounds, PassesMetaFilter,
 // resolveWeights, computeGatedActivation, computeComponents, buildWhy
 // ---------------------------------------------------------------------------
 
@@ -74,26 +74,26 @@ func TestExtractTimeBounds_WrongType(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// passesMetaFilter
+// PassesMetaFilter
 // ---------------------------------------------------------------------------
 
 func TestPassesMetaFilter_Empty(t *testing.T) {
 	eng := &storage.Engram{State: storage.StateActive}
-	if !passesMetaFilter(eng, nil) {
+	if !PassesMetaFilter(eng, nil) {
 		t.Error("nil filters should pass")
 	}
 }
 
 func TestPassesMetaFilter_StateEq(t *testing.T) {
 	eng := &storage.Engram{State: storage.StateActive}
-	pass := passesMetaFilter(eng, []Filter{
+	pass := PassesMetaFilter(eng, []Filter{
 		{Field: "state", Op: "eq", Value: storage.StateActive},
 	})
 	if !pass {
 		t.Error("should pass for matching state")
 	}
 
-	fail := passesMetaFilter(eng, []Filter{
+	fail := PassesMetaFilter(eng, []Filter{
 		{Field: "state", Op: "eq", Value: storage.StateSoftDeleted},
 	})
 	if fail {
@@ -103,14 +103,14 @@ func TestPassesMetaFilter_StateEq(t *testing.T) {
 
 func TestPassesMetaFilter_StateNeq(t *testing.T) {
 	eng := &storage.Engram{State: storage.StateActive}
-	pass := passesMetaFilter(eng, []Filter{
+	pass := PassesMetaFilter(eng, []Filter{
 		{Field: "state", Op: "neq", Value: storage.StateSoftDeleted},
 	})
 	if !pass {
 		t.Error("should pass for neq different state")
 	}
 
-	fail := passesMetaFilter(eng, []Filter{
+	fail := PassesMetaFilter(eng, []Filter{
 		{Field: "state", Op: "neq", Value: storage.StateActive},
 	})
 	if fail {
@@ -121,12 +121,12 @@ func TestPassesMetaFilter_StateNeq(t *testing.T) {
 func TestPassesMetaFilter_CreatedAfter(t *testing.T) {
 	threshold := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	eng := &storage.Engram{CreatedAt: time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)}
-	if !passesMetaFilter(eng, []Filter{{Field: "created_after", Value: threshold}}) {
+	if !PassesMetaFilter(eng, []Filter{{Field: "created_after", Value: threshold}}) {
 		t.Error("should pass — engram created after threshold")
 	}
 
 	old := &storage.Engram{CreatedAt: time.Date(2025, 5, 1, 0, 0, 0, 0, time.UTC)}
-	if passesMetaFilter(old, []Filter{{Field: "created_after", Value: threshold}}) {
+	if PassesMetaFilter(old, []Filter{{Field: "created_after", Value: threshold}}) {
 		t.Error("should fail — engram created before threshold")
 	}
 }
@@ -134,12 +134,12 @@ func TestPassesMetaFilter_CreatedAfter(t *testing.T) {
 func TestPassesMetaFilter_CreatedBefore(t *testing.T) {
 	threshold := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	eng := &storage.Engram{CreatedAt: time.Date(2025, 5, 1, 0, 0, 0, 0, time.UTC)}
-	if !passesMetaFilter(eng, []Filter{{Field: "created_before", Value: threshold}}) {
+	if !PassesMetaFilter(eng, []Filter{{Field: "created_before", Value: threshold}}) {
 		t.Error("should pass — engram created before threshold")
 	}
 
 	newer := &storage.Engram{CreatedAt: time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)}
-	if passesMetaFilter(newer, []Filter{{Field: "created_before", Value: threshold}}) {
+	if PassesMetaFilter(newer, []Filter{{Field: "created_before", Value: threshold}}) {
 		t.Error("should fail — engram created after threshold")
 	}
 }
@@ -154,7 +154,7 @@ func TestPassesMetaFilter_Combined(t *testing.T) {
 		{Field: "created_after", Value: time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)},
 		{Field: "created_before", Value: time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)},
 	}
-	if !passesMetaFilter(eng, filters) {
+	if !PassesMetaFilter(eng, filters) {
 		t.Error("should pass all combined filters")
 	}
 }

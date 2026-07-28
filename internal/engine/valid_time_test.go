@@ -405,8 +405,9 @@ func TestWrite_ContentHashDedup_ExpiredHitWritesNewEngram(t *testing.T) {
 
 // TestCOG19_Pin pins invariant COG-19: invalidation is always a ValidUntil
 // stamp, never a delete, and default recall never returns an engram whose
-// ValidUntil <= now — including candidates injected after phase-6 (the
-// entity-boost path bypasses passesMetaFilter, so the final gate must hold).
+// ValidUntil <= now — including candidates injected after phase-6 (entity
+// boost now gates injections itself, but supersession still injects past
+// PassesMetaFilter, so the final gate must hold regardless).
 func TestCOG19_Pin(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
