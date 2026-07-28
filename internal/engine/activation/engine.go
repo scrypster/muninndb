@@ -1938,14 +1938,7 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute — sub-hour precision for intraday recall
 	ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, ageFloorDays)
 	n := float64(eng.AccessCount + 1) // +1 avoids ln(0) for never-accessed engrams
-	// Importance modulates the decay RATE only (two-strength model): the
-	// effective exponent d_eff = d*(1 - 0.5*imp) is bounded [0.5d, d], so an
-	// important memory's retrieval strength fades at up to half speed.
-	// Importance NEVER multiplies contentMatch or the final score — for
-	// equal-recency memories, ranking is unchanged. The COG-7 cap below is
-	// applied AFTER, unchanged: importance cannot push base-level past it.
-	imp := math.Min(math.Max(float64(eng.EffectiveImportance()), 0), 1)
-	d := w.ACTRDecay * (1 - 0.5*imp) // power-law forgetting exponent (default d=0.5, importance-slowed)
+	d := w.ACTRDecay                  // power-law forgetting exponent (default 0.5)
 	baseLevel := math.Log(n) - d*math.Log(math.Max(ageDays, ageFloorDays)/n)
 	// Cap baseLevel at the derived saturation threshold: the unique B(M) where
 	// softplus(B(M)) = actrDenominator, i.e. where raw = contentMatch (zero Hebbian).

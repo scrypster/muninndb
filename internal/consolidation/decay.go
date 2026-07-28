@@ -13,14 +13,7 @@ import (
 // - AccessCount < 2
 // - Age > 30 days
 // - Relevance < 0.3
-// Decay: relevance = relevance * (0.5 + 0.5*EffectiveImportance)
-//
-// The decay RATE is importance-modulated (two-strength model): importance 0
-// halves relevance (the historical behavior), importance 1 leaves it
-// untouched, everything in between is continuous — importance slows fading,
-// it never boosts recall scoring. Validity is deliberately NOT consulted:
-// expired facts still decay (invalidation is a stamp, not a delete — COG-19 —
-// and history fades via inaccessibility like everything else).
+// Decay: relevance = relevance * 0.5
 func (w *Worker) runPhase4DecayAcceleration(ctx context.Context, store *storage.PebbleStore, wsPrefix [8]byte, report *ConsolidationReport) error {
 	const maxAccessCount = 2
 	const maxRelevance = 0.3
@@ -62,8 +55,8 @@ func (w *Worker) runPhase4DecayAcceleration(ctx context.Context, store *storage.
 			continue // too relevant already
 		}
 
-		// Apply importance-modulated decay (imp=0 → halve, imp=1 → no decay).
-		newRelevance := eng.Relevance * (0.5 + 0.5*eng.EffectiveImportance())
+		// Apply decay
+		newRelevance := eng.Relevance * 0.5
 
 		if !w.DryRun {
 			if err := store.UpdateRelevance(ctx, wsPrefix, eng.ID, newRelevance, eng.Stability); err != nil {

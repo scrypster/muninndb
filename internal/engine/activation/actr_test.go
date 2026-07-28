@@ -25,13 +25,6 @@ func assertNear(t *testing.T, name string, got, want, tol float64) {
 	}
 }
 
-// dEffFor returns the importance-modulated decay exponent computeACTR uses:
-// d_eff = d * (1 - 0.5*EffectiveImportance), bounded [0.5d, d]. Tests use
-// this so expected values stay in sync with production.
-func dEffFor(d float64, eng *storage.Engram) float64 {
-	return d * (1 - 0.5*float64(eng.EffectiveImportance()))
-}
-
 // expectedBaseLevel returns the B(M) value that computeACTR will produce
 // for the given parameters, including the bLevelCap. Tests should use this
 // instead of inlining the formula so they stay in sync with production code.
@@ -74,7 +67,7 @@ func TestComputeACTR_FreshEngram(t *testing.T) {
 	contentMatch := 0.35*0.9 + 0.25*math.Tanh(2.0)
 	n := 2.0 // AccessCount(1) + 1
 	// Use expectedBaseLevel so the 1-day offset + cap are applied consistently.
-	baseLevel := expectedBaseLevel(n, 1.0/(24.0*60.0), dEffFor(0.5, eng))
+	baseLevel := expectedBaseLevel(n, 1.0/(24.0*60.0), 0.5)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.0)
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
@@ -101,7 +94,7 @@ func TestComputeACTR_OldEngram_NoHebbian(t *testing.T) {
 	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
 	n := 1.0
 	// n=1, ageDays=30: B(M) = ln(1) - 0.5*ln(30) ≈ -1.70 — well below cap.
-	baseLevel := expectedBaseLevel(n, 30.0, dEffFor(0.5, eng))
+	baseLevel := expectedBaseLevel(n, 30.0, 0.5)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.0)
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
@@ -124,7 +117,7 @@ func TestComputeACTR_OldEngram_WithHebbian(t *testing.T) {
 
 	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
 	n := 1.0
-	baseLevel := expectedBaseLevel(n, 30.0, dEffFor(0.5, eng))
+	baseLevel := expectedBaseLevel(n, 30.0, 0.5)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.8)
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
@@ -153,7 +146,7 @@ func TestComputeACTR_HighAccessCount(t *testing.T) {
 	n := 101.0
 	// With 100 accesses at 7 days the uncapped B(M) ≈ 5.88 — well above bLevelCap.
 	// expectedBaseLevel applies the cap so wantRaw reflects what computeACTR returns.
-	baseLevel := expectedBaseLevel(n, 7.0, dEffFor(0.5, eng))
+	baseLevel := expectedBaseLevel(n, 7.0, 0.5)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.0)
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
@@ -228,7 +221,7 @@ func TestComputeACTR_ScoreClamping(t *testing.T) {
 	contentMatch := 0.35*1.0 + 0.25*math.Tanh(10.0)
 	n := 51.0
 	// baseLevel is capped; Hebbian lifts totalActivation far above the cap.
-	baseLevel := expectedBaseLevel(n, 1.0/(24.0*60.0), dEffFor(0.5, eng))
+	baseLevel := expectedBaseLevel(n, 1.0/(24.0*60.0), 0.5)
 	totalActivation := baseLevel + 4.0*1.0
 	expectedRaw := contentMatch * softplus(totalActivation) / actrDenominator
 	if expectedRaw <= 1.0 {
@@ -256,7 +249,7 @@ func TestComputeACTR_ZeroLastAccess(t *testing.T) {
 	contentMatch := 0.35*0.8 + 0.25*math.Tanh(1.0)
 	n := 1.0
 	// n=1 with 1-day offset: B(M) = ln(1) - 0.5*ln(1) = 0 — not capped.
-	baseLevel := expectedBaseLevel(n, 1.0/(24.0*60.0), dEffFor(0.5, eng))
+	baseLevel := expectedBaseLevel(n, 1.0/(24.0*60.0), 0.5)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.0)
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
@@ -308,8 +301,8 @@ func TestComputeACTR_CustomDecayAndHebScale(t *testing.T) {
 
 	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
 	n := 4.0
-	// n=4, ageDays=10: B(M)=ln(4)-d_eff*ln(10/4) — not capped (d_eff <= 0.8).
-	baseLevel := expectedBaseLevel(n, 10.0, dEffFor(0.8, eng))
+	// n=4, ageDays=10: B(M)=ln(4)-0.8*ln(10/4)≈0.65 — not capped.
+	baseLevel := expectedBaseLevel(n, 10.0, 0.8)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 2.0, hebbianBoost)
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
@@ -545,7 +538,7 @@ func TestComputeACTR_TagPoolFloor_RescuesZeroContentMatch(t *testing.T) {
 	// Exact expected value: contentMatch floored to tagMatchFloor, then the
 	// normal ACT-R formula (same base-level/Hebbian as this test's inputs).
 	hebScale := 4.0
-	baseLevel := expectedBaseLevel(51.0, 1.0/(24.0*60.0), dEffFor(0.5, eng)) // n=AccessCount+1, ageDays=ageFloor (fresh)
+	baseLevel := expectedBaseLevel(51.0, 1.0/(24.0*60.0), 0.5) // n=AccessCount+1, ageDays=ageFloor (fresh)
 	wantRaw := expectedACTRRaw(tagMatchFloor, baseLevel, hebScale, 0.9)
 	assertNear(t, "Raw (tag-pool floor)", sc.Raw, wantRaw, 1e-9)
 
@@ -614,69 +607,4 @@ func TestComputeACTR_TagPoolFloor_GenuineMatchOutranksFlooredTagOnly(t *testing.
 	if tagMatchFloor >= 0.5 {
 		t.Errorf("tagMatchFloor=%.4f is too high: must stay below the typical genuine content-match band (0.5-0.9) to preserve ranking", tagMatchFloor)
 	}
-}
-
-// TestComputeACTR_ImportanceSlowsDecay pins the two-strength retrieval side:
-// importance modulates ONLY the decay exponent (d_eff = d*(1-0.5*imp), bounded
-// [0.5d, d]) — an important old memory retains more base-level activation than
-// an unimportant one, but importance never multiplies contentMatch or the
-// final score (equal-recency ranking is unchanged).
-func TestComputeACTR_ImportanceSlowsDecay(t *testing.T) {
-	now := time.Now()
-	w := actrDefaultWeights()
-	old := now.Add(-100 * 24 * time.Hour)
-
-	critical := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 0, LastAccess: old, Importance: 1.0}
-	trivial := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 0, LastAccess: old, Importance: 0.01}
-
-	scCritical := computeACTR(0.7, 1.0, 0.0, 0.0, critical, 0, now, w, false)
-	scTrivial := computeACTR(0.7, 1.0, 0.0, 0.0, trivial, 0, now, w, false)
-
-	// Exact values: d_eff = 0.25 for imp=1, ≈0.4975 for imp=0.01.
-	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
-	wantCritical := expectedACTRRaw(contentMatch, expectedBaseLevel(1, 100, dEffFor(0.5, critical)), 4.0, 0.0)
-	wantTrivial := expectedACTRRaw(contentMatch, expectedBaseLevel(1, 100, dEffFor(0.5, trivial)), 4.0, 0.0)
-	assertNear(t, "Raw (imp=1.0)", scCritical.Raw, wantCritical, 1e-9)
-	assertNear(t, "Raw (imp=0.01)", scTrivial.Raw, wantTrivial, 1e-9)
-	if scCritical.Raw <= scTrivial.Raw {
-		t.Errorf("importance did not slow decay: imp=1 raw %v <= imp=0.01 raw %v", scCritical.Raw, scTrivial.Raw)
-	}
-
-	// Bound pin: d_eff for imp=1 is exactly half the configured decay.
-	if got := dEffFor(0.5, critical); math.Abs(got-0.25) > 1e-9 {
-		t.Errorf("d_eff(imp=1) = %v, want 0.25 (0.5d lower bound)", got)
-	}
-
-	// Equal recency ⇒ equal ranking: for FRESH memories with identical inputs,
-	// importance must not change the score (both saturate at the cap; the
-	// contentMatch gate is untouched by importance).
-	freshCritical := &storage.Engram{Confidence: 1.0, AccessCount: 50, LastAccess: now, Importance: 1.0}
-	freshTrivial := &storage.Engram{Confidence: 1.0, AccessCount: 50, LastAccess: now, Importance: 0.01}
-	fc := computeACTR(0.7, 1.0, 0.0, 0.0, freshCritical, 0, now, w, false)
-	ft := computeACTR(0.7, 1.0, 0.0, 0.0, freshTrivial, 0, now, w, false)
-	assertNear(t, "fresh equal-recency scores", fc.Raw, ft.Raw, 1e-9)
-}
-
-// TestComputeACTR_ImportanceRespectsCOG7Cap verifies the COG-7 base-level cap
-// is applied AFTER the importance-modulated exponent: maximum importance
-// cannot push base-level activation past bLevelCap (score absoluteness holds).
-func TestComputeACTR_ImportanceRespectsCOG7Cap(t *testing.T) {
-	now := time.Now()
-	w := actrDefaultWeights()
-	eng := &storage.Engram{Confidence: 1.0, AccessCount: 100, LastAccess: now.Add(-time.Hour), Importance: 1.0}
-
-	sc := computeACTR(0.7, 1.5, 0.0, 0.0, eng, 0, now, w, false)
-
-	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.5)
-	bLevelCap := math.Log(math.Exp(actrDenominator) - 1)
-	// Setup check: uncapped B(M) with the importance-slowed exponent still
-	// exceeds the cap, so the cap is what binds.
-	n := 101.0
-	ageDays := 1.0 / 24.0
-	uncapped := math.Log(n) - dEffFor(0.5, eng)*math.Log(ageDays/n)
-	if uncapped <= bLevelCap {
-		t.Fatalf("test setup: uncapped B=%.4f must exceed cap %.4f", uncapped, bLevelCap)
-	}
-	wantRaw := expectedACTRRaw(contentMatch, bLevelCap, 4.0, 0.0)
-	assertNear(t, "Raw (capped, imp=1)", sc.Raw, wantRaw, 1e-9)
 }

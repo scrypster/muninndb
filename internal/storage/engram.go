@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
-	"math"
 	"sort"
 	"time"
 
@@ -949,73 +948,33 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	return nil
 }
 
-// TouchAccess reinforcement tuning. The stability gain is INVERSE in current
-// retrieval strength (Bjork's "desirable difficulty"): retrieving a cold,
-// rarely-used memory is strong evidence it matters durably, so it earns a
-// large storage-strength (Stability) payoff; re-touching an already-hot
-// memory earns little. Formula:
-//
-//	B    = ln(n+1) − d·ln(max(ageDays, floor)/(n+1))   (ACT-R base level, d=0.5)
-//	gain = maxGainDays / (1 + exp(steepness·(B − midpoint)))   (logistic, in days)
-//	Stability' = min(Stability + gain·(1 + 0.5·EffectiveImportance), maxStabilityDays)
-//
-// Stability does NOT appear in B — growing storage strength cannot inflate the
-// signal that suppresses further gain, so there is no feedback loop and no
-// rich-get-richer runaway. The gain (not the AccessCount bump) is rate-limited
-// to once per day per engram (the #682 dedup-cap shape): with ReinforceOnRead
-// default-on, an agent re-reading in a tight loop must not saturate Stability.
-const (
-	touchGainMaxDays   = 7.0  // asymptotic max stability gain per qualifying touch
-	touchGainSteepness = 2.0  // logistic steepness in B(M) units
-	touchGainMidpoint  = 0.75 // B(M) at which the gain is half of max
-	touchGainActrDecay = 0.5  // d in the B(M) formula (default ACT-R decay)
-	// maxStabilityDays mirrors cognitive.MaxStability (365). Duplicated because
-	// cognitive imports storage — pinned equal by TestTouchAccessStabilityCap.
-	maxStabilityDays = 365.0
-	// touchGainMinInterval is the per-engram rate limit for the stability gain
-	// (the AccessCount bump is never rate-limited here).
-	touchGainMinInterval = 24 * time.Hour
-)
-
-// touchStabilityGain computes the inverse-retrieval-strength stability gain in
-// days for an engram with accessCount prior accesses whose last access (or
-// creation, when never accessed) was ageDays ago. Monotone decreasing in
-// retrieval strength, bounded (0, touchGainMaxDays).
-func touchStabilityGain(accessCount uint32, ageDays float64) float64 {
-	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute, matching computeACTR
-	if ageDays < ageFloorDays {
-		ageDays = ageFloorDays
-	}
-	n := float64(accessCount) + 1
-	b := math.Log(n) - touchGainActrDecay*math.Log(ageDays/n)
-	return touchGainMaxDays / (1 + math.Exp(touchGainSteepness*(b-touchGainMidpoint)))
-}
-
-// TouchAccess bumps AccessCount (+1) and LastAccess (=now) for an engram and,
-// at most once per 24h per engram, adds an inverse-retrieval-strength gain to
-// Stability (storage strength — see touchStabilityGain above). It is the
-// single reinforcement primitive for #682: RecordAccess, the content-hash
-// dedup "reinforce" path, and the Read/feedback wiring all funnel through this
-// method instead of doing their own unlocked GetEngram→UpdateMetadata round
-// trip.
+// TouchAccess bumps AccessCount (+1) and LastAccess (=now) for an engram,
+// leaving every other metadata field untouched. It is the single reinforcement
+// primitive for #682: RecordAccess, the content-hash dedup "reinforce" path,
+// and the Read/feedback wiring all funnel through this method instead of doing
+// their own unlocked GetEngram→UpdateMetadata round trip.
 //
 // Locking mirrors UpdateConfidence exactly (engram.go:799): the per-engram
 // stripe lock (casLocks.For(id) — the SAME striped mutex CompareAndSet,
 // DeleteEngram, and UpdateConfidence use) is held across the whole read-then-
 // write, and the L1 cache entry is dropped before the authoritative GetEngram
 // read, so this serializes with a same-id CompareAndSet/DeleteEngram instead of
-// racing it (STO-2). The remaining fields (State, Confidence, Relevance,
-// UpdatedAt) are read fresh under the lock and passed through to
+// racing it (STO-2). All other fields (State, Confidence, Relevance,
+// Stability, UpdatedAt) are read fresh under the lock and passed through to
 // UpdateMetadata unchanged, so the 0x0B state index stays consistent with
 // whatever state a concurrent CAS just committed (STO-3) — TouchAccess never
 // has a stale view of State to accidentally index against.
 //
-// Contract: reinforcement moves AccessCount, LastAccess, and (rate-limited,
-// bounded) Stability — and nothing else. Trust, Confidence, Relevance,
-// Importance, and State are never part of the write: access frequency is not
-// evidence of correctness (COG-10 — co-activation/access never move
-// confidence, and never move importance), and Stability is the one dimension
-// where use IS the signal (storage strength grows with successful retrieval).
+// Trust, Confidence, and Importance are never part of the write: reinforcement
+// moves only AccessCount/LastAccess, by construction — access frequency is not
+// evidence of correctness (COG-10: co-activation never updates confidence) and
+// not evidence of priority (COG-10 amendment: access never moves importance).
+// NOTE: Stability deliberately passes through unchanged. An earlier draft added
+// an inverse-retrieval-strength Stability gain here; it was deferred because
+// Stability feeds the weighted_sum/RRF DecayFactor score component, so a
+// write-on-read would silently change recall results in those modes. Any
+// future reinforcement write here must be designed against all three scoring
+// modes (ACT-R, weighted_sum, RRF) first.
 func (ps *PebbleStore) TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULID) error {
 	mu := ps.casLocks.For(id[:])
 	mu.Lock()
@@ -1030,43 +989,14 @@ func (ps *PebbleStore) TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULI
 		return err
 	}
 
-	now := time.Now()
-	newStability := eng.Stability
-
-	// Inverse-retrieval-strength stability gain, rate-limited to 1/day per
-	// engram: skip the gain (never the count) when the engram was accessed in
-	// the last 24h. A zero/pre-epoch LastAccess means "never accessed" — the
-	// gain applies, aged from CreatedAt (true dormancy).
-	lastAccess := eng.LastAccess
-	if lastAccess.Year() < 2000 {
-		lastAccess = time.Time{}
-	}
-	if lastAccess.IsZero() || now.Sub(lastAccess) >= touchGainMinInterval {
-		since := lastAccess
-		if since.IsZero() {
-			since = eng.CreatedAt
-		}
-		ageDays := now.Sub(since).Hours() / 24.0
-		if ageDays < 0 { // clock skew: timestamp in the future
-			ageDays = 0
-		}
-		gain := touchStabilityGain(eng.AccessCount, ageDays)
-		imp := float64(eng.EffectiveImportance())
-		s := float64(eng.Stability) + gain*(1+0.5*imp)
-		if s > maxStabilityDays {
-			s = maxStabilityDays
-		}
-		newStability = float32(s)
-	}
-
 	meta := &EngramMeta{
 		State:       eng.State,
 		Confidence:  eng.Confidence,
 		Relevance:   eng.Relevance,
-		Stability:   newStability,
+		Stability:   eng.Stability,
 		AccessCount: eng.AccessCount + 1,
 		UpdatedAt:   eng.UpdatedAt,
-		LastAccess:  now,
+		LastAccess:  time.Now(),
 	}
 	return ps.UpdateMetadata(ctx, wsPrefix, id, meta)
 }

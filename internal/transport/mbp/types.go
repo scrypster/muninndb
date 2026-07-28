@@ -107,10 +107,11 @@ type WriteRequest struct {
 	// Importance is the caller-asserted priority in [0,1] (orthogonal to
 	// Confidence, which is truth). Pointer so an explicit 0 is distinct from
 	// unset: nil = unset (a use-time default is derived from the memory type
-	// at read/decay/prune time and never stored); an explicit value is clamped
-	// to [0,1] and an explicit 0.0 is quantized to 0.01 on write so the stored
-	// 0 = unset sentinel stays intact. Importance modulates decay rate, prune
-	// protection, and stability gain — never recall ranking.
+	// at read/prune time and never stored); an explicit value is clamped to
+	// [0,1] and an explicit 0.0 is quantized to 0.01 on write so the stored
+	// 0 = unset sentinel stays intact. In this increment importance drives
+	// pruning protection (COG-20) and is surfaced on read — it does not
+	// modify decay or recall ranking.
 	Importance *float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
 
 	// Inline enrichment: caller-provided data that bypasses background enrichment.

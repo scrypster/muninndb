@@ -15,10 +15,15 @@ package storage
 // table applied) stay structurally distinct, and the table below can be tuned
 // later with zero migration.
 //
-// This lives in package storage (not internal/cognitive) because the import
-// direction forces it: cognitive imports storage, and TouchAccess — the locked
-// reinforcement primitive that modulates its stability gain by importance —
-// lives here. It also matches the valid-time precedent: EffectiveValidFrom /
+// In this increment importance drives exactly one behavior: the MaxEngrams
+// pruner exemption (COG-20) — plus exposure on the read surfaces. It does NOT
+// modify decay rates, reinforcement, or recall ranking; importance-modulated
+// decay is deferred until it is designed against all three scoring modes
+// (ACT-R, weighted_sum, RRF — Stability/Relevance feed the score in the
+// latter two, so modulating them changes recall results).
+//
+// This lives in package storage (not internal/cognitive) because it derives
+// from storage types, matching the valid-time precedent: EffectiveValidFrom /
 // ValidAt / IsExpired are use-time derivations defined beside the types they
 // derive from.
 
