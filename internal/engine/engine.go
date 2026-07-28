@@ -2813,6 +2813,17 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 		if req.Hard {
 			return nil, fmt.Errorf("%w: not_true_since cannot be combined with hard=true — invalidation is a stamp, deletion is deletion", ErrInvalidRequest)
 		}
+		// Guard the stamp instant BEFORE writing: reject the epoch/uninitialized
+		// sentinel (which would decode as "open" and silently NOT invalidate while
+		// the response claims it did) and an inverted window (invalid before the
+		// fact existed). Mirrors applyValidity, which the stamp path bypasses.
+		eng, err := e.store.GetEngram(ctx, wsPrefix, id)
+		if err != nil || eng == nil {
+			return nil, ErrEngramNotFound
+		}
+		if err := validateStampTime(*req.NotTrueSince, eng.EffectiveValidFrom()); err != nil {
+			return nil, err
+		}
 		if _, err := e.store.StampValidUntil(ctx, wsPrefix, id, *req.NotTrueSince, false); err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				return nil, ErrEngramNotFound
@@ -3224,6 +3235,11 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 	// exactly, no overlap and no gap). Default: the evolve moment.
 	if effectiveAt.IsZero() {
 		effectiveAt = now
+	} else if err := validateStampTime(effectiveAt, oldEng.EffectiveValidFrom()); err != nil {
+		// An explicit effective_at must be a real instant after the predecessor
+		// began: epoch would collapse the successor's ValidFrom to CreatedAt AND
+		// leave the predecessor's ValidUntil raw-0 (= open), silently un-superseding.
+		return storage.ULID{}, err
 	}
 	if concept == "" {
 		concept = oldEng.Concept

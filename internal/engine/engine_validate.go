@@ -28,6 +28,30 @@ func validateCreatedAt(t time.Time) error {
 	return nil
 }
 
+// validateStampTime guards a caller-supplied invalidation instant on the STAMP
+// paths (forget.not_true_since, evolve.effective_at), which bypass applyValidity.
+// It rejects — loudly, never silently — two truth-corrupting inputs:
+//   - the Unix epoch (UnixNano()==0): the ERF zero-sentinel decodes raw 0 as
+//     "open/current", so storing epoch as ValidUntil would leave the fact
+//     appearing still-true while the handler reports it invalidated (a truth
+//     inversion). Anything below createdAtFloor (2000-01-01) is likewise an
+//     uninitialized-clock bug. NOTE: a genuine zero time (time.Time{}, year 1)
+//     is the CLEAR sentinel used by restore and is intentionally NOT rejected
+//     here — callers of this guard pass it only for real invalidation instants.
+//   - an inverted window: until must be strictly after the fact's start, or the
+//     [from, until) window is valid at no instant (a fact that was never true).
+func validateStampTime(until, from time.Time) error {
+	if until.Before(createdAtFloor) {
+		return fmt.Errorf("%w: invalidation time (%s) is before %s — an epoch/uninitialized timestamp cannot be a validity bound (raw 0 is the ERF 'open/current' sentinel)",
+			ErrInvalidRequest, until.UTC().Format(time.RFC3339), createdAtFloor.Format("2006-01-02"))
+	}
+	if !from.IsZero() && !until.After(from) {
+		return fmt.Errorf("%w: invalidation time (%s) must be after the fact's start (%s) — the window would be valid at no instant",
+			ErrInvalidRequest, until.UTC().Format(time.RFC3339), from.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
 // applyValidity validates and applies caller-supplied valid-time bounds to a
 // new engram. The window is half-open [valid_from, valid_until); an empty or
 // inverted window is rejected loudly (a fact that was never true is a caller

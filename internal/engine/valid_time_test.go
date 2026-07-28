@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -130,8 +131,11 @@ func TestEvolveAt_StampsPredecessorValidUntil(t *testing.T) {
 	ctx := context.Background()
 	const vault = "validtime-evolve"
 
+	// Predecessor was true from 5h ago; the change took effect 2h ago (after the
+	// fact's start — a real interval, not an inverted window).
+	createdAt := time.Now().Add(-5 * time.Hour).UTC()
 	resp, err := eng.Write(ctx, &mbp.WriteRequest{
-		Vault: vault, Concept: "runway", Content: "runway is 12 months (May figure)",
+		Vault: vault, Concept: "runway", Content: "runway is 12 months (May figure)", CreatedAt: &createdAt,
 	})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
@@ -268,7 +272,11 @@ func TestForget_NotTrueSince_StampsInsteadOfDelete(t *testing.T) {
 	ctx := context.Background()
 	const vault = "validtime-forget"
 
-	resp, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "belief", Content: "a belief that stopped being true"})
+	// The fact was true for a past interval: created two hours ago, stopped being
+	// true one hour ago. (not_true_since must be after the fact's start — an
+	// invalidation before the fact existed is an inverted window, rejected.)
+	createdAt := time.Now().Add(-2 * time.Hour).UTC()
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "belief", Content: "a belief that stopped being true", CreatedAt: &createdAt})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -340,7 +348,9 @@ func TestWrite_ContentHashDedup_ExpiredHitWritesNewEngram(t *testing.T) {
 	const vault = "validtime-dedup"
 	const content = "the office is in building 7"
 
-	first, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "office", Content: content})
+	// Backdated so the later not_true_since (~now) is after the fact's start.
+	firstCreated := time.Now().Add(-time.Hour).UTC()
+	first, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "office", Content: content, CreatedAt: &firstCreated})
 	if err != nil {
 		t.Fatalf("Write first: %v", err)
 	}
@@ -403,8 +413,9 @@ func TestCOG19_Pin(t *testing.T) {
 	ctx := context.Background()
 	const vault = "cog19-pin"
 
+	cog19Created := time.Now().Add(-time.Hour).UTC()
 	resp, err := eng.Write(ctx, &mbp.WriteRequest{
-		Vault: vault, Concept: "cog19 fact", Content: "cog19 pinned fact content",
+		Vault: vault, Concept: "cog19 fact", Content: "cog19 pinned fact content", CreatedAt: &cog19Created,
 	})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
@@ -439,6 +450,91 @@ func TestCOG19_Pin(t *testing.T) {
 	for _, a := range respAct.Activations {
 		if a.ID == resp.ID {
 			t.Fatal("COG-19 violated: default recall returned an engram whose ValidUntil <= now")
+		}
+	}
+}
+
+// TestForget_NotTrueSince_RejectsEpochSentinel is the refute-pass blocking guard:
+// a stamp at the Unix epoch (UnixNano()==0) would encode to raw 0 and decode as
+// the ERF "open/current" sentinel — silently NOT invalidating while the handler
+// reports success (a truth inversion). It must be rejected loudly.
+func TestForget_NotTrueSince_RejectsEpochSentinel(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	const vault = "validtime-epoch"
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "c", Content: "content"})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	epoch := time.Unix(0, 0).UTC() // 1970 — UnixNano()==0, but IsZero()==false
+	_, err = eng.Forget(ctx, &mbp.ForgetRequest{Vault: vault, ID: resp.ID, NotTrueSince: &epoch})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("epoch not_true_since: err = %v, want ErrInvalidRequest", err)
+	}
+	// The fact must remain valid (NOT silently invalidated).
+	ws := eng.store.ResolveVaultPrefix(vault)
+	id, _ := storage.ParseULID(resp.ID)
+	got, _ := eng.store.GetEngram(ctx, ws, id)
+	if !got.ValidUntil.IsZero() {
+		t.Error("rejected stamp must leave the fact open/current, not partially invalidated")
+	}
+}
+
+// TestEvolveAt_RejectsEpochAndInverted guards the evolve.effective_at stamp path.
+func TestEvolveAt_RejectsEpochAndInverted(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	const vault = "validtime-evolveat"
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "c", Content: "original"})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	epoch := time.Unix(0, 0).UTC()
+	if _, err := eng.EvolveAt(ctx, vault, resp.ID, "new", "reason", nil, "", epoch); !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("epoch effective_at: err = %v, want ErrInvalidRequest", err)
+	}
+	// Inverted: effective_at before the predecessor's start (created ~now).
+	past := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.EvolveAt(ctx, vault, resp.ID, "new", "reason", nil, "", past); !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("inverted effective_at: err = %v, want ErrInvalidRequest", err)
+	}
+}
+
+// TestWhereLeftOff_DropsInvalidatedActive pins the refute-pass gap fix: a fact
+// invalidated via forget.not_true_since stays ACTIVE, so where_left_off (which
+// bypasses the recall gate) must drop it explicitly — the session-orientation
+// surface must never lead with something the user marked "no longer true".
+func TestWhereLeftOff_DropsInvalidatedActive(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	const vault = "validtime-wlo"
+
+	createdAt := time.Now().Add(-3 * time.Hour).UTC()
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "stale", Content: "no longer true fact", CreatedAt: &createdAt})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// Also write a still-current fact so the surface has something to return.
+	if _, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "live", Content: "still true fact"}); err != nil {
+		t.Fatalf("Write current: %v", err)
+	}
+	notTrueSince := time.Now().Add(-1 * time.Hour).UTC()
+	if _, err := eng.Forget(ctx, &mbp.ForgetRequest{Vault: vault, ID: resp.ID, NotTrueSince: &notTrueSince}); err != nil {
+		t.Fatalf("Forget(not_true_since): %v", err)
+	}
+
+	got, err := eng.WhereLeftOff(ctx, vault, 10, nil)
+	if err != nil {
+		t.Fatalf("WhereLeftOff: %v", err)
+	}
+	for _, e := range got {
+		if e.ID.String() == resp.ID {
+			t.Error("where_left_off returned a fact marked no-longer-true (COG-19 leak)")
 		}
 	}
 }
