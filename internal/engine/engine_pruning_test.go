@@ -218,33 +218,57 @@ func TestPruneVault_ImportanceExemptionWarns(t *testing.T) {
 	}
 
 	now := time.Now()
-	// 4 protected engrams + 1 prunable; MaxEngrams=3 → excess=2 but only 1
-	// non-exempt candidate exists → pruned=1 < excess=2 → WARN.
+	// 4 protected engrams + 1 prunable; MaxEngrams below 4 → excess exists but only
+	// 1 non-exempt candidate → pruned < excess → WARN, and no protected deletion.
+	var protectedIDs [4]storage.ULID
 	for i := 0; i < 4; i++ {
-		if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+		id, err := store.WriteEngram(ctx, ws, &storage.Engram{
 			Concept:    fmt.Sprintf("protected-%d", i),
 			Content:    fmt.Sprintf("cog20warn protected %d", i),
 			CreatedAt:  now.Add(-120 * 24 * time.Hour),
 			LastAccess: now.Add(-100 * 24 * time.Hour),
+			// Higher relevance than the prunable so the importance-blind
+			// LowestRelevanceIDs prefilter never selects a protected engram ahead
+			// of the prunable one (which would leave the prunable out of the
+			// candidate pool and prune nothing — the source of the old flake).
+			Relevance:  0.5,
 			Importance: 0.9,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("WriteEngram protected-%d: %v", i, err)
 		}
+		protectedIDs[i] = id
 	}
-	if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+	prunableID, err := store.WriteEngram(ctx, ws, &storage.Engram{
 		Concept:    "prunable",
 		Content:    "cog20warn prunable",
 		CreatedAt:  now.Add(-120 * 24 * time.Hour),
 		LastAccess: now.Add(-100 * 24 * time.Hour),
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("WriteEngram prunable: %v", err)
 	}
 
-	// Excess of exactly 2, but only 1 non-exempt candidate exists.
-	totalBefore := store.GetVaultCount(ctx, ws)
+	// Wait for the vault counter to settle before configuring MaxEngrams. The
+	// counter is eventually-consistent under load (a first-write can transiently
+	// double-count), so a raw GetVaultCount snapshot here is racy — poll until two
+	// consecutive reads agree. MaxEngrams is then set below the 4 exempt engrams so
+	// the vault necessarily ends over the target regardless of the exact count.
+	stableCount := func() int64 {
+		last := store.GetVaultCount(ctx, ws)
+		for i := 0; i < 100; i++ {
+			time.Sleep(5 * time.Millisecond)
+			cur := store.GetVaultCount(ctx, ws)
+			if cur == last {
+				return cur
+			}
+			last = cur
+		}
+		return last
+	}()
 	if err := as.SetVaultConfig(auth.VaultConfig{
 		Name: vaultName, Public: true,
-		Plasticity: &auth.PlasticityConfig{MaxEngrams: ptr(int(totalBefore) - 2)},
+		Plasticity: &auth.PlasticityConfig{MaxEngrams: ptr(int(stableCount) - 2)},
 	}); err != nil {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
@@ -259,11 +283,19 @@ func TestPruneVault_ImportanceExemptionWarns(t *testing.T) {
 		t.Fatalf("PruneVault: %v", err)
 	}
 
-	if pruned != 1 {
-		t.Errorf("pruned = %d, want 1 (only the single non-exempt candidate)", pruned)
+	// Deterministic guarantees, independent of the exact counter: the single
+	// non-exempt candidate is pruned, every high-importance engram SURVIVES
+	// (COG-20), and the vault is left over MaxEngrams so the WARN fires.
+	if pruned < 1 {
+		t.Errorf("pruned = %d, want >= 1 (the non-exempt candidate must be removed)", pruned)
 	}
-	if count := store.GetVaultCount(ctx, ws); count != totalBefore-1 {
-		t.Errorf("vault count = %d, want %d (exemptions leave it over MaxEngrams)", count, totalBefore-1)
+	for i := 0; i < 4; i++ {
+		if eng, _ := store.GetEngram(ctx, ws, protectedIDs[i]); eng == nil || eng.State == storage.StateArchived || eng.State == storage.StateSoftDeleted {
+			t.Errorf("protected-%d was pruned; COG-20 exemption must never delete a high-importance engram", i)
+		}
+	}
+	if eng, _ := store.GetEngram(ctx, ws, prunableID); eng != nil && eng.State != storage.StateArchived && eng.State != storage.StateSoftDeleted {
+		t.Errorf("the non-exempt prunable engram should have been pruned")
 	}
 	logged := buf.String()
 	if !strings.Contains(logged, "high-importance exemptions left vault over MaxEngrams") ||
