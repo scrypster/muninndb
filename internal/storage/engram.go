@@ -640,7 +640,24 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 
 // SoftDelete sets state to StateSoftDeleted and updates the record.
 // It also transitions the 0x0B state secondary index from the old state to StateSoftDeleted.
+//
+// Takes the per-engram stripe lock (casLocks.For(id) — the SAME striped mutex
+// CompareAndSet/DeleteEngram/UpdateConfidence/TouchAccess use) across the
+// whole read-mutate-write. Previously this ran unlocked: GetEngram returns
+// the L1 cache's live pointer (DomainCache.Get does not clone), and this
+// method mutated eng.State/eng.UpdatedAt on that shared pointer in place with
+// no synchronization — any concurrent reader of the same cached engram (e.g.
+// TouchAccess's #682 reinforcement, or another SoftDelete/UpdateConfidence
+// call) raced this write under -race. Mirrors UpdateConfidence's locking
+// shape exactly, including dropping the cache entry before the authoritative
+// GetEngram read so a racing DeleteEngram's stale cache entry can't be reused.
 func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID) error {
+	mu := ps.casLocks.For(id[:])
+	mu.Lock()
+	defer mu.Unlock()
+
+	ps.cache.Delete(wsPrefix, id)
+
 	// Read engram
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
@@ -852,6 +869,52 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	ps.replicateBatch(batch)
 
 	return nil
+}
+
+// TouchAccess bumps AccessCount (+1) and LastAccess (=now) for an engram,
+// leaving every other metadata field untouched. It is the single reinforcement
+// primitive for #682: RecordAccess, the content-hash dedup "reinforce" path,
+// and the Read/feedback wiring all funnel through this method instead of doing
+// their own unlocked GetEngram→UpdateMetadata round trip.
+//
+// Locking mirrors UpdateConfidence exactly (engram.go:799): the per-engram
+// stripe lock (casLocks.For(id) — the SAME striped mutex CompareAndSet,
+// DeleteEngram, and UpdateConfidence use) is held across the whole read-then-
+// write, and the L1 cache entry is dropped before the authoritative GetEngram
+// read, so this serializes with a same-id CompareAndSet/DeleteEngram instead of
+// racing it (STO-2). All other fields (State, Confidence, Relevance,
+// Stability, UpdatedAt) are read fresh under the lock and passed through to
+// UpdateMetadata unchanged, so the 0x0B state index stays consistent with
+// whatever state a concurrent CAS just committed (STO-3) — TouchAccess never
+// has a stale view of State to accidentally index against.
+//
+// Trust and Confidence are never part of the write: reinforcement moves only
+// AccessCount/LastAccess, by construction (COG-1/COG-2 — access frequency is
+// not evidence of correctness).
+func (ps *PebbleStore) TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULID) error {
+	mu := ps.casLocks.For(id[:])
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Drop any stale cache entry left by a racing DeleteEngram between its
+	// batch.Commit and its post-commit cache.Delete (mirrors UpdateConfidence).
+	ps.cache.Delete(wsPrefix, id)
+
+	eng, err := ps.GetEngram(ctx, wsPrefix, id)
+	if err != nil {
+		return err
+	}
+
+	meta := &EngramMeta{
+		State:       eng.State,
+		Confidence:  eng.Confidence,
+		Relevance:   eng.Relevance,
+		Stability:   eng.Stability,
+		AccessCount: eng.AccessCount + 1,
+		UpdatedAt:   eng.UpdatedAt,
+		LastAccess:  time.Now(),
+	}
+	return ps.UpdateMetadata(ctx, wsPrefix, id, meta)
 }
 
 // UpdateConfidenceWithContradiction atomically applies a confidence delta and,

@@ -311,12 +311,19 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		modePreset = preset
 	}
 
+	readOnly, roErrMsg := resolveReadOnly(ctx, args)
+	if roErrMsg != "" {
+		sendError(w, id, -32001, roErrMsg)
+		return
+	}
+
 	req := &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    contexts,
 		Threshold:  threshold,
 		MaxResults: limit,
 		Profile:    profile,
+		ReadOnly:   readOnly,
 	}
 
 	// Ownership-lease work-queue visibility (#548).
@@ -471,7 +478,13 @@ func (s *MCPServer) handleRead(ctx context.Context, w http.ResponseWriter, id js
 		sendError(w, id, -32602, "invalid params: 'id' is required")
 		return
 	}
-	resp, err := s.engine.Read(ctx, &mbp.ReadRequest{ID: engramID, Vault: vault})
+	readOnly, roErrMsg := resolveReadOnly(ctx, args)
+	if roErrMsg != "" {
+		sendError(w, id, -32001, roErrMsg)
+		return
+	}
+
+	resp, err := s.engine.Read(ctx, &mbp.ReadRequest{ID: engramID, Vault: vault, ReadOnly: readOnly})
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -862,6 +875,15 @@ func (s *MCPServer) handleWhereLeftOff(ctx context.Context, w http.ResponseWrite
 	}
 	if limit > 50 {
 		limit = 50
+	}
+
+	// S3: WhereLeftOff has no write side effects regardless of read_only (it
+	// never reinforces — see engine_where_left_off.go), so there is nothing
+	// to set on the downstream call. Still validate/reject for API
+	// consistency with muninn_recall/muninn_read (RFC S3 requires all three).
+	if _, roErrMsg := resolveReadOnly(ctx, args); roErrMsg != "" {
+		sendError(w, id, -32001, roErrMsg)
+		return
 	}
 
 	entries, err := s.engine.WhereLeftOff(ctx, vault, limit)

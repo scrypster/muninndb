@@ -218,6 +218,28 @@ func isReadOnlyTool(name string) bool {
 	return false
 }
 
+// resolveReadOnly computes the effective read-only decision (S3) for
+// muninn_recall, muninn_read, and muninn_where_left_off:
+//
+//	effective = credentialObserve(a.Mode via S0, carried on ctx by
+//	            auth.ContextMode) || explicit request "read_only" arg
+//
+// An observe-mode credential combined with an EXPLICIT read_only=false is
+// rejected (errMsg non-empty) rather than silently downgraded to read-only —
+// the request cannot escalate past what the credential allows, and failing
+// loudly here surfaces the caller's mistaken assumption instead of masking
+// it. Omitting "read_only" entirely is NOT treated as explicit false: it
+// simply defers to the credential (backward compatible with callers that
+// never set the flag).
+func resolveReadOnly(ctx context.Context, args map[string]any) (effective bool, errMsg string) {
+	credObserve := auth.ObserveFromContext(ctx)
+	reqReadOnly, hasReadOnly := args["read_only"].(bool)
+	if credObserve && hasReadOnly && !reqReadOnly {
+		return false, "forbidden: observe-mode credential cannot request read_only=false"
+	}
+	return credObserve || reqReadOnly, ""
+}
+
 // vaultFromArgs extracts the vault parameter from tool arguments.
 // Returns (name, present, invalid):
 //   - ("", false, false): vault key absent from args

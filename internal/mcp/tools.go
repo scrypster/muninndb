@@ -222,6 +222,10 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "boolean",
 						"description": "When true, disables work-queue lease filtering so memories checked out by other owners are also returned (admin/debugging). Default false.",
 					},
+					"read_only": map[string]any{
+						"type":        "boolean",
+						"description": "When true, marks this recall as a pure read that must not trigger any write side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
+					},
 				},
 				"required": []string{"context"},
 			},
@@ -234,6 +238,10 @@ func allToolDefinitions() []ToolDefinition {
 				"properties": map[string]any{
 					"vault": vaultProp,
 					"id":    map[string]any{"type": "string", "description": "Memory ID (ULID)."},
+					"read_only": map[string]any{
+						"type":        "boolean",
+						"description": "When true, this read must not trigger reinforcement (AccessCount/LastAccess bump) or implicit feedback side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
+					},
 				},
 				"required": []string{"id"},
 			},
@@ -573,6 +581,10 @@ func allToolDefinitions() []ToolDefinition {
 					"limit": map[string]any{
 						"type":        "integer",
 						"description": "Max memories to return (default 10, max 50).",
+					},
+					"read_only": map[string]any{
+						"type":        "boolean",
+						"description": "When true, marks this call as a pure read. where_left_off never has write side effects regardless of this flag; it exists for API consistency with muninn_recall/muninn_read. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
 					},
 				},
 				"required": []string{},

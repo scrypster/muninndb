@@ -67,6 +67,12 @@ type EngineStore interface {
 	// relevance_bucket, access count, timestamps). Updates both 0x01 and 0x02 keys.
 	UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id ULID, meta *EngramMeta) error
 
+	// TouchAccess bumps AccessCount (+1) and LastAccess (=now) under the
+	// per-engram stripe lock, leaving every other field (State, Confidence,
+	// Relevance, Stability) untouched. The single reinforcement primitive
+	// (#682) — see PebbleStore.TouchAccess for the locking rationale.
+	TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULID) error
+
 	// UpdateRelevance updates the relevance and stability of an engram.
 	// Moves the relevance bucket key (0x10) from the old bucket to the new bucket,
 	// and updates the metadata (0x01 and 0x02 keys) with the new values.

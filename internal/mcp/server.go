@@ -332,6 +332,14 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		sendError(w, req.ID, -32602, "unknown tool: "+req.Params.Name)
 		return
 	}
+
+	// COG-11: inject the credential's mode into ctx so engine-layer code (e.g.
+	// engine.go:2005's auth.ObserveFromContext(ctx)) can see it. gRPC
+	// (internal/transport/grpc/server.go:172) and REST (internal/auth/middleware.go:49)
+	// already do this; the MCP surface must match so observe-mode credentials get
+	// ReadOnly=true and skip Hebbian/PAS/activation-log side effects.
+	ctx = context.WithValue(ctx, auth.ContextMode, a.Mode)
+
 	handler(ctx, w, req.ID, vault, args)
 }
 

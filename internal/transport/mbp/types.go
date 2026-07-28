@@ -107,6 +107,11 @@ type WriteResponse struct {
 type ReadRequest struct {
 	ID    string `msgpack:"id" json:"id"`
 	Vault string `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	// ReadOnly, when true, suppresses reinforcement side effects (TouchAccess
+	// and the implicit feedback signal) for this read. Set by the MCP/REST/gRPC
+	// surface from the effective read-only decision (S3): observe-mode
+	// credential OR an explicit read_only request flag.
+	ReadOnly bool `msgpack:"read_only,omitempty" json:"read_only,omitempty"`
 }
 
 // ReadResponse returns the full engram data.
@@ -165,6 +170,11 @@ type ActivateRequest struct {
 	CallerOwner string `json:"caller_owner,omitempty" msgpack:"caller_owner,omitempty"`
 	// IncludeLeased disables lease-based visibility filtering (admin/debugging).
 	IncludeLeased bool `json:"include_leased,omitempty" msgpack:"include_leased,omitempty"`
+	// ReadOnly, when true, marks this activation as a pure read (S3): skips
+	// activation-log side effects. Recall/Activate never reinforces
+	// AccessCount regardless of this flag (COG-12) — this only affects the
+	// existing activation-log write path (see engine.go activateCore).
+	ReadOnly bool `json:"read_only,omitempty" msgpack:"read_only,omitempty"`
 }
 
 // Weights defines scoring weight distribution.
