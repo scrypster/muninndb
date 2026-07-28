@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -25,6 +26,22 @@ const (
 	// accumulate in one recall, no matter how many entities it shares with
 	// the seeds. Entity co-mention is associative evidence; the cap keeps it
 	// from outranking content evidence (issue #569).
+	//
+	// The cap deliberately sits at the LOW end of the BFS association weight
+	// range (~0.3–0.9): two or more maximally-rare shared entities are allowed
+	// to tie the weakest genuine graph edge, never a mid-strength one.
+	//
+	// CALIBRATION CAVEAT: factor, cap, and noise floor are calibrated to the
+	// ACT-R score scale ([0, 1]). Under RRF fusion (scoring_fusion="rrf"),
+	// content scores are rank-based and typically land in [0, 0.05]. On the
+	// activateCore path the request threshold is defaulted to 0.1 before
+	// activation.Run, so under RRF defaults no result clears the seed rule
+	// and the boost pass is effectively a no-op. A caller-explicit small
+	// threshold (e.g. 0.01) re-enables it, and there an injected engram can
+	// enter well above genuine RRF content matches while the threshold gate
+	// loses most of its bite. Scaling the boost to the active fusion mode is
+	// a scoped follow-up (see PR #570 review); until then RRF callers should
+	// treat entity-boosted scores as cross-scale.
 	entityBoostCap = float64(0.30)
 
 	// entityBoostNoiseFloor is the smallest per-entity contribution worth
@@ -72,19 +89,24 @@ func entityIDF(df, n int64) float64 {
 // boost per engram is capped at entityBoostCap. Engrams already in the
 // result set have the boost added to their score; engrams outside it are
 // injected only when their accumulated entity evidence alone clears the
-// caller's threshold AND they pass the caller's meta filters — the pipeline
-// applies filters in phase 6, so anything appended afterwards must honor the
-// same contract or a tags_all query returns records without the required
-// tags (issue #569). Both carry the boost in Components.EntityBoost so the
-// adjustment is auditable — injected results never appear with an empty
-// component trace (issue #569).
+// caller's threshold AND they pass the rest of phase 6's result contract:
+// meta filters, the ExcludeUntrusted trust filter, lease visibility (#548),
+// and the valid-time gate. The pipeline applies all of these in phase 6, so
+// anything appended afterwards must honor the same contract — otherwise a
+// tags_all query returns records without the required tags, an
+// ExcludeUntrusted vault gets flagged-unreliable memory re-injected through
+// any shared rare entity, and a work-queue engram checked out by another
+// agent leaks back into recall (issue #569). Boosted and injected results
+// both carry the boost in Components.EntityBoost so the adjustment is
+// auditable — injected results never appear with an empty component trace
+// (issue #569).
 //
 // Results are re-sorted by score descending.
 //
 // vaultSize is the recalled vault's engram count (activateCore already holds
 // it); it feeds entityIDF's n so rarity is judged against the vault being
 // recalled from, not the whole deployment — see entityIDF.
-func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int64, results []activation.ScoredEngram, threshold float64, filters []activation.Filter) []activation.ScoredEngram {
+func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int64, results []activation.ScoredEngram, req *activation.ActivateRequest) []activation.ScoredEngram {
 	if len(results) == 0 {
 		return results
 	}
@@ -103,7 +125,7 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 		if len(seeds) >= entityBoostTopN {
 			break
 		}
-		if r.Score < threshold {
+		if r.Score < req.Threshold {
 			continue
 		}
 		seeds = append(seeds, r)
@@ -123,6 +145,7 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 	}
 	boosts := make(map[storage.ULID]*boostAcc)
 	idfCache := make(map[string]float64, 8)
+	scanned := make(map[string]struct{}, 8) // entities whose reverse index was already walked
 
 	for _, seed := range seeds {
 		_ = e.store.ScanEngramEntities(ctx, ws, seed.Engram.ID, func(entityName string) error {
@@ -138,6 +161,12 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 			if contribution < entityBoostNoiseFloor {
 				return nil // ubiquitous entity — no evidence; skip its fan-out
 			}
+			// Credit is once-per-entity per target, so a second seed carrying
+			// the same entity cannot change any accumulator — skip the rescan.
+			if _, done := scanned[entityName]; done {
+				return nil
+			}
+			scanned[entityName] = struct{}{}
 			// For each engram mentioning this entity (0x23 reverse index).
 			return e.store.ScanEntityEngrams(ctx, entityName, func(entityWS [8]byte, engramID storage.ULID) error {
 				if entityWS != ws {
@@ -181,10 +210,16 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 	}
 
 	// Pass 2b: inject engrams the pipeline did not retrieve, iff their
-	// entity evidence alone clears the caller's threshold. A result below
-	// threshold stays below threshold regardless of how it was found.
+	// entity evidence alone clears the caller's threshold AND they pass the
+	// rest of phase 6's result contract. A result below threshold stays below
+	// threshold regardless of how it was found, and an engram phase 6 would
+	// have hidden (filters, trust, lease, validity) must not ride in through
+	// the boost side door. Each check mirrors its phase-6 counterpart in
+	// activation/engine.go; injections are typically few, so the per-candidate
+	// lease read costs less than batching would save.
+	injectNow := time.Now()
 	for id, acc := range boosts {
-		if acc.total < threshold {
+		if acc.total < req.Threshold {
 			continue
 		}
 		eng, err := e.store.GetEngram(ctx, ws, id)
@@ -194,8 +229,28 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
 			continue
 		}
-		if !activation.PassesMetaFilter(eng, filters) {
+		if !activation.PassesMetaFilter(eng, req.Filters) {
 			continue // injected results obey the caller's filters like any pipeline result
+		}
+		// Hard trust filter. ExcludeUntrusted rides the request bool, not
+		// Filters, so PassesMetaFilter cannot enforce it. Injection-side only:
+		// pass 2a boosts engrams the pipeline already returned, which cleared
+		// this filter (and the two below) in phase 6 — re-filtering those
+		// would be a no-op.
+		if req.ExcludeUntrusted && eng.Trust == storage.TrustUntrusted {
+			continue
+		}
+		// Work-queue checkout (#548): hide engrams under a live foreign lease.
+		if !req.IncludeLeased {
+			if l, err := e.store.GetLease(ctx, ws, id); err == nil && l.Live(injectNow) && l.Owner != req.CallerOwner {
+				continue
+			}
+		}
+		// Valid-time gate (COG-19): the final gate in activateCore would drop
+		// an expired injection anyway; checking here keeps TotalFound honest
+		// and spares supersession the phantom work.
+		if !activation.PassesValidity(eng, req.AsOf, req.IncludeInvalid, injectNow) {
+			continue
 		}
 		results = append(results, activation.ScoredEngram{
 			Engram: eng,

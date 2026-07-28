@@ -2287,9 +2287,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// top-N result receives a small boost. This surfaces entity-linked engrams
 	// that have no direct association edge to the query-matching engrams.
 	preBoost := len(result.Activations)
-	result.Activations = e.applyEntityBoost(ctx, wsPrefix, vaultSize, result.Activations, actReq.Threshold, actReq.Filters)
-	// Injected engrams count as found: keep TotalFound consistent with the
-	// returned set (total < len(activations) was the #569 bypass fingerprint).
+	result.Activations = e.applyEntityBoost(ctx, wsPrefix, vaultSize, result.Activations, actReq)
+	// Injected engrams count as found: on the boost path, total <
+	// len(activations) was the #569 bypass fingerprint. This covers entity
+	// boost only — applySupersession below may still inject promoted heads
+	// without a TotalFound bump. Known imprecision (scoped follow-up, PR #570
+	// review): an engram that scored above threshold in the pipeline but was
+	// truncated past MaxResults and then re-injected here is counted twice.
 	result.TotalFound += len(result.Activations) - preBoost
 
 	// Supersedes-aware ranking: promote the current fact over any superseded one
@@ -2299,10 +2303,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	result.Activations = e.applySupersession(ctx, wsPrefix, result.Activations, actReq.MaxResults)
 
 	// Final valid-time gate (COG-19: default recall never returns an engram whose
-	// ValidUntil <= now). Phase-6 already gated scored candidates, but entity boost
-	// and supersession inject engrams after phase 6 — entity-boost injections now
-	// honor PassesMetaFilter (#569), but validity is a separate predicate — so the
-	// shared predicate must hold at the last cut before truncation. Runs AFTER supersession
+	// ValidUntil <= now). Phase-6 already gated scored candidates, and entity-boost
+	// injections now enforce the full phase-6 contract (filters, trust, lease,
+	// validity — #569) at injection, but supersession still injects promoted heads
+	// past PassesMetaFilter, so the shared predicate must hold at the last cut
+	// before truncation. Runs AFTER supersession
 	// on purpose: a manual supersede's now-expired predecessor is dropped only once
 	// its current head has been promoted/injected, so a query matching only the
 	// stale phrasing still returns the current fact.

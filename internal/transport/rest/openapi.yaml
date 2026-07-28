@@ -307,6 +307,9 @@ components:
         transition_boost:
           type: number
           format: float
+        entity_boost:
+          type: number
+          format: float
         access_frequency:
           type: number
           format: float

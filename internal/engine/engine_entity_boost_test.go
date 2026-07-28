@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -157,10 +159,10 @@ func TestEntityBoost_ApplyEntityBoostDirect(t *testing.T) {
 		{Engram: fullA, Score: 0.8},
 	}
 
-// Apply entity boost with this test's true corpus size (3 engrams) as
+	// Apply entity boost with this test's true corpus size (3 engrams) as
 	// the vault-local n. "PostgreSQL" was upserted once (df=1, n=3), so
 	// idf = ln(3/1)/ln(3) = 1.0 and B's boost is the full entityBoostFactor.
-	boosted := eng.applyEntityBoost(ctx, ws, 3, initialResults, 0.05, nil)
+	boosted := eng.applyEntityBoost(ctx, ws, 3, initialResults, &activation.ActivateRequest{Threshold: 0.05})
 
 	// Build ID set from boosted results.
 	idSet := make(map[storage.ULID]float64, len(boosted))
@@ -227,7 +229,7 @@ func TestEntityBoost_BelowThresholdSeedDoesNotSpread(t *testing.T) {
 	initialResults := []activation.ScoredEngram{{Engram: fullA, Score: 0.02}}
 
 	const threshold = 0.05
-	boosted := eng.applyEntityBoost(ctx, ws, 2, initialResults, threshold, nil)
+	boosted := eng.applyEntityBoost(ctx, ws, 2, initialResults, &activation.ActivateRequest{Threshold: threshold})
 
 	idSet := make(map[storage.ULID]struct{}, len(boosted))
 	for _, r := range boosted {
@@ -240,7 +242,7 @@ func TestEntityBoost_BelowThresholdSeedDoesNotSpread(t *testing.T) {
 
 	// Control: with threshold 0, A is a legitimate seed and B does surface — proves
 	// the exclusion is what suppresses B, not a broken setup.
-	ctrl := eng.applyEntityBoost(ctx, ws, 2, []activation.ScoredEngram{{Engram: fullA, Score: 0.02}}, 0.0, nil)
+	ctrl := eng.applyEntityBoost(ctx, ws, 2, []activation.ScoredEngram{{Engram: fullA, Score: 0.02}}, &activation.ActivateRequest{Threshold: 0.0})
 	ctrlSet := make(map[storage.ULID]struct{}, len(ctrl))
 	for _, r := range ctrl {
 		ctrlSet[r.Engram.ID] = struct{}{}
@@ -364,7 +366,7 @@ func TestEntityBoost_UbiquitousEntityDoesNotFlood(t *testing.T) {
 		results = append(results, activation.ScoredEngram{Engram: full, Score: 0.8 - float64(i)*0.05})
 	}
 
-	boosted := eng.applyEntityBoost(ctx, ws, 12, results, 0.1, nil)
+	boosted := eng.applyEntityBoost(ctx, ws, 12, results, &activation.ActivateRequest{Threshold: 0.1})
 
 	require.Len(t, boosted, 5, "no engram may be injected on ubiquitous-entity evidence alone")
 	for _, r := range boosted {
@@ -399,7 +401,7 @@ func TestEntityBoost_SameEntityViaMultipleSeedsCountsOnce(t *testing.T) {
 	boosted := eng.applyEntityBoost(ctx, ws, 100, []activation.ScoredEngram{
 		{Engram: fullSeed1, Score: 0.8},
 		{Engram: fullSeed2, Score: 0.7},
-	}, 0.05, nil)
+	}, &activation.ActivateRequest{Threshold: 0.05})
 
 	expected := entityBoostFactor * entityIDF(3, 100)
 	var targetScore float64
@@ -443,7 +445,7 @@ func TestEntityBoost_CapBoundsAccumulation(t *testing.T) {
 
 	boosted := eng.applyEntityBoost(ctx, ws, 1000, []activation.ScoredEngram{
 		{Engram: fullSeed, Score: 0.9},
-	}, 0.05, nil)
+	}, &activation.ActivateRequest{Threshold: 0.05})
 
 	found := false
 	for _, r := range boosted {
@@ -480,13 +482,13 @@ func TestEntityBoost_InjectionRespectsThreshold(t *testing.T) {
 	// Threshold just above the evidence: no injection.
 	high := eng.applyEntityBoost(ctx, ws, 100, []activation.ScoredEngram{
 		{Engram: fullSeed, Score: 0.8},
-	}, boost+0.01, nil)
+	}, &activation.ActivateRequest{Threshold: boost + 0.01})
 	require.Len(t, high, 1, "sub-threshold entity evidence must not be injected")
 
 	// Threshold just below the evidence: injected.
 	low := eng.applyEntityBoost(ctx, ws, 100, []activation.ScoredEngram{
 		{Engram: fullSeed, Score: 0.8},
-	}, boost-0.01, nil)
+	}, &activation.ActivateRequest{Threshold: boost - 0.01})
 	require.Len(t, low, 2, "entity evidence clearing the threshold is injected")
 }
 
@@ -538,7 +540,7 @@ func TestEntityBoost_InjectionRespectsMetaFilters(t *testing.T) {
 	filters := []activation.Filter{{Field: "tags_all", Value: []string{"wanted"}}}
 	boosted := eng.applyEntityBoost(ctx, ws, 100, []activation.ScoredEngram{
 		{Engram: fullSeed, Score: 0.8},
-	}, 0.05, filters)
+	}, &activation.ActivateRequest{Threshold: 0.05, Filters: filters})
 
 	ids := make(map[storage.ULID]bool, len(boosted))
 	for _, r := range boosted {
@@ -729,4 +731,270 @@ func TestEntityBoost_RarityIsVaultLocal(t *testing.T) {
 			"a LOCALLY ubiquitous entity (df = vault size) must inject nothing, "+
 				"no matter how many engrams other vaults hold")
 	}
+}
+
+// TestEntityBoost_InjectionRespectsExcludeUntrusted verifies that engrams
+// injected on entity evidence honor the caller's ExcludeUntrusted, mirroring
+// phase 6's hard trust filter. ExcludeUntrusted rides the request bool rather
+// than Filters, so the meta-filter gate cannot cover it: pre-fix, a vault
+// excluding flagged-unreliable memory got it re-injected through any shared
+// rare entity. Injection-side only — engrams already in the result set
+// cleared phase 6's own trust filter.
+func TestEntityBoost_InjectionRespectsExcludeUntrusted(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "trust-gate-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	upsertEntityTimes(t, eng, "TrustEnt", 2)
+
+	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "trust-seed",
+		Content:    "trusted seed content",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, seedID, "TrustEnt"))
+
+	untrusted, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "trust-untrusted-target",
+		Content:    "flagged unreliable content sharing the entity",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, untrusted, "TrustEnt"))
+	require.NoError(t, eng.store.UpdateTrust(ctx, ws, untrusted, storage.TrustUntrusted))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, seedID)
+	require.NoError(t, err)
+	seedResults := []activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}
+
+	// With ExcludeUntrusted set, the untrusted engram must not be injected.
+	gated := eng.applyEntityBoost(ctx, ws, 100, seedResults, &activation.ActivateRequest{Threshold: 0.05, ExcludeUntrusted: true})
+	for _, r := range gated {
+		require.NotEqual(t, untrusted, r.Engram.ID,
+			"TrustUntrusted engram must not be injected when ExcludeUntrusted is set")
+	}
+
+	// Control: without the flag the same evidence injects it — proves the
+	// gate is what suppresses it, not a broken setup or insufficient idf.
+	open := eng.applyEntityBoost(ctx, ws, 100, seedResults, &activation.ActivateRequest{Threshold: 0.05})
+	found := false
+	for _, r := range open {
+		if r.Engram.ID == untrusted {
+			found = true
+		}
+	}
+	require.True(t, found, "control: without ExcludeUntrusted the entity evidence injects the engram")
+}
+
+// TestEntityBoost_ActivateWiresExcludeUntrustedIntoBoost drives the real
+// Activate path: a vault whose PlasticityConfig sets ExcludeUntrusted must not
+// see a TrustUntrusted engram re-enter through entity-boost injection. The
+// direct-call test above proves applyEntityBoost gates correctly; this one
+// proves activateCore actually hands the resolved flag to it, so a refactor of
+// the call site cannot silently reopen the hole while CI stays green. An
+// identical vault without the flag is the positive control: the same engram
+// arrives there ONLY via injection (its content shares no stems with the
+// query, so the FTS/vector pipeline cannot carry it — verified by disabling
+// the boost pass, which fails exactly the control leg), so a boost pass that
+// never ran cannot produce a false green.
+func TestEntityBoost_ActivateWiresExcludeUntrustedIntoBoost(t *testing.T) {
+	eng, as, _, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	tr := true
+	require.NoError(t, as.SetVaultConfig(auth.VaultConfig{
+		Name:       "trust-wire-gated",
+		Public:     true,
+		Plasticity: &auth.PlasticityConfig{ExcludeUntrusted: &tr},
+	}))
+
+	for _, vault := range []string{"trust-wire-gated", "trust-wire-open"} {
+		// Entity names are per-vault: MentionCount is store-global, so a name
+		// shared across the two test vaults would double df and sink the boost
+		// below threshold.
+		entName := "WireTrustEnt-" + vault
+		// Seed: matches the query, carries the shared entity.
+		_, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:    vault,
+			Concept:  "primary database choice",
+			Content:  "We use PostgreSQL as the primary relational database for transactional workloads",
+			Entities: []mbp.InlineEntity{{Name: entName, Type: "concept"}},
+		})
+		require.NoError(t, err)
+
+		// Untrusted target: content-unrelated to the query, reachable only
+		// via entity-boost injection.
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:    vault,
+			Concept:  "flagged note",
+			Content:  "moss shelf almanac entry, whisper ledger of appeals",
+			Entities: []mbp.InlineEntity{{Name: entName, Type: "concept"}},
+		})
+		require.NoError(t, err)
+		require.NoError(t, eng.SetTrust(ctx, vault, resp.ID, "untrusted"))
+
+		// Filler keeps the entity rare (df=2 against n=7 per vault).
+		for i := range 5 {
+			_, err := eng.Write(ctx, &mbp.WriteRequest{
+				Vault:   vault,
+				Concept: fmt.Sprintf("filler %d", i),
+				Content: fmt.Sprintf("Redis cache entry %d for session data", i),
+			})
+			require.NoError(t, err)
+		}
+
+		awaitFTS(t, eng)
+
+		act, err := eng.Activate(ctx, &mbp.ActivateRequest{
+			Vault:      vault,
+			Context:    []string{"primary relational database workloads"},
+			MaxResults: 20,
+			Threshold:  0.05,
+		})
+		require.NoError(t, err)
+
+		found := false
+		for _, item := range act.Activations {
+			if item.ID == resp.ID {
+				found = true
+			}
+		}
+		if vault == "trust-wire-gated" {
+			require.False(t, found,
+				"ExcludeUntrusted vault must not receive the untrusted engram via entity-boost injection")
+		} else {
+			require.True(t, found,
+				"control vault without ExcludeUntrusted must receive the same engram by injection")
+		}
+	}
+}
+
+// TestEntityBoost_InjectionRespectsLeaseVisibility verifies that injections
+// honor the work-queue lease contract (#548), mirroring phase 6: an engram
+// checked out under a live foreign lease must not be re-injected through a
+// shared rare entity; the caller's own lease and an expired foreign lease
+// must not hide it.
+func TestEntityBoost_InjectionRespectsLeaseVisibility(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "lease-gate-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	upsertEntityTimes(t, eng, "LeaseEnt", 2)
+
+	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "lease-seed",
+		Content:    "seed content",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, seedID, "LeaseEnt"))
+
+	target, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "lease-target",
+		Content:    "work item content sharing the entity",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, target, "LeaseEnt"))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, seedID)
+	require.NoError(t, err)
+	seedResults := []activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}
+	inSet := func(rs []activation.ScoredEngram) bool {
+		for _, r := range rs {
+			if r.Engram.ID == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Live foreign lease: hidden.
+	claimRes, err := eng.Claim(ctx, vault, target.String(), "other-agent", 600)
+	require.NoError(t, err)
+	require.Equal(t, LeaseAcquired, claimRes.Status)
+	require.False(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05, CallerOwner: "me"})),
+		"engram under a live foreign lease must not be injected")
+
+	// IncludeLeased opt-out: visible even under the live foreign lease.
+	require.True(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05, CallerOwner: "me", IncludeLeased: true})),
+		"IncludeLeased must disable lease-based hiding")
+
+	// The lease owner's own recall: visible.
+	require.True(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05, CallerOwner: "other-agent"})),
+		"the lease owner's own lease must not hide the injection")
+
+	// Released: visible again (Live() staleness itself is pinned by the lease tests).
+	_, err = eng.Release(ctx, vault, target.String(), "other-agent")
+	require.NoError(t, err)
+	require.True(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05, CallerOwner: "me"})),
+		"a released lease must not hide the injection")
+}
+
+// TestEntityBoost_InjectionRespectsValidity verifies that injections honor the
+// COG-19 valid-time gate: an engram whose ValidUntil has passed must not be
+// injected (the final gate in activateCore would drop it anyway, but gating at
+// injection keeps TotalFound honest), while IncludeInvalid restores it.
+func TestEntityBoost_InjectionRespectsValidity(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "validity-gate-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	upsertEntityTimes(t, eng, "ValidEnt", 2)
+
+	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "validity-seed",
+		Content:    "seed content",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, seedID, "ValidEnt"))
+
+	expired := time.Now().Add(-time.Hour)
+	target, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "validity-target",
+		Content:    "stale fact sharing the entity",
+		Confidence: 0.9,
+		ValidUntil: expired,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, target, "ValidEnt"))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, seedID)
+	require.NoError(t, err)
+	seedResults := []activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}
+	inSet := func(rs []activation.ScoredEngram) bool {
+		for _, r := range rs {
+			if r.Engram.ID == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	require.False(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05})),
+		"an expired engram must not be injected on entity evidence")
+
+	require.True(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05, IncludeInvalid: true})),
+		"IncludeInvalid must restore the expired injection")
 }
