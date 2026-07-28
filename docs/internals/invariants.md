@@ -58,6 +58,7 @@ Format: **[INV-n]** assertion — `file:anchor` — *why it matters / what break
 - **[SEC-11]** Vault names are `[a-z0-9_-]{1,64}` everywhere via `IsValidVaultName` — `internal/auth/token.go`.
 - **[SEC-12]** Static-token compares are constant-time with a length cap; keys/caps are looked up by SHA-256(secret) — raw secrets are never stored — `internal/auth/token.go`, `keys_store.go`, `capability_store.go`.
 - **[SEC-13]** Any new client write path in a cluster deployment must either gate on `IsLeader()`/Cortex-origin or replicate its mutation — no transport does this today, which is exactly bug #596. Background workers that mutate replicated state (e.g. the pruner) inherit the same obligation.
+- **[SEC-14]** The elevated trust level `verified` (human-confirmed / admin-certified) can only be set on a write by a `full` or `write` credential — an `observe` credential is rejected with `ErrInvalidRequest`, never silently downgraded — `internal/engine/engine.go` `resolveTrust` (enforced transport-agnostically in `Write`/`WriteBatch`, so REST/gRPC/MBP inherit it; RED-tested in `trust_write_test.go`). *Every other trust level (`inferred` default, `external`, `untrusted`) is ungated. `source_type` is provenance-derived, never a write arg, so trust is the sole caller-settable discriminator — a write path that lets any credential stamp `verified` makes the anti-pollution capture tiering theater (S8/D4).*
 
 ---
 

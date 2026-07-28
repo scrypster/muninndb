@@ -110,6 +110,9 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		req.CreatedAt = &t
 	}
 	applyTypeArgs(args, req)
+	if t, ok := args["trust"].(string); ok {
+		req.Trust = t
+	}
 	malformed := applyEnrichmentArgs(args, req)
 	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
 		sendError(w, id, -32602, errMsg)
@@ -205,6 +208,9 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			req.CreatedAt = &t
 		}
 		applyTypeArgs(m, req)
+		if t, ok := m["trust"].(string); ok {
+			req.Trust = t
+		}
 		malformed := applyEnrichmentArgs(m, req)
 		if emb, errMsg := parseEmbeddingArg(m); errMsg != "" {
 			sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].%s", i, strings.TrimPrefix(errMsg, "invalid params: ")))

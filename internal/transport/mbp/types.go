@@ -89,6 +89,14 @@ type WriteRequest struct {
 	MemoryType   uint8         `msgpack:"memory_type,omitempty" json:"memory_type,omitempty"`
 	TypeLabel    string        `msgpack:"type_label,omitempty" json:"type_label,omitempty"`
 
+	// Trust is an optional trust-level label (verified|inferred|external|untrusted).
+	// Empty defaults to "inferred" — the level for all AI-generated content.
+	// Setting "verified" requires a write or full credential (S8): the engine
+	// rejects it under an observe credential. source_type is provenance-derived
+	// and never a write argument, so trust is the only discriminator the write
+	// path exposes for the anti-pollution capture tiering.
+	Trust string `msgpack:"trust,omitempty" json:"trust,omitempty"`
+
 	// Inline enrichment: caller-provided data that bypasses background enrichment.
 	Summary             string                     `msgpack:"summary,omitempty" json:"summary,omitempty"`
 	Entities            []InlineEntity             `msgpack:"entities,omitempty" json:"entities,omitempty"`

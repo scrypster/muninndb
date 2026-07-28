@@ -918,6 +918,30 @@ func (e *Engine) Hello(ctx context.Context, req *mbp.HelloRequest) (*mbp.HelloRe
 	}, nil
 }
 
+// resolveTrust validates a caller-supplied trust label and enforces the S8/D4
+// credential gate: the elevated "verified" level (human-confirmed / admin-
+// certified) may only be set by a write or full credential, never by an
+// observe credential. An empty label defaults to TrustInferred — the level for
+// all AI-generated content — preserving the pre-S8 behaviour for callers that
+// do not pass trust. source_type is provenance-derived and never a write
+// argument, so trust is the sole discriminator the write path exposes.
+func resolveTrust(ctx context.Context, label string) (storage.TrustLevel, error) {
+	if label == "" {
+		return storage.TrustInferred, nil
+	}
+	level, err := storage.ParseTrustLevel(label)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	if level == storage.TrustVerified {
+		mode, _ := ctx.Value(auth.ContextMode).(string)
+		if mode != auth.ModeFull && mode != auth.ModeWrite {
+			return 0, fmt.Errorf("%w: trust=verified requires a write or full credential", ErrInvalidRequest)
+		}
+	}
+	return level, nil
+}
+
 // Write implements mbp.EngineAPI.Write.
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	writeStart := time.Now()
@@ -1007,6 +1031,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		callerRelationships = req.Relationships
 	}
 
+	// Resolve trust (S8): default inferred; "verified" gated to write/full creds.
+	trust, trustErr := resolveTrust(ctx, req.Trust)
+	if trustErr != nil {
+		return nil, trustErr
+	}
+
 	// Build storage.Engram from request
 	eng := &storage.Engram{
 		Concept:    req.Concept,
@@ -1017,7 +1047,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		Embedding:  req.Embedding,
 		MemoryType: storage.MemoryType(req.MemoryType),
 		TypeLabel:  req.TypeLabel,
-		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
+		Trust:      trust,
 	}
 
 	// Apply caller-provided summary directly to the engram.
@@ -1493,6 +1523,14 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			callerRelationships = req.Relationships
 		}
 
+		// Resolve trust (S8): default inferred; "verified" gated to write/full
+		// creds. A bad/ungated trust fails only this item, not the whole batch.
+		trust, trustErr := resolveTrust(ctx, req.Trust)
+		if trustErr != nil {
+			errs[i] = trustErr
+			continue
+		}
+
 		eng := &storage.Engram{
 			Concept:    req.Concept,
 			Content:    req.Content,
@@ -1502,7 +1540,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			Embedding:  req.Embedding,
 			MemoryType: storage.MemoryType(req.MemoryType),
 			TypeLabel:  req.TypeLabel,
-			Trust:      storage.TrustInferred, // all new MCP writes default to inferred
+			Trust:      trust,
 		}
 
 		if callerSummary != "" {
