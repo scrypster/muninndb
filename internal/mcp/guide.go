@@ -176,6 +176,20 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- `max_depth=N` — limits how deep the returned tree goes (default 10, 0 means unlimited).\n")
 	b.WriteString("- `limit=N` — caps how many children are returned per node per level.\n")
 
+	// Valid-time (the two time axes)
+	b.WriteString("\n## Time: two axes\n\n")
+	b.WriteString("Every memory carries two independent time axes:\n")
+	b.WriteString("- **Transaction time** (`created_at`) — when the memory was stored. Filter with recall's `since`/`before`.\n")
+	b.WriteString("- **Valid time** (`valid_from`/`valid_until`, half-open) — when the FACT was true in the world. ")
+	b.WriteString("Defaults: valid_from = created_at, valid_until = open (still true).\n\n")
+	b.WriteString("What this gives you:\n")
+	b.WriteString("- Default recall answers \"what is true now\": facts whose valid_until has passed are excluded automatically.\n")
+	b.WriteString("- `muninn_recall(as_of=\"2026-05-01T00:00:00Z\")` answers \"what was true then\". Example: after evolving a runway figure, as_of a past date returns the OLD figure.\n")
+	b.WriteString("- `muninn_recall(include_invalid=true)` shows history — expired facts come back annotated `expired: true`.\n")
+	b.WriteString("- Store historical facts with their real window: `muninn_remember(content=..., valid_from=\"2024-01-01T00:00:00Z\", valid_until=\"2025-06-30T00:00:00Z\")`. Don't backdate created_at for this.\n")
+	b.WriteString("- When a fact stops being true (but wasn't wrong), use `muninn_forget(id, not_true_since=...)` instead of deleting — the memory is kept with a closed window.\n")
+	b.WriteString("- `muninn_evolve` closes the old version's window automatically (optional `effective_at` if the change happened earlier than you recorded it).\n")
+
 	// Tips
 	b.WriteString("\n## Tips\n\n")
 	if resolved.MultiUser {

@@ -986,8 +986,14 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 	defer unlockContentHash()
 	if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
-		// A mapping exists — verify the engram is still live (not soft-deleted).
-		if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && existingEng.State != storage.StateSoftDeleted {
+		// A mapping exists — verify the engram is still live (not soft-deleted)
+		// AND still current on the valid-time axis. Re-remembering content
+		// identical to an EXPIRED engram must NOT reinforce the expired record:
+		// two same-content facts with disjoint validity windows are two facts,
+		// so we fall through to write a new engram (PutContentHash below then
+		// repoints the hash at the new, current one).
+		if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil &&
+			existingEng.State != storage.StateSoftDeleted && !existingEng.IsExpired(time.Now()) {
 			// Reinforce: increment access count and update LastAccess to signal
 			// that this content is being re-experienced. Release the stripe
 			// lock before TouchAccess — the dedup decision is already made and
@@ -1010,7 +1016,8 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 				Hint:      "duplicate_content",
 			}, nil
 		}
-		// Engram was soft-deleted or not found — remove stale hash mapping and proceed.
+		// Engram was soft-deleted, expired, or not found — remove the stale hash
+		// mapping and proceed to write a fresh engram.
 		_ = e.store.DeleteContentHash(ctx, wsPrefix, contentHash)
 	}
 
@@ -1069,6 +1076,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 			return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 		}
 		eng.CreatedAt = *req.CreatedAt
+	}
+
+	// Valid-time bounds (half-open [valid_from, valid_until)). ValidFrom
+	// defaults to CreatedAt at decode time, so leaving it unset is free.
+	if err := applyValidity(eng, req.ValidFrom, req.ValidUntil); err != nil {
+		return nil, err
 	}
 
 	// Convert associations
@@ -1489,7 +1502,11 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		// cannot see each other's hashes during Phase 1. This is a known limitation.
 		contentHash := storage.ContentHash(req.Content)
 		if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
-			if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil && existingEng.State != storage.StateSoftDeleted {
+			// Same live-AND-current check as the single-Write path: an EXPIRED
+			// engram (closed ValidUntil <= now) must not be reinforced — write a
+			// new engram with its own validity window instead.
+			if existingEng, err := e.store.GetEngram(ctx, wsPrefix, existingID); err == nil &&
+				existingEng.State != storage.StateSoftDeleted && !existingEng.IsExpired(time.Now()) {
 				// Reinforce via TouchAccess (#682) — same locked primitive and
 				// same 1/day dedup-channel cap as the single-Write path above;
 				// this unlocked GetEngram→UpdateMetadata pair was the identical
@@ -1559,6 +1576,10 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 				continue
 			}
 			eng.CreatedAt = *req.CreatedAt
+		}
+		if validityErr := applyValidity(eng, req.ValidFrom, req.ValidUntil); validityErr != nil {
+			errs[i] = validityErr
+			continue
 		}
 
 		assocs := make([]storage.Association, len(req.Associations))
@@ -2025,9 +2046,21 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		Classification:      eng.Classification,
 		EmbedDim:            uint8(eng.EmbedDim),
 		Trust:               uint8(eng.Trust),
+		ValidFrom:           eng.EffectiveValidFrom().UnixNano(),
+		ValidUntil:          validUntilNano(eng.ValidUntil),
+		IsCurrent:           eng.ValidUntil.IsZero(),
 		Entities:            entities,
 		EntityRelationships: entityRels,
 	}, nil
+}
+
+// validUntilNano converts an optional ValidUntil to UnixNano, keeping 0 as the
+// "open window" sentinel.
+func validUntilNano(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
 }
 
 // Activate implements mbp.EngineAPI.Activate.
@@ -2089,6 +2122,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
+
+	// Valid-time gate (COG-19): as_of / include_invalid flow into phase-6
+	// filtering; the final gate below re-applies them to entity-boost injections.
+	actReq.AsOf = req.AsOf
+	actReq.IncludeInvalid = req.IncludeInvalid
 
 	// Ownership-lease work-queue visibility (#548): hide engrams checked out by a
 	// live foreign lease unless the caller opts in.
@@ -2253,12 +2291,30 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// Supersedes-aware ranking: promote the current fact over any superseded one
 	// it replaces (injecting it if the query didn't retrieve it), so recall never
 	// leads with a fact it knows is stale. Runs after entity boost and BEFORE
-	// truncation so an injected head is not cut. Skipped in observe mode is
-	// unnecessary — it performs no writes (pure read-path ranking).
+	// truncation so an injected head is not cut. Pure read-path ranking (no writes).
 	result.Activations = e.applySupersession(ctx, wsPrefix, result.Activations, actReq.MaxResults)
 
-	// Re-apply MaxResults: entity boost / supersession may have appended engrams
-	// beyond the limit. Both re-sort by score descending, so truncation keeps top-K.
+	// Final valid-time gate (COG-19: default recall never returns an engram whose
+	// ValidUntil <= now). Phase-6 already gated scored candidates, but entity boost
+	// AND supersession inject engrams that bypass passesMetaFilter, so the shared
+	// predicate must hold at the last cut before truncation. Runs AFTER supersession
+	// on purpose: a manual supersede's now-expired predecessor is dropped only once
+	// its current head has been promoted/injected, so a query matching only the
+	// stale phrasing still returns the current fact.
+	// NOTE: filter into a NEW slice — the activation engine's async log-drain
+	// goroutine may still be reading the backing array returned by Run(), so
+	// in-place compaction (Activations[:0]) is a data race.
+	gateNow := time.Now()
+	kept := make([]activation.ScoredEngram, 0, len(result.Activations))
+	for _, s := range result.Activations {
+		if activation.PassesValidity(s.Engram, req.AsOf, req.IncludeInvalid, gateNow) {
+			kept = append(kept, s)
+		}
+	}
+	result.Activations = kept
+
+	// Re-apply MaxResults: entity boost / supersession / the validity gate may have
+	// changed the set. All re-sort or preserve score order, so truncation keeps top-K.
 	if actReq.MaxResults > 0 && len(result.Activations) > actReq.MaxResults {
 		result.Activations = result.Activations[:actReq.MaxResults]
 	}
@@ -2294,6 +2350,16 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		if (scored.SupersededBy != storage.ULID{}) {
 			items[i].SupersededBy = scored.SupersededBy.String()
 		}
+		// Valid-time annotations: ValidFrom only when explicitly divergent from
+		// CreatedAt; ValidUntil when the window is closed; Expired when the
+		// window closed at or before now (reachable only under include_invalid).
+		if !scored.Engram.ValidFrom.IsZero() && !scored.Engram.ValidFrom.Equal(scored.Engram.CreatedAt) {
+			items[i].ValidFrom = scored.Engram.ValidFrom.UnixNano()
+		}
+		if !scored.Engram.ValidUntil.IsZero() {
+			items[i].ValidUntil = scored.Engram.ValidUntil.UnixNano()
+		}
+		items[i].Expired = scored.Engram.IsExpired(gateNow)
 
 		items[i].ScoreComponents = mbp.ScoreComponents{
 			SemanticSimilarity: float32(scored.Components.SemanticSimilarity),
@@ -2601,6 +2667,19 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 		return nil, fmt.Errorf("write association: %w", err)
 	}
 
+	// An explicit RelSupersedes link closes the target's validity window at
+	// write time (valid-time axis, COG-19: a stamp, never a delete). Skipped
+	// when the window is already closed — an earlier stamp records when the
+	// fact actually stopped being true and must not be moved. Best-effort:
+	// the association is already committed, and the legacy read-time
+	// supersession chain-walk still demotes unstamped targets.
+	if storage.RelType(req.RelType) == storage.RelSupersedes {
+		if _, stampErr := e.store.StampValidUntil(ctx, wsPrefix, targetID, time.Now(), true); stampErr != nil {
+			slog.Warn("engine: link: failed to stamp ValidUntil on superseded target",
+				"target", targetID.String(), "err", stampErr)
+		}
+	}
+
 	// When a "contradicts" link is explicitly created via Link(), notify the
 	// ContradictWorker so it can flag the pair and drive confidence updates.
 	if storage.RelType(req.RelType) == storage.RelContradicts {
@@ -2752,6 +2831,35 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 	id, err := storage.ParseULID(req.ID)
 	if err != nil {
 		return nil, fmt.Errorf("parse id: %w", err)
+	}
+
+	// not_true_since: invalidate on the valid-time axis instead of deleting.
+	// The engram stays ACTIVE with a closed validity window — default recall
+	// drops it (COG-19), as_of/include_invalid still see it. This is an
+	// explicit caller assertion of WHEN the fact stopped being true, so it
+	// overwrites any prior stamp (onlyIfOpen=false).
+	if req.NotTrueSince != nil {
+		if req.Hard {
+			return nil, fmt.Errorf("%w: not_true_since cannot be combined with hard=true — invalidation is a stamp, deletion is deletion", ErrInvalidRequest)
+		}
+		// Guard the stamp instant BEFORE writing: reject the epoch/uninitialized
+		// sentinel (which would decode as "open" and silently NOT invalidate while
+		// the response claims it did) and an inverted window (invalid before the
+		// fact existed). Mirrors applyValidity, which the stamp path bypasses.
+		eng, err := e.store.GetEngram(ctx, wsPrefix, id)
+		if err != nil || eng == nil {
+			return nil, ErrEngramNotFound
+		}
+		if err := validateStampTime(*req.NotTrueSince, eng.EffectiveValidFrom()); err != nil {
+			return nil, err
+		}
+		if _, err := e.store.StampValidUntil(ctx, wsPrefix, id, *req.NotTrueSince, false); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return nil, ErrEngramNotFound
+			}
+			return nil, fmt.Errorf("stamp not_true_since: %w", err)
+		}
+		return &mbp.ForgetResponse{OK: true}, nil
 	}
 
 	if req.Hard {
@@ -2976,6 +3084,17 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 		return nil, fmt.Errorf("restore update: %w", err)
 	}
 
+	// Restore re-opens the validity window: without this, a restored engram
+	// whose predecessor-stamp (evolve/supersedes) is in the past would be
+	// invisible to default recall — restore would be a recall no-op.
+	if !eng.ValidUntil.IsZero() {
+		if _, err := e.store.StampValidUntil(ctx, ws, ulid, time.Time{}, false); err != nil {
+			slog.Warn("engine: restore: failed to clear ValidUntil stamp", "id", id, "err", err)
+		} else {
+			eng.ValidUntil = time.Time{}
+		}
+	}
+
 	// Re-add content-hash mapping so future writes detect this engram as a duplicate.
 	contentHash := storage.ContentHash(eng.Content)
 	_ = e.store.PutContentHash(ctx, ws, contentHash, ulid)
@@ -3114,6 +3233,16 @@ type EngineSessionEntry struct {
 // concept overrides the inherited concept label; empty string inherits verbatim (#483).
 // All three writes are committed in a single atomic Pebble batch.
 func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (storage.ULID, error) {
+	return e.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, time.Time{})
+}
+
+// EvolveAt is Evolve with an explicit valid-time boundary: effectiveAt is the
+// application-time moment the new version became true — it becomes the
+// successor's ValidFrom and the predecessor's ValidUntil stamp (half-open
+// [from, until) windows meet exactly). The zero time defaults to now.
+func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, effectiveAt time.Time) (storage.ULID, error) {
+	// Append-mode credentials cannot evolve (modify an existing memory). Guarding
+	// EvolveAt covers Evolve too, since Evolve delegates here (#687 + valid-time).
 	if auth.AppendFromContext(ctx) {
 		return storage.ULID{}, ErrAppendForbidden
 	}
@@ -3144,6 +3273,17 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	// supersedes association within the same batch.
 	newULID := storage.NewULID()
 	now := time.Now()
+	// effectiveAt is the valid-time boundary between predecessor and successor:
+	// old.ValidUntil = new.ValidFrom = effectiveAt (half-open windows meet
+	// exactly, no overlap and no gap). Default: the evolve moment.
+	if effectiveAt.IsZero() {
+		effectiveAt = now
+	} else if err := validateStampTime(effectiveAt, oldEng.EffectiveValidFrom()); err != nil {
+		// An explicit effective_at must be a real instant after the predecessor
+		// began: epoch would collapse the successor's ValidFrom to CreatedAt AND
+		// leave the predecessor's ValidUntil raw-0 (= open), silently un-superseding.
+		return storage.ULID{}, err
+	}
 	if concept == "" {
 		concept = oldEng.Concept
 	}
@@ -3175,6 +3315,7 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 		LastAccess: now,
 		Embedding:  embedding,
 		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
+		ValidFrom:  effectiveAt,
 	}
 
 	// Carry the predecessor's entity links and relationship records forward
@@ -3219,8 +3360,11 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	if err := batch.WriteAssociation(ctx, wsPrefix, newULID, oldULID, supersedes); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch write association: %w", err)
 	}
-	if err := batch.UpdateEngramState(ctx, wsPrefix, oldULID, storage.StateSoftDeleted); err != nil {
-		return storage.ULID{}, fmt.Errorf("evolve: batch update old state: %w", err)
+	// Supersede = soft-delete (hidden from the present) + ValidUntil stamp
+	// (re-opens the record for as_of time-travel only) in the same atomic
+	// batch. Invalidation is always a stamp, never a delete (COG-19).
+	if err := batch.SupersedeEngram(ctx, wsPrefix, oldULID, effectiveAt); err != nil {
+		return storage.ULID{}, fmt.Errorf("evolve: batch supersede old: %w", err)
 	}
 	for _, name := range carriedEntities {
 		if err := batch.WriteEntityEngramLink(ctx, wsPrefix, newULID, name); err != nil {

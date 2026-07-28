@@ -26,7 +26,10 @@ type EngineInterface interface {
 
 	// Higher-level cognitive operations (tools 1-11)
 	GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error)
-	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (*WriteResult, error)
+	// Evolve replaces a memory with a new version. effectiveAt is the
+	// valid-time moment the new version became true (predecessor's ValidUntil
+	// stamp = successor's ValidFrom); the zero time defaults to now.
+	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, effectiveAt time.Time) (*WriteResult, error)
 	Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error)
 	Session(ctx context.Context, vault string, since time.Time) (*SessionSummary, error)
 	Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error)

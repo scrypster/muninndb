@@ -184,6 +184,9 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 				AssocCount:  uint16(len(eng.Associations)),
 				EmbedDim:    eng.EmbedDim,
 				MemoryType:  eng.MemoryType,
+				ValidFrom:   eng.ValidFrom,
+				ValidUntil:  eng.ValidUntil,
+				Importance:  eng.Importance,
 			}
 			ps.metaCache.Add([16]byte(id), meta)
 			result[i] = meta
@@ -222,6 +225,9 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 			AssocCount:  erfMeta.AssocCount,
 			EmbedDim:    EmbedDimension(erfMeta.EmbedDim),
 			MemoryType:  MemoryType(erfMeta.MemoryType),
+			ValidFrom:   erfMeta.ValidFrom,
+			ValidUntil:  erfMeta.ValidUntil,
+			Importance:  erfMeta.Importance,
 		}
 		// Populate metaCache so subsequent calls for this engram skip Pebble.
 		ps.metaCache.Add([16]byte(id), meta)
@@ -420,6 +426,62 @@ func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULI
 	})
 
 	return nil
+}
+
+// StampValidUntil sets (or clears, with the zero time) the ValidUntil field of
+// an engram in place — the single invalidation primitive (COG-19: invalidation
+// is always a stamp, never a delete). When onlyIfOpen is true, an
+// already-closed window is left untouched and (false, nil) is returned —
+// used by the RelSupersedes link stamp, which must not destroy an earlier
+// window end. Patches the raw 0x01 bytes (no full re-encode), mirroring
+// UpdateTrust.
+func (ps *PebbleStore) StampValidUntil(ctx context.Context, wsPrefix [8]byte, id ULID, until time.Time, onlyIfOpen bool) (bool, error) {
+	engramKey := keys.EngramKey(wsPrefix, [16]byte(id))
+	rawBytes, err := Get(ps.db, engramKey)
+	if err != nil {
+		return false, fmt.Errorf("get engram raw: %w", err)
+	}
+	if rawBytes == nil {
+		return false, fmt.Errorf("engram %w", ErrNotFound)
+	}
+
+	if onlyIfOpen && !erf.GetValidUntil(rawBytes).IsZero() {
+		return false, nil
+	}
+
+	if err := erf.PatchValidUntil(rawBytes, until); err != nil {
+		return false, fmt.Errorf("patch valid_until: %w", err)
+	}
+
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+
+	batch.Set(engramKey, rawBytes, nil)
+	metaKey := keys.MetaKey(wsPrefix, [16]byte(id))
+	batch.Set(metaKey, erf.MetaKeySlice(rawBytes), nil)
+
+	// Invalidate L1 and metadata caches before commit — cached structs are stale.
+	ps.cache.Delete(wsPrefix, id)
+	ps.metaCache.Remove([16]byte(id))
+
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return false, fmt.Errorf("commit batch: %w", err)
+	}
+	ps.replicateBatch(batch)
+
+	note := "cleared"
+	if !until.IsZero() {
+		note = until.UTC().Format(time.RFC3339Nano)
+	}
+	ps.provWork.Submit(wsPrefix, id, provenance.ProvenanceEntry{
+		Timestamp: time.Now(),
+		Source:    provenance.SourceHuman,
+		AgentID:   "system:valid-until",
+		Operation: "stamp-valid-until",
+		Note:      note,
+	})
+
+	return true, nil
 }
 
 // DeleteEngram performs a hard delete: removes the engram, all association keys,
@@ -1082,6 +1144,9 @@ func toERFEngram(eng *Engram) *erf.Engram {
 		TypeLabel:      eng.TypeLabel,
 		Classification: eng.Classification,
 		Trust:          uint8(eng.Trust),
+		ValidFrom:      eng.ValidFrom,
+		ValidUntil:     eng.ValidUntil,
+		Importance:     eng.Importance,
 	}
 }
 
@@ -1122,6 +1187,9 @@ func fromERFEngram(e *erf.Engram) *Engram {
 		TypeLabel:      e.TypeLabel,
 		Classification: e.Classification,
 		Trust:          TrustLevel(e.Trust),
+		ValidFrom:      e.ValidFrom,
+		ValidUntil:     e.ValidUntil,
+		Importance:     e.Importance,
 	}
 }
 

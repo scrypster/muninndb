@@ -39,7 +39,7 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 			CurrentVersion: item.CurrentVersion,
 		}
 	}
-	return Memory{
+	m := Memory{
 		Annotations: annotations,
 		ID:          item.ID,
 		Concept:     item.Concept,
@@ -61,7 +61,19 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		SourceType:  item.SourceType,
 		Trust:       storage.TrustLevel(item.Trust).String(),
 		Tags:        item.Tags,
+		Expired:     item.Expired,
 	}
+	// Valid-time annotations: only present when meaningful (backdated
+	// valid_from, or a closed window).
+	if item.ValidFrom != 0 {
+		vf := time.Unix(0, item.ValidFrom).UTC()
+		m.ValidFrom = &vf
+	}
+	if item.ValidUntil != 0 {
+		vu := time.Unix(0, item.ValidUntil).UTC()
+		m.ValidUntil = &vu
+	}
+	return m
 }
 
 // readResponseToMemory converts a ReadResponse to a Memory for the muninn_read tool.
@@ -84,6 +96,18 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		Relevance:   r.Relevance,
 		Trust:       storage.TrustLevel(r.Trust).String(),
 	}
+	// muninn_read always echoes the valid-time axis (teaches the two axes:
+	// created_at is transaction time, valid_from/valid_until application time).
+	if r.ValidFrom != 0 {
+		vf := time.Unix(0, r.ValidFrom).UTC()
+		m.ValidFrom = &vf
+	}
+	if r.ValidUntil != 0 {
+		vu := time.Unix(0, r.ValidUntil).UTC()
+		m.ValidUntil = &vu
+	}
+	isCurrent := r.IsCurrent
+	m.IsCurrent = &isCurrent
 	for _, e := range r.Entities {
 		m.Entities = append(m.Entities, ReadEntity{Name: e.Name, Type: e.Type})
 	}

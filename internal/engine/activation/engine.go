@@ -189,6 +189,28 @@ type ActivateRequest struct {
 	CallerOwner string
 	// IncludeLeased disables lease-based visibility filtering (admin/debugging).
 	IncludeLeased bool
+	// AsOf, when set, gates results by the full valid-time interval check
+	// [ValidFrom, ValidUntil) at T ("what was true at T"). Nil = the default
+	// gate: drop only engrams whose closed ValidUntil <= now; a future
+	// ValidFrom is deliberately NOT hidden (hiding a just-stored future fact
+	// until a clock ticks kills trust).
+	AsOf *time.Time
+	// IncludeInvalid disables the valid-time gate entirely (show history).
+	IncludeInvalid bool
+}
+
+// PassesValidity is the valid-time recall gate (COG-19: default recall never
+// returns an engram whose ValidUntil <= now). Validity is a HARD filter —
+// cognition ranks only survivors. Shared by phase-6 scoring and the engine's
+// final post-entity-boost gate so injected candidates cannot bypass it.
+func PassesValidity(eng *storage.Engram, asOf *time.Time, includeInvalid bool, now time.Time) bool {
+	if includeInvalid {
+		return true
+	}
+	if asOf != nil {
+		return eng.ValidAt(*asOf)
+	}
+	return !eng.IsExpired(now)
 }
 
 // ActivateResult is what the transport layer serializes and returns.
@@ -1503,7 +1525,7 @@ func (e *ActivationEngine) phase6Score(
 	if w.UseRRFFusion {
 		for _, c := range all {
 			eng := engramByID[c.id]
-			if eng == nil || !passesMetaFilter(eng, req.Filters) {
+			if eng == nil || !passesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 				continue
 			}
 			final := computeRRFScore(c.rrfScore, c.hebbianBoost, c.transitionBoost, eng)
@@ -1565,7 +1587,7 @@ func (e *ActivationEngine) phase6Score(
 		cgdnCands := make([]cgdnCandidate, 0, len(all))
 		for _, c := range all {
 			eng := engramByID[c.id]
-			if eng == nil || !passesMetaFilter(eng, req.Filters) {
+			if eng == nil || !passesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 				continue
 			}
 			// Compute component scores (reuse existing helpers for decay, FTS normalization etc.)
@@ -1636,7 +1658,7 @@ func (e *ActivationEngine) phase6Score(
 		maxRaw := 0.0
 		for _, c := range all {
 			eng := engramByID[c.id]
-			if eng == nil || !passesMetaFilter(eng, req.Filters) {
+			if eng == nil || !passesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 				continue
 			}
 			components := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
@@ -1671,7 +1693,7 @@ func (e *ActivationEngine) phase6Score(
 	// Legacy weighted-sum path: used when neither CGDN nor ACT-R is active (DisableACTR=true).
 	for _, c := range all {
 		eng := engramByID[c.id]
-		if eng == nil || !passesMetaFilter(eng, req.Filters) {
+		if eng == nil || !passesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 			continue
 		}
 		components := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)

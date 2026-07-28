@@ -97,6 +97,13 @@ type WriteRequest struct {
 	// path exposes for the anti-pollution capture tiering.
 	Trust string `msgpack:"trust,omitempty" json:"trust,omitempty"`
 
+	// Valid-time (application-time) axis, half-open [valid_from, valid_until).
+	// ValidFrom nil defaults to CreatedAt ("valid from creation"); ValidUntil
+	// nil means open / "still current". Use for historical facts whose truth
+	// window differs from when they were stored.
+	ValidFrom  *time.Time `msgpack:"valid_from,omitempty" json:"valid_from,omitempty"`
+	ValidUntil *time.Time `msgpack:"valid_until,omitempty" json:"valid_until,omitempty"`
+
 	// Inline enrichment: caller-provided data that bypasses background enrichment.
 	Summary             string                     `msgpack:"summary,omitempty" json:"summary,omitempty"`
 	Entities            []InlineEntity             `msgpack:"entities,omitempty" json:"entities,omitempty"`
@@ -150,6 +157,14 @@ type ReadResponse struct {
 	// Clients should treat an absent trust field as equivalent to TrustUnset (0x00).
 	Trust uint8 `msgpack:"trust,omitempty" json:"trust,omitempty"`
 
+	// Valid-time axis (teaches the two time axes: created_at/updated_at are
+	// transaction time; valid_from/valid_until are application time).
+	// ValidFrom is always set (defaults to CreatedAt). ValidUntil is 0 while
+	// the window is open. IsCurrent = (ValidUntil == 0).
+	ValidFrom  int64 `msgpack:"valid_from,omitempty" json:"valid_from,omitempty"`
+	ValidUntil int64 `msgpack:"valid_until,omitempty" json:"valid_until,omitempty"`
+	IsCurrent  bool  `msgpack:"is_current" json:"is_current"`
+
 	// Entities and EntityRelationships are populated by muninn_read to expose what
 	// was stored via inline enrichment. Empty when no entities/relationships were linked.
 	Entities            []InlineEntity             `msgpack:"entities,omitempty"              json:"entities,omitempty"`
@@ -183,6 +198,15 @@ type ActivateRequest struct {
 	// AccessCount regardless of this flag (COG-12) — this only affects the
 	// existing activation-log write path (see engine.go activateCore).
 	ReadOnly bool `json:"read_only,omitempty" msgpack:"read_only,omitempty"`
+	// AsOf, when set, asks "what was true at T" on the valid-time axis: results
+	// are gated by the full half-open interval check [ValidFrom, ValidUntil) at
+	// T. Distinct from the since/before filters, which are the TRANSACTION axis
+	// (CreatedAt). Nil = default gate ("what is true now": drop only engrams
+	// whose closed ValidUntil <= now; a future ValidFrom is NOT hidden).
+	AsOf *time.Time `json:"as_of,omitempty" msgpack:"as_of,omitempty"`
+	// IncludeInvalid disables the valid-time gate entirely (show history):
+	// expired facts are returned, annotated with expired=true.
+	IncludeInvalid bool `json:"include_invalid,omitempty" msgpack:"include_invalid,omitempty"`
 }
 
 // Weights defines scoring weight distribution.
@@ -268,6 +292,13 @@ type ActivationItem struct {
 	// so any transport can say "this is stale, current is X". Empty otherwise.
 	SupersededBy   string `msgpack:"superseded_by,omitempty"   json:"superseded_by,omitempty"`
 	CurrentVersion string `msgpack:"current_version,omitempty" json:"current_version,omitempty"`
+	// Valid-time annotations. ValidFrom is set only when it differs from
+	// CreatedAt (an explicitly backdated/forward-dated fact); ValidUntil is set
+	// only when the window is closed. Expired marks a fact whose ValidUntil <=
+	// now — only reachable in results under include_invalid=true.
+	ValidFrom  int64 `msgpack:"valid_from,omitempty" json:"valid_from,omitempty"`
+	ValidUntil int64 `msgpack:"valid_until,omitempty" json:"valid_until,omitempty"`
+	Expired    bool  `msgpack:"expired,omitempty" json:"expired,omitempty"`
 }
 
 // ScoreComponents breaks down the activation score.
@@ -334,11 +365,15 @@ type LinkResponse struct {
 	OK bool `msgpack:"ok" json:"ok"`
 }
 
-// ForgetRequest soft-deletes an engram.
+// ForgetRequest soft-deletes an engram — unless NotTrueSince is set, in which
+// case the engram is invalidated on the valid-time axis instead: ValidUntil is
+// stamped and the record stays active (recoverable via as_of/include_invalid).
+// Invalidation is always a stamp, never a delete (COG-19).
 type ForgetRequest struct {
-	ID    string `msgpack:"id" json:"id"`
-	Hard  bool   `msgpack:"hard,omitempty" json:"hard,omitempty"`
-	Vault string `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	ID           string     `msgpack:"id" json:"id"`
+	Hard         bool       `msgpack:"hard,omitempty" json:"hard,omitempty"`
+	Vault        string     `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	NotTrueSince *time.Time `msgpack:"not_true_since,omitempty" json:"not_true_since,omitempty"`
 }
 
 // ForgetResponse confirms deletion.

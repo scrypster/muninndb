@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
 )
@@ -39,6 +40,12 @@ func (e *Engine) WhereLeftOff(ctx context.Context, vault string, limit int, excl
 			return nil
 		}
 		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateCompleted || eng.State == storage.StateArchived {
+			return nil
+		}
+		// Drop facts explicitly invalidated on the valid-time axis (forget.not_true_since
+		// / a supersede stamp leaves the engram ACTIVE), so this session-orientation
+		// surface never leads with something the user marked "no longer true" (COG-19).
+		if eng.IsExpired(time.Now()) {
 			return nil
 		}
 		if exclude != nil {
