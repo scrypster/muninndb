@@ -17,6 +17,7 @@ import (
 
 	hnswpkg "github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/storage"
+	"github.com/scrypster/muninndb/internal/storage/keys"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -225,6 +226,12 @@ type ActivationStore interface {
 	// bounds the intersection OUTPUT and never truncates a per-tag input window
 	// (see storage.PebbleStore.ListByTagsAllInRange). Used for tags_all seeding.
 	ListByTagsAllInRange(ctx context.Context, wsPrefix [8]byte, tags []string, since, until time.Time, limit int) ([]storage.ULID, error)
+	// ScanRawTagRange scans the S1 ordered raw-tag index (0x2B) for tagKey
+	// within [lower, upper) — see storage.PebbleStore.ScanRawTagRange and
+	// keys.RawTagRangeBound. Used to SEED candidates for tag_prefix filters
+	// (e.g. due:<=today) so a bounded range query does not depend on the
+	// engram already being a candidate from FTS/HNSW/decay/tags_all/tags_any.
+	ScanRawTagRange(ctx context.Context, wsPrefix [8]byte, tagKey string, lower, upper []byte, limit int) ([]storage.ULID, error)
 	// RestoreArchivedEdgesTransitive lazily restores archived edges for src and
 	// its direct neighbors, returning the set of restored destination IDs.
 	RestoreArchivedEdgesTransitive(ctx context.Context, wsPrefix [8]byte, src storage.ULID, maxDirect int, maxTransitive int) ([]storage.ULID, error)
@@ -597,19 +604,34 @@ func extractTimeBounds(filters []Filter) (time.Time, time.Time, bool) {
 	return since, before, hasBounds
 }
 
-// extractTagFilters extracts tags_all/tags_any tag lists from the filter list.
-// Values are coerced with asStringSlice, matching passesMetaFilter's own
-// interpretation of these fields.
-func extractTagFilters(filters []Filter) (tagsAll, tagsAny []string) {
+// extractTagFilters extracts tags_all/tags_any tag lists, and raw tag_prefix
+// (prefix, op, bound) triples, from the filter list. tags_all/tags_any values
+// are coerced with asStringSlice; tag_prefix values are coerced with asPair —
+// both match passesMetaFilter's own interpretation of these fields.
+func extractTagFilters(filters []Filter) (tagsAll, tagsAny []string, tagPrefix []tagPrefixFilter) {
 	for _, f := range filters {
 		switch f.Field {
 		case "tags_all":
 			tagsAll = append(tagsAll, asStringSlice(f.Value)...)
 		case "tags_any":
 			tagsAny = append(tagsAny, asStringSlice(f.Value)...)
+		case "tag_prefix":
+			if pb := asPair(f.Value); pb != nil {
+				tagPrefix = append(tagPrefix, tagPrefixFilter{Prefix: pb[0], Op: f.Op, Bound: pb[1]})
+			}
 		}
 	}
-	return tagsAll, tagsAny
+	return tagsAll, tagsAny, tagPrefix
+}
+
+// tagPrefixFilter is a decoded tag_prefix filter: engrams whose tag begins
+// with Prefix (e.g. "due:") are compared, after stripping Prefix, against
+// Bound per Op (lte/gte/lt/gt/eq) — see passesMetaFilter's "tag_prefix" case,
+// which this mirrors for candidate SEEDING via the S1 raw-tag-range index.
+type tagPrefixFilter struct {
+	Prefix string
+	Op     string
+	Bound  string
 }
 
 // seedTagCandidates queries the tag index for the requested tags and returns a
@@ -624,7 +646,15 @@ func extractTagFilters(filters []Filter) (tagsAll, tagsAny []string) {
 //
 // The tag index stores Hash(tag) (4-byte), so a seeded ID can be a hash-collision
 // false positive; passesMetaFilter in phase 6 remains the correctness gate.
-func (e *ActivationEngine) seedTagCandidates(ctx context.Context, ws [8]byte, tagsAll, tagsAny []string, since, until time.Time, limit int) []storage.ULID {
+//
+// tagPrefix additionally seeds from the S1 ordered raw-tag-range index (0x2B):
+// for each distinct Prefix among tagPrefix, every filter sharing that prefix is
+// combined into a single bounded range scan (AND semantics — e.g. a gte and an
+// lte filter on the same prefix narrow to one bounded range), unioned into the
+// same seed set as tags_all/tags_any. This is what makes range-filtered recall
+// (e.g. tag_filter{prefix:"due:", lte:today}) SEED candidates instead of only
+// being checked post-hoc in phase 6's passesMetaFilter.
+func (e *ActivationEngine) seedTagCandidates(ctx context.Context, ws [8]byte, tagsAll, tagsAny []string, tagPrefix []tagPrefixFilter, since, until time.Time, limit int) []storage.ULID {
 	seen := make(map[storage.ULID]struct{})
 	var seed []storage.ULID
 	add := func(ids []storage.ULID) {
@@ -657,6 +687,39 @@ func (e *ActivationEngine) seedTagCandidates(ctx context.Context, ws [8]byte, ta
 		}
 	}
 
+	// Group tag_prefix filters by Prefix (e.g. "due:") so multiple filters on
+	// the same prefix (gte + lte) combine into one bounded range scan instead
+	// of two independent (and semantically wrong, if ORed) scans.
+	if len(tagPrefix) > 0 {
+		byPrefix := make(map[string][]tagPrefixFilter, len(tagPrefix))
+		order := make([]string, 0, len(tagPrefix))
+		for _, tpf := range tagPrefix {
+			if _, ok := byPrefix[tpf.Prefix]; !ok {
+				order = append(order, tpf.Prefix)
+			}
+			byPrefix[tpf.Prefix] = append(byPrefix[tpf.Prefix], tpf)
+		}
+		for _, prefix := range order {
+			tagKey := strings.TrimSuffix(prefix, ":")
+			if tagKey == "" {
+				continue
+			}
+			tagKeyHash := keys.Hash(tagKey)
+			var lower, upper []byte
+			for i, tpf := range byPrefix[prefix] {
+				lo, hi := keys.RawTagRangeBound(ws, tagKeyHash, tpf.Op, []byte(tpf.Bound))
+				if i == 0 {
+					lower, upper = lo, hi
+				} else {
+					lower, upper = keys.CombineRawTagRangeBounds(lower, upper, lo, hi)
+				}
+			}
+			if ids, err := e.store.ScanRawTagRange(ctx, ws, tagKey, lower, upper, limit); err == nil {
+				add(ids)
+			}
+		}
+	}
+
 	return seed
 }
 
@@ -673,8 +736,8 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 	// Extract tag filters for tag-scoped candidate seeding. The tag scans reuse the
 	// time window (zero since → epoch; zero before → now) so tag-filtered recall
 	// combined with explicit time bounds respects both via the ULID-ordered index.
-	tagsAll, tagsAny := extractTagFilters(req.Filters)
-	hasTagFilters := len(tagsAll) > 0 || len(tagsAny) > 0
+	tagsAll, tagsAny, tagPrefix := extractTagFilters(req.Filters)
+	hasTagFilters := len(tagsAll) > 0 || len(tagsAny) > 0 || len(tagPrefix) > 0
 	tagSince := since
 	if tagSince.IsZero() {
 		tagSince = time.Unix(0, 0)
@@ -710,7 +773,7 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 
 		// Tag-scoped candidate seeding (fast path).
 		if hasTagFilters {
-			sets.tag = e.seedTagCandidates(ctx, ws, tagsAll, tagsAny, tagSince, tagUntil, k*3)
+			sets.tag = e.seedTagCandidates(ctx, ws, tagsAll, tagsAny, tagPrefix, tagSince, tagUntil, k*3)
 		}
 
 		// PAS: transition candidate retrieval (fast path)
@@ -786,7 +849,7 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 	// Tag-scoped candidate seeding (parallel with other indices)
 	if hasTagFilters {
 		g.Go(func() error {
-			sets.tag = e.seedTagCandidates(gctx, ws, tagsAll, tagsAny, tagSince, tagUntil, k*3)
+			sets.tag = e.seedTagCandidates(gctx, ws, tagsAll, tagsAny, tagPrefix, tagSince, tagUntil, k*3)
 			return nil
 		})
 	}
@@ -1435,7 +1498,13 @@ func (e *ActivationEngine) phase6Score(
 				continue
 			}
 			final := computeRRFScore(c.rrfScore, c.hebbianBoost, c.transitionBoost, eng)
-			if final < req.Threshold {
+			// A filter defines the candidate SET; the relevance threshold only
+			// RANKS within it. An explicit tag-filter match (inTagPool, already
+			// verified by passesMetaFilter above) must never be dropped for
+			// scoring below threshold — otherwise "due:<=today" reminders that
+			// are content-unrelated to the query silently vanish. Non-tag
+			// candidates are still thresholded normally.
+			if final < req.Threshold && !c.inTagPool {
 				continue
 			}
 			// Populate ScoreComponents for observability: report the individual
@@ -1482,6 +1551,7 @@ func (e *ActivationEngine) phase6Score(
 			activation float64
 			components ScoreComponents
 			hopPath    []storage.ULID
+			inTagPool  bool
 		}
 		cgdnCands := make([]cgdnCandidate, 0, len(all))
 		for _, c := range all {
@@ -1494,7 +1564,7 @@ func (e *ActivationEngine) phase6Score(
 			// Gated activation: content relevance × cognitive gate
 			a := computeGatedActivation(comp.SemanticSimilarity, comp.FullTextRelevance, comp.DecayFactor, comp.HebbianBoost, w)
 			cgdnCands = append(cgdnCands, cgdnCandidate{
-				id: c.id, activation: a, components: comp, hopPath: c.hopPath,
+				id: c.id, activation: a, components: comp, hopPath: c.hopPath, inTagPool: c.inTagPool,
 			})
 		}
 
@@ -1522,7 +1592,9 @@ func (e *ActivationEngine) phase6Score(
 			for _, cc := range cgdnCands {
 				r := math.Pow(cc.activation, n) / denom
 				final := r * cc.components.Confidence
-				if final < req.Threshold {
+				// Tag-filter matches bypass the relevance threshold — the filter
+				// defines the set (see the RRF path above for the full rationale).
+				if final < req.Threshold && !cc.inTagPool {
 					continue
 				}
 				cc.components.Raw = r
@@ -1549,6 +1621,7 @@ func (e *ActivationEngine) phase6Score(
 			id         storage.ULID
 			components ScoreComponents
 			hopPath    []storage.ULID
+			inTagPool  bool
 		}
 		actrCands := make([]actrCandidate, 0, len(all))
 		maxRaw := 0.0
@@ -1557,11 +1630,11 @@ func (e *ActivationEngine) phase6Score(
 			if eng == nil || !passesMetaFilter(eng, req.Filters) {
 				continue
 			}
-			components := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w)
+			components := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
 			if components.Raw > maxRaw {
 				maxRaw = components.Raw
 			}
-			actrCands = append(actrCands, actrCandidate{id: c.id, components: components, hopPath: c.hopPath})
+			actrCands = append(actrCands, actrCandidate{id: c.id, components: components, hopPath: c.hopPath, inTagPool: c.inTagPool})
 		}
 		// Rescale all raw scores by 1/maxRaw when any candidate saturated above 1.0.
 		// This preserves the [0,1] contract and relative ranking without altering the
@@ -1573,7 +1646,9 @@ func (e *ActivationEngine) phase6Score(
 		for _, cc := range actrCands {
 			raw := math.Min(cc.components.Raw*scale, 1.0)
 			final := raw * cc.components.Confidence
-			if final < req.Threshold {
+			// Tag-filter matches bypass the relevance threshold — the filter
+			// defines the set (see the RRF path above for the full rationale).
+			if final < req.Threshold && !cc.inTagPool {
 				continue
 			}
 			cc.components.Raw = raw
@@ -1592,7 +1667,9 @@ func (e *ActivationEngine) phase6Score(
 		}
 		components := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
 		final := components.Final
-		if final < req.Threshold {
+		// Tag-filter matches bypass the relevance threshold — the filter
+		// defines the set (see the RRF path above for the full rationale).
+		if final < req.Threshold && !c.inTagPool {
 			continue
 		}
 		scored = append(scored, scoredItem{id: c.id, final: final, components: components, hopPath: c.hopPath})
@@ -1730,6 +1807,17 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 // Precomputing this constant avoids recomputing softplus(0) on every engram scored.
 const actrDenominator = 1.6931471805599453
 
+// tagMatchFloor is the minimum content-match value granted to candidates that
+// matched an explicit tag filter (inTagPool=true), under ACT-R scoring (COG-5
+// amendment for S1). Rationale for 0.1: genuine content matches (semantic
+// cosine similarity or normalized FTS relevance) typically land in the
+// 0.5-0.9 range for anything a human would call "relevant" — 0.1 sits well
+// below that band, so a real content match always outranks a floored
+// tag-only hit. It is comfortably above zero so that, combined with a
+// non-trivial base-level/confidence, an explicit tag-filter match survives
+// the default activation threshold (0.3) instead of being silently dropped.
+const tagMatchFloor = 0.1
+
 // softplus computes ln(1 + exp(x)), mapping (-inf,+inf) to (0,+inf).
 // Used as the activation function in ACT-R scoring: ensures the contextual prior
 // is always positive and smoothly transitions from near-zero to near-linear.
@@ -1779,11 +1867,27 @@ func cosineSimilarity32(a, b []float32) float32 {
 // B(M) + scale×Hebbian are additive: Hebbian can rescue old but linked memories.
 // This resolves the decay-vs-Hebbian tension without two separate pathways.
 func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, eng *storage.Engram,
-	lastAccessNs int64, now time.Time, w resolvedWeights) ScoreComponents {
+	lastAccessNs int64, now time.Time, w resolvedWeights, inTagPool bool) ScoreComponents {
 
 	// Compute content relevance (same as standard path).
 	normalizedFTS := math.Tanh(ftsScore)
 	contentMatch := w.SemanticSimilarity*vectorScore + w.FullTextRelevance*normalizedFTS
+
+	// COG-5 amendment (S1): candidates that matched an explicit tag filter
+	// (inTagPool) receive a content-match floor so an explicit filter match
+	// surfaces regardless of semantic/lexical overlap with the query. Without
+	// this, a content-unrelated tag hit scores contentMatch=0 and is dropped
+	// by the gate below even though the user explicitly asked for it via
+	// tags_all/tags_any/tag_prefix (S1 seeds these into the pool, but under
+	// default ACT-R scoring the gate silently discarded them). tagMatchFloor
+	// (0.1) is well below typical genuine content-match scores (0.5-0.9), so
+	// a real semantic/lexical match always outranks a floored tag-only hit —
+	// the floor only rescues candidates that would otherwise score exactly
+	// zero. RRF scoring already honors inTagPool via its own pool boost and
+	// is unaffected by this change. See docs/internals/invariants.md COG-5.
+	if inTagPool && contentMatch < tagMatchFloor {
+		contentMatch = tagMatchFloor
+	}
 
 	// Compute ACT-R base-level activation B(M).
 	// B(M) = ln(n+1) - d × ln(max(ageDays, ageFloor) / (n+1))
