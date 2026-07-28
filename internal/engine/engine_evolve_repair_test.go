@@ -300,3 +300,47 @@ func TestEvolveEntityLinkRepair_RoundCapExhaustionIsNotClean(t *testing.T) {
 	require.Equal(t, []string{"deepchain"}, engramEntities(t, eng, ws, ids[40]),
 		"the tail heals across boots precisely because the first sweep withheld the watermark")
 }
+
+// TestEvolveEntityLinkRepair_SkipsAlreadyDigested pins the digest-set skip: a
+// stripped successor that is already marked DigestEntities (as ReplayEnrichment,
+// which takes no casLock, leaves it after funding the same successor in the repair
+// window) must NOT be re-funded — the digest bit is the funded-marker. The
+// successor is deliberately left link-less so the has-links skip does NOT fire and
+// only the digest skip can prevent the double-fund.
+func TestEvolveEntityLinkRepair_SkipsAlreadyDigested(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "test", Concept: "victim", Content: "Dana shipped the release",
+		Entities: []mbp.InlineEntity{
+			{Name: "Dana", Type: "person"},
+			{Name: "release", Type: "concept"},
+		},
+	})
+	require.NoError(t, err)
+	ws := eng.store.ResolveVaultPrefix("test")
+	oldULID, err := storage.ParseULID(resp.ID)
+	require.NoError(t, err)
+
+	succID := simulateStrippedEvolve(t, eng, ws, oldULID, "Dana shipped the release (evolved)")
+	require.Empty(t, engramEntities(t, eng, ws, succID), "precondition: successor is stripped (no links)")
+
+	// Simulate ReplayEnrichment having already healed + marked this successor.
+	require.NoError(t, eng.store.SetDigestFlag(ctx, plugin.ULID(succID), plugin.DigestEntities))
+
+	mentionBefore, err := eng.store.GetEntityRecord(ctx, "dana")
+	require.NoError(t, err)
+	require.NotNil(t, mentionBefore)
+
+	repaired, _, err := eng.repairEvolveEntityLinksOnce(ws)
+	require.NoError(t, err)
+	require.Zero(t, repaired, "a digest-marked successor must be skipped, not re-funded")
+	require.Empty(t, engramEntities(t, eng, ws, succID), "skip must write no links")
+
+	mentionAfter, err := eng.store.GetEntityRecord(ctx, "dana")
+	require.NoError(t, err)
+	require.Equal(t, mentionBefore.MentionCount, mentionAfter.MentionCount,
+		"skip must not double-fund the mention ledger")
+}

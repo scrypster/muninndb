@@ -48,14 +48,21 @@ func (ps *PebbleStore) SetEvolveRepairMark(ctx context.Context, ws [8]byte, vers
 // skip test would then treat as intact forever.
 //
 // The per-engram stripe lock (casLocks.For(succID)) is held across the
-// existence re-check and the batch commit. DeleteEngram holds the same lock
-// while removing the same key families, so a repair write cannot land after a
-// concurrent hard delete and leave keys pointing at a deleted engram.
+// existence re-check and the batch commit. Writers that respect casLocks
+// (DeleteEngram, CompareAndSet) cannot interleave, so a repair write can't land
+// after a concurrent hard delete and leave keys pointing at a deleted engram.
+// ReplayEnrichment does NOT take a casLock, so it can fund the same successor
+// concurrently. The digest-set skip below is what prevents that from
+// double-funding the ledgers; a narrow TOCTOU sliver between that read and the
+// commit remains, and its worst case is accounting drift, not content loss.
 //
-// The batch is deliberately NOT replicated: the repair is a deterministic
-// local backfill derived from data every replica already has, and every node
-// running this build performs its own pass at startup. Replicating the writes
-// would double-apply them on followers that will also repair.
+// The batch is deliberately NOT replicated: every node running this build does
+// its own startup pass, so the backfill is reconstructed locally rather than
+// shipped. This does not rest on followers already holding the data via the
+// incremental log. pebbleStoreBatch.Commit() does not replicate, so Evolve's own
+// entity-link writes don't reach followers that way either (tracked separately,
+// #596 class). Replicating the repair would double-apply on followers that also
+// run it.
 //
 // Post-commit, the mention-count and co-occurrence ledgers are funded for the
 // carried links, mirroring Evolve's carry (and DeleteEngram's post-commit
@@ -93,6 +100,23 @@ func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, 
 		return false, nil
 	}
 
+	// Skip if this successor is already digest-marked. ReplayEnrichment funds a
+	// successor's entity links and sets the digest bit WITHOUT taking the stripe
+	// lock (it is the one writer of this key family that does not), so it can heal
+	// the same StateActive, digest-unset successor the repair targets. The digest
+	// bit is the funded-marker: once it is set, the links and ledger funding are
+	// already someone's work, and re-funding here would double-count the mention
+	// and co-occurrence ledgers. Read it under the lock and bail if set. (A narrow
+	// TOCTOU sliver between this read and the commit remains, but its worst case is
+	// accounting drift, never content loss.)
+	raw, err := ps.getDigestFlagsRaw([16]byte(succID))
+	if err != nil && !errors.Is(err, pebble.ErrNotFound) {
+		return false, fmt.Errorf("repair evolve carry: read digest flags: %w", err)
+	}
+	if raw&digestFlag != 0 {
+		return false, nil
+	}
+
 	batch := ps.NewBatch()
 	defer batch.Discard()
 	pb, ok := batch.(*pebbleStoreBatch)
@@ -110,11 +134,7 @@ func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, 
 		}
 	}
 	// Digest flag rides the same batch so a healed successor is always marked
-	// against re-extraction. Read-modify-write is safe under the stripe lock.
-	raw, err := ps.getDigestFlagsRaw([16]byte(succID))
-	if err != nil && !errors.Is(err, pebble.ErrNotFound) {
-		return false, fmt.Errorf("repair evolve carry: read digest flags: %w", err)
-	}
+	// against re-extraction. The RMW uses raw read under the stripe lock above.
 	if err := pb.batch.Set(keys.DigestFlagsKey([16]byte(succID)), []byte{raw | digestFlag}, nil); err != nil {
 		return false, fmt.Errorf("repair evolve carry: set digest flag: %w", err)
 	}
