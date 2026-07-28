@@ -7,7 +7,6 @@ HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
 ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
 
 .PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets web css build test bench test-integration \
-        eval-bible-setup eval-bible eval-bible-full eval-bible-quick eval-bible-export eval-bible-fast \
         _ort-darwin-arm64 _ort-darwin-amd64 _ort-linux-amd64 _ort-linux-arm64 _ort-windows-amd64
 
 ## fetch-assets: download the model, tokenizer, and all platform ORT libraries.
@@ -127,26 +126,8 @@ bench:
 test-integration:
 	@go test -tags integration -v -timeout 120s ./cmd/muninn/...
 
-## eval-bible-setup: download KJV and cross-reference data files.
-eval-bible-setup:
-	@bash scripts/eval-bible-setup.sh
-
-## eval-bible: build the eval binary (NT-only corpus, 100 seeds).
-eval-bible:
-	@go build -o eval-bible ./cmd/eval-bible/...
-
-## eval-bible-quick: run NT-only eval with 20 seeds (fast smoke test).
-eval-bible-quick: eval-bible
-	@./eval-bible -seeds 20 -min-xrefs 3
-
-## eval-bible-export: run NT-only eval, export vault snapshot for fast re-runs.
-eval-bible-export: eval-bible
-	@./eval-bible -seeds 100 -export-to testdata/bible/bible-nt.muninn
-
-## eval-bible-fast: run NT-only eval using pre-exported vault snapshot (skips 12-min load).
-eval-bible-fast: eval-bible
-	@./eval-bible -seeds 100 -import-from testdata/bible/bible-nt.muninn
-
-## eval-bible-full: run full Bible eval (OT + NT corpus, 100 seeds).
-eval-bible-full: eval-bible
-	@./eval-bible -full -seeds 100
+# The eval-bible-* targets were removed here: they build ./cmd/eval-bible/... and run
+# scripts/eval-bible-setup.sh, neither of which is in the public repo (cmd/eval*/ and
+# scripts/eval-* are gitignored as internal development tooling). Advertising targets that
+# cannot run from a fresh clone is worse than not listing them. If the retrieval-quality
+# eval harness is published later, restore them alongside it.

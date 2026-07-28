@@ -2531,6 +2531,78 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 	return &mbp.LinkResponse{OK: true}, nil
 }
 
+// AdjustConfidence applies a signed delta to engram id's confidence (clamped to
+// [0,1]) and, when hasContra, mirrors the internal OnFound: persists the 0x0A
+// contradiction marker for (id, other) AND submits EvidenceContradiction to the
+// ConfidenceWorker for both engrams. Returns the new absolute confidence.
+//
+// All validation precedes any write. A bare delta (hasContra=false) does NOT
+// submit to the ConfidenceWorker (§D3 carve-out — processBatch would otherwise
+// clobber the explicit value).
+//
+// Mirrors Engine.Link's vault resolution + GetMetadata existence pattern +
+// cogWorkers() submit pattern. Source string is "external_contradiction" to
+// distinguish external bridge signal from the internal "contradiction_detected"
+// path emitted by Link/ContradictWorker.
+func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.ULID, delta float32, other storage.ULID, hasContra bool, reason, caller string) (float32, error) {
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+
+	if math.IsNaN(float64(delta)) || math.IsInf(float64(delta), 0) {
+		return 0, fmt.Errorf("%w: delta is NaN or Inf", ErrInvalidArgument)
+	}
+	if hasContra && other == id {
+		return 0, ErrSelfContradiction
+	}
+
+	// Existence check — mirror Engine.Link's batched GetMetadata (nil meta = NotFound).
+	ids := []storage.ULID{id}
+	if hasContra {
+		ids = []storage.ULID{id, other}
+	}
+	metas, err := e.store.GetMetadata(ctx, wsPrefix, ids)
+	if err != nil {
+		return 0, fmt.Errorf("adjust confidence: read meta: %w", err)
+	}
+	for _, m := range metas {
+		if m == nil {
+			return 0, ErrEngramNotFound
+		}
+	}
+
+	// Atomic delta write: the storage method holds the per-engram stripe lock
+	// across read+add+clamp+commit, closing the lost-update race (#559). The
+	// prior confidence read and the [0,1] clamp have moved INTO the locked
+	// storage method (UpdateConfidenceWithContradiction) — an external unlocked
+	// read here would re-open the race, so we do not call GetConfidence. The
+	// returned (prior, newConf) come from inside the locked section so the
+	// audit log below reports the same values that were committed.
+	prior, newConf, err := e.store.UpdateConfidenceWithContradiction(ctx, wsPrefix, id, delta, other, hasContra)
+	if err != nil {
+		return 0, fmt.Errorf("adjust confidence: write: %w", err)
+	}
+
+	// Mirror OnFound: submit EvidenceContradiction for both engrams (only when hasContra).
+	if hasContra {
+		if _, _, cw := e.cogWorkers(); cw != nil {
+			cw.Submit(cognitive.ConfidenceUpdate{
+				WS: wsPrefix, EngramID: [16]byte(id),
+				Evidence: cognitive.EvidenceContradiction, Source: "external_contradiction",
+			})
+			cw.Submit(cognitive.ConfidenceUpdate{
+				WS: wsPrefix, EngramID: [16]byte(other),
+				Evidence: cognitive.EvidenceContradiction, Source: "external_contradiction",
+			})
+		}
+	}
+
+	slog.Info("adjust_confidence",
+		"engram_id", id.String(), "delta", delta, "prior", prior, "new", newConf,
+		"contradicted_by", other.String(), "has_contra", hasContra,
+		"reason", reason, "caller", caller, "vault", vault)
+
+	return newConf, nil
+}
+
 // Forget implements mbp.EngineAPI.Forget.
 func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.ForgetResponse, error) {
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
@@ -2925,11 +2997,26 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 	if concept == "" {
 		concept = oldEng.Concept
 	}
+	// MemoryType and TypeLabel are inherited alongside Concept and Tags. Evolve
+	// exposes no parameter for either, so leaving them unset reset the type to
+	// the MemoryType zero value, Fact — a decision or procedure was silently
+	// relabelled a fact on every evolve, and again at each hop down a supersede
+	// chain (issue #653).
+	//
+	// Summary is deliberately NOT inherited. It is content-derived (see the
+	// field doc on storage.Engram), and Evolve replaces the content, so the
+	// predecessor's summary is false of the successor. Leaving it empty is also
+	// what lets the summarize stage regenerate it: engramHasSummary and the
+	// retroactive processor both treat a non-empty Summary as caller-authoritative
+	// and skip the stage, which would pin the stale text permanently and leave
+	// KeyPoints — produced only by that stage — empty forever.
 	newEng := &storage.Engram{
 		ID:         newULID,
 		Concept:    concept,
 		Content:    newContent,
 		Tags:       oldEng.Tags,
+		MemoryType: oldEng.MemoryType,
+		TypeLabel:  oldEng.TypeLabel,
 		Confidence: 1.0,
 		Stability:  30.0,
 		State:      storage.StateActive,

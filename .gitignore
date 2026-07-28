@@ -54,7 +54,12 @@ testdata/bible/cross-refs.tsv
 testdata/bible/cross-refs.csv
 testdata/bible/*.muninn
 
-# Planning and design docs — not committed
+# In-progress planning and design docs — kept local by default so half-formed plans don't
+# ship. Two design docs predate this rule and are deliberately kept tracked, because the
+# features they describe shipped and the rationale is worth having in the open:
+# docs/plans/2026-03-04-association-archiving.md and
+# docs/superpowers/specs/2026-03-10-playwright-e2e-design.md.
+# `git add -f` a doc here if it documents something that landed.
 docs/plans/
 docs/superpowers/
 .superpowers/
@@ -81,3 +86,8 @@ sdk/php/vendor/
 .claude/maintainer/
 .claude/skills/triage-issue/
 .claude/skills/review-pr/
+.claude/skills/merge-orchestration/
+
+# scratch browser-automation / screenshot output (workspace convention keeps these
+# at the workspace root; this is a backstop in case a tool writes into the repo)
+.artifacts/

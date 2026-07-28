@@ -2,7 +2,10 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -312,17 +315,98 @@ func isHomebrewInstall() bool {
 	return isHomebrewInstallPath(exe)
 }
 
-// releaseAssetURL returns the GitHub release asset URL for the given version, OS, and arch.
-// Archive format is tar.gz for Linux/macOS and zip for Windows.
-func releaseAssetURL(version, goos, goarch string) string {
+// releaseAssetName returns the bare filename of the release archive for the given
+// version, OS, and arch — e.g. "muninn_v1.2.3_linux_amd64.tar.gz". This must match
+// the names release.yml feeds to sha256sum, because it is the lookup key into
+// checksums.txt. Archive format is tar.gz for Linux/macOS and zip for Windows.
+func releaseAssetName(version, goos, goarch string) string {
 	ext := "tar.gz"
 	if goos == "windows" {
 		ext = "zip"
 	}
+	return fmt.Sprintf("muninn_%s_%s_%s.%s", version, goos, goarch, ext)
+}
+
+// releaseAssetURL returns the GitHub release asset URL for the given version, OS, and arch.
+// Derived from releaseAssetName so the URL and the checksum lookup key cannot drift apart.
+func releaseAssetURL(version, goos, goarch string) string {
 	return fmt.Sprintf(
-		"https://github.com/scrypster/muninndb/releases/download/%s/muninn_%s_%s_%s.%s",
-		version, version, goos, goarch, ext,
+		"https://github.com/scrypster/muninndb/releases/download/%s/%s",
+		version, releaseAssetName(version, goos, goarch),
 	)
+}
+
+// checksumsURL returns the URL of the checksums.txt asset published alongside a release.
+func checksumsURL(version string) string {
+	return fmt.Sprintf(
+		"https://github.com/scrypster/muninndb/releases/download/%s/checksums.txt",
+		version,
+	)
+}
+
+// parseChecksums reads sha256sum output format ("<64-hex-hash>  <filename>") into a
+// filename → hash map. Lines that aren't a valid SHA-256 hash plus a filename are
+// skipped. An input yielding no valid entries is an error, not an empty map: an empty
+// map would make every lookup miss, which verifyChecksum would then have to treat as
+// either "fail everything" or "skip verification" — better to reject it here.
+func parseChecksums(r io.Reader) (map[string]string, error) {
+	sums := make(map[string]string)
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) != 2 {
+			continue
+		}
+		hash, name := fields[0], fields[1]
+		// SHA-256 is exactly 64 hex characters. Anything else is a different
+		// algorithm or a malformed line; either way we can't verify with it.
+		if len(hash) != sha256.Size*2 {
+			continue
+		}
+		if _, err := hex.DecodeString(hash); err != nil {
+			continue
+		}
+		// sha256sum binary mode writes "*filename"; normalize it away.
+		sums[strings.TrimPrefix(name, "*")] = hash
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("read checksums: %w", err)
+	}
+	if len(sums) == 0 {
+		return nil, fmt.Errorf("checksums file contained no valid SHA-256 entries")
+	}
+	return sums, nil
+}
+
+// fetchChecksums downloads and parses a release's checksums.txt.
+func fetchChecksums(url string) (map[string]string, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("fetch checksums: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("fetch checksums: HTTP %d", resp.StatusCode)
+	}
+	// Cap the read: checksums.txt is a few hundred bytes, and we don't want a
+	// hostile or misrouted response to exhaust memory.
+	return parseChecksums(io.LimitReader(resp.Body, 1<<20))
+}
+
+// verifyChecksum compares the SHA-256 we computed over the downloaded archive against
+// the published one. Fails closed in both directions: a mismatch is rejected, and so is
+// an asset that isn't listed at all — otherwise anyone able to serve a checksums.txt
+// could disable verification just by omitting the entry.
+func verifyChecksum(assetName, gotSum string, sums map[string]string) error {
+	want, ok := sums[assetName]
+	if !ok {
+		return fmt.Errorf("%s is not listed in checksums.txt — refusing to install an unverifiable binary", assetName)
+	}
+	if !strings.EqualFold(want, gotSum) {
+		return fmt.Errorf("checksum mismatch for %s:\n    expected %s\n    got      %s", assetName, want, gotSum)
+	}
+	return nil
 }
 
 // progressReader wraps an io.Reader and calls fn(bytesRead, total) after each read.
@@ -344,28 +428,36 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 
 // downloadAndExtractBinaryProgress is like downloadAndExtractBinary but calls
 // progressFn(bytesDownloaded, totalBytes) during the download. progressFn may be nil.
-func downloadAndExtractBinaryProgress(url, binaryName string, progressFn func(downloaded, total int64)) (string, error) {
+//
+// It also returns the hex SHA-256 of the *entire* archive as served, for checking
+// against the release's checksums.txt. The hash deliberately covers every byte the
+// server sent, not just the prefix the tar reader consumed to reach the binary —
+// otherwise an archive with a payload appended after the binary entry would hash
+// clean. That is why the tail is drained before the sum is taken.
+func downloadAndExtractBinaryProgress(url, binaryName string, progressFn func(downloaded, total int64)) (string, string, error) {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("download failed: %w", err)
+		return "", "", fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
+		return "", "", fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
 	}
 
-	var body io.Reader = resp.Body
+	hasher := sha256.New()
+	var body io.Reader = io.TeeReader(resp.Body, hasher)
 	if progressFn != nil {
-		body = &progressReader{r: resp.Body, total: resp.ContentLength, fn: progressFn}
+		body = &progressReader{r: body, total: resp.ContentLength, fn: progressFn}
 	}
 
 	gr, err := gzip.NewReader(body)
 	if err != nil {
-		return "", fmt.Errorf("gzip open: %w", err)
+		return "", "", fmt.Errorf("gzip open: %w", err)
 	}
 	defer gr.Close()
 
+	tmpPath := ""
 	tr := tar.NewReader(gr)
 	for {
 		hdr, err := tr.Next()
@@ -373,35 +465,47 @@ func downloadAndExtractBinaryProgress(url, binaryName string, progressFn func(do
 			break
 		}
 		if err != nil {
-			return "", fmt.Errorf("tar read: %w", err)
+			return "", "", fmt.Errorf("tar read: %w", err)
 		}
 		if filepath.Base(hdr.Name) != binaryName {
 			continue
 		}
 		exe, err := os.Executable()
 		if err != nil {
-			return "", fmt.Errorf("cannot determine executable path: %w", err)
+			return "", "", fmt.Errorf("cannot determine executable path: %w", err)
 		}
 		tmp, err := os.CreateTemp(filepath.Dir(exe), ".muninn-upgrade-*")
 		if err != nil {
-			return "", fmt.Errorf("temp file: %w", err)
+			return "", "", fmt.Errorf("temp file: %w", err)
 		}
 		if _, err := io.Copy(tmp, tr); err != nil {
 			tmp.Close()
 			os.Remove(tmp.Name())
-			return "", fmt.Errorf("write temp: %w", err)
+			return "", "", fmt.Errorf("write temp: %w", err)
 		}
 		tmp.Close()
-		return tmp.Name(), nil
+		tmpPath = tmp.Name()
+		break
 	}
-	return "", fmt.Errorf("binary %q not found in archive", binaryName)
+	if tmpPath == "" {
+		return "", "", fmt.Errorf("binary %q not found in archive", binaryName)
+	}
+
+	// Pull the rest of the stream through the hasher so the sum covers the whole file.
+	if _, err := io.Copy(io.Discard, body); err != nil {
+		os.Remove(tmpPath)
+		return "", "", fmt.Errorf("read archive tail: %w", err)
+	}
+
+	return tmpPath, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // downloadAndExtractBinary downloads a tar.gz from url, extracts the file named
 // binaryName, writes it to a temp file next to the current executable, and
 // returns the temp file path. Caller is responsible for removing on error or after use.
 func downloadAndExtractBinary(url, binaryName string) (string, error) {
-	return downloadAndExtractBinaryProgress(url, binaryName, nil)
+	path, _, err := downloadAndExtractBinaryProgress(url, binaryName, nil)
+	return path, err
 }
 
 // upgradeStep prints a left-aligned step label, executes fn, then prints ✓ or ✗.
@@ -461,6 +565,19 @@ func selfUpdate(latest string) error {
 	}
 
 	assetURL := releaseAssetURL(latest, goos, goarch)
+	assetName := releaseAssetName(latest, goos, goarch)
+
+	// Fetch the published checksums before downloading anything. Fail closed: if we
+	// can't get them, we can't tell an official build from a tampered one, and this
+	// binary is about to replace itself on disk. install.sh warns and continues in
+	// this case, but it runs once on a machine with nothing to lose yet; an upgrade
+	// overwrites a working install.
+	sums, err := fetchChecksums(checksumsURL(latest))
+	if err != nil {
+		return fmt.Errorf("cannot verify this release: %w\n"+
+			"    Download it manually from https://github.com/scrypster/muninndb/releases/tag/%s "+
+			"if you want to proceed without verification", err, latest)
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -520,7 +637,8 @@ func selfUpdate(latest string) error {
 	label := fmt.Sprintf("Downloading %s...", latest)
 	fmt.Printf("  %-28s", label)
 	var dlErr error
-	tmpPath, dlErr = downloadAndExtractBinaryProgress(assetURL, binaryName, func(dl, total int64) {
+	var gotSum string
+	tmpPath, gotSum, dlErr = downloadAndExtractBinaryProgress(assetURL, binaryName, func(dl, total int64) {
 		if total > 0 {
 			mb := float64(dl) / 1024 / 1024
 			fmt.Printf("\r  %-28s%.1f MB", label, mb)
@@ -531,6 +649,16 @@ func selfUpdate(latest string) error {
 		return dlErr
 	}
 	fmt.Println(" ✓")
+
+	// Checksum first, and on its own step. Everything below this point either executes
+	// the downloaded file (verifyBinary runs `<path> version`) or installs it, so this
+	// is the last moment where a tampered archive is still inert bytes on disk.
+	if err := upgradeStep("Verifying checksum...", func() error {
+		return verifyChecksum(assetName, gotSum, sums)
+	}); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
 
 	if err := upgradeStep("Verifying binary...", func() error {
 		if err := os.Chmod(tmpPath, 0755); err != nil {

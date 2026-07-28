@@ -220,6 +220,18 @@ message ActivationPush {
   int64 at = 5;
 }
 
+message AdjustConfidenceRequest {
+  string vault              = 1;
+  string engram_id          = 2;
+  float  delta              = 3;  // signed; clamped to [0,1] after apply
+  string reason             = 4;  // audit string (caller-supplied)
+  string contradicted_by_id = 5;  // optional; mirrors OnFound (marker + evidence submit)
+}
+
+message AdjustConfidenceResponse {
+  float new_confidence = 1;
+}
+
 message ListVaultsRequest {}
 
 message ListVaultsResponse {
@@ -237,5 +249,6 @@ service MuninnDB {
   rpc Link(LinkRequest) returns (LinkResponse);
   rpc Activate(ActivateRequest) returns (stream ActivateResponse);
   rpc ListVaults(ListVaultsRequest) returns (ListVaultsResponse);
+  rpc AdjustConfidence(AdjustConfidenceRequest) returns (AdjustConfidenceResponse);
   rpc Subscribe(stream SubscribeRequest) returns (stream ActivationPush);
 }

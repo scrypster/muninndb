@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"testing"
@@ -1217,5 +1218,139 @@ func TestWriteDreamStateOverwrite(t *testing.T) {
 	}
 	if gotCount != 47 {
 		t.Errorf("count: got %d, want 47", gotCount)
+	}
+}
+
+// setupContradictionFixture creates a fresh PebbleStore and vault with two
+// seeded engrams (id, other). Mirrors the inline setup in TestFlagContradiction
+// (impl_test.go:610). Local helper — TestFlagContradiction inlines its setup;
+// these helpers are the minimal extraction the brief assumed already existed.
+func setupContradictionFixture(t *testing.T) (store *PebbleStore, ws [8]byte, id ULID, other ULID) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "muninndb-contra-fixture-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	db, err := OpenPebble(dir, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100})
+	t.Cleanup(func() { store.Close() })
+
+	ws = store.VaultPrefix("test")
+	id, err = store.WriteEngram(context.Background(), ws, &Engram{Concept: "concept1", Content: "content1"})
+	if err != nil {
+		t.Fatalf("WriteEngram(id): %v", err)
+	}
+	other, err = store.WriteEngram(context.Background(), ws, &Engram{Concept: "concept2", Content: "content2"})
+	if err != nil {
+		t.Fatalf("WriteEngram(other): %v", err)
+	}
+	return store, ws, id, other
+}
+
+// seedEngram pins an engram's starting confidence. Wraps UpdateConfidence so the
+// tests read as "seed 0.5, then invoke the composed write".
+func seedEngram(t *testing.T, store *PebbleStore, ws [8]byte, id ULID, confidence float32) {
+	t.Helper()
+	if err := store.UpdateConfidence(context.Background(), ws, id, confidence); err != nil {
+		t.Fatalf("seedEngram UpdateConfidence: %v", err)
+	}
+}
+
+// contradictionMarkerExists checks the bidirectional 0x0A contradiction pair was
+// written for (a,b). Uses the same canonical ordering as FlagContradiction
+// (association.go:793) and a direct point lookup (stronger than the prefix-scan
+// in TestFlagContradiction).
+func contradictionMarkerExists(t *testing.T, store *PebbleStore, ws [8]byte, a, b ULID) bool {
+	t.Helper()
+	aBytes := [16]byte(a)
+	bBytes := [16]byte(b)
+	if CompareULIDs(a, b) > 0 {
+		aBytes, bBytes = bBytes, aBytes
+	}
+	fwd, err := Get(store.db, keys.ContradictionKey(ws, 0, 0, aBytes))
+	if err != nil || fwd == nil {
+		return false
+	}
+	if !bytes.Equal(fwd, bBytes[:]) {
+		return false
+	}
+	rev, err := Get(store.db, keys.ContradictionKey(ws, 0, 0, bBytes))
+	if err != nil || rev == nil {
+		return false
+	}
+	return bytes.Equal(rev, aBytes[:])
+}
+
+// TestUpdateConfidenceWithContradiction_AtomicConfidenceAndMarker verifies the
+// composed write applies a delta and, when hasContra, writes the 0x0A marker
+// pair — in one batch. Mirrors the inputs of TestFlagContradiction (impl_test.go:610).
+// Delta-based since #559: the method takes a delta, does read+add+clamp inside
+// the stripe lock, and returns (prior, newConf).
+func TestUpdateConfidenceWithContradiction_AtomicConfidenceAndMarker(t *testing.T) {
+	store, ws, id, other := setupContradictionFixture(t)
+
+	// Seed an engram so GetEngram inside the method resolves.
+	seedEngram(t, store, ws, id, 0.5)
+	seedEngram(t, store, ws, other, 0.5)
+
+	// +0.4 delta from a 0.5 seed → 0.9 (mid-range, no clamp).
+	prior, newConf, err := store.UpdateConfidenceWithContradiction(
+		context.Background(), ws, id, 0.4, other, true)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if prior != 0.5 {
+		t.Fatalf("prior = %v, want 0.5 (seed)", prior)
+	}
+	// float32 approximate equality — 0.5+0.4 is not exactly representable.
+	if newConf-0.9 > 1e-6 || 0.9-newConf > 1e-6 {
+		t.Fatalf("newConf = %v, want ≈ 0.9", newConf)
+	}
+
+	if got, _ := store.GetConfidence(context.Background(), ws, id); got-0.9 > 1e-6 || 0.9-got > 1e-6 {
+		t.Fatalf("confidence = %v, want ≈ 0.9", got)
+	}
+	if !contradictionMarkerExists(t, store, ws, id, other) {
+		t.Fatal("expected 0x0A marker pair after hasContra write")
+	}
+	// The 0x0A marker lives in a separate keyspace from the confidence field.
+	// The composed write must touch only `id`'s confidence — `other`'s engram
+	// is unchanged. Regression guard: a future refactor that writes the marker
+	// pair by iterating both engrams' confidence keys would silently corrupt
+	// `other`'s confidence; this assertion catches that.
+	if got, _ := store.GetConfidence(context.Background(), ws, other); got != 0.5 {
+		t.Fatalf("other confidence mutated by composed write: got %v, want 0.5", got)
+	}
+}
+
+// TestUpdateConfidenceWithContradiction_NoMarkerWhenHasContraFalse verifies the
+// 0x0A marker is NOT written when hasContra is false (bare delta path).
+func TestUpdateConfidenceWithContradiction_NoMarkerWhenHasContraFalse(t *testing.T) {
+	store, ws, id, other := setupContradictionFixture(t)
+	seedEngram(t, store, ws, id, 0.5)
+
+	// -0.3 delta from a 0.5 seed → 0.2.
+	prior, newConf, err := store.UpdateConfidenceWithContradiction(
+		context.Background(), ws, id, -0.3, other, false)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if prior != 0.5 {
+		t.Fatalf("prior = %v, want 0.5 (seed)", prior)
+	}
+	// float32 approximate equality — 0.5-0.3 is not exactly representable.
+	if newConf-0.2 > 1e-6 || 0.2-newConf > 1e-6 {
+		t.Fatalf("newConf = %v, want ≈ 0.2", newConf)
+	}
+	if got, _ := store.GetConfidence(context.Background(), ws, id); got-0.2 > 1e-6 || 0.2-got > 1e-6 {
+		t.Fatalf("confidence = %v, want ≈ 0.2", got)
+	}
+	if contradictionMarkerExists(t, store, ws, id, other) {
+		t.Fatal("expected NO 0x0A marker when hasContra=false")
 	}
 }

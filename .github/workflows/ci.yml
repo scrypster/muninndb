@@ -6,12 +6,6 @@ on:
   pull_request:
     branches: [main, develop]
 
-# Opt into Node.js 24 for all actions now, ahead of the forced migration
-# on June 2, 2026. Silences deprecation warnings for actions/checkout,
-# actions/setup-node, actions/cache, etc.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   # ── Go: build + test ────────────────────────────────────────────────────
   go:
@@ -19,9 +13,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -43,7 +37,7 @@ jobs:
       # ORT version or model changes. The cache key includes both versions.
       - name: Cache embed assets
         id: asset-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux
@@ -53,7 +47,7 @@ jobs:
         if: steps.asset-cache.outputs.cache-hit != 'true'
         run: make fetch-model _ort-linux-amd64
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -73,7 +67,7 @@ jobs:
         run: go tool cover -func=coverage.out | tail -1
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage
           path: coverage.out
@@ -85,15 +79,15 @@ jobs:
     needs: go
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Restore embed assets from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux
@@ -105,7 +99,7 @@ jobs:
             make fetch-model _ort-linux-amd64
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -123,28 +117,33 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Cache embed assets (Windows)
         id: asset-cache-win
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
-          key: embed-assets-ort-1.24.2-minilm-v2-windows
+          key: embed-assets-ort-1.24.2-bge-small-en-v1.5-windows
 
+      # Must stay identical to the model release.yml ships for windows/amd64
+      # (see its build-windows job). These drifted apart once: CI validated
+      # all-MiniLM-L6-v2 while releases shipped bge-small-en-v1.5, so the
+      # Windows job was green against a model no user ever ran. Both models are
+      # 384-dimensional, so nothing failed — the embeddings were just different.
       - name: Fetch model assets
         if: steps.asset-cache-win.outputs.cache-hit != 'true'
         run: |
           New-Item -ItemType Directory -Path internal/plugin/embed/assets -Force | Out-Null
           Write-Host "Downloading model..."
-          Invoke-WebRequest -Uri "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_int8.onnx" -OutFile "internal/plugin/embed/assets/model_int8.onnx"
+          Invoke-WebRequest -Uri "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_int8.onnx" -OutFile "internal/plugin/embed/assets/model_int8.onnx"
           Write-Host "Downloading tokenizer..."
-          Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json" -OutFile "internal/plugin/embed/assets/tokenizer.json"
+          Invoke-WebRequest -Uri "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json" -OutFile "internal/plugin/embed/assets/tokenizer.json"
         shell: pwsh
 
       - name: Fetch ORT DLL
@@ -158,7 +157,7 @@ jobs:
           Write-Host "DLL size: $((Get-Item 'internal/plugin/embed/assets/onnxruntime_windows_amd64.dll').Length / 1MB) MB"
         shell: pwsh
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -222,15 +221,15 @@ jobs:
     needs: cli-integration  # run after CLI tests so all integration jobs are sequential
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Restore embed assets from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux
@@ -242,7 +241,7 @@ jobs:
             make fetch-model _ort-linux-amd64
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -270,7 +269,7 @@ jobs:
           curl -sf http://localhost:8750/mcp/health
           curl -sf http://localhost:8476/api/health
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -311,15 +310,15 @@ jobs:
     needs: go
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Restore embed assets from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: internal/plugin/embed/assets
           key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux
@@ -330,7 +329,7 @@ jobs:
             make fetch-model _ort-linux-amd64
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -348,7 +347,7 @@ jobs:
 
       - name: Upload Playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-report
           path: web/playwright-report/
@@ -360,7 +359,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run shellcheck
         run: shellcheck install.sh scripts/check-build-tags.sh
@@ -374,7 +373,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check openapi.yaml exists
         run: |
@@ -385,7 +384,7 @@ jobs:
           fi
           echo "openapi.yaml found ($(wc -c < internal/transport/rest/openapi.yaml) bytes)"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -422,15 +421,80 @@ jobs:
     name: Vulnerability scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
+      # Pinned, not @latest: an unpinned tool makes this job non-reproducible and
+      # lets an upstream release change CI behaviour without a commit here. The
+      # vulnerability database is still fetched fresh at run time, so pinning the
+      # binary does not stale the findings.
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 
       - name: Run govulncheck
         run: govulncheck ./...
+
+  # ── Node SDK: typecheck + unit tests ──────────────────────────────────
+  # Cheap and standalone: the tests mock HTTP with msw, so no server or embed
+  # assets are needed. This job exists because the Node SDK was previously
+  # compiled for the first time by publish-sdk.yml at tag time — a TypeScript
+  # break or a bad lockfile would not surface until an npm publish was already
+  # under way. Python has had an equivalent gate; Node did not.
+  node-sdk:
+    name: Node SDK build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+
+      - name: Install
+        run: npm ci --ignore-scripts
+        working-directory: sdk/node
+
+      - name: Typecheck and build
+        run: npm run build
+        working-directory: sdk/node
+
+      - name: Unit tests
+        run: npm test
+        working-directory: sdk/node
+
+  # ── Web console: unit tests ───────────────────────────────────────────
+  # web/ has carried vitest suites for a while (time-utils, plugin-config-utils,
+  # and now worker-status-utils) that nothing ever ran. `npm run test:e2e`
+  # covers Playwright, but plain `npm test` was never wired up, so the JS unit
+  # coverage was decorative. Two things had to be true before this job could
+  # exist: vitest had to stop globbing the Playwright specs (fixed by the
+  # test.exclude in web/vite.config.js), and the suite had to be green.
+  #
+  # Kept separate from the Go job rather than appended to it, so a failing JS
+  # assertion reports as a web failure instead of "Go build & test". It runs in
+  # parallel and needs no server, no Go toolchain, and no embed assets.
+  web-unit:
+    name: Web console unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci --ignore-scripts
+        working-directory: web
+
+      - name: Unit tests
+        run: npm test
+        working-directory: web

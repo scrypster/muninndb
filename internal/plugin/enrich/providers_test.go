@@ -3,10 +3,14 @@ package enrich
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 // --- Ollama ---
@@ -235,6 +239,7 @@ func TestOpenAIProvider_Complete_UsesStructuredReasoningFallback(t *testing.T) {
 
 func TestOpenAIProvider_Complete_ErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "2")
 		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte("rate limited"))
 	}))
@@ -248,6 +253,16 @@ func TestOpenAIProvider_Complete_ErrorStatus(t *testing.T) {
 	_, err := p.Complete(context.Background(), "s", "u")
 	if err == nil {
 		t.Fatal("expected error for 429 status")
+	}
+	var providerErr *plugin.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("expected typed ProviderError, got %T: %v", err, err)
+	}
+	if providerErr.StatusCode != http.StatusTooManyRequests || !providerErr.Retryable {
+		t.Fatalf("unexpected classification: %+v", providerErr)
+	}
+	if !providerErr.HasRetryAfter || providerErr.RetryAfter != 2*time.Second {
+		t.Fatalf("Retry-After = %v (present=%v), want 2s", providerErr.RetryAfter, providerErr.HasRetryAfter)
 	}
 }
 

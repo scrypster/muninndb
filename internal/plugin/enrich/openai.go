@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -121,13 +120,12 @@ func (p *OpenAILLMProvider) Complete(ctx context.Context, system, user string) (
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", providerTransportError(p.Name(), err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("openai returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return "", providerHTTPError(p.Name(), resp)
 	}
 
 	var chatResp openaiChatResponse

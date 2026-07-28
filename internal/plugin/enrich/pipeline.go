@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -132,6 +133,9 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 	if p.stageEnabled("entities") && !engramHasEntities(eng) {
 		ents, err := p.extractEntities(ctx, eng)
 		if err != nil {
+			if shouldAbortPipeline(err) {
+				return nil, fmt.Errorf("enrich entities: %w", err)
+			}
 			slog.Warn("enrich: entity extraction failed", "id", eng.ID.String(), "err", err)
 			stageErrors = append(stageErrors, fmt.Sprintf("entities: %v", err))
 			ents = nil
@@ -144,6 +148,9 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 	if p.stageEnabled("relationships") && len(entities) > 0 {
 		rels, err := p.extractRelationships(ctx, eng, entities)
 		if err != nil {
+			if shouldAbortPipeline(err) {
+				return nil, fmt.Errorf("enrich relationships: %w", err)
+			}
 			slog.Warn("enrich: relationship extraction failed", "id", eng.ID.String(), "err", err)
 			stageErrors = append(stageErrors, fmt.Sprintf("relationships: %v", err))
 			rels = nil
@@ -155,6 +162,9 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 	if p.stageEnabled("classification") && !engramHasClassification(eng) {
 		memType, typeLabel, category, subcategory, tags, err := p.classify(ctx, eng)
 		if err != nil {
+			if shouldAbortPipeline(err) {
+				return nil, fmt.Errorf("enrich classification: %w", err)
+			}
 			slog.Warn("enrich: classification failed", "id", eng.ID.String(), "err", err)
 			stageErrors = append(stageErrors, fmt.Sprintf("classification: %v", err))
 		} else {
@@ -172,6 +182,9 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 	if p.stageEnabled("summary") && !engramHasSummary(eng) {
 		summary, keyPoints, err := p.summarize(ctx, eng)
 		if err != nil {
+			if shouldAbortPipeline(err) {
+				return nil, fmt.Errorf("enrich summary: %w", err)
+			}
 			slog.Warn("enrich: summarization failed", "id", eng.ID.String(), "err", err)
 			stageErrors = append(stageErrors, fmt.Sprintf("summary: %v", err))
 		} else {
@@ -191,6 +204,14 @@ func (p *EnrichmentPipeline) Run(ctx context.Context, eng *storage.Engram) (resu
 	}
 
 	return result, nil
+}
+
+func shouldAbortPipeline(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var providerErr *plugin.ProviderError
+	return errors.As(err, &providerErr)
 }
 
 // engramHasEntities returns true if the engram already has caller-provided entities,

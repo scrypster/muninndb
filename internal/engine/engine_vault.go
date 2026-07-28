@@ -16,6 +16,16 @@ var ErrVaultNotFound = errors.New("vault not found")
 // Use errors.Is to check for this error in callers.
 var ErrEngramNotFound = errors.New("engram not found")
 
+// ErrInvalidArgument is returned when a caller-supplied scalar is out of the
+// representable range (NaN, Inf, etc.). REST/gRPC handlers map it to 400/INVALID_ARGUMENT.
+// Use errors.Is to check for this error in callers.
+var ErrInvalidArgument = errors.New("invalid argument")
+
+// ErrSelfContradiction is returned when AdjustConfidence is asked to mark an
+// engram as contradicting itself (id == other with hasContra=true). The
+// contradiction graph is irreflexive by construction.
+var ErrSelfContradiction = errors.New("self-contradiction rejected")
+
 // ErrEngramSoftDeleted is returned when an operation targets an engram that has
 // been soft-deleted. Use errors.Is to check for this error in callers.
 var ErrEngramSoftDeleted = errors.New("engram is soft-deleted")

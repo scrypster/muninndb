@@ -162,8 +162,13 @@ func WriteOnlyFromContext(ctx context.Context) bool {
 //
 //	mux.HandleFunc("GET /api/engrams/{id}", s.withMiddleware(auth.WriteOnlyGuard(s.handleGetEngram)))
 //
-// Scope: this guard applies to the REST API only. The MCP server uses a separate
-// static-token auth model; write-only API keys cannot authenticate to MCP at all.
+// Scope: this guard applies to the REST API only. MCP enforces the same modes
+// through its own path — see the ModeObserve/ModeWrite/ModeFull switch in
+// internal/mcp/server.go, which gates tools by isMutatingTool/isReadOnlyTool.
+// A write-mode key does authenticate to MCP; it is restricted there, not
+// rejected. (This comment previously claimed such keys "cannot authenticate to
+// MCP at all", which was never true and is exactly the kind of stale
+// security-boundary note that misleads a reviewer.)
 func WriteOnlyGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if WriteOnlyFromContext(r.Context()) {

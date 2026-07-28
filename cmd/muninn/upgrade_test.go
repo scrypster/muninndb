@@ -166,7 +166,7 @@ func TestDownloadAndExtractBinary_Progress(t *testing.T) {
 	defer srv.Close()
 
 	var lastReported int64
-	dest, err := downloadAndExtractBinaryProgress(srv.URL, "muninn", func(downloaded, total int64) {
+	dest, _, err := downloadAndExtractBinaryProgress(srv.URL, "muninn", func(downloaded, total int64) {
 		lastReported = downloaded
 	})
 	if err != nil {
