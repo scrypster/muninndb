@@ -58,7 +58,7 @@ func TestRead_ReinforcesAccess(t *testing.T) {
 
 	// Sanity: before reinforcing, "newer" is more recently accessed (it was
 	// written after "older" and LastAccess defaults to write time).
-	entries, err := eng.WhereLeftOff(ctx, "reinforce-read", 10)
+	entries, err := eng.WhereLeftOff(ctx, "reinforce-read", 10, nil)
 	if err != nil {
 		t.Fatalf("WhereLeftOff (before): %v", err)
 	}
@@ -85,7 +85,7 @@ func TestRead_ReinforcesAccess(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	reordered := false
 	for time.Now().Before(deadline) {
-		entries, err := eng.WhereLeftOff(ctx, "reinforce-read", 10)
+		entries, err := eng.WhereLeftOff(ctx, "reinforce-read", 10, nil)
 		if err != nil {
 			t.Fatalf("WhereLeftOff (after): %v", err)
 		}
