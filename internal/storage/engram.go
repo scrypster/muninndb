@@ -474,6 +474,9 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	for _, tag := range eng.Tags {
 		batch.Delete(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(id)), nil)
 	}
+	for _, tag := range eng.Tags {
+		DeleteRawTagIndexEntry(batch, wsPrefix, tag, [16]byte(id))
+	}
 
 	// Association forward/reverse keys — scan live Pebble keys rather than
 	// trusting the inline ERF associations, which may have stale weights if
@@ -747,6 +750,16 @@ func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID
 	// Write tag index entries for all tags (idempotent for existing tags).
 	for _, tag := range tags {
 		batch.Set(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(id)), []byte{}, nil)
+	}
+
+	// Write raw-tag-range index entries for all tags (idempotent for existing
+	// tags; like the 0x0C index above, stale entries for tags that are no
+	// longer present are left as orphans — safe, since phase-6's
+	// passesMetaFilter re-checks the real tag on the engram).
+	for _, tag := range tags {
+		if err := WriteRawTagIndexEntry(batch, wsPrefix, tag, [16]byte(id)); err != nil {
+			return err
+		}
 	}
 
 	// Invalidate L1 cache BEFORE commit — cached struct has stale tags.

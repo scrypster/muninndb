@@ -1,6 +1,7 @@
 package keys
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -161,6 +162,89 @@ func TagIndexKey(ws [8]byte, tagHash uint32, id [16]byte) []byte {
 	binary.BigEndian.PutUint32(key[9:13], tagHash)
 	copy(key[13:29], id[:])
 	return key
+}
+
+// RawTagRangePrefix returns the 13-byte prefix shared by every raw-tag-range
+// entry for a given (workspace, tagKey): 0x2B | ws(8) | Hash(tagKey)(4).
+// All value-bearing entries under this prefix sort by their raw value bytes.
+func RawTagRangePrefix(ws [8]byte, tagKeyHash uint32) []byte {
+	key := make([]byte, 1+8+4)
+	key[0] = prefix.RawTagRange
+	copy(key[1:9], ws[:])
+	binary.BigEndian.PutUint32(key[9:13], tagKeyHash)
+	return key
+}
+
+// RawTagRangeKey constructs the ordered raw-tag-range secondary index key
+// (0x2B prefix, S1). Layout:
+//
+//	0x2B | ws(8) | Hash(tagKey)(4) | value(N) | 0x00 | id(16)
+//
+// value must NOT contain a 0x00 byte — the 0x00 separator after value is what
+// resolves prefix-of-each-other values (e.g. "2026" sorts before "2026-07"
+// because 0x00 < '-'). Callers (internal/storage's raw-tag-range write path)
+// reject values containing 0x00 before calling this.
+func RawTagRangeKey(ws [8]byte, tagKeyHash uint32, value []byte, id [16]byte) []byte {
+	key := make([]byte, 0, 13+len(value)+1+16)
+	key = append(key, RawTagRangePrefix(ws, tagKeyHash)...)
+	key = append(key, value...)
+	key = append(key, 0x00)
+	key = append(key, id[:]...)
+	return key
+}
+
+// RawTagRangeBound computes the (lower, upper) Pebble iterator bounds for a
+// single-sided comparison against a raw-tag-range index (0x2B), scoped to one
+// (workspace, tagKeyHash). upper is always exclusive; lower is always
+// inclusive. Ops mirror activation's tag_prefix filter: lte, gte, lt, gt, and
+// eq (also the default for an unrecognized/empty op).
+//
+// The 0x00 separator after the value means "value + 0x01" as an exclusive
+// upper bound includes every id suffix for an exact value match (0x01 > 0x00),
+// and "value + 0x00" as an inclusive lower bound is <= every id suffix for
+// that same value (a key ending sooner sorts before a longer key sharing the
+// same prefix bytes).
+func RawTagRangeBound(ws [8]byte, tagKeyHash uint32, op string, value []byte) (lower, upper []byte) {
+	prefixBytes := RawTagRangePrefix(ws, tagKeyHash)
+
+	withSep := func(sep byte) []byte {
+		b := make([]byte, 0, len(prefixBytes)+len(value)+1)
+		b = append(b, prefixBytes...)
+		b = append(b, value...)
+		b = append(b, sep)
+		return b
+	}
+
+	switch op {
+	case "lt":
+		return prefixBytes, withSep(0x00)
+	case "lte":
+		return prefixBytes, withSep(0x01)
+	case "gt":
+		return withSep(0x01), PrefixUpperBound(prefixBytes)
+	case "gte":
+		return withSep(0x00), PrefixUpperBound(prefixBytes)
+	default: // "eq", ""
+		return withSep(0x00), withSep(0x01)
+	}
+}
+
+// CombineRawTagRangeBounds intersects two (lower, upper) bound pairs produced
+// by RawTagRangeBound for the same (workspace, tagKeyHash) — used when a
+// recall combines two tag_prefix filters on the same prefix (e.g. gte + lte)
+// into a single bounded scan. The intersection of [lower1, upper1) and
+// [lower2, upper2) is [max(lower1, lower2), min(upper1, upper2)), compared
+// with the same byte-lexicographic ordering Pebble itself uses for keys.
+func CombineRawTagRangeBounds(lower1, upper1, lower2, upper2 []byte) (lower, upper []byte) {
+	lower = lower1
+	if bytes.Compare(lower2, lower1) > 0 {
+		lower = lower2
+	}
+	upper = upper1
+	if bytes.Compare(upper2, upper1) < 0 {
+		upper = upper2
+	}
+	return lower, upper
 }
 
 // CreatorIndexKey constructs the creator secondary index key (0x0D prefix).

@@ -320,6 +320,13 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 		batch.Set(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(eng.ID)), []byte{}, nil)
 	}
 
+	// 0x2B: ordered raw-tag-range index (key:value tags only)
+	for _, tag := range eng.Tags {
+		if err := WriteRawTagIndexEntry(batch, wsPrefix, tag, [16]byte(eng.ID)); err != nil {
+			return ULID{}, err
+		}
+	}
+
 	// 0x0D: creator index
 	batch.Set(keys.CreatorIndexKey(wsPrefix, keys.Hash(eng.CreatedBy), [16]byte(eng.ID)), []byte{}, nil)
 
@@ -483,6 +490,17 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		batch.Set(keys.StateIndexKey(ws, uint8(eng.State), id16), []byte{}, nil)
 		for _, tag := range eng.Tags {
 			batch.Set(keys.TagIndexKey(ws, keys.Hash(tag), id16), []byte{}, nil)
+		}
+		var rawTagErr error
+		for _, tag := range eng.Tags {
+			if err := WriteRawTagIndexEntry(batch, ws, tag, id16); err != nil {
+				rawTagErr = err
+				break
+			}
+		}
+		if rawTagErr != nil {
+			errs[i] = fmt.Errorf("write engram batch: raw tag index: %w", rawTagErr)
+			continue
 		}
 		batch.Set(keys.CreatorIndexKey(ws, keys.Hash(eng.CreatedBy), id16), []byte{}, nil)
 		batch.Set(keys.RelevanceBucketKey(ws, eng.Relevance, id16), []byte{}, nil)
