@@ -470,7 +470,10 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 				slog.Warn("handleRecall: GetAnnotations failed", "id", item.ID, "err", err)
 				continue
 			}
-			memories[i].Annotations = buildAnnotations(&item, ann)
+			// Augment (not replace) the always-on supersession annotation that
+			// activationToMemory already attached, so superseded_by/current_version
+			// from the ranking phase are preserved.
+			augmentAnnotations(&memories[i], &item, ann)
 		}
 	}
 
@@ -1915,18 +1918,26 @@ func (s *MCPServer) handleEntityTimeline(ctx context.Context, w http.ResponseWri
 // buildAnnotations constructs a MemoryAnnotations from engine annotation data
 // and the activation item. Staleness is derived from item.LastAccess (nanoseconds
 // Unix timestamp).
-func buildAnnotations(item *mbp.ActivationItem, data *engine.AnnotationData) *MemoryAnnotations {
+// augmentAnnotations fills the annotate=true fields (staleness, conflicts,
+// provenance) onto a Memory, preserving any always-on supersession annotation
+// (superseded_by/current_version) that the ranking phase already attached. The
+// supersession fields are authoritative from the ranking; data.SupersededBy from
+// the reverse-edge lookup only fills in when the ranking didn't set it.
+func augmentAnnotations(m *Memory, item *mbp.ActivationItem, data *engine.AnnotationData) {
+	if m.Annotations == nil {
+		m.Annotations = &MemoryAnnotations{}
+	}
+	ann := m.Annotations
 	staleDays := math.Round(time.Since(time.Unix(0, item.LastAccess)).Hours()/24.0*10) / 10
-	ann := &MemoryAnnotations{
-		Stale:         staleDays > annotationStaleDays,
-		StaleDays:     staleDays,
-		ConflictsWith: data.ConflictsWith,
-		SupersededBy:  data.SupersededBy,
+	ann.Stale = staleDays > annotationStaleDays
+	ann.StaleDays = staleDays
+	ann.ConflictsWith = data.ConflictsWith
+	if ann.SupersededBy == "" {
+		ann.SupersededBy = data.SupersededBy
 	}
 	if data.LastVerified != nil {
 		ann.LastVerified = data.LastVerified.UTC().Format(time.RFC3339)
 	}
-	return ann
 }
 
 func (s *MCPServer) handleSetTrust(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {

@@ -76,6 +76,33 @@ func TestConvertActivationToMemory(t *testing.T) {
 	}
 }
 
+// TestConvertActivationToMemory_SupersessionAlwaysOn verifies Increment 2: when
+// the ranking marked an item superseded, activationToMemory attaches the
+// superseded_by/current_version annotation WITHOUT any annotate flag — an agent
+// is never handed a stale fact silently.
+func TestConvertActivationToMemory_SupersessionAlwaysOn(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID: "staleID", Concept: "runway 8mo", Content: "old",
+		SupersededBy: "newID", CurrentVersion: "headID",
+	}
+	m := activationToMemory(item)
+	if m.Annotations == nil {
+		t.Fatal("superseded item must carry annotations without annotate=true")
+	}
+	if m.Annotations.SupersededBy != "newID" {
+		t.Errorf("superseded_by = %q, want newID", m.Annotations.SupersededBy)
+	}
+	if m.Annotations.CurrentVersion != "headID" {
+		t.Errorf("current_version = %q, want headID", m.Annotations.CurrentVersion)
+	}
+
+	// A non-superseded item gets no annotations block (omitempty stays clean).
+	plain := activationToMemory(&mbp.ActivationItem{ID: "x", Concept: "c", Content: "y"})
+	if plain.Annotations != nil {
+		t.Errorf("non-superseded item must not carry annotations, got %+v", plain.Annotations)
+	}
+}
+
 func TestConvertTruncatesLongContent(t *testing.T) {
 	long := make([]byte, 600)
 	for i := range long {
