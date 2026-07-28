@@ -1658,15 +1658,17 @@ func runServer() {
 		eng.SetOnWrite(enrichProcessor.Notify)
 	}
 
-	// Wire processors into engine for observability stats.
-	var obsProcs []*plugin.RetroactiveProcessor
+	// Register every active processor with the engine. ClearVault uses this
+	// list as a correctness-critical admission fence; observability also reads
+	// processor stats from it.
+	var activeRetroProcs []*plugin.RetroactiveProcessor
 	if retroProcessor != nil {
-		obsProcs = append(obsProcs, retroProcessor)
+		activeRetroProcs = append(activeRetroProcs, retroProcessor)
 	}
 	if enrichProcessor != nil {
-		obsProcs = append(obsProcs, enrichProcessor)
+		activeRetroProcs = append(activeRetroProcs, enrichProcessor)
 	}
-	eng.SetRetroactiveProcessors(obsProcs...)
+	eng.SetRetroactiveProcessors(activeRetroProcs...)
 
 	// Start servers
 	errCh := make(chan error, 3)

@@ -2,11 +2,16 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -76,6 +81,154 @@ func TestEngineClearVault_MemoriesGone(t *testing.T) {
 	}
 	if !found {
 		t.Error("ClearVault should preserve vault registration")
+	}
+}
+
+type blockingEngineClearEnricher struct {
+	firstStarted     chan struct{}
+	releaseFirst     chan struct{}
+	postClearStarted chan struct{}
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *blockingEngineClearEnricher) Name() string            { return "engine-clear-enricher" }
+func (p *blockingEngineClearEnricher) Tier() plugin.PluginTier { return plugin.TierEnrich }
+func (p *blockingEngineClearEnricher) Init(context.Context, plugin.PluginConfig) error {
+	return nil
+}
+func (p *blockingEngineClearEnricher) Close() error { return nil }
+
+func (p *blockingEngineClearEnricher) Enrich(_ context.Context, _ *plugin.Engram) (*plugin.EnrichmentResult, error) {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	p.mu.Unlock()
+
+	switch call {
+	case 1:
+		close(p.firstStarted)
+		<-p.releaseFirst
+	case 2:
+		close(p.postClearStarted)
+	}
+	return &plugin.EnrichmentResult{Summary: "enriched"}, nil
+}
+
+func TestEngineClearVault_BlockedRetroactiveProcessorHonorsCancellationAndRecovers(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	const vault = "clear-blocked-retroactive"
+
+	preClear, err := eng.Write(ctx, writeReq(vault, "pre-clear", "blocked provider call"))
+	if err != nil {
+		t.Fatalf("Write(pre-clear): %v", err)
+	}
+	preClearID, err := storage.ParseULID(preClear.ID)
+	if err != nil {
+		t.Fatalf("ParseULID(pre-clear): %v", err)
+	}
+
+	provider := &blockingEngineClearEnricher{
+		firstStarted:     make(chan struct{}),
+		releaseFirst:     make(chan struct{}),
+		postClearStarted: make(chan struct{}),
+	}
+	processor := plugin.NewRetroactiveProcessor(
+		plugin.NewStoreAdapter(eng.store, eng.hnswRegistry),
+		provider,
+		plugin.DigestEnrich,
+	)
+	eng.SetRetroactiveProcessors(processor)
+	eng.SetOnWrite(processor.Notify)
+	processor.Start(ctx)
+	defer processor.Stop()
+
+	<-provider.firstStarted
+
+	clearCtx, cancelClear := context.WithCancel(ctx)
+	clearDone := make(chan error, 1)
+	go func() { clearDone <- eng.ClearVault(clearCtx, vault) }()
+
+	// Wait until ClearVault owns the per-vault operation mutex, then cancel its
+	// wait for the admitted provider call. The clear must abort without touching
+	// storage; it may not proceed past a cancelled processor boundary.
+	vaultMu := eng.getVaultMutex(vault)
+	for {
+		select {
+		case err := <-clearDone:
+			close(provider.releaseFirst)
+			t.Fatalf("ClearVault returned before cancellation while provider was blocked: %v", err)
+		default:
+		}
+		if !vaultMu.TryLock() {
+			break
+		}
+		vaultMu.Unlock()
+		runtime.Gosched()
+	}
+	cancelClear()
+	if err := <-clearDone; !errors.Is(err, context.Canceled) {
+		close(provider.releaseFirst)
+		t.Fatalf("ClearVault error = %v, want context.Canceled", err)
+	}
+	ws := eng.store.ResolveVaultPrefix(vault)
+	if _, err := eng.store.GetEngram(ctx, ws, preClearID); err != nil {
+		close(provider.releaseFirst)
+		t.Fatalf("cancelled clear removed the in-flight engram: %v", err)
+	}
+
+	// Retry while the first provider call is still blocked. Once that call is
+	// released, ClearVault must drain it, clear storage, restore FTS admission,
+	// and only then release/notify the processor via its LIFO defers.
+	retryDone := make(chan error, 1)
+	go func() { retryDone <- eng.ClearVault(ctx, vault) }()
+	for {
+		select {
+		case err := <-retryDone:
+			close(provider.releaseFirst)
+			t.Fatalf("ClearVault retry returned before the provider call was released: %v", err)
+		default:
+		}
+		if !vaultMu.TryLock() {
+			break
+		}
+		vaultMu.Unlock()
+		runtime.Gosched()
+	}
+	close(provider.releaseFirst)
+	if err := <-retryDone; err != nil {
+		t.Fatalf("ClearVault retry: %v", err)
+	}
+
+	postClear, err := eng.Write(ctx, writeReq(vault, "post-clear", "must process without restart"))
+	if err != nil {
+		t.Fatalf("Write(post-clear): %v", err)
+	}
+	postClearID, err := storage.ParseULID(postClear.ID)
+	if err != nil {
+		t.Fatalf("ParseULID(post-clear): %v", err)
+	}
+	select {
+	case <-provider.postClearStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-clear engram was not discovered by the existing processor")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		flags, err := eng.store.GetDigestFlags(ctx, postClearID)
+		if err == nil && flags&plugin.DigestEnrich != 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("post-clear engram was not marked enriched: flags=%#x err=%v", flags, err)
+		default:
+			runtime.Gosched()
+		}
 	}
 }
 

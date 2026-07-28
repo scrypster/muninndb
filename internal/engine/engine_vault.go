@@ -92,19 +92,31 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 	ws := e.store.ResolveVaultPrefix(vaultName)
 
 	// Establish the clear boundary before deleting storage. Each processor
-	// invalidates its current scan and waits only for an already-admitted call
-	// from this vault to finish persistence; unrelated vaults remain active.
+	// invalidates its current scan, closes admission for this vault, and waits
+	// for already-admitted calls to finish persistence. Admission and waiting
+	// are scoped per vault.
 	finishProcessorClears := make([]func(), 0, len(e.retroProcessors))
-	for _, processor := range e.retroProcessors {
-		if processor != nil {
-			finishProcessorClears = append(finishProcessorClears, processor.BeginVaultClear(ws))
-		}
-	}
-	defer func() {
+	finishClears := func() {
 		for i := len(finishProcessorClears) - 1; i >= 0; i-- {
 			finishProcessorClears[i]()
 		}
-	}()
+	}
+	for _, processor := range e.retroProcessors {
+		if processor != nil {
+			finish, err := processor.BeginVaultClear(ctx, ws)
+			if err != nil {
+				// Abort the whole clear. Any boundary already established on an
+				// earlier processor must be released before returning.
+				finishClears()
+				return fmt.Errorf("clear vault %q: wait for retroactive processor: %w", vaultName, err)
+			}
+			finishProcessorClears = append(finishProcessorClears, finish)
+		}
+	}
+	// Keep this defer registered before the FTS clearing defer below. Defers run
+	// in LIFO order, so FTS accepts writes again before processors are released
+	// and notified to discover post-clear records.
+	defer finishClears()
 
 	// NOTE: Jobs already mid-flush may write ghost FTS entries after the range
 	// tombstones land. This is harmless — activation filtering skips engrams

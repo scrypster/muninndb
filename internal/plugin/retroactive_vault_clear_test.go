@@ -2,9 +2,11 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
 )
@@ -109,8 +111,12 @@ func TestRetroactiveProcessor_ConcurrentVaultClearInvalidatesActivePass(t *testi
 
 	clearDone := make(chan error, 1)
 	go func() {
-		finishClear := processor.BeginVaultClear(ws)
-		_, err := store.ClearVault(ctx, ws)
+		finishClear, err := processor.BeginVaultClear(ctx, ws)
+		if err != nil {
+			clearDone <- err
+			return
+		}
+		_, err = store.ClearVault(ctx, ws)
 		finishClear()
 		clearDone <- err
 	}()
@@ -185,8 +191,12 @@ func TestRetroactiveProcessor_ConcurrentVaultClearInvalidatesEmbeddingMicroBatch
 
 	clearDone := make(chan error, 1)
 	go func() {
-		finishClear := processor.BeginVaultClear(ws)
-		_, err := store.ClearVault(ctx, ws)
+		finishClear, err := processor.BeginVaultClear(ctx, ws)
+		if err != nil {
+			clearDone <- err
+			return
+		}
+		_, err = store.ClearVault(ctx, ws)
 		finishClear()
 		clearDone <- err
 	}()
@@ -249,7 +259,10 @@ func TestRetroactiveProcessor_PassOpenedDuringVaultClearIsInvalidated(t *testing
 	}
 	processor := NewRetroactiveProcessor(adapter, provider, DigestEnrich)
 
-	finishClear := processor.BeginVaultClear(ws)
+	finishClear, err := processor.BeginVaultClear(ctx, ws)
+	if err != nil {
+		t.Fatalf("BeginVaultClear: %v", err)
+	}
 	passDone := make(chan bool, 1)
 	go func() { passDone <- processor.processBatch(ctx) }()
 	<-adapter.scanned
@@ -301,7 +314,10 @@ func TestRetroactiveProcessor_VaultClearDoesNotWaitForAnotherVaultCall(t *testin
 
 	// The active call holds activeWS's read lock. Acquiring and completing the
 	// clear boundary for clearWS must not wait for that unrelated provider call.
-	finishClear := processor.BeginVaultClear(clearWS)
+	finishClear, err := processor.BeginVaultClear(ctx, clearWS)
+	if err != nil {
+		t.Fatalf("BeginVaultClear(unrelated): %v", err)
+	}
 	if _, err := store.ClearVault(ctx, clearWS); err != nil {
 		finishClear()
 		t.Fatalf("ClearVault(unrelated): %v", err)
@@ -315,4 +331,100 @@ func TestRetroactiveProcessor_VaultClearDoesNotWaitForAnotherVaultCall(t *testin
 	if calls := provider.calls(); len(calls) != 1 {
 		t.Fatalf("active vault provider calls = %v, want exactly the in-flight record", calls)
 	}
+}
+
+func TestRetroactiveProcessor_ProviderFailureReleasesVaultClearAdmission(t *testing.T) {
+	store, registry, _ := openTestStoreWithHNSW(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("retro-clear-provider-failure")
+	if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept: "provider failure",
+		Content: "the pass must release its vault admission on every exit",
+	}); err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	provider := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "failed-enricher", tier: TierEnrich},
+		enrichErr: &ProviderError{
+			Provider:   "fake",
+			StatusCode: 503,
+			Retryable:  true,
+		},
+	}
+	processor := NewRetroactiveProcessor(NewStoreAdapter(store, registry), provider, DigestEnrich)
+
+	if ok := processor.processBatch(ctx); !ok {
+		t.Fatal("provider failure should stop only the current pass")
+	}
+
+	clearAcquired := make(chan struct{})
+	go func() {
+		finishClear, err := processor.BeginVaultClear(ctx, ws)
+		if err != nil {
+			return
+		}
+		close(clearAcquired)
+		finishClear()
+	}()
+
+	select {
+	case <-clearAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("BeginVaultClear remained blocked after the failed enrichment pass returned")
+	}
+}
+
+func TestRetroactiveProcessor_CancelledVaultClearAbortsBoundary(t *testing.T) {
+	store, registry, _ := openTestStoreWithHNSW(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("retro-clear-cancelled")
+	id, err := store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept: "blocked call",
+		Content: "cancelling the clear must leave this record intact",
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	provider := &blockingVaultClearEnricher{
+		mockPlugin:   mockPlugin{name: "cancelled-clear-enricher", tier: TierEnrich},
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	processor := NewRetroactiveProcessor(NewStoreAdapter(store, registry), provider, DigestEnrich)
+	passDone := make(chan bool, 1)
+	go func() { passDone <- processor.processBatch(ctx) }()
+	<-provider.firstStarted
+
+	clearCtx, cancelClear := context.WithCancel(ctx)
+	clearDone := make(chan error, 1)
+	go func() {
+		_, err := processor.BeginVaultClear(clearCtx, ws)
+		clearDone <- err
+	}()
+	for processor.vaultGeneration(ws) == 0 {
+		runtime.Gosched()
+	}
+	cancelClear()
+
+	if err := <-clearDone; !errors.Is(err, context.Canceled) {
+		close(provider.releaseFirst)
+		t.Fatalf("BeginVaultClear error = %v, want context.Canceled", err)
+	}
+	if _, err := store.GetEngram(ctx, ws, id); err != nil {
+		close(provider.releaseFirst)
+		t.Fatalf("cancelled boundary allowed storage clear: %v", err)
+	}
+
+	close(provider.releaseFirst)
+	if ok := <-passDone; !ok {
+		t.Fatal("processor pass reported a systemic store failure")
+	}
+
+	finishClear, err := processor.BeginVaultClear(ctx, ws)
+	if err != nil {
+		t.Fatalf("BeginVaultClear after cancellation: %v", err)
+	}
+	finishClear()
 }

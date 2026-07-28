@@ -147,8 +147,9 @@ type Engine struct {
 	// nil-safe — callers check before recording.
 	latencyTracker *latency.Tracker
 
-	// retroProcessors holds references to background processors (embed, enrich)
-	// so Observability() can report their stats. Set via SetRetroactiveProcessors.
+	// retroProcessors holds background processors (embed, enrich) for both
+	// observability and the destructive-vault-operation admission fence.
+	// Set via SetRetroactiveProcessors before serving requests.
 	retroProcessors []*plugin.RetroactiveProcessor
 
 	// enrichPlugin is the optional EnrichPlugin used by ReplayEnrichment.
@@ -279,8 +280,10 @@ func (e *Engine) ReevaluatePushOnEmbed(eng *storage.Engram, vec []float32) {
 	e.triggers.NotifyEmbed(wsVaultID(ws), eng, vec)
 }
 
-// SetRetroactiveProcessors registers background processors for observability.
-// Must be called before the engine starts serving requests (not safe for concurrent use with Observability).
+// SetRetroactiveProcessors registers background processors for observability
+// and for the correctness-critical vault-clear admission fence. Every active
+// retroactive processor must be registered before the engine serves requests.
+// Not safe for concurrent use with Observability or destructive vault operations.
 func (e *Engine) SetRetroactiveProcessors(procs ...*plugin.RetroactiveProcessor) {
 	e.retroProcessors = procs
 }
