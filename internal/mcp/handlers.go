@@ -408,7 +408,17 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	if tags := parseStringArrayArg(args["tags_any"]); len(tags) > 0 {
 		req.Filters = append(req.Filters, mbp.Filter{Field: "tags_any", Op: "any", Value: tags})
 	}
-	if tf, ok := args["tag_filter"].(map[string]any); ok {
+	if raw, present := args["tag_filter"]; present {
+		// Validate on presence — do NOT silently drop a malformed tag_filter. A
+		// caller who passes a string (a natural mistake: tags_all/tags_any ARE
+		// string arrays) or any non-object must get an error, never an unfiltered
+		// recall that looks filtered (principle #1). tag_filter is an object:
+		// {"prefix":"due:","lte":"2026-06-17"}.
+		tf, ok := raw.(map[string]any)
+		if !ok {
+			sendError(w, id, -32602, `invalid 'tag_filter': must be an object like {"prefix":"due:","lte":"2026-06-17"} (got a non-object)`)
+			return
+		}
 		prefix, _ := tf["prefix"].(string)
 		if prefix == "" {
 			sendError(w, id, -32602, "invalid 'tag_filter': 'prefix' is required")
