@@ -157,6 +157,19 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 				continue
 			}
 
+			// Pattern-separation guard: a high embedding similarity is not proof of
+			// duplication. If this member differs from the survivor on a load-bearing
+			// token (a number, a date, a negation) it is a DISTINCT fact — an update
+			// or a contradiction — and archiving it would silently destroy it (and
+			// inflate the survivor's frequency signal). Keep it; recall's
+			// supersedes-aware ranking / contradiction surfacing handle the pair.
+			if divergesOnLoadBearingToken(representative, member) {
+				report.DedupSeparated++
+				slog.Debug("consolidation phase 2: separation guard refused merge",
+					"survivor", representative.ID, "kept", member.ID)
+				continue
+			}
+
 			if !w.DryRun {
 				// Archive the member (soft delete)
 				if err := w.Engine.UpdateLifecycleState(ctx, vault, member.ID.String(), "archived"); err != nil {
