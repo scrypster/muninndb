@@ -2252,7 +2252,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// leads with a fact it knows is stale. Runs after entity boost and BEFORE
 	// truncation so an injected head is not cut. Skipped in observe mode is
 	// unnecessary — it performs no writes (pure read-path ranking).
-	result.Activations = e.applySupersession(ctx, wsPrefix, result.Activations)
+	result.Activations = e.applySupersession(ctx, wsPrefix, result.Activations, actReq.MaxResults)
 
 	// Re-apply MaxResults: entity boost / supersession may have appended engrams
 	// beyond the limit. Both re-sort by score descending, so truncation keeps top-K.

@@ -83,7 +83,7 @@ func (h *supersedeTestHarness) scored(pairs ...any) []activation.ScoredEngram {
 }
 
 func (h *supersedeTestHarness) apply(results []activation.ScoredEngram) []activation.ScoredEngram {
-	return h.eng.applySupersession(h.ctx, h.ws, results)
+	return h.eng.applySupersession(h.ctx, h.ws, results, 0)
 }
 
 // rankOf returns the 0-based rank of id in results (-1 if absent).
@@ -239,5 +239,132 @@ func TestApplySupersession_UnrelatedUnaffected(t *testing.T) {
 	ys, _ := scoreOf(got, y)
 	if xs != 0.80 || ys != 0.60 || len(got) != 2 {
 		t.Errorf("non-superseded results must be unchanged, got x=%v y=%v len=%d", xs, ys, len(got))
+	}
+}
+
+// TestApplySupersession_StaleNeverLeapfrogsUnrelated is the refute-pass bug #1
+// guard: a barely-matching stale near-duplicate must NEVER be lifted above a
+// genuinely-relevant unrelated result. Head H scores high on its own merits
+// (2.0); stale S (superseded by H) barely matched (0.30); unrelated Z earned
+// 1.00. Demote-only means S stays at 0.30, below Z — the head, not the stale
+// fact, is what gets promoted.
+func TestApplySupersession_StaleNeverLeapfrogsUnrelated(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	staleID := h.write("stale near-duplicate", "old")
+	headID := h.write("current fact, strong on its own", "new")
+	unrelID := h.write("unrelated but genuinely relevant", "z")
+	h.supersede(headID, staleID)
+
+	got := h.apply(h.scored(headID, 2.0, unrelID, 1.0, staleID, 0.30))
+
+	ss, _ := scoreOf(got, staleID)
+	if ss > 0.30 {
+		t.Errorf("stale fact must never be promoted above its earned 0.30, got %v", ss)
+	}
+	if rankOf(got, unrelID) >= rankOf(got, staleID) {
+		t.Errorf("unrelated genuine match (rank %d) must outrank the stale near-dup (rank %d)",
+			rankOf(got, unrelID), rankOf(got, staleID))
+	}
+	if rankOf(got, headID) != 0 {
+		t.Errorf("head must lead at rank 0, got %d", rankOf(got, headID))
+	}
+}
+
+// TestApplySupersession_OrderIndependent is the refute-pass bug #2 guard: the
+// same input in two orders must produce identical scores (two-phase scoring, no
+// read-after-mutate). Chain A(1.10)<-B(0.05)<-C(head, absent).
+func TestApplySupersession_OrderIndependent(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	a := h.write("v1 strong", "a")
+	b := h.write("v2 weak", "b")
+	c := h.write("v3 head", "c")
+	h.supersede(b, a)
+	h.supersede(c, b)
+
+	g1 := h.apply(h.scored(a, 1.10, b, 0.05))
+	g2 := h.apply(h.scored(b, 0.05, a, 1.10))
+
+	for _, id := range []string{a, b, c} {
+		s1, _ := scoreOf(g1, id)
+		s2, _ := scoreOf(g2, id)
+		if s1 != s2 {
+			t.Errorf("score for %s is order-dependent: %v vs %v", id, s1, s2)
+		}
+	}
+	// The weak intermediate B must stay at its earned 0.05 (demote-only), not be
+	// pinned to head−ε.
+	bs, _ := scoreOf(g1, b)
+	if bs != 0.05 {
+		t.Errorf("weak intermediate must keep earned 0.05 (demote-only), got %v", bs)
+	}
+}
+
+// TestApplySupersession_DiamondLeavesUnchanged: an engram with two active
+// superseders is ambiguous — WARN and leave un-demoted (mirror the cycle path),
+// never silently pick one.
+func TestApplySupersession_DiamondLeavesUnchanged(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	x := h.write("contested", "x")
+	b := h.write("superseder one", "b")
+	c := h.write("superseder two", "c")
+	h.supersede(b, x)
+	h.supersede(c, x) // x now has two active superseders
+
+	got := h.apply(h.scored(x, 1.00))
+	xs, _ := scoreOf(got, x)
+	if xs != 1.00 {
+		t.Errorf("ambiguous (multi-superseder) engram must be left unchanged, got %v", xs)
+	}
+}
+
+// TestApplySupersession_SelfLoop: supersede(a,a) is a self-cycle; must be treated
+// as unresolvable, scores untouched.
+func TestApplySupersession_SelfLoop(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	a := h.write("self", "a")
+	h.supersede(a, a)
+
+	got := h.apply(h.scored(a, 1.00))
+	as, _ := scoreOf(got, a)
+	if as != 1.00 {
+		t.Errorf("self-loop must leave score unchanged, got %v", as)
+	}
+}
+
+// TestApplySupersession_ManyReverseEdges: a stale fact with many (>16) unrelated
+// reverse edges plus its RelSupersedes edge must still be detected as superseded
+// (the reverse-scan cap must not hide it).
+func TestApplySupersession_ManyReverseEdges(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	oldID := h.write("stale with many refs", "old")
+	newID := h.write("current", "new")
+	// 20 other engrams each point at oldID with a non-supersedes relation.
+	for i := 0; i < 20; i++ {
+		other := h.write("ref", "ref content")
+		if _, err := h.eng.Link(h.ctx, &mbp.LinkRequest{
+			Vault: "default", SourceID: other, TargetID: oldID,
+			RelType: uint16(storage.RelRelatesTo), Weight: 0.5,
+		}); err != nil {
+			t.Fatalf("link ref: %v", err)
+		}
+	}
+	h.supersede(newID, oldID)
+
+	got := h.apply(h.scored(oldID, 1.15))
+	if rankOf(got, newID) < 0 {
+		t.Fatal("supersedes edge missed behind >16 other reverse edges — head not injected")
+	}
+	if rankOf(got, newID) >= rankOf(got, oldID) {
+		t.Errorf("head must outrank stale despite many reverse edges")
 	}
 }
