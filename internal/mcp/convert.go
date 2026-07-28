@@ -48,6 +48,7 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		Relevance:   item.Relevance,
 		SourceType:  item.SourceType,
 		Trust:       storage.TrustLevel(item.Trust).String(),
+		Tags:        item.Tags,
 	}
 }
 

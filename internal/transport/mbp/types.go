@@ -240,6 +240,9 @@ type ActivationItem struct {
 	MemoryType uint8 `msgpack:"memory_type,omitempty" json:"memory_type,omitempty"`
 	// TypeLabel is the writer's free-form type label; empty when none was stored.
 	TypeLabel string `msgpack:"type_label,omitempty" json:"type_label,omitempty"`
+	// Tags carries the engram's stored tags (S4) so muninn_recall doesn't
+	// require a follow-up muninn_read just to see them.
+	Tags []string `msgpack:"tags,omitempty" json:"tags,omitempty"`
 }
 
 // ScoreComponents breaks down the activation score.

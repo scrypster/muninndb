@@ -1383,7 +1383,7 @@ func TestHandleFindByEntity_LimitCapped(t *testing.T) {
 // whereLeftOffEngine returns a populated WhereLeftOff result for shape tests.
 type whereLeftOffEngine struct{ fakeEngine }
 
-func (e *whereLeftOffEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([]WhereLeftOffEntry, error) {
+func (e *whereLeftOffEngine) WhereLeftOff(_ context.Context, _ string, _ int, _ []string) ([]WhereLeftOffEntry, error) {
 	return []WhereLeftOffEntry{
 		{
 			ID:         "entry-1",
@@ -1405,17 +1405,21 @@ func (e *whereLeftOffEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([
 
 type whereLeftOffErrEngine struct{ fakeEngine }
 
-func (e *whereLeftOffErrEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([]WhereLeftOffEntry, error) {
+func (e *whereLeftOffErrEngine) WhereLeftOff(_ context.Context, _ string, _ int, _ []string) ([]WhereLeftOffEntry, error) {
 	return nil, fmt.Errorf("storage unavailable")
 }
 
 type whereLeftOffLimitEngine struct {
 	fakeEngine
-	lastLimit int
+	lastLimit             int
+	lastExcludeTypeLabels []string
+	excludeCallCount      int
 }
 
-func (e *whereLeftOffLimitEngine) WhereLeftOff(_ context.Context, _ string, limit int) ([]WhereLeftOffEntry, error) {
+func (e *whereLeftOffLimitEngine) WhereLeftOff(_ context.Context, _ string, limit int, excludeTypeLabels []string) ([]WhereLeftOffEntry, error) {
 	e.lastLimit = limit
+	e.lastExcludeTypeLabels = excludeTypeLabels
+	e.excludeCallCount++
 	return []WhereLeftOffEntry{}, nil
 }
 
@@ -1524,6 +1528,40 @@ func TestHandleWhereLeftOff_LimitCapped(t *testing.T) {
 	postRPC(t, srv, body)
 	if eng.lastLimit != 50 {
 		t.Errorf("expected limit capped to 50, got %d", eng.lastLimit)
+	}
+}
+
+// TestHandleWhereLeftOff_DefaultExcludeIsEmpty pins the S5 contract: when a
+// caller omits exclude_type_labels entirely, the handler must pass an empty
+// (nil/zero-length) slice through to the engine — not some default
+// exclusion. A non-empty default would be a breaking contract change; policy
+// belongs to the client, not the server.
+func TestHandleWhereLeftOff_DefaultExcludeIsEmpty(t *testing.T) {
+	eng := &whereLeftOffLimitEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_where_left_off","arguments":{"vault":"default"}}}`
+	postRPC(t, srv, body)
+	if eng.excludeCallCount != 1 {
+		t.Fatalf("expected WhereLeftOff to be called once, got %d", eng.excludeCallCount)
+	}
+	if len(eng.lastExcludeTypeLabels) != 0 {
+		t.Errorf("expected empty exclude_type_labels by default, got %v", eng.lastExcludeTypeLabels)
+	}
+}
+
+// TestHandleWhereLeftOff_ExcludeTypeLabelsPassed verifies the handler parses
+// exclude_type_labels out of the tool call arguments and forwards it to the
+// engine (S5).
+func TestHandleWhereLeftOff_ExcludeTypeLabelsPassed(t *testing.T) {
+	eng := &whereLeftOffLimitEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_where_left_off","arguments":{"vault":"default","exclude_type_labels":["session-log","scratch"]}}}`
+	postRPC(t, srv, body)
+	if len(eng.lastExcludeTypeLabels) != 2 {
+		t.Fatalf("lastExcludeTypeLabels = %v, want 2 entries", eng.lastExcludeTypeLabels)
+	}
+	if eng.lastExcludeTypeLabels[0] != "session-log" || eng.lastExcludeTypeLabels[1] != "scratch" {
+		t.Errorf("lastExcludeTypeLabels = %v, want [session-log scratch]", eng.lastExcludeTypeLabels)
 	}
 }
 
@@ -1723,8 +1761,8 @@ func (e *slowIdempotentEngine) CountChildren(ctx context.Context, vault, engramI
 func (e *slowIdempotentEngine) GetEnrichmentMode(ctx context.Context) string {
 	return (&fakeEngine{}).GetEnrichmentMode(ctx)
 }
-func (e *slowIdempotentEngine) WhereLeftOff(ctx context.Context, vault string, limit int) ([]WhereLeftOffEntry, error) {
-	return (&fakeEngine{}).WhereLeftOff(ctx, vault, limit)
+func (e *slowIdempotentEngine) WhereLeftOff(ctx context.Context, vault string, limit int, excludeTypeLabels []string) ([]WhereLeftOffEntry, error) {
+	return (&fakeEngine{}).WhereLeftOff(ctx, vault, limit, excludeTypeLabels)
 }
 func (e *slowIdempotentEngine) FindByEntity(ctx context.Context, vault, entityName string, limit int) (*engine.FindByEntityResult, error) {
 	return (&fakeEngine{}).FindByEntity(ctx, vault, entityName, limit)

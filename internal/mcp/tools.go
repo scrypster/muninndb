@@ -574,6 +574,11 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "integer",
 						"description": "Max memories to return (default 10, max 50).",
 					},
+					"exclude_type_labels": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Opt-in: type_label values to skip (e.g. \"session-log\"), so recency scan noise doesn't crowd out real memories. Excluded entries don't count against limit — the scan keeps going to fill it. Default: empty (no exclusion, all types included).",
+					},
 				},
 				"required": []string{},
 			},

@@ -2160,6 +2160,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			Trust:       uint8(scored.Engram.Trust),
 			MemoryType:  uint8(scored.Engram.MemoryType),
 			TypeLabel:   scored.Engram.TypeLabel,
+			Tags:        scored.Engram.Tags,
 		}
 
 		items[i].ScoreComponents = mbp.ScoreComponents{
