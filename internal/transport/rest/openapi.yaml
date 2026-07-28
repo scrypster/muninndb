@@ -947,7 +947,7 @@ components:
           maxLength: 256
         mode:
           type: string
-          enum: ["full", "observe"]
+          enum: ["full", "observe", "write", "append"]
           default: "full"
 
     APIKey:

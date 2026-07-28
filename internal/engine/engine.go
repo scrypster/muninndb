@@ -861,6 +861,9 @@ func (e *Engine) validateClientEmbeddingDim(wsPrefix [8]byte, vec []float32) err
 
 // UpdateTags replaces the tags on an engram.
 func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, tags []string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 	return e.store.UpdateTags(ctx, wsPrefix, id, tags)
 }
@@ -2658,6 +2661,9 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 // distinguish external bridge signal from the internal "contradiction_detected"
 // path emitted by Link/ContradictWorker.
 func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.ULID, delta float32, other storage.ULID, hasContra bool, reason, caller string) (float32, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return 0, err
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
 	if math.IsNaN(float64(delta)) || math.IsInf(float64(delta), 0) {
@@ -2960,6 +2966,9 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 // so its read-modify-write is atomic and serializes with any concurrent
 // transition on the same engram — closing the former TOCTOU.
 func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
@@ -2984,6 +2993,9 @@ func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state stri
 // trust must be one of "verified", "inferred", "external", "untrusted".
 // Returns an error if the engram is not found or trust is invalid.
 func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	level, err := storage.ParseTrustLevel(trust)
 	if err != nil {
 		return fmt.Errorf("parse trust: %w", err)
@@ -3291,6 +3303,9 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 // Consolidate merges multiple engrams into a single new engram and archives the originals.
 // Returns a ConsolidateResult with the new ID, archived IDs, and any non-fatal warnings.
 func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	if len(ids) > 50 {
 		return nil, fmt.Errorf("consolidate: too many ids (max 50, got %d)", len(ids))
 	}
@@ -3399,6 +3414,9 @@ func (e *Engine) ActivityCounts(ctx context.Context, vault string, since, until 
 // evidence-link warnings. The decision is always committed; evidence linking
 // is best-effort (a bad evidence ID produces a warning, not a failure).
 func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*DecideResult, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	content := rationale
 	if len(alternatives) > 0 {
 		content += "\n---\nAlternatives:\n" + strings.Join(alternatives, "\n")
@@ -3808,6 +3826,9 @@ func (e *Engine) GetProvenance(ctx context.Context, vault, id string) ([]provena
 // useful=false signals negative feedback (retrieved but not helpful);
 // useful=true signals positive feedback (retrieved and helpful).
 func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, useful bool) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(engramID)
 	if err != nil {

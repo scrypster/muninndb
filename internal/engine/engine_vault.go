@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/scrypster/muninndb/internal/auth"
 )
 
 // ErrVaultNotFound is returned when an operation references a vault that does not exist.
@@ -50,10 +52,30 @@ var ErrInvalidID = errors.New("invalid engram id")
 var ErrInvalidRequest = errors.New("invalid request")
 
 // ErrAppendForbidden is returned when an append-mode credential attempts an
-// operation that modifies or deletes an existing engram (Evolve, Forget).
-// Append-mode may create new memories and read, never destroy or overwrite —
-// enforced here at the engine so it holds on every transport, not just MCP.
+// operation that modifies or deletes an EXISTING engram, entity, or lease.
+// Append-mode may create new memories and read; it may not destroy or overwrite.
+// Enforced here at the engine (via refuseAppend) so the guarantee holds on every
+// transport — the MCP dispatch gate alone would leave REST/gRPC/MBP open.
 var ErrAppendForbidden = errors.New("append-mode credential cannot modify or delete existing memories")
+
+// refuseAppend returns ErrAppendForbidden when the request credential is
+// append-mode. EVERY engine method that modifies or deletes an existing engram/
+// entity/lease/enrichment must call this at its top. It is the single chokepoint
+// for the append guarantee at the engine layer; TestAppendMode_RefusesEveryDestructiveOp
+// exercises each such method so a newly-added destructive method missing this
+// call fails CI (principle #6: pin the derived guarantee, don't trust a blacklist).
+//
+// The one accepted residual: the additive tools (remember/remember_batch) may,
+// on a content-hash duplicate, reinforce an existing engram's access metadata
+// (TouchAccess / #682). Append "strengthens with use," it just never overwrites
+// content/confidence/state/tags/lifecycle or deletes. That side effect is not
+// routed through refuseAppend by design; it is documented on auth.ModeAppend.
+func (e *Engine) refuseAppend(ctx context.Context) error {
+	if auth.AppendFromContext(ctx) {
+		return ErrAppendForbidden
+	}
+	return nil
+}
 
 // ClearVault removes all memories from a vault. The vault name remains registered.
 // It evicts all in-memory state (HNSW, FTS IDF cache, novelty fingerprints, coherence
