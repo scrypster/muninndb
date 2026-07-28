@@ -53,7 +53,7 @@ components:
         state:
           type: integer
           format: int32
-          description: "Legacy numeric lifecycle state. Prefer status."
+          description: "Legacy numeric lifecycle state. Zero is ambiguous between active and disabled. Check enabled first, then prefer status."
         status:
           type: string
           description: "Stable symbolic lifecycle state. Unknown future states are reported as unknown."

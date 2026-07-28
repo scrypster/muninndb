@@ -49,4 +49,17 @@ describe('mapWorkerResponse', () => {
         expect(mapWorkerResponse({})).toEqual([]);
         expect(mapWorkerResponse(null)).toEqual([]);
     });
+
+    it('gives stopped and disabled workers distinct badge styles', () => {
+        const [stopped] = mapWorkerResponse({
+            hebbian: { enabled: true, status: 'stopped', processed: 0 },
+        });
+        const [disabled] = mapWorkerResponse({
+            hebbian: { enabled: false, status: 'disabled', processed: 0 },
+        });
+
+        expect(stopped.badgeClass).toBe('badge-stopped');
+        expect(disabled.badgeClass).toBe('badge-disabled');
+        expect(stopped.badgeClass).not.toBe(disabled.badgeClass);
+    });
 });

@@ -304,27 +304,6 @@ type EngineWorkerStats struct {
 	Confidence WorkerStats `json:"confidence"`
 }
 
-// Normalize fills the additive symbolic fields when an EngineAPI
-// implementation returns legacy zero-value stats. This keeps the public REST
-// contract authoritative even for disabled/unconfigured worker slots.
-func (s EngineWorkerStats) Normalize() EngineWorkerStats {
-	normalize := func(stats WorkerStats) WorkerStats {
-		if stats.Status != "" {
-			return stats
-		}
-		if stats.Enabled {
-			stats.Status = stats.State.String()
-		} else {
-			stats.Status = "disabled"
-		}
-		return stats
-	}
-	s.Hebbian = normalize(s.Hebbian)
-	s.Contradict = normalize(s.Contradict)
-	s.Confidence = normalize(s.Confidence)
-	return s
-}
-
 // StartAll runs multiple workers via errgroup. Returns first error.
 func StartAll(ctx context.Context, workers []interface{ Run(context.Context) error }) error {
 	g, gctx := errgroup.WithContext(ctx)

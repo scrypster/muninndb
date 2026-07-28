@@ -932,7 +932,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkerStats(w http.ResponseWriter, r *http.Request) {
-	stats := s.engine.WorkerStats().Normalize()
+	stats := s.engine.WorkerStats()
 	s.sendJSON(w, http.StatusOK, stats)
 }
 

@@ -674,10 +674,6 @@ document.addEventListener('alpine:init', () => {
       return worker.statusLabel;
     },
 
-    workerStateBadge(worker) {
-      return worker.badgeClass;
-    },
-
     formatWorkerProcessed(n) {
       if (!n) return '—';
       if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';

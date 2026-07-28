@@ -22,3 +22,16 @@ func TestAdminWorkerHelpMatchesRuntimeArchitecture(t *testing.T) {
 		t.Fatal("admin help does not explain dormant worker wake-up behavior")
 	}
 }
+
+func TestWorkerBadgesDistinguishStoppedAndDisabled(t *testing.T) {
+	css, err := FS.ReadFile("static/css/components.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(css)
+	for _, class := range []string{".badge-stopped", ".badge-disabled"} {
+		if !strings.Contains(body, class) {
+			t.Errorf("worker status stylesheet missing %s", class)
+		}
+	}
+}

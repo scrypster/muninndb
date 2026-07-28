@@ -16,8 +16,8 @@ const PRESENTATION = {
     active:   { label: 'Active',   badgeClass: 'badge-active',  color: '#10b981' },
     idle:     { label: 'Idle',     badgeClass: 'badge-idle',    color: '#f59e0b' },
     dormant:  { label: 'Dormant',  badgeClass: 'badge-dormant', color: '#9ca3af' },
-    stopped:  { label: 'Stopped',  badgeClass: 'badge-dormant', color: '#ef4444' },
-    disabled: { label: 'Disabled', badgeClass: 'badge-dormant', color: '#64748b' },
+    stopped:  { label: 'Stopped',  badgeClass: 'badge-stopped',  color: '#ef4444' },
+    disabled: { label: 'Disabled', badgeClass: 'badge-disabled', color: '#64748b' },
     unknown:  { label: 'Unknown',  badgeClass: 'badge-idle',    color: '#f59e0b' },
 };
 
