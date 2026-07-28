@@ -2283,6 +2283,15 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			Tags:        scored.Engram.Tags,
 		}
 
+		// Supersession annotation from the supersedes-aware ranking phase (always-on
+		// when this result is superseded; empty otherwise). Zero ULID → omit.
+		if (scored.CurrentVersion != storage.ULID{}) {
+			items[i].CurrentVersion = scored.CurrentVersion.String()
+		}
+		if (scored.SupersededBy != storage.ULID{}) {
+			items[i].SupersededBy = scored.SupersededBy.String()
+		}
+
 		items[i].ScoreComponents = mbp.ScoreComponents{
 			SemanticSimilarity: float32(scored.Components.SemanticSimilarity),
 			FullTextRelevance:  float32(scored.Components.FullTextRelevance),

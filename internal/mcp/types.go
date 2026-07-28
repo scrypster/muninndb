@@ -87,18 +87,25 @@ type Memory struct {
 	Entities            []ReadEntity    `json:"entities,omitempty"`
 	EntityRelationships []ReadEntityRel `json:"entity_relationships,omitempty"`
 
-	// Populated only by muninn_recall when annotate=true.
+	// Populated by muninn_recall: supersession fields (superseded_by / current_version)
+	// are always set when the memory is superseded; the rest of the fields
+	// (stale, conflicts_with, last_verified) only when annotate=true.
 	Annotations *MemoryAnnotations `json:"annotations,omitempty"`
 }
 
-// MemoryAnnotations contains contextual metadata about a recalled memory,
-// populated only when muninn_recall is called with annotate=true.
+// MemoryAnnotations contains contextual metadata about a recalled memory.
+// SupersededBy / CurrentVersion are populated whenever the memory is superseded
+// (always-on, from supersedes-aware recall); the other fields are populated only
+// when muninn_recall is called with annotate=true.
 type MemoryAnnotations struct {
 	Stale         bool     `json:"stale"`
 	StaleDays     float64  `json:"stale_days"`
 	ConflictsWith []string `json:"conflicts_with,omitempty"`
-	SupersededBy  string   `json:"superseded_by,omitempty"`
-	LastVerified  string   `json:"last_verified,omitempty"` // RFC3339
+	// SupersededBy is the immediate superseder's ULID; CurrentVersion is the chain
+	// head — the fact to consult now. Both present when this memory is stale.
+	SupersededBy   string `json:"superseded_by,omitempty"`
+	CurrentVersion string `json:"current_version,omitempty"`
+	LastVerified   string `json:"last_verified,omitempty"` // RFC3339
 }
 
 // ReadEntity is a named entity linked to a specific engram.

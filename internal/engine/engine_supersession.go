@@ -87,9 +87,10 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 	// Snapshot original earned scores BEFORE any mutation, so Phase-2 demotion is
 	// against the earned score, not a running (already-promoted) head score.
 	type staleRef struct {
-		idx    int
-		earned float64
-		headID storage.ULID
+		idx       int
+		earned    float64
+		headID    storage.ULID
+		immediate storage.ULID
 	}
 	var stales []staleRef
 	headEngram := make(map[storage.ULID]*storage.Engram)
@@ -99,12 +100,12 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		head, superseded := e.resolveSupersessionHead(ctx, ws, results[i].Engram.ID)
+		head, immediate, superseded := e.resolveSupersessionHead(ctx, ws, results[i].Engram.ID)
 		if !superseded {
 			continue
 		}
 		earned := results[i].Score
-		stales = append(stales, staleRef{idx: i, earned: earned, headID: head.ID})
+		stales = append(stales, staleRef{idx: i, earned: earned, headID: head.ID, immediate: immediate})
 		headEngram[head.ID] = head
 		if earned > headFinal[head.ID] {
 			headFinal[head.ID] = earned
@@ -132,13 +133,17 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		}
 	}
 
-	// Phase 2b: demote each stale fact — but only ever downward.
+	// Phase 2b: demote each stale fact — but only ever downward — and record the
+	// supersession annotation (immediate superseder + chain head) so recall can
+	// surface "stale — current is X" without a second call or the annotate flag.
 	for _, s := range stales {
 		demoted := headFinal[s.headID] - supersessionEpsilon
 		if s.earned < demoted {
 			demoted = s.earned
 		}
 		results[s.idx].Score = demoted
+		results[s.idx].SupersededBy = s.immediate
+		results[s.idx].CurrentVersion = s.headID
 	}
 
 	// Deterministic order: stable sort with a ULID tiebreak so the manufactured
@@ -164,10 +169,9 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 // GetReverseAssociations(X) returns edges pointing TO X with the association's
 // TargetID repurposed to hold the SOURCE — so for a RelSupersedes edge it is the
 // engram that supersedes X (see annotation.go / storage/association.go).
-func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startID storage.ULID) (*storage.Engram, bool) {
+func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startID storage.ULID) (head *storage.Engram, immediate storage.ULID, superseded bool) {
 	cur := startID
 	visited := map[storage.ULID]bool{startID: true}
-	var head *storage.Engram
 
 	for depth := 0; depth < supersessionMaxDepth; depth++ {
 		rev, err := e.store.GetReverseAssociations(ctx, ws, cur, supersessionReverseScan)
@@ -190,11 +194,11 @@ func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startI
 		}
 		if found > 1 {
 			slog.Warn("recall: engram has multiple superseders, leaving un-demoted", "id", cur.String())
-			return nil, false
+			return nil, storage.ULID{}, false
 		}
 		if visited[next] {
 			slog.Warn("recall: supersedes cycle detected, leaving un-demoted", "at", next.String())
-			return nil, false
+			return nil, storage.ULID{}, false
 		}
 		visited[next] = true
 
@@ -205,12 +209,15 @@ func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startI
 		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
 			break // superseder gone → supersession voided; stop at cur
 		}
+		if head == nil {
+			immediate = next // first active superseder = the immediate one
+		}
 		head = eng
 		cur = next
 	}
 
 	if head == nil {
-		return nil, false // startID is not superseded by any active engram
+		return nil, storage.ULID{}, false // startID is not superseded by any active engram
 	}
-	return head, true
+	return head, immediate, true
 }

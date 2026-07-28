@@ -261,6 +261,13 @@ type ActivationItem struct {
 	// Tags carries the engram's stored tags (S4) so muninn_recall doesn't
 	// require a follow-up muninn_read just to see them.
 	Tags []string `msgpack:"tags,omitempty" json:"tags,omitempty"`
+	// SupersededBy / CurrentVersion are set by supersedes-aware recall when this
+	// result is superseded by a newer active engram: SupersededBy is the immediate
+	// superseder ULID, CurrentVersion the chain head (the fact to consult now).
+	// Always populated when the supersession exists — no annotate flag required —
+	// so any transport can say "this is stale, current is X". Empty otherwise.
+	SupersededBy   string `msgpack:"superseded_by,omitempty"   json:"superseded_by,omitempty"`
+	CurrentVersion string `msgpack:"current_version,omitempty" json:"current_version,omitempty"`
 }
 
 // ScoreComponents breaks down the activation score.

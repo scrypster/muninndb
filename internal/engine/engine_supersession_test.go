@@ -242,6 +242,49 @@ func TestApplySupersession_UnrelatedUnaffected(t *testing.T) {
 	}
 }
 
+// TestApplySupersession_AnnotatesFields checks the Increment-2 payload: a demoted
+// stale fact carries SupersededBy (immediate superseder) and CurrentVersion (chain
+// head). For a depth-1 supersession they are equal; in a chain they differ.
+func TestApplySupersession_AnnotatesFields(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	// Depth-1: old superseded directly by new.
+	oldID := h.write("old", "o")
+	newID := h.write("new", "n")
+	h.supersede(newID, oldID)
+
+	got := h.apply(h.scored(oldID, 1.15, newID, 0.90))
+	for _, r := range got {
+		if r.Engram.ID.String() == oldID {
+			if r.SupersededBy.String() != newID {
+				t.Errorf("depth-1 SupersededBy = %s, want %s", r.SupersededBy, newID)
+			}
+			if r.CurrentVersion.String() != newID {
+				t.Errorf("depth-1 CurrentVersion = %s, want %s", r.CurrentVersion, newID)
+			}
+		}
+	}
+
+	// Chain A<-B<-C: A's immediate superseder is B, its current version is C.
+	a := h.write("a", "a")
+	b := h.write("b", "b")
+	c := h.write("c", "c")
+	h.supersede(b, a)
+	h.supersede(c, b)
+	got2 := h.apply(h.scored(a, 1.15))
+	for _, r := range got2 {
+		if r.Engram.ID.String() == a {
+			if r.SupersededBy.String() != b {
+				t.Errorf("chain SupersededBy = %s, want immediate %s", r.SupersededBy, b)
+			}
+			if r.CurrentVersion.String() != c {
+				t.Errorf("chain CurrentVersion = %s, want head %s", r.CurrentVersion, c)
+			}
+		}
+	}
+}
+
 // TestApplySupersession_StaleNeverLeapfrogsUnrelated is the refute-pass bug #1
 // guard: a barely-matching stale near-duplicate must NEVER be lifted above a
 // genuinely-relevant unrelated result. Head H scores high on its own merits

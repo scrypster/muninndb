@@ -28,7 +28,19 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 	if len(previewContent) > contentPreviewLen {
 		previewContent = previewContent[:contentPreviewLen] + "..."
 	}
+	// Supersession annotation is ALWAYS surfaced (no annotate flag) so an agent is
+	// never handed a stale fact without being told the current one — the "was 8 in
+	// May, now 11" narration comes from the payload alone. The annotate=true path
+	// augments this same struct with staleness/conflicts/provenance.
+	var annotations *MemoryAnnotations
+	if item.SupersededBy != "" || item.CurrentVersion != "" {
+		annotations = &MemoryAnnotations{
+			SupersededBy:   item.SupersededBy,
+			CurrentVersion: item.CurrentVersion,
+		}
+	}
 	return Memory{
+		Annotations: annotations,
 		ID:          item.ID,
 		Concept:     item.Concept,
 		Content:     previewContent,

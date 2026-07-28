@@ -141,6 +141,15 @@ type ScoredEngram struct {
 	HopPath     []storage.ULID
 	HopConcepts []string
 	Dormant     bool
+
+	// SupersededBy / CurrentVersion are set by the engine's supersedes-aware
+	// recall phase (applySupersession) on a result that is superseded by a newer
+	// active engram. SupersededBy is the immediate superseder; CurrentVersion is
+	// the chain head (the fact to consult now). Both zero when not superseded.
+	// They let recall surface "this is stale — current is X" without the caller
+	// opting into annotations or making a second call.
+	SupersededBy   storage.ULID
+	CurrentVersion storage.ULID
 }
 
 // EngramFilter is a post-retrieval predicate applied as the final activation step.
