@@ -75,6 +75,13 @@ type PlasticityConfig struct {
 	// per-user scoped recall (e.g. a per-user tag in the recall context).
 	// nil = false (single-user; guidance unchanged).
 	MultiUser *bool `json:"multi_user,omitempty"`
+
+	// ReinforceOnRead controls whether Engine.Read (by-id) fires a
+	// fire-and-forget TouchAccess (#682) to bump AccessCount/LastAccess for
+	// the read engram. nil = true (default: reads reinforce). Recall/Activate
+	// NEVER reinforces regardless of this flag (COG-12) — this only gates the
+	// explicit-read-by-id channel.
+	ReinforceOnRead *bool `json:"reinforce_on_read,omitempty"`
 }
 
 // ResolvedPlasticity is the fully-merged configuration after applying preset defaults
@@ -129,6 +136,10 @@ type ResolvedPlasticity struct {
 	LTPWeightFloor float32 `json:"ltp_weight_floor"`
 	// ExcludeUntrusted: when true, ACTIVATE silently skips engrams with TrustUntrusted.
 	ExcludeUntrusted bool `json:"exclude_untrusted"`
+	// ReinforceOnRead: when true, Engine.Read (by-id) fires TouchAccess (#682)
+	// to bump AccessCount/LastAccess. Default true. Never applies to
+	// Recall/Activate (COG-12) — that path never reinforces.
+	ReinforceOnRead bool `json:"reinforce_on_read"`
 }
 
 type plasticityPreset struct {
@@ -339,6 +350,9 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		ScoringFusion:        p.ScoringFusion,
 		LTPThreshold:         p.LTPThreshold,
 		LTPWeightFloor:       p.LTPWeightFloor,
+		// ReinforceOnRead is not preset-varying: default true across every
+		// preset, overridable per-vault via cfg.ReinforceOnRead below.
+		ReinforceOnRead: true,
 	}
 
 	if cfg == nil {
@@ -507,6 +521,9 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 	}
 	if cfg.MultiUser != nil {
 		r.MultiUser = *cfg.MultiUser
+	}
+	if cfg.ReinforceOnRead != nil {
+		r.ReinforceOnRead = *cfg.ReinforceOnRead
 	}
 	// LTP overrides
 	if cfg.LTPThreshold != nil {

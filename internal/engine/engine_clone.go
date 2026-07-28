@@ -15,6 +15,9 @@ import (
 // Returns the job immediately (202 pattern). The clone runs in a background goroutine.
 // Returns an error if sourceVault does not exist or newName already exists.
 func (e *Engine) StartClone(ctx context.Context, sourceVault, newName string) (*vaultjob.Job, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	if !e.beginVaultOp() {
 		return nil, fmt.Errorf("engine is shutting down")
 	}
@@ -164,6 +167,9 @@ func (e *Engine) reindexVault(ctx context.Context, ws [8]byte, job *vaultjob.Job
 // If deleteSource is true, the source vault is deleted after the merge completes.
 // Returns an error if source and target are the same, or if either vault does not exist.
 func (e *Engine) StartMerge(ctx context.Context, sourceVault, targetVault string, deleteSource bool) (*vaultjob.Job, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	if !e.beginVaultOp() {
 		return nil, fmt.Errorf("engine is shutting down")
 	}

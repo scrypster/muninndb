@@ -11,6 +11,9 @@ import (
 // corrects its type. For state="merged", mergedInto must be the canonical name.
 // entityType may be empty — when empty the existing type is preserved.
 func (e *Engine) SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	if entityName == "" {
 		return fmt.Errorf("set_entity_state: entity_name is required")
 	}
@@ -54,6 +57,13 @@ type EntityStateOp struct {
 // Returns one error per operation (nil = success). Never returns a top-level error —
 // partial success is preserved. Respects context cancellation between items.
 func (e *Engine) SetEntityStateBatch(ctx context.Context, ops []EntityStateOp) []error {
+	if err := e.refuseAppend(ctx); err != nil {
+		out := make([]error, len(ops))
+		for i := range out {
+			out[i] = err
+		}
+		return out
+	}
 	errs := make([]error, len(ops))
 	for i, op := range ops {
 		if ctx.Err() != nil {

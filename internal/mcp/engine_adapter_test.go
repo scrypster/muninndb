@@ -333,3 +333,22 @@ func TestWhereLeftOffEntryFromEngramMapsType(t *testing.T) {
 		t.Errorf("zero-value Type = %q, want %q", plain.Type, "fact")
 	}
 }
+
+// TestWhereLeftOff_ReturnsTags verifies the muninn_where_left_off projection
+// carries the stored tags — S4. whereLeftOffEntryFromEngram must map
+// eng.Tags onto WhereLeftOffEntry.Tags so callers can see them without a
+// follow-up muninn_read.
+func TestWhereLeftOff_ReturnsTags(t *testing.T) {
+	eng := &storage.Engram{
+		ID:      storage.ULID{9},
+		Concept: "tagged entry",
+		Tags:    []string{"alpha", "beta"},
+	}
+	entry := whereLeftOffEntryFromEngram(eng)
+	if len(entry.Tags) != 2 {
+		t.Fatalf("Tags len = %d, want 2 (got %v)", len(entry.Tags), entry.Tags)
+	}
+	if entry.Tags[0] != "alpha" || entry.Tags[1] != "beta" {
+		t.Errorf("Tags = %v, want [alpha beta]", entry.Tags)
+	}
+}

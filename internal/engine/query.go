@@ -87,6 +87,9 @@ func (e *Engine) GetContradictions(ctx context.Context, vault string) ([][2]stor
 // ResolveContradiction removes the contradiction marker for the pair (idA, idB)
 // and updates the vault coherence counters.
 func (e *Engine) ResolveContradiction(ctx context.Context, vault, idA, idB string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	a, err := storage.ParseULID(idA)
 	if err != nil {
 		return fmt.Errorf("parse id_a: %w", err)

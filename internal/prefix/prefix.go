@@ -10,7 +10,7 @@ package prefix
 
 // Source-of-truth prefix bytes. Storage unchanged; auth RELOCATED 0x11–0x14 → 0x42–0x45.
 const (
-	// Storage (0x01–0x2A)
+	// Storage (0x01–0x2C)
 	Engram             byte = 0x01
 	Meta               byte = 0x02
 	AssocFwd           byte = 0x03
@@ -53,6 +53,14 @@ const (
 	ContentHash        byte = 0x28
 	RecallEvent        byte = 0x29
 	Lease              byte = 0x2A
+	// RawTagRange (0x2C) — ordered raw-tag secondary index (S1). Unlike
+	// TagIndex (0x0C, keyed by Hash(tag) with no range scans), RawTagRange keys
+	// on Hash(tagKey) with the raw tag VALUE bytes sorted after it, enabling
+	// bounded range scans for key:value tag conventions (e.g. "due:2026-07-27").
+	// (0x2B is intentionally left free for the evolve-repair watermark in #681,
+	// which was allocated 0x2B independently; S1 took 0x2C to avoid the collision.)
+	// See docs/internals/keyspace-registry.md for the exact key layout.
+	RawTagRange byte = 0x2C
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
 	CapabilityVaultIdx byte = 0x41
@@ -130,6 +138,7 @@ var registry = []Entry{
 	{ContentHash, "storage", "ContentHash", "vault-scoped-data"},
 	{RecallEvent, "storage", "RecallEvent", "vault-scoped-data"},
 	{Lease, "storage", "Lease", "lease"},
+	{RawTagRange, "storage", "RawTagRange", "vault-scoped-data"},
 	{Capability, "capability", "Capability", "capability"},
 	{CapabilityVaultIdx, "capability", "CapabilityVaultIdx", "capability"},
 	{AdminUser, "auth", "AdminUser", "auth"},

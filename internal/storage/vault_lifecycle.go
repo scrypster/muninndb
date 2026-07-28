@@ -30,6 +30,7 @@ var clearVaultDataPrefixes = []byte{
 	prefix.ArchiveAssoc, prefix.RelEntityIndex, prefix.DreamState, prefix.ContentHash,
 	prefix.RecallEvent, // recall events hold raw query text; must not outlive a cleared vault
 	prefix.Lease,
+	prefix.RawTagRange, // S1 ordered raw-tag index; must not resurrect on vault-name reuse
 }
 
 // ClearVault deletes all data keys for a vault using Pebble range tombstones.
@@ -46,7 +47,7 @@ var clearVaultDataPrefixes = []byte{
 //  4. Evict all in-memory caches (L1, assocCache, metaCache, recentActiveCache).
 //
 // Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17,
-// 0x20–0x22, 0x24–0x2A
+// 0x20–0x22, 0x24–0x2A, 0x2C
 // Prefixes NOT cleared (global or name keys):
 //   - 0x0E vault meta key (preserved by Clear, deleted by DeleteVaultNameOnly)
 //   - 0x0F name index    (global by name hash, deleted by DeleteVaultNameOnly)

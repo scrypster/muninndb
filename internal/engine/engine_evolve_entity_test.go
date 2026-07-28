@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -68,7 +69,7 @@ func TestEvolve_CarriesEntityLinks(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "PostgreSQL 17 runs payments now", "version bump", nil, "", nil)
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "PostgreSQL 17 runs payments now", "version bump", nil, "")
 	require.NoError(t, err)
 
 	ws := eng.store.ResolveVaultPrefix("test")
@@ -129,7 +130,7 @@ func TestEvolve_MentionCountConservation(t *testing.T) {
 	require.Equal(t, 1, coOccurrenceCount(t, eng, ws, "Ada", "Grace"),
 		"write funds one co-occurrence")
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "Ada still pairs with Grace", "refresh", nil, "", nil)
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "Ada still pairs with Grace", "refresh", nil, "")
 	require.NoError(t, err)
 
 	rec, err = eng.store.GetEntityRecord(ctx, "ada")
@@ -175,7 +176,7 @@ func TestEvolve_CarriesRelationshipRecords(t *testing.T) {
 	require.NotEmpty(t, engramRelationships(t, eng, ws, oldULID),
 		"precondition: inline entity pair produces a co_occurs_with record")
 
-	newID, err := eng.Evolve(ctx, "test", resp.ID, "A still talks to B", "refresh", nil, "", nil)
+	newID, err := eng.Evolve(ctx, "test", resp.ID, "A still talks to B", "refresh", nil, "")
 	require.NoError(t, err)
 
 	recs := engramRelationships(t, eng, ws, newID)
@@ -208,14 +209,14 @@ func TestEvolve_InlineEntitiesReplaceCarry(t *testing.T) {
 	ws := eng.store.ResolveVaultPrefix("test")
 
 	// Control arm: no inline entities — the carry must be live.
-	controlID, err := eng.Evolve(ctx, "test", write("Alice owns the deploy"), "Alice still owns the deploy", "refresh", nil, "", nil)
+	controlID, err := eng.EvolveAt(ctx, "test", write("Alice owns the deploy"), "Alice still owns the deploy", "refresh", nil, "", nil, time.Time{})
 	require.NoError(t, err)
 	require.Equal(t, []string{"Alice"}, engramEntities(t, eng, ws, controlID),
 		"control: without inline entities the predecessor's links carry forward")
 
 	// Replace arm: inline entities suppress that live carry.
-	newID, err := eng.Evolve(ctx, "test", write("Alice owns the other deploy"), "Bob owns the deploy now", "handover", nil, "",
-		[]mbp.InlineEntity{{Name: "Bob", Type: "person"}})
+	newID, err := eng.EvolveAt(ctx, "test", write("Alice owns the other deploy"), "Bob owns the deploy now", "handover", nil, "",
+		[]mbp.InlineEntity{{Name: "Bob", Type: "person"}}, time.Time{})
 	require.NoError(t, err)
 
 	names := engramEntities(t, eng, ws, newID)

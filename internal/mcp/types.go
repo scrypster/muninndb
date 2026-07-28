@@ -70,6 +70,7 @@ type Memory struct {
 	Summary     string    `json:"summary,omitempty"`
 	Score       float64   `json:"score,omitempty"`
 	VectorScore float64   `json:"vector_score,omitempty"`
+	EntityBoost float64   `json:"entity_boost,omitempty"`
 	Confidence  float32   `json:"confidence"`
 	Why         string    `json:"why,omitempty"`
 	Tags        []string  `json:"tags,omitempty"`
@@ -83,22 +84,40 @@ type Memory struct {
 	SourceType  string    `json:"source_type,omitempty"`
 	Trust       string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
 
+	// Valid-time (application-time) axis, half-open [valid_from, valid_until).
+	// Distinct from created_at (transaction time). muninn_read always sets
+	// valid_from and is_current; recall sets valid_from only when it diverges
+	// from created_at. valid_until appears only when the window is closed;
+	// expired marks a fact whose window closed at or before now (only
+	// reachable in recall results under include_invalid=true).
+	ValidFrom  *time.Time `json:"valid_from,omitempty"`
+	ValidUntil *time.Time `json:"valid_until,omitempty"`
+	IsCurrent  *bool      `json:"is_current,omitempty"`
+	Expired    bool       `json:"expired,omitempty"`
+
 	// Populated only by muninn_read (omitted from recall responses).
 	Entities            []ReadEntity    `json:"entities,omitempty"`
 	EntityRelationships []ReadEntityRel `json:"entity_relationships,omitempty"`
 
-	// Populated only by muninn_recall when annotate=true.
+	// Populated by muninn_recall: supersession fields (superseded_by / current_version)
+	// are always set when the memory is superseded; the rest of the fields
+	// (stale, conflicts_with, last_verified) only when annotate=true.
 	Annotations *MemoryAnnotations `json:"annotations,omitempty"`
 }
 
-// MemoryAnnotations contains contextual metadata about a recalled memory,
-// populated only when muninn_recall is called with annotate=true.
+// MemoryAnnotations contains contextual metadata about a recalled memory.
+// SupersededBy / CurrentVersion are populated whenever the memory is superseded
+// (always-on, from supersedes-aware recall); the other fields are populated only
+// when muninn_recall is called with annotate=true.
 type MemoryAnnotations struct {
 	Stale         bool     `json:"stale"`
 	StaleDays     float64  `json:"stale_days"`
 	ConflictsWith []string `json:"conflicts_with,omitempty"`
-	SupersededBy  string   `json:"superseded_by,omitempty"`
-	LastVerified  string   `json:"last_verified,omitempty"` // RFC3339
+	// SupersededBy is the immediate superseder's ULID; CurrentVersion is the chain
+	// head — the fact to consult now. Both present when this memory is stale.
+	SupersededBy   string `json:"superseded_by,omitempty"`
+	CurrentVersion string `json:"current_version,omitempty"`
+	LastVerified   string `json:"last_verified,omitempty"` // RFC3339
 }
 
 // ReadEntity is a named entity linked to a specific engram.
@@ -369,6 +388,7 @@ type WhereLeftOffEntry struct {
 	State      string    `json:"state"`
 	Type       string    `json:"type"`                 // canonical MemoryType label; always present
 	TypeLabel  string    `json:"type_label,omitempty"` // writer-supplied free-form label
+	Tags       []string  `json:"tags,omitempty"`
 }
 
 // EntityClusterResult is one entity co-occurrence pair returned by muninn_entity_clusters.

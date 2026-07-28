@@ -78,6 +78,71 @@ type Engram struct {
 	TypeLabel      string     // free-form label, e.g. "architectural_decision", "coding_pattern"
 	Classification uint16     // concept-cluster ID
 	Trust          TrustLevel // provenance confidence label (OffsetTrust in ERF)
+
+	// Valid-time (application-time) axis — half-open [ValidFrom, ValidUntil).
+	// ValidFrom zero means "valid from CreatedAt" (the decode default for every
+	// legacy record). ValidUntil zero means open / "still current". Invalidation
+	// is always a ValidUntil stamp, never a delete (COG-19).
+	ValidFrom  time.Time
+	ValidUntil time.Time
+	Importance float32 // caller-asserted importance, 0 = unset
+}
+
+// EffectiveValidFrom returns ValidFrom, falling back to CreatedAt when unset —
+// the "valid from creation" legacy default.
+func (e *Engram) EffectiveValidFrom() time.Time {
+	if e.ValidFrom.IsZero() {
+		return e.CreatedAt
+	}
+	return e.ValidFrom
+}
+
+// ValidAt reports whether the engram's validity window covers t, using
+// half-open [ValidFrom, ValidUntil) semantics. An open ValidUntil (zero)
+// extends the window indefinitely.
+func (e *Engram) ValidAt(t time.Time) bool {
+	return validAt(e.EffectiveValidFrom(), e.ValidUntil, t)
+}
+
+// IsExpired reports whether the engram's validity window is CLOSED at or
+// before now (ValidUntil != 0 && ValidUntil <= now). A future ValidFrom does
+// NOT make an engram expired — default recall hides only expired facts, never
+// just-stored future ones.
+func (e *Engram) IsExpired(now time.Time) bool {
+	return isExpired(e.ValidUntil, now)
+}
+
+// EffectiveValidFrom returns ValidFrom, falling back to CreatedAt when unset.
+func (m *EngramMeta) EffectiveValidFrom() time.Time {
+	if m.ValidFrom.IsZero() {
+		return m.CreatedAt
+	}
+	return m.ValidFrom
+}
+
+// ValidAt reports whether the metadata's validity window covers t
+// (half-open [ValidFrom, ValidUntil)).
+func (m *EngramMeta) ValidAt(t time.Time) bool {
+	return validAt(m.EffectiveValidFrom(), m.ValidUntil, t)
+}
+
+// IsExpired reports whether the validity window is closed at or before now.
+func (m *EngramMeta) IsExpired(now time.Time) bool {
+	return isExpired(m.ValidUntil, now)
+}
+
+// validAt is the single shared validity predicate: from <= t < until,
+// with a zero until meaning open.
+func validAt(from, until, t time.Time) bool {
+	if !from.IsZero() && t.Before(from) {
+		return false
+	}
+	return until.IsZero() || t.Before(until)
+}
+
+// isExpired is the single shared expiry predicate: until != 0 && until <= now.
+func isExpired(until, now time.Time) bool {
+	return !until.IsZero() && !until.After(now)
 }
 
 // EngramMeta is the 100-byte fixed metadata section.
@@ -96,6 +161,9 @@ type EngramMeta struct {
 	AssocCount  uint16
 	EmbedDim    EmbedDimension
 	MemoryType  MemoryType
+	ValidFrom   time.Time // decode default: CreatedAt when the raw field is zero
+	ValidUntil  time.Time // zero = open / "current"
+	Importance  float32   // 0 = unset
 }
 
 // Association represents a directed, weighted link between two engrams.

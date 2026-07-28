@@ -26,6 +26,27 @@ import (
 // Memories not accessed in more than this many days are flagged stale=true.
 const annotationStaleDays = 30.0
 
+// parseValidityArgs parses the optional valid_from / valid_until args (RFC3339)
+// into a WriteRequest. Returns a non-empty error message on a malformed value.
+// Shared by muninn_remember and muninn_remember_batch.
+func parseValidityArgs(args map[string]any, req *mbp.WriteRequest) string {
+	if vfStr, ok := args["valid_from"].(string); ok && vfStr != "" {
+		t, err := time.Parse(time.RFC3339, vfStr)
+		if err != nil {
+			return "invalid 'valid_from': must be ISO 8601 (e.g. 2024-01-15T00:00:00Z)"
+		}
+		req.ValidFrom = &t
+	}
+	if vuStr, ok := args["valid_until"].(string); ok && vuStr != "" {
+		t, err := time.Parse(time.RFC3339, vuStr)
+		if err != nil {
+			return "invalid 'valid_until': must be ISO 8601 (e.g. 2025-06-30T00:00:00Z)"
+		}
+		req.ValidUntil = &t
+	}
+	return ""
+}
+
 // parseEmbedding extracts and validates an optional "embedding" field from args.
 // Returns (nil, "") when the field is absent. Returns (nil, errMsg) on validation
 // failure. The caller is responsible for the vault dimension check when needed.
@@ -109,7 +130,14 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		}
 		req.CreatedAt = &t
 	}
+	if errMsg := parseValidityArgs(args, req); errMsg != "" {
+		sendError(w, id, -32602, errMsg)
+		return
+	}
 	applyTypeArgs(args, req)
+	if t, ok := args["trust"].(string); ok {
+		req.Trust = t
+	}
 	malformed := applyEnrichmentArgs(args, req)
 	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
 		sendError(w, id, -32602, errMsg)
@@ -204,7 +232,14 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			}
 			req.CreatedAt = &t
 		}
+		if errMsg := parseValidityArgs(m, req); errMsg != "" {
+			sendError(w, id, -32602, fmt.Sprintf("memories[%d]: %s", i, errMsg))
+			return
+		}
 		applyTypeArgs(m, req)
+		if t, ok := m["trust"].(string); ok {
+			req.Trust = t
+		}
 		malformed := applyEnrichmentArgs(m, req)
 		if emb, errMsg := parseEmbeddingArg(m); errMsg != "" {
 			sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].%s", i, strings.TrimPrefix(errMsg, "invalid params: ")))
@@ -311,12 +346,19 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		modePreset = preset
 	}
 
+	readOnly, roErrMsg := resolveReadOnly(ctx, args)
+	if roErrMsg != "" {
+		sendError(w, id, -32001, roErrMsg)
+		return
+	}
+
 	req := &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    contexts,
 		Threshold:  threshold,
 		MaxResults: limit,
 		Profile:    profile,
+		ReadOnly:   readOnly,
 	}
 
 	// Ownership-lease work-queue visibility (#548).
@@ -375,6 +417,21 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		req.Filters = append(req.Filters, mbp.Filter{Field: "created_before", Op: "<", Value: t})
 	}
 
+	// Valid-time axis: as_of ("what was true at T") and include_invalid
+	// ("show history"). Orthogonal to since/before above, which filter on the
+	// TRANSACTION axis (CreatedAt).
+	if asOfStr, ok := args["as_of"].(string); ok && asOfStr != "" {
+		t, err := time.Parse(time.RFC3339, asOfStr)
+		if err != nil {
+			sendError(w, id, -32602, "invalid 'as_of': must be ISO 8601 (e.g. 2026-05-01T00:00:00Z)")
+			return
+		}
+		req.AsOf = &t
+	}
+	if includeInvalid, ok := args["include_invalid"].(bool); ok {
+		req.IncludeInvalid = includeInvalid
+	}
+
 	// Tag filters: tags_all (AND), tags_any (OR), tag_filter (prefix value range).
 	parseStringArrayArg := func(v any) []string {
 		arr, ok := v.([]any)
@@ -395,7 +452,17 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	if tags := parseStringArrayArg(args["tags_any"]); len(tags) > 0 {
 		req.Filters = append(req.Filters, mbp.Filter{Field: "tags_any", Op: "any", Value: tags})
 	}
-	if tf, ok := args["tag_filter"].(map[string]any); ok {
+	if raw, present := args["tag_filter"]; present {
+		// Validate on presence — do NOT silently drop a malformed tag_filter. A
+		// caller who passes a string (a natural mistake: tags_all/tags_any ARE
+		// string arrays) or any non-object must get an error, never an unfiltered
+		// recall that looks filtered (principle #1). tag_filter is an object:
+		// {"prefix":"due:","lte":"2026-06-17"}.
+		tf, ok := raw.(map[string]any)
+		if !ok {
+			sendError(w, id, -32602, `invalid 'tag_filter': must be an object like {"prefix":"due:","lte":"2026-06-17"} (got a non-object)`)
+			return
+		}
 		prefix, _ := tf["prefix"].(string)
 		if prefix == "" {
 			sendError(w, id, -32602, "invalid 'tag_filter': 'prefix' is required")
@@ -447,7 +514,10 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 				slog.Warn("handleRecall: GetAnnotations failed", "id", item.ID, "err", err)
 				continue
 			}
-			memories[i].Annotations = buildAnnotations(&item, ann)
+			// Augment (not replace) the always-on supersession annotation that
+			// activationToMemory already attached, so superseded_by/current_version
+			// from the ranking phase are preserved.
+			augmentAnnotations(&memories[i], &item, ann)
 		}
 	}
 
@@ -471,7 +541,13 @@ func (s *MCPServer) handleRead(ctx context.Context, w http.ResponseWriter, id js
 		sendError(w, id, -32602, "invalid params: 'id' is required")
 		return
 	}
-	resp, err := s.engine.Read(ctx, &mbp.ReadRequest{ID: engramID, Vault: vault})
+	readOnly, roErrMsg := resolveReadOnly(ctx, args)
+	if roErrMsg != "" {
+		sendError(w, id, -32001, roErrMsg)
+		return
+	}
+
+	resp, err := s.engine.Read(ctx, &mbp.ReadRequest{ID: engramID, Vault: vault, ReadOnly: readOnly})
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -485,9 +561,32 @@ func (s *MCPServer) handleForget(ctx context.Context, w http.ResponseWriter, id 
 		sendError(w, id, -32602, "invalid params: 'id' is required")
 		return
 	}
-	_, err := s.engine.Forget(ctx, &mbp.ForgetRequest{ID: engramID, Hard: false, Vault: vault})
+	req := &mbp.ForgetRequest{ID: engramID, Hard: false, Vault: vault}
+
+	// not_true_since: invalidate on the valid-time axis (stamp ValidUntil)
+	// instead of soft-deleting. The memory stays recoverable via as_of /
+	// include_invalid; default recall stops returning it (COG-19).
+	if ntsStr, ok := args["not_true_since"].(string); ok && ntsStr != "" {
+		t, err := time.Parse(time.RFC3339, ntsStr)
+		if err != nil {
+			sendError(w, id, -32602, "invalid 'not_true_since': must be ISO 8601 (e.g. 2026-07-01T00:00:00Z)")
+			return
+		}
+		req.NotTrueSince = &t
+	}
+
+	_, err := s.engine.Forget(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if req.NotTrueSince != nil {
+		sendResult(w, id, textContent(mustJSON(map[string]any{
+			"ok":          true,
+			"invalidated": true,
+			"valid_until": req.NotTrueSince.UTC().Format(time.RFC3339),
+			"hint":        "Memory invalidated on the valid-time axis (not deleted). It stays retrievable via as_of or include_invalid; default recall no longer returns it.",
+		})))
 		return
 	}
 
@@ -614,7 +713,19 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 			evolveEntities = append(evolveEntities, mbp.InlineEntity{Name: name, Type: typ})
 		}
 	}
-	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb, evolveConcept, evolveEntities)
+	// effective_at: valid-time boundary between predecessor and successor
+	// (default now). The old version's ValidUntil and the new version's
+	// ValidFrom both become this moment.
+	var effectiveAt time.Time
+	if eaStr, ok := args["effective_at"].(string); ok && eaStr != "" {
+		t, err := time.Parse(time.RFC3339, eaStr)
+		if err != nil {
+			sendError(w, id, -32602, "invalid 'effective_at': must be ISO 8601 (e.g. 2026-06-15T12:00:00Z)")
+			return
+		}
+		effectiveAt = t
+	}
+	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb, evolveConcept, evolveEntities, effectiveAt)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -887,7 +998,25 @@ func (s *MCPServer) handleWhereLeftOff(ctx context.Context, w http.ResponseWrite
 		limit = 50
 	}
 
-	entries, err := s.engine.WhereLeftOff(ctx, vault, limit)
+	// S3: WhereLeftOff has no write side effects regardless of read_only (it
+	// never reinforces — see engine_where_left_off.go), so there is nothing
+	// to set on the downstream call. Still validate/reject for API
+	// consistency with muninn_recall/muninn_read (RFC S3 requires all three).
+	if _, roErrMsg := resolveReadOnly(ctx, args); roErrMsg != "" {
+		sendError(w, id, -32001, roErrMsg)
+		return
+	}
+
+	var excludeTypeLabels []string
+	if raw, ok := args["exclude_type_labels"].([]any); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				excludeTypeLabels = append(excludeTypeLabels, s)
+			}
+		}
+	}
+
+	entries, err := s.engine.WhereLeftOff(ctx, vault, limit, excludeTypeLabels)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -1891,18 +2020,26 @@ func (s *MCPServer) handleEntityTimeline(ctx context.Context, w http.ResponseWri
 // buildAnnotations constructs a MemoryAnnotations from engine annotation data
 // and the activation item. Staleness is derived from item.LastAccess (nanoseconds
 // Unix timestamp).
-func buildAnnotations(item *mbp.ActivationItem, data *engine.AnnotationData) *MemoryAnnotations {
+// augmentAnnotations fills the annotate=true fields (staleness, conflicts,
+// provenance) onto a Memory, preserving any always-on supersession annotation
+// (superseded_by/current_version) that the ranking phase already attached. The
+// supersession fields are authoritative from the ranking; data.SupersededBy from
+// the reverse-edge lookup only fills in when the ranking didn't set it.
+func augmentAnnotations(m *Memory, item *mbp.ActivationItem, data *engine.AnnotationData) {
+	if m.Annotations == nil {
+		m.Annotations = &MemoryAnnotations{}
+	}
+	ann := m.Annotations
 	staleDays := math.Round(time.Since(time.Unix(0, item.LastAccess)).Hours()/24.0*10) / 10
-	ann := &MemoryAnnotations{
-		Stale:         staleDays > annotationStaleDays,
-		StaleDays:     staleDays,
-		ConflictsWith: data.ConflictsWith,
-		SupersededBy:  data.SupersededBy,
+	ann.Stale = staleDays > annotationStaleDays
+	ann.StaleDays = staleDays
+	ann.ConflictsWith = data.ConflictsWith
+	if ann.SupersededBy == "" {
+		ann.SupersededBy = data.SupersededBy
 	}
 	if data.LastVerified != nil {
 		ann.LastVerified = data.LastVerified.UTC().Format(time.RFC3339)
 	}
-	return ann
 }
 
 func (s *MCPServer) handleSetTrust(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {

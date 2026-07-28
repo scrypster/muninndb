@@ -60,7 +60,7 @@ func (f *fakeEngine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatR
 func (f *fakeEngine) GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error) {
 	return nil, nil
 }
-func (f *fakeEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity) (*WriteResult, error) {
+func (f *fakeEngine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, effectiveAt time.Time) (*WriteResult, error) {
 	return &WriteResult{ID: "new-id"}, nil
 }
 func (f *fakeEngine) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
@@ -126,7 +126,7 @@ func (f *fakeEngine) CountChildren(_ context.Context, vault, engramID string) (i
 func (f *fakeEngine) GetEnrichmentMode(_ context.Context) string {
 	return "none"
 }
-func (f *fakeEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([]WhereLeftOffEntry, error) {
+func (f *fakeEngine) WhereLeftOff(_ context.Context, _ string, _ int, _ []string) ([]WhereLeftOffEntry, error) {
 	return []WhereLeftOffEntry{}, nil
 }
 func (f *fakeEngine) FindByEntity(_ context.Context, _, _ string, _ int) (*engine.FindByEntityResult, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
 )
@@ -93,6 +94,11 @@ func (e *Engine) entityEngrams(ctx context.Context, ws [8]byte, entityName strin
 			return nil // skip missing/deleted
 		}
 		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
+			return nil
+		}
+		// Drop valid-time-invalidated (but still ACTIVE) facts, so "everything about
+		// X" doesn't surface something the user marked no-longer-true (COG-19).
+		if eng.IsExpired(time.Now()) {
 			return nil
 		}
 		results = append(results, eng)

@@ -184,6 +184,9 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 				AssocCount:  uint16(len(eng.Associations)),
 				EmbedDim:    eng.EmbedDim,
 				MemoryType:  eng.MemoryType,
+				ValidFrom:   eng.ValidFrom,
+				ValidUntil:  eng.ValidUntil,
+				Importance:  eng.Importance,
 			}
 			ps.metaCache.Add([16]byte(id), meta)
 			result[i] = meta
@@ -222,6 +225,9 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 			AssocCount:  erfMeta.AssocCount,
 			EmbedDim:    EmbedDimension(erfMeta.EmbedDim),
 			MemoryType:  MemoryType(erfMeta.MemoryType),
+			ValidFrom:   erfMeta.ValidFrom,
+			ValidUntil:  erfMeta.ValidUntil,
+			Importance:  erfMeta.Importance,
 		}
 		// Populate metaCache so subsequent calls for this engram skip Pebble.
 		ps.metaCache.Add([16]byte(id), meta)
@@ -422,6 +428,62 @@ func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULI
 	return nil
 }
 
+// StampValidUntil sets (or clears, with the zero time) the ValidUntil field of
+// an engram in place — the single invalidation primitive (COG-19: invalidation
+// is always a stamp, never a delete). When onlyIfOpen is true, an
+// already-closed window is left untouched and (false, nil) is returned —
+// used by the RelSupersedes link stamp, which must not destroy an earlier
+// window end. Patches the raw 0x01 bytes (no full re-encode), mirroring
+// UpdateTrust.
+func (ps *PebbleStore) StampValidUntil(ctx context.Context, wsPrefix [8]byte, id ULID, until time.Time, onlyIfOpen bool) (bool, error) {
+	engramKey := keys.EngramKey(wsPrefix, [16]byte(id))
+	rawBytes, err := Get(ps.db, engramKey)
+	if err != nil {
+		return false, fmt.Errorf("get engram raw: %w", err)
+	}
+	if rawBytes == nil {
+		return false, fmt.Errorf("engram %w", ErrNotFound)
+	}
+
+	if onlyIfOpen && !erf.GetValidUntil(rawBytes).IsZero() {
+		return false, nil
+	}
+
+	if err := erf.PatchValidUntil(rawBytes, until); err != nil {
+		return false, fmt.Errorf("patch valid_until: %w", err)
+	}
+
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+
+	batch.Set(engramKey, rawBytes, nil)
+	metaKey := keys.MetaKey(wsPrefix, [16]byte(id))
+	batch.Set(metaKey, erf.MetaKeySlice(rawBytes), nil)
+
+	// Invalidate L1 and metadata caches before commit — cached structs are stale.
+	ps.cache.Delete(wsPrefix, id)
+	ps.metaCache.Remove([16]byte(id))
+
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return false, fmt.Errorf("commit batch: %w", err)
+	}
+	ps.replicateBatch(batch)
+
+	note := "cleared"
+	if !until.IsZero() {
+		note = until.UTC().Format(time.RFC3339Nano)
+	}
+	ps.provWork.Submit(wsPrefix, id, provenance.ProvenanceEntry{
+		Timestamp: time.Now(),
+		Source:    provenance.SourceHuman,
+		AgentID:   "system:valid-until",
+		Operation: "stamp-valid-until",
+		Note:      note,
+	})
+
+	return true, nil
+}
+
 // DeleteEngram performs a hard delete: removes the engram, all association keys,
 // and all secondary indexes. Reads the engram first to gather index data.
 func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id ULID) error {
@@ -473,6 +535,9 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	batch.Delete(keys.RelevanceBucketKey(wsPrefix, eng.Relevance, [16]byte(id)), nil)
 	for _, tag := range eng.Tags {
 		batch.Delete(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(id)), nil)
+	}
+	for _, tag := range eng.Tags {
+		DeleteRawTagIndexEntry(batch, wsPrefix, tag, [16]byte(id))
 	}
 
 	// Association forward/reverse keys — scan live Pebble keys rather than
@@ -640,7 +705,24 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 
 // SoftDelete sets state to StateSoftDeleted and updates the record.
 // It also transitions the 0x0B state secondary index from the old state to StateSoftDeleted.
+//
+// Takes the per-engram stripe lock (casLocks.For(id) — the SAME striped mutex
+// CompareAndSet/DeleteEngram/UpdateConfidence/TouchAccess use) across the
+// whole read-mutate-write. Previously this ran unlocked: GetEngram returns
+// the L1 cache's live pointer (DomainCache.Get does not clone), and this
+// method mutated eng.State/eng.UpdatedAt on that shared pointer in place with
+// no synchronization — any concurrent reader of the same cached engram (e.g.
+// TouchAccess's #682 reinforcement, or another SoftDelete/UpdateConfidence
+// call) raced this write under -race. Mirrors UpdateConfidence's locking
+// shape exactly, including dropping the cache entry before the authoritative
+// GetEngram read so a racing DeleteEngram's stale cache entry can't be reused.
 func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID) error {
+	mu := ps.casLocks.For(id[:])
+	mu.Lock()
+	defer mu.Unlock()
+
+	ps.cache.Delete(wsPrefix, id)
+
 	// Read engram
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
@@ -730,6 +812,16 @@ func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID
 	// Write tag index entries for all tags (idempotent for existing tags).
 	for _, tag := range tags {
 		batch.Set(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(id)), []byte{}, nil)
+	}
+
+	// Write raw-tag-range index entries for all tags (idempotent for existing
+	// tags; like the 0x0C index above, stale entries for tags that are no
+	// longer present are left as orphans — safe, since phase-6's
+	// passesMetaFilter re-checks the real tag on the engram).
+	for _, tag := range tags {
+		if err := WriteRawTagIndexEntry(batch, wsPrefix, tag, [16]byte(id)); err != nil {
+			return err
+		}
 	}
 
 	// Invalidate L1 cache BEFORE commit — cached struct has stale tags.
@@ -852,6 +944,53 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	ps.replicateBatch(batch)
 
 	return nil
+}
+
+// TouchAccess bumps AccessCount (+1) and LastAccess (=now) for an engram,
+// leaving every other metadata field untouched. It is the single reinforcement
+// primitive for #682: RecordAccess, the content-hash dedup "reinforce" path,
+// and the Read/feedback wiring all funnel through this method instead of doing
+// their own unlocked GetEngram→UpdateMetadata round trip.
+//
+// Locking mirrors UpdateConfidence exactly (engram.go:799): the per-engram
+// stripe lock (casLocks.For(id) — the SAME striped mutex CompareAndSet,
+// DeleteEngram, and UpdateConfidence use) is held across the whole read-then-
+// write, and the L1 cache entry is dropped before the authoritative GetEngram
+// read, so this serializes with a same-id CompareAndSet/DeleteEngram instead of
+// racing it (STO-2). All other fields (State, Confidence, Relevance,
+// Stability, UpdatedAt) are read fresh under the lock and passed through to
+// UpdateMetadata unchanged, so the 0x0B state index stays consistent with
+// whatever state a concurrent CAS just committed (STO-3) — TouchAccess never
+// has a stale view of State to accidentally index against.
+//
+// Trust and Confidence are never part of the write: reinforcement moves only
+// AccessCount/LastAccess, by construction — access frequency is not evidence of
+// correctness, so it must not move Confidence (cf. COG-10: co-activation never
+// updates confidence).
+func (ps *PebbleStore) TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULID) error {
+	mu := ps.casLocks.For(id[:])
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Drop any stale cache entry left by a racing DeleteEngram between its
+	// batch.Commit and its post-commit cache.Delete (mirrors UpdateConfidence).
+	ps.cache.Delete(wsPrefix, id)
+
+	eng, err := ps.GetEngram(ctx, wsPrefix, id)
+	if err != nil {
+		return err
+	}
+
+	meta := &EngramMeta{
+		State:       eng.State,
+		Confidence:  eng.Confidence,
+		Relevance:   eng.Relevance,
+		Stability:   eng.Stability,
+		AccessCount: eng.AccessCount + 1,
+		UpdatedAt:   eng.UpdatedAt,
+		LastAccess:  time.Now(),
+	}
+	return ps.UpdateMetadata(ctx, wsPrefix, id, meta)
 }
 
 // UpdateConfidenceWithContradiction atomically applies a confidence delta and,
@@ -1005,6 +1144,9 @@ func toERFEngram(eng *Engram) *erf.Engram {
 		TypeLabel:      eng.TypeLabel,
 		Classification: eng.Classification,
 		Trust:          uint8(eng.Trust),
+		ValidFrom:      eng.ValidFrom,
+		ValidUntil:     eng.ValidUntil,
+		Importance:     eng.Importance,
 	}
 }
 
@@ -1045,6 +1187,9 @@ func fromERFEngram(e *erf.Engram) *Engram {
 		TypeLabel:      e.TypeLabel,
 		Classification: e.Classification,
 		Trust:          TrustLevel(e.Trust),
+		ValidFrom:      e.ValidFrom,
+		ValidUntil:     e.ValidUntil,
+		Importance:     e.Importance,
 	}
 }
 

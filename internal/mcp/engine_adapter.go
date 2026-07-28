@@ -75,8 +75,8 @@ func (a *mcpEngineAdapter) GetContradictions(ctx context.Context, vault string) 
 	}
 	return result, nil
 }
-func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity) (*WriteResult, error) {
-	id, err := a.eng.Evolve(ctx, vault, oldID, newContent, reason, embedding, concept, entities)
+func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, effectiveAt time.Time) (*WriteResult, error) {
+	id, err := a.eng.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, entities, effectiveAt)
 	if err != nil {
 		return nil, err
 	}
@@ -372,8 +372,8 @@ func (a *mcpEngineAdapter) GetEntityClusters(ctx context.Context, vault string, 
 	return result, nil
 }
 
-func (a *mcpEngineAdapter) WhereLeftOff(ctx context.Context, vault string, limit int) ([]WhereLeftOffEntry, error) {
-	engrams, err := a.eng.WhereLeftOff(ctx, vault, limit)
+func (a *mcpEngineAdapter) WhereLeftOff(ctx context.Context, vault string, limit int, excludeTypeLabels []string) ([]WhereLeftOffEntry, error) {
+	engrams, err := a.eng.WhereLeftOff(ctx, vault, limit, excludeTypeLabels)
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +398,7 @@ func whereLeftOffEntryFromEngram(eng *storage.Engram) WhereLeftOffEntry {
 		State:      lifecycleStateLabel(eng.State),
 		Type:       eng.MemoryType.String(),
 		TypeLabel:  eng.TypeLabel,
+		Tags:       eng.Tags,
 	}
 }
 
