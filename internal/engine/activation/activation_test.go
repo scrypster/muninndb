@@ -11,6 +11,7 @@ import (
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
+	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 // ---------------------------------------------------------------------------
@@ -206,6 +207,35 @@ func (s *stubStore) ListByTagsAllInRange(_ context.Context, _ [8]byte, tags []st
 		return bytes.Compare(matched[i][:], matched[j][:]) > 0
 	})
 	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, nil
+}
+
+// ScanRawTagRange mirrors PebbleStore.ScanRawTagRange: for engrams whose tag
+// splits (via storage.SplitRawTagKV) to tagKey, builds the actual 0x2B key
+// via keys.RawTagRangeKey and checks membership in [lower, upper) with the
+// same byte comparison Pebble applies to real keys.
+func (s *stubStore) ScanRawTagRange(_ context.Context, ws [8]byte, tagKey string, lower, upper []byte, limit int) ([]storage.ULID, error) {
+	tagKeyHash := keys.Hash(tagKey)
+	var matched []storage.ULID
+	for id, eng := range s.engrams {
+		for _, tag := range eng.Tags {
+			tk, v, ok := storage.SplitRawTagKV(tag)
+			if !ok || tk != tagKey {
+				continue
+			}
+			k := keys.RawTagRangeKey(ws, tagKeyHash, []byte(v), [16]byte(id))
+			if bytes.Compare(k, lower) >= 0 && bytes.Compare(k, upper) < 0 {
+				matched = append(matched, id)
+				break
+			}
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		return bytes.Compare(matched[i][:], matched[j][:]) < 0
+	})
+	if limit > 0 && len(matched) > limit {
 		matched = matched[:limit]
 	}
 	return matched, nil

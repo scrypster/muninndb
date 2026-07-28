@@ -74,6 +74,36 @@ func TestHandleRecall_TagFilter_RequiresPrefix(t *testing.T) {
 	}
 }
 
+// TestHandleRecall_TagFilter_RejectsNonObject verifies that a tag_filter passed
+// as a non-object (e.g. the string "due:2026-06-17", a natural mistake given the
+// tags_all/tags_any args ARE strings) is REJECTED, not silently ignored. Before
+// the fix the type assertion args["tag_filter"].(map[string]any) failed, the whole
+// block was skipped, and recall ran UNFILTERED — returning plausible-but-wrong
+// results with no error. That is a silent fail-open: a filter the caller believes
+// is active is a no-op (principle #1 — explicit config is never silently dropped).
+func TestHandleRecall_TagFilter_RejectsNonObject(t *testing.T) {
+	eng := &filterCapturingEngine{}
+	srv := newTestServerWith(eng)
+	for _, malformed := range []string{
+		`"skill:email"`,      // string (the reported mistake)
+		`["due:","2026-06"]`, // array
+		`42`,                 // number
+	} {
+		body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{
+			"vault":"default","context":["x"],"tag_filter":` + malformed + `
+		}}}`
+		w := postRPC(t, srv, body)
+		resp := decodeResp(t, w.Body.String())
+		if resp.Error == nil {
+			t.Errorf("tag_filter=%s: expected error, got none (filter silently dropped)", malformed)
+		}
+		if len(eng.lastFilters) != 0 {
+			t.Errorf("tag_filter=%s: engine was called with filters %+v; a rejected recall must not reach the engine", malformed, eng.lastFilters)
+		}
+		eng.lastFilters = nil
+	}
+}
+
 func asStrings(v interface{}) []string {
 	if s, ok := v.([]string); ok {
 		return s

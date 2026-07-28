@@ -21,15 +21,19 @@ func allToolDefinitions() []ToolDefinition {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"vault":      vaultProp,
-					"content":    map[string]any{"type": "string", "description": "The information to remember."},
-					"concept":    map[string]any{"type": "string", "description": "Short label for this memory."},
-					"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
-					"confidence": map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
-					"created_at": map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this memory was created. Defaults to now. Use to seed memories at past or future times."},
-					"type":       map[string]any{"type": "string", "description": "Memory type — either a built-in name (fact, decision, observation, preference, issue, task, procedure, event, goal, constraint, identity, reference) or a free-form label (e.g. 'architectural_decision', 'coding_pattern'). Built-in names set the enum; free-form labels are stored as type_label with enum defaulting to 'fact'."},
-					"type_label": map[string]any{"type": "string", "description": "Explicit free-form type label (e.g. 'architectural_decision'). Overrides the label inferred from 'type'."},
-					"summary":    map[string]any{"type": "string", "description": "One-line summary of what this memory captures. Providing this skips background summarization."},
+					"vault":       vaultProp,
+					"content":     map[string]any{"type": "string", "description": "The information to remember."},
+					"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
+					"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
+					"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
+					"importance":  map[string]any{"type": "number", "description": "Importance 0.0-1.0 — how much this memory matters (priority axis, orthogonal to confidence/truth). Memories with effective importance >= 0.7 are protected from capacity (max_engrams) pruning; importance does not affect decay or recall ranking. Omit to use a default derived from the memory type (decisions/goals/constraints rank higher than observations/events)."},
+					"created_at":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this memory was created (transaction time). Defaults to now."},
+					"valid_from":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact BECAME TRUE (application time — distinct from created_at, which records when it was stored). Defaults to created_at. Use for historical facts, e.g. storing today that the office moved last January."},
+					"valid_until": map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact STOPPED being true (exclusive — the window is [valid_from, valid_until)). Omit for facts that are still true. Facts with valid_until in the past are excluded from default recall; retrieve them with as_of or include_invalid."},
+					"type":        map[string]any{"type": "string", "description": "Memory type — either a built-in name (fact, decision, observation, preference, issue, task, procedure, event, goal, constraint, identity, reference) or a free-form label (e.g. 'architectural_decision', 'coding_pattern'). Built-in names set the enum; free-form labels are stored as type_label with enum defaulting to 'fact'."},
+					"type_label":  map[string]any{"type": "string", "description": "Explicit free-form type label (e.g. 'architectural_decision'). Overrides the label inferred from 'type'."},
+					"trust":       map[string]any{"type": "string", "enum": []string{"verified", "inferred", "external", "untrusted"}, "description": "Provenance trust level. Default 'inferred' (all AI-generated content). 'verified' = human-confirmed/admin-certified and requires a write or full credential (rejected for observe credentials). 'external' = imported from another system; 'untrusted' = flagged unreliable."},
+					"summary":     map[string]any{"type": "string", "description": "One-line summary of what this memory captures. Providing this skips background summarization."},
 					"entities": map[string]any{
 						"type":        "array",
 						"description": "Entities mentioned in this memory. Providing these skips background entity extraction.",
@@ -95,14 +99,18 @@ func allToolDefinitions() []ToolDefinition {
 						"items": map[string]any{
 							"type": "object",
 							"properties": map[string]any{
-								"content":    map[string]any{"type": "string", "description": "The information to remember."},
-								"concept":    map[string]any{"type": "string", "description": "Short label for this memory."},
-								"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
-								"confidence": map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
-								"created_at": map[string]any{"type": "string", "description": "ISO 8601 timestamp. Defaults to now."},
-								"type":       map[string]any{"type": "string", "description": "Memory type — built-in name or free-form label."},
-								"type_label": map[string]any{"type": "string", "description": "Explicit free-form type label."},
-								"summary":    map[string]any{"type": "string", "description": "One-line summary. Skips background summarization."},
+								"content":     map[string]any{"type": "string", "description": "The information to remember."},
+								"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
+								"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
+								"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
+								"importance":  map[string]any{"type": "number", "description": "Importance 0.0-1.0 (priority axis; >= 0.7 is protected from capacity pruning; does not affect decay or ranking). Omit for a type-derived default."},
+								"created_at":  map[string]any{"type": "string", "description": "ISO 8601 timestamp (transaction time). Defaults to now."},
+								"valid_from":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact became true (application time). Defaults to created_at."},
+								"valid_until": map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact stopped being true (exclusive). Omit for facts still true."},
+								"type":        map[string]any{"type": "string", "description": "Memory type — built-in name or free-form label."},
+								"type_label":  map[string]any{"type": "string", "description": "Explicit free-form type label."},
+								"trust":       map[string]any{"type": "string", "enum": []string{"verified", "inferred", "external", "untrusted"}, "description": "Provenance trust level. Default 'inferred'. 'verified' requires a write or full credential."},
+								"summary":     map[string]any{"type": "string", "description": "One-line summary. Skips background summarization."},
 								"entities": map[string]any{
 									"type": "array",
 									"items": map[string]any{
@@ -176,11 +184,19 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"since": map[string]any{
 						"type":        "string",
-						"description": "ISO 8601 timestamp (e.g. 2026-01-15T00:00:00Z). Only return memories created after this time.",
+						"description": "ISO 8601 timestamp (e.g. 2026-01-15T00:00:00Z). Only return memories CREATED after this time (transaction axis — when they were stored). For 'what was true at T', use as_of instead.",
 					},
 					"before": map[string]any{
 						"type":        "string",
-						"description": "ISO 8601 timestamp (e.g. 2026-01-20T00:00:00Z). Only return memories created before this time.",
+						"description": "ISO 8601 timestamp (e.g. 2026-01-20T00:00:00Z). Only return memories CREATED before this time (transaction axis).",
+					},
+					"as_of": map[string]any{
+						"type":        "string",
+						"description": "ISO 8601 timestamp. Time-travel on the VALIDITY axis: only return facts whose validity window [valid_from, valid_until) covers this moment — 'what was true at T', regardless of when it was stored. Default (omitted): 'what is true now' — facts whose valid_until has passed are excluded.",
+					},
+					"include_invalid": map[string]any{
+						"type":        "boolean",
+						"description": "When true, disables the validity gate: expired facts (valid_until <= now) are returned too, annotated with expired=true and their valid_until. Use to show history. Default false.",
 					},
 					"tags_all": map[string]any{
 						"type":        "array",
@@ -222,6 +238,10 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "boolean",
 						"description": "When true, disables work-queue lease filtering so memories checked out by other owners are also returned (admin/debugging). Default false.",
 					},
+					"read_only": map[string]any{
+						"type":        "boolean",
+						"description": "When true, marks this recall as a pure read that must not trigger any write side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
+					},
 				},
 				"required": []string{"context"},
 			},
@@ -234,18 +254,26 @@ func allToolDefinitions() []ToolDefinition {
 				"properties": map[string]any{
 					"vault": vaultProp,
 					"id":    map[string]any{"type": "string", "description": "Memory ID (ULID)."},
+					"read_only": map[string]any{
+						"type":        "boolean",
+						"description": "When true, this read must not trigger reinforcement (AccessCount/LastAccess bump) or implicit feedback side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
+					},
 				},
 				"required": []string{"id"},
 			},
 		},
 		{
 			Name:        "muninn_forget",
-			Description: "Soft-delete a memory. It remains recoverable but is excluded from recall.",
+			Description: "Soft-delete a memory (excluded from recall, recoverable for 7 days). If the memory isn't wrong but simply STOPPED BEING TRUE, pass not_true_since instead: the memory is then invalidated on the validity axis (kept, not deleted) and remains retrievable via recall's as_of/include_invalid.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"vault": vaultProp,
 					"id":    map[string]any{"type": "string", "description": "Memory ID to forget."},
+					"not_true_since": map[string]any{
+						"type":        "string",
+						"description": "ISO 8601 timestamp. Instead of deleting, records that the fact stopped being true at this moment (sets valid_until). The memory stays active but drops out of default recall; as_of before this time still returns it.",
+					},
 				},
 				"required": []string{"id"},
 			},
@@ -304,10 +332,30 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "string",
 						"description": "Optional new label for the memory. When omitted the concept is inherited verbatim. Use this to correct concepts that encode mutable state (e.g. change \"answer owed\" to \"answer sent — closed\").",
 					},
+					"effective_at": map[string]any{
+						"type":        "string",
+						"description": "ISO 8601 timestamp for when the new version BECAME TRUE (application time; defaults to now). The old version's validity window closes at this moment and the new version's opens — use when the change happened before you recorded it.",
+					},
+					"importance": map[string]any{
+						"type":        "number",
+						"description": "Importance 0.0-1.0 for the new version. Omit to inherit the predecessor's explicitly asserted importance (an unset predecessor stays unset and keeps its type-derived default).",
+					},
 					"embedding": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "number"},
 						"description": "Optional pre-computed embedding vector for the new version. When provided, the server skips its own embedding step. Must match the vault's existing embedding dimension.",
+					},
+					"entities": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"name": map[string]any{"type": "string"},
+								"type": map[string]any{"type": "string", "description": "One of: person, organization, location, product, concept, event, other."},
+							},
+							"required": []string{"name", "type"},
+						},
+						"description": "Optional replacement entities for the new version, for when the update changes what the memory is about. When omitted, the predecessor's entity links carry forward unchanged. Maximum 20.",
 					},
 				},
 				"required": []string{"id", "new_content", "reason"},
@@ -573,6 +621,15 @@ func allToolDefinitions() []ToolDefinition {
 					"limit": map[string]any{
 						"type":        "integer",
 						"description": "Max memories to return (default 10, max 50).",
+					},
+					"read_only": map[string]any{
+						"type":        "boolean",
+						"description": "When true, marks this call as a pure read. where_left_off never has write side effects regardless of this flag; it exists for API consistency with muninn_recall/muninn_read. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
+					},
+					"exclude_type_labels": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Opt-in: type_label values to skip (e.g. \"session-log\"), so recency scan noise doesn't crowd out real memories. Excluded entries don't count against limit — the scan keeps going to fill it. Default: empty (no exclusion, all types included).",
 					},
 				},
 				"required": []string{},

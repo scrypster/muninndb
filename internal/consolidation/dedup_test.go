@@ -131,9 +131,12 @@ func TestDedup_AccessCountAbsorbsArchivedDuplicates(t *testing.T) {
 		Concept: "rep", Content: "rep content", Confidence: 0.9, Relevance: 0.9,
 		Stability: 30, Embedding: embed, AccessCount: 5,
 	})
+	// True duplicates: identical content, number-free concepts. (Distinct numbers
+	// in the content would be treated as load-bearing by the pattern-separation
+	// guard and correctly refuse the merge — see dedup_separation.go.)
 	for i := 0; i < 3; i++ {
 		writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
-			Concept: fmt.Sprintf("dup-%d", i), Content: fmt.Sprintf("dup %d", i),
+			Concept: fmt.Sprintf("dup-%c", 'a'+i), Content: "rep content",
 			Confidence: 0.5, Relevance: 0.5,
 			Stability: 30, Embedding: embed, AccessCount: 0,
 		})
@@ -692,23 +695,25 @@ func TestDedup_Determinism(t *testing.T) {
 		embed1 := []float32{1, 0, 0, 0}
 		embed2 := []float32{0, 1, 0, 0}
 
-		// Cluster A: 2 identical-direction engrams
+		// Cluster A: 2 true duplicates (identical, number-free content so the
+		// pattern-separation guard doesn't treat them as distinct facts). The
+		// confidence gap drives deterministic survivor election.
 		a1 := writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
-			Concept: "a1", Content: "content-a1", Confidence: 0.9, Relevance: 0.9,
+			Concept: "alpha-hi", Content: "content alpha", Confidence: 0.9, Relevance: 0.9,
 			Stability: 30, Embedding: embed1, Tags: []string{"alpha"},
 		})
 		a2 := writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
-			Concept: "a2", Content: "content-a2", Confidence: 0.4, Relevance: 0.4,
+			Concept: "alpha-lo", Content: "content alpha", Confidence: 0.4, Relevance: 0.4,
 			Stability: 30, Embedding: embed1, Tags: []string{"beta"},
 		})
 
-		// Cluster B: 2 identical-direction engrams
+		// Cluster B: 2 true duplicates
 		b1 := writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
-			Concept: "b1", Content: "content-b1", Confidence: 0.8, Relevance: 0.8,
+			Concept: "beta-hi", Content: "content beta", Confidence: 0.8, Relevance: 0.8,
 			Stability: 30, Embedding: embed2, Tags: []string{"gamma"},
 		})
 		b2 := writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
-			Concept: "b2", Content: "content-b2", Confidence: 0.2, Relevance: 0.2,
+			Concept: "beta-lo", Content: "content beta", Confidence: 0.2, Relevance: 0.2,
 			Stability: 30, Embedding: embed2, Tags: []string{"delta"},
 		})
 		_ = a1

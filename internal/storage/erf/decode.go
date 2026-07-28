@@ -145,6 +145,8 @@ func Decode(data []byte) (*Engram, error) {
 	eng.MemoryType = data[OffsetMemoryType]
 	eng.Classification = binary.BigEndian.Uint16(data[OffsetClassification : OffsetClassification+2])
 	eng.Trust = data[OffsetTrust]
+	eng.ValidFrom, eng.ValidUntil = decodeValidity(data, eng.CreatedAt)
+	eng.Importance = math.Float32frombits(binary.BigEndian.Uint32(data[OffsetImportance : OffsetImportance+4]))
 
 	// Parse tagged extension fields between the end of variable data and CRC32 trailer.
 	varEnd := maxVarEnd(conceptOff, uint32(conceptLen), createdByOff, uint32(createdByLen),
@@ -158,6 +160,26 @@ func Decode(data []byte) (*Engram, error) {
 	}
 
 	return eng, nil
+}
+
+// decodeValidity reads the valid-time fields from the fixed metadata section.
+// Zero-default idiom (no ERF version bump, no rewrite migration): a raw zero
+// ValidFrom decodes to CreatedAt ("valid from creation") and a raw zero
+// ValidUntil decodes to the zero time ("open / still current"), so every
+// legacy record — whose bytes 72-99 are zero-filled — decodes silently correct.
+// Semantics are half-open: [ValidFrom, ValidUntil).
+func decodeValidity(data []byte, createdAt time.Time) (from, until time.Time) {
+	rawFrom := binary.BigEndian.Uint64(data[OffsetValidFrom : OffsetValidFrom+8])
+	if rawFrom == 0 {
+		from = createdAt
+	} else {
+		from = time.Unix(0, int64(rawFrom))
+	}
+	rawUntil := binary.BigEndian.Uint64(data[OffsetValidUntil : OffsetValidUntil+8])
+	if rawUntil != 0 {
+		until = time.Unix(0, int64(rawUntil))
+	}
+	return from, until
 }
 
 // maxVarEnd returns the maximum offset+length across all variable fields.

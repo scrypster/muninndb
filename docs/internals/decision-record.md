@@ -141,5 +141,17 @@ integrity reports.
 **Explicitly deferred / rejected — do not reopen without new evidence:** write-path lease
 enforcement, fencing tokens, CAS crash-atomicity (until a workflow demands them); write-mode
 pattern keys (dropped in #608 v2); per-key toolset attribute (the key layer is not a
-presentation layer, #604); ambient push (negative result, #609); `tag_prefix` via the hash
-index (it's hash-indexed, stays a post-filter).
+presentation layer, #604); ambient push (negative result, #609).
+
+**`tag_prefix` seeds candidates via a new ordered index, not the hash index (S1).**
+Superseded the earlier "stays a post-filter" call above: the 0x0C tag index is
+hash-indexed and cannot range-scan, so `tag_prefix` (e.g. `due:<=today`) could only be
+checked post-hoc in phase 6, after other indices had already decided the candidate pool —
+exactly the #607 failure mode, but for range filters instead of exact ones. S1 adds 0x2B,
+a SEPARATE index keyed on `Hash(tagKey)` with the raw tag VALUE sorted after it, so
+`lte`/`gte`/`lt`/`gt`/`eq` become real bounded Pebble range scans that seed phase-2
+candidates (`ActivationEngine.seedTagCandidates` / `storage.ScanRawTagRange`); phase 6's
+`passesMetaFilter` remains the exactness gate. See `docs/internals/keyspace-registry.md`
+0x2B for the key layout. **Principle: "stays a post-filter" is a permanent verdict only
+until the seeding mechanism it was rejected for becomes cheap to build — re-litigate
+when the cost equation changes, don't let an old call block a index built for it.**

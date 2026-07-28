@@ -116,6 +116,7 @@ func TestAll_ConstSliceComplete(t *testing.T) {
 		{"RecallEvent", RecallEvent},
 		{"Lease", Lease},
 		{"EvolveRepairMark", EvolveRepairMark},
+		{"RawTagRange", RawTagRange},
 		// Capability (0x40/0x41)
 		{"Capability", Capability},
 		{"CapabilityVaultIdx", CapabilityVaultIdx},

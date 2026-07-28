@@ -2477,3 +2477,43 @@ func TestActivateCarriesMemoryType(t *testing.T) {
 		t.Errorf("TypeLabel = %q, want %q", top.TypeLabel, "architectural_decision")
 	}
 }
+
+// TestRecall_ReturnsTags is a RED-first regression test for S4: muninn_recall
+// (Activate) must return the stored tags on each activation item so callers
+// don't need a follow-up muninn_read just to see them.
+func TestRecall_ReturnsTags(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   "test",
+		Concept: "Tagged memory about the deploy pipeline",
+		Content: "The deploy pipeline now runs canary checks before promoting.",
+		Tags:    []string{"deploy", "pipeline"},
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	awaitFTS(t, eng)
+
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      "test",
+		Context:    []string{"deploy pipeline canary"},
+		MaxResults: 10,
+		Threshold:  0.01,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if len(resp.Activations) == 0 {
+		t.Fatal("Activate returned 0 results, want >= 1")
+	}
+	top := resp.Activations[0]
+	if len(top.Tags) != 2 {
+		t.Fatalf("Tags len = %d, want 2 (got %v)", len(top.Tags), top.Tags)
+	}
+	if top.Tags[0] != "deploy" || top.Tags[1] != "pipeline" {
+		t.Errorf("Tags = %v, want [deploy pipeline]", top.Tags)
+	}
+}

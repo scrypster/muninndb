@@ -54,6 +54,38 @@ func PatchAllMeta(raw []byte, updatedAt, lastAccess time.Time, confidence, relev
 	return nil
 }
 
+// GetValidUntil reads the ValidUntil field from a raw ERF record without a
+// full decode. Returns the zero time (open / "current") when the raw field is
+// zero — the legacy default — or when the record is too short.
+func GetValidUntil(raw []byte) time.Time {
+	if len(raw) < VariableDataStart+TrailerSize {
+		return time.Time{}
+	}
+	rawUntil := binary.BigEndian.Uint64(raw[OffsetValidUntil : OffsetValidUntil+8])
+	if rawUntil == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, int64(rawUntil))
+}
+
+// PatchValidUntil updates the ValidUntil field in a raw ERF record in-place and
+// recomputes the CRC32 trailer. Does NOT touch the CRC16 (covers bytes 0-5 only).
+// Passing the zero time clears the stamp (re-opens the record — the restore path).
+// raw must be a mutable copy of the 0x01 record (Get() already returns a copy).
+func PatchValidUntil(raw []byte, until time.Time) error {
+	if len(raw) < VariableDataStart+TrailerSize {
+		return errors.New("erf: record too short for PatchValidUntil")
+	}
+	var rawUntil uint64
+	if !until.IsZero() {
+		rawUntil = uint64(until.UnixNano())
+	}
+	binary.BigEndian.PutUint64(raw[OffsetValidUntil:OffsetValidUntil+8], rawUntil)
+	crc32val := ComputeCRC32(raw[:len(raw)-TrailerSize])
+	binary.BigEndian.PutUint32(raw[len(raw)-TrailerSize:], crc32val)
+	return nil
+}
+
 // GetTrust reads the trust byte from a raw ERF record without a full decode.
 // Returns 0x00 (unset/inferred) if the record is too short.
 func GetTrust(raw []byte) uint8 {

@@ -76,6 +76,33 @@ func TestConvertActivationToMemory(t *testing.T) {
 	}
 }
 
+// TestConvertActivationToMemory_SupersessionAlwaysOn verifies Increment 2: when
+// the ranking marked an item superseded, activationToMemory attaches the
+// superseded_by/current_version annotation WITHOUT any annotate flag — an agent
+// is never handed a stale fact silently.
+func TestConvertActivationToMemory_SupersessionAlwaysOn(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID: "staleID", Concept: "runway 8mo", Content: "old",
+		SupersededBy: "newID", CurrentVersion: "headID",
+	}
+	m := activationToMemory(item)
+	if m.Annotations == nil {
+		t.Fatal("superseded item must carry annotations without annotate=true")
+	}
+	if m.Annotations.SupersededBy != "newID" {
+		t.Errorf("superseded_by = %q, want newID", m.Annotations.SupersededBy)
+	}
+	if m.Annotations.CurrentVersion != "headID" {
+		t.Errorf("current_version = %q, want headID", m.Annotations.CurrentVersion)
+	}
+
+	// A non-superseded item gets no annotations block (omitempty stays clean).
+	plain := activationToMemory(&mbp.ActivationItem{ID: "x", Concept: "c", Content: "y"})
+	if plain.Annotations != nil {
+		t.Errorf("non-superseded item must not carry annotations, got %+v", plain.Annotations)
+	}
+}
+
 func TestConvertTruncatesLongContent(t *testing.T) {
 	long := make([]byte, 600)
 	for i := range long {
@@ -424,6 +451,23 @@ func TestActivationToMemoryTypeZeroValueIsFact(t *testing.T) {
 	}
 }
 
+// TestActivationToMemory_MapsTags verifies muninn_recall exposes the stored
+// tags on Memory.Tags — S4. Previously mbp.ActivationItem had no Tags field
+// so recall always dropped them (muninn_read already returned them).
+func TestActivationToMemory_MapsTags(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:   "tagged-recall",
+		Tags: []string{"one", "two"},
+	}
+	m := activationToMemory(item)
+	if len(m.Tags) != 2 {
+		t.Fatalf("Tags len = %d, want 2 (got %v)", len(m.Tags), m.Tags)
+	}
+	if m.Tags[0] != "one" || m.Tags[1] != "two" {
+		t.Errorf("Tags = %v, want [one two]", m.Tags)
+	}
+}
+
 // TestReadResponseToMemoryMapsType verifies muninn_read maps MemoryType and
 // TypeLabel from the wire response (which has always carried them).
 func TestReadResponseToMemoryMapsType(t *testing.T) {
@@ -438,5 +482,64 @@ func TestReadResponseToMemoryMapsType(t *testing.T) {
 	}
 	if m.TypeLabel != "runbook" {
 		t.Errorf("TypeLabel = %q, want %q", m.TypeLabel, "runbook")
+	}
+}
+
+// TestActivationToMemoryImportanceExplicit verifies muninn_recall exposes an
+// explicitly asserted importance verbatim with importance_source="explicit".
+func TestActivationToMemoryImportanceExplicit(t *testing.T) {
+	m := activationToMemory(&mbp.ActivationItem{
+		ID:         "imp-recall",
+		Importance: 0.85,
+		MemoryType: uint8(storage.TypeObservation), // table would say 0.3 — must not apply
+	})
+	if m.Importance != 0.85 {
+		t.Errorf("Importance = %v, want 0.85", m.Importance)
+	}
+	if m.ImportanceSource != "explicit" {
+		t.Errorf("ImportanceSource = %q, want %q", m.ImportanceSource, "explicit")
+	}
+}
+
+// TestActivationToMemoryImportanceDerived verifies the unset (stored 0) case:
+// the effective value comes from the memory-type table (+ verified trust
+// bump) and is labeled "derived" — the caller can tell asserted from assumed.
+func TestActivationToMemoryImportanceDerived(t *testing.T) {
+	m := activationToMemory(&mbp.ActivationItem{
+		ID:         "imp-derived",
+		MemoryType: uint8(storage.TypeDecision),
+	})
+	if m.Importance != 0.6 {
+		t.Errorf("derived decision Importance = %v, want 0.6", m.Importance)
+	}
+	if m.ImportanceSource != "derived" {
+		t.Errorf("ImportanceSource = %q, want %q", m.ImportanceSource, "derived")
+	}
+	// Verified trust bumps the derived value (+0.1).
+	mv := activationToMemory(&mbp.ActivationItem{
+		ID:         "imp-derived-verified",
+		MemoryType: uint8(storage.TypeDecision),
+		Trust:      uint8(storage.TrustVerified),
+	})
+	if mv.Importance != 0.7 {
+		t.Errorf("derived verified decision Importance = %v, want 0.7", mv.Importance)
+	}
+	// Zero-value item: fact table entry, still always present.
+	mz := activationToMemory(&mbp.ActivationItem{ID: "imp-zero"})
+	if mz.Importance != 0.4 || mz.ImportanceSource != "derived" {
+		t.Errorf("zero-value item = (%v, %q), want (0.4, derived)", mz.Importance, mz.ImportanceSource)
+	}
+}
+
+// TestReadResponseToMemoryImportance verifies muninn_read maps importance the
+// same way (explicit wins; unset derives from type+trust).
+func TestReadResponseToMemoryImportance(t *testing.T) {
+	m := readResponseToMemory(&mbp.ReadResponse{ID: "imp-read", Importance: 0.42})
+	if m.Importance != 0.42 || m.ImportanceSource != "explicit" {
+		t.Errorf("explicit read = (%v, %q), want (0.42, explicit)", m.Importance, m.ImportanceSource)
+	}
+	md := readResponseToMemory(&mbp.ReadResponse{ID: "imp-read-d", MemoryType: uint8(storage.TypeProcedure)})
+	if md.Importance != 0.5 || md.ImportanceSource != "derived" {
+		t.Errorf("derived read = (%v, %q), want (0.5, derived)", md.Importance, md.ImportanceSource)
 	}
 }

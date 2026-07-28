@@ -89,6 +89,31 @@ type WriteRequest struct {
 	MemoryType   uint8         `msgpack:"memory_type,omitempty" json:"memory_type,omitempty"`
 	TypeLabel    string        `msgpack:"type_label,omitempty" json:"type_label,omitempty"`
 
+	// Trust is an optional trust-level label (verified|inferred|external|untrusted).
+	// Empty defaults to "inferred" — the level for all AI-generated content.
+	// Setting "verified" requires a write or full credential (S8): the engine
+	// rejects it under an observe credential. source_type is provenance-derived
+	// and never a write argument, so trust is the only discriminator the write
+	// path exposes for the anti-pollution capture tiering.
+	Trust string `msgpack:"trust,omitempty" json:"trust,omitempty"`
+
+	// Valid-time (application-time) axis, half-open [valid_from, valid_until).
+	// ValidFrom nil defaults to CreatedAt ("valid from creation"); ValidUntil
+	// nil means open / "still current". Use for historical facts whose truth
+	// window differs from when they were stored.
+	ValidFrom  *time.Time `msgpack:"valid_from,omitempty" json:"valid_from,omitempty"`
+	ValidUntil *time.Time `msgpack:"valid_until,omitempty" json:"valid_until,omitempty"`
+
+	// Importance is the caller-asserted priority in [0,1] (orthogonal to
+	// Confidence, which is truth). Pointer so an explicit 0 is distinct from
+	// unset: nil = unset (a use-time default is derived from the memory type
+	// at read/prune time and never stored); an explicit value is clamped to
+	// [0,1] and an explicit 0.0 is quantized to 0.01 on write so the stored
+	// 0 = unset sentinel stays intact. In this increment importance drives
+	// pruning protection (COG-20) and is surfaced on read — it does not
+	// modify decay or recall ranking.
+	Importance *float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
+
 	// Inline enrichment: caller-provided data that bypasses background enrichment.
 	Summary             string                     `msgpack:"summary,omitempty" json:"summary,omitempty"`
 	Entities            []InlineEntity             `msgpack:"entities,omitempty" json:"entities,omitempty"`
@@ -107,6 +132,11 @@ type WriteResponse struct {
 type ReadRequest struct {
 	ID    string `msgpack:"id" json:"id"`
 	Vault string `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	// ReadOnly, when true, suppresses reinforcement side effects (TouchAccess
+	// and the implicit feedback signal) for this read. Set by the MCP/REST/gRPC
+	// surface from the effective read-only decision (S3): observe-mode
+	// credential OR an explicit read_only request flag.
+	ReadOnly bool `msgpack:"read_only,omitempty" json:"read_only,omitempty"`
 }
 
 // ReadResponse returns the full engram data.
@@ -137,6 +167,20 @@ type ReadResponse struct {
 	// Clients should treat an absent trust field as equivalent to TrustUnset (0x00).
 	Trust uint8 `msgpack:"trust,omitempty" json:"trust,omitempty"`
 
+	// Valid-time axis (teaches the two time axes: created_at/updated_at are
+	// transaction time; valid_from/valid_until are application time).
+	// ValidFrom is always set (defaults to CreatedAt). ValidUntil is 0 while
+	// the window is open. IsCurrent = (ValidUntil == 0).
+	ValidFrom  int64 `msgpack:"valid_from,omitempty" json:"valid_from,omitempty"`
+	ValidUntil int64 `msgpack:"valid_until,omitempty" json:"valid_until,omitempty"`
+	IsCurrent  bool  `msgpack:"is_current" json:"is_current"`
+
+	// Importance is the STORED caller-asserted importance (0 = unset; the
+	// presentation layer derives the effective value from MemoryType/Trust —
+	// the derived value is never stored, so the wire carries only the
+	// assertion). omitempty intentional: absent means unset/derived.
+	Importance float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
+
 	// Entities and EntityRelationships are populated by muninn_read to expose what
 	// was stored via inline enrichment. Empty when no entities/relationships were linked.
 	Entities            []InlineEntity             `msgpack:"entities,omitempty"              json:"entities,omitempty"`
@@ -165,6 +209,20 @@ type ActivateRequest struct {
 	CallerOwner string `json:"caller_owner,omitempty" msgpack:"caller_owner,omitempty"`
 	// IncludeLeased disables lease-based visibility filtering (admin/debugging).
 	IncludeLeased bool `json:"include_leased,omitempty" msgpack:"include_leased,omitempty"`
+	// ReadOnly, when true, marks this activation as a pure read (S3): skips
+	// activation-log side effects. Recall/Activate never reinforces
+	// AccessCount regardless of this flag (COG-12) — this only affects the
+	// existing activation-log write path (see engine.go activateCore).
+	ReadOnly bool `json:"read_only,omitempty" msgpack:"read_only,omitempty"`
+	// AsOf, when set, asks "what was true at T" on the valid-time axis: results
+	// are gated by the full half-open interval check [ValidFrom, ValidUntil) at
+	// T. Distinct from the since/before filters, which are the TRANSACTION axis
+	// (CreatedAt). Nil = default gate ("what is true now": drop only engrams
+	// whose closed ValidUntil <= now; a future ValidFrom is NOT hidden).
+	AsOf *time.Time `json:"as_of,omitempty" msgpack:"as_of,omitempty"`
+	// IncludeInvalid disables the valid-time gate entirely (show history):
+	// expired facts are returned, annotated with expired=true.
+	IncludeInvalid bool `json:"include_invalid,omitempty" msgpack:"include_invalid,omitempty"`
 }
 
 // Weights defines scoring weight distribution.
@@ -240,6 +298,26 @@ type ActivationItem struct {
 	MemoryType uint8 `msgpack:"memory_type,omitempty" json:"memory_type,omitempty"`
 	// TypeLabel is the writer's free-form type label; empty when none was stored.
 	TypeLabel string `msgpack:"type_label,omitempty" json:"type_label,omitempty"`
+	// Tags carries the engram's stored tags (S4) so muninn_recall doesn't
+	// require a follow-up muninn_read just to see them.
+	Tags []string `msgpack:"tags,omitempty" json:"tags,omitempty"`
+	// SupersededBy / CurrentVersion are set by supersedes-aware recall when this
+	// result is superseded by a newer active engram: SupersededBy is the immediate
+	// superseder ULID, CurrentVersion the chain head (the fact to consult now).
+	// Always populated when the supersession exists — no annotate flag required —
+	// so any transport can say "this is stale, current is X". Empty otherwise.
+	SupersededBy   string `msgpack:"superseded_by,omitempty"   json:"superseded_by,omitempty"`
+	CurrentVersion string `msgpack:"current_version,omitempty" json:"current_version,omitempty"`
+	// Valid-time annotations. ValidFrom is set only when it differs from
+	// CreatedAt (an explicitly backdated/forward-dated fact); ValidUntil is set
+	// only when the window is closed. Expired marks a fact whose ValidUntil <=
+	// now — only reachable in results under include_invalid=true.
+	ValidFrom  int64 `msgpack:"valid_from,omitempty" json:"valid_from,omitempty"`
+	ValidUntil int64 `msgpack:"valid_until,omitempty" json:"valid_until,omitempty"`
+	Expired    bool  `msgpack:"expired,omitempty" json:"expired,omitempty"`
+	// Importance is the STORED caller-asserted importance (0 = unset; the
+	// presentation layer derives the effective value — see ReadResponse).
+	Importance float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
 }
 
 // ScoreComponents breaks down the activation score.
@@ -249,6 +327,7 @@ type ScoreComponents struct {
 	DecayFactor        float32 `msgpack:"decay_factor"                  json:"decay_factor"`
 	HebbianBoost       float32 `msgpack:"hebbian_boost"                 json:"hebbian_boost"`
 	TransitionBoost    float32 `msgpack:"transition_boost,omitempty"    json:"transition_boost,omitempty"`
+	EntityBoost        float32 `msgpack:"entity_boost,omitempty"        json:"entity_boost,omitempty"`
 	AccessFrequency    float32 `msgpack:"access_frequency"              json:"access_frequency"`
 	Recency            float32 `msgpack:"recency"                       json:"recency"`
 	Raw                float32 `msgpack:"raw"                           json:"raw"`
@@ -306,11 +385,15 @@ type LinkResponse struct {
 	OK bool `msgpack:"ok" json:"ok"`
 }
 
-// ForgetRequest soft-deletes an engram.
+// ForgetRequest soft-deletes an engram — unless NotTrueSince is set, in which
+// case the engram is invalidated on the valid-time axis instead: ValidUntil is
+// stamped and the record stays active (recoverable via as_of/include_invalid).
+// Invalidation is always a stamp, never a delete (COG-19).
 type ForgetRequest struct {
-	ID    string `msgpack:"id" json:"id"`
-	Hard  bool   `msgpack:"hard,omitempty" json:"hard,omitempty"`
-	Vault string `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	ID           string     `msgpack:"id" json:"id"`
+	Hard         bool       `msgpack:"hard,omitempty" json:"hard,omitempty"`
+	Vault        string     `msgpack:"vault,omitempty" json:"vault,omitempty"`
+	NotTrueSince *time.Time `msgpack:"not_true_since,omitempty" json:"not_true_since,omitempty"`
 }
 
 // ForgetResponse confirms deletion.

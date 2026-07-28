@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -181,4 +182,53 @@ func TestEvolve_CarriesRelationshipRecords(t *testing.T) {
 	recs := engramRelationships(t, eng, ws, newID)
 	require.Len(t, recs, 1)
 	require.Equal(t, "co_occurs_with", recs[0].RelType)
+}
+
+// TestEvolve_InlineEntitiesReplaceCarry: caller-provided entities on evolve
+// replace the carried set — the update changed what the memory is about.
+//
+// "Replace" is only meaningful while the carry is live, so the test proves
+// both arms on the same predecessor shape: an evolve without inline entities
+// carries Alice forward (the control — with the carry disabled this leg
+// fails, so the replace assertions cannot pass vacuously), and an evolve
+// WITH inline entities yields Bob only, not a merge.
+func TestEvolve_InlineEntitiesReplaceCarry(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	write := func(content string) string {
+		t.Helper()
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault: "test", Concept: "owner", Content: content,
+			Entities: []mbp.InlineEntity{{Name: "Alice", Type: "person"}},
+		})
+		require.NoError(t, err)
+		return resp.ID
+	}
+	ws := eng.store.ResolveVaultPrefix("test")
+
+	// Control arm: no inline entities — the carry must be live.
+	controlID, err := eng.EvolveAt(ctx, "test", write("Alice owns the deploy"), "Alice still owns the deploy", "refresh", nil, "", nil, nil, time.Time{})
+	require.NoError(t, err)
+	require.Equal(t, []string{"Alice"}, engramEntities(t, eng, ws, controlID),
+		"control: without inline entities the predecessor's links carry forward")
+
+	// Replace arm: inline entities suppress that live carry.
+	newID, err := eng.EvolveAt(ctx, "test", write("Alice owns the other deploy"), "Bob owns the deploy now", "handover", nil, "",
+		[]mbp.InlineEntity{{Name: "Bob", Type: "person"}}, nil, time.Time{})
+	require.NoError(t, err)
+
+	names := engramEntities(t, eng, ws, newID)
+	require.Equal(t, []string{"Bob"}, names,
+		"inline entities must replace the predecessor's links, not merge with them")
+
+	// Inline entities are genuinely new mentions: the record must exist.
+	rec, err := eng.store.GetEntityRecord(ctx, "bob")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+
+	flags, err := eng.store.GetDigestFlags(ctx, plugin.ULID(newID))
+	require.NoError(t, err)
+	require.NotZero(t, flags&plugin.DigestEntities)
 }

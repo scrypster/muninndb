@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
+	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 // ---------------------------------------------------------------------------
-// Tests for package-internal helpers: extractTimeBounds, passesMetaFilter,
+// Tests for package-internal helpers: extractTimeBounds, PassesMetaFilter,
 // resolveWeights, computeGatedActivation, computeComponents, buildWhy
 // ---------------------------------------------------------------------------
 
@@ -73,26 +74,26 @@ func TestExtractTimeBounds_WrongType(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// passesMetaFilter
+// PassesMetaFilter
 // ---------------------------------------------------------------------------
 
 func TestPassesMetaFilter_Empty(t *testing.T) {
 	eng := &storage.Engram{State: storage.StateActive}
-	if !passesMetaFilter(eng, nil) {
+	if !PassesMetaFilter(eng, nil) {
 		t.Error("nil filters should pass")
 	}
 }
 
 func TestPassesMetaFilter_StateEq(t *testing.T) {
 	eng := &storage.Engram{State: storage.StateActive}
-	pass := passesMetaFilter(eng, []Filter{
+	pass := PassesMetaFilter(eng, []Filter{
 		{Field: "state", Op: "eq", Value: storage.StateActive},
 	})
 	if !pass {
 		t.Error("should pass for matching state")
 	}
 
-	fail := passesMetaFilter(eng, []Filter{
+	fail := PassesMetaFilter(eng, []Filter{
 		{Field: "state", Op: "eq", Value: storage.StateSoftDeleted},
 	})
 	if fail {
@@ -102,14 +103,14 @@ func TestPassesMetaFilter_StateEq(t *testing.T) {
 
 func TestPassesMetaFilter_StateNeq(t *testing.T) {
 	eng := &storage.Engram{State: storage.StateActive}
-	pass := passesMetaFilter(eng, []Filter{
+	pass := PassesMetaFilter(eng, []Filter{
 		{Field: "state", Op: "neq", Value: storage.StateSoftDeleted},
 	})
 	if !pass {
 		t.Error("should pass for neq different state")
 	}
 
-	fail := passesMetaFilter(eng, []Filter{
+	fail := PassesMetaFilter(eng, []Filter{
 		{Field: "state", Op: "neq", Value: storage.StateActive},
 	})
 	if fail {
@@ -120,12 +121,12 @@ func TestPassesMetaFilter_StateNeq(t *testing.T) {
 func TestPassesMetaFilter_CreatedAfter(t *testing.T) {
 	threshold := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	eng := &storage.Engram{CreatedAt: time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)}
-	if !passesMetaFilter(eng, []Filter{{Field: "created_after", Value: threshold}}) {
+	if !PassesMetaFilter(eng, []Filter{{Field: "created_after", Value: threshold}}) {
 		t.Error("should pass — engram created after threshold")
 	}
 
 	old := &storage.Engram{CreatedAt: time.Date(2025, 5, 1, 0, 0, 0, 0, time.UTC)}
-	if passesMetaFilter(old, []Filter{{Field: "created_after", Value: threshold}}) {
+	if PassesMetaFilter(old, []Filter{{Field: "created_after", Value: threshold}}) {
 		t.Error("should fail — engram created before threshold")
 	}
 }
@@ -133,12 +134,12 @@ func TestPassesMetaFilter_CreatedAfter(t *testing.T) {
 func TestPassesMetaFilter_CreatedBefore(t *testing.T) {
 	threshold := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	eng := &storage.Engram{CreatedAt: time.Date(2025, 5, 1, 0, 0, 0, 0, time.UTC)}
-	if !passesMetaFilter(eng, []Filter{{Field: "created_before", Value: threshold}}) {
+	if !PassesMetaFilter(eng, []Filter{{Field: "created_before", Value: threshold}}) {
 		t.Error("should pass — engram created before threshold")
 	}
 
 	newer := &storage.Engram{CreatedAt: time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)}
-	if passesMetaFilter(newer, []Filter{{Field: "created_before", Value: threshold}}) {
+	if PassesMetaFilter(newer, []Filter{{Field: "created_before", Value: threshold}}) {
 		t.Error("should fail — engram created after threshold")
 	}
 }
@@ -153,7 +154,7 @@ func TestPassesMetaFilter_Combined(t *testing.T) {
 		{Field: "created_after", Value: time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)},
 		{Field: "created_before", Value: time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)},
 	}
-	if !passesMetaFilter(eng, filters) {
+	if !PassesMetaFilter(eng, filters) {
 		t.Error("should pass all combined filters")
 	}
 }
@@ -568,6 +569,38 @@ func (s *internalStubStore) ListByTagsAllInRange(_ context.Context, _ [8]byte, t
 		return bytes.Compare(matched[i][:], matched[j][:]) > 0
 	})
 	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, nil
+}
+
+// ScanRawTagRange mirrors PebbleStore.ScanRawTagRange over the in-memory
+// engram set: for every tag matching tagKey (split on the first ':', via the
+// same storage.SplitRawTagKV used by the real write path), it builds the
+// actual 0x2B key bytes via keys.RawTagRangeKey and checks membership in
+// [lower, upper) with the same byte-lexicographic comparison Pebble uses —
+// so this stub exercises the identical bound semantics as production,
+// ascending order, ids deduped.
+func (s *internalStubStore) ScanRawTagRange(_ context.Context, ws [8]byte, tagKey string, lower, upper []byte, limit int) ([]storage.ULID, error) {
+	tagKeyHash := keys.Hash(tagKey)
+	var matched []storage.ULID
+	for id, eng := range s.engrams {
+		for _, tag := range eng.Tags {
+			tk, v, ok := storage.SplitRawTagKV(tag)
+			if !ok || tk != tagKey {
+				continue
+			}
+			k := keys.RawTagRangeKey(ws, tagKeyHash, []byte(v), [16]byte(id))
+			if bytes.Compare(k, lower) >= 0 && bytes.Compare(k, upper) < 0 {
+				matched = append(matched, id)
+				break
+			}
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		return bytes.Compare(matched[i][:], matched[j][:]) < 0
+	})
+	if limit > 0 && len(matched) > limit {
 		matched = matched[:limit]
 	}
 	return matched, nil

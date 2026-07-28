@@ -157,6 +157,17 @@ func WriteOnlyFromContext(ctx context.Context) bool {
 	return mode == ModeWrite
 }
 
+// AppendFromContext returns true if the request credential is append-mode
+// (read + create-new only). Engine-layer destructive operations (Evolve,
+// Forget, …) use this to refuse the request transport-agnostically, so an
+// append credential structurally cannot modify or delete existing engrams no
+// matter which surface it comes in on — mirroring how SEC-14 gates verified
+// trust and how ObserveFromContext gates cognitive mutation.
+func AppendFromContext(ctx context.Context) bool {
+	mode, _ := ctx.Value(ContextMode).(string)
+	return mode == ModeAppend
+}
+
 // WriteOnlyGuard is HTTP middleware that returns 403 for write-only mode requests.
 // Apply it at route registration for every read endpoint:
 //

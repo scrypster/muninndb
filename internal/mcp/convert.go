@@ -28,13 +28,26 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 	if len(previewContent) > contentPreviewLen {
 		previewContent = previewContent[:contentPreviewLen] + "..."
 	}
-	return Memory{
+	// Supersession annotation is ALWAYS surfaced (no annotate flag) so an agent is
+	// never handed a stale fact without being told the current one — the "was 8 in
+	// May, now 11" narration comes from the payload alone. The annotate=true path
+	// augments this same struct with staleness/conflicts/provenance.
+	var annotations *MemoryAnnotations
+	if item.SupersededBy != "" || item.CurrentVersion != "" {
+		annotations = &MemoryAnnotations{
+			SupersededBy:   item.SupersededBy,
+			CurrentVersion: item.CurrentVersion,
+		}
+	}
+	m := Memory{
+		Annotations: annotations,
 		ID:          item.ID,
 		Concept:     item.Concept,
 		Content:     previewContent,
 		Summary:     item.Summary,
 		Score:       roundScore(item.Score),
 		VectorScore: roundScore(item.ScoreComponents.SemanticSimilarity),
+		EntityBoost: roundScore(item.ScoreComponents.EntityBoost),
 		Confidence:  item.Confidence,
 		Why:         item.Why,
 		// Map the lifecycle state label the same way the read path does (#502).
@@ -48,7 +61,22 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		Relevance:   item.Relevance,
 		SourceType:  item.SourceType,
 		Trust:       storage.TrustLevel(item.Trust).String(),
+		Tags:        item.Tags,
+		Expired:     item.Expired,
 	}
+	m.Importance, m.ImportanceSource = importanceFields(item.Importance,
+		storage.MemoryType(item.MemoryType), storage.TrustLevel(item.Trust))
+	// Valid-time annotations: only present when meaningful (backdated
+	// valid_from, or a closed window).
+	if item.ValidFrom != 0 {
+		vf := time.Unix(0, item.ValidFrom).UTC()
+		m.ValidFrom = &vf
+	}
+	if item.ValidUntil != 0 {
+		vu := time.Unix(0, item.ValidUntil).UTC()
+		m.ValidUntil = &vu
+	}
+	return m
 }
 
 // readResponseToMemory converts a ReadResponse to a Memory for the muninn_read tool.
@@ -71,6 +99,20 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		Relevance:   r.Relevance,
 		Trust:       storage.TrustLevel(r.Trust).String(),
 	}
+	m.Importance, m.ImportanceSource = importanceFields(r.Importance,
+		storage.MemoryType(r.MemoryType), storage.TrustLevel(r.Trust))
+	// muninn_read always echoes the valid-time axis (teaches the two axes:
+	// created_at is transaction time, valid_from/valid_until application time).
+	if r.ValidFrom != 0 {
+		vf := time.Unix(0, r.ValidFrom).UTC()
+		m.ValidFrom = &vf
+	}
+	if r.ValidUntil != 0 {
+		vu := time.Unix(0, r.ValidUntil).UTC()
+		m.ValidUntil = &vu
+	}
+	isCurrent := r.IsCurrent
+	m.IsCurrent = &isCurrent
 	for _, e := range r.Entities {
 		m.Entities = append(m.Entities, ReadEntity{Name: e.Name, Type: e.Type})
 	}
@@ -83,6 +125,19 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		})
 	}
 	return m
+}
+
+// importanceFields resolves the (importance, importance_source) presentation
+// pair from a stored importance plus the memory type and trust the effective
+// value derives from when unset. "explicit" = the caller asserted the value
+// (stored > 0 — writes quantize explicit 0 to 0.01); "derived" = the use-time
+// type-table default (never stored). Mirrors storage.EffectiveImportance.
+func importanceFields(stored float32, memType storage.MemoryType, trust storage.TrustLevel) (float64, string) {
+	eff := roundScore(storage.EffectiveImportance(stored, memType, trust))
+	if storage.ImportanceExplicit(stored) {
+		return eff, "explicit"
+	}
+	return eff, "derived"
 }
 
 // textContent wraps a string in the MCP tools/call result envelope.

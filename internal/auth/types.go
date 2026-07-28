@@ -29,6 +29,18 @@ const (
 	ModeFull    = "full"    // full read + write access
 	ModeObserve = "observe" // read-only; cognitive mutations suppressed at engine layer
 	ModeWrite   = "write"   // ingest-only; read endpoints blocked at middleware layer
+	ModeAppend  = "append"  // read + create-new. EVERY engine op that modifies or deletes an
+	//                          existing engram/entity/lease/enrichment is refused (engine-level
+	//                          via refuseAppend, so it holds on all transports; MCP also gates at
+	//                          dispatch). The credential for automated capture (flush): it can add
+	//                          memories and recall, never overwrite/evolve/forget/archive/re-trust.
+	//                          Accepted residuals — all reinforcement ("strengthens with use"), never
+	//                          destruction: (a) remember on a content-hash duplicate reinforces an
+	//                          existing engram's access metadata (TouchAccess, #682); (b) the read
+	//                          path is NOT forced read-only for append (only for observe), so Read/
+	//                          recall drive RecordFeedback (adaptive scoring weights), TouchAccess,
+	//                          and Hebbian/PAS on existing state. None overwrite content/confidence/
+	//                          state/tags/lifecycle or delete. See engine.refuseAppend for the full note.
 )
 
 type contextKey string

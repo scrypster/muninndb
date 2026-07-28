@@ -109,6 +109,9 @@ func (e *Engine) FindSimilarEntities(ctx context.Context, vault string, threshol
 //
 // When dryRun=true the function reports what would happen without writing anything.
 func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string, dryRun bool) (*MergeEntityResult, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	if entityA == "" || entityB == "" {
 		return nil, fmt.Errorf("merge_entity: entity_a and entity_b are required")
 	}
