@@ -241,8 +241,16 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 			continue
 		}
 		// Work-queue checkout (#548): hide engrams under a live foreign lease.
+		// A lease-read error fails CLOSED (skip the injection): phase 6 fails
+		// the whole request on the same fault, and silently admitting a
+		// possibly-checked-out engram is worse than dropping an optional
+		// enrichment. A missing lease record is not an error on either path.
 		if !req.IncludeLeased {
-			if l, err := e.store.GetLease(ctx, ws, id); err == nil && l.Live(injectNow) && l.Owner != req.CallerOwner {
+			l, err := e.store.GetLease(ctx, ws, id)
+			if err != nil {
+				continue
+			}
+			if l.Live(injectNow) && l.Owner != req.CallerOwner {
 				continue
 			}
 		}
