@@ -537,3 +537,88 @@ func TestAssocDecay_PrunesWeakEdges(t *testing.T) {
 		t.Errorf("weak edge A→C weight %f exceeds expected floor ~%f", wAC, expectedFloor)
 	}
 }
+
+// TestPruneVault_ImportanceProtection_Measured is the quantified value proof for
+// importance-aware pruning: a batch of important decisions that are ALSO the
+// coldest, lowest-relevance memories in the vault (exactly what a recency/
+// relevance pruner deletes first) must ALL survive heavy memory pressure, while
+// the same number of noise memories is dropped instead. It logs the measured
+// before/after so the value is a number, not a vibe.
+func TestPruneVault_ImportanceProtection_Measured(t *testing.T) {
+	eng, as, store, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vaultName = "importance-measure"
+	ws := store.VaultPrefix(vaultName)
+	if err := store.WriteVaultName(ws, vaultName); err != nil {
+		t.Fatalf("WriteVaultName: %v", err)
+	}
+
+	now := time.Now()
+	const nImportant, nNoise = 8, 24
+
+	// Important decisions: explicit importance 0.9, but the COLDEST in the vault —
+	// lowest relevance (front of the LowestRelevanceIDs prefilter) and oldest
+	// access (lowest B(M)). A recency/relevance pruner targets these FIRST.
+	important := make([]storage.ULID, 0, nImportant)
+	for i := 0; i < nImportant; i++ {
+		id, err := store.WriteEngram(ctx, ws, &storage.Engram{
+			Concept:    "important-decision",
+			Content:    "a decision that must not be forgotten",
+			Relevance:  0.0,
+			CreatedAt:  now.Add(-120 * 24 * time.Hour),
+			LastAccess: now.Add(-100 * 24 * time.Hour),
+			Importance: 0.9,
+		})
+		if err != nil {
+			t.Fatalf("write important[%d]: %v", i, err)
+		}
+		important = append(important, id)
+	}
+	// Noise: unimportant, but FRESHER and higher relevance — a recency pruner
+	// would keep these over the important-but-cold decisions.
+	for i := 0; i < nNoise; i++ {
+		if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+			Concept:    "noise",
+			Content:    "low-value chatter",
+			Relevance:  0.5,
+			CreatedAt:  now,
+			LastAccess: now,
+		}); err != nil {
+			t.Fatalf("write noise[%d]: %v", i, err)
+		}
+	}
+
+	total := store.GetVaultCount(ctx, ws)
+	// Squeeze hard: keep only ~a third. Prune must drop far more than nImportant,
+	// so a recency pruner would necessarily delete every important-but-cold one.
+	keep := int(total) - (nImportant + nNoise/2) // drops 8 + 12 = 20
+	if err := as.SetVaultConfig(auth.VaultConfig{
+		Name: vaultName, Public: true,
+		Plasticity: &auth.PlasticityConfig{MaxEngrams: ptr(keep)},
+	}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	pruned, err := eng.PruneVault(ctx, vaultName)
+	if err != nil {
+		t.Fatalf("PruneVault: %v", err)
+	}
+
+	survived := 0
+	for _, id := range important {
+		if _, err := store.GetEngram(ctx, ws, id); err == nil {
+			survived++
+		}
+	}
+	t.Logf("MEASURE importance-protection: vault %d -> pruned %d (target drop ~%d). "+
+		"Important decisions (the %d COLDEST, lowest-relevance memories — a recency pruner's first targets): %d/%d survived.",
+		total, pruned, int(total)-keep, nImportant, survived, nImportant)
+	if survived != nImportant {
+		t.Errorf("importance protection failed: %d/%d important decisions survived; a recency pruner drops these first", survived, nImportant)
+	}
+	if pruned < nImportant {
+		t.Errorf("prune did not exert real pressure: only %d dropped", pruned)
+	}
+}
