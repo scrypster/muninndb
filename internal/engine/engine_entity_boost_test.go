@@ -157,8 +157,10 @@ func TestEntityBoost_ApplyEntityBoostDirect(t *testing.T) {
 		{Engram: fullA, Score: 0.8},
 	}
 
-	// Apply entity boost (threshold 0 — this test's seed clears any bar).
-	boosted := eng.applyEntityBoost(ctx, ws, initialResults, 0.0)
+// Apply entity boost with this test's true corpus size (3 engrams) as
+	// the vault-local n. "PostgreSQL" was upserted once (df=1, n=3), so
+	// idf = ln(3/1)/ln(3) = 1.0 and B's boost is the full entityBoostFactor.
+	boosted := eng.applyEntityBoost(ctx, ws, 3, initialResults, 0.05, nil)
 
 	// Build ID set from boosted results.
 	idSet := make(map[storage.ULID]float64, len(boosted))
@@ -171,10 +173,19 @@ func TestEntityBoost_ApplyEntityBoostDirect(t *testing.T) {
 	require.True(t, aFound, "engram A should remain in boosted results")
 	require.GreaterOrEqual(t, aScore, 0.8, "engram A score should not decrease")
 
-	// Engram B must be added with entityBoostFactor score.
+	// Engram B must be added with entityBoostFactor × idf (idf = 1.0 here).
 	bScore, bFound := idSet[idB]
 	require.True(t, bFound, "engram B should be added by entity boost")
-	require.InDelta(t, entityBoostFactor, bScore, 0.001, "engram B score should equal entityBoostFactor")
+	require.InDelta(t, entityBoostFactor*entityIDF(1, 3), bScore, 0.001, "engram B score should equal entityBoostFactor × idf")
+
+	// The injected result must carry a full component trace (issue #569).
+	for _, r := range boosted {
+		if r.Engram.ID == idB {
+			require.InDelta(t, bScore, r.Components.EntityBoost, 1e-9, "injected result must expose its boost in Components.EntityBoost")
+			require.InDelta(t, bScore, r.Components.Final, 1e-9, "injected result Final must equal its score")
+			require.Greater(t, r.Components.Confidence, 0.0, "injected result must carry engram confidence")
+		}
+	}
 
 	// Engram C must NOT be in results (different entity, no entity link written).
 	_, cFound := idSet[idC]
@@ -216,7 +227,7 @@ func TestEntityBoost_BelowThresholdSeedDoesNotSpread(t *testing.T) {
 	initialResults := []activation.ScoredEngram{{Engram: fullA, Score: 0.02}}
 
 	const threshold = 0.05
-	boosted := eng.applyEntityBoost(ctx, ws, initialResults, threshold)
+	boosted := eng.applyEntityBoost(ctx, ws, 2, initialResults, threshold, nil)
 
 	idSet := make(map[storage.ULID]struct{}, len(boosted))
 	for _, r := range boosted {
@@ -229,7 +240,7 @@ func TestEntityBoost_BelowThresholdSeedDoesNotSpread(t *testing.T) {
 
 	// Control: with threshold 0, A is a legitimate seed and B does surface — proves
 	// the exclusion is what suppresses B, not a broken setup.
-	ctrl := eng.applyEntityBoost(ctx, ws, []activation.ScoredEngram{{Engram: fullA, Score: 0.02}}, 0.0)
+	ctrl := eng.applyEntityBoost(ctx, ws, 2, []activation.ScoredEngram{{Engram: fullA, Score: 0.02}}, 0.0, nil)
 	ctrlSet := make(map[storage.ULID]struct{}, len(ctrl))
 	for _, r := range ctrl {
 		ctrlSet[r.Engram.ID] = struct{}{}
@@ -289,5 +300,433 @@ func TestEntityBoost_MaxResultsRespectedAfterBoost(t *testing.T) {
 			t.Errorf("activations not sorted descending at index %d: %.3f > %.3f",
 				i, resp.Activations[i].Score, resp.Activations[i-1].Score)
 		}
+	}
+}
+
+// writeLinkedEngram writes an engram at the store level and links it to the
+// given entities. Store-level writes bypass engine counters — tests using
+// this helper pass the intended vault-local n to applyEntityBoost directly.
+func writeLinkedEngram(t *testing.T, eng *Engine, ws [8]byte, concept string, entities ...string) storage.ULID {
+	t.Helper()
+	ctx := context.Background()
+	id, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    concept,
+		Content:    concept + " content",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	for _, name := range entities {
+		require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, id, name))
+	}
+	return id
+}
+
+// upsertEntityTimes upserts an entity record `times` times, setting its
+// global MentionCount (df) to that value.
+func upsertEntityTimes(t *testing.T, eng *Engine, name string, times int) {
+	t.Helper()
+	ctx := context.Background()
+	for range times {
+		require.NoError(t, eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+			Name:   name,
+			Type:   "concept",
+			Source: "inline",
+		}, "inline"))
+	}
+}
+
+// TestEntityBoost_UbiquitousEntityDoesNotFlood is the core regression for
+// issue #569: engrams sharing only a ubiquitous entity with the seeds must
+// not be injected into results, no matter how many seeds carry that entity.
+// Before the fix, each of the 5 seeds contributed a flat 0.15 per shared
+// entity, so hub engrams flooded recall at 5 × 0.15 = 0.75 with empty
+// score components, evicting genuine matches at truncation.
+func TestEntityBoost_UbiquitousEntityDoesNotFlood(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "flood-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	// Entity "Everyone" is mentioned by all 12 engrams: df = n → idf = 0.
+	upsertEntityTimes(t, eng, "Everyone", 12)
+	ids := make([]storage.ULID, 12)
+	for i := range ids {
+		ids[i] = writeLinkedEngram(t, eng, ws, fmt.Sprintf("hub-engram-%d", i), "Everyone")
+	}
+	// Five seeds — the exact shape that produced 0.75 injections pre-fix.
+	results := make([]activation.ScoredEngram, 0, 5)
+	for i := 0; i < 5; i++ {
+		full, err := eng.store.GetEngram(ctx, ws, ids[i])
+		require.NoError(t, err)
+		results = append(results, activation.ScoredEngram{Engram: full, Score: 0.8 - float64(i)*0.05})
+	}
+
+	boosted := eng.applyEntityBoost(ctx, ws, 12, results, 0.1, nil)
+
+	require.Len(t, boosted, 5, "no engram may be injected on ubiquitous-entity evidence alone")
+	for _, r := range boosted {
+		require.LessOrEqual(t, r.Components.EntityBoost, entityBoostNoiseFloor,
+			"a ubiquitous entity must contribute ~0 boost")
+	}
+}
+
+// TestEntityBoost_SameEntityViaMultipleSeedsCountsOnce verifies that a
+// shared entity is credited to a target once, regardless of how many seeds
+// carry it — the evidence is the shared entity, not the seed count.
+func TestEntityBoost_SameEntityViaMultipleSeedsCountsOnce(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "dedup-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	// "DupEnt" is mentioned by 3 engrams (2 seeds + 1 target) in a corpus of 100.
+	upsertEntityTimes(t, eng, "DupEnt", 3)
+	seed1 := writeLinkedEngram(t, eng, ws, "dedup-seed-1", "DupEnt")
+	seed2 := writeLinkedEngram(t, eng, ws, "dedup-seed-2", "DupEnt")
+	target := writeLinkedEngram(t, eng, ws, "dedup-target", "DupEnt")
+
+	fullSeed1, err := eng.store.GetEngram(ctx, ws, seed1)
+	require.NoError(t, err)
+	fullSeed2, err := eng.store.GetEngram(ctx, ws, seed2)
+	require.NoError(t, err)
+
+	boosted := eng.applyEntityBoost(ctx, ws, 100, []activation.ScoredEngram{
+		{Engram: fullSeed1, Score: 0.8},
+		{Engram: fullSeed2, Score: 0.7},
+	}, 0.05, nil)
+
+	expected := entityBoostFactor * entityIDF(3, 100)
+	var targetScore float64
+	found := false
+	for _, r := range boosted {
+		if r.Engram.ID == target {
+			targetScore = r.Score
+			found = true
+		}
+	}
+	require.True(t, found, "target should be injected (rare shared entity)")
+	require.InDelta(t, expected, targetScore, 1e-6,
+		"entity shared with two seeds must be credited once, not twice")
+}
+
+// TestEntityBoost_CapBoundsAccumulation verifies that the total boost a
+// single engram accumulates across several rare shared entities is clamped
+// at entityBoostCap.
+func TestEntityBoost_CapBoundsAccumulation(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "cap-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	entities := []string{"CapE1", "CapE2", "CapE3", "CapE4"}
+	for _, name := range entities {
+		upsertEntityTimes(t, eng, name, 2) // df=2 each — rare
+	}
+	seed := writeLinkedEngram(t, eng, ws, "cap-seed", entities...)
+	target := writeLinkedEngram(t, eng, ws, "cap-target", entities...)
+
+	// Sanity: uncapped accumulation would exceed the cap.
+	perEntity := entityBoostFactor * entityIDF(2, 1000)
+	require.Greater(t, 4*perEntity, entityBoostCap, "test setup must exceed the cap uncapped")
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, seed)
+	require.NoError(t, err)
+
+	boosted := eng.applyEntityBoost(ctx, ws, 1000, []activation.ScoredEngram{
+		{Engram: fullSeed, Score: 0.9},
+	}, 0.05, nil)
+
+	found := false
+	for _, r := range boosted {
+		if r.Engram.ID == target {
+			found = true
+			require.InDelta(t, entityBoostCap, r.Score, 1e-9,
+				"total boost must clamp at entityBoostCap")
+		}
+	}
+	require.True(t, found, "target should be injected")
+}
+
+// TestEntityBoost_InjectionRespectsThreshold verifies that engrams whose
+// entity evidence does not clear the caller's threshold are not injected —
+// a result below threshold stays below threshold regardless of how it was
+// found (issue #569: the old path injected sub-threshold results).
+func TestEntityBoost_InjectionRespectsThreshold(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "threshold-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	upsertEntityTimes(t, eng, "RareThing", 2)
+	seed := writeLinkedEngram(t, eng, ws, "threshold-seed", "RareThing")
+	writeLinkedEngram(t, eng, ws, "threshold-target", "RareThing")
+
+	boost := entityBoostFactor * entityIDF(2, 100)
+	fullSeed, err := eng.store.GetEngram(ctx, ws, seed)
+	require.NoError(t, err)
+
+	// Threshold just above the evidence: no injection.
+	high := eng.applyEntityBoost(ctx, ws, 100, []activation.ScoredEngram{
+		{Engram: fullSeed, Score: 0.8},
+	}, boost+0.01, nil)
+	require.Len(t, high, 1, "sub-threshold entity evidence must not be injected")
+
+	// Threshold just below the evidence: injected.
+	low := eng.applyEntityBoost(ctx, ws, 100, []activation.ScoredEngram{
+		{Engram: fullSeed, Score: 0.8},
+	}, boost-0.01, nil)
+	require.Len(t, low, 2, "entity evidence clearing the threshold is injected")
+}
+
+// TestEntityBoost_InjectionRespectsMetaFilters verifies that engrams injected
+// on entity evidence are gated on the caller's meta filters. The pipeline
+// applies filters in phase 6; the boost pass appends afterwards, so without
+// this gate a tags_all query returns records that do not carry the required
+// tags (reported in production on #569: 44 records returned, 4 matching).
+func TestEntityBoost_InjectionRespectsMetaFilters(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "meta-filter-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	upsertEntityTimes(t, eng, "FilterEnt", 3)
+
+	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "filter-seed",
+		Content:    "filter-seed content",
+		Confidence: 0.9,
+		Tags:       []string{"wanted"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, seedID, "FilterEnt"))
+
+	tagged, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "filter-tagged-target",
+		Content:    "tagged target content",
+		Confidence: 0.9,
+		Tags:       []string{"wanted"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, tagged, "FilterEnt"))
+
+	untagged, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "filter-untagged-target",
+		Content:    "untagged target content",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, untagged, "FilterEnt"))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, seedID)
+	require.NoError(t, err)
+
+	filters := []activation.Filter{{Field: "tags_all", Value: []string{"wanted"}}}
+	boosted := eng.applyEntityBoost(ctx, ws, 100, []activation.ScoredEngram{
+		{Engram: fullSeed, Score: 0.8},
+	}, 0.05, filters)
+
+	ids := make(map[storage.ULID]bool, len(boosted))
+	for _, r := range boosted {
+		ids[r.Engram.ID] = true
+	}
+	require.True(t, ids[tagged], "entity-linked engram carrying the required tag must be injected")
+	require.False(t, ids[untagged], "entity-linked engram without the required tag must not be injected")
+}
+
+// TestEntityBoost_TotalFoundCoversFilteredResults is the fingerprint
+// regression from the production report on #569: with meta filters set, the
+// boost pass appended unfiltered records after TotalFound was computed, so
+// any response with total < len(activations) is the bug firing (observed:
+// total=4 with 44 records returned). After the fix, every returned record
+// passes the filter and TotalFound covers the returned set.
+func TestEntityBoost_TotalFoundCoversFilteredResults(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "fingerprint-test"
+
+	// One engram matches both the query and the tag filter.
+	respWanted, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:    vault,
+		Concept:  "wanted flow record",
+		Content:  "PostgreSQL flow record with the wanted tag",
+		Tags:     []string{"record_kind=flow"},
+		Entities: []mbp.InlineEntity{{Name: "PostgreSQL", Type: "database"}},
+	})
+	require.NoError(t, err)
+
+	// Entity-linked engrams WITHOUT the tag: phase 6 filters them out, so
+	// pre-fix they re-entered via injection, past the filter and past
+	// TotalFound.
+	untaggedIDs := make(map[string]bool, 6)
+	for i := range 6 {
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:    vault,
+			Concept:  fmt.Sprintf("untagged sibling %d", i),
+			Content:  fmt.Sprintf("PostgreSQL sibling record %d without the tag", i),
+			Entities: []mbp.InlineEntity{{Name: "PostgreSQL", Type: "database"}},
+		})
+		require.NoError(t, err)
+		untaggedIDs[resp.ID] = true
+	}
+
+	// Filler engrams without the entity keep "PostgreSQL" rare enough that
+	// its idf — and thus the injection evidence — stays above threshold
+	// (df == n would zero the boost and the test would pass vacuously).
+	for i := range 10 {
+		_, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   vault,
+			Concept: fmt.Sprintf("filler %d", i),
+			Content: fmt.Sprintf("Redis cache entry %d for session data", i),
+		})
+		require.NoError(t, err)
+	}
+
+	awaitFTS(t, eng)
+
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      vault,
+		Context:    []string{"PostgreSQL flow record"},
+		MaxResults: 50,
+		Threshold:  0.01,
+		Filters:    []mbp.Filter{{Field: "tags_all", Value: []string{"record_kind=flow"}}},
+	})
+	require.NoError(t, err)
+
+	// No unfiltered record may be returned.
+	foundWanted := false
+	for _, item := range resp.Activations {
+		require.False(t, untaggedIDs[item.ID],
+			"engram %s (no required tag) leaked into tag-filtered results via entity boost", item.ID)
+		if item.ID == respWanted.ID {
+			foundWanted = true
+		}
+	}
+	require.True(t, foundWanted, "the tagged engram must be returned")
+
+	// The fingerprint: any response with total < len(activations) is the bug.
+	require.GreaterOrEqual(t, resp.TotalFound, len(resp.Activations),
+		"TotalFound must cover the returned set (fingerprint: total < len(activations))")
+
+	// Control from the production report: a filter matching nothing returns
+	// nothing. Note this passes even pre-fix (no survivors → no seeds → the
+	// boost early-returns), which is why it cannot serve as the regression
+	// test on its own.
+	empty, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      vault,
+		Context:    []string{"PostgreSQL flow record"},
+		MaxResults: 50,
+		Threshold:  0.01,
+		Filters:    []mbp.Filter{{Field: "tags_all", Value: []string{"no-such-tag"}}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, empty.Activations, "filter matching nothing must return nothing")
+}
+
+// TestEntityBoost_RarityIsVaultLocal is the two-vaults-one-engine regression
+// for the review on #570: entityIDF's n must be the recalled vault's engram
+// count, not the deployment-global counter. With a global n, an entity that
+// is locally ubiquitous (mentioned by every engram in its vault — exactly
+// what should score idf = 0) regains a positive idf as unrelated vaults are
+// added to the same server, re-opening the #569 flood gated by deployment
+// size: idf(6, 6) = 0 but idf(6, 30) ≈ 0.47, which boosts hub siblings past
+// a 0.05 threshold. The suite missed this because every prior test pinned n
+// to a single test vault's own size.
+func TestEntityBoost_RarityIsVaultLocal(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vaultA = "vault-local-a"
+	const vaultB = "vault-local-b"
+
+	// Vault A holds 6 engrams. "AlphaHub" is on ALL of them — locally
+	// ubiquitous, unique to this vault (df = 6 = vault size → idf must be 0).
+	// "AlphaRare" is on 2 — locally rare (idf(2,6) ≈ 0.61 → boost ≈ 0.09).
+	seed, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vaultA,
+		Concept: "primary database choice",
+		Content: "We use PostgreSQL as the primary relational database for transactional workloads",
+		Entities: []mbp.InlineEntity{
+			{Name: "AlphaHub", Type: "concept"},
+			{Name: "AlphaRare", Type: "concept"},
+		},
+	})
+	require.NoError(t, err)
+
+	hubOnly := make(map[string]bool, 4)
+	for i := range 4 {
+		resp, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:    vaultA,
+			Concept:  fmt.Sprintf("hub sibling %d", i),
+			Content:  fmt.Sprintf("moss inventory shelf audit note %d", i),
+			Entities: []mbp.InlineEntity{{Name: "AlphaHub", Type: "concept"}},
+		})
+		require.NoError(t, err)
+		hubOnly[resp.ID] = true
+	}
+
+	rare, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vaultA,
+		Concept: "rare sibling",
+		Content: "quiet bench ledger of appeals heard in whispers",
+		Entities: []mbp.InlineEntity{
+			{Name: "AlphaHub", Type: "concept"},
+			{Name: "AlphaRare", Type: "concept"},
+		},
+	})
+	require.NoError(t, err)
+
+	// Vault B: unrelated engrams sharing the engine. Under a global n these
+	// inflate every idf computed for vault A recalls; under a vault-local n
+	// they must change nothing about vault A's scoring.
+	for i := range 24 {
+		_, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   vaultB,
+			Concept: fmt.Sprintf("unrelated %d", i),
+			Content: fmt.Sprintf("orchard weather almanac entry %d", i),
+		})
+		require.NoError(t, err)
+	}
+
+	awaitFTS(t, eng)
+
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      vaultA,
+		Context:    []string{"primary relational database workloads"},
+		MaxResults: 20,
+		Threshold:  0.05,
+	})
+	require.NoError(t, err)
+
+	ids := make(map[string]bool, len(resp.Activations))
+	for _, item := range resp.Activations {
+		ids[item.ID] = true
+	}
+	require.True(t, ids[seed.ID], "the FTS-matching seed must be returned")
+	require.True(t, ids[rare.ID],
+		"a LOCALLY rare shared entity must still inject its sibling (idf(2,6) ≈ 0.61)")
+	for id := range hubOnly {
+		require.False(t, ids[id],
+			"a LOCALLY ubiquitous entity (df = vault size) must inject nothing, "+
+				"no matter how many engrams other vaults hold")
 	}
 }

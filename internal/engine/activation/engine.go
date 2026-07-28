@@ -125,11 +125,16 @@ type ScoreComponents struct {
 	DecayFactor        float64
 	HebbianBoost       float64
 	TransitionBoost    float64
-	AccessFrequency    float64
-	Recency            float64
-	Confidence         float64
-	Raw                float64
-	Final              float64
+	// EntityBoost is the post-pipeline spread-activation adjustment added by
+	// the entity boost phase (rarity-weighted, capped). Zero when the result
+	// received no entity boost; for engrams injected by that phase it equals
+	// the full Score (issue #569).
+	EntityBoost     float64
+	AccessFrequency float64
+	Recency         float64
+	Confidence      float64
+	Raw             float64
+	Final           float64
 }
 
 // ScoredEngram is one activation result.
@@ -638,7 +643,7 @@ func extractTimeBounds(filters []Filter) (time.Time, time.Time, bool) {
 // extractTagFilters extracts tags_all/tags_any tag lists, and raw tag_prefix
 // (prefix, op, bound) triples, from the filter list. tags_all/tags_any values
 // are coerced with asStringSlice; tag_prefix values are coerced with asPair —
-// both match passesMetaFilter's own interpretation of these fields.
+// both match PassesMetaFilter's own interpretation of these fields.
 func extractTagFilters(filters []Filter) (tagsAll, tagsAny []string, tagPrefix []tagPrefixFilter) {
 	for _, f := range filters {
 		switch f.Field {
@@ -657,7 +662,7 @@ func extractTagFilters(filters []Filter) (tagsAll, tagsAny []string, tagPrefix [
 
 // tagPrefixFilter is a decoded tag_prefix filter: engrams whose tag begins
 // with Prefix (e.g. "due:") are compared, after stripping Prefix, against
-// Bound per Op (lte/gte/lt/gt/eq) — see passesMetaFilter's "tag_prefix" case,
+// Bound per Op (lte/gte/lt/gt/eq) — see PassesMetaFilter's "tag_prefix" case,
 // which this mirrors for candidate SEEDING via the S1 raw-tag-range index.
 type tagPrefixFilter struct {
 	Prefix string
@@ -676,7 +681,7 @@ type tagPrefixFilter struct {
 //   - both present: union of the tags_all intersection and the tags_any union.
 //
 // The tag index stores Hash(tag) (4-byte), so a seeded ID can be a hash-collision
-// false positive; passesMetaFilter in phase 6 remains the correctness gate.
+// false positive; PassesMetaFilter in phase 6 remains the correctness gate.
 //
 // tagPrefix additionally seeds from the S1 ordered raw-tag-range index (0x2B):
 // for each distinct Prefix among tagPrefix, every filter sharing that prefix is
@@ -684,7 +689,7 @@ type tagPrefixFilter struct {
 // lte filter on the same prefix narrow to one bounded range), unioned into the
 // same seed set as tags_all/tags_any. This is what makes range-filtered recall
 // (e.g. tag_filter{prefix:"due:", lte:today}) SEED candidates instead of only
-// being checked post-hoc in phase 6's passesMetaFilter.
+// being checked post-hoc in phase 6's PassesMetaFilter.
 func (e *ActivationEngine) seedTagCandidates(ctx context.Context, ws [8]byte, tagsAll, tagsAny []string, tagPrefix []tagPrefixFilter, since, until time.Time, limit int) []storage.ULID {
 	seen := make(map[storage.ULID]struct{})
 	var seed []storage.ULID
@@ -1525,13 +1530,13 @@ func (e *ActivationEngine) phase6Score(
 	if w.UseRRFFusion {
 		for _, c := range all {
 			eng := engramByID[c.id]
-			if eng == nil || !passesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
+			if eng == nil || !PassesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 				continue
 			}
 			final := computeRRFScore(c.rrfScore, c.hebbianBoost, c.transitionBoost, eng)
 			// A filter defines the candidate SET; the relevance threshold only
 			// RANKS within it. An explicit tag-filter match (inTagPool, already
-			// verified by passesMetaFilter above) must never be dropped for
+			// verified by PassesMetaFilter above) must never be dropped for
 			// scoring below threshold — otherwise "due:<=today" reminders that
 			// are content-unrelated to the query silently vanish. Non-tag
 			// candidates are still thresholded normally.
@@ -1587,7 +1592,7 @@ func (e *ActivationEngine) phase6Score(
 		cgdnCands := make([]cgdnCandidate, 0, len(all))
 		for _, c := range all {
 			eng := engramByID[c.id]
-			if eng == nil || !passesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
+			if eng == nil || !PassesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 				continue
 			}
 			// Compute component scores (reuse existing helpers for decay, FTS normalization etc.)
@@ -1658,7 +1663,7 @@ func (e *ActivationEngine) phase6Score(
 		maxRaw := 0.0
 		for _, c := range all {
 			eng := engramByID[c.id]
-			if eng == nil || !passesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
+			if eng == nil || !PassesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 				continue
 			}
 			components := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
@@ -1693,7 +1698,7 @@ func (e *ActivationEngine) phase6Score(
 	// Legacy weighted-sum path: used when neither CGDN nor ACT-R is active (DisableACTR=true).
 	for _, c := range all {
 		eng := engramByID[c.id]
-		if eng == nil || !passesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
+		if eng == nil || !PassesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 			continue
 		}
 		components := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
@@ -2045,9 +2050,9 @@ func computeGatedActivation(vectorScore, normalizedFTS, decayFactor, hebbianBoos
 	return contentRelevance * gate
 }
 
-// passesMetaFilter evaluates filter predicates against a full engram.
+// PassesMetaFilter evaluates filter predicates against a full engram.
 // Accepts *storage.Engram directly — avoids a separate GetMetadata call in phase6.
-func passesMetaFilter(eng *storage.Engram, filters []Filter) bool {
+func PassesMetaFilter(eng *storage.Engram, filters []Filter) bool {
 	for _, f := range filters {
 		switch f.Field {
 		case "state":

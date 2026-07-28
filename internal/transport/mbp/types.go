@@ -308,6 +308,7 @@ type ScoreComponents struct {
 	DecayFactor        float32 `msgpack:"decay_factor"                  json:"decay_factor"`
 	HebbianBoost       float32 `msgpack:"hebbian_boost"                 json:"hebbian_boost"`
 	TransitionBoost    float32 `msgpack:"transition_boost,omitempty"    json:"transition_boost,omitempty"`
+	EntityBoost        float32 `msgpack:"entity_boost,omitempty"        json:"entity_boost,omitempty"`
 	AccessFrequency    float32 `msgpack:"access_frequency"              json:"access_frequency"`
 	Recency            float32 `msgpack:"recency"                       json:"recency"`
 	Raw                float32 `msgpack:"raw"                           json:"raw"`

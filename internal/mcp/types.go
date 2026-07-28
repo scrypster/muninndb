@@ -70,6 +70,7 @@ type Memory struct {
 	Summary     string    `json:"summary,omitempty"`
 	Score       float64   `json:"score,omitempty"`
 	VectorScore float64   `json:"vector_score,omitempty"`
+	EntityBoost float64   `json:"entity_boost,omitempty"`
 	Confidence  float32   `json:"confidence"`
 	Why         string    `json:"why,omitempty"`
 	Tags        []string  `json:"tags,omitempty"`
