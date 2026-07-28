@@ -34,9 +34,13 @@ const (
 	//                          via refuseAppend, so it holds on all transports; MCP also gates at
 	//                          dispatch). The credential for automated capture (flush): it can add
 	//                          memories and recall, never overwrite/evolve/forget/archive/re-trust.
-	//                          One accepted residual: remember on a content-hash duplicate may
-	//                          reinforce an existing engram's access metadata (TouchAccess, #682) —
-	//                          append "strengthens with use," it just never destroys or rewrites.
+	//                          Accepted residuals — all reinforcement ("strengthens with use"), never
+	//                          destruction: (a) remember on a content-hash duplicate reinforces an
+	//                          existing engram's access metadata (TouchAccess, #682); (b) the read
+	//                          path is NOT forced read-only for append (only for observe), so Read/
+	//                          recall drive RecordFeedback (adaptive scoring weights), TouchAccess,
+	//                          and Hebbian/PAS on existing state. None overwrite content/confidence/
+	//                          state/tags/lifecycle or delete. See engine.refuseAppend for the full note.
 )
 
 type contextKey string

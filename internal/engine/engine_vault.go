@@ -65,11 +65,27 @@ var ErrAppendForbidden = errors.New("append-mode credential cannot modify or del
 // exercises each such method so a newly-added destructive method missing this
 // call fails CI (principle #6: pin the derived guarantee, don't trust a blacklist).
 //
-// The one accepted residual: the additive tools (remember/remember_batch) may,
-// on a content-hash duplicate, reinforce an existing engram's access metadata
-// (TouchAccess / #682). Append "strengthens with use," it just never overwrites
-// content/confidence/state/tags/lifecycle or deletes. That side effect is not
-// routed through refuseAppend by design; it is documented on auth.ModeAppend.
+// Accepted residuals — all reinforcement, never destruction. refuseAppend guards
+// the destructive surface (overwrite/evolve/archive/re-trust/delete of existing
+// content/confidence/state/tags/lifecycle); it deliberately does NOT guard the
+// "strengthens with use" side effects that both the write and read paths drive on
+// EXISTING engrams:
+//   - additive remember on a content-hash duplicate → TouchAccess (#682).
+//   - the read path (Read/Activate/recall) under an append credential is NOT
+//     forced read-only (resolveReadOnly forces it only for observe), so it drives
+//     RecordFeedback (per-vault adaptive scoring weights), TouchAccess (access
+//     count / last-access), and Hebbian LTP + PAS on existing associations.
+//
+// None overwrite content/confidence/state/tags/lifecycle or delete — they only
+// reinforce, which is the product promise's first word. Documented identically on
+// auth.ModeAppend. (If future work needs append reads to leave existing state
+// byte-identical, force resolveReadOnly for append too; today it does not.)
+//
+// Scope note on the census: TestAppendMode_MethodCensus forces every exported
+// method into a bucket (real anti-rot — it caught Restore/PruneVault), but it does
+// not behaviorally prove the read-only/infra members are non-destructive; that
+// classification is a human judgment. More rot-resistant than a checklist, not
+// structurally rot-proof.
 func (e *Engine) refuseAppend(ctx context.Context) error {
 	if auth.AppendFromContext(ctx) {
 		return ErrAppendForbidden
