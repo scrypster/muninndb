@@ -2246,8 +2246,16 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// top-N result receives a small boost. This surfaces entity-linked engrams
 	// that have no direct association edge to the query-matching engrams.
 	result.Activations = e.applyEntityBoost(ctx, wsPrefix, result.Activations, actReq.Threshold)
-	// Re-apply MaxResults: entity boost may have appended engrams beyond the limit.
-	// applyEntityBoost re-sorts by score descending, so truncation preserves top-K.
+
+	// Supersedes-aware ranking: promote the current fact over any superseded one
+	// it replaces (injecting it if the query didn't retrieve it), so recall never
+	// leads with a fact it knows is stale. Runs after entity boost and BEFORE
+	// truncation so an injected head is not cut. Skipped in observe mode is
+	// unnecessary — it performs no writes (pure read-path ranking).
+	result.Activations = e.applySupersession(ctx, wsPrefix, result.Activations)
+
+	// Re-apply MaxResults: entity boost / supersession may have appended engrams
+	// beyond the limit. Both re-sort by score descending, so truncation keeps top-K.
 	if actReq.MaxResults > 0 && len(result.Activations) > actReq.MaxResults {
 		result.Activations = result.Activations[:actReq.MaxResults]
 	}
