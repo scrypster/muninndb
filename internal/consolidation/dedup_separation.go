@@ -19,14 +19,29 @@ import (
 // load-bearing token. A difference means they are NOT duplicates — they are an
 // update or a contradiction — and both are kept (recall's supersedes-aware ranking
 // and contradiction surfacing handle them). Bias: refuse-to-merge over destroy.
+//
+// SCOPE — this guard catches divergence on NUMBERS, DATES, and NEGATION only.
+// Known blind spots (a merge here can still destroy a distinct fact), all documented
+// follow-ups, none of which this increment claims to solve:
+//   - Entity/noun swaps: "office in Boston" vs "…NYC", "we use Postgres" vs "…Mongo".
+//   - Same-magnitude currency/unit swaps: "$99" vs "99 euros" (symbols are dropped;
+//     only the number 99 is compared). Adjacent to the headline example, so called out.
+//   - Spelled-out numbers: "eight months" vs "nine months" (words, not digits).
+// Broadening to content-word/entity divergence needs NER or a token-set diff and is a
+// separate increment.
 
 var (
 	// numbers: digit runs with optional thousands separators / decimals, so
-	// "$1,299.00" and "80" are captured. Currency/unit symbols are stripped by the
-	// word split; we compare the numeric values themselves.
+	// "$1,299.00" and "80" are captured. NOTE: currency/unit SYMBOLS are dropped by
+	// tokenization, so "$99" and "99 euros" both reduce to "99" and are NOT
+	// distinguished — a same-magnitude currency swap is a documented blind spot
+	// (see the follow-ups note below), same class as the entity-swap gap.
 	reNumber = regexp.MustCompile(`\d[\d,]*(?:\.\d+)?`)
 	// 4-digit years (1900–2099) — the common date token in memories.
 	reYear = regexp.MustCompile(`\b(?:19|20)\d{2}\b`)
+	// US thousands grouping only: 1-3 digits then one-or-more ",ddd" groups, whole
+	// token. Used to safely strip commas ONLY when unambiguous.
+	reUSThousands = regexp.MustCompile(`^\d{1,3}(?:,\d{3})+$`)
 )
 
 // negationMarkers are words whose presence flips or corrects a claim. If one
@@ -80,13 +95,18 @@ func numberSet(s string) map[string]bool {
 	return out
 }
 
-// normalizeNumber strips thousands separators and trailing-zero decimals so
-// "1,299" == "1299" and "99.00" == "99", but "99" != "149".
+// normalizeNumber collapses ONLY unambiguous formatting equivalences, and leaves
+// every ambiguous form intact so a genuine numeric difference can never silently
+// collapse (refuse-to-merge over destroy). Concretely:
+//   - commas are stripped only for the US thousands pattern "1,000" (→ "1000"); a
+//     European decimal like "1,5" is left as-is (so it never equals "15").
+//   - decimals are NOT trimmed: "1.000" (which may be European thousands = 1000)
+//     stays "1.000" and never collapses to "1". The cost is that "2.50" and "2.5"
+//     are treated as distinct (a harmless over-fire that keeps both), which is the
+//     safe side of the line.
 func normalizeNumber(n string) string {
-	n = strings.ReplaceAll(n, ",", "")
-	if strings.Contains(n, ".") {
-		n = strings.TrimRight(n, "0")
-		n = strings.TrimRight(n, ".")
+	if reUSThousands.MatchString(n) {
+		n = strings.ReplaceAll(n, ",", "")
 	}
 	return n
 }
