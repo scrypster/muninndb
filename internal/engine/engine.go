@@ -2539,6 +2539,9 @@ func (e *Engine) Unsubscribe(ctx context.Context, subID string) error {
 
 // Link implements mbp.EngineAPI.Link.
 func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkResponse, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 
 	sourceID, err := storage.ParseULID(req.SourceID)
@@ -2925,6 +2928,9 @@ func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 // Restore un-deletes a soft-deleted engram by restoring its state to StateActive.
 // Returns an error if the engram does not exist or was hard-deleted.
 func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return nil, err
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
@@ -3460,6 +3466,9 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 // CompareAndSet/DeleteEngram on the same id (STO-2). TouchAccess holds the
 // per-engram stripe lock across the whole RMW.
 func (e *Engine) RecordAccess(ctx context.Context, vault, id string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
@@ -3488,6 +3497,9 @@ func (e *Engine) ResolveVaultPlasticity(vaultName string) auth.ResolvedPlasticit
 // persist in the relevance bucket index and cause an infinite prune loop.
 // Returns the number of engrams pruned.
 func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return 0, err
+	}
 	if !e.beginVaultOp() {
 		return 0, fmt.Errorf("engine is shutting down")
 	}

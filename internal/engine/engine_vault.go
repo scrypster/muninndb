@@ -81,6 +81,9 @@ func (e *Engine) refuseAppend(ctx context.Context) error {
 // It evicts all in-memory state (HNSW, FTS IDF cache, novelty fingerprints, coherence
 // counters, activity tracking) and adjusts the global engramCount.
 func (e *Engine) ClearVault(ctx context.Context, vaultName string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	if !e.beginVaultOp() {
 		return fmt.Errorf("engine is shutting down")
 	}
@@ -182,6 +185,9 @@ var ErrVaultJobActive = fmt.Errorf("vault has an active clone/merge job in progr
 // persisted 0x0F index — but for renamed vaults we need the index lookup
 // (not raw SipHash) to find the real ws, so we capture it up front.
 func (e *Engine) DeleteVault(ctx context.Context, vaultName string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	if !e.beginVaultOp() {
 		return fmt.Errorf("engine is shutting down")
 	}
@@ -296,6 +302,9 @@ func (e *Engine) VaultNameExists(name string) bool {
 // doesn't exist, ErrVaultJobActive if a clone/merge job targets the vault,
 // or an error if newName already exists.
 func (e *Engine) RenameVault(ctx context.Context, oldName, newName string) error {
+	if err := e.refuseAppend(ctx); err != nil {
+		return err
+	}
 	if !e.beginVaultOp() {
 		return fmt.Errorf("engine is shutting down")
 	}

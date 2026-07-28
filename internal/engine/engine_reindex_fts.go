@@ -20,6 +20,9 @@ import (
 // NOTE: This method does NOT rebuild HNSW embeddings — it is FTS-only.
 // The vault must exist in the registered name list or ErrVaultNotFound is returned.
 func (e *Engine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, error) {
+	if err := e.refuseAppend(ctx); err != nil {
+		return 0, err
+	}
 	if !e.beginVaultOp() {
 		return 0, fmt.Errorf("engine is shutting down")
 	}
