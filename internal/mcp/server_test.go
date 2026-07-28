@@ -126,7 +126,7 @@ func (f *fakeEngine) CountChildren(_ context.Context, vault, engramID string) (i
 func (f *fakeEngine) GetEnrichmentMode(_ context.Context) string {
 	return "none"
 }
-func (f *fakeEngine) WhereLeftOff(_ context.Context, _ string, _ int) ([]WhereLeftOffEntry, error) {
+func (f *fakeEngine) WhereLeftOff(_ context.Context, _ string, _ int, _ []string) ([]WhereLeftOffEntry, error) {
 	return []WhereLeftOffEntry{}, nil
 }
 func (f *fakeEngine) FindByEntity(_ context.Context, _, _ string, _ int) (*engine.FindByEntityResult, error) {

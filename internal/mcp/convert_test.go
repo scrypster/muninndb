@@ -424,6 +424,23 @@ func TestActivationToMemoryTypeZeroValueIsFact(t *testing.T) {
 	}
 }
 
+// TestActivationToMemory_MapsTags verifies muninn_recall exposes the stored
+// tags on Memory.Tags — S4. Previously mbp.ActivationItem had no Tags field
+// so recall always dropped them (muninn_read already returned them).
+func TestActivationToMemory_MapsTags(t *testing.T) {
+	item := &mbp.ActivationItem{
+		ID:   "tagged-recall",
+		Tags: []string{"one", "two"},
+	}
+	m := activationToMemory(item)
+	if len(m.Tags) != 2 {
+		t.Fatalf("Tags len = %d, want 2 (got %v)", len(m.Tags), m.Tags)
+	}
+	if m.Tags[0] != "one" || m.Tags[1] != "two" {
+		t.Errorf("Tags = %v, want [one two]", m.Tags)
+	}
+}
+
 // TestReadResponseToMemoryMapsType verifies muninn_read maps MemoryType and
 // TypeLabel from the wire response (which has always carried them).
 func TestReadResponseToMemoryMapsType(t *testing.T) {

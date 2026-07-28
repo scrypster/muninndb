@@ -369,6 +369,7 @@ type WhereLeftOffEntry struct {
 	State      string    `json:"state"`
 	Type       string    `json:"type"`                 // canonical MemoryType label; always present
 	TypeLabel  string    `json:"type_label,omitempty"` // writer-supplied free-form label
+	Tags       []string  `json:"tags,omitempty"`
 }
 
 // EntityClusterResult is one entity co-occurrence pair returned by muninn_entity_clusters.

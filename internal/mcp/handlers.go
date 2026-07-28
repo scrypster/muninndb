@@ -886,7 +886,16 @@ func (s *MCPServer) handleWhereLeftOff(ctx context.Context, w http.ResponseWrite
 		return
 	}
 
-	entries, err := s.engine.WhereLeftOff(ctx, vault, limit)
+	var excludeTypeLabels []string
+	if raw, ok := args["exclude_type_labels"].([]any); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				excludeTypeLabels = append(excludeTypeLabels, s)
+			}
+		}
+	}
+
+	entries, err := s.engine.WhereLeftOff(ctx, vault, limit, excludeTypeLabels)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return

@@ -586,6 +586,11 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "boolean",
 						"description": "When true, marks this call as a pure read. where_left_off never has write side effects regardless of this flag; it exists for API consistency with muninn_recall/muninn_read. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
 					},
+					"exclude_type_labels": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Opt-in: type_label values to skip (e.g. \"session-log\"), so recency scan noise doesn't crowd out real memories. Excluded entries don't count against limit — the scan keeps going to fill it. Default: empty (no exclusion, all types included).",
+					},
 				},
 				"required": []string{},
 			},
