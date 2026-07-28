@@ -26,6 +26,7 @@ func allToolDefinitions() []ToolDefinition {
 					"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
 					"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
 					"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
+					"importance":  map[string]any{"type": "number", "description": "Importance 0.0-1.0 — how much this memory matters (priority axis, orthogonal to confidence/truth). Memories with effective importance >= 0.7 are protected from capacity (max_engrams) pruning; importance does not affect decay or recall ranking. Omit to use a default derived from the memory type (decisions/goals/constraints rank higher than observations/events)."},
 					"created_at":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this memory was created (transaction time). Defaults to now."},
 					"valid_from":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact BECAME TRUE (application time — distinct from created_at, which records when it was stored). Defaults to created_at. Use for historical facts, e.g. storing today that the office moved last January."},
 					"valid_until": map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact STOPPED being true (exclusive — the window is [valid_from, valid_until)). Omit for facts that are still true. Facts with valid_until in the past are excluded from default recall; retrieve them with as_of or include_invalid."},
@@ -102,6 +103,7 @@ func allToolDefinitions() []ToolDefinition {
 								"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
 								"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
 								"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
+								"importance":  map[string]any{"type": "number", "description": "Importance 0.0-1.0 (priority axis; >= 0.7 is protected from capacity pruning; does not affect decay or ranking). Omit for a type-derived default."},
 								"created_at":  map[string]any{"type": "string", "description": "ISO 8601 timestamp (transaction time). Defaults to now."},
 								"valid_from":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact became true (application time). Defaults to created_at."},
 								"valid_until": map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact stopped being true (exclusive). Omit for facts still true."},
@@ -333,6 +335,10 @@ func allToolDefinitions() []ToolDefinition {
 					"effective_at": map[string]any{
 						"type":        "string",
 						"description": "ISO 8601 timestamp for when the new version BECAME TRUE (application time; defaults to now). The old version's validity window closes at this moment and the new version's opens — use when the change happened before you recorded it.",
+					},
+					"importance": map[string]any{
+						"type":        "number",
+						"description": "Importance 0.0-1.0 for the new version. Omit to inherit the predecessor's explicitly asserted importance (an unset predecessor stays unset and keeps its type-derived default).",
 					},
 					"embedding": map[string]any{
 						"type":        "array",

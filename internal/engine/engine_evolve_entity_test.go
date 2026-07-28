@@ -209,14 +209,14 @@ func TestEvolve_InlineEntitiesReplaceCarry(t *testing.T) {
 	ws := eng.store.ResolveVaultPrefix("test")
 
 	// Control arm: no inline entities — the carry must be live.
-	controlID, err := eng.EvolveAt(ctx, "test", write("Alice owns the deploy"), "Alice still owns the deploy", "refresh", nil, "", nil, time.Time{})
+	controlID, err := eng.EvolveAt(ctx, "test", write("Alice owns the deploy"), "Alice still owns the deploy", "refresh", nil, "", nil, nil, time.Time{})
 	require.NoError(t, err)
 	require.Equal(t, []string{"Alice"}, engramEntities(t, eng, ws, controlID),
 		"control: without inline entities the predecessor's links carry forward")
 
 	// Replace arm: inline entities suppress that live carry.
 	newID, err := eng.EvolveAt(ctx, "test", write("Alice owns the other deploy"), "Bob owns the deploy now", "handover", nil, "",
-		[]mbp.InlineEntity{{Name: "Bob", Type: "person"}}, time.Time{})
+		[]mbp.InlineEntity{{Name: "Bob", Type: "person"}}, nil, time.Time{})
 	require.NoError(t, err)
 
 	names := engramEntities(t, eng, ws, newID)

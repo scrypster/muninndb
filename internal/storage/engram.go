@@ -184,6 +184,7 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 				AssocCount:  uint16(len(eng.Associations)),
 				EmbedDim:    eng.EmbedDim,
 				MemoryType:  eng.MemoryType,
+				Trust:       eng.Trust,
 				ValidFrom:   eng.ValidFrom,
 				ValidUntil:  eng.ValidUntil,
 				Importance:  eng.Importance,
@@ -225,6 +226,7 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 			AssocCount:  erfMeta.AssocCount,
 			EmbedDim:    EmbedDimension(erfMeta.EmbedDim),
 			MemoryType:  MemoryType(erfMeta.MemoryType),
+			Trust:       TrustLevel(erfMeta.Trust),
 			ValidFrom:   erfMeta.ValidFrom,
 			ValidUntil:  erfMeta.ValidUntil,
 			Importance:  erfMeta.Importance,
@@ -963,10 +965,16 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 // whatever state a concurrent CAS just committed (STO-3) — TouchAccess never
 // has a stale view of State to accidentally index against.
 //
-// Trust and Confidence are never part of the write: reinforcement moves only
-// AccessCount/LastAccess, by construction — access frequency is not evidence of
-// correctness, so it must not move Confidence (cf. COG-10: co-activation never
-// updates confidence).
+// Trust, Confidence, and Importance are never part of the write: reinforcement
+// moves only AccessCount/LastAccess, by construction — access frequency is not
+// evidence of correctness (COG-10: co-activation never updates confidence) and
+// not evidence of priority (COG-10 amendment: access never moves importance).
+// NOTE: Stability deliberately passes through unchanged. An earlier draft added
+// an inverse-retrieval-strength Stability gain here; it was deferred because
+// Stability feeds the weighted_sum/RRF DecayFactor score component, so a
+// write-on-read would silently change recall results in those modes. Any
+// future reinforcement write here must be designed against all three scoring
+// modes (ACT-R, weighted_sum, RRF) first.
 func (ps *PebbleStore) TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULID) error {
 	mu := ps.casLocks.For(id[:])
 	mu.Lock()

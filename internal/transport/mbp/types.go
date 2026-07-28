@@ -104,6 +104,16 @@ type WriteRequest struct {
 	ValidFrom  *time.Time `msgpack:"valid_from,omitempty" json:"valid_from,omitempty"`
 	ValidUntil *time.Time `msgpack:"valid_until,omitempty" json:"valid_until,omitempty"`
 
+	// Importance is the caller-asserted priority in [0,1] (orthogonal to
+	// Confidence, which is truth). Pointer so an explicit 0 is distinct from
+	// unset: nil = unset (a use-time default is derived from the memory type
+	// at read/prune time and never stored); an explicit value is clamped to
+	// [0,1] and an explicit 0.0 is quantized to 0.01 on write so the stored
+	// 0 = unset sentinel stays intact. In this increment importance drives
+	// pruning protection (COG-20) and is surfaced on read — it does not
+	// modify decay or recall ranking.
+	Importance *float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
+
 	// Inline enrichment: caller-provided data that bypasses background enrichment.
 	Summary             string                     `msgpack:"summary,omitempty" json:"summary,omitempty"`
 	Entities            []InlineEntity             `msgpack:"entities,omitempty" json:"entities,omitempty"`
@@ -164,6 +174,12 @@ type ReadResponse struct {
 	ValidFrom  int64 `msgpack:"valid_from,omitempty" json:"valid_from,omitempty"`
 	ValidUntil int64 `msgpack:"valid_until,omitempty" json:"valid_until,omitempty"`
 	IsCurrent  bool  `msgpack:"is_current" json:"is_current"`
+
+	// Importance is the STORED caller-asserted importance (0 = unset; the
+	// presentation layer derives the effective value from MemoryType/Trust —
+	// the derived value is never stored, so the wire carries only the
+	// assertion). omitempty intentional: absent means unset/derived.
+	Importance float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
 
 	// Entities and EntityRelationships are populated by muninn_read to expose what
 	// was stored via inline enrichment. Empty when no entities/relationships were linked.
@@ -299,6 +315,9 @@ type ActivationItem struct {
 	ValidFrom  int64 `msgpack:"valid_from,omitempty" json:"valid_from,omitempty"`
 	ValidUntil int64 `msgpack:"valid_until,omitempty" json:"valid_until,omitempty"`
 	Expired    bool  `msgpack:"expired,omitempty" json:"expired,omitempty"`
+	// Importance is the STORED caller-asserted importance (0 = unset; the
+	// presentation layer derives the effective value — see ReadResponse).
+	Importance float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
 }
 
 // ScoreComponents breaks down the activation score.

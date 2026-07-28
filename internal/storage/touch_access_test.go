@@ -56,9 +56,13 @@ func TestTouchAccess_ConcurrentWithCAS(t *testing.T) {
 }
 
 // TestTouchAccess_PreservesOtherFields verifies TouchAccess bumps ONLY
-// AccessCount and LastAccess — Confidence/Relevance/Stability/State/Trust must
-// be read fresh under the lock and passed through unchanged. Pins the "never
-// escalates trust/confidence via reinforcement" invariant at the storage layer.
+// AccessCount and LastAccess — Confidence/Relevance/Stability/State/Trust/
+// Importance must be read fresh under the lock and passed through unchanged.
+// Pins the "never escalates trust/confidence via reinforcement" invariant
+// (COG-10) at the storage layer, including the amendment that access never
+// moves Importance, and the deliberate decision that TouchAccess does not
+// write Stability (it feeds the weighted_sum/RRF DecayFactor score component,
+// so a write-on-read would change recall results — see the method doc).
 func TestTouchAccess_PreservesOtherFields(t *testing.T) {
 	store, cleanup := newTestStoreHelper(t)
 	defer cleanup()
@@ -99,5 +103,64 @@ func TestTouchAccess_PreservesOtherFields(t *testing.T) {
 	}
 	if after.Trust != before.Trust {
 		t.Errorf("Trust changed: before=%v after=%v (TouchAccess must not touch trust)", before.Trust, after.Trust)
+	}
+	if after.Stability != before.Stability {
+		t.Errorf("Stability changed: before=%v after=%v (TouchAccess must not touch stability — it feeds weighted_sum/RRF scoring)", before.Stability, after.Stability)
+	}
+	if after.Importance != before.Importance {
+		t.Errorf("Importance changed: before=%v after=%v (TouchAccess must never move importance — COG-10)", before.Importance, after.Importance)
+	}
+}
+
+// writeAgedEngram stores an engram whose CreatedAt/LastAccess are `age` in the
+// past with the given prior access count and importance, bypassing WriteEngram's
+// "LastAccess defaults to CreatedAt=now" freshness.
+func writeAgedEngram(t *testing.T, store *PebbleStore, ws [8]byte, age time.Duration, accessCount uint32, importance float32) ULID {
+	t.Helper()
+	past := time.Now().Add(-age)
+	id, err := store.WriteEngram(context.Background(), ws, &Engram{
+		Concept:     "aged",
+		Content:     "aged content " + past.String(),
+		CreatedAt:   past,
+		UpdatedAt:   past,
+		LastAccess:  past,
+		AccessCount: accessCount,
+		Importance:  importance,
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+	return id
+}
+
+// TestTouchAccess_ConcurrentWithDelete races TouchAccess against DeleteEngram
+// on the same id under -race. TouchAccess holds the same stripe lock and drops
+// the L1 cache before its authoritative read, so it must never resurrect a
+// deleted engram's keys (#594 class): after both return, the engram must be
+// gone.
+func TestTouchAccess_ConcurrentWithDelete(t *testing.T) {
+	store, cleanup := newTestStoreHelper(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := store.VaultPrefix("touch-delete")
+
+	for i := 0; i < 200; i++ {
+		id := writeAgedEngram(t, store, ws, 48*time.Hour, 0, 0.5)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = store.DeleteEngram(ctx, ws, id)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = store.TouchAccess(ctx, ws, id)
+		}()
+		wg.Wait()
+
+		if _, err := store.GetEngram(ctx, ws, id); err == nil {
+			t.Fatalf("iter %d: engram still readable after DeleteEngram — TouchAccess resurrected it", i)
+		}
 	}
 }

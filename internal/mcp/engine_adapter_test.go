@@ -352,3 +352,24 @@ func TestWhereLeftOff_ReturnsTags(t *testing.T) {
 		t.Errorf("Tags = %v, want [alpha beta]", entry.Tags)
 	}
 }
+
+// TestWhereLeftOffEntryFromEngramImportance verifies the muninn_where_left_off
+// projection carries importance + provenance (explicit vs derived), matching
+// the read/recall surfaces.
+func TestWhereLeftOffEntryFromEngramImportance(t *testing.T) {
+	explicit := whereLeftOffEntryFromEngram(&storage.Engram{
+		ID:         storage.ULID{9},
+		MemoryType: storage.TypeTask,
+		Importance: 0.9,
+	})
+	if explicit.Importance != 0.9 || explicit.ImportanceSource != "explicit" {
+		t.Errorf("explicit entry = (%v, %q), want (0.9, explicit)", explicit.Importance, explicit.ImportanceSource)
+	}
+	derived := whereLeftOffEntryFromEngram(&storage.Engram{
+		ID:         storage.ULID{10},
+		MemoryType: storage.TypeGoal,
+	})
+	if derived.Importance != 0.6 || derived.ImportanceSource != "derived" {
+		t.Errorf("derived entry = (%v, %q), want (0.6, derived)", derived.Importance, derived.ImportanceSource)
+	}
+}

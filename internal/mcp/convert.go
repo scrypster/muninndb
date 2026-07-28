@@ -64,6 +64,8 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		Tags:        item.Tags,
 		Expired:     item.Expired,
 	}
+	m.Importance, m.ImportanceSource = importanceFields(item.Importance,
+		storage.MemoryType(item.MemoryType), storage.TrustLevel(item.Trust))
 	// Valid-time annotations: only present when meaningful (backdated
 	// valid_from, or a closed window).
 	if item.ValidFrom != 0 {
@@ -97,6 +99,8 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		Relevance:   r.Relevance,
 		Trust:       storage.TrustLevel(r.Trust).String(),
 	}
+	m.Importance, m.ImportanceSource = importanceFields(r.Importance,
+		storage.MemoryType(r.MemoryType), storage.TrustLevel(r.Trust))
 	// muninn_read always echoes the valid-time axis (teaches the two axes:
 	// created_at is transaction time, valid_from/valid_until application time).
 	if r.ValidFrom != 0 {
@@ -121,6 +125,19 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		})
 	}
 	return m
+}
+
+// importanceFields resolves the (importance, importance_source) presentation
+// pair from a stored importance plus the memory type and trust the effective
+// value derives from when unset. "explicit" = the caller asserted the value
+// (stored > 0 — writes quantize explicit 0 to 0.01); "derived" = the use-time
+// type-table default (never stored). Mirrors storage.EffectiveImportance.
+func importanceFields(stored float32, memType storage.MemoryType, trust storage.TrustLevel) (float64, string) {
+	eff := roundScore(storage.EffectiveImportance(stored, memType, trust))
+	if storage.ImportanceExplicit(stored) {
+		return eff, "explicit"
+	}
+	return eff, "derived"
 }
 
 // textContent wraps a string in the MCP tools/call result envelope.

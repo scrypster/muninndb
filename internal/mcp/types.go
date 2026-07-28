@@ -84,6 +84,13 @@ type Memory struct {
 	SourceType  string    `json:"source_type,omitempty"`
 	Trust       string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
 
+	// Importance is the use-time EffectiveImportance in [0,1]; always present.
+	// ImportanceSource says where it came from: "explicit" (caller-asserted at
+	// write/evolve) or "derived" (memory-type table + trust bump — never
+	// stored, computed at read time).
+	Importance       float64 `json:"importance"`
+	ImportanceSource string  `json:"importance_source"` // "explicit" | "derived"
+
 	// Valid-time (application-time) axis, half-open [valid_from, valid_until).
 	// Distinct from created_at (transaction time). muninn_read always sets
 	// valid_from and is_current; recall sets valid_from only when it diverges
@@ -389,6 +396,10 @@ type WhereLeftOffEntry struct {
 	Type       string    `json:"type"`                 // canonical MemoryType label; always present
 	TypeLabel  string    `json:"type_label,omitempty"` // writer-supplied free-form label
 	Tags       []string  `json:"tags,omitempty"`
+	// Importance is the use-time EffectiveImportance; ImportanceSource is
+	// "explicit" or "derived" (same convention as Memory).
+	Importance       float64 `json:"importance"`
+	ImportanceSource string  `json:"importance_source"`
 }
 
 // EntityClusterResult is one entity co-occurrence pair returned by muninn_entity_clusters.

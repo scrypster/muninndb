@@ -949,6 +949,25 @@ func resolveTrust(ctx context.Context, label string) (storage.TrustLevel, error)
 	return level, nil
 }
 
+// importanceFromRequest resolves an optional caller-asserted importance into
+// the stored representation: nil → 0 (unset — the use-time type-table default
+// applies at read/decay/prune time). An explicit value is clamped to [0,1],
+// and an explicit 0.0 (or negative) is quantized to 0.01 so the stored 0
+// keeps meaning "unset" — behaviorally identical, one fewer flag byte.
+func importanceFromRequest(p *float32) float32 {
+	if p == nil {
+		return 0
+	}
+	v := *p
+	if v > 1 {
+		v = 1
+	}
+	if v <= 0 {
+		v = 0.01
+	}
+	return v
+}
+
 // Write implements mbp.EngineAPI.Write.
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	writeStart := time.Now()
@@ -1058,6 +1077,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		Tags:       req.Tags,
 		Confidence: req.Confidence,
 		Stability:  req.Stability,
+		Importance: importanceFromRequest(req.Importance),
 		Embedding:  req.Embedding,
 		MemoryType: storage.MemoryType(req.MemoryType),
 		TypeLabel:  req.TypeLabel,
@@ -1561,6 +1581,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			Tags:       req.Tags,
 			Confidence: req.Confidence,
 			Stability:  req.Stability,
+			Importance: importanceFromRequest(req.Importance),
 			Embedding:  req.Embedding,
 			MemoryType: storage.MemoryType(req.MemoryType),
 			TypeLabel:  req.TypeLabel,
@@ -2049,6 +2070,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		ValidFrom:           eng.EffectiveValidFrom().UnixNano(),
 		ValidUntil:          validUntilNano(eng.ValidUntil),
 		IsCurrent:           eng.ValidUntil.IsZero(),
+		Importance:          eng.Importance,
 		Entities:            entities,
 		EntityRelationships: entityRels,
 	}, nil
@@ -2350,6 +2372,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			MemoryType:  uint8(scored.Engram.MemoryType),
 			TypeLabel:   scored.Engram.TypeLabel,
 			Tags:        scored.Engram.Tags,
+			Importance:  scored.Engram.Importance,
 		}
 
 		// Supersession annotation from the supersedes-aware ranking phase (always-on
@@ -3246,17 +3269,21 @@ type EngineSessionEntry struct {
 // from the predecessor — the update changed what the memory is about.
 // All three writes are committed in a single atomic Pebble batch.
 func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (storage.ULID, error) {
-	return e.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, nil, time.Time{})
+	return e.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, nil, nil, time.Time{})
 }
 
-// EvolveAt is Evolve with two optional extras: an explicit valid-time boundary
-// and a replacement entity set. effectiveAt is the application-time moment the
-// new version became true — it becomes the successor's ValidFrom and the
+// EvolveAt is Evolve with three optional extras. entities, when non-nil,
+// replaces the carried entity set (the update changed what the memory is
+// about); nil carries the predecessor's entities forward as before. importance
+// overrides the successor's caller-asserted importance (clamped [0,1], explicit
+// 0 quantized to 0.01, same rules as Write); nil inherits the predecessor's
+// explicitly asserted importance verbatim (an unset predecessor stays unset, so
+// a type-derived default keeps deriving from the inherited MemoryType rather
+// than being frozen into the record). effectiveAt is the application-time moment
+// the new version became true — it becomes the successor's ValidFrom and the
 // predecessor's ValidUntil stamp (half-open [from, until) windows meet exactly);
-// the zero time defaults to now. entities, when non-nil, replaces the carried
-// entity set (the update changed what the memory is about); nil carries the
-// predecessor's entities forward as before.
-func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, effectiveAt time.Time) (storage.ULID, error) {
+// the zero time defaults to now.
+func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (storage.ULID, error) {
 	// Append-mode credentials cannot evolve (modify an existing memory). Guarding
 	// EvolveAt covers Evolve too, since Evolve delegates here (#687 + valid-time).
 	if auth.AppendFromContext(ctx) {
@@ -3316,6 +3343,13 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 	// retroactive processor both treat a non-empty Summary as caller-authoritative
 	// and skip the stage, which would pin the stale text permanently and leave
 	// KeyPoints — produced only by that stage — empty forever.
+	// Importance: explicit override wins; otherwise inherit the predecessor's
+	// stored (explicit-only) value. Unset stays unset — never freeze the
+	// use-time type-table default into the record.
+	newImportance := oldEng.Importance
+	if importance != nil {
+		newImportance = importanceFromRequest(importance)
+	}
 	newEng := &storage.Engram{
 		ID:         newULID,
 		Concept:    concept,
@@ -3323,6 +3357,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 		Tags:       oldEng.Tags,
 		MemoryType: oldEng.MemoryType,
 		TypeLabel:  oldEng.TypeLabel,
+		Importance: newImportance,
 		Confidence: 1.0,
 		Stability:  30.0,
 		State:      storage.StateActive,
@@ -3767,6 +3802,14 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			// Phase 2: load metadata and compute real ACT-R base-level score for each candidate.
 			// B(M) = ln(n+1) - d * ln(max(ageDays, 0.1) / n)  where d=0.5 (standard decay).
 			// Engrams with low B(M) are stale and rarely accessed — safest to delete.
+			//
+			// COG-20: candidates with EffectiveImportance >= HighImportanceFloor
+			// are exempt from this retrieval-strength prune path — an important
+			// memory is never deleted just because it is cold. The exemption
+			// deliberately performs NO validity check: an expired-but-important
+			// fact stays findable via as_of (valid-time gives time travel;
+			// importance guarantees the destination still exists). RetentionDays
+			// below remains an authoritative age policy and is NOT exempt.
 			type scoredCandidate struct {
 				id    storage.ULID
 				score float64
@@ -3774,31 +3817,43 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			const actrDecay = 0.5
 			now := time.Now()
 			scored := make([]scoredCandidate, 0, len(candidates))
+			var exempted int
 
 			if len(candidates) > 0 {
 				metas, err := e.store.GetMetadata(opCtx, ws, candidates)
 				if err != nil {
-					// Fall back: delete candidates in index order without rescoring.
+					// Degrade loudly, never importance-blind: without metadata we
+					// cannot honor the COG-20 exemption, so skip this MaxEngrams
+					// pass entirely (the prune worker retries in ~60s) instead of
+					// deleting candidates in index order.
+					slog.Warn("prune vault: metadata load failed; skipping MaxEngrams prune this cycle (COG-20 exemption needs metadata)",
+						"vault", vaultName, "excess", excess, "err", err)
 					metas = nil
 				}
-				for i, id := range candidates {
-					var b float64
-					if metas != nil && i < len(metas) && metas[i] != nil {
-						m := metas[i]
-						lastAccess := m.LastAccess
-						if lastAccess.IsZero() || lastAccess.Year() < 2000 {
-							lastAccess = now
+				if metas != nil {
+					for i, id := range candidates {
+						var b float64
+						if i < len(metas) && metas[i] != nil {
+							m := metas[i]
+							if m.EffectiveImportance() >= storage.HighImportanceFloor {
+								exempted++
+								continue // COG-20: never pruned by the MaxEngrams path
+							}
+							lastAccess := m.LastAccess
+							if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+								lastAccess = now
+							}
+							ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 0.1)
+							n := float64(m.AccessCount + 1)
+							b = math.Log(n) - actrDecay*math.Log(math.Max(ageDays, 0.1)/n)
 						}
-						ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 0.1)
-						n := float64(m.AccessCount + 1)
-						b = math.Log(n) - actrDecay*math.Log(math.Max(ageDays, 0.1)/n)
+						scored = append(scored, scoredCandidate{id: id, score: b})
 					}
-					scored = append(scored, scoredCandidate{id: id, score: b})
+					// Sort ascending: lowest base-level (worst engrams) first.
+					sort.Slice(scored, func(i, j int) bool {
+						return scored[i].score < scored[j].score
+					})
 				}
-				// Sort ascending: lowest base-level (worst engrams) first.
-				sort.Slice(scored, func(i, j int) bool {
-					return scored[i].score < scored[j].score
-				})
 			}
 
 			// Delete the bottom `excess` by ACT-R base-level score (or all available if fewer).
@@ -3823,6 +3878,15 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 					}
 				}
 				pruned++
+			}
+
+			// Degrade loudly, no loop (COG-15/COG-20): if importance exemptions
+			// left the vault over MaxEngrams, say so — a vault marking most of
+			// its memories >= HighImportanceFloor cannot shrink via this path.
+			if pruned < excess && exempted > 0 {
+				slog.Warn("prune vault: high-importance exemptions left vault over MaxEngrams",
+					"vault", vaultName, "excess", excess, "pruned", pruned, "exempted", exempted,
+					"floor", storage.HighImportanceFloor)
 			}
 		}
 	}
