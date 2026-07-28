@@ -3451,16 +3451,6 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 			return storage.ULID{}, fmt.Errorf("evolve: batch carry relationship: %w", err)
 		}
 	}
-	for _, name := range carriedEntities {
-		if err := batch.WriteEntityEngramLink(ctx, wsPrefix, newULID, name); err != nil {
-			return storage.ULID{}, fmt.Errorf("evolve: batch carry entity link: %w", err)
-		}
-	}
-	for _, rec := range carriedRels {
-		if err := batch.WriteRelationshipRecord(ctx, wsPrefix, newULID, rec); err != nil {
-			return storage.ULID{}, fmt.Errorf("evolve: batch carry relationship: %w", err)
-		}
-	}
 	if err := batch.Commit(); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch commit: %w", err)
 	}
