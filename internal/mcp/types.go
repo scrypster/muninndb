@@ -83,6 +83,17 @@ type Memory struct {
 	SourceType  string    `json:"source_type,omitempty"`
 	Trust       string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
 
+	// Valid-time (application-time) axis, half-open [valid_from, valid_until).
+	// Distinct from created_at (transaction time). muninn_read always sets
+	// valid_from and is_current; recall sets valid_from only when it diverges
+	// from created_at. valid_until appears only when the window is closed;
+	// expired marks a fact whose window closed at or before now (only
+	// reachable in recall results under include_invalid=true).
+	ValidFrom  *time.Time `json:"valid_from,omitempty"`
+	ValidUntil *time.Time `json:"valid_until,omitempty"`
+	IsCurrent  *bool      `json:"is_current,omitempty"`
+	Expired    bool       `json:"expired,omitempty"`
+
 	// Populated only by muninn_read (omitted from recall responses).
 	Entities            []ReadEntity    `json:"entities,omitempty"`
 	EntityRelationships []ReadEntityRel `json:"entity_relationships,omitempty"`

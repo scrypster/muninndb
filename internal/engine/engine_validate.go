@@ -3,6 +3,8 @@ package engine
 import (
 	"fmt"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 // createdAtFloor is the earliest acceptable CreatedAt for a WriteRequest.
@@ -22,6 +24,33 @@ func validateCreatedAt(t time.Time) error {
 	}
 	if t.After(time.Now().Add(createdAtSkew)) {
 		return fmt.Errorf("created_at must not be more than 5 minutes in the future")
+	}
+	return nil
+}
+
+// applyValidity validates and applies caller-supplied valid-time bounds to a
+// new engram. The window is half-open [valid_from, valid_until); an empty or
+// inverted window is rejected loudly (a fact that was never true is a caller
+// bug, not something to store silently). Historical facts — both bounds in the
+// past — are legitimate and accepted. Callers should have set eng.CreatedAt
+// (if customized) before calling, so the ValidFrom default is correct.
+func applyValidity(eng *storage.Engram, validFrom, validUntil *time.Time) error {
+	if validFrom != nil {
+		eng.ValidFrom = *validFrom
+	}
+	if validUntil != nil {
+		from := eng.ValidFrom
+		if from.IsZero() {
+			from = eng.CreatedAt // may still be zero (= now at write time)
+		}
+		if from.IsZero() {
+			from = time.Now()
+		}
+		if !validUntil.After(from) {
+			return fmt.Errorf("%w: valid_until (%s) must be after valid_from (%s) — the window [valid_from, valid_until) would be empty",
+				ErrInvalidRequest, validUntil.Format(time.RFC3339), from.Format(time.RFC3339))
+		}
+		eng.ValidUntil = *validUntil
 	}
 	return nil
 }

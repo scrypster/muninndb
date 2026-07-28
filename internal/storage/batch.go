@@ -184,34 +184,58 @@ func (b *pebbleStoreBatch) WriteOrdinal(ctx context.Context, ws [8]byte, parentI
 // Reads the current engram from the underlying store, sets its state, and queues
 // updated 0x01 and 0x02 key writes plus the 0x0B state index transition.
 func (b *pebbleStoreBatch) UpdateEngramState(ctx context.Context, ws [8]byte, id ULID, newState LifecycleState) error {
+	return b.mutateEngram(ctx, ws, id, "update state", func(eng *Engram) {
+		eng.State = newState
+	})
+}
+
+// SupersedeEngram queues a soft-delete plus a ValidUntil stamp in one
+// re-encode. Used by Evolve so both changes land in the same atomic batch.
+// A pre-existing closed ValidUntil is preserved.
+func (b *pebbleStoreBatch) SupersedeEngram(ctx context.Context, ws [8]byte, id ULID, validUntil time.Time) error {
+	return b.mutateEngram(ctx, ws, id, "supersede", func(eng *Engram) {
+		eng.State = StateSoftDeleted
+		if eng.ValidUntil.IsZero() {
+			eng.ValidUntil = validUntil
+		}
+	})
+}
+
+// mutateEngram reads the current engram from the underlying store, applies
+// mutate, and queues updated 0x01 and 0x02 key writes plus the 0x0B state
+// index transition when the state changed.
+func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID, op string, mutate func(*Engram)) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
 	}
 	eng, err := b.ps.GetEngram(ctx, ws, id)
 	if err != nil {
-		return fmt.Errorf("update state: read engram: %w", err)
+		return fmt.Errorf("%s: read engram: %w", op, err)
 	}
 	if eng == nil {
-		return fmt.Errorf("update state: engram %s not found", id.String())
+		return fmt.Errorf("%s: engram %s not found", op, id.String())
 	}
 	oldState := eng.State
-	eng.State = newState
+	mutate(eng)
+	newState := eng.State
 	eng.UpdatedAt = time.Now()
 
 	erfEng := toERFEngram(eng)
 	erfBytes, err := erf.EncodeV2(erfEng)
 	if err != nil {
-		return fmt.Errorf("update state: encode: %w", err)
+		return fmt.Errorf("%s: encode: %w", op, err)
 	}
 	id16 := [16]byte(id)
 
 	// Transition 0x0B state index: remove old entry, write new entry.
-	b.batch.Delete(keys.StateIndexKey(ws, uint8(oldState), id16), nil)
-	b.batch.Set(keys.StateIndexKey(ws, uint8(newState), id16), []byte{}, nil)
+	if oldState != newState {
+		b.batch.Delete(keys.StateIndexKey(ws, uint8(oldState), id16), nil)
+		b.batch.Set(keys.StateIndexKey(ws, uint8(newState), id16), []byte{}, nil)
+	}
 
 	// Update 0x01 full engram record and 0x02 metadata slice.
 	if err := b.batch.Set(keys.EngramKey(ws, id16), erfBytes, nil); err != nil {
-		return fmt.Errorf("update state: set engram key: %w", err)
+		return fmt.Errorf("%s: set engram key: %w", op, err)
 	}
 	if err := b.batch.Set(keys.MetaKey(ws, id16), erf.MetaKeySlice(erfBytes), nil); err != nil {
 		return err
