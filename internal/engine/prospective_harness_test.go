@@ -126,7 +126,13 @@ func runProspectiveHarness(t *testing.T, enabled bool) harnessResult {
 			Vault:      vault,
 			Context:    []string{call.Context},
 			MaxResults: 3,
-			Threshold:  0.35,
+			// Production default threshold (COG-6). This was 0.35 before #711,
+			// a value that only worked because FTS relevance was tanh-saturated
+			// to ~1.0 for any match; #711 made full_text_relevance an honest
+			// absolute coverage score, so the harness must use the threshold real
+			// callers use. Verified on the real simplorium vault: at 0.1 the Push
+			// still fires 15/15 at precision 1.0; 0.35 was riding inflated scores.
+			Threshold: 0.1,
 		})
 		if err != nil {
 			t.Fatalf("call %d Activate: %v", ci, err)

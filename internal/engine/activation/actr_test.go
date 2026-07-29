@@ -64,7 +64,7 @@ func TestComputeACTR_FreshEngram(t *testing.T) {
 
 	sc := computeACTR(0.9, 2.0, 0.0, 0.0, eng, 0, now, w, false)
 
-	contentMatch := 0.35*0.9 + 0.25*math.Tanh(2.0)
+	contentMatch := 0.35*0.9 + 0.25*2.0
 	n := 2.0 // AccessCount(1) + 1
 	// Use expectedBaseLevel so the 1-day offset + cap are applied consistently.
 	baseLevel := expectedBaseLevel(n, 1.0/(24.0*60.0), 0.5)
@@ -73,7 +73,7 @@ func TestComputeACTR_FreshEngram(t *testing.T) {
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
 	assertNear(t, "Final", sc.Final, wantRaw, 1e-6) // Confidence=1.0
 	assertNear(t, "SemanticSimilarity", sc.SemanticSimilarity, 0.9, 1e-9)
-	assertNear(t, "FullTextRelevance", sc.FullTextRelevance, math.Tanh(2.0), 1e-9)
+	assertNear(t, "FullTextRelevance", sc.FullTextRelevance, 2.0, 1e-9)
 	if sc.Raw < 0.3 {
 		t.Errorf("Fresh engram Raw=%.4f, expected > 0.3", sc.Raw)
 	}
@@ -91,7 +91,7 @@ func TestComputeACTR_OldEngram_NoHebbian(t *testing.T) {
 
 	sc := computeACTR(0.7, 1.0, 0.0, 0.0, eng, 0, now, w, false)
 
-	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
+	contentMatch := 0.35*0.7 + 0.25*1.0
 	n := 1.0
 	// n=1, ageDays=30: B(M) = ln(1) - 0.5*ln(30) ≈ -1.70 — well below cap.
 	baseLevel := expectedBaseLevel(n, 30.0, 0.5)
@@ -115,7 +115,7 @@ func TestComputeACTR_OldEngram_WithHebbian(t *testing.T) {
 
 	sc := computeACTR(0.7, 1.0, 0.8, 0.0, eng, 0, now, w, false)
 
-	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
+	contentMatch := 0.35*0.7 + 0.25*1.0
 	n := 1.0
 	baseLevel := expectedBaseLevel(n, 30.0, 0.5)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.8)
@@ -142,7 +142,7 @@ func TestComputeACTR_HighAccessCount(t *testing.T) {
 
 	sc := computeACTR(0.7, 1.5, 0.0, 0.0, eng, 0, now, w, false)
 
-	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.5)
+	contentMatch := 0.35*0.7 + 0.25*1.5
 	n := 101.0
 	// With 100 accesses at 7 days the uncapped B(M) ≈ 5.88 — well above bLevelCap.
 	// expectedBaseLevel applies the cap so wantRaw reflects what computeACTR returns.
@@ -218,7 +218,7 @@ func TestComputeACTR_ScoreClamping(t *testing.T) {
 	// This is the case the two-pass safety net handles (Hebbian-boosted engrams).
 	sc := computeACTR(1.0, 10.0, 1.0, 0.0, eng, 0, now, w, false)
 
-	contentMatch := 0.35*1.0 + 0.25*math.Tanh(10.0)
+	contentMatch := 0.35*1.0 + 0.25*10.0
 	n := 51.0
 	// baseLevel is capped; Hebbian lifts totalActivation far above the cap.
 	baseLevel := expectedBaseLevel(n, 1.0/(24.0*60.0), 0.5)
@@ -246,7 +246,7 @@ func TestComputeACTR_ZeroLastAccess(t *testing.T) {
 	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w, false)
 
 	// Zero LastAccess → treated as "just now" → ageDays = ageFloor (1 minute)
-	contentMatch := 0.35*0.8 + 0.25*math.Tanh(1.0)
+	contentMatch := 0.35*0.8 + 0.25*1.0
 	n := 1.0
 	// n=1 with 1-day offset: B(M) = ln(1) - 0.5*ln(1) = 0 — not capped.
 	baseLevel := expectedBaseLevel(n, 1.0/(24.0*60.0), 0.5)
@@ -299,7 +299,7 @@ func TestComputeACTR_CustomDecayAndHebScale(t *testing.T) {
 
 	sc := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, 0, now, w, false)
 
-	contentMatch := 0.35*0.7 + 0.25*math.Tanh(1.0)
+	contentMatch := 0.35*0.7 + 0.25*1.0
 	n := 4.0
 	// n=4, ageDays=10: B(M)=ln(4)-0.8*ln(10/4)≈0.65 — not capped.
 	baseLevel := expectedBaseLevel(n, 10.0, 0.8)
@@ -465,8 +465,8 @@ func TestComputeACTR_FreshVault_Differentiated(t *testing.T) {
 			scHigh.Raw, scLow.Raw)
 	}
 	// Neither score should saturate without Hebbian boost.
-	contentHigh := w.SemanticSimilarity*0.9 + w.FullTextRelevance*math.Tanh(1.0)
-	contentLow := w.SemanticSimilarity*0.4 + w.FullTextRelevance*math.Tanh(1.0)
+	contentHigh := w.SemanticSimilarity*0.9 + w.FullTextRelevance*1.0
+	contentLow := w.SemanticSimilarity*0.4 + w.FullTextRelevance*1.0
 	if scHigh.Raw > contentHigh+1e-9 {
 		t.Errorf("scHigh.Raw=%.6f exceeded contentMatch=%.6f — saturation not resolved", scHigh.Raw, contentHigh)
 	}
