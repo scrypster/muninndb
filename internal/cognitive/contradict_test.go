@@ -63,9 +63,13 @@ func TestContradictWorkerProcessBatchDirectNegation(t *testing.T) {
 	}
 }
 
-// TestContradictWorkerProcessBatchSameRelDifferentTarget verifies that an engram
-// asserting the same relation type at two different targets with different concept hashes
-// is flagged (conflicting conclusions).
+// TestContradictWorkerProcessBatchSameRelDifferentTarget verifies (COG-23)
+// that an engram asserting the SAME relation type at two DIFFERENT targets
+// is NOT flagged — same-RelType/different-target is an ordinary write shape
+// (e.g. "references -> A" and "references -> B"), not a contradiction, and
+// must never be synthesized into one regardless of TargetHash. Previously
+// this test pinned the opposite (fabricated) behavior; that was pinning a
+// bug, not a feature — see contradict.go's former same-RelType rule.
 func TestContradictWorkerProcessBatchSameRelDifferentTarget(t *testing.T) {
 	called := false
 	store := &stubContradictStore{
@@ -88,8 +92,8 @@ func TestContradictWorkerProcessBatchSameRelDifferentTarget(t *testing.T) {
 	if err := cw.processBatch(ctx, []ContradictItem{item}); err != nil {
 		t.Fatalf("processBatch: %v", err)
 	}
-	if !called {
-		t.Error("expected FlagContradiction for same-rel different-target-hash")
+	if called {
+		t.Error("FlagContradiction called for same-RelType/different-target write (COG-23): must not be synthesized as a contradiction")
 	}
 }
 

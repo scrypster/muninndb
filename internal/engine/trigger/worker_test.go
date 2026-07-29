@@ -260,7 +260,7 @@ func TestTriggerWorker_HandleContradiction(t *testing.T) {
 		EngramA:  engA,
 		EngramB:  engB,
 		Severity: 0.8,
-		Type:     "semantic",
+		Type:     "relation_matrix",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -1354,7 +1354,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 			Associations: contraAssocs,
 			OnFound: func(ev cognitive.ContradictionEvent) {
 				if e.triggers != nil {
-					e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
+					e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "relation_matrix")
 				}
 				_, _, cw := e.cogWorkers()
 				if cw != nil {
@@ -1898,7 +1898,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 				Associations: contraAssocs,
 				OnFound: func(ev cognitive.ContradictionEvent) {
 					if e.triggers != nil {
-						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
+						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "relation_matrix")
 					}
 					_, _, cw := e.cogWorkers()
 					if cw != nil {

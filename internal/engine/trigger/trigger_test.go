@@ -677,7 +677,7 @@ func TestNotifyContradictionEnqueues(t *testing.T) {
 	a := storage.NewULID()
 	b := storage.NewULID()
 	ws := [8]byte{0, 0, 0, 7, 3, 3, 3, 3}
-	ts.NotifyContradiction(7, ws, a, b, 0.85, "semantic")
+	ts.NotifyContradiction(7, ws, a, b, 0.85, "relation_matrix")
 
 	select {
 	case ev := <-ts.ContradictEvents:
@@ -696,8 +696,8 @@ func TestNotifyContradictionEnqueues(t *testing.T) {
 		if ev.Severity != 0.85 {
 			t.Errorf("Severity = %v, want 0.85", ev.Severity)
 		}
-		if ev.Type != "semantic" {
-			t.Errorf("Type = %q, want 'semantic'", ev.Type)
+		if ev.Type != "relation_matrix" {
+			t.Errorf("Type = %q, want 'relation_matrix'", ev.Type)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("ContradictEvents channel empty — NotifyContradiction did not enqueue event")
