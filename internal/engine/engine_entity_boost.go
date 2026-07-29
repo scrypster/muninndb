@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"sort"
@@ -281,6 +282,17 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 		})
 	}
 
-	sort.SliceStable(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+	// Deterministic order (#698): SliceStable on Score alone is NOT enough here —
+	// pass 2b appends injections in Go map-iteration order, so tied boost totals
+	// (equal EntityBoost·idf) would survive MaxResults truncation in an arbitrary
+	// subset. Break ties by ULID so the output is independent of map order.
+	// Mirrors applySupersession's tiebreak (engine_supersession.go).
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		a, b := results[i].Engram.ID, results[j].Engram.ID
+		return bytes.Compare(a[:], b[:]) < 0
+	})
 	return results
 }
