@@ -122,10 +122,16 @@ type ScoredID struct {
 // ScoreComponents breaks down how a score was computed.
 type ScoreComponents struct {
 	SemanticSimilarity float64
-	FullTextRelevance  float64
-	DecayFactor        float64
-	HebbianBoost       float64
-	TransitionBoost    float64
+	// FullTextRelevance is an absolute, query-calibrated IDF-weighted coverage
+	// score in [0,1] straight from fts.Index.Search (COG-24, issue #711) — the
+	// fraction of the query's IDF mass this engram covers. It is NOT a
+	// normalized raw BM25 score; corpus-absent query terms are charged the
+	// corpus's maximum-rarity IDF, so a query with no real overlap scores low
+	// here regardless of what else matched.
+	FullTextRelevance float64
+	DecayFactor       float64
+	HebbianBoost      float64
+	TransitionBoost   float64
 	// EntityBoost is the post-pipeline spread-activation adjustment added by
 	// the entity boost phase (rarity-weighted, capped). Zero when the result
 	// received no entity boost; for engrams injected by that phase it equals
@@ -1546,8 +1552,9 @@ func (e *ActivationEngine) phase6Score(
 			}
 			// Populate ScoreComponents for observability: report the individual
 			// signal scores so callers can understand the composition even though
-			// the final score is rank-based.
-			normalizedFTS := math.Tanh(c.ftsScore)
+			// the final score is rank-based. c.ftsScore is already a calibrated,
+			// absolute [0,1] coverage score post-#711 — no tanh normalization.
+			normalizedFTS := c.ftsScore
 			scored = append(scored, scoredItem{
 				id:    c.id,
 				final: final,
@@ -1824,11 +1831,12 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 
 	decayFactor := math.Max(0.05, math.Exp(-daysSince/float64(eng.Stability)))
 
-	// Normalize BM25 score from [0, +∞) to [0, 1) using tanh.
-	// Raw BM25 is unbounded and not comparable to cosine similarity [0,1].
-	// tanh(0)=0, tanh(1)≈0.76, tanh(3)≈0.995 — preserves relative ordering,
-	// prevents high BM25 scores from saturating the composite score via clamping.
-	normalizedFTS := math.Tanh(ftsScore)
+	// ftsScore is ALREADY a calibrated, absolute [0,1] coverage score (see
+	// fts.Index.Search and COG-24) — no further normalization needed. Before
+	// #711 this applied math.Tanh() to squash raw unbounded BM25 into [0,1];
+	// that saturated by x≈3 (real BM25 magnitudes ran 2-40), making a single
+	// common-word match indistinguishable from a genuine multi-term match.
+	normalizedFTS := ftsScore
 
 	raw := w.SemanticSimilarity*vectorScore +
 		w.FullTextRelevance*normalizedFTS +
@@ -1926,8 +1934,10 @@ func cosineSimilarity32(a, b []float32) float32 {
 func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, eng *storage.Engram,
 	lastAccessNs int64, now time.Time, w resolvedWeights, inTagPool bool) ScoreComponents {
 
-	// Compute content relevance (same as standard path).
-	normalizedFTS := math.Tanh(ftsScore)
+	// Compute content relevance (same as standard path). ftsScore is already a
+	// calibrated, absolute [0,1] coverage score (see fts.Index.Search, COG-24) —
+	// no tanh normalization needed post-#711.
+	normalizedFTS := ftsScore
 	contentMatch := w.SemanticSimilarity*vectorScore + w.FullTextRelevance*normalizedFTS
 
 	// COG-5 amendment (S1): candidates that matched an explicit tag filter

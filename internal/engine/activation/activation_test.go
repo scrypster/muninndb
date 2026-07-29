@@ -815,7 +815,7 @@ func TestZeroFTSScoreYearsZeroFTRComponent(t *testing.T) {
 	}
 	store.writeEngram(eng1)
 
-	// FTS score = 0.0 → after math.Tanh normalization → 0.0.
+	// FTS score = 0.0 → FullTextRelevance passes through unchanged → 0.0.
 	fts := &stubFTS{results: []activation.ScoredID{
 		{ID: eng1.ID, Score: 0.0},
 	}}
@@ -853,7 +853,9 @@ func TestPositiveFTSScoreYieldsNormalizedFTR(t *testing.T) {
 	store.writeEngram(eng1)
 
 	fts := &stubFTS{results: []activation.ScoredID{
-		{ID: eng1.ID, Score: 5.0}, // BM25 raw score — large but normalized via tanh
+		// Post-#711, fts.Search itself returns a calibrated, absolute [0,1]
+		// coverage score — the activation engine no longer tanh-normalizes it.
+		{ID: eng1.ID, Score: 0.85},
 	}}
 	eng := newTestEngine(store, fts, nil)
 
