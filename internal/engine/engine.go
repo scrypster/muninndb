@@ -31,6 +31,7 @@ import (
 	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/metrics/latency"
 	"github.com/scrypster/muninndb/internal/plugin"
+	embedpkg "github.com/scrypster/muninndb/internal/plugin/embed"
 	"github.com/scrypster/muninndb/internal/provenance"
 	"github.com/scrypster/muninndb/internal/scoring"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -124,6 +125,12 @@ type Engine struct {
 	transitionWorker *cognitive.TransitionWorker
 	activity         *cognitive.ActivityTracker
 	embedder         activation.Embedder // optional embedder for embedding-based brief scoring
+	// embedModelName is the resolved model identifier for embedder (COG-26,
+	// see EngineConfig.EmbedModelName). Empty = unknown → identity transform.
+	embedModelName string
+	// warnedUnknownEmbedModels dedupes the COG-26 "no calibration on record"
+	// WARN so a busy vault doesn't spam logs once per query.
+	warnedUnknownEmbedModels sync.Map // model string -> struct{}{}
 	// Feature subsystems (all optional, nil-safe)
 	autoAssoc            *autoassoc.Worker         // write-time automatic tag-based associations
 	neighborWorker       *autoassoc.NeighborWorker // semantic neighbor auto-linking
@@ -427,6 +434,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		confidenceWorker: cfg.ConfidenceWorker,
 		activity:         cognitive.NewActivityTracker(),
 		embedder:         cfg.Embedder,
+		embedModelName:   cfg.EmbedModelName,
 		autoAssoc:        autoassoc.New(stopCtx, store, cfg.FTSIndex),
 		neighborWorker:   autoassoc.NewNeighborWorker(stopCtx, store, cfg.HNSWRegistry),
 		goalLinkWorker:   autoassoc.NewGoalLinkWorker(stopCtx, store, cfg.HNSWRegistry),
@@ -2295,6 +2303,15 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		actReq.Weights.UseCGDN = false
 	}
 
+	// COG-26: resolve the semantic-abstention baseline b for this vault's
+	// embed model, regardless of scoring mode — the noise floor is a property
+	// of the embedder, not the scorer. Applies uniformly whether Weights came
+	// from an explicit caller override, a recall-mode preset, or the resolved
+	// default, so a caller-supplied Weights struct still gets the floor
+	// (unlike SemanticSimilarity/FullTextRelevance, which an explicit caller
+	// override legitimately replaces).
+	actReq.Weights.SemanticBaseline = float32(e.resolveSemanticBaseline(req.Vault, wsPrefix, resolved))
+
 	// COG-6: the effective default threshold is mode-aware and keyed on the
 	// EFFECTIVE scoring mode (actReq.Weights.UseRRFFusion), decided here in one
 	// place — AFTER the weights block sets UseRRFFusion — so the threshold default
@@ -3805,6 +3822,61 @@ func (e *Engine) ResolveVaultPlasticity(vaultName string) auth.ResolvedPlasticit
 		}
 	}
 	return auth.ResolvePlasticity(nil)
+}
+
+// resolveSemanticBaseline resolves the COG-26 semantic-abstention baseline b
+// for a vault: the anisotropy noise floor rescaled into the semantic
+// relevance blend so near-baseline cosine (out-of-domain noise) contributes
+// ~0 to contentMatch instead of clearing the recall threshold on noise alone.
+//
+// Resolution order (explicit config always wins, never silently substituted —
+// #582/#585/#589):
+//  1. resolved.SemanticFloorOverride (per-vault plasticity override). An
+//     explicit 0 disables the floor. An out-of-range value (>=1, which would
+//     zero every match) is rejected with a WARN and falls through to registry
+//     resolution rather than silently abstaining everything.
+//  2. The vault's recorded embed model (store.GetEmbedModel, set by a future
+//     re-embed/model-tracking increment) if non-empty, else the engine's
+//     process-wide configured embed model (EngineConfig.EmbedModelName,
+//     resolved once at startup from the active provider).
+//  3. internal/plugin/embed.NoiseBaseline(model) registry lookup.
+//
+// A model with no registry entry — including "" (model unknown: no per-vault
+// marker set and no process-wide model recorded, e.g. embedded/library use
+// without EmbedModelName wired) — resolves to 0 (identity transform) plus a
+// one-time-per-model WARN: an uncalibrated model must never receive a guessed
+// floor, per COG-26 and the #582/#585/#589 explicit-config rule.
+func (e *Engine) resolveSemanticBaseline(vaultName string, ws [8]byte, resolved auth.ResolvedPlasticity) float64 {
+	if resolved.SemanticFloorOverride != nil {
+		b := *resolved.SemanticFloorOverride
+		if b >= 0 && b < 1 {
+			return b
+		}
+		slog.Warn("semantic_floor override out of range [0,1), ignoring and falling back to the embed-model registry",
+			"vault", vaultName, "semantic_floor", b)
+	}
+
+	model := ""
+	if e.store != nil {
+		if m, err := e.store.GetEmbedModel(ws); err == nil {
+			model = m
+		}
+	}
+	if model == "" {
+		model = e.embedModelName
+	}
+
+	if b, ok := embedpkg.NoiseBaseline(model); ok {
+		return b
+	}
+
+	// Unknown/unregistered model: identity transform, WARN once per distinct
+	// model string per process so a busy vault doesn't spam logs per query.
+	if _, alreadyWarned := e.warnedUnknownEmbedModels.LoadOrStore(model, struct{}{}); !alreadyWarned {
+		slog.Warn("semantic abstention floor (COG-26): no calibrated noise baseline for this embed model, using identity transform (no floor) — semantic-only nonsense may clear the recall threshold",
+			"vault", vaultName, "embed_model", model)
+	}
+	return 0
 }
 
 // PruneVault prunes a vault according to its resolved MaxEngrams and RetentionDays policy.

@@ -42,10 +42,18 @@ type DefaultWeights struct {
 type Weights struct {
 	SemanticSimilarity float32
 	FullTextRelevance  float32
-	DecayFactor        float32
-	HebbianBoost       float32
-	AccessFrequency    float32
-	Recency            float32
+	// SemanticBaseline is the COG-26 anisotropy noise floor b for the query
+	// embed model, resolved by the caller from the per-embedder registry
+	// (internal/plugin/embed/baseline.go) or a per-vault plasticity override.
+	// 0 (the zero value, and the default for direct/library callers who don't
+	// set it) is the identity transform — semCal == raw cosine, unchanged
+	// pre-COG-26 behavior. Only the root engine resolves and sets a nonzero
+	// value for calibrated models.
+	SemanticBaseline float32
+	DecayFactor      float32
+	HebbianBoost     float32
+	AccessFrequency  float32
+	Recency          float32
 	// CGDN mode: set UseCGDN=true to enable Cognitive-Gated Divisive Normalization.
 	UseCGDN   bool
 	CGDNAlpha float32 // Ebbinghaus gate exponent (0 → default 1.5)
@@ -68,10 +76,12 @@ type Weights struct {
 type resolvedWeights struct {
 	SemanticSimilarity float64
 	FullTextRelevance  float64
-	DecayFactor        float64
-	HebbianBoost       float64
-	AccessFrequency    float64
-	Recency            float64
+	// SemanticBaseline is COG-26's resolved b; see Weights.SemanticBaseline.
+	SemanticBaseline float64
+	DecayFactor      float64
+	HebbianBoost     float64
+	AccessFrequency  float64
+	Recency          float64
 
 	// CGDN: Cognitive-Gated Divisive Normalization (Carandini & Heeger 2012).
 	// When UseCGDN=true, replaces the additive weighted sum with:
@@ -1554,12 +1564,17 @@ func (e *ActivationEngine) phase6Score(
 			// signal scores so callers can understand the composition even though
 			// the final score is rank-based. c.ftsScore is already a calibrated,
 			// absolute [0,1] coverage score post-#711 — no tanh normalization.
+			// SemanticSimilarity reports COG-26's calibrated value for the same
+			// reason: RRF's own ranking is rank-based (monotone in raw cosine,
+			// so rescale never reorders it — see rescaleSemantic), but the
+			// REPORTED value should read the same "how relevant" scale as every
+			// other scoring mode.
 			normalizedFTS := c.ftsScore
 			scored = append(scored, scoredItem{
 				id:    c.id,
 				final: final,
 				components: ScoreComponents{
-					SemanticSimilarity: c.vectorScore,
+					SemanticSimilarity: rescaleSemantic(c.vectorScore, w.SemanticBaseline),
 					FullTextRelevance:  normalizedFTS,
 					HebbianBoost:       c.hebbianBoost,
 					TransitionBoost:    c.transitionBoost,
@@ -1838,7 +1853,17 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 	// common-word match indistinguishable from a genuine multi-term match.
 	normalizedFTS := ftsScore
 
-	raw := w.SemanticSimilarity*vectorScore +
+	// COG-26: rescale raw cosine by the embed model's measured anisotropy
+	// noise baseline before it feeds the weighted sum — see rescaleSemantic.
+	// Reported SemanticSimilarity below is ALSO the calibrated value (not raw
+	// cosine): mirrors #711/COG-24's FullTextRelevance, which reports an
+	// absolute calibrated coverage score rather than raw BM25 — a caller
+	// reading score_components should see "how relevant", not a raw distance
+	// metric whose 0.50 might mean noise for one embed model and strong
+	// signal for another.
+	semCal := rescaleSemantic(vectorScore, w.SemanticBaseline)
+
+	raw := w.SemanticSimilarity*semCal +
 		w.FullTextRelevance*normalizedFTS +
 		w.DecayFactor*decayFactor +
 		w.HebbianBoost*hebbianBoost +
@@ -1855,7 +1880,7 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 	conf := float64(eng.Confidence)
 
 	return ScoreComponents{
-		SemanticSimilarity: vectorScore,
+		SemanticSimilarity: semCal,
 		FullTextRelevance:  normalizedFTS, // normalized [0,1), not raw BM25
 		DecayFactor:        decayFactor,
 		HebbianBoost:       hebbianBoost,
@@ -1871,6 +1896,30 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 // It equals 1 + softplus(0) = 1 + ln(1 + exp(0)) = 1 + ln(2) ≈ 1.6931471805599453.
 // Precomputing this constant avoids recomputing softplus(0) on every engram scored.
 const actrDenominator = 1.6931471805599453
+
+// rescaleSemantic applies the COG-26 baseline-calibrated relevance transform
+// to a raw cosine similarity:
+//
+//	semCal = max(0, (cos - b) / (1 - b))
+//
+// b is the embed model's measured anisotropy noise baseline (resolved
+// upstream from the per-embedder registry, internal/plugin/embed/baseline.go,
+// or a per-vault plasticity override — never guessed here). b<=0 is the
+// identity transform: unresolved/unregistered models and direct/library
+// callers who never set Weights.SemanticBaseline see unchanged pre-COG-26
+// behavior. This mirrors internal/plugin/embed.Rescale exactly; duplicated
+// (not imported) to avoid a package cycle — embed already imports
+// engine/activation for its Embedder adapter.
+func rescaleSemantic(cos, b float64) float64 {
+	if b <= 0 || b >= 1 {
+		return cos
+	}
+	v := (cos - b) / (1 - b)
+	if v < 0 {
+		return 0
+	}
+	return v
+}
 
 // tagMatchFloor is the minimum content-match value granted to candidates that
 // matched an explicit tag filter (inTagPool=true), under ACT-R scoring (COG-5
@@ -1936,9 +1985,14 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 
 	// Compute content relevance (same as standard path). ftsScore is already a
 	// calibrated, absolute [0,1] coverage score (see fts.Index.Search, COG-24) —
-	// no tanh normalization needed post-#711.
+	// no tanh normalization needed post-#711. semCal is COG-26's baseline-
+	// rescaled cosine (rescaleSemantic): near-baseline cosine (anisotropy
+	// noise, bge-small ≈0.45-0.60) contributes ~0 to contentMatch instead of
+	// clearing the ACT-R gate below (engine.go:2308, threshold 0.1) on noise
+	// alone.
 	normalizedFTS := ftsScore
-	contentMatch := w.SemanticSimilarity*vectorScore + w.FullTextRelevance*normalizedFTS
+	semCal := rescaleSemantic(vectorScore, w.SemanticBaseline)
+	contentMatch := w.SemanticSimilarity*semCal + w.FullTextRelevance*normalizedFTS
 
 	// COG-5 amendment (S1): candidates that matched an explicit tag filter
 	// (inTagPool) receive a content-match floor so an explicit filter match
@@ -2007,7 +2061,7 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	conf := float64(eng.Confidence)
 
 	return ScoreComponents{
-		SemanticSimilarity: vectorScore,
+		SemanticSimilarity: semCal,
 		FullTextRelevance:  normalizedFTS,
 		DecayFactor:        math.Max(0.05, math.Exp(-ageDays/math.Max(float64(eng.Stability), 1.0))), // kept for reporting; guard against Stability=0
 		HebbianBoost:       hebbianBoost,
@@ -2242,6 +2296,7 @@ func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {
 	rw := resolvedWeights{
 		SemanticSimilarity: float64(req.SemanticSimilarity),
 		FullTextRelevance:  float64(req.FullTextRelevance),
+		SemanticBaseline:   float64(req.SemanticBaseline),
 		DecayFactor:        float64(req.DecayFactor),
 		HebbianBoost:       float64(req.HebbianBoost),
 		AccessFrequency:    float64(req.AccessFrequency),

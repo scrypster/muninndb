@@ -82,6 +82,17 @@ type PlasticityConfig struct {
 	// NEVER reinforces regardless of this flag (COG-12) — this only gates the
 	// explicit-read-by-id channel.
 	ReinforceOnRead *bool `json:"reinforce_on_read,omitempty"`
+
+	// SemanticFloor overrides the COG-26 semantic-abstention baseline b for
+	// this vault (see internal/plugin/embed/baseline.go), instead of the
+	// registry value looked up from the vault's embed model. nil = use the
+	// registry (or identity+WARN if the model is unregistered). An explicit
+	// 0 disables the floor (identity transform) for operators who have
+	// verified their embedder needs no calibration. Range [0,1); values >=1
+	// would zero every match and are rejected at resolution (clamped to the
+	// registry/identity fallback, never silently producing a floor that
+	// abstains everything).
+	SemanticFloor *float64 `json:"semantic_floor,omitempty"`
 }
 
 // ResolvedPlasticity is the fully-merged configuration after applying preset defaults
@@ -140,6 +151,11 @@ type ResolvedPlasticity struct {
 	// to bump AccessCount/LastAccess. Default true. Never applies to
 	// Recall/Activate (COG-12) — that path never reinforces.
 	ReinforceOnRead bool `json:"reinforce_on_read"`
+
+	// SemanticFloorOverride, when non-nil, replaces the COG-26 registry
+	// lookup for this vault's semantic-abstention baseline b. nil = no
+	// override (use the per-embedder registry). See PlasticityConfig.SemanticFloor.
+	SemanticFloorOverride *float64 `json:"semantic_floor_override,omitempty"`
 }
 
 type plasticityPreset struct {
@@ -358,6 +374,12 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 	if cfg == nil {
 		return r
 	}
+
+	// SemanticFloor is not preset-varying (like ReinforceOnRead above):
+	// nil = no override, use the COG-26 registry. Validated at the resolution
+	// site (internal/engine/engine.go), not here — clamping a bad value
+	// silently here would hide a misconfiguration the caller should see.
+	r.SemanticFloorOverride = cfg.SemanticFloor
 
 	// Apply pointer-field overrides
 	if cfg.HebbianEnabled != nil {

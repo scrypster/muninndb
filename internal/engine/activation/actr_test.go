@@ -608,3 +608,82 @@ func TestComputeACTR_TagPoolFloor_GenuineMatchOutranksFlooredTagOnly(t *testing.
 		t.Errorf("tagMatchFloor=%.4f is too high: must stay below the typical genuine content-match band (0.5-0.9) to preserve ranking", tagMatchFloor)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// COG-26: semantic-abstention floor pins at the computeACTR call site.
+// End-to-end RED/GREEN behavior against a real embedder lives in
+// semantic_abstention_test.go; these pin the unit-level contract.
+// ---------------------------------------------------------------------------
+
+// TestComputeACTR_SemanticBaseline_NearFloorCosineContributesNothing pins that
+// a cosine at or below the resolved baseline contributes ~0 to contentMatch,
+// gating the score toward 0 the same way a genuine zero-relevance candidate
+// does (engine.go's "zero semantic relevance = zero score" comment).
+func TestComputeACTR_SemanticBaseline_NearFloorCosineContributesNothing(t *testing.T) {
+	now := time.Now()
+	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
+	w := actrDefaultWeights()
+	w.SemanticBaseline = 0.558
+
+	// Noise-band cosine (0.50), no FTS overlap: with the floor, semCal=0 so
+	// contentMatch (and therefore Raw, absent tag pool/hebbian rescue) is 0.
+	sc := computeACTR(0.50, 0.0, 0.0, 0.0, eng, 0, now, w, false)
+	if sc.Raw != 0 {
+		t.Errorf("noise-band cosine (0.50) with baseline 0.558 produced Raw=%v, want 0", sc.Raw)
+	}
+	if sc.SemanticSimilarity != 0 {
+		t.Errorf("reported SemanticSimilarity = %v, want 0 (calibrated value, not raw 0.50)", sc.SemanticSimilarity)
+	}
+}
+
+// TestComputeACTR_SemanticBaseline_AboveFloorStillScores pins that a cosine
+// meaningfully above the baseline still produces a positive, ranked score —
+// the floor rescales magnitude, it does not zero everything.
+func TestComputeACTR_SemanticBaseline_AboveFloorStillScores(t *testing.T) {
+	now := time.Now()
+	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
+	w := actrDefaultWeights()
+	w.SemanticBaseline = 0.558
+
+	sc := computeACTR(0.69, 0.0, 0.0, 0.0, eng, 0, now, w, false)
+	if sc.Raw <= 0 {
+		t.Errorf("genuine cosine (0.69) with baseline 0.558 produced Raw=%v, want > 0", sc.Raw)
+	}
+	wantSemCal := rescaleSemantic(0.69, 0.558)
+	assertNear(t, "SemanticSimilarity", sc.SemanticSimilarity, wantSemCal, 1e-9)
+}
+
+// TestComputeACTR_SemanticBaseline_TagPoolFloorUnaffected pins COG-5: the
+// tag-match floor rescue is independent of the semantic baseline — a
+// tag-pooled candidate with near-floor cosine still gets contentMatch raised
+// to tagMatchFloor, exactly as it would with the floor disabled.
+func TestComputeACTR_SemanticBaseline_TagPoolFloorUnaffected(t *testing.T) {
+	now := time.Now()
+	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
+	w := actrDefaultWeights()
+	w.SemanticBaseline = 0.558
+
+	tagOnly := computeACTR(0.0, 0.0, 0.0, 0.0, eng, 0, now, w, true)
+	if tagOnly.Raw <= 0 {
+		t.Errorf("tag-pooled candidate must still be rescued to tagMatchFloor with the semantic baseline set, got Raw=%v", tagOnly.Raw)
+	}
+}
+
+// TestComputeACTR_SemanticBaseline_Monotone pins that increasing raw cosine
+// never decreases the resulting Raw score once the floor is applied — RRF
+// and every other ranking consumer is safe from reordering.
+func TestComputeACTR_SemanticBaseline_Monotone(t *testing.T) {
+	now := time.Now()
+	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
+	w := actrDefaultWeights()
+	w.SemanticBaseline = 0.558
+
+	prev := -1.0
+	for _, cos := range []float64{0, 0.3, 0.5, 0.558, 0.6, 0.69, 0.8, 1.0} {
+		sc := computeACTR(cos, 0.0, 0.0, 0.0, eng, 0, now, w, false)
+		if sc.Raw < prev {
+			t.Fatalf("Raw score not monotone in cosine: cos=%v produced Raw=%v < previous %v", cos, sc.Raw, prev)
+		}
+		prev = sc.Raw
+	}
+}
