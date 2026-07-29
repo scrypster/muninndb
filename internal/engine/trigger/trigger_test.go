@@ -619,13 +619,17 @@ func TestNotifyCognitiveEnqueues(t *testing.T) {
 	ts := newTestTriggerSystem()
 
 	id := storage.NewULID()
+	ws := [8]byte{0, 0, 0, 42, 9, 9, 9, 9}
 	// Delta = 0.5 — above the 0.001 filter.
-	ts.NotifyCognitive(42, id, "association_weight", 0.1, 0.6)
+	ts.NotifyCognitive(42, ws, id, "association_weight", 0.1, 0.6)
 
 	select {
 	case ev := <-ts.CognitiveEvents:
 		if ev.VaultID != 42 {
 			t.Errorf("VaultID = %d, want 42", ev.VaultID)
+		}
+		if ev.WSPrefix != ws {
+			t.Errorf("WSPrefix = %v, want %v (must carry the full 8-byte prefix, not just VaultID, #692)", ev.WSPrefix, ws)
 		}
 		if ev.EngramID != id {
 			t.Errorf("EngramID mismatch")
@@ -653,7 +657,7 @@ func TestNotifyCognitiveSubThresholdDropped(t *testing.T) {
 
 	id := storage.NewULID()
 	// Delta = 0.0005 — below 0.001 filter → should NOT be enqueued.
-	ts.NotifyCognitive(1, id, "relevance", 0.5000, 0.5005)
+	ts.NotifyCognitive(1, [8]byte{0, 0, 0, 1}, id, "relevance", 0.5000, 0.5005)
 
 	select {
 	case ev := <-ts.CognitiveEvents:
@@ -672,12 +676,16 @@ func TestNotifyContradictionEnqueues(t *testing.T) {
 
 	a := storage.NewULID()
 	b := storage.NewULID()
-	ts.NotifyContradiction(7, a, b, 0.85, "semantic")
+	ws := [8]byte{0, 0, 0, 7, 3, 3, 3, 3}
+	ts.NotifyContradiction(7, ws, a, b, 0.85, "semantic")
 
 	select {
 	case ev := <-ts.ContradictEvents:
 		if ev.VaultID != 7 {
 			t.Errorf("VaultID = %d, want 7", ev.VaultID)
+		}
+		if ev.WSPrefix != ws {
+			t.Errorf("WSPrefix = %v, want %v (must carry the full 8-byte prefix, not just VaultID, #692)", ev.WSPrefix, ws)
 		}
 		if ev.EngramA != a {
 			t.Error("EngramA mismatch")

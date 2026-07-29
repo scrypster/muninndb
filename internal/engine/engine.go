@@ -471,7 +471,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 	if e.hebbianWorker != nil && e.triggers != nil {
 		e.hebbianWorker.OnWeightUpdate = func(ws [8]byte, id [16]byte, field string, old, new float64) {
 			vaultID := wsVaultID(ws)
-			e.triggers.NotifyCognitive(vaultID, storage.ULID(id), field, float32(old), float32(new))
+			e.triggers.NotifyCognitive(vaultID, ws, storage.ULID(id), field, float32(old), float32(new))
 		}
 	}
 	// Fix 5: Load persisted coherence counters for known vaults.
@@ -1354,7 +1354,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 			Associations: contraAssocs,
 			OnFound: func(ev cognitive.ContradictionEvent) {
 				if e.triggers != nil {
-					e.triggers.NotifyContradiction(wsVaultID(wsPrefix), storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
+					e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
 				}
 				_, _, cw := e.cogWorkers()
 				if cw != nil {
@@ -1898,7 +1898,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 				Associations: contraAssocs,
 				OnFound: func(ev cognitive.ContradictionEvent) {
 					if e.triggers != nil {
-						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
+						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
 					}
 					_, _, cw := e.cogWorkers()
 					if cw != nil {
@@ -2654,6 +2654,7 @@ func (e *Engine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeReq
 	sub := &trigger.Subscription{
 		ID:             subID,
 		VaultID:        vaultID,
+		WSPrefix:       wsPrefix,
 		Context:        req.Context,
 		Threshold:      float64(req.Threshold),
 		TTL:            time.Duration(req.TTL) * time.Second,
@@ -2760,7 +2761,7 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 				},
 				OnFound: func(ev cognitive.ContradictionEvent) {
 					if e.triggers != nil {
-						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "explicit_link")
+						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "explicit_link")
 					}
 					_, _, cw := e.cogWorkers()
 					if cw != nil {
@@ -3051,7 +3052,7 @@ func (e *Engine) SetCognitiveWorkers(
 	if heb != nil && e.triggers != nil {
 		heb.OnWeightUpdate = func(ws [8]byte, id [16]byte, field string, old, new float64) {
 			vaultID := wsVaultID(ws)
-			e.triggers.NotifyCognitive(vaultID, storage.ULID(id), field, float32(old), float32(new))
+			e.triggers.NotifyCognitive(vaultID, ws, storage.ULID(id), field, float32(old), float32(new))
 		}
 	}
 	e.hebbianWorker = heb

@@ -99,15 +99,6 @@ func (w *TriggerWorker) Run(ctx context.Context) error {
 	}
 }
 
-func (w *TriggerWorker) vaultWS(vaultID uint32) [8]byte {
-	var ws [8]byte
-	ws[0] = byte(vaultID >> 24)
-	ws[1] = byte(vaultID >> 16)
-	ws[2] = byte(vaultID >> 8)
-	ws[3] = byte(vaultID)
-	return ws
-}
-
 func (w *TriggerWorker) handleWrite(ctx context.Context, event *EngramEvent) {
 	if !event.IsNew {
 		return
@@ -239,7 +230,7 @@ func (w *TriggerWorker) handleCognitive(ctx context.Context, event CognitiveEven
 		return
 	}
 
-	ws := w.vaultWS(event.VaultID)
+	ws := event.WSPrefix
 	metas, err := w.store.GetMetadata(ctx, ws, []storage.ULID{event.EngramID})
 	if err != nil || len(metas) == 0 {
 		return
@@ -294,7 +285,7 @@ func (w *TriggerWorker) handleContradiction(ctx context.Context, event Contradic
 		return
 	}
 
-	ws := w.vaultWS(event.VaultID)
+	ws := event.WSPrefix
 	engrams, err := w.store.GetEngrams(ctx, ws, []storage.ULID{event.EngramA, event.EngramB})
 	if err != nil || len(engrams) == 0 {
 		return
@@ -400,7 +391,10 @@ func (w *TriggerWorker) handleSweep(ctx context.Context) {
 		if len(subs) == 0 {
 			continue
 		}
-		ws := w.vaultWS(vaultID)
+		// All subscriptions in a registry bucket share the same VaultID and
+		// therefore the same real vault prefix; take it from any subscription
+		// rather than reconstructing it from the uint32 routing key (#692).
+		ws := subs[0].WSPrefix
 		w.sweepVault(ctx, vaultID, ws, subs)
 	}
 }
