@@ -150,8 +150,11 @@ func (c *Client) Activate(ctx context.Context, vault string, context []string, m
 		Vault:      vault,
 		Context:    context,
 		MaxResults: maxResults,
-		Threshold:  0.1,
-		MaxHops:    0,
+		// Threshold unset (0) → server applies its mode-aware default (rrf vaults
+		// ~0.001, else 0.1). Hardcoding 0.1 here silently filtered rrf-fusion
+		// vaults to empty regardless of the server-side fix.
+		Threshold: 0,
+		MaxHops:   0,
 	}
 
 	body, err := json.Marshal(req)
