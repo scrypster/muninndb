@@ -903,7 +903,11 @@ func TestApplySupersession_InjectionCountsInTotalFound(t *testing.T) {
 		Vault:      vault,
 		Context:    []string{"zanzibar quill futon eight months"},
 		MaxResults: 50,
-		Threshold:  0.30,
+		// 0.10 (production default): the stale fact is a full lexical match but a
+		// fresh engram, so post-ACT-R-calibration it scores ~0.24 (was tuned to 0.30
+		// on an older scale); 0.10 retrieves the stale fact while still excluding the
+		// head (~0.02) so head presence still proves supersession injection, not organic recall.
+		Threshold: 0.10,
 	}
 	before, err := eng.Activate(ctx, query)
 	if err != nil {
