@@ -2196,6 +2196,24 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// forces this; it can only ADD read-only-ness, never remove it.
 	actReq.ReadOnly = auth.ObserveFromContext(ctx) || req.ReadOnly
 
+	// Resolve the recall-mode preset — explicit wire mode first, else the
+	// vault default. The engine is the SINGLE preset decider (#704):
+	// transports validate the mode name and forward it instead of stamping
+	// preset values into the request, because only the engine knows the
+	// effective scoring mode. An invalid mode from a raw wire caller is
+	// ignored (transports fail fast; a display preference falls open, never
+	// hides memory — the #604 line), and "balanced" means engine defaults.
+	var modePreset *auth.RecallModePreset
+	recallMode := req.Mode
+	if recallMode == "" {
+		recallMode = resolved.RecallMode
+	}
+	if recallMode != "" && recallMode != "balanced" {
+		if p, mErr := auth.LookupRecallMode(recallMode); mErr == nil {
+			modePreset = &p
+		}
+	}
+
 	// Convert weights if provided; otherwise apply preset weights from Plasticity config.
 	// All scoring goes through ACT-R; legacy temporal path is kept in code but not reachable for now.
 	if req.Weights != nil {
@@ -2214,6 +2232,25 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			DisableACTR:        req.Weights.DisableACTR,
 			ACTRDecay:          req.Weights.ACTRDecay,
 			ACTRHebScale:       req.Weights.ACTRHebScale,
+		}
+	} else if modePreset != nil && req.Mode != "" && presetCarriesWeights(*modePreset) && resolved.ScoringFusion != "rrf" {
+		// EXPLICIT weight-carrying mode (semantic/recent), no caller weights:
+		// the preset defines the FULL weight vector, from the ZERO base — the
+		// same struct these modes produced when transports stamped them as
+		// caller weights. Overlaying resolved defaults instead is wrong: the
+		// preset zero-value scheme cannot express semantic's implicit "decay,
+		// hebbian, access, recency = 0", and under legacy (DisableACTR)
+		// scoring those default weights let a fresh, recently-active engram
+		// score ~0.7 with zero content match — above semantic's own 0.3
+		// threshold (see presetCarriesWeights). rrf vaults take the resolved
+		// branch instead: presets never change the fusion mode, and under rrf
+		// the preset weights are inert.
+		actReq.Weights = &activation.Weights{
+			SemanticSimilarity: modePreset.SemanticSimilarity,
+			FullTextRelevance:  modePreset.FullTextRelevance,
+			Recency:            modePreset.Recency,
+			UseACTR:            !modePreset.DisableACTR,
+			DisableACTR:        modePreset.DisableACTR,
 		}
 	} else {
 		actrDecay := float32(0.5)
@@ -2272,37 +2309,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		actReq.Threshold = 0.1
 	}
 
-	// Apply vault default recall mode when no explicit mode was set by the caller.
-	// When a caller explicitly sets Mode on the request, the REST handler or MCP handler
-	// already applied the preset; the engine only applies the vault default when Mode is empty.
-	if req.Mode == "" && resolved.RecallMode != "" && resolved.RecallMode != "balanced" {
-		preset, mErr := auth.LookupRecallMode(resolved.RecallMode)
-		if mErr == nil {
-			if preset.Threshold > 0 && req.Threshold == 0 {
-				actReq.Threshold = float64(preset.Threshold)
-			}
-			if preset.MaxHops > 0 && req.MaxHops == 0 {
-				actReq.HopDepth = preset.MaxHops
-			}
-			if preset.SemanticSimilarity > 0 || preset.FullTextRelevance > 0 || preset.Recency > 0 || preset.DisableACTR {
-				w := actReq.Weights
-				if w != nil {
-					if preset.SemanticSimilarity > 0 && w.SemanticSimilarity == 0 {
-						w.SemanticSimilarity = preset.SemanticSimilarity
-					}
-					if preset.FullTextRelevance > 0 && w.FullTextRelevance == 0 {
-						w.FullTextRelevance = preset.FullTextRelevance
-					}
-					if preset.Recency > 0 && w.Recency == 0 {
-						w.Recency = preset.Recency
-					}
-					if preset.DisableACTR {
-						w.DisableACTR = true
-						w.UseACTR = false
-					}
-				}
-			}
-		}
+	// Apply the recall-mode preset (#704) — resolved into modePreset above the
+	// weights block (the zero-base branch needs it there); runs after the
+	// COG-6 coerce because its threshold decision is keyed on the effective
+	// scoring mode. Semantics documented on applyRecallModePreset.
+	if modePreset != nil {
+		applyRecallModePreset(actReq, req, *modePreset)
 	}
 
 	// Convert filters if provided

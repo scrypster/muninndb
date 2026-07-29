@@ -3655,3 +3655,70 @@ func TestHandleRecall_EmptyHint_SingleUser(t *testing.T) {
 		t.Errorf("single-user empty-recall hint should keep the where_left_off suggestion, got %q", hint)
 	}
 }
+
+// ── handleRecall mode forwarding (#704) ──────────────────────────────────────
+
+// modeCapturingEngine records the ActivateRequest handleRecall forwards.
+type modeCapturingEngine struct {
+	fakeEngine
+	lastReq *mbp.ActivateRequest
+}
+
+func (e *modeCapturingEngine) Activate(_ context.Context, req *mbp.ActivateRequest) (*mbp.ActivateResponse, error) {
+	e.lastReq = req
+	return &mbp.ActivateResponse{}, nil
+}
+
+// TestHandleRecallModeForwardedNotStamped pins the transport half of the #704
+// fix: the handler validates the mode name but FORWARDS it to the engine
+// instead of stamping preset values into the request. The engine is the
+// single preset decider — it alone knows the effective scoring mode, and
+// preset thresholds are ACT-R-calibrated (stamping deep's 0.1 here silently
+// emptied rrf vaults).
+//
+// RED CHECK: before the fix this fails with Mode == "" and Threshold == 0.1
+// (the handler applied the preset client-side and never sent the mode).
+func TestHandleRecallModeForwardedNotStamped(t *testing.T) {
+	eng := &modeCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["auth"],"mode":"deep"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if eng.lastReq == nil {
+		t.Fatal("engine never received the request")
+	}
+	if eng.lastReq.Mode != "deep" {
+		t.Errorf("Mode = %q, want %q forwarded to the engine", eng.lastReq.Mode, "deep")
+	}
+	if eng.lastReq.Threshold != 0 {
+		t.Errorf("Threshold = %v, want 0 — the handler must not stamp the preset threshold (#704)", eng.lastReq.Threshold)
+	}
+	if eng.lastReq.MaxHops != 0 {
+		t.Errorf("MaxHops = %v, want 0 — preset application is the engine's decision", eng.lastReq.MaxHops)
+	}
+	if eng.lastReq.Weights != nil {
+		t.Errorf("Weights = %+v, want nil — preset application is the engine's decision", eng.lastReq.Weights)
+	}
+}
+
+// TestHandleRecallUnknownModeStillRejected pins that moving preset
+// application into the engine kept the handler's fail-fast validation: an
+// unknown mode is a -32602 error, never silently ignored (fail closed on a
+// typo would hide the caller's intent; the loud error is the presentation
+// contract).
+func TestHandleRecallUnknownModeStillRejected(t *testing.T) {
+	eng := &modeCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["auth"],"mode":"quantum"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error == nil {
+		t.Fatal("expected an error for unknown mode, got success")
+	}
+	if eng.lastReq != nil {
+		t.Error("engine must not receive a request carrying an unknown mode")
+	}
+}
