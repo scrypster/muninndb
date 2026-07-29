@@ -857,6 +857,39 @@ func (ps *PebbleStore) GetEmbedding(ctx context.Context, wsPrefix [8]byte, id UL
 	return erf.Dequantize(quantized, params), nil
 }
 
+// GetEmbeddings reads the quantized embeddings from the 0x18 standalone keys (ERF v2)
+// for a batch of engrams in a single round-trip (via MultiGet), instead of one
+// point-read per id. The returned slice is positionally aligned with ids: entry i
+// is the dequantized vector for ids[i], or nil if no embedding is stored for that
+// id. An unknown id is treated exactly like a missing embedding (nil, no error) --
+// GetEmbedding's own convention -- never an error for a single absent id.
+func (ps *PebbleStore) GetEmbeddings(ctx context.Context, wsPrefix [8]byte, ids []ULID) ([][]float32, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	keyList := make([][]byte, len(ids))
+	for i, id := range ids {
+		keyList[i] = keys.EmbeddingKey(wsPrefix, [16]byte(id))
+	}
+	vals, err := MultiGet(ps.db, keyList)
+	if err != nil {
+		return nil, fmt.Errorf("get embeddings: %w", err)
+	}
+	out := make([][]float32, len(ids))
+	for i, val := range vals {
+		if val == nil || len(val) < 8 {
+			continue // no embedding stored
+		}
+		params := erf.DecodeQuantizeParams([8]byte(val[:8]))
+		quantized := make([]int8, len(val)-8)
+		for j := range quantized {
+			quantized[j] = int8(val[8+j])
+		}
+		out[i] = erf.Dequantize(quantized, params)
+	}
+	return out, nil
+}
+
 // GetConfidence reads the confidence value from 0x02 metadata for an engram.
 func (ps *PebbleStore) GetConfidence(ctx context.Context, wsPrefix [8]byte, id ULID) (float32, error) {
 	key := keys.MetaKey(wsPrefix, [16]byte(id))

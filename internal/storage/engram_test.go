@@ -291,6 +291,104 @@ func TestGetEmbedding_Roundtrip(t *testing.T) {
 	}
 }
 
+// TestGetEmbeddings_MatchesIndividualReads writes several engrams (some with
+// embeddings, some without, via ERF v2), then confirms GetEmbeddings returns
+// vectors positionally aligned with the requested ids and equal to what N
+// individual GetEmbedding calls would return -- including a nil/empty slot for
+// an id with no stored embedding and an unknown id mixed into the batch.
+func TestGetEmbeddings_MatchesIndividualReads(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("getembeddings-batch")
+
+	vecA := []float32{0.1, 0.5, -0.3, 0.9, -0.7}
+	vecB := []float32{-0.2, 0.4, 0.6, -0.8, 0.1}
+
+	idA, err := store.WriteEngram(ctx, ws, &Engram{Concept: "a", Content: "a-content", Embedding: vecA})
+	if err != nil {
+		t.Fatalf("WriteEngram A: %v", err)
+	}
+	idB, err := store.WriteEngram(ctx, ws, &Engram{Concept: "b", Content: "b-content", Embedding: vecB})
+	if err != nil {
+		t.Fatalf("WriteEngram B: %v", err)
+	}
+	// No embedding at all.
+	idNoEmbed := writeTestEngram(t, store, ws, "no-embed", "no-embed-content")
+	// Never written -- unknown id.
+	idUnknown := NewULID()
+
+	ids := []ULID{idA, idNoEmbed, idB, idUnknown}
+	batch, err := store.GetEmbeddings(ctx, ws, ids)
+	if err != nil {
+		t.Fatalf("GetEmbeddings: %v", err)
+	}
+	if len(batch) != len(ids) {
+		t.Fatalf("GetEmbeddings returned %d entries, want %d", len(batch), len(ids))
+	}
+
+	// Positional checks against individual GetEmbedding calls.
+	for i, id := range ids {
+		individual, err := store.GetEmbedding(ctx, ws, id)
+		if err != nil {
+			t.Fatalf("GetEmbedding(%d): %v", i, err)
+		}
+		if len(batch[i]) != len(individual) {
+			t.Fatalf("id %d: batch len %d != individual len %d", i, len(batch[i]), len(individual))
+		}
+		for j := range individual {
+			if batch[i][j] != individual[j] {
+				t.Errorf("id %d component %d: batch %v != individual %v", i, j, batch[i][j], individual[j])
+			}
+		}
+	}
+
+	// idNoEmbed and idUnknown must both be nil/empty, never an error.
+	if len(batch[1]) != 0 {
+		t.Errorf("expected empty embedding for engram with no embedding, got len %d", len(batch[1]))
+	}
+	if len(batch[3]) != 0 {
+		t.Errorf("expected empty embedding for unknown id, got len %d", len(batch[3]))
+	}
+
+	// idA and idB must round-trip within quantization tolerance.
+	const tolerance = 0.02
+	for _, pair := range []struct {
+		got, want []float32
+	}{
+		{batch[0], vecA},
+		{batch[2], vecB},
+	} {
+		if len(pair.got) != len(pair.want) {
+			t.Fatalf("length mismatch: got %d, want %d", len(pair.got), len(pair.want))
+		}
+		for i := range pair.want {
+			diff := pair.got[i] - pair.want[i]
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > tolerance {
+				t.Errorf("component %d: got %v, want %v (diff > tolerance)", i, pair.got[i], pair.want[i])
+			}
+		}
+	}
+}
+
+// TestGetEmbeddings_Empty verifies GetEmbeddings handles an empty id slice
+// without error.
+func TestGetEmbeddings_Empty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("getembeddings-empty")
+
+	got, err := store.GetEmbeddings(ctx, ws, nil)
+	if err != nil {
+		t.Fatalf("GetEmbeddings(nil): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty result for empty id slice, got len %d", len(got))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DeleteEngram
 // ---------------------------------------------------------------------------

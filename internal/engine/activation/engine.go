@@ -275,6 +275,11 @@ type ActivationStore interface {
 	// storage.PebbleStore.GetEmbedding and the identical fallback in
 	// internal/consolidation/dedup.go and orient.go.
 	GetEmbedding(ctx context.Context, wsPrefix [8]byte, id storage.ULID) ([]float32, error)
+	// GetEmbeddings batch-reads the standalone embeddings (0x18 keys, ERF v2) for
+	// multiple engrams in one round-trip -- see storage.PebbleStore.GetEmbeddings.
+	// The returned slice is positionally aligned with ids; an id with no stored
+	// embedding gets a nil/empty entry, never an error.
+	GetEmbeddings(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([][]float32, error)
 	// GetLeases batch-reads ownership leases, one per id in order (zero Lease for
 	// unleased engrams). Used for work-queue recall visibility filtering.
 	GetLeases(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([]storage.Lease, error)
@@ -1540,6 +1545,14 @@ func (e *ActivationEngine) phase6Score(
 	// A non-zero vectorScore from the HNSW pool is never overwritten.
 	// ftsScore is left at zero: BM25 requires corpus-level IDF statistics unavailable here.
 	if len(p1.embedding) > 0 {
+		// Two passes: first collect the embeddings already available (eng.Embedding
+		// non-empty) and the ids that need a fallback read; then fetch all fallback
+		// ids in ONE GetEmbeddings round-trip instead of one GetEmbedding point-read
+		// per candidate (#714 batch follow-up). Bounded to exactly this needsCosine
+		// candidate set, never the full result set.
+		embeds := make([]([]float32), len(all))
+		var fallbackIdx []int
+		var fallbackIDs []storage.ULID
 		for i := range all {
 			needsCosine := all[i].isTraversed || (all[i].vectorScore == 0 && (all[i].inTagPool || all[i].ftsScore > 0))
 			if !needsCosine {
@@ -1549,21 +1562,28 @@ func (e *ActivationEngine) phase6Score(
 			if eng == nil {
 				continue
 			}
-			embed := eng.Embedding
-			if len(embed) == 0 {
-				// ERF v2 stores embeddings in a separate 0x18 key, so GetEngrams()
-				// above returns nil embeddings. Fall back to GetEmbedding() in
-				// that case -- same pattern as internal/consolidation/dedup.go
-				// and orient.go. Bounded to exactly this needsCosine candidate
-				// set, never the full result set.
-				// TODO(#714): if needsCosine pools grow, a batch
-				// GetEmbeddings([]ULID) would collapse these per-candidate point
-				// reads into one round-trip. Fine sequentially at current pool sizes.
-				if loaded, err := e.store.GetEmbedding(ctx, ws, eng.ID); err == nil && len(loaded) > 0 {
-					embed = loaded
+			if len(eng.Embedding) > 0 {
+				embeds[i] = eng.Embedding
+				continue
+			}
+			// ERF v2 stores embeddings in a separate 0x18 key, so GetEngrams()
+			// above returns nil embeddings. Fall back to a batched GetEmbeddings()
+			// read in that case -- same pattern as internal/consolidation/dedup.go
+			// and orient.go, collapsed into one round-trip.
+			fallbackIdx = append(fallbackIdx, i)
+			fallbackIDs = append(fallbackIDs, eng.ID)
+		}
+		if len(fallbackIDs) > 0 {
+			if loaded, err := e.store.GetEmbeddings(ctx, ws, fallbackIDs); err == nil {
+				for j, idx := range fallbackIdx {
+					if j < len(loaded) && len(loaded[j]) > 0 {
+						embeds[idx] = loaded[j]
+					}
 				}
 			}
-			if len(embed) > 0 {
+		}
+		for i := range all {
+			if embed := embeds[i]; len(embed) > 0 {
 				all[i].vectorScore = float64(cosineSimilarity32(p1.embedding, embed))
 			}
 		}

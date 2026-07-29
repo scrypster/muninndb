@@ -132,6 +132,19 @@ func (s *stubStore) GetEmbedding(_ context.Context, _ [8]byte, id storage.ULID) 
 	return nil, nil
 }
 
+// GetEmbeddings mirrors PebbleStore.GetEmbeddings for this in-memory stub: same
+// inline-Embedding source as GetEmbedding, just returned positionally for a batch
+// of ids in one call.
+func (s *stubStore) GetEmbeddings(_ context.Context, _ [8]byte, ids []storage.ULID) ([][]float32, error) {
+	out := make([][]float32, len(ids))
+	for i, id := range ids {
+		if e, ok := s.engrams[id]; ok {
+			out[i] = e.Embedding
+		}
+	}
+	return out, nil
+}
+
 func (s *stubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
 	var ids []storage.ULID
 	for _, id := range s.recent {

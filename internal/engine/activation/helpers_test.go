@@ -519,6 +519,17 @@ func (s *internalStubStore) GetEmbedding(_ context.Context, _ [8]byte, id storag
 	return s.embeddings[id], nil
 }
 
+// GetEmbeddings mirrors GetEmbedding but batched, returning vectors from the
+// same separate-embeddings map positionally aligned with ids -- faithfully
+// reproducing the ERF v2 split for a batch of ids in one call.
+func (s *internalStubStore) GetEmbeddings(_ context.Context, _ [8]byte, ids []storage.ULID) ([][]float32, error) {
+	out := make([][]float32, len(ids))
+	for i, id := range ids {
+		out[i] = s.embeddings[id]
+	}
+	return out, nil
+}
+
 func (s *internalStubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
 	return nil, nil
 }
