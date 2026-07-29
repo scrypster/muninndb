@@ -745,6 +745,32 @@ func (e *Engine) spawnJob(fn func()) bool {
 	return true
 }
 
+// waitWriteTimeAssocWorkersIdle blocks until the three write-time
+// association workers (autoAssoc, neighborWorker, goalLinkWorker) have
+// finished every job enqueued so far. These run fire-and-forget off the
+// Write() hot path (see the Intend/Write enqueue sites) and normal callers
+// never await them — recall tolerates their eventual consistency by design.
+//
+// Test-only synchronization helper: the prospective acceptance harness arms
+// intentions via Intend() (which calls Write()) and then immediately runs
+// scripted Activate() calls whose BFS candidate pool depends on associations
+// (e.g. RelSupports) these workers create. Without draining, the harness was
+// racing the same fire-and-forget workers production code is allowed to race
+// — but the harness must observe steady state before asserting recall.
+// Production scheduling/dispatch behavior is unchanged; this only adds the
+// ability to await it.
+func (e *Engine) waitWriteTimeAssocWorkersIdle() {
+	if e.autoAssoc != nil {
+		e.autoAssoc.WaitIdle()
+	}
+	if e.neighborWorker != nil {
+		e.neighborWorker.WaitIdle()
+	}
+	if e.goalLinkWorker != nil {
+		e.goalLinkWorker.WaitIdle()
+	}
+}
+
 // beginVaultOp tracks synchronous vault-operation setup work that can still
 // touch Pebble before handing off to a tracked background job. Returns false if
 // the engine is shutting down and the caller should fail fast.

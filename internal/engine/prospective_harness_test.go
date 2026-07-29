@@ -120,6 +120,17 @@ func runProspectiveHarness(t *testing.T, enabled bool) harnessResult {
 		intentionIDs[i] = id
 	}
 
+	// Deterministically drain the write-time association workers (autoAssoc,
+	// neighborWorker, goalLinkWorker) before the scripted calls. Intend()
+	// writes each intention through the normal Write() path, which enqueues
+	// fire-and-forget jobs to those workers; the BFS candidate pool the
+	// scripted Activate() calls traverse depends on associations (e.g.
+	// RelSupports from goalLinkWorker) those jobs create. Without this the
+	// harness nondeterministically raced its own async write-time workers
+	// under scheduler pressure (flaky under -race/CPU load on every branch,
+	// not specific to any feature change) — see #722.
+	eng.waitWriteTimeAssocWorkersIdle()
+
 	var res harnessResult
 	for ci, call := range sc.Calls {
 		resp, err := eng.Activate(ctx, &mbp.ActivateRequest{

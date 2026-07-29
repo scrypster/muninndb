@@ -56,6 +56,9 @@ type NeighborWorker struct {
 	hnsw    NeighborHNSW
 	metrics *NeighborMetrics
 	wg      sync.WaitGroup
+	// jobWG tracks in-flight+queued jobs; see Worker.jobWG in autoassoc.go
+	// for the same pattern. Lets WaitIdle() block deterministically.
+	jobWG   sync.WaitGroup
 	stopCtx context.Context
 }
 
@@ -81,16 +84,24 @@ func NewNeighborWorker(ctx context.Context, store NeighborStore, hnsw NeighborHN
 // the job is dropped (non-blocking) and the Dropped counter is incremented.
 // Drops are logged at powers of 2.
 func (w *NeighborWorker) EnqueueNeighborJob(job NeighborJob) {
+	w.jobWG.Add(1) // Add BEFORE the send so a concurrent WaitIdle() can't observe a false-idle gap.
 	select {
 	case w.jobs <- job:
 		w.metrics.Enqueued.Add(1)
 	default:
+		w.jobWG.Done() // never queued — nothing to wait for
 		dropped := w.metrics.Dropped.Add(1)
 		// Log at powers of 2: 1, 2, 4, 8, 16, ...
 		if dropped&(dropped-1) == 0 {
 			slog.Warn("neighbor worker queue full, dropping job", "dropped", dropped)
 		}
 	}
+}
+
+// WaitIdle blocks until every job enqueued so far has finished processing.
+// Test-only synchronization helper; see Worker.WaitIdle in autoassoc.go.
+func (w *NeighborWorker) WaitIdle() {
+	w.jobWG.Wait()
 }
 
 // Stop drains all pending jobs and waits for in-flight work to complete.
@@ -120,6 +131,7 @@ func (w *NeighborWorker) run() {
 			w.metrics.Completed.Add(1)
 		}
 		cancel()
+		w.jobWG.Done()
 	}
 }
 
