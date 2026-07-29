@@ -104,11 +104,15 @@ func TestWrite_TwoTargetsSameRelType_NoFabricatedContradiction(t *testing.T) {
 		t.Fatalf("ContradictWorker.processBatch: %v", err)
 	}
 
+	// t.Errorf (not Fatalf) so that, when this goes RED (fabrication restored),
+	// execution continues through applyOnFound and the confidence-damage
+	// assertions below ALSO fire — demonstrating both halves of the bug (the
+	// fabricated flag AND the confidence penalty), not just the flag count.
 	if len(events) != 0 {
-		t.Fatalf("fabricated contradiction (COG-23): got %d OnFound events for an ordinary same-RelType/different-target write, want 0: %+v", len(events), events)
+		t.Errorf("fabricated contradiction (COG-23): got %d OnFound events for an ordinary same-RelType/different-target write, want 0: %+v", len(events), events)
 	}
 	if len(store.flagged) != 0 {
-		t.Fatalf("fabricated contradiction persisted (COG-23): FlagContradiction called %d times, want 0: %+v", len(store.flagged), store.flagged)
+		t.Errorf("fabricated contradiction persisted (COG-23): FlagContradiction called %d times, want 0: %+v", len(store.flagged), store.flagged)
 	}
 
 	applyOnFound(t, confW, ws, events)
