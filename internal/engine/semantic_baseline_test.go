@@ -22,8 +22,8 @@ func TestResolveSemanticBaseline_RegistryHit(t *testing.T) {
 
 	ws := eng.store.ResolveVaultPrefix("v-registry-hit")
 	b := eng.resolveSemanticBaseline("v-registry-hit", ws, auth.ResolvePlasticity(nil))
-	if b != 0.558 {
-		t.Errorf("resolveSemanticBaseline for bge-small-en-v1.5 = %v, want 0.558 (the registered constant)", b)
+	if b != 0.520 {
+		t.Errorf("resolveSemanticBaseline for bge-small-en-v1.5 = %v, want 0.520 (the registered constant)", b)
 	}
 }
 
@@ -108,8 +108,8 @@ func TestResolveSemanticBaseline_PlasticityOverride_OutOfRangeRejectedFallsBackT
 	resolved := auth.ResolvePlasticity(&auth.PlasticityConfig{SemanticFloor: &tooHigh})
 	ws := eng.store.ResolveVaultPrefix("v-override-bad")
 	b := eng.resolveSemanticBaseline("v-override-bad", ws, resolved)
-	if b != 0.558 {
-		t.Errorf("resolveSemanticBaseline with out-of-range SemanticFloor=1.5 = %v, want 0.558 "+
+	if b != 0.520 {
+		t.Errorf("resolveSemanticBaseline with out-of-range SemanticFloor=1.5 = %v, want 0.520 "+
 			"(rejected override must fall back to the registry, never silently zero every match)", b)
 	}
 }

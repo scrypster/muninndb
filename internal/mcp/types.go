@@ -70,25 +70,30 @@ type WriteResult struct {
 }
 
 type Memory struct {
-	ID          string    `json:"id"`
-	Concept     string    `json:"concept"`
-	Content     string    `json:"content"` // recall: real content (truncated); read: full content
-	Summary     string    `json:"summary,omitempty"`
-	Score       float64   `json:"score,omitempty"`
-	VectorScore float64   `json:"vector_score,omitempty"`
-	EntityBoost float64   `json:"entity_boost,omitempty"`
-	Confidence  float32   `json:"confidence"`
-	Why         string    `json:"why,omitempty"`
-	Tags        []string  `json:"tags,omitempty"`
-	State       string    `json:"state,omitempty"`
-	Type        string    `json:"type"`                 // canonical MemoryType label ("fact", "decision", ...); always present
-	TypeLabel   string    `json:"type_label,omitempty"` // writer-supplied free-form label, e.g. "architectural_decision"
-	CreatedAt   time.Time `json:"created_at"`
-	LastAccess  time.Time `json:"last_access"`
-	AccessCount uint32    `json:"access_count,omitempty"`
-	Relevance   float32   `json:"relevance,omitempty"`
-	SourceType  string    `json:"source_type,omitempty"`
-	Trust       string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
+	ID          string  `json:"id"`
+	Concept     string  `json:"concept"`
+	Content     string  `json:"content"` // recall: real content (truncated); read: full content
+	Summary     string  `json:"summary,omitempty"`
+	Score       float64 `json:"score,omitempty"`
+	VectorScore float64 `json:"vector_score,omitempty"`
+	// VectorScoreRaw is the uncalibrated cosine similarity behind VectorScore
+	// (COG-26's honesty backstop — see activation.ScoreComponents.
+	// SemanticSimilarityRaw). Lets an operator see the raw signal for a match
+	// that a low VectorScore made look weak or that abstained entirely.
+	VectorScoreRaw float64   `json:"vector_score_raw,omitempty"`
+	EntityBoost    float64   `json:"entity_boost,omitempty"`
+	Confidence     float32   `json:"confidence"`
+	Why            string    `json:"why,omitempty"`
+	Tags           []string  `json:"tags,omitempty"`
+	State          string    `json:"state,omitempty"`
+	Type           string    `json:"type"`                 // canonical MemoryType label ("fact", "decision", ...); always present
+	TypeLabel      string    `json:"type_label,omitempty"` // writer-supplied free-form label, e.g. "architectural_decision"
+	CreatedAt      time.Time `json:"created_at"`
+	LastAccess     time.Time `json:"last_access"`
+	AccessCount    uint32    `json:"access_count,omitempty"`
+	Relevance      float32   `json:"relevance,omitempty"`
+	SourceType     string    `json:"source_type,omitempty"`
+	Trust          string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
 
 	// Importance is the use-time EffectiveImportance in [0,1]; always present.
 	// ImportanceSource says where it came from: "explicit" (caller-asserted at
@@ -244,10 +249,15 @@ type ExplainRequest struct {
 type ExplainComponents struct {
 	FullTextRelevance  float64 `json:"full_text_relevance"`
 	SemanticSimilarity float64 `json:"semantic_similarity"`
-	DecayFactor        float64 `json:"decay_factor"`
-	HebbianBoost       float64 `json:"hebbian_boost"`
-	AccessFrequency    float64 `json:"access_frequency"`
-	Confidence         float64 `json:"confidence"`
+	// SemanticSimilarityRaw is the uncalibrated cosine similarity — see
+	// activation.ScoreComponents.SemanticSimilarityRaw. Lets an operator see
+	// the raw signal (e.g. 0.59) behind a calibrated value that abstained
+	// (e.g. 0.07) without a second tool call.
+	SemanticSimilarityRaw float64 `json:"semantic_similarity_raw"`
+	DecayFactor           float64 `json:"decay_factor"`
+	HebbianBoost          float64 `json:"hebbian_boost"`
+	AccessFrequency       float64 `json:"access_frequency"`
+	Confidence            float64 `json:"confidence"`
 }
 
 // ExplainResult breaks down why an engram scored as it did for a given query.

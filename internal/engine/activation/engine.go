@@ -132,6 +132,15 @@ type ScoredID struct {
 // ScoreComponents breaks down how a score was computed.
 type ScoreComponents struct {
 	SemanticSimilarity float64
+	// SemanticSimilarityRaw is the uncalibrated cosine similarity — the value
+	// SemanticSimilarity would be if no COG-26 baseline rescale were applied
+	// (rescaleSemantic(vectorScore, 0) == vectorScore). This is the honesty
+	// backstop the COG-26 design named but never wired up: an operator
+	// debugging a wrongly-abstained match needs to see the raw cosine (e.g.
+	// 0.59, a genuine signal) alongside the calibrated value that made it
+	// abstain (e.g. 0.07), or the floor is unauditable. Always populated
+	// alongside SemanticSimilarity at every site that sets it.
+	SemanticSimilarityRaw float64
 	// FullTextRelevance is an absolute, query-calibrated IDF-weighted coverage
 	// score in [0,1] straight from fts.Index.Search (COG-24, issue #711) — the
 	// fraction of the query's IDF mass this engram covers. It is NOT a
@@ -1574,13 +1583,14 @@ func (e *ActivationEngine) phase6Score(
 				id:    c.id,
 				final: final,
 				components: ScoreComponents{
-					SemanticSimilarity: rescaleSemantic(c.vectorScore, w.SemanticBaseline),
-					FullTextRelevance:  normalizedFTS,
-					HebbianBoost:       c.hebbianBoost,
-					TransitionBoost:    c.transitionBoost,
-					Confidence:         float64(eng.Confidence),
-					Raw:                c.rrfScore * (1.0 + c.hebbianBoost + c.transitionBoost),
-					Final:              final,
+					SemanticSimilarity:    rescaleSemantic(c.vectorScore, w.SemanticBaseline),
+					SemanticSimilarityRaw: c.vectorScore,
+					FullTextRelevance:     normalizedFTS,
+					HebbianBoost:          c.hebbianBoost,
+					TransitionBoost:       c.transitionBoost,
+					Confidence:            float64(eng.Confidence),
+					Raw:                   c.rrfScore * (1.0 + c.hebbianBoost + c.transitionBoost),
+					Final:                 final,
 				},
 				hopPath: c.hopPath,
 			})
@@ -1880,15 +1890,16 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 	conf := float64(eng.Confidence)
 
 	return ScoreComponents{
-		SemanticSimilarity: semCal,
-		FullTextRelevance:  normalizedFTS, // normalized [0,1), not raw BM25
-		DecayFactor:        decayFactor,
-		HebbianBoost:       hebbianBoost,
-		AccessFrequency:    accessFreq,
-		Recency:            recency,
-		Confidence:         conf,
-		Raw:                raw,
-		Final:              raw * conf,
+		SemanticSimilarity:    semCal,
+		SemanticSimilarityRaw: vectorScore,
+		FullTextRelevance:     normalizedFTS, // normalized [0,1), not raw BM25
+		DecayFactor:           decayFactor,
+		HebbianBoost:          hebbianBoost,
+		AccessFrequency:       accessFreq,
+		Recency:               recency,
+		Confidence:            conf,
+		Raw:                   raw,
+		Final:                 raw * conf,
 	}
 }
 
@@ -2061,16 +2072,17 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	conf := float64(eng.Confidence)
 
 	return ScoreComponents{
-		SemanticSimilarity: semCal,
-		FullTextRelevance:  normalizedFTS,
-		DecayFactor:        math.Max(0.05, math.Exp(-ageDays/math.Max(float64(eng.Stability), 1.0))), // kept for reporting; guard against Stability=0
-		HebbianBoost:       hebbianBoost,
-		TransitionBoost:    transitionBoost,
-		AccessFrequency:    math.Log1p(float64(eng.AccessCount)) / math.Log1p(100),
-		Recency:            math.Exp(-ageDays * math.Log(2) / 7.0),
-		Confidence:         conf,
-		Raw:                raw,
-		Final:              raw * conf,
+		SemanticSimilarity:    semCal,
+		SemanticSimilarityRaw: vectorScore,
+		FullTextRelevance:     normalizedFTS,
+		DecayFactor:           math.Max(0.05, math.Exp(-ageDays/math.Max(float64(eng.Stability), 1.0))), // kept for reporting; guard against Stability=0
+		HebbianBoost:          hebbianBoost,
+		TransitionBoost:       transitionBoost,
+		AccessFrequency:       math.Log1p(float64(eng.AccessCount)) / math.Log1p(100),
+		Recency:               math.Exp(-ageDays * math.Log(2) / 7.0),
+		Confidence:            conf,
+		Raw:                   raw,
+		Final:                 raw * conf,
 	}
 }
 

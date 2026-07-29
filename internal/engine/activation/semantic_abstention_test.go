@@ -36,22 +36,36 @@ import (
 //     pre-COG-26 behavior), the nonsense query returns a confident match.
 //     This is the bug #711 left unfixed — it must reproduce here or the test
 //     proves nothing.
-//   - GREEN: with the floor ENABLED (SemanticBaseline=0.558, the bge-small
+//   - GREEN: with the floor ENABLED (SemanticBaseline=0.520, the bge-small
 //     registry value), the same nonsense query abstains (0 results).
 //   - Positive control (a): a genuinely relevant query (high cosine) still
 //     returns its match with the floor enabled — the floor must not be a
 //     flat cutoff that kills real signal.
 //   - Positive control (b): a paraphrase of the genuine query (moderate but
 //     real cosine, the #711 "paraphrase paradox" case) still returns its
-//     match with the floor enabled — the no-silent-substitution guard.
+//     match with the floor enabled — the no-silent-substitution guard. This
+//     is now a hard assertion (not a skip): an adversarial refute of the
+//     original b=0.558 proved a genuine 0.59-cosine paraphrase silently
+//     abstained, so a skip here would guard nothing.
+//   - Small-vault zero-lexical-overlap probe: on a ~15-20 engram corpus (no
+//     lexical overlap anywhere to mask the failure mode, unlike a large
+//     battery), a genuine paraphrase at cosine ~0.61 must survive and a
+//     nonsense query at cosine ~0.55 must still abstain.
 // ---------------------------------------------------------------------------
 
 // semanticBaselineBGE is COG-26's registered b for bge-small-en-v1.5
-// (mu=0.450, sigma=0.054, b = mu+2*sigma = 0.558). Mirrors the constant in
+// (mu=0.450, sigma=0.054, b = mu+1.3*sigma = 0.520). Mirrors the constant in
 // internal/plugin/embed/baseline.go — kept independent here (not imported)
 // so this test still catches a registry value drifting away from what
 // actually separates the two distributions.
-const semanticBaselineBGE = 0.558
+//
+// b was lowered from mu+2*sigma (0.558) after an adversarial refute found it
+// false-abstained genuine moderate-cosine matches (~24% of the measured
+// true-pair distribution, mu=0.693, sigma=0.088, fell below the 0.558
+// survival bar of cos~=0.632). At b=0.520 the survival bar drops to
+// cos~=0.600, rescuing that band while the measured noise top (~0.596)
+// still abstains — with a thin margin (contentMatch ~0.095 vs the 0.1 gate).
+const semanticBaselineBGE = 0.520
 
 // billingCorpus is a small, domain-coherent corpus (SaaS billing/invoicing
 // engineering notes) — coherent enough to be realistic, matching the design
@@ -273,6 +287,14 @@ func TestSemanticAbstention_PositiveControl_GenuineQueryStillMatches(t *testing.
 // no-silent-substitution guard: a paraphrase using different vocabulary than
 // the stored text (moderate cosine, the #711 "paraphrase paradox" shape)
 // must still clear the floor and return its match.
+//
+// This is a hard assertion, not a skip: an earlier revision of this test
+// skipped (rather than failed) if the paraphrase abstained, which meant the
+// test suite never actually caught the regression an adversarial refute
+// later found — b=0.558 silently abstained a genuine 0.59-cosine paraphrase
+// in a real vault, and this test's Skipf let that pass CI clean. A skip
+// guards nothing; if the paraphrase doesn't survive, that IS the failure
+// this test exists to catch.
 func TestSemanticAbstention_PositiveControl_ParaphraseStillMatches(t *testing.T) {
 	eng, _, byConcept := buildSemanticAbstentionFixture(t)
 	wantID := byConcept["Remittance processing flow"]
@@ -284,13 +306,117 @@ func TestSemanticAbstention_PositiveControl_ParaphraseStillMatches(t *testing.T)
 	result := runSemanticQuery(t, eng, paraphraseQuery, semanticBaselineBGE)
 
 	if len(result.Activations) == 0 {
-		t.Skipf("paraphrase query %q abstained even with the floor enabled — this corpus/model realization did not "+
-			"land the paraphrase above the noise band (see design doc §2c on the thin margin); not a hard failure "+
-			"of this test suite, but worth reviewing the measured cosine below", paraphraseQuery)
+		t.Fatalf("paraphrase query %q abstained with the floor enabled (b=%.3f); want >= 1 result. "+
+			"A skip here would prove nothing — the whole point of this test is that a genuine "+
+			"reformulation must survive the floor.", paraphraseQuery, semanticBaselineBGE)
 	}
 	top := result.Activations[0]
-	t.Logf("paraphrase query matched: concept=%q score=%.4f semantic_similarity=%.4f (top wanted=%v got=%v)",
-		top.Engram.Concept, top.Score, top.Components.SemanticSimilarity, wantID, top.Engram.ID)
+	if top.Engram.ID != wantID {
+		t.Errorf("top result = %q (id=%v), want the remittance-processing engram (id=%v)",
+			top.Engram.Concept, top.Engram.ID, wantID)
+	}
+	t.Logf("paraphrase query matched: concept=%q score=%.4f semantic_similarity=%.4f semantic_similarity_raw=%.4f",
+		top.Engram.Concept, top.Score, top.Components.SemanticSimilarity, top.Components.SemanticSimilarityRaw)
+}
+
+// TestSemanticAbstention_ModerateCosineBand_GenuineMatchSurvives is finding
+// #1 of the 2026-07-29 adversarial refute made test-shaped: a genuine match
+// in the 0.60-0.65 raw-cosine band. At the old b=0.558 (mu+2sigma), the
+// sem-only survival bar sat at cos~=0.632, so a genuine match at 0.60-0.65
+// would fall below it and silently abstain — exactly the bug the refute
+// found (a real paraphrase at cosine 0.59 scored contentMatch=0.043 < 0.1
+// and recall returned EMPTY where it should have ranked #2). At the lowered
+// b=0.520, the survival bar drops to cos~=0.600, so this same band survives.
+//
+// This test MUST FAIL if b is raised back to 0.558 and MUST PASS at 0.520 —
+// that's the whole point: it pins the fix, not just a general "matches
+// still work" smoke check.
+func TestSemanticAbstention_ModerateCosineBand_GenuineMatchSurvives(t *testing.T) {
+	eng, _, byConcept := buildSemanticAbstentionFixture(t)
+	wantID := byConcept["Overpayment refund workflow"]
+
+	// Measured raw cosine against the corpus (see the exploration notes in
+	// the COG-26 refute follow-up): ~0.6265 against "Overpayment refund
+	// workflow", ~0.041 clear of the next-closest candidate — squarely in
+	// the 0.60-0.65 band this increment's b=0.520 was chosen to rescue.
+	const moderateBandQuery = "getting a refund after paying extra by mistake"
+	result := runSemanticQuery(t, eng, moderateBandQuery, semanticBaselineBGE)
+
+	if len(result.Activations) == 0 {
+		t.Fatalf("0.60-0.65-band genuine match %q abstained with the floor enabled (b=%.3f); "+
+			"want >= 1 result — this is exactly the false-abstention the refute found at b=0.558.",
+			moderateBandQuery, semanticBaselineBGE)
+	}
+	top := result.Activations[0]
+	if top.Engram.ID != wantID {
+		t.Errorf("top result = %q (id=%v), want the overpayment-refund engram (id=%v)",
+			top.Engram.Concept, top.Engram.ID, wantID)
+	}
+	raw := top.Components.SemanticSimilarityRaw
+	if raw < 0.60 || raw > 0.65 {
+		t.Errorf("measured raw cosine = %.4f, want in [0.60, 0.65] — this test is meant to pin the "+
+			"specific band the refute found unrescued at the old b=0.558; if the corpus/model "+
+			"realization drifted out of band, pick a new query rather than widening this check", raw)
+	}
+	t.Logf("moderate-band query matched: concept=%q score=%.4f semantic_similarity=%.4f semantic_similarity_raw=%.4f",
+		top.Engram.Concept, top.Score, top.Components.SemanticSimilarity, raw)
+}
+
+// TestSemanticAbstention_SmallVault_ZeroLexicalOverlapProbe is the small-
+// vault probe the refute called for: an 18-engram vault (the billing
+// corpus above — no lexical overlap decoy engrams padding out a large
+// candidate pool) where a genuine, zero-lexical-overlap paraphrase must
+// survive the floor and a nonsense query must still abstain. A large-vault
+// battery (dozens to hundreds of engrams with lexical overlap scattered
+// throughout) can mask this failure mode — the genuine match doesn't need
+// the floor to be perfectly tuned because FTS or a lexical near-match
+// usually corroborates it. On a small, fresh vault (a brand-new user's
+// first session, or a narrow single-topic vault) there is no such
+// corroboration: the semantic floor is the ONLY gate, and this is where a
+// too-aggressive b silently drops a genuine first match.
+func TestSemanticAbstention_SmallVault_ZeroLexicalOverlapProbe(t *testing.T) {
+	eng, _, byConcept := buildSemanticAbstentionFixture(t)
+
+	t.Run("genuine_paraphrase_survives", func(t *testing.T) {
+		wantID := byConcept["Overpayment refund workflow"]
+		// No shared words with the stored concept/content ("overpayment",
+		// "refund", "reconciliation", "disbursement", "batch", "queued",
+		// "approval") beyond incidental filler words — a genuine
+		// reformulation. Measured raw cosine ~0.604, ~0.026 clear of the
+		// next-closest candidate.
+		const query = "before extra money goes back out, a manager has to say yes first"
+		result := runSemanticQuery(t, eng, query, semanticBaselineBGE)
+		if len(result.Activations) == 0 {
+			t.Fatalf("zero-lexical-overlap paraphrase %q abstained on the small vault (b=%.3f); want >= 1 result",
+				query, semanticBaselineBGE)
+		}
+		top := result.Activations[0]
+		if top.Engram.ID != wantID {
+			t.Errorf("top result = %q, want the overpayment-refund engram", top.Engram.Concept)
+		}
+		t.Logf("small-vault paraphrase matched: concept=%q semantic_similarity_raw=%.4f",
+			top.Engram.Concept, top.Components.SemanticSimilarityRaw)
+	})
+
+	t.Run("nonsense_still_abstains", func(t *testing.T) {
+		// Clearly out-of-domain (community arts scheduling vs. billing/
+		// invoicing) yet lands at the top of this corpus's in-domain-
+		// adjacent noise (measured raw cosine ~0.545 against "Late fee
+		// assessment schedule" — the shared word "schedule" is exactly the
+		// kind of incidental lexical echo that inflates bge-small's
+		// out-of-domain cosine without any real topical relevance).
+		const query = "quarterly schedule of community recital events downtown"
+		result := runSemanticQuery(t, eng, query, semanticBaselineBGE)
+		if len(result.Activations) > 0 {
+			top := result.Activations[0]
+			t.Errorf("nonsense query %q returned %d result(s) on the small vault (b=%.3f); want 0. "+
+				"Top: concept=%q semantic_similarity=%.4f semantic_similarity_raw=%.4f",
+				query, len(result.Activations), semanticBaselineBGE,
+				top.Engram.Concept, top.Components.SemanticSimilarity, top.Components.SemanticSimilarityRaw)
+		} else {
+			t.Logf("small-vault nonsense query correctly abstained (b=%.3f)", semanticBaselineBGE)
+		}
+	})
 }
 
 // TestSemanticAbstention_UnknownModel_IdentityPlusWarn documents the

@@ -623,13 +623,13 @@ func TestComputeACTR_SemanticBaseline_NearFloorCosineContributesNothing(t *testi
 	now := time.Now()
 	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 	w := actrDefaultWeights()
-	w.SemanticBaseline = 0.558
+	w.SemanticBaseline = 0.520
 
 	// Noise-band cosine (0.50), no FTS overlap: with the floor, semCal=0 so
 	// contentMatch (and therefore Raw, absent tag pool/hebbian rescue) is 0.
 	sc := computeACTR(0.50, 0.0, 0.0, 0.0, eng, 0, now, w, false)
 	if sc.Raw != 0 {
-		t.Errorf("noise-band cosine (0.50) with baseline 0.558 produced Raw=%v, want 0", sc.Raw)
+		t.Errorf("noise-band cosine (0.50) with baseline 0.520 produced Raw=%v, want 0", sc.Raw)
 	}
 	if sc.SemanticSimilarity != 0 {
 		t.Errorf("reported SemanticSimilarity = %v, want 0 (calibrated value, not raw 0.50)", sc.SemanticSimilarity)
@@ -643,13 +643,13 @@ func TestComputeACTR_SemanticBaseline_AboveFloorStillScores(t *testing.T) {
 	now := time.Now()
 	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 	w := actrDefaultWeights()
-	w.SemanticBaseline = 0.558
+	w.SemanticBaseline = 0.520
 
 	sc := computeACTR(0.69, 0.0, 0.0, 0.0, eng, 0, now, w, false)
 	if sc.Raw <= 0 {
-		t.Errorf("genuine cosine (0.69) with baseline 0.558 produced Raw=%v, want > 0", sc.Raw)
+		t.Errorf("genuine cosine (0.69) with baseline 0.520 produced Raw=%v, want > 0", sc.Raw)
 	}
-	wantSemCal := rescaleSemantic(0.69, 0.558)
+	wantSemCal := rescaleSemantic(0.69, 0.520)
 	assertNear(t, "SemanticSimilarity", sc.SemanticSimilarity, wantSemCal, 1e-9)
 }
 
@@ -661,7 +661,7 @@ func TestComputeACTR_SemanticBaseline_TagPoolFloorUnaffected(t *testing.T) {
 	now := time.Now()
 	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 	w := actrDefaultWeights()
-	w.SemanticBaseline = 0.558
+	w.SemanticBaseline = 0.520
 
 	tagOnly := computeACTR(0.0, 0.0, 0.0, 0.0, eng, 0, now, w, true)
 	if tagOnly.Raw <= 0 {
@@ -676,10 +676,10 @@ func TestComputeACTR_SemanticBaseline_Monotone(t *testing.T) {
 	now := time.Now()
 	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 	w := actrDefaultWeights()
-	w.SemanticBaseline = 0.558
+	w.SemanticBaseline = 0.520
 
 	prev := -1.0
-	for _, cos := range []float64{0, 0.3, 0.5, 0.558, 0.6, 0.69, 0.8, 1.0} {
+	for _, cos := range []float64{0, 0.3, 0.5, 0.520, 0.6, 0.69, 0.8, 1.0} {
 		sc := computeACTR(cos, 0.0, 0.0, 0.0, eng, 0, now, w, false)
 		if sc.Raw < prev {
 			t.Fatalf("Raw score not monotone in cosine: cos=%v produced Raw=%v < previous %v", cos, sc.Raw, prev)

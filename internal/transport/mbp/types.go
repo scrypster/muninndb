@@ -323,15 +323,21 @@ type ActivationItem struct {
 // ScoreComponents breaks down the activation score.
 type ScoreComponents struct {
 	SemanticSimilarity float32 `msgpack:"semantic_similarity"           json:"semantic_similarity"`
-	FullTextRelevance  float32 `msgpack:"full_text_relevance"           json:"full_text_relevance"`
-	DecayFactor        float32 `msgpack:"decay_factor"                  json:"decay_factor"`
-	HebbianBoost       float32 `msgpack:"hebbian_boost"                 json:"hebbian_boost"`
-	TransitionBoost    float32 `msgpack:"transition_boost,omitempty"    json:"transition_boost,omitempty"`
-	EntityBoost        float32 `msgpack:"entity_boost,omitempty"        json:"entity_boost,omitempty"`
-	AccessFrequency    float32 `msgpack:"access_frequency"              json:"access_frequency"`
-	Recency            float32 `msgpack:"recency"                       json:"recency"`
-	Raw                float32 `msgpack:"raw"                           json:"raw"`
-	Final              float32 `msgpack:"final"                         json:"final"`
+	// SemanticSimilarityRaw is the uncalibrated cosine similarity (COG-26's
+	// honesty backstop) — see internal/engine/activation.ScoreComponents.
+	// SemanticSimilarityRaw for the full rationale. omitempty is NOT used:
+	// zero is a meaningful value (identity transform / truly orthogonal),
+	// distinct from "field absent".
+	SemanticSimilarityRaw float32 `msgpack:"semantic_similarity_raw"        json:"semantic_similarity_raw"`
+	FullTextRelevance     float32 `msgpack:"full_text_relevance"           json:"full_text_relevance"`
+	DecayFactor           float32 `msgpack:"decay_factor"                  json:"decay_factor"`
+	HebbianBoost          float32 `msgpack:"hebbian_boost"                 json:"hebbian_boost"`
+	TransitionBoost       float32 `msgpack:"transition_boost,omitempty"    json:"transition_boost,omitempty"`
+	EntityBoost           float32 `msgpack:"entity_boost,omitempty"        json:"entity_boost,omitempty"`
+	AccessFrequency       float32 `msgpack:"access_frequency"              json:"access_frequency"`
+	Recency               float32 `msgpack:"recency"                       json:"recency"`
+	Raw                   float32 `msgpack:"raw"                           json:"raw"`
+	Final                 float32 `msgpack:"final"                         json:"final"`
 }
 
 // SubscribeRequest registers a context subscription.

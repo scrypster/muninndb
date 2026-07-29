@@ -184,11 +184,12 @@ func (a *mcpEngineAdapter) Explain(ctx context.Context, vault string, req *Expla
 		Threshold:   data.Threshold,
 		FinalScore:  data.FinalScore,
 		Components: ExplainComponents{
-			FullTextRelevance:  float64(data.Components.FullTextRelevance),
-			SemanticSimilarity: float64(data.Components.SemanticSimilarity),
-			DecayFactor:        float64(data.Components.DecayFactor),
-			HebbianBoost:       float64(data.Components.HebbianBoost),
-			AccessFrequency:    float64(data.Components.AccessFrequency),
+			FullTextRelevance:     float64(data.Components.FullTextRelevance),
+			SemanticSimilarity:    float64(data.Components.SemanticSimilarity),
+			SemanticSimilarityRaw: float64(data.Components.SemanticSimilarityRaw),
+			DecayFactor:           float64(data.Components.DecayFactor),
+			HebbianBoost:          float64(data.Components.HebbianBoost),
+			AccessFrequency:       float64(data.Components.AccessFrequency),
 		},
 	}, nil
 }

@@ -2466,16 +2466,17 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		items[i].Expired = scored.Engram.IsExpired(gateNow)
 
 		items[i].ScoreComponents = mbp.ScoreComponents{
-			SemanticSimilarity: float32(scored.Components.SemanticSimilarity),
-			FullTextRelevance:  float32(scored.Components.FullTextRelevance),
-			DecayFactor:        float32(scored.Components.DecayFactor),
-			HebbianBoost:       float32(scored.Components.HebbianBoost),
-			TransitionBoost:    float32(scored.Components.TransitionBoost),
-			EntityBoost:        float32(scored.Components.EntityBoost),
-			AccessFrequency:    float32(scored.Components.AccessFrequency),
-			Recency:            float32(scored.Components.Recency),
-			Raw:                float32(scored.Components.Raw),
-			Final:              float32(scored.Components.Final),
+			SemanticSimilarity:    float32(scored.Components.SemanticSimilarity),
+			SemanticSimilarityRaw: float32(scored.Components.SemanticSimilarityRaw),
+			FullTextRelevance:     float32(scored.Components.FullTextRelevance),
+			DecayFactor:           float32(scored.Components.DecayFactor),
+			HebbianBoost:          float32(scored.Components.HebbianBoost),
+			TransitionBoost:       float32(scored.Components.TransitionBoost),
+			EntityBoost:           float32(scored.Components.EntityBoost),
+			AccessFrequency:       float32(scored.Components.AccessFrequency),
+			Recency:               float32(scored.Components.Recency),
+			Raw:                   float32(scored.Components.Raw),
+			Final:                 float32(scored.Components.Final),
 		}
 
 		// Add hop path if present
