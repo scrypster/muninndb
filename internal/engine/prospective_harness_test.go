@@ -129,7 +129,7 @@ func runProspectiveHarness(t *testing.T, enabled bool) harnessResult {
 	// harness nondeterministically raced its own async write-time workers
 	// under scheduler pressure (flaky under -race/CPU load on every branch,
 	// not specific to any feature change) — see #722.
-	eng.waitWriteTimeAssocWorkersIdle()
+	eng.waitWriteTimeIdle()
 
 	var res harnessResult
 	for ci, call := range sc.Calls {

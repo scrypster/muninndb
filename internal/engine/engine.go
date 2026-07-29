@@ -757,21 +757,25 @@ func (e *Engine) spawnJob(fn func()) bool {
 	return true
 }
 
-// waitWriteTimeAssocWorkersIdle blocks until the three write-time
-// association workers (autoAssoc, neighborWorker, goalLinkWorker) have
-// finished every job enqueued so far. These run fire-and-forget off the
-// Write() hot path (see the Intend/Write enqueue sites) and normal callers
-// never await them — recall tolerates their eventual consistency by design.
+// waitWriteTimeIdle blocks until every write-time async worker has finished
+// the work enqueued so far: the three association workers (autoAssoc,
+// neighborWorker, goalLinkWorker) AND the FTS indexer (ftsWorker), all of
+// which run off the Write() hot path (see the Intend/Write enqueue sites) so
+// normal callers never await them — recall tolerates their eventual
+// consistency by design.
 //
 // Test-only synchronization helper: the prospective acceptance harness arms
 // intentions via Intend() (which calls Write()) and then immediately runs
-// scripted Activate() calls whose BFS candidate pool depends on associations
-// (e.g. RelSupports) these workers create. Without draining, the harness was
-// racing the same fire-and-forget workers production code is allowed to race
-// — but the harness must observe steady state before asserting recall.
-// Production scheduling/dispatch behavior is unchanged; this only adds the
-// ability to await it.
-func (e *Engine) waitWriteTimeAssocWorkersIdle() {
+// scripted Activate() calls that depend both on associations these workers
+// create (RelSupports for the BFS pool) AND on the intention being FTS-indexed
+// (the only recall path with the harness's noop zero-vector embeddings). Async
+// FTS indexing is decoupled from the write hot path (ftsWorker), so without
+// flushing it a scripted call can run before its intention is searchable and
+// the intention silently "does not fire" — the residual harness flake under
+// -race/CPU contention. Draining all of it makes the harness observe steady
+// state before asserting recall. Production scheduling/dispatch is unchanged;
+// this only adds the ability to await it.
+func (e *Engine) waitWriteTimeIdle() {
 	if e.autoAssoc != nil {
 		e.autoAssoc.WaitIdle()
 	}
@@ -780,6 +784,11 @@ func (e *Engine) waitWriteTimeAssocWorkersIdle() {
 	}
 	if e.goalLinkWorker != nil {
 		e.goalLinkWorker.WaitIdle()
+	}
+	if e.ftsWorker != nil {
+		// Best-effort in a test helper; the timeout is generous enough that it
+		// never trips for the handful of intentions the harness arms.
+		_ = e.ftsWorker.Flush(10 * time.Second)
 	}
 }
 
