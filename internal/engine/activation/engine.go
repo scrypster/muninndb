@@ -1521,16 +1521,20 @@ func (e *ActivationEngine) phase6Score(
 	}
 
 	// Compute vectorScore for candidates that entered the pipeline without an HNSW
-	// score now that engrams are loaded. Two cases need this:
+	// score now that engrams are loaded. Three cases need this:
 	//   - BFS-traversed candidates (never in the HNSW pool).
 	//   - Tag-seeded candidates that appear in no other pool (vectorScore == 0):
 	//     without this, ACT-R/CGDN/legacy contentMatch is zero and the tag hit is
 	//     threshold-dropped one layer below the seeding fix (caveat 1 of #607).
+	//   - FTS-only candidates (vectorScore == 0, ftsScore > 0): a lexical match that
+	//     never ranked into the HNSW top-K otherwise keeps vectorScore=0 forever,
+	//     silently dropping its entire semantic evidence term from the ACT-R blend
+	//     even though the engram's embedding is right there once loaded (#714-A2).
 	// A non-zero vectorScore from the HNSW pool is never overwritten.
 	// ftsScore is left at zero: BM25 requires corpus-level IDF statistics unavailable here.
 	if len(p1.embedding) > 0 {
 		for i := range all {
-			needsCosine := all[i].isTraversed || (all[i].inTagPool && all[i].vectorScore == 0)
+			needsCosine := all[i].isTraversed || (all[i].vectorScore == 0 && (all[i].inTagPool || all[i].ftsScore > 0))
 			if !needsCosine {
 				continue
 			}

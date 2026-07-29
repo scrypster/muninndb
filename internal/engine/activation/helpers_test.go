@@ -1540,6 +1540,61 @@ func TestPhase6Score_TraversedCandidateACTR_NonZeroScore(t *testing.T) {
 	}
 }
 
+// TestPhase6Score_FTSOnlyCandidate_NonZeroCosine is the RED-first repro for
+// scrypster/muninndb#714-A2: a candidate that enters the pool ONLY via the FTS
+// path (ftsScore > 0, never ranked into the HNSW top-K, not tag-seeded, not
+// BFS-traversed) keeps vectorScore=0 for its entire life in the pipeline unless
+// something computes it post-load. Before the fix, needsCosine only covered
+// isTraversed and inTagPool candidates, so an FTS-only match with a perfectly
+// good, highly-similar embedding silently reports semantic_similarity=0 — its
+// entire semantic evidence term is dropped from the ACT-R blend even though the
+// embedding was sitting right there once the engram was loaded.
+func TestPhase6Score_FTSOnlyCandidate_NonZeroCosine(t *testing.T) {
+	store := newInternalStubStore()
+	e := newTestActivationEngine(store)
+	defer e.Close()
+
+	// FTS-matched engram: not in the HNSW pool (vectorScore=0 in the fused
+	// candidate), not tag-seeded, not traversed -- but it DOES carry an
+	// embedding that is identical to the query embedding (cosine = 1.0).
+	eng := &storage.Engram{
+		Concept: "RemittanceFile lifecycle", Content: "RemittanceFile lifecycle state machine",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+		Embedding: []float32{1, 0, 0},
+	}
+	store.addEngram(eng)
+
+	// ftsScore > 0 (came from FTS), vectorScore left at its zero value exactly
+	// as phase3RRF's FTS loop (engine.go ~L971-975) produces it: only the
+	// vector-pool loop sets vectorScore, never the FTS loop.
+	fused := []fusedCandidate{{id: eng.ID, rrfScore: 0.5, ftsScore: 1.0}}
+	p1 := &phase1Result{
+		queryStr:  "RemittanceFile lifecycle state machine",
+		embedding: []float32{1, 0, 0},
+	}
+
+	result, err := e.phase6Score(context.Background(), &ActivateRequest{
+		MaxResults: 10,
+		Threshold:  0.01, // non-zero: proves score > 0, not just "engram passed nil-check"
+	}, [8]byte{}, fused, nil, p1)
+	if err != nil {
+		t.Fatalf("phase6Score: %v", err)
+	}
+
+	var found bool
+	for _, a := range result.Activations {
+		if a.Engram.ID == eng.ID {
+			found = true
+			if a.Components.SemanticSimilarity <= 0 {
+				t.Errorf("FTS-only candidate SemanticSimilarity = %v, want > 0 (real cosine against the query embedding, bug #714-A2)", a.Components.SemanticSimilarity)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("FTS-only candidate did not survive to the final result set")
+	}
+}
+
 // TestPhase6Score_TraversedCandidateACTR_NoEmbedding verifies backward compatibility:
 // traversed candidates without embeddings (or without a query embedding) still pass
 // through at threshold=0.0, preserving existing behaviour for deployments without HNSW.
