@@ -358,6 +358,10 @@ type ActivationEngine struct {
 	logCh     chan logItem
 	logDone   chan struct{}
 	closeOnce sync.Once
+	// logWG tracks in-flight logCh items (Add before enqueue, Done after
+	// drainLog applies the entry to assocLog) so tests can await full log
+	// visibility. See WaitLogIdle.
+	logWG sync.WaitGroup
 }
 
 // New creates a new ActivationEngine.
@@ -418,7 +422,37 @@ func (e *ActivationEngine) drainLog() {
 			EngramIDs: ids,
 			Scores:    scores,
 		})
+		e.logWG.Done()
 	}
+}
+
+// WaitLogIdle blocks until every activation-log entry submitted so far (via
+// the logCh <- logItem send in Run()) has been applied to assocLog by
+// drainLog. Test-only synchronization helper, mirroring autoassoc.Worker's
+// WaitIdle pattern: production callers never await this — phase4HebbianBoost
+// tolerates the drainer's eventual consistency by design (comment on
+// drainLog: "the log may lag by ~1ms but Hebbian decay half-life is 3600s —
+// irrelevant"). That assumption fails in a scripted back-to-back test harness
+// (calls a few ms apart): under -race/CPU contention the drainer goroutine
+// can still be applying call N's entry when call N+1 runs phase4HebbianBoost,
+// so the same candidate nondeterministically scores with or without the
+// Hebbian boost from a just-finished activation — flipping which of two
+// near-tied candidates ranks first. Exported only because the caller
+// (engine.Engine.waitWriteTimeIdle, itself unexported/test-only) lives in a
+// different package — same visibility trade-off as autoassoc.Worker.WaitIdle.
+func (e *ActivationEngine) WaitLogIdle() {
+	e.logWG.Wait()
+}
+
+// ResetLog discards assocLog's recorded activation events for vaultID.
+// Test-only: see ActivationLog.ResetVault for the full rationale (a scripted
+// back-to-back harness modeling separate agent sessions compresses real
+// elapsed time, defeating the recency half-life that normally bounds
+// cross-call priming). Callers MUST call WaitLogIdle first if a just-run
+// Activate() may still have an entry in flight, or the drainer can
+// re-populate the vault's log immediately after this call clears it.
+func (e *ActivationEngine) ResetLog(vaultID uint32) {
+	e.assocLog.ResetVault(vaultID)
 }
 
 // SetTransitionStore sets the PAS transition store for candidate injection.
@@ -548,6 +582,7 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	// The drainer extracts ids/scores off the critical path.
 	// Non-blocking: drops if channel full (Hebbian half-life=3600s, 1ms lag is negligible).
 	if !req.ReadOnly && len(result.Activations) > 0 {
+		e.logWG.Add(1) // Add FIRST — visible to WaitLogIdle() (test-only); undone below on drop
 		select {
 		case e.logCh <- logItem{vaultID: req.VaultID, activations: result.Activations}:
 			// Yield to allow the drainer goroutine to process immediately.
@@ -555,6 +590,7 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 			// drainer queue depth in production under bursty load.
 			runtime.Gosched()
 		default: // channel full — drop; eventual consistency accepted
+			e.logWG.Done()
 		}
 	}
 
