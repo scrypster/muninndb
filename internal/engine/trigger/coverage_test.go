@@ -245,32 +245,6 @@ func TestActiveVaults_AfterRemoveAll(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// vaultWS — vault workspace ID conversion
-// ---------------------------------------------------------------------------
-
-func TestVaultWS(t *testing.T) {
-	registry := newRegistry()
-	w := &TriggerWorker{registry: registry}
-
-	ws := w.vaultWS(0x01020304)
-	expected := [8]byte{0x01, 0x02, 0x03, 0x04, 0, 0, 0, 0}
-	if ws != expected {
-		t.Errorf("vaultWS(0x01020304) = %v, want %v", ws, expected)
-	}
-
-	ws0 := w.vaultWS(0)
-	if ws0 != [8]byte{} {
-		t.Errorf("vaultWS(0) = %v, want zero", ws0)
-	}
-
-	wsMax := w.vaultWS(0xFFFFFFFF)
-	expectedMax := [8]byte{0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0}
-	if wsMax != expectedMax {
-		t.Errorf("vaultWS(0xFFFFFFFF) = %v, want %v", wsMax, expectedMax)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // handleCognitive — cognitive event processing
 // ---------------------------------------------------------------------------
 
@@ -672,7 +646,7 @@ func TestSweepVault_NoEmbedding_UsesEmbedder(t *testing.T) {
 		contraEvents: make(chan ContradictEvent, 1),
 	}
 
-	ws := worker.vaultWS(9)
+	ws := [8]byte{0, 0, 0, 9, 0, 0, 0, 0}
 	subs := registry.ForVault(9)
 	worker.sweepVault(context.Background(), 9, ws, subs)
 
@@ -739,7 +713,7 @@ func TestSweepVault_SkipsSoftDeleted(t *testing.T) {
 		contraEvents: make(chan ContradictEvent, 1),
 	}
 
-	ws := worker.vaultWS(11)
+	ws := [8]byte{0, 0, 0, 11, 0, 0, 0, 0}
 	subs := registry.ForVault(11)
 	worker.sweepVault(context.Background(), 11, ws, subs)
 

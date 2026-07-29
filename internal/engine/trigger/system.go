@@ -61,8 +61,14 @@ type ActivationPush struct {
 
 // Subscription is one active context subscription.
 type Subscription struct {
-	ID             string
-	VaultID        uint32
+	ID      string
+	VaultID uint32
+	// WSPrefix is the real 8-byte Pebble workspace prefix for VaultID's vault
+	// (storage.PebbleStore.VaultPrefix / ResolveVaultPrefix). VaultID alone is
+	// only a compact routing key (registry bucketing) derived from its first 4
+	// bytes; store lookups (used by the periodic sweep) must use the full
+	// prefix, not a value reconstructed from VaultID (#692).
+	WSPrefix       [8]byte
 	Context        []string
 	Threshold      float64
 	TTL            time.Duration
@@ -97,8 +103,11 @@ type EngramEvent struct {
 }
 
 // CognitiveEvent fires when a cognitive worker changes an engram's score.
+// WSPrefix is the real 8-byte vault prefix used for the store lookup in
+// handleCognitive — VaultID alone is not sufficient (#692).
 type CognitiveEvent struct {
 	VaultID  uint32
+	WSPrefix [8]byte
 	EngramID storage.ULID
 	Field    string
 	OldValue float32
@@ -107,8 +116,11 @@ type CognitiveEvent struct {
 }
 
 // ContradictEvent fires when a contradiction is detected.
+// WSPrefix is the real 8-byte vault prefix used for the store lookup in
+// handleContradiction — VaultID alone is not sufficient (#692).
 type ContradictEvent struct {
 	VaultID  uint32
+	WSPrefix [8]byte
 	EngramA  storage.ULID
 	EngramB  storage.ULID
 	Severity float64
@@ -505,8 +517,9 @@ func (ts *TriggerSystem) NotifyEmbed(vaultID uint32, eng *storage.Engram, vec []
 	}
 }
 
-// NotifyCognitive sends a cognitive change event.
-func (ts *TriggerSystem) NotifyCognitive(vaultID uint32, id storage.ULID, field string, old, new float32) {
+// NotifyCognitive sends a cognitive change event. ws is the real 8-byte vault
+// prefix (not reconstructible from vaultID alone — see CognitiveEvent, #692).
+func (ts *TriggerSystem) NotifyCognitive(vaultID uint32, ws [8]byte, id storage.ULID, field string, old, new float32) {
 	delta := new - old
 	if delta < 0 {
 		delta = -delta
@@ -515,7 +528,7 @@ func (ts *TriggerSystem) NotifyCognitive(vaultID uint32, id storage.ULID, field 
 		return
 	}
 	select {
-	case ts.CognitiveEvents <- CognitiveEvent{VaultID: vaultID, EngramID: id, Field: field, OldValue: old, NewValue: new, Delta: delta}:
+	case ts.CognitiveEvents <- CognitiveEvent{VaultID: vaultID, WSPrefix: ws, EngramID: id, Field: field, OldValue: old, NewValue: new, Delta: delta}:
 	default:
 	}
 }
@@ -532,10 +545,11 @@ func (ts *TriggerSystem) PruneExpired() int {
 	return ts.registry.PruneExpired()
 }
 
-// NotifyContradiction sends a contradiction event.
-func (ts *TriggerSystem) NotifyContradiction(vaultID uint32, a, b storage.ULID, severity float64, typ string) {
+// NotifyContradiction sends a contradiction event. ws is the real 8-byte
+// vault prefix (not reconstructible from vaultID alone — see ContradictEvent, #692).
+func (ts *TriggerSystem) NotifyContradiction(vaultID uint32, ws [8]byte, a, b storage.ULID, severity float64, typ string) {
 	select {
-	case ts.ContradictEvents <- ContradictEvent{VaultID: vaultID, EngramA: a, EngramB: b, Severity: severity, Type: typ}:
+	case ts.ContradictEvents <- ContradictEvent{VaultID: vaultID, WSPrefix: ws, EngramA: a, EngramB: b, Severity: severity, Type: typ}:
 	default:
 	}
 }
