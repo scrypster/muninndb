@@ -52,6 +52,16 @@ const (
 	entityBoostNoiseFloor = 0.001
 )
 
+// getLeaseForInjection reads the lease sidecar consulted by applyEntityBoost's
+// pass 2b fail-closed guard. It defaults to the store's real GetLease; tests
+// covering the fail-closed behavior on a lease-read error reassign it for the
+// duration of a single test (save/restore) since the real store only errors
+// on a genuine read/decode failure, never on a missing lease. Production code
+// must never reassign this var.
+var getLeaseForInjection = func(ctx context.Context, s *storage.PebbleStore, wsPrefix [8]byte, id storage.ULID) (storage.Lease, error) {
+	return s.GetLease(ctx, wsPrefix, id)
+}
+
 // entityIDF returns the inverse-document-frequency weight for an entity:
 // ln(n/df) / ln(n), clamped to [0, 1]. n is the RECALLED VAULT's engram count
 // (vault-local — the flood #569 guards against is a vault-local phenomenon)
@@ -246,7 +256,7 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 		// possibly-checked-out engram is worse than dropping an optional
 		// enrichment. A missing lease record is not an error on either path.
 		if !req.IncludeLeased {
-			l, err := e.store.GetLease(ctx, ws, id)
+			l, err := getLeaseForInjection(ctx, e.store, ws, id)
 			if err != nil {
 				continue
 			}
