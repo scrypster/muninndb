@@ -235,7 +235,12 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 // false) when none does — never superseded, superseder soft-deleted (voided),
 // no successor both nameable and valid for this view (the caller's atomic
 // abstention), a hop with more than one active superseder (ambiguous — WARN,
-// don't guess), or a cycle / the depth cap (WARN, leave un-demoted).
+// don't guess), or a cycle (WARN, leave un-demoted). The depth cap is
+// different: it silently TRUNCATES the walk, so on a chain longer than
+// supersessionMaxDepth the head is the deepest admitted node within the cap —
+// possibly a non-terminal intermediate presented as current. Long chains are
+// rare (evolve chains heal at startup; the cap exists for pathological
+// manual graphs) and a cap-abstain would regress every long legacy chain.
 //
 // GetReverseAssociations(X) returns edges pointing TO X with the association's
 // TargetID repurposed to hold the SOURCE — so for a RelSupersedes edge it is the

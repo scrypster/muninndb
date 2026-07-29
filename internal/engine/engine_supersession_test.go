@@ -923,6 +923,19 @@ func TestApplySupersession_InjectionCountsInTotalFound(t *testing.T) {
 		t.Fatal("precondition: the query must retrieve the stale fact")
 	}
 
+	// Drift control: the same query again, still without the edge. If
+	// repeat-query side effects (cache-touch recency, reinforcement) could
+	// move TotalFound on their own, the injection branch below would be
+	// vacuous — an organic +1 mimicking the wire's +1.
+	control, err := eng.Activate(ctx, query)
+	if err != nil {
+		t.Fatalf("activate (control): %v", err)
+	}
+	if control.TotalFound != before.TotalFound {
+		t.Fatalf("drift control failed: repeat query moved TotalFound %d -> %d without any edge",
+			before.TotalFound, control.TotalFound)
+	}
+
 	// Unstamped supersede edge, as a legacy (pre-valid-time) chain would be.
 	staleULID, err := storage.ParseULID(stale.ID)
 	if err != nil {
@@ -964,5 +977,53 @@ func TestApplySupersession_InjectionCountsInTotalFound(t *testing.T) {
 			t.Errorf("injected head must count: TotalFound before=%d after=%d, want after=before+1",
 				before.TotalFound, after.TotalFound)
 		}
+	}
+}
+
+// TestApplySupersession_ViewFutureIntermediateNeverNamed pins ViewFuture as
+// its OWN guard (review pass 2, finding 2): with a BACKDATED deeper
+// successor, ValidForView alone cannot protect the annotation. Chain
+// A<-B<-C where B became valid after the caller's as-of instant and C was
+// backdated before it: C is the view-valid head, and without ViewFuture the
+// nearest-nameable rule would stamp view-future B into SupersededBy —
+// leaking the view's future through metadata. Backdated retroactive facts
+// are a designed use of explicit ValidFrom, so the shape is reachable.
+func TestApplySupersession_ViewFutureIntermediateNeverNamed(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	past := time.Now().Add(-3 * time.Hour)
+	backdated := time.Now().Add(-90 * time.Minute)
+	aU, err := h.eng.store.WriteEngram(h.ctx, h.ws, &storage.Engram{
+		Concept: "vf-a", Content: "v1", Confidence: 0.9, ValidFrom: past,
+	})
+	if err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+	b := h.write("vf-b", "v2") // ValidFrom defaults to now → future of AsOf
+	cU, err := h.eng.store.WriteEngram(h.ctx, h.ws, &storage.Engram{
+		Concept: "vf-c", Content: "v3 backdated", Confidence: 0.9, ValidFrom: backdated,
+	})
+	if err != nil {
+		t.Fatalf("write c: %v", err)
+	}
+	a, c := aU.String(), cU.String()
+	h.supersede(b, a)
+	h.supersede(c, b)
+
+	asOf := time.Now().Add(-1 * time.Hour)
+	got, injected := h.applyReq(h.scored(a, 0.9), &activation.ActivateRequest{AsOf: &asOf})
+	if rankOf(got, c) == -1 || injected != 1 {
+		t.Fatalf("backdated head C must inject (rank=%d injected=%d)", rankOf(got, c), injected)
+	}
+	if rankOf(got, b) != -1 {
+		t.Error("view-future B must not appear in results")
+	}
+	sb, cv := annotationOf(t, got, a)
+	if sb == b || cv == b {
+		t.Errorf("annotation names view-future B (SupersededBy=%s CurrentVersion=%s) — leaks the view's future", sb, cv)
+	}
+	if sb != c || cv != c {
+		t.Errorf("annotation must name backdated head C (SupersededBy=%s CurrentVersion=%s)", sb, cv)
 	}
 }

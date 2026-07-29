@@ -2365,10 +2365,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 
 	// Final valid-time gate (COG-19: default recall never returns an engram whose
 	// ValidUntil <= now). Phase-6 gated scored candidates and both injectors
-	// gate their entrants, so for injections this cut is defense in depth at
-	// the same instant (injectorNow); it remains LOAD-BEARING for one path:
-	// phase-6 survivors whose validity boundary passed during boost's own
-	// clock window, and any future result-set mutation that forgets the gate.
+	// gate their entrants. For supersession this cut is defense in depth at
+	// the same instant (injectorNow); it remains LOAD-BEARING for two paths:
+	// boost runs on its own earlier clock, so a boost injection (or phase-6
+	// survivor) whose validity boundary falls inside that window is admitted,
+	// counted at line ~2340, then swept here — a documented overcount sliver —
+	// and it backstops any future result-set mutation that forgets the gate.
 	// Runs AFTER supersession
 	// on purpose: a manual supersede's now-expired predecessor is dropped only once
 	// its current head has been promoted/injected, so a query matching only the
