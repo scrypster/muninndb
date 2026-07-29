@@ -163,6 +163,37 @@ func TestUpdateTags_EngineError(t *testing.T) {
 	}
 }
 
+// TestEvolve_RejectsTags: passing `tags` to muninn_evolve returned success
+// with the tags silently discarded (#720). It must now fail loudly and name
+// the tool that does the job.
+func TestEvolve_RejectsTags(t *testing.T) {
+	eng := &captureTagsEngine{}
+	srv := New(":0", eng, "", nil, nil, nil)
+
+	body := mkToolCallBody("muninn_evolve", map[string]any{
+		"vault":       "default",
+		"id":          testEngramID,
+		"new_content": "updated content",
+		"reason":      "test",
+		"tags":        []any{"due:2026-08-01"},
+	})
+	w := doAuthenticatedPost(srv, "", body)
+
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatal("expected muninn_evolve to reject 'tags', got success (the tags would be silently dropped)")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("code = %d, want -32602", resp.Error.Code)
+	}
+	if !strings.Contains(resp.Error.Message, "muninn_update_tags") {
+		t.Errorf("the error must teach the correct tool, got: %q", resp.Error.Message)
+	}
+}
+
 // TestUpdateTags_Validation: bad args are rejected before any engine call.
 func TestUpdateTags_Validation(t *testing.T) {
 	cases := []struct {

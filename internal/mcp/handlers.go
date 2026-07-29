@@ -704,6 +704,16 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 }
 
 func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	// Tags are metadata, and evolve is not a metadata update: it mints a new
+	// ULID and archives the predecessor. Unknown MCP params are not rejected
+	// in general, so accepting `tags` here would return success with the tags
+	// silently discarded — the worst failure class in this project (#720).
+	if _, present := args["tags"]; present {
+		sendError(w, id, -32602, "invalid params: 'tags' is not accepted by muninn_evolve — "+
+			"tags are metadata, and evolving to change them would archive this memory under a new ID; "+
+			"use muninn_update_tags(id, tags) to retag in place")
+		return
+	}
 	engramID, ok1 := args["id"].(string)
 	newContent, ok2 := args["new_content"].(string)
 	reason, ok3 := args["reason"].(string)
