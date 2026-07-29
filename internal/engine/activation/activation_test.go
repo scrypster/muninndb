@@ -122,6 +122,16 @@ func (s *stubStore) EngramLastAccessNs(_ [8]byte, _ storage.ULID) int64 {
 	return 0
 }
 
+// GetEmbedding mirrors PebbleStore.GetEmbedding for this in-memory stub: since
+// stubStore keeps Embedding inline on the engram (it never models the ERF v2
+// separate-key split), the fallback simply reads it back off the same record.
+func (s *stubStore) GetEmbedding(_ context.Context, _ [8]byte, id storage.ULID) ([]float32, error) {
+	if e, ok := s.engrams[id]; ok {
+		return e.Embedding, nil
+	}
+	return nil, nil
+}
+
 func (s *stubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
 	var ids []storage.ULID
 	for _, id := range s.recent {

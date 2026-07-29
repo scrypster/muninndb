@@ -268,6 +268,13 @@ type ActivateResponseFrame struct {
 type ActivationStore interface {
 	GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([]*storage.EngramMeta, error)
 	GetEngrams(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([]*storage.Engram, error)
+	// GetEmbedding reads the standalone embedding (0x18 key, ERF v2) for a single
+	// engram. GetEngrams does NOT join this key (embeddings are large and the
+	// join is a hot-path cost not every caller needs), so any post-load cosine
+	// fixup that finds eng.Embedding empty must fall back to this — see
+	// storage.PebbleStore.GetEmbedding and the identical fallback in
+	// internal/consolidation/dedup.go and orient.go.
+	GetEmbedding(ctx context.Context, wsPrefix [8]byte, id storage.ULID) ([]float32, error)
 	// GetLeases batch-reads ownership leases, one per id in order (zero Lease for
 	// unleased engrams). Used for work-queue recall visibility filtering.
 	GetLeases(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([]storage.Lease, error)
@@ -1538,8 +1545,23 @@ func (e *ActivationEngine) phase6Score(
 			if !needsCosine {
 				continue
 			}
-			if eng := engramByID[all[i].id]; eng != nil && len(eng.Embedding) > 0 {
-				all[i].vectorScore = float64(cosineSimilarity32(p1.embedding, eng.Embedding))
+			eng := engramByID[all[i].id]
+			if eng == nil {
+				continue
+			}
+			embed := eng.Embedding
+			if len(embed) == 0 {
+				// ERF v2 stores embeddings in a separate 0x18 key, so GetEngrams()
+				// above returns nil embeddings. Fall back to GetEmbedding() in
+				// that case -- same pattern as internal/consolidation/dedup.go
+				// and orient.go. Bounded to exactly this needsCosine candidate
+				// set, never the full result set.
+				if loaded, err := e.store.GetEmbedding(ctx, ws, eng.ID); err == nil && len(loaded) > 0 {
+					embed = loaded
+				}
+			}
+			if len(embed) > 0 {
+				all[i].vectorScore = float64(cosineSimilarity32(p1.embedding, embed))
 			}
 		}
 	}
