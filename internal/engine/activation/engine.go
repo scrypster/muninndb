@@ -1556,6 +1556,9 @@ func (e *ActivationEngine) phase6Score(
 				// that case -- same pattern as internal/consolidation/dedup.go
 				// and orient.go. Bounded to exactly this needsCosine candidate
 				// set, never the full result set.
+				// TODO(#714): if needsCosine pools grow, a batch
+				// GetEmbeddings([]ULID) would collapse these per-candidate point
+				// reads into one round-trip. Fine sequentially at current pool sizes.
 				if loaded, err := e.store.GetEmbedding(ctx, ws, eng.ID); err == nil && len(loaded) > 0 {
 					embed = loaded
 				}

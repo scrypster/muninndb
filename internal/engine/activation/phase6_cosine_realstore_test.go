@@ -47,12 +47,15 @@ func TestPhase6Score_FTSOnlyCandidate_RealStoreLoaderGap(t *testing.T) {
 		os.RemoveAll(dir)
 		t.Fatal(err)
 	}
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 128})
 	t.Cleanup(func() {
-		db.Close()
+		// Close the store (which closes the underlying db) rather than the raw
+		// db directly, so the counter-flush and other background workers stop
+		// before Pebble closes -- otherwise the flush goroutine races the db
+		// close and logs a recovered "unexpected panic in counter flush" WARN.
+		store.Close()
 		os.RemoveAll(dir)
 	})
-
-	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 128})
 	idx := fts.New(db)
 
 	ws := store.VaultPrefix("fts-cosine-loader-gap")
