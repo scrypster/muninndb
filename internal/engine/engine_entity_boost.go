@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"math"
 	"sort"
 	"time"
@@ -119,6 +120,23 @@ func entityIDF(df, n int64) float64 {
 // recalled from, not the whole deployment — see entityIDF.
 func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int64, results []activation.ScoredEngram, req *activation.ActivateRequest) []activation.ScoredEngram {
 	if len(results) == 0 {
+		return results
+	}
+
+	// COG-18: the boost pass is explicitly skipped under rrf fusion. Its
+	// factor/cap/noise-floor (see the CALIBRATION CAVEAT above) are calibrated
+	// to the ACT-R [0, 1] scale; rrf finals are rank-based and typically land
+	// in [0, 0.05]. Before R1 this was an accidental no-op — the pre-#590-fix
+	// 0.1 threshold coerce meant no rrf result ever cleared the seed rule.
+	// Now that default rrf recall reaches its genuine ~0.001 threshold
+	// (activation.Run()'s mode-aware default), leaving this pass live would
+	// let a +0.30-scale boost dominate and outrank real ~0.05-scale content
+	// matches — an injected engram could out-score every genuine hit. Skip it
+	// deliberately until the boost is recalibrated for rrf's scale (#570
+	// follow-up); today's effective (accidental) behavior is preserved on
+	// purpose.
+	if req.Weights != nil && req.Weights.UseRRFFusion {
+		slog.Debug("applyEntityBoost: skipped under rrf fusion (scale mismatch, #570 follow-up)")
 		return results
 	}
 

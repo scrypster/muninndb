@@ -264,7 +264,7 @@ components:
         threshold:
           type: number
           format: float
-          default: 0.5
+          description: "Minimum relevance score 0.0-1.0. Omitted/0 resolves to a mode-aware default: ~0.1 for the normal (ACT-R) scoring vault, or a near-zero rank-based floor (~0.001) for a vault configured with scoring_fusion='rrf' — RRF scores rarely exceed ~0.15, so an explicit threshold above ~0.01 there can filter out everything. An explicit non-zero value is never modified."
         max_results:
           type: integer
           default: 10

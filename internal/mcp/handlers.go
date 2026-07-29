@@ -348,7 +348,20 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
+	// Default threshold is mode-aware (COG-6): a caller-omitted threshold must
+	// not pre-fill a value calibrated to ACT-R's blended scale onto an rrf vault,
+	// whose finals top out around ~0.05-0.15 — that silently zeroes recall on a
+	// scoring mode the web console offers. For rrf vaults, pass 0 ("unset")
+	// through to the engine, which lets activation.Run() apply its mode-aware
+	// default (rrf -> 0.001, #590's mechanism). An explicit caller threshold is
+	// never modified.
 	threshold := float32(0.5)
+	_, thresholdSet := args["threshold"]
+	if !thresholdSet {
+		if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.ScoringFusion == "rrf" {
+			threshold = 0
+		}
+	}
 	if t, ok := args["threshold"].(float64); ok {
 		if t < 0 {
 			t = 0
@@ -567,8 +580,17 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	}
 	if len(memories) == 0 {
 		hint := "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."
-		if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.MultiUser {
+		p, pErr := s.engine.GetVaultPlasticity(ctx, vault)
+		if pErr == nil && p != nil && p.MultiUser {
 			hint = "No results matched. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global). For semantic recall, provide more specific context."
+		}
+		// COG-6: never clobber an explicit threshold — only hint. An rrf vault's
+		// blended finals rarely exceed ~0.15, so a caller-supplied threshold at
+		// or above 0.01 can silently filter every result. Only fires when the
+		// caller set the threshold explicitly (thresholdSet); the omitted-arg
+		// case is already handled mode-aware above.
+		if pErr == nil && p != nil && p.ScoringFusion == "rrf" && thresholdSet && threshold >= 0.01 {
+			hint += fmt.Sprintf(" Note: this vault uses rrf (rank-based) scoring — scores rarely exceed ~0.15; a threshold of %g filters everything; try <= 0.01.", threshold)
 		}
 		result["hint"] = hint
 	}

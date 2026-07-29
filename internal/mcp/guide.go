@@ -130,6 +130,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	}
 	if resolved.ScoringFusion == "rrf" {
 		fmt.Fprintf(&b, "- Scoring fusion: RRF (rank-based, scale-invariant)\n")
+		fmt.Fprintf(&b, "  Note: RRF scores rarely exceed ~0.15 (they are rank-based, not the 0-1 ACT-R scale). muninn_recall's threshold defaults to near-zero on this vault; if you set threshold explicitly, keep it <= 0.01 or you may filter out every result.\n")
 	} else if resolved.ScoringFusion == "weighted_sum" {
 		fmt.Fprintf(&b, "- Scoring fusion: weighted sum\n")
 	} else {

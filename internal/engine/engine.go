@@ -2180,7 +2180,14 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	if actReq.MaxResults == 0 {
 		actReq.MaxResults = 20
 	}
-	if actReq.Threshold == 0 {
+	// COG-6: the effective default threshold is mode-aware and decided in exactly
+	// one place per path. For rrf-fusion vaults, leave Threshold at 0 ("unset") so
+	// activation.Run() applies its mode-aware default (rrf -> 0.001, #590's
+	// mechanism); coercing to 0.1 here — a value calibrated to ACT-R's blended
+	// scale — made #590's fix unreachable on every production transport (MCP,
+	// REST, gRPC, MBP, embedded), since this coerce always ran before Run() saw
+	// the request. ACT-R/weighted_sum default behavior is unchanged.
+	if actReq.Threshold == 0 && resolved.ScoringFusion != "rrf" {
 		actReq.Threshold = 0.1
 	}
 
