@@ -191,7 +191,8 @@ func (f *fakeEngine) ListEntities(_ context.Context, _ string, _ int, _ string) 
 func (f *fakeEngine) GetVaultEmbedDim(_ context.Context, _ string) int {
 	return 0
 }
-func (f *fakeEngine) SetTrust(_ context.Context, _, _, _ string) error { return nil }
+func (f *fakeEngine) SetTrust(_ context.Context, _, _, _ string) error            { return nil }
+func (f *fakeEngine) UpdateTags(_ context.Context, _, _ string, _ []string) error { return nil }
 
 func (f *fakeEngine) CompareAndSet(_ context.Context, _, _ string, _, setState *string) (bool, string, string, error) {
 	state := ""

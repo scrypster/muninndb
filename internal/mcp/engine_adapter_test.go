@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -371,5 +372,19 @@ func TestWhereLeftOffEntryFromEngramImportance(t *testing.T) {
 	})
 	if derived.Importance != 0.6 || derived.ImportanceSource != "derived" {
 		t.Errorf("derived entry = (%v, %q), want (0.6, derived)", derived.Importance, derived.ImportanceSource)
+	}
+}
+
+// TestAdapterUpdateTags_InvalidULID proves the adapter validates the id
+// before touching the engine: with a nil engine, a malformed id must return
+// a parse error rather than panicking on the delegate call.
+func TestAdapterUpdateTags_InvalidULID(t *testing.T) {
+	a := &mcpEngineAdapter{eng: nil, enricher: nil}
+	err := a.UpdateTags(context.Background(), "default", "not-a-ulid", []string{"x"})
+	if err == nil {
+		t.Fatal("expected an error for a malformed engram id, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid engram id") {
+		t.Errorf("error should name the bad id, got: %v", err)
 	}
 }

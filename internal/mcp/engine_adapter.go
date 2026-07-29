@@ -639,6 +639,14 @@ func (a *mcpEngineAdapter) SetTrust(ctx context.Context, vault, id, trust string
 	return a.eng.SetTrust(ctx, vault, id, trust)
 }
 
+func (a *mcpEngineAdapter) UpdateTags(ctx context.Context, vault, id string, tags []string) error {
+	ulid, err := storage.ParseULID(id)
+	if err != nil {
+		return fmt.Errorf("invalid engram id: %w", err)
+	}
+	return a.eng.UpdateTags(ctx, vault, ulid, tags)
+}
+
 func (a *mcpEngineAdapter) CompareAndSet(ctx context.Context, vault, id string, expectState, setState *string) (bool, string, string, error) {
 	res, err := a.eng.CompareAndSet(ctx, vault, id, expectState, setState)
 	if err != nil {

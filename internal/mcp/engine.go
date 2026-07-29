@@ -182,6 +182,11 @@ type EngineInterface interface {
 	// trust must be one of "verified", "inferred", "external", "untrusted".
 	SetTrust(ctx context.Context, vault, id, trust string) error
 
+	// UpdateTags replaces an engram's full tag set in place. The ID, version
+	// lineage, and access history are preserved — unlike Evolve, which mints a
+	// new ULID and archives the predecessor.
+	UpdateTags(ctx context.Context, vault, id string, tags []string) error
+
 	// CompareAndSet atomically transitions an engram's lifecycle state, applying
 	// setState only if the current state matches expectState (nil bounds are
 	// skipped). Returns whether it applied plus the current state and lease owner.
