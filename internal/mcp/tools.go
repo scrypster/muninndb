@@ -180,7 +180,7 @@ func allToolDefinitions() []ToolDefinition {
 					"mode": map[string]any{
 						"type":        "string",
 						"enum":        []string{"semantic", "recent", "balanced", "deep"},
-						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)",
+						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)\nPreset thresholds are ACT-R-calibrated and apply only under ACT-R/weighted-sum scoring; on an rrf-fusion vault the preset threshold abstains and the rrf mode-aware default (~0.001) applies, so modes are safe to use there. An explicit threshold always wins.",
 					},
 					"since": map[string]any{
 						"type":        "string",

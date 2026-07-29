@@ -412,9 +412,12 @@ func (e *modePresetThresholdCapturingEngine) Activate(_ context.Context, req *mb
 	return &mbp.ActivateResponse{}, nil
 }
 
-func TestHandleRecall_ModePresetAppliedWhenNoExplicitThreshold(t *testing.T) {
-	// The "semantic" mode preset has Threshold=0.3. Without an explicit threshold
-	// param, the preset value must be used.
+func TestHandleRecall_ModeLeavesThresholdUnsetForEngine(t *testing.T) {
+	// #704: with a mode and no explicit threshold param, the handler forwards
+	// Threshold 0 ("unset") — the mode's preset replaces the historical 0.5
+	// default, but RESOLVING the preset is the engine's decision, because only
+	// the engine knows the effective scoring mode (preset thresholds are
+	// ACT-R-calibrated and must abstain under rrf fusion).
 	eng := &modePresetThresholdCapturingEngine{}
 	srv := newTestServerWith(eng)
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["test"],"mode":"semantic"}}}`
@@ -423,8 +426,8 @@ func TestHandleRecall_ModePresetAppliedWhenNoExplicitThreshold(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if eng.lastThreshold != 0.3 {
-		t.Errorf("mode preset threshold = %v, want 0.3", eng.lastThreshold)
+	if eng.lastThreshold != 0 {
+		t.Errorf("mode-carrying threshold = %v, want 0 (unset — the engine resolves the preset)", eng.lastThreshold)
 	}
 }
 
@@ -800,5 +803,22 @@ func TestHandleListDeleted_LimitBelowMinimum(t *testing.T) {
 	resp := decodeResp(t, w.Body.String())
 	if resp.Error != nil {
 		t.Errorf("expected success for limit=0, got error: %v", resp.Error)
+	}
+}
+
+func TestHandleRecall_BalancedModeKeepsHistoricalDefault(t *testing.T) {
+	// "balanced" means engine defaults — it carries no preset threshold, so
+	// the surface's historical 0.5 default stands (a bare mode must not
+	// silently drop the default to the engine's 0.1 coerce).
+	eng := &modePresetThresholdCapturingEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["test"],"mode":"balanced"}}}`
+	w := postRPC(t, srv, body)
+	resp := decodeResp(t, w.Body.String())
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if eng.lastThreshold != 0.5 {
+		t.Errorf("balanced-mode threshold = %v, want the historical 0.5 default", eng.lastThreshold)
 	}
 }

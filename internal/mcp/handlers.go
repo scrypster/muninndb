@@ -348,17 +348,36 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
+	// Recall mode: validate here (fail fast with a helpful error), but FORWARD
+	// the mode instead of stamping preset values into the request — the engine
+	// is the single preset decider, because only it knows the effective
+	// scoring mode and preset thresholds are scale-bound (#704: stamping
+	// deep's ACT-R-calibrated 0.1 here silently emptied rrf vaults).
+	mode, _ := args["mode"].(string)
+	if mode != "" {
+		if _, modeErr := lookupMode(mode); modeErr != nil {
+			sendError(w, id, -32602, modeErr.Error())
+			return
+		}
+	}
+
 	// Default threshold is mode-aware (COG-6): a caller-omitted threshold must
 	// not pre-fill a value calibrated to ACT-R's blended scale onto an rrf vault,
 	// whose finals top out around ~0.05-0.15 — that silently zeroes recall on a
 	// scoring mode the web console offers. For rrf vaults, pass 0 ("unset")
 	// through to the engine, which lets activation.Run() apply its mode-aware
-	// default (rrf -> 0.001, #590's mechanism). An explicit caller threshold is
-	// never modified.
+	// default (rrf -> 0.001, #590's mechanism). A recall mode likewise leaves
+	// 0: the mode's preset replaces this surface's historical 0.5 default, and
+	// resolving the preset is the engine's decision (#704). An explicit caller
+	// threshold is never modified.
 	threshold := float32(0.5)
 	_, thresholdSet := args["threshold"]
 	if !thresholdSet {
-		if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.ScoringFusion == "rrf" {
+		if mode != "" && mode != "balanced" {
+			// A threshold-carrying mode replaces this surface's 0.5 default;
+			// "balanced" means engine defaults and keeps the historical 0.5.
+			threshold = 0
+		} else if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.ScoringFusion == "rrf" {
 			threshold = 0
 		}
 	}
@@ -382,17 +401,6 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	profile, _ := args["profile"].(string)
 
-	// Mode shortcuts: resolve preset if provided.
-	var modePreset RecallMode
-	if modeStr, ok := args["mode"].(string); ok && modeStr != "" {
-		preset, modeErr := lookupMode(modeStr)
-		if modeErr != nil {
-			sendError(w, id, -32602, modeErr.Error())
-			return
-		}
-		modePreset = preset
-	}
-
 	readOnly, roErrMsg := resolveReadOnly(ctx, args)
 	if roErrMsg != "" {
 		sendError(w, id, -32001, roErrMsg)
@@ -402,6 +410,7 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	req := &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    contexts,
+		Mode:       mode,
 		Threshold:  threshold,
 		MaxResults: limit,
 		Profile:    profile,
@@ -414,36 +423,6 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	}
 	if includeLeased, ok := args["include_leased"].(bool); ok {
 		req.IncludeLeased = includeLeased
-	}
-
-	// Apply non-zero mode preset fields.
-	// Explicit caller threshold/limit args always win (already parsed above).
-	if modePreset.Threshold > 0 {
-		if _, callerSet := args["threshold"]; !callerSet {
-			req.Threshold = modePreset.Threshold
-		}
-	}
-	if modePreset.MaxHops > 0 {
-		req.MaxHops = modePreset.MaxHops
-	}
-
-	// Apply mode preset scoring weights to the request.
-	if modePreset.SemanticSimilarity > 0 || modePreset.FullTextRelevance > 0 || modePreset.Recency > 0 || modePreset.DisableACTR {
-		if req.Weights == nil {
-			req.Weights = &mbp.Weights{}
-		}
-		if modePreset.SemanticSimilarity > 0 {
-			req.Weights.SemanticSimilarity = modePreset.SemanticSimilarity
-		}
-		if modePreset.FullTextRelevance > 0 {
-			req.Weights.FullTextRelevance = modePreset.FullTextRelevance
-		}
-		if modePreset.Recency > 0 {
-			req.Weights.Recency = modePreset.Recency
-		}
-		if modePreset.DisableACTR {
-			req.Weights.DisableACTR = true
-		}
 	}
 
 	// Temporal filters: since / before
