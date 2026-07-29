@@ -127,8 +127,10 @@ func TestRead_ReadOnly_NoReinforce(t *testing.T) {
 		}
 	}
 
-	// Give any (incorrectly) spawned fire-and-forget goroutine time to land.
-	time.Sleep(200 * time.Millisecond)
+	// Give any (incorrectly) spawned fire-and-forget goroutine time to land,
+	// deterministically rather than via a fixed sleep (flakes under CPU
+	// contention).
+	eng.waitFireAndForgetIdle()
 
 	resp, err := eng.Read(ctx, &mbp.ReadRequest{Vault: "reinforce-readonly", ID: w.ID, ReadOnly: true})
 	if err != nil {
@@ -153,6 +155,11 @@ func TestFeedbackUseful_BumpsAccessCount(t *testing.T) {
 	if err := eng.RecordFeedback(ctx, "feedback-touch", wTrue.ID, true); err != nil {
 		t.Fatalf("RecordFeedback(true): %v", err)
 	}
+	// RecordFeedback's TouchAccess write rides a fire-and-forget goroutine
+	// (#682); await it deterministically instead of polling with a fixed
+	// deadline, which flakes under CPU contention (constrained CI cores,
+	// -race) when the goroutine isn't scheduled in time.
+	eng.waitFireAndForgetIdle()
 	got := pollAccessCount(t, eng, "feedback-touch", wTrue.ID, 1, 2*time.Second)
 	if got != 1 {
 		t.Fatalf("AccessCount after RecordFeedback(true) = %d, want 1", got)
@@ -165,7 +172,10 @@ func TestFeedbackUseful_BumpsAccessCount(t *testing.T) {
 	if err := eng.RecordFeedback(ctx, "feedback-touch", wFalse.ID, false); err != nil {
 		t.Fatalf("RecordFeedback(false): %v", err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	// useful=false still spawns a fire-and-forget scoring-signal goroutine
+	// (just no TouchAccess); await it deterministically rather than sleeping
+	// a fixed duration before asserting the negative (AccessCount == 0).
+	eng.waitFireAndForgetIdle()
 	resp, err := eng.Read(ctx, &mbp.ReadRequest{Vault: "feedback-touch", ID: wFalse.ID, ReadOnly: true})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -199,7 +209,9 @@ func TestRecall_DoesNotReinforce(t *testing.T) {
 		}
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	// Deterministic wait for any (incorrectly) spawned fire-and-forget
+	// reinforcement goroutine, instead of a fixed sleep (flakes under load).
+	eng.waitFireAndForgetIdle()
 	resp, err := eng.Read(ctx, &mbp.ReadRequest{Vault: "recall-noreinforce", ID: w.ID, ReadOnly: true})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -245,7 +257,10 @@ func TestReinforce_DoesNotEscalateTrust(t *testing.T) {
 	}
 
 	pollAccessCount(t, eng, "trust-noescalate", w.ID, 1, 2*time.Second)
-	time.Sleep(200 * time.Millisecond)
+	// pollAccessCount only guarantees the FIRST reinforcement landed; wait
+	// deterministically for all 10 RecordFeedback fire-and-forget goroutines
+	// to finish before asserting trust never moved, instead of a fixed sleep.
+	eng.waitFireAndForgetIdle()
 
 	final, err := eng.GetEngram(ctx, "trust-noescalate", mustParseULID(t, w.ID))
 	if err != nil {

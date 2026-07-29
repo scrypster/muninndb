@@ -726,6 +726,18 @@ func (e *Engine) spawnFireAndForget(fn func()) bool {
 	return true
 }
 
+// waitFireAndForgetIdle blocks until every fire-and-forget goroutine spawned
+// so far (RecordFeedback's scoring/TouchAccess writes, Read's reinforcement
+// signal) has finished. Test-only synchronization helper, mirroring
+// autoassoc.Worker.WaitIdle: production callers never await this —
+// fire-and-forget work is deliberately unawaited on the request path.
+// Safe to call only when the caller knows no *other* concurrent request on
+// this Engine is still spawning fire-and-forget work, since the WaitGroup is
+// shared across all callers of spawnFireAndForget.
+func (e *Engine) waitFireAndForgetIdle() {
+	e.fireAndForgetWG.Wait()
+}
+
 // spawnJob tracks fn in the engine's job WaitGroup and launches it as a
 // goroutine. Returns false without spawning if the engine is shutting down.
 // Callers MUST fail the associated job immediately when false is returned.
