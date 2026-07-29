@@ -452,6 +452,27 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_evolve returned error field: %v", errVal)
 		}
+		// #721: with `concept` omitted, EvolveAt inherits the predecessor's
+		// label, so the response must report the inherited one — not "".
+		// Asserting only "no error field" is what let #721 ship.
+		if got, _ := result["concept"].(string); got != "Alice the explorer" {
+			t.Errorf("evolve response concept = %q, want the inherited %q", got, "Alice the explorer")
+		}
+		evolvedID, _ := result["id"].(string)
+		if evolvedID == "" {
+			t.Fatalf("muninn_evolve: expected non-empty id, got: %v", result)
+		}
+		// An explicit concept must be echoed back verbatim.
+		renamed := mcpTool(t, tok, "muninn_evolve", map[string]any{
+			"vault":       vault,
+			"id":          evolvedID,
+			"new_content": "Alice explored the ancient ruins, found a map, and drew the first chart.",
+			"reason":      "relabel while updating content",
+			"concept":     "Alice the cartographer",
+		})
+		if got, _ := renamed["concept"].(string); got != "Alice the cartographer" {
+			t.Errorf("evolve response concept = %q, want the supplied %q", got, "Alice the cartographer")
+		}
 	})
 
 	t.Run("muninn_consolidate", func(t *testing.T) {
