@@ -54,16 +54,6 @@ const (
 	entityBoostNoiseFloor = 0.001
 )
 
-// getLeaseForInjection reads the lease sidecar consulted by applyEntityBoost's
-// pass 2b fail-closed guard. It defaults to the store's real GetLease; tests
-// covering the fail-closed behavior on a lease-read error reassign it for the
-// duration of a single test (save/restore) since the real store only errors
-// on a genuine read/decode failure, never on a missing lease. Production code
-// must never reassign this var.
-var getLeaseForInjection = func(ctx context.Context, s *storage.PebbleStore, wsPrefix [8]byte, id storage.ULID) (storage.Lease, error) {
-	return s.GetLease(ctx, wsPrefix, id)
-}
-
 // entityIDF returns the inverse-document-frequency weight for an entity:
 // ln(n/df) / ln(n), clamped to [0, 1]. n is the RECALLED VAULT's engram count
 // (vault-local — the flood #569 guards against is a vault-local phenomenon)
@@ -239,14 +229,17 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 	}
 
 	// Pass 2b: inject engrams the pipeline did not retrieve, iff their
-	// entity evidence alone clears the caller's threshold AND they pass the
-	// rest of phase 6's result contract. A result below threshold stays below
-	// threshold regardless of how it was found, and an engram phase 6 would
-	// have hidden (filters, trust, lease, validity) must not ride in through
-	// the boost side door. Each check mirrors its phase-6 counterpart in
-	// activation/engine.go; injections are typically few, so the per-candidate
-	// lease read costs less than batching would save.
-	injectNow := time.Now()
+	// entity evidence alone clears the caller's threshold AND the visibility
+	// gate admits them. A result below threshold stays below threshold
+	// regardless of how it was found (the threshold comparison is boost
+	// semantics, so it stays here), and an engram phase 6 would have hidden
+	// (filters, trust, lease, validity) must not ride in through the boost
+	// side door — that decision is the gate's, shared with every other
+	// injector. Injection-side only: pass 2a boosts engrams the pipeline
+	// already returned, which cleared the full contract in phase 6 —
+	// re-gating those would be a no-op. Injections are typically few, so the
+	// gate's per-candidate lease read costs less than batching would save.
+	gate := newVisibilityGate(req, time.Now())
 	for id, acc := range boosts {
 		if acc.total < req.Threshold {
 			continue
@@ -255,38 +248,7 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 		if err != nil || eng == nil {
 			continue
 		}
-		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
-			continue
-		}
-		if !activation.PassesMetaFilter(eng, req.Filters) {
-			continue // injected results obey the caller's filters like any pipeline result
-		}
-		// Hard trust filter. ExcludeUntrusted rides the request bool, not
-		// Filters, so PassesMetaFilter cannot enforce it. Injection-side only:
-		// pass 2a boosts engrams the pipeline already returned, which cleared
-		// this filter (and the two below) in phase 6 — re-filtering those
-		// would be a no-op.
-		if req.ExcludeUntrusted && eng.Trust == storage.TrustUntrusted {
-			continue
-		}
-		// Work-queue checkout (#548): hide engrams under a live foreign lease.
-		// A lease-read error fails CLOSED (skip the injection): phase 6 fails
-		// the whole request on the same fault, and silently admitting a
-		// possibly-checked-out engram is worse than dropping an optional
-		// enrichment. A missing lease record is not an error on either path.
-		if !req.IncludeLeased {
-			l, err := getLeaseForInjection(ctx, e.store, ws, id)
-			if err != nil {
-				continue
-			}
-			if l.Live(injectNow) && l.Owner != req.CallerOwner {
-				continue
-			}
-		}
-		// Valid-time gate (COG-19): the final gate in activateCore would drop
-		// an expired injection anyway; checking here keeps TotalFound honest
-		// and spares supersession the phantom work.
-		if !activation.PassesValidity(eng, req.AsOf, req.IncludeInvalid, injectNow) {
+		if !gate.Admits(ctx, e.store, ws, eng) {
 			continue
 		}
 		results = append(results, activation.ScoredEngram{

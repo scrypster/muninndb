@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -62,13 +63,26 @@ const (
 // finding). The always-on superseded_by/current_version annotation payload is a
 // following increment; today the opt-in `annotate` path still surfaces it.
 //
+// Substitution is ATOMIC per chain: a head the caller's visibility contract
+// refuses (meta filters, trust, foreign live lease, valid-time — the shared
+// visibilityGate) triggers full abstention for its stales — no injection, no
+// demotion, and no supersession annotation. Half-applying was strictly worse
+// on every branch: demote-without-inject silently truncates the topic the
+// caller asked about; annotating a stale row with a lease-hidden head's ID
+// leaks the exact existence #548 hides; and under AsOf the demotion itself is
+// wrong — at the caller's chosen instant the "stale" fact WAS the truth, so
+// it must keep the rank it earned. A head already in the result set cleared
+// phase 6 and substitutes freely. injected reports how many absent heads were
+// admitted and appended, so the caller can keep TotalFound honest.
+//
 // Runs post-scoring / post-entity-boost and PRE-truncation so injected heads are
 // not cut. Pure read path (reverse-assoc + engram reads only); observe-safe.
-// maxResults bounds the work to the top survivors (0 = examine all).
-func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, maxResults int) []activation.ScoredEngram {
+// req.MaxResults bounds the work to the top survivors (0 = examine all).
+func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, req *activation.ActivateRequest) (out []activation.ScoredEngram, injected int) {
 	if len(results) == 0 {
-		return results
+		return results, 0
 	}
+	maxResults := req.MaxResults
 
 	// ULID → index in results (grows as heads are injected).
 	seen := make(map[storage.ULID]int, len(results))
@@ -96,6 +110,11 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 	headEngram := make(map[storage.ULID]*storage.Engram)
 	headFinal := make(map[storage.ULID]float64)
 
+	// Visibility decisions for absent heads, cached per head: several stales
+	// can share one head, and the gate's lease check reads the store.
+	gate := newVisibilityGate(req, time.Now())
+	headAdmitted := make(map[storage.ULID]bool)
+
 	for i := 0; i < orig; i++ {
 		if err := ctx.Err(); err != nil {
 			break
@@ -103,6 +122,19 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		head, immediate, superseded := e.resolveSupersessionHead(ctx, ws, results[i].Engram.ID)
 		if !superseded {
 			continue
+		}
+		// Atomic abstention: an absent head the caller may not see voids the
+		// whole substitution for this stale — record nothing. In-pool heads
+		// cleared phase 6 already.
+		if _, inPool := seen[head.ID]; !inPool {
+			admitted, decided := headAdmitted[head.ID]
+			if !decided {
+				admitted = gate.Admits(ctx, e.store, ws, head)
+				headAdmitted[head.ID] = admitted
+			}
+			if !admitted {
+				continue
+			}
 		}
 		earned := results[i].Score
 		stales = append(stales, staleRef{idx: i, earned: earned, headID: head.ID, immediate: immediate})
@@ -112,7 +144,7 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		}
 	}
 	if len(stales) == 0 {
-		return results
+		return results, 0
 	}
 
 	// Fold each head's OWN earned score (when it was already retrieved) into its
@@ -123,13 +155,14 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		}
 	}
 
-	// Phase 2a: assign head scores; inject absent heads.
+	// Phase 2a: assign head scores; inject absent (gate-admitted) heads.
 	for headID, final := range headFinal {
 		if idx, ok := seen[headID]; ok {
 			results[idx].Score = final
 		} else {
 			results = append(results, activation.ScoredEngram{Engram: headEngram[headID], Score: final})
 			seen[headID] = len(results) - 1
+			injected++
 		}
 	}
 
@@ -155,7 +188,7 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		a, b := results[i].Engram.ID, results[j].Engram.ID
 		return bytes.Compare(a[:], b[:]) < 0
 	})
-	return results
+	return results, injected
 }
 
 // resolveSupersessionHead walks the RelSupersedes chain upward from startID to the

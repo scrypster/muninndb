@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -82,8 +84,15 @@ func (h *supersedeTestHarness) scored(pairs ...any) []activation.ScoredEngram {
 	return out
 }
 
+// apply runs supersession under a default (unrestricted) request. Tests that
+// exercise the visibility gate build their own request via applyReq.
 func (h *supersedeTestHarness) apply(results []activation.ScoredEngram) []activation.ScoredEngram {
-	return h.eng.applySupersession(h.ctx, h.ws, results, 0)
+	out, _ := h.eng.applySupersession(h.ctx, h.ws, results, &activation.ActivateRequest{})
+	return out
+}
+
+func (h *supersedeTestHarness) applyReq(results []activation.ScoredEngram, req *activation.ActivateRequest) ([]activation.ScoredEngram, int) {
+	return h.eng.applySupersession(h.ctx, h.ws, results, req)
 }
 
 // rankOf returns the 0-based rank of id in results (-1 if absent).
@@ -409,5 +418,213 @@ func TestApplySupersession_ManyReverseEdges(t *testing.T) {
 	}
 	if rankOf(got, newID) >= rankOf(got, oldID) {
 		t.Errorf("head must outrank stale despite many reverse edges")
+	}
+}
+
+// --- Visibility-gate tests: an absent head the caller's request refuses must
+// void the WHOLE substitution (no injection, no demotion, no annotation), and
+// an admitted injection must be counted. Each guard test fails with the gate
+// check in applySupersession reverted (RED-verified). ---
+
+// requireAbstained asserts the atomic-abstention contract: head absent, stale
+// at its earned score, no supersession annotation, nothing counted.
+func requireAbstained(t *testing.T, got []activation.ScoredEngram, injected int, staleID, headID string, earned float64) {
+	t.Helper()
+	if rankOf(got, headID) != -1 {
+		t.Fatalf("refused head %s was injected", headID)
+	}
+	if injected != 0 {
+		t.Errorf("injected = %d, want 0 on abstention", injected)
+	}
+	s, ok := scoreOf(got, staleID)
+	if !ok {
+		t.Fatalf("stale %s missing from results", staleID)
+	}
+	if s != earned {
+		t.Errorf("stale score = %v, want earned %v (no demotion on abstention)", s, earned)
+	}
+	for _, r := range got {
+		if r.Engram.ID.String() == staleID {
+			if r.SupersededBy != (storage.ULID{}) || r.CurrentVersion != (storage.ULID{}) {
+				t.Errorf("stale row annotated (SupersededBy=%s CurrentVersion=%s) — leaks the refused head",
+					r.SupersededBy, r.CurrentVersion)
+			}
+		}
+	}
+}
+
+// TestApplySupersession_HeadBlockedByMetaFilter_AbstainsAtomically: the stale
+// fact matches the caller's tag filter; the head does not. Injecting the head
+// would violate the filter (#654's class); demoting or annotating the stale
+// without it would half-apply the substitution.
+func TestApplySupersession_HeadBlockedByMetaFilter_AbstainsAtomically(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	staleID, err := h.eng.store.WriteEngram(h.ctx, h.ws, &storage.Engram{
+		Concept: "stale-tagged", Content: "stale fact", Confidence: 0.9,
+		Tags: []string{"wanted"},
+	})
+	if err != nil {
+		t.Fatalf("write stale: %v", err)
+	}
+	headID := h.write("head-untagged", "current fact")
+	h.supersede(headID, staleID.String())
+
+	req := &activation.ActivateRequest{
+		Filters: []activation.Filter{{Field: "tags_all", Value: []string{"wanted"}}},
+	}
+	got, injected := h.applyReq(h.scored(staleID.String(), 0.9), req)
+	requireAbstained(t, got, injected, staleID.String(), headID, 0.9)
+}
+
+// TestApplySupersession_HeadUntrusted_AbstainsAtomically: under
+// ExcludeUntrusted, a TrustUntrusted head must not enter — and must not
+// demote the trusted stale it would have replaced.
+func TestApplySupersession_HeadUntrusted_AbstainsAtomically(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	staleID := h.write("stale-trusted", "stale fact")
+	headID := h.write("head-untrusted", "current fact")
+	h.supersede(headID, staleID)
+	headULID, err := storage.ParseULID(headID)
+	if err != nil {
+		t.Fatalf("parse head: %v", err)
+	}
+	if err := h.eng.store.UpdateTrust(h.ctx, h.ws, headULID, storage.TrustUntrusted); err != nil {
+		t.Fatalf("mark head untrusted: %v", err)
+	}
+
+	req := &activation.ActivateRequest{ExcludeUntrusted: true}
+	got, injected := h.applyReq(h.scored(staleID, 0.9), req)
+	requireAbstained(t, got, injected, staleID, headID, 0.9)
+}
+
+// TestApplySupersession_HeadUnderForeignLease_AbstainsAtomically: a head
+// checked out by another agent is invisible to this caller (#548). Annotating
+// the stale row with the hidden head's ID would leak the exact existence the
+// lease hides, so the whole substitution abstains.
+func TestApplySupersession_HeadUnderForeignLease_AbstainsAtomically(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	staleID := h.write("stale-lease", "stale fact")
+	headID := h.write("head-leased", "current fact")
+	h.supersede(headID, staleID)
+
+	claimRes, err := h.eng.Claim(h.ctx, "default", headID, "other-agent", 600)
+	if err != nil {
+		t.Fatalf("claim head: %v", err)
+	}
+	if claimRes.Status != LeaseAcquired {
+		t.Fatalf("claim status = %v, want LeaseAcquired", claimRes.Status)
+	}
+
+	req := &activation.ActivateRequest{CallerOwner: "me"}
+	got, injected := h.applyReq(h.scored(staleID, 0.9), req)
+	requireAbstained(t, got, injected, staleID, headID, 0.9)
+
+	// IncludeLeased (admin/debugging) re-admits the head: full substitution.
+	got, injected = h.applyReq(h.scored(staleID, 0.9), &activation.ActivateRequest{
+		CallerOwner: "me", IncludeLeased: true,
+	})
+	if rankOf(got, headID) == -1 {
+		t.Fatal("IncludeLeased must disable lease-based hiding for injected heads")
+	}
+	if injected != 1 {
+		t.Errorf("injected = %d, want 1 under IncludeLeased", injected)
+	}
+}
+
+// TestApplySupersession_LeaseReadErrorFailsClosed: a lease-read fault must
+// refuse the injection (and the substitution with it), mirroring the boost
+// path and phase 6 — never silently admit a possibly-checked-out engram.
+func TestApplySupersession_LeaseReadErrorFailsClosed(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	staleID := h.write("stale-leaseerr", "stale fact")
+	headID := h.write("head-leaseerr", "current fact")
+	h.supersede(headID, staleID)
+
+	// Fault-inject a lease-read error for the head only; every other id
+	// (including calls from concurrently-running tests) is unaffected.
+	faultyID, err := storage.ParseULID(headID)
+	if err != nil {
+		t.Fatalf("parse head: %v", err)
+	}
+	orig := getLeaseForInjection
+	getLeaseForInjection = func(ctx context.Context, s *storage.PebbleStore, wsPrefix [8]byte, id storage.ULID) (storage.Lease, error) {
+		if id == faultyID {
+			return storage.Lease{}, fmt.Errorf("simulated lease read failure")
+		}
+		return orig(ctx, s, wsPrefix, id)
+	}
+	defer func() { getLeaseForInjection = orig }()
+
+	got, injected := h.applyReq(h.scored(staleID, 0.9), &activation.ActivateRequest{})
+	requireAbstained(t, got, injected, staleID, headID, 0.9)
+}
+
+// TestApplySupersession_HeadAfterAsOf_AbstainsAtomically: at the caller's
+// chosen instant the "stale" fact WAS the truth — a head that only became
+// valid later must not be injected, and the stale fact must keep the rank it
+// earned, unannotated. (The head is valid NOW; only the as-of view refuses it.)
+func TestApplySupersession_HeadAfterAsOf_AbstainsAtomically(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	past := time.Now().Add(-2 * time.Hour)
+	staleULID, err := h.eng.store.WriteEngram(h.ctx, h.ws, &storage.Engram{
+		Concept: "stale-asof", Content: "stale fact", Confidence: 0.9,
+		ValidFrom: past,
+	})
+	if err != nil {
+		t.Fatalf("write stale: %v", err)
+	}
+	staleID := staleULID.String()
+	headID := h.write("head-asof", "current fact") // ValidFrom defaults to now
+	h.supersede(headID, staleID)
+
+	// Sanity: with no AsOf the substitution applies (the head is visible now).
+	got, injected := h.applyReq(h.scored(staleID, 0.9), &activation.ActivateRequest{})
+	if rankOf(got, headID) == -1 || injected != 1 {
+		t.Fatalf("precondition: head must inject under a plain request (rank=%d injected=%d)",
+			rankOf(got, headID), injected)
+	}
+
+	// As of one hour ago: the head's ValidFrom is in the query's future.
+	asOf := time.Now().Add(-1 * time.Hour)
+	got, injected = h.applyReq(h.scored(staleID, 0.9), &activation.ActivateRequest{AsOf: &asOf})
+	requireAbstained(t, got, injected, staleID, headID, 0.9)
+}
+
+// TestApplySupersession_AdmittedHeadCounts: the plain path reports its
+// injection so the caller can keep TotalFound honest (closing the counting
+// gap the #570 review scoped as a follow-up).
+func TestApplySupersession_AdmittedHeadCounts(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	staleID := h.write("stale-count", "stale fact")
+	headID := h.write("head-count", "current fact")
+	h.supersede(headID, staleID)
+
+	got, injected := h.applyReq(h.scored(staleID, 0.9), &activation.ActivateRequest{})
+	if injected != 1 {
+		t.Errorf("injected = %d, want 1", injected)
+	}
+	if rankOf(got, headID) != 0 {
+		t.Errorf("admitted head must lead (rank %d)", rankOf(got, headID))
+	}
+
+	// Promotion of an in-pool head is not an injection.
+	got, injected = h.applyReq(h.scored(staleID, 0.9, headID, 0.5), &activation.ActivateRequest{})
+	if injected != 0 {
+		t.Errorf("injected = %d, want 0 when the head was already in the pool", injected)
+	}
+	if rankOf(got, headID) != 0 {
+		t.Errorf("promoted head must lead (rank %d)", rankOf(got, headID))
 	}
 }

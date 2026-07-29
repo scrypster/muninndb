@@ -2342,25 +2342,29 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	preBoost := len(result.Activations)
 	result.Activations = e.applyEntityBoost(ctx, wsPrefix, vaultSize, result.Activations, actReq)
 	// Injected engrams count as found: on the boost path, total <
-	// len(activations) was the #569 bypass fingerprint. This covers entity
-	// boost only — applySupersession below may still inject promoted heads
-	// without a TotalFound bump. Known imprecision (scoped follow-up, PR #570
-	// review): an engram that scored above threshold in the pipeline but was
-	// truncated past MaxResults and then re-injected here is counted twice.
+	// len(activations) was the #569 bypass fingerprint. Known imprecision
+	// (scoped follow-up, PR #570 review): an engram that scored above
+	// threshold in the pipeline but was truncated past MaxResults and then
+	// re-injected here is counted twice.
 	result.TotalFound += len(result.Activations) - preBoost
 
 	// Supersedes-aware ranking: promote the current fact over any superseded one
 	// it replaces (injecting it if the query didn't retrieve it), so recall never
 	// leads with a fact it knows is stale. Runs after entity boost and BEFORE
-	// truncation so an injected head is not cut. Pure read-path ranking (no writes).
-	result.Activations = e.applySupersession(ctx, wsPrefix, result.Activations, actReq.MaxResults)
+	// truncation so an injected head is not cut. Injected heads pass the shared
+	// visibility gate inside (a refused head voids its whole substitution) and
+	// count as found, same rule as boost injections. Pure read-path ranking (no
+	// writes).
+	var supInjected int
+	result.Activations, supInjected = e.applySupersession(ctx, wsPrefix, result.Activations, actReq)
+	result.TotalFound += supInjected
 
 	// Final valid-time gate (COG-19: default recall never returns an engram whose
-	// ValidUntil <= now). Phase-6 already gated scored candidates, and entity-boost
-	// injections now enforce the full phase-6 contract (filters, trust, lease,
-	// validity — #569) at injection, but supersession still injects promoted heads
-	// past PassesMetaFilter, so the shared predicate must hold at the last cut
-	// before truncation. Runs AFTER supersession
+	// ValidUntil <= now). Phase-6 gated scored candidates, and both injectors —
+	// entity boost and supersession — enforce the full phase-6 contract through
+	// the shared visibility gate at injection, so this last cut is defense in
+	// depth rather than load-bearing: it holds the COG-19 floor even if a future
+	// result-set mutation forgets the gate. Runs AFTER supersession
 	// on purpose: a manual supersede's now-expired predecessor is dropped only once
 	// its current head has been promoted/injected, so a query matching only the
 	// stale phrasing still returns the current fact.
