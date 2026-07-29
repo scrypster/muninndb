@@ -113,6 +113,23 @@ func (ps *PebbleStore) ScanArmedForEntity(ctx context.Context, ws [8]byte, entit
 	return out, nil
 }
 
+// IsIntentionArmedOnCue reports whether intentionID is itself armed on the
+// given cue entity — i.e. whether the engram being scored is the very
+// intention that would fire on this cue. Used to exclude an armed
+// intention's own retrieved engram from contributing to its own focality
+// (bug #693: without this, an intention's own TypeGoal engram — which
+// carries its cue as a first-class entity — could self-satisfy the
+// top-result or >=2-carrier focality rules in NoticesForRecall). A single
+// point lookup on the reconstructed 0x2D key; no scan.
+func (ps *PebbleStore) IsIntentionArmedOnCue(ctx context.Context, ws [8]byte, cueName string, intentionID ULID) (bool, error) {
+	k := keys.ProspectiveIntentKey(ws, keys.EntityNameHash(cueName), [16]byte(intentionID))
+	val, err := Get(ps.db, k)
+	if err != nil {
+		return false, fmt.Errorf("is intention armed on cue: %w", err)
+	}
+	return val != nil, nil
+}
+
 // MarkIntentionFired records a delivery of the intention. For a one-shot
 // intention every cue key is deleted (the intention is consumed). For a
 // recurring intention every cue key's record gets FiredCount+1 and a fresh

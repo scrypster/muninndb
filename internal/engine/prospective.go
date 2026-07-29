@@ -208,10 +208,16 @@ func (e *Engine) NoticesForRecall(ctx context.Context, vault string, results []S
 		}
 	}
 
-	// Count carriers per normalized entity; remember a raw name for display.
-	carriers := make(map[string]int, 8)
+	// Count carriers per normalized entity; remember a raw name for display
+	// and which result indices contributed (bug #693 needs to re-examine
+	// only those, not every (result, entity) pair — see below).
+	type carrierInfo struct {
+		count        int
+		contributors []int // indices into ordered
+	}
+	carriers := make(map[string]*carrierInfo, 8)
 	rawName := make(map[string]string, 8)
-	for _, re := range ordered {
+	for i, re := range ordered {
 		seenHere := make(map[string]struct{}, len(re.names))
 		for _, name := range re.names {
 			norm := keys.NormalizeEntityName(name)
@@ -219,20 +225,65 @@ func (e *Engine) NoticesForRecall(ctx context.Context, vault string, results []S
 				continue
 			}
 			seenHere[norm] = struct{}{}
-			carriers[norm]++
+			ci, ok := carriers[norm]
+			if !ok {
+				ci = &carrierInfo{}
+				carriers[norm] = ci
+			}
+			ci.count++
+			ci.contributors = append(ci.contributors, i)
 			if _, ok := rawName[norm]; !ok {
 				rawName[norm] = name
 			}
 		}
 	}
+
 	focalSet := make(map[string]struct{}, len(carriers))
+
+	// #693 self-focality guard: an armed intention's own engram is a TypeGoal
+	// engram that carries its own cue as a first-class entity (Intend writes
+	// the cue as an inline entity). Left unguarded, that engram coming back
+	// in results can self-satisfy its own focality via either path below —
+	// so both paths exclude a result's contribution to a cue that THAT VERY
+	// result is armed on as an intention. This does NOT exclude TypeGoal
+	// engrams generally: a goal engram is still a legitimate corroborator of
+	// a DIFFERENT intention's cue, or of its own cue via genuinely separate
+	// carriers.
+	//
+	// Perf: gate the 0x2D point lookups to the entries that could actually
+	// flip a focality decision — the top result's own names (bounded by that
+	// one engram's entity count) and cues that already reached the raw >=2
+	// threshold (below it, self-exclusion changes nothing) — instead of an
+	// O(results×names) scan over every result.
 	if topIdx >= 0 {
+		topID := ordered[topIdx].id
 		for _, name := range ordered[topIdx].names {
+			selfArmed, err := e.store.IsIntentionArmedOnCue(ctx, ws, name, topID)
+			if err != nil {
+				return nil, fmt.Errorf("notices: self-focality check (top result): %w", err)
+			}
+			if selfArmed {
+				continue
+			}
 			focalSet[keys.NormalizeEntityName(name)] = struct{}{}
 		}
 	}
-	for norm, cnt := range carriers {
-		if cnt >= 2 {
+	for norm, ci := range carriers {
+		if ci.count < 2 {
+			continue
+		}
+		real := ci.count
+		for _, idx := range ci.contributors {
+			re := ordered[idx]
+			armed, err := e.store.IsIntentionArmedOnCue(ctx, ws, rawName[norm], re.id)
+			if err != nil {
+				return nil, fmt.Errorf("notices: self-focality check (corroboration): %w", err)
+			}
+			if armed {
+				real--
+			}
+		}
+		if real >= 2 {
 			focalSet[norm] = struct{}{}
 		}
 	}

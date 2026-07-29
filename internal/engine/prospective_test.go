@@ -199,6 +199,108 @@ func TestProspective_FocalGateInvariant(t *testing.T) {
 	}
 }
 
+// === Bug #693: self-focality =================================================
+//
+// An armed intention's own engram is a TypeGoal engram that carries its own
+// cue as a first-class entity (Intend writes the cue as an inline entity).
+// If that engram itself comes back in recall results, it must not be allowed
+// to satisfy its own focality — otherwise an intention can self-fire on
+// nothing but its own retrieval, or self-corroborate a single real carrier
+// up to the >=2 threshold. NoticesForRemember already guards the analogous
+// case (self-echo, excludeID=createdID); NoticesForRecall did not.
+
+// TestNoticesForRecall_SelfFocality_IntentionOwnEngramAlone pins sub-case (a):
+// the ONLY result is the intention's own engram (e.g. the agent recalled its
+// goals list and the intention itself came back). Its cue must not become
+// focal via the top-result path just because the engram carries it.
+func TestNoticesForRecall_SelfFocality_IntentionOwnEngramAlone(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	const vault = "push-selffocal-vault-a"
+
+	intentID, err := eng.Intend(ctx, vault, "when widget comes up, mention the recall bug", []string{"widget"}, nil, false, nil)
+	if err != nil {
+		t.Fatalf("Intend: %v", err)
+	}
+
+	seen, _ := newSession()
+	notices, err := eng.NoticesForRecall(ctx, vault, sr(intentID), seen, false)
+	if err != nil {
+		t.Fatalf("NoticesForRecall: %v", err)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("#693: intention self-fired via its own retrieved engram as the sole/top result: got %d notices, want 0 (%+v)", len(notices), notices)
+	}
+}
+
+// TestNoticesForRecall_SelfFocality_SelfCorroboration pins sub-case (b): an
+// unrelated top result plus exactly ONE genuine cue-carrying memory plus the
+// intention's own engram must NOT reach the >=2-carrier corroboration
+// threshold — only one real memory corroborates the cue.
+func TestNoticesForRecall_SelfFocality_SelfCorroboration(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	const vault = "push-selffocal-vault-b"
+
+	realCarrier := writeMemWithEntities(t, eng, vault, "notes about widget procurement", "widget")
+	unrelatedTop := writeMemWithEntities(t, eng, vault, "picked a font for the landing page", "typography")
+
+	intentID, err := eng.Intend(ctx, vault, "when widget comes up, mention the recall bug", []string{"widget"}, nil, false, nil)
+	if err != nil {
+		t.Fatalf("Intend: %v", err)
+	}
+
+	seen, _ := newSession()
+	results := []ScoredResult{
+		{ID: unrelatedTop, Score: 10}, // clearly the top result, unrelated cue
+		{ID: realCarrier, Score: 1},
+		{ID: intentID, Score: 1},
+	}
+	notices, err := eng.NoticesForRecall(ctx, vault, results, seen, false)
+	if err != nil {
+		t.Fatalf("NoticesForRecall: %v", err)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("#693: intention self-corroborated via its own engram (only ONE real carrier present): got %d notices, want 0 (%+v)", len(notices), notices)
+	}
+}
+
+// TestNoticesForRecall_GenuineCorroborationStillFires is the guard against
+// over-suppression: TWO genuine (non-intention) carriers of a cue must still
+// reach the corroboration threshold and fire, even with the self-exclusion
+// fix in place.
+func TestNoticesForRecall_GenuineCorroborationStillFires(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	const vault = "push-genuine-corrob-vault"
+
+	carrierA := writeMemWithEntities(t, eng, vault, "widget spec draft one", "widget")
+	carrierB := writeMemWithEntities(t, eng, vault, "widget spec draft two", "widget")
+	unrelatedTop := writeMemWithEntities(t, eng, vault, "picked a font for the landing page", "typography")
+
+	intentID, err := eng.Intend(ctx, vault, "when widget comes up, mention the recall bug", []string{"widget"}, nil, false, nil)
+	if err != nil {
+		t.Fatalf("Intend: %v", err)
+	}
+
+	seen, _ := newSession()
+	results := []ScoredResult{
+		{ID: unrelatedTop, Score: 10},
+		{ID: carrierA, Score: 1},
+		{ID: carrierB, Score: 1},
+	}
+	notices, err := eng.NoticesForRecall(ctx, vault, results, seen, false)
+	if err != nil {
+		t.Fatalf("NoticesForRecall: %v", err)
+	}
+	if len(notices) != 1 || notices[0].MemoryID != intentID {
+		t.Fatalf("genuine 2-carrier corroboration (non-intention) must still fire: got %+v, want 1 notice for intention %s", notices, intentID)
+	}
+}
+
 // TestNoticesForRecall_TimeSilences pins "time SILENCES, never fires": an
 // intention whose valid_until has passed does not fire even on a focal cue.
 func TestNoticesForRecall_TimeSilences(t *testing.T) {
