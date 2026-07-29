@@ -130,7 +130,9 @@ Distilled from real decisions across the project's history (each traced to its P
    session state.
 
 3. **RED-sanity-check bug fixes.** A test for a fixed bug or closed race must be shown to
-   *fail without the fix*. A test that passes both ways proves nothing.
+   *fail without the fix*. A test that passes both ways proves nothing. If a test asserts
+   on state produced by an async worker, drain it deterministically instead of
+   `time.Sleep` — see `docs/internals/testing-hermeticity.md` (#722).
 
 4. **Honor the invariants and cross-surface obligations.** Check `docs/internals/invariants.md`,
    the keyspace registry, and `docs/internals/drift-and-obligations.md`. Touching an MCP
