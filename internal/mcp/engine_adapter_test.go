@@ -373,3 +373,34 @@ func TestWhereLeftOffEntryFromEngramImportance(t *testing.T) {
 		t.Errorf("derived entry = (%v, %q), want (0.6, derived)", derived.Importance, derived.ImportanceSource)
 	}
 }
+
+// TestResolveEvolveConcept pins the precedence rule behind the evolve
+// response's `concept` field (#721). Before the fix the adapter never
+// populated WriteResult.Concept at all, so every evolve response reported
+// `"concept": ""` — a caller reading it concluded the label had been wiped
+// and "repaired" it with another evolve, churning ULIDs for nothing.
+func TestResolveEvolveConcept(t *testing.T) {
+	t.Run("caller value wins without a read-back", func(t *testing.T) {
+		got := resolveEvolveConcept("explicit label", func() string {
+			t.Fatal("read-back must not run when the caller supplied a concept")
+			return ""
+		})
+		if got != "explicit label" {
+			t.Errorf("got %q, want %q", got, "explicit label")
+		}
+	})
+
+	t.Run("omitted concept reports the inherited one", func(t *testing.T) {
+		got := resolveEvolveConcept("", func() string { return "inherited label" })
+		if got != "inherited label" {
+			t.Errorf("got %q, want %q", got, "inherited label")
+		}
+	})
+
+	t.Run("failed read-back degrades to empty, never panics", func(t *testing.T) {
+		got := resolveEvolveConcept("", func() string { return "" })
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+}

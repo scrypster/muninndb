@@ -89,12 +89,35 @@ func (a *mcpEngineAdapter) GetContradictions(ctx context.Context, vault string) 
 	}
 	return result, nil
 }
+
+// resolveEvolveConcept decides which concept an evolve response reports.
+// An explicit caller value always wins. When the caller omitted `concept`,
+// EvolveAt inherited the predecessor's, so the only truthful answer requires
+// reading the new version back — readBack returns "" if that read fails, and
+// an empty result is correct-to-degrade-to: the write has already committed,
+// so a failed read-back must not turn a successful evolve into an error.
+func resolveEvolveConcept(callerConcept string, readBack func() string) string {
+	if callerConcept != "" {
+		return callerConcept
+	}
+	return readBack()
+}
+
 func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (*WriteResult, error) {
 	id, err := a.eng.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, entities, importance, effectiveAt)
 	if err != nil {
 		return nil, err
 	}
-	return &WriteResult{ID: id.String()}, nil
+	return &WriteResult{
+		ID: id.String(),
+		Concept: resolveEvolveConcept(concept, func() string {
+			eng, gerr := a.eng.GetEngram(ctx, vault, id)
+			if gerr != nil || eng == nil {
+				return ""
+			}
+			return eng.Concept
+		}),
+	}, nil
 }
 func (a *mcpEngineAdapter) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
 	res, err := a.eng.Consolidate(ctx, vault, ids, merged)
