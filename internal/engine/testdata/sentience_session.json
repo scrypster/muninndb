@@ -1,0 +1,1158 @@
+{
+  "comment": "SENTIENCE ACCEPTANCE GATE scenario \u2014 'Six weeks on the Nordlys project'. 12 simulated sessions (each call is a fresh agent session via a fresh dedup map; durable one-shot markers persist across calls). 12 armed intentions (colleague moments, A1), 8 stale/current fact pairs across 3 currency mechanisms (A2), 30 silence calls incl. 10 traps (A3), 6 continuity probes (A4). This harness runs against a noop embedder (BM25/FTS + entity-boost + traversal, no semantic vectors \u2014 see engine_test.go testEnv), so every probe needs real lexical/entity overlap with its target content; each silence call carries a closely-matching 'anchor' memory (same technique as the proven prospective_harness_test.go's diverse unrelated pool) so genuinely-irrelevant queries have something to latch onto instead of falling back to low-score noise that happens to carry a cue entity. Every colleague/currency probe carries a held-out phrasing-set-B rendering (context_b) reserved for the adversarial refute pass, NOT exercised by sentience_gate_test.go's own assertions. content_words lists only the SPECIFIC distinguishing tokens of a colleague moment (names, numbers, the specific claim) \u2014 not the cue's own generic topic vocabulary, which a real user could say aloud without it counting as 'naming the hidden fact'. filler_count generated in code brings the vault to ~250 engrams.",
+  "filler_count": 184,
+  "sessions": [
+    {
+      "seq": 1,
+      "memories": [
+        {
+          "ref": "cue_kafka_1",
+          "entities": [
+            "kafka-migration"
+          ],
+          "content": "Nordlys team started scoping the Kafka migration this week, moving event streaming off the old queue."
+        },
+        {
+          "ref": "cue_kafka_2",
+          "entities": [
+            "kafka-migration"
+          ],
+          "content": "Kafka migration timeline targets a six week rollout with a staged cutover per topic."
+        },
+        {
+          "ref": "cue_budget_1",
+          "entities": [
+            "eng-budget"
+          ],
+          "content": "Engineering budget review kicked off alongside the Series A prep, headcount plan under discussion."
+        },
+        {
+          "ref": "cue_budget_2",
+          "entities": [
+            "eng-budget"
+          ],
+          "content": "Eng budget spreadsheet now tracks burn against the fundraising runway assumptions."
+        },
+        {
+          "ref": "runway_old",
+          "entities": [
+            "runway"
+          ],
+          "content": "Runway was 8 months as of the March board close, per the finance model."
+        },
+        {
+          "ref": "oncall_old",
+          "entities": [
+            "oncall-rotation"
+          ],
+          "content": "Marcus is primary on-call for billing-service this sprint, Priya is backup."
+        },
+        {
+          "ref": "ratelimit_old",
+          "entities": [
+            "rate-limit-config"
+          ],
+          "content": "Auth-gateway rate limit is configured at 200 requests per second per tenant."
+        },
+        {
+          "ref": "n1_standup",
+          "content": "Weekly standup moved to Tuesdays so it doesn't collide with the infra sync."
+        },
+        {
+          "ref": "n1_office",
+          "content": "Team agreed to keep the shared doc for open questions instead of scattering them across channels."
+        },
+        {
+          "ref": "thread1_open",
+          "entities": [
+            "kafka-migration"
+          ],
+          "content": "Decision pending: whether the Kafka migration should keep the legacy consumer running in parallel for two weeks after cutover, Marcus to propose an answer next sync."
+        },
+        {
+          "ref": "anchor_s1_u1",
+          "content": "New coffee machine finally arrived for the office and everyone's been testing it out all week."
+        },
+        {
+          "ref": "anchor_s1_u2",
+          "content": "Support ticket volume numbers dipped noticeably during the holiday week, per the weekly report."
+        },
+        {
+          "ref": "anchor_s1_t1",
+          "content": "Kitchen freezer inventory audit came up a few items short this month, facilities is looking into it."
+        }
+      ],
+      "intentions": [
+        {
+          "ref": "intent_kafka_partitions",
+          "cues": [
+            "kafka-migration"
+          ],
+          "content": "Marcus set the Kafka migration partition count to 24 based on the projected peak throughput estimate.",
+          "content_words": [
+            "Marcus",
+            "24",
+            "partition",
+            "throughput"
+          ],
+          "one_shot": false,
+          "importance": 0.7
+        },
+        {
+          "ref": "intent_eng_headcount",
+          "cues": [
+            "eng-budget"
+          ],
+          "content": "Steve wants engineering headcount frozen until the Series A closes.",
+          "content_words": [
+            "Steve",
+            "frozen"
+          ],
+          "one_shot": true,
+          "importance": 0.65
+        }
+      ],
+      "calls": [
+        {
+          "kind": "silence_unrelated",
+          "context": "How's the new coffee machine working out for the office"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "Support ticket volume dipped over the holiday week"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Freezer inventory audit for the kitchen came up short a few items"
+        }
+      ]
+    },
+    {
+      "seq": 2,
+      "memories": [
+        {
+          "ref": "cue_billing_1",
+          "entities": [
+            "billing-service-migration"
+          ],
+          "content": "Team started drafting the billing-service migration plan, sequencing which pieces move first."
+        },
+        {
+          "ref": "cue_billing_2",
+          "entities": [
+            "billing-service-migration"
+          ],
+          "content": "Billing-service migration doc lists the cutover order for the payment components."
+        },
+        {
+          "ref": "cue_investor_1",
+          "entities": [
+            "investor-relations"
+          ],
+          "content": "Marcus started prepping the next investor-relations update ahead of the board meeting."
+        },
+        {
+          "ref": "cue_investor_2",
+          "entities": [
+            "investor-relations"
+          ],
+          "content": "Investor-relations deck now includes the updated burn chart."
+        },
+        {
+          "ref": "freeze_old",
+          "entities": [
+            "freeze-window"
+          ],
+          "content": "A deploy freeze is in effect for the November release window while the infra team stabilizes the cluster."
+        },
+        {
+          "ref": "review_old",
+          "entities": [
+            "review-policy"
+          ],
+          "content": "PR review policy requires two approvals before merge on every service."
+        },
+        {
+          "ref": "n2_a",
+          "content": "Priya rewrote the onboarding checklist for new engineers joining the Nordlys team."
+        },
+        {
+          "ref": "anchor_s2_u1",
+          "content": "IT is rolling out new laptops for the design team next month, forms are due Friday."
+        },
+        {
+          "ref": "anchor_s2_u2",
+          "content": "Someone left the conference room screen on all weekend again, facilities sent a reminder."
+        },
+        {
+          "ref": "anchor_s2_t1",
+          "content": "Budget for the team offsite dinner needs a final headcount by Friday, please RSVP."
+        }
+      ],
+      "intentions": [
+        {
+          "ref": "intent_billing_cutover",
+          "cues": [
+            "billing-service-migration"
+          ],
+          "content": "Steve found the Stripe idempotency-key bug in the old retry path during the March billing incident.",
+          "content_words": [
+            "Steve",
+            "Stripe",
+            "idempotency",
+            "retry"
+          ],
+          "one_shot": true,
+          "importance": 0.8
+        },
+        {
+          "ref": "intent_investor_cadence",
+          "cues": [
+            "investor-relations"
+          ],
+          "content": "Marcus promised the board a monthly burn update, not quarterly.",
+          "content_words": [
+            "Marcus",
+            "monthly",
+            "quarterly"
+          ],
+          "one_shot": true,
+          "importance": 0.7
+        }
+      ],
+      "calls": [
+        {
+          "kind": "continuity",
+          "want_ref": "thread1_open"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "IT is rolling out new laptops for the design team next month"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "Someone left the conference room screen on all weekend again"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Budget for the team offsite dinner needs a final headcount by Friday"
+        }
+      ]
+    },
+    {
+      "seq": 3,
+      "memories": [
+        {
+          "ref": "cue_auth_1",
+          "entities": [
+            "auth-gateway"
+          ],
+          "content": "Auth-gateway team is reviewing tenant limits ahead of the enterprise rollout."
+        },
+        {
+          "ref": "cue_auth_2",
+          "entities": [
+            "auth-gateway"
+          ],
+          "content": "Auth-gateway config review covers rate limiting and connection ceilings per tenant."
+        },
+        {
+          "ref": "stagingdb_old",
+          "entities": [
+            "staging-db"
+          ],
+          "content": "Staging Postgres instance is sized at db.r5.large for the load-test environment."
+        },
+        {
+          "ref": "audit_old",
+          "entities": [
+            "security-audit"
+          ],
+          "content": "SOC2 pre-audit flagged a missing MFA policy for admin accounts."
+        },
+        {
+          "ref": "n3_a",
+          "content": "Nordlys design review moved the dashboard mockups to Figma for easier commenting."
+        },
+        {
+          "ref": "thread2_open",
+          "entities": [
+            "auth-gateway"
+          ],
+          "content": "Decision pending: Priya is drafting the tenant rate-limit exception policy for the two largest enterprise accounts, waiting on legal sign-off before publishing."
+        },
+        {
+          "ref": "anchor_s3_u1",
+          "content": "The building's HVAC contractor is coming Thursday for the filter swap, expect some noise."
+        },
+        {
+          "ref": "anchor_s3_u2",
+          "content": "Marketing asked for updated headshots for the website, scheduling a photographer next week."
+        },
+        {
+          "ref": "anchor_s3_t1",
+          "content": "Idempotency-key handling in the retry logic for a completely different payment provider needed a fix in that old retry path."
+        }
+      ],
+      "intentions": [
+        {
+          "ref": "intent_auth_limits",
+          "cues": [
+            "auth-gateway"
+          ],
+          "content": "Priya flagged that the auth-gateway rate limiter caps at 200 req/s per tenant and larger customers will trip it.",
+          "content_words": [
+            "Priya",
+            "200",
+            "limiter",
+            "trip"
+          ],
+          "one_shot": true,
+          "importance": 0.75
+        },
+        {
+          "ref": "intent_billing_oncall",
+          "cues": [
+            "billing-service-migration"
+          ],
+          "content": "Priya is out the week of the cutover, so on-call needs backup coverage.",
+          "content_words": [
+            "Priya",
+            "backup",
+            "coverage"
+          ],
+          "one_shot": false,
+          "importance": 0.6
+        }
+      ],
+      "calls": [
+        {
+          "kind": "silence_unrelated",
+          "context": "The building's HVAC contractor is coming Thursday for the filter swap"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "Marketing asked for updated headshots for the website"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Reviewing idempotency-key handling in the retry logic for a completely different payment provider's old retry path entirely"
+        }
+      ]
+    },
+    {
+      "seq": 4,
+      "memories": [
+        {
+          "ref": "cue_freeze_1",
+          "entities": [
+            "deploy-freeze"
+          ],
+          "content": "Deploy-freeze window policy got a refresher doc after last quarter's confusion."
+        },
+        {
+          "ref": "cue_freeze_2",
+          "entities": [
+            "deploy-freeze"
+          ],
+          "content": "Deploy-freeze exception process needs sign-off logged in the incident channel."
+        },
+        {
+          "ref": "cue_launch_1",
+          "entities": [
+            "nordlys-launch"
+          ],
+          "content": "Nordlys-launch checklist now tracks the marketing and support readiness items."
+        },
+        {
+          "ref": "cue_launch_2",
+          "entities": [
+            "nordlys-launch"
+          ],
+          "content": "Nordlys-launch date review happens every other Friday with the leads."
+        },
+        {
+          "ref": "support_old",
+          "entities": [
+            "support-rotation"
+          ],
+          "content": "Marcus is the primary support-rotation contact for customer escalations this month."
+        },
+        {
+          "ref": "n4_a",
+          "content": "Marketing asked for a one-pager summarizing the Nordlys launch highlights."
+        },
+        {
+          "ref": "thread3_decoy",
+          "entities": [
+            "kafka-migration"
+          ],
+          "content": "Earlier kafka-migration question about consumer group naming was resolved last week, no longer open."
+        },
+        {
+          "ref": "anchor_s4_u1",
+          "content": "Payroll switched providers and everyone needs to re-enter direct deposit info by month end."
+        },
+        {
+          "ref": "anchor_s4_u2",
+          "content": "The office plants finally got a watering schedule posted by the kitchen."
+        },
+        {
+          "ref": "anchor_s4_t1",
+          "content": "Nord VPN renewal notice showed up for the laptop fleet, IT is processing the invoice."
+        }
+      ],
+      "intentions": [
+        {
+          "ref": "intent_deploy_process",
+          "cues": [
+            "deploy-freeze"
+          ],
+          "content": "Priya said hotfixes still need her sign-off even during the freeze window.",
+          "content_words": [
+            "Priya",
+            "hotfix"
+          ],
+          "one_shot": false,
+          "importance": 0.65
+        },
+        {
+          "ref": "intent_launch_date",
+          "cues": [
+            "nordlys-launch"
+          ],
+          "content": "Priya said marketing already committed to customers for the 15th, so the date can't slip quietly.",
+          "content_words": [
+            "Priya",
+            "15th",
+            "committed",
+            "slip"
+          ],
+          "one_shot": false,
+          "importance": 0.7
+        }
+      ],
+      "supersedes": [
+        {
+          "old_ref": "runway_old",
+          "new_ref": "runway_new",
+          "new_content": "Bridge round closed, extending runway to 11 months per the updated finance model.",
+          "new_entities": [
+            "runway"
+          ]
+        }
+      ],
+      "calls": [
+        {
+          "kind": "continuity",
+          "want_ref": "thread2_open"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "Payroll switched providers and everyone needs to re-enter direct deposit info"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "The office plants finally got a watering schedule"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Nord VPN renewal notice showed up for the laptop fleet"
+        }
+      ]
+    },
+    {
+      "seq": 5,
+      "memories": [
+        {
+          "ref": "n5_a",
+          "content": "Team retro flagged that deploy checklist steps were being skipped under time pressure."
+        },
+        {
+          "ref": "n5_b",
+          "content": "Nordlys onboarding survey results came back mostly positive, a few complaints about docs."
+        },
+        {
+          "ref": "thread3_open",
+          "entities": [
+            "kafka-migration"
+          ],
+          "content": "Decision pending: Marcus is drafting the Kafka migration rollback runbook, still waiting on a second reviewer before it's final."
+        },
+        {
+          "ref": "anchor_s5_u1",
+          "content": "Legal sent over the updated NDA template for contractors, please use the new version going forward."
+        },
+        {
+          "ref": "anchor_s5_u2",
+          "content": "Someone's cat joined the video call again during standup, everyone thought it was funny."
+        },
+        {
+          "ref": "anchor_s5_t1",
+          "content": "Investor calls about a personal 401k rollover kept Steve on the phone with his broker all afternoon."
+        }
+      ],
+      "intentions": [
+        {
+          "ref": "intent_kafka_rollback",
+          "cues": [
+            "kafka-migration"
+          ],
+          "content": "Marcus wants a documented rollback plan before anyone touches production topics.",
+          "content_words": [
+            "Marcus",
+            "rollback",
+            "production",
+            "topics"
+          ],
+          "one_shot": true,
+          "importance": 0.7
+        }
+      ],
+      "supersedes": [
+        {
+          "old_ref": "oncall_old",
+          "new_ref": "oncall_new",
+          "new_content": "Priya took over primary on-call for billing-service after Marcus rotated off this week.",
+          "new_entities": [
+            "oncall-rotation"
+          ]
+        }
+      ],
+      "calls": [
+        {
+          "kind": "silence_unrelated",
+          "context": "Legal sent over the updated NDA template for contractors"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "Someone's cat joined the video call again during standup"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Investor calls about a personal 401k rollover kept Steve on the phone all afternoon"
+        }
+      ]
+    },
+    {
+      "seq": 6,
+      "memories": [
+        {
+          "ref": "cue_stripe_1",
+          "entities": [
+            "stripe-integration"
+          ],
+          "content": "Stripe-integration payment event handler design started for the new checkout flow."
+        },
+        {
+          "ref": "cue_stripe_2",
+          "entities": [
+            "stripe-integration"
+          ],
+          "content": "Stripe-integration webhook endpoint moved behind the new auth-gateway proxy."
+        },
+        {
+          "ref": "n6_a",
+          "content": "Marcus filed a ticket to upgrade the CI runners after repeated timeouts."
+        },
+        {
+          "ref": "anchor_s6_u1",
+          "content": "The parking garage validation stickers ran out at the front desk, more are on order."
+        },
+        {
+          "ref": "anchor_s6_u2",
+          "content": "New hire orientation slides need a refresh before next month's cohort starts."
+        },
+        {
+          "ref": "anchor_s6_t1",
+          "content": "Kafka the novel got picked for the office book club's next meeting this month."
+        }
+      ],
+      "intentions": [
+        {
+          "ref": "intent_auth_audit",
+          "cues": [
+            "auth-gateway"
+          ],
+          "content": "Steve needs audit logging turned on before the SOC2 review, not after.",
+          "content_words": [
+            "Steve",
+            "SOC2",
+            "audit logging"
+          ],
+          "one_shot": true,
+          "importance": 0.75
+        }
+      ],
+      "calls": [
+        {
+          "kind": "continuity",
+          "want_ref": "thread3_open",
+          "decoy_ref": "thread3_decoy"
+        },
+        {
+          "kind": "colleague",
+          "label": "kafka_partitions_and_rollback",
+          "context": "Revisiting the Kafka migration topic configuration and the staged cutover plan before we cut over the event pipeline this week.",
+          "context_b": "Double-checking the Kafka migration's per-topic cutover plan and broker settings ahead of the streaming switch.",
+          "want_refs": [
+            "intent_kafka_partitions",
+            "intent_kafka_rollback"
+          ]
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "The parking garage validation stickers ran out at the front desk"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "New hire orientation slides need a refresh before next month's cohort"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Kafka the novel got picked for the office book club this month"
+        }
+      ]
+    },
+    {
+      "seq": 7,
+      "memories": [
+        {
+          "ref": "n7_a",
+          "content": "Nordlys support macros got updated for the new billing error codes."
+        },
+        {
+          "ref": "thread4_open",
+          "entities": [
+            "deploy-freeze"
+          ],
+          "content": "Decision pending: whether the deploy-freeze exception process should require two approvers instead of one, Priya to decide by Monday."
+        },
+        {
+          "ref": "anchor_s7_u1",
+          "content": "The team lunch order got mixed up and half the sandwiches were wrong, restaurant is redoing it."
+        },
+        {
+          "ref": "anchor_s7_u2",
+          "content": "Facilities asked everyone to label items in the shared fridge before Friday's cleanout."
+        },
+        {
+          "ref": "anchor_s7_t1",
+          "content": "Stripe pattern for the new brand color palette came back from the designer for the marketing site."
+        }
+      ],
+      "intentions": [
+        {
+          "ref": "intent_stripe_webhook",
+          "cues": [
+            "stripe-integration"
+          ],
+          "content": "Marcus found Stripe webhooks can arrive out of order, so handlers must be idempotent by event id.",
+          "content_words": [
+            "Marcus",
+            "out of order",
+            "idempotent",
+            "event id"
+          ],
+          "one_shot": true,
+          "importance": 0.75
+        }
+      ],
+      "supersedes": [
+        {
+          "old_ref": "stagingdb_old",
+          "new_ref": "stagingdb_new",
+          "new_content": "Staging Postgres was resized to db.r5.xlarge after last week's load tests showed memory pressure.",
+          "new_entities": [
+            "staging-db"
+          ]
+        }
+      ],
+      "calls": [
+        {
+          "kind": "colleague",
+          "label": "eng_headcount",
+          "context": "Engineering budget planning discussion continues alongside the Series A prep and the burn numbers.",
+          "context_b": "Series A prep and the burn numbers keep coming up in the engineering budget planning discussion.",
+          "want_refs": [
+            "intent_eng_headcount"
+          ]
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "The team lunch order got mixed up and half the sandwiches were wrong"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "Facilities asked everyone to label items in the shared fridge"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Stripe pattern for the new brand color palette came back from the designer"
+        }
+      ]
+    },
+    {
+      "seq": 8,
+      "memories": [
+        {
+          "ref": "n8_a",
+          "content": "Marcus proposed moving the weekly sync to async updates in the shared doc."
+        },
+        {
+          "ref": "thread5_decoy",
+          "entities": [
+            "deploy-freeze"
+          ],
+          "content": "Earlier deploy-freeze question about holiday coverage was settled two weeks ago, no longer open."
+        },
+        {
+          "ref": "anchor_s8_u1",
+          "content": "The printer on the third floor is out of toner again, IT was notified."
+        },
+        {
+          "ref": "anchor_s8_u2",
+          "content": "Someone suggested a book club for the design team, sign-up sheet is in the kitchen."
+        },
+        {
+          "ref": "anchor_s8_t1",
+          "content": "Morale on the Nordlys team has been solid despite the crunch, per the last pulse survey."
+        }
+      ],
+      "intentions": [
+        {
+          "ref": "intent_freeze_exception",
+          "cues": [
+            "deploy-freeze"
+          ],
+          "content": "Steve got a one-time exception approved for the auth-gateway patch during the freeze.",
+          "content_words": [
+            "Steve",
+            "one-time",
+            "approved",
+            "patch"
+          ],
+          "one_shot": true,
+          "importance": 0.7
+        }
+      ],
+      "evolves": [
+        {
+          "old_ref": "ratelimit_old",
+          "new_ref": "ratelimit_new",
+          "new_content": "Auth-gateway rate limit raised to 500 requests per second per tenant after the enterprise complaint.",
+          "reason": "enterprise complaint"
+        }
+      ],
+      "calls": [
+        {
+          "kind": "continuity",
+          "want_ref": "thread4_open"
+        },
+        {
+          "kind": "colleague",
+          "label": "deploy_freeze_process",
+          "context": "Deploy-freeze exception process questions keep coming up as we plan this week's urgent change.",
+          "context_b": "This week's urgent change is raising deploy-freeze exception process questions again.",
+          "want_refs": [
+            "intent_deploy_process"
+          ]
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "The printer on the third floor is out of toner again"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "Someone suggested a book club for the design team"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Morale on the Nordlys team has been solid despite the crunch"
+        }
+      ]
+    },
+    {
+      "seq": 9,
+      "memories": [
+        {
+          "ref": "n9_a",
+          "content": "Priya published the updated on-call escalation doc for the billing team."
+        },
+        {
+          "ref": "thread5_open",
+          "entities": [
+            "deploy-freeze"
+          ],
+          "content": "Decision pending: Priya still hasn't decided whether the freeze exception process needs two approvers, waiting on one more data point from this week's incident."
+        },
+        {
+          "ref": "anchor_s9_u1",
+          "content": "The company holiday party date got moved to the second week of December, save the date."
+        },
+        {
+          "ref": "anchor_s9_u2",
+          "content": "IT ticket queue backed up after the VPN certificate rotation, expect delays."
+        },
+        {
+          "ref": "anchor_s9_t1",
+          "content": "Billing address typo in the invoice template confused a customer, support flagged it for a fix."
+        }
+      ],
+      "supersedes": [
+        {
+          "old_ref": "freeze_old",
+          "new_ref": "freeze_new",
+          "new_content": "Deploy freeze lifted, normal release cadence resumed for the November window.",
+          "new_entities": [
+            "freeze-window"
+          ]
+        }
+      ],
+      "evolves": [
+        {
+          "old_ref": "review_old",
+          "new_ref": "review_new",
+          "new_content": "PR review policy now requires one approval plus a green CI run before merge.",
+          "reason": "process simplification"
+        }
+      ],
+      "invalidate": [
+        {
+          "ref": "freeze_old"
+        }
+      ],
+      "calls": [
+        {
+          "kind": "colleague",
+          "label": "billing_cutover_and_oncall",
+          "context": "Sequencing which pieces of the billing-service migration plan move first, and finalizing the cutover order for the payment components.",
+          "context_b": "Finalizing the cutover order for the billing-service migration's payment components, sequencing which pieces move first.",
+          "want_refs": [
+            "intent_billing_cutover",
+            "intent_billing_oncall"
+          ]
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "The company holiday party date got moved to the second week of December"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "IT ticket queue backed up after the VPN certificate rotation"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Billing address typo in the invoice template confused a customer"
+        }
+      ]
+    },
+    {
+      "seq": 10,
+      "memories": [
+        {
+          "ref": "n10_a",
+          "content": "Nordlys support team ran a dry run of the new escalation macros."
+        },
+        {
+          "ref": "anchor_s10_u1",
+          "content": "The gym membership discount program got extended for another year, HR sent the new signup link."
+        },
+        {
+          "ref": "anchor_s10_u2",
+          "content": "Someone found a stray umbrella in the stairwell, it's been sitting at the front desk for a week."
+        },
+        {
+          "ref": "anchor_s10_t1",
+          "content": "Auth error in the mobile app login screen turned out to be a stale cached token on the client side."
+        }
+      ],
+      "evolves": [
+        {
+          "old_ref": "support_old",
+          "new_ref": "support_new",
+          "new_content": "Priya is now the primary support-rotation contact for customer escalations this month.",
+          "reason": "rotation handoff"
+        }
+      ],
+      "invalidate": [
+        {
+          "ref": "audit_old"
+        }
+      ],
+      "supersedes": [
+        {
+          "old_ref": "audit_old",
+          "new_ref": "audit_new",
+          "new_content": "MFA policy adopted for all admin accounts, the SOC2 pre-audit item is closed.",
+          "new_entities": [
+            "security-audit"
+          ]
+        }
+      ],
+      "calls": [
+        {
+          "kind": "continuity",
+          "want_ref": "thread5_open",
+          "decoy_ref": "thread5_decoy"
+        },
+        {
+          "kind": "colleague",
+          "label": "auth_limits_and_audit",
+          "context": "Auth-gateway config review covers tenant limits and connection ceilings ahead of the enterprise rollout.",
+          "context_b": "Tenant limits and connection ceilings for auth-gateway, reviewed ahead of the enterprise rollout.",
+          "want_refs": [
+            "intent_auth_limits",
+            "intent_auth_audit"
+          ]
+        },
+        {
+          "kind": "currency",
+          "label": "runway_neutral",
+          "context": "What's our runway now that the bridge round closed and the finance model was updated?",
+          "context_b": "Where do we stand on runway after the bridge round closed and the finance model update?",
+          "current_ref": "runway_new",
+          "stale_ref": "runway_old",
+          "phrasing": "neutral"
+        },
+        {
+          "kind": "currency",
+          "label": "runway_stale",
+          "context": "Runway was 8 months as of the March board close, per the finance model \u2014 is that right?",
+          "context_b": "Double-checking that March runway 8 months figure from the finance model is still the one to use.",
+          "current_ref": "runway_new",
+          "stale_ref": "runway_old",
+          "phrasing": "stale"
+        },
+        {
+          "kind": "currency_asof",
+          "label": "runway_asof",
+          "context": "What was our runway as of the March board close, per the finance model?",
+          "before": "new:runway_new",
+          "want_ref": "runway_old"
+        },
+        {
+          "kind": "currency",
+          "label": "oncall_neutral",
+          "context": "Who's primary on-call for billing-service after Marcus rotated off this week?",
+          "context_b": "Who took over primary on-call for billing-service after Marcus rotated off?",
+          "current_ref": "oncall_new",
+          "stale_ref": "oncall_old",
+          "phrasing": "neutral"
+        },
+        {
+          "kind": "currency",
+          "label": "oncall_stale",
+          "context": "Marcus is primary on-call for billing-service this sprint, and Priya is backup \u2014 is that right?",
+          "context_b": "Marcus is still primary on-call for billing-service this sprint with Priya backing up, correct?",
+          "current_ref": "oncall_new",
+          "stale_ref": "oncall_old",
+          "phrasing": "stale"
+        },
+        {
+          "kind": "currency",
+          "label": "stagingdb_neutral",
+          "context": "What size was staging Postgres resized to after last week's load tests showed memory pressure?",
+          "context_b": "What instance size did staging Postgres get resized to after the load-test memory pressure?",
+          "current_ref": "stagingdb_new",
+          "stale_ref": "stagingdb_old",
+          "phrasing": "neutral"
+        },
+        {
+          "kind": "currency",
+          "label": "stagingdb_stale",
+          "context": "Staging Postgres instance is sized at db.r5.large for the load-test environment \u2014 still accurate?",
+          "context_b": "db.r5.large is still the staging Postgres instance size for the load-test environment, correct?",
+          "current_ref": "stagingdb_new",
+          "stale_ref": "stagingdb_old",
+          "phrasing": "stale"
+        },
+        {
+          "kind": "currency",
+          "label": "ratelimit_neutral",
+          "context": "What was the auth-gateway rate limit raised to per tenant after the enterprise complaint?",
+          "context_b": "What's the auth-gateway requests-per-second cap after it was raised for the enterprise complaint?",
+          "current_ref": "ratelimit_new",
+          "stale_ref": "ratelimit_old",
+          "phrasing": "neutral"
+        },
+        {
+          "kind": "currency",
+          "label": "ratelimit_stale",
+          "context": "Auth-gateway rate limit is configured at 200 requests per second per tenant \u2014 still correct?",
+          "context_b": "200 requests per second per tenant is still the auth-gateway rate limit configuration, right?",
+          "current_ref": "ratelimit_new",
+          "stale_ref": "ratelimit_old",
+          "phrasing": "stale"
+        },
+        {
+          "kind": "currency_asof",
+          "label": "ratelimit_asof",
+          "context": "What was the auth-gateway rate limit configured at, at 200 requests per second per tenant, before it changed?",
+          "before": "new:ratelimit_new",
+          "want_ref": "ratelimit_old"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "The gym membership discount program got extended for another year"
+        },
+        {
+          "kind": "silence_unrelated",
+          "context": "Someone found a stray umbrella in the stairwell for a week"
+        },
+        {
+          "kind": "silence_trap",
+          "context": "Auth error in the mobile app login screen turned out to be a stale cached token"
+        }
+      ]
+    },
+    {
+      "seq": 11,
+      "memories": [
+        {
+          "ref": "n11_a",
+          "content": "Nordlys finance model got reconciled against the new bridge terms."
+        },
+        {
+          "ref": "thread6_open",
+          "entities": [
+            "nordlys-launch"
+          ],
+          "content": "Decision pending: whether the Nordlys launch announcement goes out the morning of the 15th or the evening before, marketing waiting on Priya's call."
+        }
+      ],
+      "calls": [
+        {
+          "kind": "colleague",
+          "label": "investor_cadence",
+          "context": "Prepping the next investor-relations update with the latest burn chart for the board meeting.",
+          "context_b": "The board meeting is coming up, so the investor-relations update and burn chart need prepping.",
+          "want_refs": [
+            "intent_investor_cadence"
+          ]
+        },
+        {
+          "kind": "colleague",
+          "label": "stripe_webhook",
+          "context": "Stripe-integration payment event handler design work continues for the new checkout flow, now behind the auth-gateway proxy.",
+          "context_b": "The Stripe-integration webhook endpoint work behind the auth-gateway proxy continues for the new checkout flow.",
+          "want_refs": [
+            "intent_stripe_webhook"
+          ]
+        },
+        {
+          "kind": "currency",
+          "label": "review_neutral",
+          "context": "Does PR review policy now require one approval plus a green CI run before merge?",
+          "context_b": "How many approvals plus a green CI run does a PR need to merge now?",
+          "current_ref": "review_new",
+          "stale_ref": "review_old",
+          "phrasing": "neutral"
+        },
+        {
+          "kind": "currency",
+          "label": "review_stale",
+          "context": "PR review policy requires two approvals before merge on every service \u2014 still the rule?",
+          "context_b": "Two approvals before merge is still the PR review policy on every service, correct?",
+          "current_ref": "review_new",
+          "stale_ref": "review_old",
+          "phrasing": "stale"
+        },
+        {
+          "kind": "currency",
+          "label": "support_neutral",
+          "context": "Is Priya now the primary support-rotation contact for customer escalations this month?",
+          "context_b": "Who's the primary support-rotation contact for customer escalations this month now?",
+          "current_ref": "support_new",
+          "stale_ref": "support_old",
+          "phrasing": "neutral"
+        },
+        {
+          "kind": "currency",
+          "label": "support_stale",
+          "context": "Marcus is the primary support-rotation contact for customer escalations this month \u2014 still current?",
+          "context_b": "Marcus is still the primary support-rotation contact for customer escalations this month, right?",
+          "current_ref": "support_new",
+          "stale_ref": "support_old",
+          "phrasing": "stale"
+        },
+        {
+          "kind": "currency",
+          "label": "freeze_neutral",
+          "context": "Has the deploy freeze lifted with normal release cadence resumed for the November window?",
+          "context_b": "Is normal release cadence resumed now that the deploy freeze lifted for the November window?",
+          "current_ref": "freeze_new",
+          "stale_ref": "freeze_old",
+          "phrasing": "neutral"
+        },
+        {
+          "kind": "currency",
+          "label": "freeze_stale",
+          "context": "A deploy freeze is in effect for the November release window while the infra team stabilizes the cluster \u2014 still true?",
+          "context_b": "The November release window is still under a deploy freeze while infra stabilizes the cluster, correct?",
+          "current_ref": "freeze_new",
+          "stale_ref": "freeze_old",
+          "phrasing": "stale"
+        },
+        {
+          "kind": "currency_asof",
+          "label": "freeze_asof",
+          "context": "Was a deploy freeze in effect for the November release window while the infra team stabilizes the cluster, at that point?",
+          "before": "stamp:freeze_old",
+          "want_ref": "freeze_old"
+        },
+        {
+          "kind": "currency",
+          "label": "audit_neutral",
+          "context": "Has MFA policy been adopted for all admin accounts, closing the SOC2 pre-audit item?",
+          "context_b": "Is the SOC2 pre-audit item closed now that MFA policy was adopted for admin accounts?",
+          "current_ref": "audit_new",
+          "stale_ref": "audit_old",
+          "phrasing": "neutral"
+        },
+        {
+          "kind": "currency",
+          "label": "audit_stale",
+          "context": "SOC2 pre-audit flagged a missing MFA policy for admin accounts \u2014 still open?",
+          "context_b": "The missing-MFA-policy SOC2 pre-audit finding for admin accounts is still open, right?",
+          "current_ref": "audit_new",
+          "stale_ref": "audit_old",
+          "phrasing": "stale"
+        }
+      ]
+    },
+    {
+      "seq": 12,
+      "memories": [
+        {
+          "ref": "n12_a",
+          "content": "Nordlys retro wrapped the six-week project with a short lessons-learned doc."
+        }
+      ],
+      "calls": [
+        {
+          "kind": "continuity",
+          "want_ref": "thread6_open"
+        },
+        {
+          "kind": "colleague",
+          "label": "nordlys_launch_date",
+          "context": "Nordlys-launch checklist and date review are back on the agenda with marketing and support readiness items.",
+          "context_b": "Marketing and support readiness items are driving this round of the Nordlys-launch checklist and date review.",
+          "want_refs": [
+            "intent_launch_date"
+          ]
+        },
+        {
+          "kind": "colleague",
+          "label": "deploy_freeze_exception_granted",
+          "context": "Checking what's still allowed to ship this week under the current deploy-freeze policy and exception rules.",
+          "context_b": "Confirming what's still cleared to ship this week under the current deploy-freeze policy and exception rules.",
+          "want_refs": [
+            "intent_freeze_exception"
+          ]
+        }
+      ]
+    }
+  ]
+}
