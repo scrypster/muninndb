@@ -971,6 +971,27 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"id", "trust"},
 			},
 		},
+		// In-place retag: metadata only, no new version.
+		{
+			Name:        "muninn_update_tags",
+			Description: "Replace an engram's full tag set IN PLACE. The ID, version lineage, and access history are preserved — unlike muninn_evolve, which mints a new ULID and archives the predecessor. This is the tool for mutable tag conventions such as due:<ISO-date> or status:<value>. The tags given REPLACE the existing set entirely; pass an empty array to clear all tags. To change content and tags together, call muninn_evolve first and then this tool on the new id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"id": map[string]any{
+						"type":        "string",
+						"description": "ULID of the engram to retag",
+					},
+					"tags": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "The complete replacement tag set (max 50, each up to 128 chars). An empty array clears all tags.",
+					},
+				},
+				"required": []string{"id", "tags"},
+			},
+		},
 		// THE PUSH: prospective memory — arm an intention on entity cues.
 		{
 			Name:        "muninn_intend",

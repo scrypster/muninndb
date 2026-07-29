@@ -177,6 +177,7 @@ func isMutatingTool(name string) bool {
 		"muninn_replay_enrichment",
 		"muninn_feedback",
 		"muninn_trust",
+		"muninn_update_tags",
 		"muninn_compare_and_set",
 		"muninn_claim",
 		"muninn_release",

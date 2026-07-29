@@ -342,6 +342,9 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		// Trust label
 		"muninn_trust": s.handleSetTrust,
 
+		// In-place retag (#720)
+		"muninn_update_tags": s.handleUpdateTags,
+
 		// RFC #597: privileged workflow-vault creation (recursion-guarded above).
 		"muninn_create_workflow_vault": s.handleCreateWorkflowVault,
 
@@ -395,7 +398,7 @@ func registeredToolNames() []string {
 		"muninn_similar_entities", "muninn_merge_entity", "muninn_entity_timeline",
 		"muninn_replay_enrichment", "muninn_provenance", "muninn_feedback",
 		"muninn_entity", "muninn_entities",
-		"muninn_trust",
+		"muninn_trust", "muninn_update_tags",
 		"muninn_compare_and_set", "muninn_claim", "muninn_release",
 		"muninn_create_workflow_vault",
 		"muninn_intend",

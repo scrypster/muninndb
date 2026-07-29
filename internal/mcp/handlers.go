@@ -87,6 +87,25 @@ func parseEmbeddingArg(args map[string]any) ([]float32, string) {
 	return embedding, ""
 }
 
+// normalizeTags coerces a raw MCP `tags` argument into the canonical tag set:
+// non-strings, empty strings, and tags longer than 128 characters are skipped,
+// and the set is capped at 50. Shared by muninn_remember, muninn_remember_batch,
+// and muninn_update_tags so a tag set applied on update obeys exactly the same
+// rules as one applied at creation — otherwise evolve's tag inheritance could
+// carry forward a set muninn_remember could never have created (#720).
+func normalizeTags(raw []any) []string {
+	var tags []string
+	for _, t := range raw {
+		if tag, ok := t.(string); ok && len(tag) > 0 && len(tag) <= 128 {
+			tags = append(tags, tag)
+		}
+	}
+	if len(tags) > 50 {
+		tags = tags[:50]
+	}
+	return tags
+}
+
 func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	opID, _ := args["op_id"].(string)
 	if opID != "" {
@@ -123,14 +142,7 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		req.Concept = c
 	}
 	if tags, ok := args["tags"].([]any); ok {
-		for _, t := range tags {
-			if s, ok := t.(string); ok && len(s) > 0 && len(s) <= 128 {
-				req.Tags = append(req.Tags, s)
-			}
-		}
-		if len(req.Tags) > 50 {
-			req.Tags = req.Tags[:50]
-		}
+		req.Tags = normalizeTags(tags)
 	}
 	if conf, ok := args["confidence"].(float64); ok {
 		if conf < 0 {
@@ -235,14 +247,7 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			req.Concept = c
 		}
 		if tags, ok := m["tags"].([]any); ok {
-			for _, t := range tags {
-				if s, ok := t.(string); ok && len(s) > 0 && len(s) <= 128 {
-					req.Tags = append(req.Tags, s)
-				}
-			}
-			if len(req.Tags) > 50 {
-				req.Tags = req.Tags[:50]
-			}
+			req.Tags = normalizeTags(tags)
 		}
 		if conf, ok := m["confidence"].(float64); ok {
 			if conf < 0 {
@@ -2119,6 +2124,39 @@ func (s *MCPServer) handleSetTrust(ctx context.Context, w http.ResponseWriter, i
 		"trust": trustStr,
 		"ok":    true,
 	})))
+}
+
+// handleUpdateTags replaces an engram's full tag set IN PLACE. Unlike
+// muninn_evolve — which mints a new ULID and archives the predecessor — the
+// ID, version lineage, and access history are preserved, which is the whole
+// reason this tool exists rather than a `tags` argument on evolve (#720).
+func (s *MCPServer) handleUpdateTags(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok := args["id"].(string)
+	if !ok || engramID == "" {
+		sendError(w, id, -32602, "invalid params: 'id' is required")
+		return
+	}
+	rawTags, present := args["tags"]
+	if !present || rawTags == nil {
+		sendError(w, id, -32602, "invalid params: 'tags' is required (pass an empty array to clear all tags)")
+		return
+	}
+	tagsAny, ok := rawTags.([]any)
+	if !ok {
+		sendError(w, id, -32602, "invalid params: 'tags' must be an array of strings")
+		return
+	}
+	tags := normalizeTags(tagsAny)
+	if tags == nil {
+		// REST coerces a nil body field to []string{}; clear-all sends an empty
+		// set, not nil, and the response payload renders [] rather than null.
+		tags = []string{}
+	}
+	if err := s.engine.UpdateTags(ctx, vault, engramID, tags); err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{"id": engramID, "tags": tags, "ok": true})))
 }
 
 func (s *MCPServer) handleCompareAndSet(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {

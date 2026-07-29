@@ -305,6 +305,7 @@ func TestIsMutatingTool_MutatingSet(t *testing.T) {
 		"muninn_consolidate", "muninn_decide", "muninn_restore",
 		"muninn_retry_enrich", "muninn_entity_state", "muninn_entity_state_batch",
 		"muninn_merge_entity", "muninn_replay_enrichment", "muninn_feedback",
+		"muninn_update_tags",
 	}
 	for _, name := range mutating {
 		if !isMutatingTool(name) {
