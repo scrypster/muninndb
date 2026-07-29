@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -280,11 +281,44 @@ func loadSentienceScenario(t *testing.T) sfsScenario {
 // false-notice count too (no notices computed at all means none can leak).
 func runSentienceHarness(t *testing.T, pushEnabled bool) *sfsResult {
 	t.Helper()
-	eng, cleanup := testEnv(t)
+	return runSentienceHarnessGen(t, pushEnabled, testEnv, nil)
+}
+
+// runSentienceHarnessGen is runSentienceHarness generalized over the engine
+// environment constructor and an optional write-time embedder. newEnv is
+// testEnv (noop embedder, nil vector index) for the original measurement, or
+// testEnvSemantic (real bge-small embedder + real HNSW index, localassets-
+// gated) for the honest re-measure. embedForWrites, when non-nil, is used to
+// compute a real embedding for every written memory (filler, session
+// memories, supersede targets, evolve successors) and pass it through the
+// client-supplied-embedding path (WriteRequest.Embedding / Evolve's embedding
+// param) that inserts into HNSW inline — the same path production already
+// exercises for pre-embedded content (#582). nil reproduces the exact
+// original behavior (no embedding ever passed, matching a nil HNSWRegistry).
+//
+// Intentions (eng.Intend) deliberately do NOT get an embedding: their arming
+// mechanism is cue-ENTITY overlap (NoticesForRecall scans engram entities off
+// the results Activate already ranked — see prospective.go), not vector
+// similarity of the intention's own content, so it is not part of what this
+// fix needs to wire.
+func runSentienceHarnessGen(t *testing.T, pushEnabled bool, newEnv func(t *testing.T) (*Engine, func()), embedForWrites activation.Embedder) *sfsResult {
+	t.Helper()
+	eng, cleanup := newEnv(t)
 	defer cleanup()
 	ctx := context.Background()
 	const vault = "sentience-gate-vault"
 	ws := eng.store.ResolveVaultPrefix(vault)
+
+	embedText := func(text string) []float32 {
+		if embedForWrites == nil {
+			return nil
+		}
+		vec, err := embedForWrites.Embed(ctx, []string{text})
+		if err != nil {
+			t.Fatalf("embed write text %q: %v", text, err)
+		}
+		return vec
+	}
 
 	sc := loadSentienceScenario(t)
 	res := &sfsResult{}
@@ -293,9 +327,11 @@ func runSentienceHarness(t *testing.T, pushEnabled bool) *sfsResult {
 	// call from session 1 onward (a real vault already has history before
 	// the project narrative it's about to learn starts).
 	for i := 0; i < sc.FillerCount; i++ {
+		content := fmt.Sprintf("ledger item %d bookkeeping sequence %d misc admin note", i, i*7)
 		if _, err := eng.Write(ctx, &mbp.WriteRequest{
-			Vault:   vault,
-			Content: fmt.Sprintf("ledger item %d bookkeeping sequence %d misc admin note", i, i*7),
+			Vault:     vault,
+			Content:   content,
+			Embedding: embedText(content),
 		}); err != nil {
 			t.Fatalf("seed filler %d: %v", i, err)
 		}
@@ -321,6 +357,7 @@ func runSentienceHarness(t *testing.T, pushEnabled bool) *sfsResult {
 		}
 		resp, err := eng.Write(ctx, &mbp.WriteRequest{
 			Vault: vault, Concept: m.Concept, Content: m.Content, Entities: ents,
+			Embedding: embedText(m.Content),
 		})
 		if err != nil {
 			t.Fatalf("seed memory %q: %v", m.Ref, err)
@@ -605,7 +642,7 @@ func runSentienceHarness(t *testing.T, pushEnabled bool) *sfsResult {
 		}
 		for _, ev := range sess.Evolves {
 			checkpoints["new:"+ev.NewRef] = time.Now()
-			newID, err := eng.Evolve(ctx, vault, resolveRef(ev.OldRef), ev.NewContent, ev.Reason, nil, ev.NewConcept)
+			newID, err := eng.Evolve(ctx, vault, resolveRef(ev.OldRef), ev.NewContent, ev.Reason, embedText(ev.NewContent), ev.NewConcept)
 			if err != nil {
 				t.Fatalf("Evolve[%s->%s]: %v", ev.OldRef, ev.NewRef, err)
 			}
