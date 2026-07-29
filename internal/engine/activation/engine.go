@@ -1836,10 +1836,7 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 	// #711 this applied math.Tanh() to squash raw unbounded BM25 into [0,1];
 	// that saturated by x≈3 (real BM25 magnitudes ran 2-40), making a single
 	// common-word match indistinguishable from a genuine multi-term match.
-	// Defensive clamp: fts.Index.Search guarantees [0,1], but clamp here so the
-	// [0,1] invariant is structural — a future/synthetic ftsScore producer can
-	// never feed a raw value into the blend (COG-24).
-	normalizedFTS := math.Max(0, math.Min(1, ftsScore))
+	normalizedFTS := ftsScore
 
 	raw := w.SemanticSimilarity*vectorScore +
 		w.FullTextRelevance*normalizedFTS +
@@ -1939,9 +1936,8 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 
 	// Compute content relevance (same as standard path). ftsScore is already a
 	// calibrated, absolute [0,1] coverage score (see fts.Index.Search, COG-24) —
-	// no tanh normalization needed post-#711. Defensive clamp so the [0,1]
-	// invariant is structural for any future/synthetic ftsScore producer (COG-24).
-	normalizedFTS := math.Max(0, math.Min(1, ftsScore))
+	// no tanh normalization needed post-#711.
+	normalizedFTS := ftsScore
 	contentMatch := w.SemanticSimilarity*vectorScore + w.FullTextRelevance*normalizedFTS
 
 	// COG-5 amendment (S1): candidates that matched an explicit tag filter
