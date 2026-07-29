@@ -96,6 +96,19 @@ Distilled from real decisions across the project's history (each traced to its P
 10. **Honest negative results and scope discipline are first-class.** #609 reported that
     ambient-push memory had zero uptake and killed the idea — that's valued, not dismissed.
 
+11. **Calibration is per-vault and self-derived, never hardcoded from one dataset.** A
+    threshold, baseline, or vocabulary a feature needs must be derived from each vault's OWN
+    data (self-calibrating, like #711's per-corpus IDF) or exposed as a per-vault override —
+    with model/cold-start defaults as hints only, never fixed constants that define someone
+    else's data for them. A number tuned on one sample vault imposes that vault's shape on
+    every other (a code vault versions with git SHAs; a notes app has no version tags; a
+    medical vault is different again) where it is wrong or a silent no-op. A sample vault
+    (e.g. a maintainer's own) is for FINDING bugs and VALIDATING generalization on messy real
+    data — never for tuning a constant into the product. Everyone calibrates their own vault;
+    we ship mechanisms and hints, not their answers. (The semantic-abstention floor self-
+    measures each vault's embedding-anisotropy baseline instead of shipping bge-small's; #712
+    currency was held partly because its version-marker vocabulary was one-vault-specific.)
+
 ---
 
 ## 3. How we work
