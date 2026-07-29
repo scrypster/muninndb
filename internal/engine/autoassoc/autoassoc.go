@@ -130,15 +130,25 @@ func (w *Worker) GetMetrics() (enqueued, completed, dropped, errors int64) {
 func (w *Worker) run() {
 	defer w.wg.Done()
 	for job := range w.jobs {
-		ctx, cancel := context.WithTimeout(w.stopCtx, JobTimeout)
-		if err := w.processJob(ctx, job); err != nil {
-			w.metrics.Errors.Add(1)
-			slog.Warn("autoassoc job failed", "err", err)
-		} else {
-			w.metrics.Completed.Add(1)
-		}
-		cancel()
-		w.jobWG.Done()
+		w.runJob(job)
+	}
+}
+
+// runJob processes a single job. Done() and cancel() are deferred (rather
+// than called as plain statements after processJob returns) so they still
+// fire if processJob ever panics — otherwise a panicking job would leak an
+// un-Done() jobWG entry and hang a subsequent WaitIdle() forever. This does
+// not add a recover(): a panic still propagates and crashes the process,
+// it only makes the bookkeeping robust if one unwinds through here.
+func (w *Worker) runJob(job Job) {
+	defer w.jobWG.Done()
+	ctx, cancel := context.WithTimeout(w.stopCtx, JobTimeout)
+	defer cancel()
+	if err := w.processJob(ctx, job); err != nil {
+		w.metrics.Errors.Add(1)
+		slog.Warn("autoassoc job failed", "err", err)
+	} else {
+		w.metrics.Completed.Add(1)
 	}
 }
 

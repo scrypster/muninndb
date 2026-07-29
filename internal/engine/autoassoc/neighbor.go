@@ -123,15 +123,25 @@ func (w *NeighborWorker) GetNeighborMetrics() (enqueued, completed, dropped, err
 func (w *NeighborWorker) run() {
 	defer w.wg.Done()
 	for job := range w.jobs {
-		ctx, cancel := context.WithTimeout(w.stopCtx, neighborJobTimeout)
-		if err := w.processNeighborJob(ctx, job); err != nil {
-			w.metrics.Errors.Add(1)
-			slog.Warn("neighbor worker job failed", "err", err)
-		} else {
-			w.metrics.Completed.Add(1)
-		}
-		cancel()
-		w.jobWG.Done()
+		w.runJob(job)
+	}
+}
+
+// runJob processes a single job. Done() and cancel() are deferred (rather
+// than called as plain statements after processNeighborJob returns) so they
+// still fire if the job ever panics — otherwise a panicking job would leak
+// an un-Done() jobWG entry and hang a subsequent WaitIdle() forever. This
+// does not add a recover(): a panic still propagates and crashes the
+// process, it only makes the bookkeeping robust if one unwinds through here.
+func (w *NeighborWorker) runJob(job NeighborJob) {
+	defer w.jobWG.Done()
+	ctx, cancel := context.WithTimeout(w.stopCtx, neighborJobTimeout)
+	defer cancel()
+	if err := w.processNeighborJob(ctx, job); err != nil {
+		w.metrics.Errors.Add(1)
+		slog.Warn("neighbor worker job failed", "err", err)
+	} else {
+		w.metrics.Completed.Add(1)
 	}
 }
 

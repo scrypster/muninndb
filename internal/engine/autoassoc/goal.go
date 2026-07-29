@@ -92,11 +92,17 @@ func (w *GoalLinkWorker) run() {
 	defer w.wg.Done()
 	for job := range w.jobs {
 		w.process(job)
-		w.jobWG.Done()
 	}
 }
 
+// process handles a single job. jobWG.Done() is deferred here (rather than
+// called as a plain statement in run() after process returns) so it still
+// fires if process ever panics — otherwise a panicking job would leak an
+// un-Done() jobWG entry and hang a subsequent WaitIdle() forever. This does
+// not add a recover(): a panic still propagates and crashes the process, it
+// only makes the bookkeeping robust if one unwinds through here.
 func (w *GoalLinkWorker) process(job GoalJob) {
+	defer w.jobWG.Done()
 	if w.hnsw == nil {
 		slog.Warn("goal_link: hnsw index not initialized, skipping", "id", storage.ULID(job.ID).String())
 		return
