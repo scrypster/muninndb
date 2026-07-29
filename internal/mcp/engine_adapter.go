@@ -64,6 +64,20 @@ func (a *mcpEngineAdapter) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp
 func (a *mcpEngineAdapter) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatResponse, error) {
 	return a.eng.Stat(ctx, req)
 }
+
+// THE PUSH increment 1: prospective memory. These satisfy the optional
+// prospectiveCapable interface consulted by muninn_intend and the notices
+// path on recall/remember.
+func (a *mcpEngineAdapter) Intend(ctx context.Context, vault, content string, cues []string, validUntil *time.Time, oneShot bool, importance *float32) (string, error) {
+	return a.eng.Intend(ctx, vault, content, cues, validUntil, oneShot, importance)
+}
+func (a *mcpEngineAdapter) NoticesForRecall(ctx context.Context, vault string, results []engine.ScoredResult, sessionSeen func(string) bool, readOnly bool) ([]engine.Notice, error) {
+	return a.eng.NoticesForRecall(ctx, vault, results, sessionSeen, readOnly)
+}
+func (a *mcpEngineAdapter) NoticesForRemember(ctx context.Context, vault string, focal []string, createdID string, sessionSeen func(string) bool) ([]engine.Notice, error) {
+	return a.eng.NoticesForRemember(ctx, vault, focal, createdID, sessionSeen)
+}
+
 func (a *mcpEngineAdapter) GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error) {
 	pairs, err := a.eng.GetContradictions(ctx, vault)
 	if err != nil {

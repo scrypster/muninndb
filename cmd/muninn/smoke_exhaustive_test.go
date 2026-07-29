@@ -57,6 +57,7 @@ var allMCPTools = []string{
 	"muninn_entity_timeline",
 	"muninn_feedback",
 	"muninn_trust",
+	"muninn_intend",
 	"muninn_entity",
 	"muninn_entities",
 }

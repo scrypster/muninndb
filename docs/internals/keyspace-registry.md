@@ -67,6 +67,7 @@ prefix — see the vault-reuse note at the bottom).
 | **0x2A** | ws+ulid | JSON Lease{owner,heartbeat,ttl} | ownership-lease sidecar (advisory) |
 | 0x2B | ws | 1B repair version | evolve entity-link repair watermark (#622); presence at current version skips the startup scan |
 | **0x2C** | ws+Hash(tagKey)(4)+value+0x00+id(16) | — | **ordered raw-tag-range index (S1).** Distinct from 0x0C: keys on `Hash(tagKey)` (the part before the first `:`) with the raw VALUE bytes sorted after it, so a bounded range scan (e.g. `due:<=2026-07-27`) is a real Pebble range scan, not a post-hoc filter. Only tags containing `:` get an entry (gates write-amp to key:value tag conventions). The `0x00` separator after value resolves prefix-of-each-other values ("2026" < "2026-07" because `0x00 < '-'`). A tag value containing a `0x00` byte is rejected at write time (`storage.WriteRawTagIndexEntry`). Hash collisions between two distinct tag keys make their ranges interleave — phase-6 `passesMetaFilter` re-checks the real tag, so correctness holds and only perf degrades, mirroring 0x0C's own collision tolerance. Maintained at every 0x0C write/delete site (`internal/storage/batch.go`, `impl.go`, `engram.go`); backfilled for pre-existing data by migration v4 (`internal/storage/migrate/v4_raw_tag_range.go`). Seeds activation candidates via `ActivationEngine.seedTagCandidates`/`ScanRawTagRange` for `tag_prefix` filters with `lte`/`gte`/`lt`/`gt`/`eq`, instead of only being checked in phase 6. |
+| **0x2D** | ws+EntityNameHash(cue)(8)+intentionID(16) | msgpack {one_shot, created_at, fired_count, last_fired_at, cues[]} | **armed-intention index (THE PUSH, prospective memory).** One key per (intention, cue entity); `ScanArmedForEntity` is a 17-byte-prefix scan consulted ONLY inside recall/remember tool handlers when the cue entity is focal — nothing polls it. The value duplicates the full cue list across an intention's keys so a one-shot fire deletes every sibling key atomically (`MarkIntentionFired`) and entity-merge can rewrite stale cue names (`RelinkProspectiveIntent`, mirroring the 0x26 relink; called from `MergeEntity`). Cleared by `ClearVault`. NOT exported/cloned (intentions are session-arming state; documented residual). Stale keys for a deleted intention engram are inert — the firing rule re-verifies the engram (exists, active, ValidAt) before delivery. The design doc allocated 0x2C for this index, but 0x2C was taken by RawTagRange (S1) first; 0x2D is the real allocation. |
 
 ## Auth prefixes (`internal/auth/keys.go`)
 
@@ -90,11 +91,12 @@ prefix — see the vault-reuse note at the bottom).
 
 ## Free bytes
 
-`0x2D`–`0x3F` and `0x46`+ are free for new storage/auth keys (0x2B and 0x2C are now
-allocated: 0x2B evolve-repair watermark (#681), 0x2C raw-tag-range index (S1);
+`0x2E`–`0x3F` and `0x46`+ are free for new storage/auth keys (0x2B, 0x2C and 0x2D are now
+allocated: 0x2B evolve-repair watermark (#681), 0x2C raw-tag-range index (S1), 0x2D
+armed-intention index (THE PUSH);
 0x40–0x45 are allocated: 0x40/0x41 capability, 0x42–0x45 auth). (`0x29`/`0x40`/`0x41`
 also appear in `internal/transport/mbp/frame.go` as **wire opcodes**, a different
-keyspace; coincidental, safe, but confusing. Prefer `0x2D+` for new storage prefixes.)
+keyspace; coincidental, safe, but confusing. Prefer `0x2E+` for new storage prefixes.)
 
 ## Live hazards a reviewer must know
 

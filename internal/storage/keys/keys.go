@@ -905,6 +905,40 @@ func LeaseKey(ws [8]byte, id [16]byte) []byte {
 	return key
 }
 
+// ProspectiveIntentKey constructs an armed-intention index key (0x2D prefix,
+// THE PUSH increment 1). One key exists per (intention, cue entity) pair so a
+// focal-entity lookup is a single 17-byte-prefix scan.
+// Key: 0x2D | wsPrefix(8) | EntityNameHash(cue)(8) | intentionID(16) = 33 bytes
+// Value: msgpack prospectiveIntentRecord (internal/storage/prospective.go).
+func ProspectiveIntentKey(ws [8]byte, cueHash [8]byte, intentionID [16]byte) []byte {
+	key := make([]byte, 1+8+8+16)
+	key[0] = prefix.ProspectiveIntent
+	copy(key[1:9], ws[:])
+	copy(key[9:17], cueHash[:])
+	copy(key[17:33], intentionID[:])
+	return key
+}
+
+// ProspectiveIntentPrefix returns the 17-byte scan prefix covering every
+// intention armed on a given cue entity in a vault (0x2D | ws(8) | cueHash(8)).
+func ProspectiveIntentPrefix(ws [8]byte, cueHash [8]byte) []byte {
+	key := make([]byte, 1+8+8)
+	key[0] = prefix.ProspectiveIntent
+	copy(key[1:9], ws[:])
+	copy(key[9:17], cueHash[:])
+	return key
+}
+
+// ProspectiveIntentWorkspacePrefix returns the 9-byte scan prefix covering ALL
+// armed-intention keys in a vault (0x2D | ws(8)). Used by entity-merge relink,
+// which must rewrite stale cue names in every sibling record.
+func ProspectiveIntentWorkspacePrefix(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.ProspectiveIntent
+	copy(key[1:9], ws[:])
+	return key
+}
+
 // EvolveRepairMarkKey constructs the per-vault evolve entity-link repair
 // watermark key (0x2B prefix). Value: one byte, the repair-pass version that
 // last completed cleanly over the vault. Presence at the current version lets

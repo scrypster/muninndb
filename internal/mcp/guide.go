@@ -204,6 +204,15 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- Set it explicitly (e.g. 0.9) for memories that must survive memory pressure: pivotal decisions, hard constraints, identity facts.\n")
 	b.WriteString("- `muninn_evolve` inherits the predecessor's explicit importance unless you override it.\n")
 
+	// Prospective memory (THE PUSH)
+	b.WriteString("\n## Prospective memory (muninn_intend)\n\n")
+	b.WriteString("`muninn_intend(content, cues=[entity, ...])` arms an intention: \"when <cue entity> comes up, surface <content>\". ")
+	b.WriteString("It never interrupts — when a later muninn_recall/muninn_remember is actually about a cue entity, the response carries a `notices` field (max 2, deduped per session). ")
+	b.WriteString("When you see a notice, act on it or acknowledge it to the user; a one-shot intention (default) disarms after delivery, a recurring one can be disarmed with muninn_forget on its id.\n")
+	b.WriteString("- Cues are entity names; pick rare, specific ones (ubiquitous cues are rejected).\n")
+	b.WriteString("- `valid_until` silences an expired intention; it never triggers delivery (there is no scheduler).\n")
+	b.WriteString("- Notice delivery requires the server opt-in `MUNINN_PROSPECTIVE=1`; arming works regardless and delivery starts once enabled.\n")
+
 	// Tips
 	b.WriteString("\n## Tips\n\n")
 	if resolved.MultiUser {

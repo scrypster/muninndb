@@ -10,7 +10,7 @@ package prefix
 
 // Source-of-truth prefix bytes. Storage unchanged; auth RELOCATED 0x11–0x14 → 0x42–0x45.
 const (
-	// Storage (0x01–0x2C)
+	// Storage (0x01–0x2D)
 	Engram             byte = 0x01
 	Meta               byte = 0x02
 	AssocFwd           byte = 0x03
@@ -63,6 +63,13 @@ const (
 	// bounded range scans for key:value tag conventions (e.g. "due:2026-07-27").
 	// See docs/internals/keyspace-registry.md for the exact key layout.
 	RawTagRange byte = 0x2C
+	// ProspectiveIntent (0x2D) — armed-intention index for prospective memory
+	// (THE PUSH increment 1). One key per cue entity:
+	// 0x2D | ws(8) | EntityNameHash(cue)(8) | intentionID(16) = 33 bytes.
+	// Value: msgpack {one_shot, created_at, fired_count, last_fired_at, cues}.
+	// NOTE: the design doc allocated 0x2C, but 0x2C was taken by RawTagRange
+	// (S1) before this landed — 0x2D is the actual allocation.
+	ProspectiveIntent byte = 0x2D
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
 	CapabilityVaultIdx byte = 0x41
@@ -142,6 +149,7 @@ var registry = []Entry{
 	{Lease, "storage", "Lease", "lease"},
 	{EvolveRepairMark, "storage", "EvolveRepairMark", "vault-scoped-data"},
 	{RawTagRange, "storage", "RawTagRange", "vault-scoped-data"},
+	{ProspectiveIntent, "storage", "ProspectiveIntent", "vault-scoped-data"},
 	{Capability, "capability", "Capability", "capability"},
 	{CapabilityVaultIdx, "capability", "CapabilityVaultIdx", "capability"},
 	{AdminUser, "auth", "AdminUser", "auth"},

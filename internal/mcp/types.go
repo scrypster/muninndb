@@ -3,6 +3,8 @@ package mcp
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/engine"
 )
 
 // JSON-RPC 2.0 envelope types
@@ -61,6 +63,10 @@ type WriteResult struct {
 	Concept  string   `json:"concept"`
 	Hint     string   `json:"hint,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// Notices are prospective-memory deliveries (THE PUSH): armed intentions
+	// whose cue entity is focal in this write's inline entities. Omitted when
+	// empty (zero token cost) and inert unless MUNINN_PROSPECTIVE=1.
+	Notices []engine.Notice `json:"notices,omitempty"`
 }
 
 type Memory struct {

@@ -196,6 +196,10 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		}
 		result.Hint += fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformed)
 	}
+	// THE PUSH: prospective notices — focal set is the caller-supplied inline
+	// entities; the created engram is the self-echo guard. Inert unless
+	// MUNINN_PROSPECTIVE=1.
+	result.Notices = s.rememberNotices(ctx, vault, req.Entities, resp.ID)
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 
@@ -554,6 +558,12 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	result := map[string]any{
 		"memories": memories,
 		"total":    resp.TotalFound,
+	}
+	// THE PUSH: prospective notices — focal set derives from the RETURNED
+	// results; readOnly (COG-11) suppresses the fired-marker write. Omitted
+	// when empty; inert unless MUNINN_PROSPECTIVE=1.
+	if notices := s.recallNotices(ctx, vault, resp.Activations, readOnly); len(notices) > 0 {
+		result["notices"] = notices
 	}
 	if len(memories) == 0 {
 		hint := "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."

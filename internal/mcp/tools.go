@@ -971,6 +971,27 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"id", "trust"},
 			},
 		},
+		// THE PUSH: prospective memory — arm an intention on entity cues.
+		{
+			Name:        "muninn_intend",
+			Description: "Arm a prospective intention: 'when <cue entity> comes up, surface <content>'. Stored as a goal memory and armed on one or more cue entities. It NEVER interrupts — it is delivered as a 'notices' field on a later muninn_recall/muninn_remember response whose results are actually about the cue entity (requires MUNINN_PROSPECTIVE=1 on the server). Cues must be specific: an entity mentioned by a large share of the vault is refused. valid_until only silences an expired intention; it never triggers delivery.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":   vaultProp,
+					"content": map[string]any{"type": "string", "description": "What to surface when a cue entity becomes focal (delivered verbatim in the notice)."},
+					"cues": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Entity names to arm on (1-8). The intention fires when one of these entities is focal in a later call's results. Prefer rare, specific entities; ubiquitous ones are rejected.",
+					},
+					"valid_until": map[string]any{"type": "string", "description": "ISO 8601 expiry. A BOUND, not a trigger: after this instant the intention is silenced, never fired. Optional."},
+					"one_shot":    map[string]any{"type": "boolean", "description": "When true (default) the intention disarms after its first delivery. Set false for a recurring prompt (re-fires once per session while armed)."},
+					"importance":  map[string]any{"type": "number", "description": "Priority in [0,1]; ranks this notice against others when more than 2 are eligible (default: goal-type derived 0.6)."},
+				},
+				"required": []string{"content", "cues"},
+			},
+		},
 		// RFC #597: privileged workflow-vault creation (recursion-guarded in dispatchToolCall).
 		{
 			Name:        "muninn_create_workflow_vault",
