@@ -87,12 +87,12 @@ func (h *supersedeTestHarness) scored(pairs ...any) []activation.ScoredEngram {
 // apply runs supersession under a default (unrestricted) request. Tests that
 // exercise the visibility gate build their own request via applyReq.
 func (h *supersedeTestHarness) apply(results []activation.ScoredEngram) []activation.ScoredEngram {
-	out, _ := h.eng.applySupersession(h.ctx, h.ws, results, &activation.ActivateRequest{})
+	out, _ := h.eng.applySupersession(h.ctx, h.ws, results, &activation.ActivateRequest{}, time.Now())
 	return out
 }
 
 func (h *supersedeTestHarness) applyReq(results []activation.ScoredEngram, req *activation.ActivateRequest) ([]activation.ScoredEngram, int) {
-	return h.eng.applySupersession(h.ctx, h.ws, results, req)
+	return h.eng.applySupersession(h.ctx, h.ws, results, req, time.Now())
 }
 
 // rankOf returns the 0-based rank of id in results (-1 if absent).
@@ -476,6 +476,28 @@ func TestApplySupersession_HeadBlockedByMetaFilter_AbstainsAtomically(t *testing
 	}
 	got, injected := h.applyReq(h.scored(staleID.String(), 0.9), req)
 	requireAbstained(t, got, injected, staleID.String(), headID, 0.9)
+
+	// Positive control: a head that satisfies the same filter substitutes in
+	// full — the abstention above is the gate's doing, not a broken chain.
+	stale2, err := h.eng.store.WriteEngram(h.ctx, h.ws, &storage.Engram{
+		Concept: "stale-tagged-2", Content: "stale fact 2", Confidence: 0.9,
+		Tags: []string{"wanted"},
+	})
+	if err != nil {
+		t.Fatalf("write stale2: %v", err)
+	}
+	head2, err := h.eng.store.WriteEngram(h.ctx, h.ws, &storage.Engram{
+		Concept: "head-tagged-2", Content: "current fact 2", Confidence: 0.9,
+		Tags: []string{"wanted"},
+	})
+	if err != nil {
+		t.Fatalf("write head2: %v", err)
+	}
+	h.supersede(head2.String(), stale2.String())
+	got, injected = h.applyReq(h.scored(stale2.String(), 0.9), req)
+	if rankOf(got, head2.String()) == -1 || injected != 1 {
+		t.Fatalf("control: filter-satisfying head must inject (rank=%d injected=%d)", rankOf(got, head2.String()), injected)
+	}
 }
 
 // TestApplySupersession_HeadUntrusted_AbstainsAtomically: under
@@ -499,6 +521,13 @@ func TestApplySupersession_HeadUntrusted_AbstainsAtomically(t *testing.T) {
 	req := &activation.ActivateRequest{ExcludeUntrusted: true}
 	got, injected := h.applyReq(h.scored(staleID, 0.9), req)
 	requireAbstained(t, got, injected, staleID, headID, 0.9)
+
+	// Positive control: without ExcludeUntrusted the SAME untrusted head
+	// substitutes in full — the abstention above is the trust gate's doing.
+	got, injected = h.applyReq(h.scored(staleID, 0.9), &activation.ActivateRequest{})
+	if rankOf(got, headID) == -1 || injected != 1 {
+		t.Fatalf("control: head must inject without ExcludeUntrusted (rank=%d injected=%d)", rankOf(got, headID), injected)
+	}
 }
 
 // TestApplySupersession_HeadUnderForeignLease_AbstainsAtomically: a head
@@ -626,5 +655,314 @@ func TestApplySupersession_AdmittedHeadCounts(t *testing.T) {
 	}
 	if rankOf(got, headID) != 0 {
 		t.Errorf("promoted head must lead (rank %d)", rankOf(got, headID))
+	}
+}
+
+// annotationOf returns (SupersededBy, CurrentVersion) for id in results.
+func annotationOf(t *testing.T, results []activation.ScoredEngram, id string) (string, string) {
+	t.Helper()
+	for _, r := range results {
+		if r.Engram.ID.String() == id {
+			return r.SupersededBy.String(), r.CurrentVersion.String()
+		}
+	}
+	t.Fatalf("%s missing from results", id)
+	return "", ""
+}
+
+// TestApplySupersession_HiddenIntermediateNeverNamed: chain A<-B<-C with B
+// under a live foreign lease and C visible. The substitution proceeds to the
+// visible head C, but A's annotation must name C — never lease-hidden B,
+// whose ULID is exactly the existence #548 hides. (Adversarial-review
+// finding 1; RED against the endpoint-only gate.)
+func TestApplySupersession_HiddenIntermediateNeverNamed(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	a := h.write("chain-a", "v1")
+	b := h.write("chain-b", "v2")
+	c := h.write("chain-c", "v3")
+	h.supersede(b, a)
+	h.supersede(c, b)
+
+	claimRes, err := h.eng.Claim(h.ctx, "default", b, "other-agent", 600)
+	if err != nil || claimRes.Status != LeaseAcquired {
+		t.Fatalf("claim b: %v %v", err, claimRes.Status)
+	}
+
+	got, injected := h.applyReq(h.scored(a, 0.9), &activation.ActivateRequest{CallerOwner: "me"})
+	if rankOf(got, c) == -1 {
+		t.Fatal("visible head C must still be injected past the hidden intermediate")
+	}
+	if injected != 1 {
+		t.Errorf("injected = %d, want 1 (C)", injected)
+	}
+	if rankOf(got, b) != -1 {
+		t.Error("lease-hidden B must not appear in results")
+	}
+	sb, cv := annotationOf(t, got, a)
+	if sb == b || cv == b {
+		t.Errorf("annotation names lease-hidden B (SupersededBy=%s CurrentVersion=%s) — #548 leak", sb, cv)
+	}
+	if sb != c || cv != c {
+		t.Errorf("annotation should name visible C (SupersededBy=%s CurrentVersion=%s, want %s)", sb, cv, c)
+	}
+}
+
+// TestApplySupersession_HiddenTailStopsAtVisibleIntermediate: chain A<-B<-C
+// with C under a live foreign lease and B visible in the pool.
+// (Adversarial-review finding 2; RED against endpoint-only abstention.)
+//
+// Two views, two correct answers. B carries a stamped ValidUntil (the
+// supersede Link stamps its target), so under the DEFAULT view B is expired
+// lineage and cannot be the current head — with C hidden there is nothing
+// view-valid to substitute toward, and the whole substitution abstains (in
+// full recall the final COG-19 cut then sweeps the expired rows; a caller
+// who may not see C gets no half-answer built on it). Under a show-history
+// view (IncludeInvalid), expired B IS presentable: the effective head under
+// the caller's view is B — A demotes below it, and C leaks nowhere.
+func TestApplySupersession_HiddenTailStopsAtVisibleIntermediate(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	a := h.write("tail-a", "v1")
+	b := h.write("tail-b", "v2")
+	c := h.write("tail-c", "v3")
+	h.supersede(b, a)
+	h.supersede(c, b)
+
+	claimRes, err := h.eng.Claim(h.ctx, "default", c, "other-agent", 600)
+	if err != nil || claimRes.Status != LeaseAcquired {
+		t.Fatalf("claim c: %v %v", err, claimRes.Status)
+	}
+
+	// Default view: B is expired lineage, C is hidden → atomic abstention.
+	got, injected := h.applyReq(h.scored(a, 0.9, b, 0.5), &activation.ActivateRequest{CallerOwner: "me"})
+	if injected != 0 {
+		t.Errorf("default view: injected = %d, want 0", injected)
+	}
+	if rankOf(got, c) != -1 {
+		t.Error("default view: lease-hidden C must not appear in results")
+	}
+	if s, _ := scoreOf(got, a); s != 0.9 {
+		t.Errorf("default view: A must keep its earned score (got %v)", s)
+	}
+	sb, cv := annotationOf(t, got, a)
+	if sb != "" && sb != (storage.ULID{}).String() {
+		t.Errorf("default view: A must carry no annotation (SupersededBy=%s)", sb)
+	}
+	_ = cv
+
+	// Show-history view: expired B is presentable — the head under this view.
+	got, injected = h.applyReq(h.scored(a, 0.9, b, 0.5), &activation.ActivateRequest{
+		CallerOwner: "me", IncludeInvalid: true,
+	})
+	if injected != 0 {
+		t.Errorf("history view: injected = %d, want 0 (B already in pool)", injected)
+	}
+	if rankOf(got, c) != -1 {
+		t.Error("history view: lease-hidden C must not appear in results")
+	}
+	if rankOf(got, b) >= rankOf(got, a) {
+		t.Errorf("history view: visible successor B must outrank stale A (B %d, A %d)", rankOf(got, b), rankOf(got, a))
+	}
+	sb, cv = annotationOf(t, got, a)
+	if sb != b || cv != b {
+		t.Errorf("history view: A's annotation must name B (SupersededBy=%s CurrentVersion=%s)", sb, cv)
+	}
+	if sb == c || cv == c {
+		t.Errorf("history view: annotation names lease-hidden C — leak")
+	}
+}
+
+// TestApplySupersession_AsOfChainStopsAtContemporaryHead: A<-B<-C where C
+// became valid only after the caller's AsOf instant and B before it. At that
+// instant B WAS the head: substitution runs to B, C is neither injected nor
+// named. (The time-travel half of adversarial-review finding 2.)
+func TestApplySupersession_AsOfChainStopsAtContemporaryHead(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	twoHours := time.Now().Add(-2 * time.Hour)
+	aU, err := h.eng.store.WriteEngram(h.ctx, h.ws, &storage.Engram{
+		Concept: "asof-a", Content: "v1", Confidence: 0.9, ValidFrom: twoHours,
+	})
+	if err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+	bU, err := h.eng.store.WriteEngram(h.ctx, h.ws, &storage.Engram{
+		Concept: "asof-b", Content: "v2", Confidence: 0.9, ValidFrom: twoHours,
+	})
+	if err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+	a, b := aU.String(), bU.String()
+	c := h.write("asof-c", "v3") // ValidFrom defaults to now
+	h.supersede(b, a)
+	h.supersede(c, b)
+
+	asOf := time.Now().Add(-1 * time.Hour)
+	got, injected := h.applyReq(h.scored(a, 0.9), &activation.ActivateRequest{AsOf: &asOf})
+	if rankOf(got, c) != -1 {
+		t.Error("post-AsOf head C must not appear in an as-of view")
+	}
+	if rankOf(got, b) == -1 {
+		t.Fatal("B was the head at the caller's instant and must be injected")
+	}
+	if injected != 1 {
+		t.Errorf("injected = %d, want 1 (B)", injected)
+	}
+	if rankOf(got, b) >= rankOf(got, a) {
+		t.Errorf("B must outrank A in the as-of view")
+	}
+	sb, cv := annotationOf(t, got, a)
+	if sb != b || cv != b {
+		t.Errorf("annotation must name B, the head at the caller's instant (got SupersededBy=%s CurrentVersion=%s)", sb, cv)
+	}
+}
+
+// rejectULIDFilter is a minimal EngramFilter rejecting exactly one engram —
+// the structured (MQL WHERE) predicate a gated injection must honor.
+type rejectULIDFilter struct{ reject storage.ULID }
+
+func (f rejectULIDFilter) Match(e *storage.Engram) bool { return e.ID != f.reject }
+
+// TestApplySupersession_HeadBlockedByStructuredFilter_AbstainsAtomically: a
+// head the caller's MQL WHERE predicate rejects must not be injected — and
+// the substitution abstains whole. (Adversarial-review finding 3; RED
+// against a gate without the StructuredFilter predicate.)
+func TestApplySupersession_HeadBlockedByStructuredFilter_AbstainsAtomically(t *testing.T) {
+	h, cleanup := newSupersedeHarness(t)
+	defer cleanup()
+
+	staleID := h.write("stale-mql", "stale fact")
+	headID := h.write("head-mql", "current fact")
+	h.supersede(headID, staleID)
+	headULID, err := storage.ParseULID(headID)
+	if err != nil {
+		t.Fatalf("parse head: %v", err)
+	}
+
+	req := &activation.ActivateRequest{StructuredFilter: rejectULIDFilter{reject: headULID}}
+	got, injected := h.applyReq(h.scored(staleID, 0.9), req)
+	requireAbstained(t, got, injected, staleID, headID, 0.9)
+
+	// Positive control: a predicate that accepts the head admits the full
+	// substitution.
+	got, injected = h.applyReq(h.scored(staleID, 0.9), &activation.ActivateRequest{
+		StructuredFilter: rejectULIDFilter{}, // zero ULID rejects nothing real
+	})
+	if rankOf(got, headID) == -1 || injected != 1 {
+		t.Fatalf("control: accepting predicate must admit the head (rank=%d injected=%d)", rankOf(got, headID), injected)
+	}
+}
+
+// TestApplySupersession_InjectionCountsInTotalFound pins the CALL-SITE wire:
+// an injected head must be reflected in the response's TotalFound (the
+// counting gap the #570 review scoped as a follow-up). Full-pipeline test on
+// purpose — the RED-verified unit test pins only applySupersession's return
+// value; this one fails if the engine.go `TotalFound += supInjected` wire is
+// dropped.
+//
+// The chain is created UNSTAMPED (raw association write, not Link) because a
+// Link-stamped predecessor is validity-expired and dropped inside Run() —
+// unstamped legacy chains are exactly the population read-time supersession
+// serves in default view. Differential form: the same query runs before and
+// after the supersede edge exists, so the head's organic retrievability is
+// measured, not assumed — if the head was already in the pool the second run
+// promotes (TotalFound unchanged); if it was absent the second run injects
+// (TotalFound +1). Either branch is deterministic given the observed first
+// run; the injection branch is the one that pins the wire.
+func TestApplySupersession_InjectionCountsInTotalFound(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "supersession-total-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	stale, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: vault, Concept: "runway eight months",
+		Content: "zanzibar quill futon eight months of runway remain",
+	})
+	if err != nil {
+		t.Fatalf("write stale: %v", err)
+	}
+	head, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: vault, Concept: "runway eleven months",
+		Content: "bridge raise extended the figure",
+	})
+	if err != nil {
+		t.Fatalf("write head: %v", err)
+	}
+
+	awaitFTS(t, eng)
+
+	query := &mbp.ActivateRequest{
+		Vault:      vault,
+		Context:    []string{"zanzibar quill futon eight months"},
+		MaxResults: 50,
+		Threshold:  0.30,
+	}
+	before, err := eng.Activate(ctx, query)
+	if err != nil {
+		t.Fatalf("activate (before): %v", err)
+	}
+	headOrganic := false
+	staleFound := false
+	for _, item := range before.Activations {
+		if item.ID == head.ID {
+			headOrganic = true
+		}
+		if item.ID == stale.ID {
+			staleFound = true
+		}
+	}
+	if !staleFound {
+		t.Fatal("precondition: the query must retrieve the stale fact")
+	}
+
+	// Unstamped supersede edge, as a legacy (pre-valid-time) chain would be.
+	staleULID, err := storage.ParseULID(stale.ID)
+	if err != nil {
+		t.Fatalf("parse stale: %v", err)
+	}
+	headULID, err := storage.ParseULID(head.ID)
+	if err != nil {
+		t.Fatalf("parse head: %v", err)
+	}
+	if err := eng.store.WriteAssociation(ctx, ws, headULID, staleULID, &storage.Association{
+		TargetID: staleULID, RelType: storage.RelSupersedes, Weight: 1.0, Confidence: 1.0,
+	}); err != nil {
+		t.Fatalf("write supersedes association: %v", err)
+	}
+
+	after, err := eng.Activate(ctx, query)
+	if err != nil {
+		t.Fatalf("activate (after): %v", err)
+	}
+	headAfter := false
+	for _, item := range after.Activations {
+		if item.ID == head.ID {
+			headAfter = true
+		}
+	}
+	if !headAfter {
+		t.Fatal("head must be present after the supersede edge exists (promoted or injected)")
+	}
+
+	if headOrganic {
+		// Promotion path: no injection, so no count change from this phase.
+		if after.TotalFound != before.TotalFound {
+			t.Errorf("promotion must not change TotalFound: before=%d after=%d", before.TotalFound, after.TotalFound)
+		}
+		t.Logf("head was organically retrieved; exercised the promotion branch")
+	} else {
+		// Injection path: the call-site wire must add exactly the head.
+		if after.TotalFound != before.TotalFound+1 {
+			t.Errorf("injected head must count: TotalFound before=%d after=%d, want after=before+1",
+				before.TotalFound, after.TotalFound)
+		}
 	}
 }

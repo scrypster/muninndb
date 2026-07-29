@@ -1067,3 +1067,59 @@ func TestEntityBoost_InjectionRespectsValidity(t *testing.T) {
 		&activation.ActivateRequest{Threshold: 0.05, IncludeInvalid: true})),
 		"IncludeInvalid must restore the expired injection")
 }
+
+// TestEntityBoost_InjectionRespectsStructuredFilter: an engram the caller's
+// structured (MQL WHERE) predicate rejects must not enter via boost injection.
+// Phase 6 applies StructuredFilter inside Run(), BEFORE the boost pass — the
+// injection side door skipped it entirely until the shared visibility gate
+// picked it up (adversarial-review finding on the gate increment; behavior
+// change for boost, called out in the commit).
+func TestEntityBoost_InjectionRespectsStructuredFilter(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "structured-filter-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	upsertEntityTimes(t, eng, "SFEnt", 2)
+
+	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "sf-seed",
+		Content:    "seed content",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, seedID, "SFEnt"))
+
+	target, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "sf-target",
+		Content:    "target content sharing the entity",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, target, "SFEnt"))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, seedID)
+	require.NoError(t, err)
+	seedResults := []activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}
+	inSet := func(rs []activation.ScoredEngram) bool {
+		for _, r := range rs {
+			if r.Engram.ID == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Control: with no structured filter the target injects.
+	require.True(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05})),
+		"control: target must inject without a structured filter")
+
+	// A predicate rejecting the target must keep it out.
+	require.False(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05, StructuredFilter: rejectULIDFilter{reject: target}})),
+		"a structured-filter-rejected engram must not be injected")
+}
