@@ -1,6 +1,7 @@
 package activation
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1562,7 +1563,12 @@ func (e *ActivationEngine) phase6Score(
 				hopPath: c.hopPath,
 			})
 		}
-		sort.Slice(scored, func(i, j int) bool { return scored[i].final > scored[j].final })
+		sort.Slice(scored, func(i, j int) bool {
+			if scored[i].final != scored[j].final {
+				return scored[i].final > scored[j].final
+			}
+			return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
+		})
 		goto cgdnDone
 	}
 
@@ -1641,7 +1647,12 @@ func (e *ActivationEngine) phase6Score(
 			}
 		}
 
-		sort.Slice(scored, func(i, j int) bool { return scored[i].final > scored[j].final })
+		sort.Slice(scored, func(i, j int) bool {
+			if scored[i].final != scored[j].final {
+				return scored[i].final > scored[j].final
+			}
+			return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
+		})
 		goto cgdnDone
 	}
 
@@ -1691,7 +1702,12 @@ func (e *ActivationEngine) phase6Score(
 			cc.components.Final = final
 			scored = append(scored, scoredItem{id: cc.id, final: final, components: cc.components, hopPath: cc.hopPath})
 		}
-		sort.Slice(scored, func(i, j int) bool { return scored[i].final > scored[j].final })
+		sort.Slice(scored, func(i, j int) bool {
+			if scored[i].final != scored[j].final {
+				return scored[i].final > scored[j].final
+			}
+			return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
+		})
 		goto cgdnDone
 	}
 
@@ -1710,7 +1726,12 @@ func (e *ActivationEngine) phase6Score(
 		}
 		scored = append(scored, scoredItem{id: c.id, final: final, components: components, hopPath: c.hopPath})
 	}
-	sort.Slice(scored, func(i, j int) bool { return scored[i].final > scored[j].final })
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].final != scored[j].final {
+			return scored[i].final > scored[j].final
+		}
+		return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
+	})
 
 cgdnDone:
 	totalFound := len(scored)
