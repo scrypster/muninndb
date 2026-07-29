@@ -213,6 +213,17 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- `valid_until` silences an expired intention; it never triggers delivery (there is no scheduler).\n")
 	b.WriteString("- Notice delivery requires the server opt-in `MUNINN_PROSPECTIVE=1`; arming works regardless and delivery starts once enabled.\n")
 
+	// Cross-domain connection discovery (read-only analytic)
+	b.WriteString("\n## Cross-domain discovery (muninn_discover)\n\n")
+	b.WriteString("`muninn_discover(domain_a, domain_b, ...)` surfaces CANDIDATES WITH EVIDENCE for cross-domain, time-lagged co-occurrence — ")
+	b.WriteString("connections no single memory states (e.g. \"entity A tends to precede entity B by 1 day\"). It NEVER asserts causation: ")
+	b.WriteString("every result is phrased \"co-occurs at lag N\" and carries its full denominator (support, lift, permutation p-value, BH-FDR q-value, both marginals, window) — ")
+	b.WriteString("a candidate without that evidence cannot be returned. It is strictly READ-ONLY: it never writes association weights, access metadata, or Hebbian/PAS events, so using it never changes future recall.\n")
+	b.WriteString("- Domains are selected by `entity_type` OR `tag` (exactly one each) — e.g. domain_a={entity_type:\"event\"}, domain_b={tag:\"domain:markets\"}.\n")
+	b.WriteString("- The null model is a circular-shift permutation (not a naive shuffle) so bursty-but-unrelated entities are correctly rejected, not flagged as significant.\n")
+	b.WriteString("- Popularity artifacts (two entities that are both merely frequent) are rejected by design: lift near 1.0 means \"no more co-occurrence than raw frequency predicts\".\n")
+	b.WriteString("- An empty candidate list with a `reason` means the window or support floor couldn't be cleared — never a silently relaxed gate.\n")
+
 	// Tips
 	b.WriteString("\n## Tips\n\n")
 	if resolved.MultiUser {

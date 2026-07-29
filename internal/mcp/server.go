@@ -316,6 +316,9 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		// Entity cluster detection
 		"muninn_entity_clusters": s.handleEntityClusters,
 
+		// Cross-domain connection discovery (read-only analytic, COG-22)
+		"muninn_discover": s.handleDiscover,
+
 		// Knowledge graph export
 		"muninn_export_graph": s.handleExportGraph,
 
@@ -399,6 +402,7 @@ func registeredToolNames() []string {
 		"muninn_compare_and_set", "muninn_claim", "muninn_release",
 		"muninn_create_workflow_vault",
 		"muninn_intend",
+		"muninn_discover",
 	}
 }
 

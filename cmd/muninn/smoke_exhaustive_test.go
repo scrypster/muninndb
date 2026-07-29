@@ -60,6 +60,7 @@ var allMCPTools = []string{
 	"muninn_intend",
 	"muninn_entity",
 	"muninn_entities",
+	"muninn_discover",
 }
 
 // adminLogin POSTs to the UI login endpoint (:8476) and returns the muninn_session cookie.

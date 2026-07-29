@@ -366,6 +366,10 @@ func (a *mcpEngineAdapter) ExportGraph(ctx context.Context, vault string, includ
 	return a.eng.ExportGraph(ctx, vault, includeEngrams)
 }
 
+func (a *mcpEngineAdapter) Discover(ctx context.Context, req engine.DiscoverRequest) (*engine.DiscoverResult, error) {
+	return a.eng.Discover(ctx, req)
+}
+
 func (a *mcpEngineAdapter) GetEntityTimeline(ctx context.Context, vault, entityName string, limit int) (*engine.EntityTimeline, error) {
 	return a.eng.GetEntityTimeline(ctx, vault, entityName, limit)
 }

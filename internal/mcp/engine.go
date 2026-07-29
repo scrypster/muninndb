@@ -126,6 +126,11 @@ type EngineInterface interface {
 	// the raw graph data. The caller chooses the output format.
 	ExportGraph(ctx context.Context, vault string, includeEngrams bool) (*engine.ExportGraph, error)
 
+	// Discover runs the read-only cross-domain co-occurrence analytic
+	// (COG-22): never writes association weights, access metadata, or
+	// Hebbian/PAS events. See internal/engine/discover.go.
+	Discover(ctx context.Context, req engine.DiscoverRequest) (*engine.DiscoverResult, error)
+
 	// GetEntityTimeline returns a chronological view of when an entity first appeared
 	// in memory and how it has evolved. Results are ordered by creation time (oldest first)
 	// and capped at limit entries.

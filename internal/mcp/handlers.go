@@ -1463,6 +1463,69 @@ func (s *MCPServer) handleEntityClusters(ctx context.Context, w http.ResponseWri
 	})))
 }
 
+// discoverDomainArg parses a domain_a/domain_b argument object into an
+// engine.DiscoverDomain. Returns an error message (empty = ok) for a
+// malformed selector — the same "exactly one of entity_type/tag" rule the
+// engine enforces, checked here too so the MCP error is specific.
+func discoverDomainArg(args map[string]any, key string) (engine.DiscoverDomain, string) {
+	raw, ok := args[key].(map[string]any)
+	if !ok {
+		return engine.DiscoverDomain{}, key + " is required (object with entity_type or tag)"
+	}
+	entityType, _ := raw["entity_type"].(string)
+	tag, _ := raw["tag"].(string)
+	if (entityType == "") == (tag == "") {
+		return engine.DiscoverDomain{}, key + ": exactly one of entity_type or tag is required"
+	}
+	return engine.DiscoverDomain{EntityType: entityType, Tag: tag}, ""
+}
+
+// handleDiscover is the muninn_discover MCP tool: a READ-ONLY cross-domain
+// co-occurrence analytic (COG-22). It never writes — no association weights,
+// no access metadata, no Hebbian/PAS events — and every surfaced candidate
+// carries its full evidence contract (support, lift, permutation p, BH-FDR
+// q, both marginals, window). See internal/engine/discover.go.
+func (s *MCPServer) handleDiscover(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	domainA, errA := discoverDomainArg(args, "domain_a")
+	if errA != "" {
+		sendError(w, id, -32602, "invalid params: "+errA)
+		return
+	}
+	domainB, errB := discoverDomainArg(args, "domain_b")
+	if errB != "" {
+		sendError(w, id, -32602, "invalid params: "+errB)
+		return
+	}
+
+	req := engine.DiscoverRequest{
+		Vault:   vault,
+		DomainA: domainA,
+		DomainB: domainB,
+	}
+	if v, ok := args["max_lag_days"].(float64); ok {
+		req.MaxLagDays = int(v)
+	}
+	if v, ok := args["min_support"].(float64); ok {
+		req.MinSupport = int(v)
+	}
+	if v, ok := args["entity_cap"].(float64); ok {
+		req.EntityCap = int(v)
+	}
+	if v, ok := args["null_iters"].(float64); ok {
+		req.NullIters = int(v)
+	}
+	if v, ok := args["q_threshold"].(float64); ok {
+		req.QThreshold = v
+	}
+
+	result, err := s.engine.Discover(ctx, req)
+	if err != nil {
+		sendError(w, id, -32602, "invalid params: "+err.Error())
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(result)))
+}
+
 func (s *MCPServer) handleExportGraph(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	format := "json-ld"
 	if f, ok := args["format"].(string); ok && f != "" {

@@ -150,6 +150,9 @@ func (f *fakeEngine) GetEntityClusters(_ context.Context, _ string, _, _ int) ([
 func (f *fakeEngine) ExportGraph(_ context.Context, _ string, _ bool) (*engine.ExportGraph, error) {
 	return &engine.ExportGraph{Nodes: []engine.GraphNode{}, Edges: []engine.GraphEdge{}}, nil
 }
+func (f *fakeEngine) Discover(_ context.Context, _ engine.DiscoverRequest) (*engine.DiscoverResult, error) {
+	return &engine.DiscoverResult{Candidates: []engine.DiscoverCandidate{}}, nil
+}
 func (f *fakeEngine) GetEntityTimeline(_ context.Context, _ string, _ string, _ int) (*engine.EntityTimeline, error) {
 	return &engine.EntityTimeline{Entity: "test", FirstSeen: time.Now(), MentionCount: 0, Entries: []engine.TimelineEntry{}, Count: 0}, nil
 }
@@ -310,8 +313,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 44 {
-		t.Errorf("expected 44 tools, got %d", len(tools))
+	if len(tools) != 45 {
+		t.Errorf("expected 45 tools, got %d", len(tools))
 	}
 }
 

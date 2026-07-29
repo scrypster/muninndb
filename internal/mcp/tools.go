@@ -790,6 +790,39 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{},
 			},
 		},
+		// Cross-domain connection discovery (read-only analytic)
+		{
+			Name:        "muninn_discover",
+			Description: "Surface candidate cross-domain co-occurrence connections that no single memory states (e.g. 'entity A tends to precede entity B by N days'). Returns CANDIDATES WITH EVIDENCE — support, lift, permutation p-value, BH-FDR q-value, and both marginals — never a causal claim; language is always 'co-occurs at lag N', never 'causes'. Read-only: never writes association weights, access metadata, or Hebbian/PAS events. Domains are selected by entity_type OR tag (exactly one per domain). Uses day-bucketed presence built from EffectiveValidFrom (the fact's true/backdated time), a circular-shift permutation null (not IID shuffle — preserves each series' burstiness so the null isn't gameable), and Benjamini-Hochberg FDR correction over every (pair, lag) test performed, not just the survivors. Returns an empty candidate list with a stated reason when the window or support floor can't be cleared — never silently relaxed.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"domain_a": map[string]any{
+						"type":        "object",
+						"description": "First domain selector. Exactly one of entity_type or tag.",
+						"properties": map[string]any{
+							"entity_type": map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Select every entity of this registry type."},
+							"tag":         map[string]any{"type": "string", "description": "Select every entity mentioned by an engram carrying this tag."},
+						},
+					},
+					"domain_b": map[string]any{
+						"type":        "object",
+						"description": "Second domain selector. Exactly one of entity_type or tag.",
+						"properties": map[string]any{
+							"entity_type": map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Select every entity of this registry type."},
+							"tag":         map[string]any{"type": "string", "description": "Select every entity mentioned by an engram carrying this tag."},
+						},
+					},
+					"max_lag_days": map[string]any{"type": "integer", "description": "Maximum lag in days to test, domain_a leading domain_b (default 7)."},
+					"min_support":  map[string]any{"type": "integer", "description": "Minimum co-occurrence day-count floor, never lowered below 3 (default 3)."},
+					"entity_cap":   map[string]any{"type": "integer", "description": "Max entities considered per domain, capped by distinct-day frequency to bound multiple comparisons (default 200)."},
+					"null_iters":   map[string]any{"type": "integer", "description": "Circular-shift permutation draws for the null model (default 500)."},
+					"q_threshold":  map[string]any{"type": "number", "description": "BH-FDR q-value gate; only candidates at or below this survive (default 0.05)."},
+				},
+				"required": []string{"domain_a", "domain_b"},
+			},
+		},
 		// Knowledge graph export
 		{
 			Name:        "muninn_export_graph",
