@@ -146,7 +146,10 @@ func (a *mcpEngineAdapter) Decide(ctx context.Context, vault, decision, rational
 	if err != nil {
 		return nil, err
 	}
-	return &WriteResult{ID: res.ID.String(), Warnings: res.Warnings}, nil
+	// Concept is unconditionally the caller's decision text — engine.Decide
+	// writes Concept: decision verbatim (internal/engine/engine.go), so there
+	// is no store read-back precedence to apply here, unlike Evolve.
+	return &WriteResult{ID: res.ID.String(), Concept: decision, Warnings: res.Warnings}, nil
 }
 
 func (a *mcpEngineAdapter) Restore(ctx context.Context, vault, id string) (*RestoreResult, error) {

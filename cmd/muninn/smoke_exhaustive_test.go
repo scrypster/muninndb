@@ -524,6 +524,12 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_decide returned error field: %v", errVal)
 		}
+		// Same defect class as #721: the decide response must echo the
+		// decision text as its concept, not "". Asserting only "no error
+		// field" is exactly the coverage shape that let #721 ship.
+		if got, _ := result["concept"].(string); got != "explore the eastern ruins now" {
+			t.Errorf("decide response concept = %q, want the decision text %q", got, "explore the eastern ruins now")
+		}
 	})
 
 	t.Run("muninn_restore", func(t *testing.T) {
