@@ -260,6 +260,14 @@ type ActivateResult struct {
 	LatencyMs     float64
 	ProfileUsed   string        // resolved traversal profile name (e.g. "default", "causal")
 	RestoredEdges []mbp.EdgeRef // edges lazily restored from archive during Phase 4.75
+	// SemanticDegraded is true when the vector/semantic signal for this
+	// activation could not be trusted -- embed backend unreachable, an
+	// err==nil embed call returning an empty/all-zero vector for a
+	// non-trivial query, or the phase6 post-load cosine fallback failing to
+	// read stored embeddings. Recall still returns results (BM25/decay/
+	// Hebbian survive), but callers should surface this to the user/agent
+	// rather than silently trusting a zeroed vectorScore (principle #2).
+	SemanticDegraded bool
 }
 
 // ActivateResponseFrame is one streaming frame of results.
@@ -619,6 +627,31 @@ type phase1Result struct {
 	embedding []float32
 	tokens    []string
 	queryStr  string
+	// semanticDegraded is set whenever the semantic (vector) signal could not be
+	// produced or trusted for this query -- embed backend unreachable, or an
+	// err==nil embed call that returned an empty/all-zero vector for a
+	// non-trivial query (normalized embedders such as bge-small never emit an
+	// all-zero L2-normed vector for real text, so that shape is itself a silent
+	// degradation, not a valid embedding). Threaded through to
+	// ActivateResult.SemanticDegraded so callers get a loud signal instead of a
+	// silently-zeroed vectorScore (principle #2, "degrade loudly-but-gracefully").
+	semanticDegraded bool
+}
+
+// isZeroVector reports whether vec is empty or every component is exactly
+// zero. A properly L2-normalized embedding (e.g. bge-small) can never be the
+// zero vector for non-trivial input, so this shape signals a degraded/garbage
+// embedding rather than a legitimate one.
+func isZeroVector(vec []float32) bool {
+	if len(vec) == 0 {
+		return true
+	}
+	for _, v := range vec {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*phase1Result, error) {
@@ -647,6 +680,7 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 			// takes the FTS-only path when len(embedding)==0.
 			slog.Warn("activation: embed backend unreachable, degrading to BM25-only recall",
 				"vault", req.VaultID, "error", err)
+			result.semanticDegraded = true
 			return result, nil
 		}
 		// Embed returns a flat len(texts)*dim slice — each phrase's vector
@@ -658,6 +692,19 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 			vec = meanPoolEmbeddings(vec, n)
 		}
 		result.embedding = vec
+
+		// Sanity check: err == nil is not proof of a usable embedding. A
+		// normalized embedder (bge-small, L2-normed) never emits an all-zero
+		// vector for real text, so an empty/all-zero result for a non-trivial
+		// query is itself a silent degradation -- same failure class as the
+		// connection-refused case above, just without an error to catch it.
+		// Without this, phase2/phase6 silently fall back to FTS-only /
+		// vectorScore=0 with no signal at all that semantic recall is broken.
+		if strings.TrimSpace(result.queryStr) != "" && isZeroVector(result.embedding) {
+			slog.Warn("activation: embed backend returned empty/zero vector for non-trivial query, degrading to BM25-only recall",
+				"vault", req.VaultID, "query_len", len(result.queryStr))
+			result.semanticDegraded = true
+		}
 	}
 	return result, nil
 }
@@ -1435,6 +1482,12 @@ func (e *ActivationEngine) phase6Score(
 
 	w := resolveWeights(req.Weights, e.weights)
 
+	// semanticDegraded accumulates any semantic-signal failure discovered
+	// during scoring (post-load cosine fallback read errors), OR'd with
+	// whatever phase1 already found (embed backend unreachable / zero
+	// vector) so the final ActivateResult carries one loud, honest signal.
+	semanticDegraded := p1.semanticDegraded
+
 	// Guard: RRF and CGDN are mutually exclusive scoring paths.
 	// If both are enabled, RRF takes precedence (checked first below).
 	// Log the conflict so operators can fix their plasticity config.
@@ -1652,6 +1705,15 @@ func (e *ActivationEngine) phase6Score(
 						embeds[idx] = loaded[j]
 					}
 				}
+			} else {
+				// Fallback read failed: these candidates stay at vectorScore=0
+				// (SemanticSimilarity==0, never a crash), but that must never be
+				// silent -- without this WARN + flag, a storage hiccup here looks
+				// identical to "no semantic evidence exists", which is a
+				// plausible-looking wrong answer (principle #2).
+				slog.Warn("activation: phase6 post-load cosine fallback failed, candidates degraded to vectorScore=0",
+					"vault", req.VaultID, "candidates", len(fallbackIDs), "error", err)
+				semanticDegraded = true
 			}
 		}
 		for i := range all {
@@ -1941,9 +2003,10 @@ cgdnDone:
 	}
 
 	return &ActivateResult{
-		QueryID:     newQueryID(),
-		Activations: activations,
-		TotalFound:  totalFound,
+		QueryID:          newQueryID(),
+		Activations:      activations,
+		TotalFound:       totalFound,
+		SemanticDegraded: semanticDegraded,
 	}, nil
 }
 

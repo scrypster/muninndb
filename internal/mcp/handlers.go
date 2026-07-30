@@ -551,6 +551,14 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		"memories": memories,
 		"total":    resp.TotalFound,
 	}
+	// SemanticDegraded: the vector signal for this recall could not be
+	// trusted (embed backend unreachable, an all-zero embedding, or a
+	// failed post-load cosine fallback read). Recall still returns results
+	// via BM25/decay/Hebbian, but the caller should know semantic ranking
+	// was compromised rather than silently trusting it (principle #2).
+	if resp.SemanticDegraded {
+		result["semantic_degraded"] = true
+	}
 	// THE PUSH: prospective notices — focal set derives from the RETURNED
 	// results; readOnly (COG-11) suppresses the fired-marker write. Omitted
 	// when empty; inert unless MUNINN_PROSPECTIVE=1.

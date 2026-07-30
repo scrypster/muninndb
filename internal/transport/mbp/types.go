@@ -270,6 +270,13 @@ type ActivateResponse struct {
 	Frame       int              `msgpack:"frame,omitempty"        json:"frame,omitempty"`
 	TotalFrames int              `msgpack:"total_frames,omitempty" json:"total_frames,omitempty"`
 	Brief       []BriefSentence  `msgpack:"brief,omitempty"        json:"brief,omitempty"` // extractive activation brief
+	// SemanticDegraded is true when the vector/semantic signal for this
+	// activation could not be trusted -- embed backend unreachable, an
+	// err==nil embed call returning an empty/all-zero vector, or the phase6
+	// post-load cosine fallback failing to read stored embeddings. Recall
+	// still returns results (BM25/decay/Hebbian survive), but callers should
+	// not silently trust a zeroed vectorScore (principle #2: degrade loudly).
+	SemanticDegraded bool `msgpack:"semantic_degraded,omitempty" json:"semantic_degraded,omitempty"`
 }
 
 // ActivationItem is a single activated engram.
