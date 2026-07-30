@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -62,13 +63,36 @@ const (
 // finding). The always-on superseded_by/current_version annotation payload is a
 // following increment; today the opt-in `annotate` path still surfaces it.
 //
-// Runs post-scoring / post-entity-boost and PRE-truncation so injected heads are
-// not cut. Pure read path (reverse-assoc + engram reads only); observe-safe.
-// maxResults bounds the work to the top survivors (0 = examine all).
-func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, maxResults int) []activation.ScoredEngram {
+// Substitution is resolved UNDER THE CALLER'S VIEW and applied atomically per
+// chain. The chain walk treats a node the caller's visibility contract refuses
+// (meta filters, structured filter, trust, foreign live lease, valid-time —
+// the shared visibilityGate) as traversable but unnameable: the effective head
+// is the DEEPEST ADMITTED node on the chain, and the annotation names the
+// NEAREST ADMITTED successor, so a hidden intermediate's ID can never leak
+// through SupersededBy (#548's class — the ID is the existence) and a hidden
+// tail cannot void a substitution that is still correct at a visible
+// intermediate (under AsOf, the newest admitted node IS the head at the
+// caller's instant). When NO node above the stale is admitted, the whole
+// substitution abstains — no injection, no demotion, no annotation:
+// demote-without-inject silently truncates the topic, annotating leaks the
+// hidden ID, and under AsOf the demotion itself is wrong because at the
+// caller's instant the "stale" fact WAS the truth. A node already in the
+// result set cleared its own admission (phase 6, or a prior injector's gate)
+// and is admitted by construction. injected reports how many absent heads
+// were admitted and appended, so the caller can keep TotalFound honest.
+//
+// Runs post-scoring / post-entity-boost and PRE-truncation so injected heads
+// are not cut. No store writes (reverse-assoc + engram + lease reads only;
+// the results slice is re-scored and re-sorted in place); observe-safe.
+// req.MaxResults bounds the work to the top survivors (0 = examine all). now
+// is the shared injection clock — the caller passes the same instant to the
+// final COG-19 gate so a validity boundary cannot fall between admission here
+// and that last cut (which would un-atomize the substitution it just applied).
+func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, req *activation.ActivateRequest, now time.Time) (out []activation.ScoredEngram, injected int) {
 	if len(results) == 0 {
-		return results
+		return results, 0
 	}
+	maxResults := req.MaxResults
 
 	// ULID → index in results (grows as heads are injected).
 	seen := make(map[storage.ULID]int, len(results))
@@ -96,11 +120,34 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 	headEngram := make(map[storage.ULID]*storage.Engram)
 	headFinal := make(map[storage.ULID]float64)
 
+	// Existence decisions, cached per chain node: several stales can share a
+	// chain, and the gate's lease check reads the store. A node already in the
+	// result pool cleared its own admission (phase 6, or the entity-boost gate
+	// for boost injections, which runs before this phase) — nameable by
+	// construction, no store read.
+	gate := newVisibilityGate(req, now)
+	nameableCache := make(map[storage.ULID]bool)
+	nameable := func(eng *storage.Engram) bool {
+		if _, inPool := seen[eng.ID]; inPool {
+			return true
+		}
+		if a, decided := nameableCache[eng.ID]; decided {
+			return a
+		}
+		a := gate.Nameable(ctx, e.store, ws, eng)
+		nameableCache[eng.ID] = a
+		return a
+	}
+
 	for i := 0; i < orig; i++ {
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		head, immediate, superseded := e.resolveSupersessionHead(ctx, ws, results[i].Engram.ID)
+		// The walk resolves the effective head under the caller's view: only
+		// nameable, view-known nodes can be returned, only a view-valid node
+		// can be the head, and !superseded covers both "not superseded at
+		// all" and "no substitutable successor" — the atomic abstention branch.
+		head, immediate, superseded := e.resolveSupersessionHead(ctx, ws, results[i].Engram.ID, gate, nameable)
 		if !superseded {
 			continue
 		}
@@ -112,7 +159,7 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		}
 	}
 	if len(stales) == 0 {
-		return results
+		return results, 0
 	}
 
 	// Fold each head's OWN earned score (when it was already retrieved) into its
@@ -123,13 +170,14 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		}
 	}
 
-	// Phase 2a: assign head scores; inject absent heads.
+	// Phase 2a: assign head scores; inject absent (gate-admitted) heads.
 	for headID, final := range headFinal {
 		if idx, ok := seen[headID]; ok {
 			results[idx].Score = final
 		} else {
 			results = append(results, activation.ScoredEngram{Engram: headEngram[headID], Score: final})
 			seen[headID] = len(results) - 1
+			injected++
 		}
 	}
 
@@ -155,21 +203,49 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		a, b := results[i].Engram.ID, results[j].Engram.ID
 		return bytes.Compare(a[:], b[:]) < 0
 	})
-	return results
+	return results, injected
 }
 
-// resolveSupersessionHead walks the RelSupersedes chain upward from startID to the
-// current head: the newest ACTIVE engram that supersedes it and is itself
-// superseded by nothing active. Returns (head, true) when startID is superseded by
-// an active engram; (nil, false) when it is not superseded, when the only
-// superseder is soft-deleted/archived (a voided supersession), when a hop has more
-// than one active superseder (ambiguous — WARN, don't guess), or when the chain is
-// a cycle / exceeds the depth cap (WARN, leave un-demoted).
+// resolveSupersessionHead walks the RelSupersedes chain upward from startID to
+// the effective head UNDER THE CALLER'S VIEW: the deepest chain node that is
+// both nameable (existence-visible: lease, trust, filters — gate.Nameable)
+// and valid for the caller's temporal view (gate.ValidForView). The two
+// halves are deliberately different tests:
+//
+//   - A node that fails Nameable is hidden — TRAVERSABLE BUT UNNAMEABLE. The
+//     walk continues through it, but it can be returned as neither head nor
+//     immediate, so a hidden ID cannot surface in a result row or its
+//     SupersededBy annotation (#548: the ID is the existence).
+//   - A node that is nameable but fails ValidForView is expired lineage —
+//     NAMEABLE BUT NOT CURRENT. Chain intermediates are validity-expired by
+//     construction (supersession stamps ValidUntil on every superseded
+//     engram), so they may be named as lineage, but only a view-valid node
+//     can be the substitution's head. Under as-of, a node postdating the
+//     caller's instant (gate.ViewFuture) does not exist yet in that view and
+//     may not even be named.
+//
+// immediate is the NEAREST nameable, view-known successor of startID — the
+// caller-visible answer to "what replaced this". A soft-deleted/archived
+// superseder is different in kind from all of the above: it VOIDS the
+// supersession at that hop for every caller (the walk stops), matching
+// evolve-retraction semantics — deletion is a lifecycle fact, not a
+// per-caller view.
+//
+// Returns (head, immediate, true) when a view-valid head exists; (nil, zero,
+// false) when none does — never superseded, superseder soft-deleted (voided),
+// no successor both nameable and valid for this view (the caller's atomic
+// abstention), a hop with more than one active superseder (ambiguous — WARN,
+// don't guess), or a cycle (WARN, leave un-demoted). The depth cap is
+// different: it silently TRUNCATES the walk, so on a chain longer than
+// supersessionMaxDepth the head is the deepest admitted node within the cap —
+// possibly a non-terminal intermediate presented as current. Long chains are
+// rare (evolve chains heal at startup; the cap exists for pathological
+// manual graphs) and a cap-abstain would regress every long legacy chain.
 //
 // GetReverseAssociations(X) returns edges pointing TO X with the association's
 // TargetID repurposed to hold the SOURCE — so for a RelSupersedes edge it is the
 // engram that supersedes X (see annotation.go / storage/association.go).
-func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startID storage.ULID) (head *storage.Engram, immediate storage.ULID, superseded bool) {
+func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startID storage.ULID, gate *visibilityGate, nameable func(*storage.Engram) bool) (head *storage.Engram, immediate storage.ULID, superseded bool) {
 	cur := startID
 	visited := map[storage.ULID]bool{startID: true}
 
@@ -190,7 +266,7 @@ func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startI
 			}
 		}
 		if found == 0 {
-			break // cur has no superseder → cur is the head (or startID itself)
+			break // cur has no superseder → the chain ends here
 		}
 		if found > 1 {
 			slog.Warn("recall: engram has multiple superseders, leaving un-demoted", "id", cur.String())
@@ -204,20 +280,27 @@ func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startI
 
 		eng, err := e.store.GetEngram(ctx, ws, next)
 		if err != nil || eng == nil {
-			break // dangling edge → stop; cur is the effective head
+			break // dangling edge → stop; the chain ends below it
 		}
 		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
-			break // superseder gone → supersession voided; stop at cur
+			break // superseder retracted → supersession voided at this hop, for every caller
 		}
-		if head == nil {
-			immediate = next // first active superseder = the immediate one
-		}
-		head = eng
 		cur = next
+		if !nameable(eng) || gate.ViewFuture(eng) {
+			continue // hidden or not-yet in this view: walk through, never name
+		}
+		if immediate == (storage.ULID{}) {
+			immediate = next // nearest nameable, view-known successor
+		}
+		if gate.ValidForView(eng) {
+			head = eng // deepest nameable node valid under the caller's view
+		}
 	}
 
 	if head == nil {
-		return nil, storage.ULID{}, false // startID is not superseded by any active engram
+		// No view-valid successor: not superseded, or nothing this caller's
+		// view can substitute toward — either way, abstain whole.
+		return nil, storage.ULID{}, false
 	}
 	return head, immediate, true
 }

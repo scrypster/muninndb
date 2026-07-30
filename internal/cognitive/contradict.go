@@ -87,9 +87,13 @@ func NewContradictWorker(store ContradictionStore) *ContradictWorker {
 }
 
 // processBatch checks for contradictions within each item's own association set.
-// Two associations on the same engram contradict when their RelTypes are
-// semantically incompatible (e.g. Supports vs Contradicts), or when the same
-// RelType points at targets with different concept hashes (conflicting conclusions).
+// Two associations on the same engram contradict only when their RelTypes are
+// semantically incompatible per the ContradictionSeverity relation matrix
+// (e.g. Supports vs Contradicts, PrecededBy vs FollowedBy) — never merely
+// because they share a RelType and point at different targets. Two ordinary
+// associations of the same RelType to different targets (e.g. one engram
+// "references" two different other engrams) is a completely unremarkable
+// write shape and must never be flagged (COG-23).
 func (cw *ContradictWorker) processBatch(ctx context.Context, batch []ContradictItem) error {
 	for _, item := range batch {
 		n := len(item.Associations)
@@ -97,10 +101,6 @@ func (cw *ContradictWorker) processBatch(ctx context.Context, batch []Contradict
 			for j := i + 1; j < n; j++ {
 				a, b := item.Associations[i], item.Associations[j]
 				severity := ContradictionSeverity(a.RelType, b.RelType)
-				if severity <= 0 && a.RelType == b.RelType && a.TargetHash != b.TargetHash {
-					// Same relation type pointing at different-concept targets.
-					severity = 0.8
-				}
 				if severity > 0 {
 					if err := cw.store.FlagContradiction(ctx, item.WS, a.TargetID, b.TargetID); err != nil {
 						slog.Error("contradict: failed to flag contradiction",

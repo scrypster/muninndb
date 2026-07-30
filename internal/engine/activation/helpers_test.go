@@ -404,6 +404,11 @@ type internalStubStore struct {
 	assocs       map[storage.ULID][]storage.Association
 	recent       []storage.ULID
 	lastAccessNs map[storage.ULID]int64
+	// embeddings holds vectors reachable ONLY via GetEmbedding, modeling the
+	// ERF v2 separate 0x18 key. addEngramSeparateEmbedding populates this and
+	// strips eng.Embedding, faithfully reproducing the production GetEngrams/
+	// GetEmbedding loader split (see TestPhase6Score_FTSOnlyCandidate_LoaderGap).
+	embeddings map[storage.ULID][]float32
 }
 
 func newInternalStubStore() *internalStubStore {
@@ -411,7 +416,18 @@ func newInternalStubStore() *internalStubStore {
 		engrams:      make(map[storage.ULID]*storage.Engram),
 		assocs:       make(map[storage.ULID][]storage.Association),
 		lastAccessNs: make(map[storage.ULID]int64),
+		embeddings:   make(map[storage.ULID][]float32),
 	}
+}
+
+// addEngramSeparateEmbedding stores eng with its Embedding field stripped and
+// the vector filed away under embeddings instead -- reproducing ERF v2's
+// storage split where GetEngrams() never joins the 0x18 embedding key and
+// only GetEmbedding() can retrieve it.
+func (s *internalStubStore) addEngramSeparateEmbedding(eng *storage.Engram, embedding []float32) {
+	eng.Embedding = nil
+	s.addEngram(eng)
+	s.embeddings[eng.ID] = embedding
 }
 
 func (s *internalStubStore) addEngram(eng *storage.Engram) {
@@ -494,6 +510,24 @@ func (s *internalStubStore) VaultPrefix(_ string) [8]byte { return [8]byte{} }
 
 func (s *internalStubStore) EngramLastAccessNs(_ [8]byte, id storage.ULID) int64 {
 	return s.lastAccessNs[id]
+}
+
+// GetEmbedding returns the vector filed away under the separate embeddings
+// map (see addEngramSeparateEmbedding), mirroring PebbleStore.GetEmbedding's
+// 0x18-key read that GetEngrams never joins.
+func (s *internalStubStore) GetEmbedding(_ context.Context, _ [8]byte, id storage.ULID) ([]float32, error) {
+	return s.embeddings[id], nil
+}
+
+// GetEmbeddings mirrors GetEmbedding but batched, returning vectors from the
+// same separate-embeddings map positionally aligned with ids -- faithfully
+// reproducing the ERF v2 split for a batch of ids in one call.
+func (s *internalStubStore) GetEmbeddings(_ context.Context, _ [8]byte, ids []storage.ULID) ([][]float32, error) {
+	out := make([][]float32, len(ids))
+	for i, id := range ids {
+		out[i] = s.embeddings[id]
+	}
+	return out, nil
 }
 
 func (s *internalStubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
@@ -1537,6 +1571,181 @@ func TestPhase6Score_TraversedCandidateACTR_NonZeroScore(t *testing.T) {
 				t.Errorf("traversed candidate HebbianBoost should be > 0 (from BFS propagated score), got %f", a.Components.HebbianBoost)
 			}
 		}
+	}
+}
+
+// TestPhase6Score_TraversedCandidate_LoaderGap confirms the #714-A2 fix (fall
+// back to GetEmbedding when GetEngrams returns an empty Embedding) restores
+// cosine for the PRE-EXISTING BFS-traversed case too, not just the new
+// FTS-only case -- both share the exact same needsCosine fixup and the exact
+// same dead guard. Reproduces the ERF v2 loader split via
+// addEngramSeparateEmbedding, same as TestPhase6Score_FTSOnlyCandidate_LoaderGap.
+func TestPhase6Score_TraversedCandidate_LoaderGap(t *testing.T) {
+	store := newInternalStubStore()
+	e := newTestActivationEngine(store)
+	defer e.Close()
+
+	eng1 := &storage.Engram{
+		Concept: "microservices", Content: "Project Alpha uses microservices",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+		Embedding: []float32{1, 0, 0},
+	}
+	eng2 := &storage.Engram{
+		Concept: "scaling issues", Content: "Microservices cause scaling issues in our infrastructure",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+	}
+	store.addEngram(eng1)
+	// Traversed engram's embedding reachable ONLY via GetEmbedding, mirroring
+	// a real ERF v2 record loaded through GetEngrams.
+	store.addEngramSeparateEmbedding(eng2, []float32{0.6, 0.8, 0})
+
+	fused := []fusedCandidate{{id: eng1.ID, rrfScore: 0.5, vectorScore: 1.0, ftsScore: 1.5}}
+	traversed := []traversedCandidate{{
+		id:         eng2.ID,
+		propagated: 0.3,
+		hopPath:    []storage.ULID{eng1.ID, eng2.ID},
+		relType:    uint16(storage.RelSupports),
+	}}
+	p1 := &phase1Result{
+		queryStr:  "risks for Project Alpha",
+		embedding: []float32{1, 0, 0},
+	}
+
+	result, err := e.phase6Score(context.Background(), &ActivateRequest{
+		MaxResults: 10,
+		Threshold:  0.01,
+	}, [8]byte{}, fused, traversed, p1)
+	if err != nil {
+		t.Fatalf("phase6Score: %v", err)
+	}
+
+	var found bool
+	for _, a := range result.Activations {
+		if a.Engram.ID == eng2.ID {
+			found = true
+			if a.Components.SemanticSimilarity <= 0 {
+				t.Errorf("traversed candidate SemanticSimilarity = %v, want > 0 -- the GetEmbedding "+
+					"fallback must restore cosine for the traversed case exactly as it does for FTS-only",
+					a.Components.SemanticSimilarity)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("traversed candidate did not survive to the final result set")
+	}
+}
+
+// TestPhase6Score_FTSOnlyCandidate_NonZeroCosine is the RED-first repro for
+// scrypster/muninndb#714-A2: a candidate that enters the pool ONLY via the FTS
+// path (ftsScore > 0, never ranked into the HNSW top-K, not tag-seeded, not
+// BFS-traversed) keeps vectorScore=0 for its entire life in the pipeline unless
+// something computes it post-load. Before the fix, needsCosine only covered
+// isTraversed and inTagPool candidates, so an FTS-only match with a perfectly
+// good, highly-similar embedding silently reports semantic_similarity=0 — its
+// entire semantic evidence term is dropped from the ACT-R blend even though the
+// embedding was sitting right there once the engram was loaded.
+func TestPhase6Score_FTSOnlyCandidate_NonZeroCosine(t *testing.T) {
+	store := newInternalStubStore()
+	e := newTestActivationEngine(store)
+	defer e.Close()
+
+	// FTS-matched engram: not in the HNSW pool (vectorScore=0 in the fused
+	// candidate), not tag-seeded, not traversed -- but it DOES carry an
+	// embedding that is identical to the query embedding (cosine = 1.0).
+	eng := &storage.Engram{
+		Concept: "RemittanceFile lifecycle", Content: "RemittanceFile lifecycle state machine",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+		Embedding: []float32{1, 0, 0},
+	}
+	store.addEngram(eng)
+
+	// ftsScore > 0 (came from FTS), vectorScore left at its zero value exactly
+	// as phase3RRF's FTS loop (engine.go ~L971-975) produces it: only the
+	// vector-pool loop sets vectorScore, never the FTS loop.
+	fused := []fusedCandidate{{id: eng.ID, rrfScore: 0.5, ftsScore: 1.0}}
+	p1 := &phase1Result{
+		queryStr:  "RemittanceFile lifecycle state machine",
+		embedding: []float32{1, 0, 0},
+	}
+
+	result, err := e.phase6Score(context.Background(), &ActivateRequest{
+		MaxResults: 10,
+		Threshold:  0.01, // non-zero: proves score > 0, not just "engram passed nil-check"
+	}, [8]byte{}, fused, nil, p1)
+	if err != nil {
+		t.Fatalf("phase6Score: %v", err)
+	}
+
+	var found bool
+	for _, a := range result.Activations {
+		if a.Engram.ID == eng.ID {
+			found = true
+			if a.Components.SemanticSimilarity <= 0 {
+				t.Errorf("FTS-only candidate SemanticSimilarity = %v, want > 0 (real cosine against the query embedding, bug #714-A2)", a.Components.SemanticSimilarity)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("FTS-only candidate did not survive to the final result set")
+	}
+}
+
+// TestPhase6Score_FTSOnlyCandidate_LoaderGap is the RED-first repro for the
+// REAL #714-A2 bug: TestPhase6Score_FTSOnlyCandidate_NonZeroCosine above pre-
+// populates eng.Embedding directly on the stub, so it never exercises the
+// production loader split and passed even though production was broken.
+//
+// On real ERF v2 vaults, storage.PebbleStore.GetEngrams() does NOT join the
+// separate 0x18 embedding key -- it returns Embedding empty -- and only
+// storage.PebbleStore.GetEmbedding() can retrieve the vector (confirmed by a
+// standalone probe against a real vault). This test reproduces that split
+// exactly: the engram is stored via addEngramSeparateEmbedding, so GetEngrams
+// returns eng.Embedding == nil and only GetEmbedding(id) returns the vector.
+//
+// Before the fix (needsCosine guard checks only eng.Embedding, never falls
+// back to GetEmbedding), this FAILS: SemanticSimilarity == 0 despite a
+// perfect embedding match. After the fix it PASSES.
+func TestPhase6Score_FTSOnlyCandidate_LoaderGap(t *testing.T) {
+	store := newInternalStubStore()
+	e := newTestActivationEngine(store)
+	defer e.Close()
+
+	eng := &storage.Engram{
+		Concept: "RemittanceFile lifecycle", Content: "RemittanceFile lifecycle state machine",
+		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
+	}
+	// Embedding reachable ONLY via GetEmbedding -- eng.Embedding is nil after
+	// this call, exactly like a GetEngrams() load of an ERF v2 record.
+	store.addEngramSeparateEmbedding(eng, []float32{1, 0, 0})
+
+	fused := []fusedCandidate{{id: eng.ID, rrfScore: 0.5, ftsScore: 1.0}}
+	p1 := &phase1Result{
+		queryStr:  "RemittanceFile lifecycle state machine",
+		embedding: []float32{1, 0, 0},
+	}
+
+	result, err := e.phase6Score(context.Background(), &ActivateRequest{
+		MaxResults: 10,
+		Threshold:  0.01,
+	}, [8]byte{}, fused, nil, p1)
+	if err != nil {
+		t.Fatalf("phase6Score: %v", err)
+	}
+
+	var found bool
+	for _, a := range result.Activations {
+		if a.Engram.ID == eng.ID {
+			found = true
+			if a.Components.SemanticSimilarity <= 0 {
+				t.Errorf("FTS-only candidate SemanticSimilarity = %v, want > 0 -- GetEngrams returned an "+
+					"empty Embedding (as it does for real ERF v2 records) and the fixup must fall back to "+
+					"GetEmbedding() to find it, exactly as internal/consolidation/dedup.go and orient.go do",
+					a.Components.SemanticSimilarity)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("FTS-only candidate did not survive to the final result set")
 	}
 }
 

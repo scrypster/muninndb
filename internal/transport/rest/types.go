@@ -347,10 +347,13 @@ type ExplainRequest struct {
 type ExplainComponents struct {
 	FullTextRelevance  float64 `json:"full_text_relevance"`
 	SemanticSimilarity float64 `json:"semantic_similarity"`
-	DecayFactor        float64 `json:"decay_factor"`
-	HebbianBoost       float64 `json:"hebbian_boost"`
-	AccessFrequency    float64 `json:"access_frequency"`
-	Confidence         float64 `json:"confidence"`
+	// SemanticSimilarityRaw is the uncalibrated cosine similarity — see
+	// activation.ScoreComponents.SemanticSimilarityRaw.
+	SemanticSimilarityRaw float64 `json:"semantic_similarity_raw"`
+	DecayFactor           float64 `json:"decay_factor"`
+	HebbianBoost          float64 `json:"hebbian_boost"`
+	AccessFrequency       float64 `json:"access_frequency"`
+	Confidence            float64 `json:"confidence"`
 }
 
 // ExplainResponse is returned by the explain endpoint.

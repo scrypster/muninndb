@@ -69,6 +69,14 @@ and remain the reviewer's job.
     #596 is exactly the absence of this). Background workers that mutate replicated state
     (the pruner) inherit the obligation.
 
+12. **A new async worker or fire-and-forget path on the write or scoring path**
+    (`internal/engine`, `internal/engine/activation`, `internal/storage`) → give it a
+    `WaitIdle`/`Flush` seam, fold it into `Engine.waitWriteTimeIdle()` (or document it as
+    its own drain if it doesn't fit that call), and add it to the async-source table in
+    `testing-hermeticity.md`. Any test asserting on that worker's output must drain it
+    deterministically — `time.Sleep` is not synchronization and flakes under `-race` on
+    constrained CI cores (#722).
+
 ## Live drift found during the guardian audit (worth fixing)
 
 - ~~**Windows CI tests the wrong embedding model.**~~ — fixed. `ci.yml`'s Windows job now

@@ -232,7 +232,7 @@ class MuninnClient:
         vault: str = "default",
         context: list[str] | None = None,
         max_results: int = 10,
-        threshold: float = 0.1,
+        threshold: float | None = None,
         max_hops: int = 0,
         include_why: bool = False,
         brief_mode: str = "auto",
@@ -243,7 +243,9 @@ class MuninnClient:
             vault: Vault name (default: "default")
             context: List of query terms/context
             max_results: Max results to return (default: 10)
-            threshold: Min activation score threshold (default: 0.1)
+            threshold: Min activation score threshold. None (default) lets the
+                server choose a mode-aware default (rrf vaults ~0.001, else 0.1),
+                so rrf-fusion vaults are not silently filtered to empty.
             max_hops: Max graph hops to traverse (default: 0)
             include_why: Include reasoning/why field (default: False)
             brief_mode: Brief extraction mode - "auto", "extractive", "abstractive" (default: "auto")
@@ -261,11 +263,15 @@ class MuninnClient:
             "vault": vault,
             "context": context,
             "max_results": max_results,
-            "threshold": threshold,
             "max_hops": max_hops,
             "include_why": include_why,
             "brief_mode": brief_mode,
         }
+        # Omit threshold when unset so the server applies its mode-aware default
+        # (rrf vaults ~0.001, else 0.1). Sending a hardcoded 0.1 would silently
+        # filter rrf-fusion vaults to empty.
+        if threshold is not None:
+            body["threshold"] = threshold
 
         response = await self._request("POST", "/api/activate", json=body, params={"vault": vault})
 

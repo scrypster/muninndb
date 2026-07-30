@@ -122,6 +122,29 @@ func (s *stubStore) EngramLastAccessNs(_ [8]byte, _ storage.ULID) int64 {
 	return 0
 }
 
+// GetEmbedding mirrors PebbleStore.GetEmbedding for this in-memory stub: since
+// stubStore keeps Embedding inline on the engram (it never models the ERF v2
+// separate-key split), the fallback simply reads it back off the same record.
+func (s *stubStore) GetEmbedding(_ context.Context, _ [8]byte, id storage.ULID) ([]float32, error) {
+	if e, ok := s.engrams[id]; ok {
+		return e.Embedding, nil
+	}
+	return nil, nil
+}
+
+// GetEmbeddings mirrors PebbleStore.GetEmbeddings for this in-memory stub: same
+// inline-Embedding source as GetEmbedding, just returned positionally for a batch
+// of ids in one call.
+func (s *stubStore) GetEmbeddings(_ context.Context, _ [8]byte, ids []storage.ULID) ([][]float32, error) {
+	out := make([][]float32, len(ids))
+	for i, id := range ids {
+		if e, ok := s.engrams[id]; ok {
+			out[i] = e.Embedding
+		}
+	}
+	return out, nil
+}
+
 func (s *stubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
 	var ids []storage.ULID
 	for _, id := range s.recent {
@@ -815,7 +838,7 @@ func TestZeroFTSScoreYearsZeroFTRComponent(t *testing.T) {
 	}
 	store.writeEngram(eng1)
 
-	// FTS score = 0.0 → after math.Tanh normalization → 0.0.
+	// FTS score = 0.0 → FullTextRelevance passes through unchanged → 0.0.
 	fts := &stubFTS{results: []activation.ScoredID{
 		{ID: eng1.ID, Score: 0.0},
 	}}
@@ -853,7 +876,9 @@ func TestPositiveFTSScoreYieldsNormalizedFTR(t *testing.T) {
 	store.writeEngram(eng1)
 
 	fts := &stubFTS{results: []activation.ScoredID{
-		{ID: eng1.ID, Score: 5.0}, // BM25 raw score — large but normalized via tanh
+		// Post-#711, fts.Search itself returns a calibrated, absolute [0,1]
+		// coverage score — the activation engine no longer tanh-normalizes it.
+		{ID: eng1.ID, Score: 0.85},
 	}}
 	eng := newTestEngine(store, fts, nil)
 

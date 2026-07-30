@@ -155,3 +155,23 @@ candidates (`ActivationEngine.seedTagCandidates` / `storage.ScanRawTagRange`); p
 0x2B for the key layout. **Principle: "stays a post-filter" is a permanent verdict only
 until the seeding mechanism it was rejected for becomes cheap to build — re-litigate
 when the cost equation changes, don't let an old call block a index built for it.**
+
+### Calibration is per-vault, self-derived, never hardcoded from a sample vault (semantic floor / #712, 2026-07-29)
+
+Reliable-colleague work surfaced a recurring trap: tuning a threshold/baseline/vocabulary on the
+maintainer's own vault and shipping that constant as the universal default. #712 currency
+(version-cluster) failed this twice — v1's entity anchor didn't fire on the entity-sparse real
+vault, and v2's tag-marker vocabulary (`four-bucket`, `v2`, `final`) + document-frequency
+thresholds were tuned to one vault's pricing history (and still false-positived on it, telling a
+shipped fact it was superseded by an aspirational "planned" one). The semantic-abstention floor's
+`b = μ+2σ` was derived from that vault's embedding anisotropy — a value that fits bge-small on that
+corpus but misfloors a different vault or model. The maintainer's framing: *"you can calibrate my
+vault to get better results, everyone can calibrate their own vault, but we shouldn't be defining
+the calibration for others."* A maintainer/sample vault is for FINDING bugs and VALIDATING that a
+feature survives messy real data — never for baking a constant into the product; a feature that
+shines on the sample vault and does nothing (or misfires) elsewhere is a failure even when the
+sample passes. **Principle (CLAUDE.md #11): a feature that needs a number derives it from each
+vault's OWN data (self-calibrating — #711 weights IDF from the vault's own corpus; the semantic
+floor should self-measure each vault's anisotropy baseline over its own embeddings) or exposes a
+per-vault override; model/cold-start defaults are hints, never fixed law. Ship mechanisms and
+hints, not other people's answers.**

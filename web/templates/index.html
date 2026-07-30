@@ -1399,6 +1399,9 @@
                   </div>
                 </template>
               </div>
+              <p x-show="plasticityForm.scoringFusion === 'rrf'" style="font-size:0.75rem;color:var(--text-muted);margin:-0.5rem 0 1.25rem;">
+                Note: RRF scores are rank-based, not 0-1 like ACT-R — they rarely exceed ~0.15. Recall thresholds above ~0.01 can filter out everything on an RRF vault.
+              </p>
 
               <!-- Advanced overrides -->
               <div style="margin-bottom:1.25rem;">

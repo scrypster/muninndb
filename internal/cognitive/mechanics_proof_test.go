@@ -343,7 +343,9 @@ func TestProveContradiction_KnownPairs(t *testing.T) {
 
 // TestProveContradiction_SeverityRanking verifies the severity ordering.
 func TestProveContradiction_SeverityRanking(t *testing.T) {
-	// Severity ordering: direct negation (1.0) > temporal (0.9) > conflicting conclusions (0.8) > none (0.0)
+	// Severity ordering: direct negation (1.0) > temporal (0.9) > none (0.0).
+	// COG-23: same-RelType/different-target is NOT a contradiction — there is no
+	// 0.8 tier (the fabricated processBatch rule was removed in R2).
 	directNeg := cognitive.ContradictionSeverity(1, 2)
 	temporal := cognitive.ContradictionSeverity(8, 9)
 	noContra := cognitive.ContradictionSeverity(1, 1)
@@ -351,7 +353,7 @@ func TestProveContradiction_SeverityRanking(t *testing.T) {
 	t.Logf("Severity ranking:")
 	t.Logf("  Direct negation  (Supports vs Contradicts): %.1f", directNeg)
 	t.Logf("  Temporal incompat (PrecededBy vs FollowedBy): %.1f", temporal)
-	t.Logf("  Same rel diff target (conflicting conclusions): 0.8 (applied in processBatch)")
+	t.Logf("  Same rel diff target: 0.0 (COG-23: not a contradiction)")
 	t.Logf("  Compatible relations: %.1f", noContra)
 
 	if directNeg <= temporal {
@@ -365,47 +367,29 @@ func TestProveContradiction_SeverityRanking(t *testing.T) {
 	}
 }
 
-// TestProveContradiction_SameRelDifferentConclusions verifies conflicting conclusions are caught.
+// TestProveContradiction_SameRelDifferentConclusions proves the COG-23 behavior:
+// two associations of the SAME RelType pointing at DIFFERENT targets are NOT a
+// contradiction. Before R2, processBatch fabricated a 0.8-severity contradiction
+// for this ordinary shape (e.g. "A references X" + "A references Y") with no
+// semantic signal consulted; that rule was deleted. Severity now comes ONLY from
+// the ContradictionSeverity matrix or an explicit RelContradicts link — never
+// from same-RelType/different-target association shape.
+//
+// This asserts the matrix-level truth (a same-RelType pair scores 0 — the matrix
+// has no diagonal entry). The processBatch-level pin — that this shape yields
+// zero flags and zero confidence damage through the real ContradictWorker — is
+// TestWrite_TwoTargetsSameRelType_NoFabricatedContradiction (internal package).
 func TestProveContradiction_SameRelDifferentConclusions(t *testing.T) {
-	// RelType=1 (Supports) pointing at two different concept hashes means
-	// "A supports X" and "A supports Y" where X ≠ Y → severity 0.8
-	// This logic lives in processBatch, not ContradictionSeverity.
-	// We verify the conditional logic manually here.
-	a := cognitive.ContradictAssoc{RelType: 1, TargetHash: 111}
-	b := cognitive.ContradictAssoc{RelType: 1, TargetHash: 222}
-
-	// Direct severity check returns 0 (same rel, not in contra matrix)
-	directSev := cognitive.ContradictionSeverity(a.RelType, b.RelType)
-	t.Logf("ContradictionSeverity(1,1) = %.1f (same rel type not in contra matrix)", directSev)
-
-	// The processBatch additional check: same RelType AND different TargetHash → 0.8
-	sameRelDiffTarget := a.RelType == b.RelType && a.TargetHash != b.TargetHash
-	var effectiveSev float64
-	if directSev > 0 {
-		effectiveSev = directSev
-	} else if sameRelDiffTarget {
-		effectiveSev = 0.8
+	// Same RelType, regardless of targets: no diagonal in the matrix → severity 0,
+	// and COG-23 removed the fabricated processBatch rule that added 0.8 here.
+	if sev := cognitive.ContradictionSeverity(1, 1); sev != 0 {
+		t.Errorf("same RelType (Supports vs Supports) must score 0, got %.1f", sev)
 	}
-
-	if effectiveSev != 0.8 {
-		t.Errorf("same rel type, different target hash: expected severity 0.8, got %.1f", effectiveSev)
+	if sev := cognitive.ContradictionSeverity(5, 5); sev != 0 {
+		t.Errorf("same RelType (references vs references) must score 0, got %.1f", sev)
 	}
-	t.Logf("Same relation type pointing at conflicting targets → severity %.1f", effectiveSev)
-
-	// Same rel AND same target hash should NOT trigger (0.0)
-	c := cognitive.ContradictAssoc{RelType: 1, TargetHash: 111}
-	d := cognitive.ContradictAssoc{RelType: 1, TargetHash: 111}
-	sameRelSameTarget := c.RelType == d.RelType && c.TargetHash != d.TargetHash
-	var noConflict float64
-	if cognitive.ContradictionSeverity(c.RelType, d.RelType) > 0 {
-		noConflict = cognitive.ContradictionSeverity(c.RelType, d.RelType)
-	} else if sameRelSameTarget {
-		noConflict = 0.8
-	}
-	if noConflict != 0 {
-		t.Errorf("same rel AND same target hash should not be flagged, got %.1f", noConflict)
-	}
-	t.Logf("Same relation type, same target hash → severity %.1f (no conflict, expected 0.0)", noConflict)
+	t.Log("same RelType / different targets → severity 0 (COG-23: not a contradiction; " +
+		"processBatch-level pin: TestWrite_TwoTargetsSameRelType_NoFabricatedContradiction)")
 }
 
 // TestProveContradiction_Symmetry verifies the contradiction matrix is symmetric.

@@ -318,7 +318,34 @@ func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, cont
 	return err
 }
 
-// Search performs a BM25 search for the given query string.
+// Search performs a calibrated full-text search for the given query string.
+//
+// The returned Score is an ABSOLUTE, query-calibrated coverage score in
+// [0,1] — NOT raw BM25. It is computed as:
+//
+//	Score(d) = ( Σ_t idf_t' · cov_t(d) ) / ( Σ_t idf_t' )
+//
+// where t ranges over the query's (deduplicated, tokenized) content terms,
+// cov_t(d) is term t's field-weighted BM25 coverage in doc d capped at 1
+// (see coverageCap), and idf_t' is the term's IDF — except for a term with
+// NO corpus term-stats entry at all (getIDF returns 0, meaning the corpus has
+// literally never seen this term), which is charged at idfMax: the IDF a
+// term would have at the maximum possible rarity (df=0) for this corpus size.
+// An unseen term is the strongest possible evidence the vault knows nothing
+// about the query, so it must penalize the score, not be skipped.
+//
+// The denominator depends ONLY on the query and the corpus's IDF statistics —
+// never on the result set — so this is never a per-query-max normalization:
+// a document's Score is identical no matter what else scored in the same
+// search. See COG-24 (docs/internals/invariants.md) and issue #711.
+//
+// Before this calibration, Search summed raw unbounded BM25 across terms and
+// the caller applied math.Tanh() to squash it into [0,1]. Raw BM25 saturates
+// tanh by x≈3 (real magnitudes run 2-40), so a single common token in a
+// high-weight field was indistinguishable from a genuine multi-term match —
+// and corpus-absent query terms were silently skipped rather than penalizing.
+// That silent skip + tanh saturation is what let a nonsense query with one
+// coincidental common-word hit report full_text_relevance ≈ 0.9999.
 func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int) ([]ScoredID, error) {
 	start := time.Now()
 	defer func() { metrics.FTSSearchDuration.Observe(time.Since(start).Seconds()) }()
@@ -347,28 +374,7 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 		// ErrNotFound means legacy vault — useRawFallback stays true
 	}
 
-	// Union: include both token forms when they differ
-	allTokens := make([]string, 0, len(stemmedTokens)*2)
-	seen := make(map[string]struct{})
-	// Always include stemmed tokens
-	for _, t := range stemmedTokens {
-		if _, exists := seen[t]; !exists {
-			allTokens = append(allTokens, t)
-			seen[t] = struct{}{}
-		}
-	}
-	// Only include raw tokens for legacy vaults (dual-path backward compat)
-	if useRawFallback {
-		for _, t := range rawTokens {
-			if _, exists := seen[t]; !exists {
-				allTokens = append(allTokens, t)
-				seen[t] = struct{}{}
-			}
-		}
-	}
-	tokens := allTokens
-
-	if len(tokens) == 0 {
+	if len(stemmedTokens) == 0 {
 		return nil, nil
 	}
 	N := float64(stats.TotalEngrams)
@@ -383,21 +389,70 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 		avgdl = 1.0
 	}
 
-	// Per-engram accumulated scores; pre-allocate based on token count to reduce rehash overhead.
-	scores := make(map[[16]byte]float64, len(tokens)*20)
+	// idfMax is the IDF a term would have at the maximum possible rarity
+	// (df=0) for this corpus — the charge for a query term the corpus has
+	// NEVER seen (getIDF returns 0 for "no TermStats entry", which is
+	// exactly that case; it is distinct from a real, merely-low IDF).
+	idfMax := math.Log((N+0.5)/0.5 + 1)
 
-	for _, term := range tokens {
-		idf := idx.getIDF(ws, term, N)
-		if idf <= 0 {
-			continue
+	// numer accumulates Σ_t idf_t'·cov_t(d) per engram; denom accumulates
+	// Σ_t idf_t' — the query+corpus-only normalizer (never the result set).
+	numer := make(map[[16]byte]float64, len(stemmedTokens)*20)
+	var denom float64
+
+	// stemmedTokens[i] and rawTokens[i] are the stemmed/unstemmed forms of the
+	// SAME query word (Tokenize derives stemmedTokens from tokenizeRaw output
+	// 1:1, in order — see Tokenize). Both forms are still searched independently
+	// for real postings (a legacy, un-reindexed vault can have some engrams
+	// indexed under the raw key and others under the stemmed key for the same
+	// word — see TestFTS_DualPathSearch), so each real match still contributes
+	// its own idf/coverage exactly as before #711. The ONLY change is: when
+	// NEITHER form has any corpus stats at all (the word is genuinely absent),
+	// the query word is charged idfMax exactly ONCE — not once per form —
+	// otherwise every dual-path query on a legacy vault would double-penalize
+	// absent words relative to a reindexed vault searching the same query.
+	seenStem := make(map[string]bool, len(stemmedTokens))
+	for i, stemmed := range stemmedTokens {
+		if seenStem[stemmed] {
+			continue // duplicate query word — already scored via its first occurrence
 		}
-		_ = idx.searchToken(ws, term, scores, idf, avgdl)
+		seenStem[stemmed] = true
+
+		raw := rawTokens[i]
+		tryRaw := useRawFallback && raw != stemmed
+
+		idfStemmed := idx.getIDF(ws, stemmed, N)
+		var idfRaw float64
+		if tryRaw {
+			idfRaw = idx.getIDF(ws, raw, N)
+		}
+
+		anyReal := false
+		if idfStemmed > 0 {
+			anyReal = true
+			denom += idfStemmed
+			_ = idx.searchTokenCoverage(ws, stemmed, numer, idfStemmed, avgdl)
+		}
+		if idfRaw > 0 {
+			anyReal = true
+			denom += idfRaw
+			_ = idx.searchTokenCoverage(ws, raw, numer, idfRaw, avgdl)
+		}
+		if !anyReal {
+			// Corpus-absent word (neither form has any stats): no postings
+			// exist to scan, but it penalizes every candidate via the
+			// denominator — charged exactly once for this query word.
+			denom += idfMax
+		}
 	}
 
-	// Sort by score descending
-	results := make([]ScoredID, 0, len(scores))
-	for id, score := range scores {
-		results = append(results, ScoredID{ID: id, Score: score})
+	if denom <= 0 {
+		return nil, nil
+	}
+
+	results := make([]ScoredID, 0, len(numer))
+	for id, n := range numer {
+		results = append(results, ScoredID{ID: id, Score: n / denom})
 	}
 	sortScoredIDs(results)
 
@@ -407,21 +462,21 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 	return results, nil
 }
 
-// searchToken performs a prefix scan for a single token and accumulates BM25
-// scores into the provided scores map. Extracting this into its own function
-// ensures that defer iter.Close() is scoped to the function lifetime rather
-// than the Search() loop body, which would otherwise defer all closes until
-// Search() returns (and risk double-close on the last iterator).
-func (idx *Index) searchToken(ws [8]byte, term string, scores map[[16]byte]float64, idf, avgdl float64) error {
+// searchTokenCoverage performs a prefix scan for a single token and
+// accumulates its IDF-weighted, capped coverage into numer[docID]:
+//
+//	numer[d] += idf * min(1, Σ_fields tfNorm·fieldWeight / (k1+1))
+//
+// The cap is applied per (term, doc) across ALL fields that term appears in
+// within that doc — one term's field-weighted tf can't exceed a coverage of
+// 1.0, so stuffing a single word cannot substitute for covering the query
+// (the coverage this contributes is presence/prominence, not raw frequency).
+func (idx *Index) searchTokenCoverage(ws [8]byte, term string, numer map[[16]byte]float64, idf, avgdl float64) error {
 	// Prefix scan for this term across all fields.
 	// Key format: 0x05 | ws[8] | term | 0x00 | field[1] | id[16]
-	// Use field=0x00 for lower bound; upper bound stops at the 0x00 separator + 0x01.
 	lowerBound := keys.FTSPostingKey(ws, term, 0x00, [16]byte{})
-	// Upper bound: increment the separator byte after the term so the scan covers
-	// all field values (0x00–0xFF) for this term.
 	upperBound := make([]byte, len(lowerBound))
 	copy(upperBound, lowerBound)
-	// sepPos is the index of the 0x00 separator byte: prefix(1) + ws(8) + term.
 	sepPos := 1 + 8 + len(term)
 	upperBound[sepPos] = 0x01
 
@@ -434,9 +489,13 @@ func (idx *Index) searchToken(ws [8]byte, term string, scores map[[16]byte]float
 	}
 	defer iter.Close()
 
-	// Key layout: 0x05[1] | ws[8] | term[n] | 0x00[1] | field[1] | id[16]
 	minKeyLen := 1 + 8 + len(term) + 1 + 1 + 16
-	idOffset := 1 + 8 + len(term) + 1 + 1 // skip prefix, ws, term, separator, field
+	idOffset := 1 + 8 + len(term) + 1 + 1
+
+	// covRaw accumulates the uncapped, unweighted-by-idf coverage per doc for
+	// this term (summed across every field the term appears in within that
+	// doc) so the cap is applied ONCE per (term, doc), not per field.
+	covRaw := make(map[[16]byte]float64, 32)
 
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := iter.Key()
@@ -455,16 +514,20 @@ func (idx *Index) searchToken(ws [8]byte, term string, scores map[[16]byte]float
 			dl = avgdl
 		}
 
-		// BM25 formula
 		tfNorm := tf * (k1 + 1) / (tf + k1*(1-b+b*dl/avgdl))
-		bm25 := idf * tfNorm * fieldWeight(pv.Field)
-
-		// Guard against NaN/Inf scores that corrupt sorting
-		if math.IsNaN(bm25) || math.IsInf(bm25, 0) {
+		weighted := tfNorm * fieldWeight(pv.Field)
+		if math.IsNaN(weighted) || math.IsInf(weighted, 0) {
 			continue
 		}
+		covRaw[engramID] += weighted
+	}
 
-		scores[engramID] += bm25
+	for id, raw := range covRaw {
+		cov := raw / (k1 + 1)
+		if cov > 1 {
+			cov = 1
+		}
+		numer[id] += idf * cov
 	}
 	return nil
 }

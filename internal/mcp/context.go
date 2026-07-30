@@ -180,7 +180,8 @@ func isMutatingTool(name string) bool {
 		"muninn_compare_and_set",
 		"muninn_claim",
 		"muninn_release",
-		"muninn_create_workflow_vault":
+		"muninn_create_workflow_vault",
+		"muninn_intend":
 		return true
 	}
 	return false

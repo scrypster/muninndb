@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"math"
 	"sort"
 	"time"
@@ -111,6 +113,23 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 		return results
 	}
 
+	// COG-18: the boost pass is explicitly skipped under rrf fusion. Its
+	// factor/cap/noise-floor (see the CALIBRATION CAVEAT above) are calibrated
+	// to the ACT-R [0, 1] scale; rrf finals are rank-based and typically land
+	// in [0, 0.05]. Before R1 this was an accidental no-op — the pre-#590-fix
+	// 0.1 threshold coerce meant no rrf result ever cleared the seed rule.
+	// Now that default rrf recall reaches its genuine ~0.001 threshold
+	// (activation.Run()'s mode-aware default), leaving this pass live would
+	// let a +0.30-scale boost dominate and outrank real ~0.05-scale content
+	// matches — an injected engram could out-score every genuine hit. Skip it
+	// deliberately until the boost is recalibrated for rrf's scale (#570
+	// follow-up); today's effective (accidental) behavior is preserved on
+	// purpose.
+	if req.Weights != nil && req.Weights.UseRRFFusion {
+		slog.Debug("applyEntityBoost: skipped under rrf fusion (scale mismatch, #570 follow-up)")
+		return results
+	}
+
 	// Seed the boost from at most entityBoostTopN top results, but ONLY from
 	// results that genuinely cleared the relevance threshold. A result whose
 	// Score is below the threshold is in the set only because it matched an
@@ -210,14 +229,17 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 	}
 
 	// Pass 2b: inject engrams the pipeline did not retrieve, iff their
-	// entity evidence alone clears the caller's threshold AND they pass the
-	// rest of phase 6's result contract. A result below threshold stays below
-	// threshold regardless of how it was found, and an engram phase 6 would
-	// have hidden (filters, trust, lease, validity) must not ride in through
-	// the boost side door. Each check mirrors its phase-6 counterpart in
-	// activation/engine.go; injections are typically few, so the per-candidate
-	// lease read costs less than batching would save.
-	injectNow := time.Now()
+	// entity evidence alone clears the caller's threshold AND the visibility
+	// gate admits them. A result below threshold stays below threshold
+	// regardless of how it was found (the threshold comparison is boost
+	// semantics, so it stays here), and an engram phase 6 would have hidden
+	// (filters, trust, lease, validity) must not ride in through the boost
+	// side door — that decision is the gate's, shared with every other
+	// injector. Injection-side only: pass 2a boosts engrams the pipeline
+	// already returned, which cleared the full contract in phase 6 —
+	// re-gating those would be a no-op. Injections are typically few, so the
+	// gate's per-candidate lease read costs less than batching would save.
+	gate := newVisibilityGate(req, time.Now())
 	for id, acc := range boosts {
 		if acc.total < req.Threshold {
 			continue
@@ -226,38 +248,7 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 		if err != nil || eng == nil {
 			continue
 		}
-		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
-			continue
-		}
-		if !activation.PassesMetaFilter(eng, req.Filters) {
-			continue // injected results obey the caller's filters like any pipeline result
-		}
-		// Hard trust filter. ExcludeUntrusted rides the request bool, not
-		// Filters, so PassesMetaFilter cannot enforce it. Injection-side only:
-		// pass 2a boosts engrams the pipeline already returned, which cleared
-		// this filter (and the two below) in phase 6 — re-filtering those
-		// would be a no-op.
-		if req.ExcludeUntrusted && eng.Trust == storage.TrustUntrusted {
-			continue
-		}
-		// Work-queue checkout (#548): hide engrams under a live foreign lease.
-		// A lease-read error fails CLOSED (skip the injection): phase 6 fails
-		// the whole request on the same fault, and silently admitting a
-		// possibly-checked-out engram is worse than dropping an optional
-		// enrichment. A missing lease record is not an error on either path.
-		if !req.IncludeLeased {
-			l, err := e.store.GetLease(ctx, ws, id)
-			if err != nil {
-				continue
-			}
-			if l.Live(injectNow) && l.Owner != req.CallerOwner {
-				continue
-			}
-		}
-		// Valid-time gate (COG-19): the final gate in activateCore would drop
-		// an expired injection anyway; checking here keeps TotalFound honest
-		// and spares supersession the phantom work.
-		if !activation.PassesValidity(eng, req.AsOf, req.IncludeInvalid, injectNow) {
+		if !gate.Admits(ctx, e.store, ws, eng) {
 			continue
 		}
 		results = append(results, activation.ScoredEngram{
@@ -271,6 +262,17 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 		})
 	}
 
-	sort.SliceStable(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+	// Deterministic order (#698): SliceStable on Score alone is NOT enough here —
+	// pass 2b appends injections in Go map-iteration order, so tied boost totals
+	// (equal EntityBoost·idf) would survive MaxResults truncation in an arbitrary
+	// subset. Break ties by ULID so the output is independent of map order.
+	// Mirrors applySupersession's tiebreak (engine_supersession.go).
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		a, b := results[i].Engram.ID, results[j].Engram.ID
+		return bytes.Compare(a[:], b[:]) < 0
+	})
 	return results
 }

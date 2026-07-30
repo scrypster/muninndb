@@ -56,6 +56,9 @@ type NeighborWorker struct {
 	hnsw    NeighborHNSW
 	metrics *NeighborMetrics
 	wg      sync.WaitGroup
+	// jobWG tracks in-flight+queued jobs; see Worker.jobWG in autoassoc.go
+	// for the same pattern. Lets WaitIdle() block deterministically.
+	jobWG   sync.WaitGroup
 	stopCtx context.Context
 }
 
@@ -81,16 +84,24 @@ func NewNeighborWorker(ctx context.Context, store NeighborStore, hnsw NeighborHN
 // the job is dropped (non-blocking) and the Dropped counter is incremented.
 // Drops are logged at powers of 2.
 func (w *NeighborWorker) EnqueueNeighborJob(job NeighborJob) {
+	w.jobWG.Add(1) // Add BEFORE the send so a concurrent WaitIdle() can't observe a false-idle gap.
 	select {
 	case w.jobs <- job:
 		w.metrics.Enqueued.Add(1)
 	default:
+		w.jobWG.Done() // never queued — nothing to wait for
 		dropped := w.metrics.Dropped.Add(1)
 		// Log at powers of 2: 1, 2, 4, 8, 16, ...
 		if dropped&(dropped-1) == 0 {
 			slog.Warn("neighbor worker queue full, dropping job", "dropped", dropped)
 		}
 	}
+}
+
+// WaitIdle blocks until every job enqueued so far has finished processing.
+// Test-only synchronization helper; see Worker.WaitIdle in autoassoc.go.
+func (w *NeighborWorker) WaitIdle() {
+	w.jobWG.Wait()
 }
 
 // Stop drains all pending jobs and waits for in-flight work to complete.
@@ -112,14 +123,25 @@ func (w *NeighborWorker) GetNeighborMetrics() (enqueued, completed, dropped, err
 func (w *NeighborWorker) run() {
 	defer w.wg.Done()
 	for job := range w.jobs {
-		ctx, cancel := context.WithTimeout(w.stopCtx, neighborJobTimeout)
-		if err := w.processNeighborJob(ctx, job); err != nil {
-			w.metrics.Errors.Add(1)
-			slog.Warn("neighbor worker job failed", "err", err)
-		} else {
-			w.metrics.Completed.Add(1)
-		}
-		cancel()
+		w.runJob(job)
+	}
+}
+
+// runJob processes a single job. Done() and cancel() are deferred (rather
+// than called as plain statements after processNeighborJob returns) so they
+// still fire if the job ever panics — otherwise a panicking job would leak
+// an un-Done() jobWG entry and hang a subsequent WaitIdle() forever. This
+// does not add a recover(): a panic still propagates and crashes the
+// process, it only makes the bookkeeping robust if one unwinds through here.
+func (w *NeighborWorker) runJob(job NeighborJob) {
+	defer w.jobWG.Done()
+	ctx, cancel := context.WithTimeout(w.stopCtx, neighborJobTimeout)
+	defer cancel()
+	if err := w.processNeighborJob(ctx, job); err != nil {
+		w.metrics.Errors.Add(1)
+		slog.Warn("neighbor worker job failed", "err", err)
+	} else {
+		w.metrics.Completed.Add(1)
 	}
 }
 

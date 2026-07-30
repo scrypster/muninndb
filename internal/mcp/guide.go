@@ -130,6 +130,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	}
 	if resolved.ScoringFusion == "rrf" {
 		fmt.Fprintf(&b, "- Scoring fusion: RRF (rank-based, scale-invariant)\n")
+		fmt.Fprintf(&b, "  Note: RRF scores rarely exceed ~0.15 (they are rank-based, not the 0-1 ACT-R scale). muninn_recall's threshold defaults to near-zero on this vault; if you set threshold explicitly, keep it <= 0.01 or you may filter out every result.\n")
 	} else if resolved.ScoringFusion == "weighted_sum" {
 		fmt.Fprintf(&b, "- Scoring fusion: weighted sum\n")
 	} else {
@@ -150,7 +151,16 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("**Good:** Three separate memories:\n")
 	b.WriteString("  1. \"Decided on JWTs with 15-minute expiry for authentication\" (type: decision)\n")
 	b.WriteString("  2. \"Tom is implementing the auth system\" (type: task)\n")
-	b.WriteString("  3. \"API rate limit set to 100 requests/second per client\" (type: decision)\n")
+	b.WriteString("  3. \"API rate limit set to 100 requests/second per client\" (type: decision)\n\n")
+	b.WriteString("**Updating vs. creating.** If you are re-asserting or updating a fact that changes or replaces a prior version of the same thing ")
+	b.WriteString("(a re-run score, a corrected status, a fact that went stale), call `muninn_evolve(id, new_content, reason)` — not `muninn_remember`. ")
+	b.WriteString("Evolve links the new engram to the old one with a `supersedes` association and soft-deletes the predecessor, so the old version ")
+	b.WriteString("drops out of present-tense recall entirely (it is never destroyed — `as_of` still sees it). Calling `muninn_remember` again for the ")
+	b.WriteString("same fact instead creates a brand-new, unlinked engram: nothing tells recall the old one is stale, so every prior copy stays fully ")
+	b.WriteString("active and keeps competing for rank. Reserve `muninn_remember` for genuinely NEW atomic facts; use `muninn_evolve` for anything that ")
+	b.WriteString("supersedes what's already stored. This matters most for bulk or repeated-write pipelines that re-run over the same entities (periodic ")
+	b.WriteString("re-scoring, re-auditing, status polling): re-remembering on every run silently accumulates near-duplicate copies that crowd out other ")
+	b.WriteString("results in recall — evolving keeps the vault at one live version per fact.\n")
 
 	// Hierarchical memory
 	b.WriteString("\n## Hierarchical Memory\n\n")
@@ -204,6 +214,15 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- Set it explicitly (e.g. 0.9) for memories that must survive memory pressure: pivotal decisions, hard constraints, identity facts.\n")
 	b.WriteString("- `muninn_evolve` inherits the predecessor's explicit importance unless you override it.\n")
 
+	// Prospective memory (THE PUSH)
+	b.WriteString("\n## Prospective memory (muninn_intend)\n\n")
+	b.WriteString("`muninn_intend(content, cues=[entity, ...])` arms an intention: \"when <cue entity> comes up, surface <content>\". ")
+	b.WriteString("It never interrupts — when a later muninn_recall/muninn_remember is actually about a cue entity, the response carries a `notices` field (max 2, deduped per session). ")
+	b.WriteString("When you see a notice, act on it or acknowledge it to the user; a one-shot intention (default) disarms after delivery, a recurring one can be disarmed with muninn_forget on its id.\n")
+	b.WriteString("- Cues are entity names; pick rare, specific ones (ubiquitous cues are rejected).\n")
+	b.WriteString("- `valid_until` silences an expired intention; it never triggers delivery (there is no scheduler).\n")
+	b.WriteString("- Notice delivery requires the server opt-in `MUNINN_PROSPECTIVE=1`; arming works regardless and delivery starts once enabled.\n")
+
 	// Tips
 	b.WriteString("\n## Tips\n\n")
 	if resolved.MultiUser {
@@ -215,7 +234,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- Use muninn_recall with mode='deep' for thorough searches across the memory graph.\n")
 	b.WriteString("- Use muninn_link to connect related memories and strengthen the knowledge graph.\n")
 	b.WriteString("- Use muninn_decide to record decisions — they automatically link to supporting evidence.\n")
-	b.WriteString("- Use muninn_evolve instead of forget+remember when updating existing information.\n")
+	b.WriteString("- Use muninn_evolve instead of forget+remember (or repeated muninn_remember) when updating existing information — only evolve's supersedes link removes the old version from present-tense recall; repeated remember leaves every stale copy fully active and crowds recall with near-duplicates.\n")
 	b.WriteString("- Use muninn_remember_batch when storing multiple memories from the same conversation.\n")
 
 	return b.String()

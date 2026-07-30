@@ -40,16 +40,17 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		}
 	}
 	m := Memory{
-		Annotations: annotations,
-		ID:          item.ID,
-		Concept:     item.Concept,
-		Content:     previewContent,
-		Summary:     item.Summary,
-		Score:       roundScore(item.Score),
-		VectorScore: roundScore(item.ScoreComponents.SemanticSimilarity),
-		EntityBoost: roundScore(item.ScoreComponents.EntityBoost),
-		Confidence:  item.Confidence,
-		Why:         item.Why,
+		Annotations:    annotations,
+		ID:             item.ID,
+		Concept:        item.Concept,
+		Content:        previewContent,
+		Summary:        item.Summary,
+		Score:          roundScore(item.Score),
+		VectorScore:    roundScore(item.ScoreComponents.SemanticSimilarity),
+		VectorScoreRaw: roundScore(item.ScoreComponents.SemanticSimilarityRaw),
+		EntityBoost:    roundScore(item.ScoreComponents.EntityBoost),
+		Confidence:     item.Confidence,
+		Why:            item.Why,
 		// Map the lifecycle state label the same way the read path does (#502).
 		State: storage.LifecycleState(item.State).String(),
 		// Type mirrors the vocabulary muninn_remember accepts (storage.ParseMemoryType).

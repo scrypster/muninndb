@@ -1316,6 +1316,15 @@ func runServer() {
 	initCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	embedder, embedPlugin, err := buildEmbedder(initCtx, savedPluginCfg, *dataDir)
 	cancel()
+	// Resolve the model identifier for the COG-26 semantic noise-baseline
+	// registry (internal/plugin/embed/baseline.go). embedPlugin's concrete
+	// type (*embedpkg.EmbedService for every built-in provider) exposes it;
+	// an unrecognized plugin type leaves this empty, which resolveSemanticBaseline
+	// treats as "unknown model" — identity transform + WARN, never a guess.
+	embedModelName := ""
+	if m, ok := embedPlugin.(interface{ Model() string }); ok {
+		embedModelName = m.Model()
+	}
 	if err != nil {
 		slog.Error("embedder build failed", "err", err)
 		os.Exit(1)
@@ -1403,6 +1412,7 @@ func runServer() {
 		ConfidenceWorker: confidenceWorkerImpl.Worker,
 		Embedder:         embedder,
 		HNSWRegistry:     hnswRegistry,
+		EmbedModelName:   embedModelName,
 	})
 
 	eng.SetTransitionWorker(transitionWorkerImpl)

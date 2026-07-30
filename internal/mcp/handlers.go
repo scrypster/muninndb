@@ -211,6 +211,10 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		}
 		result.Hint += fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformed)
 	}
+	// THE PUSH: prospective notices — focal set is the caller-supplied inline
+	// entities; the created engram is the self-echo guard. Inert unless
+	// MUNINN_PROSPECTIVE=1.
+	result.Notices = s.rememberNotices(ctx, vault, req.Entities, resp.ID)
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 
@@ -359,7 +363,39 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
+	// Recall mode: validate here (fail fast with a helpful error), but FORWARD
+	// the mode instead of stamping preset values into the request — the engine
+	// is the single preset decider, because only it knows the effective
+	// scoring mode and preset thresholds are scale-bound (#704: stamping
+	// deep's ACT-R-calibrated 0.1 here silently emptied rrf vaults).
+	mode, _ := args["mode"].(string)
+	if mode != "" {
+		if _, modeErr := lookupMode(mode); modeErr != nil {
+			sendError(w, id, -32602, modeErr.Error())
+			return
+		}
+	}
+
+	// Default threshold is mode-aware (COG-6): a caller-omitted threshold must
+	// not pre-fill a value calibrated to ACT-R's blended scale onto an rrf vault,
+	// whose finals top out around ~0.05-0.15 — that silently zeroes recall on a
+	// scoring mode the web console offers. For rrf vaults, pass 0 ("unset")
+	// through to the engine, which lets activation.Run() apply its mode-aware
+	// default (rrf -> 0.001, #590's mechanism). A recall mode likewise leaves
+	// 0: the mode's preset replaces this surface's historical 0.5 default, and
+	// resolving the preset is the engine's decision (#704). An explicit caller
+	// threshold is never modified.
 	threshold := float32(0.5)
+	_, thresholdSet := args["threshold"]
+	if !thresholdSet {
+		if mode != "" && mode != "balanced" {
+			// A threshold-carrying mode replaces this surface's 0.5 default;
+			// "balanced" means engine defaults and keeps the historical 0.5.
+			threshold = 0
+		} else if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.ScoringFusion == "rrf" {
+			threshold = 0
+		}
+	}
 	if t, ok := args["threshold"].(float64); ok {
 		if t < 0 {
 			t = 0
@@ -380,17 +416,6 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	profile, _ := args["profile"].(string)
 
-	// Mode shortcuts: resolve preset if provided.
-	var modePreset RecallMode
-	if modeStr, ok := args["mode"].(string); ok && modeStr != "" {
-		preset, modeErr := lookupMode(modeStr)
-		if modeErr != nil {
-			sendError(w, id, -32602, modeErr.Error())
-			return
-		}
-		modePreset = preset
-	}
-
 	readOnly, roErrMsg := resolveReadOnly(ctx, args)
 	if roErrMsg != "" {
 		sendError(w, id, -32001, roErrMsg)
@@ -400,6 +425,7 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	req := &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    contexts,
+		Mode:       mode,
 		Threshold:  threshold,
 		MaxResults: limit,
 		Profile:    profile,
@@ -412,36 +438,6 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	}
 	if includeLeased, ok := args["include_leased"].(bool); ok {
 		req.IncludeLeased = includeLeased
-	}
-
-	// Apply non-zero mode preset fields.
-	// Explicit caller threshold/limit args always win (already parsed above).
-	if modePreset.Threshold > 0 {
-		if _, callerSet := args["threshold"]; !callerSet {
-			req.Threshold = modePreset.Threshold
-		}
-	}
-	if modePreset.MaxHops > 0 {
-		req.MaxHops = modePreset.MaxHops
-	}
-
-	// Apply mode preset scoring weights to the request.
-	if modePreset.SemanticSimilarity > 0 || modePreset.FullTextRelevance > 0 || modePreset.Recency > 0 || modePreset.DisableACTR {
-		if req.Weights == nil {
-			req.Weights = &mbp.Weights{}
-		}
-		if modePreset.SemanticSimilarity > 0 {
-			req.Weights.SemanticSimilarity = modePreset.SemanticSimilarity
-		}
-		if modePreset.FullTextRelevance > 0 {
-			req.Weights.FullTextRelevance = modePreset.FullTextRelevance
-		}
-		if modePreset.Recency > 0 {
-			req.Weights.Recency = modePreset.Recency
-		}
-		if modePreset.DisableACTR {
-			req.Weights.DisableACTR = true
-		}
 	}
 
 	// Temporal filters: since / before
@@ -570,10 +566,25 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		"memories": memories,
 		"total":    resp.TotalFound,
 	}
+	// THE PUSH: prospective notices — focal set derives from the RETURNED
+	// results; readOnly (COG-11) suppresses the fired-marker write. Omitted
+	// when empty; inert unless MUNINN_PROSPECTIVE=1.
+	if notices := s.recallNotices(ctx, vault, resp.Activations, readOnly); len(notices) > 0 {
+		result["notices"] = notices
+	}
 	if len(memories) == 0 {
 		hint := "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."
-		if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.MultiUser {
+		p, pErr := s.engine.GetVaultPlasticity(ctx, vault)
+		if pErr == nil && p != nil && p.MultiUser {
 			hint = "No results matched. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global). For semantic recall, provide more specific context."
+		}
+		// COG-6: never clobber an explicit threshold — only hint. An rrf vault's
+		// blended finals rarely exceed ~0.15, so a caller-supplied threshold at
+		// or above 0.01 can silently filter every result. Only fires when the
+		// caller set the threshold explicitly (thresholdSet); the omitted-arg
+		// case is already handled mode-aware above.
+		if pErr == nil && p != nil && p.ScoringFusion == "rrf" && thresholdSet && threshold >= 0.01 {
+			hint += fmt.Sprintf(" Note: this vault uses rrf (rank-based) scoring — scores rarely exceed ~0.15; a threshold of %g filters everything; try <= 0.01.", threshold)
 		}
 		result["hint"] = hint
 	}

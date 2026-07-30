@@ -17,7 +17,7 @@ func allToolDefinitions() []ToolDefinition {
 	return []ToolDefinition{
 		{
 			Name:        "muninn_remember",
-			Description: "Store a new piece of information (engram) in long-term memory. IMPORTANT: Keep each memory atomic — one concept, decision, or fact per memory. If a conversation covers multiple topics, use muninn_remember_batch to store them as separate memories. Atomic memories produce sharper recall, better associations, and more accurate contradiction detection. TIP: Provide ‘entities’ and ‘entity_relationships’ whenever you can identify them — this builds the knowledge graph immediately without requiring background enrichment. NOTE: If the exact same content already exists in the vault, the existing memory ID is returned instead of creating a duplicate.",
+			Description: "Store a new piece of information (engram) in long-term memory. IMPORTANT: Keep each memory atomic — one concept, decision, or fact per memory. If a conversation covers multiple topics, use muninn_remember_batch to store them as separate memories. Atomic memories produce sharper recall, better associations, and more accurate contradiction detection. TIP: Provide ‘entities’ and ‘entity_relationships’ whenever you can identify them — this builds the knowledge graph immediately without requiring background enrichment. NOTE: If the exact same content already exists in the vault, the existing memory ID is returned instead of creating a duplicate. CAUTION: If this call is RE-ASSERTING or UPDATING a fact you already stored (a re-run score, a refreshed status), use muninn_evolve(id, ...) on the prior engram instead — calling muninn_remember repeatedly for the same evolving fact leaves every stale copy fully active and crowds recall with near-duplicates.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -175,7 +175,7 @@ func allToolDefinitions() []ToolDefinition {
 				"properties": map[string]any{
 					"vault":     vaultProp,
 					"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Search context phrases."},
-					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0 (default 0.5)."},
+					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0. Default is mode-aware: 0.5 for the normal (ACT-R) scoring vault; for a vault configured with scoring_fusion='rrf', scores are rank-based and rarely exceed ~0.15, so the default there is effectively 0 (near-zero floor) — an explicit threshold above ~0.01 on an rrf vault can filter out everything."},
 					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 10)."},
 					"profile": map[string]any{
 						"type":        "string",
@@ -184,7 +184,7 @@ func allToolDefinitions() []ToolDefinition {
 					"mode": map[string]any{
 						"type":        "string",
 						"enum":        []string{"semantic", "recent", "balanced", "deep"},
-						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)",
+						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)\nPreset thresholds are ACT-R-calibrated and apply only under ACT-R/weighted-sum scoring; on an rrf-fusion vault the preset threshold abstains and the rrf mode-aware default (~0.001) applies, so modes are safe to use there. An explicit threshold always wins.",
 					},
 					"since": map[string]any{
 						"type":        "string",
@@ -324,7 +324,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_evolve",
-			Description: "Update a memory with new information. Creates a new version and archives the old one.",
+			Description: "Update a memory with new information. Creates a new version linked to the old one by a supersedes association, and soft-deletes the old version so it drops out of present-tense recall (never destroyed — as_of still sees it). Use this — not a repeated muninn_remember — whenever a new call is re-asserting or replacing a fact you already stored; otherwise every stale copy stays fully active and crowds recall with near-duplicates.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -973,6 +973,27 @@ func allToolDefinitions() []ToolDefinition {
 					},
 				},
 				"required": []string{"id", "trust"},
+			},
+		},
+		// THE PUSH: prospective memory — arm an intention on entity cues.
+		{
+			Name:        "muninn_intend",
+			Description: "Arm a prospective intention: 'when <cue entity> comes up, surface <content>'. Stored as a goal memory and armed on one or more cue entities. It NEVER interrupts — it is delivered as a 'notices' field on a later muninn_recall/muninn_remember response whose results are actually about the cue entity (requires MUNINN_PROSPECTIVE=1 on the server). Cues must be specific: an entity mentioned by a large share of the vault is refused. valid_until only silences an expired intention; it never triggers delivery.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":   vaultProp,
+					"content": map[string]any{"type": "string", "description": "What to surface when a cue entity becomes focal (delivered verbatim in the notice)."},
+					"cues": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Entity names to arm on (1-8). The intention fires when one of these entities is focal in a later call's results. Prefer rare, specific entities; ubiquitous ones are rejected.",
+					},
+					"valid_until": map[string]any{"type": "string", "description": "ISO 8601 expiry. A BOUND, not a trigger: after this instant the intention is silenced, never fired. Optional."},
+					"one_shot":    map[string]any{"type": "boolean", "description": "When true (default) the intention disarms after its first delivery. Set false for a recurring prompt (re-fires once per session while armed)."},
+					"importance":  map[string]any{"type": "number", "description": "Priority in [0,1]; ranks this notice against others when more than 2 are eligible (default: goal-type derived 0.6)."},
+				},
+				"required": []string{"content", "cues"},
 			},
 		},
 		// RFC #597: privileged workflow-vault creation (recursion-guarded in dispatchToolCall).

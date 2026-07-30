@@ -32,6 +32,7 @@ import (
 	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/metrics/latency"
 	"github.com/scrypster/muninndb/internal/plugin"
+	embedpkg "github.com/scrypster/muninndb/internal/plugin/embed"
 	"github.com/scrypster/muninndb/internal/provenance"
 	"github.com/scrypster/muninndb/internal/scoring"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -125,6 +126,12 @@ type Engine struct {
 	transitionWorker *cognitive.TransitionWorker
 	activity         *cognitive.ActivityTracker
 	embedder         activation.Embedder // optional embedder for embedding-based brief scoring
+	// embedModelName is the resolved model identifier for embedder (COG-26,
+	// see EngineConfig.EmbedModelName). Empty = unknown → identity transform.
+	embedModelName string
+	// warnedUnknownEmbedModels dedupes the COG-26 "no calibration on record"
+	// WARN so a busy vault doesn't spam logs once per query.
+	warnedUnknownEmbedModels sync.Map // model string -> struct{}{}
 	// Feature subsystems (all optional, nil-safe)
 	autoAssoc            *autoassoc.Worker         // write-time automatic tag-based associations
 	neighborWorker       *autoassoc.NeighborWorker // semantic neighbor auto-linking
@@ -446,6 +453,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		confidenceWorker: cfg.ConfidenceWorker,
 		activity:         cognitive.NewActivityTracker(),
 		embedder:         cfg.Embedder,
+		embedModelName:   cfg.EmbedModelName,
 		autoAssoc:        autoassoc.New(stopCtx, store, cfg.FTSIndex),
 		neighborWorker:   autoassoc.NewNeighborWorker(stopCtx, store, cfg.HNSWRegistry),
 		goalLinkWorker:   autoassoc.NewGoalLinkWorker(stopCtx, store, cfg.HNSWRegistry),
@@ -490,7 +498,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 	if e.hebbianWorker != nil && e.triggers != nil {
 		e.hebbianWorker.OnWeightUpdate = func(ws [8]byte, id [16]byte, field string, old, new float64) {
 			vaultID := wsVaultID(ws)
-			e.triggers.NotifyCognitive(vaultID, storage.ULID(id), field, float32(old), float32(new))
+			e.triggers.NotifyCognitive(vaultID, ws, storage.ULID(id), field, float32(old), float32(new))
 		}
 	}
 	// Fix 5: Load persisted coherence counters for known vaults.
@@ -737,6 +745,18 @@ func (e *Engine) spawnFireAndForget(fn func()) bool {
 	return true
 }
 
+// waitFireAndForgetIdle blocks until every fire-and-forget goroutine spawned
+// so far (RecordFeedback's scoring/TouchAccess writes, Read's reinforcement
+// signal) has finished. Test-only synchronization helper, mirroring
+// autoassoc.Worker.WaitIdle: production callers never await this —
+// fire-and-forget work is deliberately unawaited on the request path.
+// Safe to call only when the caller knows no *other* concurrent request on
+// this Engine is still spawning fire-and-forget work, since the WaitGroup is
+// shared across all callers of spawnFireAndForget.
+func (e *Engine) waitFireAndForgetIdle() {
+	e.fireAndForgetWG.Wait()
+}
+
 // spawnJob tracks fn in the engine's job WaitGroup and launches it as a
 // goroutine. Returns false without spawning if the engine is shutting down.
 // Callers MUST fail the associated job immediately when false is returned.
@@ -754,6 +774,71 @@ func (e *Engine) spawnJob(fn func()) bool {
 		fn()
 	}()
 	return true
+}
+
+// waitWriteTimeIdle blocks until every write-time async worker has finished
+// the work enqueued so far: the three association workers (autoAssoc,
+// neighborWorker, goalLinkWorker) AND the FTS indexer (ftsWorker), all of
+// which run off the Write() hot path (see the Intend/Write enqueue sites) so
+// normal callers never await them — recall tolerates their eventual
+// consistency by design. It also drains the activation engine's async log
+// drainer (see below) — not a write-time worker, but folded in here so the
+// harness has a single drain call to make between scripted steps.
+//
+// Test-only synchronization helper: the prospective acceptance harness arms
+// intentions via Intend() (which calls Write()) and then immediately runs
+// scripted Activate() calls that depend both on associations these workers
+// create (RelSupports for the BFS pool) AND on the intention being FTS-indexed
+// (the only recall path with the harness's noop zero-vector embeddings). Async
+// FTS indexing is decoupled from the write hot path (ftsWorker), so without
+// flushing it a scripted call can run before its intention is searchable and
+// the intention silently "does not fire" — the residual harness flake under
+// -race/CPU contention. Draining all of it makes the harness observe steady
+// state before asserting recall. Production scheduling/dispatch is unchanged;
+// this only adds the ability to await it.
+//
+// activation.WaitLogIdle (drainLog/logCh): Run() submits each activation's
+// result set to a buffered channel that a single goroutine drains into
+// assocLog, which phase4HebbianBoost reads on the NEXT call to boost
+// candidates associated with something recently activated. The drainer's
+// eventual consistency ("~1ms lag, half-life 3600s — irrelevant", per its
+// doc comment) is production-safe but breaks a scripted back-to-back
+// harness: call N's log entry can still be in flight when call N+1 runs
+// phase4HebbianBoost, so the same candidate nondeterministically scores with
+// or without that boost — flipping which of two near-tied candidates ranks
+// first (and, downstream, whether NoticesForRecall sees the corroborator or
+// the intention's own engram at rank 0). Refs #722.
+func (e *Engine) waitWriteTimeIdle() {
+	if e.autoAssoc != nil {
+		e.autoAssoc.WaitIdle()
+	}
+	if e.neighborWorker != nil {
+		e.neighborWorker.WaitIdle()
+	}
+	if e.goalLinkWorker != nil {
+		e.goalLinkWorker.WaitIdle()
+	}
+	if e.ftsWorker != nil {
+		// Best-effort in a test helper; the timeout is generous enough that it
+		// never trips for the handful of intentions the harness arms.
+		_ = e.ftsWorker.Flush(10 * time.Second)
+	}
+	if e.activation != nil {
+		e.activation.WaitLogIdle()
+	}
+}
+
+// resetActivationLogForVault clears the activation engine's recorded recent-
+// activations for vault (see activation.ActivationLog.ResetVault). Test-only:
+// callers MUST have already called waitWriteTimeIdle (or otherwise know no
+// Activate() on this vault has an entry still in flight to the log drainer),
+// or the reset can be immediately undone by a late-arriving drain.
+func (e *Engine) resetActivationLogForVault(vault string) {
+	if e.activation == nil {
+		return
+	}
+	ws := e.store.ResolveVaultPrefix(vault)
+	e.activation.ResetLog(wsVaultID(ws))
 }
 
 // beginVaultOp tracks synchronous vault-operation setup work that can still
@@ -1382,7 +1467,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 			Associations: contraAssocs,
 			OnFound: func(ev cognitive.ContradictionEvent) {
 				if e.triggers != nil {
-					e.triggers.NotifyContradiction(wsVaultID(wsPrefix), storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
+					e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "relation_matrix")
 				}
 				_, _, cw := e.cogWorkers()
 				if cw != nil {
@@ -2098,7 +2183,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 				Associations: contraAssocs,
 				OnFound: func(ev cognitive.ContradictionEvent) {
 					if e.triggers != nil {
-						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "semantic")
+						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "relation_matrix")
 					}
 					_, _, cw := e.cogWorkers()
 					if cw != nil {
@@ -2380,10 +2465,6 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	if actReq.MaxResults == 0 {
 		actReq.MaxResults = 20
 	}
-	if actReq.Threshold == 0 {
-		actReq.Threshold = 0.1
-	}
-
 	// Fix 2: Default to resolved HopDepth (from Plasticity preset) BFS traversal.
 	// The association graph is the primary differentiator of MuninnDB — it should
 	// be active by default. Order matters: apply default FIRST, then check explicit opt-out.
@@ -2399,6 +2480,24 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// MCP/REST/gRPC handler — credential-observe OR request read_only) also
 	// forces this; it can only ADD read-only-ness, never remove it.
 	actReq.ReadOnly = auth.ObserveFromContext(ctx) || req.ReadOnly
+
+	// Resolve the recall-mode preset — explicit wire mode first, else the
+	// vault default. The engine is the SINGLE preset decider (#704):
+	// transports validate the mode name and forward it instead of stamping
+	// preset values into the request, because only the engine knows the
+	// effective scoring mode. An invalid mode from a raw wire caller is
+	// ignored (transports fail fast; a display preference falls open, never
+	// hides memory — the #604 line), and "balanced" means engine defaults.
+	var modePreset *auth.RecallModePreset
+	recallMode := req.Mode
+	if recallMode == "" {
+		recallMode = resolved.RecallMode
+	}
+	if recallMode != "" && recallMode != "balanced" {
+		if p, mErr := auth.LookupRecallMode(recallMode); mErr == nil {
+			modePreset = &p
+		}
+	}
 
 	// Convert weights if provided; otherwise apply preset weights from Plasticity config.
 	// All scoring goes through ACT-R; legacy temporal path is kept in code but not reachable for now.
@@ -2418,6 +2517,25 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			DisableACTR:        req.Weights.DisableACTR,
 			ACTRDecay:          req.Weights.ACTRDecay,
 			ACTRHebScale:       req.Weights.ACTRHebScale,
+		}
+	} else if modePreset != nil && req.Mode != "" && presetCarriesWeights(*modePreset) && resolved.ScoringFusion != "rrf" {
+		// EXPLICIT weight-carrying mode (semantic/recent), no caller weights:
+		// the preset defines the FULL weight vector, from the ZERO base — the
+		// same struct these modes produced when transports stamped them as
+		// caller weights. Overlaying resolved defaults instead is wrong: the
+		// preset zero-value scheme cannot express semantic's implicit "decay,
+		// hebbian, access, recency = 0", and under legacy (DisableACTR)
+		// scoring those default weights let a fresh, recently-active engram
+		// score ~0.7 with zero content match — above semantic's own 0.3
+		// threshold (see presetCarriesWeights). rrf vaults take the resolved
+		// branch instead: presets never change the fusion mode, and under rrf
+		// the preset weights are inert.
+		actReq.Weights = &activation.Weights{
+			SemanticSimilarity: modePreset.SemanticSimilarity,
+			FullTextRelevance:  modePreset.FullTextRelevance,
+			Recency:            modePreset.Recency,
+			UseACTR:            !modePreset.DisableACTR,
+			DisableACTR:        modePreset.DisableACTR,
 		}
 	} else {
 		actrDecay := float32(0.5)
@@ -2462,37 +2580,35 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		actReq.Weights.UseCGDN = false
 	}
 
-	// Apply vault default recall mode when no explicit mode was set by the caller.
-	// When a caller explicitly sets Mode on the request, the REST handler or MCP handler
-	// already applied the preset; the engine only applies the vault default when Mode is empty.
-	if req.Mode == "" && resolved.RecallMode != "" && resolved.RecallMode != "balanced" {
-		preset, mErr := auth.LookupRecallMode(resolved.RecallMode)
-		if mErr == nil {
-			if preset.Threshold > 0 && req.Threshold == 0 {
-				actReq.Threshold = float64(preset.Threshold)
-			}
-			if preset.MaxHops > 0 && req.MaxHops == 0 {
-				actReq.HopDepth = preset.MaxHops
-			}
-			if preset.SemanticSimilarity > 0 || preset.FullTextRelevance > 0 || preset.Recency > 0 || preset.DisableACTR {
-				w := actReq.Weights
-				if w != nil {
-					if preset.SemanticSimilarity > 0 && w.SemanticSimilarity == 0 {
-						w.SemanticSimilarity = preset.SemanticSimilarity
-					}
-					if preset.FullTextRelevance > 0 && w.FullTextRelevance == 0 {
-						w.FullTextRelevance = preset.FullTextRelevance
-					}
-					if preset.Recency > 0 && w.Recency == 0 {
-						w.Recency = preset.Recency
-					}
-					if preset.DisableACTR {
-						w.DisableACTR = true
-						w.UseACTR = false
-					}
-				}
-			}
-		}
+	// COG-26: resolve the semantic-abstention baseline b for this vault's
+	// embed model, regardless of scoring mode — the noise floor is a property
+	// of the embedder, not the scorer. Applies uniformly whether Weights came
+	// from an explicit caller override, a recall-mode preset, or the resolved
+	// default, so a caller-supplied Weights struct still gets the floor
+	// (unlike SemanticSimilarity/FullTextRelevance, which an explicit caller
+	// override legitimately replaces).
+	actReq.Weights.SemanticBaseline = float32(e.resolveSemanticBaseline(req.Vault, wsPrefix, resolved))
+
+	// COG-6: the effective default threshold is mode-aware and keyed on the
+	// EFFECTIVE scoring mode (actReq.Weights.UseRRFFusion), decided here in one
+	// place — AFTER the weights block sets UseRRFFusion — so the threshold default
+	// always matches the scoring math that will actually run. (Keying on vault
+	// config, resolved.ScoringFusion, diverges when a caller passes explicit
+	// weights on an rrf vault: the request scores ACT-R but config says rrf.)
+	// For rrf scoring, leave Threshold 0 ("unset") so activation.Run() applies its
+	// rrf default (0.001, #590's mechanism); coercing to 0.1 here — an
+	// ACT-R-calibrated value — made #590's fix unreachable on every production
+	// transport. ACT-R/weighted_sum default behavior is unchanged.
+	if actReq.Threshold == 0 && !actReq.Weights.UseRRFFusion {
+		actReq.Threshold = 0.1
+	}
+
+	// Apply the recall-mode preset (#704) — resolved into modePreset above the
+	// weights block (the zero-base branch needs it there); runs after the
+	// COG-6 coerce because its threshold decision is keyed on the effective
+	// scoring mode. Semantics documented on applyRecallModePreset.
+	if modePreset != nil {
+		applyRecallModePreset(actReq, req, *modePreset)
 	}
 
 	// Convert filters if provided
@@ -2532,32 +2648,43 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	preBoost := len(result.Activations)
 	result.Activations = e.applyEntityBoost(ctx, wsPrefix, vaultSize, result.Activations, actReq)
 	// Injected engrams count as found: on the boost path, total <
-	// len(activations) was the #569 bypass fingerprint. This covers entity
-	// boost only — applySupersession below may still inject promoted heads
-	// without a TotalFound bump. Known imprecision (scoped follow-up, PR #570
-	// review): an engram that scored above threshold in the pipeline but was
-	// truncated past MaxResults and then re-injected here is counted twice.
+	// len(activations) was the #569 bypass fingerprint. Known imprecision, for
+	// BOTH injectors here and below (scoped follow-up, PR #570 review): an
+	// engram that scored above threshold in the pipeline but was truncated
+	// past MaxResults inside Run() and then re-injected by boost or
+	// supersession is counted twice.
 	result.TotalFound += len(result.Activations) - preBoost
 
 	// Supersedes-aware ranking: promote the current fact over any superseded one
 	// it replaces (injecting it if the query didn't retrieve it), so recall never
 	// leads with a fact it knows is stale. Runs after entity boost and BEFORE
-	// truncation so an injected head is not cut. Pure read-path ranking (no writes).
-	result.Activations = e.applySupersession(ctx, wsPrefix, result.Activations, actReq.MaxResults)
+	// truncation so an injected head is not cut. Chains resolve under the
+	// caller's view through the shared visibility gate (hidden nodes are
+	// traversable but unnameable; no admitted successor → the substitution
+	// abstains whole), and admitted injections count as found, same rule as
+	// boost. injectorNow is shared with the final COG-19 cut below so a
+	// validity boundary cannot fall between the gate's admission and that cut.
+	injectorNow := time.Now()
+	var supInjected int
+	result.Activations, supInjected = e.applySupersession(ctx, wsPrefix, result.Activations, actReq, injectorNow)
+	result.TotalFound += supInjected
 
 	// Final valid-time gate (COG-19: default recall never returns an engram whose
-	// ValidUntil <= now). Phase-6 already gated scored candidates, and entity-boost
-	// injections now enforce the full phase-6 contract (filters, trust, lease,
-	// validity — #569) at injection, but supersession still injects promoted heads
-	// past PassesMetaFilter, so the shared predicate must hold at the last cut
-	// before truncation. Runs AFTER supersession
+	// ValidUntil <= now). Phase-6 gated scored candidates and both injectors
+	// gate their entrants. For supersession this cut is defense in depth at
+	// the same instant (injectorNow); it remains LOAD-BEARING for two paths:
+	// boost runs on its own earlier clock, so a boost injection (or phase-6
+	// survivor) whose validity boundary falls inside that window is admitted,
+	// counted at line ~2340, then swept here — a documented overcount sliver —
+	// and it backstops any future result-set mutation that forgets the gate.
+	// Runs AFTER supersession
 	// on purpose: a manual supersede's now-expired predecessor is dropped only once
 	// its current head has been promoted/injected, so a query matching only the
 	// stale phrasing still returns the current fact.
 	// NOTE: filter into a NEW slice — the activation engine's async log-drain
 	// goroutine may still be reading the backing array returned by Run(), so
 	// in-place compaction (Activations[:0]) is a data race.
-	gateNow := time.Now()
+	gateNow := injectorNow
 	kept := make([]activation.ScoredEngram, 0, len(result.Activations))
 	for _, s := range result.Activations {
 		if activation.PassesValidity(s.Engram, req.AsOf, req.IncludeInvalid, gateNow) {
@@ -2616,16 +2743,17 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		items[i].Expired = scored.Engram.IsExpired(gateNow)
 
 		items[i].ScoreComponents = mbp.ScoreComponents{
-			SemanticSimilarity: float32(scored.Components.SemanticSimilarity),
-			FullTextRelevance:  float32(scored.Components.FullTextRelevance),
-			DecayFactor:        float32(scored.Components.DecayFactor),
-			HebbianBoost:       float32(scored.Components.HebbianBoost),
-			TransitionBoost:    float32(scored.Components.TransitionBoost),
-			EntityBoost:        float32(scored.Components.EntityBoost),
-			AccessFrequency:    float32(scored.Components.AccessFrequency),
-			Recency:            float32(scored.Components.Recency),
-			Raw:                float32(scored.Components.Raw),
-			Final:              float32(scored.Components.Final),
+			SemanticSimilarity:    float32(scored.Components.SemanticSimilarity),
+			SemanticSimilarityRaw: float32(scored.Components.SemanticSimilarityRaw),
+			FullTextRelevance:     float32(scored.Components.FullTextRelevance),
+			DecayFactor:           float32(scored.Components.DecayFactor),
+			HebbianBoost:          float32(scored.Components.HebbianBoost),
+			TransitionBoost:       float32(scored.Components.TransitionBoost),
+			EntityBoost:           float32(scored.Components.EntityBoost),
+			AccessFrequency:       float32(scored.Components.AccessFrequency),
+			Recency:               float32(scored.Components.Recency),
+			Raw:                   float32(scored.Components.Raw),
+			Final:                 float32(scored.Components.Final),
 		}
 
 		// Add hop path if present
@@ -2854,6 +2982,7 @@ func (e *Engine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeReq
 	sub := &trigger.Subscription{
 		ID:             subID,
 		VaultID:        vaultID,
+		WSPrefix:       wsPrefix,
 		Context:        req.Context,
 		Threshold:      float64(req.Threshold),
 		TTL:            time.Duration(req.TTL) * time.Second,
@@ -2960,7 +3089,7 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 				},
 				OnFound: func(ev cognitive.ContradictionEvent) {
 					if e.triggers != nil {
-						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "explicit_link")
+						e.triggers.NotifyContradiction(wsVaultID(wsPrefix), wsPrefix, storage.ULID(ev.EngramA), storage.ULID(ev.EngramB), ev.Severity, "explicit_link")
 					}
 					_, _, cw := e.cogWorkers()
 					if cw != nil {
@@ -3251,7 +3380,7 @@ func (e *Engine) SetCognitiveWorkers(
 	if heb != nil && e.triggers != nil {
 		heb.OnWeightUpdate = func(ws [8]byte, id [16]byte, field string, old, new float64) {
 			vaultID := wsVaultID(ws)
-			e.triggers.NotifyCognitive(vaultID, storage.ULID(id), field, float32(old), float32(new))
+			e.triggers.NotifyCognitive(vaultID, ws, storage.ULID(id), field, float32(old), float32(new))
 		}
 	}
 	e.hebbianWorker = heb
@@ -3971,6 +4100,61 @@ func (e *Engine) ResolveVaultPlasticity(vaultName string) auth.ResolvedPlasticit
 		}
 	}
 	return auth.ResolvePlasticity(nil)
+}
+
+// resolveSemanticBaseline resolves the COG-26 semantic-abstention baseline b
+// for a vault: the anisotropy noise floor rescaled into the semantic
+// relevance blend so near-baseline cosine (out-of-domain noise) contributes
+// ~0 to contentMatch instead of clearing the recall threshold on noise alone.
+//
+// Resolution order (explicit config always wins, never silently substituted —
+// #582/#585/#589):
+//  1. resolved.SemanticFloorOverride (per-vault plasticity override). An
+//     explicit 0 disables the floor. An out-of-range value (>=1, which would
+//     zero every match) is rejected with a WARN and falls through to registry
+//     resolution rather than silently abstaining everything.
+//  2. The vault's recorded embed model (store.GetEmbedModel, set by a future
+//     re-embed/model-tracking increment) if non-empty, else the engine's
+//     process-wide configured embed model (EngineConfig.EmbedModelName,
+//     resolved once at startup from the active provider).
+//  3. internal/plugin/embed.NoiseBaseline(model) registry lookup.
+//
+// A model with no registry entry — including "" (model unknown: no per-vault
+// marker set and no process-wide model recorded, e.g. embedded/library use
+// without EmbedModelName wired) — resolves to 0 (identity transform) plus a
+// one-time-per-model WARN: an uncalibrated model must never receive a guessed
+// floor, per COG-26 and the #582/#585/#589 explicit-config rule.
+func (e *Engine) resolveSemanticBaseline(vaultName string, ws [8]byte, resolved auth.ResolvedPlasticity) float64 {
+	if resolved.SemanticFloorOverride != nil {
+		b := *resolved.SemanticFloorOverride
+		if b >= 0 && b < 1 {
+			return b
+		}
+		slog.Warn("semantic_floor override out of range [0,1), ignoring and falling back to the embed-model registry",
+			"vault", vaultName, "semantic_floor", b)
+	}
+
+	model := ""
+	if e.store != nil {
+		if m, err := e.store.GetEmbedModel(ws); err == nil {
+			model = m
+		}
+	}
+	if model == "" {
+		model = e.embedModelName
+	}
+
+	if b, ok := embedpkg.NoiseBaseline(model); ok {
+		return b
+	}
+
+	// Unknown/unregistered model: identity transform, WARN once per distinct
+	// model string per process so a busy vault doesn't spam logs per query.
+	if _, alreadyWarned := e.warnedUnknownEmbedModels.LoadOrStore(model, struct{}{}); !alreadyWarned {
+		slog.Warn("semantic abstention floor (COG-26): no calibrated noise baseline for this embed model, using identity transform (no floor) — semantic-only nonsense may clear the recall threshold",
+			"vault", vaultName, "embed_model", model)
+	}
+	return 0
 }
 
 // PruneVault prunes a vault according to its resolved MaxEngrams and RetentionDays policy.

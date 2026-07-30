@@ -221,10 +221,13 @@ type TraverseResponse struct {
 type ExplainComponents struct {
 	FullTextRelevance  float64 `json:"full_text_relevance"`
 	SemanticSimilarity float64 `json:"semantic_similarity"`
-	DecayFactor        float64 `json:"decay_factor"`
-	HebbianBoost       float64 `json:"hebbian_boost"`
-	AccessFrequency    float64 `json:"access_frequency"`
-	Confidence         float64 `json:"confidence"`
+	// SemanticSimilarityRaw is the uncalibrated cosine similarity behind
+	// SemanticSimilarity (COG-26's honesty backstop).
+	SemanticSimilarityRaw float64 `json:"semantic_similarity_raw"`
+	DecayFactor           float64 `json:"decay_factor"`
+	HebbianBoost          float64 `json:"hebbian_boost"`
+	AccessFrequency       float64 `json:"access_frequency"`
+	Confidence            float64 `json:"confidence"`
 }
 
 // ExplainResponse represents a response from explaining an engram's score.
