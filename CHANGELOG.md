@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same way evolve does, so it never echoes text the returned engram
   doesn't actually have. Scoped to the MCP surface only — REST's
   `DecideResponse` is `{ID, Warnings}` and has no `concept` field. (#721)
+- **`muninn_decide` now warns when content-hash dedup substitutes an
+  existing engram.** The read-back fix above stopped the response from
+  lying, but a caller whose rationale collided with an existing engram
+  still got back someone else's concept with nothing flagging that their
+  own decision text was never written — silent substitution. The response
+  now appends a `warnings` entry naming both the stored concept and the
+  requested decision text whenever they differ. No new field: reuses
+  `WriteResult.Warnings`, which already existed. Scoped to the MCP surface
+  only. (#721)
 - **The `muninn_explain` MCP tool's response also dropped `concept`.** A
   third instance of the same defect shape: the adapter copied eight score-
   breakdown fields off the engine's `ExplainData` but never copied

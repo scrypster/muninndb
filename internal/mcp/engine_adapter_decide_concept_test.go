@@ -11,9 +11,16 @@ package mcp
 // identical content (same rationale). The "dedup" subtest proves the
 // response must report the STORED engram's concept, not the second caller's
 // decision text, which a plain assignment gets wrong.
+//
+// The dedup subtest also asserts a Warnings entry: the read-back fix makes
+// the response truthful, but a caller whose rationale collided with an
+// existing engram still gets back someone else's concept with nothing
+// flagging that their own decision text was never written — silent
+// substitution, not a lie, but still something the caller should be told.
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/storage"
@@ -65,6 +72,18 @@ func TestMCPEngineAdapterDecide_SetsConcept(t *testing.T) {
 		}
 		if r2.Concept != "Use PostgreSQL" {
 			t.Errorf("Concept = %q, want %q (the first call's decision — dedup returned that engram, not r2's \"Use MySQL\")", r2.Concept, "Use PostgreSQL")
+		}
+
+		found := false
+		for _, w := range r2.Warnings {
+			if strings.Contains(w, "Use PostgreSQL") && strings.Contains(w, "Use MySQL") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Warnings = %v, want an entry naming both the stored concept %q and the requested decision %q",
+				r2.Warnings, "Use PostgreSQL", "Use MySQL")
 		}
 	})
 }

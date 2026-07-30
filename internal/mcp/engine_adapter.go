@@ -220,10 +220,34 @@ func (a *mcpEngineAdapter) Decide(ctx context.Context, vault, decision, rational
 	// call's decision text, not this call's. Read the concept back from the
 	// store, exactly like Evolve, so the response never echoes text the
 	// returned engram doesn't actually have.
+	concept := a.readBackConcept(ctx, vault, res.ID, "decide")
+	warnings := res.Warnings
+	// The read-back above is now truthful, but a caller whose rationale
+	// collided with an existing engram still gets back someone else's
+	// concept with no signal that their own decision text was never
+	// written. That's silent substitution (CLAUDE.md principles 1/2) even
+	// though it's no longer a lie. Surface it as a warning rather than
+	// adding engine.DecideResult.Hint (deliberately deferred) — WriteResult
+	// already has a Warnings field for exactly this.
+	//
+	// Detected by comparing the read-back concept to the caller's decision
+	// text, NOT by checking res.Warnings == nil — engine.Decide's own
+	// warnings are about evidence-linking failures, an unrelated concern,
+	// so either could be present independent of the other.
+	//
+	// Guarded on concept != "": a failed read-back already degrades to ""
+	// via readBackConcept's own WARN path, and "" will always differ from a
+	// non-empty decision, which would otherwise misreport a read failure as
+	// a dedup substitution.
+	if concept != "" && concept != decision {
+		warnings = append(warnings, fmt.Sprintf(
+			"decision stored against an existing engram with matching content: reports concept %q instead of the requested %q",
+			concept, decision))
+	}
 	return &WriteResult{
 		ID:       res.ID.String(),
-		Concept:  a.readBackConcept(ctx, vault, res.ID, "decide"),
-		Warnings: res.Warnings,
+		Concept:  concept,
+		Warnings: warnings,
 	}, nil
 }
 
