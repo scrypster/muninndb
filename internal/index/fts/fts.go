@@ -381,6 +381,33 @@ func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, cont
 // Deletes are queued before adds so a retained term ends up holding the ADD's
 // posting — Pebble applies a batch in key-op order, and the same holds for a
 // trigram shared between a departing term and a surviving one.
+//
+// What "no UpdateStats" costs, stated beside the benefit so a future reader does
+// not take the stats-neutrality above as immunity. This method writes every
+// posting at the NEW docLen but leaves AvgDocLen alone, so an in-place edit that
+// changes the tag set's token count is length-penalized against a stale corpus
+// average. Measured on one 60-engram corpus, one target, one query:
+//
+//	[constant   ] retags 0/1/10/50 → 0.1477 throughout    (avgdl 7.100, flat)
+//	[growing    ] retags 0→50, tags 1→51 → 0.1690 → 0.0486
+//	[oscillating] retags 0/1/10/50 → 0.1477 / 0.1216 / 0.1477 / 0.1477
+//
+// So the neutrality is with respect to retag COUNT, not to tag CONTENT. The
+// oscillating row is the proof: the score returns EXACTLY to 0.1477 whenever the
+// tag set returns, with no hysteresis and no per-call ratchet, because a posting's
+// value is a pure function of the current document and df_t moves only on
+// membership. That is ordinary BM25 length normalization, not drift — which is the
+// whole difference from the DeleteEngram+IndexEngram pair, where the loss
+// accumulated per call and never came back.
+//
+// The residual: AvgDocLen does not track in-place length changes, so a vault
+// whose engrams grow their tag sets in place has a corpus average that lags low
+// and over-penalizes long documents. Direction is conservative — matches are
+// under-credited, never over-credited — and `muninn reindex-fts` recomputes
+// AvgDocLen from scratch. Calling UpdateStats here is NOT the fix: it takes a
+// docLen and increments TotalEngrams, which is the N inflation this method exists
+// to avoid; a correct AvgDocLen maintenance would need a delta-aware stats update
+// (deferred, #720).
 func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) error {
 	oldTerms := docTermSet(prev.Concept, prev.CreatedBy, prev.Content, prev.Tags)
 	newCounts, docLen := docTermCounts(next.Concept, next.CreatedBy, next.Content, next.Tags)
@@ -445,11 +472,45 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 // IndexEngram takes the lock before its DF reads).
 //
 // A decrement is CLAMPED at 0 and skipped entirely when no term-stats entry
-// exists. DeleteEngram has never decremented DF, so any engram soft-deleted
-// before ReindexEngram existed left df_t inflated relative to the live corpus;
-// an unclamped uint32 decrement would wrap to ~4 billion, and getIDF would then
-// report ≈0 IDF for a term the vault genuinely contains — a term the corpus
-// really has would become worthless evidence.
+// exists. What an unclamped uint32 decrement costs, measured (getIDF ≡
+// log((N−df+0.5)/(df+0.5)+1), and df=2^32−1 drives that ratio to just under −1):
+//
+//	WITH clamp:     df=0            getIDF(N=3) =   2.0794
+//	WITHOUT clamp:  df=4294967295   getIDF(N=3) = -20.7944
+//
+// A NEGATIVE IDF is worse than a worthless one. COG-24's numerator is
+// Σ idf_t'·cov_t, so a document that CONTAINS the term contributes a negative
+// term and ranks BELOW one that does not: the term stops being weak evidence and
+// becomes an active penalty against exactly the documents that hold it. Pinned by
+// TestAdjustDF_DecrementClampsAtZero, which asserts both df==0 and idf>0 so a
+// future change that bounds the DF but breaks the sign is still caught.
+//
+// There are two distinct ways df_t can be off, and the clamp guards the second:
+//
+//   - ABOVE its true value. DeleteEngram has never decremented DF, so an engram
+//     deleted before ReindexEngram existed left df_t inflated relative to the
+//     live corpus. Benign direction: an inflated df understates a term's rarity,
+//     so a genuine match is under-credited, never over-credited.
+//
+//   - BELOW its true value. ReindexEngram is the FIRST decrementing DF path in the
+//     codebase, so it is also the first way this can happen at all. Every
+//     write-path initial index is an ftsWorker.Submit
+//     (internal/engine/engine.go:1521 Write, :2063 the batch path, :3815 Evolve),
+//     and Submit returns false when the queue is full (worker.go:145) or after
+//     Stop (worker.go:133). An engram whose initial index job was DROPPED has no
+//     postings, so its tag tokens were never counted — yet a later retag hands
+//     ReindexEngram a prev containing them, and the −1 lands on a df another
+//     engram legitimately owns. Measured:
+//
+//     before retag of unindexed B: df(zarquon)=1  (TRUE value = 1, only A has it)
+//     after  retag of unindexed B: df(zarquon)=0  (TRUE value is still 1)
+//
+// So the clamp is not purely defensive — it bounds a reachable condition, and
+// this is the path that made it reachable. The residual it leaves is bounded and
+// mild by comparison: floored at 0, one-time per spurious decrement rather than a
+// per-call ratchet, and it INFLATES the IDF of a term for the documents that do
+// hold it rather than omitting them from results. `muninn reindex-fts` recomputes
+// df_t from scratch and clears both directions.
 func (idx *Index) adjustDF(batch *pebble.Batch, ws [8]byte, term string, delta int) {
 	tkey := keys.TermStatsKey(ws, term)
 

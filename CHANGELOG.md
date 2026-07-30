@@ -53,7 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surfaced the loss. Retagging is now stats-neutral by construction: one
   full-text-index operation that leaves the corpus size alone and moves a term's
   document frequency only when the term genuinely entered or left the memory.
-  (#720)
+  Scoped honestly: that neutrality is with respect to how many times you retag,
+  not to how big the tag set is. A memory whose tag set grows in place is still
+  length-normalized by BM25 like any longer document, and because the rebuild
+  leaves the corpus *average* document length alone, that penalty is slightly
+  over-applied until the next `muninn reindex-fts` — the conservative direction,
+  scores under-credited rather than inflated. There is no ratchet either way:
+  returning to a previous tag set restores the previous score exactly. (#720)
 
 - **A retag no longer makes a deleted memory keyword-searchable again.** A retag
   rebuilt the posting lists with no state check, undoing the soft delete's own
