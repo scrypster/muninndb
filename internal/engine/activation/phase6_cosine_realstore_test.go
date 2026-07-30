@@ -64,8 +64,8 @@ func TestPhase6Score_FTSOnlyCandidate_RealStoreLoaderGap(t *testing.T) {
 	queryVec := []float32{0.6, 0.8, 0.0, 0.0}
 
 	eng := &storage.Engram{
-		Concept:   "RemittanceFile lifecycle",
-		Content:   "RemittanceFile lifecycle state machine handles pending, cleared, and reversed states.",
+		Concept:   "WidgetPipeline lifecycle",
+		Content:   "WidgetPipeline lifecycle state machine handles pending, cleared, and reversed states.",
 		Embedding: queryVec, // identical to the query vector => cosine ~= 1.0
 	}
 	id, err := store.WriteEngram(context.Background(), ws, eng)
@@ -110,7 +110,7 @@ func TestPhase6Score_FTSOnlyCandidate_RealStoreLoaderGap(t *testing.T) {
 
 	result, err := eng2.Run(context.Background(), &activation.ActivateRequest{
 		VaultPrefix: ws,
-		Context:     []string{"RemittanceFile lifecycle state machine"},
+		Context:     []string{"WidgetPipeline lifecycle state machine"},
 		Embedding:   queryVec,
 		Threshold:   0.01,
 		MaxResults:  10,
