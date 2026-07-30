@@ -38,12 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WriteResult.Warnings`, which already existed. Scoped to the MCP surface
   only. (#721)
 - **The `muninn_explain` MCP tool's response also dropped `concept`.** A
-  third instance of the same defect shape: the adapter copied eight score-
-  breakdown fields off the engine's `ExplainData` but never copied
-  `Concept`, so `muninn_explain` always reported `concept: ""` on MCP even
-  though REST's equivalent adapter has set it correctly all along. Scoped to
-  the MCP surface only — REST's explain adapter already sets `Concept`.
-  (#721)
+  third instance of the same defect shape: the adapter copied five of the
+  engine's `ExplainData`'s six fields (every field except `Concept`) into
+  the response, so `muninn_explain` always reported `concept: ""` on MCP
+  even though REST's equivalent adapter has set it correctly all along.
+  Scoped to the MCP surface only — REST's explain adapter already sets
+  `Concept`. (#721)
 - **`muninn_contradictions` reported `concept_a`/`concept_b` as `""` for
   every pair.** A fourth instance of the same defect shape: REST's
   equivalent (`GetContradictions` in

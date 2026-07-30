@@ -2,12 +2,13 @@ package mcp
 
 // TestMCPEngineAdapterExplain_SetsConcept guards a third live instance of the
 // #721 shape (after Evolve and Decide): internal/mcp/engine_adapter.go's
-// Explain method copied eight fields off engine.ExplainData into ExplainResult
-// but dropped Concept, so muninn_explain always reported concept: "" on MCP
-// even though REST's equivalent adapter (internal/transport/rest/engine_adapter.go)
-// has set it correctly all along. ExplainResult.Concept has no `omitempty`
-// (internal/mcp/types.go), so the zero value serializes as an explicit
-// concept: "" on the wire.
+// Explain method copied five of engine.ExplainData's six fields
+// (EngramID, FinalScore, WouldReturn, Threshold, Components — skipping only
+// Concept) into ExplainResult, so muninn_explain always reported
+// concept: "" on MCP even though REST's equivalent adapter
+// (internal/transport/rest/engine_adapter.go) has set it correctly all
+// along. ExplainResult.Concept has no `omitempty` (internal/mcp/types.go),
+// so the zero value serializes as an explicit concept: "" on the wire.
 //
 // engine.ExplainData.Concept is only populated inside engine.Explain's
 // WouldReturn branch (internal/engine/query.go) — it walks the activation
