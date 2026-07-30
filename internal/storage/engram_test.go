@@ -288,6 +288,69 @@ func TestUpdateTags_RejectedTagDoesNotPoisonCache(t *testing.T) {
 	}
 }
 
+// TestUpdateTags_RecachesCommittedRecord pins the OTHER half of the same cache
+// handling: after a SUCCESSFUL retag the post-commit ps.cache.Set must leave the
+// committed record in the L1 cache, carrying the new tags.
+//
+// Why this has to be an in-package test reading ps.cache directly rather than a
+// GetEngram assertion: with the post-commit Set removed the entry is merely
+// ABSENT — the pre-commit Delete stood, nothing put anything back, and
+// `committed = true` still runs so the deferred invalidation is a no-op — so the
+// next GetEngram misses the cache, reads Pebble, and returns the correct NEW
+// tags. A GetEngram-based assertion passes in both states and proves nothing.
+// The distinction that matters is present-and-fresh vs absent, and only the cache
+// accessor can see it.
+//
+// What the absence costs in production, and why "the next read repopulates it
+// correctly" is not a defence: the invalidate sits BEFORE the commit and readers
+// do not take casLocks (recall calls GetEngram/GetEngrams constantly). A reader
+// landing in that window misses, reads the PRE-commit Pebble value, and re-caches
+// the OLD tags — which then stay cached against a committed new tag set until
+// something else evicts them. The post-commit Set closes the window by
+// overwriting whatever such a racing reader left behind, under the same stripe
+// lock (inside it, per UpdateConfidence's reasoning: outside, a racing
+// DeleteEngram's post-commit Delete could land first and this Set would re-cache
+// an engram Pebble has already deleted).
+//
+// RED with the ps.cache.Set line removed (measured):
+//
+//	L1 cache has NO entry after a successful UpdateTags — the post-commit
+//	  re-cache is missing
+//
+// GREEN: the L1 entry is present and carries ["env:staging"].
+func TestUpdateTags_RecachesCommittedRecord(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("updatetags-recache")
+
+	eng := &Engram{
+		Concept: "release checklist",
+		Content: "the checklist covers the staged rollout",
+		Tags:    []string{"env:prod"},
+	}
+	id, err := store.WriteEngram(ctx, ws, eng)
+	if err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	// Warm the L1 cache, exactly as a recall would.
+	if _, err := store.GetEngram(ctx, ws, id); err != nil {
+		t.Fatalf("GetEngram (warm cache): %v", err)
+	}
+
+	if err := store.UpdateTags(ctx, ws, id, []string{"env:staging"}); err != nil {
+		t.Fatalf("UpdateTags: %v", err)
+	}
+
+	cached, ok := store.cache.Get(ws, id)
+	if !ok {
+		t.Fatal("L1 cache has NO entry after a successful UpdateTags — the post-commit re-cache is missing, so the pre-commit invalidate window stays open for an unlocked reader to repopulate with the PRE-commit tags")
+	}
+	if len(cached.Tags) != 1 || cached.Tags[0] != "env:staging" {
+		t.Errorf("L1 cache entry tags = %q after a successful UpdateTags, want [env:staging]", cached.Tags)
+	}
+}
+
 // TestUpdateTags_ConcurrentSoftDeleteDoesNotResurrect pins [STO-2]/[STO-3] for
 // UpdateTags: it must hold casLocks.For(id) across read→commit, as SoftDelete,
 // UpdateConfidence, TouchAccess, AdjustConfidence, CompareAndSet and

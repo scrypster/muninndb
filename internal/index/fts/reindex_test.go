@@ -219,6 +219,88 @@ func TestReindexEngram_ScoreSurvivesRepeatedRetags(t *testing.T) {
 	}
 }
 
+// TestAdjustDF_DecrementClampsAtZero pins the clamp in adjustDF. ReindexEngram is
+// the first decrementing DF path in the codebase, so it is the first way df_t can
+// be driven BELOW its true value, and uint32 underflow there is not a rounding
+// error — it is a sign flip in the score.
+//
+// Reaching the clamp needs a spurious decrement, which is reachable: the
+// write-path initial index is always an ftsWorker.Submit, and Submit returns
+// false when the queue is full (internal/index/fts/worker.go:145) or after Stop
+// (:133). An engram whose initial index job was dropped has postings for nothing,
+// so its tag tokens were never counted — yet a later retag hands ReindexEngram a
+// prev containing them, and the −1 lands on a df another engram legitimately
+// owns.
+//
+// Why the test needs a SECOND decrement rather than one: the `existed` guard makes
+// the first decrement on a MISSING term-stats key a no-op, so a test that only
+// decrements an uncounted term never reaches the arithmetic. Hence the shape
+// below — engram A really holds the term (df=1, key exists), then two
+// never-indexed engrams each hand ReindexEngram a prev containing it. The first
+// takes df 1 → 0 legitimately-looking; the second is the one that would wrap.
+//
+// Measured, with and without the clamp (getIDF ≡ log((N−df+0.5)/(df+0.5)+1)):
+//
+//	WITH clamp:     #1 df=0 | #2 df=0            getIDF(zarquon, N=3) =   2.0794
+//	WITHOUT clamp:  #1 df=0 | #2 df=4294967295   getIDF(zarquon, N=3) = -20.7944
+//
+// A NEGATIVE idf is worse than a worthless one: COG-24's numerator is
+// Σ idf_t'·cov_t, so a document that CONTAINS the term contributes a negative
+// term and ranks BELOW one that does not. The term stops being weak evidence and
+// becomes an active penalty.
+func TestAdjustDF_DecrementClampsAtZero(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	idx := New(db)
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 100})
+	ws := store.VaultPrefix("adjustdf-clamp")
+
+	// A really holds the term, so the term-stats key exists at df=1 and the
+	// `existed` guard cannot short-circuit the decrements below.
+	a := [16]byte{1}
+	if err := idx.IndexEngram(ws, a, "alpha record", "", "the alpha body", []string{"zarquon"}); err != nil {
+		t.Fatalf("IndexEngram(A): %v", err)
+	}
+	if df, missing := dfOf(t, idx, ws, "zarquon"); missing || df != 1 {
+		t.Fatalf("precondition: df(zarquon) = %d (missing=%v), want 1", df, missing)
+	}
+
+	// B and C were NEVER indexed — the dropped-Submit case. Each hands
+	// ReindexEngram a prev whose tag tokens were never counted.
+	prev := Document{Concept: "beta record", Content: "the beta body", Tags: []string{"zarquon"}}
+	next := Document{Concept: "beta record", Content: "the beta body"}
+
+	if err := idx.ReindexEngram(ws, [16]byte{2}, prev, next); err != nil {
+		t.Fatalf("ReindexEngram(B): %v", err)
+	}
+	df1, missing1 := dfOf(t, idx, ws, "zarquon")
+	if missing1 || df1 != 0 {
+		t.Fatalf("after the first spurious decrement df(zarquon) = %d (missing=%v), want 0", df1, missing1)
+	}
+
+	if err := idx.ReindexEngram(ws, [16]byte{3}, prev, next); err != nil {
+		t.Fatalf("ReindexEngram(C): %v", err)
+	}
+	df2, missing2 := dfOf(t, idx, ws, "zarquon")
+
+	// The assertion under test: a decrement at df=0 stays at 0 rather than
+	// wrapping to 2^32−1.
+	if missing2 || df2 != 0 {
+		t.Errorf("df(zarquon) = %d (missing=%v) after decrementing at df=0, want 0 — an unclamped uint32 decrement wraps to 4294967295", df2, missing2)
+	}
+
+	// And the consequence, stated in the units that matter: IDF must stay
+	// positive. At the wrapped value this is −20.7944, which makes a document
+	// holding the term rank BELOW one that does not.
+	idx.InvalidateIDFCache()
+	idf := idx.getIDF(ws, stemOf(t, "zarquon"), 3)
+	t.Logf("getIDF(zarquon, N=3) with df=%d → %.4f", df2, idf)
+	if idf <= 0 {
+		t.Errorf("getIDF(zarquon, N=3) = %.4f with df=%d, want > 0 — a negative IDF penalizes documents that CONTAIN the term (COG-24's numerator is Σ idf_t'·cov_t)", idf, df2)
+	}
+}
+
 // twoDigit renders 1..99 zero-padded, so every generated due: tag tokenizes to
 // the same number of terms and only the day component's membership changes.
 func twoDigit(n int) string {
