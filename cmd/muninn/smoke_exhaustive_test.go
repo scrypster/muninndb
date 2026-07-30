@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // allMCPTools is the canonical list of every MCP tool the server must expose.
@@ -572,13 +573,42 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 	})
 
 	t.Run("muninn_explain", func(t *testing.T) {
-		result := mcpTool(t, tok, "muninn_explain", map[string]any{
+		// Deliberately explains idB, not idA: by this point in the suite
+		// idA has already been superseded and soft-deleted by the
+		// muninn_evolve subtest above, so ExplainData.WouldReturn is false
+		// by construction for idA and Concept is never set (engine.Explain,
+		// internal/engine/query.go, only fills Concept inside the
+		// WouldReturn branch) — asserting concept on idA here would either
+		// be vacuous (gated on a would_return that's always false) or
+		// outright fail. idB was never evolved, so its concept survives.
+		//
+		// FTS indexing of idB's write is async (cmd/muninn has no access to
+		// the engine's internal drain hooks across the daemon process
+		// boundary — see docs/internals/testing-hermeticity.md), so poll
+		// with a hard deadline exactly like waitForIDs
+		// (cmd/muninn/integration_test.go) rather than asserting once.
+		args := map[string]any{
 			"vault":     vault,
-			"engram_id": idA,
-			"query":     []string{"Alice explorer ruins"},
-		})
-		if errVal, hasErr := result["error"]; hasErr {
-			t.Errorf("muninn_explain returned error field: %v", errVal)
+			"engram_id": idB,
+			"query":     []string{"EntityB", "ruins", "Alice"},
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		var result map[string]any
+		for {
+			result = mcpTool(t, tok, "muninn_explain", args)
+			if errVal, hasErr := result["error"]; hasErr {
+				t.Fatalf("muninn_explain returned error field: %v", errVal)
+			}
+			if wr, _ := result["would_return"].(bool); wr {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("muninn_explain: would_return never became true within the readiness deadline (last result: %v)", result)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if got, _ := result["concept"].(string); got != "EntityB discovery" {
+			t.Errorf("explain response concept = %q, want %q", got, "EntityB discovery")
 		}
 	})
 
