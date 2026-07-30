@@ -20,6 +20,6 @@ type ProvenanceEntry struct {
 	Timestamp time.Time
 	Source    SourceType
 	AgentID   string // e.g. "user:mj", "ollama:llama3.2", "consolidation-worker"
-	Operation string // "create", "update-relevance", "update-meta", "merge", "promote"
+	Operation string // "create", "evolve", "update-relevance", "update-meta", "update-trust", "stamp-valid-until", "merge", "promote"
 	Note      string // optional free text
 }

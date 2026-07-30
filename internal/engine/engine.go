@@ -3561,7 +3561,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 	batch := e.store.NewBatch()
 	defer batch.Discard()
 
-	if err := batch.WriteEngram(ctx, wsPrefix, newEng); err != nil {
+	if err := batch.WriteEngramOp(ctx, wsPrefix, newEng, "evolve"); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch write new engram: %w", err)
 	}
 	if err := batch.WriteAssociation(ctx, wsPrefix, newULID, oldULID, supersedes); err != nil {
