@@ -214,6 +214,14 @@ type ActivateRequest struct {
 	// ExcludeUntrusted: when true, engrams with TrustUntrusted (0x04) are silently
 	// excluded from activation results. Set by the engine from vault PlasticityConfig.
 	ExcludeUntrusted bool
+	// ExcludeTags: candidates carrying any of these tags are dropped from recall
+	// RANKING (activation results) before scoring. Ranking-only — direct-id and
+	// as_of-by-id reads bypass activation and are unaffected, and the engram
+	// still counts toward the vault. Set by the engine from vault
+	// PlasticityConfig (#713). An explicit per-request tags_all/tags_any naming
+	// an excluded tag overrides the standing exclude for that request (caller
+	// intent wins). nil/empty = no exclusion (identity: unchanged behavior).
+	ExcludeTags []string
 	// CallerOwner is the ownership-lease identity of the recall caller. Engrams
 	// held by a live lease owned by someone else are hidden (work-queue checkout),
 	// unless IncludeLeased is set. Empty means the caller owns no leases.
@@ -1535,6 +1543,29 @@ func (e *ActivationEngine) phase6Score(
 		}
 	}
 
+	// Standing per-vault exclude-tags (#713): drop candidates carrying a
+	// vault-excluded tag from recall RANKING. Ranking-only — the engram is
+	// neither deleted nor hidden from direct-id/as_of-by-id reads, and still
+	// counts toward the vault. An explicit per-request include (tags_all/tags_any
+	// naming the tag) overrides the standing exclude, so a caller can always
+	// reach an excluded tag on purpose. Built once here; nil when the request
+	// carries no exclusions, so the default path is byte-identical to before.
+	var excludeTagSet map[string]struct{}
+	if len(req.ExcludeTags) > 0 {
+		excludeTagSet = make(map[string]struct{}, len(req.ExcludeTags))
+		for _, t := range req.ExcludeTags {
+			excludeTagSet[t] = struct{}{}
+		}
+		// Explicit per-request tag includes override the standing exclude.
+		reqAll, reqAny, _ := extractTagFilters(req.Filters)
+		for _, t := range reqAll {
+			delete(excludeTagSet, t)
+		}
+		for _, t := range reqAny {
+			delete(excludeTagSet, t)
+		}
+	}
+
 	// Filter out soft-deleted engrams (defense-in-depth; HNSW has no delete method).
 	// Also filter untrusted engrams when ExcludeUntrusted is set in the request.
 	var active []*storage.Engram
@@ -1549,6 +1580,11 @@ func (e *ActivationEngine) phase6Score(
 		// TrustUnset (0x00) is intentionally passed through — it is the zero-value
 		// backward-compat alias for TrustInferred, not an "unknown" or untrusted value.
 		if req.ExcludeUntrusted && eng.Trust == storage.TrustUntrusted {
+			continue
+		}
+		// Standing exclude-tags: drop candidates carrying a vault-excluded tag
+		// from ranking (#713). See excludeTagSet construction above.
+		if len(excludeTagSet) > 0 && engramHasExcludedTag(eng, excludeTagSet) {
 			continue
 		}
 		// Work-queue checkout: hide engrams under a live foreign lease.
@@ -2324,6 +2360,17 @@ func PassesMetaFilter(eng *storage.Engram, filters []Filter) bool {
 		}
 	}
 	return true
+}
+
+// engramHasExcludedTag reports whether the engram carries any tag in
+// excludeSet. Used by the phase-6 exclude-tags drop (#713).
+func engramHasExcludedTag(eng *storage.Engram, excludeSet map[string]struct{}) bool {
+	for _, t := range eng.Tags {
+		if _, ok := excludeSet[t]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // tagSet builds a lookup set from an engram's tags.

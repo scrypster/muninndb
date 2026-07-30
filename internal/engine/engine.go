@@ -2250,6 +2250,9 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
+	// Per-vault exclude-tags (#713): candidates carrying a configured tag are
+	// dropped from recall ranking. nil/empty = no exclusion (unchanged behavior).
+	actReq.ExcludeTags = resolved.ExcludeTags
 
 	// Valid-time gate (COG-19): as_of / include_invalid flow into phase-6
 	// filtering; the final gate below re-applies them to entity-boost injections.
