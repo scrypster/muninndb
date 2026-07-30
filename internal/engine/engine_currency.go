@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"regexp"
 	"sort"
 	"time"
@@ -653,7 +654,14 @@ func (e *Engine) currencyTagDF(ctx context.Context, ws [8]byte, tag string, dfCa
 	}
 	ids, err := e.store.ListByTagInRange(ctx, ws, tag, currencyDFRangeStart, currencyDFRangeEnd(), currencyTagDFScanCap)
 	var df int64
-	if err == nil {
+	if err != nil {
+		// Degrade LOUDLY and toward SILENCE (principle #2): a df-lookup failure
+		// must never manufacture a cluster. A large df makes the tag look ambient
+		// (dropped from the shared-tag count) AND facet-eligible (vetoes) — both
+		// suppress clustering rather than permit a false annotation.
+		slog.Warn("currency: tag df lookup failed; treating tag as ambient to fail toward silence", "err", err)
+		df = currencyTagDFScanCap
+	} else {
 		df = int64(len(ids))
 	}
 	dfCache[tag] = df

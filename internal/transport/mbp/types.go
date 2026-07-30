@@ -314,6 +314,9 @@ type ActivationItem struct {
 	// VersionCluster is the shared cluster key; NewestOfCluster marks the crown;
 	// ClusterSize is the member count. Distinct from SupersededBy (asserted):
 	// verify before treating the older fact as false. Empty when not clustered.
+	// Computed over the CO-RETRIEVED results only: NewestOfCluster = newest among
+	// returned cluster members (a newer version below the retrieval cut is not
+	// considered), and PossiblySupersededBy may name an engram not in this response.
 	PossiblySupersededBy string `msgpack:"possibly_superseded_by,omitempty" json:"possibly_superseded_by,omitempty"`
 	VersionCluster       string `msgpack:"version_cluster,omitempty"        json:"version_cluster,omitempty"`
 	NewestOfCluster      bool   `msgpack:"newest_of_cluster,omitempty"      json:"newest_of_cluster,omitempty"`
