@@ -305,6 +305,7 @@ func TestIsMutatingTool_MutatingSet(t *testing.T) {
 		"muninn_consolidate", "muninn_decide", "muninn_restore",
 		"muninn_retry_enrich", "muninn_entity_state", "muninn_entity_state_batch",
 		"muninn_merge_entity", "muninn_replay_enrichment", "muninn_feedback",
+		"muninn_state",
 	}
 	for _, name := range mutating {
 		if !isMutatingTool(name) {
@@ -317,7 +318,7 @@ func TestIsMutatingTool_ReadSet(t *testing.T) {
 	readonly := []string{
 		"muninn_recall", "muninn_read", "muninn_status", "muninn_session",
 		"muninn_contradictions", "muninn_traverse", "muninn_explain",
-		"muninn_state", "muninn_list_deleted", "muninn_guide",
+		"muninn_list_deleted", "muninn_guide",
 		"muninn_where_left_off", "muninn_recall_tree",
 		"muninn_find_by_entity", "muninn_entity_clusters", "muninn_export_graph",
 		"muninn_similar_entities", "muninn_entity_timeline", "muninn_provenance",
@@ -619,6 +620,64 @@ func TestToolClassification_CoversAllRegisteredHandlers(t *testing.T) {
 		if mutating && readonly {
 			t.Errorf("tool %q is classified as BOTH mutating AND read-only — must be exactly one", name)
 		}
+	}
+}
+
+// TestToolClassification_StateIsMutating pins the classification of
+// muninn_state directly (#731). It was listed in isReadOnlyTool even though its
+// handler calls Engine.UpdateLifecycleState — a write. Coverage tests only prove
+// every tool sits in exactly one bucket, never that the bucket is correct, so
+// the classification of a writing tool needs its own assertion.
+func TestToolClassification_StateIsMutating(t *testing.T) {
+	if !isMutatingTool("muninn_state") {
+		t.Error("muninn_state writes an engram's lifecycle state — must be classified mutating")
+	}
+	if isReadOnlyTool("muninn_state") {
+		t.Error("muninn_state must not be classified read-only")
+	}
+	// Not additive: it transitions an EXISTING engram (including to "archived"),
+	// so append-mode credentials must not reach it.
+	if isAdditiveTool("muninn_state") {
+		t.Error("muninn_state modifies an existing engram — must not be additive")
+	}
+}
+
+// TestDispatch_ObserveMode_BlocksStateTransition is the regression test for
+// #731: an observe-mode mk_ key could call muninn_state and archive or
+// reactivate any engram, because muninn_state was classified read-only. Unlike
+// append mode — which Engine.UpdateLifecycleState backstops via refuseAppend —
+// observe mode has no engine-level guard, so the dispatch gate was the only
+// thing standing between a read-only credential and a write.
+func TestDispatch_ObserveMode_BlocksStateTransition(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID:    "obs731",
+		Vault: "walled",
+		Mode:  auth.ModeObserve,
+	})
+	srv := newAuthTestServer(store)
+	body := mkToolCallBody("muninn_state", map[string]any{
+		"vault": "walled",
+		"id":    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		"state": "archived",
+	})
+
+	w := doAuthenticatedPost(srv, "mk_obs731", body)
+
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatal("observe-mode key must not be able to transition an engram's lifecycle state")
+	}
+	// Assert the mode gate specifically. A -32602 from argument validation would
+	// otherwise let this test pass while the tool stayed reachable.
+	if resp.Error.Code != -32001 {
+		t.Errorf("error code = %d, want -32001 (mode enforcement); got message: %s",
+			resp.Error.Code, resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "forbidden") {
+		t.Errorf("expected 'forbidden' in error, got: %s", resp.Error.Message)
 	}
 }
 

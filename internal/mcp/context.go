@@ -166,6 +166,11 @@ func isMutatingTool(name string) bool {
 		"muninn_forget",
 		"muninn_link",
 		"muninn_evolve",
+		// muninn_state transitions an existing engram's lifecycle state (its
+		// handler calls Engine.UpdateLifecycleState, up to and including
+		// "archived"). It was misclassified read-only, which let an
+		// observe-mode credential write (#731).
+		"muninn_state",
 		"muninn_consolidate",
 		"muninn_decide",
 		"muninn_restore",
@@ -200,7 +205,6 @@ func isReadOnlyTool(name string) bool {
 		"muninn_contradictions",
 		"muninn_traverse",
 		"muninn_explain",
-		"muninn_state",
 		"muninn_list_deleted",
 		"muninn_get_enrichment_candidates",
 		"muninn_guide",

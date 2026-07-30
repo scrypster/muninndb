@@ -9,7 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`muninn_state` is no longer callable by an observe-mode credential.** The
+  tool was classified in `isReadOnlyTool`, but its handler calls
+  `Engine.UpdateLifecycleState` — so an `mk_` key or `cap_` token issued as
+  read-only could transition any engram's lifecycle state, including archiving
+  it. It is now classified mutating: observe mode is denied, write and full mode
+  are unaffected, and append mode is now denied at the MCP dispatch gate as well
+  as by the existing `Engine.refuseAppend` backstop (which is why append mode was
+  never exploitable). A read-only client that was calling `muninn_state` was
+  performing a write and will now receive `forbidden`. (#731)
 
 ---
 
