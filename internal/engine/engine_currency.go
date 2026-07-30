@@ -666,6 +666,69 @@ func currencyIsUbiquitous(df, vaultSize int64) bool {
 	return float64(df) > currencyUbiquityRatio*float64(vaultSize)
 }
 
+// Distribution-derived ubiquity (#11 self-derive). The fixed currencyUbiquityRatio
+// above false-silences genuine chains on SMALL vaults (a 4-member chain's topic
+// tag is 25% of a 16-row vault -> wrongly "ubiquitous"), because a flat fraction
+// of N is a vault-size-dependent absolute cut. The self-derived cutpoint instead
+// finds the natural break in the vault's OWN tag-df distribution: on a real vault
+// the ambient/system tags (df ~240-370) sit far above the content tags (df <= ~43)
+// with a large multiplicative gap; the cutpoint belongs in that gap wherever it
+// lands, at ANY vault size. These are derivation hyperparameters (gap shape),
+// vault-size-invariant by construction — NOT per-vault df thresholds, so they do
+// not reintroduce the #11 problem the fixed ratio had.
+const (
+	// currencyMinTagsForUbiquity: below this many distinct tags there is no
+	// distribution to speak of — derive nothing, filter nothing.
+	currencyMinTagsForUbiquity = 5
+	// currencyUbiquityGapRatio: the multiplicative jump that marks the break
+	// between ambient tags and content tags (a real vault shows ~5x: 239 -> 43).
+	currencyUbiquityGapRatio = 3.0
+	// currencyMaxUbiquitousFraction: ubiquitous tags are a small MINORITY; a
+	// "gap" that puts most tags on the high side is not an ambient-tag break.
+	currencyMaxUbiquitousFraction = 0.25
+	// currencyUbiquityAbsFloor: a tag on fewer than this many memories is never
+	// "ubiquitous" regardless of distribution — the guard for the degenerate
+	// tiny-vault case where a genuine chain tag is itself the highest-df tag.
+	currencyUbiquityAbsFloor = 5
+	// currencyNoUbiquity is the sentinel cutpoint meaning "no ambient-tag class
+	// found — filter nothing" (a df can never reach it).
+	currencyNoUbiquity = int64(1) << 62
+)
+
+// currencyDeriveUbiquityCutpoint returns the df at/above which a tag is treated
+// as ubiquitous, derived from the vault's tag-df distribution dfs (one entry per
+// distinct tag). It walks the sorted-descending dfs for the highest qualifying
+// multiplicative gap that (a) leaves only a minority of tags above it and (b)
+// keeps the ubiquitous group's floor at/above the absolute floor. No such gap ->
+// currencyNoUbiquity (filter nothing). Pure function; unit-tested against real-
+// vault-shaped, small-vault, smooth-gradient and degenerate distributions.
+func currencyDeriveUbiquityCutpoint(dfs []int64) int64 {
+	n := len(dfs)
+	if n < currencyMinTagsForUbiquity {
+		return currencyNoUbiquity
+	}
+	sorted := make([]int64, n)
+	copy(sorted, dfs)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] > sorted[j] })
+	for i := 0; i < n-1; i++ {
+		hi, lo := sorted[i], sorted[i+1]
+		if lo <= 0 {
+			break
+		}
+		if hi < currencyUbiquityAbsFloor {
+			break // everything from here down is below the absolute floor
+		}
+		aboveFraction := float64(i+1) / float64(n)
+		if aboveFraction > currencyMaxUbiquitousFraction {
+			break // the high group is already too large to be "ambient tags"
+		}
+		if float64(hi)/float64(lo) >= currencyUbiquityGapRatio {
+			return hi // tags with df >= hi are the ambient class
+		}
+	}
+	return currencyNoUbiquity
+}
+
 // currencyHasAssocEdge reports whether a forward association of relType
 // exists from -> to.
 func (e *Engine) currencyHasAssocEdge(ctx context.Context, ws [8]byte, from, to storage.ULID, relType storage.RelType) bool {
