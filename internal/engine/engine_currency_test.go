@@ -696,6 +696,53 @@ func TestCurrencyAnnotation_TagShareMin_SingleSharedTagNotClustered(t *testing.T
 	}
 }
 
+// TestCurrencyAnnotation_TieBreak_TransitiveAcrossClusterBoundary pins the fix
+// for an intransitive tie-break comparator (final-review finding): within an
+// exact-score tie, ordering cluster members newest-EVF-first but non-members by
+// ULID in the SAME comparator is not a strict weak ordering — with X,Y in a
+// cluster (EVF(X)>EVF(Y)) and a non-member Z whose ULID sorts between them, the
+// relation cycles (X<Y by EVF, Y<Z by ULID, Z<X by ULID), so sort.SliceStable
+// yields different orders for different input permutations. The fix sorts by a
+// total order (Score desc, ULID asc) then reorders ONLY each cluster's tied
+// members among their own slots. Assert: (1) deterministic across all input
+// permutations, and (2) the newer cluster member (crown) precedes the older.
+func TestCurrencyAnnotation_TieBreak_TransitiveAcrossClusterBoundary(t *testing.T) {
+	h, cleanup := newCurrencyHarness(t)
+	defer cleanup()
+	h.pad(110, "filler")
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	// Written in the order Y, Z, X so ULID(Y) < ULID(Z) < ULID(X). Y,X share the
+	// topic tags + differing markers (they cluster); Z is unrelated (no shared
+	// tag) so it is a non-member whose ULID sits between the two cluster members.
+	yID := h.write(writeOpts{concept: "widgetflow layout v2", content: "widgetflow layout v2 for the standard profile.",
+		tags: []string{currencyChainTopicTag, currencyChainStructureTag, "v2"}, embedding: embedAt(0), validFrom: base})
+	zID := h.write(writeOpts{concept: "unrelated office note", content: "the office parking policy changed this quarter.",
+		tags: []string{"office", "parking"}, embedding: embedAt(150), validFrom: base.Add(20 * 24 * time.Hour)})
+	xID := h.write(writeOpts{concept: "widgetflow layout v3 final", content: "widgetflow layout v3 is now live for the standard profile.",
+		tags: []string{currencyChainTopicTag, currencyChainStructureTag, "v3", "final"}, embedding: embedAt(6), validFrom: base.Add(60 * 24 * time.Hour)})
+
+	// All three at an EXACT score tie -> one tie group spanning the cluster boundary.
+	perms := [][]string{
+		{xID, yID, zID}, {xID, zID, yID}, {yID, xID, zID},
+		{yID, zID, xID}, {zID, xID, yID}, {zID, yID, xID},
+	}
+	var canonical []string
+	for pi, order := range perms {
+		out := h.apply(h.scored(order[0], 0.9, order[1], 0.9, order[2], 0.9))
+		got := []string{out[0].Engram.ID.String(), out[1].Engram.ID.String(), out[2].Engram.ID.String()}
+		if pi == 0 {
+			canonical = got
+		} else if got[0] != canonical[0] || got[1] != canonical[1] || got[2] != canonical[2] {
+			t.Fatalf("non-deterministic tie order: perm %v gave %v, want %v (intransitive comparator)", order, got, canonical)
+		}
+		// Crown (newer cluster member X) must precede the older member Y.
+		if rankOfCur(out, xID) > rankOfCur(out, yID) {
+			t.Fatalf("newer cluster member X must precede older member Y; got X@%d Y@%d", rankOfCur(out, xID), rankOfCur(out, yID))
+		}
+	}
+}
+
 // TestCurrencyAnnotation_FutureValidFrom_NeverCrowned: a cluster member whose
 // EffectiveValidFrom is in the future must never be crowned
 // newest_of_cluster, even though it is chronologically the latest — a

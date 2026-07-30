@@ -309,27 +309,67 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 		}
 	}
 
-	// Deterministic re-sort: unchanged from the incoming order except at an
-	// EXACT score tie where both members are in the same detected cluster —
-	// there, newest-EffectiveValidFrom-first. ULID-ascending remains the
-	// tiebreak in every other case (untied clusters, ties outside a cluster,
-	// and the final fallback for a same-EffectiveValidFrom in-cluster tie) —
-	// the #699 determinism pin, unweakened.
+	// Base ordering: a TOTAL order (Score desc, ULID asc) — transitive and
+	// run-to-run deterministic (#699). The newest-first reorder is NOT folded in
+	// here: mixing EVF (within-cluster) and ULID (cross-cluster) in one comparator
+	// is intransitive (X<Y by EVF, Y<Z by ULID, Z<X by ULID cycles), which makes
+	// sort.SliceStable order-dependent. Keeping the base a pure total order and
+	// doing the reorder as a localized post-pass restores both properties.
 	sort.SliceStable(results, func(i, j int) bool {
 		if results[i].Score != results[j].Score {
 			return results[i].Score > results[j].Score
 		}
-		if results[i].VersionCluster != "" && results[i].VersionCluster == results[j].VersionCluster {
-			ti := results[i].Engram.EffectiveValidFrom()
-			tj := results[j].Engram.EffectiveValidFrom()
-			if !ti.Equal(tj) {
-				return ti.After(tj)
-			}
-		}
 		a, b := results[i].Engram.ID, results[j].Engram.ID
 		return bytes.Compare(a[:], b[:]) < 0
 	})
+
+	// Localized in-cluster tie reorder: within each maximal run of EQUAL score,
+	// reorder ONLY each detected cluster's members among the slots they already
+	// occupy, newest-EffectiveValidFrom-first. Non-members never move and the set
+	// of results in the run is unchanged, so truncation membership is untouched.
+	// This is the sole ordering change COG-25 permits.
+	for start := 0; start < len(results); {
+		end := start + 1
+		for end < len(results) && results[end].Score == results[start].Score {
+			end++
+		}
+		currencyReorderTieRun(results[start:end])
+		start = end
+	}
 	return results
+}
+
+// currencyReorderTieRun reorders, within one equal-score run, each detected
+// cluster's members among the slots they occupy — newest-EffectiveValidFrom-first,
+// ULID-ascending as the final tiebreak — leaving every non-member and every other
+// cluster's slots untouched. Clusters occupy disjoint slot sets, so the outcome is
+// independent of the (map) iteration order: deterministic and membership-preserving.
+func currencyReorderTieRun(run []activation.ScoredEngram) {
+	byCluster := map[string][]int{}
+	for i := range run {
+		if run[i].VersionCluster != "" {
+			byCluster[run[i].VersionCluster] = append(byCluster[run[i].VersionCluster], i)
+		}
+	}
+	for _, idxs := range byCluster {
+		if len(idxs) < 2 {
+			continue
+		}
+		members := make([]activation.ScoredEngram, len(idxs))
+		for k, idx := range idxs {
+			members[k] = run[idx]
+		}
+		sort.SliceStable(members, func(a, b int) bool {
+			ta, tb := members[a].Engram.EffectiveValidFrom(), members[b].Engram.EffectiveValidFrom()
+			if !ta.Equal(tb) {
+				return ta.After(tb)
+			}
+			return bytes.Compare(members[a].Engram.ID[:], members[b].Engram.ID[:]) < 0
+		})
+		for k, idx := range idxs {
+			run[idx] = members[k]
+		}
+	}
 }
 
 // currencyTemporallySeparated reports whether a and b's EffectiveValidFrom

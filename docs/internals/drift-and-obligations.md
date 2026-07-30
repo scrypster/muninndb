@@ -28,6 +28,17 @@ and remain the reviewer's job.
    **There is no automated check** — nothing verifies SDK parity in CI. Claude Code users
    get a warning from `.claude/hooks/drift-guard.mjs`; otherwise manual. 🪝
 
+   **Recall supersession/currency annotations are MCP + MBP only, deliberately** (COG-22,
+   COG-25). `SupersededBy`/`CurrentVersion` (asserted) and `possibly_superseded_by`/
+   `version_cluster`/`newest_of_cluster`/`cluster_size` (advisory, COG-25) live on
+   `mbp.ActivationItem` + `mcp.MemoryAnnotations`; REST inherits them via the
+   `rest.ActivateResponse = mbp.ActivateResponse` type alias, so it is automatically in sync.
+   **proto/gRPC and the non-Go SDKs carry NO supersession/currency annotation fields at all**
+   (their `ActivationItem` is a minimal subset that never had even `superseded_by`). Do NOT
+   "complete" the schema by adding only the currency fields there — an unpopulated field the
+   adapter never fills is the silently-wrong class (principle #2). Add the whole annotation
+   block, wired end-to-end, or nothing.
+
 4. **A plasticity preset value** (`internal/auth/plasticity.go`) → update the web-UI preset
    cards (`web/templates/index.html`) and the JS descriptions/radar data
    (`web/static/js/app.js`), and any docs table. Presets are **hand-duplicated** across Go
