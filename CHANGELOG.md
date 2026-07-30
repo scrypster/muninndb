@@ -16,10 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concept was set correctly — the same defect class already fixed for
   `muninn_remember` in #172, but evolve never got the equivalent fix. The
   response now returns the caller's `concept` when supplied, or reads back
-  the freshly-written engram to report the inherited concept. The
-  `muninn_decide` MCP tool had the identical defect and is fixed alongside
-  it. Scoped to the MCP surface only — REST's `EvolveResponse` has no
-  `concept` field. (#721)
+  the freshly-written engram to report the inherited concept. Scoped to the
+  MCP surface only — REST's `EvolveResponse` has no `concept` field. (#721)
+- **The `muninn_decide` MCP tool had the identical empty-`concept` defect,
+  plus a second bug once the first fix landed.** A naive fix (echo the
+  caller's `decision` text) is wrong when two decisions submit identical
+  rationale text: `engine.Decide` writes through the content-hash dedup
+  path, which returns a pre-existing engram's ID, so the response would
+  report the *second* call's decision text against the *first* call's
+  engram. The response now reads the concept back from the stored engram,
+  the same way evolve does, so it never echoes text the returned engram
+  doesn't actually have. Scoped to the MCP surface only — REST's
+  `DecideResponse` is `{ID, Warnings}` and has no `concept` field. (#721)
+- **The `muninn_explain` MCP tool's response also dropped `concept`.** A
+  third instance of the same defect shape: the adapter copied eight score-
+  breakdown fields off the engine's `ExplainData` but never copied
+  `Concept`, so `muninn_explain` always reported `concept: ""` on MCP even
+  though REST's equivalent adapter has set it correctly all along. Scoped to
+  the MCP surface only — REST's explain adapter already sets `Concept`.
+  (#721)
 
 ---
 

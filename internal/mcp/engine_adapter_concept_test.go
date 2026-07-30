@@ -27,10 +27,14 @@ import (
 // newConceptAdapterEnv wires a real *engine.Engine (live PebbleStore + FTS)
 // using only exported constructors — the same shape as
 // rest.newRESTRetryEnrichEnv and grpc's newConfidenceAdapterEnv. AuthStore is
-// required: the write path resolves vault plasticity and, for a vault with no
-// explicit config, logs a WARN and proceeds — that WARN is expected here, not
-// a failure. Shared with engine_adapter_decide_concept_test.go, whose
-// muninn_decide regression test needs the identical harness.
+// NOT required: Engine.ResolveVaultPlasticity falls back to defaults when
+// authStore is nil (internal/engine/engine.go). What auth.NewStore(db) buys
+// here is the expected WARN line: auth.Store.GetVaultConfig logs "vault has
+// no explicit config — defaulting to locked access (fail-closed)" for a
+// vault with no explicit config (internal/auth/vault_config.go), and that
+// WARN in test output is expected, not a failure. Shared with
+// engine_adapter_decide_concept_test.go, whose muninn_decide regression test
+// needs the identical harness.
 func newConceptAdapterEnv(t *testing.T) (*mcpEngineAdapter, func()) {
 	t.Helper()
 
