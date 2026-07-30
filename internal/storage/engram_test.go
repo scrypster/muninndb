@@ -228,6 +228,66 @@ func TestUpdateTags_NotFound(t *testing.T) {
 	}
 }
 
+// TestUpdateTags_RejectedTagDoesNotPoisonCache pins the error path: a call that
+// FAILS validation must leave every reader seeing the original tags.
+//
+// The defect this closes: GetEngram hands back the L1 cache's live entry
+// (DomainCache.Get does not clone), and UpdateTags mutated eng.Tags on that very
+// object before validating anything. The WriteRawTagIndexEntry error branch then
+// returned ahead of the cache invalidation, so the rejected tags stayed cached.
+//
+// It is reachable straight from MCP: normalizeTags checks only type, emptiness,
+// and byte length, and ValidateRawTagValue rejects a NUL byte inside a
+// `key:value` tag's VALUE — which a JSON `"<NUL>"` delivers intact.
+//
+// RED before the fix (measured):
+//
+//	baseline tags = [env:prod]
+//	UpdateTags with NUL tag returned err = raw tag index: tag value contains a
+//	  NUL byte, rejected
+//	AFTER FAILED CALL, GetEngram (L1 cache) tags = [env:sta ging]
+//	AFTER FAILED CALL, Pebble record tags      = [env:prod]
+//
+// Why that is the worst failure class in the project and not a cosmetic nit: the
+// call returns an error, so the caller believes nothing changed — yet until
+// eviction muninn_read echoes the rejected tags AND
+// activation.PassesMetaFilter, which re-checks the poisoned eng.Tags, filters
+// the engram OUT of a `tags_all: ["env:prod"]` recall. An error-returning call
+// producing a silent false negative is strictly worse than a loud failure.
+func TestUpdateTags_RejectedTagDoesNotPoisonCache(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("updatetags-cache-poison")
+
+	eng := &Engram{
+		Concept: "release checklist",
+		Content: "the checklist covers the staged rollout",
+		Tags:    []string{"env:prod"},
+	}
+	id, err := store.WriteEngram(ctx, ws, eng)
+	if err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	// Warm the L1 cache, exactly as a recall would.
+	if _, err := store.GetEngram(ctx, ws, id); err != nil {
+		t.Fatalf("GetEngram (warm cache): %v", err)
+	}
+
+	rejected := []string{"env:sta\x00ging"}
+	if err := store.UpdateTags(ctx, ws, id, rejected); err == nil {
+		t.Fatal("UpdateTags with a NUL byte in a key:value tag's value returned nil, want rejection")
+	}
+
+	got, err := store.GetEngram(ctx, ws, id)
+	if err != nil {
+		t.Fatalf("GetEngram after the failed UpdateTags: %v", err)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "env:prod" {
+		t.Errorf("after a FAILED UpdateTags, GetEngram tags = %q, want [env:prod] — the cache is serving tags that were rejected and never committed", got.Tags)
+	}
+}
+
 // TestUpdateTags_ConcurrentSoftDeleteDoesNotResurrect pins [STO-2]/[STO-3] for
 // UpdateTags: it must hold casLocks.For(id) across read→commit, as SoftDelete,
 // UpdateConfidence, TouchAccess, AdjustConfidence, CompareAndSet and

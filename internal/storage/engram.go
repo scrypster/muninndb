@@ -790,10 +790,19 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 // tag_prefix against the engram's real Tags, so a stale seeding entry can never
 // produce a false positive — but it is not free either: the orphans consume the
 // bounded candidate-seeding budget in ListByTagInRange/ListByTagsAllInRange
-// (query.go), so a heavily-retagged vault can crowd genuine matches out of a
-// tag-filtered recall. Deleting them on removal is deliberately out of scope
-// here (#720). The FTS posting lists are a different story and are NOT
-// self-correcting — Engine.UpdateTags reindexes them (see its doc comment).
+// (query.go) and in ScanRawTagRange (raw_tag_range.go), so a heavily-retagged
+// vault can crowd genuine matches out of a tag-filtered recall. The 0x2C
+// raw-tag-range orphans are the sharper edge of the two: every value of a given
+// tag key shares Hash(tagKey), so N retags of ONE engram leave N orphans inside
+// the SAME scanned range, ScanRawTagRange iterates it ascending — oldest value
+// first, exactly where a `due:<=today` scan starts — and breaks on a hard limit
+// with no dedup. The seeding budget is k*3, i.e. 90 with the default
+// CandidatesPerIndex of 30 (activation/engine.go seedTagCandidates call sites),
+// so roughly 90 retags of a SINGLE engram can consume the entire tag-seeding
+// budget for that filter and starve every other engram out of the seed set.
+// Deleting the orphans on removal is deliberately out of scope here (#720).
+// The FTS posting lists are a different story and are NOT self-correcting —
+// Engine.UpdateTags reindexes them (see its doc comment).
 //
 // Takes the per-engram stripe lock (casLocks.For(id) — the SAME striped mutex
 // CompareAndSet/DeleteEngram/SoftDelete/UpdateConfidence/TouchAccess use) across
@@ -805,9 +814,15 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 // index still read soft_deleted (measured: 35/200 engrams resurrected and
 // diverged, and a concurrent TouchAccess reinforcement reverted on 95/200).
 // [STO-2] says "state or lease" and tags are neither, but the code here writes
-// State unconditionally, so the invariant applies. Mirrors SoftDelete's locking
-// shape exactly, including dropping the cache entry before the authoritative
-// GetEngram read so a racing DeleteEngram's stale cache entry can't be reused.
+// State unconditionally, so the invariant applies. It follows SoftDelete's
+// locking shape — drop the cache entry before the authoritative GetEngram read
+// so a racing DeleteEngram's stale entry can't be reused, mutate the cache under
+// the stripe lock, re-cache the committed record post-commit — with two
+// deliberate additions SoftDelete does not need: an invalidate BEFORE the commit
+// (SoftDelete's only cache write is post-commit, so it has no pre-commit window
+// to close), and a deferred invalidation covering every failure exit, because
+// this method can reject a tag AFTER it has already mutated the cached record
+// (see the comment at that mutation).
 func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID, tags []string) error {
 	mu := ps.casLocks.For(id[:])
 	mu.Lock()
@@ -820,7 +835,33 @@ func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID
 		return err
 	}
 
-	eng.Tags = tags
+	// GetEngram hands back the L1 cache's LIVE entry (DomainCache.Get does not
+	// clone), so the mutation below poisons the cached copy the instant it runs —
+	// before anything has been validated, let alone committed. Every exit path
+	// from here on must therefore drop it. It used to return early from the
+	// WriteRawTagIndexEntry error branch below, ahead of the invalidation:
+	// the call reported failure (a NUL byte in a key:value tag's value is
+	// rejected by ValidateRawTagValue, reachable straight from MCP since
+	// normalizeTags only checks type/emptiness/length), Pebble still held the old
+	// tags, and until eviction GetEngram served the REJECTED ones — so
+	// muninn_read echoed tags that were never stored and
+	// activation.PassesMetaFilter, which re-checks the poisoned eng.Tags,
+	// filtered the engram out of a recall on its REAL tags. An error-returning
+	// call producing a silent false negative is the worst failure class there is.
+	committed := false
+	defer func() {
+		if committed {
+			return // success path already re-cached the committed record below
+		}
+		ps.cache.Delete(wsPrefix, id)
+		ps.metaCache.Remove([16]byte(id))
+	}()
+
+	// Copy rather than alias: this slice becomes a field of the shared, cached
+	// engram, so keeping the caller's backing array would hand every reader a
+	// window into memory the caller still owns.
+	eng.Tags = make([]string, len(tags))
+	copy(eng.Tags, tags)
 	eng.UpdatedAt = time.Now()
 
 	erfEng := toERFEngram(eng)
@@ -857,13 +898,28 @@ func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID
 		}
 	}
 
-	// Invalidate L1 cache BEFORE commit — cached struct has stale tags.
+	// Invalidate L1 cache BEFORE commit — the in-memory struct already carries
+	// the new tags while Pebble still holds the old ones.
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+
+	// Re-cache the committed record, under the stripe lock, as SoftDelete and
+	// UpdateConfidence do. Without this the invalidate-above/commit-here window
+	// is open to an unlocked reader — recall calls GetEngram/GetEngrams
+	// constantly and readers do not take casLocks — which would miss the cache,
+	// read the PRE-commit Pebble value, and re-cache it, leaving a stale tag set
+	// cached indefinitely against a committed new one. The Set stays INSIDE the
+	// lock for the reason UpdateConfidence gives: outside it, a racing
+	// DeleteEngram's post-commit cache.Delete can land first and this Set would
+	// re-cache an engram Pebble has already deleted.
+	ps.cache.Set(wsPrefix, id, eng)
+	ps.metaCache.Remove([16]byte(id))
+	committed = true
+
 	ps.replicateBatch(batch)
 
 	return nil
