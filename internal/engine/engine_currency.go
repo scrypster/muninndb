@@ -126,9 +126,16 @@ var currencyTypeLabelTags = map[string]struct{}{
 var (
 	// currencyVersionMarkerRe matches "v2", "v3", "v1.1", "v2-3", etc.
 	currencyVersionMarkerRe = regexp.MustCompile(`^v\d+([.-]\d+)*$`)
-	// currencyCountedStructureRe matches "four-zone", "three-zone",
-	// "5-tier", etc. — a counted noun-phrase describing a structure shape.
-	currencyCountedStructureRe = regexp.MustCompile(`^(one|two|three|four|five|six|seven|eight|nine|ten|\d+)-[a-z][a-z-]*$`)
+	// currencyCountedStructureRe matches SPELLED-OUT counted noun-phrases
+	// ("four-zone", "three-zone") that describe a structure shape. R3: a bare
+	// numeric prefix (\d+) is deliberately NOT matched — digit-prefixed tags
+	// collide with real FACET/ID tags (form numbers, year cohorts, ticket refs
+	// like "42-alpha"/"2024-cohort"). Treating those as version markers exempted
+	// them from the facet-conflict veto (the gate R2.3 proved load-bearing),
+	// causing false clusters. Cost: a digit-form structure tag like "5-tier" is
+	// no longer recognized; the spelled-out "five-tier" still is. Precision over
+	// recall here — a false cluster annotates a live fact as possibly-stale.
+	currencyCountedStructureRe = regexp.MustCompile(`^(one|two|three|four|five|six|seven|eight|nine|ten)-[a-z][a-z-]*$`)
 )
 
 // currencyVersionStatusMarkers is the status-word half of the marker

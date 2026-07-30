@@ -173,6 +173,22 @@ func findCur(results []activation.ScoredEngram, id string) *activation.ScoredEng
 	return nil
 }
 
+// clusterOf applies the currency phase to a 2-fact scored set and returns each
+// fact's VersionCluster key ("" if unclustered) — the shape the gate-pin
+// negative controls assert on.
+func clusterOf(h *currencyTestHarness, a, b string) (string, string) {
+	out := h.apply(h.scored(a, 0.9, b, 0.9))
+	ra, rb := findCur(out, a), findCur(out, b)
+	var ca, cb string
+	if ra != nil {
+		ca = ra.VersionCluster
+	}
+	if rb != nil {
+		cb = rb.VersionCluster
+	}
+	return ca, cb
+}
+
 func mustParseULIDCur(t *testing.T, s string) storage.ULID {
 	t.Helper()
 	u, err := storage.ParseULID(s)
@@ -580,6 +596,106 @@ func TestCurrencyAnnotation_ExplicitSupersedesCrown_NoTransitiveLeak(t *testing.
 	}
 }
 
+// TestCurrencyAnnotation_DigitPrefixedFacet_NotExemptFromFacetVeto pins R3: a
+// digit-prefixed FACET tag (e.g. "2024-cohort") is NOT a version marker, but the
+// pre-R3 counted-structure regex (which matched a bare \d+ prefix) misread it as
+// one, exempting it from the facet-conflict veto — the ONE gate R2.3 proved
+// load-bearing against high-cosine coexisting facets. Result: two genuinely
+// different facets falsely clustered. After R3 (spelled-out numbers only), the
+// digit-facet is subject to the veto and the false cluster is blocked.
+func TestCurrencyAnnotation_DigitPrefixedFacet_NotExemptFromFacetVeto(t *testing.T) {
+	h, cleanup := newCurrencyHarness(t)
+	defer cleanup()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	h.pad(110, "filler")
+
+	// Give the digit-prefixed facet tag df>=3 (currencyFacetDF) with two fillers.
+	for i := 0; i < 2; i++ {
+		h.write(writeOpts{
+			concept: "cohort filler", content: fmt.Sprintf("cohort note %d", i),
+			tags: []string{"2024-cohort", "note"}, embedding: embedAt(40),
+			validFrom: base.Add(time.Duration(i) * time.Hour),
+		})
+	}
+	// A: shares the topic tags, has a real marker (v2), AND the exclusive
+	// digit-facet "2024-cohort" (df>=3) — a genuinely different facet from B.
+	a := h.write(writeOpts{
+		concept: "widgetflow layout draft", content: "The widgetflow layout draft for the 2024 cohort.",
+		tags:      []string{currencyChainTopicTag, currencyChainStructureTag, "2024-cohort", "v2"},
+		embedding: embedAt(0), validFrom: base,
+	})
+	// B: shares the topic tags, different markers, no digit-facet — high cosine
+	// to A, so ONLY the facet veto can keep them apart.
+	b := h.write(writeOpts{
+		concept: "widgetflow layout live", content: "The widgetflow layout v3 is now live.",
+		tags:      []string{currencyChainTopicTag, currencyChainStructureTag, "v3", "live"},
+		embedding: embedAt(8), validFrom: base.Add(60 * 24 * time.Hour),
+	})
+
+	out := h.apply(h.scored(a, 0.9, b, 0.9))
+	ra, rb := findCur(out, a), findCur(out, b)
+	if ra.VersionCluster != "" && ra.VersionCluster == rb.VersionCluster {
+		t.Fatalf("digit-prefixed facet \"2024-cohort\" (df>=3) escaped the facet veto — A and B falsely clustered (cluster %q)", ra.VersionCluster)
+	}
+}
+
+// The next three tests pin gates that otherwise survive mutation (fleet finding):
+// each sets up a pair that clears EVERY clustering gate except the one under test,
+// then asserts NO cluster forms — so deleting/inverting that single gate turns the
+// test RED. They are negative controls, the mutation-proof complement to the
+// positive TagAnchoredChain test.
+
+// TestCurrencyAnnotation_TemporalFloor_SameBreathNotClustered pins currencyTemporalFloor:
+// two facts written < 1h apart are a same-breath batch, not generations.
+func TestCurrencyAnnotation_TemporalFloor_SameBreathNotClustered(t *testing.T) {
+	h, cleanup := newCurrencyHarness(t)
+	defer cleanup()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	h.pad(110, "filler")
+	a := h.write(writeOpts{concept: "widgetflow layout a", content: "widgetflow layout v2 for the standard profile.",
+		tags: []string{currencyChainTopicTag, currencyChainStructureTag, "v2"}, embedding: embedAt(0), validFrom: base})
+	b := h.write(writeOpts{concept: "widgetflow layout b", content: "widgetflow layout v3 for the standard profile.",
+		tags: []string{currencyChainTopicTag, currencyChainStructureTag, "v3"}, embedding: embedAt(5), validFrom: base.Add(30 * time.Minute)})
+	ra, rb := clusterOf(h, a, b)
+	if ra != "" && ra == rb {
+		t.Fatalf("facts < currencyTemporalFloor apart (same-breath) must not cluster")
+	}
+}
+
+// TestCurrencyAnnotation_CosineFloor_LowSimilarityNotClustered pins currencySimThreshold:
+// tag structure alone must not cluster genuinely-dissimilar content (cosine < 0.70).
+func TestCurrencyAnnotation_CosineFloor_LowSimilarityNotClustered(t *testing.T) {
+	h, cleanup := newCurrencyHarness(t)
+	defer cleanup()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	h.pad(110, "filler")
+	a := h.write(writeOpts{concept: "widgetflow layout a", content: "widgetflow layout v2 for the standard profile.",
+		tags: []string{currencyChainTopicTag, currencyChainStructureTag, "v2"}, embedding: embedAt(0), validFrom: base})
+	b := h.write(writeOpts{concept: "widgetflow layout b", content: "widgetflow layout v3 for the standard profile.",
+		tags: []string{currencyChainTopicTag, currencyChainStructureTag, "v3"}, embedding: embedAt(60), validFrom: base.Add(60 * 24 * time.Hour)}) // cos(60)=0.5 < 0.70
+	ra, rb := clusterOf(h, a, b)
+	if ra != "" && ra == rb {
+		t.Fatalf("facts below the cosine sanity floor (0.70) must not cluster on tag structure alone")
+	}
+}
+
+// TestCurrencyAnnotation_TagShareMin_SingleSharedTagNotClustered pins currencyTagShareMin:
+// one shared non-ubiquitous tag is necessary but not sufficient.
+func TestCurrencyAnnotation_TagShareMin_SingleSharedTagNotClustered(t *testing.T) {
+	h, cleanup := newCurrencyHarness(t)
+	defer cleanup()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	h.pad(110, "filler")
+	a := h.write(writeOpts{concept: "widgetflow layout a", content: "widgetflow layout v2 for the standard profile.",
+		tags: []string{currencyChainTopicTag, "v2"}, embedding: embedAt(0), validFrom: base}) // no structure tag
+	b := h.write(writeOpts{concept: "widgetflow layout b", content: "widgetflow layout v3 for the standard profile.",
+		tags: []string{currencyChainTopicTag, "v3"}, embedding: embedAt(5), validFrom: base.Add(60 * 24 * time.Hour)})
+	ra, rb := clusterOf(h, a, b)
+	if ra != "" && ra == rb {
+		t.Fatalf("a single shared non-ubiquitous tag (< currencyTagShareMin) must not cluster")
+	}
+}
+
 // TestCurrencyAnnotation_FutureValidFrom_NeverCrowned: a cluster member whose
 // EffectiveValidFrom is in the future must never be crowned
 // newest_of_cluster, even though it is chronologically the latest — a
@@ -799,8 +915,12 @@ func TestCurrencyEntityAnchor_NoSharedEntity_DoesNotAnchor(t *testing.T) {
 func TestCurrencyIsVersionMarker(t *testing.T) {
 	cases := map[string]bool{
 		"v2": true, "v3": true, "v1.1": true, "v2-3": true,
-		"four-zone": true, "three-zone": true, "5-tier": true,
+		"four-zone": true, "three-zone": true, "five-tier": true,
 		"final": true, "live": true, "future": true, "revision": true,
+		// R3: digit-prefixed tags are NOT markers — they collide with facet/ID
+		// tags (form numbers, year cohorts). "5-tier" and "2024-cohort" must be
+		// treated as ordinary (facet-eligible) tags, not version markers.
+		"5-tier": false, "2024-cohort": false, "42-alpha": false,
 		"widgetflow": false, "structure": false, "sandbox": false, "telemetry": false,
 	}
 	for tag, want := range cases {

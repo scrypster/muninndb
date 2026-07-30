@@ -161,6 +161,10 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("supersedes what's already stored. This matters most for bulk or repeated-write pipelines that re-run over the same entities (periodic ")
 	b.WriteString("re-scoring, re-auditing, status polling): re-remembering on every run silently accumulates near-duplicate copies that crowd out other ")
 	b.WriteString("results in recall — evolving keeps the vault at one live version per fact.\n")
+	b.WriteString("**Advisory currency signal.** Even without `muninn_evolve`, `muninn_recall` may flag a result whose content clusters with a newer, ")
+	b.WriteString("highly-similar fact about the same subject: `annotations.possibly_superseded_by` names that newer fact (with `version_cluster`, ")
+	b.WriteString("`newest_of_cluster`, `cluster_size`). This is a heuristic hint, not an assertion — unlike `superseded_by`/`current_version` (which mean ")
+	b.WriteString("an explicit `supersedes` link exists), verify before treating the older fact as false; it is still returned at full score.\n")
 
 	// Hierarchical memory
 	b.WriteString("\n## Hierarchical Memory\n\n")

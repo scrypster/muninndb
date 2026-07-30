@@ -228,7 +228,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"annotate": map[string]any{
 						"type":        "boolean",
-						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false.",
+						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false. Independent of annotate: whenever a result belongs to a detected same-subject version cluster, annotations also carries an ADVISORY (never asserted) possibly_superseded_by/version_cluster/newest_of_cluster/cluster_size signal — a mechanical hint pointing an older cluster member at the newest, distinct from the authoritative superseded_by/current_version pair.",
 					},
 					"caller": map[string]any{
 						"type":        "string",
