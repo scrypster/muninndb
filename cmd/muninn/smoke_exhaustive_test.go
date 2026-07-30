@@ -57,6 +57,7 @@ var allMCPTools = []string{
 	"muninn_entity_timeline",
 	"muninn_feedback",
 	"muninn_trust",
+	"muninn_update_tags",
 	"muninn_intend",
 	"muninn_entity",
 	"muninn_entities",
@@ -934,6 +935,39 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_trust returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_update_tags", func(t *testing.T) {
+		result := mcpTool(t, tok, "muninn_update_tags", map[string]any{
+			"vault": vault,
+			"id":    idB,
+			"tags":  []any{"due:2026-08-01", "smoke"},
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_update_tags returned error field: %v", errVal)
+		}
+		// #720: the retag is IN PLACE — the id must not change and the engram
+		// must still be readable under it (evolve would archive it under a new
+		// ULID instead).
+		if got, _ := result["id"].(string); got != idB {
+			t.Errorf("response id = %q, want the unchanged %q", got, idB)
+		}
+		readBack := mcpTool(t, tok, "muninn_read", map[string]any{
+			"vault": vault,
+			"id":    idB,
+		})
+		if state, _ := readBack["state"].(string); state == "soft_deleted" {
+			t.Errorf("retag must not archive the engram, got state %q", state)
+		}
+		// Clearing is supported and does not error.
+		cleared := mcpTool(t, tok, "muninn_update_tags", map[string]any{
+			"vault": vault,
+			"id":    idB,
+			"tags":  []any{},
+		})
+		if errVal, hasErr := cleared["error"]; hasErr {
+			t.Errorf("clearing tags returned error field: %v", errVal)
 		}
 	})
 
