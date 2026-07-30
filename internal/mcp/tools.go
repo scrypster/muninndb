@@ -974,7 +974,7 @@ func allToolDefinitions() []ToolDefinition {
 		// In-place retag: metadata only, no new version.
 		{
 			Name:        "muninn_update_tags",
-			Description: "Replace an engram's full tag set IN PLACE. The ID, version lineage, and access history are preserved — unlike muninn_evolve, which mints a new ULID and archives the predecessor. This is the tool for mutable tag conventions such as due:<ISO-date> or status:<value>. The tags given REPLACE the existing set entirely; pass an empty array to clear all tags. To change content and tags together, call muninn_evolve first and then this tool on the new id. Normalization is lenient, not strict (identical rules to muninn_remember): a non-string entry, an empty string, or a tag longer than 128 characters is DROPPED rather than rejected, and a set longer than 50 tags is TRUNCATED to 50 — the response echoes the tag set that was actually stored, so diff it against what you sent if that matters. A soft-deleted engram CAN be retagged (muninn_restore brings it back).",
+			Description: "Replace an engram's full tag set IN PLACE. The ID, version lineage, and access history are preserved — unlike muninn_evolve, which mints a new ULID and archives the predecessor. This is the tool for mutable tag conventions such as due:<ISO-date> or status:<value>. The tags given REPLACE the existing set entirely; pass an empty array to clear all tags. To change content and tags together, call muninn_evolve first and then this tool on the new id. Normalization is lenient, not strict (identical rules to muninn_remember): a non-string entry, an empty string, or a tag longer than 128 BYTES is DROPPED rather than rejected, and a set longer than 50 tags is TRUNCATED to 50 — the response echoes the tag set that was actually stored, so diff it against what you sent if that matters. The limit is bytes, not glyphs: a 50-character CJK tag is 150 bytes and is silently dropped. A soft-deleted engram CAN be retagged (muninn_restore brings it back), but its keyword-search postings are DELETED rather than rebuilt while it is deleted — that is what keeps a deleted memory out of search results — so retag it after restoring, or run muninn reindex-fts, if you need it findable by the new tags.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -986,7 +986,7 @@ func allToolDefinitions() []ToolDefinition {
 					"tags": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "The complete replacement tag set. An empty array clears all tags. Over-long (>128 chars), empty, and non-string entries are dropped and the set is truncated to 50 — never rejected; the response echoes what was stored.",
+						"description": "The complete replacement tag set. An empty array clears all tags. Over-long (>128 BYTES, not characters), empty, and non-string entries are dropped and the set is truncated to 50 — never rejected; the response echoes what was stored.",
 					},
 				},
 				"required": []string{"id", "tags"},

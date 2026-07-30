@@ -77,6 +77,8 @@ and remain the reviewer's job.
     deterministically — `time.Sleep` is not synchronization and flakes under `-race` on
     constrained CI cores (#722).
 
+13. **A path that rewrites an ALREADY-indexed engram's FTS entries** (`internal/index/fts/`) → call `fts.ReindexEngram`, never `DeleteEngram` followed by `IndexEngram`. The pair is not statistics-neutral — `IndexEngram` bumps `TotalEngrams`/`AvgDocLen` and increments `df_t` for every term of the document, `DeleteEngram` decrements neither — so it silently decays the engram's own BM25 score on every call (COG-24; measured −82.6% over 100 retags, #720). There is no automated check: nothing stops a new call site from pairing them. 🪝
+
 ## Live drift found during the guardian audit (worth fixing)
 
 - ~~**Windows CI tests the wrong embedding model.**~~ — fixed. `ci.yml`'s Windows job now

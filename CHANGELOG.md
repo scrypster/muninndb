@@ -16,9 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `muninn_evolve`, which mints a new ULID and archives the predecessor).
   Takes `vault`, `id`, and `tags`; an empty `tags` array clears all tags.
   The tag set is normalized exactly as `muninn_remember` normalizes it —
-  non-string and over-128-character entries are **dropped, not rejected**, and
+  non-string and over-128-**byte** entries are **dropped, not rejected**, and
   the set is **truncated to 50** — so diff the `tags` the response echoes back
-  against what you sent. Brings the MCP tool count to 45. (#720)
+  against what you sent. (The limit is bytes, not glyphs: a 50-glyph CJK tag is
+  150 bytes and is dropped.) A soft-deleted memory can still be retagged, but its
+  keyword-search postings stay dropped while it is deleted — that is what keeps a
+  deleted memory out of search results — so retag it again after
+  `muninn_restore` if it must be findable by the new tags. Brings the MCP tool
+  count to 45. (#720)
 
 ### Fixed
 
@@ -26,12 +31,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tokenized into the BM25 posting lists, but the storage-level tag update only
   rewrote the record and the tag indices, so after changing a tag recall scored
   the memory on a tag it no longer had and could not score it on the tag it had
-  just gained. `Engine.UpdateTags` now deletes and re-indexes the engram's
-  postings, keyed on the tag set captured before the write. (The tag *indices*
-  were never affected — the recall pipeline re-checks them against the engram's
-  real tags — but the full-text score feeds ranking directly with nothing to
-  re-verify it.) This also stops a retagged-then-forgotten memory from staying
-  keyword-searchable under a tag it used to have. (#720)
+  just gained. `Engine.UpdateTags` now rebuilds the engram's postings in one
+  atomic operation, keyed on the document captured before the write. (The tag
+  *indices* were never affected — the recall pipeline re-checks them against the
+  engram's real tags — but the full-text score feeds ranking directly with
+  nothing to re-verify it.) This also stops a retagged-then-forgotten memory from
+  staying keyword-searchable under a tag it used to have. (#720)
+
+- **Curating a memory's tags no longer makes it harder to find.** The obvious way
+  to rebuild an engram's postings — delete them, then index the new document —
+  is not statistics-neutral: indexing increments the per-term document frequency
+  for *every* term the memory contains (and the corpus size), while deleting
+  decrements neither. Because BM25's inverse document frequency is
+  `ln((N+1)/(df+0.5))`, each edit moved the denominator by a whole document and
+  the numerator barely at all, so a memory's score for a query on its own
+  **unchanged** content decayed on every retag: measured on a 60-memory vault,
+  −8.1% from a single retag, below a 0.3 recall threshold by ten, and −82.6%
+  after a hundred against a −10.0% drop for an untouched control in the same
+  vault. Since `muninn_update_tags` exists precisely for `due:<ISO-date>`-style
+  conventions, ten retags is under two weeks of ordinary use, and nothing
+  surfaced the loss. Retagging is now stats-neutral by construction: one
+  full-text-index operation that leaves the corpus size alone and moves a term's
+  document frequency only when the term genuinely entered or left the memory.
+  (#720)
+
+- **A retag no longer makes a deleted memory keyword-searchable again.** A retag
+  rebuilt the posting lists with no state check, undoing the soft delete's own
+  full-text cleanup. Recall never returned the memory (the pipeline filters
+  deleted and archived memories out before scoring), but the postings still
+  consumed candidate slots. A soft-deleted or archived memory now gets its
+  postings dropped and nothing written back — it stays retaggable, and the
+  record is updated as before. (#720)
+
+- **A rejected retag no longer leaves the wrong tags visible.** `muninn_read`
+  could echo tags that had been rejected and never stored, and — worse — a recall
+  filtered on the memory's *real* tags could drop it, because the same in-memory
+  copy backs both. The storage-level tag update mutated the cached record before
+  validating it and then returned from the validation-failure path without
+  dropping the cache entry, so a call that reported an error still changed what
+  every reader saw until the entry was evicted. Reachable from MCP with a tag
+  whose `key:value` value contains a NUL byte. The cache entry is now dropped on
+  every exit path, and the committed record is re-cached after the write — which
+  also closes the window where a concurrent reader could re-cache the
+  pre-commit tags on top of a committed update. (#720)
 
 - **A concurrent retag can no longer resurrect a deleted memory.** The
   storage-level tag update re-encodes the whole record, so unlocked it wrote back
