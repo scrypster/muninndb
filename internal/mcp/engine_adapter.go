@@ -103,21 +103,39 @@ func resolveEvolveConcept(callerConcept string, readBack func() string) string {
 	return readBack()
 }
 
+// readBackConcept fetches id's stored Concept for use as the read-back
+// resolution in a WriteResult. Shared by Evolve (via resolveEvolveConcept)
+// and Decide, whose dedup path (see Decide below) means the caller-supplied
+// text can name a different engram's content than the one actually returned.
+//
+// GetEngram, not Read, deliberately: Read bumps AccessCount when the vault's
+// ReinforceOnRead plasticity is enabled (COG-12 amendment, S2/#682,
+// docs/internals/invariants.md), and formatting a response is not a
+// caller-intended access — reading back what we just wrote to report it
+// truthfully must not itself inflate ACT-R base-level activation. GetEngram
+// is a plain point lookup with no such side effect.
+//
+// The failure arm only ever fires on a genuine error: storage.PebbleStore's
+// GetEngram never returns (nil, nil) on success — a missing key takes the
+// err != nil branch (internal/storage/engram.go) — so there is no
+// eng == nil-with-nil-err case to additionally guard against here.
+func (a *mcpEngineAdapter) readBackConcept(ctx context.Context, vault string, id storage.ULID, op string) string {
+	eng, gerr := a.eng.GetEngram(ctx, vault, id)
+	if gerr != nil {
+		slog.Warn(op+": failed to read back concept", "id", id.String(), "err", gerr)
+		return ""
+	}
+	return eng.Concept
+}
+
 func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (*WriteResult, error) {
 	id, err := a.eng.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, entities, importance, effectiveAt)
 	if err != nil {
 		return nil, err
 	}
 	return &WriteResult{
-		ID: id.String(),
-		Concept: resolveEvolveConcept(concept, func() string {
-			eng, gerr := a.eng.GetEngram(ctx, vault, id)
-			if gerr != nil || eng == nil {
-				slog.Warn("evolve: failed to read back concept", "id", id.String(), "err", gerr)
-				return ""
-			}
-			return eng.Concept
-		}),
+		ID:      id.String(),
+		Concept: resolveEvolveConcept(concept, func() string { return a.readBackConcept(ctx, vault, id, "evolve") }),
 	}, nil
 }
 func (a *mcpEngineAdapter) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
@@ -147,10 +165,22 @@ func (a *mcpEngineAdapter) Decide(ctx context.Context, vault, decision, rational
 	if err != nil {
 		return nil, err
 	}
-	// Concept is unconditionally the caller's decision text — engine.Decide
-	// writes Concept: decision verbatim (internal/engine/engine.go), so there
-	// is no store read-back precedence to apply here, unlike Evolve.
-	return &WriteResult{ID: res.ID.String(), Concept: decision, Warnings: res.Warnings}, nil
+	// Concept must NOT be the caller's decision text unconditionally.
+	// engine.Decide routes through e.Write, whose content-hash dedup
+	// short-circuit (engine.go, content-hash dedup block) returns a
+	// PRE-EXISTING engram's ID with Hint: "duplicate_content" when two
+	// decisions submit identical content (same rationale + alternatives).
+	// DecideResult carries only {ID, Warnings} — the dedup hint is dropped —
+	// so two Decide calls with the same rationale collapse onto one engram,
+	// and res.ID can name an engram whose stored Concept is an EARLIER
+	// call's decision text, not this call's. Read the concept back from the
+	// store, exactly like Evolve, so the response never echoes text the
+	// returned engram doesn't actually have.
+	return &WriteResult{
+		ID:       res.ID.String(),
+		Concept:  a.readBackConcept(ctx, vault, res.ID, "decide"),
+		Warnings: res.Warnings,
+	}, nil
 }
 
 func (a *mcpEngineAdapter) Restore(ctx context.Context, vault, id string) (*RestoreResult, error) {
