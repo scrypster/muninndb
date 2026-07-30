@@ -35,6 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   though REST's equivalent adapter has set it correctly all along. Scoped to
   the MCP surface only — REST's explain adapter already sets `Concept`.
   (#721)
+- **`muninn_contradictions` reported `concept_a`/`concept_b` as `""` for
+  every pair.** A fourth instance of the same defect shape: REST's
+  equivalent (`GetContradictions` in
+  `internal/transport/rest/engine_adapter.go`) has always read both
+  engrams back to populate `ConceptA`/`ConceptB`; the MCP adapter shipped
+  `ContradictionPair{IDa, IDb}` only. Fixed with a single batched read
+  (`Engine.GetEngramsBatch`, one Pebble iterator for every ID referenced by
+  any pair) rather than a per-pair lookup, since this tool can return every
+  contradiction in the vault. A missing or unreadable engram degrades that
+  side to `""` rather than failing the call. Scoped to the MCP surface
+  only — REST already gets this right. `detected_at` remains unpopulated;
+  the 0x0A marker persists only the pair, with no severity/type/provenance
+  to report. (#721)
 
 ---
 

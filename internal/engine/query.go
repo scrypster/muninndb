@@ -84,6 +84,15 @@ func (e *Engine) GetContradictions(ctx context.Context, vault string) ([][2]stor
 	return e.store.GetContradictions(ctx, ws)
 }
 
+// GetEngramsBatch resolves vault to a workspace prefix and batch-reads ids in
+// one call — a single Pebble iterator (storage.PebbleStore.GetEngrams) instead
+// of one point lookup per ID, same batching pattern as GetAssociationsBatch
+// above. Missing entries come back nil at their index; callers must guard.
+func (e *Engine) GetEngramsBatch(ctx context.Context, vault string, ids []storage.ULID) ([]*storage.Engram, error) {
+	ws := e.store.ResolveVaultPrefix(vault)
+	return e.store.GetEngrams(ctx, ws, ids)
+}
+
 // ResolveContradiction removes the contradiction marker for the pair (idA, idB)
 // and updates the vault coherence counters.
 func (e *Engine) ResolveContradiction(ctx context.Context, vault, idA, idB string) error {

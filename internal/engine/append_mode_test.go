@@ -38,6 +38,7 @@ var appendReadOnly = map[string]bool{
 	"Explain": true, "ExportGraph": true, "ExportVault": true, "FindByEntity": true,
 	"FindSimilarEntities": true, "GetAnnotations": true, "GetAssociations": true,
 	"GetAssociationsBatch": true, "GetContradictions": true, "GetEngram": true,
+	"GetEngramsBatch":         true,
 	"GetEnrichmentCandidates": true, "GetEnrichmentMode": true, "GetEntityAggregate": true,
 	"GetEntityClusters": true, "GetEntityTimeline": true, "GetNoveltyDrops": true,
 	"GetProcessorStats": true, "GetProvenance": true, "GetVaultEmbedDim": true, "GetVaultJob": true,

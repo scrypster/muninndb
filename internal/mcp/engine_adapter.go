@@ -78,14 +78,58 @@ func (a *mcpEngineAdapter) NoticesForRemember(ctx context.Context, vault string,
 	return a.eng.NoticesForRemember(ctx, vault, focal, createdID, sessionSeen)
 }
 
+// GetContradictions reports every contradiction pair in vault, with each
+// side's Concept read back from the store — the fourth instance of the
+// #721 defect shape: REST's equivalent (internal/transport/rest/engine_adapter.go,
+// GetContradictions) has always enriched ConceptA/ConceptB by reading both
+// engrams back; this adapter shipped ContradictionPair{IDa, IDb} only, so
+// concept_a/concept_b serialized as "" on every MCP response.
+//
+// Batched, not per-pair: GetContradictions scans the vault's entire 0x0A
+// keyspace with no cap (storage/association.go), so a tool call can return
+// every pair in the vault. Reading each side individually, as REST does,
+// would cost 2N point lookups; GetEngramsBatch instead opens a single Pebble
+// iterator for the whole ID set (storage.PebbleStore.GetEngrams), same
+// mechanism GetAssociationsBatch already uses for a batch of forward edges.
+//
+// GetEngramsBatch, not Read: it is a plain point-style lookup with no access
+// accounting, so formatting this response never bumps AccessCount/LastAccess
+// (COG-12, docs/internals/invariants.md) — the same discipline readBackConcept
+// already documents for Evolve/Decide.
+//
+// A missing or unreadable engram degrades that side to "" (mirrors REST's
+// per-side `if errX == nil && engX != nil` guards) rather than failing the
+// whole call — DetectedAt is left alone; it is genuinely unpopulatable (the
+// 0x0A marker persists only the pair, no severity/type/provenance).
 func (a *mcpEngineAdapter) GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error) {
 	pairs, err := a.eng.GetContradictions(ctx, vault)
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]storage.ULID, 0, len(pairs)*2)
+	for _, p := range pairs {
+		ids = append(ids, p[0], p[1])
+	}
+	engrams, err := a.eng.GetEngramsBatch(ctx, vault, ids)
+	if err != nil {
+		// GetEngramsBatch degrades internally rather than erroring in the
+		// current implementation, but guard anyway: a batch failure must
+		// still return every pair's IDs, just with both concepts blank.
+		slog.Warn("contradictions: batch concept read-back failed, concepts will be empty", "err", err)
+		engrams = nil
+	}
 	result := make([]ContradictionPair, len(pairs))
 	for i, p := range pairs {
 		result[i] = ContradictionPair{IDa: p[0].String(), IDb: p[1].String()}
+		if len(engrams) != len(ids) {
+			continue
+		}
+		if eng := engrams[2*i]; eng != nil {
+			result[i].ConceptA = eng.Concept
+		}
+		if eng := engrams[2*i+1]; eng != nil {
+			result[i].ConceptB = eng.Concept
+		}
 	}
 	return result, nil
 }
