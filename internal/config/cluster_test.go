@@ -355,8 +355,8 @@ func TestLoadClusterConfig_MaxLogBacklogDefaultsWhenAbsentFromYAML(t *testing.T)
 	if err != nil {
 		t.Fatalf("LoadClusterConfig: %v", err)
 	}
-	if cfg.MaxLogBacklog != 50000 {
-		t.Fatalf("MaxLogBacklog = %d, want 50000 (default must survive a yaml without the key)",
+	if cfg.MaxLogBacklog != 5000 {
+		t.Fatalf("MaxLogBacklog = %d, want 5000 (default must survive a yaml without the key)",
 			cfg.MaxLogBacklog)
 	}
 	// An explicit 0 must still disable the ceiling.

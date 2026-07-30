@@ -65,8 +65,15 @@ type ClusterConfig struct {
 	// behind the prune point rejoins via snapshot, which is the documented
 	// consequence of pruning past a replica.
 	//
+	// Sizing note: this is an entry count, but entries are not small — each
+	// one carries the full key AND value of the replicated write, so a store
+	// holding embeddings or HNSW blobs averages hundreds of KB per entry. On a
+	// real deployment the mean was 658 KB, which made a 50000-entry ceiling
+	// worth ~34 GB. A byte-based bound would be the better long-term design;
+	// until then the default is deliberately conservative.
+	//
 	// 0 disables the ceiling (unbounded retention — the old behaviour).
-	// Default: 50000.
+	// Default: 5000.
 	MaxLogBacklog int `yaml:"max_log_backlog" json:"max_log_backlog"`
 }
 
@@ -97,7 +104,7 @@ func clusterDefaults() ClusterConfig {
 		HandoffAckTimeoutSec:          5,
 		PruneIntervalSec:              60,
 		ReconDelayMs:                  2000,
-		MaxLogBacklog:                 50000,
+		MaxLogBacklog:                 5000,
 	}
 }
 
