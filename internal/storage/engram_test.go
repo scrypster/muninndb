@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -224,6 +226,172 @@ func TestUpdateTags_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when updating tags of non-existent engram, got nil")
 	}
+}
+
+// TestUpdateTags_ConcurrentSoftDeleteDoesNotResurrect pins [STO-2]/[STO-3] for
+// UpdateTags: it must hold casLocks.For(id) across read→commit, as SoftDelete,
+// UpdateConfidence, TouchAccess, AdjustConfidence, CompareAndSet and
+// DeleteEngram all do.
+//
+// UpdateTags re-encodes the FULL record (toERFEngram → erf.Encode), so it writes
+// back every field from its snapshot — State included. Unlocked, that snapshot
+// can predate a committed SoftDelete, and the write-back resurrects the record
+// while the 0x0B state index still says soft_deleted: the #594 resurrection race
+// reopened by a new unlocked state-mutating path. The user-visible symptom is
+// muninn_forget reporting success, muninn_list_deleted showing the memory as
+// deleted, and recall continuing to return it.
+//
+// The invariant's text says "state or lease" and tags are neither, but the live
+// code writes State unconditionally, so the invariant's intent applies — the
+// code is what governs.
+//
+// RED without the lock (measured, plain `go test`, no -race needed — it fails
+// deterministically enough that -race is not worth the CI minutes; two samples
+// were 35/200 and 36/200):
+//
+//	LOST UPDATE / RESURRECTION: 35/200 engrams ended State != soft_deleted after
+//	a committed SoftDelete
+//	RECORD/INDEX DIVERGENCE: 35/200 soft_deleted in the 0x0B index but not in
+//	the 0x02 record
+//	(and 44/200 lost the tag update entirely)
+func TestUpdateTags_ConcurrentSoftDeleteDoesNotResurrect(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("updatetags-resurrection")
+
+	const n = 200
+	ids := make([]ULID, n)
+	for i := range ids {
+		ids[i] = writeTestEngram(t, store, ws, fmt.Sprintf("resurrect-%d", i), "body")
+	}
+
+	// Release both writers at once per engram so the read-modify-write windows
+	// actually overlap.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(2)
+		go func(id ULID) {
+			defer wg.Done()
+			<-start
+			_ = store.UpdateTags(ctx, ws, id, []string{"retagged"})
+		}(id)
+		go func(id ULID) {
+			defer wg.Done()
+			<-start
+			_ = store.SoftDelete(ctx, ws, id)
+		}(id)
+	}
+	close(start)
+	wg.Wait()
+
+	// Whichever order the two calls serialize in, the committed outcome is the
+	// same: SoftDelete last writes soft_deleted; UpdateTags last re-reads
+	// soft_deleted under the lock and passes it through. The tag write survives
+	// either way too, so the lock does not cost the update it was protecting.
+	soft, err := indexedStateSet(ctx, store, ws, StateSoftDeleted)
+	if err != nil {
+		t.Fatalf("ScanEngramsByState: %v", err)
+	}
+
+	resurrected, diverged, lostTags := 0, 0, 0
+	for _, id := range ids {
+		// Read the authoritative record, not the L1 cache: SoftDelete
+		// repopulates the cache post-commit, and the divergence under test is
+		// between the 0x02 record and the 0x0B index.
+		store.cache.Delete(ws, id)
+		store.metaCache.Remove([16]byte(id))
+		eng, err := store.GetEngram(ctx, ws, id)
+		if err != nil {
+			t.Fatalf("GetEngram(%v): %v", id, err)
+		}
+		if eng.State != StateSoftDeleted {
+			resurrected++
+			if soft[id] {
+				diverged++
+			}
+		}
+		if len(eng.Tags) != 1 || eng.Tags[0] != "retagged" {
+			lostTags++
+		}
+	}
+	if resurrected != 0 {
+		t.Errorf("LOST UPDATE / RESURRECTION: %d/%d engrams ended State != soft_deleted after a committed SoftDelete — UpdateTags wrote back a stale unlocked snapshot [STO-2]", resurrected, n)
+	}
+	if diverged != 0 {
+		t.Errorf("RECORD/INDEX DIVERGENCE: %d/%d engrams are soft_deleted in the 0x0B state index but not in the 0x02 record [STO-3]", diverged, n)
+	}
+	if lostTags != 0 {
+		t.Errorf("%d/%d engrams lost the tag update entirely", lostTags, n)
+	}
+}
+
+// TestUpdateTags_ConcurrentTouchAccessPreservesAccessCount pins the other half
+// of the same full-record write-back: UpdateTags snapshots AccessCount and
+// LastAccess too, so unlocked it reverts a concurrent TouchAccess reinforcement.
+// This is the assertion behind the changelog's claim that a retag preserves the
+// access history — single-threaded that is trivially true; under concurrency it
+// only holds because of the stripe lock.
+//
+// RED without the lock: 95/200 engrams had AccessCount reverted to 0.
+func TestUpdateTags_ConcurrentTouchAccessPreservesAccessCount(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("updatetags-accesscount")
+
+	const n = 200
+	ids := make([]ULID, n)
+	for i := range ids {
+		ids[i] = writeTestEngram(t, store, ws, fmt.Sprintf("touch-%d", i), "body")
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(2)
+		go func(id ULID) {
+			defer wg.Done()
+			<-start
+			_ = store.UpdateTags(ctx, ws, id, []string{"retagged"})
+		}(id)
+		go func(id ULID) {
+			defer wg.Done()
+			<-start
+			_ = store.TouchAccess(ctx, ws, id)
+		}(id)
+	}
+	close(start)
+	wg.Wait()
+
+	reverted := 0
+	for _, id := range ids {
+		store.cache.Delete(ws, id)
+		store.metaCache.Remove([16]byte(id))
+		eng, err := store.GetEngram(ctx, ws, id)
+		if err != nil {
+			t.Fatalf("GetEngram(%v): %v", id, err)
+		}
+		// Serialized either way the count is exactly 1: TouchAccess first then
+		// UpdateTags passes it through; UpdateTags first then TouchAccess
+		// increments 0 → 1.
+		if eng.AccessCount != 1 {
+			reverted++
+		}
+	}
+	if reverted != 0 {
+		t.Errorf("ACCESS HISTORY REVERTED: %d/%d engrams have AccessCount != 1 after a concurrent TouchAccess — UpdateTags wrote back a stale unlocked snapshot", reverted, n)
+	}
+}
+
+// indexedStateSet collects the ids the 0x0B state secondary index lists in the
+// given lifecycle state.
+func indexedStateSet(ctx context.Context, store *PebbleStore, ws [8]byte, state LifecycleState) (map[ULID]bool, error) {
+	out := make(map[ULID]bool)
+	err := store.ScanEngramsByState(ctx, ws, state, func(id ULID) error {
+		out[id] = true
+		return nil
+	})
+	return out, err
 }
 
 // ---------------------------------------------------------------------------

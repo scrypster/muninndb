@@ -779,11 +779,42 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 	return nil
 }
 
-// UpdateTags replaces the tag list on an engram, re-encodes the full record,
-// and adds any new tag index entries. Old tag index entries for tags no longer
-// present are left as orphans (safe: they point to a valid engram, just stale).
-// For the dedup use-case (tags are always a superset) there are no removals.
+// UpdateTags REPLACES the tag list on an engram (an empty slice clears all
+// tags), re-encodes the full record, and writes 0x0C/0x2C index entries for the
+// new set. A soft-deleted engram is retaggable: the read below does not filter
+// by state, which is deliberate — Restore exists, and refusing to fix a label on
+// a recoverable memory would be a worse contract than allowing it.
+//
+// Tag index entries for REMOVED tags are left behind as orphans. That is not a
+// correctness bug — activation.PassesMetaFilter re-checks tags_all/tags_any/
+// tag_prefix against the engram's real Tags, so a stale seeding entry can never
+// produce a false positive — but it is not free either: the orphans consume the
+// bounded candidate-seeding budget in ListByTagInRange/ListByTagsAllInRange
+// (query.go), so a heavily-retagged vault can crowd genuine matches out of a
+// tag-filtered recall. Deleting them on removal is deliberately out of scope
+// here (#720). The FTS posting lists are a different story and are NOT
+// self-correcting — Engine.UpdateTags reindexes them (see its doc comment).
+//
+// Takes the per-engram stripe lock (casLocks.For(id) — the SAME striped mutex
+// CompareAndSet/DeleteEngram/SoftDelete/UpdateConfidence/TouchAccess use) across
+// the whole read-mutate-write. Previously this ran unlocked, which reopened the
+// #594 resurrection race ([STO-2]/[STO-3]): because this method re-encodes the
+// FULL record, it writes back every field from its snapshot — State,
+// Confidence, AccessCount, LastAccess — so a snapshot taken before a concurrent
+// SoftDelete committed resurrected the record to active while the 0x0B state
+// index still read soft_deleted (measured: 35/200 engrams resurrected and
+// diverged, and a concurrent TouchAccess reinforcement reverted on 95/200).
+// [STO-2] says "state or lease" and tags are neither, but the code here writes
+// State unconditionally, so the invariant applies. Mirrors SoftDelete's locking
+// shape exactly, including dropping the cache entry before the authoritative
+// GetEngram read so a racing DeleteEngram's stale cache entry can't be reused.
 func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID, tags []string) error {
+	mu := ps.casLocks.For(id[:])
+	mu.Lock()
+	defer mu.Unlock()
+
+	ps.cache.Delete(wsPrefix, id)
+
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
 		return err
