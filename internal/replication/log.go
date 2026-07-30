@@ -202,38 +202,89 @@ func (l *ReplicationLog) ReadSince(afterSeq uint64, limit int) ([]ReplicationEnt
 	return entries, nil
 }
 
-// Prune deletes log entries with seq <= untilSeq.
-// Used to clean up old entries once all replicas have acknowledged them.
+// Prune deletes log entries with seq <= untilSeq and returns how many were
+// removed. Used to clean up old entries once all replicas have acknowledged
+// them, or once the backlog ceiling forces a prune (see ClusterConfig.
+// MaxLogBacklog).
 //
 // CALLER RESPONSIBILITY: Prune must only be called after verifying that every
 // connected replica has applied all entries up to untilSeq (check
 // ClusterCoordinator.ReplicaLag or equivalent). Pruning entries that a lagging
 // Lobe has not yet applied will cause a permanent replication gap — the Lobe
 // must rejoin via snapshot if it falls behind a pruned point.
-func (l *ReplicationLog) Prune(untilSeq uint64) error {
+func (l *ReplicationLog) Prune(untilSeq uint64) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if err := l.ensureSeqInit(); err != nil {
-		return err
+		return 0, err
 	}
 
 	if untilSeq >= l.seq {
-		return nil // nothing to prune
+		return 0, nil // nothing to prune
 	}
 
-	batch := l.db.NewBatch()
-	defer batch.Close()
-
-	// Delete all entries from seq=1 up to and including untilSeq.
-	// DeleteRange is [start, end) so end key is untilSeq+1.
-	startKey := replicationEntryKey(1)
-	endKey := replicationEntryKey(untilSeq + 1)
-	if err := batch.DeleteRange(startKey, endKey, nil); err != nil {
-		return err
+	// Deliberately NOT a DeleteRange. Prefix 0x19 is shared with
+	// prefix.Idempotency, whose keys are 0x19|siphash(op_id) — byte-identical
+	// in shape to 0x19|seq_be64. A range delete would take any receipt whose
+	// siphash happens to fall below untilSeq. The two are trivially separable
+	// by encoding: log entries are msgpack, receipts are JSON. So decode, and
+	// delete only what is provably a log entry at or below the watermark.
+	iter, err := l.db.NewIter(&pebble.IterOptions{
+		LowerBound: replicationEntryKey(1),
+		UpperBound: replicationEntryKey(untilSeq + 1),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("replication log prune: new iter: %w", err)
 	}
 
-	return batch.Commit(nil)
+	var toDelete [][]byte
+	for iter.First(); iter.Valid(); iter.Next() {
+		var entry ReplicationEntry
+		if err := msgpack.Unmarshal(iter.Value(), &entry); err != nil {
+			continue // not a log entry (idempotency receipt) — leave it alone
+		}
+		if entry.Seq > untilSeq {
+			continue
+		}
+		k := make([]byte, len(iter.Key()))
+		copy(k, iter.Key())
+		toDelete = append(toDelete, k)
+	}
+	if err := iter.Error(); err != nil {
+		_ = iter.Close()
+		return 0, fmt.Errorf("replication log prune: iter: %w", err)
+	}
+	if err := iter.Close(); err != nil {
+		return 0, fmt.Errorf("replication log prune: close iter: %w", err)
+	}
+
+	// Batch the deletes so a large first prune (a log that has never been
+	// pruned can hold hundreds of thousands of entries) does not build one
+	// enormous batch.
+	const deleteBatchSize = 1000
+	deleted := 0
+	for start := 0; start < len(toDelete); start += deleteBatchSize {
+		end := start + deleteBatchSize
+		if end > len(toDelete) {
+			end = len(toDelete)
+		}
+		batch := l.db.NewBatch()
+		for _, k := range toDelete[start:end] {
+			if err := batch.Delete(k, nil); err != nil {
+				batch.Close()
+				return deleted, fmt.Errorf("replication log prune: delete: %w", err)
+			}
+		}
+		if err := batch.Commit(nil); err != nil {
+			batch.Close()
+			return deleted, fmt.Errorf("replication log prune: commit: %w", err)
+		}
+		batch.Close()
+		deleted += end - start
+	}
+
+	return deleted, nil
 }
 
 // CurrentSeq returns the latest committed sequence number.

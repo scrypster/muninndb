@@ -57,6 +57,17 @@ type ClusterConfig struct {
 	// ReconDelayMs is how long to wait after a Lobe reconnects before
 	// triggering reconciliation (ms). Default: 2000.
 	ReconDelayMs int `yaml:"recon_delay_ms" json:"recon_delay_ms"`
+	// MaxLogBacklog is the hard ceiling on replication log entries retained
+	// behind the head, regardless of replica progress. Replica acks are the
+	// preferred prune watermark, but a Lobe that never catches up must not be
+	// able to pin the log forever — the Cortex would grow without bound. When
+	// the backlog exceeds this, the log is pruned anyway and any Lobe left
+	// behind the prune point rejoins via snapshot, which is the documented
+	// consequence of pruning past a replica.
+	//
+	// 0 disables the ceiling (unbounded retention — the old behaviour).
+	// Default: 50000.
+	MaxLogBacklog int `yaml:"max_log_backlog" json:"max_log_backlog"`
 }
 
 // muninnYAML is the shape of muninn.yaml — only the cluster section is used here.
@@ -86,6 +97,7 @@ func clusterDefaults() ClusterConfig {
 		HandoffAckTimeoutSec:          5,
 		PruneIntervalSec:              60,
 		ReconDelayMs:                  2000,
+		MaxLogBacklog:                 50000,
 	}
 }
 

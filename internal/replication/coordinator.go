@@ -2194,6 +2194,41 @@ func (c *ClusterCoordinator) SnapshotInProgress() bool {
 // startPeriodicPrune launches a goroutine that prunes fully-replicated WAL
 // segments every 60 seconds. Only runs on the Cortex (leader) node.
 // Pruning is skipped while a snapshot transfer is in progress.
+// pruneWatermark returns the sequence to prune up to, and whether the backlog
+// ceiling forced it past what replicas have acknowledged.
+//
+// Replica acks are the preferred watermark: pruning past a Lobe forces it to
+// rejoin via snapshot. But MinReplicatedSeq() is a *minimum* across replicas
+// and returns 0 when none have acked, so a single Lobe that never catches up
+// pins the watermark forever and the log grows without bound. That is not a
+// hypothetical — a Lobe stuck in a join/drop loop did exactly this, and the
+// resulting bloat slowed writes enough to keep the stream timing out.
+//
+// So: honour replica progress, but never retain more than MaxLogBacklog
+// entries behind the head. A Lobe left behind re-snapshots, which is the
+// documented consequence and strictly better than an unbounded Cortex.
+func (c *ClusterCoordinator) pruneWatermark() (uint64, bool) {
+	minSeq := c.MinReplicatedSeq()
+
+	maxBacklog := uint64(0)
+	if c.cfg.MaxLogBacklog > 0 {
+		maxBacklog = uint64(c.cfg.MaxLogBacklog)
+	}
+	if maxBacklog == 0 || c.repLog == nil {
+		return minSeq, false
+	}
+
+	head := c.repLog.CurrentSeq()
+	if head <= maxBacklog {
+		return minSeq, false
+	}
+	ceiling := head - maxBacklog
+	if ceiling > minSeq {
+		return ceiling, true
+	}
+	return minSeq, false
+}
+
 func (c *ClusterCoordinator) startPeriodicPrune(ctx context.Context) {
 	if c.mol == nil {
 		return
@@ -2217,15 +2252,28 @@ func (c *ClusterCoordinator) startPeriodicPrune(ctx context.Context) {
 					slog.Warn("cluster: skipping WAL prune — snapshot transfer in progress")
 					continue
 				}
-				minSeq := c.MinReplicatedSeq()
-				if minSeq == 0 {
+				pruneSeq, forced := c.pruneWatermark()
+				if pruneSeq == 0 {
 					continue
 				}
-				pruned, err := c.mol.SafePrune(minSeq)
+				pruned, err := c.mol.SafePrune(pruneSeq)
 				if err != nil {
 					slog.Warn("cluster: periodic prune failed", "err", err)
 				} else if pruned > 0 {
-					slog.Info("cluster: pruned WAL segments", "pruned", pruned, "min_replicated_seq", minSeq)
+					slog.Info("cluster: pruned WAL segments", "pruned", pruned, "min_replicated_seq", pruneSeq)
+				}
+				// The MOL prune above only unlinks sealed segment FILES. The
+				// replication log lives in Pebble under 0x19 and needs its own
+				// prune, or it grows without bound (observed: ~10 GB/day on an
+				// otherwise idle primary).
+				if c.repLog != nil {
+					n, err := c.repLog.Prune(pruneSeq)
+					if err != nil {
+						slog.Warn("cluster: replication log prune failed", "err", err)
+					} else if n > 0 {
+						slog.Info("cluster: pruned replication log entries",
+							"pruned", n, "until_seq", pruneSeq, "forced_by_backlog", forced)
+					}
 				}
 			}
 		}

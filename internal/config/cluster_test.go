@@ -337,3 +337,38 @@ func TestClusterConfig_InvalidEnvVars(t *testing.T) {
 		t.Errorf("expected HeartbeatMS=1000 (default), got %d", cfg.HeartbeatMS)
 	}
 }
+
+// The backlog ceiling only protects a live cluster if it survives loading an
+// existing cluster.yaml that predates the field. Production vps-jane has such a
+// file; if a missing key zeroed the ceiling, the prune would be inert exactly
+// where it is needed.
+func TestLoadClusterConfig_MaxLogBacklogDefaultsWhenAbsentFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	// A cluster.yaml as it exists in production today: no max_log_backlog.
+	yaml := "enabled: true\nrole: primary\nbind_addr: 10.0.0.1:8490\n" +
+		"lease_ttl: 10\nheartbeat_ms: 1000\nprune_interval_sec: 60\n"
+	if err := os.WriteFile(filepath.Join(dir, "cluster.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write cluster.yaml: %v", err)
+	}
+
+	cfg, err := LoadClusterConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadClusterConfig: %v", err)
+	}
+	if cfg.MaxLogBacklog != 50000 {
+		t.Fatalf("MaxLogBacklog = %d, want 50000 (default must survive a yaml without the key)",
+			cfg.MaxLogBacklog)
+	}
+	// An explicit 0 must still disable the ceiling.
+	yaml += "max_log_backlog: 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "cluster.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatalf("rewrite cluster.yaml: %v", err)
+	}
+	cfg, err = LoadClusterConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadClusterConfig: %v", err)
+	}
+	if cfg.MaxLogBacklog != 0 {
+		t.Fatalf("MaxLogBacklog = %d, want 0 (explicit opt-out)", cfg.MaxLogBacklog)
+	}
+}
