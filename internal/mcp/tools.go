@@ -5,15 +5,42 @@ func allToolDefinitions() []ToolDefinition {
 		"type":        "string",
 		"description": "Vault name to scope the operation (default: 'default'). Optional when authenticating via a vault-pinned mk_ key.",
 	}
-	// entityTypeEnum lists the 14 recognised entity types (the single source of
-	// truth is validEntityTypes in handlers.go). Any other value is coerced to
-	// "other" on every user-facing write path, so advertising the enum lets MCP
-	// clients validate before sending. Keep this in sync with validEntityTypes.
-	entityTypeEnum := []string{
+	// entityTypeDescription advertises the 14 recognised entity types (the single
+	// source of truth is validEntityTypes in handlers.go) as GUIDANCE rather than
+	// as a machine-enforced JSON-Schema `enum`.
+	//
+	// The enum was strictly worse than useless. Server-side it was dead weight —
+	// normalizeEntityType coerces any unrecognised value to "other" on every
+	// user-facing write path, so it never changed what was stored. Client-side it
+	// was a hard rejection: a writer whose entity did not map cleanly onto one of
+	// the 14 buckets (or whose client validates before sending) dropped the
+	// entity, and `required:["name","type"]` meant dropping the type dropped the
+	// whole entity.
+	//
+	// A difference-in-differences control on a real 4,216-engram corpus
+	// (aggregate counts only) attributed an entity-coverage collapse to exactly
+	// this line: muninn_remember_batch never received the enum and held 87.9% ->
+	// 90.2% coverage across the change, while single-write coverage fell 76.2% ->
+	// 12.8% (DiD +65.7pp largest vault, +52.3pp overall). "The enrichment worker
+	// died" is refuted by the same data — summarization and classification ran at
+	// 92-100% throughout while entity coverage sat at 0-25%.
+	//
+	// Entity coverage caps every graph-shaped capability in the product, so an
+	// entity the caller cannot confidently classify is worth strictly more than
+	// no entity at all. Guidance, not a gate. Keep in sync with validEntityTypes.
+	// entityTypeNames is the enforced vocabulary for the CORRECTION paths
+	// (muninn_entity_state / _batch), where the caller is deliberately choosing a
+	// type for an entity that already exists. There is no capture to suppress
+	// there, so an enum is appropriate — unlike the WRITE paths above, where it
+	// cost measured entity coverage. Keep in sync with validEntityTypes.
+	entityTypeNames := []string{
 		"person", "organization", "location", "concept", "technology",
 		"project", "tool", "database", "service", "framework",
 		"language", "product", "event", "other",
 	}
+	const entityTypeDescription = "Entity type. Recognised types: person, organization, location, " +
+		"concept, technology, project, tool, database, service, framework, language, product, event, other. " +
+		"Any other value is accepted and stored as 'other' — always include the entity even if you are unsure of its type."
 	return []ToolDefinition{
 		{
 			Name:        "muninn_remember",
@@ -41,7 +68,7 @@ func allToolDefinitions() []ToolDefinition {
 							"type": "object",
 							"properties": map[string]any{
 								"name": map[string]any{"type": "string", "description": "Entity name (e.g. 'PostgreSQL', 'Auth Service')."},
-								"type": map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Entity type. One of the 14 recognised types (e.g. 'database', 'service', 'person', 'project'); any other value is stored as 'other'."},
+								"type": map[string]any{"type": "string", "description": entityTypeDescription},
 							},
 							"required": []string{"name", "type"},
 						},
@@ -116,12 +143,12 @@ func allToolDefinitions() []ToolDefinition {
 									"items": map[string]any{
 										"type": "object",
 										"properties": map[string]any{
-											"name": map[string]any{"type": "string"},
-											"type": map[string]any{"type": "string"},
+											"name": map[string]any{"type": "string", "description": "Entity name (e.g. 'PostgreSQL', 'Auth Service')."},
+											"type": map[string]any{"type": "string", "description": entityTypeDescription},
 										},
 										"required": []string{"name", "type"},
 									},
-									"description": "Entities mentioned in this memory.",
+									"description": "Entities mentioned in this memory. These populate the knowledge graph that association, traversal, and cross-memory features depend on.",
 								},
 								"relationships": map[string]any{
 									"type": "array",
@@ -570,7 +597,7 @@ func allToolDefinitions() []ToolDefinition {
 							"type": "object",
 							"properties": map[string]any{
 								"name":       map[string]any{"type": "string"},
-								"type":       map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Entity type. One of the 14 recognised types; any other value is stored as 'other'."},
+								"type":       map[string]any{"type": "string", "description": entityTypeDescription},
 								"confidence": map[string]any{"type": "number"},
 							},
 							"required": []string{"name", "type"},
@@ -659,7 +686,7 @@ func allToolDefinitions() []ToolDefinition {
 					"entity_name": map[string]any{"type": "string", "description": "The entity name to update"},
 					"state":       map[string]any{"type": "string", "description": "New state: active, deprecated, merged, or resolved"},
 					"merged_into": map[string]any{"type": "string", "description": "Canonical entity name (required when state=merged)"},
-					"type":        map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve the existing type."},
+					"type":        map[string]any{"type": "string", "enum": entityTypeNames, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve the existing type."},
 					"vault":       vaultProp,
 				},
 				"required": []string{"entity_name", "state"},
@@ -682,7 +709,7 @@ func allToolDefinitions() []ToolDefinition {
 								"entity_name": map[string]any{"type": "string", "description": "Entity name to update"},
 								"state":       map[string]any{"type": "string", "description": "New state: active, deprecated, merged, or resolved"},
 								"merged_into": map[string]any{"type": "string", "description": "Canonical entity name (required when state=merged)"},
-								"type":        map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve existing."},
+								"type":        map[string]any{"type": "string", "enum": entityTypeNames, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve existing."},
 							},
 							"required": []string{"entity_name", "state"},
 						},
