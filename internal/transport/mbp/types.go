@@ -276,6 +276,12 @@ type ActivateResponse struct {
 	// post-load cosine fallback failing to read stored embeddings. Recall
 	// still returns results (BM25/decay/Hebbian survive), but callers should
 	// not silently trust a zeroed vectorScore (principle #2: degrade loudly).
+	// Query-granular and COARSE: set on ANY such failure this recall, even if the
+	// primary HNSW vector search produced real scores and only a secondary
+	// post-load fetch failed (over-warn beats under-warn on a correctness signal).
+	// Caller-supplied embeddings are not zero-checked (only embed-backend paths).
+	// Carried on MBP + REST (alias) + MCP muninn_recall; gRPC does NOT yet map it
+	// (pb.ActivateResponse has no field — a documented deferral, tracked separately).
 	SemanticDegraded bool `msgpack:"semantic_degraded,omitempty" json:"semantic_degraded,omitempty"`
 }
 
