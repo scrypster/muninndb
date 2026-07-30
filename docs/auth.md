@@ -64,7 +64,7 @@ vault: default
 | Mode | Reads | Cognitive state writes | Use case |
 |------|-------|------------------------|----------|
 | `full` | Yes | **Yes** — temporal scores refresh, Hebbian weights update, access counts increment | AI agents, primary integrations, anything that is *part of* the brain |
-| `observe` | Yes | **No** — mutating REST routes and gRPC RPCs return `403` before the engine is reached; engine-layer cognitive mutations are also suppressed | Dashboards, analytics, read-only partners, exports |
+| `observe` | Yes | **No** — mutating REST routes and gRPC RPCs return `403` before the engine is reached, and on MCP every tool classified mutating is refused at dispatch; engine-layer cognitive mutations are also suppressed | Dashboards, analytics, read-only partners, exports |
 
 The `observe` mode exists because the vault's cognitive state is the thing of value. A dashboard reading engrams 1000 times a day should not inflate access counts and distort what the AI agent sees as relevant. `observe` keys see the brain; they don't affect it, and semantically mutating REST routes are rejected.
 

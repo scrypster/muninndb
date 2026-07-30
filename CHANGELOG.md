@@ -9,17 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Security
 
 - **`muninn_state` is no longer callable by an observe-mode credential.** The
-  tool was classified in `isReadOnlyTool`, but its handler calls
-  `Engine.UpdateLifecycleState` — so an `mk_` key or `cap_` token issued as
-  read-only could transition any engram's lifecycle state, including archiving
-  it. It is now classified mutating: observe mode is denied, write and full mode
-  are unaffected, and append mode is now denied at the MCP dispatch gate as well
-  as by the existing `Engine.refuseAppend` backstop (which is why append mode was
-  never exploitable). A read-only client that was calling `muninn_state` was
-  performing a write and will now receive `forbidden`. (#731)
+  tool was classified in `isReadOnlyTool`, but its handler reaches
+  `Engine.UpdateLifecycleState` (via `mcpEngineAdapter.UpdateState`) — so an
+  `mk_` key or `cap_` token issued as read-only could transition any engram's
+  lifecycle state, including archiving it. It is now classified mutating. Effects
+  per credential mode:
+  - **observe — now denied.** A read-only client that was calling `muninn_state`
+    was performing a write and will now receive `forbidden`.
+  - **write — now allowed** (it was previously *denied*, because write mode
+    admits only tools classified mutating). This is a side effect of the
+    two-bucket classifier, not a designed grant: `isMutatingTool` and
+    `isReadOnlyTool` are complementary by construction, so a tool cannot be
+    denied to observe *and* write. It is judged acceptable because MCP write
+    mode already admits every mutating tool — `muninn_forget`, `muninn_evolve`,
+    `muninn_trust`, `muninn_merge_entity` among them — so `muninn_state` adds no
+    new category of destructive power, and `handleState`'s response echoes only
+    caller-supplied values, so it opens no exfiltration channel. **Residual,
+    tracked separately:** REST deliberately restricts the equivalent route to
+    full mode only (`PUT /api/engrams/{id}/state` is
+    `ReadOnlyGuard(WriteOnlyGuard(...))`, pinned by
+    `TestWriteOnlyMode_ReadHandlersBlocked/SetState`), so MCP write mode is
+    broader than REST write mode and this change widens that gap by one tool.
+    Closing it needs a third `isFullOnlyTool` bucket consulted before the
+    `ModeWrite` case — a design change deliberately out of scope here.
+  - **append — now denied at the MCP dispatch gate** as well as by the existing
+    `Engine.refuseAppend` backstop, which is why append mode was never
+    exploitable. Two layers again instead of one.
+  - **full — unaffected.**
+  (#731)
 
 ---
 

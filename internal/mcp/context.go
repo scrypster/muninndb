@@ -166,10 +166,12 @@ func isMutatingTool(name string) bool {
 		"muninn_forget",
 		"muninn_link",
 		"muninn_evolve",
-		// muninn_state transitions an existing engram's lifecycle state (its
-		// handler calls Engine.UpdateLifecycleState, up to and including
-		// "archived"). It was misclassified read-only, which let an
-		// observe-mode credential write (#731).
+		// muninn_state transitions an existing engram's lifecycle state, up to
+		// and including "archived". handleState calls s.engine.UpdateState,
+		// which mcpEngineAdapter renames to Engine.UpdateLifecycleState — the
+		// rename is why grepping this package for UpdateLifecycleState finds
+		// nothing and the misclassification survived, letting an observe-mode
+		// credential write (#731).
 		"muninn_state",
 		"muninn_consolidate",
 		"muninn_decide",
