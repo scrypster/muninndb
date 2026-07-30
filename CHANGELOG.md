@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`muninn_evolve` response no longer reports an empty `concept`.** The
+  field was always serialized as `""`, even when the concept was set
+  correctly — the same defect class already fixed for `muninn_remember` in
+  #172, but evolve never got the equivalent fix. The response now returns
+  the caller's `concept` when supplied, or reads back the freshly-written
+  engram to report the inherited concept. (#721)
 
 ---
 
