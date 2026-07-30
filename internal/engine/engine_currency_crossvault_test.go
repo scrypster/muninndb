@@ -232,14 +232,15 @@ func TestCrossVault_AlienMarkerVocabulary_Silences(t *testing.T) {
 			if !h.eng.currencyPassesSimilarityGate(h.ctx, h.ws, c1Eng, c2Eng) {
 				t.Fatalf("expected the similarity floor to admit this genuinely-related pair")
 			}
-			gotAnchor := h.eng.currencyTagAnchor(h.ctx, h.ws, c1Eng, c2Eng, n, dfCache)
+			cut := currencyUbiquityCutpoint(h.vaultCount())
+			gotAnchor := h.eng.currencyTagAnchor(h.ctx, h.ws, c1Eng, c2Eng, cut, dfCache)
 			if gotAnchor {
 				t.Fatalf("test premise broken: tag anchor unexpectedly fired for alien markers %q/%q — investigate before trusting the DOCUMENTED-GAP verdict below", tc.markerOld, tc.markerNew)
 			}
 			// Also confirm the KEPT RelRefines/entity anchor paths are not
 			// the ones silently doing the work here — this test isolates
 			// the tag/marker-vocabulary mechanism specifically.
-			if h.eng.currencySharedAnchor(h.ctx, h.ws, c1Eng, c2Eng, n, dfCache) {
+			if h.eng.currencySharedAnchor(h.ctx, h.ws, c1Eng, c2Eng, n, cut, dfCache) {
 				t.Fatalf("test premise broken: currencySharedAnchor fired via a non-tag path (RelRefines/entity) for %q/%q — this test's content must stay below the novelty Jaccard threshold so it isolates the marker-vocabulary gap", tc.markerOld, tc.markerNew)
 			}
 
@@ -274,30 +275,22 @@ func TestCrossVault_AlienMarkerVocabulary_Silences(t *testing.T) {
 // version markers, silently fails to cluster on a small vault, purely
 // because currencyUbiquityRatio is a fixed fraction rather than derived from
 // the vault's own tag-df distribution.
-func TestCrossVault_SmallVault_FixedUbiquityRatio_FalseSilence(t *testing.T) {
-	// SKIP pending the #11 self-derive fix (task #30). This documents the real
-	// generalization gap the fixed currencyUbiquityRatio has on small vaults: a
-	// genuine 4-member chain sharing a topic tag at df=4 over a ~15-row vault is
-	// 25% > the fixed 10% line, so the tag is wrongly treated as ubiquitous and
-	// the chain silences — the SAME structure clusters correctly on a ~114-row
-	// vault (df~3%). Two reasons it is skipped rather than run: (1) it asserts the
-	// CURRENT (buggy) silence behavior, which the self-derive fix will invert into
-	// a cluster — this test then becomes the RED proof of that fix; (2) its
-	// premise reads GetVaultCount, served by the async counterCoalescer, so the
-	// exact N is non-deterministic call-to-call (a hermeticity issue on its own).
-	t.Skip("documents the fixed-ratio small-vault false-silence gap; becomes the RED proof once #11 self-derive lands (task #30)")
-
+// TestCrossVault_SmallVault_SelfDerivedUbiquity_ChainClusters proves the #11
+// self-derive fix. A genuine 4-member chain on a ~15-row vault shares topic+struct
+// tags at df=4 (25% of the vault) — which the OLD fixed 10% ratio wrongly called
+// "ubiquitous", false-silencing the chain. The self-derived cutpoint instead
+// reads the vault's own tag-df distribution ([misc=11, topic=4, struct=4,
+// markers=1...]) and finds NO ambient-tag break, so the df=4 chain tags survive
+// and the chain CLUSTERS. RED without the self-derive wiring (chain silences),
+// GREEN with it. Hermetic: the cutpoint reads the tag index (synchronous), not
+// the async GetVaultCount.
+func TestCrossVault_SmallVault_SelfDerivedUbiquity_ChainClusters(t *testing.T) {
 	h, cleanup := newCurrencyHarness(t)
 	defer cleanup()
 
 	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	const topicTag, structTag = "microgadget", "core"
 
-	// Content carries unique per-item filler tokens (as in the tagless test
-	// above) so write-time novelty's Jaccard fingerprint check cannot cross
-	// novelty.Threshold (0.70) between chain members and open a KEPT
-	// RelRefines edge — this test isolates the TAG-anchor/ubiquity-ratio
-	// interaction specifically, not the separate RelRefines anchor path.
 	fillerWords := []string{"lorem quux zephyr", "ipsum blorp wibble", "dolor vroom plonk", "sit snarkle fenwick"}
 	var chainIDs []string
 	markers := []string{"v1", "v2", "v3", "final"}
@@ -311,7 +304,8 @@ func TestCrossVault_SmallVault_FixedUbiquityRatio_FalseSilence(t *testing.T) {
 		})
 		chainIDs = append(chainIDs, id)
 	}
-	// 11 unrelated small-vault engrams -> vault total = 15.
+	// 11 unrelated engrams -> a ~15-row vault where topic df=4 is 25% (well over
+	// the old fixed 10% line that false-silenced this exact chain).
 	for i := 0; i < 11; i++ {
 		h.write(writeOpts{
 			concept:   fmt.Sprintf("misc note %d", i),
@@ -322,52 +316,39 @@ func TestCrossVault_SmallVault_FixedUbiquityRatio_FalseSilence(t *testing.T) {
 		})
 	}
 
-	// n is read dynamically (not asserted to an exact literal): GetVaultCount
-	// is served by an async counterCoalescer (see testEnvWithStore's doc
-	// comment), so the exact total can vary by a couple of rows call to
-	// call. The chain's tag share (4 of ~15 rows) is designed with enough
-	// margin over the fixed 10% line that this does not change the verdict.
-	n := h.vaultCount()
-
-	c1Eng, _ := h.eng.store.GetEngram(h.ctx, h.ws, mustParseULIDCur(t, chainIDs[0]))
-	c2Eng, _ := h.eng.store.GetEngram(h.ctx, h.ws, mustParseULIDCur(t, chainIDs[1]))
-	dfCache := map[string]int64{}
-
-	dfTopic := h.eng.currencyTagDF(h.ctx, h.ws, topicTag, dfCache)
-	if dfTopic != 4 {
-		t.Fatalf("test premise: expected topic tag df=4, got %d", dfTopic)
-	}
-	ratio := float64(dfTopic) / float64(n)
-	if !currencyIsUbiquitous(dfTopic, n) {
-		t.Fatalf("test premise broken: expected df=4/%d=%.1f%% to exceed the fixed %.0f%% ubiquity line", n, ratio*100, currencyUbiquityRatio*100)
-	}
-	t.Logf("measured: topic tag df=%d over vault N=%d = %.1f%% (fixed ubiquity line = %.0f%%) -> treated as ubiquitous", dfTopic, n, ratio*100, currencyUbiquityRatio*100)
-
-	if h.eng.currencyTagAnchor(h.ctx, h.ws, c1Eng, c2Eng, n, dfCache) {
-		t.Fatalf("test premise broken: tag anchor unexpectedly fired despite both shared tags being ubiquitous at this N")
+	// On this ~15-row vault the absolute floor dominates the ubiquity cutpoint
+	// (max(10%*N, currencyUbiquityAbsMin) = the floor), so the df=4 chain tags are
+	// kept — the chain-clustering assertions below are what pin the fix.
+	if cut := currencyUbiquityCutpoint(h.vaultCount()); cut != currencyUbiquityAbsMin {
+		t.Logf("ubiquity cutpoint on this small vault = %d (absolute floor expected)", cut)
 	}
 
-	// Confirm no OTHER chain pair anchors via the KEPT RelRefines/entity
-	// paths either — this test isolates the tag-anchor/ubiquity-ratio
-	// interaction specifically.
-	for i := 0; i < len(chainIDs); i++ {
-		for j := i + 1; j < len(chainIDs); j++ {
-			ei, _ := h.eng.store.GetEngram(h.ctx, h.ws, mustParseULIDCur(t, chainIDs[i]))
-			ej, _ := h.eng.store.GetEngram(h.ctx, h.ws, mustParseULIDCur(t, chainIDs[j]))
-			if h.eng.currencySharedAnchor(h.ctx, h.ws, ei, ej, n, dfCache) {
-				t.Fatalf("test premise broken: currencySharedAnchor fired via a non-tag path between chain members %d/%d — this test's content must stay below the novelty Jaccard threshold", i, j)
-			}
+	out := h.apply(h.scored(chainIDs[0], 0.9, chainIDs[1], 0.9, chainIDs[2], 0.9, chainIDs[3], 0.9))
+
+	// All four members must land in ONE cluster with exactly one crowned newest —
+	// the newest (latest validFrom) is chainIDs[3].
+	var key string
+	crowned := 0
+	for i, id := range chainIDs {
+		r := findCur(out, id)
+		if r == nil || r.VersionCluster == "" {
+			t.Fatalf("chain member %d did not cluster — the small-vault false-silence is not fixed", i)
+		}
+		if i == 0 {
+			key = r.VersionCluster
+		} else if r.VersionCluster != key {
+			t.Fatalf("chain members landed in different clusters (%q vs %q)", key, r.VersionCluster)
+		}
+		if r.NewestOfCluster {
+			crowned++
 		}
 	}
-
-	results := h.scored(chainIDs[0], 0.9, chainIDs[1], 0.9, chainIDs[2], 0.9, chainIDs[3], 0.9)
-	out := h.apply(results)
-	for _, r := range out {
-		if r.VersionCluster != "" {
-			t.Fatalf("unexpected: chain clustered despite ubiquitous shared tags (would contradict the measured currencyIsUbiquitous result above)")
-		}
+	if crowned != 1 {
+		t.Fatalf("expected exactly one crowned newest_of_cluster, got %d", crowned)
 	}
-	t.Logf("DOCUMENTED-GAP: on a ~15-row vault, a genuine 4-member version chain (shared topic tags at df=4=%.1f%%) silences because the FIXED 10%% ubiquity line treats df=4 as ubiquitous — the same tag-sharing structure that anchors correctly on a ~114-row vault (df~3%%) does not survive at this N", ratio*100)
+	if r4 := findCur(out, chainIDs[3]); r4 == nil || !r4.NewestOfCluster {
+		t.Fatalf("expected the newest chain member (chainIDs[3]) to be crowned newest_of_cluster")
+	}
 }
 
 // TestCrossVault_SmallVault_IncidentalTagCorrectlyNonUbiquitous is the

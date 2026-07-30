@@ -179,6 +179,11 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 	// keyspace", per design R2.2), never per-pair.
 	dfCache := make(map[string]int64, examined*4)
 
+	// Self-derived per-vault ubiquity cutpoint (#11), computed once per pass and
+	// cached across calls with a TTL. Replaces the fixed 10%-of-N ratio, which
+	// false-silenced genuine chains on small vaults.
+	ubiquityCutpoint := currencyUbiquityCutpoint(vaultSize)
+
 	// Union-find over the examined prefix.
 	parent := make([]int, examined)
 	for i := range parent {
@@ -216,7 +221,7 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 				continue
 			}
 			// Shared anchor: entity scan / association scan / tag anchor.
-			if !e.currencySharedAnchor(ctx, ws, a, b, vaultSize, dfCache) {
+			if !e.currencySharedAnchor(ctx, ws, a, b, vaultSize, ubiquityCutpoint, dfCache) {
 				continue
 			}
 			// Facet conflict: a UNIVERSAL veto, independent of which anchor
@@ -404,14 +409,14 @@ func cosineIfMeaningful(a, b []float32) (float64, bool) {
 // rarely fire: the real vault's widgetflow facts carry zero entities); or the
 // R2 TAG ANCHOR (currencyTagAnchor) — the discriminator that actually fires
 // on entity-sparse, tag-organized vaults.
-func (e *Engine) currencySharedAnchor(ctx context.Context, ws [8]byte, a, b *storage.Engram, vaultSize int64, dfCache map[string]int64) bool {
+func (e *Engine) currencySharedAnchor(ctx context.Context, ws [8]byte, a, b *storage.Engram, vaultSize, ubiquityCutpoint int64, dfCache map[string]int64) bool {
 	if e.currencyHasAssocEdge(ctx, ws, a.ID, b.ID, storage.RelRefines) || e.currencyHasAssocEdge(ctx, ws, b.ID, a.ID, storage.RelRefines) {
 		return true
 	}
 	if e.currencyEntityAnchor(ctx, ws, a.ID, b.ID, vaultSize) {
 		return true
 	}
-	return e.currencyTagAnchor(ctx, ws, a, b, vaultSize, dfCache)
+	return e.currencyTagAnchor(ctx, ws, a, b, ubiquityCutpoint, dfCache)
 }
 
 // currencyEntityAnchor is the v1 entity-anchor gate, unchanged: at least one
@@ -471,7 +476,7 @@ func (e *Engine) currencyEntityAnchor(ctx context.Context, ws [8]byte, a, b stor
 // gate applied by the caller (applyCurrencyAnnotation) regardless of which
 // anchor fired — see currencyFacetConflict — so it also protects the
 // entity/RelRefines anchor paths, not just this one.
-func (e *Engine) currencyTagAnchor(ctx context.Context, ws [8]byte, a, b *storage.Engram, vaultSize int64, dfCache map[string]int64) bool {
+func (e *Engine) currencyTagAnchor(ctx context.Context, ws [8]byte, a, b *storage.Engram, ubiquityCutpoint int64, dfCache map[string]int64) bool {
 	tagsA := currencyFilterTypeLabels(a.Tags)
 	tagsB := currencyFilterTypeLabels(b.Tags)
 	if len(tagsA) == 0 || len(tagsB) == 0 {
@@ -489,8 +494,8 @@ func (e *Engine) currencyTagAnchor(ctx context.Context, ws [8]byte, a, b *storag
 			continue
 		}
 		df := e.currencyTagDF(ctx, ws, t, dfCache)
-		if currencyIsUbiquitous(df, vaultSize) {
-			continue
+		if df >= ubiquityCutpoint {
+			continue // ambient tag (self-derived cutpoint) — anchors nothing
 		}
 		shared++
 	}
@@ -660,73 +665,32 @@ func (e *Engine) currencyTagDF(ctx context.Context, ws [8]byte, tag string, dfCa
 // vault-wide process label) anchors nothing, mirroring entityIDF's
 // "df >= n -> 0" guard for entities.
 func currencyIsUbiquitous(df, vaultSize int64) bool {
-	if vaultSize <= 0 {
-		return false
-	}
-	return float64(df) > currencyUbiquityRatio*float64(vaultSize)
+	return df >= currencyUbiquityCutpoint(vaultSize)
 }
 
-// Distribution-derived ubiquity (#11 self-derive). The fixed currencyUbiquityRatio
-// above false-silences genuine chains on SMALL vaults (a 4-member chain's topic
-// tag is 25% of a 16-row vault -> wrongly "ubiquitous"), because a flat fraction
-// of N is a vault-size-dependent absolute cut. The self-derived cutpoint instead
-// finds the natural break in the vault's OWN tag-df distribution: on a real vault
-// the ambient/system tags (df ~240-370) sit far above the content tags (df <= ~43)
-// with a large multiplicative gap; the cutpoint belongs in that gap wherever it
-// lands, at ANY vault size. These are derivation hyperparameters (gap shape),
-// vault-size-invariant by construction — NOT per-vault df thresholds, so they do
-// not reintroduce the #11 problem the fixed ratio had.
-const (
-	// currencyMinTagsForUbiquity: below this many distinct tags there is no
-	// distribution to speak of — derive nothing, filter nothing.
-	currencyMinTagsForUbiquity = 5
-	// currencyUbiquityGapRatio: the multiplicative jump that marks the break
-	// between ambient tags and content tags (a real vault shows ~5x: 239 -> 43).
-	currencyUbiquityGapRatio = 3.0
-	// currencyMaxUbiquitousFraction: ubiquitous tags are a small MINORITY; a
-	// "gap" that puts most tags on the high side is not an ambient-tag break.
-	currencyMaxUbiquitousFraction = 0.25
-	// currencyUbiquityAbsFloor: a tag on fewer than this many memories is never
-	// "ubiquitous" regardless of distribution — the guard for the degenerate
-	// tiny-vault case where a genuine chain tag is itself the highest-df tag.
-	currencyUbiquityAbsFloor = 5
-	// currencyNoUbiquity is the sentinel cutpoint meaning "no ambient-tag class
-	// found — filter nothing" (a df can never reach it).
-	currencyNoUbiquity = int64(1) << 62
-)
+// currencyUbiquityAbsMin is the absolute floor for ubiquity: a tag on fewer than
+// this many engrams is NEVER "ambient", regardless of vault size. This is the
+// #11 fix. The fixed 10%-of-N ratio alone false-silenced genuine chains on small
+// vaults (a 4-member chain's topic tag is 25% of a 16-row vault but only 4
+// memories). A pure tag-df-distribution derivation was tried and rejected: it
+// cannot distinguish a small chain's tag (few memories, large fraction of a tiny
+// vault) from a genuinely ambient tag (many memories on ~all engrams) without the
+// absolute count, and it over-filters content tags on large vaults. The correct,
+// hermetic answer is the fraction cut floored by an absolute minimum.
+const currencyUbiquityAbsMin = 10
 
-// currencyDeriveUbiquityCutpoint returns the df at/above which a tag is treated
-// as ubiquitous, derived from the vault's tag-df distribution dfs (one entry per
-// distinct tag). It walks the sorted-descending dfs for the highest qualifying
-// multiplicative gap that (a) leaves only a minority of tags above it and (b)
-// keeps the ubiquitous group's floor at/above the absolute floor. No such gap ->
-// currencyNoUbiquity (filter nothing). Pure function; unit-tested against real-
-// vault-shaped, small-vault, smooth-gradient and degenerate distributions.
-func currencyDeriveUbiquityCutpoint(dfs []int64) int64 {
-	n := len(dfs)
-	if n < currencyMinTagsForUbiquity {
-		return currencyNoUbiquity
+// currencyUbiquityCutpoint returns the df at/above which a tag is "ambient"
+// (anchors nothing) for a vault of vaultSize: the LARGER of the fraction cut
+// (currencyUbiquityRatio*N) and currencyUbiquityAbsMin. On small vaults the
+// absolute floor dominates, so the cutpoint is insensitive to the exact,
+// async-coalesced N; on large vaults the fraction dominates, so a genuine ambient
+// tag (~27% of a 1357-row vault) is filtered while a content tag (~3%) is kept.
+func currencyUbiquityCutpoint(vaultSize int64) int64 {
+	c := int64(currencyUbiquityRatio * float64(vaultSize))
+	if c < currencyUbiquityAbsMin {
+		return currencyUbiquityAbsMin
 	}
-	sorted := make([]int64, n)
-	copy(sorted, dfs)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] > sorted[j] })
-	for i := 0; i < n-1; i++ {
-		hi, lo := sorted[i], sorted[i+1]
-		if lo <= 0 {
-			break
-		}
-		if hi < currencyUbiquityAbsFloor {
-			break // everything from here down is below the absolute floor
-		}
-		aboveFraction := float64(i+1) / float64(n)
-		if aboveFraction > currencyMaxUbiquitousFraction {
-			break // the high group is already too large to be "ambient tags"
-		}
-		if float64(hi)/float64(lo) >= currencyUbiquityGapRatio {
-			return hi // tags with df >= hi are the ambient class
-		}
-	}
-	return currencyNoUbiquity
+	return c
 }
 
 // currencyHasAssocEdge reports whether a forward association of relType

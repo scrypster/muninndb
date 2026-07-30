@@ -384,7 +384,7 @@ func TestCurrencyAnnotation_FacetConflict_IsLoadBearing(t *testing.T) {
 	if !h.eng.currencyPassesSimilarityGate(h.ctx, h.ws, c1Eng, telemEng) {
 		t.Fatalf("expected the similarity FLOOR to admit c1/telem1 (cos ~0.87) — floor is loose by design")
 	}
-	if !h.eng.currencySharedAnchor(h.ctx, h.ws, c1Eng, telemEng, n, dfCache) {
+	if !h.eng.currencySharedAnchor(h.ctx, h.ws, c1Eng, telemEng, n, currencyUbiquityCutpoint(h.vaultCount()), dfCache) {
 		t.Fatalf("expected c1/telem1 to clear the tag anchor (shared topic tags + differing markers)")
 	}
 	// RED proof: the facet-conflict check itself reports a conflict for this
