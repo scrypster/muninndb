@@ -113,6 +113,7 @@ func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent,
 		Concept: resolveEvolveConcept(concept, func() string {
 			eng, gerr := a.eng.GetEngram(ctx, vault, id)
 			if gerr != nil || eng == nil {
+				slog.Warn("evolve: failed to read back concept", "id", id.String(), "err", gerr)
 				return ""
 			}
 			return eng.Concept
