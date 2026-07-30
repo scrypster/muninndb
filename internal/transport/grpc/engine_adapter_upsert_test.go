@@ -16,7 +16,7 @@ import (
 //
 // It drives a real (minimal) engine through the adapter: two writes with the
 // same idempotent_id + upsert_mode must land on the same engram (merge), and
-// the durable 0x2B forward index must pin it. The upsert path is nil-safe for
+// the durable 0x2E forward index must pin it. The upsert path is nil-safe for
 // the engine's ancillary fields (hnsw/fts/triggers/coherence are nil-checked),
 // so a Store-only EngineConfig suffices.
 func TestAdapter_Write_UpsertMode_ThreadsToEngine(t *testing.T) {

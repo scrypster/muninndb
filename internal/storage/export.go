@@ -30,6 +30,7 @@ var vaultScopedExportPrefixes = []byte{
 	prefix.CreatorIndex, prefix.RelevanceBucket, prefix.Coherence, prefix.VaultWeights,
 	prefix.AssocWeightIndex, prefix.VaultCount, prefix.Provenance, prefix.BucketMigration,
 	prefix.Embedding, prefix.Episode, prefix.FTSVersion, prefix.ContentHash, prefix.RawTagRange,
+	prefix.UpsertKey,
 }
 
 const exportBatchSize = 512

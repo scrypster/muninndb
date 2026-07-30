@@ -69,6 +69,10 @@ components:
         idempotent_id:
           type: string
           description: "Caller-assigned deduplication key."
+        upsert_mode:
+          type: boolean
+          default: false
+          description: "When true with idempotent_id set, merge onto the engram pinned by idempotent_id instead of creating a new one."
         memory_type:
           type: integer
           format: uint8

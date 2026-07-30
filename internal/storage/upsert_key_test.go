@@ -26,7 +26,7 @@ func TestGetUpsertKey_Miss(t *testing.T) {
 	}
 }
 
-// TestGetUpsertKey_Hit: a seeded 0x2B entry resolves to the stored engram ID.
+// TestGetUpsertKey_Hit: a seeded 0x2E entry resolves to the stored engram ID.
 func TestGetUpsertKey_Hit(t *testing.T) {
 	store := openTestStore(t)
 	ws := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
@@ -34,7 +34,7 @@ func TestGetUpsertKey_Hit(t *testing.T) {
 	want := ULID{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x10, 0x20,
 		0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
 
-	// Seed the forward index directly: 0x2B | ws | sha256 → engramID(16).
+	// Seed the forward index directly: 0x2E | ws | sha256 → engramID(16).
 	if err := store.db.Set(keys.UpsertKeyKey(ws, hash), want[:], pebble.Sync); err != nil {
 		t.Fatalf("seed upsert key: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestGetUpsertKey_CorruptValue(t *testing.T) {
 }
 
 // TestUpsertEngram_Miss_CreatesAndIndexes: a miss writes the engram, the 0x28
-// content-hash entry, AND the 0x2B upsert-key entry in one atomic batch — all
+// content-hash entry, AND the 0x2E upsert-key entry in one atomic batch — all
 // three resolve to the same engram ID afterward. This is the atomicity claim
 // that distinguishes upsert from the default Write path (where PutContentHash
 // is a separate, non-co-committed commit).
@@ -89,7 +89,7 @@ func TestUpsertEngram_Miss_CreatesAndIndexes(t *testing.T) {
 		t.Fatal("expected non-zero ULID")
 	}
 
-	// 0x2B upsert-key entry maps keyHash → id.
+	// 0x2E upsert-key entry maps keyHash → id.
 	got, err := store.GetUpsertKey(context.Background(), ws, keyHash)
 	if err != nil {
 		t.Fatalf("GetUpsertKey after miss: %v", err)
@@ -235,7 +235,7 @@ func TestUpsertEngram_Hit_SoftDeleted_Recreates(t *testing.T) {
 		t.Fatalf("first: %v", err)
 	}
 
-	// Soft-delete the pinned engram → the 0x2B entry now points at a tombstone.
+	// Soft-delete the pinned engram → the 0x2E entry now points at a tombstone.
 	b := store.NewBatch()
 	if err := b.UpdateEngramState(context.Background(), ws, id1, StateSoftDeleted); err != nil {
 		t.Fatalf("soft delete: %v", err)
@@ -256,7 +256,7 @@ func TestUpsertEngram_Hit_SoftDeleted_Recreates(t *testing.T) {
 		t.Fatal("recreate should mint a new ULID, not merge into the tombstone")
 	}
 
-	// The 0x2B entry is re-pointed to the fresh engram.
+	// The 0x2E entry is re-pointed to the fresh engram.
 	uk, _ := store.GetUpsertKey(context.Background(), ws, keyHash)
 	if uk != id2 {
 		t.Errorf("upsert-key not re-pointed to the new id: got %x, want %x", uk[:], id2[:])
@@ -272,7 +272,7 @@ func TestUpsertEngram_Hit_SoftDeleted_Recreates(t *testing.T) {
 }
 
 // TestUpsertEngram_Hit_HardDeleted_Recreates: when the forward index points at
-// a hard-deleted engram (0x01 gone — e.g. after Forget, or ClearVault left 0x2B
+// a hard-deleted engram (0x01 gone — e.g. after Forget, or ClearVault left 0x2E
 // dangling), the upsert must treat it as a stale pointer and create fresh, NOT
 // error forever. Pre-fix this returned "load pinned engram: engram not found"
 // because GetEngram returns (nil, ErrNotFound), not (nil, nil), so the
@@ -287,7 +287,7 @@ func TestUpsertEngram_Hit_HardDeleted_Recreates(t *testing.T) {
 		t.Fatalf("first upsert: %v", err)
 	}
 
-	// Hard-delete the pinned engram. DeleteEngram does NOT sweep 0x2B, so the
+	// Hard-delete the pinned engram. DeleteEngram does NOT sweep 0x2E, so the
 	// forward-index entry → id1 now dangles (0x01 for id1 is gone).
 	if err := store.DeleteEngram(context.Background(), ws, id1); err != nil {
 		t.Fatalf("hard delete: %v", err)
@@ -306,7 +306,7 @@ func TestUpsertEngram_Hit_HardDeleted_Recreates(t *testing.T) {
 		t.Fatal("recreate should mint a new ULID, not reuse the deleted one")
 	}
 
-	// The 0x2B entry is re-pointed to the fresh engram.
+	// The 0x2E entry is re-pointed to the fresh engram.
 	uk, _ := store.GetUpsertKey(context.Background(), ws, keyHash)
 	if uk != id2 {
 		t.Errorf("upsert-key not re-pointed to the new id: got %x, want %x", uk[:], id2[:])

@@ -1100,7 +1100,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	e.activity.Record(wsPrefix)
 
 	// ── Upsert mode: key-pinned create-or-merge (#556) ──────────────────
-	// When upsert_mode is set, the durable 0x2B forward index (keyed by
+	// When upsert_mode is set, the durable 0x2E forward index (keyed by
 	// idempotent_id) decides create-vs-merge — not the content-hash dedup below.
 	// The whole path returns from writeUpsert, which does its own atomic storage
 	// write (store.UpsertEngram co-commits engram + content-hash + upsert-key).
@@ -1628,17 +1628,25 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 		oldFTS, _ = e.store.GetEngram(ctx, wsPrefix, exID)
 	}
 
+	// Resolve trust (S8): default inferred; "verified" gated to write/full creds.
+	// Mirrors the default Write path — upsert must not silently bypass the gate.
+	trust, trustErr := resolveTrust(ctx, req.Trust)
+	if trustErr != nil {
+		return nil, trustErr
+	}
+
 	eng := &storage.Engram{
 		Concept:    req.Concept,
 		Content:    req.Content,
 		Tags:       req.Tags,
 		Confidence: req.Confidence,
 		Stability:  req.Stability,
+		Importance: importanceFromRequest(req.Importance),
 		Embedding:  req.Embedding,
 		MemoryType: storage.MemoryType(req.MemoryType),
 		TypeLabel:  req.TypeLabel,
 		Summary:    req.Summary,
-		Trust:      storage.TrustInferred,
+		Trust:      trust,
 	}
 	if req.CreatedAt != nil {
 		if err := validateCreatedAt(*req.CreatedAt); err != nil {

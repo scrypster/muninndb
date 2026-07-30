@@ -37,7 +37,7 @@ func (ps *PebbleStore) GetUpsertKey(ctx context.Context, wsPrefix [8]byte, keyHa
 // UpsertEngram is the compound write behind upsert_mode (#556): it pins an
 // engram to sha256(idempotent_id) on a single ULID — creating on a miss,
 // merging in place on a hit. The engram record, the 0x28 content-hash entry,
-// and the 0x2B upsert-key forward index commit in ONE Pebble batch
+// and the 0x2E upsert-key forward index commit in ONE Pebble batch
 // (crash-atomic), unlike the default Write path where PutContentHash is a
 // separate, non-co-committed commit.
 //
@@ -79,22 +79,22 @@ func (ps *PebbleStore) UpsertEngram(ctx context.Context, wsPrefix [8]byte, eng *
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			// Stale pointer: the forward index references a hard-deleted/absent
-			// engram (Forget removed 0x01, or ClearVault left 0x2B dangling).
-			// Treat as a miss → create fresh; upsertCreate re-points 0x2B.
+			// engram (Forget removed 0x01, or ClearVault left 0x2E dangling).
+			// Treat as a miss → create fresh; upsertCreate re-points 0x2E.
 			return ps.upsertCreate(ctx, wsPrefix, eng, keyHash)
 		}
 		return ULID{}, false, fmt.Errorf("upsert: load pinned engram: %w", err)
 	}
 	if pinned.State != StateActive {
-		// Soft-deleted/archived tombstone → create fresh (re-points 0x2B).
+		// Soft-deleted/archived tombstone → create fresh (re-points 0x2E).
 		return ps.upsertCreate(ctx, wsPrefix, eng, keyHash)
 	}
 	return ps.upsertMerge(wsPrefix, pinned, eng, keyHash)
 }
 
 // upsertCreate writes a fresh engram and co-commits the 0x28 content-hash and
-// 0x2B upsert-key forward indexes in one Pebble batch. Used for both a true
-// miss and the StateActive-guard recreate (which overwrites a stale 0x2B entry).
+// 0x2E upsert-key forward indexes in one Pebble batch. Used for both a true
+// miss and the StateActive-guard recreate (which overwrites a stale 0x2E entry).
 // Constructed in-package (not via the StoreBatch interface) so the raw
 // pebble.Batch is reachable for the index Set calls.
 func (ps *PebbleStore) upsertCreate(ctx context.Context, wsPrefix [8]byte, eng *Engram, keyHash [32]byte) (ULID, bool, error) {
@@ -121,7 +121,7 @@ func (ps *PebbleStore) upsertCreate(ctx context.Context, wsPrefix [8]byte, eng *
 // duplicate keys at stale weight positions (the hazard DeleteEngram notes). The
 // ERF record is re-encoded with the preserved associations inline.
 func (ps *PebbleStore) upsertMerge(wsPrefix [8]byte, existing *Engram, req *Engram, keyHash [32]byte) (ULID, bool, error) {
-	_ = keyHash // the 0x2B entry already points to this id; merge does not re-point it
+	_ = keyHash // the 0x2E entry already points to this id; merge does not re-point it
 
 	merged := *existing // shallow copy: preserves cognitive + provenance + associations
 	merged.Concept = req.Concept

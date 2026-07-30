@@ -90,7 +90,7 @@ func parseEmbeddingArg(args map[string]any) ([]float32, string) {
 func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	opID, _ := args["op_id"].(string)
 	upsertMode, _ := args["upsert_mode"].(bool)
-	// Upsert uses the durable 0x2B forward index (keyed by op_id) and merges on
+	// Upsert uses the durable 0x2E forward index (keyed by op_id) and merges on
 	// change — it must NOT go through the receipt-based dedup below (which would
 	// return the original engram on retry instead of merging). The engine's
 	// upsertKeyLock serializes concurrent upserts on the same key.
@@ -185,7 +185,7 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 
 	if upsertMode {
 		req.UpsertMode = true
-		req.IdempotentID = opID // the durable upsert key (0x2B forward index)
+		req.IdempotentID = opID // the durable upsert key (0x2E forward index)
 	}
 	resp, err := s.engine.Write(ctx, req)
 	if err != nil {

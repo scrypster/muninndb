@@ -14,7 +14,7 @@ import (
 // TestWrite_UpsertMode_CreateThenMerge verifies the engine upsert wiring
 // end-to-end: two Write calls with upsert_mode + the same idempotent_id land on
 // the SAME engram (merge in place), the second call's content wins, cognitive
-// state (Confidence) is preserved, and the 0x2B forward index pins the id.
+// state (Confidence) is preserved, and the 0x2E forward index pins the id.
 // Exercises the writeUpsert branch (dispatch, stripe lock, engram construction,
 // store.UpsertEngram, Hint) — the storage-layer semantics themselves are
 // pinned in internal/storage/upsert_key_test.go.
@@ -68,7 +68,7 @@ func TestWrite_UpsertMode_CreateThenMerge(t *testing.T) {
 		t.Errorf("Confidence not preserved: got %v, want 0.42", got.Confidence)
 	}
 
-	// The 0x2B forward index pins doc-1 → id.
+	// The 0x2E forward index pins doc-1 → id.
 	keyHash := sha256.Sum256([]byte("doc-1"))
 	pinned, err := store.GetUpsertKey(ctx, ws, keyHash)
 	if err != nil {
