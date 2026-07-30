@@ -237,6 +237,7 @@ func (a *mcpEngineAdapter) Explain(ctx context.Context, vault string, req *Expla
 	}
 	return &ExplainResult{
 		EngramID:    data.EngramID,
+		Concept:     data.Concept,
 		WouldReturn: data.WouldReturn,
 		Threshold:   data.Threshold,
 		FinalScore:  data.FinalScore,
