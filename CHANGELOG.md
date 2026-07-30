@@ -15,7 +15,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the ULID, version lineage, and access history are all preserved (unlike
   `muninn_evolve`, which mints a new ULID and archives the predecessor).
   Takes `vault`, `id`, and `tags`; an empty `tags` array clears all tags.
-  Brings the MCP tool count to 45. (#720)
+  The tag set is normalized exactly as `muninn_remember` normalizes it —
+  non-string and over-128-character entries are **dropped, not rejected**, and
+  the set is **truncated to 50** — so diff the `tags` the response echoes back
+  against what you sent. Brings the MCP tool count to 45. (#720)
+
+### Fixed
+
+- **A retag no longer leaves stale full-text-search postings.** Tags are
+  tokenized into the BM25 posting lists, but the storage-level tag update only
+  rewrote the record and the tag indices, so after changing a tag recall scored
+  the memory on a tag it no longer had and could not score it on the tag it had
+  just gained. `Engine.UpdateTags` now deletes and re-indexes the engram's
+  postings, keyed on the tag set captured before the write. (The tag *indices*
+  were never affected — the recall pipeline re-checks them against the engram's
+  real tags — but the full-text score feeds ranking directly with nothing to
+  re-verify it.) This also stops a retagged-then-forgotten memory from staying
+  keyword-searchable under a tag it used to have. (#720)
+
+- **A concurrent retag can no longer resurrect a deleted memory.** The
+  storage-level tag update re-encodes the whole record, so unlocked it wrote back
+  every field from a snapshot that could predate a committed delete — leaving the
+  memory `active` in the record while the state index said `soft_deleted`
+  (`muninn_forget` succeeds, `muninn_list_deleted` shows it as deleted, and
+  recall keeps returning it), and reverting a concurrent access-count
+  reinforcement. It now holds the same per-engram stripe lock every sibling
+  read-modify-write holds ([STO-2]/[STO-3]). (#720)
 
 ### Changed
 
@@ -24,8 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tags` and silently discarded them, returning success with no signal the
   tags were dropped — so a caller could see success, see a `concept` change
   in the same call take effect, and never learn the tags didn't. This is a
-  behavior change: nothing that previously worked breaks; only calls that
-  were already silently failing now fail loudly. (#720)
+  behavior change: a call combining `new_content` with `tags` used to
+  *partially* succeed — the content evolution landed and only the tags were
+  dropped — and now fails outright. Nothing that previously worked *completely*
+  breaks; partially-succeeding calls now fail loudly instead. (#720)
 
 ---
 
