@@ -158,7 +158,7 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 	} else if imp != nil {
 		req.Importance = imp
 	}
-	applyTypeArgs(args, req)
+	unknownType := applyTypeArgs(args, req)
 	if t, ok := args["trust"].(string); ok {
 		req.Trust = t
 	}
@@ -196,6 +196,15 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		}
 		result.Hint += fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformed)
 	}
+	// An unrecognised `type` is still accepted and stored — but never silently.
+	// Tell the writer it was downgraded to "fact" while they still have the
+	// context to correct it (principle #1, degrade-loudly form).
+	if h := unknownTypeHint(unknownType); h != "" {
+		if result.Hint != "" {
+			result.Hint += " "
+		}
+		result.Hint += h
+	}
 	// THE PUSH: prospective notices — focal set is the caller-supplied inline
 	// entities; the created engram is the self-echo guard. Inert unless
 	// MUNINN_PROSPECTIVE=1.
@@ -216,6 +225,9 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 
 	reqs := make([]*mbp.WriteRequest, 0, len(memoriesAny))
 	malformedCounts := make([]int, 0, len(memoriesAny))
+	// Per-item unrecognised `type` values, reported on that item's hint so a
+	// batch write is never a place where a type is silently swallowed.
+	unknownTypes := make([]string, 0, len(memoriesAny))
 	for i, mAny := range memoriesAny {
 		m, ok := mAny.(map[string]any)
 		if !ok {
@@ -270,7 +282,7 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		} else if imp != nil {
 			req.Importance = imp
 		}
-		applyTypeArgs(m, req)
+		unknownTypes = append(unknownTypes, applyTypeArgs(m, req))
 		if t, ok := m["trust"].(string); ok {
 			req.Trust = t
 		}
@@ -308,6 +320,12 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		}
 		if malformedCounts[i] > 0 {
 			results[i].Hint = fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformedCounts[i])
+		}
+		if h := unknownTypeHint(unknownTypes[i]); h != "" {
+			if results[i].Hint != "" {
+				results[i].Hint += " "
+			}
+			results[i].Hint += h
 		}
 	}
 	sendResult(w, id, textContent(mustJSON(map[string]any{
@@ -1511,7 +1529,44 @@ func (s *MCPServer) handleExportGraph(ctx context.Context, w http.ResponseWriter
 
 // applyTypeArgs parses the "type" and "type_label" arguments from an MCP call
 // and sets MemoryType + TypeLabel on the WriteRequest accordingly.
-func applyTypeArgs(args map[string]any, req *mbp.WriteRequest) {
+// memoryTypeNames is the caller-facing vocabulary ParseMemoryType accepts. It is
+// the single source of truth for what unknownTypeHint offers, so a new
+// MemoryType cannot be added to the enum without the nudge learning to name it
+// (pinned by TestApplyTypeArgs_NoValidTypeIsEverReportedUnknown).
+var memoryTypeNames = []string{
+	"fact", "decision", "observation", "preference", "issue", "bugfix",
+	"bug_report", "task", "procedure", "event", "experience", "goal", "constraint",
+}
+
+// unknownTypeHint renders the loud-but-graceful notice for a `type` value that
+// is not a recognised MemoryType. Empty rejected value → empty hint (nothing was
+// discarded, so there is nothing to report).
+func unknownTypeHint(rejected string) string {
+	if rejected == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Note: type %q is not a recognised memory type, so this memory was stored as \"fact\" and %q was kept only as a display label. "+
+			"Typed memories participate in recall and graph features that plain facts do not. Valid types: %s.",
+		rejected, rejected, strings.Join(memoryTypeNames, ", "))
+}
+
+// applyTypeArgs maps the caller's `type`/`type_label` arguments onto the write
+// request, and RETURNS the `type` value if it was not a recognised MemoryType.
+//
+// The storage behaviour is deliberately unchanged — an unrecognised type is
+// still accepted and still stored as TypeFact with the caller's string kept as
+// TypeLabel, so no existing writer breaks and no memory is ever rejected. What
+// changed is that the substitution is no longer SILENT: callers surface the
+// returned value via unknownTypeHint so the writer learns their type was
+// discarded while they still have the context to correct it.
+//
+// This is the project's first principle applied to the write path ("explicit
+// config is never silently substituted") in its degrade-loudly form (#578/#740):
+// accept and continue, but never pretend nothing happened. A real-corpus census
+// found 66.3% of memories typed by their writer but untyped by the type system
+// as a direct result of the previous silent behaviour.
+func applyTypeArgs(args map[string]any, req *mbp.WriteRequest) (unknownType string) {
 	typeStr, _ := args["type"].(string)
 	explicitLabel, _ := args["type_label"].(string)
 
@@ -1522,16 +1577,19 @@ func applyTypeArgs(args map[string]any, req *mbp.WriteRequest) {
 				req.TypeLabel = typeStr
 			}
 		} else {
-			// Not a known enum name — store as free-form label, default to Fact.
+			// Not a known enum name — store as free-form label, default to Fact,
+			// and report it so the caller can be told (never silently swallowed).
 			req.MemoryType = uint8(storage.TypeFact)
 			if explicitLabel == "" {
 				req.TypeLabel = typeStr
 			}
+			unknownType = typeStr
 		}
 	}
 	if explicitLabel != "" {
 		req.TypeLabel = explicitLabel
 	}
+	return unknownType
 }
 
 // validEntityTypes is the single source of truth for the 14 recognised entity
