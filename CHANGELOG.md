@@ -9,7 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`muninn_update_tags` MCP tool.** Replaces an engram's tag set in place —
+  the ULID, version lineage, and access history are all preserved (unlike
+  `muninn_evolve`, which mints a new ULID and archives the predecessor).
+  Takes `vault`, `id`, and `tags`; an empty `tags` array clears all tags.
+  Brings the MCP tool count to 45. (#720)
+
+### Changed
+
+- **`muninn_evolve` now rejects a `tags` argument** with JSON-RPC `-32602`,
+  naming `muninn_update_tags` in the error message. Previously it accepted
+  `tags` and silently discarded them, returning success with no signal the
+  tags were dropped — so a caller could see success, see a `concept` change
+  in the same call take effect, and never learn the tags didn't. This is a
+  behavior change: nothing that previously worked breaks; only calls that
+  were already silently failing now fail loudly. (#720)
 
 ---
 
