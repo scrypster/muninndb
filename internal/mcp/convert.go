@@ -80,6 +80,19 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 	return m
 }
 
+// attachSelfKnowledge builds the "agent feels it" self_knowledge block onto a
+// recall Memory from its ActivationItem. Called only when muninn_recall was
+// invoked with self_knowledge=true. Staleness/current_version reuse the
+// always-on supersession fields (item.SupersededBy/CurrentVersion); contradicts_ids
+// is the returned-set contradiction detection the engine computed under the flag.
+func attachSelfKnowledge(m *Memory, item *mbp.ActivationItem) {
+	m.SelfKnowledge = &SelfKnowledge{
+		Stale:          item.SupersededBy != "",
+		CurrentVersion: item.CurrentVersion,
+		ContradictsIDs: item.ContradictsIDs,
+	}
+}
+
 // readResponseToMemory converts a ReadResponse to a Memory for the muninn_read tool.
 // Returns the full content without truncation, and maps Summary when present.
 // Entities and EntityRelationships are included when populated by the engine.

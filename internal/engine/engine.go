@@ -2590,6 +2590,14 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	}
 	wg.Wait()
 
+	// Self-knowledge contradiction surface (gated): run the model-free text
+	// detector over every pair of the RETURNED (post-truncation) set and stamp
+	// each conflicting result with the other's ID. Only ContradictsIDs is
+	// touched, so result order/membership is unchanged — see annotateContradictions.
+	if req.SelfKnowledge {
+		annotateContradictions(items)
+	}
+
 	// Persist the surfaced set as a recall event (issue #573): the engrams
 	// this recall actually returned (post entity-boost, post truncation),
 	// keyed by a time-ordered event ULID. Skipped in observe mode — a pure

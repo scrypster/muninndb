@@ -223,6 +223,14 @@ type ActivateRequest struct {
 	// IncludeInvalid disables the valid-time gate entirely (show history):
 	// expired facts are returned, annotated with expired=true.
 	IncludeInvalid bool `json:"include_invalid,omitempty" msgpack:"include_invalid,omitempty"`
+	// SelfKnowledge, when true, asks recall to compute the "agent feels it"
+	// contradiction surface: the model-free contradictext detector is run over
+	// every pair of the RETURNED result set (post-ranking, post-truncation) and
+	// each conflicting result is stamped with the other's ID in ContradictsIDs.
+	// Gated because it is O(k^2) in the returned count; the staleness signal
+	// (SupersededBy/CurrentVersion) is always-on and needs no flag. Additive and
+	// omitempty, so an old client that never sets it gets today's exact response.
+	SelfKnowledge bool `json:"self_knowledge,omitempty" msgpack:"self_knowledge,omitempty"`
 }
 
 // Weights defines scoring weight distribution.
@@ -318,6 +326,15 @@ type ActivationItem struct {
 	// Importance is the STORED caller-asserted importance (0 = unset; the
 	// presentation layer derives the effective value — see ReadResponse).
 	Importance float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
+	// ContradictsIDs lists the IDs of OTHER results in this same recall response
+	// that this result carries an actual contradiction signal against — a value
+	// swap ("limit is 100" vs "limit is 250") or a polarity flip ("enabled" vs
+	// "disabled") over a shared subject, from the model-free contradictext
+	// detector. It is the "agent feels it" conflict surface: computed over the
+	// returned set only (never a vault-wide scan), post-ranking so it never
+	// changes result order, and only when the request sets SelfKnowledge (the
+	// O(k^2) pass is gated for cost). Empty/absent when off or no conflict.
+	ContradictsIDs []string `msgpack:"contradicts_ids,omitempty" json:"contradicts_ids,omitempty"`
 }
 
 // ScoreComponents breaks down the activation score.

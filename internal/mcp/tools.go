@@ -230,6 +230,10 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "boolean",
 						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false.",
 					},
+					"self_knowledge": map[string]any{
+						"type":        "boolean",
+						"description": "When true, each result includes a self_knowledge block: stale (superseded by a newer fact), current_version (the fact to consult now), and contradicts_ids (IDs of OTHER results in this response that this one actually conflicts with — a value swap or polarity flip). The contradiction pass compares only the returned set. Default false.",
+					},
 					"caller": map[string]any{
 						"type":        "string",
 						"description": "Your ownership-lease identity (conventionally '{host}:{session}'). Memories checked out by a live lease owned by someone else are hidden; your own leased memories are returned normally. See muninn_claim.",

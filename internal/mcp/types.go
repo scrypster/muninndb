@@ -121,6 +121,30 @@ type Memory struct {
 	// are always set when the memory is superseded; the rest of the fields
 	// (stale, conflicts_with, last_verified) only when annotate=true.
 	Annotations *MemoryAnnotations `json:"annotations,omitempty"`
+
+	// SelfKnowledge is the "agent feels it" block, populated only when
+	// muninn_recall is called with self_knowledge=true. It groups the felt
+	// signals about THIS result relative to the returned set: whether it is
+	// stale (superseded by a newer fact), what the current version is, and which
+	// other returned results it contradicts. Absent when the flag is off, so an
+	// old client sees today's exact response.
+	SelfKnowledge *SelfKnowledge `json:"self_knowledge,omitempty"`
+}
+
+// SelfKnowledge is muninn_recall's felt self-assessment of one result, emitted
+// only under self_knowledge=true. Stale/CurrentVersion mirror the always-on
+// supersession annotation (surfaced here so the whole felt picture is in one
+// block); ContradictsIDs is the returned-set contradiction detection.
+type SelfKnowledge struct {
+	// Stale is true when this result is superseded by a newer active fact
+	// (SupersededBy != ""): the explicit-supersession staleness signal.
+	Stale bool `json:"stale"`
+	// CurrentVersion is the chain head — the fact to consult now — when stale.
+	CurrentVersion string `json:"current_version,omitempty"`
+	// ContradictsIDs are the IDs of other results in THIS response that carry an
+	// actual contradiction signal against this one (value swap or polarity flip
+	// over a shared subject). Empty/absent when this result conflicts with none.
+	ContradictsIDs []string `json:"contradicts_ids,omitempty"`
 }
 
 // MemoryAnnotations contains contextual metadata about a recalled memory.

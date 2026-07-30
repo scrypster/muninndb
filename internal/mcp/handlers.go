@@ -521,6 +521,12 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	annotate, _ := args["annotate"].(bool)
 
+	// self_knowledge gates the O(k^2) returned-set contradiction pass in the
+	// engine (staleness is always-on and needs no flag). Plumbed onto the engine
+	// request so the detection runs once, on the surfaced set, inside Activate.
+	selfKnowledge, _ := args["self_knowledge"].(bool)
+	req.SelfKnowledge = selfKnowledge
+
 	resp, err := s.engine.Activate(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
@@ -544,6 +550,15 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 			// activationToMemory already attached, so superseded_by/current_version
 			// from the ranking phase are preserved.
 			augmentAnnotations(&memories[i], &item, ann)
+		}
+	}
+
+	// The felt self-knowledge block: stale/current_version (from the always-on
+	// supersession fields) and contradicts_ids (the engine's returned-set
+	// contradiction pass). Only present when the caller asked for it.
+	if selfKnowledge {
+		for i := range resp.Activations {
+			attachSelfKnowledge(&memories[i], &resp.Activations[i])
 		}
 	}
 
