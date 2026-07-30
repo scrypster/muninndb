@@ -2496,6 +2496,17 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	}
 	result.Activations = kept
 
+	// Recall-time version-cluster ADVISORY annotation (#712, COG-25). Pure
+	// read-path, zero writes, zero score changes: pairwise-clusters the top
+	// survivors when embedding/token similarity, a shared anchor (rare entity,
+	// existing RelRefines edge, or competing version-marker tags), and temporal
+	// separation ALL hold, then annotates (never demotes) and — ONLY at an exact
+	// score tie within a detected cluster — reorders newest-EffectiveValidFrom-
+	// first. An explicit RelSupersedes on a pair always wins and suppresses the
+	// heuristic for that pair (COG-25). Runs after the validity gate and before
+	// final truncation so it sees exactly the survivor set truncation will cut.
+	result.Activations = e.applyCurrencyAnnotation(ctx, wsPrefix, result.Activations, vaultSize, actReq.MaxResults)
+
 	// Re-apply MaxResults: entity boost / supersession / the validity gate may have
 	// changed the set. All re-sort or preserve score order, so truncation keeps top-K.
 	if actReq.MaxResults > 0 && len(result.Activations) > actReq.MaxResults {
@@ -2534,6 +2545,15 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		if (scored.SupersededBy != storage.ULID{}) {
 			items[i].SupersededBy = scored.SupersededBy.String()
 		}
+		// Heuristic currency annotation (advisory; from applyCurrencyAnnotation).
+		if (scored.PossiblySupersededBy != storage.ULID{}) {
+			items[i].PossiblySupersededBy = scored.PossiblySupersededBy.String()
+		}
+		if scored.VersionCluster != "" {
+			items[i].VersionCluster = scored.VersionCluster
+			items[i].ClusterSize = scored.ClusterSize
+		}
+		items[i].NewestOfCluster = scored.NewestOfCluster
 		// Valid-time annotations: ValidFrom only when explicitly divergent from
 		// CreatedAt; ValidUntil when the window is closed; Expired when the
 		// window closed at or before now (reachable only under include_invalid).

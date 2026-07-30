@@ -308,6 +308,16 @@ type ActivationItem struct {
 	// so any transport can say "this is stale, current is X". Empty otherwise.
 	SupersededBy   string `msgpack:"superseded_by,omitempty"   json:"superseded_by,omitempty"`
 	CurrentVersion string `msgpack:"current_version,omitempty" json:"current_version,omitempty"`
+	// PossiblySupersededBy / VersionCluster / NewestOfCluster / ClusterSize are
+	// the ADVISORY heuristic-currency signal (COG-25) — inferred, never asserted.
+	// PossiblySupersededBy points a non-crown cluster member at the crown;
+	// VersionCluster is the shared cluster key; NewestOfCluster marks the crown;
+	// ClusterSize is the member count. Distinct from SupersededBy (asserted):
+	// verify before treating the older fact as false. Empty when not clustered.
+	PossiblySupersededBy string `msgpack:"possibly_superseded_by,omitempty" json:"possibly_superseded_by,omitempty"`
+	VersionCluster       string `msgpack:"version_cluster,omitempty"        json:"version_cluster,omitempty"`
+	NewestOfCluster      bool   `msgpack:"newest_of_cluster,omitempty"      json:"newest_of_cluster,omitempty"`
+	ClusterSize          int    `msgpack:"cluster_size,omitempty"           json:"cluster_size,omitempty"`
 	// Valid-time annotations. ValidFrom is set only when it differs from
 	// CreatedAt (an explicitly backdated/forward-dated fact); ValidUntil is set
 	// only when the window is closed. Expired marks a fact whose ValidUntil <=

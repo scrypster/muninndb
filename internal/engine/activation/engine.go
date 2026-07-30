@@ -181,6 +181,20 @@ type ScoredEngram struct {
 	// opting into annotations or making a second call.
 	SupersededBy   storage.ULID
 	CurrentVersion storage.ULID
+
+	// VersionCluster / ClusterSize / NewestOfCluster / PossiblySupersededBy are
+	// set by the heuristic currency phase (applyCurrency, engine_currency.go) —
+	// an ADVISORY signal distinct from the authoritative SupersededBy above.
+	// VersionCluster is a stable cluster key shared by all members of a detected
+	// same-version cluster; ClusterSize is that cluster's member count;
+	// NewestOfCluster marks the crown (newest non-future EffectiveValidFrom);
+	// PossiblySupersededBy points a non-crown member at the crown. All zero when
+	// the result is not in a detected cluster. Unlike SupersededBy, these are
+	// inferred, not asserted — see COG-25 (advisory-only, never authoritative).
+	VersionCluster       string
+	ClusterSize          int
+	NewestOfCluster      bool
+	PossiblySupersededBy storage.ULID
 }
 
 // EngramFilter is a post-retrieval predicate applied as the final activation step.
