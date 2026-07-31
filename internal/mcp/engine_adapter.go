@@ -234,6 +234,15 @@ func (a *mcpEngineAdapter) Explain(ctx context.Context, vault string, req *Expla
 	if err != nil {
 		return nil, err
 	}
+	return explainResultFromEngine(data), nil
+}
+
+// explainResultFromEngine converts the engine's explain data to the MCP shape.
+// Extracted so the null-not-zero serialization contract (Scored=false =>
+// query-dependent components stay nil => JSON null, never 0) is pinned by a
+// hermetic test rather than by manufacturing an unreachable engram — the
+// diagnostic threshold bypass made "unreachable" nearly impossible to fixture.
+func explainResultFromEngine(data *engine.ExplainData) *ExplainResult {
 	res := &ExplainResult{
 		EngramID:    data.EngramID,
 		Concept:     data.Concept,
@@ -260,7 +269,7 @@ func (a *mcpEngineAdapter) Explain(ctx context.Context, vault string, req *Expla
 		res.Components.HebbianBoost = f64(float64(data.Components.HebbianBoost))
 		res.Components.AccessFrequency = f64(float64(data.Components.AccessFrequency))
 	}
-	return res, nil
+	return res
 }
 
 // f64 boxes a float64 so an explain component can distinguish a real 0 from

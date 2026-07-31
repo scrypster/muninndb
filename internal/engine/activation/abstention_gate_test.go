@@ -37,7 +37,7 @@ import (
 //	DROP if final < req.Threshold                                  :1934
 //
 // The two agent-facing surfaces default an omitted threshold to 0.5
-// (mcp/handlers.go:392, transport/rest/server.go:1772); the engine's own
+// (mcp/handlers.go:392); the engine's own
 // fallback is 0.1 (engine.go:2405) and activation's is 0.05
 // (activation/engine.go:548). All three gate the SAME quantity, and that
 // quantity is not a measure of "is this memory about the query".
@@ -51,10 +51,12 @@ const (
 	// so a registry drift surfaces as a failure here rather than silently
 	// re-defining what these tests mean.
 	abBaseline = 0.520
-	// abSurfaceThreshold is what every MCP and REST caller gets when it omits
-	// `threshold` (mcp/handlers.go:392, transport/rest/server.go:1772). This
-	// is the gate real agents actually hit.
-	abSurfaceThreshold = 0.5
+	// abRemovedSurfaceDefault is the OLD surface default (0.5), removed when the
+	// absolute gate landed and mcp/handlers.go:392 moved to 0.1. Kept only so
+	// the arithmetic pins below can state what that world required (a
+	// semantic-only match needed raw cosine >= 0.92 to survive it). No caller
+	// hits this value any more.
+	abRemovedSurfaceDefault = 0.5
 	// abEngineThreshold is engine.go:2406's non-RRF default — what a library
 	// or direct caller gets, and the value COG-26's b was calibrated against.
 	abEngineThreshold = 0.1
@@ -225,26 +227,26 @@ func TestAbstention_Answerable_SemanticOnlyMatchIsReturned(t *testing.T) {
 	})
 
 	const query = "who is the scheduler tech lead"
-	res := f.run(t, query, abSurfaceThreshold)
+	// The surface default moved 0.5 -> 0.1 in the same change that landed the
+	// absolute gate, so this test is now the ordinary "answerable queries are
+	// answered" guard its tripwire predecessor promised to become. It runs at
+	// the CURRENT surface default; the old 0.5 world it pinned (a semantic-only
+	// match needed raw cosine >= 0.92 to survive) is recorded in git history at
+	// the tripwire version of this test.
+	res := f.run(t, query, abEngineThreshold)
 	logResults(t, res)
 
-	// SHIPPED STATE: this returns nothing, and the cause is NOT the abstention
-	// gate this increment analysed — it is that 0.5 is above the structural
-	// ceiling of an honest content score. Pinned as a tripwire: the day the
-	// surface default moves onto the absolute scale (mcp/handlers.go:392,
-	// transport/rest/server.go:1772), this assertion inverts and this test
-	// becomes the ordinary "answerable queries are answered" guard.
-	if f.has(res, "answer") {
-		t.Fatalf("the surface-threshold defect no longer reproduces — %q now returns its answer at %.2f. "+
-			"Invert this test to assert the answer IS returned, and delete the tripwire comment.",
-			query, abSurfaceThreshold)
+	if !f.has(res, "answer") {
+		t.Fatalf("ANSWERABLE paraphrase %q (raw cosine 0.818 to its answer) returned nothing at the "+
+			"surface default %.2f — either the default drifted back above the ContentMatch ceiling "+
+			"(0.6 semantic-only / 0.4 lexical-only) or the gate quantity changed. The abstention fix's "+
+			"direction (b) has regressed.", query, abEngineThreshold)
 	}
-	t.Logf("DEFECT (shipped): ANSWERABLE query %q returns nothing at the surface default %.2f. "+
-		"The only memory that answers it has raw cosine 0.818; ContentMatch = 0.6*%.4f + 0.4*%.4f = %.4f. "+
-		"A semantic-only match must reach raw cosine >= %.4f to clear this gate — near-verbatim, not a "+
-		"paraphrase. Fix: surface default -> %.2f, landed together with the absolute gate.",
-		query, abSurfaceThreshold, abSemCal(0.818), 0.1488, 0.6*abSemCal(0.818)+0.4*0.1488,
-		0.5/0.6*(1-abBaseline)+abBaseline, abEngineThreshold)
+	t.Logf("answerable paraphrase %q returns its answer at the shipped default %.2f "+
+		"(ContentMatch = 0.6*%.4f + 0.4*%.4f = %.4f; under the removed %.2f default this exact "+
+		"case returned nothing — a semantic-only match needed raw cosine >= %.4f).",
+		query, abEngineThreshold, abSemCal(0.818), 0.1488, 0.6*abSemCal(0.818)+0.4*0.1488,
+		abRemovedSurfaceDefault, 0.5/0.6*(1-abBaseline)+abBaseline)
 
 	// The paired half of the fix, pinned independently of the surface constant:
 	// at the ENGINE default the answer IS returned, and the absolute gate keeps
@@ -293,9 +295,9 @@ func TestAbstention_Answerable_PinsTheObservedArithmetic(t *testing.T) {
 			"reconciles with the pipeline; re-derive it against activation/engine.go before trusting any "+
 			"other assertion in this file", got.Score)
 	}
-	t.Logf("pinned: cos_raw=%.4f semCal=%.4f fts=%.4f -> score %.4f (dropped by the %.2f surface default)",
+	t.Logf("pinned: cos_raw=%.4f semCal=%.4f fts=%.4f -> score %.4f (below the removed %.2f default; the shipped default is 0.1)",
 		got.Components.SemanticSimilarityRaw, got.Components.SemanticSimilarity,
-		got.Components.FullTextRelevance, got.Score, abSurfaceThreshold)
+		got.Components.FullTextRelevance, got.Score, abRemovedSurfaceDefault)
 }
 
 // ---------------------------------------------------------------------------
@@ -343,20 +345,34 @@ func TestAbstention_Unanswerable_MaxNormaliseExemptsTheArgmax(t *testing.T) {
 	})
 
 	const query = "what is the annual budget for Quillfeather Loom"
-	res := f.run(t, query, abSurfaceThreshold)
+	res := f.run(t, query, abEngineThreshold)
 	logResults(t, res)
 
-	// FIXED: the gate is now applied to the ABSOLUTE score, so the per-query
-	// 1/maxRaw rescale can no longer exempt the argmax. No budget was ever
-	// stored, so the honest answer is nothing at all.
-	if len(res.Activations) != 0 {
-		top := res.Activations[0]
-		t.Fatalf("UNANSWERABLE query %q returned %d result(s); top score %.4f. Nothing about a budget "+
-			"was stored, so recall must abstain. A non-empty answer here means the gate is once again "+
-			"being applied to a query-relative score, which pins the argmax to ~1.0 and exempts the "+
-			"best candidate of ANY query from abstention.", query, len(res.Activations), top.Score)
+	// FIXED PROPERTY: the argmax is no longer EXEMPT. Under the old gate the
+	// per-query 1/maxRaw rescale pinned the best candidate of ANY query to
+	// score ~1.0 — including this one, whose ContentMatch was only ~0.455 —
+	// so a garbage query always got a confident hit. The absolute gate means
+	// nothing returns unless its own content actually clears the bar.
+	//
+	// What this does NOT assert: total abstention. The release-notes decoy
+	// shares the project name with the query, so its lexical coverage alone is
+	// 0.4*0.9 = 0.36 and it LEGITIMATELY clears the shipped 0.1 default. That
+	// is the measured FPR-6.2% world: topically-related non-answers can still
+	// return; what can no longer happen is a zero-content match surfacing at
+	// score 1.0, or the below-bar candidates riding along. The no-lexical-
+	// overlap abstention case is pinned separately below (powdered moonlight).
+	for _, a := range res.Activations {
+		if a.Components.AbsoluteScore < abEngineThreshold {
+			t.Fatalf("returned %q with AbsoluteScore %.4f < threshold %.2f — the gate has stopped "+
+				"being absolute (the argmax exemption is back)", a.Engram.Concept, a.Components.AbsoluteScore, abEngineThreshold)
+		}
 	}
-	t.Logf("unanswerable query %q correctly returns 0 results at threshold %.2f", query, abSurfaceThreshold)
+	if f.has(res, "unrelated") {
+		t.Fatalf("the content-unrelated candidate (cos 0.47, fts 0) was returned — only the " +
+			"rescale exemption could have carried it over an absolute 0.1 bar")
+	}
+	t.Logf("unanswerable-but-topical query %q: %d result(s), every one clearing the absolute bar "+
+		"(the old gate returned the argmax at exactly 1.0 with ContentMatch 0.455)", query, len(res.Activations))
 }
 
 func TestAbstention_Unanswerable_PriorDefeatsTheCalibratedFloor(t *testing.T) {
@@ -405,7 +421,7 @@ func TestAbstention_EmptyResultIsDistinguishableFromAnUnrunQuery(t *testing.T) {
 			content: "Releases go out on Tuesdays between 09:00 and 11:00 UTC.",
 			cos:     0.47, fts: 0},
 	})
-	res := f.run(t, "nutritional breakdown of powdered moonlight sold by the furlong", abSurfaceThreshold)
+	res := f.run(t, "nutritional breakdown of powdered moonlight sold by the furlong", abEngineThreshold)
 	if len(res.Activations) != 0 {
 		t.Fatalf("fixture precondition: expected abstention, got %d result(s)", len(res.Activations))
 	}

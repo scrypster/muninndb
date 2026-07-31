@@ -93,11 +93,19 @@ func TestExplain_UnscoredEngramSaysSoRatherThanReturningZeros(t *testing.T) {
 	if !data.Found {
 		t.Fatal("Found = false for an engram that exists in the vault")
 	}
-	if data.Scored {
-		t.Fatal("Scored = true for a query that never reached this engram")
-	}
-	if data.Note == "" {
-		t.Error("Note is empty: an unscored explain must say why its components are absent")
+	// BEHAVIOUR CHANGE, deliberate: Explain now runs activation with the
+	// negative-threshold diagnostic bypass, so an engram that ANY index can
+	// reach gets a real score card even when it is far below the recall bar —
+	// that is the whole point of the bypass (a below-bar engram used to be
+	// gated out before it could be scored, and its absence was
+	// indistinguishable from "never a candidate"). For this fixture the broad
+	// candidate sets do reach the engram, so it is SCORED — with honest, tiny
+	// numbers — and the honesty this test protects lives in WouldReturn=false
+	// plus a real threshold, not in the absence of a card. Scored=false is
+	// still possible (an engram outside every candidate set), and the
+	// distinct Note for that case is covered by the missing/no-pool paths.
+	if !data.Scored {
+		t.Fatalf("Scored = false under the diagnostic bypass for an engram the candidate sets reach; Note=%q", data.Note)
 	}
 	// Everything query-independent is still knowable and must be reported.
 	if data.Concept == "" {
@@ -107,7 +115,10 @@ func TestExplain_UnscoredEngramSaysSoRatherThanReturningZeros(t *testing.T) {
 		t.Errorf("Confidence = %v, want 1.0 — stored confidence does not depend on the query", data.Confidence)
 	}
 	if data.WouldReturn {
-		t.Error("WouldReturn = true for an unscored engram")
+		t.Error("WouldReturn = true for an engram this query cannot justify returning — the bypass must not leak into the verdict")
+	}
+	if data.Threshold <= 0 {
+		t.Errorf("Threshold = %v: explain must report the REAL recall bar, never the bypass sentinel", data.Threshold)
 	}
 }
 
@@ -153,14 +164,21 @@ func TestExplain_MalformedIDIsExplained(t *testing.T) {
 }
 
 // TestRecallThresholdFor_MirrorsRecallSurface pins the threshold Explain
-// reports to the value muninn_recall actually defaults to (internal/mcp/
-// handlers.go handleRecall): 0.5 normally, 0 when the vault fuses with RRF
-// (RRF scores are not calibrated to that scale). If the recall default ever
-// moves, this pin and the comment in handleRecall have to move with it.
+// reports to the bar recall ACTUALLY applies. Ownership moved: the MCP surface
+// no longer pre-fills a default (it forwards 0, like every other transport),
+// so the mirror is now the ENGINE's fusion-aware coerce — ACT-R 0.1 (COG-26's
+// calibration point on the absolute scale), rrf 0.001 (#590), weighted_sum
+// 0.5 (the only bar validated against that formula).
+//
+// The previous version of this pin asserted 0.5 — and kept passing while the
+// mirror it protected was broken, because both sides of the mirror had moved
+// and the pin only looked at one (adversarial review of #754, finding 4). If
+// a default moves again, ALL THREE cases here must be re-derived together
+// with the engine.go COG-6 coerce.
 func TestRecallThresholdFor_MirrorsRecallSurface(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
-	if got := eng.recallThresholdFor("some-vault"); got != 0.5 {
-		t.Errorf("recallThresholdFor = %v, want 0.5", got)
+	if got := eng.recallThresholdFor("some-vault"); got != 0.1 {
+		t.Errorf("recallThresholdFor(ACT-R vault) = %v, want 0.1 (the engine default the MCP surface no longer overrides)", got)
 	}
 }

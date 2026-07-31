@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"testing"
@@ -1272,18 +1271,24 @@ func contradictionMarkerExists(t *testing.T, store *PebbleStore, ws [8]byte, a, 
 	if CompareULIDs(a, b) > 0 {
 		aBytes, bBytes = bBytes, aBytes
 	}
+	// Decode rather than byte-compare: the 0x0A value grew from partner(16) to
+	// partner(16)|unixnano(8) when detection times landed, and this helper's
+	// byte-equality silently pinned the LEGACY format — it failed the moment the
+	// confidence path started writing timestamped values like every other
+	// writer (which is the fix, not the regression).
 	fwd, err := Get(store.db, keys.ContradictionKey(ws, 0, 0, aBytes))
 	if err != nil || fwd == nil {
 		return false
 	}
-	if !bytes.Equal(fwd, bBytes[:]) {
+	if partner, _, ok := decodeContradictionValue(fwd); !ok || partner != ULID(bBytes) {
 		return false
 	}
 	rev, err := Get(store.db, keys.ContradictionKey(ws, 0, 0, bBytes))
 	if err != nil || rev == nil {
 		return false
 	}
-	return bytes.Equal(rev, aBytes[:])
+	partner, _, ok := decodeContradictionValue(rev)
+	return ok && partner == ULID(aBytes)
 }
 
 // TestUpdateConfidenceWithContradiction_AtomicConfidenceAndMarker verifies the

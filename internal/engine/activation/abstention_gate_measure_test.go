@@ -253,12 +253,18 @@ func abmNDCG5(kept []activation.ScoredEngram, gold storage.ULID) float64 {
 func TestMeasureAbstentionGate(t *testing.T) {
 	eng, byConcept := abmMeasureFixture(t)
 
+	// One arm: 0.10 is now BOTH the engine default (engine.go:2406, the value
+	// COG-26's b was calibrated against) and the MCP surface default
+	// (mcp/handlers.go:392) — the two moved together with the absolute gate.
+	// The old "SURFACE 0.50" arm existed to pin the coupling (no honest absolute
+	// score can reach 0.5, so recall at that default survived only while the
+	// max-rescale lied); its embedded instruction said to delete it once the
+	// default moved, and it has. What it proved is recorded in git history.
 	thresholds := []struct {
 		name string
 		v    float64
 	}{
-		{"engine 0.10", 0.1},  // engine.go:2406, the value COG-26's b was calibrated against
-		{"SURFACE 0.50", 0.5}, // mcp/handlers.go:392, transport/rest/server.go:1772
+		{"default 0.10", 0.1},
 	}
 	arms := []abmGate{abmGateCurrent, abmGateAbsolute}
 
@@ -405,8 +411,7 @@ func TestMeasureAbstentionGate(t *testing.T) {
 	for _, s := range summary {
 		t.Logf("VERDICT %s", s)
 	}
-	t.Log("VERDICT: at the engine scale the absolute gate wins BOTH metrics and should land. It cannot " +
-		"land alone: the surface default (mcp/handlers.go:392, transport/rest/server.go:1772) must move " +
-		"from 0.5 to 0.1 in the same change, or MCP/REST recall goes to zero. Neither half is shippable " +
-		"by itself.")
+	t.Log("VERDICT: the absolute gate wins BOTH metrics at the shipped default. (The gate and the " +
+		"surface default 0.5->0.1 landed together — see mcp/handlers.go:392; REST /activate has no " +
+		"surface default and rest/server.go:1772 is SUBSCRIBE, a different formula.)")
 }

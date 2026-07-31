@@ -57,13 +57,17 @@ type ExplainData struct {
 	Note string
 }
 
-// defaultRecallThreshold is the score bar a default muninn_recall applies —
-// mirrored from internal/mcp/handlers.go handleRecall so Explain's
-// would_return answers the question the caller is actually asking ("would
-// recall have returned this?") instead of the meaningless "was it a
-// candidate at threshold 0?". Pinned by
+// defaultRecallThreshold is the score bar a default recall applies on an
+// ACT-R vault. The ENGINE owns this default now (the MCP surface forwards 0;
+// see the COG-6 coerce in engine.go), so Explain mirrors the engine, not a
+// surface. 0.1 is the value COG-26's b=0.520 was calibrated against, on the
+// absolute-score scale the ACT-R gate compares. Pinned by
 // TestRecallThresholdFor_MirrorsRecallSurface.
-const defaultRecallThreshold = 0.5
+const defaultRecallThreshold = 0.1
+
+// weightedSumRecallThreshold mirrors the engine default for legacy
+// weighted_sum vaults — the only bar ever validated against that formula.
+const weightedSumRecallThreshold = 0.5
 
 // explainMaxCandidates bounds the activation run Explain inspects. Larger than
 // any real recall limit so "not scored" almost always means "the query's
@@ -76,8 +80,12 @@ const explainMaxCandidates = 1000
 // the 0..1 relevance scale, so that surface drops the bar to 0 — Explain has to
 // report the same number or would_return lies.
 func (e *Engine) recallThresholdFor(vault string) float64 {
-	if e.ResolveVaultPlasticity(vault).ScoringFusion == "rrf" {
-		return 0
+	switch e.ResolveVaultPlasticity(vault).ScoringFusion {
+	case "rrf":
+		// activation.Run's rrf default (#590).
+		return 0.001
+	case "weighted_sum":
+		return weightedSumRecallThreshold
 	}
 	return defaultRecallThreshold
 }
@@ -437,12 +445,18 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 	// triggering Hebbian co-activation, activity tracking, or PAS transitions.
 	// Explain is a diagnostic read — it should not mutate cognitive state.
 	ctx = context.WithValue(ctx, auth.ContextMode, "observe")
+	// Threshold -1 is the explicit diagnostic bypass (activation.Run treats a
+	// negative threshold as "gate nothing"): a below-bar engram must still get a
+	// full score card, or Explain cannot explain the exact case it exists for —
+	// "why didn't my memory come back". Passing 0 does NOT work: the COG-6
+	// coerce turns it into the live default and the absolute gate then drops the
+	// engram before it is ever scored.
 	resp, err := e.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    query,
 		Embedding:  embedding,
 		MaxResults: explainMaxCandidates,
-		Threshold:  0,
+		Threshold:  -1,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("explain activation: %w", err)
@@ -462,6 +476,14 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 			"Its full-text, vector and entity signals did not put it in the candidate pool for these terms.",
 			engramID, explainMaxCandidates)
 	}
-	result.WouldReturn = result.Scored && result.FinalScore >= result.Threshold
+	// would_return compares the SAME quantity recall gates. On ACT-R vaults
+	// that is AbsoluteScore — Final is max-normalized per query, so comparing
+	// it against the bar reproduced the argmax-exemption lie explain existed to
+	// debug. rrf and weighted_sum still gate on Final.
+	gated := result.FinalScore
+	if fusion := e.ResolveVaultPlasticity(vault).ScoringFusion; fusion != "rrf" && fusion != "weighted_sum" {
+		gated = float64(result.Components.AbsoluteScore)
+	}
+	result.WouldReturn = result.Scored && gated >= result.Threshold
 	return result, nil
 }

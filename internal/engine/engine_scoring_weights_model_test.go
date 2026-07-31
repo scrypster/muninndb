@@ -56,7 +56,7 @@ const (
 	// when a caller passes no threshold at all (library/direct callers).
 	scwDefaultThreshold = 0.05
 	// THE SURFACE default, which is what every real agent actually gets:
-	// internal/mcp/handlers.go:392 and internal/transport/rest/server.go:1772
+	// internal/mcp/handlers.go:392 (REST /activate has no surface default; rest/server.go:1772 is SUBSCRIBE)
 	// both default an omitted threshold to 0.5 — TEN TIMES the engine's own
 	// default. This is the gate the 0.4 FTS coefficient has to clear, and
 	// structurally cannot. See TestSCWFTSOnlyMatchIsUnreturnableAtSurfaceDefault.
@@ -426,7 +426,7 @@ func TestSCWConfidenceIsAMultiplier(t *testing.T) {
 // ContentMatch = 0.4*fts, which is capped at 0.4 at a PERFECT lexical match.
 //
 // Both agent-facing surfaces default an omitted threshold to 0.5
-// (mcp/handlers.go:392, transport/rest/server.go:1772). 0.4 < 0.5 — so an
+// (mcp/handlers.go:392). 0.4 < 0.5 — so an
 // FTS-only match is UNRETURNABLE through MCP or REST at default settings, for
 // any query, at any lexical quality, forever. Not "scores poorly": structurally
 // cannot be returned. That is a stronger statement than the reported "falls

@@ -384,26 +384,16 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		}
 	}
 
-	// Default threshold is mode-aware (COG-6): a caller-omitted threshold must
-	// not pre-fill a value calibrated to ACT-R's blended scale onto an rrf vault,
-	// whose finals top out around ~0.05-0.15 — that silently zeroes recall on a
-	// scoring mode the web console offers. For rrf vaults, pass 0 ("unset")
-	// through to the engine, which lets activation.Run() apply its mode-aware
-	// default (rrf -> 0.001, #590's mechanism). A recall mode likewise leaves
-	// 0: the mode's preset replaces this surface's historical 0.5 default, and
-	// resolving the preset is the engine's decision (#704). An explicit caller
-	// threshold is never modified.
-	threshold := float32(0.1)
+	// A caller-omitted threshold is forwarded as 0 ("unset") and the ENGINE
+	// applies its fusion-aware default (rrf -> 0.001 per #590, ACT-R -> 0.1,
+	// weighted_sum -> 0.5 — each the value its scoring path was calibrated
+	// against). MCP was the only transport that pre-filled a default here;
+	// REST /activate, gRPC and MBP all forward 0 already, and the surface
+	// pre-fill is how an ACT-R-calibrated number ended up gating rrf and
+	// weighted_sum vaults it was never derived for (COG-6, and the #754
+	// review's finding 5). An explicit caller threshold is never modified.
+	threshold := float32(0)
 	_, thresholdSet := args["threshold"]
-	if !thresholdSet {
-		if mode != "" && mode != "balanced" {
-			// A threshold-carrying mode replaces this surface's 0.5 default;
-			// "balanced" means engine defaults and keeps the historical 0.5.
-			threshold = 0
-		} else if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.ScoringFusion == "rrf" {
-			threshold = 0
-		}
-	}
 	if t, ok := args["threshold"].(float64); ok {
 		if t < 0 {
 			t = 0
@@ -827,14 +817,19 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	if c, ok := args["concept"].(string); ok {
 		evolveConcept = c
 	}
-	// Inline [[markup]] must behave identically on every write verb. It was wired
-	// into remember/remember_batch first, which left evolve storing the literal
-	// brackets — the same input produced different stored content depending on
-	// which verb the caller used, and the successor's text silently diverged from
-	// the predecessor's convention. Found by an AI model mid-evaluation:
-	// "evolve left [[Tidequill]] brackets in stored content — remember strips
-	// them; evolve did not."
-	newContent, markupNames := extractMarkupEntities(newContent)
+	// Inline [[markup]] is stripped on evolve exactly as on remember — the same
+	// input must not produce different stored content per verb. GUARD the
+	// return: extractMarkupEntities returns ("", nil) when there is nothing to
+	// do (its documented contract, honoured by parseEnrichmentArgs), and an
+	// unconditional assign here once destroyed the content of EVERY plain-text
+	// evolve — the successor stored empty text while the predecessor was
+	// superseded away. Caught by adversarial review (finding 1), not by tests:
+	// the evolve fakes never read content back.
+	var markupNames []string
+	if stripped, names := extractMarkupEntities(newContent); len(names) > 0 {
+		newContent = stripped
+		markupNames = names
+	}
 	// Optional inline entities — same shape and normalization as remember's.
 	// When present they REPLACE the entity links otherwise carried forward
 	// from the predecessor.
@@ -858,19 +853,38 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 			evolveEntities = append(evolveEntities, mbp.InlineEntity{Name: name, Type: typ})
 		}
 	}
-	// Names lifted from [[markup]] become entities, exactly as on remember. They
-	// are appended to any explicit entities[] the caller also supplied; a name
-	// already present is not duplicated.
-	for _, n := range markupNames {
-		dup := false
-		for _, e := range evolveEntities {
-			if strings.EqualFold(e.Name, n) {
-				dup = true
-				break
+	// Markup names become entities ONLY when the caller also supplied explicit
+	// entities[]. The engine treats ANY non-empty entity list on evolve as
+	// "REPLACE the carried set" (EvolveAt suppresses the carry entirely), so
+	// letting markup alone populate the list silently destroyed every
+	// predecessor entity link — a side effect the caller never asked for
+	// (adversarial review, finding 2). With explicit entities the caller has
+	// already opted into replace, and markup appends with the same vault-table
+	// type resolution remember uses. Markup-only keeps the carry and WARNS.
+	var markupOnlyWarning string
+	if len(markupNames) > 0 {
+		if len(evolveEntities) > 0 {
+			resolve := s.entityTypeResolver(ctx, vault)
+			for _, n := range markupNames {
+				dup := false
+				for _, e := range evolveEntities {
+					if strings.EqualFold(e.Name, n) {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					typ, known := resolve(n)
+					if !known {
+						typ = "other"
+					}
+					evolveEntities = append(evolveEntities, mbp.InlineEntity{Name: n, Type: typ})
+				}
 			}
-		}
-		if !dup {
-			evolveEntities = append(evolveEntities, mbp.InlineEntity{Name: n, Type: ""})
+		} else {
+			markupOnlyWarning = fmt.Sprintf(
+				"markup entities (%s) were stripped from the content but NOT linked: evolve without an explicit 'entities' list carries the predecessor's entity links forward, and adding markup names would REPLACE that carried set. To link them, pass 'entities' explicitly (which replaces the carry).",
+				strings.Join(markupNames, ", "))
 		}
 	}
 	// effective_at: valid-time boundary between predecessor and successor
@@ -896,6 +910,9 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
+	}
+	if markupOnlyWarning != "" {
+		result.Warnings = append(result.Warnings, markupOnlyWarning)
 	}
 	sendResult(w, id, textContent(mustJSON(result)))
 }

@@ -233,7 +233,7 @@ func allToolDefinitions() []ToolDefinition {
 				"properties": map[string]any{
 					"vault":     vaultProp,
 					"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Search context phrases."},
-					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0. Default is mode-aware: 0.5 for the normal (ACT-R) scoring vault; for a vault configured with scoring_fusion='rrf', scores are rank-based and rarely exceed ~0.15, so the default there is effectively 0 (near-zero floor) — an explicit threshold above ~0.01 on an rrf vault can filter out everything."},
+					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0, compared against the ABSOLUTE content score (not the displayed per-query-normalized one). Omit it for the engine's fusion-aware default: 0.1 on normal (ACT-R) vaults — a semantic-only match structurally caps near 0.6 and a lexical-only one near 0.4, so values above ~0.4 filter almost everything honest; 0.5 on legacy weighted_sum vaults; near-zero on scoring_fusion='rrf', whose rank-based scores rarely exceed ~0.15 (an explicit threshold above ~0.01 there can filter out everything)."},
 					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 10)."},
 					"profile": map[string]any{
 						"type":        "string",

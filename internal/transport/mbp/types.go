@@ -373,6 +373,14 @@ type ScoreComponents struct {
 	Recency               float32 `msgpack:"recency"                       json:"recency"`
 	Raw                   float32 `msgpack:"raw"                           json:"raw"`
 	Final                 float32 `msgpack:"final"                         json:"final"`
+	// ContentMatch is the absolute aboutness term (w_sem*semCal +
+	// w_fts*ftsCoverage) BEFORE the ACT-R prior, per-query normalization and
+	// Confidence — the quantity the COG-26 relevance calibration is stated on.
+	// AbsoluteScore = min(Raw, ContentMatch, 1) * Confidence is the quantity
+	// the recall gate compares (Final is max-normalized per query, so its
+	// argmax is always ~1.0 and it cannot be compared across queries).
+	ContentMatch  float32 `msgpack:"content_match,omitempty"  json:"content_match,omitempty"`
+	AbsoluteScore float32 `msgpack:"absolute_score,omitempty" json:"absolute_score,omitempty"`
 }
 
 // SubscribeRequest registers a context subscription.

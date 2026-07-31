@@ -80,6 +80,45 @@ func TestConsolidate_NeverArchivesItsOwnSurvivor(t *testing.T) {
 	}
 }
 
+// The guard must hold for CASE-INSENSITIVE id forms too: ULID parsing accepts
+// lowercase and Forget accepts lowercase, so a string comparison let a
+// lowercase input slip past the guard and archive the survivor anyway
+// (adversarial review of #754, finding 7).
+func TestConsolidate_SurvivorGuardIsCaseInsensitive(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	const vault = "default"
+	const shared = "Priya Raman is the tech lead for the scheduler team."
+
+	a, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Content: shared, Concept: "lead"})
+	if err != nil {
+		t.Fatalf("write A: %v", err)
+	}
+	b, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Content: "The scheduler team tech lead is Priya Raman.", Concept: "lead2"})
+	if err != nil {
+		t.Fatalf("write B: %v", err)
+	}
+
+	res, err := eng.Consolidate(ctx, vault, []string{strings.ToLower(a.ID), b.ID}, shared)
+	if err != nil {
+		t.Fatalf("consolidate: %v", err)
+	}
+	merged := res.MergedID.String()
+	for _, id := range res.Archived {
+		if strings.EqualFold(id, merged) {
+			t.Errorf("lowercase input id bypassed the survivor guard: archived=%v merged=%s", res.Archived, merged)
+		}
+	}
+	got, err := eng.GetEngram(ctx, vault, res.MergedID)
+	if err != nil || got == nil {
+		t.Fatalf("survivor unreadable after lowercase-id consolidate: %v", err)
+	}
+	if strings.EqualFold(got.State.String(), "soft_deleted") {
+		t.Error("survivor soft-deleted via the lowercase bypass")
+	}
+}
+
 // The ordinary case must keep working: when the merged content is genuinely new,
 // a new engram is created and every input is archived. This pins that the fix
 // does not smuggle in "stop archiving inputs".

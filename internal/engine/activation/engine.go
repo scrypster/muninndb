@@ -584,8 +584,13 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 		req.MaxResults = 10
 	}
 	w := resolveWeights(req.Weights, e.weights)
-	if req.Threshold <= 0 {
-		// No explicit threshold: pick a mode-appropriate default.
+	// A NEGATIVE threshold is an explicit diagnostic bypass: every gate compares
+	// `score < req.Threshold`, so nothing is ever dropped and every candidate
+	// gets a full score card. Explain depends on this — without it, the
+	// below-bar engrams it exists to explain are gated out before they can be
+	// scored, and their absence is indistinguishable from "never a candidate".
+	// (Zero still means "unset": pick a mode-appropriate default.)
+	if req.Threshold == 0 {
 		// RRF scores are rank-based, typically in [0, 0.05] -- far lower than ACT-R.
 		if w.UseRRFFusion {
 			req.Threshold = 0.001
@@ -2017,7 +2022,9 @@ func (e *ActivationEngine) phase6Score(
 			// corpus, real bge-small, 12 answerable paraphrases / 16 nonsense
 			// probes, both arms over an identical scored pool):
 			//
-			//	threshold 0.10   NDCG@5 0.5352 -> 0.6572   FPR 12.5% -> 6.2%
+			//	threshold 0.10   NDCG@5 0.5508 -> 0.6410   FPR 43.8% -> 6.2%
+			//	(deterministic since the harness pinned its hot set and age; the
+			//	earlier flaky runs understated the old gate's FPR as 12.5-31%)
 			//	threshold 0.50   NDCG@5 0.2500 -> 0.0000   FPR  0.0% -> 0.0%
 			//
 			// At the ENGINE default (0.10, engine.go:2406 — the value COG-26's
@@ -2036,14 +2043,15 @@ func (e *ActivationEngine) phase6Score(
 			// phrasing-sensitive misses are one mechanism, and 0.5 is survivable
 			// only while that mechanism lies.
 			//
-			// So this is a TWO-FILE change and neither half may land alone:
-			//   1. this gate -> `absolute`, and
-			//   2. the surface default 0.5 -> 0.1, at internal/mcp/handlers.go:392
-			//      and internal/transport/rest/server.go:1772, so every caller is
-			//      gated on the scale the score is actually expressed in.
-			// Shipping (1) without (2) takes MCP/REST recall to near-zero; (2)
-			// without (1) leaves the argmax exemption intact. Both are pinned by
-			// TestAbstention_* in this package.
+			// This landed as a coupled change: (1) this gate -> `absolute`, and
+			// (2) threshold ownership centralized in the ENGINE's fusion-aware
+			// COG-6 coerce (ACT-R 0.1, weighted_sum 0.5, rrf 0.001) with the MCP
+			// surface forwarding 0 like every other transport. Shipping (1)
+			// against a 0.5 bar takes recall to near-zero; a 0.1 bar without (1)
+			// leaves the argmax exemption intact. Pinned by TestAbstention_* in
+			// this package. (An early draft edited rest/server.go:1772 as "the
+			// REST recall default" — that line is SUBSCRIBE, a different
+			// formula; REST /activate has no surface default.)
 			absolute := math.Min(math.Min(cc.components.Raw, cc.components.ContentMatch), 1.0) *
 				cc.components.Confidence
 			cc.components.AbsoluteScore = absolute

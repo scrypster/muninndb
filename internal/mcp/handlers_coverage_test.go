@@ -414,7 +414,7 @@ func (e *modePresetThresholdCapturingEngine) Activate(_ context.Context, req *mb
 
 func TestHandleRecall_ModeLeavesThresholdUnsetForEngine(t *testing.T) {
 	// #704: with a mode and no explicit threshold param, the handler forwards
-	// Threshold 0 ("unset") — the mode's preset replaces the historical 0.5
+	// Threshold 0 ("unset") — the mode's preset replaces the surface default
 	// default, but RESOLVING the preset is the engine's decision, because only
 	// the engine knows the effective scoring mode (preset thresholds are
 	// ACT-R-calibrated and must abstain under rrf fusion).
@@ -831,8 +831,10 @@ func TestHandleRecall_BalancedModeKeepsHistoricalDefault(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if eng.lastThreshold != 0.1 {
-		t.Errorf("balanced-mode threshold = %v, want the surface default 0.1 (the scale the absolute "+
-			"score is expressed on); a bare mode must still not inherit a preset threshold", eng.lastThreshold)
+	if eng.lastThreshold != 0 {
+		t.Errorf("balanced-mode threshold = %v, want 0 (unset): the surface no longer pre-fills any "+
+			"default — the ENGINE applies its fusion-aware one (rrf 0.001, ACT-R 0.1, weighted_sum "+
+			"0.5), which is how every other transport already behaves. A bare mode must still not "+
+			"inherit a preset threshold.", eng.lastThreshold)
 	}
 }

@@ -123,23 +123,55 @@ func TestExplainAdapter_UnscoredComponentsAreNullNotZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
-	if res.Scored {
-		t.Fatal("scored = true for a query that never reached the engram")
+	// BEHAVIOUR CHANGE, deliberate: Explain now runs activation with the
+	// negative-threshold diagnostic bypass, so an engram the candidate sets can
+	// reach is SCORED even for an unrelated query — with honest, tiny numbers —
+	// instead of being gated out before it could be measured. The null-not-zero
+	// serialization property this test was written for is pinned hermetically in
+	// TestExplainConversion_UnscoredComponentsAreNullNotZero below, where the
+	// engine's Scored=false state is supplied directly rather than manufactured
+	// through reachability assumptions that the bypass invalidated.
+	if !res.Scored {
+		t.Fatalf("scored = false under the diagnostic bypass; note=%q", res.Note)
 	}
-	if res.Note == "" {
-		t.Error("note is empty: an unscored explain must state that its components are absent")
+	if res.WouldReturn {
+		t.Error("would_return = true for an unrelated query — the bypass must not leak into the verdict")
 	}
+	if res.Components.SemanticSimilarity == nil {
+		t.Error("a scored explain must report its (tiny) semantic similarity, not null")
+	}
+	// Query-independent facts survive.
+	if res.Components.Confidence == nil || *res.Components.Confidence != 1.0 {
+		t.Error("confidence must still be reported")
+	}
+	if res.Concept == "" {
+		t.Error("concept must still be reported")
+	}
+}
+
+// The null-not-zero property, pinned where it actually lives: the adapter's
+// conversion of the engine's Scored=false state. Serializing an uncomputed
+// component as 0 tells the operator "your semantic similarity is zero" when
+// the truth is "nothing measured it" — the silent-substitution class.
+func TestExplainConversion_UnscoredComponentsAreNullNotZero(t *testing.T) {
+	res := explainResultFromEngine(&engine.ExplainData{
+		EngramID:   "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		Found:      true,
+		Scored:     false,
+		Concept:    "Redis eviction policy",
+		Confidence: 1.0,
+		Note:       "not among the candidates",
+	})
 	if res.Components.SemanticSimilarity != nil {
 		t.Errorf("semantic_similarity = %v, want null (not computed)", *res.Components.SemanticSimilarity)
 	}
 	if res.Components.FullTextRelevance != nil {
 		t.Errorf("full_text_relevance = %v, want null (not computed)", *res.Components.FullTextRelevance)
 	}
-	// Query-independent facts survive.
 	if res.Components.Confidence == nil || *res.Components.Confidence != 1.0 {
-		t.Error("confidence must still be reported for an unscored engram")
+		t.Error("confidence is query-independent and must survive")
 	}
-	if res.Concept == "" {
-		t.Error("concept must still be reported for an unscored engram")
+	if res.Note == "" {
+		t.Error("the note must say why the components are absent")
 	}
 }

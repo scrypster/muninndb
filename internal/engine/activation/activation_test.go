@@ -1551,8 +1551,13 @@ func TestRun_ThresholdDefaulting(t *testing.T) {
 		{"explicit value preserved without RRF", 0.02, false, 0.02},
 		{"no threshold defaults to 0.001 under RRF", 0, true, 0.001},
 		{"no threshold defaults to 0.05 without RRF", 0, false, 0.05},
-		{"negative threshold defaults to 0.001 under RRF", -1, true, 0.001},
-		{"negative threshold defaults to 0.05 without RRF", -1, false, 0.05},
+		// NEGATIVE is no longer coerced: it is the documented diagnostic
+		// bypass ("gate nothing") that Explain depends on — coercing it to a
+		// default was exactly what made below-bar engrams unexplainable
+		// (adversarial review of #754, finding 4). The gates compare
+		// `score < Threshold`, so -1 admits everything.
+		{"negative threshold is preserved as the diagnostic bypass (RRF)", -1, true, -1},
+		{"negative threshold is preserved as the diagnostic bypass", -1, false, -1},
 	}
 
 	for _, tc := range cases {
