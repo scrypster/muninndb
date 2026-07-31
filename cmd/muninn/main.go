@@ -59,6 +59,12 @@ func main() {
 	case "shell":
 		runShell()
 	case "start":
+		// Refuse flags `start` cannot honour rather than silently opening the
+		// default (real) data directory with them discarded.
+		if err := checkStartArgs(rest); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(2)
+		}
 		if err := runStart(true); err != nil {
 			os.Exit(1)
 		}

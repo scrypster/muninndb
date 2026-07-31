@@ -67,6 +67,53 @@ func buildDaemonArgs(dataDir string, dev bool, osArgs []string, listenHostEnv, c
 }
 
 // runStart forks muninn as a background daemon and waits for health check.
+// checkStartArgs rejects any argument `muninn start` cannot honour.
+//
+// runStart resolves its data directory from defaultDataDir() and its listen
+// addresses from the server defaults. It has never read --data, --mcp-addr, or
+// any other flag — but it also never complained about them, so
+//
+//	muninn start --data /tmp/scratch --mcp-addr 127.0.0.1:9260
+//
+// looked like it launched an isolated instance while actually opening
+// $MUNINNDB_DATA (or ~/.muninn/data) on the default ports. That is principle #1
+// violated on the one argument that decides WHICH DATABASE is opened, with the
+// operator's real vault as the silent substitute.
+//
+// This fails CLOSED rather than trying to wire the flags up: guessing at which
+// subset to honour is how this class of bug is created, and a caller who wanted
+// an isolated instance is better served by an error naming the invocation that
+// supports one than by a daemon quietly attached to production data.
+//
+// The subcommand word itself is tolerated because some dispatch paths pass it
+// through in the argument slice.
+func checkStartArgs(args []string) error {
+	var rejected []string
+	for _, a := range args {
+		if a == "start" || a == "start:web" || a == "" {
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			name := a
+			if i := strings.IndexByte(name, '='); i >= 0 {
+				name = name[:i]
+			}
+			rejected = append(rejected, name)
+			continue
+		}
+		rejected = append(rejected, a)
+	}
+	if len(rejected) == 0 {
+		return nil
+	}
+	return fmt.Errorf("`muninn start` does not accept %s.\n"+
+		"  It always uses the default data directory (MUNINNDB_DATA, else ~/.muninn/data) and the\n"+
+		"  default ports, so these arguments would have been silently ignored.\n"+
+		"  To run an instance with an explicit data directory or addresses, invoke the daemon directly:\n"+
+		"    muninn --daemon --data <dir> [--rest-addr host:port] [--mcp-addr host:port]",
+		strings.Join(rejected, ", "))
+}
+
 func runStart(webEnabled bool) error {
 	dataDir := defaultDataDir()
 	pidPath := filepath.Join(dataDir, "muninn.pid")
