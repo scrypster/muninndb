@@ -148,9 +148,27 @@ type ScoreComponents struct {
 	// corpus's maximum-rarity IDF, so a query with no real overlap scores low
 	// here regardless of what else matched.
 	FullTextRelevance float64
-	DecayFactor       float64
-	HebbianBoost      float64
-	TransitionBoost   float64
+	// ContentMatch is the aboutness term the whole pipeline is built around:
+	// w_sem*semCal + w_fts*ftsCoverage, in [0,1], BEFORE the ACT-R contextual
+	// prior, before per-query normalization, and before Confidence. It is the
+	// only reported number that answers "is this memory about the query" on an
+	// absolute scale comparable across queries.
+	//
+	// It is reported because it is the quantity the relevance calibration is
+	// actually stated on — COG-26 derived b=0.520 by putting the measured
+	// out-of-domain noise ceiling at ContentMatch 0.095, just under a 0.1 gate.
+	// Without this field a caller cannot check that claim, and cannot tell a
+	// weak hit that recency promoted from a strong one.
+	ContentMatch float64
+	// AbsoluteScore is Raw before the per-query 1/maxRaw rescale, clamped to
+	// [0,1] and multiplied by Confidence. Unlike Final it is not relative to
+	// the rest of THIS query's candidate set, so it is comparable across
+	// queries: 0.9 means the same thing on a good query and a garbage one,
+	// which Final does not (the argmax of any saturated query is exactly 1.0).
+	AbsoluteScore   float64
+	DecayFactor     float64
+	HebbianBoost    float64
+	TransitionBoost float64
 	// EntityBoost is the post-pipeline spread-activation adjustment added by
 	// the entity boost phase (rarity-weighted, capped). Zero when the result
 	// received no entity boost; for engrams injected by that phase it equals
@@ -282,7 +300,34 @@ type ActivateResult struct {
 	// Hebbian survive), but callers should surface this to the user/agent
 	// rather than silently trusting a zeroed vectorScore (principle #2).
 	SemanticDegraded bool
+
+	// Abstained is true when the pipeline ran to completion and deliberately
+	// returned nothing: candidates were retrieved and scored, and none cleared
+	// the relevance bar. It is the difference between "I looked and nothing in
+	// this vault is about your query" and "nothing happened" — which an empty
+	// Activations slice alone cannot express. A caller that cannot tell those
+	// apart cannot report an honest no-answer, and a confident irrelevant hit
+	// becomes preferable to an empty list. Never set when Activations is
+	// non-empty.
+	Abstained bool
+	// AbstainedReason names WHICH emptiness this is, so the caller can say
+	// something true. Empty iff Abstained is false.
+	AbstainedReason string
 }
+
+// Abstention reasons. Distinct values, not free text, so surfaces can branch.
+const (
+	// AbstainNoCandidates: retrieval found nothing at all to score — an empty
+	// vault, or every pool (vector, lexical, tag, traversal) came back empty.
+	AbstainNoCandidates = "no_candidates"
+	// AbstainBelowThreshold: candidates were scored and every one of them fell
+	// below the caller's relevance threshold. This is the honest no-answer.
+	AbstainBelowThreshold = "below_threshold"
+	// AbstainFiltered: candidates cleared the relevance bar but were all
+	// removed by a post-retrieval filter (structured filter, supersession,
+	// visibility). Not a relevance judgment — a filtering one.
+	AbstainFiltered = "filtered"
+)
 
 // ActivateResponseFrame is one streaming frame of results.
 type ActivateResponseFrame struct {
@@ -1929,6 +1974,75 @@ func (e *ActivationEngine) phase6Score(
 		for _, cc := range actrCands {
 			raw := math.Min(cc.components.Raw*scale, 1.0)
 			final := raw * cc.components.Confidence
+			// THE ABSTENTION GATE IS MEASURABLY WRONG, AND THE FIX IS BLOCKED
+			// ON A CONSTANT IN ANOTHER FILE. Read this before touching it.
+			//
+			// `final` is query-relative in two ways that make it unusable as a
+			// relevance bar, and both are live defects:
+			//
+			//  1. THE ARGMAX EXEMPTION. scale = 1/maxRaw pins the top candidate
+			//     to raw exactly 1.0, so its final is exactly its Confidence —
+			//     which clears any threshold <= 1.0 unconditionally. Whenever
+			//     any candidate saturates (the ACT-R prior reaches 3.24x at full
+			//     Hebbian boost, so a memory co-activated moments ago routinely
+			//     does), the best candidate of a GARBAGE query is exempt from
+			//     abstention and is reported at ~1.0. That is where a query for
+			//     a fact that was never stored comes back "confident".
+			//  2. THE MIRROR IMAGE. The same rescale divides every OTHER
+			//     candidate by maxRaw, so one hot neighbour pushes a genuine
+			//     sub-max match below the bar. Same mechanism, opposite failure:
+			//     answerable queries returning nothing.
+			//
+			// And the prior itself has no business in the bar: it spans ~0.03
+			// (cold) to 3.24+ (Hebbian-hot), so gating `ContentMatch x prior`
+			// holds a recently-touched memory to a relevance bar up to 32x lower
+			// than an untouched one. Recency then substitutes for aboutness —
+			// and COG-26's b=0.520, which was derived by placing the measured
+			// noise ceiling at ContentMatch 0.095 just under a 0.1 gate, stops
+			// being the floor production actually enforces.
+			//
+			// The fix is to gate on the ABSOLUTE evidence instead — ContentMatch,
+			// attenuated by the prior only where the prior attenuates (decay must
+			// still retire a stale memory), never amplified by it, never rescaled
+			// by what else happened to be in this query's pool — times Confidence.
+			// Ranking would be untouched: `final` still orders the results, so
+			// Hebbian and PAS keep their full power to PROMOTE a relevant memory;
+			// they just could not promote an irrelevant one past the bar.
+			//
+			// MEASURED (abstention_gate_measure_test.go, 18-engram synthetic
+			// corpus, real bge-small, 12 answerable paraphrases / 16 nonsense
+			// probes, both arms over an identical scored pool):
+			//
+			//	threshold 0.10   NDCG@5 0.5352 -> 0.6572   FPR 12.5% -> 6.2%
+			//	threshold 0.50   NDCG@5 0.2500 -> 0.0000   FPR  0.0% -> 0.0%
+			//
+			// At the ENGINE default (0.10, engine.go:2406 — the value COG-26's
+			// b=0.520 was calibrated against) the absolute gate wins BOTH metrics
+			// outright: better answerable recall AND half the false-positive rate,
+			// with average false-positive depth falling 2.5 -> 1.0.
+			//
+			// At the SURFACE default it collapses to zero recall, and the reason
+			// is the finding, not a flaw in the fix: ContentMatch is structurally
+			// capped at w_sem (0.6) for a semantic-only match and w_fts (0.4) for
+			// a lexical-only one, so NO honest absolute score reaches 0.5 without
+			// near-verbatim wording (cos >= 0.9200). Recall at the 0.5 surface
+			// default therefore works TODAY ONLY BECAUSE the max-rescale inflates
+			// the argmax to 1.0 — the very same line that hands unanswerable
+			// queries a confident hit. The confident-garbage and the
+			// phrasing-sensitive misses are one mechanism, and 0.5 is survivable
+			// only while that mechanism lies.
+			//
+			// So this is a TWO-FILE change and neither half may land alone:
+			//   1. this gate -> `absolute`, and
+			//   2. the surface default 0.5 -> 0.1, at internal/mcp/handlers.go:392
+			//      and internal/transport/rest/server.go:1772, so every caller is
+			//      gated on the scale the score is actually expressed in.
+			// Shipping (1) without (2) takes MCP/REST recall to near-zero; (2)
+			// without (1) leaves the argmax exemption intact. Both are pinned by
+			// TestAbstention_* in this package.
+			absolute := math.Min(math.Min(cc.components.Raw, cc.components.ContentMatch), 1.0) *
+				cc.components.Confidence
+			cc.components.AbsoluteScore = absolute
 			// Tag-filter matches bypass the relevance threshold — the filter
 			// defines the set (see the RRF path above for the full rationale).
 			if final < req.Threshold && !cc.inTagPool {
@@ -1974,6 +2088,11 @@ cgdnDone:
 	if len(scored) > req.MaxResults {
 		scored = scored[:req.MaxResults]
 	}
+
+	// Count of candidates that cleared the relevance gate, captured BEFORE the
+	// structured filter so abstention can tell "nothing was relevant" from
+	// "relevant things were filtered out" (see AbstainedReason below).
+	clearedThreshold := len(scored)
 
 	// Apply structured filter if provided (post-retrieval predicate).
 	// This is applied AFTER RRF scoring and confidence checks, as the final step.
@@ -2023,11 +2142,31 @@ cgdnDone:
 		})
 	}
 
+	// Abstention: the pipeline ran and deliberately returned nothing. Naming
+	// WHICH emptiness this is costs one branch and is the difference between a
+	// caller that can say "nothing in this vault is about that" and one that
+	// can only fall silent — the failure mode that makes a confident irrelevant
+	// hit look preferable to an honest empty list.
+	abstained, abstainReason := false, ""
+	if len(activations) == 0 {
+		abstained = true
+		switch {
+		case len(all) == 0:
+			abstainReason = AbstainNoCandidates
+		case clearedThreshold > 0:
+			abstainReason = AbstainFiltered
+		default:
+			abstainReason = AbstainBelowThreshold
+		}
+	}
+
 	return &ActivateResult{
 		QueryID:          newQueryID(),
 		Activations:      activations,
 		TotalFound:       totalFound,
 		SemanticDegraded: semanticDegraded,
+		Abstained:        abstained,
+		AbstainedReason:  abstainReason,
 	}, nil
 }
 
@@ -2280,6 +2419,7 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 		SemanticSimilarity:    semCal,
 		SemanticSimilarityRaw: vectorScore,
 		FullTextRelevance:     normalizedFTS,
+		ContentMatch:          contentMatch,
 		DecayFactor:           math.Max(0.05, math.Exp(-ageDays/math.Max(float64(eng.Stability), 1.0))), // kept for reporting; guard against Stability=0
 		HebbianBoost:          hebbianBoost,
 		TransitionBoost:       transitionBoost,
