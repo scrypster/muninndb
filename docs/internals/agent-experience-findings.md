@@ -251,6 +251,56 @@ mediocrity, which is harder to detect than the loud absence we have today.
 
 ---
 
+## 5b. The counterfactual ceiling — substrate was NOT the flagship's blocker
+
+The "fix capture and the graph features will fire" hypothesis was tested directly and **refuted**.
+
+Two identical clones of a real 4,216-engram corpus. One left alone (CONTROL); one had types and
+entities re-derived from content by a LOCAL model (TREATMENT) — offline analysis on a throwaway
+clone, no LLM in the recall or write path. Co-activation edges were byte-identical across arms, so
+substrate was the only variable.
+
+**Substrate moved a lot:**
+
+| | control | treatment | lift |
+|---|---|---|---|
+| JOINT (graph-typed AND >=1 entity) | 2.49% | **12.29%** | 4.93x |
+| entity coverage | 29.9% | **98.6%** | 3.30x |
+| graph-typed | 4.2% | 12.5% | 2.95x |
+| co-activation edges | 135,254 | 135,254 | 1.00x |
+
+**And associative surprise fired exactly zero times in BOTH arms**, on the same 27,255 real
+candidate edges.
+
+The gate-rejection histogram explains why: rejections *redistributed* rather than cleared.
+`type` went 59.0% -> **72.4%**; `not-focal` fell 38.6% -> 12.2%. Entity enrichment pushed many more
+candidates past focality and straight into the type gate, which absorbed all of them.
+
+**The binding constraint was never sparsity. It is that five independent gates in series
+(non-obvious AND valid AND focal AND type AND idf-armed AND null) leave no survivors on real data.**
+Associative surprise is over-gated, not substrate-starved. The next increment for that feature is
+re-deriving or removing gates — not feeding it more substrate.
+
+Currency (2.73x) and the Push (1.56x) moved only on *preconditions* no user ever sees; the Push
+still fires 0 in both arms because nothing is armed. Contradiction was structurally untouched (it
+reads association RelTypes, which this intervention does not change).
+
+**Undercut the lifts, not the zero.** Hand-adjudication of 80 distinct inferred entity names gave
+~0.76 genuine-entity precision and ~0.66 genuine-and-correctly-typed — below the 0.8 bar set before
+the run. The type half is no cleaner: the model labelled **56.9% of the corpus `task`**. The
+control's 82.8% `fact` was a bug sink; the treatment's 56.9% `task` is a model-bias sink. Neither
+is a credible distribution of declared intent, and a synthetic-fixture accuracy of 0.88 did not
+transfer to the real corpus. So the currency and push lifts rest on a ~24%-junk substrate and are
+soft; adding that substrate to a live vault would be the #713 pollution trade, not a fix.
+
+**The zero is the robust result** — it is a negative, and noise could only have helped it fire.
+
+Consequence for the roadmap: fixing capture is **necessary but nowhere near sufficient**. The type
+and entity capture bugs were real and are fixed on their own merits, but they do not unlock the
+graph features, and any plan that assumed they would needs rewriting. This also means the earlier
+conclusion "the moat is getting memories typed and entity-tagged" was too strong: it is a
+precondition, not the lever.
+
 ## 6. What this implies
 
 Ranked by leverage, with the honest caveat on each:
