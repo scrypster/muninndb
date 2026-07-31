@@ -2772,6 +2772,8 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		LatencyMs:        result.LatencyMs,
 		Brief:            briefSentences,
 		SemanticDegraded: result.SemanticDegraded,
+		Abstained:        result.Abstained,
+		AbstainedReason:  result.AbstainedReason,
 	}, nil
 }
 

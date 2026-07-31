@@ -588,11 +588,22 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	if notices := s.recallNotices(ctx, vault, resp.Activations, readOnly); len(notices) > 0 {
 		result["notices"] = notices
 	}
+	// Abstention is self-describing: the caller can tell "the vault has no
+	// answer" (abstained, with a reason) from a generic empty set. Only ever
+	// present on empty results — an annotation on every response would stop
+	// meaning anything.
+	if resp.Abstained && len(memories) == 0 {
+		result["abstained"] = true
+		result["abstained_reason"] = resp.AbstainedReason
+	}
 	if len(memories) == 0 {
-		hint := "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."
+		// The hint names the threshold because it is the lever that actually
+		// changes the outcome — evaluators called the old advice wrong for
+		// suggesting mode='recent' while omitting it.
+		hint := "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent', or use muninn_where_left_off."
 		p, pErr := s.engine.GetVaultPlasticity(ctx, vault)
 		if pErr == nil && p != nil && p.MultiUser {
-			hint = "No results matched. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global). For semantic recall, provide more specific context."
+			hint = "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global)."
 		}
 		// COG-6: never clobber an explicit threshold — only hint. An rrf vault's
 		// blended finals rarely exceed ~0.15, so a caller-supplied threshold at
@@ -688,6 +699,15 @@ func (s *MCPServer) handleLink(ctx context.Context, w http.ResponseWriter, id js
 			wf = 1
 		}
 		weight = float32(wf)
+	}
+	if srcID == dstID {
+		// A memory cannot supersede, support, or contradict ITSELF. Accepting a
+		// self-link created an edge that annotated the memory as conflicting
+		// with itself (observed live by an evaluator), poisoning the one channel
+		// — declared edges — the system treats as ground truth. This is a caller
+		// error, not a declaration; reject it loudly.
+		sendError(w, id, -32602, "invalid params: source_id and target_id are the same memory — a memory cannot be linked to itself")
+		return
 	}
 	relType, unknownRel := relTypeFromStringChecked(rel)
 	_, err := s.engine.Link(ctx, &mbp.LinkRequest{
