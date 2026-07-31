@@ -790,7 +790,7 @@ func (ps *PebbleStore) GetReverseAssociations(ctx context.Context, wsPrefix [8]b
 }
 
 // FlagContradiction writes the 0x0A contradiction key for pair (a,b).
-func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error {
+func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) (bool, error) {
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
@@ -813,12 +813,24 @@ func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, 
 	contraKeyRev := keys.ContradictionKey(wsPrefix, 0, 0, bBytes)
 	batch.Set(contraKeyRev, aBytes[:], nil)
 
+	// Was this pair already flagged? The 0x0A marker is the durable record that
+	// this contradiction is ALREADY KNOWN, and it is what makes the confidence
+	// penalty idempotent: one declared contradiction is one fact, however many
+	// times a worker re-observes the edge. Re-penalising compounds a single
+	// Bayesian update (1.0 -> 0.975 -> 0.797 -> 0.313 -> 0.0709) until BOTH
+	// memories — including the true one — fall out of recall entirely.
+	newlyFlagged := true
+	if _, closer, err := ps.db.Get(contraKey); err == nil {
+		_ = closer.Close()
+		newlyFlagged = false
+	}
+
 	if err := batch.Commit(pebble.NoSync); err != nil {
-		return fmt.Errorf("commit batch: %w", err)
+		return false, fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
 
-	return nil
+	return newlyFlagged, nil
 }
 
 // ResolveContradiction deletes the contradiction marker(s) for the pair (a,b).

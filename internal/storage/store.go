@@ -156,7 +156,7 @@ type EngineStore interface {
 	GetChildrenByParent(ctx context.Context, wsPrefix [8]byte, parentID ULID) ([]ULID, error)
 
 	// FlagContradiction writes the 0x0A contradiction key for pair (a,b).
-	FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error
+	FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) (newlyFlagged bool, err error)
 
 	// GetContradictions returns all contradiction pairs in the vault by scanning the 0x0A prefix.
 	GetContradictions(ctx context.Context, wsPrefix [8]byte) ([][2]ULID, error)

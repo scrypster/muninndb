@@ -638,7 +638,7 @@ func TestFlagContradiction(t *testing.T) {
 	}
 
 	// Flag contradiction
-	err = store.FlagContradiction(ctx, ws, id1, id2)
+	_, err = store.FlagContradiction(ctx, ws, id1, id2)
 	if err != nil {
 		t.Fatalf("FlagContradiction: %v", err)
 	}
