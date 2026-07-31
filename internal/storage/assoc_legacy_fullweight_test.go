@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
@@ -86,4 +87,54 @@ func writeConfPathAssocEngram(t *testing.T, store *PebbleStore, ws [8]byte, cont
 		t.Fatalf("WriteEngram: %v", err)
 	}
 	return id
+}
+
+// The cross-era survival scenario from the adversarial review, pinned at the
+// store level: a PRE-FIX interior-weight edge (0.8 — written with the legacy
+// encoder, which is byte-identical to the fixed one on (0,1)) must survive one
+// weight update with its metadata intact and exactly one key. The reviewer
+// proved that the first (float64) version of the encoder fix failed this
+// end-to-end: the recomputed delete missed the pre-fix key, the metadata read
+// missed too, and the update wrote a duplicate edge with relType silently
+// reset to 0.
+func TestUpdateAssocWeight_PreFixInteriorWeightEdgeSurvives(t *testing.T) {
+	store, cleanup := newTestStoreHelper(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := [8]byte{8}
+
+	a := writeConfPathAssocEngram(t, store, ws, "interior edge source")
+	b := writeConfPathAssocEngram(t, store, ws, "interior edge target")
+
+	// Written with the CURRENT encoder — byte-identical to the legacy bytes at
+	// 0.8, which is exactly what the byte-compat pin in the keys package
+	// guarantees. If that pin ever breaks, this test breaks with it.
+	if err := store.WriteAssociation(ctx, ws, a, b, &Association{
+		TargetID: b, RelType: RelSupports, Weight: 0.8, Confidence: 1.0, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+
+	if err := store.UpdateAssocWeight(ctx, ws, a, b, 0.85, 1); err != nil {
+		t.Fatalf("UpdateAssocWeight: %v", err)
+	}
+
+	assocs, err := store.GetAssociations(ctx, ws, []ULID{a}, 10)
+	if err != nil {
+		t.Fatalf("GetAssociations: %v", err)
+	}
+	count := 0
+	for _, e := range assocs[a] {
+		if e.TargetID == b {
+			count++
+			if e.RelType != RelSupports {
+				t.Errorf("relType = %v after update, want RelSupports — metadata was reset, meaning "+
+					"the recomputed key missed the stored one", e.RelType)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("pair has %d edges after one update, want exactly 1 — the old key was not deleted "+
+			"(encoder byte-compatibility broken)", count)
+	}
 }

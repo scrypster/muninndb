@@ -535,39 +535,48 @@ func TransitionPrefixForSrc(ws [8]byte, src [16]byte) []byte {
 
 // WeightComplement computes the weight complement for descending sort order.
 func WeightComplement(weight float32) [4]byte {
-	// Compute in float64 and clamp. The old form — uint32(weight *
-	// float32(math.MaxUint32)) — was undefined for weight exactly 1.0:
-	// float32(MaxUint32) rounds UP to 2^32 (4294967295 is not representable in
-	// float32), so 1.0*2^32 overflows the uint32 conversion, which Go leaves
-	// implementation-defined; on arm64 it produced 0. Complement of 0 is
-	// MaxUint32 — the byte pattern of weight 0.0 — so a full-confidence
-	// declared link (weight exactly 1.0) round-tripped to weight 0. Only 1.0
-	// triggered it (float32 granularity puts the next value at 0.99999994,
-	// which is safe), which is precisely why Hebbian's 0.3-0.8 edges displayed
-	// fine while decide's evidence links and explicit contradicts/supersedes
-	// declarations — the STRONGEST edges in the system — surfaced as weight 0.
-	f := float64(weight)
-	if f < 0 {
-		f = 0
-	} else if f > 1 {
-		f = 1
+	// BYTE-COMPATIBLE with every key ever written for weights in (0,1), and
+	// explicitly saturated at the endpoints.
+	//
+	// History, because this function has now been wrong twice in opposite
+	// directions:
+	//
+	//  1. The ORIGINAL form, uint32(weight * float32(math.MaxUint32)), was
+	//     undefined for weight exactly 1.0 — float32(MaxUint32) rounds UP to
+	//     2^32, the multiply lands on 2^32, and the uint32 conversion of an
+	//     out-of-range float is implementation-defined (0 on arm64). A
+	//     full-confidence edge was therefore written at the weight-0.0 key
+	//     position and read back as 0: decide's evidence links, explicit 1.0
+	//     declarations, and LTP-saturated learning were silently destroyed.
+	//  2. The FIRST fix computed uint32(f * float64(math.MaxUint32)). Correct
+	//     at 1.0 — and byte-INCOMPATIBLE at essentially every other weight,
+	//     because float32(MaxUint32)==2^32 while float64(MaxUint32)==2^32-1:
+	//     the two multipliers disagree by ~1 integer step for all interior
+	//     weights (0 identical encodings in 1M samples). Every recomputed-key
+	//     delete (Hebbian updates, decay, engram-delete cascade) would have
+	//     missed every pre-fix key on every existing vault: metadata silently
+	//     reset, permanent duplicate edges, unbounded decay key growth. Caught
+	//     by adversarial review before it shipped.
+	//
+	// The correct form keeps the ORIGINAL expression on the open interval —
+	// byte-identical to every existing on-disk key — and handles only the
+	// endpoints explicitly. 0.99999994 (the largest float32 below 1.0) stays
+	// on the legacy path and encodes safely to 4294967040. The endpoint
+	// saturation gives 1.0 -> complement 0 (sorts first, decodes to exactly
+	// 1.0). Pinned by a cross-era byte-compatibility test that reproduces the
+	// legacy bytes for interior weights.
+	var w uint32
+	switch {
+	case weight >= 1.0:
+		w = math.MaxUint32
+	case weight <= 0:
+		w = 0
+	default:
+		w = uint32(weight * float32(math.MaxUint32)) // legacy expression: byte-identical on (0,1)
 	}
-	w := uint32(f * float64(math.MaxUint32))
 	c := uint32(math.MaxUint32) - w
 	var buf [4]byte
 	binary.BigEndian.PutUint32(buf[:], c)
-	return buf
-}
-
-// LegacyFullWeightComplement is the byte pattern the PRE-FIX WeightComplement
-// produced for weight exactly 1.0 (uint32 overflow -> 0 -> complement
-// MaxUint32) — byte-identical to the CORRECT complement of weight 0.0. Delete
-// paths that rebuild a key from a recomputed complement must also delete this
-// location when the true weight is 1.0, or every pre-fix full-weight edge
-// leaves a stale duplicate key behind on its first update.
-func LegacyFullWeightComplement() [4]byte {
-	var buf [4]byte
-	binary.BigEndian.PutUint32(buf[:], math.MaxUint32)
 	return buf
 }
 

@@ -165,6 +165,15 @@ func TestActivate_ACTRVaultDefaultRecallMode_PresetThresholdUnchanged(t *testing
 	// the SET — a preset failing to apply changes threshold/hops and therefore
 	// membership — so order and score identity, which were only ever true while
 	// full-weight learning was being destroyed on write, are no longer asserted.
+	//
+	// Set equality alone would be a WEAK guard (review finding: a resolution
+	// bug that changes only score-affecting parameters could slip through if no
+	// fixture candidate happens to straddle the two thresholds). It is not
+	// alone: the resolution function itself is pinned exhaustively at unit
+	// level in recall_mode_preset_test.go (threshold applies on ACT-R, abstains
+	// under rrf, hops apply when unset, caller-explicit always wins, scalar
+	// fill rules). This end-to-end set check guards the WIRING; the unit pins
+	// guard the RESOLUTION.
 	require.ElementsMatch(t, idsOf(explicitResp), idsOf(zeroResp),
 		"ACT-R vault-default mode must resolve to the preset's explicit equivalent — #704 must not touch non-rrf vaults")
 	require.NotEmpty(t, zeroResp.Activations, "sanity: the ACT-R control fixture must return results at all")
