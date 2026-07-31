@@ -807,6 +807,14 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	if c, ok := args["concept"].(string); ok {
 		evolveConcept = c
 	}
+	// Inline [[markup]] must behave identically on every write verb. It was wired
+	// into remember/remember_batch first, which left evolve storing the literal
+	// brackets — the same input produced different stored content depending on
+	// which verb the caller used, and the successor's text silently diverged from
+	// the predecessor's convention. Found by an AI model mid-evaluation:
+	// "evolve left [[Tidequill]] brackets in stored content — remember strips
+	// them; evolve did not."
+	newContent, markupNames := extractMarkupEntities(newContent)
 	// Optional inline entities — same shape and normalization as remember's.
 	// When present they REPLACE the entity links otherwise carried forward
 	// from the predecessor.
@@ -828,6 +836,21 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 				continue
 			}
 			evolveEntities = append(evolveEntities, mbp.InlineEntity{Name: name, Type: typ})
+		}
+	}
+	// Names lifted from [[markup]] become entities, exactly as on remember. They
+	// are appended to any explicit entities[] the caller also supplied; a name
+	// already present is not duplicated.
+	for _, n := range markupNames {
+		dup := false
+		for _, e := range evolveEntities {
+			if strings.EqualFold(e.Name, n) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			evolveEntities = append(evolveEntities, mbp.InlineEntity{Name: n, Type: ""})
 		}
 	}
 	// effective_at: valid-time boundary between predecessor and successor
