@@ -70,12 +70,19 @@ func (p *EnrichmentPipeline) recordParseError(ctx context.Context, callType stri
 	}
 	p.stats.TotalErrors.Add(1)
 	if llmstats.VerboseEnabled(p.verboseLogsFlag()) {
-		slog.InfoContext(ctx, "llm.parse_error",
+		attrs := []any{
 			"source", "llm",
 			"subsystem", "enrich",
 			"call_type", callType,
 			"error", err.Error(),
-		)
+		}
+		// Lift the classification out of the message so it can be filtered on
+		// without parsing prose.
+		var pe *ParseError
+		if errors.As(err, &pe) {
+			attrs = append(attrs, "category", string(pe.Category), "response_bytes", pe.Bytes)
+		}
+		slog.InfoContext(ctx, "llm.parse_error", attrs...)
 	}
 }
 
