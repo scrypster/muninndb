@@ -262,30 +262,49 @@ type ExplainRequest struct {
 }
 
 // ExplainComponents holds the per-component score breakdown.
+//
+// Every field is a POINTER on purpose: a component that was never computed
+// serializes as JSON null ("unknown"), never as 0. A 0 that means "unknown" is
+// exactly the silent substitution this project treats as its worst failure
+// class (CLAUDE.md §2.1) — and it is worst of all here, in the one tool an
+// agent uses to find out why a memory did not come back.
 type ExplainComponents struct {
-	FullTextRelevance  float64 `json:"full_text_relevance"`
-	SemanticSimilarity float64 `json:"semantic_similarity"`
+	FullTextRelevance  *float64 `json:"full_text_relevance"`
+	SemanticSimilarity *float64 `json:"semantic_similarity"`
 	// SemanticSimilarityRaw is the uncalibrated cosine similarity — see
 	// activation.ScoreComponents.SemanticSimilarityRaw. Lets an operator see
 	// the raw signal (e.g. 0.59) behind a calibrated value that abstained
 	// (e.g. 0.07) without a second tool call.
-	SemanticSimilarityRaw float64 `json:"semantic_similarity_raw"`
-	DecayFactor           float64 `json:"decay_factor"`
-	HebbianBoost          float64 `json:"hebbian_boost"`
-	AccessFrequency       float64 `json:"access_frequency"`
-	Confidence            float64 `json:"confidence"`
+	SemanticSimilarityRaw *float64 `json:"semantic_similarity_raw"`
+	DecayFactor           *float64 `json:"decay_factor"`
+	HebbianBoost          *float64 `json:"hebbian_boost"`
+	AccessFrequency       *float64 `json:"access_frequency"`
+	// Confidence is the engram's STORED confidence. It does not depend on the
+	// query, so it is non-null whenever the engram exists — including when the
+	// query produced no score at all.
+	Confidence *float64 `json:"confidence"`
 }
 
 // ExplainResult breaks down why an engram scored as it did for a given query.
 type ExplainResult struct {
-	EngramID    string            `json:"engram_id"`
-	Concept     string            `json:"concept"`
-	FinalScore  float64           `json:"final_score"`
+	EngramID string `json:"engram_id"`
+	Concept  string `json:"concept"`
+	// Found: the engram exists in this vault. Scored: this query's activation
+	// run produced a score for it. When Scored is false the component values
+	// are null and Note says why — final_score is likewise meaningless.
+	Found       bool              `json:"found"`
+	Scored      bool              `json:"scored"`
+	FinalScore  *float64          `json:"final_score"`
 	Components  ExplainComponents `json:"components"`
 	FTSMatches  []string          `json:"fts_matches"`
 	AssocPath   []string          `json:"assoc_path"`
 	WouldReturn bool              `json:"would_return"`
-	Threshold   float64           `json:"threshold"`
+	// Threshold is the bar a default muninn_recall applies in this vault —
+	// would_return means "clears that bar", not "was a candidate".
+	Threshold float64 `json:"threshold"`
+	// Note explains, in plain language, anything the caller would otherwise
+	// have to infer from a zero. Empty on the fully-scored happy path.
+	Note string `json:"note,omitempty"`
 }
 
 // DeletedEngram is a summary of a soft-deleted engram still within the recovery window.

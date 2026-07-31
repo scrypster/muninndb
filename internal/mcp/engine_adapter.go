@@ -178,21 +178,38 @@ func (a *mcpEngineAdapter) Explain(ctx context.Context, vault string, req *Expla
 	if err != nil {
 		return nil, err
 	}
-	return &ExplainResult{
+	res := &ExplainResult{
 		EngramID:    data.EngramID,
+		Concept:     data.Concept,
+		Found:       data.Found,
+		Scored:      data.Scored,
 		WouldReturn: data.WouldReturn,
 		Threshold:   data.Threshold,
-		FinalScore:  data.FinalScore,
-		Components: ExplainComponents{
-			FullTextRelevance:     float64(data.Components.FullTextRelevance),
-			SemanticSimilarity:    float64(data.Components.SemanticSimilarity),
-			SemanticSimilarityRaw: float64(data.Components.SemanticSimilarityRaw),
-			DecayFactor:           float64(data.Components.DecayFactor),
-			HebbianBoost:          float64(data.Components.HebbianBoost),
-			AccessFrequency:       float64(data.Components.AccessFrequency),
-		},
-	}, nil
+		Note:        data.Note,
+	}
+	// Stored confidence never depends on the query: report it whenever the
+	// engram exists. (It was previously unmapped entirely, so muninn_explain
+	// reported confidence 0 — an impossible value — for every engram.)
+	if data.Found {
+		res.Components.Confidence = f64(data.Confidence)
+	}
+	// The query-dependent components exist only if this query scored the
+	// engram. Otherwise they stay nil → JSON null → "not computed".
+	if data.Scored {
+		res.FinalScore = f64(data.FinalScore)
+		res.Components.FullTextRelevance = f64(float64(data.Components.FullTextRelevance))
+		res.Components.SemanticSimilarity = f64(float64(data.Components.SemanticSimilarity))
+		res.Components.SemanticSimilarityRaw = f64(float64(data.Components.SemanticSimilarityRaw))
+		res.Components.DecayFactor = f64(float64(data.Components.DecayFactor))
+		res.Components.HebbianBoost = f64(float64(data.Components.HebbianBoost))
+		res.Components.AccessFrequency = f64(float64(data.Components.AccessFrequency))
+	}
+	return res, nil
 }
+
+// f64 boxes a float64 so an explain component can distinguish a real 0 from
+// "never computed" (nil → JSON null).
+func f64(v float64) *float64 { return &v }
 
 func (a *mcpEngineAdapter) UpdateState(ctx context.Context, vault, id, state, reason string) error {
 	return a.eng.UpdateLifecycleState(ctx, vault, id, state)
