@@ -2891,7 +2891,7 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 	// When a "contradicts" link is explicitly created via Link(), notify the
 	// ContradictWorker so it can flag the pair and drive confidence updates.
 	if storage.RelType(req.RelType) == storage.RelContradicts {
-		_, linkContra, linkConf := e.cogWorkers()
+		_, linkContra, _ := e.cogWorkers()
 		if linkContra != nil {
 			linkContra.Submit(cognitive.ContradictItem{
 				WS:          wsPrefix,
@@ -2933,22 +2933,21 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 				},
 			})
 		}
-		// Also directly flag the pair and update confidence without waiting for
-		// ContradictWorker's batch processing — direct link is an explicit assertion.
-		if linkConf != nil {
-			linkConf.Submit(cognitive.ConfidenceUpdate{
-				WS:       wsPrefix,
-				EngramID: [16]byte(sourceID),
-				Evidence: cognitive.EvidenceContradiction,
-				Source:   "contradiction_detected",
-			})
-			linkConf.Submit(cognitive.ConfidenceUpdate{
-				WS:       wsPrefix,
-				EngramID: [16]byte(targetID),
-				Evidence: cognitive.EvidenceContradiction,
-				Source:   "contradiction_detected",
-			})
-		}
+		// The confidence penalty is applied ONLY by the ContradictWorker's OnFound
+		// callback above, which fires exactly once per pair (the 0x0A marker makes
+		// it idempotent). A second, unconditional submit used to live here to
+		// avoid waiting for the batch worker — but it bypassed that idempotency
+		// and applied the SAME evidence a second time. BayesianUpdate compounds
+		// repeat applications, so an explicit link cost two updates instead of
+		// one, and linking both directions (the natural thing for an agent to do)
+		// drove BOTH engrams 1.0 -> 0.975 -> 0.797 -> 0.313 -> 0.0709. Confidence
+		// multiplies into the recall score, so both memories — including the TRUE
+		// one, penalised exactly as hard as the false one — silently vanished from
+		// recall. Declaring a contradiction was a data-loss operation.
+		//
+		// The penalty is now delayed by up to one worker interval. That is the
+		// correct trade: a slightly late annotation beats a promptly destroyed
+		// memory.
 	}
 
 	return &mbp.LinkResponse{OK: true}, nil
