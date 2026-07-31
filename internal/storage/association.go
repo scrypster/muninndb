@@ -347,6 +347,23 @@ func (ps *PebbleStore) getAssocValueFull(wsPrefix [8]byte, a, b ULID) (RelType, 
 // If the edge was previously restored (restoredAt != 0), restoredAt is cleared once
 // the edge re-establishes itself: 3+ co-activations post-restore OR weight exceeds
 // restoreWeight * 1.5 (where restoreWeight = existingPeak * 0.25).
+
+// deleteLegacyFullWeightKeys removes the PRE-FIX key locations for a
+// full-weight edge. The old WeightComplement overflowed for weight exactly 1.0
+// and produced the byte pattern of weight 0.0, so every pre-fix 1.0-weight
+// association lives at the weight-0.0 key position. A post-fix update that
+// deletes only the CORRECT position would leave that stale key behind — a
+// duplicate edge that still reads as weight 0. Deleting the 0.0 position for a
+// pair whose true weight is 1.0 is safe: the 0x14 weight index is one value
+// per pair, so a pair cannot legitimately hold both a 1.0 and a 0.0 edge.
+func deleteLegacyFullWeightKeys(batch *pebble.Batch, wsPrefix [8]byte, a, b [16]byte, trueWeight float32) {
+	if trueWeight != 1.0 {
+		return
+	}
+	_ = batch.Delete(keys.AssocFwdKey(wsPrefix, a, 0.0, b), nil)
+	_ = batch.Delete(keys.AssocRevKey(wsPrefix, b, 0.0, a), nil)
+}
+
 func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID, weight float32, countDelta uint32) error {
 	batch := ps.db.NewBatch()
 	defer batch.Close()
@@ -360,6 +377,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	if oldWeight > 0 {
 		batch.Delete(keys.AssocFwdKey(wsPrefix, [16]byte(a), oldWeight, [16]byte(b)), nil)
 		batch.Delete(keys.AssocRevKey(wsPrefix, [16]byte(b), oldWeight, [16]byte(a)), nil)
+		deleteLegacyFullWeightKeys(batch, wsPrefix, [16]byte(a), [16]byte(b), oldWeight)
 	}
 
 	// Preserve existing metadata; set lastActivated = now (Hebbian update = activation).
@@ -437,6 +455,7 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 		if oldWeight > 0 {
 			batch.Delete(keys.AssocFwdKey(update.WS, update.Src, oldWeight, update.Dst), nil)
 			batch.Delete(keys.AssocRevKey(update.WS, update.Dst, oldWeight, update.Src), nil)
+			deleteLegacyFullWeightKeys(batch, update.WS, update.Src, update.Dst, oldWeight)
 		}
 
 		// PeakWeight is monotonically non-decreasing: max(existingPeak, newWeight).
@@ -562,6 +581,7 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		for _, e := range chunk {
 			_ = batch.Delete(keys.AssocFwdKey(wsPrefix, e.src, e.oldW, e.dst), nil)
 			_ = batch.Delete(keys.AssocRevKey(wsPrefix, e.dst, e.oldW, e.src), nil)
+			deleteLegacyFullWeightKeys(batch, wsPrefix, e.src, e.dst, e.oldW)
 			if e.archive {
 				// Move to 0x25 archive namespace. Write archive value, delete live
 				// weight index; fwd/rev keys already deleted above.

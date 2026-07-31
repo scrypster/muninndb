@@ -535,10 +535,39 @@ func TransitionPrefixForSrc(ws [8]byte, src [16]byte) []byte {
 
 // WeightComplement computes the weight complement for descending sort order.
 func WeightComplement(weight float32) [4]byte {
-	w := uint32(weight * float32(math.MaxUint32))
+	// Compute in float64 and clamp. The old form — uint32(weight *
+	// float32(math.MaxUint32)) — was undefined for weight exactly 1.0:
+	// float32(MaxUint32) rounds UP to 2^32 (4294967295 is not representable in
+	// float32), so 1.0*2^32 overflows the uint32 conversion, which Go leaves
+	// implementation-defined; on arm64 it produced 0. Complement of 0 is
+	// MaxUint32 — the byte pattern of weight 0.0 — so a full-confidence
+	// declared link (weight exactly 1.0) round-tripped to weight 0. Only 1.0
+	// triggered it (float32 granularity puts the next value at 0.99999994,
+	// which is safe), which is precisely why Hebbian's 0.3-0.8 edges displayed
+	// fine while decide's evidence links and explicit contradicts/supersedes
+	// declarations — the STRONGEST edges in the system — surfaced as weight 0.
+	f := float64(weight)
+	if f < 0 {
+		f = 0
+	} else if f > 1 {
+		f = 1
+	}
+	w := uint32(f * float64(math.MaxUint32))
 	c := uint32(math.MaxUint32) - w
 	var buf [4]byte
 	binary.BigEndian.PutUint32(buf[:], c)
+	return buf
+}
+
+// LegacyFullWeightComplement is the byte pattern the PRE-FIX WeightComplement
+// produced for weight exactly 1.0 (uint32 overflow -> 0 -> complement
+// MaxUint32) — byte-identical to the CORRECT complement of weight 0.0. Delete
+// paths that rebuild a key from a recomputed complement must also delete this
+// location when the true weight is 1.0, or every pre-fix full-weight edge
+// leaves a stale duplicate key behind on its first update.
+func LegacyFullWeightComplement() [4]byte {
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], math.MaxUint32)
 	return buf
 }
 
