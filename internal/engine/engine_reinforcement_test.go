@@ -76,13 +76,21 @@ func TestRead_ReinforcesAccess(t *testing.T) {
 
 	// Read "older" again — its own fire-and-forget TouchAccess must not
 	// deadlock or race with polling reads of itself.
-	got := pollAccessCount(t, eng, "reinforce-read", older.ID, 1, 2*time.Second)
+	//
+	// Budget: this asserts a CORRECTNESS property (the reinforcement lands),
+	// not a latency one — TouchAccess is a fire-and-forget goroutine, and 2s
+	// was inside scheduling-noise range on a loaded CI runner (failed there
+	// while passing 5/5 locally; the fourth timing flake of this shape, after
+	// #744, the import-cleanup test, and the abstention harness). There is no
+	// reason for the budget to be tight.
+	got := pollAccessCount(t, eng, "reinforce-read", older.ID, 1, 15*time.Second)
 	if got == 0 {
-		t.Fatalf("AccessCount after Read = %d, want >= 1", got)
+		t.Fatalf("TouchAccess did not land within 15s of the reinforcing Read (AccessCount still 0) — " +
+			"that is a hang or a dropped reinforcement, not scheduling noise")
 	}
 
 	// LastAccess must now put "older" ahead of "newer" in WhereLeftOff.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	reordered := false
 	for time.Now().Before(deadline) {
 		entries, err := eng.WhereLeftOff(ctx, "reinforce-read", 10, nil)
