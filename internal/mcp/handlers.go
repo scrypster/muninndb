@@ -163,7 +163,8 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 	if t, ok := args["trust"].(string); ok {
 		req.Trust = t
 	}
-	malformed := applyEnrichmentArgs(args, req)
+	enrich := parseEnrichmentArgs(args, req, s.entityTypeResolver(ctx, vault))
+	content = req.Content // [[markup]] may have rewritten the stored text
 	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
 		sendError(w, id, -32602, errMsg)
 		return
@@ -191,11 +192,11 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 	} else if len(content) > 500 {
 		result.Hint = "Tip: memories work best when each one captures a single concept. For future writes, consider using muninn_remember_batch to store multiple focused memories at once."
 	}
-	if malformed > 0 {
+	if h := enrich.hint(); h != "" {
 		if result.Hint != "" {
 			result.Hint += " "
 		}
-		result.Hint += fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformed)
+		result.Hint += h
 	}
 	// An unrecognised `type` is still accepted and stored — but never silently.
 	// Tell the writer it was downgraded to "fact" while they still have the
@@ -225,7 +226,10 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 	}
 
 	reqs := make([]*mbp.WriteRequest, 0, len(memoriesAny))
-	malformedCounts := make([]int, 0, len(memoriesAny))
+	enrichReports := make([]enrichmentReport, 0, len(memoriesAny))
+	// One resolver for the whole batch: at most one entity-table scan even when
+	// every item declares bare names.
+	resolve := s.entityTypeResolver(ctx, vault)
 	// Per-item unrecognised `type` values, reported on that item's hint so a
 	// batch write is never a place where a type is silently swallowed.
 	unknownTypes := make([]string, 0, len(memoriesAny))
@@ -287,7 +291,7 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		if t, ok := m["trust"].(string); ok {
 			req.Trust = t
 		}
-		malformed := applyEnrichmentArgs(m, req)
+		rep := parseEnrichmentArgs(m, req, resolve)
 		if emb, errMsg := parseEmbeddingArg(m); errMsg != "" {
 			sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].%s", i, strings.TrimPrefix(errMsg, "invalid params: ")))
 			return
@@ -299,7 +303,7 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			req.Embedding = emb
 		}
 		reqs = append(reqs, req)
-		malformedCounts = append(malformedCounts, malformed)
+		enrichReports = append(enrichReports, rep)
 	}
 
 	responses, errs := s.engine.WriteBatch(ctx, reqs)
@@ -319,8 +323,8 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		} else {
 			results[i] = batchItemResult{Index: i, ID: responses[i].ID, Concept: reqs[i].Concept, Status: "ok"}
 		}
-		if malformedCounts[i] > 0 {
-			results[i].Hint = fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformedCounts[i])
+		if h := enrichReports[i].hint(); h != "" {
+			results[i].Hint = h
 		}
 		if h := unknownTypeHint(unknownTypes[i]); h != "" {
 			if results[i].Hint != "" {
@@ -1633,33 +1637,254 @@ func normalizeEntityType(typ string) string {
 	return typ
 }
 
-// applyEnrichmentArgs parses optional inline enrichment fields (summary, entities,
-// relationships) from MCP tool call arguments onto the WriteRequest.
+// ── the middle gear: cheap entity declaration ────────────────────────────────
+//
+// A bare muninn_remember(content) costs ~20 tokens and produces a memory that is
+// invisible to every entity-based tool. A fully-declared write costs roughly 8x
+// the content in JSON. Four independent evaluators, asked what they would
+// actually do mid-task with a user waiting, all answered "the cheap one" — so
+// the cheap one is what the graph gets. Measured on a 4,216-engram corpus: 4.81%
+// of writes carried any declaration, 29.9% carried an entity.
+//
+// Two middle gears close that gap without an LLM anywhere in the server:
+//
+//  1. BARE STRING entities — `entities:["PostgreSQL","Auth Service"]`. The type
+//     is resolved from the vault's OWN entity table (a name it already knows
+//     keeps its known type; anything else becomes "other" and is REPORTED).
+//  2. Inline [[markup]] in the content — `"Migrated [[Auth Service]] to
+//     [[PostgreSQL]]"`. A tokenizer, not a model: the brackets are stripped and
+//     the bracketed names become entities.
+//
+// Both mechanisms only ever resolve TYPES for names the CALLER supplied. Neither
+// invents a name from content — #713's counterfactual measured hand-adjudicated
+// precision of ~0.76 for INFERRED entities, and that is the pollution this
+// project keeps having to dig out of. [[markup]] is caller intent, expressed in
+// the content instead of in JSON.
+//
+// The honest counter-argument, recorded rather than argued away: once agents
+// learn the server resolves types for them, the explicit-declaration rate may
+// fall further, and the graph's typing ceiling becomes whatever the entity table
+// already knows. A vault's FIRST mention of an entity will be typed "other"
+// unless the caller declares it. We take that trade because an untyped entity is
+// worth strictly more than no entity at all — the same reasoning that removed
+// the type enum — but it is a trade, not a free win.
+
+const (
+	maxInlineEntities = 20
+	// entityTypeScanLimit caps the vault entity table pulled in to resolve bare
+	// names. Entities are returned mention-count descending, so the names a
+	// writer is most likely to reuse are the ones inside the cap.
+	entityTypeScanLimit = 5000
+	// maxMarkupNameLen bounds what [[...]] is willing to treat as an entity name.
+	// Anything longer is prose or code, not a declaration, and is left alone.
+	maxMarkupNameLen = 64
+)
+
+// entityTypeLookup resolves a caller-supplied entity NAME to a type the vault
+// already knows. A nil lookup, or one that reports !ok, means "unknown" — never
+// an error, never a rejection.
+type entityTypeLookup func(name string) (typ string, known bool)
+
+// entityTypeResolver returns a lazy, single-scan lookup over the vault's entity
+// table. The scan is only paid for if a caller actually supplies a name with no
+// type, and at most once per tool call.
+func (s *MCPServer) entityTypeResolver(ctx context.Context, vault string) entityTypeLookup {
+	var (
+		loaded bool
+		idx    map[string]string
+	)
+	return func(name string) (string, bool) {
+		if !loaded {
+			loaded = true
+			idx = make(map[string]string)
+			rows, err := s.engine.ListEntities(ctx, vault, entityTypeScanLimit, "")
+			if err != nil {
+				// Degrade loudly-but-gracefully: bare names still become "other"
+				// and the caller is told, rather than losing the entity.
+				slog.Warn("mcp: entity-type resolution unavailable; bare-string entities will be typed \"other\"",
+					"vault", vault, "err", err)
+			}
+			for _, r := range rows {
+				if r.Type == "" {
+					continue
+				}
+				if _, dup := idx[strings.ToLower(r.Name)]; !dup {
+					idx[strings.ToLower(r.Name)] = r.Type
+				}
+			}
+		}
+		t, ok := idx[strings.ToLower(name)]
+		return t, ok
+	}
+}
+
+// enrichmentReport is what the write path owes the caller about how their
+// enrichment arguments were actually interpreted. Every field here is something
+// that used to happen silently.
+type enrichmentReport struct {
+	malformed       int      // items that carried no usable name at all
+	unresolvedNames []string // caller-supplied names with no known type -> "other"
+	coercedTypes    []string // caller-supplied types outside the 14 -> "other"
+	markup          int      // entities lifted out of [[...]] in the content
+	renamedKeys     []string // near-miss item keys accepted, e.g. entity_name -> name
+	unknownArgs     []string // near-miss top-level parameters that were ignored
+}
+
+// nearMissArgs maps parameter names that evaluators actually sent to the ones
+// this schema accepts. A wrong name currently produces an opaque -32602 (or,
+// worse, a silently dropped field) with no indication of what was expected.
+var nearMissArgs = map[string]string{
+	"entity":               "entities",
+	"entity_list":          "entities",
+	"entity_relationship":  "entity_relationships",
+	"entity_relations":     "entity_relationships",
+	"relationship":         "relationships",
+	"relation":             "relationships",
+	"related":              "relationships",
+	"summarization":        "summary",
+	"summary_text":         "summary",
+	"abstract":             "summary",
+	"entity_names":         "entities",
+	"named_entities":       "entities",
+	"entities_with_types":  "entities",
+	"entity_relationships": "", // sentinel: correct name, never reported
+}
+
+// entityNameKeys / entityTypeKeys are the near-miss key names accepted INSIDE an
+// entity object. Accepting them keeps the entity (coverage is the scarce thing);
+// naming them keeps it from being a silent schema fork.
+var entityNameKeys = []string{"entity_name", "entity", "label", "value", "text"}
+var entityTypeKeys = []string{"entity_type", "kind", "category"}
+
+func (r enrichmentReport) hint() string {
+	var parts []string
+	if r.malformed > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d entity item(s) carried no usable name and were skipped — 'entities' accepts a bare string name (\"PostgreSQL\") or an object {\"name\":\"...\",\"type\":\"...\"}.",
+			r.malformed))
+	}
+	if n := len(r.unresolvedNames); n > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d entity name(s) are not yet known to this vault and were stored with type \"other\" (%s). Pass {\"name\":\"...\",\"type\":\"...\"} to type them.",
+			n, joinCapped(r.unresolvedNames, 5)))
+	}
+	if n := len(r.coercedTypes); n > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d entity type(s) are not recognised and were stored as \"other\" (%s). Recognised: person, organization, location, concept, technology, project, tool, database, service, framework, language, product, event, other.",
+			n, joinCapped(r.coercedTypes, 5)))
+	}
+	if r.markup > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d entity(ies) were read from [[...]] markup in the content; the brackets were removed from the stored text.",
+			r.markup))
+	}
+	if n := len(r.renamedKeys); n > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%s: not part of the entities schema — the accepted keys are 'name' and 'type'. The value was used anyway.",
+			joinCapped(r.renamedKeys, 5)))
+	}
+	if n := len(r.unknownArgs); n > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"Ignored unknown parameter(s) %s — did you mean %s?",
+			joinCapped(r.unknownArgs, 5), joinCapped(r.unknownArgSuggestions(), 5)))
+	}
+	return strings.Join(parts, " ")
+}
+
+func (r enrichmentReport) unknownArgSuggestions() []string {
+	out := make([]string, 0, len(r.unknownArgs))
+	for _, a := range r.unknownArgs {
+		if want := nearMissArgs[a]; want != "" {
+			out = append(out, "'"+want+"'")
+		}
+	}
+	return out
+}
+
+func joinCapped(items []string, max int) string {
+	if len(items) <= max {
+		return strings.Join(items, ", ")
+	}
+	return strings.Join(items[:max], ", ") + fmt.Sprintf(", … (+%d more)", len(items)-max)
+}
+
+// applyEnrichmentArgs is the no-resolver form, kept for call sites that have no
+// vault context. Bare names still work; they simply all resolve to "other".
 func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
-	malformed := 0
+	return parseEnrichmentArgs(args, req, nil).malformed
+}
+
+// parseEnrichmentArgs parses optional inline enrichment fields (summary, entities,
+// relationships) from MCP tool call arguments onto the WriteRequest, resolving
+// untyped entity names against the vault's own entity table and lifting any
+// [[markup]] entities out of req.Content.
+func parseEnrichmentArgs(args map[string]any, req *mbp.WriteRequest, lookup entityTypeLookup) enrichmentReport {
+	var rep enrichmentReport
 	if summary, ok := args["summary"].(string); ok && summary != "" {
 		req.Summary = summary
 	}
-	if entitiesAny, ok := args["entities"].([]any); ok {
-		for i, eAny := range entitiesAny {
-			if i >= 20 {
-				break
+	for k := range args {
+		if want, isNearMiss := nearMissArgs[k]; isNearMiss && want != "" {
+			if _, correctPresent := args[want]; !correctPresent {
+				rep.unknownArgs = append(rep.unknownArgs, k)
 			}
-			eMap, ok := eAny.(map[string]any)
-			if !ok {
-				malformed++
-				continue
-			}
-			name, _ := eMap["name"].(string)
-			typ, _ := eMap["type"].(string)
-			name = strings.TrimSpace(norm.NFKC.String(name))
-			typ = normalizeEntityType(typ)
-			if name == "" || typ == "" {
-				continue
-			}
-			req.Entities = append(req.Entities, mbp.InlineEntity{Name: name, Type: typ})
 		}
 	}
+	sort.Strings(rep.unknownArgs)
+
+	seen := make(map[string]bool)
+	add := func(name, declaredType string) {
+		name = strings.TrimSpace(norm.NFKC.String(name))
+		if name == "" {
+			rep.malformed++
+			return
+		}
+		if len(req.Entities) >= maxInlineEntities || seen[strings.ToLower(name)] {
+			return
+		}
+		seen[strings.ToLower(name)] = true
+		typ := resolveEntityType(name, declaredType, lookup, &rep)
+		req.Entities = append(req.Entities, mbp.InlineEntity{Name: name, Type: typ})
+	}
+
+	if entitiesAny, ok := args["entities"].([]any); ok {
+		for i, eAny := range entitiesAny {
+			if i >= maxInlineEntities {
+				break
+			}
+			switch e := eAny.(type) {
+			case string:
+				// The middle gear: a bare name. ~15 tokens for a whole entity
+				// set instead of typed JSON objects.
+				add(e, "")
+			case map[string]any:
+				name, _ := e["name"].(string)
+				typ, _ := e["type"].(string)
+				if strings.TrimSpace(name) == "" {
+					name, rep.renamedKeys = pickAlt(e, entityNameKeys, rep.renamedKeys)
+				}
+				if strings.TrimSpace(typ) == "" {
+					typ, rep.renamedKeys = pickAlt(e, entityTypeKeys, rep.renamedKeys)
+				}
+				add(name, typ)
+			default:
+				rep.malformed++
+			}
+		}
+	}
+
+	// Inline markup last, so an explicitly-declared spelling/type always wins
+	// over the same name written in brackets.
+	if stripped, names := extractMarkupEntities(req.Content); len(names) > 0 {
+		req.Content = stripped
+		for _, n := range names {
+			add(n, "")
+		}
+		// Counted from the markup found, not from what survived dedup: the
+		// content was rewritten either way, and that is what must be reported.
+		rep.markup = len(names)
+	}
+
 	if relsAny, ok := args["relationships"].([]any); ok {
 		for i, rAny := range relsAny {
 			if i >= 30 {
@@ -1722,7 +1947,107 @@ func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
 			})
 		}
 	}
-	return malformed
+	return rep
+}
+
+// resolveEntityType decides the type for one caller-supplied entity name.
+//
+// A DECLARED type always wins (principle #1: explicit config is never silently
+// substituted) — it is only lowercased, and coerced to "other" if it is outside
+// the 14, which is counted. An OMITTED type is resolved from the vault's own
+// entity table; a name the vault has never seen becomes "other" and is counted.
+// Nothing here reads the content, so no name can be manufactured.
+func resolveEntityType(name, declared string, lookup entityTypeLookup, rep *enrichmentReport) string {
+	if d := strings.TrimSpace(declared); d != "" {
+		typ := normalizeEntityType(d)
+		if typ == "other" && strings.ToLower(d) != "other" {
+			rep.coercedTypes = append(rep.coercedTypes, d)
+		}
+		return typ
+	}
+	if lookup != nil {
+		if typ, known := lookup(name); known {
+			if norm := normalizeEntityType(typ); norm != "" {
+				return norm
+			}
+		}
+	}
+	rep.unresolvedNames = append(rep.unresolvedNames, name)
+	return "other"
+}
+
+// pickAlt pulls a value out of an entity object under a near-miss key, recording
+// which wrong key was used so the caller learns the real one.
+func pickAlt(obj map[string]any, keys []string, seen []string) (string, []string) {
+	for _, k := range keys {
+		if v, ok := obj[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v, append(seen, "'"+k+"'")
+		}
+	}
+	return "", seen
+}
+
+// extractMarkupEntities strips [[Entity Name]] markup out of content and returns
+// the cleaned text plus the bracketed names, in order.
+//
+// This is a TOKENIZER, not a model — it reads only what the caller explicitly
+// bracketed. It deliberately refuses anything that does not look like a
+// declaration: nested or unbalanced brackets, embedded newlines, and names
+// longer than maxMarkupNameLen are left byte-identical, so ordinary code and
+// prose containing brackets pass through untouched.
+//
+// Returns ("", nil) when there is nothing to do, so the caller can leave
+// req.Content alone rather than reassign an identical string.
+func extractMarkupEntities(content string) (string, []string) {
+	if !strings.Contains(content, "[[") {
+		return "", nil
+	}
+	var (
+		b     strings.Builder
+		names []string
+		i     int
+	)
+	for i < len(content) {
+		open := strings.Index(content[i:], "[[")
+		if open < 0 {
+			break
+		}
+		open += i
+		inner := open + 2
+		end := strings.Index(content[inner:], "]]")
+		if end < 0 {
+			break
+		}
+		end += inner
+		name := content[inner:end]
+		if !plausibleMarkupName(name) {
+			// Not a declaration — emit the opening bracket pair verbatim and
+			// keep scanning after it.
+			b.WriteString(content[i : open+2])
+			i = open + 2
+			continue
+		}
+		b.WriteString(content[i:open])
+		b.WriteString(name)
+		names = append(names, strings.TrimSpace(name))
+		i = end + 2
+		if len(names) >= maxInlineEntities {
+			break
+		}
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	b.WriteString(content[i:])
+	return b.String(), names
+}
+
+// plausibleMarkupName gates what [[...]] is allowed to claim is an entity.
+func plausibleMarkupName(s string) bool {
+	if t := strings.TrimSpace(s); t == "" || len(t) > maxMarkupNameLen {
+		return false
+	}
+	return !strings.ContainsAny(s, "[]\n\r")
 }
 
 var relTypeMap = map[string]storage.RelType{
