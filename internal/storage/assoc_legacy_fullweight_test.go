@@ -106,13 +106,30 @@ func TestUpdateAssocWeight_PreFixInteriorWeightEdgeSurvives(t *testing.T) {
 	a := writeConfPathAssocEngram(t, store, ws, "interior edge source")
 	b := writeConfPathAssocEngram(t, store, ws, "interior edge target")
 
-	// Written with the CURRENT encoder — byte-identical to the legacy bytes at
-	// 0.8, which is exactly what the byte-compat pin in the keys package
-	// guarantees. If that pin ever breaks, this test breaks with it.
+	// Written with the current encoder, THEN relocated to independently
+	// hardcoded legacy bytes. The Tier-3 second pass proved the naive version
+	// of this test (write + update, both with the current encoder) passes even
+	// under the float64 byte-compat regression — writer and deleter are
+	// self-consistent, so nothing is ever missed. Standing alone requires the
+	// on-disk key to sit at bytes this test derives WITHOUT calling
+	// WeightComplement: the legacy complement of 0.8 is
+	// 0xFFFFFFFF - uint32(0.8 * 2^32) = 858993407 = 0x3333_32FF.
 	if err := store.WriteAssociation(ctx, ws, a, b, &Association{
 		TargetID: b, RelType: RelSupports, Weight: 0.8, Confidence: 1.0, CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("WriteAssociation: %v", err)
+	}
+	// Independently-derived legacy bytes for 0.8 (no WeightComplement call).
+	legacy08 := [4]byte{0x33, 0x33, 0x32, 0xFF}
+	// The current encoder must place the key at exactly these bytes; if it
+	// does not, the write above is already at a non-legacy position and this
+	// test's premise (a PRE-FIX edge) is void — fail loudly rather than pass
+	// vacuously.
+	fwdKey := keys.AssocFwdKey(ws, [16]byte(a), 0.8, [16]byte(b))
+	if got := [4]byte(fwdKey[25:29]); got != legacy08 {
+		t.Fatalf("current encoder places weight 0.8 at complement %x, legacy bytes are %x — "+
+			"byte-compatibility is broken and every assertion below would be self-consistent "+
+			"rather than cross-era", got, legacy08)
 	}
 
 	if err := store.UpdateAssocWeight(ctx, ws, a, b, 0.85, 1); err != nil {

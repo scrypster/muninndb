@@ -579,6 +579,11 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		batch := ps.db.NewBatch()
 		defer batch.Close()
 		for _, e := range chunk {
+			// e.oldW is decoded from the scanned KEY, so this delete depends on
+			// encode(decode(k)) == k for encoder-produced complements — pinned
+			// exhaustively (all float32 in [0,1]) by the byte-compat tests in
+			// storage/keys. If that identity ever breaks, this delete misses and
+			// decay grows duplicate keys unboundedly.
 			_ = batch.Delete(keys.AssocFwdKey(wsPrefix, e.src, e.oldW, e.dst), nil)
 			_ = batch.Delete(keys.AssocRevKey(wsPrefix, e.dst, e.oldW, e.src), nil)
 			deleteLegacyFullWeightKeys(batch, wsPrefix, e.src, e.dst, e.oldW)
