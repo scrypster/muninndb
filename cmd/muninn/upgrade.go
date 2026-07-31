@@ -21,32 +21,46 @@ import (
 
 const githubReleaseAPI = "https://api.github.com/repos/scrypster/muninndb/releases/latest"
 
-// latestVersionFn is the function that fetches the latest version. Tests override it.
-var latestVersionFn = latestVersionDefault
+// releaseInfo is the part of the GitHub release payload the upgrade flow reads.
+// Body is the release notes markdown, which is where an upgrade note lives.
+type releaseInfo struct {
+	TagName string `json:"tag_name"`
+	Body    string `json:"body"`
+}
 
-// latestVersion delegates to latestVersionFn for testability.
-func latestVersion() (string, error) { return latestVersionFn() }
+// latestReleaseFn is the function that fetches the latest release. Tests override it.
+var latestReleaseFn = latestReleaseDefault
 
-// latestVersionDefault hits the GitHub releases API and returns the latest tag (e.g. "v1.2.3").
-// Returns ("", nil) if the current version is "dev" (dev build — skip check).
-// Returns ("", err) on network failure — callers should treat this as non-fatal.
-func latestVersionDefault() (string, error) {
+// latestRelease delegates to latestReleaseFn for testability.
+func latestRelease() (releaseInfo, error) { return latestReleaseFn() }
+
+// latestVersion returns just the tag of the latest release, for callers that do not
+// need the notes (status.go's version hint).
+func latestVersion() (string, error) {
+	rel, err := latestRelease()
+	return rel.TagName, err
+}
+
+// latestReleaseDefault hits the GitHub releases API and returns the latest release.
+// Returns a zero releaseInfo if the current version is "dev" (dev build — skip check).
+// Returns an error on network failure — callers should treat this as non-fatal.
+func latestReleaseDefault() (releaseInfo, error) {
 	if muninnVersion() == "dev" {
-		return "", nil
+		return releaseInfo{}, nil
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(githubReleaseAPI)
 	if err != nil {
-		return "", err
+		return releaseInfo{}, err
 	}
 	defer resp.Body.Close()
-	var release struct {
-		TagName string `json:"tag_name"`
+	var release releaseInfo
+	// Cap the read: release notes are prose, and a misrouted or hostile response
+	// should not be able to exhaust memory on what is only a version check.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&release); err != nil {
+		return releaseInfo{}, err
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", err
-	}
-	return release.TagName, nil
+	return release, nil
 }
 
 // parseSemver parses "vX.Y.Z" or "X.Y.Z" into (major, minor, patch) ints.
@@ -96,6 +110,93 @@ func newerVersionAvailable(current, latest string) bool {
 	return latPat > curPat
 }
 
+// upgradeNoteMarker is the phrase that introduces an operator-facing upgrade note in
+// the release body. CHANGELOG.md and the GitHub releases use the same convention:
+// a blockquote whose first line bolds "Upgrade note", e.g. v0.9.0's one-time on-disk
+// migration ("> **Upgrade note — on-disk migration.** ... back up your data directory").
+const upgradeNoteMarker = "upgrade note"
+
+// upgradeNote extracts that blockquote from a release body and returns it as plain
+// text, or "" when the release carries no such note.
+//
+// It is deliberately quiet about anything it does not recognise. A release whose notes
+// are shaped differently must still be installable — this reads the notes to inform the
+// operator, so a parsing miss may cost a warning but must never cost an upgrade.
+func upgradeNote(body string) string {
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	start := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, ">") {
+			continue
+		}
+		if strings.Contains(strings.ToLower(trimmed), upgradeNoteMarker) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+
+	var parts []string
+	for _, line := range lines[start:] {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, ">") {
+			break // end of the blockquote
+		}
+		text := strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
+		if text == "" {
+			// A bare ">" separates paragraphs inside one blockquote; keep the break.
+			parts = append(parts, "")
+			continue
+		}
+		parts = append(parts, text)
+	}
+
+	note := strings.TrimSpace(stripMarkdownEmphasis(strings.Join(parts, " ")))
+	// Collapse the whitespace introduced by joining, and the blank-line markers.
+	note = strings.Join(strings.Fields(note), " ")
+	const maxNoteLen = 1200
+	if len(note) > maxNoteLen {
+		note = note[:maxNoteLen] + "..."
+	}
+	return note
+}
+
+// stripMarkdownEmphasis removes the ** and * emphasis markers that survive a
+// blockquote, so the note reads as plain text in a terminal.
+func stripMarkdownEmphasis(s string) string {
+	s = strings.ReplaceAll(s, "**", "")
+	s = strings.ReplaceAll(s, "`", "")
+	return s
+}
+
+// wrapText breaks s into lines of at most width columns, splitting on spaces.
+// A single word longer than width gets its own (over-long) line rather than being cut.
+func wrapText(s string, width int) []string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return nil
+	}
+	var (
+		lines []string
+		cur   string
+	)
+	for _, w := range words {
+		switch {
+		case cur == "":
+			cur = w
+		case len(cur)+1+len(w) <= width:
+			cur += " " + w
+		default:
+			lines = append(lines, cur)
+			cur = w
+		}
+	}
+	return append(lines, cur)
+}
+
 // runUpgrade is the entry point for `muninn upgrade`.
 // Flags:
 //
@@ -127,7 +228,7 @@ func runUpgrade(args []string) {
 
 	fmt.Print("  Checking for updates...")
 
-	latest, err := latestVersion()
+	release, err := latestRelease()
 	if err != nil {
 		fmt.Println(" failed")
 		fmt.Fprintln(os.Stderr, "")
@@ -136,6 +237,7 @@ func runUpgrade(args []string) {
 		fmt.Fprintln(os.Stderr, "")
 		return
 	}
+	latest := release.TagName
 	if latest == "" {
 		fmt.Println(" skipped")
 		fmt.Println()
@@ -161,6 +263,21 @@ func runUpgrade(args []string) {
 	fmt.Println()
 	fmt.Printf("  Release notes → github.com/scrypster/muninndb/releases/tag/%s\n", latest)
 	fmt.Println()
+
+	// Surface the release's own upgrade note before the operator is asked to confirm.
+	// A release that needs a manual step (v0.9.0: back up the data directory before a
+	// one-way on-disk migration) says so in its notes, and this is the one moment the
+	// upgrade path has the operator's attention. Printed for --check too, so a
+	// scripted check surfaces it as well.
+	if note := upgradeNote(release.Body); note != "" {
+		fmt.Println("  ⚠  Upgrade note for this release:")
+		fmt.Println()
+		for _, line := range wrapText(note, 66) {
+			fmt.Printf("     %s\n", line)
+		}
+		fmt.Println()
+	}
+
 	fmt.Println("  ────────────────────────────────────────────────────")
 	fmt.Println()
 
@@ -554,8 +671,79 @@ func isDaemonRunning() bool {
 	return isProcessRunning(pid)
 }
 
+// backupBinaryPath returns where the outgoing binary is kept, e.g.
+// "/usr/local/bin/muninn.v0.9.0.bak". The version is sanitized because it becomes a
+// path component and is only as trustworthy as the -ldflags that stamped it.
+func backupBinaryPath(exe, version string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '.', r == '-', r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, version)
+	// Separators are already gone, so the path cannot leave the executable's
+	// directory — but collapse dot runs anyway so the name can never read as a
+	// traversal, and trim the edges so it cannot start a hidden file.
+	for strings.Contains(safe, "..") {
+		safe = strings.ReplaceAll(safe, "..", ".")
+	}
+	safe = strings.Trim(safe, ".-")
+	if safe == "" {
+		safe = "previous"
+	}
+	return exe + "." + safe + ".bak"
+}
+
+// preserveBinary keeps the outgoing binary at bak before the new one is installed.
+//
+// It links rather than moves, so exe never stops existing: the install step replaces
+// exe's directory entry while the link keeps the old inode reachable. A move would
+// open a window in which a concurrent `muninn` invocation finds nothing at exe, and
+// would leave the machine with no binary at all if the install then failed.
+func preserveBinary(exe, bak string) error {
+	// An existing .bak here is this same version's, left by an earlier attempt at this
+	// upgrade — same bytes, nothing to lose by replacing it.
+	if err := os.Remove(bak); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clear previous rollback binary %s: %w", bak, err)
+	}
+	if err := os.Link(exe, bak); err == nil {
+		return nil
+	}
+	// Filesystems that do not support hard links still get a rollback artifact.
+	return copyExecutable(exe, bak)
+}
+
+// copyExecutable copies src to dst with executable permissions, syncing before close
+// so the rollback binary is durable by the time the original is replaced.
+func copyExecutable(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	return out.Close()
+}
+
 // selfUpdate performs the atomic binary self-replacement for curl/manual installs.
-// Sequence: stop daemon → download → verify → chmod → rename → restart.
+// Sequence: stop daemon → download → verify → preserve old binary → rename → restart.
 func selfUpdate(latest string) error {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
@@ -670,12 +858,25 @@ func selfUpdate(latest string) error {
 		return err
 	}
 
+	// Keep the outgoing binary. Without it, backing out a bad upgrade means
+	// re-downloading the previous release — from a machine whose muninn is already
+	// broken, at the moment its operator least wants a network dependency.
+	bakPath := backupBinaryPath(exe, muninnVersion())
+	if err := upgradeStep("Keeping rollback copy...", func() error {
+		return preserveBinary(exe, bakPath)
+	}); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
 	if err := upgradeStep("Installing...", func() error {
 		return os.Rename(tmpPath, exe)
 	}); err != nil {
 		os.Remove(tmpPath)
 		return err
 	}
+
+	fmt.Printf("  %-28s%s\n", "Previous binary:", bakPath)
 
 	// Restart daemon if it was running before
 	if daemonWasRunning {

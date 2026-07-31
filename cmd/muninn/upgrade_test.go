@@ -356,9 +356,9 @@ func TestVerifyBinary_NotExist(t *testing.T) {
 }
 
 func TestRunUpgrade_AlreadyUpToDate(t *testing.T) {
-	orig := latestVersionFn
-	latestVersionFn = func() (string, error) { return "v1.0.0", nil }
-	defer func() { latestVersionFn = orig }()
+	orig := latestReleaseFn
+	latestReleaseFn = func() (releaseInfo, error) { return releaseInfo{TagName: "v1.0.0"}, nil }
+	defer func() { latestReleaseFn = orig }()
 
 	origVersion := version
 	version = "v1.0.0"
@@ -368,9 +368,9 @@ func TestRunUpgrade_AlreadyUpToDate(t *testing.T) {
 }
 
 func TestRunUpgrade_CheckOnly_UpdateAvailable(t *testing.T) {
-	orig := latestVersionFn
-	latestVersionFn = func() (string, error) { return "v2.0.0", nil }
-	defer func() { latestVersionFn = orig }()
+	orig := latestReleaseFn
+	latestReleaseFn = func() (releaseInfo, error) { return releaseInfo{TagName: "v2.0.0"}, nil }
+	defer func() { latestReleaseFn = orig }()
 
 	origVersion := version
 	version = "v1.0.0"
