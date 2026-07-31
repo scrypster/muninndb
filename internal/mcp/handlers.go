@@ -711,13 +711,50 @@ func (s *MCPServer) handleLink(ctx context.Context, w http.ResponseWriter, id js
 	sendResult(w, id, textContent(`{"ok":true}`))
 }
 
+// contradictionReporter is the optional richer contradictions read. Engines
+// that implement it report resolved concepts, real detection timestamps, and —
+// critically — the contradictions an agent has explicitly linked that the 30s
+// batch detector has not flagged yet. See mcpEngineAdapter.GetContradictionReport
+// for why this is probed rather than added to the Engine interface.
+type contradictionReporter interface {
+	GetContradictionReport(ctx context.Context, vault string) (*ContradictionsReport, error)
+}
+
 func (s *MCPServer) handleContradictions(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
-	pairs, err := s.engine.GetContradictions(ctx, vault)
+	rep, ok := s.engine.(contradictionReporter)
+	if !ok {
+		// Legacy shape: markers only, no detection state. Kept byte-compatible
+		// so an engine without the richer read still answers the question it
+		// can actually answer.
+		pairs, err := s.engine.GetContradictions(ctx, vault)
+		if err != nil {
+			sendError(w, id, -32000, "tool error: "+err.Error())
+			return
+		}
+		sendResult(w, id, textContent(mustJSON(map[string]any{"contradictions": pairs})))
+		return
+	}
+
+	report, err := rep.GetContradictionReport(ctx, vault)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
-	sendResult(w, id, textContent(mustJSON(map[string]any{"contradictions": pairs})))
+	if report.Contradictions == nil {
+		report.Contradictions = []ContradictionPair{}
+	}
+	// The note exists because an empty or short list used to be read as "there
+	// are no contradictions" when the truth was "the detector has not run yet".
+	// Say which one this is, in words, every time it is not simply "none".
+	switch {
+	case !report.ScanComplete:
+		report.Note = "contradiction scan hit its cap: pending_count is a lower bound, and pairs declared by an explicit contradicts link may be missing from this list"
+	case report.PendingCount > 0:
+		report.Note = fmt.Sprintf("%d contradiction(s) declared by an explicit link are awaiting the detector (it runs on a ~30s batch interval); they are listed with status \"pending_detection\" and are already durable", report.PendingCount)
+	case report.DetectedCount == 0:
+		report.Note = "no contradictions in this vault, and none awaiting detection"
+	}
+	sendResult(w, id, textContent(mustJSON(report)))
 }
 
 func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {

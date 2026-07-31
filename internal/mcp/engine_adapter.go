@@ -89,6 +89,49 @@ func (a *mcpEngineAdapter) GetContradictions(ctx context.Context, vault string) 
 	}
 	return result, nil
 }
+
+// GetContradictionReport is the richer contradictions read: concepts resolved,
+// real detection timestamps, and the pairs an agent has explicitly linked that
+// the 30s batch detector has not flagged yet.
+//
+// It is deliberately NOT part of the mcp.Engine interface. Adding a method
+// there would force every implementation (including test doubles in other
+// packages) to change in lockstep; handleContradictions instead probes for this
+// method and falls back to the flat GetContradictions when an engine does not
+// provide it. Same reason http handlers probe for http.Flusher.
+func (a *mcpEngineAdapter) GetContradictionReport(ctx context.Context, vault string) (*ContradictionsReport, error) {
+	rep, err := a.eng.GetContradictionReport(ctx, vault)
+	if err != nil {
+		return nil, err
+	}
+	out := &ContradictionsReport{
+		Contradictions: make([]ContradictionPair, 0, len(rep.Pairs)),
+		DetectedCount:  rep.DetectedCount,
+		PendingCount:   rep.PendingCount,
+		ScanComplete:   rep.ScanComplete,
+	}
+	for _, p := range rep.Pairs {
+		pair := ContradictionPair{
+			IDa:      p.IDa,
+			ConceptA: p.ConceptA,
+			IDb:      p.IDb,
+			ConceptB: p.ConceptB,
+			Status:   p.Status,
+		}
+		// Zero means "unknown"; leave the field absent rather than emitting the
+		// Go zero time as if it were a real instant.
+		if !p.DetectedAt.IsZero() {
+			t := p.DetectedAt
+			pair.DetectedAt = &t
+		}
+		if !p.DeclaredAt.IsZero() {
+			t := p.DeclaredAt
+			pair.DeclaredAt = &t
+		}
+		out.Contradictions = append(out.Contradictions, pair)
+	}
+	return out, nil
+}
 func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (*WriteResult, error) {
 	id, err := a.eng.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, entities, importance, effectiveAt)
 	if err != nil {

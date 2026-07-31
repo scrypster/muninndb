@@ -168,12 +168,46 @@ type ReadEntityRel struct {
 	Weight     float32 `json:"weight,omitempty"`
 }
 
+// ContradictionPair is one contradicting pair as muninn_contradictions renders
+// it.
+//
+// DetectedAt and DeclaredAt are pointers so an unknown time is ABSENT from the
+// JSON rather than serialised as "0001-01-01T00:00:00Z". A zero time rendered
+// as a real instant is a plausible wrong answer — the project's worst failure
+// class (CLAUDE.md §2.1).
 type ContradictionPair struct {
-	IDa        string    `json:"id_a"`
-	ConceptA   string    `json:"concept_a"`
-	IDb        string    `json:"id_b"`
-	ConceptB   string    `json:"concept_b"`
-	DetectedAt time.Time `json:"detected_at"`
+	IDa      string `json:"id_a"`
+	ConceptA string `json:"concept_a"`
+	IDb      string `json:"id_b"`
+	ConceptB string `json:"concept_b"`
+	// Status is "detected" (the detector has flagged this pair) or
+	// "pending_detection" (an explicit contradicts link exists and the batch
+	// detector has not reached it yet). Empty when the engine cannot report it.
+	Status string `json:"status,omitempty"`
+	// DetectedAt is when the detector flagged the pair. Absent while pending,
+	// and absent for markers written before the timestamp was recorded.
+	DetectedAt *time.Time `json:"detected_at,omitempty"`
+	// DeclaredAt is when an explicit contradicts link was written between the
+	// two engrams. Absent when the pair was found by the detector alone.
+	DeclaredAt *time.Time `json:"declared_at,omitempty"`
+}
+
+// ContradictionsReport is the muninn_contradictions response.
+//
+// PendingCount is the point of the envelope: the contradiction detector is a
+// 30s batch worker, so for up to half a minute after an explicit
+// muninn_link(relation="contradicts") no marker exists. Reporting only markers
+// made that window return an empty list — the same answer a vault with no
+// contradictions gives. The counts let a caller tell "none" from "not computed
+// yet" without waiting or guessing.
+type ContradictionsReport struct {
+	Contradictions []ContradictionPair `json:"contradictions"`
+	DetectedCount  int                 `json:"detected_count"`
+	PendingCount   int                 `json:"pending_count"`
+	// ScanComplete is false when the search for declared-but-undetected links
+	// hit its scan cap; PendingCount is then a lower bound, not a total.
+	ScanComplete bool   `json:"scan_complete"`
+	Note         string `json:"note,omitempty"`
 }
 
 // VaultStatus is returned by muninn_status.

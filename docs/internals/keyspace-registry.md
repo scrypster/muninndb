@@ -32,7 +32,7 @@ prefix — see the vault-reuse note at the bottom).
 | 0x06 | ws+trigram(3)+id | — | FTS trigram |
 | 0x07 | ws+id+layer(1) | neighbor list | HNSW graph |
 | 0x08 / 0x09 | ws+"stats" / ws+term | FTS stats | |
-| 0x0A | ws+conceptHash(4)+relType(2)+id | contradiction | |
+| 0x0A | ws+conceptHash(4)+relType(2)+id | partner id(16) + detectedAt unixnano(8) | contradiction marker; conceptHash/relType are written as 0. 16-byte values are legacy (pre-timestamp) and decode to an UNKNOWN detection time, never a zero instant |
 | 0x0B | ws+state(1)+id | — | state index |
 | **0x0C** | ws+tagHash(4)+id | — | **tag index — now READ by tag-scoped recall (`ListByTagInRange`/`ListByTagsAllInRange`, wired #619); no longer dead weight** |
 | 0x0D | ws+creatorHash(4)+id | — | creator index |

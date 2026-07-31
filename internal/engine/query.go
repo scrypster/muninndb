@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -128,6 +129,168 @@ func (e *Engine) GetAssociationsBatch(ctx context.Context, vault string, engramI
 func (e *Engine) GetContradictions(ctx context.Context, vault string) ([][2]storage.ULID, error) {
 	ws := e.store.ResolveVaultPrefix(vault)
 	return e.store.GetContradictions(ctx, ws)
+}
+
+// Contradiction status values. A caller that cannot tell these apart cannot
+// tell "this vault has no contradictions" from "the detector has not run yet".
+const (
+	// ContradictionDetected — the durable 0x0A marker exists. The confidence
+	// penalty (if any) has been applied exactly once for this pair.
+	ContradictionDetected = "detected"
+	// ContradictionPending — an explicit "contradicts" association exists but
+	// the batch detector has not flagged the pair yet. The contradiction is
+	// real and durable; only its detection is outstanding.
+	ContradictionPending = "pending_detection"
+)
+
+// ContradictionDetail is one contradiction pair, resolved for presentation.
+//
+// DetectedAt is zero when Status is ContradictionPending (nothing has detected
+// it yet) and also for legacy markers written before the timestamp existed.
+// Zero means UNKNOWN and must be rendered as absent, never as an instant.
+type ContradictionDetail struct {
+	IDa        string
+	IDb        string
+	ConceptA   string
+	ConceptB   string
+	Status     string
+	DetectedAt time.Time
+	DeclaredAt time.Time
+}
+
+// ContradictionReport is the full answer to "what contradicts what in this
+// vault?", including how much of it is still awaiting detection.
+//
+// ScanComplete reports whether the search for declared-but-undetected links
+// examined the whole association keyspace. When it is false, PendingCount is a
+// lower bound and the caller must say so rather than implying the list is
+// exhaustive.
+type ContradictionReport struct {
+	Pairs         []ContradictionDetail
+	DetectedCount int
+	PendingCount  int
+	ScanComplete  bool
+	Scanned       int
+}
+
+// GetContradictionReport returns every contradiction in a vault — both the
+// pairs the detector has flagged and the pairs an agent has explicitly linked
+// but the batch detector has not reached yet.
+//
+// The second half is the point. The ContradictWorker runs on a 30s batch
+// interval, so for up to half a minute after muninn_link(relation="contradicts")
+// the 0x0A marker does not exist. Returning only markers meant an agent that
+// linked a contradiction and immediately checked its work got an empty list —
+// the same answer a vault with no contradictions gives. Three independent
+// evaluators concluded from that empty list that the feature was dead. An
+// unknown state must never be reported as a known one (CLAUDE.md §2.1/§2.2), so
+// the declared-but-unflagged pairs are reported explicitly, labelled pending.
+//
+// Detection is left entirely to the worker: this is a read path and it neither
+// flags markers nor submits confidence updates. The contradiction confidence
+// penalty must stay asynchronous and fire exactly once per pair.
+func (e *Engine) GetContradictionReport(ctx context.Context, vault string) (*ContradictionReport, error) {
+	ws := e.store.ResolveVaultPrefix(vault)
+
+	detected, err := e.store.GetContradictionRecords(ctx, ws)
+	if err != nil {
+		return nil, err
+	}
+	declared, err := e.store.DeclaredContradictions(ctx, ws, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	report := &ContradictionReport{
+		ScanComplete: declared.Complete,
+		Scanned:      declared.Scanned,
+	}
+
+	type pairKey [32]byte
+	key := func(r storage.ContradictionRecord) pairKey {
+		var k pairKey
+		copy(k[:16], r.A[:])
+		copy(k[16:], r.B[:])
+		return k
+	}
+
+	index := make(map[pairKey]int, len(detected)+len(declared.Records))
+	for _, r := range detected {
+		index[key(r)] = len(report.Pairs)
+		report.Pairs = append(report.Pairs, ContradictionDetail{
+			IDa:        r.A.String(),
+			IDb:        r.B.String(),
+			Status:     ContradictionDetected,
+			DetectedAt: r.DetectedAt,
+		})
+		report.DetectedCount++
+	}
+	for _, r := range declared.Records {
+		if idx, ok := index[key(r)]; ok {
+			// Already detected — keep one entry, but record when it was declared.
+			report.Pairs[idx].DeclaredAt = r.DeclaredAt
+			continue
+		}
+		index[key(r)] = len(report.Pairs)
+		report.Pairs = append(report.Pairs, ContradictionDetail{
+			IDa:        r.A.String(),
+			IDb:        r.B.String(),
+			Status:     ContradictionPending,
+			DeclaredAt: r.DeclaredAt,
+		})
+		report.PendingCount++
+	}
+
+	if err := e.fillContradictionConcepts(ctx, ws, report.Pairs); err != nil {
+		return nil, err
+	}
+	return report, nil
+}
+
+// fillContradictionConcepts resolves the concept of every engram named in the
+// report. Concepts are looked up on read rather than duplicated into the 0x0A
+// index: the index would then need invalidating on every rename, and a stale
+// concept is exactly the kind of plausible-but-wrong value this surface exists
+// to stop producing. The lookup is one batched GetEngrams over the distinct
+// IDs — contradiction sets are small, and the pairs were already deduplicated.
+//
+// A concept that cannot be resolved (deleted or unreadable engram) is left
+// empty rather than guessed at.
+func (e *Engine) fillContradictionConcepts(ctx context.Context, ws [8]byte, pairs []ContradictionDetail) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+	order := make([]storage.ULID, 0, len(pairs)*2)
+	seen := make(map[string]bool, len(pairs)*2)
+	for _, p := range pairs {
+		for _, s := range [2]string{p.IDa, p.IDb} {
+			if seen[s] {
+				continue
+			}
+			seen[s] = true
+			id, err := storage.ParseULID(s)
+			if err != nil {
+				continue
+			}
+			order = append(order, id)
+		}
+	}
+	engrams, err := e.store.GetEngrams(ctx, ws, order)
+	if err != nil {
+		return fmt.Errorf("resolve contradiction concepts: %w", err)
+	}
+	concepts := make(map[string]string, len(order))
+	for i, eng := range engrams {
+		if eng == nil || i >= len(order) {
+			continue
+		}
+		concepts[order[i].String()] = eng.Concept
+	}
+	for i := range pairs {
+		pairs[i].ConceptA = concepts[pairs[i].IDa]
+		pairs[i].ConceptB = concepts[pairs[i].IDb]
+	}
+	return nil
 }
 
 // ResolveContradiction removes the contradiction marker for the pair (idA, idB)
