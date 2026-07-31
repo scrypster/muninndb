@@ -110,6 +110,37 @@ The honest reading is that the bitemporal + entity-timeline core is the product,
 and Hebbian association are hypotheses that have not yet been shown to beat plain cosine on a real
 corpus. That is a measurement to run, not an assumption to keep.
 
+### Newly-written memories are silently unfindable until the embedder catches up
+
+Verified live at commit c3b5b60. Write a memory, query it seconds later with near-exact lexical
+overlap, and recall returns ZERO results. Wait for the retroactive embed pass and the identical
+query returns it at score 0.742 (raw cosine 0.881).
+
+Timeline from the daemon log:
+
+    22:05:31  evolve creates the successor
+    22:05:34  activation complete ... results=0        <- the query
+    22:05:36  retroactive processor: complete           <- embedding lands AFTER
+
+Mechanism: `ContentMatch = 0.6*cosine + 0.4*tanh(FTS)`. Before the embedding exists, cosine is 0 —
+scored as *zero semantic relevance* rather than *unknown* — so ContentMatch cannot exceed 0.4
+however perfect the lexical match, which falls below the default threshold. Recall returns an empty
+set with a hint suggesting `mode=recent`, indistinguishable from "no such memory".
+
+This is the same defect as the paraphrase cap, from the other direction: a MISSING estimator is
+treated as a zero rather than as absence of evidence. It matters more than the paraphrase case
+because agents write-then-recall constantly within a session, and it plausibly explains part of the
+"abstains on answerable questions" behaviour observed during the hands-on evaluation — those vaults
+were being written and queried in the same minutes.
+
+It is also the third cause initially mis-attributed to ACT-R fusion, after the confidence collapse
+and the 0.6 content-match cap. The lesson recorded here: before blaming the cognitive layer,
+account for confidence, for missing-signal handling, and for indexing lag.
+
+Candidate fixes to EVALUATE (not to ship on argument): noisy-OR or max composition so a missing
+estimator does not cap the other; and/or an explicit "not yet indexed" signal on the response so an
+empty result is never silently confused with an unknown one.
+
 ### 44 tools
 
 Unanimously "too many" / "hostile". Six different tools can change a memory (`evolve`, `forget`,
