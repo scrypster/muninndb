@@ -122,7 +122,8 @@ Timeline from the daemon log:
     22:05:34  activation complete ... results=0        <- the query
     22:05:36  retroactive processor: complete           <- embedding lands AFTER
 
-Mechanism: `ContentMatch = 0.6*cosine + 0.4*tanh(FTS)`. Before the embedding exists, cosine is 0 —
+Mechanism: `ContentMatch = 0.6*semCal + 0.4*ftsCoverage`, where `semCal` is the COG-26-calibrated
+semantic score (there is no `tanh` on FTS — #711 removed it). Before the embedding exists, cosine is 0 —
 scored as *zero semantic relevance* rather than *unknown* — so ContentMatch cannot exceed 0.4
 however perfect the lexical match, which falls below the default threshold. Recall returns an empty
 set with a hint suggesting `mode=recent`, indistinguishable from "no such memory".
@@ -140,6 +141,41 @@ account for confidence, for missing-signal handling, and for indexing lag.
 Candidate fixes to EVALUATE (not to ship on argument): noisy-OR or max composition so a missing
 estimator does not cap the other; and/or an explicit "not yet indexed" signal on the response so an
 empty result is never silently confused with an unknown one.
+
+### The combiner and the abstention floor are coupled — the obvious fix has a cost
+
+A traced measurement of the live scoring path (commit `ada475e`) corrected two things believed
+earlier in this investigation, and the correction matters more than the original claim.
+
+**The production formula**, verified against source:
+
+    semCal       = max(0, (cos - b) / (1 - b))
+    ContentMatch = 0.6*semCal + 0.4*ftsCoverage
+    B(M)         = ln(n) - 0.5*ln(max(ageDays, 1min)/n),  n = AccessCount+1, capped ~1.4892
+    prior        = softplus(B(M) + 4*hebbian + 4*transition) / 1.6931
+    final        = ContentMatch * prior * Confidence
+
+Relevance multiplicatively gates salience; salience cannot rescue a zero-relevance memory (the one
+exception is COG-5's tag floor, which sets ContentMatch=0.1 for an explicit tag match).
+
+**The earlier worked example was optimistic.** Omitting the COG-26 rescale gave 0.455 for a
+cosine-0.758 paraphrase; the real value with `b=0.520` is `0.6 * 0.4958 = 0.2975`. At confidence
+1.0 that survives comfortably. Under noisy-OR at the collapsed confidence 0.07 it scores 0.0347 and
+is **still dropped** — so the content-match cap is *not* the cause of the observed miss. It is a
+standing ~1.67x handicap on every semantic-only match, turning near-misses into misses.
+
+**And the naive fix is not free.** COG-26's noise floor `b=0.520` was derived *against* the 0.6
+coefficient — the survival bar is `0.520 + (0.1/0.6)*0.480 ~= 0.600`. At the measured noise ceiling
+(cosine 0.596), the current linear form scores 0.0950 and correctly abstains, while both noisy-OR
+and max score 0.1583 and clear the 0.1 gate. **Switching the combiner buys recall and pays for it
+in abstention**, which is precisely the trade the evaluation says must not be made blind: a system
+must not win NDCG on answerable queries by returning confident nonsense on unanswerable ones.
+
+The combiner and the abstention floor are one calibration, not two knobs. Changing either requires
+re-deriving the other and measuring BOTH metrics together — which is what the harness at
+`internal/engine/engine_scoring_weights_measure_test.go` exists to do (4 combiners x confidence
+live/ablated x full-signal/paraphrase, with NDCG@5 on answerable queries and false-positive rate on
+committed nonsense probes).
 
 ### 44 tools
 
