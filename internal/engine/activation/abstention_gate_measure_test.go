@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"testing"
 	"time"
 
@@ -153,6 +154,23 @@ func (c abmCell) fpr() float64 {
 // abmMeasureFixture builds the real-embedder billing corpus and marks every
 // third engram as co-activated (Hebbian-hot), modelling an active session.
 // Returns the engine and concept->ID map.
+// abmFixedAge pins the fixture's AGE rather than its timestamp.
+//
+// The first attempt at determinism pinned CreatedAt to an absolute date. That
+// made the runs identical and simultaneously destroyed what the harness
+// measures: age was then ~30 days, the ACT-R base-level term was small, `raw`
+// never exceeded 1.0, the max-rescale never engaged, and BOTH arms reported the
+// same numbers. A harness that cannot reach the defect's precondition proves
+// nothing, however reproducible it is.
+//
+// What must be stable is the ELAPSED time the base-level term sees, not the
+// wall-clock instant. A recent, fixed age keeps the prior in the saturating
+// regime — the live "agent has been using its memory" condition where raw
+// exceeds 1.0 and the rescale actually bites — while making every run identical.
+const abmFixedAge = 5 * time.Minute
+
+func abmFixtureNow() time.Time { return time.Now().Add(-abmFixedAge) }
+
 func abmMeasureFixture(t *testing.T) (*activation.ActivationEngine, map[string]storage.ULID) {
 	t.Helper()
 	eng, store, byConcept := buildSemanticAbstentionFixture(t)
@@ -160,20 +178,40 @@ func abmMeasureFixture(t *testing.T) (*activation.ActivationEngine, map[string]s
 	// A primer engram standing in for "something the agent surfaced a moment
 	// ago". Every third corpus engram is associated to it, so phase4HebbianBoost
 	// gives those a boost of 1.0 — the live active-session condition.
+	// DETERMINISM (both of these mattered, and the harness was flaky without them):
+	//
+	//  1. CreatedAt must be PINNED, not time.Now(). ACT-R's base-level activation
+	//     is -0.5*ln(age), which is violently sensitive as age -> 0, so a
+	//     wall-clock fixture gives a different prior on every run.
+	//  2. The hot set must be chosen over SORTED keys. byConcept is a map, so
+	//     `range` selected a different third of the corpus as Hebbian-hot each
+	//     run — different engrams hot means a different maxRaw, and the
+	//     max-normalised arm divides by exactly that.
+	//
+	// Measured before this fix, over three isolated runs, the CURRENT arm gave
+	// FPR 31.2% / 25.0% / 18.8% and NDCG 0.5899 / 0.6581 / 0.6748, while the
+	// absolute arm gave 6.2% every single time. That asymmetry is the defect
+	// under test — a query-relative gate depends on whatever else is in the pool
+	// — but it also meant this test could fail on an unlucky run while asserting
+	// a direction that always held. A measurement that moves when nothing
+	// changed cannot referee a scoring decision.
 	primer := &storage.Engram{
 		Concept: "prior turn of this session", Content: "an unrelated memory surfaced a moment ago",
-		Confidence: 1.0, Stability: 30.0, CreatedAt: time.Now(),
+		Confidence: 1.0, Stability: 30.0, CreatedAt: abmFixtureNow(),
 	}
 	store.writeEngram(primer)
-	i := 0
-	for _, id := range byConcept {
+	hotKeys := make([]string, 0, len(byConcept))
+	for k := range byConcept {
+		hotKeys = append(hotKeys, k)
+	}
+	sort.Strings(hotKeys)
+	for i, k := range hotKeys {
 		if i%3 == 0 {
-			store.assocs[id] = []storage.Association{{TargetID: primer.ID, Weight: 1.0}}
+			store.assocs[byConcept[k]] = []storage.Association{{TargetID: primer.ID, Weight: 1.0}}
 		}
-		i++
 	}
 	eng.AssocLog().Record(activation.LogEntry{
-		VaultID: 0, At: time.Now(), EngramIDs: []storage.ULID{primer.ID}, Scores: []float64{1.0},
+		VaultID: 0, At: abmFixtureNow(), EngramIDs: []storage.ULID{primer.ID}, Scores: []float64{1.0},
 	})
 	return eng, byConcept
 }
