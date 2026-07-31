@@ -49,6 +49,57 @@ restored as-is. **Principle: a corrupt index is a rebuild trigger, not a served 
 boosts into displacement). A read-only recall flag is proposed but not settled. **Treat
 "read-only recall" as unresolved; don't ship changes that assume it exists.**
 
+**Associative surprise: killed after four measured passes (2026-07-31).** The pitch was the
+product's most-wanted feature: unprompted, surface a non-obvious cross-session connection the
+calling LLM could not have made itself. Four independent attempts to make it fire, each one
+measured on real data, and the mechanism is refuted **at its premise** rather than at its tuning.
+
+- **Pass 1 — does it fire?** Over a real corpus: 1,525 focal engrams, 37,296 candidate edges,
+  focality assumed always-true (the most generous possible assumption). **0 fires.** Removing the
+  type gate entirely: still 0.
+- **Pass 2 — is the anti-cosplay null sound?** No. The degree-preserving configuration-model null
+  reduces to a fixed threshold on `coact*idf` and is blind to the candidate's own degree. With
+  degree isolated as the only variable, hub-vs-genuine separation was +0.003 at n=74 and **-0.007
+  at n=809** (sign flips), arms distinguished on **0/50 seeds**, and it *prefers* the popularity
+  hub when the hub carries more weight. Its p-value also resolves to ~3 distinct values regardless
+  of N. The null was inverted, not merely weak.
+- **Pass 3 — is it substrate-starved?** No. A counterfactual on two identical clones (types and
+  entities re-derived offline by a local model on the treatment arm; co-activation edges
+  byte-identical across arms) lifted the graph-shaped substrate ~5x — JOINT typed-and-entity
+  coverage 2.49% -> 12.29%, entity coverage 29.9% -> 98.6% — and produced **0 fires in BOTH arms**
+  on the same 27,255 edges. Gate rejections *redistributed* rather than cleared (`type` 59.0% ->
+  72.4%, `not-focal` 38.6% -> 12.2%): enrichment pushed candidates past focality straight into the
+  next gate.
+- **Pass 4 — is it over-gated?** Partly, but that is not the cause either. All 32 deterministic
+  gate subsets were run over 37,169 candidate edges. **Four of the six gates are redundant** —
+  `type`, `idf-floor`, `focal` and `valid` each reject *nothing* that another gate has not already
+  rejected, and `valid` never fires at all. The earlier "the type gate absorbs everything"
+  attribution was an artifact of evaluation ORDER.
+
+**The actual refutation.** `non-obvious` is the only load-bearing gate, and it rejects **100.00%**
+of 14,306 bridge-carrying candidates: 9.1% because the candidate is already in the recall set,
+90.9% because its cosine to the recall set is at or above the ceiling. The distribution leaves no
+room — min 0.500, p50 0.763, p95 0.877. Not one candidate in 14,306 sits below it.
+
+The reason is structural: **co-activation edges form between memories recalled together, so a
+focal engram's co-activation neighbourhood IS its semantic neighbourhood.** The feature's premise —
+"a connection recall structurally could not have made" — is contradicted by its own substrate.
+There is no such thing as a co-activation neighbour recall could not have reached. A tau sweep
+confirms the shape: every survivor bought by raising the ceiling is a near-duplicate of what recall
+already returned (the 152 candidates blocked only by `non-obvious` have median cosine 0.722 and
+max 1.000 — restatements, not surprises).
+
+**Principle: a mechanism can be refuted at its premise, and that is cheaper to learn than tuning
+it.** Three of the four passes were spent improving the machinery — a better null, a better
+substrate, fewer gates — when the disqualifying fact was available from the candidate-cosine
+distribution alone. Ask what the mechanism assumes about its own inputs before optimising it.
+
+**Also recorded (2026-07-31): the substrate hypothesis was too strong.** "Fix capture and the graph
+features will fire" was stated confidently and is refuted by pass 3. Capture quality remains worth
+fixing on its own merits — silently discarding a caller's `type`, entities or relation is
+indefensible regardless — but it is a precondition, not the lever, and it unlocked nothing here.
+See `docs/internals/agent-experience-findings.md` for the full evaluation.
+
 ## Security & credentials
 
 **Security properties are structural, not policy-checked (#612).** The obvious design
@@ -141,7 +192,10 @@ integrity reports.
 **Explicitly deferred / rejected — do not reopen without new evidence:** write-path lease
 enforcement, fencing tokens, CAS crash-atomicity (until a workflow demands them); write-mode
 pattern keys (dropped in #608 v2); per-key toolset attribute (the key layer is not a
-presentation layer, #604); ambient push (negative result, #609).
+presentation layer, #604); ambient push (negative result, #609); associative surprise
+(negative result, refuted at its premise after four measured passes — a focal's
+co-activation neighbourhood is its semantic neighbourhood, so 100% of real candidates sit at
+or above the non-obviousness ceiling).
 
 **`tag_prefix` seeds candidates via a new ordered index, not the hash index (S1).**
 Superseded the earlier "stays a post-filter" call above: the 0x0C tag index is

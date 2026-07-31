@@ -2250,6 +2250,9 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
+	// Per-vault exclude-tags (#713): candidates carrying a configured tag are
+	// dropped from recall ranking. nil/empty = no exclusion (unchanged behavior).
+	actReq.ExcludeTags = resolved.ExcludeTags
 
 	// Valid-time gate (COG-19): as_of / include_invalid flow into phase-6
 	// filtering; the final gate below re-applies them to entity-boost injections.
@@ -2400,7 +2403,19 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// ACT-R-calibrated value — made #590's fix unreachable on every production
 	// transport. ACT-R/weighted_sum default behavior is unchanged.
 	if actReq.Threshold == 0 && !actReq.Weights.UseRRFFusion {
-		actReq.Threshold = 0.1
+		if actReq.Weights.UseACTR {
+			// The value COG-26's b=0.520 was calibrated against, on the
+			// absolute-score scale the ACT-R gate now compares.
+			actReq.Threshold = 0.1
+		} else {
+			// Legacy weighted_sum: its blended Final gives content-irrelevant
+			// fresh memories ~0.3 from decay/recency/access alone, and the only
+			// bar ever validated against that formula is the old 0.5 surface
+			// default. 0.1 was measured on the ACT-R absolute scale ONLY —
+			// applying it here would let recency spam through (#754 review,
+			// finding 5).
+			actReq.Threshold = 0.5
+		}
 	}
 
 	// Apply the recall-mode preset (#704) — resolved into modePreset above the
@@ -2493,6 +2508,17 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	}
 	result.Activations = kept
 
+	// Recall-time version-cluster ADVISORY annotation (#712, COG-25). Pure
+	// read-path, zero writes, zero score changes: pairwise-clusters the top
+	// survivors when embedding/token similarity, a shared anchor (rare entity,
+	// existing RelRefines edge, or competing version-marker tags), and temporal
+	// separation ALL hold, then annotates (never demotes) and — ONLY at an exact
+	// score tie within a detected cluster — reorders newest-EffectiveValidFrom-
+	// first. An explicit RelSupersedes on a pair always wins and suppresses the
+	// heuristic for that pair (COG-25). Runs after the validity gate and before
+	// final truncation so it sees exactly the survivor set truncation will cut.
+	result.Activations = e.applyCurrencyAnnotation(ctx, wsPrefix, result.Activations, vaultSize, actReq.MaxResults)
+
 	// Re-apply MaxResults: entity boost / supersession / the validity gate may have
 	// changed the set. All re-sort or preserve score order, so truncation keeps top-K.
 	if actReq.MaxResults > 0 && len(result.Activations) > actReq.MaxResults {
@@ -2531,6 +2557,15 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		if (scored.SupersededBy != storage.ULID{}) {
 			items[i].SupersededBy = scored.SupersededBy.String()
 		}
+		// Heuristic currency annotation (advisory; from applyCurrencyAnnotation).
+		if (scored.PossiblySupersededBy != storage.ULID{}) {
+			items[i].PossiblySupersededBy = scored.PossiblySupersededBy.String()
+		}
+		if scored.VersionCluster != "" {
+			items[i].VersionCluster = scored.VersionCluster
+			items[i].ClusterSize = scored.ClusterSize
+		}
+		items[i].NewestOfCluster = scored.NewestOfCluster
 		// Valid-time annotations: ValidFrom only when explicitly divergent from
 		// CreatedAt; ValidUntil when the window is closed; Expired when the
 		// window closed at or before now (reachable only under include_invalid).
@@ -2554,6 +2589,8 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			Recency:               float32(scored.Components.Recency),
 			Raw:                   float32(scored.Components.Raw),
 			Final:                 float32(scored.Components.Final),
+			ContentMatch:          float32(scored.Components.ContentMatch),
+			AbsoluteScore:         float32(scored.Components.AbsoluteScore),
 		}
 
 		// Add hop path if present
@@ -2743,11 +2780,14 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	metrics.ActivateDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
 
 	return &mbp.ActivateResponse{
-		QueryID:     queryID,
-		TotalFound:  result.TotalFound,
-		Activations: items,
-		LatencyMs:   result.LatencyMs,
-		Brief:       briefSentences,
+		QueryID:          queryID,
+		TotalFound:       result.TotalFound,
+		Activations:      items,
+		LatencyMs:        result.LatencyMs,
+		Brief:            briefSentences,
+		SemanticDegraded: result.SemanticDegraded,
+		Abstained:        result.Abstained,
+		AbstainedReason:  result.AbstainedReason,
 	}, nil
 }
 
@@ -2867,7 +2907,7 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 	// When a "contradicts" link is explicitly created via Link(), notify the
 	// ContradictWorker so it can flag the pair and drive confidence updates.
 	if storage.RelType(req.RelType) == storage.RelContradicts {
-		_, linkContra, linkConf := e.cogWorkers()
+		_, linkContra, _ := e.cogWorkers()
 		if linkContra != nil {
 			linkContra.Submit(cognitive.ContradictItem{
 				WS:          wsPrefix,
@@ -2909,22 +2949,21 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 				},
 			})
 		}
-		// Also directly flag the pair and update confidence without waiting for
-		// ContradictWorker's batch processing — direct link is an explicit assertion.
-		if linkConf != nil {
-			linkConf.Submit(cognitive.ConfidenceUpdate{
-				WS:       wsPrefix,
-				EngramID: [16]byte(sourceID),
-				Evidence: cognitive.EvidenceContradiction,
-				Source:   "contradiction_detected",
-			})
-			linkConf.Submit(cognitive.ConfidenceUpdate{
-				WS:       wsPrefix,
-				EngramID: [16]byte(targetID),
-				Evidence: cognitive.EvidenceContradiction,
-				Source:   "contradiction_detected",
-			})
-		}
+		// The confidence penalty is applied ONLY by the ContradictWorker's OnFound
+		// callback above, which fires exactly once per pair (the 0x0A marker makes
+		// it idempotent). A second, unconditional submit used to live here to
+		// avoid waiting for the batch worker — but it bypassed that idempotency
+		// and applied the SAME evidence a second time. BayesianUpdate compounds
+		// repeat applications, so an explicit link cost two updates instead of
+		// one, and linking both directions (the natural thing for an agent to do)
+		// drove BOTH engrams 1.0 -> 0.975 -> 0.797 -> 0.313 -> 0.0709. Confidence
+		// multiplies into the recall score, so both memories — including the TRUE
+		// one, penalised exactly as hard as the false one — silently vanished from
+		// recall. Declaring a contradiction was a data-loss operation.
+		//
+		// The penalty is now delayed by up to one worker interval. That is the
+		// correct trade: a slightly late annotation beats a promptly destroyed
+		// memory.
 	}
 
 	return &mbp.LinkResponse{OK: true}, nil
@@ -3396,7 +3435,11 @@ type ConsolidateResult struct {
 // Warnings lists any evidence IDs that could not be linked to the decision;
 // the decision itself is always committed even when evidence linking partially fails.
 type DecideResult struct {
-	ID       storage.ULID
+	ID storage.ULID
+	// Concept is the concept actually stored (the decision text). Returned so
+	// a transport can echo what it wrote instead of an empty string — two
+	// evaluators read the previous {"concept":""} response as data loss.
+	Concept  string
 	Warnings []string
 }
 
@@ -3558,7 +3601,20 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 	batch := e.store.NewBatch()
 	defer batch.Discard()
 
-	if err := batch.WriteEngram(ctx, wsPrefix, newEng); err != nil {
+	// The successor's provenance entry carries what changed and why, not just
+	// the verb: an "evolve" entry with only a timestamp, a source and the word
+	// "evolve" records the one thing the reader already knew. It is recorded on
+	// the SUCCESSOR because that is the engram a reader holds after an evolve
+	// (the predecessor is soft-deleted and hidden from the present), and
+	// predecessor_id is the exact mirror of read's superseded_by. reason is
+	// passed through verbatim — empty when the caller gave none, never
+	// backfilled with a plausible-looking string.
+	evolveDetails := &provenance.Details{
+		PredecessorID: oldULID.String(),
+		Reason:        reason,
+		EffectiveAt:   &effectiveAt,
+	}
+	if err := batch.WriteEngramOpDetails(ctx, wsPrefix, newEng, "evolve", evolveDetails); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch write new engram: %w", err)
 	}
 	if err := batch.WriteAssociation(ctx, wsPrefix, newULID, oldULID, supersedes); err != nil {
@@ -3734,9 +3790,37 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 		return nil, fmt.Errorf("consolidate: write merged: %w", err)
 	}
 
+	// NEVER archive the merged result itself. Write is exact-content deduplicated,
+	// so when mergedContent matches an input byte-for-byte — the NATURAL case,
+	// because the obvious merged text for a set of near-duplicates is usually one
+	// of them verbatim — Write returns THAT input's existing id rather than
+	// creating a new engram. Archiving every input then soft-deletes the very
+	// engram just returned as the survivor, and the fact disappears from recall
+	// while the response still reports success and names the (now dead) id.
+	//
+	// Verified before this guard: consolidate(ids=[A,B], merged=<A's content>)
+	// returned {"id": A, "archived": [A, B]} and left BOTH soft-deleted, so a
+	// caller using the merge tool exactly as documented lost the memory.
 	var archived []string
 	var warnings []string
+	// Compare PARSED ULIDs, not raw strings: ULID parsing is case-insensitive
+	// and Forget accepts lowercase ids, so a lowercase input whose content
+	// matched the merge text slipped past a string comparison and the survivor
+	// was archived anyway — the same data loss through a one-character-class
+	// gap (adversarial review of #754, finding 7).
+	mergedULIDForGuard, guardErr := storage.ParseULID(mergedResp.ID)
 	for _, id := range ids {
+		if guardErr == nil {
+			if inputULID, err := storage.ParseULID(id); err == nil && inputULID == mergedULIDForGuard {
+				// This input IS the merged result (dedup hit). Keep it alive; it
+				// is the consolidated memory the caller is being handed.
+				continue
+			}
+		} else if id == mergedResp.ID {
+			// Unparseable merged id (should not happen): fall back to the exact
+			// string match rather than skipping the guard entirely.
+			continue
+		}
 		_, err := e.Forget(ctx, &mbp.ForgetRequest{ID: id, Hard: false, Vault: vault})
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("failed to archive %s: %v", id, err))
@@ -3833,7 +3917,11 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 	if err := e.refuseAppend(ctx); err != nil {
 		return nil, err
 	}
-	content := rationale
+	// The body must STATE the decision, not just the reasoning behind it.
+	// Previously content was rationale(+alternatives) only, so every consumer
+	// that reads the body — a recall snippet, an export, a summarizer, a human
+	// — got the argument without ever being told what was decided.
+	content := decision + "\n\nRationale:\n" + rationale
 	if len(alternatives) > 0 {
 		content += "\n---\nAlternatives:\n" + strings.Join(alternatives, "\n")
 	}
@@ -3843,6 +3931,13 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 		Concept: decision,
 		Content: content,
 		Tags:    []string{"decision"},
+		// A decision-recording tool must produce a decision-TYPED memory.
+		// Left unset, MemoryType took the uint8 zero value (fact), which
+		// silently downgraded derived importance from the decision tier (0.6)
+		// to the fact tier (0.4) and hid the record from every type-based
+		// filter — the same silent-downgrade class as #742/#743/#745.
+		MemoryType: uint8(storage.TypeDecision),
+		TypeLabel:  storage.TypeDecision.String(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("decide: write: %w", err)
@@ -3865,7 +3960,7 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 	if err != nil {
 		return nil, fmt.Errorf("decide: parse id: %w", err)
 	}
-	return &DecideResult{ID: decideULID, Warnings: warnings}, nil
+	return &DecideResult{ID: decideULID, Concept: decision, Warnings: warnings}, nil
 }
 
 // RecordAccess increments the access count and updates the last-accessed timestamp

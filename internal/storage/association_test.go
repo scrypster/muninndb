@@ -173,14 +173,14 @@ func TestGetContradictions_WithPairs(t *testing.T) {
 	idC := NewULID()
 
 	// Flag two distinct contradiction pairs.
-	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
 		t.Fatalf("FlagContradiction(A,B): %v", err)
 	}
-	if err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
 		t.Fatalf("FlagContradiction(A,C): %v", err)
 	}
 	// Flag the same pair again in reverse order — should NOT produce a duplicate.
-	if err := store.FlagContradiction(ctx, ws, idB, idA); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idB, idA); err != nil {
 		t.Fatalf("FlagContradiction(B,A): %v", err)
 	}
 
@@ -239,10 +239,10 @@ func TestResolveContradiction(t *testing.T) {
 	idC := NewULID()
 
 	// Flag two pairs.
-	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
 		t.Fatalf("FlagContradiction(A,B): %v", err)
 	}
-	if err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
 		t.Fatalf("FlagContradiction(A,C): %v", err)
 	}
 
@@ -271,7 +271,7 @@ func TestResolveContradiction_BothDirections(t *testing.T) {
 	idA := NewULID()
 	idB := NewULID()
 
-	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
 		t.Fatalf("FlagContradiction: %v", err)
 	}
 

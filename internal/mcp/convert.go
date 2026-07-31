@@ -33,10 +33,18 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 	// May, now 11" narration comes from the payload alone. The annotate=true path
 	// augments this same struct with staleness/conflicts/provenance.
 	var annotations *MemoryAnnotations
-	if item.SupersededBy != "" || item.CurrentVersion != "" {
+	// SupersededBy/CurrentVersion (asserted) and PossiblySupersededBy/
+	// VersionCluster/NewestOfCluster (heuristic, never an authority) are all
+	// always-on; annotate=true only augments this struct further below.
+	if item.SupersededBy != "" || item.CurrentVersion != "" ||
+		item.PossiblySupersededBy != "" || item.VersionCluster != "" || item.NewestOfCluster {
 		annotations = &MemoryAnnotations{
-			SupersededBy:   item.SupersededBy,
-			CurrentVersion: item.CurrentVersion,
+			SupersededBy:         item.SupersededBy,
+			CurrentVersion:       item.CurrentVersion,
+			PossiblySupersededBy: item.PossiblySupersededBy,
+			VersionCluster:       item.VersionCluster,
+			NewestOfCluster:      item.NewestOfCluster,
+			ClusterSize:          item.ClusterSize,
 		}
 	}
 	m := Memory{

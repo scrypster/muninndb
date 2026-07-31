@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/provenance"
 )
 
 // AssocWeightUpdate represents a single association weight update for batching.
@@ -23,8 +25,18 @@ type OrdinalEntry struct {
 // StoreBatch is a write-only handle for atomic multi-write operations.
 // Callers must call Commit or Discard exactly once.
 type StoreBatch interface {
-	// WriteEngram queues an engram write into the batch.
+	// WriteEngram queues an engram write into the batch. Its provenance entry
+	// records Operation "create" — use WriteEngramOp when the batch is not
+	// creating a brand-new engram (e.g. Evolve's successor).
 	WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *Engram) error
+	// WriteEngramOp queues an engram write into the batch exactly like
+	// WriteEngram, except the provenance entry records operation as the
+	// originating verb (e.g. "evolve") instead of the hardcoded "create".
+	WriteEngramOp(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string) error
+	// WriteEngramOpDetails is WriteEngramOp with an optional operation-specific
+	// details payload (predecessor, reason, effective_at) attached to the
+	// provenance entry. nil details behaves exactly like WriteEngramOp.
+	WriteEngramOpDetails(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string, details *provenance.Details) error
 	// WriteAssociation queues association forward (0x03), reverse (0x04) keys into the batch.
 	WriteAssociation(ctx context.Context, wsPrefix [8]byte, src, dst ULID, assoc *Association) error
 	// WriteOrdinal queues the ordinal key for (parentID, childID) into the batch.
@@ -150,7 +162,7 @@ type EngineStore interface {
 	GetChildrenByParent(ctx context.Context, wsPrefix [8]byte, parentID ULID) ([]ULID, error)
 
 	// FlagContradiction writes the 0x0A contradiction key for pair (a,b).
-	FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error
+	FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) (newlyFlagged bool, err error)
 
 	// GetContradictions returns all contradiction pairs in the vault by scanning the 0x0A prefix.
 	GetContradictions(ctx context.Context, wsPrefix [8]byte) ([][2]ULID, error)

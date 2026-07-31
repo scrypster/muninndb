@@ -1,5 +1,7 @@
 package auth
 
+import "strings"
+
 // PlasticityConfig is the per-vault cognitive pipeline configuration.
 // A nil PlasticityConfig means "use defaults" (equivalent to Preset: "default").
 // Non-nil pointer fields override the chosen preset value.
@@ -93,6 +95,17 @@ type PlasticityConfig struct {
 	// registry/identity fallback, never silently producing a floor that
 	// abstains everything).
 	SemanticFloor *float64 `json:"semantic_floor,omitempty"`
+
+	// ExcludeTags is a per-vault list of tags excluded from recall RANKING.
+	// A candidate carrying any of these tags is dropped from activation results
+	// (the recall pipeline) before scoring. This is ranking-only: the engram is
+	// NOT deleted, NOT hidden from explicit direct-id or as_of-by-id reads, and
+	// still counts toward the vault. An explicit per-request tag include
+	// (tags_all/tags_any naming an excluded tag) overrides the standing exclude
+	// for that request — caller intent wins. Not preset-varying; default-empty /
+	// opt-in: nil or empty means no exclusion, so a vault without this config
+	// recalls byte-identically to before (#713).
+	ExcludeTags []string `json:"exclude_tags,omitempty"`
 }
 
 // ResolvedPlasticity is the fully-merged configuration after applying preset defaults
@@ -156,6 +169,12 @@ type ResolvedPlasticity struct {
 	// lookup for this vault's semantic-abstention baseline b. nil = no
 	// override (use the per-embedder registry). See PlasticityConfig.SemanticFloor.
 	SemanticFloorOverride *float64 `json:"semantic_floor_override,omitempty"`
+
+	// ExcludeTags is the resolved per-vault recall-ranking tag exclusion list
+	// (see PlasticityConfig.ExcludeTags). nil/empty = no exclusion. Normalized
+	// at resolution: blank entries dropped, duplicates collapsed. Not
+	// preset-varying.
+	ExcludeTags []string `json:"exclude_tags,omitempty"`
 }
 
 type plasticityPreset struct {
@@ -381,6 +400,13 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 	// silently here would hide a misconfiguration the caller should see.
 	r.SemanticFloorOverride = cfg.SemanticFloor
 
+	// ExcludeTags is not preset-varying (like SemanticFloor/ReinforceOnRead):
+	// nil/empty = no exclusion. Normalized here so a nil, empty, or
+	// duplicate-laden config all resolve to the same minimal set — and an empty
+	// or all-blank config resolves to nil, byte-identical to "no config" (the
+	// default-empty / opt-in invariant, #713).
+	r.ExcludeTags = resolveExcludeTags(cfg.ExcludeTags)
+
 	// Apply pointer-field overrides
 	if cfg.HebbianEnabled != nil {
 		r.HebbianEnabled = *cfg.HebbianEnabled
@@ -566,6 +592,30 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		r.LTPWeightFloor = v
 	}
 	return r
+}
+
+// resolveExcludeTags normalizes a per-vault exclude-tags list: blank entries
+// are dropped and duplicates collapsed, preserving first-seen order. Returns
+// nil for a nil, empty, or all-blank input so "no config" and "empty config"
+// resolve identically (the default-empty / opt-in invariant, #713).
+func resolveExcludeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tags))
+	var out []string
+	for _, t := range tags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }
 
 var validBehaviorModes = map[string]bool{

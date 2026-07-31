@@ -41,7 +41,7 @@ func ContradictionSeverity(relA, relB uint16) float64 {
 // Only FlagContradiction is required; detection logic operates over the
 // associations supplied with each ContradictItem.
 type ContradictionStore interface {
-	FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) error
+	FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) (newlyFlagged bool, err error)
 }
 
 // ContradictAssoc is an association used for contradiction checking.
@@ -102,12 +102,29 @@ func (cw *ContradictWorker) processBatch(ctx context.Context, batch []Contradict
 				a, b := item.Associations[i], item.Associations[j]
 				severity := ContradictionSeverity(a.RelType, b.RelType)
 				if severity > 0 {
-					if err := cw.store.FlagContradiction(ctx, item.WS, a.TargetID, b.TargetID); err != nil {
+					newlyFlagged, err := cw.store.FlagContradiction(ctx, item.WS, a.TargetID, b.TargetID)
+					if err != nil {
 						slog.Error("contradict: failed to flag contradiction",
 							"ws", fmt.Sprintf("%x", item.WS),
 							"engram_a", fmt.Sprintf("%x", a.TargetID),
 							"engram_b", fmt.Sprintf("%x", b.TargetID),
 							"error", err)
+						// Newness is unknown after a failed write; treat it as
+						// already-known so an erroring flag can never drive a repeat
+						// penalty.
+						continue
+					}
+					// IDEMPOTENT PENALTY. OnFound drives a ConfidenceUpdate on BOTH
+					// engrams, and BayesianUpdate compounds repeat applications of the
+					// SAME evidence: 1.0 -> 0.975 -> 0.797 -> 0.313 -> 0.0709. Confidence
+					// multiplies into the recall score, so re-firing silently removes both
+					// memories from recall — including the TRUE one, which is penalised
+					// exactly as hard as the false one. One declared contradiction is one
+					// fact, however many times the worker re-observes the edge, so the
+					// penalty fires only on first observation. The marker itself is always
+					// (re-)written above; only the penalty is suppressed.
+					if !newlyFlagged {
+						continue
 					}
 					if item.OnFound != nil {
 						item.OnFound(ContradictionEvent{

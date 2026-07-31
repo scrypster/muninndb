@@ -1653,7 +1653,7 @@ func TestPhase6Score_FTSOnlyCandidate_NonZeroCosine(t *testing.T) {
 	// candidate), not tag-seeded, not traversed -- but it DOES carry an
 	// embedding that is identical to the query embedding (cosine = 1.0).
 	eng := &storage.Engram{
-		Concept: "RemittanceFile lifecycle", Content: "RemittanceFile lifecycle state machine",
+		Concept: "WidgetPipeline lifecycle", Content: "WidgetPipeline lifecycle state machine",
 		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
 		Embedding: []float32{1, 0, 0},
 	}
@@ -1664,7 +1664,7 @@ func TestPhase6Score_FTSOnlyCandidate_NonZeroCosine(t *testing.T) {
 	// vector-pool loop sets vectorScore, never the FTS loop.
 	fused := []fusedCandidate{{id: eng.ID, rrfScore: 0.5, ftsScore: 1.0}}
 	p1 := &phase1Result{
-		queryStr:  "RemittanceFile lifecycle state machine",
+		queryStr:  "WidgetPipeline lifecycle state machine",
 		embedding: []float32{1, 0, 0},
 	}
 
@@ -1711,7 +1711,7 @@ func TestPhase6Score_FTSOnlyCandidate_LoaderGap(t *testing.T) {
 	defer e.Close()
 
 	eng := &storage.Engram{
-		Concept: "RemittanceFile lifecycle", Content: "RemittanceFile lifecycle state machine",
+		Concept: "WidgetPipeline lifecycle", Content: "WidgetPipeline lifecycle state machine",
 		Confidence: 1.0, Stability: 30.0, State: storage.StateActive,
 	}
 	// Embedding reachable ONLY via GetEmbedding -- eng.Embedding is nil after
@@ -1720,7 +1720,7 @@ func TestPhase6Score_FTSOnlyCandidate_LoaderGap(t *testing.T) {
 
 	fused := []fusedCandidate{{id: eng.ID, rrfScore: 0.5, ftsScore: 1.0}}
 	p1 := &phase1Result{
-		queryStr:  "RemittanceFile lifecycle state machine",
+		queryStr:  "WidgetPipeline lifecycle state machine",
 		embedding: []float32{1, 0, 0},
 	}
 

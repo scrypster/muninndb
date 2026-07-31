@@ -155,3 +155,74 @@ func TestStoreBatch_DefaultsApplied(t *testing.T) {
 		t.Error("CreatedAt should not be zero")
 	}
 }
+
+// TestStoreBatch_WriteEngramOp_RecordsRealOperation verifies that the
+// originating verb (e.g. "evolve") is threaded into the provenance entry
+// instead of being hardcoded to "create". Evolve queues its successor engram
+// through the batch (see Engine.EvolveAt), so a batch-committed engram is not
+// always a "create" — the caller must be able to say what it actually is.
+func TestStoreBatch_WriteEngramOp_RecordsRealOperation(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStoreForBatch(t)
+	ws := store.VaultPrefix("batch-op-test")
+
+	eng := &Engram{Concept: "Successor", Content: "evolved content"}
+
+	batch := store.NewBatch()
+	defer batch.Discard()
+
+	if err := batch.WriteEngramOp(ctx, ws, eng, "evolve"); err != nil {
+		t.Fatalf("WriteEngramOp: %v", err)
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// provWork.Submit is async (non-blocking channel send) — drain before reading.
+	store.provWork.Drain()
+
+	entries, err := store.ProvenanceStore().Get(ctx, ws, [16]byte(eng.ID))
+	if err != nil {
+		t.Fatalf("ProvenanceStore().Get: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 provenance entry, got %d", len(entries))
+	}
+	if entries[0].Operation != "evolve" {
+		t.Errorf("Operation = %q, want %q (the batch write must record the real originating verb, not a hardcoded \"create\")", entries[0].Operation, "evolve")
+	}
+}
+
+// TestStoreBatch_WriteEngram_StillRecordsCreate is a non-regression pin:
+// the plain WriteEngram entry point (used by remember_tree / add_child, which
+// genuinely create engrams) must keep recording "create".
+func TestStoreBatch_WriteEngram_StillRecordsCreate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStoreForBatch(t)
+	ws := store.VaultPrefix("batch-op-test-create")
+
+	eng := &Engram{Concept: "Child", Content: "created content"}
+
+	batch := store.NewBatch()
+	defer batch.Discard()
+
+	if err := batch.WriteEngram(ctx, ws, eng); err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	store.provWork.Drain()
+
+	entries, err := store.ProvenanceStore().Get(ctx, ws, [16]byte(eng.ID))
+	if err != nil {
+		t.Fatalf("ProvenanceStore().Get: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 provenance entry, got %d", len(entries))
+	}
+	if entries[0].Operation != "create" {
+		t.Errorf("Operation = %q, want %q", entries[0].Operation, "create")
+	}
+}

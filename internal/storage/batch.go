@@ -39,8 +39,10 @@ type pebbleStoreBatch struct {
 // batchPendingItem holds the data required for post-commit vault counter and
 // provenance work for a single engram queued into the batch.
 type batchPendingItem struct {
-	wsPrefix [8]byte
-	eng      *Engram
+	wsPrefix  [8]byte
+	eng       *Engram
+	operation string              // provenance verb: "create" (default), "evolve", etc.
+	details   *provenance.Details // optional per-operation "what changed and why"; nil for plain creates
 }
 
 // NewBatch returns a new StoreBatch that queues engram writes atomically.
@@ -54,7 +56,28 @@ func (ps *PebbleStore) NewBatch() StoreBatch {
 
 // WriteEngram queues all keys for eng into the batch (does not commit).
 // It applies the same defaulting and encoding logic as PebbleStore.WriteEngram.
+// The provenance entry records Operation "create" — use WriteEngramOp for
+// batch writes that are not creating a brand-new engram.
 func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *Engram) error {
+	return b.WriteEngramOp(ctx, wsPrefix, eng, "create")
+}
+
+// WriteEngramOp queues all keys for eng into the batch exactly like
+// WriteEngram, except the eventual provenance entry (written post-commit,
+// see Commit below) records operation as the originating verb instead of
+// always "create". Evolve's successor engram is queued through this so its
+// provenance reads "evolve", not "create" (the write-path verb was
+// previously discarded — see issue tracked in the provenance-verb work).
+func (b *pebbleStoreBatch) WriteEngramOp(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string) error {
+	return b.WriteEngramOpDetails(ctx, wsPrefix, eng, operation, nil)
+}
+
+// WriteEngramOpDetails is WriteEngramOp with an optional operation-specific
+// details payload attached to the provenance entry. Evolve uses it to record
+// what the successor replaced, why, and from which valid-time instant — the
+// verb alone said an update happened but never what changed or why. nil details
+// is exactly WriteEngramOp: no payload is recorded, and none is invented.
+func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string, details *provenance.Details) error {
 	// Apply defaults — same as PebbleStore.WriteEngram.
 	if eng.ID == (ULID{}) {
 		if !eng.CreatedAt.IsZero() {
@@ -144,7 +167,7 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 	laKey := keys.LastAccessIndexKey(wsPrefix, laMillis, id16)
 	b.batch.Set(laKey, nil, nil)
 
-	b.pendingItems = append(b.pendingItems, batchPendingItem{wsPrefix: wsPrefix, eng: eng})
+	b.pendingItems = append(b.pendingItems, batchPendingItem{wsPrefix: wsPrefix, eng: eng, operation: operation, details: details})
 	return nil
 }
 
@@ -342,11 +365,16 @@ func (b *pebbleStoreBatch) Commit() error {
 		}
 
 		if b.ps.provWork != nil {
+			op := item.operation
+			if op == "" {
+				op = "create" // defensive default; WriteEngram/WriteEngramOp always set this
+			}
 			b.ps.provWork.Submit(ws, eng.ID, provenance.ProvenanceEntry{
 				Timestamp: eng.CreatedAt,
 				Source:    provenance.SourceHuman,
 				AgentID:   eng.CreatedBy,
-				Operation: "create",
+				Operation: op,
+				Details:   item.details,
 			})
 		}
 	}

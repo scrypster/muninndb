@@ -1124,8 +1124,23 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 		if CompareULIDs(id, other) > 0 {
 			aBytes, bBytes = bBytes, aBytes
 		}
-		batch.Set(keys.ContradictionKey(wsPrefix, 0, 0, aBytes), bBytes[:], nil)
-		batch.Set(keys.ContradictionKey(wsPrefix, 0, 0, bBytes), aBytes[:], nil)
+		// Same encoding and carry-forward as FlagContradiction. This site used
+		// to write bare 16-byte legacy values and OVERWRITE unconditionally, so
+		// a pair flagged through the confidence path reported detection time
+		// "unknown" forever, and a marker that already carried a stamp had it
+		// erased on the next confidence adjustment — violating the "moment it
+		// FIRST became known" invariant (adversarial review of #754, finding 6).
+		detectedAt := time.Now()
+		contraKey := keys.ContradictionKey(wsPrefix, 0, 0, aBytes)
+		if existing, closer, err := ps.db.Get(contraKey); err == nil {
+			_, prior, _ := decodeContradictionValue(existing)
+			_ = closer.Close()
+			// Carry the prior stamp forward verbatim — including a zero one
+			// from a legacy marker (re-stamping invents a wrong time).
+			detectedAt = prior
+		}
+		batch.Set(contraKey, encodeContradictionValue(bBytes, detectedAt), nil)
+		batch.Set(keys.ContradictionKey(wsPrefix, 0, 0, bBytes), encodeContradictionValue(aBytes, detectedAt), nil)
 	}
 
 	if err := batch.Commit(pebble.NoSync); err != nil {

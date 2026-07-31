@@ -152,6 +152,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("  1. \"Decided on JWTs with 15-minute expiry for authentication\" (type: decision)\n")
 	b.WriteString("  2. \"Tom is implementing the auth system\" (type: task)\n")
 	b.WriteString("  3. \"API rate limit set to 100 requests/second per client\" (type: decision)\n\n")
+	b.WriteString("**You are the curator, not a filing cabinet.** MuninnDB is living memory, not a static database. The moment you write is the moment you know something — so it is the moment to reconcile. Before storing a fact, recall its neighborhood; if what you now know corrects, clarifies, or replaces something already there, *evolve* that memory rather than leaving a stale rival copy to compete in recall. Curating as you write is how the vault stays true over time instead of accreting contradictions — and it costs nothing extra, because you already had the knowledge in hand.\n\n")
 	b.WriteString("**Updating vs. creating.** If you are re-asserting or updating a fact that changes or replaces a prior version of the same thing ")
 	b.WriteString("(a re-run score, a corrected status, a fact that went stale), call `muninn_evolve(id, new_content, reason)` — not `muninn_remember`. ")
 	b.WriteString("Evolve links the new engram to the old one with a `supersedes` association and soft-deletes the predecessor, so the old version ")
@@ -161,6 +162,10 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("supersedes what's already stored. This matters most for bulk or repeated-write pipelines that re-run over the same entities (periodic ")
 	b.WriteString("re-scoring, re-auditing, status polling): re-remembering on every run silently accumulates near-duplicate copies that crowd out other ")
 	b.WriteString("results in recall — evolving keeps the vault at one live version per fact.\n")
+	b.WriteString("**Advisory currency signal.** Even without `muninn_evolve`, `muninn_recall` may flag a result whose content clusters with a newer, ")
+	b.WriteString("highly-similar fact about the same subject: `annotations.possibly_superseded_by` names that newer fact (with `version_cluster`, ")
+	b.WriteString("`newest_of_cluster`, `cluster_size`). This is a heuristic hint, not an assertion — unlike `superseded_by`/`current_version` (which mean ")
+	b.WriteString("an explicit `supersedes` link exists), verify before treating the older fact as false; it is still returned at full score.\n")
 
 	// Hierarchical memory
 	b.WriteString("\n## Hierarchical Memory\n\n")

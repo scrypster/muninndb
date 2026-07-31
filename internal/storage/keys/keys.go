@@ -535,7 +535,45 @@ func TransitionPrefixForSrc(ws [8]byte, src [16]byte) []byte {
 
 // WeightComplement computes the weight complement for descending sort order.
 func WeightComplement(weight float32) [4]byte {
-	w := uint32(weight * float32(math.MaxUint32))
+	// BYTE-COMPATIBLE with every key ever written for weights in (0,1), and
+	// explicitly saturated at the endpoints.
+	//
+	// History, because this function has now been wrong twice in opposite
+	// directions:
+	//
+	//  1. The ORIGINAL form, uint32(weight * float32(math.MaxUint32)), was
+	//     undefined for weight exactly 1.0 — float32(MaxUint32) rounds UP to
+	//     2^32, the multiply lands on 2^32, and the uint32 conversion of an
+	//     out-of-range float is implementation-defined (0 on arm64). A
+	//     full-confidence edge was therefore written at the weight-0.0 key
+	//     position and read back as 0: decide's evidence links, explicit 1.0
+	//     declarations, and LTP-saturated learning were silently destroyed.
+	//  2. The FIRST fix computed uint32(f * float64(math.MaxUint32)). Correct
+	//     at 1.0 — and byte-INCOMPATIBLE at essentially every other weight,
+	//     because float32(MaxUint32)==2^32 while float64(MaxUint32)==2^32-1:
+	//     the two multipliers disagree by ~1 integer step for all interior
+	//     weights (0 identical encodings in 1M samples). Every recomputed-key
+	//     delete (Hebbian updates, decay, engram-delete cascade) would have
+	//     missed every pre-fix key on every existing vault: metadata silently
+	//     reset, permanent duplicate edges, unbounded decay key growth. Caught
+	//     by adversarial review before it shipped.
+	//
+	// The correct form keeps the ORIGINAL expression on the open interval —
+	// byte-identical to every existing on-disk key — and handles only the
+	// endpoints explicitly. 0.99999994 (the largest float32 below 1.0) stays
+	// on the legacy path and encodes safely to 4294967040. The endpoint
+	// saturation gives 1.0 -> complement 0 (sorts first, decodes to exactly
+	// 1.0). Pinned by a cross-era byte-compatibility test that reproduces the
+	// legacy bytes for interior weights.
+	var w uint32
+	switch {
+	case weight >= 1.0:
+		w = math.MaxUint32
+	case weight <= 0:
+		w = 0
+	default:
+		w = uint32(weight * float32(math.MaxUint32)) // legacy expression: byte-identical on (0,1)
+	}
 	c := uint32(math.MaxUint32) - w
 	var buf [4]byte
 	binary.BigEndian.PutUint32(buf[:], c)

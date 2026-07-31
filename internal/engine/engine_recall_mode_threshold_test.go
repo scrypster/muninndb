@@ -154,14 +154,28 @@ func TestActivate_ACTRVaultDefaultRecallMode_PresetThresholdUnchanged(t *testing
 	})
 	require.NoError(t, err)
 
-	require.Equal(t, len(explicitResp.Activations), len(zeroResp.Activations),
+	// SET comparison, deliberately order-insensitive. The WeightComplement(1.0)
+	// fix made full-weight association edges readable for the first time, so a
+	// recall's in-memory session learning (the activation log feeding
+	// phase4/4.5 boosts — recorded unconditionally, in every mode) now re-ranks
+	// the NEXT call: consecutive equivalent calls return the same candidate SET
+	// in shifting order ("strengthens with use", finally functioning; verified
+	// with a three-run probe — identical IDs, rotated). The property this test
+	// protects (#704: zero resolves to the preset's explicit spelling) lives in
+	// the SET — a preset failing to apply changes threshold/hops and therefore
+	// membership — so order and score identity, which were only ever true while
+	// full-weight learning was being destroyed on write, are no longer asserted.
+	//
+	// Set equality alone would be a WEAK guard (review finding: a resolution
+	// bug that changes only score-affecting parameters could slip through if no
+	// fixture candidate happens to straddle the two thresholds). It is not
+	// alone: the resolution function itself is pinned exhaustively at unit
+	// level in recall_mode_preset_test.go (threshold applies on ACT-R, abstains
+	// under rrf, hops apply when unset, caller-explicit always wins, scalar
+	// fill rules). This end-to-end set check guards the WIRING; the unit pins
+	// guard the RESOLUTION.
+	require.ElementsMatch(t, idsOf(explicitResp), idsOf(zeroResp),
 		"ACT-R vault-default mode must resolve to the preset's explicit equivalent — #704 must not touch non-rrf vaults")
-	for i := range zeroResp.Activations {
-		require.Equal(t, explicitResp.Activations[i].ID, zeroResp.Activations[i].ID,
-			"result order/identity at index %d must be unchanged for the ACT-R path", i)
-		require.InDelta(t, explicitResp.Activations[i].Score, zeroResp.Activations[i].Score, 1e-9,
-			"score at index %d must be unchanged for the ACT-R path", i)
-	}
 	require.NotEmpty(t, zeroResp.Activations, "sanity: the ACT-R control fixture must return results at all")
 }
 
@@ -203,14 +217,9 @@ func TestActivate_ACTRExplicitWireMode_AppliesPreset(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.Equal(t, len(explicitResp.Activations), len(modeResp.Activations),
+	// Set comparison — see the sibling test's comment for the full story.
+	require.ElementsMatch(t, idsOf(explicitResp), idsOf(modeResp),
 		"explicit wire Mode=deep must resolve to deep's explicit equivalent")
-	for i := range modeResp.Activations {
-		require.Equal(t, explicitResp.Activations[i].ID, modeResp.Activations[i].ID,
-			"result order/identity at index %d must match the explicit-equivalent call", i)
-		require.InDelta(t, explicitResp.Activations[i].Score, modeResp.Activations[i].Score, 1e-9,
-			"score at index %d must match the explicit-equivalent call", i)
-	}
 	require.NotEmpty(t, modeResp.Activations, "sanity: the fixture must return results at all")
 }
 
@@ -269,4 +278,13 @@ func TestActivate_ACTRExplicitSemanticMode_MatchesStampedEquivalent(t *testing.T
 		require.InDelta(t, explicitResp.Activations[i].Score, modeResp.Activations[i].Score, 1e-9,
 			"score at index %d must match the stamped-equivalent call", i)
 	}
+}
+
+// idsOf extracts activation IDs for order-insensitive set comparison.
+func idsOf(r *mbp.ActivateResponse) []string {
+	out := make([]string, len(r.Activations))
+	for i, a := range r.Activations {
+		out[i] = a.ID
+	}
+	return out
 }
