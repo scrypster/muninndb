@@ -3857,7 +3857,11 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 	if err := e.refuseAppend(ctx); err != nil {
 		return nil, err
 	}
-	content := rationale
+	// The body must STATE the decision, not just the reasoning behind it.
+	// Previously content was rationale(+alternatives) only, so every consumer
+	// that reads the body — a recall snippet, an export, a summarizer, a human
+	// — got the argument without ever being told what was decided.
+	content := decision + "\n\nRationale:\n" + rationale
 	if len(alternatives) > 0 {
 		content += "\n---\nAlternatives:\n" + strings.Join(alternatives, "\n")
 	}
@@ -3867,6 +3871,13 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 		Concept: decision,
 		Content: content,
 		Tags:    []string{"decision"},
+		// A decision-recording tool must produce a decision-TYPED memory.
+		// Left unset, MemoryType took the uint8 zero value (fact), which
+		// silently downgraded derived importance from the decision tier (0.6)
+		// to the fact tier (0.4) and hid the record from every type-based
+		// filter — the same silent-downgrade class as #742/#743/#745.
+		MemoryType: uint8(storage.TypeDecision),
+		TypeLabel:  storage.TypeDecision.String(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("decide: write: %w", err)
