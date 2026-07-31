@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
@@ -180,5 +183,28 @@ func TestRecallThresholdFor_MirrorsRecallSurface(t *testing.T) {
 	defer cleanup()
 	if got := eng.recallThresholdFor("some-vault"); got != 0.1 {
 		t.Errorf("recallThresholdFor(ACT-R vault) = %v, want 0.1 (the engine default the MCP surface no longer overrides)", got)
+	}
+}
+
+// The other two branches of the fusion-aware default, pinned so a future edit
+// to one cannot silently drift the mirror for the others. Uses the auth-store
+// path (the same one production vault config takes) rather than a setter the
+// engine does not have.
+func TestRecallThresholdFor_FusionBranches(t *testing.T) {
+	eng, as, _, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+	require.NoError(t, as.SetVaultConfig(auth.VaultConfig{
+		Name: "rrf-vault", Public: true,
+		Plasticity: &auth.PlasticityConfig{ScoringFusion: ptr("rrf")},
+	}))
+	require.NoError(t, as.SetVaultConfig(auth.VaultConfig{
+		Name: "ws-vault", Public: true,
+		Plasticity: &auth.PlasticityConfig{ScoringFusion: ptr("weighted_sum")},
+	}))
+	if got := eng.recallThresholdFor("rrf-vault"); got != 0.001 {
+		t.Errorf("recallThresholdFor(rrf vault) = %v, want 0.001 (#590's mechanism)", got)
+	}
+	if got := eng.recallThresholdFor("ws-vault"); got != 0.5 {
+		t.Errorf("recallThresholdFor(weighted_sum vault) = %v, want 0.5 (the only bar validated against that formula)", got)
 	}
 }

@@ -117,4 +117,15 @@ func TestEvolve_MarkupWithExplicitEntitiesAppends(t *testing.T) {
 		t.Fatalf("explicit entities + markup must yield both (replace already opted into); got %v",
 			eng.gotEntities)
 	}
+	// And the markup-appended entity must carry a RESOLVED type — the pre-fix
+	// code also appended the name, just with Type:"", so a names-only assertion
+	// passes against the old behaviour and pins nothing (re-verification pass,
+	// required change 1). With the fake engine the vault table is empty, so the
+	// resolver's fallback "other" is the correct expectation here.
+	for _, e := range eng.gotEntities {
+		if e.Name == "Tidequill" && e.Type == "" {
+			t.Fatalf("markup-appended entity %q has empty type — the vault-table resolution parity "+
+				"with remember is not wired", e.Name)
+		}
+	}
 }

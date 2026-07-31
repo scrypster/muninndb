@@ -36,10 +36,11 @@ import (
 //	final        = min(raw*scale, 1.0) * Confidence                :1930
 //	DROP if final < req.Threshold                                  :1934
 //
-// The two agent-facing surfaces default an omitted threshold to 0.5
-// (mcp/handlers.go:392); the engine's own
-// fallback is 0.1 (engine.go:2405) and activation's is 0.05
-// (activation/engine.go:548). All three gate the SAME quantity, and that
+// Threshold ownership is centralized in the ENGINE: the MCP surface forwards
+// an omitted threshold as 0 (mcp/handlers.go, like every other transport) and
+// the engine's fusion-aware coerce applies ACT-R 0.1 / weighted_sum 0.5 / rrf
+// 0.001 (engine.go:2405); activation's own last-resort fallback is 0.05
+// (activation/engine.go). All of these gate the SAME quantity, and that
 // quantity is not a measure of "is this memory about the query".
 //
 // PRIVACY: every fixture string is synthetic and authored here.

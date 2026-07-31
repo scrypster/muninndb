@@ -60,9 +60,13 @@ package engine
 //
 // TWO THRESHOLDS — and this one is not cosmetic.
 //
-//	engine .05   activation/engine.go:547, what a library/direct caller gets.
-//	SURFACE .5   mcp/handlers.go:392 (the MCP surface; REST /activate forwards 0 and the engine defaults — rest/server.go:1772 is SUBSCRIBE, a different formula), what every real
-//	             agent gets when it omits `threshold`. TEN TIMES the engine's.
+//	engine .05   activation/engine.go, the last-resort fallback for a direct
+//	             activation caller.
+//	shipped .1   the engine's fusion-aware ACT-R default (engine.go:2405) —
+//	             what every real agent gets when it omits `threshold`, since
+//	             the MCP surface forwards 0 like every other transport. (The
+//	             old 0.5 surface default this arm originally measured was
+//	             removed with the absolute gate.)
 //
 // The surface default is the gate that matters, and it exposes the MISSING-
 // COSINE case: a memory with no embedding yet scores cosine 0, so ContentMatch
@@ -469,11 +473,11 @@ func TestMeasureContentMatchCombiners(t *testing.T) {
 	// 4 combiners x {conf live, conf ablated} x {full-signal, paraphrase}
 	//              x {engine threshold 0.05, SURFACE threshold 0.5}
 	//
-	// The threshold dimension is not cosmetic. Every MCP and REST agent that
-	// omits `threshold` gets 0.1 (mcp/handlers.go:392 (the MCP surface; REST /activate forwards 0 and the engine defaults — rest/server.go:1772 is SUBSCRIBE, a different formula)),
-	// ten times the engine's own default. Measuring only at 0.05 would report
-	// numbers no real agent ever sees, and would hide the fact that the 0.4 FTS
-	// coefficient sits BELOW the surface gate outright.
+	// The threshold dimension is not cosmetic. Every agent that omits
+	// `threshold` gets the ENGINE's fusion-aware ACT-R default of 0.1
+	// (engine.go:2405; the MCP surface forwards 0 like every other transport).
+	// Measuring only at the 0.05 activation fallback would report numbers no
+	// real agent ever sees.
 	combs := []scwCombiner{scwCombLinear, scwCombRawCosine, scwCombNoisyOR, scwCombMax}
 	thresholds := []struct {
 		name string

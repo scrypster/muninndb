@@ -55,12 +55,13 @@ const (
 	// activation/engine.go:547 — the non-RRF default relevance threshold used
 	// when a caller passes no threshold at all (library/direct callers).
 	scwDefaultThreshold = 0.05
-	// THE SURFACE default, which is what every real agent actually gets:
-	// internal/mcp/handlers.go:392 (REST /activate has no surface default; rest/server.go:1772 is SUBSCRIBE)
-	// both default an omitted threshold to 0.5 — TEN TIMES the engine's own
-	// default. This is the gate the 0.4 FTS coefficient has to clear, and
-	// structurally cannot. See TestSCWFTSOnlyMatchIsUnreturnableAtSurfaceDefault.
-	scwSurfaceDefaultThreshold = 0.5
+	// The REMOVED 0.5 surface default. No caller hits this value any more —
+	// the MCP surface forwards 0 and the engine's fusion-aware coerce applies
+	// 0.1 on ACT-R vaults — but the arithmetic it pinned stays load-bearing:
+	// an FTS-only match structurally caps at the 0.4 coefficient, so 0.5 was a
+	// bar no lexical-only match could EVER clear, which is half of why it had
+	// to go. See TestSCWFTSOnlyMatchIsUnreturnableAtRemovedDefault.
+	scwRemovedSurfaceThreshold = 0.5
 	// embed.noiseBaselineRegistry["bge-small-en-v1.5"], plugin/embed/baseline.go:56.
 	scwBaselineBGESmall = 0.520
 )
@@ -420,7 +421,7 @@ func TestSCWConfidenceIsAMultiplier(t *testing.T) {
 	}
 }
 
-// TestSCWFTSOnlyMatchIsUnreturnableAtSurfaceDefault is the MISSING-COSINE case
+// TestSCWFTSOnlyMatchIsUnreturnableAtRemovedDefault is the MISSING-COSINE case
 // — the same defect as the paraphrase cap, from the opposite direction. A
 // memory whose embedding has not landed yet scores cosine 0, so semCal is 0 and
 // ContentMatch = 0.4*fts, which is capped at 0.4 at a PERFECT lexical match.
@@ -436,7 +437,7 @@ func TestSCWConfidenceIsAMultiplier(t *testing.T) {
 // Note the cross-surface split this exposes: at the ENGINE default (0.05) the
 // same candidate is returned fine. A library or direct caller sees the memory;
 // an MCP agent does not.
-func TestSCWFTSOnlyMatchIsUnreturnableAtSurfaceDefault(t *testing.T) {
+func TestSCWFTSOnlyMatchIsUnreturnableAtRemovedDefault(t *testing.T) {
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	linear := scwArmSpec{Comb: scwCombLinear, UsePrior: true, UseConfidence: true}
 
@@ -451,10 +452,10 @@ func TestSCWFTSOnlyMatchIsUnreturnableAtSurfaceDefault(t *testing.T) {
 		t.Fatalf("ContentMatch at cosine 0 / perfect FTS = %.6f, want exactly 0.4", cm)
 	}
 
-	atSurface, _, _, dropSurface := scwScoreQuery([]scwInput{unindexed}, linear, scwBaselineBGESmall, scwSurfaceDefaultThreshold, now)
+	atSurface, _, _, dropSurface := scwScoreQuery([]scwInput{unindexed}, linear, scwBaselineBGESmall, scwRemovedSurfaceThreshold, now)
 	if !dropSurface[0] {
 		t.Fatalf("a perfect lexical match scored %.5f and survived the %.2f surface threshold — "+
-			"if this now passes, the surface default or the FTS coefficient changed", atSurface[0], scwSurfaceDefaultThreshold)
+			"if this now passes, the surface default or the FTS coefficient changed", atSurface[0], scwRemovedSurfaceThreshold)
 	}
 
 	atEngine, _, _, dropEngine := scwScoreQuery([]scwInput{unindexed}, linear, scwBaselineBGESmall, scwDefaultThreshold, now)
@@ -462,13 +463,13 @@ func TestSCWFTSOnlyMatchIsUnreturnableAtSurfaceDefault(t *testing.T) {
 		t.Fatalf("the same candidate was dropped at the ENGINE default too (%.5f) — the cross-surface split is gone", atEngine[0])
 	}
 	t.Logf("cosine 0, FTS 1.00 (perfect lexical, no embedding yet): final %.4f | MCP/REST gate %.2f -> DROPPED | engine gate %.2f -> returned",
-		atSurface[0], scwSurfaceDefaultThreshold, scwDefaultThreshold)
+		atSurface[0], scwRemovedSurfaceThreshold, scwDefaultThreshold)
 
 	// The absence-of-evidence combiners return it, because a missing estimator
 	// stops being scored as a zero.
 	for _, c := range []scwCombiner{scwCombNoisyOR, scwCombMax} {
 		alt := scwArmSpec{Comb: c, UsePrior: true, UseConfidence: true}
-		f, _, _, dropped := scwScoreQuery([]scwInput{unindexed}, alt, scwBaselineBGESmall, scwSurfaceDefaultThreshold, now)
+		f, _, _, dropped := scwScoreQuery([]scwInput{unindexed}, alt, scwBaselineBGESmall, scwRemovedSurfaceThreshold, now)
 		if dropped[0] {
 			t.Errorf("%s also dropped the perfect lexical match (final %.4f) — it does not fix the missing-cosine case", c, f[0])
 		} else {
@@ -512,15 +513,15 @@ func TestSCWReconstructsObservedLiveScore(t *testing.T) {
 	}
 
 	preEmbed := scwWeightFTS * impliedFTS
-	if preEmbed >= scwSurfaceDefaultThreshold {
+	if preEmbed >= scwRemovedSurfaceThreshold {
 		t.Fatalf("pre-embedding score %.4f would have cleared the %.2f surface gate — "+
-			"that contradicts the reported zero-result reproduction", preEmbed, scwSurfaceDefaultThreshold)
+			"that contradicts the reported zero-result reproduction", preEmbed, scwRemovedSurfaceThreshold)
 	}
 	t.Logf("live observation reconstructed: semCal %.4f, implied FTS coverage %.4f, final %.3f",
 		semCal, impliedFTS, observedFinal)
 	t.Logf("SAME candidate one moment earlier (no embedding): %.4f — below the %.2f surface gate. "+
 		"Zero results -> %.3f, with nothing changed but the embedding landing.",
-		preEmbed, scwSurfaceDefaultThreshold, observedFinal)
+		preEmbed, scwRemovedSurfaceThreshold, observedFinal)
 }
 
 // TestSCWPriorDynamicRange records the secondary structural fact: with Hebbian
