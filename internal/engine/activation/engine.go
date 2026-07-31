@@ -1915,9 +1915,13 @@ func (e *ActivationEngine) phase6Score(
 			for _, cc := range cgdnCands {
 				r := math.Pow(cc.activation, n) / denom
 				final := r * cc.components.Confidence
+				// Absolute, cross-query-comparable aboutness (see the gate below).
+				absolute := math.Min(math.Min(cc.components.Raw, cc.components.ContentMatch), 1.0) *
+					cc.components.Confidence
+				cc.components.AbsoluteScore = absolute
 				// Tag-filter matches bypass the relevance threshold — the filter
 				// defines the set (see the RRF path above for the full rationale).
-				if final < req.Threshold && !cc.inTagPool {
+				if absolute < req.Threshold && !cc.inTagPool {
 					continue
 				}
 				cc.components.Raw = r
@@ -2045,7 +2049,11 @@ func (e *ActivationEngine) phase6Score(
 			cc.components.AbsoluteScore = absolute
 			// Tag-filter matches bypass the relevance threshold — the filter
 			// defines the set (see the RRF path above for the full rationale).
-			if final < req.Threshold && !cc.inTagPool {
+			// GATE ON `absolute`, NOT `final`: `final` is divided by this query's
+			// max, which pins the argmax to exactly its Confidence and so exempts
+			// the best candidate of ANY query — including an unanswerable one —
+			// from abstention. `final` still ORDERS the results.
+			if absolute < req.Threshold && !cc.inTagPool {
 				continue
 			}
 			cc.components.Raw = raw
@@ -2069,6 +2077,12 @@ func (e *ActivationEngine) phase6Score(
 		}
 		components := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
 		final := components.Final
+		// Absolute score is reported here for parity, but this LEGACY
+		// weighted-sum path (DisableACTR) is NOT gated on it: ContentMatch is the
+		// ACT-R aboutness term, and this path does not compute a comparable
+		// quantity — gating on it would silently change legacy scoring semantics.
+		// Same reasoning as the RRF path above.
+		components.AbsoluteScore = math.Min(math.Min(components.Raw, components.ContentMatch), 1.0) * components.Confidence
 		// Tag-filter matches bypass the relevance threshold — the filter
 		// defines the set (see the RRF path above for the full rationale).
 		if final < req.Threshold && !c.inTagPool {

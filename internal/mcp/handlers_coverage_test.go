@@ -807,9 +807,22 @@ func TestHandleListDeleted_LimitBelowMinimum(t *testing.T) {
 }
 
 func TestHandleRecall_BalancedModeKeepsHistoricalDefault(t *testing.T) {
-	// "balanced" means engine defaults — it carries no preset threshold, so
-	// the surface's historical 0.5 default stands (a bare mode must not
-	// silently drop the default to the engine's 0.1 coerce).
+	// "balanced" means engine defaults — it carries no preset threshold, so the
+	// surface default stands. That default MOVED from 0.5 to 0.1 when the
+	// abstention gate was corrected to compare against the ABSOLUTE score
+	// instead of the per-query max-normalised one.
+	//
+	// Why it had to move: ContentMatch is structurally capped at w_sem (0.6) for
+	// a semantic-only match and w_fts (0.4) for a lexical-only one, so no honest
+	// absolute score reaches 0.5 without near-verbatim wording (cosine >= 0.92).
+	// Recall worked at 0.5 ONLY because the 1/maxRaw rescale inflated the argmax
+	// to 1.0 — the same line that exempted the best candidate of any query,
+	// including an unanswerable one, from abstention. 0.1 is the scale the score
+	// is actually expressed on, and the value COG-26's b=0.520 was calibrated
+	// against (noise ceiling at ContentMatch 0.095, just under a 0.1 gate).
+	//
+	// This test still guards the original property: a bare mode must not pick up
+	// a preset's threshold. Only the number it defaults to changed.
 	eng := &modePresetThresholdCapturingEngine{}
 	srv := newTestServerWith(eng)
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":["test"],"mode":"balanced"}}}`
@@ -818,7 +831,8 @@ func TestHandleRecall_BalancedModeKeepsHistoricalDefault(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	if eng.lastThreshold != 0.5 {
-		t.Errorf("balanced-mode threshold = %v, want the historical 0.5 default", eng.lastThreshold)
+	if eng.lastThreshold != 0.1 {
+		t.Errorf("balanced-mode threshold = %v, want the surface default 0.1 (the scale the absolute "+
+			"score is expressed on); a bare mode must still not inherit a preset threshold", eng.lastThreshold)
 	}
 }

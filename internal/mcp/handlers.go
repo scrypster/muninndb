@@ -393,7 +393,7 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	// 0: the mode's preset replaces this surface's historical 0.5 default, and
 	// resolving the preset is the engine's decision (#704). An explicit caller
 	// threshold is never modified.
-	threshold := float32(0.5)
+	threshold := float32(0.1)
 	_, thresholdSet := args["threshold"]
 	if !thresholdSet {
 		if mode != "" && mode != "balanced" {

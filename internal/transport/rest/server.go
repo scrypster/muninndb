@@ -1769,7 +1769,7 @@ func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	vault := ctxVault(r)
 	contextStrs := q["context"]
 
-	threshold := float32(0.5)
+	threshold := float32(0.1)
 	if v := q.Get("threshold"); v != "" {
 		if f, err := strconv.ParseFloat(v, 32); err == nil {
 			threshold = float32(f)

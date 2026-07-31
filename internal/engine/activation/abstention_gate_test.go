@@ -346,51 +346,19 @@ func TestAbstention_Unanswerable_MaxNormaliseExemptsTheArgmax(t *testing.T) {
 	res := f.run(t, query, abSurfaceThreshold)
 	logResults(t, res)
 
-	if len(res.Activations) == 0 {
-		t.Fatalf("the argmax-exemption defect no longer reproduces for %q — invert this test to assert "+
-			"abstention and drop the tripwire framing", query)
+	// FIXED: the gate is now applied to the ABSOLUTE score, so the per-query
+	// 1/maxRaw rescale can no longer exempt the argmax. No budget was ever
+	// stored, so the honest answer is nothing at all.
+	if len(res.Activations) != 0 {
+		top := res.Activations[0]
+		t.Fatalf("UNANSWERABLE query %q returned %d result(s); top score %.4f. Nothing about a budget "+
+			"was stored, so recall must abstain. A non-empty answer here means the gate is once again "+
+			"being applied to a query-relative score, which pins the argmax to ~1.0 and exempts the "+
+			"best candidate of ANY query from abstention.", query, len(res.Activations), top.Score)
 	}
-	top := res.Activations[0]
-	if math.Abs(top.Score-1.0) > 1e-9 {
-		t.Fatalf("expected the argmax to be pinned to exactly 1.0 by the rescale, got %.6f — the "+
-			"mechanism in the header has changed and the diagnosis must be re-derived", top.Score)
-	}
-	t.Logf("DEFECT (shipped): UNANSWERABLE query %q returns %d result(s) at threshold %.2f. Top hit "+
-		"scored EXACTLY 1.0000 — no budget was ever stored. Its ContentMatch is only %.4f; the score "+
-		"reached 1.0 because the per-query 1/maxRaw rescale (activation/engine.go:1926) pins the argmax "+
-		"to exactly 1.0 BEFORE the threshold is applied, so the best candidate of ANY query is exempt "+
-		"from abstention no matter how weak its evidence.",
-		query, len(res.Activations), abSurfaceThreshold, 0.6*abSemCal(0.596)+0.4*0.9)
-
-	// The fix, pinned: the absolute score for this candidate is below the gate,
-	// so gating on it abstains — which is what the measured candidate arm does.
-	if top.Components.AbsoluteScore >= abSurfaceThreshold {
-		t.Errorf("the candidate absolute gate would ALSO return this irrelevant hit "+
-			"(AbsoluteScore %.4f >= %.2f) — it does not fix direction (a) and the analysis is wrong",
-			top.Components.AbsoluteScore, abSurfaceThreshold)
-	}
-	t.Logf("  candidate gate: AbsoluteScore %.4f < %.2f -> would abstain",
-		top.Components.AbsoluteScore, abSurfaceThreshold)
+	t.Logf("unanswerable query %q correctly returns 0 results at threshold %.2f", query, abSurfaceThreshold)
 }
 
-// Case A2 — THE PRIOR DEFEATS COG-26's OWN CALIBRATION.
-//
-// COG-26 derived b=0.520 so that a candidate at bge-small's measured
-// out-of-domain noise ceiling (cosine 0.596) lands at ContentMatch 0.0950,
-// just under the 0.1 gate, and abstains. That derivation is stated on
-// CONTENTMATCH — it is asserted that way in
-// engine_scoring_weights_model_test.go's TestSCWAlternativesRaiseFalsePositivesToo.
-//
-// But production does not gate ContentMatch. It gates
-// ContentMatch x prior x Confidence (activation/engine.go:1930-1934), and the
-// prior ranges from ~0.03 (cold) to 3.24+ (Hebbian-hot). So the gate is off
-// from its own derivation by up to 32x in the permissive direction: the exact
-// same noise-ceiling candidate scores 0.0950 when cold and 0.3083 when hot,
-// and 0.3083 sails through the 0.1 gate COG-26 chose to stop it.
-//
-// A memory the agent touched recently is therefore held to a THIRTY-TIMES
-// LOWER relevance bar than one it has not. That is the abstention inversion
-// at its root: recency is allowed to substitute for aboutness.
 func TestAbstention_Unanswerable_PriorDefeatsTheCalibratedFloor(t *testing.T) {
 	const noiseCeilingCos = 0.596 // COG-26's measured out-of-domain ceiling
 
@@ -415,39 +383,22 @@ func TestAbstention_Unanswerable_PriorDefeatsTheCalibratedFloor(t *testing.T) {
 	hotRes := hot.run(t, "seating protocol at the convention of retired sundials", abEngineThreshold)
 	logResults(t, hotRes)
 
-	if len(hotRes.Activations) == 0 {
-		t.Fatalf("the recency-substitutes-for-relevance defect no longer reproduces — invert this test")
+	// FIXED: the ACT-R prior can no longer carry a content-irrelevant memory over
+	// the bar. It still PROMOTES within the results, but the gate is applied to the
+	// absolute aboutness score, so a recently-touched memory faces the same
+	// relevance bar as an untouched one — the cold control above and this hot case
+	// must now agree.
+	if len(hotRes.Activations) != 0 {
+		t.Fatalf("a HOT but content-irrelevant memory returned %d result(s) while the identical COLD "+
+			"one correctly abstained — recency is substituting for relevance again. The gate must be "+
+			"applied to the absolute score, not to one the ACT-R prior has already multiplied "+
+			"(the prior ranges ~0.03 cold to 3.24+ hot, i.e. up to a 32x lower effective bar).",
+			len(hotRes.Activations))
 	}
-	hot0 := hotRes.Activations[0]
-	t.Logf("DEFECT (shipped): the SAME noise-ceiling candidate (cosine %.3f, ContentMatch %.4f) abstains "+
-		"when cold but is RETURNED at score %.4f when Hebbian-hot. Recency is substituting for relevance: "+
-		"the ACT-R prior multiplies ContentMatch by up to %.2fx before the gate sees it "+
-		"(activation/engine.go:2273 and the gate below it), so COG-26's floor — derived on ContentMatch — "+
-		"is not the floor production enforces.",
-		noiseCeilingCos, 0.6*abSemCal(noiseCeilingCos), hot0.Score,
-		math.Log1p(math.Exp(math.Log(math.Exp(1+math.Log(2))-1)+4))/(1+math.Log(2)))
-
-	// The fix, pinned: gating on the absolute score makes hot and cold agree,
-	// which is exactly what "the floor is on ContentMatch" means.
-	if hot0.Components.AbsoluteScore >= abEngineThreshold {
-		t.Errorf("the candidate absolute gate would still admit the hot noise-ceiling candidate "+
-			"(AbsoluteScore %.4f >= %.2f) — recency would still be buying relevance",
-			hot0.Components.AbsoluteScore, abEngineThreshold)
-	}
-	if math.Abs(hot0.Components.AbsoluteScore-0.6*abSemCal(noiseCeilingCos)) > 1e-4 {
-		t.Errorf("AbsoluteScore %.6f != ContentMatch %.6f for a unit-confidence candidate — the absolute "+
-			"score is not reporting the quantity COG-26's calibration is stated on",
-			hot0.Components.AbsoluteScore, 0.6*abSemCal(noiseCeilingCos))
-	}
-	t.Logf("  candidate gate: AbsoluteScore %.4f < %.2f -> hot and cold agree, as COG-26 intended",
-		hot0.Components.AbsoluteScore, abEngineThreshold)
+	t.Logf("hot and cold content-irrelevant candidates both abstain at threshold %.2f — the prior no "+
+		"longer substitutes for relevance", abEngineThreshold)
 }
 
-// TestAbstention_EmptyResultIsDistinguishableFromAnUnrunQuery is the honesty
-// requirement stated in the brief: an empty result must never be
-// indistinguishable from a query that never ran. A caller receiving zero
-// activations today has no field to tell it "the engine looked and found
-// nothing above the bar" apart from "the engine did not look".
 func TestAbstention_EmptyResultIsDistinguishableFromAnUnrunQuery(t *testing.T) {
 	f := newABFixture(t, []abDoc{
 		{name: "unrelated", concept: "Deployment window policy",
