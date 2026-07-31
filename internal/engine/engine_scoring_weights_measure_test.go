@@ -58,6 +58,37 @@ package engine
 //	             with zero lexical overlap. This is the condition the 0.6 cap
 //	             is about, and no paraphrase corpus is needed to produce it.
 //
+// TWO THRESHOLDS — and this one is not cosmetic.
+//
+//	engine .05   activation/engine.go:547, what a library/direct caller gets.
+//	SURFACE .5   mcp/handlers.go:392 and rest/server.go:1772, what every real
+//	             agent gets when it omits `threshold`. TEN TIMES the engine's.
+//
+// The surface default is the gate that matters, and it exposes the MISSING-
+// COSINE case: a memory with no embedding yet scores cosine 0, so ContentMatch
+// = 0.4*fts <= 0.4 < 0.5, and is UNRETURNABLE through MCP or REST at defaults
+// no matter how perfect the lexical match. That is the same defect as the
+// paraphrase cap from the opposite direction — a missing estimator scored as a
+// zero rather than as absence of evidence — and it is pinned in
+// engine_scoring_weights_model_test.go. Measuring only at 0.05 would report
+// numbers no agent ever sees.
+//
+// THE INDEXING-LAG CONFOUND (third in the list, after confidence collapse and
+// the 0.6 cap). A corpus that is still being embedded contaminates everything:
+// unembedded engrams are invisible to the full pipeline and unscoreable by the
+// raw-cosine control, so the pipeline looks artificially bad and the control
+// artificially good. This driver PROVES settlement rather than assuming it —
+// it counts active engrams with no stored embedding, reports the fraction, and
+// REFUSES TO RUN above 1% (override: MUNINN_SCOREW_MAX_UNEMBEDDED_FRAC).
+//
+// Exposure, for reference: the retroactive embed processor polls every 3s and
+// backs off exponentially to a 3-MINUTE ceiling when idle
+// (internal/plugin/retroactive.go:25,36,188-192). Its notifyCh wake path exists
+// but NO WRITE PATH CALLS Notify() — the only caller is the processor itself
+// when it hits maxBatchSize (retroactive.go:444). So on a vault that has been
+// quiet for ~3 minutes, a newly-written memory can wait up to another ~3
+// minutes for its embedding, not the ~3s seen on a busy vault.
+//
 // LABELS ARE MECHANICAL AND ASSIGNED BEFORE SCORING
 //
 //	answerable   query text = a sampled engram's own summary; the gold
@@ -86,6 +117,11 @@ package engine
 //     currency annotation, no time filters. Every arm sees the same pool, so
 //     the COMPARISON is fair; the ABSOLUTE numbers are not "what recall
 //     returns".
+//   - Unembedded engrams are EXCLUDED from the pool (they cannot be scored by
+//     the raw-cosine control at all), and their count is reported. So the
+//     driver measures the combiners on a settled corpus; it does NOT measure
+//     the missing-cosine case itself — that one is pinned analytically in
+//     engine_scoring_weights_model_test.go, where it is exact.
 //   - Hebbian and PAS-transition boosts are 0 in every arm. Those are the
 //     cognition layer's strongest arguments for itself and they are absent, so
 //     the driver's bias runs AGAINST the parts of the layer it cannot see.
@@ -106,7 +142,7 @@ package engine
 // Optional: MUNINN_SCOREW_QUERIES (default 100), MUNINN_SCOREW_POOL (50),
 // MUNINN_SCOREW_MAX_ENGRAMS (5000), MUNINN_SCOREW_SEED (1),
 // MUNINN_SCOREW_BASELINE (0.520), MUNINN_SCOREW_MIN_CONFIDENCE (0 = keep all),
-// MUNINN_SCOREW_CONF_SUSPECT (0.5).
+// MUNINN_SCOREW_CONF_SUSPECT (0.5), MUNINN_SCOREW_MAX_UNEMBEDDED_FRAC (0.01).
 
 import (
 	"context"
@@ -135,7 +171,15 @@ const (
 	envSCWBaseline = "MUNINN_SCOREW_BASELINE"
 	envSCWMinConf  = "MUNINN_SCOREW_MIN_CONFIDENCE"
 	envSCWSuspect  = "MUNINN_SCOREW_CONF_SUSPECT"
+	// envSCWMaxUnembedded overrides the settled-corpus guard. See the
+	// INDEXING-LAG CONFOUND block in the driver body.
+	envSCWMaxUnembedded = "MUNINN_SCOREW_MAX_UNEMBEDDED_FRAC"
 )
+
+// maxUnembeddedFrac is the default ceiling on the fraction of active engrams
+// with no stored embedding. Above this the corpus has not settled and the
+// driver refuses to produce a number.
+const maxUnembeddedFrac = 0.01
 
 // scwNonsenseQueries are the UNANSWERABLE probes. Every one is synthetic,
 // authored here, and deliberately shaped like a plausible memory query
@@ -288,6 +332,7 @@ func TestMeasureContentMatchCombiners(t *testing.T) {
 	baseline := scwEnvFloat(t, envSCWBaseline, scwBaselineBGESmall)
 	minConf := scwEnvFloat(t, envSCWMinConf, 0)
 	suspectConf := scwEnvFloat(t, envSCWSuspect, 0.5)
+	maxUnembedded := scwEnvFloat(t, envSCWMaxUnembedded, maxUnembeddedFrac)
 	rng := rand.New(rand.NewSource(int64(scwEnvInt(t, envSCWSeed, 1))))
 
 	db, err := storage.OpenPebble(filepath.Join(dataDir, "pebble"), storage.DefaultOptions())
@@ -332,13 +377,21 @@ func TestMeasureContentMatchCombiners(t *testing.T) {
 	var nodes []node
 	byID := map[storage.ULID]int{}
 	confHist := map[string]int{}
-	suspectCount, excludedCount := 0, 0
+	suspectCount, excludedCount, unembedded, totalActive := 0, 0, 0, 0
 	for _, e := range engs {
 		if e == nil {
 			continue
 		}
+		totalActive++
 		emb, err := store.GetEmbedding(ctx, ws, e.ID)
 		if err != nil || len(emb) == 0 {
+			// INDEXING-LAG CONFOUND: an engram with no stored embedding scores
+			// cosine 0 in the live pipeline, so its ContentMatch is capped at
+			// 0.4 and it is unreturnable at the 0.5 surface gate. Counted and
+			// reported below; excluded from the pool because a candidate with
+			// no vector cannot be scored by the raw-cosine control at all, and
+			// silently keeping it would flatter that arm.
+			unembedded++
 			continue
 		}
 		conf := float64(e.Confidence)
@@ -382,6 +435,26 @@ func TestMeasureContentMatchCombiners(t *testing.T) {
 
 	t.Logf("vault: %d active engrams, %d with embeddings | pool=%d queries=%d baseline=%.3f",
 		len(engs), len(nodes), poolN, nQueries, baseline)
+
+	// --- INDEXING-LAG CONFOUND: prove the corpus has settled ----------------
+	// A freshly-seeded or still-catching-up corpus makes the full pipeline look
+	// artificially bad and the raw-cosine control artificially good, because
+	// unembedded engrams are invisible to the former and unscoreable by the
+	// latter. This driver PROVES settlement rather than assuming it: it counts
+	// engrams with no stored embedding and refuses to run if the fraction is
+	// non-trivial.
+	unembeddedFrac := float64(unembedded) / math.Max(float64(totalActive), 1)
+	t.Logf("EMBEDDING COVERAGE: %d/%d active engrams have a stored embedding; %d (%.2f%%) do NOT",
+		totalActive-unembedded, totalActive, unembedded, 100*unembeddedFrac)
+	if unembeddedFrac > maxUnembedded {
+		t.Fatalf("REFUSING to measure: %.2f%% of active engrams have no embedding (limit %.2f%%).\n"+
+			"The retroactive embed processor has not caught up, so this corpus has NOT settled. "+
+			"Any scoring number taken now is contaminated: unembedded engrams score cosine 0, cap at "+
+			"ContentMatch 0.4, and are unreturnable at the 0.5 surface threshold regardless of combiner.\n"+
+			"Wait for the processor to drain (it polls every 3s, backing off to 3min when idle, and NO "+
+			"write path calls Notify()), then re-run. Override with %s only if you know why.",
+			100*unembeddedFrac, 100*maxUnembedded, envSCWMaxUnembedded)
+	}
 	t.Logf("CONFIDENCE (pool-wide, BEFORE any exclusion): <0.2:%d  0.2-0.5:%d  0.5-0.8:%d  >=0.8:%d | below suspect %.2f: %d",
 		confHist["<0.2"], confHist["0.2-0.5"], confHist["0.5-0.8"], confHist[">=0.8"], suspectConf, suspectCount)
 	if minConf > 0 {
@@ -392,12 +465,28 @@ func TestMeasureContentMatchCombiners(t *testing.T) {
 			"the conf-on numbers must not be quoted. Set %s to also exclude.", envSCWMinConf)
 	}
 
-	// --- the design: 4 combiners x {conf on, conf off} x {full-signal, paraphrase}
+	// --- the design ---------------------------------------------------------
+	// 4 combiners x {conf live, conf ablated} x {full-signal, paraphrase}
+	//              x {engine threshold 0.05, SURFACE threshold 0.5}
+	//
+	// The threshold dimension is not cosmetic. Every MCP and REST agent that
+	// omits `threshold` gets 0.5 (mcp/handlers.go:392, rest/server.go:1772),
+	// ten times the engine's own default. Measuring only at 0.05 would report
+	// numbers no real agent ever sees, and would hide the fact that the 0.4 FTS
+	// coefficient sits BELOW the surface gate outright.
 	combs := []scwCombiner{scwCombLinear, scwCombRawCosine, scwCombNoisyOR, scwCombMax}
+	thresholds := []struct {
+		name string
+		v    float64
+	}{
+		{"engine .05", scwDefaultThreshold},
+		{"SURFACE .5", scwSurfaceDefaultThreshold},
+	}
 	type armKey struct {
 		comb    scwCombiner
 		useConf bool
 		para    bool
+		thr     int
 	}
 	cells := map[armKey]*scwCell{}
 	specOf := func(k armKey) scwArmSpec {
@@ -411,7 +500,9 @@ func TestMeasureContentMatchCombiners(t *testing.T) {
 	for _, c := range combs {
 		for _, uc := range []bool{true, false} {
 			for _, pa := range []bool{false, true} {
-				cells[armKey{c, uc, pa}] = &scwCell{}
+				for ti := range thresholds {
+					cells[armKey{c, uc, pa, ti}] = &scwCell{}
+				}
 			}
 		}
 	}
@@ -492,32 +583,34 @@ func TestMeasureContentMatchCombiners(t *testing.T) {
 			}
 			for _, c := range combs {
 				for _, uc := range []bool{true, false} {
-					k := armKey{c, uc, para}
-					cell := cells[k]
-					final, _, _, dropped := scwScoreQuery(p, specOf(k), baseline, scwDefaultThreshold, now)
-					ranked := scwRanked(final, dropped)
-					if unanswerable {
-						cell.unanswered++
+					for ti, thr := range thresholds {
+						k := armKey{c, uc, para, ti}
+						cell := cells[k]
+						final, _, _, dropped := scwScoreQuery(p, specOf(k), baseline, thr.v, now)
+						ranked := scwRanked(final, dropped)
+						if unanswerable {
+							cell.unanswered++
+							if len(ranked) > 0 {
+								cell.falsePos++
+								cell.fpDepthSum += float64(len(ranked))
+							}
+							continue
+						}
+						cell.answerable++
+						cell.ndcgSum += ndcgAt5(ranked, gold)
+						for _, idx := range ranked {
+							if idx == gold {
+								cell.goldFound++
+								break
+							}
+						}
 						if len(ranked) > 0 {
-							cell.falsePos++
-							cell.fpDepthSum += float64(len(ranked))
+							if ranked[0] == gold {
+								cell.goldTop1++
+							}
+							cell.top1ConfSum += p[ranked[0]].Confidence
+							cell.top1Count++
 						}
-						continue
-					}
-					cell.answerable++
-					cell.ndcgSum += ndcgAt5(ranked, gold)
-					for _, idx := range ranked {
-						if idx == gold {
-							cell.goldFound++
-							break
-						}
-					}
-					if len(ranked) > 0 {
-						if ranked[0] == gold {
-							cell.goldTop1++
-						}
-						cell.top1ConfSum += p[ranked[0]].Confidence
-						cell.top1Count++
 					}
 				}
 			}
@@ -579,38 +672,40 @@ func TestMeasureContentMatchCombiners(t *testing.T) {
 		if para {
 			cond = "PARAPHRASE (FTS forced to 0 — the condition the 0.6 cap is about)"
 		}
-		t.Logf("")
-		t.Logf("--- condition: %s ---", cond)
-		t.Logf("%-16s %-9s %8s %10s %10s %8s %10s %10s",
-			"combiner", "conf", "NDCG@5", "gold-found", "gold-top1", "FPR", "FP-depth", "top1-conf")
-		for _, c := range combs {
-			for _, uc := range []bool{true, false} {
-				cell := cells[armKey{c, uc, para}]
-				if cell.answerable == 0 {
-					continue
-				}
-				a := float64(cell.answerable)
-				fpr, depth := 0.0, 0.0
-				if cell.unanswered > 0 {
-					fpr = float64(cell.falsePos) / float64(cell.unanswered)
-					if cell.falsePos > 0 {
-						depth = cell.fpDepthSum / float64(cell.falsePos)
+		for ti, thr := range thresholds {
+			t.Logf("")
+			t.Logf("--- condition: %s | threshold: %s ---", cond, thr.name)
+			t.Logf("%-16s %-9s %8s %10s %10s %8s %10s %10s",
+				"combiner", "conf", "NDCG@5", "gold-found", "gold-top1", "FPR", "FP-depth", "top1-conf")
+			for _, c := range combs {
+				for _, uc := range []bool{true, false} {
+					cell := cells[armKey{c, uc, para, ti}]
+					if cell.answerable == 0 {
+						continue
 					}
+					a := float64(cell.answerable)
+					fpr, depth := 0.0, 0.0
+					if cell.unanswered > 0 {
+						fpr = float64(cell.falsePos) / float64(cell.unanswered)
+						if cell.falsePos > 0 {
+							depth = cell.fpDepthSum / float64(cell.falsePos)
+						}
+					}
+					conf := 0.0
+					if cell.top1Count > 0 {
+						conf = cell.top1ConfSum / float64(cell.top1Count)
+					}
+					label := "live"
+					if !uc {
+						label = "ABLATED"
+					}
+					t.Logf("%-16s %-9s %8.4f %9.1f%% %9.1f%% %7.1f%% %10.1f %10.3f",
+						c.String(), label,
+						cell.ndcgSum/a,
+						100*float64(cell.goldFound)/a,
+						100*float64(cell.goldTop1)/a,
+						100*fpr, depth, conf)
 				}
-				conf := 0.0
-				if cell.top1Count > 0 {
-					conf = cell.top1ConfSum / float64(cell.top1Count)
-				}
-				label := "live"
-				if !uc {
-					label = "ABLATED"
-				}
-				t.Logf("%-16s %-9s %8.4f %9.1f%% %9.1f%% %7.1f%% %10.1f %10.3f",
-					c.String(), label,
-					cell.ndcgSum/a,
-					100*float64(cell.goldFound)/a,
-					100*float64(cell.goldTop1)/a,
-					100*fpr, depth, conf)
 			}
 		}
 	}

@@ -4,6 +4,26 @@ Date: 2026-07-30
 Branch: `fix/agent-experience-hardening`
 Scope: trace + measurement harness only. **No behaviour change shipped in this pass.**
 
+## Framing: check the cheap causes before blaming the cognitive layer
+
+Three separate defects have now been initially mis-attributed to ACT-R fusion or to "the
+cognition layer being wrong":
+
+1. **Confidence collapse** — the contradiction bug drives confidence to ~0.07, and confidence
+   multiplies straight into the final score (§3.2). A 93% cut that has nothing to do with
+   scoring weights.
+2. **Missing-estimator handling** — the linear ContentMatch scores an absent signal as a zero
+   rather than as absence of evidence, in both directions: missing FTS (§3.1–3.3) and missing
+   cosine (§3.4).
+3. **Indexing lag** — a memory is unfindable until the async embedder catches up, for up to
+   ~3 minutes (§3.5).
+
+None of the three is ACT-R. The ACT-R prior *does* have a large dynamic range (§2.3, >20×),
+and that may yet turn out to be a real problem — but it has not been the cause of a single
+reproduced miss so far. **Account for confidence, missing-signal handling, and indexing lag
+before attributing a recall failure to the cognitive layer.** The harness in §4 exists so
+that attribution is made by measurement rather than by argument.
+
 ---
 
 ## 1. The actual scoring path, end to end
@@ -209,7 +229,84 @@ The exact fraction is vault- and query-dependent and is precisely what the harne
 (`gold-found` under the PARAPHRASE condition). It is not estimated here, because estimating
 it is the thing the harness exists to avoid doing by argument.
 
-### 3.4 The counterweight nobody should skip
+### 3.4 The same defect from the opposite direction: missing cosine
+
+A live reproduction was reported at commit `c3b5b60`: a newly-written memory returns **zero
+results** to a near-exact lexical query ~3s after the write, then returns at **0.742** once
+the async embedder catches up. Independently verified below — and the mechanism is **sharper
+than the one reported**.
+
+**The reported mechanism is incomplete.** "ContentMatch ≤ 0.4, which falls below the default
+recall threshold" understates it, because 0.4 is comfortably above the *engine's* default of
+0.05. The real gate is the **surface** default:
+
+| surface | default when `threshold` is omitted | source |
+|---|---|---|
+| engine / library | 0.05 | `activation/engine.go:547` |
+| **MCP** | **0.5** | `internal/mcp/handlers.go:392` |
+| **REST** | **0.5** | `internal/transport/rest/server.go:1772` |
+
+With no embedding, `cosine = 0` → `semCal = 0` → `ContentMatch = 0.4 × fts ≤ **0.4**`, and
+the prior can only multiply *down* (it saturates at 1.0, and the per-query rescale never
+scales up). So:
+
+> **An FTS-only match is structurally unreturnable through MCP or REST at default settings —
+> for any query, at any lexical quality, permanently.** The 0.4 coefficient sits below the
+> 0.5 gate outright.
+
+This is not "scores poorly". It is unreachable. And it is not limited to the indexing-lag
+case: *any* candidate with zero semantic score — an unembedded engram, a dimension mismatch,
+a degraded embed backend — is invisible to both agent-facing surfaces.
+
+It also exposes a **cross-surface split**: at the engine default the same candidate is
+returned at 0.291. A library or direct caller sees the memory; an MCP agent does not.
+
+**Independent verification of the formula against the live observation.** The reported
+post-embed numbers were `final = 0.742`, `vector_score_raw = 0.881`. Solving the replicated
+formula for its only unknown:
+
+```
+semCal = (0.881 - 0.520) / 0.480 = 0.7521
+0.742  = 0.6×0.7521 + 0.4×fts    =>  fts = 0.7269
+```
+
+An implied FTS coverage of 0.73 for a near-exact lexical query is entirely plausible, and an
+arbitrary formula would not land the implied value inside [0,1] at a sensible point. This is
+a genuine cross-check of the replication against a live server. Pinned in
+`TestSCWReconstructsObservedLiveScore`.
+
+The counterfactual is the finding: the **same candidate**, one moment earlier, same FTS
+coverage, no embedding → `0.4 × 0.7269 = 0.291` → below the 0.5 surface gate → zero results.
+Nothing about the memory or the query changed. Only the embedding landed.
+
+**Noisy-OR and max both fix this case** (they return the perfect lexical match at 1.0),
+which is the first evidence that one composition change addresses both directions of the
+defect. That strengthens the case for running the harness, not for shipping the change.
+
+### 3.5 Exposure of the indexing lag
+
+Quantified from `internal/plugin/retroactive.go`:
+
+- poll interval **3s** (`:25`); idle back-off `3s × 2^min(idle,6)` capped at **3 minutes**
+  (`:36`, `:188-192`); reset to fast polling on real work (`:195-197`).
+- A `notifyCh` fast-wake path exists (`:169`) — **but no write path calls `Notify()`**. The
+  only caller in the tree is the processor itself, when it hits `maxBatchSize` and knows more
+  work remains (`:444`).
+
+So the exposure window is **~3s on a busy vault** (what the live reproduction saw) and **up
+to ~3 minutes on a vault quiet for ~3 minutes** — reaching `consecutiveIdle=6` takes
+3+6+12+24+48+96 ≈ 189s of quiet. The worst case is therefore the *common agent pattern*: a
+session begins after a pause, writes a memory, and immediately recalls it.
+
+FTS indexing is also async (`internal/index/fts/worker.go`, 100ms tick) and **drops jobs when
+its queue is full** (`:37`, `:143`) — a second, rarer path into the same missing-estimator
+state.
+
+Wiring `Notify()` into the write path is an obvious, cheap mitigation. It is **not** a fix:
+it shrinks the window, it does not close the structural 0.4 < 0.5 gap. Out of scope for this
+pass, and not my file.
+
+### 3.6 The counterweight nobody should skip
 
 COG-26's `b = 0.520` was derived **against the 0.6 linear combiner**
 (`docs/internals/invariants.md`, COG-26 entry): the "sem-only survival bar" of cosine ≈ 0.600
@@ -238,8 +335,9 @@ this pass ships no behaviour change.
 Offline replication of the live ACT-R formula, term for term with upstream `file:line`
 citations, plus the three alternative ContentMatch combiners. Synthetic fixtures only.
 Pins: the denominator identity, the `bLevelCap` saturation point, the COG-26 rescale, the
-0.6/0.4 structural caps, the corrected worked case, the noise-ceiling counterweight, that
-Confidence is a clean multiplier, and the prior's >20× dynamic range.
+0.6/0.4 structural caps, the corrected worked case, the noise-ceiling counterweight, the
+missing-cosine case against the 0.5 surface gate, the reconstruction of the live 0.742
+observation, that Confidence is a clean multiplier, and the prior's >20× dynamic range.
 
 It is a replication and not a call because `activation.computeACTR` is unexported and
 `activation.Run` needs a built HNSW index. **If the live formula changes, these tests will
@@ -253,7 +351,11 @@ requires an explicit `MUNINN_SCOREW_DATA_DIR`, writes no files, prints aggregate
 only (never content, concept, summary, tags, entities, IDs, or the vault name).
 
 Design: 4 combiners × {Confidence live, **Confidence ablated to 1.0**} × {FULL-SIGNAL,
-PARAPHRASE (FTS forced to 0)}.
+PARAPHRASE (FTS forced to 0)} × {engine threshold 0.05, **surface threshold 0.5**}.
+
+The threshold dimension was added after §3.4: measuring only at 0.05 reports numbers no MCP
+or REST agent ever sees, and hides that the 0.4 FTS coefficient sits below the surface gate
+outright.
 
 Two pre-committed metrics that pull against each other:
 
@@ -271,6 +373,14 @@ arm's top-1) **and** runs every arm a second time with Confidence ablated to 1.0
 ablated rows are the primary read. If ablated and live rank the combiners differently, the
 measurement is contaminated and the conf-on numbers must not be quoted. An optional
 `MUNINN_SCOREW_MIN_CONFIDENCE` additionally excludes depressed engrams from the pool.
+
+**Indexing-lag confound — settlement is PROVEN, not assumed.** The driver counts active
+engrams with no stored embedding, always reports the fraction, and **refuses to run above
+1%** (`MUNINN_SCOREW_MAX_UNEMBEDDED_FRAC`). Unembedded engrams are excluded from the pool —
+they cannot be scored by the raw-cosine control at all, and silently keeping them would
+flatter that arm. So the driver measures the combiners on a settled corpus and does *not*
+measure the missing-cosine case itself; that one is pinned analytically in the model file,
+where it is exact rather than sampled.
 
 **Stated limits:** Hebbian and PAS-transition boosts are 0 in every arm — the cognition
 layer's strongest arguments for itself are absent, so the harness is biased *against* the
