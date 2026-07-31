@@ -127,6 +127,20 @@ func TestActivate_ACTRDefaultThreshold_Unaffected(t *testing.T) {
 
 	writeRRFThresholdFixture(t, eng, ctx, vault)
 
+	// STEADY-STATE WARMUP. The WeightComplement(1.0) fix made full-weight
+	// association edges readable for the first time — before it, the fixture's
+	// declared weight-1.0 relationships round-tripped to 0, so recall-to-recall
+	// transition boosts had nothing to act on and any two calls in a session
+	// were accidentally identical. Post-fix, the FIRST recall's session learning
+	// re-ranks the second (verified: run1 differs, run2==run3 — "strengthens
+	// with use" working as promised). These tests assert THRESHOLD-RESOLUTION
+	// equivalence, not learning behaviour, so they compare in the steady state
+	// a warmup call establishes.
+	if _, err := eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault,
+		Context: []string{"thermal calibration widget"}, Threshold: 0.1, MaxResults: 10}); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+
 	zeroResp, err := eng.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    []string{"thermal calibration widget"},

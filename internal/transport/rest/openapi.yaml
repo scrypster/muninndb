@@ -423,6 +423,14 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/BriefSentence"
+        semantic_degraded:
+          type: boolean
+          description: >-
+            True when semantic (vector) scoring degraded during this recall — the
+            embed backend was unreachable, returned an empty/all-zero query vector,
+            or a post-load embedding fetch failed — so semantic_similarity may be
+            understated. Query-granular and coarse (set on any such failure even if
+            the primary vector search produced real scores). Omitted when false.
 
     # ── Link ─────────────────────────────────────────────────────────────────
 

@@ -152,9 +152,9 @@ type stubContradictStore struct {
 	onFlag func(ctx context.Context, ws [8]byte, a, b [16]byte) error
 }
 
-func (s *stubContradictStore) FlagContradiction(ctx context.Context, ws [8]byte, a, b [16]byte) error {
+func (s *stubContradictStore) FlagContradiction(ctx context.Context, ws [8]byte, a, b [16]byte) (bool, error) {
 	if s.onFlag != nil {
-		return s.onFlag(ctx, ws, a, b)
+		return true, s.onFlag(ctx, ws, a, b)
 	}
-	return nil
+	return true, nil
 }

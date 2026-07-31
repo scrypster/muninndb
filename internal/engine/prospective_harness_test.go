@@ -141,7 +141,7 @@ func runProspectiveHarness(t *testing.T, enabled bool) harnessResult {
 			// a value that only worked because FTS relevance was tanh-saturated
 			// to ~1.0 for any match; #711 made full_text_relevance an honest
 			// absolute coverage score, so the harness must use the threshold real
-			// callers use. Verified on the real simplorium vault: at 0.1 the Push
+			// callers use. Verified on a real vault: at 0.1 the Push
 			// still fires 15/15 at precision 1.0; 0.35 was riding inflated scores.
 			Threshold: 0.1,
 		})

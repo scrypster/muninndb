@@ -1233,19 +1233,25 @@ func TestApplyEnrichmentArgs_CapsAt30Relationships(t *testing.T) {
 	require.Len(t, req.Relationships, 30, "relationships should be capped at 30")
 }
 
-func TestApplyEnrichmentArgs_SkipsEmptyOrInvalidEntities(t *testing.T) {
+// A NAME is the only thing an entity item must carry. An entity with no type is
+// no longer dropped — it is resolved from the vault's entity table, or stored as
+// "other" — because a missing type used to cost the whole entity, and entity
+// coverage is what makes a memory findable at all.
+func TestApplyEnrichmentArgs_SkipsOnlyNamelessEntities(t *testing.T) {
 	args := map[string]any{
 		"entities": []any{
 			map[string]any{"name": "", "type": "person"},    // empty name — skip
 			map[string]any{"name": "   ", "type": "person"}, // whitespace only — skip
-			map[string]any{"name": "Alice", "type": ""},     // empty type — skip
+			map[string]any{"name": "Alice", "type": ""},     // empty type — KEEP, typed "other"
 			map[string]any{"name": "Bob", "type": "person"}, // valid
 		},
 	}
 	req := &mbp.WriteRequest{}
 	applyEnrichmentArgs(args, req)
-	require.Len(t, req.Entities, 1)
-	require.Equal(t, "Bob", req.Entities[0].Name)
+	require.Len(t, req.Entities, 2)
+	require.Equal(t, "Alice", req.Entities[0].Name)
+	require.Equal(t, "other", req.Entities[0].Type)
+	require.Equal(t, "Bob", req.Entities[1].Name)
 }
 
 // ── muninn_status ────────────────────────────────────────────────────────────

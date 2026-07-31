@@ -578,7 +578,7 @@ func TestEngineGetContradictions(t *testing.T) {
 	ws := eng.store.VaultPrefix("test")
 	id1 := storage.ULID([16]byte{1})
 	id2 := storage.ULID([16]byte{2})
-	_ = eng.store.FlagContradiction(ctx, ws, id1, id2)
+	_, _ = eng.store.FlagContradiction(ctx, ws, id1, id2)
 
 	pairs, err := eng.GetContradictions(ctx, "test")
 	if err != nil {

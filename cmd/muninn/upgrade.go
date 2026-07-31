@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -221,24 +222,14 @@ func runUpgrade(args []string) {
 		if daemonWasRunning {
 			fmt.Printf("  %-28s", "Stopping daemon...")
 			pidPath := filepath.Join(defaultDataDir(), "muninn.pid")
-			if pid, err := readPID(pidPath); err == nil {
-				if proc, err := os.FindProcess(pid); err == nil {
-					_ = stopProcess(proc)
-					deadline := time.Now().Add(15 * time.Second)
-					for time.Now().Before(deadline) {
-						if !isProcessRunning(pid) {
-							break
-						}
-						time.Sleep(100 * time.Millisecond)
-					}
-					if isProcessRunning(pid) {
-						_ = proc.Kill()
-						time.Sleep(500 * time.Millisecond)
-					}
-					time.Sleep(200 * time.Millisecond)
-				}
+			if !stopDaemonForUpgrade(pidPath, 15*time.Second) {
+				fmt.Println(" ✗")
+				fmt.Fprintln(os.Stderr, "the daemon is still running and could not be stopped.")
+				fmt.Fprintln(os.Stderr, "If it was started with elevated privileges, stop it the same way")
+				fmt.Fprintln(os.Stderr, "(for example 'sudo muninn stop' or systemctl), then upgrade again.")
+				osExit(1)
+				return
 			}
-			os.Remove(pidPath)
 			fmt.Println(" ✓")
 		}
 
@@ -506,6 +497,46 @@ func downloadAndExtractBinaryProgress(url, binaryName string, progressFn func(do
 func downloadAndExtractBinary(url, binaryName string) (string, error) {
 	path, _, err := downloadAndExtractBinaryProgress(url, binaryName, nil)
 	return path, err
+}
+
+// stopDaemonForUpgrade stops the daemon named by pidPath so the binary
+// underneath it can be replaced, waiting up to timeout for it to exit, and
+// reports whether it is gone afterwards.
+//
+// The PID file is cleared only once the daemon is known to be gone. A daemon
+// started with elevated privileges cannot be signalled by an unprivileged
+// upgrade: both the signal and the kill are refused, and removing its PID
+// file would leave it running against the database with nothing on disk to
+// find it by.
+func stopDaemonForUpgrade(pidPath string, timeout time.Duration) bool {
+	pid, err := readPID(pidPath)
+	if err != nil {
+		// A PID file that vanished between the liveness check and here leaves
+		// nothing to stop. Any other failure — unreadable, unparseable — means
+		// we cannot identify the daemon the caller just saw running, and must
+		// not report it as stopped.
+		return errors.Is(err, os.ErrNotExist)
+	}
+	if proc, err := os.FindProcess(pid); err == nil {
+		_ = stopProcess(proc)
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			if !isProcessRunning(pid) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if isProcessRunning(pid) {
+			_ = proc.Kill()
+			time.Sleep(500 * time.Millisecond)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if probeProcess(pid) != processDead {
+		return false
+	}
+	os.Remove(pidPath)
+	return true
 }
 
 // upgradeStep prints a left-aligned step label, executes fn, then prints ✓ or ✗.

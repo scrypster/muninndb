@@ -23,11 +23,11 @@ func newFakeContraConfStore(a, b [16]byte, confA, confB float32) *fakeContraConf
 	}
 }
 
-func (s *fakeContraConfStore) FlagContradiction(_ context.Context, _ [8]byte, a, b [16]byte) error {
+func (s *fakeContraConfStore) FlagContradiction(_ context.Context, _ [8]byte, a, b [16]byte) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.flagged = append(s.flagged, [2][16]byte{a, b})
-	return nil
+	return true, nil
 }
 
 func (s *fakeContraConfStore) GetConfidence(_ context.Context, _ [8]byte, id [16]byte) (float32, error) {

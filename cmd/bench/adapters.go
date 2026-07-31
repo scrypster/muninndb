@@ -49,6 +49,6 @@ func (a *benchConfidenceAdapter) UpdateConfidence(ctx context.Context, ws [8]byt
 // benchContradictAdapter adapts PebbleStore to the ContradictionStore interface.
 type benchContradictAdapter struct{ store *storage.PebbleStore }
 
-func (a *benchContradictAdapter) FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) error {
+func (a *benchContradictAdapter) FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) (bool, error) {
 	return a.store.FlagContradiction(ctx, ws, storage.ULID(engramA), storage.ULID(engramB))
 }

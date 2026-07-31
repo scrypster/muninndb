@@ -270,6 +270,28 @@ type ActivateResponse struct {
 	Frame       int              `msgpack:"frame,omitempty"        json:"frame,omitempty"`
 	TotalFrames int              `msgpack:"total_frames,omitempty" json:"total_frames,omitempty"`
 	Brief       []BriefSentence  `msgpack:"brief,omitempty"        json:"brief,omitempty"` // extractive activation brief
+	// SemanticDegraded is true when the vector/semantic signal for this
+	// activation could not be trusted -- embed backend unreachable, an
+	// err==nil embed call returning an empty/all-zero vector, or the phase6
+	// post-load cosine fallback failing to read stored embeddings. Recall
+	// still returns results (BM25/decay/Hebbian survive), but callers should
+	// not silently trust a zeroed vectorScore (principle #2: degrade loudly).
+	// Query-granular and COARSE: set on ANY such failure this recall, even if the
+	// primary HNSW vector search produced real scores and only a secondary
+	// post-load fetch failed (over-warn beats under-warn on a correctness signal).
+	// Caller-supplied embeddings are not zero-checked (only embed-backend paths).
+	// Carried on MBP + REST (alias) + MCP muninn_recall; gRPC does NOT yet map it
+	// (pb.ActivateResponse has no field — a documented deferral, tracked separately).
+	SemanticDegraded bool `msgpack:"semantic_degraded,omitempty" json:"semantic_degraded,omitempty"`
+	// Abstained is true when the recall pipeline ran to completion and
+	// DELIBERATELY returned nothing: candidates were scored and every one fell
+	// below the relevance bar (or was filtered). It distinguishes "the vault
+	// has no answer" from "nothing matched this run" — without it an empty
+	// result is indistinguishable from an un-run one, the silent-substitution
+	// class fixed across #742..#746. AbstainedReason is machine-readable:
+	// no_candidates | below_threshold | filtered. Empty iff Abstained is false.
+	Abstained       bool   `msgpack:"abstained,omitempty"        json:"abstained,omitempty"`
+	AbstainedReason string `msgpack:"abstained_reason,omitempty" json:"abstained_reason,omitempty"`
 }
 
 // ActivationItem is a single activated engram.
@@ -308,6 +330,19 @@ type ActivationItem struct {
 	// so any transport can say "this is stale, current is X". Empty otherwise.
 	SupersededBy   string `msgpack:"superseded_by,omitempty"   json:"superseded_by,omitempty"`
 	CurrentVersion string `msgpack:"current_version,omitempty" json:"current_version,omitempty"`
+	// PossiblySupersededBy / VersionCluster / NewestOfCluster / ClusterSize are
+	// the ADVISORY heuristic-currency signal (COG-25) — inferred, never asserted.
+	// PossiblySupersededBy points a non-crown cluster member at the crown;
+	// VersionCluster is the shared cluster key; NewestOfCluster marks the crown;
+	// ClusterSize is the member count. Distinct from SupersededBy (asserted):
+	// verify before treating the older fact as false. Empty when not clustered.
+	// Computed over the CO-RETRIEVED results only: NewestOfCluster = newest among
+	// returned cluster members (a newer version below the retrieval cut is not
+	// considered), and PossiblySupersededBy may name an engram not in this response.
+	PossiblySupersededBy string `msgpack:"possibly_superseded_by,omitempty" json:"possibly_superseded_by,omitempty"`
+	VersionCluster       string `msgpack:"version_cluster,omitempty"        json:"version_cluster,omitempty"`
+	NewestOfCluster      bool   `msgpack:"newest_of_cluster,omitempty"      json:"newest_of_cluster,omitempty"`
+	ClusterSize          int    `msgpack:"cluster_size,omitempty"           json:"cluster_size,omitempty"`
 	// Valid-time annotations. ValidFrom is set only when it differs from
 	// CreatedAt (an explicitly backdated/forward-dated fact); ValidUntil is set
 	// only when the window is closed. Expired marks a fact whose ValidUntil <=
@@ -338,6 +373,14 @@ type ScoreComponents struct {
 	Recency               float32 `msgpack:"recency"                       json:"recency"`
 	Raw                   float32 `msgpack:"raw"                           json:"raw"`
 	Final                 float32 `msgpack:"final"                         json:"final"`
+	// ContentMatch is the absolute aboutness term (w_sem*semCal +
+	// w_fts*ftsCoverage) BEFORE the ACT-R prior, per-query normalization and
+	// Confidence — the quantity the COG-26 relevance calibration is stated on.
+	// AbsoluteScore = min(Raw, ContentMatch, 1) * Confidence is the quantity
+	// the recall gate compares (Final is max-normalized per query, so its
+	// argmax is always ~1.0 and it cannot be compared across queries).
+	ContentMatch  float32 `msgpack:"content_match,omitempty"  json:"content_match,omitempty"`
+	AbsoluteScore float32 `msgpack:"absolute_score,omitempty" json:"absolute_score,omitempty"`
 }
 
 // SubscribeRequest registers a context subscription.

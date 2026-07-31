@@ -827,6 +827,14 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Vault = vault
+	// Clamp a negative threshold: below zero is out-of-domain on the wire.
+	// In-process, a negative threshold is the diagnostic gate-bypass Explain
+	// uses (activation.Run treats <0 as "gate nothing"); that contract is
+	// deliberately NOT exposed to external callers, so the wire behaviour for
+	// out-of-range input stays what it always was — the engine default.
+	if req.Threshold < 0 {
+		req.Threshold = 0
+	}
 	// Validate the recall mode here (fail fast with a 400), but forward it
 	// instead of stamping preset values into the request — the engine is the
 	// single preset decider, because only it knows the effective scoring mode

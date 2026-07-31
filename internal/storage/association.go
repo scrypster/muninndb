@@ -347,6 +347,23 @@ func (ps *PebbleStore) getAssocValueFull(wsPrefix [8]byte, a, b ULID) (RelType, 
 // If the edge was previously restored (restoredAt != 0), restoredAt is cleared once
 // the edge re-establishes itself: 3+ co-activations post-restore OR weight exceeds
 // restoreWeight * 1.5 (where restoreWeight = existingPeak * 0.25).
+
+// deleteLegacyFullWeightKeys removes the PRE-FIX key locations for a
+// full-weight edge. The old WeightComplement overflowed for weight exactly 1.0
+// and produced the byte pattern of weight 0.0, so every pre-fix 1.0-weight
+// association lives at the weight-0.0 key position. A post-fix update that
+// deletes only the CORRECT position would leave that stale key behind — a
+// duplicate edge that still reads as weight 0. Deleting the 0.0 position for a
+// pair whose true weight is 1.0 is safe: the 0x14 weight index is one value
+// per pair, so a pair cannot legitimately hold both a 1.0 and a 0.0 edge.
+func deleteLegacyFullWeightKeys(batch *pebble.Batch, wsPrefix [8]byte, a, b [16]byte, trueWeight float32) {
+	if trueWeight != 1.0 {
+		return
+	}
+	_ = batch.Delete(keys.AssocFwdKey(wsPrefix, a, 0.0, b), nil)
+	_ = batch.Delete(keys.AssocRevKey(wsPrefix, b, 0.0, a), nil)
+}
+
 func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID, weight float32, countDelta uint32) error {
 	batch := ps.db.NewBatch()
 	defer batch.Close()
@@ -360,6 +377,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	if oldWeight > 0 {
 		batch.Delete(keys.AssocFwdKey(wsPrefix, [16]byte(a), oldWeight, [16]byte(b)), nil)
 		batch.Delete(keys.AssocRevKey(wsPrefix, [16]byte(b), oldWeight, [16]byte(a)), nil)
+		deleteLegacyFullWeightKeys(batch, wsPrefix, [16]byte(a), [16]byte(b), oldWeight)
 	}
 
 	// Preserve existing metadata; set lastActivated = now (Hebbian update = activation).
@@ -437,6 +455,7 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 		if oldWeight > 0 {
 			batch.Delete(keys.AssocFwdKey(update.WS, update.Src, oldWeight, update.Dst), nil)
 			batch.Delete(keys.AssocRevKey(update.WS, update.Dst, oldWeight, update.Src), nil)
+			deleteLegacyFullWeightKeys(batch, update.WS, update.Src, update.Dst, oldWeight)
 		}
 
 		// PeakWeight is monotonically non-decreasing: max(existingPeak, newWeight).
@@ -560,8 +579,14 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		batch := ps.db.NewBatch()
 		defer batch.Close()
 		for _, e := range chunk {
+			// e.oldW is decoded from the scanned KEY, so this delete depends on
+			// encode(decode(k)) == k for encoder-produced complements — pinned
+			// exhaustively (all float32 in [0,1]) by the byte-compat tests in
+			// storage/keys. If that identity ever breaks, this delete misses and
+			// decay grows duplicate keys unboundedly.
 			_ = batch.Delete(keys.AssocFwdKey(wsPrefix, e.src, e.oldW, e.dst), nil)
 			_ = batch.Delete(keys.AssocRevKey(wsPrefix, e.dst, e.oldW, e.src), nil)
+			deleteLegacyFullWeightKeys(batch, wsPrefix, e.src, e.dst, e.oldW)
 			if e.archive {
 				// Move to 0x25 archive namespace. Write archive value, delete live
 				// weight index; fwd/rev keys already deleted above.
@@ -789,8 +814,50 @@ func (ps *PebbleStore) GetReverseAssociations(ctx context.Context, wsPrefix [8]b
 	return results, nil
 }
 
+// contradictionValueLen is the current 0x0A value length: the partner ULID
+// followed by the detection time in Unix nanoseconds.
+// Layout: partner(16) | detectedAtUnixNano(8).
+//
+// Values written before the timestamp existed are a bare 16-byte partner ULID.
+// They decode to a ZERO detectedAt, which every reader must render as "unknown"
+// — never as a real instant and never as the Go zero time dressed up as one
+// (CLAUDE.md §2.1: a plausible wrong value is worse than an admitted gap).
+const contradictionValueLen = 16 + 8
+
+// encodeContradictionValue builds the 0x0A value for a marker.
+func encodeContradictionValue(partner [16]byte, detectedAt time.Time) []byte {
+	val := make([]byte, contradictionValueLen)
+	copy(val[:16], partner[:])
+	if !detectedAt.IsZero() {
+		binary.BigEndian.PutUint64(val[16:24], uint64(detectedAt.UnixNano()))
+	}
+	return val
+}
+
+// decodeContradictionValue reads a 0x0A value. ok is false when the value is
+// too short to even name the partner. detectedAt is the zero time for legacy
+// 16-byte values, meaning "flagged, detection time not recorded".
+func decodeContradictionValue(val []byte) (partner ULID, detectedAt time.Time, ok bool) {
+	if len(val) < 16 {
+		return partner, time.Time{}, false
+	}
+	copy(partner[:], val[:16])
+	if len(val) >= contradictionValueLen {
+		if nanos := int64(binary.BigEndian.Uint64(val[16:24])); nanos != 0 {
+			detectedAt = time.Unix(0, nanos)
+		}
+	}
+	return partner, detectedAt, true
+}
+
 // FlagContradiction writes the 0x0A contradiction key for pair (a,b).
-func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error {
+//
+// The marker's value carries the moment the contradiction FIRST became known.
+// The detector re-writes the marker on every observation of the same edge, so
+// a re-flag deliberately preserves the original timestamp: detected_at answers
+// "when did this vault learn these two memories disagree?", not "when did the
+// batch worker last look at it".
+func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) (bool, error) {
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
@@ -807,18 +874,38 @@ func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, 
 	// The key structure is: 0x0A | wsPrefix(8) | conceptHash(4) | relType(2) | id(16)
 	// We use conceptHash=0 to indicate this is a pair contradiction flag
 	contraKey := keys.ContradictionKey(wsPrefix, 0, 0, aBytes)
-	batch.Set(contraKey, bBytes[:], nil)
-
-	// Also write reverse for quick lookup
 	contraKeyRev := keys.ContradictionKey(wsPrefix, 0, 0, bBytes)
-	batch.Set(contraKeyRev, aBytes[:], nil)
+
+	// Was this pair already flagged? The 0x0A marker is the durable record that
+	// this contradiction is ALREADY KNOWN, and it is what makes the confidence
+	// penalty idempotent: one declared contradiction is one fact, however many
+	// times a worker re-observes the edge. Re-penalising compounds a single
+	// Bayesian update (1.0 -> 0.975 -> 0.797 -> 0.313 -> 0.0709) until BOTH
+	// memories — including the true one — fall out of recall entirely.
+	newlyFlagged := true
+	detectedAt := time.Now()
+	if existing, closer, err := ps.db.Get(contraKey); err == nil {
+		_, prior, _ := decodeContradictionValue(existing)
+		_ = closer.Close()
+		newlyFlagged = false
+		// Carry the prior stamp forward verbatim — INCLUDING a zero one from a
+		// legacy marker. Re-stamping an already-known contradiction with "now"
+		// would invent a detection time that is off by however long the marker
+		// has existed, which is exactly the plausible-wrong-value failure this
+		// change exists to remove.
+		detectedAt = prior
+	}
+
+	batch.Set(contraKey, encodeContradictionValue(bBytes, detectedAt), nil)
+	// Also write reverse for quick lookup
+	batch.Set(contraKeyRev, encodeContradictionValue(aBytes, detectedAt), nil)
 
 	if err := batch.Commit(pebble.NoSync); err != nil {
-		return fmt.Errorf("commit batch: %w", err)
+		return false, fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
 
-	return nil
+	return newlyFlagged, nil
 }
 
 // ResolveContradiction deletes the contradiction marker(s) for the pair (a,b).
@@ -844,11 +931,45 @@ func (ps *PebbleStore) ResolveContradiction(ctx context.Context, wsPrefix [8]byt
 	return nil
 }
 
+// ContradictionRecord is one deduplicated contradiction between engrams A and
+// B, in canonical (A < B) order.
+//
+// DetectedAt is when the detector flagged the pair; it is the zero time for
+// legacy markers written before the timestamp existed, and callers must render
+// that as "unknown" rather than as an instant.
+//
+// DeclaredAt is when an explicit "contradicts" association between the two was
+// written. It is zero when the pair was found by the detector without an
+// explicit link.
+type ContradictionRecord struct {
+	A          ULID
+	B          ULID
+	DetectedAt time.Time
+	DeclaredAt time.Time
+}
+
 // GetContradictions returns all contradiction pairs in the vault by scanning the 0x0A prefix.
-// The key structure is: 0x0A | wsPrefix(8) | conceptHash(4) | relType(2) | id(16) = 31 bytes.
-// The value is the partner ULID (16 bytes).
 // Each pair (a, b) is stored twice (forward and reverse), so we deduplicate by canonical ordering.
 func (ps *PebbleStore) GetContradictions(ctx context.Context, wsPrefix [8]byte) ([][2]ULID, error) {
+	recs, err := ps.GetContradictionRecords(ctx, wsPrefix)
+	if err != nil {
+		return nil, err
+	}
+	pairs := make([][2]ULID, 0, len(recs))
+	for _, r := range recs {
+		pairs = append(pairs, [2]ULID{r.A, r.B})
+	}
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	return pairs, nil
+}
+
+// GetContradictionRecords returns every flagged contradiction in the vault by
+// scanning the 0x0A prefix, carrying each marker's detection time.
+// The key structure is: 0x0A | wsPrefix(8) | conceptHash(4) | relType(2) | id(16) = 31 bytes.
+// The value is partner ULID(16) | detectedAtUnixNano(8) — 16 bytes for legacy markers.
+func (ps *PebbleStore) GetContradictionRecords(ctx context.Context, wsPrefix [8]byte) ([]ContradictionRecord, error) {
 	lower := keys.ContradictionKeyPrefix(wsPrefix)
 	upper := make([]byte, len(lower))
 	copy(upper, lower)
@@ -865,21 +986,19 @@ func (ps *PebbleStore) GetContradictions(ctx context.Context, wsPrefix [8]byte) 
 	const keyLen = 1 + 8 + 4 + 2 + 16
 	const idOffset = 1 + 8 + 4 + 2 // offset where the 16-byte id starts
 
-	seen := make(map[[32]byte]bool)
-	var pairs [][2]ULID
+	seen := make(map[[32]byte]int)
+	var recs []ContradictionRecord
 	for valid := iter.First(); valid; valid = iter.Next() {
 		k := iter.Key()
 		if len(k) < keyLen {
 			continue
 		}
-		val := iter.Value()
-		if len(val) < 16 {
+		b, detectedAt, ok := decodeContradictionValue(iter.Value())
+		if !ok {
 			continue
 		}
 		var a ULID
 		copy(a[:], k[idOffset:idOffset+16])
-		var b ULID
-		copy(b[:], val[:16])
 
 		// Canonicalize: always put smaller first to deduplicate
 		if CompareULIDs(a, b) > 0 {
@@ -888,10 +1007,110 @@ func (ps *PebbleStore) GetContradictions(ctx context.Context, wsPrefix [8]byte) 
 		var dedupeKey [32]byte
 		copy(dedupeKey[:16], a[:])
 		copy(dedupeKey[16:], b[:])
-		if !seen[dedupeKey] {
-			seen[dedupeKey] = true
-			pairs = append(pairs, [2]ULID{a, b})
+		if idx, dup := seen[dedupeKey]; dup {
+			// The forward and reverse markers are written together with the same
+			// stamp; if one direction predates the timestamp, prefer the known one.
+			if recs[idx].DetectedAt.IsZero() && !detectedAt.IsZero() {
+				recs[idx].DetectedAt = detectedAt
+			}
+			continue
 		}
+		seen[dedupeKey] = len(recs)
+		recs = append(recs, ContradictionRecord{A: a, B: b, DetectedAt: detectedAt})
 	}
-	return pairs, nil
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("GetContradictionRecords scan: %w", err)
+	}
+	return recs, nil
+}
+
+// DeclaredContradictionScan is the result of looking for explicit "contradicts"
+// associations. Complete reports whether the whole association keyspace was
+// examined: when it is false the caller MUST NOT claim there are no pending
+// contradictions, only that none were found in what it scanned.
+type DeclaredContradictionScan struct {
+	Records  []ContradictionRecord
+	Scanned  int
+	Complete bool
+}
+
+// DefaultDeclaredContradictionScanCap bounds the forward-association scan that
+// finds declared-but-undetected contradictions. Association values carry the
+// relation type, so there is no prefix that isolates "contradicts" edges — the
+// scan is O(edges) and has to be capped. The cap is generous because the scan
+// is value-decode-only (no point lookups, no engram reads) and this surface is
+// a deliberate, low-frequency call, not part of recall.
+const DefaultDeclaredContradictionScanCap = 500_000
+
+// DeclaredContradictions returns pairs joined by an explicit "contradicts"
+// association, deduplicated in canonical order, keeping the EARLIEST
+// declaration time when both directions were linked.
+//
+// This exists because an explicit link is durable the moment Link returns while
+// the 0x0A marker is written by a batch worker up to 30s later. Without this
+// scan the read surface reported an empty list in that window, which is
+// indistinguishable from "this vault has no contradictions" — reporting an
+// unknown state as a known one.
+//
+// maxScan <= 0 uses DefaultDeclaredContradictionScanCap.
+func (ps *PebbleStore) DeclaredContradictions(ctx context.Context, wsPrefix [8]byte, maxScan int) (DeclaredContradictionScan, error) {
+	if maxScan <= 0 {
+		maxScan = DefaultDeclaredContradictionScanCap
+	}
+	var out DeclaredContradictionScan
+
+	lower := make([]byte, 9)
+	lower[0] = prefix.AssocFwd
+	copy(lower[1:9], wsPrefix[:])
+	upper := make([]byte, 9)
+	copy(upper, lower)
+	upper[8]++
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return out, err
+	}
+	defer iter.Close()
+
+	// Forward assoc key: 0x03(1) | ws(8) | src(16) | weightComplement(4) | dst(16)
+	const assocKeyLen = 1 + 8 + 16 + 4 + 16
+	seen := make(map[[32]byte]int)
+
+	out.Complete = true
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if out.Scanned >= maxScan {
+			out.Complete = false
+			break
+		}
+		out.Scanned++
+		k := iter.Key()
+		if len(k) < assocKeyLen {
+			continue
+		}
+		relType, _, createdAt, _, _, _, _ := decodeAssocValue(iter.Value())
+		if relType != RelContradicts {
+			continue
+		}
+		var a, b ULID
+		copy(a[:], k[9:25])
+		copy(b[:], k[29:45])
+		if CompareULIDs(a, b) > 0 {
+			a, b = b, a
+		}
+		var dedupeKey [32]byte
+		copy(dedupeKey[:16], a[:])
+		copy(dedupeKey[16:], b[:])
+		if idx, dup := seen[dedupeKey]; dup {
+			if !createdAt.IsZero() && (out.Records[idx].DeclaredAt.IsZero() || createdAt.Before(out.Records[idx].DeclaredAt)) {
+				out.Records[idx].DeclaredAt = createdAt
+			}
+			continue
+		}
+		seen[dedupeKey] = len(out.Records)
+		out.Records = append(out.Records, ContradictionRecord{A: a, B: b, DeclaredAt: createdAt})
+	}
+	if err := iter.Error(); err != nil {
+		return out, fmt.Errorf("DeclaredContradictions scan: %w", err)
+	}
+	return out, nil
 }

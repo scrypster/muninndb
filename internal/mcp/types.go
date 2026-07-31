@@ -135,7 +135,23 @@ type MemoryAnnotations struct {
 	// head — the fact to consult now. Both present when this memory is stale.
 	SupersededBy   string `json:"superseded_by,omitempty"`
 	CurrentVersion string `json:"current_version,omitempty"`
-	LastVerified   string `json:"last_verified,omitempty"` // RFC3339
+	// PossiblySupersededBy / VersionCluster / NewestOfCluster / ClusterSize are the
+	// ADVISORY heuristic-currency signal (COG-25) — inferred from a same-version
+	// cluster, NOT asserted. PossiblySupersededBy names a newer, highly-similar
+	// fact about the same subject: a mechanical hint, verify before treating this
+	// memory as false — it is still returned at full score. Distinct from the
+	// authoritative SupersededBy above.
+	//
+	// Scope: these are computed over the CO-RETRIEVED results only. "newest_of_cluster"
+	// means newest among the returned cluster members — a newer version that scored
+	// below the retrieval cut is not considered — and possibly_superseded_by may name
+	// an engram not present in this response (muninn_read it to inspect). Same
+	// returned-set boundary the authoritative superseded_by already has.
+	PossiblySupersededBy string `json:"possibly_superseded_by,omitempty"`
+	VersionCluster       string `json:"version_cluster,omitempty"`
+	NewestOfCluster      bool   `json:"newest_of_cluster,omitempty"`
+	ClusterSize          int    `json:"cluster_size,omitempty"`
+	LastVerified         string `json:"last_verified,omitempty"` // RFC3339
 }
 
 // ReadEntity is a named entity linked to a specific engram.
@@ -152,12 +168,46 @@ type ReadEntityRel struct {
 	Weight     float32 `json:"weight,omitempty"`
 }
 
+// ContradictionPair is one contradicting pair as muninn_contradictions renders
+// it.
+//
+// DetectedAt and DeclaredAt are pointers so an unknown time is ABSENT from the
+// JSON rather than serialised as "0001-01-01T00:00:00Z". A zero time rendered
+// as a real instant is a plausible wrong answer — the project's worst failure
+// class (CLAUDE.md §2.1).
 type ContradictionPair struct {
-	IDa        string    `json:"id_a"`
-	ConceptA   string    `json:"concept_a"`
-	IDb        string    `json:"id_b"`
-	ConceptB   string    `json:"concept_b"`
-	DetectedAt time.Time `json:"detected_at"`
+	IDa      string `json:"id_a"`
+	ConceptA string `json:"concept_a"`
+	IDb      string `json:"id_b"`
+	ConceptB string `json:"concept_b"`
+	// Status is "detected" (the detector has flagged this pair) or
+	// "pending_detection" (an explicit contradicts link exists and the batch
+	// detector has not reached it yet). Empty when the engine cannot report it.
+	Status string `json:"status,omitempty"`
+	// DetectedAt is when the detector flagged the pair. Absent while pending,
+	// and absent for markers written before the timestamp was recorded.
+	DetectedAt *time.Time `json:"detected_at,omitempty"`
+	// DeclaredAt is when an explicit contradicts link was written between the
+	// two engrams. Absent when the pair was found by the detector alone.
+	DeclaredAt *time.Time `json:"declared_at,omitempty"`
+}
+
+// ContradictionsReport is the muninn_contradictions response.
+//
+// PendingCount is the point of the envelope: the contradiction detector is a
+// 30s batch worker, so for up to half a minute after an explicit
+// muninn_link(relation="contradicts") no marker exists. Reporting only markers
+// made that window return an empty list — the same answer a vault with no
+// contradictions gives. The counts let a caller tell "none" from "not computed
+// yet" without waiting or guessing.
+type ContradictionsReport struct {
+	Contradictions []ContradictionPair `json:"contradictions"`
+	DetectedCount  int                 `json:"detected_count"`
+	PendingCount   int                 `json:"pending_count"`
+	// ScanComplete is false when the search for declared-but-undetected links
+	// hit its scan cap; PendingCount is then a lower bound, not a total.
+	ScanComplete bool   `json:"scan_complete"`
+	Note         string `json:"note,omitempty"`
 }
 
 // VaultStatus is returned by muninn_status.
@@ -246,30 +296,49 @@ type ExplainRequest struct {
 }
 
 // ExplainComponents holds the per-component score breakdown.
+//
+// Every field is a POINTER on purpose: a component that was never computed
+// serializes as JSON null ("unknown"), never as 0. A 0 that means "unknown" is
+// exactly the silent substitution this project treats as its worst failure
+// class (CLAUDE.md §2.1) — and it is worst of all here, in the one tool an
+// agent uses to find out why a memory did not come back.
 type ExplainComponents struct {
-	FullTextRelevance  float64 `json:"full_text_relevance"`
-	SemanticSimilarity float64 `json:"semantic_similarity"`
+	FullTextRelevance  *float64 `json:"full_text_relevance"`
+	SemanticSimilarity *float64 `json:"semantic_similarity"`
 	// SemanticSimilarityRaw is the uncalibrated cosine similarity — see
 	// activation.ScoreComponents.SemanticSimilarityRaw. Lets an operator see
 	// the raw signal (e.g. 0.59) behind a calibrated value that abstained
 	// (e.g. 0.07) without a second tool call.
-	SemanticSimilarityRaw float64 `json:"semantic_similarity_raw"`
-	DecayFactor           float64 `json:"decay_factor"`
-	HebbianBoost          float64 `json:"hebbian_boost"`
-	AccessFrequency       float64 `json:"access_frequency"`
-	Confidence            float64 `json:"confidence"`
+	SemanticSimilarityRaw *float64 `json:"semantic_similarity_raw"`
+	DecayFactor           *float64 `json:"decay_factor"`
+	HebbianBoost          *float64 `json:"hebbian_boost"`
+	AccessFrequency       *float64 `json:"access_frequency"`
+	// Confidence is the engram's STORED confidence. It does not depend on the
+	// query, so it is non-null whenever the engram exists — including when the
+	// query produced no score at all.
+	Confidence *float64 `json:"confidence"`
 }
 
 // ExplainResult breaks down why an engram scored as it did for a given query.
 type ExplainResult struct {
-	EngramID    string            `json:"engram_id"`
-	Concept     string            `json:"concept"`
-	FinalScore  float64           `json:"final_score"`
+	EngramID string `json:"engram_id"`
+	Concept  string `json:"concept"`
+	// Found: the engram exists in this vault. Scored: this query's activation
+	// run produced a score for it. When Scored is false the component values
+	// are null and Note says why — final_score is likewise meaningless.
+	Found       bool              `json:"found"`
+	Scored      bool              `json:"scored"`
+	FinalScore  *float64          `json:"final_score"`
 	Components  ExplainComponents `json:"components"`
 	FTSMatches  []string          `json:"fts_matches"`
 	AssocPath   []string          `json:"assoc_path"`
 	WouldReturn bool              `json:"would_return"`
-	Threshold   float64           `json:"threshold"`
+	// Threshold is the bar a default muninn_recall applies in this vault —
+	// would_return means "clears that bar", not "was a candidate".
+	Threshold float64 `json:"threshold"`
+	// Note explains, in plain language, anything the caller would otherwise
+	// have to infer from a zero. Empty on the fully-scored happy path.
+	Note string `json:"note,omitempty"`
 }
 
 // DeletedEngram is a summary of a soft-deleted engram still within the recovery window.
@@ -451,12 +520,24 @@ type AssociationParams struct {
 }
 
 // ProvenanceEntry is a single audit log record returned by muninn_provenance.
+//
+// The trailing three fields are the operation-specific "what changed and why".
+// They are omitted whenever the recorded operation carries none — including for
+// every entry written before the record format carried them. An omitted field
+// means unknown, never "empty": absence must not be read as a claim.
 type ProvenanceEntry struct {
 	Timestamp string `json:"timestamp"` // RFC3339
 	Source    string `json:"source"`    // "human", "llm", "inferred", etc.
 	AgentID   string `json:"agent_id,omitempty"`
 	Operation string `json:"operation"` // "write", "update", "read", etc.
 	Note      string `json:"note,omitempty"`
+	// PredecessorID is the engram this version replaced (evolve).
+	PredecessorID string `json:"predecessor_id,omitempty"`
+	// Reason is the caller-supplied justification for the change (evolve).
+	Reason string `json:"reason,omitempty"`
+	// EffectiveAt is the valid-time instant the change took effect (RFC3339) —
+	// distinct from timestamp, which is when the write happened.
+	EffectiveAt string `json:"effective_at,omitempty"`
 }
 
 // ProvenanceResult is the response from muninn_provenance.
