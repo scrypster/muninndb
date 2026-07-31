@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/provenance"
 )
 
 // AssocWeightUpdate represents a single association weight update for batching.
@@ -31,6 +33,10 @@ type StoreBatch interface {
 	// WriteEngram, except the provenance entry records operation as the
 	// originating verb (e.g. "evolve") instead of the hardcoded "create".
 	WriteEngramOp(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string) error
+	// WriteEngramOpDetails is WriteEngramOp with an optional operation-specific
+	// details payload (predecessor, reason, effective_at) attached to the
+	// provenance entry. nil details behaves exactly like WriteEngramOp.
+	WriteEngramOpDetails(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string, details *provenance.Details) error
 	// WriteAssociation queues association forward (0x03), reverse (0x04) keys into the batch.
 	WriteAssociation(ctx context.Context, wsPrefix [8]byte, src, dst ULID, assoc *Association) error
 	// WriteOrdinal queues the ordinal key for (parentID, childID) into the batch.

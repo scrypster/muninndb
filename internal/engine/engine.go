@@ -3601,7 +3601,20 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 	batch := e.store.NewBatch()
 	defer batch.Discard()
 
-	if err := batch.WriteEngramOp(ctx, wsPrefix, newEng, "evolve"); err != nil {
+	// The successor's provenance entry carries what changed and why, not just
+	// the verb: an "evolve" entry with only a timestamp, a source and the word
+	// "evolve" records the one thing the reader already knew. It is recorded on
+	// the SUCCESSOR because that is the engram a reader holds after an evolve
+	// (the predecessor is soft-deleted and hidden from the present), and
+	// predecessor_id is the exact mirror of read's superseded_by. reason is
+	// passed through verbatim — empty when the caller gave none, never
+	// backfilled with a plausible-looking string.
+	evolveDetails := &provenance.Details{
+		PredecessorID: oldULID.String(),
+		Reason:        reason,
+		EffectiveAt:   &effectiveAt,
+	}
+	if err := batch.WriteEngramOpDetails(ctx, wsPrefix, newEng, "evolve", evolveDetails); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch write new engram: %w", err)
 	}
 	if err := batch.WriteAssociation(ctx, wsPrefix, newULID, oldULID, supersedes); err != nil {

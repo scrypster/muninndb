@@ -520,12 +520,24 @@ type AssociationParams struct {
 }
 
 // ProvenanceEntry is a single audit log record returned by muninn_provenance.
+//
+// The trailing three fields are the operation-specific "what changed and why".
+// They are omitted whenever the recorded operation carries none — including for
+// every entry written before the record format carried them. An omitted field
+// means unknown, never "empty": absence must not be read as a claim.
 type ProvenanceEntry struct {
 	Timestamp string `json:"timestamp"` // RFC3339
 	Source    string `json:"source"`    // "human", "llm", "inferred", etc.
 	AgentID   string `json:"agent_id,omitempty"`
 	Operation string `json:"operation"` // "write", "update", "read", etc.
 	Note      string `json:"note,omitempty"`
+	// PredecessorID is the engram this version replaced (evolve).
+	PredecessorID string `json:"predecessor_id,omitempty"`
+	// Reason is the caller-supplied justification for the change (evolve).
+	Reason string `json:"reason,omitempty"`
+	// EffectiveAt is the valid-time instant the change took effect (RFC3339) —
+	// distinct from timestamp, which is when the write happened.
+	EffectiveAt string `json:"effective_at,omitempty"`
 }
 
 // ProvenanceResult is the response from muninn_provenance.

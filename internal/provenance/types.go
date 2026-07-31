@@ -16,10 +16,46 @@ const (
 )
 
 // ProvenanceEntry records a single create/update event on an engram.
+//
+// Wire format: the value stored under the 0x16 provenance key is this struct
+// marshalled with encoding/json (see Store.Append). That makes the record
+// additively extensible in both directions and is why Details can be added
+// without a version byte: an entry written before Details existed decodes on a
+// new binary with Details == nil (absent, never a zero-value pretending to be
+// data), and an entry carrying Details decodes on an older binary that simply
+// ignores the unknown key. Only two changes would break that contract and need
+// a real format version: renaming/retyping an existing field, or making a new
+// field load-bearing for correctness rather than informational.
 type ProvenanceEntry struct {
 	Timestamp time.Time
 	Source    SourceType
 	AgentID   string // e.g. "user:mj", "ollama:llama3.2", "consolidation-worker"
 	Operation string // "create", "evolve", "update-relevance", "update-meta", "update-trust", "stamp-valid-until", "merge", "promote"
 	Note      string // optional free text
+	// Details carries the operation-specific "what changed and why" that the
+	// verb alone cannot express. Nil for operations that record none, and for
+	// every entry written before the field existed — absence is absence.
+	Details *Details `json:"Details,omitempty"`
+}
+
+// Details is the extensible, operation-specific payload of a ProvenanceEntry.
+//
+// Every field is optional and omitted when unset, so an operation populates
+// only what it actually knows. Today only "evolve" fills it in; forget
+// (not_true_since), consolidate (the merged source IDs) and friends can add
+// their own fields here later without another format decision — that is the
+// point of the shape. Pointer/omitempty rather than value types throughout:
+// an absent effective_at must read as absent, never as the zero time.
+type Details struct {
+	// PredecessorID is the engram this version superseded (evolve). It is the
+	// storage-side mirror of the RelSupersedes edge, recorded on the successor
+	// so the successor's own audit trail answers "what did this replace".
+	PredecessorID string `json:"predecessor_id,omitempty"`
+	// Reason is the caller-supplied justification for the change (evolve's
+	// reason argument) — the "why" the tool description promises.
+	Reason string `json:"reason,omitempty"`
+	// EffectiveAt is the valid-time boundary the change took effect at: the
+	// successor's ValidFrom and the predecessor's ValidUntil. Distinct from
+	// Timestamp, which is when the write happened.
+	EffectiveAt *time.Time `json:"effective_at,omitempty"`
 }

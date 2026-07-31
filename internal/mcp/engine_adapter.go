@@ -657,6 +657,17 @@ func (a *mcpEngineAdapter) GetProvenance(ctx context.Context, vault, id string) 
 			Operation: e.Operation,
 			Note:      e.Note,
 		}
+		// Operation-specific details, when the record carries them. Legacy
+		// entries — and operations that record none — leave these unset, and
+		// omitempty keeps them out of the response entirely: an unknown
+		// predecessor or reason is reported as absent, never as empty.
+		if d := e.Details; d != nil {
+			result[i].PredecessorID = d.PredecessorID
+			result[i].Reason = d.Reason
+			if d.EffectiveAt != nil {
+				result[i].EffectiveAt = d.EffectiveAt.UTC().Format(time.RFC3339)
+			}
+		}
 	}
 	return result, nil
 }

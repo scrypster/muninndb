@@ -944,7 +944,7 @@ func allToolDefinitions() []ToolDefinition {
 		// Provenance audit trail
 		{
 			Name:        "muninn_provenance",
-			Description: "Returns the ordered audit trail for an engram — who wrote it, what changed, and why.",
+			Description: "Returns the ordered audit trail for an engram — who wrote it, what changed, and why. Each entry has a timestamp, source, agent_id and operation; evolve entries also carry predecessor_id (the version this replaced), reason, and effective_at (when the change became true, as opposed to when it was written). Fields are omitted when the operation recorded none — an omitted field means unrecorded, not empty.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
