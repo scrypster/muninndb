@@ -3420,7 +3420,11 @@ type ConsolidateResult struct {
 // Warnings lists any evidence IDs that could not be linked to the decision;
 // the decision itself is always committed even when evidence linking partially fails.
 type DecideResult struct {
-	ID       storage.ULID
+	ID storage.ULID
+	// Concept is the concept actually stored (the decision text). Returned so
+	// a transport can echo what it wrote instead of an empty string — two
+	// evaluators read the previous {"concept":""} response as data loss.
+	Concept  string
 	Warnings []string
 }
 
@@ -3900,7 +3904,7 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 	if err != nil {
 		return nil, fmt.Errorf("decide: parse id: %w", err)
 	}
-	return &DecideResult{ID: decideULID, Warnings: warnings}, nil
+	return &DecideResult{ID: decideULID, Concept: decision, Warnings: warnings}, nil
 }
 
 // RecordAccess increments the access count and updates the last-accessed timestamp

@@ -94,7 +94,20 @@ func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent,
 	if err != nil {
 		return nil, err
 	}
-	return &WriteResult{ID: id.String()}, nil
+	// Echo the concept that was actually stored. The successor's concept is
+	// either the caller's override or the one carried from the predecessor, so
+	// it cannot be reconstructed from the arguments alone — read it back. The
+	// previous {"concept":""} response led two evaluators to conclude the
+	// write had lost data when the record was in fact correct.
+	res := &WriteResult{ID: id.String()}
+	if eng, err := a.eng.GetEngram(ctx, vault, id); err == nil && eng != nil {
+		res.Concept = eng.Concept
+	} else if err != nil {
+		// Never fail an accepted write over a cosmetic read-back; say so rather
+		// than reporting an empty concept as if that were the stored value.
+		res.Warnings = append(res.Warnings, fmt.Sprintf("evolve succeeded but the stored concept could not be read back: %v", err))
+	}
+	return res, nil
 }
 func (a *mcpEngineAdapter) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
 	res, err := a.eng.Consolidate(ctx, vault, ids, merged)
@@ -123,7 +136,7 @@ func (a *mcpEngineAdapter) Decide(ctx context.Context, vault, decision, rational
 	if err != nil {
 		return nil, err
 	}
-	return &WriteResult{ID: res.ID.String(), Warnings: res.Warnings}, nil
+	return &WriteResult{ID: res.ID.String(), Concept: res.Concept, Warnings: res.Warnings}, nil
 }
 
 func (a *mcpEngineAdapter) Restore(ctx context.Context, vault, id string) (*RestoreResult, error) {
