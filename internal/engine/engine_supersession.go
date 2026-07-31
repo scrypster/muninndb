@@ -162,6 +162,17 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		return results, 0
 	}
 
+	// Copy before mutating: every write below (head scores, demotions, the
+	// re-sort) lands in the backing array Run() returned, and the activation
+	// engine's async log-drain goroutine may still be reading that array's
+	// Score fields — the same hazard the final COG-19 gate in activateCore
+	// already avoids by filtering into a NEW slice. Reproduced under -race with
+	// a link-supersedes chain read under include_invalid, which needs neither
+	// evolve nor a soft-delete. Paid only when a substitution actually
+	// happens: the no-stale path above returns the caller's slice untouched.
+	// Capacity covers the heads Phase 2a may append.
+	results = append(make([]activation.ScoredEngram, 0, len(results)+len(headFinal)), results...)
+
 	// Fold each head's OWN earned score (when it was already retrieved) into its
 	// final: a head keeps its own high relevance and never drops below it.
 	for headID := range headFinal {

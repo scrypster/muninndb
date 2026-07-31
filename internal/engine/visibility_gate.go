@@ -86,7 +86,13 @@ func (g *visibilityGate) Nameable(ctx context.Context, store *storage.PebbleStor
 	if eng == nil {
 		return false
 	}
-	if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
+	// Lifecycle state, evaluated under the caller's temporal view — the same
+	// predicate phase 6 applies (activation.PassesLifecycle), so the two paths
+	// cannot drift. Default recall still refuses every soft-deleted engram; an
+	// explicit as_of / include_invalid query still reaches a SUPERSEDED one
+	// (soft-delete + closed ValidUntil), because supersession demotes a fact
+	// rather than erasing it.
+	if !activation.PassesLifecycle(eng, g.req.AsOf, g.req.IncludeInvalid) {
 		return false
 	}
 	if !activation.PassesMetaFilter(eng, g.req.Filters) {

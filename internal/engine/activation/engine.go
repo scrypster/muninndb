@@ -1635,12 +1635,19 @@ func (e *ActivationEngine) phase6Score(
 
 	// Filter out soft-deleted engrams (defense-in-depth; HNSW has no delete method).
 	// Also filter untrusted engrams when ExcludeUntrusted is set in the request.
+	//
+	// The lifecycle cut is temporal-view aware (see PassesLifecycle): default
+	// recall drops every soft-deleted engram exactly as before, while an
+	// explicit historical query (as_of / include_invalid) still reaches a
+	// SUPERSEDED predecessor — soft-delete + a closed ValidUntil — because
+	// demoting a fact must not erase it. PassesValidity below then decides
+	// whether it is nameable at the caller's instant.
 	var active []*storage.Engram
 	for _, eng := range allEngrams {
 		if eng == nil {
 			continue
 		}
-		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
+		if !PassesLifecycle(eng, req.AsOf, req.IncludeInvalid) {
 			continue
 		}
 		// Hard trust filter: skip engrams with TrustUntrusted (0x04) when requested.
