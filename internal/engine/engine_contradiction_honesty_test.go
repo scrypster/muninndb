@@ -154,8 +154,9 @@ func TestContradictionHonesty_UnresolvedDeclaredEdgeIsHonored(t *testing.T) {
 // phase. And the genuinely better unrelated match must never lose rank to
 // them: a conflict can only ever push a row DOWN, never above a better
 // unrelated result. That is the applySupersession demote-only precedent
-// restated, and it is why COG-29 gathers a cluster to its LOWEST-ranked
-// member rather than its highest.
+// restated, and it is why COG-29 demotes scores and re-sorts rather than
+// forcing cluster adjacency in either direction (gathering up lifts a member
+// above a better unrelated row; gathering down buries a dominant answer).
 func TestContradictionHonesty_DemoteOnly(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()

@@ -174,9 +174,11 @@ type MemoryAnnotations struct {
 	HeadNotIndexedYet bool               `json:"head_not_indexed_yet,omitempty"`
 	// UnresolvedContradiction is COG-29 (#764) — ASSERTED, from a declared
 	// `contradicts` link that nothing has resolved. This memory is declared to
-	// disagree with another one, so it must NOT be read as the answer: its
-	// score has been demoted and capped and its partner is returned adjacent
-	// to it. Resolve it with muninn_evolve, muninn_forget(not_true_since=…),
+	// disagree with another one, so it must NOT be read as the answer without
+	// checking this annotation: its score is demoted 10% below its earned
+	// value, and results stay score-ordered (near-tied rivals land adjacent;
+	// a clearly stronger match keeps its rank).
+	// Resolve it with muninn_evolve, muninn_forget(not_true_since=…),
 	// or muninn_link(relation="supersedes"). Distinct from the advisory
 	// conflicts_with above, which is a heuristic annotate=true signal.
 	UnresolvedContradiction *mbp.ContradictionConflict `json:"unresolved_contradiction,omitempty"`

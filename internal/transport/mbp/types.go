@@ -392,8 +392,10 @@ type ActivationItem struct {
 	Importance float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
 	// UnresolvedContradiction is COG-29 contradiction honesty (#764): this
 	// memory is joined to another by an UNRESOLVED, DECLARED `contradicts`
-	// edge, so it must not be read as the answer. Its score has been demoted
-	// and capped and its partner is returned adjacent to it. ASSERTED — an
+	// edge, so it must not be read as the answer without checking this
+	// annotation. Its score is demoted 10% below its earned value; results
+	// stay score-ordered, so near-tied rivals land adjacent while a clearly
+	// stronger match keeps its rank. ASSERTED — an
 	// agent declared the disagreement — and always-on for the same reason
 	// superseded_by is: a caller must never be handed a disputed fact without
 	// being told. nil when this memory is in no live conflict.
@@ -455,9 +457,11 @@ type ConflictPairInfo struct {
 	BConcept string `msgpack:"b_concept,omitempty" json:"b_concept,omitempty"`
 	// DeclaredAt is RFC3339, omitted when unknown.
 	DeclaredAt string `msgpack:"declared_at,omitempty" json:"declared_at,omitempty"`
-	// Preferred is "a" or "b" — which side this response ORDERED FIRST, and
-	// nothing more. It is a presentation order derived from valid-time and the
-	// direction of the declaration, NOT a verdict about which memory is true.
+	// Preferred is "a" or "b" — the side the RECENCY LADDER prefers
+	// (valid-time, then the direction of the declaration), and nothing more.
+	// It is NOT a verdict about which memory is true, and it may differ from
+	// the response's actual order: results are ordered by demoted score, so a
+	// stronger-matching older side can still rank above the preferred one.
 	// Basis names the rule that decided it: newer_valid_from | asserting_side
 	// | ulid_tiebreak.
 	Preferred string `msgpack:"preferred,omitempty" json:"preferred,omitempty"`

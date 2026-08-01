@@ -248,8 +248,9 @@ type ScoredEngram struct {
 	// engine_contradiction.go) on a row joined to another memory by an
 	// UNRESOLVED, DECLARED `contradicts` edge. It is ASSERTED — an agent said
 	// these two disagree — and it means this row must not be read as the
-	// answer: its score has been demoted and capped, and its partner is
-	// returned adjacent to it. nil on every row not in a live conflict.
+	// answer without checking the annotation: its score is demoted 10% below
+	// its earned value, and the response stays score-ordered. nil on every
+	// row not in a live conflict.
 	UnresolvedContradiction *ContradictionConflict
 }
 

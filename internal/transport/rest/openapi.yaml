@@ -454,11 +454,12 @@ components:
       description: >-
         COG-29 contradiction honesty (#764). ASSERTED, from a declared
         `contradicts` link that nothing has resolved: this memory is declared to
-        disagree with another one, so it must NOT be read as the answer. Its
-        score has been demoted and hard-capped and its partner is returned
-        adjacent to it. Resolve it with evolve, forget(not_true_since=…), or
-        link(relation="supersedes"). Absent when the memory is in no live
-        conflict.
+        disagree with another one, so it must NOT be read as the answer without
+        checking this annotation. Its score has been demoted 10 percent below
+        its earned value; results stay ordered by score, so near-tied rivals
+        land adjacent while a clearly stronger match keeps its rank. Resolve it
+        with evolve, forget(not_true_since=…), or link(relation="supersedes").
+        Absent when the memory is in no live conflict.
       properties:
         with:
           type: string
@@ -529,8 +530,10 @@ components:
           type: string
           enum: [a, b]
           description: >-
-            Which side this response ORDERED FIRST — a presentation order, NOT a
-            verdict about which memory is true.
+            The side the recency ladder prefers (valid-time, then the direction
+            of the declaration) — NOT a verdict about which memory is true, and
+            it may differ from the response's actual order, which is by demoted
+            score.
         basis:
           type: string
           enum: [newer_valid_from, asserting_side, ulid_tiebreak]

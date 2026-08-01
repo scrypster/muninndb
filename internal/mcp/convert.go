@@ -53,8 +53,8 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 			ChainTruncated:    item.ChainTruncated,
 			HeadNotIndexedYet: item.HeadNotIndexedYet,
 			// COG-29 (#764): asserted, unresolved declared contradiction.
-			// Always-on — this row's score was demoted and capped because of
-			// it, so omitting it would leave the number unexplained.
+			// Always-on — this row's score was demoted because of it, so
+			// omitting it would leave the number unexplained.
 			UnresolvedContradiction: item.UnresolvedContradiction,
 		}
 		if b := item.SubstitutionBasis; b != nil {
