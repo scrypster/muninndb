@@ -433,7 +433,7 @@ func TestContradictionHonesty_OneSidedIsAnnotatedNotInjected(t *testing.T) {
 // So the guarantee that holds, and that this test pins, is the one that
 // actually removes the reported failure: a caller that consumes only the first
 // result is still told, on that row, that it is disputed and by which memory —
-// with the score capped and the response-level block present. The
+// with the score demoted and the response-level block present. The
 // keepAtLeast/adjacency_overflow machinery still defends the case where a
 // post-pipeline injector grows the set past MaxResults and a cluster straddles
 // the re-truncation boundary.
@@ -647,11 +647,25 @@ func BenchmarkRecallContradictionGate(b *testing.B) {
 			ctx := context.Background()
 			vault := "bench-" + tc.name
 
+			// Distinctive vocabulary per engram: only the first 10 rows are
+			// about the query's topic. A corpus where every row contains
+			// every query term collapses the IDF, nothing clears the
+			// threshold, and the benchmark silently times the phase's
+			// len(results)==0 early return instead of the phase (the G6
+			// re-verification caught exactly that).
 			var first, second string
 			for i := 0; i < 200; i++ {
-				w, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault,
-					Concept: fmt.Sprintf("service policy %d", i),
-					Content: fmt.Sprintf("the request timeout limit for service %d is %dms", i, 100+i)})
+				var wreq *mbp.WriteRequest
+				if i < 10 {
+					wreq = &mbp.WriteRequest{Vault: vault,
+						Concept: fmt.Sprintf("gateway timeout policy %d", i),
+						Content: fmt.Sprintf("the request timeout limit for gateway %d is %dms", i, 100+i)}
+				} else {
+					wreq = &mbp.WriteRequest{Vault: vault,
+						Concept: fmt.Sprintf("orchard telemetry %d", i),
+						Content: fmt.Sprintf("orchard drone battery cell %d holds charge for %d minutes in frost", i, 40+i)}
+				}
+				w, err := eng.Write(ctx, wreq)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -672,8 +686,17 @@ func BenchmarkRecallContradictionGate(b *testing.B) {
 			}
 			req := &mbp.ActivateRequest{Vault: vault,
 				Context: []string{"what is the request timeout limit"}, MaxResults: 10, Threshold: 0.001}
-			if _, err := eng.Activate(ctx, req); err != nil { // warm caches + the once-per-vault probe
+			warm, err := eng.Activate(ctx, req) // warm caches + the once-per-vault probe
+			if err != nil {
 				b.Fatal(err)
+			}
+			// A benchmark that times an empty response measures the early
+			// return, not the phase. Fail loudly instead of lying quietly.
+			if len(warm.Activations) == 0 {
+				b.Fatalf("benchmark query returned zero rows — the corpus no longer exercises the phase")
+			}
+			if tc.conflict && warm.Conflict == nil {
+				b.Fatalf("gate_open arm has no conflict block — the phase is not firing on the timed path")
 			}
 
 			lat := make([]time.Duration, 0, b.N)

@@ -861,6 +861,15 @@ func (e *Engine) spawnJob(fn func()) bool {
 // first (and, downstream, whether NoticesForRecall sees the corroborator or
 // the intention's own engram at rank 0). Refs #722.
 func (e *Engine) waitWriteTimeIdle() {
+	e.WaitWriteTimeIdle()
+}
+
+// WaitWriteTimeIdle is the exported test seam over waitWriteTimeIdle, for
+// tests OUTSIDE this package (e.g. internal/mcp) that seed through the real
+// engine and must not poll wall-clock deadlines for async index visibility
+// (#722 doctrine; the SetFlushInterval precedent). Production code has no
+// reason to call it — recall is eventually consistent by design.
+func (e *Engine) WaitWriteTimeIdle() {
 	if e.autoAssoc != nil {
 		e.autoAssoc.WaitIdle()
 	}

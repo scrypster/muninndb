@@ -153,23 +153,16 @@ func TestRecallOverMCP_ConflictBlockAndAnnotations(t *testing.T) {
 
 	a, b := seedContradictionOverMCP(t, eng, srv, "default")
 
-	// The FTS index is written by an async worker and package mcp has no
-	// access to the engine's unexported drain seam, so wait for the index to
-	// become visible before asserting. This is a wait for eventual
-	// consistency, not a sleep past a race: once the rows appear, everything
-	// asserted below is computed synchronously with them in the same response.
+	// Drain the write-time async workers (FTS indexing included) through the
+	// engine's exported seam instead of polling a wall-clock deadline — the
+	// 10s poll this replaces flaked at ~10% under -race on a loaded machine
+	// (#722 doctrine: drain deterministically, never sleep past a race).
+	eng.WaitWriteTimeIdle()
+
 	rpc := `{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":"what is the request timeout limit","limit":5,"threshold":0.001}}}`
-	var got map[string]any
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		got = extractInnerJSON(t, decodeResp(t, postRPC(t, srv, rpc).Body.String()))
-		if mem, _ := got["memories"].([]any); len(mem) >= 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("both sides of the conflict never became retrievable: %v", got)
-		}
-		time.Sleep(25 * time.Millisecond)
+	got := extractInnerJSON(t, decodeResp(t, postRPC(t, srv, rpc).Body.String()))
+	if mem, _ := got["memories"].([]any); len(mem) < 2 {
+		t.Fatalf("both sides of the conflict not retrievable after the write-time drain: %v", got)
 	}
 
 	// The response-level block survived the hand-built map.
