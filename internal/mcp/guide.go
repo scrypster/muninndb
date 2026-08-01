@@ -179,6 +179,17 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("with two competing successors) abstains with `abstained_reason: \"ambiguous_version\"` rather than guessing a branch — `muninn_read` ")
 	b.WriteString("the older memory and resolve it yourself; a chain whose current version was forgotten or is unreachable abstains ")
 	b.WriteString("`\"superseded_only\"`. Historical queries (`as_of`, `include_invalid`) never substitute — there the older version IS the answer.\n")
+	b.WriteString("**Declaring a contradiction changes what recall returns.** `muninn_link(relation=\"contradicts\")` is durable the moment it returns and ")
+	b.WriteString("is honored by the very next `muninn_recall`: when two returned memories are joined by an unresolved `contradicts` link, NEITHER is ")
+	b.WriteString("presented as the answer. Both are returned adjacent, score-capped, and each carries `annotations.unresolved_contradiction` naming the ")
+	b.WriteString("other side (`with`, `with_concept`, `side`, `partner_in_results`), and the response carries a top-level `conflict` block. If only one ")
+	b.WriteString("side matched your query, that row is still capped and annotated with `partner_in_results: false` — the partner is named, never injected. ")
+	b.WriteString("**Resolve it and the flagging stops immediately, on this surface and in `muninn_contradictions`:** `muninn_evolve` the memory that should ")
+	b.WriteString("survive, `muninn_forget(not_true_since=…)` the side that stopped being true, or `muninn_link(relation=\"supersedes\")` to declare which one ")
+	b.WriteString("wins. Until then both facts stay capped — visible and recoverable, and strictly better than one of them being handed to you as the truth. ")
+	b.WriteString("`muninn_contradictions` reports each pair's `status` (`declared` = an explicit link exists; `detected` = the detector found it), its ")
+	b.WriteString("`confidence_penalty` (`pending`|`applied` — an asynchronous ~30s batch job that affects confidence only, never whether the contradiction ")
+	b.WriteString("is honored), and `resolved_by` on pairs that are no longer live.\n")
 
 	// Hierarchical memory
 	b.WriteString("\n## Hierarchical Memory\n\n")

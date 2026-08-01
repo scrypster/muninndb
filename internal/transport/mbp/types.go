@@ -300,6 +300,12 @@ type ActivateResponse struct {
 	// flag. Empty iff Abstained is false.
 	Abstained       bool   `msgpack:"abstained,omitempty"        json:"abstained,omitempty"`
 	AbstainedReason string `msgpack:"abstained_reason,omitempty" json:"abstained_reason,omitempty"`
+	// Conflict is COG-29 contradiction honesty (#764): at least two returned
+	// memories are declared to contradict each other and the conflict is
+	// unresolved, so neither is presented as the answer. nil otherwise.
+	// Carried on MBP + REST (alias) + MCP; gRPC does NOT map it (pb has no
+	// annotation fields at all — obligation #3, deliberate).
+	Conflict *ConflictBlock `msgpack:"conflict,omitempty" json:"conflict,omitempty"`
 }
 
 // ActivationItem is a single activated engram.
@@ -384,6 +390,84 @@ type ActivationItem struct {
 	// Importance is the STORED caller-asserted importance (0 = unset; the
 	// presentation layer derives the effective value — see ReadResponse).
 	Importance float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
+	// UnresolvedContradiction is COG-29 contradiction honesty (#764): this
+	// memory is joined to another by an UNRESOLVED, DECLARED `contradicts`
+	// edge, so it must not be read as the answer. Its score has been demoted
+	// and capped and its partner is returned adjacent to it. ASSERTED — an
+	// agent declared the disagreement — and always-on for the same reason
+	// superseded_by is: a caller must never be handed a disputed fact without
+	// being told. nil when this memory is in no live conflict.
+	UnresolvedContradiction *ContradictionConflict `msgpack:"unresolved_contradiction,omitempty" json:"unresolved_contradiction,omitempty"`
+}
+
+// ContradictionConflict is the per-row COG-29 payload (#764): which memory
+// this one is declared to contradict, and enough context to act on it without
+// a second call.
+type ContradictionConflict struct {
+	// With is the partner's ULID; WithConcept its concept, omitted when it
+	// could not be resolved rather than guessed at.
+	With        string `msgpack:"with"                    json:"with"`
+	WithConcept string `msgpack:"with_concept,omitempty"  json:"with_concept,omitempty"`
+	// Side is "asserted" (this memory is the SOURCE of the contradicts edge)
+	// or "challenged" (it is the target).
+	Side string `msgpack:"side" json:"side"`
+	// DeclaredAt is RFC3339. OMITTED when the edge carries no stamp — an
+	// unknown time is never serialised as the zero instant.
+	DeclaredAt string `msgpack:"declared_at,omitempty" json:"declared_at,omitempty"`
+	// PartnerInResults reports whether the partner is also in this response.
+	// When false the partner is named but NOT injected: neither side of an
+	// unresolved conflict is known to be right, so a conflict must never lift
+	// content into a result set it did not earn.
+	PartnerInResults bool `msgpack:"partner_in_results" json:"partner_in_results"`
+	// ScoreCapped reports that the hard ceiling, not merely the relative
+	// demote, bound this row's score.
+	ScoreCapped bool `msgpack:"score_capped" json:"score_capped"`
+	// ClusterSize is the number of mutually-conflicting rows in this row's
+	// conflict cluster (2 for an ordinary pair). ClusterTruncated marks a
+	// cluster larger than the per-query cap.
+	ClusterSize      int  `msgpack:"cluster_size,omitempty"      json:"cluster_size,omitempty"`
+	ClusterTruncated bool `msgpack:"cluster_truncated,omitempty" json:"cluster_truncated,omitempty"`
+}
+
+// ConflictBlock is the response-level COG-29 signal (#764): this response
+// contains at least one pair of memories declared to contradict each other
+// with the conflict unresolved, so NEITHER is presented as the answer.
+//
+// Abstained is deliberately NOT set alongside it. The candidates are
+// admission-worthy and the response is non-empty; the "Empty iff Abstained is
+// false" contract is untouched, and emptying a real result set to signal a
+// conflict would destroy the true memory exactly as hard as the false one —
+// the #747/#754 lesson.
+type ConflictBlock struct {
+	Unresolved bool               `msgpack:"unresolved"        json:"unresolved"`
+	Pairs      []ConflictPairInfo `msgpack:"pairs,omitempty"   json:"pairs,omitempty"`
+	Warning    string             `msgpack:"warning,omitempty" json:"warning,omitempty"`
+	// AdjacencyOverflow reports how many rows beyond max_results the response
+	// carries in order to keep a conflict cluster whole. Returning one side of
+	// a conflict alone is the failure this block exists to remove, so the
+	// truncation yields to it — but never silently.
+	AdjacencyOverflow int `msgpack:"adjacency_overflow,omitempty" json:"adjacency_overflow,omitempty"`
+}
+
+// ConflictPairInfo names one unresolved declared contradiction and which side
+// the ordering ladder preferred.
+type ConflictPairInfo struct {
+	A        string `msgpack:"a"                   json:"a"`
+	B        string `msgpack:"b"                   json:"b"`
+	AConcept string `msgpack:"a_concept,omitempty" json:"a_concept,omitempty"`
+	BConcept string `msgpack:"b_concept,omitempty" json:"b_concept,omitempty"`
+	// DeclaredAt is RFC3339, omitted when unknown.
+	DeclaredAt string `msgpack:"declared_at,omitempty" json:"declared_at,omitempty"`
+	// Preferred is "a" or "b" — which side this response ORDERED FIRST, and
+	// nothing more. It is a presentation order derived from valid-time and the
+	// direction of the declaration, NOT a verdict about which memory is true.
+	// Basis names the rule that decided it: newer_valid_from | asserting_side
+	// | ulid_tiebreak.
+	Preferred string `msgpack:"preferred,omitempty" json:"preferred,omitempty"`
+	Basis     string `msgpack:"basis,omitempty"     json:"basis,omitempty"`
+	// PartnerInResults is false when only one side of this pair is in the
+	// response (the other was live and visible but did not match the query).
+	PartnerInResults bool `msgpack:"partner_in_results" json:"partner_in_results"`
 }
 
 // SubstitutionBasis is the evidence that admitted a COG-28 substituted row:

@@ -243,6 +243,45 @@ type ScoredEngram struct {
 	SubstitutionBasis *ScoreComponents
 	ChainTruncated    bool
 	HeadNotIndexedYet bool
+
+	// UnresolvedContradiction is set by COG-29 contradiction honesty (#764,
+	// engine_contradiction.go) on a row joined to another memory by an
+	// UNRESOLVED, DECLARED `contradicts` edge. It is ASSERTED — an agent said
+	// these two disagree — and it means this row must not be read as the
+	// answer: its score has been demoted and capped, and its partner is
+	// returned adjacent to it. nil on every row not in a live conflict.
+	UnresolvedContradiction *ContradictionConflict
+}
+
+// ContradictionConflict is the per-row COG-29 payload: which memory this one
+// is declared to contradict, and enough context for an agent to act on it
+// without a second call.
+type ContradictionConflict struct {
+	// With is the partner's ULID; WithConcept its concept (empty when the
+	// partner's concept could not be resolved — never guessed at).
+	With        storage.ULID
+	WithConcept string
+	// Side is "asserted" when this row is the SOURCE of the contradicts edge
+	// (this memory was declared to contradict the other) and "challenged"
+	// when it is the target.
+	Side string
+	// DeclaredAt is when the edge was written. Zero means UNKNOWN (a legacy
+	// edge with no stamp) and must be rendered as absent, never as an instant.
+	DeclaredAt time.Time
+	// PartnerInResults reports whether the partner is also in this response.
+	// When false the partner was live and visible but did not match the query
+	// — it is named, not injected: neither side of an unresolved conflict is
+	// known to be right, so a conflict must never LIFT content into a result
+	// set it did not earn.
+	PartnerInResults bool
+	// ScoreCapped reports that the ceiling, not just the relative demote,
+	// bound this row's score.
+	ScoreCapped bool
+	// ClusterSize is the number of mutually-conflicting rows this row belongs
+	// to (2 for an ordinary pair). ClusterTruncated marks a cluster larger
+	// than the per-query cap, whose remaining members are not enumerated.
+	ClusterSize      int
+	ClusterTruncated bool
 }
 
 // EngramFilter is a post-retrieval predicate applied as the final activation step.

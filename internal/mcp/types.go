@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/engine"
+	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // JSON-RPC 2.0 envelope types
@@ -171,7 +172,15 @@ type MemoryAnnotations struct {
 	SubstitutionBasis *SubstitutionBasis `json:"substitution_basis,omitempty"`
 	ChainTruncated    bool               `json:"chain_truncated,omitempty"`
 	HeadNotIndexedYet bool               `json:"head_not_indexed_yet,omitempty"`
-	LastVerified      string             `json:"last_verified,omitempty"` // RFC3339
+	// UnresolvedContradiction is COG-29 (#764) — ASSERTED, from a declared
+	// `contradicts` link that nothing has resolved. This memory is declared to
+	// disagree with another one, so it must NOT be read as the answer: its
+	// score has been demoted and capped and its partner is returned adjacent
+	// to it. Resolve it with muninn_evolve, muninn_forget(not_true_since=…),
+	// or muninn_link(relation="supersedes"). Distinct from the advisory
+	// conflicts_with above, which is a heuristic annotate=true signal.
+	UnresolvedContradiction *mbp.ContradictionConflict `json:"unresolved_contradiction,omitempty"`
+	LastVerified            string                     `json:"last_verified,omitempty"` // RFC3339
 }
 
 // SubstitutionBasis is the superseded predecessor's measured evidence against
@@ -225,6 +234,13 @@ type ContradictionPair struct {
 	// a ~30s batch interval and affects only the two memories' confidence
 	// scores — never whether the contradiction is recorded or honored.
 	ConfidencePenalty string `json:"confidence_penalty,omitempty"`
+	// ResolvedBy names why a pair with status "resolved" is no longer a live
+	// conflict: "supersedes" (an explicit supersedes link between the two) or
+	// "endpoint_retired" (one side was evolved, forgotten, archived, or its
+	// validity window elapsed). Empty on a live pair. Before #764 nothing in
+	// the product cleared a declared contradiction, so resolving one the way
+	// the tool advises left the pair listed forever.
+	ResolvedBy string `json:"resolved_by,omitempty"`
 	// DetectedAt is when the detector flagged the pair. Absent while pending,
 	// and absent for markers written before the timestamp was recorded.
 	DetectedAt *time.Time `json:"detected_at,omitempty"`
@@ -245,6 +261,10 @@ type ContradictionsReport struct {
 	Contradictions []ContradictionPair `json:"contradictions"`
 	DetectedCount  int                 `json:"detected_count"`
 	PendingCount   int                 `json:"pending_count"`
+	// ResolvedCount is how many recorded pairs are no longer live conflicts.
+	// They are still listed (status "resolved", with resolved_by) rather than
+	// omitted, but they are not outstanding work.
+	ResolvedCount int `json:"resolved_count"`
 	// ScanComplete is false when the search for declared-but-undetected links
 	// hit its scan cap; PendingCount is then a lower bound, not a total.
 	ScanComplete bool   `json:"scan_complete"`

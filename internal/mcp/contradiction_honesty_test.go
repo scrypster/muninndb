@@ -137,3 +137,93 @@ func TestContradictionsOverMCP_DeclaredNotPending(t *testing.T) {
 		t.Errorf("status = %v after detection, want \"declared\" (provenance, not readiness)", entry["status"])
 	}
 }
+
+// TestRecallOverMCP_ConflictBlockAndAnnotations is R4 for #764 D2.
+//
+// It exists specifically for the two places a contradiction field silently
+// disappears on this surface, neither of which the engine-level test can see:
+// convert.go's "should I allocate annotations at all" predicate (a row
+// carrying no OTHER annotation would drop the field entirely), and
+// handleRecall's hand-built result map, which is NOT a mirror of
+// mbp.ActivateResponse — a field added to the struct alone reaches REST and
+// vanishes here.
+func TestRecallOverMCP_ConflictBlockAndAnnotations(t *testing.T) {
+	eng, srv, cleanup := newContradictionServer(t, time.Hour) // no worker flush needed
+	defer cleanup()
+
+	a, b := seedContradictionOverMCP(t, eng, srv, "default")
+
+	// The FTS index is written by an async worker and package mcp has no
+	// access to the engine's unexported drain seam, so wait for the index to
+	// become visible before asserting. This is a wait for eventual
+	// consistency, not a sleep past a race: once the rows appear, everything
+	// asserted below is computed synchronously with them in the same response.
+	rpc := `{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"muninn_recall","arguments":{"vault":"default","context":"what is the request timeout limit","limit":5,"threshold":0.001}}}`
+	var got map[string]any
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got = extractInnerJSON(t, decodeResp(t, postRPC(t, srv, rpc).Body.String()))
+		if mem, _ := got["memories"].([]any); len(mem) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("both sides of the conflict never became retrievable: %v", got)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	// The response-level block survived the hand-built map.
+	block, ok := got["conflict"].(map[string]any)
+	if !ok {
+		t.Fatalf("muninn_recall response carries no top-level \"conflict\" key: %v", got)
+	}
+	if block["unresolved"] != true {
+		t.Errorf("conflict.unresolved = %v, want true", block["unresolved"])
+	}
+	if w, _ := block["warning"].(string); w == "" {
+		t.Error("conflict block carries no warning naming the resolution actions")
+	}
+	if pairs, _ := block["pairs"].([]any); len(pairs) != 1 {
+		t.Errorf("conflict.pairs = %v, want exactly one pair", block["pairs"])
+	}
+
+	// Both rows carry the per-row annotation — and neither carries any OTHER
+	// annotation, so this is exactly the convert.go allocation-predicate case.
+	memories, _ := got["memories"].([]any)
+	if len(memories) < 2 {
+		t.Fatalf("want both sides of the conflict returned, got %d memories", len(memories))
+	}
+	seen := map[string]bool{}
+	for _, raw := range memories {
+		m, _ := raw.(map[string]any)
+		id, _ := m["id"].(string)
+		if id != a && id != b {
+			continue
+		}
+		ann, ok := m["annotations"].(map[string]any)
+		if !ok {
+			t.Fatalf("row %s has no annotations object at all — the allocation predicate dropped it", id)
+		}
+		c, ok := ann["unresolved_contradiction"].(map[string]any)
+		if !ok {
+			t.Fatalf("row %s: annotations carry no unresolved_contradiction: %v", id, ann)
+		}
+		wantPartner := a
+		if id == a {
+			wantPartner = b
+		}
+		if c["with"] != wantPartner {
+			t.Errorf("row %s names partner %v, want %s", id, c["with"], wantPartner)
+		}
+		if c["partner_in_results"] != true {
+			t.Errorf("row %s: partner_in_results = %v, want true", id, c["partner_in_results"])
+		}
+		if s, _ := c["side"].(string); s != "asserted" && s != "challenged" {
+			t.Errorf("row %s: side = %v", id, c["side"])
+		}
+		seen[id] = true
+	}
+	if !seen[a] || !seen[b] {
+		t.Errorf("annotation missing on one side: a=%v b=%v", seen[a], seen[b])
+	}
+}

@@ -290,7 +290,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"annotate": map[string]any{
 						"type":        "boolean",
-						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false. Independent of annotate: whenever a result belongs to a detected same-subject version cluster, annotations also carries an ADVISORY (never asserted) possibly_superseded_by/version_cluster/newest_of_cluster/cluster_size signal — a mechanical hint pointing an older cluster member at the newest, distinct from the authoritative superseded_by/current_version pair.",
+						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false. Independent of annotate: whenever a result belongs to a detected same-subject version cluster, annotations also carries an ADVISORY (never asserted) possibly_superseded_by/version_cluster/newest_of_cluster/cluster_size signal — a mechanical hint pointing an older cluster member at the newest, distinct from the authoritative superseded_by/current_version pair. Also independent of annotate: a memory under an UNRESOLVED declared contradicts link always carries annotations.unresolved_contradiction (naming the memory it disagrees with) and the response carries a top-level conflict block — its score has been demoted and capped, so it must not be read as the answer. Resolve it with muninn_evolve, muninn_forget(not_true_since=...), or muninn_link(relation=\"supersedes\").",
 					},
 					"caller": map[string]any{
 						"type":        "string",

@@ -1066,6 +1066,32 @@ func (ps *PebbleStore) GetContradictions(ctx context.Context, wsPrefix [8]byte) 
 	return pairs, nil
 }
 
+// HasContradictionMarkers reports whether the vault has ANY 0x0A contradiction
+// marker, using a single bounded iterator seek rather than the full scan
+// GetContradictionRecords pays.
+//
+// It exists for the recall hot path: COG-29's contradiction-honesty phase must
+// be free on the overwhelming majority of vaults, which have no contradictions
+// at all, and a per-query prefix scan would not be. A true answer only means
+// "run the phase"; the phase itself decides what is actually unresolved.
+func (ps *PebbleStore) HasContradictionMarkers(ctx context.Context, wsPrefix [8]byte) (bool, error) {
+	lower := keys.ContradictionKeyPrefix(wsPrefix)
+	upper := make([]byte, len(lower))
+	copy(upper, lower)
+	upper[len(upper)-1]++
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return false, err
+	}
+	defer iter.Close()
+	found := iter.First()
+	if err := iter.Error(); err != nil {
+		return false, fmt.Errorf("HasContradictionMarkers: %w", err)
+	}
+	return found, nil
+}
+
 // GetContradictionRecords returns every flagged contradiction in the vault by
 // scanning the 0x0A prefix, carrying each marker's detection time.
 // The key structure is: 0x0A | wsPrefix(8) | conceptHash(4) | relType(2) | id(16) = 31 bytes.

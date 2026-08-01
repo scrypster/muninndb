@@ -38,7 +38,7 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 	// always-on; annotate=true only augments this struct further below.
 	if item.SupersededBy != "" || item.CurrentVersion != "" ||
 		item.PossiblySupersededBy != "" || item.VersionCluster != "" || item.NewestOfCluster ||
-		item.SubstitutedFor != "" {
+		item.SubstitutedFor != "" || item.UnresolvedContradiction != nil {
 		annotations = &MemoryAnnotations{
 			SupersededBy:         item.SupersededBy,
 			CurrentVersion:       item.CurrentVersion,
@@ -52,6 +52,10 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 			SubstitutedFor:    item.SubstitutedFor,
 			ChainTruncated:    item.ChainTruncated,
 			HeadNotIndexedYet: item.HeadNotIndexedYet,
+			// COG-29 (#764): asserted, unresolved declared contradiction.
+			// Always-on — this row's score was demoted and capped because of
+			// it, so omitting it would leave the number unexplained.
+			UnresolvedContradiction: item.UnresolvedContradiction,
 		}
 		if b := item.SubstitutionBasis; b != nil {
 			annotations.SubstitutionBasis = &SubstitutionBasis{

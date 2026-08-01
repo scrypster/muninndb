@@ -572,6 +572,15 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	if resp.SemanticDegraded {
 		result["semantic_degraded"] = true
 	}
+	// COG-29 (#764): at least two returned memories are declared to
+	// contradict each other with the conflict unresolved, so neither is
+	// presented as the answer. This map is hand-built and is NOT a mirror of
+	// mbp.ActivateResponse — a field added to the struct alone reaches REST
+	// and silently vanishes here, which is what
+	// TestRecallOverMCP_ConflictBlockAndAnnotations exists to catch.
+	if resp.Conflict != nil {
+		result["conflict"] = resp.Conflict
+	}
 	// THE PUSH: prospective notices — focal set derives from the RETURNED
 	// results; readOnly (COG-11) suppresses the fired-marker write. Omitted
 	// when empty; inert unless MUNINN_PROSPECTIVE=1.
@@ -761,6 +770,8 @@ func (s *MCPServer) handleContradictions(ctx context.Context, w http.ResponseWri
 		report.Note = "contradiction scan hit its cap: pending_count is a lower bound, and pairs declared by an explicit contradicts link may be missing from this list"
 	case report.PendingCount > 0:
 		report.Note = fmt.Sprintf("%d contradiction(s) are declared by an explicit link and are already honored by recall; the asynchronous confidence penalty for them has not been applied yet (it runs on a ~30s batch interval)", report.PendingCount)
+	case report.DetectedCount == 0 && report.ResolvedCount > 0:
+		report.Note = fmt.Sprintf("no live contradictions in this vault; %d recorded pair(s) have been resolved (see resolved_by)", report.ResolvedCount)
 	case report.DetectedCount == 0:
 		report.Note = "no contradictions in this vault, and none awaiting detection"
 	}

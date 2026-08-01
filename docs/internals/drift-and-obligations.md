@@ -35,6 +35,15 @@ and remain the reviewer's job.
    `version_cluster`/`newest_of_cluster`/`cluster_size` (advisory, COG-25) live on
    `mbp.ActivationItem` + `mcp.MemoryAnnotations`; REST inherits them via the
    `rest.ActivateResponse = mbp.ActivateResponse` type alias, so it is automatically in sync.
+   Since #764 the same list carries `unresolved_contradiction` (per-row, ASSERTED, COG-29)
+   and the RESPONSE-level `conflict` block. Two traps that list does not protect you from,
+   both hit in #764 and both now pinned by tests: `internal/mcp/convert.go`'s
+   "should I allocate an annotations object at all" predicate must name the new field or a
+   row carrying no OTHER annotation drops it silently
+   (`TestRecallOverMCP_ConflictBlockAndAnnotations`), and `internal/mcp/handlers.go`'s
+   recall response is a hand-built `map[string]any` that is NOT a mirror of
+   `mbp.ActivateResponse` — a response-level field added to the struct alone reaches REST
+   and vanishes on MCP.
    **proto/gRPC and the non-Go SDKs carry NO supersession/currency annotation fields at all**
    (their `ActivationItem` is a minimal subset that never had even `superseded_by`). Do NOT
    "complete" the schema by adding only the currency fields there — an unpopulated field the

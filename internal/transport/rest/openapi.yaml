@@ -446,6 +446,98 @@ components:
         importance:
           type: number
           format: float
+        unresolved_contradiction:
+          $ref: "#/components/schemas/ContradictionConflict"
+
+    ContradictionConflict:
+      type: object
+      description: >-
+        COG-29 contradiction honesty (#764). ASSERTED, from a declared
+        `contradicts` link that nothing has resolved: this memory is declared to
+        disagree with another one, so it must NOT be read as the answer. Its
+        score has been demoted and hard-capped and its partner is returned
+        adjacent to it. Resolve it with evolve, forget(not_true_since=…), or
+        link(relation="supersedes"). Absent when the memory is in no live
+        conflict.
+      properties:
+        with:
+          type: string
+          description: The partner memory's ULID.
+        with_concept:
+          type: string
+          description: The partner's concept. Omitted when it could not be resolved (never guessed at).
+        side:
+          type: string
+          enum: [asserted, challenged]
+          description: >-
+            "asserted" when this memory is the SOURCE of the contradicts edge,
+            "challenged" when it is the target.
+        declared_at:
+          type: string
+          format: date-time
+          description: When the edge was written. OMITTED when unknown — never serialised as the zero instant.
+        partner_in_results:
+          type: boolean
+          description: >-
+            Whether the partner is also in this response. When false the partner
+            is NAMED but deliberately not injected — neither side of an
+            unresolved conflict is known to be right, so a conflict must never
+            lift content into a result set it did not earn.
+        score_capped:
+          type: boolean
+        cluster_size:
+          type: integer
+        cluster_truncated:
+          type: boolean
+
+    ConflictBlock:
+      type: object
+      description: >-
+        COG-29 (#764) response-level signal: at least two returned memories are
+        declared to contradict each other and the conflict is unresolved, so
+        NEITHER is presented as the answer. `abstained` is deliberately NOT set
+        alongside it — the candidates are admission-worthy and the response is
+        non-empty.
+      properties:
+        unresolved:
+          type: boolean
+        pairs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConflictPairInfo"
+        warning:
+          type: string
+        adjacency_overflow:
+          type: integer
+          description: >-
+            How many rows beyond max_results this response carries in order to
+            keep a conflict cluster whole. Never applied silently.
+
+    ConflictPairInfo:
+      type: object
+      properties:
+        a:
+          type: string
+        b:
+          type: string
+        a_concept:
+          type: string
+        b_concept:
+          type: string
+        declared_at:
+          type: string
+          format: date-time
+        preferred:
+          type: string
+          enum: [a, b]
+          description: >-
+            Which side this response ORDERED FIRST — a presentation order, NOT a
+            verdict about which memory is true.
+        basis:
+          type: string
+          enum: [newer_valid_from, asserting_side, ulid_tiebreak]
+        partner_in_results:
+          type: boolean
 
     SubstitutionBasis:
       type: object
@@ -509,6 +601,17 @@ components:
             or a post-load embedding fetch failed — so semantic_similarity may be
             understated. Query-granular and coarse (set on any such failure even if
             the primary vector search produced real scores). Omitted when false.
+        abstained:
+          type: boolean
+          description: >-
+            True when the pipeline ran to completion and DELIBERATELY returned
+            nothing: candidates were scored and every one fell below the
+            relevance bar or was filtered. Empty iff abstained is false.
+        abstained_reason:
+          type: string
+          enum: [no_candidates, below_threshold, filtered, superseded_only, ambiguous_version]
+        conflict:
+          $ref: "#/components/schemas/ConflictBlock"
 
     # ── Link ─────────────────────────────────────────────────────────────────
 
