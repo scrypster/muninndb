@@ -634,7 +634,7 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		// < 30 minutes (so edges activated 30 min ago are still eligible for decay).
 		if lastActivated > 0 {
 			activatedAt := time.Unix(int64(lastActivated), 0)
-			if time.Since(activatedAt) < assocDecayGraceWindow {
+			if ps.now().Sub(activatedAt) < assocDecayGraceWindow {
 				continue // skip — recently used, leave key untouched
 			}
 		}
@@ -664,7 +664,7 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 			dynamicFloor := peakWeight * 0.05
 			if dynamicFloor > 0 && archiveThreshold > 0 {
 				// Compute consolidation score to decide archive vs clamp.
-				daysSince := time.Since(time.Unix(int64(lastActivated), 0)).Hours() / 24.0
+				daysSince := ps.now().Sub(time.Unix(int64(lastActivated), 0)).Hours() / 24.0
 				if daysSince < 1.0 {
 					daysSince = 1.0
 				}
