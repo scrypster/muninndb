@@ -148,6 +148,16 @@ func applyRelevanceBands(
 	// Response-wide exclusions, evaluated once. Each is a DECISION, in the
 	// style COG-18 R1 / COG-28 already use — see the basis constants in
 	// activation/relevance.go for why each mode cannot be banded.
+	// PRECEDENCE (deliberate, per the design's D5 table order): a
+	// response-wide uncalibrated basis (fusion mode, semantic_degraded,
+	// disabled/absent baseline) overrides per-row AdmissionTagFilter, so a
+	// due:<=today reminder in a degraded response reads
+	// uncalibrated/<cause>, not filter_match — even though the
+	// filter-admission fact is calibration-independent. The trade: one
+	// consistent "this response's numbers are uncalibrated" signal beats a
+	// mixed response where some rows look confidently classified. A
+	// follow-up may flip tag rows specifically; do it deliberately, not as
+	// a drive-by.
 	responseBasis := activation.FusionBandBasis(cal.FusionMode)
 	if responseBasis == "" && semanticDegraded {
 		responseBasis = activation.BasisSemanticDegraded
