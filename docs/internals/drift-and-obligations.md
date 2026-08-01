@@ -29,7 +29,9 @@ and remain the reviewer's job.
    get a warning from `.claude/hooks/drift-guard.mjs`; otherwise manual. 🪝
 
    **Recall supersession/currency annotations are MCP + MBP only, deliberately** (COG-22,
-   COG-25). `SupersededBy`/`CurrentVersion` (asserted) and `possibly_superseded_by`/
+   COG-25, COG-28). `SupersededBy`/`CurrentVersion` and `substituted_for`/
+   `substitution_basis`/`chain_truncated`/`head_not_indexed_yet` (all ASSERTED — the last
+   four are COG-28 version-head substitution, #763) and `possibly_superseded_by`/
    `version_cluster`/`newest_of_cluster`/`cluster_size` (advisory, COG-25) live on
    `mbp.ActivationItem` + `mcp.MemoryAnnotations`; REST inherits them via the
    `rest.ActivateResponse = mbp.ActivateResponse` type alias, so it is automatically in sync.

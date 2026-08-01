@@ -213,6 +213,33 @@ type ScoredEngram struct {
 	ClusterSize          int
 	NewestOfCluster      bool
 	PossiblySupersededBy storage.ULID
+
+	// SubstitutedFor / SubstitutionBasis / ChainTruncated / HeadNotIndexedYet
+	// are set by COG-28 version-head substitution (#763,
+	// engine_version_head.go) on a row that was INJECTED because the query's
+	// evidence reached a superseded predecessor of this engram's declared
+	// chain rather than this engram itself.
+	//
+	// SubstitutedFor names that predecessor — the evidence source. It is zero
+	// on every row that earned its own place, including a head that was already
+	// in the result set and merely had its score raised: nothing was
+	// substituted there.
+	//
+	// SubstitutionBasis is the predecessor's MEASURED evidence against this
+	// query, and Components carries the same values. They are the real
+	// measurements that admitted this row, never this engram's own aboutness —
+	// which is why the attribution is mandatory rather than optional (design
+	// §5.4). nil on non-substituted rows.
+	//
+	// ChainTruncated marks a walk that hit supersessionMaxDepth: the injected
+	// row is the deepest node WITHIN the cap and may not be the chain's true
+	// terminus. HeadNotIndexedYet marks an injected head with no stored
+	// embedding — "not indexed yet" rather than "not relevant", the
+	// loud-degradation doctrine applied to the fresh-evolve window.
+	SubstitutedFor    storage.ULID
+	SubstitutionBasis *ScoreComponents
+	ChainTruncated    bool
+	HeadNotIndexedYet bool
 }
 
 // EngramFilter is a post-retrieval predicate applied as the final activation step.
@@ -313,6 +340,16 @@ type ActivateResult struct {
 	// AbstainedReason names WHICH emptiness this is, so the caller can say
 	// something true. Empty iff Abstained is false.
 	AbstainedReason string
+
+	// ShadowMatches are candidates that cleared the caller's relevance bar but
+	// were refused by a currency predicate while carrying the declared
+	// supersession signature (COG-28, #763). They are EVIDENCE, not results:
+	// Activations is byte-identical whether this slice is empty or full. The
+	// engine layer may resolve each to its declared chain head and inject that
+	// head instead. Score-descending, ULID-tiebroken, capped at
+	// shadowMatchCap; nil on every query that produced none, which is almost
+	// all of them. See shadow.go.
+	ShadowMatches []ShadowMatch
 }
 
 // Abstention reasons. Distinct values, not free text, so surfaces can branch.
@@ -327,6 +364,19 @@ const (
 	// removed by a post-retrieval filter (structured filter, supersession,
 	// visibility). Not a relevance judgment — a filtering one.
 	AbstainFiltered = "filtered"
+	// AbstainSupersededOnly: the query's only admission-worthy evidence landed
+	// on stale members of a declared version chain, and no current version of
+	// that chain is reachable for this caller — the successor was retracted,
+	// the head itself expired with no successor, or every node above the match
+	// is hidden from this caller. COG-28. This is the difference between an
+	// honest-but-mute empty response and a sentence an agent can act on: "there
+	// IS a version chain here, and it has no current member you can see."
+	AbstainSupersededOnly = "superseded_only"
+	// AbstainAmbiguousVersion: the query matched a stale member whose declared
+	// chain FORKS (a node with more than one active superseder). Recall refuses
+	// to choose a branch rather than guessing which is current. COG-28's named
+	// exception — read the predecessor and resolve the fork.
+	AbstainAmbiguousVersion = "ambiguous_version"
 )
 
 // ActivateResponseFrame is one streaming frame of results.
@@ -1534,6 +1584,24 @@ func (e *ActivationEngine) phase5Traverse(
 	return discovered
 }
 
+// scoringCandidate is one phase-6 candidate with the per-index evidence it
+// accumulated in phases 2-5. Package-scoped (it was function-local until
+// COG-28) so the shadow-match scorer in shadow.go can consume the same
+// candidate records the live scoring paths do — the two must never diverge in
+// what evidence they see.
+type scoringCandidate struct {
+	id              storage.ULID
+	ftsScore        float64
+	vectorScore     float64
+	hebbianBoost    float64
+	transitionBoost float64
+	rrfScore        float64
+	hopPath         []storage.ULID
+	relType         uint16
+	isTraversed     bool // true for BFS-only candidates; vectorScore is computed post-load
+	inTagPool       bool // true for tag-seeded candidates; vectorScore is computed post-load when zero
+}
+
 // phase6Score computes final scores, applies filters, and builds the result.
 func (e *ActivationEngine) phase6Score(
 	ctx context.Context,
@@ -1558,19 +1626,6 @@ func (e *ActivationEngine) phase6Score(
 	if w.UseRRFFusion && w.UseCGDN {
 		slog.Warn("scoring: both RRF and CGDN enabled -- RRF takes precedence, CGDN ignored")
 		w.UseCGDN = false
-	}
-
-	type scoringCandidate struct {
-		id              storage.ULID
-		ftsScore        float64
-		vectorScore     float64
-		hebbianBoost    float64
-		transitionBoost float64
-		rrfScore        float64
-		hopPath         []storage.ULID
-		relType         uint16
-		isTraversed     bool // true for BFS-only candidates; vectorScore is computed post-load
-		inTagPool       bool // true for tag-seeded candidates; vectorScore is computed post-load when zero
 	}
 
 	// Deduplicate: fused candidates take priority; traversed candidates are
@@ -1692,12 +1747,21 @@ func (e *ActivationEngine) phase6Score(
 	// SUPERSEDED predecessor — soft-delete + a closed ValidUntil — because
 	// demoting a fact must not erase it. PassesValidity below then decides
 	// whether it is nameable at the caller's instant.
+	//
+	// COG-28 (#763): a candidate refused HERE by the lifecycle cut while
+	// carrying the declared-supersession signature (soft-deleted + a CLOSED
+	// ValidUntil) is kept aside as a SHADOW, not discarded. It never becomes a
+	// result — it is evidence the engine layer may resolve to the declared
+	// chain head. The other four predicates below are NOT relaxed for shadows:
+	// a candidate the caller may not see does not get to speak through a proxy,
+	// so they are evaluated FIRST and a failure of any of them drops the
+	// engram from both paths. The predicates are a pure conjunction, so moving
+	// the lifecycle cut after them changes no admission decision.
+	shadowsOn := shadowsEnabled(req, w)
+	var lifecycleShadows []*storage.Engram
 	var active []*storage.Engram
 	for _, eng := range allEngrams {
 		if eng == nil {
-			continue
-		}
-		if !PassesLifecycle(eng, req.AsOf, req.IncludeInvalid) {
 			continue
 		}
 		// Hard trust filter: skip engrams with TrustUntrusted (0x04) when requested.
@@ -1717,6 +1781,12 @@ func (e *ActivationEngine) phase6Score(
 				continue
 			}
 		}
+		if !PassesLifecycle(eng, req.AsOf, req.IncludeInvalid) {
+			if shadowsOn && hasSupersessionSignature(eng, leaseFilterNow) {
+				lifecycleShadows = append(lifecycleShadows, eng)
+			}
+			continue
+		}
 		active = append(active, eng)
 	}
 	allEngrams = active
@@ -1726,6 +1796,31 @@ func (e *ActivationEngine) phase6Score(
 		if eng != nil {
 			engramByID[eng.ID] = eng
 		}
+	}
+
+	// COG-28 shadow lookup. nil (and never allocated) unless a lifecycle
+	// refusal with the supersession signature actually occurred, so the default
+	// path allocates nothing and every read below is a nil-map read. The
+	// VALIDITY-refused half of the signature is added after `now` is taken
+	// (those engrams passed the lifecycle cut, so they are already in
+	// engramByID and need no second lookup path).
+	var shadowEngrams map[storage.ULID]*storage.Engram
+	if len(lifecycleShadows) > 0 {
+		shadowEngrams = make(map[storage.ULID]*storage.Engram, len(lifecycleShadows))
+		for _, eng := range lifecycleShadows {
+			shadowEngrams[eng.ID] = eng
+		}
+	}
+	// lookupEngram resolves an id to its loaded engram across BOTH the admitted
+	// set and the shadow set. The post-load cosine backfill below must use it:
+	// keying only off engramByID would leave an FTS-only shadow at
+	// vectorScore == 0 forever, under-scoring the exact evidence COG-28 exists
+	// to redirect.
+	lookupEngram := func(id storage.ULID) *storage.Engram {
+		if eng := engramByID[id]; eng != nil {
+			return eng
+		}
+		return shadowEngrams[id]
 	}
 
 	// Compute vectorScore for candidates that entered the pipeline without an HNSW
@@ -1754,7 +1849,7 @@ func (e *ActivationEngine) phase6Score(
 			if !needsCosine {
 				continue
 			}
-			eng := engramByID[all[i].id]
+			eng := lookupEngram(all[i].id)
 			if eng == nil {
 				continue
 			}
@@ -1803,6 +1898,26 @@ func (e *ActivationEngine) phase6Score(
 
 	now := time.Now()
 	scored := make([]scoredItem, 0, len(all))
+	// COG-28: shadows produced by the OTHER declared-supersession signature —
+	// a still-active record whose ValidUntil was closed (Link(supersedes) /
+	// forget(not_true_since)). These pass the lifecycle cut and are refused by
+	// PassesValidity inside each scoring path below, so they must be recognised
+	// here, against the same `now` those paths use.
+	if shadowsOn {
+		for _, eng := range allEngrams {
+			if eng.State != storage.StateActive || eng.ValidUntil.IsZero() {
+				continue
+			}
+			if PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
+				continue
+			}
+			if shadowEngrams == nil {
+				shadowEngrams = make(map[storage.ULID]*storage.Engram, 4)
+			}
+			shadowEngrams[eng.ID] = eng
+		}
+	}
+	var shadowMatches []ShadowMatch
 
 	// RRF fusion path: use Phase 3 RRF scores directly as the final score basis.
 	// Rank-based and scale-invariant (Cormack et al. 2009). Cognitive boosts
@@ -1896,6 +2011,14 @@ func (e *ActivationEngine) phase6Score(
 			})
 		}
 
+		// σ and the divisive-normalization denominator are computed over the
+		// LIVE candidates only — COG-28 shadows are structurally excluded (see
+		// the ACT-R pass for the full rationale). With an empty live pool there
+		// is no measured operating point, so σ falls back to the same 0.01 the
+		// degenerate-median branch already uses.
+		sigma := 0.01
+		n := w.CGDNPower
+		denom := math.Pow(sigma, n)
 		if len(cgdnCands) > 0 {
 			// Compute σ = median activation (self-calibrating operating point).
 			acts := make([]float64, len(cgdnCands))
@@ -1903,18 +2026,16 @@ func (e *ActivationEngine) phase6Score(
 				acts[i] = cc.activation
 			}
 			sort.Float64s(acts)
-			sigma := acts[len(acts)/2]
+			sigma = acts[len(acts)/2]
 			if sigma <= 0 {
 				sigma = 0.01
 			}
 
-			// Compute divisive normalization denominator: σ^n + Σ a(j)^n
-			n := w.CGDNPower
 			var denomSum float64
 			for _, a := range acts {
 				denomSum += math.Pow(a, n)
 			}
-			denom := math.Pow(sigma, n) + denomSum
+			denom = math.Pow(sigma, n) + denomSum
 
 			// Pass 2: compute R(d) = a(d)^n / denom, apply confidence, threshold.
 			for _, cc := range cgdnCands {
@@ -1936,6 +2057,20 @@ func (e *ActivationEngine) phase6Score(
 				})
 			}
 		}
+
+		// COG-28 shadow pass — same functions, same gate quantity, same
+		// threshold; denominator taken from the live pool (never contributed to).
+		shadowMatches = collectShadowMatches(all, shadowEngrams, req, func(c scoringCandidate, eng *storage.Engram) (float64, float64, ScoreComponents) {
+			comp := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
+			a := computeGatedActivation(comp.SemanticSimilarity, comp.FullTextRelevance, comp.DecayFactor, comp.HebbianBoost, w)
+			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
+			r := math.Pow(a, n) / denom
+			final := r * comp.Confidence
+			comp.AbsoluteScore = absolute
+			comp.Raw = r
+			comp.Final = final
+			return final, absolute, comp
+		})
 
 		sort.Slice(scored, func(i, j int) bool {
 			if scored[i].final != scored[j].final {
@@ -2068,6 +2203,24 @@ func (e *ActivationEngine) phase6Score(
 			cc.components.Final = final
 			scored = append(scored, scoredItem{id: cc.id, final: final, components: cc.components, hopPath: cc.hopPath})
 		}
+		// COG-28 shadow pass. Deliberately a SECOND pass over a disjoint
+		// candidate set: `scale` above was computed from maxRaw over the LIVE
+		// pool only, so a hot superseded predecessor structurally cannot
+		// rescale the live result set (design §4.2 / risk 2 — the bad state is
+		// unrepresentable, not merely avoided). The shadow's own final is then
+		// computed USING that live scale, so an injected head lands on the same
+		// scale as every other row. Same formula, same gate quantity
+		// (AbsoluteScore), same req.Threshold as the live path two lines above.
+		shadowMatches = collectShadowMatches(all, shadowEngrams, req, func(c scoringCandidate, eng *storage.Engram) (float64, float64, ScoreComponents) {
+			comp := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
+			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
+			raw := math.Min(comp.Raw*scale, 1.0)
+			final := raw * comp.Confidence
+			comp.AbsoluteScore = absolute
+			comp.Raw = raw
+			comp.Final = final
+			return final, absolute, comp
+		})
 		sort.Slice(scored, func(i, j int) bool {
 			if scored[i].final != scored[j].final {
 				return scored[i].final > scored[j].final
@@ -2098,6 +2251,16 @@ func (e *ActivationEngine) phase6Score(
 		}
 		scored = append(scored, scoredItem{id: c.id, final: final, components: components, hopPath: c.hopPath})
 	}
+	// COG-28 shadow pass, weighted_sum edition: this path gates on Final, so
+	// shadows are gated on Final too — the same quantity, per design §4.2, so
+	// explain and recall cannot disagree about what "would have cleared the
+	// bar" means. There is no per-query normalization on this path, so there is
+	// nothing for a shadow to leak into.
+	shadowMatches = collectShadowMatches(all, shadowEngrams, req, func(c scoringCandidate, eng *storage.Engram) (float64, float64, ScoreComponents) {
+		comp := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
+		comp.AbsoluteScore = math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
+		return comp.Final, comp.Final, comp
+	})
 	sort.Slice(scored, func(i, j int) bool {
 		if scored[i].final != scored[j].final {
 			return scored[i].final > scored[j].final
@@ -2189,6 +2352,7 @@ cgdnDone:
 		SemanticDegraded: semanticDegraded,
 		Abstained:        abstained,
 		AbstainedReason:  abstainReason,
+		ShadowMatches:    shadowMatches,
 	}, nil
 }
 

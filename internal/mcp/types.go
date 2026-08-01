@@ -151,7 +151,34 @@ type MemoryAnnotations struct {
 	VersionCluster       string `json:"version_cluster,omitempty"`
 	NewestOfCluster      bool   `json:"newest_of_cluster,omitempty"`
 	ClusterSize          int    `json:"cluster_size,omitempty"`
-	LastVerified         string `json:"last_verified,omitempty"` // RFC3339
+	// SubstitutedFor / SubstitutionBasis / ChainTruncated / HeadNotIndexedYet
+	// are COG-28 version-head substitution (#763) — ASSERTED, from a declared
+	// RelSupersedes chain. Siblings of SupersededBy/CurrentVersion above, and
+	// explicitly NOT part of the advisory PossiblySupersededBy block.
+	//
+	// SubstitutedFor names the older, superseded memory your query's wording
+	// actually matched: this memory replaced it, so recall returned this one
+	// instead. When it is set, this memory's own wording did NOT match, and its
+	// reported score components are the PREDECESSOR's measurements —
+	// SubstitutionBasis repeats the load-bearing ones so that is unmissable.
+	// ChainTruncated: the version chain was longer than the walk limit, so this
+	// may not be the very latest version. HeadNotIndexedYet: this memory has no
+	// embedding yet (indexing pending) — "not indexed", not "not relevant".
+	SubstitutedFor    string             `json:"substituted_for,omitempty"`
+	SubstitutionBasis *SubstitutionBasis `json:"substitution_basis,omitempty"`
+	ChainTruncated    bool               `json:"chain_truncated,omitempty"`
+	HeadNotIndexedYet bool               `json:"head_not_indexed_yet,omitempty"`
+	LastVerified      string             `json:"last_verified,omitempty"` // RFC3339
+}
+
+// SubstitutionBasis is the superseded predecessor's measured evidence against
+// the query — what admitted a COG-28 substituted row. AbsoluteScore is the
+// exact quantity compared against the recall threshold.
+type SubstitutionBasis struct {
+	AbsoluteScore      float64 `json:"absolute_score"`
+	ContentMatch       float64 `json:"content_match"`
+	SemanticSimilarity float64 `json:"semantic_similarity"`
+	FullTextRelevance  float64 `json:"full_text_relevance"`
 }
 
 // ReadEntity is a named entity linked to a specific engram.

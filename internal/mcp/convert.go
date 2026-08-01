@@ -37,7 +37,8 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 	// VersionCluster/NewestOfCluster (heuristic, never an authority) are all
 	// always-on; annotate=true only augments this struct further below.
 	if item.SupersededBy != "" || item.CurrentVersion != "" ||
-		item.PossiblySupersededBy != "" || item.VersionCluster != "" || item.NewestOfCluster {
+		item.PossiblySupersededBy != "" || item.VersionCluster != "" || item.NewestOfCluster ||
+		item.SubstitutedFor != "" {
 		annotations = &MemoryAnnotations{
 			SupersededBy:         item.SupersededBy,
 			CurrentVersion:       item.CurrentVersion,
@@ -45,6 +46,20 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 			VersionCluster:       item.VersionCluster,
 			NewestOfCluster:      item.NewestOfCluster,
 			ClusterSize:          item.ClusterSize,
+			// COG-28 (#763): asserted substitution provenance. Always-on for
+			// the same reason superseded_by is — an agent must never be handed
+			// a row admitted by a DIFFERENT memory's match without being told.
+			SubstitutedFor:    item.SubstitutedFor,
+			ChainTruncated:    item.ChainTruncated,
+			HeadNotIndexedYet: item.HeadNotIndexedYet,
+		}
+		if b := item.SubstitutionBasis; b != nil {
+			annotations.SubstitutionBasis = &SubstitutionBasis{
+				AbsoluteScore:      roundScore(b.AbsoluteScore),
+				ContentMatch:       roundScore(b.ContentMatch),
+				SemanticSimilarity: roundScore(b.SemanticSimilarity),
+				FullTextRelevance:  roundScore(b.FullTextRelevance),
+			}
 		}
 	}
 	m := Memory{

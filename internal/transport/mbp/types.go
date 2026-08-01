@@ -343,6 +343,24 @@ type ActivationItem struct {
 	VersionCluster       string `msgpack:"version_cluster,omitempty"        json:"version_cluster,omitempty"`
 	NewestOfCluster      bool   `msgpack:"newest_of_cluster,omitempty"      json:"newest_of_cluster,omitempty"`
 	ClusterSize          int    `msgpack:"cluster_size,omitempty"           json:"cluster_size,omitempty"`
+	// SubstitutedFor / SubstitutionBasis / ChainTruncated / HeadNotIndexedYet
+	// are COG-28 version-head substitution (#763) — ASSERTED, from a declared
+	// RelSupersedes chain, siblings of SupersededBy above and explicitly NOT
+	// part of the advisory PossiblySupersededBy block.
+	//
+	// SubstitutedFor names the SUPERSEDED PREDECESSOR whose match admitted this
+	// row: the query's wording reached the older version, and recall resolved
+	// it to this current one. When it is set, ScoreComponents on this item are
+	// the PREDECESSOR's measurements against the query, not this memory's own
+	// aboutness — SubstitutionBasis repeats the load-bearing ones so that is
+	// unmissable. ChainTruncated: the chain was longer than the walk limit, so
+	// this may not be the very latest version. HeadNotIndexedYet: this memory
+	// has no stored embedding yet (indexing pending) — "not indexed" rather
+	// than "not relevant". All empty on a row that earned its own place.
+	SubstitutedFor    string             `msgpack:"substituted_for,omitempty"      json:"substituted_for,omitempty"`
+	SubstitutionBasis *SubstitutionBasis `msgpack:"substitution_basis,omitempty"   json:"substitution_basis,omitempty"`
+	ChainTruncated    bool               `msgpack:"chain_truncated,omitempty"      json:"chain_truncated,omitempty"`
+	HeadNotIndexedYet bool               `msgpack:"head_not_indexed_yet,omitempty" json:"head_not_indexed_yet,omitempty"`
 	// Valid-time annotations. ValidFrom is set only when it differs from
 	// CreatedAt (an explicitly backdated/forward-dated fact); ValidUntil is set
 	// only when the window is closed. Expired marks a fact whose ValidUntil <=
@@ -353,6 +371,18 @@ type ActivationItem struct {
 	// Importance is the STORED caller-asserted importance (0 = unset; the
 	// presentation layer derives the effective value — see ReadResponse).
 	Importance float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
+}
+
+// SubstitutionBasis is the evidence that admitted a COG-28 substituted row:
+// the SUPERSEDED PREDECESSOR's measured scores against this query. AbsoluteScore
+// is the exact quantity that was compared against the caller's threshold, so a
+// caller can verify for itself that the substitution redirected admission-worthy
+// evidence rather than manufacturing it.
+type SubstitutionBasis struct {
+	AbsoluteScore      float32 `msgpack:"absolute_score"      json:"absolute_score"`
+	ContentMatch       float32 `msgpack:"content_match"       json:"content_match"`
+	SemanticSimilarity float32 `msgpack:"semantic_similarity" json:"semantic_similarity"`
+	FullTextRelevance  float32 `msgpack:"full_text_relevance" json:"full_text_relevance"`
 }
 
 // ScoreComponents breaks down the activation score.

@@ -389,6 +389,81 @@ components:
           items:
             type: string
           description: "The engram's tags (S4), so callers can filter low-salience entries client-side."
+        superseded_by:
+          type: string
+          description: >-
+            ASSERTED (declared RelSupersedes chain): the immediate superseder's ULID.
+            Present whenever this result is superseded. See COG-22.
+        current_version:
+          type: string
+          description: >-
+            ASSERTED: the chain head — the fact to consult now. Present whenever this
+            result is superseded.
+        substituted_for:
+          type: string
+          description: >-
+            ASSERTED (COG-28): the superseded PREDECESSOR whose match admitted this row.
+            Your query's wording reached the older version and recall resolved it to this
+            current one. When present, this memory's OWN wording did not match and
+            score_components are the predecessor's measurements — see substitution_basis.
+        substitution_basis:
+          $ref: "#/components/schemas/SubstitutionBasis"
+        chain_truncated:
+          type: boolean
+          description: >-
+            COG-28: the declared version chain was longer than the walk limit, so the
+            returned memory may not be the very latest version.
+        head_not_indexed_yet:
+          type: boolean
+          description: >-
+            COG-28: this memory has no stored embedding yet (indexing pending). "Not
+            indexed", not "not relevant".
+        possibly_superseded_by:
+          type: string
+          description: >-
+            ADVISORY heuristic currency (COG-25) — INFERRED from a same-version cluster,
+            never asserted. Verify before treating this memory as false; it is still
+            returned at full score.
+        version_cluster:
+          type: string
+          description: "ADVISORY (COG-25): stable key shared by detected cluster members."
+        newest_of_cluster:
+          type: boolean
+          description: "ADVISORY (COG-25): newest among the RETURNED cluster members."
+        cluster_size:
+          type: integer
+        valid_from:
+          type: integer
+          format: int64
+        valid_until:
+          type: integer
+          format: int64
+        expired:
+          type: boolean
+        importance:
+          type: number
+          format: float
+
+    SubstitutionBasis:
+      type: object
+      description: >-
+        COG-28: the superseded predecessor's measured evidence against this query — what
+        admitted a substituted row. absolute_score is the exact quantity that was compared
+        against the recall threshold, so a caller can verify for itself that the
+        substitution redirected admission-worthy evidence rather than manufacturing it.
+      properties:
+        absolute_score:
+          type: number
+          format: float
+        content_match:
+          type: number
+          format: float
+        semantic_similarity:
+          type: number
+          format: float
+        full_text_relevance:
+          type: number
+          format: float
 
     BriefSentence:
       type: object

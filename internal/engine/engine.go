@@ -2532,8 +2532,27 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// boost. injectorNow is shared with the final COG-19 cut below so a
 	// validity boundary cannot fall between the gate's admission and that cut.
 	injectorNow := time.Now()
+	// One visibility gate and ONE nameable cache shared by both post-pipeline
+	// chain phases: they walk overlapping chains, and the gate's lease check is
+	// a store read. Sharing also guarantees both resolve visibility at the same
+	// instant (risk 3 of the COG-28 design).
+	injectorGate := newVisibilityGate(actReq, injectorNow)
+	nameableCache := make(map[storage.ULID]bool)
+
+	// COG-28 version-head substitution (#763). Phase 6 handed us the
+	// admission-worthy candidates it refused for being superseded; resolve each
+	// to its DECLARED chain head and inject that head at the predecessor's
+	// score, annotated substituted_for. Runs BEFORE applySupersession on the
+	// same clock so an injected head is an ordinary row by the time supersedes-
+	// aware ranking runs. See engine_version_head.go.
+	var subInjected int
+	var subBlocked []substitutionBlock
+	result.Activations, subInjected, subBlocked = e.applyVersionHeadSubstitution(
+		ctx, wsPrefix, result.Activations, result.ShadowMatches, actReq, injectorGate, nameableCache)
+	result.TotalFound += subInjected
+
 	var supInjected int
-	result.Activations, supInjected = e.applySupersession(ctx, wsPrefix, result.Activations, actReq, injectorNow)
+	result.Activations, supInjected = e.applySupersessionWithGate(ctx, wsPrefix, result.Activations, actReq, injectorGate, nameableCache)
 	result.TotalFound += supInjected
 
 	// Final valid-time gate (COG-19: default recall never returns an engram whose
@@ -2577,6 +2596,21 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		result.Activations = result.Activations[:actReq.MaxResults]
 	}
 
+	// COG-28: an empty response that had a declared version chain in it is not
+	// the same emptiness as "nothing in this vault is about that". Name it, so
+	// an agent can act ("there IS a chain here — read <id>") instead of being
+	// handed the generic below_threshold. Only when the response is genuinely
+	// empty after every phase: a good answer is never decorated with a warning
+	// about a chain that did not make it, and no row is ever manufactured.
+	if len(result.Activations) == 0 {
+		if reason := versionHeadAbstainReason(subBlocked); reason != "" {
+			result.Abstained = true
+			result.AbstainedReason = reason
+		}
+	} else if len(subBlocked) > 0 {
+		slog.Debug("recall: version-head substitution blocked on some chains", "blocked", len(subBlocked))
+	}
+
 	// Convert result.Activations to []mbp.ActivationItem
 	items := make([]mbp.ActivationItem, len(result.Activations))
 	for i, scored := range result.Activations {
@@ -2608,6 +2642,25 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		}
 		if (scored.SupersededBy != storage.ULID{}) {
 			items[i].SupersededBy = scored.SupersededBy.String()
+		}
+		// COG-28 substitution annotation (#763): ASSERTED, from a declared
+		// RelSupersedes chain — a sibling of superseded_by/current_version
+		// above, NOT part of the advisory possibly_superseded_by block below.
+		// Never optional on a substituted row: the score components on such a
+		// row are the PREDECESSOR's measurements, so the attribution is what
+		// keeps them honest.
+		if (scored.SubstitutedFor != storage.ULID{}) {
+			items[i].SubstitutedFor = scored.SubstitutedFor.String()
+			items[i].ChainTruncated = scored.ChainTruncated
+			items[i].HeadNotIndexedYet = scored.HeadNotIndexedYet
+			if b := scored.SubstitutionBasis; b != nil {
+				items[i].SubstitutionBasis = &mbp.SubstitutionBasis{
+					AbsoluteScore:      float32(b.AbsoluteScore),
+					ContentMatch:       float32(b.ContentMatch),
+					SemanticSimilarity: float32(b.SemanticSimilarity),
+					FullTextRelevance:  float32(b.FullTextRelevance),
+				}
+			}
 		}
 		// Heuristic currency annotation (advisory; from applyCurrencyAnnotation).
 		if (scored.PossiblySupersededBy != storage.ULID{}) {
@@ -3810,6 +3863,26 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 		}
 	}
 
+	// Notify background processors (e.g. the retroactive embed/summarize worker)
+	// that a new engram exists — UNCONDITIONALLY, exactly as Write does.
+	// Without this, evolve was the ONE write path that never woke the
+	// processor: the successor waited for its poll ticker, which backs off
+	// geometrically to a 3-MINUTE ceiling on an idle vault, so on a quiet vault
+	// a freshly evolved memory could be semantically unindexed for up to three
+	// minutes after the commit. That is the largest single contributor to the
+	// fresh-evolve retrieval window in #763.
+	//
+	// Not conditioned on whether a caller-supplied embedding was just indexed
+	// inline: the same processor also runs the SUMMARIZE stage, and Evolve
+	// deliberately does not inherit the predecessor's summary (it is
+	// content-derived and the content just changed), so an evolved memory has
+	// work waiting for the processor even when its vector is already in HNSW.
+	// Matching Write's unconditional call is also the property that keeps the
+	// two write paths from drifting again.
+	if fn, ok := e.onWrite.Load().(func()); ok && fn != nil {
+		fn()
+	}
+
 	// Submit new engram to async FTS worker.
 	if e.ftsWorker != nil {
 		e.ftsWorker.Submit(fts.IndexJob{
@@ -4293,7 +4366,7 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 
 // runPruneWorker is a periodic background sweep that prunes vaults according to their
 // MaxEngrams, RetentionDays, and association-decay policies. Runs every 60s with ±5s jitter.
-// Association decay is cadence-independent (COG-27), so this period is a
+// Association decay is cadence-independent (COG-28), so this period is a
 // responsiveness choice only — it is not a term in the decay rate (#762).
 func (e *Engine) runPruneWorker() {
 	defer close(e.pruneDone)

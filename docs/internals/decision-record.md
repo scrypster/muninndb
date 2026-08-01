@@ -286,3 +286,76 @@ Three things this settles beyond the immediate bug:
 the unit is an implementation detail of an unrelated component, the value is not a setting —
 it is a coincidence, and changing that component silently changes the behaviour of the
 system.**
+
+### Recall resolves a declared version chain to its head before ranking (#763, 2026-08-01)
+
+Round-6 hands-on evaluation, call 18: immediately after `muninn_evolve`, the natural
+question about the evolved decision returned only an adjacent memory and omitted the
+freshly evolved decision entirely. A rephrase in deep mode found it. The evaluator's
+framing — *"a memory system that stores truth but fails to retrieve it under a natural
+phrasing is not dependable enough to drive autonomous decisions"* — made this the only
+blocker between that evaluator and primary-memory use.
+
+**The diagnosis was an ORDERING bug, not a scoring, threshold or embedding bug**, and
+saying so mattered: three plausible-looking fixes were rejected on it. `EvolveAt`
+soft-deletes its predecessor, but nothing removes that predecessor from HNSW ("HNSW has no
+delete method") or from FTS — its vector and its postings are exactly what the user's OLD
+wording matches. Phase 6's lifecycle cut discards it *before it is ever scored*, so the
+relevance the stale wording earned is thrown away rather than redirected, and
+`applySupersession` — which already does the right thing for the visible stale case — says
+so in its own doc comment: *"evolve() soft-deletes its predecessor, so those never reach
+here."* The visibility cut runs before the substitution phase, and the substitution phase
+can only see what survived the cut.
+
+**Rejected alternatives, each for a stated reason.**
+
+- *Substitute at candidate assembly (phase 2), as the issue's sketch says literally.* At
+  phase 2 there is no evidence, no score and no visibility resolution — we would inject a
+  head for every superseded engram any index happened to return.
+- *Re-score the head against the query and gate it on its own absolute.* The successor's
+  whole purpose is that its wording changed; gating it on its own absolute reproduces call
+  18 exactly, one layer deeper.
+- *Inject at `shadow.Final − ε`, or cap the head below rank 1.* Superficially conservative,
+  actually incoherent: the existing ε orders a head against its own VISIBLE stale twin,
+  which here is not in the set. A ranking penalty on a fact the author declared current is
+  a silent statement that we trust the declaration less than we say we do. If the
+  declaration is untrustworthy the substitution should not happen at all, not at a discount.
+- *Inherit the predecessor's embedding onto the successor to close the fresh-evolve
+  window.* **Refuted, not deferred.** It would make the successor semantically
+  indistinguishable from the fact it replaces (matching the OLD wording forever, silently,
+  because a vector carries no provenance), swap the vector mid-life when the real embedding
+  lands so identical queries return different results with nothing explaining it, and
+  poison every downstream consumer of the vector — dedup, consolidation similarity,
+  `similar_entities`, Hebbian neighbour selection — with a value that is not a measurement
+  of that engram's text. Substitution already covers the window correctly and for free.
+- *A per-vault plasticity kill-switch.* Deliberately not offered: a toggle for a
+  correctness invariant invites "turn it off when it misfires" instead of fixing the
+  misfire, and presets are a hand-duplicated drift surface. If the precision gates cannot
+  be met, the design is wrong and must not ship behind a flag.
+
+**Two findings that came out of building it, both raising scope rather than lowering it
+(principle #9).**
+
+1. *`EvolveAt` never woke the retroactive embed processor.* `Write` calls the `onWrite`
+   hook after commit; evolve was the one write path that did not, so the successor waited
+   for the processor's ticker, which backs off geometrically to a 3-minute ceiling on an
+   idle vault. On a quiet vault a freshly evolved memory could be semantically unindexed
+   for up to three minutes after the commit — the largest single contributor to the
+   fresh-evolve retrieval window carried since round 4, and a one-line fix.
+2. *Multi-hop evolve chains could never resolve at all.* The design doc asserted A→B→C
+   returns C, and separately asserted that a soft-deleted successor voids the supersession.
+   Both are in the shared walker, and for evolve chains they contradict: every intermediate
+   an evolve leaves behind IS soft-deleted, so the walk read the first one as "retracted"
+   and voided the whole chain — A→B→C returned nothing, which is #763 again with an extra
+   hop. Resolved by distinguishing the two states with the same closed-`ValidUntil`
+   signature the rest of the increment uses, which is exact rather than heuristic:
+   supersession soft-deletes AND stamps atomically, a plain `muninn_forget` leaves the
+   stamp open, and `forget(not_true_since)` stamps without soft-deleting.
+
+**Principle: when the fix for a retrieval miss is "return something we did not retrieve",
+the burden of proof is the false-positive rate, and it must be measured on the corpora
+that already exist rather than argued.** The precision half is pinned by zero shadows
+across 16 nonsense probes with a declared chain grafted into the abstention corpus, an
+adjacent-topic corpus with a positive control, and an exact-equality detector for
+normalization leakage — because a substitution that fires on the wrong topic is the
+silently-wrong class this project ranks worst, arriving at the score the RIGHT topic earned.

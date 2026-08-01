@@ -166,6 +166,17 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("highly-similar fact about the same subject: `annotations.possibly_superseded_by` names that newer fact (with `version_cluster`, ")
 	b.WriteString("`newest_of_cluster`, `cluster_size`). This is a heuristic hint, not an assertion — unlike `superseded_by`/`current_version` (which mean ")
 	b.WriteString("an explicit `supersedes` link exists), verify before treating the older fact as false; it is still returned at full score.\n")
+	b.WriteString("**A query phrased against an OLDER version returns the CURRENT one.** If your wording matches a memory that has since been evolved, ")
+	b.WriteString("recall resolves it to the head of that declared `supersedes` chain and returns the head instead — so you do not have to know the new ")
+	b.WriteString("vocabulary to find the current fact, and you never have to rephrase to reach it. The returned memory carries ")
+	b.WriteString("`annotations.substituted_for` (the older memory your wording actually matched) and `annotations.substitution_basis` (that older ")
+	b.WriteString("memory's measured scores — which is what the row's `score_components` report, NOT this memory's own aboutness). Two more flags may ")
+	b.WriteString("appear: `chain_truncated` (the version chain was longer than the walk limit, so this may not be the very latest version) and ")
+	b.WriteString("`head_not_indexed_yet` (this memory has no embedding yet — 'not indexed', not 'not relevant'). This is ASSERTED, from an explicit ")
+	b.WriteString("`supersedes` link, never inferred from similarity. Two cases where recall deliberately refuses instead: a FORKED chain (one memory ")
+	b.WriteString("with two competing successors) abstains with `abstained_reason: \"ambiguous_version\"` rather than guessing a branch — `muninn_read` ")
+	b.WriteString("the older memory and resolve it yourself; a chain whose current version was forgotten or is unreachable abstains ")
+	b.WriteString("`\"superseded_only\"`. Historical queries (`as_of`, `include_invalid`) never substitute — there the older version IS the answer.\n")
 
 	// Hierarchical memory
 	b.WriteString("\n## Hierarchical Memory\n\n")
