@@ -320,6 +320,7 @@ curl http://127.0.0.1:8750/mcp/health
 | `MUNINN_CORS_ORIGINS` | `""` | Comma-separated allowed CORS origins |
 | `MUNINN_MCP_URL` | `http://127.0.0.1:8750/mcp` | Override MCP endpoint used by `muninn mcp` proxy (OpenClaw) |
 | `MUNINN_MCP_TOOLSET` | `full` | Toolset advertised by MCP `tools/list`: `full` or `core` (every tool stays callable either way). On the daemon: the default for all clients. On the `muninn mcp` proxy: forwarded per-client as the `X-Muninn-Toolset` request header, which takes precedence over the daemon default. Unknown values fall back to the next layer with a logged warning |
+| `MUNINN_PROSPECTIVE` | off | Set to `"1"` to enable prospective-memory notice delivery: armed intentions (`muninn_intend`) and unresolved contradictions surface as a `notices` field on MCP `muninn_recall`/`muninn_remember` responses when their cue entity is focal in that call's results. Off: `muninn_intend` still stores and arms intentions durably, but no notices are attached (the delivery path is fully inert) |
 | `MUNINNDB_ADMIN_URL` | auto-detected | Override the REST/admin base URL probed by `muninn status` & admin CLI (TLS deployments) |
 | `MUNINNDB_UI_URL` | auto-detected | Override the Web UI base URL probed by `muninn status` (TLS deployments) |
 | `MUNINNDB_MCP_URL` | auto-detected | Override the MCP base URL probed by `muninn status` / `muninn start` (TLS deployments) |

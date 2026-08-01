@@ -32,6 +32,14 @@ type MCPServer struct {
 
 	sseSessionsMu sync.RWMutex
 	sseSessions   map[string]*sseSession // sessionID → session
+
+	// THE PUSH (prospective memory) — opt-in via MUNINN_PROSPECTIVE=1.
+	// When false, the notices path on recall/remember is fully inert
+	// (muninn_intend still arms durable intentions). noticeSeen tracks
+	// per-session delivered-notice dedup keys (see prospective.go).
+	prospective bool
+	noticeMu    sync.Mutex
+	noticeSeen  map[string]map[string]struct{} // sessionKey → delivered dedup keys
 	// NOTE: idempotencyLocks grows by one entry per unique op_id seen during the
 	// process lifetime. In practice op_id cardinality is low (client-generated,
 	// not per-request UUIDs), so growth is bounded by usage patterns. The
@@ -71,6 +79,8 @@ func New(addr string, eng EngineInterface, token string, keyAuth apiKeyValidator
 		capKeys:          capAuth,
 		agentVaultCreate: agentVaultCreate,
 		sseSessions:      make(map[string]*sseSession),
+		prospective:      os.Getenv("MUNINN_PROSPECTIVE") == "1",
+		noticeSeen:       make(map[string]map[string]struct{}),
 		tlsConfig:        tlsConfig,
 	}
 	// The create-workflow-vault handler needs the concrete *auth.Store for
@@ -334,6 +344,9 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 
 		// RFC #597: privileged workflow-vault creation (recursion-guarded above).
 		"muninn_create_workflow_vault": s.handleCreateWorkflowVault,
+
+		// THE PUSH: prospective memory (arm an intention on entity cues).
+		"muninn_intend": s.handleIntend,
 	}
 
 	handler, found := handlers[req.Params.Name]
@@ -385,6 +398,7 @@ func registeredToolNames() []string {
 		"muninn_trust",
 		"muninn_compare_and_set", "muninn_claim", "muninn_release",
 		"muninn_create_workflow_vault",
+		"muninn_intend",
 	}
 }
 
@@ -519,6 +533,8 @@ func (s *MCPServer) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 	// The session auth is authoritative for vault pinning and mode enforcement;
 	// the POST auth check above ensures the caller is still authenticated.
 	r = r.WithContext(contextWithAuth(r.Context(), sess.auth))
+	// SSE transport: the SSE session ID is the notice-session identity.
+	r = r.WithContext(withNoticeSession(r.Context(), sessionID))
 	s.processAndPushSSE(w, r, []chan []byte{sess.ch}, sessionID)
 }
 
@@ -542,6 +558,9 @@ func (s *MCPServer) handleStreamablePost(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	r = r.WithContext(contextWithAuth(r.Context(), a))
+	// Notice-session identity for prospective-memory dedup: Streamable HTTP
+	// clients echo the Mcp-Session-Id header minted at initialize.
+	r = r.WithContext(withNoticeSession(r.Context(), r.Header.Get(mcpSessionHeader)))
 
 	// If the client also has SSE streams open, route through the async
 	// SSE handler so the response is pushed to ALL matching event streams
@@ -603,6 +622,11 @@ func (s *MCPServer) processAndPushSSE(w http.ResponseWriter, r *http.Request, ch
 	// before a slow tool call completes.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// The detached context loses request values — re-carry the notice-session
+	// identity so prospective-memory dedup survives the detach.
+	if key, ok := r.Context().Value(noticeSessionCtxKey{}).(string); ok {
+		ctx = withNoticeSession(ctx, key)
+	}
 
 	var buf bytes.Buffer
 	recorder := &responseCapture{header: http.Header{}, buf: &buf}

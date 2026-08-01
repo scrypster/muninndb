@@ -38,6 +38,22 @@ func (l *ActivationLog) getOrCreate(vaultID uint32) *vaultLog {
 	return v.(*vaultLog)
 }
 
+// ResetVault discards all recorded activation events for vaultID. Test-only:
+// production callers never call this — phase4HebbianBoost's cross-activation
+// priming ("was this candidate's associated target recently activated") is
+// intentional, unbounded spreading activation across a vault's real timeline.
+// A scripted test harness that fires many calls back-to-back to model
+// SEPARATE, independently-dedup'd agent sessions (see prospective_harness_test.go)
+// compresses what would be minutes/hours of real elapsed time into
+// milliseconds, so the recency-weighted half-life (3600s) never meaningfully
+// decays between "sessions" — every prior scripted call's results stay
+// maximally "recently activated" for the rest of the run, letting an armed
+// intention's own engram silently accumulate Hebbian boost from unrelated
+// earlier calls and outscore its own corroborator. See ActivationEngine.ResetLog.
+func (l *ActivationLog) ResetVault(vaultID uint32) {
+	l.vaults.Delete(vaultID)
+}
+
 // Record appends a new activation event to the vault-scoped ring buffer.
 func (l *ActivationLog) Record(entry LogEntry) {
 	vl := l.getOrCreate(entry.VaultID)

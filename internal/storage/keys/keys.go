@@ -535,7 +535,45 @@ func TransitionPrefixForSrc(ws [8]byte, src [16]byte) []byte {
 
 // WeightComplement computes the weight complement for descending sort order.
 func WeightComplement(weight float32) [4]byte {
-	w := uint32(weight * float32(math.MaxUint32))
+	// BYTE-COMPATIBLE with every key ever written for weights in (0,1), and
+	// explicitly saturated at the endpoints.
+	//
+	// History, because this function has now been wrong twice in opposite
+	// directions:
+	//
+	//  1. The ORIGINAL form, uint32(weight * float32(math.MaxUint32)), was
+	//     undefined for weight exactly 1.0 — float32(MaxUint32) rounds UP to
+	//     2^32, the multiply lands on 2^32, and the uint32 conversion of an
+	//     out-of-range float is implementation-defined (0 on arm64). A
+	//     full-confidence edge was therefore written at the weight-0.0 key
+	//     position and read back as 0: decide's evidence links, explicit 1.0
+	//     declarations, and LTP-saturated learning were silently destroyed.
+	//  2. The FIRST fix computed uint32(f * float64(math.MaxUint32)). Correct
+	//     at 1.0 — and byte-INCOMPATIBLE at essentially every other weight,
+	//     because float32(MaxUint32)==2^32 while float64(MaxUint32)==2^32-1:
+	//     the two multipliers disagree by ~1 integer step for all interior
+	//     weights (0 identical encodings in 1M samples). Every recomputed-key
+	//     delete (Hebbian updates, decay, engram-delete cascade) would have
+	//     missed every pre-fix key on every existing vault: metadata silently
+	//     reset, permanent duplicate edges, unbounded decay key growth. Caught
+	//     by adversarial review before it shipped.
+	//
+	// The correct form keeps the ORIGINAL expression on the open interval —
+	// byte-identical to every existing on-disk key — and handles only the
+	// endpoints explicitly. 0.99999994 (the largest float32 below 1.0) stays
+	// on the legacy path and encodes safely to 4294967040. The endpoint
+	// saturation gives 1.0 -> complement 0 (sorts first, decodes to exactly
+	// 1.0). Pinned by a cross-era byte-compatibility test that reproduces the
+	// legacy bytes for interior weights.
+	var w uint32
+	switch {
+	case weight >= 1.0:
+		w = math.MaxUint32
+	case weight <= 0:
+		w = 0
+	default:
+		w = uint32(weight * float32(math.MaxUint32)) // legacy expression: byte-identical on (0,1)
+	}
 	c := uint32(math.MaxUint32) - w
 	var buf [4]byte
 	binary.BigEndian.PutUint32(buf[:], c)
@@ -905,6 +943,40 @@ func LeaseKey(ws [8]byte, id [16]byte) []byte {
 	return key
 }
 
+// ProspectiveIntentKey constructs an armed-intention index key (0x2D prefix,
+// THE PUSH increment 1). One key exists per (intention, cue entity) pair so a
+// focal-entity lookup is a single 17-byte-prefix scan.
+// Key: 0x2D | wsPrefix(8) | EntityNameHash(cue)(8) | intentionID(16) = 33 bytes
+// Value: msgpack prospectiveIntentRecord (internal/storage/prospective.go).
+func ProspectiveIntentKey(ws [8]byte, cueHash [8]byte, intentionID [16]byte) []byte {
+	key := make([]byte, 1+8+8+16)
+	key[0] = prefix.ProspectiveIntent
+	copy(key[1:9], ws[:])
+	copy(key[9:17], cueHash[:])
+	copy(key[17:33], intentionID[:])
+	return key
+}
+
+// ProspectiveIntentPrefix returns the 17-byte scan prefix covering every
+// intention armed on a given cue entity in a vault (0x2D | ws(8) | cueHash(8)).
+func ProspectiveIntentPrefix(ws [8]byte, cueHash [8]byte) []byte {
+	key := make([]byte, 1+8+8)
+	key[0] = prefix.ProspectiveIntent
+	copy(key[1:9], ws[:])
+	copy(key[9:17], cueHash[:])
+	return key
+}
+
+// ProspectiveIntentWorkspacePrefix returns the 9-byte scan prefix covering ALL
+// armed-intention keys in a vault (0x2D | ws(8)). Used by entity-merge relink,
+// which must rewrite stale cue names in every sibling record.
+func ProspectiveIntentWorkspacePrefix(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.ProspectiveIntent
+	copy(key[1:9], ws[:])
+	return key
+}
+
 // EvolveRepairMarkKey constructs the per-vault evolve entity-link repair
 // watermark key (0x2B prefix). Value: one byte, the repair-pass version that
 // last completed cleanly over the vault. Presence at the current version lets
@@ -913,6 +985,18 @@ func LeaseKey(ws [8]byte, id [16]byte) []byte {
 func EvolveRepairMarkKey(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
 	key[0] = prefix.EvolveRepairMark
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// AssocWeightRepairMarkKey constructs the per-vault watermark key (0x2E) for
+// the one-time repair of pre-fix full-weight association keys (#756). Value:
+// one byte, the repair-pass version that last completed cleanly over the
+// vault. Presence at the current version lets startup skip the full 0x03 scan.
+// Key: 0x2E | wsPrefix(8) = 9 bytes
+func AssocWeightRepairMarkKey(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.AssocWeightRepairMark
 	copy(key[1:9], ws[:])
 	return key
 }

@@ -28,6 +28,28 @@ and remain the reviewer's job.
    **There is no automated check** — nothing verifies SDK parity in CI. Claude Code users
    get a warning from `.claude/hooks/drift-guard.mjs`; otherwise manual. 🪝
 
+   **Recall supersession/currency annotations are MCP + MBP only, deliberately** (COG-22,
+   COG-25, COG-28). `SupersededBy`/`CurrentVersion` and `substituted_for`/
+   `substitution_basis`/`chain_truncated`/`head_not_indexed_yet` (all ASSERTED — the last
+   four are COG-28 version-head substitution, #763) and `possibly_superseded_by`/
+   `version_cluster`/`newest_of_cluster`/`cluster_size` (advisory, COG-25) live on
+   `mbp.ActivationItem` + `mcp.MemoryAnnotations`; REST inherits them via the
+   `rest.ActivateResponse = mbp.ActivateResponse` type alias, so it is automatically in sync.
+   Since #764 the same list carries `unresolved_contradiction` (per-row, ASSERTED, COG-29)
+   and the RESPONSE-level `conflict` block. Two traps that list does not protect you from,
+   both hit in #764 and both now pinned by tests: `internal/mcp/convert.go`'s
+   "should I allocate an annotations object at all" predicate must name the new field or a
+   row carrying no OTHER annotation drops it silently
+   (`TestRecallOverMCP_ConflictBlockAndAnnotations`), and `internal/mcp/handlers.go`'s
+   recall response is a hand-built `map[string]any` that is NOT a mirror of
+   `mbp.ActivateResponse` — a response-level field added to the struct alone reaches REST
+   and vanishes on MCP.
+   **proto/gRPC and the non-Go SDKs carry NO supersession/currency annotation fields at all**
+   (their `ActivationItem` is a minimal subset that never had even `superseded_by`). Do NOT
+   "complete" the schema by adding only the currency fields there — an unpopulated field the
+   adapter never fills is the silently-wrong class (principle #2). Add the whole annotation
+   block, wired end-to-end, or nothing.
+
 4. **A plasticity preset value** (`internal/auth/plasticity.go`) → update the web-UI preset
    cards (`web/templates/index.html`) and the JS descriptions/radar data
    (`web/static/js/app.js`), and any docs table. Presets are **hand-duplicated** across Go
@@ -68,6 +90,14 @@ and remain the reviewer's job.
     confirm it goes through `RepLogAppend` and is leader-gated or Cortex-originated (bug
     #596 is exactly the absence of this). Background workers that mutate replicated state
     (the pruner) inherit the obligation.
+
+12. **A new async worker or fire-and-forget path on the write or scoring path**
+    (`internal/engine`, `internal/engine/activation`, `internal/storage`) → give it a
+    `WaitIdle`/`Flush` seam, fold it into `Engine.waitWriteTimeIdle()` (or document it as
+    its own drain if it doesn't fit that call), and add it to the async-source table in
+    `testing-hermeticity.md`. Any test asserting on that worker's output must drain it
+    deterministically — `time.Sleep` is not synchronization and flakes under `-race` on
+    constrained CI cores (#722).
 
 ## Live drift found during the guardian audit (worth fixing)
 

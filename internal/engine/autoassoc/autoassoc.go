@@ -65,6 +65,11 @@ type Worker struct {
 	fts     FTSIndex
 	metrics *Metrics
 	wg      sync.WaitGroup
+	// jobWG tracks in-flight+queued jobs (Add on successful Enqueue, Done
+	// after processJob returns). Separate from wg (which tracks the fixed
+	// pool of NumWorkers goroutines). Lets WaitIdle() block until the queue
+	// has been fully drained without stopping the worker pool.
+	jobWG   sync.WaitGroup
 	stopCtx context.Context
 }
 
@@ -88,12 +93,22 @@ func New(ctx context.Context, store Store, fts FTSIndex) *Worker {
 // Enqueue submits a job to the worker pool. If the queue is full, the job
 // is dropped (non-blocking) and the Dropped counter is incremented.
 func (w *Worker) Enqueue(job Job) {
+	w.jobWG.Add(1) // Add BEFORE the send so a concurrent WaitIdle() can't observe a false-idle gap.
 	select {
 	case w.jobs <- job:
 		w.metrics.Enqueued.Add(1)
 	default:
+		w.jobWG.Done() // never queued — nothing to wait for
 		w.metrics.Dropped.Add(1)
 	}
+}
+
+// WaitIdle blocks until every job enqueued so far has finished processing
+// (completed or errored). Test-only synchronization helper: production
+// callers never await this — write-time association is fire-and-forget by
+// design. It does not stop or otherwise alter the worker pool's scheduling.
+func (w *Worker) WaitIdle() {
+	w.jobWG.Wait()
 }
 
 // Stop drains all pending jobs and waits for in-flight work to complete.
@@ -115,14 +130,25 @@ func (w *Worker) GetMetrics() (enqueued, completed, dropped, errors int64) {
 func (w *Worker) run() {
 	defer w.wg.Done()
 	for job := range w.jobs {
-		ctx, cancel := context.WithTimeout(w.stopCtx, JobTimeout)
-		if err := w.processJob(ctx, job); err != nil {
-			w.metrics.Errors.Add(1)
-			slog.Warn("autoassoc job failed", "err", err)
-		} else {
-			w.metrics.Completed.Add(1)
-		}
-		cancel()
+		w.runJob(job)
+	}
+}
+
+// runJob processes a single job. Done() and cancel() are deferred (rather
+// than called as plain statements after processJob returns) so they still
+// fire if processJob ever panics — otherwise a panicking job would leak an
+// un-Done() jobWG entry and hang a subsequent WaitIdle() forever. This does
+// not add a recover(): a panic still propagates and crashes the process,
+// it only makes the bookkeeping robust if one unwinds through here.
+func (w *Worker) runJob(job Job) {
+	defer w.jobWG.Done()
+	ctx, cancel := context.WithTimeout(w.stopCtx, JobTimeout)
+	defer cancel()
+	if err := w.processJob(ctx, job); err != nil {
+		w.metrics.Errors.Add(1)
+		slog.Warn("autoassoc job failed", "err", err)
+	} else {
+		w.metrics.Completed.Add(1)
 	}
 }
 

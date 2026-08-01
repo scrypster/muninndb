@@ -66,18 +66,22 @@ touches the cognitive core, storage, recall, or a public surface, run the loop.
    is unfixed, HOLD and report — do not merge.
 
 ## Contributor PRs
-The same bar applies to contributed work: Tier-3 refute where it applies, CI green, and a measured
-result before it lands. Serialize merges that touch the same hot signatures — a parallel merge
+Don't bounce nitpicks back to a strong contributor, especially after multiple round-trips. Either
+adjust their branch yourself (`maintainerCanModify=true`: merge develop INTO their branch, resolve,
+push — a merge commit, not a force-push) or merge and do a small follow-up PR. Still hold the bar
+(Tier-3 refute, CI green). Serialize merges that touch the same hot signatures — a parallel merge
 silently dropped a feature once.
 
-(Maintainers: the review-response workflow is separate local tooling and is not part of this repo.)
+(How review responses get drafted is separate maintainer tooling and is not part of this repo.)
 
 ## Labs vs live
 Prove mechanisms in an isolated labs daemon (own data dir + ports, `-tags localassets` +
 `MUNINN_LOCAL_EMBED=1`) before pointing them at a vault you care about. Back up first
-(`muninn backup --data-dir <d> --output <b>`, server stopped), keep the old binary for rollback,
-then verify after cutover: embed provider up, no corruption, a positive recall, and any startup
-migration ran clean.
+(`muninn backup --data-dir <d> --output <b>`, server stopped via `launchctl bootout`), save the old
+binary for rollback, and on macOS **ad-hoc code-sign the new binary**
+(`codesign --force --sign - <bin>` — launchd rejects unsigned binaries with
+`OS_REASON_CODESIGNING`), then `launchctl bootstrap`/`kickstart` and verify: embed provider up, no
+corruption, a positive recall, and any startup migration ran clean.
 
 ## Pipelining
 While one increment's build/refute runs, design the next (agents notify on completion). Keep the

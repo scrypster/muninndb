@@ -401,6 +401,11 @@ func (s *Server) handleActivate(ctx context.Context, corrID uint64, payload []by
 		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid activate request")
 		return
 	}
+	// Clamp a negative threshold: the in-process negative-means-bypass contract
+	// (used by Explain) is deliberately not exposed on the wire.
+	if req.Threshold < 0 {
+		req.Threshold = 0
+	}
 
 	resolved, err := s.scopeVault(ctx, req.Vault)
 	if err != nil {

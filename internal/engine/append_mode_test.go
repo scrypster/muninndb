@@ -16,6 +16,9 @@ import (
 var appendAdditive = map[string]bool{
 	"Write": true, "WriteBatch": true, "WriteIdempotency": true,
 	"RememberTree": true, "AddChild": true, "RegisterVaultName": true,
+	// Intend only CREATES: a new TypeGoal engram (via Write) plus new 0x2D
+	// armed-intention keys. It never modifies or deletes existing state.
+	"Intend": true,
 }
 
 // appendInfra: engine wiring/lifecycle/getters with no credential-reachable
@@ -26,6 +29,9 @@ var appendInfra = map[string]bool{
 	"SetReplayEnrichTimeout": true, "SetRetroactiveProcessors": true, "SetTransitionWorker": true,
 	"Store": true, "ResetReplayFailCount": true, "Stop": true, "Checkpoint": true,
 	"Observability": true, "LatencyTracker": true, "ActivityTracker": true,
+	// WaitWriteTimeIdle drains the write-time async workers and writes
+	// nothing itself — an out-of-package test seam (#722 doctrine, #764).
+	"WaitWriteTimeIdle": true,
 }
 
 // appendReadOnly: read/query methods, safe for append.
@@ -34,14 +40,24 @@ var appendReadOnly = map[string]bool{
 	"CheckIdempotency": true, "CountChildren": true, "CountEmbedded": true, "EmbedStats": true,
 	"Explain": true, "ExportGraph": true, "ExportVault": true, "FindByEntity": true,
 	"FindSimilarEntities": true, "GetAnnotations": true, "GetAssociations": true,
-	"GetAssociationsBatch": true, "GetContradictions": true, "GetEngram": true,
+	"GetAssociationsBatch": true, "GetContradictions": true, "GetContradictionReport": true,
+	"GetEngram":               true,
 	"GetEnrichmentCandidates": true, "GetEnrichmentMode": true, "GetEntityAggregate": true,
 	"GetEntityClusters": true, "GetEntityTimeline": true, "GetNoveltyDrops": true,
 	"GetProcessorStats": true, "GetProvenance": true, "GetVaultEmbedDim": true, "GetVaultJob": true,
 	"Hello": true, "ListDeleted": true, "ListEngrams": true, "ListEntities": true, "ListVaults": true,
 	"Read": true, "RecallTree": true, "ReevaluatePushOnEmbed": true, "ResolveVaultPlasticity": true,
-	"Session": true, "SessionPaged": true, "Stat": true, "Subscribe": true, "SubscribeWithDeliver": true,
+	"VaultPlasticityConfig": true,
+	"Session":               true, "SessionPaged": true, "Stat": true, "Subscribe": true, "SubscribeWithDeliver": true,
 	"Traverse": true, "Unsubscribe": true, "VaultNameExists": true, "WhereLeftOff": true, "WorkerStats": true,
+	// NoticesFor* are read/query surfaces with ONE recorded residual write: on
+	// delivery they bump the fired-marker (FiredCount/LastFiredAt; a one-shot
+	// consumes its own 0x2D keys). That is delivery bookkeeping on the
+	// intention's OWN advisory index — the same access-metadata residual class
+	// as TouchAccess under SEC-15 (#682): append/read paths may strengthen or
+	// consume delivery state, never overwrite/evolve/forget an engram. COG-11
+	// readOnly (observe) suppresses even the marker.
+	"NoticesForRecall": true, "NoticesForRemember": true,
 }
 
 // TestAppendMode_MethodCensus is the ANTI-ROT pin the #687 reviews demanded: it

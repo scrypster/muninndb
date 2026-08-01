@@ -122,6 +122,29 @@ func (s *stubStore) EngramLastAccessNs(_ [8]byte, _ storage.ULID) int64 {
 	return 0
 }
 
+// GetEmbedding mirrors PebbleStore.GetEmbedding for this in-memory stub: since
+// stubStore keeps Embedding inline on the engram (it never models the ERF v2
+// separate-key split), the fallback simply reads it back off the same record.
+func (s *stubStore) GetEmbedding(_ context.Context, _ [8]byte, id storage.ULID) ([]float32, error) {
+	if e, ok := s.engrams[id]; ok {
+		return e.Embedding, nil
+	}
+	return nil, nil
+}
+
+// GetEmbeddings mirrors PebbleStore.GetEmbeddings for this in-memory stub: same
+// inline-Embedding source as GetEmbedding, just returned positionally for a batch
+// of ids in one call.
+func (s *stubStore) GetEmbeddings(_ context.Context, _ [8]byte, ids []storage.ULID) ([][]float32, error) {
+	out := make([][]float32, len(ids))
+	for i, id := range ids {
+		if e, ok := s.engrams[id]; ok {
+			out[i] = e.Embedding
+		}
+	}
+	return out, nil
+}
+
 func (s *stubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
 	var ids []storage.ULID
 	for _, id := range s.recent {
@@ -815,7 +838,7 @@ func TestZeroFTSScoreYearsZeroFTRComponent(t *testing.T) {
 	}
 	store.writeEngram(eng1)
 
-	// FTS score = 0.0 → after math.Tanh normalization → 0.0.
+	// FTS score = 0.0 → FullTextRelevance passes through unchanged → 0.0.
 	fts := &stubFTS{results: []activation.ScoredID{
 		{ID: eng1.ID, Score: 0.0},
 	}}
@@ -853,7 +876,9 @@ func TestPositiveFTSScoreYieldsNormalizedFTR(t *testing.T) {
 	store.writeEngram(eng1)
 
 	fts := &stubFTS{results: []activation.ScoredID{
-		{ID: eng1.ID, Score: 5.0}, // BM25 raw score — large but normalized via tanh
+		// Post-#711, fts.Search itself returns a calibrated, absolute [0,1]
+		// coverage score — the activation engine no longer tanh-normalizes it.
+		{ID: eng1.ID, Score: 0.85},
 	}}
 	eng := newTestEngine(store, fts, nil)
 
@@ -1272,9 +1297,9 @@ func TestPhase4_75_ArchiveRestoreRunsDuringActivation(t *testing.T) {
 		t.Fatalf("WriteEngram B: %v", err)
 	}
 
-	// Write A → B association with LastActivated=0 so DecayAssocWeights does
-	// not skip it via the recent-activation grace window (the guard fires only
-	// when lastActivated > 0 and within the grace period).
+	// Write A → B association with LastActivated=0 and a 30-day-old CreatedAt.
+	// Since #762 an unknown lastActivated falls back to createdAt rather than
+	// being read as the Unix epoch, so this edge has 30 days of elapsed time.
 	err = pstore.WriteAssociation(ctx, ws, engramA.ID, engramB.ID, &storage.Association{
 		TargetID:   engramB.ID,
 		Weight:     0.5,
@@ -1294,11 +1319,11 @@ func TestPhase4_75_ArchiveRestoreRunsDuringActivation(t *testing.T) {
 	}
 
 	// Trigger archiving via DecayAssocWeights:
-	//   decayFactor = 0.001 → newW = 0.5 * 0.001 = 0.0005 < minWeight(0.01)
-	//   consolidationScore = peakWeight(0.5) * coActCount(1) / daysSince(~20000)
-	//                      ≈ 0.000025
-	//   archiveThreshold = 0.000001 < 0.000025 → archive condition is satisfied.
-	_, err = pstore.DecayAssocWeights(ctx, ws, 0.001, 0.01, 0.000001)
+	//   H = 1 day, dt = 30 days → ceiling ≈ 0 < minWeight(0.01)
+	//   consolidationScore = peakWeight(0.5) * coActCount(1) / daysSince(30)
+	//                      ≈ 0.0167
+	//   archiveThreshold = 0.000001 < 0.0167 → archive condition is satisfied.
+	_, err = pstore.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.01, 0.000001)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
@@ -1526,8 +1551,13 @@ func TestRun_ThresholdDefaulting(t *testing.T) {
 		{"explicit value preserved without RRF", 0.02, false, 0.02},
 		{"no threshold defaults to 0.001 under RRF", 0, true, 0.001},
 		{"no threshold defaults to 0.05 without RRF", 0, false, 0.05},
-		{"negative threshold defaults to 0.001 under RRF", -1, true, 0.001},
-		{"negative threshold defaults to 0.05 without RRF", -1, false, 0.05},
+		// NEGATIVE is no longer coerced: it is the documented diagnostic
+		// bypass ("gate nothing") that Explain depends on — coercing it to a
+		// default was exactly what made below-bar engrams unexplainable
+		// (adversarial review of #754, finding 4). The gates compare
+		// `score < Threshold`, so -1 admits everything.
+		{"negative threshold is preserved as the diagnostic bypass (RRF)", -1, true, -1},
+		{"negative threshold is preserved as the diagnostic bypass", -1, false, -1},
 	}
 
 	for _, tc := range cases {

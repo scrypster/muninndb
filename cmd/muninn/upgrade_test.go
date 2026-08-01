@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -410,3 +411,45 @@ func TestWaitForProcessExit_Timeout(t *testing.T) {
 // Compile-time check: runStart must return error.
 // If this does not compile, the signature regression is caught immediately.
 var _ func(bool) error = runStart
+
+// TestStopDaemonForUpgrade_ForeignLiveProcess verifies that the Homebrew
+// upgrade path does not delete the PID file of a daemon it failed to stop.
+// A daemon started with elevated privileges cannot be signalled by an
+// unprivileged upgrade; deleting its PID file would leave it running against
+// the database with nothing on disk to find it by, and the upgrade would then
+// report the stop as successful.
+func TestStopDaemonForUpgrade_ForeignLiveProcess(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "muninn.pid")
+	if err := writePID(pidPath, 99999999); err != nil {
+		t.Fatalf("writePID: %v", err)
+	}
+
+	// A process that stays alive however hard we signal it — what an
+	// unprivileged stop of a root-owned daemon looks like.
+	withProbe(t, processRunning)
+
+	if stopDaemonForUpgrade(pidPath, 200*time.Millisecond) {
+		t.Error("stopDaemonForUpgrade reported success for a daemon that is still running")
+	}
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Errorf("PID file of a running daemon was removed: stat err = %v", err)
+	}
+}
+
+// TestStopDaemonForUpgrade_DeadProcess verifies the ordinary path still works:
+// a daemon that is gone has its PID file cleared and is reported as stopped.
+func TestStopDaemonForUpgrade_DeadProcess(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "muninn.pid")
+	if err := writePID(pidPath, 99999999); err != nil { // dead PID
+		t.Fatalf("writePID: %v", err)
+	}
+
+	if !stopDaemonForUpgrade(pidPath, 200*time.Millisecond) {
+		t.Error("stopDaemonForUpgrade reported failure for a dead daemon")
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Errorf("stale PID file not removed: stat err = %v", err)
+	}
+}

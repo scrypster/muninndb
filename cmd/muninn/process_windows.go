@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
 )
 
@@ -25,19 +24,18 @@ func stopProcess(proc *os.Process) error {
 	return proc.Kill()
 }
 
-// isProcessRunning checks whether a process with the given PID exists on Windows.
-// The Unix signal-0 trick is not available, so we query the system task list.
-func isProcessRunning(pid int) bool {
+// probeProcessNative checks whether a process with the given PID exists on
+// Windows. The Unix signal-0 trick is not available, so we query the system
+// task list.
+func probeProcessNative(pid int) processState {
 	if pid <= 0 {
-		return false
+		// Not a PID any process can have; a PID file holding this is garbage.
+		return processDead
 	}
 	out, err := exec.Command(
 		"tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH", "/FO", "CSV",
 	).Output()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(out), fmt.Sprintf("\"%d\"", pid))
+	return tasklistState(pid, out, err)
 }
 
 // daemonSysProcAttr returns SysProcAttr that detaches the daemon from the

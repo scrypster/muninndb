@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/provenance"
 )
 
 // AssocWeightUpdate represents a single association weight update for batching.
@@ -23,8 +25,18 @@ type OrdinalEntry struct {
 // StoreBatch is a write-only handle for atomic multi-write operations.
 // Callers must call Commit or Discard exactly once.
 type StoreBatch interface {
-	// WriteEngram queues an engram write into the batch.
+	// WriteEngram queues an engram write into the batch. Its provenance entry
+	// records Operation "create" — use WriteEngramOp when the batch is not
+	// creating a brand-new engram (e.g. Evolve's successor).
 	WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *Engram) error
+	// WriteEngramOp queues an engram write into the batch exactly like
+	// WriteEngram, except the provenance entry records operation as the
+	// originating verb (e.g. "evolve") instead of the hardcoded "create".
+	WriteEngramOp(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string) error
+	// WriteEngramOpDetails is WriteEngramOp with an optional operation-specific
+	// details payload (predecessor, reason, effective_at) attached to the
+	// provenance entry. nil details behaves exactly like WriteEngramOp.
+	WriteEngramOpDetails(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string, details *provenance.Details) error
 	// WriteAssociation queues association forward (0x03), reverse (0x04) keys into the batch.
 	WriteAssociation(ctx context.Context, wsPrefix [8]byte, src, dst ULID, assoc *Association) error
 	// WriteOrdinal queues the ordinal key for (parentID, childID) into the batch.
@@ -128,10 +140,12 @@ type EngineStore interface {
 	// countDelta is added to the existing CoActivationCount (saturating at MaxUint32).
 	UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID, weight float32, countDelta uint32) error
 
-	// DecayAssocWeights multiplies all association weights for wsPrefix by decayFactor,
-	// deleting entries that fall below minWeight. Returns count deleted.
+	// DecayAssocWeights applies the peak-anchored, elapsed-time decay ceiling
+	// (COG-27) to every association under wsPrefix, clamping entries that fall
+	// below minWeight to their dynamic floor. Returns count deleted.
+	// halfLife is the wall-clock half-life of an unused edge; it must be > 0.
 	// archiveThreshold > 0 enables moving strong floor-hit edges to the 0x25 archive namespace.
-	DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error)
+	DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error)
 
 	// UpdateAssocWeightBatch atomically updates multiple association weights in a single batch.
 	UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error
@@ -150,7 +164,7 @@ type EngineStore interface {
 	GetChildrenByParent(ctx context.Context, wsPrefix [8]byte, parentID ULID) ([]ULID, error)
 
 	// FlagContradiction writes the 0x0A contradiction key for pair (a,b).
-	FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error
+	FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) (newlyFlagged bool, err error)
 
 	// GetContradictions returns all contradiction pairs in the vault by scanning the 0x0A prefix.
 	GetContradictions(ctx context.Context, wsPrefix [8]byte) ([][2]ULID, error)

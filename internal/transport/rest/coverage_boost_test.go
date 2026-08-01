@@ -14,117 +14,57 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/storage"
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // ---------------------------------------------------------------------------
-// applyRecallModePreset — 0% coverage, pure function
+// recall mode forwarding (#704) — the handler validates the mode name but
+// FORWARDS it instead of stamping preset values; the engine is the single
+// preset decider (it alone knows the effective scoring mode, and preset
+// thresholds are ACT-R-calibrated — stamping them here silently emptied rrf
+// vaults).
 // ---------------------------------------------------------------------------
 
-func TestApplyRecallModePreset_SetsThresholdWhenZero(t *testing.T) {
-	req := &ActivateRequest{Threshold: 0}
-	preset := auth.RecallModePreset{Threshold: 0.5}
-	applyRecallModePreset(req, preset)
-	if req.Threshold != 0.5 {
-		t.Errorf("expected Threshold=0.5, got %v", req.Threshold)
-	}
+// modeCapturingEngine records the ActivateRequest the handler forwards.
+type modeCapturingEngine struct {
+	MockEngine
+	lastActivate *mbp.ActivateRequest
 }
 
-func TestApplyRecallModePreset_DoesNotOverrideNonZeroThreshold(t *testing.T) {
-	req := &ActivateRequest{Threshold: 0.8}
-	preset := auth.RecallModePreset{Threshold: 0.3}
-	applyRecallModePreset(req, preset)
-	if req.Threshold != 0.8 {
-		t.Errorf("expected Threshold to stay 0.8, got %v", req.Threshold)
-	}
+func (e *modeCapturingEngine) Activate(ctx context.Context, req *mbp.ActivateRequest) (*mbp.ActivateResponse, error) {
+	e.lastActivate = req
+	return e.MockEngine.Activate(ctx, req)
 }
 
-func TestApplyRecallModePreset_SetsMaxHopsWhenZero(t *testing.T) {
-	req := &ActivateRequest{MaxHops: 0}
-	preset := auth.RecallModePreset{MaxHops: 4}
-	applyRecallModePreset(req, preset)
-	if req.MaxHops != 4 {
-		t.Errorf("expected MaxHops=4, got %v", req.MaxHops)
-	}
-}
+func TestActivate_ModeForwardedNotStamped(t *testing.T) {
+	eng := &modeCapturingEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
 
-func TestApplyRecallModePreset_DoesNotOverrideNonZeroMaxHops(t *testing.T) {
-	req := &ActivateRequest{MaxHops: 2}
-	preset := auth.RecallModePreset{MaxHops: 5}
-	applyRecallModePreset(req, preset)
-	if req.MaxHops != 2 {
-		t.Errorf("expected MaxHops to stay 2, got %v", req.MaxHops)
-	}
-}
+	body := `{"context":["test"],"vault":"default","mode":"deep"}`
+	req := httptest.NewRequest("POST", "/api/activate", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
 
-func TestApplyRecallModePreset_SetsWeightsWhenNil(t *testing.T) {
-	req := &ActivateRequest{Weights: nil}
-	preset := auth.RecallModePreset{SemanticSimilarity: 0.8, FullTextRelevance: 0.2}
-	applyRecallModePreset(req, preset)
-	if req.Weights == nil {
-		t.Fatal("expected Weights to be non-nil after applying preset")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if req.Weights.SemanticSimilarity != 0.8 {
-		t.Errorf("expected SemanticSimilarity=0.8, got %v", req.Weights.SemanticSimilarity)
+	if eng.lastActivate == nil {
+		t.Fatal("engine never received the request")
 	}
-	if req.Weights.FullTextRelevance != 0.2 {
-		t.Errorf("expected FullTextRelevance=0.2, got %v", req.Weights.FullTextRelevance)
+	if eng.lastActivate.Mode != "deep" {
+		t.Errorf("Mode = %q, want %q forwarded to the engine", eng.lastActivate.Mode, "deep")
 	}
-}
-
-func TestApplyRecallModePreset_DoesNotOverrideExistingWeights(t *testing.T) {
-	existing := &mbp.Weights{SemanticSimilarity: 0.9}
-	req := &ActivateRequest{Weights: existing}
-	preset := auth.RecallModePreset{SemanticSimilarity: 0.5, FullTextRelevance: 0.4}
-	applyRecallModePreset(req, preset)
-	// SemanticSimilarity was already non-zero so it must not be overridden.
-	if req.Weights.SemanticSimilarity != 0.9 {
-		t.Errorf("expected SemanticSimilarity to stay 0.9, got %v", req.Weights.SemanticSimilarity)
+	if eng.lastActivate.Threshold != 0 {
+		t.Errorf("Threshold = %v, want 0 — the handler must not stamp the preset threshold (#704)", eng.lastActivate.Threshold)
 	}
-	// FullTextRelevance was zero so it should be set.
-	if req.Weights.FullTextRelevance != 0.4 {
-		t.Errorf("expected FullTextRelevance=0.4, got %v", req.Weights.FullTextRelevance)
+	if eng.lastActivate.MaxHops != 0 {
+		t.Errorf("MaxHops = %v, want 0 — preset application is the engine's decision", eng.lastActivate.MaxHops)
 	}
-}
-
-func TestApplyRecallModePreset_SetsRecency(t *testing.T) {
-	req := &ActivateRequest{}
-	preset := auth.RecallModePreset{Recency: 0.7}
-	applyRecallModePreset(req, preset)
-	if req.Weights == nil {
-		t.Fatal("expected Weights non-nil")
-	}
-	if req.Weights.Recency != 0.7 {
-		t.Errorf("expected Recency=0.7, got %v", req.Weights.Recency)
-	}
-}
-
-func TestApplyRecallModePreset_SetsDisableACTR(t *testing.T) {
-	req := &ActivateRequest{}
-	preset := auth.RecallModePreset{DisableACTR: true}
-	applyRecallModePreset(req, preset)
-	if req.Weights == nil {
-		t.Fatal("expected Weights non-nil")
-	}
-	if !req.Weights.DisableACTR {
-		t.Error("expected DisableACTR to be true")
-	}
-}
-
-func TestApplyRecallModePreset_ZeroPresetIsNoop(t *testing.T) {
-	req := &ActivateRequest{Threshold: 0.4, MaxHops: 2}
-	applyRecallModePreset(req, auth.RecallModePreset{}) // all zero values
-	if req.Threshold != 0.4 {
-		t.Errorf("expected Threshold unchanged at 0.4, got %v", req.Threshold)
-	}
-	if req.MaxHops != 2 {
-		t.Errorf("expected MaxHops unchanged at 2, got %v", req.MaxHops)
-	}
-	if req.Weights != nil {
-		t.Error("expected Weights to remain nil for zero preset")
+	if eng.lastActivate.Weights != nil {
+		t.Errorf("Weights = %+v, want nil — preset application is the engine's decision", eng.lastActivate.Weights)
 	}
 }
 

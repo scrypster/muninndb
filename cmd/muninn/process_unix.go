@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,14 +17,36 @@ func stopProcess(proc *os.Process) error {
 	return proc.Signal(syscall.SIGTERM)
 }
 
-// isProcessRunning checks whether a process with the given PID is still alive
-// by sending signal 0 (the Unix existence check).
-func isProcessRunning(pid int) bool {
+// probeProcessNative checks whether a process with the given PID is still
+// alive by sending signal 0 (the Unix existence check).
+//
+// The error cases carry as much information as the success case:
+//   - ESRCH — no such process. Go converts this to os.ErrProcessDone before
+//     returning, so matching on syscall.ESRCH never fires; match the sentinel.
+//   - EPERM — the process exists but belongs to another user, and the kernel
+//     refuses the signal for that reason. It is alive.
+//
+// Anything else is indeterminate and must not be read as absence.
+func probeProcessNative(pid int) processState {
+	if pid <= 0 {
+		// Not a PID any process can have; a PID file holding this is garbage.
+		return processDead
+	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return false
+		return processUnknown
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	err = proc.Signal(syscall.Signal(0))
+	switch {
+	case err == nil:
+		return processRunning
+	case errors.Is(err, os.ErrProcessDone), errors.Is(err, syscall.ESRCH):
+		return processDead
+	case errors.Is(err, syscall.EPERM):
+		return processRunning
+	default:
+		return processUnknown
+	}
 }
 
 // daemonSysProcAttr detaches the daemon into its own session so it is not

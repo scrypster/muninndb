@@ -173,14 +173,14 @@ func TestGetContradictions_WithPairs(t *testing.T) {
 	idC := NewULID()
 
 	// Flag two distinct contradiction pairs.
-	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
 		t.Fatalf("FlagContradiction(A,B): %v", err)
 	}
-	if err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
 		t.Fatalf("FlagContradiction(A,C): %v", err)
 	}
 	// Flag the same pair again in reverse order — should NOT produce a duplicate.
-	if err := store.FlagContradiction(ctx, ws, idB, idA); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idB, idA); err != nil {
 		t.Fatalf("FlagContradiction(B,A): %v", err)
 	}
 
@@ -239,10 +239,10 @@ func TestResolveContradiction(t *testing.T) {
 	idC := NewULID()
 
 	// Flag two pairs.
-	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
 		t.Fatalf("FlagContradiction(A,B): %v", err)
 	}
-	if err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
 		t.Fatalf("FlagContradiction(A,C): %v", err)
 	}
 
@@ -271,7 +271,7 @@ func TestResolveContradiction_BothDirections(t *testing.T) {
 	idA := NewULID()
 	idB := NewULID()
 
-	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
 		t.Fatalf("FlagContradiction: %v", err)
 	}
 
@@ -520,18 +520,21 @@ func TestDecayAssocWeightsReducesBelowThreshold(t *testing.T) {
 	}
 	weights := []float32{0.8, 0.5, 0.1}
 
+	lastAct := int32(time.Now().Add(-24 * time.Hour).Unix())
 	for i, p := range pairs {
 		if err := store.WriteAssociation(ctx, ws, p[0], p[1], &Association{
-			TargetID: p[1],
-			Weight:   weights[i],
+			TargetID:      p[1],
+			Weight:        weights[i],
+			LastActivated: lastAct,
 		}); err != nil {
 			t.Fatalf("WriteAssociation[%d]: %v", i, err)
 		}
 	}
 
-	// Decay by 50% with minWeight=0.3.
+	// One half-life of elapsed time (dt = H = 1 day) = exactly 50% decay, the
+	// same reduction the old per-pass factor 0.5 produced.
 	// Dynamic floor: edges below minWeight are clamped, NOT deleted — removed=0.
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.3, 0.0)
+	removed, err := store.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.3, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
@@ -719,8 +722,9 @@ func TestDecayAssocWeights_ArchivesStrongEdge(t *testing.T) {
 		t.Fatalf("WriteAssociation: %v", err)
 	}
 
-	// Decay aggressively to force below minWeight, archiveThreshold=0.05.
-	_, err := store.DecayAssocWeights(ctx, ws, 0.01, 0.3, 0.05)
+	// H=1 day, dt=2 days → ceiling = 0.8*0.25 = 0.2 < minWeight 0.3, so the
+	// edge hits the floor branch; archiveThreshold=0.05.
+	_, err := store.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.3, 0.05)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}

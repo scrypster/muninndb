@@ -179,20 +179,43 @@ func TestStartImport_OrphanedVaultCleanup(t *testing.T) {
 		t.Fatalf("StartImport: %v", err)
 	}
 
-	// Wait for job to fail.
-	deadline := time.Now().Add(10 * time.Second)
+	// Wait for the job to fail.
+	//
+	// The timeout MUST be detected. Previously this loop simply exited when the
+	// deadline passed and the test carried on to assert the vault was cleaned
+	// up — but cleanup only runs after the job reaches StatusError, so a slow
+	// runner produced "orphaned vault name still registered after failed
+	// import", blaming the cleanup path for what was really "the job had not
+	// finished yet". That misattribution turned a timing flake into a hunt for a
+	// non-existent cleanup bug, and it failed CI on a docs-only commit.
+	//
+	// Waiting longer alone would not fix it: the defect is that an unmet
+	// precondition was reported as a failed assertion. Now the timeout fails on
+	// its own terms, and the budget is generous because this asserts a
+	// CORRECTNESS property (cleanup happens), not a latency one.
+	const importFailDeadline = 60 * time.Second
+	deadline := time.Now().Add(importFailDeadline)
+	failed := false
+	var lastStatus vaultjob.Status
 	for time.Now().Before(deadline) {
 		j, ok := eng.GetVaultJob(job.ID)
 		if !ok {
 			t.Fatalf("job %q not found", job.ID)
 		}
-		if j.GetStatus() == vaultjob.StatusError {
+		lastStatus = j.GetStatus()
+		if lastStatus == vaultjob.StatusError {
+			failed = true
 			break
 		}
-		if j.GetStatus() == vaultjob.StatusDone {
+		if lastStatus == vaultjob.StatusDone {
 			t.Fatal("expected job to fail with bad data, but it succeeded")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if !failed {
+		t.Fatalf("import job %q did not reach StatusError within %v (last status %v) — the cleanup "+
+			"assertion below is only meaningful once the job has failed, so this is a timeout, not a "+
+			"cleanup defect", job.ID, importFailDeadline, lastStatus)
 	}
 
 	// Vault name must NOT appear in the listing.

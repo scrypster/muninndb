@@ -310,8 +310,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 43 {
-		t.Errorf("expected 43 tools, got %d", len(tools))
+	if len(tools) != 44 {
+		t.Errorf("expected 44 tools, got %d", len(tools))
 	}
 }
 
@@ -589,16 +589,19 @@ func TestApplyEnrichmentArgs(t *testing.T) {
 			wantRels:     1,
 		},
 		{
-			name: "invalid entity skipped",
+			// Only a NAMELESS item is a loss now. A missing type is resolved
+			// against the vault (no resolver here, so "other"), and a bare
+			// string IS a name — those are the middle gear, not malformed input.
+			name: "nameless entity skipped, untyped and bare-string kept",
 			args: map[string]any{
 				"entities": []any{
 					map[string]any{"name": "Valid", "type": "tool"},
-					map[string]any{"name": "", "type": "tool"}, // empty name
-					map[string]any{"name": "NoType"},           // missing type
-					"not an object",                            // wrong type
+					map[string]any{"name": "", "type": "tool"}, // empty name — the only real loss
+					map[string]any{"name": "NoType"},           // missing type -> "other"
+					"BareString",                               // middle gear
 				},
 			},
-			wantEntities: 1,
+			wantEntities: 3,
 		},
 		{
 			name: "invalid relationship skipped",

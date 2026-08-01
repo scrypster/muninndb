@@ -945,6 +945,75 @@ func TestEntityBoost_InjectionRespectsLeaseVisibility(t *testing.T) {
 		"a released lease must not hide the injection")
 }
 
+// TestEntityBoost_InjectionFailsClosedOnLeaseReadError verifies the pass 2b
+// fail-closed guard (#570 follow-up): when the lease read itself errors
+// (distinct from a missing lease, which yields a zero Lease and no error),
+// the candidate must NOT be injected. The real store's GetLease only errors
+// on a genuine Pebble read/decode failure — never on an absent lease record —
+// so this test injects the fault via getLeaseForInjection, the seam added
+// solely to make this failure mode reachable in a test.
+func TestEntityBoost_InjectionFailsClosedOnLeaseReadError(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "lease-fault-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	upsertEntityTimes(t, eng, "LeaseFaultEnt", 2)
+
+	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "lease-fault-seed",
+		Content:    "seed content",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, seedID, "LeaseFaultEnt"))
+
+	target, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "lease-fault-target",
+		Content:    "work item content sharing the entity",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, target, "LeaseFaultEnt"))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, seedID)
+	require.NoError(t, err)
+	seedResults := []activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}
+	inSet := func(rs []activation.ScoredEngram) bool {
+		for _, r := range rs {
+			if r.Engram.ID == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	// No lease record exists yet: the real store returns a zero Lease and no
+	// error, so the candidate is injected. This is the control proving the
+	// fault below — not the guard itself — is what suppresses the injection.
+	require.True(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05, CallerOwner: "me"})),
+		"control: with no lease record, the candidate is injected")
+
+	// Fault-inject a lease-read error for this target only; every other id
+	// (including calls from other concurrently-running tests) is unaffected.
+	faultyID := target
+	orig := getLeaseForInjection
+	getLeaseForInjection = func(ctx context.Context, s *storage.PebbleStore, wsPrefix [8]byte, id storage.ULID) (storage.Lease, error) {
+		if id == faultyID {
+			return storage.Lease{}, fmt.Errorf("simulated lease read failure")
+		}
+		return orig(ctx, s, wsPrefix, id)
+	}
+	defer func() { getLeaseForInjection = orig }()
+
+	require.False(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05, CallerOwner: "me"})),
+		"a lease-read error must fail closed: the candidate must not be injected")
+}
+
 // TestEntityBoost_InjectionRespectsValidity verifies that injections honor the
 // COG-19 valid-time gate: an engram whose ValidUntil has passed must not be
 // injected (the final gate in activateCore would drop it anyway, but gating at
@@ -997,4 +1066,60 @@ func TestEntityBoost_InjectionRespectsValidity(t *testing.T) {
 	require.True(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
 		&activation.ActivateRequest{Threshold: 0.05, IncludeInvalid: true})),
 		"IncludeInvalid must restore the expired injection")
+}
+
+// TestEntityBoost_InjectionRespectsStructuredFilter: an engram the caller's
+// structured (MQL WHERE) predicate rejects must not enter via boost injection.
+// Phase 6 applies StructuredFilter inside Run(), BEFORE the boost pass — the
+// injection side door skipped it entirely until the shared visibility gate
+// picked it up (adversarial-review finding on the gate increment; behavior
+// change for boost, called out in the commit).
+func TestEntityBoost_InjectionRespectsStructuredFilter(t *testing.T) {
+	t.Parallel()
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const vault = "structured-filter-test"
+	ws := eng.store.ResolveVaultPrefix(vault)
+
+	upsertEntityTimes(t, eng, "SFEnt", 2)
+
+	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "sf-seed",
+		Content:    "seed content",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, seedID, "SFEnt"))
+
+	target, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept:    "sf-target",
+		Content:    "target content sharing the entity",
+		Confidence: 0.9,
+	})
+	require.NoError(t, err)
+	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, target, "SFEnt"))
+
+	fullSeed, err := eng.store.GetEngram(ctx, ws, seedID)
+	require.NoError(t, err)
+	seedResults := []activation.ScoredEngram{{Engram: fullSeed, Score: 0.8}}
+	inSet := func(rs []activation.ScoredEngram) bool {
+		for _, r := range rs {
+			if r.Engram.ID == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Control: with no structured filter the target injects.
+	require.True(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05})),
+		"control: target must inject without a structured filter")
+
+	// A predicate rejecting the target must keep it out.
+	require.False(t, inSet(eng.applyEntityBoost(ctx, ws, 100, seedResults,
+		&activation.ActivateRequest{Threshold: 0.05, StructuredFilter: rejectULIDFilter{reject: target}})),
+		"a structured-filter-rejected engram must not be injected")
 }
