@@ -187,26 +187,27 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		}
 	}
 	result := WriteResult{ID: resp.ID, Concept: req.Concept}
-	if resp.Hint != "" {
-		result.Hint = resp.Hint
+	// #770: a caller that omits `vault` gets the default vault, and the
+	// response used to be a bare {id, concept} that said nothing about where
+	// the memory went. An agent working in vault X that forgets the parameter
+	// once gets ok:true and a fact that is invisible from X. Routing is
+	// unchanged and correct — the failure is the SILENCE — so name the
+	// resolved vault. Only fires on the no-pinned-vault fallback (the resolved
+	// vault is literally "default"): a vault pinned by an mk_ key must never
+	// be echoed back, since the key's scope may itself be sensitive.
+	if _, hasVaultArg, _ := vaultFromArgs(args); !hasVaultArg && vault == defaultVaultName {
+		result.Hint = fmt.Sprintf("Stored in vault %q (no 'vault' specified). Pass vault:<name> to target your working vault.", vault)
+	}
+	if extra := resp.Hint; extra != "" {
+		result.Hint = joinHints(result.Hint, extra)
 	} else if len(content) > 500 {
-		result.Hint = "Tip: memories work best when each one captures a single concept. For future writes, consider using muninn_remember_batch to store multiple focused memories at once."
+		result.Hint = joinHints(result.Hint, "Tip: memories work best when each one captures a single concept. For future writes, consider using muninn_remember_batch to store multiple focused memories at once.")
 	}
-	if h := enrich.hint(); h != "" {
-		if result.Hint != "" {
-			result.Hint += " "
-		}
-		result.Hint += h
-	}
+	result.Hint = joinHints(result.Hint, enrich.hint())
 	// An unrecognised `type` is still accepted and stored — but never silently.
 	// Tell the writer it was downgraded to "fact" while they still have the
 	// context to correct it (principle #1, degrade-loudly form).
-	if h := unknownTypeHint(unknownType); h != "" {
-		if result.Hint != "" {
-			result.Hint += " "
-		}
-		result.Hint += h
-	}
+	result.Hint = joinHints(result.Hint, unknownTypeHint(unknownType))
 	// THE PUSH: prospective notices — focal set is the caller-supplied inline
 	// entities; the created engram is the self-echo guard. Inert unless
 	// MUNINN_PROSPECTIVE=1.
