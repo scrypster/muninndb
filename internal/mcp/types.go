@@ -157,10 +157,13 @@ type MemoryAnnotations struct {
 	// explicitly NOT part of the advisory PossiblySupersededBy block.
 	//
 	// SubstitutedFor names the older, superseded memory your query's wording
-	// actually matched: this memory replaced it, so recall returned this one
-	// instead. When it is set, this memory's own wording did NOT match, and its
-	// reported score components are the PREDECESSOR's measurements —
-	// SubstitutionBasis repeats the load-bearing ones so that is unmissable.
+	// actually matched: this memory replaced it, so recall returned or boosted
+	// this one instead. On a row whose own wording did NOT match, the reported
+	// score AND components are the PREDECESSOR's measurements; on a row that
+	// matched on its own but was raised to the predecessor's stronger score,
+	// only the score is the predecessor's — the components remain this
+	// memory's own. SubstitutionBasis repeats the predecessor's load-bearing
+	// measurements in both cases so the score's origin is unmissable.
 	// ChainTruncated: the version chain was longer than the walk limit, so this
 	// may not be the very latest version. HeadNotIndexedYet: this memory has no
 	// embedding yet (indexing pending) — "not indexed", not "not relevant".

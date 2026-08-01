@@ -221,9 +221,12 @@ type ScoredEngram struct {
 	// chain rather than this engram itself.
 	//
 	// SubstitutedFor names that predecessor — the evidence source. It is zero
-	// on every row that earned its own place, including a head that was already
-	// in the result set and merely had its score raised: nothing was
-	// substituted there.
+	// on a row that earned its own place at its own score. It is SET in two
+	// cases: an injected head (this row's own wording did not clear the gate;
+	// Components are the predecessor's measurements) and a raised head (this
+	// row matched on its own but the predecessor matched harder; Score is the
+	// predecessor's Final while Components remain this row's own). The Why
+	// clause distinguishes the two.
 	//
 	// SubstitutionBasis is the predecessor's MEASURED evidence against this
 	// query, and Components carries the same values. They are the real

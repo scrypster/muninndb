@@ -178,7 +178,7 @@ func (e *Engine) applyVersionHeadSubstitution(
 			// the same MAX rule applySupersession applies — and when the raise
 			// actually fires, ATTRIBUTE it: the displayed Score is now the
 			// PREDECESSOR's measurement sitting beside the row's own
-			// ScoreComponents, and COG-27's rule is that attribution is never
+			// ScoreComponents, and COG-28's rule is that attribution is never
 			// optional on a row whose shown number is not its own aboutness.
 			// substitution_basis names the predecessor evidence that produced
 			// the score; without it the caller sees score=0.9 beside

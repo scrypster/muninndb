@@ -290,7 +290,7 @@ type ActivateResponse struct {
 	// result is indistinguishable from an un-run one, the silent-substitution
 	// class fixed across #742..#746. AbstainedReason is machine-readable:
 	// no_candidates | below_threshold | filtered | superseded_only |
-	// ambiguous_version. The last two come from COG-27 version-head resolution
+	// ambiguous_version. The last two come from COG-28 version-head resolution
 	// (#763): the query's only admission-worthy evidence sat in a declared
 	// supersession chain with, respectively, no reachable current head or a
 	// fork the engine refuses to choose a branch of. Both fields are
@@ -356,15 +356,20 @@ type ActivationItem struct {
 	// RelSupersedes chain, siblings of SupersededBy above and explicitly NOT
 	// part of the advisory PossiblySupersededBy block.
 	//
-	// SubstitutedFor names the SUPERSEDED PREDECESSOR whose match admitted this
-	// row: the query's wording reached the older version, and recall resolved
-	// it to this current one. When it is set, ScoreComponents on this item are
-	// the PREDECESSOR's measurements against the query, not this memory's own
-	// aboutness — SubstitutionBasis repeats the load-bearing ones so that is
+	// SubstitutedFor names the SUPERSEDED PREDECESSOR whose match admitted or
+	// boosted this row: the query's wording reached the older version, and
+	// recall resolved it to this current one. Two cases, both attributed: on
+	// an INJECTED row (this memory's own wording did not clear the gate) the
+	// displayed Score AND ScoreComponents are the predecessor's measurements;
+	// on a RAISED row (this memory matched on its own, but the predecessor
+	// matched harder) only Score is the predecessor's Final — ScoreComponents
+	// remain this memory's own. SubstitutionBasis repeats the predecessor's
+	// load-bearing measurements in both cases so the score's origin is
 	// unmissable. ChainTruncated: the chain was longer than the walk limit, so
 	// this may not be the very latest version. HeadNotIndexedYet: this memory
 	// has no stored embedding yet (indexing pending) — "not indexed" rather
-	// than "not relevant". All empty on a row that earned its own place.
+	// than "not relevant". All empty on a row that earned its own place at its
+	// own score.
 	SubstitutedFor    string             `msgpack:"substituted_for,omitempty"      json:"substituted_for,omitempty"`
 	SubstitutionBasis *SubstitutionBasis `msgpack:"substitution_basis,omitempty"   json:"substitution_basis,omitempty"`
 	ChainTruncated    bool               `msgpack:"chain_truncated,omitempty"      json:"chain_truncated,omitempty"`

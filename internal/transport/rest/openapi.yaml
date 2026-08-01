@@ -402,10 +402,13 @@ components:
         substituted_for:
           type: string
           description: >-
-            ASSERTED (COG-28): the superseded PREDECESSOR whose match admitted this row.
-            Your query's wording reached the older version and recall resolved it to this
-            current one. When present, this memory's OWN wording did not match and
-            score_components are the predecessor's measurements — see substitution_basis.
+            ASSERTED (COG-28): the superseded PREDECESSOR whose match admitted or boosted
+            this row. Your query's wording reached the older version and recall resolved it
+            to this current one. On an injected row (own wording did not match) both score
+            and score_components are the predecessor's measurements; on a raised row (own
+            wording matched, predecessor matched harder) only score is the predecessor's —
+            score_components remain this memory's own. substitution_basis carries the
+            predecessor's measurements in both cases.
         substitution_basis:
           $ref: "#/components/schemas/SubstitutionBasis"
         chain_truncated:

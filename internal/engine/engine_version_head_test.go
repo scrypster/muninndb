@@ -786,7 +786,7 @@ func TestVersionHead_SubstitutionClearsAbstention(t *testing.T) {
 //
 // When the head is ALREADY in the result pool on its own (weak) merit and the
 // predecessor's evidence is stronger, the raise branch lifts Score to the
-// predecessor's Final — a number that is NOT the row's own measurement. COG-27
+// predecessor's Final — a number that is NOT the row's own measurement. COG-28
 // says attribution is never optional on a row whose displayed score is not its
 // own aboutness, so the raise must carry substituted_for/substitution_basis
 // exactly as an injection does. Without it the caller sees score=0.9 beside

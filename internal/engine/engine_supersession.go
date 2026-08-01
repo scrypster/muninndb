@@ -363,9 +363,11 @@ func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startI
 		// COG-28 uses, and it is exact rather than heuristic: supersession
 		// (evolve and Link(relation=supersedes)) soft-deletes AND stamps in one
 		// atomic batch, a plain muninn_forget soft-deletes and leaves the stamp
-		// OPEN, and forget(not_true_since) stamps WITHOUT soft-deleting. So
-		// soft-deleted + closed stamp arises from supersession and nothing
-		// else.
+		// OPEN, and forget(not_true_since) stamps WITHOUT soft-deleting. One
+		// non-supersession sequence shares the signature — forget(not_true_since)
+		// followed later by a plain forget — but it is benign here: with no
+		// RelSupersedes edge the walk never fires on such a node, and mid-chain
+		// it is traversed-but-unnameable (no_current_version, not retracted).
 		//
 		// Before this, an EVOLVE chain longer than one hop could never resolve:
 		// every intermediate an evolve leaves behind is soft-deleted, so the
