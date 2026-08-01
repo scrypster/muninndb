@@ -377,10 +377,12 @@ func TestAssocWeightRepairMark_RoundTrip(t *testing.T) {
 	}
 }
 
-// A follower that already ran its own repair must tolerate the leader's repair
-// batch arriving on top: the Sets are byte-identical and the Deletes land on
-// keys it already removed. Simulated by running the repair twice over the same
-// state and asserting the second is a clean no-op rather than an error.
+// The repair is key-level idempotent: re-applying its exact writes over
+// already-repaired state converges to one edge rather than duplicating or
+// erroring. That property is what makes a purely LOCAL per-node repair sound
+// (the #681 precedent) — nothing is shipped to followers, so every node must
+// reach the same state by running the same deterministic pass. It also guards a
+// re-scan of a vault whose 0x2E watermark was cleared or version-bumped.
 func TestRepairLegacyFullWeightAssocKeys_DoubleApplyIsANoOp(t *testing.T) {
 	store, cleanup := newTestStoreHelper(t)
 	defer cleanup()
@@ -395,15 +397,15 @@ func TestRepairLegacyFullWeightAssocKeys_DoubleApplyIsANoOp(t *testing.T) {
 	if _, err := store.RepairLegacyFullWeightAssocKeys(ctx, ws); err != nil {
 		t.Fatalf("first repair: %v", err)
 	}
-	// Re-apply the leader's batch shape by hand: delete the (already-absent)
-	// legacy keys and re-set the (already-present) correct ones.
+	// Re-apply the repair's exact batch shape by hand: delete the
+	// (already-absent) legacy keys and re-set the (already-present) correct ones.
 	batch := store.db.NewBatch()
 	_ = batch.Delete(rawAssocKey(prefix.AssocFwd, ws, src, testLegacyComplement, dst), nil)
 	_ = batch.Delete(rawAssocKey(prefix.AssocRev, ws, dst, testLegacyComplement, src), nil)
 	_ = batch.Set(rawAssocKey(prefix.AssocFwd, ws, src, testCorrectFullWeightComplement, dst), val[:], nil)
 	_ = batch.Set(rawAssocKey(prefix.AssocRev, ws, dst, testCorrectFullWeightComplement, src), val[:], nil)
 	if err := batch.Commit(pebble.NoSync); err != nil {
-		t.Fatalf("replay leader batch: %v", err)
+		t.Fatalf("replay repair batch: %v", err)
 	}
 	_ = batch.Close()
 
@@ -413,5 +415,144 @@ func TestRepairLegacyFullWeightAssocKeys_DoubleApplyIsANoOp(t *testing.T) {
 	}
 	if n := len(assocs[ULID(src)]); n != 1 {
 		t.Errorf("pair has %d edges after double-apply, want exactly 1", n)
+	}
+}
+
+// countFwdKeysForSrc counts every 0x03 key the vault holds for src, regardless
+// of weight position — the direct measure of "is there a duplicate edge", which
+// GetAssociations would hide by returning only the first (highest-weight) one.
+func countFwdKeysForSrc(t *testing.T, store *PebbleStore, ws [8]byte, src [16]byte) [][]byte {
+	t.Helper()
+	scanPrefix := make([]byte, 25)
+	scanPrefix[0] = prefix.AssocFwd
+	copy(scanPrefix[1:9], ws[:])
+	copy(scanPrefix[9:25], src[:])
+	iter, err := PrefixIterator(store.db, scanPrefix)
+	if err != nil {
+		t.Fatalf("prefix iterator: %v", err)
+	}
+	defer iter.Close()
+	var found [][]byte
+	for iter.First(); iter.Valid(); iter.Next() {
+		found = append(found, append([]byte(nil), iter.Key()...))
+	}
+	return found
+}
+
+// B1 (review finding): a live write that supersedes a captured pair between the
+// scan's snapshot and the chunk commit must NOT be undone by the repair.
+//
+// The interleaving: the scan captures the damaged pair from its fixed snapshot.
+// Before the chunk commits, Hebbian UpdateAssocWeight runs for real — it reads
+// 1.0 from the 0x14 index, deletes the correct AND the legacy key positions, and
+// rewrites the pair at 0.8, index 0.8. The repair must notice (the legacy key is
+// gone) and emit nothing at all for that pair.
+//
+// RED against the pre-fix logic, which re-validated only `keyExists(fwdCorrect)`:
+// the 1.0 position is empty after the live write, so it wrote the STALE captured
+// value back at 1.0 — a permanent phantom full-weight duplicate that sorts first
+// in GetAssociations while the index says 0.8, and that nothing ever deletes.
+//
+// The interleaving is forced through the pre-flush hook rather than by racing a
+// multi-second scan against a timer: same window, deterministic, sub-millisecond.
+func TestRepairLegacyFullWeightAssocKeys_DoesNotResurrectSupersededPair(t *testing.T) {
+	store, cleanup := newTestStoreHelper(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := [8]byte{0x28}
+
+	src := [16]byte{0x61}
+	dst := [16]byte{0x62}
+	stale := encodeAssocValue(RelSupports, 1.0, time.Unix(1_700_000_000, 0), 1, 1.0, 1)
+	seedLegacyEdge(t, store, ws, src, dst, stale[:], 1.0)
+
+	// The live write lands in the capture→commit window, exactly once.
+	fired := false
+	assocWeightRepairPreFlushHook = func() {
+		if fired {
+			return
+		}
+		fired = true
+		if err := store.UpdateAssocWeight(ctx, ws, ULID(src), ULID(dst), 0.8, 1); err != nil {
+			t.Errorf("concurrent UpdateAssocWeight: %v", err)
+		}
+	}
+	defer func() { assocWeightRepairPreFlushHook = nil }()
+
+	repaired, err := store.RepairLegacyFullWeightAssocKeys(ctx, ws)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if !fired {
+		t.Fatal("pre-flush hook never fired — the test did not exercise the window")
+	}
+	if repaired != 0 {
+		t.Errorf("repaired = %d, want 0 — the pair was superseded, nothing was relocated", repaired)
+	}
+
+	fwdKeys := countFwdKeysForSrc(t, store, ws, src)
+	if len(fwdKeys) != 1 {
+		t.Fatalf("pair holds %d forward keys, want exactly 1 (the live 0.8 edge); a second key is the resurrected phantom", len(fwdKeys))
+	}
+	if bytes.Equal(fwdKeys[0][25:29], testCorrectFullWeightComplement[:]) {
+		t.Error("the surviving key sits at the 1.0 position — the repair resurrected the superseded full-weight edge")
+	}
+	w, err := store.GetAssocWeight(ctx, ws, ULID(src), ULID(dst))
+	if err != nil {
+		t.Fatalf("GetAssocWeight: %v", err)
+	}
+	if w != 0.8 {
+		t.Errorf("index weight = %v, want 0.8 (the live write's value)", w)
+	}
+}
+
+// B1, second half: when the pair is NOT superseded but its legacy-position value
+// bytes are rewritten in place inside the window, the repair must carry the
+// FRESH bytes to the 1.0 position. Committing the captured copy would silently
+// roll back whatever that write recorded.
+//
+// RED against the pre-fix logic, which wrote the snapshot's `d.val`.
+func TestRepairLegacyFullWeightAssocKeys_CarriesFreshlyReadValueBytes(t *testing.T) {
+	store, cleanup := newTestStoreHelper(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := [8]byte{0x29}
+
+	src := [16]byte{0x71}
+	dst := [16]byte{0x72}
+	captured := encodeAssocValue(RelSupports, 0.5, time.Unix(1_600_000_000, 0), 1, 1.0, 1)
+	fresher := encodeAssocValue(RelSupports, 0.9, time.Unix(1_700_000_000, 0), 99, 1.0, 77)
+	seedLegacyEdge(t, store, ws, src, dst, captured[:], 1.0)
+
+	fired := false
+	assocWeightRepairPreFlushHook = func() {
+		if fired {
+			return
+		}
+		fired = true
+		// In-place rewrite at the legacy position; weight (and so key position
+		// and 0x14 index) is unchanged, so the pair is still repairable.
+		if err := store.db.Set(rawAssocKey(prefix.AssocFwd, ws, src, testLegacyComplement, dst), fresher[:], pebble.NoSync); err != nil {
+			t.Errorf("in-window rewrite: %v", err)
+		}
+	}
+	defer func() { assocWeightRepairPreFlushHook = nil }()
+
+	repaired, err := store.RepairLegacyFullWeightAssocKeys(ctx, ws)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if !fired {
+		t.Fatal("pre-flush hook never fired — the test did not exercise the window")
+	}
+	if repaired != 1 {
+		t.Errorf("repaired = %d, want 1", repaired)
+	}
+	got, ok := mustGet(t, store, rawAssocKey(prefix.AssocFwd, ws, src, testCorrectFullWeightComplement, dst))
+	if !ok {
+		t.Fatal("repair did not place the edge at the true 1.0 position")
+	}
+	if !bytes.Equal(got, fresher[:]) {
+		t.Error("repair carried the captured snapshot value, clobbering the in-window rewrite")
 	}
 }

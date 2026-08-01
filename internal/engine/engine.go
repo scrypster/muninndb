@@ -143,14 +143,28 @@ type Engine struct {
 	archiveGCDone        chan struct{}             // signals archive GC worker shutdown
 	evolveRepairDone     chan struct{}             // signals evolve entity-link repair completion
 	evolveRepairDelay    time.Duration             // startup delay before the repair pass
-	// assocWeightRepairDone signals the one-shot pre-fix full-weight
-	// association-key repair (#756) has finished. runPruneWorker gates assoc
-	// decay on it — decay destroys the repair's disambiguator.
-	assocWeightRepairDone  chan struct{}
-	assocWeightRepairDelay time.Duration       // startup delay before that pass
-	coherence              *coherence.Registry // per-vault incremental coherence counters
-	scoring                *scoring.Store      // per-vault learnable scoring weights
-	prov                   *provenance.Store   // audit trail per-engram
+	// assocWeightRepairDone is closed ONLY when the one-shot pre-fix
+	// full-weight association-key repair (#756) completes cleanly.
+	// runPruneWorker gates assoc decay on it — decay destroys the repair's
+	// disambiguator, so a failed pass parks decay instead of opening the gate.
+	assocWeightRepairDone chan struct{}
+	// assocWeightRepairExited is closed unconditionally when that goroutine
+	// returns — cleanly, in error, on panic, or on shutdown. Stop() waits on
+	// THIS one, so a parked gate can never hang shutdown or leak the goroutine.
+	assocWeightRepairExited chan struct{}
+	assocWeightRepairDelay  time.Duration // startup delay before that pass
+	// decayAssocWeightsFn, when non-nil, replaces the store call decayAllVaults
+	// makes. Test-only seam: it is what lets a unit test prove the repair gate
+	// actually suppresses decay calls rather than merely existing in the source.
+	decayAssocWeightsFn func(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error)
+	// repairAssocWeightsFn, when non-nil, replaces the per-vault store call the
+	// repair pass makes. Test-only seam, and the only way to exercise the
+	// failure policy: a real forced storage error is not reachable from a test
+	// without closing the store out from under the engine.
+	repairAssocWeightsFn func(ctx context.Context, ws [8]byte) (int, error)
+	coherence            *coherence.Registry // per-vault incremental coherence counters
+	scoring              *scoring.Store      // per-vault learnable scoring weights
+	prov                 *provenance.Store   // audit trail per-engram
 
 	// Fix 5: coherence persistence lifecycle
 	coherenceFlushStop chan struct{}
@@ -544,7 +558,8 @@ func NewEngine(cfg EngineConfig) *Engine {
 		e.assocWeightRepairDelay = *cfg.AssocWeightRepairDelay
 	}
 	e.assocWeightRepairDone = make(chan struct{})
-	// engine:spawn-ok — tracked by assocWeightRepairDone channel, drained in Stop()
+	e.assocWeightRepairExited = make(chan struct{})
+	// engine:spawn-ok — tracked by assocWeightRepairExited channel, drained in Stop()
 	go e.runLegacyFullWeightAssocRepair()
 
 	return e
@@ -705,10 +720,12 @@ func (e *Engine) Stop() {
 			}
 		}
 
-		// Wait for the full-weight association repair pass to exit.
-		if e.assocWeightRepairDone != nil {
+		// Wait for the full-weight association repair pass to exit. This waits
+		// on the EXITED channel, not the gate channel: the gate stays shut on a
+		// non-clean pass, and shutdown must never depend on repair success.
+		if e.assocWeightRepairExited != nil {
 			select {
-			case <-e.assocWeightRepairDone:
+			case <-e.assocWeightRepairExited:
 			case <-time.After(5 * time.Second):
 				slog.Warn("engine: legacy full-weight association repair did not exit within 5s")
 			}
@@ -4276,40 +4293,58 @@ func (e *Engine) runPruneWorker() {
 					}
 				}
 			}
-			// Association decay must never run before the one-shot full-weight
-			// repair has swept (#756). Decay reads weight 0 from a pre-fix
-			// full-weight key and either deletes the edge or clamps it to the
-			// 0.05 floor — rewriting the 0x14 index and moving the keys, which
-			// permanently destroys the only evidence the repair can use. The
-			// gate makes that ordering structural instead of a race between two
-			// startup timers; the pass always closes its channel (including on
-			// error, panic, and shutdown), so decay resumes on the next tick.
-			decayReady := e.assocWeightRepairComplete()
-			if !decayReady {
-				slog.Debug("assoc decay deferred: full-weight repair pass still running")
-			}
-			for _, vaultName := range vaults {
-				if !decayReady {
-					break
-				}
-				resolved := e.ResolveVaultPlasticity(vaultName)
-				if resolved.HebbianEnabled && resolved.AssocDecayFactor > 0 {
-					ws := e.store.ResolveVaultPrefix(vaultName)
-					removed, err := e.store.DecayAssocWeights(e.stopCtx, ws,
-						float64(resolved.AssocDecayFactor), resolved.AssocMinWeight, resolved.ArchiveThreshold)
-					if err != nil {
-						slog.Debug("assoc decay failed", "vault", vaultName, "err", err)
-					} else if removed > 0 {
-						slog.Info("assoc decay pruned edges", "vault", vaultName, "removed", removed)
-					}
-				}
-			}
+			e.decayAllVaults(e.stopCtx, vaults)
 			jitter = time.Duration(rand.Intn(10)) * time.Second
 			timer.Reset(60*time.Second + jitter)
 		case <-e.stopCtx.Done():
 			return
 		}
 	}
+}
+
+// decayAllVaults runs one association-decay sweep across the given vaults,
+// honouring each vault's plasticity.
+//
+// It is a method, not a block inside runPruneWorker, so the gate below can be
+// unit-tested directly. That matters: the pre-review version of this code had
+// the gate inlined in the worker loop, and DELETING it left the whole engine
+// suite green — the gate was wiring nobody tested (review finding B2).
+//
+// The gate: association decay must never run before the one-shot full-weight
+// repair has swept cleanly (#756). Decay reads weight 0 from a pre-fix
+// full-weight key and either deletes the edge or clamps it to the 0.05 floor —
+// rewriting the 0x14 index and moving the keys, which permanently destroys the
+// only evidence the repair can use. A pass that errored keeps this shut for the
+// process lifetime (see runLegacyFullWeightAssocRepair's failure policy), so
+// decay is parked rather than allowed to destroy repairable state.
+func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
+	if !e.assocWeightRepairComplete() {
+		slog.Debug("assoc decay deferred: full-weight repair pass has not completed cleanly")
+		return
+	}
+	for _, vaultName := range vaults {
+		resolved := e.ResolveVaultPlasticity(vaultName)
+		if !resolved.HebbianEnabled || resolved.AssocDecayFactor <= 0 {
+			continue
+		}
+		ws := e.store.ResolveVaultPrefix(vaultName)
+		removed, err := e.decayAssocWeights(ctx, ws,
+			float64(resolved.AssocDecayFactor), resolved.AssocMinWeight, resolved.ArchiveThreshold)
+		if err != nil {
+			slog.Debug("assoc decay failed", "vault", vaultName, "err", err)
+		} else if removed > 0 {
+			slog.Info("assoc decay pruned edges", "vault", vaultName, "removed", removed)
+		}
+	}
+}
+
+// decayAssocWeights dispatches to the store unless a test has installed a
+// double via decayAssocWeightsFn.
+func (e *Engine) decayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error) {
+	if e.decayAssocWeightsFn != nil {
+		return e.decayAssocWeightsFn(ctx, ws, decayFactor, minWeight, archiveThreshold)
+	}
+	return e.store.DecayAssocWeights(ctx, ws, decayFactor, minWeight, archiveThreshold)
 }
 
 // runIdempotencySweep is a daily background sweep that purges idempotency

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"math"
 	"os"
 	"testing"
@@ -172,10 +173,10 @@ func TestLegacyFullWeightAssocRepair_EngineLifecycleAndWatermark(t *testing.T) {
 }
 
 // The prune worker's assoc-decay must not run until the repair pass has
-// finished: decay over an unrepaired vault permanently destroys the 0x14
-// evidence the repair depends on (#756 correction). The gate is what turns that
-// from a race between two startup timers into an ordering.
-func TestAssocWeightRepairGate_BlocksDecayUntilPassCompletes(t *testing.T) {
+// finished CLEANLY: decay over an unrepaired vault permanently destroys the
+// 0x14 evidence the repair depends on (#756 correction). The gate is what turns
+// that from a race between two startup timers into an ordering.
+func TestAssocWeightRepairGate_ClosedUntilCleanCompletion(t *testing.T) {
 	store, _, ftsIdx, cleanup := assocRepairTestEnv(t)
 	defer cleanup()
 
@@ -184,10 +185,134 @@ func TestAssocWeightRepairGate_BlocksDecayUntilPassCompletes(t *testing.T) {
 	require.False(t, blocked.assocWeightRepairComplete(),
 		"decay must be gated while the one-shot repair is still pending")
 	blocked.Stop()
-	require.True(t, blocked.assocWeightRepairComplete(),
-		"the gate must open once the pass exits — including via shutdown, or decay would be blocked forever")
+	require.False(t, blocked.assocWeightRepairComplete(),
+		"a pass that never swept must not open the gate — shutdown is not a clean pass")
 
 	// An Engine constructed without the pass (nil channel) must report complete,
 	// or a direct-struct test engine would have decay gated off permanently.
 	require.True(t, (&Engine{}).assocWeightRepairComplete())
+}
+
+// bareRepairEngine builds an Engine directly (no NewEngine, no background
+// goroutines) so the repair pass and the decay gate can be driven
+// deterministically, with no timers and nothing racing the test.
+func bareRepairEngine(t *testing.T, store *storage.PebbleStore) *Engine {
+	t.Helper()
+	e := &Engine{
+		store:                   store,
+		assocWeightRepairDelay:  time.Millisecond,
+		assocWeightRepairDone:   make(chan struct{}),
+		assocWeightRepairExited: make(chan struct{}),
+	}
+	e.stopCtx, e.stopCancel = context.WithCancel(context.Background())
+	t.Cleanup(e.stopCancel)
+	return e
+}
+
+// B2 (review finding): the gate itself, tested directly with a counting double.
+//
+// The pre-review version inlined `if !decayReady { break }` in runPruneWorker's
+// loop, and DELETING that line left the entire engine suite green — the gate was
+// untested wiring. decayAllVaults exists so this assertion can be made in
+// microseconds: zero DecayAssocWeights calls while the gate is shut, non-zero
+// once it opens. No 60-second prune-timer test; the CI budget does not buy one.
+//
+// RED-verified: removing the gate check from decayAllVaults makes the first
+// assertion fail.
+func TestDecayAllVaults_GateSuppressesDecayCalls(t *testing.T) {
+	store, _, _, cleanup := assocRepairTestEnv(t)
+	defer cleanup()
+
+	ws := store.ResolveVaultPrefix("vault-a")
+	require.NoError(t, store.WriteVaultName(ws, "vault-a"))
+
+	e := bareRepairEngine(t, store)
+	calls := 0
+	e.decayAssocWeightsFn = func(context.Context, [8]byte, float64, float32, float64) (int, error) {
+		calls++
+		return 0, nil
+	}
+
+	e.decayAllVaults(e.stopCtx, []string{"vault-a"})
+	require.Zero(t, calls, "association decay ran while the full-weight repair gate was shut")
+
+	close(e.assocWeightRepairDone) // what a clean pass does
+	e.decayAllVaults(e.stopCtx, []string{"vault-a"})
+	require.Positive(t, calls, "decay must resume once the repair has completed cleanly")
+}
+
+// B3 (review finding): the error path. A pass that could not repair a vault must
+// leave the gate SHUT for the process lifetime rather than opening it, because
+// decay over that vault destroys the 0x14 evidence permanently and
+// unidentifiably. The goroutine must still exit and still close its exited
+// channel, so Stop() cannot hang and the goroutine cannot leak.
+//
+// RED-verified: restoring `defer close(e.assocWeightRepairDone)` makes both the
+// gate assertion and the zero-decay assertion fail.
+func TestAssocWeightRepairGate_StaysShutWhenPassErrors(t *testing.T) {
+	store, _, _, cleanup := assocRepairTestEnv(t)
+	defer cleanup()
+
+	ws := store.ResolveVaultPrefix("vault-b")
+	require.NoError(t, store.WriteVaultName(ws, "vault-b"))
+
+	e := bareRepairEngine(t, store)
+	e.repairAssocWeightsFn = func(context.Context, [8]byte) (int, error) {
+		return 0, errors.New("synthetic repair failure")
+	}
+
+	go e.runLegacyFullWeightAssocRepair()
+	select {
+	case <-e.assocWeightRepairExited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("repair goroutine did not exit — Stop() would block on this")
+	}
+
+	require.False(t, e.assocWeightRepairComplete(),
+		"a failed repair must leave association decay parked, not open the gate on its evidence")
+
+	// The vault must NOT be watermarked: a failed pass must be retried next boot.
+	mark, err := store.GetAssocWeightRepairMark(context.Background(), ws)
+	require.NoError(t, err)
+	require.Zero(t, mark, "a failed pass must not claim the vault is repaired")
+
+	calls := 0
+	e.decayAssocWeightsFn = func(context.Context, [8]byte, float64, float32, float64) (int, error) {
+		calls++
+		return 0, nil
+	}
+	e.decayAllVaults(e.stopCtx, []string{"vault-b"})
+	require.Zero(t, calls, "decay ran over a vault whose repair failed — the 0x14 evidence is now gone")
+}
+
+// The mirror of the above: a clean pass DOES open the gate and DOES watermark.
+// Without this, "stays shut on error" could be satisfied by a gate that never
+// opens at all.
+func TestAssocWeightRepairGate_OpensOnCleanPass(t *testing.T) {
+	store, _, _, cleanup := assocRepairTestEnv(t)
+	defer cleanup()
+
+	ws := store.ResolveVaultPrefix("vault-c")
+	require.NoError(t, store.WriteVaultName(ws, "vault-c"))
+
+	e := bareRepairEngine(t, store)
+	go e.runLegacyFullWeightAssocRepair()
+	select {
+	case <-e.assocWeightRepairExited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("repair goroutine did not exit")
+	}
+
+	require.True(t, e.assocWeightRepairComplete(), "a clean pass must open the decay gate")
+	mark, err := store.GetAssocWeightRepairMark(context.Background(), ws)
+	require.NoError(t, err)
+	require.Equal(t, assocWeightRepairVersion, mark)
+
+	calls := 0
+	e.decayAssocWeightsFn = func(context.Context, [8]byte, float64, float32, float64) (int, error) {
+		calls++
+		return 0, nil
+	}
+	e.decayAllVaults(e.stopCtx, []string{"vault-c"})
+	require.Positive(t, calls)
 }
