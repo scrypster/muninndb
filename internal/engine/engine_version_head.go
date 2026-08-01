@@ -175,11 +175,31 @@ func (e *Engine) applyVersionHeadSubstitution(
 		s := subs[headID]
 		if idx, inPool := seen[headID]; inPool {
 			// The head earned its own place. Raise it to the topic's score by
-			// the same MAX rule applySupersession applies — and set NO
-			// substitution annotation: nothing was substituted, so injected is
-			// not incremented and TotalFound stays honest.
+			// the same MAX rule applySupersession applies — and when the raise
+			// actually fires, ATTRIBUTE it: the displayed Score is now the
+			// PREDECESSOR's measurement sitting beside the row's own
+			// ScoreComponents, and COG-27's rule is that attribution is never
+			// optional on a row whose shown number is not its own aboutness.
+			// substitution_basis names the predecessor evidence that produced
+			// the score; without it the caller sees score=0.9 beside
+			// components.final=0.2, unexplained. Nothing was INJECTED, so
+			// injected is not incremented and TotalFound stays honest; a head
+			// that matched at or above the shadow keeps its own score and no
+			// annotation (nothing about it was substituted).
 			if s.basis.Final > results[idx].Score {
+				basis := s.basis.Components
 				results[idx].Score = s.basis.Final
+				results[idx].SubstitutedFor = s.basis.Engram.ID
+				results[idx].SubstitutionBasis = &basis
+				results[idx].ChainTruncated = results[idx].ChainTruncated || s.truncated
+				if req.IncludeWhy {
+					clause := raiseWhy(s.basis.Engram.ID, s.truncated)
+					if results[idx].Why != "" {
+						results[idx].Why += "; " + clause
+					} else {
+						results[idx].Why = clause
+					}
+				}
 			}
 			continue
 		}
@@ -245,12 +265,33 @@ func substitutionWhy(predecessor storage.ULID, notIndexed, truncated bool) strin
 	return why
 }
 
+// raiseWhy is the include_why clause for a head that WAS retrieved on its own
+// merit but whose score was raised to the predecessor's stronger match. It
+// differs from substitutionWhy on the one fact that matters: this row's own
+// wording DID match — just more weakly than the version it replaces.
+func raiseWhy(predecessor storage.ULID, truncated bool) string {
+	why := fmt.Sprintf("score raised to the match of the earlier version %s, which this replaces — "+
+		"your query matched that superseded version more strongly than this memory's own wording", predecessor.String())
+	if truncated {
+		why += "; the version chain was longer than the walk limit, so this may not be the very latest version"
+	}
+	return why
+}
+
 // versionHeadAbstainReason converts the blocks recorded by a substitution phase
 // that injected nothing into the abstention reason for an otherwise-empty
 // response. A fork wins over everything else: "I will not guess which branch is
 // current" is more actionable than "no current version exists", and a caller
 // that sees it knows to read the predecessor and resolve the fork. Returns ""
 // when there is nothing to say.
+//
+// Every other block — retracted, hidden, no_current_version and CYCLE — folds
+// into superseded_only, deliberately: what the caller can act on is identical
+// ("your evidence is in a declared chain with no reachable current head; read
+// the predecessor"), and a per-block wire value would expand the AbstainedReason
+// contract for conditions the caller cannot handle differently. A cycle in
+// particular is a pathological authoring error the walk's WARN log already
+// names precisely; pinned by TestVersionHead_SupersessionCycleAbstainsSupersededOnly.
 func versionHeadAbstainReason(blocked []substitutionBlock) string {
 	if len(blocked) == 0 {
 		return ""

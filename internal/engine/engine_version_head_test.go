@@ -682,14 +682,21 @@ func TestVersionHead_ShadowsDoNotEnterPerQueryNormalization(t *testing.T) {
 }
 
 // --- Head already present (§6.6) ------------------------------------------
+//
+// The boundary this pins: a head whose OWN match is at least as strong as the
+// predecessor's shadow is left completely untouched — own score, no
+// annotation. (The other side of the boundary — own match WEAKER than the
+// shadow, score raised — must carry attribution, and is pinned by
+// TestVersionHead_HeadInPoolScoreRaiseIsAttributed.)
 func TestVersionHead_HeadAlreadyInResultsIsNotAnnotated(t *testing.T) {
 	h, cleanup := newVersionHeadHarness(t)
 	defer cleanup()
 
-	// Both versions share the query's wording, so the successor is retrieved on
-	// its own merit. Nothing was substituted — it earned its place.
-	predecessor := h.write("retention policy", "Telemetry rows are purged nightly by the vacuum sweeper.")
-	successor := h.evolve(predecessor, "retention policy", "Telemetry rows are purged nightly by the vacuum sweeper on a quarterly cadence.")
+	// The SUCCESSOR carries the query's near-verbatim wording; the predecessor
+	// is a weaker subset. The successor therefore outscores the shadow, the
+	// raise never fires, and nothing about the row is substituted.
+	predecessor := h.write("retention policy", "Telemetry rows are purged nightly.")
+	successor := h.evolve(predecessor, "retention policy", "Telemetry rows are purged nightly by the vacuum sweeper, quarterly cadence.")
 
 	resp := h.recall(retentionQuery)
 	head := itemByID(resp, successor)
@@ -697,7 +704,10 @@ func TestVersionHead_HeadAlreadyInResultsIsNotAnnotated(t *testing.T) {
 		t.Fatalf("the successor was not returned at all: %v", ids(resp))
 	}
 	if head.SubstitutedFor != "" {
-		t.Errorf("substituted_for = %q on a row that matched on its OWN merit — nothing was substituted", head.SubstitutedFor)
+		t.Errorf("substituted_for = %q on a row whose OWN match was the strongest evidence — nothing was substituted and no score was raised", head.SubstitutedFor)
+	}
+	if head.Score > head.ScoreComponents.Final+1e-6 {
+		t.Errorf("score %.6f exceeds the row's own final %.6f — the raise fired, so this fixture no longer tests the no-raise side of the boundary", head.Score, head.ScoreComponents.Final)
 	}
 }
 
@@ -738,6 +748,228 @@ func TestEvolve_NotifiesEmbedProcessor(t *testing.T) {
 	if calls <= afterWrite {
 		t.Fatalf("EvolveAt did not invoke the onWrite hook (%d calls before, %d after) — the retroactive embed processor is never woken, "+
 			"so on an idle vault the successor waits out a 3-minute backoff before it is semantically retrievable (#763, design §5.6)", afterWrite, calls)
+	}
+}
+
+// --- Abstention recompute (refute finding 1) --------------------------------
+//
+// Phase 6 renders its abstention verdict over ITS OWN set — and in the #763
+// shape that set is empty (the only admission-worthy evidence was the refused
+// predecessor), so it says abstained=true. The substitution phase then fills
+// the response with the injected head. The wire contract (mbp/types.go:
+// "Empty iff Abstained is false") binds the FINAL response, so Abstained must
+// be recomputed after every phase that can add or remove rows — NOT cleared
+// inside applyVersionHeadSubstitution, because the COG-19 gate and the
+// MaxResults re-truncation run after it and can empty the set again.
+func TestVersionHead_SubstitutionClearsAbstention(t *testing.T) {
+	h, cleanup := newVersionHeadHarness(t)
+	defer cleanup()
+
+	seedRetentionChain(h)
+	resp := h.recall(retentionQuery)
+
+	if len(resp.Activations) == 0 {
+		t.Fatalf("fixture failure: substitution did not fire at all (abstained=%v/%q) — this test needs a filled response",
+			resp.Abstained, resp.AbstainedReason)
+	}
+	if resp.Abstained {
+		t.Errorf("CONTRACT BREAK: abstained=true alongside %d returned result(s) — \"Empty iff Abstained is false\" "+
+			"(mbp/types.go) holds on REST/gRPC/MBP/SDK, and a caller honoring the flag discards a real answer",
+			len(resp.Activations))
+	}
+	if resp.AbstainedReason != "" {
+		t.Errorf("abstained_reason = %q on a non-empty response, want empty", resp.AbstainedReason)
+	}
+}
+
+// --- Head-in-pool score raise is attributed (refute finding 3) --------------
+//
+// When the head is ALREADY in the result pool on its own (weak) merit and the
+// predecessor's evidence is stronger, the raise branch lifts Score to the
+// predecessor's Final — a number that is NOT the row's own measurement. COG-27
+// says attribution is never optional on a row whose displayed score is not its
+// own aboutness, so the raise must carry substituted_for/substitution_basis
+// exactly as an injection does. Without it the caller sees score=0.9 beside
+// components.final=0.2, unexplained.
+func TestVersionHead_HeadInPoolScoreRaiseIsAttributed(t *testing.T) {
+	h, cleanup := newVersionHeadHarness(t)
+	defer cleanup()
+
+	// The successor must SELF-RETRIEVE (clear the threshold on its own wording)
+	// but score BELOW the predecessor's shadow: it shares a few query terms,
+	// while the predecessor is the query's near-verbatim source.
+	predecessor := h.write("retention policy",
+		"Telemetry rows older than ninety days are purged nightly by the vacuum sweeper.")
+	successor := h.evolve(predecessor, "retention policy",
+		"Telemetry rows are purged nightly by the compaction sweeper into cold shard archives.")
+
+	resp := h.recall(retentionQuery)
+	head := itemByID(resp, successor)
+	if head == nil {
+		t.Fatalf("the head was not returned at all: %v", ids(resp))
+	}
+	// Fixture validity: the raise branch must actually have fired — the
+	// displayed score exceeds the row's own measured Final. If this trips,
+	// reshape the wordings; the assertions below prove nothing without it.
+	if !(head.Score > head.ScoreComponents.Final+1e-6) {
+		t.Fatalf("fixture failure: score %.6f did not rise above the row's own final %.6f — the raise branch was not reached",
+			head.Score, head.ScoreComponents.Final)
+	}
+	if head.SubstitutedFor != predecessor {
+		t.Errorf("substituted_for = %q, want %q — a raised score is the PREDECESSOR's measurement and must be attributed",
+			head.SubstitutedFor, predecessor)
+	}
+	if head.SubstitutionBasis == nil {
+		t.Errorf("substitution_basis is nil on a raised row — the basis names the predecessor evidence that produced the displayed score")
+	}
+}
+
+// --- Cycle pinning (refute finding 6) ---------------------------------------
+//
+// A declared A<->B supersession loop must neither substitute nor hang, and an
+// empty response over it abstains superseded_only. DECISION, recorded here so
+// the fold is deliberate rather than accidental: a cycle does NOT get its own
+// wire reason. What the caller can act on is identical to the retracted/
+// unreachable cases — "your evidence is in a declared chain with no reachable
+// current head; read the predecessor" — and a third value would expand the
+// wire contract for a pathological authoring error the WARN log already names
+// precisely. If cycles ever need programmatic discrimination, that is the
+// moment to add the value (and the mbp/types.go doc line with it).
+func TestVersionHead_SupersessionCycleAbstainsSupersededOnly(t *testing.T) {
+	h, cleanup := newVersionHeadHarness(t)
+	defer cleanup()
+
+	a := h.write("retention policy", "Telemetry rows older than ninety days are purged nightly by the vacuum sweeper.")
+	b := h.write("retention policy v2", "Aged instrumentation records compact into cold shards after one quarter.")
+	h.linkSupersedes(b, a) // closes A's validity: A carries the shadow signature
+	h.linkSupersedes(a, b) // and the loop back closes B's — a genuine declared cycle
+
+	resp := h.recall(retentionQuery)
+	for _, it := range resp.Activations {
+		if it.SubstitutedFor != "" {
+			t.Fatalf("a CYCLIC chain produced a substitution (%s substituted_for %s) — there is no head to resolve to", it.ID, it.SubstitutedFor)
+		}
+	}
+	if len(resp.Activations) == 0 {
+		if !resp.Abstained || resp.AbstainedReason != activation.AbstainSupersededOnly {
+			t.Errorf("abstained=%v reason=%q, want true/%q — a cycle folds into superseded_only (see the decision above)",
+				resp.Abstained, resp.AbstainedReason, activation.AbstainSupersededOnly)
+		}
+	}
+}
+
+// --- Normalization leakage, saturating arm (refute finding 4) ---------------
+//
+// The non-saturating detector above cannot catch a real maxRaw leak: the ACT-R
+// rescale is a NO-OP unless maxRaw > 1.0, and every row in that fixture sits
+// below 1.0, so a shadow contributing to maxRaw changes nothing observable.
+// This arm makes the shadow HOT — a strong Hebbian boost (edge to a recently
+// activated neighbour) pushes its unscaled Raw past 1.0 and past every live
+// row — so a leak into maxRaw would rescale every live score and redden the
+// exact same equality assertion. RED-verified by the faithful perturbation
+// (folding shadow Raw into the pass-1 maxRaw): this test fails under it, the
+// non-saturating one does not.
+func TestVersionHead_ShadowsDoNotEnterPerQueryNormalization_Saturating(t *testing.T) {
+	h, cleanup := newVersionHeadHarness(t)
+	defer cleanup()
+
+	// Live neighbours a leak would visibly rescale.
+	n1, err := h.eng.Write(h.ctx, &mbp.WriteRequest{Vault: "default", Concept: "vacuum sweeper schedule",
+		Content: "The vacuum sweeper runs nightly against telemetry rows in every shard."})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := h.eng.Write(h.ctx, &mbp.WriteRequest{Vault: "default", Concept: "purge audit trail",
+		Content: "Every nightly purge of telemetry rows writes an audit trail entry."}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// The predecessor, tagged so one arm can exclude it, with a full-weight
+	// association to n1 — the Hebbian source of its heat.
+	pred, err := h.eng.Write(h.ctx, &mbp.WriteRequest{Vault: "default", Concept: "retention policy",
+		Content: "Telemetry rows older than ninety days are purged nightly by the vacuum sweeper.",
+		Tags:    []string{"legacy"}})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := h.eng.Link(h.ctx, &mbp.LinkRequest{
+		Vault: "default", SourceID: pred.ID, TargetID: n1.ID,
+		RelType: uint16(storage.RelRelatesTo), Weight: 1.0,
+	}); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if _, err := h.eng.Evolve(h.ctx, "default", pred.ID,
+		"Aged instrumentation records are compacted into cold shards after one quarter.",
+		"test evolve", nil, "retention policy"); err != nil {
+		t.Fatalf("evolve: %v", err)
+	}
+	// Prime the activation log AFTER the evolve, with the neighbours only: the
+	// predecessor is already a shadow here and shadows are never logged, so no
+	// LIVE row acquires a Hebbian boost (their assoc target — the predecessor —
+	// is absent from the recency window) and both arms stay deterministic.
+	h.recall("vacuum sweeper runs nightly against telemetry rows in every shard")
+	h.eng.waitWriteTimeIdle()
+
+	// FTS-only weights: under the noop embedder ContentMatch is capped at the
+	// FTS weight, and at the default 0.4 even the full 3.24x Hebbian prior
+	// cannot push Raw past 1.0 (0.4 x 3.24 x coverage < 1.3 only at coverage
+	// ~1.0, and typical coverage lands lower). At weight 1.0 the near-verbatim
+	// predecessor saturates decisively. Same weights in both arms, so the
+	// baseline comparison is untouched.
+	run := func(excludeTags []string) *activation.ActivateResult {
+		t.Helper()
+		res, err := h.eng.activation.Run(h.ctx, &activation.ActivateRequest{
+			VaultPrefix: h.ws, Context: []string{retentionQuery}, MaxResults: 10, Threshold: 0.1,
+			ExcludeTags: excludeTags,
+			Weights:     &activation.Weights{SemanticSimilarity: 0.0, FullTextRelevance: 1.0, UseACTR: true},
+		})
+		if err != nil {
+			t.Fatalf("activation run: %v", err)
+		}
+		return res
+	}
+
+	without := run([]string{"legacy"})
+	with := run(nil)
+
+	if len(with.ShadowMatches) == 0 {
+		t.Fatalf("no shadow was collected — this test proves nothing without one")
+	}
+	// Saturation proof, pinned on the OBSERVABLE: with no leak the live pool
+	// stays below 1.0, so scale is 1.0 and the shadow's reported Raw is
+	// min(unscaledRaw, 1.0) — it reads exactly 1.0 iff the shadow actually
+	// saturated. The Hebbian boost is the mechanism (softplus(1.489 + 4x1.0)
+	// / 1.693 ≈ 3.24x on near-verbatim content); both are asserted so a decay
+	// of either drains this test's power loudly instead of silently.
+	sh := with.ShadowMatches[0]
+	if sh.Components.HebbianBoost < 0.5 {
+		t.Fatalf("fixture failure: shadow HebbianBoost = %.4f, want >= 0.5 — the shadow is not hot, its Raw cannot exceed 1.0, and the rescale stays a no-op", sh.Components.HebbianBoost)
+	}
+	if sh.Components.Raw < 1.0 {
+		t.Fatalf("fixture failure: shadow Raw = %.4f, want 1.0 (the clamp of a saturated unscaled raw) — with an unsaturated shadow the rescale is a no-op and a maxRaw leak is undetectable", sh.Components.Raw)
+	}
+	if len(without.Activations) == 0 {
+		t.Fatalf("baseline arm returned nothing — the fixture cannot detect a shift")
+	}
+
+	baseline := map[storage.ULID]activation.ScoreComponents{}
+	for _, s := range without.Activations {
+		baseline[s.Engram.ID] = s.Components
+	}
+	compared := 0
+	for _, s := range with.Activations {
+		b, ok := baseline[s.Engram.ID]
+		if !ok {
+			continue
+		}
+		compared++
+		if s.Components.Raw != b.Raw || s.Components.Final != b.Final || s.Components.AbsoluteScore != b.AbsoluteScore {
+			t.Errorf("SHADOW LEAKED INTO NORMALIZATION for %s: raw %.9f->%.9f final %.9f->%.9f absolute %.9f->%.9f. "+
+				"A HOT superseded predecessor rescaled the live result set (design §4.2, risk 2 — saturating arm).",
+				s.Engram.ID, b.Raw, s.Components.Raw, b.Final, s.Components.Final, b.AbsoluteScore, s.Components.AbsoluteScore)
+		}
+	}
+	if compared == 0 {
+		t.Fatalf("no live row was common to both arms — nothing was actually compared")
 	}
 }
 

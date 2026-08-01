@@ -2596,19 +2596,36 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		result.Activations = result.Activations[:actReq.MaxResults]
 	}
 
-	// COG-28: an empty response that had a declared version chain in it is not
-	// the same emptiness as "nothing in this vault is about that". Name it, so
-	// an agent can act ("there IS a chain here — read <id>") instead of being
-	// handed the generic below_threshold. Only when the response is genuinely
-	// empty after every phase: a good answer is never decorated with a warning
-	// about a chain that did not make it, and no row is ever manufactured.
-	if len(result.Activations) == 0 {
-		if reason := versionHeadAbstainReason(subBlocked); reason != "" {
-			result.Abstained = true
-			result.AbstainedReason = reason
+	// ABSTENTION IS RECOMPUTED HERE, on the FINAL set, and nowhere earlier.
+	// Phase 6's verdict described ITS set, not this one: the substitution and
+	// supersession injectors can FILL a response phase 6 abstained on (the
+	// exact #763 shape — every live candidate below threshold, then the head
+	// injected), and the COG-19 gate / MaxResults re-truncation can EMPTY a
+	// response phase 6 did not abstain on. The wire contract ("Empty iff
+	// Abstained is false", mbp/types.go) binds what the caller receives, so
+	// the flag must be derived from what the caller receives. Deliberately
+	// NOT cleared inside applyVersionHeadSubstitution: the gate and the
+	// truncation run after it and can empty the set again.
+	if len(result.Activations) > 0 {
+		result.Abstained = false
+		result.AbstainedReason = ""
+		if len(subBlocked) > 0 {
+			slog.Debug("recall: version-head substitution blocked on some chains", "blocked", len(subBlocked))
 		}
-	} else if len(subBlocked) > 0 {
-		slog.Debug("recall: version-head substitution blocked on some chains", "blocked", len(subBlocked))
+	} else {
+		result.Abstained = true
+		// COG-28: an empty response that had a declared version chain in it is
+		// not the same emptiness as "nothing in this vault is about that".
+		// Name it, so an agent can act ("there IS a chain here — read <id>")
+		// instead of being handed the generic below_threshold.
+		if reason := versionHeadAbstainReason(subBlocked); reason != "" {
+			result.AbstainedReason = reason
+		} else if result.AbstainedReason == "" {
+			// Phase 6 produced rows and the post-pipeline gates swept them
+			// all: candidates cleared the bar and were then filtered — the
+			// same emptiness AbstainFiltered already names.
+			result.AbstainedReason = activation.AbstainFiltered
+		}
 	}
 
 	// Convert result.Activations to []mbp.ActivationItem

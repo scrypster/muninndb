@@ -289,7 +289,15 @@ type ActivateResponse struct {
 	// has no answer" from "nothing matched this run" — without it an empty
 	// result is indistinguishable from an un-run one, the silent-substitution
 	// class fixed across #742..#746. AbstainedReason is machine-readable:
-	// no_candidates | below_threshold | filtered. Empty iff Abstained is false.
+	// no_candidates | below_threshold | filtered | superseded_only |
+	// ambiguous_version. The last two come from COG-27 version-head resolution
+	// (#763): the query's only admission-worthy evidence sat in a declared
+	// supersession chain with, respectively, no reachable current head or a
+	// fork the engine refuses to choose a branch of. Both fields are
+	// RECOMPUTED on the final response, after every injection and gate phase:
+	// Abstained is true iff Activations is empty, so a version-head
+	// substitution that fills a below-threshold response also clears the
+	// flag. Empty iff Abstained is false.
 	Abstained       bool   `msgpack:"abstained,omitempty"        json:"abstained,omitempty"`
 	AbstainedReason string `msgpack:"abstained_reason,omitempty" json:"abstained_reason,omitempty"`
 }

@@ -2064,7 +2064,15 @@ func (e *ActivationEngine) phase6Score(
 			comp := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
 			a := computeGatedActivation(comp.SemanticSimilarity, comp.FullTextRelevance, comp.DecayFactor, comp.HebbianBoost, w)
 			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
-			r := math.Pow(a, n) / denom
+			// Clamped to 1.0: with an EMPTY live pool the denominator
+			// degenerates to sigma^n over the 0.01 fallback, and an unclamped
+			// shadow r explodes unbounded (8649.0 Final measured) — a number a
+			// head would then be injected at. Unreachable today only because a
+			// PRE-EXISTING CGDN defect keeps this exact shape from arising
+			// through the pipeline (the live CGDN path is likewise unclamped;
+			// that defect is deliberately NOT fixed here). The clamp makes the
+			// trap unrepresentable rather than merely unvisited.
+			r := math.Min(math.Pow(a, n)/denom, 1.0)
 			final := r * comp.Confidence
 			comp.AbsoluteScore = absolute
 			comp.Raw = r
