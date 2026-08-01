@@ -157,6 +157,90 @@ func TestRawTagRange_SeedsDueItems(t *testing.T) {
 	}
 }
 
+// TestRawTagRange_TagOnlyAdmission_IndependentOfConfidenceAndRecency pins the
+// #773 follow-up (G6 refute finding 1): a content-unrelated tag-only hit must
+// be classified AdmissionTagFilter because of WHY it was admitted (the COG-5 S1
+// content-match floor rescued it), never because of where its gated arithmetic
+// happened to land relative to the threshold.
+//
+// The trap: tagMatchFloor (0.1) numerically equals the COG-6 ACT-R default gate
+// (0.1). A FRESH, never-accessed engram's base-level is capped at bLevelCap,
+// where softplus(B) == actrDenominator exactly, so its prior is exactly 1.0 and
+// a floored row's absolute score lands EXACTLY ON the 0.1 boundary. With
+// admissionOf classifying on `gated < threshold`, the fresh confidence-1.0
+// reminder banded `weak` — a new false statement about a row the caller
+// explicitly filtered for — while its 0.9-confidence twin (absolute 0.09) and
+// its stale twin (decayed prior) banded filter_match. Confidence and recency
+// must not decide what the FILTER did.
+//
+// RED at dda8a3e: the fresh confidence-1.0 row comes back AdmissionScored.
+func TestRawTagRange_TagOnlyAdmission_IndependentOfConfidenceAndRecency(t *testing.T) {
+	store, actEngine, cleanup := openRealActivationEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	ws := store.VaultPrefix("s1-admission-vault")
+	now := time.Now()
+
+	write := func(concept string, conf float32, ts time.Time) storage.ULID {
+		t.Helper()
+		id, err := store.WriteEngram(ctx, ws, &storage.Engram{
+			Concept:    concept,
+			Content:    "zqxw glorbnak fluvventious prendicular skoombat " + concept,
+			Tags:       []string{"due:2026-01-01"},
+			Confidence: conf,
+			Stability:  30.0,
+			CreatedAt:  ts,
+			LastAccess: ts,
+			Relevance:  0,
+		})
+		if err != nil {
+			t.Fatalf("WriteEngram(%s): %v", concept, err)
+		}
+		return id
+	}
+
+	stale := now.Add(-30 * 24 * time.Hour)
+	rows := map[string]storage.ULID{
+		"fresh, confidence 1.0 (absolute lands ON the 0.1 boundary)": write("fresh-conf-one", 1.0, now),
+		"fresh, confidence 0.9 (absolute 0.09, below the gate)":      write("fresh-conf-ninety", 0.9, now),
+		"stale 30d, confidence 1.0 (decayed prior, far below)":       write("stale-conf-one", 1.0, stale),
+	}
+
+	result, err := actEngine.Run(ctx, &activation.ActivateRequest{
+		VaultPrefix:        ws,
+		Context:            []string{"totally different query about nothing related"},
+		MaxResults:         50,
+		Weights:            nil, // default scoring: ACT-R
+		Threshold:          0.1, // the COG-6 ACT-R default — the value tagMatchFloor collides with
+		CandidatesPerIndex: 10,
+		Filters: []activation.Filter{
+			{Field: "tag_prefix", Op: "lte", Value: [2]string{"due:", "2026-07-27"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	byID := make(map[storage.ULID]activation.ScoredEngram, len(result.Activations))
+	for _, a := range result.Activations {
+		byID[a.Engram.ID] = a
+	}
+	for label, id := range rows {
+		a, ok := byID[id]
+		if !ok {
+			t.Errorf("%s: not returned at all (the S1 bypass regressed)", label)
+			continue
+		}
+		if a.Admission != activation.AdmissionTagFilter {
+			t.Errorf("%s: Admission = %v, want AdmissionTagFilter — this row was admitted by the "+
+				"tag filter (contentMatch floored at tagMatchFloor), and that reason must not "+
+				"depend on confidence or recency arithmetic (abs=%.6f)",
+				label, a.Admission, a.Components.AbsoluteScore)
+		}
+	}
+}
+
 // TestRawTagRange_SeedsDueItems_DefaultScoring is the S1 gap-closure case
 // (RED before the threshold-bypass change, GREEN after): the SAME scenario as
 // TestRawTagRange_SeedsDueItems above (content-unrelated, backdated,

@@ -245,6 +245,32 @@ func TestMeasureRelevanceBandHint(t *testing.T) {
 			"weak. Whatever happens to the hint, the BAND must never do that.",
 			byBand[rqNearVerbatim].pct())
 	}
+
+	// ---- SELF-DEFENSE OF THE HONEST-NEGATIVE RECORD ---------------------
+	// engine_relevance.go's deferral quotes U(combined) = 16.7% and
+	// A(moderate) = 10.0% as the measured reasons the hint did not ship. A
+	// record that only ever LOGS can rot invisibly: an embedder, corpus or
+	// band-edge change could move these numbers in EITHER direction — toward
+	// "both rules now pass, the hint could ship" or toward "the quoted numbers
+	// are fiction" — with CI silently green throughout. Bounded assertions,
+	// deliberately loose enough (± one query on these denominators) to absorb
+	// float noise, deliberately two-sided so improvement is surfaced too. On
+	// drift: re-run, update the recorded numbers HERE and in
+	// engine_relevance.go's deferral note together, and re-evaluate the
+	// pre-committed rule — never delete the assertion.
+	const tolerancePts = 5.0
+	if math.Abs(uAll.pct()-16.7) > tolerancePts {
+		t.Errorf("U(combined) = %.1f%% (%d/%d) drifted from the recorded 16.7%% (2/12) by more "+
+			"than %.0f points — the honest-negative record in engine_relevance.go is stale; "+
+			"update BOTH together and re-evaluate the pre-committed rule",
+			uAll.pct(), uAll.fired, uAll.returned, tolerancePts)
+	}
+	if math.Abs(byBand[rqModerate].pct()-10.0) > tolerancePts {
+		t.Errorf("A(moderate) = %.1f%% (%d/%d) drifted from the recorded 10.0%% (1/10) by more "+
+			"than %.0f points — the honest-negative record in engine_relevance.go is stale; "+
+			"update BOTH together and re-evaluate the pre-committed rule",
+			byBand[rqModerate].pct(), byBand[rqModerate].fired, byBand[rqModerate].returned, tolerancePts)
+	}
 }
 
 func maxOf(xs []float64) float64 {

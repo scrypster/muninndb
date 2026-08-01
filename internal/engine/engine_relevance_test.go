@@ -162,9 +162,12 @@ func TestRelevanceBand_WeakNeighborIsNotDressedAsCertain(t *testing.T) {
 // rewritten rather than quietly going stale.
 func TestRelevanceBand_WeakRowCannotReachScoreOne(t *testing.T) {
 	// Score = ContentMatch x prior, prior <= softplus(bLevelCap + hebScale)/actrDenominator.
+	// hebScale is the PRODUCTION default resolveWeights applies, read from its
+	// exported constant rather than hardcoded — an edit to the default must
+	// move this pin with it.
 	const bLevelCap = 1.4894204224828295 // ln(exp(1.6931471805599453) - 1)
 	const actrDenominator = 1.6931471805599453
-	const hebScale = 4.0
+	const hebScale = activation.DefaultACTRHebScale
 	prior := math.Log1p(math.Exp(bLevelCap+hebScale)) / actrDenominator
 	if prior < 3.2 || prior > 3.3 {
 		t.Fatalf("the documented 3.24x prior ceiling moved to %.4f — the premise note "+

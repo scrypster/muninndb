@@ -2471,6 +2471,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// (unlike SemanticSimilarity/FullTextRelevance, which an explicit caller
 	// override legitimately replaces).
 	actReq.Weights.SemanticBaseline = float32(e.resolveSemanticBaseline(req.Vault, wsPrefix, resolved))
+	// Distinguish the two causes of a zero baseline for the relevance-band
+	// phase: an operator who explicitly set `semantic_floor: 0` (documented
+	// "disable the floor") must not be told their model is unregistered
+	// (semantic_floor_disabled vs no_model_baseline — G6 refute of #773,
+	// finding 3). Scoring math is identical either way (identity transform).
+	actReq.Weights.SemanticFloorDisabled = semanticFloorExplicitlyDisabled(resolved)
 
 	// COG-6: the effective default threshold is mode-aware and keyed on the
 	// EFFECTIVE scoring mode (actReq.Weights.UseRRFFusion), decided here in one
@@ -4292,6 +4298,17 @@ func (e *Engine) resolveSemanticBaseline(vaultName string, ws [8]byte, resolved 
 			"vault", vaultName, "embed_model", model)
 	}
 	return 0
+}
+
+// semanticFloorExplicitlyDisabled reports whether this vault's operator
+// explicitly set `semantic_floor: 0` — the documented way to disable the
+// COG-26 floor. Deliberately narrower than "the resolved baseline is 0":
+// an unset override, a positive override, and an out-of-range override that
+// resolveSemanticBaseline rejects (WARN + registry fallthrough) are all
+// false. Kept beside resolveSemanticBaseline so the two read the same
+// override field and cannot drift.
+func semanticFloorExplicitlyDisabled(resolved auth.ResolvedPlasticity) bool {
+	return resolved.SemanticFloorOverride != nil && *resolved.SemanticFloorOverride == 0
 }
 
 // PruneVault prunes a vault according to its resolved MaxEngrams and RetentionDays policy.

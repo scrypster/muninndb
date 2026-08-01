@@ -412,6 +412,7 @@ components:
               rrf_fusion,
               weighted_sum_fusion,
               no_model_baseline,
+              semantic_floor_disabled,
               semantic_degraded,
               no_content_channel,
               no_calibration_gate,
@@ -423,6 +424,10 @@ components:
             have no comparable calibration. no_model_baseline: COG-26 gave this
             embed model the identity transform, so semantic similarity is raw
             cosine whose noise floor is ~0.45 — every band would be wrong.
+            semantic_floor_disabled: the same identity transform, but because
+            the vault's operator explicitly set semantic_floor: 0 (the
+            documented way to disable the floor) — a choice, not a missing
+            calibration.
             semantic_degraded: the semantic weight was redistributed onto the
             lexical channel and the ceiling shifted. not_scored: the row was
             injected by a post-pipeline phase (entity-boost spread activation,
@@ -692,7 +697,6 @@ components:
           enum: [no_candidates, below_threshold, filtered, superseded_only, ambiguous_version]
         conflict:
           $ref: "#/components/schemas/ConflictBlock"
-
 
     # ── Link ─────────────────────────────────────────────────────────────────
 

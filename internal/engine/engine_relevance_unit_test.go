@@ -96,6 +96,18 @@ func TestRelevanceBands_D5ExclusionTable(t *testing.T) {
 			wantBases: []string{activation.BasisNoModelBaseline},
 		},
 		{
+			// Same arithmetic (identity transform), OPPOSITE cause: the
+			// operator explicitly set semantic_floor: 0, a documented, legal
+			// choice. Reporting no_model_baseline here is a false cause — it
+			// tells the operator their model is unregistered (G6 refute of
+			// #773, finding 3). RED at dda8a3e: emitted no_model_baseline.
+			name:      "explicitly disabled semantic floor names the choice, not a missing model",
+			cal:       activation.RelevanceCalibration{ContentCeiling: 1.0, FusionMode: activation.FusionACTR, SemanticBaseline: 0, BaselineExplicitlyDisabled: true},
+			rows:      []activation.ScoredEngram{scored(0.05)},
+			wantBands: []string{activation.RelevanceUncalibrated},
+			wantBases: []string{activation.BasisSemanticFloorDisabled},
+		},
+		{
 			name:      "semantic degraded is uncalibrated",
 			cal:       defaultCal,
 			degraded:  true,
@@ -148,6 +160,54 @@ func TestRelevanceBands_D5ExclusionTable(t *testing.T) {
 				t.Errorf("bases = %v, want %v", bases, tt.wantBases)
 			}
 		})
+	}
+}
+
+// COG-28 x COG-30: how substituted rows band. TWO shapes, deliberately
+// different, both documented at the substitution site (engine_version_head.go):
+//
+//   - An INJECTED head (the head was not in the pool; the query's evidence
+//     reached its predecessor): Run never scored it, but the substitution
+//     copies the PREDECESSOR's measured Components onto the row and marks it
+//     AdmissionScored — so it bands on that real predecessor evidence, which
+//     substitution_basis already attributes. It must NOT fall into the
+//     not_scored bucket reserved for zero-value injections.
+//   - An IN-POOL RAISE (the head matched on its own but the predecessor
+//     matched harder): only Score is raised to the predecessor's Final;
+//     Components remain the row's OWN measurements, so it bands on its own
+//     evidence — the raise moves the DISPLAYED score, never the band, exactly
+//     as the COG-29 demote doesn't (bands read AbsoluteScore, not Score).
+func TestRelevanceBand_SubstitutedRowBandsOnPredecessorEvidence(t *testing.T) {
+	pred := storage.ULID{0x01}
+	predComponents := activation.ScoreComponents{AbsoluteScore: 0.6} // strong predecessor evidence
+
+	injected := activation.ScoredEngram{
+		Engram:            &storage.Engram{Concept: "injected-head"},
+		Score:             0.9,
+		Components:        predComponents, // the predecessor's measurements, copied at injection
+		SubstitutedFor:    pred,
+		SubstitutionBasis: &predComponents,
+		Admission:         activation.AdmissionScored,
+	}
+	raised := activation.ScoredEngram{
+		Engram:            &storage.Engram{Concept: "raised-head"},
+		Score:             0.9,                                             // raised to the predecessor's Final
+		Components:        activation.ScoreComponents{AbsoluteScore: 0.14}, // its OWN weak evidence
+		SubstitutedFor:    pred,
+		SubstitutionBasis: &predComponents,
+		Admission:         activation.AdmissionScored,
+	}
+
+	bands, bases := applyRelevanceBands(
+		[]activation.ScoredEngram{injected, raised}, defaultCal, defaultGate, false)
+
+	if bands[0] != activation.RelevanceStrong || bases[0] != "" {
+		t.Errorf("injected head = (%q, %q), want (strong, \"\") — it carries the predecessor's "+
+			"REAL measurements and must band on them, not fall into not_scored", bands[0], bases[0])
+	}
+	if bands[1] != activation.RelevanceWeak || bases[1] != "" {
+		t.Errorf("raised head = (%q, %q), want (weak, \"\") — the raise moves Score only; the band "+
+			"reads the row's OWN AbsoluteScore", bands[1], bases[1])
 	}
 }
 

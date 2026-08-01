@@ -53,6 +53,15 @@ const (
 	// identity, semCal is RAW cosine, whose noise floor is ~0.45 rather than
 	// ~0 — every band would be wrong. Cold start says so out loud.
 	BasisNoModelBaseline = "no_model_baseline"
+	// BasisSemanticFloorDisabled: the identity transform again, but because the
+	// vault's OPERATOR explicitly set `semantic_floor: 0` — the documented way
+	// to disable the COG-26 floor, honored per the #582/#585/#589 doctrine.
+	// The arithmetic consequence is the same as BasisNoModelBaseline (semCal is
+	// raw cosine; no band is honest), but the CAUSE is the opposite: a choice,
+	// not a missing calibration. Reporting no_model_baseline here told the
+	// operator their model was unregistered — a false cause (G6 refute of
+	// #773, finding 3).
+	BasisSemanticFloorDisabled = "semantic_floor_disabled"
 	// BasisSemanticDegraded: the semantic weight was redistributed onto FTS for
 	// this response and the ceiling shifted (COG-24's residual ~0.385-0.4).
 	// Banding against an unshifted ceiling would be plausible-and-wrong.
@@ -124,6 +133,13 @@ type RelevanceCalibration struct {
 	// SemanticBaseline is COG-26's resolved b. 0 means the identity transform
 	// (unregistered/unresolved embed model) — see BasisNoModelBaseline.
 	SemanticBaseline float64
+	// BaselineExplicitlyDisabled distinguishes the two causes of
+	// SemanticBaseline == 0: true means the vault's operator explicitly set
+	// `semantic_floor: 0` (a documented, legal choice — see
+	// BasisSemanticFloorDisabled); false means no calibrated baseline exists
+	// for this model (BasisNoModelBaseline). Meaningless when
+	// SemanticBaseline > 0.
+	BaselineExplicitlyDisabled bool
 }
 
 // Admission records HOW a row entered the response, so the relevance band
@@ -151,13 +167,32 @@ const (
 	AdmissionTagFilter
 )
 
-// admissionOf classifies a row that has just passed a scoring path's gate.
+// admissionOf classifies a row that has just passed a scoring path's gate, on
+// the REASON it passed — never on arithmetic alone (G6 refute of #773,
+// finding 1).
+//
+// `floored` is ScoreComponents.ContentMatchFloored: the COG-5 S1 tag-match
+// floor replaced this row's measured (lower) aboutness because an explicit tag
+// filter named it. A floored row is a tag-filter admission BY CONSTRUCTION —
+// its ContentMatch is the floor, not a measurement — and that must not depend
+// on where the floored arithmetic lands relative to the threshold:
+// tagMatchFloor (0.1) numerically equals the COG-6 ACT-R default gate, so a
+// fresh confidence-1.0 floored row lands EXACTLY ON the boundary and a
+// `gated < threshold` test would band it `weak` while its 0.9-confidence or
+// stale twin banded filter_match. Confidence and recency must not decide what
+// the filter did. Only computeACTR ever sets the flag (computeComponents
+// applies no floor; the RRF path builds its literal without one), so on the
+// rrf/weighted_sum call sites — which pass Final, not AbsoluteScore, and whose
+// rows are response-wide uncalibrated anyway — it is structurally false.
+//
 // `gated` is whatever quantity that path compared against req.Threshold
 // (AbsoluteScore on ACT-R/CGDN, Final on rrf/weighted_sum) — the SAME
-// expression as the gate two lines above each call site, so the two cannot
-// disagree about what "cleared the bar" meant.
-func admissionOf(gated, threshold float64, inTagPool bool) Admission {
-	if inTagPool && gated < threshold {
+// expression as the gate two lines above each call site. It still matters for
+// the UNFLOORED tag-pool row whose own measured evidence fell below the bar:
+// that row too was admitted only because the filter named it (the S1 threshold
+// bypass), and it stays AdmissionTagFilter.
+func admissionOf(gated, threshold float64, inTagPool, floored bool) Admission {
+	if inTagPool && (floored || gated < threshold) {
 		return AdmissionTagFilter
 	}
 	return AdmissionScored

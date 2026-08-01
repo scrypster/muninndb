@@ -342,8 +342,8 @@ type ActivationItem struct {
 	//
 	// RelevanceBandBasis is set only for filter_match and uncalibrated and
 	// names WHY: tag_filter_bypass | rrf_fusion | weighted_sum_fusion |
-	// no_model_baseline | semantic_degraded | no_content_channel |
-	// no_calibration_gate | not_scored.
+	// no_model_baseline | semantic_floor_disabled | semantic_degraded |
+	// no_content_channel | no_calibration_gate | not_scored.
 	RelevanceBand      string `msgpack:"relevance_band,omitempty"       json:"relevance_band,omitempty"`
 	RelevanceBandBasis string `msgpack:"relevance_band_basis,omitempty" json:"relevance_band_basis,omitempty"`
 	SourceType         string `msgpack:"source_type,omitempty" json:"source_type,omitempty"`

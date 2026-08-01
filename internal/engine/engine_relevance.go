@@ -31,6 +31,13 @@ import (
 // no score change, no reorder, no truncation, no removal, no write
 // (observe-safe by construction, COG-11).
 //
+// KNOWN CONSERVATIVE RESIDUAL (cold start): while a fresh write's embedding is
+// still pending indexing, the semantic channel is silent and a row's absolute
+// score is capped at w_fts (0.4 on default weights) — below the 0.5 strong
+// floor — so `strong` is unreachable and a genuine match may under-band until
+// the index catches up; the error direction is deliberate (understate, never
+// overstate).
+//
 // The three measurement harnesses (abstention_gate_measure_test.go,
 // recall_queryset_measure_test.go, shadow_measure_test.go) call
 // activation.Run DIRECTLY. This phase lives in internal/engine and runs after
@@ -86,8 +93,15 @@ import (
 // cog6DefaultThreshold is the COG-6 fusion-aware DEFAULT recall threshold,
 // keyed on the EFFECTIVE scoring mode. ONE computation site (principle #6):
 // the threshold coerce in activateCore and the relevance-band calibration
-// anchor both read it, so the band can never be calibrated against a gate the
-// engine does not actually default to.
+// anchor both read it — but note they do NOT read it at the same instant.
+// The coerce runs BEFORE applyRecallModePreset and the band anchor after, so
+// a recall-mode preset that flips UseACTR post-coerce would hand the two
+// calls different arguments. Today that divergence is unobservable only by
+// COINCIDENCE, not structure: !UseACTR forces FusionWeightedSum, whose rows
+// are response-wide uncalibrated, so the mismatched anchor is never consulted
+// — two independent predicates that happen to line up. If a preset ever
+// changes fusion mode in a way that stays bandable, re-derive the anchor from
+// the weights the run actually used.
 //
 // rrf returns 0 = "unset", leaving activation.Run to apply its own rrf default
 // (0.001, #590's mechanism); coercing an ACT-R-calibrated 0.1 here made #590's
@@ -139,7 +153,16 @@ func applyRelevanceBands(
 		responseBasis = activation.BasisSemanticDegraded
 	}
 	if responseBasis == "" && cal.SemanticBaseline <= 0 {
-		responseBasis = activation.BasisNoModelBaseline
+		// Same arithmetic (identity transform, raw-cosine noise floor ~0.45,
+		// no honest band), two OPPOSITE causes — name the right one. An
+		// operator who explicitly set `semantic_floor: 0` made a documented
+		// choice and must not be told their model is unregistered (G6 refute
+		// of #773, finding 3).
+		if cal.BaselineExplicitlyDisabled {
+			responseBasis = activation.BasisSemanticFloorDisabled
+		} else {
+			responseBasis = activation.BasisNoModelBaseline
+		}
 	}
 
 	for i, row := range rows {
