@@ -244,6 +244,13 @@ type ScoredEngram struct {
 	ChainTruncated    bool
 	HeadNotIndexedYet bool
 
+	// Admission records HOW this row entered the response — see the Admission
+	// type in relevance.go. Set by Run's scoring paths; the ZERO VALUE
+	// (AdmissionInjected) is what an engine-layer injector's fresh literal
+	// gets, which is correct: those rows carry no phase-6 measurement.
+	// Read by the #773 relevance-band phase. Never on the wire.
+	Admission Admission
+
 	// UnresolvedContradiction is set by COG-29 contradiction honesty (#764,
 	// engine_contradiction.go) on a row joined to another memory by an
 	// UNRESOLVED, DECLARED `contradicts` edge. It is ASSERTED — an agent said
@@ -390,6 +397,12 @@ type ActivateResult struct {
 	// shadowMatchCap; nil on every query that produced none, which is almost
 	// all of them. See shadow.go.
 	ShadowMatches []ShadowMatch
+
+	// Calibration reports the scale this run's AbsoluteScores live on, resolved
+	// at the ONE site that resolves weights (#773 D4/principle #6). The
+	// engine-layer relevance-band phase reads it instead of re-resolving
+	// weights and hoping the two agree. See RelevanceCalibration.
+	Calibration RelevanceCalibration
 }
 
 // Abstention reasons. Distinct values, not free text, so surfaces can branch.
@@ -1934,6 +1947,11 @@ func (e *ActivationEngine) phase6Score(
 		final      float64
 		components ScoreComponents
 		hopPath    []storage.ULID
+		// admission: AdmissionScored when this row cleared the gate on its own
+		// measured evidence, AdmissionTagFilter when it is below the bar and
+		// only an explicit tag filter admitted it (COG-5 S1). Carried to
+		// ScoredEngram for the #773 band phase; never on the wire.
+		admission Admission
 	}
 
 	now := time.Now()
@@ -2001,7 +2019,8 @@ func (e *ActivationEngine) phase6Score(
 					Raw:                   c.rrfScore * (1.0 + c.hebbianBoost + c.transitionBoost),
 					Final:                 final,
 				},
-				hopPath: c.hopPath,
+				hopPath:   c.hopPath,
+				admission: admissionOf(final, req.Threshold, c.inTagPool),
 			})
 		}
 		sort.Slice(scored, func(i, j int) bool {
@@ -2082,6 +2101,13 @@ func (e *ActivationEngine) phase6Score(
 				r := math.Pow(cc.activation, n) / denom
 				final := r * cc.components.Confidence
 				// Absolute, cross-query-comparable aboutness (see the gate below).
+				//
+				// ORDERING IS LOAD-BEARING (#773 R4): `absolute` reads
+				// cc.components.Raw and MUST be computed BEFORE Raw is
+				// overwritten with the CGDN ratio `r` five lines down. A
+				// refactor that reorders those two statements silently
+				// corrupts AbsoluteScore — and therefore the abstention gate
+				// AND every relevance band — on this path.
 				absolute := math.Min(math.Min(cc.components.Raw, cc.components.ContentMatch), 1.0) *
 					cc.components.Confidence
 				cc.components.AbsoluteScore = absolute
@@ -2094,6 +2120,7 @@ func (e *ActivationEngine) phase6Score(
 				cc.components.Final = final
 				scored = append(scored, scoredItem{
 					id: cc.id, final: final, components: cc.components, hopPath: cc.hopPath,
+					admission: admissionOf(absolute, req.Threshold, cc.inTagPool),
 				})
 			}
 		}
@@ -2235,6 +2262,12 @@ func (e *ActivationEngine) phase6Score(
 			// this package. (An early draft edited rest/server.go:1772 as "the
 			// REST recall default" — that line is SUBSCRIBE, a different
 			// formula; REST /activate has no surface default.)
+			//
+			// ORDERING IS LOAD-BEARING (#773 R4): this reads the UNSCALED
+			// cc.components.Raw and MUST stay above the `cc.components.Raw =
+			// raw` assignment below. Reordering those two statements replaces
+			// the absolute quantity with the per-query-rescaled one and
+			// silently corrupts the abstention gate AND every relevance band.
 			absolute := math.Min(math.Min(cc.components.Raw, cc.components.ContentMatch), 1.0) *
 				cc.components.Confidence
 			cc.components.AbsoluteScore = absolute
@@ -2249,7 +2282,8 @@ func (e *ActivationEngine) phase6Score(
 			}
 			cc.components.Raw = raw
 			cc.components.Final = final
-			scored = append(scored, scoredItem{id: cc.id, final: final, components: cc.components, hopPath: cc.hopPath})
+			scored = append(scored, scoredItem{id: cc.id, final: final, components: cc.components, hopPath: cc.hopPath,
+				admission: admissionOf(absolute, req.Threshold, cc.inTagPool)})
 		}
 		// COG-28 shadow pass. Deliberately a SECOND pass over a disjoint
 		// candidate set: `scale` above was computed from maxRaw over the LIVE
@@ -2297,7 +2331,8 @@ func (e *ActivationEngine) phase6Score(
 		if final < req.Threshold && !c.inTagPool {
 			continue
 		}
-		scored = append(scored, scoredItem{id: c.id, final: final, components: components, hopPath: c.hopPath})
+		scored = append(scored, scoredItem{id: c.id, final: final, components: components, hopPath: c.hopPath,
+			admission: admissionOf(final, req.Threshold, c.inTagPool)})
 	}
 	// COG-28 shadow pass, weighted_sum edition: this path gates on Final, so
 	// shadows are gated on Final too — the same quantity, per design §4.2, so
@@ -2372,6 +2407,7 @@ cgdnDone:
 			HopPath:     append([]storage.ULID(nil), s.hopPath...),
 			HopConcepts: hopConcepts,
 			Dormant:     !w.UseACTR && eng.Relevance <= minFloor*1.1,
+			Admission:   s.admission,
 		})
 	}
 
@@ -2401,7 +2437,32 @@ cgdnDone:
 		Abstained:        abstained,
 		AbstainedReason:  abstainReason,
 		ShadowMatches:    shadowMatches,
+		Calibration:      relevanceCalibration(w),
 	}, nil
+}
+
+// relevanceCalibration reports the scale this run's AbsoluteScores live on
+// (#773). Reads the RESOLVED weights — the single site that decided which
+// scoring math actually ran — so the engine-layer band phase can never band
+// against a mode or a ceiling the run did not use.
+func relevanceCalibration(w resolvedWeights) RelevanceCalibration {
+	mode := FusionACTR
+	switch {
+	case w.UseRRFFusion:
+		// Resolved above: rrf wins over cgdn when both are set.
+		mode = FusionRRF
+	case w.UseCGDN:
+		mode = FusionCGDN
+	case !w.UseACTR:
+		mode = FusionWeightedSum
+	}
+	return RelevanceCalibration{
+		// The structural maximum an honest ContentMatch can reach:
+		// w_sem*semCal + w_fts*ftsCoverage with both channels saturated.
+		ContentCeiling:   w.SemanticSimilarity + w.FullTextRelevance,
+		FusionMode:       mode,
+		SemanticBaseline: w.SemanticBaseline,
+	}
 }
 
 // computeComponents calculates all scoring components for a candidate engram.

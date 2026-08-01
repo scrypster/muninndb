@@ -81,20 +81,51 @@ type Memory struct {
 	// (COG-26's honesty backstop — see activation.ScoreComponents.
 	// SemanticSimilarityRaw). Lets an operator see the raw signal for a match
 	// that a low VectorScore made look weak or that abstained entirely.
-	VectorScoreRaw float64   `json:"vector_score_raw,omitempty"`
-	EntityBoost    float64   `json:"entity_boost,omitempty"`
-	Confidence     float32   `json:"confidence"`
-	Why            string    `json:"why,omitempty"`
-	Tags           []string  `json:"tags,omitempty"`
-	State          string    `json:"state,omitempty"`
-	Type           string    `json:"type"`                 // canonical MemoryType label ("fact", "decision", ...); always present
-	TypeLabel      string    `json:"type_label,omitempty"` // writer-supplied free-form label, e.g. "architectural_decision"
-	CreatedAt      time.Time `json:"created_at"`
-	LastAccess     time.Time `json:"last_access"`
-	AccessCount    uint32    `json:"access_count,omitempty"`
-	Relevance      float32   `json:"relevance,omitempty"`
-	SourceType     string    `json:"source_type,omitempty"`
-	Trust          string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
+	VectorScoreRaw float64 `json:"vector_score_raw,omitempty"`
+	EntityBoost    float64 `json:"entity_boost,omitempty"`
+	// AbsoluteScore and ContentMatch are #773. Both already existed on
+	// activation.ScoreComponents and on the MBP/REST wire, and BOTH were
+	// structurally invisible to every MCP agent — reachable only inside
+	// annotations.substitution_basis, i.e. only on a COG-28 substituted row.
+	//
+	// AbsoluteScore is Raw BEFORE the per-query 1/maxRaw rescale, so unlike
+	// Score it is comparable ACROSS queries: 0.9 means the same thing on a
+	// good query and a garbage one. ContentMatch is the aboutness term
+	// (w_sem*semCal + w_fts*ftsCoverage) the relevance calibration is actually
+	// stated on. They are the audit trail behind RelevanceBand — the honesty
+	// backstop must be readable without a second tool call, exactly as
+	// vector_score_raw is for COG-26.
+	AbsoluteScore float64 `json:"absolute_score,omitempty"`
+	ContentMatch  float64 `json:"content_match,omitempty"`
+	// RelevanceBand is #773's ABSOLUTE relevance band for this row:
+	// strong | moderate | weak | filter_match | uncalibrated. Recall always
+	// sets it; muninn_read never does (this struct is shared, hence omitempty).
+	//
+	// Read it, NOT `score`: score is renormalized against this query's own best
+	// candidate, so the top row is near 1.0 on EVERY query, including one whose
+	// answer this vault does not contain. And NOT `confidence`: that is belief
+	// that the stored fact is TRUE (COG-10), not a measure of how well it
+	// matched. `relevance` below is a third thing again — the engram's stored
+	// decay/pruning strength.
+	//
+	// Deliberately TOP-LEVEL rather than inside Annotations: convert.go's
+	// "allocate an annotations object at all" predicate has already silently
+	// dropped a field once (#764). A top-level field cannot be dropped by it.
+	RelevanceBand string `json:"relevance_band,omitempty"`
+	// RelevanceBandBasis names WHY, for filter_match and uncalibrated only.
+	RelevanceBandBasis string    `json:"relevance_band_basis,omitempty"`
+	Confidence         float32   `json:"confidence"`
+	Why                string    `json:"why,omitempty"`
+	Tags               []string  `json:"tags,omitempty"`
+	State              string    `json:"state,omitempty"`
+	Type               string    `json:"type"`                 // canonical MemoryType label ("fact", "decision", ...); always present
+	TypeLabel          string    `json:"type_label,omitempty"` // writer-supplied free-form label, e.g. "architectural_decision"
+	CreatedAt          time.Time `json:"created_at"`
+	LastAccess         time.Time `json:"last_access"`
+	AccessCount        uint32    `json:"access_count,omitempty"`
+	Relevance          float32   `json:"relevance,omitempty"`
+	SourceType         string    `json:"source_type,omitempty"`
+	Trust              string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
 
 	// Importance is the use-time EffectiveImportance in [0,1]; always present.
 	// ImportanceSource says where it came from: "explicit" (caller-asserted at

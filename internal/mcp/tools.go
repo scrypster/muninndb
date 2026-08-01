@@ -227,7 +227,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_recall",
-			Description: "Search long-term memory using semantic context. Returns the most relevant memories.",
+			Description: "Search long-term memory using semantic context. Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows are all `weak` matched nothing strongly: those are related memories to verify, not answers.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

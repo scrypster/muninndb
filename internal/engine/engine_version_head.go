@@ -210,6 +210,13 @@ func (e *Engine) applyVersionHeadSubstitution(
 			Components:        basis,
 			SubstitutedFor:    s.basis.Engram.ID,
 			SubstitutionBasis: &basis,
+			// #773: this row's Components ARE the predecessor's MEASURED
+			// evidence against this query (that is what substitution_basis
+			// attributes), and the shadow that produced them cleared the same
+			// req.Threshold on the same gated quantity as any live row. So it
+			// bands on real measurement, not on the zero value an unmeasured
+			// injector would leave here.
+			Admission:         activation.AdmissionScored,
 			ChainTruncated:    s.truncated,
 			HeadNotIndexedYet: e.headLacksEmbedding(ctx, ws, s.head),
 		}

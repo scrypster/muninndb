@@ -36,7 +36,14 @@ and remain the reviewer's job.
    `mbp.ActivationItem` + `mcp.MemoryAnnotations`; REST inherits them via the
    `rest.ActivateResponse = mbp.ActivateResponse` type alias, so it is automatically in sync.
    Since #764 the same list carries `unresolved_contradiction` (per-row, ASSERTED, COG-29)
-   and the RESPONSE-level `conflict` block. Two traps that list does not protect you from,
+   and the RESPONSE-level `conflict` block. Since #773 it also carries `relevance_band` /
+   `relevance_band_basis` (per-row, absolute relevance) plus `absolute_score` and
+   `content_match` on `mcp.Memory` — the last two had existed on MBP/REST since COG-26 and
+   were invisible to MCP entirely. **`relevance_band` is deliberately TOP-LEVEL on
+   `mcp.Memory`, not inside `MemoryAnnotations`**, precisely so the allocation predicate
+   below cannot drop it; note it could not be called `relevance`, which is already taken on
+   both `mbp.ActivationItem` and `mcp.Memory` by the engram's stored decay strength.
+   Two traps that list does not protect you from,
    both hit in #764 and both now pinned by tests: `internal/mcp/convert.go`'s
    "should I allocate an annotations object at all" predicate must name the new field or a
    row carrying no OTHER annotation drops it silently

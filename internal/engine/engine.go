@@ -2483,19 +2483,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// ACT-R-calibrated value — made #590's fix unreachable on every production
 	// transport. ACT-R/weighted_sum default behavior is unchanged.
 	if actReq.Threshold == 0 && !actReq.Weights.UseRRFFusion {
-		if actReq.Weights.UseACTR {
-			// The value COG-26's b=0.520 was calibrated against, on the
-			// absolute-score scale the ACT-R gate now compares.
-			actReq.Threshold = 0.1
-		} else {
-			// Legacy weighted_sum: its blended Final gives content-irrelevant
-			// fresh memories ~0.3 from decay/recency/access alone, and the only
-			// bar ever validated against that formula is the old 0.5 surface
-			// default. 0.1 was measured on the ACT-R absolute scale ONLY —
-			// applying it here would let recency spam through (#754 review,
-			// finding 5).
-			actReq.Threshold = 0.5
-		}
+		actReq.Threshold = cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR)
 	}
 
 	// Apply the recall-mode preset (#704) — resolved into modePreset above the
@@ -2681,6 +2669,19 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		}
 	}
 
+	// #773 score-presentation honesty. Runs LAST of the post-pipeline phases —
+	// after currency, contradiction honesty, the final truncation and the
+	// abstention recompute — so it bands exactly the rows the caller receives.
+	// READ-ONLY: no score change, no reorder, no truncation, no removal, no
+	// write. See engine_relevance.go for why the calibration gate, and not
+	// actReq.Threshold, is the anchor.
+	relevanceBands, relevanceBases := applyRelevanceBands(
+		result.Activations,
+		result.Calibration,
+		cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR),
+		result.SemanticDegraded,
+	)
+
 	// Convert result.Activations to []mbp.ActivationItem
 	items := make([]mbp.ActivationItem, len(result.Activations))
 	for i, scored := range result.Activations {
@@ -2703,6 +2704,10 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			TypeLabel:   scored.Engram.TypeLabel,
 			Tags:        scored.Engram.Tags,
 			Importance:  scored.Engram.Importance,
+			// #773: the absolute relevance band and, for filter_match /
+			// uncalibrated, why.
+			RelevanceBand:      relevanceBands[i],
+			RelevanceBandBasis: relevanceBases[i],
 		}
 
 		// Supersession annotation from the supersedes-aware ranking phase (always-on

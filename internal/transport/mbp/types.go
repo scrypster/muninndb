@@ -324,7 +324,29 @@ type ActivationItem struct {
 	LastAccess      int64           `msgpack:"last_access,omitempty"       json:"last_access,omitempty"`
 	AccessCount     uint32          `msgpack:"access_count,omitempty"      json:"access_count,omitempty"`
 	Relevance       float32         `msgpack:"relevance,omitempty"         json:"relevance,omitempty"`
-	SourceType      string          `msgpack:"source_type,omitempty" json:"source_type,omitempty"`
+	// RelevanceBand is #773's ABSOLUTE relevance band for this row:
+	// strong | moderate | weak | filter_match | uncalibrated.
+	//
+	// Derived from ScoreComponents.AbsoluteScore against THIS VAULT's own
+	// calibration (its resolved default gate and its resolved content-channel
+	// ceiling) — NOT from Score, which is renormalized per query and therefore
+	// pins the best row of ANY query, however weak, to ~1.0. Not from
+	// Confidence either: that is the stored TRUTH-belief (COG-10), not a
+	// retrieval statistic.
+	//
+	// A WORD, not a float, deliberately: answering "a number that looks like
+	// certainty" with a second number asks the agent to know which one to
+	// believe. NOTE the neighbouring `relevance` field above is a different
+	// quantity entirely — the engram's stored decay/pruning strength. The band
+	// could not reuse that name.
+	//
+	// RelevanceBandBasis is set only for filter_match and uncalibrated and
+	// names WHY: tag_filter_bypass | rrf_fusion | weighted_sum_fusion |
+	// no_model_baseline | semantic_degraded | no_content_channel |
+	// no_calibration_gate | not_scored.
+	RelevanceBand      string `msgpack:"relevance_band,omitempty"       json:"relevance_band,omitempty"`
+	RelevanceBandBasis string `msgpack:"relevance_band_basis,omitempty" json:"relevance_band_basis,omitempty"`
+	SourceType         string `msgpack:"source_type,omitempty" json:"source_type,omitempty"`
 	// State is the LifecycleState uint8, so recall can label engram lifecycle state.
 	State uint8 `msgpack:"state,omitempty" json:"state,omitempty"`
 	// Trust is the TrustLevel uint8. omitempty intentional — see ReadResponse.Trust comment.

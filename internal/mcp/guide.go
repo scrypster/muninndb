@@ -216,6 +216,27 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- `max_depth=N` — limits how deep the returned tree goes (default 10, 0 means unlimited).\n")
 	b.WriteString("- `limit=N` — caps how many children are returned per node per level.\n")
 
+	// Reading a recall result (#773) — three different numbers, three different
+	// meanings, and the misread that made this section necessary.
+	b.WriteString("\n## Reading a recall result: score vs relevance_band vs confidence\n\n")
+	b.WriteString("Three fields on a recalled memory look like certainty. Only one of them is about ")
+	b.WriteString("how well the memory matched your query.\n\n")
+	b.WriteString("- **`relevance_band`** — READ THIS ONE. An ABSOLUTE judgement of how much real evidence ")
+	b.WriteString("this memory has against your query, calibrated against this vault's own noise floor and ")
+	b.WriteString("channel weights: `strong` (near-verbatim evidence) | `moderate` (real evidence) | ")
+	b.WriteString("`weak` (within one doubling of the vault's measured noise floor — a NEIGHBOUR, not necessarily an ANSWER) | ")
+	b.WriteString("`filter_match` (returned because a tag filter named it, not because it matched your text) | ")
+	b.WriteString("`uncalibrated` (this vault's scoring mode or embed model has no calibrated scale — `relevance_band_basis` says which).\n")
+	b.WriteString("- **`score`** — RELATIVE to this query's own best candidate. The top row of EVERY query is near the top of the range, ")
+	b.WriteString("including a query whose answer this vault does not contain. It orders results; it does not tell you they are good. ")
+	b.WriteString("`absolute_score` and `content_match` on the same row are the cross-query-comparable numbers behind the band.\n")
+	b.WriteString("- **`confidence`** — belief that the stored FACT is TRUE (moved by contradiction and explicit feedback). ")
+	b.WriteString("It is NOT a measure of how well the memory matched. A memory can be a certain fact and a terrible match: `confidence: 1, relevance_band: \"weak\"`.\n\n")
+	b.WriteString("A response whose rows are ALL `weak` matched nothing strongly — treat those as related memories to verify, not as answers. ")
+	b.WriteString("Note the converse is not true: a `moderate` row can still fail to answer you. The band reports how much EVIDENCE a memory has ")
+	b.WriteString("against your query, which is not the same question as whether it answers it — that one is not computable here, and MuninnDB ")
+	b.WriteString("does not pretend otherwise.\n")
+
 	// Valid-time (the two time axes)
 	b.WriteString("\n## Time: two axes\n\n")
 	b.WriteString("Every memory carries two independent time axes:\n")

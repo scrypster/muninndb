@@ -76,8 +76,19 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		VectorScore:    roundScore(item.ScoreComponents.SemanticSimilarity),
 		VectorScoreRaw: roundScore(item.ScoreComponents.SemanticSimilarityRaw),
 		EntityBoost:    roundScore(item.ScoreComponents.EntityBoost),
-		Confidence:     item.Confidence,
-		Why:            item.Why,
+		// #773: the honest, cross-query-comparable quantities. They were
+		// computed on every row and mapped onto MBP/REST, and this function —
+		// the ONLY path from an activation row to an MCP agent — dropped both.
+		AbsoluteScore: roundScore(item.ScoreComponents.AbsoluteScore),
+		ContentMatch:  roundScore(item.ScoreComponents.ContentMatch),
+		// #773: the band, TOP-LEVEL. Never fold this into the annotations
+		// block below — that block is allocated behind a predicate, and a
+		// field guarded by it silently vanishes for any row that carries no
+		// other annotation (#764).
+		RelevanceBand:      item.RelevanceBand,
+		RelevanceBandBasis: item.RelevanceBandBasis,
+		Confidence:         item.Confidence,
+		Why:                item.Why,
 		// Map the lifecycle state label the same way the read path does (#502).
 		State: storage.LifecycleState(item.State).String(),
 		// Type mirrors the vocabulary muninn_remember accepts (storage.ParseMemoryType).
