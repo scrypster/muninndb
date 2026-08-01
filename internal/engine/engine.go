@@ -143,9 +143,14 @@ type Engine struct {
 	archiveGCDone        chan struct{}             // signals archive GC worker shutdown
 	evolveRepairDone     chan struct{}             // signals evolve entity-link repair completion
 	evolveRepairDelay    time.Duration             // startup delay before the repair pass
-	coherence            *coherence.Registry       // per-vault incremental coherence counters
-	scoring              *scoring.Store            // per-vault learnable scoring weights
-	prov                 *provenance.Store         // audit trail per-engram
+	// assocWeightRepairDone signals the one-shot pre-fix full-weight
+	// association-key repair (#756) has finished. runPruneWorker gates assoc
+	// decay on it — decay destroys the repair's disambiguator.
+	assocWeightRepairDone  chan struct{}
+	assocWeightRepairDelay time.Duration       // startup delay before that pass
+	coherence              *coherence.Registry // per-vault incremental coherence counters
+	scoring                *scoring.Store      // per-vault learnable scoring weights
+	prov                   *provenance.Store   // audit trail per-engram
 
 	// Fix 5: coherence persistence lifecycle
 	coherenceFlushStop chan struct{}
@@ -530,6 +535,18 @@ func NewEngine(cfg EngineConfig) *Engine {
 	// engine:spawn-ok — tracked by evolveRepairDone channel, drained in Stop()
 	go e.runEvolveEntityLinkRepair()
 
+	// One-shot startup repair for pre-fix full-weight association keys, which
+	// the overflowed WeightComplement wrote at the weight-0.0 position (#756).
+	// Must precede the first assoc-decay pass; runPruneWorker gates on
+	// assocWeightRepairDone to guarantee that, not merely hope for it.
+	e.assocWeightRepairDelay = defaultAssocWeightRepairDelay()
+	if cfg.AssocWeightRepairDelay != nil {
+		e.assocWeightRepairDelay = *cfg.AssocWeightRepairDelay
+	}
+	e.assocWeightRepairDone = make(chan struct{})
+	// engine:spawn-ok — tracked by assocWeightRepairDone channel, drained in Stop()
+	go e.runLegacyFullWeightAssocRepair()
+
 	return e
 }
 
@@ -685,6 +702,15 @@ func (e *Engine) Stop() {
 			case <-e.evolveRepairDone:
 			case <-time.After(5 * time.Second):
 				slog.Warn("engine: evolve entity-link repair did not exit within 5s")
+			}
+		}
+
+		// Wait for the full-weight association repair pass to exit.
+		if e.assocWeightRepairDone != nil {
+			select {
+			case <-e.assocWeightRepairDone:
+			case <-time.After(5 * time.Second):
+				slog.Warn("engine: legacy full-weight association repair did not exit within 5s")
 			}
 		}
 
@@ -4250,7 +4276,22 @@ func (e *Engine) runPruneWorker() {
 					}
 				}
 			}
+			// Association decay must never run before the one-shot full-weight
+			// repair has swept (#756). Decay reads weight 0 from a pre-fix
+			// full-weight key and either deletes the edge or clamps it to the
+			// 0.05 floor — rewriting the 0x14 index and moving the keys, which
+			// permanently destroys the only evidence the repair can use. The
+			// gate makes that ordering structural instead of a race between two
+			// startup timers; the pass always closes its channel (including on
+			// error, panic, and shutdown), so decay resumes on the next tick.
+			decayReady := e.assocWeightRepairComplete()
+			if !decayReady {
+				slog.Debug("assoc decay deferred: full-weight repair pass still running")
+			}
 			for _, vaultName := range vaults {
+				if !decayReady {
+					break
+				}
 				resolved := e.ResolveVaultPlasticity(vaultName)
 				if resolved.HebbianEnabled && resolved.AssocDecayFactor > 0 {
 					ws := e.store.ResolveVaultPrefix(vaultName)

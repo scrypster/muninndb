@@ -118,6 +118,7 @@ func TestAll_ConstSliceComplete(t *testing.T) {
 		{"EvolveRepairMark", EvolveRepairMark},
 		{"RawTagRange", RawTagRange},
 		{"ProspectiveIntent", ProspectiveIntent},
+		{"AssocWeightRepairMark", AssocWeightRepairMark},
 		// Capability (0x40/0x41)
 		{"Capability", Capability},
 		{"CapabilityVaultIdx", CapabilityVaultIdx},

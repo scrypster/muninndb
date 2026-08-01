@@ -10,7 +10,7 @@ package prefix
 
 // Source-of-truth prefix bytes. Storage unchanged; auth RELOCATED 0x11–0x14 → 0x42–0x45.
 const (
-	// Storage (0x01–0x2D)
+	// Storage (0x01–0x2E)
 	Engram             byte = 0x01
 	Meta               byte = 0x02
 	AssocFwd           byte = 0x03
@@ -70,6 +70,15 @@ const (
 	// NOTE: the design doc allocated 0x2C, but 0x2C was taken by RawTagRange
 	// (S1) before this landed — 0x2D is the actual allocation.
 	ProspectiveIntent byte = 0x2D
+	// AssocWeightRepairMark (0x2E) — vault-scoped watermark for the one-time
+	// startup repair of pre-fix full-weight association keys (#756; encoder
+	// fixed in #757). The original WeightComplement overflowed at weight
+	// exactly 1.0 and wrote those edges at the weight-0.0 key position; the
+	// repair relocates them to the true 1.0 position. Presence of the mark at
+	// the current version means the repair already ran for that vault. A
+	// one-shot watermark is sound because the fixed encoder cannot create new
+	// damage of this kind.
+	AssocWeightRepairMark byte = 0x2E
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
 	CapabilityVaultIdx byte = 0x41
@@ -150,6 +159,7 @@ var registry = []Entry{
 	{EvolveRepairMark, "storage", "EvolveRepairMark", "vault-scoped-data"},
 	{RawTagRange, "storage", "RawTagRange", "vault-scoped-data"},
 	{ProspectiveIntent, "storage", "ProspectiveIntent", "vault-scoped-data"},
+	{AssocWeightRepairMark, "storage", "AssocWeightRepairMark", "vault-scoped-data"},
 	{Capability, "capability", "Capability", "capability"},
 	{CapabilityVaultIdx, "capability", "CapabilityVaultIdx", "capability"},
 	{AdminUser, "auth", "AdminUser", "auth"},
