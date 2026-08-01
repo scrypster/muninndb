@@ -29,6 +29,9 @@ var appendInfra = map[string]bool{
 	"SetReplayEnrichTimeout": true, "SetRetroactiveProcessors": true, "SetTransitionWorker": true,
 	"Store": true, "ResetReplayFailCount": true, "Stop": true, "Checkpoint": true,
 	"Observability": true, "LatencyTracker": true, "ActivityTracker": true,
+	// WaitWriteTimeIdle drains the write-time async workers and writes
+	// nothing itself — an out-of-package test seam (#722 doctrine, #764).
+	"WaitWriteTimeIdle": true,
 }
 
 // appendReadOnly: read/query methods, safe for append.
