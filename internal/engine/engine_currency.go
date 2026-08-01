@@ -153,8 +153,10 @@ var currencyVersionStatusMarkers = map[string]struct{}{
 // It examines the top min(len(results), maxResults+currencyMargin) survivors
 // (results is assumed score-sorted descending, matching every caller in this
 // package), pairwise-clusters them via union-find under the conjunctive gate
-// (similarity AND shared-anchor AND temporal-separation, MINUS any pair with
-// an explicit RelSupersedes edge), and:
+// (temporal-separation AND similarity AND version-marker vocabulary on BOTH
+// sides — currencyVersionMarkerGate, universal since R4 — AND shared-anchor,
+// MINUS facet conflicts and MINUS any member of a DECLARED supersession chain
+// in either direction, currencyInDeclaredChain), and:
 //   - crowns the max-EffectiveValidFrom, non-future member of each 2+ cluster
 //     newest_of_cluster,
 //   - annotates every other member possibly_superseded_by <- the crowned ID,
@@ -628,11 +630,20 @@ func currencyVersionMarkerGate(rawTagsA, rawTagsB []string) bool {
 // unverified newer claim is the single worst output this channel can produce:
 // it contradicts an explicit assertion using a mechanical guess.
 func (e *Engine) currencyInDeclaredChain(ctx context.Context, ws [8]byte, id storage.ULID) bool {
-	if m, err := e.store.GetAssociations(ctx, ws, []storage.ULID{id}, currencyAssocScan); err == nil {
-		for _, assoc := range m[id] {
-			if assoc.RelType == storage.RelSupersedes {
-				return true
-			}
+	m, err := e.store.GetAssociations(ctx, ws, []storage.ULID{id}, currencyAssocScan)
+	if err != nil {
+		// Degrade toward SILENCE (principle #2). The declared SUCCESSOR — the
+		// engram this whole mechanism exists to protect — carries its
+		// RelSupersedes edge in the FORWARD direction only, so swallowing this
+		// error and falling through to a healthy-but-empty reverse scan would
+		// re-open the exact leak: an asserted chain head advised as
+		// possibly-superseded because one read transiently failed.
+		slog.Warn("currency: forward-association lookup failed; treating engram as declared-chain-covered to fail toward silence", "err", err)
+		return true
+	}
+	for _, assoc := range m[id] {
+		if assoc.RelType == storage.RelSupersedes {
+			return true
 		}
 	}
 	revs, err := e.store.GetReverseAssociations(ctx, ws, id, currencyAssocScan)
