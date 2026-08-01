@@ -419,9 +419,6 @@ type ContradictionConflict struct {
 	// unresolved conflict is known to be right, so a conflict must never lift
 	// content into a result set it did not earn.
 	PartnerInResults bool `msgpack:"partner_in_results" json:"partner_in_results"`
-	// ScoreCapped reports that the hard ceiling, not merely the relative
-	// demote, bound this row's score.
-	ScoreCapped bool `msgpack:"score_capped" json:"score_capped"`
 	// ClusterSize is the number of mutually-conflicting rows in this row's
 	// conflict cluster (2 for an ordinary pair). ClusterTruncated marks a
 	// cluster larger than the per-query cap.

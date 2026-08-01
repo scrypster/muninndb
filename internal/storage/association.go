@@ -1075,10 +1075,13 @@ func (ps *PebbleStore) GetContradictions(ctx context.Context, wsPrefix [8]byte) 
 // at all, and a per-query prefix scan would not be. A true answer only means
 // "run the phase"; the phase itself decides what is actually unresolved.
 func (ps *PebbleStore) HasContradictionMarkers(ctx context.Context, wsPrefix [8]byte) (bool, error) {
+	// keys.PrefixUpperBound, never a naive last-byte increment: the prefix ends
+	// in the vault's 8th SipHash byte, and ~1/256 vaults hash to a prefix ending
+	// in 0xFF, where `upper[last]++` wraps to 0x00 and yields an upper bound
+	// BELOW the lower bound. The scan then returns empty — silently, forever —
+	// which would disable COG-29 contradiction honesty for those vaults.
 	lower := keys.ContradictionKeyPrefix(wsPrefix)
-	upper := make([]byte, len(lower))
-	copy(upper, lower)
-	upper[len(upper)-1]++
+	upper := keys.PrefixUpperBound(lower)
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {
@@ -1097,11 +1100,11 @@ func (ps *PebbleStore) HasContradictionMarkers(ctx context.Context, wsPrefix [8]
 // The key structure is: 0x0A | wsPrefix(8) | conceptHash(4) | relType(2) | id(16) = 31 bytes.
 // The value is partner ULID(16) | detectedAtUnixNano(8) — 16 bytes for legacy markers.
 func (ps *PebbleStore) GetContradictionRecords(ctx context.Context, wsPrefix [8]byte) ([]ContradictionRecord, error) {
+	// keys.PrefixUpperBound — see HasContradictionMarkers: a naive last-byte
+	// increment wraps for the ~1/256 vaults whose prefix ends in 0xFF and makes
+	// this scan silently return nothing.
 	lower := keys.ContradictionKeyPrefix(wsPrefix)
-	upper := make([]byte, len(lower))
-	copy(upper, lower)
-	// Increment last byte to form upper bound
-	upper[len(upper)-1]++
+	upper := keys.PrefixUpperBound(lower)
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {
@@ -1189,9 +1192,9 @@ func (ps *PebbleStore) DeclaredContradictions(ctx context.Context, wsPrefix [8]b
 	lower := make([]byte, 9)
 	lower[0] = prefix.AssocFwd
 	copy(lower[1:9], wsPrefix[:])
-	upper := make([]byte, 9)
-	copy(upper, lower)
-	upper[8]++
+	// keys.PrefixUpperBound — see HasContradictionMarkers: `upper[8]++` wraps
+	// for the ~1/256 vaults whose 8-byte prefix ends in 0xFF.
+	upper := keys.PrefixUpperBound(lower)
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {

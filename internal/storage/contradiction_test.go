@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -255,5 +256,70 @@ func BenchmarkDeclaredContradictions(b *testing.B) {
 		if len(res.Records) == 0 {
 			b.Fatal("expected declared pairs")
 		}
+	}
+}
+
+// vaultEndingIn0xFF derives, deterministically, a vault name whose 8-byte
+// SipHash prefix ends in 0xFF. Roughly one vault name in 256 does.
+func vaultEndingIn0xFF(t *testing.T) string {
+	t.Helper()
+	for i := 0; i < 100_000; i++ {
+		name := fmt.Sprintf("ff-vault-%d", i)
+		ws := keys.VaultPrefix(name)
+		if ws[7] == 0xFF {
+			return name
+		}
+	}
+	t.Fatal("no vault name with a 0xFF-terminated prefix in 100k candidates")
+	return ""
+}
+
+// TestContradictionScans_VaultPrefixEndingIn0xFF is the RED for the naive
+// last-byte-increment upper bound. When a vault's 8-byte prefix ends in 0xFF,
+// `upper[len-1]++` wraps to 0x00, producing an upper bound BELOW the lower
+// bound: every scan returns empty, silently, forever. For contradictions that
+// means COG-29 honesty is disabled for ~1/256 of all vaults — a silently-wrong
+// answer, the project's worst failure class.
+func TestContradictionScans_VaultPrefixEndingIn0xFF(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	name := vaultEndingIn0xFF(t)
+	ws := store.VaultPrefix(name)
+	if ws[7] != 0xFF {
+		t.Fatalf("precondition: ws = %x does not end in 0xFF", ws)
+	}
+
+	a, b := NewULID(), NewULID()
+	if _, err := store.FlagContradiction(ctx, ws, a, b); err != nil {
+		t.Fatalf("flag: %v", err)
+	}
+	if err := store.WriteAssociation(ctx, ws, a, b, &Association{
+		TargetID: b, RelType: RelContradicts, Weight: 0.5, Confidence: 1, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("write assoc: %v", err)
+	}
+
+	has, err := store.HasContradictionMarkers(ctx, ws)
+	if err != nil {
+		t.Fatalf("HasContradictionMarkers: %v", err)
+	}
+	if !has {
+		t.Error("HasContradictionMarkers = false on a vault with a marker written — the recall-side honesty gate is permanently off for this vault")
+	}
+
+	recs, err := store.GetContradictionRecords(ctx, ws)
+	if err != nil {
+		t.Fatalf("GetContradictionRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("GetContradictionRecords = %d records, want 1", len(recs))
+	}
+
+	decl, err := store.DeclaredContradictions(ctx, ws, 0)
+	if err != nil {
+		t.Fatalf("DeclaredContradictions: %v", err)
+	}
+	if len(decl.Records) != 1 {
+		t.Errorf("DeclaredContradictions = %d records, want 1", len(decl.Records))
 	}
 }

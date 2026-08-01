@@ -227,6 +227,16 @@ type Engine struct {
 	// by then the marker exists.
 	contradictionsDeclared sync.Map
 
+	// contradictionProbeClean memoises the once-per-process declared-edge scan
+	// in vaultMayHaveContradictions ([8]byte ws prefix -> struct{}): presence
+	// means "this vault was scanned to completion and had NO declared
+	// contradicts edge". It closes the hole where a process restarts between
+	// muninn_link(contradicts) and the batch worker's 0x0A flush — the marker
+	// was never written and the in-process flag is gone, so without a re-probe
+	// recall would silently stop honoring the declaration forever. Cleared by
+	// noteContradictionDeclared.
+	contradictionProbeClean sync.Map
+
 	// mergeMu serialises concurrent MergeEntity calls that touch the same entities.
 	// Uses a dedicated stripe array separate from the storage-layer entity locks to
 	// avoid reentrancy deadlock (UpsertEntityRecord acquires storage stripes internally).
@@ -2724,7 +2734,6 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 				WithConcept:      c.WithConcept,
 				Side:             c.Side,
 				PartnerInResults: c.PartnerInResults,
-				ScoreCapped:      c.ScoreCapped,
 				ClusterSize:      c.ClusterSize,
 				ClusterTruncated: c.ClusterTruncated,
 			}

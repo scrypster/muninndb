@@ -483,8 +483,6 @@ components:
             is NAMED but deliberately not injected — neither side of an
             unresolved conflict is known to be right, so a conflict must never
             lift content into a result set it did not earn.
-        score_capped:
-          type: boolean
         cluster_size:
           type: integer
         cluster_truncated:

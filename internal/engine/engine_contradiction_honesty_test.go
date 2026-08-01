@@ -2,9 +2,12 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
+	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -104,13 +107,13 @@ func TestContradictionHonesty_UnresolvedDeclaredEdgeIsHonored(t *testing.T) {
 		t.Errorf("b is the SOURCE of the declared edge, so its side must be %q", contradictionSideAsserted)
 	}
 
-	// (ii) neither side is presented as the answer.
-	for _, it := range resp.Activations {
-		if (it.ID == a || it.ID == b) && float64(it.Score) > contradictionScoreCeiling {
-			t.Errorf("row %s scored %.4f, above the %.2f ceiling — a disputed fact must never be presented at ~1.0",
-				it.ID, it.Score, contradictionScoreCeiling)
-		}
-	}
+	// (ii) neither side is presented at the score it earned. NOT asserted here
+	// against an absolute constant: this test used to check
+	// `score <= 0.95`, and recall's wire Score is an absolute activation that
+	// is structurally an order of magnitude below that, so the assertion could
+	// never fail and proved nothing. The real proof needs a control corpus and
+	// lives in TestContradictionHonesty_DemoteOnly, which builds the identical
+	// vault with and without the contradicts link and compares the scores.
 
 	// (iii) the newer side ranks first, and (iv) the two are adjacent.
 	if rb > ra {
@@ -460,10 +463,238 @@ func TestContradictionHonesty_TightLimitStillDisclosesTheConflict(t *testing.T) 
 	if c.With != want {
 		t.Errorf("annotation names %s, want the partner %s", c.With, want)
 	}
-	if float64(only.Score) > contradictionScoreCeiling {
-		t.Errorf("row scored %.4f, above the ceiling", only.Score)
-	}
 	if resp.Conflict == nil {
 		t.Error("response carries no conflict block")
+	}
+}
+
+// TestContradictionHonesty_SurvivesRestartBeforeTheMarkerFlush is the RED for
+// the permanent-silence hole in COG-29's fast-path gate.
+//
+// muninn_link(contradicts) is durable the moment Link returns, but the 0x0A
+// marker that the gate reads is written only when the batch worker FLUSHES.
+// The window between the two was covered by an in-process sync.Map — which is
+// exactly the state a restart destroys. Restart before the flush and the marker
+// was never written and the flag is gone, so vaultMayHaveContradictions returns
+// false on every subsequent query and nothing ever re-probes: recall silently
+// stops honoring a correctly-declared, durably-stored contradiction FOREVER.
+//
+// Clearing the sync.Map with the marker absent is exactly that state.
+func TestContradictionHonesty_SurvivesRestartBeforeTheMarkerFlush(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	contradictionFixture(t, eng, "test")
+
+	ws := eng.store.ResolveVaultPrefix("test")
+	// Precondition: the batch worker has NOT flushed, so the durable marker
+	// this gate normally reads does not exist. If this ever fails the test is
+	// no longer exercising the restart hole.
+	has, err := eng.store.HasContradictionMarkers(ctx, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Skip("the 0x0A marker already landed; this test needs the pre-flush window")
+	}
+	if resp := recallContradiction(t, eng, "test", nil); resp.Conflict == nil {
+		t.Fatal("precondition: the conflict must be honored before the simulated restart")
+	}
+
+	// Simulate the restart: everything in-process is gone, the store is not.
+	eng.contradictionsDeclared.Delete(ws)
+	eng.contradictionProbeClean.Delete(ws)
+
+	if !eng.vaultMayHaveContradictions(ctx, ws) {
+		t.Error("after a restart with no marker written, the gate says the vault has no contradictions — honesty is now off for this vault permanently")
+	}
+	resp := recallContradiction(t, eng, "test", nil)
+	if resp.Conflict == nil {
+		t.Fatal("recall no longer honors a durably-declared contradiction after a restart that preceded the marker flush")
+	}
+	annotated := 0
+	for _, it := range resp.Activations {
+		if it.UnresolvedContradiction != nil {
+			annotated++
+		}
+	}
+	if annotated != 2 {
+		t.Errorf("%d rows annotated after the simulated restart, want 2", annotated)
+	}
+}
+
+// TestContradictionHonesty_ProbeIsPaidOncePerVault pins the cost side of the
+// restart fix: the declared-edge scan is a bounded scan, not something recall
+// may pay on every query. A contradiction-free vault runs it once and then
+// answers from the memoised verdict.
+func TestContradictionHonesty_ProbeIsPaidOncePerVault(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := eng.Write(ctx, &mbp.WriteRequest{Vault: "clean2", Concept: "timeout",
+		Content: "the request timeout limit is 180ms"}); err != nil {
+		t.Fatal(err)
+	}
+	eng.waitWriteTimeIdle()
+
+	ws := eng.store.ResolveVaultPrefix("clean2")
+	if eng.vaultMayHaveContradictions(ctx, ws) {
+		t.Fatal("a contradiction-free vault must gate the phase off")
+	}
+	if _, cached := eng.contradictionProbeClean.Load(ws); !cached {
+		t.Error("the declared-edge probe verdict was not memoised; every recall would pay the scan")
+	}
+	if eng.vaultMayHaveContradictions(ctx, ws) {
+		t.Error("second call changed the verdict")
+	}
+
+	// A declaration invalidates the memoised verdict at its source.
+	a, _ := contradictionFixture(t, eng, "clean2")
+	_ = a
+	if _, cached := eng.contradictionProbeClean.Load(ws); cached {
+		t.Error("the clean verdict survived a new declaration in the same vault")
+	}
+	if !eng.vaultMayHaveContradictions(ctx, ws) {
+		t.Error("gate is off on a vault that just had a contradiction declared")
+	}
+}
+
+// TestContradictionHonesty_SupersedesEdgeAloneResolves isolates clause 3 of the
+// unresolved test — "a declared RelSupersedes between the pair IS the
+// resolution".
+//
+// TestContradictionHonesty_ResolvedBySupersedes above does NOT isolate it: the
+// engine's Link(supersedes) also RETIRES the target, so clause 2 (endpoint
+// liveness) clears the conflict first and that test passes with clause 3
+// deleted. Here the RelSupersedes edge is written straight through the store,
+// so both endpoints stay live and clause 3 is the only thing that can resolve
+// the pair.
+func TestContradictionHonesty_SupersedesEdgeAloneResolves(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	rows, ids := contradictionRows(t, eng, "sup", []struct {
+		concept, content string
+		score            float64
+	}{
+		{"request timeout limit", "the request timeout limit is 180ms", 0.80},
+		{"request timeout limit revised", "the request timeout limit is 320ms", 0.60},
+	})
+	linkContradicts(t, eng, "sup", ids[1], ids[0])
+
+	ws := eng.store.ResolveVaultPrefix("sup")
+	run := func() *mbp.ConflictBlock {
+		req := &activation.ActivateRequest{MaxResults: 10}
+		now := time.Now()
+		in := append([]activation.ScoredEngram(nil), rows...)
+		_, block, _ := eng.applyContradictionHonesty(ctx, ws, in, req, newVisibilityGate(req, now), now)
+		return block
+	}
+	if run() == nil {
+		t.Fatal("precondition: the unresolved conflict must be reported first")
+	}
+
+	a, err := storage.ParseULID(ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := storage.ParseULID(ids[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Straight through the store: no retirement, no ValidUntil stamp, nothing
+	// but the declared edge. Distinct weight so it gets its own forward-assoc
+	// key rather than replacing the contradicts edge.
+	if err := eng.store.WriteAssociation(ctx, ws, b, a, &storage.Association{
+		TargetID: a, RelType: storage.RelSupersedes, Weight: 0.9, Confidence: 1, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both endpoints are still live and still in the result set, so clause 2
+	// cannot be what clears this.
+	for i := range rows {
+		if !contradictionEndpointLive(rows[i].Engram, &activation.ActivateRequest{}, time.Now()) {
+			t.Fatalf("endpoint %s is no longer live — clause 2 would resolve this and the test proves nothing", ids[i])
+		}
+	}
+	if block := run(); block != nil {
+		t.Errorf("a declared RelSupersedes between the pair did not resolve the conflict: %+v", block)
+	}
+}
+
+// BenchmarkRecallContradictionGate measures what COG-29 costs a recall, on a
+// synthetic vault, in the two states that matter: the gate CLOSED (no
+// contradiction anywhere — the overwhelming majority of vaults, which must pay
+// nothing but one bounded seek plus a once-per-process declared-edge scan) and
+// the gate OPEN (a declared pair present, so the phase runs its forward and
+// reverse association reads over the examined window every query).
+//
+// It reports p50 and p99 rather than only the mean, because the concern this
+// answers is tail latency: the open gate is sticky per vault, and the phase
+// issues up to one forward batch read plus one bounded reverse iterator per
+// examined row.
+func BenchmarkRecallContradictionGate(b *testing.B) {
+	for _, tc := range []struct {
+		name     string
+		conflict bool
+	}{{"gate_closed", false}, {"gate_open", true}} {
+		b.Run(tc.name, func(b *testing.B) {
+			eng, cleanup := testEnv(b)
+			defer cleanup()
+			ctx := context.Background()
+			vault := "bench-" + tc.name
+
+			var first, second string
+			for i := 0; i < 200; i++ {
+				w, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault,
+					Concept: fmt.Sprintf("service policy %d", i),
+					Content: fmt.Sprintf("the request timeout limit for service %d is %dms", i, 100+i)})
+				if err != nil {
+					b.Fatal(err)
+				}
+				if i == 0 {
+					first = w.ID
+				}
+				if i == 1 {
+					second = w.ID
+				}
+			}
+			eng.waitWriteTimeIdle()
+			if tc.conflict {
+				if _, err := eng.Link(ctx, &mbp.LinkRequest{Vault: vault, SourceID: second,
+					TargetID: first, RelType: uint16(storage.RelContradicts)}); err != nil {
+					b.Fatal(err)
+				}
+				eng.waitWriteTimeIdle()
+			}
+			req := &mbp.ActivateRequest{Vault: vault,
+				Context: []string{"what is the request timeout limit"}, MaxResults: 10, Threshold: 0.001}
+			if _, err := eng.Activate(ctx, req); err != nil { // warm caches + the once-per-vault probe
+				b.Fatal(err)
+			}
+
+			lat := make([]time.Duration, 0, b.N)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				t0 := time.Now()
+				if _, err := eng.Activate(ctx, req); err != nil {
+					b.Fatal(err)
+				}
+				lat = append(lat, time.Since(t0))
+			}
+			b.StopTimer()
+			sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
+			pct := func(p float64) float64 {
+				if len(lat) == 0 {
+					return 0
+				}
+				i := int(float64(len(lat)-1) * p)
+				return float64(lat[i].Microseconds())
+			}
+			b.ReportMetric(pct(0.50), "p50-us")
+			b.ReportMetric(pct(0.99), "p99-us")
+		})
 	}
 }

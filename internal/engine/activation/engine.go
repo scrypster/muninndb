@@ -274,9 +274,6 @@ type ContradictionConflict struct {
 	// known to be right, so a conflict must never LIFT content into a result
 	// set it did not earn.
 	PartnerInResults bool
-	// ScoreCapped reports that the ceiling, not just the relative demote,
-	// bound this row's score.
-	ScoreCapped bool
 	// ClusterSize is the number of mutually-conflicting rows this row belongs
 	// to (2 for an ordinary pair). ClusterTruncated marks a cluster larger
 	// than the per-query cap, whose remaining members are not enumerated.

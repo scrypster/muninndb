@@ -16,9 +16,9 @@ import (
 //
 // When two results in a recall response are joined by an UNRESOLVED DECLARED
 // `contradicts` edge, recall must not present either as the answer. Both are
-// returned, adjacent, in a defensible order, with a hard score ceiling and a
-// first-class per-row annotation, and the response carries a `conflict` block
-// naming the pair and the resolution actions.
+// returned, demoted, in a defensible order, with a first-class per-row
+// annotation, and the response carries a `conflict` block naming the pair and
+// the resolution actions.
 //
 // The phase is DEMOTE-ONLY (it can never lift a row above a genuinely better
 // unrelated match), NEVER removes a row, NEVER abstains, and WRITES NOTHING.
@@ -32,21 +32,23 @@ import (
 // mbp/types.go) that two admission-worthy candidates do not satisfy. The
 // complaint underneath the ask — "an agent commonly consumes only the first
 // result, so this is confidently misleading" — is about presenting one side as
-// THE ANSWER, not about returning the data. The score ceiling, the forced
-// adjacency and the response-level block remove "the answer" while keeping
+// THE ANSWER, not about returning the data. The demote, the always-on per-row
+// annotation and the response-level block remove "the answer" while keeping
 // both facts.
 const (
 	// contradictionDemote is the relative demote applied to every member of a
 	// conflict cluster. It is a pairwise honesty nudge, not a tuned relevance
 	// constant: it exists so a disputed fact does not sit at the score an
 	// undisputed one would have earned.
+	//
+	// It is the ONLY score change this phase makes. An earlier draft also
+	// carried an absolute 0.95 ceiling; it was removed because recall's wire
+	// Score is an absolute activation, structurally well below 0.6 on every
+	// corpus measured, so the ceiling never once bound — it shipped a
+	// permanently-false `score_capped` flag and a vacuous test assertion. The
+	// honest statement of the guarantee is the relative one: a disputed row is
+	// returned BELOW the score it earned, and it is annotated on every surface.
 	contradictionDemote = 0.10
-
-	// contradictionScoreCeiling is the hard cap on a disputed row. A memory
-	// under an unresolved declared contradiction must never be presented at
-	// ~1.0 — that is the exact shape the round-7 evaluators called
-	// "confidently misleading".
-	contradictionScoreCeiling = 0.95
 
 	// contradictionMargin is added to MaxResults to decide how many top
 	// (already score-sorted) rows to examine. Same rationale and same value as
@@ -85,9 +87,9 @@ const (
 
 // contradictionWarning is the response-level instruction. It names all three
 // resolution actions in words, because the accepted residual of this phase is
-// that a declared-and-abandoned conflict caps both facts until someone
+// that a declared-and-abandoned conflict demotes both facts until someone
 // resolves it — recoverable, but only if the caller is told how.
-const contradictionWarning = "Two or more returned memories are declared to contradict each other and the conflict is unresolved. Neither is presented as the answer: they are returned adjacent and score-capped. Resolve it — muninn_evolve the memory that should survive, muninn_forget(not_true_since=…) the side that stopped being true, or muninn_link(relation=\"supersedes\") to declare which one wins."
+const contradictionWarning = "Two or more returned memories are declared to contradict each other and the conflict is unresolved. Neither is presented as the answer: both are returned, with their scores demoted below what they earned. Resolve it — muninn_evolve the memory that should survive, muninn_forget(not_true_since=…) the side that stopped being true, or muninn_link(relation=\"supersedes\") to declare which one wins."
 
 // contradictionEdge is one declared contradicts edge between two engrams,
 // carrying which side asserted it and when.
@@ -109,16 +111,34 @@ func (ce contradictionEdge) other(id storage.ULID) storage.ULID {
 
 // vaultMayHaveContradictions is COG-29's fast-path gate. The phase must be
 // free on the overwhelming majority of vaults, which have no contradictions at
-// all: a bounded 0x0A seek answers that in one iterator First().
+// all. Three probes, cheapest first:
 //
-// The in-process per-vault flag covers the window between an explicit
-// muninn_link(contradicts) and the batch worker writing the marker (≤ one
-// worker interval after #764 D1), so a single-binary deployment — the default,
-// and the evaluators' case — honors a declaration on the very next query.
+//  1. The in-process per-vault flag. It covers the window between an explicit
+//     muninn_link(contradicts) in THIS process and the batch worker writing the
+//     0x0A marker (≤ one worker interval after #764 D1), so a single-binary
+//     deployment — the default, and the evaluators' case — honors a declaration
+//     on the very next query.
 //
-// Documented residual: an edge declared by ANOTHER process/node is honored
-// only once its 0x0A marker lands. Cross-process freshness of this gate is a
-// named deferral, not an oversight.
+//  2. A bounded 0x0A seek, answered by one iterator First(). This is the steady
+//     state, and it is the only probe that sees an edge declared by ANOTHER
+//     process, so it must keep running on every query.
+//
+//  3. Once per vault per process, a bounded scan for declared-but-unflagged
+//     contradicts edges. This exists because probes 1 and 2 TOGETHER have a
+//     permanent hole: the in-process flag lives only in memory and the 0x0A
+//     marker is written only when the batch worker flushes, so a process that
+//     restarts between muninn_link(contradicts) and that flush loses the flag
+//     while the marker was never written — and nothing else ever re-probes.
+//     Recall would then silently stop honoring a durable, correctly-declared
+//     contradiction FOREVER. The scan's result is cached per vault, so a
+//     contradiction-free vault pays it exactly once, not once per recall.
+//
+// Named residual: the once-per-process scan is capped
+// (storage.DefaultDeclaredContradictionScanCap). On a vault whose forward
+// associations exceed that cap the scan is incomplete, and this gate then
+// degrades toward DOING the work rather than toward silence — the phase is
+// read-only and bounded, so the cost of being wrong that way is I/O, while the
+// cost of being wrong the other way is a disputed fact presented as the answer.
 func (e *Engine) vaultMayHaveContradictions(ctx context.Context, ws [8]byte) bool {
 	if _, declared := e.contradictionsDeclared.Load(ws); declared {
 		return true
@@ -131,14 +151,55 @@ func (e *Engine) vaultMayHaveContradictions(ctx context.Context, ws [8]byte) boo
 		slog.Warn("recall: contradiction marker probe failed, running the phase anyway", "err", err)
 		return true
 	}
-	return has
+	if has {
+		return true
+	}
+	return e.declaredContradictionsProbe(ctx, ws)
+}
+
+// declaredContradictionsProbe runs the once-per-process declared-edge scan
+// described in vaultMayHaveContradictions, memoising its verdict per vault.
+func (e *Engine) declaredContradictionsProbe(ctx context.Context, ws [8]byte) bool {
+	if _, done := e.contradictionProbeClean.Load(ws); done {
+		return false
+	}
+	res, err := e.store.DeclaredContradictions(ctx, ws, 0)
+	if err != nil {
+		slog.Warn("recall: contradiction declared-edge probe failed, running the phase anyway", "err", err)
+		return true
+	}
+	if len(res.Records) > 0 {
+		// Promote to the sticky flag: the vault demonstrably has a declared
+		// contradiction, so never pay this scan again.
+		e.contradictionsDeclared.Store(ws, struct{}{})
+		return true
+	}
+	if !res.Complete {
+		slog.Warn("recall: contradiction declared-edge probe hit its scan cap; running COG-29 on every query for this vault",
+			"scanned", res.Scanned)
+		e.contradictionsDeclared.Store(ws, struct{}{})
+		return true
+	}
+	e.contradictionProbeClean.Store(ws, struct{}{})
+	return false
 }
 
 // noteContradictionDeclared records that this process has written a
 // RelContradicts edge in ws, so the COG-29 fast-path gate stops skipping the
 // vault before the batch detector's marker exists.
+//
+// Deliberately never evicted. Eviction would have to prove that NO unresolved
+// declared contradiction remains anywhere in the vault, which is a vault-wide
+// scan — exactly the cost this gate exists to avoid — and getting it wrong
+// turns honesty off silently, the failure class this whole increment is about.
+// The entry is an empty struct keyed by an 8-byte prefix, one per vault this
+// process has ever seen a declaration in, so the retained set is bounded by
+// vault count and measured in bytes. The cost of the false positive is that
+// COG-29 keeps running on a vault whose conflicts were all resolved; the phase
+// is read-only, bounded, and returns no block when nothing is live.
 func (e *Engine) noteContradictionDeclared(ws [8]byte) {
 	e.contradictionsDeclared.Store(ws, struct{}{})
+	e.contradictionProbeClean.Delete(ws)
 }
 
 // applyContradictionHonesty is COG-29. See the block comment above for the
@@ -154,8 +215,8 @@ func (e *Engine) noteContradictionDeclared(ws [8]byte) {
 // supersession/substitution, because a declared RelSupersedes between the pair
 // IS the resolution and by then the loser has already been demoted or removed;
 // after currency, because COG-25 may reorder exact ties and COG-29's ordering
-// must be the last word; and before truncation, so adjacency holds and a
-// demoted partner is not silently cut.
+// must be the last word; and before truncation, so a demoted partner is not
+// silently cut.
 //
 // Zero writes: forward and reverse association reads, engram and metadata
 // reads, and lease reads through the shared visibility gate. Observe-safe
@@ -283,104 +344,112 @@ func (e *Engine) applyContradictionHonesty(
 	// applySupersession documents. Paid only when a live conflict exists.
 	out = append(make([]activation.ScoredEngram, 0, len(results)), results...)
 
-	// Step 6 — demote and cap. Both operations are min() against the row's
-	// OWN earned score, so a conflict can only ever push a row DOWN, never
-	// above a genuinely better unrelated match.
-	capped := make(map[int]bool, len(parent))
+	// Step 6 — demote. A single min() against the row's OWN earned score, so a
+	// conflict can only ever push a row DOWN, never above a genuinely better
+	// unrelated match. There is no absolute ceiling; see contradictionDemote.
 	for i := range parent {
 		own := out[i].Score
 		next := own * (1 - contradictionDemote)
 		if next > own {
 			next = own
 		}
-		if next > contradictionScoreCeiling {
-			next = contradictionScoreCeiling
-			capped[i] = true
-		}
 		out[i].Score = next
 	}
 
-	// Step 5 — order within each cluster, and annotate.
+	// Step 5 — order within each cluster by the deterministic ladder, applied
+	// as a PERMUTATION over the positions the cluster already occupies. The
+	// score re-sort below is stable, so the ladder is only ever the last word
+	// on an exact score tie between two cluster members — which is precisely
+	// the evaluators' shape (two rivals that scored identically) and precisely
+	// where nothing else can decide.
+	for _, members := range clusters {
+		slots := append([]int(nil), members...)
+		sort.Ints(slots)
+		sortContradictionCluster(out, members, live, idx)
+		rows := make([]activation.ScoredEngram, len(members))
+		for k, m := range members {
+			rows[k] = out[m]
+		}
+		for k, slot := range slots {
+			out[slot] = rows[k]
+		}
+	}
+	// idx maps ULID -> position and the permutation above moved rows between
+	// positions, so it must be rebuilt before anything else reads it.
+	for i := 0; i < window; i++ {
+		idx[out[i].Engram.ID] = i
+	}
+
+	// Annotate. Cluster membership is a set of positions and the permutation
+	// above only shuffled rows WITHIN that set, so `clusters` is still correct.
 	block := &mbp.ConflictBlock{Unresolved: true, Warning: contradictionWarning}
 	memberCluster := make(map[int][]int, len(parent))
 	for _, members := range clusters {
-		sortContradictionCluster(out, members, live, idx)
-		truncated := false
-		if len(members) > contradictionMaxCluster {
-			truncated = true
-		}
+		truncated := len(members) > contradictionMaxCluster
 		for _, i := range members {
 			memberCluster[i] = members
-			out[i].UnresolvedContradiction = buildRowConflict(out, i, members, live, idx, partners, capped[i], truncated)
+			out[i].UnresolvedContradiction = buildRowConflict(out, i, members, live, idx, partners, truncated)
 		}
 	}
 	block.Pairs = buildConflictPairs(out, live, idx, partners)
 
-	// Adjacency. Gather each cluster to the rank of its LOWEST-scoring member
-	// rather than its highest.
+	// Step 7 — RE-SORT by score, stably, and let adjacency be whatever the
+	// scores produce.
 	//
-	// The design called for the highest, but that is not implementable
-	// alongside the demote-only guarantee this phase's whole credibility rests
-	// on: with rows [X .9 unrelated, A .5 conflicted, Y .4 unrelated, B .3
-	// conflicted], gathering up produces [X, A, B, Y] — B has been lifted
-	// above a strictly better unrelated match, which is precisely what
-	// demote-only forbids and what R6 asserts against. Gathering down produces
-	// [X, Y, A, B]: every cluster member is at or below where it was, and no
-	// unrelated row moves down at all. In the case that actually matters —
-	// the two rivals near the top, which is the evaluators' shape — the two
-	// are identical, because there is nothing between them to gather past.
-	order := make([]int, 0, len(out))
-	placed := make(map[int]bool, len(parent))
-	for i := range out {
-		if members, ok := memberCluster[i]; ok {
-			if placed[i] {
-				continue
-			}
-			last := members[0]
-			for _, m := range members {
-				if m > last {
-					last = m
-				}
-			}
-			if i != last {
-				continue // wait until the cluster's lowest-ranked member
-			}
-			for _, m := range members {
-				placed[m] = true
-				order = append(order, m)
-			}
-			continue
-		}
-		order = append(order, i)
+	// This is the ONE rule. An earlier draft gathered each cluster to the rank
+	// of its lowest-scoring member instead, to keep the pair adjacent without
+	// lifting anything; that buries a dominant answer behind rows it outscores
+	// by orders of magnitude (measured: a 0.859 conflicted row dropped from
+	// rank 0 to rank 6 behind rows scoring 0.1–0.5) and returns a response that
+	// is no longer score-descending — a worse lie than the one the phase exists
+	// to fix. Sorting by the demoted score is both demote-only AND monotone:
+	// near-tied rivals land adjacent for free, a dominant answer stays at rank
+	// 0 (demoted and annotated), and nothing is ever lifted above a better
+	// unrelated match because a row's score only ever went down.
+	order := make([]int, len(out))
+	for i := range order {
+		order[i] = i
 	}
-	reordered := make([]activation.ScoredEngram, 0, len(out))
-	for _, i := range order {
-		reordered = append(reordered, out[i])
+	sort.SliceStable(order, func(x, y int) bool { return out[order[x]].Score > out[order[y]].Score })
+	reordered := make([]activation.ScoredEngram, len(out))
+	pos := make(map[int]int, len(order))
+	for newPos, oldIdx := range order {
+		reordered[newPos] = out[oldIdx]
+		pos[oldIdx] = newPos
 	}
 	out = reordered
 
-	// Never remove. The phase has no delete path.
+	// Never remove. The phase has no delete path; `order` is a permutation of
+	// [0,len(out)) by construction, so this is a tripwire, not a branch anyone
+	// expects to take.
 	if len(out) != len(results) {
 		slog.Error("recall: COG-29 changed the result count — this is a bug", "before", len(results), "after", len(out))
 	}
 
-	// Adjacency must survive truncation: if any cluster member is inside the
-	// caller's cut, all of them are. The overflow is bounded and REPORTED —
-	// returning one side of a conflict alone is the failure this whole phase
-	// exists to remove, so the truncation yields to it, but never silently.
+	// Cluster membership must survive truncation: if any cluster member is
+	// inside the caller's cut, all of them are. Rebuilt on POST-SORT positions
+	// — computing it against the pre-sort ranks would silently mis-report the
+	// overflow. The overflow is bounded and REPORTED: returning one side of a
+	// conflict alone is the failure this whole phase exists to remove, so the
+	// truncation yields to it, but never silently.
 	if req.MaxResults > 0 {
-		pos := make(map[int]int, len(order))
-		for newPos, oldIdx := range order {
-			pos[oldIdx] = newPos
+		sorted := make(map[int][]int, len(memberCluster))
+		for oldIdx, members := range memberCluster {
+			np := make([]int, 0, len(members))
+			for _, m := range members {
+				np = append(np, pos[m])
+			}
+			sort.Ints(np)
+			sorted[pos[oldIdx]] = np
 		}
 		limit := req.MaxResults
-		for oldIdx, members := range memberCluster {
-			if pos[oldIdx] >= req.MaxResults {
+		for p, members := range sorted {
+			if p >= req.MaxResults {
 				continue
 			}
 			for _, m := range members {
-				if p := pos[m] + 1; p > limit {
-					limit = p
+				if m+1 > limit {
+					limit = m + 1
 				}
 			}
 		}
@@ -624,46 +693,65 @@ func contradictionOrderBasis(a, b *storage.Engram, asserted bool) string {
 // buildRowConflict assembles the always-on per-row payload. Always-on for the
 // same reason superseded_by is: an agent must never be handed a disputed fact
 // without being told.
+//
+// A row can be an endpoint of several declared contradicts edges, and the
+// annotation names exactly one partner. Selection is TOTAL and independent of
+// map iteration order: prefer a partner that is itself in the result set (the
+// caller can see both sides, so naming that one is strictly more useful), then
+// the lowest partner ULID. An earlier draft took the first edge encountered
+// while ranging a map, which made both `with` and `partner_in_results` flip
+// between identical queries.
 func buildRowConflict(
 	rows []activation.ScoredEngram, i int, members []int,
 	edges []contradictionEdge, idx map[storage.ULID]int,
 	partners map[storage.ULID]contradictionPartner,
-	capped, clusterTruncated bool,
+	clusterTruncated bool,
 ) *activation.ContradictionConflict {
 	self := rows[i].Engram.ID
-	for _, ce := range edges {
+	best := -1
+	var bestOther storage.ULID
+	bestInSet := false
+	for k := range edges {
+		ce := edges[k]
 		if ce.src != self && ce.dst != self {
 			continue
 		}
 		other := ce.other(self)
-		side := contradictionSideChallenged
-		if ce.src == self {
-			side = contradictionSideAsserted
-		}
-		concept := ""
-		inResults := false
-		if j, ok := idx[other]; ok {
-			concept = rows[j].Engram.Concept
-			inResults = true
-		} else if p, ok := partners[other]; ok {
-			concept = p.concept
-		}
-		size := len(members)
-		if size < 2 && inResults {
-			size = 2
-		}
-		return &activation.ContradictionConflict{
-			With:             other,
-			WithConcept:      concept,
-			Side:             side,
-			DeclaredAt:       ce.declared,
-			PartnerInResults: inResults,
-			ScoreCapped:      capped,
-			ClusterSize:      size,
-			ClusterTruncated: clusterTruncated,
+		_, inSet := idx[other]
+		better := best < 0 ||
+			(inSet && !bestInSet) ||
+			(inSet == bestInSet && bytes.Compare(other[:], bestOther[:]) < 0)
+		if better {
+			best, bestOther, bestInSet = k, other, inSet
 		}
 	}
-	return nil
+	if best < 0 {
+		return nil
+	}
+
+	ce := edges[best]
+	side := contradictionSideChallenged
+	if ce.src == self {
+		side = contradictionSideAsserted
+	}
+	concept := ""
+	if bestInSet {
+		concept = rows[idx[bestOther]].Engram.Concept
+	} else if p, ok := partners[bestOther]; ok {
+		concept = p.concept
+	}
+	return &activation.ContradictionConflict{
+		With:             bestOther,
+		WithConcept:      concept,
+		Side:             side,
+		DeclaredAt:       ce.declared,
+		PartnerInResults: bestInSet,
+		// len(members) is authoritative: an in-set partner was unioned into
+		// this row's cluster in step 4, so a cluster with an in-set partner
+		// always has at least two members.
+		ClusterSize:      len(members),
+		ClusterTruncated: clusterTruncated,
+	}
 }
 
 // buildConflictPairs assembles the response-level pair list in a deterministic
