@@ -1011,7 +1011,7 @@ components:
           type: integer
         preset:
           type: string
-          enum: [default, reference, scratchpad, knowledge-graph]
+          enum: [default, reference, scratchpad, knowledge-graph, working]
         multi_user:
           type: boolean
           nullable: true
@@ -1049,6 +1049,37 @@ components:
           type: number
           format: float
           nullable: true
+        assoc_decay_factor:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
+          maximum: 1
+          description: >-
+            Association-decay enable/disable switch. Any value > 0 enables edge
+            decay; 0 disables it. It does not set a rate (#762) — the rate is
+            assoc_half_life_days.
+        assoc_min_weight:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
+          maximum: 1
+        archive_threshold:
+          type: number
+          format: double
+          nullable: true
+          minimum: 0
+          maximum: 1
+        max_engrams:
+          type: integer
+          nullable: true
+          minimum: 0
+        retention_days:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
         assoc_half_life_days:
           type: number
           format: float
