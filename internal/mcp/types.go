@@ -210,10 +210,21 @@ type ContradictionPair struct {
 	ConceptA string `json:"concept_a"`
 	IDb      string `json:"id_b"`
 	ConceptB string `json:"concept_b"`
-	// Status is "detected" (the detector has flagged this pair) or
-	// "pending_detection" (an explicit contradicts link exists and the batch
-	// detector has not reached it yet). Empty when the engine cannot report it.
+	// Status is the pair's PROVENANCE: "declared" (an explicit contradicts
+	// link exists between the two memories) or "detected" (the batch detector
+	// found the pair on its own). Empty when the engine cannot report it.
+	//
+	// "declared" replaced "pending_detection" in #764. A declared
+	// contradiction is durable at muninn_link return and is honored by recall
+	// on the very next query, so nothing about it is pending — what can still
+	// be outstanding is the confidence penalty, reported in
+	// ConfidencePenalty below.
 	Status string `json:"status,omitempty"`
+	// ConfidencePenalty is "pending" or "applied": whether the asynchronous,
+	// exactly-once confidence penalty for this pair has fired yet. It runs on
+	// a ~30s batch interval and affects only the two memories' confidence
+	// scores — never whether the contradiction is recorded or honored.
+	ConfidencePenalty string `json:"confidence_penalty,omitempty"`
 	// DetectedAt is when the detector flagged the pair. Absent while pending,
 	// and absent for markers written before the timestamp was recorded.
 	DetectedAt *time.Time `json:"detected_at,omitempty"`

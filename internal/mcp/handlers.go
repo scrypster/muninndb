@@ -760,7 +760,7 @@ func (s *MCPServer) handleContradictions(ctx context.Context, w http.ResponseWri
 	case !report.ScanComplete:
 		report.Note = "contradiction scan hit its cap: pending_count is a lower bound, and pairs declared by an explicit contradicts link may be missing from this list"
 	case report.PendingCount > 0:
-		report.Note = fmt.Sprintf("%d contradiction(s) declared by an explicit link are awaiting the detector (it runs on a ~30s batch interval); they are listed with status \"pending_detection\" and are already durable", report.PendingCount)
+		report.Note = fmt.Sprintf("%d contradiction(s) are declared by an explicit link and are already honored by recall; the asynchronous confidence penalty for them has not been applied yet (it runs on a ~30s batch interval)", report.PendingCount)
 	case report.DetectedCount == 0:
 		report.Note = "no contradictions in this vault, and none awaiting detection"
 	}
