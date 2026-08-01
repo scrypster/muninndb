@@ -55,6 +55,13 @@ func TestResolvePlasticity_LegacyFactorConverts(t *testing.T) {
 		{0.95, 13.5134}, // ln0.5/ln0.95
 		{0.98, 34.3097},
 		{0.5, 1.0},
+		// factor >= 1 carries NO rate: a per-pass multiplier of 1 never moved
+		// a weight, so "on but never move" must resolve to half-life 0 (the
+		// skip-with-WARN path), NOT fall through to the preset's 30 days. The
+		// preset default would silently substitute a rate the operator
+		// explicitly declined (principle #1).
+		{1.0, 0},
+		{1.05, 0},
 	}
 	for _, tc := range cases {
 		r := ResolvePlasticity(&PlasticityConfig{AssocDecayFactor: f32(tc.factor)})

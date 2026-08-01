@@ -98,7 +98,10 @@ type PebbleStore struct {
 	// edge's lastActivated (COG-27), so it needs an injectable clock to be
 	// tested at all: the cadence-independence property is a statement about two
 	// different evaluation grids over the *same* simulated interval.
-	// Test-only seam; never set in production code.
+	// Test-only seam; never set in production code. It is read without
+	// synchronization by every decay pass, so it MUST be set before the store
+	// is shared across goroutines — setting it after any background worker
+	// has started is a data race.
 	decayNow func() time.Time
 }
 

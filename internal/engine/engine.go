@@ -161,6 +161,11 @@ type Engine struct {
 	// a ~60s sweep cannot turn a one-line diagnostic into a log flood.
 	// vault name (string) -> struct{}.
 	assocDecayWarned sync.Map
+	// assocDecayLegacyChecked dedupes the legacy-factor CHECK (a per-vault
+	// GetVaultConfig read), separately from the WARN itself: vaults that never
+	// need the WARN must not pay a config read every ~60s sweep pass.
+	// vault name (string) -> struct{}.
+	assocDecayLegacyChecked sync.Map
 	// repairAssocWeightsFn, when non-nil, replaces the per-vault store call the
 	// repair pass makes. Test-only seam, and the only way to exercise the
 	// failure policy: a real forced storage error is not reachable from a test
@@ -4332,12 +4337,16 @@ func (e *Engine) runPruneWorker() {
 // suite green — the gate was wiring nobody tested (review finding B2).
 //
 // The gate: association decay must never run before the one-shot full-weight
-// repair has swept cleanly (#756). Decay reads weight 0 from a pre-fix
-// full-weight key and either deletes the edge or clamps it to the 0.05 floor —
-// rewriting the 0x14 index and moving the keys, which permanently destroys the
-// only evidence the repair can use. A pass that errored keeps this shut for the
-// process lifetime (see runLegacyFullWeightAssocRepair's failure policy), so
-// decay is parked rather than allowed to destroy repairable state.
+// repair has swept cleanly (#756). Post-#762 decay no longer deletes or clamps
+// a weight-0 pre-fix key on its own — the drop guard skips an edge whose
+// ceiling sits at or above its stored weight, and a zero weight is never below
+// it. What still destroys the repair's evidence is the ADOPTION path: a pre-fix
+// key whose value carries neither lastActivated nor createdAt gets stamped,
+// which rewrites the fwd/rev keys and sets the 0x14 index to 0.0 — overwriting
+// the weight-1.0 index entry that is the repair's only disambiguator. A pass
+// that errored keeps this shut for the process lifetime (see
+// runLegacyFullWeightAssocRepair's failure policy), so decay is parked rather
+// than allowed to destroy repairable state.
 func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
 	if !e.assocWeightRepairComplete() {
 		slog.Debug("assoc decay deferred: full-weight repair pass has not completed cleanly")
@@ -4354,8 +4363,17 @@ func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
 		if halfLife <= 0 {
 			// Decay is switched on but carries no rate. Skip rather than
 			// substitute a default: an unconfigured rate is not a licence to
-			// pick one (principle #1). WARN once so it is not silent.
+			// pick one (principle #1). WARN once so it is not silent — and
+			// truthfully: a legacy factor >= 1 gets its own message (it is
+			// NOT a reinterpretation; nothing was derived from it), distinct
+			// from the generic "no rate configured" case.
 			e.warnAssocDecayOnce(vaultName, func() {
+				if f := e.explicitLegacyAssocFactor(vaultName); f != nil && *f >= 1 {
+					slog.Warn("assoc decay enabled but legacy assoc_decay_factor >= 1 carries no rate (a per-pass multiplier of 1 never moved a weight); no half-life resolved, decay skipped for this vault",
+						"vault", vaultName, "assoc_decay_factor", *f,
+						"fix", "set plasticity assoc_half_life_days to enable decay, or assoc_decay_factor 0 to switch it off explicitly")
+					return
+				}
 				slog.Warn("assoc decay enabled but no half-life resolved; decay skipped for this vault",
 					"vault", vaultName, "fix", "set plasticity assoc_half_life_days")
 			})
@@ -4382,12 +4400,34 @@ func (e *Engine) warnAssocDecayOnce(vaultName string, fn func()) {
 	fn()
 }
 
+// explicitLegacyAssocFactor returns the vault's explicitly-configured
+// assoc_decay_factor when it is the operative rate source — i.e. set, with no
+// explicit half-life overriding it. Returns nil otherwise.
+func (e *Engine) explicitLegacyAssocFactor(vaultName string) *float32 {
+	cfg := e.VaultPlasticityConfig(vaultName)
+	if cfg == nil || cfg.AssocDecayFactor == nil {
+		return nil
+	}
+	if cfg.AssocHalfLifeDays != nil && *cfg.AssocHalfLifeDays != 0 {
+		return nil // explicit half-life wins; the factor is only a switch
+	}
+	return cfg.AssocDecayFactor
+}
+
 // warnLegacyAssocDecayFactor emits a one-time WARN per vault when a vault's
 // half-life was derived from a legacy explicit assoc_decay_factor rather than
 // configured directly. Degrade loudly, never silently-wrong (principle #2):
 // the factor's documented "per pass" meaning is gone, and the operator who set
 // it is told exactly what it now means and which field to set instead.
 func (e *Engine) warnLegacyAssocDecayFactor(vaultName string, resolved auth.ResolvedPlasticity) {
+	// "Checked" is tracked separately from "warned": the sweep calls this
+	// every ~60s per vault, and the config lookup below is a per-vault
+	// GetVaultConfig read. One check per vault per process is enough — a
+	// vault that did not need the WARN on first look never pays the read
+	// again (refute non-blocking finding 7).
+	if _, loaded := e.assocDecayLegacyChecked.LoadOrStore(vaultName, struct{}{}); loaded {
+		return
+	}
 	cfg := e.VaultPlasticityConfig(vaultName)
 	if cfg == nil || cfg.AssocDecayFactor == nil {
 		return

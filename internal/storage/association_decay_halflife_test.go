@@ -108,6 +108,106 @@ func TestDecayAssoc_NeverRaisesWeight(t *testing.T) {
 	}
 }
 
+// TestDecayAssoc_SubFloorStaleEdge_NotRaisedToFloor pins the refute finding
+// that the floor-clamp branch could RAISE a weight.
+//
+// An edge whose stored weight sits BELOW its dynamic floor (peak*0.05) is
+// reachable in production: the dream engine writes inferred weights through
+// UpdateAssocWeight (internal/consolidation/transitive.go), which preserves
+// the monotone peak — so peak 0.9 with weight 0.02 is a legal stored state.
+// With a stale anchor the ceiling drops under the floor, the drop-guard
+// passes (drop = 0.02 - ~0 > epsilon), newW lands under minWeight, and the
+// floor branch assigned e.newW = 0.045 — decay RAISING 0.02 to 0.045. Decay
+// must clamp downward or do nothing; it must never write an increase.
+func TestDecayAssoc_SubFloorStaleEdge_NotRaisedToFloor(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	ws := store.VaultPrefix("decay-subfloor-stale")
+
+	// Earn peak 0.9, then rewrite the weight down to 0.02 — below the dynamic
+	// floor 0.9*0.05 = 0.045. UpdateAssocWeight stamps lastActivated = now.
+	src, dst := seedDecayEdge(t, store, ws, 0.9, time.Now())
+	if err := store.UpdateAssocWeight(ctx, ws, src, dst, 0.02, 0); err != nil {
+		t.Fatalf("UpdateAssocWeight: %v", err)
+	}
+
+	// Stale anchor: evaluate 300 days after the stamp. ceiling ≈ 0.9*2^-10,
+	// far under both the stored weight and the floor.
+	store.decayNow = func() time.Time { return time.Now().Add(300 * 24 * time.Hour) }
+	if _, err := store.DecayAssocWeights(ctx, ws, 30*24*time.Hour, 0.05, 0.0); err != nil {
+		t.Fatalf("DecayAssocWeights: %v", err)
+	}
+
+	w, err := store.GetAssocWeight(ctx, ws, src, dst)
+	if err != nil {
+		t.Fatalf("GetAssocWeight: %v", err)
+	}
+	if float64(w) > 0.02+1e-6 {
+		t.Errorf("decay RAISED a sub-floor weight: got %v, want 0.02 unchanged (dynamic floor 0.045 must not resurrect)", w)
+	}
+	if float64(w) < 0.02-1e-6 {
+		t.Errorf("sub-floor weight changed: got %v, want 0.02 unchanged", w)
+	}
+}
+
+// TestDecayAssoc_FlooredEdge_NoRewriteChurn pins the write-churn half of the
+// same refute finding: an edge sitting AT its dynamic floor re-entered the
+// chunk on every pass — 5 keys rewritten and one batch replicated every ~65 s,
+// forever, per floored edge (the refuter measured 1429/2000 edges churning
+// every pass on a simulated post-#762 vault). After the first clamp to the
+// floor, subsequent passes must produce ZERO decay batches.
+func TestDecayAssoc_FlooredEdge_NoRewriteChurn(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	ws := store.VaultPrefix("decay-floor-churn")
+	t0 := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+
+	src, dst := seedDecayEdge(t, store, ws, 0.8, t0) // dynamic floor = 0.04
+
+	var batches int
+	store.repLogAppend = func(op uint8, key, value []byte) error {
+		batches++
+		return nil
+	}
+
+	// Pass 1, 300 days stale: legitimately clamps to the floor — one batch.
+	store.decayNow = func() time.Time { return t0.Add(300 * 24 * time.Hour) }
+	if _, err := store.DecayAssocWeights(ctx, ws, 30*24*time.Hour, 0.05, 0.0); err != nil {
+		t.Fatalf("DecayAssocWeights pass 1: %v", err)
+	}
+	if batches != 1 {
+		t.Fatalf("floor clamp should commit exactly one batch: got %d", batches)
+	}
+	w, err := store.GetAssocWeight(ctx, ws, src, dst)
+	if err != nil {
+		t.Fatalf("GetAssocWeight: %v", err)
+	}
+	if math.Abs(float64(w)-0.04) > 1e-6 {
+		t.Fatalf("pass 1 should clamp to the dynamic floor: got %v, want 0.04", w)
+	}
+
+	// Passes 2..21 at the real ~65 s cadence: the edge is already at its
+	// floor, the ceiling stays below it, and nothing may be rewritten.
+	batches = 0
+	for i := 1; i <= 20; i++ {
+		at := t0.Add(300*24*time.Hour + time.Duration(i)*65*time.Second)
+		store.decayNow = func() time.Time { return at }
+		if _, err := store.DecayAssocWeights(ctx, ws, 30*24*time.Hour, 0.05, 0.0); err != nil {
+			t.Fatalf("DecayAssocWeights pass %d: %v", i+1, err)
+		}
+	}
+	if batches != 0 {
+		t.Errorf("floored edge rewritten in %d of 20 passes — 5 keys + a replicated batch per pass, forever, want 0", batches)
+	}
+	w, err = store.GetAssocWeight(ctx, ws, src, dst)
+	if err != nil {
+		t.Fatalf("GetAssocWeight after churn passes: %v", err)
+	}
+	if math.Abs(float64(w)-0.04) > 1e-6 {
+		t.Errorf("floored edge moved during no-op passes: got %v, want 0.04", w)
+	}
+}
+
 // TestDecayAssoc_LegacyZeroLastActivated_Adopted covers the guard that keeps
 // the naive formula from destroying every legacy edge on the first pass.
 //
@@ -193,8 +293,10 @@ func TestDecayAssoc_HalfLifeMatchesTable(t *testing.T) {
 	}
 }
 
-// TestDecayAssoc_EpsilonSkipIsLossless proves the write-avoidance skip forgives
-// no decay, and bounds what it does cost.
+// TestDecayAssoc_EpsilonSkipLagIsBounded proves the write-avoidance skip
+// forgives no decay, and bounds what it does cost. The skip is NOT lossless —
+// the stored weight can sit up to epsilon above the true ceiling — but the
+// residual is a bounded lag, not accumulated error.
 //
 // The precise property — measured, not assumed. The design for #762 predicted
 // the stepped and single-pass arms would agree to 1e-6; they do not, and the
@@ -209,7 +311,7 @@ func TestDecayAssoc_HalfLifeMatchesTable(t *testing.T) {
 //
 // So: gap <= epsilon after 24 h of 65-second passes, and STILL <= epsilon after
 // 30 days of them — 40x the passes, same bound.
-func TestDecayAssoc_EpsilonSkipIsLossless(t *testing.T) {
+func TestDecayAssoc_EpsilonSkipLagIsBounded(t *testing.T) {
 	ctx := context.Background()
 	t0 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	const halfLife = 30 * 24 * time.Hour

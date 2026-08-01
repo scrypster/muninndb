@@ -550,6 +550,15 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		// to WARN once per vault; see AssocHalfLifeFromLegacyFactor.
 		if h, ok := AssocHalfLifeFromLegacyFactor(*cfg.AssocDecayFactor); ok {
 			r.AssocHalfLifeDays = h
+		} else if *cfg.AssocDecayFactor >= 1 {
+			// factor >= 1 is "switch on, weights never move" — it carries no
+			// rate to convert. Resolve half-life 0 so the decay sweep skips
+			// with a WARN, instead of falling through to the preset's rate:
+			// running the preset's 30-day half-life against an explicit 1.0
+			// substitutes a rate the operator declined (principle #1).
+			// (factor <= 0 falls through untouched: the COG-16 switch is off,
+			// so the preset half-life is inert and stays for display.)
+			r.AssocHalfLifeDays = 0
 		}
 	}
 	if cfg.AssocMinWeight != nil {

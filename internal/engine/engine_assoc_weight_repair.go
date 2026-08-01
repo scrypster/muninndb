@@ -30,9 +30,13 @@ const assocWeightRepairVersion uint8 = 1
 //
 // The startup delay is deliberately SHORT — much shorter than the #681 evolve
 // repair's 60s, which mirrors runPruneWorker. This repair is racing that very
-// worker: the first DecayAssocWeights pass over an unrepaired vault destroys
-// the disambiguator the repair depends on (see the storage docstring), and the
-// prune worker's first tick is at 60s+jitter. The delay is a courtesy to HNSW
+// worker: a DecayAssocWeights pass over an unrepaired vault can destroy the
+// disambiguator the repair depends on, and the prune worker's first tick is at
+// 60s+jitter. Post-#762 the destruction path is narrower than it was — decay's
+// drop guard skips a weight-0 key outright rather than deleting or clamping it
+// — but the adoption path (a pre-fix key with no lastActivated/createdAt
+// anchor) still stamps the edge, rewriting its keys and setting the 0x14 index
+// to 0.0 over the weight-1.0 evidence (see decayAllVaults). The gate stays. The delay is a courtesy to HNSW
 // load, not the safety mechanism; the safety mechanism is runPruneWorker's
 // hard gate on assocWeightRepairDone, which makes "decay ran before the repair"
 // an ordering rather than a race between two startup timers.

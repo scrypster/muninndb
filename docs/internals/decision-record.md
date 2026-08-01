@@ -257,15 +257,26 @@ Three things this settles beyond the immediate bug:
 
 - **A rate needs a unit.** `assoc_decay_factor` was kept as the enable/disable switch (COG-16
   unchanged, `scratchpad`'s 0 still disables with no special case) and the rate moved to
-  `assoc_half_life_days`. An explicit legacy factor is reinterpreted **per-day** with a
-  one-time WARN naming the derived half-life — because "per pass" was never a meaning, only
-  a number, and preserving the observed behaviour would mean preserving the bug.
-- **Prefer the clamp you cannot write around.** "Decay never raises a weight" is one guard
-  (`drop = w_old − ceiling`, write nothing unless `drop ≥ ε`), not a policy comment — there
-  is no branch that could assign an increase (principle #3). The first draft had the `min`
-  and the epsilon skip as separate expressions of the same clamp; deleting the `min` left
-  the test suite green, because the epsilon check silently covered for it. A guard whose
-  removal nothing notices is not a guard.
+  `assoc_half_life_days`. An explicit legacy factor in (0,1) is reinterpreted **per-day**
+  with a one-time WARN naming the derived half-life — because "per pass" was never a
+  meaning, only a number, and preserving the observed behaviour would mean preserving the
+  bug. An explicit factor ≥ 1 carries no rate at all ("on, but weights never move"): it
+  resolves half-life 0 and decay skips with its own truthful WARN — falling through to the
+  preset's 30 days would run decay at a rate the operator explicitly declined and log a
+  "derived" value that was never derived.
+- **Prefer the clamp you cannot write around.** "Decay never raises a weight" is a pair of
+  guards, not a policy comment (principle #3): the drop guard (`drop = w_old − ceiling`,
+  write nothing unless `drop ≥ ε`) covers every path where the ceiling is the new weight,
+  and a post-floor guard (`newW ≥ oldW` after the floor/archive block ⇒ no write) covers
+  the floor branch, which assigns `dynamicFloor` and — the adversarial refute proved it
+  with an executable test — could raise a sub-floor weight (0.02 → 0.045) and rewrite a
+  floored edge's 5 keys every pass forever. The first draft claimed the drop guard alone
+  made an increase unrepresentable; it did not, because the floor branch runs after it.
+  Two earlier lessons repeat here: the first draft also had the `min` and the epsilon skip
+  as separate expressions of the same clamp, and deleting the `min` left the test suite
+  green because the epsilon check silently covered for it. A guard whose removal nothing
+  notices is not a guard — and a claim of "no branch can do X" is only as good as the last
+  branch added below it.
 - **The damage is not retroactively repaired, on purpose.** Edges already at the floor stay
   there and re-learn through Hebbian growth. A one-shot re-anchoring pass (`w ← ceiling` for
   floored edges with co-activations) would fabricate weights that were never earned. Left as

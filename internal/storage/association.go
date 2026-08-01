@@ -525,11 +525,14 @@ const assocDecayChunkSize = 10_000
 // scale, NOT a behavioural threshold. An edge whose computed ceiling is within
 // epsilon of its stored weight is left untouched this pass.
 //
-// The skip is lossless because the ceiling is absolute rather than compounded:
-// a pass that skips an edge loses nothing, because the next pass recomputes the
-// ceiling from lastActivated regardless of how many passes were skipped. Under
-// the old per-pass multiplier the same skip would have permanently forgiven a
-// pass's worth of decay.
+// The skip's cost is a BOUNDED LAG, not accumulated error: the stored weight
+// may sit up to epsilon above the true ceiling between writes, but the
+// residual never grows with the number of skipped passes, because the ceiling
+// is absolute rather than compounded — every pass recomputes it from
+// lastActivated regardless of how many passes were skipped. Under the old
+// per-pass multiplier the same skip would have permanently forgiven a pass's
+// worth of decay. Measured by TestDecayAssoc_EpsilonSkipLagIsBounded: gap
+// <= epsilon after both 1,329 and 39,876 skipped passes.
 const assocDecayWriteEpsilon = 0.001
 
 // DecayAssocWeights applies time-normalized decay to every association under
@@ -722,18 +725,21 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 
 		ceiling := float64(peakWeight) * math.Exp2(-elapsed.Seconds()/halfLifeSeconds)
 
-		// drop is how far this pass would move the weight DOWN. One guard does
-		// two jobs, deliberately (principle #3 — make the bad state
-		// unrepresentable rather than policy-checked):
+		// drop is how far this pass would move the weight DOWN. This guard
+		// does two jobs:
 		//
 		//   drop <= 0      the ceiling sits at or above the stored weight, so
-		//                  there is nothing to do. This is what makes "decay
-		//                  never raises a weight" structural: there is no
-		//                  branch that could assign an increase.
-		//   0 < drop < eps lossless write-avoidance. The ceiling is absolute,
-		//                  so skipping the write forgives no decay — the next
-		//                  pass recomputes from the same anchor. Collapses
-		//                  steady-state decay write volume by ~99%.
+		//                  there is nothing to do.
+		//   0 < drop < eps bounded-lag write-avoidance. The ceiling is
+		//                  absolute, so skipping the write forgives no decay —
+		//                  the next pass recomputes from the same anchor.
+		//                  Collapses steady-state decay write volume by ~99%.
+		//
+		// This guard alone is NOT what makes "decay never raises a weight"
+		// structural: the floor branch below ASSIGNS e.newW = dynamicFloor,
+		// which can exceed the stored weight. The post-floor newW >= oldW
+		// guard before append is the second half of the invariant — together
+		// they leave no path that can write an increase (principle #3).
 		drop := oldW - float32(ceiling)
 		if float64(drop) < assocDecayWriteEpsilon {
 			continue
@@ -767,6 +773,20 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 				removed++
 			}
 		} // else: newW >= minWeight, standard keep
+
+		// Second half of the never-raises invariant, and the churn guard. The
+		// floor branch above ASSIGNS e.newW = dynamicFloor, which the drop
+		// guard cannot see: a stored weight below the floor (dream-engine
+		// inferred weights write through UpdateAssocWeight with a monotone
+		// peak) would be RAISED to it, and an edge already at the floor would
+		// be rewritten — 5 keys plus a replicated batch — every pass, forever.
+		// Placement is load-bearing: this must sit AFTER the floor/archive
+		// block (the epsilon guard runs before e.newW can be floored) and must
+		// exclude archive promotion and the dynamicFloor==0 delete path, which
+		// act without lowering the weight.
+		if !e.archive && !e.remove && e.newW >= e.oldW {
+			continue
+		}
 		chunk = append(chunk, e)
 
 		if len(chunk) >= assocDecayChunkSize {

@@ -142,6 +142,60 @@ func TestDecayAllVaults_ExplicitHalfLifeDoesNotWarn(t *testing.T) {
 	}
 }
 
+// TestDecayAllVaults_LegacyFactorAtOne_SkipsWithoutSubstitutedRate pins the
+// refute finding on assoc_decay_factor >= 1: an operator's explicit 1.0 —
+// documented per-pass semantics "on, but weights never move" — used to fall
+// through to the preset's 30-day half-life. Decay then RAN at a rate the
+// operator explicitly declined, and the legacy WARN claimed
+// derived_half_life_days=30, a value that was NOT derived from the factor.
+// factor >= 1 must resolve half-life 0 and hit the skip-with-WARN path.
+func TestDecayAllVaults_LegacyFactorAtOne_SkipsWithoutSubstitutedRate(t *testing.T) {
+	_, as, store, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+
+	const vaultName = "legacy-factor-one-vault"
+	if err := store.WriteVaultName(store.VaultPrefix(vaultName), vaultName); err != nil {
+		t.Fatalf("WriteVaultName: %v", err)
+	}
+	// Default preset (Hebbian on, half-life 30 in the preset table) + an
+	// explicit legacy factor of exactly 1.0. The preset's rate must NOT leak in.
+	if err := as.SetVaultConfig(auth.VaultConfig{
+		Name:       vaultName,
+		Public:     true,
+		Plasticity: &auth.PlasticityConfig{AssocDecayFactor: f32(1.0)},
+	}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+
+	buf := captureWarn(t)
+	e := decayConfigEngine(t, store, as)
+	calls := 0
+	e.decayAssocWeightsFn = func(_ context.Context, _ [8]byte, halfLife time.Duration, _ float32, _ float64) (int, error) {
+		calls++
+		t.Errorf("decay ran with halfLife %v for an explicit factor of 1.0 — a rate was silently substituted", halfLife)
+		return 0, nil
+	}
+	for i := 0; i < 3; i++ {
+		e.decayAllVaults(e.stopCtx, []string{vaultName})
+	}
+
+	if calls != 0 {
+		t.Errorf("decay ran %d times for factor 1.0, want 0 (skip)", calls)
+	}
+	got := buf.String()
+	// Must NOT claim a reinterpretation: nothing was derived from factor 1.0.
+	if strings.Contains(got, "reinterpreted") || strings.Contains(got, "derived_half_life_days") {
+		t.Errorf("WARN claims a derivation that never happened:\n%s", got)
+	}
+	// Must WARN once, truthfully: switch on, no rate, decay skipped.
+	if n := strings.Count(got, "no half-life resolved"); n != 1 {
+		t.Errorf("skip WARN fired %d times over 3 passes, want exactly 1\n%s", n, got)
+	}
+	if !strings.Contains(got, "carries no rate") {
+		t.Errorf("skip WARN must name the factor >= 1 cause so the operator can act on it; got:\n%s", got)
+	}
+}
+
 // Decay switched on with no resolvable rate must SKIP and WARN, never
 // substitute a default half-life. An unconfigured rate is not a licence to pick
 // one (principle #1) — the operator gets told, not guessed at.
