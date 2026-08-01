@@ -3,6 +3,8 @@ package replication
 import (
 	"context"
 	"encoding/binary"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1065,4 +1067,85 @@ func TestReplicationLog_Prune_ReportsCount(t *testing.T) {
 	if n, err = log.Prune(4); err != nil || n != 0 {
 		t.Fatalf("second Prune = (%d, %v), want (0, nil)", n, err)
 	}
+}
+
+// Pruning writes tombstones; the bytes only come back when a compaction
+// rewrites the sstables holding them. In production, pruning 104k entries
+// reclaimed nothing — the store sat at 20 GB until a compaction was forced by
+// hand. Prune must therefore compact the range it just deleted.
+func TestReplicationLog_Prune_ReclaimsDiskSpace(t *testing.T) {
+	dir := t.TempDir()
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	defer db.Close()
+
+	log := NewReplicationLog(db)
+	// Payloads big enough that reclaimed space is unambiguous on disk.
+	value := make([]byte, 64*1024)
+	for i := range value {
+		value[i] = byte(i % 251)
+	}
+	for i := 1; i <= 400; i++ {
+		if _, err := log.Append(OpSet, []byte("k"), value); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	before := dirSize(t, dir)
+
+	pruned, err := log.Prune(350)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if pruned != 350 {
+		t.Fatalf("pruned = %d, want 350", pruned)
+	}
+
+	after := dirSize(t, dir)
+	// 350 of 400 entries at 64 KiB is ~22 MiB; require most of it back rather
+	// than an exact figure, since sstable boundaries are not key-aligned.
+	if after >= before/2 {
+		t.Fatalf("prune did not reclaim disk: before=%d after=%d bytes "+
+			"(tombstones were written but never compacted)", before, after)
+	}
+
+	// The surviving entries must still be readable.
+	entries, err := log.ReadSince(350, 100)
+	if err != nil {
+		t.Fatalf("ReadSince after prune: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("entries above the watermark were lost")
+	}
+}
+
+// sstSize sums only sstable bytes. The Pebble WAL still holds every append
+// until it is recycled, so including it would mask what a compaction actually
+// reclaims from the tables.
+func dirSize(t *testing.T, dir string) int64 {
+	t.Helper()
+	var total int64
+	err := filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		// Compaction removes sstables while we walk — a vanished file is
+		// evidence the compaction ran, not an error.
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && filepath.Ext(info.Name()) == ".sst" {
+			total += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	return total
 }

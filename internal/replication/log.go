@@ -284,6 +284,32 @@ func (l *ReplicationLog) Prune(untilSeq uint64) (int, error) {
 		deleted += end - start
 	}
 
+	// Reclaim the space now. Pebble deletes are tombstones — the bytes come
+	// back only when a compaction rewrites the sstables holding them, and with
+	// the default single compaction slot a large backlog can sit on disk for
+	// hours or days. In production, pruning 104k entries reclaimed nothing
+	// until a compaction was forced by hand: the store stayed at 20 GB.
+	//
+	// Compact only the range that was just pruned, not the whole keyspace, so
+	// this stays proportional to the work done and does not disturb unrelated
+	// key ranges. Pebble's Compact is an online operation — the database keeps
+	// serving.
+	//
+	// A compaction failure is not a prune failure: the entries are gone either
+	// way and the next cycle will try again, so this logs rather than returns.
+	if deleted > 0 {
+		// Flush first: the tombstones are still in the memtable, and a
+		// compaction of the on-disk sstables cannot drop keys whose deletes it
+		// cannot see. Without this the compaction reclaims almost nothing.
+		if err := l.db.Flush(); err != nil {
+			slog.Warn("replication log: flush before compaction failed", "err", err)
+		}
+		if err := l.db.Compact(replicationEntryKey(1), replicationEntryKey(untilSeq+1), true); err != nil {
+			slog.Warn("replication log: compaction after prune failed — space will be"+
+				" reclaimed by a later compaction", "err", err, "pruned", deleted)
+		}
+	}
+
 	return deleted, nil
 }
 
