@@ -1297,9 +1297,9 @@ func TestPhase4_75_ArchiveRestoreRunsDuringActivation(t *testing.T) {
 		t.Fatalf("WriteEngram B: %v", err)
 	}
 
-	// Write A → B association with LastActivated=0 so DecayAssocWeights does
-	// not skip it via the recent-activation grace window (the guard fires only
-	// when lastActivated > 0 and within the grace period).
+	// Write A → B association with LastActivated=0 and a 30-day-old CreatedAt.
+	// Since #762 an unknown lastActivated falls back to createdAt rather than
+	// being read as the Unix epoch, so this edge has 30 days of elapsed time.
 	err = pstore.WriteAssociation(ctx, ws, engramA.ID, engramB.ID, &storage.Association{
 		TargetID:   engramB.ID,
 		Weight:     0.5,
@@ -1319,11 +1319,11 @@ func TestPhase4_75_ArchiveRestoreRunsDuringActivation(t *testing.T) {
 	}
 
 	// Trigger archiving via DecayAssocWeights:
-	//   decayFactor = 0.001 → newW = 0.5 * 0.001 = 0.0005 < minWeight(0.01)
-	//   consolidationScore = peakWeight(0.5) * coActCount(1) / daysSince(~20000)
-	//                      ≈ 0.000025
-	//   archiveThreshold = 0.000001 < 0.000025 → archive condition is satisfied.
-	_, err = pstore.DecayAssocWeights(ctx, ws, 0.001, 0.01, 0.000001)
+	//   H = 1 day, dt = 30 days → ceiling ≈ 0 < minWeight(0.01)
+	//   consolidationScore = peakWeight(0.5) * coActCount(1) / daysSince(30)
+	//                      ≈ 0.0167
+	//   archiveThreshold = 0.000001 < 0.0167 → archive condition is satisfied.
+	_, err = pstore.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.01, 0.000001)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}

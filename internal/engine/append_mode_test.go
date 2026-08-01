@@ -44,7 +44,8 @@ var appendReadOnly = map[string]bool{
 	"GetProcessorStats": true, "GetProvenance": true, "GetVaultEmbedDim": true, "GetVaultJob": true,
 	"Hello": true, "ListDeleted": true, "ListEngrams": true, "ListEntities": true, "ListVaults": true,
 	"Read": true, "RecallTree": true, "ReevaluatePushOnEmbed": true, "ResolveVaultPlasticity": true,
-	"Session": true, "SessionPaged": true, "Stat": true, "Subscribe": true, "SubscribeWithDeliver": true,
+	"VaultPlasticityConfig": true,
+	"Session":               true, "SessionPaged": true, "Stat": true, "Subscribe": true, "SubscribeWithDeliver": true,
 	"Traverse": true, "Unsubscribe": true, "VaultNameExists": true, "WhereLeftOff": true, "WorkerStats": true,
 	// NoticesFor* are read/query surfaces with ONE recorded residual write: on
 	// delivery they bump the fired-marker (FiredCount/LastFiredAt; a one-shot

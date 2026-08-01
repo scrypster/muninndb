@@ -521,15 +521,42 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 
 const assocDecayChunkSize = 10_000
 
-// assocDecayGraceWindow is the minimum time since lastActivated before an
-// association is eligible for weight decay. Edges activated within this window
-// are skipped on the decay pass, protecting recently-used associations from
-// being penalized by the next scheduled consolidation run.
-// TODO: make this configurable per vault via PlasticityConfig.
-const assocDecayGraceWindow = 5 * time.Minute
+// assocDecayWriteEpsilon is a write-avoidance quantum on the [0,1] weight
+// scale, NOT a behavioural threshold. An edge whose computed ceiling is within
+// epsilon of its stored weight is left untouched this pass.
+//
+// The skip is lossless because the ceiling is absolute rather than compounded:
+// a pass that skips an edge loses nothing, because the next pass recomputes the
+// ceiling from lastActivated regardless of how many passes were skipped. Under
+// the old per-pass multiplier the same skip would have permanently forgiven a
+// pass's worth of decay.
+const assocDecayWriteEpsilon = 0.001
 
-// DecayAssocWeights multiplies all association weights for wsPrefix by decayFactor,
-// deleting entries that fall below minWeight. Returns count of deleted entries.
+// DecayAssocWeights applies time-normalized decay to every association under
+// wsPrefix. Returns count of deleted entries.
+//
+// The mechanism (COG-27) is a peak-anchored elapsed-time ceiling:
+//
+//	dt      = max(0, now - lastActivated)
+//	ceiling = max(peakWeight*0.05, peakWeight * 2^(-dt/halfLife))
+//	w_new   = min(w_old, ceiling)
+//
+// Both inputs already live in the 26-byte association value, so there is no
+// value-format change and no new Pebble prefix.
+//
+// Two properties follow, and they are the entire point of the shape:
+//
+//   - Cadence-independence. With no intervening activation the ceiling is
+//     monotone decreasing in t, so the running minimum over ANY grid of
+//     evaluation times equals the ceiling at the final time. Sixty one-minute
+//     passes and one sixty-minute pass are bit-identical. Before this, the unit
+//     of decay was "one prune-worker tick" — an interval owned by an unrelated
+//     engram sweep — which made the configured rate a function of the worker's
+//     cadence and ground every edge to the floor within the hour (#762).
+//   - It never raises a weight. Decay only ever clamps downward, so a weight
+//     written below the peak curve by another writer (the dream engine's
+//     inferred weights) is never silently undone, and edges already sitting at
+//     the #762 floor are not resurrected for free.
 //
 // When archiveThreshold > 0 and an edge hits the dynamic floor AND its
 // consolidation score (peakWeight * coActivationCount / daysSinceLastActivated)
@@ -539,7 +566,14 @@ const assocDecayGraceWindow = 5 * time.Minute
 // Processes in chunks of assocDecayChunkSize to bound memory usage.
 // The Pebble iterator sees a consistent snapshot (created before any mutations),
 // so chunked commits are safe: each original key is visited exactly once.
-func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error) {
+func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error) {
+	if halfLife <= 0 {
+		return 0, fmt.Errorf("decay assoc: halfLife must be positive, got %v", halfLife)
+	}
+	// One clock read for the whole pass: every edge is evaluated against the
+	// same instant, so a long scan cannot decay its tail more than its head.
+	now := ps.now()
+	halfLifeSeconds := halfLife.Seconds()
 	// Build scan prefix: 0x03 | wsPrefix (9 bytes).
 	scanPrefix := make([]byte, 9)
 	scanPrefix[0] = prefix.AssocFwd
@@ -629,16 +663,6 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		// Decode existing metadata from the value bytes before extracting key fields.
 		relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, _ := decodeAssocValue(iter.Value())
 
-		// Recency skip: associations activated within the grace window are not decayed.
-		// Window must be > a few seconds (to protect edges just activated) but
-		// < 30 minutes (so edges activated 30 min ago are still eligible for decay).
-		if lastActivated > 0 {
-			activatedAt := time.Unix(int64(lastActivated), 0)
-			if ps.now().Sub(activatedAt) < assocDecayGraceWindow {
-				continue // skip — recently used, leave key untouched
-			}
-		}
-
 		var src, dst [16]byte
 		copy(src[:], key[9:25])
 		var wc [4]byte
@@ -646,7 +670,6 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 		copy(dst[:], key[29:45])
 
 		oldW := keys.WeightFromComplement(wc)
-		newW := float32(float64(oldW) * decayFactor)
 
 		// Bootstrap legacy peakWeight from current weight (pre-upgrade associations have peakWeight=0).
 		// This runs before decay so oldW is the pre-decay weight — a good conservative peak estimate.
@@ -654,17 +677,75 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 			peakWeight = oldW
 		}
 
+		// Anchor the elapsed-time clock. lastActivated == 0 means "unknown", NOT
+		// "the Unix epoch" — reading it as an epoch timestamp would hand the
+		// formula a 56-year elapsed time and floor every legacy edge on the
+		// first pass. Fall back to createdAt; if that is unknown too, adopt the
+		// edge by stamping lastActivated = now and leaving its weight alone.
+		adopt := false
+		anchor := lastActivated
+		if anchor == 0 {
+			if !createdAt.IsZero() {
+				anchor = int32(createdAt.Unix())
+			} else {
+				adopt = true
+			}
+		}
+
 		e := assocEntry{
-			src: src, dst: dst, oldW: oldW, newW: newW,
+			src: src, dst: dst, oldW: oldW, newW: oldW,
 			relType: relType, confidence: confidence,
 			createdAt: createdAt, lastActivated: lastActivated,
 			peakWeight: peakWeight, coActivationCount: coActivationCount,
 		}
+
+		if adopt {
+			// Stamp the anchor so this edge decays normally from now on; weight
+			// untouched this pass. Written unconditionally (no epsilon skip) —
+			// the point of the pass is the stamp, not the weight.
+			e.lastActivated = int32(now.Unix())
+			chunk = append(chunk, e)
+			if len(chunk) >= assocDecayChunkSize {
+				if err := flushChunk(); err != nil {
+					return removed, err
+				}
+			}
+			continue
+		}
+
+		// Negative elapsed (backwards clock skew, or a future lastActivated
+		// stamp) clamps to zero: never decay, and never boost either.
+		elapsed := now.Sub(time.Unix(int64(anchor), 0))
+		if elapsed < 0 {
+			elapsed = 0
+		}
+
+		ceiling := float64(peakWeight) * math.Exp2(-elapsed.Seconds()/halfLifeSeconds)
+
+		// drop is how far this pass would move the weight DOWN. One guard does
+		// two jobs, deliberately (principle #3 — make the bad state
+		// unrepresentable rather than policy-checked):
+		//
+		//   drop <= 0      the ceiling sits at or above the stored weight, so
+		//                  there is nothing to do. This is what makes "decay
+		//                  never raises a weight" structural: there is no
+		//                  branch that could assign an increase.
+		//   0 < drop < eps lossless write-avoidance. The ceiling is absolute,
+		//                  so skipping the write forgives no decay — the next
+		//                  pass recomputes from the same anchor. Collapses
+		//                  steady-state decay write volume by ~99%.
+		drop := oldW - float32(ceiling)
+		if float64(drop) < assocDecayWriteEpsilon {
+			continue
+		}
+		newW := oldW - drop
+		e.newW = newW
+
 		if newW < minWeight {
 			dynamicFloor := peakWeight * 0.05
 			if dynamicFloor > 0 && archiveThreshold > 0 {
 				// Compute consolidation score to decide archive vs clamp.
-				daysSince := ps.now().Sub(time.Unix(int64(lastActivated), 0)).Hours() / 24.0
+				daysSince := now.Sub(time.Unix(int64(anchor), 0)).Hours() / 24.0
 				if daysSince < 1.0 {
 					daysSince = 1.0
 				}

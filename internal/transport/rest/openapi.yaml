@@ -1049,6 +1049,14 @@ components:
           type: number
           format: float
           nullable: true
+        assoc_half_life_days:
+          type: number
+          format: float
+          nullable: true
+          description: >-
+            Wall-clock half-life of an unused association edge, in days.
+            Clamped to [0.5, 3650]; 0 or null means "use the preset value"
+            (30 for default/reference/working, 90 for knowledge-graph).
         traversal_profile:
           type: string
           nullable: true

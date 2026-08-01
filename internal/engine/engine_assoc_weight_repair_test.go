@@ -228,7 +228,7 @@ func TestDecayAllVaults_GateSuppressesDecayCalls(t *testing.T) {
 
 	e := bareRepairEngine(t, store)
 	calls := 0
-	e.decayAssocWeightsFn = func(context.Context, [8]byte, float64, float32, float64) (int, error) {
+	e.decayAssocWeightsFn = func(context.Context, [8]byte, time.Duration, float32, float64) (int, error) {
 		calls++
 		return 0, nil
 	}
@@ -277,7 +277,7 @@ func TestAssocWeightRepairGate_StaysShutWhenPassErrors(t *testing.T) {
 	require.Zero(t, mark, "a failed pass must not claim the vault is repaired")
 
 	calls := 0
-	e.decayAssocWeightsFn = func(context.Context, [8]byte, float64, float32, float64) (int, error) {
+	e.decayAssocWeightsFn = func(context.Context, [8]byte, time.Duration, float32, float64) (int, error) {
 		calls++
 		return 0, nil
 	}
@@ -309,7 +309,7 @@ func TestAssocWeightRepairGate_OpensOnCleanPass(t *testing.T) {
 	require.Equal(t, assocWeightRepairVersion, mark)
 
 	calls := 0
-	e.decayAssocWeightsFn = func(context.Context, [8]byte, float64, float32, float64) (int, error) {
+	e.decayAssocWeightsFn = func(context.Context, [8]byte, time.Duration, float32, float64) (int, error) {
 		calls++
 		return 0, nil
 	}

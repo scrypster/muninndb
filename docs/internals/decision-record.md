@@ -229,3 +229,49 @@ vault's OWN data (self-calibrating — #711 weights IDF from the vault's own cor
 floor should self-measure each vault's anisotropy baseline over its own embeddings) or exposes a
 per-vault override; model/cold-start defaults are hints, never fixed law. Ship mechanisms and
 hints, not other people's answers.**
+
+### A config value must denominate a unit someone can reason about (assoc decay / #762, 2026-08-01)
+
+Association decay was `w ← w × AssocDecayFactor`, applied "once per prune pass" at 0.95.
+Nobody ever wrote down what a pass was. The git history says why: `runPruneWorker` and its
+60 s period arrived in `e51b985` as an *engram* sweep, where 60 s is a responsiveness
+choice; `79605b2` bolted association decay into the same loop the next day and edited only
+the doc comment. So the unit of decay became an interval owned by an unrelated worker —
+1329 passes/day, a 14.6-minute half-life, `0.95^1329 ≈ 2.4e-30` per day. The observable in
+#762 was the store-wide **maximum** association weight sitting at 0.05, the pruning floor.
+"Fades when unused" was implemented as "fades unless used every five minutes," and the
+5-minute grace window turned the curve into a cliff. Reinforcement could not compete:
+holding one edge flat needed ~6,850 signal units/day, roughly 20–70 co-retrievals per
+minute forever.
+
+The fix decays against **elapsed wall-clock time from state the edge already carries**:
+`w_new = min(w_old, max(peak·0.05, peak·2^(−Δt/H)))`, `Δt = now − lastActivated` (COG-27).
+Both inputs were already in the 26-byte association value, so it cost no keyspace entry, no
+value-format change, and no migration — which is why this shape won over the obvious
+alternative (`w ← w·f^(elapsed/interval)` with a persisted per-vault last-decay watermark).
+That alternative needed a new Pebble prefix, a Tier-3 keyspace review, `ClearVault`
+plumbing, a downtime-debt cap, and per-node watermarks that never converge — and it stays
+path-dependent, so #760 gets worse rather than better.
+
+Three things this settles beyond the immediate bug:
+
+- **A rate needs a unit.** `assoc_decay_factor` was kept as the enable/disable switch (COG-16
+  unchanged, `scratchpad`'s 0 still disables with no special case) and the rate moved to
+  `assoc_half_life_days`. An explicit legacy factor is reinterpreted **per-day** with a
+  one-time WARN naming the derived half-life — because "per pass" was never a meaning, only
+  a number, and preserving the observed behaviour would mean preserving the bug.
+- **Prefer the clamp you cannot write around.** "Decay never raises a weight" is one guard
+  (`drop = w_old − ceiling`, write nothing unless `drop ≥ ε`), not a policy comment — there
+  is no branch that could assign an increase (principle #3). The first draft had the `min`
+  and the epsilon skip as separate expressions of the same clamp; deleting the `min` left
+  the test suite green, because the epsilon check silently covered for it. A guard whose
+  removal nothing notices is not a guard.
+- **The damage is not retroactively repaired, on purpose.** Edges already at the floor stay
+  there and re-learn through Hebbian growth. A one-shot re-anchoring pass (`w ← ceiling` for
+  floored edges with co-activations) would fabricate weights that were never earned. Left as
+  a separate, opt-in decision, not shipped by default.
+
+**Principle: a configuration value must denominate a unit the operator can reason about. If
+the unit is an implementation detail of an unrelated component, the value is not a setting —
+it is a coincidence, and changing that component silently changes the behaviour of the
+system.**
