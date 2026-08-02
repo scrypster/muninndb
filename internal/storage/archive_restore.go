@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"math"
@@ -215,7 +216,25 @@ func (ps *PebbleStore) reapArchivedEdgesFrom(ws [8]byte, srcID [16]byte) error {
 	defer batch.Close()
 	n := 0
 	for valid := iter.First(); valid; valid = iter.Next() {
-		_ = batch.Delete(append([]byte{}, iter.Key()...), nil)
+		k := iter.Key()
+		// STO-11. keys.PrefixUpperBound is LOOSE — it increments the first
+		// sub-0xFF byte from the right and returns without zeroing the trailing
+		// 0xFF bytes — so for a 25-byte kind|ws|src prefix whose last byte is
+		// 0xFF the bound admits keys belonging to the NEXT source id. This loop
+		// deletes what the iterator returns, so the explicit prefix check is
+		// what keeps it inside its own keyspace; without it an ordinary recall
+		// of one hard-deleted source deletes a LIVE engram's archive rows.
+		// Fixing the shared helper is #816. Pinned by
+		// TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
+		//
+		// break, not continue: the iterator starts at exactly this prefix and
+		// returns keys in order, so the first key that does not carry it is
+		// already past it — a key shorter than 25 bytes can only sort at or
+		// above the prefix by differing (greater) within its own length.
+		if len(k) < 25 || !bytes.Equal(k[:25], prefix) {
+			break
+		}
+		_ = batch.Delete(append([]byte{}, k...), nil)
 		n++
 	}
 	_ = iter.Close()

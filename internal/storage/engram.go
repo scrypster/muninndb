@@ -566,18 +566,34 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// silently skipped them and the edges outlived their endpoint permanently
 	// (nothing else reaps them: DecayAssocWeights never reads 0x01).
 	//
-	// keys.PrefixUpperBound is LOOSE in the other direction and the explicit
-	// bytes.Equal(k[:25], prefix) break below is therefore LOAD-BEARING, not
-	// belt-and-braces: it increments the first sub-0xFF byte from the right and
-	// returns without zeroing the trailing 0xFF bytes, so for a prefix ending in
-	// 0xFF (~1 engram ID in 256) the bound spans into the NEXT engram's
-	// association keyspace. On a delete path that is data loss, not a wasted
-	// scan. Fixing PrefixUpperBound is its own increment (it is mandated by
-	// STO-11 and has several callers); until then the guard is what makes this
-	// correct. It is also why these two loops must keep SeekGE and must NOT be
-	// converted to PrefixIterator, whose First/Valid shape changes the
-	// break-vs-continue semantics on short keys. Pinned by
-	// TestSTO12_DeleteEngramCascadeStaysInsideItsOwnPrefix.
+	// keys.PrefixUpperBound is LOOSE in the other direction: it increments the
+	// first sub-0xFF byte from the right and returns without zeroing the
+	// trailing 0xFF bytes, so for a prefix whose last byte is 0xFF (~1 engram ID
+	// in 256) the bound spans into the NEXT engram's association keyspace. The
+	// explicit bytes.Equal(k[:25], prefix) break below is what keeps the loop
+	// inside its own prefix.
+	//
+	// Reachability, stated accurately — this is STRUCTURAL HYGIENE, not a live
+	// data-loss report. ~1 in 256 is the rate at which the BOUND IS LOOSE, not
+	// the rate at which anything is lost. To land inside the widened band a
+	// second engram must share the victim's first 14 ID bytes: the whole 48-bit
+	// ULID millisecond timestamp AND 8 of the 10 crypto-random entropy bytes,
+	// i.e. ~2^-64 on top of a same-millisecond collision. With ULID-shaped keys
+	// that is not operationally reachable, and the test below has to CONSTRUCT
+	// its IDs to reproduce it.
+	//
+	// The guard stays, and stays uniform across all four destructive 25-byte
+	// scans, because the mandated shared helper's contract is wrong and the
+	// compensation is a per-key check at each call site — so any future
+	// non-ULID ID tail (a counter, a truncated hash, a content-addressed key)
+	// collapses that 64-bit gap to zero the day it lands, silently, on a delete
+	// path. Fixing PrefixUpperBound itself is #816.
+	//
+	// It is also why these two loops must keep SeekGE and must NOT be converted
+	// to PrefixIterator, whose First/Valid shape changes the break-vs-continue
+	// semantics on short keys. Pinned by
+	// TestSTO12_DeleteEngramCascadeStaysInsideItsOwnPrefix and, across all four
+	// scans, TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
 	fwdPrefix := keys.AssocFwdPrefixForID(wsPrefix, [16]byte(id))
 	fwdIter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: fwdPrefix,
@@ -656,10 +672,27 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	//
 	// Key: 0x25 | ws(8) | src(16) | dst(16) = 41 bytes.
 	// As source: a bounded prefix scan.
+	//
+	// STO-11, the same guard and for the same reason as the 0x03/0x04 loops
+	// above. This prefix is byte-for-byte the same 25-byte kind|ws|id shape, and
+	// PrefixIterator's own bound computation (internal/storage/pebble.go) is the
+	// byte-identical loose one: increment the first sub-0xFF byte from the right,
+	// break, never zero the trailing 0xFF bytes. Unguarded, this loop deletes
+	// whatever the widened bound admits from the NEXT id's archive keyspace.
+	// Pinned by TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
 	archSrcPrefix := keys.ArchiveAssocPrefixForID(wsPrefix, [16]byte(id))
 	if archSrcIter, aErr := PrefixIterator(ps.db, archSrcPrefix); aErr == nil {
 		for archSrcIter.First(); archSrcIter.Valid(); archSrcIter.Next() {
-			batch.Delete(append([]byte{}, archSrcIter.Key()...), nil)
+			k := archSrcIter.Key()
+			// break, not continue: keys are returned in order from a lower
+			// bound of exactly this prefix, so the first key that does not
+			// carry it is already past the prefix — including a key SHORTER
+			// than 25 bytes, which can only sort at or above the prefix by
+			// differing (greater) within its own length.
+			if len(k) < 25 || !bytes.Equal(k[:25], archSrcPrefix) {
+				break
+			}
+			batch.Delete(append([]byte{}, k...), nil)
 		}
 		archSrcIter.Close()
 	}

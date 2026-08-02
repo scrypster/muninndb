@@ -519,6 +519,73 @@ func TestRepairLegacyFullWeightAssocKeys_DoesNotResurrectSupersededPair(t *testi
 	}
 }
 
+// flushChunk's `indexed != 1.0` RE-READ had no discriminating test: deleting it
+// outright left the whole internal/storage suite green.
+//
+// Only the SCAN loop's copy of that check was covered, and the two are not the
+// same check. The scan's runs against a fixed iterator snapshot; the flush-time
+// one exists solely to catch a weight change that lands in the capture→commit
+// window. The nearest existing test
+// (TestRepairLegacyFullWeightAssocKeys_DoesNotResurrectSupersededPair) drives
+// the same hook but changes the legacy key's PRESENCE, so it exercises the
+// `!present` branch above and returns before the index is ever re-read.
+//
+// This is the window the re-read is for: the legacy key is still there (so the
+// pair still looks repairable) but the 0x14 index no longer says exactly 1.0.
+// A concurrent decay or Hebbian update that rewrites the index without moving
+// the key produces exactly that state, and the disambiguator is gone — the pair
+// is no longer provably a pre-fix full-weight edge, so the repair must not move
+// it.
+//
+// Deterministic via the pre-flush hook, not a timing race.
+func TestRepairLegacyFullWeightAssocKeys_ReReadsTheIndexAtFlushTime(t *testing.T) {
+	store, cleanup := newTestStoreHelper(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := [8]byte{0x2A}
+
+	src := [16]byte{0x81}
+	dst := [16]byte{0x82}
+	val := encodeAssocValue(RelSupports, 1.0, time.Unix(1_700_000_000, 0), 1, 1.0, 1)
+	seedLegacyEdge(t, store, ws, src, dst, val[:], 1.0)
+
+	fired := false
+	assocWeightRepairPreFlushHook = func() {
+		if fired {
+			return
+		}
+		fired = true
+		// Rewrite ONLY the 0x14 index. The legacy 0x03/0x04 keys stay exactly
+		// where they are, so the `!present` short-circuit does not fire and the
+		// index re-read is the only thing that can refuse this pair.
+		var wi [4]byte
+		binary.BigEndian.PutUint32(wi[:], math.Float32bits(0.55))
+		if err := store.db.Set(rawWeightIndexKey(ws, src, dst), wi[:], pebble.NoSync); err != nil {
+			t.Errorf("in-window index rewrite: %v", err)
+		}
+	}
+	defer func() { assocWeightRepairPreFlushHook = nil }()
+
+	repaired, err := store.RepairLegacyFullWeightAssocKeys(ctx, ws)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if !fired {
+		t.Fatal("pre-flush hook never fired — the test did not exercise the window")
+	}
+	if repaired != 0 {
+		t.Errorf("repaired = %d, want 0 — the pair's index stopped being exactly 1.0 inside the "+
+			"capture→commit window, so it is not provably a pre-fix full-weight edge", repaired)
+	}
+	if _, ok := mustGet(t, store, rawAssocKey(prefix.AssocFwd, ws, src, testCorrectFullWeightComplement, dst)); ok {
+		t.Error("the repair relocated a pair whose 0x14 index no longer said 1.0 at flush time — " +
+			"the flush-time re-read did not run")
+	}
+	if _, ok := mustGet(t, store, rawAssocKey(prefix.AssocFwd, ws, src, testLegacyComplement, dst)); !ok {
+		t.Error("the repair deleted the legacy position of a pair it refused to move")
+	}
+}
+
 // B1, second half: when the pair is NOT superseded but its legacy-position value
 // bytes are rewritten in place inside the window, the repair must carry the
 // FRESH bytes to the 1.0 position. Committing the captured copy would silently

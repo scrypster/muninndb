@@ -314,12 +314,24 @@ func TestSTO12_EngramWritersAcceptSelfAndSameCallEndpoints(t *testing.T) {
 // acceptance subtest above red. Instead the referrer's edges to a refused
 // sibling are Deleted into the same batch after the loop; Pebble applies in
 // batch order, so the Delete wins over the Set regardless of item order.
+//
+// The predicate for that post-loop Delete is ENGRAM EXISTENCE, not the batch
+// outcome. A refused item is not the same thing as a dead endpoint: a refused
+// UPDATE leaves its 0x01 record exactly where it was, so the sibling is still
+// live and the referrer's edge to it is legitimate. Keying the Delete on
+// `errs[i] != nil` alone destroys that live edge — the same reachability axis as
+// the hole this block closes, but the wrong direction of loss: the hole leaks a
+// dangling row, which the deferred integrity pass can repair, while this
+// destroys an edge nothing can recover. The third case below is that case.
 func TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint(t *testing.T) {
 	ctx := context.Background()
 
 	cases := []struct {
 		name    string
 		sibling func(id ULID, deadTarget ULID) *Engram
+		// preexisting seeds the sibling as a LIVE engram before the batch, so
+		// the refusal is a refused update rather than a refused create.
+		preexisting bool
 	}{
 		{
 			// Fails at the tag validation (impl.go), which continues without
@@ -338,6 +350,18 @@ func TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint(t *testin
 					Associations: []Association{*danglingProbeAssoc(deadTarget)}}
 			},
 		},
+		{
+			// The other direction. The sibling is ALREADY a live engram and the
+			// batch merely tries to rewrite it; the rewrite is refused, the
+			// existing 0x01 record is untouched, and the referrer's edge points
+			// at a perfectly live engram. Deleting it is unrecoverable data loss.
+			name:        "refused sibling that is ALREADY a live engram keeps the referrer's edge",
+			preexisting: true,
+			sibling: func(id ULID, _ ULID) *Engram {
+				return &Engram{ID: id, Concept: "sibling", Content: "a refused rewrite of a live engram",
+					Tags: []string{"project:plan\x00ning"}}
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -345,6 +369,9 @@ func TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint(t *testin
 			ps := newTestStore(t)
 			ws := ps.VaultPrefix("sto12-batch-sibling")
 			referrer, sibling, dead := NewULID(), NewULID(), NewULID()
+			if tc.preexisting {
+				seedEndpoints(t, ps, ws, sibling)
+			}
 
 			_, errs := ps.WriteEngramBatch(ctx, []EngramBatchItem{
 				{WSPrefix: ws, Engram: &Engram{
@@ -357,13 +384,41 @@ func TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint(t *testin
 			if errs[1] == nil {
 				t.Fatal("precondition: the sibling was expected to be refused")
 			}
-			if eng, err := ps.GetEngram(ctx, ws, sibling); err == nil && eng != nil {
-				t.Fatal("precondition: the refused sibling committed after all")
+			if errs[0] != nil {
+				t.Fatalf("precondition: the referrer was expected to commit, got %v", errs[0])
 			}
-			assertNoAssocRows(t, ps, ws, referrer, sibling)
-			if w, _ := ps.GetAssocWeight(ctx, ws, referrer, sibling); w != 0 {
-				t.Errorf("STO-12: a live edge (w=%v) from the committed referrer points at an "+
-					"engram that never committed", w)
+
+			eng, err := ps.GetEngram(ctx, ws, sibling)
+			siblingLive := err == nil && eng != nil
+			if siblingLive != tc.preexisting {
+				t.Fatalf("precondition: sibling live = %v, want %v", siblingLive, tc.preexisting)
+			}
+
+			w, _ := ps.GetAssocWeight(ctx, ws, referrer, sibling)
+			if !tc.preexisting {
+				assertNoAssocRows(t, ps, ws, referrer, sibling)
+				if w != 0 {
+					t.Errorf("STO-12: a live edge (w=%v) from the committed referrer points at an "+
+						"engram that never committed", w)
+				}
+				return
+			}
+			// The sibling is live, so every one of the three rows is legitimate.
+			for label, k := range map[string][]byte{
+				"0x03 fwd":          keys.AssocFwdKey(ws, [16]byte(referrer), 0.8, [16]byte(sibling)),
+				"0x04 rev":          keys.AssocRevKey(ws, [16]byte(sibling), 0.8, [16]byte(referrer)),
+				"0x14 weight-index": keys.AssocWeightIndexKey(ws, [16]byte(referrer), [16]byte(sibling)),
+			} {
+				if _, closer, gErr := ps.db.Get(k); gErr != nil {
+					t.Errorf("STO-12: the post-loop delete destroyed the %s row of a LIVE edge between "+
+						"two LIVE engrams, because it keyed on the batch outcome instead of engram existence", label)
+				} else {
+					_ = closer.Close()
+				}
+			}
+			if w == 0 {
+				t.Error("DATA LOSS: GetAssocWeight = 0 — a legitimate edge to a still-live engram " +
+					"was deleted because that engram's unrelated rewrite was refused")
 			}
 		})
 	}

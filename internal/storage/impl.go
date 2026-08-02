@@ -723,11 +723,33 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 
 	// STO-12, second half of the sameCall exception. sameCall promises that
 	// every caller-supplied id in this call is made live by the single commit
-	// below — but the per-item validations above (encode, raw tags, and STO-12
-	// itself) each `continue` WITHOUT queueing that item's 0x01 key, so an item
-	// the guard accepted as a live endpoint may never commit. A referrer naming
-	// it would otherwise commit three association rows pointing at nothing, with
-	// a nil error of its own.
+	// below — but the per-item validations above can `continue` without ever
+	// queueing that item's 0x01 key, so an item the guard accepted as a live
+	// endpoint may never commit. A referrer naming it would otherwise commit
+	// three association rows pointing at nothing, with a nil error of its own.
+	//
+	// Which validations those are, precisely, because it matters:
+	//
+	//   - encode, the up-front ValidateRawTagValue loop, and
+	//     checkInlineAssocTargets `continue` BEFORE the item queues anything.
+	//     Those are the ones this block repairs.
+	//   - WriteRawTagIndexEntry and the 0x22 laKey batch.Set `continue` AFTER
+	//     the item's 0x01 and association Sets are already queued. If either
+	//     ever fired, the item would COMMIT and have its inbound edges deleted —
+	//     the inverse of the intended repair. Both are unreachable today:
+	//     WriteRawTagIndexEntry re-runs the identical validation the loop above
+	//     already passed, and pebble.Batch.Set fails only on a >4 GB batch. Said
+	//     plainly here rather than claimed away, so that anyone who moves a
+	//     validation knows which side of the queueing it has to stay on.
+	//
+	// THE PREDICATE IS ENGRAM EXISTENCE, NOT THE BATCH OUTCOME. A refused item
+	// is not necessarily a dead endpoint: a refused UPDATE of an engram that is
+	// already in Pebble leaves that engram's 0x01 record exactly where it was,
+	// so a referrer's edge to it is legitimate and deleting it is unrecoverable
+	// data loss (the hole above only leaks a dangling row, which the deferred
+	// integrity pass can repair — losing a live edge has no repair). The
+	// committed-sibling check covers the same id appearing twice in one call,
+	// once successfully.
 	//
 	// Repaired after the loop rather than by accumulating sameCall as the loop
 	// walks: an incremental set would make the guard queue-order dependent (the
@@ -735,6 +757,16 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 	// referrer-first ordering. Pebble applies a batch in order, so a Delete
 	// queued here wins over a Set queued earlier for the same key, whatever the
 	// item order was.
+	committedIDs := make(map[[24]byte]struct{})
+	for i := range items {
+		if errs[i] != nil || items[i].Engram == nil {
+			continue
+		}
+		var k [24]byte
+		copy(k[:8], items[i].WSPrefix[:])
+		copy(k[8:], items[i].Engram.ID[:])
+		committedIDs[k] = struct{}{}
+	}
 	failedIDs := make(map[[24]byte]struct{})
 	for i := range items {
 		if errs[i] == nil || items[i].Engram == nil || items[i].Engram.ID == (ULID{}) {
@@ -743,6 +775,12 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		var k [24]byte
 		copy(k[:8], items[i].WSPrefix[:])
 		copy(k[8:], items[i].Engram.ID[:])
+		if _, ok := committedIDs[k]; ok {
+			continue // another item in this call makes the same id live
+		}
+		if ps.engramExists(items[i].WSPrefix, [16]byte(items[i].Engram.ID)) {
+			continue // a refused UPDATE — the endpoint is live and its edges are real
+		}
 		failedIDs[k] = struct{}{}
 	}
 	if len(failedIDs) > 0 {

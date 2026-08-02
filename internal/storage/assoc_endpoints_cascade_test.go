@@ -205,14 +205,24 @@ func TestSTO12_LegacyFullWeightRepairNeverCreatesADanglingEdge(t *testing.T) {
 // keys.PrefixUpperBound is LOOSE: it increments the first sub-0xFF byte from the
 // right and returns without zeroing the trailing 0xFF bytes, so for a prefix
 // ending in 0xFF — about 1 engram ID in 256 — the bound it returns spans into
-// the NEXT engram's association keyspace. (Tracked as its own increment; it is
-// mandated by STO-11 and has several callers, so it is not changed here.)
+// the NEXT engram's association keyspace. (Tracked as #816; it is mandated by
+// STO-11 and has several callers, so it is not changed here.)
 //
-// On a DELETE path an over-inclusive bound without a guard is data loss: the
-// cascade would delete a live engram's association rows. Both loops therefore
-// keep SeekGE plus an explicit bytes.Equal(k[:25], prefix) break — which is also
-// why they must NOT be converted to PrefixIterator, whose First/Valid shape
-// changes the break-vs-continue semantics on short keys.
+// About-1-in-256 is the rate at which the BOUND IS LOOSE, and not the rate at
+// which anything is lost. Landing a second engram inside the widened band takes
+// a shared first 14 ID bytes — the full 48-bit ULID millisecond AND 8 of the 10
+// crypto-random entropy bytes, ~2^-64 on top of a same-millisecond collision —
+// which is why the IDs below are CONSTRUCTED and not hoped for. So the guard is
+// structural hygiene rather than a live data-loss fix: the shared helper's
+// contract is wrong, each call site compensates per key, and any future
+// non-ULID ID tail closes that 64-bit gap immediately, on a delete path.
+//
+// Both loops therefore keep SeekGE plus an explicit bytes.Equal(k[:25], prefix)
+// break — which is also why they must NOT be converted to PrefixIterator, whose
+// First/Valid shape changes the break-vs-continue semantics on short keys.
+// TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix is the table over
+// all four destructive scans of this shape; this test keeps the cascade's own
+// end-to-end form.
 //
 // The victim's ID ends in 0xFF by construction, never by hoping a random ULID
 // lands there, and the neighbour is placed exactly inside the over-inclusive
