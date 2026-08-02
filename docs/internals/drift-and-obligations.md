@@ -106,6 +106,27 @@ and remain the reviewer's job.
     deterministically — `time.Sleep` is not synchronization and flakes under `-race` on
     constrained CI cores (#722).
 
+13. **A new field on `activation.ActivateRequest` that gates a scoring phase**
+    → audit EVERY constructor (`rg 'activation\.ActivateRequest\{'`) and add a pinning
+    test that the production path (`internal/engine.Activate`) sets it. There is exactly
+    ONE production constructor and dozens of test ones, so a bool defaulting to `false` is
+    a silent behaviour change for every in-tree fixture that relied on the phase. COG-31's
+    `HebbianEnabled` did exactly this: four fixtures seed `AssocLog().Record(...)` plus
+    `store.assocs` and their priming went inert until they were updated with the gate, and
+    one of them (`abstention_gate_measure_test.go`) reported a collapsed both-arms-equal
+    result that its own both-metric rule correctly rejected. That failure is the desirable
+    shape — but only because a standing corpus happened to cover it.
+
+14. **A trial/measurement seam behind `//go:build cognitiontrial`**
+    (`internal/storage/trial_clock_cognitiontrial.go`,
+    `internal/cognitive/replay_cognitiontrial.go`) → CI never passes this tag, so nothing
+    checks these files compile. Build them explicitly when you touch the packages they
+    reach into: `go build -tags 'localassets cognitiontrial' ./... && go vet -tags
+    'localassets cognitiontrial' ./...`. The cognition-trial acceptance rule
+    (`internal/engine/cognition_trial_rule_test.go`) is deliberately tagged
+    `localassets || cognitiontrial` so its own unit tests DO run in CI — a rule that
+    decides whether a subsystem lives must itself be tested.
+
 ## Live drift found during the guardian audit (worth fixing)
 
 - ~~**Windows CI tests the wrong embedding model.**~~ — fixed. `ci.yml`'s Windows job now
