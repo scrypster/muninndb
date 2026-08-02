@@ -583,11 +583,17 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// its IDs to reproduce it.
 	//
 	// The guard stays, and stays uniform across all four destructive 25-byte
-	// scans, because the mandated shared helper's contract is wrong and the
+	// scans that take their bound from the shared helper, because the mandated
+	// shared helper's contract is wrong and the
 	// compensation is a per-key check at each call site — so any future
 	// non-ULID ID tail (a counter, a truncated hash, a content-addressed key)
 	// collapses that 64-bit gap to zero the day it lands, silently, on a delete
 	// path. Fixing PrefixUpperBound itself is #816.
+	//
+	// There is a FIFTH scan over a 25-byte prefix — RestoreArchivedEdges' own
+	// candidate loop — which has no such guard and does not need one, because it
+	// hand-rolls a TIGHT bound instead. See the comment there; it must not be
+	// consolidated onto the shared helper.
 	//
 	// It is also why these two loops must keep SeekGE and must NOT be converted
 	// to PrefixIterator, whose First/Valid shape changes the break-vs-continue

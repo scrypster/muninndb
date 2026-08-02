@@ -44,6 +44,25 @@ func newRealStoreEngine(t *testing.T) (*ActivationEngine, *storage.PebbleStore) 
 	return &ActivationEngine{store: store, assocLog: &ActivationLog{}}, store
 }
 
+// seedEndpoints writes a minimal engram for each id. #803/STO-12: every
+// association writer REFUSES an edge unless both endpoints have a live 0x01
+// record, so these fixtures — which previously minted edges between bare ULIDs
+// — would otherwise fail at the write, long before reaching the symmetry
+// behaviour they exist to measure. It is also the more faithful fixture: the
+// Hebbian worker only ever co-activates engrams that exist.
+func seedEndpoints(t *testing.T, store *storage.PebbleStore, ws [8]byte, ids ...storage.ULID) {
+	t.Helper()
+	for _, id := range ids {
+		if _, err := store.WriteEngram(context.Background(), ws, &storage.Engram{
+			ID:      id,
+			Concept: "fixture endpoint",
+			Content: "fixture endpoint content",
+		}); err != nil {
+			t.Fatalf("seedEndpoints %s: %v", id.String(), err)
+		}
+	}
+}
+
 // olderNewer returns two ULIDs with a guaranteed byte-wise order, so "older"
 // and "newer" mean what canonicalPair means by them without depending on clock
 // resolution between two NewULID() calls.
@@ -81,6 +100,8 @@ func bothArms(
 	ctx := context.Background()
 	ws := store.VaultPrefix("symmetry")
 	const vaultID uint32 = 7
+
+	seedEndpoints(t, store, ws, src, dst)
 
 	// The canonical Hebbian write shape: WriteAssociation seeds the pair, then
 	// UpdateAssocWeight (what UpdateAssocWeightBatch does per pair) sets the
@@ -171,6 +192,7 @@ func TestHebbianBoost_PairCountedOnce(t *testing.T) {
 	const w float32 = 0.25
 
 	a, b := olderNewer()
+	seedEndpoints(t, store, ws, a, b)
 	for _, pair := range [][2]storage.ULID{{a, b}, {b, a}} {
 		if err := store.WriteAssociation(ctx, ws, pair[0], pair[1], &storage.Association{
 			TargetID: pair[1], Weight: 0.01, RelType: storage.RelRelatesTo,
@@ -215,6 +237,8 @@ func TestPhase5Traverse_ReachesSymmetricEdgeFromEitherEndpoint(t *testing.T) {
 		e, store := newRealStoreEngine(t)
 		ctx := context.Background()
 		ws := store.VaultPrefix("traverse-symmetry")
+
+		seedEndpoints(t, store, ws, older, newer)
 
 		// One symmetric edge, written older -> newer.
 		if err := store.WriteAssociation(ctx, ws, older, newer, &storage.Association{
@@ -303,6 +327,8 @@ func TestHebbianBoost_UnionReadFailurePreservesSymmetricOrder(t *testing.T) {
 	a := storage.NewULIDWithTime(base)                     // A→R : forward at A
 	r := storage.NewULIDWithTime(base.Add(24 * time.Hour)) // the recent engram
 	b := storage.NewULIDWithTime(base.Add(48 * time.Hour)) // R→B : inbound at B
+
+	seedEndpoints(t, store, ws, a, r, b)
 
 	// Identical weight, identical RelType — only the orientation differs.
 	for _, pair := range [][2]storage.ULID{{a, r}, {r, b}} {

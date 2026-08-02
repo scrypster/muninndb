@@ -47,7 +47,34 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 
 	prefix := keys.ArchiveAssocPrefixForID(ws, srcID)
 
-	// Upper bound: increment the last byte of the prefix to bound the scan.
+	// STO-11. This bound is DELIBERATELY TIGHT and must stay hand-rolled. Do not
+	// "tidy" it into keys.PrefixUpperBound or PrefixIterator for consistency with
+	// reapArchivedEdgesFrom twenty lines below — that is the specific edit that
+	// breaks it.
+	//
+	// The difference: the loop below increments from the right and ZEROES every
+	// byte it wraps, so the bound covers this prefix and nothing beyond it.
+	// keys.PrefixUpperBound increments the first sub-0xFF byte from the right and
+	// returns WITHOUT zeroing the trailing 0xFF bytes, so for a 25-byte
+	// 0x25|ws|src prefix whose last byte is 0xFF it admits keys belonging to the
+	// NEXT source id. (Fixing the shared helper is #816.)
+	//
+	// This is the FIFTH scan over the 0x25|ws|src prefix and the only one held
+	// inside its keyspace by its bound alone: the candidate loop below has no
+	// bytes.Equal(k[:25], prefix) break, unlike the four sites listed in the
+	// STO-11 census. A loose bound here does not merely over-delete — the restore
+	// loop MINTS live 0x03/0x04/0x14 rows, so it would fabricate a victim →
+	// neighbour's-dst edge that never existed and stamp restoredAt on it, which
+	// permanently exempts it from GCArchivedEdges. The engramExists(ws, c.dst)
+	// guard below does NOT catch that: the neighbour's dst is a real live engram.
+	// The liveness predicate and the bound are orthogonal.
+	//
+	// Pinned by TestSTO11_RestoreArchivedEdgesCandidateScanStaysInsideItsOwnPrefix.
+	//
+	// A prefix check is not folded into the len(k) < 41 || len(v) < 26 skip
+	// below on purpose: len(v) < 26 is a value-shaped condition that must stay a
+	// `continue`, while a prefix mismatch must `break` — sharing one branch would
+	// walk the whole widened band on every recall.
 	upperBound := make([]byte, len(prefix))
 	copy(upperBound, prefix)
 	for i := len(upperBound) - 1; i >= 0; i-- {
@@ -223,7 +250,18 @@ func (ps *PebbleStore) reapArchivedEdgesFrom(ws [8]byte, srcID [16]byte) error {
 		// 0xFF the bound admits keys belonging to the NEXT source id. This loop
 		// deletes what the iterator returns, so the explicit prefix check is
 		// what keeps it inside its own keyspace; without it an ordinary recall
-		// of one hard-deleted source deletes a LIVE engram's archive rows.
+		// of one hard-deleted source can delete a LIVE engram's archive rows.
+		//
+		// Reachability, on the same terms as the other three guarded sites: this
+		// is STRUCTURAL HYGIENE, not a live data-loss report. ~1 in 256 is the
+		// rate at which the BOUND IS LOOSE, not the rate at which anything is
+		// lost — landing inside the widened band additionally requires a second
+		// source sharing the victim's first 14 ID bytes (the full 48-bit ULID
+		// millisecond AND 8 of the 10 entropy bytes), i.e. ~2^-64 on top of a
+		// same-millisecond collision. The guard stays because the shared
+		// helper's contract is wrong and any future non-ULID id tail collapses
+		// that 64-bit gap to zero, silently, on a delete path.
+		//
 		// Fixing the shared helper is #816. Pinned by
 		// TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
 		//

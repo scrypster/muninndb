@@ -26,10 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Client-visible change:** a write whose `associations[].target_id` names a
   memory that has been hard-deleted is now **rejected** instead of silently
   accepted. The row it used to create pointed at nothing. How the rejection
-  surfaces is per-transport: REST's single-write path and `/api/link` return
-  **400**; REST's batch endpoint still returns 201 with `status: "error"` on
-  that item only, its siblings committing as before; gRPC and MBP return their
-  existing error for an invalid ID. `relationships[]` is unchanged in this
+  surfaces is per-transport: REST's single-write path returns **400**; REST's
+  batch endpoint still returns 201 with `status: "error"` on that item only, its
+  siblings committing as before; gRPC and MBP return their existing error for an
+  invalid ID. `relationships[]` is unchanged in this
   release — it still logs a warning and succeeds (#817).
 
 ---

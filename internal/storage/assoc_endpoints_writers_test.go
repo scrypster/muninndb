@@ -323,6 +323,22 @@ func TestSTO12_EngramWritersAcceptSelfAndSameCallEndpoints(t *testing.T) {
 // the hole this block closes, but the wrong direction of loss: the hole leaks a
 // dangling row, which the deferred integrity pass can repair, while this
 // destroys an edge nothing can recover. The third case below is that case.
+//
+// The FOURTH case is the half `engramExists` alone cannot see. When the same id
+// appears twice in one call — once committing, once refused — the successful
+// occurrence's 0x01 Set is sitting in the UNCOMMITTED batch, so the DB read
+// `engramExists` performs returns false and the refused occurrence is classified
+// dead. The referrer's three rows to a sibling that is about to commit are then
+// Deleted, in the same batch, after the Set that made it live. That is the
+// `committedIDs` set's entire job, and nothing else in the package covers it:
+// neutralising it leaves the whole of internal/storage green.
+//
+// NOTE for anyone editing the invalid-tag fixtures: the tag MUST contain a ':'.
+// ValidateRawTagValue splits on ':' and returns nil when there is no separator,
+// so a bare "bad\x00tag" is ACCEPTED and the sibling commits — the refusal this
+// whole test is built on never happens. The `errs[refused] == nil` precondition
+// below is what keeps that a loud failure instead of a green run proving
+// nothing, which is exactly why it is a t.Fatal and not an implicit assumption.
 func TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint(t *testing.T) {
 	ctx := context.Background()
 
@@ -332,6 +348,11 @@ func TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint(t *testin
 		// preexisting seeds the sibling as a LIVE engram before the batch, so
 		// the refusal is a refused update rather than a refused create.
 		preexisting bool
+		// committingTwin inserts a SECOND item carrying the same id as the
+		// refused sibling, which passes every validation and commits. The
+		// sibling ends the call live, but only via an uncommitted Set that no
+		// DB read can observe while the guard runs.
+		committingTwin bool
 	}{
 		{
 			// Fails at the tag validation (impl.go), which continues without
@@ -362,6 +383,19 @@ func TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint(t *testin
 					Tags: []string{"project:plan\x00ning"}}
 			},
 		},
+		{
+			// The committed-sibling half. The same id is queued twice: a valid
+			// item that commits, and a refused one. engramExists cannot see the
+			// valid item's 0x01 — it is an uncommitted batch Set — so without
+			// committedIDs the refused occurrence is classified dead and the
+			// referrer's edge to a sibling that DOES commit is destroyed.
+			name:           "the same id also committing elsewhere in the call keeps the referrer's edge",
+			committingTwin: true,
+			sibling: func(id ULID, _ ULID) *Engram {
+				return &Engram{ID: id, Concept: "sibling", Content: "a refused duplicate of a committing item",
+					Tags: []string{"project:plan\x00ning"}}
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -373,29 +407,46 @@ func TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint(t *testin
 				seedEndpoints(t, ps, ws, sibling)
 			}
 
-			_, errs := ps.WriteEngramBatch(ctx, []EngramBatchItem{
+			items := []EngramBatchItem{
 				{WSPrefix: ws, Engram: &Engram{
 					ID: referrer, Concept: "referrer", Content: "names its sibling",
 					Associations: []Association{*danglingProbeAssoc(sibling)},
 				}},
-				{WSPrefix: ws, Engram: tc.sibling(sibling, dead)},
-			})
+			}
+			twin := -1
+			if tc.committingTwin {
+				twin = len(items)
+				items = append(items, EngramBatchItem{WSPrefix: ws, Engram: &Engram{
+					ID: sibling, Concept: "sibling", Content: "the occurrence that commits",
+				}})
+			}
+			refused := len(items)
+			items = append(items, EngramBatchItem{WSPrefix: ws, Engram: tc.sibling(sibling, dead)})
 
-			if errs[1] == nil {
+			_, errs := ps.WriteEngramBatch(ctx, items)
+
+			if errs[refused] == nil {
 				t.Fatal("precondition: the sibling was expected to be refused")
 			}
 			if errs[0] != nil {
 				t.Fatalf("precondition: the referrer was expected to commit, got %v", errs[0])
 			}
+			if twin >= 0 && errs[twin] != nil {
+				t.Fatalf("precondition: the committing twin was expected to commit, got %v", errs[twin])
+			}
+
+			// Live either because it was already there (a refused update) or
+			// because a twin occurrence in this very call committed it.
+			wantSiblingLive := tc.preexisting || tc.committingTwin
 
 			eng, err := ps.GetEngram(ctx, ws, sibling)
 			siblingLive := err == nil && eng != nil
-			if siblingLive != tc.preexisting {
-				t.Fatalf("precondition: sibling live = %v, want %v", siblingLive, tc.preexisting)
+			if siblingLive != wantSiblingLive {
+				t.Fatalf("precondition: sibling live = %v, want %v", siblingLive, wantSiblingLive)
 			}
 
 			w, _ := ps.GetAssocWeight(ctx, ws, referrer, sibling)
-			if !tc.preexisting {
+			if !wantSiblingLive {
 				assertNoAssocRows(t, ps, ws, referrer, sibling)
 				if w != 0 {
 					t.Errorf("STO-12: a live edge (w=%v) from the committed referrer points at an "+

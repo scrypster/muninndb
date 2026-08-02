@@ -181,6 +181,12 @@ func TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix(t *testing.T) {
 			// RestoreArchivedEdges for a source with no 0x01 record reaps the
 			// whole prefix. Driven through the public entry point rather than
 			// called directly, because the reachability is the point.
+			//
+			// The FIFTH scan over this same prefix — RestoreArchivedEdges' own
+			// candidate loop, twenty lines above the reap — cannot be a row in
+			// this table: it is destructive AND creative, and it must leave most
+			// of the victim's rows in place. It has its own test, immediately
+			// below this one.
 			name:      "reapArchivedEdgesFrom via RestoreArchivedEdges",
 			prefixFor: func(ws [8]byte, id ULID) []byte { return keys.ArchiveAssocPrefixForID(ws, [16]byte(id)) },
 			seed: func(t *testing.T, ps *PebbleStore, ws [8]byte, victim, neighbour ULID) {
@@ -228,5 +234,113 @@ func TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix(t *testing.T) {
 					"has no bytes.Equal(k[:25], prefix) guard)", before, after)
 			}
 		})
+	}
+}
+
+// TestSTO11_RestoreArchivedEdgesCandidateScanStaysInsideItsOwnPrefix pins the
+// FIFTH scan over the 25-byte `0x25|ws|src` prefix: RestoreArchivedEdges' own
+// candidate loop, twenty lines above the reap that IS in the table.
+//
+// It is not a row in that table because its shape is different in the way that
+// matters. The four tabled loops only delete, and a crossing shows up as the
+// neighbour losing rows. This loop deletes (the archive row it consumes) and
+// ALSO MINTS live 0x03/0x04/0x14 rows — so a crossing shows up as an edge that
+// never existed being fabricated from the victim to a NEIGHBOUR's destination,
+// stamped restoredAt, which then permanently exempts it from GCArchivedEdges.
+//
+// It has no `bytes.Equal(k[:25], prefix)` break. It is correct today for one
+// reason only: RestoreArchivedEdges hand-rolls its OWN tight upper bound (it
+// zeroes the trailing bytes it wraps) instead of calling keys.PrefixUpperBound
+// or PrefixIterator like its four neighbours do. Two adjacent functions in one
+// file therefore use two different bound strategies over the identical prefix.
+//
+// That is exactly the configuration that breaks silently on a tidy-up. When #816
+// fixes the shared helper and someone consolidates the call sites onto it — or
+// simply "unifies" this hand-rolled loop with the reap below it for consistency,
+// which is the more likely and more innocent-looking edit — this loop starts
+// fabricating edges. And `engramExists(ws, c.dst)` at the top of the restore
+// loop will NOT catch it: the dst it reads out of the neighbour's key is a real,
+// live engram. The liveness guard is orthogonal to the bound.
+//
+// Reachability is the same ~2^-64 structural-hygiene argument as the table's:
+// the ids are constructed by hand. The point is the invariant, not an incident.
+func TestSTO11_RestoreArchivedEdgesCandidateScanStaysInsideItsOwnPrefix(t *testing.T) {
+	ctx := context.Background()
+	ps := newTestStore(t)
+	ws := ps.VaultPrefix("sto11-restore-candidate-bounds")
+
+	// Same construction as the table: the victim's id ends in 0xFF, the
+	// neighbour sits exactly inside the band a loose bound would admit.
+	var victim ULID
+	copy(victim[:], []byte{0x71, 0x22, 0x33})
+	victim[14] = 0x10
+	victim[15] = 0xFF
+	neighbour := victim
+	neighbour[14] = 0x11
+	neighbour[15] = 0x00
+
+	victimDst, neighbourDst := NewULID(), NewULID()
+	// Every endpoint is LIVE. The victim has a 0x01 record so the call takes the
+	// restore branch rather than the reap branch, and neighbourDst has one so
+	// that the restore loop's engramExists guard would happily wave it through.
+	seedEndpoints(t, ps, ws, victim, neighbour, victimDst, neighbourDst)
+	seedArchiveRow(t, ps, ws, victim, victimDst)
+	seedArchiveRow(t, ps, ws, neighbour, neighbourDst)
+
+	neighbourPrefix := keys.ArchiveAssocPrefixForID(ws, [16]byte(neighbour))
+	before := countRowsUnder(t, ps, neighbourPrefix)
+	if before == 0 {
+		t.Fatal("precondition: the neighbour has no archive rows inside the widened band")
+	}
+
+	restored, err := ps.RestoreArchivedEdges(ctx, ws, [16]byte(victim), restoreTopN)
+	if err != nil {
+		t.Fatalf("RestoreArchivedEdges: %v", err)
+	}
+
+	// Every assertion below is an Error, not a Fatal: when the bound goes loose
+	// each one reports a distinct consequence of the same crossing, and seeing
+	// all of them is the difference between "a count is off" and "an edge that
+	// never existed is now live and permanently un-collectable".
+	for _, got := range restored {
+		if got == [16]byte(neighbourDst) {
+			t.Error("the candidate scan crossed into the NEIGHBOURING source's archive band and " +
+				"restored an edge from the victim to a destination it was never associated with")
+		}
+	}
+
+	// The decisive row: 0x14 is keyed on (src,dst) with no weight component, so
+	// its presence is an exact statement that a victim→neighbourDst edge exists.
+	fabricated := keys.AssocWeightIndexKey(ws, [16]byte(victim), [16]byte(neighbourDst))
+	if _, closer, gErr := ps.db.Get(fabricated); gErr == nil {
+		_ = closer.Close()
+		t.Error("FABRICATED EDGE: a live 0x14 weight-index row now exists from the victim to the " +
+			"NEIGHBOUR's archived destination. The candidate loop has no prefix check; it is held " +
+			"inside its own keyspace solely by the hand-rolled tight upper bound in " +
+			"RestoreArchivedEdges, which this run no longer has.")
+	}
+	if w, _ := ps.GetAssocWeight(ctx, ws, victim, neighbourDst); w != 0 {
+		t.Errorf("FABRICATED EDGE: GetAssocWeight(victim, neighbourDst) = %v, want 0", w)
+	}
+
+	// Belt-and-braces on the neighbour's own rows. Measured: under a loose bound
+	// this one does NOT fire, and the reason is worth recording — the archive
+	// delete is keyed ArchiveAssocKey(ws, srcID, c.dst) with srcID = the VICTIM,
+	// so the crossing reads the neighbour's row and then deletes a key that does
+	// not exist. The neighbour keeps its archive row AND the victim gains a live
+	// edge: a duplication, not a move, and therefore invisible to any assertion
+	// that only counts the neighbour's rows. Kept so a future variant that does
+	// delete under the scanned key is caught here rather than in production.
+	if after := countRowsUnder(t, ps, neighbourPrefix); after != before {
+		t.Errorf("the candidate scan consumed the NEIGHBOURING id's archive rows: %d -> %d",
+			before, after)
+	}
+
+	// A bound that is too TIGHT is also a defect: the victim's own edge must
+	// still restore, exactly once. Checked last so a loose bound reports its
+	// real damage above rather than bailing out here on a count.
+	if len(restored) != 1 || restored[0] != [16]byte(victimDst) {
+		t.Errorf("the victim's own archived edge did not restore cleanly: got %d restored, "+
+			"want exactly [%s]", len(restored), victimDst)
 	}
 }

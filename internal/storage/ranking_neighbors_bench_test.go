@@ -94,6 +94,12 @@ func buildForwardOnlyFan(tb testing.TB, store *PebbleStore, vault string, nCand,
 		sinks[i] = NewULID()
 	}
 
+	// #803/STO-12: every endpoint needs a live 0x01 record before any edge
+	// between them is accepted. Done here, before the write loop, so the
+	// benchmark's timed region is unchanged.
+	seedEndpoints(tb, store, ws, cand...)
+	seedEndpoints(tb, store, ws, sinks...)
+
 	for i := range cand {
 		for j := 0; j < degree; j++ {
 			// Distinct, descending weights so the merge's two-pointer walk and

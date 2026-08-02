@@ -269,8 +269,15 @@ func TestRelType_BidirectionalForRanking(t *testing.T) {
 // GetRankingNeighbors
 // ---------------------------------------------------------------------------
 
+// #803/STO-12: both endpoints are seeded first. These COG-31 fixtures were
+// written against a WriteAssociation that accepted an edge between two ULIDs
+// with no engram record at all — exactly the state STO-12 now refuses — so
+// without this they fail at the write, before reaching the ranking behaviour
+// they are actually about. Seeding is also the more faithful fixture: nothing
+// in production ranks an edge whose endpoints do not exist.
 func mustWriteAssoc(t *testing.T, store *PebbleStore, ws [8]byte, src, dst ULID, w float32, rt RelType) {
 	t.Helper()
+	seedEndpoints(t, store, ws, src, dst)
 	if err := store.WriteAssociation(context.Background(), ws, src, dst, &Association{
 		TargetID: dst,
 		Weight:   w,
