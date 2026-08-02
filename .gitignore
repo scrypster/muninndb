@@ -88,6 +88,11 @@ sdk/php/vendor/
 .claude/skills/review-pr/
 .claude/skills/merge-orchestration/
 
+# Maintainer-private agent: encodes what we look for when a change might serve its
+# author rather than the community, plus the security walk and the contributor-response
+# voice. Publishing it would publish the test answers. Same tier as the skills above.
+.claude/agents/contributor-pr-vetter.md
+
 # Design records that cannot be published: ones naming real people, client or
 # tenant data, commercial terms, or competitive strategy. Everything else in
 # .claude/deep-review/ IS published — see the README there for the triage rule.
