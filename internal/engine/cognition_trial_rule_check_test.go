@@ -67,8 +67,8 @@ func ctShipVault(label string) ctVaultResult {
 		// Inside the additivity bounds: max(Delta_H, Delta_P) <= Delta_HP <= Delta_C.
 		DeltaHP:                 ctDelta{Point: 0.034, CILower: 0.012, CIUpper: 0.056, N: 320},
 		DeltaCAllQueriesDiluted: ctDelta{Point: 0.049, CILower: 0.028, CIUpper: 0.070, N: 360},
-		MRRDeltaH:               0.031,
-		MRRDeltaP:               0.002,
+		MRRDeltaH:               ctMeanDelta{Point: 0.031, N: 320},
+		MRRDeltaP:               ctMeanDelta{Point: 0.002, N: 320},
 		DeltaCByBucket:          ctBucketSeries(ctRisingBuckets(0.03)),
 		BaselineEdges:           5000,
 		ReplayedEdges:           2100,
@@ -87,8 +87,8 @@ func ctKillVault(label string) ctVaultResult {
 		DeltaP:                  ctDelta{Point: -0.003, CILower: -0.015, CIUpper: 0.009, N: 340},
 		DeltaHP:                 ctDelta{Point: 0.0015, CILower: -0.012, CIUpper: 0.015, N: 340},
 		DeltaCAllQueriesDiluted: ctDelta{Point: 0.0017, CILower: -0.012, CIUpper: 0.015, N: 395},
-		MRRDeltaH:               0.0,
-		MRRDeltaP:               -0.001,
+		MRRDeltaH:               ctMeanDelta{Point: 0.0, N: 340},
+		MRRDeltaP:               ctMeanDelta{Point: -0.001, N: 340},
 		DeltaCByBucket:          ctBucketSeries(ctFlatBuckets(0.001)),
 		BaselineEdges:           5000,
 		ReplayedEdges:           2400,
@@ -155,7 +155,7 @@ func TestCognitionTrialRule_PriorWithoutAMechanismDoesNotShip(t *testing.T) {
 	for i := range vaults {
 		vaults[i].DeltaH = ctDelta{Point: 0.004, CILower: -0.006, CIUpper: 0.014, N: 320}
 		vaults[i].DeltaP = ctDelta{Point: 0.003, CILower: -0.007, CIUpper: 0.013, N: 320}
-		vaults[i].MRRDeltaH = 0.001
+		vaults[i].MRRDeltaH = ctMeanDelta{Point: 0.001, N: vaults[i].DeltaC.N}
 	}
 	got := ctDecide(vaults, ctGoodJudge(), true)
 	if got.Verdict == ctVerdictShip {
@@ -668,7 +668,7 @@ func ctVaultResultProbes() map[string]ctProbe {
 			for i := range vaults {
 				vaults[i].DeltaH = ctDelta{Point: 0.004, CILower: -0.006, CIUpper: 0.014, N: 320}
 				vaults[i].DeltaP = ctDelta{Point: 0.026, CILower: 0.008, CIUpper: 0.044, N: 320}
-				vaults[i].MRRDeltaP = 0.02
+				vaults[i].MRRDeltaP = ctMeanDelta{Point: 0.02, N: vaults[i].DeltaC.N}
 			}
 			got := ctDecide(vaults, ctGoodJudge(), true)
 			ctRequireVerdict(t, got, ctVerdictShip, "(PAS)")
@@ -740,7 +740,7 @@ func ctVaultResultProbes() map[string]ctProbe {
 		"MRRDeltaH": ctFromShip(ctVerdictInconclusivePowered, "S4 FAIL",
 			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
 				for i := range v {
-					v[i].MRRDeltaH = -0.02 // NDCG says up, MRR says down
+					v[i].MRRDeltaH = ctMeanDelta{Point: -0.02, N: v[i].DeltaC.N} // NDCG up, MRR down
 				}
 			}),
 		"MRRDeltaP": func(t *testing.T) {
@@ -748,7 +748,7 @@ func ctVaultResultProbes() map[string]ctProbe {
 			for i := range vaults {
 				vaults[i].DeltaH = ctDelta{Point: 0.004, CILower: -0.006, CIUpper: 0.014, N: 320}
 				vaults[i].DeltaP = ctDelta{Point: 0.026, CILower: 0.008, CIUpper: 0.044, N: 320}
-				vaults[i].MRRDeltaP = -0.02
+				vaults[i].MRRDeltaP = ctMeanDelta{Point: -0.02, N: vaults[i].DeltaC.N}
 			}
 			ctRequireVerdict(t, ctDecide(vaults, ctGoodJudge(), true),
 				ctVerdictInconclusivePowered, "S4 FAIL")
@@ -930,6 +930,7 @@ func ctQuerySeriesProbes() map[string]ctProbe {
 				full.DeltaC.Point, lifted.DeltaC.Point)
 		},
 		"MRR": func(t *testing.T) {
+			// UP: the field is read.
 			s := ctSynthSeries(60)
 			full := build(s)
 			for i := range s.MRR[ctArmNameFull] {
@@ -940,6 +941,25 @@ func ctQuerySeriesProbes() map[string]ctProbe {
 				"zeroing the FULL arm's MRR moved neither MRR delta (H %v -> %v, P %v -> %v). "+
 					"S4's sign agreement reads exactly these",
 				full.MRRDeltaH, zeroed.MRRDeltaH, full.MRRDeltaP, zeroed.MRRDeltaP)
+
+			// DOWN, and this is the one the UP-probe alone could not have found —
+			// the same lesson BaselineEdges taught one struct over, and the reason
+			// the note above says every field with a meaningful ABSENT value needs
+			// its own probe. This probe WAS UP-only, and the field it guards is a
+			// MEAN: ctMean(nil) == 0, so an MRR arm that was never collected
+			// produced `mean(FULL) - 0`, a plausible measured number that
+			// manufactured a SHIP. See ctMeanDelta and
+			// TestCognitionTrialRule_UnmeasuredMRRIsNotAMeasuredZero.
+			absent := ctSynthSeries(60)
+			absent.MRR[ctArmNameNoHebbian] = nil
+			gone := build(absent)
+			ctExpect(t, gone.MRRDeltaH.N == 0,
+				"an ABSENT NO-HEBBIAN MRR arm produced MRRDeltaH %+.4f over N=%d. An arm that "+
+					"was never collected must not carry a count", gone.MRRDeltaH.Point, gone.MRRDeltaH.N)
+			vaults := ctThree(ctShipVault)
+			vaults[0].MRRDeltaH = gone.MRRDeltaH
+			ctRequireVerdict(t, ctDecide(vaults, ctGoodJudge(), true),
+				ctVerdictUnderpowered, "ABSENT OR LENGTH-MISMATCHED MRR series")
 		},
 		"Bucket": func(t *testing.T) {
 			s := ctSynthSeries(60)
@@ -956,6 +976,31 @@ func ctQuerySeriesProbes() map[string]ctProbe {
 				"%d buckets reported as omitted, want 11 — an empty bucket must be OMITTED and "+
 					"COUNTED, never regressed as a zero", len(collapsed.OmittedBuckets))
 		},
+	}
+}
+
+// ctMeanDeltaProbes is the census applied to the MRR aggregate's own struct.
+// It is on the walk for the same reason ctDelta is: the fields the verdict
+// rests on live inside it, and a field that dies there is invisible to every
+// probe on ctVaultResult.
+func ctMeanDeltaProbes() map[string]ctProbe {
+	return map[string]ctProbe{
+		"Point": ctFromShip(ctVerdictInconclusivePowered, "S4 FAIL",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				for i := range v {
+					// The N stays intact: this is a MEASURED disagreement, which
+					// must remain distinguishable from an absent series below.
+					v[i].MRRDeltaH.Point = -0.02
+				}
+			}),
+		"N": ctFromShip(ctVerdictUnderpowered, "ABSENT OR LENGTH-MISMATCHED MRR series",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				// The point estimate is left exactly where the SHIP fixture had
+				// it — agreeing in sign — so the ONLY thing that can move the
+				// verdict is the count. That is the whole claim: a number
+				// without its N is not a measurement.
+				v[1].MRRDeltaH.N = 0
+			}),
 	}
 }
 
@@ -1023,6 +1068,27 @@ func ctBucketDeltaProbes() map[string]ctProbe {
 				"a thin bucket moved the verdict to %s. It is REPORTED, not gated: U6 already "+
 					"gates how many buckets exist, and inventing a per-bucket minimum here would "+
 					"be a threshold chosen after seeing the data", got.Verdict)
+
+			// THE THINNEST BUCKET OF ALL. `thinnest == 0 ||` used the value as its
+			// own uninitialised sentinel, so a bucket holding ZERO queries was
+			// overwritten by the next one and [0, 40, 40, ...] reported "thinnest
+			// bucket 40" — the healthiest possible claim printed over the thinnest
+			// possible bucket, in the field that exists because an average hides a
+			// bucket of one. ctBucketDeltas omits empty buckets so this arrives
+			// only through a hand-built ctBucketDelta, which is exactly what a
+			// future producer is.
+			empty := ctBucketSeries(ctRisingBuckets(0.03))
+			for i := range empty {
+				empty[i].NQueries = 40
+			}
+			empty[0].NQueries = 0
+			for i := range vaults {
+				vaults[i].DeltaCByBucket = empty
+			}
+			gotEmpty := ctDecide(vaults, ctGoodJudge(), true)
+			ctExpectReason(t, gotEmpty, "fitted on 440 queries across 12 buckets, thinnest bucket 0",
+				"a bucket holding ZERO queries was reported as the thinnest bucket being some "+
+					"other bucket's count — the value cannot be its own sentinel")
 		},
 	}
 }
@@ -1042,6 +1108,7 @@ func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
 		{"ctJudgeCalibration", reflect.TypeOf(ctJudgeCalibration{}), ctJudgeProbes()},
 		{"ctVaultResult", reflect.TypeOf(ctVaultResult{}), ctVaultResultProbes()},
 		{"ctDelta", reflect.TypeOf(ctDelta{}), ctDeltaProbes()},
+		{"ctMeanDelta", reflect.TypeOf(ctMeanDelta{}), ctMeanDeltaProbes()},
 		// The two UPSTREAM structs. They reach the rule through
 		// ctVaultFromSeries, so a field that dies between the harness and
 		// ctVaultResult is invisible to every probe above.
@@ -1249,13 +1316,22 @@ func TestCognitionTrialRule_ZeroBaselineEdgesIsAnAbsenceOfMeasurement(t *testing
 		}
 	}
 
-	// The case: the baseline was never measured. ctUnreplayableFrac forms 0/0
-	// here, so the harness reports a NON-NUMBER rather than a plausible 0 —
-	// the two absences travel together because they have the same cause.
+	// THE ZERO-BASELINE CLAUSE, ISOLATED, and it has to be isolated to prove
+	// anything. This case used to set UnreplayableFrac = NaN as well — faithful
+	// to what the harness produces, since ctUnreplayableFrac forms 0/0 there and
+	// the two absences have one cause — but that made the SIBLING clause
+	// (ctNonFiniteScalar) sufficient to reach UNDERPOWERED on its own. With the
+	// zero-baseline clause reverted to `if v.BaselineEdges > 0 {`, the test still
+	// failed, but only on two ctExpectReason SUBSTRINGS: a reword of either
+	// message would have turned it green with the clause deleted. A pin that REDs
+	// on its strings rather than on its verdict is not a pin.
+	//
+	// So the fraction here is FINITE and comfortably inside the ceiling. The only
+	// objection U4 can raise is the one under test.
 	unmeasured := ctThree(ctShipVault)
 	for i := range unmeasured {
 		unmeasured[i].BaselineEdges = 0
-		unmeasured[i].UnreplayableFrac = math.NaN()
+		unmeasured[i].UnreplayableFrac = 0.30
 	}
 	got := ctDecide(unmeasured, ctGoodJudge(), true)
 	if got.Verdict == ctVerdictShip {
@@ -1272,12 +1348,28 @@ func TestCognitionTrialRule_ZeroBaselineEdgesIsAnAbsenceOfMeasurement(t *testing
 	// cannot be averaged away by two that were.
 	one := ctThree(ctShipVault)
 	one[2].BaselineEdges = 0
-	one[2].UnreplayableFrac = math.NaN()
+	one[2].UnreplayableFrac = 0.30
 	gotOne := ctDecide(one, ctGoodJudge(), true)
 	if gotOne.Verdict == ctVerdictShip {
 		t.Fatalf("SHIPPED with one vault's baseline unmeasured\n%s", gotOne)
 	}
 	ctRequireVerdict(t, gotOne, ctVerdictUnderpowered, "vault C reports 0 baseline edges")
+
+	// The harness's OWN shape, kept rather than dropped: both absences together,
+	// because that is what a real unmeasured reconstruction looks like coming out
+	// of ctUnreplayableFrac. It proves the two clauses coexist without one
+	// swallowing the other's message; it is NOT what proves the zero-baseline
+	// clause exists.
+	together := ctThree(ctShipVault)
+	for i := range together {
+		together[i].BaselineEdges = 0
+		together[i].UnreplayableFrac = math.NaN()
+	}
+	gotBoth := ctDecide(together, ctGoodJudge(), true)
+	ctRequireVerdict(t, gotBoth, ctVerdictUnderpowered, "0 baseline edges")
+	ctExpectReason(t, gotBoth, "unreplayable fraction of NaN",
+		"the sibling clause's message disappeared when both absences arrived together — a "+
+			"reader must see BOTH causes, not whichever one happened to be appended first")
 }
 
 // U4, the same shape one field over: NaN > 0.60 is FALSE, and FALSE means "no
@@ -1410,7 +1502,7 @@ func TestCognitionTrialRule_SignificantlyNegativeVaultBlocksShip(t *testing.T) {
 	vaults[2].DeltaH = ctDelta{Point: -0.05, CILower: -0.07, CIUpper: -0.03, N: 320}
 	vaults[2].DeltaP = ctDelta{Point: -0.06, CILower: -0.08, CIUpper: -0.04, N: 320}
 	vaults[2].DeltaHP = ctDelta{Point: -0.045, CILower: -0.065, CIUpper: -0.025, N: 320}
-	vaults[2].MRRDeltaH = -0.05
+	vaults[2].MRRDeltaH = ctMeanDelta{Point: -0.05, N: vaults[2].DeltaC.N}
 	got := ctDecide(vaults, ctGoodJudge(), true)
 	if got.Verdict == ctVerdictShip {
 		t.Fatalf("shipped despite a significantly negative vault\n%s", got)

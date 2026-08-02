@@ -504,6 +504,136 @@ func TestCognitionTrialRule_EveryDeltaNMustBindToTheSameSeries(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// FINDING 5: AN UNMEASURED MRR ARM MANUFACTURES A SHIP.
+//
+// The SIXTH instance of the signature defect and the FIRST that is a MEAN
+// rather than a ratio — every prior sweep went looking for zero denominators.
+// ctMean returns 0 for an empty slice and the aggregate was
+// `ctMean(inf(A)) - ctMean(inf(B))`, so an MRR arm that was never collected
+// produced a plausible measured number, and S4 — whose entire job is
+// corroborating the S2 mechanism ON A SECOND METRIC — decided against a metric
+// that may never have existed.
+//
+// Both directions flip, which is why neither a "conservative direction"
+// argument nor a bindingness probe could have found it:
+//
+//   - ABSENT NO-HEBBIAN arm: mean(FULL) - mean(nil) = mean(FULL), a large
+//     POSITIVE number that agrees in sign with any positive NDCG delta.
+//     INCONCLUSIVE-BUT-POWERED -> SHIP.
+//   - ABSENT BOTH arms, the Go zero: S4 FAIL, i.e. an audit trail
+//     indistinguishable from genuine measured disagreement. SHIP ->
+//     INCONCLUSIVE.
+//
+// And the truncation case slipped through where the NDCG control is caught:
+// ctInformative breaks at `i >= len(xs)`, so a half-length MRR arm is silently
+// truncated while a half-length NDCG arm trips U2's N-mismatch clause.
+//
+// The fixture inverts MRR against NDCG (MRR := 1 - NDCG) so the HONEST verdict
+// is a genuine S4 failure. Every mutation below therefore starts from a world
+// where the second metric really does disagree, and any movement toward SHIP is
+// the artifact and nothing else.
+// ---------------------------------------------------------------------------
+
+func ctMRRDisagreeingSeries(n int) *ctQuerySeries {
+	s := ctSynthSeries(n)
+	for arm := range s.NDCG {
+		for i := range s.NDCG[arm] {
+			s.MRR[arm][i] = 1 - s.NDCG[arm][i]
+		}
+	}
+	return s
+}
+
+func TestCognitionTrialRule_UnmeasuredMRRIsNotAMeasuredZero(t *testing.T) {
+	const n = 320
+	decide := func(mutate func(s *ctQuerySeries)) (ctDecision, ctVaultResult) {
+		s := ctMRRDisagreeingSeries(n)
+		if mutate != nil {
+			mutate(s)
+		}
+		vaults := ctThreeFromSeries(s, ctPreregistered.BootstrapResamples)
+		return ctDecide(vaults, ctGoodJudge(), true), vaults[0]
+	}
+
+	// The honest world: NDCG says the Hebbian arm helps, MRR says it hurts, and
+	// the pre-registered answer is that SHIP is blocked.
+	honest, hv := decide(nil)
+	t.Logf("HONEST                    : Delta_H=%+.4f  MRRDeltaH=%+.4f (N=%d)  -> %s",
+		hv.DeltaH.Point, hv.MRRDeltaH.Point, hv.MRRDeltaH.N, honest.Verdict)
+	if honest.Verdict != ctVerdictInconclusivePowered {
+		t.Fatalf("the honest fixture is %s, not INCONCLUSIVE-BUT-POWERED — every mutation "+
+			"below is measured against it, so this test would prove nothing\n%s",
+			honest.Verdict, honest)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		wantSub string
+		mutate  func(s *ctQuerySeries)
+	}{
+		{
+			name:    "NO-HEBBIAN MRR arm never collected",
+			wantSub: "computed MRRDelta_H over 0 queries",
+			mutate:  func(s *ctQuerySeries) { s.MRR[ctArmNameNoHebbian] = nil },
+		},
+		{
+			name:    "NO-PAS MRR arm never collected",
+			wantSub: "computed MRRDelta_P over 0 queries",
+			mutate:  func(s *ctQuerySeries) { s.MRR[ctArmNameNoPAS] = nil },
+		},
+		{
+			name:    "FULL MRR arm never collected",
+			wantSub: "computed MRRDelta_H over 0 queries",
+			mutate:  func(s *ctQuerySeries) { s.MRR[ctArmNameFull] = nil },
+		},
+		{
+			// The one the NDCG control catches and MRR did not: half the series.
+			name:    "NO-HEBBIAN MRR arm truncated to half",
+			wantSub: "computed MRRDelta_H over 0 queries",
+			mutate: func(s *ctQuerySeries) {
+				s.MRR[ctArmNameNoHebbian] = s.MRR[ctArmNameNoHebbian][:n/2]
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, v := decide(tc.mutate)
+			t.Logf("%-40s: Delta_H=%+.4f  MRRDeltaH=%+.4f (N=%d)  MRRDeltaP=%+.4f (N=%d)  -> %s",
+				tc.name, v.DeltaH.Point, v.MRRDeltaH.Point, v.MRRDeltaH.N,
+				v.MRRDeltaP.Point, v.MRRDeltaP.N, got.Verdict)
+			if got.Verdict == ctVerdictShip {
+				t.Fatalf("SHIPPED on an MRR arm that was never collected. S4's whole job is to "+
+					"corroborate the S2 mechanism on a SECOND metric, and the second metric does "+
+					"not exist here\n%s", got)
+			}
+			ctRequireVerdict(t, got, ctVerdictUnderpowered, tc.wantSub)
+		})
+	}
+
+	// THE MIRROR, on the hand-built fixture: both MRR aggregates at their ZERO
+	// VALUE — "never collected" — must not read as "measured, and it disagrees".
+	// Pre-fix this was a plain float64 0.0 and produced `S4 FAIL: MRR agrees in
+	// sign with NDCG@10`, an audit trail byte-identical to a real disagreement.
+	t.Run("both MRR aggregates at the Go zero", func(t *testing.T) {
+		vaults := ctThree(ctShipVault)
+		if base := ctDecide(vaults, ctGoodJudge(), true); base.Verdict != ctVerdictShip {
+			t.Fatalf("the SHIP fixture is %s, so the mirror proves nothing\n%s", base.Verdict, base)
+		}
+		for i := range vaults {
+			vaults[i].MRRDeltaH = ctMeanDelta{}
+			vaults[i].MRRDeltaP = ctMeanDelta{}
+		}
+		got := ctDecide(vaults, ctGoodJudge(), true)
+		if got.Verdict == ctVerdictInconclusivePowered {
+			t.Fatalf("an MRR series that was NEVER COLLECTED rendered as a measured "+
+				"disagreement and blocked SHIP through S4. 'We did not look' and 'we looked "+
+				"and the metrics disagree' are different findings and this audit trail cannot "+
+				"tell them apart\n%s", got)
+		}
+		ctRequireVerdict(t, got, ctVerdictUnderpowered, "ABSENT OR LENGTH-MISMATCHED MRR series")
+	})
+}
+
 func ctDeltaByName(v ctVaultResult, name string) ctDelta {
 	switch name {
 	case "Delta_H":

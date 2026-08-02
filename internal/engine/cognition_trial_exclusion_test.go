@@ -241,7 +241,7 @@ func TestCognitionTrialRule_AllZeroRelevanceVaultIsUnderpoweredNotKill(t *testin
 	vaults[2].DeltaH = ctDelta{Point: 0.004, CILower: -0.006, CIUpper: 0.014, N: 320}
 	vaults[2].DeltaP = ctDelta{Point: 0.003, CILower: -0.007, CIUpper: 0.013, N: 320}
 	vaults[2].DeltaHP = ctDelta{Point: 0.006, CILower: -0.006, CIUpper: 0.020, N: 320}
-	vaults[2].MRRDeltaH = 0.001
+	vaults[2].MRRDeltaH = ctMeanDelta{Point: 0.001, N: vaults[2].DeltaC.N}
 
 	got := ctDecide(vaults, ctGoodJudge(), true)
 	if got.Verdict == ctVerdictKill {
@@ -473,7 +473,7 @@ func TestCtArms_AblationAdditivity(t *testing.T) {
 		{"below Delta_P: Hebbian harmful on top of base-level", func(v *ctVaultResult) {
 			v.DeltaP = ctDelta{Point: v.DeltaHP.Point + 0.01, CILower: 0.001,
 				CIUpper: 0.05, N: v.DeltaC.N}
-			v.MRRDeltaP = 0.01
+			v.MRRDeltaP = ctMeanDelta{Point: 0.01, N: v.DeltaC.N}
 		}, "THE HEBBIAN BOOST IS NET-HARMFUL on top of the base-level prior"},
 		{"above Delta_C: the base-level prior is harmful", func(v *ctVaultResult) {
 			v.DeltaHP = ctDelta{Point: v.DeltaC.Point + 0.01, CILower: -0.01,

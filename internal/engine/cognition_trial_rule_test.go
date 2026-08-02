@@ -548,8 +548,16 @@ func ctVaultFromSeriesResamples(label string, s *ctQuerySeries, distinctEvents, 
 	boot := func(a, b string) ctDelta {
 		return ctPairedBootstrap(inf(a), inf(b), resamples, seed)
 	}
-	mrrDelta := func(a, b string) float64 {
-		return ctMean(ctInformative(s.Defined, s.MRR[a])) - ctMean(ctInformative(s.Defined, s.MRR[b]))
+	// The MRR arms carry their OWN N, taken from the same informative subset the
+	// NDCG deltas use, and an absent or length-mismatched arm yields the zero
+	// value — N of 0 — exactly as ctPairedBootstrap does. See ctMeanDelta.
+	mrrDelta := func(a, b string) ctMeanDelta {
+		ia := ctInformative(s.Defined, s.MRR[a])
+		ib := ctInformative(s.Defined, s.MRR[b])
+		if len(ia) == 0 || len(ia) != len(ib) {
+			return ctMeanDelta{}
+		}
+		return ctMeanDelta{Point: ctMean(ia) - ctMean(ib), N: len(ia)}
 	}
 
 	perBucket := make([][]float64, nBuckets)
@@ -600,6 +608,39 @@ type ctDelta struct {
 }
 
 func (d ctDelta) halfWidth() float64 { return (d.CIUpper - d.CILower) / 2 }
+
+// ctMeanDelta is a difference of two arm MEANS, inseparable from the count of
+// paired observations it was computed over. It exists for the MRR aggregates,
+// which had neither.
+//
+// THE SIXTH INSTANCE OF THIS FILE FAMILY'S SIGNATURE DEFECT, and the first that
+// is a MEAN rather than a RATIO — every prior sweep went looking for zero
+// denominators. ctMean returns 0 for an empty slice, and the aggregate was
+// `ctMean(inf(A)) - ctMean(inf(B))`, so an MRR arm that was never collected
+// produced +0.0000: a plausible measured number. S4's entire job is to
+// corroborate the S2 mechanism ON A SECOND METRIC, and it was deciding on a
+// metric that may never have existed. Reproduced through the production builder,
+// sole mutation `s.MRR[NO-HEBBIAN] = nil`:
+//
+//	HONEST                    : Delta_H=+0.0478  MRRDeltaH=-0.0798  -> INCONCLUSIVE-BUT-POWERED
+//	UNMEASURED NO-HEBBIAN MRR : Delta_H=+0.0478  MRRDeltaH=+0.4992  -> SHIP
+//
+// and the mirror flips too: both MRR deltas at the Go zero turn a SHIP fixture
+// into INCONCLUSIVE with an audit trail reading "S4 FAIL: MRR agrees in sign
+// with NDCG@10", indistinguishable from genuine measured disagreement.
+//
+// Unlike the four NDCG deltas, MRR had no N and no U2 binding clause, so the
+// truncation case slipped through as well: ctInformative breaks at
+// `i >= len(xs)`, so an MRR arm half as long as Defined is SILENTLY TRUNCATED
+// where the NDCG control is caught by U2's N-mismatch clause. Carrying N — and
+// refusing to form the difference at all when the two arms disagree in length —
+// types both absences at the place they are produced.
+type ctMeanDelta struct {
+	Point float64
+	// N is the count of paired observations behind Point. Zero means the series
+	// was ABSENT or length-mismatched, never "the two means were equal".
+	N int
+}
 
 // ctNonFinite names the first non-finite component of a delta, or "" if all
 // three are numbers. Used by U3's delta-arithmetic clause.
@@ -953,8 +994,11 @@ type ctVaultResult struct {
 	// ShuffledSeedNull is S6's result ON THIS VAULT. K4's veto requires it.
 	ShuffledSeedNull ctNullResult
 
-	MRRDeltaH float64 // sign-agreement input for S4
-	MRRDeltaP float64
+	// The sign-agreement inputs for S4, each carrying the N it was computed
+	// over. See ctMeanDelta: an unmeasured MRR arm used to render as a
+	// measured +0.0000 and manufacture a SHIP.
+	MRRDeltaH ctMeanDelta
+	MRRDeltaP ctMeanDelta
 
 	// DeltaCByBucket is S3's series: the POPULATED weekly buckets only, in
 	// bucket order. OmittedBuckets are the bucket indexes that had no evaluated
@@ -1263,6 +1307,43 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 					v.Label, d.name, d.val.N, v.DeltaC.N, d.readBy, d.name, d.purpose))
 			}
 		}
+		// THE SECOND METRIC, bound to the same series as the first. S4 exists to
+		// corroborate the S2 mechanism on MRR; a corroboration computed over a
+		// different sample — or over no sample — is not one. ctMean(nil) == 0 and
+		// 0 is a plausible delta, so an absent arm reads as a measured agreement
+		// or a measured disagreement depending only on which way the NDCG delta
+		// points. Both directions were demonstrated; see ctMeanDelta.
+		for _, m := range []struct {
+			name string
+			val  ctMeanDelta
+			arm  string
+		}{
+			{"MRRDelta_H", v.MRRDeltaH, "FULL vs NO-HEBBIAN"},
+			{"MRRDelta_P", v.MRRDeltaP, "FULL vs NO-PAS"},
+		} {
+			if m.val.N != v.DeltaC.N {
+				u = append(u, fmt.Sprintf("U2: vault %s computed %s over %d queries and Delta_C "+
+					"over %d. MRR IS THE SECOND METRIC S4 corroborates the S2 mechanism with (%s), "+
+					"and it must be the SAME paired series. An N of 0 is an ABSENT OR "+
+					"LENGTH-MISMATCHED MRR series: the aggregate is a mean, ctMean of an empty "+
+					"slice is 0, and a 0 delta reads as measured agreement or measured "+
+					"disagreement depending only on which way NDCG happens to point.",
+					v.Label, m.name, m.val.N, v.DeltaC.N, m.arm))
+			}
+			// A mean that is not a number is not "no objection" — the U3 delta
+			// clause's reasoning, on the one aggregate U3's loop does not cover.
+			// Unreachable through today's harness (ctMRR returns a finite
+			// reciprocal rank and ctInformative drops the undefined queries), and
+			// here for the same reason U3's is: "unreachable today" is a property
+			// that has to be re-derived after every edit, and ctSameSign(x, NaN)
+			// is false — which S4 reads as honest disagreement.
+			if bad := ctNonFiniteScalar(m.val.Point); bad != "" {
+				u = append(u, fmt.Sprintf("U2: vault %s reports %s as %s. ctSameSign against a "+
+					"non-number is false and S4 reads false as MEASURED DISAGREEMENT, so an "+
+					"ABSENCE OF ARITHMETIC would block SHIP under an audit trail identical to a "+
+					"metric that genuinely disagreed.", v.Label, m.name, bad))
+			}
+		}
 		if v.NQueries < ctPreregistered.MinQueriesPerVault {
 			u = append(u, fmt.Sprintf("U2: vault %s has %d INFORMATIVE labeled held-out queries "+
 				"(%d more were zero-relevance and excluded), need %d",
@@ -1512,10 +1593,19 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		// materially different claims, and the second is the one that says
 		// whether a populated bucket means anything. The thinnest bucket is
 		// named because an average hides a bucket of one.
+		//
+		// `thinnest == 0 || ...` treated a bucket holding ZERO queries as an
+		// uninitialised accumulator and overwrote it, so [0, 40, 40, ...] printed
+		// "thinnest bucket 40" — the report claiming the healthiest possible
+		// bucket exactly where the thinnest possible one sat. Ironic in the one
+		// field that exists because "an average hides a bucket of one". Not
+		// reachable through ctBucketDeltas, which omits empty buckets, and
+		// reachable through any hand-built ctBucketDelta; the sentinel is the
+		// INDEX, which cannot collide with a value.
 		fitted, thinnest := 0, 0
-		for _, bd := range v.DeltaCByBucket {
+		for i, bd := range v.DeltaCByBucket {
 			fitted += bd.NQueries
-			if thinnest == 0 || bd.NQueries < thinnest {
+			if i == 0 || bd.NQueries < thinnest {
 				thinnest = bd.NQueries
 			}
 		}
@@ -1534,20 +1624,34 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		ctPassFail(s3), s3Vaults, len(vaults), strings.Join(trendDetail, "; ")))
 
 	// S4 — MRR agrees in sign with NDCG@10 on whichever mechanism satisfied S2.
+	//
+	// THE TWO NUMBERS BEING COMPARED, AND THE N BEHIND THE SECOND, ARE PRINTED.
+	// A sign agreement is a comparison of two quantities and the report used to
+	// carry neither, so a reader could not tell a +0.03-vs-+0.03 corroboration
+	// from a +0.03-vs-+0.4999 one — and +0.4999 was the value an UNMEASURED MRR
+	// arm produced (ctMeanDelta). U2 now refuses that input outright; printing it
+	// is the backstop, because a gate whose inputs never reach the write-up is
+	// re-derivable only by rerunning the trial.
 	s4 := false
+	s4Detail := "no mechanism cleared S2, so there is nothing to corroborate"
 	if s2 {
 		for _, v := range vaults {
 			if s2Which == "Hebbian" && v.DeltaH.Point >= ctPreregistered.MinDeltaMechanism && v.DeltaH.CILower > 0 {
-				s4 = ctSameSign(v.DeltaH.Point, v.MRRDeltaH)
+				s4 = ctSameSign(v.DeltaH.Point, v.MRRDeltaH.Point)
+				s4Detail = fmt.Sprintf("vault %s Hebbian: NDCG@10 %+.4f vs MRR %+.4f over N=%d",
+					v.Label, v.DeltaH.Point, v.MRRDeltaH.Point, v.MRRDeltaH.N)
 				break
 			}
 			if s2Which == "PAS" && v.DeltaP.Point >= ctPreregistered.MinDeltaMechanism && v.DeltaP.CILower > 0 {
-				s4 = ctSameSign(v.DeltaP.Point, v.MRRDeltaP)
+				s4 = ctSameSign(v.DeltaP.Point, v.MRRDeltaP.Point)
+				s4Detail = fmt.Sprintf("vault %s PAS: NDCG@10 %+.4f vs MRR %+.4f over N=%d",
+					v.Label, v.DeltaP.Point, v.MRRDeltaP.Point, v.MRRDeltaP.N)
 				break
 			}
 		}
 	}
-	ship = append(ship, fmt.Sprintf("S4 %s: MRR agrees in sign with NDCG@10 on the S2 mechanism", ctPassFail(s4)))
+	ship = append(ship, fmt.Sprintf("S4 %s: MRR agrees in sign with NDCG@10 on the S2 mechanism (%s)",
+		ctPassFail(s4), s4Detail))
 
 	// S5
 	s5 := judge.Ran && judge.LabelHashMatches

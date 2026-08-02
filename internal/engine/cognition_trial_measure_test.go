@@ -594,6 +594,28 @@ func ctSelfCheck(rows []ctRow, hebScale float64, tol float64) int {
 // same weight. That is a direct dividend of #766 and it is what makes the
 // interleaving defensible.
 //
+// A LIMIT THE MONOTONIC DECAY ANCHOR IMPOSES, stated here rather than
+// discovered later. `lastActivated` is now monotonically non-decreasing at the
+// storage writers (COG-27's amendment: a remotely-produced stamp must not move
+// a live edge's decay anchor backwards). The replay writes onto a clone that
+// still holds the BASELINE graph, whose edges carry their real, recent
+// `lastActivated` — so for a pair that already exists in G0, a replayed
+// historical stamp is clamped forward to the baseline's, and that pair's
+// replayed forgetting is suppressed. Pairs the replay CREATES are unaffected
+// (an absent edge has no anchor to clamp against), which is why the fidelity
+// pins stay green.
+//
+// The consequence is that `replay` mode reconstructs a graph that forgets LESS
+// than production did, on exactly the edges it shares with the baseline — a
+// SHIP-ward bias, and it belongs in the design's both-directions bias table
+// beside the over-deep-seeding one. It is not fixed here for two reasons: the
+// alternative is to let a stale stamp collapse a live edge irreversibly, which
+// is the product defect this constraint exists to close; and the clean fix is
+// to build G1 from a CLEARED association namespace rather than on top of G0,
+// which is a change to what the replay arm means and belongs with the
+// transition-table reconstruction that is already deferred. `asis` is the
+// runnable configuration and is untouched — it trains nothing.
+//
 // checkpoint is called at each weekly boundary with the bucket index.
 func ctReplay(
 	t *testing.T,
@@ -1175,10 +1197,10 @@ func TestCognitionTrial(t *testing.T) {
 		vr.DeltaC.Point, vr.DeltaC.CILower, vr.DeltaC.CIUpper, vr.DeltaC.SDOfDiff, vr.DeltaC.N)
 	t.Logf("Delta_HP (FULL - BASE-LEVEL-ONLY)    = %+.4f  95%% CI [%+.4f, %+.4f]  <- WHAT A KILL COSTS",
 		vr.DeltaHP.Point, vr.DeltaHP.CILower, vr.DeltaHP.CIUpper)
-	t.Logf("Delta_H  (FULL - NO-HEBBIAN)         = %+.4f  95%% CI [%+.4f, %+.4f]  MRR %+.4f",
-		vr.DeltaH.Point, vr.DeltaH.CILower, vr.DeltaH.CIUpper, vr.MRRDeltaH)
-	t.Logf("Delta_P  (FULL - NO-PAS)             = %+.4f  95%% CI [%+.4f, %+.4f]  MRR %+.4f",
-		vr.DeltaP.Point, vr.DeltaP.CILower, vr.DeltaP.CIUpper, vr.MRRDeltaP)
+	t.Logf("Delta_H  (FULL - NO-HEBBIAN)         = %+.4f  95%% CI [%+.4f, %+.4f]  MRR %+.4f over N=%d",
+		vr.DeltaH.Point, vr.DeltaH.CILower, vr.DeltaH.CIUpper, vr.MRRDeltaH.Point, vr.MRRDeltaH.N)
+	t.Logf("Delta_P  (FULL - NO-PAS)             = %+.4f  95%% CI [%+.4f, %+.4f]  MRR %+.4f over N=%d",
+		vr.DeltaP.Point, vr.DeltaP.CILower, vr.DeltaP.CIUpper, vr.MRRDeltaP.Point, vr.MRRDeltaP.N)
 	t.Logf("REPORTED, GATES NOTHING — Delta_C over ALL %d scored queries (zero-relevance ones "+
 		"included as paired 0-vs-0) = %+.4f 95%% CI [%+.4f, %+.4f]. It is the DILUTED number: "+
 		"including a point mass at zero shrinks the mean and the SE by the same factor, so the "+

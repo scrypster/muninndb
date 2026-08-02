@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was stamped at write time rather than at co-activation time. An event that
   waited in the worker's channel was stamped late. Zero-value behaviour is
   unchanged.
+- **An association's decay anchor never moves backwards** (COG-27). Making the
+  co-activation timestamp writable also made it *remotely* writable: in a
+  cluster, a cog-forwarded co-activation carries the peer's clock verbatim.
+  `lastActivated` is COG-27's elapsed-time input, so a stale stamp collapsed a
+  live edge's decay ceiling on the next pass — irreversibly, since decay never
+  raises a weight. Both association writers now keep the later of the stored and
+  the incoming stamp, the same shape `peakWeight` already had beside them.
+  **User-visible in cluster mode only:** a lagging or skewed peer, or a
+  cog-forward backlog delivered after a partition heals, can no longer age
+  another node's associations by the size of the clock gap.
 - `RecallEvent`'s doc comment no longer claims a "positives = surfaced AND
   cited" ground-truth join that is not implementable from what is on disk (no
   join key, no identity on either side, context-free residue, and a citation
