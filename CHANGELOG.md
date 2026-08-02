@@ -13,6 +13,101 @@ Nothing yet.
 
 ---
 
+## [0.10.0] - 2026-08-01
+
+The trust release. Nine rounds of blind hands-on evaluation by AI agents drove
+this cycle: each round's top complaint was fixed, adversarially reviewed, and
+re-verified live by the evaluator that filed it.
+
+### The cognitive substrate, made honest
+
+- **Full-confidence learning restored** (#757): a key-encoding overflow had sent
+  every weight-1.0 association (declared links, decide evidence, LTP-saturated
+  learning) to the wrong key position since inception, where it read back as 0.
+  "Strengthens with use" works for the first time. A startup repair (#759)
+  relocates identifiable pre-fix keys, watermarked and gated so decay cannot
+  destroy the evidence first.
+- **Association decay is a real forgetting curve** (#766): decay was a per-pass
+  multiplier on a 60-second tick (a 13.5-minute half-life) since February; every
+  learned edge hit the floor within an hour of last use. Now a peak-anchored
+  elapsed-time ceiling (default 30-day half-life, `assoc_half_life_days`),
+  cadence-independent by construction, no on-disk format change. A legacy
+  `assoc_decay_factor` in (0,1) is reinterpreted per-day with a one-time loud
+  WARN; a factor of 1.0 or above skips loudly instead of silently enabling.
+- **Contradictions stopped destroying data** (#747) and started mattering
+  (#772): declaring a `contradicts` link now changes what recall returns — both
+  sides demoted and annotated, a response-level `conflict` block, and every
+  resolution path (evolve, forget(not_true_since), link(supersedes)) actually
+  clears it, immediately, in recall and in the report. The shared worker's flush
+  ticker was a debounce that starved detection (and the confidence penalty)
+  under any active session; fixed.
+
+### Recall that tells the truth
+
+- **Version chains resolve to their head** (#767): a query phrased in a
+  superseded fact's old wording returns the current version, attributed
+  (`substituted_for`, `substitution_basis`), with fork/cycle refusal and loud
+  truncation. Evolve now wakes the embed processor, closing a ~3-minute window
+  where a fresh successor was semantically invisible.
+- **A first-class relevance band** (#778): every recall row carries
+  `relevance_band` (strong/moderate/weak/filter_match/uncalibrated) derived
+  from the absolute score against the vault's own calibration — the per-query
+  score renormalization can no longer dress a weak neighbor as certainty.
+  `absolute_score` and `content_match` are now visible on the wire. The
+  response-level "nothing strongly matched" hint deliberately did not ship: it
+  failed its pre-committed acceptance rule (16.7% vs 70%), and that record is
+  pinned in CI.
+- **Calibrated abstention** (#715, #718, #754): recall can honestly abstain
+  (`abstained`, `abstained_reason`) with an anisotropy-calibrated semantic
+  floor, self-measured per model; embedding failure degrades loudly
+  (`semantic_degraded`, #740). RRF vaults no longer return silently-empty
+  default recall (#705); recall-mode presets no longer bypass the mode-aware
+  threshold (#710); top-N ordering is deterministic (#699).
+- **Currency advisories stopped lying** (#738, #758): the version-cluster
+  advisory ships with a universal version-marker gate and declared-chain
+  suppression — a deliberate near-silencing on vaults without version
+  vocabulary, because a false "possibly superseded" on a live fact is worse
+  than silence.
+
+### The write path and the agent experience
+
+- **The Push, increment 1** (#694): armed intentions with focal-cue notices
+  over MCP, behind `MUNINN_PROSPECTIVE`.
+- **Curator reflex in the on-connect surface** (#741) and evolve-first guidance
+  (#723); six silent-substitution defects from hands-on evaluation fixed in one
+  pass (#746); unrecognized memory types (#742) and link relations (#745) are
+  never silently swallowed; the entity-type enum that cost 64 points of entity
+  coverage is gone (#743); evolve records its real write verb in provenance
+  (#739); optional inline entities on evolve (#680); importance dimension with
+  pruning protection (#689); per-vault exclude-tags (#735).
+- **muninn_remember names the vault it resolved to** when the caller omits one
+  (#772 rider).
+
+### Operations, safety, durability
+
+- Consolidate no longer loses data under concurrent writes (#754). Stale PID
+  files no longer break `muninn stop` (#650). Trigger events carry the full
+  vault prefix (#697). Backup/import test hardening (#753), hermeticity
+  doctrine for async assertions (#727), and four CI timing flakes fixed at the
+  cause. Privacy: design records triaged with a public-repo naming rule
+  enforced by a reviewer-level check (#775, #734).
+
+### Known and named
+
+- The recall gate's answerability ceiling is measured, in-tree, and honest:
+  topically-adjacent unanswerable queries pass at high rates because they carry
+  real evidence; no scalar gate fixes this (#757's labeled query set). The
+  abstain-on-weak default both evaluators now ask for is the next increment's
+  question, gated by that measurement.
+- Pre-#766 decay damage is not retroactively undone: floored edges re-learn
+  from the floor rather than being resurrected by fiat.
+- Open, filed, and tracked: consolidation's embed-lag recall hole (#779), stale
+  concept after evolve (#769), entity co-occurrence staleness after evolve
+  (#780), the same-key relType replacement footgun (#771), CGDN's dead
+  experimental path (#768).
+
+---
+
 ## [0.9.0] - 2026-07-20
 
 Adds an agent-oriented credential and multi-agent workflow layer (capability
