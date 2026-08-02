@@ -619,6 +619,20 @@ func ctVaultResultProbes() map[string]ctProbe {
 				t.Fatalf("no delta line %q in the report, so the ordering claim is vacuous\n%s",
 					firstDeltaLine, got)
 			}
+			// And the pin on WHY it had to change: the first reason containing
+			// the string "Delta_C" is the census block's own trailing summary
+			// sentence, which mentions Delta_C in prose. Matching on that proved
+			// a one-line margin over a line of the census itself.
+			for i, r := range got.Reasons {
+				if strings.Contains(r, "Delta_C") {
+					ctExpect(t, strings.HasPrefix(r, "CENSUS"),
+						"reason %d is the first to mention Delta_C and it is %q. This probe used "+
+							"to take that index as 'the first delta line'; the pin exists so that "+
+							"if the census stops being the thing it matches, the reason is "+
+							"re-examined rather than inherited", i, r)
+					break
+				}
+			}
 			ctExpect(t, idxCensus < idxDelta,
 				"the census line appears at position %d and the first delta line at %d. D1 "+
 					"requires the census BEFORE any delta is printed: it is the only visible "+
@@ -873,19 +887,27 @@ func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
 			// passes — and no in-process check can. The decidable form is mutation
 			// testing (perturb the rule, require the probe to fail), which is a
 			// separate harness and is deliberately NOT built here.
-			ruleBefore := ctRuleCalls.Load()
-			assertBefore := ctProbeAssertions.Load()
-			t.Run(tc.what+"."+name, probe)
-			if ctRuleCalls.Load() == ruleBefore {
-				t.Errorf("%s.%s's probe NEVER ENTERED THE RULE. A probe that does not call "+
-					"ctDecide or any rule function cannot be showing that this field binds — an "+
-					"empty probe body passes every other check in this census.", tc.what, name)
-			}
-			if ctProbeAssertions.Load() == assertBefore {
-				t.Errorf("%s.%s's probe made NO ASSERTION (via ctRequireVerdict / ctExpectReason "+
-					"/ ctExpect). It called the rule and discarded the answer, which proves the "+
-					"rule does not panic and nothing else.", tc.what, name)
-			}
+			//
+			// The counters are read INSIDE the subtest, not around t.Run: a
+			// subtest excluded by -run never executes its body, and a check
+			// outside would then report every filtered-out probe as inert.
+			// (Found by running exactly that command.)
+			what, field := tc.what, name
+			t.Run(what+"."+field, func(t *testing.T) {
+				ruleBefore := ctRuleCalls.Load()
+				assertBefore := ctProbeAssertions.Load()
+				probe(t)
+				if ctRuleCalls.Load() == ruleBefore {
+					t.Errorf("%s.%s's probe NEVER ENTERED THE RULE. A probe that does not call "+
+						"ctDecide or any rule function cannot be showing that this field binds — "+
+						"an empty probe body passes every other check in this census.", what, field)
+				}
+				if ctProbeAssertions.Load() == assertBefore {
+					t.Errorf("%s.%s's probe made NO ASSERTION (via ctRequireVerdict / "+
+						"ctExpectReason / ctExpect). It called the rule and discarded the answer, "+
+						"which proves the rule does not panic and nothing else.", what, field)
+				}
+			})
 		}
 		for name := range tc.probes {
 			if !seen[name] {

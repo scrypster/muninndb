@@ -388,50 +388,58 @@ func ctDeltaByName(v ctVaultResult, name string) ctDelta {
 // rejected one, so any future edit that decouples them re-opens it silently.
 // ---------------------------------------------------------------------------
 
+// ctNaNDemoVaults is a vault set that would KILL but for ONE vault whose
+// Delta_HP — what a KILL costs — is +0.045 with the interval clear of zero. That
+// single number is the whole reason the verdict is INCONCLUSIVE-BUT-POWERED, so
+// it is exactly the place to show what a NaN does.
+func ctNaNDemoVaults() []ctVaultResult {
+	v := ctThree(ctKillVault)
+	v[1].DeltaC = ctDelta{Point: 0.050, CILower: 0.025, CIUpper: 0.075, N: 340}
+	v[1].DeltaHP = ctDelta{Point: 0.045, CILower: 0.020, CIUpper: 0.070, N: 340}
+	return v
+}
+
 func TestCognitionTrialRule_NaNDeltaIsNotNoObjection(t *testing.T) {
-	// The demonstration first: the SAME vault set, one field changed.
-	powered := ctThree(ctShipVault)
-	for i := range powered {
-		powered[i].DeltaC = ctDelta{Point: 0.020, CILower: 0.005, CIUpper: 0.035, N: 320}
-		powered[i].DeltaH = ctDelta{Point: 0.010, CILower: -0.004, CIUpper: 0.024, N: 320}
-		powered[i].DeltaP = ctDelta{Point: 0.008, CILower: -0.006, CIUpper: 0.022, N: 320}
-		powered[i].DeltaHP = ctDelta{Point: 0.045, CILower: 0.020, CIUpper: 0.070, N: 320}
-	}
-	ctRequireVerdict(t, ctDecide(powered, ctGoodJudge(), true),
+	// The demonstration first, and it is a VERDICT FLIP, not a cosmetic one.
+	ctRequireVerdict(t, ctDecide(ctNaNDemoVaults(), ctGoodJudge(), true),
 		ctVerdictInconclusivePowered, "K2 FAIL")
 
 	for _, tc := range []struct {
 		name  string
 		field func(*ctVaultResult, float64)
+		// flipsToKill records the cases where the NaN does not merely go
+		// unnoticed but actively hands the verdict to KILL, because the clause
+		// that was blocking it reads FALSE against a NaN.
+		flipsToKill bool
 	}{
-		{"Delta_C point", func(v *ctVaultResult, x float64) { v.DeltaC.Point = x }},
-		{"Delta_C CI upper", func(v *ctVaultResult, x float64) { v.DeltaC.CIUpper = x }},
-		{"Delta_H point", func(v *ctVaultResult, x float64) { v.DeltaH.Point = x }},
-		{"Delta_P point", func(v *ctVaultResult, x float64) { v.DeltaP.Point = x }},
-		{"Delta_HP point", func(v *ctVaultResult, x float64) { v.DeltaHP.Point = x }},
-		{"Delta_HP CI lower", func(v *ctVaultResult, x float64) { v.DeltaHP.CILower = x }},
+		{"Delta_HP point", func(v *ctVaultResult, x float64) { v.DeltaHP.Point = x }, true},
+		{"Delta_HP CI lower", func(v *ctVaultResult, x float64) { v.DeltaHP.CILower = x }, true},
+		{"Delta_C point", func(v *ctVaultResult, x float64) { v.DeltaC.Point = x }, false},
+		{"Delta_C CI upper", func(v *ctVaultResult, x float64) { v.DeltaC.CIUpper = x }, false},
+		{"Delta_H point", func(v *ctVaultResult, x float64) { v.DeltaH.Point = x }, false},
+		{"Delta_P point", func(v *ctVaultResult, x float64) { v.DeltaP.Point = x }, false},
 	} {
 		for _, poison := range []struct {
 			what string
 			val  float64
 		}{{"NaN", math.NaN()}, {"+Inf", math.Inf(1)}} {
 			t.Run(tc.name+" = "+poison.what, func(t *testing.T) {
-				vaults := ctThree(ctShipVault)
-				for i := range vaults {
-					vaults[i].DeltaC = ctDelta{Point: 0.020, CILower: 0.005, CIUpper: 0.035, N: 320}
-					vaults[i].DeltaH = ctDelta{Point: 0.010, CILower: -0.004, CIUpper: 0.024, N: 320}
-					vaults[i].DeltaP = ctDelta{Point: 0.008, CILower: -0.006, CIUpper: 0.022, N: 320}
-					vaults[i].DeltaHP = ctDelta{Point: 0.045, CILower: 0.020, CIUpper: 0.070, N: 320}
-				}
-				tc.field(&vaults[0], poison.val)
+				vaults := ctNaNDemoVaults()
+				tc.field(&vaults[1], poison.val)
 				got := ctDecide(vaults, ctGoodJudge(), true)
 				if got.Verdict == ctVerdictKill {
-					t.Fatalf("a %s in %s produced a KILL on a vault set that returns "+
-						"INCONCLUSIVE-BUT-POWERED with a number there. Every clause reads FALSE "+
-						"as 'no objection' and every comparison against %s is false\n%s",
+					t.Fatalf("a %s in %s produced a KILL on the vault set that returns "+
+						"INCONCLUSIVE-BUT-POWERED with a number there. The clause that was "+
+						"blocking the kill reads FALSE against %s, and FALSE means 'no "+
+						"objection' everywhere in this rule\n%s",
 						poison.what, tc.name, poison.what, got)
 				}
 				ctRequireVerdict(t, got, ctVerdictUnderpowered, "U3 (delta arithmetic)")
+				if tc.flipsToKill && poison.what == "NaN" {
+					t.Logf("without the U3 delta-arithmetic clause this case is a KILL: the only "+
+						"thing standing between this vault set and retiring the cognitive layer "+
+						"is %s, and a NaN there is silently no objection", tc.name)
+				}
 			})
 		}
 	}
