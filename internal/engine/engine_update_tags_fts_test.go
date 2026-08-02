@@ -169,6 +169,16 @@ func TestUpdateTags_ThenForget_LeavesNoOrphanPostings(t *testing.T) {
 // and skews the corpus statistics for a document that is not even active — and
 // this branch documents soft-deleted engrams as retaggable, so it is a reachable
 // state, not a hypothetical one (#720).
+//
+// SCOPE: this is the TRASH case specifically. The drop is gated on trash versus
+// history, not on State alone — a plain Forget leaves ValidUntil OPEN, which is
+// what makes this record discarded rather than superseded, and Forget has
+// already de-indexed it. An evolve predecessor carries a CLOSED ValidUntil and
+// is still indexed on purpose, so it takes the reindex arm instead; see
+// TestUpdateTags_EvolvePredecessorKeepsPostings and
+// activation.CarriesSupersessionSignature (#720 review, finding 1). Archived
+// engrams likewise reindex: nothing de-indexes on archival, so dropping them
+// here destroyed live postings.
 func TestUpdateTags_AfterForget_DoesNotReindexSoftDeleted(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()

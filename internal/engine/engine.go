@@ -1080,15 +1080,29 @@ func (e *Engine) validateClientEmbeddingDim(wsPrefix [8]byte, vec []float32) err
 // replaces. The delete half was already synchronous and a retag is rare, so
 // there is nothing to buy by keeping half of it on the worker.
 //
-// A non-active engram is NOT re-added. fts.DeleteEngram exists to keep
-// soft-deleted engrams out of search results (see its header), and reindexing
-// one would undo that: activation's phase-6 filter drops StateSoftDeleted/
-// StateArchived before returning candidates, so it cannot produce a false
-// positive, but the postings still burn candidate slots for a document that is
-// not even active. So a soft-deleted or archived engram gets its postings
-// dropped and nothing written back — it stays retaggable (the record is
-// updated; muninn_restore then reindexes nothing, but muninn reindex-fts and any
-// later edit rebuild it).
+// TRASH is de-indexed; HISTORY is reindexed. The drop is gated on
+// activation.CarriesSupersessionSignature, not on State alone. Only a plain
+// soft-delete — muninn_forget without not_true_since, which leaves ValidUntil
+// OPEN — gets its postings dropped: that record is trash, Forget already
+// de-indexed it at delete time, and re-adding it would put a discarded document
+// back where it burns candidate seed slots.
+//
+// Everything else is reindexed, including a CLOSED-stamp soft-delete and an
+// archived record. An earlier revision dropped postings for StateSoftDeleted/
+// StateArchived unconditionally, reasoning that phase 6 filters both before
+// returning candidates. That premise is false in exactly the case that matters:
+// activation.PassesLifecycle ADMITS a soft-deleted engram carrying a closed
+// ValidUntil under as_of or include_invalid — precisely the evolve/supersedes
+// signature — and Evolve deliberately does NOT delete its predecessor's postings
+// the way Forget does, because those postings are what a query phrased in the
+// OLD wording still matches (COG-28 then resolves that evidence forward to the
+// chain head). So retagging an evolve predecessor permanently destroyed the
+// keyword path to a superseded fact that as_of is contracted to still reach,
+// recoverable only by reindex-fts (#720 review, finding 1: one hit before the
+// retag, zero after). Archived is reindexed for the adjacent reason — nothing
+// de-indexes on archival, so dropping here would make a metadata edit the only
+// thing that ever removes those postings, and archival is a storage-tier
+// eviction rather than a statement about truth.
 //
 // The delete side must be keyed on the OLD document — read here BEFORE
 // store.UpdateTags overwrites it, since the terms to remove are derived from the
@@ -1100,6 +1114,20 @@ func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, 
 		return err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
+
+	// Serialize the WHOLE read-prev → write → reindex sequence under the same
+	// per-engram stripe lock the storage write takes, via the unlocked inner
+	// variant (casLocks is not reentrant). Storage being atomic is not enough:
+	// the FTS delta is derived from the tag set read BEFORE the write, so two
+	// concurrent retags of one engram could interleave read/write/reindex and
+	// strand the loser's postings while double-decrementing df_t for the terms
+	// both passes believed they removed — and because df_t is corpus-wide, that
+	// moved an UNINVOLVED third engram's full-text score by 6.5%. Measured at 36
+	// of 40 trials with no artificial delay (#720 review, finding 3). Two agents
+	// retagging the same memory is ordinary cooperative behaviour, not an
+	// adversarial edge, so documenting the race was not sufficient.
+	unlock := e.store.LockEngram(id)
+	defer unlock()
 
 	// Capture the OLD tags (and the text fields the postings were built from)
 	// before the write; this read is what makes the FTS delete exact.
@@ -1121,7 +1149,7 @@ func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, 
 		}
 	}
 
-	if err := e.store.UpdateTags(ctx, wsPrefix, id, tags); err != nil {
+	if err := e.store.UpdateTagsLocked(ctx, wsPrefix, id, tags); err != nil {
 		return err
 	}
 
@@ -1134,16 +1162,19 @@ func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, 
 		return nil
 	}
 
-	// Authoritative post-write state. prev.State is a pre-write snapshot and a
-	// concurrent Forget can land in between; store.UpdateTags re-caches the
-	// committed record under the stripe lock, so this read is cheap and current.
-	state := prev.State
-	if cur, err := e.store.GetEngram(ctx, wsPrefix, id); err == nil && cur != nil {
-		state = cur.State
+	// Authoritative post-write record. prev is a pre-write snapshot; the stripe
+	// lock held above means no concurrent writer can have changed the lifecycle
+	// under us, but store.UpdateTagsLocked re-caches the committed record so this
+	// read is cheap and is the one that reflects the commit.
+	cur := prev
+	if committed, err := e.store.GetEngram(ctx, wsPrefix, id); err == nil && committed != nil {
+		cur = committed
 	}
-	if state == storage.StateSoftDeleted || state == storage.StateArchived {
-		// Not active: drop the old postings and write nothing back, so a retag
-		// cannot resurrect a deleted engram into the candidate pool.
+	if cur.State == storage.StateSoftDeleted && !activation.CarriesSupersessionSignature(cur) {
+		// Trash, not history: an open ValidUntil means muninn_forget threw this
+		// record away rather than superseding it, and Forget already de-indexed
+		// it. Drop whatever postings remain and write nothing back, so a retag
+		// cannot put a discarded document into the candidate pool.
 		if err := e.fts.DeleteEngram(wsPrefix, [16]byte(id),
 			prevDoc.Concept, prevDoc.CreatedBy, prevDoc.Content, prevDoc.Tags); err != nil {
 			slog.Warn("engine: update_tags: fts delete failed", "id", id.String(), "err", err)

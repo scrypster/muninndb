@@ -129,6 +129,162 @@ func TestUpdateTags_Normalization(t *testing.T) {
 	}
 }
 
+// TestUpdateTags_AllEntriesRejectedIsAnError pins the loud-rejection rule
+// (#720 review, finding 4).
+//
+// Normalization silently drops entries, and an explicit empty array is a
+// deliberate CLEAR. Composed, those two reasonable rules produce an
+// unreasonable outcome: a caller that sends a non-empty tags array where every
+// entry is unusable — the shape an LLM produces when it emits numbers, nulls,
+// or an over-long generated tag — gets `"ok": true` for a call that WIPED the
+// engram's tags. Destructive, silent, and reported as success. That is the
+// silently-wrong class this project treats as the worst failure mode, and
+// nothing in the response distinguishes it from a clear the caller meant.
+//
+// The error must also NAME the offending entry, because a caller that cannot
+// see which entry failed cannot fix its output.
+//
+// RED (handleUpdateTags reverted to plain normalizeTags with no guard): each
+// case returns success and the engine is called with an empty tag set.
+func TestUpdateTags_AllEntriesRejectedIsAnError(t *testing.T) {
+	cases := []struct {
+		name    string
+		tags    []any
+		wantMsg string
+	}{
+		{"all non-strings", []any{42, nil, true}, "not a string"},
+		{"all empty strings", []any{"", ""}, "empty string"},
+		{"all over the byte limit", []any{strings.Repeat("x", 129)}, "over the 128-byte limit"},
+		{"mixed rejects", []any{42, "", nil}, "no usable tag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := &captureTagsEngine{}
+			srv := New(":0", eng, "", nil, nil, nil)
+			w := doAuthenticatedPost(srv, "", mkToolCallBody("muninn_update_tags", map[string]any{
+				"id":   testEngramID,
+				"tags": tc.tags,
+			}))
+
+			var resp JSONRPCResponse
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp.Error == nil {
+				t.Fatalf("a non-empty tags array that normalizes to empty returned success — "+
+					"the engram's tags were wiped and the caller was told %v", resp.Result)
+			}
+			if resp.Error.Code != -32602 {
+				t.Errorf("code = %d, want -32602 (the arguments are the problem)", resp.Error.Code)
+			}
+			if !strings.Contains(resp.Error.Message, tc.wantMsg) {
+				t.Errorf("message = %q, want it to name the offending entry (%q)", resp.Error.Message, tc.wantMsg)
+			}
+			if !strings.Contains(resp.Error.Message, "empty array") {
+				t.Errorf("message = %q, want it to point at the deliberate-clear path", resp.Error.Message)
+			}
+			if eng.calls != 0 {
+				t.Errorf("engine was called %d times — the destructive write must not reach it", eng.calls)
+			}
+		})
+	}
+}
+
+// TestUpdateTags_PartialNormalizationReportsDropped: when SOME entries survive,
+// the call still succeeds (the caller's intent is recoverable), but the response
+// says how many entries were dropped and why. Without this the caller cannot
+// tell a 3-tag request that stored 3 from one that stored 1.
+func TestUpdateTags_PartialNormalizationReportsDropped(t *testing.T) {
+	eng := &captureTagsEngine{}
+	srv := New(":0", eng, "", nil, nil, nil)
+	w := doAuthenticatedPost(srv, "", mkToolCallBody("muninn_update_tags", map[string]any{
+		"id":   testEngramID,
+		"tags": []any{"keep-me", 42, "", strings.Repeat("z", 200)},
+	}))
+
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out := extractInnerJSON(t, resp)
+
+	if eng.calls != 1 {
+		t.Fatalf("engine UpdateTags called %d times, want 1", eng.calls)
+	}
+	if len(eng.gotTags) != 1 || eng.gotTags[0] != "keep-me" {
+		t.Errorf("engine got %v, want the one usable tag", eng.gotTags)
+	}
+	dropped, ok := out["dropped"].(float64)
+	if !ok {
+		t.Fatalf("response has no 'dropped' count on a partially-normalized call: %v", out)
+	}
+	if int(dropped) != 3 {
+		t.Errorf("dropped = %d, want 3", int(dropped))
+	}
+	detail, ok := out["dropped_detail"].([]any)
+	if !ok || len(detail) != 3 {
+		t.Fatalf("dropped_detail = %v, want three per-entry reasons", out["dropped_detail"])
+	}
+	joined := ""
+	for _, d := range detail {
+		s, _ := d.(string)
+		joined += s + "\n"
+	}
+	for _, want := range []string{"not a string", "empty string", "over the 128-byte limit"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("dropped_detail is missing the %q reason:\n%s", want, joined)
+		}
+	}
+}
+
+// TestUpdateTags_CleanCallReportsNoDropped is the negative control: the
+// dropped fields must be ABSENT when nothing was dropped, so their presence
+// stays a reliable signal rather than noise on every response.
+func TestUpdateTags_CleanCallReportsNoDropped(t *testing.T) {
+	eng := &captureTagsEngine{}
+	srv := New(":0", eng, "", nil, nil, nil)
+	w := doAuthenticatedPost(srv, "", mkToolCallBody("muninn_update_tags", map[string]any{
+		"id":   testEngramID,
+		"tags": []any{"alpha", "beta"},
+	}))
+
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out := extractInnerJSON(t, resp)
+	if _, present := out["dropped"]; present {
+		t.Errorf("clean call reported 'dropped' = %v, want the field absent", out["dropped"])
+	}
+	if _, present := out["dropped_detail"]; present {
+		t.Errorf("clean call reported 'dropped_detail', want the field absent")
+	}
+}
+
+// TestUpdateTags_EmptyArrayStillClears re-pins the deliberate-clear path
+// against the new guard: the rejection is keyed on "the caller SENT entries and
+// none survived", not on "the resulting set is empty". An empty array must keep
+// working, or the guard has broken the documented way to remove all tags.
+func TestUpdateTags_EmptyArrayStillClears(t *testing.T) {
+	eng := &captureTagsEngine{}
+	srv := New(":0", eng, "", nil, nil, nil)
+	w := doAuthenticatedPost(srv, "", mkToolCallBody("muninn_update_tags", map[string]any{
+		"id":   testEngramID,
+		"tags": []any{},
+	}))
+
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("an explicit empty array must still clear, got error: %v", resp.Error.Message)
+	}
+	if eng.calls != 1 || len(eng.gotTags) != 0 {
+		t.Errorf("engine calls=%d tags=%v, want one call with an empty set", eng.calls, eng.gotTags)
+	}
+}
+
 // failingTagsEngine reports an engine-level failure (e.g. engram not found).
 type failingTagsEngine struct {
 	fakeEngine

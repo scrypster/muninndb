@@ -824,10 +824,44 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 // this method can reject a tag AFTER it has already mutated the cached record
 // (see the comment at that mutation).
 func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID, tags []string) error {
+	unlock := ps.LockEngram(id)
+	defer unlock()
+	return ps.UpdateTagsLocked(ctx, wsPrefix, id, tags)
+}
+
+// LockEngram acquires the per-engram stripe lock — the SAME casLocks mutex
+// CompareAndSet, SoftDelete, UpdateConfidence and UpdateTags take — and returns
+// its unlock function.
+//
+// Exported for one purpose: a caller whose write is only half-durable inside
+// storage needs to serialize its WHOLE sequence against concurrent writers, not
+// just the storage half. engine.UpdateTags is that caller — its
+// read-previous-tags → store.UpdateTags → fts.ReindexEngram triple derives the
+// FTS delta from the pre-write tag set, so two concurrent retags of the same
+// engram interleaved between the read and the reindex strand the loser's
+// postings and double-decrement df_t for the terms both passes think they
+// removed (#720 review, finding 3: 36 of 40 trials with no artificial delay,
+// and a 6.5% full-text score move on an UNINVOLVED third engram, since df_t is
+// corpus-wide).
+//
+// The mutex is NOT reentrant. A caller holding it must use UpdateTagsLocked;
+// calling UpdateTags under it self-deadlocks.
+//
+// Lock ordering: casLocks is the OUTER lock. engine.UpdateTags takes it and
+// then fts.ReindexEngram takes the index's idx.mu; nothing in internal/index/fts
+// reaches back into PebbleStore (it imports only storage/keys), so the order
+// cannot invert.
+func (ps *PebbleStore) LockEngram(id ULID) func() {
 	mu := ps.casLocks.For(id[:])
 	mu.Lock()
-	defer mu.Unlock()
+	return mu.Unlock
+}
 
+// UpdateTagsLocked is UpdateTags without acquiring the stripe lock. The caller
+// MUST already hold it via LockEngram for this engram id; see UpdateTags for
+// the full contract and the resurrection-race reasoning that applies equally
+// here.
+func (ps *PebbleStore) UpdateTagsLocked(ctx context.Context, wsPrefix [8]byte, id ULID, tags []string) error {
 	ps.cache.Delete(wsPrefix, id)
 
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
@@ -857,6 +891,11 @@ func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID
 		ps.metaCache.Remove([16]byte(id))
 	}()
 
+	// Snapshot the OLD tag set BEFORE the mutation below overwrites it — the
+	// removal diff further down is derived from it, and eng.Tags is the live
+	// cached record's own slice header.
+	oldTags := append([]string(nil), eng.Tags...)
+
 	// Copy rather than alias: this slice becomes a field of the shared, cached
 	// engram, so keeping the caller's backing array would hand every reader a
 	// window into memory the caller still owns.
@@ -883,15 +922,57 @@ func (ps *PebbleStore) UpdateTags(ctx context.Context, wsPrefix [8]byte, id ULID
 	}
 	batch.Set(metaKey, metaSlice, nil)
 
+	// Retire index entries for tags that are GOING AWAY, then write the ones
+	// that stay. Deletes are queued FIRST so that a hash collision between a
+	// departing and an arriving tag self-heals within the batch (delete then
+	// set), rather than depending on the diff alone.
+	//
+	// This is not housekeeping. UpdateTags REPLACES a set, so unlike the
+	// create path it can strand entries, and the 0x0C/0x2C indexes are
+	// CANDIDATE SEEDS with a bounded budget: phase-6's passesMetaFilter
+	// re-checks the real tag on the engram, so an orphan can never produce a
+	// false positive — it burns a seed slot instead. That is a false NEGATIVE
+	// at the pool boundary, which is the silently-wrong class. Measured (#720
+	// review, finding 2): ninety retags of ONE recurring due-date task
+	// starved the tag-seeding budget outright, crowding out ten genuinely
+	// matching engrams. Due-date tags are precisely the workload this tool's
+	// own description and muninn_guide recommend, so the residual is not
+	// deferrable here even though it is invisible in a small vault.
+	//
+	// The diff is computed on the DERIVED KEY, not the tag string — see
+	// RawTagIndexKeyFor for why a string diff is collision-unsafe. The 0x0C
+	// index gets the identical treatment: its key hashes the whole tag.
+	keptTagKeys := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		keptTagKeys[string(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(id)))] = struct{}{}
+	}
+	keptRawKeys := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		if k, ok := RawTagIndexKeyFor(wsPrefix, tag, [16]byte(id)); ok {
+			keptRawKeys[string(k)] = struct{}{}
+		}
+	}
+	for _, tag := range oldTags {
+		k := keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(id))
+		if _, kept := keptTagKeys[string(k)]; !kept {
+			batch.Delete(k, nil)
+		}
+		rawKey, indexed := RawTagIndexKeyFor(wsPrefix, tag, [16]byte(id))
+		if !indexed {
+			continue
+		}
+		if _, kept := keptRawKeys[string(rawKey)]; !kept {
+			batch.Delete(rawKey, nil)
+		}
+	}
+
 	// Write tag index entries for all tags (idempotent for existing tags).
 	for _, tag := range tags {
 		batch.Set(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(id)), []byte{}, nil)
 	}
 
 	// Write raw-tag-range index entries for all tags (idempotent for existing
-	// tags; like the 0x0C index above, stale entries for tags that are no
-	// longer present are left as orphans — safe, since phase-6's
-	// passesMetaFilter re-checks the real tag on the engram).
+	// tags).
 	for _, tag := range tags {
 		if err := WriteRawTagIndexEntry(batch, wsPrefix, tag, [16]byte(id)); err != nil {
 			return err

@@ -54,8 +54,35 @@ func PassesLifecycle(eng *storage.Engram, asOf *time.Time, includeInvalid bool) 
 	case storage.StateArchived:
 		return false
 	case storage.StateSoftDeleted:
-		return (asOf != nil || includeInvalid) && !eng.ValidUntil.IsZero()
+		return (asOf != nil || includeInvalid) && CarriesSupersessionSignature(eng)
 	default:
 		return true
 	}
+}
+
+// CarriesSupersessionSignature is the trash-versus-history test on its own,
+// factored out of PassesLifecycle so that callers which must make the same
+// distinction WITHOUT a temporal view can share the predicate instead of
+// re-deriving it.
+//
+// A closed ValidUntil is the supersession signature: Evolve/EvolveAt and
+// Link(relation=supersedes) soft-delete the predecessor AND stamp it in one
+// atomic batch, precisely so the record stays reachable on the valid-time
+// axis. A plain muninn_forget (no not_true_since) soft-deletes and leaves the
+// stamp OPEN — that record is trash, not history.
+//
+// The distinction matters outside recall because the two classes are treated
+// differently by the FTS index: Forget drops the engram's postings at
+// soft-delete time, while Evolve deliberately does NOT — the predecessor's
+// postings are the ones an old-wording query still matches, and COG-28 relies
+// on that evidence reaching the chain. So a maintenance path that keys on
+// storage.StateSoftDeleted ALONE cannot tell "already de-indexed trash" from
+// "deliberately still-indexed history", and destroys the latter (#720 review,
+// finding 1: retagging an evolve predecessor removed its postings permanently,
+// reachable again only via reindex-fts).
+//
+// Deliberately NOT a method on storage.Engram: it lives beside PassesLifecycle
+// so the recall gate and any other caller are provably reading one definition.
+func CarriesSupersessionSignature(eng *storage.Engram) bool {
+	return eng != nil && !eng.ValidUntil.IsZero()
 }
