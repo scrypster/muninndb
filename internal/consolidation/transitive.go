@@ -18,6 +18,23 @@ import (
 // to avoid inflating newly-created edges.
 // Inferred weight = weight(A→B) * weight(B→C) * 0.8 (confidence discount)
 func (w *Worker) runPhase5TransitiveInference(ctx context.Context, store *storage.PebbleStore, wsPrefix [8]byte, report *ConsolidationReport) error {
+	// minWeight is load-bearing for an integrity property it was never designed
+	// to carry — read this before tuning it down.
+	//
+	// This phase writes A→C from A→B and B→C. During the #803 investigation it
+	// looked like a self-propagating amplifier for dangling edges (an edge to a
+	// hard-deleted engram could beget more edges to it). It is not — but ONLY
+	// BECAUSE of this threshold, not by design:
+	//
+	//   - autoassoc mints edges at 0.3;
+	//   - archive restore returns them at peakWeight * 0.25;
+	//   - Hebbian growth needs the dead engram to appear in a recall RESULT,
+	//     which phase 6 (and recall's own filtering) prevents.
+	//
+	// So a dangling edge cannot climb to 0.7 and cannot seed an inference.
+	// Lower this constant far enough and dangling edges become self-
+	// propagating corruption. storage.WriteAssociation's STO-12 endpoint guard
+	// is the actual defence; this comment records that the accident existed.
 	const minWeight = 0.7
 	const confidenceDiscount = 0.8
 

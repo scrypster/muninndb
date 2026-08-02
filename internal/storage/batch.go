@@ -174,9 +174,20 @@ func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8
 // WriteAssociation queues forward (0x03), reverse (0x04), and weight-index (0x14) keys
 // for the association into the batch. Uses the same key-building and value-encoding
 // logic as PebbleStore.WriteAssociation.
+//
+// The endpoint-liveness guard (STO-12) here must also count engrams queued
+// EARLIER IN THIS BATCH as live, because both in-tree callers do exactly that:
+// RememberChild (tree.go) and Evolve (engine.go) queue WriteEngram and
+// WriteAssociation into the same uncommitted batch so the engram and its edge
+// land atomically. Their 0x01 key is not visible to a Pebble read until
+// Commit, so a DB-read-only guard would reject every legitimate atomic
+// child-append and every evolve. See batchQueuedEngram.
 func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src, dst ULID, assoc *Association) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
+	}
+	if err := b.checkEndpointsLive(ws, [16]byte(src), [16]byte(dst)); err != nil {
+		return err
 	}
 	// Seed PeakWeight from Weight if not set (new association initial write).
 	peak := assoc.PeakWeight
@@ -189,6 +200,30 @@ func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src
 	var weightBuf [4]byte
 	binary.BigEndian.PutUint32(weightBuf[:], math.Float32bits(assoc.Weight))
 	b.batch.Set(keys.AssocWeightIndexKey(ws, [16]byte(src), [16]byte(dst)), weightBuf[:], nil)
+	return nil
+}
+
+// batchQueuedEngram reports whether an engram with this (ws, id) has already
+// been queued into this batch by WriteEngram/WriteEngramOp/WriteEngramOpDetails
+// — i.e. its 0x01 key is pending in the batch but not yet readable from Pebble.
+func (b *pebbleStoreBatch) batchQueuedEngram(ws [8]byte, id [16]byte) bool {
+	for _, it := range b.pendingItems {
+		if it.eng != nil && it.wsPrefix == ws && [16]byte(it.eng.ID) == id {
+			return true
+		}
+	}
+	return false
+}
+
+// checkEndpointsLive is checkEndpointsLive on the store, widened to accept
+// engrams queued in this same uncommitted batch.
+func (b *pebbleStoreBatch) checkEndpointsLive(ws [8]byte, src, dst [16]byte) error {
+	if !b.batchQueuedEngram(ws, src) && !b.ps.engramExists(ws, src) {
+		return fmt.Errorf("%w: source %s", ErrDanglingEndpoint, ULID(src).String())
+	}
+	if !b.batchQueuedEngram(ws, dst) && !b.ps.engramExists(ws, dst) {
+		return fmt.Errorf("%w: target %s", ErrDanglingEndpoint, ULID(dst).String())
+	}
 	return nil
 }
 

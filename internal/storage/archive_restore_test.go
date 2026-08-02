@@ -17,6 +17,7 @@ func TestRestoreArchivedEdges_RestoresTopN(t *testing.T) {
 	src := NewULID()
 	dst1 := NewULID()
 	dst2 := NewULID()
+	seedEndpoints(t, store, ws, src, dst1, dst2)
 
 	// Write two archive entries directly.
 	// dst1: high consolidation score (peakWeight=0.9, coAct=10, lastAct=1 day ago)
@@ -70,6 +71,7 @@ func TestRestoreArchivedEdges_RestoresTopByConsolidation(t *testing.T) {
 	src := NewULID()
 	dst1 := NewULID()
 	dst2 := NewULID()
+	seedEndpoints(t, store, ws, src, dst1, dst2)
 
 	now := time.Now()
 	// dst1: high consolidation score (peakWeight=0.9, coAct=10, lastAct=1 day ago)
@@ -117,6 +119,7 @@ func TestRestoreArchivedEdges_Transitive(t *testing.T) {
 	src := NewULID()
 	neighbor := NewULID()
 	deepNeighbor := NewULID()
+	seedEndpoints(t, store, ws, src, neighbor, deepNeighbor)
 
 	now := time.Now()
 	lastAct := int32(now.Add(-24 * time.Hour).Unix())

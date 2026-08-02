@@ -13,6 +13,7 @@ import (
 func seedDecayEdge(t *testing.T, store *PebbleStore, ws [8]byte, weight float32, lastActivated time.Time) (ULID, ULID) {
 	t.Helper()
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 	var la int32
 	if !lastActivated.IsZero() {
 		la = int32(lastActivated.Unix())
@@ -222,6 +223,7 @@ func TestDecayAssoc_LegacyZeroLastActivated_Adopted(t *testing.T) {
 	now := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID:   dst,
 		Weight:     0.7,

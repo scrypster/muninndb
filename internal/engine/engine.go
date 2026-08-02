@@ -3319,11 +3319,12 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 			}
 		}
 
-		// Mark the node as deleted in the HNSW index so it is skipped in
-		// future Search results. Memory is reclaimed on the next rebuild.
-		if e.hnswRegistry != nil {
-			e.hnswRegistry.TombstoneNode(wsPrefix, [16]byte(id))
-		}
+		// Remove the engram from the search indexes. Until #803 this branch
+		// tombstoned HNSW but never touched FTS — only the SOFT branch below
+		// called fts.DeleteEngram — so a hard-deleted engram's tag postings
+		// survived, and autoassoc's tag search kept handing its ID to
+		// WriteAssociation on every later write sharing a tag. See STO-12.
+		e.cleanSearchIndexesAfterHardDelete(wsPrefix, [16]byte(id), eng)
 		// Decrement the global engram counter. Floor at zero to guard against
 		// counter skew in crash-recovery scenarios (mirrors ClearVault's guard).
 		for {
@@ -3353,6 +3354,31 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 	}
 
 	return &mbp.ForgetResponse{OK: true}, nil
+}
+
+// cleanSearchIndexesAfterHardDelete removes a hard-deleted engram from the FTS
+// posting lists and tombstones it in the HNSW vector index.
+//
+// STO-12. storage.DeleteEngram's own cascade (0x01/0x02/0x03/0x04/0x14/0x25 and
+// the secondary indexes) is complete, but the FTS and HNSW indexes live outside
+// the store and every hard-delete caller must clean them itself. The two
+// callers that did not — Forget(hard=true) and PruneVault — left the dead ID
+// reachable from a tag search and a vector search, which the autoassoc and
+// neighbor workers then turned back into association edges. `eng` may be nil
+// (the record was unreadable before the delete); FTS cleanup needs its fields,
+// the HNSW tombstone does not, so they are gated separately.
+func (e *Engine) cleanSearchIndexesAfterHardDelete(wsPrefix [8]byte, id [16]byte, eng *storage.Engram) {
+	if e.fts != nil && eng != nil {
+		if err := e.fts.DeleteEngram(wsPrefix, id, eng.Concept, eng.CreatedBy, eng.Content, eng.Tags); err != nil {
+			slog.Warn("engine: fts cleanup failed after hard delete",
+				"id", storage.ULID(id).String(), "error", err)
+		}
+	}
+	// Mark the node as deleted in the HNSW index so it is skipped in future
+	// Search results. Memory is reclaimed on the next rebuild.
+	if e.hnswRegistry != nil {
+		e.hnswRegistry.TombstoneNode(wsPrefix, id)
+	}
 }
 
 // Stat implements mbp.EngineAPI.Stat.
@@ -4426,10 +4452,17 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			}
 			for i := 0; i < toDelete; i++ {
 				id := scored[i].id
+				// Read before deleting: FTS cleanup needs the indexed fields,
+				// which are gone once the 0x01 record is.
+				victim, _ := e.store.GetEngram(opCtx, ws, id)
 				if err := e.store.DeleteEngram(opCtx, ws, id); err != nil {
 					slog.Debug("prune vault: hard-delete failed", "vault", vaultName, "id", id, "err", err)
 					continue
 				}
+				// STO-12: the pruner reaches DeleteEngram directly and cleaned
+				// neither FTS nor HNSW, so it leaked dangling edges through
+				// BOTH amplifiers with no operator action at all.
+				e.cleanSearchIndexesAfterHardDelete(ws, [16]byte(id), victim)
 				// Decrement the global engram counter.
 				for {
 					cur := e.engramCount.Load()
@@ -4466,10 +4499,13 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			return pruned, fmt.Errorf("prune vault %s (retention scan): %w", vaultName, err)
 		}
 		for _, id := range ids {
+			victim, _ := e.store.GetEngram(opCtx, ws, id)
 			if err := e.store.DeleteEngram(opCtx, ws, id); err != nil {
 				slog.Debug("prune vault: retention hard-delete failed", "vault", vaultName, "id", id, "err", err)
 				continue
 			}
+			// STO-12: same leak as the MaxEngrams path above.
+			e.cleanSearchIndexesAfterHardDelete(ws, [16]byte(id), victim)
 			// Decrement the global engram counter.
 			for {
 				cur := e.engramCount.Load()

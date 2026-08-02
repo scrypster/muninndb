@@ -21,6 +21,7 @@ func TestAssocMetadata_LastActivated_PreservedOnUpdate(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	lastAct := int32(time.Now().Add(-2 * time.Hour).Unix())
 
@@ -80,6 +81,7 @@ func TestAssocMetadata_PreservedThroughDecay(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	lastAct := int32(time.Now().Add(-30 * time.Minute).Unix())
 
@@ -147,6 +149,7 @@ func TestAssocPeakWeight_TrackedAcrossUpdates(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("peak-tracking")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write at 0.4
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
@@ -189,6 +192,7 @@ func TestAssocPeakWeight_InitialWriteSetsPeak(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("peak-initial")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID: dst, Weight: 0.7,
@@ -216,6 +220,7 @@ func TestAssocDecay_DynamicFloor(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("dynamic-floor")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write at 0.8 — PeakWeight is seeded to 0.8 by WriteAssociation.
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
@@ -264,6 +269,7 @@ func TestAssocDecay_LowPeakEdgeClampsToVeryLowFloor(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("low-floor")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write at just above minWeight — peak bootstraps to this value.
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
@@ -302,6 +308,7 @@ func TestAssocPeakWeight_BatchUpdatePreservesPeak(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("peak-batch")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write initial association at 0.4
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
@@ -355,6 +362,7 @@ func TestAssocDecay_RecencySkip(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// LastActivated = right now — should be skipped by recency-aware decay.
 	recentlyActivated := int32(time.Now().Unix())

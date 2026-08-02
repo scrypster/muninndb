@@ -103,7 +103,24 @@ func assocCacheKey(wsPrefix [8]byte, id ULID) [24]byte {
 }
 
 // WriteAssociation writes forward and reverse association keys.
+//
+// Refuses with ErrDanglingEndpoint when either endpoint has no 0x01 engram
+// record (STO-12). This is the choke point for the whole writer set —
+// autoassoc, the neighbor and goal-link workers, the refines writer, the
+// plugin store adapter, inline caller relationships and muninn_link all reach
+// the 0x03/0x04/0x14 keyspace through here. Guarding those sites individually
+// would be cosmetic: the next worker added would reintroduce the class.
 func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, src, dst ULID, assoc *Association) error {
+	if err := ps.checkEndpointsLive(wsPrefix, [16]byte(src), [16]byte(dst)); err != nil {
+		return err
+	}
+	return ps.writeAssociationUnguarded(ctx, wsPrefix, src, dst, assoc)
+}
+
+// writeAssociationUnguarded is WriteAssociation's body without the STO-12
+// endpoint check. Split out so the guard's cost can be measured directly
+// (BenchmarkWriteAssociation{With,No}Guard); no production caller uses it.
+func (ps *PebbleStore) writeAssociationUnguarded(ctx context.Context, wsPrefix [8]byte, src, dst ULID, assoc *Association) error {
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
@@ -849,6 +866,24 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 	applied := 0
 
 	for i, update := range updates {
+		// STO-12. This method DOES create edges out of nothing, which is not
+		// obvious and was measured rather than assumed: #809 made a read
+		// FAILURE skip the pair, but read ABSENCE is a normal fact that
+		// returns a nil error and a zero tuple, so a pair naming two ULIDs
+		// with no engram and no edge falls straight through both reads and
+		// Sets a brand-new 0x03/0x04/0x14 row (probe: weight 0.42 written,
+		// UpdateAssocWeightBatch returned nil). That is also the shape of the
+		// DeleteEngram-vs-Hebbian-flush race: the cascade removes the edge,
+		// this batch re-Sets it.
+		//
+		// Reported through the same skip channel as an unreadable pair —
+		// silence would be the silently-wrong class one layer up.
+		if err := ps.checkEndpointsLive(update.WS, update.Src, update.Dst); err != nil {
+			skipped = append(skipped, i)
+			skipErrs = append(skipErrs, fmt.Errorf("pair %s->%s: %w",
+				ULID(update.Src).String(), ULID(update.Dst).String(), err))
+			continue
+		}
 		oldWeight, err := ps.GetAssocWeight(ctx, update.WS, update.Src, update.Dst)
 		if err != nil {
 			skipped = append(skipped, i)

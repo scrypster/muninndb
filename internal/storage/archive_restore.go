@@ -36,6 +36,14 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 		maxN = restoreTopN
 	}
 
+	// STO-12: if the SOURCE engram is gone, nothing under this prefix can ever
+	// be restored. Reap the whole prefix rather than scanning it on every
+	// recall forever. (DeleteEngram now cascades 0x25, so this only fires for
+	// archive rows stranded by a pre-fix hard delete.)
+	if !ps.engramExists(ws, srcID) {
+		return nil, ps.reapArchivedEdgesFrom(ws, srcID)
+	}
+
 	prefix := keys.ArchiveAssocPrefixForID(ws, srcID)
 
 	// Upper bound: increment the last byte of the prefix to bound the scan.
@@ -115,6 +123,17 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 
 	var restoredDsts [][16]byte
 	for _, c := range candidates {
+		// STO-12: never restore an edge whose target engram was hard-deleted.
+		// Restoring it recreates a dangling 0x03/0x04/0x14 row AND stamps
+		// restoredAt, which permanently exempts the row from GCArchivedEdges
+		// (it requires restoredAt == 0) — so this path does not merely leak,
+		// it makes the leak un-collectable. Drop the archive row instead: with
+		// its target's 0x01 record gone the edge can never become valid again.
+		if !ps.engramExists(ws, c.dst) {
+			_ = batch.Delete(keys.ArchiveAssocKey(ws, srcID, c.dst), nil)
+			continue
+		}
+
 		restoreW := c.restoreWeight
 
 		// Encode the live value using the 30-byte archive format so that restoredAt is stamped.
@@ -156,6 +175,36 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 	}
 
 	return restoredDsts, nil
+}
+
+// reapArchivedEdgesFrom deletes every 0x25 archive row sourced from srcID.
+// Used when srcID has no 0x01 record: none of those edges can ever be restored.
+func (ps *PebbleStore) reapArchivedEdgesFrom(ws [8]byte, srcID [16]byte) error {
+	prefix := keys.ArchiveAssocPrefixForID(ws, srcID)
+	iter, err := ps.db.NewIter(&pebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: keys.PrefixUpperBound(prefix),
+	})
+	if err != nil {
+		return err
+	}
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+	n := 0
+	for valid := iter.First(); valid; valid = iter.Next() {
+		_ = batch.Delete(append([]byte{}, iter.Key()...), nil)
+		n++
+	}
+	_ = iter.Close()
+	if n == 0 {
+		return nil
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	ps.replicateBatch(batch)
+	ps.assocCache.Remove(assocCacheKey(ws, ULID(srcID)))
+	return nil
 }
 
 // RestoreArchivedEdgesTransitive restores archived edges for src (top-N),

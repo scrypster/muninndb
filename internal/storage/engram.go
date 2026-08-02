@@ -610,6 +610,42 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		revIter.Close()
 	}
 
+	// Archived-association cleanup (0x25) — STO-12.
+	//
+	// The 0x03/0x04 passes above do not see an edge that decay ARCHIVED before
+	// this engram was hard-deleted: DecayAssocWeights moves such an edge out of
+	// the live index into 0x25. Left behind, recall's lazy
+	// RestoreArchivedEdgesTransitive writes it straight back into 0x03/0x04/0x14
+	// as a dangling row — and stamps restoredAt, which permanently exempts it
+	// from GCArchivedEdges. Fixing only the FTS/HNSW cascades does not close it.
+	//
+	// Key: 0x25 | ws(8) | src(16) | dst(16) = 41 bytes.
+	// As source: a bounded prefix scan.
+	archSrcPrefix := keys.ArchiveAssocPrefixForID(wsPrefix, [16]byte(id))
+	if archSrcIter, aErr := PrefixIterator(ps.db, archSrcPrefix); aErr == nil {
+		for archSrcIter.First(); archSrcIter.Valid(); archSrcIter.Next() {
+			batch.Delete(append([]byte{}, archSrcIter.Key()...), nil)
+		}
+		archSrcIter.Close()
+	}
+	// As target: dst is the trailing 16 bytes, so this needs a vault-wide 0x25
+	// scan. Same shape and cost class as the ordinal child scan below, which
+	// has scanned the vault's 0x1E range on every delete since it was written.
+	archVaultPrefix := keys.ArchiveAssocRangeStart(wsPrefix)
+	if archDstIter, aErr := PrefixIterator(ps.db, archVaultPrefix); aErr == nil {
+		idBytes := [16]byte(id)
+		for archDstIter.First(); archDstIter.Valid(); archDstIter.Next() {
+			k := archDstIter.Key()
+			if len(k) != 41 {
+				continue
+			}
+			if bytes.Equal(k[25:41], idBytes[:]) {
+				batch.Delete(append([]byte{}, k...), nil)
+			}
+		}
+		archDstIter.Close()
+	}
+
 	// Ordinal cleanup: scan all ordinal keys in this workspace and delete any where
 	// this engram is the child (bytes [25:41] == id).
 	// Key: 0x1E|ws(8)|parentID(16)|childID(16) = 41 bytes; childID at [25:41].

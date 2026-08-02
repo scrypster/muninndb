@@ -250,7 +250,14 @@ func TestAbsenceIsNotFailure(t *testing.T) {
 					tc.seed(t, store, ws, src, dst)
 				}
 				// A pair that was never written, on a healthy store.
-				if err := tc.absent(store, ws, src, NewULID()); err != nil {
+				// The absent endpoint is a REAL engram with no edge to it:
+				// this subtest's variable is EDGE absence. STO-12 makes an
+				// edge to a nonexistent engram a different fact (a refused
+				// write), and conflating the two would have this row assert
+				// that dangling writes are normal.
+				absentDst := NewULID()
+				seedEndpoints(t, store, ws, absentDst)
+				if err := tc.absent(store, ws, src, absentDst); err != nil {
 					t.Errorf("%s on an absent pair: got error %v, want nil — absence is a normal fact", tc.method, err)
 				}
 			})
