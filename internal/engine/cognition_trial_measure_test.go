@@ -896,11 +896,24 @@ func TestCognitionTrial(t *testing.T) {
 	defer actEngine.Close()
 	actEngine.SetTransitionStore(store.TransitionCache())
 
+	// resolved.ACTRHebScale is ALWAYS populated by auth.ResolvePlasticity (from
+	// the preset, or from an explicit override clamped to [0, 50]), so there is
+	// no "unset" to fall back from and the value is passed through untouched.
+	// The `if hebScale == 0 { hebScale = DefaultACTRHebScale }` guard that stood
+	// here was the THIRD instance of the substitution d17a884 removed from two
+	// production sites — and the worst-placed one: a vault configured
+	// `actr_heb_scale: 0` (cognition deliberately off) would have been MEASURED
+	// at 4.0, i.e. the trial would have judged the exact configuration whose
+	// behaviour it exists to judge as though it were the opposite one.
+	// TestACTRHebScale_NoZeroSubstitutionAnywhere now fails on a fourth.
 	hebScale := resolved.ACTRHebScale
-	if hebScale == 0 {
-		hebScale = activation.DefaultACTRHebScale
-	}
 	scaleF32 := float32(hebScale)
+	if hebScale == 0 {
+		t.Logf("NOTE: actr_heb_scale is 0 on this vault — the cognitive prior's Hebbian and " +
+			"transition terms are OFF by configuration. FULL and NO-HEBBIAN are therefore the " +
+			"same arm here and Delta_H is structurally 0. That is the vault's real behaviour " +
+			"and is measured as such; it is NOT substituted with the 4.0 default.")
+	}
 
 	runArm := func(query string, pas bool) []ctRow {
 		res, err := actEngine.Run(ctx, &activation.ActivateRequest{
