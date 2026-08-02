@@ -290,3 +290,89 @@ func joinLines(s []string) string {
 	}
 	return b.String()
 }
+
+// TestSTO12_HardDeletePathsCleanTheSearchIndexes is the independent RED for
+// LAYER ONE, the cascades.
+//
+// The endpoint guard (layer two) absorbs the dangling-edge symptom of a dirty
+// FTS index, so TestSTO12_NoDanglingAssociationEdges stays green if only the
+// cascade regresses — which would leave a real defect standing: a hard-deleted
+// engram remains a live search hit, wasting every amplifier's work on an ID
+// that can never be linked, and (before this fix) taking the HNSW tombstone
+// with it on the prune path. This asserts the cascade directly.
+func TestSTO12_HardDeletePathsCleanTheSearchIndexes(t *testing.T) {
+	const distinctive = "thermocline"
+
+	inFTS := func(t *testing.T, eng *Engine, vault string, ws [8]byte, id storage.ULID) bool {
+		t.Helper()
+		hits, err := eng.fts.Search(context.Background(), ws, distinctive, 50)
+		if err != nil {
+			t.Fatalf("fts search: %v", err)
+		}
+		for _, h := range hits {
+			if h.ID == [16]byte(id) {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("Forget(hard=true)", func(t *testing.T) {
+		eng, store, _ := danglingEnv(t)
+		vault := "sto12-fts-forget"
+		ws := store.VaultPrefix(vault)
+		if err := store.WriteVaultName(ws, vault); err != nil {
+			t.Fatal(err)
+		}
+		w := danglingWriter(t, eng, vault, "sampling")
+		victim := w("depth profile", "the "+distinctive+" sits near twelve metres")
+
+		if !inFTS(t, eng, vault, ws, victim) {
+			t.Fatal("precondition: the engram was never indexed in FTS")
+		}
+		if _, err := eng.Forget(context.Background(), &mbp.ForgetRequest{
+			Vault: vault, ID: victim.String(), Hard: true,
+		}); err != nil {
+			t.Fatalf("hard forget: %v", err)
+		}
+		if inFTS(t, eng, vault, ws, victim) {
+			t.Error("hard-deleted engram is still a live FTS hit — the hard branch did not clean the index")
+		}
+	})
+
+	t.Run("PruneVault(MaxEngrams)", func(t *testing.T) {
+		eng, store, _ := danglingEnv(t)
+		vault := "sto12-fts-prune"
+		ws := store.VaultPrefix(vault)
+		if err := store.WriteVaultName(ws, vault); err != nil {
+			t.Fatal(err)
+		}
+		w := danglingWriter(t, eng, vault, "sampling")
+		var ids []storage.ULID
+		for i := 0; i < 5; i++ {
+			ids = append(ids, w(fmt.Sprintf("depth profile %d", i),
+				fmt.Sprintf("the %s sits near %d metres", distinctive, 10+i)))
+		}
+		if err := eng.authStore.SetVaultConfig(auth.VaultConfig{
+			Name: vault, Public: true,
+			Plasticity: &auth.PlasticityConfig{MaxEngrams: ptr(1)},
+		}); err != nil {
+			t.Fatalf("SetVaultConfig: %v", err)
+		}
+		if _, err := eng.PruneVault(context.Background(), vault); err != nil {
+			t.Fatalf("PruneVault: %v", err)
+		}
+		var stillIndexed int
+		for _, id := range ids {
+			if _, err := store.GetEngram(context.Background(), ws, id); err == nil {
+				continue // survived the prune
+			}
+			if inFTS(t, eng, vault, ws, id) {
+				stillIndexed++
+			}
+		}
+		if stillIndexed > 0 {
+			t.Errorf("%d pruned engram(s) are still live FTS hits — the pruner did not clean the index", stillIndexed)
+		}
+	})
+}
