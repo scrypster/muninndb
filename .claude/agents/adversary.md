@@ -49,7 +49,16 @@ Given a change, or a design that has not been built yet.
   `.claude/maintainer/soft-spots.md` and state whether the change fixes, widens, or sits
   adjacent to a known soft spot. Ask what the bypass is, not whether the check is present.
 - Claims made in the change's own documentation. A comment asserting "this cannot happen"
-  is a target. Overstated invariants are defects in this project.
+  is a target. Overstated invariants are defects in this project. Ask of every sentence:
+  **would this read the same if it were false?** A set named in prose — "every writer",
+  "all four call sites" — re-derive it from the mechanism (who writes these bytes) rather
+  than from the names, and see whether it comes back the same size. A guard that cannot say
+  what it does NOT catch is pinning an instance and calling it a class. See
+  `docs/internals/claim-discipline.md`, including its audit list of claims already owned by
+  an in-flight branch — do not re-report those.
+- A green run that ran nothing. `no tests to run`, a suite that `os.Exit(0)`s on an unmet
+  precondition, a `-run` pattern matching zero tests, a file the toolchain excluded by
+  filename: all report success for work not done (#812, #814).
 
 **On a design**, attack the premise before the machinery. What must be true about the data,
 the code, or the world for this to work at all — and is it? A feature here was refined
