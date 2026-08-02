@@ -61,6 +61,11 @@ func TestPhase5Traverse_InertAtTheMeasuredSeedCeiling(t *testing.T) {
 			ctx := context.Background()
 			ws := store.VaultPrefix("traverse-inert")
 
+			// #803/STO-12: every association writer refuses an edge unless both
+			// endpoints have a live 0x01 record, so the fixture must seed the
+			// endpoints before writing the edge below.
+			seedEndpoints(t, store, ws, older, newer)
+
 			// Weight 1.0 is the maximum representable association weight. The
 			// heaviest edge in a 127,798-edge production census was 0.799, so
 			// this fixture is strictly more favourable to traversal than any
