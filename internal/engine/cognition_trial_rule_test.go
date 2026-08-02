@@ -19,6 +19,20 @@ import (
 // — and the whole point of expressing the rule as code rather than prose is that
 // a failing gate REPORTS ITSELF instead of being rounded up in a write-up.
 //
+// AMENDMENTS, all pre-registered in #798 BEFORE any number was produced, and
+// each traceable to the clause that implements it:
+//
+//	D1  zero-relevance queries are EXCLUDED, COUNTED, and the power gates
+//	    re-bind to the retained series (ctNDCGAt10's second return value,
+//	    ctVaultFromSeries, U2's three new clauses, the census block)
+//	D2  BASE-LEVEL-ONLY is added as a fifth arm; K2 gains Delta_HP and K4 is
+//	    the veto on it (ctArmNames, K2, K4)
+//	D3  S3 is DEMOTED to descriptive and leaves the SHIP conjunction
+//	D4  KILL's actions are split by what evidence licenses them
+//
+// These are amendments to the RULE, not to a result: none was made after seeing
+// an arm number, and each one only makes a conclusion harder to reach.
+//
 // A KILL verdict is a legitimate, valuable outcome. So is UNDERPOWERED. The
 // fourth outcome, INCONCLUSIVE-BUT-POWERED, exists precisely so that the
 // temptation to round a real-but-small effect up to SHIP has nowhere to go.
@@ -98,18 +112,35 @@ var ctPreregistered = struct {
 // METRICS
 // ---------------------------------------------------------------------------
 
-// ctNDCGAt10 computes graded NDCG@10 for one query.
+// ctNDCGAt10 computes graded NDCG@10 for one query, and reports whether it is
+// DEFINED AT ALL.
 //
 // ranked is the arm's returned order (memory keys). grades is the POOLED label
 // set for this query — the union of every arm's top-10, labeled once, which is
 // what makes the labels arm-neutral. The ideal DCG is computed over the pooled
-// set, so all four arms are normalized by the same denominator; normalizing
+// set, so all five arms are normalized by the same denominator; normalizing
 // each arm by its own returned set would let a short list win by returning less.
 //
 // An unlabeled ranked item contributes gain 0 rather than being skipped:
 // skipping it would silently promote whatever came after it, which is the arm
 // flattering itself.
-func ctNDCGAt10(ranked []string, grades map[string]int) float64 {
+//
+// # THE SECOND RETURN VALUE, AND WHY IT IS NOT A CONVENIENCE
+//
+// When the pooled label set contains no relevant document, IDCG is 0 and NDCG
+// is 0/0 — undefined. This function used to say exactly that in a comment and
+// then `return 0`, which is the SAME DEFECT SHAPE this file family has now hit
+// three times: ctMean(nil)==0 padding absent trend buckets as measured zeros
+// (fixed by U6), the FTS `idf<=0 -> continue` path (fixed by COG-24's idfMax),
+// and this one. A policy comment does not stop the fourth. A TYPE does.
+//
+// So the undefined case is unrepresentable as a number: ok is false and the
+// value is NaN. `ndcg := ctNDCGAt10(...)` no longer compiles, and a caller that
+// discards ok with `_` gets a NaN that poisons any mean it enters rather than a
+// plausible zero that silently dilutes it. See ctInformative/ctVaultFromSeries
+// for what the caller must do with it (D1: EXCLUDE, count, and re-bind the
+// power gates to the retained series).
+func ctNDCGAt10(ranked []string, grades map[string]int) (float64, bool) {
 	const k = 10
 	dcg := 0.0
 	for i, id := range ranked {
@@ -131,12 +162,9 @@ func ctNDCGAt10(ranked []string, grades map[string]int) float64 {
 		idcg += ctGain(g) / math.Log2(float64(i)+2.0)
 	}
 	if idcg == 0 {
-		// No relevant document exists for this query in the pooled label set.
-		// NDCG is undefined; 0 for every arm, which is paired and therefore
-		// contributes exactly 0 to every delta. Reported as such by the caller.
-		return 0
+		return math.NaN(), false
 	}
-	return dcg / idcg
+	return dcg / idcg, true
 }
 
 func ctGain(grade int) float64 {
@@ -157,6 +185,200 @@ func ctMRR(ranked []string, grades map[string]int) float64 {
 		}
 	}
 	return 0
+}
+
+// ---------------------------------------------------------------------------
+// THE ARMS
+//
+// FULL                 everything on                       LIVE run
+// NO-PAS               no transition candidates injected   LIVE run
+// NO-HEBBIAN           hebbianBoost := 0                   ARITHMETIC on FULL
+// BASE-LEVEL-ONLY      hebbianBoost := 0; transition := 0  ARITHMETIC on NO-PAS
+// CONTENT-MATCH-ONLY   contextualPrior := actrDenominator  ARITHMETIC on NO-PAS
+//
+// BASE-LEVEL-ONLY (D2) is the fifth arm and it exists because NOTHING ELSE
+// CORRESPONDS TO THE CONFIGURATION A KILL VERDICT SHIPS. KILL sets
+// hebbian_enabled:false + predictive_activation:false and KEEPS the ACT-R
+// base-level prior — that is base-level ON with both boosts OFF, which was not
+// an arm. The four marginals cannot reconstruct it under redundancy: two worlds
+// exist that are bit-identical on all four arms while Delta_HP differs by the
+// entire effect (one where Hebbian and PAS are fully redundant with each other,
+// one where the whole benefit is base-level), and the general bound
+// Delta_HP in [max(Delta_H, Delta_P), Delta_C] spans the whole range. Without
+// it the trial yields NO INFORMATION ABOUT THE COST OF THE ACTION IT AUTHORIZES.
+//
+// It costs ZERO additional live runs: it is an arithmetic ablation of the
+// existing NO-PAS run, exactly the relationship CONTENT-MATCH-ONLY already has
+// to NO-PAS.
+// ---------------------------------------------------------------------------
+
+const (
+	ctArmNameFull          = "FULL"
+	ctArmNameNoPAS         = "NO-PAS"
+	ctArmNameNoHebbian     = "NO-HEBBIAN"
+	ctArmNameBaseLevelOnly = "BASE-LEVEL-ONLY"
+	ctArmNameContentOnly   = "CONTENT-MATCH-ONLY"
+)
+
+// ctArmNames is the reporting order.
+var ctArmNames = []string{
+	ctArmNameFull, ctArmNameNoPAS, ctArmNameNoHebbian,
+	ctArmNameBaseLevelOnly, ctArmNameContentOnly,
+}
+
+// ctMechanismsOffInArm names, for each arm, the mechanisms it removes relative
+// to FULL. It is the bridge between an ARM (a measurement) and a CONFIGURATION
+// (an action), and TestCognitionTrialRule_KillActionArmIsMeasured walks it in
+// reverse: it reads the config knobs KILL's action text flips, maps them to the
+// arm that IS that configuration, and requires some K-clause to read that arm.
+var ctMechanismsOffInArm = map[string][]string{
+	ctArmNameFull:          {},
+	ctArmNameNoHebbian:     {"Hebbian"},
+	ctArmNameNoPAS:         {"PAS"},
+	ctArmNameBaseLevelOnly: {"Hebbian", "PAS"},
+	ctArmNameContentOnly:   {"Hebbian", "PAS", "base-level"},
+}
+
+// ---------------------------------------------------------------------------
+// D1: ZERO-RELEVANCE QUERIES ARE EXCLUDED, COUNTED, AND THE POWER GATES RE-BIND
+// TO THE RETAINED SERIES.
+//
+// A query whose pooled label set contains nothing relevant has an UNDEFINED
+// NDCG for every arm. It is NOT a correct abstention: internal/engine/engine.go
+// writes the 0x29 recall event ONLY when len(items) > 0, so an abstention
+// cannot appear in this population at all. What it is, is a recall that RETURNED
+// items every one of which the judge graded irrelevant — a false-positive
+// recall, and a real retrieval-quality number in its own right.
+//
+// Including it as a paired 0-vs-0 difference shrinks the mean by the informative
+// fraction p AND the standard error by the same factor, so the t-statistic is
+// invariant while the point estimate slides across the ABSOLUTE bars S1 and K1
+// use. Measured on a synthetic 320-query series: the verdict walks
+// INCONCLUSIVE-BUT-POWERED -> KILL as zero-relevance queries are appended, while
+// the CI half-width only ever SHRINKS — so U5, which gates half-width, can never
+// catch it. There was never a guard.
+//
+// Exclusion cannot manufacture a positive: Delta_inf = Delta_all / p is
+// sign-preserving, applied identically to every arm, and the excluded pairs have
+// difference exactly 0 independent of arm. If the informative effect is 0, the
+// excluded series is 0. It is also what a Wilcoxon/sign test does by
+// construction, which is why those are dilution-invariant.
+// ---------------------------------------------------------------------------
+
+// ctQuerySeries is one vault's per-query scores in evaluation order. Every
+// slice is aligned index-for-index with Defined, which records whether that
+// query's NDCG existed at all.
+type ctQuerySeries struct {
+	// Defined[i] is ctNDCGAt10's ok for query i. False = zero-relevance.
+	Defined []bool
+	// NDCG and MRR are keyed by arm name; every arm carries one entry per
+	// SCORED query, including the undefined ones (NaN), so the slices stay
+	// aligned and the exclusion happens in exactly one place.
+	NDCG map[string][]float64
+	MRR  map[string][]float64
+	// Bucket[i] is query i's weekly bucket index, for S3's descriptive series.
+	Bucket []int
+}
+
+func ctNewQuerySeries(arms []string) *ctQuerySeries {
+	s := &ctQuerySeries{NDCG: map[string][]float64{}, MRR: map[string][]float64{}}
+	for _, a := range arms {
+		s.NDCG[a] = nil
+		s.MRR[a] = nil
+	}
+	return s
+}
+
+// ctInformativeCount is how many scored queries had a defined NDCG.
+func (s *ctQuerySeries) ctInformativeCount() int {
+	n := 0
+	for _, d := range s.Defined {
+		if d {
+			n++
+		}
+	}
+	return n
+}
+
+// ctZeroRelevanceCount is the excluded remainder — mandatory census output.
+func (s *ctQuerySeries) ctZeroRelevanceCount() int {
+	return len(s.Defined) - s.ctInformativeCount()
+}
+
+// ctInformative returns the sub-series at the indexes where the query's NDCG
+// was defined. This is the ONLY place the exclusion happens.
+func ctInformative(defined []bool, xs []float64) []float64 {
+	out := make([]float64, 0, len(xs))
+	for i, d := range defined {
+		if i >= len(xs) {
+			break
+		}
+		if d {
+			out = append(out, xs[i])
+		}
+	}
+	return out
+}
+
+// ctZeroFilled returns the series with undefined entries written as 0 — the
+// DILUTED form. It exists so the all-queries number can still be REPORTED under
+// a name that says what it is. Nothing gates on it.
+func ctZeroFilled(defined []bool, xs []float64) []float64 {
+	out := make([]float64, 0, len(xs))
+	for i := range xs {
+		if i < len(defined) && !defined[i] {
+			out = append(out, 0)
+			continue
+		}
+		out = append(out, xs[i])
+	}
+	return out
+}
+
+// ctVaultFromSeries builds a vault result from the raw per-query series. It is
+// the seam D1's dilution-invariance property test drives, and it is what the
+// harness calls, so the property is proved about the code that runs.
+func ctVaultFromSeries(label string, s *ctQuerySeries, distinctEvents, nBuckets int, seed int64) ctVaultResult {
+	inf := func(arm string) []float64 { return ctInformative(s.Defined, s.NDCG[arm]) }
+	boot := func(a, b string) ctDelta {
+		return ctPairedBootstrap(inf(a), inf(b), ctPreregistered.BootstrapResamples, seed)
+	}
+	mrrDelta := func(a, b string) float64 {
+		return ctMean(ctInformative(s.Defined, s.MRR[a])) - ctMean(ctInformative(s.Defined, s.MRR[b]))
+	}
+
+	perBucket := make([][]float64, nBuckets)
+	full, content := s.NDCG[ctArmNameFull], s.NDCG[ctArmNameContentOnly]
+	for i, d := range s.Defined {
+		if !d || i >= len(s.Bucket) || i >= len(full) || i >= len(content) {
+			continue
+		}
+		b := s.Bucket[i]
+		if b < 0 || b >= nBuckets {
+			continue
+		}
+		perBucket[b] = append(perBucket[b], full[i]-content[i])
+	}
+	bucketDeltas, omitted := ctBucketDeltas(perBucket)
+
+	return ctVaultResult{
+		Label:                label,
+		NQueries:             s.ctInformativeCount(),
+		ZeroRelevanceQueries: s.ctZeroRelevanceCount(),
+		DistinctEvents:       distinctEvents,
+		DeltaC:               boot(ctArmNameFull, ctArmNameContentOnly),
+		DeltaH:               boot(ctArmNameFull, ctArmNameNoHebbian),
+		DeltaP:               boot(ctArmNameFull, ctArmNameNoPAS),
+		DeltaHP:              boot(ctArmNameFull, ctArmNameBaseLevelOnly),
+		DeltaCAllQueriesDiluted: ctPairedBootstrap(
+			ctZeroFilled(s.Defined, s.NDCG[ctArmNameFull]),
+			ctZeroFilled(s.Defined, s.NDCG[ctArmNameContentOnly]),
+			ctPreregistered.BootstrapResamples, seed),
+		MRRDeltaH:      mrrDelta(ctArmNameFull, ctArmNameNoHebbian),
+		MRRDeltaP:      mrrDelta(ctArmNameFull, ctArmNameNoPAS),
+		DeltaCByBucket: bucketDeltas,
+		OmittedBuckets: omitted,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -413,24 +635,73 @@ type ctJudgeCalibration struct {
 	LabelHashMatches bool
 }
 
+// ctNullResult is S6's shuffled-seed null on ONE vault, as a TRI-STATE. "Not
+// run" is not "survived": K4's veto requires that the vetoing vault's effect
+// survives a shuffled seed, and a null that was never run cannot say that.
+//
+// The SHUFFLED-SEED arm itself is the instrument-repair increment's item
+// (#797/F1, design v2 §2.4), so ctNullNotRun is the honest state of every vault
+// today. Wiring the FIELD now is what stops the arm landing later against a rule
+// that has nowhere to put its answer.
+type ctNullResult int
+
+const (
+	ctNullNotRun ctNullResult = iota
+	ctNullSurvived
+	ctNullReproducedByShuffle
+)
+
+func (r ctNullResult) String() string {
+	switch r {
+	case ctNullSurvived:
+		return "survived the shuffled-seed null"
+	case ctNullReproducedByShuffle:
+		return "REPRODUCED by a shuffled seed"
+	default:
+		return "shuffled-seed null NOT RUN"
+	}
+}
+
 // ctVaultResult is one vault's contribution. Vaults are A/B/C; the label is the
 // only identifier that ever exists here, by construction.
 type ctVaultResult struct {
-	Label    string
-	NQueries int // labeled held-out queries
+	Label string
+	// NQueries is the count of INFORMATIVE labeled held-out queries — those with
+	// a defined NDCG. D1: zero-relevance queries are excluded from every delta,
+	// so the power gates U2 and U5 must bind to the retained series or they are
+	// gating a sample size the estimate was not computed from. This makes the
+	// eligibility arithmetic worse (300 INFORMATIVE queries per vault) and that
+	// honesty is the point.
+	NQueries int
+	// ZeroRelevanceQueries is the excluded remainder: recalls that returned items
+	// every one of which the judge graded irrelevant. Mandatory census output,
+	// emitted BEFORE any delta. It is a real retrieval-quality number and the
+	// only visible symptom of a too-conservative judge — U1 gates the judge's
+	// false-positive rate but nothing gates its false-NEGATIVE rate.
+	ZeroRelevanceQueries int
 	// DistinctEvents is the vault's distinct recall events after dedup (U2).
 	DistinctEvents int
 
-	DeltaC ctDelta // FULL - CONTENT-MATCH-ONLY
-	DeltaH ctDelta // FULL - NO-HEBBIAN
-	DeltaP ctDelta // FULL - NO-PAS
+	DeltaC  ctDelta // FULL - CONTENT-MATCH-ONLY
+	DeltaH  ctDelta // FULL - NO-HEBBIAN
+	DeltaP  ctDelta // FULL - NO-PAS
+	DeltaHP ctDelta // FULL - BASE-LEVEL-ONLY: what a KILL verdict actually costs
+
+	// DeltaCAllQueriesDiluted is Delta_C over ALL scored queries, zero-relevance
+	// ones included as paired 0-vs-0. It is REPORTED so the dilution is visible
+	// and GATES NOTHING. The name says what it is on purpose.
+	DeltaCAllQueriesDiluted ctDelta
+
+	// ShuffledSeedNull is S6's result ON THIS VAULT. K4's veto requires it.
+	ShuffledSeedNull ctNullResult
 
 	MRRDeltaH float64 // sign-agreement input for S4
 	MRRDeltaP float64
 
 	// DeltaCByBucket is S3's series: the POPULATED weekly buckets only, in
 	// bucket order. OmittedBuckets are the bucket indexes that had no evaluated
-	// query — reported, never regressed as zeros.
+	// query — reported, never regressed as zeros. DESCRIPTIVE since D3: see
+	// ctDecide's S3 block for why it is not in the SHIP conjunction.
 	DeltaCByBucket []ctBucketDelta
 	OmittedBuckets []int
 
@@ -466,6 +737,44 @@ func (d ctDecision) String() string {
 }
 
 // ---------------------------------------------------------------------------
+// THE ABLATION-ADDITIVITY BOUNDS (U3-class)
+// ---------------------------------------------------------------------------
+
+// ctAdditivityViolation checks the two bounds that make the redundancy gap
+// VISIBLE rather than assumed:
+//
+//	Delta_HP >= max(Delta_H, Delta_P)   removing BOTH boosts cannot hurt less
+//	                                    than removing either one alone
+//	Delta_HP <= Delta_C                 removing both boosts cannot hurt more
+//	                                    than also removing the base-level prior
+//
+// A violation is not a small result — it means the ARITHMETIC ABLATION IS NOT
+// WHAT IT CLAIMS TO BE, which is a U3-class failure (the reconstruction is not
+// the thing it says it is), so ctDecide routes it to UNDERPOWERED rather than
+// letting a number be quoted from it.
+//
+// The tolerance is the bootstrap's own resolution, not a fudge: the four deltas
+// are separate resamples of the same paired series, so a boundary case can
+// disagree in the last few digits without anything being wrong.
+const ctAdditivityTolerance = 1e-9
+
+func ctAdditivityViolation(v ctVaultResult) string {
+	lower := math.Max(v.DeltaH.Point, v.DeltaP.Point)
+	if v.DeltaHP.Point < lower-ctAdditivityTolerance {
+		return fmt.Sprintf("vault %s: Delta_HP %+.4f < max(Delta_H %+.4f, Delta_P %+.4f) — "+
+			"removing BOTH boosts hurt LESS than removing one, so the arithmetic ablation is "+
+			"not the configuration it claims to be", v.Label, v.DeltaHP.Point,
+			v.DeltaH.Point, v.DeltaP.Point)
+	}
+	if v.DeltaHP.Point > v.DeltaC.Point+ctAdditivityTolerance {
+		return fmt.Sprintf("vault %s: Delta_HP %+.4f > Delta_C %+.4f — removing both boosts hurt "+
+			"MORE than also removing the base-level prior, which the ablation cannot produce",
+			v.Label, v.DeltaHP.Point, v.DeltaC.Point)
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
 // THE RULE
 // ---------------------------------------------------------------------------
 
@@ -483,6 +792,31 @@ func (d ctDecision) String() string {
 // The harness passes their result in rather than assuming it.
 func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool) ctDecision {
 	var u []string
+
+	// --- THE CENSUS, BEFORE ANY DELTA ----------------------------------------
+	// The zero-relevance fraction is mandatory output, not a footnote. It is a
+	// retrieval-quality number in its own right (these are recalls that RETURNED
+	// items the judge graded entirely irrelevant — the 0x29 event is only written
+	// when len(items) > 0, so no abstention can be hiding in here), and it is the
+	// only visible symptom of a too-conservative judge: U1 gates the judge's
+	// false-POSITIVE rate and nothing gates its false-negative rate, so a judge
+	// that grades everything 0 shows up HERE or nowhere.
+	census := make([]string, 0, len(vaults)+1)
+	for _, v := range vaults {
+		scored := v.NQueries + v.ZeroRelevanceQueries
+		frac := 0.0
+		if scored > 0 {
+			frac = float64(v.ZeroRelevanceQueries) / float64(scored)
+		}
+		census = append(census, fmt.Sprintf(
+			"CENSUS vault %s: %d scored queries = %d informative + %d zero-relevance (%.1f%% "+
+				"zero-relevance); %d distinct recall events; %s",
+			v.Label, scored, v.NQueries, v.ZeroRelevanceQueries, 100*frac,
+			v.DistinctEvents, v.ShuffledSeedNull))
+	}
+	census = append(census, "CENSUS: zero-relevance queries are EXCLUDED from every delta (D1). "+
+		"They are false-positive recalls, not abstentions — an abstention cannot appear in this "+
+		"population. Delta_C over ALL queries is reported below as DILUTED and gates nothing.")
 
 	// --- U1: the judge-calibration gate --------------------------------------
 	if !judge.Ran {
@@ -535,9 +869,43 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		u = append(u, fmt.Sprintf("U2: %d vaults, need %d", len(vaults), ctPreregistered.VaultsRequired))
 	}
 	for _, v := range vaults {
+		// D1: a vault where EVERY query was zero-relevance has an EMPTY Delta_C
+		// series, and ctPairedBootstrap(nil, nil, ...) returns the zero value —
+		// Point 0, CI [0,0], N 0. That makes K1's clause TRUE and U5's clause
+		// FALSE, so such a vault votes KILL WITH PERFECT CONFIDENCE. Two of them
+		// plus one strong vault produced a KILL verdict through the unmodified
+		// rule: "we did not look" rendered as "we looked and found nothing",
+		// which is #797's exact shape reappearing in the Delta_C series.
+		//
+		// Informative-N must travel with the number, and informative-N of 0 must
+		// route HERE, never to a K1 vote.
+		if v.DeltaC.N == 0 {
+			u = append(u, fmt.Sprintf("U2: vault %s has NO INFORMATIVE QUERY — every scored query "+
+				"was zero-relevance (%d of them), so Delta_C was computed from an empty series. "+
+				"An empty paired bootstrap returns Point 0 with a zero-width CI, which reads as "+
+				"a confident null. It is an ABSENCE OF MEASUREMENT.",
+				v.Label, v.ZeroRelevanceQueries))
+		}
+		// D1: the load-bearing wire. U2 reads NQueries and U5 reads
+		// DeltaC.halfWidth(), and until now NOTHING read DeltaC.N — so a harness
+		// that reported a pre-exclusion NQueries beside a post-exclusion interval
+		// would gate power on one sample and estimate on another, silently. Under
+		// an exclusion policy that is the whole ballgame, so it is asserted rather
+		// than trusted.
+		if v.NQueries != v.DeltaC.N {
+			u = append(u, fmt.Sprintf("U2: vault %s reports %d informative queries but Delta_C was "+
+				"computed over %d. The power gates and the estimate must bind to the SAME series.",
+				v.Label, v.NQueries, v.DeltaC.N))
+		}
+		if v.DeltaHP.N != v.DeltaC.N {
+			u = append(u, fmt.Sprintf("U2: vault %s computed Delta_HP over %d queries and Delta_C "+
+				"over %d. K2 and K4 read Delta_HP; it must be the same paired series.",
+				v.Label, v.DeltaHP.N, v.DeltaC.N))
+		}
 		if v.NQueries < ctPreregistered.MinQueriesPerVault {
-			u = append(u, fmt.Sprintf("U2: vault %s has %d labeled held-out queries, need %d",
-				v.Label, v.NQueries, ctPreregistered.MinQueriesPerVault))
+			u = append(u, fmt.Sprintf("U2: vault %s has %d INFORMATIVE labeled held-out queries "+
+				"(%d more were zero-relevance and excluded), need %d",
+				v.Label, v.NQueries, v.ZeroRelevanceQueries, ctPreregistered.MinQueriesPerVault))
 		}
 		if v.DistinctEvents < ctPreregistered.MinEventsPerVault {
 			u = append(u, fmt.Sprintf("U2: vault %s has %d distinct recall events after dedup, need %d",
@@ -549,6 +917,11 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	if !fidelityOK {
 		u = append(u, "U3: a reconstruction-fidelity test failed — the reconstruction is not "+
 			"the thing it claims to be, and no arm number may be quoted")
+	}
+	for _, v := range vaults {
+		if msg := ctAdditivityViolation(v); msg != "" {
+			u = append(u, "U3 (ablation additivity): "+msg)
+		}
 	}
 
 	// --- U4: the reconstruction is too partial -------------------------------
@@ -608,11 +981,22 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		u = append(u, "UNDERPOWERED is a real outcome, not a failure of the instrument: report it, "+
 			"change no defaults, publish the composition and power numbers, and schedule the "+
 			"confirmatory run after natural re-learning.")
-		return ctDecision{Verdict: ctVerdictUnderpowered, Reasons: u}
+		return ctDecision{Verdict: ctVerdictUnderpowered, Reasons: append(census, u...)}
 	}
 
 	// --- SHIP ---------------------------------------------------------------
-	var ship, kill []string
+	ship, kill := append([]string(nil), census...), []string(nil)
+
+	// The diluted number, reported and gating nothing, so the exclusion is
+	// auditable rather than asserted.
+	for _, v := range vaults {
+		ship = append(ship, fmt.Sprintf(
+			"REPORTED (gates nothing): vault %s Delta_C over ALL %d scored queries = %+.4f "+
+				"CI [%+.4f, %+.4f]; over the %d INFORMATIVE queries = %+.4f CI [%+.4f, %+.4f]",
+			v.Label, v.DeltaCAllQueriesDiluted.N, v.DeltaCAllQueriesDiluted.Point,
+			v.DeltaCAllQueriesDiluted.CILower, v.DeltaCAllQueriesDiluted.CIUpper,
+			v.DeltaC.N, v.DeltaC.Point, v.DeltaC.CILower, v.DeltaC.CIUpper))
+	}
 
 	// S1
 	s1Vaults, s1NegativeVault := 0, ""
@@ -647,11 +1031,24 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	ship = append(ship, fmt.Sprintf("S2 %s: a named mechanism reaches +%.2f with CI lower > 0 on some vault%s",
 		ctPassFail(s2), ctPreregistered.MinDeltaMechanism, ctIf(s2, " ("+s2Which+")")))
 
-	// S3 — the trend. Applied per vault and required on the same number of
-	// vaults as S1: the design states the count for S1 and not for S3, and
-	// requiring the trend on FEWER vaults than the effect would let a single
-	// vault's trend carry the reproducibility claim. Symmetry is the
-	// conservative reading, and it is recorded here rather than chosen silently.
+	// S3 — DESCRIPTIVE SINCE D3, NOT A SHIP GATE.
+	//
+	// S3 was pre-registered as a TREND OVER 12 WEEKLY CHECKPOINTS, and the code
+	// does not compute that: ctReplay runs ONCE, its checkpoint callback only
+	// logs, and every arm scores against the FINAL graph. What is actually
+	// computed is a per-bucket breakdown of a single measurement — the same
+	// evidence S1 already rests on, re-read through a different lens.
+	//
+	// Leaving it in the SHIP conjunction gates the verdict on a quantity the code
+	// does not produce, which is #797's shape (a gate that cannot bind on
+	// evidence it never receives). The alternative — score each arm against the
+	// graph AS OF each checkpoint — is correct and is deferred, because equal
+	// -width weekly buckets need ~84 days of recall corpus and redefining
+	// "weekly" to mean ~26 hours to make the gate satisfiable today would be
+	// exactly the tuning this rule exists to prevent.
+	//
+	// It is still COMPUTED AND REPORTED. U6's empty-bucket guard stays regardless:
+	// an absent bucket is absent data whether or not a verdict depends on it.
 	s3Vaults := 0
 	var trendDetail []string
 	for _, v := range vaults {
@@ -668,9 +1065,10 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 			tr.WindowN, len(v.OmittedBuckets), tr.Slope, tr.SlopeCILower))
 	}
 	s3 := s3Vaults >= ctPreregistered.VaultsSupporting
-	ship = append(ship, fmt.Sprintf("S3 %s: trend holds on %d/%d vaults (need %d) [%s]",
-		ctPassFail(s3), s3Vaults, len(vaults), ctPreregistered.VaultsSupporting,
-		strings.Join(trendDetail, "; ")))
+	ship = append(ship, fmt.Sprintf("S3 %s (DESCRIPTIVE ONLY — gates nothing since D3; this is a "+
+		"per-bucket breakdown of ONE measurement against the FINAL graph, not a checkpoint "+
+		"trend): would-hold on %d/%d vaults [%s]",
+		ctPassFail(s3), s3Vaults, len(vaults), strings.Join(trendDetail, "; ")))
 
 	// S4 — MRR agrees in sign with NDCG@10 on whichever mechanism satisfied S2.
 	s4 := false
@@ -693,7 +1091,7 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	ship = append(ship, fmt.Sprintf("S5 %s: judge gate passed before scoring and the label hash matches",
 		ctPassFail(s5)))
 
-	if s1 && s2 && s3 && s4 && s5 {
+	if s1 && s2 && s4 && s5 {
 		ship = append(ship, "SHIP: the cognitive layer earns its complexity.")
 		return ctDecision{Verdict: ctVerdictShip, Reasons: ship}
 	}
@@ -712,10 +1110,22 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		ctPassFail(k1), ctPreregistered.KillDeltaCPoint, ctPreregistered.KillDeltaCCIUpper,
 		k1Vaults, len(vaults), ctPreregistered.VaultsSupporting))
 
-	// K2 is the exact negation of S2.
-	k2 := !s2
-	kill = append(kill, fmt.Sprintf("K2 %s: neither Delta_H nor Delta_P reaches +%.2f with CI lower > 0 on any vault",
-		ctPassFail(k2), ctPreregistered.MinDeltaMechanism))
+	// K2 — restated by D2 to include Delta_HP. S2 asks whether a NAMED mechanism
+	// earns its keep; K2 asks whether ANY of them does, and the configuration
+	// KILL actually ships (both boosts off, base-level kept) is the BASE-LEVEL-ONLY
+	// arm, whose delta is Delta_HP. Omitting it let KILL be authorized by three
+	// marginals that provably cannot reconstruct it.
+	hpVault := ""
+	for _, v := range vaults {
+		if v.DeltaHP.Point >= ctPreregistered.MinDeltaMechanism && v.DeltaHP.CILower > 0 {
+			hpVault = v.Label
+			break
+		}
+	}
+	k2 := !s2 && hpVault == ""
+	kill = append(kill, fmt.Sprintf("K2 %s: neither Delta_H nor Delta_P nor Delta_HP reaches +%.2f "+
+		"with CI lower > 0 on any vault%s", ctPassFail(k2), ctPreregistered.MinDeltaMechanism,
+		ctIf(hpVault != "", fmt.Sprintf("; vault %s's Delta_HP does", hpVault))))
 
 	// K3 — re-asserted rather than implied by control flow, so it appears in
 	// the audit trail.
@@ -731,14 +1141,65 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	kill = append(kill, fmt.Sprintf("K3 %s: power was adequate (judge gate passed, n >= %d per vault, U2/U4/U5 clear)",
 		ctPassFail(k3), ctPreregistered.MinQueriesPerVault))
 
-	if k1 && k2 && k3 {
+	// K4 — THE VETO, ON Delta_HP (D2).
+	//
+	// KILL is blocked if the configuration KILL SHIPS costs a vault at least
+	// MinDeltaC with CI lower > 0 — the S1 per-vault bar, applied to the quantity
+	// the action actually spends. The integrity condition matters as much as the
+	// bar: THE VETOING VAULT MUST ITSELF HAVE SURVIVED THE S6 SHUFFLED-SEED NULL.
+	// A veto that a shuffled seed reproduces is ambient lift, not memory, and is
+	// not a veto. A veto whose null was never run is not a veto either — an unrun
+	// gate is not a passed gate, the same reading U1 takes.
+	//
+	// SUBSUMPTION, RECORDED SO IT IS NOT MISTAKEN FOR INDEPENDENT EVIDENCE:
+	// K4's bar (MinDeltaC = 0.03) is ABOVE K2's (MinDeltaMechanism = 0.02) and
+	// both must hold for KILL, so as long as MinDeltaC >= MinDeltaMechanism every
+	// K4 veto is already blocked by K2's Delta_HP clause and K4 cannot change a
+	// verdict on its own. It is retained because it is what was pre-registered,
+	// because it names the veto and its integrity condition in the audit trail,
+	// and because it becomes load-bearing the moment the two bars are re-ordered.
+	// TestCognitionTrialRule_K4IsSubsumedByK2 pins the relationship so a future
+	// edit to either bar surfaces it instead of silently changing what KILL means.
+	k4Vetoing, k4Weak := "", ""
+	for _, v := range vaults {
+		if v.DeltaHP.Point >= ctPreregistered.MinDeltaC && v.DeltaHP.CILower > 0 {
+			if v.ShuffledSeedNull == ctNullSurvived {
+				k4Vetoing = v.Label
+				break
+			}
+			k4Weak = fmt.Sprintf("%s (%s)", v.Label, v.ShuffledSeedNull)
+		}
+	}
+	k4 := k4Vetoing == ""
+	kill = append(kill, fmt.Sprintf("K4 %s: no vault's Delta_HP — what KILL actually costs, the "+
+		"FULL minus %s arm — reaches +%.2f with CI lower > 0 AND survives the S6 shuffled-seed "+
+		"null%s%s", ctPassFail(k4), ctArmNameBaseLevelOnly, ctPreregistered.MinDeltaC,
+		ctIf(k4Vetoing != "", fmt.Sprintf("; vault %s VETOES the kill", k4Vetoing)),
+		ctIf(k4Vetoing == "" && k4Weak != "",
+			fmt.Sprintf("; vault %s clears the bar but its null did not qualify it to veto", k4Weak))))
+
+	if k1 && k2 && k3 && k4 {
 		kill = append(kill,
 			"KILL: retire the cognitive layer. Executes in one PR referencing the design: "+
 				"default preset hebbian_enabled:false + predictive_activation:false (now actually "+
-				"effective on the read side, COG-31); record the negative in the decision record; "+
-				"delete the dead SGD feedback loop and correct muninn_feedback's description; decide "+
-				"the fate of internal/working and internal/episodic; rewrite the README's first "+
-				"clause; KEEP the ACT-R base-level prior unless increment 2 measures it out.")
+				"effective on the read side, COG-31), with the per-vault override that already "+
+				"ships left in place; record the negative in the decision record; rewrite the "+
+				"README's first clause; KEEP the ACT-R base-level prior unless increment 2 "+
+				"measures it out.")
+		// D4: split by what evidence licenses what. A result that is REFUTED AT
+		// THE PREMISE — a census, no labels needed — licenses DELETION; that is
+		// the #609 precedent. A mechanism that FIRES BUT BELOW THE BAR licenses a
+		// DEFAULT CHANGE with the per-vault override, not a deletion.
+		kill = append(kill,
+			"NOT LICENSED BY THIS VERDICT, and deliberately not bundled into it: "+
+				"internal/working and internal/episodic are measured by NO ARM of this trial. "+
+				"Deciding their fate on this measurement is precisely the failure the design "+
+				"exists to prevent. They need their own census, and it can run today.")
+		kill = append(kill,
+			"NOT VERDICT-DEPENDENT, and deliberately not bundled into it: deleting the dead SGD "+
+				"feedback loop and correcting muninn_feedback's description are wrong under SHIP "+
+				"too. They are their own change and should not wait on this trial or borrow its "+
+				"authority.")
 		return ctDecision{Verdict: ctVerdictKill, Reasons: append(ship, kill...)}
 	}
 

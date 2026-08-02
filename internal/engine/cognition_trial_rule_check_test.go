@@ -55,35 +55,44 @@ func ctFlatBuckets(v float64) []float64 {
 
 func ctShipVault(label string) ctVaultResult {
 	return ctVaultResult{
-		Label:            label,
-		NQueries:         320,
-		DistinctEvents:   410,
-		DeltaC:           ctDelta{Point: 0.055, CILower: 0.031, CIUpper: 0.079, N: 320},
-		DeltaH:           ctDelta{Point: 0.028, CILower: 0.008, CIUpper: 0.048, N: 320},
-		DeltaP:           ctDelta{Point: 0.006, CILower: -0.010, CIUpper: 0.022, N: 320},
-		MRRDeltaH:        0.031,
-		MRRDeltaP:        0.002,
-		DeltaCByBucket:   ctBucketSeries(ctRisingBuckets(0.03)),
-		BaselineEdges:    5000,
-		ReplayedEdges:    2100,
-		UnreplayableFrac: 0.30,
+		Label:    label,
+		NQueries: 320,
+		// 40 more queries were scored and every returned item was graded
+		// irrelevant: excluded from the deltas (D1), counted here.
+		ZeroRelevanceQueries: 40,
+		DistinctEvents:       410,
+		DeltaC:               ctDelta{Point: 0.055, CILower: 0.031, CIUpper: 0.079, N: 320},
+		DeltaH:               ctDelta{Point: 0.028, CILower: 0.008, CIUpper: 0.048, N: 320},
+		DeltaP:               ctDelta{Point: 0.006, CILower: -0.010, CIUpper: 0.022, N: 320},
+		// Inside the additivity bounds: max(Delta_H, Delta_P) <= Delta_HP <= Delta_C.
+		DeltaHP:                 ctDelta{Point: 0.034, CILower: 0.012, CIUpper: 0.056, N: 320},
+		DeltaCAllQueriesDiluted: ctDelta{Point: 0.049, CILower: 0.028, CIUpper: 0.070, N: 360},
+		MRRDeltaH:               0.031,
+		MRRDeltaP:               0.002,
+		DeltaCByBucket:          ctBucketSeries(ctRisingBuckets(0.03)),
+		BaselineEdges:           5000,
+		ReplayedEdges:           2100,
+		UnreplayableFrac:        0.30,
 	}
 }
 
 func ctKillVault(label string) ctVaultResult {
 	return ctVaultResult{
-		Label:            label,
-		NQueries:         340,
-		DistinctEvents:   460,
-		DeltaC:           ctDelta{Point: 0.002, CILower: -0.014, CIUpper: 0.018, N: 340},
-		DeltaH:           ctDelta{Point: 0.001, CILower: -0.011, CIUpper: 0.013, N: 340},
-		DeltaP:           ctDelta{Point: -0.003, CILower: -0.015, CIUpper: 0.009, N: 340},
-		MRRDeltaH:        0.0,
-		MRRDeltaP:        -0.001,
-		DeltaCByBucket:   ctBucketSeries(ctFlatBuckets(0.001)),
-		BaselineEdges:    5000,
-		ReplayedEdges:    2400,
-		UnreplayableFrac: 0.25,
+		Label:                   label,
+		NQueries:                340,
+		ZeroRelevanceQueries:    55,
+		DistinctEvents:          460,
+		DeltaC:                  ctDelta{Point: 0.002, CILower: -0.014, CIUpper: 0.018, N: 340},
+		DeltaH:                  ctDelta{Point: 0.001, CILower: -0.011, CIUpper: 0.013, N: 340},
+		DeltaP:                  ctDelta{Point: -0.003, CILower: -0.015, CIUpper: 0.009, N: 340},
+		DeltaHP:                 ctDelta{Point: 0.0015, CILower: -0.012, CIUpper: 0.015, N: 340},
+		DeltaCAllQueriesDiluted: ctDelta{Point: 0.0017, CILower: -0.012, CIUpper: 0.015, N: 395},
+		MRRDeltaH:               0.0,
+		MRRDeltaP:               -0.001,
+		DeltaCByBucket:          ctBucketSeries(ctFlatBuckets(0.001)),
+		BaselineEdges:           5000,
+		ReplayedEdges:           2400,
+		UnreplayableFrac:        0.25,
 	}
 }
 
@@ -139,9 +148,10 @@ func TestCognitionTrialRule_PriorWithoutAMechanismDoesNotShip(t *testing.T) {
 func TestCognitionTrialRule_InconclusiveButPowered(t *testing.T) {
 	vaults := ctThree(ctShipVault)
 	for i := range vaults {
-		vaults[i].DeltaC = ctDelta{Point: 0.018, CILower: 0.006, CIUpper: 0.030}
-		vaults[i].DeltaH = ctDelta{Point: 0.010, CILower: 0.002, CIUpper: 0.018}
-		vaults[i].DeltaP = ctDelta{Point: 0.004, CILower: -0.004, CIUpper: 0.012}
+		vaults[i].DeltaC = ctDelta{Point: 0.018, CILower: 0.006, CIUpper: 0.030, N: 320}
+		vaults[i].DeltaH = ctDelta{Point: 0.010, CILower: 0.002, CIUpper: 0.018, N: 320}
+		vaults[i].DeltaP = ctDelta{Point: 0.004, CILower: -0.004, CIUpper: 0.012, N: 320}
+		vaults[i].DeltaHP = ctDelta{Point: 0.014, CILower: 0.004, CIUpper: 0.024, N: 320}
 	}
 	ctRequireVerdict(t, ctDecide(vaults, ctGoodJudge(), true), ctVerdictInconclusivePowered,
 		"INCONCLUSIVE-BUT-POWERED")
@@ -165,7 +175,8 @@ func TestCognitionTrialRule_UnderpoweredGates(t *testing.T) {
 		}, "U1: judge false-positive rate"},
 		{"U2 queries", func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
 			v[1].NQueries = 299
-		}, "U2: vault B has 299 labeled held-out queries"},
+			v[1].DeltaC.N, v[1].DeltaHP.N = 299, 299
+		}, "U2: vault B has 299 INFORMATIVE labeled held-out queries"},
 		{"U2 events", func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
 			v[2].DistinctEvents = 199
 		}, "U2: vault C has 199 distinct recall events"},
@@ -179,8 +190,8 @@ func TestCognitionTrialRule_UnderpoweredGates(t *testing.T) {
 			v[0].UnreplayableFrac = 0.61
 		}, "in RelTypes replay cannot produce"},
 		{"U5 wide intervals on two vaults", func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
-			v[0].DeltaC = ctDelta{Point: 0.055, CILower: 0.001, CIUpper: 0.110}
-			v[1].DeltaC = ctDelta{Point: 0.055, CILower: 0.001, CIUpper: 0.110}
+			v[0].DeltaC = ctDelta{Point: 0.055, CILower: 0.001, CIUpper: 0.110, N: 320}
+			v[1].DeltaC = ctDelta{Point: 0.055, CILower: 0.001, CIUpper: 0.110, N: 320}
 		}, "U5: the paired-bootstrap 95% CI half-width"},
 		{"U2 only two vaults", func(_ []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {}, "U2: 2 vaults, need 3"},
 	}
@@ -249,6 +260,36 @@ func ctFromKill(want ctVerdict, wantSub string, mutate func(v []ctVaultResult)) 
 	}
 }
 
+// ctFromShipDescriptive is for an input that is READ AND REPORTED but no longer
+// gates a verdict — S3's two thresholds since D3. It requires the audit trail to
+// change and the verdict NOT to, which is the honest claim for a descriptive
+// quantity: pretending it still gates would be worse than admitting it does not.
+func ctFromShipDescriptive(t *testing.T, wantSub string, mutate func(v []ctVaultResult)) {
+	t.Helper()
+	base := ctDecide(ctThree(ctShipVault), ctGoodJudge(), true)
+	if base.Verdict != ctVerdictShip {
+		t.Fatalf("baseline is not SHIP, so this probe proves nothing\n%s", base)
+	}
+	vaults := ctThree(ctShipVault)
+	mutate(vaults)
+	got := ctDecide(vaults, ctGoodJudge(), true)
+	if got.Verdict != ctVerdictShip {
+		t.Fatalf("verdict moved to %s. This field is DESCRIPTIVE since D3 and must not gate a "+
+			"verdict; if it now does, the probe is stale or the demotion was reverted\n%s",
+			got.Verdict, got)
+	}
+	found := false
+	for _, r := range got.Reasons {
+		if strings.Contains(r, wantSub) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no reason mentions %q — the field is neither gating NOR reported, i.e. inert\n%s",
+			wantSub, got)
+	}
+}
+
 func ctPreregisteredProbes() map[string]ctProbe {
 	return map[string]ctProbe{
 		// --- S-side ---------------------------------------------------------
@@ -258,7 +299,8 @@ func ctPreregisteredProbes() map[string]ctProbe {
 					// Just under the bar, CI still strictly positive and tight:
 					// this is a REAL effect that is simply too small.
 					v[i].DeltaC = ctDelta{Point: ctPreregistered.MinDeltaC - 0.001,
-						CILower: 0.020, CIUpper: 0.038}
+						CILower: 0.020, CIUpper: 0.038, N: 320}
+					v[i].DeltaHP = ctDelta{Point: 0.028, CILower: 0.010, CIUpper: 0.046, N: 320}
 				}
 			}),
 		"MinDeltaMechanism": ctFromShip(ctVerdictInconclusivePowered, "S2 FAIL",
@@ -269,9 +311,15 @@ func ctPreregisteredProbes() map[string]ctProbe {
 					v[i].DeltaP = ctDelta{Point: 0.003, CILower: -0.007, CIUpper: 0.013}
 				}
 			}),
+		// DESCRIPTIVE SINCE D3. S3 is no longer in the SHIP conjunction, because
+		// the code does not compute the checkpoint trend S3 was pre-registered
+		// as: ctReplay runs once, its checkpoint callback only logs, and every arm
+		// scores against the FINAL graph. So this field can no longer be shown to
+		// move a VERDICT — the honest probe is that it still moves the REPORTED
+		// line, and that it still pins U6's derived floor (which does gate).
+		// A probe asserting a verdict change here would be asserting a gate the
+		// project deliberately removed.
 		"TrendMinPositive": func(t *testing.T) {
-			// Exactly one fewer positive bucket than the rule requires, inside
-			// the trailing window.
 			series := ctRisingBuckets(0.03)
 			for i := 2; i < 2+(ctPreregistered.TrendWindow-ctPreregistered.TrendMinPositive+1); i++ {
 				series[i] = -0.001
@@ -281,12 +329,12 @@ func ctPreregisteredProbes() map[string]ctProbe {
 				t.Fatalf("probe setup: %d positive in the window, want %d",
 					tr.PositiveOfLastN, ctPreregistered.TrendMinPositive-1)
 			}
-			ctFromShip(ctVerdictInconclusivePowered, "S3 FAIL",
-				func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+			ctFromShipDescriptive(t, "S3 FAIL",
+				func(v []ctVaultResult) {
 					for i := range v {
 						v[i].DeltaCByBucket = ctBucketSeries(series)
 					}
-				})(t)
+				})
 		},
 		"TrendWindow": func(t *testing.T) {
 			// A series whose positivity count DEPENDS on the window: positive in
@@ -310,10 +358,11 @@ func ctPreregisteredProbes() map[string]ctProbe {
 					ctPreregistered.TrendWindow+2, narrow.PositiveOfLastN, wide.PositiveOfLastN)
 			}
 		},
-		"TrendSlopeCILower": ctFromShip(ctVerdictInconclusivePowered, "S3 FAIL",
-			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+		// DESCRIPTIVE SINCE D3, same as TrendMinPositive.
+		"TrendSlopeCILower": func(t *testing.T) {
+			ctFromShipDescriptive(t, "S3 FAIL", func(v []ctVaultResult) {
 				// Every bucket positive — so the positivity half of S3 passes —
-				// but clearly DECREASING, which is the half this field gates.
+				// but clearly DECREASING, which is the half this field reads.
 				falling := make([]float64, 12)
 				for i := range falling {
 					falling[i] = 0.08 - 0.005*float64(i)
@@ -321,12 +370,14 @@ func ctPreregisteredProbes() map[string]ctProbe {
 				for i := range v {
 					v[i].DeltaCByBucket = ctBucketSeries(falling)
 				}
-			}),
+			})
+		},
 		"VaultsSupporting": ctFromShip(ctVerdictInconclusivePowered, "S1 FAIL",
 			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
 				// Only ONE vault carries the effect; the rule needs two.
 				for i := 1; i < len(v); i++ {
-					v[i].DeltaC = ctDelta{Point: 0.029, CILower: 0.020, CIUpper: 0.038}
+					v[i].DeltaC = ctDelta{Point: 0.029, CILower: 0.020, CIUpper: 0.038, N: 320}
+					v[i].DeltaHP = ctDelta{Point: 0.028, CILower: 0.010, CIUpper: 0.046, N: 320}
 				}
 			}),
 
@@ -335,14 +386,16 @@ func ctPreregisteredProbes() map[string]ctProbe {
 			func(v []ctVaultResult) {
 				for i := range v {
 					v[i].DeltaC = ctDelta{Point: ctPreregistered.KillDeltaCPoint + 0.001,
-						CILower: -0.005, CIUpper: 0.027}
+						CILower: -0.005, CIUpper: 0.027, N: 340}
+					v[i].DeltaHP = ctDelta{Point: 0.009, CILower: -0.006, CIUpper: 0.024, N: 340}
 				}
 			}),
 		"KillDeltaCCIUpper": ctFromKill(ctVerdictInconclusivePowered, "K1 FAIL",
 			func(v []ctVaultResult) {
 				for i := range v {
 					v[i].DeltaC = ctDelta{Point: 0.002, CILower: -0.025,
-						CIUpper: ctPreregistered.KillDeltaCCIUpper + 0.001}
+						CIUpper: ctPreregistered.KillDeltaCCIUpper + 0.001, N: 340}
+					v[i].DeltaHP = ctDelta{Point: 0.0018, CILower: -0.025, CIUpper: 0.029, N: 340}
 				}
 			}),
 
@@ -384,7 +437,7 @@ func ctPreregisteredProbes() map[string]ctProbe {
 			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
 				w := ctPreregistered.MaxCIHalfWidth + 0.001
 				for i := 0; i < ctPreregistered.VaultsSupporting; i++ {
-					v[i].DeltaC = ctDelta{Point: 0.055, CILower: 0.055 - w, CIUpper: 0.055 + w}
+					v[i].DeltaC = ctDelta{Point: 0.055, CILower: 0.055 - w, CIUpper: 0.055 + w, N: 320}
 				}
 			}),
 		"MinPopulatedBuckets": func(t *testing.T) {
@@ -460,6 +513,219 @@ func ctJudgeProbes() map[string]ctProbe {
 	}
 }
 
+// ctVaultResultProbes is the same census applied to the VAULT RESULT, added
+// with D1/D2 because that is where the new inputs landed. Every field a vault
+// hands the rule must be shown to be read.
+//
+// The rule's inputs are what #797 got wrong: DeltaC.N was declared, wired
+// correctly by the harness, and read by NOTHING — so an exclusion policy could
+// have gated power on one sample while estimating on another with no test
+// noticing. A field on this struct is a claim the rule uses it.
+func ctVaultResultProbes() map[string]ctProbe {
+	return map[string]ctProbe{
+		"Label": ctFromShip(ctVerdictUnderpowered, "vault ZZ-9",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				// The label is the ONLY identifier in the rule, and its job is to
+				// name the offending vault in the audit trail. Prove it does.
+				v[1].Label = "ZZ-9"
+				v[1].NQueries = ctPreregistered.MinQueriesPerVault - 1
+				v[1].DeltaC.N = v[1].NQueries
+				v[1].DeltaHP.N = v[1].NQueries
+			}),
+		"NQueries": ctFromShip(ctVerdictUnderpowered, "INFORMATIVE labeled held-out queries",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[1].NQueries = ctPreregistered.MinQueriesPerVault - 1
+				v[1].DeltaC.N = v[1].NQueries
+				v[1].DeltaHP.N = v[1].NQueries
+			}),
+		"ZeroRelevanceQueries": func(t *testing.T) {
+			// D1 item 6: mandatory census output. It gates nothing on purpose —
+			// a vault is not underpowered for having false-positive recalls — so
+			// the probe is that the number REACHES THE REPORT, before any delta.
+			vaults := ctThree(ctShipVault)
+			vaults[0].ZeroRelevanceQueries = 137
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			want := "CENSUS vault A: 457 scored queries = 320 informative + 137 zero-relevance (30.0% zero-relevance)"
+			idxCensus, idxDelta := -1, -1
+			for i, r := range got.Reasons {
+				if strings.Contains(r, want) && idxCensus < 0 {
+					idxCensus = i
+				}
+				if strings.Contains(r, "Delta_C") && idxDelta < 0 {
+					idxDelta = i
+				}
+			}
+			if idxCensus < 0 {
+				t.Fatalf("the zero-relevance census line is missing. Expected %q\n%s", want, got)
+			}
+			if idxDelta >= 0 && idxCensus > idxDelta {
+				t.Errorf("the census line appears AFTER a delta (positions %d vs %d). D1 requires "+
+					"it before any Delta is printed: it is the only visible symptom of a "+
+					"too-conservative judge, and a reader who has already seen the deltas has "+
+					"already formed the conclusion.", idxCensus, idxDelta)
+			}
+		},
+		"DistinctEvents": ctFromShip(ctVerdictUnderpowered, "distinct recall events",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[2].DistinctEvents = ctPreregistered.MinEventsPerVault - 1
+			}),
+		"DeltaC": ctFromShip(ctVerdictInconclusivePowered, "S1 FAIL",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				// Below S1's bar and above K1's: a real effect, too small to ship
+				// and too large to kill.
+				for i := range v {
+					v[i].DeltaC = ctDelta{Point: 0.020, CILower: 0.005, CIUpper: 0.035, N: 320}
+					v[i].DeltaH = ctDelta{Point: 0.010, CILower: -0.004, CIUpper: 0.024, N: 320}
+					v[i].DeltaP = ctDelta{Point: 0.008, CILower: -0.006, CIUpper: 0.022, N: 320}
+					v[i].DeltaHP = ctDelta{Point: 0.015, CILower: 0.001, CIUpper: 0.029, N: 320}
+				}
+			}),
+		"DeltaH": ctFromShip(ctVerdictInconclusivePowered, "S2 FAIL",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				for i := range v {
+					v[i].DeltaH = ctDelta{Point: 0.004, CILower: -0.006, CIUpper: 0.014, N: 320}
+					v[i].DeltaP = ctDelta{Point: 0.003, CILower: -0.007, CIUpper: 0.013, N: 320}
+					v[i].DeltaHP = ctDelta{Point: 0.006, CILower: -0.006, CIUpper: 0.018, N: 320}
+				}
+			}),
+		"DeltaP": func(t *testing.T) {
+			// PAS alone carries S2, which is only observable through DeltaP.
+			vaults := ctThree(ctShipVault)
+			for i := range vaults {
+				vaults[i].DeltaH = ctDelta{Point: 0.004, CILower: -0.006, CIUpper: 0.014, N: 320}
+				vaults[i].DeltaP = ctDelta{Point: 0.026, CILower: 0.008, CIUpper: 0.044, N: 320}
+				vaults[i].MRRDeltaP = 0.02
+			}
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			ctRequireVerdict(t, got, ctVerdictShip, "(PAS)")
+		},
+		"DeltaHP": ctFromKill(ctVerdictInconclusivePowered, "K2 FAIL",
+			func(v []ctVaultResult) {
+				// D2: the arm that IS the post-KILL configuration. Delta_H and
+				// Delta_P stay at their killing values; only the JOINT ablation
+				// shows the cost, which is exactly the redundancy case the four
+				// marginals provably cannot reconstruct.
+				v[1].DeltaHP = ctDelta{Point: 0.045, CILower: 0.020, CIUpper: 0.070, N: 340}
+				v[1].DeltaC = ctDelta{Point: 0.050, CILower: 0.025, CIUpper: 0.075, N: 340}
+			}),
+		"DeltaCAllQueriesDiluted": func(t *testing.T) {
+			// Reported, gates nothing (D1 item 2). The probe is that it reaches
+			// the report AND that changing it cannot change the verdict — the
+			// second half is the point: this is the number that used to gate.
+			vaults := ctThree(ctShipVault)
+			for i := range vaults {
+				vaults[i].DeltaCAllQueriesDiluted = ctDelta{
+					Point: 0.0001, CILower: -0.0005, CIUpper: 0.0007, N: 9999}
+			}
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			if got.Verdict != ctVerdictShip {
+				t.Fatalf("the DILUTED all-queries Delta_C changed the verdict to %s. It gates "+
+					"NOTHING: including zero-relevance queries shrinks the mean and the SE by "+
+					"the same factor, so it slides the point estimate across S1's and K1's "+
+					"absolute bars while the t-statistic never moves\n%s", got.Verdict, got)
+			}
+			found := false
+			for _, r := range got.Reasons {
+				if strings.Contains(r, "over ALL 9999 scored queries = +0.0001") {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("the diluted number is not reported — it must be visible so the "+
+					"exclusion is auditable rather than asserted\n%s", got)
+			}
+		},
+		"ShuffledSeedNull": func(t *testing.T) {
+			// K4's integrity condition. It cannot be shown to change a VERDICT,
+			// because K4 is subsumed by K2 whenever MinDeltaC >= MinDeltaMechanism
+			// (see TestCognitionTrialRule_K4IsSubsumedByK2) — so the honest probe
+			// is that the tri-state is READ and DISTINGUISHED in the audit trail.
+			// Reporting it as a verdict gate would be the same overstatement this
+			// census exists to catch.
+			for _, tc := range []struct {
+				null ctNullResult
+				want string
+			}{
+				{ctNullNotRun, "shuffled-seed null NOT RUN"},
+				{ctNullSurvived, "VETOES the kill"},
+				{ctNullReproducedByShuffle, "REPRODUCED by a shuffled seed"},
+			} {
+				vaults := ctThree(ctKillVault)
+				vaults[1].DeltaHP = ctDelta{Point: 0.045, CILower: 0.020, CIUpper: 0.070, N: 340}
+				vaults[1].DeltaC = ctDelta{Point: 0.050, CILower: 0.025, CIUpper: 0.075, N: 340}
+				vaults[1].ShuffledSeedNull = tc.null
+				got := ctDecide(vaults, ctGoodJudge(), true)
+				// Scoped to the K4 line specifically. The census also prints the
+				// tri-state, so an unscoped search would pass even if K4 stopped
+				// reading it — which is exactly the inertness this census exists
+				// to catch.
+				found := false
+				for _, r := range got.Reasons {
+					if strings.HasPrefix(r, "K4 ") && strings.Contains(r, tc.want) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("K4 does not distinguish %v (want %q on its own line). A null that "+
+						"was never run is not a null that was survived\n%s", tc.null, tc.want, got)
+				}
+			}
+		},
+		"MRRDeltaH": ctFromShip(ctVerdictInconclusivePowered, "S4 FAIL",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				for i := range v {
+					v[i].MRRDeltaH = -0.02 // NDCG says up, MRR says down
+				}
+			}),
+		"MRRDeltaP": func(t *testing.T) {
+			vaults := ctThree(ctShipVault)
+			for i := range vaults {
+				vaults[i].DeltaH = ctDelta{Point: 0.004, CILower: -0.006, CIUpper: 0.014, N: 320}
+				vaults[i].DeltaP = ctDelta{Point: 0.026, CILower: 0.008, CIUpper: 0.044, N: 320}
+				vaults[i].MRRDeltaP = -0.02
+			}
+			ctRequireVerdict(t, ctDecide(vaults, ctGoodJudge(), true),
+				ctVerdictInconclusivePowered, "S4 FAIL")
+		},
+		"DeltaCByBucket": ctFromShip(ctVerdictUnderpowered, "populated weekly buckets",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				full := ctBucketSeries(ctRisingBuckets(0.03))
+				for i := range v {
+					v[i].DeltaCByBucket = full[:ctPreregistered.MinPopulatedBuckets-1]
+				}
+			}),
+		"OmittedBuckets": func(t *testing.T) {
+			// Reported, not gating: the count is what turns "the trend was fitted
+			// on 12 buckets" into "on 7 of 12", which is a materially different
+			// claim.
+			vaults := ctThree(ctShipVault)
+			vaults[0].OmittedBuckets = []int{3, 4, 5}
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			found := false
+			for _, r := range got.Reasons {
+				if strings.Contains(r, "3 buckets omitted as empty") {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("the omitted-bucket count is not reported\n%s", got)
+			}
+		},
+		"BaselineEdges": ctFromShip(ctVerdictUnderpowered, "below the 20% floor",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[0].BaselineEdges = 50000 // same replayed edges, 4.2% of baseline
+			}),
+		"ReplayedEdges": ctFromShip(ctVerdictUnderpowered, "below the 20% floor",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[0].ReplayedEdges = 100
+			}),
+		"UnreplayableFrac": ctFromShip(ctVerdictUnderpowered, "in RelTypes replay cannot produce",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[0].UnreplayableFrac = ctPreregistered.MaxUnreplayableFrac + 0.01
+			}),
+	}
+}
+
 func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
 	for _, tc := range []struct {
 		what   string
@@ -468,6 +734,7 @@ func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
 	}{
 		{"ctPreregistered", reflect.TypeOf(ctPreregistered), ctPreregisteredProbes()},
 		{"ctJudgeCalibration", reflect.TypeOf(ctJudgeCalibration{}), ctJudgeProbes()},
+		{"ctVaultResult", reflect.TypeOf(ctVaultResult{}), ctVaultResultProbes()},
 	} {
 		seen := map[string]bool{}
 		for i := 0; i < tc.typ.NumField(); i++ {
@@ -664,7 +931,8 @@ func TestCognitionTrialRule_DegenerateAdjudicationSampleIsNotACalibration(t *tes
 func TestCognitionTrialRule_WideIntervalIsNotAKill(t *testing.T) {
 	vaults := ctThree(ctKillVault)
 	for i := range vaults {
-		vaults[i].DeltaC = ctDelta{Point: 0.005, CILower: -0.060, CIUpper: 0.070}
+		vaults[i].DeltaC = ctDelta{Point: 0.005, CILower: -0.060, CIUpper: 0.070, N: 340}
+		vaults[i].DeltaHP = ctDelta{Point: 0.004, CILower: -0.060, CIUpper: 0.068, N: 340}
 	}
 	ctRequireVerdict(t, ctDecide(vaults, ctGoodJudge(), true), ctVerdictUnderpowered, "U5")
 }
@@ -673,7 +941,15 @@ func TestCognitionTrialRule_WideIntervalIsNotAKill(t *testing.T) {
 // vaults clear the bar.
 func TestCognitionTrialRule_SignificantlyNegativeVaultBlocksShip(t *testing.T) {
 	vaults := ctThree(ctShipVault)
-	vaults[2].DeltaC = ctDelta{Point: -0.04, CILower: -0.06, CIUpper: -0.02}
+	// A vault where the whole prior HURTS. Its mechanism deltas move with it —
+	// a vault cannot simultaneously report that the prior costs it 0.04 and that
+	// each individual mechanism buys it 0.03, and the U3 additivity bounds now
+	// say so, which is why this fixture had to become internally coherent.
+	vaults[2].DeltaC = ctDelta{Point: -0.04, CILower: -0.06, CIUpper: -0.02, N: 320}
+	vaults[2].DeltaH = ctDelta{Point: -0.05, CILower: -0.07, CIUpper: -0.03, N: 320}
+	vaults[2].DeltaP = ctDelta{Point: -0.06, CILower: -0.08, CIUpper: -0.04, N: 320}
+	vaults[2].DeltaHP = ctDelta{Point: -0.045, CILower: -0.065, CIUpper: -0.025, N: 320}
+	vaults[2].MRRDeltaH = -0.05
 	got := ctDecide(vaults, ctGoodJudge(), true)
 	if got.Verdict == ctVerdictShip {
 		t.Fatalf("shipped despite a significantly negative vault\n%s", got)
@@ -699,35 +975,68 @@ func TestCognitionTrialRule_LabelHashMismatchBlocksShip(t *testing.T) {
 
 func TestCognitionTrialMetrics_NDCGGradedAndPooled(t *testing.T) {
 	grades := map[string]int{"m1": 3, "m2": 2, "m3": 1, "m4": 0}
+	must := func(v float64, ok bool) float64 {
+		t.Helper()
+		if !ok {
+			t.Fatalf("NDCG unexpectedly undefined on a pool containing relevant documents")
+		}
+		return v
+	}
 
-	perfect := ctNDCGAt10([]string{"m1", "m2", "m3", "m4"}, grades)
+	perfect := must(ctNDCGAt10([]string{"m1", "m2", "m3", "m4"}, grades))
 	if math.Abs(perfect-1.0) > 1e-12 {
 		t.Errorf("ideal order NDCG@10 = %.12f, want 1", perfect)
 	}
-	reversed := ctNDCGAt10([]string{"m4", "m3", "m2", "m1"}, grades)
+	reversed := must(ctNDCGAt10([]string{"m4", "m3", "m2", "m1"}, grades))
 	if reversed >= perfect {
 		t.Errorf("reversed order scored %.6f >= ideal %.6f", reversed, perfect)
 	}
 
 	// An arm that returns FEWER items must not win by shortening its list: the
 	// IDCG denominator comes from the pooled label set, not from the arm.
-	truncated := ctNDCGAt10([]string{"m1"}, grades)
+	truncated := must(ctNDCGAt10([]string{"m1"}, grades))
 	if truncated >= perfect {
 		t.Errorf("a one-item list scored %.6f >= the full ideal %.6f — the denominator is "+
 			"being taken from the arm instead of the pool", truncated, perfect)
 	}
 
 	// An unlabeled item occupies its rank at gain 0 rather than being skipped.
-	withNoise := ctNDCGAt10([]string{"unlabeled-x", "m1", "m2", "m3"}, grades)
+	withNoise := must(ctNDCGAt10([]string{"unlabeled-x", "m1", "m2", "m3"}, grades))
 	if withNoise >= perfect {
 		t.Errorf("an unlabeled item at rank 1 did not cost anything (%.6f vs %.6f) — it is "+
 			"being skipped, which silently promotes everything after it", withNoise, perfect)
 	}
+}
 
-	// A query whose pooled labels are all 0 has no defined NDCG; 0 for every
-	// arm, hence exactly 0 in every paired delta.
-	if got := ctNDCGAt10([]string{"m4"}, map[string]int{"m4": 0}); got != 0 {
-		t.Errorf("all-irrelevant pool NDCG = %v, want 0", got)
+// ---------------------------------------------------------------------------
+// D1, part 1: AN UNDEFINED NDCG IS NOT A ZERO, AND IS NOT REPRESENTABLE AS ONE.
+//
+// A query whose pooled label set contains nothing relevant has IDCG 0, so NDCG
+// is 0/0. The function used to say "NDCG is undefined" in a comment and then
+// return 0 — the third instance in this file family of undefined written as a
+// measured zero (ctMean(nil) padding trend buckets, fixed by U6; FTS
+// `idf<=0 -> continue`, fixed by COG-24's idfMax; this one).
+// ---------------------------------------------------------------------------
+
+func TestCognitionTrialMetrics_UndefinedNDCGIsNotAZero(t *testing.T) {
+	v, ok := ctNDCGAt10([]string{"m4"}, map[string]int{"m4": 0})
+	if ok {
+		t.Fatalf("an all-irrelevant pool reported a DEFINED NDCG of %v", v)
+	}
+	if !math.IsNaN(v) {
+		t.Errorf("undefined NDCG returned %v, want NaN. A caller that discards ok with `_` must "+
+			"get a value that POISONS any mean it enters, not a plausible zero that silently "+
+			"dilutes it toward the KILL side of an absolute bar.", v)
+	}
+	// The empty pool is the same case and must answer the same way.
+	if v, ok := ctNDCGAt10(nil, nil); ok || !math.IsNaN(v) {
+		t.Errorf("empty pool returned (%v, %v), want (NaN, false)", v, ok)
+	}
+	// And a pool with ANY positive grade is defined, including grade 1, which is
+	// below the MRR binarization but still carries NDCG gain.
+	if v, ok := ctNDCGAt10([]string{"m3"}, map[string]int{"m3": 1}); !ok || v != 1 {
+		t.Errorf("a grade-1-only pool returned (%v, %v), want (1, true) — grade 1 is not "+
+			"relevant for MRR but it IS a defined NDCG", v, ok)
 	}
 }
 

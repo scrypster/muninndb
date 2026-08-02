@@ -18,11 +18,12 @@ import (
 // pre-registered U3 stop condition. If this fails, every arm number the trial
 // reports is fiction.
 //
-// WHAT THE TRIAL DOES, AND WHY IT NEEDS THIS. The trial compares four arms:
+// WHAT THE TRIAL DOES, AND WHY IT NEEDS THIS. The trial compares five arms:
 //
 //	FULL                 everything on                       — live run
 //	NO-PAS               no transition candidates injected   — live run
 //	NO-HEBBIAN           hebbianBoost := 0                   — ARITHMETIC on FULL
+//	BASE-LEVEL-ONLY      hebbianBoost := 0; transition := 0  — ARITHMETIC on NO-PAS
 //	CONTENT-MATCH-ONLY   contextualPrior := actrDenominator  — ARITHMETIC on NO-PAS
 //
 // PAS must be a live run because it INJECTS CANDIDATES into the pool, changing
@@ -90,6 +91,12 @@ var (
 	}}
 	ctArmNoHebbian = ctArm{"NO-HEBBIAN", func(cm, b, _, tr, s float64) float64 {
 		return cm * ctSoftplus(b+s*tr) / ctDenominator
+	}}
+	// BASE-LEVEL-ONLY is the fifth arm: base-level prior kept, BOTH boosts
+	// zeroed. It is what a KILL verdict ships, and it is the only arm whose
+	// delta from FULL measures the cost of that action.
+	ctArmBaseLevelOnly = ctArm{"BASE-LEVEL-ONLY", func(cm, b, _, _, _ float64) float64 {
+		return cm * ctSoftplus(b) / ctDenominator
 	}}
 	ctArmContentOnly = ctArm{"CONTENT-MATCH-ONLY", func(cm, _, _, _, _ float64) float64 {
 		return cm // prior := D, i.e. contextualPrior/D = 1
@@ -470,6 +477,60 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 	if strictlyLower == 0 {
 		t.Error("NO-HEBBIAN changed nothing anywhere — the arm is inert and cannot " +
 			"measure Hebbian's contribution")
+	}
+
+	// --- 6. THE ABLATION-ADDITIVITY BOUNDS, WHERE THEY ARE ACTUALLY INVARIANTS -
+	//
+	// At the RAW SCORE level the arm ordering is arithmetic, not an assumption:
+	// hebbian, transition and hebScale are all non-negative, softplus is strictly
+	// increasing, and softplus(bLevelCap)/D = 1 with baseLevel clamped at
+	// bLevelCap — so per candidate
+	//
+	//	CONTENT-MATCH-ONLY >= BASE-LEVEL-ONLY <= {NO-HEBBIAN, NO-PAS} <= FULL
+	//
+	// The trial rule checks the same relation on NDCG deltas, where it is a
+	// DIAGNOSTIC rather than an invariant (NDCG is not monotone in scores, and a
+	// genuinely harmful mechanism can invert a delta). Proving it here is what
+	// makes a rule-level violation interpretable: if the raw ordering holds and
+	// the delta ordering does not, the ablation is fine and the mechanism is
+	// harmful — which is a result, not a bug.
+	baseBelow, baseStrictlyBelowFull := 0, 0
+	for _, c := range cands {
+		full := ctArmFull.raw(c.contentMatch, c.baseLevel, c.hebbian, c.transition, hebScale)
+		noHeb := ctArmNoHebbian.raw(c.contentMatch, c.baseLevel, c.hebbian, c.transition, hebScale)
+		baseOnly := ctArmBaseLevelOnly.raw(c.contentMatch, c.baseLevel, c.hebbian, c.transition, hebScale)
+		content := ctArmContentOnly.raw(c.contentMatch, c.baseLevel, c.hebbian, c.transition, hebScale)
+
+		if baseOnly > noHeb+1e-12 {
+			t.Errorf("%s: BASE-LEVEL-ONLY (%.12f) scored above NO-HEBBIAN (%.12f) — zeroing the "+
+				"transition boost too cannot RAISE a score", c.id, baseOnly, noHeb)
+		}
+		if baseOnly > full+1e-12 {
+			t.Errorf("%s: BASE-LEVEL-ONLY (%.12f) scored above FULL (%.12f)", c.id, baseOnly, full)
+		}
+		if baseOnly > content+1e-12 {
+			t.Errorf("%s: BASE-LEVEL-ONLY (%.12f) scored above CONTENT-MATCH-ONLY (%.12f) — the "+
+				"base-level prior is clamped at bLevelCap where softplus(b)/D = 1, so it can "+
+				"only ever attenuate contentMatch", c.id, baseOnly, content)
+		}
+		// The transition term is zero on this synthetic corpus unless PAS ran, so
+		// BASE-LEVEL-ONLY and NO-HEBBIAN coincide there; what must bite in every
+		// case is BASE-LEVEL-ONLY against FULL wherever any boost exists.
+		if baseOnly < content-1e-12 {
+			baseBelow++
+		}
+		if (c.hebbian > 0 || c.transition > 0) && baseOnly < full-1e-12 {
+			baseStrictlyBelowFull++
+		}
+	}
+	if baseBelow == 0 {
+		t.Error("BASE-LEVEL-ONLY equalled CONTENT-MATCH-ONLY on every candidate — the corpus sits " +
+			"at bLevelCap everywhere, so the arm cannot distinguish the base-level prior from " +
+			"nothing and this fixture proves nothing about it")
+	}
+	if baseStrictlyBelowFull == 0 {
+		t.Error("BASE-LEVEL-ONLY never scored below FULL on a candidate carrying a boost — the " +
+			"fifth arm is inert and Delta_HP would be structurally zero")
 	}
 }
 

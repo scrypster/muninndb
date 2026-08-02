@@ -58,12 +58,19 @@ import (
 // after numbers are seen.
 //
 // ---------------------------------------------------------------------------
-// THE FOUR ARMS
+// THE FIVE ARMS
 //
 //	FULL                 everything on                       LIVE run
 //	NO-PAS               no transition candidates injected   LIVE run
 //	NO-HEBBIAN           hebbianBoost := 0                   ARITHMETIC on FULL
+//	BASE-LEVEL-ONLY      hebbianBoost := 0; transition := 0  ARITHMETIC on NO-PAS
 //	CONTENT-MATCH-ONLY   contextualPrior := actrDenominator  ARITHMETIC on NO-PAS
+//
+// BASE-LEVEL-ONLY is the configuration a KILL VERDICT SHIPS (both boosts off,
+// ACT-R base-level kept). It was added because no arm corresponded to it and the
+// other four provably cannot reconstruct it under redundancy — so the trial was
+// authorizing an action about which it measured nothing. It costs ZERO extra
+// live runs.
 //
 // PAS must be a live run because it INJECTS CANDIDATES (activation phase 2), so
 // disabling it changes the candidate SET, which no offline arithmetic can
@@ -494,6 +501,21 @@ func ctArmRawFull(r ctRow, hebScale float64) float64 {
 
 func ctArmRawNoHebbian(r ctRow, hebScale float64) float64 {
 	return r.contentMatch * ctSoftplusM(r.baseLevel+hebScale*r.transition) / ctDenominatorM
+}
+
+// ctArmRawBaseLevelOnly is the FIFTH ARM (D2): base-level prior ON, both boosts
+// arithmetically zeroed. It is applied to the NO-PAS live run, exactly the
+// relationship CONTENT-MATCH-ONLY already has to NO-PAS, so it costs ZERO
+// additional live runs.
+//
+// It exists because it is THE CONFIGURATION A KILL VERDICT SHIPS —
+// hebbian_enabled:false + predictive_activation:false with the ACT-R base-level
+// prior kept — and nothing else measured it. Delta_HP = FULL - BASE-LEVEL-ONLY
+// is therefore what a kill costs, and the four other arms cannot reconstruct it:
+// the bound is [max(Delta_H, Delta_P), Delta_C], which on a real vault spans
+// essentially the whole range.
+func ctArmRawBaseLevelOnly(r ctRow, _ float64) float64 {
+	return r.contentMatch * ctSoftplusM(r.baseLevel) / ctDenominatorM
 }
 
 func ctArmRawContentOnly(r ctRow, _ float64) float64 { return r.contentMatch }
@@ -981,11 +1003,7 @@ func TestCognitionTrial(t *testing.T) {
 		return rows
 	}
 
-	type armSeries struct{ ndcg, mrr []float64 }
-	series := map[string]*armSeries{
-		"FULL": {}, "NO-PAS": {}, "NO-HEBBIAN": {}, "CONTENT-MATCH-ONLY": {},
-	}
-	perBucketDeltaC := make([][]float64, nBuckets)
+	series := ctNewQuerySeries(ctArmNames)
 	selfCheckBad, selfCheckTotal := 0, 0
 	unlabeled := 0
 
@@ -1012,20 +1030,29 @@ func TestCognitionTrial(t *testing.T) {
 			}
 			return r
 		}
-		add := func(name string, ranked []string) {
-			s := series[name]
-			s.ndcg = append(s.ndcg, ctNDCGAt10(ranked, grades))
-			s.mrr = append(s.mrr, ctMRR(ranked, grades))
+		ranked := map[string][]string{
+			ctArmNameFull:          rk(full, ctArmRawFull),
+			ctArmNameNoPAS:         rk(noPAS, ctArmRawFull),
+			ctArmNameNoHebbian:     rk(full, ctArmRawNoHebbian),
+			ctArmNameBaseLevelOnly: rk(noPAS, ctArmRawBaseLevelOnly),
+			ctArmNameContentOnly:   rk(noPAS, ctArmRawContentOnly),
 		}
-		add("FULL", rk(full, ctArmRawFull))
-		add("NO-PAS", rk(noPAS, ctArmRawFull))
-		add("NO-HEBBIAN", rk(full, ctArmRawNoHebbian))
-		add("CONTENT-MATCH-ONLY", rk(noPAS, ctArmRawContentOnly))
-
-		b := evalBucket[qi]
-		perBucketDeltaC[b] = append(perBucketDeltaC[b],
-			series["FULL"].ndcg[len(series["FULL"].ndcg)-1]-
-				series["CONTENT-MATCH-ONLY"].ndcg[len(series["CONTENT-MATCH-ONLY"].ndcg)-1])
+		// D1: NDCG is UNDEFINED when the pooled label set holds nothing relevant,
+		// and it is undefined for EVERY arm simultaneously (the pool is shared).
+		// The definedness is therefore a property of the QUERY, recorded once and
+		// applied identically to every arm — which is what makes the exclusion
+		// arm-neutral and ungameable.
+		defined := true
+		for _, name := range ctArmNames {
+			v, ok := ctNDCGAt10(ranked[name], grades)
+			if !ok {
+				defined = false
+			}
+			series.NDCG[name] = append(series.NDCG[name], v)
+			series.MRR[name] = append(series.MRR[name], ctMRR(ranked[name], grades))
+		}
+		series.Defined = append(series.Defined, defined)
+		series.Bucket = append(series.Bucket, evalBucket[qi])
 	}
 
 	if unlabeled > 0 {
@@ -1041,70 +1068,103 @@ func TestCognitionTrial(t *testing.T) {
 			"than hiding it.")
 	}
 
-	// --- deltas -------------------------------------------------------------
-	deltaC := ctPairedBootstrap(series["FULL"].ndcg, series["CONTENT-MATCH-ONLY"].ndcg,
-		ctPreregistered.BootstrapResamples, seed)
-	deltaH := ctPairedBootstrap(series["FULL"].ndcg, series["NO-HEBBIAN"].ndcg,
-		ctPreregistered.BootstrapResamples, seed)
-	deltaP := ctPairedBootstrap(series["FULL"].ndcg, series["NO-PAS"].ndcg,
-		ctPreregistered.BootstrapResamples, seed)
-	mrrH := ctMean(series["FULL"].mrr) - ctMean(series["NO-HEBBIAN"].mrr)
-	mrrP := ctMean(series["FULL"].mrr) - ctMean(series["NO-PAS"].mrr)
-
-	t.Logf("")
-	t.Logf("%-22s %8s %8s", "ARM", "NDCG@10", "MRR")
-	for _, name := range []string{"FULL", "NO-PAS", "NO-HEBBIAN", "CONTENT-MATCH-ONLY"} {
-		t.Logf("%-22s %8.4f %8.4f", name, ctMean(series[name].ndcg), ctMean(series[name].mrr))
+	// --- THE ZERO-RELEVANCE CENSUS, BEFORE ANY DELTA -------------------------
+	// D1 item 6. These are recalls that RETURNED items every one of which the
+	// judge graded irrelevant — the 0x29 event is only written when
+	// len(items) > 0, so no abstention can be hiding in this count. It is a
+	// retrieval-quality number in its own right and the only visible symptom of
+	// a too-conservative judge: U1 gates the judge's false-POSITIVE rate and
+	// nothing gates its false-negative rate.
+	scored := len(series.Defined)
+	informative := series.ctInformativeCount()
+	zeroRel := series.ctZeroRelevanceCount()
+	zrFrac := 0.0
+	if scored > 0 {
+		zrFrac = float64(zeroRel) / float64(scored)
 	}
 	t.Logf("")
-	t.Logf("Delta_C (FULL - CONTENT-MATCH-ONLY) = %+.4f  95%% CI [%+.4f, %+.4f]  sigma_d=%.4f  n=%d",
-		deltaC.Point, deltaC.CILower, deltaC.CIUpper, deltaC.SDOfDiff, deltaC.N)
-	t.Logf("Delta_H (FULL - NO-HEBBIAN)         = %+.4f  95%% CI [%+.4f, %+.4f]  MRR %+.4f",
-		deltaH.Point, deltaH.CILower, deltaH.CIUpper, mrrH)
-	t.Logf("Delta_P (FULL - NO-PAS)             = %+.4f  95%% CI [%+.4f, %+.4f]  MRR %+.4f",
-		deltaP.Point, deltaP.CILower, deltaP.CIUpper, mrrP)
-	if deltaC.SDOfDiff > 0.20 {
+	t.Logf("ZERO-RELEVANCE CENSUS: %d scored queries = %d informative + %d zero-relevance "+
+		"(%.1f%%). Zero-relevance queries are EXCLUDED from every delta and from the U2/U5 "+
+		"power gates (D1). They are not abstentions — an abstention cannot appear in this "+
+		"population — they are recalls whose every returned item was graded irrelevant.",
+		scored, informative, zeroRel, 100*zrFrac)
+	if zrFrac > 0.5 {
+		t.Logf("NOTE: over half of all scored queries were zero-relevance. That is either a real " +
+			"retrieval-quality result or a too-conservative judge, and U1 cannot tell you which " +
+			"— it gates the judge's false-POSITIVE rate only. Adjudicate before quoting any delta.")
+	}
+
+	// --- the vault result, built by the rule layer ---------------------------
+	// ctVaultFromSeries owns the exclusion, so the dilution-invariance property
+	// test proves it about the code that actually runs.
+	vr := ctVaultFromSeries(sc.label, series, len(distinct), nBuckets, seed)
+	vr.BaselineEdges = baseTotal
+	vr.ReplayedEdges = replayedEdges
+	vr.UnreplayableFrac = ctUnreplayableFrac(baseTotal, baseByType)
+	// S6's shuffled-seed null is the instrument-repair increment's arm; until it
+	// lands, "not run" is the honest value and K4 will say so.
+	vr.ShuffledSeedNull = ctNullNotRun
+
+	t.Logf("")
+	t.Logf("%-22s %8s %8s   (means over the %d INFORMATIVE queries)", "ARM", "NDCG@10", "MRR",
+		informative)
+	for _, name := range ctArmNames {
+		t.Logf("%-22s %8.4f %8.4f", name,
+			ctMean(ctInformative(series.Defined, series.NDCG[name])),
+			ctMean(ctInformative(series.Defined, series.MRR[name])))
+	}
+	t.Logf("")
+	t.Logf("Delta_C  (FULL - CONTENT-MATCH-ONLY) = %+.4f  95%% CI [%+.4f, %+.4f]  sigma_d=%.4f  n=%d",
+		vr.DeltaC.Point, vr.DeltaC.CILower, vr.DeltaC.CIUpper, vr.DeltaC.SDOfDiff, vr.DeltaC.N)
+	t.Logf("Delta_HP (FULL - BASE-LEVEL-ONLY)    = %+.4f  95%% CI [%+.4f, %+.4f]  <- WHAT A KILL COSTS",
+		vr.DeltaHP.Point, vr.DeltaHP.CILower, vr.DeltaHP.CIUpper)
+	t.Logf("Delta_H  (FULL - NO-HEBBIAN)         = %+.4f  95%% CI [%+.4f, %+.4f]  MRR %+.4f",
+		vr.DeltaH.Point, vr.DeltaH.CILower, vr.DeltaH.CIUpper, vr.MRRDeltaH)
+	t.Logf("Delta_P  (FULL - NO-PAS)             = %+.4f  95%% CI [%+.4f, %+.4f]  MRR %+.4f",
+		vr.DeltaP.Point, vr.DeltaP.CILower, vr.DeltaP.CIUpper, vr.MRRDeltaP)
+	t.Logf("REPORTED, GATES NOTHING — Delta_C over ALL %d scored queries (zero-relevance ones "+
+		"included as paired 0-vs-0) = %+.4f 95%% CI [%+.4f, %+.4f]. It is the DILUTED number: "+
+		"including a point mass at zero shrinks the mean and the SE by the same factor, so the "+
+		"t-statistic never moves while the estimate slides across S1's and K1's absolute bars.",
+		vr.DeltaCAllQueriesDiluted.N, vr.DeltaCAllQueriesDiluted.Point,
+		vr.DeltaCAllQueriesDiluted.CILower, vr.DeltaCAllQueriesDiluted.CIUpper)
+	if msg := ctAdditivityViolation(vr); msg != "" {
+		t.Logf("U3 (ablation additivity) VIOLATED: %s", msg)
+	} else {
+		t.Logf("Ablation additivity holds: max(Delta_H, Delta_P) %+.4f <= Delta_HP %+.4f <= "+
+			"Delta_C %+.4f. The width of that interval is exactly the information the four "+
+			"marginals could not have supplied.",
+			math.Max(vr.DeltaH.Point, vr.DeltaP.Point), vr.DeltaHP.Point, vr.DeltaC.Point)
+	}
+	if vr.DeltaC.SDOfDiff > 0.20 {
 		t.Logf("NOTE: sigma_d = %.4f > 0.20. The pre-registered n was computed at sigma_d ~= 0.15; "+
 			"at this dispersion n must rise to %.0f or the trial is UNDERPOWERED (U5).",
-			deltaC.SDOfDiff, 7.84*deltaC.SDOfDiff*deltaC.SDOfDiff/0.0009)
+			vr.DeltaC.SDOfDiff, 7.84*vr.DeltaC.SDOfDiff*vr.DeltaC.SDOfDiff/0.0009)
 	}
 
 	// EMPTY BUCKETS ARE OMITTED, NOT ZEROED. ctMean(nil) is 0, so building a
 	// dense per-bucket series scores a week with no evaluated queries as a
 	// measured Delta_C of exactly 0 and regresses it — which is how six real
 	// +0.04 buckets plus six empty ones manufacture a +0.005 slope with a CI
-	// lower bound of +0.003 and pass S3 on data that does not exist. See
-	// ctBucketDeltas; U6 refuses the trend outright when too few buckets in the
-	// trailing window survive.
-	bucketDeltas, omittedBuckets := ctBucketDeltas(perBucketDeltaC)
-	for _, bd := range bucketDeltas {
+	// lower bound of +0.003 on data that does not exist. See ctBucketDeltas; U6
+	// refuses the series outright when too few buckets in the trailing window
+	// survive. The guard stays even though D3 demoted S3 to descriptive: an
+	// absent bucket is absent data whether or not a verdict depends on it.
+	t.Logf("PER-BUCKET BREAKDOWN (DESCRIPTIVE — this is one measurement against the FINAL graph, " +
+		"sliced by week; it is NOT a trend across checkpoints and gates nothing since D3):")
+	for _, bd := range vr.DeltaCByBucket {
 		t.Logf("  bucket W%02d: Delta_C %+.4f over %d queries", bd.Bucket, bd.Mean, bd.NQueries)
 	}
-	if len(omittedBuckets) > 0 {
-		t.Logf("  %d of %d weekly buckets had NO evaluated query and are OMITTED from the trend "+
+	if len(vr.OmittedBuckets) > 0 {
+		t.Logf("  %d of %d weekly buckets had NO evaluated query and are OMITTED "+
 			"(indexes %v). They are absent data, not a Delta_C of zero.",
-			len(omittedBuckets), nBuckets, omittedBuckets)
+			len(vr.OmittedBuckets), nBuckets, vr.OmittedBuckets)
 	}
 
 	// --- verdict ------------------------------------------------------------
 	// SINGLE VAULT. ctDecide requires three; running it here reports the U2 gate
 	// truthfully rather than letting a single-vault run look conclusive. The
 	// operator collects three vault results and calls ctDecide once across them.
-	vr := ctVaultResult{
-		Label:            sc.label,
-		NQueries:         deltaC.N,
-		DistinctEvents:   len(distinct),
-		DeltaC:           deltaC,
-		DeltaH:           deltaH,
-		DeltaP:           deltaP,
-		MRRDeltaH:        mrrH,
-		MRRDeltaP:        mrrP,
-		DeltaCByBucket:   bucketDeltas,
-		OmittedBuckets:   omittedBuckets,
-		BaselineEdges:    baseTotal,
-		ReplayedEdges:    replayedEdges,
-		UnreplayableFrac: ctUnreplayableFrac(baseTotal, baseByType),
-	}
 	t.Logf("")
 	t.Logf("VERDICT (THIS VAULT ALONE — the rule requires 3; a single-vault run is U2 by " +
 		"construction and is reported as such):")
