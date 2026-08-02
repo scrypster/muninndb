@@ -47,6 +47,10 @@ type AssocWeightUpdate struct {
 	Dst        [16]byte
 	Weight     float32
 	CountDelta uint32 // number of co-activations observed for this pair in the batch
+	// LastActivatedAt is the Unix-seconds stamp to record as the edge's
+	// lastActivated, carried through from CoActivationEvent.At. ZERO =
+	// time.Now() at the storage layer, i.e. the pre-#779 behaviour.
+	LastActivatedAt int32
 }
 
 // CoActivationEvent records a set of engrams that were retrieved together.
@@ -217,6 +221,13 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 		signal float64
 		ws     [8]byte
 		ltp    *LTPConfig // per-vault LTP config from the event (nil = use worker default)
+		// at is the LATEST CoActivationEvent.At seen for this pair in the
+		// batch, in Unix seconds; 0 when no event carried a time (the worker's
+		// own submissions always do, direct constructions may not). Taking the
+		// max rather than the last keeps the aggregation ORDER-INDEPENDENT,
+		// which is the same property the log-space weight update has and the
+		// reason a batch can be split or reordered without changing its result.
+		at int64
 	}
 	pairs := make(map[pairKey]*pairStats)
 
@@ -225,14 +236,21 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 			for j := i + 1; j < len(event.Engrams); j++ {
 				key := canonicalPair(event.Engrams[i].ID, event.Engrams[j].ID)
 				signal := event.Engrams[i].Score * event.Engrams[j].Score // geometric product
+				var eventAt int64
+				if !event.At.IsZero() {
+					eventAt = event.At.Unix()
+				}
 				if ps, ok := pairs[key]; ok {
 					ps.count++
 					ps.signal += signal
+					if eventAt > ps.at {
+						ps.at = eventAt
+					}
 					if ps.ltp == nil {
 						ps.ltp = event.LTP // keep non-nil LTP from later events
 					}
 				} else {
-					pairs[key] = &pairStats{count: 1, signal: signal, ws: event.WS, ltp: event.LTP}
+					pairs[key] = &pairStats{count: 1, signal: signal, ws: event.WS, ltp: event.LTP, at: eventAt}
 				}
 			}
 		}
@@ -332,12 +350,24 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 			}
 		}
 
+		// Carry the EVENT's own time to the edge rather than letting storage
+		// stamp time.Now(): an event that waited in the worker's channel was
+		// being stamped late, and an offline replay of historical events would
+		// stamp all of them "now" and erase every interleaved decay pass.
+		// Clamped to int32 because that is the on-disk width; a stamp outside
+		// the representable range falls back to 0 = "stamp at write time".
+		var lastAt int32
+		if stats.at > 0 && stats.at <= math.MaxInt32 {
+			lastAt = int32(stats.at)
+		}
+
 		updates = append(updates, AssocWeightUpdate{
-			WS:         stats.ws,
-			Src:        pair.a,
-			Dst:        pair.b,
-			Weight:     newWeight,
-			CountDelta: countDelta,
+			WS:              stats.ws,
+			Src:             pair.a,
+			Dst:             pair.b,
+			Weight:          newWeight,
+			CountDelta:      countDelta,
+			LastActivatedAt: lastAt,
 		})
 
 		if hw.OnWeightUpdate != nil {

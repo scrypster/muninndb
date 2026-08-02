@@ -534,7 +534,9 @@ func (e *AssocBatchSkipError) Unwrap() []error { return e.Errs }
 // atomically — the batch is all-or-nothing about what it WRITES, so no pair is
 // ever left half-updated and no fabricated tuple is ever persisted.
 // Existing metadata (relType, confidence, createdAt) is preserved per-pair;
-// lastActivated is set to now (Hebbian update = activation).
+// lastActivated is set to update.LastActivatedAt when non-zero, else to now
+// (Hebbian update = activation). Zero-value = the pre-#779 behaviour, so
+// production is byte-identical unless a caller opts in.
 //
 // # An unreadable pair is skipped, not fatal to the batch
 //
@@ -564,12 +566,18 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
-	now := int32(time.Now().Unix())
+	wallNow := int32(time.Now().Unix())
 	var skipped []int
 	var skipErrs []error
 	applied := 0
 
 	for i, update := range updates {
+		// A caller may carry its own activation timestamp (the replay driver
+		// does); zero means "use the wall clock", the pre-#779 behaviour.
+		now := wallNow
+		if update.LastActivatedAt != 0 {
+			now = update.LastActivatedAt
+		}
 		oldWeight, err := ps.GetAssocWeight(ctx, update.WS, update.Src, update.Dst)
 		if err != nil {
 			skipped = append(skipped, i)
