@@ -1317,6 +1317,14 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	// Write to store
 	id, err := e.store.WriteEngram(ctx, wsPrefix, eng)
 	if err != nil {
+		// An inline association naming an engram that no longer exists is the
+		// caller's mistake, not a storage fault — the same class as the
+		// unparseable target_id refused a few lines above, and refused the same
+		// way. Mapped to ErrInvalidID so the transports answer 400 rather than
+		// 500 (STO-12).
+		if errors.Is(err, storage.ErrDanglingEndpoint) {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidID, err)
+		}
 		return nil, fmt.Errorf("write engram: %w", err)
 	}
 
@@ -1852,7 +1860,14 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	ids := make([]storage.ULID, n)
 	for fi, origIdx := range filteredIdx {
 		if batchErrs[fi] != nil {
-			errs[origIdx] = fmt.Errorf("write engram: %w", batchErrs[fi])
+			// STO-12, same mapping as Engine.Write: a dangling inline
+			// association target is a bad request, and it fails only its own
+			// item — the rest of the batch is unaffected.
+			if errors.Is(batchErrs[fi], storage.ErrDanglingEndpoint) {
+				errs[origIdx] = fmt.Errorf("%w: %v", ErrInvalidID, batchErrs[fi])
+			} else {
+				errs[origIdx] = fmt.Errorf("write engram: %w", batchErrs[fi])
+			}
 			continue
 		}
 		ids[origIdx] = batchIDs[fi]

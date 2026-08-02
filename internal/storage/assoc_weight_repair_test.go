@@ -463,6 +463,11 @@ func TestRepairLegacyFullWeightAssocKeys_DoesNotResurrectSupersededPair(t *testi
 
 	src := [16]byte{0x61}
 	dst := [16]byte{0x62}
+	// STO-12: the concurrent writer below is UpdateAssocWeight, which now
+	// refuses a pair whose endpoints have no 0x01 record. Give the pair real
+	// engrams so the window this test forces is the repair-vs-live-write one it
+	// is about, not an endpoint refusal.
+	seedEndpoints(t, store, ws, ULID(src), ULID(dst))
 	stale := encodeAssocValue(RelSupports, 1.0, time.Unix(1_700_000_000, 0), 1, 1.0, 1)
 	seedLegacyEdge(t, store, ws, src, dst, stale[:], 1.0)
 

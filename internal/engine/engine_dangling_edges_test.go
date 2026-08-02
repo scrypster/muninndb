@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -242,6 +243,96 @@ func TestSTO12_NoDanglingAssociationEdges(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSTO12_InlineAssociationsCannotNameADeadEngram is the SURFACE-REACHABLE
+// arm of the machine check.
+//
+// mbp.WriteRequest has two distinct inline relationship fields and they take
+// different routes into the keyspace:
+//
+//   - Relationships → Engine.Write's post-write loop → store.WriteAssociation,
+//     which has been guarded since #803's first round;
+//   - Associations  → eng.Associations → store.WriteEngram / WriteEngramBatch,
+//     whose inline loops Set 0x03/0x04/0x14 directly and were NOT guarded.
+//
+// The second is reachable by an ordinary client over REST (WriteRequest is a
+// type alias of mbp.WriteRequest), gRPC, MBP and the embedded library — no
+// hostile actor required, just a client that holds an ID across a delete. Only
+// MCP escapes it, because muninn_link and muninn_remember use `relationships`.
+//
+// Asserted against the same danglingCensus as the delete-path table so the two
+// layers are pinned by the same definition of the invariant.
+func TestSTO12_InlineAssociationsCannotNameADeadEngram(t *testing.T) {
+	ctx := context.Background()
+
+	// deadTarget writes an engram, hard-deletes it, and returns its ID — a
+	// perfectly well-formed ULID with no 0x01 record behind it.
+	deadTarget := func(t *testing.T, eng *Engine, vault string) string {
+		t.Helper()
+		w := danglingWriter(t, eng, vault, "retention")
+		victim := w("superseded rota", "the old duty rota nobody uses any more")
+		if _, err := eng.Forget(ctx, &mbp.ForgetRequest{Vault: vault, ID: victim.String(), Hard: true}); err != nil {
+			t.Fatalf("hard forget: %v", err)
+		}
+		return victim.String()
+	}
+
+	t.Run("Engine.Write", func(t *testing.T) {
+		eng, store, db := danglingEnv(t)
+		vault := "sto12-inline-write"
+		ws := store.VaultPrefix(vault)
+		if err := store.WriteVaultName(ws, vault); err != nil {
+			t.Fatal(err)
+		}
+		dead := deadTarget(t, eng, vault)
+
+		_, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault: vault, Concept: "replacement rota", Content: "the duty rota that replaced it",
+			Associations: []mbp.Association{{TargetID: dead, RelType: 1, Weight: 0.8, Confidence: 1}},
+		})
+		if err == nil {
+			t.Fatal("Engine.Write ACCEPTED an inline association naming a hard-deleted engram")
+		}
+		// A client naming an ID that no longer exists is a bad request, not a
+		// storage fault: REST maps ErrInvalidID to 400.
+		if !errors.Is(err, ErrInvalidID) {
+			t.Errorf("want the refusal to reach the transports as ErrInvalidID (400), got %v", err)
+		}
+		eng.WaitWriteTimeIdle()
+		if bad := danglingCensus(t, db, ws); len(bad) > 0 {
+			t.Errorf("STO-12 violated via the inline-association path: %d dangling row(s)\n  %s",
+				len(bad), joinLines(bad))
+		}
+	})
+
+	t.Run("Engine.WriteBatch", func(t *testing.T) {
+		eng, store, db := danglingEnv(t)
+		vault := "sto12-inline-batch"
+		ws := store.VaultPrefix(vault)
+		if err := store.WriteVaultName(ws, vault); err != nil {
+			t.Fatal(err)
+		}
+		dead := deadTarget(t, eng, vault)
+
+		// Item 0 is innocent and must still land; only item 1 is refused.
+		_, errs := eng.WriteBatch(ctx, []*mbp.WriteRequest{
+			{Vault: vault, Concept: "handover note", Content: "who is covering the shift"},
+			{Vault: vault, Concept: "replacement rota", Content: "the duty rota that replaced it",
+				Associations: []mbp.Association{{TargetID: dead, RelType: 1, Weight: 0.8, Confidence: 1}}},
+		})
+		if errs[0] != nil {
+			t.Errorf("an innocent batch item must not be collateral: %v", errs[0])
+		}
+		if errs[1] == nil {
+			t.Fatal("Engine.WriteBatch ACCEPTED an inline association naming a hard-deleted engram")
+		}
+		eng.WaitWriteTimeIdle()
+		if bad := danglingCensus(t, db, ws); len(bad) > 0 {
+			t.Errorf("STO-12 violated via the batched inline-association path: %d dangling row(s)\n  %s",
+				len(bad), joinLines(bad))
+		}
+	})
 }
 
 func danglingWriter(t *testing.T, eng *Engine, vault, tag string) func(concept, content string) storage.ULID {

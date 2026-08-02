@@ -33,8 +33,14 @@ func (w *Worker) runPhase5TransitiveInference(ctx context.Context, store *storag
 	//
 	// So a dangling edge cannot climb to 0.7 and cannot seed an inference.
 	// Lower this constant far enough and dangling edges become self-
-	// propagating corruption. storage.WriteAssociation's STO-12 endpoint guard
-	// is the actual defence; this comment records that the accident existed.
+	// propagating corruption.
+	//
+	// The defence is storage.UpdateAssocWeight's own STO-12 endpoint guard —
+	// which is what this phase calls, and which was NOT guarded when the above
+	// was first written. It is NOT WriteAssociation's guard: this phase never
+	// touches WriteAssociation, and an earlier version of this comment said it
+	// did. "Unreachable at weight 0.7" and "defended by the guard" are different
+	// claims; both are true now, and only the first was true then.
 	const minWeight = 0.7
 	const confidenceDiscount = 0.8
 

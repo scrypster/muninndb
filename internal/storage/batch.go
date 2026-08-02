@@ -105,6 +105,16 @@ func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8
 		eng.LastAccess = eng.CreatedAt
 	}
 
+	// STO-12: the inline-Associations loop below is a creator, checked before
+	// anything is queued. Engrams already queued in this batch count as live —
+	// same exception, and the same queue-order requirement, as
+	// pebbleStoreBatch.WriteAssociation.
+	if err := b.ps.checkInlineAssocTargets(wsPrefix, [16]byte(eng.ID), eng.Associations, func(id [16]byte) bool {
+		return b.batchQueuedEngram(wsPrefix, id)
+	}); err != nil {
+		return err
+	}
+
 	erfEng := toERFEngram(eng)
 	erfBytes, err := erf.EncodeV2(erfEng)
 	if err != nil {

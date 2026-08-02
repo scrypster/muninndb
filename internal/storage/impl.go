@@ -130,6 +130,11 @@ type PebbleStore struct {
 	// Like decayNow, it is read without synchronization, so it MUST be set
 	// before the store is shared across goroutines.
 	readFault func(key []byte) error
+	// guardReadFaults counts the times the STO-12 endpoint-liveness read failed
+	// and the guard failed open (see engramExists). guardReadFaultLoggedAt is
+	// the unix-nano stamp of the last WARN, used to rate-limit it.
+	guardReadFaults        atomic.Uint64
+	guardReadFaultLoggedAt atomic.Int64
 }
 
 // pointGet is the single-key read used by the metadata helpers that must tell
@@ -402,6 +407,13 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 		eng.LastAccess = eng.CreatedAt
 	}
 
+	// STO-12: inline associations are a creator. Checked BEFORE anything is
+	// encoded or queued, so a refusal is a clean no-op rather than a partly
+	// written engram. No sibling set: this call makes exactly one engram live.
+	if err := ps.checkInlineAssocTargets(wsPrefix, [16]byte(eng.ID), eng.Associations, nil); err != nil {
+		return ULID{}, err
+	}
+
 	erfEng := toERFEngram(eng)
 	erfBytes, err := erf.EncodeV2(erfEng)
 	if err != nil {
@@ -553,6 +565,34 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
+	// STO-12 sibling set for the inline-association guard: every CALLER-SUPPLIED
+	// id in this call, which the single commit below makes live atomically.
+	// Built up front from the whole slice rather than accumulated as the loop
+	// walks it, so the guard is ORDER-INDEPENDENT — an item may name a sibling
+	// that appears later. (pebbleStoreBatch cannot do this: its WriteAssociation
+	// is called before the later WriteEngram exists to be seen. See
+	// TestSTO12_BatchAssociationGuardIsQueueOrderDependent.)
+	// Auto-assigned ids are deliberately absent: a caller cannot reference an id
+	// the store has not generated yet.
+	sameCall := make(map[[24]byte]struct{}, len(items))
+	for i := range items {
+		if items[i].Engram != nil && items[i].Engram.ID != (ULID{}) {
+			var k [24]byte
+			copy(k[:8], items[i].WSPrefix[:])
+			copy(k[8:], items[i].Engram.ID[:])
+			sameCall[k] = struct{}{}
+		}
+	}
+	inSameCall := func(ws [8]byte) func([16]byte) bool {
+		return func(id [16]byte) bool {
+			var k [24]byte
+			copy(k[:8], ws[:])
+			copy(k[8:], id[:])
+			_, ok := sameCall[k]
+			return ok
+		}
+	}
+
 	for i := range items {
 		eng := items[i].Engram
 		ws := items[i].WSPrefix
@@ -611,6 +651,15 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		}
 		if tagErr != nil {
 			errs[i] = tagErr
+			continue
+		}
+
+		// STO-12, for the same reason and in the same place as the tag
+		// validation above: the batch is shared and a mid-item `continue`
+		// cannot un-queue Sets already added, so a dangling inline target has
+		// to be caught before this item queues anything at all.
+		if err := ps.checkInlineAssocTargets(ws, [16]byte(eng.ID), eng.Associations, inSameCall(ws)); err != nil {
+			errs[i] = err
 			continue
 		}
 

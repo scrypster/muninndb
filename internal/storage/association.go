@@ -698,7 +698,23 @@ func deleteLegacyFullWeightKeys(batch *pebble.Batch, wsPrefix [8]byte, a, b [16]
 	_ = batch.Delete(keys.AssocRevKey(wsPrefix, b, 0.0, a), nil)
 }
 
+// UpdateAssocWeight updates one association's weight, preserving the edge's
+// existing metadata.
+//
+// STO-12: this is a CREATOR, not only an updater — exactly the same shape as
+// UpdateAssocWeightBatch. A read ABSENCE is a normal fact that returns a nil
+// error and a zero tuple, so a pair naming two ULIDs with no engram and no edge
+// falls straight through both reads below and Sets a brand-new 0x03/0x04/0x14
+// row, returning nil. Its live callers are consolidation's transitive-inference
+// phase and the Hebbian store adapter, neither of which re-checks its endpoints.
+// Unlike the batch form there is no per-pair skip channel to report through:
+// one call, one pair, so a dead endpoint is simply the call's error, and both
+// callers already log-and-continue on one.
 func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID, weight float32, countDelta uint32) error {
+	if err := ps.checkEndpointsLive(wsPrefix, [16]byte(a), [16]byte(b)); err != nil {
+		return err
+	}
+
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 

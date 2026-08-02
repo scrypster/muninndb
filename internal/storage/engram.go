@@ -551,6 +551,11 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	//   - the forward key itself
 	//   - the reverse key 0x04|ws|targetID|weight|id (uses actual weight)
 	//   - the weight index key 0x14|ws|id|targetID
+	//
+	// assocCacheDirty collects the sources whose cached forward-association list
+	// names this engram; they are invalidated post-commit (STO-12, below).
+	assocCacheDirty := []ULID{id}
+
 	fwdPrefix := keys.AssocFwdPrefixForID(wsPrefix, [16]byte(id))
 	fwdIter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: fwdPrefix,
@@ -606,6 +611,12 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 			batch.Delete(k, nil) // reverse key
 			batch.Delete(keys.AssocFwdKey(wsPrefix, srcID, weight, [16]byte(id)), nil)
 			batch.Delete(keys.AssocWeightIndexKey(wsPrefix, srcID, [16]byte(id)), nil)
+			// STO-12: the rows go, but GetAssociations serves a 2s-TTL cache
+			// keyed by SOURCE engram, so without this the served graph keeps
+			// naming the dead engram for up to two seconds after its rows are
+			// gone — traversal hops to an ID that can never materialise. The
+			// scan already has every source in hand; invalidate post-commit.
+			assocCacheDirty = append(assocCacheDirty, ULID(srcID))
 		}
 		revIter.Close()
 	}
@@ -691,6 +702,9 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	ps.replicateBatch(batch)
 
 	ps.cache.Delete(wsPrefix, id)
+	for _, src := range assocCacheDirty {
+		ps.assocCache.Remove(assocCacheKey(wsPrefix, src))
+	}
 
 	// Decrement MentionCount on each entity that was linked to this engram.
 	// Done post-commit: if the process crashes here, counts will be slightly

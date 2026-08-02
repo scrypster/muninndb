@@ -171,6 +171,16 @@ func TestSTO12_BatchWriteAssociationAcceptsSameBatchEngram(t *testing.T) {
 
 // TestSTO12_DeleteEngramCascadesArchivedEdges pins the 0x25 cascade in both
 // directions. Before this fix DeleteEngram scanned 0x03 and 0x04 only.
+//
+// THIS TEST IS THE ONLY PIN ON THAT CASCADE. Do not assume the engine-level
+// table covers it: ablating BOTH PrefixIterator loops in DeleteEngram leaves
+// ./internal/engine entirely green, including
+// TestSTO12_NoDanglingAssociationEdges' "archived edge whose target is
+// hard-deleted" case — because RestoreArchivedEdges reaps the unrestorable 0x25
+// row per target on the way past, so the end-to-end census comes back clean
+// even with the cascade removed. The layer is pinned; the table case is not its
+// pin. Same masking shape as the FTS cascade, which is why
+// TestSTO12_HardDeletePathsCleanTheSearchIndexes exists separately.
 func TestSTO12_DeleteEngramCascadesArchivedEdges(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()
@@ -201,6 +211,57 @@ func TestSTO12_DeleteEngramCascadesArchivedEdges(t *testing.T) {
 		if _, closer, err := ps.db.Get(k); err == nil {
 			_ = closer.Close()
 			t.Errorf("0x25 archive row survived the hard delete of one of its endpoints: %x", k)
+		}
+	}
+}
+
+// TestSTO12_DeleteEngramInvalidatesTheAssocCacheOfItsSources closes the one
+// member of the class STO-12's row-level wording does not cover.
+//
+// The invariant is about ROWS, and DeleteEngram's cascade removes every row —
+// but GetAssociations serves a 2s-TTL in-memory cache keyed by source engram,
+// and DeleteEngram never touched it. So for up to two seconds after a hard
+// delete the SERVED graph still names the dead engram: traversal walks to an ID
+// whose 0x01 is gone, wasting the hop. It cannot leak content (0x01 is gone, so
+// the ID can never materialise into an engram) and it self-heals on expiry,
+// which is why this is a wasted-work bug and not a correctness one — but the
+// reverse pass already has every source ID in hand, so the invalidation is free.
+//
+// Deterministic by construction: the cache is warmed by an explicit read, not
+// by waiting for a worker.
+func TestSTO12_DeleteEngramInvalidatesTheAssocCacheOfItsSources(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+	ws := ps.VaultPrefix("sto12-assoccache")
+
+	src, victim := NewULID(), NewULID()
+	seedEndpoints(t, ps, ws, src, victim)
+	if err := ps.WriteAssociation(ctx, ws, src, victim, &Association{
+		TargetID: victim, RelType: RelSupports, Weight: 0.6, Confidence: 1, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+
+	// Warm the cache for src.
+	got, err := ps.GetAssociations(ctx, ws, []ULID{src}, 10)
+	if err != nil {
+		t.Fatalf("GetAssociations (warm): %v", err)
+	}
+	if len(got[src]) != 1 {
+		t.Fatalf("precondition: src should have 1 association, got %d", len(got[src]))
+	}
+
+	if err := ps.DeleteEngram(ctx, ws, victim); err != nil {
+		t.Fatalf("DeleteEngram: %v", err)
+	}
+
+	got, err = ps.GetAssociations(ctx, ws, []ULID{src}, 10)
+	if err != nil {
+		t.Fatalf("GetAssociations (post-delete): %v", err)
+	}
+	for _, a := range got[src] {
+		if a.TargetID == victim {
+			t.Fatal("the association cache still serves an edge to a hard-deleted engram")
 		}
 	}
 }
