@@ -906,7 +906,20 @@ func TestVersionHead_ShadowsDoNotEnterPerQueryNormalization_Saturating(t *testin
 	// predecessor is already a shadow here and shadows are never logged, so no
 	// LIVE row acquires a Hebbian boost (their assoc target — the predecessor —
 	// is absent from the recency window) and both arms stay deterministic.
-	h.recall("vacuum sweeper runs nightly against telemetry rows in every shard")
+	// The priming recall must MATCH on every platform: under default weights
+	// the semantic channel dominates, and the real embedder's cosine for this
+	// query drifts across ONNX platforms (passed on darwin/arm64, abstained on
+	// CI's linux/amd64 — results=0 → nothing logged → no heat, twice). Prime
+	// on the lexical channel with a near-zero threshold instead: FTS coverage
+	// is platform-exact, so the neighbours always log.
+	primed := h.recall("vacuum sweeper runs nightly against telemetry rows in every shard",
+		func(r *mbp.ActivateRequest) {
+			r.Threshold = 0.001
+			r.Weights = &mbp.Weights{FullTextRelevance: 1.0, UseACTR: true}
+		})
+	if len(primed.Activations) == 0 {
+		t.Fatalf("fixture failure: the priming recall matched nothing — no activation entries were logged and the saturating arm cannot heat")
+	}
 	h.eng.waitWriteTimeIdle()
 	// The Hebbian priming rides the ACTIVATION log, not the write-time
 	// workers: waitWriteTimeIdle alone leaves a window where the priming
