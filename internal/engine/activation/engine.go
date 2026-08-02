@@ -1356,19 +1356,26 @@ func (e *ActivationEngine) phase4HebbianBoost(ctx context.Context, ws [8]byte, v
 	// strength from one endpoint and ZERO from the other (#800).
 	assocMap, err := e.store.GetRankingNeighbors(ctx, ws, ids, 20)
 	if err != nil {
-		// Degrade loudly but gracefully (principle #2). A failure in the union
-		// read — the reverse half above all, which #800 added as a second
-		// failure source — must not delete the forward half's contribution
-		// too; a bare `return` here zeroed the ENTIRE Hebbian boost silently.
-		// Pinned by TestHebbianBoost_UnionReadFailureFallsBackToForward.
-		slog.Warn("activation: hebbian ranking-neighbor read failed, falling back to forward-only",
+		// Degrade LOUDLY (principle #2) — the original bug here was a bare
+		// `return` that deleted the entire Hebbian contribution with no log
+		// line — and degrade UNIFORMLY: the whole signal is dropped, not half
+		// of it.
+		//
+		// Falling back to GetAssociations was tried and rejected. It keeps the
+		// forward half's absolute signal, and in exchange it reinstates exactly
+		// the defect #800 fixed: two candidates carrying the same symmetric
+		// edge to the same recent engram score w and 0 purely by which
+		// orientation their writer picked, and hebbianBoost MULTIPLIES the
+		// final score. Preserving some signal at the cost of a fabricated
+		// ordering between equally-related candidates is the project's worst
+		// failure class, not its second-best outcome — the same reason an
+		// unreachable embed backend degrades to BM25-only rather than to a
+		// half-applied vector score. Ranking here loses the Hebbian term and
+		// stays internally consistent. Pinned by
+		// TestHebbianBoost_UnionReadFailurePreservesSymmetricOrder.
+		slog.Warn("activation: hebbian ranking-neighbor read failed, boost skipped for this recall",
 			"vault", vaultID, "candidates", len(ids), "error", err)
-		assocMap, err = e.store.GetAssociations(ctx, ws, ids, 20)
-		if err != nil {
-			slog.Warn("activation: hebbian association read failed, boost skipped",
-				"vault", vaultID, "candidates", len(ids), "error", err)
-			return
-		}
+		return
 	}
 
 	for i := range candidates {
@@ -1482,7 +1489,15 @@ type traversedCandidate struct {
 	id         storage.ULID
 	propagated float64
 	hopPath    []storage.ULID
-	relType    uint16
+	// relType is the RelType of the edge this node was reached over — read out
+	// of GetRankingNeighbors, which LOSES edge direction by construction
+	// (COG-31). It is carried to scoringCandidate and today never read again,
+	// which is what makes COG-31's "the traversed RelType is dropped before the
+	// response is built" true. Anything that starts reading it is reading a
+	// relation whose direction is unknown: a RelSupersedes here may mean this
+	// node supersedes the previous hop or the reverse. Ranking on it is fine;
+	// presenting it, or deriving a direction from it, is what COG-31 forbids.
+	relType uint16
 }
 
 // resolveProfile implements the C-B-A traversal profile resolution chain:
@@ -1706,9 +1721,9 @@ type scoringCandidate struct {
 	transitionBoost float64
 	rrfScore        float64
 	hopPath         []storage.ULID
-	relType         uint16
-	isTraversed     bool // true for BFS-only candidates; vectorScore is computed post-load
-	inTagPool       bool // true for tag-seeded candidates; vectorScore is computed post-load when zero
+	relType         uint16 // direction-LOST; write-only today — see traversedCandidate.relType
+	isTraversed     bool   // true for BFS-only candidates; vectorScore is computed post-load
+	inTagPool       bool   // true for tag-seeded candidates; vectorScore is computed post-load when zero
 }
 
 // phase6Score computes final scores, applies filters, and builds the result.

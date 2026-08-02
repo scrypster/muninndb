@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
 	"strings"
 	"testing"
@@ -12,6 +13,26 @@ import (
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
+
+// captureWarn runs fn with the default slog logger redirected into a buffer and
+// returns everything it emitted.
+//
+// Principle #2 has two halves — degrade GRACEFULLY and degrade LOUDLY — and only
+// the graceful half is normally observable from a test, so the loud half tends to
+// go unpinned: deleting a slog.Warn leaves the suite green. This makes asserting
+// on it as cheap as asserting on the returned value.
+//
+// It mutates process-global state (slog.SetDefault), so a test using it must not
+// call t.Parallel().
+func captureWarn(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
 
 // ---------------------------------------------------------------------------
 // Tests for package-internal helpers: extractTimeBounds, PassesMetaFilter,

@@ -304,7 +304,10 @@ func (ps *PebbleStore) GetRankingNeighbors(ctx context.Context, wsPrefix [8]byte
 //
 // Results are cached in revAssocCache, and BOTH the hit and the miss path
 // return a COPY: the returned slices never alias a cache entry's backing
-// array, so a caller may mutate or retain what it is given.
+// array, so a caller may mutate or retain what it is given. GetRankingNeighbors
+// offers the same guarantee for the MERGED list — see mergeRankingNeighbors,
+// whose forward half needs its own copy because GetAssociations does not offer
+// it (#820).
 func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte, ids []ULID, maxPerNode int) (map[ULID][]Association, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -423,10 +426,9 @@ func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte
 		// caller owns what it is handed — the hit path above copies for the
 		// same reason. Returning `assocs` here would publish the cache's array
 		// for the rest of the 2s TTL; it is safe only while no caller mutates
-		// and no caller forwards it (mergeRankingNeighbors allocates whenever
-		// len(rev) > 0, and its one shortcut returns fwd). Defending that at
-		// the merge instead would put the invariant somewhere the caller
-		// cannot see it. Pinned by
+		// and no caller forwards it, which is a property of today's callers,
+		// not of this function. Defending that at the merge instead would put
+		// the invariant somewhere the caller cannot see it. Pinned by
 		// TestRankingReverseEdges_MissPathDoesNotAliasTheCache.
 		out[id] = append([]Association(nil), assocs[:n]...)
 	}
@@ -439,12 +441,26 @@ func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte
 //
 // Dedup happens BEFORE the cap, so a pair reachable in both directions
 // consumes exactly one cap slot and contributes its weight exactly once.
+//
+// The returned slice is ALWAYS freshly allocated, including on the no-reverse-
+// edges shortcut, which used to return `fwd` as it stood. `fwd` comes from
+// GetAssociations, whose miss path returns the slice it just put in assocCache
+// (#820) — so that shortcut published a live cache entry to the caller for the
+// 2s TTL, but only for nodes with no inbound symmetric edges. An ownership
+// contract that holds for some nodes and not others, decided by data the caller
+// cannot see, is the trap; the extra copy here (<= maxPerNode entries: 20 in
+// phase4, 10 in BFS) buys uniformity. Fixing GetAssociations itself belongs to
+// #820, which owns its other consumers. Pinned by
+// TestGetRankingNeighbors_NoReverseEdgesDoesNotAliasTheCache.
 func mergeRankingNeighbors(fwd, rev []Association, maxPerNode int) []Association {
 	if len(rev) == 0 {
 		if maxPerNode > 0 && len(fwd) > maxPerNode {
 			return append([]Association(nil), fwd[:maxPerNode]...)
 		}
-		return fwd
+		if len(fwd) == 0 {
+			return nil
+		}
+		return append([]Association(nil), fwd...)
 	}
 
 	capHint := len(fwd) + len(rev)

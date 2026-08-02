@@ -398,6 +398,35 @@ lands, because 0x04 has been fully maintained all along.
 widen it — add a sibling with a narrower contract and name its only legitimate consumers.
 And prefer the fix that repairs existing data over the one that only helps new data.**
 
+**A graceful-degradation fallback can reinstate the very defect the change fixes, and the
+half that is preserved is the half that gets written down (#800).** `phase4HebbianBoost`
+swallowed its read error with a bare `return`, and the union gave it a second source for
+one, so the first repair was the obvious pairing: warn, then fall back to the forward-only
+`GetAssociations`. It preserves the forward half's absolute signal — and it is not
+uniformly better than the bare return it replaced. Measured on the fixture that IS #800's
+root cause (one recent engram, two candidates, one `RelCoActivated` edge of identical
+weight each, differing only in the orientation their writer picked): healthy union 0.5/0.5,
+forward-only fallback 0.5/0.0, bare return 0.0/0.0. `hebbianBoost` MULTIPLIES the RRF score,
+so the fallback opens a 33% final-score gap between two candidates the corpus says are
+equal, while the thing it replaced preserved their (correct) tie. The fallback trades
+tie-preservation for signal-preservation, and only the winning half of that trade was in
+the commit message. Resolved by dropping the Hebbian term entirely on a failed union and
+warning — the same shape as an unreachable embed backend degrading to BM25-only rather than
+to a half-applied vector score. **Principle: a fallback that keeps PART of a signal keeps
+part of that signal's biases too. Before adding one, score the fixture the bug was filed
+about — if the fallback re-enters the failure mode, uniform loss beats partial, biased
+retention. And pin the RELATIVE ORDER, not just the magnitudes: every magnitude assertion
+here passed on the defective fallback.**
+
+**The "loudly" half of degrade-loudly-but-gracefully is a behaviour, and it was unpinned
+everywhere (#800).** Deleting both `slog.Warn` calls from `phase4HebbianBoost` left
+`./internal/engine/... ./internal/storage/` fully green: nothing in the repo asserted on a
+WARN string, on a change whose stated justification is principle #2. A four-line
+`captureWarn(t, fn) string` test helper (swap `slog.Default()` for a buffer, restore) makes
+asserting on the log as cheap as asserting on a return value. **Principle: if the log line
+IS the user-visible behaviour of a degradation path, it needs a test like any other
+behaviour — otherwise "loudly" survives exactly until someone tidies up.**
+
 **A cost model that says "one more bounded scan, like the one next to it" must check
 whether the one next to it is cached (#800).** The design sized the reverse read against
 the forward read and left it uncached, reasoning that one extra bounded Pebble iterator
@@ -408,10 +437,18 @@ which moved whole-recall p50 15-20% — past the increment's own pre-committed k
 threshold. Giving the reverse half a cache of the same shape, and replacing a per-candidate
 dedup map with a linear scan over a list bounded by `maxPerNode`, brought the union to
 ~41µs and whole-recall p50 to +1.7% (paired median, 12 rounds of the increment's own
-harness). That +1.7% and the +1.3% in the entry below are two DIFFERENT measurements of
-the same quantity by two independent harnesses at different sample sizes, not a
-contradiction and not a correction: they agree that the union costs whole-recall p50 one
-to two percent, and the entry below is the one that carries the denominator. **Principle: "symmetric
+harness, whose whole-recall p50 is ~0.5 ms — no embedder in the path). The +1.3% in the
+entry below is a SECOND, independent attempt at the same quantity, and the two do NOT
+corroborate each other, in either direction: the denominators differ ~50× (~0.5 ms here,
+~26 ms there), so equal percentages would be absolute costs 50× apart — +1.3% of 26 ms is
+~340 µs, roughly 8× the ~41 µs measured here — and the +1.3% is itself inside its own
+run-to-run spread, i.e. a null equally consistent with 0%. The honest reading: the
+small-denominator harness measured the effect, the end-to-end harness was underpowered for
+it and cleared the gate without resolving it. Neither harness is committed, so neither
+number is reproducible from the tree; both are recorded as what was observed, not as a
+result anyone can re-derive here. **Principle: two percentages of two different
+denominators are not two measurements of one number — convert to absolute cost before
+claiming agreement, and a result inside the noise band corroborates nothing.** **Principle: "symmetric
 cost to an adjacent operation" is a claim about the adjacent operation's implementation,
 not its signature — and a per-item map allocation on a path that runs 50 times per query
 is usually the largest line in the profile.**
@@ -419,7 +456,7 @@ is usually the largest line in the profile.**
 **A latency budget is only meaningful with its denominator attached (#800).** The COG-31
 increment pre-committed a whole-recall p50 kill threshold expressed against a ~0.5 ms
 figure. Re-measured end to end through `Engine.Activate` with the real embedder — 60
-recalls per arm, 4 runs per commit, an independent re-measure of the +1.7% above rather
+recalls per arm, 4 runs per commit, an independent attempt at the +1.7% above rather
 than a revision of it — cold p50 moved 26.14 ms → 26.49 ms (+1.3%, inside the
 run-to-run spread), and p99 on IDENTICAL code varied 47.5–261.6 ms across four runs, so p99
 is not a usable gate at this sample size. The gate is cleared, but the number that cleared
@@ -445,13 +482,19 @@ per-cache, and the pin belongs on both sides.
 
 **`revAssocScanCap` bounds accepted edges, not keys scanned — deliberately (#800).** An
 inbound edge failing `BidirectionalForRanking` is skipped without consuming a cap slot, so
-one cold `GetRankingNeighbors` for a hub is O(inbound degree): measured 4.5 µs at degree 0,
-65 µs at 1,000 and 476 µs at 5,000 directional inbound edges, returning ZERO edges for
-that cost, against 3.5 µs for the pre-change forward-only read; the symmetric arm stays flat
-(~14 µs) because there the cap binds. Those are one run: re-runs on this machine and on
-an independent one put the degree-5,000 figure between 389 and 493 µs (~80-110x the
-degree-0 cost). The order of magnitude and the linear-in-degree shape are what reproduce;
-the third digit does not, and nothing here should be quoted to three digits. Turning it into a scanned-key budget was considered
+one cold `GetRankingNeighbors` for a hub is O(inbound degree): measured ~4 µs at degree 0,
+~65 µs at 1,000 and ~0.5 ms at 5,000 directional inbound edges, returning ZERO edges for
+that cost, against a few µs for the pre-change forward-only read; the symmetric arm stays
+flat (~15 µs) because there the cap binds. **Quote the RATIO, not the microseconds.** Across
+more than a dozen runs of the committed benchmark on two machine classes, the degree-5,000
+figure landed anywhere from ~390 to ~570 µs — a spread wider than any effect this code
+could have, on a benchmark that purges both caches inside the loop, so it is machine
+variance and not fixture noise. An earlier revision of this entry quoted a three-run band
+("389-493 µs") and five of the next six runs fell outside it: **a band from a handful of
+runs on one machine is a sample, not a bound, and writing it down as a range makes it look
+like the latter.** What reproduces is that a degree-5,000 directional hub costs roughly half
+a millisecond, ~100× (observed ~90-140×) the same call at degree 0, and grows linearly in
+inbound degree. Turning it into a scanned-key budget was considered
 and rejected: reverse keys arrive weight-descending and the two edge classes do not share a
 weight distribution — explicit directional relations are written once at a high fixed
 confidence weight, while the `RelCoActivated` edges this union exists to surface start low

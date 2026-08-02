@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,7 +256,8 @@ func TestPhase5Traverse_ReachesSymmetricEdgeFromEitherEndpoint(t *testing.T) {
 
 // rankingNeighborsFailingStore is a real store whose UNION read always fails,
 // standing in for a reverse (0x04) iterator error. The forward half is
-// untouched and still answers.
+// untouched and still answers, which is exactly the shape that makes a
+// forward-only fallback look attractive.
 type rankingNeighborsFailingStore struct {
 	ActivationStore
 	calls int
@@ -268,66 +270,104 @@ func (s *rankingNeighborsFailingStore) GetRankingNeighbors(
 	return nil, errors.New("synthetic reverse-scan failure")
 }
 
-// TestHebbianBoost_UnionReadFailureFallsBackToForward: a failure in the COG-31
-// union must not zero the Hebbian boost that the FORWARD half would still have
-// produced.
+// TestHebbianBoost_UnionReadFailurePreservesSymmetricOrder is the ORDERING pin
+// on COG-31's degradation path, and the reason phase4HebbianBoost does not fall
+// back to a forward-only read.
 //
-// #800 added a second failure source to a read whose error was already being
-// swallowed by a bare `return` — so one bad reverse scan silently deleted the
-// entire Hebbian contribution to ranking, including the forward half that
-// succeeded, with no log line to say so. Principle #2: degrade loudly but
-// gracefully. phase5Traverse already warns on its own read failure; this is
-// the same obligation on the other consumer.
-func TestHebbianBoost_UnionReadFailureFallsBackToForward(t *testing.T) {
+// The fixture is #800's root cause verbatim: one recent engram R, two
+// candidates A and B, one RelCoActivated edge of IDENTICAL weight each, differing
+// only in the orientation the writer happened to pick — A→R forward, R→B inbound
+// at B. The corpus says A and B are equally co-activated with R; nothing may make
+// them unequal.
+//
+//	healthy union            A = w, B = w  (tie preserved)
+//	forward-only fallback    A = w, B = 0  (tie DESTROYED — this is #800)
+//	warn + skip              A = 0, B = 0  (tie preserved, signal dropped)
+//
+// hebbianBoost MULTIPLIES the final RRF score (final = rrf × (1+heb+trans)), so
+// the middle row is a 33% final-score separation between two candidates the
+// corpus says are equal. A forward-only fallback preserves absolute signal for
+// related-vs-unrelated and re-enters the invariant's own failure mode for
+// symmetric pairs — it is a TRADE, not a strict improvement. This test picks the
+// side: a failed union drops the whole Hebbian signal uniformly (as an embed
+// failure drops the whole vector signal rather than half-applying it) and says
+// so in the log. Ranking degrades; it does not become confidently wrong.
+func TestHebbianBoost_UnionReadFailurePreservesSymmetricOrder(t *testing.T) {
 	e, store := newRealStoreEngine(t)
 	ctx := context.Background()
 	ws := store.VaultPrefix("symmetry")
 	const vaultID uint32 = 7
+	const w float32 = 0.5
 
-	older, newer := olderNewer()
-	if err := store.WriteAssociation(ctx, ws, older, newer, &storage.Association{
-		TargetID: newer, Weight: 0.01, RelType: storage.RelCoActivated,
-	}); err != nil {
-		t.Fatalf("WriteAssociation: %v", err)
-	}
-	if err := store.UpdateAssocWeight(ctx, ws, older, newer, 0.5, 1); err != nil {
-		t.Fatalf("UpdateAssocWeight: %v", err)
+	base := time.Unix(1_700_000_000, 0)
+	a := storage.NewULIDWithTime(base)                     // A→R : forward at A
+	r := storage.NewULIDWithTime(base.Add(24 * time.Hour)) // the recent engram
+	b := storage.NewULIDWithTime(base.Add(48 * time.Hour)) // R→B : inbound at B
+
+	// Identical weight, identical RelType — only the orientation differs.
+	for _, pair := range [][2]storage.ULID{{a, r}, {r, b}} {
+		if err := store.WriteAssociation(ctx, ws, pair[0], pair[1], &storage.Association{
+			TargetID: pair[1], Weight: 0.01, RelType: storage.RelCoActivated,
+		}); err != nil {
+			t.Fatalf("WriteAssociation: %v", err)
+		}
+		if err := store.UpdateAssocWeight(ctx, ws, pair[0], pair[1], w, 1); err != nil {
+			t.Fatalf("UpdateAssocWeight: %v", err)
+		}
 	}
 
-	// Control arm: with a healthy union both endpoints score (that is #800).
-	e.assocLog.Record(LogEntry{
-		VaultID: vaultID, At: time.Now(), EngramIDs: []storage.ULID{older, newer},
-	})
-	healthy := []fusedCandidate{{id: older, rrfScore: 0.5}, {id: newer, rrfScore: 0.5}}
+	// Only R is recent, so A's boost comes from A→R and B's from R→B.
+	e.assocLog.Record(LogEntry{VaultID: vaultID, At: time.Now(), EngramIDs: []storage.ULID{r}})
+
+	// Control arm: with a healthy union both candidates score, and score EQUALLY.
+	healthy := []fusedCandidate{{id: a, rrfScore: 0.5}, {id: b, rrfScore: 0.5}}
 	e.phase4HebbianBoost(ctx, ws, vaultID, healthy)
+	t.Logf("HEALTHY UNION            A=%.9g B=%.9g", healthy[0].hebbianBoost, healthy[1].hebbianBoost)
 	if healthy[0].hebbianBoost <= 0 || healthy[1].hebbianBoost <= 0 {
 		t.Fatalf("UNDERPOWERED, not a pass: the control arm did not score "+
-			"(forward %v, reverse %v) — the fixture, not the fallback, is broken",
+			"(A=%v B=%v) — the fixture, not the degradation path, is broken",
+			healthy[0].hebbianBoost, healthy[1].hebbianBoost)
+	}
+	if math.Abs(healthy[0].hebbianBoost-healthy[1].hebbianBoost) >= 1e-9 {
+		t.Fatalf("UNDERPOWERED: the control arm is already asymmetric (A=%.9g B=%.9g); "+
+			"the degraded arm below cannot mean anything",
 			healthy[0].hebbianBoost, healthy[1].hebbianBoost)
 	}
 
 	// Failure arm: the union read errors on every call.
 	failing := &rankingNeighborsFailingStore{ActivationStore: store}
 	e.store = failing
-	degraded := []fusedCandidate{{id: older, rrfScore: 0.5}, {id: newer, rrfScore: 0.5}}
-	e.phase4HebbianBoost(ctx, ws, vaultID, degraded)
+	degraded := []fusedCandidate{{id: a, rrfScore: 0.5}, {id: b, rrfScore: 0.5}}
+	logged := captureWarn(t, func() {
+		e.phase4HebbianBoost(ctx, ws, vaultID, degraded)
+	})
+	t.Logf("FAILED UNION             A=%.9g B=%.9g", degraded[0].hebbianBoost, degraded[1].hebbianBoost)
 
 	if failing.calls == 0 {
 		t.Fatal("UNDERPOWERED: the failing store was never consulted")
 	}
-	if degraded[0].hebbianBoost <= 0 {
-		t.Fatalf("a reverse-scan failure zeroed the FORWARD Hebbian boost too: "+
-			"forward boost = %v, want the same %v the healthy arm produced. "+
-			"Fall back to GetAssociations and warn (principle #2), do not return.",
-			degraded[0].hebbianBoost, healthy[0].hebbianBoost)
+
+	// THE ordering property. Equal in the corpus, equal under degradation.
+	if degraded[0].hebbianBoost != degraded[1].hebbianBoost {
+		t.Fatalf("a failed union read separated two EQUALLY co-activated candidates: "+
+			"A=%.9g B=%.9g (healthy: A=%.9g B=%.9g). Only the writer-chosen orientation "+
+			"differs between them — this is #800's defect reinstated on the degradation "+
+			"path. Drop the whole Hebbian signal, do not keep the forward half.",
+			degraded[0].hebbianBoost, degraded[1].hebbianBoost,
+			healthy[0].hebbianBoost, healthy[1].hebbianBoost)
 	}
-	if degraded[0].hebbianBoost != healthy[0].hebbianBoost {
-		t.Errorf("the forward-only fallback did not reproduce the forward boost: got %v, want %v",
-			degraded[0].hebbianBoost, healthy[0].hebbianBoost)
+	// Nothing may be fabricated either: the read failed, so there is no signal.
+	if degraded[0].hebbianBoost != 0 {
+		t.Errorf("a failed union read still produced a boost of %.9g, want 0",
+			degraded[0].hebbianBoost)
 	}
-	// The reverse half is genuinely unavailable — degraded, not fabricated.
-	if degraded[1].hebbianBoost != 0 {
-		t.Errorf("the reverse arm scored %v under a failed reverse scan, want 0",
-			degraded[1].hebbianBoost)
+
+	// Principle #2's LOUD half. Silently zeroing the boost was the original
+	// defect; zeroing it quietly-but-differently is the same defect.
+	if !strings.Contains(logged, "hebbian ranking-neighbor read failed") {
+		t.Errorf("no WARN for the failed union read; logged: %q", logged)
+	}
+	if !strings.Contains(logged, "synthetic reverse-scan failure") {
+		t.Errorf("the WARN did not carry the underlying error; logged: %q", logged)
 	}
 }

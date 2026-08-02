@@ -114,13 +114,15 @@ const relTypeConstBlockAnchor = "RelSupports"
 //
 // It collects EVERY name declared in the const block containing
 // relTypeConstBlockAnchor, regardless of how that name is typed, plus any
-// constant elsewhere in the file annotated with an explicit `RelType` type.
-// So all of these are censused:
+// constant elsewhere in the FILE whose type annotation is the identifier
+// `RelType` (parenthesised annotations are unwrapped). So all of these are
+// censused:
 //
-//	RelX RelType = 0x0012   // annotated (the house style)
-//	RelX = RelType(0x0012)  // nil Type, CallExpr value
-//	RelX = 0x0012           // untyped, inheriting the block
-//	RelX                    // iota continuation
+//	RelX RelType = 0x0012   // annotated (the house style), anywhere in the file
+//	RelX (RelType) = 0x0012 // parenthesised annotation, anywhere in the file
+//	RelX = RelType(0x0012)  // nil Type, CallExpr value — ANCHOR BLOCK ONLY
+//	RelX = 0x0012           // untyped, inheriting the block — ANCHOR BLOCK ONLY
+//	RelX                    // iota continuation — ANCHOR BLOCK ONLY
 //
 // Keying off the BLOCK rather than off `vs.Type` is deliberate. The census
 // exists to catch someone who adds a member without learning there was a table
@@ -129,10 +131,27 @@ const relTypeConstBlockAnchor = "RelSupports"
 // other three through with a green suite. Pinned by
 // TestRelTypeConstantNames_CatchesUnannotatedDeclarations.
 //
-// The residual, stated so the boundary is visible: a RelType member declared
-// WITHOUT the type annotation in some OTHER const block, or in another file,
-// is still invisible. Both are far off the path — the members live in one
-// block in types.go — but if that ever changes, move the anchor or widen this.
+// The residual, stated so the boundary is visible — these forms escape, each
+// confirmed against this parser rather than reasoned about:
+//
+//	// A SECOND const block: only the `RelType`-annotated form is swept there,
+//	// so everything the anchor block gets for free is invisible.
+//	const ( RelStray = RelType(0x0031); RelIota; RelBare = 0x0032 )
+//
+//	// ALIAS-annotated. It IS annotated, and the annotation is not the
+//	// identifier `RelType`. go/ast alone cannot resolve the alias; only a
+//	// type-checked pass (go/types) could.
+//	type RelKind = RelType
+//	const RelAliased RelKind = 0x0032
+//
+//	// ANOTHER FILE. This parses types.go and nothing else.
+//	// internal/storage/relations_extra.go: const RelSideways RelType = 0x0030
+//
+// Note that the second and third are ANNOTATED members that still escape, which
+// is not what "unannotated" would lead a reader to expect. All are off the path
+// today — every member lives in one block in types.go, and the anchor check
+// t.Fatals if that block stops existing — but if that changes, move the anchor,
+// sweep the package rather than the file, or type-check.
 func relTypeConstantNames(t *testing.T, filename string, src any) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -177,8 +196,18 @@ func relTypeConstantNames(t *testing.T, filename string, src any) []string {
 			if !ok {
 				continue
 			}
+			// Unwrap `(RelType)` — a legal annotation that parses as a
+			// ParenExpr, not an Ident.
+			texpr := vs.Type
+			for {
+				p, ok := texpr.(*ast.ParenExpr)
+				if !ok {
+					break
+				}
+				texpr = p.X
+			}
 			typed := false
-			if ident, ok := vs.Type.(*ast.Ident); ok && ident.Name == "RelType" {
+			if ident, ok := texpr.(*ast.Ident); ok && ident.Name == "RelType" {
 				typed = true
 			}
 			if !isAnchorBlock && !typed {
@@ -778,11 +807,13 @@ func TestRankingReverseEdges_DirectionalEdgeDoesNotConsumeCapSlot(t *testing.T) 
 // The hit path copies (`append([]Association(nil), entry.assocs[:n]...)`); the
 // miss path used to cache `assocs` and then return that same slice, so the
 // caller held a live view of a cache entry for the rest of the 2s TTL. Nothing
-// in-tree mutated it — mergeRankingNeighbors allocates whenever len(rev) > 0,
-// and its one shortcut returns fwd — which is exactly what makes it a trap:
-// adding the symmetric shortcut `if len(fwd) == 0 { return rev }` is a
+// in-tree mutated it, which is exactly what makes it a trap: adding the
+// symmetric shortcut `if len(fwd) == 0 { return rev }` to the merge is a
 // five-second edit that looks like an unambiguous win and silently publishes
 // the cache's array to phase4HebbianBoost and phase5Traverse.
+//
+// TestGetRankingNeighbors_NoReverseEdgesDoesNotAliasTheCache is the same rule
+// on the forward half, at the public entry point.
 //
 // The invariant is defended at the source rather than by a comment on the
 // merge, because a caller cannot see the aliasing from where it stands.
@@ -826,6 +857,63 @@ func TestRankingReverseEdges_MissPathDoesNotAliasTheCache(t *testing.T) {
 	}
 }
 
+// TestGetRankingNeighbors_NoReverseEdgesDoesNotAliasTheCache pins the same rule
+// at the PUBLIC entry point, on the half that reaches it through the merge.
+//
+// rankingReverseEdges copies on both of its paths, so the reverse half is clean.
+// mergeRankingNeighbors' `if len(rev) == 0 { return fwd }` shortcut then handed
+// GetAssociations' own miss-path slice — which DOES alias assocCache (#820) —
+// straight back to the caller. GetRankingNeighbors' return was therefore
+// copy-safe for a node with inbound symmetric edges and aliased for a node
+// without, decided by data, with nothing at the call site to show which. A
+// non-uniform ownership contract is worse than a uniformly unsafe one: the
+// caller that gets away with mutating it fifty times is the one that breaks on
+// the fifty-first, in another vault.
+//
+// The copy is taken in the merge because that is where the union's contract is
+// stated. #820 still owns GetAssociations' own contract for its other callers.
+func TestGetRankingNeighbors_NoReverseEdgesDoesNotAliasTheCache(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("union-fwd-aliasing")
+
+	src := NewULID()
+	dstA, dstB := NewULID(), NewULID()
+	// Forward edges only: nothing points AT src, so the merge takes its
+	// len(rev) == 0 shortcut.
+	mustWriteAssoc(t, store, ws, src, dstA, 0.7, RelRelatesTo)
+	mustWriteAssoc(t, store, ws, src, dstB, 0.3, RelRelatesTo)
+
+	first, err := store.GetRankingNeighbors(ctx, ws, []ULID{src}, 10)
+	if err != nil {
+		t.Fatalf("GetRankingNeighbors (cold): %v", err)
+	}
+	if len(first[src]) != 2 {
+		t.Fatalf("cold read: want 2 forward edges, got %d", len(first[src]))
+	}
+	if len(first[src]) > 0 && first[src][0].Weight != 0.7 {
+		t.Fatalf("UNDERPOWERED: the fixture's heaviest edge is %v, want 0.7", first[src][0].Weight)
+	}
+
+	// The caller mutates what it was handed — legal, per the documented contract.
+	first[src][0].Weight = -42
+
+	second, err := store.GetRankingNeighbors(ctx, ws, []ULID{src}, 10)
+	if err != nil {
+		t.Fatalf("GetRankingNeighbors (warm): %v", err)
+	}
+	if len(second[src]) != 2 {
+		t.Fatalf("warm read: want 2 forward edges, got %d", len(second[src]))
+	}
+	if second[src][0].Weight != 0.7 {
+		t.Fatalf("the union published a cache entry's backing array: after a caller "+
+			"mutated its own copy, the next read returned weight %v, want 0.7. "+
+			"mergeRankingNeighbors' len(rev) == 0 shortcut must copy too — "+
+			"GetRankingNeighbors' ownership contract may not depend on whether a "+
+			"node happens to have inbound edges.", second[src][0].Weight)
+	}
+}
+
 // TestRelTypeConstantNames_CatchesUnannotatedDeclarations guards the census's
 // own parser.
 //
@@ -860,6 +948,10 @@ const (
 // A second block, annotated: found by the type sweep, not the anchor.
 const RelStrayTyped RelType = 0x0015
 
+// Annotated inside parentheses. Legal Go, an *ast.ParenExpr rather than an
+// *ast.Ident, and outside the anchor block — so the type sweep must unwrap it.
+const RelParenTyped (RelType) = 0x0016
+
 // Not a RelType at all, and in its own block: must NOT be collected.
 const someUnrelatedConst = 7
 `
@@ -868,6 +960,7 @@ const someUnrelatedConst = 7
 	want := []string{
 		"RelCoActivated",
 		"RelMentions",
+		"RelParenTyped",
 		"RelStrayTyped",
 		"RelSupports",
 		"RelWhispers",
