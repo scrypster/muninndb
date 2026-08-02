@@ -130,6 +130,20 @@ type PebbleStore struct {
 	// Like decayNow, it is read without synchronization, so it MUST be set
 	// before the store is shared across goroutines.
 	readFault func(key []byte) error
+	// iterFault is a TEST-ONLY seam, nil in production — the ITERATOR sibling of
+	// readFault, which mediates point reads only. When non-nil it is consulted
+	// once per scan opened through scanIter, and may return a replacement
+	// iterator (typically one that truncates the scan and then reports an error
+	// from Error()). Returning nil leaves the real iterator in place.
+	//
+	// It exists because a mid-scan Pebble failure is otherwise unreproducible
+	// without corrupting a real .sst: closing the DB or deleting keys changes
+	// what the scan SEES, never whether it FAILED partway through — and the
+	// whole defect class (#808) is "a scan that stopped early is served as a
+	// short-but-complete list".
+	// Like decayNow and readFault, it is read without synchronization, so it
+	// MUST be set before the store is shared across goroutines.
+	iterFault func(scanPrefix []byte, it scanIterator) scanIterator
 	// guardReadFaults counts the times the STO-12 endpoint-liveness read failed
 	// and the guard failed open (see engramExists). guardReadFaultLoggedAt is
 	// the unix-nano stamp of the last WARN, used to rate-limit it.
@@ -158,20 +172,23 @@ func (ps *PebbleStore) now() time.Time {
 	return time.Now()
 }
 
-// assocCacheEntry holds a cached association list.
+// assocCacheEntry holds a cached FORWARD (0x03) association list.
 // TTL is enforced by the expirable.LRU cache (2s); no per-entry expiry field needed.
+//
+// truncated records that the scan stopped at the caller's maxPerNode rather
+// than at the end of the node's edge list, so a later caller asking for MORE is
+// re-scanned instead of silently served the shorter list (#820). Mirrors
+// revAssocCacheEntry, which has carried the flag since COG-31.
 type assocCacheEntry struct {
-	assocs []Association
+	assocs    []Association
+	truncated bool
 }
 
 // revAssocCacheEntry holds a cached REVERSE (0x04) ranking adjacency list.
 //
-// It carries `truncated` because the forward cache does not, and that gap is a
-// live latent bug there: GetAssociations caches the list it built UNDER the
-// caller's maxPerNode, so a later caller asking for MORE is silently served
-// the shorter list from cache. The reverse cache refuses to repeat it — a hit
-// whose entry was truncated below what this caller asked for is treated as a
-// miss and re-scanned.
+// A hit whose entry was truncated below what this caller asked for is treated
+// as a miss and re-scanned, rather than silently under-serving. The forward
+// cache carried the same gap and now carries the same flag (#820).
 type revAssocCacheEntry struct {
 	assocs    []Association
 	truncated bool

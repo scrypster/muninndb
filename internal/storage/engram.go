@@ -555,6 +555,13 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// assocCacheDirty collects the sources whose cached forward-association list
 	// names this engram; they are invalidated post-commit (STO-12, below).
 	assocCacheDirty := []ULID{id}
+	// revAssocCacheDirty is the 0x04 mirror (#818). revAssocCache is keyed on
+	// the DESTINATION, so the entries this delete invalidates are:
+	//   - id itself, whose inbound edges are all being removed, and
+	//   - every TARGET of an outbound edge, whose inbound list names id.
+	// Without it the dead engram stayed reachable INTO its former targets for
+	// the 2s TTL — the #803 forward eviction alone left the reverse half stale.
+	revAssocCacheDirty := []ULID{id}
 
 	// STO-11: the upper bound MUST carry-propagate (keys.PrefixUpperBound), not
 	// append a 0xFF sentinel. A 0x03 key is prefix(25)|weightComplement(4)|dst(16)
@@ -624,6 +631,9 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 			batch.Delete(k, nil) // forward key (exact live key)
 			batch.Delete(keys.AssocRevKey(wsPrefix, targetID, weight, [16]byte(id)), nil)
 			batch.Delete(keys.AssocWeightIndexKey(wsPrefix, [16]byte(id), targetID), nil)
+			// #818: the 0x04 row deleted above is keyed on targetID, so that
+			// target's cached REVERSE list still names this engram.
+			revAssocCacheDirty = append(revAssocCacheDirty, ULID(targetID))
 		}
 		fwdIter.Close()
 	}
@@ -767,6 +777,9 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	ps.cache.Delete(wsPrefix, id)
 	for _, src := range assocCacheDirty {
 		ps.assocCache.Remove(assocCacheKey(wsPrefix, src))
+	}
+	for _, dst := range revAssocCacheDirty {
+		ps.revAssocCache.Remove(assocCacheKey(wsPrefix, dst))
 	}
 
 	// Decrement MentionCount on each entity that was linked to this engram.
@@ -1243,17 +1256,37 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 		// "unknown" forever, and a marker that already carried a stamp had it
 		// erased on the next confidence adjustment — violating the "moment it
 		// FIRST became known" invariant (adversarial review of #754, finding 6).
+		//
+		// FAILS OPEN ON THE MARKER ONLY (#804), the opposite call from
+		// FlagContradiction and for a reason specific to this site: the
+		// confidence delta is the caller's request and is already computed;
+		// refusing the whole batch because the 0x0A stamp was unreadable would
+		// drop a write that has nothing to do with the faulting key. But a
+		// stamp that could not be read must never be REPLACED with `now` —
+		// that is the plausible-wrong-value failure. So the confidence keys are
+		// written and the marker rewrite is skipped, leaving whatever is on
+		// disk intact.
+		//
+		// A pair whose marker read fails and whose marker does not yet exist
+		// therefore goes unflagged this time; the contradiction detector
+		// re-observes and FlagContradiction writes it. A missed marker is
+		// recoverable; a restamped one is not.
 		detectedAt := time.Now()
 		contraKey := keys.ContradictionKey(wsPrefix, 0, 0, aBytes)
-		if existing, closer, err := ps.db.Get(contraKey); err == nil {
-			_, prior, _ := decodeContradictionValue(existing)
-			_ = closer.Close()
-			// Carry the prior stamp forward verbatim — including a zero one
-			// from a legacy marker (re-stamping invents a wrong time).
-			detectedAt = prior
+		prior, exists, rerr := ps.readContradictionMarker(contraKey)
+		if rerr != nil {
+			slog.Warn("storage: contradiction marker read failed; leaving the existing 0x0A marker untouched rather than restamping it",
+				"engram", id.String(), "other", other.String(),
+				"vault_prefix", fmt.Sprintf("%x", wsPrefix), "err", rerr)
+		} else {
+			if exists {
+				// Carry the prior stamp forward verbatim — including a zero one
+				// from a legacy marker (re-stamping invents a wrong time).
+				detectedAt = prior
+			}
+			batch.Set(contraKey, encodeContradictionValue(bBytes, detectedAt), nil)
+			batch.Set(keys.ContradictionKey(wsPrefix, 0, 0, bBytes), encodeContradictionValue(aBytes, detectedAt), nil)
 		}
-		batch.Set(contraKey, encodeContradictionValue(bBytes, detectedAt), nil)
-		batch.Set(keys.ContradictionKey(wsPrefix, 0, 0, bBytes), encodeContradictionValue(aBytes, detectedAt), nil)
 	}
 
 	if err := batch.Commit(pebble.NoSync); err != nil {

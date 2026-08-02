@@ -34,6 +34,19 @@ type pebbleStoreBatch struct {
 	// stateUpdatedIDs tracks engrams whose state was changed by UpdateEngramState.
 	// Their cache entries are invalidated in Commit after the batch flushes to Pebble.
 	stateUpdatedIDs []stateUpdate
+	// assocEdges records every (src, dst) whose 0x03/0x04 rows this batch
+	// writes, so Commit can evict the forward cache (keyed on src) and the
+	// reverse cache (keyed on dst) — #818. Deferred to Commit deliberately:
+	// the batch may be Discarded, and evicting at queue time would drop a
+	// CORRECT cache entry on behalf of a write that never lands.
+	assocEdges []batchAssocEdge
+}
+
+// batchAssocEdge is one association-cache invalidation owed by a batch.
+type batchAssocEdge struct {
+	ws  [8]byte
+	src ULID
+	dst ULID
 }
 
 // batchPendingItem holds the data required for post-commit vault counter and
@@ -153,6 +166,11 @@ func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8
 		var wiBuf [4]byte
 		binary.BigEndian.PutUint32(wiBuf[:], math.Float32bits(assoc.Weight))
 		b.batch.Set(keys.AssocWeightIndexKey(wsPrefix, id16, [16]byte(assoc.TargetID)), wiBuf[:], nil)
+		// #818: the INLINE association writer sets the same 0x03/0x04 rows as
+		// WriteAssociation and owes the same post-commit eviction. The source
+		// is usually a brand-new engram with no cache entry, but the TARGET is
+		// an existing one whose reverse list is now stale.
+		b.assocEdges = append(b.assocEdges, batchAssocEdge{ws: wsPrefix, src: eng.ID, dst: assoc.TargetID})
 	}
 
 	// 0x0B: state index
@@ -210,6 +228,7 @@ func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src
 	var weightBuf [4]byte
 	binary.BigEndian.PutUint32(weightBuf[:], math.Float32bits(assoc.Weight))
 	b.batch.Set(keys.AssocWeightIndexKey(ws, [16]byte(src), [16]byte(dst)), weightBuf[:], nil)
+	b.assocEdges = append(b.assocEdges, batchAssocEdge{ws: ws, src: src, dst: dst})
 	return nil
 }
 
@@ -383,6 +402,15 @@ func (b *pebbleStoreBatch) Commit() error {
 	for _, su := range b.stateUpdatedIDs {
 		b.ps.cache.Delete(su.ws, su.id)
 		b.ps.metaCache.Remove([16]byte(su.id))
+	}
+
+	// Association caches — #818. Same post-commit placement and the same
+	// forward-on-src / reverse-on-dst keying as PebbleStore.WriteAssociation.
+	// Without this an edge written through a batch was invisible from BOTH
+	// endpoints for the 2s TTL.
+	for _, e := range b.assocEdges {
+		b.ps.assocCache.Remove(assocCacheKey(e.ws, e.src))
+		b.ps.revAssocCache.Remove(assocCacheKey(e.ws, e.dst))
 	}
 
 	// Post-commit side effects — mirrors PebbleStore.WriteEngram post-commit work.

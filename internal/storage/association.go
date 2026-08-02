@@ -175,12 +175,17 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 		if entry, ok := ps.assocCache.Get(ck); ok {
 			// Determine slice length
 			n := len(entry.assocs)
-			if maxPerNode > 0 && n > maxPerNode {
-				n = maxPerNode
+			// A truncated entry can only answer a caller asking for no more
+			// than it holds; otherwise re-scan rather than silently under-serve
+			// (#820). Same rule as revAssocCache's hit path.
+			if !entry.truncated || maxPerNode > 0 && maxPerNode <= n {
+				if maxPerNode > 0 && n > maxPerNode {
+					n = maxPerNode
+				}
+				// Return a copy of the slice
+				result[id] = append([]Association(nil), entry.assocs[:n]...)
+				continue
 			}
-			// Return a copy of the slice
-			result[id] = append([]Association(nil), entry.assocs[:n]...)
-			continue
 		}
 		uncached = append(uncached, id)
 	}
@@ -196,18 +201,20 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 	// Phase 3: open ONE iterator covering the entire 0x03|wsPrefix range (snapshot-aware).
 	lower := keys.AssocFwdRangeStart(wsPrefix)
 	upper := keys.AssocFwdRangeEnd(wsPrefix) // nil means unbounded (all-0xFF workspace)
-	iter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
+	rawIter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: upper,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("assoc iterator: %w", err)
 	}
+	iter := ps.scanIter(lower, rawIter)
 	defer iter.Close()
 
 	for _, id := range uncached {
 		prefix := keys.AssocFwdPrefixForID(wsPrefix, id) // 0x03 | ws | id (25 bytes)
 		var assocs []Association
+		truncated := false
 
 		// SeekGE positions at the first key >= prefix (strictly forward seek).
 		for iter.SeekGE(prefix); iter.Valid(); iter.Next() {
@@ -217,6 +224,7 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 				break
 			}
 			if maxPerNode > 0 && len(assocs) >= maxPerNode {
+				truncated = true
 				break
 			}
 			// Key layout: 0x03 | ws(8) | srcID(16) | weightComplement(4) | dstID(16) = 45 bytes
@@ -242,8 +250,35 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 			})
 		}
 
-		result[id] = assocs
-		ps.assocCache.Add(assocCacheKey(wsPrefix, id), &assocCacheEntry{assocs: assocs})
+		// #808: FAIL CLOSED on a mid-scan iterator failure, and do it BEFORE
+		// anything is returned or cached.
+		//
+		// This is the opposite call from the STO-12 endpoint-liveness guard
+		// (#803), which fails OPEN, and the difference is the loss direction.
+		// #803 is a WRITE guard: refusing on a read fault deletes a live edge
+		// that cannot be recovered. This is a READ: refusing costs the caller
+		// an error it can retry or report, and destroys nothing. Meanwhile
+		// proceeding does not stay local — the truncated list is written into
+		// assocCache and served for the 2s TTL to readers that never saw a
+		// fault, and "zero edges" is read as "not in a declared chain" by
+		// currencyInDeclaredChain, which is how a scan fault turns into a false
+		// `possibly_superseded_by` advisory (COG-25).
+		//
+		// One iterator serves every uncached id, so a failure anywhere is
+		// terminal for the whole call.
+		if err := iter.Error(); err != nil {
+			return nil, fmt.Errorf("assoc scan: %w", err)
+		}
+
+		ps.assocCache.Add(assocCacheKey(wsPrefix, id), &assocCacheEntry{assocs: assocs, truncated: truncated})
+		// COPY (#820). `assocs` is now the cache entry's backing array; the hit
+		// path above copies for the same reason, and this function's own doc
+		// comment promises it. Returning `assocs` published a live view of the
+		// cache entry to the first caller after every miss — safe only while no
+		// caller mutates and no caller forwards it, which is a property of
+		// today's callers, not of this function. One allocation per cold miss,
+		// against a Pebble scan.
+		result[id] = append([]Association(nil), assocs...)
 	}
 
 	return result, nil
@@ -269,12 +304,10 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 // same shape (revAssocCache, keyed on the DESTINATION); the merged list is
 // never cached.
 //
-// Error handling differs between the two halves, and the difference is not
-// intentional design: rankingReverseEdges checks iter.Error() and propagates,
-// while the forward half inherits GetAssociations' unchecked iterator, which
-// reports a truncated scan as a short-but-successful list (#808). Fixing that
-// belongs to #808, not here — but a caller reading this should not assume the
-// two halves fail alike.
+// Both halves now fail alike on a mid-scan iterator failure: each checks
+// iter.Error() and propagates, before anything is cached (#808). They used to
+// differ — the forward half reported a truncated scan as a short-but-successful
+// list — and that difference was never intentional design.
 //
 // Both 0x03 and 0x04 order by weightComplement in the same key position, so
 // both streams arrive weight-DESCENDING and the cap is an exact top-N via a
@@ -461,14 +494,14 @@ func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte
 //
 // The returned slice is ALWAYS freshly allocated, including on the no-reverse-
 // edges shortcut, which used to return `fwd` as it stood. `fwd` comes from
-// GetAssociations, whose miss path returns the slice it just put in assocCache
-// (#820) — so that shortcut published a live cache entry to the caller for the
-// 2s TTL, but only for nodes with no inbound symmetric edges. An ownership
-// contract that holds for some nodes and not others, decided by data the caller
-// cannot see, is the trap; the extra copy here (<= maxPerNode entries: 20 in
-// phase4, 10 in BFS) buys uniformity. Fixing GetAssociations itself belongs to
-// #820, which owns its other consumers. Pinned by
-// TestGetRankingNeighbors_NoReverseEdgesDoesNotAliasTheCache.
+// GetAssociations, whose miss path used to return the slice it had just put in
+// assocCache (#820, now fixed at the source) — so that shortcut published a
+// live cache entry to the caller for the 2s TTL, but only for nodes with no
+// inbound symmetric edges. An ownership contract that holds for some nodes and
+// not others, decided by data the caller cannot see, is the trap; the copy here
+// (<= maxPerNode entries: 20 in phase4, 10 in BFS) is kept even now that the
+// source is fixed, so this function's contract does not depend on its
+// caller's. Pinned by TestGetRankingNeighbors_NoReverseEdgesDoesNotAliasTheCache.
 func mergeRankingNeighbors(fwd, rev []Association, maxPerNode int) []Association {
 	if len(rev) == 0 {
 		if maxPerNode > 0 && len(fwd) > maxPerNode {
@@ -536,25 +569,32 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 	ck := assocCacheKey(wsPrefix, id)
 	if entry, ok := ps.assocCache.Get(ck); ok {
 		n := len(entry.assocs)
-		if maxPerNode > 0 && n > maxPerNode {
-			n = maxPerNode
+		// A truncated entry can only answer a caller asking for no more than it
+		// holds; otherwise fall through and re-scan (#820).
+		if !entry.truncated || maxPerNode > 0 && maxPerNode <= n {
+			if maxPerNode > 0 && n > maxPerNode {
+				n = maxPerNode
+			}
+			return append([]Association(nil), entry.assocs[:n]...), nil
 		}
-		return append([]Association(nil), entry.assocs[:n]...), nil
 	}
 
 	// Build prefix: 0x03 | wsPrefix | id
 	prefix := keys.AssocFwdKey(wsPrefix, [16]byte(id), 1.0, [16]byte{})
 	prefix = prefix[0 : 1+8+16] // trim to just the prefix portion
 
-	iter, err := PrefixIterator(ps.db, prefix)
+	rawIter, err := PrefixIterator(ps.db, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("prefix iterator: %w", err)
 	}
+	iter := ps.scanIter(prefix, rawIter)
 	defer iter.Close()
 
 	var assocs []Association
+	truncated := false
 	for iter.First(); iter.Valid(); iter.Next() {
 		if maxPerNode > 0 && len(assocs) >= maxPerNode {
+			truncated = true
 			break
 		}
 		// Key format: 0x03 | wsPrefix(8) | srcID(16) | weightComplement(4) | dstID(16)
@@ -585,16 +625,13 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 			RestoredAt:        restoredAt,
 		})
 	}
+	// #808: check the scan BEFORE anything is cached or returned. See the same
+	// guard in GetAssociations for the fail-closed reasoning.
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("associationsForOne scan: %w", err)
+	}
 	// Populate cache — expirable.LRU enforces the TTL automatically.
-	//
-	// KNOWN GAP (#808): this loop never checks iter.Error(), so a scan that
-	// stops early on a corrupt block caches a TRUNCATED association list and
-	// returns it as complete — the same absence-vs-failure laundering this file
-	// fixed on the pointGet path, one seam over. It was deliberately deferred
-	// rather than fixed blind: the readFault seam mediates pointGet, not
-	// iteration, so a guard here has no deterministic RED and would ship
-	// unproven. Fixing it needs an iterator-level fault seam.
-	ps.assocCache.Add(ck, &assocCacheEntry{assocs: assocs})
+	ps.assocCache.Add(ck, &assocCacheEntry{assocs: assocs, truncated: truncated})
 	return assocs, nil
 }
 
@@ -1141,6 +1178,16 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 			return fmt.Errorf("decay assoc chunk commit: %w", err)
 		}
 		ps.replicateBatch(batch)
+		// #818: every entry in this chunk relocated, archived or deleted a
+		// 0x03 row (keyed on src) and its 0x04 mirror (keyed on dst), so both
+		// caches can be holding pre-decay weights. Evicted POST-COMMIT, per
+		// chunk, so a reader that misses immediately after re-scans the state
+		// this batch just committed. Weights, not membership, are usually what
+		// goes stale here — and weight is what ranking orders on.
+		for _, e := range chunk {
+			ps.assocCache.Remove(assocCacheKey(wsPrefix, ULID(e.src)))
+			ps.revAssocCache.Remove(assocCacheKey(wsPrefix, ULID(e.dst)))
+		}
 		chunk = chunk[:0]
 		return nil
 	}
@@ -1439,6 +1486,32 @@ func decodeContradictionValue(val []byte) (partner ULID, detectedAt time.Time, o
 	return partner, detectedAt, true
 }
 
+// readContradictionMarker reads the 0x0A marker at key and returns the moment
+// the contradiction FIRST became known.
+//
+// Three outcomes, not two — the same policy GetAssocWeight states one seam
+// over. A MISSING key is absence: (zero, false, nil). A key holding fewer than
+// 16 bytes cannot even name the partner, so it is not something any writer in
+// this package produced; that is corruption, and reporting it as absence is the
+// same laundering one layer down. Anything else is a read FAILURE.
+//
+// The two callers take deliberately OPPOSITE actions on that failure, because
+// their loss directions are opposite. See each call site.
+func (ps *PebbleStore) readContradictionMarker(key []byte) (detectedAt time.Time, exists bool, err error) {
+	val, err := ps.pointGet(key)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("read contradiction marker: %w", err)
+	}
+	if val == nil {
+		return time.Time{}, false, nil
+	}
+	_, prior, ok := decodeContradictionValue(val)
+	if !ok {
+		return time.Time{}, false, fmt.Errorf("read contradiction marker: corrupt record: %d bytes, want at least 16", len(val))
+	}
+	return prior, true, nil
+}
+
 // FlagContradiction writes the 0x0A contradiction key for pair (a,b).
 //
 // The marker's value carries the moment the contradiction FIRST became known.
@@ -1471,11 +1544,33 @@ func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, 
 	// times a worker re-observes the edge. Re-penalising compounds a single
 	// Bayesian update (1.0 -> 0.975 -> 0.797 -> 0.313 -> 0.0709) until BOTH
 	// memories — including the true one — fall out of recall entirely.
+	//
+	// FAILS CLOSED (#804), and that is the opposite call from the STO-12
+	// endpoint-liveness guard (#803), deliberately. Both are read faults; the
+	// loss directions are mirror images:
+	//
+	//   #803  refusing an association write on a read fault DESTROYS live data
+	//         (a real edge that can never be recovered), while proceeding costs
+	//         one repairable dangling row. So it fails OPEN, loudly.
+	//   here  proceeding on a read fault reports the pair NEWLY flagged and
+	//         restamps detectedAt with `now`. The first drives a repeat
+	//         confidence penalty on BOTH engrams, and BayesianUpdate is not
+	//         invertible (COG-23 residual) — unrecoverable. Refusing costs at
+	//         most one deferred penalty, which the next detection re-applies.
+	//
+	// So the read error propagates and NOTHING is written. The only production
+	// caller is ContradictWorker.processBatch, which already treats an error as
+	// "newness unknown, do not penalise" and continues — so this cannot fail a
+	// recall or a user-facing path on an otherwise-harmless corrupt block. The
+	// (false, err) return keeps that suppression true even for a caller that
+	// ignores the error.
 	newlyFlagged := true
 	detectedAt := time.Now()
-	if existing, closer, err := ps.db.Get(contraKey); err == nil {
-		_, prior, _ := decodeContradictionValue(existing)
-		_ = closer.Close()
+	prior, exists, rerr := ps.readContradictionMarker(contraKey)
+	if rerr != nil {
+		return false, fmt.Errorf("flag contradiction: %w", rerr)
+	}
+	if exists {
 		newlyFlagged = false
 		// Carry the prior stamp forward verbatim — INCLUDING a zero one from a
 		// legacy marker. Re-stamping an already-known contradiction with "now"
