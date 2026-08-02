@@ -71,10 +71,23 @@ type Weights struct {
 	// ACT-R mode: set UseACTR=true to enable ACT-R base-level + Hebbian scoring.
 	// This is the recommended mode: resolves decay-vs-Hebbian tension, deterministic,
 	// total recall (no stored state mutation), grounded in 30+ years of cognitive science.
-	UseACTR      bool
-	ACTRDecay    float32 // power-law decay exponent d (0 → default 0.5)
-	ACTRHebScale float32 // Hebbian scaling inside softplus (0 → default 4.0)
-	DisableACTR  bool    // when true, force legacy weighted-sum scoring (overrides UseACTR)
+	UseACTR   bool
+	ACTRDecay float32 // power-law decay exponent d (0 → default 0.5)
+	// ACTRHebScale is the Hebbian amplifier inside softplus. It is a POINTER
+	// because 0 is a MEANINGFUL value — "apply no cognitive boost at all" — and
+	// the auth layer already admits it (`PlasticityConfig.ACTRHebScale` is a
+	// *float64 clamped to [0, 50]). With a plain float32 the zero value was
+	// indistinguishable from unset and was silently substituted with 4.0: an
+	// operator who configured `actr_heb_scale: 0` got the default, in the hot
+	// path, with no warning. That is principle #1 violated, and it made the
+	// documented kill switch a no-op.
+	//
+	// nil = unset → DefaultACTRHebScale. Non-nil is honored exactly, including 0.
+	// NOTE this scales BOTH hebbianBoost and transitionBoost (see computeACTR),
+	// so 0 is "no cognitive boost", NOT "no Hebbian" — the per-mechanism
+	// ablation is HebbianEnabled / PASEnabled (COG-31).
+	ACTRHebScale *float32
+	DisableACTR  bool // when true, force legacy weighted-sum scoring (overrides UseACTR)
 	// RRF fusion mode: when true, use Phase 3 RRF scores directly as the scoring
 	// basis in Phase 6, bypassing ACT-R/CGDN/weighted-sum recomputation.
 	// Rank-based and scale-invariant (Cormack et al. 2009). Cognitive boosts
@@ -3053,9 +3066,13 @@ func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {
 	if req.ACTRDecay > 0 {
 		rw.ACTRDecay = float64(req.ACTRDecay)
 	}
+	// nil = unset (take the default); non-nil is honored EXACTLY, including 0.
+	// A `> 0` guard here would silently substitute the default for a configured
+	// zero — principle #1 in the hot path. See the field comment on
+	// Weights.ACTRHebScale.
 	rw.ACTRHebScale = DefaultACTRHebScale
-	if req.ACTRHebScale > 0 {
-		rw.ACTRHebScale = float64(req.ACTRHebScale)
+	if req.ACTRHebScale != nil {
+		rw.ACTRHebScale = float64(*req.ACTRHebScale)
 	}
 	return rw
 }

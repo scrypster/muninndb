@@ -149,3 +149,149 @@ func TestActivateRequest_HebbianEnabledVaultStillBoosts(t *testing.T) {
 		t.Errorf("default vault reported hebbian_boost = %v, want > 0", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The KILL SWITCH: actr_heb_scale = 0.
+//
+// The scalar multiplies BOTH hebbianBoost and transitionBoost inside softplus,
+// so 0 means "no cognitive boost at all". Two layers used to substitute the
+// 4.0 default for a configured 0 — Engine.Activate's `resolved.ACTRHebScale > 0`
+// guard and activation's `req.ACTRHebScale > 0` guard — which made the
+// documented switch a no-op in the hot path (principle #1).
+//
+// Asserted on the OBSERVABLE, not on the reported component: phase 4 still
+// computes hebbian_boost at scale 0 (it is a measurement), but it must not move
+// the score. So the same corpus is probed with and without the co-activation
+// priming and the resulting scores must be bit-identical.
+// ---------------------------------------------------------------------------
+
+// hebScaleProbe is hebReadGateProbe's sibling: it returns the probe row's
+// absolute score, optionally priming the activation log first.
+func hebScaleProbe(t *testing.T, eng *Engine, vaultName string, prime bool) float64 {
+	t.Helper()
+	ctx := context.Background()
+
+	probeResp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vaultName,
+		Concept: "kiln firing schedule",
+		Content: "the bisque kiln ramps at eighty degrees an hour to cone zero four",
+	})
+	if err != nil {
+		t.Fatalf("Write(probe): %v", err)
+	}
+	partnerResp, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   vaultName,
+		Concept: "glaze mixing ratio",
+		Content: "the celadon glaze is mixed at one part ash to two parts feldspar",
+	})
+	if err != nil {
+		t.Fatalf("Write(partner): %v", err)
+	}
+	awaitFTS(t, eng)
+
+	probeID, err := storage.ParseULID(probeResp.ID)
+	if err != nil {
+		t.Fatalf("ParseULID(probe): %v", err)
+	}
+	partnerID, err := storage.ParseULID(partnerResp.ID)
+	if err != nil {
+		t.Fatalf("ParseULID(partner): %v", err)
+	}
+
+	ws := eng.store.ResolveVaultPrefix(vaultName)
+	if err := eng.store.WriteAssociation(ctx, ws, probeID, partnerID, &storage.Association{
+		TargetID:   partnerID,
+		RelType:    storage.RelRelatesTo,
+		Weight:     1.0,
+		Confidence: 1.0,
+		CreatedAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+	if prime {
+		eng.activation.AssocLog().Record(activation.LogEntry{
+			VaultID:   wsVaultID(ws),
+			At:        time.Now(),
+			EngramIDs: []storage.ULID{partnerID},
+			Scores:    []float64{1.0},
+		})
+	}
+
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      vaultName,
+		Context:    []string{"kiln firing schedule"},
+		MaxResults: 10,
+		Threshold:  0.001,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	for _, a := range resp.Activations {
+		if a.ID == probeResp.ID {
+			// Raw, not AbsoluteScore: AbsoluteScore is
+			// min(Raw, ContentMatch, 1) x Confidence, and under the no-op
+			// embedder ContentMatch is capped at the FTS weight (0.4), which
+			// clamps the prior back out of view. Raw is where the contextual
+			// prior is observable.
+			return float64(a.ScoreComponents.Raw)
+		}
+	}
+	t.Fatalf("probe engram not among %d activations", len(resp.Activations))
+	return 0
+}
+
+func hebScaleEnv(t *testing.T, vaultName string, scale *float64) (*Engine, func()) {
+	t.Helper()
+	eng, as, store, cleanup := testEnvWithAuth(t)
+	if err := store.WriteVaultName(store.VaultPrefix(vaultName), vaultName); err != nil {
+		t.Fatalf("WriteVaultName: %v", err)
+	}
+	if err := as.SetVaultConfig(auth.VaultConfig{
+		Name:       vaultName,
+		Public:     true,
+		Plasticity: &auth.PlasticityConfig{ACTRHebScale: scale},
+	}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+	return eng, cleanup
+}
+
+// TestACTRHebScaleZero_KillsTheCognitiveBoost is the end-to-end RED test for
+// the kill switch.
+func TestACTRHebScaleZero_KillsTheCognitiveBoost(t *testing.T) {
+	zero := 0.0
+	if r := auth.ResolvePlasticity(&auth.PlasticityConfig{ACTRHebScale: &zero}); r.ACTRHebScale != 0 {
+		t.Fatalf("test setup: auth resolved actr_heb_scale %v, want 0", r.ACTRHebScale)
+	}
+
+	engPrimed, c1 := hebScaleEnv(t, "heb-scale-zero", &zero)
+	defer c1()
+	primed := hebScaleProbe(t, engPrimed, "heb-scale-zero", true)
+
+	engCold, c2 := hebScaleEnv(t, "heb-scale-zero", &zero)
+	defer c2()
+	cold := hebScaleProbe(t, engCold, "heb-scale-zero", false)
+
+	if primed != cold {
+		t.Errorf("actr_heb_scale:0 — a co-activated neighbour still moved the score "+
+			"(%.12f primed vs %.12f cold). An explicitly configured 0 must not be "+
+			"substituted with the 4.0 default (principle #1).", primed, cold)
+	}
+}
+
+// TestACTRHebScaleDefault_CognitiveBoostStillApplies is the converse control:
+// the fix must honor an explicit 0, not neutralise the mechanism for everyone.
+func TestACTRHebScaleDefault_CognitiveBoostStillApplies(t *testing.T) {
+	engPrimed, c1 := hebScaleEnv(t, "heb-scale-default", nil)
+	defer c1()
+	primed := hebScaleProbe(t, engPrimed, "heb-scale-default", true)
+
+	engCold, c2 := hebScaleEnv(t, "heb-scale-default", nil)
+	defer c2()
+	cold := hebScaleProbe(t, engCold, "heb-scale-default", false)
+
+	if primed <= cold {
+		t.Errorf("default actr_heb_scale — priming did not raise the score "+
+			"(%.12f primed vs %.12f cold); the fixture proves nothing", primed, cold)
+	}
+}
