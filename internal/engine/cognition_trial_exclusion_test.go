@@ -397,33 +397,30 @@ func TestCognitionTrialRule_K4IsSubsumedByK2(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// D2: THE ABLATION-ADDITIVITY BOUNDS.
+// D2/D5: THE ABLATION-ADDITIVITY RELATIONS, AS A DIAGNOSTIC.
 //
 //	Delta_HP >= max(Delta_H, Delta_P)
 //	Delta_HP <= Delta_C
 //
-// A violation is a U3-class failure: the arithmetic ablation is not the
-// configuration it claims to be. The two bounds are also what make the
-// REDUNDANCY GAP visible rather than assumed — the whole reason the fifth arm
-// exists is that Delta_HP can sit anywhere in that interval, and on a typical
-// vault the interval is the entire range.
+// These make the REDUNDANCY GAP visible rather than assumed — the whole reason
+// the fifth arm exists is that Delta_HP can sit anywhere in that interval, and
+// on a typical vault the interval is the entire range.
 //
-// A DELIBERATE CONSERVATISM, recorded: a violation is ALSO producible by a
-// genuinely HARMFUL mechanism (if the base-level prior hurts, BASE-LEVEL-ONLY
-// scores below CONTENT-MATCH-ONLY and Delta_HP legitimately exceeds Delta_C).
-// The rule routes both to UNDERPOWERED, which suppresses a kill-supporting
-// finding rather than a ship-supporting one — the direction the design says to
-// err in, since the action at stake is an irreversible deletion. Distinguishing
-// the two cases needs the ARM-LEVEL check, where the bound is a genuine
-// arithmetic invariant on raw scores; that lives in the activation package's
-// reconstruction-fidelity test.
+// D2 also made them a U3 GATE, and D5 removed that. The reasons are in
+// ctAdditivityDiagnostic's comment and are pinned by
+// TestCognitionTrialRule_AdditivityDoesNotConvergeAndIsNotAGate: the comparison
+// is between four POINT estimates, it breaks ~2/3 of the time under an
+// exchangeable null, it is FLAT IN n, and every break it does report decodes to
+// a named net-harmful mechanism — a finding, not an instrument failure. The
+// genuinely invariant form of the relation is on RAW SCORES and stays a hard
+// failure in the activation package's reconstruction-fidelity test.
 // ---------------------------------------------------------------------------
 
 func TestCtArms_AblationAdditivity(t *testing.T) {
-	// The bounds hold on a series built from the real arm ordering.
+	// The relations hold on a series built from the real arm ordering.
 	v := ctVaultFromSynth("A", ctSynthSeries(320))
-	if msg := ctAdditivityViolation(v); msg != "" {
-		t.Fatalf("a well-formed arm series violated the bounds: %s", msg)
+	if msgs := ctAdditivityDiagnostic(v); len(msgs) != 0 {
+		t.Fatalf("a well-formed arm series broke the relations: %v", msgs)
 	}
 	if !(v.DeltaHP.Point >= math.Max(v.DeltaH.Point, v.DeltaP.Point) &&
 		v.DeltaHP.Point <= v.DeltaC.Point) {
@@ -440,29 +437,48 @@ func TestCtArms_AblationAdditivity(t *testing.T) {
 	t.Logf("Delta_H %+.4f  Delta_P %+.4f  Delta_HP %+.4f  Delta_C %+.4f  (bound width %.4f)",
 		v.DeltaH.Point, v.DeltaP.Point, v.DeltaHP.Point, v.DeltaC.Point, hi-lo)
 
-	// And each violation is detected, named, and routed to UNDERPOWERED.
+	// And each break is detected, DECODED to the mechanism it names, reported in
+	// the audit trail — and changes NO verdict.
 	for _, tc := range []struct {
 		name    string
 		mutate  func(v *ctVaultResult)
 		wantSub string
 	}{
-		{"below max(Delta_H, Delta_P)", func(v *ctVaultResult) {
+		{"below Delta_H: PAS harmful on top of base-level", func(v *ctVaultResult) {
 			v.DeltaHP = ctDelta{Point: v.DeltaH.Point - 0.01, CILower: -0.01,
 				CIUpper: 0.03, N: v.DeltaC.N}
-		}, "removing BOTH boosts hurt LESS than removing one"},
-		{"above Delta_C", func(v *ctVaultResult) {
+		}, "PAS IS NET-HARMFUL on top of the base-level prior"},
+		{"below Delta_P: Hebbian harmful on top of base-level", func(v *ctVaultResult) {
+			v.DeltaP = ctDelta{Point: v.DeltaHP.Point + 0.01, CILower: 0.001,
+				CIUpper: 0.05, N: v.DeltaC.N}
+			v.MRRDeltaP = 0.01
+		}, "THE HEBBIAN BOOST IS NET-HARMFUL on top of the base-level prior"},
+		{"above Delta_C: the base-level prior is harmful", func(v *ctVaultResult) {
 			v.DeltaHP = ctDelta{Point: v.DeltaC.Point + 0.01, CILower: -0.01,
 				CIUpper: 0.09, N: v.DeltaC.N}
-		}, "hurt MORE than also removing the base-level prior"},
+		}, "THE ACT-R BASE-LEVEL PRIOR IS NET-HARMFUL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			base := ctDecide(ctThree(ctShipVault), ctGoodJudge(), true)
 			vaults := ctThree(ctShipVault)
 			tc.mutate(&vaults[1])
-			if msg := ctAdditivityViolation(vaults[1]); msg == "" {
-				t.Fatal("the violation was not detected")
+			if msgs := ctAdditivityDiagnostic(vaults[1]); len(msgs) == 0 {
+				t.Fatal("the broken relation was not detected at all")
 			}
-			ctRequireVerdict(t, ctDecide(vaults, ctGoodJudge(), true),
-				ctVerdictUnderpowered, tc.wantSub)
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			// It is REPORTED...
+			ctRequireVerdict(t, got, base.Verdict, tc.wantSub)
+			// ...and it gated nothing: the verdict is the untouched baseline's.
+			if got.Verdict != base.Verdict {
+				t.Fatalf("a broken NDCG-level additivity relation moved the verdict %s -> %s. "+
+					"Since D5 it is a DIAGNOSTIC: the comparison breaks ~2/3 of the time under an "+
+					"exchangeable null and is flat in n, so gating on it converts a finding about "+
+					"a harmful mechanism into 'we could not measure'\n%s",
+					base.Verdict, got.Verdict, got)
+			}
+			if strings.Contains(strings.Join(got.Reasons, "\n"), "U3 (ablation additivity)") {
+				t.Errorf("the additivity relation is still raising a U3 objection\n%s", got)
+			}
 		})
 	}
 }

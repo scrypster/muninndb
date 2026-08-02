@@ -1,0 +1,511 @@
+//go:build localassets || cognitiontrial
+
+package engine
+
+import (
+	"math"
+	"math/rand"
+	"strings"
+	"testing"
+)
+
+// ---------------------------------------------------------------------------
+// D5 — THE NDCG-LEVEL ADDITIVITY RELATIONS ARE A DIAGNOSTIC, NOT A GATE.
+//
+// D2 wired them in as a U3-class gate. This file is the evidence that they
+// cannot be one, and that gating on them suppressed findings in BOTH
+// directions — worst of all where a mechanism is HARMFUL, which is the finding a
+// delete-or-keep trial most needs.
+//
+// PRIVACY: arithmetic and verdict strings only. Every series here is generated
+// in this file. No vault, no query text, no identifier.
+// ---------------------------------------------------------------------------
+
+// ctArmMeans is a synthetic world: one mean NDCG@10 per arm. Every scenario
+// below is stated as five numbers, so what each one claims about the mechanisms
+// is readable without running it.
+type ctArmMeans struct {
+	content  float64 // CONTENT-MATCH-ONLY
+	baseOnly float64 // BASE-LEVEL-ONLY   — the configuration a KILL ships
+	noHeb    float64 // NO-HEBBIAN
+	noPAS    float64 // NO-PAS
+	full     float64 // FULL
+}
+
+// ctSeriesFromMeans builds n informative queries realizing those arm means.
+//
+// The per-query common component is large (queries differ in difficulty) and the
+// per-arm perturbation is small, which is what a PAIRED design is for: the
+// difference series is tight even though the levels are not. Deterministic — a
+// property test that resamples differently per run is a property test that
+// flakes.
+func ctSeriesFromMeans(n int, m ctArmMeans) *ctQuerySeries {
+	s := ctNewQuerySeries(ctArmNames)
+	byArm := map[string]float64{
+		ctArmNameContentOnly:   m.content,
+		ctArmNameBaseLevelOnly: m.baseOnly,
+		ctArmNameNoHebbian:     m.noHeb,
+		ctArmNameNoPAS:         m.noPAS,
+		ctArmNameFull:          m.full,
+	}
+	for i := 0; i < n; i++ {
+		common := float64((i*37)%100)/100.0*0.30 - 0.15
+		k := 0
+		for _, arm := range ctArmNames {
+			k++
+			// A small, mean-zero, arm-specific wobble so no delta is a constant
+			// (a constant paired difference makes every bootstrap resample
+			// identical and would hide a seed that was never wired in).
+			jitter := (float64((i*(7+3*k))%11)/11.0 - 0.5) * 0.02
+			v := math.Min(math.Max(byArm[arm]+common+jitter, 0), 1)
+			s.NDCG[arm] = append(s.NDCG[arm], v)
+			s.MRR[arm] = append(s.MRR[arm], v)
+		}
+		s.Defined = append(s.Defined, true)
+		s.Bucket = append(s.Bucket, i%12)
+	}
+	return s
+}
+
+// ctThreeFromSeries builds a three-vault result set from ONE series, through the
+// production builder, with the U4 reconstruction numbers the series does not
+// carry. Three identical vaults is the cleanest way to hold everything except
+// the quantity under test fixed.
+func ctThreeFromSeries(s *ctQuerySeries, resamples int) []ctVaultResult {
+	out := make([]ctVaultResult, 0, 3)
+	for _, label := range []string{"A", "B", "C"} {
+		v := ctVaultFromSeriesResamples(label, s, 410, 12, 7, resamples)
+		v.BaselineEdges = 5000
+		v.ReplayedEdges = 2100
+		v.UnreplayableFrac = 0.30
+		out = append(out, v)
+	}
+	return out
+}
+
+// ctNullSeries builds n queries under an EXCHANGEABLE NULL: every arm's score is
+// the query's own difficulty plus independent noise from the same distribution,
+// so every pairwise delta has expectation exactly 0 and NO arm is systematically
+// better than another. This is the world in which an instrument check must stay
+// quiet, and in which a POINT comparison between four exchangeable estimates
+// cannot.
+//
+// The per-arm noise SD is chosen so the PAIRED difference has sigma_d ~= 0.15,
+// the dispersion the design pre-registers its sample size at.
+func ctNullSeries(n int, rng *rand.Rand) *ctQuerySeries {
+	const pairedSD = 0.15
+	perArmSD := pairedSD / math.Sqrt2
+	s := ctNewQuerySeries(ctArmNames)
+	for i := 0; i < n; i++ {
+		difficulty := 0.2 + 0.6*rng.Float64()
+		for _, arm := range ctArmNames {
+			v := math.Min(math.Max(difficulty+rng.NormFloat64()*perArmSD, 0), 1)
+			s.NDCG[arm] = append(s.NDCG[arm], v)
+			s.MRR[arm] = append(s.MRR[arm], v)
+		}
+		s.Defined = append(s.Defined, true)
+		s.Bucket = append(s.Bucket, i%12)
+	}
+	return s
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 1: THE POINT COMPARISON DOES NOT CONVERGE IN n, SO IT CANNOT GATE.
+//
+// Under the null, Delta_H, Delta_P and Delta_HP are exchangeable, so
+// P(Delta_HP is the largest of the three) = 1/3 and the lower relation is broken
+// 2/3 of the time BY CONSTRUCTION. Adding data does not help: the comparison is
+// between three estimates that all converge to the SAME value, so their ORDER
+// stays a coin toss however tight each one gets. That is the difference between
+// a statistic and an instrument check, and it is why widening the tolerance
+// cannot rescue it either — there is no tolerance at which a coin toss becomes
+// evidence.
+//
+// The test asserts the two things that matter:
+//
+//  1. the break rate stays high AT EVERY n, i.e. it is flat rather than
+//     converging — measured here, not assumed; and
+//  2. NOT ONE of those breaks routes a verdict to UNDERPOWERED.
+//
+// (2) is the pre-D5 behaviour, and it was catastrophic: on an otherwise clean
+// vault set — judge calibrated, n over the bar, intervals tight, buckets
+// populated — the additivity clause was the ONLY reachable U condition, so the
+// UNDERPOWERED rate below IS the break rate.
+// ---------------------------------------------------------------------------
+
+func TestCognitionTrialRule_AdditivityDoesNotConvergeAndIsNotAGate(t *testing.T) {
+	// A reduced resample count: the relations read ctDelta.Point, which is the
+	// EXACT arithmetic mean and is bit-identical at any resample count, so this
+	// changes nothing the test asserts and keeps a 4 000-query sweep inside the
+	// CI budget. Nothing here asserts on an interval.
+	const resamples = 100
+
+	type row struct {
+		n, trials, broke, underpowered int
+	}
+	var rows []row
+	for _, tc := range []struct{ n, trials int }{
+		{320, 200}, {1000, 100}, {4000, 40},
+	} {
+		r := row{n: tc.n, trials: tc.trials}
+		for trial := 0; trial < tc.trials; trial++ {
+			rng := rand.New(rand.NewSource(int64(1000*tc.n + trial)))
+			vaults := ctThreeFromSeries(ctNullSeries(tc.n, rng), resamples)
+			if len(ctAdditivityDiagnostic(vaults[0])) > 0 {
+				r.broke++
+			}
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			if got.Verdict == ctVerdictUnderpowered {
+				r.underpowered++
+				if trial == 0 {
+					t.Logf("first UNDERPOWERED at n=%d:\n%s", tc.n, got)
+				}
+			}
+		}
+		rows = append(rows, r)
+		t.Logf("n=%-5d trials=%-4d additivity relations broken %3d (%.1f%%)  ->  UNDERPOWERED %d",
+			r.n, r.trials, r.broke, 100*float64(r.broke)/float64(r.trials), r.underpowered)
+	}
+
+	// 1. FLAT IN n. A converging instrument check would break less often as the
+	//    estimates tighten; this one does not, because what it compares is an
+	//    ORDER between three quantities with the same limit.
+	first, last := rows[0], rows[len(rows)-1]
+	rate := func(r row) float64 { return float64(r.broke) / float64(r.trials) }
+	if rate(last) < 0.50 {
+		t.Errorf("the break rate at n=%d is %.1f%%. This test's premise is that the point "+
+			"comparison does NOT converge — if it now does, the demotion in D5 should be "+
+			"re-argued from the new evidence rather than inherited", last.n, 100*rate(last))
+	}
+	if rate(last) < rate(first)-0.20 {
+		t.Errorf("the break rate fell from %.1f%% at n=%d to %.1f%% at n=%d — that is "+
+			"convergence, and this test is no longer measuring the thing it exists for",
+			100*rate(first), first.n, 100*rate(last), last.n)
+	}
+
+	// 2. AND IT GATES NOTHING. Every vault set above is clean on U1/U2/U4/U5/U6
+	//    by construction, so before D5 the UNDERPOWERED count WAS the break count.
+	for _, r := range rows {
+		if r.underpowered != 0 {
+			t.Errorf("n=%d: %d of %d trials returned UNDERPOWERED on an otherwise-clean vault "+
+				"set whose ONLY objection can be the additivity relation. Broken relations were "+
+				"%d. A gate that fires ~%.0f%% of the time under a null where nothing is wrong "+
+				"is not measuring the instrument — and it cannot be fixed with more data.",
+				r.n, r.underpowered, r.trials, r.broke, 100*rate(r))
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 2: EVERY BREAK DECODES TO A REAL WORLD, AND THE GATE SUPPRESSED BOTH
+// DIRECTIONS.
+//
+// The three differences are identities, not approximations:
+//
+//	Delta_HP - Delta_P == NDCG(NO-PAS)             - NDCG(BASE-LEVEL-ONLY)
+//	Delta_HP - Delta_H == NDCG(NO-HEBBIAN)         - NDCG(BASE-LEVEL-ONLY)
+//	Delta_HP - Delta_C == NDCG(CONTENT-MATCH-ONLY) - NDCG(BASE-LEVEL-ONLY)
+//
+// so a break is exactly "this mechanism, measured on top of the base-level
+// prior, is net-harmful on this vault". The four worlds below are the ones the
+// gate silently converted into "we could not measure", and the claim it carried
+// — that it errs toward suppressing KILLs — is refuted by the second row.
+// ---------------------------------------------------------------------------
+
+func TestCognitionTrialRule_AdditivityBreaksDecodeToAHarmfulMechanism(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		means    ctArmMeans
+		want     ctVerdict
+		wantDiag []string
+	}{
+		{
+			// Delta_C +0.04 with the boosts carrying +0.065 of it: the prior is
+			// LOSING 0.025 and the layer is still worth keeping. SHIP is right,
+			// and it is the row that refutes "it only suppresses kills".
+			name:  "the base-level prior is harmful and the boosts still earn their keep",
+			means: ctArmMeans{content: 0.560, baseOnly: 0.535, noHeb: 0.575, noPAS: 0.580, full: 0.600},
+			want:  ctVerdictShip,
+			wantDiag: []string{
+				"THE ACT-R BASE-LEVEL PRIOR IS NET-HARMFUL",
+			},
+		},
+		{
+			// Every arm beats FULL. The layer actively hurts; KILL is right, and
+			// this is the direction the old comment claimed could not be
+			// suppressed.
+			name:  "EVERYTHING is harmful — the layer actively hurts",
+			means: ctArmMeans{content: 0.600, baseOnly: 0.580, noHeb: 0.550, noPAS: 0.560, full: 0.500},
+			want:  ctVerdictKill,
+			wantDiag: []string{
+				"THE HEBBIAN BOOST IS NET-HARMFUL on top of the base-level prior",
+				"PAS IS NET-HARMFUL on top of the base-level prior",
+				"THE ACT-R BASE-LEVEL PRIOR IS NET-HARMFUL",
+			},
+		},
+		{
+			// Hebbian carries a real +0.03; PAS on top of the base-level prior
+			// costs 0.01. A mixed result, and the most useful kind.
+			name:  "PAS on top of base-level is harmful and Hebbian carries the win",
+			means: ctArmMeans{content: 0.550, baseOnly: 0.580, noHeb: 0.570, noPAS: 0.610, full: 0.600},
+			want:  ctVerdictShip,
+			wantDiag: []string{
+				"PAS IS NET-HARMFUL on top of the base-level prior",
+			},
+		},
+		{
+			// The control: every mechanism helps, no relation is broken, no
+			// diagnostic is emitted. Without this row the test would pass on a
+			// diagnostic that fires unconditionally.
+			name:     "CONTROL: everything helps and the relations hold",
+			means:    ctArmMeans{content: 0.550, baseOnly: 0.570, noHeb: 0.580, noPAS: 0.585, full: 0.600},
+			want:     ctVerdictShip,
+			wantDiag: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vaults := ctThreeFromSeries(ctSeriesFromMeans(320, tc.means), 2000)
+			v := vaults[0]
+			t.Logf("Delta_C %+.4f  Delta_H %+.4f  Delta_P %+.4f  Delta_HP %+.4f  (n=%d)",
+				v.DeltaC.Point, v.DeltaH.Point, v.DeltaP.Point, v.DeltaHP.Point, v.DeltaC.N)
+
+			diag := ctAdditivityDiagnostic(v)
+			if len(diag) != len(tc.wantDiag) {
+				t.Fatalf("%d diagnostics, want %d:\n%s", len(diag), len(tc.wantDiag),
+					strings.Join(diag, "\n"))
+			}
+			for _, want := range tc.wantDiag {
+				found := false
+				for _, d := range diag {
+					if strings.Contains(d, want) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("no diagnostic names %q. A broken relation that is not DECODED is "+
+						"just a number nobody can act on:\n%s", want, strings.Join(diag, "\n"))
+				}
+			}
+
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			if got.Verdict == ctVerdictUnderpowered {
+				t.Fatalf("this world returned UNDERPOWERED. It is a MEASURED world with a named "+
+					"harmful mechanism, and the correct verdict is %s. Converting it into 'we "+
+					"could not measure' destroys the most decision-relevant finding a "+
+					"delete-or-keep trial can produce\n%s", tc.want, got)
+			}
+			ctRequireVerdict(t, got, tc.want, "")
+			// The finding must reach the reader, and it must be marked as gating
+			// nothing so it is not mistaken for an instrument failure.
+			for _, want := range tc.wantDiag {
+				ctExpectReason(t, got, want, "the decoded finding is not in the audit trail")
+				ctExpectReason(t, got, "DIAGNOSTIC (a finding about the mechanisms; gates nothing",
+					"the finding is not marked as a diagnostic, so a reader cannot tell it from a "+
+						"U-gate")
+			}
+			if strings.Contains(strings.Join(got.Reasons, "\n"), "U3 (ablation additivity)") {
+				t.Errorf("the additivity relation is raising a U3 objection again\n%s", got)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 4: ABSENCE-TYPING MUST COVER ALL FOUR DELTAS, NOT TWO.
+//
+// ctPairedBootstrap returns {Point:0, CI:[0,0], N:0} on an empty OR
+// length-mismatched series — a CONFIDENT ZERO. D1 typed that for Delta_C and
+// Delta_HP; Delta_H and Delta_P were left untyped, which is D1's exact defect
+// relocated one field over. One arm's series one element short is all it takes,
+// and it is reachable through the production builder rather than only through a
+// hand-built struct.
+// ---------------------------------------------------------------------------
+
+func TestCognitionTrialRule_EveryDeltaNMustBindToTheSameSeries(t *testing.T) {
+	const n = 320
+	for _, tc := range []struct {
+		arm     string
+		delta   string
+		wantSub string
+	}{
+		{ctArmNameNoHebbian, "Delta_H", "computed Delta_H over 0 queries"},
+		{ctArmNameNoPAS, "Delta_P", "computed Delta_P over 0 queries"},
+		{ctArmNameBaseLevelOnly, "Delta_HP", "computed Delta_HP over 0 queries"},
+		{ctArmNameContentOnly, "Delta_C", "NO INFORMATIVE QUERY"},
+	} {
+		t.Run(tc.arm+" truncated by one", func(t *testing.T) {
+			intact := ctSynthSeries(n)
+			short := ctSynthSeries(n)
+			short.NDCG[tc.arm] = short.NDCG[tc.arm][:n-1]
+
+			before := ctVaultFromSeries("A", intact, 410, 12, 7)
+			after := ctVaultFromSeries("A", short, 410, 12, 7)
+			t.Logf("intact:         %s = %+.4f (N=%d)", tc.delta,
+				ctDeltaByName(before, tc.delta).Point, ctDeltaByName(before, tc.delta).N)
+			t.Logf("truncated-by-1: %s = %+.4f CI[%+.4f,%+.4f] N=%d   Delta_C N=%d  NQueries=%d",
+				tc.delta, ctDeltaByName(after, tc.delta).Point,
+				ctDeltaByName(after, tc.delta).CILower, ctDeltaByName(after, tc.delta).CIUpper,
+				ctDeltaByName(after, tc.delta).N, after.DeltaC.N, after.NQueries)
+
+			if ctDeltaByName(after, tc.delta).N != 0 {
+				t.Fatalf("truncating one arm did not empty %s's paired series — this test's "+
+					"premise (that a length mismatch renders as a confident zero) has changed",
+					tc.delta)
+			}
+
+			vaults := ctThree(ctShipVault)
+			vaults[1] = after
+			vaults[1].Label = "B"
+			vaults[1].BaselineEdges, vaults[1].ReplayedEdges = 5000, 2100
+			vaults[1].UnreplayableFrac = 0.30
+			ctRequireVerdict(t, ctDecide(vaults, ctGoodJudge(), true),
+				ctVerdictUnderpowered, tc.wantSub)
+		})
+	}
+}
+
+func ctDeltaByName(v ctVaultResult, name string) ctDelta {
+	switch name {
+	case "Delta_H":
+		return v.DeltaH
+	case "Delta_P":
+		return v.DeltaP
+	case "Delta_HP":
+		return v.DeltaHP
+	default:
+		return v.DeltaC
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 3: A NaN READS AS "NO OBJECTION" AT EVERY KILL GATE.
+//
+// Every clause is written so FALSE means "no objection", and every comparison
+// against NaN is false. So a NaN sails through K1, K2, K4 and U5 alike and the
+// verdict swings on it. NOT reachable today — ctNDCGAt10's ok is a pure function
+// of the pooled grades, so NaN and !Defined coincide exactly and ctInformative
+// drops the NaNs before the bootstrap sees them — but nothing DOWNSTREAM
+// rejected one, so any future edit that decouples them re-opens it silently.
+// ---------------------------------------------------------------------------
+
+func TestCognitionTrialRule_NaNDeltaIsNotNoObjection(t *testing.T) {
+	// The demonstration first: the SAME vault set, one field changed.
+	powered := ctThree(ctShipVault)
+	for i := range powered {
+		powered[i].DeltaC = ctDelta{Point: 0.020, CILower: 0.005, CIUpper: 0.035, N: 320}
+		powered[i].DeltaH = ctDelta{Point: 0.010, CILower: -0.004, CIUpper: 0.024, N: 320}
+		powered[i].DeltaP = ctDelta{Point: 0.008, CILower: -0.006, CIUpper: 0.022, N: 320}
+		powered[i].DeltaHP = ctDelta{Point: 0.045, CILower: 0.020, CIUpper: 0.070, N: 320}
+	}
+	ctRequireVerdict(t, ctDecide(powered, ctGoodJudge(), true),
+		ctVerdictInconclusivePowered, "K2 FAIL")
+
+	for _, tc := range []struct {
+		name  string
+		field func(*ctVaultResult, float64)
+	}{
+		{"Delta_C point", func(v *ctVaultResult, x float64) { v.DeltaC.Point = x }},
+		{"Delta_C CI upper", func(v *ctVaultResult, x float64) { v.DeltaC.CIUpper = x }},
+		{"Delta_H point", func(v *ctVaultResult, x float64) { v.DeltaH.Point = x }},
+		{"Delta_P point", func(v *ctVaultResult, x float64) { v.DeltaP.Point = x }},
+		{"Delta_HP point", func(v *ctVaultResult, x float64) { v.DeltaHP.Point = x }},
+		{"Delta_HP CI lower", func(v *ctVaultResult, x float64) { v.DeltaHP.CILower = x }},
+	} {
+		for _, poison := range []struct {
+			what string
+			val  float64
+		}{{"NaN", math.NaN()}, {"+Inf", math.Inf(1)}} {
+			t.Run(tc.name+" = "+poison.what, func(t *testing.T) {
+				vaults := ctThree(ctShipVault)
+				for i := range vaults {
+					vaults[i].DeltaC = ctDelta{Point: 0.020, CILower: 0.005, CIUpper: 0.035, N: 320}
+					vaults[i].DeltaH = ctDelta{Point: 0.010, CILower: -0.004, CIUpper: 0.024, N: 320}
+					vaults[i].DeltaP = ctDelta{Point: 0.008, CILower: -0.006, CIUpper: 0.022, N: 320}
+					vaults[i].DeltaHP = ctDelta{Point: 0.045, CILower: 0.020, CIUpper: 0.070, N: 320}
+				}
+				tc.field(&vaults[0], poison.val)
+				got := ctDecide(vaults, ctGoodJudge(), true)
+				if got.Verdict == ctVerdictKill {
+					t.Fatalf("a %s in %s produced a KILL on a vault set that returns "+
+						"INCONCLUSIVE-BUT-POWERED with a number there. Every clause reads FALSE "+
+						"as 'no objection' and every comparison against %s is false\n%s",
+						poison.what, tc.name, poison.what, got)
+				}
+				ctRequireVerdict(t, got, ctVerdictUnderpowered, "U3 (delta arithmetic)")
+			})
+		}
+	}
+}
+
+// The one data-reachable leak: ctZeroFilled copied xs[i] verbatim for any index
+// past the end of Defined, and ctNDCGAt10 writes NaN there. It gates nothing —
+// it PRINTS, which is its own kind of wrong.
+func TestCognitionTrialRule_ZeroFilledNeverEmitsANaN(t *testing.T) {
+	xs := []float64{0.4, math.NaN(), 0.6, math.NaN()}
+	for _, defined := range [][]bool{
+		{true, false, true, false}, // the intended shape
+		{true, false, true},        // one short: index 3 has no flag at all
+		nil,                        // no flags at all
+		{true, true, true, true},   // a NaN under a true flag: a contradiction
+	} {
+		got := ctZeroFilled(defined, xs)
+		if len(got) != len(xs) {
+			t.Fatalf("defined=%v: length %d, want %d", defined, len(got), len(xs))
+		}
+		for i, v := range got {
+			if math.IsNaN(v) {
+				t.Errorf("defined=%v: a NaN survived at index %d and would be bootstrapped into "+
+					"DeltaCAllQueriesDiluted and printed in the report", defined, i)
+			}
+		}
+	}
+	// And the intended case is untouched: a defined entry keeps its value.
+	got := ctZeroFilled([]bool{true, false, true, false}, xs)
+	if got[0] != 0.4 || got[2] != 0.6 || got[1] != 0 || got[3] != 0 {
+		t.Errorf("ctZeroFilled = %v, want [0.4 0 0.6 0] — the diluted series must still write "+
+			"undefined entries as the zeros it is named for", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 8: THE EXCLUSION INHERITS A DEGREE OF FREEDOM FROM THE ARM SET.
+//
+// The exclusion is arm-NEUTRAL — ctNDCGAt10's ok is a pure function of the
+// POOLED grades, so it is identical across arms for a given query. But the POOL
+// is the UNION of the arms' top-PoolDepth, so WHICH queries are informative
+// depends on the arm SET and the DEPTH. This is that dependence, executed: same
+// query, same ranking, one extra arm in the pool.
+// ---------------------------------------------------------------------------
+
+func TestCognitionTrialMetrics_ThePoolDependsOnTheArmSet(t *testing.T) {
+	ranked := []string{"m1", "m2"}
+
+	// Four arms between them surfaced only ungraded-or-zero documents.
+	fourArmPool := map[string]int{"m1": 0, "m2": 0, "m3": 0}
+	if v, ok := ctNDCGAt10(ranked, fourArmPool); ok {
+		t.Fatalf("a pool whose every grade is 0 reported a defined NDCG of %v", v)
+	}
+
+	// A fifth arm surfaces ONE graded document. The query under test returned
+	// exactly the same two items in exactly the same order — and it has just
+	// moved from zero-relevance (excluded, counted, invisible to S1 and K1) to
+	// informative (included, and contributing a 0.0 to the mean of every arm).
+	fiveArmPool := map[string]int{"m1": 0, "m2": 0, "m3": 0, "m4": 2}
+	v, ok := ctNDCGAt10(ranked, fiveArmPool)
+	if !ok {
+		t.Fatalf("the five-arm pool is still undefined — this demonstration has changed shape")
+	}
+	t.Logf("same query, same ranking: 4-arm pool -> defined=false (EXCLUDED); "+
+		"5-arm pool -> defined=true, NDCG=%.4f (INCLUDED, as a zero)", v)
+	if v != 0 {
+		t.Errorf("NDCG %.4f, want 0 — the retained query contributes a zero to every arm, which "+
+			"is what moves the ABSOLUTE bars S1 and K1 read", v)
+	}
+
+	// Which is why both the arm set and the pooling depth are pinned, and why a
+	// change to either is a re-pre-registration rather than a config tweak. D2
+	// added the fifth arm; any later change re-partitions the population again.
+	if msg := ctInstrumentPinViolation(ctArmNames, ctPreregistered.PoolDepth); msg != "" {
+		t.Fatalf("the running instrument is not the pre-registered one: %s", msg)
+	}
+}

@@ -162,7 +162,10 @@ const (
 )
 
 const (
-	ctDefaultPoolDepth    = 10
+	// ctDefaultBuckets and friends are harness defaults. The POOL DEPTH is not
+	// one: it is pre-registered (ctPreregistered.PoolDepth) because it decides
+	// which queries are informative under D1, so the default IS the pin and a
+	// deviation is a re-pre-registration, not a flag.
 	ctDefaultBuckets      = 12
 	ctDefaultMaxUnembed   = 0.01
 	ctHoldoutFraction     = 0.20
@@ -720,7 +723,18 @@ func TestCognitionTrial(t *testing.T) {
 	if mode != "asis" && mode != "replay" {
 		t.Fatalf("%s=%q: want asis or replay", envCTMode, mode)
 	}
-	poolDepth := ctEnvInt(t, envCTPoolDepth, ctDefaultPoolDepth)
+	poolDepth := ctEnvInt(t, envCTPoolDepth, ctPreregistered.PoolDepth)
+	// THE INSTRUMENT PIN, checked before a single query is scored.
+	//
+	// D1's exclusion is arm-neutral, but the POOL is the union of the arms'
+	// top-poolDepth, so the arm SET and the DEPTH decide WHICH queries have a
+	// defined NDCG at all — and therefore where every absolute bar S1 and K1 read
+	// falls. poolDepth is env-configurable; a run with a different one is not the
+	// pre-registered instrument and its numbers are not comparable to another
+	// vault's. Fail loudly here rather than silently shifting the bars.
+	if msg := ctInstrumentPinViolation(ctArmNames, poolDepth); msg != "" {
+		t.Fatalf("PRE-REGISTRATION: %s\n(%s=%d)", msg, envCTPoolDepth, poolDepth)
+	}
 	nBuckets := ctEnvInt(t, envCTBuckets, ctDefaultBuckets)
 	maxQueries := ctEnvInt(t, envCTQueries, 0)
 	seed := int64(ctEnvInt(t, envCTSeed, 1))
@@ -1037,7 +1051,9 @@ func TestCognitionTrial(t *testing.T) {
 			ctArmNameBaseLevelOnly: rk(noPAS, ctArmRawBaseLevelOnly),
 			ctArmNameContentOnly:   rk(noPAS, ctArmRawContentOnly),
 		}
-		// D1: NDCG is UNDEFINED when the pooled label set holds nothing relevant,
+		// D1: NDCG is UNDEFINED when EVERY POOLED GRADE IS 0 (not merely when
+		// nothing is RELEVANT — grade 1 is below the binarization and still
+		// carries gain, so an all-grade-1 pool is defined and is scored),
 		// and it is undefined for EVERY arm simultaneously (the pool is shared).
 		// The definedness is therefore a property of the QUERY, recorded once and
 		// applied identically to every arm — which is what makes the exclusion
@@ -1070,7 +1086,7 @@ func TestCognitionTrial(t *testing.T) {
 
 	// --- THE ZERO-RELEVANCE CENSUS, BEFORE ANY DELTA -------------------------
 	// D1 item 6. These are recalls that RETURNED items every one of which the
-	// judge graded irrelevant — the 0x29 event is only written when
+	// judge graded 0 — the 0x29 event is only written when
 	// len(items) > 0, so no abstention can be hiding in this count. It is a
 	// retrieval-quality number in its own right and the only visible symptom of
 	// a too-conservative judge: U1 gates the judge's false-POSITIVE rate and
@@ -1086,7 +1102,9 @@ func TestCognitionTrial(t *testing.T) {
 	t.Logf("ZERO-RELEVANCE CENSUS: %d scored queries = %d informative + %d zero-relevance "+
 		"(%.1f%%). Zero-relevance queries are EXCLUDED from every delta and from the U2/U5 "+
 		"power gates (D1). They are not abstentions — an abstention cannot appear in this "+
-		"population — they are recalls whose every returned item was graded irrelevant.",
+		"population — they are recalls whose every POOLED GRADE IS 0. Not merely 'nothing "+
+		"relevant': grade 1 is below the relevance binarization but carries NDCG gain, so an "+
+		"all-grade-1 pool is DEFINED, retained and scored.",
 		scored, informative, zeroRel, 100*zrFrac)
 	if zrFrac > 0.5 {
 		t.Logf("NOTE: over half of all scored queries were zero-relevance. That is either a real " +
@@ -1128,8 +1146,15 @@ func TestCognitionTrial(t *testing.T) {
 		"t-statistic never moves while the estimate slides across S1's and K1's absolute bars.",
 		vr.DeltaCAllQueriesDiluted.N, vr.DeltaCAllQueriesDiluted.Point,
 		vr.DeltaCAllQueriesDiluted.CILower, vr.DeltaCAllQueriesDiluted.CIUpper)
-	if msg := ctAdditivityViolation(vr); msg != "" {
-		t.Logf("U3 (ablation additivity) VIOLATED: %s", msg)
+	// D5: the NDCG-level additivity relations are a DIAGNOSTIC, not a gate. A
+	// break names a net-harmful mechanism; it does not mean the ablation is
+	// broken. The arithmetic form of the relation is checked on RAW SCORES by
+	// TestCognitionTrial_ArmReconstructionFidelity, and per-candidate on this
+	// very corpus by ctSelfCheck above.
+	if msgs := ctAdditivityDiagnostic(vr); len(msgs) > 0 {
+		for _, m := range msgs {
+			t.Logf("DIAGNOSTIC (a finding about the mechanisms; gates nothing): %s", m)
+		}
 	} else {
 		t.Logf("Ablation additivity holds: max(Delta_H, Delta_P) %+.4f <= Delta_HP %+.4f <= "+
 			"Delta_C %+.4f. The width of that interval is exactly the information the four "+

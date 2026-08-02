@@ -488,12 +488,22 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 	//
 	//	CONTENT-MATCH-ONLY >= BASE-LEVEL-ONLY <= {NO-HEBBIAN, NO-PAS} <= FULL
 	//
-	// The trial rule checks the same relation on NDCG deltas, where it is a
-	// DIAGNOSTIC rather than an invariant (NDCG is not monotone in scores, and a
-	// genuinely harmful mechanism can invert a delta). Proving it here is what
-	// makes a rule-level violation interpretable: if the raw ordering holds and
-	// the delta ordering does not, the ablation is fine and the mechanism is
-	// harmful — which is a result, not a bug.
+	// THIS IS THE HALF OF THE SPLIT THAT IS A HARD FAILURE. The trial rule checks
+	// the SAME relation on NDCG deltas, and there it is a DIAGNOSTIC that gates
+	// nothing (D5, ctAdditivityDiagnostic): NDCG is not monotone in scores, the
+	// comparison is between four exchangeable POINT estimates, it breaks ~91% of
+	// the time under a null and — measured at n = 320 / 1 000 / 4 000 — the break
+	// rate is FLAT IN n, so no amount of data resolves it.
+	//
+	//	RAW SCORES here      -> an INVARIANT. A break is a bug; this test fails.
+	//	NDCG deltas in ctDecide -> an OBSERVATION. A break names a net-harmful
+	//	                           mechanism; it is reported, and gates nothing.
+	//
+	// Proving the raw form here is what makes the NDCG-level finding
+	// interpretable at all: because the raw ordering is guaranteed, a broken
+	// delta ordering can ONLY mean the ablation is fine and the mechanism is
+	// harmful — which is a result, and the most decision-relevant one the trial
+	// can produce.
 	baseBelow, baseStrictlyBelowFull := 0, 0
 	for _, c := range cands {
 		full := ctArmFull.raw(c.contentMatch, c.baseLevel, c.hebbian, c.transition, hebScale)

@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"sort"
 	"strings"
+	"sync/atomic"
 )
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,33 @@ import (
 //
 // These are amendments to the RULE, not to a result: none was made after seeing
 // an arm number, and each one only makes a conclusion harder to reach.
+//
+// D5, and it is a CORRECTION of D2 rather than a new amendment. D2 wired the
+// NDCG-level ablation-additivity bounds in as a U3-class GATE. They cannot be
+// one: they compare four POINT estimates with no interval, so under a null where
+// the arms merely reorder results, Delta_H / Delta_P / Delta_HP are exchangeable,
+// P(Delta_HP is the largest) = 1/3, and the lower bound is violated ~2/3 of the
+// time BY CONSTRUCTION — measured at 92.5% / 90.7% / 91.8% / 92.7% for
+// n = 320 / 1000 / 5000 / 20000. FLAT IN n: more data cannot fix it, which is the
+// definition of a gate that is not an instrument check. End to end it produced
+// UNDERPOWERED on 199 of 200 trials.
+//
+// And it could not simply be widened, because every violation DECODES TO A REAL
+// WORLD: Delta_HP - Delta_C == NDCG(CONTENT-MATCH-ONLY) - NDCG(BASE-LEVEL-ONLY),
+// so the upper bound breaks exactly when the ACT-R base-level prior is
+// net-harmful, and the two lower-bound breaks decode the same way for each boost
+// on top of it. The old comment here claimed the gate "suppresses a
+// kill-supporting finding rather than a ship-supporting one — the direction the
+// design says to err in". THAT WAS FALSE: it suppressed both, and it was worst
+// precisely where a mechanism is HARMFUL, which is the finding a delete-or-keep
+// trial most needs. So the NDCG-level bounds are DEMOTED to a reported
+// diagnostic that names the harmful mechanism (ctAdditivityDiagnostic), and the
+// genuinely arithmetic form of the same relation stays a hard invariant where it
+// belongs: on RAW SCORES, in TestCognitionTrial_ArmReconstructionFidelity §6.
+//
+//	raw-score bounds  = an INVARIANT (non-negative boosts, increasing softplus,
+//	                    softplus(bLevelCap)/D == 1) -> a test failure
+//	NDCG-level bounds = an OBSERVATION about the mechanisms -> a reported finding
 //
 // A KILL verdict is a legitimate, valuable outcome. So is UNDERPOWERED. The
 // fourth outcome, INCONCLUSIVE-BUT-POWERED, exists precisely so that the
@@ -82,6 +110,25 @@ var ctPreregistered = struct {
 	MaxUnreplayableFrac float64 // U4
 	MaxCIHalfWidth      float64 // U5
 	BootstrapResamples  int
+	// Arms and PoolDepth are PINS, not thresholds, and they are pre-registered
+	// for a reason that is not obvious.
+	//
+	// D1's exclusion is arm-NEUTRAL in the strong form — the pooled label set is
+	// shared, so ctNDCGAt10's `ok` is the same for every arm (verified over
+	// 50 000 random pools x 6 arms, zero divergence). But the POOL is the union
+	// of the arms' top-PoolDepth, so WHICH queries are informative is a function
+	// of the arm SET and the pooling DEPTH. D2 added a fifth arm: the same query
+	// with the same ranking is zero-relevance under a 4-arm pool and informative
+	// under a 5-arm pool where the extra arm surfaced one graded document. Any
+	// later change to either re-partitions informative vs zero-relevance and
+	// moves every ABSOLUTE bar S1 and K1 read.
+	//
+	// So a change to either is a RE-PRE-REGISTRATION and must fail loudly rather
+	// than silently shift the bars. ctInstrumentPinViolation is what says so, and
+	// the harness calls it with its own (env-configurable) pool depth before it
+	// scores anything.
+	Arms      []string
+	PoolDepth int
 }{
 	MinDeltaC:         0.03,
 	MinDeltaMechanism: 0.02,
@@ -106,7 +153,94 @@ var ctPreregistered = struct {
 	MaxUnreplayableFrac: 0.60,
 	MaxCIHalfWidth:      0.03,
 	BootstrapResamples:  10000,
+	Arms: []string{
+		ctArmNameFull, ctArmNameNoPAS, ctArmNameNoHebbian,
+		ctArmNameBaseLevelOnly, ctArmNameContentOnly,
+	},
+	PoolDepth: 10,
 }
+
+// ctInstrumentPinViolation reports why the running instrument is not the
+// pre-registered one, or "" if it is.
+//
+// It is deliberately a comparison of SETS plus the depth, not of the reporting
+// order: reordering ctArmNames changes nothing about which queries are
+// informative, while adding, removing or renaming an arm changes it for every
+// vault, and so does moving the pooling depth.
+func ctInstrumentPinViolation(arms []string, poolDepth int) string {
+	ctRuleEntered()
+	want := map[string]bool{}
+	for _, a := range ctPreregistered.Arms {
+		want[a] = true
+	}
+	got := map[string]bool{}
+	for _, a := range arms {
+		got[a] = true
+	}
+	var added, missing []string
+	for a := range got {
+		if !want[a] {
+			added = append(added, a)
+		}
+	}
+	for a := range want {
+		if !got[a] {
+			missing = append(missing, a)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(missing)
+	var msgs []string
+	if len(added) > 0 || len(missing) > 0 {
+		msgs = append(msgs, fmt.Sprintf("the ARM SET has changed (added %v, missing %v; "+
+			"pre-registered %v)", added, missing, ctPreregistered.Arms))
+	}
+	if poolDepth != ctPreregistered.PoolDepth {
+		msgs = append(msgs, fmt.Sprintf("the POOLING DEPTH is %d, pre-registered %d",
+			poolDepth, ctPreregistered.PoolDepth))
+	}
+	if len(msgs) == 0 {
+		return ""
+	}
+	return strings.Join(msgs, "; ") + ". The pooled label set is the UNION of the arms' " +
+		"top-PoolDepth results, so both of these decide WHICH queries have a defined NDCG at " +
+		"all (D1). Changing either re-partitions informative vs zero-relevance and moves every " +
+		"absolute bar S1 and K1 read. That is a RE-PRE-REGISTRATION, made explicitly and " +
+		"BEFORE any number is looked at — not a config tweak."
+}
+
+// ---------------------------------------------------------------------------
+// PROBE-BINDINGNESS INSTRUMENTATION
+//
+// The anti-inert-gate census (TestCognitionTrialRule_EveryThresholdBinds)
+// requires a registered probe for every field of every input struct. It caught
+// that a probe can be MISSING. It did not catch that a probe can be EMPTY: an
+// `InertNewField` plus a `func(t *testing.T) {}` passed the whole census. So
+// presence was enforced and BINDINGNESS was not, which is the same shape as the
+// declared-and-never-read field the census exists to find.
+//
+// ctRuleCalls is incremented by every entry point of the rule. A probe that
+// never enters the rule cannot be showing anything about it, and the census now
+// fails such a probe by arithmetic rather than by review.
+//
+// THE LIMIT, stated precisely rather than implied: this makes an EMPTY probe
+// decidably inert, and (with ctProbeAssertions) a probe that calls the rule and
+// then discards the answer. It does NOT make bindingness decidable in general —
+// `ctExpect(t, true, "")` after a ctDecide call still passes, and no in-process
+// check can distinguish a vacuous assertion from a real one. The decidable form
+// of that is mutation testing (perturb the rule, require the probe to fail),
+// which is a separate harness and is NOT built here.
+//
+// Both counters are atomic because the harness (`cognitiontrial`) also calls
+// these functions and this file is compiled into it.
+// ---------------------------------------------------------------------------
+
+var (
+	ctRuleCalls       atomic.Int64
+	ctProbeAssertions atomic.Int64
+)
+
+func ctRuleEntered() { ctRuleCalls.Add(1) }
 
 // ---------------------------------------------------------------------------
 // METRICS
@@ -127,8 +261,18 @@ var ctPreregistered = struct {
 //
 // # THE SECOND RETURN VALUE, AND WHY IT IS NOT A CONVENIENCE
 //
-// When the pooled label set contains no relevant document, IDCG is 0 and NDCG
-// is 0/0 — undefined. This function used to say exactly that in a comment and
+// When EVERY POOLED GRADE IS 0, IDCG is 0 and NDCG is 0/0 — undefined.
+//
+// Say that precisely, because the obvious paraphrase is wrong and was in this
+// comment: the trigger is NOT "no RELEVANT document". Relevance is the
+// binarization grade >= ctRelevantGrade (2), but the NDCG gain vector gives
+// grade 1 a gain of 1, so a pool whose every grade is 1 contains no relevant
+// document and still has a perfectly well-defined IDCG. Executed: a four-item
+// all-grade-1 pool returns (0.7654, true) and is RETAINED and SCORED. The
+// undefined set is strictly smaller than the not-relevant set, and D1's
+// "zero-relevance" exclusion means ALL GRADES ZERO — not "nothing relevant".
+//
+// This function used to say "no relevant document" in a comment and
 // then `return 0`, which is the SAME DEFECT SHAPE this file family has now hit
 // three times: ctMean(nil)==0 padding absent trend buckets as measured zeros
 // (fixed by U6), the FTS `idf<=0 -> continue` path (fixed by COG-24's idfMax),
@@ -141,6 +285,7 @@ var ctPreregistered = struct {
 // for what the caller must do with it (D1: EXCLUDE, count, and re-bind the
 // power gates to the retained series).
 func ctNDCGAt10(ranked []string, grades map[string]int) (float64, bool) {
+	ctRuleEntered()
 	const k = 10
 	dcg := 0.0
 	for i, id := range ranked {
@@ -179,6 +324,7 @@ func ctGain(grade int) float64 {
 
 // ctMRR is the reciprocal rank of the first returned item graded relevant.
 func ctMRR(ranked []string, grades map[string]int) float64 {
+	ctRuleEntered()
 	for i, id := range ranked {
 		if grades[id] >= ctRelevantGrade {
 			return 1.0 / float64(i+1)
@@ -243,12 +389,14 @@ var ctMechanismsOffInArm = map[string][]string{
 // D1: ZERO-RELEVANCE QUERIES ARE EXCLUDED, COUNTED, AND THE POWER GATES RE-BIND
 // TO THE RETAINED SERIES.
 //
-// A query whose pooled label set contains nothing relevant has an UNDEFINED
-// NDCG for every arm. It is NOT a correct abstention: internal/engine/engine.go
+// A query whose pooled label set is ALL GRADE 0 has an UNDEFINED
+// NDCG for every arm. (All grade 0 — not merely 'nothing relevant': grade 1 is
+// below the relevance binarization but carries NDCG gain, so an all-grade-1 pool
+// is defined, retained and scored. See ctNDCGAt10.) It is NOT a correct abstention: internal/engine/engine.go
 // writes the 0x29 recall event ONLY when len(items) > 0, so an abstention
 // cannot appear in this population at all. What it is, is a recall that RETURNED
-// items every one of which the judge graded irrelevant — a false-positive
-// recall, and a real retrieval-quality number in its own right.
+// items every one of which the judge graded 0 — a false-positive recall, and a
+// real retrieval-quality number in its own right.
 //
 // Including it as a paired 0-vs-0 difference shrinks the mean by the informative
 // fraction p AND the standard error by the same factor, so the t-statistic is
@@ -323,10 +471,21 @@ func ctInformative(defined []bool, xs []float64) []float64 {
 // ctZeroFilled returns the series with undefined entries written as 0 — the
 // DILUTED form. It exists so the all-queries number can still be REPORTED under
 // a name that says what it is. Nothing gates on it.
+//
+// AN ENTRY WITH NO DEFINEDNESS FLAG IS UNDEFINED, NOT A NUMBER TO BE COPIED.
+// The old `i < len(defined) && !defined[i]` copied xs[i] verbatim for any index
+// past the end of Defined, and ctNDCGAt10 writes NaN there — so a series whose
+// Defined slice was one short leaked a NaN straight into
+// DeltaCAllQueriesDiluted and printed it in the report. Same for a NaN sitting
+// under a true flag, which is a contradiction the caller should never produce
+// and which must not be laundered into a plausible number here. The length
+// mismatch that causes it is itself an UNDERPOWERED condition (U2's N-consistency
+// clauses); this guard is what stops the printed line being nonsense in the
+// meantime.
 func ctZeroFilled(defined []bool, xs []float64) []float64 {
 	out := make([]float64, 0, len(xs))
 	for i := range xs {
-		if i < len(defined) && !defined[i] {
+		if i >= len(defined) || !defined[i] || math.IsNaN(xs[i]) {
 			out = append(out, 0)
 			continue
 		}
@@ -339,9 +498,26 @@ func ctZeroFilled(defined []bool, xs []float64) []float64 {
 // the seam D1's dilution-invariance property test drives, and it is what the
 // harness calls, so the property is proved about the code that runs.
 func ctVaultFromSeries(label string, s *ctQuerySeries, distinctEvents, nBuckets int, seed int64) ctVaultResult {
+	return ctVaultFromSeriesResamples(label, s, distinctEvents, nBuckets, seed,
+		ctPreregistered.BootstrapResamples)
+}
+
+// ctVaultFromSeriesResamples is ctVaultFromSeries with the resample count as a
+// parameter. EVERY caller that produces a number the trial quotes goes through
+// ctVaultFromSeries and gets the pre-registered 10 000; the parameter exists so
+// a property test can sweep n up to 20 000 queries without spending
+// 20 000 x 10 000 x 5 resample draws per trial.
+//
+// It is sound for what that sweep measures: the additivity relation reads only
+// ctDelta.Point, which is the EXACT arithmetic mean of the paired differences
+// and is never resampled, so it is bit-identical at any resample count. The
+// interval is not, and no test asserts on an interval from a reduced count.
+func ctVaultFromSeriesResamples(label string, s *ctQuerySeries, distinctEvents, nBuckets int,
+	seed int64, resamples int,
+) ctVaultResult {
 	inf := func(arm string) []float64 { return ctInformative(s.Defined, s.NDCG[arm]) }
 	boot := func(a, b string) ctDelta {
-		return ctPairedBootstrap(inf(a), inf(b), ctPreregistered.BootstrapResamples, seed)
+		return ctPairedBootstrap(inf(a), inf(b), resamples, seed)
 	}
 	mrrDelta := func(a, b string) float64 {
 		return ctMean(ctInformative(s.Defined, s.MRR[a])) - ctMean(ctInformative(s.Defined, s.MRR[b]))
@@ -373,7 +549,7 @@ func ctVaultFromSeries(label string, s *ctQuerySeries, distinctEvents, nBuckets 
 		DeltaCAllQueriesDiluted: ctPairedBootstrap(
 			ctZeroFilled(s.Defined, s.NDCG[ctArmNameFull]),
 			ctZeroFilled(s.Defined, s.NDCG[ctArmNameContentOnly]),
-			ctPreregistered.BootstrapResamples, seed),
+			resamples, seed),
 		MRRDeltaH:      mrrDelta(ctArmNameFull, ctArmNameNoHebbian),
 		MRRDeltaP:      mrrDelta(ctArmNameFull, ctArmNameNoPAS),
 		DeltaCByBucket: bucketDeltas,
@@ -396,6 +572,30 @@ type ctDelta struct {
 
 func (d ctDelta) halfWidth() float64 { return (d.CIUpper - d.CILower) / 2 }
 
+// ctNonFinite names the first non-finite component of a delta, or "" if all
+// three are numbers. Used by U3's delta-arithmetic clause.
+func ctNonFinite(d ctDelta) string {
+	for _, f := range []struct {
+		name string
+		v    float64
+	}{{"NaN point estimate", d.Point}, {"NaN CI lower bound", d.CILower},
+		{"NaN CI upper bound", d.CIUpper}} {
+		if math.IsNaN(f.v) {
+			return f.name
+		}
+	}
+	for _, f := range []struct {
+		name string
+		v    float64
+	}{{"infinite point estimate", d.Point}, {"infinite CI lower bound", d.CILower},
+		{"infinite CI upper bound", d.CIUpper}} {
+		if math.IsInf(f.v, 0) {
+			return f.name
+		}
+	}
+	return ""
+}
+
 // ctPairedBootstrap resamples QUERIES (not observations) with replacement, so
 // the pairing between arms is preserved in every resample — that is the whole
 // point of the paired design and the reason the same queries run through every
@@ -403,6 +603,7 @@ func (d ctDelta) halfWidth() float64 { return (d.CIUpper - d.CILower) / 2 }
 //
 // seed is explicit so a run is reproducible from its run log.
 func ctPairedBootstrap(a, b []float64, resamples int, seed int64) ctDelta {
+	ctRuleEntered()
 	n := len(a)
 	if n == 0 || len(b) != n {
 		return ctDelta{}
@@ -481,6 +682,7 @@ type ctBucketDelta struct {
 // mandatory output: "the trend was fitted on 7 of 12 buckets" is a materially
 // different claim from "the trend was fitted on 12 buckets".
 func ctBucketDeltas(perBucket [][]float64) (series []ctBucketDelta, omitted []int) {
+	ctRuleEntered()
 	for b, vals := range perBucket {
 		if len(vals) == 0 {
 			omitted = append(omitted, b)
@@ -545,6 +747,7 @@ func ctT975(df int) float64 {
 // The trailing window is measured in BUCKET INDEX, not in list position: with
 // omissions those differ, and "the last 10 weeks" means weeks, not entries.
 func ctComputeTrend(series []ctBucketDelta, window int) ctTrend {
+	ctRuleEntered()
 	n := len(series)
 	tr := ctTrend{WindowN: window}
 	if n == 0 {
@@ -674,7 +877,7 @@ type ctVaultResult struct {
 	// honesty is the point.
 	NQueries int
 	// ZeroRelevanceQueries is the excluded remainder: recalls that returned items
-	// every one of which the judge graded irrelevant. Mandatory census output,
+	// every one of which the judge graded 0. Mandatory census output,
 	// emitted BEFORE any delta. It is a real retrieval-quality number and the
 	// only visible symptom of a too-conservative judge — U1 gates the judge's
 	// false-positive rate but nothing gates its false-NEGATIVE rate.
@@ -737,41 +940,103 @@ func (d ctDecision) String() string {
 }
 
 // ---------------------------------------------------------------------------
-// THE ABLATION-ADDITIVITY BOUNDS (U3-class)
+// THE NDCG-LEVEL ABLATION-ADDITIVITY RELATIONS — A DIAGNOSTIC, NOT A GATE (D5)
+//
+// The three relations are
+//
+//	Delta_HP >= Delta_H     Delta_HP >= Delta_P     Delta_HP <= Delta_C
+//
+// and on RAW SCORES, per candidate, they are arithmetic invariants: the boosts
+// are non-negative, softplus is strictly increasing, and softplus(bLevelCap)/D
+// is exactly 1. That is where they are checked as a hard failure —
+// TestCognitionTrial_ArmReconstructionFidelity §6, in the activation package.
+//
+// AT THE NDCG LEVEL THEY ARE NEITHER, AND THEY WERE WIRED IN AS A U3 GATE.
+// Two independent reasons that had to be taken together:
+//
+//  1. NDCG IS NOT MONOTONE IN SCORES, so a mean-of-NDCG delta need not inherit
+//     the per-candidate raw ordering at all. Comparing four POINT estimates with
+//     a 1e-9 tolerance and no interval is not a test of anything: under a null
+//     where the arms reorder results but none is systematically better, Delta_H,
+//     Delta_P and Delta_HP are exchangeable, P(Delta_HP largest) = 1/3, and the
+//     lower relation is broken ~2/3 of the time BY CONSTRUCTION. Measured
+//     through this builder at sigma_d = 0.15: 92.5% / 90.7% / 91.8% / 92.7% of
+//     600 trials at n = 320 / 1000 / 5000 / 20000. FLAT IN n — the signature of
+//     a quantity no amount of data resolves. As a gate it produced UNDERPOWERED
+//     on 199 of 200 end-to-end trials while a true strong effect shipped 199/200
+//     and an exact null killed 50/50, so the harness was fine and the gate was
+//     not.
+//
+//  2. IT COULD NOT BE WIDENED, BECAUSE EVERY BREAK DECODES TO A REAL WORLD:
+//
+//     Delta_HP - Delta_P  == NDCG(NO-PAS)             - NDCG(BASE-LEVEL-ONLY)
+//     Delta_HP - Delta_H  == NDCG(NO-HEBBIAN)         - NDCG(BASE-LEVEL-ONLY)
+//     Delta_HP - Delta_C  == NDCG(CONTENT-MATCH-ONLY) - NDCG(BASE-LEVEL-ONLY)
+//
+//     each of which is exactly one mechanism's own contribution measured on top
+//     of the base-level prior. A break says that mechanism is NET-HARMFUL on
+//     this vault. That is a finding, and it is the single most decision-relevant
+//     finding a delete-or-keep trial can produce.
+//
+// The comment that stood here claimed routing both to UNDERPOWERED "suppresses a
+// kill-supporting finding rather than a ship-supporting one — the direction the
+// design says to err in". That was FALSE and is removed rather than softened: it
+// suppressed BOTH, and it was worst precisely where a mechanism is harmful.
+// Executed, one vault set per line:
+//
+//	base-level HARMFUL, boosts carry a real +0.065 (SHIP was right) -> UNDERPOWERED
+//	EVERYTHING harmful — the layer actively hurts (KILL was right)  -> UNDERPOWERED
+//	PAS-on-top-of-base HARMFUL, Hebbian carries the win             -> UNDERPOWERED
+//
+// So: the relations are REPORTED, DECODED and NAMED, and they gate nothing.
+//
+// NOT DONE, deliberately: an interval-based version (break the relation only
+// when the paired CI on the DIFFERENCE of deltas clears zero) would be
+// statistically honest and would converge in n. It is not added speculatively —
+// it needs its own convergence evidence before it may gate anything, and a
+// diagnostic that names the harmful mechanism already carries the information a
+// reader needs.
 // ---------------------------------------------------------------------------
 
-// ctAdditivityViolation checks the two bounds that make the redundancy gap
-// VISIBLE rather than assumed:
+// ctAdditivityTolerance guards FLOAT ROUNDING and nothing else — the residue is
+// ~1e-16 in magnitude.
 //
-//	Delta_HP >= max(Delta_H, Delta_P)   removing BOTH boosts cannot hurt less
-//	                                    than removing either one alone
-//	Delta_HP <= Delta_C                 removing both boosts cannot hurt more
-//	                                    than also removing the base-level prior
-//
-// A violation is not a small result — it means the ARITHMETIC ABLATION IS NOT
-// WHAT IT CLAIMS TO BE, which is a U3-class failure (the reconstruction is not
-// the thing it says it is), so ctDecide routes it to UNDERPOWERED rather than
-// letting a number be quoted from it.
-//
-// The tolerance is the bootstrap's own resolution, not a fudge: the four deltas
-// are separate resamples of the same paired series, so a boundary case can
-// disagree in the last few digits without anything being wrong.
+// The comment here used to call it "the bootstrap's own resolution ... four
+// separate resamples of the same paired series". That was false twice over:
+// ctDelta.Point is the exact arithmetic mean of the paired differences and is
+// never resampled, and ctVaultFromSeries passes the SAME seed to all four
+// bootstraps, so even the intervals are drawn from identical index sequences.
 const ctAdditivityTolerance = 1e-9
 
-func ctAdditivityViolation(v ctVaultResult) string {
-	lower := math.Max(v.DeltaH.Point, v.DeltaP.Point)
-	if v.DeltaHP.Point < lower-ctAdditivityTolerance {
-		return fmt.Sprintf("vault %s: Delta_HP %+.4f < max(Delta_H %+.4f, Delta_P %+.4f) — "+
-			"removing BOTH boosts hurt LESS than removing one, so the arithmetic ablation is "+
-			"not the configuration it claims to be", v.Label, v.DeltaHP.Point,
-			v.DeltaH.Point, v.DeltaP.Point)
+// ctAdditivityDiagnostic decodes each broken relation into the finding it IS.
+// It returns one sentence per net-harmful mechanism, and nothing at all when the
+// relations hold. It is called for its report; no verdict reads it.
+func ctAdditivityDiagnostic(v ctVaultResult) []string {
+	ctRuleEntered()
+	var out []string
+	if v.DeltaHP.Point < v.DeltaP.Point-ctAdditivityTolerance {
+		out = append(out, fmt.Sprintf("vault %s: THE HEBBIAN BOOST IS NET-HARMFUL on top of the "+
+			"base-level prior. Delta_HP %+.4f < Delta_P %+.4f, and Delta_HP - Delta_P (%+.4f) is "+
+			"exactly NDCG(NO-PAS) - NDCG(BASE-LEVEL-ONLY) — the Hebbian term's own contribution "+
+			"with PAS already off. Negative means adding it LOWERED NDCG@10.",
+			v.Label, v.DeltaHP.Point, v.DeltaP.Point, v.DeltaHP.Point-v.DeltaP.Point))
+	}
+	if v.DeltaHP.Point < v.DeltaH.Point-ctAdditivityTolerance {
+		out = append(out, fmt.Sprintf("vault %s: PAS IS NET-HARMFUL on top of the base-level "+
+			"prior. Delta_HP %+.4f < Delta_H %+.4f, and Delta_HP - Delta_H (%+.4f) is exactly "+
+			"NDCG(NO-HEBBIAN) - NDCG(BASE-LEVEL-ONLY) — the transition term's own contribution "+
+			"with Hebbian already off.",
+			v.Label, v.DeltaHP.Point, v.DeltaH.Point, v.DeltaHP.Point-v.DeltaH.Point))
 	}
 	if v.DeltaHP.Point > v.DeltaC.Point+ctAdditivityTolerance {
-		return fmt.Sprintf("vault %s: Delta_HP %+.4f > Delta_C %+.4f — removing both boosts hurt "+
-			"MORE than also removing the base-level prior, which the ablation cannot produce",
-			v.Label, v.DeltaHP.Point, v.DeltaC.Point)
+		out = append(out, fmt.Sprintf("vault %s: THE ACT-R BASE-LEVEL PRIOR IS NET-HARMFUL. "+
+			"Delta_HP %+.4f > Delta_C %+.4f, and Delta_HP - Delta_C (%+.4f) is exactly "+
+			"NDCG(CONTENT-MATCH-ONLY) - NDCG(BASE-LEVEL-ONLY): the prior scored BELOW the content "+
+			"gate alone. Note what this does to a KILL — KILL keeps the base-level prior, so on "+
+			"this vault the configuration KILL ships is worse than content matching by itself.",
+			v.Label, v.DeltaHP.Point, v.DeltaC.Point, v.DeltaHP.Point-v.DeltaC.Point))
 	}
-	return ""
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +1056,7 @@ func ctAdditivityViolation(v ctVaultResult) string {
 // (TestCognitionTrial_ReplayFidelity, TestCognitionTrial_ArmReconstructionFidelity).
 // The harness passes their result in rather than assuming it.
 func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool) ctDecision {
+	ctRuleEntered()
 	var u []string
 
 	// --- THE CENSUS, BEFORE ANY DELTA ----------------------------------------
@@ -810,13 +1076,31 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		}
 		census = append(census, fmt.Sprintf(
 			"CENSUS vault %s: %d scored queries = %d informative + %d zero-relevance (%.1f%% "+
-				"zero-relevance); %d distinct recall events; %s",
+				"zero-relevance); %d distinct recall events; sigma_d(Delta_C)=%.4f; %s",
 			v.Label, scored, v.NQueries, v.ZeroRelevanceQueries, 100*frac,
-			v.DistinctEvents, v.ShuffledSeedNull))
+			v.DistinctEvents, v.DeltaC.SDOfDiff, v.ShuffledSeedNull))
 	}
-	census = append(census, "CENSUS: zero-relevance queries are EXCLUDED from every delta (D1). "+
-		"They are false-positive recalls, not abstentions — an abstention cannot appear in this "+
-		"population. Delta_C over ALL queries is reported below as DILUTED and gates nothing.")
+	census = append(census, "CENSUS: zero-relevance queries — those whose every POOLED GRADE IS "+
+		"ZERO, which is a strictly smaller set than 'nothing relevant' since grade 1 is not "+
+		"relevant but does carry NDCG gain — are EXCLUDED from every delta (D1). They are "+
+		"false-positive recalls, not abstentions: an abstention cannot appear in this population. "+
+		"Delta_C over ALL queries is reported below as DILUTED and gates nothing. sigma_d is the "+
+		"observed paired SD of the Delta_C differences, the input any power calculation needs; it "+
+		"is reported, not gated.")
+
+	// --- THE ABLATION-ADDITIVITY DIAGNOSTIC (D5) -----------------------------
+	// A finding ABOUT THE MECHANISMS, decoded and named, printed with the census
+	// and read by no verdict. See ctAdditivityDiagnostic for why this is not a
+	// gate: the point-estimate comparison breaks ~2/3 of the time under an
+	// exchangeable null and is FLAT IN n, and every break it does report decodes
+	// to "this mechanism is net-harmful on this vault" — which must be surfaced,
+	// never converted into "we could not measure".
+	for _, v := range vaults {
+		for _, m := range ctAdditivityDiagnostic(v) {
+			census = append(census, "DIAGNOSTIC (a finding about the mechanisms; gates nothing, "+
+				"by D5): "+m)
+		}
+	}
 
 	// --- U1: the judge-calibration gate --------------------------------------
 	if !judge.Ran {
@@ -897,10 +1181,32 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 				"computed over %d. The power gates and the estimate must bind to the SAME series.",
 				v.Label, v.NQueries, v.DeltaC.N))
 		}
-		if v.DeltaHP.N != v.DeltaC.N {
-			u = append(u, fmt.Sprintf("U2: vault %s computed Delta_HP over %d queries and Delta_C "+
-				"over %d. K2 and K4 read Delta_HP; it must be the same paired series.",
-				v.Label, v.DeltaHP.N, v.DeltaC.N))
+		// ALL FOUR DELTAS, not two. The clauses above typed absence for Delta_C
+		// and Delta_HP and left Delta_H and Delta_P untyped — which is D1's exact
+		// defect relocated one field over, because ctPairedBootstrap returns
+		// {Point:0, CI:[0,0], N:0} on an empty OR LENGTH-MISMATCHED series. One
+		// arm's series one element short is all it takes: reached through
+		// ctVaultFromSeries, an intact run reporting Delta_H = +0.1000 over N=320
+		// becomes Delta_H = +0.0000 CI [+0.0000,+0.0000] N=0 while Delta_C still
+		// reads N=320 and NQueries still reads 320. S2 and K2 read Delta_H and
+		// Delta_P; a KILL built on that has an audit trail BYTE-IDENTICAL to one
+		// where both were genuinely measured at zero.
+		for _, d := range []struct {
+			name    string
+			val     ctDelta
+			readBy  string
+			purpose string
+		}{
+			{"Delta_HP", v.DeltaHP, "K2 and K4", "what a KILL actually costs"},
+			{"Delta_H", v.DeltaH, "S2 and K2", "the Hebbian mechanism's own contribution"},
+			{"Delta_P", v.DeltaP, "S2 and K2", "PAS's own contribution"},
+		} {
+			if d.val.N != v.DeltaC.N {
+				u = append(u, fmt.Sprintf("U2: vault %s computed %s over %d queries and Delta_C "+
+					"over %d. %s read %s (%s); it must be the SAME paired series, and an N of 0 "+
+					"is an empty or length-mismatched arm series rendering as a confident zero.",
+					v.Label, d.name, d.val.N, v.DeltaC.N, d.readBy, d.name, d.purpose))
+			}
 		}
 		if v.NQueries < ctPreregistered.MinQueriesPerVault {
 			u = append(u, fmt.Sprintf("U2: vault %s has %d INFORMATIVE labeled held-out queries "+
@@ -918,9 +1224,37 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		u = append(u, "U3: a reconstruction-fidelity test failed — the reconstruction is not "+
 			"the thing it claims to be, and no arm number may be quoted")
 	}
+	// U3 (delta arithmetic): A DELTA THAT IS NOT A NUMBER IS NOT "NO OBJECTION".
+	//
+	// Every clause in this rule is written so that FALSE means "no objection",
+	// and every comparison against NaN is false. So a NaN delta sails through
+	// K1, K2, K4 and U5 alike, each reading it as nothing to say, and the verdict
+	// swings on it: the same vault set reporting Delta_HP +0.045 CI [0.020,0.070]
+	// returns INCONCLUSIVE-BUT-POWERED, and with Delta_HP := NaN and nothing else
+	// changed returns KILL.
+	//
+	// It is NOT reachable today — ctNDCGAt10's `ok` is a pure function of the
+	// pooled grades, so NaN and !Defined coincide exactly (verified over 50 000
+	// random pools x 6 arms) and ctInformative drops the NaNs before the
+	// bootstrap ever sees them. This clause is here because nothing DOWNSTREAM
+	// rejected one: any future edit that decouples definedness from NaN-ness
+	// re-opens a silent verdict flip, and "unreachable today" is not a property
+	// the rule should have to keep being re-derived.
 	for _, v := range vaults {
-		if msg := ctAdditivityViolation(v); msg != "" {
-			u = append(u, "U3 (ablation additivity): "+msg)
+		for _, d := range []struct {
+			name string
+			val  ctDelta
+		}{
+			{"Delta_C", v.DeltaC}, {"Delta_H", v.DeltaH},
+			{"Delta_P", v.DeltaP}, {"Delta_HP", v.DeltaHP},
+		} {
+			if bad := ctNonFinite(d.val); bad != "" {
+				u = append(u, fmt.Sprintf("U3 (delta arithmetic): vault %s reports %s with a %s. "+
+					"Every clause here is written so FALSE means 'no objection' and every "+
+					"comparison against NaN is false, so a non-finite delta reads as no "+
+					"objection at every kill gate. It is an ABSENCE OF ARITHMETIC.",
+					v.Label, d.name, bad))
+			}
 		}
 	}
 
@@ -1113,8 +1447,22 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	// K2 — restated by D2 to include Delta_HP. S2 asks whether a NAMED mechanism
 	// earns its keep; K2 asks whether ANY of them does, and the configuration
 	// KILL actually ships (both boosts off, base-level kept) is the BASE-LEVEL-ONLY
-	// arm, whose delta is Delta_HP. Omitting it let KILL be authorized by three
-	// marginals that provably cannot reconstruct it.
+	// arm, whose delta is Delta_HP.
+	//
+	// D2's GATING justification is NARROWER THAN IT WAS WRITTEN, and the honest
+	// version is this: on a CLEAN-KILL vault — every marginal small and every
+	// interval straddling zero — the Delta_HP clause is effectively unreachable,
+	// 0 hits in 2 000 000 sampled points. Flipping K2 through Delta_HP alone
+	// needs redundancy strong enough that neither boost clears +0.02 on its own
+	// while removing BOTH clears it with the interval off zero, which a
+	// clean-kill vault by definition does not have.
+	//
+	// The clause STAYS, and the REPORTING justification is untouched and is the
+	// real one: Delta_HP is what a KILL costs, the other four arms provably
+	// cannot reconstruct it under redundancy, and it must appear in the audit
+	// trail of any verdict that spends it. Removing a clause because it has not
+	// yet fired is how a gate becomes unreachable on the one vault where it
+	// mattered.
 	hpVault := ""
 	for _, v := range vaults {
 		if v.DeltaHP.Point >= ctPreregistered.MinDeltaMechanism && v.DeltaHP.CILower > 0 {
@@ -1248,6 +1596,7 @@ func ctSameSign(a, b float64) bool {
 // branch) and fpr=0 (via an empty denominator) while carrying zero
 // discriminative information — see ctDecide's U1.
 func ctCohensKappa(judge, human []int) (kappa, fpr float64, n, humanRelevant, humanIrrelevant int) {
+	ctRuleEntered()
 	n = len(judge)
 	if n == 0 || len(human) != n {
 		return 0, 0, 0, 0, 0

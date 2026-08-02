@@ -100,22 +100,42 @@ func ctThree(f func(string) ctVaultResult) []ctVaultResult {
 	return []ctVaultResult{f("A"), f("B"), f("C")}
 }
 
+// ctRequireVerdict, ctExpectReason and ctExpect are the census's ASSERTION
+// helpers, and they are the only ones a probe may use. Each bumps
+// ctProbeAssertions, which is what lets TestCognitionTrialRule_EveryThresholdBinds
+// reject a probe that never asserts anything — see the counters' comment in
+// cognition_trial_rule_test.go for exactly how far that goes and where it stops.
 func ctRequireVerdict(t *testing.T, got ctDecision, want ctVerdict, wantReason string) {
 	t.Helper()
+	ctProbeAssertions.Add(1)
 	if got.Verdict != want {
 		t.Fatalf("verdict = %s, want %s\n%s", got.Verdict, want, got)
 	}
 	if wantReason != "" {
-		found := false
-		for _, r := range got.Reasons {
-			if strings.Contains(r, wantReason) {
-				found = true
-			}
+		ctExpectReason(t, got, wantReason, "a gate that fires without saying why cannot be "+
+			"reported honestly")
+	}
+}
+
+// ctExpectReason requires the audit trail to carry a line containing sub.
+func ctExpectReason(t *testing.T, got ctDecision, sub, why string) {
+	t.Helper()
+	ctProbeAssertions.Add(1)
+	for _, r := range got.Reasons {
+		if strings.Contains(r, sub) {
+			return
 		}
-		if !found {
-			t.Errorf("no reason mentions %q — a gate that fires without saying why cannot be "+
-				"reported honestly\n%s", wantReason, got)
-		}
+	}
+	t.Errorf("no reason mentions %q — %s\n%s", sub, why, got)
+}
+
+// ctExpect is the arithmetic probes' assertion: they do not produce a decision,
+// so they have no audit trail to inspect.
+func ctExpect(t *testing.T, ok bool, format string, args ...any) {
+	t.Helper()
+	ctProbeAssertions.Add(1)
+	if !ok {
+		t.Errorf(format, args...)
 	}
 }
 
@@ -133,8 +153,8 @@ func TestCognitionTrialRule_Kill(t *testing.T) {
 func TestCognitionTrialRule_PriorWithoutAMechanismDoesNotShip(t *testing.T) {
 	vaults := ctThree(ctShipVault)
 	for i := range vaults {
-		vaults[i].DeltaH = ctDelta{Point: 0.004, CILower: -0.006, CIUpper: 0.014}
-		vaults[i].DeltaP = ctDelta{Point: 0.003, CILower: -0.007, CIUpper: 0.013}
+		vaults[i].DeltaH = ctDelta{Point: 0.004, CILower: -0.006, CIUpper: 0.014, N: 320}
+		vaults[i].DeltaP = ctDelta{Point: 0.003, CILower: -0.007, CIUpper: 0.013, N: 320}
 		vaults[i].MRRDeltaH = 0.001
 	}
 	got := ctDecide(vaults, ctGoodJudge(), true)
@@ -278,16 +298,7 @@ func ctFromShipDescriptive(t *testing.T, wantSub string, mutate func(v []ctVault
 			"verdict; if it now does, the probe is stale or the demotion was reverted\n%s",
 			got.Verdict, got)
 	}
-	found := false
-	for _, r := range got.Reasons {
-		if strings.Contains(r, wantSub) {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("no reason mentions %q — the field is neither gating NOR reported, i.e. inert\n%s",
-			wantSub, got)
-	}
+	ctExpectReason(t, got, wantSub, "the field is neither gating NOR reported, i.e. inert")
 }
 
 func ctPreregisteredProbes() map[string]ctProbe {
@@ -307,8 +318,8 @@ func ctPreregisteredProbes() map[string]ctProbe {
 			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
 				for i := range v {
 					v[i].DeltaH = ctDelta{Point: ctPreregistered.MinDeltaMechanism - 0.001,
-						CILower: 0.008, CIUpper: 0.030}
-					v[i].DeltaP = ctDelta{Point: 0.003, CILower: -0.007, CIUpper: 0.013}
+						CILower: 0.008, CIUpper: 0.030, N: 320}
+					v[i].DeltaP = ctDelta{Point: 0.003, CILower: -0.007, CIUpper: 0.013, N: 320}
 				}
 			}),
 		// DESCRIPTIVE SINCE D3. S3 is no longer in the SHIP conjunction, because
@@ -352,11 +363,10 @@ func ctPreregisteredProbes() map[string]ctProbe {
 				t.Fatalf("probe setup: the pre-registered window already passes (%d positive)",
 					narrow.PositiveOfLastN)
 			}
-			if wide.PositiveOfLastN < ctPreregistered.TrendMinPositive {
-				t.Fatalf("the trailing window is not load-bearing: widening it from %d to %d "+
+			ctExpect(t, wide.PositiveOfLastN >= ctPreregistered.TrendMinPositive,
+				"the trailing window is not load-bearing: widening it from %d to %d "+
 					"changed nothing (%d vs %d positive)", ctPreregistered.TrendWindow,
-					ctPreregistered.TrendWindow+2, narrow.PositiveOfLastN, wide.PositiveOfLastN)
-			}
+				ctPreregistered.TrendWindow+2, narrow.PositiveOfLastN, wide.PositiveOfLastN)
 		},
 		// DESCRIPTIVE SINCE D3, same as TrendMinPositive.
 		"TrendSlopeCILower": func(t *testing.T) {
@@ -446,11 +456,10 @@ func ctPreregisteredProbes() map[string]ctProbe {
 			// unsatisfiable with fewer than TrendMinPositive populated ones. If
 			// someone raises TrendMinPositive without raising this, the floor
 			// silently stops being the floor.
-			if ctPreregistered.MinPopulatedBuckets != ctPreregistered.TrendMinPositive {
-				t.Errorf("MinPopulatedBuckets = %d but TrendMinPositive = %d: the U6 floor is "+
+			ctExpect(t, ctPreregistered.MinPopulatedBuckets == ctPreregistered.TrendMinPositive,
+				"MinPopulatedBuckets = %d but TrendMinPositive = %d: the U6 floor is "+
 					"DERIVED from S3's positivity requirement, not chosen",
-					ctPreregistered.MinPopulatedBuckets, ctPreregistered.TrendMinPositive)
-			}
+				ctPreregistered.MinPopulatedBuckets, ctPreregistered.TrendMinPositive)
 			ctFromShip(ctVerdictUnderpowered, "populated weekly buckets",
 				func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
 					full := ctBucketSeries(ctRisingBuckets(0.03))
@@ -476,14 +485,53 @@ func ctPreregisteredProbes() map[string]ctProbe {
 			}
 			full := ctPairedBootstrap(a, b, ctPreregistered.BootstrapResamples, 7)
 			coarse := ctPairedBootstrap(a, b, 20, 7)
-			if full == coarse {
-				t.Errorf("the resample count is not consumed: %d resamples and 20 produced an "+
+			ctExpect(t, full != coarse,
+				"the resample count is not consumed: %d resamples and 20 produced an "+
 					"identical interval %+v", ctPreregistered.BootstrapResamples, full)
-			}
-			if ctPercentileIndex(ctPreregistered.BootstrapResamples, 0.025) !=
-				ctPreregistered.BootstrapResamples/40 {
-				t.Errorf("the 2.5%% percentile index is not derived from the resample count")
-			}
+			ctExpect(t, ctPercentileIndex(ctPreregistered.BootstrapResamples, 0.025) ==
+				ctPreregistered.BootstrapResamples/40,
+				"the 2.5%% percentile index is not derived from the resample count")
+		},
+
+		// --- pins, not thresholds (Finding 8) --------------------------------
+		// The arm set and the pooling depth are degrees of freedom the D1
+		// exclusion inherits: the pool is the UNION of the arms' top-PoolDepth,
+		// so both decide which queries are informative and therefore where every
+		// absolute bar falls. Their probe is that a change to either is DETECTED
+		// and named as a re-pre-registration.
+		"Arms": func(t *testing.T) {
+			ctExpect(t, ctInstrumentPinViolation(ctArmNames, ctPreregistered.PoolDepth) == "",
+				"the arm set the rule reports over (%v) is not the pre-registered one (%v)",
+				ctArmNames, ctPreregistered.Arms)
+			added := append(append([]string(nil), ctArmNames...), "NO-BASE-LEVEL")
+			ctExpect(t, strings.Contains(
+				ctInstrumentPinViolation(added, ctPreregistered.PoolDepth), "ARM SET has changed"),
+				"adding a sixth arm was not detected as a change to the instrument. D2 added a "+
+					"FIFTH arm and that alone re-partitioned informative vs zero-relevance: the "+
+					"same query is zero-relevance under a 4-arm pool and informative under a "+
+					"5-arm pool where the extra arm surfaced one graded document.")
+			ctExpect(t, strings.Contains(
+				ctInstrumentPinViolation(ctArmNames[:len(ctArmNames)-1], ctPreregistered.PoolDepth),
+				"ARM SET has changed"), "REMOVING an arm was not detected either")
+			// Reordering is NOT a change: it moves no query between the two sets.
+			shuffled := []string{ctArmNameContentOnly, ctArmNameFull, ctArmNameNoPAS,
+				ctArmNameBaseLevelOnly, ctArmNameNoHebbian}
+			ctExpect(t, ctInstrumentPinViolation(shuffled, ctPreregistered.PoolDepth) == "",
+				"reordering the arms was reported as an instrument change; the pin is over the "+
+					"SET, and reporting order moves no query between informative and zero-relevance")
+		},
+		"PoolDepth": func(t *testing.T) {
+			ctExpect(t, strings.Contains(
+				ctInstrumentPinViolation(ctArmNames, ctPreregistered.PoolDepth+5),
+				"POOLING DEPTH is"),
+				"a deeper pool was not detected as a change to the instrument. It is "+
+					"env-configurable (MUNINN_COGTRIAL_POOL_DEPTH) and it decides how many "+
+					"documents per arm enter the pooled label set, hence which queries have a "+
+					"defined NDCG at all.")
+			ctExpectReason(t,
+				ctDecision{Reasons: []string{ctInstrumentPinViolation(ctArmNames, 1)}},
+				"RE-PRE-REGISTRATION",
+				"a change to a pinned instrument parameter must be named as what it is")
 		},
 	}
 }
@@ -546,24 +594,36 @@ func ctVaultResultProbes() map[string]ctProbe {
 			vaults[0].ZeroRelevanceQueries = 137
 			got := ctDecide(vaults, ctGoodJudge(), true)
 			want := "CENSUS vault A: 457 scored queries = 320 informative + 137 zero-relevance (30.0% zero-relevance)"
+			// THE ORDERING HALF, and it has to match a DELTA LINE rather than the
+			// first line containing the string "Delta_C". It used to do the
+			// latter, and the first such line is index 3 — the census block's own
+			// trailing summary sentence, which mentions Delta_C in prose. So it
+			// proved a one-line margin over a line of the census itself, not that
+			// the census precedes the delta SECTION. The delta section begins at
+			// the "REPORTED (gates nothing)" lines, which are the first place a
+			// number a reader could form a conclusion from is printed.
+			const firstDeltaLine = "REPORTED (gates nothing): vault"
 			idxCensus, idxDelta := -1, -1
 			for i, r := range got.Reasons {
 				if strings.Contains(r, want) && idxCensus < 0 {
 					idxCensus = i
 				}
-				if strings.Contains(r, "Delta_C") && idxDelta < 0 {
+				if strings.Contains(r, firstDeltaLine) && idxDelta < 0 {
 					idxDelta = i
 				}
 			}
 			if idxCensus < 0 {
 				t.Fatalf("the zero-relevance census line is missing. Expected %q\n%s", want, got)
 			}
-			if idxDelta >= 0 && idxCensus > idxDelta {
-				t.Errorf("the census line appears AFTER a delta (positions %d vs %d). D1 requires "+
-					"it before any Delta is printed: it is the only visible symptom of a "+
-					"too-conservative judge, and a reader who has already seen the deltas has "+
-					"already formed the conclusion.", idxCensus, idxDelta)
+			if idxDelta < 0 {
+				t.Fatalf("no delta line %q in the report, so the ordering claim is vacuous\n%s",
+					firstDeltaLine, got)
 			}
+			ctExpect(t, idxCensus < idxDelta,
+				"the census line appears at position %d and the first delta line at %d. D1 "+
+					"requires the census BEFORE any delta is printed: it is the only visible "+
+					"symptom of a too-conservative judge, and a reader who has already seen the "+
+					"deltas has already formed the conclusion.", idxCensus, idxDelta)
 		},
 		"DistinctEvents": ctFromShip(ctVerdictUnderpowered, "distinct recall events",
 			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
@@ -624,16 +684,9 @@ func ctVaultResultProbes() map[string]ctProbe {
 					"the same factor, so it slides the point estimate across S1's and K1's "+
 					"absolute bars while the t-statistic never moves\n%s", got.Verdict, got)
 			}
-			found := false
-			for _, r := range got.Reasons {
-				if strings.Contains(r, "over ALL 9999 scored queries = +0.0001") {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("the diluted number is not reported — it must be visible so the "+
-					"exclusion is auditable rather than asserted\n%s", got)
-			}
+			ctExpectReason(t, got, "over ALL 9999 scored queries = +0.0001",
+				"the diluted number is not reported — it must be visible so the exclusion is "+
+					"auditable rather than asserted")
 		},
 		"ShuffledSeedNull": func(t *testing.T) {
 			// K4's integrity condition. It cannot be shown to change a VERDICT,
@@ -665,10 +718,9 @@ func ctVaultResultProbes() map[string]ctProbe {
 						found = true
 					}
 				}
-				if !found {
-					t.Errorf("K4 does not distinguish %v (want %q on its own line). A null that "+
+				ctExpect(t, found,
+					"K4 does not distinguish %v (want %q on its own line). A null that "+
 						"was never run is not a null that was survived\n%s", tc.null, tc.want, got)
-				}
 			}
 		},
 		"MRRDeltaH": ctFromShip(ctVerdictInconclusivePowered, "S4 FAIL",
@@ -701,15 +753,8 @@ func ctVaultResultProbes() map[string]ctProbe {
 			vaults := ctThree(ctShipVault)
 			vaults[0].OmittedBuckets = []int{3, 4, 5}
 			got := ctDecide(vaults, ctGoodJudge(), true)
-			found := false
-			for _, r := range got.Reasons {
-				if strings.Contains(r, "3 buckets omitted as empty") {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("the omitted-bucket count is not reported\n%s", got)
-			}
+			ctExpectReason(t, got, "3 buckets omitted as empty",
+				"the omitted-bucket count is not reported")
 		},
 		"BaselineEdges": ctFromShip(ctVerdictUnderpowered, "below the 20% floor",
 			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
@@ -726,6 +771,72 @@ func ctVaultResultProbes() map[string]ctProbe {
 	}
 }
 
+// ctDeltaProbes is the census applied to ctDelta itself — the struct EVERY
+// number the verdict rests on is carried in, and the one the walk did not reach.
+// Its fields are read through four different vault fields, so "is this field
+// read" is a question about the rule, not about any one delta.
+func ctDeltaProbes() map[string]ctProbe {
+	return map[string]ctProbe{
+		// EXACTLY ONE FLOAT MOVES IN EACH OF THESE, and the interval it moves
+		// inside stays coherent (the point estimate never leaves its own CI), so
+		// the probe cannot be passing on an impossible fixture.
+		"Point": ctFromKill(ctVerdictInconclusivePowered, "K1 FAIL",
+			func(v []ctVaultResult) {
+				for i := range v {
+					// Above K1's point bar, still inside the killing interval
+					// [-0.014, +0.018] and still nowhere near S1's.
+					v[i].DeltaC.Point = ctPreregistered.KillDeltaCPoint + 0.001
+				}
+			}),
+		"CILower": func(t *testing.T) {
+			// CILower is read as "does the interval exclude zero" by S1, S2, K2
+			// and K4. Probed on K2 because that is where a ONE-FIELD change is
+			// coherent: the same Delta_HP point estimate, the same width, the
+			// interval merely lifted off zero.
+			mk := func(ciLower float64) []ctVaultResult {
+				v := ctThree(ctKillVault)
+				v[1].DeltaHP = ctDelta{Point: 0.045, CILower: ciLower, CIUpper: 0.091, N: 340}
+				return v
+			}
+			if base := ctDecide(mk(-0.001), ctGoodJudge(), true); base.Verdict != ctVerdictKill {
+				t.Fatalf("baseline is not KILL, so this probe proves nothing\n%s", base)
+			}
+			ctRequireVerdict(t, ctDecide(mk(+0.001), ctGoodJudge(), true),
+				ctVerdictInconclusivePowered, "K2 FAIL")
+		},
+		"CIUpper": ctFromKill(ctVerdictInconclusivePowered, "K1 FAIL",
+			func(v []ctVaultResult) {
+				for i := range v {
+					// K1 is the only clause that reads an upper bound.
+					v[i].DeltaC.CIUpper = ctPreregistered.KillDeltaCCIUpper + 0.001
+				}
+			}),
+		"N": ctFromShip(ctVerdictUnderpowered, "it must be the SAME paired series",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[1].DeltaH.N = 0
+			}),
+		"SDOfDiff": func(t *testing.T) {
+			// sigma_d GATES NOTHING and that is deliberate: the pre-registered n
+			// was computed at sigma_d ~= 0.15, and turning an observed dispersion
+			// into a gate mid-trial would be a threshold derived after seeing the
+			// data. It is the input every power calculation needs, so the honest
+			// probe is that it REACHES THE REPORT — the shape ctJudgeCalibration.N
+			// failed, one struct over.
+			vaults := ctThree(ctShipVault)
+			vaults[0].DeltaC.SDOfDiff = 0.1234
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			ctExpectReason(t, got, "sigma_d(Delta_C)=0.1234",
+				"the observed paired SD is not reported anywhere. It is the sigma_d every "+
+					"sample-size calculation this design makes depends on, and a number that "+
+					"reaches no reader is inert whether or not it gates")
+			ctExpect(t, got.Verdict == ctVerdictShip,
+				"sigma_d moved the verdict to %s. It is REPORTED, not gated: deriving a "+
+					"threshold from the run's own observed dispersion is exactly the "+
+					"after-the-fact tuning this rule exists to prevent", got.Verdict)
+		},
+	}
+}
+
 func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
 	for _, tc := range []struct {
 		what   string
@@ -735,6 +846,7 @@ func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
 		{"ctPreregistered", reflect.TypeOf(ctPreregistered), ctPreregisteredProbes()},
 		{"ctJudgeCalibration", reflect.TypeOf(ctJudgeCalibration{}), ctJudgeProbes()},
 		{"ctVaultResult", reflect.TypeOf(ctVaultResult{}), ctVaultResultProbes()},
+		{"ctDelta", reflect.TypeOf(ctDelta{}), ctDeltaProbes()},
 	} {
 		seen := map[string]bool{}
 		for i := 0; i < tc.typ.NumField(); i++ {
@@ -749,7 +861,31 @@ func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
 					"protection.", tc.what, name)
 				continue
 			}
+			// PRESENCE IS NOT BINDINGNESS. The census caught a MISSING probe and
+			// happily accepted an EMPTY one: an `InertNewField` plus a
+			// `func(t *testing.T) {}` passed the whole walk, which is the
+			// declared-and-never-read shape this test exists to find, one level up.
+			//
+			// So a probe must, at minimum, ENTER THE RULE and ASSERT SOMETHING
+			// ABOUT WHAT CAME BACK. Both are counted; neither is inferrable from
+			// the probe's source. What this still cannot decide is whether the
+			// assertion is vacuous — `ctExpect(t, true, "")` after a ctDecide call
+			// passes — and no in-process check can. The decidable form is mutation
+			// testing (perturb the rule, require the probe to fail), which is a
+			// separate harness and is deliberately NOT built here.
+			ruleBefore := ctRuleCalls.Load()
+			assertBefore := ctProbeAssertions.Load()
 			t.Run(tc.what+"."+name, probe)
+			if ctRuleCalls.Load() == ruleBefore {
+				t.Errorf("%s.%s's probe NEVER ENTERED THE RULE. A probe that does not call "+
+					"ctDecide or any rule function cannot be showing that this field binds — an "+
+					"empty probe body passes every other check in this census.", tc.what, name)
+			}
+			if ctProbeAssertions.Load() == assertBefore {
+				t.Errorf("%s.%s's probe made NO ASSERTION (via ctRequireVerdict / ctExpectReason "+
+					"/ ctExpect). It called the rule and discarded the answer, which proves the "+
+					"rule does not panic and nothing else.", tc.what, name)
+			}
 		}
 		for name := range tc.probes {
 			if !seen[name] {
@@ -1011,7 +1147,7 @@ func TestCognitionTrialMetrics_NDCGGradedAndPooled(t *testing.T) {
 // ---------------------------------------------------------------------------
 // D1, part 1: AN UNDEFINED NDCG IS NOT A ZERO, AND IS NOT REPRESENTABLE AS ONE.
 //
-// A query whose pooled label set contains nothing relevant has IDCG 0, so NDCG
+// A query whose pooled label set is ALL GRADE 0 has IDCG 0, so NDCG
 // is 0/0. The function used to say "NDCG is undefined" in a comment and then
 // return 0 — the third instance in this file family of undefined written as a
 // measured zero (ctMean(nil) padding trend buckets, fixed by U6; FTS
@@ -1038,6 +1174,30 @@ func TestCognitionTrialMetrics_UndefinedNDCGIsNotAZero(t *testing.T) {
 		t.Errorf("a grade-1-only pool returned (%v, %v), want (1, true) — grade 1 is not "+
 			"relevant for MRR but it IS a defined NDCG", v, ok)
 	}
+	// THE CASE THAT SEPARATES THE TRIGGER FROM ITS TEMPTING PARAPHRASE, executed
+	// rather than argued. ctNDCGAt10's comment said the undefined case was "the
+	// pooled label set contains no relevant document"; it is not. Relevance is
+	// grade >= 2, but ctGains gives grade 1 a gain of 1, so a pool of four
+	// grade-1 documents contains NO RELEVANT DOCUMENT AT ALL and still has a
+	// perfectly well-defined IDCG — it is retained, scored, and it discriminates
+	// between arms. The undefined set is strictly smaller than the not-relevant
+	// set, and D1 excludes only the former.
+	allOnes := map[string]int{"m1": 1, "m2": 1, "m3": 1, "m4": 1}
+	if got := ctMRR([]string{"m1", "m2", "m3", "m4"}, allOnes); got != 0 {
+		t.Fatalf("MRR = %v on an all-grade-1 pool, want 0 — the premise is that this pool "+
+			"contains no RELEVANT document", got)
+	}
+	partial, ok := ctNDCGAt10([]string{"m1", "m2"}, allOnes)
+	if !ok {
+		t.Fatalf("an all-grade-1 pool reported an UNDEFINED NDCG. It contains no relevant " +
+			"document but every grade is positive, so IDCG > 0 and the query must be RETAINED")
+	}
+	if !(partial > 0 && partial < 1) {
+		t.Errorf("all-grade-1 pool, 2 of 4 returned: NDCG %v, want a value strictly inside "+
+			"(0,1) — the arm is genuinely being discriminated, not degenerately scored", partial)
+	}
+	t.Logf("all-grade-1 pool (NO relevant document), 2 of 4 returned: NDCG@10 = %.4f, "+
+		"defined = %v — retained and scored", partial, ok)
 }
 
 func TestCognitionTrialMetrics_MRRUsesTheBinarizedGrade(t *testing.T) {
