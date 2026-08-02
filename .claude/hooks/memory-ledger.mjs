@@ -8,8 +8,14 @@
 //
 // Two independent mechanisms close it, because each one alone has a residual:
 //
-//   1. A lock file. Serialises drain against any producer that goes through
-//      memory-propose.mjs. Residual: a raw `echo >>` append does not take the lock.
+//   1. A lock file. Serialises drain against drain, and against any producer that goes
+//      through memory-propose.mjs. Residual: a raw `echo >>` append does not take the lock.
+//      Note the asymmetry, and it is deliberate: the DRAIN treats the lock as mandatory (a
+//      second drain skips its run), while a PRODUCER that cannot get it appends anyway and
+//      says so. A drain that skips repeats on the next trigger and loses nothing; a
+//      producer that refuses to append loses the finding, which is the only failure this
+//      whole mechanism exists to prevent. Mechanism 2 is what makes the unlocked append
+//      safe, and it is the same path a raw `>>` has always taken.
 //   2. Prefix-range consumption. The drain records the byte length it read and, at rewrite
 //      time, re-reads the file, verifies the prefix is byte-identical to what it consumed,
 //      and splices [retained prefix lines] + [everything appended after the offset]. A raw
@@ -23,12 +29,49 @@
 // zero for any producer that takes the lock.
 
 import { existsSync, mkdirSync, openSync, closeSync, fstatSync, readSync, readFileSync, writeFileSync, renameSync, unlinkSync, statSync, appendFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve, isAbsolute } from 'node:path'
 
-export function paths(root = process.env.CLAUDE_PROJECT_DIR || process.cwd()) {
+/**
+ * The repository's ONE ledger location, shared by every worktree of the same repo.
+ *
+ * Before this, `paths()` used CLAUDE_PROJECT_DIR (or cwd) directly, so a proposal appended
+ * with a scratch worktree as the working directory landed in THAT worktree's `.claude/`.
+ * No session ever has a scratch worktree as its project root, so no drain ever looked
+ * there: 17 real proposals sat undrained in two worktrees while the protocol claimed "no
+ * ledger is invisible to the process that would drain it". A per-worktree queue only works
+ * if a drain runs per worktree, and nothing ever will.
+ *
+ * A linked worktree's `.git` is a FILE containing `gitdir: <main>/.git/worktrees/<name>`,
+ * and `<gitdir>/commondir` points back at the main `.git`. Resolving that gives the main
+ * checkout, which is where the queue lives. Falls back to the given root on anything
+ * unexpected — a ledger in the wrong place beats a crash in a hook.
+ *
+ * `MUNINN_LEDGER_ROOT` overrides it outright (the tests use it; so can a bare directory
+ * that is not a git checkout at all).
+ */
+export function canonicalRoot(root) {
+  if (process.env.MUNINN_LEDGER_ROOT) return resolve(process.env.MUNINN_LEDGER_ROOT)
+  try {
+    const dotGit = join(root, '.git')
+    if (!statSync(dotGit).isFile()) return root          // main checkout (.git is a directory)
+    const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, 'utf8'))
+    if (!m) return root
+    const gitdir = isAbsolute(m[1].trim()) ? m[1].trim() : resolve(root, m[1].trim())
+    const commonRel = readFileSync(join(gitdir, 'commondir'), 'utf8').trim()
+    const commonDir = isAbsolute(commonRel) ? commonRel : resolve(gitdir, commonRel)
+    const main = dirname(commonDir)
+    return existsSync(main) ? main : root
+  } catch {
+    return root
+  }
+}
+
+export function paths(rawRoot = process.env.CLAUDE_PROJECT_DIR || process.cwd()) {
+  const root = canonicalRoot(rawRoot)
   const d = join(root, '.claude')
   return {
     root,
+    invokedFrom: rawRoot,
     dir: d,
     ledger: join(d, 'memory-proposals.jsonl'),
     archive: join(d, 'memory-proposals.drained.jsonl'),
@@ -72,25 +115,38 @@ export function acquireLock(lockPath, { waitMs = 0 } = {}) {
  * Read the ledger and pin the byte offset that was read. Everything the caller may consume
  * lives in [0, bytes); everything appended later lives beyond it and is not the caller's to
  * touch.
- * @returns {{exists: boolean, bytes: number, prefix: Buffer, lines: {no: number, raw: string}[]}}
+ *
+ * `bytes` stops at the LAST NEWLINE, never at the file size. A line is consumable only once
+ * it is terminated, so a trailing fragment — a writer that was interrupted, or an append
+ * larger than the writer's buffer that has landed in part — is outside the consumed range
+ * by construction. It stays in the tail and is spliced back verbatim, where the rest of it
+ * can still arrive. Without this the drain hands a half-line to the validator, which
+ * (correctly, for what it was given) calls it unparseable and dead-letters it as
+ * PERMANENTLY invalid — a permanent verdict on a transient state, which is the one thing
+ * dead-lettering must never do.
+ *
+ * @returns {{exists: boolean, bytes: number, prefix: Buffer, lines: {no: number, raw: string}[], partialTail: number}}
  */
 export function readPrefix(ledgerPath) {
-  if (!existsSync(ledgerPath)) return { exists: false, bytes: 0, prefix: Buffer.alloc(0), lines: [] }
+  if (!existsSync(ledgerPath)) return { exists: false, bytes: 0, prefix: Buffer.alloc(0), lines: [], partialTail: 0 }
   const fd = openSync(ledgerPath, 'r')
   try {
     const size = fstatSync(fd).size
-    const buf = Buffer.alloc(size)
+    const whole = Buffer.alloc(size)
     let off = 0
     while (off < size) {
-      const n = readSync(fd, buf, off, size - off, off)
+      const n = readSync(fd, whole, off, size - off, off)
       if (n <= 0) break
       off += n
     }
+    const lastNl = whole.lastIndexOf(0x0a)
+    const bytes = lastNl === -1 ? 0 : lastNl + 1
+    const buf = whole.subarray(0, bytes)
     const lines = []
     buf.toString('utf8').split('\n').forEach((raw, i) => {
       if (raw.trim()) lines.push({ no: i + 1, raw: raw.trim() })
     })
-    return { exists: true, bytes: size, prefix: buf, lines }
+    return { exists: true, bytes, prefix: buf, lines, partialTail: size - bytes }
   } finally {
     closeSync(fd)
   }

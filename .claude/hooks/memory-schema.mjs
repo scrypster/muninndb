@@ -65,6 +65,14 @@ const OBSERVED_ALIASES = {
  *   every one of them is a property of the line itself, not of the world it is written to.
  *   That is what makes dead-lettering them safe, and what distinguishes them from a write
  *   that failed because a daemon was down.
+ *
+ *   The claim holds only because the caller never passes a line that is still being
+ *   written. A raw append larger than the writer's buffer is two write() calls, and the
+ *   fragment between them parses as neither valid JSON nor a stable shape — a TRANSIENT
+ *   state that this function would rule permanently invalid. memory-ledger.readPrefix() is
+ *   what keeps it out: it consumes only up to the last newline, so an unterminated trailing
+ *   line is never handed here at all. If you ever read the ledger some other way, apply the
+ *   same rule before calling this.
  */
 export function validate(p) {
   const problems = []
@@ -135,10 +143,24 @@ export function repair(p, { defaultVault = DEFAULT_VAULT } = {}) {
   return { proposal: out, repairs }
 }
 
+// The fields that ARE the memory. Everything else on a proposal — including `summary`,
+// `type` and `entities`, which the drain does write on a first write — is an annotation on
+// this identity, not part of it.
+//
+// Stated precisely because the earlier comment said "excludes tags/importance" and excluded
+// three more fields than it named. The consequence is real and has to be said out loud: a
+// re-proposal that corrects a `summary`, `type` or `entities` has the same op_id, so the
+// server returns the existing engram and the correction does not land. That is the right
+// trade — including them would mint a rival near-duplicate for a one-word summary edit,
+// which is the pollution the whole design avoids — but it is only acceptable because the
+// drain now REPORTS it (counts.unapplied_annotations, a NOT APPLIED line, and
+// `annotations_not_applied` in the archive) instead of logging "already had" and moving on.
+// Correcting a live memory's annotations is muninn_evolve's job, not a re-proposal's.
+export const IDENTITY_FIELDS = ['vault', 'concept', 'content']
+
 // Content-derived, so the same finding proposed twice is the same op_id and the server's
 // idempotency receipt answers "have I already written this?" exactly, in O(1), with no
-// embedder and no similarity heuristic. Deliberately excludes tags/importance: those can be
-// refined without minting a new memory.
+// embedder and no similarity heuristic.
 //
 // The fields are JSON-encoded rather than joined by a separator character. The previous
 // version used a literal NUL between fields — correct delimiting, but two invisible NUL
@@ -153,7 +175,7 @@ export function repair(p, { defaultVault = DEFAULT_VAULT } = {}) {
 // change — of which there are none.
 export function opIdFor(p) {
   return 'mp-' + createHash('sha256')
-    .update(JSON.stringify([p.vault, p.concept, p.content]))
+    .update(JSON.stringify(IDENTITY_FIELDS.map((f) => p[f])))
     .digest('hex').slice(0, 24)
 }
 

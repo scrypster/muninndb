@@ -89,10 +89,21 @@ if (CHECK) {
   process.exit(0)
 }
 
-const lock = acquireLock(P.lock, { waitMs: 5000 })
+// Take the lock if it is free — it is the cheapest way to be sure — but APPEND EITHER WAY.
+//
+// This used to exit 1 and append nothing when the lock was held. That converted a held lock
+// into a lost finding, which is the exact failure the entire mechanism exists to prevent,
+// and it was reachable: a drain killed by its 60 s hook timeout left the lock on disk and
+// blocked every producer for the ~10 minutes until the stale breaker fired. Measured at the
+// time: `memory-propose exit=1 after 5033 ms`, ledger lines 0. The loss window had moved
+// from the drain to the producer, not closed.
+//
+// An unlocked append is safe against a concurrent drain: it lands past the byte offset the
+// drain pinned, so it is in the tail the splice preserves verbatim — the same path a raw
+// `>>` has always taken, and the reason spliceConsumed exists (memory-ledger.mjs).
+const lock = acquireLock(P.lock, { waitMs: 3000 })
 if (!lock.ok) {
-  console.error(`memory-propose: ${lock.why} — nothing appended, retry in a moment.`)
-  process.exit(1)
+  console.error(`memory-propose: ${lock.why}; appending anyway — a held lock must never cost a finding.`)
 }
 try {
   appendRecords(P.ledger, prepared)

@@ -1,6 +1,10 @@
 // pipeline.test.mjs — the memory pipeline's own tests.
 //
-// Run: node --test .claude/hooks/tests/
+// Run: node --test .claude/hooks/tests/*.test.mjs      <- the glob, expanded by the shell
+//
+// NOT `node --test .claude/hooks/tests/` — the runner's directory walker skips dot-
+// directories, so the directory form finds nothing and exits 1 with MODULE_NOT_FOUND in
+// ~30 ms. An implausibly fast non-run is easy to read as green (Node v22.21.1).
 //
 // NOT in CI: the CI budget is for the Go gate (docs/internals/drift-and-obligations.md), and
 // this tooling is developer-local. It is fast (a few seconds, one loopback HTTP server, no
@@ -16,13 +20,14 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { validate, repair, opIdFor } from '../memory-schema.mjs'
+import { canonicalRoot } from '../memory-ledger.mjs'
 
 const HOOKS = dirname(dirname(fileURLToPath(import.meta.url)))
 const DRAIN = join(HOOKS, 'memory-drain.mjs')
@@ -48,8 +53,14 @@ function proposal(n, extra = {}) {
   }
 }
 
-/** A stand-in MuninnDB MCP endpoint. `onRemember` can mutate the world mid-drain. */
-async function fakeMuninn({ onRemember = () => ({}) } = {}) {
+/**
+ * A stand-in MuninnDB MCP endpoint. `onRemember` can mutate the world mid-drain.
+ *   hang: 'muninn_status' | 'muninn_remember' — accept the request and never answer it,
+ *         which is the failure a connection-refused test cannot reach.
+ *   rememberStatus: an HTTP status for muninn_remember (500 = the server-error branch).
+ *   onArrive(name): called the moment a request is fully received, before any response.
+ */
+async function fakeMuninn({ onRemember = () => ({}), hang = null, rememberStatus = 200, onArrive = null } = {}) {
   const calls = []
   const srv = createServer((req, res) => {
     let body = ''
@@ -59,6 +70,13 @@ async function fakeMuninn({ onRemember = () => ({}) } = {}) {
       const name = env?.params?.name
       const args = env?.params?.arguments || {}
       calls.push({ name, args })
+      if (onArrive) onArrive(name, args)
+      if (hang === name) return                       // headers never sent, body never ends
+      if (name === 'muninn_remember' && rememberStatus !== 200) {
+        res.writeHead(rememberStatus, { 'Content-Type': 'text/plain' })
+        res.end('internal error')
+        return
+      }
       let payload
       if (name === 'muninn_status') payload = { status: 'ok' }
       else if (name === 'muninn_remember') payload = { id: `eng-${calls.length}`, ...onRemember(args, calls.length) }
@@ -68,23 +86,31 @@ async function fakeMuninn({ onRemember = () => ({}) } = {}) {
     })
   })
   await new Promise((r) => srv.listen(0, '127.0.0.1', r))
-  return { base: `http://127.0.0.1:${srv.address().port}/mcp`, calls, close: () => new Promise((r) => srv.close(r)) }
+  return {
+    base: `http://127.0.0.1:${srv.address().port}/mcp`,
+    calls,
+    close: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r) }),
+  }
 }
 
-function runNode(script, args, { root, env = {} } = {}) {
-  return new Promise((resolve) => {
-    const p = spawn(process.execPath, [script, ...args], {
-      cwd: root,
-      env: { ...process.env, CLAUDE_PROJECT_DIR: root, MUNINN_MCP_TOKEN: 'mdb_test', ...env },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-    let out = '', err = ''
-    p.stdout.on('data', (c) => { out += c })
-    p.stderr.on('data', (c) => { err += c })
-    if (env.__stdin !== undefined) p.stdin.write(env.__stdin)
-    p.stdin.end()
-    p.on('close', (code) => resolve({ code, out, err }))
+/** Spawn and expose the child, so a test can signal it deterministically. */
+function spawnNode(script, args, { root, env = {} } = {}) {
+  const p = spawn(process.execPath, [script, ...args], {
+    cwd: root,
+    env: { ...process.env, CLAUDE_PROJECT_DIR: root, MUNINN_MCP_TOKEN: 'mdb_test', ...env },
+    stdio: ['pipe', 'pipe', 'pipe'],
   })
+  let out = '', err = ''
+  p.stdout.on('data', (c) => { out += c })
+  p.stderr.on('data', (c) => { err += c })
+  if (env.__stdin !== undefined) p.stdin.write(env.__stdin)
+  p.stdin.end()
+  const done = new Promise((resolve) => p.on('close', (code, signal) => resolve({ code, signal, out, err })))
+  return { proc: p, done }
+}
+
+function runNode(script, args, opts = {}) {
+  return spawnNode(script, args, opts).done
 }
 
 function lines(path) {
@@ -373,9 +399,376 @@ test('--max caps a run and leaves the remainder queued for the next one', async 
 })
 
 test('op_id delimiting is unambiguous — a shifted field boundary is a different memory', () => {
-  const a = { vault: 'v', concept: 'alpha beta', content: 'gamma' }
-  const b = { vault: 'v', concept: 'alpha', content: 'beta gamma' }
+  // The fixture has to be one that an UNDELIMITED formula gets wrong, or it pins nothing.
+  // The previous pair here was ('alpha beta','gamma') vs ('alpha','beta gamma') — the space
+  // that moves across the boundary is itself a delimiter, so plain concatenation
+  // distinguishes them too and the test passed with the delimiting removed entirely.
+  const a = { vault: 'v', concept: 'ab', content: 'ccc'.repeat(20) }
+  const b = { vault: 'v', concept: 'a', content: 'b' + 'ccc'.repeat(20) }
+  const naive = (p) => p.vault + p.concept + p.content
+  assert.equal(naive(a), naive(b),
+    'this fixture is only discriminating if an undelimited formula WOULD collide on it')
   assert.notEqual(opIdFor(a), opIdFor(b), 'a separator that can appear inside a field is not a separator')
+})
+
+// ── F1: the debounce watermark ────────────────────────────────────────────────────────────
+//
+// `last_run_at` moves forward and never back, and an untouched ledger's mtime does not move
+// at all, so `ledgerM <= lastRun` never expires on its own. One run that advanced the
+// watermark WITHOUT consuming anything therefore disabled the debounced `Stop` trigger
+// permanently — measured: daemon down for one Stop, healthy for the next, still reporting
+// "ledger unchanged since the last run" with considered 0 thirty days later, proposals
+// stranded. That is precisely the crash/kill case `Stop` exists to cover, and `--hook`
+// exit 0 means nothing reports it.
+const OLD_WATERMARK = '2020-01-01T00:00:00.000Z'
+
+function seedReceipt(root, lastRunAt) {
+  writeFileSync(join(root, '.claude', 'memory-drain-receipt.json'),
+    JSON.stringify({ at: lastRunAt, trigger: 'seed', outcome: 'ok', last_run_at: lastRunAt }, null, 2))
+}
+const readReceiptFile = (root) => JSON.parse(readFileSync(join(root, '.claude', 'memory-drain-receipt.json'), 'utf8'))
+
+test('F1: only an outcome that consumed from the ledger advances the debounce watermark', async (t) => {
+  const srv = await fakeMuninn()
+  t.after(() => srv.close())
+
+  // [name, advances?, setup -> {root, args, env}]
+  const cases = [
+    ['ok', true, () => {
+      const { root } = makeRepo([proposal(1)]); return { root, args: ['--base', srv.base] }
+    }],
+    ['partial', true, () => {
+      const { root } = makeRepo([proposal(1)])
+      return { root, args: ['--base', srv.base], env: { MUNINN_MCP_TOKEN: '', MUNINN_TOKEN: '' } }
+    }],
+    ['empty', true, () => {
+      const { root } = makeRepo([]); return { root, args: ['--base', srv.base] }
+    }],
+    ['no-ledger', true, () => {
+      const { root, ledger } = makeRepo([]); rmSync(ledger); return { root, args: ['--base', srv.base] }
+    }],
+    ['rewrite-refused', true, () => {
+      const { root, ledger } = makeRepo([proposal(1), proposal(2)])
+      rewriteTarget = ledger
+      return { root, args: ['--base', refuseSrv.base] }
+    }],
+    ['locked', false, () => {
+      const { root } = makeRepo([proposal(1)])
+      writeFileSync(join(root, '.claude', 'memory-proposals.lock'), JSON.stringify({ pid: 999999, at: new Date().toISOString() }))
+      return { root, args: ['--base', srv.base] }
+    }],
+    ['unreachable', false, () => {
+      const { root } = makeRepo([proposal(1)]); return { root, args: ['--base', 'http://127.0.0.1:1/mcp'] }
+    }],
+    ['error', false, () => {
+      const { root, ledger } = makeRepo([]); rmSync(ledger); mkdirSync(ledger)   // EISDIR on read
+      return { root, args: ['--base', srv.base] }
+    }],
+    ['debounced', false, () => {
+      const { root } = makeRepo([proposal(1)])
+      return { root, args: ['--base', srv.base, '--debounce', '60'], recent: true }
+    }],
+  ]
+
+  // A dedicated server for the rewrite-refused case: it clobbers the consumed prefix.
+  let rewriteTarget = null
+  const refuseSrv = await fakeMuninn({ onRemember: () => { writeFileSync(rewriteTarget, JSON.stringify(proposal(42)) + '\n'); return {} } })
+  t.after(() => refuseSrv.close())
+
+  const wrong = []
+  for (const [name, advances, setup] of cases) {
+    const { root, args, env = {}, recent = false } = setup()
+    const sentinel = recent ? new Date(Date.now() - 60_000).toISOString() : OLD_WATERMARK
+    seedReceipt(root, sentinel)
+    await runNode(DRAIN, args, { root, env })
+    const rc = readReceiptFile(root)
+    assert.equal(rc.outcome, name, `case '${name}' did not produce that outcome (got '${rc.outcome}' — ${rc.why})`)
+    const moved = rc.last_run_at !== sentinel
+    if (moved !== advances) {
+      wrong.push(`${name}: watermark ${moved ? 'ADVANCED' : 'held'} (${rc.last_run_at}), expected ${advances ? 'advance' : 'hold at ' + sentinel}`)
+    }
+    if (advances) assert.ok(Date.parse(rc.last_run_at) > Date.parse(sentinel), `${name}: watermark must be a real forward timestamp`)
+  }
+  assert.deepEqual(wrong, [], `an outcome that consumed nothing must not move the debounce watermark:\n  ${wrong.join('\n  ')}`)
+})
+
+test('F1: a failed run does not wedge the next Stop — the drain retries and drains', async (t) => {
+  const { root, ledger } = makeRepo([proposal(1)])
+  // Stop #1: the daemon is down. Nothing consumed.
+  await runNode(DRAIN, ['--base', 'http://127.0.0.1:1/mcp', '--hook', '--trigger', 'Stop', '--debounce', '20'], { root })
+  assert.equal(readReceiptFile(root).outcome, 'unreachable')
+  assert.equal(lines(ledger).length, 1)
+
+  // Stop #2, more than the debounce window later, daemon healthy, ledger untouched since.
+  const srv = await fakeMuninn()
+  t.after(() => srv.close())
+  const past = new Date(Date.now() - 60 * 60_000)
+  const rc = readReceiptFile(root)
+  writeFileSync(join(root, '.claude', 'memory-drain-receipt.json'), JSON.stringify({ ...rc, at: past.toISOString(), last_run_at: rc.last_run_at }, null, 2))
+
+  await runNode(DRAIN, ['--base', srv.base, '--hook', '--trigger', 'Stop', '--debounce', '20'], { root })
+  const rc2 = readReceiptFile(root)
+  assert.notEqual(rc2.outcome, 'debounced', `the ledger has never been consumed; a Stop must not debounce it away (${rc2.why})`)
+  assert.equal(rc2.counts.written, 1)
+  assert.equal(lines(ledger).length, 0)
+})
+
+test('F1: the debounce DOES skip when the ledger genuinely has not changed since a real run', async (t) => {
+  const srv = await fakeMuninn()
+  t.after(() => srv.close())
+  const { root } = makeRepo([proposal(1)])
+  await runNode(DRAIN, ['--base', srv.base], { root })          // consumes; ledger now empty
+
+  // Push both the watermark and the ledger's mtime well into the past, ledger oldest, so
+  // `quiet` is false and only the ledger-unchanged branch can fire.
+  const rc = readReceiptFile(root)
+  const runAt = new Date(Date.now() - 90 * 60_000)
+  writeFileSync(join(root, '.claude', 'memory-drain-receipt.json'), JSON.stringify({ ...rc, last_run_at: runAt.toISOString() }, null, 2))
+  const older = new Date(Date.now() - 120 * 60_000)
+  utimesSync(join(root, '.claude', 'memory-proposals.jsonl'), older, older)
+
+  await runNode(DRAIN, ['--base', srv.base, '--debounce', '20'], { root })
+  const rc2 = readReceiptFile(root)
+  assert.equal(rc2.outcome, 'debounced')
+  assert.match(rc2.why, /ledger unchanged since the last run/)
+  assert.equal(rc2.considered, 0)
+})
+
+// ── F2: a drain that cannot finish must still release the lock and leave a receipt ────────
+//
+// `mcp()` had no timeout of any kind. A daemon that accepts the connection and never
+// answers hung the drain for the whole 60 s hook timeout, and the SIGTERM that ended it
+// left the lock on disk with NO receipt written — so `stat` returned the PREVIOUS receipt,
+// fresh-looking and wrong, and the leaked lock then blocked every producer.
+test('F2: a daemon that accepts and never answers is bounded, not hung', { timeout: 20_000 }, async (t) => {
+  const srv = await fakeMuninn({ hang: 'muninn_status' })
+  t.after(() => srv.close())
+  const { root, ledger } = makeRepo([proposal(1)])
+
+  const t0 = Date.now()
+  const r = await runNode(DRAIN, ['--base', srv.base, '--timeout', '600'], { root })
+  const elapsed = Date.now() - t0
+
+  assert.ok(elapsed < 10_000, `the drain must bound its own call, not wait to be killed (took ${elapsed} ms)`)
+  const rc = readReceiptFile(root)
+  assert.equal(rc.outcome, 'unreachable')
+  assert.match(rc.why, /no response within 600 ms/)
+  assert.equal(existsSync(join(root, '.claude', 'memory-proposals.lock')), false, 'the lock must not survive the run')
+  assert.equal(lines(ledger).length, 1, 'nothing was consumed')
+  assert.equal(r.code, 1)
+})
+
+test('F2: a SIGTERM mid-write releases the lock and still writes a receipt', { timeout: 20_000 }, async (t) => {
+  let killer = null
+  const srv = await fakeMuninn({
+    hang: 'muninn_remember',
+    onArrive: (name) => { if (name === 'muninn_remember') killer?.() },
+  })
+  t.after(() => srv.close())
+  const { root, ledger } = makeRepo([proposal(1)])
+
+  // No timeout flag: this is the harness-kills-us path, not the self-bounded one.
+  const { proc, done } = spawnNode(DRAIN, ['--base', srv.base, '--timeout', '60000'], { root })
+  killer = () => proc.kill('SIGTERM')                     // fires when the request lands
+  const r = await done
+
+  assert.equal(existsSync(join(root, '.claude', 'memory-proposals.lock')), false,
+    'a killed drain must not leave the lock behind — it blocks every producer until the stale breaker fires')
+  const rc = readReceiptFile(root)
+  assert.equal(rc.outcome, 'interrupted', r.out + r.err)
+  assert.match(rc.why, /SIGTERM/)
+  assert.equal(rc.last_run_at, null, 'an interrupted run consumed nothing, so it must not advance the watermark')
+  assert.equal(lines(ledger).length, 1, 'the ledger is rewritten only at the end, so nothing was consumed')
+})
+
+test('F2: a producer never loses a finding to a held lock', async () => {
+  const { root, ledger } = makeRepo([])
+  writeFileSync(join(root, '.claude', 'memory-proposals.lock'), JSON.stringify({ pid: 999999, at: new Date().toISOString() }))
+  const r = await runNode(PROPOSE, [], { root, env: { __stdin: JSON.stringify(proposal(1)) } })
+  assert.equal(r.code, 0, `a held lock must not cost a finding:\n${r.err}`)
+  assert.match(r.err, /appending anyway/)
+  assert.equal(lines(ledger).length, 1)
+})
+
+// ── F3: the guards that had no coverage at all ────────────────────────────────────────────
+test('F3: a server-side write failure retains the line — not written, not dead-lettered, not lost', async (t) => {
+  const srv = await fakeMuninn({ rememberStatus: 500 })
+  t.after(() => srv.close())
+  const { root, ledger } = makeRepo([proposal(1)])
+
+  const r = await runNode(DRAIN, ['--base', srv.base], { root })
+  assert.equal(r.code, 1)
+  assert.equal(lines(ledger).length, 1, 'a 500 is the world failing, not the line — the proposal stays queued')
+  assert.equal(lines(join(root, '.claude', 'memory-proposals.deadletter.jsonl')).length, 0)
+  const rc = readReceiptFile(root)
+  assert.equal(rc.outcome, 'partial')
+  assert.equal(rc.counts.failed, 1)
+  assert.equal(rc.counts.retained, 1)
+  assert.equal(rc.counts.written, 0)
+})
+
+test('F3: a drain does not run while another holds the lock, and touches nothing', async (t) => {
+  const srv = await fakeMuninn()
+  t.after(() => srv.close())
+  const { root, ledger } = makeRepo([proposal(1)])
+  const lockPath = join(root, '.claude', 'memory-proposals.lock')
+  const holder = JSON.stringify({ pid: 999999, at: new Date().toISOString() })
+  writeFileSync(lockPath, holder)
+
+  await runNode(DRAIN, ['--base', srv.base], { root })
+  const rc = readReceiptFile(root)
+  assert.equal(rc.outcome, 'locked')
+  assert.equal(lines(ledger).length, 1, 'a second drain must not consume the first one\'s ledger')
+  assert.equal(srv.calls.length, 0, 'and must not write to the vault at all')
+  assert.equal(readFileSync(lockPath, 'utf8'), holder, "and must not steal the holder's lock")
+})
+
+test('F3: a stale lock from a crashed holder is broken, not obeyed forever', async (t) => {
+  const srv = await fakeMuninn()
+  t.after(() => srv.close())
+  const { root, ledger } = makeRepo([proposal(1)])
+  const lockPath = join(root, '.claude', 'memory-proposals.lock')
+  writeFileSync(lockPath, JSON.stringify({ pid: 999999, at: '2020-01-01T00:00:00.000Z' }))
+  const ancient = new Date(Date.now() - 60 * 60_000)          // an hour old; breaker is 10 min
+  utimesSync(lockPath, ancient, ancient)
+
+  await runNode(DRAIN, ['--base', srv.base], { root })
+  const rc = readReceiptFile(root)
+  assert.equal(rc.outcome, 'ok', `a SIGKILLed holder must not wedge the queue forever (${rc.why})`)
+  assert.equal(rc.counts.written, 1)
+  assert.equal(lines(ledger).length, 0)
+  assert.equal(existsSync(lockPath), false)
+})
+
+// ── F5: an idempotency hit must not silently swallow a correction ──────────────────────────
+test('F5: a re-proposal whose non-identity fields changed is reported, never silently dropped', async (t) => {
+  const srv = await fakeMuninn({ onRemember: () => ({ id: 'eng-existing', idempotent: true }) })
+  t.after(() => srv.close())
+  const corrected = proposal(1, { summary: 'a corrected summary', type: 'decision', entities: ['thing'] })
+  const { root } = makeRepo([corrected])
+
+  const r = await runNode(DRAIN, ['--base', srv.base], { root })
+  const rc = readReceiptFile(root)
+  assert.equal(rc.counts.idempotent, 1)
+  assert.equal(rc.counts.unapplied_annotations, 1,
+    'identity is (vault, concept, content); a changed summary/type/entities does NOT land, so it has to be said')
+  assert.match(r.out, /NOT APPLIED/)
+  assert.match(r.out, /summary/)
+  const arch = JSON.parse(lines(join(root, '.claude', 'memory-proposals.drained.jsonl'))[0])
+  assert.deepEqual(arch.annotations_not_applied, ['summary', 'type', 'entities'])
+  assert.equal(arch.summary, 'a corrected summary', 'the correction is recoverable from the archive')
+})
+
+test('F5: an idempotency hit with nothing to correct stays quiet', async (t) => {
+  const srv = await fakeMuninn({ onRemember: () => ({ id: 'eng-existing', idempotent: true }) })
+  t.after(() => srv.close())
+  const bare = { vault: 'testvault', concept: 'bare', content: 'A proposal carrying identity fields and nothing else at all, comfortably past forty.' }
+  const { root } = makeRepo([bare])
+  const r = await runNode(DRAIN, ['--base', srv.base], { root })
+  assert.equal(readReceiptFile(root).counts.unapplied_annotations, 0)
+  assert.doesNotMatch(r.out, /NOT APPLIED/)
+})
+
+// ── The read boundary: an unterminated trailing line is transient, not permanent ───────────
+test('a half-written trailing line is left for the next run, never dead-lettered', async (t) => {
+  const srv = await fakeMuninn()
+  t.after(() => srv.close())
+  const { root, ledger } = makeRepo([proposal(1)])
+  const torn = '{"vault":"testvault","concept":"torn","cont'
+  appendFileSync(ledger, torn)                                  // no newline: still being written
+
+  await runNode(DRAIN, ['--base', srv.base], { root })
+  assert.equal(lines(join(root, '.claude', 'memory-proposals.deadletter.jsonl')).length, 0,
+    'an incomplete line is a transient state of the world; dead-lettering calls it permanent')
+  assert.equal(readFileSync(ledger, 'utf8'), torn, 'the fragment survives byte-identical, so its completion still parses')
+  const rc = readReceiptFile(root)
+  assert.equal(rc.counts.written, 1)
+  assert.equal(rc.ledger.partial_tail_bytes, torn.length)
+
+  // …and once the writer finishes the line, it drains normally.
+  appendFileSync(ledger, 'ent":"The rest of the line arrives on the second write, which is what makes it transient."}\n')
+  await runNode(DRAIN, ['--base', srv.base], { root })
+  assert.equal(lines(ledger).length, 0)
+  assert.ok(srv.calls.some((c) => c.name === 'muninn_remember' && c.args.concept === 'torn'))
+})
+
+// ── F6: one ledger per repository, not one per worktree ───────────────────────────────────
+//
+// 17 real proposals sat undrained in two scratch worktrees. CLAUDE_PROJECT_DIR is empty in
+// a Bash tool environment, so `paths()` fell back to cwd; an append made with a worktree as
+// cwd landed there, and no session ever has a scratch worktree as its project root. The
+// protocol claimed "no ledger is invisible to the process that would drain it".
+test('F6: a linked worktree resolves to the main checkout, so there is one queue per repo', () => {
+  const main = mkdtempSync(join(tmpdir(), 'muninn-mainrepo-'))
+  mkdirSync(join(main, '.git', 'worktrees', 'scratch'), { recursive: true })
+  writeFileSync(join(main, '.git', 'worktrees', 'scratch', 'commondir'), '../..\n')
+  const wt = mkdtempSync(join(tmpdir(), 'muninn-worktree-'))
+  writeFileSync(join(wt, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'scratch')}\n`)
+
+  assert.equal(canonicalRoot(wt), main, 'a proposal appended from a worktree must queue where a drain will look')
+  assert.equal(canonicalRoot(main), main, 'a main checkout resolves to itself')
+  const notARepo = mkdtempSync(join(tmpdir(), 'muninn-norepo-'))
+  assert.equal(canonicalRoot(notARepo), notARepo, 'and a directory that is not a checkout is left alone')
+})
+
+test('F6: a proposal made from a worktree lands in the repo ledger the drain reads', async (t) => {
+  const srv = await fakeMuninn()
+  t.after(() => srv.close())
+  const main = mkdtempSync(join(tmpdir(), 'muninn-mainrepo-'))
+  mkdirSync(join(main, '.git', 'worktrees', 'scratch'), { recursive: true })
+  writeFileSync(join(main, '.git', 'worktrees', 'scratch', 'commondir'), '../..\n')
+  const wt = mkdtempSync(join(tmpdir(), 'muninn-worktree-'))
+  writeFileSync(join(wt, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'scratch')}\n`)
+
+  const r = await runNode(PROPOSE, [], { root: wt, env: { __stdin: JSON.stringify(proposal(1)) } })
+  assert.equal(r.code, 0, r.err)
+  assert.equal(existsSync(join(wt, '.claude', 'memory-proposals.jsonl')), false, 'nothing may be stranded in the worktree')
+  assert.equal(lines(join(main, '.claude', 'memory-proposals.jsonl')).length, 1)
+
+  // A drain running in the main checkout — which is the only place one ever runs — sees it.
+  await runNode(DRAIN, ['--base', srv.base], { root: main })
+  assert.ok(srv.calls.some((c) => c.name === 'muninn_remember' && c.args.concept === proposal(1).concept))
+})
+
+// ── The receipt has a reader ───────────────────────────────────────────────────────────────
+//
+// Nothing anywhere read the receipt: a grep found the drain's own debounce, .gitignore and
+// prose. A receipt nobody reads is a file, not observability — and combined with a watermark
+// that could not un-wedge itself, `stat` showed a seconds-old `debounced` receipt while
+// findings rotted, which is worse than silence because it looks like an answer.
+const FRESH = join(HOOKS, 'memory-freshness.mjs')
+const context = (r) => { try { return JSON.parse(r.out).hookSpecificOutput.additionalContext } catch { return '' } }
+
+test('freshness: a queue with no receipt at all is reported at session start', async () => {
+  const { root } = makeRepo([proposal(1), proposal(2)])
+  const r = await runNode(FRESH, [], { root, env: { __stdin: JSON.stringify({ cwd: root, session_id: 's1' }) } })
+  assert.equal(r.code, 0)
+  assert.match(context(r), /2 memory proposal\(s\) are queued and the drain has never run/)
+})
+
+test('freshness: an unhealthy last outcome is reported, and a healthy empty one is silent', async (t) => {
+  const srv = await fakeMuninn()
+  t.after(() => srv.close())
+
+  const bad = makeRepo([proposal(1)])
+  await runNode(DRAIN, ['--base', 'http://127.0.0.1:1/mcp'], { root: bad.root })      // unreachable
+  const r1 = await runNode(FRESH, [], { root: bad.root, env: { __stdin: JSON.stringify({ cwd: bad.root }) } })
+  assert.match(context(r1), /ended `unreachable`/)
+  assert.match(context(r1), /1 proposal\(s\) are still queued/)
+
+  const good = makeRepo([proposal(1)])
+  await runNode(DRAIN, ['--base', srv.base], { root: good.root })                     // ok, queue empty
+  const r2 = await runNode(FRESH, [], { root: good.root, env: { __stdin: JSON.stringify({ cwd: good.root }) } })
+  assert.equal(r2.out, '', 'a working pipe must say nothing at all')
+  assert.equal(r2.code, 0)
+})
+
+test('freshness: it cannot fail a session start, whatever it is fed', async () => {
+  const { root } = makeRepo([proposal(1)])
+  for (const stdin of ['', 'not json', '[]', 'null', '{"cwd":123}', JSON.stringify({ cwd: '/nonexistent/nope' })]) {
+    const r = await runNode(FRESH, [], { root, env: { __stdin: stdin } })
+    assert.equal(r.code, 0, `exit 0 for stdin ${JSON.stringify(stdin)}; stderr: ${r.err}`)
+  }
 })
 
 test('no committed hook script contains a NUL byte', async () => {

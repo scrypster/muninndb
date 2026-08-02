@@ -203,13 +203,19 @@ identifiers.
 Direct `muninn_remember` over MCP is not wrong and stays available; the ledger is what makes
 the finding survive a session that has no MCP access, a subagent with no credentials, or a
 context that ends before anyone thinks to write it down. `.claude/hooks/memory-drain.mjs`
-moves the queue into the vault on `PreCompact` / `SessionEnd` / a debounced `Stop`, and every
-invocation leaves a receipt at `.claude/memory-drain-receipt.json` — so "has this ever run?"
-is a `stat`, not an inference. That distinction is the whole point: the first version of this
-mechanism never ran once and nobody could tell.
+moves the queue into the vault on `PreCompact` / `SessionEnd` / a debounced `Stop`. Every
+invocation that is not `SIGKILL`ed leaves a receipt at `.claude/memory-drain-receipt.json`,
+and `memory-freshness.mjs` reads it back at `SessionStart` and speaks up when the queue is
+stale — so "has this ever run?" needs neither a `stat` nor an inference. That distinction is
+the whole point: the first version of this mechanism never ran once and nobody could tell.
+
+There is **one ledger per repository**, in the main checkout: appending from a linked
+worktree resolves through `.git` to the same file, because a per-worktree queue is one no
+drain ever visits (17 proposals were found stranded that way).
 
 Its tests are `node --test .claude/hooks/tests/*.test.mjs` — a few seconds, no daemon, not in
-CI. Run them if you touch the drain.
+CI. Run them if you touch the drain. Use the glob; `node --test .claude/hooks/tests/` finds
+nothing and exits 1 in ~30 ms, because the runner skips dot-directories.
 
 ---
 
