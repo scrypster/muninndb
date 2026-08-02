@@ -2,6 +2,7 @@ package cognitive
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"time"
@@ -28,7 +29,12 @@ type HebbianStore interface {
 	// halfLife is the wall-clock half-life of an unused edge; it must be > 0.
 	// archiveThreshold > 0 enables moving strong floor-hit edges to the 0x25 archive namespace.
 	DecayAssocWeights(ctx context.Context, ws [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error)
-	// UpdateAssocWeightBatch atomically updates multiple association weights in a single batch.
+	// UpdateAssocWeightBatch updates multiple association weights in a single
+	// Pebble batch. What it writes is atomic; what it applies may be a SUBSET.
+	// A pair whose existing metadata cannot be read is skipped rather than
+	// overwritten with fabricated defaults, and reported through an error that
+	// also exposes SkippedUpdates() []int (indices into updates). Callers that
+	// act on an update landing must consult it.
 	UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error
 }
 
@@ -229,7 +235,12 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 	// when effectiveSignal is large (math.Pow(1+lr, n) → +Inf for n in the thousands).
 	// Collect all updates into a batch for atomic commit.
 	var updates []AssocWeightUpdate
+	// idx ties each pending callback to the update that must persist before it
+	// may fire. OnWeightUpdate is NotifyCognitive in production, so a callback
+	// for an update that did not land tells the trigger system about a weight
+	// transition memory does not have.
 	var callbacks []struct {
+		idx int
 		ws  [8]byte
 		id  [16]byte
 		old float64
@@ -299,27 +310,59 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 
 		if hw.OnWeightUpdate != nil {
 			callbacks = append(callbacks, struct {
+				idx int
 				ws  [8]byte
 				id  [16]byte
 				old float64
 				new float64
-			}{stats.ws, pair.a, float64(current), float64(newWeight)})
+			}{len(updates) - 1, stats.ws, pair.a, float64(current), float64(newWeight)})
 		}
 	}
 
-	// Atomically commit all updates in a single batch
+	// Commit the updates. A store may apply the batch PARTIALLY: a pair whose
+	// existing metadata cannot be read is skipped rather than overwritten with
+	// fabricated defaults, and reported via an error that names the skipped
+	// indices (storage.AssocBatchSkipError). Matching on the method rather than
+	// the concrete type keeps this package free of a storage dependency.
+	var batchErr error
+	notPersisted := map[int]struct{}{}
 	if len(updates) > 0 {
 		if err := hw.store.UpdateAssocWeightBatch(ctx, updates); err != nil {
-			slog.Error("hebbian: failed to persist association weights batch",
-				"batch_size", len(updates),
-				"error", err)
+			batchErr = err
+			var partial interface{ SkippedUpdates() []int }
+			if errors.As(err, &partial) {
+				skipped := partial.SkippedUpdates()
+				for _, i := range skipped {
+					notPersisted[i] = struct{}{}
+				}
+				slog.Error("hebbian: association weight updates skipped — existing metadata unreadable; "+
+					"the rest of the batch was applied",
+					"batch_size", len(updates),
+					"skipped", len(skipped),
+					"error", err)
+			} else {
+				// Nothing landed: no update in this batch is persisted.
+				for i := range updates {
+					notPersisted[i] = struct{}{}
+				}
+				slog.Error("hebbian: failed to persist association weights batch",
+					"batch_size", len(updates),
+					"error", err)
+			}
 		}
 	}
 
-	// Fire callbacks after batch commit succeeds
+	// Fire callbacks only for updates that actually persisted.
 	for _, cb := range callbacks {
+		if _, dropped := notPersisted[cb.idx]; dropped {
+			continue
+		}
 		hw.OnWeightUpdate(cb.ws, cb.id, "association_weight", cb.old, cb.new)
 	}
 
-	return nil
+	// Return the failure rather than swallowing it: Worker.Run counts a
+	// non-nil process error in Stats().Errors, which is the only place a
+	// persistence failure in this worker becomes observable. It does not stop
+	// the worker.
+	return batchErr
 }

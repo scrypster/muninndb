@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -301,17 +302,33 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 // FAILED. The two are not the same fact and must not be conflated: weight 0
 // means "no such edge" to every caller, so a swallowed read error makes the
 // Hebbian worker re-seed a strong edge at the 0.01 cold-start weight and makes
-// dream consolidation infer a fresh A→C over one that already exists. A
-// missing or short record is still absence; anything else is an error.
-// (Same policy as rawAssocWeightIndex in assoc_weight_repair.go.)
+// dream consolidation infer a fresh A→C over one that already exists.
+//
+// Three outcomes, not two. A MISSING key is absence. A key holding fewer than
+// 4 bytes is neither absence nor a disk fault but a corrupt record: every
+// writer of the 0x14 index in this package writes exactly 4 bytes
+// (binary.BigEndian.PutUint32 of the float bits), so a shorter one cannot be
+// something this code wrote. Reporting it as absence is the same laundering
+// one layer down — UpdateAssocWeight then reads oldWeight 0, skips the delete
+// of the live forward/reverse keys, and writes a SECOND edge for the pair with
+// a reset relType and peakWeight, which GetAssociations, BFS traversal and
+// DecayAssocWeights all treat as an independent relation.
+//
+// rawAssocWeightIndex (assoc_weight_repair.go) deliberately keeps the LENIENT
+// policy for the same record: it is a whole-vault repair scan whose job is to
+// make progress across damage, not a read-modify-write on one pair.
 func (ps *PebbleStore) GetAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID) (float32, error) {
 	key := keys.AssocWeightIndexKey(wsPrefix, [16]byte(a), [16]byte(b))
 	val, err := ps.pointGet(key)
 	if err != nil {
 		return 0.0, fmt.Errorf("read assoc weight index: %w", err)
 	}
-	if val == nil || len(val) < 4 {
-		return 0.0, nil
+	if val == nil {
+		return 0.0, nil // absent
+	}
+	if len(val) < 4 {
+		return 0.0, fmt.Errorf("read assoc weight index: corrupt record for pair %s->%s: %d bytes, want 4",
+			a.String(), b.String(), len(val))
 	}
 	return math.Float32frombits(binary.BigEndian.Uint32(val[:4])), nil
 }
@@ -455,32 +472,99 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	return nil
 }
 
-// UpdateAssocWeightBatch atomically updates multiple association weights in a single batch.
-// All updates are committed atomically — either all succeed or none do.
+// AssocBatchSkipError reports that UpdateAssocWeightBatch committed every
+// update whose existing metadata it could read, and SKIPPED the ones it could
+// not. It is returned alongside a successful commit — the batch that landed is
+// durable — so a caller must treat it as "partially applied", not "failed".
+//
+// Skipped holds indices into the updates slice passed to the call, ascending.
+// The Hebbian worker uses them to suppress the OnWeightUpdate callbacks for
+// transitions that were never persisted; the in-tree adapters build their
+// storage.AssocWeightUpdate slice positionally, so the indices carry across.
+type AssocBatchSkipError struct {
+	Skipped []int
+	Errs    []error
+	Applied int
+}
+
+// SkippedUpdates returns the indices of the updates that were not applied.
+// Declared as a method so callers in packages that must not import storage can
+// reach it through a one-method interface.
+func (e *AssocBatchSkipError) SkippedUpdates() []int { return e.Skipped }
+
+func (e *AssocBatchSkipError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "update assoc weight batch: %d of %d update(s) skipped, %d applied",
+		len(e.Skipped), len(e.Skipped)+e.Applied, e.Applied)
+	for i, err := range e.Errs {
+		if i > 0 {
+			b.WriteString(";")
+		}
+		fmt.Fprintf(&b, " [%d] %v", e.Skipped[i], err)
+	}
+	return b.String()
+}
+
+// Unwrap exposes the per-pair causes so errors.Is reaches the underlying
+// Pebble failure.
+func (e *AssocBatchSkipError) Unwrap() []error { return e.Errs }
+
+// UpdateAssocWeightBatch updates multiple association weights in a single Pebble
+// batch. Every update whose existing metadata could be read is committed
+// atomically — the batch is all-or-nothing about what it WRITES, so no pair is
+// ever left half-updated and no fabricated tuple is ever persisted.
 // Existing metadata (relType, confidence, createdAt) is preserved per-pair;
 // lastActivated is set to now (Hebbian update = activation).
+//
+// # An unreadable pair is skipped, not fatal to the batch
+//
+// A failed read is NOT an empty edge, so a pair whose metadata cannot be read
+// is left exactly as it is on disk and reported. It does not abort the other
+// updates, and this is a deliberate reversal of the first version of this fix,
+// which aborted the whole batch on the reasoning that "a Pebble point-read
+// failure here is an I/O or lifecycle fault that the subsequent batch.Commit
+// would hit anyway". That reasoning is false. Measured on Pebble v1.1.5 with 8
+// bytes flipped in one .sst and the DB reopened, a point read of the corrupted
+// key returns "pebble/table: invalid table ... (checksum mismatch)" while a
+// batch.Commit immediately afterwards returns nil: a corrupt block is a
+// PERMANENT, KEY-SCOPED fault on a fully writable database.
+//
+// That makes the blast radius of aborting large and standing. The Hebbian
+// worker aggregates up to 50 co-activation events spanning MULTIPLE VAULTS into
+// one call, and a frequently co-activated pair recurs in flush window after
+// flush window — so one unreadable edge would cost every innocent vault in
+// every window its learning, indefinitely. Skipping costs that one pair's
+// update and keeps the rest (principle #2: degrade loudly-but-gracefully).
+//
+// The report is the other half. Returning nil here would be the same
+// silently-wrong class one layer up, so a partial application returns
+// *AssocBatchSkipError naming each skipped pair and its cause, with the indices
+// the caller needs to know which of its updates did not land.
 func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error {
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
 	now := int32(time.Now().Unix())
+	var skipped []int
+	var skipErrs []error
+	applied := 0
 
-	for _, update := range updates {
-		// A failed read is NOT an empty edge. The batch is documented as
-		// all-or-nothing, so one unreadable pair aborts the whole batch rather
-		// than writing fabricated defaults over that edge's live metadata, or
-		// silently dropping the pair (which would lose a learning signal with no
-		// signal to the caller). Both in-tree callers of an errored batch update
-		// already log-and-skip, and a Pebble point-read failure here is an I/O
-		// or lifecycle fault that the subsequent batch.Commit would hit anyway.
+	for i, update := range updates {
 		oldWeight, err := ps.GetAssocWeight(ctx, update.WS, update.Src, update.Dst)
 		if err != nil {
-			return fmt.Errorf("update assoc weight batch: %w", err)
+			skipped = append(skipped, i)
+			skipErrs = append(skipErrs, fmt.Errorf("pair %s->%s: %w",
+				ULID(update.Src).String(), ULID(update.Dst).String(), err))
+			continue
 		}
 		relType, confidence, createdAt, _, existingPeak, existingCoAct, existingRestoredAt, err := ps.getAssocValueFull(ctx, update.WS, ULID(update.Src), ULID(update.Dst))
 		if err != nil {
-			return fmt.Errorf("update assoc weight batch: %w", err)
+			skipped = append(skipped, i)
+			skipErrs = append(skipErrs, fmt.Errorf("pair %s->%s: %w",
+				ULID(update.Src).String(), ULID(update.Dst).String(), err))
+			continue
 		}
+		applied++
 
 		if oldWeight > 0 {
 			batch.Delete(keys.AssocFwdKey(update.WS, update.Src, oldWeight, update.Dst), nil)
@@ -538,6 +622,9 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 
 	// Invalidate assoc cache for all updated source nodes.
 	// Deduplicate to avoid redundant removals when a source appears multiple times.
+	// Skipped sources are invalidated too: dropping a cache entry can only cost a
+	// re-read, and the cached list for a source whose read just failed is exactly
+	// the entry least worth trusting.
 	seen := make(map[[24]byte]struct{}, len(updates))
 	for _, update := range updates {
 		ck := assocCacheKey(update.WS, update.Src)
@@ -545,6 +632,9 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 			seen[ck] = struct{}{}
 			ps.assocCache.Remove(ck)
 		}
+	}
+	if len(skipped) > 0 {
+		return &AssocBatchSkipError{Skipped: skipped, Errs: skipErrs, Applied: applied}
 	}
 	return nil
 }

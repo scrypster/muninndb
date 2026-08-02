@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,114 +178,109 @@ func TestUpdateAssocWeight_ReadFailureDoesNotOverwriteEdge(t *testing.T) {
 	}
 }
 
-// TestGetAssocWeight_ReadErrorPropagates pins the weight-index half of the same
-// class. Weight 0 means "no such edge" to every caller: the Hebbian worker
-// re-seeds a cold-start 0.01 over a strong edge, and dream consolidation infers
-// a fresh A→C over one that already exists. Absence and failure must differ.
-func TestGetAssocWeight_ReadErrorPropagates(t *testing.T) {
+// failReadsForSource returns a readFault scoped to ONE pair's namespace: reads
+// of forward-association keys under (ws, src) fail, everything else succeeds.
+// Prefix-wide faults cannot express the case that matters for a multi-vault
+// batch — one unreadable pair among readable ones.
+func failReadsForSource(ws [8]byte, src ULID) func([]byte) error {
+	scoped := make([]byte, 0, 25)
+	scoped = append(scoped, prefix.AssocFwd)
+	scoped = append(scoped, ws[:]...)
+	scoped = append(scoped, src[:]...)
+	return func(key []byte) error {
+		if bytes.HasPrefix(key, scoped) {
+			return errInjectedRead
+		}
+		return nil
+	}
+}
+
+// TestUpdateAssocWeightBatch_OneUnreadablePairDoesNotStopTheRest pins the
+// blast-radius decision for a permanently unreadable pair.
+//
+// processBatch aggregates up to 50 CoActivationEvents spanning MULTIPLE VAULTS
+// into one AssocWeightUpdate slice. A corrupt Pebble block is a permanent,
+// KEY-SCOPED fault on an otherwise fully writable DB — a point read of the bad
+// key returns a checksum error while a subsequent batch.Commit succeeds — so a
+// pair that fails to read fails to read on every flush window that contains it.
+// And a frequently co-activated pair is in the index precisely BECAUSE it is
+// frequently co-activated, so it recurs.
+//
+// Aborting the whole batch therefore converts one edge's unreadable metadata
+// into a standing Hebbian-learning outage for every innocent vault sharing the
+// flush window. The contract's "either all succeed or none do" is about the
+// atomicity of what gets WRITTEN — nothing half-written, no fabricated tuple
+// ever persisted — not a promise to write nothing when one INPUT is unreadable.
+// So: skip the unreadable pair, apply the rest, and report loudly enough that
+// the caller can tell which updates did not land (principle #2, degrade
+// loudly-but-gracefully; a silent skip would be the same silently-wrong class
+// one layer up).
+func TestUpdateAssocWeightBatch_OneUnreadablePairDoesNotStopTheRest(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("assoc-read-fail-weight")
 
-	src, dst := NewULID(), NewULID()
-	seedEdge(t, store, ws, src, dst, 0.7)
+	wsA := store.VaultPrefix("batch-partial-innocent-before")
+	wsB := store.VaultPrefix("batch-partial-unreadable")
+	wsC := store.VaultPrefix("batch-partial-innocent-after")
 
-	// Absence still reports 0 with no error.
-	absent, err := store.GetAssocWeight(ctx, ws, src, NewULID())
-	if err != nil {
-		t.Fatalf("GetAssocWeight (absent): unexpected error %v", err)
-	}
-	if absent != 0 {
-		t.Errorf("GetAssocWeight (absent): got %v, want 0", absent)
-	}
+	aSrc, aDst := NewULID(), NewULID()
+	bSrc, bDst := NewULID(), NewULID()
+	cSrc, cDst := NewULID(), NewULID()
 
-	store.readFault = failReadsWithPrefix(prefix.AssocWeightIndex)
-	defer func() { store.readFault = nil }()
+	seedEdge(t, store, wsA, aSrc, aDst, 0.5)
+	bOrig := seedEdge(t, store, wsB, bSrc, bDst, 0.5)
+	seedEdge(t, store, wsC, cSrc, cDst, 0.5)
 
-	w, err := store.GetAssocWeight(ctx, ws, src, dst)
+	store.readFault = failReadsForSource(wsB, bSrc)
+
+	err := store.UpdateAssocWeightBatch(ctx, []AssocWeightUpdate{
+		{WS: wsA, Src: [16]byte(aSrc), Dst: [16]byte(aDst), Weight: 0.42, CountDelta: 1},
+		{WS: wsB, Src: [16]byte(bSrc), Dst: [16]byte(bDst), Weight: 0.30, CountDelta: 1},
+		{WS: wsC, Src: [16]byte(cSrc), Dst: [16]byte(cDst), Weight: 0.37, CountDelta: 1},
+	})
+
+	store.readFault = nil
+
+	// The failure is reported, not swallowed.
 	if err == nil {
-		t.Fatalf("GetAssocWeight: want error on a failed read, got weight %v and nil error", w)
+		t.Fatal("UpdateAssocWeightBatch: want an error naming the skipped pair, got nil — a silent skip is silently-wrong")
 	}
 	if !errors.Is(err, errInjectedRead) {
-		t.Errorf("GetAssocWeight: want wrapped injected read failure, got %v", err)
+		t.Errorf("UpdateAssocWeightBatch: want the injected read failure wrapped, got %v", err)
 	}
-}
-
-// TestGetAssocValueFull_ReadErrorPropagates pins the metadata reader itself.
-func TestGetAssocValueFull_ReadErrorPropagates(t *testing.T) {
-	store := newTestStore(t)
-	ws := store.VaultPrefix("assoc-read-fail-full")
-
-	src, dst := NewULID(), NewULID()
-	seedEdge(t, store, ws, src, dst, 0.6)
-
-	// Absence: no edge, no error.
-	_, _, _, _, _, _, _, err := store.getAssocValueFull(context.Background(), ws, src, NewULID())
-	if err != nil {
-		t.Fatalf("getAssocValueFull (absent): unexpected error %v", err)
+	// The error names the pair the caller lost, so an operator can act on it.
+	if !strings.Contains(err.Error(), bSrc.String()) || !strings.Contains(err.Error(), bDst.String()) {
+		t.Errorf("UpdateAssocWeightBatch error must name the skipped pair %s->%s, got: %v", bSrc, bDst, err)
 	}
 
-	store.readFault = failReadsWithPrefix(prefix.AssocFwd)
-	defer func() { store.readFault = nil }()
-
-	relType, _, _, _, peak, _, _, err := store.getAssocValueFull(context.Background(), ws, src, dst)
-	if err == nil {
-		t.Fatalf("getAssocValueFull: want error on a failed read, got relType=%v peak=%v and nil error", relType, peak)
+	// The innocent vaults' updates landed — both the one ordered BEFORE the bad
+	// pair and the one ordered AFTER it.
+	if w, gerr := store.GetAssocWeight(ctx, wsA, aSrc, aDst); gerr != nil || w < 0.419 || w > 0.421 {
+		t.Errorf("innocent vault ordered BEFORE the unreadable pair: weight %v, err %v; want 0.42 — "+
+			"one unreadable pair must not cost an unrelated vault its learning", w, gerr)
 	}
-	if !errors.Is(err, errInjectedRead) {
-		t.Errorf("getAssocValueFull: want wrapped injected read failure, got %v", err)
-	}
-}
-
-// TestReadOrdinal_ReadErrorPropagates pins the same shape in ReadOrdinal, which
-// reported found=false — indistinguishable from "no ordinal" — on a read error.
-func TestReadOrdinal_ReadErrorPropagates(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-	ws := store.VaultPrefix("ordinal-read-fail")
-
-	parent, child := NewULID(), NewULID()
-	if err := store.WriteOrdinal(ctx, ws, parent, child, 7); err != nil {
-		t.Fatalf("WriteOrdinal: %v", err)
+	if w, gerr := store.GetAssocWeight(ctx, wsC, cSrc, cDst); gerr != nil || w < 0.369 || w > 0.371 {
+		t.Errorf("innocent vault ordered AFTER the unreadable pair: weight %v, err %v; want 0.37", w, gerr)
 	}
 
-	// Corrupt the stored record to a short value: still "absent", not an error.
-	key := keys.OrdinalKey(ws, [16]byte(parent), [16]byte(child))
-	if err := store.db.Set(key, []byte{0x01}, nil); err != nil {
-		t.Fatalf("Set short ordinal: %v", err)
+	// The unreadable pair is untouched: nothing fabricated was written over it.
+	cur, gerr := Get(store.db, keys.AssocFwdKey(wsB, [16]byte(bSrc), 0.5, [16]byte(bDst)))
+	if gerr != nil {
+		t.Fatalf("re-read skipped pair: %v", gerr)
 	}
-	if _, found, err := store.ReadOrdinal(ctx, ws, parent, child); err != nil || found {
-		t.Errorf("ReadOrdinal (short record): got found=%v err=%v, want found=false err=nil", found, err)
+	if !bytes.Equal(cur, bOrig) {
+		t.Errorf("skipped pair rewritten: got %x, want %x", cur, bOrig)
+	}
+	if n := countLiveEdges(t, store, wsB, bSrc, bDst); n != 1 {
+		t.Errorf("skipped pair live forward edges: got %d, want 1", n)
 	}
 
-	store.readFault = failReadsWithPrefix(prefix.Ordinal)
-	defer func() { store.readFault = nil }()
-
-	ord, found, err := store.ReadOrdinal(ctx, ws, parent, child)
-	if err == nil {
-		t.Fatalf("ReadOrdinal: want error on a failed read, got ordinal=%v found=%v nil error", ord, found)
+	// The caller can identify exactly which updates did not land.
+	var partial interface{ SkippedUpdates() []int }
+	if !errors.As(err, &partial) {
+		t.Fatalf("UpdateAssocWeightBatch: want an error exposing SkippedUpdates() []int, got %T: %v", err, err)
 	}
-	if !errors.Is(err, errInjectedRead) {
-		t.Errorf("ReadOrdinal: want wrapped injected read failure, got %v", err)
-	}
-}
-
-// TestAssocReadFaultSeamIsInert asserts the test-only seam is inert when nil,
-// so it can never change production behaviour.
-func TestAssocReadFaultSeamIsInert(t *testing.T) {
-	store := newTestStore(t)
-	ws := store.VaultPrefix("assoc-seam-inert")
-	src, dst := NewULID(), NewULID()
-	seedEdge(t, store, ws, src, dst, 0.5)
-
-	if store.readFault != nil {
-		t.Fatal("readFault must default to nil")
-	}
-	w, err := store.GetAssocWeight(context.Background(), ws, src, dst)
-	if err != nil {
-		t.Fatalf("GetAssocWeight: %v", err)
-	}
-	if math.Abs(float64(w)-0.5) > 0.001 {
-		t.Errorf("weight through the seam: got %v, want 0.5", w)
+	if got := partial.SkippedUpdates(); len(got) != 1 || got[0] != 1 {
+		t.Errorf("SkippedUpdates: got %v, want [1] (the middle update)", got)
 	}
 }

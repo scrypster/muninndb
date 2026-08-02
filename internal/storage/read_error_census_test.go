@@ -6,38 +6,51 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
 
-// TestNoLaunderedReadErrors is a source census over package storage that pins a
-// DEFECT CLASS, not a single defect: a read error disjuncted with an absence
-// check and returned as a zero value.
+// TestPointGetReadersAreCovered is a COMPLETENESS check, not a defect detector.
+// It asserts one decidable fact: every method in package storage whose body
+// calls ps.pointGet appears in absenceVsFailureCases, the behavioural table in
+// association_read_error_test.go.
+//
+// # Why this shape and not a source census for the bad idiom
+//
+// The first version of this file pattern-matched the laundering idiom itself —
+// an `if err != nil || <absence>` whose body returns a zero tuple. That census
+// was replaced because it did not pin the class it claimed to. A full
+// reintroduction of the original defect passed it in four of the five natural
+// ways to write the same bug: naming the error variable `e`, adding a
+// slog.Debug before the return, inverting to `if !(err == nil && val != nil)`,
+// or — the most likely refactor of all — splitting the `||` into two `if`s:
 //
 //	val, err := ps.pointGet(key)
-//	if err != nil || val == nil {
-//	    return 0, 1.0, time.Time{}, 0, 0, 0   // <- laundered
+//	if err != nil {
+//	    return 0.0, nil       // still laundered; no `||` anywhere
 //	}
 //
-// Storage is the layer where that shape is load-bearing, because the tuple a
-// reader fabricates here is the tuple a writer re-encodes a few lines later.
-// The association write path did exactly that: a transient Pebble read failure
-// reset a live edge's relType (reclassifying a directional relation as RelType
-// 0, the Hebbian co-activation type), its createdAt, and its peakWeight — the
-// COG-27 decay-ceiling anchor. Absence is a fact about the vault; failure is a
-// fact about the disk. Returning the first when you observed the second is the
-// silently-wrong class (principle #2).
+// Recognising every way to write a bad `if` is not decidable. Whether a
+// method's OBSERVABLE behaviour under a failed read is an error is, so the
+// table tests that directly and this census only guards the table's coverage.
+// A partial idiom matcher reads as coverage it does not provide, which is worse
+// than no matcher at all.
 //
-// The census flags an `if` whose condition ORs `err != nil` with anything, and
-// whose body is a lone `return` that never mentions the error. Rewriting such a
-// site to propagate the error clears it. There is deliberately no allowlist: a
-// site that genuinely must swallow a read error should say so by returning the
-// error and having its CALLER decide, not by hiding it here.
+// # What this does and does not catch
 //
-// Known limits (documented rather than papered over): it does not see a
-// laundering `continue`/`break` inside a loop, nor one split across a temporary
-// variable. It catches the shape that reached production twice.
-func TestNoLaunderedReadErrors(t *testing.T) {
+// CATCHES: a new pointGet-routed reader added without a table row (so its
+// absence-vs-failure behaviour is never exercised), and the removal of a table
+// row for a reader that still exists.
+//
+// DOES NOT CATCH: a reader that launders a read error while reading through
+// pebble directly (storage.Get, ps.db.Get, an iterator) instead of pointGet.
+// Those are outside the seam and therefore outside this census — the honest
+// boundary, stated so nobody reads more into a green run than it means.
+// FlagContradiction (association.go) is exactly such a reader and is tracked
+// separately as #804; adding it to pointGet would pull it into this census and
+// require a table row, which is the intended way for it to be fixed.
+func TestPointGetReadersAreCovered(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
@@ -48,7 +61,102 @@ func TestNoLaunderedReadErrors(t *testing.T) {
 
 	fset := token.NewFileSet()
 	scanned := 0
-	var findings []string
+	routers := map[string]string{} // method name -> position
+
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		src, rerr := os.ReadFile(path)
+		if rerr != nil {
+			t.Fatalf("read %s: %v", path, rerr)
+		}
+		file, perr := parser.ParseFile(fset, path, src, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+		scanned++
+
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Recv == nil {
+				continue
+			}
+			if fn.Name.Name == "pointGet" {
+				continue // the seam itself
+			}
+			if callsPointGet(fn.Body) {
+				routers[fn.Name.Name] = fset.Position(fn.Pos()).String()
+			}
+		}
+	}
+
+	if scanned == 0 {
+		t.Fatal("census scanned no non-test files")
+	}
+	if len(routers) == 0 {
+		t.Fatal("census found no pointGet callers — the seam was removed or renamed, " +
+			"and this census is now vacuous. Re-point it or delete it deliberately.")
+	}
+
+	covered := map[string]bool{}
+	for _, c := range absenceVsFailureCases {
+		covered[c.method] = true
+	}
+
+	var missing []string
+	for name, pos := range routers {
+		if !covered[name] {
+			missing = append(missing, name+" ("+pos+")")
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Errorf("pointGet-routed reader(s) with no row in absenceVsFailureCases:\n  %s\n"+
+			"Every reader behind the pointGet seam must have its absence-vs-failure behaviour\n"+
+			"exercised: absence is a fact about the vault, failure is a fact about the disk, and\n"+
+			"a reader that reports the first when it observed the second hands a writer a\n"+
+			"fabricated tuple to persist. Add a row to absenceVsFailureCases.",
+			strings.Join(missing, "\n  "))
+	}
+
+	// The table must not name a method that no longer exists, or it silently
+	// stops guarding anything.
+	for _, c := range absenceVsFailureCases {
+		if !c.routesPointGet {
+			continue
+		}
+		if _, ok := routers[c.method]; !ok {
+			t.Errorf("absenceVsFailureCases row %q claims to route through pointGet, but no such "+
+				"method in package storage calls pointGet. Fix the row or clear routesPointGet.", c.method)
+		}
+	}
+
+	names := make([]string, 0, len(routers))
+	for name := range routers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	t.Logf("census scanned %d non-test files; pointGet-routed readers: %s", scanned, strings.Join(names, ", "))
+}
+
+// TestReadFaultIsArmedOnlyByTests asserts the structural fact that
+// TestPointGetSeamIsNilInProductionConstructors relies on and cannot itself
+// establish: nothing outside a _test.go file ever ASSIGNS PebbleStore.readFault,
+// so there is no production path that can arm the seam. The field is
+// unexported, so this package-local scan is complete for the whole program.
+func TestReadFaultIsArmedOnlyByTests(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	fset := token.NewFileSet()
+	var offenders []string
+	scanned := 0
+
+	record := func(n ast.Node) {
+		offenders = append(offenders, fset.Position(n.Pos()).String())
+	}
 
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
@@ -65,86 +173,42 @@ func TestNoLaunderedReadErrors(t *testing.T) {
 		scanned++
 
 		ast.Inspect(file, func(n ast.Node) bool {
-			ifStmt, ok := n.(*ast.IfStmt)
-			if !ok {
-				return true
-			}
-			errName, ok := errOredWithSomethingElse(ifStmt.Cond)
-			if !ok {
-				return true
-			}
-			if len(ifStmt.Body.List) != 1 {
-				return true
-			}
-			ret, ok := ifStmt.Body.List[0].(*ast.ReturnStmt)
-			if !ok {
-				return true
-			}
-			for _, res := range ret.Results {
-				if mentionsIdent(res, errName) {
-					return true // the error survives — not laundered
+			switch node := n.(type) {
+			case *ast.AssignStmt:
+				for _, lhs := range node.Lhs {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "readFault" {
+						record(node)
+					}
+				}
+			case *ast.KeyValueExpr:
+				// A composite literal field: PebbleStore{readFault: ...}.
+				if id, ok := node.Key.(*ast.Ident); ok && id.Name == "readFault" {
+					record(node)
 				}
 			}
-			pos := fset.Position(ifStmt.Pos())
-			findings = append(findings, pos.String())
 			return true
 		})
 	}
 
 	if scanned == 0 {
-		t.Fatal("census scanned no non-test files")
+		t.Fatal("scan found no non-test files — wrong working directory?")
 	}
-	if len(findings) > 0 {
-		t.Errorf("laundered read error(s): an `if %s != nil || ...` returning a zero tuple that drops the error.\n"+
-			"Absence and failure are different facts; a writer downstream will re-encode the fabricated tuple.\n"+
-			"Sites:\n  %s", "err", strings.Join(findings, "\n  "))
+	if len(offenders) > 0 {
+		t.Errorf("readFault is assigned in non-test source, so the fault seam is no longer test-only:\n  %s",
+			strings.Join(offenders, "\n  "))
 	}
-	t.Logf("census scanned %d non-test files in package storage, %d findings", scanned, len(findings))
 }
 
-// errOredWithSomethingElse reports whether cond is a `||` expression with an
-// `<err> != nil` operand, returning the error identifier's name.
-func errOredWithSomethingElse(cond ast.Expr) (string, bool) {
-	bin, ok := cond.(*ast.BinaryExpr)
-	if !ok || bin.Op != token.LOR {
-		return "", false
-	}
-	var name string
-	var walk func(ast.Expr)
-	walk = func(e ast.Expr) {
-		b, ok := e.(*ast.BinaryExpr)
-		if !ok {
-			return
-		}
-		if b.Op == token.LOR {
-			walk(b.X)
-			walk(b.Y)
-			return
-		}
-		if b.Op != token.NEQ {
-			return
-		}
-		lhs, lok := b.X.(*ast.Ident)
-		rhs, rok := b.Y.(*ast.Ident)
-		if lok && rok && rhs.Name == "nil" && isErrName(lhs.Name) {
-			name = lhs.Name
-		}
-	}
-	walk(bin)
-	return name, name != ""
-}
-
-// isErrName matches the conventional error-variable names used in this package.
-func isErrName(s string) bool {
-	return s == "err" || strings.HasSuffix(s, "Err") || strings.HasPrefix(s, "err")
-}
-
-// mentionsIdent reports whether expr references the named identifier anywhere
-// (covering both `return err` and `return fmt.Errorf("...: %w", err)`).
-func mentionsIdent(expr ast.Expr, name string) bool {
+// callsPointGet reports whether body contains a call to a selector named
+// pointGet (i.e. `<recv>.pointGet(...)`).
+func callsPointGet(body *ast.BlockStmt) bool {
 	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && id.Name == name {
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "pointGet" {
 			found = true
 		}
 		return !found
