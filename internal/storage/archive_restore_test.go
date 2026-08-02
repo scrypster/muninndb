@@ -100,7 +100,10 @@ func TestRestoreArchivedEdges_RestoresTopByConsolidation(t *testing.T) {
 	}
 
 	// Verify restoredAt is stamped on the live write.
-	_, _, _, _, _, _, restoredAt1 := store.getAssocValueFull(ws, src, dst1)
+	_, _, _, _, _, _, restoredAt1, err := store.getAssocValueFull(ctx, ws, src, dst1)
+	if err != nil {
+		t.Fatalf("getAssocValueFull: %v", err)
+	}
 	if restoredAt1 == 0 {
 		t.Error("restored edge should have restoredAt stamped")
 	}

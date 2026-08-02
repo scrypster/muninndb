@@ -693,7 +693,10 @@ func TestRestoredAt_ClearedAfterReestablishment(t *testing.T) {
 	}
 
 	// Read back and verify restoredAt is cleared.
-	_, _, _, _, _, _, restoredAt := store.getAssocValueFull(ws, src, dst)
+	_, _, _, _, _, _, restoredAt, err := store.getAssocValueFull(ctx, ws, src, dst)
+	if err != nil {
+		t.Fatalf("getAssocValueFull: %v", err)
+	}
 	if restoredAt != 0 {
 		t.Errorf("restoredAt should be cleared after 3 co-activations, got %v", restoredAt)
 	}

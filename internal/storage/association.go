@@ -296,46 +296,55 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 
 // GetAssocWeight reads the weight of a forward association for pair (a,b).
 // Uses the 0x14 weight index for O(1) lookup.
-// Returns 0.0 if no association exists.
+//
+// Returns (0, nil) when no association exists — and (0, err) when the read
+// FAILED. The two are not the same fact and must not be conflated: weight 0
+// means "no such edge" to every caller, so a swallowed read error makes the
+// Hebbian worker re-seed a strong edge at the 0.01 cold-start weight and makes
+// dream consolidation infer a fresh A→C over one that already exists. A
+// missing or short record is still absence; anything else is an error.
+// (Same policy as rawAssocWeightIndex in assoc_weight_repair.go.)
 func (ps *PebbleStore) GetAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID) (float32, error) {
 	key := keys.AssocWeightIndexKey(wsPrefix, [16]byte(a), [16]byte(b))
-	val, err := Get(ps.db, key)
-	if err != nil || val == nil || len(val) < 4 {
+	val, err := ps.pointGet(key)
+	if err != nil {
+		return 0.0, fmt.Errorf("read assoc weight index: %w", err)
+	}
+	if val == nil || len(val) < 4 {
 		return 0.0, nil
 	}
 	return math.Float32frombits(binary.BigEndian.Uint32(val[:4])), nil
 }
 
-// getAssocValue reads the decoded association metadata for pair (a→b).
-// Uses knownWeight to construct the 0x03 key. Returns zero values if no
-// association exists or the key cannot be read.
-func (ps *PebbleStore) getAssocValue(wsPrefix [8]byte, a, b ULID, knownWeight float32) (relType RelType, confidence float32, createdAt time.Time, lastActivated int32, peakWeight float32, coActivationCount uint32) {
-	if knownWeight <= 0 {
-		return 0, 1.0, time.Time{}, 0, 0, 0
-	}
-	fwdKey := keys.AssocFwdKey(wsPrefix, [16]byte(a), knownWeight, [16]byte(b))
-	val, err := Get(ps.db, fwdKey)
-	if err != nil || val == nil {
-		return 0, 1.0, time.Time{}, 0, 0, 0
-	}
-	relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, _ = decodeAssocValue(val)
-	return
-}
-
 // getAssocValueFull reads all 7 decoded fields for pair (a→b), including restoredAt.
 // Uses GetAssocWeight to determine the current weight, then reads the forward key.
-// Returns zero values (with confidence=1.0) if no association exists.
-func (ps *PebbleStore) getAssocValueFull(wsPrefix [8]byte, a, b ULID) (RelType, float32, time.Time, int32, float32, uint32, int32) {
-	w, _ := ps.GetAssocWeight(context.Background(), wsPrefix, a, b)
+//
+// Absence and failure are distinct returns. Absence is (zero fields with
+// confidence=1.0, nil) — the caller may safely treat the pair as new. Failure
+// is (zero fields, err) and the caller MUST NOT write those zero fields back:
+// re-encoding them overwrites a live edge's relType (reclassifying a
+// directional relation as RelType 0, the Hebbian co-activation type),
+// createdAt, and peakWeight — which anchors the COG-27 decay ceiling
+// (ceiling = peakWeight * 2^(-dt/halfLife)), so a reset peak collapses that
+// edge's ceiling on the next decay pass.
+func (ps *PebbleStore) getAssocValueFull(ctx context.Context, wsPrefix [8]byte, a, b ULID) (RelType, float32, time.Time, int32, float32, uint32, int32, error) {
+	w, err := ps.GetAssocWeight(ctx, wsPrefix, a, b)
+	if err != nil {
+		return 0, 1.0, time.Time{}, 0, 0, 0, 0, err
+	}
 	if w <= 0 {
-		return 0, 1.0, time.Time{}, 0, 0, 0, 0
+		return 0, 1.0, time.Time{}, 0, 0, 0, 0, nil
 	}
 	fwdKey := keys.AssocFwdKey(wsPrefix, [16]byte(a), w, [16]byte(b))
-	val, err := Get(ps.db, fwdKey)
-	if err != nil || val == nil {
-		return 0, 1.0, time.Time{}, 0, 0, 0, 0
+	val, err := ps.pointGet(fwdKey)
+	if err != nil {
+		return 0, 1.0, time.Time{}, 0, 0, 0, 0, fmt.Errorf("read assoc metadata: %w", err)
 	}
-	return decodeAssocValue(val)
+	if val == nil {
+		return 0, 1.0, time.Time{}, 0, 0, 0, 0, nil
+	}
+	relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, restoredAt := decodeAssocValue(val)
+	return relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, restoredAt, nil
 }
 
 // UpdateAssocWeight writes/updates the 0x03 and 0x04 association keys for pair (a,b).
@@ -371,8 +380,16 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	// Read existing metadata (all 7 fields) before deleting old keys.
 	// getAssocValueFull does its own GetAssocWeight internally; capture oldWeight
 	// separately so we can delete the old fwd/rev keys.
-	oldWeight, _ := ps.GetAssocWeight(ctx, wsPrefix, a, b)
-	relType, confidence, createdAt, _, existingPeak, existingCoAct, existingRestoredAt := ps.getAssocValueFull(wsPrefix, a, b)
+	// A failed read is NOT an empty edge: refuse the update rather than
+	// re-encoding fabricated defaults over live metadata (see getAssocValueFull).
+	oldWeight, err := ps.GetAssocWeight(ctx, wsPrefix, a, b)
+	if err != nil {
+		return fmt.Errorf("update assoc weight: %w", err)
+	}
+	relType, confidence, createdAt, _, existingPeak, existingCoAct, existingRestoredAt, err := ps.getAssocValueFull(ctx, wsPrefix, a, b)
+	if err != nil {
+		return fmt.Errorf("update assoc weight: %w", err)
+	}
 
 	if oldWeight > 0 {
 		batch.Delete(keys.AssocFwdKey(wsPrefix, [16]byte(a), oldWeight, [16]byte(b)), nil)
@@ -449,8 +466,21 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 	now := int32(time.Now().Unix())
 
 	for _, update := range updates {
-		oldWeight, _ := ps.GetAssocWeight(ctx, update.WS, update.Src, update.Dst)
-		relType, confidence, createdAt, _, existingPeak, existingCoAct, existingRestoredAt := ps.getAssocValueFull(update.WS, ULID(update.Src), ULID(update.Dst))
+		// A failed read is NOT an empty edge. The batch is documented as
+		// all-or-nothing, so one unreadable pair aborts the whole batch rather
+		// than writing fabricated defaults over that edge's live metadata, or
+		// silently dropping the pair (which would lose a learning signal with no
+		// signal to the caller). Both in-tree callers of an errored batch update
+		// already log-and-skip, and a Pebble point-read failure here is an I/O
+		// or lifecycle fault that the subsequent batch.Commit would hit anyway.
+		oldWeight, err := ps.GetAssocWeight(ctx, update.WS, update.Src, update.Dst)
+		if err != nil {
+			return fmt.Errorf("update assoc weight batch: %w", err)
+		}
+		relType, confidence, createdAt, _, existingPeak, existingCoAct, existingRestoredAt, err := ps.getAssocValueFull(ctx, update.WS, ULID(update.Src), ULID(update.Dst))
+		if err != nil {
+			return fmt.Errorf("update assoc weight batch: %w", err)
+		}
 
 		if oldWeight > 0 {
 			batch.Delete(keys.AssocFwdKey(update.WS, update.Src, oldWeight, update.Dst), nil)

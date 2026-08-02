@@ -29,11 +29,17 @@ func (ps *PebbleStore) WriteOrdinal(ctx context.Context, wsPrefix [8]byte, paren
 }
 
 // ReadOrdinal reads the ordinal for (parentID, childID).
-// Returns found=false if the key does not exist.
+// Returns found=false if the key does not exist (or holds a short record).
+// A read FAILURE is returned as an error rather than as found=false — the two
+// are different facts, and a caller that reorders children on "not found"
+// would silently discard a real ordering on a transient read fault.
 func (ps *PebbleStore) ReadOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID) (int32, bool, error) {
 	key := keys.OrdinalKey(wsPrefix, [16]byte(parentID), [16]byte(childID))
-	val, err := Get(ps.db, key)
-	if err != nil || val == nil || len(val) < 4 {
+	val, err := ps.pointGet(key)
+	if err != nil {
+		return 0, false, fmt.Errorf("read ordinal: %w", err)
+	}
+	if val == nil || len(val) < 4 {
 		return 0, false, nil
 	}
 	return int32(binary.BigEndian.Uint32(val[:4])), true, nil

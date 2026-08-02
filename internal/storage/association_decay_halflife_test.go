@@ -245,7 +245,10 @@ func TestDecayAssoc_LegacyZeroLastActivated_Adopted(t *testing.T) {
 		t.Fatalf("legacy zero-lastActivated edge was decayed: got %v, want 0.7 (floor would be 0.035)", w)
 	}
 
-	_, _, _, lastActivated, _, _ := store.getAssocValue(ws, src, dst, w)
+	_, _, _, lastActivated, _, _, _, err := store.getAssocValueFull(ctx, ws, src, dst)
+	if err != nil {
+		t.Fatalf("getAssocValueFull: %v", err)
+	}
 	if lastActivated != int32(now.Unix()) {
 		t.Errorf("adopted edge was not stamped: lastActivated = %d, want %d", lastActivated, now.Unix())
 	}

@@ -103,6 +103,30 @@ type PebbleStore struct {
 	// is shared across goroutines — setting it after any background worker
 	// has started is a data race.
 	decayNow func() time.Time
+	// readFault is a TEST-ONLY seam, nil in production. When non-nil it is
+	// consulted before every point read routed through pointGet; a non-nil
+	// return is surfaced to the caller exactly as a Pebble read failure would
+	// be. It exists because the association write path's behaviour under a
+	// failed read cannot be exercised any other way: the damage (a live edge's
+	// relType/createdAt/peakWeight overwritten with defaults) only occurs when
+	// the read fails while the write still succeeds, which closing the DB or
+	// deleting the key cannot reproduce.
+	// Like decayNow, it is read without synchronization, so it MUST be set
+	// before the store is shared across goroutines.
+	readFault func(key []byte) error
+}
+
+// pointGet is the single-key read used by the metadata helpers that must tell
+// absence apart from failure. It exists so the test-only readFault seam has one
+// place to inject, and so those readers share one absence-vs-failure policy:
+// a missing key is (nil, nil); anything else is an error the caller must handle.
+func (ps *PebbleStore) pointGet(key []byte) ([]byte, error) {
+	if ps.readFault != nil {
+		if err := ps.readFault(key); err != nil {
+			return nil, err
+		}
+	}
+	return Get(ps.db, key)
 }
 
 // now returns the decay clock: the injected test clock, or wall time.
