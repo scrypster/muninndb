@@ -418,6 +418,31 @@ about — if the fallback re-enters the failure mode, uniform loss beats partial
 retention. And pin the RELATIVE ORDER, not just the magnitudes: every magnitude assertion
 here passed on the defective fallback.**
 
+The counter-argument, recorded because a decision record that carries only the winning
+half is the same shape as a benchmark that only measures the arm that agrees with it:
+**dropping the whole Hebbian term costs related-vs-unrelated discrimination for ALL
+candidates in that recall, and that aggregate quality loss may well exceed the orientation
+bias among the subset of pairs that happen to be symmetric.** Neither quantity is measured,
+and measuring them needs a relevance-judged corpus this project does not have. The decision
+still stands on shape rather than magnitude — the whole-term loss is UNIFORM, so nothing is
+ranked above anything else on a fabricated basis, and principles #1/#2 rank silent
+wrongness above visible degradation — but "the revert is right" is a judgement here, not a
+measurement. Two things narrow the counter-argument's practical reach: the term is a
+ranking MODIFIER, not a channel, so its absence changes an ordering and not what any score
+asserts; and `GetRankingNeighbors` errors if EITHER half fails, so a forward-half failure
+would have failed the fallback too — the fallback only ever helped on a
+reverse-scan-specific failure, a strictly narrower set than "a failed union".
+
+**The degradation is also undetectable downstream, deliberately (#800).**
+`ActivationResult` carries `SemanticDegraded` for the semantic channel and has no analogue
+for the Hebbian one, so a dropped Hebbian term is visible only in the server log — a
+caller cannot tell a recall that lost it from one that never had it. Accepted rather than
+overlooked: a channel flag tells a caller that a score MEANS something different (a BM25-only
+score is not a hybrid score), whereas a missing ranking modifier leaves every score meaning
+exactly what it says and only reorders them. Adding a second flag would also make the wire
+shape imply the two are peers. Recorded as a deliberate asymmetry so it is not rediscovered
+as an oversight.
+
 **The "loudly" half of degrade-loudly-but-gracefully is a behaviour, and it was unpinned
 everywhere (#800).** Deleting both `slog.Warn` calls from `phase4HebbianBoost` left
 `./internal/engine/... ./internal/storage/` fully green: nothing in the repo asserted on a
@@ -452,6 +477,28 @@ claiming agreement, and a result inside the noise band corroborates nothing.** *
 cost to an adjacent operation" is a claim about the adjacent operation's implementation,
 not its signature — and a per-item map allocation on a path that runs 50 times per query
 is usually the largest line in the profile.**
+
+**A number cited from a benchmark must be producible BY that benchmark — check which arm
+you read (#800).** The extra copy in `mergeRankingNeighbors`' no-reverse-edges shortcut was
+recorded as "~1µs per call, measured with `BenchmarkPhase4Read`". That benchmark builds a
+RING: at `edges > 0` every node has both outbound and inbound edges, so `len(rev) > 0` and
+the shortcut is never reached; at `edges = 0` no node has any edge, so the forward list is
+empty and the branch returns `nil` without copying. **No arm of it performs the copy**, and
+the ~1µs was machine noise — it moves in the same band with the copy reverted (degree-0 arm,
+five runs each: 9.5–10.8 µs with the copy, 9.4–10.3 µs without, fully overlapping). Re-measured on a fixture that does pay
+(`BenchmarkPhase4Read_ForwardOnlyFan`: 50 candidates fanning out to sinks that are never
+themselves candidates, so nothing points AT a candidate), the median cost is +4.1 µs at
+forward degree 2, +6.8 µs at 10 and +13.2 µs at the `maxPerNode` cap of 20 — an order of
+magnitude above the recorded figure, and structural rather than noise: allocations go
+62 → 112, exactly one per candidate. The decision is unchanged (~13 µs against a ~26 ms
+whole-recall p50 is ~0.05%, and uniform slice ownership is worth it), only the claim.
+The repair was to ADD the arm rather than to soften the prose, so the doc's citation is
+regenerable from the committed mechanism, and the fixture's shape is asserted in the CI
+gate by `TestForwardOnlyFanFixture_TakesTheMergeCopyShortcut` rather than assumed — the
+whole failure was a number taken from an arm nobody checked. **Principle: when a claim
+names a measurement, the named measurement must be able to produce it. If the benchmark
+you cite has no arm that exercises the code you are pricing, adding the arm is the fix;
+restating the prose leaves the next person measuring the same wrong thing.**
 
 **A latency budget is only meaningful with its denominator attached (#800).** The COG-31
 increment pre-committed a whole-recall p50 kill threshold expressed against a ~0.5 ms

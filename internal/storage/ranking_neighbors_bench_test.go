@@ -67,6 +67,85 @@ func BenchmarkPhase4Read(b *testing.B) {
 	}
 }
 
+// buildForwardOnlyFan populates a vault with nCand candidate engrams, each
+// holding `degree` forward edges, and returns the vault prefix and the
+// candidate ids.
+//
+// The edges point at SINK engrams that are NEVER themselves candidates. That
+// is the whole point of the fixture and it is easy to get wrong: a ring (or
+// any fixture where candidates point at each other) gives every candidate
+// inbound edges too, so len(rev) > 0 and mergeRankingNeighbors never reaches
+// its len(rev) == 0 shortcut. Nothing points AT a candidate here, so the
+// shortcut — and the copy taken there — is what the benchmark measures.
+//
+// The shape is asserted, not assumed, by
+// TestForwardOnlyFanFixture_TakesTheMergeCopyShortcut.
+func buildForwardOnlyFan(tb testing.TB, store *PebbleStore, vault string, nCand, degree int) ([8]byte, []ULID) {
+	tb.Helper()
+	ctx := context.Background()
+	ws := store.VaultPrefix(vault)
+
+	cand := make([]ULID, nCand)
+	for i := range cand {
+		cand[i] = NewULID()
+	}
+	sinks := make([]ULID, degree)
+	for i := range sinks {
+		sinks[i] = NewULID()
+	}
+
+	for i := range cand {
+		for j := 0; j < degree; j++ {
+			// Distinct, descending weights so the merge's two-pointer walk and
+			// the cap see a realistic ordering rather than a flat tie.
+			w := float32(degree-j) / float32(degree+1)
+			if err := store.WriteAssociation(ctx, ws, cand[i], sinks[j], &Association{
+				TargetID: sinks[j], Weight: w, RelType: RelRelatesTo,
+			}); err != nil {
+				tb.Fatalf("WriteAssociation: %v", err)
+			}
+		}
+	}
+	return ws, cand
+}
+
+// BenchmarkPhase4Read_ForwardOnlyFan measures the arm that BenchmarkPhase4Read
+// does not have: 50 candidates that hold forward edges and NO inbound ones.
+//
+// This is the only shape in which mergeRankingNeighbors' len(rev) == 0
+// shortcut runs with a non-empty list, so it is the only shape that pays for
+// the copy taken there (afacf8b, COG-31). BenchmarkPhase4Read's arms both miss
+// it: at edges > 0 it builds a ring, so every node has inbound edges and
+// len(rev) > 0; at edges == 0 no node has any edge, so the shortcut returns
+// nil without copying. A figure quoted from either arm is measuring machine
+// noise, which is how ~1us came to be recorded for a cost that is ~4-13us.
+//
+// Degrees 2/10/20 bracket the maxPerNode 20 cap phase4HebbianBoost uses, and
+// the allocation counters are the load-bearing half: the copy's cost scales
+// with the number of edges returned, so it is largest exactly at the cap.
+//
+// Not in the CI gate (benchmarks do not run under `go test`).
+func BenchmarkPhase4Read_ForwardOnlyFan(b *testing.B) {
+	for _, degree := range []int{2, 10, 20} {
+		store := openBenchStore(b)
+		ctx := context.Background()
+		ws, cand := buildForwardOnlyFan(b, store, fmt.Sprintf("bench-fan-%d", degree), 50, degree)
+
+		b.Run(fmt.Sprintf("fanOut%d/GetAssociations", degree), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, _ = store.GetAssociations(ctx, ws, cand, 20)
+			}
+		})
+		b.Run(fmt.Sprintf("fanOut%d/GetRankingNeighbors", degree), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, _ = store.GetRankingNeighbors(ctx, ws, cand, 20)
+			}
+		})
+	}
+}
+
 // BenchmarkRankingReverseEdges_DirectionalInbound measures the cost of one
 // COLD GetRankingNeighbors call for a HUB engram whose inbound edges are
 // DIRECTIONAL — the shape a project or spec node acquires when every memory

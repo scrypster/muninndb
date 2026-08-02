@@ -914,6 +914,73 @@ func TestGetRankingNeighbors_NoReverseEdgesDoesNotAliasTheCache(t *testing.T) {
 	}
 }
 
+// TestForwardOnlyFanFixture_TakesTheMergeCopyShortcut asserts the SHAPE that
+// BenchmarkPhase4Read_ForwardOnlyFan claims to measure, rather than trusting it.
+//
+// The benchmark's number is quoted in COG-31 and in #800's commit body as the
+// cost of the copy in mergeRankingNeighbors' len(rev) == 0 branch. That number
+// is only about the copy if the fixture actually reaches that branch with a
+// non-empty forward list — i.e. every candidate must have forward edges and NO
+// inbound ones. BenchmarkPhase4Read's ring fixture fails exactly this check on
+// its edges > 0 arms (every node has an inbound edge, so len(rev) > 0) and
+// returns an empty list on its edges == 0 arm, which is how a ~1us noise
+// reading was recorded as the copy's cost for a whole review round.
+//
+// So the precondition is checked here, in the gate, where a later edit to the
+// fixture that reintroduces inbound edges fails loudly instead of quietly
+// re-measuring the wrong arm.
+func TestForwardOnlyFanFixture_TakesTheMergeCopyShortcut(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, degree := range []int{2, 10, 20} {
+		ws, cand := buildForwardOnlyFan(t, store, fmt.Sprintf("fan-shape-%d", degree), 50, degree)
+
+		fwd, err := store.GetAssociations(ctx, ws, cand, 20)
+		if err != nil {
+			t.Fatalf("degree %d: GetAssociations: %v", degree, err)
+		}
+		rev, err := store.rankingReverseEdges(ctx, ws, cand, 20)
+		if err != nil {
+			t.Fatalf("degree %d: rankingReverseEdges: %v", degree, err)
+		}
+
+		want := degree
+		if want > 20 {
+			want = 20
+		}
+		for _, id := range cand {
+			if len(fwd[id]) != want {
+				t.Fatalf("degree %d: candidate %v has %d forward edges, want %d — "+
+					"the fan fixture is not producing the forward degree the benchmark "+
+					"claims to measure", degree, id, len(fwd[id]), want)
+			}
+			if len(rev[id]) != 0 {
+				t.Fatalf("degree %d: candidate %v has %d INBOUND edges, want 0. The fan "+
+					"fixture's sinks must never be candidates: with inbound edges, "+
+					"mergeRankingNeighbors takes its two-pointer path and the benchmark "+
+					"measures the merge, not the len(rev) == 0 copy it is quoted for",
+					degree, id, len(rev[id]))
+			}
+		}
+
+		// Both halves of the shortcut's precondition hold, so the union must
+		// return exactly the forward list. (That it returns a COPY of it is
+		// pinned by TestGetRankingNeighbors_NoReverseEdgesDoesNotAliasTheCache;
+		// what this test owns is that the branch is reached at all.)
+		union, err := store.GetRankingNeighbors(ctx, ws, cand, 20)
+		if err != nil {
+			t.Fatalf("degree %d: GetRankingNeighbors: %v", degree, err)
+		}
+		for _, id := range cand {
+			if len(union[id]) != want {
+				t.Fatalf("degree %d: union returned %d edges for %v, want %d",
+					degree, len(union[id]), id, want)
+			}
+		}
+	}
+}
+
 // TestRelTypeConstantNames_CatchesUnannotatedDeclarations guards the census's
 // own parser.
 //

@@ -490,6 +490,11 @@ type ActivationStore interface {
 	// edge direction by construction, so its ONLY legitimate consumers are the
 	// recall ranking phases (phase4HebbianBoost, phase5Traverse). Never use it
 	// where an edge's direction is written back or shown to a caller.
+	//
+	// Every returned slice is the CALLER's: it never aliases a store cache
+	// entry's backing array, for any id, whether or not that id has inbound
+	// edges. That is uniform across the whole union by construction — it is
+	// NOT a property GetAssociations offers its own callers (#820).
 	GetRankingNeighbors(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error)
 	RecentActive(ctx context.Context, wsPrefix [8]byte, topK int) ([]storage.ULID, error)
 	VaultPrefix(vault string) [8]byte
