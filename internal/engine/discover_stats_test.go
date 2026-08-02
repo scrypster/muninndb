@@ -192,3 +192,64 @@ func TestCircularShiftPValue_VsIIDShuffle_CircularIsMoreConservative(t *testing.
 		t.Fatalf("circular-shift null wrongly flagged a burst-only artifact as significant: lift=%.2f p=%.4f", lift, p)
 	}
 }
+
+// TestCircularShiftPValue_CannotResolveBelowThePermutationFloor pins the
+// correctness property that #706's adversarial refute found violated: a
+// permutation p-value can never be finer than the permutation SPACE, no
+// matter how many draws are requested.
+//
+// deterministicShiftOffsets draws from [1, T-1], so the space has exactly
+// T-1 distinct rotations. Asking for N >> T-1 draws re-evaluates rotations
+// that were already evaluated; each repeat is the SAME statistic, not an
+// additional independent draw. Dividing by N+1 anyway reports evidence the
+// data cannot contain.
+//
+// RED before the fix: with T=365 and N=4000 the uncapped implementation
+// returns 1/4001 = 0.00025 for a perfectly-aligned pair whose exact p is
+// 1/365 = 0.00274 — an ~11x overstatement, and precisely the inflation that
+// let the proof's planted signal clear BH-FDR.
+func TestCircularShiftPValue_CannotResolveBelowThePermutationFloor(t *testing.T) {
+	const T = 365
+	// A pair that no rotation can match: a and b are identical, so the
+	// unshifted lift is maximal and every non-zero rotation scores lower.
+	// exceed == 0, therefore p is exactly the floor 1/(space+1).
+	a := make([]bool, T)
+	b := make([]bool, T)
+	for i := 0; i < T; i += 4 {
+		a[i] = true
+		b[i] = true
+	}
+	nA := 0
+	for _, v := range a {
+		if v {
+			nA++
+		}
+	}
+	lift := liftScore(dayLagCoOccurrence(a, b, 0), T, nA, nA)
+
+	distinct := map[int]struct{}{}
+	for _, o := range deterministicShiftOffsets(T, 4000) {
+		distinct[o] = struct{}{}
+	}
+	if len(distinct) != T-1 {
+		t.Fatalf("precondition: expected the shift space to hold %d distinct rotations, got %d", T-1, len(distinct))
+	}
+	exactFloor := 1.0 / float64(len(distinct)+1)
+
+	for _, n := range []int{500, 4000, 40000} {
+		offsets := deterministicShiftOffsets(T, n)
+		p := circularShiftPValue(a, b, 0, T, nA, offsets, lift)
+		if p < exactFloor {
+			t.Errorf("N=%d: p=%.8f is finer than the exact permutation floor %.8f (%.1fx overstated) — "+
+				"the shift space holds only %d distinct rotations",
+				n, p, exactFloor, exactFloor/p, len(distinct))
+		}
+	}
+
+	// And the floor must be REACHED, not merely respected: a maximally
+	// aligned pair should report exactly 1/(T-1+1), never something coarser.
+	p := circularShiftPValue(a, b, 0, T, nA, deterministicShiftOffsets(T, 4000), lift)
+	if diff := p - exactFloor; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("expected the exact floor %.8f for an unmatchable pair, got %.8f", exactFloor, p)
+	}
+}

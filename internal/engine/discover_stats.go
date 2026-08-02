@@ -60,9 +60,12 @@ func circularShift(presence []bool, offset int) []bool {
 // that is coprime with T-1, found by decrementing from a fixed starting
 // point; coprimality guarantees offsets don't degenerate into a short
 // repeating cycle before covering most of the [1, T-1] range at least once.
-// When n > T-1 the sequence wraps and repeats — deterministically, and
-// documented: production default N=500 against a 365-day window (T-1=364)
-// does not wrap.
+//
+// When n > T-1 the sequence wraps and repeats — deterministically. Those
+// repeats are NOT additional evidence: a repeated rotation recomputes a
+// statistic that was already computed, so the permutation space still holds
+// exactly T-1 members however large n is. circularShiftPValue deduplicates
+// for that reason; see its comment.
 func deterministicShiftOffsets(T, n int) []int {
 	offsets := make([]int, n)
 	if T <= 1 {
@@ -95,13 +98,29 @@ func gcd(a, b int) int {
 	return a
 }
 
-// circularShiftPValue draws len(offsets) circular-shift permutations of b,
-// recomputes lift for each, and returns the permutation p-value: the
-// (add-one-smoothed) fraction of null lifts at or above the observed lift.
+// circularShiftPValue evaluates the DISTINCT circular-shift permutations of b
+// in offsets, recomputes lift for each, and returns the permutation p-value:
+// the (add-one-smoothed) fraction of null lifts at or above the observed lift.
 // The +1 in both numerator and denominator is the standard permutation-test
-// correction (Davison & Hinkley) that guarantees p > 0 even when zero of N
-// draws exceed the observed statistic — reporting p=0 from a finite sample
-// would overstate the evidence.
+// correction (Davison & Hinkley) that guarantees p > 0 even when zero draws
+// exceed the observed statistic — reporting p=0 from a finite sample would
+// overstate the evidence.
+//
+// The denominator is the number of DISTINCT offsets, not len(offsets), and
+// that distinction is load-bearing (#706). deterministicShiftOffsets draws
+// from [1, T-1], so the permutation space has exactly T-1 members; asking for
+// more draws than that re-evaluates rotations already evaluated. Each repeat
+// yields a bit-identical statistic, so it adds no information — but dividing
+// by len(offsets)+1 anyway reports a resolution the data cannot support. At
+// T=365 the exact floor is 1/365 ≈ 0.00274; the uncapped form reported
+// 1/501 ≈ 0.0020 at the production default N=500 and 1/4001 ≈ 0.00025 at
+// N=4000, overstating the evidence 1.4x and 11x respectively. Under BH-FDR
+// over m tests that inflation is the difference between clearing the gate and
+// not, so it is a correctness bug and not a rounding detail.
+//
+// Deduplicating also makes the cost of an oversized NullIters bounded rather
+// than linear in the request: work is now capped at the size of the
+// permutation space.
 func circularShiftPValue(a, b []bool, lag, T, nA int, offsets []int, observedLift float64) float64 {
 	nB := 0
 	for _, v := range b {
@@ -109,8 +128,19 @@ func circularShiftPValue(a, b []bool, lag, T, nA int, offsets []int, observedLif
 			nB++
 		}
 	}
+	seen := make(map[int]struct{}, len(offsets))
 	exceed := 0
 	for _, offset := range offsets {
+		// Normalize to the rotation the shift actually performs, so two
+		// offsets that name the same rotation collapse to one member.
+		norm := offset
+		if T > 0 {
+			norm = ((offset % T) + T) % T
+		}
+		if _, dup := seen[norm]; dup {
+			continue
+		}
+		seen[norm] = struct{}{}
 		shifted := circularShift(b, offset)
 		k := dayLagCoOccurrence(a, shifted, lag)
 		nullLift := liftScore(k, T, nA, nB)
@@ -118,7 +148,7 @@ func circularShiftPValue(a, b []bool, lag, T, nA int, offsets []int, observedLif
 			exceed++
 		}
 	}
-	return float64(exceed+1) / float64(len(offsets)+1)
+	return float64(exceed+1) / float64(len(seen)+1)
 }
 
 // benjaminiHochberg computes BH-FDR q-values for a slice of p-values.
