@@ -58,6 +58,19 @@ type PebbleStore struct {
 	// Invalidated on any WriteAssociation or UpdateAssociation for that engram.
 	// Bounded to 500_000 entries with 2s TTL; expirable.LRU handles expiry automatically.
 	assocCache *expirable.LRU[[24]byte, *assocCacheEntry]
+	// revAssocCache: [24]byte (wsPrefix[8]+engramID[16]) → *revAssocCacheEntry
+	// The 0x04 mirror of assocCache: the ranking-only reverse adjacency read by
+	// GetRankingNeighbors (COG-31). Same size, same 2s TTL, invalidated at the
+	// same mutation sites as assocCache but keyed on the DESTINATION endpoint.
+	//
+	// This exists for a measured reason. Without it, phase4HebbianBoost paid a
+	// full uncached reverse scan on EVERY recall while its forward half was
+	// served from assocCache — 50 fresh Pebble seeks per call. Measured on a
+	// synthetic 200-engram vault at 10 edges/node, the union read cost 11µs
+	// cached-forward vs 152µs uncached-reverse, which pushed whole-recall p50
+	// ~15-20% over the pre-committed budget. Caching the reverse half restores
+	// the symmetry the cost model assumed.
+	revAssocCache *expirable.LRU[[24]byte, *revAssocCacheEntry]
 	// metaCache: [16]byte (engramID) → *EngramMeta
 	// Caches metadata for hot read-path engrams so GetMetadata never goes to Pebble twice.
 	// Populated by GetMetadata on first Pebble read. Invalidated by UpdateMetadata/WriteEngram.
@@ -142,6 +155,26 @@ func (ps *PebbleStore) now() time.Time {
 type assocCacheEntry struct {
 	assocs []Association
 }
+
+// revAssocCacheEntry holds a cached REVERSE (0x04) ranking adjacency list.
+//
+// It carries `truncated` because the forward cache does not, and that gap is a
+// live latent bug there: GetAssociations caches the list it built UNDER the
+// caller's maxPerNode, so a later caller asking for MORE is silently served
+// the shorter list from cache. The reverse cache refuses to repeat it — a hit
+// whose entry was truncated below what this caller asked for is treated as a
+// miss and re-scanned.
+type revAssocCacheEntry struct {
+	assocs    []Association
+	truncated bool
+}
+
+// revAssocScanCap bounds how much reverse adjacency is scanned and cached per
+// engram, independent of the caller's maxPerNode. It is comfortably above both
+// production ranking caps (phase4HebbianBoost 20, phase5Traverse 10) so a
+// cached entry serves either without a re-scan, while still bounding the work a
+// hub engram with thousands of inbound edges can cause.
+const revAssocScanCap = 64
 
 // assocCacheTTL is how long association lists are cached.
 // Stale weights are acceptable for BFS traversal in the activation path.
@@ -229,7 +262,8 @@ func NewPebbleStore(db *pebble.DB, cfg PebbleStoreConfig) *PebbleStore {
 	prov := provenance.NewStore(db)
 	metaCache, _ := lru.New[[16]byte, *EngramMeta](100_000)
 	vaultPrefixCache, _ := lru.New[string, [8]byte](10_000)
-	assocCache := expirable.NewLRU[[24]byte, *assocCacheEntry](500_000, nil, 2*time.Second)
+	assocCache := expirable.NewLRU[[24]byte, *assocCacheEntry](500_000, nil, assocCacheTTL)
+	revAssocCache := expirable.NewLRU[[24]byte, *revAssocCacheEntry](500_000, nil, assocCacheTTL)
 	ps := &PebbleStore{
 		db:               db,
 		cache:            NewL1Cache(cfg.CacheSize),
@@ -239,6 +273,7 @@ func NewPebbleStore(db *pebble.DB, cfg PebbleStoreConfig) *PebbleStore {
 		metaCache:        metaCache,
 		vaultPrefixCache: vaultPrefixCache,
 		assocCache:       assocCache,
+		revAssocCache:    revAssocCache,
 	}
 	ps.walSync = newWALSyncer(db)
 	ps.counterFlush = newCounterCoalescer(db)

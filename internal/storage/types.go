@@ -242,6 +242,12 @@ func ParseLifecycleState(s string) (LifecycleState, error) {
 type RelType uint16
 
 const (
+	// RelCoActivated is the relation the Hebbian co-activation worker writes.
+	// It was the only RelType with no name, which is how a symmetric relation
+	// ended up stored under a directional convention nobody wrote down (#800).
+	// Its on-disk value is 0x0000, which is also what decodeAssocValue returns
+	// for a legacy all-zero value — that is pre-existing and unchanged.
+	RelCoActivated      RelType = 0x0000
 	RelSupports         RelType = 0x0001
 	RelContradicts      RelType = 0x0002
 	RelDependsOn        RelType = 0x0003
@@ -260,6 +266,38 @@ const (
 	RelRefines          RelType = 0x0010 // near-duplicate refinement (write-time novelty)
 	RelUserDefined      RelType = 0x8000
 )
+
+// IsSymmetric reports whether the relation asserts the same fact in both
+// directions, so that reading it from either endpoint is equally true.
+//
+// STRICT by design: a type is symmetric only if it is declared so here. An
+// unknown or user-defined relation is NOT symmetric — claiming a symmetry the
+// author never declared is what produces "the OLD version supersedes the NEW
+// one". This predicate is safe for a WRITER or a direction-presenting surface
+// to consult. See COG-31.
+func (r RelType) IsSymmetric() bool {
+	switch r {
+	case RelCoActivated, RelRelatesTo, RelContradicts:
+		return true
+	default:
+		return false
+	}
+}
+
+// BidirectionalForRanking reports whether an edge of this type may be read from
+// either endpoint FOR SCORING AND TRAVERSAL ONLY.
+//
+// It is IsSymmetric plus the user-defined range. The extra admission is
+// principle #4 applied where it belongs: on the presentation side of the line,
+// over-retrieving a relation whose symmetry was never declared is a small,
+// bounded ranking nudge, whereas under-retrieving silently drops half of it.
+//
+// MUST NOT be consulted by a writer, by supersession/currency/annotation, or by
+// any surface that presents an edge's direction to a caller. Its only legitimate
+// consumers are the recall ranking phases (COG-31).
+func (r RelType) BidirectionalForRanking() bool {
+	return r.IsSymmetric() || r >= RelUserDefined
+}
 
 // EmbedDimension encodes embedding dimensionality (uint8 on disk).
 type EmbedDimension uint8

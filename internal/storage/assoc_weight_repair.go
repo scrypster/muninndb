@@ -250,6 +250,7 @@ func (ps *PebbleStore) RepairLegacyFullWeightAssocKeys(ctx context.Context, wsPr
 		repaired += len(moved)
 		for _, d := range moved {
 			ps.assocCache.Remove(assocCacheKey(wsPrefix, ULID(d.src)))
+			ps.revAssocCache.Remove(assocCacheKey(wsPrefix, ULID(d.dst)))
 		}
 		chunk = chunk[:0]
 		return nil

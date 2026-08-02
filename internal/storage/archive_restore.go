@@ -149,8 +149,10 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 
 	// Invalidate assocCache for src and all restored dst nodes.
 	ps.assocCache.Remove(assocCacheKey(ws, ULID(srcID)))
+	ps.revAssocCache.Remove(assocCacheKey(ws, ULID(srcID)))
 	for _, dst := range restoredDsts {
 		ps.assocCache.Remove(assocCacheKey(ws, ULID(dst)))
+		ps.revAssocCache.Remove(assocCacheKey(ws, ULID(dst)))
 	}
 
 	return restoredDsts, nil

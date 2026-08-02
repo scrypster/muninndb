@@ -499,6 +499,12 @@ func (s *internalStubStore) GetAssociations(_ context.Context, _ [8]byte, ids []
 	return result, nil
 }
 
+// GetRankingNeighbors: see the note on stubStore.GetRankingNeighbors — this
+// stub has no 0x04 reverse index, so the forward list is the honest answer.
+func (s *internalStubStore) GetRankingNeighbors(ctx context.Context, ws [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error) {
+	return s.GetAssociations(ctx, ws, ids, maxPerNode)
+}
+
 func (s *internalStubStore) RecentActive(_ context.Context, _ [8]byte, topK int) ([]storage.ULID, error) {
 	if topK > len(s.recent) {
 		topK = len(s.recent)

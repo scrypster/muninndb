@@ -27,7 +27,7 @@ prefix — see the vault-reuse note at the bottom).
 | 0x01 | ws+ulid(16) | Engram (ERF) | primary record |
 | 0x02 | ws+ulid(16) | EngramMeta | |
 | 0x03 | ws+src(16)+weightComplement(4)+dst(16) | — | forward assoc, sorted desc by weight |
-| 0x04 | ws+dst(16)+weightComplement(4)+src(16) | — | reverse assoc |
+| 0x04 | ws+dst(16)+weightComplement(4)+src(16) | — | reverse assoc. Since #800 this is also a RECALL-PATH read: `GetRankingNeighbors` unions it into 0x03 for symmetric relation types only, for ranking and traversal (COG-31). Cached in `revAssocCache` (500k/2s, keyed on dst) |
 | 0x05 | ws+term+0x00+field(1)+id | posting | FTS |
 | 0x06 | ws+trigram(3)+id | — | FTS trigram |
 | 0x07 | ws+id+layer(1) | neighbor list | HNSW graph |

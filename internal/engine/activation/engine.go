@@ -485,6 +485,12 @@ type ActivationStore interface {
 	// unleased engrams). Used for work-queue recall visibility filtering.
 	GetLeases(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([]storage.Lease, error)
 	GetAssociations(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error)
+	// GetRankingNeighbors is GetAssociations UNIONED with the reverse (0x04)
+	// edges whose RelType is symmetric for ranking purposes — COG-31. It loses
+	// edge direction by construction, so its ONLY legitimate consumers are the
+	// recall ranking phases (phase4HebbianBoost, phase5Traverse). Never use it
+	// where an edge's direction is written back or shown to a caller.
+	GetRankingNeighbors(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error)
 	RecentActive(ctx context.Context, wsPrefix [8]byte, topK int) ([]storage.ULID, error)
 	VaultPrefix(vault string) [8]byte
 	// EngramLastAccessNs returns the nanosecond timestamp of the last cache access for id.
@@ -1338,12 +1344,17 @@ func (e *ActivationEngine) phase4HebbianBoost(ctx context.Context, ws [8]byte, v
 		ids[i] = c.id
 	}
 
-	// Cap to top-50 candidates to bound GetAssociations work per activation cycle.
+	// Cap to top-50 candidates to bound association work per activation cycle.
 	if len(ids) > 50 {
 		ids = ids[:50]
 	}
 
-	assocMap, err := e.store.GetAssociations(ctx, ws, ids, 20)
+	// COG-31: symmetric edges (co-activation, relates_to, contradicts) are
+	// stored in ONE direction chosen by whichever writer got there first —
+	// Hebbian writes older→newer, the neighbour worker writes newer→older.
+	// A forward-only read therefore scored a co-activated pair at full
+	// strength from one endpoint and ZERO from the other (#800).
+	assocMap, err := e.store.GetRankingNeighbors(ctx, ws, ids, 20)
 	if err != nil {
 		return
 	}
@@ -1586,7 +1597,11 @@ func (e *ActivationEngine) phase5Traverse(
 		}
 
 		// One batched Pebble call for the entire level.
-		assocMap, err := e.store.GetAssociations(ctx, ws, ids, maxEdgesPerNode)
+		// COG-31: symmetric edges are reachable from either endpoint here, so
+		// BFS no longer depends on which direction the writer happened to pick.
+		// Directional relations (supersedes, depends_on, ...) stay forward-only,
+		// so a hop still means what the profile says it means.
+		assocMap, err := e.store.GetRankingNeighbors(ctx, ws, ids, maxEdgesPerNode)
 		if err != nil {
 			slog.Warn("activation: bfs associations error, truncating traversal",
 				"vault", req.VaultID, "hop", eligible[0].hopDepth, "error", err)

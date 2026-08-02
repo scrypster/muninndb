@@ -130,9 +130,12 @@ func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, s
 	}
 	ps.replicateBatch(batch)
 
-	// Invalidate source node's cached association list so BFS traversal
-	// sees the new edge immediately instead of waiting for TTL expiry.
+	// Invalidate the source node's cached FORWARD list and the destination
+	// node's cached REVERSE list, so both endpoints see the new edge
+	// immediately instead of waiting for TTL expiry. The reverse eviction is
+	// keyed on dst because that is the 0x04 key's first ULID (COG-31).
 	ps.assocCache.Remove(assocCacheKey(wsPrefix, src))
+	ps.revAssocCache.Remove(assocCacheKey(wsPrefix, dst))
 
 	return nil
 }
@@ -227,6 +230,240 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 	}
 
 	return result, nil
+}
+
+// GetRankingNeighbors returns, for each id, the top-maxPerNode association
+// edges by weight over the UNION of:
+//
+//   - every 0x03 forward edge FROM id (all relation types — identical to
+//     GetAssociations), and
+//   - every 0x04 reverse edge INTO id whose RelType.BidirectionalForRanking()
+//     is true (RelCoActivated, RelRelatesTo, RelContradicts, and the
+//     user-defined range).
+//
+// RANKING AND TRAVERSAL ONLY — COG-31. This function deliberately LOSES the
+// direction an edge was written in: a reverse edge is returned with the
+// far endpoint in TargetID, indistinguishable from a forward one. A writer or
+// a direction-presenting surface that consumes it will manufacture facts
+// ("the OLD version supersedes the NEW one"). Use GetAssociations for those.
+//
+// The forward half delegates to GetAssociations, so it keeps the assocCache
+// and its 2s TTL byte-identically. The reverse half is uncached, exactly as
+// GetReverseAssociations already is; the merged list is never cached.
+//
+// Both 0x03 and 0x04 order by weightComplement in the same key position, so
+// both streams arrive weight-DESCENDING and the cap is an exact top-N via a
+// two-pointer merge — never a concatenate-then-truncate, which could fill the
+// cap with floor-weight forward edges while discarding a far heavier reverse
+// one. Duplicates (the same partner reachable both ways) are collapsed to the
+// larger weight BEFORE the cap, so phase4HebbianBoost cannot double-count a
+// pair.
+func (ps *PebbleStore) GetRankingNeighbors(ctx context.Context, wsPrefix [8]byte, ids []ULID, maxPerNode int) (map[ULID][]Association, error) {
+	// Both input streams are capped at maxPerNode, not read uncapped. That is
+	// exact, not an approximation: each stream is weight-descending and its
+	// targets are distinct, so the top-maxPerNode of the merged, deduplicated
+	// union is always a subset of the union of the two capped streams. Reading
+	// the forward half UNCAPPED would also change what GetAssociations stores
+	// in assocCache (it caches the list it built UNDER the cap), leaking a
+	// behaviour change into every other GetAssociations consumer for the 2s
+	// TTL — the exact non-interference this increment must not spend.
+	fwd, err := ps.GetAssociations(ctx, wsPrefix, ids, maxPerNode)
+	if err != nil {
+		return nil, err
+	}
+
+	rev, err := ps.rankingReverseEdges(ctx, wsPrefix, ids, maxPerNode)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[ULID][]Association, len(ids))
+	for _, id := range ids {
+		result[id] = mergeRankingNeighbors(fwd[id], rev[id], maxPerNode)
+	}
+	return result, nil
+}
+
+// rankingReverseEdges scans the 0x04 reverse index for every id with a SINGLE
+// iterator and sorted forward seeks, mirroring GetAssociations' shape.
+// Reusing GetReverseAssociations per id would open one iterator per id, and
+// BFS passes up to 20 ids per level.
+//
+// Returned Associations carry the SOURCE engram in TargetID (the engram that
+// points at id) and are weight-descending, matching the forward stream.
+// Edges whose RelType is not BidirectionalForRanking are skipped. Not cached.
+// maxPerNode <= 0 means uncapped.
+func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte, ids []ULID, maxPerNode int) (map[ULID][]Association, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// scanCap bounds the scan and what gets cached, independent of the
+	// caller's cap, so one cached entry serves every ranking caller.
+	scanCap := revAssocScanCap
+	if maxPerNode <= 0 || maxPerNode > scanCap {
+		scanCap = maxPerNode // 0 (uncapped) or an unusually large request
+	}
+
+	out := make(map[ULID][]Association, len(ids))
+
+	// Phase 1: serve cache-warm ids without touching Pebble, mirroring
+	// GetAssociations' forward fast path (2s TTL, same size, same key shape).
+	var uncached []ULID
+	for _, id := range ids {
+		if _, dup := out[id]; dup {
+			continue // duplicate id in the input
+		}
+		ck := assocCacheKey(wsPrefix, id)
+		if entry, ok := ps.revAssocCache.Get(ck); ok {
+			n := len(entry.assocs)
+			// A truncated entry can only answer a caller asking for no more
+			// than it holds; otherwise re-scan rather than silently under-serve.
+			if !entry.truncated || maxPerNode > 0 && maxPerNode <= n {
+				if maxPerNode > 0 && n > maxPerNode {
+					n = maxPerNode
+				}
+				out[id] = append([]Association(nil), entry.assocs[:n]...)
+				continue
+			}
+		}
+		out[id] = nil // claim the slot so a duplicate id is not scanned twice
+		uncached = append(uncached, id)
+	}
+	if len(uncached) == 0 {
+		return out, nil
+	}
+
+	sorted := make([]ULID, len(uncached))
+	copy(sorted, uncached)
+	sort.Slice(sorted, func(i, j int) bool {
+		return bytes.Compare(sorted[i][:], sorted[j][:]) < 0
+	})
+
+	iter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
+		LowerBound: keys.AssocRevRangeStart(wsPrefix),
+		UpperBound: keys.AssocRevRangeEnd(wsPrefix),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ranking reverse iterator: %w", err)
+	}
+	defer iter.Close()
+
+	for _, id := range sorted {
+		idPrefix := keys.AssocRevPrefixForID(wsPrefix, [16]byte(id)) // 0x04 | ws | dst (25 bytes)
+		var assocs []Association
+		truncated := false
+
+		for iter.SeekGE(idPrefix); iter.Valid(); iter.Next() {
+			k := iter.Key()
+			if len(k) < 25 || !bytes.Equal(k[:25], idPrefix) {
+				break
+			}
+			// Accepted edges arrive weight-descending, so stopping at the cap
+			// keeps the heaviest ones. Filtered-out (directional) edges
+			// deliberately do not consume a slot.
+			if scanCap > 0 && len(assocs) >= scanCap {
+				truncated = true
+				break
+			}
+			// Key layout: 0x04 | ws(8) | dstID(16) | weightComplement(4) | srcID(16) = 45 bytes
+			if len(k) < 45 {
+				continue
+			}
+			var srcID ULID
+			copy(srcID[:], k[29:45])
+			// No explicit self-edge skip: a self-loop writes fwd(a,a) and
+			// rev(a,a) with the same weight, and mergeRankingNeighbors'
+			// TargetID dedup already collapses the two copies into one. An
+			// extra `srcID == id` guard here would be dead code, and dead code
+			// that looks like a safety property is worse than none — pinned by
+			// TestGetRankingNeighbors_SelfEdge.
+			relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, restoredAt := decodeAssocValue(iter.Value())
+			if !relType.BidirectionalForRanking() {
+				continue
+			}
+			var wc [4]byte
+			copy(wc[:], k[25:29])
+			assocs = append(assocs, Association{
+				TargetID:          srcID,
+				Weight:            keys.WeightFromComplement(wc),
+				RelType:           relType,
+				Confidence:        confidence,
+				CreatedAt:         createdAt,
+				LastActivated:     lastActivated,
+				PeakWeight:        peakWeight,
+				CoActivationCount: coActivationCount,
+				RestoredAt:        restoredAt,
+			})
+		}
+		if err := iter.Error(); err != nil {
+			return nil, fmt.Errorf("ranking reverse scan: %w", err)
+		}
+		ps.revAssocCache.Add(assocCacheKey(wsPrefix, id), &revAssocCacheEntry{assocs: assocs, truncated: truncated})
+		if maxPerNode > 0 && len(assocs) > maxPerNode {
+			assocs = assocs[:maxPerNode]
+		}
+		out[id] = assocs
+	}
+	return out, nil
+}
+
+// mergeRankingNeighbors merges two weight-DESCENDING association streams into
+// one, deduplicating by TargetID (keeping the larger weight) and then taking
+// the top maxPerNode. maxPerNode <= 0 means uncapped.
+//
+// Dedup happens BEFORE the cap, so a pair reachable in both directions
+// consumes exactly one cap slot and contributes its weight exactly once.
+func mergeRankingNeighbors(fwd, rev []Association, maxPerNode int) []Association {
+	if len(rev) == 0 {
+		if maxPerNode > 0 && len(fwd) > maxPerNode {
+			return append([]Association(nil), fwd[:maxPerNode]...)
+		}
+		return fwd
+	}
+
+	capHint := len(fwd) + len(rev)
+	if maxPerNode > 0 && capHint > maxPerNode {
+		capHint = maxPerNode
+	}
+	merged := make([]Association, 0, capHint)
+
+	i, j := 0, 0
+	for i < len(fwd) || j < len(rev) {
+		if maxPerNode > 0 && len(merged) >= maxPerNode {
+			break
+		}
+		var next Association
+		// Both streams are weight-descending; take the heavier head. Ties go to
+		// the forward stream so a reverse edge never displaces an equal-weight
+		// forward edge from the cap.
+		if j >= len(rev) || (i < len(fwd) && fwd[i].Weight >= rev[j].Weight) {
+			next = fwd[i]
+			i++
+		} else {
+			next = rev[j]
+			j++
+		}
+		// Dedup by linear scan, not a map. This runs once per CANDIDATE on
+		// every recall (up to 50 per phase4HebbianBoost call), and the merged
+		// list is bounded by maxPerNode — 20 in phase4, 10 in BFS. Allocating
+		// a map per candidate measured as the single largest cost in the
+		// merge; a 16-byte compare over <=20 entries is cheaper and allocates
+		// nothing. The heavier copy was emitted first, so a duplicate is
+		// always equal-or-lighter and is simply dropped.
+		dup := false
+		for k := range merged {
+			if merged[k].TargetID == next.TargetID {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		merged = append(merged, next)
+	}
+	return merged
 }
 
 // associationsForOne scans forward-assoc keys for a single source ID.
@@ -482,6 +719,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	ps.replicateBatch(batch)
 
 	ps.assocCache.Remove(assocCacheKey(wsPrefix, a))
+	ps.revAssocCache.Remove(assocCacheKey(wsPrefix, b))
 	return nil
 }
 
@@ -651,6 +889,11 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 		if _, ok := seen[ck]; !ok {
 			seen[ck] = struct{}{}
 			ps.assocCache.Remove(ck)
+		}
+		rk := assocCacheKey(update.WS, update.Dst)
+		if _, ok := seen[rk]; !ok {
+			seen[rk] = struct{}{}
+			ps.revAssocCache.Remove(rk)
 		}
 	}
 	if len(skipped) > 0 {

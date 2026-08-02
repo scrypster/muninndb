@@ -359,3 +359,55 @@ across 16 nonsense probes with a declared chain grafted into the abstention corp
 adjacent-topic corpus with a positive control, and an exact-equality detector for
 normalization leakage — because a substitution that fires on the wrong topic is the
 silently-wrong class this project ranks worst, arriving at the score the RIGHT topic earned.
+
+---
+
+**A symmetric relation gets a read-side union in a SEPARATE method, never in the shared
+reader — and never write-side mirroring (#800).** Every association writer picked an edge
+direction, and they picked different ones: the Hebbian worker canonicalises each
+co-activated pair older→newer, the neighbour and autoassoc workers write newer→older.
+Recall's two ranking phases read only the 0x03 forward index, so the SAME single
+relationship boosted a candidate at full strength from one endpoint and by exactly zero
+from the other. Every DIRECTIONAL relation in the codebase (supersession, currency, the
+contradiction gate) was already being read from both endpoints correctly; only the
+symmetric ones were half-blind. The classification was inverted, and it had never been
+written down anywhere.
+
+Three placements were on the table and two were killed on evidence:
+
+*Killed — unioning inside `GetAssociations`.* Its consumers include a WRITER (dream's
+transitive inference persists what it infers) and direction-presenting surfaces
+(`Engine.Traverse`, REST `/associations`). Unioning the shared reader made dream persist
+manufactured transitive facts and made REST report "the OLD version supersedes the NEW
+one" — with a green suite. Both failures become structurally unrepresentable when the
+union lives in a sibling method, which is COG-22's `NameableAsLineage` shape reused.
+
+*Killed — write-side mirroring (writing both `fwd(a,b)` and `fwd(b,a)` for symmetric
+types).* `UpdateAssocWeightBatch` stamps `lastActivated` on the canonical key only, and
+COG-27 makes decay a pure function of `(peakWeight, lastActivated, now)` per 0x03 key. A
+mirrored edge would therefore decay while its primary did not: ~50% divergence at 30 days,
+the 5% floor at ~130 days, a 20x direction skew that no reader can detect and no test
+would catch. Making it correct means dual-keying every weight write atomically, which
+drags in `GetAssocWeight`'s single-value contract, the #756 0x2E repair pass,
+`deleteLegacyFullWeightKeys`, archive/restore, export/import and the replicated batch — a
+Tier 3 on-disk change with a migration, in exchange for a fix that leaves every existing
+vault broken. The read-side union, by contrast, fixes every existing vault the moment it
+lands, because 0x04 has been fully maintained all along.
+
+**Principle: when a shared reader has both a writer and a presenter downstream, do not
+widen it — add a sibling with a narrower contract and name its only legitimate consumers.
+And prefer the fix that repairs existing data over the one that only helps new data.**
+
+**A cost model that says "one more bounded scan, like the one next to it" must check
+whether the one next to it is cached (#800).** The design sized the reverse read against
+the forward read and left it uncached, reasoning that one extra bounded Pebble iterator
+was affordable. It was not: the forward half is served from `assocCache`, so the reverse
+half was paying ~50 fresh seeks on every recall. Measured on a synthetic 200-engram vault
+at 10 edges/node, a 50-candidate read cost ~11µs forward-only and ~152µs for the union,
+which moved whole-recall p50 15-20% — past the increment's own pre-committed kill
+threshold. Giving the reverse half a cache of the same shape, and replacing a per-candidate
+dedup map with a linear scan over a list bounded by `maxPerNode`, brought the union to
+~41µs and whole-recall p50 to +1.7% (paired median, 12 rounds). **Principle: "symmetric
+cost to an adjacent operation" is a claim about the adjacent operation's implementation,
+not its signature — and a per-item map allocation on a path that runs 50 times per query
+is usually the largest line in the profile.**
