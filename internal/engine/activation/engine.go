@@ -337,6 +337,20 @@ type ActivateRequest struct {
 	// CandidatesPerIndex overrides the per-index candidate pool size for phase2.
 	// Zero means fall back to 30.
 	CandidatesPerIndex int
+	// HebbianEnabled gates the PHASE 4 read-side Hebbian boost, symmetrically
+	// with the way PASEnabled gates phase 4.5 (COG-31). Set by the engine from
+	// the vault's resolved PlasticityConfig, which already gates Hebbian
+	// LEARNING submission and association DECAY on the same flag. Before #779
+	// the read side was unconditional, so a `scratchpad` vault
+	// (hebbian_enabled:false, assoc_decay_factor:0) was scored by edges it
+	// would never update and never decay.
+	//
+	// DIRECT activation callers (tests, cmd/bench, anything constructing an
+	// ActivateRequest by hand) get the zero value, i.e. NO Hebbian boost. That
+	// is deliberate: a bool that defaults to "on" cannot express "off", and the
+	// pipeline's only production constructor (internal/engine.Activate) always
+	// sets it — pinned by TestActivateRequest_WiresHebbianEnabledFromPlasticity.
+	HebbianEnabled bool
 	// PAS: Predictive Activation Signal — sequential transition tracking.
 	PASEnabled       bool // when true, inject transition candidates in Phase 2
 	PASMaxInjections int  // max transition candidates to inject (0 = default 5)
@@ -745,7 +759,12 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	fused := phase3RRF(sets)
 
 	// Phase 4: Hebbian boost (always sequential — fast, in-memory ring buffer read).
-	e.phase4HebbianBoost(ctx, ws, req.VaultID, fused)
+	// Gated on HebbianEnabled symmetrically with phase 4.5's PASEnabled (COG-31):
+	// a vault that neither learns nor decays association weights must not be
+	// scored by them either.
+	if req.HebbianEnabled {
+		e.phase4HebbianBoost(ctx, ws, req.VaultID, fused)
+	}
 
 	// Phase 4.5: PAS transition boost — applies to candidates already in the fused list.
 	if req.PASEnabled {

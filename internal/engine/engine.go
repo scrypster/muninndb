@@ -2329,6 +2329,10 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// PAS: Predictive Activation Signal config from vault Plasticity.
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
+	// Hebbian read side, gated symmetrically with PAS (COG-31). The same flag
+	// already gates learning submission (below) and association decay
+	// (decayAllVaults); before #779 the phase-4 boost ignored it.
+	actReq.HebbianEnabled = resolved.HebbianEnabled
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
 	// Per-vault exclude-tags (#713): candidates carrying a configured tag are
 	// dropped from recall ranking. nil/empty = no exclusion (unchanged behavior).
