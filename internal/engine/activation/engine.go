@@ -2592,14 +2592,16 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 	} else {
 		lastAccess = eng.LastAccess
 	}
-	// Treat zero or pre-2000 LastAccess as "just now" — an engram that has never
-	// been accessed, exactly as computeACTR does. Without this, a zero LastAccess
-	// gives daysSince ~= 740,000: recency 0 and decayFactor pinned at its 0.05
-	// floor, which on a weighted_sum vault scored an otherwise-perfect row 0.42
-	// against COG-6's 0.5 default threshold — a silently-EMPTY recall (#810).
-	// This guard is independent of the write-side and ERF-side fixes in #810: it
-	// defends records already at rest and any future writer.
-	if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+	// Treat an unset LastAccess (zero time, or the pre-2000 ERF overflow
+	// sentinel) as "just now" — an engram that has never been accessed, exactly
+	// as computeACTR does. Without this, a zero LastAccess gives daysSince ~=
+	// 740,000: recency 0 and decayFactor pinned at its 0.05 floor, which on a
+	// weighted_sum vault scored an otherwise-perfect row 0.42 against COG-6's 0.5
+	// default threshold — a silently-EMPTY recall (#810). This guard is
+	// independent of the write-side and ERF-side fixes in #810: it defends
+	// records already at rest and any future writer, and on its own it fully
+	// covers the scoring half of the repair.
+	if storage.IsUnsetTimestamp(lastAccess) {
 		lastAccess = now
 	}
 	daysSince := now.Sub(lastAccess).Hours() / 24.0
@@ -2790,9 +2792,9 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	} else {
 		lastAccess = eng.LastAccess
 	}
-	// Treat zero or pre-2000 LastAccess as "just now" — these are newly written
-	// engrams that have never been accessed. A fresh write = maximum recency.
-	if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+	// Treat an unset LastAccess as "just now" — these are newly written engrams
+	// that have never been accessed. A fresh write = maximum recency.
+	if storage.IsUnsetTimestamp(lastAccess) {
 		lastAccess = now
 	}
 	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute — sub-hour precision for intraday recall

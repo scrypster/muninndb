@@ -4455,7 +4455,7 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 								continue // COG-20: never pruned by the MaxEngrams path
 							}
 							lastAccess := m.LastAccess
-							if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+							if storage.IsUnsetTimestamp(lastAccess) {
 								lastAccess = now
 							}
 							ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 0.1)

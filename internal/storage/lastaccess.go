@@ -20,6 +20,20 @@ import (
 // would sort FIRST — i.e. an index rebuild landing before #810's fix would put
 // garbage-timestamped engrams at the head of where_left_off. Rebuild only on top
 // of #810.
+//
+// The trap does not decay away on its own. #810's write-side fix only covers
+// writers that CREATE timestamps (see normalizeEngramTimes); the six
+// read-modify-write paths rewrite a pre-existing sentinel back verbatim, so a
+// vault cloned before the fix keeps it until TouchAccess or UpdateMetadata
+// happens to repair each record individually.
+//
+// Related, and the reason a second concern closed clean: today a cloned vault
+// has NO 0x22 entries at all, so there are no orphaned index keys to reconcile.
+// Adding prefix.LastAccess to vaultScopedSwapPrefixes — the obvious fix for
+// #811 — changes that: the clone would then carry index keys built from the
+// SOURCE's LastAccess values while the copied 0x01 records get their LastAccess
+// reset to CreatedAt, so the two would disagree from the first instant. Whoever
+// fixes #811 must rebuild the index from the rewritten records, not copy it.
 func (ps *PebbleStore) WriteLastAccessEntry(ctx context.Context, ws [8]byte, id ULID, prevMillis, newMillis int64) error {
 	batch := ps.db.NewBatch()
 	defer batch.Close()

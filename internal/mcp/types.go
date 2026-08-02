@@ -160,8 +160,14 @@ type Memory struct {
 // (always-on, from supersedes-aware recall); the other fields are populated only
 // when muninn_recall is called with annotate=true.
 type MemoryAnnotations struct {
-	Stale         bool     `json:"stale"`
-	StaleDays     float64  `json:"stale_days"`
+	// Stale / StaleDays are POINTERS so that "unknown" is representable and is
+	// sent as absence rather than as zero. A never-accessed engram (a vault
+	// cloned before #810 carries the ERF zero-time sentinel on every record) has
+	// no staleness the system can assert; emitting "stale_days": 0,
+	// "stale": false would read to an agent as "accessed today" — plausible and
+	// wrong. Present-and-zero still means what it always did: accessed today.
+	Stale         *bool    `json:"stale,omitempty"`
+	StaleDays     *float64 `json:"stale_days,omitempty"`
 	ConflictsWith []string `json:"conflicts_with,omitempty"`
 	// SupersededBy is the immediate superseder's ULID; CurrentVersion is the chain
 	// head — the fact to consult now. Both present when this memory is stale.

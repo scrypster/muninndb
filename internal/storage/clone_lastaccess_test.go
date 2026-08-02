@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
@@ -93,5 +94,88 @@ func TestCloneVaultData_NeverAccessedFollowsWriteEngramConvention(t *testing.T) 
 	}
 	if src.AccessCount != 17 {
 		t.Errorf("source AccessCount = %d, want 17 (clone must not mutate the source)", src.AccessCount)
+	}
+}
+
+// TestReadModifyWriteWriters_PerpetuateSentinel_DoNotHeal pins the honest scope
+// of normalizeEngramTimes, which an earlier version of its doc comment got
+// wrong by claiming "every writer of a 0x01 record must funnel through this".
+//
+// Six writers do not, and correctly so: mutateEngram (behind UpdateEngramState
+// and SupersedeEngram), SoftDelete, UpdateTags, UpdateConfidence,
+// UpdateConfidenceWithContradiction and UpdateDigest are read-modify-write. They
+// create no NEW corruption — but they decode, mutate one field and re-encode, so
+// a zero LastAccess that decode just repaired is written straight back out as
+// the sentinel. They preserve; they do not heal.
+//
+// The consequence is load-bearing elsewhere and is why this is pinned rather
+// than only commented: a vault cloned before #810 never self-heals through
+// ordinary writes, so the #811 index-rebuild ordering trap noted at
+// WriteLastAccessEntry stays live indefinitely instead of decaying away, and the
+// decode-side repair can never be retired as "eventually unnecessary".
+//
+// If this test fails because an RMW path started normalizing, that is a fine
+// thing to do — but update normalizeEngramTimes' doc, the #811 note and this
+// test together, because three other statements depend on it.
+func TestReadModifyWriteWriters_PerpetuateSentinel_DoNotHeal(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("rmw-sentinel")
+
+	created := time.Now().Add(-48 * time.Hour)
+	id, err := store.WriteEngram(ctx, ws, &Engram{
+		Concept:    "read-modify-write does not heal",
+		Content:    "body",
+		CreatedAt:  created,
+		UpdatedAt:  created,
+		LastAccess: created,
+	})
+	if err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	// Put the record into the pre-#810 state: the sentinel on disk, in both the
+	// 0x01 record and its 0x02 metadata slice, with a valid CRC32.
+	key := keys.EngramKey(ws, [16]byte(id))
+	raw, err := Get(store.db, key)
+	if err != nil || raw == nil {
+		t.Fatalf("get raw engram: %v", err)
+	}
+	sentinel := uint64(time.Time{}.UnixNano())
+	binary.BigEndian.PutUint64(raw[erf.OffsetLastAccess:erf.OffsetLastAccess+8], sentinel)
+	binary.BigEndian.PutUint32(raw[len(raw)-erf.TrailerSize:], erf.ComputeCRC32(raw[:len(raw)-erf.TrailerSize]))
+	if err := store.db.Set(key, raw, pebble.Sync); err != nil {
+		t.Fatalf("set patched 0x01: %v", err)
+	}
+	if err := store.db.Set(keys.MetaKey(ws, [16]byte(id)), erf.MetaKeySlice(raw), pebble.Sync); err != nil {
+		t.Fatalf("set patched 0x02: %v", err)
+	}
+
+	// An ordinary write against that record.
+	if err := store.SoftDelete(ctx, ws, id); err != nil {
+		t.Fatalf("SoftDelete: %v", err)
+	}
+
+	after, err := Get(store.db, key)
+	if err != nil || after == nil {
+		t.Fatalf("get raw engram after SoftDelete: %v", err)
+	}
+	gotRaw := int64(binary.BigEndian.Uint64(after[erf.OffsetLastAccess : erf.OffsetLastAccess+8]))
+	if gotRaw != int64(sentinel) {
+		t.Fatalf("after SoftDelete the on-disk LastAccess raw = %d (%v), want the sentinel %d — an RMW writer "+
+			"started healing timestamps; see this test's doc for the three statements that depend on it not doing so",
+			gotRaw, time.Unix(0, gotRaw).UTC(), int64(sentinel))
+	}
+	t.Logf("PERPETUATED as designed: after SoftDelete the on-disk LastAccess is still the sentinel raw=%d (%v)",
+		gotRaw, time.Unix(0, gotRaw).UTC())
+
+	// The decode-side repair is what keeps that byte pattern harmless.
+	got, err := store.GetEngram(ctx, ws, id)
+	if err != nil {
+		t.Fatalf("GetEngram: %v", err)
+	}
+	if !got.LastAccess.IsZero() {
+		t.Errorf("decoded LastAccess = %v, want the zero time — the decode-side repair is the only thing "+
+			"standing between this record and a 740,000-day age", got.LastAccess.UTC())
 	}
 }

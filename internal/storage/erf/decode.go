@@ -162,28 +162,55 @@ func Decode(data []byte) (*Engram, error) {
 	return eng, nil
 }
 
-// zeroTimeUnixNano is the value uint64(time.Time{}.UnixNano()) stores: the zero
-// time is year 1, far outside UnixNano's defined range (1678-2262), so the call
-// silently overflows to a fixed bit pattern (-6795364578871345152 ns) that
+// ZeroTimeSentinelNanos is the value uint64(time.Time{}.UnixNano()) stores: the
+// zero time is year 1, far outside UnixNano's defined range (1678-2262), so the
+// call silently overflows to a fixed bit pattern (-6795364578871345152 ns) that
 // decodes back as 1754-08-30T22:43:41.128654848Z. Because that IS a valid
 // time.Time, IsZero() on it returns FALSE, and every IsZero() guard downstream
 // waved it through (#810).
-var zeroTimeUnixNano = time.Time{}.UnixNano()
+//
+// Exported so the write-path floor that keeps decodeTimestamp's mapping
+// unambiguous (engine.createdAtFloor) can be pinned strictly above it.
+var ZeroTimeSentinelNanos = time.Time{}.UnixNano()
 
 // decodeTimestamp converts a raw big-endian UnixNano metadata field into a
 // time.Time, mapping the encoder's zero-time overflow artifact back to the zero
 // time so IsZero() works everywhere — including for records already on disk,
 // which no write-side fix can repair.
 //
-// This is collision-free rather than heuristic: no time a legitimate writer can
-// produce round-trips to zeroTimeUnixNano, because that value is only reachable
-// by overflowing UnixNano, and any timestamp inside UnixNano's defined range
-// maps to itself. Applied to CreatedAt/UpdatedAt/LastAccess ONLY.
-// ValidFrom/ValidUntil have their own documented raw-0 sentinels on both sides
-// (decodeValidity) and must not be routed through here — a 1754 ValidUntil would
-// read as permanently expired under COG-19, and the sentinel is what prevents it.
+// The mapping is ALIASED, not collision-free. ZeroTimeSentinelNanos is itself
+// inside UnixNano's defined range, so the instant 1754-08-30T22:43:41.128654848Z
+// encodes to exactly those bits and decodes back here as the zero time: that one
+// instant is unrepresentable, and a record carrying it loses it on read. It is
+// UNREACHABLE, not impossible — and only because engine.createdAtFloor
+// (2000-01-01) rejects every pre-2000 caller-supplied CreatedAt before the
+// encoder sees it. That cross-package coupling is load-bearing: lowering the
+// floor to admit a historical, genealogy or journal-import vault would make the
+// collision live and silently destroy the stored instant with no error.
+// TestCreatedAtFloor_IsAboveERFZeroTimeSentinel (internal/engine) pins the
+// coupling; TestDecodeTimestamp_SentinelInstantAliases (this package) pins the
+// aliasing itself so it is documented behaviour rather than a future surprise.
+//
+// Applied to CreatedAt/UpdatedAt/LastAccess ONLY. ValidFrom/ValidUntil have
+// their own documented raw-0 sentinels on both sides (decodeValidity) and must
+// not be routed through here — a 1754 ValidUntil would read as permanently
+// expired under COG-19, and the sentinel is what prevents it. ValidFrom is
+// nonetheless *derived* from CreatedAt when its raw field is 0, so it does
+// inherit whatever this function does to CreatedAt; that is deliberate and
+// behaviour-neutral, because every ValidFrom.IsZero() consumer treats year-1 and
+// year-1754 identically.
+//
+// Scope, stated precisely (the fix's other two parts cover different ground):
+// the SCORING repair is fully covered on its own by the
+// `IsZero() || Year() < MinPlausibleTimestampYear` guard in computeComponents,
+// since 1754 < 2000. What this decode-side repair uniquely buys is that existing
+// data RENDERS honestly — engine/tree.go omits last_accessed instead of printing
+// the 1754 string, and UpdateMetadata's two LastAccess.IsZero() guards start
+// firing. It is NOT the MCP staleness fix: augmentAnnotations reads
+// item.LastAccess, which is time.Time{}.UnixNano() either way, so that surface
+// needs its own year guard.
 func decodeTimestamp(raw uint64) time.Time {
-	if int64(raw) == zeroTimeUnixNano {
+	if int64(raw) == ZeroTimeSentinelNanos {
 		return time.Time{}
 	}
 	return time.Unix(0, int64(raw))
