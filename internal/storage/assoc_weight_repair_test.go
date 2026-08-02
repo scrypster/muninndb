@@ -46,8 +46,16 @@ func rawWeightIndexKey(ws [8]byte, a, b [16]byte) []byte {
 // seedLegacyEdge lays down the exact on-disk shape a PRE-FIX weight-1.0 write
 // left behind: 0x03/0x04 keys at the legacy complement, and a 0x14 index
 // carrying the true weight (the index always stored raw float bits correctly).
+//
+// Both endpoints get a real 0x01 record: flushChunk re-validates them (STO-12),
+// because a legacy row whose endpoint is gone must be skipped rather than
+// relocated into a live, correctly-positioned dangling edge. A fixture without
+// engrams would exercise the skip path on every case and prove nothing about
+// the relocation this file is testing. TestSTO12_LegacyFullWeightRepairNever-
+// CreatesADanglingEdge covers the endpoint-less shape deliberately.
 func seedLegacyEdge(t *testing.T, store *PebbleStore, ws [8]byte, src, dst [16]byte, val []byte, indexWeight float32) {
 	t.Helper()
+	seedEndpoints(t, store, ws, ULID(src), ULID(dst))
 	batch := store.db.NewBatch()
 	defer batch.Close()
 	_ = batch.Set(rawAssocKey(prefix.AssocFwd, ws, src, testLegacyComplement, dst), val, nil)

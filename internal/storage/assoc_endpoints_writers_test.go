@@ -31,12 +31,30 @@ import (
 //   - DeleteEngram (engram.go) and deleteLegacyFullWeightKeys — Delete only.
 //   - DecayAssocWeights (association.go ~800) — rewrites/archives rows it just
 //     read from the live index; it cannot conjure a pair that was not there.
-//   - RepairAssocWeightKeys (assoc_weight_repair.go) — RELOCATES an existing
-//     full-weight row from the pre-fix key position to the correct one and
-//     deletes the legacy position in the same batch, so it is net-zero on the
-//     dangling-row count. It is also unreachable for a hard-deleted endpoint:
-//     DeleteEngram's 0x03/0x04 passes scan by prefix across ALL weights, which
-//     includes the legacy weight-0.0 position.
+//   - RepairLegacyFullWeightAssocKeys (assoc_weight_repair.go) — RELOCATES an
+//     existing full-weight row from the pre-fix key position to the correct one
+//     and deletes the legacy position in the same batch, so it is net-zero on
+//     the dangling-row count.
+//
+//     Net-zero is the WHOLE of the exemption, and the earlier version of this
+//     note added a second, false supporting claim: that the pass is unreachable
+//     for a hard-deleted endpoint because "DeleteEngram's 0x03/0x04 passes scan
+//     by prefix across ALL weights". They did not. Both scans bounded themselves
+//     with an appended 0xFF sentinel (STO-11), which sorts at or below every key
+//     whose weight complement starts 0xFF — that is every weight at or below
+//     ~1/256, and complement 0xFFFFFFFF, which is exactly the legacy position.
+//     So the cascade left the legacy row behind, this pass scans with a correct
+//     carry-propagating bound and therefore SAW it, and relocating it produced a
+//     live, correctly-positioned, fully-reachable dangling edge. Net-zero held;
+//     "unreachable" was the opposite of true, and the pass was a creator.
+//
+//     Both halves are now closed and both are pinned: the cascade bounds use
+//     keys.PrefixUpperBound, and flushChunk's live re-validation additionally
+//     requires both endpoints to have a 0x01 record — needed on its own, because
+//     the vaults this pass exists for were hard-deleted by a PRE-FIX binary
+//     whose cascade could not reach the legacy position either. See
+//     TestSTO12_DeleteEngramCascadeReachesEveryWeightPosition and
+//     TestSTO12_LegacyFullWeightRepairNeverCreatesADanglingEdge.
 //   - index/adjacency.Graph.WriteAssociation — a parallel 0x03/0x04 writer with
 //     no non-test importer in the tree at all (`grep -rn index/adjacency`
 //     returns only its own test). Left alone deliberately rather than guarded:
@@ -241,6 +259,13 @@ func TestSTO12_EngramWritersAcceptSelfAndSameCallEndpoints(t *testing.T) {
 		if w, _ := ps.GetAssocWeight(ctx, ws, first, second); w == 0 {
 			t.Fatal("the intra-batch association was dropped")
 		}
+		// The acceptance is only sound if the sibling ACTUALLY committed.
+		// Asserting the referrer's nil error alone would stay green even if the
+		// sibling were skipped, which is precisely the hole
+		// TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint pins.
+		if eng, err := ps.GetEngram(ctx, ws, second); err != nil || eng == nil {
+			t.Fatalf("the sibling accepted as a live endpoint did not commit: %v", err)
+		}
 	})
 
 	t.Run("pebbleStoreBatch.WriteEngram: an engram queued earlier is live", func(t *testing.T) {
@@ -266,6 +291,82 @@ func TestSTO12_EngramWritersAcceptSelfAndSameCallEndpoints(t *testing.T) {
 			t.Fatal("the same-batch inline association was dropped")
 		}
 	})
+}
+
+// TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint closes the
+// gap between WriteEngramBatch's sameCall set and its per-item validations.
+//
+// sameCall is built from the WHOLE slice up front — deliberately, so the guard
+// is order-independent (see TestSTO12_BatchAssociationGuardIsQueueOrderDependent
+// for why pebbleStoreBatch cannot do the same). But the per-item validations run
+// afterwards inside the loop and each `continue`s without queueing that item's
+// 0x01 key, so the same call could promise a sibling is live and then refuse it.
+// A referrer naming that sibling committed its three association rows with a nil
+// error, pointing at an engram that never existed.
+//
+// Latent rather than live today — Engine.WriteBatch builds each storage.Engram
+// fresh with no ID, so sameCall is always empty on every transport path — but it
+// is a hole in the guard on exactly the axis this invariant covers, and it would
+// open the moment any caller assigns IDs.
+//
+// The fix must NOT be to accumulate sameCall as the loop walks the slice: that
+// reintroduces the queue-order dependence and turns the referrer-first
+// acceptance subtest above red. Instead the referrer's edges to a refused
+// sibling are Deleted into the same batch after the loop; Pebble applies in
+// batch order, so the Delete wins over the Set regardless of item order.
+func TestSTO12_BatchSiblingThatFailsItsOwnValidationIsNotALiveEndpoint(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name    string
+		sibling func(id ULID, deadTarget ULID) *Engram
+	}{
+		{
+			// Fails at the tag validation (impl.go), which continues without
+			// queueing anything for the item.
+			name: "sibling rejected by raw-tag validation",
+			sibling: func(id ULID, _ ULID) *Engram {
+				return &Engram{ID: id, Concept: "sibling", Content: "the target",
+					Tags: []string{"project:plan\x00ning"}}
+			},
+		},
+		{
+			// Fails at STO-12 itself: the sibling's own inline target is dead.
+			name: "sibling rejected by its own STO-12 check",
+			sibling: func(id ULID, deadTarget ULID) *Engram {
+				return &Engram{ID: id, Concept: "sibling", Content: "the target",
+					Associations: []Association{*danglingProbeAssoc(deadTarget)}}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := newTestStore(t)
+			ws := ps.VaultPrefix("sto12-batch-sibling")
+			referrer, sibling, dead := NewULID(), NewULID(), NewULID()
+
+			_, errs := ps.WriteEngramBatch(ctx, []EngramBatchItem{
+				{WSPrefix: ws, Engram: &Engram{
+					ID: referrer, Concept: "referrer", Content: "names its sibling",
+					Associations: []Association{*danglingProbeAssoc(sibling)},
+				}},
+				{WSPrefix: ws, Engram: tc.sibling(sibling, dead)},
+			})
+
+			if errs[1] == nil {
+				t.Fatal("precondition: the sibling was expected to be refused")
+			}
+			if eng, err := ps.GetEngram(ctx, ws, sibling); err == nil && eng != nil {
+				t.Fatal("precondition: the refused sibling committed after all")
+			}
+			assertNoAssocRows(t, ps, ws, referrer, sibling)
+			if w, _ := ps.GetAssocWeight(ctx, ws, referrer, sibling); w != 0 {
+				t.Errorf("STO-12: a live edge (w=%v) from the committed referrer points at an "+
+					"engram that never committed", w)
+			}
+		})
+	}
 }
 
 // TestSTO12_GuardFailsOpenButNotSilently pins the OTHER half of the fail-open

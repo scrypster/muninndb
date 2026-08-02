@@ -3,8 +3,10 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -15,13 +17,15 @@ import (
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
 	"github.com/scrypster/muninndb/internal/index/fts"
+	"github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
-// STO-12 machine check: an association edge may only exist while BOTH of its
-// endpoints have a live 0x01 engram record.
+// STO-12 machine check: every association writer REFUSES an edge unless BOTH of
+// its endpoints have a live 0x01 engram record. A refusal at each writer, not an
+// unrepresentable state — see the invariant entry for the measured residual.
 //
 // Each sub-case drives a real delete path through the real engine and then
 // resumes ordinary use, because the leak this pins is not in the delete itself
@@ -96,10 +100,14 @@ func danglingEnv(t *testing.T) (*Engine, *storage.PebbleStore, *pebble.DB) {
 	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 1000})
 	ftsIdx := fts.New(db)
 	embedder := &noopEmbedder{}
+	// A real HNSW registry, not nil: the hard-delete cascade's vector-index half
+	// (TombstoneNode) is unobservable without one.
+	hnswReg := hnsw.NewRegistry(db)
 	eng := NewEngine(EngineConfig{
 		Store:            store,
 		AuthStore:        auth.NewStore(db),
 		FTSIndex:         ftsIdx,
+		HNSWRegistry:     hnswReg,
 		ActivationEngine: activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder),
 		TriggerSystem:    trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder),
 		Embedder:         embedder,
@@ -220,6 +228,62 @@ func TestSTO12_NoDanglingAssociationEdges(t *testing.T) {
 				// The lazy restore recall performs per candidate.
 				if _, err := store.RestoreArchivedEdgesTransitive(ctx, ws, source, 10, 5); err != nil {
 					t.Fatalf("RestoreArchivedEdgesTransitive: %v", err)
+				}
+			},
+		},
+		{
+			// Leak 4 (STO-11 inside the cascade): a 0x03 key is
+			// prefix(25)|weightComplement(4)|dst(16) and the complement is
+			// MaxUint32 - uint32(w*MaxUint32), so complement[0] == 0xFF for every
+			// weight at or below ~1/256. DeleteEngram's forward and reverse
+			// scans bounded themselves with a naive appended 0xFF, which sorts
+			// at or below all of those keys — so the cascade never saw them.
+			// Nothing clamps Weight on the way in, so `weight: 0.001` on an
+			// ordinary muninn_link / REST link is all it takes.
+			name: "client link below the 1/256 weight boundary, then hard forget",
+			run: func(t *testing.T, eng *Engine, store *storage.PebbleStore, db *pebble.DB, vault string, ws [8]byte) {
+				ctx := context.Background()
+				w := danglingWriter(t, eng, vault, sharedTag)
+				source := w("seed neighbour", "planning notes that keep the tag alive")
+				target := w("archive rotation policy", "rotate the planning archive every quarter")
+
+				if _, err := eng.Link(ctx, &mbp.LinkRequest{
+					Vault: vault, SourceID: source.String(), TargetID: target.String(),
+					RelType: 1, Weight: 0.001,
+				}); err != nil {
+					t.Fatalf("Link at weight 0.001: %v", err)
+				}
+				if _, err := eng.Forget(ctx, &mbp.ForgetRequest{
+					Vault: vault, ID: target.String(), Hard: true,
+				}); err != nil {
+					t.Fatalf("hard forget: %v", err)
+				}
+			},
+		},
+		{
+			// Leak 4, legacy arm. Complement 0xFFFFFFFF is both the weight-0
+			// position AND the position every PRE-FIX weight-1.0 edge was
+			// written at (legacyFullWeightComplement). Those rows are on disk in
+			// real vaults, the startup repair pass exists because of them, and
+			// that pass scans with a CORRECT bound — so a cascade that cannot
+			// reach the legacy position hands the repair a stranded row to
+			// promote into a fully-reachable dangling edge at the true 1.0
+			// position. Both halves are exercised: hard-delete, then repair.
+			name: "legacy full-weight edge, hard forget, then the startup repair pass",
+			run: func(t *testing.T, eng *Engine, store *storage.PebbleStore, db *pebble.DB, vault string, ws [8]byte) {
+				ctx := context.Background()
+				w := danglingWriter(t, eng, vault, sharedTag)
+				source := w("seed neighbour", "planning notes that keep the tag alive")
+				target := w("archive rotation policy", "rotate the planning archive every quarter")
+
+				seedLegacyFullWeightRows(t, db, ws, source, target)
+				if _, err := eng.Forget(ctx, &mbp.ForgetRequest{
+					Vault: vault, ID: target.String(), Hard: true,
+				}); err != nil {
+					t.Fatalf("hard forget: %v", err)
+				}
+				if _, err := store.RepairLegacyFullWeightAssocKeys(ctx, ws); err != nil {
+					t.Fatalf("RepairLegacyFullWeightAssocKeys: %v", err)
 				}
 			},
 		},
@@ -356,6 +420,36 @@ func danglingWriter(t *testing.T, eng *Engine, vault, tag string) func(concept, 
 	}
 }
 
+// seedLegacyFullWeightRows writes the three keys a PRE-FIX weight-1.0 edge left
+// on disk: 0x03 and 0x04 at complement 0xFFFFFFFF (the position the old encoder
+// produced for weight exactly 1.0), and a 0x14 index holding a true 1.0. That
+// disagreement is what RepairLegacyFullWeightAssocKeys scans for, and the keys
+// are written raw because no current encoder can produce that combination.
+func seedLegacyFullWeightRows(t *testing.T, db *pebble.DB, ws [8]byte, src, dst storage.ULID) {
+	t.Helper()
+	legacy := []byte{0xFF, 0xFF, 0xFF, 0xFF}
+	key := func(p byte, a, b storage.ULID) []byte {
+		k := make([]byte, 0, 45)
+		k = append(k, p)
+		k = append(k, ws[:]...)
+		k = append(k, a[:]...)
+		k = append(k, legacy...)
+		k = append(k, b[:]...)
+		return k
+	}
+	val := make([]byte, 26)
+	var idxVal [4]byte
+	binary.BigEndian.PutUint32(idxVal[:], math.Float32bits(1.0))
+	b := db.NewBatch()
+	defer b.Close()
+	_ = b.Set(key(0x03, src, dst), val, nil)
+	_ = b.Set(key(0x04, dst, src), val, nil)
+	_ = b.Set(keys.AssocWeightIndexKey(ws, [16]byte(src), [16]byte(dst)), idxVal[:], nil)
+	if err := b.Commit(pebble.NoSync); err != nil {
+		t.Fatalf("seed legacy full-weight rows: %v", err)
+	}
+}
+
 func countPrefix(t *testing.T, db *pebble.DB, ws [8]byte, p byte) int {
 	t.Helper()
 	lo := append([]byte{p}, ws[:]...)
@@ -391,10 +485,13 @@ func joinLines(s []string) string {
 // engram remains a live search hit, wasting every amplifier's work on an ID
 // that can never be linked, and (before this fix) taking the HNSW tombstone
 // with it on the prune path. This asserts the cascade directly.
+// Both amplifiers are asserted, and both arms of PruneVault: the MaxEngrams arm
+// and the RetentionDays arm are separate loops with separate cleanup call sites,
+// so covering one leaves the other free to regress silently.
 func TestSTO12_HardDeletePathsCleanTheSearchIndexes(t *testing.T) {
 	const distinctive = "thermocline"
 
-	inFTS := func(t *testing.T, eng *Engine, vault string, ws [8]byte, id storage.ULID) bool {
+	inFTS := func(t *testing.T, eng *Engine, ws [8]byte, id storage.ULID) bool {
 		t.Helper()
 		hits, err := eng.fts.Search(context.Background(), ws, distinctive, 50)
 		if err != nil {
@@ -408,62 +505,126 @@ func TestSTO12_HardDeletePathsCleanTheSearchIndexes(t *testing.T) {
 		return false
 	}
 
-	t.Run("Forget(hard=true)", func(t *testing.T) {
-		eng, store, _ := danglingEnv(t)
-		vault := "sto12-fts-forget"
-		ws := store.VaultPrefix(vault)
-		if err := store.WriteVaultName(ws, vault); err != nil {
+	// write puts the engram in BOTH indexes: FTS via the ordinary write path,
+	// HNSW via the caller-supplied embedding (Engine.Write inserts it inline).
+	write := func(t *testing.T, eng *Engine, vault, concept, content string, createdAt *time.Time) storage.ULID {
+		t.Helper()
+		vec := make([]float32, 384)
+		vec[0] = 1
+		resp, err := eng.Write(context.Background(), &mbp.WriteRequest{
+			Vault: vault, Concept: concept, Content: content,
+			Tags: []string{"sampling"}, Embedding: vec, CreatedAt: createdAt,
+		})
+		if err != nil {
+			t.Fatalf("write %q: %v", concept, err)
+		}
+		eng.WaitWriteTimeIdle()
+		id, err := storage.ParseULID(resp.ID)
+		if err != nil {
 			t.Fatal(err)
 		}
-		w := danglingWriter(t, eng, vault, "sampling")
-		victim := w("depth profile", "the "+distinctive+" sits near twelve metres")
+		return id
+	}
 
-		if !inFTS(t, eng, vault, ws, victim) {
-			t.Fatal("precondition: the engram was never indexed in FTS")
-		}
-		if _, err := eng.Forget(context.Background(), &mbp.ForgetRequest{
-			Vault: vault, ID: victim.String(), Hard: true,
-		}); err != nil {
-			t.Fatalf("hard forget: %v", err)
-		}
-		if inFTS(t, eng, vault, ws, victim) {
-			t.Error("hard-deleted engram is still a live FTS hit — the hard branch did not clean the index")
-		}
-	})
+	cases := []struct {
+		name string
+		// run seeds the vault and drives one hard-delete caller, returning every
+		// id it seeded. Survivors are filtered out by the assertions.
+		run func(t *testing.T, eng *Engine, store *storage.PebbleStore, vault string) []storage.ULID
+	}{
+		{
+			name: "Forget(hard=true)",
+			run: func(t *testing.T, eng *Engine, store *storage.PebbleStore, vault string) []storage.ULID {
+				victim := write(t, eng, vault, "depth profile", "the "+distinctive+" sits near twelve metres", nil)
+				if _, err := eng.Forget(context.Background(), &mbp.ForgetRequest{
+					Vault: vault, ID: victim.String(), Hard: true,
+				}); err != nil {
+					t.Fatalf("hard forget: %v", err)
+				}
+				return []storage.ULID{victim}
+			},
+		},
+		{
+			name: "PruneVault(MaxEngrams)",
+			run: func(t *testing.T, eng *Engine, store *storage.PebbleStore, vault string) []storage.ULID {
+				var ids []storage.ULID
+				for i := 0; i < 5; i++ {
+					ids = append(ids, write(t, eng, vault, fmt.Sprintf("depth profile %d", i),
+						fmt.Sprintf("the %s sits near %d metres", distinctive, 10+i), nil))
+				}
+				if err := eng.authStore.SetVaultConfig(auth.VaultConfig{
+					Name: vault, Public: true,
+					Plasticity: &auth.PlasticityConfig{MaxEngrams: ptr(1)},
+				}); err != nil {
+					t.Fatalf("SetVaultConfig: %v", err)
+				}
+				if _, err := eng.PruneVault(context.Background(), vault); err != nil {
+					t.Fatalf("PruneVault: %v", err)
+				}
+				return ids
+			},
+		},
+		{
+			// The retention arm is a SECOND, independent delete loop with its
+			// own cleanup call site. Age comes from an explicit created_at (the
+			// ULID carries it, which is what EngramIDsByCreatedRange scans) —
+			// never from waiting on a clock.
+			name: "PruneVault(RetentionDays)",
+			run: func(t *testing.T, eng *Engine, store *storage.PebbleStore, vault string) []storage.ULID {
+				old := time.Now().AddDate(0, 0, -90)
+				var ids []storage.ULID
+				for i := 0; i < 3; i++ {
+					ids = append(ids, write(t, eng, vault, fmt.Sprintf("archived profile %d", i),
+						fmt.Sprintf("the %s sat near %d metres", distinctive, 10+i), &old))
+				}
+				if err := eng.authStore.SetVaultConfig(auth.VaultConfig{
+					Name: vault, Public: true,
+					Plasticity: &auth.PlasticityConfig{RetentionDays: ptr[float32](30)},
+				}); err != nil {
+					t.Fatalf("SetVaultConfig: %v", err)
+				}
+				if _, err := eng.PruneVault(context.Background(), vault); err != nil {
+					t.Fatalf("PruneVault: %v", err)
+				}
+				return ids
+			},
+		},
+	}
 
-	t.Run("PruneVault(MaxEngrams)", func(t *testing.T) {
-		eng, store, _ := danglingEnv(t)
-		vault := "sto12-fts-prune"
-		ws := store.VaultPrefix(vault)
-		if err := store.WriteVaultName(ws, vault); err != nil {
-			t.Fatal(err)
-		}
-		w := danglingWriter(t, eng, vault, "sampling")
-		var ids []storage.ULID
-		for i := 0; i < 5; i++ {
-			ids = append(ids, w(fmt.Sprintf("depth profile %d", i),
-				fmt.Sprintf("the %s sits near %d metres", distinctive, 10+i)))
-		}
-		if err := eng.authStore.SetVaultConfig(auth.VaultConfig{
-			Name: vault, Public: true,
-			Plasticity: &auth.PlasticityConfig{MaxEngrams: ptr(1)},
-		}); err != nil {
-			t.Fatalf("SetVaultConfig: %v", err)
-		}
-		if _, err := eng.PruneVault(context.Background(), vault); err != nil {
-			t.Fatalf("PruneVault: %v", err)
-		}
-		var stillIndexed int
-		for _, id := range ids {
-			if _, err := store.GetEngram(context.Background(), ws, id); err == nil {
-				continue // survived the prune
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng, store, _ := danglingEnv(t)
+			vault := fmt.Sprintf("sto12-search-idx-%d", i)
+			ws := store.VaultPrefix(vault)
+			if err := store.WriteVaultName(ws, vault); err != nil {
+				t.Fatal(err)
 			}
-			if inFTS(t, eng, vault, ws, id) {
-				stillIndexed++
+
+			ids := tc.run(t, eng, store, vault)
+
+			var deleted, stillFTS, notTombstoned int
+			for _, id := range ids {
+				if _, err := store.GetEngram(context.Background(), ws, id); err == nil {
+					continue // survived
+				}
+				deleted++
+				if inFTS(t, eng, ws, id) {
+					stillFTS++
+				}
+				if !eng.hnswRegistry.IsTombstoned(ws, [16]byte(id)) {
+					notTombstoned++
+				}
 			}
-		}
-		if stillIndexed > 0 {
-			t.Errorf("%d pruned engram(s) are still live FTS hits — the pruner did not clean the index", stillIndexed)
-		}
-	})
+			if deleted == 0 {
+				t.Fatal("precondition: this delete path removed nothing")
+			}
+			if stillFTS > 0 {
+				t.Errorf("%d hard-deleted engram(s) are still live FTS hits — the caller did not clean the index", stillFTS)
+			}
+			if notTombstoned > 0 {
+				t.Errorf("%d hard-deleted engram(s) are NOT tombstoned in HNSW — they stay live vector hits, "+
+					"and the neighbor worker turns each one back into an association edge", notTombstoned)
+			}
+		})
+	}
 }

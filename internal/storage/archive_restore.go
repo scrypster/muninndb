@@ -179,6 +179,29 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 
 // reapArchivedEdgesFrom deletes every 0x25 archive row sourced from srcID.
 // Used when srcID has no 0x01 record: none of those edges can ever be restored.
+//
+// # Replication (obligation 11): a new DESTRUCTIVE write on the recall path
+//
+// RestoreArchivedEdges has always replicated its restore batch, so this is not
+// a new replicated write on the read path — but it is the first DESTRUCTIVE
+// one, and a follower reaches it independently of the leader. On a follower,
+// recall locally deletes 0x25 rows the leader may still hold, until the leader
+// recalls the same source and ships the same deletion.
+//
+// Judged not a correctness problem, on two grounds. First, the rows are
+// PROVABLY unrestorable: RestoreArchivedEdges is the only reader of a 0x25
+// prefix, it requires the source's 0x01 record, and that record is gone — so
+// the divergence is between "absent" and "present but unreadable by anything",
+// which no query can distinguish. Second, it is self-limiting: one commit per
+// source, after which the prefix is empty and every later call finds n == 0 and
+// commits nothing. It cannot oscillate and it cannot amplify.
+//
+// What it is NOT is a claim about the replication model in general. If a
+// follower's local deletes are supposed to be impossible rather than merely
+// harmless, this is the call site to change, and the fix is to gate the reap on
+// leadership and let followers skip (paying the rescan) rather than to make the
+// reap conditional on some weaker signal. Stated here so that review is a
+// question about one function, not an archaeology exercise.
 func (ps *PebbleStore) reapArchivedEdgesFrom(ws [8]byte, srcID [16]byte) error {
 	prefix := keys.ArchiveAssocPrefixForID(ws, srcID)
 	iter, err := ps.db.NewIter(&pebble.IterOptions{

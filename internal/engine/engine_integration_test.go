@@ -45,8 +45,8 @@ func TestHebbian_WeightStrengthenAfterCoActivation(t *testing.T) {
 	idB[0] = 0x0A
 	idB[1] = 0x0B
 
-	// STO-12: an association may only exist while both endpoints have a live
-	// 0x01 engram record, so the fixture has to create them.
+	// STO-12: every association writer refuses an edge unless both endpoints
+	// have a live 0x01 engram record, so the fixture has to create them.
 	for _, id := range []storage.ULID{idA, idB} {
 		_, err = store.WriteEngram(ctx, ws, &storage.Engram{
 			ID: id, Concept: "hebbian fixture", Content: "hebbian fixture content",

@@ -250,6 +250,17 @@ func (r *Registry) TombstoneNode(ws [8]byte, id [16]byte) {
 	}
 }
 
+// IsTombstoned reports whether the node is tombstoned in the vault's index.
+// Returns false when the vault index has not been loaded — the node cannot
+// appear in results from an index that does not exist, so "not tombstoned" and
+// "not present" are the same answer to a caller asking about search visibility.
+func (r *Registry) IsTombstoned(ws [8]byte, id [16]byte) bool {
+	if idx := r.get(ws); idx != nil {
+		return idx.IsTombstoned(id)
+	}
+	return false
+}
+
 // maybeLogMemoryPressure emits throttled warning logs when memory thresholds are
 // exceeded. It returns true if the hard limit is active and the insert should be
 // skipped.

@@ -721,6 +721,52 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		ids[i] = eng.ID
 	}
 
+	// STO-12, second half of the sameCall exception. sameCall promises that
+	// every caller-supplied id in this call is made live by the single commit
+	// below — but the per-item validations above (encode, raw tags, and STO-12
+	// itself) each `continue` WITHOUT queueing that item's 0x01 key, so an item
+	// the guard accepted as a live endpoint may never commit. A referrer naming
+	// it would otherwise commit three association rows pointing at nothing, with
+	// a nil error of its own.
+	//
+	// Repaired after the loop rather than by accumulating sameCall as the loop
+	// walks: an incremental set would make the guard queue-order dependent (the
+	// documented pebbleStoreBatch limitation) and refuse the legitimate
+	// referrer-first ordering. Pebble applies a batch in order, so a Delete
+	// queued here wins over a Set queued earlier for the same key, whatever the
+	// item order was.
+	failedIDs := make(map[[24]byte]struct{})
+	for i := range items {
+		if errs[i] == nil || items[i].Engram == nil || items[i].Engram.ID == (ULID{}) {
+			continue
+		}
+		var k [24]byte
+		copy(k[:8], items[i].WSPrefix[:])
+		copy(k[8:], items[i].Engram.ID[:])
+		failedIDs[k] = struct{}{}
+	}
+	if len(failedIDs) > 0 {
+		for i := range items {
+			if errs[i] != nil || items[i].Engram == nil {
+				continue
+			}
+			ws := items[i].WSPrefix
+			id16 := [16]byte(items[i].Engram.ID)
+			for _, assoc := range items[i].Engram.Associations {
+				var k [24]byte
+				copy(k[:8], ws[:])
+				copy(k[8:], assoc.TargetID[:])
+				if _, dead := failedIDs[k]; !dead {
+					continue
+				}
+				dst := [16]byte(assoc.TargetID)
+				batch.Delete(keys.AssocFwdKey(ws, id16, assoc.Weight, dst), nil)
+				batch.Delete(keys.AssocRevKey(ws, dst, assoc.Weight, id16), nil)
+				batch.Delete(keys.AssocWeightIndexKey(ws, id16, dst), nil)
+			}
+		}
+	}
+
 	syncOption := pebble.Sync
 	if ps.noSyncEngrams {
 		syncOption = pebble.NoSync

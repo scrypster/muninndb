@@ -222,6 +222,25 @@ func (ps *PebbleStore) RepairLegacyFullWeightAssocKeys(ctx context.Context, wsPr
 			if indexed != 1.0 {
 				continue // a live write changed the pair's weight; not ours to move
 			}
+			// STO-12, and the same class of question as `indexed != 1.0`:
+			// this is live state re-read at flush time, and a pair whose
+			// endpoint has no 0x01 record is not ours to move either.
+			//
+			// Reachable independently of DeleteEngram's own cascade. This pass
+			// exists precisely because pre-fix vaults are on disk, and a pre-fix
+			// binary's cascade could not see the legacy key position at all
+			// (STO-11 — its 0x03/0x04 upper bound was a naive appended 0xFF,
+			// which sorts below complement 0xFFFFFFFF). A stranded legacy row is
+			// therefore exactly the shape this pass meets, and relocating it
+			// would promote a row the scan-bound bug hid into a live,
+			// correctly-positioned, fully-reachable dangling edge.
+			//
+			// Skipped rather than deleted: this pass moves rows it can prove
+			// are pre-fix full-weight edges, and reaping stranded rows is the
+			// deferred O(vault) integrity pass's job, not a side effect here.
+			if !ps.engramExists(wsPrefix, d.src) || !ps.engramExists(wsPrefix, d.dst) {
+				continue
+			}
 
 			fwdCorrect := keys.AssocFwdKey(wsPrefix, d.src, 1.0, d.dst)
 			revCorrect := keys.AssocRevKey(wsPrefix, d.dst, 1.0, d.src)

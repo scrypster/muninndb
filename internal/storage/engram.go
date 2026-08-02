@@ -556,10 +556,32 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// names this engram; they are invalidated post-commit (STO-12, below).
 	assocCacheDirty := []ULID{id}
 
+	// STO-11: the upper bound MUST carry-propagate (keys.PrefixUpperBound), not
+	// append a 0xFF sentinel. A 0x03 key is prefix(25)|weightComplement(4)|dst(16)
+	// and keys.WeightComplement is MaxUint32 - uint32(w*MaxUint32), so
+	// complement[0] == 0xFF for every weight at or below ~1/256 — and the whole
+	// complement is 0xFFFFFFFF at weight 0, which is also the byte position a
+	// pre-fix weight-1.0 edge was written at (legacyFullWeightComplement). A
+	// 26-byte `prefix|0xFF` bound sorts at or below all of those, so the cascade
+	// silently skipped them and the edges outlived their endpoint permanently
+	// (nothing else reaps them: DecayAssocWeights never reads 0x01).
+	//
+	// keys.PrefixUpperBound is LOOSE in the other direction and the explicit
+	// bytes.Equal(k[:25], prefix) break below is therefore LOAD-BEARING, not
+	// belt-and-braces: it increments the first sub-0xFF byte from the right and
+	// returns without zeroing the trailing 0xFF bytes, so for a prefix ending in
+	// 0xFF (~1 engram ID in 256) the bound spans into the NEXT engram's
+	// association keyspace. On a delete path that is data loss, not a wasted
+	// scan. Fixing PrefixUpperBound is its own increment (it is mandated by
+	// STO-11 and has several callers); until then the guard is what makes this
+	// correct. It is also why these two loops must keep SeekGE and must NOT be
+	// converted to PrefixIterator, whose First/Valid shape changes the
+	// break-vs-continue semantics on short keys. Pinned by
+	// TestSTO12_DeleteEngramCascadeStaysInsideItsOwnPrefix.
 	fwdPrefix := keys.AssocFwdPrefixForID(wsPrefix, [16]byte(id))
 	fwdIter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: fwdPrefix,
-		UpperBound: append(append([]byte{}, fwdPrefix...), 0xFF),
+		UpperBound: keys.PrefixUpperBound(append([]byte{}, fwdPrefix...)),
 	})
 	if err == nil {
 		for fwdIter.SeekGE(fwdPrefix); fwdIter.Valid(); fwdIter.Next() {
@@ -587,10 +609,12 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// Reverse pass: scan 0x04|ws|id to find all associations TO this engram
 	// (from other engrams). Clean up the reverse index entries and the
 	// corresponding forward keys in those other engrams.
+	// STO-11 again — same weight-complement reasoning as the forward pass, and
+	// the same load-bearing bytes.Equal guard against the loose upper bound.
 	revPrefix := keys.AssocRevPrefixForID(wsPrefix, [16]byte(id))
 	revIter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: revPrefix,
-		UpperBound: append(append([]byte{}, revPrefix...), 0xFF),
+		UpperBound: keys.PrefixUpperBound(append([]byte{}, revPrefix...)),
 	})
 	if err == nil {
 		for revIter.SeekGE(revPrefix); revIter.Valid(); revIter.Next() {
