@@ -445,8 +445,11 @@ func ctLoadAdjudication(t *testing.T, path string) ctJudgeCalibration {
 		judge = append(judge, j)
 		human = append(human, h)
 	}
-	k, fpr, n := ctCohensKappa(judge, human)
-	return ctJudgeCalibration{Ran: n > 0, Kappa: k, FPR: fpr, N: n}
+	k, fpr, n, hRel, hIrrel := ctCohensKappa(judge, human)
+	return ctJudgeCalibration{
+		Ran: n > 0, Kappa: k, FPR: fpr, N: n,
+		HumanRelevant: hRel, HumanIrrelevant: hIrrel,
+	}
 }
 
 // --- arm arithmetic ---------------------------------------------------------
@@ -830,9 +833,27 @@ func TestCognitionTrial(t *testing.T) {
 			evalBucket = append(evalBucket, distinctBucket[i])
 		}
 	}
+	// A CAP MUST NOT RESHAPE THE TIME SPAN. evalQueries is in event-time order,
+	// so `evalQueries[:maxQueries]` keeps the OLDEST queries and drops the
+	// newest — which empties every trailing weekly bucket and manufactures
+	// exactly the sparse-tail shape the trend is most easily fooled by. The
+	// subsample is taken at an even stride across the whole ordered list
+	// instead, so it spans the same interval as the full set and every bucket
+	// keeps its share. Deterministic, so a truncated run reproduces itself.
 	if maxQueries > 0 && len(evalQueries) > maxQueries {
-		evalQueries = evalQueries[:maxQueries]
-		evalBucket = evalBucket[:maxQueries]
+		total := len(evalQueries)
+		sampled := make([]ctEvent, 0, maxQueries)
+		sampledBucket := make([]int, 0, maxQueries)
+		for k := 0; k < maxQueries; k++ {
+			i := k * total / maxQueries
+			sampled = append(sampled, evalQueries[i])
+			sampledBucket = append(sampledBucket, evalBucket[i])
+		}
+		t.Logf("SUBSAMPLE: %s=%d — taking every %.1fth query at an even stride across the full "+
+			"time span (%d held out), NOT the first %d, which would drop the newest queries and "+
+			"empty the trailing weekly buckets.",
+			envCTQueries, maxQueries, float64(total)/float64(maxQueries), total, maxQueries)
+		evalQueries, evalBucket = sampled, sampledBucket
 	}
 	t.Logf("HOLDOUT: %d of %d distinct queries held out for evaluation (%.0f%% target), "+
 		"excluded from replay", len(evalQueries), len(distinct), 100*ctHoldoutFraction)
@@ -843,9 +864,17 @@ func TestCognitionTrial(t *testing.T) {
 	t.Logf("LABELS: %d (queryHash, memoryID, grade) triples", labels.n)
 	t.Logf("LABEL SET SHA-256: %s", labels.hash)
 	t.Logf("JUDGE CALIBRATION (run BEFORE any arm was scored): kappa=%.3f fpr=%.1f%% n=%d "+
-		"[gate: kappa >= %.2f AND fpr <= %.0f%%]",
-		judge.Kappa, 100*judge.FPR, judge.N,
-		ctPreregistered.MinJudgeKappa, 100*ctPreregistered.MaxJudgeFPR)
+		"human-relevant=%d human-irrelevant=%d\n"+
+		"  [gate: kappa >= %.2f AND fpr <= %.0f%% AND n >= %d AND both human marginals >= 1]",
+		judge.Kappa, 100*judge.FPR, judge.N, judge.HumanRelevant, judge.HumanIrrelevant,
+		ctPreregistered.MinJudgeKappa, 100*ctPreregistered.MaxJudgeFPR,
+		ctPreregistered.MinAdjudicatedPairs)
+	if judge.HumanIrrelevant == 0 || judge.HumanRelevant == 0 {
+		t.Logf("WARNING: every adjudicated pair falls on ONE side of the grade>=2 binarization. "+
+			"kappa reads 1.000 by the degenerate 1-pe==0 branch and the FPR denominator is "+
+			"empty (%d human-irrelevant pairs). This is U1 — §3c's planted negatives are "+
+			"missing from the subsample.", judge.HumanIrrelevant)
+	}
 	t.Logf("NO ARM NUMBER IS COMPUTED ABOVE THIS LINE. The label hash and the judge gate are " +
 		"now in the run log; §6 S5 requires the hash to match what was frozen.")
 	judge.LabelHashMatches = strings.EqualFold(
@@ -1040,11 +1069,22 @@ func TestCognitionTrial(t *testing.T) {
 			deltaC.SDOfDiff, 7.84*deltaC.SDOfDiff*deltaC.SDOfDiff/0.0009)
 	}
 
-	bucketDeltas := make([]float64, 0, nBuckets)
-	for _, vals := range perBucketDeltaC {
-		bucketDeltas = append(bucketDeltas, ctMean(vals))
+	// EMPTY BUCKETS ARE OMITTED, NOT ZEROED. ctMean(nil) is 0, so building a
+	// dense per-bucket series scores a week with no evaluated queries as a
+	// measured Delta_C of exactly 0 and regresses it — which is how six real
+	// +0.04 buckets plus six empty ones manufacture a +0.005 slope with a CI
+	// lower bound of +0.003 and pass S3 on data that does not exist. See
+	// ctBucketDeltas; U6 refuses the trend outright when too few buckets in the
+	// trailing window survive.
+	bucketDeltas, omittedBuckets := ctBucketDeltas(perBucketDeltaC)
+	for _, bd := range bucketDeltas {
+		t.Logf("  bucket W%02d: Delta_C %+.4f over %d queries", bd.Bucket, bd.Mean, bd.NQueries)
 	}
-	t.Logf("Delta_C by weekly bucket: %v", ctRound4(bucketDeltas))
+	if len(omittedBuckets) > 0 {
+		t.Logf("  %d of %d weekly buckets had NO evaluated query and are OMITTED from the trend "+
+			"(indexes %v). They are absent data, not a Delta_C of zero.",
+			len(omittedBuckets), nBuckets, omittedBuckets)
+	}
 
 	// --- verdict ------------------------------------------------------------
 	// SINGLE VAULT. ctDecide requires three; running it here reports the U2 gate
@@ -1060,6 +1100,7 @@ func TestCognitionTrial(t *testing.T) {
 		MRRDeltaH:        mrrH,
 		MRRDeltaP:        mrrP,
 		DeltaCByBucket:   bucketDeltas,
+		OmittedBuckets:   omittedBuckets,
 		BaselineEdges:    baseTotal,
 		ReplayedEdges:    replayedEdges,
 		UnreplayableFrac: ctUnreplayableFrac(baseTotal, baseByType),
@@ -1096,25 +1137,6 @@ func ctHoldoutBit(queryHash string, seed int64) float64 {
 		v = v<<8 | uint64(sum[i])
 	}
 	return float64(v%1_000_000) / 1_000_000.0
-}
-
-func ctMean(xs []float64) float64 {
-	if len(xs) == 0 {
-		return 0
-	}
-	s := 0.0
-	for _, x := range xs {
-		s += x
-	}
-	return s / float64(len(xs))
-}
-
-func ctRound4(xs []float64) []float64 {
-	out := make([]float64, len(xs))
-	for i, x := range xs {
-		out[i] = math.Round(x*10000) / 10000
-	}
-	return out
 }
 
 func ctLogComposition(t *testing.T, tag string, total int, byType map[storage.RelType]int) {

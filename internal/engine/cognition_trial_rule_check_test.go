@@ -4,6 +4,7 @@ package engine
 
 import (
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -23,7 +24,14 @@ import (
 
 // ctGoodJudge is a calibration that passes U1 and S5.
 func ctGoodJudge() ctJudgeCalibration {
-	return ctJudgeCalibration{Ran: true, Kappa: 0.72, FPR: 0.09, N: 180, LabelHashMatches: true}
+	return ctJudgeCalibration{
+		Ran: true, Kappa: 0.72, FPR: 0.09, N: 180,
+		// Both human marginals non-empty: 40 of the 180 adjudicated pairs are
+		// human-irrelevant (§3c's planted negatives among them), so kappa's
+		// expected agreement is defined and the FPR denominator is not empty.
+		HumanRelevant: 140, HumanIrrelevant: 40,
+		LabelHashMatches: true,
+	}
 }
 
 // ctRisingBuckets is a 12-bucket Delta_C series that satisfies S3: positive in
@@ -55,7 +63,7 @@ func ctShipVault(label string) ctVaultResult {
 		DeltaP:           ctDelta{Point: 0.006, CILower: -0.010, CIUpper: 0.022, N: 320},
 		MRRDeltaH:        0.031,
 		MRRDeltaP:        0.002,
-		DeltaCByBucket:   ctRisingBuckets(0.03),
+		DeltaCByBucket:   ctBucketSeries(ctRisingBuckets(0.03)),
 		BaselineEdges:    5000,
 		ReplayedEdges:    2100,
 		UnreplayableFrac: 0.30,
@@ -72,7 +80,7 @@ func ctKillVault(label string) ctVaultResult {
 		DeltaP:           ctDelta{Point: -0.003, CILower: -0.015, CIUpper: 0.009, N: 340},
 		MRRDeltaH:        0.0,
 		MRRDeltaP:        -0.001,
-		DeltaCByBucket:   ctFlatBuckets(0.001),
+		DeltaCByBucket:   ctBucketSeries(ctFlatBuckets(0.001)),
 		BaselineEdges:    5000,
 		ReplayedEdges:    2400,
 		UnreplayableFrac: 0.25,
@@ -186,6 +194,467 @@ func TestCognitionTrialRule_UnderpoweredGates(t *testing.T) {
 			fidelity := true
 			tc.mutate(vaults, &judge, &fidelity)
 			ctRequireVerdict(t, ctDecide(vaults, judge, fidelity), ctVerdictUnderpowered, tc.wantSub)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestCognitionTrialRule_EveryThresholdBinds — the anti-inert-gate census.
+//
+// TestCognitionTrialRule_UnderpoweredGates above is a HAND-MAINTAINED list, and
+// a hand-maintained list is exactly how ctJudgeCalibration.N came to be
+// declared, documented and never read: it had no case, so nothing noticed. A
+// sweep over the rule's inputs found it was the ONLY inert one, which is
+// reassuring about the others and says nothing at all about the next field
+// somebody adds.
+//
+// So this test REFLECTS over every field of ctPreregistered and every field of
+// ctJudgeCalibration and requires a registered probe for each. A new threshold
+// without a probe fails here; a probe for a field that no longer exists fails
+// too. Each probe pushes exactly one input past that field's bound and requires
+// the verdict to change — i.e. it proves the field is load-bearing, not merely
+// present.
+// ---------------------------------------------------------------------------
+
+// ctProbe asserts that one mutation moves the verdict off SHIP (or off KILL,
+// for the K-side thresholds) and says why in the audit trail.
+type ctProbe func(t *testing.T)
+
+// ctFromShip mutates an otherwise-SHIP input and requires the stated verdict.
+func ctFromShip(want ctVerdict, wantSub string,
+	mutate func(v []ctVaultResult, j *ctJudgeCalibration, fidelity *bool),
+) ctProbe {
+	return func(t *testing.T) {
+		vaults := ctThree(ctShipVault)
+		judge := ctGoodJudge()
+		fidelity := true
+		mutate(vaults, &judge, &fidelity)
+		if base := ctDecide(ctThree(ctShipVault), ctGoodJudge(), true); base.Verdict != ctVerdictShip {
+			t.Fatalf("baseline is not SHIP, so this probe proves nothing\n%s", base)
+		}
+		ctRequireVerdict(t, ctDecide(vaults, judge, fidelity), want, wantSub)
+	}
+}
+
+// ctFromKill mutates an otherwise-KILL input and requires the stated verdict —
+// the K-side thresholds can only be shown to bind from a killing baseline.
+func ctFromKill(want ctVerdict, wantSub string, mutate func(v []ctVaultResult)) ctProbe {
+	return func(t *testing.T) {
+		vaults := ctThree(ctKillVault)
+		mutate(vaults)
+		if base := ctDecide(ctThree(ctKillVault), ctGoodJudge(), true); base.Verdict != ctVerdictKill {
+			t.Fatalf("baseline is not KILL, so this probe proves nothing\n%s", base)
+		}
+		ctRequireVerdict(t, ctDecide(vaults, ctGoodJudge(), true), want, wantSub)
+	}
+}
+
+func ctPreregisteredProbes() map[string]ctProbe {
+	return map[string]ctProbe{
+		// --- S-side ---------------------------------------------------------
+		"MinDeltaC": ctFromShip(ctVerdictInconclusivePowered, "S1 FAIL",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				for i := range v {
+					// Just under the bar, CI still strictly positive and tight:
+					// this is a REAL effect that is simply too small.
+					v[i].DeltaC = ctDelta{Point: ctPreregistered.MinDeltaC - 0.001,
+						CILower: 0.020, CIUpper: 0.038}
+				}
+			}),
+		"MinDeltaMechanism": ctFromShip(ctVerdictInconclusivePowered, "S2 FAIL",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				for i := range v {
+					v[i].DeltaH = ctDelta{Point: ctPreregistered.MinDeltaMechanism - 0.001,
+						CILower: 0.008, CIUpper: 0.030}
+					v[i].DeltaP = ctDelta{Point: 0.003, CILower: -0.007, CIUpper: 0.013}
+				}
+			}),
+		"TrendMinPositive": func(t *testing.T) {
+			// Exactly one fewer positive bucket than the rule requires, inside
+			// the trailing window.
+			series := ctRisingBuckets(0.03)
+			for i := 2; i < 2+(ctPreregistered.TrendWindow-ctPreregistered.TrendMinPositive+1); i++ {
+				series[i] = -0.001
+			}
+			tr := ctComputeTrend(ctBucketSeries(series), ctPreregistered.TrendWindow)
+			if tr.PositiveOfLastN != ctPreregistered.TrendMinPositive-1 {
+				t.Fatalf("probe setup: %d positive in the window, want %d",
+					tr.PositiveOfLastN, ctPreregistered.TrendMinPositive-1)
+			}
+			ctFromShip(ctVerdictInconclusivePowered, "S3 FAIL",
+				func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+					for i := range v {
+						v[i].DeltaCByBucket = ctBucketSeries(series)
+					}
+				})(t)
+		},
+		"TrendWindow": func(t *testing.T) {
+			// A series whose positivity count DEPENDS on the window: positive in
+			// the two oldest buckets, and only TrendMinPositive-1 positive
+			// inside the trailing window. At the pre-registered window it fails
+			// S3; at a wider window it would pass — which is what "the window is
+			// load-bearing" means.
+			series := ctRisingBuckets(0.03)
+			for i := 2; i < 2+(ctPreregistered.TrendWindow-ctPreregistered.TrendMinPositive+1); i++ {
+				series[i] = -0.001
+			}
+			narrow := ctComputeTrend(ctBucketSeries(series), ctPreregistered.TrendWindow)
+			wide := ctComputeTrend(ctBucketSeries(series), ctPreregistered.TrendWindow+2)
+			if narrow.PositiveOfLastN >= ctPreregistered.TrendMinPositive {
+				t.Fatalf("probe setup: the pre-registered window already passes (%d positive)",
+					narrow.PositiveOfLastN)
+			}
+			if wide.PositiveOfLastN < ctPreregistered.TrendMinPositive {
+				t.Fatalf("the trailing window is not load-bearing: widening it from %d to %d "+
+					"changed nothing (%d vs %d positive)", ctPreregistered.TrendWindow,
+					ctPreregistered.TrendWindow+2, narrow.PositiveOfLastN, wide.PositiveOfLastN)
+			}
+		},
+		"TrendSlopeCILower": ctFromShip(ctVerdictInconclusivePowered, "S3 FAIL",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				// Every bucket positive — so the positivity half of S3 passes —
+				// but clearly DECREASING, which is the half this field gates.
+				falling := make([]float64, 12)
+				for i := range falling {
+					falling[i] = 0.08 - 0.005*float64(i)
+				}
+				for i := range v {
+					v[i].DeltaCByBucket = ctBucketSeries(falling)
+				}
+			}),
+		"VaultsSupporting": ctFromShip(ctVerdictInconclusivePowered, "S1 FAIL",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				// Only ONE vault carries the effect; the rule needs two.
+				for i := 1; i < len(v); i++ {
+					v[i].DeltaC = ctDelta{Point: 0.029, CILower: 0.020, CIUpper: 0.038}
+				}
+			}),
+
+		// --- K-side ---------------------------------------------------------
+		"KillDeltaCPoint": ctFromKill(ctVerdictInconclusivePowered, "K1 FAIL",
+			func(v []ctVaultResult) {
+				for i := range v {
+					v[i].DeltaC = ctDelta{Point: ctPreregistered.KillDeltaCPoint + 0.001,
+						CILower: -0.005, CIUpper: 0.027}
+				}
+			}),
+		"KillDeltaCCIUpper": ctFromKill(ctVerdictInconclusivePowered, "K1 FAIL",
+			func(v []ctVaultResult) {
+				for i := range v {
+					v[i].DeltaC = ctDelta{Point: 0.002, CILower: -0.025,
+						CIUpper: ctPreregistered.KillDeltaCCIUpper + 0.001}
+				}
+			}),
+
+		// --- U-side ---------------------------------------------------------
+		"VaultsRequired": func(t *testing.T) {
+			got := ctDecide(ctThree(ctShipVault)[:ctPreregistered.VaultsRequired-1], ctGoodJudge(), true)
+			ctRequireVerdict(t, got, ctVerdictUnderpowered, "U2: 2 vaults, need 3")
+		},
+		"MinQueriesPerVault": ctFromShip(ctVerdictUnderpowered, "labeled held-out queries",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[1].NQueries = ctPreregistered.MinQueriesPerVault - 1
+			}),
+		"MinEventsPerVault": ctFromShip(ctVerdictUnderpowered, "distinct recall events",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[2].DistinctEvents = ctPreregistered.MinEventsPerVault - 1
+			}),
+		"MinJudgeKappa": ctFromShip(ctVerdictUnderpowered, "U1: judge kappa",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) {
+				j.Kappa = ctPreregistered.MinJudgeKappa - 0.01
+			}),
+		"MaxJudgeFPR": ctFromShip(ctVerdictUnderpowered, "U1: judge false-positive rate",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) {
+				j.FPR = ctPreregistered.MaxJudgeFPR + 0.01
+			}),
+		"MinAdjudicatedPairs": ctFromShip(ctVerdictUnderpowered, "adjudicated pairs, need",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) {
+				j.N = ctPreregistered.MinAdjudicatedPairs - 1
+			}),
+		"MinReplayEdgeFrac": ctFromShip(ctVerdictUnderpowered, "below the 20% floor",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[0].ReplayedEdges = int(ctPreregistered.MinReplayEdgeFrac*
+					float64(v[0].BaselineEdges)) - 1
+			}),
+		"MaxUnreplayableFrac": ctFromShip(ctVerdictUnderpowered, "in RelTypes replay cannot produce",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				v[0].UnreplayableFrac = ctPreregistered.MaxUnreplayableFrac + 0.01
+			}),
+		"MaxCIHalfWidth": ctFromShip(ctVerdictUnderpowered, "CI half-width",
+			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+				w := ctPreregistered.MaxCIHalfWidth + 0.001
+				for i := 0; i < ctPreregistered.VaultsSupporting; i++ {
+					v[i].DeltaC = ctDelta{Point: 0.055, CILower: 0.055 - w, CIUpper: 0.055 + w}
+				}
+			}),
+		"MinPopulatedBuckets": func(t *testing.T) {
+			// DERIVED, and pinned as derived: S3 asks for TrendMinPositive
+			// positive buckets out of the trailing window, which is
+			// unsatisfiable with fewer than TrendMinPositive populated ones. If
+			// someone raises TrendMinPositive without raising this, the floor
+			// silently stops being the floor.
+			if ctPreregistered.MinPopulatedBuckets != ctPreregistered.TrendMinPositive {
+				t.Errorf("MinPopulatedBuckets = %d but TrendMinPositive = %d: the U6 floor is "+
+					"DERIVED from S3's positivity requirement, not chosen",
+					ctPreregistered.MinPopulatedBuckets, ctPreregistered.TrendMinPositive)
+			}
+			ctFromShip(ctVerdictUnderpowered, "populated weekly buckets",
+				func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+					full := ctBucketSeries(ctRisingBuckets(0.03))
+					for i := range v {
+						v[i].DeltaCByBucket = full[:ctPreregistered.MinPopulatedBuckets-1]
+					}
+				})(t)
+		},
+
+		// --- not a gate: a parameter the harness consumes --------------------
+		"BootstrapResamples": func(t *testing.T) {
+			// This one is NOT a verdict gate — it is the resample count the
+			// interval is computed from. Its probe therefore proves it is
+			// CONSUMED: the pre-registered value must produce a different
+			// interval from a coarser one on identical data and seed.
+			a := make([]float64, 60)
+			b := make([]float64, 60)
+			for i := range a {
+				// The paired difference must VARY, or every resample mean is
+				// identical and the resample count could not be observed at all.
+				b[i] = float64((i*13)%17) / 17.0
+				a[i] = b[i] + 0.04 + 0.01*float64((i*7)%5) - 0.02
+			}
+			full := ctPairedBootstrap(a, b, ctPreregistered.BootstrapResamples, 7)
+			coarse := ctPairedBootstrap(a, b, 20, 7)
+			if full == coarse {
+				t.Errorf("the resample count is not consumed: %d resamples and 20 produced an "+
+					"identical interval %+v", ctPreregistered.BootstrapResamples, full)
+			}
+			if ctPercentileIndex(ctPreregistered.BootstrapResamples, 0.025) !=
+				ctPreregistered.BootstrapResamples/40 {
+				t.Errorf("the 2.5%% percentile index is not derived from the resample count")
+			}
+		},
+	}
+}
+
+func ctJudgeProbes() map[string]ctProbe {
+	return map[string]ctProbe{
+		"Ran": ctFromShip(ctVerdictUnderpowered, "U1: the judge-calibration gate was not run",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) { j.Ran = false }),
+		"Kappa": ctFromShip(ctVerdictUnderpowered, "U1: judge kappa",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) {
+				j.Kappa = ctPreregistered.MinJudgeKappa - 0.01
+			}),
+		"FPR": ctFromShip(ctVerdictUnderpowered, "U1: judge false-positive rate",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) {
+				j.FPR = ctPreregistered.MaxJudgeFPR + 0.01
+			}),
+		"N": ctFromShip(ctVerdictUnderpowered, "adjudicated pairs, need",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) {
+				j.N = ctPreregistered.MinAdjudicatedPairs - 1
+			}),
+		"HumanRelevant": ctFromShip(ctVerdictUnderpowered, "no human-RELEVANT",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) { j.HumanRelevant = 0 }),
+		"HumanIrrelevant": ctFromShip(ctVerdictUnderpowered, "no human-IRRELEVANT",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) { j.HumanIrrelevant = 0 }),
+		"LabelHashMatches": ctFromShip(ctVerdictInconclusivePowered, "S5 FAIL",
+			func(_ []ctVaultResult, j *ctJudgeCalibration, _ *bool) { j.LabelHashMatches = false }),
+	}
+}
+
+func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
+	for _, tc := range []struct {
+		what   string
+		typ    reflect.Type
+		probes map[string]ctProbe
+	}{
+		{"ctPreregistered", reflect.TypeOf(ctPreregistered), ctPreregisteredProbes()},
+		{"ctJudgeCalibration", reflect.TypeOf(ctJudgeCalibration{}), ctJudgeProbes()},
+	} {
+		seen := map[string]bool{}
+		for i := 0; i < tc.typ.NumField(); i++ {
+			name := tc.typ.Field(i).Name
+			seen[name] = true
+			probe, ok := tc.probes[name]
+			if !ok {
+				t.Errorf("%s.%s has NO PROBE. Every field of this struct must be shown to bind: "+
+					"add a case that pushes exactly this input past its bound and asserts the "+
+					"verdict changes. A declared-and-never-read gate (which is how "+
+					"ctJudgeCalibration.N shipped) is worse than no gate, because it reads as "+
+					"protection.", tc.what, name)
+				continue
+			}
+			t.Run(tc.what+"."+name, probe)
+		}
+		for name := range tc.probes {
+			if !seen[name] {
+				t.Errorf("%s has a probe for %q, which is not a field of the struct — the probe "+
+					"list has drifted", tc.what, name)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ABSENT BUCKETS ARE NOT MEASURED ZEROS.
+//
+// The trend series was a dense []float64 built as ctMean(perBucket[b]), and
+// ctMean(nil) is 0 — so a week with no evaluated query entered the OLS
+// regression as a Delta_C of exactly zero. This test pins the demonstration
+// that made the defect undeniable: the SAME six real buckets yield a slope of
+// +0.0046 (CI lower > 0, i.e. S3's non-decreasing gate PASSING) or -0.0046
+// (failing it) depending only on WHERE the six absent buckets are padded in.
+// The conclusion is being decided by data that does not exist.
+// ---------------------------------------------------------------------------
+
+func TestCognitionTrialRule_EmptyBucketsAreOmittedNotScoredAsZero(t *testing.T) {
+	const real = 0.04
+	// Six buckets with one query each at +0.04; six with no queries at all.
+	sparseLate := make([][]float64, 12)  // populated 0..5, absent 6..11
+	sparseEarly := make([][]float64, 12) // absent 0..5, populated 6..11
+	for b := 0; b < 6; b++ {
+		sparseLate[b] = []float64{real}
+		sparseEarly[b+6] = []float64{real}
+	}
+
+	// --- 1. what PADDING does, which is the defect ---------------------------
+	pad := func(perBucket [][]float64) []ctBucketDelta {
+		out := make([]ctBucketDelta, len(perBucket))
+		for b, vals := range perBucket {
+			out[b] = ctBucketDelta{Bucket: b, Mean: ctMean(vals), NQueries: len(vals)}
+		}
+		return out
+	}
+	up := ctComputeTrend(pad(sparseEarly), ctPreregistered.TrendWindow)
+	down := ctComputeTrend(pad(sparseLate), ctPreregistered.TrendWindow)
+	// 0.72/143 exactly: sum((x-5.5)*(y-0.02)) / sum((x-5.5)^2) for
+	// y = six 0s then six 0.04s. Every term of the numerator is contributed by
+	// the SIX ZEROS, which are not measurements.
+	if math.Abs(up.Slope-0.0050350) > 1e-6 || math.Abs(down.Slope+0.0050350) > 1e-6 {
+		t.Fatalf("the padding demonstration has drifted: slopes %+.7f / %+.7f, expected "+
+			"+0.0050350 / -0.0050350", up.Slope, down.Slope)
+	}
+	if up.SlopeCILower <= 0 {
+		t.Fatalf("padded-early slope CI lower %+.6f — the demonstration is meant to show a "+
+			"CI that EXCLUDES zero on fabricated data", up.SlopeCILower)
+	}
+	if !(up.SlopeCILower >= ctPreregistered.TrendSlopeCILower &&
+		down.SlopeCILower < ctPreregistered.TrendSlopeCILower) {
+		t.Fatalf("padding did not flip S3's slope gate (%+.6f vs %+.6f against floor %+.6f) — "+
+			"the case this test exists for is no longer the case",
+			up.SlopeCILower, down.SlopeCILower, ctPreregistered.TrendSlopeCILower)
+	}
+
+	// --- 2. what OMISSION does, which is the fix -----------------------------
+	for _, tc := range []struct {
+		name      string
+		perBucket [][]float64
+		wantFirst int
+	}{
+		{"absent buckets early", sparseEarly, 6},
+		{"absent buckets late", sparseLate, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			series, omitted := ctBucketDeltas(tc.perBucket)
+			if len(series) != 6 || len(omitted) != 6 {
+				t.Fatalf("%d populated / %d omitted, want 6/6 — an empty bucket is being "+
+					"carried into the series", len(series), len(omitted))
+			}
+			if series[0].Bucket != tc.wantFirst {
+				t.Errorf("first populated bucket index %d, want %d — omitting a bucket must "+
+					"not re-space the ones that remain", series[0].Bucket, tc.wantFirst)
+			}
+			for _, bd := range series {
+				if bd.NQueries == 0 {
+					t.Errorf("bucket %d survived with 0 queries", bd.Bucket)
+				}
+			}
+			tr := ctComputeTrend(series, ctPreregistered.TrendWindow)
+			if math.Abs(tr.Slope) > 1e-12 {
+				t.Errorf("slope %+.9f over six identical +%.2f buckets, want exactly 0 — the "+
+					"fabricated slope is coming from somewhere", tr.Slope, real)
+			}
+			if tr.PopulatedInWindow != 6 {
+				t.Errorf("PopulatedInWindow = %d, want 6", tr.PopulatedInWindow)
+			}
+
+			// --- 3. and the verdict is UNDERPOWERED, not a trend -------------
+			vaults := ctThree(ctShipVault)
+			for i := range vaults {
+				vaults[i].DeltaCByBucket = series
+				vaults[i].OmittedBuckets = omitted
+			}
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			if got.Verdict == ctVerdictShip {
+				t.Fatalf("SHIPPED on a trend fitted over %d of 12 weekly buckets\n%s",
+					len(series), got)
+			}
+			ctRequireVerdict(t, got, ctVerdictUnderpowered, "populated weekly buckets")
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The two ways the judge gate could be passed by a sample that measures nothing.
+// Both were DEMONSTRATED against the first version of this rule, which declared
+// and documented ctJudgeCalibration.N and then never read it.
+// ---------------------------------------------------------------------------
+
+// ONE agreeing pair yields kappa=1.000, fpr=0.000 and — before N was bound —
+// a clean SHIP. §3c pre-registers a minimum of 150 adjudicated pairs; a gate
+// that is declared and never read is not a gate.
+func TestCognitionTrialRule_OneAdjudicatedPairIsNotACalibration(t *testing.T) {
+	judge := ctJudgeCalibration{
+		Ran: true, Kappa: 1.0, FPR: 0.0, N: 1,
+		HumanRelevant: 1, HumanIrrelevant: 0, LabelHashMatches: true,
+	}
+	got := ctDecide(ctThree(ctShipVault), judge, true)
+	if got.Verdict == ctVerdictShip {
+		t.Fatalf("SHIPPED on a judge calibration of ONE pair — the pre-registered minimum of "+
+			"%d adjudicated pairs is not binding\n%s", ctPreregistered.MinAdjudicatedPairs, got)
+	}
+	ctRequireVerdict(t, got, ctVerdictUnderpowered, "U1: the judge-calibration subsample has 1")
+}
+
+// 200 pairs where EVERY pair is relevant to both judge and human also yields
+// kappa=1.000 fpr=0.000 — kappa via the 1-pe==0 branch, FPR via an empty
+// denominator. Perfect agreement carrying zero discriminative information.
+// §3c's planted negatives exist to prevent exactly this; nothing asserted one
+// was present. The arithmetic is computed here rather than asserted by hand so
+// the demonstration cannot drift from the implementation.
+func TestCognitionTrialRule_DegenerateAdjudicationSampleIsNotACalibration(t *testing.T) {
+	all := func(g int, n int) []int {
+		out := make([]int, n)
+		for i := range out {
+			out[i] = g
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name          string
+		judge, human  []int
+		wantSubstring string
+	}{
+		{"every pair relevant", all(3, 200), all(3, 200),
+			"U1: the judge-calibration subsample contains no human-IRRELEVANT pair"},
+		{"every pair irrelevant", all(0, 200), all(0, 200),
+			"U1: the judge-calibration subsample contains no human-RELEVANT pair"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, fpr, n, hRel, hIrrel := ctCohensKappa(tc.judge, tc.human)
+			if k != 1 || fpr != 0 || n != 200 {
+				t.Fatalf("setup: kappa=%v fpr=%v n=%v — this case is meant to be the "+
+					"degenerate kappa=1 fpr=0 one", k, fpr, n)
+			}
+			judge := ctJudgeCalibration{
+				Ran: true, Kappa: k, FPR: fpr, N: n,
+				HumanRelevant: hRel, HumanIrrelevant: hIrrel, LabelHashMatches: true,
+			}
+			got := ctDecide(ctThree(ctShipVault), judge, true)
+			if got.Verdict == ctVerdictShip {
+				t.Fatalf("SHIPPED on a degenerate adjudication sample (kappa=%.3f fpr=%.3f, "+
+					"every pair on one side of the binarization) — perfect agreement that "+
+					"measures nothing\n%s", k, fpr, got)
+			}
+			ctRequireVerdict(t, got, ctVerdictUnderpowered, tc.wantSubstring)
 		})
 	}
 }
@@ -313,7 +782,7 @@ func TestCognitionTrialMetrics_PairedBootstrapIsPairedAndReproducible(t *testing
 }
 
 func TestCognitionTrialMetrics_TrendSlopeInterval(t *testing.T) {
-	rising := ctComputeTrend(ctRisingBuckets(0.03), 10)
+	rising := ctComputeTrend(ctBucketSeries(ctRisingBuckets(0.03)), 10)
 	if rising.PositiveOfLastN != 10 {
 		t.Errorf("positive buckets = %d, want 10", rising.PositiveOfLastN)
 	}
@@ -326,7 +795,7 @@ func TestCognitionTrialMetrics_TrendSlopeInterval(t *testing.T) {
 	for i := range falling {
 		falling[i] = 0.08 - 0.01*float64(i)
 	}
-	fall := ctComputeTrend(falling, 10)
+	fall := ctComputeTrend(ctBucketSeries(falling), 10)
 	if fall.SlopeCILower >= ctPreregistered.TrendSlopeCILower {
 		t.Errorf("a clearly decreasing series passed the non-decreasing floor (CI lower %.6f)",
 			fall.SlopeCILower)
@@ -345,7 +814,7 @@ func TestCognitionTrialJudge_KappaAndFPR(t *testing.T) {
 	// positives), 1 human-only.
 	judge := []int{3, 2, 2, 3, 0, 1, 0, 3, 2, 0}
 	human := []int{3, 3, 2, 2, 0, 0, 1, 0, 0, 3}
-	k, fpr, n := ctCohensKappa(judge, human)
+	k, fpr, n, _, _ := ctCohensKappa(judge, human)
 	if n != 10 {
 		t.Fatalf("n = %d, want 10", n)
 	}
@@ -360,13 +829,13 @@ func TestCognitionTrialJudge_KappaAndFPR(t *testing.T) {
 	// Perfect agreement must be exactly 1, never NaN — a NaN compares false
 	// against the gate and would read as a failure for the wrong reason (or,
 	// with the comparison flipped, as a pass).
-	if k, _, _ := ctCohensKappa([]int{3, 3, 0, 0}, []int{3, 3, 0, 0}); math.Abs(k-1) > 1e-12 {
+	if k, _, _, _, _ := ctCohensKappa([]int{3, 3, 0, 0}, []int{3, 3, 0, 0}); math.Abs(k-1) > 1e-12 {
 		t.Errorf("kappa on perfect agreement = %v, want 1", k)
 	}
-	if k, _, _ := ctCohensKappa([]int{3, 3}, []int{3, 3}); math.IsNaN(k) || k != 1 {
+	if k, _, _, _, _ := ctCohensKappa([]int{3, 3}, []int{3, 3}); math.IsNaN(k) || k != 1 {
 		t.Errorf("kappa on a degenerate all-relevant sample = %v, want 1 and never NaN", k)
 	}
-	if _, _, n := ctCohensKappa(nil, nil); n != 0 {
+	if _, _, n, _, _ := ctCohensKappa(nil, nil); n != 0 {
 		t.Errorf("empty input n = %d, want 0", n)
 	}
 }

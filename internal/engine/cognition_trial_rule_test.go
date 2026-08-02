@@ -56,30 +56,38 @@ var ctPreregistered = struct {
 	TrendMinPositive    int     // S3: positive in >= this many of the last 10 buckets
 	TrendWindow         int     // S3: ...out of this many trailing buckets
 	TrendSlopeCILower   float64 // S3: OLS slope 95% CI lower bound floor
+	MinPopulatedBuckets int     // U6: populated buckets required inside the window
 	VaultsRequired      int     // U2
 	VaultsSupporting    int     // S1/S3: how many vaults must carry the claim
 	MinQueriesPerVault  int     // U2
 	MinEventsPerVault   int     // U2
 	MinJudgeKappa       float64 // U1
 	MaxJudgeFPR         float64 // U1
+	MinAdjudicatedPairs int     // U1: §3c's minimum human-adjudicated subsample
 	MinReplayEdgeFrac   float64 // U4
 	MaxUnreplayableFrac float64 // U4
 	MaxCIHalfWidth      float64 // U5
 	BootstrapResamples  int
 }{
-	MinDeltaC:           0.03,
-	MinDeltaMechanism:   0.02,
-	KillDeltaCPoint:     0.01,
-	KillDeltaCCIUpper:   0.03,
-	TrendMinPositive:    8,
-	TrendWindow:         10,
-	TrendSlopeCILower:   -0.005,
+	MinDeltaC:         0.03,
+	MinDeltaMechanism: 0.02,
+	KillDeltaCPoint:   0.01,
+	KillDeltaCCIUpper: 0.03,
+	TrendMinPositive:  8,
+	TrendWindow:       10,
+	TrendSlopeCILower: -0.005,
+	// DERIVED, not a new number: you cannot have TrendMinPositive positive
+	// buckets out of the last TrendWindow if fewer than TrendMinPositive of
+	// them contain any data. Pinned equal to TrendMinPositive by
+	// TestCognitionTrialRule_EveryThresholdBinds.
+	MinPopulatedBuckets: 8,
 	VaultsRequired:      3,
 	VaultsSupporting:    2,
 	MinQueriesPerVault:  300,
 	MinEventsPerVault:   200,
 	MinJudgeKappa:       0.6,
 	MaxJudgeFPR:         0.15,
+	MinAdjudicatedPairs: 150,
 	MinReplayEdgeFrac:   0.20,
 	MaxUnreplayableFrac: 0.60,
 	MaxCIHalfWidth:      0.03,
@@ -223,13 +231,66 @@ func ctPercentileIndex(n int, p float64) int {
 // TREND (S3)
 // ---------------------------------------------------------------------------
 
+// ctBucketDelta is ONE WEEKLY BUCKET's mean Delta_C, carrying its bucket index
+// and the number of queries it was computed from.
+//
+// WHY THE INDEX TRAVELS WITH THE VALUE. The trend series used to be a dense
+// []float64 with one entry per bucket, built as ctMean(perBucket[b]) — and
+// ctMean(nil) is 0, so a bucket with NO EVALUATED QUERIES entered the
+// regression as a measured Delta_C of exactly zero. That is absent data scored
+// as a result. Demonstrated: six real +0.04 buckets followed by six empty ones
+// manufacture an OLS slope of +0.005 with a CI lower bound of +0.003 — S3's
+// slope gate PASSING on six buckets of data that do not exist — and reversing
+// the padding fails the same gate on the same non-data. Sparse buckets are
+// anticipated by the design's risk 8 (0x29 retention is 90 days but pruning is
+// amortized every 256th write PROCESS-WIDE, so a vault's usable window is
+// uneven), so this is honoring the design rather than departing from it.
+//
+// Empty buckets are now OMITTED, and the regression uses the real bucket index
+// as its x — omitting a bucket must not silently re-space the ones that remain.
+type ctBucketDelta struct {
+	Bucket   int     // weekly bucket index, 0-based
+	Mean     float64 // mean Delta_C over that bucket's evaluated queries
+	NQueries int     // how many queries it was computed from; never 0
+}
+
+// ctBucketDeltas builds the trend series from per-bucket per-query deltas,
+// dropping empty buckets and reporting how many were dropped. The count is
+// mandatory output: "the trend was fitted on 7 of 12 buckets" is a materially
+// different claim from "the trend was fitted on 12 buckets".
+func ctBucketDeltas(perBucket [][]float64) (series []ctBucketDelta, omitted []int) {
+	for b, vals := range perBucket {
+		if len(vals) == 0 {
+			omitted = append(omitted, b)
+			continue
+		}
+		series = append(series, ctBucketDelta{Bucket: b, Mean: ctMean(vals), NQueries: len(vals)})
+	}
+	return series, omitted
+}
+
+// ctBucketSeries lifts a dense per-bucket slice into the indexed form. Used by
+// the rule's own tests, where every bucket is populated by construction.
+func ctBucketSeries(vals []float64) []ctBucketDelta {
+	out := make([]ctBucketDelta, len(vals))
+	for i, v := range vals {
+		out[i] = ctBucketDelta{Bucket: i, Mean: v, NQueries: 1}
+	}
+	return out
+}
+
 // ctTrend is the OLS regression of Delta_C on bucket index, with a t-based 95%
 // interval on the slope.
 type ctTrend struct {
-	Slope           float64
-	SlopeCILower    float64
-	PositiveOfLastN int
-	WindowN         int
+	Slope        float64
+	SlopeCILower float64
+	// PositiveOfLastN counts POPULATED buckets with a positive mean whose index
+	// falls in the trailing window. PopulatedInWindow is how many buckets in
+	// that window had any data at all — the denominator the count is against,
+	// and the quantity U6 gates.
+	PositiveOfLastN   int
+	PopulatedInWindow int
+	WindowN           int
 }
 
 // ctTrendT975 is the two-sided 97.5th percentile of Student's t by degrees of
@@ -254,16 +315,27 @@ func ctT975(df int) float64 {
 	return 1.96
 }
 
-// ctComputeTrend takes Delta_C per weekly bucket, in bucket order.
-func ctComputeTrend(deltaByBucket []float64, window int) ctTrend {
-	n := len(deltaByBucket)
+// ctComputeTrend takes the POPULATED weekly buckets, in bucket order. Absent
+// buckets are absent — they are neither regressed as zeros nor counted as
+// non-positive, because "no queries fell in week 9" is not an observation about
+// week 9's Delta_C.
+//
+// The trailing window is measured in BUCKET INDEX, not in list position: with
+// omissions those differ, and "the last 10 weeks" means weeks, not entries.
+func ctComputeTrend(series []ctBucketDelta, window int) ctTrend {
+	n := len(series)
 	tr := ctTrend{WindowN: window}
-	start := n - window
-	if start < 0 {
-		start = 0
+	if n == 0 {
+		tr.SlopeCILower = math.Inf(-1)
+		return tr
 	}
-	for _, d := range deltaByBucket[start:] {
-		if d > 0 {
+	lastBucket := series[n-1].Bucket
+	for _, d := range series {
+		if d.Bucket <= lastBucket-window {
+			continue
+		}
+		tr.PopulatedInWindow++
+		if d.Mean > 0 {
 			tr.PositiveOfLastN++
 		}
 	}
@@ -272,15 +344,15 @@ func ctComputeTrend(deltaByBucket []float64, window int) ctTrend {
 		return tr
 	}
 	var sx, sy float64
-	for i, y := range deltaByBucket {
-		sx += float64(i)
-		sy += y
+	for _, d := range series {
+		sx += float64(d.Bucket)
+		sy += d.Mean
 	}
 	mx, my := sx/float64(n), sy/float64(n)
 	var sxy, sxx float64
-	for i, y := range deltaByBucket {
-		dx := float64(i) - mx
-		sxy += dx * (y - my)
+	for _, d := range series {
+		dx := float64(d.Bucket) - mx
+		sxy += dx * (d.Mean - my)
 		sxx += dx * dx
 	}
 	if sxx == 0 {
@@ -290,8 +362,8 @@ func ctComputeTrend(deltaByBucket []float64, window int) ctTrend {
 	slope := sxy / sxx
 	intercept := my - slope*mx
 	var sse float64
-	for i, y := range deltaByBucket {
-		resid := y - (intercept + slope*float64(i))
+	for _, d := range series {
+		resid := d.Mean - (intercept + slope*float64(d.Bucket))
 		sse += resid * resid
 	}
 	df := n - 2
@@ -299,6 +371,21 @@ func ctComputeTrend(deltaByBucket []float64, window int) ctTrend {
 	tr.Slope = slope
 	tr.SlopeCILower = slope - ctT975(df)*se
 	return tr
+}
+
+// ctMean is the arithmetic mean, 0 for an empty slice. It lives HERE, beside
+// ctBucketDeltas, because ctMean(nil) == 0 is exactly the identity that made
+// absent buckets look like measured zeros: the two belong in one place where a
+// reader meets the trap and its handling together.
+func ctMean(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	s := 0.0
+	for _, x := range xs {
+		s += x
+	}
+	return s / float64(len(xs))
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +399,14 @@ type ctJudgeCalibration struct {
 	Kappa float64 // Cohen's kappa on the binarized (grade >= 2) label
 	FPR   float64 // judge >= 2 where human < 2
 	N     int     // adjudicated pairs
+	// HumanRelevant / HumanIrrelevant are the human marginal counts. Both must
+	// be non-zero or the sample cannot measure agreement: with every pair on one
+	// side of the binarization, kappa is 1 by the degenerate 1-pe==0 branch and
+	// the FPR denominator is empty, so a sample carrying zero discriminative
+	// information reports a perfect calibration. §3c's planted negatives exist
+	// to prevent exactly that; these two counts are what ASSERTS they were there.
+	HumanRelevant   int
+	HumanIrrelevant int
 	// LabelHashMatches records that the SHA-256 of the sorted
 	// (queryHash, memoryID, grade) triples used for scoring equals the hash
 	// frozen in the run log before scoring. S5.
@@ -333,7 +428,11 @@ type ctVaultResult struct {
 	MRRDeltaH float64 // sign-agreement input for S4
 	MRRDeltaP float64
 
-	DeltaCByBucket []float64 // S3, in weekly-bucket order
+	// DeltaCByBucket is S3's series: the POPULATED weekly buckets only, in
+	// bucket order. OmittedBuckets are the bucket indexes that had no evaluated
+	// query — reported, never regressed as zeros.
+	DeltaCByBucket []ctBucketDelta
+	OmittedBuckets []int
 
 	// Reconstruction composition (U4). BaselineEdges is G0's total edge count,
 	// ReplayedEdges is G1's, UnreplayableFrac is the share of G0's edges whose
@@ -398,6 +497,37 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 			u = append(u, fmt.Sprintf("U1: judge false-positive rate %.1f%% > %.0f%%",
 				100*judge.FPR, 100*ctPreregistered.MaxJudgeFPR))
 		}
+		// The SIZE of the adjudicated subsample. §3c pre-registers "a uniformly
+		// random 15% subsample (minimum 150 pairs per vault)". Without this,
+		// ONE agreeing pair yields kappa=1.000, fpr=0.000 and a clean SHIP —
+		// demonstrated, which is why the field is now read rather than merely
+		// declared. (The rule takes one calibration for the run; the minimum is
+		// pre-registered PER VAULT, so this is the weakest form of the gate and
+		// the operator must still confirm each vault's own subsample.)
+		if judge.N < ctPreregistered.MinAdjudicatedPairs {
+			u = append(u, fmt.Sprintf("U1: the judge-calibration subsample has %d adjudicated "+
+				"pairs, need %d (§3c, per vault). A kappa computed on a handful of pairs is "+
+				"not a calibration.", judge.N, ctPreregistered.MinAdjudicatedPairs))
+		}
+		// The SHAPE of it. If every adjudicated pair falls on one side of the
+		// grade>=2 binarization, kappa is 1 by the degenerate 1-pe==0 branch and
+		// the FPR denominator is empty: perfect agreement carrying ZERO
+		// discriminative information. Demonstrated both ways — 200 all-relevant
+		// pairs and 200 all-irrelevant pairs each produced kappa=1.000 fpr=0.000
+		// and a SHIP. §3c's ~8% planted negatives exist to make the irrelevant
+		// side non-empty; these two counts are what ASSERTS they were there
+		// instead of trusting that they were.
+		if judge.HumanIrrelevant < 1 {
+			u = append(u, "U1: the judge-calibration subsample contains no human-IRRELEVANT "+
+				"pair, so the judge false-positive rate has an EMPTY DENOMINATOR and kappa's "+
+				"expected agreement is degenerate. §3c's planted negatives are what prevent "+
+				"this; a 0.0% FPR measured over nothing is not a 0.0% FPR.")
+		}
+		if judge.HumanRelevant < 1 {
+			u = append(u, "U1: the judge-calibration subsample contains no human-RELEVANT "+
+				"pair — the mirror-image degeneracy, kappa=1 by the same 1-pe==0 branch over "+
+				"a sample that cannot show the judge agreeing about anything relevant.")
+		}
 	}
 
 	// --- U2: sample size -----------------------------------------------------
@@ -445,6 +575,29 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 			wide++
 		}
 	}
+	// --- U6: the weekly trend cannot be evaluated -----------------------------
+	// Not in §6's numbered list, and deliberately added rather than assumed: §6
+	// pre-registers a TREND over 12 weekly checkpoints, and design risk 8 warns
+	// the buckets will be uneven. When too few buckets in the trailing window
+	// contain any evaluated query, the honest answer is that S3 has no data —
+	// NOT a slope of zero, which is what padding the gaps with ctMean(nil)==0
+	// produced (six real +0.04 buckets plus six empty ones manufactured a
+	// +0.005 slope with a CI lower bound of +0.003, i.e. S3 PASSING on six
+	// buckets that do not exist).
+	//
+	// This gate can only ever turn a fabricated conclusion into UNDERPOWERED —
+	// it cannot rescue a result, so it is not a threshold moved to fit numbers.
+	for _, v := range vaults {
+		tr := ctComputeTrend(v.DeltaCByBucket, ctPreregistered.TrendWindow)
+		if tr.PopulatedInWindow < ctPreregistered.MinPopulatedBuckets {
+			u = append(u, fmt.Sprintf("U6: vault %s has %d populated weekly buckets in the "+
+				"trailing window of %d (%d omitted as empty overall), below the %d needed to "+
+				"evaluate S3's trend. An empty bucket is ABSENT DATA, not a Delta_C of zero.",
+				v.Label, tr.PopulatedInWindow, ctPreregistered.TrendWindow,
+				len(v.OmittedBuckets), ctPreregistered.MinPopulatedBuckets))
+		}
+	}
+
 	if wide >= ctPreregistered.VaultsSupporting {
 		u = append(u, fmt.Sprintf("U5: the paired-bootstrap 95%% CI half-width for Delta_C exceeds "+
 			"%.2f on %d vaults — the data cannot distinguish SHIP from KILL",
@@ -508,8 +661,11 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		if ok {
 			s3Vaults++
 		}
-		trendDetail = append(trendDetail, fmt.Sprintf("%s:%d/%d pos, slope %.5f (CI lo %.5f)",
-			v.Label, tr.PositiveOfLastN, tr.WindowN, tr.Slope, tr.SlopeCILower))
+		trendDetail = append(trendDetail, fmt.Sprintf(
+			"%s:%d/%d pos over %d populated of the last %d (%d buckets omitted as empty), "+
+				"slope %.5f (CI lo %.5f)",
+			v.Label, tr.PositiveOfLastN, ctPreregistered.TrendMinPositive, tr.PopulatedInWindow,
+			tr.WindowN, len(v.OmittedBuckets), tr.Slope, tr.SlopeCILower))
 	}
 	s3 := s3Vaults >= ctPreregistered.VaultsSupporting
 	ship = append(ship, fmt.Sprintf("S3 %s: trend holds on %d/%d vaults (need %d) [%s]",
@@ -563,7 +719,10 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 
 	// K3 — re-asserted rather than implied by control flow, so it appears in
 	// the audit trail.
-	k3 := judge.Ran && judge.Kappa >= ctPreregistered.MinJudgeKappa && judge.FPR <= ctPreregistered.MaxJudgeFPR
+	k3 := judge.Ran && judge.Kappa >= ctPreregistered.MinJudgeKappa &&
+		judge.FPR <= ctPreregistered.MaxJudgeFPR &&
+		judge.N >= ctPreregistered.MinAdjudicatedPairs &&
+		judge.HumanIrrelevant >= 1 && judge.HumanRelevant >= 1
 	for _, v := range vaults {
 		if v.NQueries < ctPreregistered.MinQueriesPerVault {
 			k3 = false
@@ -622,10 +781,15 @@ func ctSameSign(a, b float64) bool {
 // Returns kappa and the judge false-positive rate (judge relevant where the
 // human said not relevant) in one pass, because the gate needs both and
 // computing them apart invites them being computed over different subsets.
-func ctCohensKappa(judge, human []int) (kappa, fpr float64, n int) {
+// It also returns the two MARGINAL COUNTS the gate needs to know whether the
+// sample can measure anything at all. Perfect agreement on a sample that is
+// entirely on one side of the binarization gives kappa=1 (via the 1-pe==0
+// branch) and fpr=0 (via an empty denominator) while carrying zero
+// discriminative information — see ctDecide's U1.
+func ctCohensKappa(judge, human []int) (kappa, fpr float64, n, humanRelevant, humanIrrelevant int) {
 	n = len(judge)
 	if n == 0 || len(human) != n {
-		return 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
 	var bothRel, bothIrrel, judgeOnly, humanOnly float64
 	for i := range judge {
@@ -662,5 +826,5 @@ func ctCohensKappa(judge, human []int) (kappa, fpr float64, n int) {
 	if humanIrrel > 0 {
 		fpr = judgeOnly / humanIrrel
 	}
-	return kappa, fpr, n
+	return kappa, fpr, n, int(bothRel + humanOnly), int(humanIrrel)
 }
