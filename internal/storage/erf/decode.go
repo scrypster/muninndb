@@ -133,9 +133,9 @@ func Decode(data []byte) (*Engram, error) {
 	}
 
 	copy(eng.ID[:], data[OffsetID:OffsetID+16])
-	eng.CreatedAt = time.Unix(0, int64(binary.BigEndian.Uint64(data[OffsetCreatedAt:OffsetCreatedAt+8])))
-	eng.UpdatedAt = time.Unix(0, int64(binary.BigEndian.Uint64(data[OffsetUpdatedAt:OffsetUpdatedAt+8])))
-	eng.LastAccess = time.Unix(0, int64(binary.BigEndian.Uint64(data[OffsetLastAccess:OffsetLastAccess+8])))
+	eng.CreatedAt = decodeTimestamp(binary.BigEndian.Uint64(data[OffsetCreatedAt : OffsetCreatedAt+8]))
+	eng.UpdatedAt = decodeTimestamp(binary.BigEndian.Uint64(data[OffsetUpdatedAt : OffsetUpdatedAt+8]))
+	eng.LastAccess = decodeTimestamp(binary.BigEndian.Uint64(data[OffsetLastAccess : OffsetLastAccess+8]))
 	eng.Confidence = math.Float32frombits(binary.BigEndian.Uint32(data[OffsetConfidence : OffsetConfidence+4]))
 	eng.Relevance = math.Float32frombits(binary.BigEndian.Uint32(data[OffsetRelevance : OffsetRelevance+4]))
 	eng.Stability = math.Float32frombits(binary.BigEndian.Uint32(data[OffsetStability : OffsetStability+4]))
@@ -160,6 +160,33 @@ func Decode(data []byte) (*Engram, error) {
 	}
 
 	return eng, nil
+}
+
+// zeroTimeUnixNano is the value uint64(time.Time{}.UnixNano()) stores: the zero
+// time is year 1, far outside UnixNano's defined range (1678-2262), so the call
+// silently overflows to a fixed bit pattern (-6795364578871345152 ns) that
+// decodes back as 1754-08-30T22:43:41.128654848Z. Because that IS a valid
+// time.Time, IsZero() on it returns FALSE, and every IsZero() guard downstream
+// waved it through (#810).
+var zeroTimeUnixNano = time.Time{}.UnixNano()
+
+// decodeTimestamp converts a raw big-endian UnixNano metadata field into a
+// time.Time, mapping the encoder's zero-time overflow artifact back to the zero
+// time so IsZero() works everywhere — including for records already on disk,
+// which no write-side fix can repair.
+//
+// This is collision-free rather than heuristic: no time a legitimate writer can
+// produce round-trips to zeroTimeUnixNano, because that value is only reachable
+// by overflowing UnixNano, and any timestamp inside UnixNano's defined range
+// maps to itself. Applied to CreatedAt/UpdatedAt/LastAccess ONLY.
+// ValidFrom/ValidUntil have their own documented raw-0 sentinels on both sides
+// (decodeValidity) and must not be routed through here — a 1754 ValidUntil would
+// read as permanently expired under COG-19, and the sentinel is what prevents it.
+func decodeTimestamp(raw uint64) time.Time {
+	if int64(raw) == zeroTimeUnixNano {
+		return time.Time{}
+	}
+	return time.Unix(0, int64(raw))
 }
 
 // decodeValidity reads the valid-time fields from the fixed metadata section.

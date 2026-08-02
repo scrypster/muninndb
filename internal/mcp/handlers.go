@@ -2655,7 +2655,16 @@ func augmentAnnotations(m *Memory, item *mbp.ActivationItem, data *engine.Annota
 		m.Annotations = &MemoryAnnotations{}
 	}
 	ann := m.Annotations
-	staleDays := math.Round(time.Since(time.Unix(0, item.LastAccess)).Hours()/24.0*10) / 10
+	// A never-accessed engram has no staleness to report. Before #810, a vault
+	// cloned with the zero-time sentinel reported stale_days=99317.8, stale=true
+	// for EVERY memory — 272 years of decay, announced to the calling agent, on a
+	// vault created seconds earlier. The year check mirrors computeACTR's and
+	// computeComponents' guard and also covers a plain zero LastAccess (1970).
+	lastAccess := time.Unix(0, item.LastAccess)
+	var staleDays float64
+	if lastAccess.Year() >= 2000 {
+		staleDays = math.Round(time.Since(lastAccess).Hours()/24.0*10) / 10
+	}
 	ann.Stale = staleDays > annotationStaleDays
 	ann.StaleDays = staleDays
 	ann.ConflictsWith = data.ConflictsWith

@@ -179,6 +179,14 @@ func NewDecayWorker(store DecayStore) *DecayWorker {
 	return dw
 }
 
+// processBatch is currently DEAD CODE: DecayWorker has no non-test caller.
+//
+// FLAGGED, deliberately not fixed as part of #810: unlike computeACTR and
+// computeComponents, the daysSince computation below has no
+// `IsZero() || Year() < 2000` guard, and this path WRITES the result back
+// (UpdateRelevance). If DecayWorker is ever wired up, a never-accessed engram
+// would decay ~740,000 days' worth in one pass and the damage would be
+// persistent, not just a bad score for one query. Add the guard before wiring.
 func (dw *DecayWorker) processBatch(ctx context.Context, batch []DecayCandidate) error {
 	now := time.Now()
 	for _, c := range batch {

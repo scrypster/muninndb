@@ -11,6 +11,15 @@ import (
 // WriteLastAccessEntry writes or updates the 0x22 LastAccess index entry.
 // If prevMillis != 0, the previous entry is deleted first (key includes timestamp,
 // so old key must be removed when time changes).
+//
+// #811: prefix.LastAccess (0x22) is NOT in clone.go's vaultScopedSwapPrefixes,
+// so this index is empty in a cloned or merged vault and where_left_off is blind
+// there. Deliberately still open — but note the ordering trap before rebuilding
+// it: keys.LastAccessIndexKey encodes ^uint64(millis), so a NEGATIVE millis
+// (which is what a pre-2000 LastAccess produces) inverts to a SMALL key and
+// would sort FIRST — i.e. an index rebuild landing before #810's fix would put
+// garbage-timestamped engrams at the head of where_left_off. Rebuild only on top
+// of #810.
 func (ps *PebbleStore) WriteLastAccessEntry(ctx context.Context, ws [8]byte, id ULID, prevMillis, newMillis int64) error {
 	batch := ps.db.NewBatch()
 	defer batch.Close()

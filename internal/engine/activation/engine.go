@@ -2592,6 +2592,16 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 	} else {
 		lastAccess = eng.LastAccess
 	}
+	// Treat zero or pre-2000 LastAccess as "just now" — an engram that has never
+	// been accessed, exactly as computeACTR does. Without this, a zero LastAccess
+	// gives daysSince ~= 740,000: recency 0 and decayFactor pinned at its 0.05
+	// floor, which on a weighted_sum vault scored an otherwise-perfect row 0.42
+	// against COG-6's 0.5 default threshold — a silently-EMPTY recall (#810).
+	// This guard is independent of the write-side and ERF-side fixes in #810: it
+	// defends records already at rest and any future writer.
+	if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+		lastAccess = now
+	}
 	daysSince := now.Sub(lastAccess).Hours() / 24.0
 	// Clamp clock skew: a future LastAccess (NTP step, or a cache timestamp
 	// ahead of wall clock) yields a negative daysSince, which would push recency

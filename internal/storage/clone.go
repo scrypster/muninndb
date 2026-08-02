@@ -56,7 +56,9 @@ const cloneBatchSize = 512
 // CloneVaultData copies all engrams and index data from wsSource to wsTarget.
 //
 // For engrams (0x01 prefix), the ERF blob is decoded, AccessCount is reset to 0
-// and LastAccess is reset to the zero time, then re-encoded before writing.
+// and LastAccess is reset to CreatedAt — the product-wide "created, never
+// accessed" convention, applied via normalizeEngramTimes (#810) — then
+// re-encoded before writing.
 // For all other vault-scoped prefixes the key prefix bytes (bytes 1–8) are
 // replaced with wsTarget bytes.  The 9-byte VaultCountKey (0x15 | ws) is
 // skipped and written at the end with the computed count.
@@ -125,9 +127,18 @@ func (ps *PebbleStore) CloneVaultData(
 				continue
 			}
 
-			// Reset access metadata for clone.
+			// Reset access metadata for clone. "Never accessed in this vault"
+			// is spelled the way EVERY other writer spells it — LastAccess ==
+			// CreatedAt — by routing through the SAME normalization
+			// WriteEngram/WriteEngramBatch/BatchWriter apply, rather than
+			// inventing a second answer here (#810). Assigning time.Time{} and
+			// encoding it directly stored uint64(time.Time{}.UnixNano()), which
+			// decodes as 1754-08-30 and is NOT IsZero(); on a weighted_sum vault
+			// that pinned recency to 0 and the decay factor to its 0.05 floor,
+			// and the first recall on a fresh clone returned nothing, silently.
 			erfEng.AccessCount = 0
-			erfEng.LastAccess = time.Time{}
+			erfEng.CreatedAt, erfEng.UpdatedAt, erfEng.LastAccess =
+				normalizeEngramTimes(erfEng.CreatedAt, erfEng.UpdatedAt, time.Time{})
 
 			encoded, encErr := erf.Encode(erfEng)
 			if encErr != nil {

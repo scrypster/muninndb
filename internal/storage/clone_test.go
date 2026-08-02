@@ -55,8 +55,8 @@ func TestCloneVaultData_AllPrefixesCopied(t *testing.T) {
 	}
 }
 
-// TestCloneVaultData_AccessCountReset verifies that AccessCount and LastAccess
-// are zeroed in the cloned vault.
+// TestCloneVaultData_AccessCountReset verifies that AccessCount is zeroed and
+// LastAccess is reset to CreatedAt ("created, never accessed") in the clone.
 func TestCloneVaultData_AccessCountReset(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -65,13 +65,14 @@ func TestCloneVaultData_AccessCountReset(t *testing.T) {
 	wsTarget := store.VaultPrefix("dst-ac")
 
 	now := time.Now()
+	created := now.Add(-48 * time.Hour)
 	eng := &Engram{
 		Concept:     "access count test",
 		Content:     "some content",
 		AccessCount: 42,
 		LastAccess:  now,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		CreatedAt:   created,
+		UpdatedAt:   created,
 	}
 	id, err := store.WriteEngram(ctx, wsSource, eng)
 	if err != nil {
@@ -93,13 +94,21 @@ func TestCloneVaultData_AccessCountReset(t *testing.T) {
 	if got.AccessCount != 0 {
 		t.Errorf("AccessCount should be 0 after clone, got %d", got.AccessCount)
 	}
-	// ERF stores LastAccess as BigEndian uint64(UnixNano). time.Time{} has
-	// UnixNano = -6795364578871345152. The uint64 cast preserves the bit pattern,
-	// and decoding it back via time.Unix(0, int64(v)) gives back the same nanosecond
-	// value. Verify that LastAccess was reset: it must be well before the source time.
-	// We consider it reset if it is before the Unix epoch (year 1970).
-	if !got.LastAccess.Before(time.Unix(0, 0)) {
-		t.Errorf("LastAccess should be before Unix epoch (reset) after clone, got %v", got.LastAccess)
+	// #810: this assertion used to require LastAccess to be BEFORE the Unix
+	// epoch — it PINNED the defect. Clone wrote time.Time{}, ERF stored
+	// uint64(time.Time{}.UnixNano()), and it decoded as 1754-08-30; the test
+	// asserted on that garbage as if it were the intended reset value.
+	// The reset state is now the product-wide "created, never accessed"
+	// convention: LastAccess == CreatedAt. See
+	// TestCloneVaultData_NeverAccessedFollowsWriteEngramConvention for the
+	// raw-byte assertion that the sentinel is not written at all.
+	if !got.LastAccess.Equal(got.CreatedAt) {
+		t.Errorf("LastAccess should equal CreatedAt after clone, got LastAccess=%v CreatedAt=%v",
+			got.LastAccess.UTC(), got.CreatedAt.UTC())
+	}
+	if !got.LastAccess.Before(now) {
+		t.Errorf("LastAccess should be reset to the (earlier) CreatedAt, got %v >= source access time %v",
+			got.LastAccess.UTC(), now.UTC())
 	}
 }
 
