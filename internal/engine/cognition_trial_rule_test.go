@@ -1763,7 +1763,7 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		kill = append(kill,
 			"KILL: retire the cognitive layer. Executes in one PR referencing the design: "+
 				"default preset hebbian_enabled:false + predictive_activation:false (now actually "+
-				"effective on the read side, COG-31), with the per-vault override that already "+
+				"effective on the read side, COG-32), with the per-vault override that already "+
 				"ships left in place; record the negative in the decision record; rewrite the "+
 				"README's first clause; KEEP the ACT-R base-level prior unless increment 2 "+
 				"measures it out.")

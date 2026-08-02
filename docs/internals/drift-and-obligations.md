@@ -110,7 +110,7 @@ and remain the reviewer's job.
     → audit EVERY constructor (`rg 'activation\.ActivateRequest\{'`) and add a pinning
     test that the production path (`internal/engine.Activate`) sets it. There is exactly
     ONE production constructor and dozens of test ones, so a bool defaulting to `false` is
-    a silent behaviour change for every in-tree fixture that relied on the phase. COG-31's
+    a silent behaviour change for every in-tree fixture that relied on the phase. COG-32's
     `HebbianEnabled` did exactly this: four fixtures seed `AssocLog().Record(...)` plus
     `store.assocs` and their priming went inert until they were updated with the gate, and
     one of them (`abstention_gate_measure_test.go`) reported a collapsed both-arms-equal

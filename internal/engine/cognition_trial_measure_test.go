@@ -848,7 +848,7 @@ func TestCognitionTrial(t *testing.T) {
 		t.Logf("NOTE: this vault has hebbian_enabled=false. It has events but NEVER LEARNED. " +
 			"Replaying it manufactures learning that did not occur — legitimate as a " +
 			"counterfactual, ILLEGITIMATE as a description of the vault. Do not average it " +
-			"with a learning vault. (Since COG-31 the read side is off here too.)")
+			"with a learning vault. (Since COG-32 the read side is off here too.)")
 	}
 	if resolved.LTPThreshold > 0 {
 		t.Logf("NOTE: ltp_threshold=%d. LTP state is session-local by design, so the replay "+

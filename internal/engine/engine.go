@@ -2329,7 +2329,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// PAS: Predictive Activation Signal config from vault Plasticity.
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
-	// Hebbian read side, gated symmetrically with PAS (COG-31). The same flag
+	// Hebbian read side, gated symmetrically with PAS (COG-32). The same flag
 	// already gates learning submission (below) and association decay
 	// (decayAllVaults); before #779 the phase-4 boost ignored it.
 	actReq.HebbianEnabled = resolved.HebbianEnabled

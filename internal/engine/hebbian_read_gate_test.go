@@ -12,7 +12,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// COG-31, engine side: Engine.Activate must forward the vault's resolved
+// COG-32, engine side: Engine.Activate must forward the vault's resolved
 // HebbianEnabled to the activation request, so a vault that disables Hebbian
 // learning also stops being SCORED by Hebbian edges.
 //
@@ -99,7 +99,7 @@ func hebReadGateProbe(t *testing.T, eng *Engine, vaultName string) float64 {
 }
 
 // TestActivateRequest_WiresHebbianEnabledFromPlasticity is the engine-level RED
-// test for COG-31: a vault with hebbian_enabled:false must report a zero
+// test for COG-32: a vault with hebbian_enabled:false must report a zero
 // read-side boost even though a saturated edge and a fresh co-activation exist.
 func TestActivateRequest_WiresHebbianEnabledFromPlasticity(t *testing.T) {
 	eng, as, store, cleanup := testEnvWithAuth(t)
@@ -123,7 +123,7 @@ func TestActivateRequest_WiresHebbianEnabledFromPlasticity(t *testing.T) {
 
 	if got := hebReadGateProbe(t, eng, vaultName); got != 0 {
 		t.Errorf("hebbian_enabled:false vault reported hebbian_boost = %v, want 0 — "+
-			"Engine.Activate must forward resolved.HebbianEnabled (COG-31)", got)
+			"Engine.Activate must forward resolved.HebbianEnabled (COG-32)", got)
 	}
 }
 

@@ -10,7 +10,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// COG-31: HebbianEnabled is SYMMETRIC — it gates the read-side boost, not only
+// COG-32: HebbianEnabled is SYMMETRIC — it gates the read-side boost, not only
 // the learning submission and the edge decay.
 //
 // Before this test, `phase4HebbianBoost` ran unconditionally in Run() while its
@@ -112,13 +112,13 @@ func (f *hebGateFixture) run(t *testing.T, hebbianEnabled bool) float64 {
 	return 0
 }
 
-// TestPhase4Hebbian_RespectsHebbianEnabled is the RED test for COG-31.
+// TestPhase4Hebbian_RespectsHebbianEnabled is the RED test for COG-32.
 // hebbian_enabled:false must produce a zero read-side boost.
 func TestPhase4Hebbian_RespectsHebbianEnabled(t *testing.T) {
 	f := newHebGateFixture(t)
 	if got := f.run(t, false); got != 0 {
 		t.Errorf("HebbianEnabled=false: hebbian_boost = %v, want 0 — the read-side "+
-			"boost must be gated symmetrically with learning and decay (COG-31)", got)
+			"boost must be gated symmetrically with learning and decay (COG-32)", got)
 	}
 }
 

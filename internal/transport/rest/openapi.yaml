@@ -1336,7 +1336,7 @@ components:
           type: boolean
           nullable: true
           description: >
-            Hebbian co-activation learning. Symmetric (COG-31): gates weight
+            Hebbian co-activation learning. Symmetric (COG-32): gates weight
             updates, association decay, and the read-side boost recall applies
             from association weights. false means recall is never scored by
             association weights.

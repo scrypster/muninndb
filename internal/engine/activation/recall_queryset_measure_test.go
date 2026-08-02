@@ -486,7 +486,7 @@ func rqProbeAt(t *testing.T, f *rqFix, query string, baseline float64) []rqCand 
 		// the pool. 60 puts the whole corpus in every query's pool, so every
 		// miss reported here is a GATE decision.
 		CandidatesPerIndex: 60,
-		// COG-31: models a DEFAULT-preset vault, so the primer engram's
+		// COG-32: models a DEFAULT-preset vault, so the primer engram's
 		// Hebbian priming reaches phase 4 as it did before the gate landed.
 		HebbianEnabled: true,
 		Weights: &activation.Weights{

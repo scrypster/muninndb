@@ -85,7 +85,7 @@ type Weights struct {
 	// nil = unset → DefaultACTRHebScale. Non-nil is honored exactly, including 0.
 	// NOTE this scales BOTH hebbianBoost and transitionBoost (see computeACTR),
 	// so 0 is "no cognitive boost", NOT "no Hebbian" — the per-mechanism
-	// ablation is HebbianEnabled / PASEnabled (COG-31).
+	// ablation is HebbianEnabled / PASEnabled (COG-32).
 	ACTRHebScale *float32
 	DisableACTR  bool // when true, force legacy weighted-sum scoring (overrides UseACTR)
 	// RRF fusion mode: when true, use Phase 3 RRF scores directly as the scoring
@@ -351,7 +351,7 @@ type ActivateRequest struct {
 	// Zero means fall back to 30.
 	CandidatesPerIndex int
 	// HebbianEnabled gates the PHASE 4 read-side Hebbian boost, symmetrically
-	// with the way PASEnabled gates phase 4.5 (COG-31). Set by the engine from
+	// with the way PASEnabled gates phase 4.5 (COG-32). Set by the engine from
 	// the vault's resolved PlasticityConfig, which already gates Hebbian
 	// LEARNING submission and association DECAY on the same flag. Before #779
 	// the read side was unconditional, so a `scratchpad` vault
@@ -772,7 +772,7 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	fused := phase3RRF(sets)
 
 	// Phase 4: Hebbian boost (always sequential — fast, in-memory ring buffer read).
-	// Gated on HebbianEnabled symmetrically with phase 4.5's PASEnabled (COG-31):
+	// Gated on HebbianEnabled symmetrically with phase 4.5's PASEnabled (COG-32):
 	// a vault that neither learns nor decays association weights must not be
 	// scored by them either.
 	if req.HebbianEnabled {

@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`hebbian_enabled` now governs the read side too** (COG-31). The phase-4
+- **`hebbian_enabled` now governs the read side too** (COG-32). The phase-4
   Hebbian boost ran unconditionally during recall while its neighbour, the PAS
   transition boost, was gated — so a vault with `hebbian_enabled: false` (the
   `scratchpad` preset) was still scored by association edges it would never

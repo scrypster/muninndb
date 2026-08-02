@@ -334,7 +334,7 @@ Every cognitive behavior is tunable per vault:
 | Setting | Default | Range | Description |
 |---------|---------|-------|-------------|
 | `preset` | `"default"` | default/reference/scratchpad/knowledge-graph/working | Base behavior template |
-| `hebbian_enabled` | true | bool | Hebbian co-activation learning. Governs the WHOLE loop (COG-31): weight updates, association decay, **and** the read-side phase-4 boost during recall. `false` means recall is never scored by association weights. |
+| `hebbian_enabled` | true | bool | Hebbian co-activation learning. Governs the WHOLE loop (COG-32): weight updates, association decay, **and** the read-side phase-4 boost during recall. `false` means recall is never scored by association weights. |
 | `temporal_enabled` | true | bool | Temporal decay scoring |
 | `auto_link_neighbors` | true | bool | Semantic neighbor auto-linking on write |
 | `hop_depth` | 2 | 0–8 | BFS traversal depth |
