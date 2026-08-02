@@ -906,28 +906,24 @@ func TestVersionHead_ShadowsDoNotEnterPerQueryNormalization_Saturating(t *testin
 	// predecessor is already a shadow here and shadows are never logged, so no
 	// LIVE row acquires a Hebbian boost (their assoc target — the predecessor —
 	// is absent from the recency window) and both arms stay deterministic.
-	// The priming recall must MATCH on every platform: under default weights
-	// the semantic channel dominates, and the real embedder's cosine for this
-	// query drifts across ONNX platforms (passed on darwin/arm64, abstained on
-	// CI's linux/amd64 — results=0 → nothing logged → no heat, twice). Prime
-	// on the lexical channel with a near-zero threshold instead: FTS coverage
-	// is platform-exact, so the neighbours always log.
-	primed := h.recall("vacuum sweeper runs nightly against telemetry rows in every shard",
-		func(r *mbp.ActivateRequest) {
-			r.Threshold = 0.001
-			r.Weights = &mbp.Weights{FullTextRelevance: 1.0, UseACTR: true}
-		})
-	if len(primed.Activations) == 0 {
-		t.Fatalf("fixture failure: the priming recall matched nothing — no activation entries were logged and the saturating arm cannot heat")
+	// Heat n1 by RECORDING its activation directly. Two recall-based priming
+	// shapes failed on CI while passing locally (real-embedder cosine drifts
+	// across ONNX platforms; then the measured FTS-only arms themselves
+	// returned zero live rows on linux/amd64), because a recall-shaped prime
+	// couples this fixture to every platform-sensitive stage of the pipeline
+	// when all it needs is one entry in the recency structure phase 4 reads.
+	// ActivationLog.Record is the exact structure the async drainer writes,
+	// keyed by the SAME VaultID the measured runs below pass — deterministic
+	// on every platform, no drain to race.
+	n1ULID, err := storage.ParseULID(n1.ID)
+	if err != nil {
+		t.Fatalf("parse n1: %v", err)
 	}
+	h.eng.activation.AssocLog().Record(activation.LogEntry{
+		VaultID: wsVaultID(h.ws), At: time.Now(),
+		EngramIDs: []storage.ULID{n1ULID}, Scores: []float64{1.0},
+	})
 	h.eng.waitWriteTimeIdle()
-	// The Hebbian priming rides the ACTIVATION log, not the write-time
-	// workers: waitWriteTimeIdle alone leaves a window where the priming
-	// recall's log entry has not reached the recency structure phase 4 reads,
-	// and on a loaded CI runner the fixture guard fires with HebbianBoost=0
-	// (observed once in CI, never in 15 local runs — the #722 class). Drain
-	// the log deterministically instead of racing it.
-	h.eng.activation.WaitLogIdle()
 
 	// FTS-only weights: under the noop embedder ContentMatch is capped at the
 	// FTS weight, and at the default 0.4 even the full 3.24x Hebbian prior
@@ -938,6 +934,7 @@ func TestVersionHead_ShadowsDoNotEnterPerQueryNormalization_Saturating(t *testin
 	run := func(excludeTags []string) *activation.ActivateResult {
 		t.Helper()
 		res, err := h.eng.activation.Run(h.ctx, &activation.ActivateRequest{
+			VaultID:     wsVaultID(h.ws),
 			VaultPrefix: h.ws, Context: []string{retentionQuery}, MaxResults: 10, Threshold: 0.1,
 			ExcludeTags: excludeTags,
 			Weights:     &activation.Weights{SemanticSimilarity: 0.0, FullTextRelevance: 1.0, UseACTR: true},
