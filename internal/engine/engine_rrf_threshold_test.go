@@ -127,25 +127,22 @@ func TestActivate_ACTRDefaultThreshold_Unaffected(t *testing.T) {
 
 	writeRRFThresholdFixture(t, eng, ctx, vault)
 
-	// STEADY-STATE WARMUP. The WeightComplement(1.0) fix made full-weight
-	// association edges readable for the first time — before it, the fixture's
-	// declared weight-1.0 relationships round-tripped to 0, so recall-to-recall
-	// transition boosts had nothing to act on and any two calls in a session
-	// were accidentally identical. Post-fix, the FIRST recall's session learning
-	// re-ranks the second (verified: run1 differs, run2==run3 — "strengthens
-	// with use" working as promised). These tests assert THRESHOLD-RESOLUTION
-	// equivalence, not learning behaviour, so they compare in the steady state
-	// a warmup call establishes.
-	if _, err := eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault,
-		Context: []string{"thermal calibration widget"}, Threshold: 0.1, MaxResults: 10}); err != nil {
-		t.Fatalf("warmup: %v", err)
-	}
-
+	// HERMETIC COMPARISON. This test asserts THRESHOLD-RESOLUTION equivalence,
+	// not learning behaviour — so every call runs ReadOnly (observe), which
+	// gates the activation log and submits no session learning at all. The
+	// previous shape (a warmup call establishing a "steady state") was still
+	// cadence-dependent: the learning submitted by the warmup sat in an async
+	// worker whose flush could land BETWEEN the two compared calls on a loaded
+	// runner (the #764 F1 worker fix restored honest flush deadlines, which is
+	// exactly what let it fire mid-test on CI where the old debounce starved
+	// it). ReadOnly removes the input instead of racing the flush; threshold
+	// resolution (recallThresholdFor) does not depend on ReadOnly.
 	zeroResp, err := eng.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    []string{"thermal calibration widget"},
 		Threshold:  0,
 		MaxResults: 10,
+		ReadOnly:   true,
 	})
 	require.NoError(t, err)
 
@@ -154,6 +151,7 @@ func TestActivate_ACTRDefaultThreshold_Unaffected(t *testing.T) {
 		Context:    []string{"thermal calibration widget"},
 		Threshold:  0.1,
 		MaxResults: 10,
+		ReadOnly:   true,
 	})
 	require.NoError(t, err)
 

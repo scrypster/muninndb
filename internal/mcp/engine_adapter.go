@@ -108,15 +108,18 @@ func (a *mcpEngineAdapter) GetContradictionReport(ctx context.Context, vault str
 		Contradictions: make([]ContradictionPair, 0, len(rep.Pairs)),
 		DetectedCount:  rep.DetectedCount,
 		PendingCount:   rep.PendingCount,
+		ResolvedCount:  rep.ResolvedCount,
 		ScanComplete:   rep.ScanComplete,
 	}
 	for _, p := range rep.Pairs {
 		pair := ContradictionPair{
-			IDa:      p.IDa,
-			ConceptA: p.ConceptA,
-			IDb:      p.IDb,
-			ConceptB: p.ConceptB,
-			Status:   p.Status,
+			IDa:               p.IDa,
+			ConceptA:          p.ConceptA,
+			IDb:               p.IDb,
+			ConceptB:          p.ConceptB,
+			Status:            p.Status,
+			ConfidencePenalty: p.ConfidencePenalty,
+			ResolvedBy:        p.ResolvedBy,
 		}
 		// Zero means "unknown"; leave the field absent rather than emitting the
 		// Go zero time as if it were a real instant.

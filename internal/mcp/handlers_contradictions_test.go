@@ -29,7 +29,7 @@ func TestHandleContradictions_PendingIsDistinguishableFromNone(t *testing.T) {
 	pending := newTestServerWith(&reportingContradictionEngine{report: &ContradictionsReport{
 		Contradictions: []ContradictionPair{{
 			IDa: "A", ConceptA: "widget-color", IDb: "B", ConceptB: "widget-color-revised",
-			Status: "pending_detection", DeclaredAt: &declared,
+			Status: "declared", ConfidencePenalty: "pending", DeclaredAt: &declared,
 		}},
 		PendingCount: 1,
 		ScanComplete: true,
@@ -53,8 +53,8 @@ func TestHandleContradictions_PendingIsDistinguishableFromNone(t *testing.T) {
 		t.Fatalf("contradictions = %v, want one pending entry", got["contradictions"])
 	}
 	entry, _ := list[0].(map[string]any)
-	if entry["status"] != "pending_detection" {
-		t.Errorf("status = %v, want pending_detection", entry["status"])
+	if entry["status"] != "declared" {
+		t.Errorf("status = %v, want declared", entry["status"])
 	}
 	if entry["concept_a"] != "widget-color" || entry["concept_b"] != "widget-color-revised" {
 		t.Errorf("concepts = (%v,%v), want the two seeded concepts", entry["concept_a"], entry["concept_b"])
@@ -62,7 +62,7 @@ func TestHandleContradictions_PendingIsDistinguishableFromNone(t *testing.T) {
 	if _, present := entry["detected_at"]; present {
 		t.Errorf("detected_at must be ABSENT while pending, got %v", entry["detected_at"])
 	}
-	if note, _ := got["note"].(string); !strings.Contains(note, "awaiting the detector") {
+	if note, _ := got["note"].(string); !strings.Contains(note, "confidence penalty") {
 		t.Errorf("note = %q, want an explanation of the pending state", note)
 	}
 

@@ -29,12 +29,27 @@ func (ps *PebbleStore) WriteOrdinal(ctx context.Context, wsPrefix [8]byte, paren
 }
 
 // ReadOrdinal reads the ordinal for (parentID, childID).
-// Returns found=false if the key does not exist.
+//
+// Three outcomes, not two. A MISSING key is found=false with no error — the
+// child simply has no explicit ordering. A read FAILURE is an error, never
+// found=false: a caller that reorders children on "not found" would silently
+// discard a real ordering on a transient read fault. A key present but shorter
+// than 4 bytes is also an error, not absence — WriteOrdinal and the batch
+// writer both store exactly 4 bytes, so a shorter record is damage, and calling
+// damage "no ordering" is the same silently-wrong answer with a different
+// cause.
 func (ps *PebbleStore) ReadOrdinal(ctx context.Context, wsPrefix [8]byte, parentID, childID ULID) (int32, bool, error) {
 	key := keys.OrdinalKey(wsPrefix, [16]byte(parentID), [16]byte(childID))
-	val, err := Get(ps.db, key)
-	if err != nil || val == nil || len(val) < 4 {
-		return 0, false, nil
+	val, err := ps.pointGet(key)
+	if err != nil {
+		return 0, false, fmt.Errorf("read ordinal: %w", err)
+	}
+	if val == nil {
+		return 0, false, nil // absent
+	}
+	if len(val) < 4 {
+		return 0, false, fmt.Errorf("read ordinal: corrupt record for %s/%s: %d bytes, want 4",
+			parentID.String(), childID.String(), len(val))
 	}
 	return int32(binary.BigEndian.Uint32(val[:4])), true, nil
 }

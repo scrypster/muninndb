@@ -139,29 +139,81 @@ func (e *Engine) GetContradictions(ctx context.Context, vault string) ([][2]stor
 	return e.store.GetContradictions(ctx, ws)
 }
 
-// Contradiction status values. A caller that cannot tell these apart cannot
-// tell "this vault has no contradictions" from "the detector has not run yet".
+// Contradiction status values. Status answers "where did this contradiction
+// come from?", never "has it taken effect yet?" — a caller that cannot tell
+// those apart cannot tell "this vault has no contradictions" from "the
+// detector has not run yet".
 const (
-	// ContradictionDetected — the durable 0x0A marker exists. The confidence
-	// penalty (if any) has been applied exactly once for this pair.
+	// ContradictionDetected — the pair carries a durable 0x0A marker and no
+	// explicit contradicts link: the detector found it on its own.
 	ContradictionDetected = "detected"
-	// ContradictionPending — an explicit "contradicts" association exists but
-	// the batch detector has not flagged the pair yet. The contradiction is
-	// real and durable; only its detection is outstanding.
-	ContradictionPending = "pending_detection"
+	// ContradictionDeclared — an explicit "contradicts" association exists
+	// between the pair. The declaration is durable the moment muninn_link
+	// returns and is honored by recall on the very next query (COG-29), so it
+	// is NOT pending anything the caller needs to wait for.
+	//
+	// This value was "pending_detection" until #764. That was a mislabel that
+	// read as "your declaration has not taken effect yet", and both round-7
+	// evaluators read it exactly that way. What can still be outstanding is
+	// the asynchronous confidence penalty — reported separately in
+	// ConfidencePenalty rather than overloaded onto the status.
+	ContradictionDeclared = "declared"
+)
+
+// Confidence-penalty states for a reported contradiction. Derived from the
+// 0x0A marker: its presence IS the record that the penalty fired (the marker's
+// newlyFlagged return is the penalty's idempotency token — see COG-23).
+const (
+	ContradictionPenaltyPending = "pending"
+	ContradictionPenaltyApplied = "applied"
+)
+
+// Resolution states (#764 D3). Until this, NO operation in the product cleared
+// a declared contradiction: evolve, forget (soft), forget(not_true_since),
+// hard-delete and muninn_decide all left both the 0x03 edge and the 0x0A
+// marker in place, so the pair stayed in this report forever — the evaluators
+// resolved a conflict the way the product tells them to and the theater
+// continued. A pair is now reported as RESOLVED, with the reason, whenever the
+// same liveness-and-resolution rule recall applies (COG-29) says it is no
+// longer a live conflict. Resolved pairs are excluded from DetectedCount and
+// PendingCount, which now mean "still live".
+const (
+	// ContradictionResolved — the pair is recorded but is no longer a live
+	// conflict. ResolvedBy says why.
+	ContradictionResolved = "resolved"
+	// ContradictionResolvedBySupersedes — an explicit RelSupersedes between
+	// the two: "I declared which one wins" is a resolution.
+	ContradictionResolvedBySupersedes = "supersedes"
+	// ContradictionResolvedByRetirement — one endpoint is soft-deleted,
+	// archived, or its validity window has elapsed. evolve, forget (soft) and
+	// forget(not_true_since) all land here.
+	ContradictionResolvedByRetirement = "endpoint_retired"
 )
 
 // ContradictionDetail is one contradiction pair, resolved for presentation.
 //
-// DetectedAt is zero when Status is ContradictionPending (nothing has detected
-// it yet) and also for legacy markers written before the timestamp existed.
+// DetectedAt is zero while the confidence penalty is still pending (nothing
+// has flagged the pair yet) and also for legacy markers written before the
+// timestamp existed.
 // Zero means UNKNOWN and must be rendered as absent, never as an instant.
 type ContradictionDetail struct {
-	IDa        string
-	IDb        string
-	ConceptA   string
-	ConceptB   string
-	Status     string
+	IDa      string
+	IDb      string
+	ConceptA string
+	ConceptB string
+	// Status is ContradictionDeclared or ContradictionDetected — the pair's
+	// PROVENANCE, not its readiness.
+	Status string
+	// ConfidencePenalty is ContradictionPenaltyPending or
+	// ContradictionPenaltyApplied: whether the asynchronous, exactly-once
+	// confidence penalty has fired for this pair yet. Only this is ever
+	// outstanding; the contradiction itself is durable and honored from the
+	// moment it is declared.
+	ConfidencePenalty string
+	// ResolvedBy names why a pair whose Status is ContradictionResolved is no
+	// longer live: ContradictionResolvedBySupersedes or
+	// ContradictionResolvedByRetirement. Empty on a live pair.
+	ResolvedBy string
 	DetectedAt time.Time
 	DeclaredAt time.Time
 }
@@ -177,6 +229,11 @@ type ContradictionReport struct {
 	Pairs         []ContradictionDetail
 	DetectedCount int
 	PendingCount  int
+	// ResolvedCount is the number of recorded pairs that are no longer live
+	// conflicts. They are still listed (with Status ContradictionResolved and
+	// a ResolvedBy reason) rather than omitted — an omission would be another
+	// unknown reported as known — but they are not counted as outstanding.
+	ResolvedCount int
 	ScanComplete  bool
 	Scanned       int
 }
@@ -226,33 +283,91 @@ func (e *Engine) GetContradictionReport(ctx context.Context, vault string) (*Con
 	for _, r := range detected {
 		index[key(r)] = len(report.Pairs)
 		report.Pairs = append(report.Pairs, ContradictionDetail{
-			IDa:        r.A.String(),
-			IDb:        r.B.String(),
-			Status:     ContradictionDetected,
-			DetectedAt: r.DetectedAt,
+			IDa:               r.A.String(),
+			IDb:               r.B.String(),
+			Status:            ContradictionDetected,
+			ConfidencePenalty: ContradictionPenaltyApplied,
+			DetectedAt:        r.DetectedAt,
 		})
-		report.DetectedCount++
 	}
 	for _, r := range declared.Records {
 		if idx, ok := index[key(r)]; ok {
-			// Already detected — keep one entry, but record when it was declared.
+			// Already flagged — keep one entry, but record when it was
+			// declared and re-label its provenance: an explicit link exists,
+			// so this pair is DECLARED (with the penalty already applied),
+			// not something the detector inferred on its own.
 			report.Pairs[idx].DeclaredAt = r.DeclaredAt
+			report.Pairs[idx].Status = ContradictionDeclared
 			continue
 		}
 		index[key(r)] = len(report.Pairs)
 		report.Pairs = append(report.Pairs, ContradictionDetail{
-			IDa:        r.A.String(),
-			IDb:        r.B.String(),
-			Status:     ContradictionPending,
-			DeclaredAt: r.DeclaredAt,
+			IDa:               r.A.String(),
+			IDb:               r.B.String(),
+			Status:            ContradictionDeclared,
+			ConfidencePenalty: ContradictionPenaltyPending,
+			DeclaredAt:        r.DeclaredAt,
 		})
-		report.PendingCount++
 	}
 
-	if err := e.fillContradictionConcepts(ctx, ws, report.Pairs); err != nil {
+	// One batched endpoint read serves BOTH the concept resolution this report
+	// has always done and the liveness half of the #764 D3 resolution rule —
+	// zero extra I/O.
+	live, err := e.fillContradictionConcepts(ctx, ws, report.Pairs)
+	if err != nil {
 		return nil, err
 	}
+	report.Pairs = e.markResolvedContradictions(ctx, ws, report.Pairs, live, time.Now())
+	for _, p := range report.Pairs {
+		switch {
+		case p.Status == ContradictionResolved:
+			report.ResolvedCount++
+		case p.ConfidencePenalty == ContradictionPenaltyApplied:
+			report.DetectedCount++
+		default:
+			report.PendingCount++
+		}
+	}
 	return report, nil
+}
+
+// markResolvedContradictions applies the #764 D3 resolution rule — the SAME
+// liveness-and-resolution test recall applies in COG-29, so evolve/forget of
+// either side stops the theater on BOTH surfaces at once.
+//
+// A pair whose endpoint no longer EXISTS is dropped outright: after a hard
+// delete the 0x03 edges are gone and only a dangling 0x0A marker remains, and
+// there is nothing left to name — reporting it rendered a permanently
+// blank-concept row. A pair whose endpoint exists but has been retired
+// (soft-deleted, archived, or its validity window elapsed) is kept and
+// labelled resolved, because it can still be named and the history is real.
+func (e *Engine) markResolvedContradictions(ctx context.Context, ws [8]byte, pairs []ContradictionDetail, live map[string]*storage.Engram, now time.Time) []ContradictionDetail {
+	out := pairs[:0]
+	for _, p := range pairs {
+		ea, eb := live[p.IDa], live[p.IDb]
+		if ea == nil || eb == nil {
+			continue // dangling: nothing to name
+		}
+		retired := func(eng *storage.Engram) bool {
+			return eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived || eng.IsExpired(now)
+		}
+		// Supersedes is tested FIRST because Link(relation="supersedes") also
+		// stamps ValidUntil on the target, so both branches are true for it
+		// and the caller's ACTION is the more useful attribution than its
+		// mechanism. Evolve is unaffected: its RelSupersedes edge runs from
+		// the successor to the predecessor, not between the contradicting
+		// pair, so it is correctly reported as a retirement.
+		switch {
+		case e.currencyHasExplicitSupersedesEdge(ctx, ws, ea.ID, eb.ID):
+			p.Status = ContradictionResolved
+			p.ResolvedBy = ContradictionResolvedBySupersedes
+		case retired(ea) || retired(eb):
+			p.Status = ContradictionResolved
+			p.ResolvedBy = ContradictionResolvedByRetirement
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // fillContradictionConcepts resolves the concept of every engram named in the
@@ -264,9 +379,12 @@ func (e *Engine) GetContradictionReport(ctx context.Context, vault string) (*Con
 //
 // A concept that cannot be resolved (deleted or unreadable engram) is left
 // empty rather than guessed at.
-func (e *Engine) fillContradictionConcepts(ctx context.Context, ws [8]byte, pairs []ContradictionDetail) error {
+// It also RETURNS the resolved engrams keyed by ID, so the #764 D3 resolution
+// rule can test endpoint liveness off the same read instead of paying a second
+// one.
+func (e *Engine) fillContradictionConcepts(ctx context.Context, ws [8]byte, pairs []ContradictionDetail) (map[string]*storage.Engram, error) {
 	if len(pairs) == 0 {
-		return nil
+		return nil, nil
 	}
 	order := make([]storage.ULID, 0, len(pairs)*2)
 	seen := make(map[string]bool, len(pairs)*2)
@@ -285,20 +403,24 @@ func (e *Engine) fillContradictionConcepts(ctx context.Context, ws [8]byte, pair
 	}
 	engrams, err := e.store.GetEngrams(ctx, ws, order)
 	if err != nil {
-		return fmt.Errorf("resolve contradiction concepts: %w", err)
+		return nil, fmt.Errorf("resolve contradiction concepts: %w", err)
 	}
-	concepts := make(map[string]string, len(order))
+	resolved := make(map[string]*storage.Engram, len(order))
 	for i, eng := range engrams {
 		if eng == nil || i >= len(order) {
 			continue
 		}
-		concepts[order[i].String()] = eng.Concept
+		resolved[order[i].String()] = eng
 	}
 	for i := range pairs {
-		pairs[i].ConceptA = concepts[pairs[i].IDa]
-		pairs[i].ConceptB = concepts[pairs[i].IDb]
+		if eng := resolved[pairs[i].IDa]; eng != nil {
+			pairs[i].ConceptA = eng.Concept
+		}
+		if eng := resolved[pairs[i].IDb]; eng != nil {
+			pairs[i].ConceptB = eng.Concept
+		}
 	}
-	return nil
+	return resolved, nil
 }
 
 // ResolveContradiction removes the contradiction marker for the pair (idA, idB)

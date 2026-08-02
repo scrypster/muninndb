@@ -167,3 +167,53 @@ func TestWorkerDormancy(t *testing.T) {
 		t.Fatalf("expected Active after wakeup, got %v", w.Stats().State)
 	}
 }
+
+func TestWorkerStatsSymbolicStatus(t *testing.T) {
+	tests := []struct {
+		name  string
+		state WorkerState
+		want  string
+	}{
+		{name: "active", state: WorkerStateActive, want: "active"},
+		{name: "idle", state: WorkerStateIdle, want: "idle"},
+		{name: "dormant", state: WorkerStateDormant, want: "dormant"},
+		{name: "stopped", state: WorkerStateStopped, want: "stopped"},
+		{name: "unknown future state", state: WorkerState(99), want: "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := NewWorker(1, 1, time.Second, func(context.Context, []int) error { return nil })
+			w.state.Store(int32(tt.state))
+
+			stats := w.Stats()
+			if !stats.Enabled {
+				t.Fatal("configured worker reported disabled")
+			}
+			if stats.Status != tt.want {
+				t.Fatalf("Status = %q, want %q", stats.Status, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkerReportsStoppedAfterRunExits(t *testing.T) {
+	w := NewWorker(1, 1, time.Second, func(context.Context, []int) error { return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = w.Run(ctx)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop")
+	}
+
+	if got := w.Stats().Status; got != "stopped" {
+		t.Fatalf("Status = %q after Run exits, want stopped", got)
+	}
+}

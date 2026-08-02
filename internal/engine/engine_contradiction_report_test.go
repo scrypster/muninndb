@@ -88,8 +88,8 @@ func TestContradictionReport_PendingIsNotNone(t *testing.T) {
 		t.Fatalf("Pairs = %d, want 1; an empty list here is indistinguishable from 'no contradictions'", len(got.Pairs))
 	}
 	p := got.Pairs[0]
-	if p.Status != ContradictionPending {
-		t.Errorf("Status = %q, want %q", p.Status, ContradictionPending)
+	if p.Status != ContradictionDeclared {
+		t.Errorf("Status = %q, want %q", p.Status, ContradictionDeclared)
 	}
 	if p.DeclaredAt.Before(linkedAt.Add(-time.Second)) || p.DeclaredAt.IsZero() {
 		t.Errorf("DeclaredAt = %v, want ~%v", p.DeclaredAt, linkedAt)
@@ -214,8 +214,14 @@ func TestContradictionReport_DetectionSupersedesPending(t *testing.T) {
 	if len(got.Pairs) != 1 {
 		t.Fatalf("Pairs = %d, want 1 (no duplicate declared/detected entry)", len(got.Pairs))
 	}
-	if got.Pairs[0].Status != ContradictionDetected {
-		t.Errorf("Status = %q, want %q", got.Pairs[0].Status, ContradictionDetected)
+	// Status is PROVENANCE, not readiness (#764): an explicitly-linked pair
+	// stays "declared" after the detector flags it. What the flag changes is
+	// the confidence penalty, which is reported separately.
+	if got.Pairs[0].Status != ContradictionDeclared {
+		t.Errorf("Status = %q, want %q", got.Pairs[0].Status, ContradictionDeclared)
+	}
+	if got.Pairs[0].ConfidencePenalty != ContradictionPenaltyApplied {
+		t.Errorf("ConfidencePenalty = %q, want %q", got.Pairs[0].ConfidencePenalty, ContradictionPenaltyApplied)
 	}
 	if got.PendingCount != 0 {
 		t.Errorf("PendingCount = %d, want 0", got.PendingCount)

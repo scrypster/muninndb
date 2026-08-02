@@ -649,20 +649,12 @@ func (m *mockHebbianStore) GetAssocWeight(ctx context.Context, ws [8]byte, src, 
 	return weight, nil
 }
 
-func (m *mockHebbianStore) DecayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	removed := 0
-	for k, w := range m.weights {
-		newW := float32(float64(w) * decayFactor)
-		if newW < minWeight {
-			delete(m.weights, k)
-			removed++
-		} else {
-			m.weights[k] = newW
-		}
-	}
-	return removed, nil
+// DecayAssocWeights satisfies HebbianStore. It is a no-op: this mock stores
+// bare weights with no lastActivated or peakWeight, and since #762 decay is a
+// function of exactly those two fields — there is nothing here to decay. No
+// test in this file calls it.
+func (m *mockHebbianStore) DecayAssocWeights(ctx context.Context, ws [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error) {
+	return 0, nil
 }
 
 func (m *mockHebbianStore) UpdateAssocWeightBatch(ctx context.Context, updates []cognitive.AssocWeightUpdate) error {

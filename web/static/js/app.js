@@ -587,19 +587,7 @@ document.addEventListener('alpine:init', () => {
       } else if (msg.type === 'workers_update') {
         const d = msg.data;
         if (d) {
-          const map = { Hebbian: d.hebbian, Contradict: d.contradict, Confidence: d.confidence };
-          this.workerStats = Object.entries(map)
-            .filter(([, w]) => w != null)
-            .map(([name, w]) => ({
-              name,
-              state:         w.state         ?? 0,
-              processed:     w.processed     ?? 0,
-              batches:       w.batches       ?? 0,
-              errors:        w.errors        ?? 0,
-              dropped:       w.dropped       ?? 0,
-              lastRun:       w.lastRun       ?? 0,
-              effectiveWait: w.effectiveWait ?? 0,
-            }));
+          this.workerStats = MuninnWorkers.mapWorkerResponse(d);
         }
       } else if (msg.type === 'memory_added') {
         // Guard: skip malformed events missing required fields.
@@ -676,31 +664,14 @@ document.addEventListener('alpine:init', () => {
     async loadWorkerStats() {
       try {
         const data = await this.apiCall('/api/workers');
-        const map = { Hebbian: data.hebbian, Contradict: data.contradict, Confidence: data.confidence };
-        this.workerStats = Object.entries(map)
-          .filter(([, d]) => d != null)
-          .map(([name, d]) => ({
-            name,
-            state:        d.state        ?? 0,
-            processed:    d.processed    ?? 0,
-            batches:      d.batches      ?? 0,
-            errors:       d.errors       ?? 0,
-            dropped:      d.dropped      ?? 0,
-            lastRun:      d.lastRun      ?? 0,
-            effectiveWait: d.effectiveWait ?? 0,
-          }));
+        this.workerStats = MuninnWorkers.mapWorkerResponse(data);
       } catch (err) {
         console.warn('[muninn] worker stats failed:', err);
       }
     },
 
-    workerStateName(state) {
-      return ['Active', 'Idle', 'Dormant'][state] ?? 'Unknown';
-    },
-
-    workerStateBadge(state) {
-      const classes = ['badge-active', 'badge-idle', 'badge-dormant'];
-      return classes[state] ?? 'badge-idle';
+    workerStateName(worker) {
+      return worker.statusLabel;
     },
 
     formatWorkerProcessed(n) {
@@ -722,7 +693,7 @@ document.addEventListener('alpine:init', () => {
 
     workerTooltip(w) {
       const lines = [
-        `${w.name}  ·  ${this.workerStateName(w.state)}`,
+        `${w.name}  ·  ${this.workerStateName(w)}`,
         `Processed: ${w.processed}  ·  Batches: ${w.batches}`,
         `Last run: ${this.formatWorkerLastRun(w.lastRun)}`,
       ];
@@ -731,31 +702,32 @@ document.addEventListener('alpine:init', () => {
       return lines.join('\n');
     },
 
-    workerDotStyle(state) {
-      const colors = ['#10b981', '#f59e0b', '#9ca3af']; // active, idle, dormant
-      return `background:${colors[state] ?? '#9ca3af'};`;
+    workerDotStyle(worker) {
+      return `background:${worker.color};`;
     },
 
-    workerStateStyle(state) {
-      const styles = ['color:#10b981;', 'color:#f59e0b;', 'color:#9ca3af;'];
-      return styles[state] ?? 'color:#9ca3af;';
+    workerStateStyle(worker) {
+      return `color:${worker.color};`;
     },
 
     workersOverallHealthLabel() {
       if (!this.workerStats.length) return 'Loading';
-      const active = this.workerStats.filter(w => w.state === 0).length;
-      const idle   = this.workerStats.filter(w => w.state === 1).length;
+      const active = this.workerStats.filter(w => w.status === 'active').length;
+      const idle   = this.workerStats.filter(w => w.status === 'idle').length;
       if (active === this.workerStats.length) return 'All Active';
       if (active > 0) return active + ' Active';
       if (idle   > 0) return idle + ' Idle';
-      return 'Dormant';
+      if (this.workerStats.some(w => w.status === 'dormant')) return 'Dormant';
+      if (this.workerStats.some(w => w.status === 'stopped')) return 'Stopped';
+      if (this.workerStats.every(w => w.status === 'disabled')) return 'Disabled';
+      return 'Unknown';
     },
 
     workersOverallHealthStyle() {
       const base = 'font-size:0.6875rem;padding:0.1rem 0.5rem;border-radius:9999px;font-weight:600;';
       if (!this.workerStats.length) return base + 'background:#6b728020;color:#6b7280;';
-      const active = this.workerStats.filter(w => w.state === 0).length;
-      const idle   = this.workerStats.filter(w => w.state === 1).length;
+      const active = this.workerStats.filter(w => w.status === 'active').length;
+      const idle   = this.workerStats.filter(w => w.status === 'idle').length;
       if (active === this.workerStats.length) return base + 'background:#10b98120;color:#10b981;';
       if (active > 0) return base + 'background:#f59e0b20;color:#f59e0b;';
       if (idle   > 0) return base + 'background:#f59e0b20;color:#f59e0b;';
@@ -1952,18 +1924,7 @@ document.addEventListener('alpine:init', () => {
         }
     },
     workerRows() {
-        const ws = this.cogWorkerStats || {};
-        const toRow = (name, stats) => ({
-            name,
-            active: stats && (stats.processed > 0 || stats.running),
-            processed: stats ? (stats.processed ?? '—') : '—',
-        });
-        return [
-            toRow('Hebbian Learning', ws.hebbian),
-            toRow('Temporal Scoring', ws.decay),
-            toRow('Contradiction Detection', ws.contradict),
-            toRow('Confidence Updates', ws.confidence),
-        ];
+        return MuninnWorkers.mapWorkerResponse(this.cogWorkerStats);
     },
 
     async loadPlasticity() {

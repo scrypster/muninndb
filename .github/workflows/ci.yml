@@ -108,7 +108,13 @@ jobs:
 
       # TestMain builds the binary itself; we just need Go + assets present.
       # Tests exercise: help, unknown-command, init, start, stop, restart, status, MCP round-trip.
+      #
+      # MUNINN_REQUIRE_INTEGRATION makes "the suite did not run" a failure rather
+      # than a quiet skip (#812). A runner has no daemon on :8750, so if the port
+      # is busy here something is wrong and a green tick would be the wrong answer.
       - name: Run CLI integration tests
+        env:
+          MUNINN_REQUIRE_INTEGRATION: '1'
         run: go test -tags localassets,integration -v -timeout 120s ./cmd/muninn/...
 
   # ── Windows: build + smoke test ───────────────────────────────────────
@@ -362,10 +368,17 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Run shellcheck
-        run: shellcheck install.sh scripts/check-build-tags.sh
+        run: shellcheck install.sh scripts/check-build-tags.sh scripts/check-filename-build-constraints.sh
 
       - name: Check build tags
         run: bash scripts/check-build-tags.sh
+
+      # #814: a file named *_arm_test.go / *_386.go is excluded by the toolchain
+      # on filename alone, with no //go:build line and no diagnostic. Lives here
+      # rather than in `go test` because a Go guard against build exclusion can
+      # itself be build-excluded.
+      - name: Check filename build constraints
+        run: bash scripts/check-filename-build-constraints.sh
 
   # ── API spec validation — catches drift before it ships ───────────────
   api-spec-validation:

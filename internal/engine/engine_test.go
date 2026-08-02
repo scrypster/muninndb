@@ -19,7 +19,9 @@ import (
 
 // testEnv wires up a fully functional Engine with real storage and FTS,
 // using a temporary directory that is cleaned up after the test.
-func testEnv(t *testing.T) (*Engine, func()) {
+// testEnv takes testing.TB so benchmarks (BenchmarkRecallContradictionGate)
+// can build the same environment tests do.
+func testEnv(t testing.TB) (*Engine, func()) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "muninndb-engine-test-*")
 	if err != nil {

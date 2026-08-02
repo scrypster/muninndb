@@ -551,10 +551,59 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	//   - the forward key itself
 	//   - the reverse key 0x04|ws|targetID|weight|id (uses actual weight)
 	//   - the weight index key 0x14|ws|id|targetID
+	//
+	// assocCacheDirty collects the sources whose cached forward-association list
+	// names this engram; they are invalidated post-commit (STO-12, below).
+	assocCacheDirty := []ULID{id}
+
+	// STO-11: the upper bound MUST carry-propagate (keys.PrefixUpperBound), not
+	// append a 0xFF sentinel. A 0x03 key is prefix(25)|weightComplement(4)|dst(16)
+	// and keys.WeightComplement is MaxUint32 - uint32(w*MaxUint32), so
+	// complement[0] == 0xFF for every weight at or below ~1/256 — and the whole
+	// complement is 0xFFFFFFFF at weight 0, which is also the byte position a
+	// pre-fix weight-1.0 edge was written at (legacyFullWeightComplement). A
+	// 26-byte `prefix|0xFF` bound sorts at or below all of those, so the cascade
+	// silently skipped them and the edges outlived their endpoint permanently
+	// (nothing else reaps them: DecayAssocWeights never reads 0x01).
+	//
+	// keys.PrefixUpperBound is LOOSE in the other direction: it increments the
+	// first sub-0xFF byte from the right and returns without zeroing the
+	// trailing 0xFF bytes, so for a prefix whose last byte is 0xFF (~1 engram ID
+	// in 256) the bound spans into the NEXT engram's association keyspace. The
+	// explicit bytes.Equal(k[:25], prefix) break below is what keeps the loop
+	// inside its own prefix.
+	//
+	// Reachability, stated accurately — this is STRUCTURAL HYGIENE, not a live
+	// data-loss report. ~1 in 256 is the rate at which the BOUND IS LOOSE, not
+	// the rate at which anything is lost. To land inside the widened band a
+	// second engram must share the victim's first 14 ID bytes: the whole 48-bit
+	// ULID millisecond timestamp AND 8 of the 10 crypto-random entropy bytes,
+	// i.e. ~2^-64 on top of a same-millisecond collision. With ULID-shaped keys
+	// that is not operationally reachable, and the test below has to CONSTRUCT
+	// its IDs to reproduce it.
+	//
+	// The guard stays, and stays uniform across all four destructive 25-byte
+	// scans that take their bound from the shared helper, because the mandated
+	// shared helper's contract is wrong and the
+	// compensation is a per-key check at each call site — so any future
+	// non-ULID ID tail (a counter, a truncated hash, a content-addressed key)
+	// collapses that 64-bit gap to zero the day it lands, silently, on a delete
+	// path. Fixing PrefixUpperBound itself is #816.
+	//
+	// There is a FIFTH scan over a 25-byte prefix — RestoreArchivedEdges' own
+	// candidate loop — which has no such guard and does not need one, because it
+	// hand-rolls a TIGHT bound instead. See the comment there; it must not be
+	// consolidated onto the shared helper.
+	//
+	// It is also why these two loops must keep SeekGE and must NOT be converted
+	// to PrefixIterator, whose First/Valid shape changes the break-vs-continue
+	// semantics on short keys. Pinned by
+	// TestSTO12_DeleteEngramCascadeStaysInsideItsOwnPrefix and, across all four
+	// scans, TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
 	fwdPrefix := keys.AssocFwdPrefixForID(wsPrefix, [16]byte(id))
 	fwdIter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: fwdPrefix,
-		UpperBound: append(append([]byte{}, fwdPrefix...), 0xFF),
+		UpperBound: keys.PrefixUpperBound(append([]byte{}, fwdPrefix...)),
 	})
 	if err == nil {
 		for fwdIter.SeekGE(fwdPrefix); fwdIter.Valid(); fwdIter.Next() {
@@ -582,10 +631,12 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// Reverse pass: scan 0x04|ws|id to find all associations TO this engram
 	// (from other engrams). Clean up the reverse index entries and the
 	// corresponding forward keys in those other engrams.
+	// STO-11 again — same weight-complement reasoning as the forward pass, and
+	// the same load-bearing bytes.Equal guard against the loose upper bound.
 	revPrefix := keys.AssocRevPrefixForID(wsPrefix, [16]byte(id))
 	revIter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: revPrefix,
-		UpperBound: append(append([]byte{}, revPrefix...), 0xFF),
+		UpperBound: keys.PrefixUpperBound(append([]byte{}, revPrefix...)),
 	})
 	if err == nil {
 		for revIter.SeekGE(revPrefix); revIter.Valid(); revIter.Next() {
@@ -606,8 +657,67 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 			batch.Delete(k, nil) // reverse key
 			batch.Delete(keys.AssocFwdKey(wsPrefix, srcID, weight, [16]byte(id)), nil)
 			batch.Delete(keys.AssocWeightIndexKey(wsPrefix, srcID, [16]byte(id)), nil)
+			// STO-12: the rows go, but GetAssociations serves a 2s-TTL cache
+			// keyed by SOURCE engram, so without this the served graph keeps
+			// naming the dead engram for up to two seconds after its rows are
+			// gone — traversal hops to an ID that can never materialise. The
+			// scan already has every source in hand; invalidate post-commit.
+			assocCacheDirty = append(assocCacheDirty, ULID(srcID))
 		}
 		revIter.Close()
+	}
+
+	// Archived-association cleanup (0x25) — STO-12.
+	//
+	// The 0x03/0x04 passes above do not see an edge that decay ARCHIVED before
+	// this engram was hard-deleted: DecayAssocWeights moves such an edge out of
+	// the live index into 0x25. Left behind, recall's lazy
+	// RestoreArchivedEdgesTransitive writes it straight back into 0x03/0x04/0x14
+	// as a dangling row — and stamps restoredAt, which permanently exempts it
+	// from GCArchivedEdges. Fixing only the FTS/HNSW cascades does not close it.
+	//
+	// Key: 0x25 | ws(8) | src(16) | dst(16) = 41 bytes.
+	// As source: a bounded prefix scan.
+	//
+	// STO-11, the same guard and for the same reason as the 0x03/0x04 loops
+	// above. This prefix is byte-for-byte the same 25-byte kind|ws|id shape, and
+	// PrefixIterator's own bound computation (internal/storage/pebble.go) is the
+	// byte-identical loose one: increment the first sub-0xFF byte from the right,
+	// break, never zero the trailing 0xFF bytes. Unguarded, this loop deletes
+	// whatever the widened bound admits from the NEXT id's archive keyspace.
+	// Pinned by TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
+	archSrcPrefix := keys.ArchiveAssocPrefixForID(wsPrefix, [16]byte(id))
+	if archSrcIter, aErr := PrefixIterator(ps.db, archSrcPrefix); aErr == nil {
+		for archSrcIter.First(); archSrcIter.Valid(); archSrcIter.Next() {
+			k := archSrcIter.Key()
+			// break, not continue: keys are returned in order from a lower
+			// bound of exactly this prefix, so the first key that does not
+			// carry it is already past the prefix — including a key SHORTER
+			// than 25 bytes, which can only sort at or above the prefix by
+			// differing (greater) within its own length.
+			if len(k) < 25 || !bytes.Equal(k[:25], archSrcPrefix) {
+				break
+			}
+			batch.Delete(append([]byte{}, k...), nil)
+		}
+		archSrcIter.Close()
+	}
+	// As target: dst is the trailing 16 bytes, so this needs a vault-wide 0x25
+	// scan. Same shape and cost class as the ordinal child scan below, which
+	// has scanned the vault's 0x1E range on every delete since it was written.
+	archVaultPrefix := keys.ArchiveAssocRangeStart(wsPrefix)
+	if archDstIter, aErr := PrefixIterator(ps.db, archVaultPrefix); aErr == nil {
+		idBytes := [16]byte(id)
+		for archDstIter.First(); archDstIter.Valid(); archDstIter.Next() {
+			k := archDstIter.Key()
+			if len(k) != 41 {
+				continue
+			}
+			if bytes.Equal(k[25:41], idBytes[:]) {
+				batch.Delete(append([]byte{}, k...), nil)
+			}
+		}
+		archDstIter.Close()
 	}
 
 	// Ordinal cleanup: scan all ordinal keys in this workspace and delete any where
@@ -655,6 +765,9 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	ps.replicateBatch(batch)
 
 	ps.cache.Delete(wsPrefix, id)
+	for _, src := range assocCacheDirty {
+		ps.assocCache.Remove(assocCacheKey(wsPrefix, src))
+	}
 
 	// Decrement MentionCount on each entity that was linked to this engram.
 	// Done post-commit: if the process crashes here, counts will be slightly

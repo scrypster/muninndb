@@ -37,4 +37,11 @@ type EngineConfig struct {
 	// entity-link repair pass (#622). nil → 60s plus jitter, matching the
 	// prune worker. Tests set a small value to exercise the pass promptly.
 	EvolveRepairDelay *time.Duration
+
+	// AssocWeightRepairDelay overrides the startup delay before the one-shot
+	// repair of pre-fix full-weight association keys (#756). nil → 5s plus
+	// jitter — deliberately well inside the prune worker's first 60s tick,
+	// because a decay pass over an unrepaired vault destroys the evidence the
+	// repair needs. Tests set a small value to exercise the pass promptly.
+	AssocWeightRepairDelay *time.Duration
 }

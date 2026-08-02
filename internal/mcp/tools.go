@@ -227,7 +227,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_recall",
-			Description: "Search long-term memory using semantic context. Returns the most relevant memories.",
+			Description: "Search long-term memory using semantic context. Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows are all `weak` matched nothing strongly: those are related memories to verify, not answers.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -290,7 +290,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"annotate": map[string]any{
 						"type":        "boolean",
-						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false. Independent of annotate: whenever a result belongs to a detected same-subject version cluster, annotations also carries an ADVISORY (never asserted) possibly_superseded_by/version_cluster/newest_of_cluster/cluster_size signal — a mechanical hint pointing an older cluster member at the newest, distinct from the authoritative superseded_by/current_version pair.",
+						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false. Independent of annotate: whenever a result belongs to a detected same-subject version cluster, annotations also carries an ADVISORY (never asserted) possibly_superseded_by/version_cluster/newest_of_cluster/cluster_size signal — a mechanical hint pointing an older cluster member at the newest, distinct from the authoritative superseded_by/current_version pair. Also independent of annotate: a memory under an UNRESOLVED declared contradicts link always carries annotations.unresolved_contradiction (naming the memory it disagrees with) and the response carries a top-level conflict block — its score has been demoted 10 percent below its earned value, so it must not be read as the answer without checking the annotation. Resolve it with muninn_evolve, muninn_forget(not_true_since=...), or muninn_link(relation=\"supersedes\").",
 					},
 					"caller": map[string]any{
 						"type":        "string",

@@ -153,8 +153,10 @@ var currencyVersionStatusMarkers = map[string]struct{}{
 // It examines the top min(len(results), maxResults+currencyMargin) survivors
 // (results is assumed score-sorted descending, matching every caller in this
 // package), pairwise-clusters them via union-find under the conjunctive gate
-// (similarity AND shared-anchor AND temporal-separation, MINUS any pair with
-// an explicit RelSupersedes edge), and:
+// (temporal-separation AND similarity AND version-marker vocabulary on BOTH
+// sides — currencyVersionMarkerGate, universal since R4 — AND shared-anchor,
+// MINUS facet conflicts and MINUS any member of a DECLARED supersession chain
+// in either direction, currencyInDeclaredChain), and:
 //   - crowns the max-EffectiveValidFrom, non-future member of each 2+ cluster
 //     newest_of_cluster,
 //   - annotates every other member possibly_superseded_by <- the crowned ID,
@@ -179,6 +181,20 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 	// DISTINCT tag across the whole examined set (bounded — "no new
 	// keyspace", per design R2.2), never per-pair.
 	dfCache := make(map[string]int64, examined*4)
+
+	// Per-call declared-chain memo (R4): whether an engram participates in ANY
+	// explicit RelSupersedes edge, in EITHER direction. Computed lazily — only
+	// for engrams that have already cleared every cheap gate — and at most once
+	// per engram, never once per pair.
+	chainMemo := make(map[storage.ULID]bool, examined)
+	inDeclaredChain := func(id storage.ULID) bool {
+		if v, ok := chainMemo[id]; ok {
+			return v
+		}
+		v := e.currencyInDeclaredChain(ctx, ws, id)
+		chainMemo[id] = v
+		return v
+	}
 
 	// Self-derived per-vault ubiquity cutpoint (#11), computed once per pass and
 	// cached across calls with a TTL. Replaces the fixed 10%-of-N ratio, which
@@ -221,6 +237,21 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 			if !e.currencyPassesSimilarityGate(ctx, ws, a, b) {
 				continue
 			}
+			// Version markers: a UNIVERSAL gate (R4), independent of which
+			// anchor fires below. Before R4 the marker requirement lived
+			// INSIDE currencyTagAnchor, so the entity and RelRefines anchors —
+			// which return early from currencySharedAnchor — bypassed it
+			// entirely: any two temporally-separated, loosely-similar memories
+			// sharing one rare entity (in a project vault, the project name)
+			// were clustered as generations of one fact with no version
+			// vocabulary anywhere. That is the reproduced "unrelated
+			// project-identity memory called a newer version of the storage
+			// decision" false advisory. See
+			// TestCurrencyPrecision_EntityAnchorSideDoor_UnrelatedTopics /
+			// _RelRefinesSideDoor_NoVersionVocabulary.
+			if !currencyVersionMarkerGate(a.Tags, b.Tags) {
+				continue
+			}
 			// Shared anchor: entity scan / association scan / tag anchor.
 			if !e.currencySharedAnchor(ctx, ws, a, b, vaultSize, ubiquityCutpoint, dfCache) {
 				continue
@@ -233,8 +264,19 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 				continue
 			}
 			// Asserted supersession always wins — never second-guess it with
-			// the heuristic, even though every other gate cleared.
-			if e.currencyHasExplicitSupersedesEdge(ctx, ws, a.ID, b.ID) {
+			// the heuristic, even though every other gate cleared. R4 widens
+			// this from "this PAIR carries an edge" to "EITHER SIDE is covered
+			// by a declared chain at all, in either direction". The old,
+			// narrower rule protected only the SUPERSEDED side: the declared
+			// SUCCESSOR (the head of an evolve chain) carries no incoming
+			// stamp, so it looked like an ordinary un-versioned engram and the
+			// heuristic was free to annotate it possibly_superseded_by an
+			// arbitrary newer, unverified memory — advising the exact opposite
+			// of what the user explicitly asserted. When a human or an agent
+			// has declared how a fact versions, the heuristic has nothing to
+			// add and everything to get wrong; it stays out. See
+			// TestCurrencyPrecision_DeclaredSuccessor_NotAdvisedSuperseded.
+			if inDeclaredChain(a.ID) || inDeclaredChain(b.ID) {
 				continue
 			}
 			union(i, j)
@@ -443,7 +485,13 @@ func cosineIfMeaningful(a, b []float32) (float64, bool) {
 }
 
 // currencySharedAnchor reports whether a and b are anchored to the same
-// topic via ANY of (R2): an existing RelRefines edge (write-time novelty
+// TOPIC via ANY of (R2) the three signals below. It is the "same subject"
+// question ONLY — since R4 it is no longer the last word on clustering: the
+// universal version-marker gate and the facet-conflict veto are applied by
+// applyCurrencyAnnotation on every path, precisely because the first two
+// branches here return early.
+//
+// The three anchors are: an existing RelRefines edge (write-time novelty
 // already vouched for their near-duplicate relationship — KEPT from v1); at
 // least one shared entity whose store-wide mention count is rare enough to
 // carry idf weight (entityIDF/COG-18 — KEPT from v1, but measured (#716) to
@@ -501,22 +549,17 @@ func (e *Engine) currencyEntityAnchor(ctx context.Context, ws [8]byte, a, b stor
 // 0.68-0.86). Tags carry the real signal. a and b anchor as versions of the
 // same fact iff ALL of:
 //
-//  1. shared tags: at least currencyTagShareMin tags in common, after
-//     dropping type-label tags (currencyTypeLabelTags) and UBIQUITOUS tags
-//     (df > currencyUbiquityRatio of the vault) — necessary, not sufficient
-//     (measured: shared topic tags alone appear on both real chains AND
-//     variants).
-//  2. version markers: BOTH sides carry at least one version-marker tag
-//     (currencyIsVersionMarker), and the two marker SETS differ (identical
-//     marker sets mean same-version SIBLINGS — e.g. three separate
-//     "four-zone" facts comparing rates — which must not be ordered
-//     against each other).
+// same topic iff they share at least currencyTagShareMin tags, after dropping
+// type-label tags (currencyTypeLabelTags) and UBIQUITOUS tags (df >= the
+// self-derived ubiquity cutpoint) — necessary, not sufficient (measured: shared
+// topic tags alone appear on both real chains AND coexisting variants).
 //
-// The facet-conflict veto (no exclusive non-marker tag with vault df >=
-// currencyFacetDF differing between the two sides) is a SEPARATE, UNIVERSAL
-// gate applied by the caller (applyCurrencyAnnotation) regardless of which
-// anchor fired — see currencyFacetConflict — so it also protects the
-// entity/RelRefines anchor paths, not just this one.
+// R4: the version-marker requirement that used to live HERE is now a UNIVERSAL
+// gate applied by the caller (currencyVersionMarkerGate), joining the
+// facet-conflict veto. Both are applied regardless of which anchor fired, so
+// they protect the entity/RelRefines anchor paths too — those paths return early
+// from currencySharedAnchor and could never reach a gate buried in this
+// function. This function is now purely the "same topic?" test.
 func (e *Engine) currencyTagAnchor(ctx context.Context, ws [8]byte, a, b *storage.Engram, ubiquityCutpoint int64, dfCache map[string]int64) bool {
 	tagsA := currencyFilterTypeLabels(a.Tags)
 	tagsB := currencyFilterTypeLabels(b.Tags)
@@ -540,24 +583,83 @@ func (e *Engine) currencyTagAnchor(ctx context.Context, ws [8]byte, a, b *storag
 		}
 		shared++
 	}
-	if shared < currencyTagShareMin {
-		return false
-	}
+	return shared >= currencyTagShareMin
+}
 
-	markersA := currencyMarkerSet(tagsA)
-	markersB := currencyMarkerSet(tagsB)
+// currencyVersionMarkerGate is the UNIVERSAL version-vocabulary gate (R4). Two
+// engrams may be treated as generations of one fact only if BOTH carry at least
+// one version-marker tag (currencyIsVersionMarker) and their marker SETS DIFFER
+// — identical marker sets mean same-version SIBLINGS (e.g. three separate
+// "four-zone" facts comparing rates), which must not be ordered against each
+// other.
+//
+// R4 moved this out of currencyTagAnchor and up into applyCurrencyAnnotation,
+// alongside the facet-conflict veto, for the same reason the facet veto is
+// universal: currencySharedAnchor RETURNS EARLY on the entity and RelRefines
+// branches, so anything living inside the tag anchor is a gate those two paths
+// simply never reach. That was a side door wide enough to drive the measured
+// false advisories through — a shared rare entity (in a project vault, the
+// project's own name, which every memory mentions) plus a 0.70 cosine floor was
+// the entire evidentiary basis for telling an agent that a live fact might be
+// stale. A supersession advisory with no version vocabulary on either side is
+// not a weak hint; it is a guess dressed as evidence.
+//
+// The anchors still differ in what they substitute for: entity/RelRefines
+// anchors stand in for the >=2-shared-tag requirement (useful on tag-poor,
+// entity-rich vaults), but no anchor stands in for version vocabulary.
+func currencyVersionMarkerGate(rawTagsA, rawTagsB []string) bool {
+	markersA := currencyMarkerSet(currencyFilterTypeLabels(rawTagsA))
+	markersB := currencyMarkerSet(currencyFilterTypeLabels(rawTagsB))
 	if len(markersA) == 0 || len(markersB) == 0 {
 		return false
 	}
-	if currencyMarkerSetsEqual(markersA, markersB) {
-		// Identical marker sets => same-version siblings, not an ordered
-		// chain (e.g. two "four-zone" comparison facts).
-		return false
-	}
+	// Identical marker sets => same-version siblings, not an ordered chain.
+	return !currencyMarkerSetsEqual(markersA, markersB)
+}
 
-	// Facet-conflict veto is applied by the caller as a universal gate (see
-	// applyCurrencyAnnotation) — not repeated here.
-	return true
+// currencyInDeclaredChain reports whether id participates in ANY explicit
+// RelSupersedes edge, in either direction — i.e. whether a human or an agent has
+// already DECLARED how this fact versions (via muninn_evolve or muninn_link).
+//
+// When they have, the heuristic must stay silent about that engram entirely:
+// not just on the declared pair (the pre-R4 rule), and not just on the
+// superseded side. The declared SUCCESSOR is the dangerous case — it carries no
+// incoming supersession stamp, so under the pre-R4 rule it was indistinguishable
+// from an un-versioned engram, and any newer same-topic memory could be crowned
+// over it. Annotating the asserted head of a chain as possibly-superseded by an
+// unverified newer claim is the single worst output this channel can produce:
+// it contradicts an explicit assertion using a mechanical guess.
+func (e *Engine) currencyInDeclaredChain(ctx context.Context, ws [8]byte, id storage.ULID) bool {
+	m, err := e.store.GetAssociations(ctx, ws, []storage.ULID{id}, currencyAssocScan)
+	if err != nil {
+		// Degrade toward SILENCE (principle #2). The declared SUCCESSOR — the
+		// engram this whole mechanism exists to protect — carries its
+		// RelSupersedes edge in the FORWARD direction only, so swallowing this
+		// error and falling through to a healthy-but-empty reverse scan would
+		// re-open the exact leak: an asserted chain head advised as
+		// possibly-superseded because one read transiently failed.
+		slog.Warn("currency: forward-association lookup failed; treating engram as declared-chain-covered to fail toward silence", "err", err)
+		return true
+	}
+	for _, assoc := range m[id] {
+		if assoc.RelType == storage.RelSupersedes {
+			return true
+		}
+	}
+	revs, err := e.store.GetReverseAssociations(ctx, ws, id, currencyAssocScan)
+	if err != nil {
+		// Degrade toward SILENCE (principle #2): if we cannot tell whether an
+		// asserted chain covers this engram, do not manufacture an advisory
+		// that might contradict one.
+		slog.Warn("currency: reverse-association lookup failed; treating engram as declared-chain-covered to fail toward silence", "err", err)
+		return true
+	}
+	for _, assoc := range revs {
+		if assoc.RelType == storage.RelSupersedes {
+			return true
+		}
+	}
+	return false
 }
 
 // currencyFilterTypeLabels drops MuninnDB's own type-label tags

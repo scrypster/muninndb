@@ -31,6 +31,8 @@
   <script type="module" src="/static/js/plugin-config-utils.js"></script>
   <!-- time-utils: created_at unit normalization helpers — sets globalThis.MuninnTime -->
   <script type="module" src="/static/js/time-utils.js"></script>
+  <!-- worker-status-utils: authoritative /api/workers mapping — sets globalThis.MuninnWorkers -->
+  <script type="module" src="/static/js/worker-status-utils.js"></script>
 
   <!-- Alpine.js (deferred — initializes after DOM + app.js registers components) -->
   <script defer src="/static/vendor/alpine-3.14.9.min.js"></script>
@@ -220,7 +222,7 @@
           <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:0.625rem;border-bottom:1px solid var(--border);margin-bottom:0.5rem;">
             <div class="stat-label" style="margin:0;">Cognitive Workers</div>
             <div style="display:flex;align-items:center;gap:0.4375rem;">
-              <span x-show="workerStats.some(w => w.state !== 2)" :style="workersOverallHealthStyle()" x-text="workersOverallHealthLabel()"></span>
+              <span x-show="workerStats.length > 0" :style="workersOverallHealthStyle()" x-text="workersOverallHealthLabel()"></span>
               <button @click="cognitiveInfoModal = true"
                 title="Learn about cognitive workers"
                 style="background:none;border:1px solid var(--border);border-radius:9999px;width:1.375rem;height:1.375rem;font-size:0.75rem;cursor:pointer;color:var(--text-muted);display:flex;align-items:center;justify-content:center;padding:0;line-height:1;flex-shrink:0;">?</button>
@@ -233,7 +235,7 @@
                 style="display:flex;align-items:center;justify-content:space-between;padding:0.4375rem 0;border-bottom:1px solid var(--border);">
                 <!-- Left: dot + name -->
                 <div style="display:flex;align-items:center;gap:0.4375rem;">
-                  <div :style="workerDotStyle(w.state)" style="width:6px;height:6px;border-radius:50%;flex-shrink:0;"></div>
+                  <div :style="workerDotStyle(w)" style="width:6px;height:6px;border-radius:50%;flex-shrink:0;"></div>
                   <span style="font-size:0.8125rem;color:var(--text-secondary);" x-text="w.name"></span>
                 </div>
                 <!-- Right: optional count + errors + state text -->
@@ -247,9 +249,9 @@
                   <span x-show="w.dropped > 0"
                     style="font-size:0.625rem;padding:0.0625rem 0.3125rem;border-radius:9999px;background:#f9731622;color:#f97316;font-weight:600;"
                     x-text="w.dropped + 'd'"></span>
-                  <span :style="workerStateStyle(w.state)"
+                  <span :style="workerStateStyle(w)"
                     style="font-size:0.6875rem;font-weight:500;"
-                    x-text="workerStateName(w.state)"></span>
+                    x-text="workerStateName(w)"></span>
                 </div>
               </div>
             </template>
@@ -1258,8 +1260,8 @@
           <div class="card-polished">
             <h3 style="margin:0 0 0.25rem;font-size:1rem;">Cognitive Engine Workers</h3>
             <p style="color:var(--text-muted);font-size:0.8125rem;margin:0 0 1.25rem;">
-              Background workers that apply Hebbian learning, temporal scoring, contradiction detection, and confidence updates.
-              Configured via server startup flags.
+              Background workers are started automatically by the server; vault plasticity settings control applicable cognitive behavior.
+              Dormant workers are enabled and wake when qualifying work arrives. Temporal scoring runs at query time, not in a background worker.
             </p>
             <table style="width:100%;border-collapse:collapse;font-size:0.8125rem;">
               <thead>
@@ -1267,6 +1269,7 @@
                   <th style="padding:0.5rem 0.75rem 0.5rem 0;color:var(--text-muted);font-weight:500;">Worker</th>
                   <th style="padding:0.5rem 0.75rem;color:var(--text-muted);font-weight:500;">Status</th>
                   <th style="padding:0.5rem 0;color:var(--text-muted);font-weight:500;">Processed</th>
+                  <th style="padding:0.5rem 0;color:var(--text-muted);font-weight:500;">Errors</th>
                 </tr>
               </thead>
               <tbody>
@@ -1274,11 +1277,12 @@
                   <tr style="border-bottom:1px solid var(--border);">
                     <td style="padding:0.625rem 0.75rem 0.625rem 0;font-weight:500;" x-text="w.name"></td>
                     <td style="padding:0.625rem 0.75rem;">
-                      <span :class="w.active ? 'badge-active' : 'badge-dormant'"
+                      <span :class="w.badgeClass"
                             style="border-radius:9999px;padding:0.125rem 0.625rem;font-size:0.75rem;font-weight:600;"
-                            x-text="w.active ? 'Active' : 'Inactive'"></span>
+                            x-text="w.statusLabel"></span>
                     </td>
                     <td style="padding:0.625rem 0;color:var(--text-secondary);" x-text="w.processed"></td>
+                    <td style="padding:0.625rem 0;color:var(--text-secondary);" x-text="w.errors"></td>
                   </tr>
                 </template>
               </tbody>

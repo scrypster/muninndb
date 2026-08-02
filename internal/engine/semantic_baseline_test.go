@@ -113,3 +113,31 @@ func TestResolveSemanticBaseline_PlasticityOverride_OutOfRangeRejectedFallsBackT
 			"(rejected override must fall back to the registry, never silently zero every match)", b)
 	}
 }
+
+// semanticFloorExplicitlyDisabled feeds the relevance-band phase's
+// semantic_floor_disabled basis (G6 refute of #773, finding 3): true ONLY for
+// an explicit `semantic_floor: 0`. An unset override, a positive override,
+// and an out-of-range override (which resolveSemanticBaseline rejects and
+// falls through to the registry) must all be false — those vaults either have
+// a real baseline or a genuinely missing one, and naming the wrong cause is
+// the defect this exists to remove.
+func TestSemanticFloorExplicitlyDisabled(t *testing.T) {
+	zero, positive, tooHigh := 0.0, 0.3, 1.5
+	tests := []struct {
+		name string
+		cfg  *auth.PlasticityConfig
+		want bool
+	}{
+		{"no override", nil, false},
+		{"explicit zero disables", &auth.PlasticityConfig{SemanticFloor: &zero}, true},
+		{"positive override is a floor, not a disable", &auth.PlasticityConfig{SemanticFloor: &positive}, false},
+		{"out-of-range override is rejected, not a disable", &auth.PlasticityConfig{SemanticFloor: &tooHigh}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := semanticFloorExplicitlyDisabled(auth.ResolvePlasticity(tt.cfg)); got != tt.want {
+				t.Errorf("semanticFloorExplicitlyDisabled = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

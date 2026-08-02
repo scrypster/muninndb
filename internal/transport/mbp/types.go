@@ -289,9 +289,23 @@ type ActivateResponse struct {
 	// has no answer" from "nothing matched this run" — without it an empty
 	// result is indistinguishable from an un-run one, the silent-substitution
 	// class fixed across #742..#746. AbstainedReason is machine-readable:
-	// no_candidates | below_threshold | filtered. Empty iff Abstained is false.
+	// no_candidates | below_threshold | filtered | superseded_only |
+	// ambiguous_version. The last two come from COG-28 version-head resolution
+	// (#763): the query's only admission-worthy evidence sat in a declared
+	// supersession chain with, respectively, no reachable current head or a
+	// fork the engine refuses to choose a branch of. Both fields are
+	// RECOMPUTED on the final response, after every injection and gate phase:
+	// Abstained is true iff Activations is empty, so a version-head
+	// substitution that fills a below-threshold response also clears the
+	// flag. Empty iff Abstained is false.
 	Abstained       bool   `msgpack:"abstained,omitempty"        json:"abstained,omitempty"`
 	AbstainedReason string `msgpack:"abstained_reason,omitempty" json:"abstained_reason,omitempty"`
+	// Conflict is COG-29 contradiction honesty (#764): at least two returned
+	// memories are declared to contradict each other and the conflict is
+	// unresolved, so neither is presented as the answer. nil otherwise.
+	// Carried on MBP + REST (alias) + MCP; gRPC does NOT map it (pb has no
+	// annotation fields at all — obligation #3, deliberate).
+	Conflict *ConflictBlock `msgpack:"conflict,omitempty" json:"conflict,omitempty"`
 }
 
 // ActivationItem is a single activated engram.
@@ -310,7 +324,29 @@ type ActivationItem struct {
 	LastAccess      int64           `msgpack:"last_access,omitempty"       json:"last_access,omitempty"`
 	AccessCount     uint32          `msgpack:"access_count,omitempty"      json:"access_count,omitempty"`
 	Relevance       float32         `msgpack:"relevance,omitempty"         json:"relevance,omitempty"`
-	SourceType      string          `msgpack:"source_type,omitempty" json:"source_type,omitempty"`
+	// RelevanceBand is #773's ABSOLUTE relevance band for this row:
+	// strong | moderate | weak | filter_match | uncalibrated.
+	//
+	// Derived from ScoreComponents.AbsoluteScore against THIS VAULT's own
+	// calibration (its resolved default gate and its resolved content-channel
+	// ceiling) — NOT from Score, which is renormalized per query and therefore
+	// pins the best row of ANY query, however weak, to ~1.0. Not from
+	// Confidence either: that is the stored TRUTH-belief (COG-10), not a
+	// retrieval statistic.
+	//
+	// A WORD, not a float, deliberately: answering "a number that looks like
+	// certainty" with a second number asks the agent to know which one to
+	// believe. NOTE the neighbouring `relevance` field above is a different
+	// quantity entirely — the engram's stored decay/pruning strength. The band
+	// could not reuse that name.
+	//
+	// RelevanceBandBasis is set only for filter_match and uncalibrated and
+	// names WHY: tag_filter_bypass | rrf_fusion | weighted_sum_fusion |
+	// no_model_baseline | semantic_floor_disabled | semantic_degraded |
+	// no_content_channel | no_calibration_gate | not_scored.
+	RelevanceBand      string `msgpack:"relevance_band,omitempty"       json:"relevance_band,omitempty"`
+	RelevanceBandBasis string `msgpack:"relevance_band_basis,omitempty" json:"relevance_band_basis,omitempty"`
+	SourceType         string `msgpack:"source_type,omitempty" json:"source_type,omitempty"`
 	// State is the LifecycleState uint8, so recall can label engram lifecycle state.
 	State uint8 `msgpack:"state,omitempty" json:"state,omitempty"`
 	// Trust is the TrustLevel uint8. omitempty intentional — see ReadResponse.Trust comment.
@@ -343,6 +379,29 @@ type ActivationItem struct {
 	VersionCluster       string `msgpack:"version_cluster,omitempty"        json:"version_cluster,omitempty"`
 	NewestOfCluster      bool   `msgpack:"newest_of_cluster,omitempty"      json:"newest_of_cluster,omitempty"`
 	ClusterSize          int    `msgpack:"cluster_size,omitempty"           json:"cluster_size,omitempty"`
+	// SubstitutedFor / SubstitutionBasis / ChainTruncated / HeadNotIndexedYet
+	// are COG-28 version-head substitution (#763) — ASSERTED, from a declared
+	// RelSupersedes chain, siblings of SupersededBy above and explicitly NOT
+	// part of the advisory PossiblySupersededBy block.
+	//
+	// SubstitutedFor names the SUPERSEDED PREDECESSOR whose match admitted or
+	// boosted this row: the query's wording reached the older version, and
+	// recall resolved it to this current one. Two cases, both attributed: on
+	// an INJECTED row (this memory's own wording did not clear the gate) the
+	// displayed Score AND ScoreComponents are the predecessor's measurements;
+	// on a RAISED row (this memory matched on its own, but the predecessor
+	// matched harder) only Score is the predecessor's Final — ScoreComponents
+	// remain this memory's own. SubstitutionBasis repeats the predecessor's
+	// load-bearing measurements in both cases so the score's origin is
+	// unmissable. ChainTruncated: the chain was longer than the walk limit, so
+	// this may not be the very latest version. HeadNotIndexedYet: this memory
+	// has no stored embedding yet (indexing pending) — "not indexed" rather
+	// than "not relevant". All empty on a row that earned its own place at its
+	// own score.
+	SubstitutedFor    string             `msgpack:"substituted_for,omitempty"      json:"substituted_for,omitempty"`
+	SubstitutionBasis *SubstitutionBasis `msgpack:"substitution_basis,omitempty"   json:"substitution_basis,omitempty"`
+	ChainTruncated    bool               `msgpack:"chain_truncated,omitempty"      json:"chain_truncated,omitempty"`
+	HeadNotIndexedYet bool               `msgpack:"head_not_indexed_yet,omitempty" json:"head_not_indexed_yet,omitempty"`
 	// Valid-time annotations. ValidFrom is set only when it differs from
 	// CreatedAt (an explicitly backdated/forward-dated fact); ValidUntil is set
 	// only when the window is closed. Expired marks a fact whose ValidUntil <=
@@ -353,6 +412,97 @@ type ActivationItem struct {
 	// Importance is the STORED caller-asserted importance (0 = unset; the
 	// presentation layer derives the effective value — see ReadResponse).
 	Importance float32 `msgpack:"importance,omitempty" json:"importance,omitempty"`
+	// UnresolvedContradiction is COG-29 contradiction honesty (#764): this
+	// memory is joined to another by an UNRESOLVED, DECLARED `contradicts`
+	// edge, so it must not be read as the answer without checking this
+	// annotation. Its score is demoted 10% below its earned value; results
+	// stay score-ordered, so near-tied rivals land adjacent while a clearly
+	// stronger match keeps its rank. ASSERTED — an
+	// agent declared the disagreement — and always-on for the same reason
+	// superseded_by is: a caller must never be handed a disputed fact without
+	// being told. nil when this memory is in no live conflict.
+	UnresolvedContradiction *ContradictionConflict `msgpack:"unresolved_contradiction,omitempty" json:"unresolved_contradiction,omitempty"`
+}
+
+// ContradictionConflict is the per-row COG-29 payload (#764): which memory
+// this one is declared to contradict, and enough context to act on it without
+// a second call.
+type ContradictionConflict struct {
+	// With is the partner's ULID; WithConcept its concept, omitted when it
+	// could not be resolved rather than guessed at.
+	With        string `msgpack:"with"                    json:"with"`
+	WithConcept string `msgpack:"with_concept,omitempty"  json:"with_concept,omitempty"`
+	// Side is "asserted" (this memory is the SOURCE of the contradicts edge)
+	// or "challenged" (it is the target).
+	Side string `msgpack:"side" json:"side"`
+	// DeclaredAt is RFC3339. OMITTED when the edge carries no stamp — an
+	// unknown time is never serialised as the zero instant.
+	DeclaredAt string `msgpack:"declared_at,omitempty" json:"declared_at,omitempty"`
+	// PartnerInResults reports whether the partner is also in this response.
+	// When false the partner is named but NOT injected: neither side of an
+	// unresolved conflict is known to be right, so a conflict must never lift
+	// content into a result set it did not earn.
+	PartnerInResults bool `msgpack:"partner_in_results" json:"partner_in_results"`
+	// ClusterSize is the number of mutually-conflicting rows in this row's
+	// conflict cluster (2 for an ordinary pair). ClusterTruncated marks a
+	// cluster larger than the per-query cap.
+	ClusterSize      int  `msgpack:"cluster_size,omitempty"      json:"cluster_size,omitempty"`
+	ClusterTruncated bool `msgpack:"cluster_truncated,omitempty" json:"cluster_truncated,omitempty"`
+}
+
+// ConflictBlock is the response-level COG-29 signal (#764): this response
+// contains at least one pair of memories declared to contradict each other
+// with the conflict unresolved, so NEITHER is presented as the answer.
+//
+// Abstained is deliberately NOT set alongside it. The candidates are
+// admission-worthy and the response is non-empty; the "Empty iff Abstained is
+// false" contract is untouched, and emptying a real result set to signal a
+// conflict would destroy the true memory exactly as hard as the false one —
+// the #747/#754 lesson.
+type ConflictBlock struct {
+	Unresolved bool               `msgpack:"unresolved"        json:"unresolved"`
+	Pairs      []ConflictPairInfo `msgpack:"pairs,omitempty"   json:"pairs,omitempty"`
+	Warning    string             `msgpack:"warning,omitempty" json:"warning,omitempty"`
+	// AdjacencyOverflow reports how many rows beyond max_results the response
+	// carries in order to keep a conflict cluster whole. Returning one side of
+	// a conflict alone is the failure this block exists to remove, so the
+	// truncation yields to it — but never silently.
+	AdjacencyOverflow int `msgpack:"adjacency_overflow,omitempty" json:"adjacency_overflow,omitempty"`
+}
+
+// ConflictPairInfo names one unresolved declared contradiction and which side
+// the ordering ladder preferred.
+type ConflictPairInfo struct {
+	A        string `msgpack:"a"                   json:"a"`
+	B        string `msgpack:"b"                   json:"b"`
+	AConcept string `msgpack:"a_concept,omitempty" json:"a_concept,omitempty"`
+	BConcept string `msgpack:"b_concept,omitempty" json:"b_concept,omitempty"`
+	// DeclaredAt is RFC3339, omitted when unknown.
+	DeclaredAt string `msgpack:"declared_at,omitempty" json:"declared_at,omitempty"`
+	// Preferred is "a" or "b" — the side the RECENCY LADDER prefers
+	// (valid-time, then the direction of the declaration), and nothing more.
+	// It is NOT a verdict about which memory is true, and it may differ from
+	// the response's actual order: results are ordered by demoted score, so a
+	// stronger-matching older side can still rank above the preferred one.
+	// Basis names the rule that decided it: newer_valid_from | asserting_side
+	// | ulid_tiebreak.
+	Preferred string `msgpack:"preferred,omitempty" json:"preferred,omitempty"`
+	Basis     string `msgpack:"basis,omitempty"     json:"basis,omitempty"`
+	// PartnerInResults is false when only one side of this pair is in the
+	// response (the other was live and visible but did not match the query).
+	PartnerInResults bool `msgpack:"partner_in_results" json:"partner_in_results"`
+}
+
+// SubstitutionBasis is the evidence that admitted a COG-28 substituted row:
+// the SUPERSEDED PREDECESSOR's measured scores against this query. AbsoluteScore
+// is the exact quantity that was compared against the caller's threshold, so a
+// caller can verify for itself that the substitution redirected admission-worthy
+// evidence rather than manufacturing it.
+type SubstitutionBasis struct {
+	AbsoluteScore      float32 `msgpack:"absolute_score"      json:"absolute_score"`
+	ContentMatch       float32 `msgpack:"content_match"       json:"content_match"`
+	SemanticSimilarity float32 `msgpack:"semantic_similarity" json:"semantic_similarity"`
+	FullTextRelevance  float32 `msgpack:"full_text_relevance" json:"full_text_relevance"`
 }
 
 // ScoreComponents breaks down the activation score.
