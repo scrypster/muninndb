@@ -93,6 +93,13 @@ sdk/php/vendor/
 # voice. Publishing it would publish the test answers. Same tier as the skills above.
 .claude/agents/contributor-pr-vetter.md
 
+# Memory-proposal ledger: session findings queued for the vault. Real content, and the
+# durability floor for anything not yet drained — never commit it. The drain and the
+# protocol ARE committed; only the queue is local. See .claude/memory-protocol.md.
+.claude/memory-proposals.jsonl
+.claude/memory-proposals.jsonl.tmp
+.claude/memory-proposals.drained.jsonl
+
 # Design records that cannot be published: ones naming real people, client or
 # tenant data, commercial terms, or competitive strategy. Everything else in
 # .claude/deep-review/ IS published — see the README there for the triage rule.

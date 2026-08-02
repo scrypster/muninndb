@@ -96,3 +96,15 @@ test, a hook, or a CI gate — not in your head, and not in the next reviewer's.
   is not.
 
 Make no edits and open nothing.
+
+## Findings that should outlive this session
+
+If you learn something durable, non-obvious, and not recoverable from git or the tracker —
+a measured number, a decision and why it beat the alternative, an honest negative, a defect
+*pattern* rather than a defect, a trap that looks safe — **append it to
+`.claude/memory-proposals.jsonl` rather than only writing it in your report.** One JSON
+object per line, append only. `.claude/memory-protocol.md` has the schema and, more
+importantly, the bar: a noisy vault is worse than a small one, so progress narration and
+restatements of the diff do not qualify.
+
+A report is read once. The ledger is drained into memory and survives.

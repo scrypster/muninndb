@@ -81,3 +81,15 @@ anything you could not resolve that the maintainer must decide.
 the mechanism cannot work, or the value cannot be measured, say so with the evidence and
 stop. The project has killed features on measured evidence more than once and counts those
 as wins. A design that talks itself into building something is worse than no design.
+
+## Findings that should outlive this session
+
+If you learn something durable, non-obvious, and not recoverable from git or the tracker —
+a measured number, a decision and why it beat the alternative, an honest negative, a defect
+*pattern* rather than a defect, a trap that looks safe — **append it to
+`.claude/memory-proposals.jsonl` rather than only writing it in your report.** One JSON
+object per line, append only. `.claude/memory-protocol.md` has the schema and, more
+importantly, the bar: a noisy vault is worse than a small one, so progress narration and
+restatements of the diff do not qualify.
+
+A report is read once. The ledger is drained into memory and survives.
