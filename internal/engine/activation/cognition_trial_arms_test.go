@@ -100,20 +100,26 @@ var (
 // and ages, so the base-level reconstruction is exercised both at the cap and
 // well below it. A corpus of uniformly-fresh engrams would sit at bLevelCap
 // everywhere and would not test B(M) at all.
+// CONFIDENCE VARIES, and that is load-bearing rather than decorative. With
+// Confidence 1.0 on every engram the ranking check's `x gotConfidence` is
+// inert and the composed value the trial's ctRank computes is never verified
+// against the pipeline at all: SQUARING Confidence in computeACTR was measured
+// to leave the whole test green.
 var ctCorpus = []struct {
 	concept     string
 	content     string
 	accessCount uint32
 	ageDays     float64
+	confidence  float32
 }{
-	{"kiln firing schedule", "the bisque kiln ramps at eighty degrees an hour to cone zero four", 0, 0},
-	{"glaze mixing ratio", "the celadon glaze is mixed at one part ash to two parts feldspar", 3, 40},
-	{"wedging table height", "the wedging table sits at hip height so the potter can use body weight", 0, 200},
-	{"clay body shrinkage", "the stoneware body shrinks about twelve percent from wet to fired", 11, 5},
-	{"kiln shelf coating", "kiln shelves are coated with alumina hydrate before every glaze firing", 1, 90},
-	{"slip trailing nozzle", "the slip trailer uses a one millimetre nozzle for fine line work", 0, 12},
-	{"bisque cooling window", "the bisque load is not opened until the pyrometer reads below two hundred", 7, 1},
-	{"studio humidity target", "the damp room is held near ninety percent so trimming can wait a day", 2, 365},
+	{"kiln firing schedule", "the bisque kiln ramps at eighty degrees an hour to cone zero four", 0, 0, 1.00},
+	{"glaze mixing ratio", "the celadon glaze is mixed at one part ash to two parts feldspar", 3, 40, 0.62},
+	{"wedging table height", "the wedging table sits at hip height so the potter can use body weight", 0, 200, 0.88},
+	{"clay body shrinkage", "the stoneware body shrinks about twelve percent from wet to fired", 11, 5, 0.55},
+	{"kiln shelf coating", "kiln shelves are coated with alumina hydrate before every glaze firing", 1, 90, 0.97},
+	{"slip trailing nozzle", "the slip trailer uses a one millimetre nozzle for fine line work", 0, 12, 0.71},
+	{"bisque cooling window", "the bisque load is not opened until the pyrometer reads below two hundred", 7, 1, 0.80},
+	{"studio humidity target", "the damp room is held near ninety percent so trimming can wait a day", 2, 365, 0.93},
 }
 
 type ctCandidate struct {
@@ -123,11 +129,43 @@ type ctCandidate struct {
 	hebbian      float64
 	transition   float64
 	// as reported by the pipeline
-	gotRaw, gotAbsolute, gotConfidence float64
-	rank                               int
+	gotRaw, gotAbsolute, gotConfidence, gotFinal float64
+	engramConfidence                             float64 // as STORED, not as reported
+	rank                                         int
 }
 
+// ctStubTransitionStore is the PAS transition table for the PAS-enabled run.
+// PASTransitionStore is exported precisely so an out-of-package test can supply
+// one; the engine reads transitions for each engram of the MOST RECENT logged
+// activation, so its keys are the primer's ID.
+type ctStubTransitionStore struct {
+	transitions map[storage.ULID][]storage.TransitionTarget
+}
+
+func (s *ctStubTransitionStore) GetTopTransitions(_ context.Context, _ [8]byte, srcID [16]byte, topK int) ([]storage.TransitionTarget, error) {
+	targets := s.transitions[storage.ULID(srcID)]
+	if len(targets) > topK {
+		targets = targets[:topK]
+	}
+	return targets, nil
+}
+
+// TestCognitionTrial_ArmReconstructionFidelity runs the whole fidelity proof
+// TWICE.
+//
+// The PAS-enabled run is not a nicety. With PASEnabled:false the
+// transitionBoost term is IDENTICALLY ZERO on every candidate, so every
+// assertion that mentions it is vacuous — adding `+ abs(transitionBoost)*1e9`
+// to totalActivation in computeACTR was measured to leave this test green. That
+// term is the one that separates the trial's FULL and NO-PAS arms, and it is
+// also the only place `hebScale` is applied to something other than the Hebbian
+// boost, so a scale applied to one and not the other would be invisible too.
 func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
+	t.Run("PAS off", func(t *testing.T) { ctRunFidelity(t, false) })
+	t.Run("PAS on, populated transition store", func(t *testing.T) { ctRunFidelity(t, true) })
+}
+
+func ctRunFidelity(t *testing.T, pasEnabled bool) {
 	store := newStubStore()
 	now := time.Now()
 
@@ -138,7 +176,7 @@ func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
 			Concept:     c.concept,
 			Content:     c.content,
 			Embedding:   []float32{0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1},
-			Confidence:  1.0,
+			Confidence:  c.confidence,
 			Stability:   30.0,
 			AccessCount: c.accessCount,
 			CreatedAt:   now.Add(-time.Duration(c.ageDays*24) * time.Hour),
@@ -177,6 +215,23 @@ func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
 		VaultID: 7, At: now, EngramIDs: []storage.ULID{primer.ID}, Scores: []float64{1.0},
 	})
 
+	// The PAS transition table, keyed on the primer because that is the engram
+	// of the most recent logged activation. Counts VARY so the normalized boost
+	// (count/globalMax) is neither uniform nor saturated, and only SOME
+	// candidates are targets — a transition boost on every row would make the
+	// arithmetic indistinguishable from a constant.
+	if pasEnabled {
+		eng.SetTransitionStore(&ctStubTransitionStore{
+			transitions: map[storage.ULID][]storage.TransitionTarget{
+				primer.ID: {
+					{ID: [16]byte(ids[1]), Count: 12},
+					{ID: [16]byte(ids[4]), Count: 5},
+					{ID: [16]byte(ids[6]), Count: 3},
+				},
+			},
+		})
+	}
+
 	res, err := eng.Run(context.Background(), &activation.ActivateRequest{
 		VaultID:            7,
 		Context:            []string{"kiln firing schedule"},
@@ -184,8 +239,13 @@ func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
 		MaxResults:         100,
 		CandidatesPerIndex: 60,
 		HebbianEnabled:     true,
-		// PASEnabled deliberately false: PAS is a LIVE arm, never reconstructed
-		// (it changes the candidate set). See the header.
+		// PAS is a LIVE arm, never reconstructed (it changes the candidate SET,
+		// which no arithmetic can reproduce). Both settings are exercised: the
+		// arm ARITHMETIC must reproduce the pipeline in either regime, and with
+		// PAS off the transitionBoost term is identically zero and proves
+		// nothing about itself.
+		PASEnabled:       pasEnabled,
+		PASMaxInjections: 3,
 		Weights: &activation.Weights{
 			SemanticSimilarity: 0.6,
 			FullTextRelevance:  0.4,
@@ -210,15 +270,17 @@ func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
 			boosted++
 		}
 		cands = append(cands, ctCandidate{
-			id:            a.Engram.ID,
-			contentMatch:  c.ContentMatch,
-			baseLevel:     ctBaseLevel(a.Engram.AccessCount, a.Engram.LastAccess, now),
-			hebbian:       c.HebbianBoost,
-			transition:    c.TransitionBoost,
-			gotRaw:        c.Raw,
-			gotAbsolute:   c.AbsoluteScore,
-			gotConfidence: c.Confidence,
-			rank:          rank,
+			id:               a.Engram.ID,
+			contentMatch:     c.ContentMatch,
+			baseLevel:        ctBaseLevel(a.Engram.AccessCount, a.Engram.LastAccess, now),
+			hebbian:          c.HebbianBoost,
+			transition:       c.TransitionBoost,
+			gotRaw:           c.Raw,
+			gotAbsolute:      c.AbsoluteScore,
+			gotConfidence:    c.Confidence,
+			gotFinal:         c.Final,
+			engramConfidence: float64(a.Engram.Confidence),
+			rank:             rank,
 		})
 	}
 	if boosted == 0 {
@@ -228,6 +290,48 @@ func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
 	if boosted == len(cands) {
 		t.Fatal("EVERY candidate carried a Hebbian boost — the fixture cannot show that " +
 			"the ablation is selective")
+	}
+
+	// --- 0. THE FIXTURE ITSELF MUST EXERCISE WHAT THE TEST CLAIMS TO CHECK ---
+	// Every assertion below multiplies by Confidence and adds a transition
+	// term. If the fixture holds either constant, those factors are inert and
+	// the assertion silently checks nothing — which is exactly how squaring
+	// Confidence and injecting abs(transitionBoost)*1e9 into totalActivation
+	// were both measured to pass.
+	distinctConf := map[float64]struct{}{}
+	transBoosted := 0
+	for _, c := range cands {
+		distinctConf[c.gotConfidence] = struct{}{}
+		if c.transition > 0 {
+			transBoosted++
+		}
+	}
+	if len(distinctConf) < 3 {
+		t.Fatalf("only %d distinct Confidence values across %d candidates — the `x Confidence` "+
+			"factor in the ranking check is inert and proves nothing", len(distinctConf), len(cands))
+	}
+	if pasEnabled {
+		if transBoosted == 0 {
+			t.Fatal("PAS is enabled and NO candidate carried a transition boost — the term " +
+				"that separates the FULL and NO-PAS arms is identically zero, so every " +
+				"assertion about it is vacuous. Check the transition store wiring.")
+		}
+		if transBoosted == len(cands) {
+			t.Fatal("EVERY candidate carried a transition boost — the fixture cannot show " +
+				"the boost is selective")
+		}
+		distinctTrans := map[float64]struct{}{}
+		for _, c := range cands {
+			if c.transition > 0 {
+				distinctTrans[c.transition] = struct{}{}
+			}
+		}
+		if len(distinctTrans) < 2 {
+			t.Fatalf("all %d transition boosts have the same value — a constant is "+
+				"indistinguishable from a wrongly-scaled constant", transBoosted)
+		}
+	} else if transBoosted != 0 {
+		t.Fatalf("%d candidates carried a transition boost with PAS DISABLED", transBoosted)
 	}
 
 	// --- 1. THE ALGEBRAIC IDENTITY the CONTENT-MATCH-ONLY arm rests on -------
@@ -279,6 +383,32 @@ func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
 		if math.Abs(wantAbs-c.gotAbsolute) > tol {
 			t.Errorf("%s: reconstructed absolute %.12f vs pipeline %.12f",
 				c.id, wantAbs, c.gotAbsolute)
+		}
+		// THE COMPOSED RANKING VALUE, which is what the trial harness's ctRank
+		// actually sorts on: arm(row) x Confidence, up to the positive per-query
+		// constant scalePred. Nothing checked this before — ctSelfCheck compares
+		// only Raw, and the ordering assertion below is invariant to any
+		// monotone distortion of Confidence, so SQUARING Confidence in
+		// computeACTR passed. Confidence varies across this fixture precisely so
+		// that this line has teeth.
+		// The reported Confidence must be the engram's OWN, untransformed. The
+		// trial models Final = arm(row) x the engram's confidence; if the
+		// pipeline reported some FUNCTION of it instead, every assertion in
+		// this file would still agree with itself (Components.Confidence and
+		// Components.Final would be consistently distorted) while the model the
+		// harness is built on quietly stopped being true. Measured: squaring
+		// Confidence inside computeACTR passes every OTHER check here.
+		if c.gotConfidence != c.engramConfidence {
+			t.Errorf("%s: pipeline reported Confidence %.12f, engram stores %.12f — the trial "+
+				"ranks on arm(row) x the ENGRAM's confidence, so a transformed one silently "+
+				"invalidates its model", c.id, c.gotConfidence, c.engramConfidence)
+		}
+		wantFinal := wantRaw * c.gotConfidence
+		if math.Abs(wantFinal-c.gotFinal) > tol {
+			t.Errorf("%s: reconstructed Final %.12f vs pipeline %.12f (raw %.12f x conf %.6f) "+
+				"— the harness ranks on arm(row) x Confidence, so this composition is the "+
+				"quantity its NDCG columns are built from",
+				c.id, wantFinal, c.gotFinal, wantRaw, c.gotConfidence)
 		}
 	}
 
@@ -341,4 +471,43 @@ func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
 		t.Error("NO-HEBBIAN changed nothing anywhere — the arm is inert and cannot " +
 			"measure Hebbian's contribution")
 	}
+}
+
+// TestCognitionTrial_AgeFloorIsUnobservableUnderTheCap records a NEGATIVE
+// result rather than chasing it: the ACT-R age floor (1 minute) is not a gap in
+// the fidelity proof above, because it is structurally unobservable.
+//
+// The floor only binds when an engram's real age is BELOW it. But the crossover
+// age at which the base level drops under bLevelCap is
+//
+//	ageDays* = n^(1 + 1/d) * exp(-bLevelCap/d)     [solve B(M) = bLevelCap]
+//
+// which at d=0.5 and n=1 (a never-accessed engram, the earliest crossover, since
+// ageDays* grows with n) is exp(-2*bLevelCap) ~= 0.0508 days ~= 73 minutes —
+// SEVENTY-THREE TIMES the floor. So every engram young enough for the floor to
+// apply is already clamped at the cap, the clamp discards the floor's
+// contribution entirely, and no choice of floor within that range changes any
+// score. Perturbing it would not fail the fidelity test, and that is correct,
+// not a blind spot.
+func TestCognitionTrial_AgeFloorIsUnobservableUnderTheCap(t *testing.T) {
+	now := time.Now()
+	crossoverDays := math.Exp(-ctBLevelCap / ctACTRDecay) // n = 1
+	if crossoverDays <= ctAgeFloorDays {
+		t.Fatalf("crossover age %.6f days is at or below the floor %.6f — the floor WOULD be "+
+			"observable and the fidelity test needs a case for it", crossoverDays, ctAgeFloorDays)
+	}
+	// Every age from zero up to the floor sits at the cap, for every access count
+	// the corpus uses, so the floor's value cannot reach any score.
+	for _, n := range []uint32{0, 1, 3, 7, 11} {
+		for _, ageDays := range []float64{0, ctAgeFloorDays / 10, ctAgeFloorDays, ctAgeFloorDays * 2} {
+			at := now.Add(-time.Duration(ageDays * 24 * float64(time.Hour)))
+			if got := ctBaseLevel(n, at, now); math.Abs(got-ctBLevelCap) > 1e-12 {
+				t.Errorf("accessCount %d at %.6f days: base level %.12f, want the cap %.12f — "+
+					"the floor is reachable after all", n, ageDays, got, ctBLevelCap)
+			}
+		}
+	}
+	t.Logf("age floor %.6f days (1 min) vs earliest cap crossover %.6f days (%.0f min): the "+
+		"floor is %0.f x below it and is discarded by the clamp",
+		ctAgeFloorDays, crossoverDays, crossoverDays*24*60, crossoverDays/ctAgeFloorDays)
 }
