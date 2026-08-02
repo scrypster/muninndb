@@ -5,6 +5,7 @@ package engine
 import (
 	"math"
 	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -71,14 +72,33 @@ func ctSeriesFromMeans(n int, m ctArmMeans) *ctQuerySeries {
 // production builder, with the U4 reconstruction numbers the series does not
 // carry. Three identical vaults is the cleanest way to hold everything except
 // the quantity under test fixed.
+//
+// THE BUILDER RUNS ONCE AND THE RESULT IS RELABELLED, which is exact rather than
+// approximate: ctVaultFromSeriesResamples is a pure function of (series,
+// distinctEvents, nBuckets, seed, resamples) plus the label, which it only
+// copies into ctVaultResult.Label. Same inputs, same seed, same output — running
+// it three times produced three bit-identical structs at three times the cost,
+// and the cost is the whole reason this test family was 36x more expensive under
+// -race than its non-race timing suggested.
+//
+// TestCognitionTrialRule_ThreeFromSeriesRelabelIsExact pins the equivalence
+// against a per-label rebuild, so if the builder ever acquires a label-dependent
+// term this stops being sound LOUDLY.
+//
+// The slices ctVaultResult carries (DeltaCByBucket, OmittedBuckets) are shared
+// between the three copies. That is safe here and is asserted rather than
+// assumed: no caller of this helper mutates them, and the pinning test compares
+// contents, not identity.
 func ctThreeFromSeries(s *ctQuerySeries, resamples int) []ctVaultResult {
+	v := ctVaultFromSeriesResamples("A", s, 410, 12, 7, resamples)
+	v.BaselineEdges = 5000
+	v.ReplayedEdges = 2100
+	v.UnreplayableFrac = 0.30
 	out := make([]ctVaultResult, 0, 3)
 	for _, label := range []string{"A", "B", "C"} {
-		v := ctVaultFromSeriesResamples(label, s, 410, 12, 7, resamples)
-		v.BaselineEdges = 5000
-		v.ReplayedEdges = 2100
-		v.UnreplayableFrac = 0.30
-		out = append(out, v)
+		c := v
+		c.Label = label
+		out = append(out, c)
 	}
 	return out
 }
@@ -109,6 +129,40 @@ func ctNullSeries(n int, rng *rand.Rand) *ctQuerySeries {
 	return s
 }
 
+// ctThreeFromSeries and ctVaultFromSynth build one vault and relabel it twice
+// instead of running the builder three times. That is only sound if the builder
+// is a pure function of its inputs whose ONLY use of the label is to copy it,
+// so the property is pinned here rather than argued in a comment — the same
+// standard the rest of this branch is held to.
+//
+// Deliberately at a small n and a small resample count: this asserts an
+// EQUIVALENCE between two call patterns, which is scale-free, and paying the
+// pre-registered 10 000 to assert it would reintroduce the cost the relabelling
+// exists to remove.
+func TestCognitionTrialRule_ThreeFromSeriesRelabelIsExact(t *testing.T) {
+	const (
+		n         = 40
+		resamples = 50
+	)
+	s := ctSynthSeries(n)
+	got := ctThreeFromSeries(s, resamples)
+	if len(got) != 3 {
+		t.Fatalf("%d vaults, want 3", len(got))
+	}
+	for i, label := range []string{"A", "B", "C"} {
+		want := ctVaultFromSeriesResamples(label, s, 410, 12, 7, resamples)
+		want.BaselineEdges = 5000
+		want.ReplayedEdges = 2100
+		want.UnreplayableFrac = 0.30
+		if !reflect.DeepEqual(got[i], want) {
+			t.Errorf("vault %s from the relabelled build differs from a per-label rebuild.\n"+
+				" got: %+v\nwant: %+v\nThe builder has acquired a label-dependent term, so "+
+				"building once and relabelling is no longer the same measurement.",
+				label, got[i], want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // FINDING 1: THE POINT COMPARISON DOES NOT CONVERGE IN n, SO IT CANNOT GATE.
 //
@@ -134,23 +188,71 @@ func ctNullSeries(n int, rng *rand.Rand) *ctQuerySeries {
 // ---------------------------------------------------------------------------
 
 func TestCognitionTrialRule_AdditivityDoesNotConvergeAndIsNotAGate(t *testing.T) {
-	// A reduced resample count: the relations read ctDelta.Point, which is the
-	// EXACT arithmetic mean and is bit-identical at any resample count, so this
-	// changes nothing the test asserts and keeps a 4 000-query sweep inside the
-	// CI budget. Nothing here asserts on an interval.
+	// A reduced resample count, and the justification is NARROWER than it was
+	// written. The additivity relations read ctDelta.Point, which is the exact
+	// arithmetic mean and is bit-identical at any resample count — that part
+	// holds. But this test ALSO asserts Verdict != UNDERPOWERED, and U5 reads
+	// DeltaC's half-width, so an interval drawn from 100 resamples IS load-bearing
+	// here. The old blanket claim ("nothing here asserts on an interval") was
+	// false.
+	//
+	// So it is checked instead of argued, twice over:
+	//
+	//  1. EXECUTED, once, by hand. Re-running this whole sweep at
+	//     ctPreregistered.BootstrapResamples gives identical break counts and
+	//     identical UNDERPOWERED counts — 93/100, 46/50, 20/20, zero UNDERPOWERED
+	//     at every n — at 48.07s instead of 10.80s.
+	//  2. RE-CHECKED ON EVERY RUN, cheaply, on the trial where it is TIGHTEST:
+	//     the loop records the seed of the WIDEST Delta_C interval it produced,
+	//     and afterwards rebuilds exactly that vault set at the pre-registered
+	//     count and requires the same verdict. One extra build, at the one seed
+	//     where a 100-draw interval has the least room.
+	//
+	// A MARGIN HEURISTIC WAS TRIED FIRST AND REJECTED BY MEASUREMENT. The obvious
+	// guard is "require the widest half-width to stay well inside U5's gate", and
+	// the guess written here was that these intervals sit an order of magnitude
+	// inside it. They do not: the widest is 0.0206 against a 0.03 gate, a margin
+	// of 1.46x. Under this null sigma_d is ~0.15 by construction and n is as low
+	// as 320, so 1.96*0.15/sqrt(320) ~= 0.0164 is simply where the interval lands.
+	// Any "comfortable margin" constant would have had to be picked AFTER seeing
+	// that number, which is the tuning this file exists to refuse. Checking the
+	// verdict directly needs no constant at all.
 	const resamples = 100
+	widest, widestSeed, widestN := 0.0, int64(0), 0
 
 	type row struct {
 		n, trials, broke, underpowered int
 	}
 	var rows []row
+	// THE TRIAL COUNTS ARE HALVED FROM {200, 100, 40}, AND HERE IS WHY THAT DOES
+	// NOT WEAKEN WHAT THIS TEST ASSERTS.
+	//
+	// CI runs the default job with -race, where this test cost 58.36s against a
+	// 300s per-package timeout — and it is deterministic single-goroutine
+	// arithmetic, so the race detector is paying ~10x for a schedule it cannot
+	// find anything in. The whole package sat at 256s of its 300s budget.
+	//
+	// The assertion below is that the break rate at the largest n stays ABOVE
+	// 0.50, against a measured rate of ~0.91. At 20 trials a binomial 95%
+	// interval around p = 0.91 is roughly [0.70, 0.99] — nowhere near the bar.
+	// And the seeds are a pure function of (n, trial), so the counts here are
+	// FIXED, not sampled: this test cannot flake in either direction. Halving the
+	// trials halves the resolution of a number that has ~40 points of margin.
+	//
+	// ctThreeFromSeries additionally stopped rebuilding the identical vault three
+	// times, which is where the rest of the reduction comes from and costs no
+	// resolution at all.
 	for _, tc := range []struct{ n, trials int }{
-		{320, 200}, {1000, 100}, {4000, 40},
+		{320, 100}, {1000, 50}, {4000, 20},
 	} {
 		r := row{n: tc.n, trials: tc.trials}
 		for trial := 0; trial < tc.trials; trial++ {
-			rng := rand.New(rand.NewSource(int64(1000*tc.n + trial)))
+			seed := int64(1000*tc.n + trial)
+			rng := rand.New(rand.NewSource(seed))
 			vaults := ctThreeFromSeries(ctNullSeries(tc.n, rng), resamples)
+			if hw := vaults[0].DeltaC.halfWidth(); hw > widest {
+				widest, widestSeed, widestN = hw, seed, tc.n
+			}
 			if len(ctAdditivityDiagnostic(vaults[0])) > 0 {
 				r.broke++
 			}
@@ -165,6 +267,32 @@ func TestCognitionTrialRule_AdditivityDoesNotConvergeAndIsNotAGate(t *testing.T)
 		rows = append(rows, r)
 		t.Logf("n=%-5d trials=%-4d additivity relations broken %3d (%.1f%%)  ->  UNDERPOWERED %d",
 			r.n, r.trials, r.broke, 100*float64(r.broke)/float64(r.trials), r.underpowered)
+	}
+
+	// 0. THE REDUCED RESAMPLE COUNT IS STILL SOUND, checked where it is tightest.
+	//    This test asserts a verdict, U5 reads Delta_C's half-width, and a
+	//    100-draw interval is therefore load-bearing. The trial with the WIDEST
+	//    interval is the one with the least room before U5 fires, so that is the
+	//    one rebuilt at the pre-registered count and re-decided.
+	t.Logf("widest Delta_C 95%% CI half-width over every trial above: %.5f at n=%d (U5 gates at "+
+		"%.2f — a margin of %.2fx, which is why this is checked by rebuilding rather than by a "+
+		"margin constant)", widest, widestN, ctPreregistered.MaxCIHalfWidth,
+		ctPreregistered.MaxCIHalfWidth/widest)
+	{
+		s := ctNullSeries(widestN, rand.New(rand.NewSource(widestSeed)))
+		reduced := ctDecide(ctThreeFromSeries(s, resamples), ctGoodJudge(), true)
+		full := ctDecide(ctThreeFromSeries(s, ctPreregistered.BootstrapResamples),
+			ctGoodJudge(), true)
+		t.Logf("tightest-margin trial (n=%d, seed %d): %d resamples -> %s; %d resamples -> %s",
+			widestN, widestSeed, resamples, reduced.Verdict,
+			ctPreregistered.BootstrapResamples, full.Verdict)
+		if reduced.Verdict != full.Verdict {
+			t.Errorf("on the trial with the widest interval, %d resamples gave %s and the "+
+				"pre-registered %d gave %s. The reduced count is deciding this sweep's verdicts, "+
+				"so it can no longer stand in for the pre-registered one here.\nreduced:\n%s\n"+
+				"full:\n%s", resamples, reduced.Verdict, ctPreregistered.BootstrapResamples,
+				full.Verdict, reduced, full)
+		}
 	}
 
 	// 1. FLAT IN n. A converging instrument check would break less often as the
@@ -338,7 +466,19 @@ func TestCognitionTrialRule_EveryDeltaNMustBindToTheSameSeries(t *testing.T) {
 			short := ctSynthSeries(n)
 			short.NDCG[tc.arm] = short.NDCG[tc.arm][:n-1]
 
-			before := ctVaultFromSeries("A", intact, 410, 12, 7)
+			// `before` exists ONLY for the log line below, which prints .Point and
+			// .N. ctDelta.Point is the exact arithmetic mean of the paired
+			// differences and is never resampled, so it is bit-identical at any
+			// resample count, and .N is the series length. NOTHING reads an
+			// interval off `before` — it never reaches ctDecide. So it is built at
+			// a reduced count and `after`, which DOES reach ctDecide and whose
+			// interval U5 reads, is built at the pre-registered one.
+			//
+			// That asymmetry is the whole rule for reduced counts, applied per
+			// CALL SITE rather than asserted once about the helper. See
+			// ctVaultFromSeriesResamples' comment for why the blanket form of this
+			// claim was wrong.
+			before := ctVaultFromSeriesResamples("A", intact, 410, 12, 7, 100)
 			after := ctVaultFromSeries("A", short, 410, 12, 7)
 			t.Logf("intact:         %s = %+.4f (N=%d)", tc.delta,
 				ctDeltaByName(before, tc.delta).Point, ctDeltaByName(before, tc.delta).N)

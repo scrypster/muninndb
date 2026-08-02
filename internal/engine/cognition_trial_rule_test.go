@@ -113,6 +113,12 @@ var ctPreregistered = struct {
 	// Arms and PoolDepth are PINS, not thresholds, and they are pre-registered
 	// for a reason that is not obvious.
 	//
+	// Arms DUPLICATES ctArmNames AS A LITERAL ON PURPOSE — do not "DRY" it into
+	// `Arms: ctArmNames`. A pin that is defined as the thing it pins cannot
+	// detect a change to that thing: ctInstrumentPinViolation would compare
+	// ctArmNames against itself and report agreement forever. The duplication IS
+	// the mechanism.
+	//
 	// D1's exclusion is arm-NEUTRAL in the strong form — the pooled label set is
 	// shared, so ctNDCGAt10's `ok` is the same for every arm (verified over
 	// 50 000 random pools x 6 arms, zero divergence). But the POOL is the union
@@ -508,10 +514,33 @@ func ctVaultFromSeries(label string, s *ctQuerySeries, distinctEvents, nBuckets 
 // a property test can sweep n up to 20 000 queries without spending
 // 20 000 x 10 000 x 5 resample draws per trial.
 //
-// It is sound for what that sweep measures: the additivity relation reads only
-// ctDelta.Point, which is the EXACT arithmetic mean of the paired differences
-// and is never resampled, so it is bit-identical at any resample count. The
-// interval is not, and no test asserts on an interval from a reduced count.
+// WHAT IS AND IS NOT SOUND ABOUT A REDUCED COUNT, corrected. The comment here
+// used to end "The interval is not, and no test asserts on an interval from a
+// reduced count." THE SECOND HALF WAS FALSE. Both reduced-count callers reach
+// ctDecide, and S1, S2, K1, K2, K4 and U5 all read CILower/CIUpper — the
+// additivity-convergence test asserts Verdict != UNDERPOWERED on vaults whose
+// DeltaC interval came from 100 resamples, and that assertion depends on U5's
+// half-width check against a 100-draw interval. It is the third claim of this
+// kind on this branch to have been asserted rather than checked.
+//
+// The correct statement, and it is narrower:
+//
+//	ctDelta.Point is the EXACT arithmetic mean of the paired differences and is
+//	never resampled, so it is bit-identical at any resample count. The INTERVAL
+//	is not. A reduced count is therefore sound ONLY at a call site that reads no
+//	interval, or one that reads an interval whose insensitivity to the count has
+//	been CHECKED at that site — never by blanket assertion here.
+//
+// Both reduced-count call sites now carry that check AT THE SITE:
+//
+//   - TestCognitionTrialRule_AdditivityDoesNotConvergeAndIsNotAGate reaches
+//     ctDecide and U5 reads its interval, so it re-decides its WIDEST-interval
+//     trial at the pre-registered count on every run and requires the same
+//     verdict. (Its intervals sit 1.46x inside U5's gate, not the order of
+//     magnitude a comment here once guessed — which is why the check is a
+//     rebuild and not a margin constant.)
+//   - TestCognitionTrialRule_EveryDeltaNMustBindToTheSameSeries' `before` vault
+//     reads .Point and .N and never reaches ctDecide at all.
 func ctVaultFromSeriesResamples(label string, s *ctQuerySeries, distinctEvents, nBuckets int,
 	seed int64, resamples int,
 ) ctVaultResult {
@@ -574,6 +603,11 @@ func (d ctDelta) halfWidth() float64 { return (d.CIUpper - d.CILower) / 2 }
 
 // ctNonFinite names the first non-finite component of a delta, or "" if all
 // three are numbers. Used by U3's delta-arithmetic clause.
+//
+// NaN is reported before infinity across ALL THREE components rather than
+// component-by-component, because the two mean different things — a NaN is 0/0,
+// an infinity is x/0 — and a delta carrying both should be named by the worse
+// one.
 func ctNonFinite(d ctDelta) string {
 	for _, f := range []struct {
 		name string
@@ -592,6 +626,27 @@ func ctNonFinite(d ctDelta) string {
 		if math.IsInf(f.v, 0) {
 			return f.name
 		}
+	}
+	return ""
+}
+
+// ctNonFiniteScalar is ctNonFinite for a single number: it names WHY the value
+// is not one, or "" if it is.
+//
+// It exists because ctNonFinite covered the four deltas and nothing else, while
+// U4 compares a fifth float — UnreplayableFrac — against a threshold. `NaN >
+// 0.60` is false, and FALSE MEANS "NO OBJECTION" everywhere in this rule, so an
+// unmeasurable ratio read as a passed ceiling. That is the U3 delta-arithmetic
+// clause's exact class, one field over, and "not reachable through today's
+// harness" is the reasoning that clause was written to reject.
+func ctNonFiniteScalar(v float64) string {
+	switch {
+	case math.IsNaN(v):
+		return "NaN"
+	case math.IsInf(v, 1):
+		return "+Inf"
+	case math.IsInf(v, -1):
+		return "-Inf"
 	}
 	return ""
 }
@@ -1259,8 +1314,38 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	}
 
 	// --- U4: the reconstruction is too partial -------------------------------
+	//
+	// AN UNMEASURED BASELINE IS NOT A PASSED FLOOR — the FIFTH instance of this
+	// file family's signature defect, in the one U gate nobody had audited for
+	// it. The clause was `if v.BaselineEdges > 0 { ...the floor... }`, so a vault
+	// with an EMPTY baseline association graph, or one whose edge count simply
+	// failed to be collected, skipped the replay-fraction floor entirely. And
+	// ctUnreplayableFrac returned a plausible 0 for the 0/0 ratio, so BOTH halves
+	// of U4 fell silent together at exactly the same moment, leaving an audit
+	// trail byte-identical to a vault that genuinely replayed everything.
+	//
+	// Nothing upstream catches it. U2 gates DistinctEvents >= 200, which counts
+	// RECALL EVENTS, not edges; a vault can plausibly have 200+ recall events and
+	// a near-empty association graph, and that is precisely the vault whose
+	// reconstruction deserves the least trust.
+	//
+	// The two absences travel together because they have ONE CAUSE (no baseline
+	// edges were counted), and they are typed separately anyway: the ratio is a
+	// float the rule compares against a threshold, and a float that is not a
+	// number must be rejected where it is READ, not where it happened to be
+	// produced. Go cannot make an unset float64 field distinguishable from a
+	// measured 0.0, so the integer count is the field that carries the absence
+	// and the clause below is what reads it.
 	for _, v := range vaults {
-		if v.BaselineEdges > 0 {
+		if v.BaselineEdges <= 0 {
+			u = append(u, fmt.Sprintf("U4: vault %s reports %d baseline edges, so the replay "+
+				"fraction ReplayedEdges/BaselineEdges (%d/%d) cannot be formed and the %.0f%% "+
+				"floor was NEVER APPLIED. This is not a reconstruction that replayed everything; "+
+				"it is an ABSENCE OF MEASUREMENT, and U2's event floor cannot stand in for it "+
+				"because it counts recall events, not edges.",
+				v.Label, v.BaselineEdges, v.ReplayedEdges, v.BaselineEdges,
+				100*ctPreregistered.MinReplayEdgeFrac))
+		} else {
 			frac := float64(v.ReplayedEdges) / float64(v.BaselineEdges)
 			if frac < ctPreregistered.MinReplayEdgeFrac {
 				u = append(u, fmt.Sprintf("U4: vault %s replayed %d edges vs %d baseline (%.1f%%), "+
@@ -1268,7 +1353,13 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 					100*frac, 100*ctPreregistered.MinReplayEdgeFrac))
 			}
 		}
-		if v.UnreplayableFrac > ctPreregistered.MaxUnreplayableFrac {
+		if bad := ctNonFiniteScalar(v.UnreplayableFrac); bad != "" {
+			u = append(u, fmt.Sprintf("U4: vault %s reports an unreplayable fraction of %s. "+
+				"Every clause here is written so FALSE means 'no objection' and every comparison "+
+				"against a non-number is false, so the %.0f%% ceiling silently stops applying — "+
+				"and printing it as a percentage would render an ABSENCE OF MEASUREMENT as a "+
+				"measured composition.", v.Label, bad, 100*ctPreregistered.MaxUnreplayableFrac))
+		} else if v.UnreplayableFrac > ctPreregistered.MaxUnreplayableFrac {
 			u = append(u, fmt.Sprintf("U4: vault %s has %.1f%% of baseline edges in RelTypes replay "+
 				"cannot produce (declared / autoassoc / consolidation), above the %.0f%% ceiling",
 				v.Label, 100*v.UnreplayableFrac, 100*ctPreregistered.MaxUnreplayableFrac))
@@ -1276,12 +1367,24 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	}
 
 	// --- U5: the interval cannot distinguish SHIP from KILL -------------------
+	//
+	// The reason line is appended HERE, before U6's, because the audit trail is
+	// read in order and a rule whose numbered criteria print out of numbered
+	// order invites the reader to assume one of them is missing. It used to be
+	// appended after the U6 loop for no reason other than where the counting
+	// loop happened to sit.
 	wide := 0
 	for _, v := range vaults {
 		if v.DeltaC.halfWidth() > ctPreregistered.MaxCIHalfWidth {
 			wide++
 		}
 	}
+	if wide >= ctPreregistered.VaultsSupporting {
+		u = append(u, fmt.Sprintf("U5: the paired-bootstrap 95%% CI half-width for Delta_C exceeds "+
+			"%.2f on %d vaults — the data cannot distinguish SHIP from KILL",
+			ctPreregistered.MaxCIHalfWidth, wide))
+	}
+
 	// --- U6: the weekly trend cannot be evaluated -----------------------------
 	// Not in §6's numbered list, and deliberately added rather than assumed: §6
 	// pre-registers a TREND over 12 weekly checkpoints, and design risk 8 warns
@@ -1303,12 +1406,6 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 				v.Label, tr.PopulatedInWindow, ctPreregistered.TrendWindow,
 				len(v.OmittedBuckets), ctPreregistered.MinPopulatedBuckets))
 		}
-	}
-
-	if wide >= ctPreregistered.VaultsSupporting {
-		u = append(u, fmt.Sprintf("U5: the paired-bootstrap 95%% CI half-width for Delta_C exceeds "+
-			"%.2f on %d vaults — the data cannot distinguish SHIP from KILL",
-			ctPreregistered.MaxCIHalfWidth, wide))
 	}
 
 	if len(u) > 0 {
@@ -1350,6 +1447,21 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	// S2 — the win must be attributable to a NAMED mechanism. A Delta_C carried
 	// entirely by the ACT-R base-level prior is not a win for Hebbian/PAS and
 	// does not license keeping them.
+	//
+	// S2 PICKS THE MECHANISM S4 MUST THEN VINDICATE, and that coupling is
+	// deliberate but was undocumented. The loop below stops at the FIRST vault
+	// and the FIRST mechanism that clears the bar, checking Hebbian before PAS,
+	// and S4 goes on to require MRR sign-agreement on THAT mechanism and no
+	// other. So a vault whose Hebbian clears S2 while its MRR disagrees blocks
+	// SHIP even if PAS also clears S2 and its MRR does agree.
+	//
+	// That is the CONSERVATIVE direction and it is kept: S4 exists to catch a
+	// metric-specific artefact, and "the first mechanism we credited the win to
+	// is not corroborated by a second metric" is exactly the artefact it is
+	// looking for. Searching for ANY mechanism that clears both bars would let
+	// the rule shop for the metric pair that agrees, which is the same freedom
+	// the pre-registration exists to remove. Named here so a future reader meets
+	// the coupling instead of discovering it.
 	s2 := false
 	s2Which := ""
 	for _, v := range vaults {
@@ -1392,11 +1504,28 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 		if ok {
 			s3Vaults++
 		}
+		// ctBucketDelta.NQueries was CARRIED AND NEVER READ — declared by the
+		// producer, guaranteed non-zero by ctBucketDeltas, and reaching no
+		// reader, which is the shape ctJudgeCalibration.N shipped in. It belongs
+		// in the report rather than in a gate: "the trend was fitted on 7 of 12
+		// buckets" and "on 7 of 12 buckets holding 9 queries between them" are
+		// materially different claims, and the second is the one that says
+		// whether a populated bucket means anything. The thinnest bucket is
+		// named because an average hides a bucket of one.
+		fitted, thinnest := 0, 0
+		for _, bd := range v.DeltaCByBucket {
+			fitted += bd.NQueries
+			if thinnest == 0 || bd.NQueries < thinnest {
+				thinnest = bd.NQueries
+			}
+		}
 		trendDetail = append(trendDetail, fmt.Sprintf(
 			"%s:%d/%d pos over %d populated of the last %d (%d buckets omitted as empty), "+
-				"slope %.5f (CI lo %.5f)",
+				"slope %.5f (CI lo %.5f), fitted on %d queries across %d buckets, thinnest "+
+				"bucket %d",
 			v.Label, tr.PositiveOfLastN, ctPreregistered.TrendMinPositive, tr.PopulatedInWindow,
-			tr.WindowN, len(v.OmittedBuckets), tr.Slope, tr.SlopeCILower))
+			tr.WindowN, len(v.OmittedBuckets), tr.Slope, tr.SlopeCILower, fitted,
+			len(v.DeltaCByBucket), thinnest))
 	}
 	s3 := s3Vaults >= ctPreregistered.VaultsSupporting
 	ship = append(ship, fmt.Sprintf("S3 %s (DESCRIPTIVE ONLY — gates nothing since D3; this is a "+

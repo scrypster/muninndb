@@ -770,18 +770,53 @@ func ctVaultResultProbes() map[string]ctProbe {
 			ctExpectReason(t, got, "3 buckets omitted as empty",
 				"the omitted-bucket count is not reported")
 		},
-		"BaselineEdges": ctFromShip(ctVerdictUnderpowered, "below the 20% floor",
-			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
-				v[0].BaselineEdges = 50000 // same replayed edges, 4.2% of baseline
-			}),
+		// BINDINGNESS IS NOT ABSENCE-TYPING, AND THIS CENSUS CANNOT DECIDE THE
+		// LATTER.
+		//
+		// The probe here used to be the UP-probe alone: move BaselineEdges to
+		// 50000 and the replay fraction falls under the floor, so the field is
+		// read. That is true, and it is all a bindingness census can establish —
+		// it proves the field REACHES a clause. It says nothing about what the
+		// clause does at the field's ABSENT value, and U4's guard was
+		// `if v.BaselineEdges > 0 {...}`, so at BaselineEdges == 0 the field
+		// reached a clause that then declined to fire. A field can be perfectly
+		// bound and still have an unmeasured value that reads as a pass.
+		//
+		// Absence-typing is a SEPARATE question and needs a SEPARATE probe per
+		// field, asking "what does the rule do when this was never measured?".
+		// Every probe on this struct that has a meaningful absent value should
+		// carry one; the DOWN-probe below is BaselineEdges'.
+		"BaselineEdges": func(t *testing.T) {
+			// UP: the field is read — same replayed edges, 4.2% of a bigger baseline.
+			ctFromShip(ctVerdictUnderpowered, "below the 20% floor",
+				func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+					v[0].BaselineEdges = 50000
+				})(t)
+			// DOWN, and this is the one the census could not have found: at 0 the
+			// ratio cannot be formed at all, and "the floor did not fire" must not
+			// be the same audit trail as "the floor passed".
+			ctFromShip(ctVerdictUnderpowered, "reports 0 baseline edges",
+				func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+					v[0].BaselineEdges = 0
+				})(t)
+		},
 		"ReplayedEdges": ctFromShip(ctVerdictUnderpowered, "below the 20% floor",
 			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
 				v[0].ReplayedEdges = 100
 			}),
-		"UnreplayableFrac": ctFromShip(ctVerdictUnderpowered, "in RelTypes replay cannot produce",
-			func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
-				v[0].UnreplayableFrac = ctPreregistered.MaxUnreplayableFrac + 0.01
-			}),
+		"UnreplayableFrac": func(t *testing.T) {
+			// UP: past the ceiling.
+			ctFromShip(ctVerdictUnderpowered, "in RelTypes replay cannot produce",
+				func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+					v[0].UnreplayableFrac = ctPreregistered.MaxUnreplayableFrac + 0.01
+				})(t)
+			// ABSENT: the ratio's own unmeasurable value. NaN > 0.60 is false, and
+			// false is "no objection" everywhere in this rule.
+			ctFromShip(ctVerdictUnderpowered, "reports an unreplayable fraction of NaN",
+				func(v []ctVaultResult, _ *ctJudgeCalibration, _ *bool) {
+					v[0].UnreplayableFrac = math.NaN()
+				})(t)
+		},
 	}
 }
 
@@ -851,6 +886,152 @@ func ctDeltaProbes() map[string]ctProbe {
 	}
 }
 
+// ctQuerySeriesProbes and ctBucketDeltaProbes extend the census to the two
+// structs the walk did not reach. Both feed the rule through ctVaultFromSeries
+// — they are UPSTREAM of ctVaultResult, so a field that dies there is invisible
+// to every probe on the four structs already walked, which is the same
+// blind-spot argument that put ctDelta on the list.
+//
+// It found one: ctBucketDelta.NQueries was declared by ctBucketDeltas,
+// guaranteed non-zero by it, and read by NOTHING. It is now in S3's reported
+// line, which is where it belonged — a populated bucket holding one query and
+// one holding forty are not the same evidence.
+func ctQuerySeriesProbes() map[string]ctProbe {
+	// Every probe here drives ctVaultFromSeries, the seam the harness itself
+	// calls, so what is proven is proven about the code that runs.
+	build := func(s *ctQuerySeries) ctVaultResult {
+		return ctVaultFromSeriesResamples("A", s, 410, 12, 7, 50)
+	}
+	return map[string]ctProbe{
+		"Defined": func(t *testing.T) {
+			s := ctSynthSeries(60)
+			full := build(s)
+			s.Defined[7], s.Defined[11] = false, false
+			excluded := build(s)
+			ctExpect(t, excluded.NQueries == full.NQueries-2,
+				"flipping two Defined flags left NQueries at %d (was %d). Defined is the ONLY "+
+					"thing that decides which queries enter a delta (D1)",
+				excluded.NQueries, full.NQueries)
+			ctExpect(t, excluded.ZeroRelevanceQueries == 2,
+				"the two excluded queries were not COUNTED (%d) — D1 excludes and counts",
+				excluded.ZeroRelevanceQueries)
+			ctExpect(t, excluded.DeltaC.Point != full.DeltaC.Point,
+				"excluding two queries did not move Delta_C at all (%v)", full.DeltaC.Point)
+		},
+		"NDCG": func(t *testing.T) {
+			s := ctSynthSeries(60)
+			full := build(s)
+			for i := range s.NDCG[ctArmNameFull] {
+				s.NDCG[ctArmNameFull][i] = math.Min(s.NDCG[ctArmNameFull][i]+0.10, 1)
+			}
+			lifted := build(s)
+			ctExpect(t, lifted.DeltaC.Point > full.DeltaC.Point,
+				"lifting the FULL arm's NDCG by 0.10 did not raise Delta_C (%v -> %v)",
+				full.DeltaC.Point, lifted.DeltaC.Point)
+		},
+		"MRR": func(t *testing.T) {
+			s := ctSynthSeries(60)
+			full := build(s)
+			for i := range s.MRR[ctArmNameFull] {
+				s.MRR[ctArmNameFull][i] = 0
+			}
+			zeroed := build(s)
+			ctExpect(t, zeroed.MRRDeltaH != full.MRRDeltaH && zeroed.MRRDeltaP != full.MRRDeltaP,
+				"zeroing the FULL arm's MRR moved neither MRR delta (H %v -> %v, P %v -> %v). "+
+					"S4's sign agreement reads exactly these",
+				full.MRRDeltaH, zeroed.MRRDeltaH, full.MRRDeltaP, zeroed.MRRDeltaP)
+		},
+		"Bucket": func(t *testing.T) {
+			s := ctSynthSeries(60)
+			full := build(s)
+			for i := range s.Bucket {
+				s.Bucket[i] = 0 // every query into one bucket
+			}
+			collapsed := build(s)
+			ctExpect(t, len(collapsed.DeltaCByBucket) == 1 && len(full.DeltaCByBucket) > 1,
+				"collapsing every query into bucket 0 produced %d populated buckets (was %d) — "+
+					"the bucket index is not deciding the trend series",
+				len(collapsed.DeltaCByBucket), len(full.DeltaCByBucket))
+			ctExpect(t, len(collapsed.OmittedBuckets) == 11,
+				"%d buckets reported as omitted, want 11 — an empty bucket must be OMITTED and "+
+					"COUNTED, never regressed as a zero", len(collapsed.OmittedBuckets))
+		},
+	}
+}
+
+func ctBucketDeltaProbes() map[string]ctProbe {
+	return map[string]ctProbe{
+		"Bucket": func(t *testing.T) {
+			// The index travels with the value so an omission cannot re-space the
+			// buckets that remain. Six identical buckets at their REAL indexes
+			// have slope exactly 0; renumbered densely they would too, so the
+			// discriminating case is the trailing WINDOW, which is measured in
+			// bucket index rather than list position.
+			series, _ := ctBucketDeltas(func() [][]float64 {
+				pb := make([][]float64, 12)
+				for b := 0; b < 6; b++ {
+					pb[b] = []float64{0.04}
+				}
+				return pb
+			}())
+			tr := ctComputeTrend(series, ctPreregistered.TrendWindow)
+			ctExpect(t, tr.PopulatedInWindow == 6 && len(series) == 6,
+				"%d populated in the window over %d entries — with real indexes 0..5 and a "+
+					"window of %d ending at bucket 5, all six fall inside",
+				tr.PopulatedInWindow, len(series), ctPreregistered.TrendWindow)
+			// Now the same six values at indexes 0..5 of a series whose LAST
+			// bucket is 11: the window slides and the early ones fall out.
+			shifted := append(append([]ctBucketDelta(nil), series...),
+				ctBucketDelta{Bucket: 11, Mean: 0.04, NQueries: 1})
+			trShifted := ctComputeTrend(shifted, ctPreregistered.TrendWindow)
+			ctExpect(t, trShifted.PopulatedInWindow < 7,
+				"adding a bucket at index 11 left all %d entries inside a %d-wide trailing "+
+					"window — the window is being measured in LIST POSITION, not bucket index, "+
+					"so an omission silently re-spaces the series",
+				trShifted.PopulatedInWindow, ctPreregistered.TrendWindow)
+		},
+		"Mean": ctFromShipDescriptiveProbe("S3 FAIL", func(v []ctVaultResult) {
+			falling := make([]float64, 12)
+			for i := range falling {
+				falling[i] = 0.08 - 0.005*float64(i)
+			}
+			for i := range v {
+				v[i].DeltaCByBucket = ctBucketSeries(falling)
+			}
+		}),
+		"NQueries": func(t *testing.T) {
+			// FOUND BY THIS CENSUS: carried, guaranteed non-zero, and read by
+			// nothing. It gates nothing — a thin bucket is not an UNDERPOWERED
+			// condition, U6 already gates how MANY buckets there are — so the
+			// honest probe is that it REACHES THE REPORT, the same shape
+			// ctDelta.SDOfDiff takes one struct over.
+			vaults := ctThree(ctShipVault)
+			series := ctBucketSeries(ctRisingBuckets(0.03))
+			for i := range series {
+				series[i].NQueries = 40
+			}
+			series[3].NQueries = 1 // one bucket resting on a single query
+			for i := range vaults {
+				vaults[i].DeltaCByBucket = series
+			}
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			ctExpectReason(t, got, "fitted on 441 queries across 12 buckets, thinnest bucket 1",
+				"the per-bucket query count reaches no reader. A trend fitted on 12 buckets one "+
+					"of which rests on a SINGLE query is a different claim from one fitted on 12 "+
+					"buckets of 40, and nothing else in the report distinguishes them")
+			ctExpect(t, got.Verdict == ctVerdictShip,
+				"a thin bucket moved the verdict to %s. It is REPORTED, not gated: U6 already "+
+					"gates how many buckets exist, and inventing a per-bucket minimum here would "+
+					"be a threshold chosen after seeing the data", got.Verdict)
+		},
+	}
+}
+
+// ctFromShipDescriptiveProbe adapts ctFromShipDescriptive to the ctProbe shape.
+func ctFromShipDescriptiveProbe(wantSub string, mutate func(v []ctVaultResult)) ctProbe {
+	return func(t *testing.T) { ctFromShipDescriptive(t, wantSub, mutate) }
+}
+
 func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
 	for _, tc := range []struct {
 		what   string
@@ -861,6 +1042,11 @@ func TestCognitionTrialRule_EveryThresholdBinds(t *testing.T) {
 		{"ctJudgeCalibration", reflect.TypeOf(ctJudgeCalibration{}), ctJudgeProbes()},
 		{"ctVaultResult", reflect.TypeOf(ctVaultResult{}), ctVaultResultProbes()},
 		{"ctDelta", reflect.TypeOf(ctDelta{}), ctDeltaProbes()},
+		// The two UPSTREAM structs. They reach the rule through
+		// ctVaultFromSeries, so a field that dies between the harness and
+		// ctVaultResult is invisible to every probe above.
+		{"ctQuerySeries", reflect.TypeOf(ctQuerySeries{}), ctQuerySeriesProbes()},
+		{"ctBucketDelta", reflect.TypeOf(ctBucketDelta{}), ctBucketDeltaProbes()},
 	} {
 		seen := map[string]bool{}
 		for i := 0; i < tc.typ.NumField(); i++ {
@@ -1015,6 +1201,123 @@ func TestCognitionTrialRule_EmptyBucketsAreOmittedNotScoredAsZero(t *testing.T) 
 			ctRequireVerdict(t, got, ctVerdictUnderpowered, "populated weekly buckets")
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// U4: A BASELINE OF ZERO EDGES IS AN ABSENCE OF MEASUREMENT, NOT A PASSED FLOOR.
+//
+// This is the FIFTH instance of this branch's signature defect — "we did not
+// look" rendering as "we looked and found nothing" — and it was in the one U
+// gate nobody audited for it. The clause read
+//
+//	if v.BaselineEdges > 0 { ...the replay-fraction floor... }
+//
+// so a vault whose baseline association graph is empty, or whose edge count
+// simply failed to be collected, SKIPPED the floor entirely. And the producer
+// (ctUnreplayableFrac) returned a plausible 0 for a 0/0 ratio, so the second
+// U4 clause went quiet at exactly the same moment. Both halves of U4 fall
+// silent together, and the audit trail is byte-identical to a vault that
+// genuinely replayed everything.
+//
+// Nothing upstream catches it: U2 gates DistinctEvents >= 200, which counts
+// RECALL EVENTS, not edges — a vault can plausibly have 200+ recall events and
+// a near-empty association graph, which is precisely the vault whose
+// reconstruction is least trustworthy.
+//
+// The two vault sets below are identical in every field U4 reads EXCEPT that
+// one measured its baseline and the other did not, and that difference alone
+// must be the difference between a verdict and no verdict.
+// ---------------------------------------------------------------------------
+
+func TestCognitionTrialRule_ZeroBaselineEdgesIsAnAbsenceOfMeasurement(t *testing.T) {
+	// The control: a vault set that genuinely replayed EVERY baseline edge. U4
+	// has nothing to say, and the verdict is SHIP.
+	measured := ctThree(ctShipVault)
+	for i := range measured {
+		measured[i].BaselineEdges = 5000
+		measured[i].ReplayedEdges = 5000
+		measured[i].UnreplayableFrac = 0
+	}
+	control := ctDecide(measured, ctGoodJudge(), true)
+	if control.Verdict != ctVerdictShip {
+		t.Fatalf("the control (a full replay) is not SHIP, so the comparison below proves "+
+			"nothing\n%s", control)
+	}
+	for _, r := range control.Reasons {
+		if strings.Contains(r, "U4:") {
+			t.Fatalf("the control emitted a U4 objection %q — it replayed every edge", r)
+		}
+	}
+
+	// The case: the baseline was never measured. ctUnreplayableFrac forms 0/0
+	// here, so the harness reports a NON-NUMBER rather than a plausible 0 —
+	// the two absences travel together because they have the same cause.
+	unmeasured := ctThree(ctShipVault)
+	for i := range unmeasured {
+		unmeasured[i].BaselineEdges = 0
+		unmeasured[i].UnreplayableFrac = math.NaN()
+	}
+	got := ctDecide(unmeasured, ctGoodJudge(), true)
+	if got.Verdict == ctVerdictShip {
+		t.Fatalf("SHIPPED with ZERO baseline edges on every vault. The replay-fraction floor "+
+			"cannot be formed at all, so it was never applied, and the audit trail is "+
+			"byte-identical to the control that replayed all 5000\n%s", got)
+	}
+	ctRequireVerdict(t, got, ctVerdictUnderpowered, "0 baseline edges")
+	ctExpectReason(t, got, "ABSENCE OF MEASUREMENT",
+		"U4's zero-baseline clause must say what it is in the same language D1's clauses use, "+
+			"or a reader cannot tell an unmeasured reconstruction from a complete one")
+
+	// ONE vault is enough: U4 is per-vault, and a reconstruction nobody measured
+	// cannot be averaged away by two that were.
+	one := ctThree(ctShipVault)
+	one[2].BaselineEdges = 0
+	one[2].UnreplayableFrac = math.NaN()
+	gotOne := ctDecide(one, ctGoodJudge(), true)
+	if gotOne.Verdict == ctVerdictShip {
+		t.Fatalf("SHIPPED with one vault's baseline unmeasured\n%s", gotOne)
+	}
+	ctRequireVerdict(t, gotOne, ctVerdictUnderpowered, "vault C reports 0 baseline edges")
+}
+
+// U4, the same shape one field over: NaN > 0.60 is FALSE, and FALSE means "no
+// objection" everywhere in this rule. This is the exact class the U3
+// delta-arithmetic clause exists for, applied to the one non-delta float the
+// rule compares against a threshold.
+//
+// It is not reachable through today's harness with a non-zero baseline —
+// ctUnreplayableFrac's only non-finite output is the 0/0 case, which the clause
+// above already catches. It is here for the same reason the U3 delta clause is:
+// "unreachable today" is a property that has to be re-derived after every edit,
+// and nothing DOWNSTREAM rejected one.
+func TestCognitionTrialRule_UnmeasurableUnreplayableFracIsNotNoObjection(t *testing.T) {
+	for _, poison := range []struct {
+		what string
+		val  float64
+	}{{"NaN", math.NaN()}, {"+Inf", math.Inf(1)}, {"-Inf", math.Inf(-1)}} {
+		t.Run(poison.what, func(t *testing.T) {
+			vaults := ctThree(ctShipVault)
+			// The baseline IS measured, so the zero-baseline clause cannot be the
+			// thing that fires: the only objection available is the ratio itself.
+			vaults[0].UnreplayableFrac = poison.val
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			if got.Verdict == ctVerdictShip {
+				t.Fatalf("a %s unreplayable fraction SHIPPED. Every comparison against %s is "+
+					"false and false means 'no objection', so the ceiling silently stopped "+
+					"applying\n%s", poison.what, poison.what, got)
+			}
+			ctRequireVerdict(t, got, ctVerdictUnderpowered, "unreplayable fraction")
+		})
+	}
+	// The control: a REAL 0.0 is a measurement (every baseline edge is one replay
+	// can produce) and must pass, or the fix would have replaced a silent
+	// no-objection with a false objection.
+	vaults := ctThree(ctShipVault)
+	for i := range vaults {
+		vaults[i].UnreplayableFrac = 0
+	}
+	got := ctDecide(vaults, ctGoodJudge(), true)
+	ctRequireVerdict(t, got, ctVerdictShip, "")
 }
 
 // ---------------------------------------------------------------------------

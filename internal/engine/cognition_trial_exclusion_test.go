@@ -85,6 +85,28 @@ func ctVaultFromSynth(label string, s *ctQuerySeries) ctVaultResult {
 	return v
 }
 
+// ctThreeFromSynth is A/B/C from ONE series at the PRE-REGISTERED resample
+// count, built once and relabelled.
+//
+// The relabelling is what makes the pre-registered count affordable here. This
+// test's second half runs the production builder over series up to 11n long,
+// and every one of its intervals is drawn at ctPreregistered.BootstrapResamples
+// — because U5 reads DeltaC's half-width and the verdict this test asserts
+// invariance of depends on it. Cutting the resample count instead would have
+// been cutting the very thing under test; cutting the redundant rebuild costs
+// nothing. See ctThreeFromSeries for why relabelling is exact, and
+// TestCognitionTrialRule_ThreeFromSeriesRelabelIsExact for the pin.
+func ctThreeFromSynth(s *ctQuerySeries) []ctVaultResult {
+	v := ctVaultFromSynth("A", s)
+	out := make([]ctVaultResult, 0, 3)
+	for _, label := range []string{"A", "B", "C"} {
+		c := v
+		c.Label = label
+		out = append(out, c)
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // D1: DILUTION INVARIANCE.
 //
@@ -147,13 +169,13 @@ func TestCognitionTrialRule_DilutionInvariance(t *testing.T) {
 	}
 
 	// --- 2. what EXCLUSION does, which is the fix ----------------------------
-	baseVaults := ctThree(func(l string) ctVaultResult { return ctVaultFromSynth(l, src) })
+	baseVaults := ctThreeFromSynth(src)
 	base := ctDecide(baseVaults, ctGoodJudge(), true)
 	t.Logf("EXCLUDE m=0     Delta_C=%+.4f over %d informative -> %s",
 		baseVaults[0].DeltaC.Point, baseVaults[0].NQueries, base.Verdict)
 	for _, m := range []int{n, 3 * n, 10 * n} {
 		s := ctDilute(src, m)
-		vaults := ctThree(func(l string) ctVaultResult { return ctVaultFromSynth(l, s) })
+		vaults := ctThreeFromSynth(s)
 		got := ctDecide(vaults, ctGoodJudge(), true)
 		t.Logf("EXCLUDE m=%-5d Delta_C=%+.4f over %d informative (%d zero-relevance) -> %s",
 			m, vaults[0].DeltaC.Point, vaults[0].NQueries, vaults[0].ZeroRelevanceQueries,

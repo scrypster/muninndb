@@ -696,12 +696,51 @@ func ctEdgeComposition(t *testing.T, ctx context.Context, store *storage.PebbleS
 // ctUnreplayableFrac is the share of edges whose RelType the replay structurally
 // cannot produce. The Hebbian worker only ever writes the generic co-activation
 // class; everything else comes from declared links, autoassoc or consolidation.
+//
+// IT RETURNS NaN ON AN EMPTY BASELINE, NOT 0. With total == 0 the ratio is 0/0
+// and there is no composition to report; returning 0 said "none of this vault's
+// baseline edges are unreplayable", which is the most reassuring thing this
+// function can say and is a statement about a graph nobody counted. It read as a
+// passed U4 ceiling — at exactly the same moment BaselineEdges == 0 stopped the
+// replay-fraction floor from being formed, so BOTH halves of U4 fell silent
+// together on one cause. The rule now types both: see ctDecide's U4 block.
+//
+// A REAL 0.0 (total > 0 and every edge in the replayable class) is a
+// measurement, is still returned as 0, and still passes.
 func ctUnreplayableFrac(total int, byType map[storage.RelType]int) float64 {
-	if total == 0 {
-		return 0
+	if total <= 0 {
+		return math.NaN()
 	}
 	replayable := byType[storage.RelRelatesTo]
 	return float64(total-replayable) / float64(total)
+}
+
+// TestCognitionTrialUnreplayableFracIsUndefinedOnAnEmptyBaseline pins the
+// producer half of U4's absence-typing. The rule half — the clause that REJECTS
+// a non-finite ratio instead of comparing it against the ceiling and getting
+// "no objection" — is in ctDecide and is covered by
+// TestCognitionTrialRule_UnmeasurableUnreplayableFracIsNotNoObjection, which
+// runs in the default CI job. This one needs the harness tag because
+// ctUnreplayableFrac lives with the edge-composition census that feeds it.
+func TestCognitionTrialUnreplayableFracIsUndefinedOnAnEmptyBaseline(t *testing.T) {
+	if got := ctUnreplayableFrac(0, map[storage.RelType]int{}); !math.IsNaN(got) {
+		t.Errorf("ctUnreplayableFrac(0, ...) = %v, want NaN. 0/0 is not 'none of this vault's "+
+			"edges are unreplayable' — that is the most reassuring thing this function can say "+
+			"and it would be saying it about a graph nobody counted, at exactly the moment "+
+			"BaselineEdges == 0 also stops U4's replay-fraction floor from being formed", got)
+	}
+	if got := ctUnreplayableFrac(0, nil); !math.IsNaN(got) {
+		t.Errorf("ctUnreplayableFrac(0, nil) = %v, want NaN", got)
+	}
+	// A REAL zero is a measurement and must survive as one, or the fix would have
+	// traded a silent no-objection for a false objection on a perfectly replayed
+	// vault.
+	if got := ctUnreplayableFrac(400, map[storage.RelType]int{storage.RelRelatesTo: 400}); got != 0 {
+		t.Errorf("a fully replayable baseline reported %v, want exactly 0", got)
+	}
+	if got := ctUnreplayableFrac(400, map[storage.RelType]int{storage.RelRelatesTo: 100}); got != 0.75 {
+		t.Errorf("300 of 400 edges unreplayable reported %v, want 0.75", got)
+	}
 }
 
 // ===========================================================================
