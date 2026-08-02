@@ -11,15 +11,18 @@ import (
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
-// tightPrefixUpperBound is what keys.PrefixUpperBound SHOULD return: the first
-// sub-0xFF byte from the right is incremented AND every trailing 0xFF byte is
-// zeroed, so the bound covers the prefix and nothing beyond it.
+// tightPrefixUpperBound increments the first sub-0xFF byte from the right AND
+// zeroes every trailing 0xFF byte, so the bound covers the prefix and nothing
+// beyond it. Since #816 keys.PrefixUpperBound agrees with it.
 //
-// The test computes its own bound deliberately. Counting the neighbour's
-// surviving rows with keys.PrefixUpperBound would count rows outside the
-// neighbour's prefix too, which is the very looseness under test — the assertion
-// would then be measured with the broken ruler. (Fixing the shared helper is
-// #816; this file must keep working either way.)
+// DO NOT replace this with a call to keys.PrefixUpperBound. The test computes
+// its own bound deliberately: the thing under test is whether a destructive
+// scan stays inside its prefix, and the scan's bound comes from the shared
+// helper. Measuring the survivors with the same helper the subject uses means a
+// future regression in the helper moves the ruler and the assertion at the same
+// time — the test would keep passing while the code it guards over-deletes.
+// That is not hypothetical: this file was written while the helper WAS loose,
+// and it is the reason it could measure that at all.
 func tightPrefixUpperBound(prefix []byte) []byte {
 	bound := append([]byte{}, prefix...)
 	for i := len(bound) - 1; i >= 0; i-- {
@@ -69,13 +72,17 @@ func seedArchiveRow(t *testing.T, ps *PebbleStore, ws [8]byte, src, dst ULID) {
 // prefix. It is a table, not four tests, so that the fifth such scan is a row
 // rather than a rediscovery.
 //
-// The shared shape: `keys.PrefixUpperBound` (and `storage.PrefixIterator`, whose
-// bound computation is byte-identical) increments the first sub-0xFF byte from
-// the right and returns WITHOUT zeroing the trailing 0xFF bytes. For a prefix
-// whose last byte is 0xFF the returned bound therefore admits keys belonging to
-// the NEXT id. Every loop below deletes what its iterator returns, so without an
-// explicit `bytes.Equal(k[:25], prefix)` break each one can delete a live,
-// unrelated engram's rows.
+// The shared shape it was written against: `keys.PrefixUpperBound` (and
+// `storage.PrefixIterator`, which open-coded a byte-identical copy) incremented
+// the first sub-0xFF byte from the right and returned WITHOUT clearing the
+// trailing 0xFF bytes, so for a prefix whose last byte is 0xFF the bound
+// admitted keys belonging to the NEXT id. #816 fixed the helper and
+// PrefixIterator now delegates to it, so each loop below is inside its prefix
+// twice over: by its bound AND by an explicit `bytes.Equal(k[:25], prefix)`
+// break. Both are deliberate. Every loop deletes what its iterator returns, and
+// a delete loop should not depend on a helper in another package for the only
+// thing holding it in place — so the guards stay and this test keeps measuring
+// them with its own ruler.
 //
 // # Reachability, stated honestly
 //
@@ -88,11 +95,12 @@ func seedArchiveRow(t *testing.T, ps *PebbleStore, ws [8]byte, src, dst ULID) {
 // LOOSE, not the rate at which anything is lost; the two differ by about 64
 // bits.
 //
-// It is worth guarding anyway, and worth guarding uniformly: the mandated shared
-// helper's contract is wrong, the compensation is a per-key check at each call
-// site, and any future non-ULID id tail (a counter, a hash truncation, a
-// content-addressed key) collapses that 64-bit gap to zero the day it lands —
-// silently, on a delete path. Fixing the helper itself is #816.
+// It is worth guarding anyway, and worth guarding uniformly, even now that #816
+// has made the shared helper tight: the compensation is one comparison per key
+// at each call site, and any future non-ULID id tail (a counter, a hash
+// truncation, a content-addressed key) collapses that 64-bit gap to zero the day
+// it lands — silently, on a delete path. The guards are the property this test
+// measures; the helper being correct is a second, independent line.
 func TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix(t *testing.T) {
 	ctx := context.Background()
 
@@ -230,8 +238,9 @@ func TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix(t *testing.T) {
 			}
 			if after := countRowsUnder(t, ps, neighbourPrefix); after != before {
 				t.Errorf("the destructive scan crossed into the NEIGHBOURING id's keyspace: "+
-					"neighbour rows %d -> %d (keys.PrefixUpperBound is loose and this loop "+
-					"has no bytes.Equal(k[:25], prefix) guard)", before, after)
+					"neighbour rows %d -> %d — either this loop's upper bound went loose "+
+					"or its bytes.Equal(k[:25], prefix) guard is gone; both must hold",
+					before, after)
 			}
 		})
 	}
@@ -248,19 +257,20 @@ func TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix(t *testing.T) {
 // never existed being fabricated from the victim to a NEIGHBOUR's destination,
 // stamped restoredAt, which then permanently exempts it from GCArchivedEdges.
 //
-// It has no `bytes.Equal(k[:25], prefix)` break. It is correct today for one
-// reason only: RestoreArchivedEdges hand-rolls its OWN tight upper bound (it
-// zeroes the trailing bytes it wraps) instead of calling keys.PrefixUpperBound
-// or PrefixIterator like its four neighbours do. Two adjacent functions in one
-// file therefore use two different bound strategies over the identical prefix.
+// It has no `bytes.Equal(k[:25], prefix)` break, so its upper bound is its ONLY
+// protection. RestoreArchivedEdges hand-rolls that bound (increment from the
+// right, zero every byte it wraps) rather than calling keys.PrefixUpperBound or
+// PrefixIterator like its four neighbours. #816 has since made the shared helper
+// agree with it, so the two are now equivalent — but the hand-rolled bound stays,
+// because "equivalent today" and "the only thing standing between this loop and
+// fabricated edges" is a combination that should not be maintained at a distance.
 //
-// That is exactly the configuration that breaks silently on a tidy-up. When #816
-// fixes the shared helper and someone consolidates the call sites onto it — or
-// simply "unifies" this hand-rolled loop with the reap below it for consistency,
-// which is the more likely and more innocent-looking edit — this loop starts
-// fabricating edges. And `engramExists(ws, c.dst)` at the top of the restore
-// loop will NOT catch it: the dst it reads out of the neighbour's key is a real,
-// live engram. The liveness guard is orthogonal to the bound.
+// This test is what catches the loosening, whatever its route: a helper
+// regression, or the innocent-looking edit that "unifies" this loop with the reap
+// below it and drops the bound in the process. `engramExists(ws, c.dst)` at the
+// top of the restore loop will NOT catch it: the dst it reads out of the
+// neighbour's key is a real, live engram. The liveness guard is orthogonal to the
+// bound.
 //
 // Reachability is the same ~2^-64 structural-hygiene argument as the table's:
 // the ids are constructed by hand. The point is the invariant, not an incident.
