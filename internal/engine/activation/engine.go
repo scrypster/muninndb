@@ -2377,7 +2377,11 @@ func (e *ActivationEngine) phase6Score(
 		// scale as every other row. Same formula, same gate quantity
 		// (AbsoluteScore), same req.Threshold as the live path two lines above.
 		shadowMatches = collectShadowMatches(all, shadowEngrams, req, func(c scoringCandidate, eng *storage.Engram) (float64, float64, ScoreComponents) {
-			comp := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
+			// THE TAG-POOL BYPASS IS DELIBERATELY NOT APPLIED (shadow.go): a
+			// shadow is evidence, not a returned row, so it must never be
+			// admitted on the tagMatchFloor alone — pass inTagPool=false,
+			// never c.inTagPool.
+			comp := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, false)
 			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
 			raw := math.Min(comp.Raw*scale, 1.0)
 			final := raw * comp.Confidence

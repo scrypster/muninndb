@@ -548,7 +548,7 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	if annotate {
 		for i, item := range resp.Activations {
-			ann, err := s.engine.GetAnnotations(ctx, vault, item.ID)
+			ann, err := s.engine.GetAnnotations(ctx, vault, item.ID, req)
 			if err != nil || ann == nil {
 				// Non-fatal: log and skip annotations for this result.
 				slog.Warn("handleRecall: GetAnnotations failed", "id", item.ID, "err", err)
@@ -644,7 +644,16 @@ func (s *MCPServer) handleForget(ctx context.Context, w http.ResponseWriter, id 
 		sendError(w, id, -32602, "invalid params: 'id' is required")
 		return
 	}
-	req := &mbp.ForgetRequest{ID: engramID, Hard: false, Vault: vault}
+	// #807: honor the caller's explicit hard flag instead of silently
+	// downgrading it to a soft delete. Same authorization as any other
+	// mutating tool call — muninn_forget is already isMutatingTool-classified
+	// (blocked for observe-mode credentials) and the engine itself refuses
+	// EVERY Forget call, hard or soft, from an append-mode credential
+	// (SEC-15) — the identical bar gRPC's ForgetRequest.Hard already clears
+	// with no additional elevation, so this does not make MCP more
+	// permissive than the other transports that already reach hard delete.
+	hard, _ := args["hard"].(bool)
+	req := &mbp.ForgetRequest{ID: engramID, Hard: hard, Vault: vault}
 
 	// not_true_since: invalidate on the valid-time axis (stamp ValidUntil)
 	// instead of soft-deleting. The memory stays recoverable via as_of /

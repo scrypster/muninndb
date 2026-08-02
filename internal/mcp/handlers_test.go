@@ -1109,6 +1109,58 @@ func TestHandleForget_HappyPath(t *testing.T) {
 	}
 }
 
+// forgetSpyEngine records the ForgetRequest it received, so a test can
+// assert what the handler actually forwarded to the engine.
+type forgetSpyEngine struct {
+	fakeEngine
+	got *mbp.ForgetRequest
+}
+
+func (e *forgetSpyEngine) Forget(_ context.Context, req *mbp.ForgetRequest) (*mbp.ForgetResponse, error) {
+	e.got = req
+	return &mbp.ForgetResponse{OK: true}, nil
+}
+
+// #807: a caller passing hard=true must reach the engine as Hard: true, not
+// be silently downgraded to a soft delete. MCP's authorization for this is
+// unchanged from an ordinary mutating tool call (muninn_forget is already
+// isMutatingTool-classified and blocked for observe-mode credentials and
+// append-mode credentials at the engine layer, SEC-15) — the SAME
+// authorization level gRPC already applies to Hard via its ForgetRequest
+// wire field; this only stops MCP from overriding the caller's explicit
+// request.
+func TestHandleForget_HardTrue_ReachesEngineAsHardDelete(t *testing.T) {
+	eng := &forgetSpyEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_forget","arguments":{"vault":"default","id":"abc-123","hard":true}}}`
+	w := postRPC(t, srv, body)
+	content := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+
+	if ok, _ := content["ok"].(bool); !ok {
+		t.Errorf("expected ok=true in response, got %v", content["ok"])
+	}
+	if eng.got == nil {
+		t.Fatal("engine Forget was never called")
+	}
+	if !eng.got.Hard {
+		t.Errorf("ForgetRequest.Hard = false, want true — hard=true must not be silently downgraded to a soft delete")
+	}
+}
+
+func TestHandleForget_HardOmitted_DefaultsToSoftDelete(t *testing.T) {
+	eng := &forgetSpyEngine{}
+	srv := newTestServerWith(eng)
+	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_forget","arguments":{"vault":"default","id":"abc-123"}}}`
+	postRPC(t, srv, body)
+
+	if eng.got == nil {
+		t.Fatal("engine Forget was never called")
+	}
+	if eng.got.Hard {
+		t.Error("ForgetRequest.Hard = true, want false — omitting 'hard' must still default to soft delete")
+	}
+}
+
 func TestHandleForget_MissingID(t *testing.T) {
 	srv := newTestServer()
 	body := `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_forget","arguments":{"vault":"default"}}}`
@@ -3541,7 +3593,7 @@ func (e *recallAnnotateEngine) Activate(_ context.Context, _ *mbp.ActivateReques
 	}, nil
 }
 
-func (e *recallAnnotateEngine) GetAnnotations(_ context.Context, _, _ string) (*engine.AnnotationData, error) {
+func (e *recallAnnotateEngine) GetAnnotations(_ context.Context, _, _ string, _ *mbp.ActivateRequest) (*engine.AnnotationData, error) {
 	return e.annData, nil
 }
 

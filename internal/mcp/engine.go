@@ -196,10 +196,12 @@ type EngineInterface interface {
 	// when the engram was unleased or held by someone else.
 	Release(ctx context.Context, vault, id, owner string) (released bool, curOwner string, err error)
 
-	// GetAnnotations returns annotation metadata for a single engram.
+	// GetAnnotations returns annotation metadata for a single engram, gated by
+	// req's own visibility contract (#700) — pass the SAME request the
+	// recall call used so the annotation answers for the same caller view.
 	// Used to populate muninn_recall annotation objects when annotate=true.
 	// Returns a non-nil *engine.AnnotationData (possibly with empty fields) on success.
-	GetAnnotations(ctx context.Context, vault, id string) (*engine.AnnotationData, error)
+	GetAnnotations(ctx context.Context, vault, id string, req *mbp.ActivateRequest) (*engine.AnnotationData, error)
 
 	// RegisterVaultName registers a vault name in the engine's vault registry
 	// (idempotent 2-key write). Used by muninn_create_workflow_vault (RFC #597).
