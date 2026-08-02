@@ -195,7 +195,10 @@ pattern keys (dropped in #608 v2); per-key toolset attribute (the key layer is n
 presentation layer, #604); ambient push (negative result, #609); associative surprise
 (negative result, refuted at its premise after four measured passes — a focal's
 co-activation neighbourhood is its semantic neighbourhood, so 100% of real candidates sit at
-or above the non-obviousness ceiling).
+or above the non-obviousness ceiling); cross-domain discovery as designed (held at a
+multiple-comparisons ceiling, #706 — reopening requires a null with sub-1/T resolution or a
+gated test set, not a larger draw count); dream phases enabled by default (measured
+net-negative against no dream at all, #786 — the phase-GATING increment #785 remains open).
 
 **`tag_prefix` seeds candidates via a new ordered index, not the hash index (S1).**
 Superseded the earlier "stays a post-filter" call above: the 0x0C tag index is
@@ -359,6 +362,163 @@ across 16 nonsense probes with a declared chain grafted into the abstention corp
 adjacent-topic corpus with a positive control, and an exact-equality detector for
 normalization leakage — because a substitution that fires on the wrong topic is the
 silently-wrong class this project ranks worst, arriving at the score the RIGHT topic earned.
+
+### A permutation null's resolution is a design ceiling, not a tuning knob (cross-domain discover / #706, 2026-08-02)
+
+`muninn_discover` — read-only cross-domain connection discovery — was built RED-first with a
+four-assertion planted-vault proof and then **held, not merged**, when an adversarial refute
+of its STATISTICS found the significance inflated and the design unable to clear a valid gate
+at production scale. Recorded here because the plumbing is correct and should be reused, and
+because the reason it cannot ship is a constraint any successor has to clear rather than a
+number anyone can turn up.
+
+**The defect, traced to the line.** `circularShiftPValue` returned
+`(exceed+1)/(NullIters+1)`, but the null draws come from `deterministicShiftOffsets`, which
+walks `[1, T-1]` — a permutation space of exactly **T-1 members**. At T=365 both the
+production default N=500 and the proof's N=4000 yield the same **364 distinct rotations**;
+every extra draw recomputes a rotation already computed, producing a bit-identical statistic
+and no new information. Dividing by N+1 anyway reports a resolution the data cannot contain:
+`1/4001 ≈ 0.00025` against an exact floor of `1/365 ≈ 0.00274`, an **11x** overstatement
+(the production default's `1/501` is 1.4x). Fixed by deduplicating the offsets and dividing
+by the size of the distinct set — which also bounds the work at the size of the permutation
+space instead of growing linearly in a knob.
+
+**With the honest p, the planted signal fails.** At the proof's m=128 tests, BH q at rank 1
+is `p·m`: `1/365 · 128 = 0.35` against the reported `0.032`. It misses q≤0.05 by 7x. The
+proof's `nullItersForTest = 4000` had been chosen to push `1/(N+1)` under `0.05/128` — the
+inflation *was* the gate. Re-run at production defaults on the same planted vault, the signal
+never appears at all: `[lag7/N500] candidates=0`, `[lag1/N500] candidates=0`,
+`[lag7/N4000] candidates=0`; only `[lag1/N4000]`, a regime `handleDiscover` never uses,
+surfaces it. **Landing the p-value fix on the held branch turns its own proof RED, and that
+red is the truth** — `TestDiscover_PlantedSignalProof` reports
+`tested_pairs=128 dropped_fdr=128` with an empty top-3, and
+`TestDiscover_COG22_ReadOnly_FailOnMutate`'s deliberate non-vacuity guard ("a no-op read-only
+stub would also pass trivially") fires too, which is exactly the assertion earning its keep.
+Neither was softened.
+
+**The ceiling, which is the entry's whole point.** With a valid floor `max(1/T, 1/N)`, the
+largest m a *lone* true positive can survive under BH at q≤0.05 is `0.05/p_floor`: about **18**
+tests on a 365-day window, and about **25** even on a ten-year vault (where N=500 becomes the
+binding constraint rather than T). Production defaults test 200 entities per domain across 8
+lags — up to 320,000 tests. A handful of genuine signals **structurally cannot** clear FDR
+there. This is inherent to (day-bucket circular-shift null, ~T rotations) × (BH-FDR over all
+pairs); honest p makes the feature a no-op at scale, inflated p makes it a liar. **No draw
+count, support floor or q threshold moves it** — a successor must change the ceiling itself:
+enlarge the permutation space below 1/T resolution (finer buckets, block permutation), adopt a
+null with genuine sub-1/T resolution (analytic Poisson/binomial, a non-rotation bootstrap), or
+shrink m before correction (hierarchical/gated testing over a small pre-registered candidate
+set, or discover-on-half/confirm-on-half instead of BH over the full pair×lag grid). Its
+acceptance test must assert the planted signal survives **at `handleDiscover`'s real
+defaults**, never a bespoke regime.
+
+**Correct — do not rebuild.** Five pieces survive the refute intact and belong in any
+successor: (1) **COG-22 read-only structural enforcement** — the `discoverReader` interface
+plus `mutationCanaryStore` make a write unrepresentable rather than forbidden (principle #3);
+(2) the lift formula `k·T/(n_a·n_b)` computed on the **`EffectiveValidFrom` event clock**, not
+`CreatedAt`, with per-day presence dedup and cross-domain self-pair drop; (3) **BH-FDR over
+ALL tests**, never just the survivors, with correct step-up monotonicity; (4) the
+circular-shift-over-IID null choice and its anti-conservative unit tests — an IID shuffle
+destroys the autocorrelation instead of the alignment and makes a merely-bursty independent
+pair look significant; (5) the **non-gameable shuffle RED** — permuting the market domain's
+timestamps leaves every count identical and collapses the planted pair to lift≈1.1, p≈0.28.
+Plus the evidence contract (non-optional support/lift/p/q/marginals) and its strict
+no-causation language.
+
+**Principle: the resolution of a permutation test is a property of its permutation space, and
+no draw count buys resolution the space does not have. Before designing a multiple-comparison
+gate, compute `alpha / p_floor` — if that number is smaller than the number of tests you
+intend to run, the design is a no-op or a liar and no amount of tuning changes which.**
+
+### One vault finds bugs; two vaults tell you which finding generalizes (entity sparsity / #716, 2026-08-02)
+
+A measurement on a 3,296-memory production vault found that many memories carried **zero**
+extracted entities — **12.8%** entity coverage in the post-enum window — and concluded that
+*real vaults are entity-sparse*, that the tag layer is the actual organizing signal, and that
+entity-anchored features (entity-boost, entity-scoped recall, #712 version-clustering,
+cross-domain discovery) will under-fire on real data. #712 was re-anchored onto tags partly on
+the strength of that claim.
+
+**It did not survive a second vault.** @johanneshauer measured an independently-used
+production vault — 2,892 engrams, ~5 months, multi-user, external Ollama `bge-m3` (1024-dim)
+rather than the bundled bge-small — read-only against a backup snapshot, aggregate counts only:
+**95.1%** coverage whole-vault, 97.6% pre-enum, and **92.6%** in the *same calendar window on
+the same server version* that produced the 12.8%.
+
+So **"real vaults are entity-sparse" is not a property of real vaults. It is a property of how
+a vault is written.** The batch-vs-single control replicates the causal mechanism on both
+corpora: the batch-shaped path (which never received the strict entity-type enum) stays flat
+while the enum'd single-write path drops — **DiD +10.8pp** there against **+65.7pp** here, same
+sign, same shape, on a different embedder and a different domain. What differs is magnitude
+(−9.5pp against −63.4pp), and the magnitude tracks **how well the writing client already knew
+the entity-type vocabulary**: an operator-primed caller that had been told the 14 recognized
+types inline had almost nothing left for the enum to reject. Dose-response for exactly the
+mechanism the first vault identified — the enum's cost is a function of caller priming, not of
+the data — and substantially fixed upstream by #743, which demotes the enum to a description so
+an unknown type degrades to `other` instead of dropping the whole entity. A follow-up 144-run
+paired harness put a **lower bound** on the priming effect itself (+0.383 entities, +0.574
+relationships per write from one added operator paragraph, both CIs clear of zero) and could
+not build a genuinely unprimed arm, which is stated as a limitation rather than papered over.
+
+**What still stands, and is a standing design constraint.** The tag layer *is* a first-class
+organizing signal on some real vaults; entity-anchored features *do* under-fire where extraction
+never populated; a feature must not assume an entity-rich graph. `ExcludeTags` shipping
+per-vault is that principle already in practice. What does **not** stand is treating
+entity-sparsity as the steady state of real vaults, or as evidence against the entity anchor in
+general — the evidence base for that was a single vault written before #743 landed. It is worth
+re-measuring coverage on a post-#743 corpus before either anchor is called the right one. This
+binds #712, #789 (whose per-vault contradiction lexicons face the same question) and cross-domain
+discovery alike: each must work on both shapes, because both are real.
+
+**Principle: ONE vault is for finding bugs. TWO vaults are for knowing which finding
+generalizes.** A single-corpus measurement can establish that a mechanism is real (the DiD
+replicated) and simultaneously mislead about its population (the headline inverted, 12.8% to
+95.1%). This is CLAUDE.md #11 earning itself from the other direction: the rule against baking a
+sample vault's constant into the product is the same rule as the one against generalizing a
+sample vault's *shape* into a claim about everyone. A finding phrased as "real vaults are X" has
+a denominator of one until a second, differently-written corpus says otherwise — and the honest
+version of the original finding is "a vault written this way is X", which is both smaller and
+true.
+
+### Dream consolidation's phases did not beat doing nothing (#786 / #367, 2026-08-02)
+
+@5queezer ran the ablation that settles how dream ships: **50 Optuna trials (TPE sampler) over
+255 dream-phase combinations**, scored on PersonaChat + MultiWOZ, followed by a full
+vault-isolated 6-dataset run with three arms.
+
+| arm | composite |
+|---|---|
+| baseline — no dream at all | **0.489** |
+| all phases enabled | 0.374 |
+| Optuna-best subset (1,2,5) | 0.322 |
+
+**No phase combination in the study beat doing nothing.** Per-phase deltas: transitive inference
+**+0.022** and orient **+0.007** help, semantic dedup +0.006 is marginal; relevance decay
+**−0.011**, LLM adjudication **−0.011** and bidirectional stability **−0.014** are net-negative.
+Follow-up LocOMo/LongMemEval work (read-only evaluation, predeclared config, median-of-fifteen)
+came out neutral for conservative ERC, mean ≈ **+0.00048** — and the contributor's own reading is
+the right one: *"I would not sell this as a large LocOMo win,"* treat it as diagnostic
+infrastructure, not positive evidence.
+
+**This is why dream ships opt-in with conservative defaults rather than on by default**, and it
+belongs where people read *why* rather than in a closed thread. It sits beside ambient push
+(#609) and associative surprise (#751) as a measured negative that shaped the product —
+principle #10, and a particularly clean instance of it: the contributor published the table that
+killed his own feature's defaults, and volunteered the null follow-up rather than the arm that
+agreed with him.
+
+**The MECHANISM half stays OPEN.** This record closes the *claim*, not the work. **#785** —
+`MUNINN_DREAM_PHASES` selection with a conservative default phase set `{0,2,5}` (orient, semantic
+dedup, transitive inference), `parseDreamPhases` returning the safe set on empty OR invalid input
+with a WARN (fail-open-to-safe, principle #4), landed as **per-vault plasticity config** rather
+than a process-wide constant (principle #11 — a fixed phase set is exactly the kind of one-vault
+answer we do not ship as law) — is real unbuilt code and does not close with this entry. The
+measurement above is precisely what its defaults should encode: the three phases that were not
+measured harmful. Its preset obligations apply in full — web console cards and a
+`reflect.DeepEqual` pinning test (principle #6).
+
+**Principle: a negative result retires a claim, not the mechanism it was measured on. Record
+which half died — and say plainly, in the same entry, which half is still open — or the next
+reader will close both.**
 
 ---
 
