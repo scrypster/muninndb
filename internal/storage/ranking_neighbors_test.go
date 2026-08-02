@@ -92,37 +92,112 @@ func TestRelType_SymmetryCensus(t *testing.T) {
 }
 
 // declaredRelTypeConstants parses internal/storage/types.go and returns the
-// names of every constant declared with an explicit `RelType` type. Parsing
-// the source is the point: a hand-maintained mirror list is exactly the drift
-// the census exists to prevent.
+// names of every RelType constant it declares. Parsing the source is the
+// point: a hand-maintained mirror list is exactly the drift the census exists
+// to prevent.
 func declaredRelTypeConstants(t *testing.T) []string {
 	t.Helper()
+	return relTypeConstantNames(t, "types.go", nil)
+}
+
+// relTypeConstBlockAnchor is a member of the RelType const block used to
+// locate that block in the AST. Any member would do; RelSupports is picked
+// because it is the oldest and least likely to be renamed. If it ever is,
+// relTypeConstantNames fails loudly rather than censusing an empty set.
+const relTypeConstBlockAnchor = "RelSupports"
+
+// relTypeConstantNames is declaredRelTypeConstants with the source injected so
+// the parser itself can be tested against forms types.go does not currently
+// use. src is anything go/parser accepts (nil reads filename from disk).
+//
+// # What it recognises, and what it does not
+//
+// It collects EVERY name declared in the const block containing
+// relTypeConstBlockAnchor, regardless of how that name is typed, plus any
+// constant elsewhere in the file annotated with an explicit `RelType` type.
+// So all of these are censused:
+//
+//	RelX RelType = 0x0012   // annotated (the house style)
+//	RelX = RelType(0x0012)  // nil Type, CallExpr value
+//	RelX = 0x0012           // untyped, inheriting the block
+//	RelX                    // iota continuation
+//
+// Keying off the BLOCK rather than off `vs.Type` is deliberate. The census
+// exists to catch someone who adds a member without learning there was a table
+// to update (SEC-6/SEC-15) — and that person is exactly the one who will not
+// match the house style. A parser that only saw the annotated form let the
+// other three through with a green suite. Pinned by
+// TestRelTypeConstantNames_CatchesUnannotatedDeclarations.
+//
+// The residual, stated so the boundary is visible: a RelType member declared
+// WITHOUT the type annotation in some OTHER const block, or in another file,
+// is still invisible. Both are far off the path — the members live in one
+// block in types.go — but if that ever changes, move the anchor or widen this.
+func relTypeConstantNames(t *testing.T, filename string, src any) []string {
+	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "types.go", nil, 0)
+	f, err := parser.ParseFile(fset, filename, src, 0)
 	if err != nil {
-		t.Fatalf("parse types.go: %v", err)
+		t.Fatalf("parse %s: %v", filename, err)
 	}
-	var names []string
+
+	seen := make(map[string]bool)
+	add := func(name string) {
+		if name != "_" && !seen[name] {
+			seen[name] = true
+		}
+	}
+
+	anchored := false
 	for _, decl := range f.Decls {
 		gd, ok := decl.(*ast.GenDecl)
 		if !ok || gd.Tok != token.CONST {
 			continue
 		}
+
+		// Is this THE RelType block?
+		isAnchorBlock := false
 		for _, spec := range gd.Specs {
 			vs, ok := spec.(*ast.ValueSpec)
 			if !ok {
 				continue
 			}
-			ident, ok := vs.Type.(*ast.Ident)
-			if !ok || ident.Name != "RelType" {
-				continue
-			}
 			for _, n := range vs.Names {
-				if n.Name != "_" {
-					names = append(names, n.Name)
+				if n.Name == relTypeConstBlockAnchor {
+					isAnchorBlock = true
 				}
 			}
 		}
+		if isAnchorBlock {
+			anchored = true
+		}
+
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			typed := false
+			if ident, ok := vs.Type.(*ast.Ident); ok && ident.Name == "RelType" {
+				typed = true
+			}
+			if !isAnchorBlock && !typed {
+				continue
+			}
+			for _, n := range vs.Names {
+				add(n.Name)
+			}
+		}
+	}
+	if !anchored {
+		t.Fatalf("%s declares no const block containing %s — the census anchor moved or was "+
+			"renamed, so the parser, not the code, is what needs fixing",
+			filename, relTypeConstBlockAnchor)
+	}
+
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
 	}
 	sort.Strings(names)
 	return names
@@ -694,5 +769,112 @@ func TestRankingReverseEdges_DirectionalEdgeDoesNotConsumeCapSlot(t *testing.T) 
 	if len(got[hub]) != 1 {
 		t.Errorf("GetRankingNeighbors(hub) returned %d edges, want exactly 1 (the symmetric one): %v",
 			len(got[hub]), targetsOf(got[hub]))
+	}
+}
+
+// TestRankingReverseEdges_MissPathDoesNotAliasTheCache pins that BOTH cache
+// paths hand the caller a private slice, not the cache's backing array.
+//
+// The hit path copies (`append([]Association(nil), entry.assocs[:n]...)`); the
+// miss path used to cache `assocs` and then return that same slice, so the
+// caller held a live view of a cache entry for the rest of the 2s TTL. Nothing
+// in-tree mutated it — mergeRankingNeighbors allocates whenever len(rev) > 0,
+// and its one shortcut returns fwd — which is exactly what makes it a trap:
+// adding the symmetric shortcut `if len(fwd) == 0 { return rev }` is a
+// five-second edit that looks like an unambiguous win and silently publishes
+// the cache's array to phase4HebbianBoost and phase5Traverse.
+//
+// The invariant is defended at the source rather than by a comment on the
+// merge, because a caller cannot see the aliasing from where it stands.
+func TestRankingReverseEdges_MissPathDoesNotAliasTheCache(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("rev-cache-aliasing")
+
+	dst := NewULID()
+	srcA, srcB := NewULID(), NewULID()
+	mustWriteAssoc(t, store, ws, srcA, dst, 0.8, RelRelatesTo)
+	mustWriteAssoc(t, store, ws, srcB, dst, 0.4, RelRelatesTo)
+
+	// Cold: the MISS path scans, populates revAssocCache, and returns.
+	first, err := store.rankingReverseEdges(ctx, ws, []ULID{dst}, 10)
+	if err != nil {
+		t.Fatalf("rankingReverseEdges (cold): %v", err)
+	}
+	if len(first[dst]) != 2 {
+		t.Fatalf("cold read: want 2 inbound edges, got %d", len(first[dst]))
+	}
+
+	// A caller mutates what it was handed. That is legal: the returned slice
+	// is documented as the caller's.
+	first[dst][0].Weight = 42
+	first[dst][0].TargetID = ULID{}
+
+	// Warm: the HIT path must serve the edge as stored.
+	second, err := store.rankingReverseEdges(ctx, ws, []ULID{dst}, 10)
+	if err != nil {
+		t.Fatalf("rankingReverseEdges (warm): %v", err)
+	}
+	if len(second[dst]) != 2 {
+		t.Fatalf("warm read: want 2 inbound edges, got %d", len(second[dst]))
+	}
+	if second[dst][0].TargetID != srcA || second[dst][0].Weight != 0.8 {
+		t.Fatalf("the cache-miss path returned a slice aliasing the cached backing array: "+
+			"after a caller mutated its own copy, the cached head became %v at weight %v, "+
+			"want %v at 0.8. Copy on the miss path, not just the hit path.",
+			second[dst][0].TargetID, second[dst][0].Weight, srcA)
+	}
+}
+
+// TestRelTypeConstantNames_CatchesUnannotatedDeclarations guards the census's
+// own parser.
+//
+// TestRelType_SymmetryCensus is only as complete as the set of names it is
+// handed. The parser used to require `vs.Type` to be the identifier `RelType`,
+// so a member written in any other legal form — `RelMentions =
+// RelType(0x0012)`, a ValueSpec with a nil Type and a CallExpr value — was
+// invisible, and the census stayed green while an unclassified relation
+// shipped. Every constant in types.go today uses the annotated form, so that
+// gap was latent; but the census's whole premise (SEC-6/SEC-15) is catching
+// the person who adds a member without learning there was a table to update,
+// and that person is precisely the one who will not match the house style.
+//
+// The fixture is synthetic source, not types.go, because the point is to
+// exercise forms types.go does not contain.
+func TestRelTypeConstantNames_CatchesUnannotatedDeclarations(t *testing.T) {
+	const src = `package storage
+
+type RelType uint16
+
+const (
+	RelCoActivated RelType = 0x0000
+	RelSupports    RelType = 0x0001
+	// Not the house style. Nil Type, CallExpr value — invisible to a parser
+	// that keys off vs.Type.
+	RelMentions = RelType(0x0012)
+	// Untyped, inheriting the block. Also invisible to that parser.
+	RelWhispers = 0x0013
+	_           = 0x0014
+)
+
+// A second block, annotated: found by the type sweep, not the anchor.
+const RelStrayTyped RelType = 0x0015
+
+// Not a RelType at all, and in its own block: must NOT be collected.
+const someUnrelatedConst = 7
+`
+
+	got := relTypeConstantNames(t, "synthetic_types.go", src)
+	want := []string{
+		"RelCoActivated",
+		"RelMentions",
+		"RelStrayTyped",
+		"RelSupports",
+		"RelWhispers",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("relTypeConstantNames() = %v, want %v\n"+
+			"The census is only as complete as this list. A RelType member the parser "+
+			"cannot see is a member nobody is forced to classify (COG-31).", got, want)
 	}
 }

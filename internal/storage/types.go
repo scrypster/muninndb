@@ -246,7 +246,19 @@ const (
 	// It was the only RelType with no name, which is how a symmetric relation
 	// ended up stored under a directional convention nobody wrote down (#800).
 	// Its on-disk value is 0x0000, which is also what decodeAssocValue returns
-	// for a legacy all-zero value — that is pre-existing and unchanged.
+	// for a short value and for an all-zero 18-byte legacy value ("old encoder
+	// wrote blank values"). That COLLISION is pre-existing; its CONSEQUENCE is
+	// not. Before #800 relType 0 only fed profile.AllowsEdge; it now also
+	// decides reverse admissibility, so on a vault written by the old encoder a
+	// legacy blank-valued edge that was genuinely DIRECTIONAL is admitted into
+	// the reverse half and read backwards during ranking.
+	//
+	// Left as-is deliberately. The blast radius is identical to the deliberate
+	// >=0x8000 admission below — ranking and traversal only, with no writer and
+	// no direction-presenting surface downstream (COG-31) — so it can nudge an
+	// ordering but cannot manufacture a presented fact. Distinguishing "really
+	// co-activated" from "blank legacy" needs a value-format change and a
+	// migration, which is its own increment.
 	RelCoActivated      RelType = 0x0000
 	RelSupports         RelType = 0x0001
 	RelContradicts      RelType = 0x0002
@@ -275,6 +287,12 @@ const (
 // author never declared is what produces "the OLD version supersedes the NEW
 // one". This predicate is safe for a WRITER or a direction-presenting surface
 // to consult. See COG-31.
+//
+// It is the DECLARATION POINT for relation symmetry, not a hot-path predicate:
+// in production it is reached only through BidirectionalForRanking. Having no
+// direct production caller is the expected state, not dead code — a writer or
+// a presenter that ever needs the question answered must ask it here rather
+// than re-deciding locally, which is the mistake #800 was.
 func (r RelType) IsSymmetric() bool {
 	switch r {
 	case RelCoActivated, RelRelatesTo, RelContradicts:

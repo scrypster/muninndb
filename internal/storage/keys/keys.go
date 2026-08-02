@@ -369,6 +369,7 @@ func AssocFwdRangeStart(ws [8]byte) []byte {
 // would carry off the end and yield 0x03|00..00 — an upper bound below the
 // lower bound. Left as-is here rather than changed under an unrelated
 // increment; AssocRevRangeEnd uses PrefixUpperBound and has no such edge.
+// Filed as #819 so it is findable without reading this function.
 func AssocFwdRangeEnd(ws [8]byte) []byte {
 	end := make([]byte, 1+8)
 	end[0] = prefix.AssocFwd

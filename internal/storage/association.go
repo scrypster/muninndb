@@ -248,8 +248,16 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 // ("the OLD version supersedes the NEW one"). Use GetAssociations for those.
 //
 // The forward half delegates to GetAssociations, so it keeps the assocCache
-// and its 2s TTL byte-identically. The reverse half is uncached, exactly as
-// GetReverseAssociations already is; the merged list is never cached.
+// and its 2s TTL byte-identically. The reverse half has its own cache of the
+// same shape (revAssocCache, keyed on the DESTINATION); the merged list is
+// never cached.
+//
+// Error handling differs between the two halves, and the difference is not
+// intentional design: rankingReverseEdges checks iter.Error() and propagates,
+// while the forward half inherits GetAssociations' unchecked iterator, which
+// reports a truncated scan as a short-but-successful list (#808). Fixing that
+// belongs to #808, not here — but a caller reading this should not assume the
+// two halves fail alike.
 //
 // Both 0x03 and 0x04 order by weightComplement in the same key position, so
 // both streams arrive weight-DESCENDING and the cap is an exact top-N via a
@@ -291,8 +299,12 @@ func (ps *PebbleStore) GetRankingNeighbors(ctx context.Context, wsPrefix [8]byte
 //
 // Returned Associations carry the SOURCE engram in TargetID (the engram that
 // points at id) and are weight-descending, matching the forward stream.
-// Edges whose RelType is not BidirectionalForRanking are skipped. Not cached.
+// Edges whose RelType is not BidirectionalForRanking are skipped.
 // maxPerNode <= 0 means uncapped.
+//
+// Results are cached in revAssocCache, and BOTH the hit and the miss path
+// return a COPY: the returned slices never alias a cache entry's backing
+// array, so a caller may mutate or retain what it is given.
 func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte, ids []ULID, maxPerNode int) (map[ULID][]Association, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -403,10 +415,20 @@ func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte
 			return nil, fmt.Errorf("ranking reverse scan: %w", err)
 		}
 		ps.revAssocCache.Add(assocCacheKey(wsPrefix, id), &revAssocCacheEntry{assocs: assocs, truncated: truncated})
-		if maxPerNode > 0 && len(assocs) > maxPerNode {
-			assocs = assocs[:maxPerNode]
+		n := len(assocs)
+		if maxPerNode > 0 && n > maxPerNode {
+			n = maxPerNode
 		}
-		out[id] = assocs
+		// COPY. `assocs` is now the cache entry's backing array, and the
+		// caller owns what it is handed — the hit path above copies for the
+		// same reason. Returning `assocs` here would publish the cache's array
+		// for the rest of the 2s TTL; it is safe only while no caller mutates
+		// and no caller forwards it (mergeRankingNeighbors allocates whenever
+		// len(rev) > 0, and its one shortcut returns fwd). Defending that at
+		// the merge instead would put the invariant somewhere the caller
+		// cannot see it. Pinned by
+		// TestRankingReverseEdges_MissPathDoesNotAliasTheCache.
+		out[id] = append([]Association(nil), assocs[:n]...)
 	}
 	return out, nil
 }

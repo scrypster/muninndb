@@ -1356,7 +1356,19 @@ func (e *ActivationEngine) phase4HebbianBoost(ctx context.Context, ws [8]byte, v
 	// strength from one endpoint and ZERO from the other (#800).
 	assocMap, err := e.store.GetRankingNeighbors(ctx, ws, ids, 20)
 	if err != nil {
-		return
+		// Degrade loudly but gracefully (principle #2). A failure in the union
+		// read — the reverse half above all, which #800 added as a second
+		// failure source — must not delete the forward half's contribution
+		// too; a bare `return` here zeroed the ENTIRE Hebbian boost silently.
+		// Pinned by TestHebbianBoost_UnionReadFailureFallsBackToForward.
+		slog.Warn("activation: hebbian ranking-neighbor read failed, falling back to forward-only",
+			"vault", vaultID, "candidates", len(ids), "error", err)
+		assocMap, err = e.store.GetAssociations(ctx, ws, ids, 20)
+		if err != nil {
+			slog.Warn("activation: hebbian association read failed, boost skipped",
+				"vault", vaultID, "candidates", len(ids), "error", err)
+			return
+		}
 	}
 
 	for i := range candidates {
@@ -1599,8 +1611,14 @@ func (e *ActivationEngine) phase5Traverse(
 		// One batched Pebble call for the entire level.
 		// COG-31: symmetric edges are reachable from either endpoint here, so
 		// BFS no longer depends on which direction the writer happened to pick.
-		// Directional relations (supersedes, depends_on, ...) stay forward-only,
-		// so a hop still means what the profile says it means.
+		// Directional relations (supersedes, depends_on, ...) stay forward-only
+		// — with two deliberate exceptions, so a hop is "the profile allows
+		// this relation" and NOT "this relation points this way": the
+		// user-defined range (>=0x8000, admitted under principle #4) and legacy
+		// blank-valued edges, which decode to relType 0 and are indistinguishable
+		// from RelCoActivated (see RelCoActivated in storage/types.go). Both are
+		// bounded to ranking and traversal; neither reaches a writer or a
+		// direction-presenting surface.
 		assocMap, err := e.store.GetRankingNeighbors(ctx, ws, ids, maxEdgesPerNode)
 		if err != nil {
 			slog.Warn("activation: bfs associations error, truncating traversal",

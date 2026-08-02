@@ -62,6 +62,9 @@ type PebbleStore struct {
 	// The 0x04 mirror of assocCache: the ranking-only reverse adjacency read by
 	// GetRankingNeighbors (COG-31). Same size, same 2s TTL, invalidated at the
 	// same mutation sites as assocCache but keyed on the DESTINATION endpoint.
+	// Three assoc-mutating sites evict NEITHER cache (DeleteEngram,
+	// DecayAssocWeights, pebbleStoreBatch.WriteAssociation) — pre-existing and
+	// symmetric across both, filed as #818.
 	//
 	// This exists for a measured reason. Without it, phase4HebbianBoost paid a
 	// full uncached reverse scan on EVERY recall while its forward half was
@@ -190,7 +193,10 @@ type revAssocCacheEntry struct {
 //	symmetricInbound1000/cold            15 µs
 //	symmetricInbound5000/cold            14 µs    (flat — the cap binds)
 //
-// ~106x for one id, returning zero edges. The shape is realistic: a project or
+// ~106x for one id, returning zero edges — one run, and only the order of
+// magnitude and the linear-in-degree shape reproduce: re-runs here and on an
+// independent machine put the degree-5,000 figure anywhere from 389 to 493 µs.
+// Do not quote these to three digits. The shape is realistic: a project or
 // spec node that every memory points at with RelBelongsToProject or
 // RelReferences. phase5Traverse pays it at every BFS level whenever
 // HopDepth > 0.

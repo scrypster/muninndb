@@ -2,6 +2,7 @@ package activation
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -249,5 +250,84 @@ func TestPhase5Traverse_ReachesSymmetricEdgeFromEitherEndpoint(t *testing.T) {
 	if !found(fromTarget, older) {
 		t.Fatalf("#800: BFS from the edge TARGET did not reach the source — a symmetric "+
 			"edge is only walkable in the direction the writer picked (%d discovered)", len(fromTarget))
+	}
+}
+
+// rankingNeighborsFailingStore is a real store whose UNION read always fails,
+// standing in for a reverse (0x04) iterator error. The forward half is
+// untouched and still answers.
+type rankingNeighborsFailingStore struct {
+	ActivationStore
+	calls int
+}
+
+func (s *rankingNeighborsFailingStore) GetRankingNeighbors(
+	_ context.Context, _ [8]byte, _ []storage.ULID, _ int,
+) (map[storage.ULID][]storage.Association, error) {
+	s.calls++
+	return nil, errors.New("synthetic reverse-scan failure")
+}
+
+// TestHebbianBoost_UnionReadFailureFallsBackToForward: a failure in the COG-31
+// union must not zero the Hebbian boost that the FORWARD half would still have
+// produced.
+//
+// #800 added a second failure source to a read whose error was already being
+// swallowed by a bare `return` — so one bad reverse scan silently deleted the
+// entire Hebbian contribution to ranking, including the forward half that
+// succeeded, with no log line to say so. Principle #2: degrade loudly but
+// gracefully. phase5Traverse already warns on its own read failure; this is
+// the same obligation on the other consumer.
+func TestHebbianBoost_UnionReadFailureFallsBackToForward(t *testing.T) {
+	e, store := newRealStoreEngine(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("symmetry")
+	const vaultID uint32 = 7
+
+	older, newer := olderNewer()
+	if err := store.WriteAssociation(ctx, ws, older, newer, &storage.Association{
+		TargetID: newer, Weight: 0.01, RelType: storage.RelCoActivated,
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+	if err := store.UpdateAssocWeight(ctx, ws, older, newer, 0.5, 1); err != nil {
+		t.Fatalf("UpdateAssocWeight: %v", err)
+	}
+
+	// Control arm: with a healthy union both endpoints score (that is #800).
+	e.assocLog.Record(LogEntry{
+		VaultID: vaultID, At: time.Now(), EngramIDs: []storage.ULID{older, newer},
+	})
+	healthy := []fusedCandidate{{id: older, rrfScore: 0.5}, {id: newer, rrfScore: 0.5}}
+	e.phase4HebbianBoost(ctx, ws, vaultID, healthy)
+	if healthy[0].hebbianBoost <= 0 || healthy[1].hebbianBoost <= 0 {
+		t.Fatalf("UNDERPOWERED, not a pass: the control arm did not score "+
+			"(forward %v, reverse %v) — the fixture, not the fallback, is broken",
+			healthy[0].hebbianBoost, healthy[1].hebbianBoost)
+	}
+
+	// Failure arm: the union read errors on every call.
+	failing := &rankingNeighborsFailingStore{ActivationStore: store}
+	e.store = failing
+	degraded := []fusedCandidate{{id: older, rrfScore: 0.5}, {id: newer, rrfScore: 0.5}}
+	e.phase4HebbianBoost(ctx, ws, vaultID, degraded)
+
+	if failing.calls == 0 {
+		t.Fatal("UNDERPOWERED: the failing store was never consulted")
+	}
+	if degraded[0].hebbianBoost <= 0 {
+		t.Fatalf("a reverse-scan failure zeroed the FORWARD Hebbian boost too: "+
+			"forward boost = %v, want the same %v the healthy arm produced. "+
+			"Fall back to GetAssociations and warn (principle #2), do not return.",
+			degraded[0].hebbianBoost, healthy[0].hebbianBoost)
+	}
+	if degraded[0].hebbianBoost != healthy[0].hebbianBoost {
+		t.Errorf("the forward-only fallback did not reproduce the forward boost: got %v, want %v",
+			degraded[0].hebbianBoost, healthy[0].hebbianBoost)
+	}
+	// The reverse half is genuinely unavailable — degraded, not fabricated.
+	if degraded[1].hebbianBoost != 0 {
+		t.Errorf("the reverse arm scored %v under a failed reverse scan, want 0",
+			degraded[1].hebbianBoost)
 	}
 }

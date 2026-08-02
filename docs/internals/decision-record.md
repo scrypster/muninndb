@@ -407,7 +407,11 @@ at 10 edges/node, a 50-candidate read cost ~11µs forward-only and ~152µs for t
 which moved whole-recall p50 15-20% — past the increment's own pre-committed kill
 threshold. Giving the reverse half a cache of the same shape, and replacing a per-candidate
 dedup map with a linear scan over a list bounded by `maxPerNode`, brought the union to
-~41µs and whole-recall p50 to +1.7% (paired median, 12 rounds). **Principle: "symmetric
+~41µs and whole-recall p50 to +1.7% (paired median, 12 rounds of the increment's own
+harness). That +1.7% and the +1.3% in the entry below are two DIFFERENT measurements of
+the same quantity by two independent harnesses at different sample sizes, not a
+contradiction and not a correction: they agree that the union costs whole-recall p50 one
+to two percent, and the entry below is the one that carries the denominator. **Principle: "symmetric
 cost to an adjacent operation" is a claim about the adjacent operation's implementation,
 not its signature — and a per-item map allocation on a path that runs 50 times per query
 is usually the largest line in the profile.**
@@ -415,7 +419,8 @@ is usually the largest line in the profile.**
 **A latency budget is only meaningful with its denominator attached (#800).** The COG-31
 increment pre-committed a whole-recall p50 kill threshold expressed against a ~0.5 ms
 figure. Re-measured end to end through `Engine.Activate` with the real embedder — 60
-recalls per arm, 4 runs per commit — cold p50 moved 26.14 ms → 26.49 ms (+1.3%, inside the
+recalls per arm, 4 runs per commit, an independent re-measure of the +1.7% above rather
+than a revision of it — cold p50 moved 26.14 ms → 26.49 ms (+1.3%, inside the
 run-to-run spread), and p99 on IDENTICAL code varied 47.5–261.6 ms across four runs, so p99
 is not a usable gate at this sample size. The gate is cleared, but the number that cleared
 it is **embedder-dominated**: whole-recall p50 is ~26 ms, not ~0.5 ms. A storage-layer cost
@@ -441,9 +446,12 @@ per-cache, and the pin belongs on both sides.
 **`revAssocScanCap` bounds accepted edges, not keys scanned — deliberately (#800).** An
 inbound edge failing `BidirectionalForRanking` is skipped without consuming a cap slot, so
 one cold `GetRankingNeighbors` for a hub is O(inbound degree): measured 4.5 µs at degree 0,
-65 µs at 1,000 and 476 µs at 5,000 directional inbound edges, returning ZERO edges for that
-cost, against 3.5 µs for the pre-change forward-only read; the symmetric arm stays flat
-(~14 µs) because there the cap binds. Turning it into a scanned-key budget was considered
+65 µs at 1,000 and 476 µs at 5,000 directional inbound edges, returning ZERO edges for
+that cost, against 3.5 µs for the pre-change forward-only read; the symmetric arm stays flat
+(~14 µs) because there the cap binds. Those are one run: re-runs on this machine and on
+an independent one put the degree-5,000 figure between 389 and 493 µs (~80-110x the
+degree-0 cost). The order of magnitude and the linear-in-degree shape are what reproduce;
+the third digit does not, and nothing here should be quoted to three digits. Turning it into a scanned-key budget was considered
 and rejected: reverse keys arrive weight-descending and the two edge classes do not share a
 weight distribution — explicit directional relations are written once at a high fixed
 confidence weight, while the `RelCoActivated` edges this union exists to surface start low
