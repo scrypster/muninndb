@@ -29,9 +29,26 @@ import (
 func TestIsUnsetTimestamp_IsLocationIndependent(t *testing.T) {
 	floor := time.Date(MinPlausibleTimestampYear, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	// Walk the whole band the disagreement could live in: every hour of the
-	// first UTC day of the floor year, in every whole-hour zone offset.
-	for hour := 0; hour < 24; hour++ {
+	// Walk the whole band the disagreement could live in, on BOTH sides of the
+	// floor: every hour of the last UTC day BEFORE the floor year and the first
+	// UTC day of it, in every whole-hour zone offset.
+	//
+	// The negative half is load-bearing and was missing. With `hour := 0` the
+	// generated instants are all >= floor, so admittedByFloor is always true and
+	// the second assertion below is structurally dead — it can never execute its
+	// error. Measured: loosening IsUnsetTimestamp to `< MinPlausibleTimestampYear-1`
+	// breaks direction 2 alone, and the 0..23 loop still passed.
+	//
+	// Direction 2 is the half that says WHY the comparison is .UTC() and not
+	// merely "some fixed location that isn't the value's own". Its witness is the
+	// mirror of the one in the doc comment: 1999-12-31T20:00:00Z rendered in
+	// UTC+14 has a LOCAL Year() of 2000, so the pre-fix `t.Year()` read it as SET
+	// while the floor refuses the instant outright — a value nothing may store,
+	// treated as a real timestamp. Positive-offset zones produce that half;
+	// negative-offset zones produce the first half. Only a UTC comparison closes
+	// both, which is what makes IsUnsetTimestamp the floor's exact complement
+	// rather than an approximation with a bias in one direction.
+	for hour := -24; hour < 24; hour++ {
 		instant := floor.Add(time.Duration(hour) * time.Hour)
 		for offset := -12; offset <= 14; offset++ {
 			loc := time.FixedZone("test", offset*3600)
@@ -62,5 +79,23 @@ func TestIsUnsetTimestamp_IsLocationIndependent(t *testing.T) {
 	if IsUnsetTimestamp(v) {
 		t.Errorf("IsUnsetTimestamp(%s) = true; its local Year() is %d but its UTC year is %d and the "+
 			"floor admits it", v.Format(time.RFC3339), v.Year(), v.UTC().Year())
+	}
+
+	// The mirror case, direction 2, asserted directly for the same reason: the
+	// loop above proves it, but the loop is now 48x27 iterations and this is the
+	// one that has to be legible. 1999-12-31T20:00:00Z in UTC+14 reports a local
+	// Year() of 2000, so the pre-fix t.Year() called it SET — while the floor
+	// refuses the instant. A value the floor will not store, read as a real
+	// timestamp: the exact complement failing in the other direction.
+	w := floor.Add(-4 * time.Hour).In(time.FixedZone("positive", 14*3600))
+	if w.Year() != MinPlausibleTimestampYear {
+		t.Fatalf("mirror fixture no longer exhibits the local-year skew (Year()=%d); the case is vacuous", w.Year())
+	}
+	if !w.Before(floor) {
+		t.Fatalf("mirror fixture is no longer refused by the floor; the case is vacuous")
+	}
+	if !IsUnsetTimestamp(w) {
+		t.Errorf("IsUnsetTimestamp(%s) = false; its local Year() is %d but its UTC year is %d and the "+
+			"floor REFUSES it, so it must read as unset", w.Format(time.RFC3339), w.Year(), w.UTC().Year())
 	}
 }

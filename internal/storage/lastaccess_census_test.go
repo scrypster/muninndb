@@ -41,9 +41,17 @@ import (
 // "LastAccess-tainted" is a monotone intra-function dataflow: a value is
 // tainted if it is a `.LastAccess` selector, or is assigned from an expression
 // containing one (transitively). That is what lets it see through the local
-// copy every guarded site uses — `lastAccess := eng.LastAccess`,
-// `lastAccess := time.Unix(0, item.LastAccess)` — which a selector-only matcher
-// would miss entirely, reporting zero sites and looking green.
+// copy MOST guarded sites use — `lastAccess := eng.LastAccess`,
+// `lastAccess := time.Unix(0, item.LastAccess)`. Five of the six live sites
+// have that shape; DecayWorker.processBatch computes `now.Sub(c.LastAccess)`
+// off a direct selector and needs no dataflow at all, as does the
+// working.Manager.GC exemption. So a selector-only matcher would NOT report
+// zero and look green — it would report exactly those two and lose the other
+// five, which is why the vacuity check below cannot be a count and is instead
+// TestLastAccessCensusMatcherSeesLaunderedCopies: a fixture-driven unit test of
+// the matcher itself. (An earlier revision of this comment, and the commit
+// message that carried it, both claimed "EVERY guarded site" and "zero sites";
+// both were false, and the guard designed on them was vacuous.)
 //
 // # What it does NOT catch — the honest boundary
 //
@@ -51,6 +59,13 @@ import (
 //     computes elapsed time from it is invisible here; the sentinel would have
 //     to be laundered through a call. No such helper exists today (the census
 //     would have to grow a call graph to see one).
+//   - Taint that leaves the function through a NON-ROOTED assignment target.
+//     `h.la = m.LastAccess` taints `h` (see rootIdent), so the intra-function
+//     sink is caught — but the taint is recorded against the local root name
+//     only. Storing into a value that outlives the function (a package-level
+//     var, a field of a pointer receiver read back in another method) and
+//     computing elapsed time THERE is inter-function taint by another route,
+//     and is not seen.
 //   - Guards that are LEXICALLY earlier but do not actually dominate the sink —
 //     a guard inside an unrelated `if` branch satisfies this check. It pins that
 //     someone thought about the sentinel at that site, not that the branch is
@@ -145,10 +160,19 @@ func TestLastAccessElapsedCensus(t *testing.T) {
 		}
 	}
 
+	// Vacuity floor, and its honest limit. This fires only if the FIELD ITSELF
+	// disappears — renamed, or the walk stopped finding files. It does NOT
+	// detect a broken matcher: two live sites (DecayWorker.processBatch and the
+	// working.Manager.GC exemption) compute elapsed time off a direct
+	// `.LastAccess` selector, so total is >= 2 even with the taint analysis
+	// deleted outright. That was measured, not assumed: neutering
+	// taintedLastAccessIdents to return an empty map lost five of the six sites
+	// and this check still passed. The matcher's own health is pinned by
+	// TestLastAccessCensusMatcherSeesLaunderedCopies instead.
 	total := len(guarded) + len(unguarded) + len(seenExempt)
 	if total == 0 {
-		t.Fatalf("census found NO elapsed-from-LastAccess computations in %d files. Either the "+
-			"field was renamed or the matcher broke; either way this test is now vacuous. "+
+		t.Fatalf("census found NO elapsed-from-LastAccess computations in %d files. The field was "+
+			"renamed, or the walk found nothing; either way this test is now vacuous. "+
 			"Re-point it or delete it deliberately.", scanned)
 	}
 
@@ -187,6 +211,174 @@ func TestLastAccessElapsedCensus(t *testing.T) {
 	}
 	t.Logf("census scanned %d non-test files; %d guarded site(s), %d exempt:\n  %s",
 		scanned, len(guarded), len(seenExempt), strings.Join(g, "\n  "))
+}
+
+// censusMatcherFixture is the source the census's own matcher is tested
+// against. It is parsed, never compiled or linked: nothing in it is a real
+// type, and the names are invented.
+//
+// Every function is one shape the matcher must classify. The shapes are not
+// hypothetical — `localCopy` is what five of the six live sites look like,
+// `directSelector` is DecayWorker.processBatch, and the four launder shapes are
+// the ones a bare-`*ast.Ident` assignment target silently dropped.
+const censusMatcherFixture = `package fixture
+
+import "time"
+
+type record struct {
+	LastAccess time.Time
+	CreatedAt  time.Time
+}
+
+type holder struct{ la time.Time }
+
+// --- shapes that MUST be seen ---
+
+func localCopy(rec record, now time.Time) time.Duration {
+	lastAccess := rec.LastAccess
+	return now.Sub(lastAccess)
+}
+
+func localCopyGuarded(rec record, now time.Time) time.Duration {
+	lastAccess := rec.LastAccess
+	if IsUnsetTimestamp(lastAccess) {
+		lastAccess = now
+	}
+	return now.Sub(lastAccess)
+}
+
+func transitiveCopy(rec record) time.Duration {
+	a := rec.LastAccess
+	b := a
+	return time.Since(b)
+}
+
+func copyThroughCall(rec record) time.Duration {
+	la := time.Unix(0, rec.LastAccess.UnixNano())
+	return time.Since(la)
+}
+
+func directSelector(rec record, now time.Time) time.Duration {
+	return now.Sub(rec.LastAccess)
+}
+
+func structFieldLaunder(rec record, h *holder) time.Duration {
+	h.la = rec.LastAccess
+	return time.Since(h.la)
+}
+
+func sliceElemLaunder(rec record, buf []time.Time) time.Duration {
+	buf[0] = rec.LastAccess
+	return time.Since(buf[0])
+}
+
+func mapLaunder(rec record, mm map[string]time.Time) time.Duration {
+	mm["k"] = rec.LastAccess
+	return time.Since(mm["k"])
+}
+
+func pointerLaunder(rec record, p *time.Time) time.Duration {
+	*p = rec.LastAccess
+	return time.Since(*p)
+}
+
+// --- shapes that must NOT be seen, or must not count as guarded ---
+
+func unrelatedField(rec record) time.Duration {
+	c := rec.CreatedAt
+	return time.Since(c)
+}
+
+func guardOnADifferentValue(rec record, now time.Time) time.Duration {
+	lastAccess := rec.LastAccess
+	created := rec.CreatedAt
+	if IsUnsetTimestamp(created) {
+		created = now
+	}
+	return now.Sub(lastAccess)
+}
+`
+
+// TestLastAccessCensusMatcherSeesLaunderedCopies is the census's self-check.
+//
+// TestLastAccessElapsedCensus cannot vouch for its own matcher. Its vacuity
+// guard is `total == 0`, and two live sites reach the sink through a bare
+// `.LastAccess` selector with no dataflow involved at all — so deleting the
+// taint analysis entirely leaves total == 2 and the census reports PASS while
+// having lost five of its six sites. That was demonstrated, not theorised.
+//
+// This test pins the matcher directly instead: a fixture with one function per
+// shape, run through the same taintedLastAccessIdents / elapsedFromLastAccess /
+// lastAccessGuardPositions the census uses. Neuter any of the three and this
+// fails with the specific shape that stopped being seen.
+func TestLastAccessCensusMatcherSeesLaunderedCopies(t *testing.T) {
+	cases := map[string]struct {
+		sinks   int
+		guarded bool
+		why     string
+	}{
+		"localCopy":              {sinks: 1, guarded: false, why: "the local-copy shape five of the six live sites use"},
+		"localCopyGuarded":       {sinks: 1, guarded: true, why: "the guarded local copy — the IsUnsetTimestamp call must be recognised on the tainted ident"},
+		"transitiveCopy":         {sinks: 1, guarded: false, why: "taint must survive a second hop (a := x.LastAccess; b := a)"},
+		"copyThroughCall":        {sinks: 1, guarded: false, why: "taint must survive being rebuilt through a call (time.Unix(0, ...))"},
+		"directSelector":         {sinks: 1, guarded: false, why: "the no-dataflow shape (DecayWorker.processBatch)"},
+		"structFieldLaunder":     {sinks: 1, guarded: false, why: "h.la = rec.LastAccess must taint h"},
+		"sliceElemLaunder":       {sinks: 1, guarded: false, why: "buf[0] = rec.LastAccess must taint buf"},
+		"mapLaunder":             {sinks: 1, guarded: false, why: `mm["k"] = rec.LastAccess must taint mm`},
+		"pointerLaunder":         {sinks: 1, guarded: false, why: "*p = rec.LastAccess must taint p"},
+		"unrelatedField":         {sinks: 0, guarded: false, why: "CreatedAt is not LastAccess — a matcher that flags this flags everything"},
+		"guardOnADifferentValue": {sinks: 1, guarded: false, why: "an IsUnsetTimestamp call on an UNTAINTED value must not count as this site's guard"},
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "censusMatcherFixture.go", censusMatcherFixture, 0)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		want, ok := cases[fn.Name.Name]
+		if !ok {
+			t.Errorf("fixture function %q has no expectation — add one, or the fixture is dead weight", fn.Name.Name)
+			continue
+		}
+		seen[fn.Name.Name] = true
+
+		tainted := taintedLastAccessIdents(fn.Body)
+		guards := lastAccessGuardPositions(fn.Body, tainted)
+		sinks := elapsedFromLastAccess(fn.Body, tainted)
+
+		if len(sinks) != want.sinks {
+			var got []string
+			for _, s := range sinks {
+				got = append(got, exprString(fset, s))
+			}
+			t.Errorf("%s(): matcher found %d elapsed-from-LastAccess site(s), want %d — %s\n  found: %v\n"+
+				"The census walks the module with this same matcher. A shape it stops seeing vanishes "+
+				"from the census SILENTLY: the census still passes, having lost a guard site.",
+				fn.Name.Name, len(sinks), want.sinks, want.why, got)
+			continue
+		}
+		if want.sinks == 0 {
+			continue
+		}
+		gotGuarded := guardedBefore(guards, sinks[0].Pos())
+		if gotGuarded != want.guarded {
+			t.Errorf("%s(): site guarded=%v, want %v — %s", fn.Name.Name, gotGuarded, want.guarded, want.why)
+		}
+	}
+
+	for name := range cases {
+		if !seen[name] {
+			t.Errorf("expectation %q has no function in censusMatcherFixture — it was renamed or dropped, "+
+				"so that shape is no longer being checked", name)
+		}
+	}
 }
 
 // censusExemptions maps "<relpath>:<func>" to the reason an elapsed-time
@@ -257,8 +449,8 @@ func taintedLastAccessIdents(body *ast.BlockStmt) map[string]bool {
 	for round := 0; round < 8; round++ {
 		grew := false
 		mark := func(lhs ast.Expr, rhs ast.Expr) {
-			id, ok := lhs.(*ast.Ident)
-			if !ok || id.Name == "_" || tainted[id.Name] {
+			id := rootIdent(lhs)
+			if id == nil || id.Name == "_" || tainted[id.Name] {
 				return
 			}
 			if rhs != nil && containsTainted(rhs, tainted) {
@@ -294,6 +486,43 @@ func taintedLastAccessIdents(body *ast.BlockStmt) map[string]bool {
 		}
 	}
 	return tainted
+}
+
+// rootIdent walks an assignment target down to the identifier it is rooted at:
+//
+//	h.la      -> h        (struct field)
+//	buf[0]    -> buf      (slice/array element)
+//	mm["k"]   -> mm       (map entry)
+//	*p        -> p        (pointer indirection)
+//	(x)       -> x
+//
+// It returns nil for a target with no identifier at its root.
+//
+// Tainting the ROOT is deliberately conservative. `h.la = m.LastAccess` taints
+// the whole of `h`, so a later `time.Since(h.anythingElse)` in the same
+// function is flagged too. That over-taints, which can only ever produce a
+// false ALARM at the census — noisy, and resolved by an exemption with a
+// stated reason. Matching only a bare `*ast.Ident` target, which is what this
+// did before, under-taints: it launders the sentinel through all four shapes
+// above and reports the sink as absent. The census exists because it beats a
+// grep, and `grep LastAccess` WOULD have found `h.la = m.LastAccess`.
+func rootIdent(e ast.Expr) *ast.Ident {
+	for {
+		switch n := e.(type) {
+		case *ast.Ident:
+			return n
+		case *ast.ParenExpr:
+			e = n.X
+		case *ast.SelectorExpr:
+			e = n.X
+		case *ast.IndexExpr:
+			e = n.X
+		case *ast.StarExpr:
+			e = n.X
+		default:
+			return nil
+		}
+	}
 }
 
 // lastAccessGuardPositions returns the positions of every IsUnsetTimestamp call

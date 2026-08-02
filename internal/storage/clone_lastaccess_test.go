@@ -97,11 +97,21 @@ func TestCloneVaultData_NeverAccessedFollowsWriteEngramConvention(t *testing.T) 
 	}
 }
 
-// rmwWriters is the complete set of writers that encode a 0x01 engram record
-// WITHOUT going through normalizeEngramTimes. It was derived by walking all ten
-// erf.Encode/EncodeV2 call sites in package storage: four normalize
-// (WriteEngram, WriteEngramBatch, BatchWriter.WriteEngram, CloneVaultData) and
-// these six read-modify-write. There is no eleventh.
+// rmwWriters drives every ENTRY POINT into the set of writers that encode a
+// 0x01 engram record WITHOUT going through normalizeEngramTimes. The writer set
+// was derived by walking all ten erf.Encode/EncodeV2 call sites in package
+// storage: four normalize (WriteEngram, WriteEngramBatch, BatchWriter.WriteEngram,
+// CloneVaultData) and six read-modify-write. There is no eleventh.
+//
+// The table has SEVEN entries for those six writers, and the extra one is the
+// point rather than a miscount: pebbleStoreBatch.mutateEngram is ONE encoder
+// reached through TWO exported methods, UpdateEngramState and SupersedeEngram,
+// which set different fields on the way in. Driving one of them would leave the
+// other's argument handling unexercised, so both are driven — the same reason
+// this table exists at all. timestamps.go's SCOPE paragraph states the writer
+// set the same way ("mutateEngram (backing UpdateEngramState and
+// SupersedeEngram)"); this comment previously said "these six" over seven rows
+// and left a reader to reconcile it.
 //
 // Each entry mutates ONE field of an existing record and re-encodes. Each is
 // exercised against its own freshly-planted sentinel record by
