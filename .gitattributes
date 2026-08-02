@@ -1,0 +1,10 @@
+# Force a textual diff for the tooling scripts.
+#
+# git decides binary-vs-text by looking for a NUL byte in the blob, and the pre-#825
+# memory-drain.mjs delimited its op_id hash fields with literal NULs. The result: `git diff`
+# reported a JavaScript source file as *binary* and showed no diff for it — through a review,
+# a merge, and a public push. An invisible byte silently removed a file from review.
+#
+# The NULs are gone, but this keeps the class from recurring: any .mjs in the tree diffs as
+# text no matter what lands inside it.
+*.mjs diff text

@@ -99,6 +99,14 @@ sdk/php/vendor/
 .claude/memory-proposals.jsonl
 .claude/memory-proposals.jsonl.tmp
 .claude/memory-proposals.drained.jsonl
+.claude/memory-proposals.deadletter.jsonl
+.claude/memory-proposals.lock
+# Drain receipts. Liveness evidence, not content — but they carry local paths and counts
+# for a specific machine, and the receipt log grows, so they stay local too.
+.claude/memory-drain-receipt.json
+.claude/memory-drain-receipt.json.tmp
+.claude/memory-drain-receipts.jsonl
+.claude/memory-drain-receipts.jsonl.tmp
 
 # Design records that cannot be published: ones naming real people, client or
 # tenant data, commercial terms, or competitive strategy. Everything else in
