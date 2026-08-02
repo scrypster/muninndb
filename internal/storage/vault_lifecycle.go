@@ -137,6 +137,11 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 			ps.assocCache.Remove(k)
 		}
 	}
+	for _, k := range ps.revAssocCache.Keys() {
+		if [8]byte(k[:8]) == ws {
+			ps.revAssocCache.Remove(k)
+		}
+	}
 
 	// metaCache: keys are [16]byte (engramID only — not vault-scoped).
 	// We cannot filter by vault, so clear all entries. The cache is a

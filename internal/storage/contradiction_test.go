@@ -121,6 +121,7 @@ func TestDeclaredContradictions_FindsUnflaggedLinks(t *testing.T) {
 	ws := store.VaultPrefix("contra-declared")
 
 	a, b, c := NewULID(), NewULID(), NewULID()
+	seedEndpoints(t, store, ws, a, b, c)
 	created := time.Now().Truncate(time.Millisecond)
 
 	// One contradicts edge and one ordinary edge — only the first counts.
@@ -165,6 +166,7 @@ func TestDeclaredContradictions_DedupesBothDirections(t *testing.T) {
 	ws := store.VaultPrefix("contra-declared-dupe")
 
 	a, b := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, a, b)
 	early := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
 	late := time.Now().Truncate(time.Millisecond)
 	if err := store.WriteAssociation(ctx, ws, a, b, &Association{
@@ -199,8 +201,10 @@ func TestDeclaredContradictions_ScanCapIsReported(t *testing.T) {
 	ws := store.VaultPrefix("contra-declared-cap")
 
 	src := NewULID()
+	seedEndpoints(t, store, ws, src)
 	for i := 0; i < 5; i++ {
 		dst := NewULID()
+		seedEndpoints(t, store, ws, dst)
 		if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 			TargetID: dst, RelType: RelSupports, Weight: float32(i+1) / 10, Confidence: 1, CreatedAt: time.Now(),
 		}); err != nil {
@@ -290,6 +294,7 @@ func TestContradictionScans_VaultPrefixEndingIn0xFF(t *testing.T) {
 	}
 
 	a, b := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, a, b)
 	if _, err := store.FlagContradiction(ctx, ws, a, b); err != nil {
 		t.Fatalf("flag: %v", err)
 	}

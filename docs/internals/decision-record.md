@@ -359,3 +359,195 @@ across 16 nonsense probes with a declared chain grafted into the abstention corp
 adjacent-topic corpus with a positive control, and an exact-equality detector for
 normalization leakage — because a substitution that fires on the wrong topic is the
 silently-wrong class this project ranks worst, arriving at the score the RIGHT topic earned.
+
+---
+
+**A symmetric relation gets a read-side union in a SEPARATE method, never in the shared
+reader — and never write-side mirroring (#800).** Every association writer picked an edge
+direction, and they picked different ones: the Hebbian worker canonicalises each
+co-activated pair older→newer, the neighbour and autoassoc workers write newer→older.
+Recall's two ranking phases read only the 0x03 forward index, so the SAME single
+relationship boosted a candidate at full strength from one endpoint and by exactly zero
+from the other. Every DIRECTIONAL relation in the codebase (supersession, currency, the
+contradiction gate) was already being read from both endpoints correctly; only the
+symmetric ones were half-blind. The classification was inverted, and it had never been
+written down anywhere.
+
+Three placements were on the table and two were killed on evidence:
+
+*Killed — unioning inside `GetAssociations`.* Its consumers include a WRITER (dream's
+transitive inference persists what it infers) and direction-presenting surfaces
+(`Engine.Traverse`, REST `/associations`). Unioning the shared reader made dream persist
+manufactured transitive facts and made REST report "the OLD version supersedes the NEW
+one" — with a green suite. Both failures become structurally unrepresentable when the
+union lives in a sibling method, which is COG-22's `NameableAsLineage` shape reused.
+
+*Killed — write-side mirroring (writing both `fwd(a,b)` and `fwd(b,a)` for symmetric
+types).* `UpdateAssocWeightBatch` stamps `lastActivated` on the canonical key only, and
+COG-27 makes decay a pure function of `(peakWeight, lastActivated, now)` per 0x03 key. A
+mirrored edge would therefore decay while its primary did not: ~50% divergence at 30 days,
+the 5% floor at ~130 days, a 20x direction skew that no reader can detect and no test
+would catch. Making it correct means dual-keying every weight write atomically, which
+drags in `GetAssocWeight`'s single-value contract, the #756 0x2E repair pass,
+`deleteLegacyFullWeightKeys`, archive/restore, export/import and the replicated batch — a
+Tier 3 on-disk change with a migration, in exchange for a fix that leaves every existing
+vault broken. The read-side union, by contrast, fixes every existing vault the moment it
+lands, because 0x04 has been fully maintained all along.
+
+**Principle: when a shared reader has both a writer and a presenter downstream, do not
+widen it — add a sibling with a narrower contract and name its only legitimate consumers.
+And prefer the fix that repairs existing data over the one that only helps new data.**
+
+**A graceful-degradation fallback can reinstate the very defect the change fixes, and the
+half that is preserved is the half that gets written down (#800).** `phase4HebbianBoost`
+swallowed its read error with a bare `return`, and the union gave it a second source for
+one, so the first repair was the obvious pairing: warn, then fall back to the forward-only
+`GetAssociations`. It preserves the forward half's absolute signal — and it is not
+uniformly better than the bare return it replaced. Measured on the fixture that IS #800's
+root cause (one recent engram, two candidates, one `RelCoActivated` edge of identical
+weight each, differing only in the orientation their writer picked): healthy union 0.5/0.5,
+forward-only fallback 0.5/0.0, bare return 0.0/0.0. `hebbianBoost` MULTIPLIES the RRF score,
+so the fallback opens a 33% final-score gap between two candidates the corpus says are
+equal, while the thing it replaced preserved their (correct) tie. The fallback trades
+tie-preservation for signal-preservation, and only the winning half of that trade was in
+the commit message. Resolved by dropping the Hebbian term entirely on a failed union and
+warning — the same shape as an unreachable embed backend degrading to BM25-only rather than
+to a half-applied vector score. **Principle: a fallback that keeps PART of a signal keeps
+part of that signal's biases too. Before adding one, score the fixture the bug was filed
+about — if the fallback re-enters the failure mode, uniform loss beats partial, biased
+retention. And pin the RELATIVE ORDER, not just the magnitudes: every magnitude assertion
+here passed on the defective fallback.**
+
+The counter-argument, recorded because a decision record that carries only the winning
+half is the same shape as a benchmark that only measures the arm that agrees with it:
+**dropping the whole Hebbian term costs related-vs-unrelated discrimination for ALL
+candidates in that recall, and that aggregate quality loss may well exceed the orientation
+bias among the subset of pairs that happen to be symmetric.** Neither quantity is measured,
+and measuring them needs a relevance-judged corpus this project does not have. The decision
+still stands on shape rather than magnitude — the whole-term loss is UNIFORM, so nothing is
+ranked above anything else on a fabricated basis, and principles #1/#2 rank silent
+wrongness above visible degradation — but "the revert is right" is a judgement here, not a
+measurement. Two things narrow the counter-argument's practical reach: the term is a
+ranking MODIFIER, not a channel, so its absence changes an ordering and not what any score
+asserts; and `GetRankingNeighbors` errors if EITHER half fails, so a forward-half failure
+would have failed the fallback too — the fallback only ever helped on a
+reverse-scan-specific failure, a strictly narrower set than "a failed union".
+
+**The degradation is also undetectable downstream, deliberately (#800).**
+`ActivationResult` carries `SemanticDegraded` for the semantic channel and has no analogue
+for the Hebbian one, so a dropped Hebbian term is visible only in the server log — a
+caller cannot tell a recall that lost it from one that never had it. Accepted rather than
+overlooked: a channel flag tells a caller that a score MEANS something different (a BM25-only
+score is not a hybrid score), whereas a missing ranking modifier leaves every score meaning
+exactly what it says and only reorders them. Adding a second flag would also make the wire
+shape imply the two are peers. Recorded as a deliberate asymmetry so it is not rediscovered
+as an oversight.
+
+**The "loudly" half of degrade-loudly-but-gracefully is a behaviour, and it was unpinned
+everywhere (#800).** Deleting both `slog.Warn` calls from `phase4HebbianBoost` left
+`./internal/engine/... ./internal/storage/` fully green: nothing in the repo asserted on a
+WARN string, on a change whose stated justification is principle #2. A four-line
+`captureWarn(t, fn) string` test helper (swap `slog.Default()` for a buffer, restore) makes
+asserting on the log as cheap as asserting on a return value. **Principle: if the log line
+IS the user-visible behaviour of a degradation path, it needs a test like any other
+behaviour — otherwise "loudly" survives exactly until someone tidies up.**
+
+**A cost model that says "one more bounded scan, like the one next to it" must check
+whether the one next to it is cached (#800).** The design sized the reverse read against
+the forward read and left it uncached, reasoning that one extra bounded Pebble iterator
+was affordable. It was not: the forward half is served from `assocCache`, so the reverse
+half was paying ~50 fresh seeks on every recall. Measured on a synthetic 200-engram vault
+at 10 edges/node, a 50-candidate read cost ~11µs forward-only and ~152µs for the union,
+which moved whole-recall p50 15-20% — past the increment's own pre-committed kill
+threshold. Giving the reverse half a cache of the same shape, and replacing a per-candidate
+dedup map with a linear scan over a list bounded by `maxPerNode`, brought the union to
+~41µs and whole-recall p50 to +1.7% (paired median, 12 rounds of the increment's own
+harness, whose whole-recall p50 is ~0.5 ms — no embedder in the path). The +1.3% in the
+entry below is a SECOND, independent attempt at the same quantity, and the two do NOT
+corroborate each other, in either direction: the denominators differ ~50× (~0.5 ms here,
+~26 ms there), so equal percentages would be absolute costs 50× apart — +1.3% of 26 ms is
+~340 µs, roughly 8× the ~41 µs measured here — and the +1.3% is itself inside its own
+run-to-run spread, i.e. a null equally consistent with 0%. The honest reading: the
+small-denominator harness measured the effect, the end-to-end harness was underpowered for
+it and cleared the gate without resolving it. Neither harness is committed, so neither
+number is reproducible from the tree; both are recorded as what was observed, not as a
+result anyone can re-derive here. **Principle: two percentages of two different
+denominators are not two measurements of one number — convert to absolute cost before
+claiming agreement, and a result inside the noise band corroborates nothing.** **Principle: "symmetric
+cost to an adjacent operation" is a claim about the adjacent operation's implementation,
+not its signature — and a per-item map allocation on a path that runs 50 times per query
+is usually the largest line in the profile.**
+
+**A number cited from a benchmark must be producible BY that benchmark — check which arm
+you read (#800).** The extra copy in `mergeRankingNeighbors`' no-reverse-edges shortcut was
+recorded as "~1µs per call, measured with `BenchmarkPhase4Read`". That benchmark builds a
+RING: at `edges > 0` every node has both outbound and inbound edges, so `len(rev) > 0` and
+the shortcut is never reached; at `edges = 0` no node has any edge, so the forward list is
+empty and the branch returns `nil` without copying. **No arm of it performs the copy**, and
+the ~1µs was machine noise — it moves in the same band with the copy reverted (degree-0 arm,
+five runs each: 9.5–10.8 µs with the copy, 9.4–10.3 µs without, fully overlapping). Re-measured on a fixture that does pay
+(`BenchmarkPhase4Read_ForwardOnlyFan`: 50 candidates fanning out to sinks that are never
+themselves candidates, so nothing points AT a candidate), the median cost is +4.1 µs at
+forward degree 2, +6.8 µs at 10 and +13.2 µs at the `maxPerNode` cap of 20 — an order of
+magnitude above the recorded figure, and structural rather than noise: allocations go
+62 → 112, exactly one per candidate. The decision is unchanged (~13 µs against a ~26 ms
+whole-recall p50 is ~0.05%, and uniform slice ownership is worth it), only the claim.
+The repair was to ADD the arm rather than to soften the prose, so the doc's citation is
+regenerable from the committed mechanism, and the fixture's shape is asserted in the CI
+gate by `TestForwardOnlyFanFixture_TakesTheMergeCopyShortcut` rather than assumed — the
+whole failure was a number taken from an arm nobody checked. **Principle: when a claim
+names a measurement, the named measurement must be able to produce it. If the benchmark
+you cite has no arm that exercises the code you are pricing, adding the arm is the fix;
+restating the prose leaves the next person measuring the same wrong thing.**
+
+**A latency budget is only meaningful with its denominator attached (#800).** The COG-31
+increment pre-committed a whole-recall p50 kill threshold expressed against a ~0.5 ms
+figure. Re-measured end to end through `Engine.Activate` with the real embedder — 60
+recalls per arm, 4 runs per commit, an independent attempt at the +1.7% above rather
+than a revision of it — cold p50 moved 26.14 ms → 26.49 ms (+1.3%, inside the
+run-to-run spread), and p99 on IDENTICAL code varied 47.5–261.6 ms across four runs, so p99
+is not a usable gate at this sample size. The gate is cleared, but the number that cleared
+it is **embedder-dominated**: whole-recall p50 is ~26 ms, not ~0.5 ms. A storage-layer cost
+of a few hundred microseconds is ~1% of that and ~55% of the other, and **a deployment that
+supplies caller-side embeddings sits at the other one** — no embedder in the path, so the
+same absolute cost is a large fraction of the call. **Principle: a percentage-of-p50 budget
+silently encodes a deployment shape. State the absolute cost and the denominator you
+measured it against, or a cleared gate will be read as "negligible everywhere".**
+
+**Two caches keyed alike are still two caches: never share one dedup set between them
+(#800).** `UpdateAssocWeightBatch` invalidated the forward cache on each update's `Src` and
+the reverse cache on its `Dst`, deduplicating both through ONE `seen` set. The keys are the
+same 24-byte `(vault, engramID)` shape, so an engram appearing in BOTH roles inside one
+batch had its second eviction suppressed and one cache served pre-batch weights for the
+rest of the 2s TTL. That is the common case, not a corner: `HebbianWorker.processBatch`
+emits every C(n,2) pair of a co-activated set, so any three co-activated engrams X<Y<Z put
+Y in both roles — every recall returning ≥3 results. It also regressed a path the increment
+did not touch (`GetAssociations`, correct at the parent commit), which is the general
+hazard: **adding a second cache to an existing invalidation site is a change to the FIRST
+cache's coherence, even when the reader is byte-for-byte unmodified.** Dedup sets are
+per-cache, and the pin belongs on both sides.
+
+**`revAssocScanCap` bounds accepted edges, not keys scanned — deliberately (#800).** An
+inbound edge failing `BidirectionalForRanking` is skipped without consuming a cap slot, so
+one cold `GetRankingNeighbors` for a hub is O(inbound degree): measured ~4 µs at degree 0,
+~65 µs at 1,000 and ~0.5 ms at 5,000 directional inbound edges, returning ZERO edges for
+that cost, against a few µs for the pre-change forward-only read; the symmetric arm stays
+flat (~15 µs) because there the cap binds. **Quote the RATIO, not the microseconds.** Across
+more than a dozen runs of the committed benchmark on two machine classes, the degree-5,000
+figure landed anywhere from ~390 to ~570 µs — a spread wider than any effect this code
+could have, on a benchmark that purges both caches inside the loop, so it is machine
+variance and not fixture noise. An earlier revision of this entry quoted a three-run band
+("389-493 µs") and five of the next six runs fell outside it: **a band from a handful of
+runs on one machine is a sample, not a bound, and writing it down as a range makes it look
+like the latter.** What reproduces is that a degree-5,000 directional hub costs roughly half
+a millisecond, ~100× (observed ~90-140×) the same call at degree 0, and grows linearly in
+inbound degree. Turning it into a scanned-key budget was considered
+and rejected: reverse keys arrive weight-descending and the two edge classes do not share a
+weight distribution — explicit directional relations are written once at a high fixed
+confidence weight, while the `RelCoActivated` edges this union exists to surface start low
+and grow with use — so a key budget on a directional hub fills with directional edges and
+systematically hides exactly the Hebbian edges the feature was built to reach. **Principle:
+a "work bound" that truncates an ordered stream is only neutral if the ordering is
+uncorrelated with what you are filtering for. Here it is anti-correlated, so the bound
+would trade a bounded latency win for a silent, biased loss of real neighbours.** A
+relType-aware reverse index, or a per-engram directional-degree hint, is its own increment.

@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,15 +20,55 @@ import (
 // muninnBin is the path to the built binary, set by TestMain.
 var muninnBin string
 
+// suiteSkipReason is set by TestMain when a whole-suite precondition is unmet.
+// TestIntegrationPrecondition turns it into a visible SKIP record.
+var suiteSkipReason string
+
+// requireIntegrationEnv, when set to any non-empty value, turns an unrun suite
+// into a failure. CI sets it (see the cli-integration job in ci.yml): there is
+// no daemon on a runner, so a busy port there means something is wrong, and a
+// green "ok" would be the wrong answer.
+const requireIntegrationEnv = "MUNINN_REQUIRE_INTEGRATION"
+
 // TestMain builds the muninn binary once and runs all integration tests.
-// It exits 0 without running tests if muninn is already listening on :8750,
-// since these tests require exclusive use of that port.
+//
+// If muninn is already listening on :8750 the suite cannot run — these tests
+// need exclusive use of that port. #812: this used to print one line to stderr
+// and os.Exit(0), so `go test` reported
+//
+//	ok  	github.com/scrypster/muninndb/cmd/muninn	0.4s
+//
+// with zero "=== RUN" lines. On a machine where a daemon is always up that is
+// every run, and "integration smoke: ok" meant nothing for as long as it was
+// believed. Now the same condition produces a real SKIP record, and a
+// non-zero exit when the caller has declared the suite must actually run.
 func TestMain(m *testing.M) {
-	// Guard: skip if something is already on the MCP port.
 	if resp, err := http.Get("http://127.0.0.1:8750/mcp/health"); err == nil {
 		resp.Body.Close()
-		fmt.Fprintln(os.Stderr, "integration: muninn already running on :8750 — stop it first")
-		os.Exit(0)
+		suiteSkipReason = "muninn is already listening on :8750 and these tests need exclusive use of that port — stop it and re-run"
+
+		if os.Getenv(requireIntegrationEnv) != "" {
+			fmt.Fprintf(os.Stderr, "FAIL\tintegration: %s\n", suiteSkipReason)
+			fmt.Fprintf(os.Stderr, "integration: %s is set, so a suite that did not run is a failure, not a skip.\n", requireIntegrationEnv)
+			os.Exit(1)
+		}
+
+		// Narrow the run to the sentinel so the skip is reported by the test
+		// framework rather than asserted by a print. If the flag is missing
+		// (a testing-package change), fail loudly rather than run the suite
+		// against a port we do not own.
+		f := flag.Lookup("test.run")
+		if f == nil {
+			fmt.Fprintln(os.Stderr, "integration: cannot find -test.run to narrow the skip; refusing to continue")
+			os.Exit(1)
+		}
+		if err := f.Value.Set("^TestIntegrationPrecondition$"); err != nil {
+			fmt.Fprintf(os.Stderr, "integration: cannot set -test.run (%v); refusing to continue\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "integration: SKIPPING the whole suite — %s\n", suiteSkipReason)
+		fmt.Fprintf(os.Stderr, "integration: set %s=1 to make this a failure instead.\n", requireIntegrationEnv)
+		os.Exit(m.Run())
 	}
 
 	// Build the binary into a temp file.
@@ -49,6 +90,17 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	os.Remove(muninnBin)
 	os.Exit(code)
+}
+
+// TestIntegrationPrecondition is the suite's honesty record. When the suite can
+// run it passes trivially; when it cannot, it is the only test TestMain lets
+// run, and it SKIPs with the reason — so `go test` output distinguishes "the
+// integration suite ran" from "the integration suite could not run" without
+// anyone reading stderr.
+func TestIntegrationPrecondition(t *testing.T) {
+	if suiteSkipReason != "" {
+		t.Skipf("integration suite did not run: %s (set %s=1 to make this a failure)", suiteSkipReason, requireIntegrationEnv)
+	}
 }
 
 // muninnCmd creates a command with MUNINNDB_DATA set to the given directory.

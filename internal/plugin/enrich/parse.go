@@ -3,7 +3,6 @@ package enrich
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/scrypster/muninndb/internal/plugin"
@@ -103,6 +102,7 @@ func extractJSON(s string) string {
 // ParseEntityResponse parses the JSON response from the entity extraction call.
 func ParseEntityResponse(raw string) ([]plugin.ExtractedEntity, error) {
 	raw = strings.TrimSpace(raw)
+	n := len(raw)
 	jsonStr := extractJSON(raw)
 
 	if rawEntities, ok, err := extractTopLevelField(jsonStr, "entities"); err == nil && ok {
@@ -111,23 +111,23 @@ func ParseEntityResponse(raw string) ([]plugin.ExtractedEntity, error) {
 		}
 		var entities []plugin.ExtractedEntity
 		if err := json.Unmarshal(rawEntities, &entities); err != nil {
-			return nil, fmt.Errorf("invalid entity response JSON: %s", truncateForError(jsonStr))
+			return nil, newParseError("entities", n, err)
 		}
 		return validateAndDedupeEntities(entities), nil
 	}
 
 	// Try to parse as direct array
 	var entities []plugin.ExtractedEntity
-	if err := json.Unmarshal([]byte(jsonStr), &entities); err == nil {
-		return validateAndDedupeEntities(entities), nil
+	if err := json.Unmarshal([]byte(jsonStr), &entities); err != nil {
+		return nil, newParseError("entities", n, err)
 	}
-
-	return nil, fmt.Errorf("invalid entity response JSON: %s", truncateForError(jsonStr))
+	return validateAndDedupeEntities(entities), nil
 }
 
 // ParseRelationshipResponse parses the JSON response from the relationship extraction call.
 func ParseRelationshipResponse(raw string) ([]plugin.ExtractedRelation, error) {
 	raw = strings.TrimSpace(raw)
+	n := len(raw)
 	jsonStr := extractJSON(raw)
 
 	if rawRelationships, ok, err := extractTopLevelField(jsonStr, "relationships"); err == nil && ok {
@@ -141,7 +141,7 @@ func ParseRelationshipResponse(raw string) ([]plugin.ExtractedRelation, error) {
 			Weight float32 `json:"weight"`
 		}
 		if err := json.Unmarshal(rawRelationships, &wrapper); err != nil {
-			return nil, fmt.Errorf("invalid relationship response JSON: %s", truncateForError(jsonStr))
+			return nil, newParseError("relationships", n, err)
 		}
 		var result []plugin.ExtractedRelation
 		for _, rel := range wrapper {
@@ -162,20 +162,19 @@ func ParseRelationshipResponse(raw string) ([]plugin.ExtractedRelation, error) {
 		Type   string  `json:"type"`
 		Weight float32 `json:"weight"`
 	}
-	if err := json.Unmarshal([]byte(jsonStr), &rawRels); err == nil {
-		var result []plugin.ExtractedRelation
-		for _, rel := range rawRels {
-			result = append(result, plugin.ExtractedRelation{
-				FromEntity: rel.From,
-				ToEntity:   rel.To,
-				RelType:    rel.Type,
-				Weight:     rel.Weight,
-			})
-		}
-		return validateRelationships(result), nil
+	if err := json.Unmarshal([]byte(jsonStr), &rawRels); err != nil {
+		return nil, newParseError("relationships", n, err)
 	}
-
-	return nil, fmt.Errorf("invalid relationship response JSON: %s", truncateForError(jsonStr))
+	var result []plugin.ExtractedRelation
+	for _, rel := range rawRels {
+		result = append(result, plugin.ExtractedRelation{
+			FromEntity: rel.From,
+			ToEntity:   rel.To,
+			RelType:    rel.Type,
+			Weight:     rel.Weight,
+		})
+	}
+	return validateRelationships(result), nil
 }
 
 func extractTopLevelField(jsonStr, field string) (json.RawMessage, bool, error) {
@@ -194,6 +193,7 @@ func isJSONNull(raw json.RawMessage) bool {
 // ParseClassificationResponse parses the JSON response from the classification call.
 func ParseClassificationResponse(raw string) (memType, typeLabel, category, subcategory string, tags []string, err error) {
 	raw = strings.TrimSpace(raw)
+	n := len(raw)
 	jsonStr := extractJSON(raw)
 
 	var result struct {
@@ -206,10 +206,10 @@ func ParseClassificationResponse(raw string) (memType, typeLabel, category, subc
 
 	err = json.Unmarshal([]byte(jsonStr), &result)
 	if err != nil {
-		return "", "", "", "", nil, fmt.Errorf("invalid classification response JSON: %s", truncateForError(jsonStr))
+		return "", "", "", "", nil, newParseError("classification", n, err)
 	}
 	if result.MemoryType == "" && result.TypeLabel == "" && result.Category == "" && result.Subcategory == "" && len(result.Tags) == 0 {
-		return "", "", "", "", nil, fmt.Errorf("classification response was empty")
+		return "", "", "", "", nil, emptyResultError("classification", n)
 	}
 
 	return result.MemoryType, result.TypeLabel, result.Category, result.Subcategory, result.Tags, nil
@@ -218,6 +218,7 @@ func ParseClassificationResponse(raw string) (memType, typeLabel, category, subc
 // ParseSummarizeResponse parses the JSON response from the summarization call.
 func ParseSummarizeResponse(raw string) (summary string, keyPoints []string, err error) {
 	raw = strings.TrimSpace(raw)
+	n := len(raw)
 	jsonStr := extractJSON(raw)
 
 	var result struct {
@@ -227,22 +228,13 @@ func ParseSummarizeResponse(raw string) (summary string, keyPoints []string, err
 
 	err = json.Unmarshal([]byte(jsonStr), &result)
 	if err != nil {
-		return "", nil, fmt.Errorf("invalid summarize response JSON: %s", truncateForError(jsonStr))
+		return "", nil, newParseError("summary", n, err)
 	}
 	if result.Summary == "" && len(result.KeyPoints) == 0 {
-		return "", nil, fmt.Errorf("summarize response was empty")
+		return "", nil, emptyResultError("summary", n)
 	}
 
 	return result.Summary, result.KeyPoints, nil
-}
-
-func truncateForError(s string) string {
-	const maxLen = 160
-	s = strings.TrimSpace(s)
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }
 
 // validateAndDedupeEntities validates entity fields and removes duplicates (keeping highest confidence).

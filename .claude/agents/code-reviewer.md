@@ -54,6 +54,17 @@ flag that it needs the refute pass. The rules below are how you carry the rubric
 3. **RED-sanity-check every bug-fix / race-fix claim.** Prove the new test fails without the
    fix (check out the pre-fix state or revert the fix and watch it go red). A test that
    passes both ways proves nothing. Say so in your review when you've done it.
+   **`no tests to run` is a FAILED RED check** — `go test -run` exits 0 saying `ok` when its
+   pattern matches nothing, and a filename-excluded test file does the same (#814). Look for
+   the `=== RUN` line, not the exit code.
+
+3a. **Review the change's claims, not only its code.** Comments, invariant text, census
+   docstrings and the commit message are in scope, and on this project that is where most
+   defects have been. Apply `docs/internals/claim-discipline.md`: a set named in prose
+   should be regenerable from a mechanism; a guard must state what it does not catch;
+   *cannot/never/may only* claims structural unrepresentability and needs the structural
+   reason inline, otherwise it says *is refused unless* and states its residual; a
+   percentage needs its denominator and a band needs its N and machine.
 
 4. **Verify claims, don't trust the PR description.** If it says "closes the race" / "all
    green" / "no behavior change," confirm it yourself.

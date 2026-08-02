@@ -178,7 +178,48 @@ yes please send it." Warmth and rigor, together.
 
 ---
 
-## 4. The code-review agent
+## 4. Findings that outlive the session
+
+**This applies to you, the main session, not only to subagents.** `.claude/memory-protocol.md`
+was named in five agent definitions and nowhere in this file, so the only actor with a shell —
+the only one that could ever drain the queue — had never been told the queue existed. Two
+disjoint persistence protocols split by agent type with no bridge. This is the bridge.
+
+If a session produces something **durable, non-obvious, and not recoverable from git, the PR,
+or the tracker** — a measured number, a decision and why it beat the alternative, an honest
+negative, a defect *pattern* rather than a defect, a trap that looks safe — propose it:
+
+```sh
+node .claude/hooks/memory-propose.mjs <<'JSON'
+{"concept":"short label","content":"the fact itself, self-contained, readable in a year","summary":"one line","type":"fact","source":"main"}
+JSON
+```
+
+Read `.claude/memory-protocol.md` for the bar (a noisy vault is worse than a small one, and
+the "do not propose" list is as load-bearing as the "do"). The ledger is gitignored and
+subject to the same privacy rule as committed content — no vault names, no client
+identifiers.
+
+Direct `muninn_remember` over MCP is not wrong and stays available; the ledger is what makes
+the finding survive a session that has no MCP access, a subagent with no credentials, or a
+context that ends before anyone thinks to write it down. `.claude/hooks/memory-drain.mjs`
+moves the queue into the vault on `PreCompact` / `SessionEnd` / a debounced `Stop`. Every
+invocation that is not `SIGKILL`ed leaves a receipt at `.claude/memory-drain-receipt.json`,
+and `memory-freshness.mjs` reads it back at `SessionStart` and speaks up when the queue is
+stale — so "has this ever run?" needs neither a `stat` nor an inference. That distinction is
+the whole point: the first version of this mechanism never ran once and nobody could tell.
+
+There is **one ledger per repository**, in the main checkout: appending from a linked
+worktree resolves through `.git` to the same file, because a per-worktree queue is one no
+drain ever visits (17 proposals were found stranded that way).
+
+Its tests are `node --test .claude/hooks/tests/*.test.mjs` — a few seconds, no daemon, not in
+CI. Run them if you touch the drain. Use the glob; `node --test .claude/hooks/tests/` finds
+nothing and exits 1 in ~30 ms, because the runner skips dot-directories.
+
+---
+
+## 5. The code-review agent
 
 `.claude/agents/code-reviewer.md` is the repo's resident reviewer — correctness, the
 cognitive/storage/security invariants, and cross-surface drift, with its own
@@ -191,7 +232,7 @@ is not part of this repo.
 
 ---
 
-## 5. Attribution
+## 6. Attribution
 
 Do not add "Generated with Claude" / Anthropic attribution to any PR body, commit message,
 issue, or code comment.

@@ -170,6 +170,15 @@ func runUpgrade(args []string) {
 		return
 	}
 
+	// Refuse before touching anything if a service manager owns the running daemon.
+	// This sits after --check on purpose: reporting that an update exists is safe and
+	// useful on a service-managed host; performing one behind the manager's back is not.
+	if unit, managed := serviceManagerOwnsDaemon(); managed {
+		fmt.Fprint(os.Stderr, serviceManagerRefusal(unit))
+		osExit(1)
+		return
+	}
+
 	// Windows: no self-replace (OS locks running executables)
 	if runtime.GOOS == "windows" {
 		fmt.Printf("  Download %s from:\n", latest)

@@ -24,6 +24,7 @@ func TestAssociationsForOne_CacheMiss(t *testing.T) {
 
 	idA := NewULID()
 	idB := NewULID()
+	seedEndpoints(t, store, ws, idA, idB)
 
 	// Write an engram and an association A → B.
 	_, err := store.WriteEngram(ctx, ws, &Engram{Concept: "A", Content: "a"})
@@ -88,6 +89,7 @@ func TestUpdateAssocWeightBatch_SingleUpdate(t *testing.T) {
 
 	idA := NewULID()
 	idB := NewULID()
+	seedEndpoints(t, store, ws, idA, idB)
 
 	// Write initial edge with weight 0.5.
 	if err := store.WriteAssociation(ctx, ws, idA, idB, &Association{
@@ -298,6 +300,7 @@ func TestGetChildrenByParent_IsPartOf(t *testing.T) {
 	child1 := NewULID()
 	child2 := NewULID()
 	other := NewULID()
+	seedEndpoints(t, store, ws, parent, child1, child2, other)
 
 	// child1 → parent (is_part_of)
 	if err := store.WriteAssociation(ctx, ws, child1, parent, &Association{
@@ -402,6 +405,7 @@ func TestWriteAssociationGetAssociationsRoundtrip(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	now := time.Now().Truncate(time.Millisecond)
 	assoc := &Association{
@@ -455,6 +459,7 @@ func TestUpdateAssocWeightPersistsCorrectly(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write initial association.
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
@@ -519,6 +524,10 @@ func TestDecayAssocWeightsReducesBelowThreshold(t *testing.T) {
 		{NewULID(), NewULID()}, // weight 0.1 — decays to 0.05 < 0.3, floor = 0.1*0.05 = 0.005
 	}
 	weights := []float32{0.8, 0.5, 0.1}
+
+	for _, p := range pairs {
+		seedEndpoints(t, store, ws, p[0], p[1])
+	}
 
 	lastAct := int32(time.Now().Add(-24 * time.Hour).Unix())
 	for i, p := range pairs {
@@ -585,6 +594,7 @@ func TestGetAssociationsMultipleSourceIDs(t *testing.T) {
 	dst1 := NewULID()
 	dst2 := NewULID()
 	dst3 := NewULID()
+	seedEndpoints(t, store, ws, srcA, srcB, dst1, dst2, dst3)
 
 	_ = store.WriteAssociation(ctx, ws, srcA, dst1, &Association{TargetID: dst1, Weight: 0.7})
 	_ = store.WriteAssociation(ctx, ws, srcA, dst2, &Association{TargetID: dst2, Weight: 0.5})
@@ -618,6 +628,7 @@ func TestGetAssociations_ReturnsCopy(t *testing.T) {
 	src := NewULID()
 	dst1 := NewULID()
 	dst2 := NewULID()
+	seedEndpoints(t, store, ws, src, dst1, dst2)
 
 	// Write two associations from src.
 	_ = store.WriteAssociation(ctx, ws, src, dst1, &Association{TargetID: dst1, Weight: 0.7})
@@ -672,6 +683,7 @@ func TestRestoredAt_ClearedAfterReestablishment(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write a restored edge (simulate via archive value written to live keys).
 	now := int32(time.Now().Unix())
@@ -693,7 +705,10 @@ func TestRestoredAt_ClearedAfterReestablishment(t *testing.T) {
 	}
 
 	// Read back and verify restoredAt is cleared.
-	_, _, _, _, _, _, restoredAt := store.getAssocValueFull(ws, src, dst)
+	_, _, _, _, _, _, restoredAt, err := store.getAssocValueFull(ctx, ws, src, dst)
+	if err != nil {
+		t.Fatalf("getAssocValueFull: %v", err)
+	}
 	if restoredAt != 0 {
 		t.Errorf("restoredAt should be cleared after 3 co-activations, got %v", restoredAt)
 	}
@@ -709,6 +724,7 @@ func TestDecayAssocWeights_ArchivesStrongEdge(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write edge: weight=0.8, will get peakWeight=0.8, coActivationCount=1 seeded.
 	// consolidation score = peakWeight(0.8) * coActivationCount(1) / max(daysSince,1)
@@ -754,6 +770,7 @@ func TestGetReverseAssociations(t *testing.T) {
 
 	idA := NewULID()
 	idB := NewULID()
+	seedEndpoints(t, store, ws, idA, idB)
 
 	assoc := &Association{
 		TargetID:   idB,

@@ -27,6 +27,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An association edge can no longer outlive its endpoints** (#803). Hard
+  deletes left the dead engram in the FTS and vector indexes, so the automatic
+  association workers kept finding it and minting fresh edges to an ID that no
+  longer existed — growing with use, and never reaped, because association decay
+  does not read engram records. Both hard-delete callers now clean both search
+  indexes, `DeleteEngram` cascades archived (0x25) edges in both directions, and
+  every association writer refuses an edge whose endpoint has no engram record.
+  The delete cascade also missed every edge at weight ≤ ~1/256 (and at the
+  legacy full-weight key position) because of a scan-bound bug; those edges were
+  unreapable, and the startup key-repair pass could promote one into a live
+  dangling edge. Both are closed.
+
+  **Client-visible change:** a write whose `associations[].target_id` names a
+  memory that has been hard-deleted is now **rejected** instead of silently
+  accepted. The row it used to create pointed at nothing. How the rejection
+  surfaces is per-transport: REST's single-write path returns **400**; REST's
+  batch endpoint still returns 201 with `status: "error"` on that item only, its
+  siblings committing as before; gRPC and MBP return their existing error for an
+  invalid ID. `relationships[]` is unchanged in this
+  release — it still logs a warning and succeeds (#817).
+
 - **A retag no longer leaves stale full-text-search postings.** Tags are
   tokenized into the BM25 posting lists, but the storage-level tag update only
   rewrote the record and the tag indices, so after changing a tag recall scored

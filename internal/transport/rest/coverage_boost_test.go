@@ -384,6 +384,26 @@ func TestHandleWorkerStats(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
+	var got map[string]struct {
+		Enabled bool   `json:"enabled"`
+		Status  string `json:"status"`
+		State   int32  `json:"state"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	for _, name := range []string{"hebbian", "contradict", "confidence"} {
+		worker, ok := got[name]
+		if !ok {
+			t.Fatalf("response missing %q worker: %s", name, w.Body.String())
+		}
+		if worker.Enabled || worker.Status != "disabled" {
+			t.Errorf("%s = %+v, want disabled/unconfigured", name, worker)
+		}
+		if worker.State != 0 {
+			t.Errorf("%s.state = %d, want legacy zero value", name, worker.State)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

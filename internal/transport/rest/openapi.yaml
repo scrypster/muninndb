@@ -30,6 +30,53 @@ components:
 
   schemas:
 
+    WorkerStats:
+      type: object
+      required: [processed, batches, errors, dropped, lastRun, state, status, enabled, effectiveWait]
+      properties:
+        processed:
+          type: integer
+          format: uint64
+        batches:
+          type: integer
+          format: uint64
+        errors:
+          type: integer
+          format: uint64
+        dropped:
+          type: integer
+          format: uint64
+        lastRun:
+          type: integer
+          format: int64
+          description: "Unix timestamp in nanoseconds; zero means never."
+        state:
+          type: integer
+          format: int32
+          description: "Legacy numeric lifecycle state. Zero is ambiguous between active and disabled. Check enabled first, then prefer status."
+        status:
+          type: string
+          description: "Stable symbolic lifecycle state. Unknown future states are reported as unknown."
+          enum: [active, idle, dormant, stopped, disabled, unknown]
+        enabled:
+          type: boolean
+          description: "Whether the worker is configured on this node. Dormant workers remain enabled."
+        effectiveWait:
+          type: integer
+          format: int64
+          description: "Current worker wait interval in nanoseconds."
+
+    EngineWorkerStats:
+      type: object
+      required: [hebbian, contradict, confidence]
+      properties:
+        hebbian:
+          $ref: "#/components/schemas/WorkerStats"
+        contradict:
+          $ref: "#/components/schemas/WorkerStats"
+        confidence:
+          $ref: "#/components/schemas/WorkerStats"
+
     # ── Core write/read ─────────────────────────────────────────────────────
 
     WriteRequest:
@@ -1910,7 +1957,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
+                $ref: "#/components/schemas/EngineWorkerStats"
 
   /api/stats:
     get:

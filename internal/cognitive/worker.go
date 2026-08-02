@@ -15,7 +15,26 @@ const (
 	WorkerStateActive  WorkerState = 0
 	WorkerStateIdle    WorkerState = 1
 	WorkerStateDormant WorkerState = 2
+	WorkerStateStopped WorkerState = 3
 )
+
+// String returns the stable API representation of a worker state. Keep this
+// symbolic contract additive to the legacy numeric state field so clients do
+// not need to duplicate Go enum values.
+func (s WorkerState) String() string {
+	switch s {
+	case WorkerStateActive:
+		return "active"
+	case WorkerStateIdle:
+		return "idle"
+	case WorkerStateDormant:
+		return "dormant"
+	case WorkerStateStopped:
+		return "stopped"
+	default:
+		return "unknown"
+	}
+}
 
 const (
 	defaultIdleThreshold    = 5 * time.Minute
@@ -32,7 +51,16 @@ type WorkerStats struct {
 	Dropped       uint64        `json:"dropped"`
 	LastRun       int64         `json:"lastRun"` // Unix nanoseconds
 	State         WorkerState   `json:"state"`
+	Status        string        `json:"status"`
+	Enabled       bool          `json:"enabled"`
 	EffectiveWait time.Duration `json:"effectiveWait"` // current actual tick interval
+}
+
+// DisabledWorkerStats describes a worker that is not configured on this node.
+// Counter and numeric state fields intentionally retain their zero values for
+// compatibility with existing /api/workers consumers.
+func DisabledWorkerStats() WorkerStats {
+	return WorkerStats{Status: "disabled"}
 }
 
 // Worker is the generic goroutine lifecycle for cognitive workers.
@@ -147,6 +175,8 @@ func (w *Worker[T]) SubmitBatch(items []T) {
 
 // Run starts the worker loop. Blocks until ctx is done.
 func (w *Worker[T]) Run(ctx context.Context) error {
+	defer w.state.Store(int32(WorkerStateStopped))
+
 	batch := make([]T, 0, w.batchSize)
 	ticker := time.NewTicker(time.Duration(w.maxWait.Load()))
 	defer ticker.Stop()
@@ -286,13 +316,16 @@ func (w *Worker[T]) Run(ctx context.Context) error {
 
 // Stats returns current telemetry.
 func (w *Worker[T]) Stats() WorkerStats {
+	state := WorkerState(w.state.Load())
 	return WorkerStats{
 		Processed:     w.processed.Load(),
 		Batches:       w.batches.Load(),
 		Errors:        w.errors.Load(),
 		Dropped:       w.dropped.Load(),
 		LastRun:       w.lastRun.Load(),
-		State:         WorkerState(w.state.Load()),
+		State:         state,
+		Status:        state.String(),
+		Enabled:       true,
 		EffectiveWait: time.Duration(w.maxWait.Load()),
 	}
 }

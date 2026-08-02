@@ -46,8 +46,16 @@ func rawWeightIndexKey(ws [8]byte, a, b [16]byte) []byte {
 // seedLegacyEdge lays down the exact on-disk shape a PRE-FIX weight-1.0 write
 // left behind: 0x03/0x04 keys at the legacy complement, and a 0x14 index
 // carrying the true weight (the index always stored raw float bits correctly).
+//
+// Both endpoints get a real 0x01 record: flushChunk re-validates them (STO-12),
+// because a legacy row whose endpoint is gone must be skipped rather than
+// relocated into a live, correctly-positioned dangling edge. A fixture without
+// engrams would exercise the skip path on every case and prove nothing about
+// the relocation this file is testing. TestSTO12_LegacyFullWeightRepairNever-
+// CreatesADanglingEdge covers the endpoint-less shape deliberately.
 func seedLegacyEdge(t *testing.T, store *PebbleStore, ws [8]byte, src, dst [16]byte, val []byte, indexWeight float32) {
 	t.Helper()
+	seedEndpoints(t, store, ws, ULID(src), ULID(dst))
 	batch := store.db.NewBatch()
 	defer batch.Close()
 	_ = batch.Set(rawAssocKey(prefix.AssocFwd, ws, src, testLegacyComplement, dst), val, nil)
@@ -463,6 +471,11 @@ func TestRepairLegacyFullWeightAssocKeys_DoesNotResurrectSupersededPair(t *testi
 
 	src := [16]byte{0x61}
 	dst := [16]byte{0x62}
+	// STO-12: the concurrent writer below is UpdateAssocWeight, which now
+	// refuses a pair whose endpoints have no 0x01 record. Give the pair real
+	// engrams so the window this test forces is the repair-vs-live-write one it
+	// is about, not an endpoint refusal.
+	seedEndpoints(t, store, ws, ULID(src), ULID(dst))
 	stale := encodeAssocValue(RelSupports, 1.0, time.Unix(1_700_000_000, 0), 1, 1.0, 1)
 	seedLegacyEdge(t, store, ws, src, dst, stale[:], 1.0)
 
@@ -503,6 +516,73 @@ func TestRepairLegacyFullWeightAssocKeys_DoesNotResurrectSupersededPair(t *testi
 	}
 	if w != 0.8 {
 		t.Errorf("index weight = %v, want 0.8 (the live write's value)", w)
+	}
+}
+
+// flushChunk's `indexed != 1.0` RE-READ had no discriminating test: deleting it
+// outright left the whole internal/storage suite green.
+//
+// Only the SCAN loop's copy of that check was covered, and the two are not the
+// same check. The scan's runs against a fixed iterator snapshot; the flush-time
+// one exists solely to catch a weight change that lands in the capture→commit
+// window. The nearest existing test
+// (TestRepairLegacyFullWeightAssocKeys_DoesNotResurrectSupersededPair) drives
+// the same hook but changes the legacy key's PRESENCE, so it exercises the
+// `!present` branch above and returns before the index is ever re-read.
+//
+// This is the window the re-read is for: the legacy key is still there (so the
+// pair still looks repairable) but the 0x14 index no longer says exactly 1.0.
+// A concurrent decay or Hebbian update that rewrites the index without moving
+// the key produces exactly that state, and the disambiguator is gone — the pair
+// is no longer provably a pre-fix full-weight edge, so the repair must not move
+// it.
+//
+// Deterministic via the pre-flush hook, not a timing race.
+func TestRepairLegacyFullWeightAssocKeys_ReReadsTheIndexAtFlushTime(t *testing.T) {
+	store, cleanup := newTestStoreHelper(t)
+	defer cleanup()
+	ctx := context.Background()
+	ws := [8]byte{0x2A}
+
+	src := [16]byte{0x81}
+	dst := [16]byte{0x82}
+	val := encodeAssocValue(RelSupports, 1.0, time.Unix(1_700_000_000, 0), 1, 1.0, 1)
+	seedLegacyEdge(t, store, ws, src, dst, val[:], 1.0)
+
+	fired := false
+	assocWeightRepairPreFlushHook = func() {
+		if fired {
+			return
+		}
+		fired = true
+		// Rewrite ONLY the 0x14 index. The legacy 0x03/0x04 keys stay exactly
+		// where they are, so the `!present` short-circuit does not fire and the
+		// index re-read is the only thing that can refuse this pair.
+		var wi [4]byte
+		binary.BigEndian.PutUint32(wi[:], math.Float32bits(0.55))
+		if err := store.db.Set(rawWeightIndexKey(ws, src, dst), wi[:], pebble.NoSync); err != nil {
+			t.Errorf("in-window index rewrite: %v", err)
+		}
+	}
+	defer func() { assocWeightRepairPreFlushHook = nil }()
+
+	repaired, err := store.RepairLegacyFullWeightAssocKeys(ctx, ws)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if !fired {
+		t.Fatal("pre-flush hook never fired — the test did not exercise the window")
+	}
+	if repaired != 0 {
+		t.Errorf("repaired = %d, want 0 — the pair's index stopped being exactly 1.0 inside the "+
+			"capture→commit window, so it is not provably a pre-fix full-weight edge", repaired)
+	}
+	if _, ok := mustGet(t, store, rawAssocKey(prefix.AssocFwd, ws, src, testCorrectFullWeightComplement, dst)); ok {
+		t.Error("the repair relocated a pair whose 0x14 index no longer said 1.0 at flush time — " +
+			"the flush-time re-read did not run")
+	}
+	if _, ok := mustGet(t, store, rawAssocKey(prefix.AssocFwd, ws, src, testLegacyComplement, dst)); !ok {
+		t.Error("the repair deleted the legacy position of a pair it refused to move")
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 func seedDecayEdge(t *testing.T, store *PebbleStore, ws [8]byte, weight float32, lastActivated time.Time) (ULID, ULID) {
 	t.Helper()
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 	var la int32
 	if !lastActivated.IsZero() {
 		la = int32(lastActivated.Unix())
@@ -222,6 +223,7 @@ func TestDecayAssoc_LegacyZeroLastActivated_Adopted(t *testing.T) {
 	now := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID:   dst,
 		Weight:     0.7,
@@ -245,7 +247,10 @@ func TestDecayAssoc_LegacyZeroLastActivated_Adopted(t *testing.T) {
 		t.Fatalf("legacy zero-lastActivated edge was decayed: got %v, want 0.7 (floor would be 0.035)", w)
 	}
 
-	_, _, _, lastActivated, _, _ := store.getAssocValue(ws, src, dst, w)
+	_, _, _, lastActivated, _, _, _, err := store.getAssocValueFull(ctx, ws, src, dst)
+	if err != nil {
+		t.Fatalf("getAssocValueFull: %v", err)
+	}
 	if lastActivated != int32(now.Unix()) {
 		t.Errorf("adopted edge was not stamped: lastActivated = %d, want %d", lastActivated, now.Unix())
 	}

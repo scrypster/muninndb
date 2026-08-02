@@ -137,6 +137,15 @@ func (idx *Index) Tombstone(id [16]byte) {
 	idx.deleted.Store(id, struct{}{})
 }
 
+// IsTombstoned reports whether the node has been tombstoned. Read-only; exists
+// so a caller (and STO-12's cascade tests) can assert the hard-delete cleanup
+// actually reached the vector index rather than inferring it from a Search that
+// a zero-vector fixture would answer the same way either.
+func (idx *Index) IsTombstoned(id [16]byte) bool {
+	_, ok := idx.deleted.Load(id)
+	return ok
+}
+
 // efC returns the effective EfConstruction for this index.
 // Allows per-index override (e.g., lower value during bulk eval loading).
 func (idx *Index) efC() int {

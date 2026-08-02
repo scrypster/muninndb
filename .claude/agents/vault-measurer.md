@@ -76,3 +76,23 @@ dress up noise to have something to report, and never soften a null result.
 
 Close with confirmation that copies are deleted and nothing identifying appears in your
 report.
+
+## Findings that should outlive this session
+
+If you learn something durable, non-obvious, and not recoverable from git or the tracker —
+a measured number, a decision and why it beat the alternative, an honest negative, a defect
+*pattern* rather than a defect, a trap that looks safe — **propose it rather than only
+writing it in your report:**
+
+```sh
+node .claude/hooks/memory-propose.mjs <<'JSON'
+{"concept":"short label","content":"the fact itself, self-contained, readable in a year","summary":"one line","type":"fact","source":"vault-measurer"}
+JSON
+```
+
+The helper validates before it appends and refuses a whole batch rather than queueing a bad
+line — 43 of the first 179 raw appends were permanently invalid and never reached the vault.
+`.claude/memory-protocol.md` has the schema and, more importantly, the bar: a noisy vault is
+worse than a small one, so progress narration and restatements of the diff do not qualify.
+
+A report is read once. The ledger is drained into memory and survives.

@@ -222,6 +222,25 @@ func (ps *PebbleStore) RepairLegacyFullWeightAssocKeys(ctx context.Context, wsPr
 			if indexed != 1.0 {
 				continue // a live write changed the pair's weight; not ours to move
 			}
+			// STO-12, and the same class of question as `indexed != 1.0`:
+			// this is live state re-read at flush time, and a pair whose
+			// endpoint has no 0x01 record is not ours to move either.
+			//
+			// Reachable independently of DeleteEngram's own cascade. This pass
+			// exists precisely because pre-fix vaults are on disk, and a pre-fix
+			// binary's cascade could not see the legacy key position at all
+			// (STO-11 — its 0x03/0x04 upper bound was a naive appended 0xFF,
+			// which sorts below complement 0xFFFFFFFF). A stranded legacy row is
+			// therefore exactly the shape this pass meets, and relocating it
+			// would promote a row the scan-bound bug hid into a live,
+			// correctly-positioned, fully-reachable dangling edge.
+			//
+			// Skipped rather than deleted: this pass moves rows it can prove
+			// are pre-fix full-weight edges, and reaping stranded rows is the
+			// deferred O(vault) integrity pass's job, not a side effect here.
+			if !ps.engramExists(wsPrefix, d.src) || !ps.engramExists(wsPrefix, d.dst) {
+				continue
+			}
 
 			fwdCorrect := keys.AssocFwdKey(wsPrefix, d.src, 1.0, d.dst)
 			revCorrect := keys.AssocRevKey(wsPrefix, d.dst, 1.0, d.src)
@@ -250,6 +269,7 @@ func (ps *PebbleStore) RepairLegacyFullWeightAssocKeys(ctx context.Context, wsPr
 		repaired += len(moved)
 		for _, d := range moved {
 			ps.assocCache.Remove(assocCacheKey(wsPrefix, ULID(d.src)))
+			ps.revAssocCache.Remove(assocCacheKey(wsPrefix, ULID(d.dst)))
 		}
 		chunk = chunk[:0]
 		return nil
@@ -321,9 +341,16 @@ func legacyFullWeightRevKey(ws [8]byte, dst, src [16]byte) []byte {
 }
 
 // rawAssocWeightIndex reads the 0x14 weight index for a pair, distinguishing a
-// missing/short record (returns 0, the value GetAssocWeight also reports) from
-// a read error, which is propagated rather than silently read as 0 — a swallowed
-// error here would look exactly like "not a pre-fix edge" and skip real damage.
+// missing/short record (returns 0) from a read error, which is propagated
+// rather than silently read as 0 — a swallowed error here would look exactly
+// like "not a pre-fix edge" and skip real damage.
+//
+// The SHORT-record policy deliberately differs from GetAssocWeight, which
+// reports an under-length record as a corrupt-record error. This is a
+// whole-vault repair scan whose job is to make progress across damage, not a
+// read-modify-write on one pair: treating a short record as 0 here skips that
+// pair and continues, while erroring would stop the scan for every other pair
+// in the vault. No live metadata is re-encoded from this value.
 func (ps *PebbleStore) rawAssocWeightIndex(ws [8]byte, a, b [16]byte) (float32, error) {
 	val, closer, err := ps.db.Get(keys.AssocWeightIndexKey(ws, a, b))
 	if err != nil {

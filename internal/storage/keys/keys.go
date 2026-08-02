@@ -362,6 +362,14 @@ func AssocFwdRangeStart(ws [8]byte) []byte {
 // AssocFwdRangeEnd returns the exclusive upper bound for scanning all forward
 // associations within a vault (increments the workspace prefix by 1 in the
 // last byte, standard Pebble upper-bound idiom).
+//
+// The carry loop below stops at index 1, so it never increments the 0x03
+// prefix byte. That covers the ~1-in-256 STO-11 case (a vault prefix whose
+// LAST byte is 0xFF) correctly, but an ALL-0xFF workspace prefix (2^-64)
+// would carry off the end and yield 0x03|00..00 — an upper bound below the
+// lower bound. Left as-is here rather than changed under an unrelated
+// increment; AssocRevRangeEnd uses PrefixUpperBound and has no such edge.
+// Filed as #819 so it is findable without reading this function.
 func AssocFwdRangeEnd(ws [8]byte) []byte {
 	end := make([]byte, 1+8)
 	end[0] = prefix.AssocFwd
@@ -384,6 +392,35 @@ func AssocFwdPrefixForID(ws [8]byte, id [16]byte) []byte {
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
+}
+
+// AssocRevRangeStart returns the inclusive lower bound for scanning all reverse
+// association index entries within a vault (0x04 prefix scan lower bound).
+func AssocRevRangeStart(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.AssocRev
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// AssocRevRangeEnd returns the exclusive upper bound for scanning all reverse
+// association index entries within a vault.
+//
+// STO-11: this delegates to PrefixUpperBound rather than open-coding a
+// last-byte increment. PrefixUpperBound carries across every byte, and because
+// byte 0 here is the 0x04 prefix (never 0xFF) it always produces a bound
+// strictly above the lower bound — including for an all-0xFF workspace
+// prefix. Note what it actually returns there: it increments the FIRST
+// NON-0xFF BYTE FROM THE RIGHT and leaves the trailing 0xFFs in place, so an
+// all-0xFF workspace yields 0x05|FF..FF, not 0x05|00..00. The bound is still
+// strictly above the lower bound, which is the property STO-11 needs; the
+// surplus range it admits is 0x05-prefixed keys, which no reverse-association
+// scan can mistake for its own because every consumer additionally checks the
+// 25-byte per-id prefix (see rankingReverseEdges). The open-coded loop in
+// AssocFwdRangeEnd stops at index 1 and therefore does NOT carry out of the
+// workspace bytes; see the note there.
+func AssocRevRangeEnd(ws [8]byte) []byte {
+	return PrefixUpperBound(AssocRevRangeStart(ws))
 }
 
 // AssocRevPrefixForID returns a 25-byte scan prefix covering all reverse

@@ -147,7 +147,12 @@ type EngineStore interface {
 	// archiveThreshold > 0 enables moving strong floor-hit edges to the 0x25 archive namespace.
 	DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error)
 
-	// UpdateAssocWeightBatch atomically updates multiple association weights in a single batch.
+	// UpdateAssocWeightBatch updates multiple association weights in a single
+	// Pebble batch. What it writes is atomic; what it applies may be a SUBSET.
+	// A pair whose existing metadata cannot be read is skipped rather than
+	// overwritten with fabricated defaults, and reported through an error that
+	// also exposes SkippedUpdates() []int (indices into updates). Callers that
+	// act on an update landing must consult it.
 	UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error
 
 	// GetConfidence reads the confidence value from 0x02 metadata for an engram.

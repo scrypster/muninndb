@@ -242,6 +242,24 @@ func ParseLifecycleState(s string) (LifecycleState, error) {
 type RelType uint16
 
 const (
+	// RelCoActivated is the relation the Hebbian co-activation worker writes.
+	// It was the only RelType with no name, which is how a symmetric relation
+	// ended up stored under a directional convention nobody wrote down (#800).
+	// Its on-disk value is 0x0000, which is also what decodeAssocValue returns
+	// for a short value and for an all-zero 18-byte legacy value ("old encoder
+	// wrote blank values"). That COLLISION is pre-existing; its CONSEQUENCE is
+	// not. Before #800 relType 0 only fed profile.AllowsEdge; it now also
+	// decides reverse admissibility, so on a vault written by the old encoder a
+	// legacy blank-valued edge that was genuinely DIRECTIONAL is admitted into
+	// the reverse half and read backwards during ranking.
+	//
+	// Left as-is deliberately. The blast radius is identical to the deliberate
+	// >=0x8000 admission below — ranking and traversal only, with no writer and
+	// no direction-presenting surface downstream (COG-31) — so it can nudge an
+	// ordering but cannot manufacture a presented fact. Distinguishing "really
+	// co-activated" from "blank legacy" needs a value-format change and a
+	// migration, which is its own increment.
+	RelCoActivated      RelType = 0x0000
 	RelSupports         RelType = 0x0001
 	RelContradicts      RelType = 0x0002
 	RelDependsOn        RelType = 0x0003
@@ -260,6 +278,44 @@ const (
 	RelRefines          RelType = 0x0010 // near-duplicate refinement (write-time novelty)
 	RelUserDefined      RelType = 0x8000
 )
+
+// IsSymmetric reports whether the relation asserts the same fact in both
+// directions, so that reading it from either endpoint is equally true.
+//
+// STRICT by design: a type is symmetric only if it is declared so here. An
+// unknown or user-defined relation is NOT symmetric — claiming a symmetry the
+// author never declared is what produces "the OLD version supersedes the NEW
+// one". This predicate is safe for a WRITER or a direction-presenting surface
+// to consult. See COG-31.
+//
+// It is the DECLARATION POINT for relation symmetry, not a hot-path predicate:
+// in production it is reached only through BidirectionalForRanking. Having no
+// direct production caller is the expected state, not dead code — a writer or
+// a presenter that ever needs the question answered must ask it here rather
+// than re-deciding locally, which is the mistake #800 was.
+func (r RelType) IsSymmetric() bool {
+	switch r {
+	case RelCoActivated, RelRelatesTo, RelContradicts:
+		return true
+	default:
+		return false
+	}
+}
+
+// BidirectionalForRanking reports whether an edge of this type may be read from
+// either endpoint FOR SCORING AND TRAVERSAL ONLY.
+//
+// It is IsSymmetric plus the user-defined range. The extra admission is
+// principle #4 applied where it belongs: on the presentation side of the line,
+// over-retrieving a relation whose symmetry was never declared is a small,
+// bounded ranking nudge, whereas under-retrieving silently drops half of it.
+//
+// MUST NOT be consulted by a writer, by supersession/currency/annotation, or by
+// any surface that presents an edge's direction to a caller. Its only legitimate
+// consumers are the recall ranking phases (COG-31).
+func (r RelType) BidirectionalForRanking() bool {
+	return r.IsSymmetric() || r >= RelUserDefined
+}
 
 // EmbedDimension encodes embedding dimensionality (uint8 on disk).
 type EmbedDimension uint8

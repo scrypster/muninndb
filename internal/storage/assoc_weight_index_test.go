@@ -40,6 +40,7 @@ func TestAssocWeightIndex_O1Lookup(t *testing.T) {
 	a := NewULID()
 	b := NewULID()
 	c := NewULID()
+	seedEndpoints(t, store, ws, a, b, c)
 
 	// Write three associations from a
 	assocAB := &Association{TargetID: b, Weight: 0.8}
@@ -89,6 +90,7 @@ func TestAssocWeightIndex_UpdateWeight(t *testing.T) {
 
 	a := NewULID()
 	b := NewULID()
+	seedEndpoints(t, store, ws, a, b)
 
 	assoc := &Association{TargetID: b, Weight: 0.5}
 	if err := store.WriteAssociation(ctx, ws, a, b, assoc); err != nil {
@@ -122,6 +124,7 @@ func TestAssocWeightIndex_DecayFloorsClampsEntry(t *testing.T) {
 
 	a := NewULID()
 	b := NewULID()
+	seedEndpoints(t, store, ws, a, b)
 
 	// PeakWeight seeds to 0.05 at WriteAssociation time. lastActivated is 30
 	// days back so the elapsed-time ceiling (COG-27) is far below minWeight.

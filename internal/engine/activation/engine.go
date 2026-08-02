@@ -485,6 +485,17 @@ type ActivationStore interface {
 	// unleased engrams). Used for work-queue recall visibility filtering.
 	GetLeases(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID) ([]storage.Lease, error)
 	GetAssociations(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error)
+	// GetRankingNeighbors is GetAssociations UNIONED with the reverse (0x04)
+	// edges whose RelType is symmetric for ranking purposes — COG-31. It loses
+	// edge direction by construction, so its ONLY legitimate consumers are the
+	// recall ranking phases (phase4HebbianBoost, phase5Traverse). Never use it
+	// where an edge's direction is written back or shown to a caller.
+	//
+	// Every returned slice is the CALLER's: it never aliases a store cache
+	// entry's backing array, for any id, whether or not that id has inbound
+	// edges. That is uniform across the whole union by construction — it is
+	// NOT a property GetAssociations offers its own callers (#820).
+	GetRankingNeighbors(ctx context.Context, wsPrefix [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error)
 	RecentActive(ctx context.Context, wsPrefix [8]byte, topK int) ([]storage.ULID, error)
 	VaultPrefix(vault string) [8]byte
 	// EngramLastAccessNs returns the nanosecond timestamp of the last cache access for id.
@@ -1338,13 +1349,37 @@ func (e *ActivationEngine) phase4HebbianBoost(ctx context.Context, ws [8]byte, v
 		ids[i] = c.id
 	}
 
-	// Cap to top-50 candidates to bound GetAssociations work per activation cycle.
+	// Cap to top-50 candidates to bound association work per activation cycle.
 	if len(ids) > 50 {
 		ids = ids[:50]
 	}
 
-	assocMap, err := e.store.GetAssociations(ctx, ws, ids, 20)
+	// COG-31: symmetric edges (co-activation, relates_to, contradicts) are
+	// stored in ONE direction chosen by whichever writer got there first —
+	// Hebbian writes older→newer, the neighbour worker writes newer→older.
+	// A forward-only read therefore scored a co-activated pair at full
+	// strength from one endpoint and ZERO from the other (#800).
+	assocMap, err := e.store.GetRankingNeighbors(ctx, ws, ids, 20)
 	if err != nil {
+		// Degrade LOUDLY (principle #2) — the original bug here was a bare
+		// `return` that deleted the entire Hebbian contribution with no log
+		// line — and degrade UNIFORMLY: the whole signal is dropped, not half
+		// of it.
+		//
+		// Falling back to GetAssociations was tried and rejected. It keeps the
+		// forward half's absolute signal, and in exchange it reinstates exactly
+		// the defect #800 fixed: two candidates carrying the same symmetric
+		// edge to the same recent engram score w and 0 purely by which
+		// orientation their writer picked, and hebbianBoost MULTIPLIES the
+		// final score. Preserving some signal at the cost of a fabricated
+		// ordering between equally-related candidates is the project's worst
+		// failure class, not its second-best outcome — the same reason an
+		// unreachable embed backend degrades to BM25-only rather than to a
+		// half-applied vector score. Ranking here loses the Hebbian term and
+		// stays internally consistent. Pinned by
+		// TestHebbianBoost_UnionReadFailurePreservesSymmetricOrder.
+		slog.Warn("activation: hebbian ranking-neighbor read failed, boost skipped for this recall",
+			"vault", vaultID, "candidates", len(ids), "error", err)
 		return
 	}
 
@@ -1459,7 +1494,15 @@ type traversedCandidate struct {
 	id         storage.ULID
 	propagated float64
 	hopPath    []storage.ULID
-	relType    uint16
+	// relType is the RelType of the edge this node was reached over — read out
+	// of GetRankingNeighbors, which LOSES edge direction by construction
+	// (COG-31). It is carried to scoringCandidate and today never read again,
+	// which is what makes COG-31's "the traversed RelType is dropped before the
+	// response is built" true. Anything that starts reading it is reading a
+	// relation whose direction is unknown: a RelSupersedes here may mean this
+	// node supersedes the previous hop or the reverse. Ranking on it is fine;
+	// presenting it, or deriving a direction from it, is what COG-31 forbids.
+	relType uint16
 }
 
 // resolveProfile implements the C-B-A traversal profile resolution chain:
@@ -1586,7 +1629,17 @@ func (e *ActivationEngine) phase5Traverse(
 		}
 
 		// One batched Pebble call for the entire level.
-		assocMap, err := e.store.GetAssociations(ctx, ws, ids, maxEdgesPerNode)
+		// COG-31: symmetric edges are reachable from either endpoint here, so
+		// BFS no longer depends on which direction the writer happened to pick.
+		// Directional relations (supersedes, depends_on, ...) stay forward-only
+		// — with two deliberate exceptions, so a hop is "the profile allows
+		// this relation" and NOT "this relation points this way": the
+		// user-defined range (>=0x8000, admitted under principle #4) and legacy
+		// blank-valued edges, which decode to relType 0 and are indistinguishable
+		// from RelCoActivated (see RelCoActivated in storage/types.go). Both are
+		// bounded to ranking and traversal; neither reaches a writer or a
+		// direction-presenting surface.
+		assocMap, err := e.store.GetRankingNeighbors(ctx, ws, ids, maxEdgesPerNode)
 		if err != nil {
 			slog.Warn("activation: bfs associations error, truncating traversal",
 				"vault", req.VaultID, "hop", eligible[0].hopDepth, "error", err)
@@ -1673,9 +1726,9 @@ type scoringCandidate struct {
 	transitionBoost float64
 	rrfScore        float64
 	hopPath         []storage.ULID
-	relType         uint16
-	isTraversed     bool // true for BFS-only candidates; vectorScore is computed post-load
-	inTagPool       bool // true for tag-seeded candidates; vectorScore is computed post-load when zero
+	relType         uint16 // direction-LOST; write-only today — see traversedCandidate.relType
+	isTraversed     bool   // true for BFS-only candidates; vectorScore is computed post-load
+	inTagPool       bool   // true for tag-seeded candidates; vectorScore is computed post-load when zero
 }
 
 // phase6Score computes final scores, applies filters, and builds the result.
