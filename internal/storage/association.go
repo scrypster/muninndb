@@ -291,6 +291,14 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 		})
 	}
 	// Populate cache — expirable.LRU enforces the TTL automatically.
+	//
+	// KNOWN GAP (#808): this loop never checks iter.Error(), so a scan that
+	// stops early on a corrupt block caches a TRUNCATED association list and
+	// returns it as complete — the same absence-vs-failure laundering this file
+	// fixed on the pointGet path, one seam over. It was deliberately deferred
+	// rather than fixed blind: the readFault seam mediates pointGet, not
+	// iteration, so a guard here has no deterministic RED and would ship
+	// unproven. Fixing it needs an iterator-level fault seam.
 	ps.assocCache.Add(ck, &assocCacheEntry{assocs: assocs})
 	return assocs, nil
 }
@@ -357,6 +365,11 @@ func (ps *PebbleStore) getAssocValueFull(ctx context.Context, wsPrefix [8]byte, 
 	if err != nil {
 		return 0, 1.0, time.Time{}, 0, 0, 0, 0, fmt.Errorf("read assoc metadata: %w", err)
 	}
+	// The 0x14 index says w > 0 but the 0x03 key at w is MISSING: an orphaned
+	// index entry. Absence, deliberately, and not a fourth outcome — every
+	// reader of associations scans the 0x03 namespace, so an index entry with no
+	// 0x03 key behind it is invisible to all of them. Re-creating the edge from
+	// this write is repair, not damage: there is no live metadata to overwrite.
 	if val == nil {
 		return 0, 1.0, time.Time{}, 0, 0, 0, 0, nil
 	}
@@ -496,11 +509,18 @@ func (e *AssocBatchSkipError) Error() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "update assoc weight batch: %d of %d update(s) skipped, %d applied",
 		len(e.Skipped), len(e.Skipped)+e.Applied, e.Applied)
+	// Skipped and Errs are appended in lockstep by UpdateAssocWeightBatch, so
+	// they are the same length. The guard is for a hand-constructed value (a
+	// test double, a future caller): formatting an error must never panic.
 	for i, err := range e.Errs {
 		if i > 0 {
 			b.WriteString(";")
 		}
-		fmt.Fprintf(&b, " [%d] %v", e.Skipped[i], err)
+		if i < len(e.Skipped) {
+			fmt.Fprintf(&b, " [%d] %v", e.Skipped[i], err)
+		} else {
+			fmt.Fprintf(&b, " [?] %v", err)
+		}
 	}
 	return b.String()
 }

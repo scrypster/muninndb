@@ -321,9 +321,16 @@ func legacyFullWeightRevKey(ws [8]byte, dst, src [16]byte) []byte {
 }
 
 // rawAssocWeightIndex reads the 0x14 weight index for a pair, distinguishing a
-// missing/short record (returns 0, the value GetAssocWeight also reports) from
-// a read error, which is propagated rather than silently read as 0 — a swallowed
-// error here would look exactly like "not a pre-fix edge" and skip real damage.
+// missing/short record (returns 0) from a read error, which is propagated
+// rather than silently read as 0 — a swallowed error here would look exactly
+// like "not a pre-fix edge" and skip real damage.
+//
+// The SHORT-record policy deliberately differs from GetAssocWeight, which
+// reports an under-length record as a corrupt-record error. This is a
+// whole-vault repair scan whose job is to make progress across damage, not a
+// read-modify-write on one pair: treating a short record as 0 here skips that
+// pair and continues, while erroring would stop the scan for every other pair
+// in the vault. No live metadata is re-encoded from this value.
 func (ps *PebbleStore) rawAssocWeightIndex(ws [8]byte, a, b [16]byte) (float32, error) {
 	val, closer, err := ps.db.Get(keys.AssocWeightIndexKey(ws, a, b))
 	if err != nil {

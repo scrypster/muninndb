@@ -332,7 +332,7 @@ func TestAbsenceIsNotFailure(t *testing.T) {
 // right weight. That is a weaker property than the name promised: it never
 // exercised the missing-key branch, and it never touched getAssocValueFull or
 // ReadOrdinal. The stronger structural fact — that nothing in the production
-// code assigns readFault — is asserted by TestReadFaultIsAssignedOnlyByTests.
+// code assigns readFault — is asserted by TestReadFaultIsArmedOnlyByTests (read_error_census_test.go).
 func TestPointGetSeamIsNilInProductionConstructors(t *testing.T) {
 	store := newTestStore(t)
 	ws := store.VaultPrefix("seam-nil")

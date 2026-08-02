@@ -284,3 +284,47 @@ func TestUpdateAssocWeightBatch_OneUnreadablePairDoesNotStopTheRest(t *testing.T
 		t.Errorf("SkippedUpdates: got %v, want [1] (the middle update)", got)
 	}
 }
+
+// TestUpdateAssocWeightBatch_AllSkipped_AppendsNoReplicationEntry pins that a
+// batch which wrote nothing replicates nothing.
+//
+// Newly reachable with this change: before it, every update was written
+// unconditionally, so an all-skipped batch could not occur. replicateBatch's
+// own `len(repr) == 0` guard does not catch it — an empty Pebble batch's Repr()
+// is still a 12-byte header, not zero bytes — so a zero-op OpBatch would be
+// shipped to every follower each flush window. Harmless to apply, but it is log
+// volume and a divergence-investigation red herring for a batch that did
+// nothing.
+func TestUpdateAssocWeightBatch_AllSkipped_AppendsNoReplicationEntry(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("all-skipped-replication")
+
+	src, dst := NewULID(), NewULID()
+	seedEdge(t, store, ws, src, dst, 0.5)
+
+	var appends int
+	store.repLogAppend = func(uint8, []byte, []byte) error {
+		appends++
+		return nil
+	}
+
+	// Fail the 0x14 weight-index read so the only update in the batch is skipped.
+	store.readFault = failReadsWithPrefix(prefix.AssocWeightIndex)
+
+	err := store.UpdateAssocWeightBatch(ctx, []AssocWeightUpdate{
+		{WS: ws, Src: [16]byte(src), Dst: [16]byte(dst), Weight: 0.7, CountDelta: 1},
+	})
+	if err == nil {
+		t.Fatal("UpdateAssocWeightBatch: want the skip reported, got nil")
+	}
+	var skipErr *AssocBatchSkipError
+	if !errors.As(err, &skipErr) || len(skipErr.Skipped) != 1 || skipErr.Applied != 0 {
+		t.Fatalf("want every update skipped and none applied, got %v", err)
+	}
+
+	if appends != 0 {
+		t.Errorf("a batch that applied 0 updates appended %d replication entr(ies) — an empty "+
+			"Pebble batch's Repr() is a 12-byte header, so the len(repr)==0 guard does not fire", appends)
+	}
+}

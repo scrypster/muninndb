@@ -269,6 +269,15 @@ func (ps *PebbleStore) replicateBatch(b *pebble.Batch) {
 	if ps.repLogAppend == nil {
 		return
 	}
+	// A batch with no records replicates nothing. The len(repr) check alone does
+	// not cover it: an EMPTY Pebble batch's Repr() is still a 12-byte header, so
+	// it is non-zero-length and would ship a zero-op OpBatch to every follower.
+	// Applying one is harmless, but it is log volume and a red herring in a
+	// divergence investigation. Newly reachable since UpdateAssocWeightBatch can
+	// skip every update in a batch (see AssocBatchSkipError).
+	if b.Empty() {
+		return
+	}
 	repr := b.Repr()
 	if len(repr) == 0 {
 		return

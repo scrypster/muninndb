@@ -3,8 +3,10 @@ package cognitive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -95,6 +97,11 @@ type HebbianWorker struct {
 	// When ltpCfg is nil, LTP is disabled and behavior is unchanged.
 	ltpCfg   *LTPConfig
 	ltpState *ltpState
+
+	// loggedReadFaults suppresses repeat log lines for a pair whose current
+	// association weight could not be read. See shouldLogReadFault.
+	readFaultMu      sync.Mutex
+	loggedReadFaults map[pairKey]struct{}
 
 	// internal stop channel for tests and lifecycle management.
 	stopCh chan struct{}
@@ -246,6 +253,11 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 		old float64
 		new float64
 	}
+	// readErrs collects pairs whose CURRENT weight could not be read. They never
+	// enter updates, so they are invisible to the batch's own skip reporting;
+	// they are folded into this function's returned error instead, which is what
+	// Worker.Run counts in Stats().Errors.
+	var readErrs []error
 
 	for pair, stats := range pairs {
 		const hebbianSignalEpsilon = 1e-9
@@ -257,9 +269,29 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 			continue
 		}
 
-		// Get current weight
+		// Get current weight.
+		//
+		// A failed read is NOT a cold start. Skipping is the correct direction —
+		// falling through would re-seed a live edge at the 0.01 cold-start weight,
+		// which is the defect this branch exists to prevent — but the skip must
+		// not be silent. This fault never reaches UpdateAssocWeightBatch, so the
+		// AssocBatchSkipError machinery below never sees it; without reporting
+		// here, a pair whose 0x14 record is corrupt (a PERMANENT, KEY-SCOPED
+		// fault) would stop learning forever with nothing in Stats().Errors and
+		// nothing in the logs. Report it through the same error this function
+		// already returns, and log the pair at most once — the fault recurs in
+		// every flush window, so an unguarded log line here is a flood.
 		current, err := hw.store.GetAssocWeight(ctx, stats.ws, pair.a, pair.b)
 		if err != nil {
+			readErrs = append(readErrs, fmt.Errorf("pair %x->%x: %w", pair.a, pair.b, err))
+			if hw.shouldLogReadFault(pair) {
+				slog.Warn("hebbian: association weight read failed — pair skipped, not re-seeded; "+
+					"further failures for this pair are counted but not logged",
+					"vault_prefix", fmt.Sprintf("%x", stats.ws),
+					"src", fmt.Sprintf("%x", pair.a),
+					"dst", fmt.Sprintf("%x", pair.b),
+					"error", err)
+			}
 			continue
 		}
 
@@ -360,9 +392,55 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 		hw.OnWeightUpdate(cb.ws, cb.id, "association_weight", cb.old, cb.new)
 	}
 
+	// Fold the read failures into the same return. One mechanism covers both
+	// halves of "this pair did not learn this pass": a pair skipped by the store
+	// because its metadata was unreadable, and a pair skipped here because its
+	// weight was unreadable. errors.Join keeps errors.As reaching the batch's
+	// SkippedUpdates() through the combined error.
+	if len(readErrs) > 0 {
+		readErr := fmt.Errorf("hebbian: %d pair(s) skipped, current association weight unreadable: %w",
+			len(readErrs), errors.Join(readErrs...))
+		if batchErr != nil {
+			batchErr = errors.Join(batchErr, readErr)
+		} else {
+			batchErr = readErr
+		}
+	}
+
 	// Return the failure rather than swallowing it: Worker.Run counts a
 	// non-nil process error in Stats().Errors, which is the only place a
 	// persistence failure in this worker becomes observable. It does not stop
 	// the worker.
 	return batchErr
+}
+
+// readFaultLogCap bounds the suppression set. A read fault broad enough to
+// exceed it is already reported through processBatch's error every window; the
+// cap only stops an unbounded map from growing behind a transient, wide fault.
+const readFaultLogCap = 4096
+
+// shouldLogReadFault reports whether this pair's read failure has not been
+// logged yet, recording it if so.
+//
+// A corrupt Pebble block is permanent and key-scoped, and the worker flushes
+// every HebbianPassInterval, so the same pair fails in window after window.
+// Logging it once turns a silent bug into an operator-visible one without
+// trading it for a log line a minute, forever.
+//
+// Guarded because tests drive processBatch directly while the worker's own
+// goroutine is live; in production it is called from that goroutine only.
+func (hw *HebbianWorker) shouldLogReadFault(pair pairKey) bool {
+	hw.readFaultMu.Lock()
+	defer hw.readFaultMu.Unlock()
+	if hw.loggedReadFaults == nil {
+		hw.loggedReadFaults = make(map[pairKey]struct{})
+	}
+	if _, seen := hw.loggedReadFaults[pair]; seen {
+		return false
+	}
+	if len(hw.loggedReadFaults) >= readFaultLogCap {
+		return false
+	}
+	hw.loggedReadFaults[pair] = struct{}{}
+	return true
 }

@@ -14,7 +14,7 @@ import (
 // TestPointGetReadersAreCovered is a COMPLETENESS check, not a defect detector.
 // It asserts one decidable fact: every method in package storage whose body
 // calls ps.pointGet appears in absenceVsFailureCases, the behavioural table in
-// association_read_error_test.go.
+// read_absence_vs_failure_test.go.
 //
 // # Why this shape and not a source census for the bad idiom
 //
