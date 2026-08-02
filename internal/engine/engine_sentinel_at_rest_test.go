@@ -81,8 +81,21 @@ func TestCreatedAtFloor_IsAboveERFZeroTimeSentinel(t *testing.T) {
 //     way: the failed first recall populates the L1 cache, and computeComponents
 //     prefers the cache's lastAccessNs over eng.LastAccess. That self-masking is
 //     how this reached production.
-//   - A COLD cache. The store is brand new over the reopened DB, so no read of
-//     the patched records may happen before the assertion.
+//   - A COLD cache, and this property is STRONGER than "don't recall twice". Any
+//     read reaching storage.GetEngram masks the bug for THAT engram: GetEngram
+//     ends in ps.cache.Set, which stamps the entry's lastAccess with
+//     time.Now(), and that is the very value EngramLastAccessNs returns and
+//     computeComponents prefers over eng.LastAccess. So a plain read-by-id
+//     (muninn_read), a tree walk, an admin inspection — anything touching these
+//     engrams between the reopen and the assertion — turns the fixture green
+//     while the bug is fully present. Verified by sabotage: with the
+//     computeComponents guard deleted, adding a store.GetEngram loop over the
+//     three stamped IDs before the Activate call makes this test PASS. The mask
+//     is per record — reading only ONE of the three still fails, on the count
+//     assertion at 1 of 3 — so a partial read degrades the evidence silently
+//     rather than breaking it loudly. The store is brand new over the reopened
+//     DB precisely so that nothing has read them. Do NOT add a "sanity check the
+//     records are there" read before the recall.
 //   - Threshold left at 0, so the engine supplies COG-6's real weighted_sum
 //     default (0.5). Hardcoding a low threshold makes it pass against the bug.
 func TestRecall_SentinelLastAccessAtRest_NotSilentlyEmpty(t *testing.T) {

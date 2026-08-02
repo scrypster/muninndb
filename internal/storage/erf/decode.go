@@ -202,13 +202,24 @@ var ZeroTimeSentinelNanos = time.Time{}.UnixNano()
 //
 // Scope, stated precisely (the fix's other two parts cover different ground):
 // the SCORING repair is fully covered on its own by the
-// `IsZero() || Year() < MinPlausibleTimestampYear` guard in computeComponents,
-// since 1754 < 2000. What this decode-side repair uniquely buys is that existing
-// data RENDERS honestly — engine/tree.go omits last_accessed instead of printing
-// the 1754 string, and UpdateMetadata's two LastAccess.IsZero() guards start
-// firing. It is NOT the MCP staleness fix: augmentAnnotations reads
-// item.LastAccess, which is time.Time{}.UnixNano() either way, so that surface
-// needs its own year guard.
+// storage.IsUnsetTimestamp guards on the read side, since 1754 < 2000. What this
+// decode-side repair uniquely buys is that IsZero()-shaped consumers of a
+// DECODED time.Time start behaving — engine/tree.go omits last_accessed instead
+// of printing the 1754 string, and UpdateMetadata's two LastAccess.IsZero()
+// guards on the 0x22 index start firing.
+//
+// It buys nothing on any path that re-derives a wire integer from the decoded
+// value, because time.Time{}.UnixNano() IS ZeroTimeSentinelNanos — the repair is
+// invisible through that round trip by construction. Two live consequences,
+// stated rather than glossed as "renders honestly":
+//
+//   - MCP staleness needed its own year guard (augmentAnnotations reads
+//     item.LastAccess, unchanged by this function) — that one is FIXED.
+//   - mbp.ActivationItem.LastAccess still carries the sentinel to MCP, REST,
+//     gRPC and MBP, so `last_access` renders as 1754-08-30 in the very response
+//     where staleness is omitted as unknown. OPEN residual; making it absent
+//     needs a nullable wire field on four transports at once (obligation #3).
+//     Pinned by TestHandleRecall_UnknownLastAccess_RendersTheSentinelInstant.
 func decodeTimestamp(raw uint64) time.Time {
 	if int64(raw) == ZeroTimeSentinelNanos {
 		return time.Time{}

@@ -24,8 +24,10 @@ import (
 // The trap does not decay away on its own. #810's write-side fix only covers
 // writers that CREATE timestamps (see normalizeEngramTimes); the six
 // read-modify-write paths rewrite a pre-existing sentinel back verbatim, so a
-// vault cloned before the fix keeps it until TouchAccess or UpdateMetadata
-// happens to repair each record individually.
+// vault cloned before the fix keeps it until TouchAccess happens to repair each
+// record individually. TouchAccess is the ONLY repair path: UpdateMetadata is a
+// pass-through and three of its four callers carry a decoded LastAccess straight
+// back to disk — see normalizeEngramTimes' doc for the caller table.
 //
 // Related, and the reason a second concern closed clean: today a cloned vault
 // has NO 0x22 entries at all, so there are no orphaned index keys to reconcile.
