@@ -652,3 +652,47 @@ func TestGetRankingNeighbors_CacheDoesNotUnderServeALargerCap(t *testing.T) {
 		t.Fatalf("want all %d inbound edges, got %d", inbound, len(all[center]))
 	}
 }
+
+// TestRankingReverseEdges_DirectionalEdgeDoesNotConsumeCapSlot pins what
+// revAssocScanCap actually bounds: ACCEPTED edges, not keys scanned.
+//
+// The fixture is the hazard the doc argues about. A hub carries
+// revAssocScanCap*2 inbound DIRECTIONAL edges at a HIGH weight — the shape an
+// explicit relation is written in, once, at a fixed confidence — plus one
+// inbound RelCoActivated edge at a LOW weight, the shape a Hebbian edge starts
+// in. Reverse keys arrive weight-descending, so the co-activation edge sorts
+// BELOW every directional one.
+//
+// Because the cap counts accepted edges, the scan walks past all of them and
+// returns the co-activation edge. Turn the cap into a scanned-key budget and
+// this test goes red with the reason attached: the budget would be spent
+// entirely on directional keys and the only real neighbour would vanish.
+func TestRankingReverseEdges_DirectionalEdgeDoesNotConsumeCapSlot(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("directional-hub")
+
+	hub := NewULID()
+	for i := 0; i < revAssocScanCap*2; i++ {
+		mustWriteAssoc(t, store, ws, NewULID(), hub, 0.9, RelBelongsToProject)
+	}
+	hebbian := NewULID()
+	mustWriteAssoc(t, store, ws, hebbian, hub, 0.1, RelCoActivated)
+
+	got, err := store.GetRankingNeighbors(ctx, ws, []ULID{hub}, 20)
+	if err != nil {
+		t.Fatalf("GetRankingNeighbors: %v", err)
+	}
+	if !containsTarget(got[hub], hebbian) {
+		t.Fatalf("the one symmetric inbound edge was lost behind %d high-weight directional "+
+			"edges: GetRankingNeighbors(hub) = %v. revAssocScanCap must bound ACCEPTED edges, "+
+			"not keys scanned — a scanned-key budget fills with directional edges and hides "+
+			"exactly the Hebbian edges this union exists to surface.",
+			revAssocScanCap*2, targetsOf(got[hub]))
+	}
+	// ...and none of the directional edges leaked in alongside it.
+	if len(got[hub]) != 1 {
+		t.Errorf("GetRankingNeighbors(hub) returned %d edges, want exactly 1 (the symmetric one): %v",
+			len(got[hub]), targetsOf(got[hub]))
+	}
+}

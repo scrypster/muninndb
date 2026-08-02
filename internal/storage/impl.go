@@ -169,11 +169,51 @@ type revAssocCacheEntry struct {
 	truncated bool
 }
 
-// revAssocScanCap bounds how much reverse adjacency is scanned and cached per
+// revAssocScanCap bounds how many reverse edges are ACCEPTED and cached per
 // engram, independent of the caller's maxPerNode. It is comfortably above both
 // production ranking caps (phase4HebbianBoost 20, phase5Traverse 10) so a
-// cached entry serves either without a re-scan, while still bounding the work a
-// hub engram with thousands of inbound edges can cause.
+// cached entry serves either without a re-scan.
+//
+// # It bounds accepted edges, NOT keys scanned — and that is deliberate
+//
+// An inbound edge that fails BidirectionalForRanking is skipped WITHOUT
+// consuming a cap slot, so the scan for one id is O(inbound degree), not
+// O(cap). A hub whose inbound edges are all directional is read in full and
+// returns nothing for the cost. Measured by
+// BenchmarkRankingReverseEdges_DirectionalInbound (Apple M5 Max, one cold
+// GetRankingNeighbors call for a single hub id, maxPerNode 20):
+//
+//	directionalInbound0/cold             4.5 µs   (0 edges returned)
+//	directionalInbound1000/cold          65 µs    (0 edges returned)
+//	directionalInbound5000/cold         476 µs    (0 edges returned)
+//	directionalInbound5000/coldFwdOnly  3.5 µs    (pre-COG-31 baseline)
+//	symmetricInbound1000/cold            15 µs
+//	symmetricInbound5000/cold            14 µs    (flat — the cap binds)
+//
+// ~106x for one id, returning zero edges. The shape is realistic: a project or
+// spec node that every memory points at with RelBelongsToProject or
+// RelReferences. phase5Traverse pays it at every BFS level whenever
+// HopDepth > 0.
+//
+// Making the cap count KEYS SCANNED would bound that work, and it was
+// considered and rejected. Reverse keys arrive weight-DESCENDING, and the two
+// edge classes do not share a weight distribution: explicit directional
+// relations are written once at a high fixed confidence weight, while the
+// RelCoActivated edges this union exists to surface start low and grow with
+// use. A scanned-key budget on a directional hub would therefore fill itself
+// with the high-weight directional edges and systematically hide exactly the
+// Hebbian edges the feature was built to reach — a silent, biased loss of real
+// neighbours (principle #2) traded for a bounded latency win. Pinned by
+// TestRankingReverseEdges_DirectionalEdgeDoesNotConsumeCapSlot; change the
+// semantics and that test tells you what you are giving up.
+//
+// The residual cost is a cold-cache scan amortized over the 2s revAssocCache
+// TTL. Sizing it against whole-recall p50 depends on the deployment: measured
+// end-to-end recall is ~26 ms and embedder-dominated, where 476 µs is ~2%; a
+// deployment supplying caller-side embeddings has no embedder in the path and
+// a far smaller denominator, where the same 476 µs is a large fraction of the
+// call. Bounding the scan without the hiding hazard — a relType-aware reverse
+// index, or a per-engram directional-degree hint — is its own increment.
 const revAssocScanCap = 64
 
 // assocCacheTTL is how long association lists are cached.

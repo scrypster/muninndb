@@ -411,3 +411,45 @@ dedup map with a linear scan over a list bounded by `maxPerNode`, brought the un
 cost to an adjacent operation" is a claim about the adjacent operation's implementation,
 not its signature — and a per-item map allocation on a path that runs 50 times per query
 is usually the largest line in the profile.**
+
+**A latency budget is only meaningful with its denominator attached (#800).** The COG-31
+increment pre-committed a whole-recall p50 kill threshold expressed against a ~0.5 ms
+figure. Re-measured end to end through `Engine.Activate` with the real embedder — 60
+recalls per arm, 4 runs per commit — cold p50 moved 26.14 ms → 26.49 ms (+1.3%, inside the
+run-to-run spread), and p99 on IDENTICAL code varied 47.5–261.6 ms across four runs, so p99
+is not a usable gate at this sample size. The gate is cleared, but the number that cleared
+it is **embedder-dominated**: whole-recall p50 is ~26 ms, not ~0.5 ms. A storage-layer cost
+of a few hundred microseconds is ~1% of that and ~55% of the other, and **a deployment that
+supplies caller-side embeddings sits at the other one** — no embedder in the path, so the
+same absolute cost is a large fraction of the call. **Principle: a percentage-of-p50 budget
+silently encodes a deployment shape. State the absolute cost and the denominator you
+measured it against, or a cleared gate will be read as "negligible everywhere".**
+
+**Two caches keyed alike are still two caches: never share one dedup set between them
+(#800).** `UpdateAssocWeightBatch` invalidated the forward cache on each update's `Src` and
+the reverse cache on its `Dst`, deduplicating both through ONE `seen` set. The keys are the
+same 24-byte `(vault, engramID)` shape, so an engram appearing in BOTH roles inside one
+batch had its second eviction suppressed and one cache served pre-batch weights for the
+rest of the 2s TTL. That is the common case, not a corner: `HebbianWorker.processBatch`
+emits every C(n,2) pair of a co-activated set, so any three co-activated engrams X<Y<Z put
+Y in both roles — every recall returning ≥3 results. It also regressed a path the increment
+did not touch (`GetAssociations`, correct at the parent commit), which is the general
+hazard: **adding a second cache to an existing invalidation site is a change to the FIRST
+cache's coherence, even when the reader is byte-for-byte unmodified.** Dedup sets are
+per-cache, and the pin belongs on both sides.
+
+**`revAssocScanCap` bounds accepted edges, not keys scanned — deliberately (#800).** An
+inbound edge failing `BidirectionalForRanking` is skipped without consuming a cap slot, so
+one cold `GetRankingNeighbors` for a hub is O(inbound degree): measured 4.5 µs at degree 0,
+65 µs at 1,000 and 476 µs at 5,000 directional inbound edges, returning ZERO edges for that
+cost, against 3.5 µs for the pre-change forward-only read; the symmetric arm stays flat
+(~14 µs) because there the cap binds. Turning it into a scanned-key budget was considered
+and rejected: reverse keys arrive weight-descending and the two edge classes do not share a
+weight distribution — explicit directional relations are written once at a high fixed
+confidence weight, while the `RelCoActivated` edges this union exists to surface start low
+and grow with use — so a key budget on a directional hub fills with directional edges and
+systematically hides exactly the Hebbian edges the feature was built to reach. **Principle:
+a "work bound" that truncates an ordered stream is only neutral if the ordering is
+uncorrelated with what you are filtering for. Here it is anti-correlated, so the bound
+would trade a bounded latency win for a silent, biased loss of real neighbours.** A
+relType-aware reverse index, or a per-engram directional-degree hint, is its own increment.

@@ -361,7 +361,10 @@ func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte
 			}
 			// Accepted edges arrive weight-descending, so stopping at the cap
 			// keeps the heaviest ones. Filtered-out (directional) edges
-			// deliberately do not consume a slot.
+			// deliberately do not consume a slot — which means this loop is
+			// O(inbound degree), NOT O(scanCap), for a directional hub. That
+			// cost is measured and the trade is argued at revAssocScanCap;
+			// read it before turning this into a scanned-key budget.
 			if scanCap > 0 && len(assocs) >= scanCap {
 				truncated = true
 				break
@@ -878,21 +881,34 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 	}
 	ps.replicateBatch(batch)
 
-	// Invalidate assoc cache for all updated source nodes.
-	// Deduplicate to avoid redundant removals when a source appears multiple times.
-	// Skipped sources are invalidated too: dropping a cache entry can only cost a
-	// re-read, and the cached list for a source whose read just failed is exactly
-	// the entry least worth trusting.
-	seen := make(map[[24]byte]struct{}, len(updates))
+	// Invalidate the forward cache for every updated source and the reverse
+	// cache for every updated destination.
+	// Deduplicate to avoid redundant removals when an engram appears in the
+	// same role more than once. Skipped pairs are invalidated too: dropping a
+	// cache entry can only cost a re-read, and the cached list for a pair whose
+	// read just failed is exactly the entry least worth trusting.
+	//
+	// The two dedup sets are SEPARATE, and that is the whole point: the caches
+	// are keyed alike but hold different things, so one shared set makes an
+	// engram appearing in BOTH roles inside one batch lose its second eviction
+	// — whichever cache is reached second keeps serving pre-batch weights for
+	// the rest of the 2s TTL. That shape is the common case, not the corner
+	// one: HebbianWorker.processBatch emits every C(n,2) pair of a co-activated
+	// set, so for any three co-activated engrams X<Y<Z one batch carries (X,Y)
+	// and (Y,Z) and Y is both a Dst and a Src. Pinned from both sides by
+	// TestUpdateAssocWeightBatch_ForwardCacheEvictedWhenEngramIsAlsoDst and
+	// TestUpdateAssocWeightBatch_ReverseCacheEvictedWhenEngramIsAlsoSrc.
+	seenFwd := make(map[[24]byte]struct{}, len(updates))
+	seenRev := make(map[[24]byte]struct{}, len(updates))
 	for _, update := range updates {
 		ck := assocCacheKey(update.WS, update.Src)
-		if _, ok := seen[ck]; !ok {
-			seen[ck] = struct{}{}
+		if _, ok := seenFwd[ck]; !ok {
+			seenFwd[ck] = struct{}{}
 			ps.assocCache.Remove(ck)
 		}
 		rk := assocCacheKey(update.WS, update.Dst)
-		if _, ok := seen[rk]; !ok {
-			seen[rk] = struct{}{}
+		if _, ok := seenRev[rk]; !ok {
+			seenRev[rk] = struct{}{}
 			ps.revAssocCache.Remove(rk)
 		}
 	}

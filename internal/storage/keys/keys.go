@@ -409,7 +409,13 @@ func AssocRevRangeStart(ws [8]byte) []byte {
 // last-byte increment. PrefixUpperBound carries across every byte, and because
 // byte 0 here is the 0x04 prefix (never 0xFF) it always produces a bound
 // strictly above the lower bound — including for an all-0xFF workspace
-// prefix, where it yields 0x05|00..00. The open-coded loop in
+// prefix. Note what it actually returns there: it increments the FIRST
+// NON-0xFF BYTE FROM THE RIGHT and leaves the trailing 0xFFs in place, so an
+// all-0xFF workspace yields 0x05|FF..FF, not 0x05|00..00. The bound is still
+// strictly above the lower bound, which is the property STO-11 needs; the
+// surplus range it admits is 0x05-prefixed keys, which no reverse-association
+// scan can mistake for its own because every consumer additionally checks the
+// 25-byte per-id prefix (see rankingReverseEdges). The open-coded loop in
 // AssocFwdRangeEnd stops at index 1 and therefore does NOT carry out of the
 // workspace bytes; see the note there.
 func AssocRevRangeEnd(ws [8]byte) []byte {
