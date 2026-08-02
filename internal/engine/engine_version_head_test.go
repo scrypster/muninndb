@@ -908,6 +908,13 @@ func TestVersionHead_ShadowsDoNotEnterPerQueryNormalization_Saturating(t *testin
 	// is absent from the recency window) and both arms stay deterministic.
 	h.recall("vacuum sweeper runs nightly against telemetry rows in every shard")
 	h.eng.waitWriteTimeIdle()
+	// The Hebbian priming rides the ACTIVATION log, not the write-time
+	// workers: waitWriteTimeIdle alone leaves a window where the priming
+	// recall's log entry has not reached the recency structure phase 4 reads,
+	// and on a loaded CI runner the fixture guard fires with HebbianBoost=0
+	// (observed once in CI, never in 15 local runs — the #722 class). Drain
+	// the log deterministically instead of racing it.
+	h.eng.activation.WaitLogIdle()
 
 	// FTS-only weights: under the noop embedder ContentMatch is capped at the
 	// FTS weight, and at the default 0.4 even the full 3.24x Hebbian prior
