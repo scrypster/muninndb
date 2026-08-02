@@ -94,7 +94,7 @@ The ACTIVATE pipeline has **6 phases**:
 | **Phase 3** | RRF Fusion | Reciprocal Rank Fusion merges all candidate lists into a unified scored set |
 | **Phase 4** | Hebbian Boost | Boosts candidates that were co-activated with previous results (learned associations) |
 | **Phase 4.5** | PAS Transition Boost | Boosts candidates that sequentially followed previous activations (predictive) |
-| **Phase 5** | BFS Traversal | Walks the association graph from top candidates, discovering related memories up to N hops deep |
+| **Phase 5** | BFS Traversal | Walks the association graph from top candidates, discovering related memories up to N hops deep. **Currently inert:** its hop threshold has been above the mechanism's own score ceiling since the initial commit, so on real corpora it discovers nothing (measured, #801 — see `docs/internals/decision-record.md`). The association graph reaches your results through Phase 4, not through hops. |
 | **Phase 6** | Final Scoring + Filter | Computes ACT-R score, applies filters, ranks, truncates, and builds response |
 
 #### Scoring Models
@@ -111,6 +111,9 @@ The ACTIVATE pipeline has **6 phases**:
 - Recency
 
 #### Traversal Profiles (for Phase 5 BFS)
+
+*Phase 5 emits no candidates on real corpora today (#801), so a profile choice currently has no observable effect on recall. Documented as configured, not as effective.*
+
 - **default** — balanced, contradiction edges dampened
 - **causal** — follow cause/effect/dependency chains
 - **confirmatory** — find supporting evidence, contradiction edges excluded
@@ -120,9 +123,9 @@ The ACTIVATE pipeline has **6 phases**:
 
 #### Recall Modes (MCP shortcuts)
 - `semantic` — high-precision vector search (threshold=0.3)
-- `recent` — recency-biased, 1 hop (threshold=0.2)
+- `recent` — recency-biased, 1 hop (threshold=0.2; hop count has no effect today, #801)
 - `balanced` — engine defaults
-- `deep` — exhaustive graph traversal, 4 hops (threshold=0.1)
+- `deep` — lowest threshold (0.1), 4 hops (hop count has no effect today, #801)
 
 #### Filtering
 - `created_after` / `created_before` — time bounds
@@ -337,7 +340,7 @@ Every cognitive behavior is tunable per vault:
 | `hebbian_enabled` | true | bool | Hebbian co-activation learning |
 | `temporal_enabled` | true | bool | Temporal decay scoring |
 | `auto_link_neighbors` | true | bool | Semantic neighbor auto-linking on write |
-| `hop_depth` | 2 | 0–8 | BFS traversal depth |
+| `hop_depth` | 2 | 0–8 | BFS traversal depth. Accepted and stored, but Phase 5 emits nothing on real corpora (#801), so this value does not currently change any recall result |
 | `semantic_weight` | 0.6 | 0–1 | Vector similarity weight |
 | `fts_weight` | 0.3 | 0–1 | BM25 full-text weight |
 | `relevance_floor` | 0.05 | 0–1 | Minimum activation threshold |
@@ -361,7 +364,7 @@ Every cognitive behavior is tunable per vault:
 - **reference** — long-term knowledge, minimal decay, strong Hebbian, autonomous behavior
 - **scratchpad** — short-lived, high recency bias, no Hebbian, PAS off, selective behavior
 - **working** — default cognition (Hebbian + PAS on) with 7-day auto-eviction and selective behavior; for shared workflow scratch vaults, pair with `multi_user` (RFC #597)
-- **knowledge-graph** — deep traversal (4 hops), strong Hebbian (8.0 scale), autonomous behavior
+- **knowledge-graph** — deep traversal (4 hops — inert today, #801), strong Hebbian (8.0 scale), autonomous behavior
 
 ### Behavior Modes (How the AI Uses Memory)
 

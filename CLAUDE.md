@@ -25,7 +25,11 @@ Licensed BSL 1.1.
 The three words in the promise map to real subsystems:
 - **strengthens with use** → Hebbian co-activation learning, LTP, access-driven ACT-R base-level.
 - **fades when unused** → Ebbinghaus/ACT-R temporal decay, the background pruner, association decay + archival.
-- **pushes to you when it matters** → recall's predictive activation (PAS), entity/associative traversal, confidence-weighted scoring.
+- **pushes to you when it matters** → recall's predictive activation (PAS), the Hebbian
+  association read in ranking (`phase4HebbianBoost`), entity boost, confidence-weighted scoring.
+  Note what is NOT in that list: BFS **traversal** (`phase5Traverse`) has emitted nothing for the
+  life of the product and is strictly dominated by raising `CandidatesPerIndex` — measured, #801,
+  see the decision record. The association graph contributes through phase 4; hops do not.
 
 If a change makes memory behave less like this — recall that returns silently-wrong
 results, decay that never fires, learning that displaces genuine matches — it is wrong even

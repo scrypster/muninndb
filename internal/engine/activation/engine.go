@@ -1563,6 +1563,22 @@ func (e *ActivationEngine) phase5Traverse(
 		return nil
 	}
 
+	// INERT — this phase has never emitted a candidate on a real corpus (#801).
+	// minHopScore and the `baseScore: seed.rrfScore` seeding below both date to
+	// the initial commit, where the fusion summed three lists and the best
+	// conceivable hop scored 1/41+1/61+1/121 = 0.049048, x1.0 x0.7 = 0.034334
+	// against a 0.05 gate: unreachable by construction. Today's unfiltered
+	// ceiling is 1/41+1/61+1/121+1/51 = 0.0686559 (the time and tag lists only
+	// populate under a filter), so a hop needs weight x boost >= 1.041 while
+	// weight <= 1.0 and the default profile only dampens. Measured on a real
+	// 3,458-engram production vault with 127,798 edges: 0 hops on 150/150
+	// queries, and at a fully-open gate traversal is strictly dominated by
+	// raising CandidatesPerIndex (0/150 wins at cap 2+, p < 1e-45, replicated
+	// on a second vault). Do NOT "fix" the constant — no threshold formulation
+	// is supported, and the reasoning, the discarded circular control and the
+	// one open alternative (ACT-R-seeded traversal, with a pre-committed
+	// acceptance rule) are in docs/internals/decision-record.md (#801).
+	// Pinned by TestPhase5Traverse_InertAtTheMeasuredSeedCeiling.
 	const (
 		hopPenalty      = 0.7
 		minHopScore     = 0.05
