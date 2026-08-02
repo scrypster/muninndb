@@ -81,6 +81,22 @@ func (w *Worker[T]) EnableAdaptiveScaling() {
 	w.adaptiveScaling = true
 }
 
+// SetFlushInterval overrides the active-state flush interval (maxWait) chosen
+// at construction. It must be called BEFORE Run, which reads the value once to
+// build its ticker.
+//
+// This is a test seam: it lets a test drive a worker whose production interval
+// is tens of seconds (ContradictWorker: 30s) on a sub-second clock, so the
+// flush behaviour can be asserted deterministically instead of by sleeping
+// past a production interval. Production never calls it.
+func (w *Worker[T]) SetFlushInterval(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	w.baseMaxWait = d
+	w.maxWait.Store(int64(d))
+}
+
 // SetThresholds overrides the default idle/dormant thresholds. Used in tests.
 // Poll intervals are derived from the thresholds so state re-evaluation happens
 // fast enough for the test to observe transitions without waiting minutes.
@@ -208,8 +224,25 @@ func (w *Worker[T]) Run(ctx context.Context) error {
 				return nil
 			}
 			w.lastItem.Store(time.Now().UnixNano())
-			w.state.Store(int32(WorkerStateActive))
-			ticker.Reset(time.Duration(w.maxWait.Load()))
+			// Reset the flush ticker ONLY on the transition INTO Active — i.e.
+			// when leaving idle/dormant, where the ticker is running at the
+			// slow poll interval and must be sped back up.
+			//
+			// Resetting it on EVERY item turned "flush at least every maxWait"
+			// into "flush after maxWait of SILENCE" (#764 D1). Engine.Write
+			// submits a ContradictItem on every remember, so an agent writing
+			// anything at all more often than maxWait held the flush off until
+			// the batch reached batchSize (50) — which an ordinary session
+			// never does. The declared contradiction stayed undetected
+			// indefinitely, and ConfidenceWorker (the same generic) starved
+			// identically, so #747's "the penalty arrives one interval later"
+			// was in practice "the penalty never arrives".
+			//
+			// Swap keeps the dormant→active speed-up the unconditional reset
+			// used to provide, without the debounce.
+			if WorkerState(w.state.Swap(int32(WorkerStateActive))) != WorkerStateActive {
+				ticker.Reset(time.Duration(w.maxWait.Load()))
+			}
 			batch = append(batch, item)
 			if len(batch) >= w.batchSize {
 				flush(ctx)

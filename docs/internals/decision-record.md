@@ -229,3 +229,133 @@ vault's OWN data (self-calibrating — #711 weights IDF from the vault's own cor
 floor should self-measure each vault's anisotropy baseline over its own embeddings) or exposes a
 per-vault override; model/cold-start defaults are hints, never fixed law. Ship mechanisms and
 hints, not other people's answers.**
+
+### A config value must denominate a unit someone can reason about (assoc decay / #762, 2026-08-01)
+
+Association decay was `w ← w × AssocDecayFactor`, applied "once per prune pass" at 0.95.
+Nobody ever wrote down what a pass was. The git history says why: `runPruneWorker` and its
+60 s period arrived in `e51b985` as an *engram* sweep, where 60 s is a responsiveness
+choice; `79605b2` bolted association decay into the same loop the next day and edited only
+the doc comment. So the unit of decay became an interval owned by an unrelated worker —
+1329 passes/day, a 14.6-minute half-life, `0.95^1329 ≈ 2.4e-30` per day. The observable in
+#762 was the store-wide **maximum** association weight sitting at 0.05, the pruning floor.
+"Fades when unused" was implemented as "fades unless used every five minutes," and the
+5-minute grace window turned the curve into a cliff. Reinforcement could not compete:
+holding one edge flat needed ~6,850 signal units/day, roughly 20–70 co-retrievals per
+minute forever.
+
+The fix decays against **elapsed wall-clock time from state the edge already carries**:
+`w_new = min(w_old, max(peak·0.05, peak·2^(−Δt/H)))`, `Δt = now − lastActivated` (COG-27).
+Both inputs were already in the 26-byte association value, so it cost no keyspace entry, no
+value-format change, and no migration — which is why this shape won over the obvious
+alternative (`w ← w·f^(elapsed/interval)` with a persisted per-vault last-decay watermark).
+That alternative needed a new Pebble prefix, a Tier-3 keyspace review, `ClearVault`
+plumbing, a downtime-debt cap, and per-node watermarks that never converge — and it stays
+path-dependent, so #760 gets worse rather than better.
+
+Three things this settles beyond the immediate bug:
+
+- **A rate needs a unit.** `assoc_decay_factor` was kept as the enable/disable switch (COG-16
+  unchanged, `scratchpad`'s 0 still disables with no special case) and the rate moved to
+  `assoc_half_life_days`. An explicit legacy factor in (0,1) is reinterpreted **per-day**
+  with a one-time WARN naming the derived half-life — because "per pass" was never a
+  meaning, only a number, and preserving the observed behaviour would mean preserving the
+  bug. An explicit factor ≥ 1 carries no rate at all ("on, but weights never move"): it
+  resolves half-life 0 and decay skips with its own truthful WARN — falling through to the
+  preset's 30 days would run decay at a rate the operator explicitly declined and log a
+  "derived" value that was never derived.
+- **Prefer the clamp you cannot write around.** "Decay never raises a weight" is a pair of
+  guards, not a policy comment (principle #3): the drop guard (`drop = w_old − ceiling`,
+  write nothing unless `drop ≥ ε`) covers every path where the ceiling is the new weight,
+  and a post-floor guard (`newW ≥ oldW` after the floor/archive block ⇒ no write) covers
+  the floor branch, which assigns `dynamicFloor` and — the adversarial refute proved it
+  with an executable test — could raise a sub-floor weight (0.02 → 0.045) and rewrite a
+  floored edge's 5 keys every pass forever. The first draft claimed the drop guard alone
+  made an increase unrepresentable; it did not, because the floor branch runs after it.
+  Two earlier lessons repeat here: the first draft also had the `min` and the epsilon skip
+  as separate expressions of the same clamp, and deleting the `min` left the test suite
+  green because the epsilon check silently covered for it. A guard whose removal nothing
+  notices is not a guard — and a claim of "no branch can do X" is only as good as the last
+  branch added below it.
+- **The damage is not retroactively repaired, on purpose.** Edges already at the floor stay
+  there and re-learn through Hebbian growth. A one-shot re-anchoring pass (`w ← ceiling` for
+  floored edges with co-activations) would fabricate weights that were never earned. Left as
+  a separate, opt-in decision, not shipped by default.
+
+**Principle: a configuration value must denominate a unit the operator can reason about. If
+the unit is an implementation detail of an unrelated component, the value is not a setting —
+it is a coincidence, and changing that component silently changes the behaviour of the
+system.**
+
+### Recall resolves a declared version chain to its head before ranking (#763, 2026-08-01)
+
+Round-6 hands-on evaluation, call 18: immediately after `muninn_evolve`, the natural
+question about the evolved decision returned only an adjacent memory and omitted the
+freshly evolved decision entirely. A rephrase in deep mode found it. The evaluator's
+framing — *"a memory system that stores truth but fails to retrieve it under a natural
+phrasing is not dependable enough to drive autonomous decisions"* — made this the only
+blocker between that evaluator and primary-memory use.
+
+**The diagnosis was an ORDERING bug, not a scoring, threshold or embedding bug**, and
+saying so mattered: three plausible-looking fixes were rejected on it. `EvolveAt`
+soft-deletes its predecessor, but nothing removes that predecessor from HNSW ("HNSW has no
+delete method") or from FTS — its vector and its postings are exactly what the user's OLD
+wording matches. Phase 6's lifecycle cut discards it *before it is ever scored*, so the
+relevance the stale wording earned is thrown away rather than redirected, and
+`applySupersession` — which already does the right thing for the visible stale case — says
+so in its own doc comment: *"evolve() soft-deletes its predecessor, so those never reach
+here."* The visibility cut runs before the substitution phase, and the substitution phase
+can only see what survived the cut.
+
+**Rejected alternatives, each for a stated reason.**
+
+- *Substitute at candidate assembly (phase 2), as the issue's sketch says literally.* At
+  phase 2 there is no evidence, no score and no visibility resolution — we would inject a
+  head for every superseded engram any index happened to return.
+- *Re-score the head against the query and gate it on its own absolute.* The successor's
+  whole purpose is that its wording changed; gating it on its own absolute reproduces call
+  18 exactly, one layer deeper.
+- *Inject at `shadow.Final − ε`, or cap the head below rank 1.* Superficially conservative,
+  actually incoherent: the existing ε orders a head against its own VISIBLE stale twin,
+  which here is not in the set. A ranking penalty on a fact the author declared current is
+  a silent statement that we trust the declaration less than we say we do. If the
+  declaration is untrustworthy the substitution should not happen at all, not at a discount.
+- *Inherit the predecessor's embedding onto the successor to close the fresh-evolve
+  window.* **Refuted, not deferred.** It would make the successor semantically
+  indistinguishable from the fact it replaces (matching the OLD wording forever, silently,
+  because a vector carries no provenance), swap the vector mid-life when the real embedding
+  lands so identical queries return different results with nothing explaining it, and
+  poison every downstream consumer of the vector — dedup, consolidation similarity,
+  `similar_entities`, Hebbian neighbour selection — with a value that is not a measurement
+  of that engram's text. Substitution already covers the window correctly and for free.
+- *A per-vault plasticity kill-switch.* Deliberately not offered: a toggle for a
+  correctness invariant invites "turn it off when it misfires" instead of fixing the
+  misfire, and presets are a hand-duplicated drift surface. If the precision gates cannot
+  be met, the design is wrong and must not ship behind a flag.
+
+**Two findings that came out of building it, both raising scope rather than lowering it
+(principle #9).**
+
+1. *`EvolveAt` never woke the retroactive embed processor.* `Write` calls the `onWrite`
+   hook after commit; evolve was the one write path that did not, so the successor waited
+   for the processor's ticker, which backs off geometrically to a 3-minute ceiling on an
+   idle vault. On a quiet vault a freshly evolved memory could be semantically unindexed
+   for up to three minutes after the commit — the largest single contributor to the
+   fresh-evolve retrieval window carried since round 4, and a one-line fix.
+2. *Multi-hop evolve chains could never resolve at all.* The design doc asserted A→B→C
+   returns C, and separately asserted that a soft-deleted successor voids the supersession.
+   Both are in the shared walker, and for evolve chains they contradict: every intermediate
+   an evolve leaves behind IS soft-deleted, so the walk read the first one as "retracted"
+   and voided the whole chain — A→B→C returned nothing, which is #763 again with an extra
+   hop. Resolved by distinguishing the two states with the same closed-`ValidUntil`
+   signature the rest of the increment uses, which is exact rather than heuristic:
+   supersession soft-deletes AND stamps atomically, a plain `muninn_forget` leaves the
+   stamp open, and `forget(not_true_since)` stamps without soft-deleting.
+
+**Principle: when the fix for a retrieval miss is "return something we did not retrieve",
+the burden of proof is the false-positive rate, and it must be measured on the corpora
+that already exist rather than argued.** The precision half is pinned by zero shadows
+across 16 nonsense probes with a declared chain grafted into the abstention corpus, an
+adjacent-topic corpus with a positive control, and an exact-equality detector for
+normalization leakage — because a substitution that fires on the wrong topic is the
+silently-wrong class this project ranks worst, arriving at the score the RIGHT topic earned.

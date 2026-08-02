@@ -58,6 +58,18 @@ flag that it needs the refute pass. The rules below are how you carry the rubric
 4. **Verify claims, don't trust the PR description.** If it says "closes the race" / "all
    green" / "no behavior change," confirm it yourself.
 
+5. **Block any client, vault, or person identifier in committed content.** This repo is
+   public. Scan the diff — source, tests, code comments, design records, fixtures, commit
+   message, and **filenames** — for the name of a real vault, client, tenant, fund, product,
+   or person, and for pricing or commercial terms. Measurements are welcome; the corpus name
+   is not. "Measured on a real 3,296-memory production vault" is correct; naming the vault is
+   a blocker, not a nit.
+
+   Treat it as unfixable-after-the-fact: #715 put a vault name on `origin/develop` and #734
+   scrubbed the tip a day later, but the history is public permanently. **A scrub of the tip is
+   not a scrub.** This is one of the few findings where "it's only a name" is not a reason to
+   downgrade severity — the cost is irreversible and the fix before merge is one word.
+
 ## Routing — apply the invariant sets that match what the diff touches
 
 A PR often touches more than one. Load `docs/internals/invariants.md` and apply every group

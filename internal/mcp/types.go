@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/engine"
+	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // JSON-RPC 2.0 envelope types
@@ -80,20 +81,51 @@ type Memory struct {
 	// (COG-26's honesty backstop — see activation.ScoreComponents.
 	// SemanticSimilarityRaw). Lets an operator see the raw signal for a match
 	// that a low VectorScore made look weak or that abstained entirely.
-	VectorScoreRaw float64   `json:"vector_score_raw,omitempty"`
-	EntityBoost    float64   `json:"entity_boost,omitempty"`
-	Confidence     float32   `json:"confidence"`
-	Why            string    `json:"why,omitempty"`
-	Tags           []string  `json:"tags,omitempty"`
-	State          string    `json:"state,omitempty"`
-	Type           string    `json:"type"`                 // canonical MemoryType label ("fact", "decision", ...); always present
-	TypeLabel      string    `json:"type_label,omitempty"` // writer-supplied free-form label, e.g. "architectural_decision"
-	CreatedAt      time.Time `json:"created_at"`
-	LastAccess     time.Time `json:"last_access"`
-	AccessCount    uint32    `json:"access_count,omitempty"`
-	Relevance      float32   `json:"relevance,omitempty"`
-	SourceType     string    `json:"source_type,omitempty"`
-	Trust          string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
+	VectorScoreRaw float64 `json:"vector_score_raw,omitempty"`
+	EntityBoost    float64 `json:"entity_boost,omitempty"`
+	// AbsoluteScore and ContentMatch are #773. Both already existed on
+	// activation.ScoreComponents and on the MBP/REST wire, and BOTH were
+	// structurally invisible to every MCP agent — reachable only inside
+	// annotations.substitution_basis, i.e. only on a COG-28 substituted row.
+	//
+	// AbsoluteScore is Raw BEFORE the per-query 1/maxRaw rescale, so unlike
+	// Score it is comparable ACROSS queries: 0.9 means the same thing on a
+	// good query and a garbage one. ContentMatch is the aboutness term
+	// (w_sem*semCal + w_fts*ftsCoverage) the relevance calibration is actually
+	// stated on. They are the audit trail behind RelevanceBand — the honesty
+	// backstop must be readable without a second tool call, exactly as
+	// vector_score_raw is for COG-26.
+	AbsoluteScore float64 `json:"absolute_score,omitempty"`
+	ContentMatch  float64 `json:"content_match,omitempty"`
+	// RelevanceBand is #773's ABSOLUTE relevance band for this row:
+	// strong | moderate | weak | filter_match | uncalibrated. Recall always
+	// sets it; muninn_read never does (this struct is shared, hence omitempty).
+	//
+	// Read it, NOT `score`: score is renormalized against this query's own best
+	// candidate, so the top row is near 1.0 on EVERY query, including one whose
+	// answer this vault does not contain. And NOT `confidence`: that is belief
+	// that the stored fact is TRUE (COG-10), not a measure of how well it
+	// matched. `relevance` below is a third thing again — the engram's stored
+	// decay/pruning strength.
+	//
+	// Deliberately TOP-LEVEL rather than inside Annotations: convert.go's
+	// "allocate an annotations object at all" predicate has already silently
+	// dropped a field once (#764). A top-level field cannot be dropped by it.
+	RelevanceBand string `json:"relevance_band,omitempty"`
+	// RelevanceBandBasis names WHY, for filter_match and uncalibrated only.
+	RelevanceBandBasis string    `json:"relevance_band_basis,omitempty"`
+	Confidence         float32   `json:"confidence"`
+	Why                string    `json:"why,omitempty"`
+	Tags               []string  `json:"tags,omitempty"`
+	State              string    `json:"state,omitempty"`
+	Type               string    `json:"type"`                 // canonical MemoryType label ("fact", "decision", ...); always present
+	TypeLabel          string    `json:"type_label,omitempty"` // writer-supplied free-form label, e.g. "architectural_decision"
+	CreatedAt          time.Time `json:"created_at"`
+	LastAccess         time.Time `json:"last_access"`
+	AccessCount        uint32    `json:"access_count,omitempty"`
+	Relevance          float32   `json:"relevance,omitempty"`
+	SourceType         string    `json:"source_type,omitempty"`
+	Trust              string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
 
 	// Importance is the use-time EffectiveImportance in [0,1]; always present.
 	// ImportanceSource says where it came from: "explicit" (caller-asserted at
@@ -151,7 +183,47 @@ type MemoryAnnotations struct {
 	VersionCluster       string `json:"version_cluster,omitempty"`
 	NewestOfCluster      bool   `json:"newest_of_cluster,omitempty"`
 	ClusterSize          int    `json:"cluster_size,omitempty"`
-	LastVerified         string `json:"last_verified,omitempty"` // RFC3339
+	// SubstitutedFor / SubstitutionBasis / ChainTruncated / HeadNotIndexedYet
+	// are COG-28 version-head substitution (#763) — ASSERTED, from a declared
+	// RelSupersedes chain. Siblings of SupersededBy/CurrentVersion above, and
+	// explicitly NOT part of the advisory PossiblySupersededBy block.
+	//
+	// SubstitutedFor names the older, superseded memory your query's wording
+	// actually matched: this memory replaced it, so recall returned or boosted
+	// this one instead. On a row whose own wording did NOT match, the reported
+	// score AND components are the PREDECESSOR's measurements; on a row that
+	// matched on its own but was raised to the predecessor's stronger score,
+	// only the score is the predecessor's — the components remain this
+	// memory's own. SubstitutionBasis repeats the predecessor's load-bearing
+	// measurements in both cases so the score's origin is unmissable.
+	// ChainTruncated: the version chain was longer than the walk limit, so this
+	// may not be the very latest version. HeadNotIndexedYet: this memory has no
+	// embedding yet (indexing pending) — "not indexed", not "not relevant".
+	SubstitutedFor    string             `json:"substituted_for,omitempty"`
+	SubstitutionBasis *SubstitutionBasis `json:"substitution_basis,omitempty"`
+	ChainTruncated    bool               `json:"chain_truncated,omitempty"`
+	HeadNotIndexedYet bool               `json:"head_not_indexed_yet,omitempty"`
+	// UnresolvedContradiction is COG-29 (#764) — ASSERTED, from a declared
+	// `contradicts` link that nothing has resolved. This memory is declared to
+	// disagree with another one, so it must NOT be read as the answer without
+	// checking this annotation: its score is demoted 10% below its earned
+	// value, and results stay score-ordered (near-tied rivals land adjacent;
+	// a clearly stronger match keeps its rank).
+	// Resolve it with muninn_evolve, muninn_forget(not_true_since=…),
+	// or muninn_link(relation="supersedes"). Distinct from the advisory
+	// conflicts_with above, which is a heuristic annotate=true signal.
+	UnresolvedContradiction *mbp.ContradictionConflict `json:"unresolved_contradiction,omitempty"`
+	LastVerified            string                     `json:"last_verified,omitempty"` // RFC3339
+}
+
+// SubstitutionBasis is the superseded predecessor's measured evidence against
+// the query — what admitted a COG-28 substituted row. AbsoluteScore is the
+// exact quantity compared against the recall threshold.
+type SubstitutionBasis struct {
+	AbsoluteScore      float64 `json:"absolute_score"`
+	ContentMatch       float64 `json:"content_match"`
+	SemanticSimilarity float64 `json:"semantic_similarity"`
+	FullTextRelevance  float64 `json:"full_text_relevance"`
 }
 
 // ReadEntity is a named entity linked to a specific engram.
@@ -180,10 +252,28 @@ type ContradictionPair struct {
 	ConceptA string `json:"concept_a"`
 	IDb      string `json:"id_b"`
 	ConceptB string `json:"concept_b"`
-	// Status is "detected" (the detector has flagged this pair) or
-	// "pending_detection" (an explicit contradicts link exists and the batch
-	// detector has not reached it yet). Empty when the engine cannot report it.
+	// Status is the pair's PROVENANCE: "declared" (an explicit contradicts
+	// link exists between the two memories) or "detected" (the batch detector
+	// found the pair on its own). Empty when the engine cannot report it.
+	//
+	// "declared" replaced "pending_detection" in #764. A declared
+	// contradiction is durable at muninn_link return and is honored by recall
+	// on the very next query, so nothing about it is pending — what can still
+	// be outstanding is the confidence penalty, reported in
+	// ConfidencePenalty below.
 	Status string `json:"status,omitempty"`
+	// ConfidencePenalty is "pending" or "applied": whether the asynchronous,
+	// exactly-once confidence penalty for this pair has fired yet. It runs on
+	// a ~30s batch interval and affects only the two memories' confidence
+	// scores — never whether the contradiction is recorded or honored.
+	ConfidencePenalty string `json:"confidence_penalty,omitempty"`
+	// ResolvedBy names why a pair with status "resolved" is no longer a live
+	// conflict: "supersedes" (an explicit supersedes link between the two) or
+	// "endpoint_retired" (one side was evolved, forgotten, archived, or its
+	// validity window elapsed). Empty on a live pair. Before #764 nothing in
+	// the product cleared a declared contradiction, so resolving one the way
+	// the tool advises left the pair listed forever.
+	ResolvedBy string `json:"resolved_by,omitempty"`
 	// DetectedAt is when the detector flagged the pair. Absent while pending,
 	// and absent for markers written before the timestamp was recorded.
 	DetectedAt *time.Time `json:"detected_at,omitempty"`
@@ -204,6 +294,10 @@ type ContradictionsReport struct {
 	Contradictions []ContradictionPair `json:"contradictions"`
 	DetectedCount  int                 `json:"detected_count"`
 	PendingCount   int                 `json:"pending_count"`
+	// ResolvedCount is how many recorded pairs are no longer live conflicts.
+	// They are still listed (status "resolved", with resolved_by) rather than
+	// omitted, but they are not outstanding work.
+	ResolvedCount int `json:"resolved_count"`
 	// ScanComplete is false when the search for declared-but-undetected links
 	// hit its scan cap; PendingCount is then a lower bound, not a total.
 	ScanComplete bool   `json:"scan_complete"`

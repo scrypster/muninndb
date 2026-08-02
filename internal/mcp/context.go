@@ -146,7 +146,25 @@ func resolveVault(pinnedVault string, args map[string]any) (vault string, errMsg
 	if hasArg && argVault != "" {
 		return argVault, ""
 	}
-	return "default", ""
+	return defaultVaultName, ""
+}
+
+// defaultVaultName is the vault a request with no pinned vault and no explicit
+// `vault` argument resolves to.
+const defaultVaultName = "default"
+
+// joinHints appends one hint to another with a single separating space,
+// tolerating an empty base. Response hints accumulate from several
+// independent sources and none of them may clobber another.
+func joinHints(base, extra string) string {
+	switch {
+	case extra == "":
+		return base
+	case base == "":
+		return extra
+	default:
+		return base + " " + extra
+	}
 }
 
 // isMutatingTool returns true for MCP tools that write, modify, or delete data.

@@ -988,3 +988,15 @@ func EvolveRepairMarkKey(ws [8]byte) []byte {
 	copy(key[1:9], ws[:])
 	return key
 }
+
+// AssocWeightRepairMarkKey constructs the per-vault watermark key (0x2E) for
+// the one-time repair of pre-fix full-weight association keys (#756). Value:
+// one byte, the repair-pass version that last completed cleanly over the
+// vault. Presence at the current version lets startup skip the full 0x03 scan.
+// Key: 0x2E | wsPrefix(8) = 9 bytes
+func AssocWeightRepairMarkKey(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.AssocWeightRepairMark
+	copy(key[1:9], ws[:])
+	return key
+}

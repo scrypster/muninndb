@@ -29,10 +29,28 @@ and remain the reviewer's job.
    get a warning from `.claude/hooks/drift-guard.mjs`; otherwise manual. 🪝
 
    **Recall supersession/currency annotations are MCP + MBP only, deliberately** (COG-22,
-   COG-25). `SupersededBy`/`CurrentVersion` (asserted) and `possibly_superseded_by`/
+   COG-25, COG-28). `SupersededBy`/`CurrentVersion` and `substituted_for`/
+   `substitution_basis`/`chain_truncated`/`head_not_indexed_yet` (all ASSERTED — the last
+   four are COG-28 version-head substitution, #763) and `possibly_superseded_by`/
    `version_cluster`/`newest_of_cluster`/`cluster_size` (advisory, COG-25) live on
    `mbp.ActivationItem` + `mcp.MemoryAnnotations`; REST inherits them via the
    `rest.ActivateResponse = mbp.ActivateResponse` type alias, so it is automatically in sync.
+   Since #764 the same list carries `unresolved_contradiction` (per-row, ASSERTED, COG-29)
+   and the RESPONSE-level `conflict` block. Since #773 it also carries `relevance_band` /
+   `relevance_band_basis` (per-row, absolute relevance) plus `absolute_score` and
+   `content_match` on `mcp.Memory` — the last two had existed on MBP/REST since COG-26 and
+   were invisible to MCP entirely. **`relevance_band` is deliberately TOP-LEVEL on
+   `mcp.Memory`, not inside `MemoryAnnotations`**, precisely so the allocation predicate
+   below cannot drop it; note it could not be called `relevance`, which is already taken on
+   both `mbp.ActivationItem` and `mcp.Memory` by the engram's stored decay strength.
+   Two traps that list does not protect you from,
+   both hit in #764 and both now pinned by tests: `internal/mcp/convert.go`'s
+   "should I allocate an annotations object at all" predicate must name the new field or a
+   row carrying no OTHER annotation drops it silently
+   (`TestRecallOverMCP_ConflictBlockAndAnnotations`), and `internal/mcp/handlers.go`'s
+   recall response is a hand-built `map[string]any` that is NOT a mirror of
+   `mbp.ActivateResponse` — a response-level field added to the struct alone reaches REST
+   and vanishes on MCP.
    **proto/gRPC and the non-Go SDKs carry NO supersession/currency annotation fields at all**
    (their `ActivationItem` is a minimal subset that never had even `superseded_by`). Do NOT
    "complete" the schema by adding only the currency fields there — an unpopulated field the

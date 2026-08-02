@@ -797,6 +797,14 @@ func TestCurrencyAnnotation_ZeroWritesDuringAnnotation(t *testing.T) {
 	defer cleanup()
 
 	ids := seedTagAnchoredVault(h)
+	// Drain the write-time async workers (autoassoc included) BEFORE the
+	// before/after snapshots: the seed's autoassoc edges land asynchronously,
+	// and with the real embedder up (-tags localassets) one can commit
+	// between the two counts — the pin then reports the seeding's own edge
+	// as a phantom write by the annotation phase (#777, ~1-in-10 under
+	// -race+localassets, reproduced on develop). #722 doctrine: drain,
+	// never race.
+	h.eng.WaitWriteTimeIdle()
 	countBefore := h.vaultCount()
 
 	revCount := func(id string) int {

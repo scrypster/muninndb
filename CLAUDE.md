@@ -141,6 +141,29 @@ Distilled from real decisions across the project's history (each traced to its P
    Four of those obligations now warn automatically via `.claude/hooks/drift-guard.mjs`
    (marked 🪝 in that doc) — a reminder, not a gate, and no substitute for walking the list.
 
+**This repository is public. Measure on real vaults; never name them.** Mechanisms get proven
+against real corpora — that is the point, and a measurement without a real substrate is not
+worth much. But the vault a measurement ran on is not ours to publish. It belongs to a user, a
+client, or another product, and naming it links them to this project permanently.
+
+The rule, in committed content — source, tests, code comments, design records, commit messages,
+**and filenames**:
+
+- Refer to a measurement corpus as **"a production vault"**. Keep the numbers; drop the name.
+  "Measured on a real 3,296-memory production vault" carries every bit of the evidence that
+  naming it would, and costs nothing.
+- Use invented names in fixtures and examples. Not a real colleague, customer, or contact —
+  and not a real product's module names either.
+- No client, tenant, employer, or fund identifiers. No pricing, rates, or commercial terms.
+- If a design record can't make its point without those, it isn't publishable. Keep it local;
+  `.claude/deep-review/README.md` has the triage rule and the `private/` convention.
+
+This is not hypothetical. A vault name reached `origin/develop` in #715 and was scrubbed at the
+tip a day later by #734 — but a public repo's history is public forever, and a scrub of the tip
+is not a scrub. **Getting it right before the commit is the only version of this that works.**
+Maintainers additionally run a local pre-commit guard; do not rely on it, and note that
+contributors don't have it.
+
 **Keep CI fast and cheap.** The full gate must stay **under ~10 minutes** (baseline ~6–7
 min; job map in `drift-and-obligations.md`). Unit and invariant tests are nearly free —
 prefer them. Integration, Playwright, `-race`, and asset-gated tests cost real minutes;

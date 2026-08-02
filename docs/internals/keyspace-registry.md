@@ -32,7 +32,7 @@ prefix — see the vault-reuse note at the bottom).
 | 0x06 | ws+trigram(3)+id | — | FTS trigram |
 | 0x07 | ws+id+layer(1) | neighbor list | HNSW graph |
 | 0x08 / 0x09 | ws+"stats" / ws+term | FTS stats | |
-| 0x0A | ws+conceptHash(4)+relType(2)+id | partner id(16) + detectedAt unixnano(8) | contradiction marker; conceptHash/relType are written as 0. 16-byte values are legacy (pre-timestamp) and decode to an UNKNOWN detection time, never a zero instant |
+| 0x0A | ws+conceptHash(4)+relType(2)+id | partner id(16) + detectedAt unixnano(8) | contradiction marker; conceptHash/relType are written as 0. 16-byte values are legacy (pre-timestamp) and decode to an UNKNOWN detection time, never a zero instant. **The key is `…\|id(16)` with a SINGLE-partner value, so one engram can record exactly ONE 0x0A partner — a second contradiction on the same engram OVERWRITES the first.** This is why COG-29 (#764) keys recall-side contradiction honoring on the declared 0x03/0x04 edges rather than on this marker; the marker's remaining job is making the confidence penalty fire exactly once (its `newlyFlagged` return is that idempotency token). A migration to `0x0A\|ws\|…\|id\|partner` is a named deferral |
 | 0x0B | ws+state(1)+id | — | state index |
 | **0x0C** | ws+tagHash(4)+id | — | **tag index — now READ by tag-scoped recall (`ListByTagInRange`/`ListByTagsAllInRange`, wired #619); no longer dead weight** |
 | 0x0D | ws+creatorHash(4)+id | — | creator index |
@@ -68,6 +68,7 @@ prefix — see the vault-reuse note at the bottom).
 | 0x2B | ws | 1B repair version | evolve entity-link repair watermark (#622); presence at current version skips the startup scan |
 | **0x2C** | ws+Hash(tagKey)(4)+value+0x00+id(16) | — | **ordered raw-tag-range index (S1).** Distinct from 0x0C: keys on `Hash(tagKey)` (the part before the first `:`) with the raw VALUE bytes sorted after it, so a bounded range scan (e.g. `due:<=2026-07-27`) is a real Pebble range scan, not a post-hoc filter. Only tags containing `:` get an entry (gates write-amp to key:value tag conventions). The `0x00` separator after value resolves prefix-of-each-other values ("2026" < "2026-07" because `0x00 < '-'`). A tag value containing a `0x00` byte is rejected at write time (`storage.WriteRawTagIndexEntry`). Hash collisions between two distinct tag keys make their ranges interleave — phase-6 `passesMetaFilter` re-checks the real tag, so correctness holds and only perf degrades, mirroring 0x0C's own collision tolerance. Maintained at every 0x0C write/delete site (`internal/storage/batch.go`, `impl.go`, `engram.go`); backfilled for pre-existing data by migration v4 (`internal/storage/migrate/v4_raw_tag_range.go`). Seeds activation candidates via `ActivationEngine.seedTagCandidates`/`ScanRawTagRange` for `tag_prefix` filters with `lte`/`gte`/`lt`/`gt`/`eq`, instead of only being checked in phase 6. |
 | **0x2D** | ws+EntityNameHash(cue)(8)+intentionID(16) | msgpack {one_shot, created_at, fired_count, last_fired_at, cues[]} | **armed-intention index (THE PUSH, prospective memory).** One key per (intention, cue entity); `ScanArmedForEntity` is a 17-byte-prefix scan consulted ONLY inside recall/remember tool handlers when the cue entity is focal — nothing polls it. The value duplicates the full cue list across an intention's keys so a one-shot fire deletes every sibling key atomically (`MarkIntentionFired`) and entity-merge can rewrite stale cue names (`RelinkProspectiveIntent`, mirroring the 0x26 relink; called from `MergeEntity`). Cleared by `ClearVault`. NOT exported/cloned (intentions are session-arming state; documented residual). Stale keys for a deleted intention engram are inert — the firing rule re-verifies the engram (exists, active, ValidAt) before delivery. The design doc allocated 0x2C for this index, but 0x2C was taken by RawTagRange (S1) first; 0x2D is the real allocation. |
+| **0x2E** | ws | 1B repair version | **pre-fix full-weight association-key repair watermark (#756).** The original `WeightComplement` overflowed at weight exactly 1.0 and wrote those 0x03/0x04 keys at the weight-0.0 complement (`0xFFFFFFFF`), where they read back as weight 0; the encoder was fixed byte-compatibly in #757 but the misplaced keys remain. `Engine.runLegacyFullWeightAssocRepair` scans 0x03 for that complement and, when the pair's 0x14 index reads **exactly 1.0**, relocates fwd/rev to the true 1.0 position (complement `0x00000000`) carrying the value bytes verbatim, deleting the legacy position; any other index value is left alone. Presence at the current version skips the scan. A one-shot watermark is sound because the fixed encoder cannot create new damage of this kind. Cleared by `ClearVault`. Edges a decay pass already clamped or deleted are unrepairable **and unidentifiable** — no count is claimed for them, and neither are pre-0x14-era pairs that carry no weight index at all. `runPruneWorker` gates assoc decay (`Engine.decayAllVaults`) on the pass completing **cleanly**: a pass that errored leaves the gate shut for the process lifetime and logs at ERROR, because decay over a still-damaged vault destroys that evidence permanently and unidentifiably. The pass is **local to each node** — nothing is replicated (the #681 precedent); it is deterministic and idempotent, so nodes converge. Upgrade the **leader first**, and upgrade followers promptly: an ungated old-binary node can destroy its own evidence before it is upgraded. |
 
 ## Auth prefixes (`internal/auth/keys.go`)
 
@@ -91,12 +92,12 @@ prefix — see the vault-reuse note at the bottom).
 
 ## Free bytes
 
-`0x2E`–`0x3F` and `0x46`+ are free for new storage/auth keys (0x2B, 0x2C and 0x2D are now
+`0x2F`–`0x3F` and `0x46`+ are free for new storage/auth keys (0x2B–0x2E are now
 allocated: 0x2B evolve-repair watermark (#681), 0x2C raw-tag-range index (S1), 0x2D
-armed-intention index (THE PUSH);
+armed-intention index (THE PUSH), 0x2E full-weight assoc-key repair watermark (#756);
 0x40–0x45 are allocated: 0x40/0x41 capability, 0x42–0x45 auth). (`0x29`/`0x40`/`0x41`
 also appear in `internal/transport/mbp/frame.go` as **wire opcodes**, a different
-keyspace; coincidental, safe, but confusing. Prefer `0x2E+` for new storage prefixes.)
+keyspace; coincidental, safe, but confusing. Prefer `0x2F+` for new storage prefixes.)
 
 ## Live hazards a reviewer must know
 
@@ -127,3 +128,15 @@ keyspace; coincidental, safe, but confusing. Prefer `0x2E+` for new storage pref
    name recomputes the identical SipHash prefix and resurfaces those orphans. The correct
    invariant is "prefixes are name-deterministic," **not** "never reused." A PR asserting
    the latter is wrong about this codebase.
+
+5. **0x2B and 0x2E are repair watermarks and share one set of semantics.** Both hold a
+   single version byte per vault (0x2B: evolve entity-link repair, #681; 0x2E: pre-fix
+   full-weight association-key repair, #756), and both mean the same thing: "a pass at
+   this version completed cleanly over this vault, skip the scan." Consequences that
+   apply to both, and to any watermark added later — put it in this family and follow
+   them: presence at or above the current version short-circuits the whole scan, so
+   forcing a re-run means bumping the pass's version constant (or deleting the marks);
+   both are listed in `clearVaultDataPrefixes`, so `ClearVault` drops them and a reused
+   vault name cannot inherit a stranger's "already repaired" claim at the cost of one
+   no-op scan; and a repair whose watermark is present is never revisited, so the
+   watermark must only be written on a genuinely clean pass.

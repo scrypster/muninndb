@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -516,13 +517,14 @@ func TestAssocDecay_PrunesWeakEdges(t *testing.T) {
 	}
 
 	// Write a strong association (A→B, weight 0.8) and a weak one (A→C, weight 0.03).
+	lastAct := int32(time.Now().Add(-24 * time.Hour).Unix())
 	if err := store.WriteAssociation(ctx, ws, idA, idB, &storage.Association{
-		TargetID: idB, Weight: 0.8, Confidence: 1.0, CreatedAt: time.Now(),
+		TargetID: idB, Weight: 0.8, Confidence: 1.0, CreatedAt: time.Now(), LastActivated: lastAct,
 	}); err != nil {
 		t.Fatalf("WriteAssociation A→B: %v", err)
 	}
 	if err := store.WriteAssociation(ctx, ws, idA, idC, &storage.Association{
-		TargetID: idC, Weight: 0.03, Confidence: 1.0, CreatedAt: time.Now(),
+		TargetID: idC, Weight: 0.03, Confidence: 1.0, CreatedAt: time.Now(), LastActivated: lastAct,
 	}); err != nil {
 		t.Fatalf("WriteAssociation A→C: %v", err)
 	}
@@ -537,10 +539,13 @@ func TestAssocDecay_PrunesWeakEdges(t *testing.T) {
 		t.Fatal("expected A→C association to exist before decay")
 	}
 
-	// Run decay with factor=0.95, minWeight=0.05.
+	// Run decay with minWeight=0.05 and a half-life chosen so that the one day
+	// of elapsed time on both edges costs exactly the 0.95 factor this test was
+	// written around (13.51 days).
 	// A→B: 0.8 * 0.95 = 0.76 (survives above threshold)
 	// A→C: 0.03 * 0.95 = 0.0285 < 0.05, but PeakWeight=0.03 → floor=0.0015 → clamped (not deleted)
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.95, 0.05, 0.0)
+	halfLife := time.Duration(float64(24*time.Hour) * math.Ln2 / math.Log(1/0.95))
+	removed, err := store.DecayAssocWeights(ctx, ws, halfLife, 0.05, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}

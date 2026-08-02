@@ -233,15 +233,30 @@ func TestCrossVault_AlienMarkerVocabulary_Silences(t *testing.T) {
 				t.Fatalf("expected the similarity floor to admit this genuinely-related pair")
 			}
 			cut := currencyUbiquityCutpoint(h.vaultCount())
-			gotAnchor := h.eng.currencyTagAnchor(h.ctx, h.ws, c1Eng, c2Eng, cut, dfCache)
-			if gotAnchor {
-				t.Fatalf("test premise broken: tag anchor unexpectedly fired for alien markers %q/%q — investigate before trusting the DOCUMENTED-GAP verdict below", tc.markerOld, tc.markerNew)
+			// R4 restructuring, NOT a weakened assertion. Before R4 the
+			// version-marker requirement lived inside currencyTagAnchor, so
+			// "tag anchor is false" was how this test observed "the marker
+			// vocabulary did not recognize these tokens". R4 split the two:
+			// currencyTagAnchor is now purely the same-TOPIC test (which these
+			// two engrams genuinely pass — they share gizmoline+framework), and
+			// the marker requirement is the universal currencyVersionMarkerGate.
+			// The claim under test is unchanged and is now asserted directly on
+			// the gate that owns it.
+			if !h.eng.currencyTagAnchor(h.ctx, h.ws, c1Eng, c2Eng, cut, dfCache) {
+				t.Fatalf("test premise broken: expected the (topic-only) tag anchor to fire for %q/%q — they share both topic tags; the marker gate below must be what silences them", tc.markerOld, tc.markerNew)
 			}
-			// Also confirm the KEPT RelRefines/entity anchor paths are not
-			// the ones silently doing the work here — this test isolates
-			// the tag/marker-vocabulary mechanism specifically.
-			if h.eng.currencySharedAnchor(h.ctx, h.ws, c1Eng, c2Eng, n, cut, dfCache) {
-				t.Fatalf("test premise broken: currencySharedAnchor fired via a non-tag path (RelRefines/entity) for %q/%q — this test's content must stay below the novelty Jaccard threshold so it isolates the marker-vocabulary gap", tc.markerOld, tc.markerNew)
+			if currencyVersionMarkerGate(c1Eng.Tags, c2Eng.Tags) {
+				t.Fatalf("test premise broken: the universal marker gate unexpectedly admitted alien markers %q/%q — investigate before trusting the DOCUMENTED-GAP verdict below", tc.markerOld, tc.markerNew)
+			}
+			// Also confirm the KEPT RelRefines/entity anchor paths are not the
+			// ones silently doing the work here — this test isolates the
+			// tag/marker-vocabulary mechanism specifically. (Post-R4 those
+			// paths could not produce a cluster on their own anyway, since the
+			// marker gate is universal — but the premise is still worth pinning.)
+			if h.eng.currencyHasAssocEdge(h.ctx, h.ws, c1Eng.ID, c2Eng.ID, storage.RelRefines) ||
+				h.eng.currencyHasAssocEdge(h.ctx, h.ws, c2Eng.ID, c1Eng.ID, storage.RelRefines) ||
+				h.eng.currencyEntityAnchor(h.ctx, h.ws, c1Eng.ID, c2Eng.ID, n) {
+				t.Fatalf("test premise broken: a non-tag anchor (RelRefines/entity) fired for %q/%q — this test's content must stay below the novelty Jaccard threshold so it isolates the marker-vocabulary gap", tc.markerOld, tc.markerNew)
 			}
 
 			results := h.scored(c1, 0.9, c2, 0.9)

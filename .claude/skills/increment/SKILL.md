@@ -7,9 +7,9 @@ description: The repeatable build loop MuninnDB holds itself to — design, buil
 
 This is the loop that landed the reflex stack, valid-time, importance, and more, each
 adversarially reviewed and measured. It is how we chase real, measurable value and refuse fluff.
-The north star: **a sentient-FEELING memory engine** ("if I have to say 'remember when Steve said
-X,' it has failed"). The bar for every increment: **world-class, enterprise-grade, measured — no
-smoke-and-mirrors, no marketing.**
+The north star: **a sentient-FEELING memory engine** — if the user has to say "remember when
+so-and-so told me X," it has failed. The bar for every increment: **world-class,
+enterprise-grade, measured — no smoke-and-mirrors, no marketing.**
 
 ## When to use
 Any non-trivial feature or fix. For a one-line mechanical edit, just do it. For anything that
@@ -69,16 +69,19 @@ touches the cognitive core, storage, recall, or a public surface, run the loop.
 Don't bounce nitpicks back to a strong contributor, especially after multiple round-trips. Either
 adjust their branch yourself (`maintainerCanModify=true`: merge develop INTO their branch, resolve,
 push — a merge commit, not a force-push) or merge and do a small follow-up PR. Still hold the bar
-(Tier-3 refute, CI green). Review + approve in the owner's voice per the `review-pr` skill. Serialize
-merges that touch the same hot signatures (a parallel merge silently dropped a feature once).
+(Tier-3 refute, CI green). Serialize merges that touch the same hot signatures — a parallel merge
+silently dropped a feature once.
+
+(How review responses get drafted is separate maintainer tooling and is not part of this repo.)
 
 ## Labs vs live
 Prove mechanisms in an isolated labs daemon (own data dir + ports, `-tags localassets` +
-`MUNINN_LOCAL_EMBED=1`) first. Deploy to the live daemon only with explicit owner go: back up first
+`MUNINN_LOCAL_EMBED=1`) before pointing them at a vault you care about. Back up first
 (`muninn backup --data-dir <d> --output <b>`, server stopped via `launchctl bootout`), save the old
-binary for rollback, **ad-hoc code-sign the new binary** (`codesign --force --sign - <bin>` — launchd
-rejects unsigned binaries with `OS_REASON_CODESIGNING`), `launchctl bootstrap`/`kickstart`, then
-verify: embed provider up, no corruption, a positive recall, and any startup migration ran clean.
+binary for rollback, and on macOS **ad-hoc code-sign the new binary**
+(`codesign --force --sign - <bin>` — launchd rejects unsigned binaries with
+`OS_REASON_CODESIGNING`), then `launchctl bootstrap`/`kickstart` and verify: embed provider up, no
+corruption, a positive recall, and any startup migration ran clean.
 
 ## Pipelining
 While one increment's build/refute runs, design the next (agents notify on completion). Keep the

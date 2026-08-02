@@ -93,6 +93,24 @@ type PebbleStore struct {
 	archiveBloom *archiveBloom
 	// repLogAppend is the cluster replication callback. nil in non-cluster mode.
 	repLogAppend func(op uint8, key, value []byte) error
+	// decayNow is the clock used by DecayAssocWeights. nil = time.Now.
+	// Association decay is a pure function of elapsed wall-clock time since an
+	// edge's lastActivated (COG-27), so it needs an injectable clock to be
+	// tested at all: the cadence-independence property is a statement about two
+	// different evaluation grids over the *same* simulated interval.
+	// Test-only seam; never set in production code. It is read without
+	// synchronization by every decay pass, so it MUST be set before the store
+	// is shared across goroutines — setting it after any background worker
+	// has started is a data race.
+	decayNow func() time.Time
+}
+
+// now returns the decay clock: the injected test clock, or wall time.
+func (ps *PebbleStore) now() time.Time {
+	if ps.decayNow != nil {
+		return ps.decayNow()
+	}
+	return time.Now()
 }
 
 // assocCacheEntry holds a cached association list.

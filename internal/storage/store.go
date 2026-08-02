@@ -140,10 +140,12 @@ type EngineStore interface {
 	// countDelta is added to the existing CoActivationCount (saturating at MaxUint32).
 	UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID, weight float32, countDelta uint32) error
 
-	// DecayAssocWeights multiplies all association weights for wsPrefix by decayFactor,
-	// deleting entries that fall below minWeight. Returns count deleted.
+	// DecayAssocWeights applies the peak-anchored, elapsed-time decay ceiling
+	// (COG-27) to every association under wsPrefix, clamping entries that fall
+	// below minWeight to their dynamic floor. Returns count deleted.
+	// halfLife is the wall-clock half-life of an unused edge; it must be > 0.
 	// archiveThreshold > 0 enables moving strong floor-hit edges to the 0x25 archive namespace.
-	DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error)
+	DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error)
 
 	// UpdateAssocWeightBatch atomically updates multiple association weights in a single batch.
 	UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error

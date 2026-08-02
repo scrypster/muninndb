@@ -41,6 +41,38 @@ const (
 	supersessionMargin = 16
 )
 
+// Reasons a chain walk produced no substitutable head. Distinct values, not
+// free text, so COG-28 can branch on them (design §5.5).
+const (
+	supersessionBlockNotSuperseded = "not_superseded"     // no RelSupersedes edge at all — not a block, just silence
+	supersessionBlockAmbiguous     = "ambiguous"          // fork: >1 active superseder at a hop; refusing to choose
+	supersessionBlockCycle         = "cycle"              // the chain loops
+	supersessionBlockRetracted     = "retracted"          // the successor was soft-deleted/archived: supersession voided
+	supersessionBlockNoCurrent     = "no_current_version" // successors exist, none is valid for this view
+	supersessionBlockHidden        = "hidden"             // successors exist, none is nameable by this caller
+)
+
+// supersessionWalk is the result of resolveSupersessionHead. It replaced a
+// three-value return so the walk can report WHY it refused (Reason) and
+// WHETHER the depth cap cut it short (Truncated) — two facts the ranking
+// caller may ignore but the COG-28 substitution caller must surface, because
+// there the injected head is the only row the caller sees.
+type supersessionWalk struct {
+	// Head is the deepest chain node both nameable and valid for the caller's
+	// view. nil iff OK is false.
+	Head *storage.Engram
+	// Immediate is the NEAREST nameable, view-known successor of the start
+	// node — the caller-visible answer to "what replaced this".
+	Immediate storage.ULID
+	// OK reports that a view-valid head exists.
+	OK bool
+	// Truncated reports that the walk exhausted supersessionMaxDepth: Head is
+	// the deepest admitted node WITHIN the cap and may not be the terminus.
+	Truncated bool
+	// Reason names the refusal when OK is false; empty when OK.
+	Reason string
+}
+
 // applySupersession makes recall supersedes-aware: when a candidate is superseded
 // by a newer engram (a manual RelSupersedes link whose predecessor is still
 // active — evolve() soft-deletes its predecessor, so those never reach here), the
@@ -89,6 +121,17 @@ const (
 // final COG-19 gate so a validity boundary cannot fall between admission here
 // and that last cut (which would un-atomize the substitution it just applied).
 func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, req *activation.ActivateRequest, now time.Time) (out []activation.ScoredEngram, injected int) {
+	return e.applySupersessionWithGate(ctx, ws, results, req, newVisibilityGate(req, now), make(map[storage.ULID]bool))
+}
+
+// applySupersessionWithGate is applySupersession with the visibility gate and
+// its per-node decision cache supplied by the caller. activateCore shares one
+// gate and one cache across BOTH post-pipeline chain phases (COG-28
+// substitution, then this one), so a broad query over a vault with many evolve
+// chains pays each node's lease read once instead of twice. The gate carries
+// the injection clock, so passing it also guarantees the two phases resolve
+// visibility at the same instant.
+func (e *Engine) applySupersessionWithGate(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, req *activation.ActivateRequest, gate *visibilityGate, nameableCache map[storage.ULID]bool) (out []activation.ScoredEngram, injected int) {
 	if len(results) == 0 {
 		return results, 0
 	}
@@ -125,8 +168,6 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 	// result pool cleared its own admission (phase 6, or the entity-boost gate
 	// for boost injections, which runs before this phase) — nameable by
 	// construction, no store read.
-	gate := newVisibilityGate(req, now)
-	nameableCache := make(map[storage.ULID]bool)
 	nameable := func(eng *storage.Engram) bool {
 		if _, inPool := seen[eng.ID]; inPool {
 			return true
@@ -147,10 +188,16 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 		// nameable, view-known nodes can be returned, only a view-valid node
 		// can be the head, and !superseded covers both "not superseded at
 		// all" and "no substitutable successor" — the atomic abstention branch.
-		head, immediate, superseded := e.resolveSupersessionHead(ctx, ws, results[i].Engram.ID, gate, nameable)
-		if !superseded {
+		// Truncation is ignored HERE (and only here): on this path the stale row
+		// stays visible and annotated beside the head, so a non-terminal
+		// intermediate presented as current is still accompanied by the record
+		// it replaced. The COG-28 substitution path, where the injected head is
+		// the ONLY row the caller sees, propagates it loudly instead.
+		walk := e.resolveSupersessionHead(ctx, ws, results[i].Engram.ID, gate, nameable)
+		if !walk.OK {
 			continue
 		}
+		head, immediate := walk.Head, walk.Immediate
 		earned := results[i].Score
 		stales = append(stales, staleRef{idx: i, earned: earned, headID: head.ID, immediate: immediate})
 		headEngram[head.ID] = head
@@ -242,25 +289,37 @@ func (e *Engine) applySupersession(ctx context.Context, ws [8]byte, results []ac
 // evolve-retraction semantics — deletion is a lifecycle fact, not a
 // per-caller view.
 //
-// Returns (head, immediate, true) when a view-valid head exists; (nil, zero,
-// false) when none does — never superseded, superseder soft-deleted (voided),
-// no successor both nameable and valid for this view (the caller's atomic
-// abstention), a hop with more than one active superseder (ambiguous — WARN,
-// don't guess), or a cycle (WARN, leave un-demoted). The depth cap is
-// different: it silently TRUNCATES the walk, so on a chain longer than
+// Returns OK=true with Head set when a view-valid head exists; OK=false when
+// none does — never superseded, superseder soft-deleted (voided), no successor
+// both nameable and valid for this view (the caller's atomic abstention), a hop
+// with more than one active superseder (ambiguous — WARN, don't guess), or a
+// cycle (WARN, leave un-demoted). Reason names which of those it was, so the
+// COG-28 substitution caller can report an actionable abstention instead of a
+// generic empty response; the ranking caller ignores it.
+//
+// The depth cap is different: it TRUNCATES the walk, so on a chain longer than
 // supersessionMaxDepth the head is the deepest admitted node within the cap —
 // possibly a non-terminal intermediate presented as current. Long chains are
-// rare (evolve chains heal at startup; the cap exists for pathological
-// manual graphs) and a cap-abstain would regress every long legacy chain.
+// rare (evolve chains heal at startup; the cap exists for pathological manual
+// graphs) and a cap-abstain would regress every long legacy chain, so the walk
+// still substitutes — but it now REPORTS the truncation (Truncated) rather than
+// swallowing it. That was tolerable while the stale row was always visible
+// beside the head; on the substitution path the injected head is the only row
+// the caller sees, and presenting a non-terminal intermediate as "current"
+// without saying so is silently-wrong.
 //
 // GetReverseAssociations(X) returns edges pointing TO X with the association's
 // TargetID repurposed to hold the SOURCE — so for a RelSupersedes edge it is the
 // engram that supersedes X (see annotation.go / storage/association.go).
-func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startID storage.ULID, gate *visibilityGate, nameable func(*storage.Engram) bool) (head *storage.Engram, immediate storage.ULID, superseded bool) {
+func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startID storage.ULID, gate *visibilityGate, nameable func(*storage.Engram) bool) supersessionWalk {
 	cur := startID
 	visited := map[storage.ULID]bool{startID: true}
 
-	for depth := 0; depth < supersessionMaxDepth; depth++ {
+	var head *storage.Engram
+	var immediate storage.ULID
+	sawSuccessor, sawRetracted, sawHidden, truncated := false, false, false, false
+	depth := 0
+	for ; depth < supersessionMaxDepth; depth++ {
 		rev, err := e.store.GetReverseAssociations(ctx, ws, cur, supersessionReverseScan)
 		if err != nil {
 			break
@@ -281,24 +340,60 @@ func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startI
 		}
 		if found > 1 {
 			slog.Warn("recall: engram has multiple superseders, leaving un-demoted", "id", cur.String())
-			return nil, storage.ULID{}, false
+			return supersessionWalk{Reason: supersessionBlockAmbiguous}
 		}
 		if visited[next] {
 			slog.Warn("recall: supersedes cycle detected, leaving un-demoted", "at", next.String())
-			return nil, storage.ULID{}, false
+			return supersessionWalk{Reason: supersessionBlockCycle}
 		}
 		visited[next] = true
+		sawSuccessor = true
 
 		eng, err := e.store.GetEngram(ctx, ws, next)
 		if err != nil || eng == nil {
 			break // dangling edge → stop; the chain ends below it
 		}
-		if eng.State == storage.StateSoftDeleted || eng.State == storage.StateArchived {
+		// RETRACTION vs. FURTHER SUPERSESSION. Both leave a hop's superseder
+		// soft-deleted, and telling them apart is load-bearing: a retracted
+		// successor voids the supersession for every caller, while a successor
+		// that was itself superseded is an ordinary chain INTERMEDIATE that the
+		// walk must pass through to reach the head.
+		//
+		// The discriminator is the same closed-ValidUntil signature the rest of
+		// COG-28 uses, and it is exact rather than heuristic: supersession
+		// (evolve and Link(relation=supersedes)) soft-deletes AND stamps in one
+		// atomic batch, a plain muninn_forget soft-deletes and leaves the stamp
+		// OPEN, and forget(not_true_since) stamps WITHOUT soft-deleting. One
+		// non-supersession sequence shares the signature — forget(not_true_since)
+		// followed later by a plain forget — but it is benign here: with no
+		// RelSupersedes edge the walk never fires on such a node, and mid-chain
+		// it is traversed-but-unnameable (no_current_version, not retracted).
+		//
+		// Before this, an EVOLVE chain longer than one hop could never resolve:
+		// every intermediate an evolve leaves behind is soft-deleted, so the
+		// walk read the first one as "retracted" and voided the whole chain.
+		// A→B→C returned nothing at all, which is #763 again with an extra hop.
+		// StateArchived still stops the walk unconditionally (a storage-tier
+		// fact whose payload is not guaranteed resident).
+		if eng.State == storage.StateArchived ||
+			(eng.State == storage.StateSoftDeleted && eng.ValidUntil.IsZero()) {
+			sawRetracted = true
 			break // superseder retracted → supersession voided at this hop, for every caller
 		}
 		cur = next
 		if !nameable(eng) || gate.ViewFuture(eng) {
-			continue // hidden or not-yet in this view: walk through, never name
+			// Hidden from this caller, not yet in this view, or — the ordinary
+			// evolve case — an intermediate that is itself superseded and so
+			// fails the default lifecycle cut. Traversable, never nameable.
+			// Only a genuine CALLER-visibility refusal counts as "hidden" for
+			// the abstention reason; a superseded intermediate is expected
+			// structure, not a permission problem. (Under as_of the lifecycle
+			// cut admits such an intermediate, and it may legitimately BE the
+			// head at the caller's instant — the branch below decides.)
+			if eng.State == storage.StateActive {
+				sawHidden = true
+			}
+			continue
 		}
 		if immediate == (storage.ULID{}) {
 			immediate = next // nearest nameable, view-known successor
@@ -307,11 +402,28 @@ func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startI
 			head = eng // deepest nameable node valid under the caller's view
 		}
 	}
+	// The walk ran the cap out without reaching a terminus. Deliberately
+	// OVER-reports by one: a chain whose terminus sits at exactly
+	// supersessionMaxDepth hops is flagged truncated because the loop never
+	// gets the iteration that would prove it terminal. Over-warning that a
+	// "current" answer might not be the last word is the safe direction.
+	if depth >= supersessionMaxDepth {
+		truncated = true
+	}
 
 	if head == nil {
 		// No view-valid successor: not superseded, or nothing this caller's
 		// view can substitute toward — either way, abstain whole.
-		return nil, storage.ULID{}, false
+		switch {
+		case !sawSuccessor:
+			return supersessionWalk{Reason: supersessionBlockNotSuperseded}
+		case sawRetracted:
+			return supersessionWalk{Reason: supersessionBlockRetracted}
+		case sawHidden:
+			return supersessionWalk{Reason: supersessionBlockHidden}
+		default:
+			return supersessionWalk{Reason: supersessionBlockNoCurrent}
+		}
 	}
-	return head, immediate, true
+	return supersessionWalk{Head: head, Immediate: immediate, OK: true, Truncated: truncated}
 }

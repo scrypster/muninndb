@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 // newTestStoreHelper creates a PebbleStore backed by a temporary directory.
@@ -122,15 +123,16 @@ func TestAssocWeightIndex_DecayFloorsClampsEntry(t *testing.T) {
 	a := NewULID()
 	b := NewULID()
 
-	// PeakWeight seeds to 0.05 at WriteAssociation time.
-	assoc := &Association{TargetID: b, Weight: 0.05}
+	// PeakWeight seeds to 0.05 at WriteAssociation time. lastActivated is 30
+	// days back so the elapsed-time ceiling (COG-27) is far below minWeight.
+	assoc := &Association{TargetID: b, Weight: 0.05, LastActivated: int32(time.Now().Add(-30 * 24 * time.Hour).Unix())}
 	if err := store.WriteAssociation(ctx, ws, a, b, assoc); err != nil {
 		t.Fatal(err)
 	}
 
-	// Decay by 50% with minWeight=0.1 — newW=0.025 < 0.1, floor = 0.05*0.05 = 0.0025.
+	// H=1 day, dt=30 days → ceiling ≈ 0 < minWeight 0.1, floor = 0.05*0.05 = 0.0025.
 	// Dynamic floor: edge is clamped, NOT deleted — removed count should be 0.
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.1, 0.0)
+	removed, err := store.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.1, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
