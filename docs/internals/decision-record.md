@@ -1144,3 +1144,142 @@ the class both defects share — a constant a person chose once, compared agains
 that a decay pass moves 20x before anyone reads it — is now a standing, self-checking
 machine test rather than something that needs a third independent analysis pass to
 rediscover a third time.**
+
+### A claim that reads the same when false, found eleven more times in one day (2026-08-03)
+
+#830 (b719ecc, 2026-08-02) named the pattern from eighteen review findings in a single
+session and shipped `docs/internals/claim-discipline.md`. What follows is not repetition of
+that doctrine — it is what happened when the same eye kept looking for one more day, across
+CLI, storage, engine, auth, consolidation, and a process document: eleven further instances,
+in materially different subsystems, each independently verified against the commit that
+fixed or corrected it. That recurrence rate, not any single instance, is why this is a
+record entry rather than a line added to the doc.
+
+**Group 1 — a check whose failure path cannot execute.** The shared shape: something that
+looks like a red/green gate, where the branch that would go red has a lifetime execution
+count of zero.
+
+- **#812** — `cmd/muninn/integration_test.go`'s old `TestMain` printed one line and called
+  `os.Exit(0)` when port `:8750` was already held, producing zero `=== RUN` lines and `ok`.
+  A busy port and a clean pass were the same output.
+- **#814** — `scripts/check-filename-build-constraints.sh`. A file named `*_arm_test.go` is
+  excluded by the Go toolchain on filename alone, no `//go:build` line, no diagnostic;
+  `go test -run` reported `ok ... [no tests to run]`, exit 0.
+- **#827** (3cf8f86) — a NUL byte in a tracked source file makes `git diff` classify it as
+  binary. The file showed `0 insertions(+), 0 deletions(-)` through review, merge, and a
+  public push — three independent gates, one shared blind spot.
+- **#825 / D6** (73dbb4c) — the memory drain's HOLD gate keyed on `relevance_band == strong`,
+  but `engine_relevance.go:161` bands every row `uncalibrated` whenever
+  `FusionBandBasis` is non-empty — true of any `rrf`/`weighted_sum` vault, and of any recall
+  running semantic-degraded. The gate could never observe a `strong` row on such a vault, so
+  it reported "0 held," indistinguishable from "0 duplicates found."
+- **#810's census** (467371a) — `TestLastAccessElapsedCensus`'s vacuity guard was
+  `total == 0`, which can never fire because two always-present sites keep the count ≥ 2
+  regardless of whether the taint analysis works. Deleting the taint analysis outright
+  compiled, vetted clean, and dropped five of the census's six sites
+  (`computeComponents`, `computeACTR`, `PruneVault`, `TriggerScore`,
+  `augmentAnnotations`) while the census still reported PASS.
+
+**Group 2 — a success report for work that was not performed.** Here the code ran; it just
+printed the outcome it was written to print rather than the outcome that occurred.
+
+- **#792** (3cf8f86) — `selfUpdate` printed "Stopping daemon... ✓" whether or not a process
+  actually stopped, because detection was PID-file-only and any daemon not started by
+  `muninn start` (launchd, a systemd unit execing the server directly, a bare `--daemon`
+  process) has no PID file to find.
+- **#634** (7a3004c) — `saveDefaultVault` discarded every `MkdirAll`/`json.Marshal`/
+  `WriteFile` error, and the CLI shell printed "Switched to vault" unconditionally
+  afterward. It also re-marshalled a fresh map containing only `default_vault`, silently
+  dropping every other key already in the file on a write that appeared to succeed.
+- **#598** (a679fe8) — three post-`Run` write sites (recall-event persist, Hebbian
+  co-activation submit, PAS transition write) gated on `auth.ObserveFromContext(ctx)` alone,
+  ignoring an explicit `req.ReadOnly`. A full-mode credential calling
+  `muninn_recall(read_only: true)` still bonded every returned engram pairwise and still
+  persisted a recall event — contradicting both the tool description ("must not trigger any
+  write side effects") and COG-11 as written at the time.
+
+**Group 3 — a claim whose cited evidence does not support it.** The number quoted was real;
+it was evidence of something other than what it was cited for.
+
+- **#702** (8ea84ba) — the Push/prospective acceptance harness reported precision 1.000,
+  recall 15/15, with `prospective.go`'s ≥2-carrier corroboration branch disabled outright.
+  The number was genuine — every `should_fire` case in the fixture is satisfied by the
+  top-result rule alone — but it was evidence the fixture never exercised corroboration, not
+  evidence corroboration worked. (The gap is now closed by an explicit COG-21 case requiring
+  it.)
+- **#696** (86d0ba6) — the trigger registry's bucket-collision residual was published as
+  "≈N²/2³³, ~10⁻⁵ at 10,000 vaults." The formula is right; the exponent was evaluated at
+  ~300 vaults, not 10,000. Rederived: **~1.16%** at N=10,000 — roughly three orders of
+  magnitude larger than the figure that had been carried since the original estimate,
+  unchecked, into a second issue.
+- **#785** (issue, closed in favour of #786's measurement; decision-record entry above,
+  fd026ba/882352e) — the proposal to default dream to phases `{0,2,5}` argued from
+  per-phase deltas (transitive inference +0.022, orient +0.007, semantic dedup +0.006, all
+  individually positive) as if they compose. The **same study**'s own measured subset arm
+  running exactly `{1,2,5}` scored **0.322** — below both "all phases enabled" (0.374) and
+  "no dream at all" (0.489). Positive deltas in isolation did not predict the combined
+  arm's own rank; the record above closes on the combined measurement, not the sum of parts.
+
+**Group 4 — a documented contract and its enforcement, in both directions.** The doc
+comment's truth value and the code's behavior are independent variables. #728 and #858 are
+the two ways they can diverge.
+
+- **#728** (86d0ba6) — `Worker.MaxDedup` is documented as "max pairs to merge per run," a
+  hard-cap reading. `runPhase2Dedup` checked it only at cluster boundaries; once a cluster
+  was entered, it always merged in full. `TestDedup_RespectsMaxDedupCap` failed 9/100 runs
+  under `-count=100`, and forcing the larger cluster to process last made it fail 100/100 —
+  the cap read as hard and behaved as soft, gated entirely by ULID entropy-byte ordering
+  within a millisecond.
+- **#858** (750e9f1) — `L1Cache.Get`'s doc comment states the shared return is read-only. It
+  was added by #492, which fixed exactly this class in dream dedup, and it has been
+  **accurate** ever since. It prevented **none** of the seven writers an AST census found
+  mutating the cache-returned pointer in place (`mutateEngram`, `SoftDelete`,
+  `UpdateTagsLocked`, `UpdateConfidence`, `UpdateConfidenceWithContradiction`,
+  `UpdateDigest`, `Engine.Restore`) — a true, unchanged claim that changed no behavior at any
+  of the sites it was meant to warn.
+
+**The falsifier, assessed honestly rather than asserted as universal.** *A claim in a
+document or gate whose supporting branch has a lifetime execution count of zero* catches
+Group 1 cleanly (all five — a skip, a filename exclusion, a binary-classified diff, a band
+value never emitted, a count floor propped up by unrelated sites) and #702 from Group 3 (the
+corroboration branch the fixture cites had, in fact, never run). It does **not** catch Group
+2 — #792, #634 and #598 are code that executed and reported the wrong outcome, not code that
+never ran — nor #696 or #785, which are a formula evaluated at the wrong N and deltas that
+do not compose, not zero-execution branches; nor #728 or #858, which are the accuracy of a
+sentence relative to code that runs constantly. Six of thirteen (counting #830's own two).
+Naming the boundary is the point of writing this down: a falsifier that quietly generalized
+past what it actually covers would be exactly the class of claim this entry exists to flag.
+
+**What caught each one, honestly.** Two were caught by deliberate sabotage-and-rerun:
+#810's census (delete the taint analysis, watch the guard stay green) and #702 (disable the
+corroboration branch, watch the acceptance number hold). #825/D6 and #858 came from
+structured root-cause investigation that kept going past the first defect found — #858 in
+particular started from a real, reported data race and only became a class once someone
+asked "is this the only writer" and built the AST sweep to check. #792, #634, #598, and #827
+were found by a systematic audit pass that did not take the original issue's stated
+mechanism on faith (principle #9) and re-derived what the code actually did — #634's own
+commit records that the reporter's stated mechanism "did not reproduce" and the real defect
+was one layer over. #728 surfaced by brute repetition — `-count=100` on an already-written,
+already-passing test — which is closer to luck than to method; the defect existed for as
+long as the test did and nothing was looking for it until someone ran it in a loop. #696 and
+#785 were caught by a human rereading a document and noticing an internal disagreement — a
+formula's inputs against its own later citation, and a set of individually-positive deltas
+against the same study's combined-arm row — which is exactly the case the doctrine itself
+says nothing mechanical reaches. #812 and #814 are #830's own two, the only pair here that
+an existing guard was built to catch before this list existed.
+
+**What does not generalize.** #830's own shipped guards
+(`scripts/check-filename-build-constraints.sh`, the `TestMain` rewrite, `make corpora`)
+would have caught #812 and #814 and nothing else in this list — two of thirteen. Every other
+instance needed either a new, domain-specific mechanism built in response (the NUL-byte
+check, the weight-gate census, the cached-engram census) or a person rereading a document,
+rerunning a test in a loop, or refusing to take a stated mechanism on faith. **A general
+doctrine plus a general test does not substitute for the domain-specific check each instance
+still needed once found** — every guard listed above from #810 onward is bespoke to its own
+subsystem, and none of them would have caught any of the other twelve. The doctrine names
+the shape; finding an instance of the shape is still per-subsystem work.
+
+**Principle: the rate at which this class recurred across genuinely unrelated subsystems in
+one day is itself the evidence that "a claim that reads the same when false" is a species,
+not an incident — and the falsifier that catches most of a species does not catch all of
+it. State which half a general check reaches before treating it as coverage.**
