@@ -286,6 +286,10 @@ func (w *RESTEngineWrapper) ReindexFTSVault(ctx context.Context, vaultName strin
 	return w.engine.ReindexFTSVault(ctx, vaultName)
 }
 
+func (w *RESTEngineWrapper) ResetRepairWatermark(ctx context.Context, vaultName string, which engine.RepairWatermarkKind) error {
+	return w.engine.ResetRepairWatermark(ctx, vaultName, which)
+}
+
 func (w *RESTEngineWrapper) StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error) {
 	return w.engine.StartReembedVault(ctx, vaultName, modelName)
 }

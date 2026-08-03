@@ -4642,6 +4642,24 @@ func (e *Engine) runPruneWorker() {
 // runLegacyFullWeightAssocRepair's failure policy), so decay is parked rather
 // than allowed to destroy repairable state.
 func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
+	// #760: association decay writes are keyed by weight (AssocFwdKey/AssocRevKey
+	// encode the float32 weight itself), and the decay formula (COG-28) is an
+	// independent recompute from stored peakWeight/lastActivated rather than an
+	// incremental step. Two nodes evaluating it a tick apart land on two
+	// different float32 weights for the same edge — two different LIVE keys,
+	// not one edge updated twice. Running this on every cluster node
+	// (leader AND followers) therefore does not converge; it leaves stale
+	// duplicate keys behind every pass. Followers already receive the leader's
+	// decayed weights through the ordinary replication stream, so they must
+	// not ALSO decay independently. This reuses the single-writer gate
+	// (e.writeGate, #596) rather than adding a second leadership signal — the
+	// same pattern the periodic replication-log prune already uses
+	// (ClusterCoordinator.startPeriodicPrune: "if !c.IsLeader() { continue }").
+	// A nil gate (standalone, non-cluster) decays exactly as before.
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		slog.Debug("assoc decay skipped: not the cluster leader", "err", err)
+		return
+	}
 	if !e.assocWeightRepairComplete() {
 		slog.Debug("assoc decay deferred: full-weight repair pass has not completed cleanly")
 		return
