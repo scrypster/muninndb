@@ -46,6 +46,26 @@ go test -tags localassets ./...
 
 ---
 
+## Keeping real names out of a public repo
+
+MuninnDB is public. Vault, client, and host names may be *measured against* — the numbers
+are the point — but never *named* in what ships (see `CLAUDE.md`). `scripts/check-leak-tells.sh`
+is a public, structural check for the decidable shapes a leaked identifier tends to take (an
+`.internal` hostname, an AWS instance id, an "our/on the &lt;Name&gt; ..." phrase) in lines
+*added* by your change. It runs in CI automatically (part of the Shellcheck job) and you can
+install it as a local pre-commit hook:
+
+```bash
+bash scripts/check-leak-tells.sh --install-hook   # opt-in; not enabled by default
+bash scripts/check-leak-tells.sh --selftest       # exercise it against inline fixtures
+```
+
+It has no denylist — a denylist of real names can't live in a public repo without publishing
+the very thing it exists to prevent — so it can only catch identifiers with a structural tell.
+A bare project-internal codename with no such marker will pass through undetected; reading
+your own diff before committing is still the actual check. If it flags a false positive,
+`ALLOW_LEAK_TELLS=1 git commit …` bypasses it (logged, and still worth a second look).
+
 ## Branch Model (Git Flow)
 
 We use a **develop → main** flow:
