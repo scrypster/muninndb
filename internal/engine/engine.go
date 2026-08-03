@@ -4170,9 +4170,33 @@ func (e *Engine) ListDeleted(ctx context.Context, vault string, limit int) ([]*s
 }
 
 // wsVaultID extracts a uint32 routing ID from the first 4 bytes of a workspace
-// prefix. This mirrors the convention in storage/impl.go line ~146 and the
-// trigger system's vaultWS() function. Used to route write events to the
-// correct subscription buckets in the trigger registry.
+// prefix. This mirrors the convention in storage/impl.go line ~146. Used to
+// route write/cognitive/contradiction events to the correct subscription
+// bucket in the trigger registry (internal/engine/trigger.SubscriptionRegistry
+// keys byVault by this uint32, not by the full 8-byte prefix).
+//
+// #696 residual: two vaults whose real 8-byte SipHash prefixes agree on the
+// first 4 bytes share a registry bucket, and trigger.handleSweep then serves
+// the WHOLE bucket from subs[0].WSPrefix (#692's fix), so every OTHER vault
+// in that bucket gets swept against its own subscriptions but the FIRST
+// subscription's store prefix — the class #692 fixed for the non-colliding
+// case, reopened only for the colliding one. This is pre-existing design,
+// untouched by #692/#696, and #692 strictly improved it (before that fix
+// EVERY vault hit this class of bug, not just a colliding one).
+//
+// The collision probability was UNDER-STATED when #692 was filed ("~10⁻⁵ at
+// 10k vaults" — an inherited assumption, not independently checked): the
+// correct birthday-bound estimate is expected-colliding-pairs ≈
+// N(N-1)/(2·2³²), giving P(at least one collision) = 1 - e^(-that) ≈ **1.16%
+// at N=10,000 vaults**, not ~10⁻⁵ — that smaller figure is what the SAME
+// formula gives at N≈300. The exposure is bounded (a mis-swept vault's own
+// write/cognitive/contradiction pushes are unaffected — only the periodic
+// sweep's store lookups inside a colliding bucket are wrong, and a fleet
+// only reaches meaningful odds of a bucket actually colliding in the
+// thousands-of-vaults range), but "bounded" is not "negligible" at the
+// scale a multi-tenant deployment can reach. Long-term fix: key the trigger
+// registry's byVault map by the full [8]byte prefix instead of this uint32,
+// which erases the class rather than shrinking its odds.
 func wsVaultID(ws [8]byte) uint32 {
 	return binary.BigEndian.Uint32(ws[:4])
 }

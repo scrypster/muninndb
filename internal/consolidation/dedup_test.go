@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -284,6 +285,22 @@ func TestDedup_DryRun_NoMutation(t *testing.T) {
 	}
 }
 
+// TestDedup_RespectsMaxDedupCap is #728's deterministic repro. Cluster
+// processing order is scanAllEngramIDs' Pebble key order, i.e. ULID order —
+// so the test controls order directly through each engram's CreatedAt
+// (WriteEngram mints the ULID from a non-zero CreatedAt via
+// NewULIDWithTime), never through wall-clock sleeps or write-call ordering,
+// which is what made the original version of this test order-dependent
+// (ULIDs minted in the same millisecond sort by random entropy bytes): the
+// y-cluster (smaller, 2 members) is timestamped to sort BEFORE the x-cluster
+// (larger, 3 members) on every run, deterministically.
+//
+// This exercises exactly the case #728 reported: the smaller cluster is
+// visited first and only partially exhausts the cap, and the ORIGINAL code
+// still merged the larger cluster in full once it was entered (checking the
+// cap only at cluster boundaries), landing on MergedEngrams=3 against a cap
+// of 2. The fix trims a cluster's absorbable set to the remaining budget
+// before archiving anything from it, so this must land on EXACTLY 2.
 func TestDedup_RespectsMaxDedupCap(t *testing.T) {
 	store, db, cleanup := testStoreWithDB(t)
 	defer cleanup()
@@ -291,27 +308,30 @@ func TestDedup_RespectsMaxDedupCap(t *testing.T) {
 	ctx := context.Background()
 	vault := "dedup_cap"
 	wsPrefix := store.ResolveVaultPrefix(vault)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	// Cluster 1: x-axis (3 engrams → 2 merges)
-	embedX := []float32{1, 0, 0}
-	for i := 0; i < 3; i++ {
-		writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
-			Concept: "x", Content: "x", Confidence: float32(i+1) * 0.1, Relevance: float32(i+1) * 0.1,
-			Stability: 30, Embedding: embedX,
-		})
-	}
-
-	// Cluster 2: y-axis (2 engrams → 1 merge, but should be skipped by cap)
+	// Cluster 1 (sorts FIRST): y-axis, 2 engrams -> 1 absorbable member.
 	embedY := []float32{0, 1, 0}
 	for i := 0; i < 2; i++ {
 		writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
-			Concept: "y", Content: "y", Confidence: float32(i+1) * 0.1, Relevance: float32(i+1) * 0.1,
+			CreatedAt: base.Add(time.Duration(i) * time.Second),
+			Concept:   "y", Content: "y", Confidence: float32(i+1) * 0.1, Relevance: float32(i+1) * 0.1,
 			Stability: 30, Embedding: embedY,
 		})
 	}
 
+	// Cluster 2 (sorts SECOND): x-axis, 3 engrams -> 2 absorbable members,
+	// larger than the budget (1) remaining after cluster 1.
+	embedX := []float32{1, 0, 0}
+	for i := 0; i < 3; i++ {
+		writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
+			CreatedAt: base.Add(time.Duration(10+i) * time.Second),
+			Concept:   "x", Content: "x", Confidence: float32(i+1) * 0.1, Relevance: float32(i+1) * 0.1,
+			Stability: 30, Embedding: embedX,
+		})
+	}
+
 	mock := &mockEngineInterface{store: store}
-	// Cap at 2: cluster 1 merges 2, cluster 2 should be skipped
 	w := &Worker{Engine: mock, MaxDedup: 2, MaxTransitive: 100}
 	report := &ConsolidationReport{}
 
@@ -319,10 +339,83 @@ func TestDedup_RespectsMaxDedupCap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The cap is checked at cluster boundaries, so cluster 1 (2 merges) fills
-	// the cap and cluster 2 is skipped entirely.
-	if report.MergedEngrams > 2 {
-		t.Errorf("MergedEngrams = %d, should be capped at 2", report.MergedEngrams)
+	// Hard cap: never more than MaxDedup, in either direction.
+	if report.MergedEngrams != 2 {
+		t.Errorf("MergedEngrams = %d, want exactly 2 (hard cap)", report.MergedEngrams)
+	}
+}
+
+// TestDedup_MaxDedupCapDefersRestOfClusterToNextRun proves the hard cap's
+// safety argument: a cluster trimmed mid-way by the cap is not lost, only
+// deferred — the member(s) left live are picked up by re-clustering on the
+// NEXT run once their already-merged siblings are gone from the scan.
+func TestDedup_MaxDedupCapDefersRestOfClusterToNextRun(t *testing.T) {
+	store, db, cleanup := testStoreWithDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	vault := "dedup_cap_defer"
+	wsPrefix := store.ResolveVaultPrefix(vault)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// One cluster, 3 engrams -> 2 absorbable members, budget of 1.
+	embed := []float32{1, 0, 0}
+	var ids []storage.ULID
+	for i := 0; i < 3; i++ {
+		id := writeEngramWithEmbedding(t, ctx, store, db, wsPrefix, &storage.Engram{
+			CreatedAt: base.Add(time.Duration(i) * time.Second),
+			Concept:   "x", Content: "x", Confidence: float32(i+1) * 0.1, Relevance: float32(i+1) * 0.1,
+			Stability: 30, Embedding: embed,
+		})
+		ids = append(ids, id)
+	}
+
+	mock := &mockEngineInterface{store: store}
+	w := &Worker{Engine: mock, MaxDedup: 1, MaxTransitive: 100}
+
+	report1 := &ConsolidationReport{}
+	if err := w.runPhase2Dedup(ctx, store, wsPrefix, report1, vault); err != nil {
+		t.Fatal(err)
+	}
+	if report1.MergedEngrams != 1 {
+		t.Fatalf("run 1: MergedEngrams = %d, want exactly 1 (hard cap)", report1.MergedEngrams)
+	}
+
+	archivedAfterRun1 := 0
+	for _, id := range ids {
+		eng, err := store.GetEngram(ctx, wsPrefix, id)
+		if err != nil {
+			t.Fatalf("GetEngram: %v", err)
+		}
+		if eng.State == storage.StateArchived {
+			archivedAfterRun1++
+		}
+	}
+	if archivedAfterRun1 != 1 {
+		t.Fatalf("run 1: %d engrams archived, want exactly 1", archivedAfterRun1)
+	}
+
+	// Second run: the still-live pair reclusters and finishes merging.
+	report2 := &ConsolidationReport{}
+	if err := w.runPhase2Dedup(ctx, store, wsPrefix, report2, vault); err != nil {
+		t.Fatal(err)
+	}
+	if report2.MergedEngrams != 1 {
+		t.Errorf("run 2: MergedEngrams = %d, want exactly 1 (the deferred member)", report2.MergedEngrams)
+	}
+
+	archivedTotal := 0
+	for _, id := range ids {
+		eng, err := store.GetEngram(ctx, wsPrefix, id)
+		if err != nil {
+			t.Fatalf("GetEngram: %v", err)
+		}
+		if eng.State == storage.StateArchived {
+			archivedTotal++
+		}
+	}
+	if archivedTotal != 2 {
+		t.Errorf("after both runs: %d engrams archived, want exactly 2 (nothing lost)", archivedTotal)
 	}
 }
 

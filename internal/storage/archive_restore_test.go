@@ -157,6 +157,234 @@ func TestRestoreArchivedEdges_Transitive(t *testing.T) {
 	}
 }
 
+// --- #806: archived associations restorable from either endpoint ---
+//
+// Before the fix, DecayAssocWeights archived an edge only under ws|src|dst,
+// so RestoreArchivedEdges (called per recall CANDIDATE by
+// phase4_75ArchiveRestore) could only ever find it when recall happened to
+// touch the endpoint that was its Src. Since the Hebbian worker's
+// canonicalPair always makes the OLDER engram Src, that meant the NEWER of a
+// co-activated pair — exactly what a recent session is most likely to touch
+// — could never trigger its own edge's restoration.
+
+// archiveViaDecay writes a live association and runs it through
+// DecayAssocWeights with parameters chosen to push it into the 0x25 archive
+// (consolidation score above threshold, same shape as
+// TestDecayAssocWeights_ArchivesStrongEdge), so the mirror-write behavior
+// under test is exercised through the real production code path rather than
+// hand-encoded fixture bytes.
+func archiveViaDecay(t *testing.T, store *PebbleStore, ctx context.Context, ws [8]byte, src, dst ULID, relType RelType) {
+	t.Helper()
+	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
+		TargetID:      dst,
+		Weight:        0.8,
+		RelType:       relType,
+		LastActivated: int32(time.Now().Add(-48 * time.Hour).Unix()),
+	}); err != nil {
+		t.Fatalf("WriteAssociation: %v", err)
+	}
+	if _, err := store.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.3, 0.05); err != nil {
+		t.Fatalf("DecayAssocWeights: %v", err)
+	}
+	// Precondition: the edge actually left the live index.
+	if w, _ := store.GetAssocWeight(ctx, ws, src, dst); w > 0 {
+		t.Fatalf("precondition failed: edge is still live (w=%v), not archived", w)
+	}
+}
+
+func archiveRowExists(t *testing.T, store *PebbleStore, ws [8]byte, a, b ULID) bool {
+	t.Helper()
+	_, closer, err := store.db.Get(keys.ArchiveAssocKey(ws, [16]byte(a), [16]byte(b)))
+	if err != nil {
+		return false
+	}
+	closer.Close()
+	return true
+}
+
+// TestArchiveRestore_SymmetricEdgeMirroredOnArchive is the write-side half:
+// a RelCoActivated edge (RelType.IsSymmetric()) must land under BOTH
+// ws|src|dst and ws|dst|src the moment it is archived, with identical
+// values, so a later scan from either endpoint's own prefix finds it.
+func TestArchiveRestore_SymmetricEdgeMirroredOnArchive(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("archive-mirror-write")
+
+	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
+
+	archiveViaDecay(t, store, ctx, ws, src, dst, RelCoActivated)
+
+	if !archiveRowExists(t, store, ws, src, dst) {
+		t.Error("primary archive row ws|src|dst missing")
+	}
+	if !archiveRowExists(t, store, ws, dst, src) {
+		t.Error("mirror archive row ws|dst|src missing for a symmetric relation")
+	}
+
+	primaryVal, closer1, err := store.db.Get(keys.ArchiveAssocKey(ws, [16]byte(src), [16]byte(dst)))
+	if err != nil {
+		t.Fatalf("read primary: %v", err)
+	}
+	primaryCopy := append([]byte{}, primaryVal...)
+	closer1.Close()
+	mirrorVal, closer2, err := store.db.Get(keys.ArchiveAssocKey(ws, [16]byte(dst), [16]byte(src)))
+	if err != nil {
+		t.Fatalf("read mirror: %v", err)
+	}
+	defer closer2.Close()
+	if string(primaryCopy) != string(mirrorVal) {
+		t.Errorf("mirror value diverges from primary: primary=%x mirror=%x", primaryCopy, mirrorVal)
+	}
+}
+
+// TestArchiveRestore_SymmetricEdgeRestorableFromEitherEndpoint is the
+// end-to-end round trip #806 was filed over: archive a symmetric edge, then
+// restore from the DESTINATION side (the side a recent session actually
+// touches for a Hebbian pair) and confirm it comes back.
+func TestArchiveRestore_SymmetricEdgeRestorableFromEitherEndpoint(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("archive-restore-either-end")
+
+	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
+
+	archiveViaDecay(t, store, ctx, ws, src, dst, RelRelatesTo)
+
+	// Restore triggered from the DESTINATION's own prefix — the case that
+	// was silently impossible before #806.
+	restored, err := store.RestoreArchivedEdges(ctx, ws, [16]byte(dst), 10)
+	if err != nil {
+		t.Fatalf("RestoreArchivedEdges from destination: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("expected 1 edge restored from the destination side, got %d", len(restored))
+	}
+
+	// RestoreArchivedEdges always writes the live pair in (callerSrcID, c.dst)
+	// order — here (dst, src), because the restore was triggered from dst's
+	// own prefix. GetAssocWeight's 0x14 lookup is a raw, direction-sensitive
+	// point read (unlike ranking, which unions 0x03/0x04 for symmetric
+	// types), so the pair must be queried in the order it was actually
+	// written; querying it (src, dst) is exactly the wrong-direction lookup
+	// this is not testing.
+	w, err := store.GetAssocWeight(ctx, ws, dst, src)
+	if err != nil || w <= 0 {
+		t.Errorf("edge not restored to live index after destination-side restore: w=%v err=%v", w, err)
+	}
+}
+
+// TestArchiveRestore_DirectionalEdgeNotMirrored: a directional relation
+// (RelSupports is not in RelType.IsSymmetric()'s set) keeps the pre-#806
+// behavior — restorable only from its Src. Mirroring it would let a restore
+// MINT a live edge in a direction its writer never asserted, which COG-31
+// forbids of a writer exactly as it forbids it of a presenter.
+func TestArchiveRestore_DirectionalEdgeNotMirrored(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("archive-directional-not-mirrored")
+
+	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
+
+	archiveViaDecay(t, store, ctx, ws, src, dst, RelSupports)
+
+	if archiveRowExists(t, store, ws, dst, src) {
+		t.Error("directional edge must not be mirrored under ws|dst|src")
+	}
+
+	restored, err := store.RestoreArchivedEdges(ctx, ws, [16]byte(dst), 10)
+	if err != nil {
+		t.Fatalf("RestoreArchivedEdges from destination: %v", err)
+	}
+	if len(restored) != 0 {
+		t.Errorf("a directional edge was restored from its non-authored endpoint: %d", len(restored))
+	}
+}
+
+// TestArchiveRestore_RestoreDeletesBothArchiveRows: restoring a symmetric
+// edge from either side must retire BOTH archive rows in the restore's own
+// commit, or the sibling survives as a stale duplicate with restoredAt still
+// 0 — exactly the state GCArchivedEdges' restoredAt==0 criterion assumes
+// cannot happen for an edge that is live again.
+func TestArchiveRestore_RestoreDeletesBothArchiveRows(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("archive-restore-both-rows")
+
+	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
+
+	archiveViaDecay(t, store, ctx, ws, src, dst, RelContradicts)
+
+	if _, err := store.RestoreArchivedEdges(ctx, ws, [16]byte(src), 10); err != nil {
+		t.Fatalf("RestoreArchivedEdges: %v", err)
+	}
+
+	if archiveRowExists(t, store, ws, src, dst) {
+		t.Error("primary archive row survived a restore triggered from its own side")
+	}
+	if archiveRowExists(t, store, ws, dst, src) {
+		t.Error("mirror archive row survived restore — a stale duplicate with restoredAt==0 remains")
+	}
+}
+
+// TestArchiveRestore_ConcurrentRestoreAndGC exercises the ordering GC and
+// restore can land in relative to each other, deterministically (no
+// goroutines, per the project's testing-hermeticity rule): a GC pass that
+// runs between the two archive rows being written and either being restored
+// must not prune a row a restore is about to need, and a GC pass that runs
+// AFTER a full restore must find nothing left to prune and must not error.
+func TestArchiveRestore_ConcurrentRestoreAndGC(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("archive-restore-vs-gc")
+
+	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
+
+	archiveViaDecay(t, store, ctx, ws, src, dst, RelCoActivated)
+
+	// GC runs first. Both mirrored rows carry byte-identical values (fresh
+	// LastActivated, peakWeight 0.8 >= the 0.15 GC floor), so neither
+	// qualifies for pruning yet — GC must be a no-op here.
+	pruned, err := store.GCArchivedEdges(ctx, ws)
+	if err != nil {
+		t.Fatalf("GCArchivedEdges (pre-restore): %v", err)
+	}
+	if pruned != 0 {
+		t.Fatalf("GC pruned %d row(s) that a restore still needed", pruned)
+	}
+
+	restored, err := store.RestoreArchivedEdges(ctx, ws, [16]byte(dst), 10)
+	if err != nil {
+		t.Fatalf("RestoreArchivedEdges: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("expected 1 restored edge, got %d", len(restored))
+	}
+
+	// GC runs again after the restore. Both archive rows are gone, so this
+	// must find nothing and must not error over an already-live edge.
+	pruned, err = store.GCArchivedEdges(ctx, ws)
+	if err != nil {
+		t.Fatalf("GCArchivedEdges (post-restore): %v", err)
+	}
+	if pruned != 0 {
+		t.Errorf("GC found %d row(s) to prune after both archive rows were already retired by restore", pruned)
+	}
+
+	// The restored edge is genuinely live and unaffected by either GC pass.
+	// Restore was triggered from dst's own prefix, so the live pair was
+	// written (dst, src) — see the direction note in
+	// TestArchiveRestore_SymmetricEdgeRestorableFromEitherEndpoint.
+	if w, err := store.GetAssocWeight(ctx, ws, dst, src); err != nil || w <= 0 {
+		t.Errorf("restored edge not live after both GC passes: w=%v err=%v", w, err)
+	}
+}
+
 // TestSTO12_ArchivedEdgesFromAHardDeletedSourceAreReaped covers
 // reapArchivedEdgesFrom — a destructive, replicated, bulk-delete reachable from
 // the recall read path, which shipped with no coverage of its own.

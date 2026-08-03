@@ -391,9 +391,21 @@ func (w *TriggerWorker) handleSweep(ctx context.Context) {
 		if len(subs) == 0 {
 			continue
 		}
-		// All subscriptions in a registry bucket share the same VaultID and
-		// therefore the same real vault prefix; take it from any subscription
-		// rather than reconstructing it from the uint32 routing key (#692).
+		// All subscriptions in a registry bucket share the same VaultID, so
+		// take the real vault prefix from any of them rather than
+		// reconstructing it from the uint32 routing key (#692). VaultID is a
+		// 4-byte truncation of the real 8-byte prefix, so "share the same
+		// VaultID" does NOT strictly imply "share the same vault" — two
+		// vaults whose prefixes agree on the first 4 bytes land in the SAME
+		// bucket, and every subscription in it is then swept against
+		// subs[0].WSPrefix regardless of which vault it actually belongs to.
+		// This is pre-existing (registry bucketing predates #692, which
+		// strictly improved it — before that fix EVERY vault hit this class
+		// of bug, not just a colliding one) and bounded to the periodic
+		// sweep's store lookups. See wsVaultID's doc comment in
+		// internal/engine/engine.go for the corrected collision-probability
+		// estimate (#696) and the long-term fix (key the registry by the
+		// full 8-byte prefix).
 		ws := subs[0].WSPrefix
 		w.sweepVault(ctx, vaultID, ws, subs)
 	}

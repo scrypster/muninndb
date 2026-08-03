@@ -59,7 +59,7 @@ prefix — see the vault-reuse note at the bottom).
 | 0x22 | ws+^millis(8)+id | — | last-access (inverted for MRU-first) |
 | 0x23 | nameHash(8)+ws(8)+id | — | entity reverse index (global prefix, **vault in the key's MIDDLE**). A plain `0x23\|nameHash` scan therefore spans every tenant; use `keys.EntityReverseIndexVaultPrefix(nameHash, ws)` (17 bytes) for anything that must stay inside one vault — the orphan check in `DecrementEntityMentionCount` does. The same layout is why `ClearVault` deletes it row-by-row rather than with a range tombstone |
 | 0x24 | ws+hashA(8)+hashB(8) | msgpack count | co-occurrence |
-| 0x25 | ws+src+dst | archived assoc (no weight sort, no reverse) | |
+| 0x25 | ws+src+dst | archived assoc (no weight sort) | **#806:** a `RelType.IsSymmetric()` edge (`RelCoActivated`/`RelRelatesTo`/`RelContradicts`) is stored under BOTH `ws\|src\|dst` and `ws\|dst\|src` with byte-identical values, written in the same batch that archives it — no new prefix, no reverse-key format, since `RestoreArchivedEdges`' existing src-prefix scan finds the mirror row directly. A directional (non-symmetric) edge, including `RelUserDefined`, is never mirrored — restoring it from the wrong endpoint would mint a live edge in a direction its author never asserted, which COG-31 forbids for a writer same as a presenter. Restoring an edge deletes both rows in the restore's own batch |
 | 0x26 | ws+entityHash(8)+engramID | — | rel-entity index |
 | 0x27 | ws | 16B dream state | |
 | 0x28 | ws+sha256(32) | engramID(16) | content-hash dedup |

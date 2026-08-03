@@ -1210,6 +1210,23 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 				_ = batch.Set(keys.ArchiveAssocKey(wsPrefix, e.src, e.dst), archVal[:], nil)
 				_ = batch.Delete(keys.AssocWeightIndexKey(wsPrefix, e.src, e.dst), nil)
 				ps.AddToArchiveBloom(e.src)
+				// #806: a symmetric relation asserts the same fact from either
+				// endpoint (RelType.IsSymmetric, COG-31 — "safe for a WRITER... to
+				// consult"), but 0x25 has no reverse index, so an edge archived
+				// only under its src is invisible to RestoreArchivedEdges called
+				// on its dst — exactly the endpoint a recent session is most
+				// likely to touch, since Hebbian canonicalization always makes
+				// the newer engram the dst. Mirror the row under the swapped key
+				// so the SAME src-prefix scan RestoreArchivedEdges already runs
+				// finds it from either side, with no format change and no new
+				// prefix. A directional (non-symmetric) edge is never mirrored:
+				// doing so would let a restore MINT a live edge in the wrong
+				// direction from the reverse endpoint, which COG-31 forbids for
+				// any surface, writer included.
+				if e.relType.IsSymmetric() {
+					_ = batch.Set(keys.ArchiveAssocKey(wsPrefix, e.dst, e.src), archVal[:], nil)
+					ps.AddToArchiveBloom(e.dst)
+				}
 			} else if !e.remove {
 				// Preserve existing metadata. Do NOT update lastActivated here —
 				// decay is a background process, not a user activation.

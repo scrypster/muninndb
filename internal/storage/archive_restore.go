@@ -193,6 +193,22 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 		archKey := keys.ArchiveAssocKey(ws, srcID, c.dst)
 		_ = batch.Delete(archKey, nil)
 
+		// #806: a symmetric edge was archived under BOTH endpoints (see the
+		// mirror write in DecayAssocWeights), so restoring it from either side
+		// must retire both archive rows in the SAME commit as the live write —
+		// otherwise the sibling row survives with restoredAt still 0 and the
+		// edge remains "archived" from its other endpoint even though it is
+		// live again. It is not a correctness hole on its own (re-restoring it
+		// later just re-writes the same live values), but it is a stale
+		// duplicate that only GC's age/weight criteria would ever clear, and
+		// GCArchivedEdges' restoredAt==0 requirement was written assuming one
+		// row per edge. Deleting a key that was never written (a directional
+		// edge, or a symmetric edge whose sibling GC already reaped) is a
+		// harmless no-op.
+		if c.relType.IsSymmetric() {
+			_ = batch.Delete(keys.ArchiveAssocKey(ws, c.dst, srcID), nil)
+		}
+
 		restoredDsts = append(restoredDsts, c.dst)
 	}
 
