@@ -30,11 +30,11 @@ var clearVaultDataPrefixes = []byte{
 	prefix.ArchiveAssoc, prefix.RelEntityIndex, prefix.DreamState, prefix.ContentHash,
 	prefix.RecallEvent, // recall events hold raw query text; must not outlive a cleared vault
 	prefix.Lease,
-	prefix.EvolveRepairMark,  // cleared vault has nothing to repair; next boot re-scans and re-marks
-	prefix.RawTagRange,       // S1 ordered raw-tag index; must not resurrect on vault-name reuse
-	prefix.ProspectiveIntent, // armed intentions (THE PUSH); a cleared vault must not keep firing notices
+	prefix.EvolveRepairMark,      // cleared vault has nothing to repair; next boot re-scans and re-marks
+	prefix.RawTagRange,           // S1 ordered raw-tag index; must not resurrect on vault-name reuse
+	prefix.ProspectiveIntent,     // armed intentions (THE PUSH); a cleared vault must not keep firing notices
 	prefix.AssocWeightRepairMark, // a cleared vault has no associations left to repair
-	prefix.UpsertKey,            // upsert forward-index pins — must not outlive a cleared vault
+	prefix.UpsertKey,             // upsert forward-index pins — must not outlive a cleared vault
 }
 
 // ClearVault deletes all data keys for a vault using Pebble range tombstones.
