@@ -14,6 +14,19 @@ type AssocWeightUpdate struct {
 	Dst        ULID
 	Weight     float32
 	CountDelta uint32 // Hebbian co-activation increment to add to CoActivationCount
+	// LastActivatedAt is the Unix-seconds stamp to record as this edge's
+	// lastActivated. ZERO = time.Now(), which is the pre-#779 behaviour and
+	// therefore what every production caller gets unless it says otherwise.
+	//
+	// It exists because the co-activation event ALREADY carries its own time
+	// (cognitive.CoActivationEvent.At) and that time was being dropped: an
+	// event that sat in the Hebbian worker's channel for seconds was stamped
+	// late, and — decisively — an OFFLINE REPLAY of historical co-activations
+	// would stamp 90 days of learning as "just now", erasing every interleaved
+	// decay pass and fabricating a "no forgetting ever" graph that never
+	// existed. Association decay is a pure function of now - lastActivated
+	// (COG-27), so this field is what makes replayed forgetting possible.
+	LastActivatedAt int32
 }
 
 // OrdinalEntry is a (childID, ordinal) pair returned by ListChildOrdinals.

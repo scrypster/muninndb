@@ -1421,7 +1421,7 @@
                 </p>
                 <div style="display:flex;gap:1.5rem;margin-bottom:1rem;flex-wrap:wrap;">
                   <label style="font-size:0.8125rem;display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
-                    <input type="checkbox" x-model="plasticityForm.hebbianEnabled" @change="_updatePlasticityChart()" />
+                    <input type="checkbox" x-model="plasticityForm.hebbianEnabled" @change="_updatePlasticityChart()" title="Co-activation learning. Governs the whole loop: weight updates, association decay, and the read-side boost recall applies from association weights. Off means recall is never scored by association weights." />
                     Hebbian learning
                   </label>
                   <label style="font-size:0.8125rem;display:flex;align-items:center;gap:0.5rem;cursor:pointer;">

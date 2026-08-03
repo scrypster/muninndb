@@ -224,6 +224,10 @@ func abmScore(t *testing.T, eng *activation.ActivationEngine, query string) []ac
 		Context:    []string{query},
 		Threshold:  1e-9, // effectively disabled; the rescale does not depend on it
 		MaxResults: 100,
+		// COG-32: models a DEFAULT-preset vault. Without this the primer
+		// seeded in abmFixture is inert and both gate arms collapse onto each
+		// other, which the both-metric rule below correctly rejects.
+		HebbianEnabled: true,
 		Weights: &activation.Weights{
 			SemanticSimilarity: 0.6,
 			FullTextRelevance:  0.4,

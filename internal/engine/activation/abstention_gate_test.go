@@ -149,6 +149,10 @@ func (f *abFixture) run(t *testing.T, query string, threshold float64) *activati
 		Context:    []string{query},
 		Threshold:  threshold,
 		MaxResults: 10,
+		// COG-32: the fixture models a DEFAULT-preset vault, whose read-side
+		// Hebbian boost is on. Since #779 that is explicit on the request —
+		// the primer engram above is inert without it.
+		HebbianEnabled: true,
 		Weights: &activation.Weights{
 			SemanticSimilarity: 0.6,
 			FullTextRelevance:  0.4,

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/prefix"
@@ -56,7 +55,10 @@ const cloneBatchSize = 512
 // CloneVaultData copies all engrams and index data from wsSource to wsTarget.
 //
 // For engrams (0x01 prefix), the ERF blob is decoded, AccessCount is reset to 0
-// and LastAccess is reset to the zero time, then re-encoded before writing.
+// and LastAccess is CARRIED OVER from the source (falling back to CreatedAt only
+// when the source's own LastAccess is unset, via normalizeEngramTimes) — then
+// re-encoded before writing. See the block comment at the reset for why the
+// counter is reset but the timestamp is not (#810).
 // For all other vault-scoped prefixes the key prefix bytes (bytes 1–8) are
 // replaced with wsTarget bytes.  The 9-byte VaultCountKey (0x15 | ws) is
 // skipped and written at the end with the computed count.
@@ -125,9 +127,41 @@ func (ps *PebbleStore) CloneVaultData(
 				continue
 			}
 
-			// Reset access metadata for clone.
+			// Access metadata for the clone: the COUNTER is reset, the
+			// TIMESTAMP is carried over. The two are not the same kind of
+			// thing, and #810 is the proof.
+			//
+			// AccessCount has a meaningful zero — 0 genuinely means "no reads
+			// in this vault yet" — it degrades gracefully (ACT-R consumes
+			// ln(n+1), bounded by the base-level cap) and it recovers, because
+			// the first read of each engram in the clone starts rebuilding it.
+			//
+			// LastAccess has NO representation for "never", which is the whole
+			// of #810: the format stores uint64(t.UnixNano()), so time.Time{}
+			// round-trips to 1754-08-30, whose IsZero() is false. Any value
+			// invented here is therefore a false statement about WHEN, it never
+			// recovers (an engram never read in the clone carries it forever),
+			// and it is re-consumed on every recall. The first attempt stored
+			// the zero time directly: recency pinned to 0, the decay factor
+			// pinned to its 0.05 floor, and the first recall on a fresh
+			// weighted_sum clone returned nothing, silently. The second
+			// attempt (LastAccess := CreatedAt, via normalizeEngramTimes)
+			// removed the sentinel but reached the SAME arithmetic by another
+			// route on any vault that is actually used: #682's ReinforceOnRead
+			// keeps LastAccess fresh on old memories, and rewinding it to a
+			// CreatedAt months back is an equally large daysSince. Measured
+			// break points on a one-recall cold-cache clone: DEFAULT ACT-R at 7
+			// days of source age, weighted_sum at ~45, rrf unaffected.
+			//
+			// So: carry the source's LastAccess. It keeps the clone
+			// recall-equivalent to its source, and it preserves the RELATIVE
+			// recency ordering across the vault, which is what recency actually
+			// consumes. normalizeEngramTimes still runs, and still supplies
+			// CreatedAt when the SOURCE record's own LastAccess is unset —
+			// which is how a vault cloned before #810 heals as it is copied.
 			erfEng.AccessCount = 0
-			erfEng.LastAccess = time.Time{}
+			erfEng.CreatedAt, erfEng.UpdatedAt, erfEng.LastAccess =
+				normalizeEngramTimes(erfEng.CreatedAt, erfEng.UpdatedAt, erfEng.LastAccess)
 
 			encoded, encErr := erf.Encode(erfEng)
 			if encErr != nil {

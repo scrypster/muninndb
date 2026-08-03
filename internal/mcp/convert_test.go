@@ -159,7 +159,7 @@ func TestActivationToMemoryFreshnessFull(t *testing.T) {
 		t.Errorf("SourceType = %q, want %q", m.SourceType, "human")
 	}
 	wantTime := time.Unix(0, lastAccessNs).UTC()
-	if !m.LastAccess.Equal(wantTime) {
+	if m.LastAccess == nil || !m.LastAccess.Equal(wantTime) {
 		t.Errorf("LastAccess = %v, want %v", m.LastAccess, wantTime)
 	}
 }
@@ -177,6 +177,9 @@ func TestActivationToMemoryLastAccessConversion(t *testing.T) {
 	}
 	m := activationToMemory(item)
 
+	if m.LastAccess == nil {
+		t.Fatalf("LastAccess = nil, want %v — a real 2024 instant must not be read as unset", wantTime)
+	}
 	if !m.LastAccess.Equal(wantTime) {
 		t.Errorf("LastAccess = %v, want %v", m.LastAccess, wantTime)
 	}
@@ -185,18 +188,29 @@ func TestActivationToMemoryLastAccessConversion(t *testing.T) {
 	}
 }
 
-// TestActivationToMemoryLastAccessZero verifies that a zero LastAccess value
-// produces time.Unix(0,0).UTC() (the zero Unix epoch in UTC).
-func TestActivationToMemoryLastAccessZero(t *testing.T) {
-	item := &mbp.ActivationItem{
-		ID:         "zero-ts",
-		LastAccess: 0,
-	}
-	m := activationToMemory(item)
-
-	want := time.Unix(0, 0).UTC()
-	if !m.LastAccess.Equal(want) {
-		t.Errorf("LastAccess with 0 input = %v, want %v", m.LastAccess, want)
+// TestActivationToMemoryUnsetLastAccessIsOmitted pins that neither unset shape
+// is rendered as an instant.
+//
+// This test previously asserted the OPPOSITE for the 0 case — that a zero
+// LastAccess "produces time.Unix(0,0).UTC()", i.e. that MCP tells a calling
+// agent a memory was last read on 1970-01-01. It pinned the defect, the same way
+// TestCloneVaultData_AccessCountReset once pinned the 1754 sentinel as the
+// intended reset value. There is no code path on which the Unix epoch is a real
+// access time; both 0 and the 1754 sentinel mean "unknown", and unknown is sent
+// as absence.
+func TestActivationToMemoryUnsetLastAccessIsOmitted(t *testing.T) {
+	for name, ns := range map[string]int64{
+		"unix epoch (a wire zero)":           0,
+		"erf zero-time sentinel (year 1754)": time.Time{}.UnixNano(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := activationToMemory(&mbp.ActivationItem{ID: "unset-ts", LastAccess: ns})
+			if m.LastAccess != nil {
+				t.Errorf("LastAccess = %v, want nil (omitted) — rendering it as an instant is the "+
+					"plausible-looking wrong answer, on the same row where staleness is omitted as unknown",
+					m.LastAccess.UTC())
+			}
+		})
 	}
 }
 

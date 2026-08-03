@@ -108,15 +108,7 @@ func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8
 	if eng.Stability == 0 {
 		eng.Stability = 30.0
 	}
-	if eng.CreatedAt.IsZero() {
-		eng.CreatedAt = time.Now()
-	}
-	if eng.UpdatedAt.IsZero() {
-		eng.UpdatedAt = eng.CreatedAt
-	}
-	if eng.LastAccess.IsZero() {
-		eng.LastAccess = eng.CreatedAt
-	}
+	eng.CreatedAt, eng.UpdatedAt, eng.LastAccess = normalizeEngramTimes(eng.CreatedAt, eng.UpdatedAt, eng.LastAccess)
 
 	// STO-12: the inline-Associations loop below is a creator, checked before
 	// anything is queued. Engrams already queued in this batch count as live —

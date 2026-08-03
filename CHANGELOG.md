@@ -46,7 +46,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an unknown role, so a leader serving writes during startup can never silently
   drop them out of the stream. Neither filter was expressible before #726: under
   `0x19` both would have discarded idempotency receipts too.
-
+- **`hebbian_enabled` now governs the read side too** (COG-32). The phase-4
+  Hebbian boost ran unconditionally during recall while its neighbour, the PAS
+  transition boost, was gated — so a vault with `hebbian_enabled: false` (the
+  `scratchpad` preset) was still scored by association edges it would never
+  update and never decay. The flag is now symmetric: it gates learning, decay
+  and the read-side boost. **User-visible:** `scratchpad` vaults score recall
+  without any Hebbian contribution, and rows can reorder on such vaults.
+- **An explicit `actr_heb_scale: 0` is honored** instead of being silently
+  replaced by the 4.0 default. Two layers substituted it; the config layer had
+  always admitted it. `actr_heb_scale` scales both the Hebbian and the PAS
+  transition boost, so 0 is the "no cognitive prior at all" switch — it now
+  works.
+- **Co-activation writes carry their own timestamp.** `CoActivationEvent.At`
+  was set by the engine and then dropped, so an association's `lastActivated`
+  was stamped at write time rather than at co-activation time. An event that
+  waited in the worker's channel was stamped late. Zero-value behaviour is
+  unchanged.
+- **An association's decay anchor never moves backwards** (COG-27). Making the
+  co-activation timestamp writable also made it *remotely* writable: in a
+  cluster, a cog-forwarded co-activation carries the peer's clock verbatim.
+  `lastActivated` is COG-27's elapsed-time input, so a stale stamp collapsed a
+  live edge's decay ceiling on the next pass — irreversibly, since decay never
+  raises a weight. Both association writers now keep the later of the stored and
+  the incoming stamp, the same shape `peakWeight` already had beside them.
+  **User-visible in cluster mode only:** a lagging or skewed peer, or a
+  cog-forward backlog delivered after a partition heals, can no longer age
+  another node's associations by the size of the clock gap.
+- `RecallEvent`'s doc comment no longer claims a "positives = surfaced AND
+  cited" ground-truth join that is not implementable from what is on disk (no
+  join key, no identity on either side, context-free residue, and a citation
+  side damaged by the #757 class).
 - **An association edge can no longer outlive its endpoints** (#803). Hard
   deletes left the dead engram in the FTS and vector indexes, so the automatic
   association workers kept finding it and minting fresh edges to an ID that no
@@ -67,6 +97,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   siblings committing as before; gRPC and MBP return their existing error for an
   invalid ID. `relationships[]` is unchanged in this
   release — it still logs a warning and succeeds (#817).
+
+### Internal
+
+- The cognition trial's machinery: a build-tagged (`cognitiontrial`) offline
+  harness that puts the Hebbian / PAS / ACT-R base-level layer on trial against
+  real recorded queries, a co-activation replay driver, and the pre-registered
+  acceptance rule as executable code with its own unit tests. None of it
+  compiles into a shipped binary.
+
+### Security
+
+- **`muninn_state` is no longer callable by an observe-mode credential.** The
+  tool was classified in `isReadOnlyTool`, but its handler reaches
+  `Engine.UpdateLifecycleState` (via `mcpEngineAdapter.UpdateState`) — so an
+  `mk_` key or `cap_` token issued as read-only could transition any engram's
+  lifecycle state, including archiving it. It is now classified mutating. Effects
+  per credential mode:
+  - **observe — now denied.** A read-only client that was calling `muninn_state`
+    was performing a write and will now receive `forbidden`.
+  - **write — now allowed** (it was previously *denied*, because write mode
+    admits only tools classified mutating). This is a side effect of the
+    two-bucket classifier, not a designed grant: `mutatingTools` and
+    `readOnlyTools` are complementary over every registered tool — enforced by
+    the census in `internal/mcp/tool_classification_test.go`, not true by
+    construction — so a tool cannot be denied to observe *and* write.
+
+    It grants write mode a second tool for a capability it already held, not a
+    new capability. `muninn_compare_and_set` has been classified mutating since
+    before this change, its `set_state` enum includes `archived`, and
+    `expect_state` is optional (the tool schema says "Omit to skip the guard"),
+    so it reaches the identical `store.CompareAndSet` lifecycle transition
+    unconditionally. Write mode also already holds every other mutating tool —
+    `muninn_forget`, `muninn_evolve`, `muninn_trust`, `muninn_merge_entity`
+    among them — with the single exception of `muninn_create_workflow_vault`,
+    which `server.go` pins to a full-mode `mk_` key by a separate guard.
+    `handleState`'s response echoes only caller-supplied values, so it opens no
+    exfiltration channel.
+
+    **One property of archive is worse than its neighbours and is named rather
+    than glossed:** `state(archived)` is the only write-mode operation that
+    leaves no *enumerable* trace. `muninn_list_deleted` reads
+    `StateSoftDeleted` only and recall refuses archived engrams on every path,
+    so where a `forget` is findable through `list_deleted` and an `evolve`
+    through `as_of`/`include_invalid`, an archived engram is reachable only
+    from an ID the caller already holds. It is not silent and not
+    irreversible — `Engine.Restore` accepts `StateArchived` — but its audit
+    trail is a content-free `update-meta` provenance entry, and the `reason`
+    argument the tool advertises is discarded by both the MCP and REST adapters
+    (`Engine.UpdateLifecycleState` has no such parameter). By contrast
+    `muninn_merge_entity`, which write mode has always held, is outright
+    irreversible. All of these properties are pre-existing and untouched here.
+
+    **Residual, tracked separately (#822):** MCP write mode is broader than
+    REST write mode, but not for the reason the route shapes suggest. REST's
+    `ReadOnlyGuard(WriteOnlyGuard(...))` on `PUT /api/engrams/{id}/state` is
+    documented in `internal/transport/rest/server.go` as exfiltration
+    prevention for routes that "return engram data in their response body" —
+    and REST write mode is separately *allowed* to soft-delete
+    (`TestWriteOnlyMode_WriteHandlersNotBlocked/DeleteEngram`), which is more
+    destructive than archiving. Closing the real gap needs a full-only overlay
+    consulted before the `ModeWrite` case, whose membership must cover every
+    write-mode path to a lifecycle transition — `muninn_state` *and*
+    `muninn_compare_and_set`, then a decision about `muninn_claim`/
+    `muninn_release`, which share the CAS primitive. That is a scoping
+    decision, not a one-name move, and REST exposes no compare-and-set route
+    to take parity from. Pinned meanwhile by
+    `TestDispatch_WriteMode_AllowsCompareAndSetArchive`.
+  - **append — now denied at the MCP dispatch gate** as well as by the existing
+    `Engine.refuseAppend` backstop, which is why append mode was never
+    exploitable. Two layers again instead of one.
+  - **full — unaffected.**
+  (#731)
 
 ---
 

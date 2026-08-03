@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
-	"time"
 )
 
 // DecodeMetaConcept decodes the metadata fields and the concept string from a
@@ -48,9 +47,10 @@ func DecodeMeta(data []byte) (*EngramMeta, error) {
 
 	meta := &EngramMeta{}
 	copy(meta.ID[:], data[OffsetID:OffsetID+16])
-	meta.CreatedAt = time.Unix(0, int64(binary.BigEndian.Uint64(data[OffsetCreatedAt:OffsetCreatedAt+8])))
-	meta.UpdatedAt = time.Unix(0, int64(binary.BigEndian.Uint64(data[OffsetUpdatedAt:OffsetUpdatedAt+8])))
-	meta.LastAccess = time.Unix(0, int64(binary.BigEndian.Uint64(data[OffsetLastAccess:OffsetLastAccess+8])))
+	// decodeTimestamp, not time.Unix: see the zero-time overflow note in decode.go (#810).
+	meta.CreatedAt = decodeTimestamp(binary.BigEndian.Uint64(data[OffsetCreatedAt : OffsetCreatedAt+8]))
+	meta.UpdatedAt = decodeTimestamp(binary.BigEndian.Uint64(data[OffsetUpdatedAt : OffsetUpdatedAt+8]))
+	meta.LastAccess = decodeTimestamp(binary.BigEndian.Uint64(data[OffsetLastAccess : OffsetLastAccess+8]))
 	meta.Confidence = math.Float32frombits(binary.BigEndian.Uint32(data[OffsetConfidence : OffsetConfidence+4]))
 	meta.Relevance = math.Float32frombits(binary.BigEndian.Uint32(data[OffsetRelevance : OffsetRelevance+4]))
 	meta.Stability = math.Float32frombits(binary.BigEndian.Uint32(data[OffsetStability : OffsetStability+4]))

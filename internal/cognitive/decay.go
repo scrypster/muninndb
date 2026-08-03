@@ -5,6 +5,8 @@ import (
 	"context"
 	"math"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 const (
@@ -179,9 +181,29 @@ func NewDecayWorker(store DecayStore) *DecayWorker {
 	return dw
 }
 
+// processBatch is currently DEAD CODE: DecayWorker has no non-test caller. It
+// carries the storage.IsUnsetTimestamp guard anyway, pre-wiring, because this
+// path WRITES its result back (UpdateRelevance): a never-accessed engram would
+// decay ~740,000 days' worth in one pass and the damage would be PERSISTENT,
+// not a bad score for one query.
+//
+// It is guarded rather than annotated on purpose. The previous round left a
+// comment here telling a future author to add the guard before wiring, and
+// asserted in passing that this was the only unguarded site. The round after it
+// found a LIVE one — trigger.TriggerScore, fed persisted metadata by the
+// periodic sweep — that the same assertion had implicitly denied. The guard
+// costs one branch; the assertion cost a defect. The set of guarded sites is
+// now regenerated mechanically by TestLastAccessElapsedCensus
+// (internal/storage/lastaccess_census_test.go) rather than named in prose here.
 func (dw *DecayWorker) processBatch(ctx context.Context, batch []DecayCandidate) error {
 	now := time.Now()
 	for _, c := range batch {
+		// Unset LastAccess means "never accessed", never "accessed at the dawn
+		// of the Unix epoch's negative overflow". Skip: there is no elapsed
+		// interval to decay over, and inventing one writes the vault to floor.
+		if storage.IsUnsetTimestamp(c.LastAccess) {
+			continue
+		}
 		daysSince := now.Sub(c.LastAccess).Hours() / 24.0
 		newRelevance := EbbinghausWithFloor(daysSince, float64(c.Stability), DefaultFloor)
 

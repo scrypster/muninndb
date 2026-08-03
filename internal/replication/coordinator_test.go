@@ -500,6 +500,103 @@ func TestClusterCoordinator_OnBecameLobe_Callback(t *testing.T) {
 	}
 }
 
+// TestClusterCoordinator_RoleCallbacks_UnsynchronizedStateRace mirrors how
+// cmd/muninn/server.go wires OnBecameCortex/OnBecameLobe: both close over a
+// shared worker-handle variable with no lock of their own, relying entirely on
+// the coordinator to never invoke them concurrently. handlePromotion calls
+// OnBecameCortex synchronously on the caller's goroutine while handleDemotion
+// fires OnBecameLobe in a bare, unsynchronized goroutine — so a promotion and a
+// demotion racing each other (a real possibility under flapping quorum) mutate
+// that shared state from two goroutines with no happens-before edge (#629
+// claim 1). Run with -race: this must not report a data race.
+func TestClusterCoordinator_RoleCallbacks_UnsynchronizedStateRace(t *testing.T) {
+	coord, _ := newTestCoordinator(t, "auto")
+
+	type workerHandle struct{ epoch uint64 }
+	var handle *workerHandle
+
+	const iterations = 20
+	// Each iteration invokes exactly one of OnBecameCortex (sync) or
+	// OnBecameLobe (async, via a bare goroutine) — count every callback
+	// invocation so the test can wait deterministically for all of them to
+	// land before reading the shared state, rather than a wall-clock sleep.
+	invoked := make(chan struct{}, iterations*2)
+
+	coord.OnBecameCortex = func(epoch uint64) {
+		handle = &workerHandle{epoch: epoch}
+		invoked <- struct{}{}
+	}
+	coord.OnBecameLobe = func() {
+		handle = nil
+		invoked <- struct{}{}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < iterations; i++ {
+		epoch := uint64(i + 1)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			simulatePromotion(coord, epoch)
+		}()
+		go func() {
+			defer wg.Done()
+			coord.handleDemotion(causeQuorumLoss)
+		}()
+	}
+	wg.Wait()
+
+	// Drain exactly the expected number of callback invocations. handleDemotion
+	// fires OnBecameLobe from a bare goroutine, so wg.Wait() (which only waits
+	// for handlePromotion/handleDemotion to return, not for that inner
+	// goroutine) is not sufficient — this is the deterministic completion
+	// signal instead of a sleep.
+	for i := 0; i < iterations*2; i++ {
+		select {
+		case <-invoked:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for callback invocation %d/%d", i+1, iterations*2)
+		}
+	}
+	_ = handle
+}
+
+// TestClusterCoordinator_OnBecameLobe_PanicRecovered proves a panicking
+// OnBecameLobe callback (e.g. cmd/muninn/server.go's cognitive worker
+// teardown hitting a nil pointer or a double-close) no longer takes the whole
+// process down (#629 claim 1) — it is caught, logged, and the coordinator
+// keeps functioning afterward.
+func TestClusterCoordinator_OnBecameLobe_PanicRecovered(t *testing.T) {
+	coord, _ := newTestCoordinator(t, "auto")
+
+	invoked := make(chan struct{}, 1)
+	coord.OnBecameLobe = func() {
+		defer func() { invoked <- struct{}{} }()
+		panic("simulated cognitive worker teardown failure")
+	}
+
+	simulatePromotion(coord, 1)
+	coord.handleDemotion(causeClaim)
+
+	select {
+	case <-invoked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for panicking OnBecameLobe to run")
+	}
+
+	// The process (and this test) is still alive to reach this line — that is
+	// the assertion. Confirm the coordinator still works after the panic.
+	if coord.Role() != RoleReplica {
+		t.Errorf("expected role=RoleReplica after demotion, got %v", coord.Role())
+	}
+	var secondCortex bool
+	coord.OnBecameCortex = func(uint64) { secondCortex = true }
+	simulatePromotion(coord, 2)
+	if !secondCortex {
+		t.Error("expected coordinator to keep processing role callbacks after a prior panic")
+	}
+}
+
 func TestClusterCoordinator_NilCallbacksSafe(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "auto")
 

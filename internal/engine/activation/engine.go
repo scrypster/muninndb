@@ -71,10 +71,23 @@ type Weights struct {
 	// ACT-R mode: set UseACTR=true to enable ACT-R base-level + Hebbian scoring.
 	// This is the recommended mode: resolves decay-vs-Hebbian tension, deterministic,
 	// total recall (no stored state mutation), grounded in 30+ years of cognitive science.
-	UseACTR      bool
-	ACTRDecay    float32 // power-law decay exponent d (0 → default 0.5)
-	ACTRHebScale float32 // Hebbian scaling inside softplus (0 → default 4.0)
-	DisableACTR  bool    // when true, force legacy weighted-sum scoring (overrides UseACTR)
+	UseACTR   bool
+	ACTRDecay float32 // power-law decay exponent d (0 → default 0.5)
+	// ACTRHebScale is the Hebbian amplifier inside softplus. It is a POINTER
+	// because 0 is a MEANINGFUL value — "apply no cognitive boost at all" — and
+	// the auth layer already admits it (`PlasticityConfig.ACTRHebScale` is a
+	// *float64 clamped to [0, 50]). With a plain float32 the zero value was
+	// indistinguishable from unset and was silently substituted with 4.0: an
+	// operator who configured `actr_heb_scale: 0` got the default, in the hot
+	// path, with no warning. That is principle #1 violated, and it made the
+	// documented kill switch a no-op.
+	//
+	// nil = unset → DefaultACTRHebScale. Non-nil is honored exactly, including 0.
+	// NOTE this scales BOTH hebbianBoost and transitionBoost (see computeACTR),
+	// so 0 is "no cognitive boost", NOT "no Hebbian" — the per-mechanism
+	// ablation is HebbianEnabled / PASEnabled (COG-32).
+	ACTRHebScale *float32
+	DisableACTR  bool // when true, force legacy weighted-sum scoring (overrides UseACTR)
 	// RRF fusion mode: when true, use Phase 3 RRF scores directly as the scoring
 	// basis in Phase 6, bypassing ACT-R/CGDN/weighted-sum recomputation.
 	// Rank-based and scale-invariant (Cormack et al. 2009). Cognitive boosts
@@ -337,6 +350,20 @@ type ActivateRequest struct {
 	// CandidatesPerIndex overrides the per-index candidate pool size for phase2.
 	// Zero means fall back to 30.
 	CandidatesPerIndex int
+	// HebbianEnabled gates the PHASE 4 read-side Hebbian boost, symmetrically
+	// with the way PASEnabled gates phase 4.5 (COG-32). Set by the engine from
+	// the vault's resolved PlasticityConfig, which already gates Hebbian
+	// LEARNING submission and association DECAY on the same flag. Before #779
+	// the read side was unconditional, so a `scratchpad` vault
+	// (hebbian_enabled:false, assoc_decay_factor:0) was scored by edges it
+	// would never update and never decay.
+	//
+	// DIRECT activation callers (tests, cmd/bench, anything constructing an
+	// ActivateRequest by hand) get the zero value, i.e. NO Hebbian boost. That
+	// is deliberate: a bool that defaults to "on" cannot express "off", and the
+	// pipeline's only production constructor (internal/engine.Activate) always
+	// sets it — pinned by TestActivateRequest_WiresHebbianEnabledFromPlasticity.
+	HebbianEnabled bool
 	// PAS: Predictive Activation Signal — sequential transition tracking.
 	PASEnabled       bool // when true, inject transition candidates in Phase 2
 	PASMaxInjections int  // max transition candidates to inject (0 = default 5)
@@ -756,7 +783,12 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	fused := phase3RRF(sets)
 
 	// Phase 4: Hebbian boost (always sequential — fast, in-memory ring buffer read).
-	e.phase4HebbianBoost(ctx, ws, req.VaultID, fused)
+	// Gated on HebbianEnabled symmetrically with phase 4.5's PASEnabled (COG-32):
+	// a vault that neither learns nor decays association weights must not be
+	// scored by them either.
+	if req.HebbianEnabled {
+		e.phase4HebbianBoost(ctx, ws, req.VaultID, fused)
+	}
 
 	// Phase 4.5: PAS transition boost — applies to candidates already in the fused list.
 	if req.PASEnabled {
@@ -2592,6 +2624,18 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 	} else {
 		lastAccess = eng.LastAccess
 	}
+	// Treat an unset LastAccess (zero time, or the pre-2000 ERF overflow
+	// sentinel) as "just now" — an engram that has never been accessed, exactly
+	// as computeACTR does. Without this, a zero LastAccess gives daysSince ~=
+	// 740,000: recency 0 and decayFactor pinned at its 0.05 floor, which on a
+	// weighted_sum vault scored an otherwise-perfect row 0.42 against COG-6's 0.5
+	// default threshold — a silently-EMPTY recall (#810). This guard is
+	// independent of the write-side and ERF-side fixes in #810: it defends
+	// records already at rest and any future writer, and on its own it fully
+	// covers the scoring half of the repair.
+	if storage.IsUnsetTimestamp(lastAccess) {
+		lastAccess = now
+	}
 	daysSince := now.Sub(lastAccess).Hours() / 24.0
 	// Clamp clock skew: a future LastAccess (NTP step, or a cache timestamp
 	// ahead of wall clock) yields a negative daysSince, which would push recency
@@ -2780,9 +2824,9 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	} else {
 		lastAccess = eng.LastAccess
 	}
-	// Treat zero or pre-2000 LastAccess as "just now" — these are newly written
-	// engrams that have never been accessed. A fresh write = maximum recency.
-	if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+	// Treat an unset LastAccess as "just now" — these are newly written engrams
+	// that have never been accessed. A fresh write = maximum recency.
+	if storage.IsUnsetTimestamp(lastAccess) {
 		lastAccess = now
 	}
 	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute — sub-hour precision for intraday recall
@@ -3107,9 +3151,13 @@ func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {
 	if req.ACTRDecay > 0 {
 		rw.ACTRDecay = float64(req.ACTRDecay)
 	}
+	// nil = unset (take the default); non-nil is honored EXACTLY, including 0.
+	// A `> 0` guard here would silently substitute the default for a configured
+	// zero — principle #1 in the hot path. See the field comment on
+	// Weights.ACTRHebScale.
 	rw.ACTRHebScale = DefaultACTRHebScale
-	if req.ACTRHebScale > 0 {
-		rw.ACTRHebScale = float64(req.ACTRHebScale)
+	if req.ACTRHebScale != nil {
+		rw.ACTRHebScale = float64(*req.ACTRHebScale)
 	}
 	return rw
 }
