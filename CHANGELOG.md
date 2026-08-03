@@ -29,6 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`muninn shell`'s `use <vault>` no longer reports success when the vault switch was not
+  persisted, and no longer clobbers unrelated keys in `~/.muninn/config`** (#634). The shell's
+  `use` command did call the persistence function (the issue's stated "does not persist"
+  mechanism did not reproduce), but that function, `saveDefaultVault`, discarded every error
+  from `MkdirAll`, `json.Marshal`, and `WriteFile` and always printed `Switched to vault
+  '<name>'` regardless of whether the write actually happened — a non-writable config path, a
+  full disk, or a permissions problem produced exactly the reported symptom of a stale default
+  vault surviving a switch the user was told succeeded. It also marshalled a fresh
+  `map[string]string{"default_vault": vault}` on every call, discarding any other key already
+  in the file. `saveDefaultVault` now returns an error, read-modify-writes to preserve unknown
+  keys, and `use` reports the failure and falls back to a session-only switch instead of
+  printing an unqualified success message.
+
 - **Consolidation now DECLARES supersession, closing a permanent recall hole over the fact it was meant to preserve** (#779).
   `muninn_consolidate` / `POST /api/consolidate` archived its source memories with a plain
   soft-delete: no `supersedes` edge, an open validity window. That is exactly the signature the

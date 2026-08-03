@@ -171,8 +171,12 @@ func (r *replState) handleCommand(line string) bool {
 			return false
 		}
 		r.vault = args[0]
-		saveDefaultVault(r.vault)
-		fmt.Printf("Switched to vault '%s'\n", r.vault)
+		if err := saveDefaultVault(r.vault); err != nil {
+			fmt.Printf("Error: failed to save default vault: %v\n", err)
+			fmt.Printf("Switched to vault '%s' for this session only\n", r.vault)
+		} else {
+			fmt.Printf("Switched to vault '%s'\n", r.vault)
+		}
 
 	case "show vaults":
 		r.cmdShowVaults()
