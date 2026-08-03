@@ -11,20 +11,23 @@ import (
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
-// TestCloneVaultData_NeverAccessedFollowsWriteEngramConvention pins that a
-// cloned engram's "never accessed in this vault" state is spelled the SAME way
-// every other writer in the product spells it: LastAccess == CreatedAt (the
-// normalization WriteEngram/WriteEngramBatch/BatchWriter apply).
+// TestCloneVaultData_LastAccessSurvivesOnDisk pins the on-disk bytes of a
+// cloned engram's LastAccess: it is the SOURCE's LastAccess, verbatim — not the
+// zero-time sentinel, and not CreatedAt.
 //
-// Clone previously wrote time.Time{} straight through erf.Encode, which stores
+// Clone originally wrote time.Time{} straight through erf.Encode, which stores
 // uint64(time.Time{}.UnixNano()) and decodes as 1754-08-30 — a value whose
-// IsZero() is false, so every downstream guard waved it through (#810).
+// IsZero() is false, so every downstream guard waved it through (#810). The
+// first fix replaced it with CreatedAt; that is correct only for a record that
+// has genuinely never been read, and this fixture is deliberately the other
+// case — a memory created 72h ago and READ 1h ago, which is what #682's
+// ReinforceOnRead makes the ordinary state of a live vault.
 //
 // This asserts on the RAW BYTES, not the decoded value, because the decode-side
 // sentinel mapping (part 2 of #810) would otherwise mask a clone that still
 // writes the garbage: decode would turn it into the zero time and this test
 // would look green while the on-disk record was still wrong.
-func TestCloneVaultData_NeverAccessedFollowsWriteEngramConvention(t *testing.T) {
+func TestCloneVaultData_LastAccessSurvivesOnDisk(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -68,9 +71,14 @@ func TestCloneVaultData_NeverAccessedFollowsWriteEngramConvention(t *testing.T) 
 		t.Fatalf("clone wrote the zero-time sentinel to LastAccess on disk (raw=%d, reads back as %v)",
 			rawLastAccess, time.Unix(0, rawLastAccess).UTC())
 	}
-	if rawLastAccess != rawCreatedAt {
-		t.Errorf("cloned LastAccess raw = %d (%v), want it to equal CreatedAt raw = %d (%v) — the product-wide \"never accessed\" convention",
-			rawLastAccess, time.Unix(0, rawLastAccess).UTC(), rawCreatedAt, time.Unix(0, rawCreatedAt).UTC())
+	if rawLastAccess != accessed.UnixNano() {
+		t.Errorf("cloned LastAccess raw = %d (%v), want the SOURCE's LastAccess raw = %d (%v) — the clone must not invent a timestamp",
+			rawLastAccess, time.Unix(0, rawLastAccess).UTC(), accessed.UnixNano(), accessed.UTC())
+	}
+	if rawLastAccess == rawCreatedAt {
+		t.Errorf("cloned LastAccess raw == CreatedAt raw (%d) — LastAccess was rewound to the creation date, which is the second form of #810: "+
+			"an actively-used memory loses ~%.0f days of recency and drops below threshold (DEFAULT ACT-R at 7 days of source age)",
+			rawCreatedAt, accessed.Sub(created).Hours()/24.0)
 	}
 
 	// And the decoded view agrees, with AccessCount still reset.
@@ -81,8 +89,8 @@ func TestCloneVaultData_NeverAccessedFollowsWriteEngramConvention(t *testing.T) 
 	if got.AccessCount != 0 {
 		t.Errorf("AccessCount = %d after clone, want 0", got.AccessCount)
 	}
-	if !got.LastAccess.Equal(got.CreatedAt) {
-		t.Errorf("decoded LastAccess = %v, want == CreatedAt = %v", got.LastAccess.UTC(), got.CreatedAt.UTC())
+	if !got.LastAccess.Equal(accessed) {
+		t.Errorf("decoded LastAccess = %v, want the source's %v", got.LastAccess.UTC(), accessed.UTC())
 	}
 	if got.LastAccess.Year() < 2000 {
 		t.Errorf("decoded LastAccess = %v — a pre-2000 year is the #810 signature", got.LastAccess.UTC())
@@ -94,6 +102,62 @@ func TestCloneVaultData_NeverAccessedFollowsWriteEngramConvention(t *testing.T) 
 	}
 	if src.AccessCount != 17 {
 		t.Errorf("source AccessCount = %d, want 17 (clone must not mutate the source)", src.AccessCount)
+	}
+}
+
+// TestCloneVaultData_SentinelSourceHealsToCreatedAt is the other half of the
+// carry-over rule, and the reason normalizeEngramTimes is still on the clone
+// path at all.
+//
+// Carrying the source's LastAccess verbatim would be wrong if the source itself
+// carries the pre-#810 zero-time sentinel — that is a vault cloned before the
+// fix, and copying its garbage forward would make the defect hereditary.
+// erf.Decode maps the sentinel back to the zero time, normalizeEngramTimes then
+// substitutes CreatedAt, and the clone lands on the honest fallback: "we do not
+// know when this was read; treat it as its creation date."
+//
+// So the rule is not "carry it over", it is "carry over what the source
+// actually knows". This test is the case where it knows nothing.
+func TestCloneVaultData_SentinelSourceHealsToCreatedAt(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	wsSource := store.VaultPrefix("src-heal")
+	wsTarget := store.VaultPrefix("dst-heal")
+
+	id, _, sentinel := plantSentinelEngram(t, store, wsSource)
+
+	if err := store.WriteVaultName(wsTarget, "dst-heal"); err != nil {
+		t.Fatalf("WriteVaultName: %v", err)
+	}
+	if _, err := store.CloneVaultData(ctx, wsSource, wsTarget, nil); err != nil {
+		t.Fatalf("CloneVaultData: %v", err)
+	}
+
+	raw, err := Get(store.db, keys.EngramKey(wsTarget, [16]byte(id)))
+	if err != nil || raw == nil {
+		t.Fatalf("get raw cloned engram: %v (raw nil = %v)", err, raw == nil)
+	}
+	rawLastAccess := binary.BigEndian.Uint64(raw[erf.OffsetLastAccess : erf.OffsetLastAccess+8])
+	rawCreatedAt := binary.BigEndian.Uint64(raw[erf.OffsetCreatedAt : erf.OffsetCreatedAt+8])
+
+	if rawLastAccess == sentinel {
+		t.Fatalf("clone copied the pre-#810 zero-time sentinel forward (raw=%d, reads back as %v) — "+
+			"the defect would be hereditary across every re-clone",
+			int64(rawLastAccess), time.Unix(0, int64(rawLastAccess)).UTC())
+	}
+	if rawLastAccess != rawCreatedAt {
+		t.Errorf("cloned LastAccess raw = %d (%v), want CreatedAt raw = %d (%v) — an unset source LastAccess must fall back to CreatedAt",
+			int64(rawLastAccess), time.Unix(0, int64(rawLastAccess)).UTC(),
+			int64(rawCreatedAt), time.Unix(0, int64(rawCreatedAt)).UTC())
+	}
+
+	got, err := store.GetEngram(ctx, wsTarget, id)
+	if err != nil {
+		t.Fatalf("GetEngram target: %v", err)
+	}
+	if IsUnsetTimestamp(got.LastAccess) {
+		t.Errorf("decoded LastAccess = %v is still unset after the clone", got.LastAccess.UTC())
 	}
 }
 

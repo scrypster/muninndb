@@ -3801,7 +3801,7 @@ func (e *staleAnnotateEngine) Activate(_ context.Context, _ *mbp.ActivateRequest
 	}, nil
 }
 
-func (e *staleAnnotateEngine) GetAnnotations(_ context.Context, _, _ string) (*engine.AnnotationData, error) {
+func (e *staleAnnotateEngine) GetAnnotations(_ context.Context, _, _ string, _ *mbp.ActivateRequest) (*engine.AnnotationData, error) {
 	return &engine.AnnotationData{}, nil
 }
 
@@ -3873,35 +3873,36 @@ func TestHandleRecall_Annotate_UnknownLastAccessOmitsStaleness(t *testing.T) {
 	})
 }
 
-// TestHandleRecall_UnknownLastAccess_RendersTheSentinelInstant records a KNOWN,
-// PRE-EXISTING RESIDUAL that #810 does not close, pinned so it cannot be
-// forgotten or quietly re-described.
+// TestHandleRecall_UnknownLastAccess_OmitsLastAccess closes half of a residual
+// #810 originally filed rather than fixed, and records why the OTHER half is
+// still open.
 //
-// In one and the same response row, for one and the same memory, MuninnDB says
-// two incompatible things about when it was last accessed:
+// What it looked like before: in one response row, for one memory, MuninnDB said
+// two incompatible things about when it was last accessed —
 //
 //	"annotations": {}                                  <- staleness omitted: UNKNOWN
 //	"last_access": "1754-08-30T22:43:41.128654848Z"    <- a concrete year-1754 instant
 //
 // Mechanism: engine.go stamps mbp.ActivationItem.LastAccess as
-// eng.LastAccess.UnixNano(). After the #810 decode-side repair eng.LastAccess is
-// time.Time{}, whose UnixNano() IS erf.ZeroTimeSentinelNanos — so the repair is
-// invisible on this path by construction, and mcp/convert.go renders the
-// sentinel back out through time.Unix. The identical value reaches REST, gRPC
-// and MBP through mbp.ActivationItem.LastAccess.
+// eng.LastAccess.UnixNano(), and time.Time{}.UnixNano() IS
+// erf.ZeroTimeSentinelNanos — so the #810 decode-side repair is invisible on
+// this path by construction, and mcp/convert.go rendered the sentinel back out
+// through time.Unix.
 //
-// DELIBERATELY NOT FIXED HERE, and the reason is obligation #3, not effort.
-// Omitting it needs a nullable wire field (encoding/json's omitempty is a no-op
-// on a time.Time struct), which is a breaking change on four transports plus
-// openapi.yaml plus the SDKs. Landing it on MCP alone would leave REST/gRPC/MBP
-// emitting 1754 while MCP omitted it — a NEW cross-surface divergence, which is
-// exactly the silently-wrong class the omission rule exists to prevent. Filed
-// rather than half-done.
+// It was filed as needing "a nullable wire field on four transports at once
+// (obligation #3)". That reason was WRONG about the field an agent actually
+// reads. mcp.Memory.LastAccess is a time.Time declared in internal/mcp/types.go
+// and referenced nowhere outside this package; making it *time.Time costs
+// REST/gRPC/MBP nothing, and this very PR had already set the precedent in the
+// same file by making MemoryAnnotations.Stale/StaleDays MCP-only pointers for
+// exactly this reason. Weighing a hypothetical cross-surface divergence above an
+// ACTUAL self-contradiction inside one response was the wrong trade.
 //
-// If this test fails, someone made the rendering honest. Good — now update:
-// erf/decode.go's decodeTimestamp doc (which scopes what the repair does and
-// does not buy), invariants.md's clone-sentinel invariant residual, and this test.
-func TestHandleRecall_UnknownLastAccess_RendersTheSentinelInstant(t *testing.T) {
+// STILL OPEN, and this is the genuinely four-transport part: the int64
+// `last_access` on mbp.ActivationItem, which REST and gRPC inherit by type alias
+// and which openapi.yaml and the SDKs describe, continues to carry the sentinel.
+// See invariants.md STO-13.
+func TestHandleRecall_UnknownLastAccess_OmitsLastAccess(t *testing.T) {
 	const body = `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"context":["test"],"annotate":true}}}`
 
 	srv := newTestServerWith(&staleAnnotateEngine{lastAccess: time.Time{}.UnixNano()})
@@ -3916,30 +3917,25 @@ func TestHandleRecall_UnknownLastAccess_RendersTheSentinelInstant(t *testing.T) 
 		t.Fatalf("expected a memory object, got %v", mems[0])
 	}
 
-	// The staleness half is honest (pinned in full by
+	// The staleness half (pinned in full by
 	// TestHandleRecall_Annotate_UnknownLastAccessOmitsStaleness).
 	if ann, ok := row["annotations"].(map[string]interface{}); ok {
 		if _, present := ann["stale_days"]; present {
-			t.Fatalf("stale_days is present; the omission half regressed and this residual test is "+
-				"no longer describing the divergence it exists to describe: %v", ann)
+			t.Fatalf("stale_days is present for an engram with no known access time: %v", ann)
 		}
 	}
 
-	la, present := row["last_access"]
-	if !present {
-		t.Fatalf("last_access is ABSENT — the residual this test records has been fixed. " +
-			"Update erf/decode.go's decodeTimestamp doc and invariants.md's clone-sentinel invariant, then delete this test.")
+	// The half this test closes: the two must AGREE. Both omitted, or the
+	// response contradicts itself.
+	if la, present := row["last_access"]; present {
+		s, _ := la.(string)
+		year := 0
+		if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			year = parsed.UTC().Year()
+		}
+		t.Fatalf("last_access = %q (year %d) on a row whose staleness is omitted as UNKNOWN. "+
+			"An agent reads a concrete instant as a fact. Year 1754 is the erf zero-time sentinel; "+
+			"any other year here is worse — a plausible date for a memory that has never been accessed.",
+			s, year)
 	}
-	s, _ := la.(string)
-	got, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		t.Fatalf("last_access = %q, not an RFC3339 instant: %v", s, err)
-	}
-	if got.UTC().Year() != 1754 {
-		t.Fatalf("last_access = %q (year %d), want the year-1754 sentinel instant. Either the "+
-			"rendering became honest — good, update erf/decode.go's decodeTimestamp doc and "+
-			"invariants.md's clone-sentinel invariant and delete this test — or it became a DIFFERENT lie, which is worse: "+
-			"a plausible recent instant for a memory that has never been accessed.", s, got.UTC().Year())
-	}
-	t.Logf("RESIDUAL as filed: staleness omitted as unknown, but last_access renders %q on the same row", s)
 }

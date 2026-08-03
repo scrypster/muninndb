@@ -55,8 +55,8 @@ func TestCloneVaultData_AllPrefixesCopied(t *testing.T) {
 	}
 }
 
-// TestCloneVaultData_AccessCountReset verifies that AccessCount is zeroed and
-// LastAccess is reset to CreatedAt ("created, never accessed") in the clone.
+// TestCloneVaultData_AccessCountReset verifies the asymmetry: AccessCount is
+// zeroed in the clone, LastAccess is CARRIED OVER from the source.
 func TestCloneVaultData_AccessCountReset(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -94,21 +94,23 @@ func TestCloneVaultData_AccessCountReset(t *testing.T) {
 	if got.AccessCount != 0 {
 		t.Errorf("AccessCount should be 0 after clone, got %d", got.AccessCount)
 	}
-	// #810: this assertion used to require LastAccess to be BEFORE the Unix
-	// epoch — it PINNED the defect. Clone wrote time.Time{}, ERF stored
-	// uint64(time.Time{}.UnixNano()), and it decoded as 1754-08-30; the test
-	// asserted on that garbage as if it were the intended reset value.
-	// The reset state is now the product-wide "created, never accessed"
-	// convention: LastAccess == CreatedAt. See
-	// TestCloneVaultData_NeverAccessedFollowsWriteEngramConvention for the
-	// raw-byte assertion that the sentinel is not written at all.
-	if !got.LastAccess.Equal(got.CreatedAt) {
-		t.Errorf("LastAccess should equal CreatedAt after clone, got LastAccess=%v CreatedAt=%v",
-			got.LastAccess.UTC(), got.CreatedAt.UTC())
-	}
-	if !got.LastAccess.Before(now) {
-		t.Errorf("LastAccess should be reset to the (earlier) CreatedAt, got %v >= source access time %v",
+	// #810, twice over. The FIRST version of this assertion required LastAccess
+	// to be BEFORE the Unix epoch — it PINNED the defect: clone wrote
+	// time.Time{}, ERF stored uint64(time.Time{}.UnixNano()), it decoded as
+	// 1754-08-30, and the test asserted on that garbage as if it were the
+	// intended reset value. The SECOND required LastAccess == CreatedAt, which
+	// removed the sentinel but rewound an actively-used memory's recency to its
+	// creation date — the same silently-empty recall by another route (see
+	// TestClone_AgedActivelyUsedSource_RecallEquivalent in internal/engine).
+	//
+	// The rule now: the counter resets, the timestamp survives.
+	if !got.LastAccess.Equal(now) {
+		t.Errorf("LastAccess should be carried over from the source, got %v want %v",
 			got.LastAccess.UTC(), now.UTC())
+	}
+	if !got.LastAccess.After(got.CreatedAt) {
+		t.Errorf("LastAccess (%v) should still be after CreatedAt (%v) — the source's relative recency must survive the clone",
+			got.LastAccess.UTC(), got.CreatedAt.UTC())
 	}
 }
 

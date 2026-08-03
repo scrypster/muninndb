@@ -214,12 +214,17 @@ var ZeroTimeSentinelNanos = time.Time{}.UnixNano()
 // stated rather than glossed as "renders honestly":
 //
 //   - MCP staleness needed its own year guard (augmentAnnotations reads
-//     item.LastAccess, unchanged by this function) — that one is FIXED.
-//   - mbp.ActivationItem.LastAccess still carries the sentinel to MCP, REST,
-//     gRPC and MBP, so `last_access` renders as 1754-08-30 in the very response
-//     where staleness is omitted as unknown. OPEN residual; making it absent
-//     needs a nullable wire field on four transports at once (obligation #3).
-//     Pinned by TestHandleRecall_UnknownLastAccess_RendersTheSentinelInstant.
+//     item.LastAccess, unchanged by this function) — FIXED.
+//   - MCP's `last_access` rendering needed the same guard, for the same reason,
+//     and got it: mcp.Memory.LastAccess is a *time.Time and is OMITTED when the
+//     value is not a real instant (mcp/convert.go knownLastAccess). This was
+//     first filed as unfixable without "a nullable wire field on four transports
+//     at once"; that reason was wrong about this field, which is declared in
+//     internal/mcp and referenced nowhere else. Pinned by
+//     TestHandleRecall_UnknownLastAccess_OmitsLastAccess.
+//   - mbp.ActivationItem.LastAccess still carries the sentinel to REST, gRPC and
+//     MBP (which inherit it by type alias) plus openapi.yaml and the SDKs. THAT
+//     one really is a four-surface change and stays OPEN.
 func decodeTimestamp(raw uint64) time.Time {
 	if int64(raw) == ZeroTimeSentinelNanos {
 		return time.Time{}

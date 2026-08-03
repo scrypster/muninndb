@@ -58,7 +58,13 @@ func IsUnsetTimestamp(t time.Time) bool {
 //	LastAccess unset -> CreatedAt   ("created, never accessed")
 //
 // SCOPE, precisely: it governs the writers that CREATE these timestamps —
-// WriteEngram, WriteEngramBatch, BatchWriter and CloneVaultData. It is NOT a
+// WriteEngram, WriteEngramBatch, BatchWriter and CloneVaultData. Note what the
+// clone case means after the second #810 fix: CloneVaultData passes the SOURCE's
+// LastAccess in, not time.Time{}, so the "unset -> CreatedAt" rule fires there
+// only when the source record itself has no access time. Carrying the source's
+// value is the point (a clone must be recall-equivalent to its source); routing
+// it through here is what stops a pre-#810 vault's sentinel from being inherited
+// by every re-clone. It is NOT a
 // funnel every 0x01 write passes through, and the six read-modify-write paths
 // that encode a 0x01 record without it are deliberate, not oversights:
 // pebbleStoreBatch.mutateEngram (backing UpdateEngramState and SupersedeEngram),
