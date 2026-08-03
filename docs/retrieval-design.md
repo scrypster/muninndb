@@ -117,7 +117,7 @@ type ActivationItem struct {
 }
 ```
 
-The `Weights` struct controls the temporal/semantic/hebbian balance. ACT-R is the only production scoring path. CGDN is available as an experimental alternative when `experimental_cgdn: true` is set in the vault's plasticity config.
+The `Weights` struct controls the temporal/semantic/hebbian balance. ACT-R is the only production scoring path. CGDN is nominally available as an experimental alternative when `experimental_cgdn: true` is set in the vault's plasticity config, but it is currently inert at any positive activation threshold — see `docs/internals/decision-record.md` (#768) — so enabling it returns nothing on the surface default threshold.
 
 ---
 
