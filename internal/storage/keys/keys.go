@@ -996,7 +996,7 @@ func LeaseKey(ws [8]byte, id [16]byte) []byte {
 	return key
 }
 
-// ProspectiveIntentKey constructs an armed-intention index key (0x2F prefix,
+// ProspectiveIntentKey constructs an armed-intention index key (0x2D prefix,
 // THE PUSH increment 1). One key exists per (intention, cue entity) pair so a
 // focal-entity lookup is a single 17-byte-prefix scan.
 // Key: 0x2D | wsPrefix(8) | EntityNameHash(cue)(8) | intentionID(16) = 33 bytes
@@ -1042,12 +1042,12 @@ func EvolveRepairMarkKey(ws [8]byte) []byte {
 	return key
 }
 
-// UpsertKeyKey constructs the upsert forward-index key (0x2F prefix).
+// UpsertKeyKey constructs the upsert forward-index key (0x30 prefix).
 // Maps sha256(idempotent_id) → the engram ID it is pinned to within a vault,
 // enabling O(1) upsert-key lookup at write time (issue #556). Mirrors
 // ContentHashKey's shape exactly — vault-scoped, sha256-suffixed, ULID value.
-// Relocated from 0x2E after #756
-// Key: 0x2F | wsPrefix(8) | sha256(32) = 41 bytes
+// Relocated from 0x2F after #726 (replication) took it
+// Key: 0x30 | wsPrefix(8) | sha256(32) = 41 bytes
 // Value: engramID(16) bytes
 func UpsertKeyKey(ws [8]byte, hash [32]byte) []byte {
 	key := make([]byte, 1+8+32)

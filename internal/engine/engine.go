@@ -292,7 +292,7 @@ type Engine struct {
 	// concurrent REST writes. Uses contentHashStripes FNV-32a stripes for constant memory overhead.
 	contentHashLocks [contentHashStripes]sync.Mutex
 
-	// upsertKeyLocks serialises the GetUpsertKey → UpsertEngram sequence per
+	// upsertKeyLocks serialises the GetUpsertKey → dispatch → write sequence per
 	// (vault, upsert-key) stripe, preventing two concurrent upserts on the same
 	// idempotent_id from both observing a miss and creating two engrams. Mirrors
 	// contentHashLocks; the storage layer trusts the caller holds this lock.
@@ -371,6 +371,31 @@ func (e *Engine) upsertKeyLock(wsPrefix [8]byte, keyHash [32]byte) *sync.Mutex {
 	h.Write(wsPrefix[:])
 	h.Write(keyHash[:])
 	return &e.upsertKeyLocks[h.Sum32()%upsertKeyStripes]
+}
+
+// ctxKeySkipContentDedup marks a Write as identity-addressed rather than
+// content-addressed. Only Engine.upsertCreate sets it (#556).
+//
+// Upsert identity is the caller's key, NOT the content. Two distinct upsert
+// keys whose documents happen to carry byte-identical text are TWO documents,
+// and collapsing them onto one engram makes them share fate: when one key's
+// document later changes, the shared engram is superseded and soft-deleted out
+// from under the other key, which loses its content from default recall until
+// its own next sync and then comes back under a NEW ULID — destroying the
+// stable identity the feature exists to provide. It also stamps a FALSE
+// lineage claim, that document A was superseded by document B's revision.
+// Duplicate text across chunks (boilerplate, licence blocks, repeated
+// headings) is ordinary in the re-ingest corpora upsert targets, so this is a
+// routine case, not a corner one.
+type ctxKeySkipContentDedup struct{}
+
+func withSkipContentDedup(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKeySkipContentDedup{}, true)
+}
+
+func skipContentDedup(ctx context.Context) bool {
+	v, _ := ctx.Value(ctxKeySkipContentDedup{}).(bool)
+	return v
 }
 
 // SetOnWrite registers a callback invoked after every successful Write.
@@ -1327,11 +1352,11 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 	e.activity.Record(wsPrefix)
 
-	// ── Upsert mode: key-pinned create-or-merge (#556) ──────────────────
-	// When upsert_mode is set, the durable 0x2F forward index (keyed by
+	// ── Upsert mode: key-pinned create-or-evolve (#556) ─────────────────
+	// When upsert_mode is set, the durable 0x30 forward index (keyed by
 	// idempotent_id) decides create-vs-merge — not the content-hash dedup below.
-	// The whole path returns from writeUpsert, which does its own atomic storage
-	// write (store.UpsertEngram co-commits engram + content-hash + upsert-key).
+	// The whole path returns from writeUpsert, which delegates to the default
+	// create path or to EvolveAt (which re-points the index in its own batch).
 	if req.UpsertMode {
 		return e.writeUpsert(ctx, wsPrefix, req)
 	}
@@ -1366,7 +1391,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		}
 	}
 	defer unlockContentHash()
-	if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
+	if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) && !skipContentDedup(ctx) {
 		// A mapping exists — verify the engram is still live (not soft-deleted)
 		// AND still current on the valid-time axis. Re-remembering content
 		// identical to an EXPIRED engram must NOT reinforce the expired record:
@@ -1830,7 +1855,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 }
 
 // writeUpsert implements the upsert_mode write path (#556, Rev 2 redesign).
-// The durable 0x2F forward index (keyed by sha256(idempotent_id)) maps to the
+// The durable 0x30 forward index (keyed by sha256(idempotent_id)) maps to the
 // CURRENT HEAD of the key's chain — never a fixed engram. The orchestrator
 // holds the per-(vault, keyHash) stripe mutex across lookup → dispatch → write
 // so concurrent upserts on the same key serialize, and the index is updated
@@ -1841,7 +1866,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 //     ULID under the key.
 //   - HIT + identical content → no-op (returns the existing head id).
 //   - HIT + changed content → EvolveAt creates the successor, supersedes the
-//     head, and re-points the 0x2F entry IN THE SAME atomic batch as the
+//     head, and re-points the 0x30 entry IN THE SAME atomic batch as the
 //     successor write (the re-point is queued via StoreBatch.RepointUpsertKey
 //     inside evolveAtInternal — scrypster's #1 trap: never a separate commit).
 //
@@ -1877,7 +1902,7 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 		vaultName = "default"
 	}
 
-	// ── Dispatch on the durable 0x2E pointer ──────────────────────────────
+	// ── Dispatch on the durable 0x30 pointer ──────────────────────────────
 	// upsertKeyLock serializes concurrent upserts on the same key; the default
 	// Write path takes contentHashLock internally for creates, EvolveAt takes
 	// its own locks for evolves — writeUpsert no longer holds contentHashLock
@@ -1920,7 +1945,7 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	}
 
 	// Changed content: EvolveAt creates the successor, supersedes the head, and
-	// re-points the 0x2F pointer in one atomic batch (the re-point is queued
+	// re-points the 0x30 pointer in one atomic batch (the re-point is queued
 	// via StoreBatch.RepointUpsertKey inside evolveAtInternal). EvolveAt
 	// inherits Concept/Tags/MemoryType/TypeLabel from the predecessor when
 	// concept == ""; pass the caller's concept only if set, embedding when
@@ -1971,14 +1996,17 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 // The caller MUST hold the upsertKeyLock(wsPrefix, keyHash) stripe. The default
 // Write path is entered with UpsertMode=false (we're already inside the upsert
 // orchestrator; re-entering it would loop) and IdempotentID="" (upsert tracks
-// via the durable 0x2E index, not the legacy receipt — a receipt would point
+// via the durable 0x30 index, not the legacy receipt — a receipt would point
 // the second caller back at the first's engram and bypass the head/evolve
 // dispatch).
 func (e *Engine) upsertCreate(ctx context.Context, wsPrefix [8]byte, vaultName string, req *mbp.WriteRequest, keyHash [32]byte, start time.Time) (*mbp.WriteResponse, error) {
 	createReq := *req
 	createReq.UpsertMode = false
 	createReq.IdempotentID = ""
-	resp, err := e.Write(ctx, &createReq)
+	// Identity-addressed create: bypass content-hash dedup so two distinct
+	// upsert keys with byte-identical text stay two engrams (see
+	// ctxKeySkipContentDedup).
+	resp, err := e.Write(withSkipContentDedup(ctx), &createReq)
 	if err != nil {
 		return nil, fmt.Errorf("upsert create: %w", err)
 	}
@@ -1988,7 +2016,7 @@ func (e *Engine) upsertCreate(ctx context.Context, wsPrefix [8]byte, vaultName s
 	}
 	// Pin the freshly created engram under the upsert key. Non-batched — the
 	// engram has already committed under the default Write path's batch; a
-	// crash here leaves a created engram with no 0x2F entry, which the next
+	// crash here leaves a created engram with no 0x30 entry, which the next
 	// upsert on this key self-heals (treats it as a miss and creates again).
 	if err := e.store.PutUpsertKey(ctx, wsPrefix, keyHash, parsedID); err != nil {
 		return nil, fmt.Errorf("upsert create: pin key: %w", err)
@@ -2067,8 +2095,8 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		e.activity.Record(wsPrefix)
 
 		// ── Upsert mode: route through the per-item upsert path (#556) ──
-		// writeUpsert holds its own upsertKeyLock, calls store.UpsertEngram,
-		// and runs the search-critical hooks. Per-item — no cross-item atomicity,
+		// writeUpsert holds its own upsertKeyLock and delegates to Write or
+		// EvolveAt. Per-item — no cross-item atomicity,
 		// matching WriteBatch's existing per-item contract. Intra-batch same-key
 		// items dedup naturally: B sees A's just-committed forward-index entry.
 		if req.UpsertMode {
@@ -4189,7 +4217,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 }
 
 // evolveAtInternal is EvolveAt with an optional upsert key hash. When non-nil,
-// the 0x2F upsert-key forward index for (wsPrefix, *upsertKeyHash) is re-pointed
+// the 0x30 upsert-key forward index for (wsPrefix, *upsertKeyHash) is re-pointed
 // to the successor ULID INSIDE the evolve's atomic batch — so a content-change
 // upsert never leaves the durable pointer aimed at the soft-deleted predecessor
 // (#556, scrypster's #1 trap: the re-point must be crash-atomic with the evolve,
@@ -4358,7 +4386,7 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 		}
 	}
 	// Upsert re-point (#556): when called from writeUpsert's content-change
-	// path, move the 0x2F forward index to the successor in this same atomic
+	// path, move the 0x30 forward index to the successor in this same atomic
 	// batch — the re-point must commit (or roll back) with the evolve itself.
 	if upsertKeyHash != nil {
 		batch.RepointUpsertKey(wsPrefix, *upsertKeyHash, newULID)

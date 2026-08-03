@@ -336,8 +336,8 @@ func TestUpsertKeyKey_Layout(t *testing.T) {
 	if len(key) != 41 {
 		t.Fatalf("expected 41 bytes, got %d", len(key))
 	}
-	if key[0] != 0x2F {
-		t.Errorf("prefix byte: got 0x%02X, want 0x2F", key[0])
+	if key[0] != 0x30 {
+		t.Errorf("prefix byte: got 0x%02X, want 0x30", key[0])
 	}
 	if !bytes.Equal(key[1:9], ws[:]) {
 		t.Error("ws mismatch")

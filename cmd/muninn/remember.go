@@ -84,7 +84,7 @@ func rememberMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	entities := fs.String("entities", "", "comma-separated inline entities, each Name or Name:type")
 	vault := fs.String("vault", "", "vault name (default: derived from the API key, else \"default\")")
 	opID := fs.String("op-id", "", "idempotency key — safe retries return the original engram id")
-	upsertMode := fs.Bool("upsert-mode", false, "merge onto the engram pinned by --op-id instead of creating a new one (requires --op-id)")
+	upsertMode := fs.Bool("upsert-mode", false, "keep one stable memory per --op-id: create on first use, evolve it when the content changes, no-op when it is identical (requires --op-id)")
 	keyFile := fs.String("key-file", "", "vault API key file (default: ~/.muninn/api.key)")
 
 	if err := fs.Parse(args); err != nil {

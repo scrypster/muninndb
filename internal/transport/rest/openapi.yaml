@@ -119,7 +119,7 @@ components:
         upsert_mode:
           type: boolean
           default: false
-          description: "When true with idempotent_id set, merge onto the engram pinned by idempotent_id instead of creating a new one."
+          description: "When true with idempotent_id set, keep one stable memory per key: created on first use, evolved (superseding the previous version, which stays retrievable as history) when the content changes, and a no-op when the content is identical. Requires idempotent_id. On the evolve step only content, concept and importance are taken from the request; tags, confidence and trust are inherited from the previous version."
         memory_type:
           type: integer
           format: uint8
