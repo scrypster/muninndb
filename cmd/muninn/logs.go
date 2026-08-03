@@ -33,7 +33,19 @@ func runLogs(args []string) {
 		}
 	}
 
-	path := logFilePath()
+	// #852: <dataDir>/muninn.log is only ever written by the CLI's own
+	// fork-a-daemon path. A daemon started any other way — a systemd unit
+	// execing --daemon directly, launchd with StandardErrorPath, `docker
+	// run` — never writes it, and reading it unconditionally shows fossil
+	// content with no signal anything is wrong. resolveLogPath defers to
+	// the muninn.logdest sidecar the daemon itself records at every
+	// startup (#850), which is authoritative regardless of how the daemon
+	// was started.
+	path, inherited := resolveLogPath(defaultDataDir())
+	if inherited {
+		printInheritedLogGuidance(defaultDataDir())
+		return
+	}
 
 	if *noFollow {
 		printLastN(path, *last, *level)
@@ -41,6 +53,30 @@ func runLogs(args []string) {
 	}
 
 	tailLog(path, *level, *last, os.Stdout, os.Stderr)
+}
+
+// printInheritedLogGuidance is what `muninn logs` prints instead of tailing
+// a file, when the running (or most recently started) daemon's log
+// destination is inherited stderr with no path this command can resolve.
+// Showing nothing, or showing an explanation, both beat showing stale or
+// wrong content as if it were current (docs/internals/claim-discipline.md).
+func printInheritedLogGuidance(dataDir string) {
+	fmt.Println("  This daemon's log destination is inherited stderr, not a file muninn")
+	fmt.Println("  itself opened — `muninn logs` has no path it can safely read.")
+	fmt.Println()
+	if unit, managed := serviceManagerOwnsDaemon(); managed {
+		fmt.Printf("  Managed by systemd (unit: %s). View its logs with:\n", unit)
+		fmt.Printf("    journalctl -u %s -n 100 --no-pager\n", unit)
+	} else {
+		fmt.Println("  Check your process supervisor for where it captures stdout/stderr:")
+		fmt.Println("    macOS (launchd):  StandardErrorPath / StandardOutPath in the .plist")
+		fmt.Println("    Linux (systemd):  journalctl -u <unit> -n 100 --no-pager")
+		fmt.Println("    Docker:           docker logs <container>")
+	}
+	fmt.Println()
+	fmt.Println("  To make `muninn logs` work again, point the daemon at an explicit file:")
+	fmt.Printf("    --log-file %s\n", filepath.Join(dataDir, "muninn.log"))
+	fmt.Println("  or set MUNINN_LOG_FILE to the same path your supervisor captures.")
 }
 
 // printLastN reads the last N lines from the log file (filtered by level if set).

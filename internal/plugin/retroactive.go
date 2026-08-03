@@ -47,7 +47,7 @@ const maxIdleInterval = 3 * time.Minute
 type RetroactiveProcessor struct {
 	store    PluginStore
 	plugin   Plugin
-	flagBit  uint8 // DigestEmbed or DigestEnrich
+	flagBit  uint16 // DigestEmbed or DigestEnrich
 	stats    RetroactiveStats
 	statsMu  sync.RWMutex
 	cancelFn context.CancelFunc
@@ -67,7 +67,7 @@ func (rp *RetroactiveProcessor) SetOnEmbed(fn func(eng *Engram, vec []float32)) 
 }
 
 // NewRetroactiveProcessor creates a new processor for a plugin.
-func NewRetroactiveProcessor(store PluginStore, p Plugin, flagBit uint8) *RetroactiveProcessor {
+func NewRetroactiveProcessor(store PluginStore, p Plugin, flagBit uint16) *RetroactiveProcessor {
 	return &RetroactiveProcessor{
 		store:    store,
 		plugin:   p,
@@ -130,7 +130,7 @@ func (rp *RetroactiveProcessor) Mode() string {
 // skipFlags returns the digest flags that should be excluded from scanning.
 // Both embed and enrich processors skip permanently-failed engrams to prevent
 // infinite retry loops that trip the circuit breaker and block other memories.
-func (rp *RetroactiveProcessor) skipFlags() uint8 {
+func (rp *RetroactiveProcessor) skipFlags() uint16 {
 	if rp.flagBit == DigestEmbed {
 		return DigestEmbedFailed
 	}

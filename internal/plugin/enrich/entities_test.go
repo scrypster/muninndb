@@ -55,14 +55,14 @@ func (m *mockPluginStore) UpsertRelationship(_ context.Context, id plugin.ULID, 
 }
 
 // Unused interface methods
-func (m *mockPluginStore) CountWithoutFlag(context.Context, uint8, uint8) (int64, error) {
+func (m *mockPluginStore) CountWithoutFlag(context.Context, uint16, uint16) (int64, error) {
 	return 0, nil
 }
-func (m *mockPluginStore) ScanWithoutFlag(context.Context, uint8, uint8) plugin.EngramIterator {
+func (m *mockPluginStore) ScanWithoutFlag(context.Context, uint16, uint16) plugin.EngramIterator {
 	return nil
 }
-func (m *mockPluginStore) SetDigestFlag(context.Context, plugin.ULID, uint8) error       { return nil }
-func (m *mockPluginStore) GetDigestFlags(context.Context, plugin.ULID) (uint8, error)    { return 0, nil }
+func (m *mockPluginStore) SetDigestFlag(context.Context, plugin.ULID, uint16) error      { return nil }
+func (m *mockPluginStore) GetDigestFlags(context.Context, plugin.ULID) (uint16, error)   { return 0, nil }
 func (m *mockPluginStore) UpdateEmbedding(context.Context, plugin.ULID, []float32) error { return nil }
 func (m *mockPluginStore) UpdateDigest(context.Context, plugin.ULID, *plugin.EnrichmentResult) error {
 	return nil

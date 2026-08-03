@@ -1071,7 +1071,7 @@ func (e *Engine) WriteIdempotency(ctx context.Context, opID, engramID string) er
 // CountEmbedded returns the count of engrams that have had embeddings generated
 // (i.e. the DigestEmbed flag is set). Returns -1 on error.
 func (e *Engine) CountEmbedded(ctx context.Context) int64 {
-	const DigestEmbed uint8 = 0x02
+	const DigestEmbed uint16 = 0x02
 	count, err := e.store.CountWithFlag(ctx, DigestEmbed)
 	if err != nil {
 		return -1
@@ -1482,7 +1482,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	//   - entity relationships     -> DigestRelationships
 	//   - type/classification      -> DigestClassified (req.TypeLabel is set whenever
 	//                                 the caller supplies a type or type_label)
-	var inlineStageFlags uint8
+	var inlineStageFlags uint16
 	if callerSummary != "" {
 		inlineStageFlags |= plugin.DigestSummarized
 	}
@@ -2046,7 +2046,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		// GetEnrichmentCandidates does not report these memories as un-enriched (#500).
 		// Mirror the single-write path: only set a stage's flag when that stage's data
 		// is actually present from the caller.
-		var inlineStageFlags uint8
+		var inlineStageFlags uint16
 		if p.callerSummary != "" {
 			inlineStageFlags |= plugin.DigestSummarized
 		}

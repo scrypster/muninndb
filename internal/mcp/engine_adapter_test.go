@@ -19,17 +19,17 @@ type mockPluginStore struct {
 	incrementCoOccurrenceCalls int
 }
 
-func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint8) (int64, error) {
+func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint16) (int64, error) {
 	return 0, nil
 }
-func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _, _ uint8) plugin.EngramIterator {
+func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _, _ uint16) plugin.EngramIterator {
 	return nil
 }
-func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ plugin.ULID, _ uint8) error {
+func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ plugin.ULID, _ uint16) error {
 	m.setDigestFlagCalls++
 	return nil
 }
-func (m *mockPluginStore) GetDigestFlags(_ context.Context, _ plugin.ULID) (uint8, error) {
+func (m *mockPluginStore) GetDigestFlags(_ context.Context, _ plugin.ULID) (uint16, error) {
 	return 0, nil
 }
 func (m *mockPluginStore) UpdateEmbedding(_ context.Context, _ plugin.ULID, _ []float32) error {

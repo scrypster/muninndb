@@ -32,7 +32,7 @@ func TestClearEmbedFlagsForVault(t *testing.T) {
 	}
 
 	// Set DigestEmbed (0x02) flag on each.
-	const DigestEmbed uint8 = 0x02
+	const DigestEmbed uint16 = 0x02
 	for i, id := range ids {
 		if err := store.SetDigestFlag(ctx, id, DigestEmbed); err != nil {
 			t.Fatalf("SetDigestFlag[%d]: %v", i, err)
@@ -265,7 +265,7 @@ func TestClearEmbedFlagsForVault_DigestEmbedFailed(t *testing.T) {
 		t.Fatalf("WriteEngram: %v", err)
 	}
 
-	const DigestEmbedFailed uint8 = 0x80
+	const DigestEmbedFailed uint16 = 0x80
 	if err := store.SetDigestFlag(ctx, id, DigestEmbedFailed); err != nil {
 		t.Fatalf("SetDigestFlag(DigestEmbedFailed): %v", err)
 	}

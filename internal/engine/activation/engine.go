@@ -392,7 +392,29 @@ type ActivateRequest struct {
 	AsOf *time.Time
 	// IncludeInvalid disables the valid-time gate entirely (show history).
 	IncludeInvalid bool
+	// EmbedBudgetFraction bounds how much of the CALLER's remaining context
+	// deadline phase1's embed call may consume, as a fraction in (0, 1].
+	// Zero (the common case — direct callers never set this) uses
+	// defaultEmbedBudgetFraction. This exists so a hung/slow embed backend
+	// cannot consume the entire caller deadline and leave no time for the
+	// BM25-only fallback (#658): the budget is a FRACTION of whatever
+	// deadline the caller supplied, not a fixed duration, since a fixed
+	// timeout tuned for one deployment's embedder latency would be wrong for
+	// every other deployment's request budget. Ignored when ctx carries no
+	// deadline at all (nothing to divide, and no fallback to protect).
+	EmbedBudgetFraction float64
 }
+
+// defaultEmbedBudgetFraction is the fraction of a caller's REMAINING context
+// deadline that phase1 reserves for the embed call, leaving the rest for
+// phase2's BM25/FTS retrieval and phase6 scoring to complete the graceful
+// degradation path (#658). Deliberately a fraction of the caller's own
+// budget rather than an absolute duration: a vault whose embedder normally
+// answers in 50ms and a vault behind a slow remote provider need entirely
+// different absolute timeouts, but the same proportional split serves both
+// self-derived shapes without imposing either one's latency profile on the
+// other (see docs/internals's per-vault calibration principle).
+const defaultEmbedBudgetFraction = 0.5
 
 // PassesValidity is the valid-time recall gate (COG-19: default recall never
 // returns an engram whose ValidUntil <= now). Validity is a HARD filter —
@@ -887,6 +909,35 @@ func isZeroVector(vec []float32) bool {
 	return true
 }
 
+// embedBudgetContext derives a sub-context for the embed call that reserves
+// the rest of ctx's remaining deadline for the BM25 fallback path (#658). If
+// ctx carries no deadline, or fraction is out of (0, 1], it returns ctx
+// unmodified — there is no caller budget to protect, so today's
+// wait-as-long-as-ctx-allows behavior is preserved. The returned cancel func
+// must always be called (defer is safe even on the ctx passthrough — Go's
+// context.WithTimeout returns a no-op-safe CancelFunc, and for the
+// passthrough case the caller's own cancellation already governs ctx).
+func embedBudgetContext(ctx context.Context, fraction float64) (context.Context, context.CancelFunc) {
+	if fraction <= 0 || fraction > 1 {
+		fraction = defaultEmbedBudgetFraction
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		// Already past deadline — nothing to reserve; let the embed call fail
+		// immediately through the existing ctx-already-done path.
+		return ctx, func() {}
+	}
+	budget := time.Duration(float64(remaining) * fraction)
+	if budget <= 0 || budget >= remaining {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, budget)
+}
+
 func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*phase1Result, error) {
 	result := &phase1Result{}
 	result.queryStr = strings.Join(req.Context, " ")
@@ -905,7 +956,9 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 	// benchmarks and lightweight deployments), this avoids the hashEmbedder
 	// CPU cost entirely (~13% of activation CPU).
 	if e.embedder != nil && e.hnsw != nil {
-		vec, err := e.embedder.Embed(ctx, req.Context)
+		embedCtx, cancelEmbed := embedBudgetContext(ctx, req.EmbedBudgetFraction)
+		defer cancelEmbed()
+		vec, err := e.embedder.Embed(embedCtx, req.Context)
 		if err != nil {
 			// Embedding backend unreachable (e.g. connection refused on the
 			// embedding endpoint). Degrade to BM25+decay recall instead of

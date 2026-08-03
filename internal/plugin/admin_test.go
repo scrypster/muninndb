@@ -19,7 +19,7 @@ type mockPluginStore struct {
 	countErr        error
 	scanResult      EngramIterator
 	setFlagErr      error
-	getFlagsResult  uint8
+	getFlagsResult  uint16
 	getFlagsErr     error
 	updateEmbedErr  error
 	updateDigestErr error
@@ -32,7 +32,7 @@ type mockPluginStore struct {
 	autoLinkErr     error
 
 	setFlagCalls      int
-	setFlags          []uint8
+	setFlags          []uint16
 	checkDimCalls     int
 	updateEmbedCalls  int
 	hnswInsertCalls   int
@@ -43,21 +43,21 @@ type mockPluginStore struct {
 	coOccurCalls      int
 }
 
-func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint8) (int64, error) {
+func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint16) (int64, error) {
 	return m.countResult, m.countErr
 }
 
-func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _, _ uint8) EngramIterator {
+func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _, _ uint16) EngramIterator {
 	return m.scanResult
 }
 
-func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ ULID, flag uint8) error {
+func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ ULID, flag uint16) error {
 	m.setFlagCalls++
 	m.setFlags = append(m.setFlags, flag)
 	return m.setFlagErr
 }
 
-func (m *mockPluginStore) GetDigestFlags(_ context.Context, _ ULID) (uint8, error) {
+func (m *mockPluginStore) GetDigestFlags(_ context.Context, _ ULID) (uint16, error) {
 	return m.getFlagsResult, m.getFlagsErr
 }
 

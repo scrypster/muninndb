@@ -20,11 +20,11 @@ func NewStoreAdapter(store *storage.PebbleStore, hnsw *hnswpkg.Registry) PluginS
 	return &pluginStoreAdapter{store: store, hnsw: hnsw}
 }
 
-func (a *pluginStoreAdapter) CountWithoutFlag(ctx context.Context, flag, skipFlags uint8) (int64, error) {
+func (a *pluginStoreAdapter) CountWithoutFlag(ctx context.Context, flag, skipFlags uint16) (int64, error) {
 	return a.store.CountWithoutFlag(ctx, flag, skipFlags)
 }
 
-func (a *pluginStoreAdapter) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint8) EngramIterator {
+func (a *pluginStoreAdapter) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint16) EngramIterator {
 	iter := a.store.ScanWithoutFlag(ctx, flag, skipFlags)
 	if iter == nil {
 		// Prevent a typed-nil concrete pointer from being wrapped in a non-nil
@@ -34,11 +34,11 @@ func (a *pluginStoreAdapter) ScanWithoutFlag(ctx context.Context, flag, skipFlag
 	return iter
 }
 
-func (a *pluginStoreAdapter) SetDigestFlag(ctx context.Context, id ULID, flag uint8) error {
+func (a *pluginStoreAdapter) SetDigestFlag(ctx context.Context, id ULID, flag uint16) error {
 	return a.store.SetDigestFlag(ctx, storage.ULID(id), flag)
 }
 
-func (a *pluginStoreAdapter) GetDigestFlags(ctx context.Context, id ULID) (uint8, error) {
+func (a *pluginStoreAdapter) GetDigestFlags(ctx context.Context, id ULID) (uint16, error) {
 	return a.store.GetDigestFlags(ctx, storage.ULID(id))
 }
 

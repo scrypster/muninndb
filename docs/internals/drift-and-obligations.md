@@ -96,7 +96,7 @@ and remain the reviewer's job.
    **Changing the SCOPE of an existing prefix is the same obligation plus a migration.**
    #683 moved 0x1F from global to vault-scoped: that meant a new key length, the
    `prefix.All()` category, membership in `clearVaultDataPrefixes` (and its scope test),
-   the registry row, an invariant (STO-16), and migration v6 — plus a `MaxRegisteredVersion`
+   the registry row, an invariant (STO-17), and migration v6 — plus a `MaxRegisteredVersion`
    bump that a previous migration's registration test pinned to an exact value and therefore
    broke. Check for that pin: `TestRegisterMigrations_IncludesV5` asserted `== 5`. Pin the
    exact value in the NEWEST migration's test and assert only a floor in the older ones.
