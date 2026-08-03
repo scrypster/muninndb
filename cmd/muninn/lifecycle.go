@@ -195,6 +195,19 @@ func runStart(webEnabled bool) error {
 	lf, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if logErr == nil {
 		cmd.Stderr = lf
+		// Also tell the child its own log path via MUNINN_LOG_FILE (rather
+		// than relying on the redirected stderr fd above) so the daemon
+		// opens an independent, reopenable descriptor on the same file
+		// (#850) and records it as its authoritative log destination
+		// (#852) — the same file `muninn logs` already reads by default,
+		// now confirmed rather than assumed. An explicit --log-file/
+		// MUNINN_LOG_FILE the user already set takes priority (buildDaemonArgs
+		// doesn't forward it, so only an inherited env value could compete,
+		// and Environ() below overwrites it with logPath either way — if a
+		// user wants a different daemon log path they invoke the daemon
+		// directly rather than through `muninn start`, same as any other
+		// flag `checkStartArgs` refuses).
+		cmd.Env = append(os.Environ(), "MUNINN_LOG_FILE="+logPath)
 	} else {
 		cmd.Stderr = nil
 	}
@@ -249,7 +262,7 @@ func runStart(webEnabled bool) error {
 // did not happen.
 func removeSidecars(dataDir, pidPath string) error {
 	var errs []error
-	for _, p := range []string{pidPath, filepath.Join(dataDir, addrsFileName)} {
+	for _, p := range []string{pidPath, filepath.Join(dataDir, addrsFileName), filepath.Join(dataDir, logDestFileName)} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}

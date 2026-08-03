@@ -225,10 +225,18 @@ func TestHebbianBoost_PairCountedOnce(t *testing.T) {
 //
 // Context, and why this is not dressed up as a user-visible win: #801 measured
 // that phase5Traverse emits NOTHING under the default profile, because
-// minHopScore (0.05) gates a raw rrfScore whose theoretical maximum is 0.0885.
-// This test therefore drives phase5Traverse DIRECTLY with a seed score high
-// enough to clear that gate — it proves the graph read is correct, not that
-// traversal is live. When #801 repairs the gate, it lands on a correct read.
+// minHopScore (0.05) gates a raw rrfScore whose real unfiltered ceiling is
+// 0.0686559. This test therefore drives phase5Traverse DIRECTLY with a seed
+// score high enough to clear that gate — it proves the graph read is correct,
+// not that traversal is live.
+//
+// #801 CLOSED without repairing the gate: no threshold formulation is
+// supported, and at scale traversal is strictly dominated by raising
+// CandidatesPerIndex. So this test is now permanently the "the BFS walks a
+// symmetric edge correctly" pin and never a "traversal works" one, and it is
+// also the RED control for TestPhase5Traverse_InertAtTheMeasuredSeedCeiling:
+// scaled-up seed -> hops, real seed ceiling -> none. See
+// docs/internals/decision-record.md (#801).
 func TestPhase5Traverse_ReachesSymmetricEdgeFromEitherEndpoint(t *testing.T) {
 	older, newer := olderNewer()
 

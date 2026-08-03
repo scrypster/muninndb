@@ -22,6 +22,9 @@ var errCapabilityNoExpiry = errors.New("capability requires an ExpiresAt (nil fo
 // GenerateCapability creates a new cap_ token for the given vault.
 // ttl is required (pass a non-nil ExpiresAt); returns the raw token (shown once) and metadata.
 func (s *Store) GenerateCapability(vault, label, mode, origin string, expiresAt *time.Time) (token string, cap Capability, err error) {
+	if err = s.refuseNonLeaderWrite(); err != nil {
+		return
+	}
 	if mode != ModeFull && mode != ModeObserve && mode != ModeWrite && mode != ModeAppend {
 		err = fmt.Errorf("mode must be %q, %q, %q, or %q", ModeFull, ModeObserve, ModeWrite, ModeAppend)
 		return
@@ -70,7 +73,8 @@ func (s *Store) GenerateCapability(vault, label, mode, origin string, expiresAt 
 		err = setErr
 		return
 	}
-	err = batch.Commit(pebble.Sync)
+	err = s.commit(batch)
+	batch.Close()
 	return
 }
 
@@ -133,6 +137,9 @@ func (s *Store) ListCapabilities(vault string) ([]Capability, error) {
 
 // RevokeCapability removes the capability with the given display ID from the vault.
 func (s *Store) RevokeCapability(vault, capID string) error {
+	if err := s.refuseNonLeaderWrite(); err != nil {
+		return err
+	}
 	idBytes, err := base64.RawURLEncoding.DecodeString(capID)
 	if err != nil || len(idBytes) != 8 {
 		return ErrCapabilityNotFound
@@ -147,13 +154,12 @@ func (s *Store) RevokeCapability(vault, capID string) error {
 	closer.Close()
 
 	batch := s.db.NewBatch()
+	defer batch.Close()
 	if err := batch.Delete(capabilityStorageKey(hash), nil); err != nil {
-		batch.Close()
 		return err
 	}
 	if err := batch.Delete(idxKey, nil); err != nil {
-		batch.Close()
 		return err
 	}
-	return batch.Commit(pebble.Sync)
+	return s.commit(batch)
 }

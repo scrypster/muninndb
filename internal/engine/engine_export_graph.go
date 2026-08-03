@@ -81,7 +81,7 @@ func (e *Engine) ExportGraph(ctx context.Context, vault string, includeEngrams b
 
 		node := GraphNode{ID: name}
 		if includeEngrams {
-			rec, recErr := e.store.GetEntityRecord(opCtx, name)
+			rec, recErr := e.store.GetEntityRecord(opCtx, ws, name)
 			if recErr != nil {
 				if errors.Is(recErr, context.Canceled) || errors.Is(recErr, context.DeadlineExceeded) {
 					return nil, recErr

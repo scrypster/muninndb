@@ -100,6 +100,41 @@ fixing on its own merits — silently discarding a caller's `type`, entities or 
 indefensible regardless — but it is a precondition, not the lever, and it unlocked nothing here.
 See `docs/internals/agent-experience-findings.md` for the full evaluation.
 
+**Every content-replacing verb must DECLARE the replacement, and derived state must be
+reinterpreted at read time rather than rewritten (2026-08-03, #779/#769/#780).** Three issues
+filed independently against three surfaces turned out to be one mechanism — supersession, and
+the derived state that outlives it — and **all three named a cause the code did not have.**
+Verifying each claim before fixing anything is what produced the increment; taking any of them
+at face value would have produced three wrong changes.
+
+- #779 reported an embed-lag RACE in consolidate. That race was already closed (`Consolidate`
+  calls `Engine.Write`, which fires `onWrite`, #767). The real defect was PERMANENT and one
+  line away: consolidate archived its sources with `Forget{Hard:false}`, a plain soft-delete
+  with an OPEN `ValidUntil` and no `RelSupersedes` edge — the exact signature COG-28 reads as
+  "trash, not history". **Consolidation was the one content-replacing operation excluded from
+  the mechanism built to close exactly that hole.** Evolve declares supersession, `Link
+  (supersedes)` declares it, consolidate did not. The generalisable rule: when a mechanism
+  admits records on a STRUCTURAL SIGNATURE, every writer that produces the semantic condition
+  must produce the signature — a new verb silently opts out, and opts out invisibly.
+- #769 reported a missing `concept` parameter on evolve. It has been there, read and honored,
+  the whole time. The genuine residual was one layer up and much smaller: nothing SAID the
+  label had been inherited. Rebuilding what existed would have been the expensive wrong answer.
+- #780 reported a monotone counter "never decremented". `DecrementEntityCoOccurrence` exists
+  and deletes at zero — it is just never funded by a soft-delete. It also assumed evolve
+  strands entities, when evolve CARRIES them onto the live successor. Once both corrections
+  land, the residual defect is narrow and real (an entity retired by an explicit `entities[]`
+  replacement) and, crucially, its shape dictates the fix: **a monotone capture-time ledger can
+  never be corrected by anything the user does later, so the correction must live at read
+  time.** Presence is derived from live support; the count is left alone, because it is a
+  historical strength signal and honest as one.
+
+Both fixes chose **read-side reinterpretation over rewriting data at rest** (#810, #854): the
+consolidations that already ran are not migrated, because their sources carry the plain-forget
+signature every read path already interprets correctly, so doing nothing leaves them exactly as
+they behave today instead of half-converted. And the live-support filter is **abandoned rather
+than applied to a partial view** past its scan cap — filtering on a subset of the truth deletes
+real edges, which is strictly worse than reporting a stale one.
+
 ## Security & credentials
 
 **Security properties are structural, not policy-checked (#612).** The obvious design
@@ -136,6 +171,30 @@ full relocation + one-time migration ("we're still alpha, migration cost is as l
 ever be") plus a cross-package disjointness test — not an assertion-only fix. **Principles:
 verify reporter claims independently (severity may rise); fix the disk, not just the future;
 guard the class of bug with a test.**
+
+**Coverage is not correctness (#731 → #732).** `muninn_state` sat in `isReadOnlyTool`
+while `handleState` reached `Engine.UpdateLifecycleState` → `store.CompareAndSet`, so an
+observe-mode credential could archive any engram in its vault — out of recall on every
+path — and every test stayed green. The exhaustive test proved each tool sat in exactly one
+bucket, never that the bucket was right. Three things hid it: the adapter **renames** the
+method (`UpdateState` → `UpdateLifecycleState`), so grepping `internal/mcp/` for the engine
+method finds only the one-line forwarder and never the handler; `registeredToolNames()` was
+a hand-maintained mirror of the dispatch map; and the classifiers were `switch` bodies,
+which cannot be enumerated, so a dead or misspelled entry was invisible. Unlike SEC-15's
+append guarantee — backstopped at the engine by `refuseAppend`, which is why append mode was
+never exploitable — observe has **no engine-level refusal**. `ObserveFromContext` suppresses
+COG-11 learning and `auth.ContextMode` gates SEC-14 trust; neither refuses an operation. The
+classification WAS the enforcement. Fixed by reclassifying, deriving the registry from the
+dispatch map, making the classifiers enumerable maps, and adding a per-tool census a human
+must edit. A reviewing pass built an independent write-reachability oracle and confirmed
+`muninn_state` was the sole outlier in both directions across all 44 tools — and found why
+the obvious follow-up test does not work: `Read`, `Activate`, `Explain` and `Stat` also
+reach writes and are correctly read-only, because the engine suppresses them via
+`ObserveFromContext`. So "a read-only tool must not reach a write" is RED on day one against
+correct code; the true invariant is "must not reach a write unguarded by `ObserveFromContext`",
+which points at an engine-level `refuseObserve` rather than a test.
+**Principles: fail closed on auth; an exhaustive test that pins shape rather than meaning is
+not a gate; prefer the enumerable structure over the one that cannot be asserted about.**
 
 ## Delivery & process
 
@@ -195,7 +254,14 @@ pattern keys (dropped in #608 v2); per-key toolset attribute (the key layer is n
 presentation layer, #604); ambient push (negative result, #609); associative surprise
 (negative result, refuted at its premise after four measured passes — a focal's
 co-activation neighbourhood is its semantic neighbourhood, so 100% of real candidates sit at
-or above the non-obviousness ceiling).
+or above the non-obviousness ceiling); cross-domain discovery as designed (held at a
+multiple-comparisons ceiling, #706 — reopening requires a null with sub-1/T resolution or a
+gated test set, not a larger draw count); dream phases enabled by default (measured
+net-negative against no dream at all, #786 — the phase-GATING increment #785 remains open);
+repairing `phase5Traverse`'s hop threshold (negative result, #801 — the gate has been above
+the mechanism's ceiling since the initial commit, and at scale traversal is strictly
+dominated by simply raising `CandidatesPerIndex`; no threshold formulation is supported, and
+only the ACT-R-seeded variant is left open, under a pre-committed rule in this record).
 
 **`tag_prefix` seeds candidates via a new ordered index, not the hash index (S1).**
 Superseded the earlier "stays a post-filter" call above: the 0x0C tag index is
@@ -359,6 +425,163 @@ across 16 nonsense probes with a declared chain grafted into the abstention corp
 adjacent-topic corpus with a positive control, and an exact-equality detector for
 normalization leakage — because a substitution that fires on the wrong topic is the
 silently-wrong class this project ranks worst, arriving at the score the RIGHT topic earned.
+
+### A permutation null's resolution is a design ceiling, not a tuning knob (cross-domain discover / #706, 2026-08-02)
+
+`muninn_discover` — read-only cross-domain connection discovery — was built RED-first with a
+four-assertion planted-vault proof and then **held, not merged**, when an adversarial refute
+of its STATISTICS found the significance inflated and the design unable to clear a valid gate
+at production scale. Recorded here because the plumbing is correct and should be reused, and
+because the reason it cannot ship is a constraint any successor has to clear rather than a
+number anyone can turn up.
+
+**The defect, traced to the line.** `circularShiftPValue` returned
+`(exceed+1)/(NullIters+1)`, but the null draws come from `deterministicShiftOffsets`, which
+walks `[1, T-1]` — a permutation space of exactly **T-1 members**. At T=365 both the
+production default N=500 and the proof's N=4000 yield the same **364 distinct rotations**;
+every extra draw recomputes a rotation already computed, producing a bit-identical statistic
+and no new information. Dividing by N+1 anyway reports a resolution the data cannot contain:
+`1/4001 ≈ 0.00025` against an exact floor of `1/365 ≈ 0.00274`, an **11x** overstatement
+(the production default's `1/501` is 1.4x). Fixed by deduplicating the offsets and dividing
+by the size of the distinct set — which also bounds the work at the size of the permutation
+space instead of growing linearly in a knob.
+
+**With the honest p, the planted signal fails.** At the proof's m=128 tests, BH q at rank 1
+is `p·m`: `1/365 · 128 = 0.35` against the reported `0.032`. It misses q≤0.05 by 7x. The
+proof's `nullItersForTest = 4000` had been chosen to push `1/(N+1)` under `0.05/128` — the
+inflation *was* the gate. Re-run at production defaults on the same planted vault, the signal
+never appears at all: `[lag7/N500] candidates=0`, `[lag1/N500] candidates=0`,
+`[lag7/N4000] candidates=0`; only `[lag1/N4000]`, a regime `handleDiscover` never uses,
+surfaces it. **Landing the p-value fix on the held branch turns its own proof RED, and that
+red is the truth** — `TestDiscover_PlantedSignalProof` reports
+`tested_pairs=128 dropped_fdr=128` with an empty top-3, and
+`TestDiscover_COG22_ReadOnly_FailOnMutate`'s deliberate non-vacuity guard ("a no-op read-only
+stub would also pass trivially") fires too, which is exactly the assertion earning its keep.
+Neither was softened.
+
+**The ceiling, which is the entry's whole point.** With a valid floor `max(1/T, 1/N)`, the
+largest m a *lone* true positive can survive under BH at q≤0.05 is `0.05/p_floor`: about **18**
+tests on a 365-day window, and about **25** even on a ten-year vault (where N=500 becomes the
+binding constraint rather than T). Production defaults test 200 entities per domain across 8
+lags — up to 320,000 tests. A handful of genuine signals **structurally cannot** clear FDR
+there. This is inherent to (day-bucket circular-shift null, ~T rotations) × (BH-FDR over all
+pairs); honest p makes the feature a no-op at scale, inflated p makes it a liar. **No draw
+count, support floor or q threshold moves it** — a successor must change the ceiling itself:
+enlarge the permutation space below 1/T resolution (finer buckets, block permutation), adopt a
+null with genuine sub-1/T resolution (analytic Poisson/binomial, a non-rotation bootstrap), or
+shrink m before correction (hierarchical/gated testing over a small pre-registered candidate
+set, or discover-on-half/confirm-on-half instead of BH over the full pair×lag grid). Its
+acceptance test must assert the planted signal survives **at `handleDiscover`'s real
+defaults**, never a bespoke regime.
+
+**Correct — do not rebuild.** Five pieces survive the refute intact and belong in any
+successor: (1) **COG-22 read-only structural enforcement** — the `discoverReader` interface
+plus `mutationCanaryStore` make a write unrepresentable rather than forbidden (principle #3);
+(2) the lift formula `k·T/(n_a·n_b)` computed on the **`EffectiveValidFrom` event clock**, not
+`CreatedAt`, with per-day presence dedup and cross-domain self-pair drop; (3) **BH-FDR over
+ALL tests**, never just the survivors, with correct step-up monotonicity; (4) the
+circular-shift-over-IID null choice and its anti-conservative unit tests — an IID shuffle
+destroys the autocorrelation instead of the alignment and makes a merely-bursty independent
+pair look significant; (5) the **non-gameable shuffle RED** — permuting the market domain's
+timestamps leaves every count identical and collapses the planted pair to lift≈1.1, p≈0.28.
+Plus the evidence contract (non-optional support/lift/p/q/marginals) and its strict
+no-causation language.
+
+**Principle: the resolution of a permutation test is a property of its permutation space, and
+no draw count buys resolution the space does not have. Before designing a multiple-comparison
+gate, compute `alpha / p_floor` — if that number is smaller than the number of tests you
+intend to run, the design is a no-op or a liar and no amount of tuning changes which.**
+
+### One vault finds bugs; two vaults tell you which finding generalizes (entity sparsity / #716, 2026-08-02)
+
+A measurement on a 3,296-memory production vault found that many memories carried **zero**
+extracted entities — **12.8%** entity coverage in the post-enum window — and concluded that
+*real vaults are entity-sparse*, that the tag layer is the actual organizing signal, and that
+entity-anchored features (entity-boost, entity-scoped recall, #712 version-clustering,
+cross-domain discovery) will under-fire on real data. #712 was re-anchored onto tags partly on
+the strength of that claim.
+
+**It did not survive a second vault.** @johanneshauer measured an independently-used
+production vault — 2,892 engrams, ~5 months, multi-user, external Ollama `bge-m3` (1024-dim)
+rather than the bundled bge-small — read-only against a backup snapshot, aggregate counts only:
+**95.1%** coverage whole-vault, 97.6% pre-enum, and **92.6%** in the *same calendar window on
+the same server version* that produced the 12.8%.
+
+So **"real vaults are entity-sparse" is not a property of real vaults. It is a property of how
+a vault is written.** The batch-vs-single control replicates the causal mechanism on both
+corpora: the batch-shaped path (which never received the strict entity-type enum) stays flat
+while the enum'd single-write path drops — **DiD +10.8pp** there against **+65.7pp** here, same
+sign, same shape, on a different embedder and a different domain. What differs is magnitude
+(−9.5pp against −63.4pp), and the magnitude tracks **how well the writing client already knew
+the entity-type vocabulary**: an operator-primed caller that had been told the 14 recognized
+types inline had almost nothing left for the enum to reject. Dose-response for exactly the
+mechanism the first vault identified — the enum's cost is a function of caller priming, not of
+the data — and substantially fixed upstream by #743, which demotes the enum to a description so
+an unknown type degrades to `other` instead of dropping the whole entity. A follow-up 144-run
+paired harness put a **lower bound** on the priming effect itself (+0.383 entities, +0.574
+relationships per write from one added operator paragraph, both CIs clear of zero) and could
+not build a genuinely unprimed arm, which is stated as a limitation rather than papered over.
+
+**What still stands, and is a standing design constraint.** The tag layer *is* a first-class
+organizing signal on some real vaults; entity-anchored features *do* under-fire where extraction
+never populated; a feature must not assume an entity-rich graph. `ExcludeTags` shipping
+per-vault is that principle already in practice. What does **not** stand is treating
+entity-sparsity as the steady state of real vaults, or as evidence against the entity anchor in
+general — the evidence base for that was a single vault written before #743 landed. It is worth
+re-measuring coverage on a post-#743 corpus before either anchor is called the right one. This
+binds #712, #789 (whose per-vault contradiction lexicons face the same question) and cross-domain
+discovery alike: each must work on both shapes, because both are real.
+
+**Principle: ONE vault is for finding bugs. TWO vaults are for knowing which finding
+generalizes.** A single-corpus measurement can establish that a mechanism is real (the DiD
+replicated) and simultaneously mislead about its population (the headline inverted, 12.8% to
+95.1%). This is CLAUDE.md #11 earning itself from the other direction: the rule against baking a
+sample vault's constant into the product is the same rule as the one against generalizing a
+sample vault's *shape* into a claim about everyone. A finding phrased as "real vaults are X" has
+a denominator of one until a second, differently-written corpus says otherwise — and the honest
+version of the original finding is "a vault written this way is X", which is both smaller and
+true.
+
+### Dream consolidation's phases did not beat doing nothing (#786 / #367, 2026-08-02)
+
+@5queezer ran the ablation that settles how dream ships: **50 Optuna trials (TPE sampler) over
+255 dream-phase combinations**, scored on PersonaChat + MultiWOZ, followed by a full
+vault-isolated 6-dataset run with three arms.
+
+| arm | composite |
+|---|---|
+| baseline — no dream at all | **0.489** |
+| all phases enabled | 0.374 |
+| Optuna-best subset (1,2,5) | 0.322 |
+
+**No phase combination in the study beat doing nothing.** Per-phase deltas: transitive inference
+**+0.022** and orient **+0.007** help, semantic dedup +0.006 is marginal; relevance decay
+**−0.011**, LLM adjudication **−0.011** and bidirectional stability **−0.014** are net-negative.
+Follow-up LocOMo/LongMemEval work (read-only evaluation, predeclared config, median-of-fifteen)
+came out neutral for conservative ERC, mean ≈ **+0.00048** — and the contributor's own reading is
+the right one: *"I would not sell this as a large LocOMo win,"* treat it as diagnostic
+infrastructure, not positive evidence.
+
+**This is why dream ships opt-in with conservative defaults rather than on by default**, and it
+belongs where people read *why* rather than in a closed thread. It sits beside ambient push
+(#609) and associative surprise (#751) as a measured negative that shaped the product —
+principle #10, and a particularly clean instance of it: the contributor published the table that
+killed his own feature's defaults, and volunteered the null follow-up rather than the arm that
+agreed with him.
+
+**The MECHANISM half stays OPEN.** This record closes the *claim*, not the work. **#785** —
+`MUNINN_DREAM_PHASES` selection with a conservative default phase set `{0,2,5}` (orient, semantic
+dedup, transitive inference), `parseDreamPhases` returning the safe set on empty OR invalid input
+with a WARN (fail-open-to-safe, principle #4), landed as **per-vault plasticity config** rather
+than a process-wide constant (principle #11 — a fixed phase set is exactly the kind of one-vault
+answer we do not ship as law) — is real unbuilt code and does not close with this entry. The
+measurement above is precisely what its defaults should encode: the three phases that were not
+measured harmful. Its preset obligations apply in full — web console cards and a
+`reflect.DeepEqual` pinning test (principle #6).
+
+**Principle: a negative result retires a claim, not the mechanism it was measured on. Record
+which half died — and say plainly, in the same entry, which half is still open — or the next
+reader will close both.**
 
 ---
 
@@ -551,3 +774,373 @@ a "work bound" that truncates an ordered stream is only neutral if the ordering 
 uncorrelated with what you are filtering for. Here it is anti-correlated, so the bound
 would trade a bounded latency win for a silent, biased loss of real neighbours.** A
 relType-aware reverse index, or a per-engram directional-degree hint, is its own increment.
+
+### Associative traversal has never fired, and no threshold repairs it (#801, 2026-08-02)
+
+`phase5Traverse` seeds each hop from the raw RRF score and gates the propagated score on
+`minHopScore = 0.05` (`internal/engine/activation/engine.go:1568`, `:1596`, `:1676`).
+**Both constants date to the initial commit, and at that commit the gate was above the
+mechanism's theoretical ceiling.** The fusion then summed three lists — HNSW k=40, FTS
+k=60, decay k=120 — so the best conceivable seed, rank 1 in all three, scored
+`1/41 + 1/61 + 1/121 = 0.049048`, and the best conceivable hop off it scored
+`0.049048 × 1.0 × 0.7 = 0.034334` against a 0.05 gate. No input, no configuration, no edge
+weight and no seed rank could produce a hop. The phase was dead on arrival and has emitted
+nothing for the life of the product.
+
+It became *theoretically* reachable later only by accident, when three more RRF lists were
+added (PAS transitions k=50, time k=100, tag k=100) and lifted the ceiling to `0.088458`.
+That ceiling is not real: the `time` and `tag` lists are only populated when the request
+carries a time or tag filter, and an ordinary recall carries neither. Measured list
+membership over real recalls on two vaults (460 seeds) found **zero seeds in 5 or 6 lists**,
+so the unfiltered ceiling is `1/41 + 1/61 + 1/121 + 1/51 = 0.0686559` and clearing the gate
+needs `weight × boost ≥ 1.041`. Maximum edge weight is 1.0 and the `default` profile only
+dampens (`profiles.go:82` — every entry ≤ 1.0), so `boost ≤ 1.0`. **Under the default
+profile on an unfiltered recall the phase cannot fire at any edge weight whatsoever.**
+
+**Measured, not only derived.** On a real 3,458-engram production vault with 127,798
+association edges (plus a 736-engram second vault), 150 queries each, real pipeline, real
+bundled embedder, a fresh clone per arm:
+
+- **0 hops on 150/150 queries, both vaults.** Observed maximum seed score `0.04078` =
+  exactly rank-1 HNSW + rank-1 FTS; no seed ever appeared in more than two lists. At that
+  seed a hop needs `weight × boost ≥ 1.751`.
+- **Reachability was not the constraint.** The candidate pool covered 2.60% of vault A
+  (p50), with **121 novel engrams one hop from a median query's seeds**. An earlier
+  small-vault pass had stalled because the pool covered 100% of the vault; this substrate
+  removed that blocker.
+- **The instrument was verified non-blind**: the shipped `phase5Traverse`, on the same real
+  edges, produces 64 hops the moment seed scores are scaled up.
+- **There is no knee, there is a cliff.** Gate 0.05 → 0/150 queries with a hop; 0.001 →
+  8/150; 0.0005 → 142/150 at a median of 15 hops; 0 → 125 hops median. Silence and flooding
+  are a factor of ~2 in gate value apart with nothing usable between.
+- **Weights are pinned 20× below their write-time constants.** Association decay clamps to
+  `peakWeight × 0.05` (`storage/association.go`), and a full census finds the live
+  population sitting on that floor: `RelRelatesTo` p50 **0.01500** (= 0.3 × 0.05),
+  `RelCoActivated` p50 **0.00050** (= the 0.01 cold-start seed × 0.05). Only 829 of 127,798
+  edges (0.65%) exceed 0.05 at all, and none approaches 1.04.
+
+**The decisive control is not the obvious one.** Seed↔hop cosine was computed and then
+**discarded as circular**: `internal/engine/autoassoc/neighbor.go:185` writes `RelRelatesTo`
+edges *from an HNSW kNN search* with `weight = similarity × 0.5`, and 99.2% of reachable
+hops are that type — scoring them by cosine measures the construction rule, not retrieval
+quality. The non-circular control instead asks what traversal buys **against the cheapest
+alternative**: for each query, compare the N hops a budget cap admits with HNSW ranks
+`31..30+N`, i.e. what simply raising `CandidatesPerIndex` from 30 gives away for free.
+
+| cap N | A: traversal wins / raise-k wins | Δ p50 | sign test p | vault B |
+|---|---|---|---|---|
+| 1 | 2 / 146 | −0.0083 | 6e-41 | 2 / 122 |
+| 2 | **0 / 150** | −0.0163 | 1.4e-45 | 0 / 133 |
+| 5 | **0 / 150** | −0.0218 | 1.4e-45 | 0 / 140 |
+| 10 | **0 / 150** | −0.0229 | 1.4e-45 | 1 / 147 |
+
+**Strictly dominated on essentially every query, in both vaults, at every setting.** 82.7%
+of top-1 hops already sit inside the query's own top-400 vector ranking; the median top-1
+hop sits at HNSW rank 98 — traversal's single best offer is worse than the 31st vector
+candidate. The pre-committed usability rule (*median hops in [1,10] AND median admitted-hop
+cosine ≥ background p95 = 0.855*) was met by no setting; best observed admitted-hop cosine
+0.785 against a background of 0.705.
+
+**Hebbian edges cannot participate, and the ones that would are noise.** Not one of 77,408
+`RelCoActivated` edges reaches 0.05 (max **0.01009**, 20× below the gate, ~1,700× below what
+a hop needs). At a fully-open gate the 81 that get through measure query-cosine **0.706
+against a background of 0.705** — indistinguishable from random pairs — and any gate low
+enough to admit one admits a median of 49–125 neighbour hops.
+
+**No threshold formulation is supported**, and the alternatives died for stated reasons, not
+for lack of tuning. A lower absolute constant has no knee to find and would encode one
+vault's decay history and write-time constants (principle #11, the #762 shape exactly). A
+relative-to-seed form is a **category error**: since `propagated = base × w × boost × 0.7`,
+the condition `propagated ≥ α × base` reduces to `w × boost ≥ α/0.7` — the seed cancels
+exactly, so a fraction-of-own-score threshold is an edge-weight test wearing a score's
+clothing, and every `relown`/`reltop` arm admitted either 0 hops or all of them. A
+rank/budget cap bounds the count but loses the sign test at p < 1e-40. Per-RelType treatment
+fails because the only high-volume type is kNN-derived and therefore **redundant with the
+vector index by construction**, while the Hebbian arm sits at background.
+
+**Why nobody noticed, for the life of the product.** There was never a "before" in which
+hops worked, so no regression signal ever existed; the only detectable symptom would have
+been the absence of something that had never been present. Every gate the project has —
+tests, invariants, the review agent — checks that a mechanism behaves correctly when
+exercised, and the traversal tests do exactly that: they drive `phase5Traverse` with seed
+scores (0.1, 1.0) that phase 3 cannot produce, so they proved the BFS is correct and could
+not have revealed that nothing ever reaches it. Meanwhile the neighbour worker, the
+autoassoc worker, dream consolidation, the Hebbian worker, decay, archival and the #756
+weight-repair pass all kept maintaining a structure that this phase never productively read.
+**Principle: a unit test that supplies its own inputs cannot tell you the input is
+unreachable. When a mechanism has a threshold, pin the threshold against the measured
+distribution of what actually arrives at it, not against a value chosen to exercise the
+branch.**
+
+**What this does NOT establish, stated because the negative is strong.** Traversal is not
+*harmful* — it never fires, so it costs one (usually cache-warm) `GetRankingNeighbors` call
+per recall and then terminates at level 1. Non-default profiles (`causal`, `adversarial`,
+boosts to 1.3) were not run; the arithmetic still says no (`1.041/1.3` needs weight ≥ 0.80,
+which one edge in 127,798 meets) but it is arithmetic, not a measurement. Filtered recall,
+where `time`/`tag` populate and a seed could reach 3–4 lists, was not run. PAS was measured
+as *absent* rather than as zero-contribution — the harness cannot populate the in-process
+activation log — though its bound (+1/51) changes no conclusion. Queries were in-vault
+`Concept` strings rather than a real query log, which makes seeds unusually strong and
+therefore **favours** traversal; the null is conservative.
+
+#### The one caveat the data cannot speak to: ACT-R-seeded traversal
+
+Traversal seeded on the **final ACT-R score** instead of `rrfScore` is a genuinely different
+mechanism and was never measured. It is not a tuning variant: ACT-R finals are order ~0.5
+rather than order ~0.04, so the same 0.05 gate becomes `weight ≥ ~0.14` and the phase would
+start emitting. Saying otherwise would be reasoning past the evidence, so it is recorded
+here rather than asserted away — and it is recorded here rather than filed as an issue,
+because it is a rider on a killed mechanism, not work in its own right.
+
+The prior is strongly against it, with a mechanism: seeding changes only *which* members of
+the reachable set are admitted and in what order, never the set itself, and that set is
+99.2% kNN-derived edges — the vector index's own neighbourhood of the seeds, 82.7% of it
+already inside the query's top-400.
+
+So the arm worth running is not "the ACT-R variant" but **the oracle bound on every possible
+seeding rule**, which is the same cost and kills or clears the entire family in one pass.
+Pre-committed here, before any number is looked at:
+
+- **Setup.** Same two production vault clones, same 150 queries per vault, same pipeline,
+  gate fully open so admission is not the variable. For each query `q`, let `H(q)` be the
+  novel one-hop targets reachable from the phase-3 top-20 seeds under the `default` profile
+  (p50 121 on vault A). Any seeding rule that leaves the seed *set* alone — ACT-R included —
+  can only re-order and re-admit members of `H(q)`; a variant that also re-selects the 20
+  seeds needs `H(q)` recomputed over that seed set, a one-line harness change.
+- **Arm.** For each `q` and cap `N ∈ {1,2,5,10}`, take the `N` members of `H(q)` that
+  *maximise* #801's comparison statistic — an oracle no implementable seeding rule can beat
+  — and compare against HNSW ranks `31..30+N`, the same raise-k control and the same
+  two-sided sign test over 150 queries.
+- **SHIPS** (build and measure a real ACT-R-seeded arm, which must then clear the same bar
+  non-oracularly): the oracle beats raise-k on **≥ 90/150 queries at cap 2 with sign-test
+  p < 0.01 in vault A, and the same sign in vault B**.
+- **KILLS the whole family** (ACT-R seeding, rank seeding, and any future reseeding, without
+  running any of them): the oracle wins on **≤ 75/150 at cap 2**, i.e. the sign test does not
+  favour it at p < 0.05, in either vault.
+- **UNDERPOWERED — a measurement problem, not a verdict** (rerun wider; do not read it as
+  either outcome): oracle wins on 76–89 of 150, or the two vaults disagree in sign, or fewer
+  than 120 queries have `|H(q)| ≥ N`. At n=150 against a 0.5 null a two-sided sign test
+  resolves a 60/40 split at p < 0.01 with power ~0.85, and #801's own arms resolved at
+  p < 1e-40, so an ambiguous result here is a genuine null region rather than a resolution
+  limit.
+- **Cost.** One offline pass on a throwaway clone. No product code, no CI minutes. Nothing
+  above depends on it: it can only revive a killed mechanism, never rescue the shipped one.
+
+#### Code disposition: kept, pinned, and labelled — not deleted, not flagged
+
+`phase5Traverse` and its call site (`internal/engine/activation/engine.go:783`) **stay**,
+with the inertness recorded at the constant and pinned by a test
+(`TestPhase5Traverse_InertAtTheMeasuredSeedCeiling`) that drives the real phase at the
+measured unfiltered ceiling and the maximum representable edge weight and asserts zero hops.
+The RED control for that test already exists next to it:
+`TestPhase5Traverse_ReachesSymmetricEdgeFromEitherEndpoint` drives the same function at
+`rrfScore = 1.0` and gets hops, so the pin fails if the phase becomes live and fails if the
+BFS breaks — it cannot pass vacuously.
+
+Deletion was the tempting call, and this project has been bitten repeatedly by dead code
+everyone believes works. It loses on two concrete counts.
+
+- **It would convert an inert mechanism into a silently-ignored explicit config**, which is
+  principle #1's failure class rather than a cleanup. `hop_depth` is a documented per-vault
+  plasticity value (`internal/auth/plasticity.go:20`, presets at `:235/:262/:289/:316/:346`)
+  surfaced on REST admin + `openapi.yaml`, gRPC (`proto/muninn/v1/service.proto`), MBP
+  (`internal/transport/mbp/types.go`), the CLI (`cmd/muninn/vault.go`), the web console
+  (`web/static/js/app.js`, `web/templates/index.html`) and `docs/auth.md` /
+  `docs/feature-reference.md`; `disable_hops` and `hop_path` are request/response fields on
+  those same surfaces. Removing the phase without disposing of all of them leaves a number an
+  operator sets and a field a caller reads that mean nothing at all. Doing it properly is a
+  cross-surface increment of its own, and it should be decided on the ACT-R/oracle result
+  rather than ahead of it — deletion is the one option that cannot be undone cheaply.
+- **COG-31 landed four days earlier and names `phase5Traverse` as one of exactly two
+  legitimate consumers of `GetRankingNeighbors`**, with the traversal half pinned by its own
+  test. Deleting the phase rewrites a large, freshly-reasoned invariant to remove a consumer
+  whose read is correct.
+
+An explicitly-off flag was rejected too: a toggle advertises "we might turn this on", which
+the measurement contradicts, and it buys a per-vault config surface (preset drift, the web
+UI, a pinning test) for a mechanism measured as strictly dominated.
+
+**Named deferral, folded in here rather than filed: `hop_depth` is accepted everywhere and
+cannot change any result.** Nothing is silently *substituted* — but it is silently inert,
+which is the same disappointment from the operator's side. The honest options are to mark it
+advisory-on-every-surface pending the oracle arm, or to remove it together with the phase.
+Not decided here; it must not be rediscovered as a bug report.
+
+#### What this implies for adjacent work
+
+- **#805** (CGDN's `epsilon = 0.01` floor sitting 20× above the steady-state Hebbian weight
+  of 0.0005) and **#816** (the over-inclusive `keys.PrefixUpperBound` guard, which covers the
+  association range scans this BFS reads) both touch a phase that emits nothing. Neither is
+  wasted — `phase4HebbianBoost` shares the same read path and *does* contribute — but any
+  claim either makes about traversal specifically is a claim about a no-op.
+- **#800**'s traversal arm is in the same position: the symmetric read it fixed is correct
+  and load-bearing for phase 4, and inert for phase 5. That is why its test says so at the
+  top rather than presenting a user-visible win.
+- **The general pattern is the same shape as #762 and #805**: a threshold chosen against
+  write-time constants, applied to a quantity that decays 20× before anyone reads it. Any
+  future constant compared against an association weight must be checked against the
+  **steady-state floor** (`peakWeight × 0.05`), not against the value the writer wrote.
+
+**Principle: "the association graph is our differentiator" was a claim about a subsystem, and
+it was true of the wrong half of it. Phase 4 reads the graph and contributes; phase 5 reads
+it and has never emitted a row. When a claim spans two mechanisms, measure them separately —
+and when one of them turns out to be redundant with a cheaper index it is built on top of,
+the finding is "delete the claim", not "tune the constant".**
+
+### CGDN has never executed, and the class now has a census (#768/#805, 2026-08-03)
+
+`computeComponents` — the component producer the CGDN scoring path uses — never sets
+`ScoreComponents.ContentMatch` (only `computeACTR` does; `computeComponents` is shared with
+the legacy weighted-sum path, which never reads that field, so the gap was invisible there).
+CGDN's abstention gate is
+
+	absolute := min(min(Raw, ContentMatch), 1.0) * Confidence
+	if absolute < req.Threshold && !inTagPool { continue }
+
+so `absolute` is exactly `0.0` for every non-tag-pool candidate on this path, and every
+`req.Threshold > 0` drops the entire result set. CGDN has never returned a live result in a
+passing configuration for the life of the feature — the same shape as #801, discovered by
+the same #763 review panel that found traversal, and deliberately not fixed there either.
+
+**The unclamped-`r` claim in #768 does not hold, and the record needs correcting rather than
+repeating it.** The issue also asserted the live ratio `r = a(d)^n / denom` was unbounded,
+citing a measured `8649.0`. It is not: the Pass-2 loop that computes `r` for LIVE candidates
+only runs `if len(cgdnCands) > 0`, and inside that branch `denom = sigma^n + sum(a_i^n)`
+where the sum runs over every candidate in the pool — including the one whose ratio is being
+computed. `denom >= a(d)^n` for that candidate by construction, so `r <= 1` always, on the
+live path, for every configuration. The measured `8649.0` came from the COG-28 SHADOW pass
+evaluated against an EMPTY live pool (`denom` degenerating to `sigma^n` alone at the 0.01
+fallback) — a path the code already clamps explicitly (`math.Min(r, 1.0)`) with a comment
+naming exactly this trap. Verified independently: read the loop guard and the shadow clamp
+in `internal/engine/activation/engine.go` before trusting either claim on faith (principle #9
+— severity and correctness both need independent verification, in either direction).
+
+**#805 is not a separate defect — it is the same phase's SECOND, independent reason nothing
+comes out, folded in here rather than tracked apart.** CGDN's Hebbian rescue term in
+`computeGatedActivation` is `rescue(d) = max(0, hebbianBoost - epsilon) * lambda`, with
+`epsilon = 0.01`. Association edge weights are clamped to `peakWeight * 0.05` in steady
+state (`internal/storage/association.go`), and a census of two production vault clones put
+the entire live `RelCoActivated` (Hebbian) population at a p50 of **0.0005** — twenty times
+below epsilon. So even after #768 is repaired, `hebbianBoost - epsilon` is negative for
+essentially every live edge and the rescue mechanism the function exists to provide is a
+no-op on its own terms — the same #801/#762 shape: a constant chosen against a write-time
+value (Hebbian cold-start seed 0.01, which epsilon was presumably set to match), applied to
+a quantity a decay pass moves 20x before anyone reads it.
+
+#### Disposition: kept, labelled INERT at both sites, not deleted, not flagged
+
+`computeComponents`, the CGDN branch of `phase6Score`, and `computeGatedActivation` **stay**,
+with the inertness recorded at the constant/gate in each case and pinned by
+`TestPhase6Score_CGDN_InertAtAnyPositiveThreshold`, which drives the real `phase6Score` CGDN
+path with a maximally strong candidate (perfect vector cosine, perfect FTS coverage) at the
+smallest representable positive threshold and asserts zero activations. Its RED control is
+the neighbouring `TestPhase6Score_CGDNPath`, which drives the SAME function over an
+equivalent fixture at `Threshold: 0.0` and DOES get output — proving the pin is not vacuous:
+raise the control's threshold above zero and it starts failing like the pin; lower the pin's
+threshold to zero and it passes trivially like the control. The two tests bound the defect
+exactly at zero, which is where it actually sits.
+
+This follows #801's disposition rule exactly, because the same two facts hold:
+
+- **CGDN has real, live per-vault configuration and transport surfaces**, checked before
+  deciding: `experimental_cgdn` (plasticity config, `internal/auth/plasticity.go`, all five
+  presets), `use_cgdn`/`cgdn_alpha`/`cgdn_beta`/`cgdn_power` (REST `openapi.yaml` and MBP
+  wire types, `internal/transport/mbp/types.go`), and `--mode cgdn` (the CLI REPL,
+  `cmd/muninn/repl_client.go`, with its own passthrough test). Deleting the scorer without
+  disposing of all of them turns an inert mechanism into silently-ignored explicit config —
+  principle #1's failure class arrived at by way of a cleanup, which is exactly what #801
+  named as the reason traversal was kept. (CGDN has no gRPC/proto or MCP surface today —
+  checked and confirmed absent — so this is a real but narrower surface footprint than
+  traversal's six; still enough to make deletion the wrong call.)
+- **Deletion cannot be undone cheaply, and repair is not free either.** Wiring
+  `ContentMatch` alone would surface a scorer whose OWN Hebbian floor (#805) still discards
+  essentially its entire live Hebbian-linked population — an honest fix is a coupled change
+  to both constants together, re-measured against a real vault, not a one-line patch. That
+  work is not done here; this entry records the finding and the disposition, not a repair.
+
+Comments at three sites carry the finding forward for the next reader: the CGDN branch in
+`phase6Score` (the gate itself, the corrected `r <= 1` proof, and why not to "fix"
+`ContentMatch` alone), `computeComponents`'s doc comment (the missing field, and why
+weighted-sum never noticed), and `computeGatedActivation`'s epsilon constant (the #805
+floor, restated at the site rather than only in this record).
+
+`docs/feature-reference.md` and `docs/retrieval-design.md` previously described CGDN as
+simply "experimental" with no caveat about output; both now state the inertness and cite
+this entry, mirroring what #801 did for `docs/feature-reference.md`'s traversal row.
+
+#### The census: a units/scale check for "constant vs. a decaying quantity", not "every threshold"
+
+#805 asked, as its own machine check: *"a units/scale census over every constant compared
+against an association weight: assert each is either derived per-vault or documented with
+the steady-state range it is meant to discriminate."* Built as
+`TestWeightGateCensus`/`TestWeightGateCensusMatcherFixture`
+(`internal/engine/activation/weight_gate_census_test.go`), in the shape of
+`TestLastAccessElapsedCensus` (`internal/storage/lastaccess_census_test.go`) — an AST walk
+of the whole module, a named-sites floor, and a SEPARATE matcher self-check driven by a
+synthetic fixture, because (as that census's own history records) a vacuity guard on a bare
+count can pass while the walk or the matcher has silently gone blind.
+
+**Scope, deliberately narrow.** "Every threshold in the engine" was tried and rejected as
+too broad to be useful. The rule that shipped: a **named, hardcoded numeric `const`**
+(function-local or file-scoped — never a variable, a struct field, or a plasticity-derived
+value, which are already per-vault by construction) compared (`<`,`<=`,`>`,`>=`) or
+subtracted against a quantity that is, or is transitively assigned from, a `.Weight`
+selector or the identifier `hebbianBoost`/`HebbianBoost` (case-insensitive) — this
+codebase's vocabulary for association-edge-derived strength. Two things were tried and
+explicitly rejected during development, both because they produced real noise measured
+against the actual tree, not hypothetically:
+
+- Matching bare numeric literals (not only named consts) — this additionally flagged
+  `update.Weight > restoreWeight*1.5` and `newCoAct >= existingCoAct+3` in
+  `internal/storage/association.go`, neither of which is the defect: a named constant is
+  specifically the signal that a human chose a number once and is unlikely to ever revisit
+  it, which is how both #801 and #805 went unnoticed since the initial commit.
+- Matching the substring "boost" instead of the exact `hebbianBoost` identifier — this
+  caught `entityBoostNoiseFloor` (`internal/engine/engine_entity_boost.go`), a named float
+  constant genuinely compared against a derived quantity (`contribution`), but that quantity
+  is `entityBoostFactor * idf` — an entity-rarity IDF score with no decay pass touching it,
+  not an association weight. A FALSE POSITIVE, kept in the matcher fixture
+  (`notAssociationWeight`) as the permanent regression case for that vocabulary choice.
+
+**Result on the real tree: three sites, zero false positives.** `minHopScore` (#801) and
+`epsilon` (#805) were the two the record already knew about. The census found a **third**,
+previously undocumented in this class: `internal/consolidation/transitive.go:minWeight`
+(`runPhase5TransitiveInference`, gating transitive-edge inference at
+`max(Weight, PeakWeight) >= 0.7`). Inspection showed it is the **healthy** counter-example:
+its own comment already reasons about the achievable range — autoassoc mints edges at 0.3,
+archive restore returns them at `peakWeight * 0.25`, so neither route can reach 0.7, which is
+exactly why the threshold was chosen there and why a dangling edge (the risk the comment
+names) cannot climb to it. It is recorded in `weightGateKnownSites` alongside the two dead
+ones specifically so a reader sees both outcomes of doing the range-check: two constants
+that were never checked and are dead, one that was checked and is fine. The census asserts a
+site is DOCUMENTED, not that it is healthy — both `weightGateKnownSites` entries `minHopScore`
+and `epsilon` remain intentionally live and undeleted per this entry's own disposition,
+while `minWeight` needed no change at all.
+
+**RED-verified, not merely asserted.** Neutering the transitive-taint fixpoint (so only a
+direct `.Weight` selector — never a locally-assigned intermediate like `propagated` or
+`effectiveAB` — counts as tainted) was tried as the sabotage: `TestWeightGateCensus` lost 2
+of its 3 known sites and failed loudly naming which; `TestWeightGateCensusMatcherFixture`
+failed on the exact fixture case exercising that shape. Restoring the fixpoint made both
+pass again. The census is not vacuous with respect to its own matcher, by demonstration, not
+assumption — the same discipline `TestLastAccessCensusMatcherSeesLaunderedCopies` established
+after that census's own count-only guard was shown to lose 5 of 6 sites silently.
+
+**What this does NOT claim.** The census does not, and cannot, cover #768's actual defect —
+a field that is never SET, not a constant compared against the wrong range. That shape (an
+uninitialized/never-populated component silently zeroing a downstream gate) is a different
+mechanism from "a hardcoded number vs. a decaying quantity", and is caught here only by the
+behavioural pin (`TestPhase6Score_CGDN_InertAtAnyPositiveThreshold`), not by the AST census.
+Naming this boundary matters more than pretending one machine check now covers the whole
+class — see the census's own "what it does NOT catch" section, which states four further
+gaps (inter-function taint, non-`.Weight`/non-Hebbian vocabulary, and others) rather than
+implying completeness.
+
+**Principle: the same review that measured #801 correctly getting the arithmetic right also
+carried forward an overstated corollary (`r` unbounded) that a second, independent look
+disproved — severity and correctness both need independent re-verification in EITHER
+direction (principle #9), and a corrected record is worth more than a consistent one. And
+the class both defects share — a constant a person chose once, compared against a quantity
+that a decay pass moves 20x before anyone reads it — is now a standing, self-checking
+machine test rather than something that needs a third independent analysis pass to
+rediscover a third time.**

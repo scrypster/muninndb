@@ -12,7 +12,7 @@ import (
 func StoreEntities(ctx context.Context, store plugin.PluginStore, engramID plugin.ULID, entities []plugin.ExtractedEntity) error {
 	var linked []string
 	for _, entity := range entities {
-		if err := store.UpsertEntity(ctx, entity); err != nil {
+		if err := store.UpsertEntity(ctx, engramID, entity); err != nil {
 			return err
 		}
 		if err := store.LinkEngramToEntity(ctx, engramID, entity.Name); err != nil {

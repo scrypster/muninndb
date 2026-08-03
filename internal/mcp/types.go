@@ -121,11 +121,29 @@ type Memory struct {
 	Type               string    `json:"type"`                 // canonical MemoryType label ("fact", "decision", ...); always present
 	TypeLabel          string    `json:"type_label,omitempty"` // writer-supplied free-form label, e.g. "architectural_decision"
 	CreatedAt          time.Time `json:"created_at"`
-	LastAccess         time.Time `json:"last_access"`
-	AccessCount        uint32    `json:"access_count,omitempty"`
-	Relevance          float32   `json:"relevance,omitempty"`
-	SourceType         string    `json:"source_type,omitempty"`
-	Trust              string    `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
+	// LastAccess is a POINTER for the same reason MemoryAnnotations.Stale is:
+	// "we do not know when this was last accessed" must be representable, and it
+	// must be sent as ABSENCE rather than as an instant. `omitempty` is a no-op
+	// on a time.Time struct, so a nullable field is the only spelling available.
+	//
+	// The value being omitted is not hypothetical: engine.go stamps
+	// mbp.ActivationItem.LastAccess as eng.LastAccess.UnixNano(), and
+	// time.Time{}.UnixNano() IS erf.ZeroTimeSentinelNanos, so the #810 decode
+	// repair is invisible through that round trip by construction and this field
+	// rendered "1754-08-30T22:43:41.128654848Z" — on the SAME ROW where the
+	// staleness annotation was omitted as unknown. One response, two
+	// incompatible statements about one memory.
+	//
+	// Scope, deliberately: this is MCP-only. `Memory` lives in this package and
+	// is used nowhere outside it, so making it nullable costs no other transport
+	// anything. The int64 `last_access` on mbp.ActivationItem — shared by REST,
+	// gRPC and MBP by type alias, plus openapi.yaml and the SDKs — is a separate,
+	// still-open residual; see invariants.md STO-13.
+	LastAccess  *time.Time `json:"last_access,omitempty"`
+	AccessCount uint32     `json:"access_count,omitempty"`
+	Relevance   float32    `json:"relevance,omitempty"`
+	SourceType  string     `json:"source_type,omitempty"`
+	Trust       string     `json:"trust,omitempty"` // "verified", "inferred", "external", "untrusted"
 
 	// Importance is the use-time EffectiveImportance in [0,1]; always present.
 	// ImportanceSource says where it came from: "explicit" (caller-asserted at
@@ -160,8 +178,14 @@ type Memory struct {
 // (always-on, from supersedes-aware recall); the other fields are populated only
 // when muninn_recall is called with annotate=true.
 type MemoryAnnotations struct {
-	Stale         bool     `json:"stale"`
-	StaleDays     float64  `json:"stale_days"`
+	// Stale / StaleDays are POINTERS so that "unknown" is representable and is
+	// sent as absence rather than as zero. A never-accessed engram (a vault
+	// cloned before #810 carries the ERF zero-time sentinel on every record) has
+	// no staleness the system can assert; emitting "stale_days": 0,
+	// "stale": false would read to an agent as "accessed today" — plausible and
+	// wrong. Present-and-zero still means what it always did: accessed today.
+	Stale         *bool    `json:"stale,omitempty"`
+	StaleDays     *float64 `json:"stale_days,omitempty"`
 	ConflictsWith []string `json:"conflicts_with,omitempty"`
 	// SupersededBy is the immediate superseder's ULID; CurrentVersion is the chain
 	// head — the fact to consult now. Both present when this memory is stale.

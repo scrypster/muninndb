@@ -187,10 +187,10 @@ func TestObserver_DoesNotAffectQuorum(t *testing.T) {
 
 	// Simulate lobe starting an election at epoch 2.
 	testEpoch := uint64(2)
-	if err := obs1.coord.epochStore.ForceSet(testEpoch - 1); err != nil {
+	if err := obs1.coord.epochStore.Advance(testEpoch - 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := obs2.coord.epochStore.ForceSet(testEpoch - 1); err != nil {
+	if err := obs2.coord.epochStore.Advance(testEpoch - 1); err != nil {
 		t.Fatal(err)
 	}
 

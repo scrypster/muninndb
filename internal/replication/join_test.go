@@ -108,8 +108,8 @@ func readLeaveMessage(t *testing.T, conn net.Conn) mbp.LeaveMessage {
 // FireOnLobeJoined explicitly after JoinResponse (+ Snapshot) is on the wire.
 func TestJoinHandler_HandleJoinRequest_DoesNotFireCallback(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(3); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(3); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 	repLog := newTestRepLog(t)
 	mgr := NewConnManager("cortex-1")
@@ -143,8 +143,8 @@ func TestJoinHandler_HandleJoinRequest_DoesNotFireCallback(t *testing.T) {
 func TestJoinHandler_HandleJoinRequest_Success(t *testing.T) {
 	es := newTestEpochStore(t)
 	// Set a non-zero epoch so the handler accepts joins.
-	if err := es.ForceSet(3); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(3); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -218,8 +218,8 @@ func TestJoinHandler_HandleJoinRequest_Success(t *testing.T) {
 // call and remain usable for peer.Send().
 func TestJoinHandler_HandleJoinRequest_LiveConnPreserved(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(1); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -305,8 +305,8 @@ func TestJoinHandler_HandleJoinRequest_WrongEpoch(t *testing.T) {
 
 func TestJoinHandler_HandleLeave(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(1); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -350,8 +350,8 @@ func TestJoinHandler_HandleLeave(t *testing.T) {
 
 func TestJoinHandler_Members_ThreadSafe(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(2); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(2); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -494,8 +494,8 @@ func TestJoinClient_Join_Rejected(t *testing.T) {
 
 func TestJoinClient_Leave(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(7); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(7); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	mgr := NewConnManager("lobe-3")
@@ -723,8 +723,8 @@ func computeHMAC(secret, nodeID string) []byte {
 // a SecretHash computed from the wrong secret is rejected.
 func TestJoinHandler_HMACSecretMismatch_Rejected(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(1); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -757,8 +757,8 @@ func TestJoinHandler_HMACSecretMismatch_Rejected(t *testing.T) {
 // a correctly-computed SecretHash is accepted.
 func TestJoinHandler_HMACSecretMatch_Accepted(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(1); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -788,8 +788,8 @@ func TestJoinHandler_HMACSecretMatch_Accepted(t *testing.T) {
 // is empty (open cluster), any SecretHash — including nil — is accepted.
 func TestJoinHandler_EmptySecret_AlwaysAccepted(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(1); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -819,8 +819,8 @@ func TestJoinHandler_EmptySecret_AlwaysAccepted(t *testing.T) {
 // accept them gracefully.
 func TestJoinHandler_LegacyLobe_Accepted(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(1); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -873,8 +873,8 @@ func TestJoinHandler_LegacyLobe_Accepted(t *testing.T) {
 // ProtocolVersion = CurrentProtocolVersion is accepted normally (no warning).
 func TestJoinHandler_CurrentVersionLobe_Accepted(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(1); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -912,8 +912,8 @@ func TestJoinHandler_CurrentVersionLobe_Accepted(t *testing.T) {
 // understand new protocol extensions sent by the newer Lobe.
 func TestJoinHandler_FutureVersionLobe_Rejected(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(1); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -964,8 +964,8 @@ func TestJoinHandler_TooOldVersionLobe_Rejected(t *testing.T) {
 	t.Cleanup(func() { mbp.MinSupportedProtocolVersion = orig })
 
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(1); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)
@@ -1007,8 +1007,8 @@ func TestJoinHandler_TooOldVersionLobe_Rejected(t *testing.T) {
 // All should be accepted and registered, proving the Cortex can handle heterogeneous versions.
 func TestJoinHandler_ProtocolVersionRollingUpgrade(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(5); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(5); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	repLog := newTestRepLog(t)

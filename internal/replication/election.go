@@ -250,7 +250,7 @@ func (e *Election) StartElection(ctx context.Context) error {
 //   - We have not already voted for a different candidate in this epoch.
 //
 // If the request epoch is higher than ours, we update our epoch store
-// (ForceSet) to track the latest epoch we've seen.
+// (Advance) to track the latest epoch we've seen.
 func (e *Election) HandleVoteRequest(req mbp.VoteRequest) mbp.VoteResponse {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -277,7 +277,7 @@ func (e *Election) HandleVoteRequest(req mbp.VoteRequest) mbp.VoteResponse {
 
 	// If the request epoch is higher, advance our epoch.
 	if req.Epoch > currentEpoch {
-		_ = e.epochStore.ForceSet(req.Epoch)
+		_, _ = e.epochStore.Advance(req.Epoch)
 	}
 
 	// Check if we already voted in this epoch.
@@ -427,7 +427,7 @@ func (e *Election) broadcastClaim(epoch uint64) {
 // HandleCortexClaim processes an incoming CortexClaim from another node.
 //
 // Accept the claim if claim.Epoch >= our current epoch:
-//  1. Update our epoch store via ForceSet
+//  1. Update our epoch store via Advance
 //  2. Set currentLeader = claim.CortexID
 //  3. Set state = ElectionFollower
 //  4. If we were leader (split scenario), call OnDemoted
@@ -460,7 +460,7 @@ func (e *Election) HandleCortexClaim(claim mbp.CortexClaim) {
 	}
 
 	// Update epoch store to track the claim's epoch.
-	_ = e.epochStore.ForceSet(claim.Epoch)
+	_, _ = e.epochStore.Advance(claim.Epoch)
 
 	wasLeader := e.state == ElectionLeader
 	e.state = ElectionFollower

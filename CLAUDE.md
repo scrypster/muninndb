@@ -25,7 +25,11 @@ Licensed BSL 1.1.
 The three words in the promise map to real subsystems:
 - **strengthens with use** → Hebbian co-activation learning, LTP, access-driven ACT-R base-level.
 - **fades when unused** → Ebbinghaus/ACT-R temporal decay, the background pruner, association decay + archival.
-- **pushes to you when it matters** → recall's predictive activation (PAS), entity/associative traversal, confidence-weighted scoring.
+- **pushes to you when it matters** → recall's predictive activation (PAS), the Hebbian
+  association read in ranking (`phase4HebbianBoost`), entity boost, confidence-weighted scoring.
+  Note what is NOT in that list: BFS **traversal** (`phase5Traverse`) has emitted nothing for the
+  life of the product and is strictly dominated by raising `CandidatesPerIndex` — measured, #801,
+  see the decision record. The association graph contributes through phase 4; hops do not.
 
 If a change makes memory behave less like this — recall that returns silently-wrong
 results, decay that never fires, learning that displaces genuine matches — it is wrong even
@@ -96,6 +100,19 @@ Distilled from real decisions across the project's history (each traced to its P
 10. **Honest negative results and scope discipline are first-class.** #609 reported that
     ambient-push memory had zero uptake and killed the idea — that's valued, not dismissed.
 
+11. **Calibration is per-vault and self-derived, never hardcoded from one dataset.** A
+    threshold, baseline, or vocabulary a feature needs must be derived from each vault's OWN
+    data (self-calibrating, like #711's per-corpus IDF) or exposed as a per-vault override —
+    with model/cold-start defaults as hints only, never fixed constants that define someone
+    else's data for them. A number tuned on one sample vault imposes that vault's shape on
+    every other (a code vault versions with git SHAs; a notes app has no version tags; a
+    medical vault is different again) where it is wrong or a silent no-op. A sample vault
+    (e.g. a maintainer's own) is for FINDING bugs and VALIDATING generalization on messy real
+    data — never for tuning a constant into the product. Everyone calibrates their own vault;
+    we ship mechanisms and hints, not their answers. (The semantic-abstention floor self-
+    measures each vault's embedding-anisotropy baseline instead of shipping bge-small's; #712
+    currency was held partly because its version-marker vocabulary was one-vault-specific.)
+
 ---
 
 ## 3. How we work
@@ -108,17 +125,67 @@ Distilled from real decisions across the project's history (each traced to its P
    the project's own tooling build — a whole analysis pass ran against a branch missing six
    merged PRs.)
 
-2. **Build and test the actual change**, not just the diff: `go build ./... && go vet ./...
-   && gofmt -l .` plus the relevant `go test`. Use `-race` for anything touching storage,
-   the Hebbian/PAS workers, the pruner, replication, or MCP session state.
+2. **Build and test the actual change**, not just the diff — and **keep `-tags localassets`**:
+   `go build -tags localassets ./... && go vet -tags localassets ./... && gofmt -l .` plus the
+   relevant `go test -tags localassets`. CI builds, vets, and tests everything with that tag
+   (obligation #9), so a bare `go build ./...` exercises a different code path than the gate
+   you have to pass. It needs the embed assets — `make fetch-assets` once. Use `-race` for
+   anything touching storage, the Hebbian/PAS workers, the pruner, replication, or MCP
+   session state.
 
 3. **RED-sanity-check bug fixes.** A test for a fixed bug or closed race must be shown to
-   *fail without the fix*. A test that passes both ways proves nothing.
+   *fail without the fix*. A test that passes both ways proves nothing. If a test asserts
+   on state produced by an async worker, drain it deterministically instead of
+   `time.Sleep` — see `docs/internals/testing-hermeticity.md` (#722).
 
 4. **Honor the invariants and cross-surface obligations.** Check `docs/internals/invariants.md`,
    the keyspace registry, and `docs/internals/drift-and-obligations.md`. Touching an MCP
    handler means updating the registry smoke test; adding a Pebble prefix means checking the
    collision guard; changing a preset means updating the web UI and adding a pinning test; etc.
+   Four of those obligations now warn automatically via `.claude/hooks/drift-guard.mjs`
+   (marked 🪝 in that doc) — a reminder, not a gate, and no substitute for walking the list.
+
+**This repository is public. Measure on real vaults; never name them.** Mechanisms get proven
+against real corpora — that is the point, and a measurement without a real substrate is not
+worth much. But the vault a measurement ran on is not ours to publish. It belongs to a user, a
+client, or another product, and naming it links them to this project permanently.
+
+The rule, in committed content — source, tests, code comments, design records, commit messages,
+**and filenames**:
+
+- Refer to a measurement corpus as **"a production vault"**. Keep the numbers; drop the name.
+  "Measured on a real 3,296-memory production vault" carries every bit of the evidence that
+  naming it would, and costs nothing.
+- Use invented names in fixtures and examples. Not a real colleague, customer, or contact —
+  and not a real product's module names either.
+- No client, tenant, employer, or fund identifiers. No pricing, rates, or commercial terms.
+- If a design record can't make its point without those, it isn't publishable. Keep it local;
+  `.claude/deep-review/README.md` has the triage rule and the `private/` convention.
+
+This is not hypothetical. A vault name reached `origin/develop` in #715 and was scrubbed at the
+tip a day later by #734 — but a public repo's history is public forever, and a scrub of the tip
+is not a scrub. **Getting it right before the commit is the only version of this that works.**
+
+Two mechanisms back this up, and neither is a substitute for the rule above:
+
+- **`scripts/check-leak-tells.sh`** is public and runs in CI (the Shellcheck job) against every
+  change's *added* lines, and is available to any contributor as an opt-in local pre-commit
+  hook (`--install-hook`; see `CONTRIBUTING.md`). It has no denylist by design — a list of real
+  names sitting in a public repo would publish the very association it exists to prevent — so
+  it can only catch a handful of *structurally*-shaped tells: an `.internal` hostname, an
+  AWS/GCP-style instance id, an "our/on the &lt;ProperNoun&gt; ..." phrase. It cannot catch a
+  bare project-internal codename with no such marker — which is the exact shape every leak in
+  this repo's history has actually taken (an ordinary-looking client name with no structural
+  tell, and a domain term indistinguishable from a real one). It is a net, not a proof.
+- Maintainers additionally run a private, gitignored pre-commit guard
+  (`.claude/maintainer/pre-commit-vault-guard.sh`) against a denylist of known client/product
+  names — the thing the public check structurally cannot have. It is maintainer-only tooling,
+  not present in a fresh contributor clone, and it does not run in CI.
+
+Between them: the public check is what every contributor gets and covers structural tells; the
+private one is what the maintainer gets and covers known names. Neither catches an unknown bare
+codename typed by someone who doesn't know it's sensitive — that gap is closed by reading your
+own diff before committing, which is the actual control both tools exist to remind you to do.
 
 **Keep CI fast and cheap.** The full gate must stay **under ~10 minutes** (baseline ~6–7
 min; job map in `drift-and-obligations.md`). Unit and invariant tests are nearly free —
@@ -134,7 +201,48 @@ yes please send it." Warmth and rigor, together.
 
 ---
 
-## 4. The code-review agent
+## 4. Findings that outlive the session
+
+**This applies to you, the main session, not only to subagents.** `.claude/memory-protocol.md`
+was named in five agent definitions and nowhere in this file, so the only actor with a shell —
+the only one that could ever drain the queue — had never been told the queue existed. Two
+disjoint persistence protocols split by agent type with no bridge. This is the bridge.
+
+If a session produces something **durable, non-obvious, and not recoverable from git, the PR,
+or the tracker** — a measured number, a decision and why it beat the alternative, an honest
+negative, a defect *pattern* rather than a defect, a trap that looks safe — propose it:
+
+```sh
+node .claude/hooks/memory-propose.mjs <<'JSON'
+{"concept":"short label","content":"the fact itself, self-contained, readable in a year","summary":"one line","type":"fact","source":"main"}
+JSON
+```
+
+Read `.claude/memory-protocol.md` for the bar (a noisy vault is worse than a small one, and
+the "do not propose" list is as load-bearing as the "do"). The ledger is gitignored and
+subject to the same privacy rule as committed content — no vault names, no client
+identifiers.
+
+Direct `muninn_remember` over MCP is not wrong and stays available; the ledger is what makes
+the finding survive a session that has no MCP access, a subagent with no credentials, or a
+context that ends before anyone thinks to write it down. `.claude/hooks/memory-drain.mjs`
+moves the queue into the vault on `PreCompact` / `SessionEnd` / a debounced `Stop`. Every
+invocation that is not `SIGKILL`ed leaves a receipt at `.claude/memory-drain-receipt.json`,
+and `memory-freshness.mjs` reads it back at `SessionStart` and speaks up when the queue is
+stale — so "has this ever run?" needs neither a `stat` nor an inference. That distinction is
+the whole point: the first version of this mechanism never ran once and nobody could tell.
+
+There is **one ledger per repository**, in the main checkout: appending from a linked
+worktree resolves through `.git` to the same file, because a per-worktree queue is one no
+drain ever visits (17 proposals were found stranded that way).
+
+Its tests are `node --test .claude/hooks/tests/*.test.mjs` — a few seconds, no daemon, not in
+CI. Run them if you touch the drain. Use the glob; `node --test .claude/hooks/tests/` finds
+nothing and exits 1 in ~30 ms, because the runner skips dot-directories.
+
+---
+
+## 5. The code-review agent
 
 `.claude/agents/code-reviewer.md` is the repo's resident reviewer — correctness, the
 cognitive/storage/security invariants, and cross-surface drift, with its own
@@ -147,7 +255,7 @@ is not part of this repo.
 
 ---
 
-## 5. Attribution
+## 6. Attribution
 
 Do not add "Generated with Claude" / Anthropic attribution to any PR body, commit message,
 issue, or code comment.

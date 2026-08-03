@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -116,7 +117,19 @@ func (s *Server) handleAdminClusterEnable(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.EmitAudit(r, "cluster.enable", "system", "cluster", "ok", nil)
-	s.sendJSON(w, http.StatusOK, map[string]any{"enabled": true, "role": req.Role})
+	// 202, not 200: the configuration is accepted, clustering is not yet
+	// running. See enableClusterRuntime for why a coordinator is never built in
+	// a running process (#628) — reporting "enabled" here would be the exact
+	// silently-wrong answer the change removes.
+	slog.Warn("cluster: configuration saved; clustering starts on the next restart of this node",
+		"role", req.Role, "bind_addr", req.BindAddr)
+	s.sendJSON(w, http.StatusAccepted, map[string]any{
+		"enabled":          false,
+		"configured":       true,
+		"restart_required": true,
+		"role":             req.Role,
+		"message":          "cluster configuration saved. Restart muninn on this node to start clustering — a coordinator started without a restart cannot replicate this node's writes.",
+	})
 }
 
 func (s *Server) handleAdminClusterDisable(w http.ResponseWriter, r *http.Request) {

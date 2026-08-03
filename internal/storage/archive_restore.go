@@ -47,17 +47,24 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 
 	prefix := keys.ArchiveAssocPrefixForID(ws, srcID)
 
-	// STO-11. This bound is DELIBERATELY TIGHT and must stay hand-rolled. Do not
-	// "tidy" it into keys.PrefixUpperBound or PrefixIterator for consistency with
-	// reapArchivedEdgesFrom twenty lines below — that is the specific edit that
-	// breaks it.
+	// STO-11. This bound is DELIBERATELY TIGHT and stays hand-rolled.
 	//
-	// The difference: the loop below increments from the right and ZEROES every
-	// byte it wraps, so the bound covers this prefix and nothing beyond it.
-	// keys.PrefixUpperBound increments the first sub-0xFF byte from the right and
-	// returns WITHOUT zeroing the trailing 0xFF bytes, so for a 25-byte
-	// 0x25|ws|src prefix whose last byte is 0xFF it admits keys belonging to the
-	// NEXT source id. (Fixing the shared helper is #816.)
+	// History, because the comment would otherwise read as superstition: until
+	// #816, keys.PrefixUpperBound incremented the first sub-0xFF byte from the
+	// right and returned WITHOUT clearing the trailing 0xFF bytes, so for a
+	// 25-byte 0x25|ws|src prefix whose last byte was 0xFF it admitted keys
+	// belonging to the NEXT source id. The loop below increments from the right
+	// and ZEROES every byte it wraps, which is why it was correct when the
+	// shared helper was not. #816 made the helper carry-and-truncate, so the two
+	// now agree (the helper is marginally tighter — it drops the zeroed tail
+	// rather than writing it).
+	//
+	// It stays hand-rolled anyway. This loop has NO per-key prefix check, so its
+	// bound is its ONLY protection, and it is the one scan here that both
+	// deletes and MINTS. A bound whose correctness is visible in the ten lines
+	// above the loop it protects is worth more here than consistency with the
+	// four guarded call sites — those degrade to an extra comparison if a helper
+	// regresses; this one fabricates edges.
 	//
 	// This is the FIFTH scan over the 0x25|ws|src prefix and the only one held
 	// inside its keyspace by its bound alone: the candidate loop below has no
@@ -244,26 +251,27 @@ func (ps *PebbleStore) reapArchivedEdgesFrom(ws [8]byte, srcID [16]byte) error {
 	n := 0
 	for valid := iter.First(); valid; valid = iter.Next() {
 		k := iter.Key()
-		// STO-11. keys.PrefixUpperBound is LOOSE — it increments the first
-		// sub-0xFF byte from the right and returns without zeroing the trailing
-		// 0xFF bytes — so for a 25-byte kind|ws|src prefix whose last byte is
-		// 0xFF the bound admits keys belonging to the NEXT source id. This loop
-		// deletes what the iterator returns, so the explicit prefix check is
-		// what keeps it inside its own keyspace; without it an ordinary recall
-		// of one hard-deleted source can delete a LIVE engram's archive rows.
+		// STO-11. keys.PrefixUpperBound used to be LOOSE — it incremented the
+		// first sub-0xFF byte from the right and returned without clearing the
+		// trailing 0xFF bytes, so for a 25-byte kind|ws|src prefix whose last
+		// byte was 0xFF the bound admitted keys belonging to the NEXT source id.
+		// #816 made it carry-and-truncate. This loop deletes what the iterator
+		// returns, and it is reachable from the ordinary recall read path, so
+		// the explicit prefix check STAYS as belt and braces: one comparison per
+		// key, and it is what stops an ordinary recall of one hard-deleted
+		// source from deleting a LIVE engram's archive rows no matter what a
+		// helper in another package does next.
 		//
-		// Reachability, on the same terms as the other three guarded sites: this
-		// is STRUCTURAL HYGIENE, not a live data-loss report. ~1 in 256 is the
-		// rate at which the BOUND IS LOOSE, not the rate at which anything is
-		// lost — landing inside the widened band additionally requires a second
-		// source sharing the victim's first 14 ID bytes (the full 48-bit ULID
-		// millisecond AND 8 of the 10 entropy bytes), i.e. ~2^-64 on top of a
-		// same-millisecond collision. The guard stays because the shared
-		// helper's contract is wrong and any future non-ULID id tail collapses
-		// that 64-bit gap to zero, silently, on a delete path.
+		// Reachability of the old looseness, on the same terms as the other
+		// three guarded sites: it was STRUCTURAL HYGIENE, never a live
+		// data-loss report. ~1 in 256 was the rate at which the BOUND WAS LOOSE,
+		// not the rate at which anything was lost — landing inside the widened
+		// band additionally required a second source sharing the victim's first
+		// 14 ID bytes (the full 48-bit ULID millisecond AND 8 of the 10 entropy
+		// bytes), i.e. ~2^-64 on top of a same-millisecond collision. Any future
+		// non-ULID id tail would collapse that 64-bit gap to zero.
 		//
-		// Fixing the shared helper is #816. Pinned by
-		// TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
+		// Pinned by TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
 		//
 		// break, not continue: the iterator starts at exactly this prefix and
 		// returns keys in order, so the first key that does not carry it is

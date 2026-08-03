@@ -12,17 +12,18 @@ import (
 func TestUpsertEntityRecord_RoundTrip(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-test")
 
 	record := EntityRecord{
 		Name:       "PostgreSQL",
 		Type:       "database",
 		Confidence: 0.95,
 	}
-	err := store.UpsertEntityRecord(ctx, record, "inline:test")
+	err := store.UpsertEntityRecord(ctx, ws, record, "inline:test")
 	require.NoError(t, err)
 
 	// Normalized lookup (lowercase)
-	got, err := store.GetEntityRecord(ctx, "postgresql")
+	got, err := store.GetEntityRecord(ctx, ws, "postgresql")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, "PostgreSQL", got.Name)
@@ -30,7 +31,7 @@ func TestUpsertEntityRecord_RoundTrip(t *testing.T) {
 	require.Equal(t, "inline:test", got.Source)
 
 	// Different case resolves to same record
-	got2, err := store.GetEntityRecord(ctx, "POSTGRESQL")
+	got2, err := store.GetEntityRecord(ctx, ws, "POSTGRESQL")
 	require.NoError(t, err)
 	require.NotNil(t, got2)
 	require.Equal(t, got.Name, got2.Name)
@@ -39,8 +40,9 @@ func TestUpsertEntityRecord_RoundTrip(t *testing.T) {
 func TestGetEntityRecord_NotFound(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-test")
 
-	got, err := store.GetEntityRecord(ctx, "nonexistent-entity")
+	got, err := store.GetEntityRecord(ctx, ws, "nonexistent-entity")
 	require.NoError(t, err)
 	require.Nil(t, got)
 }
@@ -48,11 +50,12 @@ func TestGetEntityRecord_NotFound(t *testing.T) {
 func TestWriteEntityEngramLink(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-test")
 
-	ws := store.VaultPrefix("entity-link-vault")
+	ws = store.VaultPrefix("entity-link-vault")
 
 	// Write an entity first
-	err := store.UpsertEntityRecord(ctx, EntityRecord{Name: "PostgreSQL", Type: "database", Confidence: 0.9}, "test")
+	err := store.UpsertEntityRecord(ctx, ws, EntityRecord{Name: "PostgreSQL", Type: "database", Confidence: 0.9}, "test")
 	require.NoError(t, err)
 
 	engramID := NewULID()
@@ -65,8 +68,9 @@ func TestWriteEntityEngramLink(t *testing.T) {
 func TestUpsertRelationshipRecord(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-test")
 
-	ws := store.VaultPrefix("relationship-vault")
+	ws = store.VaultPrefix("relationship-vault")
 	engramID := NewULID()
 
 	record := RelationshipRecord{
@@ -84,9 +88,10 @@ func TestUpsertRelationshipRecord(t *testing.T) {
 func TestUpsertEntityRecord_UpdatePreservesName(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-test")
 
 	// Write initial record
-	err := store.UpsertEntityRecord(ctx, EntityRecord{
+	err := store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name:       "Redis",
 		Type:       "cache",
 		Confidence: 0.7,
@@ -94,14 +99,14 @@ func TestUpsertEntityRecord_UpdatePreservesName(t *testing.T) {
 	require.NoError(t, err)
 
 	// Overwrite with higher confidence
-	err = store.UpsertEntityRecord(ctx, EntityRecord{
+	err = store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name:       "Redis",
 		Type:       "database",
 		Confidence: 0.95,
 	}, "plugin:enrich")
 	require.NoError(t, err)
 
-	got, err := store.GetEntityRecord(ctx, "redis")
+	got, err := store.GetEntityRecord(ctx, ws, "redis")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, "Redis", got.Name)
@@ -113,20 +118,21 @@ func TestUpsertEntityRecord_UpdatePreservesName(t *testing.T) {
 func TestUpsertEntityRecord_KeepsHigherConfidence(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-test")
 
 	// Write initial record with high confidence.
-	err := store.UpsertEntityRecord(ctx, EntityRecord{
+	err := store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "PostgreSQL", Type: "technology", Confidence: 0.9,
 	}, "plugin:enrich")
 	require.NoError(t, err)
 
 	// Upsert with lower confidence — existing confidence must be preserved.
-	err = store.UpsertEntityRecord(ctx, EntityRecord{
+	err = store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "PostgreSQL", Type: "technology", Confidence: 0.4,
 	}, "inline")
 	require.NoError(t, err)
 
-	got, err := store.GetEntityRecord(ctx, "PostgreSQL")
+	got, err := store.GetEntityRecord(ctx, ws, "PostgreSQL")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.InDelta(t, float32(0.9), got.Confidence, 0.001, "higher confidence must be preserved")
@@ -135,19 +141,20 @@ func TestUpsertEntityRecord_KeepsHigherConfidence(t *testing.T) {
 func TestUpsertEntityRecord_UpdatesWhenHigherConfidence(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-test")
 
-	err := store.UpsertEntityRecord(ctx, EntityRecord{
+	err := store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "PostgreSQL", Type: "technology", Confidence: 0.4,
 	}, "inline")
 	require.NoError(t, err)
 
 	// Upsert with higher confidence — should update.
-	err = store.UpsertEntityRecord(ctx, EntityRecord{
+	err = store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "PostgreSQL", Type: "technology", Confidence: 0.9,
 	}, "plugin:enrich")
 	require.NoError(t, err)
 
-	got, err := store.GetEntityRecord(ctx, "PostgreSQL")
+	got, err := store.GetEntityRecord(ctx, ws, "PostgreSQL")
 	require.NoError(t, err)
 	assert.InDelta(t, float32(0.9), got.Confidence, 0.001, "higher confidence must be accepted")
 	assert.Equal(t, "plugin:enrich", got.Source)
@@ -156,11 +163,12 @@ func TestUpsertEntityRecord_UpdatesWhenHigherConfidence(t *testing.T) {
 func TestEntityReverseIndex_WrittenOnLink(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()
+	ws := ps.VaultPrefix("entity-test")
 
-	ws := ps.VaultPrefix("test")
+	ws = ps.VaultPrefix("test")
 	engID := NewULID()
 
-	require.NoError(t, ps.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "PostgreSQL", Type: "technology", Confidence: 0.8,
 	}, "test"))
 	require.NoError(t, ps.WriteEntityEngramLink(ctx, ws, engID, "PostgreSQL"))
@@ -178,9 +186,10 @@ func TestEntityReverseIndex_WrittenOnLink(t *testing.T) {
 func TestEntityReverseIndex_MultipleEngrams(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()
-	ws := ps.VaultPrefix("test")
+	ws := ps.VaultPrefix("entity-test")
+	ws = ps.VaultPrefix("test")
 
-	require.NoError(t, ps.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Go", Type: "technology", Confidence: 0.7,
 	}, "test"))
 
@@ -211,26 +220,27 @@ func TestEntityReverseIndex_EmptyForUnknownEntity(t *testing.T) {
 func TestEntityRecord_FirstSeenSetOnce(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()
+	ws := ps.VaultPrefix("entity-test")
 
 	// First upsert — FirstSeen should be set.
-	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+	err := ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Go", Type: "technology", Confidence: 0.8,
 	}, "test")
 	require.NoError(t, err)
 
-	got, err := ps.GetEntityRecord(ctx, "Go")
+	got, err := ps.GetEntityRecord(ctx, ws, "Go")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.NotZero(t, got.FirstSeen, "FirstSeen must be set on first upsert")
 	firstSeen := got.FirstSeen
 
 	// Second upsert — FirstSeen must NOT change.
-	err = ps.UpsertEntityRecord(ctx, EntityRecord{
+	err = ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Go", Type: "technology", Confidence: 0.9,
 	}, "test")
 	require.NoError(t, err)
 
-	got2, err := ps.GetEntityRecord(ctx, "Go")
+	got2, err := ps.GetEntityRecord(ctx, ws, "Go")
 	require.NoError(t, err)
 	assert.Equal(t, firstSeen, got2.FirstSeen, "FirstSeen must not change on second upsert")
 }
@@ -238,15 +248,16 @@ func TestEntityRecord_FirstSeenSetOnce(t *testing.T) {
 func TestEntityRecord_MentionCountIncrementsOnUpsert(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()
+	ws := ps.VaultPrefix("entity-test")
 
 	for i := 0; i < 3; i++ {
-		err := ps.UpsertEntityRecord(ctx, EntityRecord{
+		err := ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 			Name: "Python", Type: "technology", Confidence: 0.7,
 		}, "test")
 		require.NoError(t, err)
 	}
 
-	got, err := ps.GetEntityRecord(ctx, "Python")
+	got, err := ps.GetEntityRecord(ctx, ws, "Python")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, int32(3), got.MentionCount, "MentionCount should be 3 after 3 upserts")
@@ -255,13 +266,14 @@ func TestEntityRecord_MentionCountIncrementsOnUpsert(t *testing.T) {
 func TestEntityRecord_StateDefaultActive(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()
+	ws := ps.VaultPrefix("entity-test")
 
-	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+	err := ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Rust", Type: "technology", Confidence: 0.8,
 	}, "test")
 	require.NoError(t, err)
 
-	got, err := ps.GetEntityRecord(ctx, "Rust")
+	got, err := ps.GetEntityRecord(ctx, ws, "Rust")
 	require.NoError(t, err)
 	assert.Equal(t, "active", got.State, "default state must be 'active'")
 }
@@ -269,9 +281,10 @@ func TestEntityRecord_StateDefaultActive(t *testing.T) {
 func TestUpsertEntityRecord_ConcurrentPreservesHighestConfidence(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()
+	ws := ps.VaultPrefix("entity-test")
 
 	// Seed with a low baseline.
-	require.NoError(t, ps.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "ConcurrentEntity", Type: "test", Confidence: 0.1,
 	}, "baseline"))
 
@@ -281,20 +294,20 @@ func TestUpsertEntityRecord_ConcurrentPreservesHighestConfidence(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_ = ps.UpsertEntityRecord(ctx, EntityRecord{
+			_ = ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 				Name: "ConcurrentEntity", Type: "test", Confidence: 0.8,
 			}, "high")
 		}()
 		go func() {
 			defer wg.Done()
-			_ = ps.UpsertEntityRecord(ctx, EntityRecord{
+			_ = ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 				Name: "ConcurrentEntity", Type: "test", Confidence: 0.7,
 			}, "mid")
 		}()
 	}
 	wg.Wait()
 
-	got, err := ps.GetEntityRecord(ctx, "ConcurrentEntity")
+	got, err := ps.GetEntityRecord(ctx, ws, "ConcurrentEntity")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.InDelta(t, float32(0.8), got.Confidence, 0.001, "highest confidence must survive concurrent writes")
@@ -304,21 +317,22 @@ func TestUpsertEntityRecord_ConcurrentPreservesHighestConfidence(t *testing.T) {
 func TestEntityRecord_MergedIntoPreservedOnUpsert(t *testing.T) {
 	ps := newTestPebbleStore(t)
 	ctx := context.Background()
+	ws := ps.VaultPrefix("entity-test")
 
 	// First write: entity is merged.
-	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+	err := ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "OldName", Type: "technology", Confidence: 0.8,
 		State: "merged", MergedInto: "CanonicalName",
 	}, "test")
 	require.NoError(t, err)
 
 	// Second write: caller doesn't set State or MergedInto.
-	err = ps.UpsertEntityRecord(ctx, EntityRecord{
+	err = ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "OldName", Type: "technology", Confidence: 0.9,
 	}, "test")
 	require.NoError(t, err)
 
-	got, err := ps.GetEntityRecord(ctx, "OldName")
+	got, err := ps.GetEntityRecord(ctx, ws, "OldName")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "merged", got.State, "State must be preserved")
@@ -328,8 +342,9 @@ func TestEntityRecord_MergedIntoPreservedOnUpsert(t *testing.T) {
 func TestEntityRecord_InvalidStateReturnsError(t *testing.T) {
 	ps := newTestPebbleStore(t)
 	ctx := context.Background()
+	ws := ps.VaultPrefix("entity-test")
 
-	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+	err := ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "X", Type: "technology", Confidence: 0.8,
 		State: "invalid_state",
 	}, "test")
@@ -339,8 +354,9 @@ func TestEntityRecord_InvalidStateReturnsError(t *testing.T) {
 func TestEntityRecord_MergedIntoWithoutMergedStateReturnsError(t *testing.T) {
 	ps := newTestPebbleStore(t)
 	ctx := context.Background()
+	ws := ps.VaultPrefix("entity-test")
 
-	err := ps.UpsertEntityRecord(ctx, EntityRecord{
+	err := ps.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "X", Type: "technology", Confidence: 0.8,
 		State: "active", MergedInto: "Y",
 	}, "test")
@@ -357,8 +373,8 @@ func TestEntityRecord_MergedIntoWithoutMergedStateReturnsError(t *testing.T) {
 func TestDigestFlagConstants_SyncWithPluginPackage(t *testing.T) {
 	// Canonical values from internal/plugin/types.go — update both if either changes.
 	const (
-		canonicalDigestClassified uint8 = 0x20
-		canonicalDigestSummarized uint8 = 0x40
+		canonicalDigestClassified uint16 = 0x20
+		canonicalDigestSummarized uint16 = 0x40
 	)
 	if digestClassifiedFlag != canonicalDigestClassified {
 		t.Errorf("digestClassifiedFlag = 0x%02x, want 0x%02x (plugin.DigestClassified)", digestClassifiedFlag, canonicalDigestClassified)

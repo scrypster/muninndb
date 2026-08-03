@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/oklog/ulid/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,6 +58,24 @@ type ClusterConfig struct {
 	// ReconDelayMs is how long to wait after a Lobe reconnects before
 	// triggering reconciliation (ms). Default: 2000.
 	ReconDelayMs int `yaml:"recon_delay_ms" json:"recon_delay_ms"`
+	// MaxLogBacklog is the hard ceiling on replication log entries retained
+	// behind the head, regardless of replica progress. Replica acks are the
+	// preferred prune watermark, but a Lobe that never catches up must not be
+	// able to pin the log forever — the Cortex would grow without bound. When
+	// the backlog exceeds this, the log is pruned anyway and any Lobe left
+	// behind the prune point rejoins via snapshot, which is the documented
+	// consequence of pruning past a replica.
+	//
+	// Sizing note: this is an entry count, but entries are not small — each
+	// one carries the full key AND value of the replicated write, so a store
+	// holding embeddings or HNSW blobs averages hundreds of KB per entry. On a
+	// real deployment the mean was 658 KB, which made a 50000-entry ceiling
+	// worth ~34 GB. A byte-based bound would be the better long-term design;
+	// until then the default is deliberately conservative.
+	//
+	// 0 disables the ceiling (unbounded retention — the old behaviour).
+	// Default: 5000.
+	MaxLogBacklog int `yaml:"max_log_backlog" json:"max_log_backlog"`
 }
 
 // muninnYAML is the shape of muninn.yaml — only the cluster section is used here.
@@ -86,6 +105,7 @@ func clusterDefaults() ClusterConfig {
 		HandoffAckTimeoutSec:          5,
 		PruneIntervalSec:              60,
 		ReconDelayMs:                  2000,
+		MaxLogBacklog:                 5000,
 	}
 }
 
@@ -243,20 +263,96 @@ func applyEnvOverrides(cfg *ClusterConfig) {
 	}
 }
 
-// autoNodeID auto-generates a stable NodeID when cluster is enabled but
-// NodeID is not set. The format is {hostname}-{first8charsOfSHA256(dataDir)}.
+// hostnameFn resolves this host's hostname. A package variable so tests can
+// simulate a hostname change without touching the real OS hostname. Retained
+// only as the fallback identity source (see autoNodeID) — the primary source
+// is the persisted node identity file.
+var hostnameFn = os.Hostname
+
+// nodeIdentityFilename is the file in the data directory that persists a
+// stable node identity across restarts, independent of hostname (#630).
+const nodeIdentityFilename = "node-identity"
+
+// autoNodeID assigns a stable NodeID when cluster is enabled but NodeID is
+// not explicitly configured (via muninn.yaml, cluster.yaml, or
+// MUNINN_CLUSTER_NODE_ID — applyEnvOverrides runs before this, so an explicit
+// operator-set id always wins per the project's "explicit config is never
+// silently substituted" rule).
+//
+// The identity is a random ULID persisted to {dataDir}/node-identity on first
+// use and reused on every subsequent start, so it survives a hostname change.
+// The previous scheme derived NodeID from os.Hostname() at every startup:
+// macOS hostnames flap with network changes (mDNS renaming, captive
+// portals) and container hostnames can change across restarts, so the same
+// physical node minted a brand-new cluster identity each time — the old
+// registration was never reaped, poisoning quorum counting and pinning
+// MinReplicatedSeq at its last ack forever (SafePrune never advances) (#630).
+//
+// Existing deployments that already have ghost registrations from the old
+// hostname-derived scheme are NOT migrated automatically: this node's own
+// past registrations under old hostnames can't be distinguished from a
+// different real peer without an operator asserting "these are the same
+// machine", and reaping the wrong entry would silently drop a live node from
+// quorum — worse than leaving a known ghost for manual cleanup.
+// `muninn cluster remove-node` (DELETE /api/admin/cluster/nodes/{id}, already
+// shipped) remains the supported way to clear a confirmed ghost after
+// upgrading to this release. A node upgraded in place picks up a *new*
+// stable identity on its first start under this code (its data directory has
+// no node-identity file yet) — that registration event is itself indistinguishable
+// from a hostname flap to a running cluster, so it is still an operator's
+// call to remove the node's pre-upgrade registration(s) once confirmed dead.
 func autoNodeID(cfg *ClusterConfig, dataDir string) {
 	if !cfg.Enabled || cfg.NodeID != "" {
 		return
 	}
-	hostname, err := os.Hostname()
+	id, err := loadOrCreateNodeIdentity(dataDir)
 	if err != nil {
-		slog.Warn("autoNodeID: hostname lookup failed, falling back to \"node\"", "err", err)
+		// Falling back to the legacy hostname-derived scheme keeps a node
+		// startable even if the data directory is unwritable for some reason;
+		// an id that doesn't survive a hostname change is still better than a
+		// cluster node that refuses to start.
+		slog.Warn("autoNodeID: could not persist stable node identity, falling back to hostname-derived id",
+			"err", err, "dataDir", dataDir)
+		cfg.NodeID = legacyHostnameNodeID(dataDir)
+		return
+	}
+	cfg.NodeID = id
+}
+
+// loadOrCreateNodeIdentity returns the node identity persisted at
+// {dataDir}/node-identity, generating and persisting one on first use.
+func loadOrCreateNodeIdentity(dataDir string) (string, error) {
+	path := filepath.Join(dataDir, nodeIdentityFilename)
+	if data, err := os.ReadFile(path); err == nil {
+		if id := strings.TrimSpace(string(data)); id != "" {
+			return id, nil
+		}
+		// Empty/corrupt file: fall through and regenerate rather than
+		// persisting (or returning) a blank identity.
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return "", fmt.Errorf("create data dir: %w", err)
+	}
+	id := "nid-" + ulid.Make().String()
+	if err := os.WriteFile(path, []byte(id+"\n"), 0600); err != nil {
+		return "", fmt.Errorf("persist node identity: %w", err)
+	}
+	return id, nil
+}
+
+// legacyHostnameNodeID reproduces the pre-#630 hostname-derived scheme, used
+// only when the data directory is unwritable and a persisted identity can't
+// be created.
+func legacyHostnameNodeID(dataDir string) string {
+	hostname, err := hostnameFn()
+	if err != nil {
 		hostname = "node"
 	}
 	sum := sha256.Sum256([]byte(dataDir))
-	shortHash := fmt.Sprintf("%x", sum[:4]) // 4 bytes = 8 hex chars
-	cfg.NodeID = hostname + "-" + shortHash
+	return hostname + "-" + fmt.Sprintf("%x", sum[:4])
 }
 
 var validRoles = map[string]bool{

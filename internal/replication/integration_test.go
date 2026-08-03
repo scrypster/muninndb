@@ -452,12 +452,12 @@ func TestIntegration_FencingTokenPreventsStaleWrite(t *testing.T) {
 	// Set up: A was Cortex at epoch=1, B is new Cortex at epoch=2.
 	// Set both coordinator role AND election state so HandleCortexClaim
 	// properly detects the leadership transition.
-	if err := nodeA.epochStore.ForceSet(1); err != nil {
+	if _, err := nodeA.epochStore.Advance(1); err != nil {
 		t.Fatal(err)
 	}
 	simulatePromotion(nodeA.coord, 1)
 
-	if err := nodeB.epochStore.ForceSet(2); err != nil {
+	if _, err := nodeB.epochStore.Advance(2); err != nil {
 		t.Fatal(err)
 	}
 	simulatePromotion(nodeB.coord, 2)

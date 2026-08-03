@@ -183,8 +183,8 @@ func TestElection_HandleCortexClaim_RejectsStaleEpoch(t *testing.T) {
 	el := newTestElection(t, "node-A")
 
 	// Advance epoch to 10.
-	if err := el.epochStore.ForceSet(10); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := el.epochStore.Advance(10); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 
 	var newLeaderCalled bool

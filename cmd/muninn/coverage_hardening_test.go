@@ -2086,13 +2086,13 @@ func TestConfigureTools_Windsurf_Path(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// upgrade.go: runUpgrade with injected latestVersionFn
+// upgrade.go: runUpgrade with injected latestReleaseFn
 // ---------------------------------------------------------------------------
 
 func TestRunUpgrade_SkipsDevBuild(t *testing.T) {
-	old := latestVersionFn
-	latestVersionFn = func() (string, error) { return "", nil }
-	defer func() { latestVersionFn = old }()
+	old := latestReleaseFn
+	latestReleaseFn = func() (releaseInfo, error) { return releaseInfo{}, nil }
+	defer func() { latestReleaseFn = old }()
 
 	out := captureStdout(func() {
 		runUpgrade([]string{})
@@ -2103,9 +2103,9 @@ func TestRunUpgrade_SkipsDevBuild(t *testing.T) {
 }
 
 func TestRunUpgrade_UpToDate_Injected(t *testing.T) {
-	old := latestVersionFn
-	latestVersionFn = func() (string, error) { return "v0.0.1", nil }
-	defer func() { latestVersionFn = old }()
+	old := latestReleaseFn
+	latestReleaseFn = func() (releaseInfo, error) { return releaseInfo{TagName: "v0.0.1"}, nil }
+	defer func() { latestReleaseFn = old }()
 
 	out := captureStdout(func() {
 		runUpgrade([]string{})
@@ -2116,9 +2116,9 @@ func TestRunUpgrade_UpToDate_Injected(t *testing.T) {
 }
 
 func TestRunUpgrade_NetworkError(t *testing.T) {
-	old := latestVersionFn
-	latestVersionFn = func() (string, error) { return "", fmt.Errorf("network down") }
-	defer func() { latestVersionFn = old }()
+	old := latestReleaseFn
+	latestReleaseFn = func() (releaseInfo, error) { return releaseInfo{}, fmt.Errorf("network down") }
+	defer func() { latestReleaseFn = old }()
 
 	oldExit := osExit
 	osExit = func(c int) {}
@@ -2133,17 +2133,17 @@ func TestRunUpgrade_NetworkError(t *testing.T) {
 }
 
 func TestLatestVersionDefault_Dev(t *testing.T) {
-	v, err := latestVersionDefault()
+	rel, err := latestReleaseDefault()
 	if err != nil {
 		t.Skipf("network error: %v", err)
 	}
-	_ = v
+	_ = rel
 }
 
 func TestCheckVersionHint_WithUpdate(t *testing.T) {
-	old := latestVersionFn
-	latestVersionFn = func() (string, error) { return "", nil }
-	defer func() { latestVersionFn = old }()
+	old := latestReleaseFn
+	latestReleaseFn = func() (releaseInfo, error) { return releaseInfo{}, nil }
+	defer func() { latestReleaseFn = old }()
 
 	out := captureStdout(func() {
 		checkVersionHint()
@@ -2157,7 +2157,7 @@ func TestCheckVersionHint_WithUpdate(t *testing.T) {
 
 func TestPrintStatusDisplay_Running(t *testing.T) {
 	old := probeServicesFn
-	latestOld := latestVersionFn
+	latestOld := latestReleaseFn
 	probeServicesFn = func() []serviceStatus {
 		return []serviceStatus{
 			{name: "database", port: 8475, up: true},
@@ -2165,8 +2165,8 @@ func TestPrintStatusDisplay_Running(t *testing.T) {
 			{name: "web ui", port: 8476, up: true},
 		}
 	}
-	latestVersionFn = func() (string, error) { return "", nil }
-	defer func() { probeServicesFn = old; latestVersionFn = latestOld }()
+	latestReleaseFn = func() (releaseInfo, error) { return releaseInfo{}, nil }
+	defer func() { probeServicesFn = old; latestReleaseFn = latestOld }()
 
 	out := captureStdout(func() {
 		state := printStatusDisplay(false)
@@ -2257,7 +2257,7 @@ func TestPrintStatusDisplay_DegradedMCPDown(t *testing.T) {
 
 func TestRunStatus_Running(t *testing.T) {
 	old := probeServicesFn
-	latestOld := latestVersionFn
+	latestOld := latestReleaseFn
 	probeServicesFn = func() []serviceStatus {
 		return []serviceStatus{
 			{name: "database", port: 8475, up: true},
@@ -2265,8 +2265,8 @@ func TestRunStatus_Running(t *testing.T) {
 			{name: "web ui", port: 8476, up: true},
 		}
 	}
-	latestVersionFn = func() (string, error) { return "", nil }
-	defer func() { probeServicesFn = old; latestVersionFn = latestOld }()
+	latestReleaseFn = func() (releaseInfo, error) { return releaseInfo{}, nil }
+	defer func() { probeServicesFn = old; latestReleaseFn = latestOld }()
 
 	out := captureStdout(func() {
 		runStatus()

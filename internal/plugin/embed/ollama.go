@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -141,8 +140,7 @@ func (p *OllamaProvider) probeEmbedEndpoint(ctx context.Context) (int, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("Ollama returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return 0, plugin.ProviderHTTPError(p.Name(), resp)
 	}
 
 	var batchResp ollamaBatchEmbedResponse
@@ -182,8 +180,7 @@ func (p *OllamaProvider) probeLegacyEmbedEndpoint(ctx context.Context) (int, err
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("Ollama returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return 0, plugin.ProviderHTTPError(p.Name(), resp)
 	}
 
 	var ollamaResp ollamaEmbedResponse
@@ -273,8 +270,7 @@ func (p *OllamaProvider) embedBatchNew(ctx context.Context, texts []string) ([]f
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Ollama returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, plugin.ProviderHTTPError(p.Name(), resp)
 	}
 
 	var batchResp ollamaBatchEmbedResponse
@@ -324,8 +320,7 @@ func (p *OllamaProvider) embedBatchLegacy(ctx context.Context, texts []string) (
 			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
-				bodyBytes, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("Ollama returned status %d: %s", resp.StatusCode, string(bodyBytes))
+				return plugin.ProviderHTTPError(p.Name(), resp)
 			}
 
 			var ollamaResp ollamaEmbedResponse

@@ -3,7 +3,10 @@ package plugin
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -80,4 +83,66 @@ func (e *ProviderError) IsPermanentContent() bool {
 func IsPermanentContentProviderError(err error) bool {
 	var providerErr *ProviderError
 	return errors.As(err, &providerErr) && providerErr.IsPermanentContent()
+}
+
+// ProviderHTTPError builds a ProviderError from a non-2xx HTTP response,
+// draining and discarding the response body rather than interpolating it into
+// the error. The request body embed providers send IS the memory text, and a
+// provider that echoes the offending input back in a 400/413/422 error body
+// (common for oversize or content-policy rejections) must not have that text
+// retained, formatted into an error string, or reach a log line — this is the
+// same class the enrich transport already holds via its own local
+// providerHTTPError (internal/plugin/enrich/provider_error.go); this is the
+// shared version any HTTP-based provider package can call directly. Retains
+// only status, retryability, and Retry-After metadata — enough to diagnose,
+// never enough to leak (#750's parse-error category, applied to embed's HTTP
+// layer, #790).
+func ProviderHTTPError(provider string, resp *http.Response) *ProviderError {
+	// Drain a bounded amount so the standard transport can reuse the
+	// connection, but never retain or log the provider's response body.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	retryAfter, hasRetryAfter := parseProviderRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	return &ProviderError{
+		Provider:      provider,
+		StatusCode:    resp.StatusCode,
+		Retryable:     retryableProviderHTTPStatus(resp.StatusCode),
+		RetryAfter:    retryAfter,
+		HasRetryAfter: hasRetryAfter,
+	}
+}
+
+func retryableProviderHTTPStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseProviderRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
+		const maxRetryAfterSeconds = int64(^uint64(0)>>1) / int64(time.Second)
+		if seconds > maxRetryAfterSeconds {
+			return 0, false
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	if !when.After(now) {
+		return 0, true
+	}
+	return when.Sub(now), true
 }

@@ -15,7 +15,7 @@ import (
 // Returns the job immediately (202 pattern). The clone runs in a background goroutine.
 // Returns an error if sourceVault does not exist or newName already exists.
 func (e *Engine) StartClone(ctx context.Context, sourceVault, newName string) (*vaultjob.Job, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	if !e.beginVaultOp() {
@@ -131,8 +131,22 @@ func (e *Engine) runClone(job *vaultjob.Job, wsSource, wsTarget [8]byte, newName
 	e.jobManager.Complete(job)
 }
 
-// reindexVault scans all engrams in a vault and rebuilds FTS and HNSW indexes.
-// job may be nil (no progress tracking).
+// reindexVault scans all engrams in a vault and rebuilds FTS, HNSW, and the
+// 0x22 LastAccess index. job may be nil (no progress tracking).
+//
+// The 0x22 rebuild closes #811: prefix.LastAccess is not in clone.go's
+// vaultScopedSwapPrefixes, so neither CloneVaultData nor MergeVaultData
+// carries it, and where_left_off was permanently blind in a cloned or merged
+// vault for every engram that predates the operation. This is the correct
+// place to rebuild it — reindexVault already scans every engram in the
+// target vault to rebuild FTS/HNSW, and by the time it runs each engram's
+// LastAccess is the REWRITTEN value (clone resets AccessCount but carries
+// LastAccess forward as of #810/#835; merge preserves it as-is), never the
+// pre-#810 1754 sentinel that would otherwise sort first in the index. Safe
+// to run unconditionally, including on a target vault's pre-existing engrams
+// (merge scans those too): WriteLastAccessEntry with prevMillis=0 only Sets
+// the current key, and an engram whose 0x22 entry already matches its current
+// LastAccess re-Sets the identical key — a no-op, not a duplicate.
 func (e *Engine) reindexVault(ctx context.Context, ws [8]byte, job *vaultjob.Job) error {
 	var indexed int64
 
@@ -154,6 +168,13 @@ func (e *Engine) reindexVault(ctx context.Context, ws [8]byte, job *vaultjob.Job
 			}
 		}
 
+		// 0x22 LastAccess index rebuild (#811).
+		if !eng.LastAccess.IsZero() {
+			if err := e.store.WriteLastAccessEntry(ctx, ws, eng.ID, 0, eng.LastAccess.UnixMilli()); err != nil {
+				slog.Warn("reindex: LastAccess index rebuild failed for engram", "id", eng.ID, "err", err)
+			}
+		}
+
 		indexed++
 		if job != nil {
 			job.IndexCurrent.Store(indexed)
@@ -167,7 +188,7 @@ func (e *Engine) reindexVault(ctx context.Context, ws [8]byte, job *vaultjob.Job
 // If deleteSource is true, the source vault is deleted after the merge completes.
 // Returns an error if source and target are the same, or if either vault does not exist.
 func (e *Engine) StartMerge(ctx context.Context, sourceVault, targetVault string, deleteSource bool) (*vaultjob.Job, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	if !e.beginVaultOp() {

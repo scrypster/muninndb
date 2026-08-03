@@ -253,7 +253,7 @@ func TestTagSeeding_NonRRFCosine(t *testing.T) {
 			FullTextRelevance:  0.4,
 			UseACTR:            true,
 			ACTRDecay:          0.5,
-			ACTRHebScale:       4.0,
+			ACTRHebScale:       actHebScale(4.0),
 		},
 		Filters: []activation.Filter{{Field: "tags_all", Value: []string{"special"}}},
 	})

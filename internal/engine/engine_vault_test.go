@@ -162,9 +162,14 @@ func TestEngineDeleteVault_RemovesEntityGraph(t *testing.T) {
 	wsA := eng.store.ResolveVaultPrefix(deletedVault)
 	wsB := eng.store.ResolveVaultPrefix(keptVault)
 
-	for _, name := range []string{"SharedEntity", "OnlyDeletedVault", "SharedEntity", "OnlyKeptVault"} {
-		if err := eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{Name: name, Type: "test", Confidence: 1}, "test"); err != nil {
-			t.Fatalf("UpsertEntityRecord %q: %v", name, err)
+	// Entity records are vault-scoped (#683) — each vault owns its own copy of a
+	// name it shares with another.
+	for _, e := range []struct {
+		ws   [8]byte
+		name string
+	}{{wsA, "SharedEntity"}, {wsA, "OnlyDeletedVault"}, {wsB, "SharedEntity"}, {wsB, "OnlyKeptVault"}} {
+		if err := eng.store.UpsertEntityRecord(ctx, e.ws, storage.EntityRecord{Name: e.name, Type: "test", Confidence: 1}, "test"); err != nil {
+			t.Fatalf("UpsertEntityRecord %q: %v", e.name, err)
 		}
 	}
 	if err := eng.store.WriteEntityEngramLink(ctx, wsA, idA, "SharedEntity"); err != nil {
@@ -204,7 +209,7 @@ func TestEngineDeleteVault_RemovesEntityGraph(t *testing.T) {
 	if len(deletedRefs.Engrams) != 0 {
 		t.Fatalf("expected deleted vault to have no SharedEntity refs, got %d", len(deletedRefs.Engrams))
 	}
-	onlyDeleted, err := eng.store.GetEntityRecord(ctx, "OnlyDeletedVault")
+	onlyDeleted, err := eng.store.GetEntityRecord(ctx, wsA, "OnlyDeletedVault")
 	if err != nil {
 		t.Fatalf("GetEntityRecord OnlyDeletedVault: %v", err)
 	}

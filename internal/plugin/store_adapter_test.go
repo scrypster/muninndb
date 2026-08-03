@@ -45,12 +45,12 @@ func TestStoreAdapter_Methods(t *testing.T) {
 	}
 
 	// UpsertEntity should store an entity record.
-	if err := adapter.UpsertEntity(ctx, ExtractedEntity{Name: "PostgreSQL", Type: "database", Confidence: 0.9}); err != nil {
+	if err := adapter.UpsertEntity(ctx, ULID(id), ExtractedEntity{Name: "PostgreSQL", Type: "database", Confidence: 0.9}); err != nil {
 		t.Errorf("UpsertEntity should return nil, got %v", err)
 	}
 
 	// Verify the entity was stored.
-	record, err := store.GetEntityRecord(ctx, "postgresql")
+	record, err := store.GetEntityRecord(ctx, ws, "postgresql")
 	if err != nil {
 		t.Fatalf("GetEntityRecord: %v", err)
 	}

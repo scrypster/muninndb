@@ -28,10 +28,20 @@ var appendInfra = map[string]bool{
 	"SetEnrichPlugin": true, "SetLatencyTracker": true, "SetOnWrite": true,
 	"SetReplayEnrichTimeout": true, "SetRetroactiveProcessors": true, "SetTransitionWorker": true,
 	"Store": true, "ResetReplayFailCount": true, "Stop": true, "Checkpoint": true,
+	// SetWriteGate installs the cluster single-writer gate (#596) — wiring, and
+	// it can only ever REFUSE writes, never perform one.
+	"SetWriteGate":  true,
 	"Observability": true, "LatencyTracker": true, "ActivityTracker": true,
 	// WaitWriteTimeIdle drains the write-time async workers and writes
 	// nothing itself — an out-of-package test seam (#722 doctrine, #764).
 	"WaitWriteTimeIdle": true,
+	// ResetRepairWatermark (#761) deletes a per-vault REPAIR-PASS watermark
+	// (0x2B/0x2E), never an engram/entity/lease — refuseAppend's guarantee is
+	// specifically about existing MEMORIES, and this touches none. It is also
+	// not reachable by an append-mode API key at all: the only caller is the
+	// admin REST handler behind withAdminMiddleware (session auth), which
+	// append-mode credentials do not hold.
+	"ResetRepairWatermark": true,
 }
 
 // appendReadOnly: read/query methods, safe for append.
@@ -120,8 +130,8 @@ func guardedOps(eng *Engine, ap context.Context) map[string]func() error {
 		"Decide":               func() error { _, e := eng.Decide(ap, v, "d", "r", nil, nil); return e },
 		"RecordFeedback":       func() error { return eng.RecordFeedback(ap, v, id, true) },
 		"RecordAccess":         func() error { return eng.RecordAccess(ap, v, id) },
-		"SetEntityState":       func() error { return eng.SetEntityState(ap, "E", "merged", "", "") },
-		"SetEntityStateBatch":  func() error { errs := eng.SetEntityStateBatch(ap, []EntityStateOp{{}}); return errs[0] },
+		"SetEntityState":       func() error { return eng.SetEntityState(ap, "v", "E", "merged", "", "") },
+		"SetEntityStateBatch":  func() error { errs := eng.SetEntityStateBatch(ap, "v", []EntityStateOp{{}}); return errs[0] },
 		"CompareAndSet":        func() error { _, e := eng.CompareAndSet(ap, v, id, nil, nil); return e },
 		"Claim":                func() error { _, e := eng.Claim(ap, v, id, "o", 60); return e },
 		"Release":              func() error { _, e := eng.Release(ap, v, id, "o"); return e },

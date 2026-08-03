@@ -143,14 +143,14 @@ func TestRetroactiveProcessor_AuthenticationFailureRemainsPendingAndStopsBatch(t
 type flagAwareStore struct {
 	mockPluginStore
 	engrams []*Engram // fixed keyspace order
-	flags   map[ULID]uint8
+	flags   map[ULID]uint16
 }
 
 func newFlagAwareStore(engrams ...*Engram) *flagAwareStore {
-	return &flagAwareStore{engrams: engrams, flags: make(map[ULID]uint8)}
+	return &flagAwareStore{engrams: engrams, flags: make(map[ULID]uint16)}
 }
 
-func (s *flagAwareStore) pending(flagBit, skipFlags uint8) []*Engram {
+func (s *flagAwareStore) pending(flagBit, skipFlags uint16) []*Engram {
 	var out []*Engram
 	for _, e := range s.engrams {
 		if f := s.flags[e.ID]; f&flagBit != 0 || f&skipFlags != 0 {
@@ -161,20 +161,20 @@ func (s *flagAwareStore) pending(flagBit, skipFlags uint8) []*Engram {
 	return out
 }
 
-func (s *flagAwareStore) CountWithoutFlag(_ context.Context, flagBit, skipFlags uint8) (int64, error) {
+func (s *flagAwareStore) CountWithoutFlag(_ context.Context, flagBit, skipFlags uint16) (int64, error) {
 	return int64(len(s.pending(flagBit, skipFlags))), nil
 }
 
-func (s *flagAwareStore) ScanWithoutFlag(_ context.Context, flagBit, skipFlags uint8) EngramIterator {
+func (s *flagAwareStore) ScanWithoutFlag(_ context.Context, flagBit, skipFlags uint16) EngramIterator {
 	return &mockIterator{engrams: s.pending(flagBit, skipFlags)}
 }
 
-func (s *flagAwareStore) SetDigestFlag(_ context.Context, id ULID, flag uint8) error {
+func (s *flagAwareStore) SetDigestFlag(_ context.Context, id ULID, flag uint16) error {
 	s.flags[id] |= flag
 	return nil
 }
 
-func (s *flagAwareStore) GetDigestFlags(_ context.Context, id ULID) (uint8, error) {
+func (s *flagAwareStore) GetDigestFlags(_ context.Context, id ULID) (uint16, error) {
 	return s.flags[id], nil
 }
 

@@ -170,6 +170,7 @@ func TestMergeGuard_IntegrationConcurrentMerge(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
+	ws := eng.store.ResolveVaultPrefix("default")
 
 	// Write entity A with two engrams, and separate target entities B and C.
 	writeEntityEngram(t, eng, "default", "entity A first mention",
@@ -212,7 +213,7 @@ func TestMergeGuard_IntegrationConcurrentMerge(t *testing.T) {
 	assert.Equal(t, 1, failures, "the second concurrent merge must fail (A already merged)")
 
 	// Entity A must be state=merged with a single canonical target.
-	recA, err := eng.store.GetEntityRecord(ctx, "EntityA")
+	recA, err := eng.store.GetEntityRecord(ctx, ws, "EntityA")
 	require.NoError(t, err)
 	require.NotNil(t, recA)
 	assert.Equal(t, "merged", recA.State)

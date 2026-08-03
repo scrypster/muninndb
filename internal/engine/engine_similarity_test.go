@@ -170,6 +170,7 @@ func TestMergeEntity_DryRun(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := context.Background()
+	ws := eng.store.ResolveVaultPrefix("default")
 
 	writeEntityEngram(t, eng, "default", "PostgreSQL is the primary DB",
 		mbp.InlineEntity{Name: "PostgreSQL", Type: "database"})
@@ -184,7 +185,7 @@ func TestMergeEntity_DryRun(t *testing.T) {
 	require.GreaterOrEqual(t, result.EngramsRelinked, 0)
 
 	// Verify that entity A is NOT changed to merged (dry run).
-	recA, err := eng.store.GetEntityRecord(ctx, "Postgre SQL")
+	recA, err := eng.store.GetEntityRecord(ctx, ws, "Postgre SQL")
 	require.NoError(t, err)
 	require.NotNil(t, recA)
 	require.NotEqual(t, "merged", recA.State, "dry_run must not modify entity A's state")
@@ -194,6 +195,7 @@ func TestMergeEntity_MergesAndRelinks(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := context.Background()
+	ws := eng.store.ResolveVaultPrefix("default")
 
 	// Write two engrams linking to entity A ("Postgre SQL").
 	id1 := writeEntityEngram(t, eng, "default", "Postgre SQL is legacy name",
@@ -210,14 +212,13 @@ func TestMergeEntity_MergesAndRelinks(t *testing.T) {
 	require.Equal(t, 2, result.EngramsRelinked, "two engrams should have been relinked")
 
 	// Entity A should now be state=merged.
-	recA, err := eng.store.GetEntityRecord(ctx, "Postgre SQL")
+	recA, err := eng.store.GetEntityRecord(ctx, ws, "Postgre SQL")
 	require.NoError(t, err)
 	require.NotNil(t, recA)
 	require.Equal(t, "merged", recA.State)
 	require.Equal(t, "PostgreSQL", recA.MergedInto)
 
 	// The two engrams previously linked to A should now also link to B.
-	ws := eng.store.ResolveVaultPrefix("default")
 	for _, rawID := range []string{id1, id2} {
 		ulid, err := storage.ParseULID(rawID)
 		require.NoError(t, err)

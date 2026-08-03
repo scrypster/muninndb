@@ -531,7 +531,7 @@ func (e *Engine) currencyEntityAnchor(ctx context.Context, ws [8]byte, a, b stor
 		if _, shared := entsA[name]; !shared {
 			return nil
 		}
-		rec, err := e.store.GetEntityRecord(ctx, name)
+		rec, err := e.store.GetEntityRecord(ctx, ws, name)
 		if err != nil || rec == nil {
 			return nil
 		}

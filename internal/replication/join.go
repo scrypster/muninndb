@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -14,6 +15,14 @@ import (
 
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
+
+// ErrEpochRegression is returned by the join path when a Cortex reports an
+// epoch BEHIND this node's own and offers no resnapshot. It means the Cortex
+// was rebuilt or restored from a backup while this node kept running: there is
+// no reconciliation path, and joining anyway is the silent divergence of #631.
+// The operator must wipe this node's data directory so it takes a fresh
+// snapshot (or roll the Cortex forward).
+var ErrEpochRegression = errors.New("replication: cortex epoch is behind this node and no resnapshot was offered")
 
 // JoinHandler handles incoming JoinRequests on the Cortex side.
 // It is safe for concurrent access.
@@ -349,7 +358,7 @@ func NewJoinClientWithDB(localNodeID, localAddr, clusterSecret string, epochStor
 }
 
 // Join connects to cortexAddr, sends a JoinRequest, and receives a JoinResponse.
-// On success it updates the local epoch via epochStore.ForceSet(resp.Epoch) and
+// On success it reconciles the local epoch with the Cortex's (see joinConn) and
 // returns a JoinResult. When the Cortex signals NeedsSnapshot, the snapshot is
 // received and written to the local DB before this method returns.
 // The caller should start a NetworkStreamer from JoinResult.StreamFromSeq+1.
@@ -535,9 +544,40 @@ func (c *JoinClient) joinConn(ctx context.Context, conn net.Conn) (JoinResult, e
 		return JoinResult{JoinResponse: resp}, fmt.Errorf("join: rejected by cortex: %s", resp.RejectReason)
 	}
 
-	// Update local epoch to match the Cortex's epoch.
-	if err := c.epochStore.ForceSet(resp.Epoch); err != nil {
-		return JoinResult{JoinResponse: resp}, fmt.Errorf("join: update epoch: %w", err)
+	// Epoch reconciliation (#631). Three cases, and the middle one is the bug
+	// this replaced: the old code called ForceSet unconditionally, which refused
+	// to go backwards but reported that refusal as nil, so a Cortex that had been
+	// rebuilt from an empty data dir was adopted as if nothing were wrong.
+	//
+	//  1. resp.Epoch > local  — normal. Advance.
+	//  2. resp.Epoch < local, no snapshot offered — the Cortex's election history
+	//     is SHORTER than ours, and nothing is going to reconcile our state with
+	//     its. Refuse the join loudly and let the operator decide; continuing is
+	//     the silent divergence #631 reported (lag 0, receives nothing).
+	//  3. resp.Epoch < local, snapshot offered — legitimate rebuild/restore. The
+	//     snapshot replaces our state wholesale, so we adopt the lower epoch —
+	//     but only AFTER it has actually landed (below), never before, so a
+	//     failed snapshot cannot leave us fenced at an epoch we never synced to.
+	localEpoch := c.epochStore.Load()
+	switch {
+	case resp.Epoch >= localEpoch:
+		if _, err := c.epochStore.Advance(resp.Epoch); err != nil {
+			return JoinResult{JoinResponse: resp}, fmt.Errorf("join: update epoch: %w", err)
+		}
+	case !resp.NeedsSnapshot:
+		slog.Error("join: REFUSED — Cortex epoch is behind this node's epoch and no resnapshot was offered",
+			"node", c.localNodeID,
+			"local_epoch", localEpoch,
+			"cortex_epoch", resp.Epoch,
+			"cortex", resp.CortexID,
+			"remedy", "the Cortex was rebuilt or restored from backup; stop this node, delete its data directory, and restart it so it takes a fresh snapshot",
+		)
+		return JoinResult{JoinResponse: resp}, fmt.Errorf(
+			"%w: cortex %q is at epoch %d but this node is at epoch %d and no resnapshot was offered; "+
+				"joining would diverge silently — wipe this node's data directory to rejoin",
+			ErrEpochRegression, resp.CortexID, resp.Epoch, localEpoch)
+	default:
+		// Case 3 — adoption deferred until the snapshot has landed.
 	}
 
 	// Register Cortex as a known peer in ConnManager.
@@ -557,6 +597,26 @@ func (c *JoinClient) joinConn(ctx context.Context, conn net.Conn) (JoinResult, e
 			return result, fmt.Errorf("join: receive snapshot: %w", err)
 		}
 		result.StreamFromSeq = snapshotSeq
+
+		// The snapshot has replaced local state, so the snapshot's seq — not
+		// whatever this node had applied before — is the authoritative baseline.
+		// Rebase the apply cursor onto it. Applier.lastApplied is in memory and
+		// survives WipeForResnapshot; leaving it high makes Apply() skip every
+		// entry the (rebuilt) Cortex ships while ReplicationLag reports 0 (#631).
+		if c.applier != nil {
+			if err := c.applier.ResetTo(snapshotSeq); err != nil {
+				return result, fmt.Errorf("join: rebase apply cursor onto snapshot: %w", err)
+			}
+		}
+
+		// Case 3 from the epoch switch above: the Cortex is at a LOWER epoch and
+		// has now replaced our state, so adopt its epoch. Doing this here rather
+		// than before the transfer means a failed snapshot leaves the epoch alone.
+		if resp.Epoch < localEpoch {
+			if err := c.epochStore.AdoptForSnapshot(resp.Epoch); err != nil {
+				return result, fmt.Errorf("join: adopt cortex epoch after resnapshot: %w", err)
+			}
+		}
 	}
 
 	return result, nil

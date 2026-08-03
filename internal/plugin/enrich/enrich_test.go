@@ -446,6 +446,32 @@ func TestEnrichService_AuthenticationFailureStillOpensCircuit(t *testing.T) {
 	}
 }
 
+// TestEnrichService_CallerCancellationDoesNotOpenCircuit pins #642: a caller
+// cancelling (client disconnect, deadline) must not trip the breaker that
+// exists to detect a bad *provider*. Before the fix, EnrichService.Enrich ran
+// the pipeline inside breaker.Do, which calls RecordFailure for ANY non-nil
+// error — including context.Canceled/DeadlineExceeded surfaced through
+// providerTransportError's plain %w wrap. A flurry of client timeouts would
+// therefore open the circuit and fail every OTHER caller's healthy-provider
+// enrichment with circuit.ErrOpen until the reset window elapsed.
+func TestEnrichService_CallerCancellationDoesNotOpenCircuit(t *testing.T) {
+	mock := NewMockLLMProvider()
+	mock.customComplete = func(context.Context, string, string) (string, error) {
+		return "", providerTransportError("fake", context.DeadlineExceeded)
+	}
+	pipeline := NewPipeline(mock, NewTokenBucketLimiter(100, 100))
+	pipeline.SetConfig(&config.PluginConfig{EnrichMode: "light"})
+	es := &EnrichService{provider: mock, pipeline: pipeline, breaker: circuit.New(1, time.Hour)}
+	eng := &storage.Engram{ID: storage.NewULID()}
+
+	if _, err := es.Enrich(context.Background(), eng); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Enrich error = %v, want context.DeadlineExceeded discoverable via errors.Is", err)
+	}
+	if _, err := es.Enrich(context.Background(), eng); errors.Is(err, circuit.ErrOpen) {
+		t.Fatalf("second Enrich error = %v, want the circuit still closed — a caller cancellation must never count as a provider failure", err)
+	}
+}
+
 func TestEnrichService_Close_Idempotent(t *testing.T) {
 	es, err := NewEnrichService("ollama://localhost:11434/test")
 	if err != nil {

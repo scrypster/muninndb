@@ -8,18 +8,6 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-// clusterEpochKey returns the Pebble key used to store the cluster election epoch.
-func clusterEpochKey() []byte {
-	return []byte{0x19, 0x03, 'c', 'l', 'u', 's', 't', 'e', 'r', '_', 'e', 'p', 'o', 'c', 'h'}
-}
-
-// nodeRoleKey returns the Pebble key used to store the last claimed node role.
-// Written before broadcasting CortexClaim during handoff so that a crash
-// between broadcasting and completing promotion is recoverable on restart.
-func nodeRoleKey() []byte {
-	return []byte{0x19, 0x03, 'n', 'o', 'd', 'e', '_', 'r', 'o', 'l', 'e'}
-}
-
 // EpochStore persists the cluster election epoch to Pebble.
 // Every time this node participates in an election, the epoch is incremented
 // and persisted before any votes are sent. This ensures a restarted node
@@ -76,22 +64,66 @@ func (s *EpochStore) CompareAndSet(expected, newEpoch uint64) (bool, error) {
 	return true, nil
 }
 
-// ForceSet unconditionally sets the epoch to the given value.
-// Used when accepting a CortexClaim with a higher epoch from another node.
-// Only updates if newEpoch > current (never go backwards).
-func (s *EpochStore) ForceSet(newEpoch uint64) error {
+// Advance moves the epoch forward and reports whether it actually moved.
+//
+// The epoch is monotonic by construction: a value less than or equal to the
+// current one is refused, never persisted, and reported as advanced=false.
+//
+// The bool return is load-bearing and is why this method replaced the former
+// ForceSet (#631). ForceSet also refused to go backwards, but it signalled the
+// refusal only by returning nil — indistinguishable from success — so the join
+// path adopted a rebuilt Cortex's lower epoch as if it had worked and diverged
+// silently. A caller that must not continue past a regression cannot ignore
+// this bool without saying so in code (principle #3: make the bad state
+// unrepresentable rather than documented).
+//
+// A backwards epoch is NOT always illegitimate: rebuilding or restoring the
+// Cortex from a backup genuinely lowers the cluster's epoch. That case is
+// legal only through AdoptForSnapshot, which names its own precondition.
+func (s *EpochStore) Advance(newEpoch uint64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if newEpoch <= s.current {
-		slog.Debug("epoch store: ignoring stale ForceSet", "current", s.current, "provided", newEpoch)
-		return nil // never go backwards
+		slog.Debug("epoch store: refusing non-advancing epoch", "current", s.current, "provided", newEpoch)
+		return false, nil
 	}
 
 	if err := s.persist(newEpoch); err != nil {
-		return err
+		return false, err
 	}
 
+	s.current = newEpoch
+	return true, nil
+}
+
+// AdoptForSnapshot sets the epoch to newEpoch even when that moves it BACKWARDS.
+// It is the only backwards path in the type, and its name is its precondition:
+// the caller must have just replaced this node's entire local state with a full
+// snapshot from the node whose epoch this is.
+//
+// This exists because WipeForResnapshot deliberately preserves cluster_epoch
+// (#531 PR3) — correct when re-snapshotting from a Cortex that is AHEAD, wrong
+// when the Cortex was rebuilt from scratch, which leaves the node holding a
+// fencing token from a cluster history that no longer exists (#631).
+//
+// Every other caller uses Advance. Splitting the two means a future edit cannot
+// regress an epoch by accident; it has to call a method whose name it would have
+// to justify in review.
+func (s *EpochStore) AdoptForSnapshot(newEpoch uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if newEpoch == s.current {
+		return nil
+	}
+	if newEpoch < s.current {
+		slog.Warn("epoch store: adopting a LOWER epoch after a full resnapshot — the Cortex was rebuilt or restored",
+			"previous", s.current, "adopted", newEpoch)
+	}
+	if err := s.persist(newEpoch); err != nil {
+		return err
+	}
 	s.current = newEpoch
 	return nil
 }

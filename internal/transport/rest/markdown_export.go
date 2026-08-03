@@ -97,7 +97,13 @@ func collectMarkdownNotes(ctx context.Context, eng EngineAPI, vault string) ([]m
 		}
 
 		for _, item := range resp.Engrams {
-			read, err := eng.Read(ctx, &ReadRequest{ID: item.ID, Vault: vault})
+			// ReadOnly: an export is observation, not use — it must not
+			// reinforce (COG-12 doctrine, extended to admin/export routes by
+			// #733). Without it, Engine.Read's implicit feedback signal and
+			// #682's AccessCount/LastAccess touch fire for every engram in
+			// the vault on every export, flattening ACT-R base-level and
+			// defeating decay.
+			read, err := eng.Read(ctx, &ReadRequest{ID: item.ID, Vault: vault, ReadOnly: true})
 			if err != nil {
 				return nil, fmt.Errorf("markdown export: read engram %s: %w", item.ID, err)
 			}
