@@ -318,7 +318,7 @@ curl http://127.0.0.1:8750/mcp/health
 | `MUNINN_MEM_LIMIT_GB` | `4` | GOMEMLIMIT in GB |
 | `MUNINN_GC_PERCENT` | `200` | GOGC tuning |
 | `MUNINN_CORS_ORIGINS` | `""` | Comma-separated allowed CORS origins |
-| `MUNINN_LOG_FILE` | `""` | Explicit log file path. When set, the daemon opens it directly (independent of inherited stderr) and `SIGHUP` reopens it — the standard rotation contract (rename, then signal) `logrotate`/`newsyslog` expect. Empty: logs go to inherited stderr and `SIGHUP` is a documented no-op (WARN logged) since there is no path to reopen. `muninn start` sets this automatically to `<dataDir>/muninn.log` |
+| `MUNINN_LOG_FILE` | `""` | Explicit log file path. When set, the daemon opens it directly (independent of inherited stderr) and `SIGHUP` reopens it — the standard rotation contract (rename, then signal) `logrotate`/`newsyslog` expect. Empty: logs go to inherited stderr and `SIGHUP` is a documented no-op (WARN logged) since there is no path to reopen. `muninn start` sets this automatically to `<dataDir>/muninn.log`. **Rotation via `SIGHUP` is POSIX-only (Linux/macOS).** Windows has no process-signal equivalent to deliver `SIGHUP` with, so there is no way to trigger a reopen there at all — this is a platform limitation of process signaling, not a gap in this feature. A Windows deployment that needs log rotation has to handle it outside this mechanism entirely (e.g. a scheduled service restart) |
 | `MUNINN_ACCESS_LOG` | on | Set to `"0"` to silence the REST per-request access log (`INFO msg=request ...`) independently of `--log-level` — so request chatter can be turned off without losing every other INFO line |
 | `MUNINN_MCP_URL` | `http://127.0.0.1:8750/mcp` | Override MCP endpoint used by `muninn mcp` proxy (OpenClaw) |
 | `MUNINN_MCP_TOOLSET` | `full` | Toolset advertised by MCP `tools/list`: `full` or `core` (every tool stays callable either way). On the daemon: the default for all clients. On the `muninn mcp` proxy: forwarded per-client as the `X-Muninn-Toolset` request header, which takes precedence over the daemon default. Unknown values fall back to the next layer with a logged warning |
@@ -353,6 +353,13 @@ curl http://127.0.0.1:8750/mcp/health
 `SIGHUP` rotation and `muninn logs` both work against it. Without that,
 `muninn logs` tells you where to look instead of guessing (`journalctl` for a
 systemd unit; check `StandardErrorPath` for a launchd plist).
+
+**On Windows**, `SIGHUP`-triggered reopen is not available — Windows has no
+process-signal mechanism to deliver it — so rename-then-signal rotation
+(`logrotate`'s idiom) does not work there. `muninn logs` and `--log-file`
+still work for locating and writing the log; rotation on Windows is not
+supported by this mechanism and is left to the operator's own tooling (e.g.
+a scheduled service restart).
 
 ---
 

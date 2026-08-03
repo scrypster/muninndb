@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -13,7 +14,21 @@ import (
 // signals it to reopen. Without a working Reopen, writes after the rename
 // keep landing in the renamed (now-orphaned) inode and the file at the
 // original path never receives anything.
+//
+// This is a POSIX rotation idiom: an open descriptor stays attached to its
+// inode across a rename, so the daemon can keep writing to the (now
+// unlinked-by-path) old file until Reopen swaps it for a fresh descriptor at
+// the original path. Windows takes a mandatory lock on an open file, so
+// os.Rename on a path the daemon still has open fails outright — there is no
+// equivalent to keep working. That is not a gap this test papers over: the
+// feature's *trigger* is SIGHUP, and SIGHUP has no Windows delivery mechanism
+// either (see the signal.Notify comment in server.go), so rename-then-signal
+// rotation is inherently POSIX-only, not merely untested on Windows. See
+// docs/self-hosting.md for the operator-facing statement of that limitation.
 func TestReopenableFile_ReopenAfterRename(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("rename-while-open rotation is a POSIX idiom: Windows takes a mandatory lock on open files, so this rename would fail outright, and SIGHUP — the trigger this mechanism relies on — cannot be delivered on Windows at all. See docs/self-hosting.md for the documented platform limitation.")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "muninn.log")
 
