@@ -112,6 +112,54 @@ func TestWrite_UpsertMode_EvolveClosesValidUntil(t *testing.T) {
 	}
 }
 
+// TestWrite_UpsertMode_PlainWriteNotAliasedToUpsertEngram pins the OTHER
+// direction of the identity-vs-content rule (#556 fix-round finding 2).
+// ctxKeySkipContentDedup already stops an upsert create from consulting the
+// content-hash index (so two distinct upsert KEYS with the same text stay
+// distinct engrams — TestWrite_UpsertMode_DistinctKeysSameContentStayDistinct).
+// But the delegated default Write path still POPULATED that index
+// unconditionally, so the content-hash entry ended up re-pointed at the
+// upsert-owned engram anyway. A later, wholly ORDINARY plain Write (no
+// upsert_mode) of byte-identical text then hit the default dedup path and
+// aliased itself onto the upsert engram — sharing its fate: the next time the
+// upsert key's document changed, the plain write's memory was soft-deleted
+// out from under its caller, who was never told anything happened. An upsert
+// engram's identity is its key, never its bytes, so it must not be a dedup
+// target for anything outside its own key's chain — in EITHER direction.
+//
+// RED: comment out the `if !skipContentDedup(ctx)` guard around the
+// PutContentHash call in Write (this file's production code, engine.go
+// ~line 1562) and this fails: the plain write returns the upsert engram's
+// own ULID instead of minting its own.
+func TestWrite_UpsertMode_PlainWriteNotAliasedToUpsertEngram(t *testing.T) {
+	eng, _, cleanup := testEnvWithStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	const shared = "text that an upsert key owns and a plain write later repeats"
+
+	up, err := eng.Write(ctx, &mbp.WriteRequest{
+		Concept: "c", Content: shared, UpsertMode: true, IdempotentID: "owner-doc",
+	})
+	if err != nil {
+		t.Fatalf("upsert create: %v", err)
+	}
+	if up.Hint != "upsert-created" {
+		t.Fatalf("upsert Hint: got %q, want upsert-created", up.Hint)
+	}
+
+	plain, err := eng.Write(ctx, &mbp.WriteRequest{Concept: "c", Content: shared})
+	if err != nil {
+		t.Fatalf("plain write: %v", err)
+	}
+	if plain.ID == up.ID {
+		t.Fatalf("plain write aliased onto the upsert-owned engram %s — an ordinary write must "+
+			"mint its own identity, not share fate with a key-addressed engram it never asked to join", up.ID)
+	}
+	if plain.Hint == "duplicate_content" {
+		t.Errorf("plain write Hint = %q — it deduped against the upsert engram's content-hash entry", plain.Hint)
+	}
+}
+
 // TestWrite_UpsertMode_AppendCredential pins SEC-15 across the three upsert
 // branches: an append-mode credential MAY create (upsert is the create path
 // there) and MAY re-submit identical content (a strict no-op), but MUST be

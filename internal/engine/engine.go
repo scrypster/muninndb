@@ -1558,9 +1558,27 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		return nil, fmt.Errorf("write engram: %w", err)
 	}
 
-	// Store content hash → engram ID mapping for future dedup lookups.
-	if err := e.store.PutContentHash(ctx, wsPrefix, contentHash, id); err != nil {
-		slog.Warn("engine: failed to store content hash", "id", id.String(), "err", err)
+	// Store content hash → engram ID mapping for future dedup lookups — unless
+	// this is an identity-addressed upsert create (skipContentDedup), whose
+	// identity is the caller's key, never the content. Populating the index
+	// for it made the dedup bypass one-directional (#556 fix-round finding
+	// 2): the LOOKUP above was suppressed for upsert creates, but leaving
+	// this PutContentHash unconditional still re-pointed the shared
+	// content-hash entry at the upsert-owned engram, so a later ORDINARY,
+	// non-upsert Write of the same text would alias onto it via the default
+	// dedup path — and then get soft-deleted out from under the plain
+	// caller the next time the upsert key's document changed, with the
+	// caller never told. Same fate-sharing harm the ctxKeySkipContentDedup
+	// doc comment describes, just in the other direction. Consequence: an
+	// upsert-created engram is now invisible to content dedup entirely (a
+	// plain Write of byte-identical text mints its own engram rather than
+	// reinforcing the upsert one) — correct, since an upsert engram's
+	// identity is its key, not its bytes, so it was never a legitimate dedup
+	// target for anything outside its own key's chain.
+	if !skipContentDedup(ctx) {
+		if err := e.store.PutContentHash(ctx, wsPrefix, contentHash, id); err != nil {
+			slog.Warn("engine: failed to store content hash", "id", id.String(), "err", err)
+		}
 	}
 	unlockContentHash() // release stripe lock — PutContentHash is done
 
@@ -1878,8 +1896,8 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 //
 // v1 scope retained: the delegated paths run the search-critical side effects
 // (HNSW insert for caller embeddings, FTS submit, vault-name, triggers +
-// counters on create). Upsert targets content-addressed re-ingest (e.g. the
-// go-rag bridge), which does not carry caller-enrichment / analytics hooks —
+// counters on create). Upsert targets content-addressed re-ingest (e.g. a
+// document-sync bridge), which does not carry caller-enrichment / analytics hooks —
 // EvolveAt carries the predecessor's entity links forward but does not run
 // contradiction/novelty/auto-associations. Hook parity is a follow-up if needed.
 func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
@@ -1922,7 +1940,24 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	if existingID != (storage.ULID{}) {
 		head, _ = e.store.GetEngram(ctx, wsPrefix, existingID)
 	}
-	if head == nil || head.State != storage.StateActive {
+	// A head that is Active but valid-time-expired (COG-19 not_true_since
+	// invalidation stamps ValidUntil without soft-deleting — State stays
+	// Active) is invisible to default recall exactly like a soft-deleted
+	// head, so it must be treated as a stale pointer, not a live target for
+	// the identical-content no-op below. Otherwise an agent that calls
+	// muninn_forget(not_true_since=...) — the documented way to retire a
+	// fact without deleting it — finds the SAME upsert key permanently stuck
+	// returning "upsert-identical" on every re-sync of unchanged content,
+	// recoverable only by the caller editing the text. Mirrors the sibling
+	// content-hash-dedup predicate at the default Write path (this file,
+	// ~line 1401): State != SoftDeleted && !IsExpired(now). Create, not
+	// evolve-from-the-expired-head: an EvolveAt here would supersede an
+	// engram that valid-time semantics already say is not the fact's current
+	// state, manufacturing a supersession edge from a fact that was declared
+	// no-longer-true, and would inherit ValidFrom/entity links across an
+	// invalidation the caller explicitly asserted — a plain create is the
+	// same shape as the ordinary stale-pointer branches just above it.
+	if head == nil || head.State != storage.StateActive || head.IsExpired(time.Now()) {
 		return e.upsertCreate(ctx, wsPrefix, vaultName, req, keyHash, start)
 	}
 
@@ -2015,9 +2050,18 @@ func (e *Engine) upsertCreate(ctx context.Context, wsPrefix [8]byte, vaultName s
 		return nil, fmt.Errorf("upsert create: parse id: %w", pErr)
 	}
 	// Pin the freshly created engram under the upsert key. Non-batched — the
-	// engram has already committed under the default Write path's batch; a
-	// crash here leaves a created engram with no 0x30 entry, which the next
-	// upsert on this key self-heals (treats it as a miss and creates again).
+	// engram has already committed under the default Write path's own batch,
+	// which this call cannot join (Write owns and commits its own batch
+	// internally). A crash in the sub-millisecond window between that commit
+	// and this PutUpsertKey call self-heals the POINTER ONLY: the next
+	// upsert on this key finds no 0x30 entry, treats it as a miss, and
+	// creates again. It does NOT heal the orphan — the first engram this
+	// call created is left Active with content-hash dedup bypassed
+	// (ctxKeySkipContentDedup) and nothing pointing at it, so nothing will
+	// ever supersede or reap it. That is structural while create delegates
+	// to Write, which owns its own batch — fixing it would mean folding the
+	// pointer write into the SAME batch as the engram write, which the
+	// current delegation-to-Write design doesn't do.
 	if err := e.store.PutUpsertKey(ctx, wsPrefix, keyHash, parsedID); err != nil {
 		return nil, fmt.Errorf("upsert create: pin key: %w", err)
 	}

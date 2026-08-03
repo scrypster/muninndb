@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -446,5 +447,100 @@ func TestWrite_UpsertMode_ConcurrentSameKey_OneHead(t *testing.T) {
 	}
 	if created != 1 {
 		t.Errorf("expected exactly 1 upsert-created (lock must serialise creates), got %d", created)
+	}
+}
+
+// TestWriteUpsert_ExpiredHeadTakesCreateBranch pins the fix for a valid-time
+// gap in writeUpsert's dispatch: it decided "is the head still usable" on
+// head.State != StateActive ALONE. COG-19 not_true_since invalidation
+// (muninn_forget's documented way to retire a fact without deleting it)
+// deliberately leaves State=Active and only stamps ValidUntil. An invalidated
+// head is therefore Active-but-invisible-to-default-recall, and the OLD
+// dispatch took the identical-content no-op branch on it, stranding the
+// upsert key: re-syncing the unchanged document returned "upsert-identical"
+// forever, and the fact could only return to default recall if the CALLER
+// EDITED THE TEXT — recovery conditional on a content change, not a policy
+// choice.
+//
+// The fix mirrors the sibling predicate the default (non-upsert) content-hash
+// dedup path already uses (this file's production code, engine.go ~line
+// 1401): a head must be both non-soft-deleted AND not IsExpired(now) to be a
+// live dedup target. An expired head takes the CREATE branch (not evolve —
+// see the writeUpsert doc comment for why: evolving would manufacture a
+// supersession edge from a fact already declared not-currently-true).
+//
+// "active_head_dedups" is the in-test control proving the ordinary
+// content-hash no-op path is untouched by this fix.
+func TestWriteUpsert_ExpiredHeadTakesCreateBranch(t *testing.T) {
+	tests := []struct {
+		name       string
+		invalidate bool
+		wantHint   string
+		wantNewID  bool
+	}{
+		{name: "active_head_dedups", invalidate: false, wantHint: "upsert-identical", wantNewID: false},
+		{name: "expired_head_recreates", invalidate: true, wantHint: "upsert-created", wantNewID: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			eng, store, cleanup := testEnvWithStore(t)
+			defer cleanup()
+			ctx := context.Background()
+			const key = "doc-valid-time"
+
+			createdAt := time.Now().Add(-2 * time.Hour).UTC()
+			resp1, err := eng.Write(ctx, &mbp.WriteRequest{
+				Concept: "c", Content: "unchanged text", UpsertMode: true,
+				IdempotentID: key, CreatedAt: &createdAt,
+			})
+			if err != nil {
+				t.Fatalf("initial upsert: %v", err)
+			}
+			if resp1.Hint != "upsert-created" {
+				t.Fatalf("initial Hint: got %q, want upsert-created", resp1.Hint)
+			}
+
+			if tc.invalidate {
+				notTrueSince := time.Now().Add(-time.Hour).UTC()
+				if _, err := eng.Forget(ctx, &mbp.ForgetRequest{
+					ID: resp1.ID, NotTrueSince: &notTrueSince,
+				}); err != nil {
+					t.Fatalf("Forget(not_true_since): %v", err)
+				}
+			}
+
+			// Re-sync the IDENTICAL, unchanged content — the ordinary re-ingest
+			// case (the sync tool has no reason to know the fact was invalidated).
+			resp2, err := eng.Write(ctx, &mbp.WriteRequest{
+				Concept: "c", Content: "unchanged text", UpsertMode: true, IdempotentID: key,
+			})
+			if err != nil {
+				t.Fatalf("re-sync upsert: %v", err)
+			}
+			if resp2.Hint != tc.wantHint {
+				t.Errorf("re-sync Hint: got %q, want %q", resp2.Hint, tc.wantHint)
+			}
+			if gotNew := resp2.ID != resp1.ID; gotNew != tc.wantNewID {
+				t.Errorf("re-sync minted new id = %v (id1=%s id2=%s), want %v", gotNew, resp1.ID, resp2.ID, tc.wantNewID)
+			}
+
+			ws := store.ResolveVaultPrefix("")
+			id2, _ := storage.ParseULID(resp2.ID)
+			pinned, err := store.GetUpsertKey(ctx, ws, sha256.Sum256([]byte(key)))
+			if err != nil {
+				t.Fatalf("GetUpsertKey: %v", err)
+			}
+			if pinned != id2 {
+				t.Errorf("upsert key not pinned to the re-sync result: got %x, want %x", pinned[:], id2[:])
+			}
+
+			head, err := store.GetEngram(ctx, ws, id2)
+			if err != nil {
+				t.Fatalf("GetEngram head: %v", err)
+			}
+			if head.IsExpired(time.Now()) {
+				t.Errorf("re-sync head is still expired — default recall remains permanently blind to this key")
+			}
+		})
 	}
 }
