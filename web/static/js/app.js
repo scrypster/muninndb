@@ -106,6 +106,7 @@ document.addEventListener('alpine:init', () => {
     clusterEnableLoading: false,
     clusterEnableError: null,
     clusterEnableProgress: [],
+    clusterRestartRequired: false,
     showEnableClusterConfirm: false,
 
     // Sub-tab nav
@@ -2347,9 +2348,22 @@ document.addEventListener('alpine:init', () => {
           const err = await resp.json().catch(() => ({ error: 'Enable failed' }));
           throw new Error(err.error || 'Enable failed');
         }
-        this.clusterEnableProgress = ['Initializing TLS...', 'Generating join token...', 'Starting heartbeat...'];
-        await this._loadClusterInfo();
-        this.clusterEnableProgress = [...this.clusterEnableProgress, 'Cluster active \u2713'];
+        const data = await resp.json().catch(() => ({}));
+        // Enabling clustering requires a restart (#628): the server persists
+        // cluster.yaml and answers 202 restart_required. It deliberately does
+        // not start a coordinator, because one built after boot has no
+        // replication hook and would replicate nothing while looking healthy.
+        // Do not claim "Cluster active" for a cluster that is not running.
+        if (data.restart_required) {
+          this.clusterRestartRequired = true;
+          this.clusterEnableProgress = [
+            'Configuration saved \u2713',
+            'Restart muninn on this node to start clustering',
+          ];
+        } else {
+          await this._loadClusterInfo();
+          this.clusterEnableProgress = ['Cluster active \u2713'];
+        }
       } catch (e) {
         this.clusterEnableError = e.message;
       } finally {

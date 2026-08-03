@@ -107,11 +107,6 @@ type Server struct {
 	// dataDir is the server's data directory, used for reading/writing plugin_config.json.
 	dataDir string
 
-	// coordinatorFactory, when set, is called by enableClusterRuntime to create and
-	// start a coordinator from a persisted ClusterConfig. If nil, config is persisted
-	// but the coordinator is not started until the next process restart.
-	coordinatorFactory func(ctx context.Context, cfg config.ClusterConfig) (*replication.ClusterCoordinator, error)
-
 	// coordinator is the optional cluster coordinator; nil when cluster is disabled.
 	coordinator *replication.ClusterCoordinator
 
@@ -409,35 +404,48 @@ func (s *Server) probeDBWritability() {
 	}
 }
 
-// SetCoordinatorFactory wires in a factory function that creates and starts a
-// ClusterCoordinator from a ClusterConfig. Must be called before Serve.
-func (s *Server) SetCoordinatorFactory(f func(context.Context, config.ClusterConfig) (*replication.ClusterCoordinator, error)) {
-	s.coordinatorFactory = f
-}
-
-// enableClusterRuntime persists the config and, if a coordinatorFactory is wired,
-// starts the coordinator. For Phase 1, if no factory is present, config is persisted
-// and the server reports success (coordinator starts on next restart).
-func (s *Server) enableClusterRuntime(ctx context.Context, cfg config.ClusterConfig) error {
-	if s.dataDir != "" {
-		if err := config.SaveClusterConfig(s.dataDir, cfg); err != nil {
-			return fmt.Errorf("persist config: %w", err)
-		}
-		// Reload after saving so auto-generated fields (NodeID) are populated
-		// before the coordinator is created. Without this, the coordinator
-		// starts with an empty NodeID and the node cannot rejoin after restart.
-		reloaded, err := config.LoadClusterConfig(s.dataDir)
-		if err != nil {
-			return fmt.Errorf("reload config after save: %w", err)
-		}
-		cfg = reloaded
+// enableClusterRuntime persists a cluster configuration. It deliberately does
+// NOT start a coordinator (#628).
+//
+// Clustering cannot be switched on in a running process, and the previous
+// attempt to do so produced the worst of the three available outcomes. The
+// storage layer's replication hook (storage.PebbleStoreConfig.RepLogAppend) is
+// captured when the PebbleStore is constructed at boot, and it is only
+// populated when cluster.yaml said Enabled at that moment. A coordinator built
+// afterwards therefore has a replication log that nothing ever appends to: the
+// node reports itself clustered, accepts Lobes, ships them a snapshot — and
+// every subsequent write it accepts is invisible to replication. It also never
+// received SetMOL, so it never prunes, and it registered joiners as voters
+// against a quorum the boot path would have computed differently.
+//
+// A half-initialised coordinator that looks enabled and cannot replicate is a
+// silently-wrong result, which is the failure class this project ranks worst.
+// Requiring a restart makes that state unrepresentable rather than merely
+// discouraged: there is no code path that constructs a coordinator outside boot.
+// The cost is one restart; the alternative was a replica that looks complete
+// and is not.
+//
+// The caller reports 202 Accepted with restart_required so the operator is told
+// plainly, instead of being congratulated on a cluster that is not running.
+func (s *Server) enableClusterRuntime(_ context.Context, cfg config.ClusterConfig) error {
+	if s.dataDir == "" {
+		return nil
 	}
-	if s.coordinatorFactory != nil {
-		coord, err := s.coordinatorFactory(ctx, cfg)
-		if err != nil {
-			return err
-		}
-		s.SetCoordinator(coord)
+	if err := config.SaveClusterConfig(s.dataDir, cfg); err != nil {
+		return fmt.Errorf("persist config: %w", err)
+	}
+	// Read the file back before reporting success. The restart is the only
+	// thing that starts clustering, so an unreadable cluster.yaml would turn
+	// "restart to activate" into a node that comes back up unclustered with no
+	// explanation. SaveClusterConfig fills auto-generated fields (NodeID);
+	// confirming they round-trip is what makes the promised restart honest.
+	saved, err := config.LoadClusterConfig(s.dataDir)
+	if err != nil {
+		return fmt.Errorf("reload config after save: %w", err)
+	}
+	if !saved.Enabled || saved.NodeID == "" {
+		return fmt.Errorf("persisted cluster config is incomplete (enabled=%v node_id=%q); a restart would not start clustering",
+			saved.Enabled, saved.NodeID)
 	}
 	return nil
 }

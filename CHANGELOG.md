@@ -11,6 +11,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cluster catch-up no longer spirals: a slow replica is not a dead one**
+  (#627). Every frame write was bounded by one fixed 5-second deadline — a
+  constant applied to a quantity measured somewhere else entirely, since the
+  frame may be a 40-byte heartbeat or a 1 MB snapshot chunk and the link may be
+  loopback or a laptop on a WAN tunnel. A replica that fell behind could not get
+  back: the receiver applied entries more slowly than the sender pushed, the
+  socket buffer filled, one write crossed 5 seconds, the stream died, the
+  replica rejoined further behind. Raising the constant only moves the cliff, so
+  the bound was replaced rather than retuned. A frame write now fails only when
+  the peer accepts **no bytes at all** for the idle timeout; the deadline resets
+  on every byte of forward progress, which makes it independent of frame size
+  and link speed. Two outer bounds keep that from becoming unbounded: a single
+  frame may not hold a connection's write slot beyond `sendMaxDuration`
+  (2 minutes) even while dribbling, and a caller that cannot get the write slot
+  within `sendSlotWait` gets `ErrPeerBusy` — the peer is busy, not dead, the
+  connection is left intact, and the shared heartbeat broadcast moves on instead
+  of blocking behind a multi-megabyte transfer.
+
+  A restarted replication stream also no longer restarts from sequence 0. It
+  resumes from the highest position the primary can prove the replica holds:
+  its last acknowledged sequence, or the snapshot sequence quoted in its join
+  response, whichever is higher. (The snapshot source is not redundant — the
+  snapshot receiver does not advance the replica's applier position, so a
+  freshly-snapshotted replica acknowledges a low sequence while holding a
+  complete database.) Previously the re-transfer volume tracked the size of the
+  log rather than the size of the lag. A stream that ends now logs where it
+  started, how far it got, and where the log is, so a stalled replica is visible
+  instead of indistinguishable from an idle one.
+
+- **Enabling clustering at runtime built a coordinator that could not
+  replicate** (#628). `POST /api/admin/cluster/enable` constructed and started a
+  cluster coordinator inside the running process. That coordinator could never
+  work: the storage layer's replication hook is captured when the Pebble store
+  is built at boot, and only when `cluster.yaml` already said enabled at that
+  moment. A node enabled this way reported itself clustered, accepted replicas
+  and shipped them a snapshot — and then appended **nothing** it wrote to the
+  replication log. It also never received the WAL handle, so it never pruned
+  (unbounded log growth), and it registered joiners as voters against a quorum
+  the boot path would have computed differently.
+
+  There is now no code path that constructs a coordinator outside boot. The
+  endpoint persists the configuration and answers **`202 Accepted`** with
+  `restart_required: true`, `enabled: false`, and a message saying so; the web
+  console shows a restart-required banner instead of "Cluster active". This is a
+  **behaviour change** for anyone scripting that endpoint: a successful call is
+  now 202, not 200, and clustering starts on the next restart of the node.
+
 - **An association edge can no longer outlive its endpoints** (#803). Hard
   deletes left the dead engram in the FTS and vector indexes, so the automatic
   association workers kept finding it and minting fresh edges to an ID that no

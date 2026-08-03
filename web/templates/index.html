@@ -2300,9 +2300,15 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
       <div x-show="clusterEnabled === false" style="display:flex;align-items:center;justify-content:center;min-height:16rem;">
         <div class="card-polished" style="padding:2rem;max-width:28rem;width:100%;">
           <h2 style="margin:0 0 0.375rem;font-size:1.125rem;font-weight:600;color:var(--text-primary);">Enable Cluster Mode</h2>
-          <p style="margin:0 0 1.5rem;font-size:0.875rem;color:var(--text-muted);">
+          <p style="margin:0 0 1rem;font-size:0.875rem;color:var(--text-muted);">
             Connect this node to a MuninnDB cluster for high availability and replication.
+            Saving this configuration requires a restart of this node before clustering starts.
           </p>
+
+          <!-- Restart-required banner -->
+          <div x-show="clusterRestartRequired" style="margin-bottom:1rem;padding:0.75rem;border-radius:0.375rem;background:rgba(234,179,8,0.1);color:#eab308;font-size:0.875rem;">
+            Cluster configuration saved. <strong>Restart muninn on this node</strong> to start clustering.
+          </div>
 
           <!-- Error banner -->
           <div x-show="clusterEnableError" style="margin-bottom:1rem;padding:0.75rem;border-radius:0.375rem;background:rgba(239,68,68,0.1);color:#ef4444;font-size:0.875rem;" x-text="clusterEnableError"></div>

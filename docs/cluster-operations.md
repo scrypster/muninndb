@@ -74,7 +74,7 @@ muninn start
 
 3. The primary bootstraps at epoch 0, starts an election, and becomes Cortex.
 
-**Or** enable cluster mode on a running node via REST:
+**Or** write the cluster configuration through REST, then restart the node:
 
 ```sh
 curl -X POST http://127.0.0.1:8475/api/admin/cluster/enable \
@@ -85,7 +85,18 @@ curl -X POST http://127.0.0.1:8475/api/admin/cluster/enable \
     "bind_addr": "0.0.0.0:8474",
     "cluster_secret": "your-secure-secret"
   }'
+# 202 Accepted
+# {"enabled":false,"configured":true,"restart_required":true,"role":"primary",
+#  "message":"cluster configuration saved. Restart muninn on this node ..."}
 ```
+
+> **Enabling clustering requires a restart.** The endpoint persists
+> `cluster.yaml` and answers `202 Accepted` with `restart_required: true`; it
+> does not start a coordinator. The storage layer's replication hook is wired
+> when the store is built at boot and only when clustering was already enabled
+> at that moment, so a coordinator started mid-process would report itself
+> clustered, accept replicas, hand them a snapshot — and replicate none of the
+> node's subsequent writes. Restart the node to activate clustering.
 
 ### Adding Replica Nodes
 

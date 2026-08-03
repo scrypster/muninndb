@@ -3547,7 +3547,15 @@ paths:
   /api/admin/cluster/enable:
     post:
       tags: [cluster]
-      summary: "Enable cluster mode on this node."
+      summary: "Persist cluster configuration on this node (restart required to activate)."
+      description: >
+        Saves cluster.yaml and returns 202 Accepted with restart_required=true.
+        Clustering is NOT started in the running process: the storage layer's
+        replication hook is wired when the store is built at boot, so a
+        coordinator created afterwards would report itself enabled and replicate
+        none of this node's writes. Restart muninn to activate clustering.
+        Returns 200 with enabled=true only when clustering is already running,
+        in which case the call is a no-op.
       security:
         - AdminSession: []
       requestBody:
@@ -3558,7 +3566,7 @@ paths:
               $ref: "#/components/schemas/EnableClusterRequest"
       responses:
         "200":
-          description: "Cluster enabled."
+          description: "Cluster was already running; no change."
           content:
             application/json:
               schema:
@@ -3567,6 +3575,24 @@ paths:
                   enabled:
                     type: boolean
                   role:
+                    type: string
+        "202":
+          description: "Configuration saved. Restart this node to start clustering."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                    description: "Always false — configured, not running."
+                  configured:
+                    type: boolean
+                  restart_required:
+                    type: boolean
+                  role:
+                    type: string
+                  message:
                     type: string
         "400":
           $ref: "#/components/responses/BadRequest"

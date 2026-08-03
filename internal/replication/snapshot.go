@@ -194,7 +194,7 @@ func (s *SnapshotSender) streamChunks(ctx context.Context, conn *PeerConn, snap 
 		if err != nil {
 			return fmt.Errorf("marshal chunk %d: %w", chunkIdx, err)
 		}
-		if err := conn.Send(mbp.TypeSnapChunk, payload); err != nil {
+		if err := sendBulk(ctx, conn, mbp.TypeSnapChunk, payload, "snapshot chunk"); err != nil {
 			return fmt.Errorf("send chunk %d: %w", chunkIdx, err)
 		}
 		return nil

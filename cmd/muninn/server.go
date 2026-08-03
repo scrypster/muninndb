@@ -1604,25 +1604,13 @@ func runServer() {
 		restServer.SetCoordinator(coordinator)
 	}
 
-	// Wire coordinator factory so the admin enable endpoint can start cluster
-	// at runtime (without a restart) when cluster.yaml is written via the UI/CLI.
-	restServer.SetCoordinatorFactory(func(_ context.Context, cfg plugincfg.ClusterConfig) (*replication.ClusterCoordinator, error) {
-		repLog := replication.NewReplicationLog(db)
-		applier := replication.NewApplier(db)
-		epochStore, err := replication.NewEpochStore(db)
-		if err != nil {
-			return nil, fmt.Errorf("create epoch store: %w", err)
-		}
-		coord := replication.NewClusterCoordinator(&cfg, repLog, applier, epochStore)
-		coord.OnBecameCortex = func(epoch uint64) {
-			log.Printf("[cluster] node promoted to Cortex at epoch %d", epoch)
-		}
-		coord.OnBecameLobe = func() {
-			log.Printf("[cluster] node demoted to Lobe")
-		}
-		startCoordinator(coord, cfg.BindAddr)
-		return coord, nil
-	})
+	// There is deliberately no runtime coordinator factory (#628). The storage
+	// layer's replication hook is captured in storeCfg.RepLogAppend above, and
+	// only when clustering was already enabled at boot. A coordinator created
+	// later would be attached to a replication log that nothing appends to —
+	// enabled-looking and unable to replicate a single write. POST
+	// /api/admin/cluster/enable persists the config and answers 202
+	// restart_required; the coordinator is built here, at boot, or not at all.
 
 	// Start GroupCommitter
 	go gc.Run(ctx)

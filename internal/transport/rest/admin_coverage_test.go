@@ -891,26 +891,8 @@ func TestApplyAndPersistSettings_WithDataDir(t *testing.T) {
 }
 
 // --- enableClusterRuntime ---
-
-func TestEnableClusterRuntime_NoFactory(t *testing.T) {
-	dir := t.TempDir()
-	srv := &Server{dataDir: dir}
-
-	err := srv.enableClusterRuntime(nil, config.ClusterConfig{
-		Enabled:  true,
-		NodeID:   "test",
-		BindAddr: ":0",
-		Role:     "primary",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	saved, _ := config.LoadClusterConfig(dir)
-	if !saved.Enabled {
-		t.Error("expected config to be persisted as enabled")
-	}
-}
+// See cluster_enable_restart_test.go: runtime enable persists configuration and
+// never constructs a coordinator (#628).
 
 // --- statusRecorder ---
 
