@@ -217,6 +217,15 @@ The ACTIVATE pipeline has **6 phases**:
 | Readiness probe | `GET /api/ready` | — | — |
 | Worker stats | `GET /api/workers` | — | — |
 
+`GET /api/workers` returns the three configured background-worker slots
+(`hebbian`, `contradict`, and `confidence`). Each retains the existing numeric
+`state` and telemetry counters for compatibility and also includes an additive
+symbolic `status` (`active`, `idle`, `dormant`, `stopped`, `disabled`, or
+`unknown`) plus `enabled`. Numeric `state: 0` can mean active or disabled, so
+clients must check `enabled` first and use `status` for lifecycle state. Dormant
+workers are enabled and wake when qualifying work arrives. ACT-R temporal
+scoring is query-time and is not a worker entry.
+
 ---
 
 ## Cognitive Features (what makes it "think")

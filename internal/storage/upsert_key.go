@@ -37,7 +37,7 @@ func (ps *PebbleStore) GetUpsertKey(ctx context.Context, wsPrefix [8]byte, keyHa
 // the upsert orchestrator (Engine.writeUpsert) to pin a freshly created engram
 // to sha256(idempotent_id) after the default Write path lands it. Mirrors
 // PutContentHash (content_hash.go) in shape — a simple, non-batched Set of the
-// 0x2E pointer. The re-point on a content-change evolve is queued into the
+// 0x2F pointer. The re-point on a content-change evolve is queued into the
 // evolve's own batch via StoreBatch.RepointUpsertKey so it commits atomically
 // with the successor; this method is only for the create / stale-recreate path
 // where the engram has just been written under the default Write path's batch.

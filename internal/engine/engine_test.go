@@ -19,7 +19,9 @@ import (
 
 // testEnv wires up a fully functional Engine with real storage and FTS,
 // using a temporary directory that is cleaned up after the test.
-func testEnv(t *testing.T) (*Engine, func()) {
+// testEnv takes testing.TB so benchmarks (BenchmarkRecallContradictionGate)
+// can build the same environment tests do.
+func testEnv(t testing.TB) (*Engine, func()) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "muninndb-engine-test-*")
 	if err != nil {
@@ -578,7 +580,7 @@ func TestEngineGetContradictions(t *testing.T) {
 	ws := eng.store.VaultPrefix("test")
 	id1 := storage.ULID([16]byte{1})
 	id2 := storage.ULID([16]byte{2})
-	_ = eng.store.FlagContradiction(ctx, ws, id1, id2)
+	_, _ = eng.store.FlagContradiction(ctx, ws, id1, id2)
 
 	pairs, err := eng.GetContradictions(ctx, "test")
 	if err != nil {

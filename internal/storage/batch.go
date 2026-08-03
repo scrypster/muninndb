@@ -39,8 +39,10 @@ type pebbleStoreBatch struct {
 // batchPendingItem holds the data required for post-commit vault counter and
 // provenance work for a single engram queued into the batch.
 type batchPendingItem struct {
-	wsPrefix [8]byte
-	eng      *Engram
+	wsPrefix  [8]byte
+	eng       *Engram
+	operation string              // provenance verb: "create" (default), "evolve", etc.
+	details   *provenance.Details // optional per-operation "what changed and why"; nil for plain creates
 }
 
 // NewBatch returns a new StoreBatch that queues engram writes atomically.
@@ -54,7 +56,28 @@ func (ps *PebbleStore) NewBatch() StoreBatch {
 
 // WriteEngram queues all keys for eng into the batch (does not commit).
 // It applies the same defaulting and encoding logic as PebbleStore.WriteEngram.
+// The provenance entry records Operation "create" — use WriteEngramOp for
+// batch writes that are not creating a brand-new engram.
 func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *Engram) error {
+	return b.WriteEngramOp(ctx, wsPrefix, eng, "create")
+}
+
+// WriteEngramOp queues all keys for eng into the batch exactly like
+// WriteEngram, except the eventual provenance entry (written post-commit,
+// see Commit below) records operation as the originating verb instead of
+// always "create". Evolve's successor engram is queued through this so its
+// provenance reads "evolve", not "create" (the write-path verb was
+// previously discarded — see issue tracked in the provenance-verb work).
+func (b *pebbleStoreBatch) WriteEngramOp(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string) error {
+	return b.WriteEngramOpDetails(ctx, wsPrefix, eng, operation, nil)
+}
+
+// WriteEngramOpDetails is WriteEngramOp with an optional operation-specific
+// details payload attached to the provenance entry. Evolve uses it to record
+// what the successor replaced, why, and from which valid-time instant — the
+// verb alone said an update happened but never what changed or why. nil details
+// is exactly WriteEngramOp: no payload is recorded, and none is invented.
+func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string, details *provenance.Details) error {
 	// Apply defaults — same as PebbleStore.WriteEngram.
 	if eng.ID == (ULID{}) {
 		if !eng.CreatedAt.IsZero() {
@@ -80,6 +103,16 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 	}
 	if eng.LastAccess.IsZero() {
 		eng.LastAccess = eng.CreatedAt
+	}
+
+	// STO-12: the inline-Associations loop below is a creator, checked before
+	// anything is queued. Engrams already queued in this batch count as live —
+	// same exception, and the same queue-order requirement, as
+	// pebbleStoreBatch.WriteAssociation.
+	if err := b.ps.checkInlineAssocTargets(wsPrefix, [16]byte(eng.ID), eng.Associations, func(id [16]byte) bool {
+		return b.batchQueuedEngram(wsPrefix, id)
+	}); err != nil {
+		return err
 	}
 
 	erfEng := toERFEngram(eng)
@@ -144,16 +177,27 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 	laKey := keys.LastAccessIndexKey(wsPrefix, laMillis, id16)
 	b.batch.Set(laKey, nil, nil)
 
-	b.pendingItems = append(b.pendingItems, batchPendingItem{wsPrefix: wsPrefix, eng: eng})
+	b.pendingItems = append(b.pendingItems, batchPendingItem{wsPrefix: wsPrefix, eng: eng, operation: operation, details: details})
 	return nil
 }
 
 // WriteAssociation queues forward (0x03), reverse (0x04), and weight-index (0x14) keys
 // for the association into the batch. Uses the same key-building and value-encoding
 // logic as PebbleStore.WriteAssociation.
+//
+// The endpoint-liveness guard (STO-12) here must also count engrams queued
+// EARLIER IN THIS BATCH as live, because both in-tree callers do exactly that:
+// RememberChild (tree.go) and Evolve (engine.go) queue WriteEngram and
+// WriteAssociation into the same uncommitted batch so the engram and its edge
+// land atomically. Their 0x01 key is not visible to a Pebble read until
+// Commit, so a DB-read-only guard would reject every legitimate atomic
+// child-append and every evolve. See batchQueuedEngram.
 func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src, dst ULID, assoc *Association) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
+	}
+	if err := b.checkEndpointsLive(ws, [16]byte(src), [16]byte(dst)); err != nil {
+		return err
 	}
 	// Seed PeakWeight from Weight if not set (new association initial write).
 	peak := assoc.PeakWeight
@@ -166,6 +210,30 @@ func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src
 	var weightBuf [4]byte
 	binary.BigEndian.PutUint32(weightBuf[:], math.Float32bits(assoc.Weight))
 	b.batch.Set(keys.AssocWeightIndexKey(ws, [16]byte(src), [16]byte(dst)), weightBuf[:], nil)
+	return nil
+}
+
+// batchQueuedEngram reports whether an engram with this (ws, id) has already
+// been queued into this batch by WriteEngram/WriteEngramOp/WriteEngramOpDetails
+// — i.e. its 0x01 key is pending in the batch but not yet readable from Pebble.
+func (b *pebbleStoreBatch) batchQueuedEngram(ws [8]byte, id [16]byte) bool {
+	for _, it := range b.pendingItems {
+		if it.eng != nil && it.wsPrefix == ws && [16]byte(it.eng.ID) == id {
+			return true
+		}
+	}
+	return false
+}
+
+// checkEndpointsLive is checkEndpointsLive on the store, widened to accept
+// engrams queued in this same uncommitted batch.
+func (b *pebbleStoreBatch) checkEndpointsLive(ws [8]byte, src, dst [16]byte) error {
+	if !b.batchQueuedEngram(ws, src) && !b.ps.engramExists(ws, src) {
+		return fmt.Errorf("%w: source %s", ErrDanglingEndpoint, ULID(src).String())
+	}
+	if !b.batchQueuedEngram(ws, dst) && !b.ps.engramExists(ws, dst) {
+		return fmt.Errorf("%w: target %s", ErrDanglingEndpoint, ULID(dst).String())
+	}
 	return nil
 }
 
@@ -356,11 +424,16 @@ func (b *pebbleStoreBatch) Commit() error {
 		}
 
 		if b.ps.provWork != nil {
+			op := item.operation
+			if op == "" {
+				op = "create" // defensive default; WriteEngram/WriteEngramOp always set this
+			}
 			b.ps.provWork.Submit(ws, eng.ID, provenance.ProvenanceEntry{
 				Timestamp: eng.CreatedAt,
 				Source:    provenance.SourceHuman,
 				AgentID:   eng.CreatedBy,
-				Operation: "create",
+				Operation: op,
+				Details:   item.details,
 			})
 		}
 	}

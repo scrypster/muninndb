@@ -17,8 +17,9 @@ const mcpInstructions = `MuninnDB is a long-term memory server for AI agents. ` 
 	`in a shared vault it is vault-global, so use muninn_recall scoped to your per-user tag instead ` +
 	`(muninn_guide states whether this vault is shared, under Vault Configuration). ` +
 	`Store with muninn_remember (include type, summary, entities). ` +
-	`Update with muninn_evolve, not forget+remember. ` +
-	`Keep memories atomic — one concept each. ` +
+	`You are this memory's curator, not a static store: the moment you write is the moment you know something, so it is the moment to reconcile. ` +
+	`Before adding a fact, recall what's related — if your new knowledge corrects, sharpens, or supersedes an existing memory, muninn_evolve that one instead of adding a rival copy (evolve supersedes and retires the old version; a second muninn_remember leaves a stale duplicate competing in recall). ` +
+	`Reserve muninn_remember for genuinely new facts. Keep memories atomic — one concept each. ` +
 	`Call muninn_guide for the full reference.`
 
 // apiKeyValidator is the subset of auth.Store used by MCP for vault key auth.
@@ -145,7 +146,25 @@ func resolveVault(pinnedVault string, args map[string]any) (vault string, errMsg
 	if hasArg && argVault != "" {
 		return argVault, ""
 	}
-	return "default", ""
+	return defaultVaultName, ""
+}
+
+// defaultVaultName is the vault a request with no pinned vault and no explicit
+// `vault` argument resolves to.
+const defaultVaultName = "default"
+
+// joinHints appends one hint to another with a single separating space,
+// tolerating an empty base. Response hints accumulate from several
+// independent sources and none of them may clobber another.
+func joinHints(base, extra string) string {
+	switch {
+	case extra == "":
+		return base
+	case base == "":
+		return extra
+	default:
+		return base + " " + extra
+	}
 }
 
 // isMutatingTool returns true for MCP tools that write, modify, or delete data.

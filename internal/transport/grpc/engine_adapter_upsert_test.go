@@ -18,7 +18,7 @@ import (
 // same idempotent_id + upsert_mode must thread into the upsert orchestrator.
 // Rev 2 semantics: the first creates (Hint="upsert-created"); the second with
 // CHANGED content evolves the head — successor gets a new ULID, predecessor is
-// superseded (soft-deleted), and the durable 0x2E forward index is re-pointed
+// superseded (soft-deleted), and the durable 0x2F forward index is re-pointed
 // to the successor atomically. The upsert path is nil-safe for the engine's
 // ancillary fields (hnsw/fts/triggers/coherence are nil-checked), so a
 // Store-only EngineConfig suffices.

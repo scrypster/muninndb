@@ -13,13 +13,13 @@ import (
 )
 
 // TestWrite_UpsertMode_CreateThenEvolve verifies the Rev 2 upsert orchestrator
-// end-to-end. The 0x2E forward index maps the upsert key to the CURRENT HEAD of
+// end-to-end. The 0x2F forward index maps the upsert key to the CURRENT HEAD of
 // the chain (never a fixed engram), so:
 //   - first upsert (miss) creates a fresh engram, pins it → "upsert-created";
 //   - second upsert with CHANGED content evolves the head (new ULID, predecessor
-//     superseded) and atomically re-points 0x2E to the successor → "upsert-evolved".
+//     superseded) and atomically re-points 0x2F to the successor → "upsert-evolved".
 //
-// After the evolve, the 0x2E pointer targets the successor, recall sees only the
+// After the evolve, the 0x2F pointer targets the successor, recall sees only the
 // successor (the predecessor is soft-deleted), and the supersedes association
 // links successor → predecessor. The storage-layer primitives themselves
 // (GetUpsertKey, PutUpsertKey, StoreBatch.RepointUpsertKey) are pinned in
@@ -61,7 +61,7 @@ func TestWrite_UpsertMode_CreateThenEvolve(t *testing.T) {
 	id1, _ := storage.ParseULID(resp1.ID)
 	id2, _ := storage.ParseULID(resp2.ID)
 
-	// The 0x2E pointer now targets the SUCCESSOR (the evolve re-pointed it in
+	// The 0x2F pointer now targets the SUCCESSOR (the evolve re-pointed it in
 	// the same atomic batch that wrote the successor).
 	keyHash := sha256.Sum256([]byte("doc-1"))
 	pinned, err := store.GetUpsertKey(ctx, ws, keyHash)
@@ -144,7 +144,7 @@ func TestWrite_UpsertMode_IdenticalContent_NoOp(t *testing.T) {
 		t.Errorf("identical should return the same id: got %s, want %s", resp2.ID, resp1.ID)
 	}
 
-	// No successor was minted — the 0x2E pointer still targets the original.
+	// No successor was minted — the 0x2F pointer still targets the original.
 	ws := store.ResolveVaultPrefix("")
 	id1, _ := storage.ParseULID(resp1.ID)
 	pinned, _ := store.GetUpsertKey(ctx, ws, sha256.Sum256([]byte("doc-same")))
@@ -153,7 +153,7 @@ func TestWrite_UpsertMode_IdenticalContent_NoOp(t *testing.T) {
 	}
 }
 
-// TestWrite_UpsertMode_StalePointerSoftDeleted_Recreates: when the 0x2E entry
+// TestWrite_UpsertMode_StalePointerSoftDeleted_Recreates: when the 0x2F entry
 // points at a non-Active (soft-deleted) head, the orchestrator must treat it as
 // stale and create a fresh engram + re-pin the pointer — never evolve into a
 // tombstone (RedTeam #556 Change-2: silent data loss otherwise).
@@ -171,7 +171,7 @@ func TestWrite_UpsertMode_StalePointerSoftDeleted_Recreates(t *testing.T) {
 	id1, _ := storage.ParseULID(resp1.ID)
 	ws := store.ResolveVaultPrefix("")
 
-	// Soft-delete the head → the 0x2E entry now points at a tombstone.
+	// Soft-delete the head → the 0x2F entry now points at a tombstone.
 	if err := store.SoftDelete(ctx, ws, id1); err != nil {
 		t.Fatalf("soft-delete head: %v", err)
 	}
@@ -208,9 +208,9 @@ func TestWrite_UpsertMode_StalePointerSoftDeleted_Recreates(t *testing.T) {
 	}
 }
 
-// TestWrite_UpsertMode_StalePointerHardDeleted_Recreates: when the 0x2E entry
+// TestWrite_UpsertMode_StalePointerHardDeleted_Recreates: when the 0x2F entry
 // points at a hard-deleted/absent engram (Forget removed 0x01, or ClearVault
-// left 0x2E dangling), GetEngram returns (nil, ErrNotFound); the orchestrator
+// left 0x2F dangling), GetEngram returns (nil, ErrNotFound); the orchestrator
 // must treat it as stale and recreate rather than error forever.
 func TestWrite_UpsertMode_StalePointerHardDeleted_Recreates(t *testing.T) {
 	eng, store, cleanup := testEnvWithStore(t)
@@ -226,7 +226,7 @@ func TestWrite_UpsertMode_StalePointerHardDeleted_Recreates(t *testing.T) {
 	id1, _ := storage.ParseULID(resp1.ID)
 	ws := store.ResolveVaultPrefix("")
 
-	// Hard-delete the pinned engram. DeleteEngram does NOT sweep 0x2E, so the
+	// Hard-delete the pinned engram. DeleteEngram does NOT sweep 0x2F, so the
 	// forward-index entry → id1 now dangles.
 	if err := store.DeleteEngram(ctx, ws, id1); err != nil {
 		t.Fatalf("DeleteEngram head: %v", err)
@@ -350,7 +350,7 @@ func TestWriteBatch_Upsert_RoutesPerItem(t *testing.T) {
 
 // TestWrite_UpsertMode_ConcurrentSameKey_OneHead is the core concurrency proof:
 // N goroutines Write the same upsert key at once. The upsertKeyLock must
-// serialise them so the final 0x2E pointer targets exactly one Active head
+// serialise them so the final 0x2F pointer targets exactly one Active head
 // along a single chain — each write either creates (the first), evolves (the
 // rest with changed content), or no-ops (the rest with identical content). No
 // goroutine errors, no orphans pinned. Run with -race.

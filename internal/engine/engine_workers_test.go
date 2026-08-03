@@ -3,20 +3,21 @@ package engine
 import (
 	"context"
 	"testing"
+
+	"github.com/scrypster/muninndb/internal/cognitive"
 )
 
 // TestWorkerStats_ReturnsWithoutPanic verifies that WorkerStats() returns without
-// panicking. In the test environment, all cognitive workers are nil, so all
-// WorkerStats fields should be zero-valued.
+// panicking. In the test environment, all cognitive workers are nil, so the
+// response must identify them as unconfigured without losing legacy counters.
 func TestWorkerStats_ReturnsWithoutPanic(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 
-	// testEnv wires nil hebbianWorker, contradictWorker, and confidenceWorker,
-	// so WorkerStats should return zero-value EngineWorkerStats.
+	// testEnv wires nil hebbianWorker, contradictWorker, and confidenceWorker.
 	stats := eng.WorkerStats()
 
-	// In test env workers are nil — all fields must be the zero value.
+	// Existing counters remain zero for compatibility.
 	if stats.Hebbian.Processed != 0 {
 		t.Errorf("Hebbian.Processed = %d, want 0 (nil worker in test env)", stats.Hebbian.Processed)
 	}
@@ -28,6 +29,16 @@ func TestWorkerStats_ReturnsWithoutPanic(t *testing.T) {
 	}
 	if stats.Hebbian.Errors != 0 {
 		t.Errorf("Hebbian.Errors = %d, want 0", stats.Hebbian.Errors)
+	}
+	for name, worker := range map[string]cognitive.WorkerStats{
+		"hebbian": stats.Hebbian, "contradict": stats.Contradict, "confidence": stats.Confidence,
+	} {
+		if worker.Enabled {
+			t.Errorf("%s.Enabled = true for nil worker", name)
+		}
+		if worker.Status != "disabled" {
+			t.Errorf("%s.Status = %q, want disabled", name, worker.Status)
+		}
 	}
 }
 

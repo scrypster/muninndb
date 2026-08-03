@@ -38,7 +38,7 @@ func (m *ltpMockStore) GetAssocWeight(_ context.Context, _ [8]byte, src, dst [16
 	return m.weights[pairKeyBytes(src, dst)], nil
 }
 
-func (m *ltpMockStore) DecayAssocWeights(_ context.Context, _ [8]byte, _ float64, _ float32, _ float64) (int, error) {
+func (m *ltpMockStore) DecayAssocWeights(_ context.Context, _ [8]byte, _ time.Duration, _ float32, _ float64) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.decayed++

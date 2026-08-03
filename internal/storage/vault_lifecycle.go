@@ -33,7 +33,8 @@ var clearVaultDataPrefixes = []byte{
 	prefix.EvolveRepairMark,  // cleared vault has nothing to repair; next boot re-scans and re-marks
 	prefix.RawTagRange,       // S1 ordered raw-tag index; must not resurrect on vault-name reuse
 	prefix.ProspectiveIntent, // armed intentions (THE PUSH); a cleared vault must not keep firing notices
-	prefix.UpsertKey,         // upsert forward-index pins — must not outlive a cleared vault
+	prefix.AssocWeightRepairMark, // a cleared vault has no associations left to repair
+	prefix.UpsertKey,            // upsert forward-index pins — must not outlive a cleared vault
 }
 
 // ClearVault deletes all data keys for a vault using Pebble range tombstones.
@@ -50,7 +51,7 @@ var clearVaultDataPrefixes = []byte{
 //  4. Evict all in-memory caches (L1, assocCache, metaCache, recentActiveCache).
 //
 // Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17,
-// 0x20–0x22, 0x24–0x2E
+// 0x20–0x22, 0x24–0x2F
 // Prefixes NOT cleared (global or name keys):
 //   - 0x0E vault meta key (preserved by Clear, deleted by DeleteVaultNameOnly)
 //   - 0x0F name index    (global by name hash, deleted by DeleteVaultNameOnly)
@@ -132,6 +133,11 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	for _, k := range ps.assocCache.Keys() {
 		if [8]byte(k[:8]) == ws {
 			ps.assocCache.Remove(k)
+		}
+	}
+	for _, k := range ps.revAssocCache.Keys() {
+		if [8]byte(k[:8]) == ws {
+			ps.revAssocCache.Remove(k)
 		}
 	}
 

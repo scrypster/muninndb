@@ -57,6 +57,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"DreamStateKey", DreamStateKey([8]byte{1, 2, 3, 4, 5, 6, 7, 8})},
 		{"LeaseKey", LeaseKey(ws, id)},
 		{"EvolveRepairMarkKey", EvolveRepairMarkKey(ws)},
+		{"AssocWeightRepairMarkKey", AssocWeightRepairMarkKey(ws)},
 	}
 
 	seen := make(map[byte]string)
@@ -332,8 +333,8 @@ func TestUpsertKeyKey_Layout(t *testing.T) {
 	if len(key) != 41 {
 		t.Fatalf("expected 41 bytes, got %d", len(key))
 	}
-	if key[0] != 0x2E {
-		t.Errorf("prefix byte: got 0x%02X, want 0x2E", key[0])
+	if key[0] != 0x2F {
+		t.Errorf("prefix byte: got 0x%02X, want 0x2F", key[0])
 	}
 	if !bytes.Equal(key[1:9], ws[:]) {
 		t.Error("ws mismatch")
@@ -424,6 +425,7 @@ func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
 		{"Lease", LeaseKey(ws, id16)[0], prefix.Lease},
 		{"EvolveRepairMark", EvolveRepairMarkKey(ws)[0], prefix.EvolveRepairMark},
 		{"UpsertKey", UpsertKeyKey(ws, id32)[0], prefix.UpsertKey},
+		{"AssocWeightRepairMark", AssocWeightRepairMarkKey(ws)[0], prefix.AssocWeightRepairMark},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

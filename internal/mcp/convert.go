@@ -33,10 +33,37 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 	// May, now 11" narration comes from the payload alone. The annotate=true path
 	// augments this same struct with staleness/conflicts/provenance.
 	var annotations *MemoryAnnotations
-	if item.SupersededBy != "" || item.CurrentVersion != "" {
+	// SupersededBy/CurrentVersion (asserted) and PossiblySupersededBy/
+	// VersionCluster/NewestOfCluster (heuristic, never an authority) are all
+	// always-on; annotate=true only augments this struct further below.
+	if item.SupersededBy != "" || item.CurrentVersion != "" ||
+		item.PossiblySupersededBy != "" || item.VersionCluster != "" || item.NewestOfCluster ||
+		item.SubstitutedFor != "" || item.UnresolvedContradiction != nil {
 		annotations = &MemoryAnnotations{
-			SupersededBy:   item.SupersededBy,
-			CurrentVersion: item.CurrentVersion,
+			SupersededBy:         item.SupersededBy,
+			CurrentVersion:       item.CurrentVersion,
+			PossiblySupersededBy: item.PossiblySupersededBy,
+			VersionCluster:       item.VersionCluster,
+			NewestOfCluster:      item.NewestOfCluster,
+			ClusterSize:          item.ClusterSize,
+			// COG-28 (#763): asserted substitution provenance. Always-on for
+			// the same reason superseded_by is — an agent must never be handed
+			// a row admitted by a DIFFERENT memory's match without being told.
+			SubstitutedFor:    item.SubstitutedFor,
+			ChainTruncated:    item.ChainTruncated,
+			HeadNotIndexedYet: item.HeadNotIndexedYet,
+			// COG-29 (#764): asserted, unresolved declared contradiction.
+			// Always-on — this row's score was demoted because of it, so
+			// omitting it would leave the number unexplained.
+			UnresolvedContradiction: item.UnresolvedContradiction,
+		}
+		if b := item.SubstitutionBasis; b != nil {
+			annotations.SubstitutionBasis = &SubstitutionBasis{
+				AbsoluteScore:      roundScore(b.AbsoluteScore),
+				ContentMatch:       roundScore(b.ContentMatch),
+				SemanticSimilarity: roundScore(b.SemanticSimilarity),
+				FullTextRelevance:  roundScore(b.FullTextRelevance),
+			}
 		}
 	}
 	m := Memory{
@@ -49,8 +76,19 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		VectorScore:    roundScore(item.ScoreComponents.SemanticSimilarity),
 		VectorScoreRaw: roundScore(item.ScoreComponents.SemanticSimilarityRaw),
 		EntityBoost:    roundScore(item.ScoreComponents.EntityBoost),
-		Confidence:     item.Confidence,
-		Why:            item.Why,
+		// #773: the honest, cross-query-comparable quantities. They were
+		// computed on every row and mapped onto MBP/REST, and this function —
+		// the ONLY path from an activation row to an MCP agent — dropped both.
+		AbsoluteScore: roundScore(item.ScoreComponents.AbsoluteScore),
+		ContentMatch:  roundScore(item.ScoreComponents.ContentMatch),
+		// #773: the band, TOP-LEVEL. Never fold this into the annotations
+		// block below — that block is allocated behind a predicate, and a
+		// field guarded by it silently vanishes for any row that carries no
+		// other annotation (#764).
+		RelevanceBand:      item.RelevanceBand,
+		RelevanceBandBasis: item.RelevanceBandBasis,
+		Confidence:         item.Confidence,
+		Why:                item.Why,
 		// Map the lifecycle state label the same way the read path does (#502).
 		State: storage.LifecycleState(item.State).String(),
 		// Type mirrors the vocabulary muninn_remember accepts (storage.ParseMemoryType).

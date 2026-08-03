@@ -1,15 +1,91 @@
 package mcp
 
+// entitiesArrayDescription and entityItemsSchema define THE MIDDLE GEAR between
+// a bare muninn_remember(content) — ~20 tokens, no concept, no entities, and
+// invisible to every entity-based tool — and a fully-declared write, which costs
+// roughly 8x the content in JSON. Measured on a 4,216-engram corpus, only 4.81%
+// of writes carried any declaration and 29.9% carried an entity, because under
+// time pressure the cheap path is the path taken.
+//
+// Two cheaper gears, in ascending order of cheapness:
+//
+//   - a BARE STRING name: ["PostgreSQL","Auth Service"]. The server resolves the
+//     type from the vault's own entity table (see entityTypeResolver). ~15 extra
+//     tokens for a whole entity set.
+//   - [[markup]] in the content itself: ~2 tokens per entity, no JSON at all.
+//
+// The object form is unchanged and still wins wherever it is supplied: a
+// declared type is never substituted (principle #1). `type` is deliberately NOT
+// required — requiring it is the same class of client-side hard rejection the
+// type enum was, where a caller who could not classify an entity dropped the
+// whole entity, and that cost ~64pp of measured entity coverage.
+const entitiesArrayDescription = "Entities mentioned in this memory. Providing these skips background entity extraction. " +
+	"CHEAPEST FORM: a bare string name — [\"PostgreSQL\", \"Auth Service\"] — the server resolves each type from entities it already knows " +
+	"(an unfamiliar name is stored as type \"other\", and the response says so). Full form: [{\"name\":\"PostgreSQL\",\"type\":\"database\"}]. " +
+	"Both forms may be mixed in one array. Always include entities you can name, even untyped — entity coverage is what makes a memory findable."
+
+func entityItemsSchema() map[string]any {
+	return map[string]any{
+		// A union type, not oneOf: the properties below stay visible to clients
+		// that render schemas, while a bare string still validates.
+		"type":        []string{"object", "string"},
+		"description": "Either a bare entity NAME (\"PostgreSQL\") or an object {\"name\":..., \"type\":...}.",
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string", "description": "Entity name (e.g. 'PostgreSQL', 'Auth Service')."},
+			"type": map[string]any{"type": "string", "description": entityTypeDescription},
+		},
+		"required": []string{"name"},
+	}
+}
+
+// entityTypeDescription advertises the 14 recognised entity types (the single
+// source of truth is validEntityTypes in handlers.go) as GUIDANCE rather than as
+// a machine-enforced JSON-Schema `enum`. See tools_entity_enum_test.go for why.
+const entityTypeDescription = "Entity type — OPTIONAL. Omit it and the server resolves the type from entities this vault already knows. " +
+	"Recognised types: person, organization, location, " +
+	"concept, technology, project, tool, database, service, framework, language, product, event, other. " +
+	"Any other value is accepted and stored as 'other' — always include the entity even if you are unsure of its type."
+
+// contentMarkupTip documents the cheapest entity-declaration gear there is: the
+// caller brackets names inline and the server tokenizes them out. It is a string
+// scan, never a model, and it only ever reads names the caller bracketed — it
+// does not infer entities from prose (#713).
+const contentMarkupTip = " TIP: wrap entity names in [[double brackets]] — \"Migrated [[Auth Service]] to [[PostgreSQL]] 16\" — " +
+	"and they are registered as entities at ~2 tokens each. The brackets are removed from the stored text."
+
 func allToolDefinitions() []ToolDefinition {
 	vaultProp := map[string]any{
 		"type":        "string",
 		"description": "Vault name to scope the operation (default: 'default'). Optional when authenticating via a vault-pinned mk_ key.",
 	}
-	// entityTypeEnum lists the 14 recognised entity types (the single source of
-	// truth is validEntityTypes in handlers.go). Any other value is coerced to
-	// "other" on every user-facing write path, so advertising the enum lets MCP
-	// clients validate before sending. Keep this in sync with validEntityTypes.
-	entityTypeEnum := []string{
+	// The 14 recognised entity types are advertised (in entityTypeDescription,
+	// above) as GUIDANCE rather than as a machine-enforced JSON-Schema `enum`.
+	//
+	// The enum was strictly worse than useless. Server-side it was dead weight —
+	// normalizeEntityType coerces any unrecognised value to "other" on every
+	// user-facing write path, so it never changed what was stored. Client-side it
+	// was a hard rejection: a writer whose entity did not map cleanly onto one of
+	// the 14 buckets (or whose client validates before sending) dropped the
+	// entity, and `required:["name","type"]` meant dropping the type dropped the
+	// whole entity.
+	//
+	// A difference-in-differences control on a real 4,216-engram corpus
+	// (aggregate counts only) attributed an entity-coverage collapse to exactly
+	// this line: muninn_remember_batch never received the enum and held 87.9% ->
+	// 90.2% coverage across the change, while single-write coverage fell 76.2% ->
+	// 12.8% (DiD +65.7pp largest vault, +52.3pp overall). "The enrichment worker
+	// died" is refuted by the same data — summarization and classification ran at
+	// 92-100% throughout while entity coverage sat at 0-25%.
+	//
+	// Entity coverage caps every graph-shaped capability in the product, so an
+	// entity the caller cannot confidently classify is worth strictly more than
+	// no entity at all. Guidance, not a gate. Keep in sync with validEntityTypes.
+	// entityTypeNames is the enforced vocabulary for the CORRECTION paths
+	// (muninn_entity_state / _batch), where the caller is deliberately choosing a
+	// type for an entity that already exists. There is no capture to suppress
+	// there, so an enum is appropriate — unlike the WRITE paths above, where it
+	// cost measured entity coverage. Keep in sync with validEntityTypes.
+	entityTypeNames := []string{
 		"person", "organization", "location", "concept", "technology",
 		"project", "tool", "database", "service", "framework",
 		"language", "product", "event", "other",
@@ -22,7 +98,7 @@ func allToolDefinitions() []ToolDefinition {
 				"type": "object",
 				"properties": map[string]any{
 					"vault":       vaultProp,
-					"content":     map[string]any{"type": "string", "description": "The information to remember."},
+					"content":     map[string]any{"type": "string", "description": "The information to remember." + contentMarkupTip},
 					"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
 					"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
 					"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
@@ -36,15 +112,8 @@ func allToolDefinitions() []ToolDefinition {
 					"summary":     map[string]any{"type": "string", "description": "One-line summary of what this memory captures. Providing this skips background summarization."},
 					"entities": map[string]any{
 						"type":        "array",
-						"description": "Entities mentioned in this memory. Providing these skips background entity extraction.",
-						"items": map[string]any{
-							"type": "object",
-							"properties": map[string]any{
-								"name": map[string]any{"type": "string", "description": "Entity name (e.g. 'PostgreSQL', 'Auth Service')."},
-								"type": map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Entity type. One of the 14 recognised types (e.g. 'database', 'service', 'person', 'project'); any other value is stored as 'other'."},
-							},
-							"required": []string{"name", "type"},
-						},
+						"description": entitiesArrayDescription,
+						"items":       entityItemsSchema(),
 					},
 					"relationships": map[string]any{
 						"type":        "array",
@@ -103,7 +172,7 @@ func allToolDefinitions() []ToolDefinition {
 						"items": map[string]any{
 							"type": "object",
 							"properties": map[string]any{
-								"content":     map[string]any{"type": "string", "description": "The information to remember."},
+								"content":     map[string]any{"type": "string", "description": "The information to remember." + contentMarkupTip},
 								"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
 								"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
 								"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
@@ -116,16 +185,9 @@ func allToolDefinitions() []ToolDefinition {
 								"trust":       map[string]any{"type": "string", "enum": []string{"verified", "inferred", "external", "untrusted"}, "description": "Provenance trust level. Default 'inferred'. 'verified' requires a write or full credential."},
 								"summary":     map[string]any{"type": "string", "description": "One-line summary. Skips background summarization."},
 								"entities": map[string]any{
-									"type": "array",
-									"items": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"name": map[string]any{"type": "string"},
-											"type": map[string]any{"type": "string"},
-										},
-										"required": []string{"name", "type"},
-									},
-									"description": "Entities mentioned in this memory.",
+									"type":        "array",
+									"items":       entityItemsSchema(),
+									"description": entitiesArrayDescription + " These populate the knowledge graph that association, traversal, and cross-memory features depend on.",
 								},
 								"relationships": map[string]any{
 									"type": "array",
@@ -169,13 +231,13 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_recall",
-			Description: "Search long-term memory using semantic context. Returns the most relevant memories.",
+			Description: "Search long-term memory using semantic context. Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows are all `weak` matched nothing strongly: those are related memories to verify, not answers.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"vault":     vaultProp,
 					"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Search context phrases."},
-					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0. Default is mode-aware: 0.5 for the normal (ACT-R) scoring vault; for a vault configured with scoring_fusion='rrf', scores are rank-based and rarely exceed ~0.15, so the default there is effectively 0 (near-zero floor) — an explicit threshold above ~0.01 on an rrf vault can filter out everything."},
+					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0, compared against the ABSOLUTE content score (not the displayed per-query-normalized one). Omit it for the engine's fusion-aware default: 0.1 on normal (ACT-R) vaults — a semantic-only match structurally caps near 0.6 and a lexical-only one near 0.4, so values above ~0.4 filter almost everything honest; 0.5 on legacy weighted_sum vaults; near-zero on scoring_fusion='rrf', whose rank-based scores rarely exceed ~0.15 (an explicit threshold above ~0.01 there can filter out everything)."},
 					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 10)."},
 					"profile": map[string]any{
 						"type":        "string",
@@ -232,7 +294,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"annotate": map[string]any{
 						"type":        "boolean",
-						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false.",
+						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false. Independent of annotate: whenever a result belongs to a detected same-subject version cluster, annotations also carries an ADVISORY (never asserted) possibly_superseded_by/version_cluster/newest_of_cluster/cluster_size signal — a mechanical hint pointing an older cluster member at the newest, distinct from the authoritative superseded_by/current_version pair. Also independent of annotate: a memory under an UNRESOLVED declared contradicts link always carries annotations.unresolved_contradiction (naming the memory it disagrees with) and the response carries a top-level conflict block — its score has been demoted 10 percent below its earned value, so it must not be read as the answer without checking the annotation. Resolve it with muninn_evolve, muninn_forget(not_true_since=...), or muninn_link(relation=\"supersedes\").",
 					},
 					"caller": map[string]any{
 						"type":        "string",
@@ -574,7 +636,7 @@ func allToolDefinitions() []ToolDefinition {
 							"type": "object",
 							"properties": map[string]any{
 								"name":       map[string]any{"type": "string"},
-								"type":       map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Entity type. One of the 14 recognised types; any other value is stored as 'other'."},
+								"type":       map[string]any{"type": "string", "description": entityTypeDescription},
 								"confidence": map[string]any{"type": "number"},
 							},
 							"required": []string{"name", "type"},
@@ -663,7 +725,7 @@ func allToolDefinitions() []ToolDefinition {
 					"entity_name": map[string]any{"type": "string", "description": "The entity name to update"},
 					"state":       map[string]any{"type": "string", "description": "New state: active, deprecated, merged, or resolved"},
 					"merged_into": map[string]any{"type": "string", "description": "Canonical entity name (required when state=merged)"},
-					"type":        map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve the existing type."},
+					"type":        map[string]any{"type": "string", "enum": entityTypeNames, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve the existing type."},
 					"vault":       vaultProp,
 				},
 				"required": []string{"entity_name", "state"},
@@ -686,7 +748,7 @@ func allToolDefinitions() []ToolDefinition {
 								"entity_name": map[string]any{"type": "string", "description": "Entity name to update"},
 								"state":       map[string]any{"type": "string", "description": "New state: active, deprecated, merged, or resolved"},
 								"merged_into": map[string]any{"type": "string", "description": "Canonical entity name (required when state=merged)"},
-								"type":        map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve existing."},
+								"type":        map[string]any{"type": "string", "enum": entityTypeNames, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve existing."},
 							},
 							"required": []string{"entity_name", "state"},
 						},
@@ -886,7 +948,7 @@ func allToolDefinitions() []ToolDefinition {
 		// Provenance audit trail
 		{
 			Name:        "muninn_provenance",
-			Description: "Returns the ordered audit trail for an engram — who wrote it, what changed, and why.",
+			Description: "Returns the ordered audit trail for an engram — who wrote it, what changed, and why. Each entry has a timestamp, source, agent_id and operation; evolve entries also carry predecessor_id (the version this replaced), reason, and effective_at (when the change became true, as opposed to when it was written). Fields are omitted when the operation recorded none — an omitted field means unrecorded, not empty.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

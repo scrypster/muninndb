@@ -113,8 +113,14 @@ func (a *grpcEngineAdapter) Read(ctx context.Context, req *pb.ReadRequest) (*pb.
 }
 
 func (a *grpcEngineAdapter) Activate(ctx context.Context, req *pb.ActivateRequest) (*pb.ActivateResponse, error) {
+	// Clamp a negative threshold: the in-process negative-means-bypass contract
+	// (used by Explain) is deliberately not exposed on the wire.
+	threshold := req.Threshold
+	if threshold < 0 {
+		threshold = 0
+	}
 	resp, err := a.eng.Activate(ctx, &mbp.ActivateRequest{
-		Context: req.Context, Threshold: req.Threshold, MaxResults: int(req.MaxResults),
+		Context: req.Context, Threshold: threshold, MaxResults: int(req.MaxResults),
 		MaxHops: int(req.MaxHops), IncludeWhy: req.IncludeWhy, Vault: req.Vault, Embedding: req.Embedding,
 	})
 	if err != nil {
@@ -127,6 +133,11 @@ func (a *grpcEngineAdapter) Activate(ctx context.Context, req *pb.ActivateReques
 			Score: item.Score, Why: item.Why,
 		}
 	}
+	// NOTE (deferred): resp.SemanticDegraded is intentionally NOT mapped here —
+	// pb.ActivateResponse has no such field. Wiring it needs a proto field + regen
+	// (a separate drift obligation); tracked as a follow-up so this stays a minimal
+	// increment. Until then gRPC callers do not receive the degrade-loudly signal
+	// that MBP/REST/MCP carry.
 	return &pb.ActivateResponse{
 		QueryID: resp.QueryID, TotalFound: int32(resp.TotalFound),
 		Activations: items, LatencyMs: resp.LatencyMs,

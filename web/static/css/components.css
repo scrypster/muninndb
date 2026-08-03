@@ -80,6 +80,8 @@ html.light .seg-btn:hover:not(.seg-active) {
 .badge-active   { background: rgba(16,185,129,0.15); color: #10b981; }
 .badge-idle     { background: rgba(234,179,8,0.15);  color: #eab308; }
 .badge-dormant  { background: rgba(100,116,139,0.15); color: #64748b; }
+.badge-stopped  { background: rgba(239,68,68,0.15); color: #ef4444; }
+.badge-disabled { background: transparent; color: #64748b; box-shadow: inset 0 0 0 1px rgba(100,116,139,0.35); }
 
 /* Memory card (engram row) */
 .memory-card {

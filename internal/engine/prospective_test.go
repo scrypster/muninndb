@@ -565,7 +565,7 @@ func TestNoticesForRecall_ContradictionNotice(t *testing.T) {
 	ws := eng.Store().ResolveVaultPrefix(vault)
 	a, _ := storage.ParseULID(aID)
 	b, _ := storage.ParseULID(bID)
-	if err := eng.Store().FlagContradiction(ctx, ws, a, b); err != nil {
+	if _, err := eng.Store().FlagContradiction(ctx, ws, a, b); err != nil {
 		t.Fatalf("FlagContradiction: %v", err)
 	}
 

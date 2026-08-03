@@ -25,7 +25,7 @@ func TestGetUpsertKey_Miss(t *testing.T) {
 	}
 }
 
-// TestGetUpsertKey_Hit: a seeded 0x2E entry resolves to the stored engram ID.
+// TestGetUpsertKey_Hit: a seeded 0x2F entry resolves to the stored engram ID.
 func TestGetUpsertKey_Hit(t *testing.T) {
 	store := openTestStore(t)
 	ws := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
@@ -33,7 +33,7 @@ func TestGetUpsertKey_Hit(t *testing.T) {
 	want := ULID{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x10, 0x20,
 		0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
 
-	// Seed the forward index directly: 0x2E | ws | sha256 → engramID(16).
+	// Seed the forward index directly: 0x2F | ws | sha256 → engramID(16).
 	if err := store.db.Set(keys.UpsertKeyKey(ws, hash), want[:], pebble.Sync); err != nil {
 		t.Fatalf("seed upsert key: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestGetUpsertKey_CorruptValue(t *testing.T) {
 	}
 }
 
-// TestPutUpsertKey_WritesAndReadsBack: PutUpsertKey writes the 0x2E pointer
+// TestPutUpsertKey_WritesAndReadsBack: PutUpsertKey writes the 0x2F pointer
 // that GetUpsertKey then resolves — the simple, non-batched mirror of
 // PutContentHash. This is the primitive the upsert orchestrator's create branch
 // uses to pin a freshly created engram under sha256(idempotent_id). The

@@ -144,9 +144,37 @@ type Engine struct {
 	archiveGCDone        chan struct{}             // signals archive GC worker shutdown
 	evolveRepairDone     chan struct{}             // signals evolve entity-link repair completion
 	evolveRepairDelay    time.Duration             // startup delay before the repair pass
-	coherence            *coherence.Registry       // per-vault incremental coherence counters
-	scoring              *scoring.Store            // per-vault learnable scoring weights
-	prov                 *provenance.Store         // audit trail per-engram
+	// assocWeightRepairDone is closed ONLY when the one-shot pre-fix
+	// full-weight association-key repair (#756) completes cleanly.
+	// runPruneWorker gates assoc decay on it — decay destroys the repair's
+	// disambiguator, so a failed pass parks decay instead of opening the gate.
+	assocWeightRepairDone chan struct{}
+	// assocWeightRepairExited is closed unconditionally when that goroutine
+	// returns — cleanly, in error, on panic, or on shutdown. Stop() waits on
+	// THIS one, so a parked gate can never hang shutdown or leak the goroutine.
+	assocWeightRepairExited chan struct{}
+	assocWeightRepairDelay  time.Duration // startup delay before that pass
+	// decayAssocWeightsFn, when non-nil, replaces the store call decayAllVaults
+	// makes. Test-only seam: it is what lets a unit test prove the repair gate
+	// actually suppresses decay calls rather than merely existing in the source.
+	decayAssocWeightsFn func(ctx context.Context, ws [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error)
+	// assocDecayWarned dedupes the per-vault association-decay config WARNs so
+	// a ~60s sweep cannot turn a one-line diagnostic into a log flood.
+	// vault name (string) -> struct{}.
+	assocDecayWarned sync.Map
+	// assocDecayLegacyChecked dedupes the legacy-factor CHECK (a per-vault
+	// GetVaultConfig read), separately from the WARN itself: vaults that never
+	// need the WARN must not pay a config read every ~60s sweep pass.
+	// vault name (string) -> struct{}.
+	assocDecayLegacyChecked sync.Map
+	// repairAssocWeightsFn, when non-nil, replaces the per-vault store call the
+	// repair pass makes. Test-only seam, and the only way to exercise the
+	// failure policy: a real forced storage error is not reachable from a test
+	// without closing the store out from under the engine.
+	repairAssocWeightsFn func(ctx context.Context, ws [8]byte) (int, error)
+	coherence            *coherence.Registry // per-vault incremental coherence counters
+	scoring              *scoring.Store      // per-vault learnable scoring weights
+	prov                 *provenance.Store   // audit trail per-engram
 
 	// Fix 5: coherence persistence lifecycle
 	coherenceFlushStop chan struct{}
@@ -190,6 +218,25 @@ type Engine struct {
 	// ReplayEnrichment calls. Keys are storage.ULID; values are int.
 	// Resets on server restart. Cleared per-engram by ResetReplayFailCount.
 	replayFailCounts map[storage.ULID]int
+
+	// contradictionsDeclared is the per-vault ([8]byte ws prefix -> struct{})
+	// in-process record that THIS process has written a RelContradicts edge in
+	// that vault. It closes COG-29's fast-path gate over the window between an
+	// explicit muninn_link(contradicts) and the batch detector's 0x0A marker,
+	// so a single-binary deployment honors a declaration on the very next
+	// query instead of up to one worker interval later. Resets on restart —
+	// by then the marker exists.
+	contradictionsDeclared sync.Map
+
+	// contradictionProbeClean memoises the once-per-process declared-edge scan
+	// in vaultMayHaveContradictions ([8]byte ws prefix -> struct{}): presence
+	// means "this vault was scanned to completion and had NO declared
+	// contradicts edge". It closes the hole where a process restarts between
+	// muninn_link(contradicts) and the batch worker's 0x0A flush — the marker
+	// was never written and the in-process flag is gone, so without a re-probe
+	// recall would silently stop honoring the declaration forever. Cleared by
+	// noteContradictionDeclared.
+	contradictionProbeClean sync.Map
 
 	// mergeMu serialises concurrent MergeEntity calls that touch the same entities.
 	// Uses a dedicated stripe array separate from the storage-layer entity locks to
@@ -549,6 +596,19 @@ func NewEngine(cfg EngineConfig) *Engine {
 	// engine:spawn-ok — tracked by evolveRepairDone channel, drained in Stop()
 	go e.runEvolveEntityLinkRepair()
 
+	// One-shot startup repair for pre-fix full-weight association keys, which
+	// the overflowed WeightComplement wrote at the weight-0.0 position (#756).
+	// Must precede the first assoc-decay pass; runPruneWorker gates on
+	// assocWeightRepairDone to guarantee that, not merely hope for it.
+	e.assocWeightRepairDelay = defaultAssocWeightRepairDelay()
+	if cfg.AssocWeightRepairDelay != nil {
+		e.assocWeightRepairDelay = *cfg.AssocWeightRepairDelay
+	}
+	e.assocWeightRepairDone = make(chan struct{})
+	e.assocWeightRepairExited = make(chan struct{})
+	// engine:spawn-ok — tracked by assocWeightRepairExited channel, drained in Stop()
+	go e.runLegacyFullWeightAssocRepair()
+
 	return e
 }
 
@@ -707,6 +767,17 @@ func (e *Engine) Stop() {
 			}
 		}
 
+		// Wait for the full-weight association repair pass to exit. This waits
+		// on the EXITED channel, not the gate channel: the gate stays shut on a
+		// non-clean pass, and shutdown must never depend on repair success.
+		if e.assocWeightRepairExited != nil {
+			select {
+			case <-e.assocWeightRepairExited:
+			case <-time.After(5 * time.Second):
+				slog.Warn("engine: legacy full-weight association repair did not exit within 5s")
+			}
+		}
+
 		// Drain fire-and-forget goroutines last — they write to Pebble via the
 		// scoring store. Must complete before store.Close() (called by the caller
 		// immediately after Stop() returns).
@@ -809,6 +880,15 @@ func (e *Engine) spawnJob(fn func()) bool {
 // first (and, downstream, whether NoticesForRecall sees the corroborator or
 // the intention's own engram at rank 0). Refs #722.
 func (e *Engine) waitWriteTimeIdle() {
+	e.WaitWriteTimeIdle()
+}
+
+// WaitWriteTimeIdle is the exported test seam over waitWriteTimeIdle, for
+// tests OUTSIDE this package (e.g. internal/mcp) that seed through the real
+// engine and must not poll wall-clock deadlines for async index visibility
+// (#722 doctrine; the SetFlushInterval precedent). Production code has no
+// reason to call it — recall is eventually consistent by design.
+func (e *Engine) WaitWriteTimeIdle() {
 	if e.autoAssoc != nil {
 		e.autoAssoc.WaitIdle()
 	}
@@ -1100,7 +1180,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	e.activity.Record(wsPrefix)
 
 	// ── Upsert mode: key-pinned create-or-merge (#556) ──────────────────
-	// When upsert_mode is set, the durable 0x2E forward index (keyed by
+	// When upsert_mode is set, the durable 0x2F forward index (keyed by
 	// idempotent_id) decides create-vs-merge — not the content-hash dedup below.
 	// The whole path returns from writeUpsert, which does its own atomic storage
 	// write (store.UpsertEngram co-commits engram + content-hash + upsert-key).
@@ -1265,6 +1345,14 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	// Write to store
 	id, err := e.store.WriteEngram(ctx, wsPrefix, eng)
 	if err != nil {
+		// An inline association naming an engram that no longer exists is the
+		// caller's mistake, not a storage fault — the same class as the
+		// unparseable target_id refused a few lines above, and refused the same
+		// way. Mapped to ErrInvalidID so the transports answer 400 rather than
+		// 500 (STO-12).
+		if errors.Is(err, storage.ErrDanglingEndpoint) {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidID, err)
+		}
 		return nil, fmt.Errorf("write engram: %w", err)
 	}
 
@@ -1579,7 +1667,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 }
 
 // writeUpsert implements the upsert_mode write path (#556, Rev 2 redesign).
-// The durable 0x2E forward index (keyed by sha256(idempotent_id)) maps to the
+// The durable 0x2F forward index (keyed by sha256(idempotent_id)) maps to the
 // CURRENT HEAD of the key's chain — never a fixed engram. The orchestrator
 // holds the per-(vault, keyHash) stripe mutex across lookup → dispatch → write
 // so concurrent upserts on the same key serialize, and the index is updated
@@ -1590,7 +1678,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 //     ULID under the key.
 //   - HIT + identical content → no-op (returns the existing head id).
 //   - HIT + changed content → EvolveAt creates the successor, supersedes the
-//     head, and re-points the 0x2E entry IN THE SAME atomic batch as the
+//     head, and re-points the 0x2F entry IN THE SAME atomic batch as the
 //     successor write (the re-point is queued via StoreBatch.RepointUpsertKey
 //     inside evolveAtInternal — scrypster's #1 trap: never a separate commit).
 //
@@ -1669,7 +1757,7 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	}
 
 	// Changed content: EvolveAt creates the successor, supersedes the head, and
-	// re-points the 0x2E pointer in one atomic batch (the re-point is queued
+	// re-points the 0x2F pointer in one atomic batch (the re-point is queued
 	// via StoreBatch.RepointUpsertKey inside evolveAtInternal). EvolveAt
 	// inherits Concept/Tags/MemoryType/TypeLabel from the predecessor when
 	// concept == ""; pass the caller's concept only if set, embedding when
@@ -1737,7 +1825,7 @@ func (e *Engine) upsertCreate(ctx context.Context, wsPrefix [8]byte, vaultName s
 	}
 	// Pin the freshly created engram under the upsert key. Non-batched — the
 	// engram has already committed under the default Write path's batch; a
-	// crash here leaves a created engram with no 0x2E entry, which the next
+	// crash here leaves a created engram with no 0x2F entry, which the next
 	// upsert on this key self-heals (treats it as a miss and creates again).
 	if err := e.store.PutUpsertKey(ctx, wsPrefix, keyHash, parsedID); err != nil {
 		return nil, fmt.Errorf("upsert create: pin key: %w", err)
@@ -1990,7 +2078,14 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	ids := make([]storage.ULID, n)
 	for fi, origIdx := range filteredIdx {
 		if batchErrs[fi] != nil {
-			errs[origIdx] = fmt.Errorf("write engram: %w", batchErrs[fi])
+			// STO-12, same mapping as Engine.Write: a dangling inline
+			// association target is a bad request, and it fails only its own
+			// item — the rest of the batch is unaffected.
+			if errors.Is(batchErrs[fi], storage.ErrDanglingEndpoint) {
+				errs[origIdx] = fmt.Errorf("%w: %v", ErrInvalidID, batchErrs[fi])
+			} else {
+				errs[origIdx] = fmt.Errorf("write engram: %w", batchErrs[fi])
+			}
 			continue
 		}
 		ids[origIdx] = batchIDs[fi]
@@ -2477,6 +2572,9 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
+	// Per-vault exclude-tags (#713): candidates carrying a configured tag are
+	// dropped from recall ranking. nil/empty = no exclusion (unchanged behavior).
+	actReq.ExcludeTags = resolved.ExcludeTags
 
 	// Valid-time gate (COG-19): as_of / include_invalid flow into phase-6
 	// filtering; the final gate below re-applies them to entity-boost injections.
@@ -2615,6 +2713,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// (unlike SemanticSimilarity/FullTextRelevance, which an explicit caller
 	// override legitimately replaces).
 	actReq.Weights.SemanticBaseline = float32(e.resolveSemanticBaseline(req.Vault, wsPrefix, resolved))
+	// Distinguish the two causes of a zero baseline for the relevance-band
+	// phase: an operator who explicitly set `semantic_floor: 0` (documented
+	// "disable the floor") must not be told their model is unregistered
+	// (semantic_floor_disabled vs no_model_baseline — G6 refute of #773,
+	// finding 3). Scoring math is identical either way (identity transform).
+	actReq.Weights.SemanticFloorDisabled = semanticFloorExplicitlyDisabled(resolved)
 
 	// COG-6: the effective default threshold is mode-aware and keyed on the
 	// EFFECTIVE scoring mode (actReq.Weights.UseRRFFusion), decided here in one
@@ -2627,7 +2731,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// ACT-R-calibrated value — made #590's fix unreachable on every production
 	// transport. ACT-R/weighted_sum default behavior is unchanged.
 	if actReq.Threshold == 0 && !actReq.Weights.UseRRFFusion {
-		actReq.Threshold = 0.1
+		actReq.Threshold = cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR)
 	}
 
 	// Apply the recall-mode preset (#704) — resolved into modePreset above the
@@ -2692,8 +2796,27 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// boost. injectorNow is shared with the final COG-19 cut below so a
 	// validity boundary cannot fall between the gate's admission and that cut.
 	injectorNow := time.Now()
+	// One visibility gate and ONE nameable cache shared by both post-pipeline
+	// chain phases: they walk overlapping chains, and the gate's lease check is
+	// a store read. Sharing also guarantees both resolve visibility at the same
+	// instant (risk 3 of the COG-28 design).
+	injectorGate := newVisibilityGate(actReq, injectorNow)
+	nameableCache := make(map[storage.ULID]bool)
+
+	// COG-28 version-head substitution (#763). Phase 6 handed us the
+	// admission-worthy candidates it refused for being superseded; resolve each
+	// to its DECLARED chain head and inject that head at the predecessor's
+	// score, annotated substituted_for. Runs BEFORE applySupersession on the
+	// same clock so an injected head is an ordinary row by the time supersedes-
+	// aware ranking runs. See engine_version_head.go.
+	var subInjected int
+	var subBlocked []substitutionBlock
+	result.Activations, subInjected, subBlocked = e.applyVersionHeadSubstitution(
+		ctx, wsPrefix, result.Activations, result.ShadowMatches, actReq, injectorGate, nameableCache)
+	result.TotalFound += subInjected
+
 	var supInjected int
-	result.Activations, supInjected = e.applySupersession(ctx, wsPrefix, result.Activations, actReq, injectorNow)
+	result.Activations, supInjected = e.applySupersessionWithGate(ctx, wsPrefix, result.Activations, actReq, injectorGate, nameableCache)
 	result.TotalFound += supInjected
 
 	// Final valid-time gate (COG-19: default recall never returns an engram whose
@@ -2720,11 +2843,92 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	}
 	result.Activations = kept
 
+	// Recall-time version-cluster ADVISORY annotation (#712, COG-25). Pure
+	// read-path, zero writes, zero score changes: pairwise-clusters the top
+	// survivors when embedding/token similarity, a shared anchor (rare entity,
+	// existing RelRefines edge, or competing version-marker tags), and temporal
+	// separation ALL hold, then annotates (never demotes) and — ONLY at an exact
+	// score tie within a detected cluster — reorders newest-EffectiveValidFrom-
+	// first. An explicit RelSupersedes on a pair always wins and suppresses the
+	// heuristic for that pair (COG-25). Runs after the validity gate and before
+	// final truncation so it sees exactly the survivor set truncation will cut.
+	result.Activations = e.applyCurrencyAnnotation(ctx, wsPrefix, result.Activations, vaultSize, actReq.MaxResults)
+
+	// COG-29 contradiction honesty (#764). Runs LAST of the post-pipeline
+	// phases and before truncation: after the COG-19 gate so a side already
+	// removed for being invalid/soft-deleted is neither resurrected nor
+	// referenced (this is what makes evolve/forget stop the theater), after
+	// supersession/substitution because a declared RelSupersedes between the
+	// pair IS the resolution, after currency because COG-25 may reorder exact
+	// ties and this phase's ordering must be the last word, and before
+	// truncation so the adjacency guarantee holds.
+	var conflictKeep int
+	var conflictBlock *mbp.ConflictBlock
+	result.Activations, conflictBlock, conflictKeep = e.applyContradictionHonesty(
+		ctx, wsPrefix, result.Activations, actReq, injectorGate, gateNow)
+
 	// Re-apply MaxResults: entity boost / supersession / the validity gate may have
 	// changed the set. All re-sort or preserve score order, so truncation keeps top-K.
-	if actReq.MaxResults > 0 && len(result.Activations) > actReq.MaxResults {
-		result.Activations = result.Activations[:actReq.MaxResults]
+	// COG-29 may raise the cut by up to contradictionMaxCluster-1 so a conflict
+	// cluster is never returned half-truncated; the overflow is reported in the
+	// conflict block rather than applied silently.
+	truncateAt := actReq.MaxResults
+	if conflictKeep > truncateAt {
+		truncateAt = conflictKeep
 	}
+	if truncateAt > 0 && len(result.Activations) > truncateAt {
+		result.Activations = result.Activations[:truncateAt]
+	}
+
+	// A conflict cluster that fell entirely outside the caller's cut must not
+	// be reported: the block describes what the caller RECEIVED. Prune to the
+	// pairs with a surviving endpoint, and drop the block when none remain.
+	conflictBlock = pruneConflictBlock(conflictBlock, result.Activations)
+
+	// ABSTENTION IS RECOMPUTED HERE, on the FINAL set, and nowhere earlier.
+	// Phase 6's verdict described ITS set, not this one: the substitution and
+	// supersession injectors can FILL a response phase 6 abstained on (the
+	// exact #763 shape — every live candidate below threshold, then the head
+	// injected), and the COG-19 gate / MaxResults re-truncation can EMPTY a
+	// response phase 6 did not abstain on. The wire contract ("Empty iff
+	// Abstained is false", mbp/types.go) binds what the caller receives, so
+	// the flag must be derived from what the caller receives. Deliberately
+	// NOT cleared inside applyVersionHeadSubstitution: the gate and the
+	// truncation run after it and can empty the set again.
+	if len(result.Activations) > 0 {
+		result.Abstained = false
+		result.AbstainedReason = ""
+		if len(subBlocked) > 0 {
+			slog.Debug("recall: version-head substitution blocked on some chains", "blocked", len(subBlocked))
+		}
+	} else {
+		result.Abstained = true
+		// COG-28: an empty response that had a declared version chain in it is
+		// not the same emptiness as "nothing in this vault is about that".
+		// Name it, so an agent can act ("there IS a chain here — read <id>")
+		// instead of being handed the generic below_threshold.
+		if reason := versionHeadAbstainReason(subBlocked); reason != "" {
+			result.AbstainedReason = reason
+		} else if result.AbstainedReason == "" {
+			// Phase 6 produced rows and the post-pipeline gates swept them
+			// all: candidates cleared the bar and were then filtered — the
+			// same emptiness AbstainFiltered already names.
+			result.AbstainedReason = activation.AbstainFiltered
+		}
+	}
+
+	// #773 score-presentation honesty. Runs LAST of the post-pipeline phases —
+	// after currency, contradiction honesty, the final truncation and the
+	// abstention recompute — so it bands exactly the rows the caller receives.
+	// READ-ONLY: no score change, no reorder, no truncation, no removal, no
+	// write. See engine_relevance.go for why the calibration gate, and not
+	// actReq.Threshold, is the anchor.
+	relevanceBands, relevanceBases := applyRelevanceBands(
+		result.Activations,
+		result.Calibration,
+		cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR),
+		result.SemanticDegraded,
+	)
 
 	// Convert result.Activations to []mbp.ActivationItem
 	items := make([]mbp.ActivationItem, len(result.Activations))
@@ -2748,6 +2952,10 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			TypeLabel:   scored.Engram.TypeLabel,
 			Tags:        scored.Engram.Tags,
 			Importance:  scored.Engram.Importance,
+			// #773: the absolute relevance band and, for filter_match /
+			// uncalibrated, why.
+			RelevanceBand:      relevanceBands[i],
+			RelevanceBandBasis: relevanceBases[i],
 		}
 
 		// Supersession annotation from the supersedes-aware ranking phase (always-on
@@ -2758,6 +2966,55 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		if (scored.SupersededBy != storage.ULID{}) {
 			items[i].SupersededBy = scored.SupersededBy.String()
 		}
+		// COG-28 substitution annotation (#763): ASSERTED, from a declared
+		// RelSupersedes chain — a sibling of superseded_by/current_version
+		// above, NOT part of the advisory possibly_superseded_by block below.
+		// Never optional on a substituted row: the score components on such a
+		// row are the PREDECESSOR's measurements, so the attribution is what
+		// keeps them honest.
+		if (scored.SubstitutedFor != storage.ULID{}) {
+			items[i].SubstitutedFor = scored.SubstitutedFor.String()
+			items[i].ChainTruncated = scored.ChainTruncated
+			items[i].HeadNotIndexedYet = scored.HeadNotIndexedYet
+			if b := scored.SubstitutionBasis; b != nil {
+				items[i].SubstitutionBasis = &mbp.SubstitutionBasis{
+					AbsoluteScore:      float32(b.AbsoluteScore),
+					ContentMatch:       float32(b.ContentMatch),
+					SemanticSimilarity: float32(b.SemanticSimilarity),
+					FullTextRelevance:  float32(b.FullTextRelevance),
+				}
+			}
+		}
+		// COG-29 contradiction honesty (#764): ASSERTED, from a declared
+		// RelContradicts edge that is still unresolved. Always-on for the same
+		// reason superseded_by is — a caller must never be handed a disputed
+		// fact without being told, and this row's score was demoted and capped
+		// because of it.
+		if c := scored.UnresolvedContradiction; c != nil {
+			item := &mbp.ContradictionConflict{
+				With:             c.With.String(),
+				WithConcept:      c.WithConcept,
+				Side:             c.Side,
+				PartnerInResults: c.PartnerInResults,
+				ClusterSize:      c.ClusterSize,
+				ClusterTruncated: c.ClusterTruncated,
+			}
+			// Zero means UNKNOWN (a legacy edge with no stamp): omit it rather
+			// than serialising the Go zero time as if it were an instant.
+			if !c.DeclaredAt.IsZero() {
+				item.DeclaredAt = c.DeclaredAt.UTC().Format(time.RFC3339)
+			}
+			items[i].UnresolvedContradiction = item
+		}
+		// Heuristic currency annotation (advisory; from applyCurrencyAnnotation).
+		if (scored.PossiblySupersededBy != storage.ULID{}) {
+			items[i].PossiblySupersededBy = scored.PossiblySupersededBy.String()
+		}
+		if scored.VersionCluster != "" {
+			items[i].VersionCluster = scored.VersionCluster
+			items[i].ClusterSize = scored.ClusterSize
+		}
+		items[i].NewestOfCluster = scored.NewestOfCluster
 		// Valid-time annotations: ValidFrom only when explicitly divergent from
 		// CreatedAt; ValidUntil when the window is closed; Expired when the
 		// window closed at or before now (reachable only under include_invalid).
@@ -2781,6 +3038,8 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			Recency:               float32(scored.Components.Recency),
 			Raw:                   float32(scored.Components.Raw),
 			Final:                 float32(scored.Components.Final),
+			ContentMatch:          float32(scored.Components.ContentMatch),
+			AbsoluteScore:         float32(scored.Components.AbsoluteScore),
 		}
 
 		// Add hop path if present
@@ -2970,11 +3229,15 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	metrics.ActivateDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
 
 	return &mbp.ActivateResponse{
-		QueryID:     queryID,
-		TotalFound:  result.TotalFound,
-		Activations: items,
-		LatencyMs:   result.LatencyMs,
-		Brief:       briefSentences,
+		QueryID:          queryID,
+		TotalFound:       result.TotalFound,
+		Activations:      items,
+		LatencyMs:        result.LatencyMs,
+		Brief:            briefSentences,
+		SemanticDegraded: result.SemanticDegraded,
+		Abstained:        result.Abstained,
+		AbstainedReason:  result.AbstainedReason,
+		Conflict:         conflictBlock,
 	}, nil
 }
 
@@ -3094,7 +3357,12 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 	// When a "contradicts" link is explicitly created via Link(), notify the
 	// ContradictWorker so it can flag the pair and drive confidence updates.
 	if storage.RelType(req.RelType) == storage.RelContradicts {
-		_, linkContra, linkConf := e.cogWorkers()
+		// Tell COG-29's fast-path gate this vault has a declared contradiction
+		// NOW, rather than when the batch detector's 0x0A marker lands. The
+		// declaration is durable the moment the association above committed,
+		// so recall must honor it on the very next query.
+		e.noteContradictionDeclared(wsPrefix)
+		_, linkContra, _ := e.cogWorkers()
 		if linkContra != nil {
 			linkContra.Submit(cognitive.ContradictItem{
 				WS:          wsPrefix,
@@ -3136,22 +3404,21 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 				},
 			})
 		}
-		// Also directly flag the pair and update confidence without waiting for
-		// ContradictWorker's batch processing — direct link is an explicit assertion.
-		if linkConf != nil {
-			linkConf.Submit(cognitive.ConfidenceUpdate{
-				WS:       wsPrefix,
-				EngramID: [16]byte(sourceID),
-				Evidence: cognitive.EvidenceContradiction,
-				Source:   "contradiction_detected",
-			})
-			linkConf.Submit(cognitive.ConfidenceUpdate{
-				WS:       wsPrefix,
-				EngramID: [16]byte(targetID),
-				Evidence: cognitive.EvidenceContradiction,
-				Source:   "contradiction_detected",
-			})
-		}
+		// The confidence penalty is applied ONLY by the ContradictWorker's OnFound
+		// callback above, which fires exactly once per pair (the 0x0A marker makes
+		// it idempotent). A second, unconditional submit used to live here to
+		// avoid waiting for the batch worker — but it bypassed that idempotency
+		// and applied the SAME evidence a second time. BayesianUpdate compounds
+		// repeat applications, so an explicit link cost two updates instead of
+		// one, and linking both directions (the natural thing for an agent to do)
+		// drove BOTH engrams 1.0 -> 0.975 -> 0.797 -> 0.313 -> 0.0709. Confidence
+		// multiplies into the recall score, so both memories — including the TRUE
+		// one, penalised exactly as hard as the false one — silently vanished from
+		// recall. Declaring a contradiction was a data-loss operation.
+		//
+		// The penalty is now delayed by up to one worker interval. That is the
+		// correct trade: a slightly late annotation beats a promptly destroyed
+		// memory.
 	}
 
 	return &mbp.LinkResponse{OK: true}, nil
@@ -3294,11 +3561,12 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 			}
 		}
 
-		// Mark the node as deleted in the HNSW index so it is skipped in
-		// future Search results. Memory is reclaimed on the next rebuild.
-		if e.hnswRegistry != nil {
-			e.hnswRegistry.TombstoneNode(wsPrefix, [16]byte(id))
-		}
+		// Remove the engram from the search indexes. Until #803 this branch
+		// tombstoned HNSW but never touched FTS — only the SOFT branch below
+		// called fts.DeleteEngram — so a hard-deleted engram's tag postings
+		// survived, and autoassoc's tag search kept handing its ID to
+		// WriteAssociation on every later write sharing a tag. See STO-12.
+		e.cleanSearchIndexesAfterHardDelete(wsPrefix, [16]byte(id), eng)
 		// Decrement the global engram counter. Floor at zero to guard against
 		// counter skew in crash-recovery scenarios (mirrors ClearVault's guard).
 		for {
@@ -3328,6 +3596,31 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 	}
 
 	return &mbp.ForgetResponse{OK: true}, nil
+}
+
+// cleanSearchIndexesAfterHardDelete removes a hard-deleted engram from the FTS
+// posting lists and tombstones it in the HNSW vector index.
+//
+// STO-12. storage.DeleteEngram's own cascade (0x01/0x02/0x03/0x04/0x14/0x25 and
+// the secondary indexes) is complete, but the FTS and HNSW indexes live outside
+// the store and every hard-delete caller must clean them itself. The two
+// callers that did not — Forget(hard=true) and PruneVault — left the dead ID
+// reachable from a tag search and a vector search, which the autoassoc and
+// neighbor workers then turned back into association edges. `eng` may be nil
+// (the record was unreadable before the delete); FTS cleanup needs its fields,
+// the HNSW tombstone does not, so they are gated separately.
+func (e *Engine) cleanSearchIndexesAfterHardDelete(wsPrefix [8]byte, id [16]byte, eng *storage.Engram) {
+	if e.fts != nil && eng != nil {
+		if err := e.fts.DeleteEngram(wsPrefix, id, eng.Concept, eng.CreatedBy, eng.Content, eng.Tags); err != nil {
+			slog.Warn("engine: fts cleanup failed after hard delete",
+				"id", storage.ULID(id).String(), "error", err)
+		}
+	}
+	// Mark the node as deleted in the HNSW index so it is skipped in future
+	// Search results. Memory is reclaimed on the next rebuild.
+	if e.hnswRegistry != nil {
+		e.hnswRegistry.TombstoneNode(wsPrefix, id)
+	}
 }
 
 // Stat implements mbp.EngineAPI.Stat.
@@ -3448,7 +3741,11 @@ func (e *Engine) cogWorkers() (*cognitive.HebbianWorker, *cognitive.Worker[cogni
 // WorkerStats returns the current statistics for all cognitive workers.
 func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 	heb, contra, conf := e.cogWorkers()
-	stats := cognitive.EngineWorkerStats{}
+	stats := cognitive.EngineWorkerStats{
+		Hebbian:    cognitive.DisabledWorkerStats(),
+		Contradict: cognitive.DisabledWorkerStats(),
+		Confidence: cognitive.DisabledWorkerStats(),
+	}
 	if heb != nil {
 		stats.Hebbian = heb.Stats()
 	}
@@ -3623,7 +3920,11 @@ type ConsolidateResult struct {
 // Warnings lists any evidence IDs that could not be linked to the decision;
 // the decision itself is always committed even when evidence linking partially fails.
 type DecideResult struct {
-	ID       storage.ULID
+	ID storage.ULID
+	// Concept is the concept actually stored (the decision text). Returned so
+	// a transport can echo what it wrote instead of an empty string — two
+	// evaluators read the previous {"concept":""} response as data loss.
+	Concept  string
 	Warnings []string
 }
 
@@ -3665,7 +3966,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 }
 
 // evolveAtInternal is EvolveAt with an optional upsert key hash. When non-nil,
-// the 0x2E upsert-key forward index for (wsPrefix, *upsertKeyHash) is re-pointed
+// the 0x2F upsert-key forward index for (wsPrefix, *upsertKeyHash) is re-pointed
 // to the successor ULID INSIDE the evolve's atomic batch — so a content-change
 // upsert never leaves the durable pointer aimed at the soft-deleted predecessor
 // (#556, scrypster's #1 trap: the re-point must be crash-atomic with the evolve,
@@ -3796,7 +4097,20 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 	batch := e.store.NewBatch()
 	defer batch.Discard()
 
-	if err := batch.WriteEngram(ctx, wsPrefix, newEng); err != nil {
+	// The successor's provenance entry carries what changed and why, not just
+	// the verb: an "evolve" entry with only a timestamp, a source and the word
+	// "evolve" records the one thing the reader already knew. It is recorded on
+	// the SUCCESSOR because that is the engram a reader holds after an evolve
+	// (the predecessor is soft-deleted and hidden from the present), and
+	// predecessor_id is the exact mirror of read's superseded_by. reason is
+	// passed through verbatim — empty when the caller gave none, never
+	// backfilled with a plausible-looking string.
+	evolveDetails := &provenance.Details{
+		PredecessorID: oldULID.String(),
+		Reason:        reason,
+		EffectiveAt:   &effectiveAt,
+	}
+	if err := batch.WriteEngramOpDetails(ctx, wsPrefix, newEng, "evolve", evolveDetails); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch write new engram: %w", err)
 	}
 	if err := batch.WriteAssociation(ctx, wsPrefix, newULID, oldULID, supersedes); err != nil {
@@ -3819,7 +4133,7 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 		}
 	}
 	// Upsert re-point (#556): when called from writeUpsert's content-change
-	// path, move the 0x2E forward index to the successor in this same atomic
+	// path, move the 0x2F forward index to the successor in this same atomic
 	// batch — the re-point must commit (or roll back) with the evolve itself.
 	if upsertKeyHash != nil {
 		batch.RepointUpsertKey(wsPrefix, *upsertKeyHash, newULID)
@@ -3946,6 +4260,26 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 		}
 	}
 
+	// Notify background processors (e.g. the retroactive embed/summarize worker)
+	// that a new engram exists — UNCONDITIONALLY, exactly as Write does.
+	// Without this, evolve was the ONE write path that never woke the
+	// processor: the successor waited for its poll ticker, which backs off
+	// geometrically to a 3-MINUTE ceiling on an idle vault, so on a quiet vault
+	// a freshly evolved memory could be semantically unindexed for up to three
+	// minutes after the commit. That is the largest single contributor to the
+	// fresh-evolve retrieval window in #763.
+	//
+	// Not conditioned on whether a caller-supplied embedding was just indexed
+	// inline: the same processor also runs the SUMMARIZE stage, and Evolve
+	// deliberately does not inherit the predecessor's summary (it is
+	// content-derived and the content just changed), so an evolved memory has
+	// work waiting for the processor even when its vector is already in HNSW.
+	// Matching Write's unconditional call is also the property that keeps the
+	// two write paths from drifting again.
+	if fn, ok := e.onWrite.Load().(func()); ok && fn != nil {
+		fn()
+	}
+
 	// Submit new engram to async FTS worker.
 	if e.ftsWorker != nil {
 		e.ftsWorker.Submit(fts.IndexJob{
@@ -3978,9 +4312,37 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 		return nil, fmt.Errorf("consolidate: write merged: %w", err)
 	}
 
+	// NEVER archive the merged result itself. Write is exact-content deduplicated,
+	// so when mergedContent matches an input byte-for-byte — the NATURAL case,
+	// because the obvious merged text for a set of near-duplicates is usually one
+	// of them verbatim — Write returns THAT input's existing id rather than
+	// creating a new engram. Archiving every input then soft-deletes the very
+	// engram just returned as the survivor, and the fact disappears from recall
+	// while the response still reports success and names the (now dead) id.
+	//
+	// Verified before this guard: consolidate(ids=[A,B], merged=<A's content>)
+	// returned {"id": A, "archived": [A, B]} and left BOTH soft-deleted, so a
+	// caller using the merge tool exactly as documented lost the memory.
 	var archived []string
 	var warnings []string
+	// Compare PARSED ULIDs, not raw strings: ULID parsing is case-insensitive
+	// and Forget accepts lowercase ids, so a lowercase input whose content
+	// matched the merge text slipped past a string comparison and the survivor
+	// was archived anyway — the same data loss through a one-character-class
+	// gap (adversarial review of #754, finding 7).
+	mergedULIDForGuard, guardErr := storage.ParseULID(mergedResp.ID)
 	for _, id := range ids {
+		if guardErr == nil {
+			if inputULID, err := storage.ParseULID(id); err == nil && inputULID == mergedULIDForGuard {
+				// This input IS the merged result (dedup hit). Keep it alive; it
+				// is the consolidated memory the caller is being handed.
+				continue
+			}
+		} else if id == mergedResp.ID {
+			// Unparseable merged id (should not happen): fall back to the exact
+			// string match rather than skipping the guard entirely.
+			continue
+		}
 		_, err := e.Forget(ctx, &mbp.ForgetRequest{ID: id, Hard: false, Vault: vault})
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("failed to archive %s: %v", id, err))
@@ -4077,7 +4439,11 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 	if err := e.refuseAppend(ctx); err != nil {
 		return nil, err
 	}
-	content := rationale
+	// The body must STATE the decision, not just the reasoning behind it.
+	// Previously content was rationale(+alternatives) only, so every consumer
+	// that reads the body — a recall snippet, an export, a summarizer, a human
+	// — got the argument without ever being told what was decided.
+	content := decision + "\n\nRationale:\n" + rationale
 	if len(alternatives) > 0 {
 		content += "\n---\nAlternatives:\n" + strings.Join(alternatives, "\n")
 	}
@@ -4087,6 +4453,13 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 		Concept: decision,
 		Content: content,
 		Tags:    []string{"decision"},
+		// A decision-recording tool must produce a decision-TYPED memory.
+		// Left unset, MemoryType took the uint8 zero value (fact), which
+		// silently downgraded derived importance from the decision tier (0.6)
+		// to the fact tier (0.4) and hid the record from every type-based
+		// filter — the same silent-downgrade class as #742/#743/#745.
+		MemoryType: uint8(storage.TypeDecision),
+		TypeLabel:  storage.TypeDecision.String(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("decide: write: %w", err)
@@ -4109,7 +4482,7 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 	if err != nil {
 		return nil, fmt.Errorf("decide: parse id: %w", err)
 	}
-	return &DecideResult{ID: decideULID, Warnings: warnings}, nil
+	return &DecideResult{ID: decideULID, Concept: decision, Warnings: warnings}, nil
 }
 
 // RecordAccess increments the access count and updates the last-accessed timestamp
@@ -4136,6 +4509,21 @@ func (e *Engine) RecordAccess(ctx context.Context, vault, id string) error {
 
 // ResolveVaultPlasticity returns the resolved plasticity config for a vault,
 // falling back to defaults when no authStore is configured.
+// VaultPlasticityConfig returns the vault's RAW plasticity config (nil when
+// unset or unreadable). Callers that need resolved values want
+// ResolveVaultPlasticity; this exists for the narrow case of distinguishing
+// "the operator set this field explicitly" from "it came from the preset".
+func (e *Engine) VaultPlasticityConfig(vaultName string) *auth.PlasticityConfig {
+	if e.authStore == nil {
+		return nil
+	}
+	vaultCfg, err := e.authStore.GetVaultConfig(vaultName)
+	if err != nil {
+		return nil
+	}
+	return vaultCfg.Plasticity
+}
+
 func (e *Engine) ResolveVaultPlasticity(vaultName string) auth.ResolvedPlasticity {
 	if e.authStore != nil {
 		vaultCfg, err := e.authStore.GetVaultConfig(vaultName)
@@ -4199,6 +4587,17 @@ func (e *Engine) resolveSemanticBaseline(vaultName string, ws [8]byte, resolved 
 			"vault", vaultName, "embed_model", model)
 	}
 	return 0
+}
+
+// semanticFloorExplicitlyDisabled reports whether this vault's operator
+// explicitly set `semantic_floor: 0` — the documented way to disable the
+// COG-26 floor. Deliberately narrower than "the resolved baseline is 0":
+// an unset override, a positive override, and an out-of-range override that
+// resolveSemanticBaseline rejects (WARN + registry fallthrough) are all
+// false. Kept beside resolveSemanticBaseline so the two read the same
+// override field and cannot drift.
+func semanticFloorExplicitlyDisabled(resolved auth.ResolvedPlasticity) bool {
+	return resolved.SemanticFloorOverride != nil && *resolved.SemanticFloorOverride == 0
 }
 
 // PruneVault prunes a vault according to its resolved MaxEngrams and RetentionDays policy.
@@ -4312,10 +4711,17 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			}
 			for i := 0; i < toDelete; i++ {
 				id := scored[i].id
+				// Read before deleting: FTS cleanup needs the indexed fields,
+				// which are gone once the 0x01 record is.
+				victim, _ := e.store.GetEngram(opCtx, ws, id)
 				if err := e.store.DeleteEngram(opCtx, ws, id); err != nil {
 					slog.Debug("prune vault: hard-delete failed", "vault", vaultName, "id", id, "err", err)
 					continue
 				}
+				// STO-12: the pruner reaches DeleteEngram directly and cleaned
+				// neither FTS nor HNSW, so it leaked dangling edges through
+				// BOTH amplifiers with no operator action at all.
+				e.cleanSearchIndexesAfterHardDelete(ws, [16]byte(id), victim)
 				// Decrement the global engram counter.
 				for {
 					cur := e.engramCount.Load()
@@ -4352,10 +4758,13 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			return pruned, fmt.Errorf("prune vault %s (retention scan): %w", vaultName, err)
 		}
 		for _, id := range ids {
+			victim, _ := e.store.GetEngram(opCtx, ws, id)
 			if err := e.store.DeleteEngram(opCtx, ws, id); err != nil {
 				slog.Debug("prune vault: retention hard-delete failed", "vault", vaultName, "id", id, "err", err)
 				continue
 			}
+			// STO-12: same leak as the MaxEngrams path above.
+			e.cleanSearchIndexesAfterHardDelete(ws, [16]byte(id), victim)
 			// Decrement the global engram counter.
 			for {
 				cur := e.engramCount.Load()
@@ -4374,7 +4783,9 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 }
 
 // runPruneWorker is a periodic background sweep that prunes vaults according to their
-// MaxEngrams, RetentionDays, and AssocDecayFactor policies. Runs every 60s with ±5s jitter.
+// MaxEngrams, RetentionDays, and association-decay policies. Runs every 60s with ±5s jitter.
+// Association decay is cadence-independent (COG-28), so this period is a
+// responsiveness choice only — it is not a term in the decay rate (#762).
 func (e *Engine) runPruneWorker() {
 	defer close(e.pruneDone)
 	defer func() {
@@ -4399,25 +4810,138 @@ func (e *Engine) runPruneWorker() {
 					}
 				}
 			}
-			for _, vaultName := range vaults {
-				resolved := e.ResolveVaultPlasticity(vaultName)
-				if resolved.HebbianEnabled && resolved.AssocDecayFactor > 0 {
-					ws := e.store.ResolveVaultPrefix(vaultName)
-					removed, err := e.store.DecayAssocWeights(e.stopCtx, ws,
-						float64(resolved.AssocDecayFactor), resolved.AssocMinWeight, resolved.ArchiveThreshold)
-					if err != nil {
-						slog.Debug("assoc decay failed", "vault", vaultName, "err", err)
-					} else if removed > 0 {
-						slog.Info("assoc decay pruned edges", "vault", vaultName, "removed", removed)
-					}
-				}
-			}
+			e.decayAllVaults(e.stopCtx, vaults)
 			jitter = time.Duration(rand.Intn(10)) * time.Second
 			timer.Reset(60*time.Second + jitter)
 		case <-e.stopCtx.Done():
 			return
 		}
 	}
+}
+
+// decayAllVaults runs one association-decay sweep across the given vaults,
+// honouring each vault's plasticity.
+//
+// It is a method, not a block inside runPruneWorker, so the gate below can be
+// unit-tested directly. That matters: the pre-review version of this code had
+// the gate inlined in the worker loop, and DELETING it left the whole engine
+// suite green — the gate was wiring nobody tested (review finding B2).
+//
+// The gate: association decay must never run before the one-shot full-weight
+// repair has swept cleanly (#756). Post-#762 decay no longer deletes or clamps
+// a weight-0 pre-fix key on its own — the drop guard skips an edge whose
+// ceiling sits at or above its stored weight, and a zero weight is never below
+// it. What still destroys the repair's evidence is the ADOPTION path: a pre-fix
+// key whose value carries neither lastActivated nor createdAt gets stamped,
+// which rewrites the fwd/rev keys and sets the 0x14 index to 0.0 — overwriting
+// the weight-1.0 index entry that is the repair's only disambiguator. A pass
+// that errored keeps this shut for the process lifetime (see
+// runLegacyFullWeightAssocRepair's failure policy), so decay is parked rather
+// than allowed to destroy repairable state.
+func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
+	if !e.assocWeightRepairComplete() {
+		slog.Debug("assoc decay deferred: full-weight repair pass has not completed cleanly")
+		return
+	}
+	for _, vaultName := range vaults {
+		resolved := e.ResolveVaultPlasticity(vaultName)
+		// COG-16 unchanged: AssocDecayFactor is still the gate. It is now only
+		// a switch — the rate lives in AssocHalfLifeDays (#762).
+		if !resolved.HebbianEnabled || resolved.AssocDecayFactor <= 0 {
+			continue
+		}
+		halfLife := resolved.AssocHalfLife()
+		if halfLife <= 0 {
+			// Decay is switched on but carries no rate. Skip rather than
+			// substitute a default: an unconfigured rate is not a licence to
+			// pick one (principle #1). WARN once so it is not silent — and
+			// truthfully: a legacy factor >= 1 gets its own message (it is
+			// NOT a reinterpretation; nothing was derived from it), distinct
+			// from the generic "no rate configured" case.
+			e.warnAssocDecayOnce(vaultName, func() {
+				if f := e.explicitLegacyAssocFactor(vaultName); f != nil && *f >= 1 {
+					slog.Warn("assoc decay enabled but legacy assoc_decay_factor >= 1 carries no rate (a per-pass multiplier of 1 never moved a weight); no half-life resolved, decay skipped for this vault",
+						"vault", vaultName, "assoc_decay_factor", *f,
+						"fix", "set plasticity assoc_half_life_days to enable decay, or assoc_decay_factor 0 to switch it off explicitly")
+					return
+				}
+				slog.Warn("assoc decay enabled but no half-life resolved; decay skipped for this vault",
+					"vault", vaultName, "fix", "set plasticity assoc_half_life_days")
+			})
+			continue
+		}
+		e.warnLegacyAssocDecayFactor(vaultName, resolved)
+		ws := e.store.ResolveVaultPrefix(vaultName)
+		removed, err := e.decayAssocWeights(ctx, ws, halfLife, resolved.AssocMinWeight, resolved.ArchiveThreshold)
+		if err != nil {
+			slog.Debug("assoc decay failed", "vault", vaultName, "err", err)
+		} else if removed > 0 {
+			slog.Info("assoc decay pruned edges", "vault", vaultName, "removed", removed)
+		}
+	}
+}
+
+// warnAssocDecayOnce runs fn at most once per vault for the process lifetime.
+// The decay sweep runs every ~60s; a per-pass WARN would be a log flood, and a
+// flood is functionally silent.
+func (e *Engine) warnAssocDecayOnce(vaultName string, fn func()) {
+	if _, loaded := e.assocDecayWarned.LoadOrStore(vaultName, struct{}{}); loaded {
+		return
+	}
+	fn()
+}
+
+// explicitLegacyAssocFactor returns the vault's explicitly-configured
+// assoc_decay_factor when it is the operative rate source — i.e. set, with no
+// explicit half-life overriding it. Returns nil otherwise.
+func (e *Engine) explicitLegacyAssocFactor(vaultName string) *float32 {
+	cfg := e.VaultPlasticityConfig(vaultName)
+	if cfg == nil || cfg.AssocDecayFactor == nil {
+		return nil
+	}
+	if cfg.AssocHalfLifeDays != nil && *cfg.AssocHalfLifeDays != 0 {
+		return nil // explicit half-life wins; the factor is only a switch
+	}
+	return cfg.AssocDecayFactor
+}
+
+// warnLegacyAssocDecayFactor emits a one-time WARN per vault when a vault's
+// half-life was derived from a legacy explicit assoc_decay_factor rather than
+// configured directly. Degrade loudly, never silently-wrong (principle #2):
+// the factor's documented "per pass" meaning is gone, and the operator who set
+// it is told exactly what it now means and which field to set instead.
+func (e *Engine) warnLegacyAssocDecayFactor(vaultName string, resolved auth.ResolvedPlasticity) {
+	// "Checked" is tracked separately from "warned": the sweep calls this
+	// every ~60s per vault, and the config lookup below is a per-vault
+	// GetVaultConfig read. One check per vault per process is enough — a
+	// vault that did not need the WARN on first look never pays the read
+	// again (refute non-blocking finding 7).
+	if _, loaded := e.assocDecayLegacyChecked.LoadOrStore(vaultName, struct{}{}); loaded {
+		return
+	}
+	cfg := e.VaultPlasticityConfig(vaultName)
+	if cfg == nil || cfg.AssocDecayFactor == nil {
+		return
+	}
+	if cfg.AssocHalfLifeDays != nil && *cfg.AssocHalfLifeDays != 0 {
+		return // explicit half-life wins; nothing was reinterpreted
+	}
+	e.warnAssocDecayOnce(vaultName, func() {
+		slog.Warn("legacy assoc_decay_factor reinterpreted as a per-day rate (#762); it is now only an enable/disable switch",
+			"vault", vaultName,
+			"assoc_decay_factor", *cfg.AssocDecayFactor,
+			"derived_half_life_days", resolved.AssocHalfLifeDays,
+			"fix", "set plasticity assoc_half_life_days explicitly")
+	})
+}
+
+// decayAssocWeights dispatches to the store unless a test has installed a
+// double via decayAssocWeightsFn.
+func (e *Engine) decayAssocWeights(ctx context.Context, ws [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error) {
+	if e.decayAssocWeightsFn != nil {
+		return e.decayAssocWeightsFn(ctx, ws, halfLife, minWeight, archiveThreshold)
+	}
+	return e.store.DecayAssocWeights(ctx, ws, halfLife, minWeight, archiveThreshold)
 }
 
 // runIdempotencySweep is a daily background sweep that purges idempotency

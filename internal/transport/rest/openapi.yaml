@@ -30,6 +30,53 @@ components:
 
   schemas:
 
+    WorkerStats:
+      type: object
+      required: [processed, batches, errors, dropped, lastRun, state, status, enabled, effectiveWait]
+      properties:
+        processed:
+          type: integer
+          format: uint64
+        batches:
+          type: integer
+          format: uint64
+        errors:
+          type: integer
+          format: uint64
+        dropped:
+          type: integer
+          format: uint64
+        lastRun:
+          type: integer
+          format: int64
+          description: "Unix timestamp in nanoseconds; zero means never."
+        state:
+          type: integer
+          format: int32
+          description: "Legacy numeric lifecycle state. Zero is ambiguous between active and disabled. Check enabled first, then prefer status."
+        status:
+          type: string
+          description: "Stable symbolic lifecycle state. Unknown future states are reported as unknown."
+          enum: [active, idle, dormant, stopped, disabled, unknown]
+        enabled:
+          type: boolean
+          description: "Whether the worker is configured on this node. Dormant workers remain enabled."
+        effectiveWait:
+          type: integer
+          format: int64
+          description: "Current worker wait interval in nanoseconds."
+
+    EngineWorkerStats:
+      type: object
+      required: [hebbian, contradict, confidence]
+      properties:
+        hebbian:
+          $ref: "#/components/schemas/WorkerStats"
+        contradict:
+          $ref: "#/components/schemas/WorkerStats"
+        confidence:
+          $ref: "#/components/schemas/WorkerStats"
+
     # ── Core write/read ─────────────────────────────────────────────────────
 
     WriteRequest:
@@ -308,9 +355,35 @@ components:
         semantic_similarity:
           type: number
           format: float
+          description: COG-26 baseline-calibrated cosine (semCal), not the raw one.
+        semantic_similarity_raw:
+          type: number
+          format: float
+          description: >-
+            The UNCALIBRATED cosine behind semantic_similarity — COG-26's
+            honesty backstop, so an operator can see the raw signal behind a
+            match a low calibrated value made look weak.
         full_text_relevance:
           type: number
           format: float
+        content_match:
+          type: number
+          format: float
+          description: >-
+            w_sem*semCal + w_fts*fts_coverage in [0,1], BEFORE the ACT-R
+            contextual prior, before per-query normalization and before
+            confidence. The only reported number that answers "is this memory
+            about the query" on a scale comparable ACROSS queries, and the
+            quantity the relevance calibration is stated on.
+        absolute_score:
+          type: number
+          format: float
+          description: >-
+            Raw BEFORE the per-query 1/maxRaw rescale, clamped to [0,1] and
+            multiplied by confidence. Unlike `score` it is not relative to this
+            query's candidate set, so 0.9 means the same thing on a good query
+            and a garbage one. This is the quantity the abstention gate compares
+            and the quantity relevance_band is derived from.
         decay_factor:
           type: number
           format: float
@@ -350,9 +423,67 @@ components:
         score:
           type: number
           format: float
+          description: >-
+            RELATIVE to this query's own best candidate: the 1/maxRaw rescale
+            pins the argmax of ANY query near the top of the range, including a
+            query this vault cannot answer. It ORDERS results. Judge relevance
+            by relevance_band (or score_components.absolute_score), never by
+            this.
         confidence:
           type: number
           format: float
+          description: >-
+            The stored TRUTH-belief for this memory (COG-10) — moved by
+            contradiction and explicit feedback, never by retrieval. NOT a
+            retrieval statistic: a memory can be a certain fact and a terrible
+            match (confidence 1, relevance_band weak).
+        relevance_band:
+          type: string
+          enum: [strong, moderate, weak, filter_match, uncalibrated]
+          description: >-
+            #773 score-presentation honesty. The ABSOLUTE relevance band for
+            this row, derived from score_components.absolute_score against THIS
+            VAULT's own calibration — its resolved default gate (which COG-26
+            deliberately placed just above the embed model's measured
+            out-of-domain noise ceiling) and its resolved content-channel
+            ceiling. strong = at or above half the ceiling (near-verbatim
+            evidence); moderate = clear of the noise band; weak = within one
+            doubling of the noise floor, i.e. a NEIGHBOUR rather than
+            necessarily an ANSWER; filter_match = admitted below the relevance
+            bar by an explicit tag filter (COG-5 S1) — the filter defined the
+            set, not relevance; uncalibrated = this row's absolute score is not
+            on a bandable scale, with relevance_band_basis naming why.
+            NOTE the separate `relevance` field below is a different quantity
+            entirely (the engram's stored decay/pruning strength).
+        relevance_band_basis:
+          type: string
+          enum:
+            [
+              tag_filter_bypass,
+              rrf_fusion,
+              weighted_sum_fusion,
+              no_model_baseline,
+              semantic_floor_disabled,
+              semantic_degraded,
+              no_content_channel,
+              no_calibration_gate,
+              not_scored,
+            ]
+          description: >-
+            Set only for filter_match and uncalibrated, and names WHY. rrf /
+            weighted_sum: those fusion modes do not gate on absolute_score and
+            have no comparable calibration. no_model_baseline: COG-26 gave this
+            embed model the identity transform, so semantic similarity is raw
+            cosine whose noise floor is ~0.45 — every band would be wrong.
+            semantic_floor_disabled: the same identity transform, but because
+            the vault's operator explicitly set semantic_floor: 0 (the
+            documented way to disable the floor) — a choice, not a missing
+            calibration.
+            semantic_degraded: the semantic weight was redistributed onto the
+            lexical channel and the ceiling shifted. not_scored: the row was
+            injected by a post-pipeline phase (entity-boost spread activation,
+            supersession head promotion) and its aboutness against this query
+            was never MEASURED — which is different from measured and low.
         score_components:
           $ref: "#/components/schemas/ScoreComponents"
         why:
@@ -393,6 +524,177 @@ components:
           items:
             type: string
           description: "The engram's tags (S4), so callers can filter low-salience entries client-side."
+        superseded_by:
+          type: string
+          description: >-
+            ASSERTED (declared RelSupersedes chain): the immediate superseder's ULID.
+            Present whenever this result is superseded. See COG-22.
+        current_version:
+          type: string
+          description: >-
+            ASSERTED: the chain head — the fact to consult now. Present whenever this
+            result is superseded.
+        substituted_for:
+          type: string
+          description: >-
+            ASSERTED (COG-28): the superseded PREDECESSOR whose match admitted or boosted
+            this row. Your query's wording reached the older version and recall resolved it
+            to this current one. On an injected row (own wording did not match) both score
+            and score_components are the predecessor's measurements; on a raised row (own
+            wording matched, predecessor matched harder) only score is the predecessor's —
+            score_components remain this memory's own. substitution_basis carries the
+            predecessor's measurements in both cases.
+        substitution_basis:
+          $ref: "#/components/schemas/SubstitutionBasis"
+        chain_truncated:
+          type: boolean
+          description: >-
+            COG-28: the declared version chain was longer than the walk limit, so the
+            returned memory may not be the very latest version.
+        head_not_indexed_yet:
+          type: boolean
+          description: >-
+            COG-28: this memory has no stored embedding yet (indexing pending). "Not
+            indexed", not "not relevant".
+        possibly_superseded_by:
+          type: string
+          description: >-
+            ADVISORY heuristic currency (COG-25) — INFERRED from a same-version cluster,
+            never asserted. Verify before treating this memory as false; it is still
+            returned at full score.
+        version_cluster:
+          type: string
+          description: "ADVISORY (COG-25): stable key shared by detected cluster members."
+        newest_of_cluster:
+          type: boolean
+          description: "ADVISORY (COG-25): newest among the RETURNED cluster members."
+        cluster_size:
+          type: integer
+        valid_from:
+          type: integer
+          format: int64
+        valid_until:
+          type: integer
+          format: int64
+        expired:
+          type: boolean
+        importance:
+          type: number
+          format: float
+        unresolved_contradiction:
+          $ref: "#/components/schemas/ContradictionConflict"
+
+    ContradictionConflict:
+      type: object
+      description: >-
+        COG-29 contradiction honesty (#764). ASSERTED, from a declared
+        `contradicts` link that nothing has resolved: this memory is declared to
+        disagree with another one, so it must NOT be read as the answer without
+        checking this annotation. Its score has been demoted 10 percent below
+        its earned value; results stay ordered by score, so near-tied rivals
+        land adjacent while a clearly stronger match keeps its rank. Resolve it
+        with evolve, forget(not_true_since=…), or link(relation="supersedes").
+        Absent when the memory is in no live conflict.
+      properties:
+        with:
+          type: string
+          description: The partner memory's ULID.
+        with_concept:
+          type: string
+          description: The partner's concept. Omitted when it could not be resolved (never guessed at).
+        side:
+          type: string
+          enum: [asserted, challenged]
+          description: >-
+            "asserted" when this memory is the SOURCE of the contradicts edge,
+            "challenged" when it is the target.
+        declared_at:
+          type: string
+          format: date-time
+          description: When the edge was written. OMITTED when unknown — never serialised as the zero instant.
+        partner_in_results:
+          type: boolean
+          description: >-
+            Whether the partner is also in this response. When false the partner
+            is NAMED but deliberately not injected — neither side of an
+            unresolved conflict is known to be right, so a conflict must never
+            lift content into a result set it did not earn.
+        cluster_size:
+          type: integer
+        cluster_truncated:
+          type: boolean
+
+    ConflictBlock:
+      type: object
+      description: >-
+        COG-29 (#764) response-level signal: at least two returned memories are
+        declared to contradict each other and the conflict is unresolved, so
+        NEITHER is presented as the answer. `abstained` is deliberately NOT set
+        alongside it — the candidates are admission-worthy and the response is
+        non-empty.
+      properties:
+        unresolved:
+          type: boolean
+        pairs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConflictPairInfo"
+        warning:
+          type: string
+        adjacency_overflow:
+          type: integer
+          description: >-
+            How many rows beyond max_results this response carries in order to
+            keep a conflict cluster whole. Never applied silently.
+
+    ConflictPairInfo:
+      type: object
+      properties:
+        a:
+          type: string
+        b:
+          type: string
+        a_concept:
+          type: string
+        b_concept:
+          type: string
+        declared_at:
+          type: string
+          format: date-time
+        preferred:
+          type: string
+          enum: [a, b]
+          description: >-
+            The side the recency ladder prefers (valid-time, then the direction
+            of the declaration) — NOT a verdict about which memory is true, and
+            it may differ from the response's actual order, which is by demoted
+            score.
+        basis:
+          type: string
+          enum: [newer_valid_from, asserting_side, ulid_tiebreak]
+        partner_in_results:
+          type: boolean
+
+    SubstitutionBasis:
+      type: object
+      description: >-
+        COG-28: the superseded predecessor's measured evidence against this query — what
+        admitted a substituted row. absolute_score is the exact quantity that was compared
+        against the recall threshold, so a caller can verify for itself that the
+        substitution redirected admission-worthy evidence rather than manufacturing it.
+      properties:
+        absolute_score:
+          type: number
+          format: float
+        content_match:
+          type: number
+          format: float
+        semantic_similarity:
+          type: number
+          format: float
+        full_text_relevance:
+          type: number
+          format: float
 
     BriefSentence:
       type: object
@@ -427,6 +729,25 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/BriefSentence"
+        semantic_degraded:
+          type: boolean
+          description: >-
+            True when semantic (vector) scoring degraded during this recall — the
+            embed backend was unreachable, returned an empty/all-zero query vector,
+            or a post-load embedding fetch failed — so semantic_similarity may be
+            understated. Query-granular and coarse (set on any such failure even if
+            the primary vector search produced real scores). Omitted when false.
+        abstained:
+          type: boolean
+          description: >-
+            True when the pipeline ran to completion and DELIBERATELY returned
+            nothing: candidates were scored and every one fell below the
+            relevance bar or was filtered. Empty iff abstained is false.
+        abstained_reason:
+          type: string
+          enum: [no_candidates, below_threshold, filtered, superseded_only, ambiguous_version]
+        conflict:
+          $ref: "#/components/schemas/ConflictBlock"
 
     # ── Link ─────────────────────────────────────────────────────────────────
 
@@ -1007,7 +1328,7 @@ components:
           type: integer
         preset:
           type: string
-          enum: [default, reference, scratchpad, knowledge-graph]
+          enum: [default, reference, scratchpad, knowledge-graph, working]
         multi_user:
           type: boolean
           nullable: true
@@ -1045,6 +1366,45 @@ components:
           type: number
           format: float
           nullable: true
+        assoc_decay_factor:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
+          maximum: 1
+          description: >-
+            Association-decay enable/disable switch. Any value > 0 enables edge
+            decay; 0 disables it. It does not set a rate (#762) — the rate is
+            assoc_half_life_days.
+        assoc_min_weight:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
+          maximum: 1
+        archive_threshold:
+          type: number
+          format: double
+          nullable: true
+          minimum: 0
+          maximum: 1
+        max_engrams:
+          type: integer
+          nullable: true
+          minimum: 0
+        retention_days:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
+        assoc_half_life_days:
+          type: number
+          format: float
+          nullable: true
+          description: >-
+            Wall-clock half-life of an unused association edge, in days.
+            Clamped to [0.5, 3650]; 0 or null means "use the preset value"
+            (30 for default/reference/working, 90 for knowledge-graph).
         traversal_profile:
           type: string
           nullable: true
@@ -1601,7 +1961,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
+                $ref: "#/components/schemas/EngineWorkerStats"
 
   /api/stats:
     get:

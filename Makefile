@@ -7,6 +7,7 @@ HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
 ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
 
 .PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets web css build test bench test-integration \
+        corpora check-filenames \
         _ort-darwin-arm64 _ort-darwin-amd64 _ort-linux-amd64 _ort-linux-arm64 _ort-windows-amd64
 
 ## fetch-assets: download the model, tokenizer, and all platform ORT libraries.
@@ -123,11 +124,28 @@ bench:
 
 ## test-integration: run integration tests (requires no muninn already running on :8750).
 ## Builds the binary, exercises the full start/stop/restart lifecycle, then cleans up.
+## If :8750 is busy the suite SKIPs visibly; MUNINN_REQUIRE_INTEGRATION=1 makes that a
+## failure instead, which is what CI sets (#812).
 test-integration:
 	@go test -tags integration -v -timeout 120s ./cmd/muninn/...
+
+## corpora: run the standing measurement corpora and write .artifacts/corpora.txt.
+## The four harnesses in internal/engine/activation, normalised so two runs of an
+## unchanged tree are byte-identical and a diff shows only moved numbers. They also run
+## inside `go test ./...`; this target exists to produce the diffable artifact.
+corpora:
+	@bash scripts/run-corpora.sh
+
+## check-filenames: fail if a source file's NAME silently excludes it from the build (#814).
+check-filenames:
+	@bash scripts/check-filename-build-constraints.sh
 
 # The eval-bible-* targets were removed here: they build ./cmd/eval-bible/... and run
 # scripts/eval-bible-setup.sh, neither of which is in the public repo (cmd/eval*/ and
 # scripts/eval-* are gitignored as internal development tooling). Advertising targets that
 # cannot run from a fresh clone is worse than not listing them. If the retrieval-quality
 # eval harness is published later, restore them alongside it.
+#
+# testdata/bible/ went with them (it held only a .gitkeep). An empty data directory whose
+# only loader is gitignored reads as "there is a corpus here"; there was not one, and it
+# was cited as if it were the standing corpora. The standing corpora are `make corpora`.

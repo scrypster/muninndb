@@ -10,7 +10,7 @@ package prefix
 
 // Source-of-truth prefix bytes. Storage unchanged; auth RELOCATED 0x11–0x14 → 0x42–0x45.
 const (
-	// Storage (0x01–0x2E)
+	// Storage (0x01–0x2F)
 	Engram             byte = 0x01
 	Meta               byte = 0x02
 	AssocFwd           byte = 0x03
@@ -70,10 +70,21 @@ const (
 	// NOTE: the design doc allocated 0x2C, but 0x2C was taken by RawTagRange
 	// (S1) before this landed — 0x2D is the actual allocation.
 	ProspectiveIntent byte = 0x2D
-	// UpsertKey (0x2E) — durable upsert forward index (#556): sha256 of the
-	// caller's idempotent_id → the engram ID it is pinned to. Relocated from
-	// 0x2D after upstream #694 (THE PUSH) allocated ProspectiveIntent (0x2D).
-	UpsertKey byte = 0x2E
+	// AssocWeightRepairMark (0x2E) — vault-scoped watermark for the one-time
+	// startup repair of pre-fix full-weight association keys (#756; encoder
+	// fixed in #757). The original WeightComplement overflowed at weight
+	// exactly 1.0 and wrote those edges at the weight-0.0 key position; the
+	// repair relocates them to the true 1.0 position. Presence of the mark at
+	// the current version means the repair already ran for that vault. A
+	// one-shot watermark is sound because the fixed encoder cannot create new
+	// damage of this kind.
+	AssocWeightRepairMark byte = 0x2E
+	// UpsertKey (0x2F) — durable upsert forward index (#556): sha256 of the
+	// caller's idempotent_id → the engram ID it is pinned to. The maintainer's
+	// review (#659) refers to this as "the 0x2E index"; the actual byte moved
+	// to 0x2F after upstream #756 allocated AssocWeightRepairMark (0x2E).
+	// Relocation history: 0x2B → 0x2D → 0x2E → 0x2F.
+	UpsertKey byte = 0x2F
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
 	CapabilityVaultIdx byte = 0x41
@@ -154,6 +165,7 @@ var registry = []Entry{
 	{EvolveRepairMark, "storage", "EvolveRepairMark", "vault-scoped-data"},
 	{RawTagRange, "storage", "RawTagRange", "vault-scoped-data"},
 	{ProspectiveIntent, "storage", "ProspectiveIntent", "vault-scoped-data"},
+	{AssocWeightRepairMark, "storage", "AssocWeightRepairMark", "vault-scoped-data"},
 	{UpsertKey, "storage", "UpsertKey", "vault-scoped-data"},
 	{Capability, "capability", "Capability", "capability"},
 	{CapabilityVaultIdx, "capability", "CapabilityVaultIdx", "capability"},

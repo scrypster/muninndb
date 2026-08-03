@@ -28,7 +28,7 @@ func (e *upsertCaptureEngine) Write(_ context.Context, req *mbp.WriteRequest) (*
 // TestHandleRemember_UpsertMode_ThreadsToEngine: muninn_remember with
 // upsert_mode + op_id must set WriteRequest.UpsertMode=true and
 // IdempotentID=op_id, and reach Write — NOT short-circuit on a receipt (upsert
-// uses the durable 0x2E forward index, not the receipt path). MCP-side half of
+// uses the durable 0x2F forward index, not the receipt path). MCP-side half of
 // the #556 Inc 3 cross-surface parity check.
 func TestHandleRemember_UpsertMode_ThreadsToEngine(t *testing.T) {
 	eng := &upsertCaptureEngine{}

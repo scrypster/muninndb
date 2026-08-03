@@ -3,8 +3,8 @@
 **Date:** 2026-07-29 · **Step:** DESIGN (no production code) · **Base:** origin/develop @ `cdbe355`
 **Problem:** Recall never abstains. Off-topic/nonsense queries return confident irrelevant
 results because `full_text_relevance` is ~1.0 for *any* single-token match, so no threshold
-can separate nonsense from genuine matches. Measured on the real 3,296-memory simplorium
-vault: `"how to bake sourdough bread"` → "Platform validation methodology", score 1.0,
+can separate nonsense from genuine matches. Measured on a real ~3,300-memory vault
+(the labs clone): `"how to bake sourdough bread"` → "Platform validation methodology", score 1.0,
 full_text_relevance 0.9999, semantic_similarity 0.
 
 ---
@@ -41,7 +41,7 @@ with `idf = ln((N-df+0.5)/(df+0.5) + 1)` (fts.go:536) and field weights **3.0 co
 activation engine unmodified: `c.ftsScore = s.Score` at
 `internal/engine/activation/engine.go:948` (phase3RRF), then tanh'd at the three sites above.
 
-**Real magnitudes for N=3,296 (simplorium):**
+**Real magnitudes for N=3,296 (a real vault):**
 
 | match | idf | bm25 (≈) | tanh |
 |---|---|---|---|
@@ -260,7 +260,7 @@ score plants):
 
 ### Real-vault validation (the honest gate)
 
-Against the labs clone (isolated daemon, REST :9475, vault=simplorium, 3,296 real
+Against the labs clone (isolated daemon, REST :9475, vault=<labs-clone>, 3,296 real
 memories), run the ~12-query probe before and after, default threshold, and report a
 before/after table of (top concept, score, full_text_relevance, semantic_similarity, n):
 

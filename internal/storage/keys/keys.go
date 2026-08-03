@@ -362,6 +362,14 @@ func AssocFwdRangeStart(ws [8]byte) []byte {
 // AssocFwdRangeEnd returns the exclusive upper bound for scanning all forward
 // associations within a vault (increments the workspace prefix by 1 in the
 // last byte, standard Pebble upper-bound idiom).
+//
+// The carry loop below stops at index 1, so it never increments the 0x03
+// prefix byte. That covers the ~1-in-256 STO-11 case (a vault prefix whose
+// LAST byte is 0xFF) correctly, but an ALL-0xFF workspace prefix (2^-64)
+// would carry off the end and yield 0x03|00..00 — an upper bound below the
+// lower bound. Left as-is here rather than changed under an unrelated
+// increment; AssocRevRangeEnd uses PrefixUpperBound and has no such edge.
+// Filed as #819 so it is findable without reading this function.
 func AssocFwdRangeEnd(ws [8]byte) []byte {
 	end := make([]byte, 1+8)
 	end[0] = prefix.AssocFwd
@@ -384,6 +392,35 @@ func AssocFwdPrefixForID(ws [8]byte, id [16]byte) []byte {
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
+}
+
+// AssocRevRangeStart returns the inclusive lower bound for scanning all reverse
+// association index entries within a vault (0x04 prefix scan lower bound).
+func AssocRevRangeStart(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.AssocRev
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// AssocRevRangeEnd returns the exclusive upper bound for scanning all reverse
+// association index entries within a vault.
+//
+// STO-11: this delegates to PrefixUpperBound rather than open-coding a
+// last-byte increment. PrefixUpperBound carries across every byte, and because
+// byte 0 here is the 0x04 prefix (never 0xFF) it always produces a bound
+// strictly above the lower bound — including for an all-0xFF workspace
+// prefix. Note what it actually returns there: it increments the FIRST
+// NON-0xFF BYTE FROM THE RIGHT and leaves the trailing 0xFFs in place, so an
+// all-0xFF workspace yields 0x05|FF..FF, not 0x05|00..00. The bound is still
+// strictly above the lower bound, which is the property STO-11 needs; the
+// surplus range it admits is 0x05-prefixed keys, which no reverse-association
+// scan can mistake for its own because every consumer additionally checks the
+// 25-byte per-id prefix (see rankingReverseEdges). The open-coded loop in
+// AssocFwdRangeEnd stops at index 1 and therefore does NOT carry out of the
+// workspace bytes; see the note there.
+func AssocRevRangeEnd(ws [8]byte) []byte {
+	return PrefixUpperBound(AssocRevRangeStart(ws))
 }
 
 // AssocRevPrefixForID returns a 25-byte scan prefix covering all reverse
@@ -535,7 +572,45 @@ func TransitionPrefixForSrc(ws [8]byte, src [16]byte) []byte {
 
 // WeightComplement computes the weight complement for descending sort order.
 func WeightComplement(weight float32) [4]byte {
-	w := uint32(weight * float32(math.MaxUint32))
+	// BYTE-COMPATIBLE with every key ever written for weights in (0,1), and
+	// explicitly saturated at the endpoints.
+	//
+	// History, because this function has now been wrong twice in opposite
+	// directions:
+	//
+	//  1. The ORIGINAL form, uint32(weight * float32(math.MaxUint32)), was
+	//     undefined for weight exactly 1.0 — float32(MaxUint32) rounds UP to
+	//     2^32, the multiply lands on 2^32, and the uint32 conversion of an
+	//     out-of-range float is implementation-defined (0 on arm64). A
+	//     full-confidence edge was therefore written at the weight-0.0 key
+	//     position and read back as 0: decide's evidence links, explicit 1.0
+	//     declarations, and LTP-saturated learning were silently destroyed.
+	//  2. The FIRST fix computed uint32(f * float64(math.MaxUint32)). Correct
+	//     at 1.0 — and byte-INCOMPATIBLE at essentially every other weight,
+	//     because float32(MaxUint32)==2^32 while float64(MaxUint32)==2^32-1:
+	//     the two multipliers disagree by ~1 integer step for all interior
+	//     weights (0 identical encodings in 1M samples). Every recomputed-key
+	//     delete (Hebbian updates, decay, engram-delete cascade) would have
+	//     missed every pre-fix key on every existing vault: metadata silently
+	//     reset, permanent duplicate edges, unbounded decay key growth. Caught
+	//     by adversarial review before it shipped.
+	//
+	// The correct form keeps the ORIGINAL expression on the open interval —
+	// byte-identical to every existing on-disk key — and handles only the
+	// endpoints explicitly. 0.99999994 (the largest float32 below 1.0) stays
+	// on the legacy path and encodes safely to 4294967040. The endpoint
+	// saturation gives 1.0 -> complement 0 (sorts first, decodes to exactly
+	// 1.0). Pinned by a cross-era byte-compatibility test that reproduces the
+	// legacy bytes for interior weights.
+	var w uint32
+	switch {
+	case weight >= 1.0:
+		w = math.MaxUint32
+	case weight <= 0:
+		w = 0
+	default:
+		w = uint32(weight * float32(math.MaxUint32)) // legacy expression: byte-identical on (0,1)
+	}
 	c := uint32(math.MaxUint32) - w
 	var buf [4]byte
 	binary.BigEndian.PutUint32(buf[:], c)
@@ -905,7 +980,7 @@ func LeaseKey(ws [8]byte, id [16]byte) []byte {
 	return key
 }
 
-// ProspectiveIntentKey constructs an armed-intention index key (0x2E prefix,
+// ProspectiveIntentKey constructs an armed-intention index key (0x2F prefix,
 // THE PUSH increment 1). One key exists per (intention, cue entity) pair so a
 // focal-entity lookup is a single 17-byte-prefix scan.
 // Key: 0x2D | wsPrefix(8) | EntityNameHash(cue)(8) | intentionID(16) = 33 bytes
@@ -951,17 +1026,29 @@ func EvolveRepairMarkKey(ws [8]byte) []byte {
 	return key
 }
 
-// UpsertKeyKey constructs the upsert forward-index key (0x2E prefix).
+// UpsertKeyKey constructs the upsert forward-index key (0x2F prefix).
 // Maps sha256(idempotent_id) → the engram ID it is pinned to within a vault,
 // enabling O(1) upsert-key lookup at write time (issue #556). Mirrors
 // ContentHashKey's shape exactly — vault-scoped, sha256-suffixed, ULID value.
-// Relocated from 0x2D after upstream #694 landed EvolveRepairMark/RawTagRange.
-// Key: 0x2D | wsPrefix(8) | sha256(32) = 41 bytes
+// Relocated from 0x2E after #756
+// Key: 0x2F | wsPrefix(8) | sha256(32) = 41 bytes
 // Value: engramID(16) bytes
 func UpsertKeyKey(ws [8]byte, hash [32]byte) []byte {
 	key := make([]byte, 1+8+32)
 	key[0] = prefix.UpsertKey
 	copy(key[1:9], ws[:])
 	copy(key[9:41], hash[:])
+	return key
+}
+
+// AssocWeightRepairMarkKey constructs the per-vault watermark key (0x2E) for
+// the one-time repair of pre-fix full-weight association keys (#756). Value:
+// one byte, the repair-pass version that last completed cleanly over the
+// vault. Presence at the current version lets startup skip the full 0x03 scan.
+// Key: 0x2E | wsPrefix(8) = 9 bytes
+func AssocWeightRepairMarkKey(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.AssocWeightRepairMark
+	copy(key[1:9], ws[:])
 	return key
 }
