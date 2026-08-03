@@ -275,10 +275,6 @@ func TestEntityKeyLayout(t *testing.T) {
 	require.Equal(t, []byte{9, 9, 9, 9, 9, 9, 9, 9}, k[1:9], "bytes 1-8 must be the workspace prefix")
 	require.Equal(t, []byte{1, 2, 3, 4, 5, 6, 7, 8}, k[9:17], "bytes 9-16 must be the name hash")
 
-	vp := EntityVaultPrefix([8]byte{9, 9, 9, 9, 9, 9, 9, 9})
-	require.Len(t, vp, 9, "EntityVaultPrefix must be 9 bytes")
-	require.Equal(t, k[:9], vp, "EntityVaultPrefix must be EntityKey's first 9 bytes")
-
 	ws := [8]byte{0xAA}
 	engramID := [16]byte{0xBB}
 	nameHash := [8]byte{0xCC}

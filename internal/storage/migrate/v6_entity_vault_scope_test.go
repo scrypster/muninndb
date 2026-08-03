@@ -243,6 +243,52 @@ func TestV6_KeepsMergeTombstonesWithTheirTarget(t *testing.T) {
 	}
 }
 
+// TestV6_TombstoneFansOutIntoUninvolvedVault documents a known, accepted
+// residual of clause 4 (see the "WHICH VAULTS A RECORD GOES TO" doc comment on
+// VaultScopeEntityRecords and STO-17's residual paragraph): a merge tombstone
+// inherits the FULL vault set of its MergedInto target, and that set can have
+// more than one member. TestV6_KeepsMergeTombstonesWithTheirTarget above only
+// ever gives the target a SINGLE referencing vault — a shape that cannot
+// exercise the fan-out. Here the target is referenced by both alpha (which
+// performed the merge) and beta (an unrelated vault that never mentioned the
+// merged-away name at all); beta still receives the tombstone, because
+// nothing in the keyspace records which vault ran the merge. This is not a
+// regression — beta saw the same record through the pre-#683 global key — and
+// is kept deliberately rather than guessed away.
+func TestV6_TombstoneFansOutIntoUninvolvedVault(t *testing.T) {
+	db := v6TestDB(t)
+	// alpha merged "Acme Co" into "Acme Corporation".
+	putLegacyEntity(t, db, legacyEntityRecord{
+		Name: "Acme Co", Type: "org", MentionCount: 4, State: "merged",
+		MergedInto: "Acme Corporation",
+	})
+	putLegacyEntity(t, db, legacyEntityRecord{
+		Name: "Acme Corporation", Type: "org", MentionCount: 9, State: "active",
+	})
+	// alpha references the target, having performed the merge...
+	putReverseLink(t, db, "Acme Corporation", wsAlpha, eid(1))
+	// ...and so does beta, an unrelated tenant that never merged anything and
+	// has zero references of any kind to "Acme Co".
+	putReverseLink(t, db, "Acme Corporation", wsBeta, eid(2))
+
+	if err := VaultScopeEntityRecords(db); err != nil {
+		t.Fatalf("VaultScopeEntityRecords: %v", err)
+	}
+
+	got := readScoped(t, db, wsBeta, "Acme Co")
+	if got == nil {
+		t.Fatal("expected the known fan-out: beta should receive the tombstone " +
+			"because it references the merge target, even though it never " +
+			"referenced the merged-away name itself")
+	}
+	if got.State != "merged" || got.MergedInto != "Acme Corporation" {
+		t.Errorf("beta's fanned-out tombstone lost its merge state: %+v", got)
+	}
+	t.Log("known residual reproduced: beta has zero references to \"Acme Co\" " +
+		"yet received a full merge-tombstone record for it, because it " +
+		"references \"Acme Corporation\" and clause 4 is not per-vault")
+}
+
 // TestV6_RelationshipOnlyEntityKeepsItsVault: an entity referenced only by a
 // 0x26 relationship index entry still belongs to that vault, with no mentions.
 func TestV6_RelationshipOnlyEntityKeepsItsVault(t *testing.T) {

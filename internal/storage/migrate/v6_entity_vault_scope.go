@@ -62,16 +62,43 @@ import (
 //
 // # WHICH VAULTS A RECORD GOES TO
 //
-// The union of four positive, per-vault references, in this order:
+// The union of four positive references, in this order. The first three are
+// genuinely per-vault; the fourth is NOT — read its caveat below.
 //
 //  1. 0x23 entity→engram reverse index — the mentions. Supplies the count.
+//
 //  2. 0x26 relationship entity index — curated relationships with no 0x20 link.
+//
 //  3. 0x2D prospective-intent cues — an armed intention naming the entity.
-//  4. for a State=="merged" tombstone, the vault set of its MergedInto target
-//     (computed from 1–3). MergeEntity relinks every engram and relationship
-//     away from A BEFORE marking A merged, so every merge tombstone in the
-//     store has zero references of its own. Following the target is what keeps
-//     those tombstones — dropping "orphans" blindly would delete all of them.
+//
+//  4. for a State=="merged" tombstone, the FULL vault set of its MergedInto
+//     target (computed from 1–3), not filtered to any one vault. MergeEntity
+//     relinks every engram and relationship away from A BEFORE marking A
+//     merged, so every merge tombstone in the store has zero references of its
+//     own; following the target is what keeps those tombstones instead of
+//     dropping them all as "orphans".
+//
+//     CAVEAT: nothing in the keyspace records WHICH vault ran the merge, so
+//     when the target has references from more than one vault, clause 4 gives
+//     the tombstone to ALL of them — including a vault that has never
+//     mentioned or referenced the merged-away name. That vault gets a full
+//     `state="merged", merged_into=<target>` record purely because some other
+//     vault performed the merge: the same read-oracle shape #683 otherwise
+//     closes, reopened for this one record shape. Pre-migration, that vault
+//     saw the identical record through the old global key, so this PRESERVES
+//     an existing exposure rather than creating a new one, and there is no
+//     information anywhere in the store to attribute the tombstone correctly —
+//     dropping it for a vault in the fan-out whenever the target has more than
+//     one vault would delete a redirect some OTHER vault in that same set
+//     genuinely needs. Bounded (unreachable via ListEntities, which walks 0x20
+//     and gets no forward link for the uninvolved vault; reachable only by an
+//     exact-name lookup) but durable: UpsertEntityRecord preserves
+//     State/MergedInto once State=="merged", so if the uninvolved vault later
+//     legitimately acquires that name its record stays pinned as a stranger's
+//     tombstone, and a subsequent MergeEntity on it fails with "already
+//     merged" until manually cleared. See STO-17's residual paragraph. Pinned
+//     (as intentional, not a regression trap) by
+//     TestV6_TombstoneFansOutIntoUninvolvedVault.
 //
 // A record with no reference under any of the four is unreachable from every
 // vault-scoped view today, and the live code already deletes exactly that shape

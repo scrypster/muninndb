@@ -720,15 +720,6 @@ func EntityKey(ws [8]byte, nameHash [8]byte) []byte {
 	return key
 }
 
-// EntityVaultPrefix returns the 9-byte scan prefix covering every entity record
-// in a vault (0x1F | wsPrefix(8)).
-func EntityVaultPrefix(ws [8]byte) []byte {
-	key := make([]byte, 1+8)
-	key[0] = prefix.Entity
-	copy(key[1:9], ws[:])
-	return key
-}
-
 // EntityEngramLinkKey constructs the engram→entity link key (0x20 prefix).
 // Key: 0x20 | wsPrefix(8) | engramID(16) | nameHash(8) = 33 bytes
 func EntityEngramLinkKey(ws [8]byte, engramID [16]byte, nameHash [8]byte) []byte {
