@@ -19,6 +19,13 @@ import (
 type substitutionBlock struct {
 	PredecessorID storage.ULID
 	Reason        string
+	// Truncated reports that the walk exhausted supersessionMaxDepth before
+	// reaching this refusal — the abstention is not "no current version
+	// exists" so much as "the walk could not tell within the depth cap".
+	// Carried from supersessionWalk.Truncated (#794): previously dropped on
+	// the abstain path, so a chain longer than the cap was indistinguishable
+	// downstream from a chain with no current version at all.
+	Truncated bool
 }
 
 // applyVersionHeadSubstitution is COG-28 (#763): if a query's evidence reached
@@ -122,7 +129,16 @@ func (e *Engine) applyVersionHeadSubstitution(
 			// or forgotten engram that happened to match) and is not a block —
 			// nothing was refused, there was simply no declared chain.
 			if walk.Reason != supersessionBlockNotSuperseded {
-				blocked = append(blocked, substitutionBlock{PredecessorID: sh.Engram.ID, Reason: walk.Reason})
+				if walk.Truncated {
+					// #794: the depth cap cut the walk short before it could
+					// tell whether a current head exists — WARN on refusal
+					// too, not only on the OK-but-truncated substitution path
+					// below, so this is never silently indistinguishable from
+					// "no current version exists".
+					slog.Warn("recall: version-head substitution abstained after the walk ran out at the chain depth cap; a current head may exist beyond it",
+						"predecessor", sh.Engram.ID.String(), "reason", walk.Reason, "max_depth", supersessionMaxDepth)
+				}
+				blocked = append(blocked, substitutionBlock{PredecessorID: sh.Engram.ID, Reason: walk.Reason, Truncated: walk.Truncated})
 			}
 			continue
 		}

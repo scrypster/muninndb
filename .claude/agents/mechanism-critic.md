@@ -101,10 +101,18 @@ Make no edits and open nothing.
 
 If you learn something durable, non-obvious, and not recoverable from git or the tracker —
 a measured number, a decision and why it beat the alternative, an honest negative, a defect
-*pattern* rather than a defect, a trap that looks safe — **append it to
-`.claude/memory-proposals.jsonl` rather than only writing it in your report.** One JSON
-object per line, append only. `.claude/memory-protocol.md` has the schema and, more
-importantly, the bar: a noisy vault is worse than a small one, so progress narration and
-restatements of the diff do not qualify.
+*pattern* rather than a defect, a trap that looks safe — **propose it rather than only
+writing it in your report:**
+
+```sh
+node .claude/hooks/memory-propose.mjs <<'JSON'
+{"concept":"short label","content":"the fact itself, self-contained, readable in a year","summary":"one line","type":"fact","source":"mechanism-critic"}
+JSON
+```
+
+The helper validates before it appends and refuses a whole batch rather than queueing a bad
+line — 43 of the first 179 raw appends were permanently invalid and never reached the vault.
+`.claude/memory-protocol.md` has the schema and, more importantly, the bar: a noisy vault is
+worse than a small one, so progress narration and restatements of the diff do not qualify.
 
 A report is read once. The ledger is drained into memory and survives.

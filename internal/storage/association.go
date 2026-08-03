@@ -103,7 +103,24 @@ func assocCacheKey(wsPrefix [8]byte, id ULID) [24]byte {
 }
 
 // WriteAssociation writes forward and reverse association keys.
+//
+// Refuses with ErrDanglingEndpoint when either endpoint has no 0x01 engram
+// record (STO-12). This is the choke point for the whole writer set —
+// autoassoc, the neighbor and goal-link workers, the refines writer, the
+// plugin store adapter, inline caller relationships and muninn_link all reach
+// the 0x03/0x04/0x14 keyspace through here. Guarding those sites individually
+// would be cosmetic: the next worker added would reintroduce the class.
 func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, src, dst ULID, assoc *Association) error {
+	if err := ps.checkEndpointsLive(wsPrefix, [16]byte(src), [16]byte(dst)); err != nil {
+		return err
+	}
+	return ps.writeAssociationUnguarded(ctx, wsPrefix, src, dst, assoc)
+}
+
+// writeAssociationUnguarded is WriteAssociation's body without the STO-12
+// endpoint check. Split out so the guard's cost can be measured directly
+// (BenchmarkWriteAssociation{With,No}Guard); no production caller uses it.
+func (ps *PebbleStore) writeAssociationUnguarded(ctx context.Context, wsPrefix [8]byte, src, dst ULID, assoc *Association) error {
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
@@ -130,9 +147,12 @@ func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, s
 	}
 	ps.replicateBatch(batch)
 
-	// Invalidate source node's cached association list so BFS traversal
-	// sees the new edge immediately instead of waiting for TTL expiry.
+	// Invalidate the source node's cached FORWARD list and the destination
+	// node's cached REVERSE list, so both endpoints see the new edge
+	// immediately instead of waiting for TTL expiry. The reverse eviction is
+	// keyed on dst because that is the 0x04 key's first ULID (COG-31).
 	ps.assocCache.Remove(assocCacheKey(wsPrefix, src))
+	ps.revAssocCache.Remove(assocCacheKey(wsPrefix, dst))
 
 	return nil
 }
@@ -155,12 +175,17 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 		if entry, ok := ps.assocCache.Get(ck); ok {
 			// Determine slice length
 			n := len(entry.assocs)
-			if maxPerNode > 0 && n > maxPerNode {
-				n = maxPerNode
+			// A truncated entry can only answer a caller asking for no more
+			// than it holds; otherwise re-scan rather than silently under-serve
+			// (#820). Same rule as revAssocCache's hit path.
+			if !entry.truncated || maxPerNode > 0 && maxPerNode <= n {
+				if maxPerNode > 0 && n > maxPerNode {
+					n = maxPerNode
+				}
+				// Return a copy of the slice
+				result[id] = append([]Association(nil), entry.assocs[:n]...)
+				continue
 			}
-			// Return a copy of the slice
-			result[id] = append([]Association(nil), entry.assocs[:n]...)
-			continue
 		}
 		uncached = append(uncached, id)
 	}
@@ -176,18 +201,20 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 	// Phase 3: open ONE iterator covering the entire 0x03|wsPrefix range (snapshot-aware).
 	lower := keys.AssocFwdRangeStart(wsPrefix)
 	upper := keys.AssocFwdRangeEnd(wsPrefix) // nil means unbounded (all-0xFF workspace)
-	iter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
+	rawIter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: upper,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("assoc iterator: %w", err)
 	}
+	iter := ps.scanIter(lower, rawIter)
 	defer iter.Close()
 
 	for _, id := range uncached {
 		prefix := keys.AssocFwdPrefixForID(wsPrefix, id) // 0x03 | ws | id (25 bytes)
 		var assocs []Association
+		truncated := false
 
 		// SeekGE positions at the first key >= prefix (strictly forward seek).
 		for iter.SeekGE(prefix); iter.Valid(); iter.Next() {
@@ -197,6 +224,7 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 				break
 			}
 			if maxPerNode > 0 && len(assocs) >= maxPerNode {
+				truncated = true
 				break
 			}
 			// Key layout: 0x03 | ws(8) | srcID(16) | weightComplement(4) | dstID(16) = 45 bytes
@@ -222,11 +250,311 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 			})
 		}
 
-		result[id] = assocs
-		ps.assocCache.Add(assocCacheKey(wsPrefix, id), &assocCacheEntry{assocs: assocs})
+		// #808: FAIL CLOSED on a mid-scan iterator failure, and do it BEFORE
+		// anything is returned or cached.
+		//
+		// This is the opposite call from the STO-12 endpoint-liveness guard
+		// (#803), which fails OPEN, and the difference is the loss direction.
+		// #803 is a WRITE guard: refusing on a read fault deletes a live edge
+		// that cannot be recovered. This is a READ: refusing costs the caller
+		// an error it can retry or report, and destroys nothing. Meanwhile
+		// proceeding does not stay local — the truncated list is written into
+		// assocCache and served for the 2s TTL to readers that never saw a
+		// fault, and "zero edges" is read as "not in a declared chain" by
+		// currencyInDeclaredChain, which is how a scan fault turns into a false
+		// `possibly_superseded_by` advisory (COG-25).
+		//
+		// One iterator serves every uncached id, so a failure anywhere is
+		// terminal for the whole call.
+		if err := iter.Error(); err != nil {
+			return nil, fmt.Errorf("assoc scan: %w", err)
+		}
+
+		ps.assocCache.Add(assocCacheKey(wsPrefix, id), &assocCacheEntry{assocs: assocs, truncated: truncated})
+		// COPY (#820). `assocs` is now the cache entry's backing array; the hit
+		// path above copies for the same reason, and this function's own doc
+		// comment promises it. Returning `assocs` published a live view of the
+		// cache entry to the first caller after every miss — safe only while no
+		// caller mutates and no caller forwards it, which is a property of
+		// today's callers, not of this function. One allocation per cold miss,
+		// against a Pebble scan.
+		result[id] = append([]Association(nil), assocs...)
 	}
 
 	return result, nil
+}
+
+// GetRankingNeighbors returns, for each id, the top-maxPerNode association
+// edges by weight over the UNION of:
+//
+//   - every 0x03 forward edge FROM id (all relation types — identical to
+//     GetAssociations), and
+//   - every 0x04 reverse edge INTO id whose RelType.BidirectionalForRanking()
+//     is true (RelCoActivated, RelRelatesTo, RelContradicts, and the
+//     user-defined range).
+//
+// RANKING AND TRAVERSAL ONLY — COG-31. This function deliberately LOSES the
+// direction an edge was written in: a reverse edge is returned with the
+// far endpoint in TargetID, indistinguishable from a forward one. A writer or
+// a direction-presenting surface that consumes it will manufacture facts
+// ("the OLD version supersedes the NEW one"). Use GetAssociations for those.
+//
+// The forward half delegates to GetAssociations, so it keeps the assocCache
+// and its 2s TTL byte-identically. The reverse half has its own cache of the
+// same shape (revAssocCache, keyed on the DESTINATION); the merged list is
+// never cached.
+//
+// Both halves now fail alike on a mid-scan iterator failure: each checks
+// iter.Error() and propagates, before anything is cached (#808). They used to
+// differ — the forward half reported a truncated scan as a short-but-successful
+// list — and that difference was never intentional design.
+//
+// Both 0x03 and 0x04 order by weightComplement in the same key position, so
+// both streams arrive weight-DESCENDING and the cap is an exact top-N via a
+// two-pointer merge — never a concatenate-then-truncate, which could fill the
+// cap with floor-weight forward edges while discarding a far heavier reverse
+// one. Duplicates (the same partner reachable both ways) are collapsed to the
+// larger weight BEFORE the cap, so phase4HebbianBoost cannot double-count a
+// pair.
+func (ps *PebbleStore) GetRankingNeighbors(ctx context.Context, wsPrefix [8]byte, ids []ULID, maxPerNode int) (map[ULID][]Association, error) {
+	// Both input streams are capped at maxPerNode, not read uncapped. That is
+	// exact, not an approximation: each stream is weight-descending and its
+	// targets are distinct, so the top-maxPerNode of the merged, deduplicated
+	// union is always a subset of the union of the two capped streams. Reading
+	// the forward half UNCAPPED would also change what GetAssociations stores
+	// in assocCache (it caches the list it built UNDER the cap), leaking a
+	// behaviour change into every other GetAssociations consumer for the 2s
+	// TTL — the exact non-interference this increment must not spend.
+	fwd, err := ps.GetAssociations(ctx, wsPrefix, ids, maxPerNode)
+	if err != nil {
+		return nil, err
+	}
+
+	rev, err := ps.rankingReverseEdges(ctx, wsPrefix, ids, maxPerNode)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[ULID][]Association, len(ids))
+	for _, id := range ids {
+		result[id] = mergeRankingNeighbors(fwd[id], rev[id], maxPerNode)
+	}
+	return result, nil
+}
+
+// rankingReverseEdges scans the 0x04 reverse index for every id with a SINGLE
+// iterator and sorted forward seeks, mirroring GetAssociations' shape.
+// Reusing GetReverseAssociations per id would open one iterator per id, and
+// BFS passes up to 20 ids per level.
+//
+// Returned Associations carry the SOURCE engram in TargetID (the engram that
+// points at id) and are weight-descending, matching the forward stream.
+// Edges whose RelType is not BidirectionalForRanking are skipped.
+// maxPerNode <= 0 means uncapped.
+//
+// Results are cached in revAssocCache, and BOTH the hit and the miss path
+// return a COPY: the returned slices never alias a cache entry's backing
+// array, so a caller may mutate or retain what it is given. GetRankingNeighbors
+// offers the same guarantee for the MERGED list — see mergeRankingNeighbors,
+// whose forward half needs its own copy because GetAssociations does not offer
+// it (#820).
+func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte, ids []ULID, maxPerNode int) (map[ULID][]Association, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// scanCap bounds the scan and what gets cached, independent of the
+	// caller's cap, so one cached entry serves every ranking caller.
+	scanCap := revAssocScanCap
+	if maxPerNode <= 0 || maxPerNode > scanCap {
+		scanCap = maxPerNode // 0 (uncapped) or an unusually large request
+	}
+
+	out := make(map[ULID][]Association, len(ids))
+
+	// Phase 1: serve cache-warm ids without touching Pebble, mirroring
+	// GetAssociations' forward fast path (2s TTL, same size, same key shape).
+	var uncached []ULID
+	for _, id := range ids {
+		if _, dup := out[id]; dup {
+			continue // duplicate id in the input
+		}
+		ck := assocCacheKey(wsPrefix, id)
+		if entry, ok := ps.revAssocCache.Get(ck); ok {
+			n := len(entry.assocs)
+			// A truncated entry can only answer a caller asking for no more
+			// than it holds; otherwise re-scan rather than silently under-serve.
+			if !entry.truncated || maxPerNode > 0 && maxPerNode <= n {
+				if maxPerNode > 0 && n > maxPerNode {
+					n = maxPerNode
+				}
+				out[id] = append([]Association(nil), entry.assocs[:n]...)
+				continue
+			}
+		}
+		out[id] = nil // claim the slot so a duplicate id is not scanned twice
+		uncached = append(uncached, id)
+	}
+	if len(uncached) == 0 {
+		return out, nil
+	}
+
+	sorted := make([]ULID, len(uncached))
+	copy(sorted, uncached)
+	sort.Slice(sorted, func(i, j int) bool {
+		return bytes.Compare(sorted[i][:], sorted[j][:]) < 0
+	})
+
+	iter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
+		LowerBound: keys.AssocRevRangeStart(wsPrefix),
+		UpperBound: keys.AssocRevRangeEnd(wsPrefix),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ranking reverse iterator: %w", err)
+	}
+	defer iter.Close()
+
+	for _, id := range sorted {
+		idPrefix := keys.AssocRevPrefixForID(wsPrefix, [16]byte(id)) // 0x04 | ws | dst (25 bytes)
+		var assocs []Association
+		truncated := false
+
+		for iter.SeekGE(idPrefix); iter.Valid(); iter.Next() {
+			k := iter.Key()
+			if len(k) < 25 || !bytes.Equal(k[:25], idPrefix) {
+				break
+			}
+			// Accepted edges arrive weight-descending, so stopping at the cap
+			// keeps the heaviest ones. Filtered-out (directional) edges
+			// deliberately do not consume a slot — which means this loop is
+			// O(inbound degree), NOT O(scanCap), for a directional hub. That
+			// cost is measured and the trade is argued at revAssocScanCap;
+			// read it before turning this into a scanned-key budget.
+			if scanCap > 0 && len(assocs) >= scanCap {
+				truncated = true
+				break
+			}
+			// Key layout: 0x04 | ws(8) | dstID(16) | weightComplement(4) | srcID(16) = 45 bytes
+			if len(k) < 45 {
+				continue
+			}
+			var srcID ULID
+			copy(srcID[:], k[29:45])
+			// No explicit self-edge skip: a self-loop writes fwd(a,a) and
+			// rev(a,a) with the same weight, and mergeRankingNeighbors'
+			// TargetID dedup already collapses the two copies into one. An
+			// extra `srcID == id` guard here would be dead code, and dead code
+			// that looks like a safety property is worse than none — pinned by
+			// TestGetRankingNeighbors_SelfEdge.
+			relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, restoredAt := decodeAssocValue(iter.Value())
+			if !relType.BidirectionalForRanking() {
+				continue
+			}
+			var wc [4]byte
+			copy(wc[:], k[25:29])
+			assocs = append(assocs, Association{
+				TargetID:          srcID,
+				Weight:            keys.WeightFromComplement(wc),
+				RelType:           relType,
+				Confidence:        confidence,
+				CreatedAt:         createdAt,
+				LastActivated:     lastActivated,
+				PeakWeight:        peakWeight,
+				CoActivationCount: coActivationCount,
+				RestoredAt:        restoredAt,
+			})
+		}
+		if err := iter.Error(); err != nil {
+			return nil, fmt.Errorf("ranking reverse scan: %w", err)
+		}
+		ps.revAssocCache.Add(assocCacheKey(wsPrefix, id), &revAssocCacheEntry{assocs: assocs, truncated: truncated})
+		n := len(assocs)
+		if maxPerNode > 0 && n > maxPerNode {
+			n = maxPerNode
+		}
+		// COPY. `assocs` is now the cache entry's backing array, and the
+		// caller owns what it is handed — the hit path above copies for the
+		// same reason. Returning `assocs` here would publish the cache's array
+		// for the rest of the 2s TTL; it is safe only while no caller mutates
+		// and no caller forwards it, which is a property of today's callers,
+		// not of this function. Defending that at the merge instead would put
+		// the invariant somewhere the caller cannot see it. Pinned by
+		// TestRankingReverseEdges_MissPathDoesNotAliasTheCache.
+		out[id] = append([]Association(nil), assocs[:n]...)
+	}
+	return out, nil
+}
+
+// mergeRankingNeighbors merges two weight-DESCENDING association streams into
+// one, deduplicating by TargetID (keeping the larger weight) and then taking
+// the top maxPerNode. maxPerNode <= 0 means uncapped.
+//
+// Dedup happens BEFORE the cap, so a pair reachable in both directions
+// consumes exactly one cap slot and contributes its weight exactly once.
+//
+// The returned slice is ALWAYS freshly allocated, including on the no-reverse-
+// edges shortcut, which used to return `fwd` as it stood. `fwd` comes from
+// GetAssociations, whose miss path used to return the slice it had just put in
+// assocCache (#820, now fixed at the source) — so that shortcut published a
+// live cache entry to the caller for the 2s TTL, but only for nodes with no
+// inbound symmetric edges. An ownership contract that holds for some nodes and
+// not others, decided by data the caller cannot see, is the trap; the copy here
+// (<= maxPerNode entries: 20 in phase4, 10 in BFS) is kept even now that the
+// source is fixed, so this function's contract does not depend on its
+// caller's. Pinned by TestGetRankingNeighbors_NoReverseEdgesDoesNotAliasTheCache.
+func mergeRankingNeighbors(fwd, rev []Association, maxPerNode int) []Association {
+	if len(rev) == 0 {
+		if maxPerNode > 0 && len(fwd) > maxPerNode {
+			return append([]Association(nil), fwd[:maxPerNode]...)
+		}
+		if len(fwd) == 0 {
+			return nil
+		}
+		return append([]Association(nil), fwd...)
+	}
+
+	capHint := len(fwd) + len(rev)
+	if maxPerNode > 0 && capHint > maxPerNode {
+		capHint = maxPerNode
+	}
+	merged := make([]Association, 0, capHint)
+
+	i, j := 0, 0
+	for i < len(fwd) || j < len(rev) {
+		if maxPerNode > 0 && len(merged) >= maxPerNode {
+			break
+		}
+		var next Association
+		// Both streams are weight-descending; take the heavier head. Ties go to
+		// the forward stream so a reverse edge never displaces an equal-weight
+		// forward edge from the cap.
+		if j >= len(rev) || (i < len(fwd) && fwd[i].Weight >= rev[j].Weight) {
+			next = fwd[i]
+			i++
+		} else {
+			next = rev[j]
+			j++
+		}
+		// Dedup by linear scan, not a map. This runs once per CANDIDATE on
+		// every recall (up to 50 per phase4HebbianBoost call), and the merged
+		// list is bounded by maxPerNode — 20 in phase4, 10 in BFS. Allocating
+		// a map per candidate measured as the single largest cost in the
+		// merge; a 16-byte compare over <=20 entries is cheaper and allocates
+		// nothing. The heavier copy was emitted first, so a duplicate is
+		// always equal-or-lighter and is simply dropped.
+		dup := false
+		for k := range merged {
+			if merged[k].TargetID == next.TargetID {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		merged = append(merged, next)
+	}
+	return merged
 }
 
 // associationsForOne scans forward-assoc keys for a single source ID.
@@ -241,25 +569,32 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 	ck := assocCacheKey(wsPrefix, id)
 	if entry, ok := ps.assocCache.Get(ck); ok {
 		n := len(entry.assocs)
-		if maxPerNode > 0 && n > maxPerNode {
-			n = maxPerNode
+		// A truncated entry can only answer a caller asking for no more than it
+		// holds; otherwise fall through and re-scan (#820).
+		if !entry.truncated || maxPerNode > 0 && maxPerNode <= n {
+			if maxPerNode > 0 && n > maxPerNode {
+				n = maxPerNode
+			}
+			return append([]Association(nil), entry.assocs[:n]...), nil
 		}
-		return append([]Association(nil), entry.assocs[:n]...), nil
 	}
 
 	// Build prefix: 0x03 | wsPrefix | id
 	prefix := keys.AssocFwdKey(wsPrefix, [16]byte(id), 1.0, [16]byte{})
 	prefix = prefix[0 : 1+8+16] // trim to just the prefix portion
 
-	iter, err := PrefixIterator(ps.db, prefix)
+	rawIter, err := PrefixIterator(ps.db, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("prefix iterator: %w", err)
 	}
+	iter := ps.scanIter(prefix, rawIter)
 	defer iter.Close()
 
 	var assocs []Association
+	truncated := false
 	for iter.First(); iter.Valid(); iter.Next() {
 		if maxPerNode > 0 && len(assocs) >= maxPerNode {
+			truncated = true
 			break
 		}
 		// Key format: 0x03 | wsPrefix(8) | srcID(16) | weightComplement(4) | dstID(16)
@@ -290,16 +625,13 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 			RestoredAt:        restoredAt,
 		})
 	}
+	// #808: check the scan BEFORE anything is cached or returned. See the same
+	// guard in GetAssociations for the fail-closed reasoning.
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("associationsForOne scan: %w", err)
+	}
 	// Populate cache — expirable.LRU enforces the TTL automatically.
-	//
-	// KNOWN GAP (#808): this loop never checks iter.Error(), so a scan that
-	// stops early on a corrupt block caches a TRUNCATED association list and
-	// returns it as complete — the same absence-vs-failure laundering this file
-	// fixed on the pointGet path, one seam over. It was deliberately deferred
-	// rather than fixed blind: the readFault seam mediates pointGet, not
-	// iteration, so a guard here has no deterministic RED and would ship
-	// unproven. Fixing it needs an iterator-level fault seam.
-	ps.assocCache.Add(ck, &assocCacheEntry{assocs: assocs})
+	ps.assocCache.Add(ck, &assocCacheEntry{assocs: assocs, truncated: truncated})
 	return assocs, nil
 }
 
@@ -438,7 +770,23 @@ func assocMonotonicAnchor(stored, incoming int32) int32 {
 	return incoming
 }
 
+// UpdateAssocWeight updates one association's weight, preserving the edge's
+// existing metadata.
+//
+// STO-12: this is a CREATOR, not only an updater — exactly the same shape as
+// UpdateAssocWeightBatch. A read ABSENCE is a normal fact that returns a nil
+// error and a zero tuple, so a pair naming two ULIDs with no engram and no edge
+// falls straight through both reads below and Sets a brand-new 0x03/0x04/0x14
+// row, returning nil. Its live callers are consolidation's transitive-inference
+// phase and the Hebbian store adapter, neither of which re-checks its endpoints.
+// Unlike the batch form there is no per-pair skip channel to report through:
+// one call, one pair, so a dead endpoint is simply the call's error, and both
+// callers already log-and-continue on one.
 func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID, weight float32, countDelta uint32) error {
+	if err := ps.checkEndpointsLive(wsPrefix, [16]byte(a), [16]byte(b)); err != nil {
+		return err
+	}
+
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
@@ -518,6 +866,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	ps.replicateBatch(batch)
 
 	ps.assocCache.Remove(assocCacheKey(wsPrefix, a))
+	ps.revAssocCache.Remove(assocCacheKey(wsPrefix, b))
 	return nil
 }
 
@@ -608,6 +957,25 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 	applied := 0
 
 	for i, update := range updates {
+		// STO-12. This method DOES create edges out of nothing, which is not
+		// obvious and was measured rather than assumed: #809 made a read
+		// FAILURE skip the pair, but read ABSENCE is a normal fact that
+		// returns a nil error and a zero tuple, so a pair naming two ULIDs
+		// with no engram and no edge falls straight through both reads and
+		// Sets a brand-new 0x03/0x04/0x14 row (probe: weight 0.42 written,
+		// UpdateAssocWeightBatch returned nil). That is also the shape of the
+		// DeleteEngram-vs-Hebbian-flush race: the cascade removes the edge,
+		// this batch re-Sets it.
+		//
+		// Reported through the same skip channel as an unreadable pair —
+		// silence would be the silently-wrong class one layer up.
+		if err := ps.checkEndpointsLive(update.WS, update.Src, update.Dst); err != nil {
+			skipped = append(skipped, i)
+			skipErrs = append(skipErrs, fmt.Errorf("pair %s->%s: %w",
+				ULID(update.Src).String(), ULID(update.Dst).String(), err))
+			continue
+		}
+
 		// A caller may carry its own activation timestamp (the replay driver
 		// does); zero means "use the wall clock", the pre-#779 behaviour.
 		now := wallNow
@@ -688,17 +1056,35 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 	}
 	ps.replicateBatch(batch)
 
-	// Invalidate assoc cache for all updated source nodes.
-	// Deduplicate to avoid redundant removals when a source appears multiple times.
-	// Skipped sources are invalidated too: dropping a cache entry can only cost a
-	// re-read, and the cached list for a source whose read just failed is exactly
-	// the entry least worth trusting.
-	seen := make(map[[24]byte]struct{}, len(updates))
+	// Invalidate the forward cache for every updated source and the reverse
+	// cache for every updated destination.
+	// Deduplicate to avoid redundant removals when an engram appears in the
+	// same role more than once. Skipped pairs are invalidated too: dropping a
+	// cache entry can only cost a re-read, and the cached list for a pair whose
+	// read just failed is exactly the entry least worth trusting.
+	//
+	// The two dedup sets are SEPARATE, and that is the whole point: the caches
+	// are keyed alike but hold different things, so one shared set makes an
+	// engram appearing in BOTH roles inside one batch lose its second eviction
+	// — whichever cache is reached second keeps serving pre-batch weights for
+	// the rest of the 2s TTL. That shape is the common case, not the corner
+	// one: HebbianWorker.processBatch emits every C(n,2) pair of a co-activated
+	// set, so for any three co-activated engrams X<Y<Z one batch carries (X,Y)
+	// and (Y,Z) and Y is both a Dst and a Src. Pinned from both sides by
+	// TestUpdateAssocWeightBatch_ForwardCacheEvictedWhenEngramIsAlsoDst and
+	// TestUpdateAssocWeightBatch_ReverseCacheEvictedWhenEngramIsAlsoSrc.
+	seenFwd := make(map[[24]byte]struct{}, len(updates))
+	seenRev := make(map[[24]byte]struct{}, len(updates))
 	for _, update := range updates {
 		ck := assocCacheKey(update.WS, update.Src)
-		if _, ok := seen[ck]; !ok {
-			seen[ck] = struct{}{}
+		if _, ok := seenFwd[ck]; !ok {
+			seenFwd[ck] = struct{}{}
 			ps.assocCache.Remove(ck)
+		}
+		rk := assocCacheKey(update.WS, update.Dst)
+		if _, ok := seenRev[rk]; !ok {
+			seenRev[rk] = struct{}{}
+			ps.revAssocCache.Remove(rk)
 		}
 	}
 	if len(skipped) > 0 {
@@ -841,6 +1227,16 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 			return fmt.Errorf("decay assoc chunk commit: %w", err)
 		}
 		ps.replicateBatch(batch)
+		// #818: every entry in this chunk relocated, archived or deleted a
+		// 0x03 row (keyed on src) and its 0x04 mirror (keyed on dst), so both
+		// caches can be holding pre-decay weights. Evicted POST-COMMIT, per
+		// chunk, so a reader that misses immediately after re-scans the state
+		// this batch just committed. Weights, not membership, are usually what
+		// goes stale here — and weight is what ranking orders on.
+		for _, e := range chunk {
+			ps.assocCache.Remove(assocCacheKey(wsPrefix, ULID(e.src)))
+			ps.revAssocCache.Remove(assocCacheKey(wsPrefix, ULID(e.dst)))
+		}
 		chunk = chunk[:0]
 		return nil
 	}
@@ -1139,6 +1535,32 @@ func decodeContradictionValue(val []byte) (partner ULID, detectedAt time.Time, o
 	return partner, detectedAt, true
 }
 
+// readContradictionMarker reads the 0x0A marker at key and returns the moment
+// the contradiction FIRST became known.
+//
+// Three outcomes, not two — the same policy GetAssocWeight states one seam
+// over. A MISSING key is absence: (zero, false, nil). A key holding fewer than
+// 16 bytes cannot even name the partner, so it is not something any writer in
+// this package produced; that is corruption, and reporting it as absence is the
+// same laundering one layer down. Anything else is a read FAILURE.
+//
+// The two callers take deliberately OPPOSITE actions on that failure, because
+// their loss directions are opposite. See each call site.
+func (ps *PebbleStore) readContradictionMarker(key []byte) (detectedAt time.Time, exists bool, err error) {
+	val, err := ps.pointGet(key)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("read contradiction marker: %w", err)
+	}
+	if val == nil {
+		return time.Time{}, false, nil
+	}
+	_, prior, ok := decodeContradictionValue(val)
+	if !ok {
+		return time.Time{}, false, fmt.Errorf("read contradiction marker: corrupt record: %d bytes, want at least 16", len(val))
+	}
+	return prior, true, nil
+}
+
 // FlagContradiction writes the 0x0A contradiction key for pair (a,b).
 //
 // The marker's value carries the moment the contradiction FIRST became known.
@@ -1171,11 +1593,33 @@ func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, 
 	// times a worker re-observes the edge. Re-penalising compounds a single
 	// Bayesian update (1.0 -> 0.975 -> 0.797 -> 0.313 -> 0.0709) until BOTH
 	// memories — including the true one — fall out of recall entirely.
+	//
+	// FAILS CLOSED (#804), and that is the opposite call from the STO-12
+	// endpoint-liveness guard (#803), deliberately. Both are read faults; the
+	// loss directions are mirror images:
+	//
+	//   #803  refusing an association write on a read fault DESTROYS live data
+	//         (a real edge that can never be recovered), while proceeding costs
+	//         one repairable dangling row. So it fails OPEN, loudly.
+	//   here  proceeding on a read fault reports the pair NEWLY flagged and
+	//         restamps detectedAt with `now`. The first drives a repeat
+	//         confidence penalty on BOTH engrams, and BayesianUpdate is not
+	//         invertible (COG-23 residual) — unrecoverable. Refusing costs at
+	//         most one deferred penalty, which the next detection re-applies.
+	//
+	// So the read error propagates and NOTHING is written. The only production
+	// caller is ContradictWorker.processBatch, which already treats an error as
+	// "newness unknown, do not penalise" and continues — so this cannot fail a
+	// recall or a user-facing path on an otherwise-harmless corrupt block. The
+	// (false, err) return keeps that suppression true even for a caller that
+	// ignores the error.
 	newlyFlagged := true
 	detectedAt := time.Now()
-	if existing, closer, err := ps.db.Get(contraKey); err == nil {
-		_, prior, _ := decodeContradictionValue(existing)
-		_ = closer.Close()
+	prior, exists, rerr := ps.readContradictionMarker(contraKey)
+	if rerr != nil {
+		return false, fmt.Errorf("flag contradiction: %w", rerr)
+	}
+	if exists {
 		newlyFlagged = false
 		// Carry the prior stamp forward verbatim — INCLUDING a zero one from a
 		// legacy marker. Re-stamping an already-known contradiction with "now"

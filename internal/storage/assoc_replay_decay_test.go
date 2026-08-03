@@ -40,6 +40,7 @@ func TestCognitionTrial_ReplayedStampsDriveDecayAndNeverRaise(t *testing.T) {
 	t0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	const halfLife = 30 * 24 * time.Hour
 
+	seedEndpoints(t, store, ws, src, dst)
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID: dst, Weight: 0.9, Confidence: 1.0, CreatedAt: t0,
 	}); err != nil {

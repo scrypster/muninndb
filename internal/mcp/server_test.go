@@ -209,7 +209,7 @@ func (f *fakeEngine) Release(_ context.Context, _, _, _ string) (bool, string, e
 	return true, "", nil
 }
 
-func (f *fakeEngine) GetAnnotations(_ context.Context, _, _ string) (*engine.AnnotationData, error) {
+func (f *fakeEngine) GetAnnotations(_ context.Context, _, _ string, _ *mbp.ActivateRequest) (*engine.AnnotationData, error) {
 	return nil, nil
 }
 

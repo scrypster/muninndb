@@ -17,6 +17,7 @@ func TestRestoreArchivedEdges_RestoresTopN(t *testing.T) {
 	src := NewULID()
 	dst1 := NewULID()
 	dst2 := NewULID()
+	seedEndpoints(t, store, ws, src, dst1, dst2)
 
 	// Write two archive entries directly.
 	// dst1: high consolidation score (peakWeight=0.9, coAct=10, lastAct=1 day ago)
@@ -70,6 +71,7 @@ func TestRestoreArchivedEdges_RestoresTopByConsolidation(t *testing.T) {
 	src := NewULID()
 	dst1 := NewULID()
 	dst2 := NewULID()
+	seedEndpoints(t, store, ws, src, dst1, dst2)
 
 	now := time.Now()
 	// dst1: high consolidation score (peakWeight=0.9, coAct=10, lastAct=1 day ago)
@@ -117,6 +119,7 @@ func TestRestoreArchivedEdges_Transitive(t *testing.T) {
 	src := NewULID()
 	neighbor := NewULID()
 	deepNeighbor := NewULID()
+	seedEndpoints(t, store, ws, src, neighbor, deepNeighbor)
 
 	now := time.Now()
 	lastAct := int32(now.Add(-24 * time.Hour).Unix())
@@ -151,5 +154,75 @@ func TestRestoreArchivedEdges_Transitive(t *testing.T) {
 
 	if len(restored) != 2 {
 		t.Errorf("expected 2 restored ULIDs (neighbor + deepNeighbor), got %d", len(restored))
+	}
+}
+
+// TestSTO12_ArchivedEdgesFromAHardDeletedSourceAreReaped covers
+// reapArchivedEdgesFrom — a destructive, replicated, bulk-delete reachable from
+// the recall read path, which shipped with no coverage of its own.
+//
+// The rows it deletes are provably unrestorable: RestoreArchivedEdges is the
+// only reader of a 0x25 prefix and it needs the SOURCE's 0x01 record, which is
+// gone. Scanning them on every recall forever is the alternative.
+func TestSTO12_ArchivedEdgesFromAHardDeletedSourceAreReaped(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("sto12-reap-archive")
+
+	src, dst1, dst2 := NewULID(), NewULID(), NewULID()
+	// The TARGETS are alive; only the SOURCE is missing. That is what makes the
+	// rows unrestorable rather than merely stale, and it stops the assertion
+	// from passing for the wrong reason (the per-candidate target check).
+	seedEndpoints(t, store, ws, dst1, dst2)
+
+	now := time.Now()
+	for _, dst := range []ULID{dst1, dst2} {
+		val := encodeArchiveValue(RelSupports, 0.9, now.Add(-24*time.Hour), int32(now.Add(-24*time.Hour).Unix()), 0.9, 5, 0)
+		if err := store.db.Set(keys.ArchiveAssocKey(ws, [16]byte(src), [16]byte(dst)), val[:], pebble.Sync); err != nil {
+			t.Fatalf("seed archive row: %v", err)
+		}
+	}
+
+	countArchive := func() int {
+		prefix := keys.ArchiveAssocPrefixForID(ws, [16]byte(src))
+		it, err := store.db.NewIter(&pebble.IterOptions{
+			LowerBound: prefix, UpperBound: keys.PrefixUpperBound(append([]byte{}, prefix...)),
+		})
+		if err != nil {
+			t.Fatalf("iter: %v", err)
+		}
+		defer it.Close()
+		n := 0
+		for it.First(); it.Valid(); it.Next() {
+			n++
+		}
+		return n
+	}
+	if countArchive() != 2 {
+		t.Fatalf("precondition: expected 2 archive rows, got %d", countArchive())
+	}
+
+	restored, err := store.RestoreArchivedEdges(ctx, ws, [16]byte(src), 10)
+	if err != nil {
+		t.Fatalf("RestoreArchivedEdges over a dead source must not error: %v", err)
+	}
+	if len(restored) != 0 {
+		t.Errorf("edges were restored from a source with no engram record: %d", len(restored))
+	}
+	if n := countArchive(); n != 0 {
+		t.Errorf("%d unrestorable 0x25 row(s) survived — recall rescans them on every candidate, forever", n)
+	}
+	for _, dst := range []ULID{dst1, dst2} {
+		if w, _ := store.GetAssocWeight(ctx, ws, src, dst); w != 0 {
+			t.Errorf("a live edge (w=%v) was created from an engram-less source", w)
+		}
+	}
+
+	// Self-limiting: a second call finds nothing and commits nothing.
+	if _, err := store.RestoreArchivedEdges(ctx, ws, [16]byte(src), 10); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if n := countArchive(); n != 0 {
+		t.Errorf("second pass left %d row(s)", n)
 	}
 }

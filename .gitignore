@@ -48,11 +48,11 @@ muninndb-data/
 .worktrees/
 .claude/worktrees/
 
-# Bible eval testdata (downloaded via scripts/eval-bible-setup.sh)
-testdata/bible/kjv.json
-testdata/bible/cross-refs.tsv
-testdata/bible/cross-refs.csv
-testdata/bible/*.muninn
+# /testdata/ — the eval-bible corpus directory was removed with its (gitignored) tooling;
+# the ROOT tree stays ignored so a re-added local corpus cannot be committed by accident.
+# The leading slash is load-bearing: bare `testdata/` matches at every depth and would
+# silently ignore internal/engine/testdata/, which is tracked and loaded by tests.
+/testdata/
 
 # In-progress planning and design docs — kept local by default so half-formed plans don't
 # ship. Two design docs predate this rule and are deliberately kept tracked, because the
@@ -99,6 +99,14 @@ sdk/php/vendor/
 .claude/memory-proposals.jsonl
 .claude/memory-proposals.jsonl.tmp
 .claude/memory-proposals.drained.jsonl
+.claude/memory-proposals.deadletter.jsonl
+.claude/memory-proposals.lock
+# Drain receipts. Liveness evidence, not content — but they carry local paths and counts
+# for a specific machine, and the receipt log grows, so they stay local too.
+.claude/memory-drain-receipt.json
+.claude/memory-drain-receipt.json.tmp
+.claude/memory-drain-receipts.jsonl
+.claude/memory-drain-receipts.jsonl.tmp
 
 # Design records that cannot be published: ones naming real people, client or
 # tenant data, commercial terms, or competitive strategy. Everything else in

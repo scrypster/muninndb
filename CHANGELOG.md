@@ -42,6 +42,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cited" ground-truth join that is not implementable from what is on disk (no
   join key, no identity on either side, context-free residue, and a citation
   side damaged by the #757 class).
+- **An association edge can no longer outlive its endpoints** (#803). Hard
+  deletes left the dead engram in the FTS and vector indexes, so the automatic
+  association workers kept finding it and minting fresh edges to an ID that no
+  longer existed — growing with use, and never reaped, because association decay
+  does not read engram records. Both hard-delete callers now clean both search
+  indexes, `DeleteEngram` cascades archived (0x25) edges in both directions, and
+  every association writer refuses an edge whose endpoint has no engram record.
+  The delete cascade also missed every edge at weight ≤ ~1/256 (and at the
+  legacy full-weight key position) because of a scan-bound bug; those edges were
+  unreapable, and the startup key-repair pass could promote one into a live
+  dangling edge. Both are closed.
+
+  **Client-visible change:** a write whose `associations[].target_id` names a
+  memory that has been hard-deleted is now **rejected** instead of silently
+  accepted. The row it used to create pointed at nothing. How the rejection
+  surfaces is per-transport: REST's single-write path returns **400**; REST's
+  batch endpoint still returns 201 with `status: "error"` on that item only, its
+  siblings committing as before; gRPC and MBP return their existing error for an
+  invalid ID. `relationships[]` is unchanged in this
+  release — it still logs a warning and succeeds (#817).
 
 ### Internal
 
@@ -50,6 +70,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real recorded queries, a co-activation replay driver, and the pre-registered
   acceptance rule as executable code with its own unit tests. None of it
   compiles into a shipped binary.
+
+### Security
+
+- **`muninn_state` is no longer callable by an observe-mode credential.** The
+  tool was classified in `isReadOnlyTool`, but its handler reaches
+  `Engine.UpdateLifecycleState` (via `mcpEngineAdapter.UpdateState`) — so an
+  `mk_` key or `cap_` token issued as read-only could transition any engram's
+  lifecycle state, including archiving it. It is now classified mutating. Effects
+  per credential mode:
+  - **observe — now denied.** A read-only client that was calling `muninn_state`
+    was performing a write and will now receive `forbidden`.
+  - **write — now allowed** (it was previously *denied*, because write mode
+    admits only tools classified mutating). This is a side effect of the
+    two-bucket classifier, not a designed grant: `mutatingTools` and
+    `readOnlyTools` are complementary over every registered tool — enforced by
+    the census in `internal/mcp/tool_classification_test.go`, not true by
+    construction — so a tool cannot be denied to observe *and* write.
+
+    It grants write mode a second tool for a capability it already held, not a
+    new capability. `muninn_compare_and_set` has been classified mutating since
+    before this change, its `set_state` enum includes `archived`, and
+    `expect_state` is optional (the tool schema says "Omit to skip the guard"),
+    so it reaches the identical `store.CompareAndSet` lifecycle transition
+    unconditionally. Write mode also already holds every other mutating tool —
+    `muninn_forget`, `muninn_evolve`, `muninn_trust`, `muninn_merge_entity`
+    among them — with the single exception of `muninn_create_workflow_vault`,
+    which `server.go` pins to a full-mode `mk_` key by a separate guard.
+    `handleState`'s response echoes only caller-supplied values, so it opens no
+    exfiltration channel.
+
+    **One property of archive is worse than its neighbours and is named rather
+    than glossed:** `state(archived)` is the only write-mode operation that
+    leaves no *enumerable* trace. `muninn_list_deleted` reads
+    `StateSoftDeleted` only and recall refuses archived engrams on every path,
+    so where a `forget` is findable through `list_deleted` and an `evolve`
+    through `as_of`/`include_invalid`, an archived engram is reachable only
+    from an ID the caller already holds. It is not silent and not
+    irreversible — `Engine.Restore` accepts `StateArchived` — but its audit
+    trail is a content-free `update-meta` provenance entry, and the `reason`
+    argument the tool advertises is discarded by both the MCP and REST adapters
+    (`Engine.UpdateLifecycleState` has no such parameter). By contrast
+    `muninn_merge_entity`, which write mode has always held, is outright
+    irreversible. All of these properties are pre-existing and untouched here.
+
+    **Residual, tracked separately (#822):** MCP write mode is broader than
+    REST write mode, but not for the reason the route shapes suggest. REST's
+    `ReadOnlyGuard(WriteOnlyGuard(...))` on `PUT /api/engrams/{id}/state` is
+    documented in `internal/transport/rest/server.go` as exfiltration
+    prevention for routes that "return engram data in their response body" —
+    and REST write mode is separately *allowed* to soft-delete
+    (`TestWriteOnlyMode_WriteHandlersNotBlocked/DeleteEngram`), which is more
+    destructive than archiving. Closing the real gap needs a full-only overlay
+    consulted before the `ModeWrite` case, whose membership must cover every
+    write-mode path to a lifecycle transition — `muninn_state` *and*
+    `muninn_compare_and_set`, then a decision about `muninn_claim`/
+    `muninn_release`, which share the CAS primitive. That is a scoping
+    decision, not a one-name move, and REST exposes no compare-and-set route
+    to take parity from. Pinned meanwhile by
+    `TestDispatch_WriteMode_AllowsCompareAndSetArchive`.
+  - **append — now denied at the MCP dispatch gate** as well as by the existing
+    `Engine.refuseAppend` backstop, which is why append mode was never
+    exploitable. Two layers again instead of one.
+  - **full — unaffected.**
+  (#731)
 
 ---
 

@@ -107,6 +107,14 @@ func (s *stubStore) GetAssociations(_ context.Context, _ [8]byte, ids []storage.
 	return result, nil
 }
 
+// GetRankingNeighbors: the stub holds a single forward adjacency map with no
+// 0x04 reverse index to union, so the honest stub behaviour is the forward
+// list. The union itself is covered where it lives — storage-level
+// (TestGetRankingNeighbors_*) and end-to-end (TestHebbianBoost_IsSymmetricInPairOrder).
+func (s *stubStore) GetRankingNeighbors(ctx context.Context, ws [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error) {
+	return s.GetAssociations(ctx, ws, ids, maxPerNode)
+}
+
 func (s *stubStore) RecentActive(_ context.Context, _ [8]byte, topK int) ([]storage.ULID, error) {
 	if topK > len(s.recent) {
 		topK = len(s.recent)

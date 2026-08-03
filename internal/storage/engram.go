@@ -551,10 +551,68 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	//   - the forward key itself
 	//   - the reverse key 0x04|ws|targetID|weight|id (uses actual weight)
 	//   - the weight index key 0x14|ws|id|targetID
+	//
+	// assocCacheDirty collects the sources whose cached forward-association list
+	// names this engram; they are invalidated post-commit (STO-12, below).
+	assocCacheDirty := []ULID{id}
+	// revAssocCacheDirty is the 0x04 mirror (#818). revAssocCache is keyed on
+	// the DESTINATION, so the entries this delete invalidates are:
+	//   - id itself, whose inbound edges are all being removed, and
+	//   - every TARGET of an outbound edge, whose inbound list names id.
+	// Without it the dead engram stayed reachable INTO its former targets for
+	// the 2s TTL — the #803 forward eviction alone left the reverse half stale.
+	revAssocCacheDirty := []ULID{id}
+
+	// STO-11: the upper bound MUST carry-propagate (keys.PrefixUpperBound), not
+	// append a 0xFF sentinel. A 0x03 key is prefix(25)|weightComplement(4)|dst(16)
+	// and keys.WeightComplement is MaxUint32 - uint32(w*MaxUint32), so
+	// complement[0] == 0xFF for every weight at or below ~1/256 — and the whole
+	// complement is 0xFFFFFFFF at weight 0, which is also the byte position a
+	// pre-fix weight-1.0 edge was written at (legacyFullWeightComplement). A
+	// 26-byte `prefix|0xFF` bound sorts at or below all of those, so the cascade
+	// silently skipped them and the edges outlived their endpoint permanently
+	// (nothing else reaps them: DecayAssocWeights never reads 0x01).
+	//
+	// The bound is now also TIGHT in the other direction. keys.PrefixUpperBound
+	// used to increment the first sub-0xFF byte from the right and return
+	// without clearing the trailing 0xFF bytes, so for a prefix whose last byte
+	// was 0xFF (~1 engram ID in 256) it spanned into the NEXT engram's
+	// association keyspace; #816 made it carry-and-truncate.
+	//
+	// The explicit bytes.Equal(k[:25], prefix) break below STAYS — belt and
+	// braces now rather than the sole protection. It costs one comparison per
+	// key on a path that is already deleting, it is what the STO-11 table
+	// measures, and it is the property that has to hold no matter which helper a
+	// future edit reaches for. Removing it would make correctness of a delete
+	// loop depend entirely on a helper edited in another package.
+	//
+	// Reachability of the old looseness, for the record — it was STRUCTURAL
+	// HYGIENE, never a live data-loss report. ~1 in 256 was the rate at which
+	// the BOUND WAS LOOSE, not the rate at which anything was lost. To land
+	// inside the widened band a second engram had to share the victim's first 14
+	// ID bytes: the whole 48-bit ULID millisecond timestamp AND 8 of the 10
+	// crypto-random entropy bytes, i.e. ~2^-64 on top of a same-millisecond
+	// collision. With ULID-shaped keys that was not operationally reachable, and
+	// the STO-11 test has to CONSTRUCT its IDs to reproduce it. A future
+	// non-ULID ID tail (a counter, a truncated hash, a content-addressed key)
+	// would collapse that 64-bit gap to zero — which is the other reason the
+	// per-key guard is worth its one comparison.
+	//
+	// There is a FIFTH scan over a 25-byte prefix — RestoreArchivedEdges' own
+	// candidate loop — which has no such guard because it hand-rolls a TIGHT
+	// bound instead. See the comment there: it stays hand-rolled even now that
+	// the shared helper agrees with it, because that loop's bound is its ONLY
+	// protection and it is destructive AND creative.
+	//
+	// It is also why these two loops must keep SeekGE and must NOT be converted
+	// to PrefixIterator, whose First/Valid shape changes the break-vs-continue
+	// semantics on short keys. Pinned by
+	// TestSTO12_DeleteEngramCascadeStaysInsideItsOwnPrefix and, across all four
+	// scans, TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
 	fwdPrefix := keys.AssocFwdPrefixForID(wsPrefix, [16]byte(id))
 	fwdIter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: fwdPrefix,
-		UpperBound: append(append([]byte{}, fwdPrefix...), 0xFF),
+		UpperBound: keys.PrefixUpperBound(append([]byte{}, fwdPrefix...)),
 	})
 	if err == nil {
 		for fwdIter.SeekGE(fwdPrefix); fwdIter.Valid(); fwdIter.Next() {
@@ -575,6 +633,9 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 			batch.Delete(k, nil) // forward key (exact live key)
 			batch.Delete(keys.AssocRevKey(wsPrefix, targetID, weight, [16]byte(id)), nil)
 			batch.Delete(keys.AssocWeightIndexKey(wsPrefix, [16]byte(id), targetID), nil)
+			// #818: the 0x04 row deleted above is keyed on targetID, so that
+			// target's cached REVERSE list still names this engram.
+			revAssocCacheDirty = append(revAssocCacheDirty, ULID(targetID))
 		}
 		fwdIter.Close()
 	}
@@ -582,10 +643,13 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// Reverse pass: scan 0x04|ws|id to find all associations TO this engram
 	// (from other engrams). Clean up the reverse index entries and the
 	// corresponding forward keys in those other engrams.
+	// STO-11 again — same weight-complement reasoning as the forward pass, and
+	// the same bytes.Equal guard, kept as belt and braces now that #816 made
+	// keys.PrefixUpperBound tight.
 	revPrefix := keys.AssocRevPrefixForID(wsPrefix, [16]byte(id))
 	revIter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: revPrefix,
-		UpperBound: append(append([]byte{}, revPrefix...), 0xFF),
+		UpperBound: keys.PrefixUpperBound(append([]byte{}, revPrefix...)),
 	})
 	if err == nil {
 		for revIter.SeekGE(revPrefix); revIter.Valid(); revIter.Next() {
@@ -606,8 +670,68 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 			batch.Delete(k, nil) // reverse key
 			batch.Delete(keys.AssocFwdKey(wsPrefix, srcID, weight, [16]byte(id)), nil)
 			batch.Delete(keys.AssocWeightIndexKey(wsPrefix, srcID, [16]byte(id)), nil)
+			// STO-12: the rows go, but GetAssociations serves a 2s-TTL cache
+			// keyed by SOURCE engram, so without this the served graph keeps
+			// naming the dead engram for up to two seconds after its rows are
+			// gone — traversal hops to an ID that can never materialise. The
+			// scan already has every source in hand; invalidate post-commit.
+			assocCacheDirty = append(assocCacheDirty, ULID(srcID))
 		}
 		revIter.Close()
+	}
+
+	// Archived-association cleanup (0x25) — STO-12.
+	//
+	// The 0x03/0x04 passes above do not see an edge that decay ARCHIVED before
+	// this engram was hard-deleted: DecayAssocWeights moves such an edge out of
+	// the live index into 0x25. Left behind, recall's lazy
+	// RestoreArchivedEdgesTransitive writes it straight back into 0x03/0x04/0x14
+	// as a dangling row — and stamps restoredAt, which permanently exempts it
+	// from GCArchivedEdges. Fixing only the FTS/HNSW cascades does not close it.
+	//
+	// Key: 0x25 | ws(8) | src(16) | dst(16) = 41 bytes.
+	// As source: a bounded prefix scan.
+	//
+	// STO-11, the same guard and for the same reason as the 0x03/0x04 loops
+	// above. This prefix is byte-for-byte the same 25-byte kind|ws|id shape.
+	// PrefixIterator used to open-code a byte-identical COPY of the pre-#816
+	// loose bound; it now delegates to keys.PrefixUpperBound, so there is one
+	// implementation. The guard STAYS as belt and braces — a delete loop should
+	// not depend on a helper in another package for the only thing keeping it
+	// inside its own keyspace.
+	// Pinned by TestSTO11_EveryDestructivePrefixScanStaysInsideItsOwnPrefix.
+	archSrcPrefix := keys.ArchiveAssocPrefixForID(wsPrefix, [16]byte(id))
+	if archSrcIter, aErr := PrefixIterator(ps.db, archSrcPrefix); aErr == nil {
+		for archSrcIter.First(); archSrcIter.Valid(); archSrcIter.Next() {
+			k := archSrcIter.Key()
+			// break, not continue: keys are returned in order from a lower
+			// bound of exactly this prefix, so the first key that does not
+			// carry it is already past the prefix — including a key SHORTER
+			// than 25 bytes, which can only sort at or above the prefix by
+			// differing (greater) within its own length.
+			if len(k) < 25 || !bytes.Equal(k[:25], archSrcPrefix) {
+				break
+			}
+			batch.Delete(append([]byte{}, k...), nil)
+		}
+		archSrcIter.Close()
+	}
+	// As target: dst is the trailing 16 bytes, so this needs a vault-wide 0x25
+	// scan. Same shape and cost class as the ordinal child scan below, which
+	// has scanned the vault's 0x1E range on every delete since it was written.
+	archVaultPrefix := keys.ArchiveAssocRangeStart(wsPrefix)
+	if archDstIter, aErr := PrefixIterator(ps.db, archVaultPrefix); aErr == nil {
+		idBytes := [16]byte(id)
+		for archDstIter.First(); archDstIter.Valid(); archDstIter.Next() {
+			k := archDstIter.Key()
+			if len(k) != 41 {
+				continue
+			}
+			if bytes.Equal(k[25:41], idBytes[:]) {
+				batch.Delete(append([]byte{}, k...), nil)
+			}
+		}
+		archDstIter.Close()
 	}
 
 	// Ordinal cleanup: scan all ordinal keys in this workspace and delete any where
@@ -655,6 +779,12 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	ps.replicateBatch(batch)
 
 	ps.cache.Delete(wsPrefix, id)
+	for _, src := range assocCacheDirty {
+		ps.assocCache.Remove(assocCacheKey(wsPrefix, src))
+	}
+	for _, dst := range revAssocCacheDirty {
+		ps.revAssocCache.Remove(assocCacheKey(wsPrefix, dst))
+	}
 
 	// Decrement MentionCount on each entity that was linked to this engram.
 	// Done post-commit: if the process crashes here, counts will be slightly
@@ -1130,17 +1260,37 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 		// "unknown" forever, and a marker that already carried a stamp had it
 		// erased on the next confidence adjustment — violating the "moment it
 		// FIRST became known" invariant (adversarial review of #754, finding 6).
+		//
+		// FAILS OPEN ON THE MARKER ONLY (#804), the opposite call from
+		// FlagContradiction and for a reason specific to this site: the
+		// confidence delta is the caller's request and is already computed;
+		// refusing the whole batch because the 0x0A stamp was unreadable would
+		// drop a write that has nothing to do with the faulting key. But a
+		// stamp that could not be read must never be REPLACED with `now` —
+		// that is the plausible-wrong-value failure. So the confidence keys are
+		// written and the marker rewrite is skipped, leaving whatever is on
+		// disk intact.
+		//
+		// A pair whose marker read fails and whose marker does not yet exist
+		// therefore goes unflagged this time; the contradiction detector
+		// re-observes and FlagContradiction writes it. A missed marker is
+		// recoverable; a restamped one is not.
 		detectedAt := time.Now()
 		contraKey := keys.ContradictionKey(wsPrefix, 0, 0, aBytes)
-		if existing, closer, err := ps.db.Get(contraKey); err == nil {
-			_, prior, _ := decodeContradictionValue(existing)
-			_ = closer.Close()
-			// Carry the prior stamp forward verbatim — including a zero one
-			// from a legacy marker (re-stamping invents a wrong time).
-			detectedAt = prior
+		prior, exists, rerr := ps.readContradictionMarker(contraKey)
+		if rerr != nil {
+			slog.Warn("storage: contradiction marker read failed; leaving the existing 0x0A marker untouched rather than restamping it",
+				"engram", id.String(), "other", other.String(),
+				"vault_prefix", fmt.Sprintf("%x", wsPrefix), "err", rerr)
+		} else {
+			if exists {
+				// Carry the prior stamp forward verbatim — including a zero one
+				// from a legacy marker (re-stamping invents a wrong time).
+				detectedAt = prior
+			}
+			batch.Set(contraKey, encodeContradictionValue(bBytes, detectedAt), nil)
+			batch.Set(keys.ContradictionKey(wsPrefix, 0, 0, bBytes), encodeContradictionValue(aBytes, detectedAt), nil)
 		}
-		batch.Set(contraKey, encodeContradictionValue(bBytes, detectedAt), nil)
-		batch.Set(keys.ContradictionKey(wsPrefix, 0, 0, bBytes), encodeContradictionValue(aBytes, detectedAt), nil)
 	}
 
 	if err := batch.Commit(pebble.NoSync); err != nil {

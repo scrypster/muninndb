@@ -1317,6 +1317,14 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	// Write to store
 	id, err := e.store.WriteEngram(ctx, wsPrefix, eng)
 	if err != nil {
+		// An inline association naming an engram that no longer exists is the
+		// caller's mistake, not a storage fault — the same class as the
+		// unparseable target_id refused a few lines above, and refused the same
+		// way. Mapped to ErrInvalidID so the transports answer 400 rather than
+		// 500 (STO-12).
+		if errors.Is(err, storage.ErrDanglingEndpoint) {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidID, err)
+		}
 		return nil, fmt.Errorf("write engram: %w", err)
 	}
 
@@ -1852,7 +1860,14 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	ids := make([]storage.ULID, n)
 	for fi, origIdx := range filteredIdx {
 		if batchErrs[fi] != nil {
-			errs[origIdx] = fmt.Errorf("write engram: %w", batchErrs[fi])
+			// STO-12, same mapping as Engine.Write: a dangling inline
+			// association target is a bad request, and it fails only its own
+			// item — the rest of the batch is unaffected.
+			if errors.Is(batchErrs[fi], storage.ErrDanglingEndpoint) {
+				errs[origIdx] = fmt.Errorf("%w: %v", ErrInvalidID, batchErrs[fi])
+			} else {
+				errs[origIdx] = fmt.Errorf("write engram: %w", batchErrs[fi])
+			}
 			continue
 		}
 		ids[origIdx] = batchIDs[fi]
@@ -2353,8 +2368,19 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		actReq.MaxResults = 20
 	}
 	// Fix 2: Default to resolved HopDepth (from Plasticity preset) BFS traversal.
-	// The association graph is the primary differentiator of MuninnDB — it should
-	// be active by default. Order matters: apply default FIRST, then check explicit opt-out.
+	// Order matters: apply default FIRST, then check explicit opt-out.
+	//
+	// This default was justified as "the association graph is the primary
+	// differentiator of MuninnDB". Half of that is still true and half is not
+	// (#801): the graph reaches results through phase4HebbianBoost, which does
+	// contribute — but phase5Traverse's hop gate has sat above the phase's own
+	// score ceiling since the initial commit, so HopDepth > 0 has never produced
+	// a hop on any real corpus. Measured on a 3,458-engram production vault with
+	// 127,798 edges: 0 hops on 150/150 queries, and traversal strictly dominated
+	// by raising CandidatesPerIndex at every budget cap. Left on rather than
+	// defaulted off because it is inert, not harmful, and because HopDepth is a
+	// per-vault plasticity value surfaced on six transports — disposing of it is
+	// its own increment. See docs/internals/decision-record.md (#801).
 	if actReq.HopDepth == 0 {
 		actReq.HopDepth = resolved.HopDepth
 	}
@@ -3332,11 +3358,12 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 			}
 		}
 
-		// Mark the node as deleted in the HNSW index so it is skipped in
-		// future Search results. Memory is reclaimed on the next rebuild.
-		if e.hnswRegistry != nil {
-			e.hnswRegistry.TombstoneNode(wsPrefix, [16]byte(id))
-		}
+		// Remove the engram from the search indexes. Until #803 this branch
+		// tombstoned HNSW but never touched FTS — only the SOFT branch below
+		// called fts.DeleteEngram — so a hard-deleted engram's tag postings
+		// survived, and autoassoc's tag search kept handing its ID to
+		// WriteAssociation on every later write sharing a tag. See STO-12.
+		e.cleanSearchIndexesAfterHardDelete(wsPrefix, [16]byte(id), eng)
 		// Decrement the global engram counter. Floor at zero to guard against
 		// counter skew in crash-recovery scenarios (mirrors ClearVault's guard).
 		for {
@@ -3366,6 +3393,31 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 	}
 
 	return &mbp.ForgetResponse{OK: true}, nil
+}
+
+// cleanSearchIndexesAfterHardDelete removes a hard-deleted engram from the FTS
+// posting lists and tombstones it in the HNSW vector index.
+//
+// STO-12. storage.DeleteEngram's own cascade (0x01/0x02/0x03/0x04/0x14/0x25 and
+// the secondary indexes) is complete, but the FTS and HNSW indexes live outside
+// the store and every hard-delete caller must clean them itself. The two
+// callers that did not — Forget(hard=true) and PruneVault — left the dead ID
+// reachable from a tag search and a vector search, which the autoassoc and
+// neighbor workers then turned back into association edges. `eng` may be nil
+// (the record was unreadable before the delete); FTS cleanup needs its fields,
+// the HNSW tombstone does not, so they are gated separately.
+func (e *Engine) cleanSearchIndexesAfterHardDelete(wsPrefix [8]byte, id [16]byte, eng *storage.Engram) {
+	if e.fts != nil && eng != nil {
+		if err := e.fts.DeleteEngram(wsPrefix, id, eng.Concept, eng.CreatedBy, eng.Content, eng.Tags); err != nil {
+			slog.Warn("engine: fts cleanup failed after hard delete",
+				"id", storage.ULID(id).String(), "error", err)
+		}
+	}
+	// Mark the node as deleted in the HNSW index so it is skipped in future
+	// Search results. Memory is reclaimed on the next rebuild.
+	if e.hnswRegistry != nil {
+		e.hnswRegistry.TombstoneNode(wsPrefix, id)
+	}
 }
 
 // Stat implements mbp.EngineAPI.Stat.
@@ -4439,10 +4491,17 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			}
 			for i := 0; i < toDelete; i++ {
 				id := scored[i].id
+				// Read before deleting: FTS cleanup needs the indexed fields,
+				// which are gone once the 0x01 record is.
+				victim, _ := e.store.GetEngram(opCtx, ws, id)
 				if err := e.store.DeleteEngram(opCtx, ws, id); err != nil {
 					slog.Debug("prune vault: hard-delete failed", "vault", vaultName, "id", id, "err", err)
 					continue
 				}
+				// STO-12: the pruner reaches DeleteEngram directly and cleaned
+				// neither FTS nor HNSW, so it leaked dangling edges through
+				// BOTH amplifiers with no operator action at all.
+				e.cleanSearchIndexesAfterHardDelete(ws, [16]byte(id), victim)
 				// Decrement the global engram counter.
 				for {
 					cur := e.engramCount.Load()
@@ -4479,10 +4538,13 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 			return pruned, fmt.Errorf("prune vault %s (retention scan): %w", vaultName, err)
 		}
 		for _, id := range ids {
+			victim, _ := e.store.GetEngram(opCtx, ws, id)
 			if err := e.store.DeleteEngram(opCtx, ws, id); err != nil {
 				slog.Debug("prune vault: retention hard-delete failed", "vault", vaultName, "id", id, "err", err)
 				continue
 			}
+			// STO-12: same leak as the MaxEngrams path above.
+			e.cleanSearchIndexesAfterHardDelete(ws, [16]byte(id), victim)
 			// Decrement the global engram counter.
 			for {
 				cur := e.engramCount.Load()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/keys"
@@ -130,6 +131,47 @@ var absenceVsFailureCases = []absenceVsFailureCase{
 		},
 	},
 	{
+		// #804. The 0x0A idempotency token: absence means "not yet flagged",
+		// which is what makes the contradiction confidence penalty fire once.
+		// A failed read reported as absence made the pair NEWLY flagged and
+		// restamped detectedAt with `now` — and BayesianUpdate is not
+		// invertible, so the compounded penalty (1.0 -> 0.975 -> 0.797 ->
+		// 0.313 -> 0.0709) removes BOTH memories from recall, the true one
+		// included. The two callers act oppositely on the error this returns;
+		// see readContradictionMarker and each call site.
+		method:         "readContradictionMarker",
+		routesPointGet: true,
+		faultPrefix:    prefix.Contradiction,
+		seed: func(t *testing.T, s *PebbleStore, ws [8]byte, src, dst ULID) []byte {
+			a, _ := seedContradictionMarker(t, s, ws, src, dst, time.Unix(1700000000, 0))
+			return keys.ContradictionKey(ws, 0, 0, [16]byte(a))
+		},
+		absent: func(s *PebbleStore, ws [8]byte, src, dst ULID) error {
+			_, _, err := s.readContradictionMarker(keys.ContradictionKey(ws, 0, 0, [16]byte(src)))
+			return err
+		},
+		call: func(s *PebbleStore, ws [8]byte, src, dst ULID) error {
+			a := src
+			if CompareULIDs(src, dst) > 0 {
+				a = dst
+			}
+			_, _, err := s.readContradictionMarker(keys.ContradictionKey(ws, 0, 0, [16]byte(a)))
+			return err
+		},
+		corrupt: func(t *testing.T, s *PebbleStore, ws [8]byte, src, dst ULID) {
+			t.Helper()
+			a := src
+			if CompareULIDs(src, dst) > 0 {
+				a = dst
+			}
+			// A value too short to even name the partner cannot be something
+			// any writer in this package produced. A bare 16-byte legacy
+			// marker is VALID and decodes to "detection time unknown"; only
+			// shorter than that is damage.
+			setShort(t, s, keys.ContradictionKey(ws, 0, 0, [16]byte(a)))
+		},
+	},
+	{
 		// Not a pointGet caller itself — it reads through the two above. It is
 		// in the table because it is the WRITER that persists whatever they
 		// report, so it is where a laundered read does its damage.
@@ -250,7 +292,14 @@ func TestAbsenceIsNotFailure(t *testing.T) {
 					tc.seed(t, store, ws, src, dst)
 				}
 				// A pair that was never written, on a healthy store.
-				if err := tc.absent(store, ws, src, NewULID()); err != nil {
+				// The absent endpoint is a REAL engram with no edge to it:
+				// this subtest's variable is EDGE absence. STO-12 makes an
+				// edge to a nonexistent engram a different fact (a refused
+				// write), and conflating the two would have this row assert
+				// that dangling writes are normal.
+				absentDst := NewULID()
+				seedEndpoints(t, store, ws, absentDst)
+				if err := tc.absent(store, ws, src, absentDst); err != nil {
 					t.Errorf("%s on an absent pair: got error %v, want nil — absence is a normal fact", tc.method, err)
 				}
 			})

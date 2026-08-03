@@ -759,8 +759,8 @@ func (a *mcpEngineAdapter) Release(ctx context.Context, vault, id, owner string)
 	return res.Released, res.Owner, nil
 }
 
-func (a *mcpEngineAdapter) GetAnnotations(ctx context.Context, vault, id string) (*engine.AnnotationData, error) {
-	return a.eng.GetAnnotations(ctx, vault, id)
+func (a *mcpEngineAdapter) GetAnnotations(ctx context.Context, vault, id string, req *mbp.ActivateRequest) (*engine.AnnotationData, error) {
+	return a.eng.GetAnnotations(ctx, vault, id, req)
 }
 
 func (a *mcpEngineAdapter) ListEntities(ctx context.Context, vault string, limit int, state string) ([]EntitySummary, error) {

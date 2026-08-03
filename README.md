@@ -247,7 +247,7 @@ MuninnDB exposes **35 MCP tools** — store, activate, search, batch insert, get
 
 ## What Just Happened
 
-Most databases store data and wait. MuninnDB stores *memory traces* — called **engrams** — and continuously works on them in the background. When you called `activate`, it ran a 6-phase pipeline: parallel full-text + vector search, fused the results, applied Hebbian co-activation boosts from past queries, injected predictive candidates from sequential patterns, traversed the association graph, and scored everything with ACT-R temporal weighting — in under 20ms.
+Most databases store data and wait. MuninnDB stores *memory traces* — called **engrams** — and continuously works on them in the background. When you called `activate`, it ran a 6-phase pipeline: parallel full-text + vector search, fused the results, applied Hebbian co-activation boosts from past queries, injected predictive candidates from sequential patterns, walked the association graph, and scored everything with ACT-R temporal weighting — in under 20ms. (The graph walk is currently inert on real corpora and is being reconsidered — the association graph reaches your results through the Hebbian boost, not through hops. See `docs/internals/decision-record.md`, #801.)
 
 The Q3 incident surfaced because MuninnDB understood that *"payment retry logic"* and *"idempotency keys after a double-charge"* are part of the same conversation. You never wrote that relationship. It emerged from semantic proximity and how these concepts travel together. That is the difference between a database and memory.
 

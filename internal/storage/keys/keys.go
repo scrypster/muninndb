@@ -360,20 +360,24 @@ func AssocFwdRangeStart(ws [8]byte) []byte {
 }
 
 // AssocFwdRangeEnd returns the exclusive upper bound for scanning all forward
-// associations within a vault (increments the workspace prefix by 1 in the
-// last byte, standard Pebble upper-bound idiom).
+// associations within a vault.
+//
+// STO-11: delegates to PrefixUpperBound, like its sibling AssocRevRangeEnd.
+// This used to open-code its own carry loop that stopped at index 1 so it could
+// not touch the 0x03 type byte — correct for the ~1-in-256 case where the vault
+// prefix's LAST byte is 0xFF, but for an ALL-0xFF workspace prefix every
+// workspace byte wrapped to 0x00 and the loop ran out of indices, producing
+// 0x03|00..00: an upper bound BELOW the lower bound, so the scan returned
+// nothing, silently and forever, for that vault only. Probability 2^-64, i.e.
+// it will not happen — which is exactly why it is a delegation rather than a
+// comment (#819). One bound rule for the keyspace, not two.
+//
+// Byte 0 is the 0x03 type prefix and can never be 0xFF, so PrefixUpperBound's
+// carry always terminates and this never returns the unbounded nil.
+// Pinned by TestAssocRangeEnds_NeverInvertTheirBound and, behaviourally, by
+// TestGetAssociations_AllFFWorkspacePrefixIsNotSilentlyEmpty.
 func AssocFwdRangeEnd(ws [8]byte) []byte {
-	end := make([]byte, 1+8)
-	end[0] = prefix.AssocFwd
-	copy(end[1:9], ws[:])
-	// Increment the last byte of ws portion in the key to get exclusive upper bound.
-	for i := len(end) - 1; i >= 1; i-- {
-		end[i]++
-		if end[i] != 0 {
-			break
-		}
-	}
-	return end
+	return PrefixUpperBound(AssocFwdRangeStart(ws))
 }
 
 // AssocFwdPrefixForID returns a 25-byte scan prefix covering all forward
@@ -384,6 +388,34 @@ func AssocFwdPrefixForID(ws [8]byte, id [16]byte) []byte {
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
+}
+
+// AssocRevRangeStart returns the inclusive lower bound for scanning all reverse
+// association index entries within a vault (0x04 prefix scan lower bound).
+func AssocRevRangeStart(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.AssocRev
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// AssocRevRangeEnd returns the exclusive upper bound for scanning all reverse
+// association index entries within a vault.
+//
+// STO-11: this delegates to PrefixUpperBound rather than open-coding a
+// last-byte increment. PrefixUpperBound carries across every byte, and because
+// byte 0 here is the 0x04 prefix (never 0xFF) it always produces a bound
+// strictly above the lower bound — including for an all-0xFF workspace prefix,
+// where it now returns exactly 0x05.
+//
+// Before #816 the helper left the trailing 0xFFs in place, so an all-0xFF
+// workspace yielded 0x05|FF..FF and a 0xFF-terminated one yielded a bound that
+// reached into the NEXT vault's 0x04 range. That surplus was harmless only
+// because every consumer additionally checks the 25-byte per-id prefix (see
+// rankingReverseEdges). It is now tight, and AssocFwdRangeEnd delegates here
+// too (#819), so the keyspace has one bound rule.
+func AssocRevRangeEnd(ws [8]byte) []byte {
+	return PrefixUpperBound(AssocRevRangeStart(ws))
 }
 
 // AssocRevPrefixForID returns a 25-byte scan prefix covering all reverse

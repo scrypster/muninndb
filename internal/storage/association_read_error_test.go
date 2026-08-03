@@ -35,6 +35,7 @@ func failReadsWithPrefix(b byte) func([]byte) error {
 func seedEdge(t *testing.T, store *PebbleStore, ws [8]byte, src, dst ULID, weight float32) []byte {
 	t.Helper()
 	ctx := context.Background()
+	seedEndpoints(t, store, ws, src, dst)
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID:      dst,
 		Weight:        weight,
@@ -226,7 +227,6 @@ func TestUpdateAssocWeightBatch_OneUnreadablePairDoesNotStopTheRest(t *testing.T
 	aSrc, aDst := NewULID(), NewULID()
 	bSrc, bDst := NewULID(), NewULID()
 	cSrc, cDst := NewULID(), NewULID()
-
 	seedEdge(t, store, wsA, aSrc, aDst, 0.5)
 	bOrig := seedEdge(t, store, wsB, bSrc, bDst, 0.5)
 	seedEdge(t, store, wsC, cSrc, cDst, 0.5)

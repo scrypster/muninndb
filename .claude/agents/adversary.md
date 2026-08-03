@@ -49,7 +49,16 @@ Given a change, or a design that has not been built yet.
   `.claude/maintainer/soft-spots.md` and state whether the change fixes, widens, or sits
   adjacent to a known soft spot. Ask what the bypass is, not whether the check is present.
 - Claims made in the change's own documentation. A comment asserting "this cannot happen"
-  is a target. Overstated invariants are defects in this project.
+  is a target. Overstated invariants are defects in this project. Ask of every sentence:
+  **would this read the same if it were false?** A set named in prose — "every writer",
+  "all four call sites" — re-derive it from the mechanism (who writes these bytes) rather
+  than from the names, and see whether it comes back the same size. A guard that cannot say
+  what it does NOT catch is pinning an instance and calling it a class. See
+  `docs/internals/claim-discipline.md`, including its audit list of claims already owned by
+  an in-flight branch — do not re-report those.
+- A green run that ran nothing. `no tests to run`, a suite that `os.Exit(0)`s on an unmet
+  precondition, a `-run` pattern matching zero tests, a file the toolchain excluded by
+  filename: all report success for work not done (#812, #814).
 
 **On a design**, attack the premise before the machinery. What must be true about the data,
 the code, or the world for this to work at all — and is it? A feature here was refined
@@ -99,10 +108,18 @@ scratch worktree is gone.
 
 If you learn something durable, non-obvious, and not recoverable from git or the tracker —
 a measured number, a decision and why it beat the alternative, an honest negative, a defect
-*pattern* rather than a defect, a trap that looks safe — **append it to
-`.claude/memory-proposals.jsonl` rather than only writing it in your report.** One JSON
-object per line, append only. `.claude/memory-protocol.md` has the schema and, more
-importantly, the bar: a noisy vault is worse than a small one, so progress narration and
-restatements of the diff do not qualify.
+*pattern* rather than a defect, a trap that looks safe — **propose it rather than only
+writing it in your report:**
+
+```sh
+node .claude/hooks/memory-propose.mjs <<'JSON'
+{"concept":"short label","content":"the fact itself, self-contained, readable in a year","summary":"one line","type":"fact","source":"adversary"}
+JSON
+```
+
+The helper validates before it appends and refuses a whole batch rather than queueing a bad
+line — 43 of the first 179 raw appends were permanently invalid and never reached the vault.
+`.claude/memory-protocol.md` has the schema and, more importantly, the bar: a noisy vault is
+worse than a small one, so progress narration and restatements of the diff do not qualify.
 
 A report is read once. The ledger is drained into memory and survives.

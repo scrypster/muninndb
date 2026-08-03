@@ -41,8 +41,18 @@ func engineRawAssocKey(pfx byte, ws [8]byte, first [16]byte, complement [4]byte,
 // edge directly through Pebble: 0x03/0x04 at the legacy complement, 0x14
 // carrying the true 1.0. Direct writes are the only way to produce this state —
 // the fixed encoder cannot.
-func seedLegacyFullWeightEdge(t *testing.T, db *pebble.DB, ws [8]byte, src, dst [16]byte) {
+//
+// Both endpoints also get a real engram: the repair's flushChunk re-validates
+// them (STO-12), and a fixture without engrams would exercise the skip path
+// rather than the relocation this test is about.
+func seedLegacyFullWeightEdge(t *testing.T, store *storage.PebbleStore, db *pebble.DB, ws [8]byte, src, dst [16]byte) {
 	t.Helper()
+	for _, id := range [][16]byte{src, dst} {
+		_, err := store.WriteEngram(context.Background(), ws, &storage.Engram{
+			ID: storage.ULID(id), Concept: "repair fixture endpoint", Content: "repair fixture endpoint content",
+		})
+		require.NoError(t, err)
+	}
 	// 26-byte modern value with peakWeight 1.0 (the dominant, clamp-not-delete
 	// case from the #756 correction).
 	val := make([]byte, 26)
@@ -135,7 +145,7 @@ func TestLegacyFullWeightAssocRepair_EngineLifecycleAndWatermark(t *testing.T) {
 
 	src1 := [16]byte{0x01, 0xAA}
 	dst1 := [16]byte{0x02, 0xBB}
-	seedLegacyFullWeightEdge(t, db, ws, src1, dst1)
+	seedLegacyFullWeightEdge(t, store, db, ws, src1, dst1)
 
 	// Boot 1: the startup pass must relocate the edge and mark the vault.
 	boot1 := newAssocRepairEngine(store, ftsIdx, time.Millisecond)
@@ -156,7 +166,7 @@ func TestLegacyFullWeightAssocRepair_EngineLifecycleAndWatermark(t *testing.T) {
 	// New damage after the watermark (hand-written; unreachable in practice).
 	src2 := [16]byte{0x03, 0xCC}
 	dst2 := [16]byte{0x04, 0xDD}
-	seedLegacyFullWeightEdge(t, db, ws, src2, dst2)
+	seedLegacyFullWeightEdge(t, store, db, ws, src2, dst2)
 	boot1.Stop()
 
 	// Boot 2: the watermark short-circuits the vault — the second scan never

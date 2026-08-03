@@ -142,10 +142,17 @@ func TestPointGetReadersAreCovered(t *testing.T) {
 
 // TestReadFaultIsArmedOnlyByTests asserts the structural fact that
 // TestPointGetSeamIsNilInProductionConstructors relies on and cannot itself
-// establish: nothing outside a _test.go file ever ASSIGNS PebbleStore.readFault,
-// so there is no production path that can arm the seam. The field is
-// unexported, so this package-local scan is complete for the whole program.
+// establish: nothing outside a _test.go file ever ASSIGNS PebbleStore.readFault
+// or PebbleStore.iterFault, so there is no production path that can arm either
+// seam. The fields are unexported, so this package-local scan is complete for
+// the whole program.
+//
+// iterFault (#808) is the iterator sibling of readFault and joined this scan
+// with it: a fault seam that production code can arm is not a test seam, and
+// the two must not drift into different guarantees.
 func TestReadFaultIsArmedOnlyByTests(t *testing.T) {
+	faultSeams := map[string]bool{"readFault": true, "iterFault": true}
+
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
@@ -176,13 +183,13 @@ func TestReadFaultIsArmedOnlyByTests(t *testing.T) {
 			switch node := n.(type) {
 			case *ast.AssignStmt:
 				for _, lhs := range node.Lhs {
-					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "readFault" {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && faultSeams[sel.Sel.Name] {
 						record(node)
 					}
 				}
 			case *ast.KeyValueExpr:
 				// A composite literal field: PebbleStore{readFault: ...}.
-				if id, ok := node.Key.(*ast.Ident); ok && id.Name == "readFault" {
+				if id, ok := node.Key.(*ast.Ident); ok && faultSeams[id.Name] {
 					record(node)
 				}
 			}
@@ -194,7 +201,7 @@ func TestReadFaultIsArmedOnlyByTests(t *testing.T) {
 		t.Fatal("scan found no non-test files — wrong working directory?")
 	}
 	if len(offenders) > 0 {
-		t.Errorf("readFault is assigned in non-test source, so the fault seam is no longer test-only:\n  %s",
+		t.Errorf("a read/iterator fault seam is assigned in non-test source, so it is no longer test-only:\n  %s",
 			strings.Join(offenders, "\n  "))
 	}
 }

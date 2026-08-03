@@ -28,6 +28,7 @@ func TestUpdateAssocWeightBatch_HonorsExplicitLastActivated(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("assoc-stamp-vault")
 	idA, idB := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, idA, idB)
 
 	if err := store.WriteAssociation(ctx, ws, idA, idB, &Association{
 		TargetID: idB,
@@ -61,6 +62,7 @@ func TestUpdateAssocWeightBatch_ZeroStampMeansNow(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("assoc-stamp-vault")
 	idA, idB := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, idA, idB)
 
 	if err := store.WriteAssociation(ctx, ws, idA, idB, &Association{
 		TargetID: idB,
@@ -129,6 +131,7 @@ func TestUpdateAssocWeightBatch_NeverMovesTheDecayAnchorBackwards(t *testing.T) 
 	stale := recent.Add(-400 * 24 * time.Hour)
 	const halfLife = 30 * 24 * time.Hour
 
+	seedEndpoints(t, store, ws, idA, idB)
 	if err := store.WriteAssociation(ctx, ws, idA, idB, &Association{
 		TargetID: idB, Weight: 0.9, Confidence: 1.0, CreatedAt: stale,
 	}); err != nil {
@@ -195,6 +198,7 @@ func TestUpdateAssocWeight_NeverMovesTheDecayAnchorBackwards(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("assoc-anchor-vault-single")
 	idA, idB := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, idA, idB)
 
 	if err := store.WriteAssociation(ctx, ws, idA, idB, &Association{
 		TargetID: idB, Weight: 0.5, Confidence: 1.0,
