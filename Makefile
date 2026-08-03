@@ -7,7 +7,7 @@ HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
 ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
 
 .PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets web css build test bench test-integration \
-        corpora check-filenames \
+        corpora check-filenames check-nul-bytes \
         _ort-darwin-arm64 _ort-darwin-amd64 _ort-linux-amd64 _ort-linux-arm64 _ort-windows-amd64
 
 ## fetch-assets: download the model, tokenizer, and all platform ORT libraries.
@@ -139,6 +139,11 @@ corpora:
 ## check-filenames: fail if a source file's NAME silently excludes it from the build (#814).
 check-filenames:
 	@bash scripts/check-filename-build-constraints.sh
+
+## check-nul-bytes: fail if a tracked source file contains a NUL byte, which git renders as
+## a binary blob invisible to git diff and every diff-based review surface (#827).
+check-nul-bytes:
+	@bash scripts/check-nul-bytes.sh
 
 # The eval-bible-* targets were removed here: they build ./cmd/eval-bible/... and run
 # scripts/eval-bible-setup.sh, neither of which is in the public repo (cmd/eval*/ and

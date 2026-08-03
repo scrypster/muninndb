@@ -1300,20 +1300,49 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	// Convert associations
-	assocs := make([]storage.Association, len(req.Associations))
-	for i, a := range req.Associations {
+	assocs := make([]storage.Association, 0, len(req.Associations)+len(callerRelationships))
+	for _, a := range req.Associations {
 		targetID, err := storage.ParseULID(a.TargetID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: association target_id %q: %v", ErrInvalidID, a.TargetID, err)
 		}
-		assocs[i] = storage.Association{
+		assocs = append(assocs, storage.Association{
 			TargetID:      targetID,
 			RelType:       storage.RelType(a.RelType),
 			Weight:        a.Weight,
 			Confidence:    a.Confidence,
 			CreatedAt:     time.Unix(0, a.CreatedAt),
 			LastActivated: a.LastActivated,
+		})
+	}
+	// relationships[] (mbp.WriteRequest.Relationships) is the OTHER inline
+	// edge field on a write, and until #817 a dangling target on it was
+	// refused differently from associations[] for the identical defect — a
+	// target naming a hard-deleted engram. associations[] failed the whole
+	// write (ErrDanglingEndpoint -> ErrInvalidID, 400) because it reaches
+	// checkInlineAssocTargets atomically through eng.Associations;
+	// relationships[] instead ran a POST-write loop of individual
+	// WriteAssociation calls that logged a WARN on refusal and returned 200
+	// regardless — silent for the MCP surface (muninn_link, muninn_remember)
+	// that is the most common agent path (#817). Folding relationships into
+	// this SAME eng.Associations slice, validated by the SAME atomic
+	// pre-write guard, closes the asymmetry by construction instead of
+	// duplicating the check or inventing a warnings field: a dangling
+	// relationships[] target now fails the whole write exactly like a
+	// dangling associations[] target, and a malformed target_id (previously
+	// silently skipped) does too, for the same reason. See CHANGELOG.
+	for _, rel := range callerRelationships {
+		targetID, err := storage.ParseULID(rel.TargetID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: relationship target_id %q: %v", ErrInvalidID, rel.TargetID, err)
 		}
+		assocs = append(assocs, storage.Association{
+			TargetID:   targetID,
+			RelType:    storage.RelType(relTypeFromString(rel.Relation)),
+			Weight:     rel.Weight,
+			Confidence: 1.0,
+			CreatedAt:  time.Now(),
+		})
 	}
 	eng.Associations = assocs
 
@@ -1414,24 +1443,10 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEntities)
 	}
 
-	// Create associations from caller-provided relationships (after engram is stored).
-	for _, rel := range callerRelationships {
-		targetULID, parseErr := storage.ParseULID(rel.TargetID)
-		if parseErr != nil {
-			slog.Warn("engine: inline relationship has invalid target_id", "target_id", rel.TargetID, "error", parseErr)
-			continue
-		}
-		relAssoc := &storage.Association{
-			TargetID:   targetULID,
-			RelType:    storage.RelType(relTypeFromString(rel.Relation)),
-			Weight:     rel.Weight,
-			Confidence: 1.0,
-			CreatedAt:  time.Now(),
-		}
-		if writeErr := e.store.WriteAssociation(ctx, wsPrefix, id, targetULID, relAssoc); writeErr != nil {
-			slog.Warn("engine: failed to write inline relationship", "target_id", rel.TargetID, "error", writeErr)
-		}
-	}
+	// callerRelationships were already converted into eng.Associations above
+	// and written atomically with the engram itself, through the same
+	// checkInlineAssocTargets guard associations[] uses (#817) — nothing left
+	// to do here.
 
 	// Store caller-provided entity-to-entity relationships in the 0x21 relationship index.
 	wroteEntityRelationships := false
@@ -1663,7 +1678,6 @@ type preparedBatchItem struct {
 	inlineMode                string
 	callerSummary             string
 	callerEntities            []mbp.InlineEntity
-	callerRelationships       []mbp.InlineRelationship
 	callerEntityRelationships []mbp.InlineEntityRelationship
 	skipBackgroundEnrich      bool
 	contentHash               [32]byte // SHA-256 of content for dedup
@@ -1815,21 +1829,43 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			continue
 		}
 
-		assocs := make([]storage.Association, len(req.Associations))
-		for j, a := range req.Associations {
+		assocs := make([]storage.Association, 0, len(req.Associations)+len(callerRelationships))
+		for _, a := range req.Associations {
 			targetID, parseErr := storage.ParseULID(a.TargetID)
 			if parseErr != nil {
 				errs[i] = fmt.Errorf("parse target id: %w", parseErr)
 				break
 			}
-			assocs[j] = storage.Association{
+			assocs = append(assocs, storage.Association{
 				TargetID:      targetID,
 				RelType:       storage.RelType(a.RelType),
 				Weight:        a.Weight,
 				Confidence:    a.Confidence,
 				CreatedAt:     time.Unix(0, a.CreatedAt),
 				LastActivated: a.LastActivated,
+			})
+		}
+		if errs[i] != nil {
+			continue
+		}
+		// relationships[] folded into the same eng.Associations slice as
+		// associations[] — see the single-write path's comment (#817). A
+		// dangling or malformed relationship target now fails only this
+		// item's write, the same as a dangling associations[] target above,
+		// instead of silently succeeding with the edge dropped.
+		for _, rel := range callerRelationships {
+			targetID, parseErr := storage.ParseULID(rel.TargetID)
+			if parseErr != nil {
+				errs[i] = fmt.Errorf("%w: relationship target_id %q: %v", ErrInvalidID, rel.TargetID, parseErr)
+				break
 			}
+			assocs = append(assocs, storage.Association{
+				TargetID:   targetID,
+				RelType:    storage.RelType(relTypeFromString(rel.Relation)),
+				Weight:     rel.Weight,
+				Confidence: 1.0,
+				CreatedAt:  time.Now(),
+			})
 		}
 		if errs[i] != nil {
 			continue
@@ -1854,7 +1890,6 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			inlineMode:                inlineMode,
 			callerSummary:             callerSummary,
 			callerEntities:            callerEntities,
-			callerRelationships:       callerRelationships,
 			callerEntityRelationships: req.EntityRelationships,
 			skipBackgroundEnrich:      skipBG,
 			contentHash:               contentHash,
@@ -1973,23 +2008,9 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEntities)
 		}
 
-		for _, rel := range p.callerRelationships {
-			targetULID, parseErr := storage.ParseULID(rel.TargetID)
-			if parseErr != nil {
-				slog.Warn("engine: batch: skipping inline relationship with invalid target_id", "target_id", rel.TargetID, "err", parseErr)
-				continue
-			}
-			relAssoc := &storage.Association{
-				TargetID:   targetULID,
-				RelType:    storage.RelType(relTypeFromString(rel.Relation)),
-				Weight:     rel.Weight,
-				Confidence: 1.0,
-				CreatedAt:  time.Now(),
-			}
-			if err := e.store.WriteAssociation(ctx, p.wsPrefix, id, targetULID, relAssoc); err != nil {
-				slog.Warn("engine: batch: failed to write inline relationship", "target_id", rel.TargetID, "err", err)
-			}
-		}
+		// callerRelationships were already folded into eng.Associations in
+		// Phase 1 and written atomically by WriteEngramBatch — nothing left
+		// to do here (#817).
 
 		// Store caller-provided entity-to-entity relationships in the 0x21 relationship index.
 		wroteEntityRelationships := false

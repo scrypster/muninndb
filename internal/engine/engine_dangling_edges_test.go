@@ -312,21 +312,24 @@ func TestSTO12_NoDanglingAssociationEdges(t *testing.T) {
 // TestSTO12_InlineAssociationsCannotNameADeadEngram is the SURFACE-REACHABLE
 // arm of the machine check.
 //
-// mbp.WriteRequest has two distinct inline relationship fields and they take
-// different routes into the keyspace:
-//
-//   - Relationships → Engine.Write's post-write loop → store.WriteAssociation,
-//     which has been guarded since #803's first round;
-//   - Associations  → eng.Associations → store.WriteEngram / WriteEngramBatch,
-//     whose inline loops Set 0x03/0x04/0x14 directly and were NOT guarded.
-//
-// The second is reachable by an ordinary client over REST (WriteRequest is a
-// type alias of mbp.WriteRequest), gRPC, MBP and the embedded library — no
-// hostile actor required, just a client that holds an ID across a delete. Only
-// MCP escapes it, because muninn_link and muninn_remember use `relationships`.
+// mbp.WriteRequest has two distinct inline relationship fields.
+// Associations → eng.Associations → store.WriteEngram / WriteEngramBatch's
+// inline loop, which Sets 0x03/0x04/0x14 directly and refuses via
+// checkInlineAssocTargets (STO-12), mapped to ErrInvalidID (400) by the
+// caller. Reachable by an ordinary client over REST (WriteRequest is a type
+// alias of mbp.WriteRequest), gRPC, MBP and the embedded library — no
+// hostile actor required, just a client that holds an ID across a delete.
 //
 // Asserted against the same danglingCensus as the delete-path table so the two
 // layers are pinned by the same definition of the invariant.
+//
+// #817: Relationships used to take a THIRD route — Engine.Write's post-write
+// loop calling store.WriteAssociation, which correctly refuses via
+// checkEndpointsLive but whose caller only logged a WARN and returned 200
+// regardless, silently for the MCP surface (muninn_link, muninn_remember)
+// that is the most common agent path. Relationships are now folded into the
+// same eng.Associations slice before the write, so they are refused by the
+// SAME guard as associations[] — see TestSTO12_InlineRelationshipsCannotNameADeadEngram.
 func TestSTO12_InlineAssociationsCannotNameADeadEngram(t *testing.T) {
 	ctx := context.Background()
 
@@ -394,6 +397,82 @@ func TestSTO12_InlineAssociationsCannotNameADeadEngram(t *testing.T) {
 		eng.WaitWriteTimeIdle()
 		if bad := danglingCensus(t, db, ws); len(bad) > 0 {
 			t.Errorf("STO-12 violated via the batched inline-association path: %d dangling row(s)\n  %s",
+				len(bad), joinLines(bad))
+		}
+	})
+}
+
+// TestSTO12_InlineRelationshipsCannotNameADeadEngram is #817's RED/GREEN pin:
+// relationships[] on Engine.Write and Engine.WriteBatch must refuse a
+// dangling target with an observable error (ErrInvalidID -> 400), the same
+// as associations[] already does, instead of logging a WARN and returning
+// 200 for a relationship the store correctly refused to create.
+func TestSTO12_InlineRelationshipsCannotNameADeadEngram(t *testing.T) {
+	ctx := context.Background()
+
+	deadTarget := func(t *testing.T, eng *Engine, vault string) string {
+		t.Helper()
+		w := danglingWriter(t, eng, vault, "retention")
+		victim := w("superseded rota", "the old duty rota nobody uses any more")
+		if _, err := eng.Forget(ctx, &mbp.ForgetRequest{Vault: vault, ID: victim.String(), Hard: true}); err != nil {
+			t.Fatalf("hard forget: %v", err)
+		}
+		return victim.String()
+	}
+
+	t.Run("Engine.Write", func(t *testing.T) {
+		eng, store, db := danglingEnv(t)
+		vault := "sto12-inline-rel-write"
+		ws := store.VaultPrefix(vault)
+		if err := store.WriteVaultName(ws, vault); err != nil {
+			t.Fatal(err)
+		}
+		dead := deadTarget(t, eng, vault)
+
+		_, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault: vault, Concept: "replacement rota", Content: "the duty rota that replaced it",
+			Relationships: []mbp.InlineRelationship{{TargetID: dead, Relation: "relates_to", Weight: 0.8}},
+		})
+		if err == nil {
+			t.Fatal("Engine.Write ACCEPTED an inline relationship naming a hard-deleted engram (#817)")
+		}
+		if !errors.Is(err, ErrInvalidID) {
+			t.Errorf("want the refusal to reach the transports as ErrInvalidID (400), got %v", err)
+		}
+		eng.WaitWriteTimeIdle()
+		if bad := danglingCensus(t, db, ws); len(bad) > 0 {
+			t.Errorf("STO-12 violated via the inline-relationship path: %d dangling row(s)\n  %s",
+				len(bad), joinLines(bad))
+		}
+	})
+
+	t.Run("Engine.WriteBatch", func(t *testing.T) {
+		eng, store, db := danglingEnv(t)
+		vault := "sto12-inline-rel-batch"
+		ws := store.VaultPrefix(vault)
+		if err := store.WriteVaultName(ws, vault); err != nil {
+			t.Fatal(err)
+		}
+		dead := deadTarget(t, eng, vault)
+
+		// Item 0 is innocent and must still land; only item 1 is refused.
+		_, errs := eng.WriteBatch(ctx, []*mbp.WriteRequest{
+			{Vault: vault, Concept: "handover note", Content: "who is covering the shift"},
+			{Vault: vault, Concept: "replacement rota", Content: "the duty rota that replaced it",
+				Relationships: []mbp.InlineRelationship{{TargetID: dead, Relation: "relates_to", Weight: 0.8}}},
+		})
+		if errs[0] != nil {
+			t.Errorf("an innocent batch item must not be collateral: %v", errs[0])
+		}
+		if errs[1] == nil {
+			t.Fatal("Engine.WriteBatch ACCEPTED an inline relationship naming a hard-deleted engram (#817)")
+		}
+		if !errors.Is(errs[1], ErrInvalidID) {
+			t.Errorf("want the refusal to reach the transports as ErrInvalidID (400), got %v", errs[1])
+		}
+		eng.WaitWriteTimeIdle()
+		if bad := danglingCensus(t, db, ws); len(bad) > 0 {
+			t.Errorf("STO-12 violated via the batched inline-relationship path: %d dangling row(s)\n  %s",
 				len(bad), joinLines(bad))
 		}
 	})

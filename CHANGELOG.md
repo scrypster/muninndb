@@ -11,6 +11,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`relationships[]` naming a hard-deleted engram now fails the write, matching `associations[]`** (#817).
+  `mbp.WriteRequest` has two inline edge fields. `associations[]` has refused a
+  target with no live engram record since #803 (`ErrDanglingEndpoint`, mapped
+  to `ErrInvalidID` — REST/gRPC/MBP answer 400). `relationships[]` reached the
+  same store-level guard through a different route — a post-write loop calling
+  `store.WriteAssociation` — which correctly refused the edge but only logged
+  a WARN and returned 200 regardless, so the relationship silently did not
+  exist. This was the more commonly hit half of the asymmetry: `muninn_link`
+  and `muninn_remember` — the MCP surface, the most common agent path — use
+  `relationships`, not `associations`.
+
+  **Client-visible change.** A `relationships[]` entry (on `Engine.Write` or
+  `Engine.WriteBatch`) naming a target with no live 0x01 engram record now
+  fails the write with the same `ErrInvalidID` → 400 that a dangling
+  `associations[]` entry has produced since #803, instead of returning
+  200/201 with the edge silently dropped. A malformed (unparseable)
+  `target_id` in `relationships[]`, previously also silently skipped with a
+  WARN, is refused the same way for the same reason. `Engine.WriteBatch`
+  fails only the item carrying the bad relationship; sibling items are
+  unaffected.
+
+  Chosen over annotating the response with a per-item warning (the
+  alternative the issue named as closer to this project's "degrade loudly"
+  line) because it reuses the existing, already-tested atomic guard
+  (`checkInlineAssocTargets`, run before the engram itself is persisted)
+  rather than adding a new response-shape across MBP/REST/gRPC/MCP — the
+  in-tree mechanism `associations[]` already has, extended rather than a
+  second one invented next to it (STO-12).
+
 - **Writes to a non-Cortex node are no longer accepted and lost** (#596, #631).
   A `muninn_remember` delivered to a Lobe — by a load balancer without leader
   affinity, a stale DNS record, or a VIP that failed over to a replica —
