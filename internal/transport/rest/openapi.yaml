@@ -1549,6 +1549,23 @@ components:
         model:
           type: string
 
+    ResetRepairWatermarkRequest:
+      type: object
+      required: [which]
+      properties:
+        which:
+          type: string
+          enum: [evolve, assoc_weight, all]
+          description: "Which repair watermark to reset: 0x2B (evolve entity-link repair), 0x2E (full-weight association repair), or both."
+
+    ResetRepairWatermarkResponse:
+      type: object
+      properties:
+        vault:
+          type: string
+        which:
+          type: string
+
     # ── Admin — backup ───────────────────────────────────────────────────────
 
     BackupRequest:
@@ -3396,6 +3413,41 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "421":
           $ref: "#/components/responses/NotCortex"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/admin/vaults/{name}/repair-watermark/reset:
+    post:
+      tags: [admin-vaults]
+      summary: "Reset a per-vault repair watermark (0x2B evolve entity-link repair, 0x2E full-weight association repair, or both) so the next boot re-scans."
+      description: "Node-local: neither repair pass is leader-gated or replicated (each cluster node runs its own startup pass), so this resets THIS node's own watermark only."
+      security:
+        - AdminSession: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetRepairWatermarkRequest"
+      responses:
+        "200":
+          description: "Watermark(s) reset."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResetRepairWatermarkResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":

@@ -35,6 +35,13 @@ var appendInfra = map[string]bool{
 	// WaitWriteTimeIdle drains the write-time async workers and writes
 	// nothing itself — an out-of-package test seam (#722 doctrine, #764).
 	"WaitWriteTimeIdle": true,
+	// ResetRepairWatermark (#761) deletes a per-vault REPAIR-PASS watermark
+	// (0x2B/0x2E), never an engram/entity/lease — refuseAppend's guarantee is
+	// specifically about existing MEMORIES, and this touches none. It is also
+	// not reachable by an append-mode API key at all: the only caller is the
+	// admin REST handler behind withAdminMiddleware (session auth), which
+	// append-mode credentials do not hold.
+	"ResetRepairWatermark": true,
 }
 
 // appendReadOnly: read/query methods, safe for append.

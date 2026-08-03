@@ -114,6 +114,11 @@ func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, s
 	if err := ps.checkEndpointsLive(wsPrefix, [16]byte(src), [16]byte(dst)); err != nil {
 		return err
 	}
+	// #771: refuse rather than silently replace a different RelType edge
+	// collision at the same (src, weight, dst) key.
+	if err := checkRelTypeCollision(ps.db, wsPrefix, [16]byte(src), assoc.Weight, [16]byte(dst), assoc.RelType); err != nil {
+		return err
+	}
 	return ps.writeAssociationUnguarded(ctx, wsPrefix, src, dst, assoc)
 }
 

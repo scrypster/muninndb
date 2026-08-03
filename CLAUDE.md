@@ -165,8 +165,27 @@ The rule, in committed content — source, tests, code comments, design records,
 This is not hypothetical. A vault name reached `origin/develop` in #715 and was scrubbed at the
 tip a day later by #734 — but a public repo's history is public forever, and a scrub of the tip
 is not a scrub. **Getting it right before the commit is the only version of this that works.**
-Maintainers additionally run a local pre-commit guard; do not rely on it, and note that
-contributors don't have it.
+
+Two mechanisms back this up, and neither is a substitute for the rule above:
+
+- **`scripts/check-leak-tells.sh`** is public and runs in CI (the Shellcheck job) against every
+  change's *added* lines, and is available to any contributor as an opt-in local pre-commit
+  hook (`--install-hook`; see `CONTRIBUTING.md`). It has no denylist by design — a list of real
+  names sitting in a public repo would publish the very association it exists to prevent — so
+  it can only catch a handful of *structurally*-shaped tells: an `.internal` hostname, an
+  AWS/GCP-style instance id, an "our/on the &lt;ProperNoun&gt; ..." phrase. It cannot catch a
+  bare project-internal codename with no such marker — which is the exact shape every leak in
+  this repo's history has actually taken (an ordinary-looking client name with no structural
+  tell, and a domain term indistinguishable from a real one). It is a net, not a proof.
+- Maintainers additionally run a private, gitignored pre-commit guard
+  (`.claude/maintainer/pre-commit-vault-guard.sh`) against a denylist of known client/product
+  names — the thing the public check structurally cannot have. It is maintainer-only tooling,
+  not present in a fresh contributor clone, and it does not run in CI.
+
+Between them: the public check is what every contributor gets and covers structural tells; the
+private one is what the maintainer gets and covers known names. Neither catches an unknown bare
+codename typed by someone who doesn't know it's sensitive — that gap is closed by reading your
+own diff before committing, which is the actual control both tools exist to remind you to do.
 
 **Keep CI fast and cheap.** The full gate must stay **under ~10 minutes** (baseline ~6–7
 min; job map in `drift-and-obligations.md`). Unit and invariant tests are nearly free —

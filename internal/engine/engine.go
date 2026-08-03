@@ -2593,8 +2593,19 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// Snapshot the previous activation BEFORE running the current one.
 	// The activation log is updated asynchronously by Run()'s drainLog goroutine,
 	// so capturing it here guarantees we see the correct "previous" entry.
+	//
+	// #598 follow-up: gate on actReq.ReadOnly (the single resolved decision —
+	// observe-mode credential OR explicit req.ReadOnly, computed once above),
+	// not on auth.ObserveFromContext(ctx) alone. Every post-Run write site in
+	// this function must consult actReq.ReadOnly instead of re-deriving the
+	// credential check directly — TestActivateCore_ObserveFromContextResolvedExactlyOnce
+	// enforces there is exactly one direct call to auth.ObserveFromContext in
+	// this function (the one computing actReq.ReadOnly above), so a future
+	// write site that copies the old `!auth.ObserveFromContext(ctx)` pattern
+	// fails the census immediately instead of silently ignoring an explicit
+	// req.ReadOnly from a full-mode credential.
 	var prevActivation []storage.ULID
-	if resolved.PredictiveActivation && !auth.ObserveFromContext(ctx) {
+	if resolved.PredictiveActivation && !actReq.ReadOnly {
 		prevEntries := e.activation.AssocLog().RecentForVault(vaultID, 1)
 		if len(prevEntries) > 0 {
 			prevActivation = prevEntries[0].EngramIDs
@@ -2911,12 +2922,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 
 	// Persist the surfaced set as a recall event (issue #573): the engrams
 	// this recall actually returned (post entity-boost, post truncation),
-	// keyed by a time-ordered event ULID. Skipped in observe mode — a pure
-	// read must not write the signal that calibration reads. On success the
-	// event ID becomes the response query_id, so a later muninn_decide can
-	// be joined offline against exactly what this recall surfaced.
+	// keyed by a time-ordered event ULID. Skipped when actReq.ReadOnly (observe
+	// mode OR an explicit req.ReadOnly, #598) — a pure read must not write the
+	// signal that calibration reads. On success the event ID becomes the
+	// response query_id, so a later muninn_decide can be joined offline
+	// against exactly what this recall surfaced.
 	queryID := e.fastQueryID()
-	if len(items) > 0 && !auth.ObserveFromContext(ctx) {
+	if len(items) > 0 && !actReq.ReadOnly {
 		eventID := storage.NewULID()
 		entries := make([]storage.RecallSurfacedEntry, len(items))
 		for i, item := range items {
@@ -2937,10 +2949,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		}
 	}
 
-	// Submit co-activations to Hebbian worker (skipped in observe mode or when disabled by Plasticity).
+	// Submit co-activations to Hebbian worker. Skipped when actReq.ReadOnly
+	// (observe mode OR an explicit req.ReadOnly, #598 — this was the live
+	// defect: an unread caller's read_only:true still bonded every returned
+	// engram pairwise) or when disabled by Plasticity.
 	// On Lobe nodes (hebbianWorker == nil) collect refs for forwarding to Cortex instead.
 	var lobeCoActivations []mbp.CoActivationRef
-	if len(result.Activations) > 0 && !auth.ObserveFromContext(ctx) && resolved.HebbianEnabled {
+	if len(result.Activations) > 0 && !actReq.ReadOnly && resolved.HebbianEnabled {
 		hebW, _, _ := e.cogWorkers()
 		if hebW != nil {
 			coActivatedEngrams := make([]cognitive.CoActivatedEngram, len(result.Activations))
@@ -2977,8 +2992,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 
 	// PAS: Record sequential transitions (previous activation → current activation).
 	// Uses the prevActivation snapshot captured before Run() to avoid race conditions
-	// with the async drainLog goroutine.
-	if len(result.Activations) > 0 && len(prevActivation) > 0 {
+	// with the async drainLog goroutine. prevActivation is already empty whenever
+	// actReq.ReadOnly is set (see the snapshot above), but the explicit check here
+	// is defense in depth: this write must not depend on an implementation detail
+	// of an earlier phase to stay suppressed under #598's contract.
+	if len(result.Activations) > 0 && len(prevActivation) > 0 && !actReq.ReadOnly {
 		e.cogMu.RLock()
 		tw := e.transitionWorker
 		e.cogMu.RUnlock()
@@ -4663,6 +4681,24 @@ func (e *Engine) runPruneWorker() {
 // runLegacyFullWeightAssocRepair's failure policy), so decay is parked rather
 // than allowed to destroy repairable state.
 func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
+	// #760: association decay writes are keyed by weight (AssocFwdKey/AssocRevKey
+	// encode the float32 weight itself), and the decay formula (COG-28) is an
+	// independent recompute from stored peakWeight/lastActivated rather than an
+	// incremental step. Two nodes evaluating it a tick apart land on two
+	// different float32 weights for the same edge — two different LIVE keys,
+	// not one edge updated twice. Running this on every cluster node
+	// (leader AND followers) therefore does not converge; it leaves stale
+	// duplicate keys behind every pass. Followers already receive the leader's
+	// decayed weights through the ordinary replication stream, so they must
+	// not ALSO decay independently. This reuses the single-writer gate
+	// (e.writeGate, #596) rather than adding a second leadership signal — the
+	// same pattern the periodic replication-log prune already uses
+	// (ClusterCoordinator.startPeriodicPrune: "if !c.IsLeader() { continue }").
+	// A nil gate (standalone, non-cluster) decays exactly as before.
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		slog.Debug("assoc decay skipped: not the cluster leader", "err", err)
+		return
+	}
 	if !e.assocWeightRepairComplete() {
 		slog.Debug("assoc decay deferred: full-weight repair pass has not completed cleanly")
 		return

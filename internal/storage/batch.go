@@ -209,6 +209,14 @@ func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src
 	if err := b.checkEndpointsLive(ws, [16]byte(src), [16]byte(dst)); err != nil {
 		return err
 	}
+	// #771: same collision guard as the direct PebbleStore.WriteAssociation —
+	// checked against committed DB state only, matching checkEndpointsLive's
+	// STO-12 scope for this batch path (an edge queued earlier in the SAME
+	// uncommitted batch is not visible to a DB read; the batch writers in
+	// this codebase queue at most one edge per (src, dst) pair per call).
+	if err := checkRelTypeCollision(b.ps.db, ws, [16]byte(src), assoc.Weight, [16]byte(dst), assoc.RelType); err != nil {
+		return err
+	}
 	// Seed PeakWeight from Weight if not set (new association initial write).
 	peak := assoc.PeakWeight
 	if peak == 0 {
@@ -387,6 +395,16 @@ func (b *pebbleStoreBatch) Commit() error {
 	if err := b.batch.Commit(syncOption); err != nil {
 		return fmt.Errorf("batch commit: %w", err)
 	}
+
+	// #686: every direct PebbleStore write method calls ps.replicateBatch
+	// after committing its raw pebble.Batch (engram.go, association.go,
+	// entity.go, lease.go). Evolve and the startup repair use this
+	// StoreBatch abstraction exclusively, so without this call a leader's
+	// evolve — new engram, supersedes association, predecessor soft-delete,
+	// carried entity links — never reached a follower. Must run before
+	// b.batch.Close() (Discard), same constraint replicateBatch documents
+	// for its direct callers.
+	b.ps.replicateBatch(b.batch)
 
 	// Invalidate L1 cache entries for all engrams whose state was updated.
 	// The batch has now been flushed to Pebble; any cached entry reflects the

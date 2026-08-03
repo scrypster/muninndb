@@ -951,3 +951,161 @@ it was true of the wrong half of it. Phase 4 reads the graph and contributes; ph
 it and has never emitted a row. When a claim spans two mechanisms, measure them separately —
 and when one of them turns out to be redundant with a cheaper index it is built on top of,
 the finding is "delete the claim", not "tune the constant".**
+
+### CGDN has never executed, and the class now has a census (#768/#805, 2026-08-03)
+
+`computeComponents` — the component producer the CGDN scoring path uses — never sets
+`ScoreComponents.ContentMatch` (only `computeACTR` does; `computeComponents` is shared with
+the legacy weighted-sum path, which never reads that field, so the gap was invisible there).
+CGDN's abstention gate is
+
+	absolute := min(min(Raw, ContentMatch), 1.0) * Confidence
+	if absolute < req.Threshold && !inTagPool { continue }
+
+so `absolute` is exactly `0.0` for every non-tag-pool candidate on this path, and every
+`req.Threshold > 0` drops the entire result set. CGDN has never returned a live result in a
+passing configuration for the life of the feature — the same shape as #801, discovered by
+the same #763 review panel that found traversal, and deliberately not fixed there either.
+
+**The unclamped-`r` claim in #768 does not hold, and the record needs correcting rather than
+repeating it.** The issue also asserted the live ratio `r = a(d)^n / denom` was unbounded,
+citing a measured `8649.0`. It is not: the Pass-2 loop that computes `r` for LIVE candidates
+only runs `if len(cgdnCands) > 0`, and inside that branch `denom = sigma^n + sum(a_i^n)`
+where the sum runs over every candidate in the pool — including the one whose ratio is being
+computed. `denom >= a(d)^n` for that candidate by construction, so `r <= 1` always, on the
+live path, for every configuration. The measured `8649.0` came from the COG-28 SHADOW pass
+evaluated against an EMPTY live pool (`denom` degenerating to `sigma^n` alone at the 0.01
+fallback) — a path the code already clamps explicitly (`math.Min(r, 1.0)`) with a comment
+naming exactly this trap. Verified independently: read the loop guard and the shadow clamp
+in `internal/engine/activation/engine.go` before trusting either claim on faith (principle #9
+— severity and correctness both need independent verification, in either direction).
+
+**#805 is not a separate defect — it is the same phase's SECOND, independent reason nothing
+comes out, folded in here rather than tracked apart.** CGDN's Hebbian rescue term in
+`computeGatedActivation` is `rescue(d) = max(0, hebbianBoost - epsilon) * lambda`, with
+`epsilon = 0.01`. Association edge weights are clamped to `peakWeight * 0.05` in steady
+state (`internal/storage/association.go`), and a census of two production vault clones put
+the entire live `RelCoActivated` (Hebbian) population at a p50 of **0.0005** — twenty times
+below epsilon. So even after #768 is repaired, `hebbianBoost - epsilon` is negative for
+essentially every live edge and the rescue mechanism the function exists to provide is a
+no-op on its own terms — the same #801/#762 shape: a constant chosen against a write-time
+value (Hebbian cold-start seed 0.01, which epsilon was presumably set to match), applied to
+a quantity a decay pass moves 20x before anyone reads it.
+
+#### Disposition: kept, labelled INERT at both sites, not deleted, not flagged
+
+`computeComponents`, the CGDN branch of `phase6Score`, and `computeGatedActivation` **stay**,
+with the inertness recorded at the constant/gate in each case and pinned by
+`TestPhase6Score_CGDN_InertAtAnyPositiveThreshold`, which drives the real `phase6Score` CGDN
+path with a maximally strong candidate (perfect vector cosine, perfect FTS coverage) at the
+smallest representable positive threshold and asserts zero activations. Its RED control is
+the neighbouring `TestPhase6Score_CGDNPath`, which drives the SAME function over an
+equivalent fixture at `Threshold: 0.0` and DOES get output — proving the pin is not vacuous:
+raise the control's threshold above zero and it starts failing like the pin; lower the pin's
+threshold to zero and it passes trivially like the control. The two tests bound the defect
+exactly at zero, which is where it actually sits.
+
+This follows #801's disposition rule exactly, because the same two facts hold:
+
+- **CGDN has real, live per-vault configuration and transport surfaces**, checked before
+  deciding: `experimental_cgdn` (plasticity config, `internal/auth/plasticity.go`, all five
+  presets), `use_cgdn`/`cgdn_alpha`/`cgdn_beta`/`cgdn_power` (REST `openapi.yaml` and MBP
+  wire types, `internal/transport/mbp/types.go`), and `--mode cgdn` (the CLI REPL,
+  `cmd/muninn/repl_client.go`, with its own passthrough test). Deleting the scorer without
+  disposing of all of them turns an inert mechanism into silently-ignored explicit config —
+  principle #1's failure class arrived at by way of a cleanup, which is exactly what #801
+  named as the reason traversal was kept. (CGDN has no gRPC/proto or MCP surface today —
+  checked and confirmed absent — so this is a real but narrower surface footprint than
+  traversal's six; still enough to make deletion the wrong call.)
+- **Deletion cannot be undone cheaply, and repair is not free either.** Wiring
+  `ContentMatch` alone would surface a scorer whose OWN Hebbian floor (#805) still discards
+  essentially its entire live Hebbian-linked population — an honest fix is a coupled change
+  to both constants together, re-measured against a real vault, not a one-line patch. That
+  work is not done here; this entry records the finding and the disposition, not a repair.
+
+Comments at three sites carry the finding forward for the next reader: the CGDN branch in
+`phase6Score` (the gate itself, the corrected `r <= 1` proof, and why not to "fix"
+`ContentMatch` alone), `computeComponents`'s doc comment (the missing field, and why
+weighted-sum never noticed), and `computeGatedActivation`'s epsilon constant (the #805
+floor, restated at the site rather than only in this record).
+
+`docs/feature-reference.md` and `docs/retrieval-design.md` previously described CGDN as
+simply "experimental" with no caveat about output; both now state the inertness and cite
+this entry, mirroring what #801 did for `docs/feature-reference.md`'s traversal row.
+
+#### The census: a units/scale check for "constant vs. a decaying quantity", not "every threshold"
+
+#805 asked, as its own machine check: *"a units/scale census over every constant compared
+against an association weight: assert each is either derived per-vault or documented with
+the steady-state range it is meant to discriminate."* Built as
+`TestWeightGateCensus`/`TestWeightGateCensusMatcherFixture`
+(`internal/engine/activation/weight_gate_census_test.go`), in the shape of
+`TestLastAccessElapsedCensus` (`internal/storage/lastaccess_census_test.go`) — an AST walk
+of the whole module, a named-sites floor, and a SEPARATE matcher self-check driven by a
+synthetic fixture, because (as that census's own history records) a vacuity guard on a bare
+count can pass while the walk or the matcher has silently gone blind.
+
+**Scope, deliberately narrow.** "Every threshold in the engine" was tried and rejected as
+too broad to be useful. The rule that shipped: a **named, hardcoded numeric `const`**
+(function-local or file-scoped — never a variable, a struct field, or a plasticity-derived
+value, which are already per-vault by construction) compared (`<`,`<=`,`>`,`>=`) or
+subtracted against a quantity that is, or is transitively assigned from, a `.Weight`
+selector or the identifier `hebbianBoost`/`HebbianBoost` (case-insensitive) — this
+codebase's vocabulary for association-edge-derived strength. Two things were tried and
+explicitly rejected during development, both because they produced real noise measured
+against the actual tree, not hypothetically:
+
+- Matching bare numeric literals (not only named consts) — this additionally flagged
+  `update.Weight > restoreWeight*1.5` and `newCoAct >= existingCoAct+3` in
+  `internal/storage/association.go`, neither of which is the defect: a named constant is
+  specifically the signal that a human chose a number once and is unlikely to ever revisit
+  it, which is how both #801 and #805 went unnoticed since the initial commit.
+- Matching the substring "boost" instead of the exact `hebbianBoost` identifier — this
+  caught `entityBoostNoiseFloor` (`internal/engine/engine_entity_boost.go`), a named float
+  constant genuinely compared against a derived quantity (`contribution`), but that quantity
+  is `entityBoostFactor * idf` — an entity-rarity IDF score with no decay pass touching it,
+  not an association weight. A FALSE POSITIVE, kept in the matcher fixture
+  (`notAssociationWeight`) as the permanent regression case for that vocabulary choice.
+
+**Result on the real tree: three sites, zero false positives.** `minHopScore` (#801) and
+`epsilon` (#805) were the two the record already knew about. The census found a **third**,
+previously undocumented in this class: `internal/consolidation/transitive.go:minWeight`
+(`runPhase5TransitiveInference`, gating transitive-edge inference at
+`max(Weight, PeakWeight) >= 0.7`). Inspection showed it is the **healthy** counter-example:
+its own comment already reasons about the achievable range — autoassoc mints edges at 0.3,
+archive restore returns them at `peakWeight * 0.25`, so neither route can reach 0.7, which is
+exactly why the threshold was chosen there and why a dangling edge (the risk the comment
+names) cannot climb to it. It is recorded in `weightGateKnownSites` alongside the two dead
+ones specifically so a reader sees both outcomes of doing the range-check: two constants
+that were never checked and are dead, one that was checked and is fine. The census asserts a
+site is DOCUMENTED, not that it is healthy — both `weightGateKnownSites` entries `minHopScore`
+and `epsilon` remain intentionally live and undeleted per this entry's own disposition,
+while `minWeight` needed no change at all.
+
+**RED-verified, not merely asserted.** Neutering the transitive-taint fixpoint (so only a
+direct `.Weight` selector — never a locally-assigned intermediate like `propagated` or
+`effectiveAB` — counts as tainted) was tried as the sabotage: `TestWeightGateCensus` lost 2
+of its 3 known sites and failed loudly naming which; `TestWeightGateCensusMatcherFixture`
+failed on the exact fixture case exercising that shape. Restoring the fixpoint made both
+pass again. The census is not vacuous with respect to its own matcher, by demonstration, not
+assumption — the same discipline `TestLastAccessCensusMatcherSeesLaunderedCopies` established
+after that census's own count-only guard was shown to lose 5 of 6 sites silently.
+
+**What this does NOT claim.** The census does not, and cannot, cover #768's actual defect —
+a field that is never SET, not a constant compared against the wrong range. That shape (an
+uninitialized/never-populated component silently zeroing a downstream gate) is a different
+mechanism from "a hardcoded number vs. a decaying quantity", and is caught here only by the
+behavioural pin (`TestPhase6Score_CGDN_InertAtAnyPositiveThreshold`), not by the AST census.
+Naming this boundary matters more than pretending one machine check now covers the whole
+class — see the census's own "what it does NOT catch" section, which states four further
+gaps (inter-function taint, non-`.Weight`/non-Hebbian vocabulary, and others) rather than
+implying completeness.
+
+**Principle: the same review that measured #801 correctly getting the arithmetic right also
+carried forward an overstated corollary (`r` unbounded) that a second, independent look
+disproved — severity and correctness both need independent re-verification in EITHER
+direction (principle #9), and a corrected record is worth more than a consistent one. And
+the class both defects share — a constant a person chose once, compared against a quantity
+that a decay pass moves 20x before anyone reads it — is now a standing, self-checking
+machine test rather than something that needs a third independent analysis pass to
+rediscover a third time.**

@@ -69,6 +69,17 @@ func (ps *PebbleStore) SetAssocWeightRepairMark(ctx context.Context, ws [8]byte,
 	return ps.db.Set(keys.AssocWeightRepairMarkKey(ws), []byte{version}, pebble.NoSync)
 }
 
+// DeleteAssocWeightRepairMark removes the 0x2E watermark for ws — the
+// AssocWeightRepairMark counterpart of DeleteEvolveRepairMark, same rationale
+// (#761): both repair passes are idempotent, so re-arming either one by
+// deleting its mark and letting the next boot re-scan is always safe.
+func (ps *PebbleStore) DeleteAssocWeightRepairMark(ctx context.Context, ws [8]byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return ps.db.Delete(keys.AssocWeightRepairMarkKey(ws), pebble.NoSync)
+}
+
 // RepairLegacyFullWeightAssocKeys relocates pre-fix weight-1.0 association keys
 // from the weight-0.0 key position they were written at to the true 1.0
 // position, and reports how many pairs it moved.

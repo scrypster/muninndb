@@ -2162,6 +2162,38 @@ func (e *ActivationEngine) phase6Score(
 	// Pass 1 computes gated activations a(d) for all candidates; Pass 2 normalizes.
 	// This replicates lateral inhibition in hippocampal retrieval: cognitive state
 	// multiplicatively gates content relevance, then candidates compete via division.
+	//
+	// INERT at any positive threshold (#768). `computeComponents` below — the
+	// component producer this path uses — never sets ScoreComponents.ContentMatch
+	// (that field is only populated by computeACTR); it keeps its Go zero value,
+	// 0.0. The gate a few lines down is
+	//
+	//	absolute := min(min(Raw, ContentMatch), 1.0) * Confidence
+	//
+	// so `absolute` is exactly 0.0 for every candidate on this path, and
+	// `absolute < req.Threshold` drops every non-tag-pool row unless
+	// req.Threshold <= 0. CGDN has never returned a live result in a passing
+	// configuration for the life of the feature. Pinned by
+	// TestPhase6Score_CGDN_InertAtAnyPositiveThreshold; its RED control is the
+	// neighbouring TestPhase6Score_CGDNPath (threshold 0.0), which already
+	// gets output — proving the pin is not vacuous: threshold 0 emits,
+	// threshold > 0 does not, on the identical candidate.
+	//
+	// The live ratio `r = a(d)^n / denom` just below is NOT unbounded, contra
+	// an earlier reading of this code (#768's second claim): the Pass-2 loop
+	// only runs `if len(cgdnCands) > 0`, and in that branch `denom = sigma^n +
+	// sum(a_i^n)` includes the candidate's own a(d)^n term in the sum, so
+	// `denom >= a(d)^n` and `r <= 1` by construction for every live row. The
+	// measured 8649.0 blowup came from the SHADOW pass below, over an EMPTY
+	// live pool, which is why that pass clamps explicitly and the live pass
+	// does not need to.
+	//
+	// Do NOT "fix" ContentMatch here as a standalone patch: #805 found the
+	// Hebbian rescue floor (`epsilon` in computeGatedActivation) sitting 20x
+	// above the steady-state Hebbian edge weight, so wiring ContentMatch alone
+	// would surface a mechanism whose OWN floor still discards the entire live
+	// Hebbian population. See docs/internals/decision-record.md (#768/#805)
+	// before touching either constant.
 	if w.UseCGDN {
 		type cgdnItem struct {
 			c interface {
@@ -2608,6 +2640,13 @@ func relevanceCalibration(w resolvedWeights) RelevanceCalibration {
 // computeComponents calculates all scoring components for a candidate engram.
 // Accepts *storage.Engram directly — avoids a separate GetMetadata call in phase6.
 // lastAccessNs is the nanosecond timestamp of last cache access (0 if not cached).
+//
+// NOTE (#768): the returned ScoreComponents does NOT set ContentMatch — that
+// field is only populated by computeACTR. computeComponents is the producer
+// used by both the legacy weighted-sum path AND the CGDN path; weighted-sum
+// never reads ContentMatch, so this was harmless there, but CGDN's abstention
+// gate does read it (`min(Raw, ContentMatch)`), which makes CGDN inert at any
+// positive threshold. See the INERT comment at the CGDN branch in phase6Score.
 func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage.Engram, lastAccessNs int64, now time.Time, w resolvedWeights) ScoreComponents {
 	const accessFreqSaturation = 100.0
 	const recencyHalfLifeDays = 7.0
@@ -2927,10 +2966,24 @@ func computeRRFScore(rrfScore, hebbianBoost, transitionBoost float64, eng *stora
 //
 // This creates a 41x advantage for the Hebbian-linked stale vs unlinked stale,
 // replicating retrieval-induced forgetting counteraction (Anderson & Bjork 1994)
-// and memory reconsolidation (Nader et al. 2000).
+// and memory reconsolidation (Nader et al. 2000) — in THEORY. In practice this
+// whole path is INERT (#768, see the block comment at the CGDN branch above),
+// so the illustration in the doc comment above never executes on a real
+// candidate. Recorded anyway (#805) because epsilon is wrong on its own terms
+// even if CGDN becomes live: it is a write-time constant compared against a
+// quantity that decays. Association edge weights are clamped to
+// `peakWeight * 0.05` in steady state (internal/storage/association.go), and a
+// census of two production vault clones found the entire live Hebbian
+// population (`RelCoActivated`) sitting at a p50 of 0.0005 — 20x BELOW
+// epsilon. `hebbianBoost` here is a weight of that same shape, so
+// `hebbianBoost - epsilon` is negative for essentially every live edge and
+// `rescue` floors to 0: the Hebbian-rescue mechanism this function exists to
+// provide would be a no-op even after #768 is repaired. Do not "fix" epsilon
+// in isolation — see docs/internals/decision-record.md (#768/#805) for why
+// this is folded into the same disposition rather than tuned separately.
 func computeGatedActivation(vectorScore, normalizedFTS, decayFactor, hebbianBoost float64, w resolvedWeights) float64 {
 	const (
-		epsilon      = 0.01 // Hebbian floor — prevents zero rescue for unlinked engrams
+		epsilon      = 0.01 // INERT floor (#805) — 20x above steady-state Hebbian weight; see doc comment above
 		rescueLambda = 0.8  // Hebbian rescue strength — how much Hebbian can restore decay
 	)
 	rescue := math.Max(0, hebbianBoost-epsilon) * rescueLambda

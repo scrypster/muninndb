@@ -40,6 +40,25 @@ func (ps *PebbleStore) SetEvolveRepairMark(ctx context.Context, ws [8]byte, vers
 	return ps.db.Set(keys.EvolveRepairMarkKey(ws), []byte{version}, pebble.NoSync)
 }
 
+// DeleteEvolveRepairMark removes the 0x2B watermark for ws, so the next boot's
+// startup pass re-scans the vault instead of trusting a prior clean pass.
+//
+// #761: this is the operator escape hatch for the rollback residual both
+// repair watermarks document — a pre-fix binary run after the mark is written
+// can accrue new damage the mark then masks, and the only recovery on record
+// was bumping the repair-version constant (a recompile) or `ClearVault`
+// (which drops the vault's data too). Deleting the mark is neither: both
+// repairs are idempotent by design (re-running one that already succeeded is
+// a no-op scan), so this is safe to call on a vault that does not need it.
+// Deleting a key that is already absent is itself a no-op (Pebble Delete on a
+// missing key does not error).
+func (ps *PebbleStore) DeleteEvolveRepairMark(ctx context.Context, ws [8]byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return ps.db.Delete(keys.EvolveRepairMarkKey(ws), pebble.NoSync)
+}
+
 // RepairEvolveEntityCarry atomically writes the full carried entity set for a
 // supersede-successor stripped by the pre-fix Evolve path (#622): all 0x20/0x23
 // link keys, all 0x21/0x26 relationship keys, and the digest flag, in ONE

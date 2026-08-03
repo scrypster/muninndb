@@ -99,7 +99,7 @@ The ACTIVATE pipeline has **6 phases**:
 
 #### Scoring Models
 - **ACT-R** (default, production) — `ContentMatch × softplus(BaseLevel + HebbianScale × HebbianBoost + TransitionBoost)`. Power-law temporal decay based on access count and recency. This is the only production scorer
-- **CGDN** (Cognitive-Gated Divisive Normalization) — experimental. Multiplicative cognitive gating with divisive normalization across candidates. Requires `experimental_cgdn: true` in vault plasticity config
+- **CGDN** (Cognitive-Gated Divisive Normalization) — experimental, and **currently inert at any positive activation threshold**: its component producer never sets the field the abstention gate reads, so `absolute` is 0.0 for every non-tag-pool candidate and every threshold above zero drops the whole result set (measured, #768 — see `docs/internals/decision-record.md`). Requires `experimental_cgdn: true` in vault plasticity config
 
 #### Score Components
 - Semantic Similarity (vector cosine)
@@ -348,7 +348,7 @@ Every cognitive behavior is tunable per vault:
 | `traversal_profile` | auto | string | Default traversal profile |
 | `actr_decay` | 0.5 | 0.01–2.0 | ACT-R power-law exponent |
 | `actr_heb_scale` | 4.0 | 0–50 | Hebbian amplifier in ACT-R |
-| `experimental_cgdn` | false | bool | Enable experimental CGDN scorer |
+| `experimental_cgdn` | false | bool | Enable experimental CGDN scorer. Accepted and stored, but the scorer is inert at any positive activation threshold (#768), so on the surface default (0.5) it returns nothing — see below |
 | `predictive_activation` | true | bool | Enable PAS |
 | `pas_max_injections` | 5 | 0–10 | Max PAS candidates to inject |
 | `behavior_mode` | `"autonomous"` | autonomous/prompted/selective/custom | How the AI should use memory (see below) |
