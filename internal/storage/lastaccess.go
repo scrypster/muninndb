@@ -11,6 +11,24 @@ import (
 // WriteLastAccessEntry writes or updates the 0x22 LastAccess index entry.
 // If prevMillis != 0, the previous entry is deleted first (key includes timestamp,
 // so old key must be removed when time changes).
+//
+// #811 (closed): prefix.LastAccess (0x22) is NOT in clone.go's
+// vaultScopedSwapPrefixes, so CloneVaultData/MergeVaultData never carry it —
+// that part is unchanged, deliberately: copying the SOURCE's index keys would
+// disagree with the copied 0x01 records' rewritten LastAccess (clone resets
+// AccessCount but carries LastAccess forward as of #810/#835; a copied key
+// built from the pre-copy value would then point at the wrong millis for a
+// merge, or be simply wrong after a clone that also rewrote CreatedAt via
+// normalizeEngramTimes). Instead, `Engine.reindexVault`
+// (internal/engine/engine_clone.go) — already run after both operations to
+// rebuild FTS/HNSW — rebuilds this index too, calling WriteLastAccessEntry
+// with prevMillis=0 for every scanned engram's REWRITTEN LastAccess. That
+// ordering is why the ordering trap this comment used to warn about never
+// materializes: keys.LastAccessIndexKey encodes ^uint64(millis), so a
+// NEGATIVE millis (a pre-2000 LastAccess, #810's ERF zero-time sentinel)
+// inverts to a SMALL key and sorts FIRST — but #810/#835 landed first, so by
+// the time reindexVault runs, every engram's LastAccess is real, non-sentinel
+// data, not the 1754 ghost.
 func (ps *PebbleStore) WriteLastAccessEntry(ctx context.Context, ws [8]byte, id ULID, prevMillis, newMillis int64) error {
 	batch := ps.db.NewBatch()
 	defer batch.Close()

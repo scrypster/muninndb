@@ -28,7 +28,7 @@ func TestFindByEntity_ExcludesArchived(t *testing.T) {
 	idB, err := eng.store.WriteEngram(ctx, ws, engB)
 	require.NoError(t, err)
 
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:   "SharedEntity",
 		Type:   "concept",
 		Source: "inline",
@@ -81,7 +81,7 @@ func TestFindByEntity_ExcludesSoftDeleted(t *testing.T) {
 	idB, err := eng.store.WriteEngram(ctx, ws, engB)
 	require.NoError(t, err)
 
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:   "SharedEntity2",
 		Type:   "concept",
 		Source: "inline",

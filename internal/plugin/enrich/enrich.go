@@ -234,13 +234,24 @@ func (s *EnrichService) Enrich(ctx context.Context, eng *storage.Engram) (*plugi
 	}
 
 	var result *plugin.EnrichmentResult
-	err = s.breaker.Do(func() error {
+	err = s.breaker.DoIgnoring(func() error {
 		var runErr error
 		result, runErr = s.pipeline.Run(ctx, eng)
 		return runErr
-	})
+	}, isCallerCancellation)
 	s.recordProviderOutcome(err, admissionGen)
 	return result, err
+}
+
+// isCallerCancellation reports whether err was caused by the CALLER
+// cancelling or its context deadline expiring, as opposed to the provider
+// itself failing (#642). Such an outcome carries no signal about provider
+// health and must never count against the circuit breaker that exists to
+// detect a bad provider — otherwise a flurry of client-side timeouts can trip
+// the breaker and fail every other caller's healthy-provider enrichment with
+// circuit.ErrOpen until the reset window elapses.
+func isCallerCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (s *EnrichService) waitForProvider(ctx context.Context) (uint64, error) {

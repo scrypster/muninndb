@@ -70,7 +70,7 @@ func (m *mockEngineAPI) SubscribeWithDeliver(ctx context.Context, req *mbp.Subsc
 func (m *mockEngineAPI) Unsubscribe(ctx context.Context, subID string) error {
 	return nil
 }
-func (m *mockEngineAPI) CountEmbedded(ctx context.Context) int64 {
+func (m *mockEngineAPI) CountEmbedded(ctx context.Context, vault string) int64 {
 	return 0
 }
 func (m *mockEngineAPI) RecordAccess(ctx context.Context, vault, id string) error {

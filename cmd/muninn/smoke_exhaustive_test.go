@@ -57,6 +57,7 @@ var allMCPTools = []string{
 	"muninn_entity_timeline",
 	"muninn_feedback",
 	"muninn_trust",
+	"muninn_update_tags",
 	"muninn_intend",
 	"muninn_entity",
 	"muninn_entities",
@@ -937,6 +938,62 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		}
 	})
 
+	t.Run("muninn_update_tags", func(t *testing.T) {
+		// The point of the gated end-to-end test is the part the unit tests
+		// cannot reach: they stop at a fake engine, so nothing else proves the
+		// tags actually land on disk through the MCP path. So this reads the
+		// engram back and asserts the stored set, rather than checking that the
+		// handler echoed its own argument (it always does) or that no "error"
+		// key appeared (mcpTool already t.Fatalf's on a JSON-RPC error, and this
+		// handler never emits an "error" key in its payload).
+		want := []string{"due:2026-08-01", "smoke"}
+		result := mcpTool(t, tok, "muninn_update_tags", map[string]any{
+			"vault": vault,
+			"id":    idB,
+			"tags":  []any{want[0], want[1]},
+		})
+		// The response echoes the NORMALIZED set that was stored — the contract
+		// the tool description tells callers to diff against what they sent.
+		if got := payloadTags(result); !equalStringSets(got, want) {
+			t.Errorf("muninn_update_tags echoed tags %v, want %v", got, want)
+		}
+
+		readBack := mcpTool(t, tok, "muninn_read", map[string]any{
+			"vault": vault,
+			"id":    idB,
+		})
+		if got := payloadTags(readBack); !equalStringSets(got, want) {
+			t.Errorf("muninn_read after retag reports tags %v, want %v — the retag did not reach storage", got, want)
+		}
+		// #720: the retag is IN PLACE, so the engram is still readable under the
+		// SAME id and is not archived. Evolve's predecessor would be `archived`
+		// (internal/storage/types.go), not soft_deleted, so that is the state to
+		// rule out.
+		if got, _ := readBack["id"].(string); got != idB {
+			t.Errorf("muninn_read echoed id %q, want the unchanged %q", got, idB)
+		}
+		if state, _ := readBack["state"].(string); state == "archived" || state == "soft_deleted" {
+			t.Errorf("retag must not archive or delete the engram, got state %q", state)
+		}
+
+		// Clearing really clears: an empty array is the documented clear-all.
+		cleared := mcpTool(t, tok, "muninn_update_tags", map[string]any{
+			"vault": vault,
+			"id":    idB,
+			"tags":  []any{},
+		})
+		if got := payloadTags(cleared); len(got) != 0 {
+			t.Errorf("clearing echoed tags %v, want none", got)
+		}
+		readCleared := mcpTool(t, tok, "muninn_read", map[string]any{
+			"vault": vault,
+			"id":    idB,
+		})
+		if got := payloadTags(readCleared); len(got) != 0 {
+			t.Errorf("muninn_read after clearing reports tags %v, want none — the clear did not reach storage", got)
+		}
+	})
+
 	t.Run("muninn_entity", func(t *testing.T) {
 		// muninn_entity uses 'name' not 'entity'.
 		result := mcpTool(t, tok, "muninn_entity", map[string]any{
@@ -1269,4 +1326,41 @@ func TestRegression_VaultCreationE2E(t *testing.T) {
 		t.Errorf("step 7: content %q does not contain %q", content, wantSubstr)
 	}
 	t.Logf("TestRegression_VaultCreationE2E passed: vault=%s, memID=%s", testVault, memID)
+}
+
+// payloadTags extracts the "tags" array from an MCP tool's JSON payload. Both
+// muninn_update_tags's response and muninn_read's Memory payload carry it as a
+// JSON array of strings under that key (omitempty, so an engram with no tags has
+// no key at all — which is why a missing key reads as the empty set here).
+func payloadTags(payload map[string]any) []string {
+	raw, ok := payload["tags"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// equalStringSets reports whether a and b contain the same strings, ignoring
+// order (tag order is not part of the contract).
+func equalStringSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, s := range a {
+		counts[s]++
+	}
+	for _, s := range b {
+		counts[s]--
+		if counts[s] < 0 {
+			return false
+		}
+	}
+	return true
 }

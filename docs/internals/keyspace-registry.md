@@ -26,8 +26,8 @@ prefix — see the vault-reuse note at the bottom).
 |---|---|---|---|
 | 0x01 | ws+ulid(16) | Engram (ERF) | primary record |
 | 0x02 | ws+ulid(16) | EngramMeta | |
-| 0x03 | ws+src(16)+weightComplement(4)+dst(16) | — | forward assoc, sorted desc by weight |
-| 0x04 | ws+dst(16)+weightComplement(4)+src(16) | — | reverse assoc |
+| 0x03 | ws+src(16)+weightComplement(4)+dst(16) | — | forward assoc, sorted desc by weight. `RelType` lives in the VALUE, not the key — two edges between the same pair at the same weight collide on this key (STO-15, #771); `checkRelTypeCollision` refuses a write that would silently replace a different `RelType`'s edge here |
+| 0x04 | ws+dst(16)+weightComplement(4)+src(16) | — | reverse assoc. Since #800 this is also a RECALL-PATH read: `GetRankingNeighbors` unions it into 0x03 for symmetric relation types only, for ranking and traversal (COG-31). Cached in `revAssocCache` (500k/2s, keyed on dst) |
 | 0x05 | ws+term+0x00+field(1)+id | posting | FTS |
 | 0x06 | ws+trigram(3)+id | — | FTS trigram |
 | 0x07 | ws+id+layer(1) | neighbor list | HNSW graph |
@@ -47,19 +47,19 @@ prefix — see the vault-reuse note at the bottom).
 | 0x16 | ws+id(16)+ts(8)+seq(4) | provenance entry (**JSON**, additively extensible) | async worker; the value is `provenance.ProvenanceEntry` marshalled with encoding/json, so a new *optional* field needs no version byte: old entries decode with the field ABSENT (never a zero value posing as data), and new entries decode on an old binary, which ignores the unknown key. `Details` (evolve's predecessor_id / reason / effective_at; extensible per-operation) was added this way. Renaming or retyping an existing field, or making a new field load-bearing for correctness, WOULD require a real format version |
 | 0x17 | ws | migration version+cursor | |
 | 0x18 | ws+ulid | quantize params + int8 embedding | ERF v2 vector |
-| **0x19** | siphash(opID)(8) → JSON receipt | idempotency | **shared with replication (see below) — safe only by JSON-vs-msgpack decode accident** |
+| **0x19** | siphash(opID)(8) → JSON receipt | idempotency | **storage-only since #726**, which relocated the whole replication keyspace to 0x2F. It used to hold replication log entries at `0x19\|seq_be64(8)` — byte-identical in shape to a receipt — so `ReplicationLog.Prune`'s `DeleteRange` covered every receipt whose SipHash fell under the watermark. Do not re-colocate anything here. `PurgeExpiredIdempotency` scans this whole prefix and JSON-decodes every value; that is now O(receipts) instead of O(entire replication log) |
 | 0x1A | ws+episodeID(16)[+0xFF+pos(4)] | episode/frame | |
 | 0x1B | ws | uint8 FTS schema version | |
 | 0x1C | ws+src+dst | PAS transition | |
 | 0x1D | ws | embed model name string | |
 | 0x1E | ws+parentID+childID | ordinal | |
-| 0x1F | entityNameHash(8) — **GLOBAL** | entity record | identity = NFKC+lower+trim |
+| **0x1F** | ws+entityNameHash(8) | entity record | **vault-scoped since #683** (migration v6). It used to be `0x1F\|nameHash` with no workspace prefix while the links backing it (0x20/0x23/0x26) all had one, so two vaults that mentioned the same name shared ONE record: `mention_count` was a cross-vault sum, and a lookup by name from a vault with no links still returned the other tenant's metadata with an empty engram list. Identity within a vault is still NFKC+lower+trim SipHash. Migration v6 relocates each legacy record to every vault that references it (0x23 mentions, 0x26 relationships, 0x2D cues, or — for a `merged` tombstone — its target's vault set) with `mention_count` RECOMPUTED from that vault's 0x23 links; unreferenced records are dropped with a WARN. Now in `clearVaultDataPrefixes`. Still NOT in `vaultScopedExportPrefixes` — see note 7 |
 | 0x20 | ws+engramID+nameHash(8) | — | engram→entity link |
 | 0x21 | ws+engramID+fromHash(8)+relType(1)+toHash(8) | — | relationship record |
 | 0x22 | ws+^millis(8)+id | — | last-access (inverted for MRU-first) |
-| 0x23 | nameHash(8)+ws(8)+id | — | entity reverse index (global prefix, vault in suffix) |
+| 0x23 | nameHash(8)+ws(8)+id | — | entity reverse index (global prefix, **vault in the key's MIDDLE**). A plain `0x23\|nameHash` scan therefore spans every tenant; use `keys.EntityReverseIndexVaultPrefix(nameHash, ws)` (17 bytes) for anything that must stay inside one vault — the orphan check in `DecrementEntityMentionCount` does. The same layout is why `ClearVault` deletes it row-by-row rather than with a range tombstone |
 | 0x24 | ws+hashA(8)+hashB(8) | msgpack count | co-occurrence |
-| 0x25 | ws+src+dst | archived assoc (no weight sort, no reverse) | |
+| 0x25 | ws+src+dst | archived assoc (no weight sort) | **#806:** a `RelType.IsSymmetric()` edge (`RelCoActivated`/`RelRelatesTo`/`RelContradicts`) is stored under BOTH `ws\|src\|dst` and `ws\|dst\|src` with byte-identical values, written in the same batch that archives it — no new prefix, no reverse-key format, since `RestoreArchivedEdges`' existing src-prefix scan finds the mirror row directly. A directional (non-symmetric) edge, including `RelUserDefined`, is never mirrored — restoring it from the wrong endpoint would mint a live edge in a direction its author never asserted, which COG-31 forbids for a writer same as a presenter. Restoring an edge deletes both rows in the restore's own batch |
 | 0x26 | ws+entityHash(8)+engramID | — | rel-entity index |
 | 0x27 | ws | 16B dream state | |
 | 0x28 | ws+sha256(32) | engramID(16) | content-hash dedup |
@@ -69,6 +69,8 @@ prefix — see the vault-reuse note at the bottom).
 | **0x2C** | ws+Hash(tagKey)(4)+value+0x00+id(16) | — | **ordered raw-tag-range index (S1).** Distinct from 0x0C: keys on `Hash(tagKey)` (the part before the first `:`) with the raw VALUE bytes sorted after it, so a bounded range scan (e.g. `due:<=2026-07-27`) is a real Pebble range scan, not a post-hoc filter. Only tags containing `:` get an entry (gates write-amp to key:value tag conventions). The `0x00` separator after value resolves prefix-of-each-other values ("2026" < "2026-07" because `0x00 < '-'`). A tag value containing a `0x00` byte is rejected at write time (`storage.WriteRawTagIndexEntry`). Hash collisions between two distinct tag keys make their ranges interleave — phase-6 `passesMetaFilter` re-checks the real tag, so correctness holds and only perf degrades, mirroring 0x0C's own collision tolerance. Maintained at every 0x0C write/delete site (`internal/storage/batch.go`, `impl.go`, `engram.go`); backfilled for pre-existing data by migration v4 (`internal/storage/migrate/v4_raw_tag_range.go`). Seeds activation candidates via `ActivationEngine.seedTagCandidates`/`ScanRawTagRange` for `tag_prefix` filters with `lte`/`gte`/`lt`/`gt`/`eq`, instead of only being checked in phase 6. |
 | **0x2D** | ws+EntityNameHash(cue)(8)+intentionID(16) | msgpack {one_shot, created_at, fired_count, last_fired_at, cues[]} | **armed-intention index (THE PUSH, prospective memory).** One key per (intention, cue entity); `ScanArmedForEntity` is a 17-byte-prefix scan consulted ONLY inside recall/remember tool handlers when the cue entity is focal — nothing polls it. The value duplicates the full cue list across an intention's keys so a one-shot fire deletes every sibling key atomically (`MarkIntentionFired`) and entity-merge can rewrite stale cue names (`RelinkProspectiveIntent`, mirroring the 0x26 relink; called from `MergeEntity`). Cleared by `ClearVault`. NOT exported/cloned (intentions are session-arming state; documented residual). Stale keys for a deleted intention engram are inert — the firing rule re-verifies the engram (exists, active, ValidAt) before delivery. The design doc allocated 0x2C for this index, but 0x2C was taken by RawTagRange (S1) first; 0x2D is the real allocation. |
 | **0x2E** | ws | 1B repair version | **pre-fix full-weight association-key repair watermark (#756).** The original `WeightComplement` overflowed at weight exactly 1.0 and wrote those 0x03/0x04 keys at the weight-0.0 complement (`0xFFFFFFFF`), where they read back as weight 0; the encoder was fixed byte-compatibly in #757 but the misplaced keys remain. `Engine.runLegacyFullWeightAssocRepair` scans 0x03 for that complement and, when the pair's 0x14 index reads **exactly 1.0**, relocates fwd/rev to the true 1.0 position (complement `0x00000000`) carrying the value bytes verbatim, deleting the legacy position; any other index value is left alone. Presence at the current version skips the scan. A one-shot watermark is sound because the fixed encoder cannot create new damage of this kind. Cleared by `ClearVault`. Edges a decay pass already clamped or deleted are unrepairable **and unidentifiable** — no count is claimed for them, and neither are pre-0x14-era pairs that carry no weight index at all. `runPruneWorker` gates assoc decay (`Engine.decayAllVaults`) on the pass completing **cleanly**: a pass that errored leaves the gate shut for the process lifetime and logs at ERROR, because decay over a still-damaged vault destroys that evidence permanently and unidentifiably. The pass is **local to each node** — nothing is replicated (the #681 precedent); it is deterministic and idempotent, so nodes converge. Upgrade the **leader first**, and upgrade followers promptly: an ungated old-binary node can destroy its own evidence before it is upgraded. |
+| **0x2F** | 0x01\|seq_be64(8) (log entry) / 0x02\|name (metadata) | msgpack ReplicationEntry / raw | **the whole `internal/replication` keyspace (#726).** Relocated off 0x19, where it overlapped `prefix.Idempotency` byte-for-byte. The second discriminator byte is load-bearing: the entry sub-range is exactly `[0x2F 0x01, 0x2F 0x02)`, so `ReplicationLog.Prune`'s `DeleteRange` is structurally confined to log entries and cannot reach the metadata (seq counter, last-applied, schema version, cluster epoch, node role, snap-complete) or anything else. Constructors in `internal/replication/keys.go`; **global, not vault-scoped**, so it belongs in none of the four `prefix_lists_test.go` lists. Migrated by `internal/storage/migrate/v5_replication_prefix_relocate.go`, which moves the metadata and DROPS the legacy log entries behind a positive per-key identification (never a range delete — receipts share the old range) |
+| **0x30** | ws+sha256(32) | engramID(16) | upsert forward-index — `idempotent_id` → engram pin (#556); relocation history 0x2B → 0x2D → 0x2E → 0x2F → 0x30 (0x2F taken by Replication, #726) |
 
 ## Auth prefixes (`internal/auth/keys.go`)
 
@@ -81,23 +83,34 @@ prefix — see the vault-reuse note at the bottom).
 | 0x44 | vault+0x00+keyID(8) | — | APIKey vault index; relocated from 0x13 by #618 |
 | 0x45 | vault-name | VaultCfg (JSON) | relocated from 0x14 by #618 |
 
-## Replication prefixes (`internal/replication/`) — all under 0x19
+## Replication prefixes (`internal/replication/keys.go`) — all under 0x2F
+
+Relocated off 0x19 by #726 (migration v5). Every key is built from
+`prefix.Replication`; no raw byte is inlined in `internal/replication` any more.
 
 | Key | Meaning |
 |---|---|
-| 0x19 + seq_be64(8) | replication log entry (msgpack) |
-| 0x19 0x02 \| "last_app" | last applied |
-| 0x19 0x03 \| "cluster_epoch" / "node_role" / "schema_v" | epoch/role/schema |
-| 0x19 0x10 \| "snap_complete" | snapshot marker |
+| 0x2F 0x01 \| seq_be64(8) | replication log entry (msgpack) |
+| 0x2F 0x02 \| "seq_counter" | head sequence number |
+| 0x2F 0x02 \| "last_applied" | applier watermark |
+| 0x2F 0x02 \| "schema_version" | on-disk schema version |
+| 0x2F 0x02 \| "cluster_epoch" / "node_role" | election epoch / last claimed role |
+| 0x2F 0x02 \| "snap_complete" | clean-snapshot sentinel |
+
+Pre-#726 addresses, for anyone reading an un-migrated store: `0x19|seq_be64(8)`,
+`0x19|0xFF*8` (seq counter — note that lived *inside* the entry range, at
+sequence MaxUint64), `0x19 0x02 "last_app"`, `0x19 0x03 "schema_v" /
+"cluster_epoch" / "node_role"`, `0x19 0x10 "snap_complete"`.
 
 ## Free bytes
 
-`0x2F`–`0x3F` and `0x46`+ are free for new storage/auth keys (0x2B–0x2E are now
+`0x31`–`0x3F` and `0x46`+ are free for new storage/auth keys (0x2B–0x30 are now
 allocated: 0x2B evolve-repair watermark (#681), 0x2C raw-tag-range index (S1), 0x2D
-armed-intention index (THE PUSH), 0x2E full-weight assoc-key repair watermark (#756);
+armed-intention index (THE PUSH), 0x2E full-weight assoc-key repair watermark (#756),
+0x2F the replication keyspace (#726), 0x30 upsert forward-index (#556);
 0x40–0x45 are allocated: 0x40/0x41 capability, 0x42–0x45 auth). (`0x29`/`0x40`/`0x41`
 also appear in `internal/transport/mbp/frame.go` as **wire opcodes**, a different
-keyspace; coincidental, safe, but confusing. Prefer `0x2F+` for new storage prefixes.)
+keyspace; coincidental, safe, but confusing. Prefer `0x31+` for new storage prefixes.)
 
 ## Live hazards a reviewer must know
 
@@ -109,12 +122,19 @@ keyspace; coincidental, safe, but confusing. Prefer `0x2F+` for new storage pref
    (`prefix_test.go`), so 0x11–0x14 are now storage-only. No action needed; do not
    reintroduce an auth key in 0x11–0x14.
 
-2. **0x19 is shared idempotency+replication territory.** `PurgeExpiredIdempotency` scans
-   the *entire* 0x19 range including replication log/epoch entries and only survives
-   because msgpack payloads fail JSON unmarshal (silently skipped). Any special-cased key
-   there must be **exact-match, never prefix-skip** (as `snapshot.go` already does for
-   `cluster_epoch`). Never switch replication values to JSON or receipts to msgpack
-   without revisiting this.
+2. **#726 — 0x19 was shared idempotency+replication territory — RESOLVED.** Replication
+   inlined a raw 0x19 for every key it wrote, so log entries (`0x19|seq_be64(8)`) and
+   idempotency receipts (`0x19|siphash(op_id)(8)`) were the same prefix, the same length
+   and the same database, with no discriminator. `ReplicationLog.Prune`'s
+   `DeleteRange(0x19|be64(1), 0x19|be64(untilSeq+1))` therefore deleted every receipt
+   whose SipHash landed under the watermark — vanishingly unlikely at seq ≈ 10^5, linear
+   in seq, and armed the moment the prune got a production caller (#724/#737).
+   `PurgeExpiredIdempotency` scanned the entire range in the other direction and survived
+   only because msgpack payloads fail JSON unmarshal. Replication now owns 0x2F
+   (migration v5). **Do not put anything else under 0x19**, and note the general rule the
+   incident produced: a prefix must never mix fixed-width HASH-keyed records with
+   fixed-width SEQUENCE-keyed records, because a range delete over one is a range delete
+   over the other.
 
 3. **0x0C tag index is now read by tag-scoped recall (#619).** `ListByTagInRange` /
    `ListByTagsAllInRange` (`internal/storage/query.go`) seed the candidate pool for
@@ -124,10 +144,11 @@ keyspace; coincidental, safe, but confusing. Prefer `0x2F+` for new storage pref
 
 4. **Vault prefixes are name-deterministic and therefore REUSED on name reuse.** Deleting
    a vault (`ClearVault` + `DeleteVaultNameOnly`) does not clean 0x11 DigestFlags
-   ("orphans acceptable") or 0x1F global entity records. Re-creating a vault of the same
-   name recomputes the identical SipHash prefix and resurfaces those orphans. The correct
-   invariant is "prefixes are name-deterministic," **not** "never reused." A PR asserting
-   the latter is wrong about this codebase.
+   ("orphans acceptable"). Re-creating a vault of the same name recomputes the identical
+   SipHash prefix and resurfaces those orphans. The correct invariant is "prefixes are
+   name-deterministic," **not** "never reused." A PR asserting the latter is wrong about
+   this codebase. (0x1F entity records used to be on this list too; #683 made them
+   vault-scoped, so `ClearVault` now range-deletes them like any other vault data.)
 
 5. **0x2B and 0x2E are repair watermarks and share one set of semantics.** Both hold a
    single version byte per vault (0x2B: evolve entity-link repair, #681; 0x2E: pre-fix
@@ -140,3 +161,17 @@ keyspace; coincidental, safe, but confusing. Prefer `0x2F+` for new storage pref
    vault name cannot inherit a stranger's "already repaired" claim at the cost of one
    no-op scan; and a repair whose watermark is present is never revisited, so the
    watermark must only be written on a genuinely clean pass.
+
+6. **The entity graph is still absent from `vaultScopedExportPrefixes` — deliberately, and
+   it is a known gap.** `muninn vault export` transports memories, associations, FTS, HNSW
+   and embeddings, but none of 0x1F/0x20/0x21/0x23/0x24/0x26: a restore rebuilds the
+   memories and loses the curated entity graph (re-enrichment recovers extracted entities,
+   not hand-authored ones or their relationships). The offline whole-store `muninn backup`
+   is unaffected. #683 removed the *reason* the record could not be exported (it was
+   globally keyed, so a vault-scoped export could not include it without exporting other
+   tenants'), but did not do the export work, because a partial one is worse than none:
+   shipping 0x1F alone restores exactly the empty-aggregate phantom #683 exists to
+   eliminate, and 0x23 cannot ride the export machinery at all — that machinery strips the
+   workspace from key bytes 1–8, and 0x23 keeps the vault at bytes 9–16. Doing this
+   properly means all six prefixes plus a 0x23-shaped exception, which is its own
+   increment.

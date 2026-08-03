@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/replication"
 	"github.com/scrypster/muninndb/internal/storage"
 )
@@ -307,8 +308,12 @@ func TestUpgradeTest_DowngradeBlocked(t *testing.T) {
 		t.Fatalf("OpenPebble (phase 2): %v", err)
 	}
 
-	// Key matches schemaVersionKey() in internal/replication/schema_version.go
-	schemaKey := []byte{0x19, 0x03, 's', 'c', 'h', 'e', 'm', 'a', '_', 'v'}
+	// Key matches schemaVersionKey() in internal/replication/keys.go. It moved
+	// from 0x19 0x03 "schema_v" to prefix.Replication|0x02|"schema_version" with
+	// #726; the live constructor is unexported, so this copy is hand-written and
+	// the migration's copy is pinned separately by
+	// TestMigrationV5KeysMatchReplicationPackage.
+	schemaKey := append([]byte{prefix.Replication, 0x02}, "schema_version"...)
 	futureVersion := uint64(999)
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, futureVersion)

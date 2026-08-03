@@ -57,7 +57,7 @@ func (a *grpcEngineAdapter) Write(ctx context.Context, req *pb.WriteRequest) (*p
 		Concept: req.Concept, Content: req.Content, Tags: req.Tags,
 		Confidence: req.Confidence, Stability: req.Stability, Vault: req.Vault,
 		IdempotentID: req.IdempotentID, Associations: mbpAssocs, Embedding: req.Embedding,
-		MemoryType: uint8(req.MemoryType), TypeLabel: req.TypeLabel,
+		MemoryType: uint8(req.MemoryType), TypeLabel: req.TypeLabel, UpsertMode: req.UpsertMode,
 	})
 	if err != nil {
 		return nil, err
@@ -81,7 +81,7 @@ func (a *grpcEngineAdapter) BatchWrite(ctx context.Context, req *pb.BatchWriteRe
 			Concept: r.Concept, Content: r.Content, Tags: r.Tags,
 			Confidence: r.Confidence, Stability: r.Stability, Vault: r.Vault,
 			IdempotentID: r.IdempotentID, Associations: mbpAssocs, Embedding: r.Embedding,
-			MemoryType: uint8(r.MemoryType), TypeLabel: r.TypeLabel,
+			MemoryType: uint8(r.MemoryType), TypeLabel: r.TypeLabel, UpsertMode: r.UpsertMode,
 		}
 	}
 	responses, errs := a.eng.WriteBatch(ctx, mbpReqs)

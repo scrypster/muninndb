@@ -49,6 +49,7 @@ type rememberRequest struct {
 	Tags         []string         `json:"tags,omitempty"`
 	Vault        string           `json:"vault,omitempty"`
 	IdempotentID string           `json:"idempotent_id,omitempty"`
+	UpsertMode   bool             `json:"upsert_mode,omitempty"`
 	Summary      string           `json:"summary,omitempty"`
 	Entities     []rememberEntity `json:"entities,omitempty"`
 }
@@ -83,6 +84,7 @@ func rememberMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	entities := fs.String("entities", "", "comma-separated inline entities, each Name or Name:type")
 	vault := fs.String("vault", "", "vault name (default: derived from the API key, else \"default\")")
 	opID := fs.String("op-id", "", "idempotency key — safe retries return the original engram id")
+	upsertMode := fs.Bool("upsert-mode", false, "keep one stable memory per --op-id: create on first use, evolve it when the content changes, no-op when it is identical (requires --op-id)")
 	keyFile := fs.String("key-file", "", "vault API key file (default: ~/.muninn/api.key)")
 
 	if err := fs.Parse(args); err != nil {
@@ -102,6 +104,10 @@ func rememberMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	}
 	if *content == "" && *contentFile == "" {
 		fmt.Fprintln(stderr, "muninn remember: one of --content or --content-file is required")
+		return execExitUsage
+	}
+	if *upsertMode && strings.TrimSpace(*opID) == "" {
+		fmt.Fprintln(stderr, "muninn remember: --upsert-mode requires --op-id (the key the engram is pinned to)")
 		return execExitUsage
 	}
 
@@ -137,6 +143,7 @@ func rememberMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		Tags:         splitCommaList(*tags),
 		Vault:        strings.TrimSpace(*vault),
 		IdempotentID: strings.TrimSpace(*opID),
+		UpsertMode:   *upsertMode,
 		Summary:      *summary,
 		Entities:     ents,
 	}

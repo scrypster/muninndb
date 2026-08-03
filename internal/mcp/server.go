@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,9 @@ type MCPServer struct {
 	authStore        *auth.Store         // privileged: SetVaultConfig + GenerateCapability (create-workflow-vault); nil = tool disabled
 	agentVaultCreate bool                // opt-in: MUNINN_AGENT_VAULT_CREATE (default off, secure-by-default)
 	srv              *http.Server
-	tlsConfig        *tls.Config // nil = plain TCP
+	// writeGate is the cluster single-writer gate (#596); nil = standalone.
+	writeGate func() error
+	tlsConfig *tls.Config // nil = plain TCP
 
 	sseSessionsMu sync.RWMutex
 	sseSessions   map[string]*sseSession // sessionID → session
@@ -199,6 +202,10 @@ func (s *MCPServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// SetWriteGate installs the cluster single-writer gate (#596). cmd/muninn wires
+// it to the ClusterCoordinator when cluster mode is enabled.
+func (s *MCPServer) SetWriteGate(g func() error) { s.writeGate = g }
+
 func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter, req *JSONRPCRequest, a AuthContext) {
 	if req.Params == nil {
 		sendError(w, req.ID, -32602, "invalid params: params required")
@@ -253,6 +260,22 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		}
 	}
 
+	// Cluster single-writer gate (#596). Every mutating tool is refused on a
+	// non-Cortex node with the leader named, rather than being accepted locally
+	// and silently never replicated. isMutatingTool is the same classification
+	// the write-mode credential check above uses, so a new mutating tool is
+	// covered the moment it is classified — there is no second list.
+	//
+	// Read tools are untouched: a Lobe serving reads is the entire point of a
+	// Lobe. This runs AFTER credential checks so an unauthenticated caller
+	// cannot use it to learn cluster topology.
+	if s.writeGate != nil && isMutatingTool(req.Params.Name) {
+		if err := s.writeGate(); err != nil {
+			sendError(w, req.ID, -32002, err.Error())
+			return
+		}
+	}
+
 	// muninn_create_workflow_vault is privileged: it requires an mk_ full-mode
 	// key AND the opt-in flag. A cap_ bearer (IsCapability, not IsAPIKey) is
 	// rejected here — this is the structural recursion guard. No capability can
@@ -273,7 +296,45 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		}
 	}
 
-	handlers := map[string]func(context.Context, http.ResponseWriter, json.RawMessage, string, map[string]any){
+	handler, found := s.toolHandlers()[req.Params.Name]
+	if !found {
+		sendError(w, req.ID, -32602, "unknown tool: "+req.Params.Name)
+		return
+	}
+
+	// COG-11: inject the credential's mode into ctx so engine-layer code (e.g.
+	// engine.go:2005's auth.ObserveFromContext(ctx)) can see it. gRPC
+	// (internal/transport/grpc/server.go:172) and REST (internal/auth/middleware.go:49)
+	// already do this; the MCP surface must match so observe-mode credentials get
+	// ReadOnly=true and skip Hebbian/PAS/activation-log side effects.
+	//
+	// An authorized session with no explicit mode — the static mdb_ token and the
+	// open-server (zero-config) deployment, which both have full tool access — is
+	// mapped to ModeFull, matching REST's public path (internal/auth/middleware.go:74).
+	// Without this, resolveTrust (SEC-14) would reject trust=verified on the default
+	// deployment even though the caller has full access. mk_/cap_ sessions carry
+	// their real key/cap Mode and are left untouched, so an observe key still cannot
+	// stamp verified.
+	mode := a.Mode
+	if mode == "" && a.Authorized {
+		mode = auth.ModeFull
+	}
+	ctx = context.WithValue(ctx, auth.ContextMode, mode)
+
+	handler(ctx, w, req.ID, vault, args)
+}
+
+// toolHandlerFunc is the signature every MCP tool handler shares.
+type toolHandlerFunc func(context.Context, http.ResponseWriter, json.RawMessage, string, map[string]any)
+
+// toolHandlers is the tool dispatch table: the single authoritative list of
+// which tool names this server serves. It was a map literal inside
+// dispatchToolCall until #731, with registeredToolNames() a hand-maintained
+// mirror of it kept in sync by a comment. A tool present here but missing from
+// that mirror was invisible to every classification test, so the mirror is now
+// derived from these keys instead (see registeredToolNames).
+func (s *MCPServer) toolHandlers() map[string]toolHandlerFunc {
+	return map[string]toolHandlerFunc{
 		"muninn_remember":       s.handleRemember,
 		"muninn_remember_batch": s.handleRememberBatch,
 		"muninn_recall":         s.handleRecall,
@@ -342,64 +403,34 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		// Trust label
 		"muninn_trust": s.handleSetTrust,
 
-		// RFC #597: privileged workflow-vault creation (recursion-guarded above).
+		// In-place retag (#720)
+		"muninn_update_tags": s.handleUpdateTags,
+
+		// RFC #597: privileged workflow-vault creation (recursion-guarded in
+		// dispatchToolCall).
 		"muninn_create_workflow_vault": s.handleCreateWorkflowVault,
 
 		// THE PUSH: prospective memory (arm an intention on entity cues).
 		"muninn_intend": s.handleIntend,
 	}
-
-	handler, found := handlers[req.Params.Name]
-	if !found {
-		sendError(w, req.ID, -32602, "unknown tool: "+req.Params.Name)
-		return
-	}
-
-	// COG-11: inject the credential's mode into ctx so engine-layer code (e.g.
-	// engine.go:2005's auth.ObserveFromContext(ctx)) can see it. gRPC
-	// (internal/transport/grpc/server.go:172) and REST (internal/auth/middleware.go:49)
-	// already do this; the MCP surface must match so observe-mode credentials get
-	// ReadOnly=true and skip Hebbian/PAS/activation-log side effects.
-	//
-	// An authorized session with no explicit mode — the static mdb_ token and the
-	// open-server (zero-config) deployment, which both have full tool access — is
-	// mapped to ModeFull, matching REST's public path (internal/auth/middleware.go:74).
-	// Without this, resolveTrust (SEC-14) would reject trust=verified on the default
-	// deployment even though the caller has full access. mk_/cap_ sessions carry
-	// their real key/cap Mode and are left untouched, so an observe key still cannot
-	// stamp verified.
-	mode := a.Mode
-	if mode == "" && a.Authorized {
-		mode = auth.ModeFull
-	}
-	ctx = context.WithValue(ctx, auth.ContextMode, mode)
-
-	handler(ctx, w, req.ID, vault, args)
 }
 
-// registeredToolNames returns the set of tool names registered in the handler
-// dispatch map. This is used by tests to verify that isMutatingTool and
-// isReadOnlyTool cover every registered tool.
+// registeredToolNames returns, sorted, the tool names registered in the handler
+// dispatch map. Tests use it to verify that the classification tables cover
+// every registered tool. It is DERIVED from toolHandlers() rather than
+// hand-maintained, so a tool cannot be registered without the classification
+// tests seeing it (#731).
+//
+// The zero-value receiver is never invoked — only the method VALUES are built,
+// to take their keys — so no handler runs and nothing dereferences it.
 func registeredToolNames() []string {
-	// Keep in sync with the handlers map in dispatchToolCall.
-	return []string{
-		"muninn_remember", "muninn_remember_batch", "muninn_recall", "muninn_read",
-		"muninn_forget", "muninn_link", "muninn_contradictions", "muninn_status",
-		"muninn_evolve", "muninn_consolidate", "muninn_session", "muninn_decide",
-		"muninn_restore", "muninn_traverse", "muninn_explain", "muninn_state",
-		"muninn_list_deleted", "muninn_retry_enrich", "muninn_get_enrichment_candidates",
-		"muninn_apply_enrichment", "muninn_guide",
-		"muninn_where_left_off", "muninn_remember_tree", "muninn_recall_tree",
-		"muninn_add_child", "muninn_find_by_entity", "muninn_entity_state",
-		"muninn_entity_state_batch", "muninn_entity_clusters", "muninn_export_graph",
-		"muninn_similar_entities", "muninn_merge_entity", "muninn_entity_timeline",
-		"muninn_replay_enrichment", "muninn_provenance", "muninn_feedback",
-		"muninn_entity", "muninn_entities",
-		"muninn_trust",
-		"muninn_compare_and_set", "muninn_claim", "muninn_release",
-		"muninn_create_workflow_vault",
-		"muninn_intend",
+	handlers := new(MCPServer).toolHandlers()
+	names := make([]string, 0, len(handlers))
+	for name := range handlers {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	return names
 }
 
 // handleSSE establishes an SSE stream per the MCP SSE transport spec.

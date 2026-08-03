@@ -86,6 +86,7 @@ type WriteRequest struct {
 	Embedding    []float32     `msgpack:"embedding,omitempty" json:"embedding,omitempty"`
 	Vault        string        `msgpack:"vault,omitempty" json:"vault,omitempty"`
 	IdempotentID string        `msgpack:"idempotent_id,omitempty" json:"idempotent_id,omitempty"`
+	UpsertMode   bool          `msgpack:"upsert_mode,omitempty" json:"upsert_mode,omitempty"`
 	MemoryType   uint8         `msgpack:"memory_type,omitempty" json:"memory_type,omitempty"`
 	TypeLabel    string        `msgpack:"type_label,omitempty" json:"type_label,omitempty"`
 

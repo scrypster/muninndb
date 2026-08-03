@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,17 +20,17 @@ type mockPluginStore struct {
 	incrementCoOccurrenceCalls int
 }
 
-func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint8) (int64, error) {
+func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint16) (int64, error) {
 	return 0, nil
 }
-func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _, _ uint8) plugin.EngramIterator {
+func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _, _ uint16) plugin.EngramIterator {
 	return nil
 }
-func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ plugin.ULID, _ uint8) error {
+func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ plugin.ULID, _ uint16) error {
 	m.setDigestFlagCalls++
 	return nil
 }
-func (m *mockPluginStore) GetDigestFlags(_ context.Context, _ plugin.ULID) (uint8, error) {
+func (m *mockPluginStore) GetDigestFlags(_ context.Context, _ plugin.ULID) (uint16, error) {
 	return 0, nil
 }
 func (m *mockPluginStore) UpdateEmbedding(_ context.Context, _ plugin.ULID, _ []float32) error {
@@ -39,7 +40,7 @@ func (m *mockPluginStore) UpdateDigest(_ context.Context, _ plugin.ULID, _ *plug
 	m.updateDigestCalls++
 	return nil
 }
-func (m *mockPluginStore) UpsertEntity(_ context.Context, _ plugin.ExtractedEntity) error {
+func (m *mockPluginStore) UpsertEntity(_ context.Context, _ plugin.ULID, _ plugin.ExtractedEntity) error {
 	m.upsertEntityCalls++
 	return nil
 }
@@ -211,7 +212,7 @@ func TestRetryEnrich_PersistenceCallSequence(t *testing.T) {
 	}
 	var linkedEntityNames []string
 	for _, entity := range result.Entities {
-		if err := pStore.UpsertEntity(ctx, entity); err != nil {
+		if err := pStore.UpsertEntity(ctx, plugin.ULID(ulid), entity); err != nil {
 			continue
 		}
 		if err := pStore.LinkEngramToEntity(ctx, plugin.ULID(ulid), entity.Name); err != nil {
@@ -371,5 +372,19 @@ func TestWhereLeftOffEntryFromEngramImportance(t *testing.T) {
 	})
 	if derived.Importance != 0.6 || derived.ImportanceSource != "derived" {
 		t.Errorf("derived entry = (%v, %q), want (0.6, derived)", derived.Importance, derived.ImportanceSource)
+	}
+}
+
+// TestAdapterUpdateTags_InvalidULID proves the adapter validates the id
+// before touching the engine: with a nil engine, a malformed id must return
+// a parse error rather than panicking on the delegate call.
+func TestAdapterUpdateTags_InvalidULID(t *testing.T) {
+	a := &mcpEngineAdapter{eng: nil, enricher: nil}
+	err := a.UpdateTags(context.Background(), "default", "not-a-ulid", []string{"x"})
+	if err == nil {
+		t.Fatal("expected an error for a malformed engram id, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid engram id") {
+		t.Errorf("error should name the bad id, got: %v", err)
 	}
 }

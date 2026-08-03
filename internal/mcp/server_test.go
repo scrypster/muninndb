@@ -138,10 +138,10 @@ func (f *fakeEngine) CheckIdempotency(_ context.Context, _ string) (*storage.Ide
 func (f *fakeEngine) WriteIdempotency(_ context.Context, _, _ string) error {
 	return nil
 }
-func (f *fakeEngine) SetEntityState(_ context.Context, _, _, _, _ string) error {
+func (f *fakeEngine) SetEntityState(_ context.Context, _, _, _, _, _ string) error {
 	return nil
 }
-func (f *fakeEngine) SetEntityStateBatch(_ context.Context, ops []engine.EntityStateOp) []error {
+func (f *fakeEngine) SetEntityStateBatch(_ context.Context, _ string, ops []engine.EntityStateOp) []error {
 	return make([]error, len(ops))
 }
 func (f *fakeEngine) GetEntityClusters(_ context.Context, _ string, _, _ int) ([]EntityClusterResult, error) {
@@ -191,7 +191,8 @@ func (f *fakeEngine) ListEntities(_ context.Context, _ string, _ int, _ string) 
 func (f *fakeEngine) GetVaultEmbedDim(_ context.Context, _ string) int {
 	return 0
 }
-func (f *fakeEngine) SetTrust(_ context.Context, _, _, _ string) error { return nil }
+func (f *fakeEngine) SetTrust(_ context.Context, _, _, _ string) error            { return nil }
+func (f *fakeEngine) UpdateTags(_ context.Context, _, _ string, _ []string) error { return nil }
 
 func (f *fakeEngine) CompareAndSet(_ context.Context, _, _ string, _, setState *string) (bool, string, string, error) {
 	state := ""
@@ -209,7 +210,7 @@ func (f *fakeEngine) Release(_ context.Context, _, _, _ string) (bool, string, e
 	return true, "", nil
 }
 
-func (f *fakeEngine) GetAnnotations(_ context.Context, _, _ string) (*engine.AnnotationData, error) {
+func (f *fakeEngine) GetAnnotations(_ context.Context, _, _ string, _ *mbp.ActivateRequest) (*engine.AnnotationData, error) {
 	return nil, nil
 }
 
@@ -310,8 +311,8 @@ func TestListTools(t *testing.T) {
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 44 {
-		t.Errorf("expected 44 tools, got %d", len(tools))
+	if len(tools) != 45 {
+		t.Errorf("expected 45 tools, got %d", len(tools))
 	}
 }
 

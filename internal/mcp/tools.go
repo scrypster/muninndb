@@ -146,6 +146,10 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "string",
 						"description": "Optional idempotency key. If set and a receipt exists for this key, the cached engram ID is returned without re-creating.",
 					},
+					"upsert_mode": map[string]any{
+						"type":        "boolean",
+						"description": "Optional. With op_id set, keep one stable memory per key across repeated writes: created on first use, and on later writes with the SAME op_id either left alone (identical content) or EVOLVED (changed content — a new version supersedes the old one, which stays retrievable as history). Requires op_id. Differs from a plain op_id retry, which always returns the original unchanged even if the content differs. NOTE on the evolve step: only content, concept and importance are taken from this call — tags, confidence and trust are inherited from the previous version (use muninn_update_tags to retag).",
+					},
 					"embedding": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "number"},
@@ -336,6 +340,10 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "string",
 						"description": "ISO 8601 timestamp. Instead of deleting, records that the fact stopped being true at this moment (sets valid_until). The memory stays active but drops out of default recall; as_of before this time still returns it.",
 					},
+					"hard": map[string]any{
+						"type":        "boolean",
+						"description": "When true, PERMANENTLY destroys the memory instead of soft-deleting it: no 7-day recovery window, not restorable, not counted anywhere. Default false (soft-delete). Cannot be combined with not_true_since. Irreversible — confirm with the caller before setting this.",
+					},
 				},
 				"required": []string{"id"},
 			},
@@ -425,7 +433,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_consolidate",
-			Description: "Merge multiple related memories into one. Archives the originals. Maximum 50 IDs.",
+			Description: "Merge multiple related memories into one. The originals are SUPERSEDED by the merged memory, exactly as muninn_evolve supersedes a predecessor: they leave present-day recall, but a query phrased against their wording still resolves to the merged memory, and they stay reachable as lineage via as_of/include_invalid. Maximum 50 IDs.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1031,6 +1039,27 @@ func allToolDefinitions() []ToolDefinition {
 					},
 				},
 				"required": []string{"id", "trust"},
+			},
+		},
+		// In-place retag: metadata only, no new version.
+		{
+			Name:        "muninn_update_tags",
+			Description: "Replace an engram's full tag set IN PLACE. The ID, version lineage, and access history are preserved — unlike muninn_evolve, which mints a new ULID and archives the predecessor. This is the tool for mutable tag conventions such as due:<ISO-date> or status:<value>. The tags given REPLACE the existing set entirely; pass an empty array to clear all tags. To change content and tags together, call muninn_evolve first and then this tool on the new id. Normalization is lenient, not strict (identical rules to muninn_remember): a non-string entry, an empty string, or a tag longer than 128 BYTES is DROPPED rather than rejected, and a set longer than 50 tags is TRUNCATED to 50 — the response echoes the tag set that was actually stored, so diff it against what you sent if that matters. The limit is bytes, not glyphs: a 50-character CJK tag is 150 bytes and is silently dropped. A soft-deleted engram CAN be retagged (muninn_restore brings it back), but its keyword-search postings are DELETED rather than rebuilt while it is deleted — that is what keeps a deleted memory out of search results — so retag it after restoring, or run muninn reindex-fts, if you need it findable by the new tags.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"id": map[string]any{
+						"type":        "string",
+						"description": "ULID of the engram to retag",
+					},
+					"tags": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "The complete replacement tag set. An empty array clears all tags. Over-long (>128 BYTES, not characters), empty, and non-string entries are dropped and the set is truncated to 50 — never rejected; the response echoes what was stored.",
+					},
+				},
+				"required": []string{"id", "tags"},
 			},
 		},
 		// THE PUSH: prospective memory — arm an intention on entity cues.

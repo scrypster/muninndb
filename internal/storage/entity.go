@@ -2,15 +2,15 @@ package storage
 
 // Entity Graph Key Space Design
 //
-// MuninnDB maintains a two-layer entity graph: a global entity registry and a
-// vault-scoped relationship graph. Both are stored in Pebble using the following
-// key prefixes. All writes in this file use pebble.NoSync + walSyncer group-commit
-// (≤10ms durability window). See storage/wal_syncer.go for the durability contract.
+// MuninnDB maintains a vault-scoped entity graph: an entity registry and a
+// relationship graph, both partitioned by workspace prefix. All writes in this
+// file use pebble.NoSync + walSyncer group-commit (≤10ms durability window).
+// See storage/wal_syncer.go for the durability contract.
 //
 // ┌─────────────────────────────────────────────────────────────────────────────┐
 // │ Prefix │ Scope  │ Key Layout                              │ Value           │
 // ├────────┼────────┼─────────────────────────────────────────┼─────────────────┤
-// │ 0x1F   │ Global │ 0x1F | nameHash(8)                      │ msgpack(Entity) │
+// │ 0x1F   │ Vault  │ 0x1F | ws(8) | nameHash(8)              │ msgpack(Entity) │
 // │ 0x20   │ Vault  │ 0x20 | ws(8) | engramID(16) | hash(8)  │ entityName(str) │
 // │ 0x21   │ Vault  │ 0x21 | ws(8) | engramID(16) | fromH(8) │                 │
 // │        │        │        | relTypeByte(1) | toH(8)        │ msgpack(Rel)    │
@@ -18,12 +18,17 @@ package storage
 // │ 0x24   │ Vault  │ 0x24 | ws(8) | hashA(8) | hashB(8)     │ msgpack(CoOcc)  │
 // └─────────────────────────────────────────────────────────────────────────────┘
 //
-// Prefix 0x1F — Global Entity Registry
-//   Key:   0x1F | SipHash(NFKC-normalized entity name)(8 bytes)
+// Prefix 0x1F — Entity Registry (Vault-Scoped)
+//   Key:   0x1F | ws(8) | SipHash(NFKC-normalized entity name)(8 bytes)  [17 bytes]
 //   Value: msgpack-encoded EntityRecord (name, type, confidence, source, timestamps,
 //          mentionCount, state, mergedInto)
-//   Scope: Global (no vault isolation) — entity identity is cross-vault
-//   Mutex: Per-entity lock via getEntityLock(nameHash) prevents TOCTOU in UpsertEntityRecord
+//   Scope: Vault (#683). The name hash is still the identity within a vault, but
+//          two vaults that mention the same name now own two independent records:
+//          separate mention counts, separate lifecycle state, no cross-tenant read.
+//          Before #683 this key had no ws prefix while 0x20/0x26 did, so identity
+//          and aggregate metadata were global while the links backing them were
+//          per-vault — every aggregate entity view was a cross-vault sum.
+//   Mutex: Per-(vault, entity) lock via getEntityLock prevents TOCTOU in UpsertEntityRecord
 //   Merge: Confidence-preserving: max(existing, new); other fields are last-writer-wins
 //
 // Prefix 0x20 — Engram→Entity Forward Link Index (Vault-Scoped)
@@ -74,8 +79,8 @@ var validEntityStates = map[string]bool{
 	"active": true, "deprecated": true, "merged": true, "resolved": true,
 }
 
-// EntityRecord is a named entity stored at the global 0x1F key prefix.
-// Records are vault-agnostic; entity-engram links are vault-scoped at 0x20.
+// EntityRecord is a named entity stored at the vault-scoped 0x1F key prefix
+// (0x1F|ws|nameHash), matching the scope of the 0x20 links that back it.
 type EntityRecord struct {
 	Name         string  `msgpack:"name"`
 	Type         string  `msgpack:"type"`
@@ -99,20 +104,21 @@ type RelationshipRecord struct {
 	UpdatedAt  int64   `msgpack:"updated_at"`
 }
 
-// UpsertEntityRecord stores or updates a global entity record at 0x1F|nameHash.
-// Applies confidence-preserving merge: if an existing record has higher confidence,
-// the existing confidence is preserved (last-writer-wins on all other fields).
-// Safe for concurrent calls — uses per-entity locking to prevent TOCTOU races.
-func (ps *PebbleStore) UpsertEntityRecord(ctx context.Context, record EntityRecord, source string) error {
-	mu := ps.getEntityLock(record.Name)
+// UpsertEntityRecord stores or updates a vault-scoped entity record at
+// 0x1F|ws|nameHash. Applies confidence-preserving merge: if an existing record
+// has higher confidence, the existing confidence is preserved (last-writer-wins
+// on all other fields).
+// Safe for concurrent calls — uses per-(vault, entity) locking to prevent TOCTOU races.
+func (ps *PebbleStore) UpsertEntityRecord(ctx context.Context, ws [8]byte, record EntityRecord, source string) error {
+	mu := ps.getEntityLock(ws, record.Name)
 	mu.Lock()
 	defer mu.Unlock()
 
 	nameHash := keys.EntityNameHash(record.Name)
-	key := keys.EntityKey(nameHash)
+	key := keys.EntityKey(ws, nameHash)
 
 	// Read existing record for confidence-preserving merge.
-	existing, err := ps.GetEntityRecord(ctx, record.Name)
+	existing, err := ps.GetEntityRecord(ctx, ws, record.Name)
 	if err != nil {
 		return fmt.Errorf("entity record read-before-write: %w", err)
 	}
@@ -170,14 +176,15 @@ func (ps *PebbleStore) UpsertEntityRecord(ctx context.Context, record EntityReco
 	return ps.db.Set(key, val, pebble.NoSync)
 }
 
-// GetEntityRecord reads a global entity record by name. Returns nil, nil if not found.
-func (ps *PebbleStore) GetEntityRecord(ctx context.Context, name string) (*EntityRecord, error) {
+// GetEntityRecord reads a vault's entity record by name. Returns nil, nil if
+// the vault has no record for that name — including when another vault does.
+func (ps *PebbleStore) GetEntityRecord(ctx context.Context, ws [8]byte, name string) (*EntityRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	nameHash := keys.EntityNameHash(name)
-	key := keys.EntityKey(nameHash)
+	key := keys.EntityKey(ws, nameHash)
 	val, err := Get(ps.db, key)
 	if err != nil {
 		return nil, fmt.Errorf("get entity record: %w", err)
@@ -192,11 +199,17 @@ func (ps *PebbleStore) GetEntityRecord(ctx context.Context, name string) (*Entit
 	return &record, nil
 }
 
-// getEntityLock returns the stripe mutex for the given entity name.
-// Uses the same NFKC normalization as EntityNameHash for consistent keying.
-func (ps *PebbleStore) getEntityLock(name string) *sync.Mutex {
+// getEntityLock returns the stripe mutex for the given (vault, entity name).
+// Uses the same NFKC normalization as EntityNameHash for consistent keying, and
+// includes the workspace prefix because the record it guards is vault-scoped
+// (#683) — two vaults writing the same entity name touch different keys and must
+// not serialize on each other.
+func (ps *PebbleStore) getEntityLock(ws [8]byte, name string) *sync.Mutex {
 	normalized := strings.ToLower(strings.TrimSpace(norm.NFKC.String(name)))
-	return ps.entityLocks.For([]byte(normalized))
+	stripeKey := make([]byte, 0, 8+len(normalized))
+	stripeKey = append(stripeKey, ws[:]...)
+	stripeKey = append(stripeKey, normalized...)
+	return ps.entityLocks.For(stripeKey)
 }
 
 // getCoOccurrenceLock returns the stripe mutex for the given canonical hash pair.
@@ -777,8 +790,8 @@ func (ps *PebbleStore) UpsertRelationshipRecord(ctx context.Context, ws [8]byte,
 
 const (
 	// Keep these values aligned with plugin.DigestClassified and plugin.DigestSummarized.
-	digestClassifiedFlag uint8 = 0x20
-	digestSummarizedFlag uint8 = 0x40
+	digestClassifiedFlag uint16 = 0x20
+	digestSummarizedFlag uint16 = 0x40
 )
 
 // UpdateDigest updates the summary, key points, memory type, and type label on an
@@ -795,13 +808,20 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	if err != nil {
 		return fmt.Errorf("UpdateDigest: get engram: %w", err)
 	}
+	// Clone before mutating (#858, STO-20). This path runs on the enrichment
+	// worker, concurrently with recall, and takes no stripe lock at all, so
+	// every assignment below used to land on the struct GetEngram had just
+	// re-cached for every reader.
+	eng = eng.Clone()
 
 	// Only overwrite fields that were provided (non-empty).
 	if summary != "" {
 		eng.Summary = summary
 	}
 	if len(keyPoints) > 0 {
-		eng.KeyPoints = keyPoints
+		// Copy rather than alias: the caller still owns keyPoints, and this
+		// slice becomes a field of the record re-cached below.
+		eng.KeyPoints = append([]string(nil), keyPoints...)
 	}
 	if memoryType != "" {
 		if mt, ok := ParseMemoryType(memoryType); ok {
@@ -845,7 +865,7 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	if memoryType != "" || typeLabel != "" {
 		flags |= digestClassifiedFlag
 	}
-	batch.Set(keys.DigestFlagsKey([16]byte(id)), []byte{flags}, nil)
+	batch.Set(keys.DigestFlagsKey([16]byte(id)), encodeDigestFlags(flags), nil)
 
 	// Invalidate caches before commit — cached structs are stale.
 	ps.cache.Delete(ws, id)
@@ -859,7 +879,7 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	return nil
 }
 
-// IncrementEntityMentionCount increments the MentionCount on the global entity
+// IncrementEntityMentionCount increments the MentionCount on the vault's entity
 // record for the given name without touching any other field — unlike
 // UpsertEntityRecord it never rewrites Type, Source or Confidence, so it is
 // safe to call for links carried from a predecessor whose entity metadata must
@@ -867,12 +887,12 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 // 0x1F record is already gone has nothing to fund, and DecrementEntityMentionCount
 // floors at 0 on the other side, so the ledger stays consistent.
 // Safe for concurrent calls — uses per-entity locking.
-func (ps *PebbleStore) IncrementEntityMentionCount(ctx context.Context, name string) error {
-	mu := ps.getEntityLock(name)
+func (ps *PebbleStore) IncrementEntityMentionCount(ctx context.Context, ws [8]byte, name string) error {
+	mu := ps.getEntityLock(ws, name)
 	mu.Lock()
 	defer mu.Unlock()
 
-	existing, err := ps.GetEntityRecord(ctx, name)
+	existing, err := ps.GetEntityRecord(ctx, ws, name)
 	if err != nil {
 		return fmt.Errorf("increment entity mention count: %w", err)
 	}
@@ -886,21 +906,24 @@ func (ps *PebbleStore) IncrementEntityMentionCount(ctx context.Context, name str
 	if err != nil {
 		return fmt.Errorf("increment entity mention count: marshal: %w", err)
 	}
-	return ps.db.Set(keys.EntityKey(keys.EntityNameHash(name)), val, pebble.NoSync)
+	return ps.db.Set(keys.EntityKey(ws, keys.EntityNameHash(name)), val, pebble.NoSync)
 }
 
-// DecrementEntityMentionCount decrements the MentionCount on the global entity
+// DecrementEntityMentionCount decrements the MentionCount on the vault's entity
 // record for the given name, floored at 0. No-ops if the record does not exist.
-// When the count reaches 0, the 0x23 reverse index is scanned to confirm no live
-// engrams still reference the entity (counts can be stale-high after a crash);
-// if none are found, the 0x1F entity record is deleted.
-// Safe for concurrent calls — uses per-entity locking.
-func (ps *PebbleStore) DecrementEntityMentionCount(ctx context.Context, name string) error {
-	mu := ps.getEntityLock(name)
+// When the count reaches 0, the 0x23 reverse index is scanned — bounded to THIS
+// vault — to confirm no live engrams in it still reference the entity (counts
+// can be stale-high after a crash); if none are found, the vault's 0x1F record
+// is deleted. The vault bound matters: 0x23 is keyed nameHash-then-ws, so an
+// unbounded scan would find another tenant's links and keep this vault's record
+// alive forever (#683).
+// Safe for concurrent calls — uses per-(vault, entity) locking.
+func (ps *PebbleStore) DecrementEntityMentionCount(ctx context.Context, ws [8]byte, name string) error {
+	mu := ps.getEntityLock(ws, name)
 	mu.Lock()
 	defer mu.Unlock()
 
-	existing, err := ps.GetEntityRecord(ctx, name)
+	existing, err := ps.GetEntityRecord(ctx, ws, name)
 	if err != nil {
 		return fmt.Errorf("decrement entity mention count: %w", err)
 	}
@@ -921,7 +944,7 @@ func (ps *PebbleStore) DecrementEntityMentionCount(ctx context.Context, name str
 	// the entity is genuinely orphaned and the 0x1F record is deleted.
 	if existing.MentionCount == 0 {
 		orphaned := true
-		revPrefix := keys.EntityReverseIndexPrefix(nameHash)
+		revPrefix := keys.EntityReverseIndexVaultPrefix(nameHash, ws)
 		iter, iterErr := PrefixIterator(ps.db, revPrefix)
 		if iterErr == nil {
 			if iter.First() {
@@ -930,7 +953,7 @@ func (ps *PebbleStore) DecrementEntityMentionCount(ctx context.Context, name str
 			iter.Close()
 		}
 		if orphaned {
-			return ps.db.Delete(keys.EntityKey(nameHash), pebble.NoSync)
+			return ps.db.Delete(keys.EntityKey(ws, nameHash), pebble.NoSync)
 		}
 	}
 
@@ -939,7 +962,7 @@ func (ps *PebbleStore) DecrementEntityMentionCount(ctx context.Context, name str
 	if err != nil {
 		return fmt.Errorf("decrement entity mention count: marshal: %w", err)
 	}
-	return ps.db.Set(keys.EntityKey(nameHash), val, pebble.NoSync)
+	return ps.db.Set(keys.EntityKey(ws, nameHash), val, pebble.NoSync)
 }
 
 // DecrementEntityCoOccurrence decrements the co-occurrence count for a pair of

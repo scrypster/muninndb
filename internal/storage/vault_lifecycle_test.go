@@ -116,9 +116,14 @@ func TestClearVault_RemovesEntityGraphForVault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"Shared", "OnlyA", "Shared", "OnlyB"} {
-		if err := store.UpsertEntityRecord(ctx, EntityRecord{Name: name, Type: "test", Confidence: 1}, "test"); err != nil {
-			t.Fatalf("UpsertEntityRecord %q: %v", name, err)
+	// Entity records are vault-scoped (#683): each vault owns its own copy of a
+	// shared name.
+	for _, e := range []struct {
+		ws   [8]byte
+		name string
+	}{{wsA, "Shared"}, {wsA, "OnlyA"}, {wsB, "Shared"}, {wsB, "OnlyB"}} {
+		if err := store.UpsertEntityRecord(ctx, e.ws, EntityRecord{Name: e.name, Type: "test", Confidence: 1}, "test"); err != nil {
+			t.Fatalf("UpsertEntityRecord %q: %v", e.name, err)
 		}
 	}
 	if err := store.WriteEntityEngramLink(ctx, wsA, engA, "Shared"); err != nil {
@@ -177,19 +182,35 @@ func TestClearVault_RemovesEntityGraphForVault(t *testing.T) {
 		t.Fatalf("expected Shared to keep only vault B reverse link, got %v", sharedLinks)
 	}
 
-	onlyA, err := store.GetEntityRecord(ctx, "OnlyA")
+	// Vault A's 0x1F records are range-deleted with the rest of its data.
+	onlyA, err := store.GetEntityRecord(ctx, wsA, "OnlyA")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if onlyA != nil {
-		t.Fatalf("expected orphaned entity OnlyA to be deleted, got %+v", onlyA)
+		t.Fatalf("expected cleared vault A entity OnlyA to be deleted, got %+v", onlyA)
 	}
-	shared, err := store.GetEntityRecord(ctx, "Shared")
+	sharedA, err := store.GetEntityRecord(ctx, wsA, "Shared")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shared == nil {
-		t.Fatal("expected Shared entity record to survive because vault B still references it")
+	if sharedA != nil {
+		t.Fatalf("expected cleared vault A entity Shared to be deleted, got %+v", sharedA)
+	}
+	// Vault B keeps its own copy — clearing a tenant must not touch another.
+	sharedB, err := store.GetEntityRecord(ctx, wsB, "Shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sharedB == nil {
+		t.Fatal("expected vault B's Shared entity record to survive the clear of vault A")
+	}
+	onlyB, err := store.GetEntityRecord(ctx, wsB, "OnlyB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyB == nil {
+		t.Fatal("expected vault B's OnlyB entity record to survive the clear of vault A")
 	}
 }
 

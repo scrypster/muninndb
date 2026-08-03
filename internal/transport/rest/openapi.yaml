@@ -116,6 +116,10 @@ components:
         idempotent_id:
           type: string
           description: "Caller-assigned deduplication key."
+        upsert_mode:
+          type: boolean
+          default: false
+          description: "When true with idempotent_id set, keep one stable memory per key: created on first use, evolved (superseding the previous version, which stays retrievable as history) when the content changes, and a no-op when the content is identical. Requires idempotent_id. On the evolve step only content, concept and importance are taken from the request; tags, confidence and trust are inherited from the previous version."
         memory_type:
           type: integer
           format: uint8
@@ -978,7 +982,13 @@ components:
           type: array
           items:
             type: string
-          description: "IDs of the archived source engrams."
+          description: >
+            IDs of the source engrams that were SUPERSEDED by the merged engram.
+            Each carries a declared `supersedes` edge from the merged engram plus
+            a closed validity window, exactly as an evolved predecessor does: they
+            leave present-day recall, a query matching their wording resolves to
+            the merged engram, and they remain reachable as lineage under `as_of`
+            and `include_invalid`. The field name is retained for compatibility.
         warnings:
           type: array
           items:
@@ -1335,6 +1345,11 @@ components:
         hebbian_enabled:
           type: boolean
           nullable: true
+          description: >
+            Hebbian co-activation learning. Symmetric (COG-32): gates weight
+            updates, association decay, and the read-side boost recall applies
+            from association weights. false means recall is never scored by
+            association weights.
         temporal_enabled:
           type: boolean
           nullable: true
@@ -1463,9 +1478,11 @@ components:
         embedded_count:
           type: integer
           format: int64
+          description: "Instance-wide by default; scoped to ?vault= when the request supplied one (#802)."
         total_count:
           type: integer
           format: int64
+          description: "Same scope as embedded_count — the two always share scope, so their ratio is a true coverage measure."
         indexing:
           type: boolean
 
@@ -1542,6 +1559,23 @@ components:
       type: object
       properties:
         model:
+          type: string
+
+    ResetRepairWatermarkRequest:
+      type: object
+      required: [which]
+      properties:
+        which:
+          type: string
+          enum: [evolve, assoc_weight, all]
+          description: "Which repair watermark to reset: 0x2B (evolve entity-link repair), 0x2E (full-weight association repair), or both."
+
+    ResetRepairWatermarkResponse:
+      type: object
+      properties:
+        vault:
+          type: string
+        which:
           type: string
 
     # ── Admin — backup ───────────────────────────────────────────────────────
@@ -1821,6 +1855,26 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    NotCortex:
+      description: |
+        This node is not the cluster's Cortex, and the operation writes.
+        In cluster mode writes are accepted only on the Cortex; a write
+        committed on a Lobe would never be replicated (#596). Retry against
+        the node named in the response headers. Never returned by a
+        standalone (non-cluster) server, and never for a read.
+      headers:
+        X-Muninn-Cortex-Id:
+          description: "Node id of the Cortex to retry against. Absent if no Cortex is currently known (mid-election)."
+          schema:
+            type: string
+        X-Muninn-Cortex-Addr:
+          description: "Cluster address of the Cortex to retry against. Absent if unknown."
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     Conflict:
       description: "Conflict with current state."
       content:
@@ -2006,6 +2060,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
@@ -2071,6 +2127,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2134,6 +2192,8 @@ paths:
                 $ref: "#/components/schemas/ForgetResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -2202,6 +2262,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2233,6 +2295,8 @@ paths:
                 $ref: "#/components/schemas/RestoreResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -2269,6 +2333,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2300,6 +2366,8 @@ paths:
                 $ref: "#/components/schemas/RetryEnrichResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -2352,6 +2420,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2463,6 +2533,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2647,7 +2719,7 @@ paths:
   /api/consolidate:
     post:
       tags: [cognitive]
-      summary: "Merge multiple engrams into a single canonical engram."
+      summary: "Merge multiple engrams into a single canonical engram, superseding the sources."
       security:
         - BearerAuth: []
       requestBody:
@@ -2667,6 +2739,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2693,6 +2767,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2793,6 +2869,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
     get:
       tags: [admin-keys]
       summary: "List all API keys for a vault."
@@ -2845,6 +2923,8 @@ paths:
                     type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -2874,6 +2954,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2912,6 +2994,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2940,6 +3024,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2996,6 +3082,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -3026,6 +3114,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -3058,6 +3148,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -3094,6 +3186,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -3131,6 +3225,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -3172,6 +3268,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -3299,6 +3397,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -3321,6 +3421,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReindexFTSResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/admin/vaults/{name}/repair-watermark/reset:
+    post:
+      tags: [admin-vaults]
+      summary: "Reset a per-vault repair watermark (0x2B evolve entity-link repair, 0x2E full-weight association repair, or both) so the next boot re-scans."
+      description: "Node-local: neither repair pass is leader-gated or replicated (each cluster node runs its own startup pass), so this resets THIS node's own watermark only."
+      security:
+        - AdminSession: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetRepairWatermarkRequest"
+      responses:
+        "200":
+          description: "Watermark(s) reset."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResetRepairWatermarkResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -3355,6 +3492,8 @@ paths:
                 $ref: "#/components/schemas/JobResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -3366,6 +3505,17 @@ paths:
     get:
       tags: [admin-system]
       summary: "Return the current embedder configuration and indexing progress."
+      parameters:
+        - name: vault
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >-
+            Scope embedded_count/total_count to this vault (#802). Omitted or empty
+            means instance-wide (the historical behavior). rate_per_sec/eta_seconds
+            remain instance-wide regardless of this parameter — throughput is not
+            tracked per vault.
       security:
         - AdminSession: []
       responses:
@@ -3547,7 +3697,15 @@ paths:
   /api/admin/cluster/enable:
     post:
       tags: [cluster]
-      summary: "Enable cluster mode on this node."
+      summary: "Persist cluster configuration on this node (restart required to activate)."
+      description: >
+        Saves cluster.yaml and returns 202 Accepted with restart_required=true.
+        Clustering is NOT started in the running process: the storage layer's
+        replication hook is wired when the store is built at boot, so a
+        coordinator created afterwards would report itself enabled and replicate
+        none of this node's writes. Restart muninn to activate clustering.
+        Returns 200 with enabled=true only when clustering is already running,
+        in which case the call is a no-op.
       security:
         - AdminSession: []
       requestBody:
@@ -3558,7 +3716,7 @@ paths:
               $ref: "#/components/schemas/EnableClusterRequest"
       responses:
         "200":
-          description: "Cluster enabled."
+          description: "Cluster was already running; no change."
           content:
             application/json:
               schema:
@@ -3567,6 +3725,24 @@ paths:
                   enabled:
                     type: boolean
                   role:
+                    type: string
+        "202":
+          description: "Configuration saved. Restart this node to start clustering."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                    description: "Always false — configured, not running."
+                  configured:
+                    type: boolean
+                  restart_required:
+                    type: boolean
+                  role:
+                    type: string
+                  message:
                     type: string
         "400":
           $ref: "#/components/responses/BadRequest"

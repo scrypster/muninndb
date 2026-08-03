@@ -83,6 +83,23 @@ and remain the reviewer's job.
 8. **A new Pebble prefix** → see `keyspace-registry.md`: disjoint, and added to
    `internal/prefix/prefix.All()` (the single source of truth). The disjointness tests in
    `internal/prefix/prefix_test.go` auto-tighten — there is no `storageMaxPrefix` to bump.
+   Two things that do NOT auto-tighten: the hard-coded `owners` slice in
+   `TestAll_OwnerGroupsPairwiseDisjoint` (a new owner string silently opts out of the
+   pairwise check until it is listed) and the `named` slice in
+   `TestAll_ConstSliceComplete`. Also check whether the prefix is vault-scoped: if it is,
+   it belongs in one or more of the four lists pinned by
+   `internal/storage/prefix_lists_test.go`; if it is global (as `prefix.Replication` is),
+   say so in the registry row so the next reader does not have to re-derive it. And obey
+   STO-14's general rule: **never mix fixed-width hash-keyed with fixed-width
+   sequence-keyed records under one prefix** — that was #726.
+
+   **Changing the SCOPE of an existing prefix is the same obligation plus a migration.**
+   #683 moved 0x1F from global to vault-scoped: that meant a new key length, the
+   `prefix.All()` category, membership in `clearVaultDataPrefixes` (and its scope test),
+   the registry row, an invariant (STO-17), and migration v6 — plus a `MaxRegisteredVersion`
+   bump that a previous migration's registration test pinned to an exact value and therefore
+   broke. Check for that pin: `TestRegisterMigrations_IncludesV5` asserted `== 5`. Pin the
+   exact value in the NEWEST migration's test and assert only a floor in the older ones.
 
 9. **Any `go build` of the muninn binary** → must keep `-tags localassets`. Enforced by
    `scripts/check-build-tags.sh` (CI `shellcheck` job), but that script only scans the
@@ -96,7 +113,16 @@ and remain the reviewer's job.
 11. **Anything under `internal/replication/` or a new write path in a cluster deployment** →
     confirm it goes through `RepLogAppend` and is leader-gated or Cortex-originated (bug
     #596 is exactly the absence of this). Background workers that mutate replicated state
-    (the pruner) inherit the obligation.
+    (the pruner) inherit the obligation. Since #826 the callback is built by
+    `replication.LocalAppendFunc`, which suppresses the append on a node whose role is
+    *definitively* follower — **know which way a role gate fails.** `IsFollower()` is
+    false for `RoleUnknown` on purpose: suppressing leader work on a node that turns out
+    to be the leader loses data, while doing it on a follower only wastes resources. A gate
+    written the other way (`if !IsLeader() { skip }`) would drop every write accepted during
+    the startup window out of the stream its followers read, silently and permanently.
+    Equally: anything that filters keys out of a snapshot (`skipFromSnapshot`) must keep
+    replication METADATA flowing — dropping the seq counter restarts a promoted node's log
+    at 1.
 
 12. **A new async worker or fire-and-forget path on the write or scoring path**
     (`internal/engine`, `internal/engine/activation`, `internal/storage`) → give it a
@@ -105,6 +131,29 @@ and remain the reviewer's job.
     `testing-hermeticity.md`. Any test asserting on that worker's output must drain it
     deterministically — `time.Sleep` is not synchronization and flakes under `-race` on
     constrained CI cores (#722).
+
+13. **A new field on `activation.ActivateRequest` that gates a scoring phase**
+    → audit EVERY constructor (`rg 'activation\.ActivateRequest\{'`) and add a pinning
+    test that the production path (`internal/engine.Activate`) sets it. There is exactly
+    ONE production constructor and dozens of test ones, so a bool defaulting to `false` is
+    a silent behaviour change for every in-tree fixture that relied on the phase. COG-32's
+    `HebbianEnabled` did exactly this: four fixtures seed `AssocLog().Record(...)` plus
+    `store.assocs` and their priming went inert until they were updated with the gate, and
+    one of them (`abstention_gate_measure_test.go`) reported a collapsed both-arms-equal
+    result that its own both-metric rule correctly rejected. That failure is the desirable
+    shape — but only because a standing corpus happened to cover it.
+
+14. **A trial/measurement seam behind `//go:build cognitiontrial`**
+    (`internal/storage/trial_clock_cognitiontrial.go`,
+    `internal/cognitive/replay_cognitiontrial.go`) → CI never passes this tag, so nothing
+    checks these files compile. Build them explicitly when you touch the packages they
+    reach into: `go build -tags 'localassets cognitiontrial' ./... && go vet -tags
+    'localassets cognitiontrial' ./...`. The cognition-trial acceptance rule
+    (`internal/engine/cognition_trial_rule_test.go`) is deliberately tagged
+    `localassets || cognitiontrial` so its own unit tests DO run in CI — a rule that
+    decides whether a subsystem lives must itself be tested.
+
+15. **A path that rewrites an ALREADY-indexed engram's FTS entries** (`internal/index/fts/`) → call `fts.ReindexEngram`, never `DeleteEngram` followed by `IndexEngram`. The pair is not statistics-neutral — `IndexEngram` bumps `TotalEngrams`/`AvgDocLen` and increments `df_t` for every term of the document, `DeleteEngram` decrements neither — so it silently decays the engram's own BM25 score on every call (COG-24; measured −82.6% over 100 retags, #720). **One carve-out, named by mechanism:** a FULL-VAULT rebuild that first range-tombstones the 0x08 global-stats and 0x09 per-term-stats prefixes via `store.ClearFTSKeys` may call `IndexEngram` on already-indexed engrams — `Engine.ReindexFTSVault` does (`internal/engine/engine_reindex_fts.go:67` clears, `:80` re-indexes), and it is correct precisely because the stats it would otherwise inflate no longer exist. Do **not** read this as "unless the stats are handled": if a path has not range-tombstoned 0x08/0x09, it is in violation. There is no automated check: nothing stops a new call site from pairing them, and nothing distinguishes a legitimate post-`ClearFTSKeys` rebuild from an illegitimate in-place one. 🪝
 
 ## Live drift found during the guardian audit (worth fixing)
 
@@ -150,6 +199,44 @@ wall-clock. Jobs (from `.github/workflows/ci.yml`, real recent timings):
 | `node-sdk` | 15–20s | `npm ci` + `tsc` + vitest for `sdk/node`. Before it existed the SDK was first compiled by `publish-sdk.yml` at tag time |
 | `web-unit` | 15–25s | `npm test` for `web/`. Before it existed the vitest suites there ran nowhere |
 
+**Per-package `-race` headroom, measured (#815).** The `go` job runs `go test -race
+./... -timeout 300s`, and the per-package timeout is the real cliff: crossing it produces a
+panic dump of every goroutine, not a failed assertion. `internal/engine` is the largest
+package and the one nearest that cliff. #815 reported it at **293.3s under the full
+parallel invocation — 7 seconds of headroom** and flagged that nobody had measured a
+parallel baseline. That baseline now exists: **six runs of the exact CI invocation on an
+18-core Apple Silicon machine, across two tree states, put `internal/engine` at 187.4 /
+188.6 / 190.7 / 195.3 / 200.9 / 215.9s** — 84-113s of headroom, 28-38%, not 7s. Isolated
+(not parallel) it is 172.0s, so contention costs ~15-45s here rather than the ~99s the
+issue extrapolated; the 293.3s single sample did not reproduce. The 215.9s outlier came
+from a run with other work on the machine, which is worth stating rather than dropping:
+the spread is dominated by ambient load, and that is the most likely explanation of the
+293.3s original too. Two independent cross-checks
+agree: the `go` job's own 3.5-4 min wall time in the table above cannot contain a 293s
+package, and the in-tree reduction documented at
+`cognition_trial_diagnostic_test.go` ("the whole package sat at 256s of its 300s budget")
+landed after that sample was taken.
+
+**The distribution, which is not what #815 assumed.** It described "a long tail under 3s —
+accumulation, not one offender", led by `TestConcurrentWriteActivate_StressSmall` (5.5s)
+and `TestCrossVault_FacetDFBoundary` (3.9s). That is no longer true. Of a 214.7s CPU-sum
+over 698 top-level tests, **five `TestCognitionTrial*` tests account for 47.4s (22%)**:
+`DilutionInvariance` 20.6s, `AdditivityDoesNotConvergeAndIsNotAGate` 10.6s,
+`UnmeasuredMRRIsNotAMeasuredZero` 9.1s, `EveryDeltaNMustBindToTheSameSeries` 5.8s,
+`AdditivityBreaksDecodeToAHarmfulMechanism` 1.5s. They are deterministic single-goroutine
+bootstrap arithmetic, so `-race` pays ~10x for a schedule it cannot find anything in. They
+are in CI deliberately (obligation 14: a rule that decides whether a subsystem lives must
+itself be tested), and they have **already** been through a measured reduction round whose
+levers and rejected alternatives are documented in place — resample counts are load-bearing
+for the U5 half-width gate, and cutting them further is statistics work, not budget
+trimming. Left alone on that basis, with the numbers recorded so the next person starts
+from a measurement.
+
+**Still unmeasured, and only CI can close it:** every figure above is one workstation.
+`ubuntu-latest` has far fewer cores, so ~40 concurrent package binaries contend harder
+there. The `go` job's reported duration is the cheapest proxy; watch it rather than
+inferring from a laptop.
+
 Critical path: `go` → (`cli-integration` ∥ `playwright-e2e`) → `python-sdk`. What's cached:
 embed assets (~130MB, keyed by ORT+model+platform), Go module cache, and npm for the two
 lockfile-scoped jobs (`node-sdk`, `web-unit`). npm is **not** cached in the jobs that build
@@ -166,6 +253,16 @@ rather than in the default `go test ./...` path.
 ## Testing conventions worth upholding
 
 - **RED-sanity verification**: a bug-fix/race-fix test must be shown to fail without the fix.
+  `no tests to run` is a FAILED RED check — `go test -run` exits 0 saying `ok` when nothing
+  matched, and so does a file the toolchain excluded by filename (#814, guarded by
+  `scripts/check-filename-build-constraints.sh` in the `shellcheck` job).
+- **Claim discipline** (`claim-discipline.md`): a set named in prose is regenerated by a
+  test from a mechanism; a guard states what it does not catch; *cannot/never* means
+  structurally unrepresentable and says why inline, otherwise *is refused unless* plus the
+  residual; every number carries its denominator, N and machine.
+- **The standing corpora are `make corpora`** — the four `TestMeasure*` harnesses in
+  `internal/engine/activation`, normalised into a diffable `.artifacts/corpora.txt`. They
+  also run inside `go test ./...`; the target exists to produce the diff.
 - **Preset-pinning `reflect.DeepEqual` tests** for derived config (#599).
 - **Registry-parity smoke** for the MCP tool surface (`smoke_exhaustive_test.go`).
 - **Cross-package disjointness test** for Pebble prefixes, derived from `prefix.All()`

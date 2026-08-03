@@ -42,7 +42,7 @@ type EnrichmentCandidate struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	MissingStages []string
-	DigestFlags   uint8
+	DigestFlags   uint16
 }
 
 // EnrichmentApplyEntity is one externally generated entity result.
@@ -78,11 +78,11 @@ type EnrichmentApplyResult struct {
 	ID            storage.ULID
 	AppliedStages []string
 	UpdatedAt     time.Time
-	DigestFlags   uint8
+	DigestFlags   uint16
 }
 
 // stageToFlag maps a stage name to its DigestFlag bit.
-var stageToFlag = map[string]uint8{
+var stageToFlag = map[string]uint16{
 	"entities":       plugin.DigestEntities,
 	"relationships":  plugin.DigestRelationships,
 	"classification": plugin.DigestClassified,
@@ -104,7 +104,7 @@ var defaultReplayStages = []string{"entities", "relationships", "classification"
 // The method requires an EnrichPlugin to be registered via SetEnrichPlugin.
 // If no plugin is configured and dryRun is false, an error is returned.
 func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []string, limit int, dryRun bool) (*ReplayEnrichmentResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	stageMask, validStages, seen, err := normalizeEnrichmentStages(stages)
@@ -267,7 +267,7 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 					Type:       entity.Type,
 					Confidence: entity.Confidence,
 				}
-				if upsertErr := e.store.UpsertEntityRecord(ctx, record, "replay:enrich"); upsertErr != nil {
+				if upsertErr := e.store.UpsertEntityRecord(ctx, ws, record, "replay:enrich"); upsertErr != nil {
 					slog.Warn("replay enrichment: UpsertEntityRecord failed",
 						"id", eng.ID.String(), "name", entity.Name, "err", upsertErr)
 					continue
@@ -451,7 +451,7 @@ func (e *Engine) GetEnrichmentCandidates(ctx context.Context, vault string, stag
 
 // ApplyEnrichment persists explicit agent-generated enrichment output.
 func (e *Engine) ApplyEnrichment(ctx context.Context, vault string, req *EnrichmentApplyRequest) (*EnrichmentApplyResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	if req == nil {
@@ -523,7 +523,7 @@ func (e *Engine) ApplyEnrichment(ctx context.Context, vault string, req *Enrichm
 				Type:       entity.Type,
 				Confidence: entity.Confidence,
 			}
-			if err := e.store.UpsertEntityRecord(ctx, record, source); err != nil {
+			if err := e.store.UpsertEntityRecord(ctx, ws, record, source); err != nil {
 				return nil, fmt.Errorf("apply enrichment: upsert entity %q: %w", entity.Name, err)
 			}
 			if err := e.store.WriteEntityEngramLink(ctx, ws, id, entity.Name); err != nil {
@@ -600,11 +600,11 @@ func countNonNilEngrams(engrams []*storage.Engram) int {
 	return n
 }
 
-func normalizeEnrichmentStages(stages []string) (uint8, []string, map[string]bool, error) {
+func normalizeEnrichmentStages(stages []string) (uint16, []string, map[string]bool, error) {
 	if len(stages) == 0 {
 		stages = defaultReplayStages
 	}
-	stageMask := uint8(0)
+	stageMask := uint16(0)
 	validStages := make([]string, 0, len(stages))
 	seen := make(map[string]bool, len(stages))
 	for _, s := range stages {
@@ -631,7 +631,7 @@ func normalizeExplicitEnrichmentStages(stages []string) (map[string]bool, error)
 	return seen, nil
 }
 
-func missingStagesForFlags(flags uint8, stages []string) []string {
+func missingStagesForFlags(flags uint16, stages []string) []string {
 	missing := make([]string, 0, len(stages))
 	for _, stage := range stages {
 		if flags&stageToFlag[stage] == 0 {

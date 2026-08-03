@@ -72,15 +72,34 @@ func WriteRawTagIndexEntry(batch *pebble.Batch, ws [8]byte, tag string, id [16]b
 // a value that WAS written could not have contained a NUL, so this is a no-op
 // in that case regardless.
 func DeleteRawTagIndexEntry(batch *pebble.Batch, ws [8]byte, tag string, id [16]byte) {
-	tagKey, value, ok := SplitRawTagKV(tag)
+	k, ok := RawTagIndexKeyFor(ws, tag, id)
 	if !ok {
 		return
 	}
-	if strings.IndexByte(value, 0x00) >= 0 {
-		return
-	}
-	k := keys.RawTagRangeKey(ws, keys.Hash(tagKey), []byte(value), id)
 	batch.Delete(k, nil)
+}
+
+// RawTagIndexKeyFor derives the 0x2C key tag WOULD occupy for id, reporting
+// ok=false for a tag that is never indexed (no ':') or could never have been
+// written (NUL in the value). It is the single derivation shared by the delete
+// path above and by callers that must DIFF two tag sets by the key each tag
+// actually occupies.
+//
+// Diffing on the derived key rather than on the tag string is what makes a
+// removal pass collision-safe: the key hashes the tag KEY to 4 bytes
+// (keys.Hash), so two distinct tag keys can collide, and a diff computed on
+// strings would then delete an entry the surviving tag still needs. Comparing
+// keys degrades a collision into a retained orphan — the pre-existing, safe
+// behaviour — instead of a lost index entry.
+func RawTagIndexKeyFor(ws [8]byte, tag string, id [16]byte) ([]byte, bool) {
+	tagKey, value, ok := SplitRawTagKV(tag)
+	if !ok {
+		return nil, false
+	}
+	if strings.IndexByte(value, 0x00) >= 0 {
+		return nil, false
+	}
+	return keys.RawTagRangeKey(ws, keys.Hash(tagKey), []byte(value), id), true
 }
 
 // ScanRawTagRange scans the 0x2C raw-tag-range index for tagKey within

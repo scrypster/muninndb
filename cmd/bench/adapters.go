@@ -27,11 +27,12 @@ func (a *benchHebbianAdapter) UpdateAssocWeightBatch(ctx context.Context, update
 	storageUpdates := make([]storage.AssocWeightUpdate, len(updates))
 	for i, u := range updates {
 		storageUpdates[i] = storage.AssocWeightUpdate{
-			WS:         u.WS,
-			Src:        storage.ULID(u.Src),
-			Dst:        storage.ULID(u.Dst),
-			Weight:     u.Weight,
-			CountDelta: u.CountDelta,
+			WS:              u.WS,
+			Src:             storage.ULID(u.Src),
+			Dst:             storage.ULID(u.Dst),
+			Weight:          u.Weight,
+			CountDelta:      u.CountDelta,
+			LastActivatedAt: u.LastActivatedAt,
 		}
 	}
 	return a.store.UpdateAssocWeightBatch(ctx, storageUpdates)

@@ -47,6 +47,27 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 		if eng == nil {
 			continue
 		}
+		// #728: an already-archived (or soft-deleted) engram is dedup's OWN
+		// output — GetEngrams/scanAllEngramIDs do not filter by lifecycle
+		// state, so without this check a member this phase archived on an
+		// earlier run (or an earlier cluster in the SAME run) keeps
+		// reappearing in every future cluster it embeds near. That is
+		// silently harmless when the whole cluster fits under one run's
+		// MaxDedup — the absorb loop just re-issues an idempotent archive —
+		// but it BREAKS the hard cap's deferral guarantee: a cluster larger
+		// than the remaining budget is trimmed to its FIRST N members in
+		// cluster order, and if the already-archived member keeps sorting
+		// into that same leading position, the next run spends its whole
+		// budget re-selecting it and never reaches the genuinely still-live
+		// duplicate — "deferred" would silently become "never," which is
+		// exactly the kind of plausible-looking wrong answer this project
+		// treats as worse than an honest failure. Skipping a non-live state
+		// here is also just correct on its own terms: dedup's job is to
+		// reduce the set of engrams recall still serves, and an
+		// already-retired one is not a candidate for that job twice.
+		if eng.State == storage.StateArchived || eng.State == storage.StateSoftDeleted {
+			continue
+		}
 		embed := eng.Embedding
 		if len(embed) == 0 {
 			if loaded, err := store.GetEmbedding(ctx, wsPrefix, eng.ID); err == nil && len(loaded) > 0 {
@@ -146,6 +167,32 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 				continue
 			}
 			absorbable = append(absorbable, member)
+		}
+
+		// #728: MaxDedup is a HARD per-run cap, not a per-cluster one — trim
+		// this cluster's absorbable set to whatever budget remains BEFORE
+		// tags/frequency are folded from it, so a single cluster larger than
+		// the remaining budget cannot make report.MergedEngrams overshoot
+		// w.MaxDedup. The top-of-loop check above only stops the NEXT
+		// cluster from starting; without this trim, a cluster already in
+		// progress always finished in full regardless of the cap (the
+		// mechanism a large duplicate cluster — e.g. many-times-repeated
+		// auto-ingest captures — could exceed the configured rate limit by
+		// its own size). The untrimmed members are left live, exactly as if
+		// their cluster had not been visited yet: the next run re-scans,
+		// reclusters them (the already-archived siblings are gone from
+		// allEngrams by then), and finishes the merge — nothing is lost,
+		// only deferred across runs. Pinned by TestDedup_RespectsMaxDedupCap
+		// (exact-equality hard-cap assertion) and
+		// TestDedup_MaxDedupCapDefersRestOfClusterToNextRun.
+		if remaining := w.MaxDedup - report.MergedEngrams; remaining < len(absorbable) {
+			if remaining < 0 {
+				remaining = 0
+			}
+			absorbable = absorbable[:remaining]
+		}
+		if len(absorbable) == 0 {
+			continue
 		}
 
 		// Merge tags from the survivor + only the ABSORBABLE (true-duplicate)

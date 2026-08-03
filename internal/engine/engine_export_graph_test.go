@@ -42,11 +42,11 @@ func writeEntityRelationship(t *testing.T, eng *Engine, vault, fromName, fromTyp
 	require.NoError(t, err)
 
 	// Upsert entity records so GetEntityRecord works.
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name: fromName, Type: fromType, Confidence: 1.0,
 	}, "test")
 	require.NoError(t, err)
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name: toName, Type: toType, Confidence: 1.0,
 	}, "test")
 	require.NoError(t, err)
@@ -250,10 +250,10 @@ func TestExportGraph_DeterministicOrder(t *testing.T) {
 			Source:     "test",
 		})
 		// Also upsert entity records.
-		_ = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+		_ = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 			Name: e.from, Type: e.fromType, Confidence: 1.0,
 		}, "test")
-		_ = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+		_ = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 			Name: e.to, Type: e.toType, Confidence: 1.0,
 		}, "test")
 	}

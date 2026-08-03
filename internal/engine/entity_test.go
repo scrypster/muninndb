@@ -14,6 +14,7 @@ func TestInlineEntities_StoredInEntityTable(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := context.Background()
+	ws := eng.store.ResolveVaultPrefix("default")
 
 	resp, err := eng.Write(ctx, &mbp.WriteRequest{
 		Vault:   "default",
@@ -27,7 +28,7 @@ func TestInlineEntities_StoredInEntityTable(t *testing.T) {
 	require.NotEmpty(t, resp.ID)
 
 	// Entity should be in the entity table (lookup via normalized name).
-	record, err := eng.store.GetEntityRecord(ctx, "postgresql")
+	record, err := eng.store.GetEntityRecord(ctx, ws, "postgresql")
 	require.NoError(t, err)
 	require.NotNil(t, record, "inline entity should be stored in entity table")
 	require.Equal(t, "PostgreSQL", record.Name)
@@ -73,6 +74,7 @@ func TestInlineEntities_MultipleEntities(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := context.Background()
+	ws := eng.store.ResolveVaultPrefix("default")
 
 	_, err := eng.Write(ctx, &mbp.WriteRequest{
 		Vault:   "default",
@@ -88,7 +90,7 @@ func TestInlineEntities_MultipleEntities(t *testing.T) {
 
 	// All entities should be stored.
 	for _, name := range []string{"postgresql", "redis", "payment-service"} {
-		record, err := eng.store.GetEntityRecord(ctx, name)
+		record, err := eng.store.GetEntityRecord(ctx, ws, name)
 		require.NoError(t, err)
 		require.NotNilf(t, record, "entity %q should be stored in entity table", name)
 	}

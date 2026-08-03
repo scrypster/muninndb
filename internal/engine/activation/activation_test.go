@@ -107,6 +107,14 @@ func (s *stubStore) GetAssociations(_ context.Context, _ [8]byte, ids []storage.
 	return result, nil
 }
 
+// GetRankingNeighbors: the stub holds a single forward adjacency map with no
+// 0x04 reverse index to union, so the honest stub behaviour is the forward
+// list. The union itself is covered where it lives — storage-level
+// (TestGetRankingNeighbors_*) and end-to-end (TestHebbianBoost_IsSymmetricInPairOrder).
+func (s *stubStore) GetRankingNeighbors(ctx context.Context, ws [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error) {
+	return s.GetAssociations(ctx, ws, ids, maxPerNode)
+}
+
 func (s *stubStore) RecentActive(_ context.Context, _ [8]byte, topK int) ([]storage.ULID, error) {
 	if topK > len(s.recent) {
 		topK = len(s.recent)
@@ -317,6 +325,11 @@ type emptyHNSW struct{}
 func (h *emptyHNSW) Search(_ context.Context, _ [8]byte, _ []float32, _ int) ([]activation.ScoredID, error) {
 	return nil, nil
 }
+
+// actHebScale is the pointer form of activation.Weights.ACTRHebScale, which is
+// optional so that an explicit 0 ("no cognitive boost") is distinguishable from
+// unset. See the field comment in activation/engine.go.
+func actHebScale(v float32) *float32 { return &v }
 
 // newTestEngine creates an ActivationEngine backed by the provided stubs.
 // If hnsw is nil a no-op stub is used to avoid nil interface panics.
@@ -1138,7 +1151,7 @@ func TestDisableACTR_VsACTR_DifferentScores(t *testing.T) {
 			FullTextRelevance:  0.4,
 			UseACTR:            true,
 			ACTRDecay:          0.5,
-			ACTRHebScale:       4.0,
+			ACTRHebScale:       actHebScale(4.0),
 		},
 	})
 	if err != nil {
@@ -1417,7 +1430,7 @@ func TestUseRRFFusion_ProducesDifferentScoresFromACTR(t *testing.T) {
 			FullTextRelevance:  0.4,
 			UseACTR:            true,
 			ACTRDecay:          0.5,
-			ACTRHebScale:       4.0,
+			ACTRHebScale:       actHebScale(4.0),
 		},
 	})
 	if err != nil {

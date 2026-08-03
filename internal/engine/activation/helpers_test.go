@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
 	"strings"
 	"testing"
@@ -12,6 +13,26 @@ import (
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
+
+// captureWarn runs fn with the default slog logger redirected into a buffer and
+// returns everything it emitted.
+//
+// Principle #2 has two halves — degrade GRACEFULLY and degrade LOUDLY — and only
+// the graceful half is normally observable from a test, so the loud half tends to
+// go unpinned: deleting a slog.Warn leaves the suite green. This makes asserting
+// on it as cheap as asserting on the returned value.
+//
+// It mutates process-global state (slog.SetDefault), so a test using it must not
+// call t.Parallel().
+func captureWarn(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
 
 // ---------------------------------------------------------------------------
 // Tests for package-internal helpers: extractTimeBounds, PassesMetaFilter,
@@ -192,7 +213,7 @@ func TestResolveWeights_WithRequest(t *testing.T) {
 		SemanticSimilarity: 0.5,
 		FullTextRelevance:  0.3,
 		ACTRDecay:          0.7,
-		ACTRHebScale:       6.0,
+		ACTRHebScale:       f32p(6.0),
 	}
 	rw := resolveWeights(req, DefaultWeights{})
 	if rw.ACTRDecay < 0.69 || rw.ACTRDecay > 0.71 {
@@ -497,6 +518,12 @@ func (s *internalStubStore) GetAssociations(_ context.Context, _ [8]byte, ids []
 		result[id] = assocs
 	}
 	return result, nil
+}
+
+// GetRankingNeighbors: see the note on stubStore.GetRankingNeighbors — this
+// stub has no 0x04 reverse index, so the forward list is the honest answer.
+func (s *internalStubStore) GetRankingNeighbors(ctx context.Context, ws [8]byte, ids []storage.ULID, maxPerNode int) (map[storage.ULID][]storage.Association, error) {
+	return s.GetAssociations(ctx, ws, ids, maxPerNode)
 }
 
 func (s *internalStubStore) RecentActive(_ context.Context, _ [8]byte, topK int) ([]storage.ULID, error) {

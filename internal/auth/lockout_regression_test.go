@@ -36,14 +36,14 @@ func TestLockoutRegression_AllThreeBugsClosed(t *testing.T) {
 	// collide with auth's pre-relocation AdminUser prefix and falsely trip
 	// AdminExists). Key: 0x11 | id(16) = 17 bytes; value: 1-byte flag.
 	const numDigestFlags = 3
-	const flag = uint8(0x01)
+	const flag = uint16(0x01)
 	for i := 0; i < numDigestFlags; i++ {
 		var id [16]byte
 		id[15] = byte(i)
 		key := make([]byte, 1+16)
 		key[0] = prefix.DigestFlags
 		copy(key[1:], id[:])
-		if err := db.Set(key, []byte{flag}, pebble.Sync); err != nil {
+		if err := db.Set(key, []byte{byte(flag)}, pebble.Sync); err != nil {
 			t.Fatalf("seed DigestFlags[%d]: %v", i, err)
 		}
 	}

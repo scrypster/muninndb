@@ -296,39 +296,13 @@ func TestResolveVault_NoPinned_NoArg_DefaultsToDefault(t *testing.T) {
 	}
 }
 
-// --- isMutatingTool unit tests ---
-
-func TestIsMutatingTool_MutatingSet(t *testing.T) {
-	mutating := []string{
-		"muninn_remember", "muninn_remember_batch", "muninn_remember_tree",
-		"muninn_add_child", "muninn_forget", "muninn_link", "muninn_evolve",
-		"muninn_consolidate", "muninn_decide", "muninn_restore",
-		"muninn_retry_enrich", "muninn_entity_state", "muninn_entity_state_batch",
-		"muninn_merge_entity", "muninn_replay_enrichment", "muninn_feedback",
-	}
-	for _, name := range mutating {
-		if !isMutatingTool(name) {
-			t.Errorf("isMutatingTool(%q) should be true", name)
-		}
-	}
-}
-
-func TestIsMutatingTool_ReadSet(t *testing.T) {
-	readonly := []string{
-		"muninn_recall", "muninn_read", "muninn_status", "muninn_session",
-		"muninn_contradictions", "muninn_traverse", "muninn_explain",
-		"muninn_state", "muninn_list_deleted", "muninn_guide",
-		"muninn_where_left_off", "muninn_recall_tree",
-		"muninn_find_by_entity", "muninn_entity_clusters", "muninn_export_graph",
-		"muninn_similar_entities", "muninn_entity_timeline", "muninn_provenance",
-		"muninn_entity", "muninn_entities",
-	}
-	for _, name := range readonly {
-		if isMutatingTool(name) {
-			t.Errorf("isMutatingTool(%q) should be false", name)
-		}
-	}
-}
+// The two hand-typed classification lists that used to live here
+// (TestIsMutatingTool_MutatingSet / _ReadSet) are gone. Neither was
+// exhaustive, so neither could catch the drift that produced #731 — the
+// mutating list had itself drifted to 16 of the 23 names the classifier then
+// covered, and no test noticed. Both are replaced by the census in
+// tool_classification_test.go, which is checked against the registry in both
+// directions.
 
 // --- Integration: dispatchToolCall mode enforcement via HTTP ---
 
@@ -622,14 +596,150 @@ func TestToolClassification_CoversAllRegisteredHandlers(t *testing.T) {
 	}
 }
 
-// TestToolClassification_UnknownToolDefaultDeny verifies that an unknown tool
-// name is classified as neither mutating nor read-only (fail-closed).
-func TestToolClassification_UnknownToolDefaultDeny(t *testing.T) {
-	if isMutatingTool("muninn_nonexistent") {
-		t.Error("unknown tool should not be classified as mutating")
+// TestToolClassification_StateIsMutating pins the classification of
+// muninn_state directly (#731). It was listed in isReadOnlyTool even though its
+// handler calls Engine.UpdateLifecycleState — a write. Coverage tests only prove
+// every tool sits in exactly one bucket, never that the bucket is correct, so
+// the classification of a writing tool needs its own assertion.
+func TestToolClassification_StateIsMutating(t *testing.T) {
+	if !isMutatingTool("muninn_state") {
+		t.Error("muninn_state writes an engram's lifecycle state — must be classified mutating")
 	}
-	if isReadOnlyTool("muninn_nonexistent") {
-		t.Error("unknown tool should not be classified as read-only")
+	if isReadOnlyTool("muninn_state") {
+		t.Error("muninn_state must not be classified read-only")
+	}
+	// Not additive: it transitions an EXISTING engram (including to "archived"),
+	// so append-mode credentials must not reach it.
+	if isAdditiveTool("muninn_state") {
+		t.Error("muninn_state modifies an existing engram — must not be additive")
+	}
+}
+
+// TestDispatch_ObserveMode_BlocksStateTransition is the regression test for
+// #731: an observe-mode mk_ key could call muninn_state and archive or
+// reactivate any engram, because muninn_state was classified read-only. Unlike
+// append mode — which Engine.UpdateLifecycleState backstops via refuseAppend —
+// observe mode has no engine-level guard, so the dispatch gate was the only
+// thing standing between a read-only credential and a write.
+func TestDispatch_ObserveMode_BlocksStateTransition(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID:    "obs731",
+		Vault: "walled",
+		Mode:  auth.ModeObserve,
+	})
+	srv := newAuthTestServer(store)
+	body := mkToolCallBody("muninn_state", map[string]any{
+		"vault": "walled",
+		"id":    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		"state": "archived",
+	})
+
+	w := doAuthenticatedPost(srv, "mk_obs731", body)
+
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatal("observe-mode key must not be able to transition an engram's lifecycle state")
+	}
+	// Assert the mode gate specifically. A -32602 from argument validation would
+	// otherwise let this test pass while the tool stayed reachable.
+	if resp.Error.Code != -32001 {
+		t.Errorf("error code = %d, want -32001 (mode enforcement); got message: %s",
+			resp.Error.Code, resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "forbidden") {
+		t.Errorf("expected 'forbidden' in error, got: %s", resp.Error.Message)
+	}
+}
+
+// TestDispatch_WriteMode_AllowsStateTransition pins the OTHER direction of the
+// #731 reclassification. Write mode admits only tools classified mutating, so
+// while muninn_state sat in isReadOnlyTool a write-mode credential was *denied*
+// it; now it is allowed. Without this test a future revert to read-only would be
+// caught for observe and ride along silently for write.
+//
+// The grant follows from the two buckets being complementary over every
+// registered tool: a tool cannot be denied to observe AND write, so denying
+// write would take a third, full-only predicate. It is acceptable because it
+// grants write mode a SECOND tool for a capability it already had, not a new
+// capability — see TestDispatch_WriteMode_AllowsCompareAndSetArchive.
+//
+// REST is not the counter-example it looks like. PUT /api/engrams/{id}/state is
+// ReadOnlyGuard(WriteOnlyGuard(...)), but internal/transport/rest/server.go
+// documents that guard pair as exfiltration prevention for routes that "return
+// engram data in their response body", not as lifecycle hardening — and REST
+// write mode is separately ALLOWED to soft-delete
+// (TestWriteOnlyMode_WriteHandlersNotBlocked/DeleteEngram), which is more
+// destructive than archiving.
+func TestDispatch_WriteMode_AllowsStateTransition(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID:    "wrt731",
+		Vault: "ingest",
+		Mode:  auth.ModeWrite,
+	})
+	srv := newAuthTestServer(store)
+	body := mkToolCallBody("muninn_state", map[string]any{
+		"vault": "ingest",
+		"id":    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		"state": "archived",
+	})
+
+	w := doAuthenticatedPost(srv, "mk_wrt731", body)
+
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	// Assert only that the mode gate let it through — a downstream handler or
+	// mock-engine error is fine and keeps this from going brittle.
+	if resp.Error != nil && strings.Contains(resp.Error.Message, "forbidden") {
+		t.Errorf("write-mode key should be allowed to call muninn_state, got: %s", resp.Error.Message)
+	}
+}
+
+// TestDispatch_WriteMode_AllowsCompareAndSetArchive records, in code, why
+// muninn_state was NOT made full-only in #732 — the shape of fix that would
+// keep write mode denied after the reclassification.
+//
+// A full-only overlay listing muninn_state alone would close nothing.
+// muninn_compare_and_set has been classified mutating since before #731, its
+// set_state enum includes "archived", and expect_state is optional (the tool
+// schema says "Omit to skip the guard"), so it reaches the identical
+// store.CompareAndSet lifecycle transition unconditionally. A write-mode key
+// could archive any engram in its vault on develop, and can still do so with
+// this test passing.
+//
+// Deciding the overlay's real membership — state and compare_and_set at
+// minimum, then whether claim/release, which share the CAS primitive, belong
+// — is a scoping question, not a one-name move. If this test ever has to be
+// inverted, that decision has been made; make it deliberately.
+func TestDispatch_WriteMode_AllowsCompareAndSetArchive(t *testing.T) {
+	store := newMockKeyStore(auth.APIKey{
+		ID:    "wrtcas",
+		Vault: "ingest",
+		Mode:  auth.ModeWrite,
+	})
+	srv := newAuthTestServer(store)
+	// No expect_state: the guard is optional, so this is an unconditional
+	// archive of whatever the engram's current state happens to be.
+	body := mkToolCallBody("muninn_compare_and_set", map[string]any{
+		"vault":     "ingest",
+		"id":        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		"set_state": "archived",
+	})
+
+	w := doAuthenticatedPost(srv, "mk_wrtcas", body)
+
+	var resp JSONRPCResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp.Error != nil && strings.Contains(resp.Error.Message, "forbidden") {
+		t.Errorf("write mode reaches the archive transition via muninn_compare_and_set; "+
+			"if that is no longer true, the #732 deferral rationale needs revisiting. got: %s",
+			resp.Error.Message)
 	}
 }
 
@@ -751,6 +861,14 @@ func TestResolveVault_PinnedVault_InvalidArgIsError(t *testing.T) {
 }
 
 // --- Mode enforcement on ALL tools via dispatch ---
+//
+// #732: these four loops used to select their tools with the very predicate
+// they were meant to police (`if !isReadOnlyTool(name) { continue }`), which
+// made them tautologies — reverting muninn_state to read-only left all four
+// GREEN, and TestDispatch_ObserveMode_AllReadToolsAllowed actively asserted
+// the #731 vulnerability. They now select from expectedToolClassification, the
+// human-declared census, so the gate is compared against declared intent
+// rather than against itself.
 
 func TestDispatch_ObserveMode_AllReadToolsAllowed(t *testing.T) {
 	store := newMockKeyStore(auth.APIKey{
@@ -758,8 +876,8 @@ func TestDispatch_ObserveMode_AllReadToolsAllowed(t *testing.T) {
 	})
 	srv := newAuthTestServer(store)
 
-	for _, name := range registeredToolNames() {
-		if !isReadOnlyTool(name) {
+	for _, name := range sortedClassKeys(expectedToolClassification) {
+		if expectedToolClassification[name] != classRead {
 			continue
 		}
 		body := mkToolCallBody(name, map[string]any{"vault": "v", "context": "x", "id": "x", "concept": "x", "content": "y", "entity_name": "x", "query": []string{"x"}})
@@ -778,8 +896,8 @@ func TestDispatch_ObserveMode_AllMutatingToolsBlocked(t *testing.T) {
 	})
 	srv := newAuthTestServer(store)
 
-	for _, name := range registeredToolNames() {
-		if !isMutatingTool(name) {
+	for _, name := range sortedClassKeys(expectedToolClassification) {
+		if expectedToolClassification[name] == classRead {
 			continue
 		}
 		body := mkToolCallBody(name, map[string]any{"vault": "v", "concept": "x", "content": "y", "id": "x"})
@@ -798,15 +916,16 @@ func TestDispatch_WriteMode_AllMutatingToolsAllowed(t *testing.T) {
 	})
 	srv := newAuthTestServer(store)
 
-	for _, name := range registeredToolNames() {
-		if !isMutatingTool(name) {
+	for _, name := range sortedClassKeys(expectedToolClassification) {
+		if expectedToolClassification[name] == classRead {
 			continue
 		}
 		// muninn_create_workflow_vault is a privileged mutating tool: although
 		// classified mutating (so observe-mode keys are blocked by mode
 		// enforcement), it additionally requires a full-mode mk_ key via the
 		// recursion guard. Write-mode is correctly rejected. See
-		// TestCreateWorkflowVault_NonFullKeyRejected.
+		// TestCreateWorkflowVault_NonFullKeyRejected. This is why "write mode
+		// admits every mutating tool" is true of all but this one.
 		if name == "muninn_create_workflow_vault" {
 			continue
 		}
@@ -826,8 +945,8 @@ func TestDispatch_WriteMode_AllReadToolsBlocked(t *testing.T) {
 	})
 	srv := newAuthTestServer(store)
 
-	for _, name := range registeredToolNames() {
-		if !isReadOnlyTool(name) {
+	for _, name := range sortedClassKeys(expectedToolClassification) {
+		if expectedToolClassification[name] != classRead {
 			continue
 		}
 		body := mkToolCallBody(name, map[string]any{"vault": "v", "context": "x", "id": "x"})

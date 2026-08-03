@@ -40,6 +40,25 @@ func (ps *PebbleStore) SetEvolveRepairMark(ctx context.Context, ws [8]byte, vers
 	return ps.db.Set(keys.EvolveRepairMarkKey(ws), []byte{version}, pebble.NoSync)
 }
 
+// DeleteEvolveRepairMark removes the 0x2B watermark for ws, so the next boot's
+// startup pass re-scans the vault instead of trusting a prior clean pass.
+//
+// #761: this is the operator escape hatch for the rollback residual both
+// repair watermarks document — a pre-fix binary run after the mark is written
+// can accrue new damage the mark then masks, and the only recovery on record
+// was bumping the repair-version constant (a recompile) or `ClearVault`
+// (which drops the vault's data too). Deleting the mark is neither: both
+// repairs are idempotent by design (re-running one that already succeeded is
+// a no-op scan), so this is safe to call on a vault that does not need it.
+// Deleting a key that is already absent is itself a no-op (Pebble Delete on a
+// missing key does not error).
+func (ps *PebbleStore) DeleteEvolveRepairMark(ctx context.Context, ws [8]byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return ps.db.Delete(keys.EvolveRepairMarkKey(ws), pebble.NoSync)
+}
+
 // RepairEvolveEntityCarry atomically writes the full carried entity set for a
 // supersede-successor stripped by the pre-fix Evolve path (#622): all 0x20/0x23
 // link keys, all 0x21/0x26 relationship keys, and the digest flag, in ONE
@@ -71,7 +90,7 @@ func (ps *PebbleStore) SetEvolveRepairMark(ctx context.Context, ws [8]byte, vers
 //
 // Returns false if the successor no longer exists or already has links (both
 // re-checked under the lock) — nothing was written.
-func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, succID ULID, entityNames []string, rels []RelationshipRecord, digestFlag uint8) (bool, error) {
+func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, succID ULID, entityNames []string, rels []RelationshipRecord, digestFlag uint16) (bool, error) {
 	if len(entityNames) == 0 {
 		return false, nil
 	}
@@ -135,7 +154,7 @@ func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, 
 	}
 	// Digest flag rides the same batch so a healed successor is always marked
 	// against re-extraction. The RMW uses raw read under the stripe lock above.
-	if err := pb.batch.Set(keys.DigestFlagsKey([16]byte(succID)), []byte{raw | digestFlag}, nil); err != nil {
+	if err := pb.batch.Set(keys.DigestFlagsKey([16]byte(succID)), encodeDigestFlags(raw|digestFlag), nil); err != nil {
 		return false, fmt.Errorf("repair evolve carry: set digest flag: %w", err)
 	}
 	if err := batch.Commit(); err != nil {
@@ -151,7 +170,7 @@ func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, 
 	// recovering these counts — counts are best-effort across crashes on both
 	// sides of the ledger.
 	for _, name := range entityNames {
-		if err := ps.IncrementEntityMentionCount(ctx, name); err != nil {
+		if err := ps.IncrementEntityMentionCount(ctx, ws, name); err != nil {
 			slog.Warn("storage: repair evolve carry: failed to fund mention count", "entity", name, "engram", succID.String(), "err", err)
 		}
 	}

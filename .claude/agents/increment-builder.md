@@ -36,6 +36,12 @@ For every behavior change:
 A test that passes both ways proves nothing and will be caught. When you report, quote the
 RED output verbatim; "RED-verified" without the failure text is not evidence.
 
+**`no tests to run` is a FAILED RED check, not a passing one.** `go test -run` prints that
+warning, says `ok`, and exits 0 when the pattern matches nothing — and so does a file the
+toolchain excluded by filename (`foo_arm_test.go`; #814). A RED arm that ran zero tests is
+indistinguishable from a passing baseline. Confirm your test actually ran: look for its
+`=== RUN` line, not the exit code.
+
 **Use `cp` for the backup when you sabotage a file, never `git checkout`** — `git checkout`
 on a file with uncommitted work destroys it. Commit before sabotaging when you can.
 
@@ -60,8 +66,14 @@ go build -tags localassets ./... && go vet -tags localassets ./... && gofmt -l .
 
 Run `-race` on anything touching storage, the Hebbian/PAS workers, the pruner,
 replication, or MCP session state. Run the full package suites for what you touched, plus
-any measurement harness the design names — and re-run the project's standing corpora if
-your change could move them, to show they did not.
+any measurement harness the design names. If your change could move the standing corpora,
+re-run them with **`make corpora`** — the four harnesses in `internal/engine/activation`,
+normalised into a diffable `.artifacts/corpora.txt` — and report the diff, not the claim.
+
+Your own comments, invariant text and commit message are part of the change and get the
+same scrutiny as the code: `docs/internals/claim-discipline.md` has the rules that keep a
+claim from outrunning its mechanism (name a set from a mechanism, state what a guard does
+not catch, *cannot* vs *is refused unless*, and denominators on every number).
 
 ## Walk the obligations, don't assume
 
@@ -109,10 +121,18 @@ Do not open a PR.
 
 If you learn something durable, non-obvious, and not recoverable from git or the tracker —
 a measured number, a decision and why it beat the alternative, an honest negative, a defect
-*pattern* rather than a defect, a trap that looks safe — **append it to
-`.claude/memory-proposals.jsonl` rather than only writing it in your report.** One JSON
-object per line, append only. `.claude/memory-protocol.md` has the schema and, more
-importantly, the bar: a noisy vault is worse than a small one, so progress narration and
-restatements of the diff do not qualify.
+*pattern* rather than a defect, a trap that looks safe — **propose it rather than only
+writing it in your report:**
+
+```sh
+node .claude/hooks/memory-propose.mjs <<'JSON'
+{"concept":"short label","content":"the fact itself, self-contained, readable in a year","summary":"one line","type":"fact","source":"increment-builder"}
+JSON
+```
+
+The helper validates before it appends and refuses a whole batch rather than queueing a bad
+line — 43 of the first 179 raw appends were permanently invalid and never reached the vault.
+`.claude/memory-protocol.md` has the schema and, more importantly, the bar: a noisy vault is
+worse than a small one, so progress narration and restatements of the diff do not qualify.
 
 A report is read once. The ledger is drained into memory and survives.

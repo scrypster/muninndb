@@ -238,6 +238,26 @@ func runProspectiveHarness(t *testing.T, enabled bool) harnessResult {
 }
 
 // TestProspectiveAcceptance_Gates1to3 is the non-gameable acceptance gate.
+//
+// Known scope limit (#702 followup, verified not a current failure): this
+// fixture does not discriminate the >=2-carrier corroboration branch in
+// NoticesForRecall (internal/engine/prospective.go) from a mechanism that
+// fires on a single carrier. Every should_fire call's genuine corroborating
+// memory outranks the intention's own engram closely enough that the
+// top-scored-result rule alone accounts for all 15 fires; the corroboration
+// branch and its self-exclusion loop are never exercised end-to-end here.
+// Confirmed by disabling that branch (`ci.count < 2` -> `ci.count < 1000` in
+// prospective.go) and observing this test stay green at 15/15,
+// precision 1.000, zero unrelated notices. That branch IS pinned — by
+// TestNoticesForRecall_GenuineCorroborationStillFires,
+// TestNoticesForRecall_SelfFocality_SelfCorroboration, and
+// TestNoticesForRecall_IntentionTopWithSingleTailCarrier_NoFire in
+// prospective_test.go, which construct ScoredResult sets directly rather than
+// depending on real BM25/embedding ranking to route through it. A future
+// wording-only edit to testdata/prospective_session.json that makes the
+// corroborating memory rank below the intention for some should_fire case
+// would start exercising this branch through the harness too, but is not
+// required for correctness coverage — the unit tests already own it.
 func TestProspectiveAcceptance_Gates1to3(t *testing.T) {
 	res := runProspectiveHarness(t, true)
 	t.Logf("harness: fired=%d fired∧wanted=%d precision=%.3f recall=%d/%d=%.3f unrelated_notices=%d",

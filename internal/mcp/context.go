@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/metrics"
 )
 
 const mcpSessionHeader = "Mcp-Session-Id"
@@ -62,6 +63,17 @@ func authFromContext(ctx context.Context) AuthContext {
 // capStore may be nil to disable cap_ capability auth (pre-RFC #597 mode);
 // when non-nil, an invalid or expired cap_ token fails closed (never falls
 // through to open-server), mirroring the mk_ posture.
+
+// MCP auth source labels for muninn_mcp_auth_total (#648). Exported as
+// constants (not inlined at each call site) so the metric's label set is
+// defined once, next to the branches that emit it.
+const (
+	authSourceAPIKey     = "api_key"
+	authSourceCapability = "capability"
+	authSourceStatic     = "static_token"
+	authSourceOpen       = "open"
+)
+
 func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyValidator, capStore capabilityValidator) AuthContext {
 	token, found := auth.ParseBearerToken(r.Header.Get("Authorization"))
 
@@ -70,6 +82,12 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 	// isolation; an invalid or revoked key must never fall through to open access.
 	if found && len(token) > 3 && token[:3] == "mk_" && apiKeyStore != nil {
 		if key, err := apiKeyStore.ValidateAPIKey(token); err == nil {
+			// #648: emit the auth SOURCE only — never the token or any prefix
+			// of it. IsAPIKey/IsCapability already distinguish credential
+			// class structurally; this just makes that distinction
+			// observable to an operator deciding whether a static-token
+			// retirement is safe.
+			metrics.MCPAuthTotal.WithLabelValues(authSourceAPIKey).Inc()
 			return AuthContext{
 				Token:      token,
 				Authorized: true,
@@ -88,6 +106,7 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 	// auth is disabled and the branch is skipped (backward-compatible).
 	if found && len(token) > 4 && token[:4] == "cap_" && capStore != nil {
 		if cap, err := capStore.ValidateCapability(token); err == nil {
+			metrics.MCPAuthTotal.WithLabelValues(authSourceCapability).Inc()
 			return AuthContext{
 				Token:        token,
 				Authorized:   true,
@@ -102,6 +121,7 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 
 	// 2. Open-server mode — no static token required and no mk_ key presented.
 	if requiredToken == "" {
+		metrics.MCPAuthTotal.WithLabelValues(authSourceOpen).Inc()
 		return AuthContext{Authorized: true}
 	}
 
@@ -110,6 +130,7 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 		return AuthContext{Authorized: false}
 	}
 	if auth.ValidateStaticToken(token, requiredToken) {
+		metrics.MCPAuthTotal.WithLabelValues(authSourceStatic).Inc()
 		return AuthContext{Token: token, Authorized: true}
 	}
 	return AuthContext{Authorized: false}
@@ -167,92 +188,106 @@ func joinHints(base, extra string) string {
 	}
 }
 
-// isMutatingTool returns true for MCP tools that write, modify, or delete data.
-// Used to enforce mode restrictions when authenticating via an mk_ vault API key.
+// The three tables below are the MCP tool classification. They were `switch`
+// bodies until #731; a switch cannot be enumerated at run time, so nothing
+// could assert the reverse direction — that every name a classifier claims is
+// a name some handler actually registers. A dead or misspelled entry was
+// therefore invisible to the whole suite. As maps they are enumerable, and
+// tool_classification_test.go walks them in both directions against
+// toolHandlers(). Behaviour is unchanged: a missing key yields the zero value
+// false, exactly as the switch fell through to `return false`.
+//
+// Every tool in the dispatchToolCall handler map MUST appear in exactly one of
+// mutatingTools or readOnlyTools; additiveTools is an overlay on mutatingTools,
+// not a third bucket.
+
+// mutatingTools lists MCP tools that write, modify, or delete data. Used to
+// enforce mode restrictions when authenticating via an mk_ vault API key.
 //
 // observe-mode keys: blocked from mutating tools.
 // write-mode keys:   blocked from non-mutating (read) tools.
-//
-// IMPORTANT: every tool in the dispatchToolCall handler map MUST appear in
-// exactly one of isMutatingTool or isReadOnlyTool. The test
-// TestToolClassification_CoversAllRegisteredHandlers enforces this invariant.
-func isMutatingTool(name string) bool {
-	switch name {
-	case "muninn_remember",
-		"muninn_remember_batch",
-		"muninn_remember_tree",
-		"muninn_add_child",
-		"muninn_forget",
-		"muninn_link",
-		"muninn_evolve",
-		"muninn_consolidate",
-		"muninn_decide",
-		"muninn_restore",
-		"muninn_retry_enrich",
-		"muninn_apply_enrichment",
-		"muninn_entity_state",
-		"muninn_entity_state_batch",
-		"muninn_merge_entity",
-		"muninn_replay_enrichment",
-		"muninn_feedback",
-		"muninn_trust",
-		"muninn_compare_and_set",
-		"muninn_claim",
-		"muninn_release",
-		"muninn_create_workflow_vault",
-		"muninn_intend":
-		return true
-	}
-	return false
+var mutatingTools = map[string]bool{
+	"muninn_remember":       true,
+	"muninn_remember_batch": true,
+	"muninn_remember_tree":  true,
+	"muninn_add_child":      true,
+	"muninn_forget":         true,
+	"muninn_link":           true,
+	"muninn_evolve":         true,
+	// muninn_state transitions an existing engram's lifecycle state, up to and
+	// including "archived". handleState calls s.engine.UpdateState, which
+	// mcpEngineAdapter forwards to Engine.UpdateLifecycleState — the rename is
+	// why grepping internal/mcp/ for the engine method turns up only that
+	// one-line forwarder in engine_adapter.go and never handleState, and the
+	// misclassification survived, letting an observe-mode credential write
+	// (#731).
+	"muninn_state":                 true,
+	"muninn_consolidate":           true,
+	"muninn_decide":                true,
+	"muninn_restore":               true,
+	"muninn_retry_enrich":          true,
+	"muninn_apply_enrichment":      true,
+	"muninn_entity_state":          true,
+	"muninn_entity_state_batch":    true,
+	"muninn_merge_entity":          true,
+	"muninn_replay_enrichment":     true,
+	"muninn_feedback":              true,
+	"muninn_trust":                 true,
+	"muninn_update_tags":           true,
+	"muninn_compare_and_set":       true,
+	"muninn_claim":                 true,
+	"muninn_release":               true,
+	"muninn_create_workflow_vault": true,
+	"muninn_intend":                true,
 }
 
-// isReadOnlyTool returns true for MCP tools that only read data.
-// This is the explicit counterpart of isMutatingTool — together they must
-// cover every registered tool name. Unknown tools are classified as neither,
-// which causes mode enforcement to reject them (fail-closed).
-func isReadOnlyTool(name string) bool {
-	switch name {
-	case "muninn_recall",
-		"muninn_read",
-		"muninn_status",
-		"muninn_session",
-		"muninn_contradictions",
-		"muninn_traverse",
-		"muninn_explain",
-		"muninn_state",
-		"muninn_list_deleted",
-		"muninn_get_enrichment_candidates",
-		"muninn_guide",
-		"muninn_where_left_off",
-		"muninn_recall_tree",
-		"muninn_find_by_entity",
-		"muninn_entity_clusters",
-		"muninn_export_graph",
-		"muninn_similar_entities",
-		"muninn_entity_timeline",
-		"muninn_provenance",
-		"muninn_entity",
-		"muninn_entities":
-		return true
-	}
-	return false
+// readOnlyTools lists MCP tools that only read data. This is the explicit
+// counterpart of mutatingTools — together they must cover every registered
+// tool name. Unknown tools are in neither, which causes mode enforcement to
+// reject them (fail-closed).
+var readOnlyTools = map[string]bool{
+	"muninn_recall":                    true,
+	"muninn_read":                      true,
+	"muninn_status":                    true,
+	"muninn_session":                   true,
+	"muninn_contradictions":            true,
+	"muninn_traverse":                  true,
+	"muninn_explain":                   true,
+	"muninn_list_deleted":              true,
+	"muninn_get_enrichment_candidates": true,
+	"muninn_guide":                     true,
+	"muninn_where_left_off":            true,
+	"muninn_recall_tree":               true,
+	"muninn_find_by_entity":            true,
+	"muninn_entity_clusters":           true,
+	"muninn_export_graph":              true,
+	"muninn_similar_entities":          true,
+	"muninn_entity_timeline":           true,
+	"muninn_provenance":                true,
+	"muninn_entity":                    true,
+	"muninn_entities":                  true,
 }
 
-// isAdditiveTool returns true for the subset of mutating tools that only CREATE
-// new engrams and never modify or delete existing ones. Append-mode credentials
-// (auth.ModeAppend — the flush write credential) may call these plus read tools,
-// but NOT the destructive mutating tools (evolve/forget/trust/merge/…). Keep this
-// a strict subset of isMutatingTool.
-func isAdditiveTool(name string) bool {
-	switch name {
-	case "muninn_remember",
-		"muninn_remember_batch",
-		"muninn_remember_tree",
-		"muninn_add_child":
-		return true
-	}
-	return false
+// additiveTools is the subset of mutating tools that only CREATE new engrams
+// and never modify or delete existing ones. Append-mode credentials
+// (auth.ModeAppend — the flush write credential) may call these plus read
+// tools, but NOT the destructive mutating tools (evolve/forget/trust/merge/…).
+// Keep this a strict subset of mutatingTools.
+var additiveTools = map[string]bool{
+	"muninn_remember":       true,
+	"muninn_remember_batch": true,
+	"muninn_remember_tree":  true,
+	"muninn_add_child":      true,
 }
+
+// isMutatingTool reports whether name writes, modifies, or deletes data.
+func isMutatingTool(name string) bool { return mutatingTools[name] }
+
+// isReadOnlyTool reports whether name only reads data.
+func isReadOnlyTool(name string) bool { return readOnlyTools[name] }
+
+// isAdditiveTool reports whether name is a create-only mutating tool.
+func isAdditiveTool(name string) bool { return additiveTools[name] }
 
 // resolveReadOnly computes the effective read-only decision (S3) for
 // muninn_recall, muninn_read, and muninn_where_left_off:

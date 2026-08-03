@@ -44,7 +44,7 @@ This document is the authoritative reference for every prefix in the system. Upd
 | 0x16 | Provenance | Vault | `ws(8) \| id(16) \| ts_ns(8) \| seq(4)` | NoSync | Append-only audit trail entries. |
 | 0x17 | Bucket Migration | Vault | `ws(8)` | NoSync | Tracks which relevance-bucket migration version has been applied. |
 | 0x18 | Quantized Embedding | Vault | `ws(8) \| id(16)` | NoSync | Standalone quantized vector for similarity search. |
-| 0x19 | Idempotency Receipt | Global | `siphash(op_id)(8)` | NoSync | Duplicate-request guard. TTL-expired by background sweep. |
+| 0x19 | Idempotency Receipt | Global | `siphash(op_id)(8)` | NoSync | Duplicate-request guard. TTL-expired by background sweep. Storage-only since #726 — the replication log used to share this prefix. |
 | 0x1A | Episode Record | Vault | `ws(8) \| episodeID(16)` | NoSync | Episode metadata (create/close lifecycle). |
 | 0x1A+0xFF | Episode Frame | Vault | `ws(8) \| episodeID(16) \| 0xFF \| position(4)` | **Sync** | Ordered frame within an episode. 0xFF separator distinguishes frames from the episode record. Atomic batch with FrameCount. |
 | 0x1B | FTS Schema Version | Vault | `ws(8)` | NoSync | Tracks FTS schema version for migration gating. |
@@ -57,6 +57,7 @@ This document is the authoritative reference for every prefix in the system. Upd
 | 0x23 | Entity Reverse Index | Cross-vault | `nameHash(8) \| ws(8) \| engramID(16)` | NoSync | Entity←engram reverse lookup across vaults. Always written atomically with 0x20. |
 | 0x24 | Entity Co-occurrence | Vault | `ws(8) \| hashA(8) \| hashB(8)` | NoSync | Pairwise entity co-occurrence count. Hash pair is canonically ordered (hashA < hashB). |
 | 0x27 | Dream State | Vault | `ws(8)` | NoSync→Sync | Per-vault dream consolidation state (last run time, engram count at run). Also used for global dream-due flag with zero vault prefix. |
+| 0x2F | Replication | Global | `0x01 \| seq_be64(8)` (log entry) / `0x02 \| name` (metadata) | **Sync** | The cluster replication keyspace. Present only in cluster mode. Relocated off 0x19 by #726; the sub-namespace byte keeps the sequence-keyed log entries in a range of their own so a prune cannot reach anything else. |
 
 \* Engram (0x01) and Metadata (0x02) default to Sync. When `NoSyncEngrams=true`, they move to NoSync tier (WAL syncer provides ≤10ms durability).
 

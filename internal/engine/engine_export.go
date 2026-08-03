@@ -51,7 +51,7 @@ func (e *Engine) ExportVault(ctx context.Context, vaultName, embedderModel strin
 // Returns the job immediately (202 pattern).
 // Returns an error if vaultName already exists.
 func (e *Engine) StartImport(ctx context.Context, vaultName, embedderModel string, dimension int, resetMeta bool, r io.Reader) (*vaultjob.Job, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	if !e.beginVaultOp() {

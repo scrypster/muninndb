@@ -25,7 +25,11 @@ Licensed BSL 1.1.
 The three words in the promise map to real subsystems:
 - **strengthens with use** → Hebbian co-activation learning, LTP, access-driven ACT-R base-level.
 - **fades when unused** → Ebbinghaus/ACT-R temporal decay, the background pruner, association decay + archival.
-- **pushes to you when it matters** → recall's predictive activation (PAS), entity/associative traversal, confidence-weighted scoring.
+- **pushes to you when it matters** → recall's predictive activation (PAS), the Hebbian
+  association read in ranking (`phase4HebbianBoost`), entity boost, confidence-weighted scoring.
+  Note what is NOT in that list: BFS **traversal** (`phase5Traverse`) has emitted nothing for the
+  life of the product and is strictly dominated by raising `CandidatesPerIndex` — measured, #801,
+  see the decision record. The association graph contributes through phase 4; hops do not.
 
 If a change makes memory behave less like this — recall that returns silently-wrong
 results, decay that never fires, learning that displaces genuine matches — it is wrong even
@@ -161,8 +165,27 @@ The rule, in committed content — source, tests, code comments, design records,
 This is not hypothetical. A vault name reached `origin/develop` in #715 and was scrubbed at the
 tip a day later by #734 — but a public repo's history is public forever, and a scrub of the tip
 is not a scrub. **Getting it right before the commit is the only version of this that works.**
-Maintainers additionally run a local pre-commit guard; do not rely on it, and note that
-contributors don't have it.
+
+Two mechanisms back this up, and neither is a substitute for the rule above:
+
+- **`scripts/check-leak-tells.sh`** is public and runs in CI (the Shellcheck job) against every
+  change's *added* lines, and is available to any contributor as an opt-in local pre-commit
+  hook (`--install-hook`; see `CONTRIBUTING.md`). It has no denylist by design — a list of real
+  names sitting in a public repo would publish the very association it exists to prevent — so
+  it can only catch a handful of *structurally*-shaped tells: an `.internal` hostname, an
+  AWS/GCP-style instance id, an "our/on the &lt;ProperNoun&gt; ..." phrase. It cannot catch a
+  bare project-internal codename with no such marker — which is the exact shape every leak in
+  this repo's history has actually taken (an ordinary-looking client name with no structural
+  tell, and a domain term indistinguishable from a real one). It is a net, not a proof.
+- Maintainers additionally run a private, gitignored pre-commit guard
+  (`.claude/maintainer/pre-commit-vault-guard.sh`) against a denylist of known client/product
+  names — the thing the public check structurally cannot have. It is maintainer-only tooling,
+  not present in a fresh contributor clone, and it does not run in CI.
+
+Between them: the public check is what every contributor gets and covers structural tells; the
+private one is what the maintainer gets and covers known names. Neither catches an unknown bare
+codename typed by someone who doesn't know it's sensitive — that gap is closed by reading your
+own diff before committing, which is the actual control both tools exist to remind you to do.
 
 **Keep CI fast and cheap.** The full gate must stay **under ~10 minutes** (baseline ~6–7
 min; job map in `drift-and-obligations.md`). Unit and invariant tests are nearly free —
@@ -178,7 +201,48 @@ yes please send it." Warmth and rigor, together.
 
 ---
 
-## 4. The code-review agent
+## 4. Findings that outlive the session
+
+**This applies to you, the main session, not only to subagents.** `.claude/memory-protocol.md`
+was named in five agent definitions and nowhere in this file, so the only actor with a shell —
+the only one that could ever drain the queue — had never been told the queue existed. Two
+disjoint persistence protocols split by agent type with no bridge. This is the bridge.
+
+If a session produces something **durable, non-obvious, and not recoverable from git, the PR,
+or the tracker** — a measured number, a decision and why it beat the alternative, an honest
+negative, a defect *pattern* rather than a defect, a trap that looks safe — propose it:
+
+```sh
+node .claude/hooks/memory-propose.mjs <<'JSON'
+{"concept":"short label","content":"the fact itself, self-contained, readable in a year","summary":"one line","type":"fact","source":"main"}
+JSON
+```
+
+Read `.claude/memory-protocol.md` for the bar (a noisy vault is worse than a small one, and
+the "do not propose" list is as load-bearing as the "do"). The ledger is gitignored and
+subject to the same privacy rule as committed content — no vault names, no client
+identifiers.
+
+Direct `muninn_remember` over MCP is not wrong and stays available; the ledger is what makes
+the finding survive a session that has no MCP access, a subagent with no credentials, or a
+context that ends before anyone thinks to write it down. `.claude/hooks/memory-drain.mjs`
+moves the queue into the vault on `PreCompact` / `SessionEnd` / a debounced `Stop`. Every
+invocation that is not `SIGKILL`ed leaves a receipt at `.claude/memory-drain-receipt.json`,
+and `memory-freshness.mjs` reads it back at `SessionStart` and speaks up when the queue is
+stale — so "has this ever run?" needs neither a `stat` nor an inference. That distinction is
+the whole point: the first version of this mechanism never ran once and nobody could tell.
+
+There is **one ledger per repository**, in the main checkout: appending from a linked
+worktree resolves through `.git` to the same file, because a per-worktree queue is one no
+drain ever visits (17 proposals were found stranded that way).
+
+Its tests are `node --test .claude/hooks/tests/*.test.mjs` — a few seconds, no daemon, not in
+CI. Run them if you touch the drain. Use the glob; `node --test .claude/hooks/tests/` finds
+nothing and exits 1 in ~30 ms, because the runner skips dot-directories.
+
+---
+
+## 5. The code-review agent
 
 `.claude/agents/code-reviewer.md` is the repo's resident reviewer — correctness, the
 cognitive/storage/security invariants, and cross-surface drift, with its own
@@ -191,7 +255,7 @@ is not part of this repo.
 
 ---
 
-## 5. Attribution
+## 6. Attribution
 
 Do not add "Generated with Claude" / Anthropic attribution to any PR body, commit message,
 issue, or code comment.

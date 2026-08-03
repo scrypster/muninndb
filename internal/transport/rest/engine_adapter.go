@@ -246,8 +246,8 @@ func (w *RESTEngineWrapper) Unsubscribe(ctx context.Context, subID string) error
 	return w.engine.Unsubscribe(ctx, subID)
 }
 
-func (w *RESTEngineWrapper) CountEmbedded(ctx context.Context) int64 {
-	return w.engine.CountEmbedded(ctx)
+func (w *RESTEngineWrapper) CountEmbedded(ctx context.Context, vault string) int64 {
+	return w.engine.CountEmbedded(ctx, vault)
 }
 
 func (w *RESTEngineWrapper) RecordAccess(ctx context.Context, vault, id string) error {
@@ -284,6 +284,10 @@ func (w *RESTEngineWrapper) StartImport(ctx context.Context, vaultName, embedder
 
 func (w *RESTEngineWrapper) ReindexFTSVault(ctx context.Context, vaultName string) (int64, error) {
 	return w.engine.ReindexFTSVault(ctx, vaultName)
+}
+
+func (w *RESTEngineWrapper) ResetRepairWatermark(ctx context.Context, vaultName string, which engine.RepairWatermarkKind) error {
+	return w.engine.ResetRepairWatermark(ctx, vaultName, which)
 }
 
 func (w *RESTEngineWrapper) StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error) {

@@ -286,8 +286,8 @@ func TestP2Integration_SnapshotJoin(t *testing.T) {
 // streamer producing ReplEntry frames behind it.
 func TestP2Integration_JoinResponseBeforeReplEntry(t *testing.T) {
 	cortex := newTestNode(t, "cortex-wo", "primary")
-	if err := cortex.epochStore.ForceSet(4); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := cortex.epochStore.Advance(4); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 	// Only the leader accepts joins (#533); mark this cortex as leader.
 	cortex.coord.roleMu.Lock()

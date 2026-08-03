@@ -48,7 +48,7 @@ func persistEntityStage(ctx context.Context, store PluginStore, id ULID, entitie
 	var errs []string
 
 	for _, entity := range entities {
-		if err := store.UpsertEntity(ctx, entity); err != nil {
+		if err := store.UpsertEntity(ctx, id, entity); err != nil {
 			slog.Warn("enrich: failed to upsert entity", "id", id.String(), "name", entity.Name, "err", err)
 			errs = append(errs, fmt.Sprintf("upsert entity %q: %v", entity.Name, err))
 			continue

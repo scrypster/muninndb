@@ -107,12 +107,18 @@ type EngineAPI interface {
 	// the current (Porter2-stemmed) tokenizer. Sets the FTS version marker to 1
 	// upon completion. Returns the number of engrams re-indexed.
 	ReindexFTSVault(ctx context.Context, vaultName string) (int64, error)
+	// ResetRepairWatermark deletes the named repair watermark(s) (#761) for
+	// vaultName so the next boot re-scans instead of trusting a prior clean
+	// pass. Node-local: neither repair pass is leader-gated or replicated.
+	ResetRepairWatermark(ctx context.Context, vaultName string, which engine.RepairWatermarkKind) error
 	// StartReembedVault clears stale embeddings and digest flags for the named vault,
 	// allowing the RetroactiveProcessor to re-embed everything with the current model.
 	// Returns a Job immediately (202 pattern).
 	StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error)
 	// CountEmbedded returns the number of engrams with the DigestEmbed flag set.
-	CountEmbedded(ctx context.Context) int64
+	// vault == "" counts across the whole store; a non-empty vault scopes the
+	// count to that vault only (#802).
+	CountEmbedded(ctx context.Context, vault string) int64
 	// Observability returns the full system observability snapshot.
 	Observability(ctx context.Context, version string, uptimeSeconds int64) (*engine.ObservabilitySnapshot, error)
 	// GetProcessorStats returns stats for all retroactive processors.

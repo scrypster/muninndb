@@ -360,20 +360,24 @@ func AssocFwdRangeStart(ws [8]byte) []byte {
 }
 
 // AssocFwdRangeEnd returns the exclusive upper bound for scanning all forward
-// associations within a vault (increments the workspace prefix by 1 in the
-// last byte, standard Pebble upper-bound idiom).
+// associations within a vault.
+//
+// STO-11: delegates to PrefixUpperBound, like its sibling AssocRevRangeEnd.
+// This used to open-code its own carry loop that stopped at index 1 so it could
+// not touch the 0x03 type byte — correct for the ~1-in-256 case where the vault
+// prefix's LAST byte is 0xFF, but for an ALL-0xFF workspace prefix every
+// workspace byte wrapped to 0x00 and the loop ran out of indices, producing
+// 0x03|00..00: an upper bound BELOW the lower bound, so the scan returned
+// nothing, silently and forever, for that vault only. Probability 2^-64, i.e.
+// it will not happen — which is exactly why it is a delegation rather than a
+// comment (#819). One bound rule for the keyspace, not two.
+//
+// Byte 0 is the 0x03 type prefix and can never be 0xFF, so PrefixUpperBound's
+// carry always terminates and this never returns the unbounded nil.
+// Pinned by TestAssocRangeEnds_NeverInvertTheirBound and, behaviourally, by
+// TestGetAssociations_AllFFWorkspacePrefixIsNotSilentlyEmpty.
 func AssocFwdRangeEnd(ws [8]byte) []byte {
-	end := make([]byte, 1+8)
-	end[0] = prefix.AssocFwd
-	copy(end[1:9], ws[:])
-	// Increment the last byte of ws portion in the key to get exclusive upper bound.
-	for i := len(end) - 1; i >= 1; i-- {
-		end[i]++
-		if end[i] != 0 {
-			break
-		}
-	}
-	return end
+	return PrefixUpperBound(AssocFwdRangeStart(ws))
 }
 
 // AssocFwdPrefixForID returns a 25-byte scan prefix covering all forward
@@ -384,6 +388,34 @@ func AssocFwdPrefixForID(ws [8]byte, id [16]byte) []byte {
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
+}
+
+// AssocRevRangeStart returns the inclusive lower bound for scanning all reverse
+// association index entries within a vault (0x04 prefix scan lower bound).
+func AssocRevRangeStart(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.AssocRev
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// AssocRevRangeEnd returns the exclusive upper bound for scanning all reverse
+// association index entries within a vault.
+//
+// STO-11: this delegates to PrefixUpperBound rather than open-coding a
+// last-byte increment. PrefixUpperBound carries across every byte, and because
+// byte 0 here is the 0x04 prefix (never 0xFF) it always produces a bound
+// strictly above the lower bound — including for an all-0xFF workspace prefix,
+// where it now returns exactly 0x05.
+//
+// Before #816 the helper left the trailing 0xFFs in place, so an all-0xFF
+// workspace yielded 0x05|FF..FF and a 0xFF-terminated one yielded a bound that
+// reached into the NEXT vault's 0x04 range. That surplus was harmless only
+// because every consumer additionally checks the 25-byte per-id prefix (see
+// rankingReverseEdges). It is now tight, and AssocFwdRangeEnd delegates here
+// too (#819), so the keyspace has one bound rule.
+func AssocRevRangeEnd(ws [8]byte) []byte {
+	return PrefixUpperBound(AssocRevRangeStart(ws))
 }
 
 // AssocRevPrefixForID returns a 25-byte scan prefix covering all reverse
@@ -671,12 +703,20 @@ func EntityNameHash(name string) [8]byte {
 	return h
 }
 
-// EntityKey constructs the global entity record key (0x1F prefix).
-// Key: 0x1F | nameHash(8) = 9 bytes
-func EntityKey(nameHash [8]byte) []byte {
-	key := make([]byte, 1+8)
+// EntityKey constructs the VAULT-SCOPED entity record key (0x1F prefix).
+// Key: 0x1F | wsPrefix(8) | nameHash(8) = 17 bytes
+//
+// #683: this key used to be 0x1F|nameHash(8) with no workspace prefix, so every
+// vault that mentioned an entity of the same name shared one record — one
+// mention_count summed across tenants, and a lookup from a vault with no links
+// to the entity still returned another tenant's metadata. The links (0x20) and
+// the relationship index (0x26) were already vault-scoped; the aggregate record
+// was the odd one out. Migration v6 re-keys existing records.
+func EntityKey(ws [8]byte, nameHash [8]byte) []byte {
+	key := make([]byte, 1+8+8)
 	key[0] = prefix.Entity
-	copy(key[1:9], nameHash[:])
+	copy(key[1:9], ws[:])
+	copy(key[9:17], nameHash[:])
 	return key
 }
 
@@ -770,11 +810,24 @@ func EntityReverseIndexKey(nameHash [8]byte, ws [8]byte, engramID [16]byte) []by
 }
 
 // EntityReverseIndexPrefix returns a 9-byte prefix for scanning all engrams
-// that mention a given entity (0x23 | nameHash(8)).
+// that mention a given entity (0x23 | nameHash(8)), ACROSS every vault.
 func EntityReverseIndexPrefix(nameHash [8]byte) []byte {
 	key := make([]byte, 1+8)
 	key[0] = prefix.EntityReverseIndex
 	copy(key[1:9], nameHash[:])
+	return key
+}
+
+// EntityReverseIndexVaultPrefix returns the 17-byte prefix for scanning the
+// engrams in ONE vault that mention a given entity
+// (0x23 | nameHash(8) | wsPrefix(8)). The 0x23 layout puts the vault in the
+// key's middle, so this is the only bound that confines a reverse-index scan to
+// a single tenant — a plain EntityReverseIndexPrefix scan sees every vault.
+func EntityReverseIndexVaultPrefix(nameHash [8]byte, ws [8]byte) []byte {
+	key := make([]byte, 1+8+8)
+	key[0] = prefix.EntityReverseIndex
+	copy(key[1:9], nameHash[:])
+	copy(key[9:17], ws[:])
 	return key
 }
 
@@ -986,6 +1039,21 @@ func EvolveRepairMarkKey(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
 	key[0] = prefix.EvolveRepairMark
 	copy(key[1:9], ws[:])
+	return key
+}
+
+// UpsertKeyKey constructs the upsert forward-index key (0x30 prefix).
+// Maps sha256(idempotent_id) → the engram ID it is pinned to within a vault,
+// enabling O(1) upsert-key lookup at write time (issue #556). Mirrors
+// ContentHashKey's shape exactly — vault-scoped, sha256-suffixed, ULID value.
+// Relocated from 0x2F after #726 (replication) took it
+// Key: 0x30 | wsPrefix(8) | sha256(32) = 41 bytes
+// Value: engramID(16) bytes
+func UpsertKeyKey(ws [8]byte, hash [32]byte) []byte {
+	key := make([]byte, 1+8+32)
+	key[0] = prefix.UpsertKey
+	copy(key[1:9], ws[:])
+	copy(key[9:41], hash[:])
 	return key
 }
 

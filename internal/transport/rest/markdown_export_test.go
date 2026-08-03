@@ -72,6 +72,56 @@ func (e *markdownExportEngine) GetBatchEngramLinks(_ context.Context, _ *BatchGe
 	return &BatchGetEngramLinksResponse{Links: map[string][]AssociationItem{}}, nil
 }
 
+// readOnlySpyEngine records the ReadOnly flag of every Read call it sees, so
+// a test can assert the export path never triggers reinforcement (#733).
+type readOnlySpyEngine struct {
+	MockEngine
+	readOnlySeen []bool
+}
+
+func (e *readOnlySpyEngine) ListEngrams(_ context.Context, req *ListEngramsRequest) (*ListEngramsResponse, error) {
+	if req.Offset > 0 {
+		return &ListEngramsResponse{Engrams: nil, Total: 1}, nil
+	}
+	return &ListEngramsResponse{
+		Engrams: []EngramItem{{ID: "01ABCDEF01234567", Concept: "Active Note", Vault: req.Vault}},
+		Total:   1,
+	}, nil
+}
+
+func (e *readOnlySpyEngine) Read(_ context.Context, req *ReadRequest) (*ReadResponse, error) {
+	e.readOnlySeen = append(e.readOnlySeen, req.ReadOnly)
+	return &ReadResponse{
+		ID: req.ID, Concept: "Active Note", Content: "content",
+		State: 1, CreatedAt: 1700000000,
+	}, nil
+}
+
+func (e *readOnlySpyEngine) GetEngramLinks(_ context.Context, _ *GetEngramLinksRequest) (*GetEngramLinksResponse, error) {
+	return &GetEngramLinksResponse{}, nil
+}
+
+// #733: a scheduled markdown export must not reinforce every engram it reads
+// — the export is observation, not use (the same doctrine that keeps recall
+// from persisting access, COG-12). Engine.Read only skips its reinforcement
+// side effects (implicit feedback + #682's AccessCount/LastAccess touch) when
+// ReadOnly is set on the request; collectMarkdownNotes must set it.
+func TestCollectMarkdownNotes_ReadsAreReadOnly(t *testing.T) {
+	eng := &readOnlySpyEngine{}
+	_, err := collectMarkdownNotes(context.Background(), eng, "default")
+	if err != nil {
+		t.Fatalf("collectMarkdownNotes: %v", err)
+	}
+	if len(eng.readOnlySeen) == 0 {
+		t.Fatal("expected at least one Read call")
+	}
+	for i, ro := range eng.readOnlySeen {
+		if !ro {
+			t.Errorf("Read call %d: ReadOnly=false, want true — export must not reinforce the engrams it reads", i)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // writeVaultMarkdownExport
 // ---------------------------------------------------------------------------

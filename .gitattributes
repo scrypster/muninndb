@@ -1,0 +1,36 @@
+# Force a textual diff for source and script files (#827).
+#
+# git decides binary-vs-text by looking for a NUL byte in the blob, and the pre-#825
+# memory-drain.mjs delimited its op_id hash fields with literal NULs. The result: `git diff`
+# reported a JavaScript source file as *binary* and showed no diff for it — through a review,
+# a merge, and a public push. An invisible byte silently removed a file from review.
+#
+# The NULs there are gone, but this keeps the class from recurring for any source file: git
+# renders a textual diff no matter what lands inside it, so an accidental NUL becomes a visible
+# control character in the diff instead of a silent "Bin N -> M bytes, 0 insertions(+), 0
+# deletions(-)". scripts/check-nul-bytes.sh (CI: the shellcheck job) is the other half — it
+# fails the build outright if one ever lands, rather than relying on a reviewer to notice.
+#
+# Originally *.mjs only; widened to every source extension actually tracked in this repo
+# (re-derived from `git ls-files | sed -E 's/.*\.//' | sort -u`, not remembered — keep the two
+# lists, here and in check-nul-bytes.sh's EXTENSIONS, in sync by hand). Binary asset extensions
+# (images, lockfiles, compiled artifacts) are deliberately excluded: they legitimately contain
+# arbitrary bytes and forcing a textual diff on them would be noise, not safety.
+*.go    diff text
+*.js    diff text
+*.mjs   diff text
+*.ts    diff text
+*.py    diff text
+*.php   diff text
+*.sh    diff text
+*.yml   diff text
+*.yaml  diff text
+*.json  diff text
+*.proto diff text
+*.kt    diff text
+*.kts   diff text
+*.swift diff text
+*.css   diff text
+*.html  diff text
+*.toml  diff text
+*.md    diff text

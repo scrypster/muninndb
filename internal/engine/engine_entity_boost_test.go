@@ -120,7 +120,7 @@ func TestEntityBoost_ApplyEntityBoostDirect(t *testing.T) {
 	idA, err := eng.store.WriteEngram(ctx, ws, engramA)
 	require.NoError(t, err)
 
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:   "PostgreSQL",
 		Type:   "database",
 		Source: "inline",
@@ -213,7 +213,7 @@ func TestEntityBoost_BelowThresholdSeedDoesNotSpread(t *testing.T) {
 	engramA := &storage.Engram{Concept: "due-a", Content: "Send the founder agreement to the lawyer", Confidence: 0.9}
 	idA, err := eng.store.WriteEngram(ctx, ws, engramA)
 	require.NoError(t, err)
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{Name: "Lawyer", Type: "person", Source: "inline"}, "inline")
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{Name: "Lawyer", Type: "person", Source: "inline"}, "inline")
 	require.NoError(t, err)
 	require.NoError(t, eng.store.WriteEntityEngramLink(ctx, ws, idA, "Lawyer"))
 
@@ -323,13 +323,13 @@ func writeLinkedEngram(t *testing.T, eng *Engine, ws [8]byte, concept string, en
 	return id
 }
 
-// upsertEntityTimes upserts an entity record `times` times, setting its
-// global MentionCount (df) to that value.
-func upsertEntityTimes(t *testing.T, eng *Engine, name string, times int) {
+// upsertEntityTimes upserts an entity record in vault ws `times` times, setting
+// its vault-local MentionCount (df) to that value.
+func upsertEntityTimes(t *testing.T, eng *Engine, ws [8]byte, name string, times int) {
 	t.Helper()
 	ctx := context.Background()
 	for range times {
-		require.NoError(t, eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+		require.NoError(t, eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 			Name:   name,
 			Type:   "concept",
 			Source: "inline",
@@ -353,7 +353,7 @@ func TestEntityBoost_UbiquitousEntityDoesNotFlood(t *testing.T) {
 	ws := eng.store.ResolveVaultPrefix(vault)
 
 	// Entity "Everyone" is mentioned by all 12 engrams: df = n → idf = 0.
-	upsertEntityTimes(t, eng, "Everyone", 12)
+	upsertEntityTimes(t, eng, ws, "Everyone", 12)
 	ids := make([]storage.ULID, 12)
 	for i := range ids {
 		ids[i] = writeLinkedEngram(t, eng, ws, fmt.Sprintf("hub-engram-%d", i), "Everyone")
@@ -388,7 +388,7 @@ func TestEntityBoost_SameEntityViaMultipleSeedsCountsOnce(t *testing.T) {
 	ws := eng.store.ResolveVaultPrefix(vault)
 
 	// "DupEnt" is mentioned by 3 engrams (2 seeds + 1 target) in a corpus of 100.
-	upsertEntityTimes(t, eng, "DupEnt", 3)
+	upsertEntityTimes(t, eng, ws, "DupEnt", 3)
 	seed1 := writeLinkedEngram(t, eng, ws, "dedup-seed-1", "DupEnt")
 	seed2 := writeLinkedEngram(t, eng, ws, "dedup-seed-2", "DupEnt")
 	target := writeLinkedEngram(t, eng, ws, "dedup-target", "DupEnt")
@@ -431,7 +431,7 @@ func TestEntityBoost_CapBoundsAccumulation(t *testing.T) {
 
 	entities := []string{"CapE1", "CapE2", "CapE3", "CapE4"}
 	for _, name := range entities {
-		upsertEntityTimes(t, eng, name, 2) // df=2 each — rare
+		upsertEntityTimes(t, eng, ws, name, 2) // df=2 each — rare
 	}
 	seed := writeLinkedEngram(t, eng, ws, "cap-seed", entities...)
 	target := writeLinkedEngram(t, eng, ws, "cap-target", entities...)
@@ -471,7 +471,7 @@ func TestEntityBoost_InjectionRespectsThreshold(t *testing.T) {
 	const vault = "threshold-test"
 	ws := eng.store.ResolveVaultPrefix(vault)
 
-	upsertEntityTimes(t, eng, "RareThing", 2)
+	upsertEntityTimes(t, eng, ws, "RareThing", 2)
 	seed := writeLinkedEngram(t, eng, ws, "threshold-seed", "RareThing")
 	writeLinkedEngram(t, eng, ws, "threshold-target", "RareThing")
 
@@ -506,7 +506,7 @@ func TestEntityBoost_InjectionRespectsMetaFilters(t *testing.T) {
 	const vault = "meta-filter-test"
 	ws := eng.store.ResolveVaultPrefix(vault)
 
-	upsertEntityTimes(t, eng, "FilterEnt", 3)
+	upsertEntityTimes(t, eng, ws, "FilterEnt", 3)
 
 	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
 		Concept:    "filter-seed",
@@ -749,7 +749,7 @@ func TestEntityBoost_InjectionRespectsExcludeUntrusted(t *testing.T) {
 	const vault = "trust-gate-test"
 	ws := eng.store.ResolveVaultPrefix(vault)
 
-	upsertEntityTimes(t, eng, "TrustEnt", 2)
+	upsertEntityTimes(t, eng, ws, "TrustEnt", 2)
 
 	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
 		Concept:    "trust-seed",
@@ -889,7 +889,7 @@ func TestEntityBoost_InjectionRespectsLeaseVisibility(t *testing.T) {
 	const vault = "lease-gate-test"
 	ws := eng.store.ResolveVaultPrefix(vault)
 
-	upsertEntityTimes(t, eng, "LeaseEnt", 2)
+	upsertEntityTimes(t, eng, ws, "LeaseEnt", 2)
 
 	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
 		Concept:    "lease-seed",
@@ -960,7 +960,7 @@ func TestEntityBoost_InjectionFailsClosedOnLeaseReadError(t *testing.T) {
 	const vault = "lease-fault-test"
 	ws := eng.store.ResolveVaultPrefix(vault)
 
-	upsertEntityTimes(t, eng, "LeaseFaultEnt", 2)
+	upsertEntityTimes(t, eng, ws, "LeaseFaultEnt", 2)
 
 	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
 		Concept:    "lease-fault-seed",
@@ -1027,7 +1027,7 @@ func TestEntityBoost_InjectionRespectsValidity(t *testing.T) {
 	const vault = "validity-gate-test"
 	ws := eng.store.ResolveVaultPrefix(vault)
 
-	upsertEntityTimes(t, eng, "ValidEnt", 2)
+	upsertEntityTimes(t, eng, ws, "ValidEnt", 2)
 
 	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
 		Concept:    "validity-seed",
@@ -1083,7 +1083,7 @@ func TestEntityBoost_InjectionRespectsStructuredFilter(t *testing.T) {
 	const vault = "structured-filter-test"
 	ws := eng.store.ResolveVaultPrefix(vault)
 
-	upsertEntityTimes(t, eng, "SFEnt", 2)
+	upsertEntityTimes(t, eng, ws, "SFEnt", 2)
 
 	seedID, err := eng.store.WriteEngram(ctx, ws, &storage.Engram{
 		Concept:    "sf-seed",

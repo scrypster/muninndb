@@ -69,6 +69,17 @@ func (ps *PebbleStore) SetAssocWeightRepairMark(ctx context.Context, ws [8]byte,
 	return ps.db.Set(keys.AssocWeightRepairMarkKey(ws), []byte{version}, pebble.NoSync)
 }
 
+// DeleteAssocWeightRepairMark removes the 0x2E watermark for ws — the
+// AssocWeightRepairMark counterpart of DeleteEvolveRepairMark, same rationale
+// (#761): both repair passes are idempotent, so re-arming either one by
+// deleting its mark and letting the next boot re-scan is always safe.
+func (ps *PebbleStore) DeleteAssocWeightRepairMark(ctx context.Context, ws [8]byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return ps.db.Delete(keys.AssocWeightRepairMarkKey(ws), pebble.NoSync)
+}
+
 // RepairLegacyFullWeightAssocKeys relocates pre-fix weight-1.0 association keys
 // from the weight-0.0 key position they were written at to the true 1.0
 // position, and reports how many pairs it moved.
@@ -222,6 +233,25 @@ func (ps *PebbleStore) RepairLegacyFullWeightAssocKeys(ctx context.Context, wsPr
 			if indexed != 1.0 {
 				continue // a live write changed the pair's weight; not ours to move
 			}
+			// STO-12, and the same class of question as `indexed != 1.0`:
+			// this is live state re-read at flush time, and a pair whose
+			// endpoint has no 0x01 record is not ours to move either.
+			//
+			// Reachable independently of DeleteEngram's own cascade. This pass
+			// exists precisely because pre-fix vaults are on disk, and a pre-fix
+			// binary's cascade could not see the legacy key position at all
+			// (STO-11 — its 0x03/0x04 upper bound was a naive appended 0xFF,
+			// which sorts below complement 0xFFFFFFFF). A stranded legacy row is
+			// therefore exactly the shape this pass meets, and relocating it
+			// would promote a row the scan-bound bug hid into a live,
+			// correctly-positioned, fully-reachable dangling edge.
+			//
+			// Skipped rather than deleted: this pass moves rows it can prove
+			// are pre-fix full-weight edges, and reaping stranded rows is the
+			// deferred O(vault) integrity pass's job, not a side effect here.
+			if !ps.engramExists(wsPrefix, d.src) || !ps.engramExists(wsPrefix, d.dst) {
+				continue
+			}
 
 			fwdCorrect := keys.AssocFwdKey(wsPrefix, d.src, 1.0, d.dst)
 			revCorrect := keys.AssocRevKey(wsPrefix, d.dst, 1.0, d.src)
@@ -250,6 +280,7 @@ func (ps *PebbleStore) RepairLegacyFullWeightAssocKeys(ctx context.Context, wsPr
 		repaired += len(moved)
 		for _, d := range moved {
 			ps.assocCache.Remove(assocCacheKey(wsPrefix, ULID(d.src)))
+			ps.revAssocCache.Remove(assocCacheKey(wsPrefix, ULID(d.dst)))
 		}
 		chunk = chunk[:0]
 		return nil

@@ -49,17 +49,27 @@ func (s *Store) GetVaultConfig(vault string) (VaultConfig, error) {
 }
 
 // SetVaultConfig persists the vault configuration.
+//
+// This is where per-vault plasticity lives, so it is the write behind
+// PUT /api/admin/vault/{v}/plasticity. On a Lobe it is refused (#596); on the
+// Cortex it now enters the replication stream like any engram write.
 func (s *Store) SetVaultConfig(cfg VaultConfig) error {
+	if err := s.refuseNonLeaderWrite(); err != nil {
+		return err
+	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal vault config: %w", err)
 	}
-	return s.db.Set(vaultConfigKey(cfg.Name), data, pebble.Sync)
+	return s.set(vaultConfigKey(cfg.Name), data)
 }
 
 // RenameVaultConfig moves a vault's config from oldName to newName.
 // If no config exists for oldName, this is a no-op (returns nil).
 func (s *Store) RenameVaultConfig(oldName, newName string) error {
+	if gerr := s.refuseNonLeaderWrite(); gerr != nil {
+		return gerr
+	}
 	cfg, err := s.GetVaultConfig(oldName)
 	if err != nil {
 		return nil // no config → no-op
@@ -82,7 +92,7 @@ func (s *Store) RenameVaultConfig(oldName, newName string) error {
 	batch := s.db.NewBatch()
 	batch.Set(vaultConfigKey(newName), data, nil)
 	batch.Delete(vaultConfigKey(oldName), nil)
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := s.commit(batch); err != nil {
 		batch.Close()
 		return fmt.Errorf("rename vault config: commit: %w", err)
 	}
@@ -93,7 +103,10 @@ func (s *Store) RenameVaultConfig(oldName, newName string) error {
 // DeleteVaultConfig removes the vault configuration for the named vault.
 // If no config exists for the vault, this is a no-op and returns nil (idempotent).
 func (s *Store) DeleteVaultConfig(name string) error {
-	return s.db.Delete(vaultConfigKey(name), pebble.Sync)
+	if err := s.refuseNonLeaderWrite(); err != nil {
+		return err
+	}
+	return s.del(vaultConfigKey(name))
 }
 
 // ListVaultConfigs returns all explicitly configured vaults.

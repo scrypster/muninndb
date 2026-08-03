@@ -14,7 +14,10 @@ import (
 // handler. This is the first of the two enforcement layers; the engine
 // (TestAppendMode_RefusesEvolveAndForget) is the transport-agnostic backstop.
 func TestAppendMode_DispatchGate(t *testing.T) {
-	forbidden := []string{"muninn_forget", "muninn_evolve", "muninn_trust", "muninn_merge_entity", "muninn_link"}
+	// muninn_state (#731): the engine's refuseAppend already refused it, so
+	// append was never exploitable — but until it was reclassified as mutating
+	// the dispatch gate let it through, leaving only one layer.
+	forbidden := []string{"muninn_forget", "muninn_evolve", "muninn_trust", "muninn_update_tags", "muninn_merge_entity", "muninn_link", "muninn_state"}
 	allowed := []string{"muninn_remember", "muninn_remember_batch", "muninn_recall", "muninn_read", "muninn_where_left_off"}
 
 	for _, tool := range forbidden {

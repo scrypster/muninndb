@@ -100,6 +100,12 @@ func NewNetworkStreamer(log *ReplicationLog, peer *PeerConn, startSeq uint64) *N
 	}
 }
 
+// LastSeq returns the highest sequence this streamer has put on the wire. It is
+// read by the owning goroutine after Stream returns, so operators can see how
+// far a dying streamer got (#627: a streamer that silently died mid-catch-up
+// left nothing in the log to distinguish it from a healthy idle one).
+func (s *NetworkStreamer) LastSeq() uint64 { return s.lastSeq }
+
 // Stream blocks, waiting for push notifications from the ReplicationLog, then
 // reads all available entries and sends them to the peer over MBP.
 // Returns when ctx is cancelled or a fatal send/read error occurs.
@@ -143,7 +149,7 @@ func (s *NetworkStreamer) Stream(ctx context.Context) error {
 				if err != nil {
 					return err
 				}
-				if err := s.peer.Send(mbp.TypeReplEntry, payload); err != nil {
+				if err := sendBulk(ctx, s.peer, mbp.TypeReplEntry, payload, "replication stream"); err != nil {
 					return err
 				}
 				s.lastSeq = entry.Seq

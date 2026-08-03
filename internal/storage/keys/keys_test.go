@@ -49,7 +49,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"EmbeddingKey", EmbeddingKey(ws, id)},
 		{"TransitionKey", TransitionKey(ws, id, id)},
 		{"OrdinalKey", OrdinalKey(ws, id, id)},
-		{"EntityKey", EntityKey([8]byte{})},
+		{"EntityKey", EntityKey([8]byte{}, [8]byte{})},
 		{"EntityEngramLinkKey", EntityEngramLinkKey([8]byte{}, [16]byte{}, [8]byte{})},
 		{"RelationshipKey", RelationshipKey([8]byte{}, [16]byte{}, [8]byte{}, 0x01, [8]byte{})},
 		{"EntityReverseIndexKey", EntityReverseIndexKey([8]byte{}, [8]byte{}, [16]byte{})},
@@ -268,9 +268,12 @@ func TestEntityNameHash_Normalizes(t *testing.T) {
 }
 
 func TestEntityKeyLayout(t *testing.T) {
-	k := EntityKey([8]byte{1, 2, 3, 4, 5, 6, 7, 8})
+	// #683: the entity record is vault-scoped — 0x1F | ws(8) | nameHash(8).
+	k := EntityKey([8]byte{9, 9, 9, 9, 9, 9, 9, 9}, [8]byte{1, 2, 3, 4, 5, 6, 7, 8})
 	require.Equal(t, byte(0x1F), k[0], "EntityKey must start with 0x1F")
-	require.Len(t, k, 9, "EntityKey must be 9 bytes")
+	require.Len(t, k, 17, "EntityKey must be 17 bytes (prefix + ws + nameHash)")
+	require.Equal(t, []byte{9, 9, 9, 9, 9, 9, 9, 9}, k[1:9], "bytes 1-8 must be the workspace prefix")
+	require.Equal(t, []byte{1, 2, 3, 4, 5, 6, 7, 8}, k[9:17], "bytes 9-16 must be the name hash")
 
 	ws := [8]byte{0xAA}
 	engramID := [16]byte{0xBB}
@@ -319,6 +322,28 @@ func TestArchiveAssocPrefixForID_Length(t *testing.T) {
 	}
 	if prefix[0] != 0x25 {
 		t.Errorf("prefix byte: got 0x%02X, want 0x25", prefix[0])
+	}
+}
+
+func TestUpsertKeyKey_Layout(t *testing.T) {
+	ws := [8]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	hash := [32]byte{0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+		0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF}
+
+	key := UpsertKeyKey(ws, hash)
+
+	// Total length: 1 (prefix) + 8 (ws) + 32 (sha256) = 41 bytes
+	if len(key) != 41 {
+		t.Fatalf("expected 41 bytes, got %d", len(key))
+	}
+	if key[0] != 0x30 {
+		t.Errorf("prefix byte: got 0x%02X, want 0x30", key[0])
+	}
+	if !bytes.Equal(key[1:9], ws[:]) {
+		t.Error("ws mismatch")
+	}
+	if !bytes.Equal(key[9:41], hash[:]) {
+		t.Error("hash mismatch")
 	}
 }
 
@@ -380,7 +405,7 @@ func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
 		{"Ordinal", OrdinalKey(ws, id16, id16)[0], prefix.Ordinal},
 		{"OrdinalPrefixForParent", OrdinalPrefixForParent(ws, id16)[0], prefix.Ordinal},
 		{"OrdinalWorkspacePrefix", OrdinalWorkspacePrefix(ws)[0], prefix.Ordinal},
-		{"Entity", EntityKey(u8)[0], prefix.Entity},
+		{"Entity", EntityKey(u8, u8)[0], prefix.Entity},
 		{"EntityEngramLink", EntityEngramLinkKey(ws, id16, u8)[0], prefix.EntityEngramLink},
 		{"EntityEngramLinkPrefix", EntityEngramLinkPrefix(ws, id16)[0], prefix.EntityEngramLink},
 		{"Relationship", RelationshipKey(ws, id16, u8, 0, u8)[0], prefix.Relationship},
@@ -402,6 +427,7 @@ func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
 		{"ContentHash", ContentHashKey(ws, id32)[0], prefix.ContentHash},
 		{"Lease", LeaseKey(ws, id16)[0], prefix.Lease},
 		{"EvolveRepairMark", EvolveRepairMarkKey(ws)[0], prefix.EvolveRepairMark},
+		{"UpsertKey", UpsertKeyKey(ws, id32)[0], prefix.UpsertKey},
 		{"AssocWeightRepairMark", AssocWeightRepairMarkKey(ws)[0], prefix.AssocWeightRepairMark},
 	}
 	for _, c := range cases {
