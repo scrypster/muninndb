@@ -429,7 +429,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_consolidate",
-			Description: "Merge multiple related memories into one. Archives the originals. Maximum 50 IDs.",
+			Description: "Merge multiple related memories into one. The originals are SUPERSEDED by the merged memory, exactly as muninn_evolve supersedes a predecessor: they leave present-day recall, but a query phrased against their wording still resolves to the merged memory, and they stay reachable as lineage via as_of/include_invalid. Maximum 50 IDs.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

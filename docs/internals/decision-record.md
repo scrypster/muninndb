@@ -100,6 +100,41 @@ fixing on its own merits — silently discarding a caller's `type`, entities or 
 indefensible regardless — but it is a precondition, not the lever, and it unlocked nothing here.
 See `docs/internals/agent-experience-findings.md` for the full evaluation.
 
+**Every content-replacing verb must DECLARE the replacement, and derived state must be
+reinterpreted at read time rather than rewritten (2026-08-03, #779/#769/#780).** Three issues
+filed independently against three surfaces turned out to be one mechanism — supersession, and
+the derived state that outlives it — and **all three named a cause the code did not have.**
+Verifying each claim before fixing anything is what produced the increment; taking any of them
+at face value would have produced three wrong changes.
+
+- #779 reported an embed-lag RACE in consolidate. That race was already closed (`Consolidate`
+  calls `Engine.Write`, which fires `onWrite`, #767). The real defect was PERMANENT and one
+  line away: consolidate archived its sources with `Forget{Hard:false}`, a plain soft-delete
+  with an OPEN `ValidUntil` and no `RelSupersedes` edge — the exact signature COG-28 reads as
+  "trash, not history". **Consolidation was the one content-replacing operation excluded from
+  the mechanism built to close exactly that hole.** Evolve declares supersession, `Link
+  (supersedes)` declares it, consolidate did not. The generalisable rule: when a mechanism
+  admits records on a STRUCTURAL SIGNATURE, every writer that produces the semantic condition
+  must produce the signature — a new verb silently opts out, and opts out invisibly.
+- #769 reported a missing `concept` parameter on evolve. It has been there, read and honored,
+  the whole time. The genuine residual was one layer up and much smaller: nothing SAID the
+  label had been inherited. Rebuilding what existed would have been the expensive wrong answer.
+- #780 reported a monotone counter "never decremented". `DecrementEntityCoOccurrence` exists
+  and deletes at zero — it is just never funded by a soft-delete. It also assumed evolve
+  strands entities, when evolve CARRIES them onto the live successor. Once both corrections
+  land, the residual defect is narrow and real (an entity retired by an explicit `entities[]`
+  replacement) and, crucially, its shape dictates the fix: **a monotone capture-time ledger can
+  never be corrected by anything the user does later, so the correction must live at read
+  time.** Presence is derived from live support; the count is left alone, because it is a
+  historical strength signal and honest as one.
+
+Both fixes chose **read-side reinterpretation over rewriting data at rest** (#810, #854): the
+consolidations that already ran are not migrated, because their sources carry the plain-forget
+signature every read path already interprets correctly, so doing nothing leaves them exactly as
+they behave today instead of half-converted. And the live-support filter is **abandoned rather
+than applied to a partial view** past its scan cap — filtering on a subset of the truth deletes
+real edges, which is strictly worse than reporting a stale one.
+
 ## Security & credentials
 
 **Security properties are structural, not policy-checked (#612).** The obvious design

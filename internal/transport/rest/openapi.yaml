@@ -978,7 +978,13 @@ components:
           type: array
           items:
             type: string
-          description: "IDs of the archived source engrams."
+          description: >
+            IDs of the source engrams that were SUPERSEDED by the merged engram.
+            Each carries a declared `supersedes` edge from the merged engram plus
+            a closed validity window, exactly as an evolved predecessor does: they
+            leave present-day recall, a query matching their wording resolves to
+            the merged engram, and they remain reachable as lineage under `as_of`
+            and `include_invalid`. The field name is retained for compatibility.
         warnings:
           type: array
           items:
@@ -2707,7 +2713,7 @@ paths:
   /api/consolidate:
     post:
       tags: [cognitive]
-      summary: "Merge multiple engrams into a single canonical engram."
+      summary: "Merge multiple engrams into a single canonical engram, superseding the sources."
       security:
         - BearerAuth: []
       requestBody:

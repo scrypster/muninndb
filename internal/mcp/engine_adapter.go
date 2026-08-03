@@ -148,6 +148,26 @@ func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent,
 	res := &WriteResult{ID: id.String()}
 	if eng, err := a.eng.GetEngram(ctx, vault, id); err == nil && eng != nil {
 		res.Concept = eng.Concept
+		// #769: a carried concept is a silent assertion about content that just
+		// changed. Inheriting it is the right default — most evolves sharpen a
+		// fact without changing what it is about — but saying nothing left a
+		// successor whose label describes the OLD fact, which every
+		// concept-surfacing view (muninn_where_left_off, session summaries, the
+		// console list) then presents as current. Announce it and NAME the
+		// carried label so the caller can judge it.
+		//
+		// The trigger is the engine's OWN carry predicate (`concept == ""` in
+		// EvolveAt), not a judgement about how much the content moved: deciding
+		// whether a new fact still fits an old label needs a reader, and this
+		// runtime does not have one. Warn whenever the label was inherited,
+		// never guess whether it still holds.
+		if concept == "" && eng.Concept != "" {
+			res.Warnings = append(res.Warnings, fmt.Sprintf(
+				"concept was not supplied, so the predecessor's label was carried forward verbatim: %q. "+
+					"The content changed; the label did not. If it no longer describes this memory, re-run "+
+					"muninn_evolve with 'concept' — concept-surfacing views show the label, not the content.",
+				eng.Concept))
+		}
 	} else if err != nil {
 		// Never fail an accepted write over a cosmetic read-back; say so rather
 		// than reporting an empty concept as if that were the stored value.

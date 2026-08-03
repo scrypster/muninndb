@@ -4136,8 +4136,36 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 	return newULID, nil
 }
 
-// Consolidate merges multiple engrams into a single new engram and archives the originals.
-// Returns a ConsolidateResult with the new ID, archived IDs, and any non-fatal warnings.
+// Consolidate merges multiple engrams into a single new engram and SUPERSEDES
+// the originals. Returns a ConsolidateResult with the new ID, the superseded
+// (Archived) IDs, and any non-fatal warnings.
+//
+// Consolidation is content REPLACEMENT, and it declares that the same way its
+// siblings do (issue #779): each source gets a `RelSupersedes` edge from the
+// merged engram plus a soft-delete and a CLOSED `ValidUntil` stamp, in one
+// atomic batch per source — the exact shape `EvolveAt` writes.
+//
+// Before this, sources were archived with a plain soft-delete: no edge, an OPEN
+// `ValidUntil`. That is the signature COG-28 reads as "trash, not history", so
+// consolidation was the ONE content-replacing operation excluded from the
+// mechanism built to close exactly this hole — a query phrased against a
+// source's wording reached a record the lifecycle cut discards, with nothing
+// declaring where the content went, and recall returned nothing about the fact
+// the merge was meant to PRESERVE. Unlike the embed-lag race #779 describes
+// (already closed: `Write` fires `onWrite`, #767), that hole was permanent.
+//
+// Two consequences of declaring it, both deliberate and both user-visible:
+//
+//   - Sources become time-travellable lineage. `as_of` before the merge and
+//     `include_invalid` now return them, and `muninn_read` reports
+//     `superseded_by` = the merged id instead of a bare soft-delete.
+//   - Their FTS postings are KEPT, exactly as evolve keeps a predecessor's.
+//     That is what lets the old wording reach the source and be redirected to
+//     the merged memory; deleting them (what the old `Forget` path did) is
+//     precisely what made the hole unreachable from the lexical side.
+//
+// A JOIN is not a FORK: many sources point at ONE merged engram, so each source
+// still has exactly one superseder and every chain resolves.
 func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error) {
 	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
@@ -4145,6 +4173,7 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 	if len(ids) > 50 {
 		return nil, fmt.Errorf("consolidate: too many ids (max 50, got %d)", len(ids))
 	}
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
 	mergedResp, err := e.Write(ctx, &mbp.WriteRequest{
 		Vault:   vault,
 		Concept: "Consolidated memory",
@@ -4152,6 +4181,10 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 	})
 	if err != nil {
 		return nil, fmt.Errorf("consolidate: write merged: %w", err)
+	}
+	mergedULID, err := storage.ParseULID(mergedResp.ID)
+	if err != nil {
+		return nil, fmt.Errorf("consolidate: parse merged id: %w", err)
 	}
 
 	// NEVER archive the merged result itself. Write is exact-content deduplicated,
@@ -4172,31 +4205,65 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 	// matched the merge text slipped past a string comparison and the survivor
 	// was archived anyway — the same data loss through a one-character-class
 	// gap (adversarial review of #754, finding 7).
-	mergedULIDForGuard, guardErr := storage.ParseULID(mergedResp.ID)
+	now := time.Now()
 	for _, id := range ids {
-		if guardErr == nil {
-			if inputULID, err := storage.ParseULID(id); err == nil && inputULID == mergedULIDForGuard {
+		inputULID, parseErr := storage.ParseULID(id)
+		if parseErr == nil {
+			if inputULID == mergedULID {
 				// This input IS the merged result (dedup hit). Keep it alive; it
 				// is the consolidated memory the caller is being handed.
 				continue
 			}
-		} else if id == mergedResp.ID {
-			// Unparseable merged id (should not happen): fall back to the exact
-			// string match rather than skipping the guard entirely.
+		} else {
+			// An unparseable input can be neither compared to the merged id nor
+			// superseded. Say so instead of silently dropping it.
+			warnings = append(warnings, fmt.Sprintf("failed to supersede %s: %v", id, parseErr))
 			continue
 		}
-		_, err := e.Forget(ctx, &mbp.ForgetRequest{ID: id, Hard: false, Vault: vault})
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("failed to archive %s: %v", id, err))
-		} else {
-			archived = append(archived, id)
+
+		// Supersede = declared edge + soft-delete + closed ValidUntil stamp, in
+		// ONE atomic batch per source. Per-source rather than one batch for all
+		// of them so a single unreadable id degrades to a warning (the previous
+		// per-id Forget behaviour) instead of failing the whole merge — and a
+		// crash mid-loop leaves each already-processed source fully declared,
+		// never archived-without-an-edge. The remaining sources stay live beside
+		// the merged engram, which is exactly what a crash between the merged
+		// Write and the old archive loop already produced.
+		//
+		// A source that was ALREADY superseded gains a SECOND superseder, which
+		// the chain walk reports as a fork and refuses to resolve — the designed
+		// response to two rival replacements, and reachable only by a caller who
+		// consolidates a memory they have already evolved away. Deliberately not
+		// pre-screened: skipping such a source would report it as archived while
+		// leaving it live and unlinked, which is the response-asserts-something-
+		// untrue class the survivor guard above exists to prevent. Pinned by
+		// TestConsolidate_AlreadySupersededSourceForksAndRefuses.
+		supersedes := &storage.Association{
+			TargetID:      inputULID,
+			RelType:       storage.RelSupersedes,
+			Weight:        1.0,
+			Confidence:    1.0,
+			CreatedAt:     now,
+			LastActivated: int32(now.Unix()),
 		}
+		supersedeErr := func() error {
+			batch := e.store.NewBatch()
+			defer batch.Discard()
+			if err := batch.WriteAssociation(ctx, wsPrefix, mergedULID, inputULID, supersedes); err != nil {
+				return err
+			}
+			if err := batch.SupersedeEngram(ctx, wsPrefix, inputULID, now); err != nil {
+				return err
+			}
+			return batch.Commit()
+		}()
+		if supersedeErr != nil {
+			warnings = append(warnings, fmt.Sprintf("failed to supersede %s: %v", id, supersedeErr))
+			continue
+		}
+		archived = append(archived, id)
 	}
 
-	mergedULID, err := storage.ParseULID(mergedResp.ID)
-	if err != nil {
-		return nil, fmt.Errorf("consolidate: parse merged id: %w", err)
-	}
 	return &ConsolidateResult{MergedID: mergedULID, Archived: archived, Warnings: warnings}, nil
 }
 

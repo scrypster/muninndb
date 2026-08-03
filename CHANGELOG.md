@@ -16,6 +16,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Consolidation now DECLARES supersession, closing a permanent recall hole over the fact it was meant to preserve** (#779).
+  `muninn_consolidate` / `POST /api/consolidate` archived its source memories with a plain
+  soft-delete: no `supersedes` edge, an open validity window. That is exactly the signature the
+  version-head mechanism reads as "trash, not history", so consolidation was the one
+  content-replacing operation excluded from the mechanism built to close this hole — a later
+  query phrased against a source's wording reached a record recall discards, with nothing
+  declaring where the content went, and came back with nothing about the merged fact. Evolve
+  declares supersession; `muninn_link(relation="supersedes")` declares it; consolidate did not.
+  Each source now gets a `supersedes` edge from the merged memory plus a closed validity window,
+  in one atomic write per source — the same shape `muninn_evolve` writes.
+
+  **Contract change, user-visible.** Consolidated sources are now time-travellable LINEAGE
+  rather than plain archived records:
+
+  - A recall phrased against a source's wording returns the MERGED memory, annotated with
+    `substituted_for` and `substitution_basis`, instead of returning nothing.
+  - `as_of` (before the merge) and `include_invalid` now return the sources; previously a
+    consolidated source was invisible to both. `muninn_read` on a source reports
+    `superseded_by` = the merged id.
+  - The sources' full-text postings are KEPT (deleting them is what made the merged content
+    unreachable from the lexical side). They are still excluded from ordinary present-day
+    recall, exactly as before.
+  - The response field is still named `archived`, for compatibility.
+
+  **Consolidations that already ran are not migrated and need no repair pass.** Their sources
+  carry the plain-forget signature, which every read path already interprets correctly — their
+  behaviour is unchanged rather than half-converted. Note that the embed-lag race the issue
+  describes was not the cause and was already closed: `Consolidate` writes through the normal
+  write path, which wakes the retroactive embed processor (#767).
+
+  Note also what did NOT change: the merged memory still starts with no access history or
+  association edges of its own, so it can rank below its sources' former standing. Inheriting
+  that standing is deferred — it needs a design pass, not a one-line fix.
+
+- **`muninn_evolve` now warns when it carries the predecessor's concept onto changed content** (#769).
+  `concept` has always been a declared parameter of `muninn_evolve`, read by the handler and
+  honored by the engine — that half of the report did not reproduce. What was missing was the
+  loudness: a caller who replaced the substance and left `concept` unset got a successor whose
+  label describes the OLD fact, silently, and every concept-surfacing view
+  (`muninn_where_left_off`, session summaries, the console list) then presents that stale claim
+  as current. The response now carries a warning naming the carried label and the parameter to
+  set. It fires whenever the label was inherited — deciding whether an old label still fits new
+  content needs a reader, and this runtime deliberately has none, so it announces rather than
+  guesses. An explicit `concept` produces no warning.
+
+- **`muninn_entity` no longer reports co-occurrences and relationships whose every supporting memory was superseded** (#780).
+  Both views read capture-time ledgers that only a HARD delete corrects, so an entity retired by
+  an evolve that replaced the entity list — the "we moved off that technology" act — kept
+  appearing under `co_occurs_with` forever, while the same response's `engrams` list already
+  excluded every record behind it. Presence is now decided at read time against live support:
+  an edge is reported only while some live memory still co-mentions the pair. Two clarifications
+  against the report: the counter IS decremented on hard delete (just never on supersession),
+  and an ordinary evolve carries entities onto the live successor, so those pairs are genuinely
+  live and are still reported. The count itself is unchanged — it is a historical strength
+  signal and is honest as one. On an entity with more than 500 live memories the check is
+  abandoned rather than applied to a partial view (filtering on a partial view would delete real
+  edges) and a warning is logged.
+
 - **`muninn logs` no longer reads `<dataDir>/muninn.log` unconditionally** (#852). That file is written only by the CLI's own fork-a-daemon path; a daemon started under a process supervisor (a systemd unit execing `--daemon` directly, launchd with `StandardErrorPath`, `docker run`) never writes it, so `muninn logs` silently tailed a frozen file from whenever the daemon was last started by hand — with no error and no staleness indicator, showing a previous daemon lifetime's log (including its `shutdown complete` line) as if it were current. The daemon now records its actual log destination in a `muninn.logdest` sidecar at every startup, independent of how it was started; `muninn logs` reads that instead of guessing, and prints guidance (pointing at `journalctl` for a known systemd unit, or general supervisor guidance otherwise) rather than presenting stale or wrong content as current. A pre-fix daemon, or a data directory nothing has ever run in, falls back to the historical default path unchanged.
 - **`relationships[]` naming a hard-deleted engram now fails the write, matching `associations[]`** (#817).
   `mbp.WriteRequest` has two inline edge fields. `associations[]` has refused a
