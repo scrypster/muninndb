@@ -64,7 +64,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   monotonic and *reports* whether it moved, so a caller can no longer swallow a
   regression by ignoring a nil error, and the single legitimate backwards path
   is the explicitly named `AdoptForSnapshot`.
+- **Cluster catch-up no longer spirals: a slow replica is not a dead one**
+  (#627). Every frame write was bounded by one fixed 5-second deadline — a
+  constant applied to a quantity measured somewhere else entirely, since the
+  frame may be a 40-byte heartbeat or a 1 MB snapshot chunk and the link may be
+  loopback or a laptop on a WAN tunnel. A replica that fell behind could not get
+  back: the receiver applied entries more slowly than the sender pushed, the
+  socket buffer filled, one write crossed 5 seconds, the stream died, the
+  replica rejoined further behind. Raising the constant only moves the cliff, so
+  the bound was replaced rather than retuned. A frame write now fails only when
+  the peer accepts **no bytes at all** for the idle timeout; the deadline resets
+  on every byte of forward progress, which makes it independent of frame size
+  and link speed. Two outer bounds keep that from becoming unbounded: a single
+  frame may not hold a connection's write slot beyond `sendMaxDuration`
+  (2 minutes) even while dribbling, and a caller that cannot get the write slot
+  within `sendSlotWait` gets `ErrPeerBusy` — the peer is busy, not dead, the
+  connection is left intact, and the shared heartbeat broadcast moves on instead
+  of blocking behind a multi-megabyte transfer.
 
+  A restarted replication stream also no longer restarts from sequence 0. It
+  resumes from the highest position the primary can prove the replica holds:
+  its last acknowledged sequence, or the snapshot sequence quoted in its join
+  response, whichever is higher. (The snapshot source is not redundant — the
+  snapshot receiver does not advance the replica's applier position, so a
+  freshly-snapshotted replica acknowledges a low sequence while holding a
+  complete database.) Previously the re-transfer volume tracked the size of the
+  log rather than the size of the lag. A stream that ends now logs where it
+  started, how far it got, and where the log is, so a stalled replica is visible
+  instead of indistinguishable from an idle one.
+
+- **Enabling clustering at runtime built a coordinator that could not
+  replicate** (#628). `POST /api/admin/cluster/enable` constructed and started a
+  cluster coordinator inside the running process. That coordinator could never
+  work: the storage layer's replication hook is captured when the Pebble store
+  is built at boot, and only when `cluster.yaml` already said enabled at that
+  moment. A node enabled this way reported itself clustered, accepted replicas
+  and shipped them a snapshot — and then appended **nothing** it wrote to the
+  replication log. It also never received the WAL handle, so it never pruned
+  (unbounded log growth), and it registered joiners as voters against a quorum
+  the boot path would have computed differently.
+
+  There is now no code path that constructs a coordinator outside boot. The
+  endpoint persists the configuration and answers **`202 Accepted`** with
+  `restart_required: true`, `enabled: false`, and a message saying so; the web
+  console shows a restart-required banner instead of "Cluster active". This is a
+  **behaviour change** for anyone scripting that endpoint: a successful call is
+  now 202, not 200, and clustering starts on the next restart of the node.
+- **Pebble prefix `0x19` was allocated twice, and a cluster prune would have
+  deleted idempotency receipts** (#726). `internal/replication` inlined a raw
+  `0x19` for every key it wrote, so a replication log entry (`0x19|seq_be64(8)`)
+  and an idempotency receipt (`0x19|siphash(op_id)(8)`) had the same prefix, the
+  same length, and the same database, with no discriminator between them —
+  116,248 entries alongside 23 receipts on one production store.
+  `ReplicationLog.Prune` range-deletes `[0x19|be64(1), 0x19|be64(untilSeq+1))`,
+  which is precisely "every receipt whose SipHash is below the watermark": a
+  vanishing probability at today's sequence numbers, growing linearly with the
+  sequence, and armed the moment the prune gets a production caller. The
+  sequence counter was worse-placed still, at `0x19|0xFF*8` — *inside* the entry
+  range. The whole replication keyspace now lives at `0x2F` with a
+  sub-namespace byte, so the prune's range provably contains nothing but log
+  entries. **Migration v5** relocates existing stores; it drops the old log
+  entries (key by key, behind a positive identification — never a range delete,
+  since receipts share that range) and compacts, which is also where a bloated
+  store gets its disk back. A pre-v5 binary refuses to start against a migrated
+  data directory. See `docs/cluster-operations.md` for the upgrade note.
+
+- **Observers accumulated the Cortex's replication log forever** (#826). Two
+  mechanisms, both closed. The snapshot sender iterated the entire database, so
+  every joining Lobe received a byte-for-byte copy of the Cortex's log — entries
+  that each carry the full key and value of a replicated write — which nothing
+  on a Lobe ever reads and nothing there prunes (the periodic prune is
+  leader-gated). And `RepLogAppend` was wired unconditionally on every cluster
+  node, so a Lobe logged a full-size entry for each of its *own* local writes
+  (last-access touches, Hebbian updates, decay), which is why a measured lobe
+  held more entries than the Cortex it followed: 22 GB and 7.5 GB on two
+  observers. Snapshots now skip the log entries and only the log entries — the
+  replication metadata, above all the sequence counter, still ships, so a
+  promoted Lobe continues the cluster's numbering — and a node that is
+  definitively a follower no longer appends. The suppression fails **open** on
+  an unknown role, so a leader serving writes during startup can never silently
+  drop them out of the stream. Neither filter was expressible before #726: under
+  `0x19` both would have discarded idempotency receipts too.
+- **`hebbian_enabled` now governs the read side too** (COG-32). The phase-4
+  Hebbian boost ran unconditionally during recall while its neighbour, the PAS
+  transition boost, was gated — so a vault with `hebbian_enabled: false` (the
+  `scratchpad` preset) was still scored by association edges it would never
+  update and never decay. The flag is now symmetric: it gates learning, decay
+  and the read-side boost. **User-visible:** `scratchpad` vaults score recall
+  without any Hebbian contribution, and rows can reorder on such vaults.
+- **An explicit `actr_heb_scale: 0` is honored** instead of being silently
+  replaced by the 4.0 default. Two layers substituted it; the config layer had
+  always admitted it. `actr_heb_scale` scales both the Hebbian and the PAS
+  transition boost, so 0 is the "no cognitive prior at all" switch — it now
+  works.
+- **Co-activation writes carry their own timestamp.** `CoActivationEvent.At`
+  was set by the engine and then dropped, so an association's `lastActivated`
+  was stamped at write time rather than at co-activation time. An event that
+  waited in the worker's channel was stamped late. Zero-value behaviour is
+  unchanged.
+- **An association's decay anchor never moves backwards** (COG-27). Making the
+  co-activation timestamp writable also made it *remotely* writable: in a
+  cluster, a cog-forwarded co-activation carries the peer's clock verbatim.
+  `lastActivated` is COG-27's elapsed-time input, so a stale stamp collapsed a
+  live edge's decay ceiling on the next pass — irreversibly, since decay never
+  raises a weight. Both association writers now keep the later of the stored and
+  the incoming stamp, the same shape `peakWeight` already had beside them.
+  **User-visible in cluster mode only:** a lagging or skewed peer, or a
+  cog-forward backlog delivered after a partition heals, can no longer age
+  another node's associations by the size of the clock gap.
+- `RecallEvent`'s doc comment no longer claims a "positives = surfaced AND
+  cited" ground-truth join that is not implementable from what is on disk (no
+  join key, no identity on either side, context-free residue, and a citation
+  side damaged by the #757 class).
 - **An association edge can no longer outlive its endpoints** (#803). Hard
   deletes left the dead engram in the FTS and vector indexes, so the automatic
   association workers kept finding it and minting fresh edges to an ID that no
@@ -85,6 +196,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   siblings committing as before; gRPC and MBP return their existing error for an
   invalid ID. `relationships[]` is unchanged in this
   release — it still logs a warning and succeeds (#817).
+
+### Internal
+
+- The cognition trial's machinery: a build-tagged (`cognitiontrial`) offline
+  harness that puts the Hebbian / PAS / ACT-R base-level layer on trial against
+  real recorded queries, a co-activation replay driver, and the pre-registered
+  acceptance rule as executable code with its own unit tests. None of it
+  compiles into a shipped binary.
 
 ### Security
 

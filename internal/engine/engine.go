@@ -2362,6 +2362,10 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// PAS: Predictive Activation Signal config from vault Plasticity.
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
+	// Hebbian read side, gated symmetrically with PAS (COG-32). The same flag
+	// already gates learning submission (below) and association decay
+	// (decayAllVaults); before #779 the phase-4 boost ignored it.
+	actReq.HebbianEnabled = resolved.HebbianEnabled
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
 	// Per-vault exclude-tags (#713): candidates carrying a configured tag are
 	// dropped from recall ranking. nil/empty = no exclusion (unchanged behavior).
@@ -2443,7 +2447,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			UseACTR:            !req.Weights.DisableACTR,
 			DisableACTR:        req.Weights.DisableACTR,
 			ACTRDecay:          req.Weights.ACTRDecay,
-			ACTRHebScale:       req.Weights.ACTRHebScale,
+			// The MBP/REST wire field is `omitempty` float32, so an explicit 0
+			// from a caller never reaches this struct as 0 — it arrives as
+			// "absent". Mapping 0 to nil here is therefore not a loss: it is
+			// the only honest reading of what the wire can express. Per-vault
+			// `actr_heb_scale: 0` goes through the plasticity branch below,
+			// which CAN express it.
+			ACTRHebScale: actrHebScalePtr(req.Weights.ACTRHebScale),
 		}
 	} else if modePreset != nil && req.Mode != "" && presetCarriesWeights(*modePreset) && resolved.ScoringFusion != "rrf" {
 		// EXPLICIT weight-carrying mode (semantic/recent), no caller weights:
@@ -2469,10 +2479,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		if resolved.ACTRDecay > 0 {
 			actrDecay = float32(resolved.ACTRDecay)
 		}
-		actrHebScale := float32(4.0)
-		if resolved.ACTRHebScale > 0 {
-			actrHebScale = float32(resolved.ACTRHebScale)
-		}
+		// resolved.ACTRHebScale is ALWAYS populated by auth.ResolvePlasticity
+		// (from the preset, or from an explicit override clamped to [0, 50]),
+		// so there is no "unset" to fall back from. The `> 0` guard this
+		// replaces was a SECOND silent substitution of the documented 0 —
+		// principle #1, in the same request that the activation layer's own
+		// substitution corrupted.
+		actrHebScale := float32(resolved.ACTRHebScale)
 		actReq.Weights = &activation.Weights{
 			// ACT-R ContentMatch gate: 60% semantic, 40% FTS — proven optimal.
 			// Plasticity's SemanticWeight/FTSWeight were calibrated for the old 6-component
@@ -2488,7 +2501,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			// ACT-R cognitive parameters (from Plasticity presets)
 			UseACTR:      true,
 			ACTRDecay:    actrDecay,
-			ACTRHebScale: actrHebScale,
+			ACTRHebScale: &actrHebScale,
 		}
 
 		// Wire ScoringFusion from plasticity config to activation weights.
@@ -4478,7 +4491,7 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 								continue // COG-20: never pruned by the MaxEngrams path
 							}
 							lastAccess := m.LastAccess
-							if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+							if storage.IsUnsetTimestamp(lastAccess) {
 								lastAccess = now
 							}
 							ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 0.1)
@@ -4926,4 +4939,14 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 		})
 	}
 	return nil
+}
+
+// actrHebScalePtr maps a wire-level ACTRHebScale to activation's optional form.
+// The MBP/REST field is `omitempty`, so 0 on the wire means ABSENT, never an
+// explicit zero — see the call site in Activate.
+func actrHebScalePtr(v float32) *float32 {
+	if v <= 0 {
+		return nil
+	}
+	return &v
 }

@@ -72,9 +72,12 @@ func TestWipeForResnapshot_PreservesClusterEpoch(t *testing.T) {
 	if err := db.Set([]byte("engram:1"), []byte("data"), pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
-	// A non-meta key that merely shares the 0x19 0x03 prefix (e.g. an idempotency
-	// receipt) MUST still be wiped — the preservation is exact-key, not prefix.
-	collidingKey := []byte{0x19, 0x03, 0xAB, 0xCD}
+	// A key that merely shares a PREFIX with the epoch key MUST still be wiped —
+	// the preservation is exact-key, not prefix-skip. (Pre-#726 the realistic
+	// example was an idempotency receipt beginning 0x19 0x03; since the
+	// relocation the neighbours are replication's own sibling metadata keys,
+	// e.g. last_applied, which must NOT survive a re-snapshot.)
+	collidingKey := append(metaKey("cluster_epoch"), 0xAB)
 	if err := db.Set(collidingKey, []byte("receipt"), pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +88,7 @@ func TestWipeForResnapshot_PreservesClusterEpoch(t *testing.T) {
 
 	if _, closer, err := db.Get(collidingKey); err == nil {
 		closer.Close()
-		t.Error("a key sharing the 0x19 0x03 prefix (not the exact epoch key) must be wiped")
+		t.Error("a key sharing a prefix with the epoch key (but not the exact key) must be wiped")
 	}
 
 	// Epoch survives (re-read from the DB).

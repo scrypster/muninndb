@@ -735,6 +735,41 @@ func deleteLegacyFullWeightKeys(batch *pebble.Batch, wsPrefix [8]byte, a, b [16]
 	_ = batch.Delete(keys.AssocRevKey(wsPrefix, b, 0.0, a), nil)
 }
 
+// assocMonotonicAnchor returns the lastActivated stamp to persist: never
+// earlier than the one already on disk.
+//
+// lastActivated is COG-27's decay input — `ceiling = peakWeight *
+// 2^(-(now - lastActivated)/H)` — so moving it BACKWARDS collapses a live
+// edge's ceiling on the very next pass, and COG-27's never-raise guarantee
+// makes that collapse IRREVERSIBLE: a corrected stamp cannot restore the
+// weight, only re-learning can.
+//
+// The stamp is not purely local. Since #779, AssocWeightUpdate.LastActivatedAt
+// reaches disk, and the replication coordinator builds its CoActivationEvent
+// from `time.Unix(0, effect.Timestamp)` — the REMOTE PEER'S CLOCK, verbatim.
+// The Hebbian worker takes the per-pair max WITHIN one batch, which is
+// order-independent and correct, but nothing compared against what was already
+// stored. A lagging or skewed peer, or a cog-forward backlog delivered after a
+// partition heals, could therefore rewrite another node's decay anchor.
+//
+// max() is the same shape peakWeight already has in both writers (principle #3:
+// make the bad state unrepresentable rather than policy-checked), and it is
+// what makes COG-27's "convergent under replication" claim true again — max,
+// like min, is commutative and associative, so nodes converge on the anchor
+// regardless of delivery order.
+//
+// A zero `stored` is "unknown, not the Unix epoch" (COG-27) and cannot pin
+// anything forward. A FUTURE incoming stamp is deliberately NOT clamped down:
+// that is the opposite direction (an inflated anchor suppresses decay), it is a
+// separate question, and clamping would break the offline replay driver's
+// virtual clock.
+func assocMonotonicAnchor(stored, incoming int32) int32 {
+	if stored > incoming {
+		return stored
+	}
+	return incoming
+}
+
 // UpdateAssocWeight updates one association's weight, preserving the edge's
 // existing metadata.
 //
@@ -764,7 +799,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	if err != nil {
 		return fmt.Errorf("update assoc weight: %w", err)
 	}
-	relType, confidence, createdAt, _, existingPeak, existingCoAct, existingRestoredAt, err := ps.getAssocValueFull(ctx, wsPrefix, a, b)
+	relType, confidence, createdAt, existingLastActivated, existingPeak, existingCoAct, existingRestoredAt, err := ps.getAssocValueFull(ctx, wsPrefix, a, b)
 	if err != nil {
 		return fmt.Errorf("update assoc weight: %w", err)
 	}
@@ -777,7 +812,8 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 
 	// Preserve existing metadata; set lastActivated = now (Hebbian update = activation).
 	// PeakWeight is monotonically non-decreasing: max(existingPeak, newWeight).
-	now := int32(time.Now().Unix())
+	// So is lastActivated, and for the same reason — see assocMonotonicAnchor.
+	now := assocMonotonicAnchor(existingLastActivated, int32(time.Now().Unix()))
 	newPeak := existingPeak
 	if weight > newPeak {
 		newPeak = weight
@@ -883,7 +919,9 @@ func (e *AssocBatchSkipError) Unwrap() []error { return e.Errs }
 // atomically — the batch is all-or-nothing about what it WRITES, so no pair is
 // ever left half-updated and no fabricated tuple is ever persisted.
 // Existing metadata (relType, confidence, createdAt) is preserved per-pair;
-// lastActivated is set to now (Hebbian update = activation).
+// lastActivated is set to update.LastActivatedAt when non-zero, else to now
+// (Hebbian update = activation). Zero-value = the pre-#779 behaviour, so
+// production is byte-identical unless a caller opts in.
 //
 // # An unreadable pair is skipped, not fatal to the batch
 //
@@ -913,7 +951,7 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
-	now := int32(time.Now().Unix())
+	wallNow := int32(time.Now().Unix())
 	var skipped []int
 	var skipErrs []error
 	applied := 0
@@ -937,6 +975,13 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 				ULID(update.Src).String(), ULID(update.Dst).String(), err))
 			continue
 		}
+
+		// A caller may carry its own activation timestamp (the replay driver
+		// does); zero means "use the wall clock", the pre-#779 behaviour.
+		now := wallNow
+		if update.LastActivatedAt != 0 {
+			now = update.LastActivatedAt
+		}
 		oldWeight, err := ps.GetAssocWeight(ctx, update.WS, update.Src, update.Dst)
 		if err != nil {
 			skipped = append(skipped, i)
@@ -944,7 +989,7 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 				ULID(update.Src).String(), ULID(update.Dst).String(), err))
 			continue
 		}
-		relType, confidence, createdAt, _, existingPeak, existingCoAct, existingRestoredAt, err := ps.getAssocValueFull(ctx, update.WS, ULID(update.Src), ULID(update.Dst))
+		relType, confidence, createdAt, existingLastActivated, existingPeak, existingCoAct, existingRestoredAt, err := ps.getAssocValueFull(ctx, update.WS, ULID(update.Src), ULID(update.Dst))
 		if err != nil {
 			skipped = append(skipped, i)
 			skipErrs = append(skipErrs, fmt.Errorf("pair %s->%s: %w",
@@ -952,6 +997,10 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 			continue
 		}
 		applied++
+
+		// The decay anchor is monotonic: a late-arriving or remotely-produced
+		// stamp may not move it back. See assocMonotonicAnchor.
+		now = assocMonotonicAnchor(existingLastActivated, now)
 
 		if oldWeight > 0 {
 			batch.Delete(keys.AssocFwdKey(update.WS, update.Src, oldWeight, update.Dst), nil)

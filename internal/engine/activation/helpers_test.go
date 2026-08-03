@@ -213,7 +213,7 @@ func TestResolveWeights_WithRequest(t *testing.T) {
 		SemanticSimilarity: 0.5,
 		FullTextRelevance:  0.3,
 		ACTRDecay:          0.7,
-		ACTRHebScale:       6.0,
+		ACTRHebScale:       f32p(6.0),
 	}
 	rw := resolveWeights(req, DefaultWeights{})
 	if rw.ACTRDecay < 0.69 || rw.ACTRDecay > 0.71 {

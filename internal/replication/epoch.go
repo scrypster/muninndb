@@ -8,18 +8,6 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-// clusterEpochKey returns the Pebble key used to store the cluster election epoch.
-func clusterEpochKey() []byte {
-	return []byte{0x19, 0x03, 'c', 'l', 'u', 's', 't', 'e', 'r', '_', 'e', 'p', 'o', 'c', 'h'}
-}
-
-// nodeRoleKey returns the Pebble key used to store the last claimed node role.
-// Written before broadcasting CortexClaim during handoff so that a crash
-// between broadcasting and completing promotion is recoverable on restart.
-func nodeRoleKey() []byte {
-	return []byte{0x19, 0x03, 'n', 'o', 'd', 'e', '_', 'r', 'o', 'l', 'e'}
-}
-
 // EpochStore persists the cluster election epoch to Pebble.
 // Every time this node participates in an election, the epoch is incremented
 // and persisted before any votes are sent. This ensures a restarted node

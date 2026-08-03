@@ -308,7 +308,7 @@ curl -X PUT "http://127.0.0.1:8475/api/admin/vault/default/plasticity" \
 | Field | Type | Range | Purpose |
 |-------|------|-------|---------|
 | `preset` | string | `default` \| `reference` \| `scratchpad` \| `knowledge-graph` \| `working` | Base cognitive profile; overrides applied on top |
-| `hebbian_enabled` | bool | — | Enable/disable Hebbian weight updates (coactivation learning) |
+| `hebbian_enabled` | bool | — | Enable/disable Hebbian co-activation learning. Symmetric (COG-32): gates weight updates, association decay, **and** the read-side boost recall applies from association weights |
 | `temporal_enabled` | bool | — | Enable/disable time-based temporal scoring |
 | `multi_user` | bool | — | Vault shared by multiple users/agents: guide + recall hints steer clients to per-user scoped recall; `where_left_off`/`session` flagged vault-global |
 | `hop_depth` | int | 0–8 | BFS hops for associative retrieval; higher = broader context |

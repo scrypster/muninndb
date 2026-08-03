@@ -119,7 +119,7 @@ muninn start
 
 3. The primary bootstraps at epoch 0, starts an election, and becomes Cortex.
 
-**Or** enable cluster mode on a running node via REST:
+**Or** write the cluster configuration through REST, then restart the node:
 
 ```sh
 curl -X POST http://127.0.0.1:8475/api/admin/cluster/enable \
@@ -130,7 +130,18 @@ curl -X POST http://127.0.0.1:8475/api/admin/cluster/enable \
     "bind_addr": "0.0.0.0:8474",
     "cluster_secret": "your-secure-secret"
   }'
+# 202 Accepted
+# {"enabled":false,"configured":true,"restart_required":true,"role":"primary",
+#  "message":"cluster configuration saved. Restart muninn on this node ..."}
 ```
+
+> **Enabling clustering requires a restart.** The endpoint persists
+> `cluster.yaml` and answers `202 Accepted` with `restart_required: true`; it
+> does not start a coordinator. The storage layer's replication hook is wired
+> when the store is built at boot and only when clustering was already enabled
+> at that moment, so a coordinator started mid-process would report itself
+> clustered, accept replicas, hand them a snapshot — and replicate none of the
+> node's subsequent writes. Restart the node to activate clustering.
 
 ### Adding Replica Nodes
 
@@ -351,6 +362,28 @@ Use when the Cortex has failed and you need a new leader elected. The Lobe with 
    - Stop the demoted primary (now replica)
    - Replace binary, start
    - Wait for catch-up
+
+### One-time migration on first start of a post-#726 binary
+
+The replication keyspace moved off Pebble prefix `0x19` (which it shared with idempotency
+receipts) onto `0x2F`. Storage migration **v5** runs automatically on first start and:
+
+- relocates the replication metadata (sequence counter, applied watermark, schema version,
+  cluster epoch, node role, snapshot sentinel) — values preserved, so sequence numbering
+  and fencing state carry over unchanged;
+- **drops the old replication log entries** and compacts the range. On the deployments that
+  motivated this, that is where the tens of gigabytes come back.
+
+Operational consequence: a Lobe that was behind the Cortex's retained log when the Cortex
+restarts will **rejoin by snapshot** rather than by incremental catch-up. That is the same
+consequence a prune has, it is automatic, and it is bounded by snapshot transfer time.
+Follow the normal upgrade order below so at most one node is resnapshotting at a time.
+
+Migration v5 cannot be undone: **a pre-v5 binary refuses to start against a migrated data
+directory** (the refuse-newer guard). That refusal is deliberate — an older binary would
+find no sequence counter, restart the replication log at 1, and re-issue sequence numbers
+its followers have already applied. To roll back, restore the data directory from the
+backup taken before the upgrade.
 
 ### Schema Version Compatibility
 

@@ -50,6 +50,7 @@ func RegisterMigrations(r *Runner) {
 	r.Register(Migration{Version: 2, Description: "backfill relationship entity index (0x26) for GetEntityAggregate optimisation", Up: BackfillRelEntityIndex})
 	r.Register(Migration{Version: 3, Description: "relocate auth prefixes 0x11–0x14 to 0x42–0x45 (#611)", Up: RelocateAuthPrefixes})
 	r.Register(Migration{Version: 4, Description: "backfill ordered raw-tag-range index (0x2C) for existing key:value tags (S1)", Up: BackfillRawTagRange})
+	r.Register(Migration{Version: 5, Description: "relocate the replication keyspace off the double-allocated 0x19 onto 0x2F (#726)", Up: RelocateReplicationPrefix})
 }
 
 // MaxRegisteredVersion returns the highest migration version this binary knows.

@@ -66,8 +66,9 @@ func TestAdminCluster_Enable_DefaultsWrittenToDisk(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json")
 	s.mux.ServeHTTP(w, r)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	// 202, not 200: enabling clustering requires a restart (#628).
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// Read back the persisted config and verify no zero-value timing fields.
@@ -116,8 +117,8 @@ func TestBug175_SettingsPersistAllFields(t *testing.T) {
 		strings.NewReader(`{"role":"primary","bind_addr":"127.0.0.1:8474"}`))
 	r.Header.Set("Content-Type", "application/json")
 	s.mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("enable cluster: expected 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("enable cluster: expected 202, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// Send all four settings fields.
@@ -163,7 +164,7 @@ func TestBug175_GetSettingsReturnsPersistedValues(t *testing.T) {
 		strings.NewReader(`{"role":"primary","bind_addr":"127.0.0.1:8474"}`))
 	r.Header.Set("Content-Type", "application/json")
 	s.mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusAccepted {
 		t.Fatalf("enable cluster: %d: %s", w.Code, w.Body.String())
 	}
 
