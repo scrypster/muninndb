@@ -180,7 +180,7 @@ func (m *mockEngine) StartReembedVault(ctx context.Context, vaultName, modelName
 	return &vaultjob.Job{ID: "mock-reembed-job", Operation: "reembed", Source: vaultName, Target: vaultName}, nil
 }
 
-func (m *mockEngine) CountEmbedded(ctx context.Context) int64 {
+func (m *mockEngine) CountEmbedded(ctx context.Context, vault string) int64 {
 	return 0
 }
 

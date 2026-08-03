@@ -82,6 +82,53 @@ func (ps *PebbleStore) CountWithFlag(ctx context.Context, flag uint16) (int64, e
 	return count, iter.Error()
 }
 
+// CountEmbeddedInVault returns the number of engrams IN THE GIVEN VAULT that
+// have the given digest flag bit set. Unlike CountWithFlag (which scans the
+// global 0x11 DigestFlags keyspace directly — that keyspace is deliberately
+// NOT vault-scoped, see docs/internals/keyspace-registry.md), this scans the
+// vault's own 0x01 Engram keyspace for its member IDs and looks up each one's
+// digest flags individually, so it costs O(engrams in this vault) rather than
+// O(all engrams in the store). Mirrors countEngramsForVault's bound
+// construction so the numerator and denominator of an embedding-coverage
+// ratio agree on which rows are "in the vault" (#802).
+func (ps *PebbleStore) CountEmbeddedInVault(ctx context.Context, wsPrefix [8]byte, flag uint16) (int64, error) {
+	lower := keys.EngramKey(wsPrefix, [16]byte{})
+	upperWS := wsPrefix
+	for i := 7; i >= 0; i-- {
+		upperWS[i]++
+		if upperWS[i] != 0 {
+			break
+		}
+	}
+	upper := make([]byte, 1+8)
+	upper[0] = prefix.Engram
+	copy(upper[1:9], upperWS[:])
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return 0, err
+	}
+	defer iter.Close()
+
+	var count int64
+	for valid := iter.First(); valid; valid = iter.Next() {
+		k := iter.Key()
+		if len(k) < 25 {
+			continue
+		}
+		var id [16]byte
+		copy(id[:], k[9:25])
+		raw, err := ps.getDigestFlagsRaw(id)
+		if err == nil && raw&flag != 0 {
+			count++
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return 0, fmt.Errorf("count embedded in vault scan: %w", err)
+	}
+	return count, nil
+}
+
 // ScanWithoutFlag returns a forward-only iterator over all engrams that are
 // missing the given digest flag bit. Engrams that have any skipFlags bit set
 // are skipped during iteration.

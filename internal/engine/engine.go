@@ -1253,9 +1253,24 @@ func (e *Engine) WriteIdempotency(ctx context.Context, opID, engramID string) er
 
 // CountEmbedded returns the count of engrams that have had embeddings generated
 // (i.e. the DigestEmbed flag is set). Returns -1 on error.
-func (e *Engine) CountEmbedded(ctx context.Context) int64 {
+//
+// vault == "" counts across the whole store (the historical, instance-wide
+// behavior). A non-empty vault scopes the count to that vault's own engrams
+// (#802) — the 0x11 DigestFlags keyspace itself is deliberately global (see
+// docs/internals/keyspace-registry.md), so the vault-scoped path is a
+// different, more expensive query: scan the vault's engram IDs and look up
+// each one's flags, rather than scanning DigestFlags directly.
+func (e *Engine) CountEmbedded(ctx context.Context, vault string) int64 {
 	const DigestEmbed uint16 = 0x02
-	count, err := e.store.CountWithFlag(ctx, DigestEmbed)
+	if vault == "" {
+		count, err := e.store.CountWithFlag(ctx, DigestEmbed)
+		if err != nil {
+			return -1
+		}
+		return count
+	}
+	wsPrefix := e.store.ResolveVaultPrefix(vault)
+	count, err := e.store.CountEmbeddedInVault(ctx, wsPrefix, DigestEmbed)
 	if err != nil {
 		return -1
 	}

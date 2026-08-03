@@ -48,6 +48,70 @@ func TestHandleEmbedStatus(t *testing.T) {
 	}
 }
 
+// TestHandleEmbedStatus_HonorsVaultParam is #802: GET /api/admin/embed/status
+// ignored the ?vault= query param entirely and always queried instance-wide
+// state, so two differently-sized vaults returned byte-identical payloads.
+// Asserts the handler forwards the requested vault to BOTH Stat (denominator)
+// and CountEmbedded (numerator) — sharing scope matters, because a
+// vault-scoped numerator over an instance-wide denominator is a coverage
+// ratio that looks plausible and is wrong.
+func TestHandleEmbedStatus_HonorsVaultParam(t *testing.T) {
+	store := newTestAuthStore(t)
+	eng := &MockEngine{
+		statEngramCountByVault: map[string]int64{"alpha": 5, "beta": 500},
+		countEmbeddedByVault:   map[string]int64{"alpha": 3, "beta": 17},
+	}
+	srv := NewServer("localhost:0", eng, store, nil, nil, EmbedInfo{
+		Provider: "openai",
+		Model:    "text-embedding-3-small",
+	}, EnrichInfo{}, nil, "", nil)
+
+	req := httptest.NewRequest("GET", "/api/admin/embed/status?vault=alpha", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp EmbedStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if eng.lastStatReq == nil || eng.lastStatReq.Vault != "alpha" {
+		got := "<nil>"
+		if eng.lastStatReq != nil {
+			got = eng.lastStatReq.Vault
+		}
+		t.Errorf("Stat was not called with vault=alpha, got %q", got)
+	}
+	if eng.lastCountEmbeddedVault == nil || *eng.lastCountEmbeddedVault != "alpha" {
+		got := "<nil>"
+		if eng.lastCountEmbeddedVault != nil {
+			got = *eng.lastCountEmbeddedVault
+		}
+		t.Errorf("CountEmbedded was not called with vault=alpha, got %q", got)
+	}
+	if resp.TotalCount != 5 {
+		t.Errorf("expected total_count=5 (alpha's own count), got %d", resp.TotalCount)
+	}
+	if resp.EmbeddedCount != 3 {
+		t.Errorf("expected embedded_count=3 (alpha's own count), got %d", resp.EmbeddedCount)
+	}
+
+	// A second, differently-sized vault must NOT return the same payload.
+	req2 := httptest.NewRequest("GET", "/api/admin/embed/status?vault=beta", nil)
+	w2 := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w2, req2)
+	var resp2 EmbedStatusResponse
+	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp2.TotalCount == resp.TotalCount || resp2.EmbeddedCount == resp.EmbeddedCount {
+		t.Errorf("vault=alpha and vault=beta returned identical counts: %+v vs %+v", resp, resp2)
+	}
+}
+
 func TestHandleEmbedStatus_NoneProvider(t *testing.T) {
 	store := newTestAuthStore(t)
 	srv := NewServer("localhost:0", &MockEngine{}, store, nil, nil, EmbedInfo{

@@ -1478,9 +1478,11 @@ components:
         embedded_count:
           type: integer
           format: int64
+          description: "Instance-wide by default; scoped to ?vault= when the request supplied one (#802)."
         total_count:
           type: integer
           format: int64
+          description: "Same scope as embedded_count — the two always share scope, so their ratio is a true coverage measure."
         indexing:
           type: boolean
 
@@ -3503,6 +3505,17 @@ paths:
     get:
       tags: [admin-system]
       summary: "Return the current embedder configuration and indexing progress."
+      parameters:
+        - name: vault
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >-
+            Scope embedded_count/total_count to this vault (#802). Omitted or empty
+            means instance-wide (the historical behavior). rate_per_sec/eta_seconds
+            remain instance-wide regardless of this parameter — throughput is not
+            tracked per vault.
       security:
         - AdminSession: []
       responses:

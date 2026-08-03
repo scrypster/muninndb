@@ -666,7 +666,7 @@ func New(store ActivationStore, fts FTSIndex, hnsw HNSWIndex, embedder Embedder)
 // drainLog is the single goroutine that writes to assocLog.
 // Serializes all activation log writes, eliminating Lock contention against
 // Phase 4's concurrent RecentForVault RLock calls. Eventual consistency:
-// the log may lag by ~1ms but Hebbian decay half-life is 3600s — irrelevant.
+// the log may lag by ~1ms but Hebbian recency decays with τ=3600s (recencyTau) — irrelevant.
 func (e *ActivationEngine) drainLog() {
 	defer close(e.logDone)
 	for item := range e.logCh {
@@ -692,8 +692,8 @@ func (e *ActivationEngine) drainLog() {
 // drainLog. Test-only synchronization helper, mirroring autoassoc.Worker's
 // WaitIdle pattern: production callers never await this — phase4HebbianBoost
 // tolerates the drainer's eventual consistency by design (comment on
-// drainLog: "the log may lag by ~1ms but Hebbian decay half-life is 3600s —
-// irrelevant"). That assumption fails in a scripted back-to-back test harness
+// drainLog: "the log may lag by ~1ms but Hebbian recency decays with τ=3600s
+// (recencyTau) — irrelevant"). That assumption fails in a scripted back-to-back test harness
 // (calls a few ms apart): under -race/CPU contention the drainer goroutine
 // can still be applying call N's entry when call N+1 runs phase4HebbianBoost,
 // so the same candidate nondeterministically scores with or without the
@@ -708,7 +708,7 @@ func (e *ActivationEngine) WaitLogIdle() {
 // ResetLog discards assocLog's recorded activation events for vaultID.
 // Test-only: see ActivationLog.ResetVault for the full rationale (a scripted
 // back-to-back harness modeling separate agent sessions compresses real
-// elapsed time, defeating the recency half-life that normally bounds
+// elapsed time, defeating the recency decay (recencyTau) that normally bounds
 // cross-call priming). Callers MUST call WaitLogIdle first if a just-run
 // Activate() may still have an entry in flight, or the drainer can
 // re-populate the vault's log immediately after this call clears it.
@@ -851,7 +851,7 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 
 	// Submit activation log entry to the async drainer — zero hot-path allocations.
 	// The drainer extracts ids/scores off the critical path.
-	// Non-blocking: drops if channel full (Hebbian half-life=3600s, 1ms lag is negligible).
+	// Non-blocking: drops if channel full (Hebbian recencyTau=3600s, 1ms lag is negligible).
 	if !req.ReadOnly && len(result.Activations) > 0 {
 		e.logWG.Add(1) // Add FIRST — visible to WaitLogIdle() (test-only); undone below on drop
 		select {
@@ -1411,13 +1411,19 @@ func (e *ActivationEngine) phase4HebbianBoost(ctx context.Context, ws [8]byte, v
 
 	now := time.Now().Unix()
 	recentWeights := make(map[storage.ULID]float64, len(recent))
-	const halfLife = 3600.0
+	// recencyTau is a decay TIME CONSTANT (τ), used as exp(-age/τ), not a
+	// half-life (2^(-age/h)). The two differ by ln(2): the half-life this
+	// τ actually implies is τ·ln(2) ≈ 2495s ≈ 41.6min, not 3600s/1h. Do not
+	// rename this back to "halfLife" without also swapping the formula to
+	// math.Exp2(-age/h) — internal/storage/association.go's DecayAssocWeights
+	// is the worked example of the OTHER (genuine half-life) parameterization.
+	const recencyTau = 3600.0
 	for _, entry := range recent {
 		age := float64(now - entry.At.Unix())
 		if age < 0 { // clock skew: activation timestamped in the future
 			age = 0
 		}
-		recencyW := math.Exp(-age / halfLife)
+		recencyW := math.Exp(-age / recencyTau)
 		for _, id := range entry.EngramIDs {
 			if w, ok := recentWeights[id]; !ok || recencyW > w {
 				recentWeights[id] = recencyW

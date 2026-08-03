@@ -366,6 +366,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reinforcement. It now holds the same per-engram stripe lock every sibling
   read-modify-write holds ([STO-2]/[STO-3]). (#720)
 
+- **`GET /api/admin/embed/status` now honors an optional `?vault=` query
+  parameter** (#802). It previously accepted the parameter and silently
+  ignored it — every vault on a multi-vault instance got the same
+  instance-wide `embedded_count`/`total_count`, which reads as a per-vault
+  coverage ratio and is not one. `total_count` now comes from `Stat` scoped to
+  the same vault (already supported); `embedded_count` gained a new
+  vault-scoped storage path (`CountEmbeddedInVault`), since the 0x11
+  DigestFlags keyspace it reads from is deliberately global and cannot be
+  scanned by vault directly — it scans the vault's own engram IDs and looks
+  up each one's flags instead. Both counts always share scope by
+  construction, so the ratio stays honest. `rate_per_sec`/`eta_seconds`
+  remain instance-wide — a named, documented deferral, not silently wrong.
+  Omitted or empty `vault` preserves the historical instance-wide behavior.
+
 ### Changed
 
 - **`muninn_evolve` now rejects a `tags` argument** with JSON-RPC `-32602`,

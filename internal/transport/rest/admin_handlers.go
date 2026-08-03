@@ -611,15 +611,23 @@ type EmbedStatusResponse struct {
 	HardwareAccelerated *bool `json:"hardware_accelerated,omitempty"`
 }
 
-// handleEmbedStatus returns the current embedder configuration and indexing state.
+// handleEmbedStatus returns the current embedder configuration and indexing
+// state. An optional ?vault= query param scopes embedded_count/total_count to
+// that vault (#802) — omitted or empty means instance-wide, the historical
+// behavior. Both counts share the SAME scope: without that, a vault-scoped
+// numerator over an instance-wide denominator produces a coverage ratio that
+// looks plausible and is wrong, exactly the silent-substitution failure this
+// project treats as worst.
 func (s *Server) handleEmbedStatus(w http.ResponseWriter, r *http.Request) {
-	statResp, err := s.engine.Stat(r.Context(), &StatRequest{})
+	vault := r.URL.Query().Get("vault")
+
+	statResp, err := s.engine.Stat(r.Context(), &StatRequest{Vault: vault})
 	totalCount := int64(-1)
 	if err == nil {
 		totalCount = int64(statResp.EngramCount)
 	}
 
-	embeddedCount := s.engine.CountEmbedded(r.Context())
+	embeddedCount := s.engine.CountEmbedded(r.Context(), vault)
 	indexing := embeddedCount >= 0 && totalCount >= 0 && embeddedCount < totalCount
 
 	resp := EmbedStatusResponse{
@@ -632,7 +640,11 @@ func (s *Server) handleEmbedStatus(w http.ResponseWriter, r *http.Request) {
 		HardwareAccelerated: s.embedHardwareAccelerated,
 	}
 
-	// Only populate rate/ETA when actively indexing.
+	// Only populate rate/ETA when actively indexing. rate_per_sec/eta_seconds
+	// remain instance-wide regardless of ?vault= — the RetroactiveProcessor
+	// backing EmbedStats does not track per-vault throughput. A named
+	// deferral, not silently wrong: embedded_count/total_count (the coverage
+	// ratio the reported defect was about) are vault-scoped when requested.
 	if indexing {
 		stats := s.engine.EmbedStats()
 		resp.RatePerSec = stats.RatePerSec

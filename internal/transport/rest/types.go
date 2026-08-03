@@ -116,7 +116,9 @@ type EngineAPI interface {
 	// Returns a Job immediately (202 pattern).
 	StartReembedVault(ctx context.Context, vaultName, modelName string) (*vaultjob.Job, error)
 	// CountEmbedded returns the number of engrams with the DigestEmbed flag set.
-	CountEmbedded(ctx context.Context) int64
+	// vault == "" counts across the whole store; a non-empty vault scopes the
+	// count to that vault only (#802).
+	CountEmbedded(ctx context.Context, vault string) int64
 	// Observability returns the full system observability snapshot.
 	Observability(ctx context.Context, version string, uptimeSeconds int64) (*engine.ObservabilitySnapshot, error)
 	// GetProcessorStats returns stats for all retroactive processors.

@@ -37,6 +37,13 @@ type MockEngine struct {
 	lastActivityReq   *ActivityCountsRequest
 	activityCountsErr error
 	lastSubscribeReq  *mbp.SubscribeRequest
+
+	// #802: capture/control Stat and CountEmbedded's vault scoping so tests
+	// can assert GET /api/admin/embed/status honors ?vault=.
+	lastStatReq            *StatRequest
+	lastCountEmbeddedVault *string // nil until CountEmbedded is called
+	statEngramCountByVault map[string]int64
+	countEmbeddedByVault   map[string]int64
 }
 
 func (m *MockEngine) Hello(ctx context.Context, req *HelloRequest) (*HelloResponse, error) {
@@ -99,8 +106,15 @@ func (m *MockEngine) Forget(ctx context.Context, req *ForgetRequest) (*ForgetRes
 }
 
 func (m *MockEngine) Stat(ctx context.Context, req *StatRequest) (*StatResponse, error) {
+	m.lastStatReq = req
+	engramCount := int64(100)
+	if req != nil && req.Vault != "" {
+		if n, ok := m.statEngramCountByVault[req.Vault]; ok {
+			engramCount = n
+		}
+	}
 	return &StatResponse{
-		EngramCount:  100,
+		EngramCount:  engramCount,
 		VaultCount:   1,
 		StorageBytes: 1024000,
 	}, nil
@@ -309,7 +323,14 @@ func (m *MockEngine) StartReembedVault(ctx context.Context, vaultName, modelName
 	return &vaultjob.Job{ID: "mock-reembed-job", Operation: "reembed", Source: vaultName, Target: vaultName}, nil
 }
 
-func (m *MockEngine) CountEmbedded(ctx context.Context) int64 {
+func (m *MockEngine) CountEmbedded(ctx context.Context, vault string) int64 {
+	v := vault
+	m.lastCountEmbeddedVault = &v
+	if vault != "" {
+		if n, ok := m.countEmbeddedByVault[vault]; ok {
+			return n
+		}
+	}
 	return 42
 }
 

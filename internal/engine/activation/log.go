@@ -45,8 +45,8 @@ func (l *ActivationLog) getOrCreate(vaultID uint32) *vaultLog {
 // A scripted test harness that fires many calls back-to-back to model
 // SEPARATE, independently-dedup'd agent sessions (see prospective_harness_test.go)
 // compresses what would be minutes/hours of real elapsed time into
-// milliseconds, so the recency-weighted half-life (3600s) never meaningfully
-// decays between "sessions" — every prior scripted call's results stay
+// milliseconds, so the recency-weighted decay (recencyTau=3600s) never
+// meaningfully decays between "sessions" — every prior scripted call's results stay
 // maximally "recently activated" for the rest of the run, letting an armed
 // intention's own engram silently accumulate Hebbian boost from unrelated
 // earlier calls and outscore its own corroborator. See ActivationEngine.ResetLog.

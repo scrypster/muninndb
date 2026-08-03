@@ -81,6 +81,74 @@ func TestCountWithFlag(t *testing.T) {
 	}
 }
 
+// TestCountEmbeddedInVault is #802: GET /api/admin/embed/status needs a
+// PER-VAULT embedded count so a multi-vault install can measure coverage for
+// one vault rather than the whole store. Writes engrams to TWO vaults, flags
+// a different subset of each, and verifies CountEmbeddedInVault scopes to
+// only the requested vault's own engrams — unlike CountWithFlag, which scans
+// the global 0x11 DigestFlags keyspace and cannot distinguish vaults at all.
+func TestCountEmbeddedInVault(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	wsA := store.VaultPrefix("count-embedded-vault-a")
+	wsB := store.VaultPrefix("count-embedded-vault-b")
+	const flag = uint16(0x02)
+
+	var idsA []ULID
+	for i := 0; i < 5; i++ {
+		id, err := store.WriteEngram(ctx, wsA, &Engram{Concept: "a", Content: "content"})
+		if err != nil {
+			t.Fatalf("WriteEngram A[%d]: %v", i, err)
+		}
+		idsA = append(idsA, id)
+	}
+	var idsB []ULID
+	for i := 0; i < 3; i++ {
+		id, err := store.WriteEngram(ctx, wsB, &Engram{Concept: "b", Content: "content"})
+		if err != nil {
+			t.Fatalf("WriteEngram B[%d]: %v", i, err)
+		}
+		idsB = append(idsB, id)
+	}
+
+	// Flag 2 of vault A's 5 engrams, and 1 of vault B's 3.
+	for _, id := range idsA[:2] {
+		if err := store.SetDigestFlag(ctx, id, flag); err != nil {
+			t.Fatalf("SetDigestFlag A: %v", err)
+		}
+	}
+	if err := store.SetDigestFlag(ctx, idsB[0], flag); err != nil {
+		t.Fatalf("SetDigestFlag B: %v", err)
+	}
+
+	countA, err := store.CountEmbeddedInVault(ctx, wsA, flag)
+	if err != nil {
+		t.Fatalf("CountEmbeddedInVault A: %v", err)
+	}
+	if countA != 2 {
+		t.Errorf("CountEmbeddedInVault A: got %d, want 2", countA)
+	}
+
+	countB, err := store.CountEmbeddedInVault(ctx, wsB, flag)
+	if err != nil {
+		t.Fatalf("CountEmbeddedInVault B: %v", err)
+	}
+	if countB != 1 {
+		t.Errorf("CountEmbeddedInVault B: got %d, want 1", countB)
+	}
+
+	// Sanity: the global CountWithFlag sees BOTH vaults' flagged engrams
+	// (3 total), which is exactly the cross-vault leakage a caller asking
+	// for one vault's coverage must NOT see.
+	globalCount, err := store.CountWithFlag(ctx, flag)
+	if err != nil {
+		t.Fatalf("CountWithFlag: %v", err)
+	}
+	if globalCount != 3 {
+		t.Errorf("CountWithFlag (global, for contrast): got %d, want 3", globalCount)
+	}
+}
+
 // TestFindVaultPrefix writes an engram in a known vault, then calls
 // FindVaultPrefix with the engram's ULID and verifies the correct ws is returned.
 func TestFindVaultPrefix(t *testing.T) {

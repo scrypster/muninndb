@@ -246,8 +246,8 @@ func (w *RESTEngineWrapper) Unsubscribe(ctx context.Context, subID string) error
 	return w.engine.Unsubscribe(ctx, subID)
 }
 
-func (w *RESTEngineWrapper) CountEmbedded(ctx context.Context) int64 {
-	return w.engine.CountEmbedded(ctx)
+func (w *RESTEngineWrapper) CountEmbedded(ctx context.Context, vault string) int64 {
+	return w.engine.CountEmbedded(ctx, vault)
 }
 
 func (w *RESTEngineWrapper) RecordAccess(ctx context.Context, vault, id string) error {
