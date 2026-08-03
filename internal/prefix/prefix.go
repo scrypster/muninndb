@@ -1,11 +1,13 @@
 // Package prefix is the single source of truth for Pebble key-prefix byte
-// allocations across storage, auth, and capability. Every key constructor in
-// internal/storage/keys and internal/auth MUST reference these constants;
-// never inline a raw byte. [RT-FIX RT3] The length invariants below are load-
-// bearing for the v3 migration discriminator. NOTE: replication's schemaVersionKey
-// (0x19,0x03,... in internal/replication/schema_version.go) bypasses this registry
-// and overlaps storage's 0x19 Idempotency — a pre-existing instance of the same
-// bug class, flagged as a follow-up (NOT fixed here).
+// allocations across storage, auth, capability, and replication. Every key
+// constructor in internal/storage/keys, internal/auth and internal/replication
+// MUST reference these constants; never inline a raw byte. [RT-FIX RT3] The
+// length invariants below are load-bearing for the v3 migration discriminator.
+//
+// #726: replication used to bypass this registry entirely and live under 0x19,
+// byte-for-byte overlapping storage's 0x19 Idempotency (both were
+// 0x19|8-bytes). It now owns Replication (0x2F) and references it from here;
+// migration v5 relocates existing vaults.
 package prefix
 
 // Source-of-truth prefix bytes. Storage unchanged; auth RELOCATED 0x11–0x14 → 0x42–0x45.
@@ -79,6 +81,20 @@ const (
 	// one-shot watermark is sound because the fixed encoder cannot create new
 	// damage of this kind.
 	AssocWeightRepairMark byte = 0x2E
+	// Replication (0x2F) — the whole internal/replication keyspace, relocated
+	// off the double-allocated 0x19 by #726. A second discriminator byte
+	// partitions it so that the sequence-keyed log entries can never share an
+	// address with anything else:
+	//
+	//	0x2F | 0x01 | seq_be64(8)  = 10 bytes  log entry (msgpack)
+	//	0x2F | 0x02 | name...                  replication metadata
+	//
+	// The entry sub-range is exactly [0x2F 0x01, 0x2F 0x02), so ReplicationLog.
+	// Prune's DeleteRange is STRUCTURALLY confined to log entries — it cannot
+	// reach the metadata keys, and (the #726 defect) it cannot reach an
+	// idempotency receipt, which now lives a whole prefix away.
+	// See internal/replication/keys.go for the constructors.
+	Replication byte = 0x2F
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
 	CapabilityVaultIdx byte = 0x41
@@ -96,7 +112,7 @@ const (
 
 type Entry struct {
 	Byte  byte
-	Owner string // "storage" | "auth" | "capability"
+	Owner string // "storage" | "auth" | "capability" | "replication"
 	Name  string
 	Cat   string // category for the per-list partition guards (Task 5)
 }
@@ -160,6 +176,7 @@ var registry = []Entry{
 	{RawTagRange, "storage", "RawTagRange", "vault-scoped-data"},
 	{ProspectiveIntent, "storage", "ProspectiveIntent", "vault-scoped-data"},
 	{AssocWeightRepairMark, "storage", "AssocWeightRepairMark", "vault-scoped-data"},
+	{Replication, "replication", "Replication", "replication"},
 	{Capability, "capability", "Capability", "capability"},
 	{CapabilityVaultIdx, "capability", "CapabilityVaultIdx", "capability"},
 	{AdminUser, "auth", "AdminUser", "auth"},

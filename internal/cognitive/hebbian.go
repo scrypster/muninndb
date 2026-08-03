@@ -17,10 +17,11 @@ const (
 	HebbianPassInterval = time.Minute
 )
 
-// hebbianMetadataKey returns the Pebble key for Hebbian worker metadata.
-func hebbianMetadataKey(name string) []byte {
-	return append([]byte{0x19, 0x01}, name...)
-}
+// NOTE: there was a hebbianMetadataKey(name) here returning 0x19|0x01|name — a
+// THIRD unregistered claimant on prefix.Idempotency (0x19). It had no callers in
+// the entire tree and was removed with #726 rather than relocated, since there
+// is no on-disk state behind it. Any future Hebbian metadata key must be
+// allocated in internal/prefix and added to docs/internals/keyspace-registry.md.
 
 // HebbianStore is the storage interface for Hebbian updates.
 type HebbianStore interface {

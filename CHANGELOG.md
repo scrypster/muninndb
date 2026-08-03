@@ -11,6 +11,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pebble prefix `0x19` was allocated twice, and a cluster prune would have
+  deleted idempotency receipts** (#726). `internal/replication` inlined a raw
+  `0x19` for every key it wrote, so a replication log entry (`0x19|seq_be64(8)`)
+  and an idempotency receipt (`0x19|siphash(op_id)(8)`) had the same prefix, the
+  same length, and the same database, with no discriminator between them —
+  116,248 entries alongside 23 receipts on one production store.
+  `ReplicationLog.Prune` range-deletes `[0x19|be64(1), 0x19|be64(untilSeq+1))`,
+  which is precisely "every receipt whose SipHash is below the watermark": a
+  vanishing probability at today's sequence numbers, growing linearly with the
+  sequence, and armed the moment the prune gets a production caller. The
+  sequence counter was worse-placed still, at `0x19|0xFF*8` — *inside* the entry
+  range. The whole replication keyspace now lives at `0x2F` with a
+  sub-namespace byte, so the prune's range provably contains nothing but log
+  entries. **Migration v5** relocates existing stores; it drops the old log
+  entries (key by key, behind a positive identification — never a range delete,
+  since receipts share that range) and compacts, which is also where a bloated
+  store gets its disk back. A pre-v5 binary refuses to start against a migrated
+  data directory. See `docs/cluster-operations.md` for the upgrade note.
+
+- **Observers accumulated the Cortex's replication log forever** (#826). Two
+  mechanisms, both closed. The snapshot sender iterated the entire database, so
+  every joining Lobe received a byte-for-byte copy of the Cortex's log — entries
+  that each carry the full key and value of a replicated write — which nothing
+  on a Lobe ever reads and nothing there prunes (the periodic prune is
+  leader-gated). And `RepLogAppend` was wired unconditionally on every cluster
+  node, so a Lobe logged a full-size entry for each of its *own* local writes
+  (last-access touches, Hebbian updates, decay), which is why a measured lobe
+  held more entries than the Cortex it followed: 22 GB and 7.5 GB on two
+  observers. Snapshots now skip the log entries and only the log entries — the
+  replication metadata, above all the sequence counter, still ships, so a
+  promoted Lobe continues the cluster's numbering — and a node that is
+  definitively a follower no longer appends. The suppression fails **open** on
+  an unknown role, so a leader serving writes during startup can never silently
+  drop them out of the stream. Neither filter was expressible before #726: under
+  `0x19` both would have discarded idempotency receipts too.
+
 - **An association edge can no longer outlive its endpoints** (#803). Hard
   deletes left the dead engram in the FTS and vector indexes, so the automatic
   association workers kept finding it and minting fresh edges to an ID that no

@@ -16,28 +16,7 @@ var (
 	ErrEmptyLog = errors.New("replication: empty log")
 )
 
-// replicationLogPrefix is the 0x19 prefix used for replication log keys.
-const replicationLogPrefix = 0x19
-
-// seqCounterKey is the key used to store the current sequence counter.
-// Key: 0x19 | 0xFF | 0xFF | 0xFF | 0xFF | 0xFF | 0xFF | 0xFF | 0xFF = 9 bytes
-func seqCounterKey() []byte {
-	key := make([]byte, 9)
-	key[0] = replicationLogPrefix
-	for i := 1; i < 9; i++ {
-		key[i] = 0xFF
-	}
-	return key
-}
-
-// replicationEntryKey constructs the key for a replication log entry.
-// Key: 0x19 | seq_be64(8) = 9 bytes
-func replicationEntryKey(seq uint64) []byte {
-	key := make([]byte, 9)
-	key[0] = replicationLogPrefix
-	binary.BigEndian.PutUint64(key[1:9], seq)
-	return key
-}
+// The log's key layout lives in keys.go (prefix.Replication, #726).
 
 // ReplicationLog manages the append-only replication log stored in Pebble.
 type ReplicationLog struct {
@@ -90,7 +69,7 @@ func (l *ReplicationLog) persistSeq() error {
 }
 
 // Append writes a new entry to the replication log and returns its sequence number.
-// The entry is serialized using msgpack and stored under key 0x19 | seq_be64.
+// The entry is serialized using msgpack and stored under key 0x2F|0x01|seq_be64.
 // Thread-safe.
 func (l *ReplicationLog) Append(op WALOp, key, value []byte) (uint64, error) {
 	l.mu.Lock()
@@ -166,8 +145,8 @@ func (l *ReplicationLog) ReadSince(afterSeq uint64, limit int) ([]ReplicationEnt
 	// Scan from afterSeq+1 to currentSeq (snapshot taken above)
 	startKey := replicationEntryKey(afterSeq + 1)
 	var endKey []byte
-	if currentSeq == ^uint64(0) { // uint64 max
-		endKey = seqCounterKey()
+	if currentSeq == ^uint64(0) { // uint64 max — no seq+1 to address
+		endKey = entryRangeUpper()
 	} else {
 		endKey = replicationEntryKey(currentSeq + 1)
 	}
@@ -185,13 +164,10 @@ func (l *ReplicationLog) ReadSince(afterSeq uint64, limit int) ([]ReplicationEnt
 	for valid := iter.First(); valid && len(entries) < limit; valid = iter.Next() {
 		var entry ReplicationEntry
 		if err := msgpack.Unmarshal(iter.Value(), &entry); err != nil {
-			// Extract the sequence number from the key (0x19 | seq_be64) so we can
-			// report exactly which entry is corrupt before returning an error.
-			// Silently skipping would create an invisible gap in the replication stream.
-			var seq uint64
-			if key := iter.Key(); len(key) >= 9 {
-				seq = binary.BigEndian.Uint64(key[1:9])
-			}
+			// Extract the sequence number from the key so we can report exactly
+			// which entry is corrupt before returning an error. Silently skipping
+			// would create an invisible gap in the replication stream.
+			seq, _ := entrySeqFromKey(iter.Key())
 			slog.Error("replication log: malformed entry, replication may have gaps",
 				"seq", seq, "err", err)
 			return nil, fmt.Errorf("malformed log entry at seq %d: %w", seq, err)
@@ -204,6 +180,12 @@ func (l *ReplicationLog) ReadSince(afterSeq uint64, limit int) ([]ReplicationEnt
 
 // Prune deletes log entries with seq <= untilSeq.
 // Used to clean up old entries once all replicas have acknowledged them.
+//
+// The DeleteRange below is safe BY CONSTRUCTION since #726: both bounds carry
+// the 0x2F|0x01 entry discriminator, so the range contains only log entries.
+// It used to be `0x19|be64(1) .. 0x19|be64(untilSeq+1)`, which swept every
+// idempotency receipt (`0x19|siphash(op_id)`) whose hash landed below the
+// watermark. Do NOT reintroduce a bound that starts at a bare prefix byte.
 //
 // CALLER RESPONSIBILITY: Prune must only be called after verifying that every
 // connected replica has applied all entries up to untilSeq (check

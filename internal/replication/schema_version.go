@@ -16,10 +16,6 @@ import (
 //	1 = initial versioned release (HA beta)
 const CurrentSchemaVersion uint64 = 1
 
-func schemaVersionKey() []byte {
-	return []byte{0x19, 0x03, 's', 'c', 'h', 'e', 'm', 'a', '_', 'v'}
-}
-
 // CheckAndSetSchemaVersion reads the stored schema version from Pebble.
 //   - Fresh DB (no key): writes CurrentSchemaVersion, returns nil.
 //   - stored == current: returns nil (no-op).

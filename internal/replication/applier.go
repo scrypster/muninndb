@@ -9,11 +9,6 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-// lastAppliedKey returns the Pebble key used to persist the lastApplied sequence number.
-func lastAppliedKey() []byte {
-	return []byte{0x19, 0x02, 'l', 'a', 's', 't', '_', 'a', 'p', 'p'}
-}
-
 // applierSyncInterval is the number of entries applied between periodic fsyncs.
 // Pebble's WAL handles crash-safety for individual writes (pebble.NoSync); this
 // periodic sync bounds the amount of data that can be lost after a crash.

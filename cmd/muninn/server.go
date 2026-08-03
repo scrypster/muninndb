@@ -1282,10 +1282,10 @@ func runServer() {
 	// Build storage layer
 	storeCfg := storage.PebbleStoreConfig{CacheSize: 10000}
 	if clusterCfg.Enabled {
-		storeCfg.RepLogAppend = func(op uint8, key, value []byte) error {
-			_, err := repLog.Append(replication.WALOp(op), key, value)
-			return err
-		}
+		// #826: LocalAppendFunc suppresses the append on a node that has
+		// positively established itself as a Lobe/Observer — nothing reads a
+		// follower's log and nothing prunes it. Fail-open on RoleUnknown.
+		storeCfg.RepLogAppend = replication.LocalAppendFunc(coordinator, repLog)
 	}
 	store := storage.NewPebbleStore(db, storeCfg)
 

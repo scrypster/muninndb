@@ -83,6 +83,15 @@ and remain the reviewer's job.
 8. **A new Pebble prefix** → see `keyspace-registry.md`: disjoint, and added to
    `internal/prefix/prefix.All()` (the single source of truth). The disjointness tests in
    `internal/prefix/prefix_test.go` auto-tighten — there is no `storageMaxPrefix` to bump.
+   Two things that do NOT auto-tighten: the hard-coded `owners` slice in
+   `TestAll_OwnerGroupsPairwiseDisjoint` (a new owner string silently opts out of the
+   pairwise check until it is listed) and the `named` slice in
+   `TestAll_ConstSliceComplete`. Also check whether the prefix is vault-scoped: if it is,
+   it belongs in one or more of the four lists pinned by
+   `internal/storage/prefix_lists_test.go`; if it is global (as `prefix.Replication` is),
+   say so in the registry row so the next reader does not have to re-derive it. And obey
+   STO-14's general rule: **never mix fixed-width hash-keyed with fixed-width
+   sequence-keyed records under one prefix** — that was #726.
 
 9. **Any `go build` of the muninn binary** → must keep `-tags localassets`. Enforced by
    `scripts/check-build-tags.sh` (CI `shellcheck` job), but that script only scans the
@@ -96,7 +105,16 @@ and remain the reviewer's job.
 11. **Anything under `internal/replication/` or a new write path in a cluster deployment** →
     confirm it goes through `RepLogAppend` and is leader-gated or Cortex-originated (bug
     #596 is exactly the absence of this). Background workers that mutate replicated state
-    (the pruner) inherit the obligation.
+    (the pruner) inherit the obligation. Since #826 the callback is built by
+    `replication.LocalAppendFunc`, which suppresses the append on a node whose role is
+    *definitively* follower — **know which way a role gate fails.** `IsFollower()` is
+    false for `RoleUnknown` on purpose: suppressing leader work on a node that turns out
+    to be the leader loses data, while doing it on a follower only wastes resources. A gate
+    written the other way (`if !IsLeader() { skip }`) would drop every write accepted during
+    the startup window out of the stream its followers read, silently and permanently.
+    Equally: anything that filters keys out of a snapshot (`skipFromSnapshot`) must keep
+    replication METADATA flowing — dropping the seq counter restarts a promoted node's log
+    at 1.
 
 12. **A new async worker or fire-and-forget path on the write or scoring path**
     (`internal/engine`, `internal/engine/activation`, `internal/storage`) → give it a
