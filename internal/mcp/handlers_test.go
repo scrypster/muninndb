@@ -1825,11 +1825,11 @@ func (e *slowIdempotentEngine) WhereLeftOff(ctx context.Context, vault string, l
 func (e *slowIdempotentEngine) FindByEntity(ctx context.Context, vault, entityName string, limit int) (*engine.FindByEntityResult, error) {
 	return (&fakeEngine{}).FindByEntity(ctx, vault, entityName, limit)
 }
-func (e *slowIdempotentEngine) SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error {
-	return (&fakeEngine{}).SetEntityState(ctx, entityName, state, mergedInto, entityType)
+func (e *slowIdempotentEngine) SetEntityState(ctx context.Context, vault, entityName, state, mergedInto, entityType string) error {
+	return (&fakeEngine{}).SetEntityState(ctx, vault, entityName, state, mergedInto, entityType)
 }
-func (e *slowIdempotentEngine) SetEntityStateBatch(ctx context.Context, ops []engine.EntityStateOp) []error {
-	return (&fakeEngine{}).SetEntityStateBatch(ctx, ops)
+func (e *slowIdempotentEngine) SetEntityStateBatch(ctx context.Context, vault string, ops []engine.EntityStateOp) []error {
+	return (&fakeEngine{}).SetEntityStateBatch(ctx, vault, ops)
 }
 func (e *slowIdempotentEngine) GetEntityClusters(ctx context.Context, vault string, minCount, topN int) ([]EntityClusterResult, error) {
 	return (&fakeEngine{}).GetEntityClusters(ctx, vault, minCount, topN)
@@ -1922,7 +1922,7 @@ func TestHandleRemember_ConcurrentSameOpID(t *testing.T) {
 // entityStateEngine is a minimal engine stub for muninn_entity_state tests.
 type entityStateEngine struct{ fakeEngine }
 
-func (e *entityStateEngine) SetEntityState(_ context.Context, name, state, mergedInto, entityType string) error {
+func (e *entityStateEngine) SetEntityState(_ context.Context, _, name, state, mergedInto, entityType string) error {
 	if name == "" {
 		return fmt.Errorf("entity_name is required")
 	}
@@ -1932,7 +1932,7 @@ func (e *entityStateEngine) SetEntityState(_ context.Context, name, state, merge
 // entityStateErrEngine returns an error from SetEntityState.
 type entityStateErrEngine struct{ fakeEngine }
 
-func (e *entityStateErrEngine) SetEntityState(_ context.Context, _, _, _, _ string) error {
+func (e *entityStateErrEngine) SetEntityState(_ context.Context, _, _, _, _, _ string) error {
 	return fmt.Errorf("entity %q not found", "PostgreSQL")
 }
 
@@ -2066,13 +2066,13 @@ func TestHandleEntityStateWithoutTypeOmitsTypeField(t *testing.T) {
 
 type entityStateBatchEngine struct{ fakeEngine }
 
-func (e *entityStateBatchEngine) SetEntityStateBatch(_ context.Context, ops []engine.EntityStateOp) []error {
+func (e *entityStateBatchEngine) SetEntityStateBatch(_ context.Context, _ string, ops []engine.EntityStateOp) []error {
 	return make([]error, len(ops)) // all succeed
 }
 
 type entityStateBatchPartialErrEngine struct{ fakeEngine }
 
-func (e *entityStateBatchPartialErrEngine) SetEntityStateBatch(_ context.Context, ops []engine.EntityStateOp) []error {
+func (e *entityStateBatchPartialErrEngine) SetEntityStateBatch(_ context.Context, _ string, ops []engine.EntityStateOp) []error {
 	errs := make([]error, len(ops))
 	if len(ops) > 0 {
 		errs[0] = fmt.Errorf("entity %q not found", ops[0].EntityName)

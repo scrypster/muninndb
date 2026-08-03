@@ -15,18 +15,21 @@ import (
 // per-list partition guard (TestClearVaultDataPrefixes_Scope) can pin its
 // membership directly.
 //
-// 0x0E (vault meta key), 0x0F (name index), 0x11 (digest flags), 0x1F (entity
-// records) are intentionally excluded — they are global or name keys cleared
-// separately by DeleteVaultNameOnly / entity prune. 0x23 (entity reverse index)
-// is deleted row-by-row in deleteVaultEntityReverseIndex (the row layout embeds
-// the vault prefix mid-key, so a prefix-range tombstone cannot target it).
+// 0x0E (vault meta key), 0x0F (name index) and 0x11 (digest flags) are
+// intentionally excluded — they are global or name keys cleared separately by
+// DeleteVaultNameOnly. 0x1F (entity records) IS cleared here since #683 made it
+// vault-scoped (0x1F|ws|nameHash): a range tombstone now removes exactly this
+// vault's records, replacing the old per-mention decrement walk that a
+// globally-keyed record forced. 0x23 (entity reverse index) is still deleted
+// row-by-row in deleteVaultEntityReverseIndex (the row layout embeds the vault
+// prefix mid-key, so a prefix-range tombstone cannot target it).
 var clearVaultDataPrefixes = []byte{
 	prefix.Engram, prefix.Meta, prefix.AssocFwd, prefix.AssocRev,
 	prefix.FTSPosting, prefix.Trigram, prefix.HNSWNode, prefix.FTSStats,
 	prefix.TermStats, prefix.Contradiction, prefix.StateIndex, prefix.TagIndex,
 	prefix.CreatorIndex, prefix.RelevanceBucket, prefix.Coherence, prefix.VaultWeights,
 	prefix.AssocWeightIndex, prefix.VaultCount, prefix.Provenance, prefix.BucketMigration,
-	prefix.EntityEngramLink, prefix.Relationship, prefix.LastAccess, prefix.CoOccurrence,
+	prefix.Entity, prefix.EntityEngramLink, prefix.Relationship, prefix.LastAccess, prefix.CoOccurrence,
 	prefix.ArchiveAssoc, prefix.RelEntityIndex, prefix.DreamState, prefix.ContentHash,
 	prefix.RecallEvent, // recall events hold raw query text; must not outlive a cleared vault
 	prefix.Lease,
@@ -52,21 +55,15 @@ var clearVaultDataPrefixes = []byte{
 //  3. Commit the range tombstones for all vault-scoped data prefixes.
 //  4. Evict all in-memory caches (L1, assocCache, metaCache, recentActiveCache).
 //
-// Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17,
+// Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17, 0x1F,
 // 0x20–0x22, 0x24–0x2E
 // Prefixes NOT cleared (global or name keys):
 //   - 0x0E vault meta key (preserved by Clear, deleted by DeleteVaultNameOnly)
 //   - 0x0F name index    (global by name hash, deleted by DeleteVaultNameOnly)
 //   - 0x11 digest flags  (globally keyed by ULID — orphans are acceptable)
-//   - 0x1F entity records (global by entity hash; orphan records are pruned
-//     after vault-scoped links are removed)
 func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error) {
 	// Capture count before anything is deleted.
 	vaultCount := ps.GetVaultCount(ctx, ws)
-	entityMentions, err := ps.collectVaultEntityMentions(ws)
-	if err != nil {
-		return 0, fmt.Errorf("clear vault: collect entity mentions: %w", err)
-	}
 
 	// Step 1: point-delete VaultCountKey from Pebble FIRST (prevents stale re-seed).
 	// 0x15 | ws[8] = 9 bytes — the short form of the count key (not the EpisodeKey).
@@ -117,13 +114,6 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	if err := batch.Commit(pebble.Sync); err != nil {
 		return 0, fmt.Errorf("clear vault: commit: %w", err)
 	}
-	for name, count := range entityMentions {
-		for i := 0; i < count; i++ {
-			if err := ps.DecrementEntityMentionCount(ctx, name); err != nil {
-				return 0, fmt.Errorf("clear vault: decrement entity %q: %w", name, err)
-			}
-		}
-	}
 
 	// Step 4: evict all in-memory caches.
 
@@ -153,37 +143,6 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	ps.recentActiveCache.Delete(ws)
 
 	return vaultCount, nil
-}
-
-func (ps *PebbleStore) collectVaultEntityMentions(ws [8]byte) (map[string]int, error) {
-	prefixPre := make([]byte, 9)
-	prefixPre[0] = prefix.EntityEngramLink
-	copy(prefixPre[1:], ws[:])
-	wsPlus, err := incrementWS(ws)
-	if err != nil {
-		return nil, err
-	}
-	upperBound := make([]byte, 9)
-	upperBound[0] = prefix.EntityEngramLink
-	copy(upperBound[1:], wsPlus[:])
-
-	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefixPre, UpperBound: upperBound})
-	if err != nil {
-		return nil, err
-	}
-	defer iter.Close()
-
-	mentions := make(map[string]int)
-	for valid := iter.First(); valid; valid = iter.Next() {
-		name := string(iter.Value())
-		if name != "" {
-			mentions[name]++
-		}
-	}
-	if err := iter.Error(); err != nil {
-		return nil, err
-	}
-	return mentions, nil
 }
 
 func (ps *PebbleStore) deleteVaultEntityReverseIndex(batch *pebble.Batch, ws [8]byte) error {

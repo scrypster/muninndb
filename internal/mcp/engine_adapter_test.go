@@ -39,7 +39,7 @@ func (m *mockPluginStore) UpdateDigest(_ context.Context, _ plugin.ULID, _ *plug
 	m.updateDigestCalls++
 	return nil
 }
-func (m *mockPluginStore) UpsertEntity(_ context.Context, _ plugin.ExtractedEntity) error {
+func (m *mockPluginStore) UpsertEntity(_ context.Context, _ plugin.ULID, _ plugin.ExtractedEntity) error {
 	m.upsertEntityCalls++
 	return nil
 }
@@ -211,7 +211,7 @@ func TestRetryEnrich_PersistenceCallSequence(t *testing.T) {
 	}
 	var linkedEntityNames []string
 	for _, entity := range result.Entities {
-		if err := pStore.UpsertEntity(ctx, entity); err != nil {
+		if err := pStore.UpsertEntity(ctx, plugin.ULID(ulid), entity); err != nil {
 			continue
 		}
 		if err := pStore.LinkEngramToEntity(ctx, plugin.ULID(ulid), entity.Name); err != nil {

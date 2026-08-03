@@ -7,10 +7,15 @@ import (
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
-// SetEntityState sets the lifecycle state of a named entity, and optionally
-// corrects its type. For state="merged", mergedInto must be the canonical name.
-// entityType may be empty — when empty the existing type is preserved.
-func (e *Engine) SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error {
+// SetEntityState sets the lifecycle state of a named entity IN vault, and
+// optionally corrects its type. For state="merged", mergedInto must be the
+// canonical name. entityType may be empty — when empty the existing type is
+// preserved.
+//
+// #683: this took no vault and wrote the global 0x1F record, so an agent
+// authenticated for one vault could deprecate or merge another vault's entity.
+// The record is vault-scoped now and so is this call.
+func (e *Engine) SetEntityState(ctx context.Context, vault, entityName, state, mergedInto, entityType string) error {
 	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
@@ -18,8 +23,10 @@ func (e *Engine) SetEntityState(ctx context.Context, entityName, state, mergedIn
 		return fmt.Errorf("set_entity_state: entity_name is required")
 	}
 
+	ws := e.store.ResolveVaultPrefix(vault)
+
 	// Get existing to preserve other fields.
-	existing, err := e.store.GetEntityRecord(ctx, entityName)
+	existing, err := e.store.GetEntityRecord(ctx, ws, entityName)
 	if err != nil {
 		return fmt.Errorf("set_entity_state: read entity: %w", err)
 	}
@@ -42,7 +49,7 @@ func (e *Engine) SetEntityState(ctx context.Context, entityName, state, mergedIn
 		Confidence: existing.Confidence,
 	}
 
-	return e.store.UpsertEntityRecord(ctx, record, "mcp:entity_state")
+	return e.store.UpsertEntityRecord(ctx, ws, record, "mcp:entity_state")
 }
 
 // EntityStateOp is a single operation in a SetEntityStateBatch call.
@@ -56,7 +63,7 @@ type EntityStateOp struct {
 // SetEntityStateBatch applies multiple entity state updates sequentially.
 // Returns one error per operation (nil = success). Never returns a top-level error —
 // partial success is preserved. Respects context cancellation between items.
-func (e *Engine) SetEntityStateBatch(ctx context.Context, ops []EntityStateOp) []error {
+func (e *Engine) SetEntityStateBatch(ctx context.Context, vault string, ops []EntityStateOp) []error {
 	if err := e.refuseWrite(ctx); err != nil {
 		out := make([]error, len(ops))
 		for i := range out {
@@ -70,7 +77,7 @@ func (e *Engine) SetEntityStateBatch(ctx context.Context, ops []EntityStateOp) [
 			errs[i] = ctx.Err()
 			continue
 		}
-		errs[i] = e.SetEntityState(ctx, op.EntityName, op.State, op.MergedInto, op.EntityType)
+		errs[i] = e.SetEntityState(ctx, vault, op.EntityName, op.State, op.MergedInto, op.EntityType)
 	}
 	return errs
 }

@@ -33,9 +33,11 @@ type PluginStore interface {
 	// type_label/topic classification) on an existing engram. Called by enrich.
 	UpdateDigest(ctx context.Context, id ULID, result *EnrichmentResult) error
 
-	// UpsertEntity creates or updates a lightweight entity record.
-	// Entities live in their own key namespace (0x0F | hash(name)).
-	UpsertEntity(ctx context.Context, entity ExtractedEntity) error
+	// UpsertEntity creates or updates a lightweight entity record in the vault
+	// that contains the given engram. Entity records are vault-scoped
+	// (0x1F | ws | hash(name)) since #683, so the vault must be resolved from
+	// the engram exactly as IncrementEntityCoOccurrence already does.
+	UpsertEntity(ctx context.Context, engramID ULID, entity ExtractedEntity) error
 
 	// LinkEngramToEntity creates an association between an engram and an entity.
 	LinkEngramToEntity(ctx context.Context, engramID ULID, entityName string) error

@@ -247,8 +247,10 @@ func TestRegisterMigrations_IncludesV5(t *testing.T) {
 	if !found {
 		t.Fatalf("migration v5 (#726 replication prefix relocation) is not registered")
 	}
-	if got := MaxRegisteredVersion(); got != 5 {
-		t.Errorf("MaxRegisteredVersion() = %d; want 5 — the refuse-newer downgrade guard keys off this", got)
+	// The exact value is pinned by TestRegisterMigrations_IncludesV6 (the
+	// current head); here only the floor matters.
+	if got := MaxRegisteredVersion(); got < 5 {
+		t.Errorf("MaxRegisteredVersion() = %d; want >= 5 — the refuse-newer downgrade guard keys off this", got)
 	}
 }
 

@@ -1450,7 +1450,7 @@ func (s *MCPServer) handleEntityState(ctx context.Context, w http.ResponseWriter
 	entityType, _ := args["type"].(string)
 	entityType = normalizeEntityType(entityType)
 
-	if err := s.engine.SetEntityState(ctx, entityName, state, mergedInto, entityType); err != nil {
+	if err := s.engine.SetEntityState(ctx, vault, entityName, state, mergedInto, entityType); err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
@@ -1513,7 +1513,7 @@ func (s *MCPServer) handleEntityStateBatch(ctx context.Context, w http.ResponseW
 		})
 	}
 
-	errs := s.engine.SetEntityStateBatch(ctx, ops)
+	errs := s.engine.SetEntityStateBatch(ctx, vault, ops)
 
 	type batchItemResult struct {
 		Index  int    `json:"index"`

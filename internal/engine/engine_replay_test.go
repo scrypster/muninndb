@@ -735,7 +735,7 @@ func TestApplyEnrichment_PersistsExplicitOutput(t *testing.T) {
 		t.Fatalf("digest flags: got 0x%02x, want mask 0x%02x", flags, wantMask)
 	}
 
-	entityRecord, err := eng.store.GetEntityRecord(ctx, "PostgreSQL")
+	entityRecord, err := eng.store.GetEntityRecord(ctx, ws, "PostgreSQL")
 	if err != nil {
 		t.Fatalf("GetEntityRecord: %v", err)
 	}

@@ -31,7 +31,7 @@ func TestEntityBoost_TiedInjectionsDeterministic(t *testing.T) {
 	ws := eng.store.ResolveVaultPrefix(vault)
 
 	// One rare entity, upserted once → df=1.
-	require.NoError(t, eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	require.NoError(t, eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name: "SharedEntity", Type: "topic", Source: "inline",
 	}, "inline"))
 

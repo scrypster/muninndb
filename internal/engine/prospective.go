@@ -118,7 +118,7 @@ func (e *Engine) Intend(ctx context.Context, vault, content string, cues []strin
 	n := e.store.GetVaultCount(ctx, ws)
 	if n >= cueUbiquityMinVault {
 		for _, cue := range clean {
-			rec, err := e.store.GetEntityRecord(ctx, cue)
+			rec, err := e.store.GetEntityRecord(ctx, ws, cue)
 			if err != nil || rec == nil {
 				continue // unknown entity: maximally rare, always armable
 			}

@@ -87,13 +87,17 @@ func (a *pluginStoreAdapter) UpdateDigest(ctx context.Context, id ULID, result *
 	return a.store.UpdateDigest(ctx, storage.ULID(id), result.Summary, result.KeyPoints, result.MemoryType, result.TypeLabel)
 }
 
-func (a *pluginStoreAdapter) UpsertEntity(ctx context.Context, entity ExtractedEntity) error {
+func (a *pluginStoreAdapter) UpsertEntity(ctx context.Context, engramID ULID, entity ExtractedEntity) error {
+	ws, ok := a.store.FindVaultPrefix(storage.ULID(engramID))
+	if !ok {
+		return fmt.Errorf("UpsertEntity: engram %s not found", engramID.String())
+	}
 	record := storage.EntityRecord{
 		Name:       entity.Name,
 		Type:       entity.Type,
 		Confidence: entity.Confidence,
 	}
-	return a.store.UpsertEntityRecord(ctx, record, "plugin:enrich")
+	return a.store.UpsertEntityRecord(ctx, ws, record, "plugin:enrich")
 }
 
 func (a *pluginStoreAdapter) LinkEngramToEntity(ctx context.Context, engramID ULID, entityName string) error {

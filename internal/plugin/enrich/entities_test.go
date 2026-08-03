@@ -24,7 +24,7 @@ type mockPluginStore struct {
 	failOnUpsertRel    bool
 }
 
-func (m *mockPluginStore) UpsertEntity(_ context.Context, e plugin.ExtractedEntity) error {
+func (m *mockPluginStore) UpsertEntity(_ context.Context, _ plugin.ULID, e plugin.ExtractedEntity) error {
 	if m.failOnUpsertEntity {
 		return fmt.Errorf("upsert entity failed")
 	}

@@ -703,12 +703,29 @@ func EntityNameHash(name string) [8]byte {
 	return h
 }
 
-// EntityKey constructs the global entity record key (0x1F prefix).
-// Key: 0x1F | nameHash(8) = 9 bytes
-func EntityKey(nameHash [8]byte) []byte {
+// EntityKey constructs the VAULT-SCOPED entity record key (0x1F prefix).
+// Key: 0x1F | wsPrefix(8) | nameHash(8) = 17 bytes
+//
+// #683: this key used to be 0x1F|nameHash(8) with no workspace prefix, so every
+// vault that mentioned an entity of the same name shared one record — one
+// mention_count summed across tenants, and a lookup from a vault with no links
+// to the entity still returned another tenant's metadata. The links (0x20) and
+// the relationship index (0x26) were already vault-scoped; the aggregate record
+// was the odd one out. Migration v6 re-keys existing records.
+func EntityKey(ws [8]byte, nameHash [8]byte) []byte {
+	key := make([]byte, 1+8+8)
+	key[0] = prefix.Entity
+	copy(key[1:9], ws[:])
+	copy(key[9:17], nameHash[:])
+	return key
+}
+
+// EntityVaultPrefix returns the 9-byte scan prefix covering every entity record
+// in a vault (0x1F | wsPrefix(8)).
+func EntityVaultPrefix(ws [8]byte) []byte {
 	key := make([]byte, 1+8)
 	key[0] = prefix.Entity
-	copy(key[1:9], nameHash[:])
+	copy(key[1:9], ws[:])
 	return key
 }
 
@@ -802,11 +819,24 @@ func EntityReverseIndexKey(nameHash [8]byte, ws [8]byte, engramID [16]byte) []by
 }
 
 // EntityReverseIndexPrefix returns a 9-byte prefix for scanning all engrams
-// that mention a given entity (0x23 | nameHash(8)).
+// that mention a given entity (0x23 | nameHash(8)), ACROSS every vault.
 func EntityReverseIndexPrefix(nameHash [8]byte) []byte {
 	key := make([]byte, 1+8)
 	key[0] = prefix.EntityReverseIndex
 	copy(key[1:9], nameHash[:])
+	return key
+}
+
+// EntityReverseIndexVaultPrefix returns the 17-byte prefix for scanning the
+// engrams in ONE vault that mention a given entity
+// (0x23 | nameHash(8) | wsPrefix(8)). The 0x23 layout puts the vault in the
+// key's middle, so this is the only bound that confines a reverse-index scan to
+// a single tenant — a plain EntityReverseIndexPrefix scan sees every vault.
+func EntityReverseIndexVaultPrefix(nameHash [8]byte, ws [8]byte) []byte {
+	key := make([]byte, 1+8+8)
+	key[0] = prefix.EntityReverseIndex
+	copy(key[1:9], nameHash[:])
+	copy(key[9:17], ws[:])
 	return key
 }
 

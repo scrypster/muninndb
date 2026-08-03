@@ -80,14 +80,14 @@ func TestEvolveEntityLinkRepair_HealsStrippedSuccessor(t *testing.T) {
 	// The repaired links are funded: write gave 1, the repair's carry gives 2,
 	// and hard-deleting the predecessor must return 1 with the pair intact —
 	// the same conservation the write-path carry maintains.
-	rec, err := eng.store.GetEntityRecord(ctx, "carl")
+	rec, err := eng.store.GetEntityRecord(ctx, ws, "carl")
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	require.Equal(t, int32(2), rec.MentionCount, "repair must fund the carried link")
 	require.Equal(t, 2, coOccurrenceCount(t, eng, ws, "Carl", "rosemary"))
 
 	require.NoError(t, eng.store.DeleteEngram(ctx, ws, oldULID))
-	rec, err = eng.store.GetEntityRecord(ctx, "carl")
+	rec, err = eng.store.GetEntityRecord(ctx, ws, "carl")
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	require.Equal(t, int32(1), rec.MentionCount)
@@ -241,7 +241,7 @@ func strippedChainWithDescendingULIDs(t *testing.T, eng *Engine, ws [8]byte, hop
 		ids[i] = storage.ULID{0xF0 - byte(i), 0x01, byte(i)}
 	}
 
-	require.NoError(t, eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	require.NoError(t, eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name: "deepchain", Type: "concept", Source: "inline",
 	}, "inline"))
 
@@ -330,7 +330,7 @@ func TestEvolveEntityLinkRepair_SkipsAlreadyDigested(t *testing.T) {
 	// Simulate ReplayEnrichment having already healed + marked this successor.
 	require.NoError(t, eng.store.SetDigestFlag(ctx, plugin.ULID(succID), plugin.DigestEntities))
 
-	mentionBefore, err := eng.store.GetEntityRecord(ctx, "dana")
+	mentionBefore, err := eng.store.GetEntityRecord(ctx, ws, "dana")
 	require.NoError(t, err)
 	require.NotNil(t, mentionBefore)
 
@@ -339,7 +339,7 @@ func TestEvolveEntityLinkRepair_SkipsAlreadyDigested(t *testing.T) {
 	require.Zero(t, repaired, "a digest-marked successor must be skipped, not re-funded")
 	require.Empty(t, engramEntities(t, eng, ws, succID), "skip must write no links")
 
-	mentionAfter, err := eng.store.GetEntityRecord(ctx, "dana")
+	mentionAfter, err := eng.store.GetEntityRecord(ctx, ws, "dana")
 	require.NoError(t, err)
 	require.Equal(t, mentionBefore.MentionCount, mentionAfter.MentionCount,
 		"skip must not double-fund the mention ledger")

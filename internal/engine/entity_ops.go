@@ -36,16 +36,20 @@ func (e *Engine) GetEntityAggregate(ctx context.Context, vault, entityName strin
 		limit = defaultEntityEngramLimit
 	}
 
-	// 1. Entity metadata record (global, vault-agnostic)
-	rec, err := e.store.GetEntityRecord(ctx, entityName)
+	ws := e.store.ResolveVaultPrefix(vault)
+
+	// 1. Entity metadata record — vault-scoped since #683. A vault that has no
+	// record for this name gets "not found", even when another vault does: the
+	// pre-#683 global record made this call an existence-and-metadata oracle
+	// over every other tenant's entity vocabulary (nonzero mention_count and
+	// first_seen with an empty engram list).
+	rec, err := e.store.GetEntityRecord(ctx, ws, entityName)
 	if err != nil {
 		return nil, err
 	}
 	if rec == nil {
 		return nil, nil // not found
 	}
-
-	ws := e.store.ResolveVaultPrefix(vault)
 
 	// 2. Engrams that mention this entity (vault-scoped via ScanEntityEngrams reverse index)
 	var engrams []*storage.Engram
@@ -118,7 +122,7 @@ func (e *Engine) ListEntities(ctx context.Context, vault string, limit int, stat
 
 	var records []storage.EntityRecord
 	err := e.store.ScanVaultEntityNames(ctx, ws, func(name string) error {
-		rec, err := e.store.GetEntityRecord(ctx, name)
+		rec, err := e.store.GetEntityRecord(ctx, ws, name)
 		if err != nil || rec == nil {
 			return nil // skip missing
 		}

@@ -267,7 +267,7 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 					Type:       entity.Type,
 					Confidence: entity.Confidence,
 				}
-				if upsertErr := e.store.UpsertEntityRecord(ctx, record, "replay:enrich"); upsertErr != nil {
+				if upsertErr := e.store.UpsertEntityRecord(ctx, ws, record, "replay:enrich"); upsertErr != nil {
 					slog.Warn("replay enrichment: UpsertEntityRecord failed",
 						"id", eng.ID.String(), "name", entity.Name, "err", upsertErr)
 					continue
@@ -523,7 +523,7 @@ func (e *Engine) ApplyEnrichment(ctx context.Context, vault string, req *Enrichm
 				Type:       entity.Type,
 				Confidence: entity.Confidence,
 			}
-			if err := e.store.UpsertEntityRecord(ctx, record, source); err != nil {
+			if err := e.store.UpsertEntityRecord(ctx, ws, record, source); err != nil {
 				return nil, fmt.Errorf("apply enrichment: upsert entity %q: %w", entity.Name, err)
 			}
 			if err := e.store.WriteEntityEngramLink(ctx, ws, id, entity.Name); err != nil {

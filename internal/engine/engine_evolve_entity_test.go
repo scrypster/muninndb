@@ -123,7 +123,7 @@ func TestEvolve_MentionCountConservation(t *testing.T) {
 	oldULID, err := storage.ParseULID(resp.ID)
 	require.NoError(t, err)
 
-	rec, err := eng.store.GetEntityRecord(ctx, "ada")
+	rec, err := eng.store.GetEntityRecord(ctx, ws, "ada")
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	require.Equal(t, int32(1), rec.MentionCount, "write funds one mention")
@@ -133,7 +133,7 @@ func TestEvolve_MentionCountConservation(t *testing.T) {
 	newID, err := eng.Evolve(ctx, "test", resp.ID, "Ada still pairs with Grace", "refresh", nil, "")
 	require.NoError(t, err)
 
-	rec, err = eng.store.GetEntityRecord(ctx, "ada")
+	rec, err = eng.store.GetEntityRecord(ctx, ws, "ada")
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	require.Equal(t, int32(2), rec.MentionCount,
@@ -145,7 +145,7 @@ func TestEvolve_MentionCountConservation(t *testing.T) {
 	// predecessors. Its decrement must be matched by the carry's increment.
 	require.NoError(t, eng.store.DeleteEngram(ctx, ws, oldULID))
 
-	rec, err = eng.store.GetEntityRecord(ctx, "ada")
+	rec, err = eng.store.GetEntityRecord(ctx, ws, "ada")
 	require.NoError(t, err)
 	require.NotNil(t, rec, "entity record must survive predecessor pruning")
 	require.Equal(t, int32(1), rec.MentionCount,
@@ -224,7 +224,7 @@ func TestEvolve_InlineEntitiesReplaceCarry(t *testing.T) {
 		"inline entities must replace the predecessor's links, not merge with them")
 
 	// Inline entities are genuinely new mentions: the record must exist.
-	rec, err := eng.store.GetEntityRecord(ctx, "bob")
+	rec, err := eng.store.GetEntityRecord(ctx, ws, "bob")
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 

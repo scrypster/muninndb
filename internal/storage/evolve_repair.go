@@ -170,7 +170,7 @@ func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, 
 	// recovering these counts — counts are best-effort across crashes on both
 	// sides of the ledger.
 	for _, name := range entityNames {
-		if err := ps.IncrementEntityMentionCount(ctx, name); err != nil {
+		if err := ps.IncrementEntityMentionCount(ctx, ws, name); err != nil {
 			slog.Warn("storage: repair evolve carry: failed to fund mention count", "entity", name, "engram", succID.String(), "err", err)
 		}
 	}

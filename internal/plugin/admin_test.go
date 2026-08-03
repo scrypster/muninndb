@@ -70,7 +70,7 @@ func (m *mockPluginStore) UpdateDigest(_ context.Context, _ ULID, _ *EnrichmentR
 	return m.updateDigestErr
 }
 
-func (m *mockPluginStore) UpsertEntity(_ context.Context, _ ExtractedEntity) error {
+func (m *mockPluginStore) UpsertEntity(_ context.Context, _ ULID, _ ExtractedEntity) error {
 	m.upsertEntityCalls++
 	return m.upsertEntityErr
 }

@@ -338,7 +338,7 @@ func (a *mcpEngineAdapter) RetryEnrich(ctx context.Context, vault, id string) (*
 	// Persist entities, links, and co-occurrence pairs.
 	var linkedEntityNames []string
 	for _, entity := range result.Entities {
-		if err := a.pStore.UpsertEntity(ctx, entity); err != nil {
+		if err := a.pStore.UpsertEntity(ctx, plugin.ULID(ulid), entity); err != nil {
 			slog.Warn("retry enrich: failed to upsert entity", "id", id, "name", entity.Name, "err", err)
 			continue
 		}
@@ -440,12 +440,12 @@ func (a *mcpEngineAdapter) WriteIdempotency(ctx context.Context, opID, engramID 
 	return a.eng.WriteIdempotency(ctx, opID, engramID)
 }
 
-func (a *mcpEngineAdapter) SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error {
-	return a.eng.SetEntityState(ctx, entityName, state, mergedInto, entityType)
+func (a *mcpEngineAdapter) SetEntityState(ctx context.Context, vault, entityName, state, mergedInto, entityType string) error {
+	return a.eng.SetEntityState(ctx, vault, entityName, state, mergedInto, entityType)
 }
 
-func (a *mcpEngineAdapter) SetEntityStateBatch(ctx context.Context, ops []engine.EntityStateOp) []error {
-	return a.eng.SetEntityStateBatch(ctx, ops)
+func (a *mcpEngineAdapter) SetEntityStateBatch(ctx context.Context, vault string, ops []engine.EntityStateOp) []error {
+	return a.eng.SetEntityStateBatch(ctx, vault, ops)
 }
 
 func (a *mcpEngineAdapter) ExportGraph(ctx context.Context, vault string, includeEngrams bool) (*engine.ExportGraph, error) {

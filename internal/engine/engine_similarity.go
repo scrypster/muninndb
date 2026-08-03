@@ -134,7 +134,7 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 
 	ws := e.store.ResolveVaultPrefix(vault)
 
-	recA, err := e.store.GetEntityRecord(ctx, entityA)
+	recA, err := e.store.GetEntityRecord(ctx, ws, entityA)
 	if err != nil {
 		return nil, fmt.Errorf("merge_entity: read entity_a: %w", err)
 	}
@@ -145,7 +145,7 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 		return nil, fmt.Errorf("merge_entity: entity_a %q is already merged into %q", entityA, recA.MergedInto)
 	}
 
-	recB, err := e.store.GetEntityRecord(ctx, entityB)
+	recB, err := e.store.GetEntityRecord(ctx, ws, entityB)
 	if err != nil {
 		return nil, fmt.Errorf("merge_entity: read entity_b: %w", err)
 	}
@@ -203,7 +203,7 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 	}
 
 	// Step 2: mark A as merged.
-	if err := e.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	if err := e.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:       recA.Name,
 		Type:       recA.Type,
 		Confidence: recA.Confidence,
@@ -219,7 +219,7 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 	if recA.Confidence > newConf {
 		newConf = recA.Confidence
 	}
-	if err := e.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	if err := e.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:       recB.Name,
 		Type:       recB.Type,
 		Confidence: newConf,

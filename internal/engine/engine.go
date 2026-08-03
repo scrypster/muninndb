@@ -1411,7 +1411,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 				Type:       typ,
 				Confidence: 1.0,
 			}
-			if err := e.store.UpsertEntityRecord(ctx, record, "inline"); err != nil {
+			if err := e.store.UpsertEntityRecord(ctx, ws, record, "inline"); err != nil {
 				slog.Warn("engine: failed to store inline entity", "name", ent.Name, "err", err)
 				continue
 			}
@@ -1976,7 +1976,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 					Type:       typ,
 					Confidence: 1.0,
 				}
-				if err := e.store.UpsertEntityRecord(ctx, record, "inline"); err != nil {
+				if err := e.store.UpsertEntityRecord(ctx, ws, record, "inline"); err != nil {
 					slog.Warn("engine: batch: failed to store inline entity", "name", ent.Name, "err", err)
 					continue
 				}
@@ -2255,7 +2255,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 	// Collect entities linked to this engram (0x20 forward index).
 	var entities []mbp.InlineEntity
 	_ = e.store.ScanEngramEntities(ctx, wsPrefix, id, func(name string) error {
-		rec, err := e.store.GetEntityRecord(ctx, name)
+		rec, err := e.store.GetEntityRecord(ctx, wsPrefix, name)
 		if err != nil || rec == nil {
 			entities = append(entities, mbp.InlineEntity{Name: name})
 			return nil
@@ -3996,7 +3996,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 	// decrements: a crash here leaves counts slightly low with the links
 	// intact, the mirror image of DeleteEngram's slightly-high stale case.
 	for _, name := range carriedEntities {
-		if err := e.store.IncrementEntityMentionCount(ctx, name); err != nil {
+		if err := e.store.IncrementEntityMentionCount(ctx, wsPrefix, name); err != nil {
 			slog.Warn("engine: evolve: failed to increment mention count for carried entity", "entity", name, "engram", newULID.String(), "err", err)
 		}
 	}
@@ -4035,7 +4035,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 				Type:       typ,
 				Confidence: 1.0,
 			}
-			if err := e.store.UpsertEntityRecord(ctx, record, "inline"); err != nil {
+			if err := e.store.UpsertEntityRecord(ctx, wsPrefix, record, "inline"); err != nil {
 				slog.Warn("engine: evolve: failed to store inline entity", "name", ent.Name, "err", err)
 				continue
 			}

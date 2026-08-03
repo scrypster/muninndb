@@ -18,7 +18,8 @@ import (
 func TestScanVaultEntityNames_Empty(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-entity-names-empty")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-entity-names-empty")
 
 	var names []string
 	err := store.ScanVaultEntityNames(ctx, ws, func(name string) error {
@@ -34,13 +35,14 @@ func TestScanVaultEntityNames_Empty(t *testing.T) {
 func TestScanVaultEntityNames_MultipleEntities(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-entity-names-multi")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-entity-names-multi")
 
 	entityNames := []string{"PostgreSQL", "Redis", "Kafka"}
 
 	// Write entity records and link them to distinct engrams in the vault.
 	for _, name := range entityNames {
-		require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+		require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 			Name: name, Type: "technology", Confidence: 0.8,
 		}, "test"))
 		engramID := NewULID()
@@ -68,9 +70,10 @@ func TestScanVaultEntityNames_MultipleEntities(t *testing.T) {
 func TestScanVaultEntityNames_DeduplicatesAcrossEngrams(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-entity-dedup")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-entity-dedup")
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Go", Type: "technology", Confidence: 0.9,
 	}, "test"))
 
@@ -95,9 +98,10 @@ func TestScanVaultEntityNames_DeduplicatesAcrossEngrams(t *testing.T) {
 func TestScanVaultEntityNames_DeduplicatesCaseVariants(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-entity-case-variants")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-entity-case-variants")
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "MuninnDB", Type: "database", Confidence: 1,
 	}, "test"))
 
@@ -118,10 +122,11 @@ func TestScanVaultEntityNames_DeduplicatesCaseVariants(t *testing.T) {
 func TestScanVaultEntityNames_CallbackError(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-entity-names-err")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-entity-names-err")
 
 	for _, name := range []string{"A", "B", "C"} {
-		require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+		require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 			Name: name, Type: "t", Confidence: 0.5,
 		}, "test"))
 		require.NoError(t, store.WriteEntityEngramLink(ctx, ws, NewULID(), name))
@@ -146,7 +151,8 @@ func TestScanVaultEntityNames_CallbackError(t *testing.T) {
 func TestScanEngramEntities_Empty(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-engram-entities-empty")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-engram-entities-empty")
 
 	engramID := NewULID() // never linked to any entity
 
@@ -164,13 +170,14 @@ func TestScanEngramEntities_Empty(t *testing.T) {
 func TestScanEngramEntities_LinkedEntities(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-engram-entities-linked")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-engram-entities-linked")
 
 	engramID := NewULID()
 	entityNames := []string{"payment-service", "PostgreSQL", "Redis"}
 
 	for _, name := range entityNames {
-		require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+		require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 			Name: name, Type: "service", Confidence: 0.7,
 		}, "test"))
 		require.NoError(t, store.WriteEntityEngramLink(ctx, ws, engramID, name))
@@ -178,7 +185,7 @@ func TestScanEngramEntities_LinkedEntities(t *testing.T) {
 
 	// Link a different entity to a different engram — must not appear in results.
 	otherEngramID := NewULID()
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "unrelated", Type: "other", Confidence: 0.5,
 	}, "test"))
 	require.NoError(t, store.WriteEntityEngramLink(ctx, ws, otherEngramID, "unrelated"))
@@ -203,11 +210,12 @@ func TestScanEngramEntities_LinkedEntities(t *testing.T) {
 func TestScanEngramEntities_CallbackError(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-engram-entities-err")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-engram-entities-err")
 
 	engramID := NewULID()
 	for _, name := range []string{"X", "Y", "Z"} {
-		require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+		require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 			Name: name, Type: "t", Confidence: 0.5,
 		}, "test"))
 		require.NoError(t, store.WriteEntityEngramLink(ctx, ws, engramID, name))
@@ -232,7 +240,8 @@ func TestScanEngramEntities_CallbackError(t *testing.T) {
 func TestScanRelationships_Empty(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-rels-empty")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-rels-empty")
 
 	called := false
 	err := store.ScanRelationships(ctx, ws, func(r RelationshipRecord) error {
@@ -249,7 +258,8 @@ func TestScanRelationships_Empty(t *testing.T) {
 func TestScanRelationships_WrittenRelationships(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-rels-written")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-rels-written")
 
 	engramID := NewULID()
 
@@ -315,7 +325,8 @@ func TestScanRelationships_IsolatedByVault(t *testing.T) {
 func TestScanRelationships_CallbackError(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("scan-rels-err")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("scan-rels-err")
 
 	engramID := NewULID()
 	for i := 0; i < 3; i++ {

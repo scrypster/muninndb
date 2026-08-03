@@ -108,14 +108,16 @@ type EngineInterface interface {
 	// WriteIdempotency stores an idempotency receipt (op_id → engramID).
 	WriteIdempotency(ctx context.Context, opID, engramID string) error
 
-	// SetEntityState sets the lifecycle state of a named entity, and optionally
-	// corrects its type. entityType may be empty (preserves existing type).
-	// For state="merged", mergedInto must be the canonical entity name.
-	SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error
+	// SetEntityState sets the lifecycle state of a named entity IN vault, and
+	// optionally corrects its type. entityType may be empty (preserves existing
+	// type). For state="merged", mergedInto must be the canonical entity name.
+	// The vault is load-bearing: entity records are vault-scoped (#683), and
+	// without it this was a cross-tenant write.
+	SetEntityState(ctx context.Context, vault, entityName, state, mergedInto, entityType string) error
 
-	// SetEntityStateBatch applies multiple entity state updates sequentially.
+	// SetEntityStateBatch applies multiple entity state updates to vault sequentially.
 	// Returns one error per operation (nil = success). Partial success is preserved.
-	SetEntityStateBatch(ctx context.Context, ops []engine.EntityStateOp) []error
+	SetEntityStateBatch(ctx context.Context, vault string, ops []engine.EntityStateOp) []error
 
 	// GetEntityClusters returns entity pairs that frequently co-occur in the same engrams,
 	// sorted by count descending. Only pairs with count >= minCount are returned.

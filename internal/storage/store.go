@@ -247,11 +247,13 @@ type EngineStore interface {
 	// sorted by ordinal ascending.
 	ListChildOrdinals(ctx context.Context, wsPrefix [8]byte, parentID ULID) ([]OrdinalEntry, error)
 
-	// UpsertEntityRecord stores or updates a global entity record.
-	UpsertEntityRecord(ctx context.Context, record EntityRecord, source string) error
+	// UpsertEntityRecord stores or updates a vault's entity record (0x1F|ws|nameHash).
+	UpsertEntityRecord(ctx context.Context, ws [8]byte, record EntityRecord, source string) error
 
-	// GetEntityRecord reads a global entity record by canonical name. Returns nil, nil if not found.
-	GetEntityRecord(ctx context.Context, name string) (*EntityRecord, error)
+	// GetEntityRecord reads a vault's entity record by canonical name. Returns
+	// nil, nil if THIS vault has no such record — another vault holding one is
+	// not visible here (#683).
+	GetEntityRecord(ctx context.Context, ws [8]byte, name string) (*EntityRecord, error)
 
 	// WriteEntityEngramLink writes a vault-scoped engram→entity link.
 	WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error

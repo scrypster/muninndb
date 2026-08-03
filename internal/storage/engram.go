@@ -793,7 +793,7 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	// DecrementEntityMentionCount automatically deletes the 0x1F record when
 	// the count reaches 0 and the 0x23 reverse index confirms no live links remain.
 	for _, name := range entityNames {
-		if err := ps.DecrementEntityMentionCount(ctx, name); err != nil {
+		if err := ps.DecrementEntityMentionCount(ctx, wsPrefix, name); err != nil {
 			slog.Warn("storage: failed to decrement entity mention count on delete", "entity", name, "engram", id.String(), "err", err)
 		}
 	}

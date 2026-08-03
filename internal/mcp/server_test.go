@@ -138,10 +138,10 @@ func (f *fakeEngine) CheckIdempotency(_ context.Context, _ string) (*storage.Ide
 func (f *fakeEngine) WriteIdempotency(_ context.Context, _, _ string) error {
 	return nil
 }
-func (f *fakeEngine) SetEntityState(_ context.Context, _, _, _, _ string) error {
+func (f *fakeEngine) SetEntityState(_ context.Context, _, _, _, _, _ string) error {
 	return nil
 }
-func (f *fakeEngine) SetEntityStateBatch(_ context.Context, ops []engine.EntityStateOp) []error {
+func (f *fakeEngine) SetEntityStateBatch(_ context.Context, _ string, ops []engine.EntityStateOp) []error {
 	return make([]error, len(ops))
 }
 func (f *fakeEngine) GetEntityClusters(_ context.Context, _ string, _, _ int) ([]EntityClusterResult, error) {

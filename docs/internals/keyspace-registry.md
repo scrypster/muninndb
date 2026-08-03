@@ -53,11 +53,11 @@ prefix — see the vault-reuse note at the bottom).
 | 0x1C | ws+src+dst | PAS transition | |
 | 0x1D | ws | embed model name string | |
 | 0x1E | ws+parentID+childID | ordinal | |
-| 0x1F | entityNameHash(8) — **GLOBAL** | entity record | identity = NFKC+lower+trim |
+| **0x1F** | ws+entityNameHash(8) | entity record | **vault-scoped since #683** (migration v6). It used to be `0x1F\|nameHash` with no workspace prefix while the links backing it (0x20/0x23/0x26) all had one, so two vaults that mentioned the same name shared ONE record: `mention_count` was a cross-vault sum, and a lookup by name from a vault with no links still returned the other tenant's metadata with an empty engram list. Identity within a vault is still NFKC+lower+trim SipHash. Migration v6 relocates each legacy record to every vault that references it (0x23 mentions, 0x26 relationships, 0x2D cues, or — for a `merged` tombstone — its target's vault set) with `mention_count` RECOMPUTED from that vault's 0x23 links; unreferenced records are dropped with a WARN. Now in `clearVaultDataPrefixes`. Still NOT in `vaultScopedExportPrefixes` — see note 7 |
 | 0x20 | ws+engramID+nameHash(8) | — | engram→entity link |
 | 0x21 | ws+engramID+fromHash(8)+relType(1)+toHash(8) | — | relationship record |
 | 0x22 | ws+^millis(8)+id | — | last-access (inverted for MRU-first) |
-| 0x23 | nameHash(8)+ws(8)+id | — | entity reverse index (global prefix, vault in suffix) |
+| 0x23 | nameHash(8)+ws(8)+id | — | entity reverse index (global prefix, **vault in the key's MIDDLE**). A plain `0x23\|nameHash` scan therefore spans every tenant; use `keys.EntityReverseIndexVaultPrefix(nameHash, ws)` (17 bytes) for anything that must stay inside one vault — the orphan check in `DecrementEntityMentionCount` does. The same layout is why `ClearVault` deletes it row-by-row rather than with a range tombstone |
 | 0x24 | ws+hashA(8)+hashB(8) | msgpack count | co-occurrence |
 | 0x25 | ws+src+dst | archived assoc (no weight sort, no reverse) | |
 | 0x26 | ws+entityHash(8)+engramID | — | rel-entity index |
@@ -143,10 +143,11 @@ keyspace; coincidental, safe, but confusing. Prefer `0x30+` for new storage pref
 
 4. **Vault prefixes are name-deterministic and therefore REUSED on name reuse.** Deleting
    a vault (`ClearVault` + `DeleteVaultNameOnly`) does not clean 0x11 DigestFlags
-   ("orphans acceptable") or 0x1F global entity records. Re-creating a vault of the same
-   name recomputes the identical SipHash prefix and resurfaces those orphans. The correct
-   invariant is "prefixes are name-deterministic," **not** "never reused." A PR asserting
-   the latter is wrong about this codebase.
+   ("orphans acceptable"). Re-creating a vault of the same name recomputes the identical
+   SipHash prefix and resurfaces those orphans. The correct invariant is "prefixes are
+   name-deterministic," **not** "never reused." A PR asserting the latter is wrong about
+   this codebase. (0x1F entity records used to be on this list too; #683 made them
+   vault-scoped, so `ClearVault` now range-deletes them like any other vault data.)
 
 5. **0x2B and 0x2E are repair watermarks and share one set of semantics.** Both hold a
    single version byte per vault (0x2B: evolve entity-link repair, #681; 0x2E: pre-fix
@@ -159,3 +160,17 @@ keyspace; coincidental, safe, but confusing. Prefer `0x30+` for new storage pref
    vault name cannot inherit a stranger's "already repaired" claim at the cost of one
    no-op scan; and a repair whose watermark is present is never revisited, so the
    watermark must only be written on a genuinely clean pass.
+
+6. **The entity graph is still absent from `vaultScopedExportPrefixes` — deliberately, and
+   it is a known gap.** `muninn vault export` transports memories, associations, FTS, HNSW
+   and embeddings, but none of 0x1F/0x20/0x21/0x23/0x24/0x26: a restore rebuilds the
+   memories and loses the curated entity graph (re-enrichment recovers extracted entities,
+   not hand-authored ones or their relationships). The offline whole-store `muninn backup`
+   is unaffected. #683 removed the *reason* the record could not be exported (it was
+   globally keyed, so a vault-scoped export could not include it without exporting other
+   tenants'), but did not do the export work, because a partial one is worse than none:
+   shipping 0x1F alone restores exactly the empty-aggregate phantom #683 exists to
+   eliminate, and 0x23 cannot ride the export machinery at all — that machinery strips the
+   workspace from key bytes 1–8, and 0x23 keeps the vault at bytes 9–16. Doing this
+   properly means all six prefixes plus a 0x23-shaped exception, which is its own
+   increment.

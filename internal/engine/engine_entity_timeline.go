@@ -41,17 +41,18 @@ func (e *Engine) GetEntityTimeline(ctx context.Context, vault string, entityName
 		limit = 50
 	}
 
+	// Resolve the vault prefix first — the 0x1F entity record is vault-scoped
+	// (#683), so "does this entity exist" is a question only a vault can answer.
+	ws := e.store.ResolveVaultPrefix(vault)
+
 	// Get the entity record to check if it exists and get FirstSeen + MentionCount.
-	entityRecord, err := e.store.GetEntityRecord(ctx, entityName)
+	entityRecord, err := e.store.GetEntityRecord(ctx, ws, entityName)
 	if err != nil {
 		return nil, fmt.Errorf("get entity record: %w", err)
 	}
 	if entityRecord == nil {
 		return nil, fmt.Errorf("entity_name not found in entity registry")
 	}
-
-	// Resolve the vault prefix.
-	ws := e.store.ResolveVaultPrefix(vault)
 
 	// Scan all engrams mentioning this entity.
 	var entries []TimelineEntry
