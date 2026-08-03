@@ -1578,19 +1578,34 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}, nil
 }
 
-// writeUpsert implements the upsert_mode write path (#556). It pins the engram
-// to sha256(idempotent_id) via store.UpsertEngram (create-or-merge-in-place,
-// crash-atomic across engram + content-hash + upsert-key), holding the
-// upsertKeyLock stripe across the call so two concurrent writes on the same key
-// cannot both create. Cognitive state is preserved on merge; AccessCount is NOT
-// bumped (differs from content-hash dedup).
+// writeUpsert implements the upsert_mode write path (#556, Rev 2 redesign).
+// The durable 0x2E forward index (keyed by sha256(idempotent_id)) maps to the
+// CURRENT HEAD of the key's chain — never a fixed engram. The orchestrator
+// holds the per-(vault, keyHash) stripe mutex across lookup → dispatch → write
+// so concurrent upserts on the same key serialize, and the index is updated
+// atomically on every path:
 //
-// v1 scope: runs the search-critical side effects (HNSW insert for caller
-// embeddings, FTS submit, vault-name, triggers + counters on create). It does
-// NOT run the caller-enrichment / analytics hooks of the default path (inline
-// entities/relationships, contradiction, novelty, auto-association, neighbor
-// linking) — upsert targets content-addressed re-ingest (e.g. the go-rag
-// bridge), which does not carry those. Hook parity is a follow-up if needed.
+//   - MISS or stale pointer (absent / soft-deleted / hard-deleted head) → the
+//     default Write path creates a fresh engram; PutUpsertKey then pins the new
+//     ULID under the key.
+//   - HIT + identical content → no-op (returns the existing head id).
+//   - HIT + changed content → EvolveAt creates the successor, supersedes the
+//     head, and re-points the 0x2E entry IN THE SAME atomic batch as the
+//     successor write (the re-point is queued via StoreBatch.RepointUpsertKey
+//     inside evolveAtInternal — scrypster's #1 trap: never a separate commit).
+//
+// This replaces the v1 in-place merge path. The review's insight: a path that
+// mutates an existing engram in place has to hand-re-derive every invariant the
+// create path establishes, and each pass finds a different one it forgot.
+// Delegating to Write (creates) and EvolveAt (content changes) means upsert
+// inherits both paths' invariant coverage for free.
+//
+// v1 scope retained: the delegated paths run the search-critical side effects
+// (HNSW insert for caller embeddings, FTS submit, vault-name, triggers +
+// counters on create). Upsert targets content-addressed re-ingest (e.g. the
+// go-rag bridge), which does not carry caller-enrichment / analytics hooks —
+// EvolveAt carries the predecessor's entity links forward but does not run
+// contradiction/novelty/auto-associations. Hook parity is a follow-up if needed.
 func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	start := time.Now()
 
@@ -1606,123 +1621,81 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Also hold the content-hash stripe so the upsert path's 0x28 write
-	// serializes with the default Write path (GetContentHash→PutContentHash
-	// under contentHashLock). Without it, a concurrent default-Write + upsert
-	// with identical content can produce two engrams sharing one hash slot.
-	// Lock order upsertKeyLock → contentHashLock is one-way (no other path
-	// takes both), so no deadlock. The merge's OLD-content delete is left
-	// unlocked — it races only with a default-Write dedup of content the
-	// merge is moving away from (benign).
-	chMu := e.contentHashLock(wsPrefix, storage.ContentHash(req.Content))
-	chMu.Lock()
-	defer chMu.Unlock()
-
-	// Best-effort capture of the pre-merge engram, so a content-changing merge
-	// can sweep its stale FTS postings (fts.DeleteEngram, mirroring Forget)
-	// before the new content is indexed. Outside casLocks, so technically racy
-	// with a concurrent Delete/CAS — acceptable: FTS is derived and self-heals
-	// on reindex; upsertKeyLock already serializes concurrent upserts per key.
-	var oldFTS *storage.Engram
-	if exID, gErr := e.store.GetUpsertKey(ctx, wsPrefix, keyHash); gErr == nil && exID != (storage.ULID{}) {
-		oldFTS, _ = e.store.GetEngram(ctx, wsPrefix, exID)
-	}
-
-	// Resolve trust (S8): default inferred; "verified" gated to write/full creds.
-	// Mirrors the default Write path — upsert must not silently bypass the gate.
-	trust, trustErr := resolveTrust(ctx, req.Trust)
-	if trustErr != nil {
-		return nil, trustErr
-	}
-
-	eng := &storage.Engram{
-		Concept:    req.Concept,
-		Content:    req.Content,
-		Tags:       req.Tags,
-		Confidence: req.Confidence,
-		Stability:  req.Stability,
-		Importance: importanceFromRequest(req.Importance),
-		Embedding:  req.Embedding,
-		MemoryType: storage.MemoryType(req.MemoryType),
-		TypeLabel:  req.TypeLabel,
-		Summary:    req.Summary,
-		Trust:      trust,
-	}
-	if req.CreatedAt != nil {
-		if err := validateCreatedAt(*req.CreatedAt); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
-		}
-		eng.CreatedAt = *req.CreatedAt
-	}
-
-	id, created, err := e.store.UpsertEngram(ctx, wsPrefix, eng, keyHash)
-	if err != nil {
-		return nil, fmt.Errorf("upsert: %w", err)
-	}
-
-	// Sweep stale FTS postings when a merge changed the content (mirrors
-	// Engine.Forget). The new content is indexed by the ftsWorker.Submit below.
-	// e.fts may be nil in minimal test engines.
-	if e.fts != nil && oldFTS != nil && oldFTS.Content != eng.Content {
-		if ftErr := e.fts.DeleteEngram(wsPrefix, [16]byte(id), oldFTS.Concept, oldFTS.CreatedBy, oldFTS.Content, oldFTS.Tags); ftErr != nil {
-			slog.Warn("engine: upsert: failed to sweep stale FTS postings", "id", id.String(), "err", ftErr)
-		}
-	}
-
 	vaultName := req.Vault
 	if vaultName == "" {
 		vaultName = "default"
 	}
 
-	// Inline caller embedding into HNSW (same self-healing note as Write).
-	if len(req.Embedding) > 0 {
-		if err := e.hnswRegistry.Insert(ctx, wsPrefix, [16]byte(id), req.Embedding); err != nil {
-			slog.Warn("engine: upsert embedding not inserted into HNSW; engram left for the retroactive processor", "id", id.String(), "err", err)
-		} else {
-			existing, _ := e.store.GetDigestFlags(ctx, plugin.ULID(id))
-			_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEmbed)
-		}
+	// ── Dispatch on the durable 0x2E pointer ──────────────────────────────
+	// upsertKeyLock serializes concurrent upserts on the same key; the default
+	// Write path takes contentHashLock internally for creates, EvolveAt takes
+	// its own locks for evolves — writeUpsert no longer holds contentHashLock
+	// itself (the v1 merge wrote the content-hash in-batch, the Rev 2 paths
+	// delegate). No path takes upsertKeyLock + contentHashLock in the other
+	// order, so the one-way lock order is preserved.
+	existingID, err := e.store.GetUpsertKey(ctx, wsPrefix, keyHash)
+	if err != nil {
+		return nil, fmt.Errorf("upsert lookup: %w", err)
 	}
 
-	// Keyword-search visibility.
-	if e.ftsWorker != nil {
-		e.ftsWorker.Submit(fts.IndexJob{
-			WS:        wsPrefix,
-			ID:        [16]byte(id),
-			Concept:   eng.Concept,
-			CreatedBy: eng.CreatedBy,
-			Content:   eng.Content,
-			Tags:      eng.Tags,
-		})
+	// Load the head once (if the pointer is present). Absent/non-Active head →
+	// treat as a stale pointer and recreate (RedTeam #556 Change-2: merging
+	// into a tombstone silently loses data). GetEngram returns (nil, ErrNotFound)
+	// for a hard-deleted/absent engram — the error is the signal, not nil-nil.
+	var head *storage.Engram
+	if existingID != (storage.ULID{}) {
+		head, _ = e.store.GetEngram(ctx, wsPrefix, existingID)
+	}
+	if head == nil || head.State != storage.StateActive {
+		return e.upsertCreate(ctx, wsPrefix, vaultName, req, keyHash, start)
 	}
 
-	_ = e.store.WriteVaultName(wsPrefix, vaultName)
+	// HIT + Active → compare content hash to decide no-op vs evolve.
+	if storage.ContentHash(head.Content) == storage.ContentHash(req.Content) {
+		// Identical content: no-op. Cheap fast path — no write, no evolve, no
+		// index churn. Return the existing head id with the identical hint so
+		// callers can tell nothing changed.
+		metrics.EngineWritesTotal.Inc()
+		d := time.Since(start)
+		if e.latencyTracker != nil {
+			e.latencyTracker.Record(wsPrefix, "write", d)
+		}
+		metrics.WriteDuration.WithLabelValues(vaultName).Observe(d.Seconds())
+		return &mbp.WriteResponse{
+			ID:        existingID.String(),
+			CreatedAt: time.Now().UnixNano(),
+			Hint:      "upsert-identical",
+		}, nil
+	}
 
-	// Counters + triggers fire only on a fresh create (merge preserves the
-	// existing engram's cognitive state and counts).
-	if created {
-		e.engramCount.Add(1)
-		if e.coherence != nil {
-			e.coherence.GetOrCreate(vaultName).RecordWrite(eng.Confidence)
-		}
-		if e.triggers != nil {
-			engCopy := *eng
-			engCopy.Tags = append([]string(nil), eng.Tags...)
-			engCopy.Associations = append([]storage.Association(nil), eng.Associations...)
-			if eng.Embedding != nil {
-				engCopy.Embedding = append([]float32(nil), eng.Embedding...)
-			}
-			e.triggers.NotifyWrite(wsVaultID(wsPrefix), &engCopy, true)
-		}
+	// Changed content: EvolveAt creates the successor, supersedes the head, and
+	// re-points the 0x2E pointer in one atomic batch (the re-point is queued
+	// via StoreBatch.RepointUpsertKey inside evolveAtInternal). EvolveAt
+	// inherits Concept/Tags/MemoryType/TypeLabel from the predecessor when
+	// concept == ""; pass the caller's concept only if set, embedding when
+	// supplied, importance when asserted. EffectiveAt defaults to now inside
+	// EvolveAt. Trust is set to TrustInferred internally by EvolveAt — the
+	// existing behavior, which upsert inherits.
+	concept := req.Concept // "" → EvolveAt inherits the predecessor's concept
+	newID, evErr := e.evolveAtInternal(
+		ctx,
+		req.Vault,
+		existingID.String(),
+		req.Content,
+		"upsert_mode: content changed",
+		req.Embedding,
+		concept,
+		nil, // entities: upsert targets content-addressed re-ingest — no inline entities
+		req.Importance,
+		time.Time{},
+		&keyHash,
+	)
+	if evErr != nil {
+		return nil, fmt.Errorf("upsert evolve: %w", evErr)
 	}
 
 	if fn, ok := e.onWrite.Load().(func()); ok && fn != nil {
 		fn()
-	}
-
-	hint := "upsert-merged"
-	if created {
-		hint = "upsert-created"
 	}
 	metrics.EngineWritesTotal.Inc()
 	d := time.Since(start)
@@ -1732,10 +1705,52 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	metrics.WriteDuration.WithLabelValues(vaultName).Observe(d.Seconds())
 
 	return &mbp.WriteResponse{
-		ID:        id.String(),
+		ID:        newID.String(),
 		CreatedAt: time.Now().UnixNano(),
-		Hint:      hint,
+		Hint:      "upsert-evolved",
 	}, nil
+}
+
+// upsertCreate is the writeUpsert helper for the miss / stale-pointer branch:
+// delegate to the default Write path (which runs content-hash dedup, ResolveTrust,
+// importanceFromRequest, hooks, and counters), then pin the freshly created
+// ULID under the upsert key via PutUpsertKey. Returns the Write response with
+// Hint="upsert-created".
+//
+// The caller MUST hold the upsertKeyLock(wsPrefix, keyHash) stripe. The default
+// Write path is entered with UpsertMode=false (we're already inside the upsert
+// orchestrator; re-entering it would loop) and IdempotentID="" (upsert tracks
+// via the durable 0x2E index, not the legacy receipt — a receipt would point
+// the second caller back at the first's engram and bypass the head/evolve
+// dispatch).
+func (e *Engine) upsertCreate(ctx context.Context, wsPrefix [8]byte, vaultName string, req *mbp.WriteRequest, keyHash [32]byte, start time.Time) (*mbp.WriteResponse, error) {
+	createReq := *req
+	createReq.UpsertMode = false
+	createReq.IdempotentID = ""
+	resp, err := e.Write(ctx, &createReq)
+	if err != nil {
+		return nil, fmt.Errorf("upsert create: %w", err)
+	}
+	parsedID, pErr := storage.ParseULID(resp.ID)
+	if pErr != nil {
+		return nil, fmt.Errorf("upsert create: parse id: %w", pErr)
+	}
+	// Pin the freshly created engram under the upsert key. Non-batched — the
+	// engram has already committed under the default Write path's batch; a
+	// crash here leaves a created engram with no 0x2E entry, which the next
+	// upsert on this key self-heals (treats it as a miss and creates again).
+	if err := e.store.PutUpsertKey(ctx, wsPrefix, keyHash, parsedID); err != nil {
+		return nil, fmt.Errorf("upsert create: pin key: %w", err)
+	}
+	resp.Hint = "upsert-created"
+
+	metrics.EngineWritesTotal.Inc()
+	d := time.Since(start)
+	if e.latencyTracker != nil {
+		e.latencyTracker.Record(wsPrefix, "write", d)
+	}
+	metrics.WriteDuration.WithLabelValues(vaultName).Observe(d.Seconds())
+	return resp, nil
 }
 
 // MaxBatchSize is the maximum number of items allowed in a single WriteBatch call.
@@ -2016,7 +2031,11 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 		// Skip upsert-routed items — writeUpsert already committed them and ran
 		// their own hooks; prepared[i]/ids[i] were never populated for these.
-		if responses[i].Hint == "upsert-created" || responses[i].Hint == "upsert-merged" {
+		// Rev 2 hints: upsert-created (miss/stale), upsert-evolved (content change),
+		// upsert-identical (no-op). v1 used upsert-merged; it is no longer produced
+		// but the check stays defensive against future hint names.
+		if responses[i].Hint == "upsert-created" || responses[i].Hint == "upsert-evolved" ||
+			responses[i].Hint == "upsert-identical" || responses[i].Hint == "upsert-merged" {
 			continue
 		}
 		p := &prepared[i]
@@ -3642,6 +3661,17 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 // predecessor's ValidUntil stamp (half-open [from, until) windows meet exactly);
 // the zero time defaults to now.
 func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (storage.ULID, error) {
+	return e.evolveAtInternal(ctx, vault, oldID, newContent, reason, embedding, concept, entities, importance, effectiveAt, nil)
+}
+
+// evolveAtInternal is EvolveAt with an optional upsert key hash. When non-nil,
+// the 0x2E upsert-key forward index for (wsPrefix, *upsertKeyHash) is re-pointed
+// to the successor ULID INSIDE the evolve's atomic batch — so a content-change
+// upsert never leaves the durable pointer aimed at the soft-deleted predecessor
+// (#556, scrypster's #1 trap: the re-point must be crash-atomic with the evolve,
+// never a separate commit). Public Evolve/EvolveAt pass nil (unchanged behavior);
+// only Engine.writeUpsert passes a non-nil pointer on the content-change path.
+func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time, upsertKeyHash *[32]byte) (storage.ULID, error) {
 	// Append-mode credentials cannot evolve (modify an existing memory). Guarding
 	// EvolveAt covers Evolve too, since Evolve delegates here (#687 + valid-time).
 	if auth.AppendFromContext(ctx) {
@@ -3787,6 +3817,12 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 		if err := batch.WriteRelationshipRecord(ctx, wsPrefix, newULID, rec); err != nil {
 			return storage.ULID{}, fmt.Errorf("evolve: batch carry relationship: %w", err)
 		}
+	}
+	// Upsert re-point (#556): when called from writeUpsert's content-change
+	// path, move the 0x2E forward index to the successor in this same atomic
+	// batch — the re-point must commit (or roll back) with the evolve itself.
+	if upsertKeyHash != nil {
+		batch.RepointUpsertKey(wsPrefix, *upsertKeyHash, newULID)
 	}
 	if err := batch.Commit(); err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: batch commit: %w", err)

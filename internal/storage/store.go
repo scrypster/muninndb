@@ -52,6 +52,13 @@ type StoreBatch interface {
 	// relationship-entity index keys into the batch. Same encoding as
 	// PebbleStore.UpsertRelationshipRecord.
 	WriteRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error
+	// RepointUpsertKey queues a 0x2E upsert-key forward-index re-point into the
+	// batch — the durable upsert pointer (keyed by sha256(idempotent_id)) is
+	// moved to the given engram ID. Used by Engine.evolveAtInternal so a
+	// content-change evolve re-points the upsert key IN THE SAME atomic batch
+	// as the successor write + predecessor supersede (#556: the re-point must
+	// be crash-atomic with the evolve, never a separate commit).
+	RepointUpsertKey(ws [8]byte, keyHash [32]byte, id ULID)
 	// Commit atomically commits all queued writes.
 	Commit() error
 	// Discard releases the batch without writing anything.

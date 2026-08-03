@@ -293,6 +293,20 @@ func (b *pebbleStoreBatch) WriteRelationshipRecord(ctx context.Context, ws [8]by
 	return nil
 }
 
+// RepointUpsertKey queues a 0x2E upsert-key forward-index re-point into the
+// batch: keys.UpsertKeyKey(ws, keyHash) → id[:]. Used by Engine.evolveAtInternal
+// so the upsert pointer is moved to the successor IN THE SAME atomic batch as
+// the evolve (the successor write + predecessor supersede + association keys).
+// Atomicity is the whole point — a separate commit would leave a window where
+// the index points at the soft-deleted predecessor. Issue #556.
+func (b *pebbleStoreBatch) RepointUpsertKey(ws [8]byte, keyHash [32]byte, id ULID) {
+	if b.committed {
+		return
+	}
+	id16 := [16]byte(id)
+	b.batch.Set(keys.UpsertKeyKey(ws, keyHash), id16[:], nil)
+}
+
 // Commit atomically flushes all queued writes to Pebble and runs post-commit
 // side effects (vault counters, WAL entries, provenance).
 func (b *pebbleStoreBatch) Commit() error {

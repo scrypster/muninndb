@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -11,14 +12,19 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
-// TestWrite_UpsertMode_CreateThenMerge verifies the engine upsert wiring
-// end-to-end: two Write calls with upsert_mode + the same idempotent_id land on
-// the SAME engram (merge in place), the second call's content wins, cognitive
-// state (Confidence) is preserved, and the 0x2E forward index pins the id.
-// Exercises the writeUpsert branch (dispatch, stripe lock, engram construction,
-// store.UpsertEngram, Hint) — the storage-layer semantics themselves are
-// pinned in internal/storage/upsert_key_test.go.
-func TestWrite_UpsertMode_CreateThenMerge(t *testing.T) {
+// TestWrite_UpsertMode_CreateThenEvolve verifies the Rev 2 upsert orchestrator
+// end-to-end. The 0x2E forward index maps the upsert key to the CURRENT HEAD of
+// the chain (never a fixed engram), so:
+//   - first upsert (miss) creates a fresh engram, pins it → "upsert-created";
+//   - second upsert with CHANGED content evolves the head (new ULID, predecessor
+//     superseded) and atomically re-points 0x2E to the successor → "upsert-evolved".
+//
+// After the evolve, the 0x2E pointer targets the successor, recall sees only the
+// successor (the predecessor is soft-deleted), and the supersedes association
+// links successor → predecessor. The storage-layer primitives themselves
+// (GetUpsertKey, PutUpsertKey, StoreBatch.RepointUpsertKey) are pinned in
+// internal/storage/upsert_key_test.go.
+func TestWrite_UpsertMode_CreateThenEvolve(t *testing.T) {
 	eng, store, cleanup := testEnvWithStore(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -44,38 +50,205 @@ func TestWrite_UpsertMode_CreateThenMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second upsert Write: %v", err)
 	}
-	if resp2.Hint != "upsert-merged" {
-		t.Errorf("second Hint: got %q, want upsert-merged", resp2.Hint)
+	if resp2.Hint != "upsert-evolved" {
+		t.Errorf("second Hint: got %q, want upsert-evolved", resp2.Hint)
 	}
-	if resp2.ID != resp1.ID {
-		t.Errorf("merge changed the ID: got %s, want %s", resp2.ID, resp1.ID)
+	if resp2.ID == resp1.ID {
+		t.Errorf("evolve should mint a new ULID, got the same id %s", resp2.ID)
 	}
 
-	// Verify via the store: content overwritten, Confidence preserved.
 	ws := store.ResolveVaultPrefix("")
-	id, err := storage.ParseULID(resp1.ID)
-	if err != nil {
-		t.Fatalf("parse ULID: %v", err)
-	}
-	got, err := store.GetEngram(ctx, ws, id)
-	if err != nil {
-		t.Fatalf("GetEngram: %v", err)
-	}
-	if got.Content != "v2" {
-		t.Errorf("content: got %q, want %q", got.Content, "v2")
-	}
-	if got.Confidence != 0.42 {
-		t.Errorf("Confidence not preserved: got %v, want 0.42", got.Confidence)
-	}
+	id1, _ := storage.ParseULID(resp1.ID)
+	id2, _ := storage.ParseULID(resp2.ID)
 
-	// The 0x2E forward index pins doc-1 → id.
+	// The 0x2E pointer now targets the SUCCESSOR (the evolve re-pointed it in
+	// the same atomic batch that wrote the successor).
 	keyHash := sha256.Sum256([]byte("doc-1"))
 	pinned, err := store.GetUpsertKey(ctx, ws, keyHash)
 	if err != nil {
 		t.Fatalf("GetUpsertKey: %v", err)
 	}
-	if pinned != id {
-		t.Errorf("upsert-key pin: got %x, want %x", pinned[:], id[:])
+	if pinned != id2 {
+		t.Errorf("upsert-key pin: got %x, want successor %x", pinned[:], id2[:])
+	}
+
+	// Successor is the current head — Active and carrying the new content.
+	head, err := store.GetEngram(ctx, ws, id2)
+	if err != nil {
+		t.Fatalf("GetEngram successor: %v", err)
+	}
+	if head.Content != "v2" {
+		t.Errorf("successor content: got %q, want v2", head.Content)
+	}
+	if head.State != storage.StateActive {
+		t.Errorf("successor state: got %d, want StateActive", head.State)
+	}
+
+	// Predecessor is superseded — soft-deleted, hidden from the present.
+	pred, err := store.GetEngram(ctx, ws, id1)
+	if err != nil {
+		t.Fatalf("GetEngram predecessor: %v", err)
+	}
+	if pred.State != storage.StateSoftDeleted {
+		t.Errorf("predecessor state: got %d, want StateSoftDeleted (superseded)", pred.State)
+	}
+	if pred.Content != "v1" {
+		t.Errorf("predecessor content mutated: got %q, want v1 (evolve creates a new engram, never mutates)", pred.Content)
+	}
+
+	// The supersedes association successor → predecessor is the chain link.
+	assocs, err := store.GetAssociations(ctx, ws, []storage.ULID{id2}, 16)
+	if err != nil {
+		t.Fatalf("GetAssociations: %v", err)
+	}
+	var sawSupersedes bool
+	for _, a := range assocs[id2] {
+		if a.RelType == storage.RelSupersedes && a.TargetID == id1 {
+			sawSupersedes = true
+		}
+	}
+	if !sawSupersedes {
+		t.Errorf("supersedes association successor→predecessor missing; got %#v", assocs[id2])
+	}
+}
+
+// TestWrite_UpsertMode_IdenticalContent_NoOp: a second upsert with byte-identical
+// content is a no-op — returns the existing head id with Hint="upsert-identical",
+// no new ULID minted, no evolve batch committed. Pinned by the orchestrator's
+// content-hash fast path.
+func TestWrite_UpsertMode_IdenticalContent_NoOp(t *testing.T) {
+	eng, store, cleanup := testEnvWithStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp1, err := eng.Write(ctx, &mbp.WriteRequest{
+		Concept: "c", Content: "same", UpsertMode: true, IdempotentID: "doc-same",
+	})
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if resp1.Hint != "upsert-created" {
+		t.Fatalf("first Hint: got %q, want upsert-created", resp1.Hint)
+	}
+
+	resp2, err := eng.Write(ctx, &mbp.WriteRequest{
+		Concept: "c", Content: "same", UpsertMode: true, IdempotentID: "doc-same",
+	})
+	if err != nil {
+		t.Fatalf("identical re-write: %v", err)
+	}
+	if resp2.Hint != "upsert-identical" {
+		t.Errorf("identical Hint: got %q, want upsert-identical", resp2.Hint)
+	}
+	if resp2.ID != resp1.ID {
+		t.Errorf("identical should return the same id: got %s, want %s", resp2.ID, resp1.ID)
+	}
+
+	// No successor was minted — the 0x2E pointer still targets the original.
+	ws := store.ResolveVaultPrefix("")
+	id1, _ := storage.ParseULID(resp1.ID)
+	pinned, _ := store.GetUpsertKey(ctx, ws, sha256.Sum256([]byte("doc-same")))
+	if pinned != id1 {
+		t.Errorf("identical re-pointed the pointer: got %x, want %x", pinned[:], id1[:])
+	}
+}
+
+// TestWrite_UpsertMode_StalePointerSoftDeleted_Recreates: when the 0x2E entry
+// points at a non-Active (soft-deleted) head, the orchestrator must treat it as
+// stale and create a fresh engram + re-pin the pointer — never evolve into a
+// tombstone (RedTeam #556 Change-2: silent data loss otherwise).
+func TestWrite_UpsertMode_StalePointerSoftDeleted_Recreates(t *testing.T) {
+	eng, store, cleanup := testEnvWithStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp1, err := eng.Write(ctx, &mbp.WriteRequest{
+		Concept: "c", Content: "v1", UpsertMode: true, IdempotentID: "doc-stale",
+	})
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	id1, _ := storage.ParseULID(resp1.ID)
+	ws := store.ResolveVaultPrefix("")
+
+	// Soft-delete the head → the 0x2E entry now points at a tombstone.
+	if err := store.SoftDelete(ctx, ws, id1); err != nil {
+		t.Fatalf("soft-delete head: %v", err)
+	}
+
+	resp2, err := eng.Write(ctx, &mbp.WriteRequest{
+		Concept: "c", Content: "v2", UpsertMode: true, IdempotentID: "doc-stale",
+	})
+	if err != nil {
+		t.Fatalf("recreate after soft-delete: %v", err)
+	}
+	if resp2.Hint != "upsert-created" {
+		t.Errorf("stale-pointer Hint: got %q, want upsert-created", resp2.Hint)
+	}
+	if resp2.ID == resp1.ID {
+		t.Fatal("recreate should mint a new ULID, not reuse the tombstoned one")
+	}
+	id2, _ := storage.ParseULID(resp2.ID)
+
+	// Pointer re-pinned to the fresh engram.
+	pinned, _ := store.GetUpsertKey(ctx, ws, sha256.Sum256([]byte("doc-stale")))
+	if pinned != id2 {
+		t.Errorf("pointer not re-pinned: got %x, want %x", pinned[:], id2[:])
+	}
+
+	// The fresh engram is Active with the new content; the tombstone stays
+	// soft-deleted (not mutated, not evolved into).
+	got, _ := store.GetEngram(ctx, ws, id2)
+	if got.State != storage.StateActive || got.Content != "v2" {
+		t.Errorf("recreate head wrong: state=%d content=%q", got.State, got.Content)
+	}
+	tomb, _ := store.GetEngram(ctx, ws, id1)
+	if tomb.State != storage.StateSoftDeleted || tomb.Content != "v1" {
+		t.Errorf("tombstone mutated: state=%d content=%q", tomb.State, tomb.Content)
+	}
+}
+
+// TestWrite_UpsertMode_StalePointerHardDeleted_Recreates: when the 0x2E entry
+// points at a hard-deleted/absent engram (Forget removed 0x01, or ClearVault
+// left 0x2E dangling), GetEngram returns (nil, ErrNotFound); the orchestrator
+// must treat it as stale and recreate rather than error forever.
+func TestWrite_UpsertMode_StalePointerHardDeleted_Recreates(t *testing.T) {
+	eng, store, cleanup := testEnvWithStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	resp1, err := eng.Write(ctx, &mbp.WriteRequest{
+		Concept: "c", Content: "v1", UpsertMode: true, IdempotentID: "doc-hard",
+	})
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	id1, _ := storage.ParseULID(resp1.ID)
+	ws := store.ResolveVaultPrefix("")
+
+	// Hard-delete the pinned engram. DeleteEngram does NOT sweep 0x2E, so the
+	// forward-index entry → id1 now dangles.
+	if err := store.DeleteEngram(ctx, ws, id1); err != nil {
+		t.Fatalf("DeleteEngram head: %v", err)
+	}
+	if _, gErr := store.GetEngram(ctx, ws, id1); !errors.Is(gErr, storage.ErrNotFound) {
+		t.Fatalf("precondition: GetEngram after delete should be ErrNotFound, got %v", gErr)
+	}
+
+	resp2, err := eng.Write(ctx, &mbp.WriteRequest{
+		Concept: "c", Content: "v2", UpsertMode: true, IdempotentID: "doc-hard",
+	})
+	if err != nil {
+		t.Fatalf("recreate after hard-delete: %v", err)
+	}
+	if resp2.Hint != "upsert-created" {
+		t.Errorf("stale-pointer Hint: got %q, want upsert-created", resp2.Hint)
+	}
+	id2, _ := storage.ParseULID(resp2.ID)
+
+	pinned, _ := store.GetUpsertKey(ctx, ws, sha256.Sum256([]byte("doc-hard")))
+	if pinned != id2 {
+		t.Errorf("pointer not re-pinned: got %x, want %x", pinned[:], id2[:])
 	}
 }
 
@@ -94,19 +267,14 @@ func TestWrite_UpsertMode_RequiresIdempotentID(t *testing.T) {
 }
 
 // TestWrite_UpsertMode_DefaultUnchanged: with upsert_mode=false (the default),
-// two writes with the same idempotent_id create TWO distinct engrams — the
-// upsert branch is not consulted, and the legacy idempotent-receipt + content-
-// hash dedup path is untouched (regression guard for the dispatch).
+// two writes with the same idempotent_id take the legacy idempotent-receipt +
+// content-hash dedup path, NOT the upsert branch (regression guard for the
+// dispatch). The upsert Hints must never surface in default mode.
 func TestWrite_UpsertMode_DefaultUnchanged(t *testing.T) {
 	eng, _, cleanup := testEnvWithStore(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	// Same idempotent_id, DIFFERENT content, upsert_mode NOT set. The legacy
-	// idempotent receipt returns the original id on the second call — so both
-	// calls return the same id, and only ONE engram exists (the receipt path,
-	// not the upsert path). This confirms the upsert branch didn't hijack the
-	// default flow.
 	resp1, err := eng.Write(ctx, &mbp.WriteRequest{
 		Content: "a", IdempotentID: "op-1",
 	})
@@ -128,17 +296,17 @@ func TestWrite_UpsertMode_DefaultUnchanged(t *testing.T) {
 	if resp2.Hint != "idempotent" {
 		t.Errorf("second Hint: got %q, want idempotent (legacy receipt)", resp2.Hint)
 	}
-	if resp1.Hint == "upsert-created" || resp1.Hint == "upsert-merged" ||
-		resp2.Hint == "upsert-created" || resp2.Hint == "upsert-merged" {
+	if resp1.Hint == "upsert-created" || resp1.Hint == "upsert-evolved" ||
+		resp2.Hint == "upsert-created" || resp2.Hint == "upsert-evolved" {
 		t.Errorf("upsert branch hijacked default mode: resp1=%q resp2=%q", resp1.Hint, resp2.Hint)
 	}
 }
 
 // TestWriteBatch_Upsert_RoutesPerItem: a mixed batch — two upsert items sharing
-// a key (intra-batch merge) plus a default-mode item — routes correctly: upsert
+// a key (intra-batch evolve) plus a default-mode item — routes correctly: upsert
 // items go through writeUpsert (per-item, Phase 2 batch commit skips them), the
-// default item takes the legacy path, and intra-batch same-key dedup works
-// (item 1 sees item 0's just-committed forward-index entry).
+// default item takes the legacy path, and intra-batch same-key chaining works
+// (item 1 sees item 0's just-committed forward-index entry and evolves it).
 func TestWriteBatch_Upsert_RoutesPerItem(t *testing.T) {
 	eng, store, cleanup := testEnvWithStore(t)
 	defer cleanup()
@@ -155,36 +323,38 @@ func TestWriteBatch_Upsert_RoutesPerItem(t *testing.T) {
 			t.Fatalf("item %d error: %v", i, e)
 		}
 	}
-	if resps[0].ID != resps[1].ID {
-		t.Errorf("intra-batch same-key upsert: item0=%s item1=%s (want same id)", resps[0].ID, resps[1].ID)
-	}
 	if resps[0].Hint != "upsert-created" {
 		t.Errorf("item0 Hint: got %q, want upsert-created", resps[0].Hint)
 	}
-	if resps[1].Hint != "upsert-merged" {
-		t.Errorf("item1 Hint: got %q, want upsert-merged (intra-batch merge)", resps[1].Hint)
+	if resps[1].Hint != "upsert-evolved" {
+		t.Errorf("item1 Hint: got %q, want upsert-evolved (intra-batch evolve)", resps[1].Hint)
+	}
+	if resps[1].ID == resps[0].ID {
+		t.Errorf("intra-batch evolve should mint a new id: item0=%s item1=%s", resps[0].ID, resps[1].ID)
 	}
 	if resps[2].ID == "" || resps[2].ID == resps[0].ID {
 		t.Errorf("default-mode item should get its own id: got %q", resps[2].ID)
 	}
-	// Last merge wins → content bv2.
+
+	// The pointer pins the SUCCESSOR (last write wins) and recall sees bv2.
 	ws := store.ResolveVaultPrefix("")
-	id, _ := storage.ParseULID(resps[0].ID)
-	got, err := store.GetEngram(ctx, ws, id)
-	if err != nil {
-		t.Fatalf("GetEngram: %v", err)
+	pinned, _ := store.GetUpsertKey(ctx, ws, sha256.Sum256([]byte("b-doc")))
+	head, _ := store.GetEngram(ctx, ws, pinned)
+	if head.Content != "bv2" {
+		t.Errorf("upsert head content: got %q, want bv2", head.Content)
 	}
-	if got.Content != "bv2" {
-		t.Errorf("upsert content after batch: got %q, want bv2", got.Content)
+	if head.ID.String() != resps[1].ID {
+		t.Errorf("pinned id: got %s, want successor %s", head.ID.String(), resps[1].ID)
 	}
 }
 
-// TestWrite_UpsertMode_ConcurrentSameKey_OneEngram is the core concurrency
-// proof: N goroutines Write the same upsert key at once. The upsertKeyLock must
-// serialise them so exactly ONE creates and the rest merge — all return the
-// same id, exactly one "upsert-created" hint. This is the invariant the
-// content-hash dedup path lacks a test for; UPSERT ships it. Run with -race.
-func TestWrite_UpsertMode_ConcurrentSameKey_OneEngram(t *testing.T) {
+// TestWrite_UpsertMode_ConcurrentSameKey_OneHead is the core concurrency proof:
+// N goroutines Write the same upsert key at once. The upsertKeyLock must
+// serialise them so the final 0x2E pointer targets exactly one Active head
+// along a single chain — each write either creates (the first), evolves (the
+// rest with changed content), or no-ops (the rest with identical content). No
+// goroutine errors, no orphans pinned. Run with -race.
+func TestWrite_UpsertMode_ConcurrentSameKey_OneHead(t *testing.T) {
 	eng, store, cleanup := testEnvWithStore(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -192,6 +362,7 @@ func TestWrite_UpsertMode_ConcurrentSameKey_OneEngram(t *testing.T) {
 	const N = 32
 	ids := make([]string, N)
 	hints := make([]string, N)
+	errs := make([]error, N)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(N)
@@ -204,7 +375,7 @@ func TestWrite_UpsertMode_ConcurrentSameKey_OneEngram(t *testing.T) {
 				Content: fmt.Sprintf("v-%d", i), UpsertMode: true, IdempotentID: "race-key",
 			})
 			if err != nil {
-				t.Errorf("goroutine %d: %v", i, err)
+				errs[i] = err
 				return
 			}
 			ids[i] = resp.ID
@@ -214,7 +385,13 @@ func TestWrite_UpsertMode_ConcurrentSameKey_OneEngram(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	// Exactly one engram pinned to "race-key".
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("goroutine %d errored: %v", i, e)
+		}
+	}
+
+	// Exactly one engram is pinned as the head by the end.
 	ws := store.ResolveVaultPrefix("")
 	keyHash := sha256.Sum256([]byte("race-key"))
 	pinned, err := store.GetUpsertKey(ctx, ws, keyHash)
@@ -222,16 +399,45 @@ func TestWrite_UpsertMode_ConcurrentSameKey_OneEngram(t *testing.T) {
 		t.Fatalf("GetUpsertKey: %v", err)
 	}
 	if pinned == (storage.ULID{}) {
-		t.Fatal("no engram pinned to race-key")
+		t.Fatal("no engram pinned to race-key after concurrent writes")
 	}
+
+	// Every non-empty response id must be either the current head or a known
+	// predecessor along the chain (the evolve path superseded it). Walk the
+	// supersedes chain back from the head to collect every legal id, then
+	// assert each response id is in that set.
+	legalIDs := map[storage.ULID]bool{pinned: true}
+	cur := pinned
+	for i := 0; i < N+1; i++ { // bound the walk well above any possible chain length
+		assocs, aErr := store.GetAssociations(ctx, ws, []storage.ULID{cur}, 16)
+		if aErr != nil {
+			t.Fatalf("walking chain at %s: %v", cur.String(), aErr)
+		}
+		next := storage.ULID{}
+		for _, a := range assocs[cur] {
+			if a.RelType == storage.RelSupersedes {
+				next = a.TargetID
+				break
+			}
+		}
+		if next == (storage.ULID{}) {
+			break // end of chain
+		}
+		legalIDs[next] = true
+		cur = next
+	}
+
 	for i, id := range ids {
 		if id == "" {
 			continue
 		}
-		if id != pinned.String() {
-			t.Errorf("goroutine %d returned id %s, want pinned %s", i, id, pinned.String())
+		u, _ := storage.ParseULID(id)
+		if !legalIDs[u] {
+			t.Errorf("goroutine %d returned id %s not on the pinned chain (head=%s)", i, id, pinned.String())
 		}
 	}
+
+	// Exactly one create (the first writer to acquire the lock on an empty key).
 	created := 0
 	for _, h := range hints {
 		if h == "upsert-created" {
