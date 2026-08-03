@@ -2062,12 +2062,19 @@ func (c *ClusterCoordinator) HandleHandoff(fromNodeID string, payload []byte) er
 	newEpoch := msg.Epoch + 1
 
 	// Promote self: update epoch, set role, broadcast claim.
-	if err := c.epochStore.ForceSet(newEpoch); err != nil {
-		return fmt.Errorf("HandleHandoff: ForceSet epoch %d: %w", newEpoch, err)
+	advanced, err := c.epochStore.Advance(newEpoch)
+	if err != nil {
+		return fmt.Errorf("HandleHandoff: advance epoch to %d: %w", newEpoch, err)
 	}
-
-	// Verify the epoch stuck — if someone else bumped it concurrently,
-	// ForceSet is a no-op (returns nil) and we must not promote.
+	// If someone else bumped the epoch concurrently, Advance refuses and reports
+	// advanced=false; we must not promote. Load() is re-read only to name the
+	// epoch that beat us in the log line.
+	if !advanced {
+		actual := c.epochStore.Load()
+		slog.Warn("HandleHandoff: epoch moved past our target, aborting promotion",
+			"expected", newEpoch, "actual", actual)
+		return fmt.Errorf("HandleHandoff: epoch already advanced to %d, expected %d", actual, newEpoch)
+	}
 	if actual := c.epochStore.Load(); actual != newEpoch {
 		slog.Warn("HandleHandoff: epoch moved past our target, aborting promotion",
 			"expected", newEpoch, "actual", actual)

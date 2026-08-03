@@ -1821,6 +1821,26 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    NotCortex:
+      description: |
+        This node is not the cluster's Cortex, and the operation writes.
+        In cluster mode writes are accepted only on the Cortex; a write
+        committed on a Lobe would never be replicated (#596). Retry against
+        the node named in the response headers. Never returned by a
+        standalone (non-cluster) server, and never for a read.
+      headers:
+        X-Muninn-Cortex-Id:
+          description: "Node id of the Cortex to retry against. Absent if no Cortex is currently known (mid-election)."
+          schema:
+            type: string
+        X-Muninn-Cortex-Addr:
+          description: "Cluster address of the Cortex to retry against. Absent if unknown."
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     Conflict:
       description: "Conflict with current state."
       content:
@@ -2006,6 +2026,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
@@ -2071,6 +2093,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2134,6 +2158,8 @@ paths:
                 $ref: "#/components/schemas/ForgetResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -2202,6 +2228,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2233,6 +2261,8 @@ paths:
                 $ref: "#/components/schemas/RestoreResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -2269,6 +2299,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2300,6 +2332,8 @@ paths:
                 $ref: "#/components/schemas/RetryEnrichResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -2352,6 +2386,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2463,6 +2499,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -2667,6 +2705,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2693,6 +2733,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2793,6 +2835,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
     get:
       tags: [admin-keys]
       summary: "List all API keys for a vault."
@@ -2845,6 +2889,8 @@ paths:
                     type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -2874,6 +2920,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2912,6 +2960,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2940,6 +2990,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2996,6 +3048,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -3026,6 +3080,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -3058,6 +3114,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -3094,6 +3152,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -3131,6 +3191,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -3172,6 +3234,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -3299,6 +3363,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -3323,6 +3389,8 @@ paths:
                 $ref: "#/components/schemas/ReindexFTSResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -3355,6 +3423,8 @@ paths:
                 $ref: "#/components/schemas/JobResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":

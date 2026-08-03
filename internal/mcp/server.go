@@ -29,7 +29,9 @@ type MCPServer struct {
 	authStore        *auth.Store         // privileged: SetVaultConfig + GenerateCapability (create-workflow-vault); nil = tool disabled
 	agentVaultCreate bool                // opt-in: MUNINN_AGENT_VAULT_CREATE (default off, secure-by-default)
 	srv              *http.Server
-	tlsConfig        *tls.Config // nil = plain TCP
+	// writeGate is the cluster single-writer gate (#596); nil = standalone.
+	writeGate func() error
+	tlsConfig *tls.Config // nil = plain TCP
 
 	sseSessionsMu sync.RWMutex
 	sseSessions   map[string]*sseSession // sessionID → session
@@ -200,6 +202,10 @@ func (s *MCPServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// SetWriteGate installs the cluster single-writer gate (#596). cmd/muninn wires
+// it to the ClusterCoordinator when cluster mode is enabled.
+func (s *MCPServer) SetWriteGate(g func() error) { s.writeGate = g }
+
 func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter, req *JSONRPCRequest, a AuthContext) {
 	if req.Params == nil {
 		sendError(w, req.ID, -32602, "invalid params: params required")
@@ -250,6 +256,22 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		default:
 			// Unknown mode — fail-closed.
 			sendError(w, req.ID, -32001, "forbidden: unrecognized key mode")
+			return
+		}
+	}
+
+	// Cluster single-writer gate (#596). Every mutating tool is refused on a
+	// non-Cortex node with the leader named, rather than being accepted locally
+	// and silently never replicated. isMutatingTool is the same classification
+	// the write-mode credential check above uses, so a new mutating tool is
+	// covered the moment it is classified — there is no second list.
+	//
+	// Read tools are untouched: a Lobe serving reads is the entire point of a
+	// Lobe. This runs AFTER credential checks so an unauthenticated caller
+	// cannot use it to learn cluster topology.
+	if s.writeGate != nil && isMutatingTool(req.Params.Name) {
+		if err := s.writeGate(); err != nil {
+			sendError(w, req.ID, -32002, err.Error())
 			return
 		}
 	}

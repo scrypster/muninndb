@@ -11,6 +11,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Writes to a non-Cortex node are no longer accepted and lost** (#596, #631).
+  A `muninn_remember` delivered to a Lobe — by a load balancer without leader
+  affinity, a stale DNS record, or a VIP that failed over to a replica —
+  returned success with an engram id, committed the memory to that one node's
+  Pebble, and never forwarded it. Nothing in the write path knew the node's
+  role: `IsLeader()` had no caller outside `internal/replication` and the REST
+  status handlers. The engram was invisible cluster-wide and destroyed by the
+  next resnapshot. Vault configuration (including per-vault plasticity), API
+  keys and capability tokens had the same shape *and* a second one: they wrote
+  straight to Pebble, bypassing the replication log entirely, so a key minted or
+  a preset set on the Cortex reached a Lobe only via a full join snapshot —
+  never incrementally — and a failover served the pre-failover defaults.
+
+  Both are closed. In cluster mode a client write is accepted only on the
+  Cortex, and configuration now travels the same replication path as engrams.
+
+  **Client-visible change — this is a breaking behaviour change for anyone
+  sending writes to a replica.** A write that previously returned 201/200 on a
+  Lobe now fails, naming the Cortex to retry against:
+
+  | Surface | Before | Now |
+  |---|---|---|
+  | REST | `201`/`200` | **`421 Misdirected Request`**, error code `4015`, headers `X-Muninn-Cortex-Id` and `X-Muninn-Cortex-Addr` |
+  | MCP | tool result | JSON-RPC error **`-32002`**, message names the Cortex |
+  | gRPC | `OK` | **`FAILED_PRECONDITION`** |
+  | MBP | `WriteOK` | error frame, code **`4015`** |
+
+  Reads are untouched on every surface — serving reads is what a Lobe is for —
+  and so is the cluster-administration API, so an operator can still promote or
+  fail over *from* a Lobe. A standalone (non-cluster) server installs no gate
+  and is completely unaffected.
+
+  Rejecting rather than transparently forwarding is deliberate: there is no
+  node-to-node write RPC to forward over, forwarding would have correct
+  followers pump traffic into the wrong side of a split brain, and rejection
+  introduces no new timeout. The full argument is recorded at
+  `mbp.NotLeaderError` and in invariant SEC-13.
+
+- **A Lobe can no longer be talked backwards into a stale cluster, silently**
+  (#631). After a Cortex was rebuilt from an empty data directory, a Lobe still
+  holding the old, higher epoch and a far-ahead apply cursor rejoined
+  successfully, reported `lag: 0`, and received nothing — forever. The apply
+  cursor is an in-memory field on the applier with no reset path, and
+  `WipeForResnapshot` deliberately preserves the epoch, so after the snapshot
+  landed the node skipped every entry the new Cortex shipped (they were all
+  below its cursor) while the lag calculation clamped to 0. The join path now
+  rebases the apply cursor onto the snapshot's baseline and adopts the Cortex's
+  epoch with it; a backwards epoch offered **without** a resnapshot is refused
+  outright with an error naming both epochs and the remedy, because nothing
+  would reconcile the divergence. `EpochStore.ForceSet` is gone: `Advance` is
+  monotonic and *reports* whether it moved, so a caller can no longer swallow a
+  regression by ignoring a nil error, and the single legitimate backwards path
+  is the explicitly named `AdoptForSnapshot`.
+
 - **An association edge can no longer outlive its endpoints** (#803). Hard
   deletes left the dead engram in the FTS and vector indexes, so the automatic
   association workers kept finding it and minting fresh edges to an ID that no

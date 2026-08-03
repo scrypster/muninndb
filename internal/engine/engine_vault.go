@@ -97,7 +97,7 @@ func (e *Engine) refuseAppend(ctx context.Context) error {
 // It evicts all in-memory state (HNSW, FTS IDF cache, novelty fingerprints, coherence
 // counters, activity tracking) and adjusts the global engramCount.
 func (e *Engine) ClearVault(ctx context.Context, vaultName string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	if !e.beginVaultOp() {
@@ -201,7 +201,7 @@ var ErrVaultJobActive = fmt.Errorf("vault has an active clone/merge job in progr
 // persisted 0x0F index — but for renamed vaults we need the index lookup
 // (not raw SipHash) to find the real ws, so we capture it up front.
 func (e *Engine) DeleteVault(ctx context.Context, vaultName string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	if !e.beginVaultOp() {
@@ -301,6 +301,10 @@ func (e *Engine) ensureVaultRegistered(name string) (bool, error) {
 // operations (reindex-fts, vault export, vault clear) can find it immediately,
 // even before the first engram has been written.
 func (e *Engine) RegisterVaultName(name string) error {
+	// Cluster single-writer gate (#596).
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		return err
+	}
 	ws := e.store.ResolveVaultPrefix(name)
 	return e.store.WriteVaultName(ws, name)
 }
@@ -318,7 +322,7 @@ func (e *Engine) VaultNameExists(name string) bool {
 // doesn't exist, ErrVaultJobActive if a clone/merge job targets the vault,
 // or an error if newName already exists.
 func (e *Engine) RenameVault(ctx context.Context, oldName, newName string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	if !e.beginVaultOp() {

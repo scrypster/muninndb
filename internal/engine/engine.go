@@ -182,7 +182,8 @@ type Engine struct {
 	// coordinator forwards cognitive side effects to the Cortex on Lobe nodes.
 	// nil on standalone / Cortex nodes (workers handle effects locally).
 	coordinator   CognitiveForwarder
-	coordinatorID string // this node's ID, used as OriginNodeID in CognitiveSideEffect
+	writeGate     WriteGate // nil outside cluster mode; see single_writer.go (#596)
+	coordinatorID string    // this node's ID, used as OriginNodeID in CognitiveSideEffect
 
 	// onWrite is an optional callback invoked after every successful Write.
 	// Used to notify background processors (e.g. embed retroactive worker) of new data.
@@ -1047,7 +1048,7 @@ func (e *Engine) validateClientEmbeddingDim(wsPrefix [8]byte, vec []float32) err
 
 // UpdateTags replaces the tags on an engram.
 func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, tags []string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
@@ -1061,6 +1062,9 @@ func (e *Engine) CheckIdempotency(ctx context.Context, opID string) (*storage.Id
 
 // WriteIdempotency stores an idempotency receipt (op_id → engramID).
 func (e *Engine) WriteIdempotency(ctx context.Context, opID, engramID string) error {
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		return err
+	}
 	return e.store.WriteIdempotency(ctx, opID, engramID)
 }
 
@@ -1156,6 +1160,11 @@ func importanceFromRequest(p *float32) float32 {
 
 // Write implements mbp.EngineAPI.Write.
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
+	// Cluster single-writer gate (#596). Additive methods have no append gate to
+	// hang this off, so they call it directly.
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		return nil, err
+	}
 	writeStart := time.Now()
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 	e.activity.Record(wsPrefix)
@@ -1665,6 +1674,15 @@ type preparedBatchItem struct {
 // across N engrams instead of paying it per-engram.
 func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*mbp.WriteResponse, []error) {
 	n := len(reqs)
+	// Cluster single-writer gate (#596): refuse the whole batch, per item, so a
+	// caller reading errs[i] sees the same reason for every element.
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		errs := make([]error, n)
+		for i := range errs {
+			errs[i] = err
+		}
+		return make([]*mbp.WriteResponse, n), errs
+	}
 	if n > MaxBatchSize {
 		errs := make([]error, n)
 		for i := range errs {
@@ -3080,7 +3098,7 @@ func (e *Engine) Unsubscribe(ctx context.Context, subID string) error {
 
 // Link implements mbp.EngineAPI.Link.
 func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkResponse, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
@@ -3222,7 +3240,7 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 // distinguish external bridge signal from the internal "contradiction_detected"
 // path emitted by Link/ContradictWorker.
 func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.ULID, delta float32, other storage.ULID, hasContra bool, reason, caller string) (float32, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return 0, err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
@@ -3285,8 +3303,11 @@ func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.
 
 // Forget implements mbp.EngineAPI.Forget.
 func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.ForgetResponse, error) {
-	if auth.AppendFromContext(ctx) {
-		return nil, ErrAppendForbidden
+	// refuseWrite, not an inline AppendFromContext check: this method used to
+	// re-implement the append gate by hand, which meant it also missed the
+	// cluster single-writer gate when that was added to the shared helper (#596).
+	if err := e.refuseWrite(ctx); err != nil {
+		return nil, err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 
@@ -3545,7 +3566,7 @@ func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 // Restore un-deletes a soft-deleted engram by restoring its state to StateActive.
 // Returns an error if the engram does not exist or was hard-deleted.
 func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	ws := e.store.ResolveVaultPrefix(vault)
@@ -3600,7 +3621,7 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 // so its read-modify-write is atomic and serializes with any concurrent
 // transition on the same engram — closing the former TOCTOU.
 func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	ws := e.store.ResolveVaultPrefix(vault)
@@ -3627,7 +3648,7 @@ func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state stri
 // trust must be one of "verified", "inferred", "external", "untrusted".
 // Returns an error if the engram is not found or trust is invalid.
 func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	level, err := storage.ParseTrustLevel(trust)
@@ -3748,8 +3769,10 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (storage.ULID, error) {
 	// Append-mode credentials cannot evolve (modify an existing memory). Guarding
 	// EvolveAt covers Evolve too, since Evolve delegates here (#687 + valid-time).
-	if auth.AppendFromContext(ctx) {
-		return storage.ULID{}, ErrAppendForbidden
+	// Via refuseWrite so the cluster single-writer gate lands here too (#596) —
+	// the previous inline AppendFromContext check silently opted out of it.
+	if err := e.refuseWrite(ctx); err != nil {
+		return storage.ULID{}, err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
@@ -4064,7 +4087,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 // Consolidate merges multiple engrams into a single new engram and archives the originals.
 // Returns a ConsolidateResult with the new ID, archived IDs, and any non-fatal warnings.
 func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	if len(ids) > 50 {
@@ -4203,7 +4226,7 @@ func (e *Engine) ActivityCounts(ctx context.Context, vault string, since, until 
 // evidence-link warnings. The decision is always committed; evidence linking
 // is best-effort (a bad evidence ID produces a warning, not a failure).
 func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*DecideResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	// The body must STATE the decision, not just the reasoning behind it.
@@ -4260,7 +4283,7 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 // CompareAndSet/DeleteEngram on the same id (STO-2). TouchAccess holds the
 // per-engram stripe lock across the whole RMW.
 func (e *Engine) RecordAccess(ctx context.Context, vault, id string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	ws := e.store.ResolveVaultPrefix(vault)
@@ -4372,7 +4395,7 @@ func semanticFloorExplicitlyDisabled(resolved auth.ResolvedPlasticity) bool {
 // persist in the relevance bucket index and cause an infinite prune loop.
 // Returns the number of engrams pruned.
 func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return 0, err
 	}
 	if !e.beginVaultOp() {
@@ -4867,7 +4890,7 @@ func (e *Engine) GetProvenance(ctx context.Context, vault, id string) ([]provena
 // useful=false signals negative feedback (retrieved but not helpful);
 // useful=true signals positive feedback (retrieved and helpful).
 func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, useful bool) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)

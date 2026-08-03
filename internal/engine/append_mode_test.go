@@ -28,6 +28,9 @@ var appendInfra = map[string]bool{
 	"SetEnrichPlugin": true, "SetLatencyTracker": true, "SetOnWrite": true,
 	"SetReplayEnrichTimeout": true, "SetRetroactiveProcessors": true, "SetTransitionWorker": true,
 	"Store": true, "ResetReplayFailCount": true, "Stop": true, "Checkpoint": true,
+	// SetWriteGate installs the cluster single-writer gate (#596) — wiring, and
+	// it can only ever REFUSE writes, never perform one.
+	"SetWriteGate":  true,
 	"Observability": true, "LatencyTracker": true, "ActivityTracker": true,
 	// WaitWriteTimeIdle drains the write-time async workers and writes
 	// nothing itself — an out-of-package test seam (#722 doctrine, #764).

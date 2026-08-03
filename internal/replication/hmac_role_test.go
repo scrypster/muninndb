@@ -15,7 +15,7 @@ import (
 func TestHandleJoinRequest_V2_RoleInHMAC_Accepted(t *testing.T) {
 	const secret = "test-secret"
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
+	if _, err := es.Advance(1); err != nil {
 		t.Fatal(err)
 	}
 	mgr := NewConnManager("cortex-1")
@@ -44,7 +44,7 @@ func TestHandleJoinRequest_V2_RoleInHMAC_Accepted(t *testing.T) {
 func TestHandleJoinRequest_V2_LegacyHMAC_Rejected(t *testing.T) {
 	const secret = "test-secret"
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
+	if _, err := es.Advance(1); err != nil {
 		t.Fatal(err)
 	}
 	mgr := NewConnManager("cortex-1")
@@ -73,7 +73,7 @@ func TestHandleJoinRequest_V2_LegacyHMAC_Rejected(t *testing.T) {
 func TestHandleJoinRequest_V1_LegacyHMAC_Accepted(t *testing.T) {
 	const secret = "test-secret"
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(1); err != nil {
+	if _, err := es.Advance(1); err != nil {
 		t.Fatal(err)
 	}
 	mgr := NewConnManager("cortex-1")

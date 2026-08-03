@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -365,7 +366,7 @@ func (s *Server) handleWrite(ctx context.Context, corrID uint64, payload []byte,
 
 	resp, err := s.engine.Write(ctx, &req)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrStorageError, err.Error())
+		s.queueEngineError(writeCh, corrID, err, ErrStorageError)
 		return
 	}
 
@@ -478,7 +479,7 @@ func (s *Server) handleLink(ctx context.Context, corrID uint64, payload []byte, 
 
 	resp, err := s.engine.Link(ctx, &req)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidAssociation, err.Error())
+		s.queueEngineError(writeCh, corrID, err, ErrInvalidAssociation)
 		return
 	}
 
@@ -501,7 +502,7 @@ func (s *Server) handleForget(ctx context.Context, corrID uint64, payload []byte
 
 	resp, err := s.engine.Forget(ctx, &req)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrStorageError, err.Error())
+		s.queueEngineError(writeCh, corrID, err, ErrStorageError)
 		return
 	}
 
@@ -589,6 +590,18 @@ func (s *Server) queueActivateResponse(writeCh chan *Frame, corrID uint64, resp 
 	// For now, send as a single frame
 	// TODO: implement multi-frame streaming for large result sets
 	s.queueFrame(writeCh, TypeActivateResp, corrID, resp, caps)
+}
+
+// queueEngineError classifies an engine error before framing it. A write that
+// reached a non-Cortex node gets ErrNotCortex (4015) with the leader hint in the
+// message, never the generic storage/association code — a client cannot retry
+// against the right node if the wire says "storage error" (#596).
+func (s *Server) queueEngineError(writeCh chan *Frame, corrID uint64, err error, fallback ErrorCode) {
+	code := fallback
+	if errors.Is(err, ErrNotLeader) {
+		code = ErrNotCortex
+	}
+	s.queueErrorFrame(writeCh, corrID, code, err.Error())
 }
 
 func (s *Server) queueErrorFrame(writeCh chan *Frame, corrID uint64, code ErrorCode, message string) {

@@ -122,7 +122,7 @@ func TestClusterCoordinator_Role_ThreadSafe(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "auto")
 
 	// Force epoch to 1 so promotion can proceed
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	var wg sync.WaitGroup
 	const readers = 50
@@ -183,7 +183,7 @@ func TestClusterCoordinator_CurrentEpoch(t *testing.T) {
 		t.Errorf("expected epoch 0, got %d", epoch)
 	}
 
-	coord.epochStore.ForceSet(5)
+	coord.epochStore.Advance(5)
 
 	if epoch := coord.CurrentEpoch(); epoch != 5 {
 		t.Errorf("expected epoch 5, got %d", epoch)
@@ -553,7 +553,7 @@ func TestClusterCoordinator_FencingToken(t *testing.T) {
 		t.Errorf("expected fencing token 0, got %d", token)
 	}
 
-	coord.epochStore.ForceSet(42)
+	coord.epochStore.Advance(42)
 
 	if token := coord.FencingToken(); token != 42 {
 		t.Errorf("expected fencing token 42, got %d", token)
@@ -942,7 +942,7 @@ func TestGracefulFailover_Success(t *testing.T) {
 
 	// Promote to Cortex.
 	simulatePromotion(coord, 1)
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Set up a target peer with a net.Pipe so Send works.
 	targetID := "target-1"
@@ -1016,7 +1016,7 @@ func TestGracefulFailover_Success(t *testing.T) {
 func TestGracefulFailover_ConvergenceTimeout(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
 	simulatePromotion(coord, 1)
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Add a target peer.
 	targetID := "target-conv"
@@ -1054,7 +1054,7 @@ func TestGracefulFailover_ConvergenceTimeout(t *testing.T) {
 func TestGracefulFailover_AckTimeout(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
 	simulatePromotion(coord, 1)
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Set up target peer with a pipe that reads but never sends ACK.
 	targetID := "target-noack"
@@ -1093,7 +1093,7 @@ func TestGracefulFailover_AckTimeout(t *testing.T) {
 func TestGracefulFailover_DrainRejectsWrites(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
 	simulatePromotion(coord, 1)
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Set up target peer (no pipe needed — we use AddPeer for a non-connected peer
 	// since the test will cancel before reaching the Send step).
@@ -1188,7 +1188,7 @@ func TestClusterCoordinator_UpdateReplicaSeq(t *testing.T) {
 
 func TestClusterCoordinator_HandleHandoff_PromotesTarget(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "replica")
-	coord.epochStore.ForceSet(5)
+	coord.epochStore.Advance(5)
 
 	// Track promotion callback.
 	var promotedEpoch uint64
@@ -1278,7 +1278,7 @@ func TestBug176_CrashRecoveryPathClearsBreadcrumb(t *testing.T) {
 	if err := coord.epochStore.PersistRole("cortex"); err != nil {
 		t.Fatalf("PersistRole: %v", err)
 	}
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Run the crash-recovery path via runAsCortex; cancel context immediately after
 	// the recovery finishes (it blocks on <-ctx.Done() after promoting).
@@ -1322,7 +1322,7 @@ func TestBug176_CrashRecoveryPathClearsBreadcrumb(t *testing.T) {
 // breadcrumb must be cleared once the ACK is delivered to the old Cortex.
 func TestBug176_HandleHandoffClearsBreadcrumb(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "replica")
-	coord.epochStore.ForceSet(5)
+	coord.epochStore.Advance(5)
 
 	// Wire a pipe so HandleHandoff can send the HANDOFF_ACK.
 	fromID := "old-cortex"
@@ -1452,8 +1452,8 @@ func TestCoordinator_SetReconcileOnHeal(t *testing.T) {
 // closed so the lobe reconnects and retries the snapshot from scratch.
 func TestClusterCoordinator_HandleIncomingJoin_SnapshotFails_NoCallback(t *testing.T) {
 	coord, db := newTestCoordinator(t, "primary")
-	if err := coord.epochStore.ForceSet(2); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := coord.epochStore.Advance(2); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 	// Only the leader accepts joins (#533); mark this cortex as leader.
 	coord.roleMu.Lock()

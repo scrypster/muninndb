@@ -122,6 +122,10 @@ func flattenTree(root TreeNodeInput) []flatTreeItem {
 // leave the constellation in a partially-written state. Associations and
 // ordinal keys are wired after the batch commits (Phase 2).
 func (e *Engine) RememberTree(ctx context.Context, req *RememberTreeRequest) (*RememberTreeResult, error) {
+	// Cluster single-writer gate (#596).
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		return nil, err
+	}
 	if err := validateTreeNode(req.Root, 0); err != nil {
 		return nil, fmt.Errorf("RememberTree: %w", err)
 	}
@@ -219,6 +223,10 @@ func (e *Engine) CountChildren(ctx context.Context, vault, engramID string) (int
 // a crash between any two writes cannot leave the tree in an inconsistent state.
 // If input.Ordinal is nil, appends after the last existing child.
 func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *AddChildInput) (*AddChildResult, error) {
+	// Cluster single-writer gate (#596).
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		return nil, err
+	}
 	if input == nil {
 		return nil, fmt.Errorf("add child: input must not be nil")
 	}

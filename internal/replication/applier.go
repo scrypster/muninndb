@@ -154,6 +154,40 @@ func (a *Applier) LastApplied() uint64 {
 	return a.lastApplied
 }
 
+// ResetTo rebases the apply cursor onto seq, in memory and in Pebble, and is
+// the ONLY way the cursor moves other than applying an entry.
+//
+// It exists for exactly one caller: the join path, immediately after a full
+// snapshot has replaced this node's local state. The snapshot's SnapshotSeq is
+// the new authoritative baseline, and the cursor must follow it — including
+// DOWNWARDS, when the Cortex has been rebuilt or restored and its head is now
+// behind where this node had got to.
+//
+// Without this, the #631 failure is silent and total: WipeForResnapshot clears
+// the persisted cursor but Applier.lastApplied is in memory, so it survives at
+// its pre-rebuild value; Apply() then skips every entry with Seq <= that value
+// (the idempotence check), and ReplicationLag() returns 0 because it clamps at
+// cortexSeq <= lastApplied. The node reports a healthy lag of 0 and applies
+// nothing, forever.
+func (a *Applier) ResetTo(seq uint64) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.lastApplied == seq {
+		return nil
+	}
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, seq)
+	if err := a.db.Set(lastAppliedKey(), buf, pebble.Sync); err != nil {
+		return fmt.Errorf("applier: persist reset cursor %d: %w", seq, err)
+	}
+	slog.Info("applier: apply cursor rebased onto snapshot baseline",
+		"previous", a.lastApplied, "baseline", seq)
+	a.lastApplied = seq
+	a.appliedSince = 0
+	return nil
+}
+
 // IsLagging returns true if the replica's lastApplied is more than maxLag
 // entries behind the primary's currentSeq. Used to enforce BoundedStaleness mode.
 func (a *Applier) IsLagging(primarySeq uint64, maxLag uint64) bool {

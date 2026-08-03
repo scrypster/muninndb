@@ -1604,6 +1604,56 @@ func runServer() {
 		restServer.SetCoordinator(coordinator)
 	}
 
+	// Cluster single-writer gate (#596). Installed only in cluster mode: a
+	// standalone server keeps a nil gate everywhere and is completely unaffected.
+	//
+	// One gate function, four surfaces. The engine and the auth store hold it as
+	// the transport-agnostic backstop (so the embedded Go library and any future
+	// transport inherit it); REST and MCP additionally hold it at the request
+	// boundary so they can answer with a precise status/JSON-RPC error and the
+	// leader hint instead of a generic failure. gRPC and MBP map the engine's
+	// error at their own error boundaries.
+	if coordinator != nil {
+		gate := func() error {
+			if coordinator.IsLeader() {
+				return nil
+			}
+			leaderID := coordinator.CortexID()
+			var leaderAddr string
+			if leaderID != "" && leaderID != clusterCfg.NodeID {
+				for _, n := range coordinator.KnownNodes() {
+					if n.NodeID == leaderID {
+						leaderAddr = n.Addr
+						break
+					}
+				}
+			}
+			return &mbp.NotLeaderError{
+				Role:       string(coordinator.Role()),
+				LeaderID:   leaderID,
+				LeaderAddr: leaderAddr,
+			}
+		}
+		eng.SetWriteGate(gate)
+		authStore.SetWriteGate(gate)
+		restServer.SetWriteGate(gate)
+		mcpServer.SetWriteGate(gate)
+
+		// Configuration must travel the same replication path as engrams
+		// (#596 issue 2 / #631 claim 2): vault configs carry per-vault
+		// plasticity, and API keys minted on the Cortex have to exist on the
+		// Lobes or they return 401 there.
+		authStore.SetReplicator(func(op uint8, key, value []byte) error {
+			_, err := repLog.Append(replication.WALOp(op), key, value)
+			return err
+		})
+
+		// Forward cognitive side effects from Lobe to Cortex. This seam existed
+		// (Engine.SetCoordinator / ForwardCognitiveEffects) but was never called
+		// from the server, so it was dead in the shipped binary.
+		eng.SetCoordinator(coordinator, clusterCfg.NodeID)
+	}
+
 	// Wire coordinator factory so the admin enable endpoint can start cluster
 	// at runtime (without a restart) when cluster.yaml is written via the UI/CLI.
 	restServer.SetCoordinatorFactory(func(_ context.Context, cfg plugincfg.ClusterConfig) (*replication.ClusterCoordinator, error) {

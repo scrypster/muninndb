@@ -11,7 +11,7 @@ Operational guide for running and maintaining MuninnDB clusters. For architectur
 MuninnDB uses a **Cortex/Lobe** model (internally: leader/replica terminology):
 
 - **Cortex (Primary)**: Single writer. Accepts writes, runs cognitive workers (temporal, Hebbian, contradiction, confidence), streams WAL to Lobes, handles join requests.
-- **Lobe (Replica)**: Read-only copy. Receives WAL stream from Cortex, applies entries to local Pebble, forwards cognitive side effects to Cortex. Can be promoted to Cortex during failover.
+- **Lobe (Replica)**: Read-only copy. Receives WAL stream from Cortex, applies entries to local Pebble, forwards cognitive side effects to Cortex. Can be promoted to Cortex during failover. **A write sent to a Lobe is refused, not forwarded** — see [Write routing](#write-routing-cortex-only) below.
 
 ### Node Roles
 
@@ -29,11 +29,56 @@ MuninnDB uses a **Cortex/Lobe** model (internally: leader/replica terminology):
 - Lobes apply entries idempotently and send `ReplAck` with last applied seq.
 - The Cortex runs **SafePrune** every 60s to garbage-collect WAL segments once all Lobes have confirmed receipt.
 
+### Write routing (Cortex only)
+
+In cluster mode, **client writes are accepted only on the Cortex.** A write that
+reaches a Lobe, Sentinel or Observer — via a load balancer without leader
+affinity, a stale DNS record, or a VIP that failed over — is **refused with the
+Cortex named**, not silently committed locally and not transparently forwarded.
+
+| Surface | Refusal |
+|---|---|
+| REST | `421 Misdirected Request`, error code `4015`, headers `X-Muninn-Cortex-Id` / `X-Muninn-Cortex-Addr` |
+| MCP | JSON-RPC error `-32002`; the message names the Cortex |
+| gRPC | `FAILED_PRECONDITION` |
+| MBP | error frame, code `4015` |
+
+Clients should treat this as "retry against the named node", not as a transient
+failure — retrying the same node will keep failing until it is promoted.
+
+**Reads are unaffected** on every surface: serving reads is what a Lobe is for.
+So is the cluster-administration API (`/api/admin/cluster/*`,
+`/v1/replication/promote`) — those must work *on* a Lobe so an operator can
+recover from a lost Cortex.
+
+This covers configuration too: vault config and per-vault plasticity, `mk_` API
+keys, `cap_` capability tokens and the admin password are refused on a non-Cortex
+node and replicated from the Cortex like any engram write.
+
+A **standalone (non-cluster) server** installs no such gate and is unaffected.
+
+*Why refuse rather than forward:* there is no node-to-node write RPC to forward
+over (the cluster wire is one-directional log shipping plus join/heartbeat/vote),
+forwarding would have correctly-following nodes pump traffic into the wrong side
+of a split brain, and refusing adds no timeout. See invariant SEC-13.
+
 ### Epoch-Based Fencing
 
 - Every leadership change increments the **epoch** (stored in EpochStore).
-- The epoch serves as a **fencing token**: writes from a demoted Cortex with a stale token are rejected.
-- Prevents split-brain writes during failover or partition recovery.
+- The epoch is **monotonic**: `EpochStore.Advance` refuses any value at or below
+  the current one and *reports* that it refused. The one path that may lower it
+  is `AdoptForSnapshot`, reachable only after a full snapshot has replaced the
+  node's entire local state — i.e. after the Cortex was rebuilt or restored.
+- A node that joins a Cortex whose epoch is **behind** its own and that is offered
+  **no** resnapshot **refuses the join** and logs the remedy: stop the node, delete
+  its data directory, and restart it so it takes a fresh snapshot. Accepting would
+  leave it reporting `lag: 0` while applying nothing.
+- **Known gap:** the epoch is *published* as a fencing token
+  (`GET /v1/cluster/status` → `fencing_token`) and `ValidateFencingToken` exists,
+  but **nothing calls it on the write path today**. Split-brain writes are bounded
+  by the pre-emptive quorum-loss demotion below and by the Cortex-only write gate,
+  not by token validation. Do not rely on fencing to reject a demoted Cortex's
+  in-flight write.
 
 ---
 

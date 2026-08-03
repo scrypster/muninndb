@@ -59,7 +59,7 @@ const casMaxRetries = 5
 // primitive that closes the lifecycle-state TOCTOU. Either bound may be nil:
 // a nil expectState skips the guard; a nil setState leaves the state unchanged.
 func (e *Engine) CompareAndSet(ctx context.Context, vault, id string, expectState, setState *string) (CompareAndSetResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return CompareAndSetResult{}, err
 	}
 	ulid, err := storage.ParseULID(id)
@@ -102,7 +102,7 @@ func (e *Engine) CompareAndSet(ctx context.Context, vault, id string, expectStat
 // work. A live foreign lease is never overwritten — the caller gets a conflict
 // naming the current holder.
 func (e *Engine) Claim(ctx context.Context, vault, id, owner string, ttlSecs int64) (ClaimResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return ClaimResult{}, err
 	}
 	if owner == "" {
@@ -169,7 +169,7 @@ func (e *Engine) Claim(ctx context.Context, vault, id, owner string, ttlSecs int
 // engram is unleased or held by someone else, it is left untouched and
 // Released is false.
 func (e *Engine) Release(ctx context.Context, vault, id, owner string) (ReleaseResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return ReleaseResult{}, err
 	}
 	if owner == "" {

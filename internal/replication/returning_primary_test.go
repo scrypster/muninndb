@@ -15,7 +15,7 @@ import (
 // registering the prober's conn or adding a member (side-effect-free discovery).
 func TestHandleIncomingJoin_Probe(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
-	if err := coord.epochStore.ForceSet(5); err != nil {
+	if _, err := coord.epochStore.Advance(5); err != nil {
 		t.Fatal(err)
 	}
 	coord.roleMu.Lock()
@@ -66,7 +66,7 @@ func TestWipeForResnapshot_PreservesClusterEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := es.ForceSet(7); err != nil {
+	if _, err := es.Advance(7); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Set([]byte("engram:1"), []byte("data"), pebble.Sync); err != nil {

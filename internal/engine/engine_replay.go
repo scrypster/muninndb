@@ -104,7 +104,7 @@ var defaultReplayStages = []string{"entities", "relationships", "classification"
 // The method requires an EnrichPlugin to be registered via SetEnrichPlugin.
 // If no plugin is configured and dryRun is false, an error is returned.
 func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []string, limit int, dryRun bool) (*ReplayEnrichmentResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	stageMask, validStages, seen, err := normalizeEnrichmentStages(stages)
@@ -451,7 +451,7 @@ func (e *Engine) GetEnrichmentCandidates(ctx context.Context, vault string, stag
 
 // ApplyEnrichment persists explicit agent-generated enrichment output.
 func (e *Engine) ApplyEnrichment(ctx context.Context, vault string, req *EnrichmentApplyRequest) (*EnrichmentApplyResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	if req == nil {
