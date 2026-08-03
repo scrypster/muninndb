@@ -3068,9 +3068,30 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// Run activation
 	result, err := e.activation.Run(ctx, actReq)
 	if err != nil {
+		// #606: hard-failure counter, labelled by a coarse reason so an
+		// operator can separate a caller-side cancellation/timeout (expected
+		// under load, not an embed/activation defect) from an actual
+		// activation error.
+		reason := "activation_error"
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = "timeout"
+		} else if errors.Is(err, context.Canceled) {
+			reason = "canceled"
+		}
+		metrics.RecallErrorsTotal.WithLabelValues(req.Vault, reason).Inc()
 		return nil, fmt.Errorf("activation: %w", err)
 	}
 	metrics.EngineActivationsTotal.Inc()
+	// #606: recall-health signal for the silent embed->BM25 fallback (#578,
+	// hardened for reachability by #658). result.SemanticDegraded already
+	// surfaces per-call on the MCP/MBP response (principle #2's "loud"); this
+	// counter is the fleet-level counterpart — an operator can alert on
+	// rate(muninndb_recall_embed_fallback_total)/rate(muninndb_activate_duration_seconds_count)
+	// per vault instead of scraping logs for the WARN that fires on every
+	// degraded call.
+	if result.SemanticDegraded {
+		metrics.RecallEmbedFallbackTotal.WithLabelValues(req.Vault).Inc()
+	}
 
 	// Entity boost phase: spread activation through shared named entities.
 	// After BFS produces a scored set, any engram sharing a named entity with a

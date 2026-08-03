@@ -301,6 +301,57 @@ func TestNoticesForRecall_GenuineCorroborationStillFires(t *testing.T) {
 	}
 }
 
+// TestNoticesForRecall_IntentionTopWithSingleTailCarrier_NoFire pins the COG-21
+// case named in #702 (followup 3): the intention's own engram ranks the TOP
+// result (so the top-path is self-excluded, #693) and exactly ONE genuine
+// external carrier appears in the tail. That is still only one real
+// corroborator — below the >=2 threshold — so the notice must NOT fire.
+// Distinct from TestNoticesForRecall_SelfFocality_SelfCorroboration, which has
+// an UNRELATED result at top and the intention itself in the tail; here the
+// intention is the top-scored result, exercising the OTHER self-exclusion
+// branch (the one guarding the top-path, not the corroboration-path).
+//
+// #702 also observed that the JSON acceptance fixture (prospective_session.json
+// / TestProspectiveAcceptance_Gates1to3) never distinguishes this from a
+// mechanism that fires on a single carrier: every should_fire case in that
+// fixture is satisfied by the top-result rule alone (the genuine corroborating
+// memory consistently outranks the intention's own engram for a
+// closely-worded query), so the fixture never drives NoticesForRecall through
+// the >=2-carrier branch or its self-exclusion loop at all. Verified directly:
+// widening the corroboration threshold in prospective.go from `ci.count < 2`
+// to `ci.count < 1000` (disabling multi-carrier corroboration outright) still
+// leaves TestProspectiveAcceptance_Gates1to3 green (15/15, precision 1.000,
+// zero unrelated notices) — see the design record for the harness this pins.
+// The unit tests in this file (this one and the two above) are what actually
+// pin that branch; the acceptance fixture measures end-to-end ranking
+// precision/recall, not this particular guard.
+func TestNoticesForRecall_IntentionTopWithSingleTailCarrier_NoFire(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+	const vault = "push-selffocal-vault-c"
+
+	realCarrier := writeMemWithEntities(t, eng, vault, "notes about widget procurement", "widget")
+
+	intentID, err := eng.Intend(ctx, vault, "when widget comes up, mention the recall bug", []string{"widget"}, nil, false, nil)
+	if err != nil {
+		t.Fatalf("Intend: %v", err)
+	}
+
+	seen, _ := newSession()
+	results := []ScoredResult{
+		{ID: intentID, Score: 10}, // the intention's own engram is the TOP result
+		{ID: realCarrier, Score: 1},
+	}
+	notices, err := eng.NoticesForRecall(ctx, vault, results, seen, false)
+	if err != nil {
+		t.Fatalf("NoticesForRecall: %v", err)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("COG-21: intention-as-top + single genuine tail carrier must NOT fire: got %d notices, want 0 (%+v)", len(notices), notices)
+	}
+}
+
 // TestNoticesForRecall_TimeSilences pins "time SILENCES, never fires": an
 // intention whose valid_until has passed does not fire even on a focal cue.
 func TestNoticesForRecall_TimeSilences(t *testing.T) {

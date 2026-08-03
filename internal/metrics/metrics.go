@@ -69,6 +69,40 @@ var (
 		Name: "muninndb_embed_pending",
 		Help: "Number of engrams pending embedding",
 	})
+
+	// RecallEmbedFallbackTotal counts activation calls that degraded to
+	// BM25-only recall because the embed backend could not be trusted
+	// (unreachable, timed out even after #658's reserved budget, or returned
+	// a garbage/zero embedding). Paired with muninndb_activate_duration_seconds's
+	// per-vault _count (already the activation total) this gives an operator
+	// rate(fallback)/rate(total) embed-flakiness signal without a separate
+	// duplicate total counter (#606).
+	RecallEmbedFallbackTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_recall_embed_fallback_total",
+		Help: "Total activation calls that degraded to BM25-only recall because the embed backend could not be trusted, per vault.",
+	}, []string{"vault"})
+
+	// RecallErrorsTotal counts activation calls that hard-failed (returned an
+	// error, not a degraded-but-successful result), labelled by a coarse
+	// reason so an operator can separate caller-side cancellation/timeout
+	// from an internal activation failure (#606).
+	RecallErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_recall_errors_total",
+		Help: "Total activation calls that returned a hard error, per vault and reason.",
+	}, []string{"vault", "reason"})
+
+	// MCPAuthTotal counts each authenticated MCP request by the credential
+	// class that authenticated it. The three credential types are already
+	// structurally distinct (auth.AuthContext.IsAPIKey / IsCapability /
+	// neither-with-a-Token for the static mdb_ token / neither-with-no-Token
+	// for open-server mode) — this surfaces that existing distinction as a
+	// scrapeable signal so an operator can confirm zero static-token traffic
+	// before retiring it (#648). Never logs or labels the credential value
+	// itself, only its class.
+	MCPAuthTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninn_mcp_auth_total",
+		Help: "Total authenticated MCP requests by credential source (api_key, capability, static_token, open).",
+	}, []string{"source"})
 )
 
 // VaultStore is the subset of storage.PebbleStore methods needed by VaultEngramCollector.

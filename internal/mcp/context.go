@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/metrics"
 )
 
 const mcpSessionHeader = "Mcp-Session-Id"
@@ -62,6 +63,17 @@ func authFromContext(ctx context.Context) AuthContext {
 // capStore may be nil to disable cap_ capability auth (pre-RFC #597 mode);
 // when non-nil, an invalid or expired cap_ token fails closed (never falls
 // through to open-server), mirroring the mk_ posture.
+
+// MCP auth source labels for muninn_mcp_auth_total (#648). Exported as
+// constants (not inlined at each call site) so the metric's label set is
+// defined once, next to the branches that emit it.
+const (
+	authSourceAPIKey     = "api_key"
+	authSourceCapability = "capability"
+	authSourceStatic     = "static_token"
+	authSourceOpen       = "open"
+)
+
 func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyValidator, capStore capabilityValidator) AuthContext {
 	token, found := auth.ParseBearerToken(r.Header.Get("Authorization"))
 
@@ -70,6 +82,12 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 	// isolation; an invalid or revoked key must never fall through to open access.
 	if found && len(token) > 3 && token[:3] == "mk_" && apiKeyStore != nil {
 		if key, err := apiKeyStore.ValidateAPIKey(token); err == nil {
+			// #648: emit the auth SOURCE only — never the token or any prefix
+			// of it. IsAPIKey/IsCapability already distinguish credential
+			// class structurally; this just makes that distinction
+			// observable to an operator deciding whether a static-token
+			// retirement is safe.
+			metrics.MCPAuthTotal.WithLabelValues(authSourceAPIKey).Inc()
 			return AuthContext{
 				Token:      token,
 				Authorized: true,
@@ -88,6 +106,7 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 	// auth is disabled and the branch is skipped (backward-compatible).
 	if found && len(token) > 4 && token[:4] == "cap_" && capStore != nil {
 		if cap, err := capStore.ValidateCapability(token); err == nil {
+			metrics.MCPAuthTotal.WithLabelValues(authSourceCapability).Inc()
 			return AuthContext{
 				Token:        token,
 				Authorized:   true,
@@ -102,6 +121,7 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 
 	// 2. Open-server mode — no static token required and no mk_ key presented.
 	if requiredToken == "" {
+		metrics.MCPAuthTotal.WithLabelValues(authSourceOpen).Inc()
 		return AuthContext{Authorized: true}
 	}
 
@@ -110,6 +130,7 @@ func authFromRequest(r *http.Request, requiredToken string, apiKeyStore apiKeyVa
 		return AuthContext{Authorized: false}
 	}
 	if auth.ValidateStaticToken(token, requiredToken) {
+		metrics.MCPAuthTotal.WithLabelValues(authSourceStatic).Inc()
 		return AuthContext{Token: token, Authorized: true}
 	}
 	return AuthContext{Authorized: false}
