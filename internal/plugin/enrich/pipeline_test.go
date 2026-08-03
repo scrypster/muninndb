@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/config"
+	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -20,6 +21,55 @@ type MockLLMProvider struct {
 	failCount      int
 	entityResponse string
 	customComplete func(ctx context.Context, system, user string) (string, error)
+}
+
+func TestPipelineRun_RetryableProviderErrorStopsAndPreservesMetadata(t *testing.T) {
+	providerErr := &plugin.ProviderError{
+		Provider:      "mock",
+		StatusCode:    429,
+		Retryable:     true,
+		RetryAfter:    5 * time.Second,
+		HasRetryAfter: true,
+	}
+	calls := 0
+	mock := NewMockLLMProvider()
+	mock.customComplete = func(context.Context, string, string) (string, error) {
+		calls++
+		return "", fmt.Errorf("complete: %w", providerErr)
+	}
+	pipeline := NewPipeline(mock, NewTokenBucketLimiter(100, 100))
+
+	result, err := pipeline.Run(context.Background(), &storage.Engram{})
+	if err == nil {
+		t.Fatal("expected retryable provider error")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil on systemic transient failure", result)
+	}
+	if calls != 1 {
+		t.Fatalf("provider calls = %d, want 1 (pipeline must stop after throttle)", calls)
+	}
+	var got *plugin.ProviderError
+	if !errors.As(err, &got) || got != providerErr {
+		t.Fatalf("retryability metadata was not preserved: %v", err)
+	}
+}
+
+func TestPipelineRun_MalformedSuccessfulOutputRemainsPermanent(t *testing.T) {
+	mock := NewMockLLMProvider()
+	mock.customComplete = func(context.Context, string, string) (string, error) {
+		return "not-json", nil
+	}
+	pipeline := NewPipeline(mock, NewTokenBucketLimiter(100, 100))
+
+	result, err := pipeline.Run(context.Background(), &storage.Engram{})
+	if err == nil || result != nil {
+		t.Fatalf("malformed output = (%#v, %v), want permanent failure", result, err)
+	}
+	var providerErr *plugin.ProviderError
+	if errors.As(err, &providerErr) {
+		t.Fatalf("malformed successful output must not be retryable provider failure: %+v", providerErr)
+	}
 }
 
 func NewMockLLMProvider() *MockLLMProvider {

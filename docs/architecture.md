@@ -29,7 +29,7 @@ Consumers (AI agents, applications, Claude, Cursor)
 │  • Write path (<10ms ACK guarantee)                 │
 │  • 6-phase ACTIVATE pipeline                        │
 │  • Cognitive workers (async, never block)           │
-│    temporal · hebbian · contradiction · confidence  │
+│    hebbian · contradiction · confidence             │
 │    · transition (PAS)                               │
 │  • Semantic trigger system                          │
 └────────────────────────┬────────────────────────────┘

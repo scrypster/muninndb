@@ -256,6 +256,20 @@ type ListVaultsResponse struct {
 	Vaults []string `protobuf:"bytes,1,rep,name=vaults"`
 }
 
+// AdjustConfidenceRequest message
+type AdjustConfidenceRequest struct {
+	Vault            string  `protobuf:"bytes,1,opt,name=vault"`
+	EngramId         string  `protobuf:"bytes,2,opt,name=engram_id"`
+	Delta            float32 `protobuf:"fixed32,3,opt,name=delta"`
+	Reason           string  `protobuf:"bytes,4,opt,name=reason"`
+	ContradictedById string  `protobuf:"bytes,5,opt,name=contradicted_by_id"`
+}
+
+// AdjustConfidenceResponse message
+type AdjustConfidenceResponse struct {
+	NewConfidence float32 `protobuf:"fixed32,1,opt,name=new_confidence"`
+}
+
 // ActivationPush message
 type ActivationPush struct {
 	SubscriptionID string          `protobuf:"bytes,1,opt,name=subscription_id"`

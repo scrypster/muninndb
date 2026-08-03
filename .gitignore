@@ -48,13 +48,18 @@ muninndb-data/
 .worktrees/
 .claude/worktrees/
 
-# Bible eval testdata (downloaded via scripts/eval-bible-setup.sh)
-testdata/bible/kjv.json
-testdata/bible/cross-refs.tsv
-testdata/bible/cross-refs.csv
-testdata/bible/*.muninn
+# /testdata/ — the eval-bible corpus directory was removed with its (gitignored) tooling;
+# the ROOT tree stays ignored so a re-added local corpus cannot be committed by accident.
+# The leading slash is load-bearing: bare `testdata/` matches at every depth and would
+# silently ignore internal/engine/testdata/, which is tracked and loaded by tests.
+/testdata/
 
-# Planning and design docs — not committed
+# In-progress planning and design docs — kept local by default so half-formed plans don't
+# ship. Two design docs predate this rule and are deliberately kept tracked, because the
+# features they describe shipped and the rationale is worth having in the open:
+# docs/plans/2026-03-04-association-archiving.md and
+# docs/superpowers/specs/2026-03-10-playwright-e2e-design.md.
+# `git add -f` a doc here if it documents something that landed.
 docs/plans/
 docs/superpowers/
 .superpowers/
@@ -81,3 +86,34 @@ sdk/php/vendor/
 .claude/maintainer/
 .claude/skills/triage-issue/
 .claude/skills/review-pr/
+.claude/skills/merge-orchestration/
+
+# Maintainer-private agent: encodes what we look for when a change might serve its
+# author rather than the community, plus the security walk and the contributor-response
+# voice. Publishing it would publish the test answers. Same tier as the skills above.
+.claude/agents/contributor-pr-vetter.md
+
+# Memory-proposal ledger: session findings queued for the vault. Real content, and the
+# durability floor for anything not yet drained — never commit it. The drain and the
+# protocol ARE committed; only the queue is local. See .claude/memory-protocol.md.
+.claude/memory-proposals.jsonl
+.claude/memory-proposals.jsonl.tmp
+.claude/memory-proposals.drained.jsonl
+.claude/memory-proposals.deadletter.jsonl
+.claude/memory-proposals.lock
+# Drain receipts. Liveness evidence, not content — but they carry local paths and counts
+# for a specific machine, and the receipt log grows, so they stay local too.
+.claude/memory-drain-receipt.json
+.claude/memory-drain-receipt.json.tmp
+.claude/memory-drain-receipts.jsonl
+.claude/memory-drain-receipts.jsonl.tmp
+
+# Design records that cannot be published: ones naming real people, client or
+# tenant data, commercial terms, or competitive strategy. Everything else in
+# .claude/deep-review/ IS published — see the README there for the triage rule.
+# Default new work to private/ and promote deliberately; the reverse is a leak.
+.claude/deep-review/private/
+
+# scratch browser-automation / screenshot output (workspace convention keeps these
+# at the workspace root; this is a backstop in case a tool writes into the repo)
+.artifacts/

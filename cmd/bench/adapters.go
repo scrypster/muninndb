@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/cognitive"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -19,18 +20,19 @@ func (a *benchHebbianAdapter) UpdateAssocWeight(ctx context.Context, ws [8]byte,
 	// is accumulated exclusively through UpdateAssocWeightBatch in processBatch.
 	return a.store.UpdateAssocWeight(ctx, ws, storage.ULID(src), storage.ULID(dst), w, 0)
 }
-func (a *benchHebbianAdapter) DecayAssocWeights(ctx context.Context, ws [8]byte, factor float64, min float32, archiveThreshold float64) (int, error) {
-	return a.store.DecayAssocWeights(ctx, ws, factor, min, archiveThreshold)
+func (a *benchHebbianAdapter) DecayAssocWeights(ctx context.Context, ws [8]byte, halfLife time.Duration, min float32, archiveThreshold float64) (int, error) {
+	return a.store.DecayAssocWeights(ctx, ws, halfLife, min, archiveThreshold)
 }
 func (a *benchHebbianAdapter) UpdateAssocWeightBatch(ctx context.Context, updates []cognitive.AssocWeightUpdate) error {
 	storageUpdates := make([]storage.AssocWeightUpdate, len(updates))
 	for i, u := range updates {
 		storageUpdates[i] = storage.AssocWeightUpdate{
-			WS:         u.WS,
-			Src:        storage.ULID(u.Src),
-			Dst:        storage.ULID(u.Dst),
-			Weight:     u.Weight,
-			CountDelta: u.CountDelta,
+			WS:              u.WS,
+			Src:             storage.ULID(u.Src),
+			Dst:             storage.ULID(u.Dst),
+			Weight:          u.Weight,
+			CountDelta:      u.CountDelta,
+			LastActivatedAt: u.LastActivatedAt,
 		}
 	}
 	return a.store.UpdateAssocWeightBatch(ctx, storageUpdates)
@@ -49,6 +51,6 @@ func (a *benchConfidenceAdapter) UpdateConfidence(ctx context.Context, ws [8]byt
 // benchContradictAdapter adapts PebbleStore to the ContradictionStore interface.
 type benchContradictAdapter struct{ store *storage.PebbleStore }
 
-func (a *benchContradictAdapter) FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) error {
+func (a *benchContradictAdapter) FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) (bool, error) {
 	return a.store.FlagContradiction(ctx, ws, storage.ULID(engramA), storage.ULID(engramB))
 }

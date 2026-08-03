@@ -15,7 +15,26 @@ const (
 	WorkerStateActive  WorkerState = 0
 	WorkerStateIdle    WorkerState = 1
 	WorkerStateDormant WorkerState = 2
+	WorkerStateStopped WorkerState = 3
 )
+
+// String returns the stable API representation of a worker state. Keep this
+// symbolic contract additive to the legacy numeric state field so clients do
+// not need to duplicate Go enum values.
+func (s WorkerState) String() string {
+	switch s {
+	case WorkerStateActive:
+		return "active"
+	case WorkerStateIdle:
+		return "idle"
+	case WorkerStateDormant:
+		return "dormant"
+	case WorkerStateStopped:
+		return "stopped"
+	default:
+		return "unknown"
+	}
+}
 
 const (
 	defaultIdleThreshold    = 5 * time.Minute
@@ -32,7 +51,16 @@ type WorkerStats struct {
 	Dropped       uint64        `json:"dropped"`
 	LastRun       int64         `json:"lastRun"` // Unix nanoseconds
 	State         WorkerState   `json:"state"`
+	Status        string        `json:"status"`
+	Enabled       bool          `json:"enabled"`
 	EffectiveWait time.Duration `json:"effectiveWait"` // current actual tick interval
+}
+
+// DisabledWorkerStats describes a worker that is not configured on this node.
+// Counter and numeric state fields intentionally retain their zero values for
+// compatibility with existing /api/workers consumers.
+func DisabledWorkerStats() WorkerStats {
+	return WorkerStats{Status: "disabled"}
 }
 
 // Worker is the generic goroutine lifecycle for cognitive workers.
@@ -79,6 +107,22 @@ func NewWorker[T any](bufSize, batchSize int, maxWait time.Duration, process fun
 // Call after NewWorker, before Run.
 func (w *Worker[T]) EnableAdaptiveScaling() {
 	w.adaptiveScaling = true
+}
+
+// SetFlushInterval overrides the active-state flush interval (maxWait) chosen
+// at construction. It must be called BEFORE Run, which reads the value once to
+// build its ticker.
+//
+// This is a test seam: it lets a test drive a worker whose production interval
+// is tens of seconds (ContradictWorker: 30s) on a sub-second clock, so the
+// flush behaviour can be asserted deterministically instead of by sleeping
+// past a production interval. Production never calls it.
+func (w *Worker[T]) SetFlushInterval(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	w.baseMaxWait = d
+	w.maxWait.Store(int64(d))
 }
 
 // SetThresholds overrides the default idle/dormant thresholds. Used in tests.
@@ -131,6 +175,8 @@ func (w *Worker[T]) SubmitBatch(items []T) {
 
 // Run starts the worker loop. Blocks until ctx is done.
 func (w *Worker[T]) Run(ctx context.Context) error {
+	defer w.state.Store(int32(WorkerStateStopped))
+
 	batch := make([]T, 0, w.batchSize)
 	ticker := time.NewTicker(time.Duration(w.maxWait.Load()))
 	defer ticker.Stop()
@@ -208,8 +254,25 @@ func (w *Worker[T]) Run(ctx context.Context) error {
 				return nil
 			}
 			w.lastItem.Store(time.Now().UnixNano())
-			w.state.Store(int32(WorkerStateActive))
-			ticker.Reset(time.Duration(w.maxWait.Load()))
+			// Reset the flush ticker ONLY on the transition INTO Active — i.e.
+			// when leaving idle/dormant, where the ticker is running at the
+			// slow poll interval and must be sped back up.
+			//
+			// Resetting it on EVERY item turned "flush at least every maxWait"
+			// into "flush after maxWait of SILENCE" (#764 D1). Engine.Write
+			// submits a ContradictItem on every remember, so an agent writing
+			// anything at all more often than maxWait held the flush off until
+			// the batch reached batchSize (50) — which an ordinary session
+			// never does. The declared contradiction stayed undetected
+			// indefinitely, and ConfidenceWorker (the same generic) starved
+			// identically, so #747's "the penalty arrives one interval later"
+			// was in practice "the penalty never arrives".
+			//
+			// Swap keeps the dormant→active speed-up the unconditional reset
+			// used to provide, without the debounce.
+			if WorkerState(w.state.Swap(int32(WorkerStateActive))) != WorkerStateActive {
+				ticker.Reset(time.Duration(w.maxWait.Load()))
+			}
 			batch = append(batch, item)
 			if len(batch) >= w.batchSize {
 				flush(ctx)
@@ -253,13 +316,16 @@ func (w *Worker[T]) Run(ctx context.Context) error {
 
 // Stats returns current telemetry.
 func (w *Worker[T]) Stats() WorkerStats {
+	state := WorkerState(w.state.Load())
 	return WorkerStats{
 		Processed:     w.processed.Load(),
 		Batches:       w.batches.Load(),
 		Errors:        w.errors.Load(),
 		Dropped:       w.dropped.Load(),
 		LastRun:       w.lastRun.Load(),
-		State:         WorkerState(w.state.Load()),
+		State:         state,
+		Status:        state.String(),
+		Enabled:       true,
 		EffectiveWait: time.Duration(w.maxWait.Load()),
 	}
 }

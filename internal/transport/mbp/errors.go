@@ -20,11 +20,16 @@ const (
 	ErrRateLimited           ErrorCode = 4012
 	ErrMaxResultsExceeded    ErrorCode = 4013
 	ErrInvalidClusterRequest ErrorCode = 4014
-	ErrStorageError          ErrorCode = 5001
-	ErrIndexError            ErrorCode = 5002
-	ErrEnrichmentError       ErrorCode = 5003
-	ErrShardUnavailable      ErrorCode = 5004
-	ErrInternal              ErrorCode = 5005
+	// ErrNotCortex: the request reached a node that is not the cluster Cortex
+	// and the operation writes. The node names the Cortex it believes in so the
+	// client can retry there (#596). REST maps this to 421 Misdirected Request
+	// and sets X-Muninn-Cortex; gRPC maps it to FailedPrecondition.
+	ErrNotCortex        ErrorCode = 4015
+	ErrStorageError     ErrorCode = 5001
+	ErrIndexError       ErrorCode = 5002
+	ErrEnrichmentError  ErrorCode = 5003
+	ErrShardUnavailable ErrorCode = 5004
+	ErrInternal         ErrorCode = 5005
 )
 
 // ErrorPayload is the msgpack body of a TypeError frame.
@@ -68,6 +73,8 @@ func ErrorCodeMessage(code ErrorCode) string {
 		return "max results exceeded"
 	case ErrInvalidClusterRequest:
 		return "invalid cluster request"
+	case ErrNotCortex:
+		return "not the cluster Cortex; writes are accepted only on the Cortex"
 	case ErrStorageError:
 		return "storage error"
 	case ErrIndexError:

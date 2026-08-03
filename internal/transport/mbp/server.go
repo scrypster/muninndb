@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -186,6 +187,17 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 	scope := &vaultScope{}
+	// Credential mode for the whole connection. A keyed session carries its
+	// key's real mode (so an observe key stays observe); a credential-less
+	// session (open/localhost MBP) is full access. This mirrors gRPC
+	// (internal/transport/grpc/server.go:172,184) and REST
+	// (internal/auth/middleware.go). Without it, ctx has no auth.ContextMode on
+	// MBP, so (a) resolveTrust (SEC-14) over-blocks a legitimate full/write key's
+	// trust=verified write, and (b) an observe key's reads still reinforce
+	// (COG-11), because auth.ObserveFromContext returns false. Use the key's
+	// actual mode — a blanket ModeFull here would let an observe MBP key stamp
+	// verified, turning the over-block into a real SEC-14 under-block.
+	connMode := auth.ModeFull
 	if helloReq.AuthMethod == "token" {
 		key, err := s.authStore.ValidateAPIKey(helloReq.Token)
 		if err != nil {
@@ -193,8 +205,10 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 		scope.key = &key
+		connMode = key.Mode
 	}
 	connCtx = withVaultScope(connCtx, scope)
+	connCtx = context.WithValue(connCtx, auth.ContextMode, connMode)
 
 	// Resolve and validate the HELLO vault under the new scope, then pin the
 	// request to it so the engine registers (and the response advertises) the
@@ -352,7 +366,7 @@ func (s *Server) handleWrite(ctx context.Context, corrID uint64, payload []byte,
 
 	resp, err := s.engine.Write(ctx, &req)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrStorageError, err.Error())
+		s.queueEngineError(writeCh, corrID, err, ErrStorageError)
 		return
 	}
 
@@ -387,6 +401,11 @@ func (s *Server) handleActivate(ctx context.Context, corrID uint64, payload []by
 	if err := DecodeMsgpack(payload, &req); err != nil {
 		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid activate request")
 		return
+	}
+	// Clamp a negative threshold: the in-process negative-means-bypass contract
+	// (used by Explain) is deliberately not exposed on the wire.
+	if req.Threshold < 0 {
+		req.Threshold = 0
 	}
 
 	resolved, err := s.scopeVault(ctx, req.Vault)
@@ -460,7 +479,7 @@ func (s *Server) handleLink(ctx context.Context, corrID uint64, payload []byte, 
 
 	resp, err := s.engine.Link(ctx, &req)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidAssociation, err.Error())
+		s.queueEngineError(writeCh, corrID, err, ErrInvalidAssociation)
 		return
 	}
 
@@ -483,7 +502,7 @@ func (s *Server) handleForget(ctx context.Context, corrID uint64, payload []byte
 
 	resp, err := s.engine.Forget(ctx, &req)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrStorageError, err.Error())
+		s.queueEngineError(writeCh, corrID, err, ErrStorageError)
 		return
 	}
 
@@ -571,6 +590,18 @@ func (s *Server) queueActivateResponse(writeCh chan *Frame, corrID uint64, resp 
 	// For now, send as a single frame
 	// TODO: implement multi-frame streaming for large result sets
 	s.queueFrame(writeCh, TypeActivateResp, corrID, resp, caps)
+}
+
+// queueEngineError classifies an engine error before framing it. A write that
+// reached a non-Cortex node gets ErrNotCortex (4015) with the leader hint in the
+// message, never the generic storage/association code — a client cannot retry
+// against the right node if the wire says "storage error" (#596).
+func (s *Server) queueEngineError(writeCh chan *Frame, corrID uint64, err error, fallback ErrorCode) {
+	code := fallback
+	if errors.Is(err, ErrNotLeader) {
+		code = ErrNotCortex
+	}
+	s.queueErrorFrame(writeCh, corrID, code, err.Error())
 }
 
 func (s *Server) queueErrorFrame(writeCh chan *Frame, corrID uint64, code ErrorCode, message string) {

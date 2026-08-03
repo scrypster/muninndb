@@ -9,7 +9,360 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Writes to a non-Cortex node are no longer accepted and lost** (#596, #631).
+  A `muninn_remember` delivered to a Lobe — by a load balancer without leader
+  affinity, a stale DNS record, or a VIP that failed over to a replica —
+  returned success with an engram id, committed the memory to that one node's
+  Pebble, and never forwarded it. Nothing in the write path knew the node's
+  role: `IsLeader()` had no caller outside `internal/replication` and the REST
+  status handlers. The engram was invisible cluster-wide and destroyed by the
+  next resnapshot. Vault configuration (including per-vault plasticity), API
+  keys and capability tokens had the same shape *and* a second one: they wrote
+  straight to Pebble, bypassing the replication log entirely, so a key minted or
+  a preset set on the Cortex reached a Lobe only via a full join snapshot —
+  never incrementally — and a failover served the pre-failover defaults.
+
+  Both are closed. In cluster mode a client write is accepted only on the
+  Cortex, and configuration now travels the same replication path as engrams.
+
+  **Client-visible change — this is a breaking behaviour change for anyone
+  sending writes to a replica.** A write that previously returned 201/200 on a
+  Lobe now fails, naming the Cortex to retry against:
+
+  | Surface | Before | Now |
+  |---|---|---|
+  | REST | `201`/`200` | **`421 Misdirected Request`**, error code `4015`, headers `X-Muninn-Cortex-Id` and `X-Muninn-Cortex-Addr` |
+  | MCP | tool result | JSON-RPC error **`-32002`**, message names the Cortex |
+  | gRPC | `OK` | **`FAILED_PRECONDITION`** |
+  | MBP | `WriteOK` | error frame, code **`4015`** |
+
+  Reads are untouched on every surface — serving reads is what a Lobe is for —
+  and so is the cluster-administration API, so an operator can still promote or
+  fail over *from* a Lobe. A standalone (non-cluster) server installs no gate
+  and is completely unaffected.
+
+  Rejecting rather than transparently forwarding is deliberate: there is no
+  node-to-node write RPC to forward over, forwarding would have correct
+  followers pump traffic into the wrong side of a split brain, and rejection
+  introduces no new timeout. The full argument is recorded at
+  `mbp.NotLeaderError` and in invariant SEC-13.
+
+- **A Lobe can no longer be talked backwards into a stale cluster, silently**
+  (#631). After a Cortex was rebuilt from an empty data directory, a Lobe still
+  holding the old, higher epoch and a far-ahead apply cursor rejoined
+  successfully, reported `lag: 0`, and received nothing — forever. The apply
+  cursor is an in-memory field on the applier with no reset path, and
+  `WipeForResnapshot` deliberately preserves the epoch, so after the snapshot
+  landed the node skipped every entry the new Cortex shipped (they were all
+  below its cursor) while the lag calculation clamped to 0. The join path now
+  rebases the apply cursor onto the snapshot's baseline and adopts the Cortex's
+  epoch with it; a backwards epoch offered **without** a resnapshot is refused
+  outright with an error naming both epochs and the remedy, because nothing
+  would reconcile the divergence. `EpochStore.ForceSet` is gone: `Advance` is
+  monotonic and *reports* whether it moved, so a caller can no longer swallow a
+  regression by ignoring a nil error, and the single legitimate backwards path
+  is the explicitly named `AdoptForSnapshot`.
+- **Cluster catch-up no longer spirals: a slow replica is not a dead one**
+  (#627). Every frame write was bounded by one fixed 5-second deadline — a
+  constant applied to a quantity measured somewhere else entirely, since the
+  frame may be a 40-byte heartbeat or a 1 MB snapshot chunk and the link may be
+  loopback or a laptop on a WAN tunnel. A replica that fell behind could not get
+  back: the receiver applied entries more slowly than the sender pushed, the
+  socket buffer filled, one write crossed 5 seconds, the stream died, the
+  replica rejoined further behind. Raising the constant only moves the cliff, so
+  the bound was replaced rather than retuned. A frame write now fails only when
+  the peer accepts **no bytes at all** for the idle timeout; the deadline resets
+  on every byte of forward progress, which makes it independent of frame size
+  and link speed. Two outer bounds keep that from becoming unbounded: a single
+  frame may not hold a connection's write slot beyond `sendMaxDuration`
+  (2 minutes) even while dribbling, and a caller that cannot get the write slot
+  within `sendSlotWait` gets `ErrPeerBusy` — the peer is busy, not dead, the
+  connection is left intact, and the shared heartbeat broadcast moves on instead
+  of blocking behind a multi-megabyte transfer.
+
+  A restarted replication stream also no longer restarts from sequence 0. It
+  resumes from the highest position the primary can prove the replica holds:
+  its last acknowledged sequence, or the snapshot sequence quoted in its join
+  response, whichever is higher. (The snapshot source is not redundant — the
+  snapshot receiver does not advance the replica's applier position, so a
+  freshly-snapshotted replica acknowledges a low sequence while holding a
+  complete database.) Previously the re-transfer volume tracked the size of the
+  log rather than the size of the lag. A stream that ends now logs where it
+  started, how far it got, and where the log is, so a stalled replica is visible
+  instead of indistinguishable from an idle one.
+
+- **Enabling clustering at runtime built a coordinator that could not
+  replicate** (#628). `POST /api/admin/cluster/enable` constructed and started a
+  cluster coordinator inside the running process. That coordinator could never
+  work: the storage layer's replication hook is captured when the Pebble store
+  is built at boot, and only when `cluster.yaml` already said enabled at that
+  moment. A node enabled this way reported itself clustered, accepted replicas
+  and shipped them a snapshot — and then appended **nothing** it wrote to the
+  replication log. It also never received the WAL handle, so it never pruned
+  (unbounded log growth), and it registered joiners as voters against a quorum
+  the boot path would have computed differently.
+
+  There is now no code path that constructs a coordinator outside boot. The
+  endpoint persists the configuration and answers **`202 Accepted`** with
+  `restart_required: true`, `enabled: false`, and a message saying so; the web
+  console shows a restart-required banner instead of "Cluster active". This is a
+  **behaviour change** for anyone scripting that endpoint: a successful call is
+  now 202, not 200, and clustering starts on the next restart of the node.
+- **Pebble prefix `0x19` was allocated twice, and a cluster prune would have
+  deleted idempotency receipts** (#726). `internal/replication` inlined a raw
+  `0x19` for every key it wrote, so a replication log entry (`0x19|seq_be64(8)`)
+  and an idempotency receipt (`0x19|siphash(op_id)(8)`) had the same prefix, the
+  same length, and the same database, with no discriminator between them —
+  116,248 entries alongside 23 receipts on one production store.
+  `ReplicationLog.Prune` range-deletes `[0x19|be64(1), 0x19|be64(untilSeq+1))`,
+  which is precisely "every receipt whose SipHash is below the watermark": a
+  vanishing probability at today's sequence numbers, growing linearly with the
+  sequence, and armed the moment the prune gets a production caller. The
+  sequence counter was worse-placed still, at `0x19|0xFF*8` — *inside* the entry
+  range. The whole replication keyspace now lives at `0x2F` with a
+  sub-namespace byte, so the prune's range provably contains nothing but log
+  entries. **Migration v5** relocates existing stores; it drops the old log
+  entries (key by key, behind a positive identification — never a range delete,
+  since receipts share that range) and compacts, which is also where a bloated
+  store gets its disk back. A pre-v5 binary refuses to start against a migrated
+  data directory. See `docs/cluster-operations.md` for the upgrade note.
+
+- **Observers accumulated the Cortex's replication log forever** (#826). Two
+  mechanisms, both closed. The snapshot sender iterated the entire database, so
+  every joining Lobe received a byte-for-byte copy of the Cortex's log — entries
+  that each carry the full key and value of a replicated write — which nothing
+  on a Lobe ever reads and nothing there prunes (the periodic prune is
+  leader-gated). And `RepLogAppend` was wired unconditionally on every cluster
+  node, so a Lobe logged a full-size entry for each of its *own* local writes
+  (last-access touches, Hebbian updates, decay), which is why a measured lobe
+  held more entries than the Cortex it followed: 22 GB and 7.5 GB on two
+  observers. Snapshots now skip the log entries and only the log entries — the
+  replication metadata, above all the sequence counter, still ships, so a
+  promoted Lobe continues the cluster's numbering — and a node that is
+  definitively a follower no longer appends. The suppression fails **open** on
+  an unknown role, so a leader serving writes during startup can never silently
+  drop them out of the stream. Neither filter was expressible before #726: under
+  `0x19` both would have discarded idempotency receipts too.
+- **`hebbian_enabled` now governs the read side too** (COG-32). The phase-4
+  Hebbian boost ran unconditionally during recall while its neighbour, the PAS
+  transition boost, was gated — so a vault with `hebbian_enabled: false` (the
+  `scratchpad` preset) was still scored by association edges it would never
+  update and never decay. The flag is now symmetric: it gates learning, decay
+  and the read-side boost. **User-visible:** `scratchpad` vaults score recall
+  without any Hebbian contribution, and rows can reorder on such vaults.
+- **An explicit `actr_heb_scale: 0` is honored** instead of being silently
+  replaced by the 4.0 default. Two layers substituted it; the config layer had
+  always admitted it. `actr_heb_scale` scales both the Hebbian and the PAS
+  transition boost, so 0 is the "no cognitive prior at all" switch — it now
+  works.
+- **Co-activation writes carry their own timestamp.** `CoActivationEvent.At`
+  was set by the engine and then dropped, so an association's `lastActivated`
+  was stamped at write time rather than at co-activation time. An event that
+  waited in the worker's channel was stamped late. Zero-value behaviour is
+  unchanged.
+- **An association's decay anchor never moves backwards** (COG-27). Making the
+  co-activation timestamp writable also made it *remotely* writable: in a
+  cluster, a cog-forwarded co-activation carries the peer's clock verbatim.
+  `lastActivated` is COG-27's elapsed-time input, so a stale stamp collapsed a
+  live edge's decay ceiling on the next pass — irreversibly, since decay never
+  raises a weight. Both association writers now keep the later of the stored and
+  the incoming stamp, the same shape `peakWeight` already had beside them.
+  **User-visible in cluster mode only:** a lagging or skewed peer, or a
+  cog-forward backlog delivered after a partition heals, can no longer age
+  another node's associations by the size of the clock gap.
+- `RecallEvent`'s doc comment no longer claims a "positives = surfaced AND
+  cited" ground-truth join that is not implementable from what is on disk (no
+  join key, no identity on either side, context-free residue, and a citation
+  side damaged by the #757 class).
+- **An association edge can no longer outlive its endpoints** (#803). Hard
+  deletes left the dead engram in the FTS and vector indexes, so the automatic
+  association workers kept finding it and minting fresh edges to an ID that no
+  longer existed — growing with use, and never reaped, because association decay
+  does not read engram records. Both hard-delete callers now clean both search
+  indexes, `DeleteEngram` cascades archived (0x25) edges in both directions, and
+  every association writer refuses an edge whose endpoint has no engram record.
+  The delete cascade also missed every edge at weight ≤ ~1/256 (and at the
+  legacy full-weight key position) because of a scan-bound bug; those edges were
+  unreapable, and the startup key-repair pass could promote one into a live
+  dangling edge. Both are closed.
+
+  **Client-visible change:** a write whose `associations[].target_id` names a
+  memory that has been hard-deleted is now **rejected** instead of silently
+  accepted. The row it used to create pointed at nothing. How the rejection
+  surfaces is per-transport: REST's single-write path returns **400**; REST's
+  batch endpoint still returns 201 with `status: "error"` on that item only, its
+  siblings committing as before; gRPC and MBP return their existing error for an
+  invalid ID. `relationships[]` is unchanged in this
+  release — it still logs a warning and succeeds (#817).
+
+### Internal
+
+- The cognition trial's machinery: a build-tagged (`cognitiontrial`) offline
+  harness that puts the Hebbian / PAS / ACT-R base-level layer on trial against
+  real recorded queries, a co-activation replay driver, and the pre-registered
+  acceptance rule as executable code with its own unit tests. None of it
+  compiles into a shipped binary.
+
+### Security
+
+- **`muninn_state` is no longer callable by an observe-mode credential.** The
+  tool was classified in `isReadOnlyTool`, but its handler reaches
+  `Engine.UpdateLifecycleState` (via `mcpEngineAdapter.UpdateState`) — so an
+  `mk_` key or `cap_` token issued as read-only could transition any engram's
+  lifecycle state, including archiving it. It is now classified mutating. Effects
+  per credential mode:
+  - **observe — now denied.** A read-only client that was calling `muninn_state`
+    was performing a write and will now receive `forbidden`.
+  - **write — now allowed** (it was previously *denied*, because write mode
+    admits only tools classified mutating). This is a side effect of the
+    two-bucket classifier, not a designed grant: `mutatingTools` and
+    `readOnlyTools` are complementary over every registered tool — enforced by
+    the census in `internal/mcp/tool_classification_test.go`, not true by
+    construction — so a tool cannot be denied to observe *and* write.
+
+    It grants write mode a second tool for a capability it already held, not a
+    new capability. `muninn_compare_and_set` has been classified mutating since
+    before this change, its `set_state` enum includes `archived`, and
+    `expect_state` is optional (the tool schema says "Omit to skip the guard"),
+    so it reaches the identical `store.CompareAndSet` lifecycle transition
+    unconditionally. Write mode also already holds every other mutating tool —
+    `muninn_forget`, `muninn_evolve`, `muninn_trust`, `muninn_merge_entity`
+    among them — with the single exception of `muninn_create_workflow_vault`,
+    which `server.go` pins to a full-mode `mk_` key by a separate guard.
+    `handleState`'s response echoes only caller-supplied values, so it opens no
+    exfiltration channel.
+
+    **One property of archive is worse than its neighbours and is named rather
+    than glossed:** `state(archived)` is the only write-mode operation that
+    leaves no *enumerable* trace. `muninn_list_deleted` reads
+    `StateSoftDeleted` only and recall refuses archived engrams on every path,
+    so where a `forget` is findable through `list_deleted` and an `evolve`
+    through `as_of`/`include_invalid`, an archived engram is reachable only
+    from an ID the caller already holds. It is not silent and not
+    irreversible — `Engine.Restore` accepts `StateArchived` — but its audit
+    trail is a content-free `update-meta` provenance entry, and the `reason`
+    argument the tool advertises is discarded by both the MCP and REST adapters
+    (`Engine.UpdateLifecycleState` has no such parameter). By contrast
+    `muninn_merge_entity`, which write mode has always held, is outright
+    irreversible. All of these properties are pre-existing and untouched here.
+
+    **Residual, tracked separately (#822):** MCP write mode is broader than
+    REST write mode, but not for the reason the route shapes suggest. REST's
+    `ReadOnlyGuard(WriteOnlyGuard(...))` on `PUT /api/engrams/{id}/state` is
+    documented in `internal/transport/rest/server.go` as exfiltration
+    prevention for routes that "return engram data in their response body" —
+    and REST write mode is separately *allowed* to soft-delete
+    (`TestWriteOnlyMode_WriteHandlersNotBlocked/DeleteEngram`), which is more
+    destructive than archiving. Closing the real gap needs a full-only overlay
+    consulted before the `ModeWrite` case, whose membership must cover every
+    write-mode path to a lifecycle transition — `muninn_state` *and*
+    `muninn_compare_and_set`, then a decision about `muninn_claim`/
+    `muninn_release`, which share the CAS primitive. That is a scoping
+    decision, not a one-name move, and REST exposes no compare-and-set route
+    to take parity from. Pinned meanwhile by
+    `TestDispatch_WriteMode_AllowsCompareAndSetArchive`.
+  - **append — now denied at the MCP dispatch gate** as well as by the existing
+    `Engine.refuseAppend` backstop, which is why append mode was never
+    exploitable. Two layers again instead of one.
+  - **full — unaffected.**
+  (#731)
+
+---
+
+## [0.10.0] - 2026-08-01
+
+The trust release. Nine rounds of blind hands-on evaluation by AI agents drove
+this cycle: each round's top complaint was fixed, adversarially reviewed, and
+re-verified live by the evaluator that filed it.
+
+### The cognitive substrate, made honest
+
+- **Full-confidence learning restored** (#757): a key-encoding overflow had sent
+  every weight-1.0 association (declared links, decide evidence, LTP-saturated
+  learning) to the wrong key position since inception, where it read back as 0.
+  "Strengthens with use" works for the first time. A startup repair (#759)
+  relocates identifiable pre-fix keys, watermarked and gated so decay cannot
+  destroy the evidence first.
+- **Association decay is a real forgetting curve** (#766): decay was a per-pass
+  multiplier on a 60-second tick (a 13.5-minute half-life) since February; every
+  learned edge hit the floor within an hour of last use. Now a peak-anchored
+  elapsed-time ceiling (default 30-day half-life, `assoc_half_life_days`),
+  cadence-independent by construction, no on-disk format change. A legacy
+  `assoc_decay_factor` in (0,1) is reinterpreted per-day with a one-time loud
+  WARN; a factor of 1.0 or above skips loudly instead of silently enabling.
+- **Contradictions stopped destroying data** (#747) and started mattering
+  (#772): declaring a `contradicts` link now changes what recall returns — both
+  sides demoted and annotated, a response-level `conflict` block, and every
+  resolution path (evolve, forget(not_true_since), link(supersedes)) actually
+  clears it, immediately, in recall and in the report. The shared worker's flush
+  ticker was a debounce that starved detection (and the confidence penalty)
+  under any active session; fixed.
+
+### Recall that tells the truth
+
+- **Version chains resolve to their head** (#767): a query phrased in a
+  superseded fact's old wording returns the current version, attributed
+  (`substituted_for`, `substitution_basis`), with fork/cycle refusal and loud
+  truncation. Evolve now wakes the embed processor, closing a ~3-minute window
+  where a fresh successor was semantically invisible.
+- **A first-class relevance band** (#778): every recall row carries
+  `relevance_band` (strong/moderate/weak/filter_match/uncalibrated) derived
+  from the absolute score against the vault's own calibration — the per-query
+  score renormalization can no longer dress a weak neighbor as certainty.
+  `absolute_score` and `content_match` are now visible on the wire. The
+  response-level "nothing strongly matched" hint deliberately did not ship: it
+  failed its pre-committed acceptance rule (16.7% vs 70%), and that record is
+  pinned in CI.
+- **Calibrated abstention** (#715, #718, #754): recall can honestly abstain
+  (`abstained`, `abstained_reason`) with an anisotropy-calibrated semantic
+  floor, self-measured per model; embedding failure degrades loudly
+  (`semantic_degraded`, #740). RRF vaults no longer return silently-empty
+  default recall (#705); recall-mode presets no longer bypass the mode-aware
+  threshold (#710); top-N ordering is deterministic (#699).
+- **Currency advisories stopped lying** (#738, #758): the version-cluster
+  advisory ships with a universal version-marker gate and declared-chain
+  suppression — a deliberate near-silencing on vaults without version
+  vocabulary, because a false "possibly superseded" on a live fact is worse
+  than silence.
+
+### The write path and the agent experience
+
+- **The Push, increment 1** (#694): armed intentions with focal-cue notices
+  over MCP, behind `MUNINN_PROSPECTIVE`.
+- **Curator reflex in the on-connect surface** (#741) and evolve-first guidance
+  (#723); six silent-substitution defects from hands-on evaluation fixed in one
+  pass (#746); unrecognized memory types (#742) and link relations (#745) are
+  never silently swallowed; the entity-type enum that cost 64 points of entity
+  coverage is gone (#743); evolve records its real write verb in provenance
+  (#739); optional inline entities on evolve (#680); importance dimension with
+  pruning protection (#689); per-vault exclude-tags (#735).
+- **muninn_remember names the vault it resolved to** when the caller omits one
+  (#772 rider).
+
+### Operations, safety, durability
+
+- Consolidate no longer loses data under concurrent writes (#754). Stale PID
+  files no longer break `muninn stop` (#650). Trigger events carry the full
+  vault prefix (#697). Backup/import test hardening (#753), hermeticity
+  doctrine for async assertions (#727), and four CI timing flakes fixed at the
+  cause. Privacy: design records triaged with a public-repo naming rule
+  enforced by a reviewer-level check (#775, #734).
+
+### Known and named
+
+- The recall gate's answerability ceiling is measured, in-tree, and honest:
+  topically-adjacent unanswerable queries pass at high rates because they carry
+  real evidence; no scalar gate fixes this (#757's labeled query set). The
+  abstain-on-weak default both evaluators now ask for is the next increment's
+  question, gated by that measurement.
+- Pre-#766 decay damage is not retroactively undone: floored edges re-learn
+  from the floor rather than being resurrected by fiat.
+- Open, filed, and tracked: consolidation's embed-lag recall hole (#779), stale
+  concept after evolve (#769), entity co-occurrence staleness after evolve
+  (#780), the same-key relType replacement footgun (#771), CGDN's dead
+  experimental path (#768).
 
 ---
 

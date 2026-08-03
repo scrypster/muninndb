@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/provenance"
 )
 
 // AssocWeightUpdate represents a single association weight update for batching.
@@ -12,6 +14,19 @@ type AssocWeightUpdate struct {
 	Dst        ULID
 	Weight     float32
 	CountDelta uint32 // Hebbian co-activation increment to add to CoActivationCount
+	// LastActivatedAt is the Unix-seconds stamp to record as this edge's
+	// lastActivated. ZERO = time.Now(), which is the pre-#779 behaviour and
+	// therefore what every production caller gets unless it says otherwise.
+	//
+	// It exists because the co-activation event ALREADY carries its own time
+	// (cognitive.CoActivationEvent.At) and that time was being dropped: an
+	// event that sat in the Hebbian worker's channel for seconds was stamped
+	// late, and — decisively — an OFFLINE REPLAY of historical co-activations
+	// would stamp 90 days of learning as "just now", erasing every interleaved
+	// decay pass and fabricating a "no forgetting ever" graph that never
+	// existed. Association decay is a pure function of now - lastActivated
+	// (COG-27), so this field is what makes replayed forgetting possible.
+	LastActivatedAt int32
 }
 
 // OrdinalEntry is a (childID, ordinal) pair returned by ListChildOrdinals.
@@ -23,8 +38,18 @@ type OrdinalEntry struct {
 // StoreBatch is a write-only handle for atomic multi-write operations.
 // Callers must call Commit or Discard exactly once.
 type StoreBatch interface {
-	// WriteEngram queues an engram write into the batch.
+	// WriteEngram queues an engram write into the batch. Its provenance entry
+	// records Operation "create" — use WriteEngramOp when the batch is not
+	// creating a brand-new engram (e.g. Evolve's successor).
 	WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *Engram) error
+	// WriteEngramOp queues an engram write into the batch exactly like
+	// WriteEngram, except the provenance entry records operation as the
+	// originating verb (e.g. "evolve") instead of the hardcoded "create".
+	WriteEngramOp(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string) error
+	// WriteEngramOpDetails is WriteEngramOp with an optional operation-specific
+	// details payload (predecessor, reason, effective_at) attached to the
+	// provenance entry. nil details behaves exactly like WriteEngramOp.
+	WriteEngramOpDetails(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string, details *provenance.Details) error
 	// WriteAssociation queues association forward (0x03), reverse (0x04) keys into the batch.
 	WriteAssociation(ctx context.Context, wsPrefix [8]byte, src, dst ULID, assoc *Association) error
 	// WriteOrdinal queues the ordinal key for (parentID, childID) into the batch.
@@ -33,6 +58,25 @@ type StoreBatch interface {
 	// Reads the current engram from the underlying store, sets its state, and queues
 	// updated 0x01 and 0x02 key writes.
 	UpdateEngramState(ctx context.Context, ws [8]byte, id ULID, newState LifecycleState) error
+	// SupersedeEngram queues a soft-delete PLUS a ValidUntil stamp for an
+	// existing engram in one re-encode (the evolve write path, COG-19:
+	// invalidation is a stamp, never a delete. The soft-delete hides the
+	// predecessor from the present; the stamp records when it stopped being
+	// true). An already-closed ValidUntil is preserved (evolving an
+	// already-expired fact must not destroy the earlier window end).
+	SupersedeEngram(ctx context.Context, ws [8]byte, id ULID, validUntil time.Time) error
+	// WriteEntityEngramLink queues the 0x20 forward and 0x23 reverse entity-link
+	// keys into the batch. Like PebbleStore.WriteEntityEngramLink, it does not
+	// touch the 0x1F entity record — callers that need the record created must
+	// use UpsertEntityRecord separately, and callers carrying links to an
+	// existing record must fund the mention-count ledger post-commit via
+	// IncrementEntityMentionCount (one increment per link created, matching
+	// DeleteEngram's one decrement per link destroyed).
+	WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error
+	// WriteRelationshipRecord queues the 0x21 relationship record and both 0x26
+	// relationship-entity index keys into the batch. Same encoding as
+	// PebbleStore.UpsertRelationshipRecord.
+	WriteRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error
 	// Commit atomically commits all queued writes.
 	Commit() error
 	// Discard releases the batch without writing anything.
@@ -66,6 +110,12 @@ type EngineStore interface {
 	// UpdateMetadata writes only the metadata fields that changed (state, confidence,
 	// relevance_bucket, access count, timestamps). Updates both 0x01 and 0x02 keys.
 	UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id ULID, meta *EngramMeta) error
+
+	// TouchAccess bumps AccessCount (+1) and LastAccess (=now) under the
+	// per-engram stripe lock, leaving every other field (State, Confidence,
+	// Relevance, Stability) untouched. The single reinforcement primitive
+	// (#682) — see PebbleStore.TouchAccess for the locking rationale.
+	TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULID) error
 
 	// UpdateRelevance updates the relevance and stability of an engram.
 	// Moves the relevance bucket key (0x10) from the old bucket to the new bucket,
@@ -103,12 +153,19 @@ type EngineStore interface {
 	// countDelta is added to the existing CoActivationCount (saturating at MaxUint32).
 	UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID, weight float32, countDelta uint32) error
 
-	// DecayAssocWeights multiplies all association weights for wsPrefix by decayFactor,
-	// deleting entries that fall below minWeight. Returns count deleted.
+	// DecayAssocWeights applies the peak-anchored, elapsed-time decay ceiling
+	// (COG-27) to every association under wsPrefix, clamping entries that fall
+	// below minWeight to their dynamic floor. Returns count deleted.
+	// halfLife is the wall-clock half-life of an unused edge; it must be > 0.
 	// archiveThreshold > 0 enables moving strong floor-hit edges to the 0x25 archive namespace.
-	DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error)
+	DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error)
 
-	// UpdateAssocWeightBatch atomically updates multiple association weights in a single batch.
+	// UpdateAssocWeightBatch updates multiple association weights in a single
+	// Pebble batch. What it writes is atomic; what it applies may be a SUBSET.
+	// A pair whose existing metadata cannot be read is skipped rather than
+	// overwritten with fabricated defaults, and reported through an error that
+	// also exposes SkippedUpdates() []int (indices into updates). Callers that
+	// act on an update landing must consult it.
 	UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error
 
 	// GetConfidence reads the confidence value from 0x02 metadata for an engram.
@@ -125,7 +182,7 @@ type EngineStore interface {
 	GetChildrenByParent(ctx context.Context, wsPrefix [8]byte, parentID ULID) ([]ULID, error)
 
 	// FlagContradiction writes the 0x0A contradiction key for pair (a,b).
-	FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) error
+	FlagContradiction(ctx context.Context, wsPrefix [8]byte, a, b ULID) (newlyFlagged bool, err error)
 
 	// GetContradictions returns all contradiction pairs in the vault by scanning the 0x0A prefix.
 	GetContradictions(ctx context.Context, wsPrefix [8]byte) ([][2]ULID, error)

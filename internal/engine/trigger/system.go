@@ -61,8 +61,14 @@ type ActivationPush struct {
 
 // Subscription is one active context subscription.
 type Subscription struct {
-	ID             string
-	VaultID        uint32
+	ID      string
+	VaultID uint32
+	// WSPrefix is the real 8-byte Pebble workspace prefix for VaultID's vault
+	// (storage.PebbleStore.VaultPrefix / ResolveVaultPrefix). VaultID alone is
+	// only a compact routing key (registry bucketing) derived from its first 4
+	// bytes; store lookups (used by the periodic sweep) must use the full
+	// prefix, not a value reconstructed from VaultID (#692).
+	WSPrefix       [8]byte
 	Context        []string
 	Threshold      float64
 	TTL            time.Duration
@@ -97,8 +103,11 @@ type EngramEvent struct {
 }
 
 // CognitiveEvent fires when a cognitive worker changes an engram's score.
+// WSPrefix is the real 8-byte vault prefix used for the store lookup in
+// handleCognitive — VaultID alone is not sufficient (#692).
 type CognitiveEvent struct {
 	VaultID  uint32
+	WSPrefix [8]byte
 	EngramID storage.ULID
 	Field    string
 	OldValue float32
@@ -107,8 +116,11 @@ type CognitiveEvent struct {
 }
 
 // ContradictEvent fires when a contradiction is detected.
+// WSPrefix is the real 8-byte vault prefix used for the store lookup in
+// handleContradiction — VaultID alone is not sufficient (#692).
 type ContradictEvent struct {
 	VaultID  uint32
+	WSPrefix [8]byte
 	EngramA  storage.ULID
 	EngramB  storage.ULID
 	Severity float64
@@ -328,7 +340,20 @@ func TriggerScore(sub *Subscription, meta *storage.EngramMeta, vectorScore, ftsS
 		accessFreq = 1.0
 	}
 
-	daysSince := time.Since(meta.LastAccess).Hours() / 24.0
+	// Treat an unset LastAccess (the plain zero time, or the 1754 ERF overflow
+	// sentinel a pre-#810 clone wrote) as "just now" — a never-accessed engram
+	// is a freshly written one, i.e. maximally recent. meta comes straight off
+	// disk here (worker.go's periodic sweep calls store.GetMetadata), so this is
+	// precisely the sentinel-bearing population. Without the guard daysSince is
+	// ~740,000, recency underflows to 0, and the entire wRecency=0.10 term
+	// disappears: any subscription whose Threshold lands in (0.80*conf,
+	// 0.90*conf] fires on a healthy vault and goes permanently, silently quiet
+	// on a cloned one. Pinned by TestTriggerScore_UnsetLastAccessDoesNotSilencePush.
+	lastAccess := meta.LastAccess
+	if storage.IsUnsetTimestamp(lastAccess) {
+		lastAccess = time.Now()
+	}
+	daysSince := time.Since(lastAccess).Hours() / 24.0
 	recency := math.Exp(-daysSince * math.Log(2) / 7.0)
 
 	raw := wSemantic*vectorScore + wFTS*ftsScore + wDecay*decayFactor + wAccess*accessFreq + wRecency*recency
@@ -505,8 +530,9 @@ func (ts *TriggerSystem) NotifyEmbed(vaultID uint32, eng *storage.Engram, vec []
 	}
 }
 
-// NotifyCognitive sends a cognitive change event.
-func (ts *TriggerSystem) NotifyCognitive(vaultID uint32, id storage.ULID, field string, old, new float32) {
+// NotifyCognitive sends a cognitive change event. ws is the real 8-byte vault
+// prefix (not reconstructible from vaultID alone — see CognitiveEvent, #692).
+func (ts *TriggerSystem) NotifyCognitive(vaultID uint32, ws [8]byte, id storage.ULID, field string, old, new float32) {
 	delta := new - old
 	if delta < 0 {
 		delta = -delta
@@ -515,7 +541,7 @@ func (ts *TriggerSystem) NotifyCognitive(vaultID uint32, id storage.ULID, field 
 		return
 	}
 	select {
-	case ts.CognitiveEvents <- CognitiveEvent{VaultID: vaultID, EngramID: id, Field: field, OldValue: old, NewValue: new, Delta: delta}:
+	case ts.CognitiveEvents <- CognitiveEvent{VaultID: vaultID, WSPrefix: ws, EngramID: id, Field: field, OldValue: old, NewValue: new, Delta: delta}:
 	default:
 	}
 }
@@ -532,10 +558,11 @@ func (ts *TriggerSystem) PruneExpired() int {
 	return ts.registry.PruneExpired()
 }
 
-// NotifyContradiction sends a contradiction event.
-func (ts *TriggerSystem) NotifyContradiction(vaultID uint32, a, b storage.ULID, severity float64, typ string) {
+// NotifyContradiction sends a contradiction event. ws is the real 8-byte
+// vault prefix (not reconstructible from vaultID alone — see ContradictEvent, #692).
+func (ts *TriggerSystem) NotifyContradiction(vaultID uint32, ws [8]byte, a, b storage.ULID, severity float64, typ string) {
 	select {
-	case ts.ContradictEvents <- ContradictEvent{VaultID: vaultID, EngramA: a, EngramB: b, Severity: severity, Type: typ}:
+	case ts.ContradictEvents <- ContradictEvent{VaultID: vaultID, WSPrefix: ws, EngramA: a, EngramB: b, Severity: severity, Type: typ}:
 	default:
 	}
 }

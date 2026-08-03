@@ -109,6 +109,9 @@ func (e *Engine) FindSimilarEntities(ctx context.Context, vault string, threshol
 //
 // When dryRun=true the function reports what would happen without writing anything.
 func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string, dryRun bool) (*MergeEntityResult, error) {
+	if err := e.refuseWrite(ctx); err != nil {
+		return nil, err
+	}
 	if entityA == "" || entityB == "" {
 		return nil, fmt.Errorf("merge_entity: entity_a and entity_b are required")
 	}
@@ -190,6 +193,13 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 	// ScanEntityRelationships("B") returning the complete set after a merge.
 	if err := e.store.RelinkRelationshipEntity(ctx, ws, entityA, entityB); err != nil {
 		return nil, fmt.Errorf("merge_entity: relink relationship records from entity_a to entity_b: %w", err)
+	}
+
+	// Step 1c: rewrite armed prospective intentions (0x2D) whose cue was A —
+	// key moves to Hash(B) and every stored cue list naming A is rewritten to
+	// B (THE PUSH increment 1; mirrors the 0x26 relink above).
+	if err := e.store.RelinkProspectiveIntent(ctx, ws, entityA, entityB); err != nil {
+		return nil, fmt.Errorf("merge_entity: relink armed intentions from entity_a to entity_b: %w", err)
 	}
 
 	// Step 2: mark A as merged.

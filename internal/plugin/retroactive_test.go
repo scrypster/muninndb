@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -18,15 +19,205 @@ type enrichMockForRetro struct {
 	mockPlugin
 	enrichResult *EnrichmentResult
 	enrichErr    error
+	enrichFunc   func(context.Context, *Engram) (*EnrichmentResult, error)
 	callCount    int
 }
 
-func (m *enrichMockForRetro) Enrich(_ context.Context, _ *Engram) (*EnrichmentResult, error) {
+func (m *enrichMockForRetro) Enrich(ctx context.Context, eng *Engram) (*EnrichmentResult, error) {
 	m.callCount++
+	if m.enrichFunc != nil {
+		return m.enrichFunc(ctx, eng)
+	}
 	if m.enrichErr != nil {
 		return nil, m.enrichErr
 	}
 	return m.enrichResult, nil
+}
+
+func TestRetroactiveProcessor_RetryableProviderErrorRemainsPendingThenEnriches(t *testing.T) {
+	eng := &Engram{Concept: "pending", Content: "content"}
+	store := &mockPluginStore{countResult: 1}
+	attempt := 0
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-throttled", tier: TierEnrich},
+		enrichFunc: func(context.Context, *Engram) (*EnrichmentResult, error) {
+			attempt++
+			if attempt == 1 {
+				return nil, fmt.Errorf("pipeline: %w", &ProviderError{
+					Provider:      "fake",
+					StatusCode:    429,
+					Retryable:     true,
+					RetryAfter:    time.Second,
+					HasRetryAfter: true,
+				})
+			}
+			return &EnrichmentResult{Summary: "enriched"}, nil
+		},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	store.scanResult = &mockIterator{engrams: []*Engram{eng, &Engram{Concept: "later", Content: "content"}}}
+	rp.processBatch(context.Background())
+	if enrichPlugin.callCount != 1 {
+		t.Fatalf("calls after throttle = %d, want 1 (batch must stop globally)", enrichPlugin.callCount)
+	}
+	if store.setFlagCalls != 0 {
+		t.Fatalf("429 set digest flags %v; engram must remain pending", store.setFlags)
+	}
+
+	store.scanResult = &mockIterator{engrams: []*Engram{eng}}
+	rp.processBatch(context.Background())
+	if enrichPlugin.callCount != 2 {
+		t.Fatalf("calls after recovery = %d, want 2", enrichPlugin.callCount)
+	}
+	if rp.Stats().Processed != 1 {
+		t.Fatalf("processed = %d, want original engram enriched", rp.Stats().Processed)
+	}
+	for _, flag := range store.setFlags {
+		if flag == DigestEnrichFailed {
+			t.Fatalf("DigestEnrichFailed was set because of 429: %v", store.setFlags)
+		}
+	}
+}
+
+func TestProcessEnrichEngram_RetryableWrappingPreservesMetadata(t *testing.T) {
+	providerErr := &ProviderError{Provider: "fake", StatusCode: 503, Retryable: true}
+	store := &mockPluginStore{}
+	rp := NewRetroactiveProcessor(store, &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "wrapped", tier: TierEnrich},
+		enrichErr:  fmt.Errorf("service: %w", providerErr),
+	}, DigestEnrich)
+
+	err := rp.processEnrichEngram(context.Background(), &Engram{})
+	var got *ProviderError
+	if !errors.As(err, &got) || got != providerErr {
+		t.Fatalf("retryability metadata was not preserved: %v", err)
+	}
+}
+
+func TestProcessEnrichEngram_PermanentProviderWrappingPreservesMetadata(t *testing.T) {
+	providerErr := &ProviderError{Provider: "fake", StatusCode: 401, Retryable: false}
+	store := &mockPluginStore{}
+	rp := NewRetroactiveProcessor(store, &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "auth-failed", tier: TierEnrich},
+		enrichErr:  fmt.Errorf("pipeline: %w", providerErr),
+	}, DigestEnrich)
+
+	err := rp.processEnrichEngram(context.Background(), &Engram{})
+	if errors.Is(err, errLLMFailed) {
+		t.Fatalf("systemic authentication error became per-engram failure: %v", err)
+	}
+	var got *ProviderError
+	if !errors.As(err, &got) || got != providerErr {
+		t.Fatalf("provider metadata was not preserved: %v", err)
+	}
+}
+
+func TestRetroactiveProcessor_AuthenticationFailureRemainsPendingAndStopsBatch(t *testing.T) {
+	eng := &Engram{Concept: "pending", Content: "content"}
+	store := &mockPluginStore{
+		countResult: 2,
+		scanResult:  &mockIterator{engrams: []*Engram{eng, &Engram{Concept: "later"}}},
+	}
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "auth-failed", tier: TierEnrich},
+		enrichErr:  &ProviderError{Provider: "fake", StatusCode: 401, Retryable: false},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	rp.processBatch(context.Background())
+	if enrichPlugin.callCount != 1 {
+		t.Fatalf("provider calls = %d, want 1 after systemic auth failure", enrichPlugin.callCount)
+	}
+	if store.setFlagCalls != 0 {
+		t.Fatalf("authentication failure set permanent flags: %v", store.setFlags)
+	}
+}
+
+// flagAwareStore faithfully models PebbleStore's flag-driven scan: it stores
+// per-engram digest flags and, on every pass, ScanWithoutFlag restarts from the
+// keyspace head and excludes engrams whose flags intersect flagBit or skipFlags.
+// This is the exact substrate the #587 wedge needs to reproduce — a content 4xx
+// that sorts first must LATCH so it is skipped next pass, otherwise it re-breaks
+// every pass and starves every follower.
+type flagAwareStore struct {
+	mockPluginStore
+	engrams []*Engram // fixed keyspace order
+	flags   map[ULID]uint8
+}
+
+func newFlagAwareStore(engrams ...*Engram) *flagAwareStore {
+	return &flagAwareStore{engrams: engrams, flags: make(map[ULID]uint8)}
+}
+
+func (s *flagAwareStore) pending(flagBit, skipFlags uint8) []*Engram {
+	var out []*Engram
+	for _, e := range s.engrams {
+		if f := s.flags[e.ID]; f&flagBit != 0 || f&skipFlags != 0 {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func (s *flagAwareStore) CountWithoutFlag(_ context.Context, flagBit, skipFlags uint8) (int64, error) {
+	return int64(len(s.pending(flagBit, skipFlags))), nil
+}
+
+func (s *flagAwareStore) ScanWithoutFlag(_ context.Context, flagBit, skipFlags uint8) EngramIterator {
+	return &mockIterator{engrams: s.pending(flagBit, skipFlags)}
+}
+
+func (s *flagAwareStore) SetDigestFlag(_ context.Context, id ULID, flag uint8) error {
+	s.flags[id] |= flag
+	return nil
+}
+
+func (s *flagAwareStore) GetDigestFlags(_ context.Context, id ULID) (uint8, error) {
+	return s.flags[id], nil
+}
+
+// TestRetroactiveProcessor_ContentFourxxLatchesAndFollowersDrain pins the #587
+// fix: a non-retryable content HTTP 400 on the engram that sorts FIRST must be
+// stamped DigestEnrichFailed and NOT break the pass, so the follower enriches.
+// Before the fix this wedged forever — the 400 broke every pass at the head and
+// no engram sorted after it was ever reached.
+func TestRetroactiveProcessor_ContentFourxxLatchesAndFollowersDrain(t *testing.T) {
+	first := &Engram{ID: ULID{1}, Concept: "content-400", Content: "oversized"}
+	second := &Engram{ID: ULID{2}, Concept: "enrichable", Content: "content"}
+	store := newFlagAwareStore(first, second)
+
+	enrichPlugin := &enrichMockForRetro{
+		mockPlugin: mockPlugin{name: "enrich-content-400", tier: TierEnrich},
+		enrichFunc: func(_ context.Context, e *Engram) (*EnrichmentResult, error) {
+			if e.ID == first.ID {
+				return nil, fmt.Errorf("pipeline: %w", &ProviderError{
+					Provider:   "fake",
+					StatusCode: 400,
+					Retryable:  false,
+				})
+			}
+			return &EnrichmentResult{Summary: "enriched"}, nil
+		},
+	}
+	rp := NewRetroactiveProcessor(store, enrichPlugin, DigestEnrich)
+
+	// Multiple passes: even one pass suffices with the fix, but repeated passes
+	// prove the head engram does not re-break the batch.
+	for i := 0; i < 3; i++ {
+		rp.processBatch(context.Background())
+	}
+
+	if store.flags[first.ID]&DigestEnrichFailed == 0 {
+		t.Fatalf("first engram (content 400) was not latched with DigestEnrichFailed; flags=%#x", store.flags[first.ID])
+	}
+	if store.flags[second.ID]&DigestEnrich == 0 {
+		t.Fatalf("follower engram never enriched — batch wedged on the content 400 (#587); flags=%#x", store.flags[second.ID])
+	}
+	if rp.Stats().Processed != 1 {
+		t.Fatalf("processed = %d, want 1 (the follower)", rp.Stats().Processed)
+	}
 }
 
 // ---------------------------------------------------------------------------

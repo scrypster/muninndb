@@ -1282,10 +1282,10 @@ func runServer() {
 	// Build storage layer
 	storeCfg := storage.PebbleStoreConfig{CacheSize: 10000}
 	if clusterCfg.Enabled {
-		storeCfg.RepLogAppend = func(op uint8, key, value []byte) error {
-			_, err := repLog.Append(replication.WALOp(op), key, value)
-			return err
-		}
+		// #826: LocalAppendFunc suppresses the append on a node that has
+		// positively established itself as a Lobe/Observer — nothing reads a
+		// follower's log and nothing prunes it. Fail-open on RoleUnknown.
+		storeCfg.RepLogAppend = replication.LocalAppendFunc(coordinator, repLog)
 	}
 	store := storage.NewPebbleStore(db, storeCfg)
 
@@ -1316,6 +1316,15 @@ func runServer() {
 	initCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	embedder, embedPlugin, err := buildEmbedder(initCtx, savedPluginCfg, *dataDir)
 	cancel()
+	// Resolve the model identifier for the COG-26 semantic noise-baseline
+	// registry (internal/plugin/embed/baseline.go). embedPlugin's concrete
+	// type (*embedpkg.EmbedService for every built-in provider) exposes it;
+	// an unrecognized plugin type leaves this empty, which resolveSemanticBaseline
+	// treats as "unknown model" — identity transform + WARN, never a guess.
+	embedModelName := ""
+	if m, ok := embedPlugin.(interface{ Model() string }); ok {
+		embedModelName = m.Model()
+	}
 	if err != nil {
 		slog.Error("embedder build failed", "err", err)
 		os.Exit(1)
@@ -1403,6 +1412,7 @@ func runServer() {
 		ConfidenceWorker: confidenceWorkerImpl.Worker,
 		Embedder:         embedder,
 		HNSWRegistry:     hnswRegistry,
+		EmbedModelName:   embedModelName,
 	})
 
 	eng.SetTransitionWorker(transitionWorkerImpl)
@@ -1594,25 +1604,63 @@ func runServer() {
 		restServer.SetCoordinator(coordinator)
 	}
 
-	// Wire coordinator factory so the admin enable endpoint can start cluster
-	// at runtime (without a restart) when cluster.yaml is written via the UI/CLI.
-	restServer.SetCoordinatorFactory(func(_ context.Context, cfg plugincfg.ClusterConfig) (*replication.ClusterCoordinator, error) {
-		repLog := replication.NewReplicationLog(db)
-		applier := replication.NewApplier(db)
-		epochStore, err := replication.NewEpochStore(db)
-		if err != nil {
-			return nil, fmt.Errorf("create epoch store: %w", err)
+	// Cluster single-writer gate (#596). Installed only in cluster mode: a
+	// standalone server keeps a nil gate everywhere and is completely unaffected.
+	//
+	// One gate function, four surfaces. The engine and the auth store hold it as
+	// the transport-agnostic backstop (so the embedded Go library and any future
+	// transport inherit it); REST and MCP additionally hold it at the request
+	// boundary so they can answer with a precise status/JSON-RPC error and the
+	// leader hint instead of a generic failure. gRPC and MBP map the engine's
+	// error at their own error boundaries.
+	if coordinator != nil {
+		gate := func() error {
+			if coordinator.IsLeader() {
+				return nil
+			}
+			leaderID := coordinator.CortexID()
+			var leaderAddr string
+			if leaderID != "" && leaderID != clusterCfg.NodeID {
+				for _, n := range coordinator.KnownNodes() {
+					if n.NodeID == leaderID {
+						leaderAddr = n.Addr
+						break
+					}
+				}
+			}
+			return &mbp.NotLeaderError{
+				Role:       string(coordinator.Role()),
+				LeaderID:   leaderID,
+				LeaderAddr: leaderAddr,
+			}
 		}
-		coord := replication.NewClusterCoordinator(&cfg, repLog, applier, epochStore)
-		coord.OnBecameCortex = func(epoch uint64) {
-			log.Printf("[cluster] node promoted to Cortex at epoch %d", epoch)
-		}
-		coord.OnBecameLobe = func() {
-			log.Printf("[cluster] node demoted to Lobe")
-		}
-		startCoordinator(coord, cfg.BindAddr)
-		return coord, nil
-	})
+		eng.SetWriteGate(gate)
+		authStore.SetWriteGate(gate)
+		restServer.SetWriteGate(gate)
+		mcpServer.SetWriteGate(gate)
+
+		// Configuration must travel the same replication path as engrams
+		// (#596 issue 2 / #631 claim 2): vault configs carry per-vault
+		// plasticity, and API keys minted on the Cortex have to exist on the
+		// Lobes or they return 401 there.
+		authStore.SetReplicator(func(op uint8, key, value []byte) error {
+			_, err := repLog.Append(replication.WALOp(op), key, value)
+			return err
+		})
+
+		// Forward cognitive side effects from Lobe to Cortex. This seam existed
+		// (Engine.SetCoordinator / ForwardCognitiveEffects) but was never called
+		// from the server, so it was dead in the shipped binary.
+		eng.SetCoordinator(coordinator, clusterCfg.NodeID)
+	}
+
+	// There is deliberately no runtime coordinator factory (#628). The storage
+	// layer's replication hook is captured in storeCfg.RepLogAppend above, and
+	// only when clustering was already enabled at boot. A coordinator created
+	// later would be attached to a replication log that nothing appends to —
+	// enabled-looking and unable to replicate a single write. POST
+	// /api/admin/cluster/enable persists the config and answers 202
+	// restart_required; the coordinator is built here, at boot, or not at all.
 
 	// Start GroupCommitter
 	go gc.Run(ctx)

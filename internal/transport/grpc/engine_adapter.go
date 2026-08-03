@@ -2,11 +2,16 @@ package grpc
 
 import (
 	"context"
+	"errors"
 
+	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
+	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 	pb "github.com/scrypster/muninndb/proto/gen/go/muninn/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // grpcEngineAdapter adapts *engine.Engine to grpcpkg.EngineAPI, translating
@@ -108,8 +113,14 @@ func (a *grpcEngineAdapter) Read(ctx context.Context, req *pb.ReadRequest) (*pb.
 }
 
 func (a *grpcEngineAdapter) Activate(ctx context.Context, req *pb.ActivateRequest) (*pb.ActivateResponse, error) {
+	// Clamp a negative threshold: the in-process negative-means-bypass contract
+	// (used by Explain) is deliberately not exposed on the wire.
+	threshold := req.Threshold
+	if threshold < 0 {
+		threshold = 0
+	}
 	resp, err := a.eng.Activate(ctx, &mbp.ActivateRequest{
-		Context: req.Context, Threshold: req.Threshold, MaxResults: int(req.MaxResults),
+		Context: req.Context, Threshold: threshold, MaxResults: int(req.MaxResults),
 		MaxHops: int(req.MaxHops), IncludeWhy: req.IncludeWhy, Vault: req.Vault, Embedding: req.Embedding,
 	})
 	if err != nil {
@@ -122,6 +133,11 @@ func (a *grpcEngineAdapter) Activate(ctx context.Context, req *pb.ActivateReques
 			Score: item.Score, Why: item.Why,
 		}
 	}
+	// NOTE (deferred): resp.SemanticDegraded is intentionally NOT mapped here —
+	// pb.ActivateResponse has no such field. Wiring it needs a proto field + regen
+	// (a separate drift obligation); tracked as a follow-up so this stays a minimal
+	// increment. Until then gRPC callers do not receive the degrade-loudly signal
+	// that MBP/REST/MCP carry.
 	return &pb.ActivateResponse{
 		QueryID: resp.QueryID, TotalFound: int32(resp.TotalFound),
 		Activations: items, LatencyMs: resp.LatencyMs,
@@ -203,4 +219,66 @@ func (a *grpcEngineAdapter) SubscribeWithDeliver(ctx context.Context, req *pb.Su
 
 func (a *grpcEngineAdapter) Unsubscribe(ctx context.Context, subID string) error {
 	return a.eng.Unsubscribe(ctx, subID)
+}
+
+// AdjustConfidence adapts the AdjustConfidence RPC to engine.Engine.AdjustConfidence.
+// ULID parsing failures return codes.InvalidArgument without reaching the engine;
+// engine sentinel errors (ErrInvalidArgument, ErrSelfContradiction, ErrEngramNotFound)
+// are mapped to the codes the engine contract documents (400 / INVALID_ARGUMENT and
+// 404 / NOT_FOUND). All other errors surface as the engine returned them.
+func (a *grpcEngineAdapter) AdjustConfidence(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error) {
+	id, err := storage.ParseULID(req.EngramId)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "engram_id %q: %v", req.EngramId, err)
+	}
+	hasContra := req.ContradictedById != ""
+	var other storage.ULID
+	if hasContra {
+		other, err = storage.ParseULID(req.ContradictedById)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "contradicted_by_id %q: %v", req.ContradictedById, err)
+		}
+	} else {
+		other = id
+	}
+	newConf, err := a.eng.AdjustConfidence(ctx, req.Vault, id, req.Delta, other, hasContra, req.Reason, callerFromContext(ctx))
+	if err != nil {
+		return nil, mapAdjustConfidenceError(err)
+	}
+	return &pb.AdjustConfidenceResponse{NewConfidence: newConf}, nil
+}
+
+// mapAdjustConfidenceError maps the engine sentinel errors that AdjustConfidence
+// documents (engine_vault.go: "REST/gRPC handlers map it to 400/INVALID_ARGUMENT")
+// onto the corresponding gRPC codes. It is local to this RPC because the existing
+// Link/Forget adapter surface does not currently perform sentinel→code mapping
+// (those errors surface as codes.Unknown); AdjustConfidence was specified to do so.
+func mapAdjustConfidenceError(err error) error {
+	switch {
+	case errors.Is(err, engine.ErrInvalidArgument), errors.Is(err, engine.ErrSelfContradiction):
+		return status.Errorf(codes.InvalidArgument, "%v", err)
+	case errors.Is(err, engine.ErrEngramNotFound), errors.Is(err, storage.ErrNotFound):
+		return status.Errorf(codes.NotFound, "%v", err)
+	default:
+		return err
+	}
+}
+
+// callerFromContext extracts a human-readable caller identifier from the
+// authenticated principal in ctx. authUnaryInterceptor sets auth.ContextAPIKey
+// to the validated *auth.APIKey on the mk_ path; the public-vault path leaves
+// it unset. Returns the key Label (operator-assigned, stable, human-readable),
+// falling back to the key ID when Label is empty, and "anonymous" when no key
+// is present — so the audit log always carries a non-empty caller field.
+//
+// Mirrors the MCP transport's AuthContext.IsAPIKey extraction (context.go),
+// read from the same context value the gRPC interceptor already populates.
+func callerFromContext(ctx context.Context) string {
+	if key, ok := ctx.Value(auth.ContextAPIKey).(*auth.APIKey); ok && key != nil {
+		if key.Label != "" {
+			return key.Label
+		}
+		return key.ID
+	}
+	return "anonymous"
 }

@@ -58,6 +58,22 @@ type PebbleStore struct {
 	// Invalidated on any WriteAssociation or UpdateAssociation for that engram.
 	// Bounded to 500_000 entries with 2s TTL; expirable.LRU handles expiry automatically.
 	assocCache *expirable.LRU[[24]byte, *assocCacheEntry]
+	// revAssocCache: [24]byte (wsPrefix[8]+engramID[16]) → *revAssocCacheEntry
+	// The 0x04 mirror of assocCache: the ranking-only reverse adjacency read by
+	// GetRankingNeighbors (COG-31). Same size, same 2s TTL, invalidated at the
+	// same mutation sites as assocCache but keyed on the DESTINATION endpoint.
+	// Three assoc-mutating sites evict NEITHER cache (DeleteEngram,
+	// DecayAssocWeights, pebbleStoreBatch.WriteAssociation) — pre-existing and
+	// symmetric across both, filed as #818.
+	//
+	// This exists for a measured reason. Without it, phase4HebbianBoost paid a
+	// full uncached reverse scan on EVERY recall while its forward half was
+	// served from assocCache — 50 fresh Pebble seeks per call. Measured on a
+	// synthetic 200-engram vault at 10 edges/node, the union read cost 11µs
+	// cached-forward vs 152µs uncached-reverse, which pushed whole-recall p50
+	// ~15-20% over the pre-committed budget. Caching the reverse half restores
+	// the symmetry the cost model assumed.
+	revAssocCache *expirable.LRU[[24]byte, *revAssocCacheEntry]
 	// metaCache: [16]byte (engramID) → *EngramMeta
 	// Caches metadata for hot read-path engrams so GetMetadata never goes to Pebble twice.
 	// Populated by GetMetadata on first Pebble read. Invalidated by UpdateMetadata/WriteEngram.
@@ -93,13 +109,140 @@ type PebbleStore struct {
 	archiveBloom *archiveBloom
 	// repLogAppend is the cluster replication callback. nil in non-cluster mode.
 	repLogAppend func(op uint8, key, value []byte) error
+	// decayNow is the clock used by DecayAssocWeights. nil = time.Now.
+	// Association decay is a pure function of elapsed wall-clock time since an
+	// edge's lastActivated (COG-27), so it needs an injectable clock to be
+	// tested at all: the cadence-independence property is a statement about two
+	// different evaluation grids over the *same* simulated interval.
+	// Test-only seam; never set in production code. It is read without
+	// synchronization by every decay pass, so it MUST be set before the store
+	// is shared across goroutines — setting it after any background worker
+	// has started is a data race.
+	decayNow func() time.Time
+	// readFault is a TEST-ONLY seam, nil in production. When non-nil it is
+	// consulted before every point read routed through pointGet; a non-nil
+	// return is surfaced to the caller exactly as a Pebble read failure would
+	// be. It exists because the association write path's behaviour under a
+	// failed read cannot be exercised any other way: the damage (a live edge's
+	// relType/createdAt/peakWeight overwritten with defaults) only occurs when
+	// the read fails while the write still succeeds, which closing the DB or
+	// deleting the key cannot reproduce.
+	// Like decayNow, it is read without synchronization, so it MUST be set
+	// before the store is shared across goroutines.
+	readFault func(key []byte) error
+	// iterFault is a TEST-ONLY seam, nil in production — the ITERATOR sibling of
+	// readFault, which mediates point reads only. When non-nil it is consulted
+	// once per scan opened through scanIter, and may return a replacement
+	// iterator (typically one that truncates the scan and then reports an error
+	// from Error()). Returning nil leaves the real iterator in place.
+	//
+	// It exists because a mid-scan Pebble failure is otherwise unreproducible
+	// without corrupting a real .sst: closing the DB or deleting keys changes
+	// what the scan SEES, never whether it FAILED partway through — and the
+	// whole defect class (#808) is "a scan that stopped early is served as a
+	// short-but-complete list".
+	// Like decayNow and readFault, it is read without synchronization, so it
+	// MUST be set before the store is shared across goroutines.
+	iterFault func(scanPrefix []byte, it scanIterator) scanIterator
+	// guardReadFaults counts the times the STO-12 endpoint-liveness read failed
+	// and the guard failed open (see engramExists). guardReadFaultLoggedAt is
+	// the unix-nano stamp of the last WARN, used to rate-limit it.
+	guardReadFaults        atomic.Uint64
+	guardReadFaultLoggedAt atomic.Int64
 }
 
-// assocCacheEntry holds a cached association list.
-// TTL is enforced by the expirable.LRU cache (2s); no per-entry expiry field needed.
-type assocCacheEntry struct {
-	assocs []Association
+// pointGet is the single-key read used by the metadata helpers that must tell
+// absence apart from failure. It exists so the test-only readFault seam has one
+// place to inject, and so those readers share one absence-vs-failure policy:
+// a missing key is (nil, nil); anything else is an error the caller must handle.
+func (ps *PebbleStore) pointGet(key []byte) ([]byte, error) {
+	if ps.readFault != nil {
+		if err := ps.readFault(key); err != nil {
+			return nil, err
+		}
+	}
+	return Get(ps.db, key)
 }
+
+// now returns the decay clock: the injected test clock, or wall time.
+func (ps *PebbleStore) now() time.Time {
+	if ps.decayNow != nil {
+		return ps.decayNow()
+	}
+	return time.Now()
+}
+
+// assocCacheEntry holds a cached FORWARD (0x03) association list.
+// TTL is enforced by the expirable.LRU cache (2s); no per-entry expiry field needed.
+//
+// truncated records that the scan stopped at the caller's maxPerNode rather
+// than at the end of the node's edge list, so a later caller asking for MORE is
+// re-scanned instead of silently served the shorter list (#820). Mirrors
+// revAssocCacheEntry, which has carried the flag since COG-31.
+type assocCacheEntry struct {
+	assocs    []Association
+	truncated bool
+}
+
+// revAssocCacheEntry holds a cached REVERSE (0x04) ranking adjacency list.
+//
+// A hit whose entry was truncated below what this caller asked for is treated
+// as a miss and re-scanned, rather than silently under-serving. The forward
+// cache carried the same gap and now carries the same flag (#820).
+type revAssocCacheEntry struct {
+	assocs    []Association
+	truncated bool
+}
+
+// revAssocScanCap bounds how many reverse edges are ACCEPTED and cached per
+// engram, independent of the caller's maxPerNode. It is comfortably above both
+// production ranking caps (phase4HebbianBoost 20, phase5Traverse 10) so a
+// cached entry serves either without a re-scan.
+//
+// # It bounds accepted edges, NOT keys scanned — and that is deliberate
+//
+// An inbound edge that fails BidirectionalForRanking is skipped WITHOUT
+// consuming a cap slot, so the scan for one id is O(inbound degree), not
+// O(cap). A hub whose inbound edges are all directional is read in full and
+// returns nothing for the cost. Measured by
+// BenchmarkRankingReverseEdges_DirectionalInbound (Apple M5 Max, one cold
+// GetRankingNeighbors call for a single hub id, maxPerNode 20):
+//
+//	directionalInbound0/cold             4.5 µs   (0 edges returned)
+//	directionalInbound1000/cold          65 µs    (0 edges returned)
+//	directionalInbound5000/cold         476 µs    (0 edges returned)
+//	directionalInbound5000/coldFwdOnly  3.5 µs    (pre-COG-31 baseline)
+//	symmetricInbound1000/cold            15 µs
+//	symmetricInbound5000/cold            14 µs    (flat — the cap binds)
+//
+// ~106x for one id, returning zero edges — one run, and only the order of
+// magnitude and the linear-in-degree shape reproduce: re-runs here and on an
+// independent machine put the degree-5,000 figure anywhere from 389 to 493 µs.
+// Do not quote these to three digits. The shape is realistic: a project or
+// spec node that every memory points at with RelBelongsToProject or
+// RelReferences. phase5Traverse pays it at every BFS level whenever
+// HopDepth > 0.
+//
+// Making the cap count KEYS SCANNED would bound that work, and it was
+// considered and rejected. Reverse keys arrive weight-DESCENDING, and the two
+// edge classes do not share a weight distribution: explicit directional
+// relations are written once at a high fixed confidence weight, while the
+// RelCoActivated edges this union exists to surface start low and grow with
+// use. A scanned-key budget on a directional hub would therefore fill itself
+// with the high-weight directional edges and systematically hide exactly the
+// Hebbian edges the feature was built to reach — a silent, biased loss of real
+// neighbours (principle #2) traded for a bounded latency win. Pinned by
+// TestRankingReverseEdges_DirectionalEdgeDoesNotConsumeCapSlot; change the
+// semantics and that test tells you what you are giving up.
+//
+// The residual cost is a cold-cache scan amortized over the 2s revAssocCache
+// TTL. Sizing it against whole-recall p50 depends on the deployment: measured
+// end-to-end recall is ~26 ms and embedder-dominated, where 476 µs is ~2%; a
+// deployment supplying caller-side embeddings has no embedder in the path and
+// a far smaller denominator, where the same 476 µs is a large fraction of the
+// call. Bounding the scan without the hiding hazard — a relType-aware reverse
+// index, or a per-engram directional-degree hint — is its own increment.
+const revAssocScanCap = 64
 
 // assocCacheTTL is how long association lists are cached.
 // Stale weights are acceptable for BFS traversal in the activation path.
@@ -187,7 +330,8 @@ func NewPebbleStore(db *pebble.DB, cfg PebbleStoreConfig) *PebbleStore {
 	prov := provenance.NewStore(db)
 	metaCache, _ := lru.New[[16]byte, *EngramMeta](100_000)
 	vaultPrefixCache, _ := lru.New[string, [8]byte](10_000)
-	assocCache := expirable.NewLRU[[24]byte, *assocCacheEntry](500_000, nil, 2*time.Second)
+	assocCache := expirable.NewLRU[[24]byte, *assocCacheEntry](500_000, nil, assocCacheTTL)
+	revAssocCache := expirable.NewLRU[[24]byte, *revAssocCacheEntry](500_000, nil, assocCacheTTL)
 	ps := &PebbleStore{
 		db:               db,
 		cache:            NewL1Cache(cfg.CacheSize),
@@ -197,6 +341,7 @@ func NewPebbleStore(db *pebble.DB, cfg PebbleStoreConfig) *PebbleStore {
 		metaCache:        metaCache,
 		vaultPrefixCache: vaultPrefixCache,
 		assocCache:       assocCache,
+		revAssocCache:    revAssocCache,
 	}
 	ps.walSync = newWALSyncer(db)
 	ps.counterFlush = newCounterCoalescer(db)
@@ -225,6 +370,15 @@ func (ps *PebbleStore) SetWAL(mol *wal.MOL, gc *wal.GroupCommitter) {
 // Must be called after a successful batch.Commit() and before batch.Close().
 func (ps *PebbleStore) replicateBatch(b *pebble.Batch) {
 	if ps.repLogAppend == nil {
+		return
+	}
+	// A batch with no records replicates nothing. The len(repr) check alone does
+	// not cover it: an EMPTY Pebble batch's Repr() is still a 12-byte header, so
+	// it is non-zero-length and would ship a zero-op OpBatch to every follower.
+	// Applying one is harmless, but it is log volume and a red herring in a
+	// divergence investigation. Newly reachable since UpdateAssocWeightBatch can
+	// skip every update in a batch (see AssocBatchSkipError).
+	if b.Empty() {
 		return
 	}
 	repr := b.Repr()
@@ -260,14 +414,13 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	if eng.Stability == 0 {
 		eng.Stability = 30.0
 	}
-	if eng.CreatedAt.IsZero() {
-		eng.CreatedAt = time.Now()
-	}
-	if eng.UpdatedAt.IsZero() {
-		eng.UpdatedAt = eng.CreatedAt
-	}
-	if eng.LastAccess.IsZero() {
-		eng.LastAccess = eng.CreatedAt
+	eng.CreatedAt, eng.UpdatedAt, eng.LastAccess = normalizeEngramTimes(eng.CreatedAt, eng.UpdatedAt, eng.LastAccess)
+
+	// STO-12: inline associations are a creator. Checked BEFORE anything is
+	// encoded or queued, so a refusal is a clean no-op rather than a partly
+	// written engram. No sibling set: this call makes exactly one engram live.
+	if err := ps.checkInlineAssocTargets(wsPrefix, [16]byte(eng.ID), eng.Associations, nil); err != nil {
+		return ULID{}, err
 	}
 
 	erfEng := toERFEngram(eng)
@@ -318,6 +471,13 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	// 0x0C: tag indexes
 	for _, tag := range eng.Tags {
 		batch.Set(keys.TagIndexKey(wsPrefix, keys.Hash(tag), [16]byte(eng.ID)), []byte{}, nil)
+	}
+
+	// 0x2C: ordered raw-tag-range index (key:value tags only)
+	for _, tag := range eng.Tags {
+		if err := WriteRawTagIndexEntry(batch, wsPrefix, tag, [16]byte(eng.ID)); err != nil {
+			return ULID{}, err
+		}
 	}
 
 	// 0x0D: creator index
@@ -414,6 +574,34 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
+	// STO-12 sibling set for the inline-association guard: every CALLER-SUPPLIED
+	// id in this call, which the single commit below makes live atomically.
+	// Built up front from the whole slice rather than accumulated as the loop
+	// walks it, so the guard is ORDER-INDEPENDENT — an item may name a sibling
+	// that appears later. (pebbleStoreBatch cannot do this: its WriteAssociation
+	// is called before the later WriteEngram exists to be seen. See
+	// TestSTO12_BatchAssociationGuardIsQueueOrderDependent.)
+	// Auto-assigned ids are deliberately absent: a caller cannot reference an id
+	// the store has not generated yet.
+	sameCall := make(map[[24]byte]struct{}, len(items))
+	for i := range items {
+		if items[i].Engram != nil && items[i].Engram.ID != (ULID{}) {
+			var k [24]byte
+			copy(k[:8], items[i].WSPrefix[:])
+			copy(k[8:], items[i].Engram.ID[:])
+			sameCall[k] = struct{}{}
+		}
+	}
+	inSameCall := func(ws [8]byte) func([16]byte) bool {
+		return func(id [16]byte) bool {
+			var k [24]byte
+			copy(k[:8], ws[:])
+			copy(k[8:], id[:])
+			_, ok := sameCall[k]
+			return ok
+		}
+	}
+
 	for i := range items {
 		eng := items[i].Engram
 		ws := items[i].WSPrefix
@@ -434,20 +622,45 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		if eng.Stability == 0 {
 			eng.Stability = 30.0
 		}
-		if eng.CreatedAt.IsZero() {
-			eng.CreatedAt = time.Now()
-		}
-		if eng.UpdatedAt.IsZero() {
-			eng.UpdatedAt = eng.CreatedAt
-		}
-		if eng.LastAccess.IsZero() {
-			eng.LastAccess = eng.CreatedAt
-		}
+		eng.CreatedAt, eng.UpdatedAt, eng.LastAccess = normalizeEngramTimes(eng.CreatedAt, eng.UpdatedAt, eng.LastAccess)
 
 		erfEng := toERFEngram(eng)
 		erfBytes, encErr := erf.EncodeV2(erfEng)
 		if encErr != nil {
 			errs[i] = fmt.Errorf("encode engram: %w", encErr)
+			continue
+		}
+
+		// Validate every tag BEFORE queueing any Set for this item. The batch is
+		// shared and committed as a whole, so a mid-item `continue` cannot un-queue
+		// Sets already added — validating a NUL tag value only after the engram/meta/
+		// index keys were queued would report the item failed yet still commit a
+		// half-indexed engram (missing creator/relevance/last-access keys → invisible
+		// to the pruner and where_left_off). Reject up front instead.
+		// Validate every tag BEFORE queueing any Set for this item. The batch is
+		// shared and committed as a whole, so a mid-item `continue` cannot un-queue
+		// Sets already added — validating a NUL tag value only after the engram/meta/
+		// index keys were queued would report the item failed yet still commit a
+		// half-indexed engram (missing creator/relevance/last-access keys → invisible
+		// to the pruner and where_left_off). Reject up front instead.
+		tagErr := error(nil)
+		for _, tag := range eng.Tags {
+			if err := ValidateRawTagValue(tag); err != nil {
+				tagErr = fmt.Errorf("write engram batch: raw tag index: %w", err)
+				break
+			}
+		}
+		if tagErr != nil {
+			errs[i] = tagErr
+			continue
+		}
+
+		// STO-12, for the same reason and in the same place as the tag
+		// validation above: the batch is shared and a mid-item `continue`
+		// cannot un-queue Sets already added, so a dangling inline target has
+		// to be caught before this item queues anything at all.
+		if err := ps.checkInlineAssocTargets(ws, [16]byte(eng.ID), eng.Associations, inSameCall(ws)); err != nil {
+			errs[i] = err
 			continue
 		}
 
@@ -484,6 +697,17 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		for _, tag := range eng.Tags {
 			batch.Set(keys.TagIndexKey(ws, keys.Hash(tag), id16), []byte{}, nil)
 		}
+		var rawTagErr error
+		for _, tag := range eng.Tags {
+			if err := WriteRawTagIndexEntry(batch, ws, tag, id16); err != nil {
+				rawTagErr = err
+				break
+			}
+		}
+		if rawTagErr != nil {
+			errs[i] = fmt.Errorf("write engram batch: raw tag index: %w", rawTagErr)
+			continue
+		}
 		batch.Set(keys.CreatorIndexKey(ws, keys.Hash(eng.CreatedBy), id16), []byte{}, nil)
 		batch.Set(keys.RelevanceBucketKey(ws, eng.Relevance, id16), []byte{}, nil)
 
@@ -496,6 +720,90 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		}
 
 		ids[i] = eng.ID
+	}
+
+	// STO-12, second half of the sameCall exception. sameCall promises that
+	// every caller-supplied id in this call is made live by the single commit
+	// below — but the per-item validations above can `continue` without ever
+	// queueing that item's 0x01 key, so an item the guard accepted as a live
+	// endpoint may never commit. A referrer naming it would otherwise commit
+	// three association rows pointing at nothing, with a nil error of its own.
+	//
+	// Which validations those are, precisely, because it matters:
+	//
+	//   - encode, the up-front ValidateRawTagValue loop, and
+	//     checkInlineAssocTargets `continue` BEFORE the item queues anything.
+	//     Those are the ones this block repairs.
+	//   - WriteRawTagIndexEntry and the 0x22 laKey batch.Set `continue` AFTER
+	//     the item's 0x01 and association Sets are already queued. If either
+	//     ever fired, the item would COMMIT and have its inbound edges deleted —
+	//     the inverse of the intended repair. Both are unreachable today:
+	//     WriteRawTagIndexEntry re-runs the identical validation the loop above
+	//     already passed, and pebble.Batch.Set fails only on a >4 GB batch. Said
+	//     plainly here rather than claimed away, so that anyone who moves a
+	//     validation knows which side of the queueing it has to stay on.
+	//
+	// THE PREDICATE IS ENGRAM EXISTENCE, NOT THE BATCH OUTCOME. A refused item
+	// is not necessarily a dead endpoint: a refused UPDATE of an engram that is
+	// already in Pebble leaves that engram's 0x01 record exactly where it was,
+	// so a referrer's edge to it is legitimate and deleting it is unrecoverable
+	// data loss (the hole above only leaks a dangling row, which the deferred
+	// integrity pass can repair — losing a live edge has no repair). The
+	// committed-sibling check covers the same id appearing twice in one call,
+	// once successfully.
+	//
+	// Repaired after the loop rather than by accumulating sameCall as the loop
+	// walks: an incremental set would make the guard queue-order dependent (the
+	// documented pebbleStoreBatch limitation) and refuse the legitimate
+	// referrer-first ordering. Pebble applies a batch in order, so a Delete
+	// queued here wins over a Set queued earlier for the same key, whatever the
+	// item order was.
+	committedIDs := make(map[[24]byte]struct{})
+	for i := range items {
+		if errs[i] != nil || items[i].Engram == nil {
+			continue
+		}
+		var k [24]byte
+		copy(k[:8], items[i].WSPrefix[:])
+		copy(k[8:], items[i].Engram.ID[:])
+		committedIDs[k] = struct{}{}
+	}
+	failedIDs := make(map[[24]byte]struct{})
+	for i := range items {
+		if errs[i] == nil || items[i].Engram == nil || items[i].Engram.ID == (ULID{}) {
+			continue
+		}
+		var k [24]byte
+		copy(k[:8], items[i].WSPrefix[:])
+		copy(k[8:], items[i].Engram.ID[:])
+		if _, ok := committedIDs[k]; ok {
+			continue // another item in this call makes the same id live
+		}
+		if ps.engramExists(items[i].WSPrefix, [16]byte(items[i].Engram.ID)) {
+			continue // a refused UPDATE — the endpoint is live and its edges are real
+		}
+		failedIDs[k] = struct{}{}
+	}
+	if len(failedIDs) > 0 {
+		for i := range items {
+			if errs[i] != nil || items[i].Engram == nil {
+				continue
+			}
+			ws := items[i].WSPrefix
+			id16 := [16]byte(items[i].Engram.ID)
+			for _, assoc := range items[i].Engram.Associations {
+				var k [24]byte
+				copy(k[:8], ws[:])
+				copy(k[8:], assoc.TargetID[:])
+				if _, dead := failedIDs[k]; !dead {
+					continue
+				}
+				dst := [16]byte(assoc.TargetID)
+				batch.Delete(keys.AssocFwdKey(ws, id16, assoc.Weight, dst), nil)
+				batch.Delete(keys.AssocRevKey(ws, dst, assoc.Weight, id16), nil)
+				batch.Delete(keys.AssocWeightIndexKey(ws, id16, dst), nil)
+			}
+		}
 	}
 
 	syncOption := pebble.Sync

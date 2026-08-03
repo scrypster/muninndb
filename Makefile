@@ -7,7 +7,7 @@ HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
 ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
 
 .PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets web css build test bench test-integration \
-        eval-bible-setup eval-bible eval-bible-full eval-bible-quick eval-bible-export eval-bible-fast \
+        corpora check-filenames \
         _ort-darwin-arm64 _ort-darwin-amd64 _ort-linux-amd64 _ort-linux-arm64 _ort-windows-amd64
 
 ## fetch-assets: download the model, tokenizer, and all platform ORT libraries.
@@ -124,29 +124,28 @@ bench:
 
 ## test-integration: run integration tests (requires no muninn already running on :8750).
 ## Builds the binary, exercises the full start/stop/restart lifecycle, then cleans up.
+## If :8750 is busy the suite SKIPs visibly; MUNINN_REQUIRE_INTEGRATION=1 makes that a
+## failure instead, which is what CI sets (#812).
 test-integration:
 	@go test -tags integration -v -timeout 120s ./cmd/muninn/...
 
-## eval-bible-setup: download KJV and cross-reference data files.
-eval-bible-setup:
-	@bash scripts/eval-bible-setup.sh
+## corpora: run the standing measurement corpora and write .artifacts/corpora.txt.
+## The four harnesses in internal/engine/activation, normalised so two runs of an
+## unchanged tree are byte-identical and a diff shows only moved numbers. They also run
+## inside `go test ./...`; this target exists to produce the diffable artifact.
+corpora:
+	@bash scripts/run-corpora.sh
 
-## eval-bible: build the eval binary (NT-only corpus, 100 seeds).
-eval-bible:
-	@go build -o eval-bible ./cmd/eval-bible/...
+## check-filenames: fail if a source file's NAME silently excludes it from the build (#814).
+check-filenames:
+	@bash scripts/check-filename-build-constraints.sh
 
-## eval-bible-quick: run NT-only eval with 20 seeds (fast smoke test).
-eval-bible-quick: eval-bible
-	@./eval-bible -seeds 20 -min-xrefs 3
-
-## eval-bible-export: run NT-only eval, export vault snapshot for fast re-runs.
-eval-bible-export: eval-bible
-	@./eval-bible -seeds 100 -export-to testdata/bible/bible-nt.muninn
-
-## eval-bible-fast: run NT-only eval using pre-exported vault snapshot (skips 12-min load).
-eval-bible-fast: eval-bible
-	@./eval-bible -seeds 100 -import-from testdata/bible/bible-nt.muninn
-
-## eval-bible-full: run full Bible eval (OT + NT corpus, 100 seeds).
-eval-bible-full: eval-bible
-	@./eval-bible -full -seeds 100
+# The eval-bible-* targets were removed here: they build ./cmd/eval-bible/... and run
+# scripts/eval-bible-setup.sh, neither of which is in the public repo (cmd/eval*/ and
+# scripts/eval-* are gitignored as internal development tooling). Advertising targets that
+# cannot run from a fresh clone is worse than not listing them. If the retrieval-quality
+# eval harness is published later, restore them alongside it.
+#
+# testdata/bible/ went with them (it held only a .gitkeep). An empty data directory whose
+# only loader is gitignored reads as "there is a corpus here"; there was not one, and it
+# was cited as if it were the standing corpora. The standing corpora are `make corpora`.

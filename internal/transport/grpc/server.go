@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
+	"github.com/scrypster/muninndb/internal/transport/mbp"
 	pb "github.com/scrypster/muninndb/proto/gen/go/muninn/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -35,6 +37,7 @@ type EngineAPI interface {
 	Subscribe(ctx context.Context, req *pb.SubscribeRequest) (*pb.SubscribeResponse, error)
 	SubscribeWithDeliver(ctx context.Context, req *pb.SubscribeRequest, deliver trigger.DeliverFunc) (string, error)
 	Unsubscribe(ctx context.Context, subID string) error
+	AdjustConfidence(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error)
 }
 
 // Server implements the MuninnDB gRPC service.
@@ -45,6 +48,31 @@ type Server struct {
 	authStore *auth.Store
 	gs        *grpc.Server
 	tlsConfig *tls.Config // nil = plain TCP
+}
+
+// notCortexUnaryInterceptor turns a write refused by the cluster single-writer
+// gate into FailedPrecondition with the leader hint, rather than the
+// codes.Unknown a bare error would produce (#596). It sits at the interceptor
+// chain so every RPC — present and future — inherits the mapping; there is no
+// per-handler list to keep in sync.
+//
+// FailedPrecondition, not Unavailable: the gRPC spec reserves Unavailable for
+// "retry the SAME call against the SAME backend", which is exactly wrong here.
+// FailedPrecondition tells the client to fix something first — go to the Cortex.
+func notCortexUnaryInterceptor(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	resp, err := handler(ctx, req)
+	return resp, mapNotCortex(err)
+}
+
+func notCortexStreamInterceptor(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	return mapNotCortex(handler(srv, ss))
+}
+
+func mapNotCortex(err error) error {
+	if err == nil || !errors.Is(err, mbp.ErrNotLeader) {
+		return err
+	}
+	return status.Error(codes.FailedPrecondition, err.Error())
 }
 
 func denyReadOnlyMutation(ctx context.Context) error {
@@ -113,8 +141,8 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, tlsConfig *
 	opts := []grpc.ServerOption{
 		grpc.MaxConcurrentStreams(500),
 		grpc.KeepaliveParams(kasp),
-		grpc.UnaryInterceptor(server.authUnaryInterceptor),
-		grpc.StreamInterceptor(server.authStreamInterceptor),
+		grpc.ChainUnaryInterceptor(server.authUnaryInterceptor, notCortexUnaryInterceptor),
+		grpc.ChainStreamInterceptor(server.authStreamInterceptor, notCortexStreamInterceptor),
 	}
 	if tlsConfig != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
@@ -415,6 +443,27 @@ func (s *Server) Link(ctx context.Context, req *pb.LinkRequest) (*pb.LinkRespons
 	resp, err := s.engine.Link(ctx, req)
 	if err != nil {
 		slog.Error("link failed", "error", err)
+		return nil, err
+	}
+	return resp, nil
+}
+
+// AdjustConfidence implements the AdjustConfidence RPC. Mirrors Link:
+// denyReadOnlyMutation rejects observe-mode keys, resolveRequestVault rewrites
+// req.Vault to the canonical bound vault, then the engine adapter handles ULID
+// parsing and the documented sentinel→codes mapping.
+func (s *Server) AdjustConfidence(ctx context.Context, req *pb.AdjustConfidenceRequest) (*pb.AdjustConfidenceResponse, error) {
+	if err := denyReadOnlyMutation(ctx); err != nil {
+		return nil, err
+	}
+	vault, err := s.resolveRequestVault(ctx, req.Vault)
+	if err != nil {
+		return nil, err
+	}
+	req.Vault = vault
+	resp, err := s.engine.AdjustConfidence(ctx, req)
+	if err != nil {
+		slog.Error("adjust_confidence failed", "error", err)
 		return nil, err
 	}
 	return resp, nil

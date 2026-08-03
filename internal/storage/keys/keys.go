@@ -1,6 +1,7 @@
 package keys
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -163,6 +164,89 @@ func TagIndexKey(ws [8]byte, tagHash uint32, id [16]byte) []byte {
 	return key
 }
 
+// RawTagRangePrefix returns the 13-byte prefix shared by every raw-tag-range
+// entry for a given (workspace, tagKey): 0x2B | ws(8) | Hash(tagKey)(4).
+// All value-bearing entries under this prefix sort by their raw value bytes.
+func RawTagRangePrefix(ws [8]byte, tagKeyHash uint32) []byte {
+	key := make([]byte, 1+8+4)
+	key[0] = prefix.RawTagRange
+	copy(key[1:9], ws[:])
+	binary.BigEndian.PutUint32(key[9:13], tagKeyHash)
+	return key
+}
+
+// RawTagRangeKey constructs the ordered raw-tag-range secondary index key
+// (0x2B prefix, S1). Layout:
+//
+//	0x2B | ws(8) | Hash(tagKey)(4) | value(N) | 0x00 | id(16)
+//
+// value must NOT contain a 0x00 byte — the 0x00 separator after value is what
+// resolves prefix-of-each-other values (e.g. "2026" sorts before "2026-07"
+// because 0x00 < '-'). Callers (internal/storage's raw-tag-range write path)
+// reject values containing 0x00 before calling this.
+func RawTagRangeKey(ws [8]byte, tagKeyHash uint32, value []byte, id [16]byte) []byte {
+	key := make([]byte, 0, 13+len(value)+1+16)
+	key = append(key, RawTagRangePrefix(ws, tagKeyHash)...)
+	key = append(key, value...)
+	key = append(key, 0x00)
+	key = append(key, id[:]...)
+	return key
+}
+
+// RawTagRangeBound computes the (lower, upper) Pebble iterator bounds for a
+// single-sided comparison against a raw-tag-range index (0x2B), scoped to one
+// (workspace, tagKeyHash). upper is always exclusive; lower is always
+// inclusive. Ops mirror activation's tag_prefix filter: lte, gte, lt, gt, and
+// eq (also the default for an unrecognized/empty op).
+//
+// The 0x00 separator after the value means "value + 0x01" as an exclusive
+// upper bound includes every id suffix for an exact value match (0x01 > 0x00),
+// and "value + 0x00" as an inclusive lower bound is <= every id suffix for
+// that same value (a key ending sooner sorts before a longer key sharing the
+// same prefix bytes).
+func RawTagRangeBound(ws [8]byte, tagKeyHash uint32, op string, value []byte) (lower, upper []byte) {
+	prefixBytes := RawTagRangePrefix(ws, tagKeyHash)
+
+	withSep := func(sep byte) []byte {
+		b := make([]byte, 0, len(prefixBytes)+len(value)+1)
+		b = append(b, prefixBytes...)
+		b = append(b, value...)
+		b = append(b, sep)
+		return b
+	}
+
+	switch op {
+	case "lt":
+		return prefixBytes, withSep(0x00)
+	case "lte":
+		return prefixBytes, withSep(0x01)
+	case "gt":
+		return withSep(0x01), PrefixUpperBound(prefixBytes)
+	case "gte":
+		return withSep(0x00), PrefixUpperBound(prefixBytes)
+	default: // "eq", ""
+		return withSep(0x00), withSep(0x01)
+	}
+}
+
+// CombineRawTagRangeBounds intersects two (lower, upper) bound pairs produced
+// by RawTagRangeBound for the same (workspace, tagKeyHash) — used when a
+// recall combines two tag_prefix filters on the same prefix (e.g. gte + lte)
+// into a single bounded scan. The intersection of [lower1, upper1) and
+// [lower2, upper2) is [max(lower1, lower2), min(upper1, upper2)), compared
+// with the same byte-lexicographic ordering Pebble itself uses for keys.
+func CombineRawTagRangeBounds(lower1, upper1, lower2, upper2 []byte) (lower, upper []byte) {
+	lower = lower1
+	if bytes.Compare(lower2, lower1) > 0 {
+		lower = lower2
+	}
+	upper = upper1
+	if bytes.Compare(upper2, upper1) < 0 {
+		upper = upper2
+	}
+	return lower, upper
+}
+
 // CreatorIndexKey constructs the creator secondary index key (0x0D prefix).
 func CreatorIndexKey(ws [8]byte, creatorHash uint32, id [16]byte) []byte {
 	key := make([]byte, 1+8+4+16)
@@ -276,20 +360,24 @@ func AssocFwdRangeStart(ws [8]byte) []byte {
 }
 
 // AssocFwdRangeEnd returns the exclusive upper bound for scanning all forward
-// associations within a vault (increments the workspace prefix by 1 in the
-// last byte, standard Pebble upper-bound idiom).
+// associations within a vault.
+//
+// STO-11: delegates to PrefixUpperBound, like its sibling AssocRevRangeEnd.
+// This used to open-code its own carry loop that stopped at index 1 so it could
+// not touch the 0x03 type byte — correct for the ~1-in-256 case where the vault
+// prefix's LAST byte is 0xFF, but for an ALL-0xFF workspace prefix every
+// workspace byte wrapped to 0x00 and the loop ran out of indices, producing
+// 0x03|00..00: an upper bound BELOW the lower bound, so the scan returned
+// nothing, silently and forever, for that vault only. Probability 2^-64, i.e.
+// it will not happen — which is exactly why it is a delegation rather than a
+// comment (#819). One bound rule for the keyspace, not two.
+//
+// Byte 0 is the 0x03 type prefix and can never be 0xFF, so PrefixUpperBound's
+// carry always terminates and this never returns the unbounded nil.
+// Pinned by TestAssocRangeEnds_NeverInvertTheirBound and, behaviourally, by
+// TestGetAssociations_AllFFWorkspacePrefixIsNotSilentlyEmpty.
 func AssocFwdRangeEnd(ws [8]byte) []byte {
-	end := make([]byte, 1+8)
-	end[0] = prefix.AssocFwd
-	copy(end[1:9], ws[:])
-	// Increment the last byte of ws portion in the key to get exclusive upper bound.
-	for i := len(end) - 1; i >= 1; i-- {
-		end[i]++
-		if end[i] != 0 {
-			break
-		}
-	}
-	return end
+	return PrefixUpperBound(AssocFwdRangeStart(ws))
 }
 
 // AssocFwdPrefixForID returns a 25-byte scan prefix covering all forward
@@ -300,6 +388,34 @@ func AssocFwdPrefixForID(ws [8]byte, id [16]byte) []byte {
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
 	return key
+}
+
+// AssocRevRangeStart returns the inclusive lower bound for scanning all reverse
+// association index entries within a vault (0x04 prefix scan lower bound).
+func AssocRevRangeStart(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.AssocRev
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// AssocRevRangeEnd returns the exclusive upper bound for scanning all reverse
+// association index entries within a vault.
+//
+// STO-11: this delegates to PrefixUpperBound rather than open-coding a
+// last-byte increment. PrefixUpperBound carries across every byte, and because
+// byte 0 here is the 0x04 prefix (never 0xFF) it always produces a bound
+// strictly above the lower bound — including for an all-0xFF workspace prefix,
+// where it now returns exactly 0x05.
+//
+// Before #816 the helper left the trailing 0xFFs in place, so an all-0xFF
+// workspace yielded 0x05|FF..FF and a 0xFF-terminated one yielded a bound that
+// reached into the NEXT vault's 0x04 range. That surplus was harmless only
+// because every consumer additionally checks the 25-byte per-id prefix (see
+// rankingReverseEdges). It is now tight, and AssocFwdRangeEnd delegates here
+// too (#819), so the keyspace has one bound rule.
+func AssocRevRangeEnd(ws [8]byte) []byte {
+	return PrefixUpperBound(AssocRevRangeStart(ws))
 }
 
 // AssocRevPrefixForID returns a 25-byte scan prefix covering all reverse
@@ -451,7 +567,45 @@ func TransitionPrefixForSrc(ws [8]byte, src [16]byte) []byte {
 
 // WeightComplement computes the weight complement for descending sort order.
 func WeightComplement(weight float32) [4]byte {
-	w := uint32(weight * float32(math.MaxUint32))
+	// BYTE-COMPATIBLE with every key ever written for weights in (0,1), and
+	// explicitly saturated at the endpoints.
+	//
+	// History, because this function has now been wrong twice in opposite
+	// directions:
+	//
+	//  1. The ORIGINAL form, uint32(weight * float32(math.MaxUint32)), was
+	//     undefined for weight exactly 1.0 — float32(MaxUint32) rounds UP to
+	//     2^32, the multiply lands on 2^32, and the uint32 conversion of an
+	//     out-of-range float is implementation-defined (0 on arm64). A
+	//     full-confidence edge was therefore written at the weight-0.0 key
+	//     position and read back as 0: decide's evidence links, explicit 1.0
+	//     declarations, and LTP-saturated learning were silently destroyed.
+	//  2. The FIRST fix computed uint32(f * float64(math.MaxUint32)). Correct
+	//     at 1.0 — and byte-INCOMPATIBLE at essentially every other weight,
+	//     because float32(MaxUint32)==2^32 while float64(MaxUint32)==2^32-1:
+	//     the two multipliers disagree by ~1 integer step for all interior
+	//     weights (0 identical encodings in 1M samples). Every recomputed-key
+	//     delete (Hebbian updates, decay, engram-delete cascade) would have
+	//     missed every pre-fix key on every existing vault: metadata silently
+	//     reset, permanent duplicate edges, unbounded decay key growth. Caught
+	//     by adversarial review before it shipped.
+	//
+	// The correct form keeps the ORIGINAL expression on the open interval —
+	// byte-identical to every existing on-disk key — and handles only the
+	// endpoints explicitly. 0.99999994 (the largest float32 below 1.0) stays
+	// on the legacy path and encodes safely to 4294967040. The endpoint
+	// saturation gives 1.0 -> complement 0 (sorts first, decodes to exactly
+	// 1.0). Pinned by a cross-era byte-compatibility test that reproduces the
+	// legacy bytes for interior weights.
+	var w uint32
+	switch {
+	case weight >= 1.0:
+		w = math.MaxUint32
+	case weight <= 0:
+		w = 0
+	default:
+		w = uint32(weight * float32(math.MaxUint32)) // legacy expression: byte-identical on (0,1)
+	}
 	c := uint32(math.MaxUint32) - w
 	var buf [4]byte
 	binary.BigEndian.PutUint32(buf[:], c)
@@ -818,5 +972,63 @@ func LeaseKey(ws [8]byte, id [16]byte) []byte {
 	key[0] = prefix.Lease
 	copy(key[1:9], ws[:])
 	copy(key[9:25], id[:])
+	return key
+}
+
+// ProspectiveIntentKey constructs an armed-intention index key (0x2D prefix,
+// THE PUSH increment 1). One key exists per (intention, cue entity) pair so a
+// focal-entity lookup is a single 17-byte-prefix scan.
+// Key: 0x2D | wsPrefix(8) | EntityNameHash(cue)(8) | intentionID(16) = 33 bytes
+// Value: msgpack prospectiveIntentRecord (internal/storage/prospective.go).
+func ProspectiveIntentKey(ws [8]byte, cueHash [8]byte, intentionID [16]byte) []byte {
+	key := make([]byte, 1+8+8+16)
+	key[0] = prefix.ProspectiveIntent
+	copy(key[1:9], ws[:])
+	copy(key[9:17], cueHash[:])
+	copy(key[17:33], intentionID[:])
+	return key
+}
+
+// ProspectiveIntentPrefix returns the 17-byte scan prefix covering every
+// intention armed on a given cue entity in a vault (0x2D | ws(8) | cueHash(8)).
+func ProspectiveIntentPrefix(ws [8]byte, cueHash [8]byte) []byte {
+	key := make([]byte, 1+8+8)
+	key[0] = prefix.ProspectiveIntent
+	copy(key[1:9], ws[:])
+	copy(key[9:17], cueHash[:])
+	return key
+}
+
+// ProspectiveIntentWorkspacePrefix returns the 9-byte scan prefix covering ALL
+// armed-intention keys in a vault (0x2D | ws(8)). Used by entity-merge relink,
+// which must rewrite stale cue names in every sibling record.
+func ProspectiveIntentWorkspacePrefix(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.ProspectiveIntent
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// EvolveRepairMarkKey constructs the per-vault evolve entity-link repair
+// watermark key (0x2B prefix). Value: one byte, the repair-pass version that
+// last completed cleanly over the vault. Presence at the current version lets
+// startup skip the full soft-deleted scan on an already-healed vault.
+// Key: 0x2B | wsPrefix(8) = 9 bytes
+func EvolveRepairMarkKey(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.EvolveRepairMark
+	copy(key[1:9], ws[:])
+	return key
+}
+
+// AssocWeightRepairMarkKey constructs the per-vault watermark key (0x2E) for
+// the one-time repair of pre-fix full-weight association keys (#756). Value:
+// one byte, the repair-pass version that last completed cleanly over the
+// vault. Presence at the current version lets startup skip the full 0x03 scan.
+// Key: 0x2E | wsPrefix(8) = 9 bytes
+func AssocWeightRepairMarkKey(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.AssocWeightRepairMark
+	copy(key[1:9], ws[:])
 	return key
 }

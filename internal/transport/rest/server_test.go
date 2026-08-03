@@ -166,7 +166,11 @@ func (m *MockEngine) GetActivityCounts(ctx context.Context, req *ActivityCountsR
 }
 
 func (m *MockEngine) WorkerStats() cognitive.EngineWorkerStats {
-	return cognitive.EngineWorkerStats{}
+	return cognitive.EngineWorkerStats{
+		Hebbian:    cognitive.DisabledWorkerStats(),
+		Contradict: cognitive.DisabledWorkerStats(),
+		Confidence: cognitive.DisabledWorkerStats(),
+	}
 }
 
 func (m *MockEngine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeRequest, deliver trigger.DeliverFunc) (string, error) {
@@ -1941,6 +1945,16 @@ func TestOpenAPISpec_ListEngramsLimitContract(t *testing.T) {
 	}
 	if !strings.Contains(engramsSection, "maximum: 200") {
 		t.Fatal("expected list engrams maximum limit 200 in openapi spec")
+	}
+}
+
+func TestOpenAPISpec_WorkerStateZeroIsAmbiguous(t *testing.T) {
+	body := string(openapiSpec)
+	if !strings.Contains(body, "Zero is ambiguous between active and disabled") {
+		t.Fatal("worker state description must explain that numeric zero is ambiguous")
+	}
+	if !strings.Contains(body, "Check enabled first") {
+		t.Fatal("worker state description must direct clients to check enabled first")
 	}
 }
 

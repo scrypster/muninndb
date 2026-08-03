@@ -56,6 +56,8 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"LastAccessIndexKey", LastAccessIndexKey([8]byte{}, 0, [16]byte{})},
 		{"DreamStateKey", DreamStateKey([8]byte{1, 2, 3, 4, 5, 6, 7, 8})},
 		{"LeaseKey", LeaseKey(ws, id)},
+		{"EvolveRepairMarkKey", EvolveRepairMarkKey(ws)},
+		{"AssocWeightRepairMarkKey", AssocWeightRepairMarkKey(ws)},
 	}
 
 	seen := make(map[byte]string)
@@ -399,6 +401,8 @@ func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
 		{"DreamState", DreamStateKey(u8)[0], prefix.DreamState},
 		{"ContentHash", ContentHashKey(ws, id32)[0], prefix.ContentHash},
 		{"Lease", LeaseKey(ws, id16)[0], prefix.Lease},
+		{"EvolveRepairMark", EvolveRepairMarkKey(ws)[0], prefix.EvolveRepairMark},
+		{"AssocWeightRepairMark", AssocWeightRepairMarkKey(ws)[0], prefix.AssocWeightRepairMark},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

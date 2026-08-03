@@ -859,6 +859,36 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	return nil
 }
 
+// IncrementEntityMentionCount increments the MentionCount on the global entity
+// record for the given name without touching any other field — unlike
+// UpsertEntityRecord it never rewrites Type, Source or Confidence, so it is
+// safe to call for links carried from a predecessor whose entity metadata must
+// survive untouched. No-ops if the record does not exist: a carried link whose
+// 0x1F record is already gone has nothing to fund, and DecrementEntityMentionCount
+// floors at 0 on the other side, so the ledger stays consistent.
+// Safe for concurrent calls — uses per-entity locking.
+func (ps *PebbleStore) IncrementEntityMentionCount(ctx context.Context, name string) error {
+	mu := ps.getEntityLock(name)
+	mu.Lock()
+	defer mu.Unlock()
+
+	existing, err := ps.GetEntityRecord(ctx, name)
+	if err != nil {
+		return fmt.Errorf("increment entity mention count: %w", err)
+	}
+	if existing == nil {
+		return nil
+	}
+
+	existing.MentionCount++
+	existing.UpdatedAt = time.Now().UnixNano()
+	val, err := msgpack.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("increment entity mention count: marshal: %w", err)
+	}
+	return ps.db.Set(keys.EntityKey(keys.EntityNameHash(name)), val, pebble.NoSync)
+}
+
 // DecrementEntityMentionCount decrements the MentionCount on the global entity
 // record for the given name, floored at 0. No-ops if the record does not exist.
 // When the count reaches 0, the 0x23 reverse index is scanned to confirm no live

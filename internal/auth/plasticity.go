@@ -1,5 +1,11 @@
 package auth
 
+import (
+	"math"
+	"strings"
+	"time"
+)
+
 // PlasticityConfig is the per-vault cognitive pipeline configuration.
 // A nil PlasticityConfig means "use defaults" (equivalent to Preset: "default").
 // Non-nil pointer fields override the chosen preset value.
@@ -32,10 +38,23 @@ type PlasticityConfig struct {
 	MaxEngrams    *int     `json:"max_engrams,omitempty"`    // max engrams per vault; 0 = no limit
 	RetentionDays *float32 `json:"retention_days,omitempty"` // max age in days; 0 = no limit
 
-	// Association edge decay (applied each prune pass, ~60s)
-	AssocDecayFactor *float32 `json:"assoc_decay_factor,omitempty"` // multiplier per pass (e.g. 0.95 = 5% decay); 0 = disabled
-	AssocMinWeight   *float32 `json:"assoc_min_weight,omitempty"`   // edges below this are deleted (e.g. 0.05)
-	ArchiveThreshold *float64 `json:"archive_threshold,omitempty"`  // consolidation score threshold for archiving (default 0.05)
+	// Association edge decay.
+	//
+	// AssocDecayFactor is an ENABLE/DISABLE SWITCH, not a rate (#762). It was
+	// once "multiplier per prune pass", but a pass is an interval owned by an
+	// unrelated worker, so the number never denominated a rate anyone could
+	// reason about. The rate now lives in AssocHalfLifeDays. Any value > 0
+	// enables decay; 0 disables it (COG-16 is unchanged).
+	//
+	// An explicit AssocDecayFactor with no AssocHalfLifeDays is reinterpreted
+	// as a per-DAY multiplier and converted to a half-life, with a one-time
+	// WARN per vault naming the derived value (see AssocHalfLifeFromLegacyFactor).
+	AssocDecayFactor *float32 `json:"assoc_decay_factor,omitempty"` // > 0 = decay enabled; 0 = disabled
+	// AssocHalfLifeDays is the wall-clock half-life of an unused association
+	// edge, in days. Clamped to [0.5, 3650]; 0/nil = use the preset value.
+	AssocHalfLifeDays *float32 `json:"assoc_half_life_days,omitempty"`
+	AssocMinWeight    *float32 `json:"assoc_min_weight,omitempty"`  // edges below this are deleted (e.g. 0.05)
+	ArchiveThreshold  *float64 `json:"archive_threshold,omitempty"` // consolidation score threshold for archiving (default 0.05)
 
 	// Behavior mode controls how AI agents use memory
 	BehaviorMode         *string `json:"behavior_mode,omitempty"`         // "autonomous"|"prompted"|"selective"|"custom"
@@ -75,6 +94,35 @@ type PlasticityConfig struct {
 	// per-user scoped recall (e.g. a per-user tag in the recall context).
 	// nil = false (single-user; guidance unchanged).
 	MultiUser *bool `json:"multi_user,omitempty"`
+
+	// ReinforceOnRead controls whether Engine.Read (by-id) fires a
+	// fire-and-forget TouchAccess (#682) to bump AccessCount/LastAccess for
+	// the read engram. nil = true (default: reads reinforce). Recall/Activate
+	// NEVER reinforces regardless of this flag (COG-12) — this only gates the
+	// explicit-read-by-id channel.
+	ReinforceOnRead *bool `json:"reinforce_on_read,omitempty"`
+
+	// SemanticFloor overrides the COG-26 semantic-abstention baseline b for
+	// this vault (see internal/plugin/embed/baseline.go), instead of the
+	// registry value looked up from the vault's embed model. nil = use the
+	// registry (or identity+WARN if the model is unregistered). An explicit
+	// 0 disables the floor (identity transform) for operators who have
+	// verified their embedder needs no calibration. Range [0,1); values >=1
+	// would zero every match and are rejected at resolution (clamped to the
+	// registry/identity fallback, never silently producing a floor that
+	// abstains everything).
+	SemanticFloor *float64 `json:"semantic_floor,omitempty"`
+
+	// ExcludeTags is a per-vault list of tags excluded from recall RANKING.
+	// A candidate carrying any of these tags is dropped from activation results
+	// (the recall pipeline) before scoring. This is ranking-only: the engram is
+	// NOT deleted, NOT hidden from explicit direct-id or as_of-by-id reads, and
+	// still counts toward the vault. An explicit per-request tag include
+	// (tags_all/tags_any naming an excluded tag) overrides the standing exclude
+	// for that request — caller intent wins. Not preset-varying; default-empty /
+	// opt-in: nil or empty means no exclusion, so a vault without this config
+	// recalls byte-identically to before (#713).
+	ExcludeTags []string `json:"exclude_tags,omitempty"`
 }
 
 // ResolvedPlasticity is the fully-merged configuration after applying preset defaults
@@ -107,9 +155,10 @@ type ResolvedPlasticity struct {
 	MaxEngrams    int     `json:"max_engrams"`    // 0 = no limit
 	RetentionDays float32 `json:"retention_days"` // 0 = no limit
 	// Association edge decay
-	AssocDecayFactor float32 `json:"assoc_decay_factor"` // multiplier per prune pass; 0 = disabled
-	AssocMinWeight   float32 `json:"assoc_min_weight"`   // edges below this are deleted
-	ArchiveThreshold float64 `json:"archive_threshold"`  // consolidation score threshold for archiving
+	AssocDecayFactor  float32 `json:"assoc_decay_factor"`   // > 0 = decay enabled; 0 = disabled (a switch, not a rate — #762)
+	AssocHalfLifeDays float32 `json:"assoc_half_life_days"` // wall-clock half-life of an unused edge, in days
+	AssocMinWeight    float32 `json:"assoc_min_weight"`     // edges below this are deleted
+	ArchiveThreshold  float64 `json:"archive_threshold"`    // consolidation score threshold for archiving
 	// Behavior mode
 	BehaviorMode         string `json:"behavior_mode"`
 	BehaviorInstructions string `json:"behavior_instructions"`
@@ -129,6 +178,21 @@ type ResolvedPlasticity struct {
 	LTPWeightFloor float32 `json:"ltp_weight_floor"`
 	// ExcludeUntrusted: when true, ACTIVATE silently skips engrams with TrustUntrusted.
 	ExcludeUntrusted bool `json:"exclude_untrusted"`
+	// ReinforceOnRead: when true, Engine.Read (by-id) fires TouchAccess (#682)
+	// to bump AccessCount/LastAccess. Default true. Never applies to
+	// Recall/Activate (COG-12) — that path never reinforces.
+	ReinforceOnRead bool `json:"reinforce_on_read"`
+
+	// SemanticFloorOverride, when non-nil, replaces the COG-26 registry
+	// lookup for this vault's semantic-abstention baseline b. nil = no
+	// override (use the per-embedder registry). See PlasticityConfig.SemanticFloor.
+	SemanticFloorOverride *float64 `json:"semantic_floor_override,omitempty"`
+
+	// ExcludeTags is the resolved per-vault recall-ranking tag exclusion list
+	// (see PlasticityConfig.ExcludeTags). nil/empty = no exclusion. Normalized
+	// at resolution: blank entries dropped, duplicates collapsed. Not
+	// preset-varying.
+	ExcludeTags []string `json:"exclude_tags,omitempty"`
 }
 
 type plasticityPreset struct {
@@ -151,6 +215,7 @@ type plasticityPreset struct {
 	MaxEngrams           int
 	RetentionDays        float32
 	AssocDecayFactor     float32
+	AssocHalfLifeDays    float32
 	AssocMinWeight       float32
 	ArchiveThreshold     float64
 	BehaviorMode         string
@@ -182,6 +247,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		MaxEngrams:           0,
 		RetentionDays:        0,
 		AssocDecayFactor:     0.95,
+		AssocHalfLifeDays:    30,
 		AssocMinWeight:       0.05,
 		ArchiveThreshold:     0.05,
 		BehaviorMode:         "autonomous",
@@ -208,6 +274,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		MaxEngrams:           0,
 		RetentionDays:        0,
 		AssocDecayFactor:     0.95,
+		AssocHalfLifeDays:    30,
 		AssocMinWeight:       0.05,
 		ArchiveThreshold:     0.05,
 		BehaviorMode:         "autonomous",
@@ -234,6 +301,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		MaxEngrams:           0,
 		RetentionDays:        0,
 		AssocDecayFactor:     0,
+		AssocHalfLifeDays:    0,
 		AssocMinWeight:       0,
 		ArchiveThreshold:     0.05,
 		BehaviorMode:         "selective",
@@ -260,6 +328,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		MaxEngrams:           0,
 		RetentionDays:        0,
 		AssocDecayFactor:     0.98,
+		AssocHalfLifeDays:    90,
 		AssocMinWeight:       0.03,
 		ArchiveThreshold:     0.05,
 		BehaviorMode:         "autonomous",
@@ -289,6 +358,7 @@ var plasticityPresets = map[string]plasticityPreset{
 		MaxEngrams:           0,
 		RetentionDays:        7,
 		AssocDecayFactor:     0.95,
+		AssocHalfLifeDays:    30,
 		AssocMinWeight:       0.05,
 		ArchiveThreshold:     0.05,
 		BehaviorMode:         "selective",
@@ -330,6 +400,7 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		MaxEngrams:           p.MaxEngrams,
 		RetentionDays:        p.RetentionDays,
 		AssocDecayFactor:     p.AssocDecayFactor,
+		AssocHalfLifeDays:    p.AssocHalfLifeDays,
 		AssocMinWeight:       p.AssocMinWeight,
 		ArchiveThreshold:     p.ArchiveThreshold,
 		BehaviorMode:         p.BehaviorMode,
@@ -339,11 +410,27 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		ScoringFusion:        p.ScoringFusion,
 		LTPThreshold:         p.LTPThreshold,
 		LTPWeightFloor:       p.LTPWeightFloor,
+		// ReinforceOnRead is not preset-varying: default true across every
+		// preset, overridable per-vault via cfg.ReinforceOnRead below.
+		ReinforceOnRead: true,
 	}
 
 	if cfg == nil {
 		return r
 	}
+
+	// SemanticFloor is not preset-varying (like ReinforceOnRead above):
+	// nil = no override, use the COG-26 registry. Validated at the resolution
+	// site (internal/engine/engine.go), not here — clamping a bad value
+	// silently here would hide a misconfiguration the caller should see.
+	r.SemanticFloorOverride = cfg.SemanticFloor
+
+	// ExcludeTags is not preset-varying (like SemanticFloor/ReinforceOnRead):
+	// nil/empty = no exclusion. Normalized here so a nil, empty, or
+	// duplicate-laden config all resolve to the same minimal set — and an empty
+	// or all-blank config resolves to nil, byte-identical to "no config" (the
+	// default-empty / opt-in invariant, #713).
+	r.ExcludeTags = resolveExcludeTags(cfg.ExcludeTags)
 
 	// Apply pointer-field overrides
 	if cfg.HebbianEnabled != nil {
@@ -452,6 +539,28 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		}
 		r.AssocDecayFactor = f
 	}
+	// COG-2: clamp, never reject.
+	if cfg.AssocHalfLifeDays != nil && *cfg.AssocHalfLifeDays != 0 {
+		r.AssocHalfLifeDays = ClampAssocHalfLifeDays(*cfg.AssocHalfLifeDays)
+	} else if cfg.AssocDecayFactor != nil {
+		// Legacy path: an operator set a factor before it stopped being a rate.
+		// Reinterpret it per-day rather than per-pass — per-pass is not
+		// representable in a cadence-independent mechanism, and preserving the
+		// observed behaviour would mean preserving #762. The caller is expected
+		// to WARN once per vault; see AssocHalfLifeFromLegacyFactor.
+		if h, ok := AssocHalfLifeFromLegacyFactor(*cfg.AssocDecayFactor); ok {
+			r.AssocHalfLifeDays = h
+		} else if *cfg.AssocDecayFactor >= 1 {
+			// factor >= 1 is "switch on, weights never move" — it carries no
+			// rate to convert. Resolve half-life 0 so the decay sweep skips
+			// with a WARN, instead of falling through to the preset's rate:
+			// running the preset's 30-day half-life against an explicit 1.0
+			// substitutes a rate the operator declined (principle #1).
+			// (factor <= 0 falls through untouched: the COG-16 switch is off,
+			// so the preset half-life is inert and stays for display.)
+			r.AssocHalfLifeDays = 0
+		}
+	}
 	if cfg.AssocMinWeight != nil {
 		w := *cfg.AssocMinWeight
 		if w < 0 {
@@ -508,6 +617,9 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 	if cfg.MultiUser != nil {
 		r.MultiUser = *cfg.MultiUser
 	}
+	if cfg.ReinforceOnRead != nil {
+		r.ReinforceOnRead = *cfg.ReinforceOnRead
+	}
 	// LTP overrides
 	if cfg.LTPThreshold != nil {
 		v := *cfg.LTPThreshold
@@ -527,6 +639,30 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		r.LTPWeightFloor = v
 	}
 	return r
+}
+
+// resolveExcludeTags normalizes a per-vault exclude-tags list: blank entries
+// are dropped and duplicates collapsed, preserving first-seen order. Returns
+// nil for a nil, empty, or all-blank input so "no config" and "empty config"
+// resolve identically (the default-empty / opt-in invariant, #713).
+func resolveExcludeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tags))
+	var out []string
+	for _, t := range tags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }
 
 var validBehaviorModes = map[string]bool{
@@ -574,4 +710,61 @@ func ValidScoringFusion(s string) bool {
 		return true
 	}
 	return false
+}
+
+// Association-decay half-life bounds (COG-2: clamp, never reject).
+//
+// The lower bound keeps a misconfiguration from reproducing #762 — half a day
+// is already an order of magnitude faster than the 30-day default and fast
+// enough for any legitimate scratch use. The upper bound is 10 years, past
+// which decay is indistinguishable from off (and off is spelled
+// assoc_decay_factor: 0).
+const (
+	MinAssocHalfLifeDays float32 = 0.5
+	MaxAssocHalfLifeDays float32 = 3650
+)
+
+// ClampAssocHalfLifeDays clamps an operator-supplied half-life into the
+// supported range. Never rejects (COG-2).
+func ClampAssocHalfLifeDays(d float32) float32 {
+	if d < MinAssocHalfLifeDays {
+		return MinAssocHalfLifeDays
+	}
+	if d > MaxAssocHalfLifeDays {
+		return MaxAssocHalfLifeDays
+	}
+	return d
+}
+
+// AssocHalfLifeFromLegacyFactor converts a legacy assoc_decay_factor into a
+// half-life in days, reinterpreting the factor as a PER-DAY multiplier:
+//
+//	halfLifeDays = ln(0.5) / ln(factor)
+//
+// e.g. 0.95 -> 13.51 days, 0.98 -> 34.31 days.
+//
+// The factor was documented as "per prune pass", but a pass is an unspecified
+// interval owned by a worker that predates decay (#762) — there is no per-pass
+// semantics to preserve, only a number to translate, loudly. Preserving the
+// observed per-pass behaviour would mean preserving the bug.
+//
+// Returns ok=false when the factor carries no rate: <= 0 (decay disabled) or
+// >= 1 (no decay at all).
+func AssocHalfLifeFromLegacyFactor(factor float32) (float32, bool) {
+	if factor <= 0 || factor >= 1 {
+		return 0, false
+	}
+	h := float32(math.Log(0.5) / math.Log(float64(factor)))
+	return ClampAssocHalfLifeDays(h), true
+}
+
+// AssocHalfLife returns the resolved association-decay half-life as a duration.
+// Returns 0 when the vault has no usable half-life configured, which callers
+// must treat as "do not decay" rather than substituting a default — an
+// unconfigured rate is not a licence to pick one (principle #1).
+func (r ResolvedPlasticity) AssocHalfLife() time.Duration {
+	if r.AssocHalfLifeDays <= 0 {
+		return 0
+	}
+	return time.Duration(float64(r.AssocHalfLifeDays) * float64(24*time.Hour))
 }

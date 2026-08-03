@@ -39,8 +39,8 @@ func TestEpochStore_Persistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEpochStore: %v", err)
 	}
-	if err := s.ForceSet(42); err != nil {
-		t.Fatalf("ForceSet(42): %v", err)
+	if _, err := s.Advance(42); err != nil {
+		t.Fatalf("Advance(42): %v", err)
 	}
 	db.Close()
 
@@ -114,7 +114,7 @@ func TestEpochStore_CompareAndSet_Fail(t *testing.T) {
 	}
 }
 
-func TestEpochStore_ForceSet_OnlyIncreases(t *testing.T) {
+func TestEpochStore_Advance_OnlyIncreases(t *testing.T) {
 	db := openTestDB(t, t.TempDir())
 	defer db.Close()
 
@@ -123,24 +123,24 @@ func TestEpochStore_ForceSet_OnlyIncreases(t *testing.T) {
 		t.Fatalf("NewEpochStore: %v", err)
 	}
 
-	if err := s.ForceSet(10); err != nil {
-		t.Fatalf("ForceSet(10): %v", err)
+	if _, err := s.Advance(10); err != nil {
+		t.Fatalf("Advance(10): %v", err)
 	}
 	if got := s.Load(); got != 10 {
 		t.Errorf("Load() = %d, want 10", got)
 	}
 
 	// Lower value: no-op
-	if err := s.ForceSet(5); err != nil {
-		t.Fatalf("ForceSet(5): %v", err)
+	if _, err := s.Advance(5); err != nil {
+		t.Fatalf("Advance(5): %v", err)
 	}
 	if got := s.Load(); got != 10 {
-		t.Errorf("Load() after ForceSet(5) = %d, want 10 (no-op)", got)
+		t.Errorf("Load() after Advance(5) = %d, want 10 (no-op)", got)
 	}
 
 	// Higher value: should update
-	if err := s.ForceSet(11); err != nil {
-		t.Fatalf("ForceSet(11): %v", err)
+	if _, err := s.Advance(11); err != nil {
+		t.Fatalf("Advance(11): %v", err)
 	}
 	if got := s.Load(); got != 11 {
 		t.Errorf("Load() = %d, want 11", got)
