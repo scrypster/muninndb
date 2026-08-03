@@ -35,7 +35,7 @@ func TestReplicationLog_Prune_Large(t *testing.T) {
 
 	// Time the prune operation — should be O(1) range delete
 	start := time.Now()
-	if _, err := log.Prune(9990); err != nil {
+	if err := log.Prune(9990); err != nil {
 		t.Fatalf("Prune failed: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -79,7 +79,7 @@ func TestReplicationLog_Prune_BoundaryConditions(t *testing.T) {
 		log := NewReplicationLog(db)
 
 		// Prune(0) on empty log → no error
-		if _, err := log.Prune(0); err != nil {
+		if err := log.Prune(0); err != nil {
 			t.Errorf("Prune(0) on empty log returned error: %v", err)
 		}
 		if seq := log.CurrentSeq(); seq != 0 {
@@ -101,7 +101,7 @@ func TestReplicationLog_Prune_BoundaryConditions(t *testing.T) {
 		}
 
 		// Prune(5) → returns nil (untilSeq >= l.seq, so it's a no-op)
-		if _, err := log.Prune(5); err != nil {
+		if err := log.Prune(5); err != nil {
 			t.Errorf("Prune(5) returned error: %v", err)
 		}
 
@@ -128,7 +128,7 @@ func TestReplicationLog_Prune_BoundaryConditions(t *testing.T) {
 			log.Append(OpSet, []byte("key"), []byte("value"))
 		}
 
-		if _, err := log.Prune(3); err != nil {
+		if err := log.Prune(3); err != nil {
 			t.Fatalf("Prune(3) failed: %v", err)
 		}
 
@@ -157,7 +157,7 @@ func TestReplicationLog_Prune_BoundaryConditions(t *testing.T) {
 			log.Append(OpSet, []byte("key"), []byte("value"))
 		}
 
-		if _, err := log.Prune(1); err != nil {
+		if err := log.Prune(1); err != nil {
 			t.Fatalf("Prune(1) failed: %v", err)
 		}
 
@@ -193,7 +193,7 @@ func TestReplicationLog_Prune_StartsAtOne(t *testing.T) {
 	}
 
 	// Prune(2) — entries 1 and 2 pruned, entry 3 remains
-	if _, err := log.Prune(2); err != nil {
+	if err := log.Prune(2); err != nil {
 		t.Fatalf("Prune(2) failed: %v", err)
 	}
 
@@ -365,7 +365,7 @@ func TestReplicationLog_Prune(t *testing.T) {
 	}
 
 	// Prune entries <= 2
-	if _, err := log.Prune(2); err != nil {
+	if err := log.Prune(2); err != nil {
 		t.Fatalf("Prune failed: %v", err)
 	}
 
@@ -891,7 +891,7 @@ func TestReplicationLog_Prune_BeyondCurrentSeq_IsNoOp(t *testing.T) {
 	}
 
 	// Prune(10) — beyond currentSeq (5): should be a no-op.
-	if _, err := log.Prune(10); err != nil {
+	if err := log.Prune(10); err != nil {
 		t.Errorf("Prune(10) returned unexpected error: %v", err)
 	}
 
@@ -981,12 +981,28 @@ func TestReplicationLog_ReadSince_ConcurrentAppend(t *testing.T) {
 	}
 }
 
-// Prefix 0x19 is shared by the replication log (0x19|seq_be64, msgpack) and
-// prefix.Idempotency (0x19|siphash(op_id), JSON) — byte-identical in shape.
-// The old range-delete prune took anything in [0x19|1, 0x19|untilSeq+1),
-// which includes any receipt whose siphash happens to land in that window.
-// Pruning must key off the value encoding, not the key range.
-func TestReplicationLog_Prune_LeavesIdempotencyReceipts(t *testing.T) {
+// TestReplicationLog_Prune_EntryRangeCollisionNoLongerPossible is a FORWARD
+// regression guard, not a reproduction of the original defect.
+//
+// Before #726, prefix 0x19 was shared by the replication log
+// (0x19|seq_be64, msgpack) and prefix.Idempotency (0x19|siphash(op_id),
+// JSON) — byte-identical in shape. A range-delete prune over
+// [0x19|1, 0x19|untilSeq+1) therefore risked taking any receipt whose
+// siphash happened to land in that window, which is why Prune used to decode
+// every value in the window and skip anything that didn't unmarshal as a
+// ReplicationEntry.
+//
+// #726 relocated the log to prefix.Replication|subEntry, a range that
+// provably contains nothing but log entries (see keys.go and
+// prefix_relocation_test.go's TestReplicationKeys_NeverCollideWithIdempotency
+// and TestPrune_LeavesIdempotencyReceiptsAlone, which model the collision
+// correctly — seeding receipts at their real prefix.Idempotency address).
+// The precondition for the old defect — a receipt able to occupy a key this
+// Prune scans — no longer holds, so what this test pins instead is the
+// opposite: data placed inside the entry range IS entry-range data, and a
+// plain DeleteRange over it is exactly the intended (and now unnecessary to
+// avoid) behaviour.
+func TestReplicationLog_Prune_EntryRangeCollisionNoLongerPossible(t *testing.T) {
 	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
 	if err != nil {
 		t.Fatalf("open pebble: %v", err)
@@ -1000,38 +1016,17 @@ func TestReplicationLog_Prune_LeavesIdempotencyReceipts(t *testing.T) {
 		}
 	}
 
-	// Receipts whose "siphash" collides with the seq window being pruned.
-	// These are exactly the keys a range delete would destroy.
-	receiptKeys := [][]byte{
-		replicationEntryKey(7),
-		replicationEntryKey(42),
-		replicationEntryKey(50),
-	}
-	receipt := []byte(`{"engram_id":"01ABC","created_at":1700000000}`)
-	for _, k := range receiptKeys {
-		if err := db.Set(k, receipt, pebble.Sync); err != nil {
-			t.Fatalf("seed receipt: %v", err)
-		}
-	}
-
-	pruned, err := log.Prune(60)
-	if err != nil {
+	if err := log.Prune(60); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	// 60 seqs in the window, 3 of which were overwritten by receipts.
-	if pruned != 57 {
-		t.Fatalf("pruned = %d, want 57 (60 entries minus 3 receipt collisions)", pruned)
-	}
 
-	for _, k := range receiptKeys {
-		got, closer, err := db.Get(k)
-		if err != nil {
-			t.Fatalf("idempotency receipt at %x was deleted by Prune: %v", k, err)
+	// Every key in the pruned window is entry-range data and must be gone —
+	// there is no encoding to preserve here anymore.
+	for _, seq := range []uint64{7, 42, 50, 60} {
+		if _, closer, err := db.Get(replicationEntryKey(seq)); err == nil {
+			closer.Close()
+			t.Fatalf("entry %d survived Prune(60) — expected the whole window deleted", seq)
 		}
-		if string(got) != string(receipt) {
-			t.Fatalf("receipt at %x corrupted: %q", k, got)
-		}
-		closer.Close()
 	}
 
 	// And the log entries above the watermark are untouched.
@@ -1042,7 +1037,12 @@ func TestReplicationLog_Prune_LeavesIdempotencyReceipts(t *testing.T) {
 	}
 }
 
-func TestReplicationLog_Prune_ReportsCount(t *testing.T) {
+// TestReplicationLog_Prune_IdempotentOnRepeatedWatermark exercises the
+// lastPruned fast path: calling Prune with a watermark that has already been
+// pruned (the periodic prune loop calls Prune every tick regardless of
+// whether the watermark advanced) must not error and must not disturb
+// anything, rather than re-issuing a redundant delete/flush/compact cycle.
+func TestReplicationLog_Prune_IdempotentOnRepeatedWatermark(t *testing.T) {
 	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
 	if err != nil {
 		t.Fatalf("open pebble: %v", err)
@@ -1056,16 +1056,24 @@ func TestReplicationLog_Prune_ReportsCount(t *testing.T) {
 		}
 	}
 
-	n, err := log.Prune(4)
-	if err != nil {
+	if err := log.Prune(4); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if n != 4 {
-		t.Fatalf("pruned = %d, want 4", n)
+	for seq := uint64(1); seq <= 4; seq++ {
+		if _, closer, err := db.Get(replicationEntryKey(seq)); err == nil {
+			closer.Close()
+			t.Fatalf("entry %d survived Prune(4)", seq)
+		}
 	}
-	// Pruning the same watermark twice reclaims nothing further.
-	if n, err = log.Prune(4); err != nil || n != 0 {
-		t.Fatalf("second Prune = (%d, %v), want (0, nil)", n, err)
+
+	// Pruning the same watermark again must be a clean no-op, not an error.
+	if err := log.Prune(4); err != nil {
+		t.Fatalf("second Prune(4) = %v, want nil", err)
+	}
+	if _, closer, err := db.Get(replicationEntryKey(5)); err != nil {
+		t.Fatalf("entry above watermark lost after repeated prune: %v", err)
+	} else {
+		closer.Close()
 	}
 }
 
@@ -1098,12 +1106,8 @@ func TestReplicationLog_Prune_ReclaimsDiskSpace(t *testing.T) {
 
 	before := dirSize(t, dir)
 
-	pruned, err := log.Prune(350)
-	if err != nil {
+	if err := log.Prune(350); err != nil {
 		t.Fatalf("Prune: %v", err)
-	}
-	if pruned != 350 {
-		t.Fatalf("pruned = %d, want 350", pruned)
 	}
 
 	// Compact() returns once the compaction is applied, but Pebble unlinks the
@@ -1203,7 +1207,7 @@ func TestReplicationLog_PruneDoesNotBlockAppend(t *testing.T) {
 		}
 	}()
 
-	pruned, err := log.Prune(4000)
+	err = log.Prune(4000)
 	// Sample BEFORE stopping the writer, so the count is what completed while
 	// the prune was running rather than after it returned.
 	during := appended.Load()
@@ -1213,9 +1217,6 @@ func TestReplicationLog_PruneDoesNotBlockAppend(t *testing.T) {
 		t.Fatalf("Prune: %v", err)
 	}
 
-	if pruned < 4000 {
-		t.Fatalf("pruned = %d, want >= 4000", pruned)
-	}
 	if during < 10 {
 		t.Fatalf("only %d appends completed while the prune ran — Prune is serialising the write path", during)
 	}

@@ -162,6 +162,13 @@ type ClusterCoordinator struct {
 	// deleting WAL segments that the snapshot receiver still needs.
 	snapshotInProgress atomic.Int32
 
+	// lastLoggedPruneSeq is the highest watermark the periodic prune loop has
+	// already logged. ReplicationLog.Prune is a cheap no-op once a watermark
+	// has already been pruned (#726), so the loop calls it unconditionally
+	// every tick — this just keeps that from writing an identical INFO line
+	// every PruneIntervalSec once the log is caught up.
+	lastLoggedPruneSeq atomic.Uint64
+
 	// reconciler runs post-partition cognitive reconciliation.
 	// Set via SetReconciler after the coordinator is created.
 	reconciler *Reconciler
@@ -2425,16 +2432,20 @@ func (c *ClusterCoordinator) startPeriodicPrune(ctx context.Context) {
 					c.evictLobesBehind(pruneSeq)
 				}
 				// The MOL prune above only unlinks sealed segment FILES. The
-				// replication log lives in Pebble under 0x19 and needs its own
-				// prune, or it grows without bound (observed: ~10 GB/day on an
-				// otherwise idle primary).
+				// replication log lives in its own Pebble sub-range
+				// (prefix.Replication|subEntry, #726) and needs its own prune,
+				// or it grows without bound (observed: ~10 GB/day on an
+				// otherwise idle primary). ReplicationLog.Prune is a cheap
+				// no-op once a watermark has already been pruned, so this can
+				// run unconditionally every tick without an entry count to
+				// gate on.
 				if c.repLog != nil {
-					n, err := c.repLog.Prune(pruneSeq)
-					if err != nil {
+					if err := c.repLog.Prune(pruneSeq); err != nil {
 						slog.Warn("cluster: replication log prune failed", "err", err)
-					} else if n > 0 {
-						slog.Info("cluster: pruned replication log entries",
-							"pruned", n, "until_seq", pruneSeq, "forced_by_backlog", forced)
+					} else if pruneSeq > c.lastLoggedPruneSeq.Load() {
+						c.lastLoggedPruneSeq.Store(pruneSeq)
+						slog.Info("cluster: pruned replication log",
+							"until_seq", pruneSeq, "forced_by_backlog", forced)
 					}
 				}
 			}

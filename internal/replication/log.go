@@ -20,21 +20,13 @@ var (
 
 // ReplicationLog manages the append-only replication log stored in Pebble.
 type ReplicationLog struct {
-	db     *pebble.DB
-	mu     sync.Mutex
-	seq    uint64 // current sequence number
-	init   bool   // whether seq has been initialized from Pebble
-	subs   []chan struct{}
-	subsMu sync.Mutex
-
-	// pruneMu serializes Prune calls. Prune must NOT hold mu for its
-	// duration: mu is the Append mutex, Append is on the synchronous write
-	// path (PebbleStore.replicateBatch), and a first prune over a log that
-	// has never been pruned scans, deletes and compacts tens of GB. Holding
-	// mu across that stalls every write in the process. Prune only needs mu
-	// long enough to read the seq watermark; everything it touches after
-	// that is at or below untilSeq < seq, which Append never writes.
-	pruneMu sync.Mutex
+	db         *pebble.DB
+	mu         sync.Mutex
+	seq        uint64 // current sequence number
+	init       bool   // whether seq has been initialized from Pebble
+	lastPruned uint64 // highest seq already deleted by Prune, this process lifetime
+	subs       []chan struct{}
+	subsMu     sync.Mutex
 }
 
 // NewReplicationLog creates a new ReplicationLog backed by a Pebble database.
@@ -187,96 +179,70 @@ func (l *ReplicationLog) ReadSince(afterSeq uint64, limit int) ([]ReplicationEnt
 	return entries, nil
 }
 
-// Prune deletes log entries with seq <= untilSeq and returns how many were
-// removed. Used to clean up old entries once all replicas have acknowledged
-// them, or once the backlog ceiling forces a prune (see ClusterConfig.
-// MaxLogBacklog).
+// Prune deletes log entries with seq <= untilSeq. Used to clean up old
+// entries once all replicas have acknowledged them, or once the backlog
+// ceiling forces a prune (see ClusterConfig.MaxLogBacklog).
 //
 // The DeleteRange below is safe BY CONSTRUCTION since #726: both bounds carry
-// the 0x2F|0x01 entry discriminator, so the range contains only log entries.
-// It used to be `0x19|be64(1) .. 0x19|be64(untilSeq+1)`, which swept every
-// idempotency receipt (`0x19|siphash(op_id)`) whose hash landed below the
-// watermark. Do NOT reintroduce a bound that starts at a bare prefix byte.
+// the 0x2F|0x01 entry discriminator (keys.go), so the range contains only log
+// entries — it can never reach an idempotency receipt (a different prefix
+// entirely now) or replication metadata (0x2F|0x02, which sorts after every
+// entry key). Before #726 this was a decode-per-key scan: the log's prefix
+// was shared with idempotency receipts of the same key shape, so distinguishing
+// the two required unmarshalling every value in the window. That is gone with
+// the shared prefix; reintroducing a scan here would resurrect the exact
+// disk-decode cost the relocation exists to remove (a first prune over a large
+// unpruned log used to decode every entry).
+//
+// lastPruned tracks how far this process has already deleted, so a prune
+// that lands on an already-pruned watermark (the periodic prune runs every
+// PruneIntervalSec even when nothing new has been acknowledged) is a fast
+// no-op rather than a redundant DeleteRange + Flush + Compact every cycle.
+// It resets on restart, so the first prune after a process restart may
+// re-delete an empty sub-range — harmless, just a wasted (cheap) tombstone
+// write, not a correctness issue.
 //
 // CALLER RESPONSIBILITY: Prune must only be called after verifying that every
 // connected replica has applied all entries up to untilSeq (check
 // ClusterCoordinator.ReplicaLag or equivalent). Pruning entries that a lagging
 // Lobe has not yet applied will cause a permanent replication gap — the Lobe
 // must rejoin via snapshot if it falls behind a pruned point.
-func (l *ReplicationLog) Prune(untilSeq uint64) (int, error) {
-	l.pruneMu.Lock()
-	defer l.pruneMu.Unlock()
-
+func (l *ReplicationLog) Prune(untilSeq uint64) error {
 	l.mu.Lock()
-	err := l.ensureSeqInit()
+	if err := l.ensureSeqInit(); err != nil {
+		l.mu.Unlock()
+		return err
+	}
 	seq := l.seq
-	l.mu.Unlock()
-	if err != nil {
-		return 0, err
-	}
-
 	if untilSeq >= seq {
-		return 0, nil // nothing to prune
+		l.mu.Unlock()
+		return nil // nothing to prune
 	}
+	if untilSeq <= l.lastPruned {
+		l.mu.Unlock()
+		return nil // already pruned past this watermark
+	}
+	from := l.lastPruned + 1
+	l.lastPruned = untilSeq
+	l.mu.Unlock()
 
-	// Deliberately NOT a DeleteRange. Prefix 0x19 is shared with
-	// prefix.Idempotency, whose keys are 0x19|siphash(op_id) — byte-identical
-	// in shape to 0x19|seq_be64. A range delete would take any receipt whose
-	// siphash happens to fall below untilSeq. The two are trivially separable
-	// by encoding: log entries are msgpack, receipts are JSON. So decode, and
-	// delete only what is provably a log entry at or below the watermark.
-	iter, err := l.db.NewIter(&pebble.IterOptions{
-		LowerBound: replicationEntryKey(1),
-		UpperBound: replicationEntryKey(untilSeq + 1),
-	})
-	if err != nil {
-		return 0, fmt.Errorf("replication log prune: new iter: %w", err)
-	}
+	// Everything from here on operates on [from, untilSeq], which is at or
+	// below untilSeq < seq — Append only ever writes at seq+1 and beyond, so
+	// this never races a concurrent Append. mu is not held across it: mu is
+	// the Append mutex, Append is on the synchronous write path
+	// (PebbleStore.replicateBatch), and the flush/compact below can run for
+	// as long as it takes to rewrite the pruned sstables. Holding mu across
+	// that would stall every write in the process.
+	startKey := replicationEntryKey(from)
+	endKey := replicationEntryKey(untilSeq + 1)
 
-	var toDelete [][]byte
-	for iter.First(); iter.Valid(); iter.Next() {
-		var entry ReplicationEntry
-		if err := msgpack.Unmarshal(iter.Value(), &entry); err != nil {
-			continue // not a log entry (idempotency receipt) — leave it alone
-		}
-		if entry.Seq > untilSeq {
-			continue
-		}
-		k := make([]byte, len(iter.Key()))
-		copy(k, iter.Key())
-		toDelete = append(toDelete, k)
+	batch := l.db.NewBatch()
+	defer batch.Close()
+	if err := batch.DeleteRange(startKey, endKey, nil); err != nil {
+		return fmt.Errorf("replication log prune: delete range: %w", err)
 	}
-	if err := iter.Error(); err != nil {
-		_ = iter.Close()
-		return 0, fmt.Errorf("replication log prune: iter: %w", err)
-	}
-	if err := iter.Close(); err != nil {
-		return 0, fmt.Errorf("replication log prune: close iter: %w", err)
-	}
-
-	// Batch the deletes so a large first prune (a log that has never been
-	// pruned can hold hundreds of thousands of entries) does not build one
-	// enormous batch.
-	const deleteBatchSize = 1000
-	deleted := 0
-	for start := 0; start < len(toDelete); start += deleteBatchSize {
-		end := start + deleteBatchSize
-		if end > len(toDelete) {
-			end = len(toDelete)
-		}
-		batch := l.db.NewBatch()
-		for _, k := range toDelete[start:end] {
-			if err := batch.Delete(k, nil); err != nil {
-				batch.Close()
-				return deleted, fmt.Errorf("replication log prune: delete: %w", err)
-			}
-		}
-		if err := batch.Commit(nil); err != nil {
-			batch.Close()
-			return deleted, fmt.Errorf("replication log prune: commit: %w", err)
-		}
-		batch.Close()
-		deleted += end - start
+	if err := batch.Commit(nil); err != nil {
+		return fmt.Errorf("replication log prune: commit: %w", err)
 	}
 
 	// Reclaim the space now. Pebble deletes are tombstones — the bytes come
@@ -292,20 +258,19 @@ func (l *ReplicationLog) Prune(untilSeq uint64) (int, error) {
 	//
 	// A compaction failure is not a prune failure: the entries are gone either
 	// way and the next cycle will try again, so this logs rather than returns.
-	if deleted > 0 {
-		// Flush first: the tombstones are still in the memtable, and a
-		// compaction of the on-disk sstables cannot drop keys whose deletes it
-		// cannot see. Without this the compaction reclaims almost nothing.
-		if err := l.db.Flush(); err != nil {
-			slog.Warn("replication log: flush before compaction failed", "err", err)
-		}
-		if err := l.db.Compact(replicationEntryKey(1), replicationEntryKey(untilSeq+1), true); err != nil {
-			slog.Warn("replication log: compaction after prune failed — space will be"+
-				" reclaimed by a later compaction", "err", err, "pruned", deleted)
-		}
+	//
+	// Flush first: the tombstones are still in the memtable, and a compaction
+	// of the on-disk sstables cannot drop keys whose deletes it cannot see.
+	// Without this the compaction reclaims almost nothing.
+	if err := l.db.Flush(); err != nil {
+		slog.Warn("replication log: flush before compaction failed", "err", err)
+	}
+	if err := l.db.Compact(startKey, endKey, true); err != nil {
+		slog.Warn("replication log: compaction after prune failed — space will be"+
+			" reclaimed by a later compaction", "err", err, "from_seq", from, "until_seq", untilSeq)
 	}
 
-	return deleted, nil
+	return nil
 }
 
 // CurrentSeq returns the latest committed sequence number.
