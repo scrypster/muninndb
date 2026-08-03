@@ -187,14 +187,45 @@ func (b *Breaker) StateString() string {
 // Do executes fn if the circuit allows it; otherwise returns ErrOpen.
 // Automatically records success/failure based on whether fn returns an error.
 func (b *Breaker) Do(fn func() error) error {
+	return b.DoIgnoring(fn, nil)
+}
+
+// DoIgnoring is Do, but any error for which ignore returns true is recorded as
+// neither a success nor a failure: it does not touch consecutiveFails or the
+// Closed/Open state. This is for caller-side outcomes that carry no signal
+// about the callee's health — a context cancellation or deadline expiry
+// caused by the CALLER, not the provider being gated. A nil ignore behaves
+// exactly like Do (every non-nil error is a failure).
+//
+// If the ignored call was the circuit's one HalfOpen probe, its slot is
+// released (see RecordIgnore) rather than left permanently consumed — an
+// unlucky cancellation must not stall recovery until an operator intervenes.
+func (b *Breaker) DoIgnoring(fn func() error, ignore func(error) bool) error {
 	if err := b.Allow(); err != nil {
 		return err
 	}
 	err := fn()
-	if err != nil {
-		b.RecordFailure()
-	} else {
+	switch {
+	case err == nil:
 		b.RecordSuccess()
+	case ignore != nil && ignore(err):
+		b.RecordIgnore()
+	default:
+		b.RecordFailure()
 	}
 	return err
+}
+
+// RecordIgnore releases a call that produced no usable provider-health
+// signal (see DoIgnoring) without touching consecutiveFails or transitioning
+// Closed/Open state. If the circuit was HalfOpen, the single probe slot this
+// call consumed via Allow is released so a subsequent genuine call can still
+// probe — otherwise an ignored HalfOpen call would stall recovery until
+// resetAfter elapses again with no probe ever attempted.
+func (b *Breaker) RecordIgnore() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state == StateHalfOpen {
+		b.halfOpenUsed = false
+	}
 }

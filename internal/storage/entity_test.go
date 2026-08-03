@@ -357,8 +357,8 @@ func TestEntityRecord_MergedIntoWithoutMergedStateReturnsError(t *testing.T) {
 func TestDigestFlagConstants_SyncWithPluginPackage(t *testing.T) {
 	// Canonical values from internal/plugin/types.go — update both if either changes.
 	const (
-		canonicalDigestClassified uint8 = 0x20
-		canonicalDigestSummarized uint8 = 0x40
+		canonicalDigestClassified uint16 = 0x20
+		canonicalDigestSummarized uint16 = 0x40
 	)
 	if digestClassifiedFlag != canonicalDigestClassified {
 		t.Errorf("digestClassifiedFlag = 0x%02x, want 0x%02x (plugin.DigestClassified)", digestClassifiedFlag, canonicalDigestClassified)

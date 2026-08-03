@@ -90,7 +90,7 @@ func (ps *PebbleStore) DeleteEvolveRepairMark(ctx context.Context, ws [8]byte) e
 //
 // Returns false if the successor no longer exists or already has links (both
 // re-checked under the lock) — nothing was written.
-func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, succID ULID, entityNames []string, rels []RelationshipRecord, digestFlag uint8) (bool, error) {
+func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, succID ULID, entityNames []string, rels []RelationshipRecord, digestFlag uint16) (bool, error) {
 	if len(entityNames) == 0 {
 		return false, nil
 	}
@@ -154,7 +154,7 @@ func (ps *PebbleStore) RepairEvolveEntityCarry(ctx context.Context, ws [8]byte, 
 	}
 	// Digest flag rides the same batch so a healed successor is always marked
 	// against re-extraction. The RMW uses raw read under the stripe lock above.
-	if err := pb.batch.Set(keys.DigestFlagsKey([16]byte(succID)), []byte{raw | digestFlag}, nil); err != nil {
+	if err := pb.batch.Set(keys.DigestFlagsKey([16]byte(succID)), encodeDigestFlags(raw|digestFlag), nil); err != nil {
 		return false, fmt.Errorf("repair evolve carry: set digest flag: %w", err)
 	}
 	if err := batch.Commit(); err != nil {

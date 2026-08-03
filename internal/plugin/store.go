@@ -9,21 +9,21 @@ type PluginStore interface {
 	// skipFlags causes engrams that have any of those bits set to be excluded
 	// from the count (e.g. pass DigestEmbedFailed to exclude permanently-failed engrams).
 	// Used by RetroactiveProcessor to calculate total work.
-	CountWithoutFlag(ctx context.Context, flag, skipFlags uint8) (int64, error)
+	CountWithoutFlag(ctx context.Context, flag, skipFlags uint16) (int64, error)
 
 	// ScanWithoutFlag returns an iterator over engrams missing the given digest flag.
 	// skipFlags causes engrams that have any of those bits set to be skipped
 	// (e.g. pass DigestEmbedFailed to skip permanently-failed engrams).
 	// Iterates in ULID order (oldest first). Must be resumable: if the server
 	// restarts, calling ScanWithoutFlag again yields only unprocessed engrams.
-	ScanWithoutFlag(ctx context.Context, flag, skipFlags uint8) EngramIterator
+	ScanWithoutFlag(ctx context.Context, flag, skipFlags uint16) EngramIterator
 
 	// SetDigestFlag sets a digest flag bit on an engram's metadata.
 	// Atomic: uses Pebble Merge to set the bit without read-modify-write.
-	SetDigestFlag(ctx context.Context, id ULID, flag uint8) error
+	SetDigestFlag(ctx context.Context, id ULID, flag uint16) error
 
 	// GetDigestFlags returns the current digest flags byte for an engram.
-	GetDigestFlags(ctx context.Context, id ULID) (uint8, error)
+	GetDigestFlags(ctx context.Context, id ULID) (uint16, error)
 
 	// UpdateEmbedding stores an embedding vector for an engram.
 	// Also updates the EmbedDim field in ERF metadata.

@@ -777,8 +777,8 @@ func (ps *PebbleStore) UpsertRelationshipRecord(ctx context.Context, ws [8]byte,
 
 const (
 	// Keep these values aligned with plugin.DigestClassified and plugin.DigestSummarized.
-	digestClassifiedFlag uint8 = 0x20
-	digestSummarizedFlag uint8 = 0x40
+	digestClassifiedFlag uint16 = 0x20
+	digestSummarizedFlag uint16 = 0x40
 )
 
 // UpdateDigest updates the summary, key points, memory type, and type label on an
@@ -845,7 +845,7 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	if memoryType != "" || typeLabel != "" {
 		flags |= digestClassifiedFlag
 	}
-	batch.Set(keys.DigestFlagsKey([16]byte(id)), []byte{flags}, nil)
+	batch.Set(keys.DigestFlagsKey([16]byte(id)), encodeDigestFlags(flags), nil)
 
 	// Invalidate caches before commit — cached structs are stale.
 	ps.cache.Delete(ws, id)

@@ -104,7 +104,7 @@ func TestPersistEnrichmentResult_EmptyEntityStageMarksEntityAndRelationshipFlags
 	}
 }
 
-func hasSetFlag(store *mockPluginStore, flag uint8) bool {
+func hasSetFlag(store *mockPluginStore, flag uint16) bool {
 	for _, got := range store.setFlags {
 		if got == flag {
 			return true

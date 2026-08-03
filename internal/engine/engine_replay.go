@@ -42,7 +42,7 @@ type EnrichmentCandidate struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	MissingStages []string
-	DigestFlags   uint8
+	DigestFlags   uint16
 }
 
 // EnrichmentApplyEntity is one externally generated entity result.
@@ -78,11 +78,11 @@ type EnrichmentApplyResult struct {
 	ID            storage.ULID
 	AppliedStages []string
 	UpdatedAt     time.Time
-	DigestFlags   uint8
+	DigestFlags   uint16
 }
 
 // stageToFlag maps a stage name to its DigestFlag bit.
-var stageToFlag = map[string]uint8{
+var stageToFlag = map[string]uint16{
 	"entities":       plugin.DigestEntities,
 	"relationships":  plugin.DigestRelationships,
 	"classification": plugin.DigestClassified,
@@ -600,11 +600,11 @@ func countNonNilEngrams(engrams []*storage.Engram) int {
 	return n
 }
 
-func normalizeEnrichmentStages(stages []string) (uint8, []string, map[string]bool, error) {
+func normalizeEnrichmentStages(stages []string) (uint16, []string, map[string]bool, error) {
 	if len(stages) == 0 {
 		stages = defaultReplayStages
 	}
-	stageMask := uint8(0)
+	stageMask := uint16(0)
 	validStages := make([]string, 0, len(stages))
 	seen := make(map[string]bool, len(stages))
 	for _, s := range stages {
@@ -631,7 +631,7 @@ func normalizeExplicitEnrichmentStages(stages []string) (map[string]bool, error)
 	return seen, nil
 }
 
-func missingStagesForFlags(flags uint8, stages []string) []string {
+func missingStagesForFlags(flags uint16, stages []string) []string {
 	missing := make([]string, 0, len(stages))
 	for _, stage := range stages {
 		if flags&stageToFlag[stage] == 0 {

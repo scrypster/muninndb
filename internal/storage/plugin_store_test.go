@@ -10,7 +10,7 @@ import (
 
 // digestFlagAll is a convenience flag covering all bits, used to identify any
 // flagged engram in CountWithFlag tests.
-const digestFlagAll = uint8(0xFF)
+const digestFlagAll = uint16(0xFF)
 
 // TestCountWithoutFlag writes 3 engrams, sets the digest flag on 1, and
 // verifies CountWithoutFlag returns 2 (the unflagged ones).
@@ -32,7 +32,7 @@ func TestCountWithoutFlag(t *testing.T) {
 	}
 
 	// Flag only the first engram.
-	const flag = uint8(0x01)
+	const flag = uint16(0x01)
 	if err := store.SetDigestFlag(ctx, ids[0], flag); err != nil {
 		t.Fatalf("SetDigestFlag: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestCountWithFlag(t *testing.T) {
 	}
 
 	// Flag only the second engram.
-	const flag = uint8(0x01)
+	const flag = uint16(0x01)
 	if err := store.SetDigestFlag(ctx, ids[1], flag); err != nil {
 		t.Fatalf("SetDigestFlag: %v", err)
 	}

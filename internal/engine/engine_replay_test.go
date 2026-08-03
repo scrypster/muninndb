@@ -124,7 +124,7 @@ func TestReplayEnrichment_SkipsAlreadyEnriched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseULID: %v", err)
 	}
-	for _, flag := range []uint8{
+	for _, flag := range []uint16{
 		plugin.DigestEntities,
 		plugin.DigestRelationships,
 		plugin.DigestClassified,
@@ -265,7 +265,7 @@ func TestGetEnrichmentCandidates_ReturnsOnlyMissingStages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseULID(done): %v", err)
 	}
-	for _, flag := range []uint8{
+	for _, flag := range []uint16{
 		plugin.DigestEntities,
 		plugin.DigestRelationships,
 		plugin.DigestClassified,
@@ -335,7 +335,7 @@ func TestGetEnrichmentCandidates_InlineEnrichedNotCandidate(t *testing.T) {
 	}
 	for _, f := range []struct {
 		name string
-		bit  uint8
+		bit  uint16
 	}{
 		{"DigestEntities", plugin.DigestEntities},
 		{"DigestRelationships", plugin.DigestRelationships},
@@ -397,7 +397,7 @@ func TestRememberBatch_InlineEnrichedSetsFlags(t *testing.T) {
 	}
 	for _, f := range []struct {
 		name string
-		bit  uint8
+		bit  uint16
 	}{
 		{"DigestEntities", plugin.DigestEntities},
 		{"DigestRelationships", plugin.DigestRelationships},
@@ -434,7 +434,7 @@ func TestGetEnrichmentCandidates_CursorPaginates(t *testing.T) {
 		}
 		ids[i] = id
 	}
-	allFlags := []uint8{plugin.DigestEntities, plugin.DigestRelationships, plugin.DigestClassified, plugin.DigestSummarized}
+	allFlags := []uint16{plugin.DigestEntities, plugin.DigestRelationships, plugin.DigestClassified, plugin.DigestSummarized}
 	for i := 0; i < 4; i++ {
 		for _, flag := range allFlags {
 			if err := eng.store.SetDigestFlag(ctx, ids[i], flag); err != nil {
@@ -517,7 +517,7 @@ func TestGetEnrichmentCandidates_SkipsEnrichedAtStart(t *testing.T) {
 		}
 		ids[i] = id
 	}
-	allFlags := []uint8{plugin.DigestEntities, plugin.DigestRelationships, plugin.DigestClassified, plugin.DigestSummarized}
+	allFlags := []uint16{plugin.DigestEntities, plugin.DigestRelationships, plugin.DigestClassified, plugin.DigestSummarized}
 	for _, flag := range allFlags {
 		if err := eng.store.SetDigestFlag(ctx, ids[0], flag); err != nil {
 			t.Fatalf("SetDigestFlag(0): %v", err)
@@ -730,7 +730,7 @@ func TestApplyEnrichment_PersistsExplicitOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDigestFlags: %v", err)
 	}
-	wantMask := plugin.DigestEntities | plugin.DigestRelationships | plugin.DigestClassified | plugin.DigestSummarized
+	wantMask := uint16(plugin.DigestEntities | plugin.DigestRelationships | plugin.DigestClassified | plugin.DigestSummarized)
 	if flags&wantMask != wantMask {
 		t.Fatalf("digest flags: got 0x%02x, want mask 0x%02x", flags, wantMask)
 	}
@@ -959,7 +959,7 @@ func TestGetEnrichmentCandidates_AdaptiveBatch(t *testing.T) {
 		}
 		ids[i] = id
 	}
-	allFlags := []uint8{plugin.DigestEntities, plugin.DigestRelationships, plugin.DigestClassified, plugin.DigestSummarized}
+	allFlags := []uint16{plugin.DigestEntities, plugin.DigestRelationships, plugin.DigestClassified, plugin.DigestSummarized}
 	for i := 0; i < enrichedCount; i++ {
 		for _, flag := range allFlags {
 			if err := eng.store.SetDigestFlag(ctx, ids[i], flag); err != nil {
