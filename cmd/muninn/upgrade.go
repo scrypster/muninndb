@@ -171,7 +171,33 @@ func upgradeNote(body string) string {
 func stripMarkdownEmphasis(s string) string {
 	s = strings.ReplaceAll(s, "**", "")
 	s = strings.ReplaceAll(s, "`", "")
-	return s
+	return stripTerminalControlBytes(s)
+}
+
+// stripTerminalControlBytes removes C0/C1 control characters and DEL from s,
+// keeping only tab and newline.
+//
+// The upgrade note originates in a GitHub Release body and is printed straight
+// to the operator's terminal. An ESC there is an escape sequence, not a
+// character: it can reposition the cursor, recolour, or overwrite text the
+// operator has already read — so a release body could make the printed note say
+// something other than what a reviewer saw on the release page.
+//
+// Today only someone with release-publish access on this repo can reach it, so
+// the threat model is thin. That is a property of who currently holds a
+// permission, not a property of the code, and it is the kind of assumption that
+// is true until an org grows. Rendering untrusted bytes inertly costs nothing.
+func stripTerminalControlBytes(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+			return -1
+		default:
+			return r
+		}
+	}, s)
 }
 
 // wrapText breaks s into lines of at most width columns, splitting on spaces.
