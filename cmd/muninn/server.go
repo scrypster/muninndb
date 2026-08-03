@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"log/slog"
@@ -963,6 +964,7 @@ func runServer() {
 	corsOriginsFlag := flag.String("cors-origins", corsOriginsDefault, "Comma-separated allowed CORS origins for browser clients (e.g. http://myapp.local:3000); overrides MUNINN_CORS_ORIGINS")
 	var logLevelStr string
 	flag.StringVar(&logLevelStr, "log-level", "info", "Log level: debug, info, warn, error")
+	logFile := flag.String("log-file", "", "Path to write logs to. If set, the daemon opens this file directly (not inherited stderr) and SIGHUP reopens it for log rotation. Empty (default): log to stderr; SIGHUP is then a documented no-op that WARNs instead of attempting a reopen with no known path. Also settable via MUNINN_LOG_FILE")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of muninndb:\n")
 		flag.PrintDefaults()
@@ -982,6 +984,8 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_WARN_THRESHOLD_MB  Emit a warning when HNSW in-memory vector bytes exceed N MB (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_MAX_MB             Skip HNSW insert (keep Pebble write) when memory exceeds N MB (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_LISTEN_HOST           Host to bind all servers to (e.g. 0.0.0.0 for LAN access)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_LOG_FILE              Explicit log file path; enables SIGHUP log-reopen for rotation (see --log-file)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_ACCESS_LOG            Set to \"0\" to silence the REST per-request access log independently of --log-level\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_CORS_ORIGINS          Comma-separated CORS allowed origins\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_MCP_TOKEN             Bearer token for MCP endpoint auth (Docker/compose alternative to --mcp-token)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_MEM_LIMIT_GB          Memory limit in GB (default: 4)\n")
@@ -1011,6 +1015,11 @@ func runServer() {
 	}
 	if *tlsKey == "" {
 		*tlsKey = os.Getenv("MUNINN_TLS_KEY")
+	}
+
+	// --log-file env fallback — flag takes priority.
+	if *logFile == "" {
+		*logFile = os.Getenv("MUNINN_LOG_FILE")
 	}
 
 	// Persist actual bound addresses + scheme so 'muninn status' and the startup
@@ -1111,9 +1120,40 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "invalid --log-level %q: must be debug, info, warn, or error\n", logLevelStr)
 		os.Exit(1)
 	}
+	// Log destination (#850, #852). Default: os.Stderr, whatever that is —
+	// inherited from the CLI fork (muninn.log), a supervisor's capture file,
+	// its journal, or a terminal. This process cannot resolve "whatever
+	// stderr is" to a reopenable path, so SIGHUP is a no-op in that case
+	// (handleServerSignal WARNs rather than guessing).
+	//
+	// --log-file/MUNINN_LOG_FILE names an explicit path: the daemon opens
+	// its OWN descriptor on it (independent of whatever stderr also is) so
+	// SIGHUP can reopen it after a rotator renames the file, and records
+	// the resolved destination in muninn.logdest so `muninn logs` (#852)
+	// never has to guess where the running daemon's output actually goes.
+	var reopener *reopenableFile
+	var logWriter io.Writer = os.Stderr
+	logDest := logDestInherited
+	if *logFile != "" {
+		rf, err := newReopenableFile(*logFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open --log-file/MUNINN_LOG_FILE %q: %v\n", *logFile, err)
+			os.Exit(1)
+		}
+		reopener = rf
+		logWriter = rf
+		logDest = *logFile
+	}
+	if err := writeLogDestFile(*dataDir, logDest); err != nil {
+		// Best-effort: `muninn logs` falls back to its historical default
+		// when this sidecar is missing or unreadable, so a write failure
+		// here degrades to old behavior rather than blocking startup.
+		slog.Warn("failed to record log destination sidecar", "err", err)
+	}
+
 	// Create ring buffer — onAdd wired after uiSrv is constructed.
 	ring := logging.NewRingBuffer(1000, nil)
-	baseHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	baseHandler := slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(logging.NewRingHandler(baseHandler, ring)))
 
 	// Resolve web FS (embedded by default, filesystem in dev mode)
@@ -1540,17 +1580,34 @@ func runServer() {
 	grpcAdapter := grpcpkg.NewEngineAdapter(eng)
 	grpcServer := grpcpkg.NewServer(*grpcAddr, grpcAdapter, authStore, clientTLS)
 
-	// Signal handling
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// Signal handling. SIGHUP (#850) reopens the log file when --log-file/
+	// MUNINN_LOG_FILE is configured (reopener above) and does not affect
+	// shutdown; SIGINT/SIGTERM request graceful shutdown on the first
+	// occurrence and force an immediate exit on a second. All routing
+	// decisions live in handleServerSignal so they're unit-testable without
+	// a running server.
+	//
+	// SIGHUP is included in signal.Notify unconditionally — it compiles
+	// cleanly on Windows (the Go runtime defines syscall.SIGHUP there) even
+	// though Windows has no process-signal equivalent to deliver it, so the
+	// reopen path is simply unreachable there. Chosen over SIGUSR1: SIGHUP
+	// is the long-standing convention for "reopen"/"reload" (syslog, nginx,
+	// Apache), nothing in this codebase used it already, and — unlike
+	// SIGHUP — syscall.SIGUSR1 does not exist on the Windows build of the
+	// syscall package at all, so using it would need a build-tagged stub
+	// merely to keep the symbol name available.
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
+	var sigReopener logReopener
+	if reopener != nil {
+		sigReopener = reopener
+	}
 	go func() {
-		<-sigCh
-		slog.Info("shutdown signal received — starting graceful shutdown")
-		cancel()
-		<-sigCh
-		slog.Error("second signal received — forcing immediate exit")
-		os.Exit(1)
+		shutdownRequested := false
+		for sig := range sigCh {
+			handleServerSignal(sig, sigReopener, cancel, &shutdownRequested, os.Exit)
+		}
 	}()
 
 	// Start Prometheus metrics server (if configured).

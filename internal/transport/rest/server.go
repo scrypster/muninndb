@@ -123,6 +123,14 @@ type Server struct {
 	ready     chan struct{} // closed by Serve after wg.Add(1); guards against Shutdown racing wg.Wait
 	wg        sync.WaitGroup
 	shutdownM sync.Mutex
+
+	// accessLogEnabled gates the per-request "request" INFO line emitted by
+	// loggingMiddleware, independently of --log-level (#851). On by
+	// default; MUNINN_ACCESS_LOG=0 silences it without discarding every
+	// other INFO event in the system, the way raising --log-level to warn
+	// would. Read once at construction, matching the MUNINN_LOCAL_EMBED
+	// on-by-default/opt-out-with-"0" convention already used elsewhere.
+	accessLogEnabled bool
 }
 
 // EmbedInfo carries static embedder metadata set at server construction time.
@@ -168,6 +176,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 		startTime:                time.Now(),
 		shutdown:                 make(chan struct{}),
 		ready:                    make(chan struct{}),
+		accessLogEnabled:         os.Getenv("MUNINN_ACCESS_LOG") != "0",
 	}
 	// Subsystems are considered ready immediately unless explicitly marked otherwise.
 	s.subsystemsReady.Store(true)
@@ -678,7 +687,9 @@ func (s *Server) loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		statusClass := fmt.Sprintf("%dxx", rec.status/100)
 		metrics.RESTRequestDuration.WithLabelValues(r.Method, path, statusClass).Observe(duration)
 
-		slog.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", elapsed.Milliseconds())
+		if s.accessLogEnabled {
+			slog.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", elapsed.Milliseconds())
+		}
 	}
 }
 

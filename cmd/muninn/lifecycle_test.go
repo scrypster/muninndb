@@ -323,6 +323,29 @@ func TestRunStart_IndeterminateProbe(t *testing.T) {
 	}
 }
 
+// TestRemoveSidecars_CleansUpLogDestFile pins the #852 sidecar into the
+// existing cleanup list: muninn.pid and muninn.addrs were already removed on
+// stop, and muninn.logdest — the "where do my logs actually go" record — must
+// go with them, or `muninn logs` would keep trusting a stale answer from a
+// daemon that is no longer running.
+func TestRemoveSidecars_CleansUpLogDestFile(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "muninn.pid")
+	for _, p := range []string{pidPath, filepath.Join(dir, addrsFileName), filepath.Join(dir, logDestFileName)} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := removeSidecars(dir, pidPath); err != nil {
+		t.Fatalf("removeSidecars: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, logDestFileName)); !os.IsNotExist(err) {
+		t.Errorf("expected muninn.logdest to be removed, stat err = %v", err)
+	}
+}
+
 func TestMCPPortFromArgs_Default(t *testing.T) {
 	if got := mcpPortFromArgs(nil); got != defaultMCPPort {
 		t.Errorf("nil args: got %q, want %q", got, defaultMCPPort)
