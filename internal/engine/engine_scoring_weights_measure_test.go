@@ -484,7 +484,7 @@ func TestMeasureContentMatchCombiners(t *testing.T) {
 		v    float64
 	}{
 		{"engine .05", scwDefaultThreshold},
-		{"SURFACE .5", scwSurfaceDefaultThreshold},
+		{"SURFACE .5", scwRemovedSurfaceThreshold},
 	}
 	type armKey struct {
 		comb    scwCombiner

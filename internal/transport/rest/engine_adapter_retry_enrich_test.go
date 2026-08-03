@@ -180,7 +180,7 @@ func TestRESTEngineWrapperRetryEnrich_PersistsDigestAndGraphData(t *testing.T) {
 		t.Fatalf("expected DigestRelationships flag, flags=%08b", flags)
 	}
 
-	postgres, err := eng.Store().GetEntityRecord(ctx, "postgres")
+	postgres, err := eng.Store().GetEntityRecord(ctx, ws, "postgres")
 	if err != nil {
 		t.Fatalf("GetEntityRecord(postgres): %v", err)
 	}

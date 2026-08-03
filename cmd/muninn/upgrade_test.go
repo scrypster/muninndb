@@ -453,3 +453,83 @@ func TestStopDaemonForUpgrade_DeadProcess(t *testing.T) {
 		t.Errorf("stale PID file not removed: stat err = %v", err)
 	}
 }
+
+// withRunningDaemonPIDs substitutes runningDaemonPIDs for the duration of a
+// test, so exe-scan-only daemon detection (no PID file, e.g. a
+// service-managed process that never wrote muninn.pid — #792) can be
+// exercised without a real matching process on disk.
+func withRunningDaemonPIDs(t *testing.T, pids []int) {
+	t.Helper()
+	orig := runningDaemonPIDs
+	runningDaemonPIDs = func() []int { return pids }
+	t.Cleanup(func() { runningDaemonPIDs = orig })
+}
+
+// TestStopDaemonInstances_NoPIDFile_ExeScanFindsLiveProcess proves the core
+// #792 defect: a daemon with no muninn.pid (launchd, a systemd Type=simple
+// unit execing the server directly, a bare `--daemon` process) is invisible
+// to the PID-file check alone, so a stop step that only reads the PID file
+// stops nothing and — under the pre-fix upgradeStep contract — still prints
+// "Stopping daemon... ✓". stopDaemonInstances must instead find this process
+// via the exe-scan and refuse to report success while it stays alive.
+func TestStopDaemonInstances_NoPIDFile_ExeScanFindsLiveProcess(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "muninn.pid") // deliberately never written
+
+	// A process that stays alive however hard we signal it — same shape
+	// TestStopDaemonForUpgrade_ForeignLiveProcess uses for the PID-file case.
+	withProbe(t, processRunning)
+	withRunningDaemonPIDs(t, []int{99999999})
+
+	stopped, err := stopDaemonInstances(pidPath, 200*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected stopDaemonInstances to refuse success — a live process running this binary was found via exe-scan and never died")
+	}
+	if !stopped {
+		t.Error("expected stoppedAny=true — a stop was attempted on the exe-scan PID")
+	}
+	if !strings.Contains(err.Error(), "99999999") {
+		t.Errorf("error does not name the stuck pid: %v", err)
+	}
+}
+
+// TestStopDaemonInstances_NoPIDFile_NoLiveProcess is the negative control:
+// with no PID file and no exe-scan hits, there is genuinely nothing to stop,
+// and reporting stoppedAny=false with a nil error is honest, not a false
+// positive.
+func TestStopDaemonInstances_NoPIDFile_NoLiveProcess(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "muninn.pid")
+	withRunningDaemonPIDs(t, nil)
+
+	stopped, err := stopDaemonInstances(pidPath, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("expected no error when nothing is running, got: %v", err)
+	}
+	if stopped {
+		t.Error("expected stoppedAny=false when nothing is running")
+	}
+}
+
+// TestStopDaemonInstances_PIDFileDeadProcess_ExeScanConfirmsGone verifies the
+// ordinary case still works: a stale PID file naming a dead process, and the
+// exe-scan agreeing nothing is running, reports success and clears the file.
+func TestStopDaemonInstances_PIDFileDeadProcess_ExeScanConfirmsGone(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "muninn.pid")
+	if err := writePID(pidPath, 99999999); err != nil {
+		t.Fatalf("writePID: %v", err)
+	}
+	withRunningDaemonPIDs(t, nil)
+
+	stopped, err := stopDaemonInstances(pidPath, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("expected no error for an already-dead daemon, got: %v", err)
+	}
+	if stopped {
+		t.Error("expected stoppedAny=false for a PID file naming an already-dead process")
+	}
+	if _, statErr := os.Stat(pidPath); !os.IsNotExist(statErr) {
+		t.Errorf("stale PID file not removed: stat err = %v", statErr)
+	}
+}

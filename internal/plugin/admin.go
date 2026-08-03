@@ -168,14 +168,14 @@ func (h *AdminHandler) handleAdd(w http.ResponseWriter, ctx context.Context, req
 	slog.Info("plugin registered", "name", plugin.Name(), "tier", req.Tier)
 
 	// Count unprocessed engrams
-	var flagBit uint8
+	var flagBit uint16
 	if req.Tier == "embed" {
 		flagBit = DigestEmbed
 	} else {
 		flagBit = DigestEnrich
 	}
 
-	var skipFlags uint8
+	var skipFlags uint16
 	if flagBit == DigestEmbed {
 		skipFlags = DigestEmbedFailed
 	} else {

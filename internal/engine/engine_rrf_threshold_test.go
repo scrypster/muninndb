@@ -200,7 +200,7 @@ func TestApplyEntityBoost_SkippedUnderRRFFusion(t *testing.T) {
 	// TestEntityBoost_SameEntityViaMultipleSeedsCountsOnce, known to clear a
 	// 0.05 threshold via entity evidence alone (entityBoostFactor * idf(3,100)
 	// ~= 0.114).
-	upsertEntityTimes(t, eng, "RareEnt", 3)
+	upsertEntityTimes(t, eng, ws, "RareEnt", 3)
 	seed := writeLinkedEngram(t, eng, ws, "boost-skip-seed", "RareEnt")
 	target := writeLinkedEngram(t, eng, ws, "boost-skip-target", "RareEnt")
 

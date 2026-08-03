@@ -21,9 +21,9 @@ import (
 //
 // Returns the number of digest records that were written (created or updated).
 func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) (int64, error) {
-	const DigestEmbed uint8 = 0x02
-	const DigestEmbedFailed uint8 = 0x80
-	const embedMask uint8 = DigestEmbed | DigestEmbedFailed
+	const DigestEmbed uint16 = 0x02
+	const DigestEmbedFailed uint16 = 0x80
+	const embedMask uint16 = DigestEmbed | DigestEmbedFailed
 
 	wsPlus, err := keys.IncrementWSPrefix(ws)
 	if err != nil {
@@ -98,7 +98,7 @@ func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) 
 
 		raw &^= embedMask
 		flagKey := keys.DigestFlagsKey(id)
-		if err := batch.Set(flagKey, []byte{raw}, nil); err != nil {
+		if err := batch.Set(flagKey, encodeDigestFlags(raw), nil); err != nil {
 			return cleared, fmt.Errorf("clear embed flags: batch set: %w", err)
 		}
 		cleared++

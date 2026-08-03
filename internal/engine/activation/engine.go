@@ -71,10 +71,23 @@ type Weights struct {
 	// ACT-R mode: set UseACTR=true to enable ACT-R base-level + Hebbian scoring.
 	// This is the recommended mode: resolves decay-vs-Hebbian tension, deterministic,
 	// total recall (no stored state mutation), grounded in 30+ years of cognitive science.
-	UseACTR      bool
-	ACTRDecay    float32 // power-law decay exponent d (0 → default 0.5)
-	ACTRHebScale float32 // Hebbian scaling inside softplus (0 → default 4.0)
-	DisableACTR  bool    // when true, force legacy weighted-sum scoring (overrides UseACTR)
+	UseACTR   bool
+	ACTRDecay float32 // power-law decay exponent d (0 → default 0.5)
+	// ACTRHebScale is the Hebbian amplifier inside softplus. It is a POINTER
+	// because 0 is a MEANINGFUL value — "apply no cognitive boost at all" — and
+	// the auth layer already admits it (`PlasticityConfig.ACTRHebScale` is a
+	// *float64 clamped to [0, 50]). With a plain float32 the zero value was
+	// indistinguishable from unset and was silently substituted with 4.0: an
+	// operator who configured `actr_heb_scale: 0` got the default, in the hot
+	// path, with no warning. That is principle #1 violated, and it made the
+	// documented kill switch a no-op.
+	//
+	// nil = unset → DefaultACTRHebScale. Non-nil is honored exactly, including 0.
+	// NOTE this scales BOTH hebbianBoost and transitionBoost (see computeACTR),
+	// so 0 is "no cognitive boost", NOT "no Hebbian" — the per-mechanism
+	// ablation is HebbianEnabled / PASEnabled (COG-32).
+	ACTRHebScale *float32
+	DisableACTR  bool // when true, force legacy weighted-sum scoring (overrides UseACTR)
 	// RRF fusion mode: when true, use Phase 3 RRF scores directly as the scoring
 	// basis in Phase 6, bypassing ACT-R/CGDN/weighted-sum recomputation.
 	// Rank-based and scale-invariant (Cormack et al. 2009). Cognitive boosts
@@ -337,6 +350,20 @@ type ActivateRequest struct {
 	// CandidatesPerIndex overrides the per-index candidate pool size for phase2.
 	// Zero means fall back to 30.
 	CandidatesPerIndex int
+	// HebbianEnabled gates the PHASE 4 read-side Hebbian boost, symmetrically
+	// with the way PASEnabled gates phase 4.5 (COG-32). Set by the engine from
+	// the vault's resolved PlasticityConfig, which already gates Hebbian
+	// LEARNING submission and association DECAY on the same flag. Before #779
+	// the read side was unconditional, so a `scratchpad` vault
+	// (hebbian_enabled:false, assoc_decay_factor:0) was scored by edges it
+	// would never update and never decay.
+	//
+	// DIRECT activation callers (tests, cmd/bench, anything constructing an
+	// ActivateRequest by hand) get the zero value, i.e. NO Hebbian boost. That
+	// is deliberate: a bool that defaults to "on" cannot express "off", and the
+	// pipeline's only production constructor (internal/engine.Activate) always
+	// sets it — pinned by TestActivateRequest_WiresHebbianEnabledFromPlasticity.
+	HebbianEnabled bool
 	// PAS: Predictive Activation Signal — sequential transition tracking.
 	PASEnabled       bool // when true, inject transition candidates in Phase 2
 	PASMaxInjections int  // max transition candidates to inject (0 = default 5)
@@ -365,7 +392,29 @@ type ActivateRequest struct {
 	AsOf *time.Time
 	// IncludeInvalid disables the valid-time gate entirely (show history).
 	IncludeInvalid bool
+	// EmbedBudgetFraction bounds how much of the CALLER's remaining context
+	// deadline phase1's embed call may consume, as a fraction in (0, 1].
+	// Zero (the common case — direct callers never set this) uses
+	// defaultEmbedBudgetFraction. This exists so a hung/slow embed backend
+	// cannot consume the entire caller deadline and leave no time for the
+	// BM25-only fallback (#658): the budget is a FRACTION of whatever
+	// deadline the caller supplied, not a fixed duration, since a fixed
+	// timeout tuned for one deployment's embedder latency would be wrong for
+	// every other deployment's request budget. Ignored when ctx carries no
+	// deadline at all (nothing to divide, and no fallback to protect).
+	EmbedBudgetFraction float64
 }
+
+// defaultEmbedBudgetFraction is the fraction of a caller's REMAINING context
+// deadline that phase1 reserves for the embed call, leaving the rest for
+// phase2's BM25/FTS retrieval and phase6 scoring to complete the graceful
+// degradation path (#658). Deliberately a fraction of the caller's own
+// budget rather than an absolute duration: a vault whose embedder normally
+// answers in 50ms and a vault behind a slow remote provider need entirely
+// different absolute timeouts, but the same proportional split serves both
+// self-derived shapes without imposing either one's latency profile on the
+// other (see docs/internals's per-vault calibration principle).
+const defaultEmbedBudgetFraction = 0.5
 
 // PassesValidity is the valid-time recall gate (COG-19: default recall never
 // returns an engram whose ValidUntil <= now). Validity is a HARD filter —
@@ -756,7 +805,12 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	fused := phase3RRF(sets)
 
 	// Phase 4: Hebbian boost (always sequential — fast, in-memory ring buffer read).
-	e.phase4HebbianBoost(ctx, ws, req.VaultID, fused)
+	// Gated on HebbianEnabled symmetrically with phase 4.5's PASEnabled (COG-32):
+	// a vault that neither learns nor decays association weights must not be
+	// scored by them either.
+	if req.HebbianEnabled {
+		e.phase4HebbianBoost(ctx, ws, req.VaultID, fused)
+	}
 
 	// Phase 4.5: PAS transition boost — applies to candidates already in the fused list.
 	if req.PASEnabled {
@@ -855,6 +909,35 @@ func isZeroVector(vec []float32) bool {
 	return true
 }
 
+// embedBudgetContext derives a sub-context for the embed call that reserves
+// the rest of ctx's remaining deadline for the BM25 fallback path (#658). If
+// ctx carries no deadline, or fraction is out of (0, 1], it returns ctx
+// unmodified — there is no caller budget to protect, so today's
+// wait-as-long-as-ctx-allows behavior is preserved. The returned cancel func
+// must always be called (defer is safe even on the ctx passthrough — Go's
+// context.WithTimeout returns a no-op-safe CancelFunc, and for the
+// passthrough case the caller's own cancellation already governs ctx).
+func embedBudgetContext(ctx context.Context, fraction float64) (context.Context, context.CancelFunc) {
+	if fraction <= 0 || fraction > 1 {
+		fraction = defaultEmbedBudgetFraction
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		// Already past deadline — nothing to reserve; let the embed call fail
+		// immediately through the existing ctx-already-done path.
+		return ctx, func() {}
+	}
+	budget := time.Duration(float64(remaining) * fraction)
+	if budget <= 0 || budget >= remaining {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, budget)
+}
+
 func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*phase1Result, error) {
 	result := &phase1Result{}
 	result.queryStr = strings.Join(req.Context, " ")
@@ -873,7 +956,9 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 	// benchmarks and lightweight deployments), this avoids the hashEmbedder
 	// CPU cost entirely (~13% of activation CPU).
 	if e.embedder != nil && e.hnsw != nil {
-		vec, err := e.embedder.Embed(ctx, req.Context)
+		embedCtx, cancelEmbed := embedBudgetContext(ctx, req.EmbedBudgetFraction)
+		defer cancelEmbed()
+		vec, err := e.embedder.Embed(embedCtx, req.Context)
 		if err != nil {
 			// Embedding backend unreachable (e.g. connection refused on the
 			// embedding endpoint). Degrade to BM25+decay recall instead of
@@ -1563,6 +1648,22 @@ func (e *ActivationEngine) phase5Traverse(
 		return nil
 	}
 
+	// INERT — this phase has never emitted a candidate on a real corpus (#801).
+	// minHopScore and the `baseScore: seed.rrfScore` seeding below both date to
+	// the initial commit, where the fusion summed three lists and the best
+	// conceivable hop scored 1/41+1/61+1/121 = 0.049048, x1.0 x0.7 = 0.034334
+	// against a 0.05 gate: unreachable by construction. Today's unfiltered
+	// ceiling is 1/41+1/61+1/121+1/51 = 0.0686559 (the time and tag lists only
+	// populate under a filter), so a hop needs weight x boost >= 1.041 while
+	// weight <= 1.0 and the default profile only dampens. Measured on a real
+	// 3,458-engram production vault with 127,798 edges: 0 hops on 150/150
+	// queries, and at a fully-open gate traversal is strictly dominated by
+	// raising CandidatesPerIndex (0/150 wins at cap 2+, p < 1e-45, replicated
+	// on a second vault). Do NOT "fix" the constant — no threshold formulation
+	// is supported, and the reasoning, the discarded circular control and the
+	// one open alternative (ACT-R-seeded traversal, with a pre-committed
+	// acceptance rule) are in docs/internals/decision-record.md (#801).
+	// Pinned by TestPhase5Traverse_InertAtTheMeasuredSeedCeiling.
 	const (
 		hopPenalty      = 0.7
 		minHopScore     = 0.05
@@ -2114,6 +2215,38 @@ func (e *ActivationEngine) phase6Score(
 	// Pass 1 computes gated activations a(d) for all candidates; Pass 2 normalizes.
 	// This replicates lateral inhibition in hippocampal retrieval: cognitive state
 	// multiplicatively gates content relevance, then candidates compete via division.
+	//
+	// INERT at any positive threshold (#768). `computeComponents` below — the
+	// component producer this path uses — never sets ScoreComponents.ContentMatch
+	// (that field is only populated by computeACTR); it keeps its Go zero value,
+	// 0.0. The gate a few lines down is
+	//
+	//	absolute := min(min(Raw, ContentMatch), 1.0) * Confidence
+	//
+	// so `absolute` is exactly 0.0 for every candidate on this path, and
+	// `absolute < req.Threshold` drops every non-tag-pool row unless
+	// req.Threshold <= 0. CGDN has never returned a live result in a passing
+	// configuration for the life of the feature. Pinned by
+	// TestPhase6Score_CGDN_InertAtAnyPositiveThreshold; its RED control is the
+	// neighbouring TestPhase6Score_CGDNPath (threshold 0.0), which already
+	// gets output — proving the pin is not vacuous: threshold 0 emits,
+	// threshold > 0 does not, on the identical candidate.
+	//
+	// The live ratio `r = a(d)^n / denom` just below is NOT unbounded, contra
+	// an earlier reading of this code (#768's second claim): the Pass-2 loop
+	// only runs `if len(cgdnCands) > 0`, and in that branch `denom = sigma^n +
+	// sum(a_i^n)` includes the candidate's own a(d)^n term in the sum, so
+	// `denom >= a(d)^n` and `r <= 1` by construction for every live row. The
+	// measured 8649.0 blowup came from the SHADOW pass below, over an EMPTY
+	// live pool, which is why that pass clamps explicitly and the live pass
+	// does not need to.
+	//
+	// Do NOT "fix" ContentMatch here as a standalone patch: #805 found the
+	// Hebbian rescue floor (`epsilon` in computeGatedActivation) sitting 20x
+	// above the steady-state Hebbian edge weight, so wiring ContentMatch alone
+	// would surface a mechanism whose OWN floor still discards the entire live
+	// Hebbian population. See docs/internals/decision-record.md (#768/#805)
+	// before touching either constant.
 	if w.UseCGDN {
 		type cgdnItem struct {
 			c interface {
@@ -2377,7 +2510,11 @@ func (e *ActivationEngine) phase6Score(
 		// scale as every other row. Same formula, same gate quantity
 		// (AbsoluteScore), same req.Threshold as the live path two lines above.
 		shadowMatches = collectShadowMatches(all, shadowEngrams, req, func(c scoringCandidate, eng *storage.Engram) (float64, float64, ScoreComponents) {
-			comp := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
+			// THE TAG-POOL BYPASS IS DELIBERATELY NOT APPLIED (shadow.go): a
+			// shadow is evidence, not a returned row, so it must never be
+			// admitted on the tagMatchFloor alone — pass inTagPool=false,
+			// never c.inTagPool.
+			comp := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, false)
 			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
 			raw := math.Min(comp.Raw*scale, 1.0)
 			final := raw * comp.Confidence
@@ -2556,6 +2693,13 @@ func relevanceCalibration(w resolvedWeights) RelevanceCalibration {
 // computeComponents calculates all scoring components for a candidate engram.
 // Accepts *storage.Engram directly — avoids a separate GetMetadata call in phase6.
 // lastAccessNs is the nanosecond timestamp of last cache access (0 if not cached).
+//
+// NOTE (#768): the returned ScoreComponents does NOT set ContentMatch — that
+// field is only populated by computeACTR. computeComponents is the producer
+// used by both the legacy weighted-sum path AND the CGDN path; weighted-sum
+// never reads ContentMatch, so this was harmless there, but CGDN's abstention
+// gate does read it (`min(Raw, ContentMatch)`), which makes CGDN inert at any
+// positive threshold. See the INERT comment at the CGDN branch in phase6Score.
 func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage.Engram, lastAccessNs int64, now time.Time, w resolvedWeights) ScoreComponents {
 	const accessFreqSaturation = 100.0
 	const recencyHalfLifeDays = 7.0
@@ -2571,6 +2715,18 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 		lastAccess = time.Unix(0, lastAccessNs)
 	} else {
 		lastAccess = eng.LastAccess
+	}
+	// Treat an unset LastAccess (zero time, or the pre-2000 ERF overflow
+	// sentinel) as "just now" — an engram that has never been accessed, exactly
+	// as computeACTR does. Without this, a zero LastAccess gives daysSince ~=
+	// 740,000: recency 0 and decayFactor pinned at its 0.05 floor, which on a
+	// weighted_sum vault scored an otherwise-perfect row 0.42 against COG-6's 0.5
+	// default threshold — a silently-EMPTY recall (#810). This guard is
+	// independent of the write-side and ERF-side fixes in #810: it defends
+	// records already at rest and any future writer, and on its own it fully
+	// covers the scoring half of the repair.
+	if storage.IsUnsetTimestamp(lastAccess) {
+		lastAccess = now
 	}
 	daysSince := now.Sub(lastAccess).Hours() / 24.0
 	// Clamp clock skew: a future LastAccess (NTP step, or a cache timestamp
@@ -2760,9 +2916,9 @@ func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, e
 	} else {
 		lastAccess = eng.LastAccess
 	}
-	// Treat zero or pre-2000 LastAccess as "just now" — these are newly written
-	// engrams that have never been accessed. A fresh write = maximum recency.
-	if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+	// Treat an unset LastAccess as "just now" — these are newly written engrams
+	// that have never been accessed. A fresh write = maximum recency.
+	if storage.IsUnsetTimestamp(lastAccess) {
 		lastAccess = now
 	}
 	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute — sub-hour precision for intraday recall
@@ -2863,10 +3019,24 @@ func computeRRFScore(rrfScore, hebbianBoost, transitionBoost float64, eng *stora
 //
 // This creates a 41x advantage for the Hebbian-linked stale vs unlinked stale,
 // replicating retrieval-induced forgetting counteraction (Anderson & Bjork 1994)
-// and memory reconsolidation (Nader et al. 2000).
+// and memory reconsolidation (Nader et al. 2000) — in THEORY. In practice this
+// whole path is INERT (#768, see the block comment at the CGDN branch above),
+// so the illustration in the doc comment above never executes on a real
+// candidate. Recorded anyway (#805) because epsilon is wrong on its own terms
+// even if CGDN becomes live: it is a write-time constant compared against a
+// quantity that decays. Association edge weights are clamped to
+// `peakWeight * 0.05` in steady state (internal/storage/association.go), and a
+// census of two production vault clones found the entire live Hebbian
+// population (`RelCoActivated`) sitting at a p50 of 0.0005 — 20x BELOW
+// epsilon. `hebbianBoost` here is a weight of that same shape, so
+// `hebbianBoost - epsilon` is negative for essentially every live edge and
+// `rescue` floors to 0: the Hebbian-rescue mechanism this function exists to
+// provide would be a no-op even after #768 is repaired. Do not "fix" epsilon
+// in isolation — see docs/internals/decision-record.md (#768/#805) for why
+// this is folded into the same disposition rather than tuned separately.
 func computeGatedActivation(vectorScore, normalizedFTS, decayFactor, hebbianBoost float64, w resolvedWeights) float64 {
 	const (
-		epsilon      = 0.01 // Hebbian floor — prevents zero rescue for unlinked engrams
+		epsilon      = 0.01 // INERT floor (#805) — 20x above steady-state Hebbian weight; see doc comment above
 		rescueLambda = 0.8  // Hebbian rescue strength — how much Hebbian can restore decay
 	)
 	rescue := math.Max(0, hebbianBoost-epsilon) * rescueLambda
@@ -3087,9 +3257,13 @@ func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {
 	if req.ACTRDecay > 0 {
 		rw.ACTRDecay = float64(req.ACTRDecay)
 	}
+	// nil = unset (take the default); non-nil is honored EXACTLY, including 0.
+	// A `> 0` guard here would silently substitute the default for a configured
+	// zero — principle #1 in the hot path. See the field comment on
+	// Weights.ACTRHebScale.
 	rw.ACTRHebScale = DefaultACTRHebScale
-	if req.ACTRHebScale > 0 {
-		rw.ACTRHebScale = float64(req.ACTRHebScale)
+	if req.ACTRHebScale != nil {
+		rw.ACTRHebScale = float64(*req.ACTRHebScale)
 	}
 	return rw
 }

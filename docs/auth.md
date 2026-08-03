@@ -64,7 +64,7 @@ vault: default
 | Mode | Reads | Cognitive state writes | Use case |
 |------|-------|------------------------|----------|
 | `full` | Yes | **Yes** — temporal scores refresh, Hebbian weights update, access counts increment | AI agents, primary integrations, anything that is *part of* the brain |
-| `observe` | Yes | **No** — mutating REST routes and gRPC RPCs return `403` before the engine is reached; engine-layer cognitive mutations are also suppressed | Dashboards, analytics, read-only partners, exports |
+| `observe` | Yes | **No** — mutating REST routes and gRPC RPCs return `403` before the engine is reached, and on MCP every tool classified mutating is refused at dispatch; engine-layer cognitive mutations are also suppressed | Dashboards, analytics, read-only partners, exports |
 
 The `observe` mode exists because the vault's cognitive state is the thing of value. A dashboard reading engrams 1000 times a day should not inflate access counts and distort what the AI agent sees as relevant. `observe` keys see the brain; they don't affect it, and semantically mutating REST routes are rejected.
 
@@ -308,7 +308,7 @@ curl -X PUT "http://127.0.0.1:8475/api/admin/vault/default/plasticity" \
 | Field | Type | Range | Purpose |
 |-------|------|-------|---------|
 | `preset` | string | `default` \| `reference` \| `scratchpad` \| `knowledge-graph` \| `working` | Base cognitive profile; overrides applied on top |
-| `hebbian_enabled` | bool | — | Enable/disable Hebbian weight updates (coactivation learning) |
+| `hebbian_enabled` | bool | — | Enable/disable Hebbian co-activation learning. Symmetric (COG-32): gates weight updates, association decay, **and** the read-side boost recall applies from association weights |
 | `temporal_enabled` | bool | — | Enable/disable time-based temporal scoring |
 | `multi_user` | bool | — | Vault shared by multiple users/agents: guide + recall hints steer clients to per-user scoped recall; `where_left_off`/`session` flagged vault-global |
 | `hop_depth` | int | 0–8 | BFS hops for associative retrieval; higher = broader context |

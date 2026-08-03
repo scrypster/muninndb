@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/keys"
@@ -127,6 +128,47 @@ var absenceVsFailureCases = []absenceVsFailureCase{
 		corrupt: func(t *testing.T, s *PebbleStore, ws [8]byte, src, dst ULID) {
 			t.Helper()
 			setShort(t, s, keys.OrdinalKey(ws, [16]byte(src), [16]byte(dst)))
+		},
+	},
+	{
+		// #804. The 0x0A idempotency token: absence means "not yet flagged",
+		// which is what makes the contradiction confidence penalty fire once.
+		// A failed read reported as absence made the pair NEWLY flagged and
+		// restamped detectedAt with `now` — and BayesianUpdate is not
+		// invertible, so the compounded penalty (1.0 -> 0.975 -> 0.797 ->
+		// 0.313 -> 0.0709) removes BOTH memories from recall, the true one
+		// included. The two callers act oppositely on the error this returns;
+		// see readContradictionMarker and each call site.
+		method:         "readContradictionMarker",
+		routesPointGet: true,
+		faultPrefix:    prefix.Contradiction,
+		seed: func(t *testing.T, s *PebbleStore, ws [8]byte, src, dst ULID) []byte {
+			a, _ := seedContradictionMarker(t, s, ws, src, dst, time.Unix(1700000000, 0))
+			return keys.ContradictionKey(ws, 0, 0, [16]byte(a))
+		},
+		absent: func(s *PebbleStore, ws [8]byte, src, dst ULID) error {
+			_, _, err := s.readContradictionMarker(keys.ContradictionKey(ws, 0, 0, [16]byte(src)))
+			return err
+		},
+		call: func(s *PebbleStore, ws [8]byte, src, dst ULID) error {
+			a := src
+			if CompareULIDs(src, dst) > 0 {
+				a = dst
+			}
+			_, _, err := s.readContradictionMarker(keys.ContradictionKey(ws, 0, 0, [16]byte(a)))
+			return err
+		},
+		corrupt: func(t *testing.T, s *PebbleStore, ws [8]byte, src, dst ULID) {
+			t.Helper()
+			a := src
+			if CompareULIDs(src, dst) > 0 {
+				a = dst
+			}
+			// A value too short to even name the partner cannot be something
+			// any writer in this package produced. A bare 16-byte legacy
+			// marker is VALID and decodes to "detection time unknown"; only
+			// shorter than that is damage.
+			setShort(t, s, keys.ContradictionKey(ws, 0, 0, [16]byte(a)))
 		},
 	},
 	{

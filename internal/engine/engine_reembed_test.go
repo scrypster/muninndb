@@ -35,7 +35,7 @@ func TestStartReembedVault_Success(t *testing.T) {
 	ctx := context.Background()
 
 	const vaultName = "reembed-success"
-	const DigestEmbed uint8 = 0x02
+	const DigestEmbed uint16 = 0x02
 
 	// Write a few engrams.
 	idStrings := make([]string, 3)

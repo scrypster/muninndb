@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/cognitive"
@@ -109,8 +108,10 @@ func TestPAS_TransitionRecording(t *testing.T) {
 		t.Fatal("Activate 1 returned 0 results")
 	}
 
-	// Allow drainLog goroutine to process the first activation's log entry.
-	time.Sleep(100 * time.Millisecond)
+	// Allow drainLog goroutine to process the first activation's log entry —
+	// deterministically (testing-hermeticity.md source #5) rather than a
+	// fixed sleep, which flakes under -race scheduling pressure.
+	eng.waitWriteTimeIdle()
 
 	// Activation 2: query about coffee beans (sequential after brewing)
 	resp2, err := eng.Activate(ctx, &mbp.ActivateRequest{
@@ -190,7 +191,9 @@ func TestPAS_TransitionBoostInScoreComponents(t *testing.T) {
 			MaxResults: 10,
 			Threshold:  0.01,
 		})
-		time.Sleep(100 * time.Millisecond)
+		// Deterministic drainLog wait (testing-hermeticity.md source #5)
+		// instead of a fixed sleep.
+		eng.waitWriteTimeIdle()
 
 		_, _ = eng.Activate(ctx, &mbp.ActivateRequest{
 			Vault:      "test",
@@ -198,7 +201,7 @@ func TestPAS_TransitionBoostInScoreComponents(t *testing.T) {
 			MaxResults: 10,
 			Threshold:  0.01,
 		})
-		time.Sleep(100 * time.Millisecond)
+		eng.waitWriteTimeIdle()
 	}
 
 	// Force-flush the transition worker to ensure all transitions are processed.

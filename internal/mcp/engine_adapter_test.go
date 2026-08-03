@@ -20,17 +20,17 @@ type mockPluginStore struct {
 	incrementCoOccurrenceCalls int
 }
 
-func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint8) (int64, error) {
+func (m *mockPluginStore) CountWithoutFlag(_ context.Context, _, _ uint16) (int64, error) {
 	return 0, nil
 }
-func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _, _ uint8) plugin.EngramIterator {
+func (m *mockPluginStore) ScanWithoutFlag(_ context.Context, _, _ uint16) plugin.EngramIterator {
 	return nil
 }
-func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ plugin.ULID, _ uint8) error {
+func (m *mockPluginStore) SetDigestFlag(_ context.Context, _ plugin.ULID, _ uint16) error {
 	m.setDigestFlagCalls++
 	return nil
 }
-func (m *mockPluginStore) GetDigestFlags(_ context.Context, _ plugin.ULID) (uint8, error) {
+func (m *mockPluginStore) GetDigestFlags(_ context.Context, _ plugin.ULID) (uint16, error) {
 	return 0, nil
 }
 func (m *mockPluginStore) UpdateEmbedding(_ context.Context, _ plugin.ULID, _ []float32) error {
@@ -40,7 +40,7 @@ func (m *mockPluginStore) UpdateDigest(_ context.Context, _ plugin.ULID, _ *plug
 	m.updateDigestCalls++
 	return nil
 }
-func (m *mockPluginStore) UpsertEntity(_ context.Context, _ plugin.ExtractedEntity) error {
+func (m *mockPluginStore) UpsertEntity(_ context.Context, _ plugin.ULID, _ plugin.ExtractedEntity) error {
 	m.upsertEntityCalls++
 	return nil
 }
@@ -212,7 +212,7 @@ func TestRetryEnrich_PersistenceCallSequence(t *testing.T) {
 	}
 	var linkedEntityNames []string
 	for _, entity := range result.Entities {
-		if err := pStore.UpsertEntity(ctx, entity); err != nil {
+		if err := pStore.UpsertEntity(ctx, plugin.ULID(ulid), entity); err != nil {
 			continue
 		}
 		if err := pStore.LinkEngramToEntity(ctx, plugin.ULID(ulid), entity.Name); err != nil {

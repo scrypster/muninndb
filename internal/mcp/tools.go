@@ -336,6 +336,10 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "string",
 						"description": "ISO 8601 timestamp. Instead of deleting, records that the fact stopped being true at this moment (sets valid_until). The memory stays active but drops out of default recall; as_of before this time still returns it.",
 					},
+					"hard": map[string]any{
+						"type":        "boolean",
+						"description": "When true, PERMANENTLY destroys the memory instead of soft-deleting it: no 7-day recovery window, not restorable, not counted anywhere. Default false (soft-delete). Cannot be combined with not_true_since. Irreversible — confirm with the caller before setting this.",
+					},
 				},
 				"required": []string{"id"},
 			},

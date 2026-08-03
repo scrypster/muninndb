@@ -1128,6 +1128,61 @@ func (s *Server) handleReindexFTSVault(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleResetRepairWatermark deletes a per-vault repair watermark (0x2B evolve
+// entity-link repair, 0x2E full-weight association repair, or both) so the
+// next boot re-scans instead of trusting a prior clean pass (#761). Neither
+// repair is leader-gated or replicated — each node runs its own startup
+// pass — so this resets THIS node's own copy only; an operator suspecting
+// several cluster nodes are affected calls it once per node.
+// POST /api/admin/vaults/{name}/repair-watermark/reset
+// Body: {"which": "evolve" | "assoc_weight" | "all"}
+// Response 200: {"vault": "...", "which": "..."}
+func (s *Server) handleResetRepairWatermark(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name required")
+		return
+	}
+	if !isValidVaultName(name) {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "vault name contains invalid characters")
+		return
+	}
+
+	var req struct {
+		Which string `json:"which"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body: "+err.Error())
+			return
+		}
+	}
+	if req.Which == "" {
+		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "which required: evolve, assoc_weight, or all")
+		return
+	}
+
+	if err := s.engine.ResetRepairWatermark(r.Context(), name, engine.RepairWatermarkKind(req.Which)); err != nil {
+		if errors.Is(err, engine.ErrVaultNotFound) {
+			s.sendError(r, w, http.StatusNotFound, ErrVaultNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, engine.ErrUnknownRepairWatermark) {
+			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
+			return
+		}
+		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
+		return
+	}
+	s.EmitAudit(r, "vault.repair_watermark_reset", "vault", name, "ok", map[string]string{"which": req.Which})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"vault": name,
+		"which": req.Which,
+	})
+}
+
 // handleReembedVault clears stale embeddings for a vault so the RetroactiveProcessor
 // re-embeds everything with the current model.
 // POST /api/admin/vaults/{name}/reembed

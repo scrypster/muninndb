@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -141,6 +142,40 @@ func TestClusterCommands_ServerUnreachable(t *testing.T) {
 	}
 
 	w.Close()
+}
+
+// TestClusterCommands_AttachClusterSecretBearer reproduces #632: /v1/cluster/*
+// requires "Authorization: Bearer <cluster_secret>" (withClusterAuth in
+// internal/transport/rest/server.go) but the CLI sent no credential at all,
+// so every `muninn cluster info|status|failover` 401'd against a healthy,
+// correctly-configured daemon. The CLI should read the secret from the local
+// cluster.yaml next to the daemon's data directory (the suggested fix in the
+// issue) and attach it automatically.
+func TestClusterCommands_AttachClusterSecretBearer(t *testing.T) {
+	const secret = "test-cluster-secret"
+
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "cluster.yaml"),
+		[]byte("enabled: true\ncluster_secret: "+secret+"\n"), 0600); err != nil {
+		t.Fatalf("write cluster.yaml: %v", err)
+	}
+	t.Setenv("MUNINNDB_DATA", dataDir)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("Authorization")
+		if got != "Bearer "+secret {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]any{"code": "cluster_auth_required"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"enabled": true})
+	}))
+	defer server.Close()
+
+	if _, err := httpGet(server.URL + "/v1/cluster/info"); err != nil {
+		t.Errorf("expected httpGet to attach the cluster secret and succeed, got: %v", err)
+	}
 }
 
 // TestClusterCommands_AddNode verifies add-node prints instructions.
@@ -307,5 +342,80 @@ func TestClusterDisable_Success(t *testing.T) {
 	}
 	if !strings.Contains(result, "disabled") {
 		t.Errorf("expected 'disabled' in output, got: %s", result)
+	}
+}
+
+// TestClusterEnable_ViaDispatcher_AuthenticatesLikeVault reproduces the other
+// half of #632: `muninn cluster enable` must authenticate against
+// /api/admin/cluster/enable using the same -u/-p admin-session mechanism
+// `muninn vault` already uses (authenticateAdmin -> muninn_session cookie),
+// not send nothing. Exercised through the top-level runCluster dispatcher,
+// since that (like runVault) is where authentication happens once before
+// dispatch — runClusterEnable itself only attaches whatever cookie is
+// already set, exactly like runVaultCreate/doVaultRequestForce.
+func TestClusterEnable_ViaDispatcher_AuthenticatesLikeVault(t *testing.T) {
+	oldAdmin, oldUI, oldCookie := vaultAdminBase, vaultUIBase, vaultCookie
+	oldExit := osExit
+	defer func() {
+		vaultAdminBase, vaultUIBase, vaultCookie = oldAdmin, oldUI, oldCookie
+		osExit = oldExit
+	}()
+	vaultCookie = ""
+
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/auth/login" {
+			http.SetCookie(w, &http.Cookie{Name: "muninn_session", Value: "dispatcher-test-session"})
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer loginServer.Close()
+	vaultUIBase = loginServer.URL
+
+	adminServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/admin/cluster/enable" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		c, err := r.Cookie("muninn_session")
+		if err != nil || c.Value != "dispatcher-test-session" {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]any{"code": "admin_auth_required"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"enabled": true, "role": "primary"})
+	}))
+	defer adminServer.Close()
+
+	var exitCode int
+	osExit = func(code int) { exitCode = code }
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	runCluster([]string{
+		"-u", "root", "-p" + "password",
+		"enable",
+		"--addr", adminServer.URL,
+		"--role", "primary",
+		"--bind-addr", "127.0.0.1:7778",
+		"--yes",
+	})
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	output := make([]byte, 4096)
+	n, _ := r.Read(output)
+	result := string(output[:n])
+
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0 after authenticating like muninn vault does, got %d (output: %s)", exitCode, result)
+	}
+	if !strings.Contains(result, "enabled") {
+		t.Errorf("expected 'enabled' in output, got: %s", result)
 	}
 }

@@ -15,7 +15,8 @@ import (
 func TestUpsertRelationshipRecord_WritesRelEntityIndex(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("rel-index-write")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("rel-index-write")
 
 	eng := makeTestEngram("relationship index write test")
 	_, err := store.WriteEngram(ctx, ws, eng)
@@ -63,7 +64,8 @@ func TestUpsertRelationshipRecord_WritesRelEntityIndex(t *testing.T) {
 func TestRelinkRelationshipEntity_UpdatesFromAndToEntries(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("relink-rel-entity")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("relink-rel-entity")
 
 	eng := makeTestEngram("relink relationship test")
 	_, err := store.WriteEngram(ctx, ws, eng)
@@ -116,7 +118,8 @@ func TestRelinkRelationshipEntity_UpdatesFromAndToEntries(t *testing.T) {
 func TestRelinkRelationshipEntity_ToEntitySide(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("relink-rel-to")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("relink-rel-to")
 
 	eng := makeTestEngram("relink to-entity test")
 	_, err := store.WriteEngram(ctx, ws, eng)
@@ -148,7 +151,8 @@ func TestRelinkRelationshipEntity_ToEntitySide(t *testing.T) {
 func TestRelinkRelationshipEntity_NoopOnMissing(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("relink-rel-noop")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("relink-rel-noop")
 	require.NoError(t, store.RelinkRelationshipEntity(ctx, ws, "NonExistent", "Target"))
 }
 
@@ -157,7 +161,8 @@ func TestRelinkRelationshipEntity_NoopOnMissing(t *testing.T) {
 func TestRelinkRelationshipEntity_IdempotentOnRepeat(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("relink-rel-idempotent")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("relink-rel-idempotent")
 
 	eng := makeTestEngram("idempotent relink rel")
 	_, err := store.WriteEngram(ctx, ws, eng)
@@ -192,7 +197,8 @@ func TestRelinkRelationshipEntity_IdempotentOnRepeat(t *testing.T) {
 func TestScanEntityRelationships_ReturnsOnlyEntityRelationships(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("rel-index-filter")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("rel-index-filter")
 
 	eng1 := makeTestEngram("engram one")
 	eng2 := makeTestEngram("engram two")
@@ -233,7 +239,8 @@ func TestScanEntityRelationships_ReturnsOnlyEntityRelationships(t *testing.T) {
 func TestScanEntityRelationships_BothDirections(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("rel-index-directions")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("rel-index-directions")
 
 	eng1 := makeTestEngram("from direction")
 	eng2 := makeTestEngram("to direction")
@@ -272,7 +279,8 @@ func TestScanEntityRelationships_BothDirections(t *testing.T) {
 func TestScanEntityRelationships_NoopOnMissing(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("rel-index-noop")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("rel-index-noop")
 
 	var rels []RelationshipRecord
 	require.NoError(t, store.ScanEntityRelationships(ctx, ws, "NonExistent",
@@ -290,7 +298,8 @@ func TestScanEntityRelationships_NoopOnMissing(t *testing.T) {
 func TestDeleteEngram_CleansRelEntityIndex(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("rel-index-cleanup")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("rel-index-cleanup")
 
 	eng := makeTestEngram("relationship cleanup test")
 	_, err := store.WriteEngram(ctx, ws, eng)
@@ -341,9 +350,10 @@ func TestDeleteEngram_CleansRelEntityIndex(t *testing.T) {
 func TestDeleteEntityEngramLink_RemovesForwardAndReverseKeys(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("delete-entity-link")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("delete-entity-link")
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "PostgreSQL", Type: "database", Confidence: 0.9,
 	}, "test"))
 
@@ -382,7 +392,8 @@ func TestDeleteEntityEngramLink_RemovesForwardAndReverseKeys(t *testing.T) {
 func TestDeleteEntityEngramLink_NoopOnMissing(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("delete-entity-link-noop")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("delete-entity-link-noop")
 
 	id := NewULID()
 	// Must not error on a link that doesn't exist.
@@ -399,12 +410,13 @@ func TestDeleteEntityEngramLink_NoopOnMissing(t *testing.T) {
 func TestRelinkEntityEngramLink_AtomicMoveWritesBAndDeletesA(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("relink-entity-link")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("relink-entity-link")
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Postgre SQL", Type: "database", Confidence: 0.8,
 	}, "test"))
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "PostgreSQL", Type: "database", Confidence: 0.9,
 	}, "test"))
 
@@ -460,12 +472,13 @@ func TestRelinkEntityEngramLink_AtomicMoveWritesBAndDeletesA(t *testing.T) {
 func TestRelinkEntityEngramLink_IdempotentOnRepeat(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	ws := store.VaultPrefix("relink-entity-link-idempotent")
+	ws := store.VaultPrefix("entity-test")
+	ws = store.VaultPrefix("relink-entity-link-idempotent")
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Postgre SQL", Type: "database", Confidence: 0.8,
 	}, "test"))
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "PostgreSQL", Type: "database", Confidence: 0.9,
 	}, "test"))
 

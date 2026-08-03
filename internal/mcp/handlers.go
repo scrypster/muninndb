@@ -583,7 +583,7 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	if annotate {
 		for i, item := range resp.Activations {
-			ann, err := s.engine.GetAnnotations(ctx, vault, item.ID)
+			ann, err := s.engine.GetAnnotations(ctx, vault, item.ID, req)
 			if err != nil || ann == nil {
 				// Non-fatal: log and skip annotations for this result.
 				slog.Warn("handleRecall: GetAnnotations failed", "id", item.ID, "err", err)
@@ -679,7 +679,16 @@ func (s *MCPServer) handleForget(ctx context.Context, w http.ResponseWriter, id 
 		sendError(w, id, -32602, "invalid params: 'id' is required")
 		return
 	}
-	req := &mbp.ForgetRequest{ID: engramID, Hard: false, Vault: vault}
+	// #807: honor the caller's explicit hard flag instead of silently
+	// downgrading it to a soft delete. Same authorization as any other
+	// mutating tool call — muninn_forget is already isMutatingTool-classified
+	// (blocked for observe-mode credentials) and the engine itself refuses
+	// EVERY Forget call, hard or soft, from an append-mode credential
+	// (SEC-15) — the identical bar gRPC's ForgetRequest.Hard already clears
+	// with no additional elevation, so this does not make MCP more
+	// permissive than the other transports that already reach hard delete.
+	hard, _ := args["hard"].(bool)
+	req := &mbp.ForgetRequest{ID: engramID, Hard: hard, Vault: vault}
 
 	// not_true_since: invalidate on the valid-time axis (stamp ValidUntil)
 	// instead of soft-deleting. The memory stays recoverable via as_of /
@@ -1486,7 +1495,7 @@ func (s *MCPServer) handleEntityState(ctx context.Context, w http.ResponseWriter
 	entityType, _ := args["type"].(string)
 	entityType = normalizeEntityType(entityType)
 
-	if err := s.engine.SetEntityState(ctx, entityName, state, mergedInto, entityType); err != nil {
+	if err := s.engine.SetEntityState(ctx, vault, entityName, state, mergedInto, entityType); err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
@@ -1549,7 +1558,7 @@ func (s *MCPServer) handleEntityStateBatch(ctx context.Context, w http.ResponseW
 		})
 	}
 
-	errs := s.engine.SetEntityStateBatch(ctx, ops)
+	errs := s.engine.SetEntityStateBatch(ctx, vault, ops)
 
 	type batchItemResult struct {
 		Index  int    `json:"index"`
@@ -2691,9 +2700,26 @@ func augmentAnnotations(m *Memory, item *mbp.ActivationItem, data *engine.Annota
 		m.Annotations = &MemoryAnnotations{}
 	}
 	ann := m.Annotations
-	staleDays := math.Round(time.Since(time.Unix(0, item.LastAccess)).Hours()/24.0*10) / 10
-	ann.Stale = staleDays > annotationStaleDays
-	ann.StaleDays = staleDays
+	// A never-accessed engram has no staleness to report, so we report NONE —
+	// both fields are omitted from the wire rather than defaulted. Before #810, a
+	// vault cloned with the zero-time sentinel reported stale_days=99317.8,
+	// stale=true for EVERY memory: 272 years of decay, announced to the calling
+	// agent, on a vault created seconds earlier. Emitting stale_days=0 /
+	// stale=false instead would be a SMALLER lie, not the truth — an agent reads
+	// that as "accessed today", which is plausible and wrong, the failure class
+	// principle #2 names as the worst one. Omission is the only honest answer
+	// available: the system does not know when this memory was last accessed.
+	//
+	// This guard is needed on top of the ERF decode-side repair, not covered by
+	// it: item.LastAccess is time.Time{}.UnixNano() for a never-accessed engram
+	// either way, so this surface sees the 1754 instant regardless.
+	lastAccess := time.Unix(0, item.LastAccess)
+	if !storage.IsUnsetTimestamp(lastAccess) {
+		staleDays := math.Round(time.Since(lastAccess).Hours()/24.0*10) / 10
+		stale := staleDays > annotationStaleDays
+		ann.StaleDays = &staleDays
+		ann.Stale = &stale
+	}
 	ann.ConflictsWith = data.ConflictsWith
 	if ann.SupersededBy == "" {
 		ann.SupersededBy = data.SupersededBy

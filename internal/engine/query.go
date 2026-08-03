@@ -426,7 +426,7 @@ func (e *Engine) fillContradictionConcepts(ctx context.Context, ws [8]byte, pair
 // ResolveContradiction removes the contradiction marker for the pair (idA, idB)
 // and updates the vault coherence counters.
 func (e *Engine) ResolveContradiction(ctx context.Context, vault, idA, idB string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	a, err := storage.ParseULID(idA)

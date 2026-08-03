@@ -42,22 +42,30 @@ func TestRead_ReinforcesAccess(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
+	// Explicit, distinct CreatedAt stamps (LastAccess defaults to CreatedAt
+	// at write time — normalizeEngramTimes) instead of a time.Sleep between
+	// the two writes to force clock-tick separation: #695 flagged the sleep
+	// as itself fragile under coarse clock resolution / CI load, and it was
+	// never addressed. This makes the "older"/"newer" ordering a property of
+	// the data, not of wall-clock scheduling.
+	base := time.Now()
 	older, err := eng.Write(ctx, &mbp.WriteRequest{
 		Vault: "reinforce-read", Concept: "older", Content: "older sibling content",
+		CreatedAt: timePtr(base.Add(-time.Second)),
 	})
 	if err != nil {
 		t.Fatalf("Write older: %v", err)
 	}
-	time.Sleep(5 * time.Millisecond)
 	newer, err := eng.Write(ctx, &mbp.WriteRequest{
 		Vault: "reinforce-read", Concept: "newer", Content: "newer sibling content",
+		CreatedAt: timePtr(base),
 	})
 	if err != nil {
 		t.Fatalf("Write newer: %v", err)
 	}
 
 	// Sanity: before reinforcing, "newer" is more recently accessed (it was
-	// written after "older" and LastAccess defaults to write time).
+	// stamped after "older" and LastAccess defaults to write time).
 	entries, err := eng.WhereLeftOff(ctx, "reinforce-read", 10, nil)
 	if err != nil {
 		t.Fatalf("WhereLeftOff (before): %v", err)
@@ -74,39 +82,38 @@ func TestRead_ReinforcesAccess(t *testing.T) {
 		t.Fatalf("AccessCount before any reinforcement = %d, want 0", before.AccessCount)
 	}
 
-	// Read "older" again — its own fire-and-forget TouchAccess must not
-	// deadlock or race with polling reads of itself.
-	//
-	// Budget: this asserts a CORRECTNESS property (the reinforcement lands),
-	// not a latency one — TouchAccess is a fire-and-forget goroutine, and 2s
-	// was inside scheduling-noise range on a loaded CI runner (failed there
-	// while passing 5/5 locally; the fourth timing flake of this shape, after
-	// #744, the import-cleanup test, and the abstention harness). There is no
-	// reason for the budget to be tight.
-	got := pollAccessCount(t, eng, "reinforce-read", older.ID, 1, 15*time.Second)
-	if got == 0 {
-		t.Fatalf("TouchAccess did not land within 15s of the reinforcing Read (AccessCount still 0) — " +
-			"that is a hang or a dropped reinforcement, not scheduling noise")
+	// Read "older" again — this spawns the #682 reinforcement (TouchAccess)
+	// as a fire-and-forget goroutine tracked by fireAndForgetWG. Drain it
+	// deterministically (docs/internals/testing-hermeticity.md, source #2)
+	// instead of polling against a wall-clock deadline — the same seam
+	// (waitFireAndForgetIdle) every sibling test in this file already uses.
+	if _, err := eng.Read(ctx, &mbp.ReadRequest{Vault: "reinforce-read", ID: older.ID}); err != nil {
+		t.Fatalf("Read (reinforcing): %v", err)
+	}
+	eng.waitFireAndForgetIdle()
+
+	after, err := eng.Read(ctx, &mbp.ReadRequest{Vault: "reinforce-read", ID: older.ID, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("Read (after): %v", err)
+	}
+	if after.AccessCount == 0 {
+		t.Fatalf("TouchAccess did not land after draining fire-and-forget goroutines (AccessCount still 0) — " +
+			"a dropped reinforcement, not scheduling noise")
 	}
 
-	// LastAccess must now put "older" ahead of "newer" in WhereLeftOff.
-	deadline := time.Now().Add(15 * time.Second)
-	reordered := false
-	for time.Now().Before(deadline) {
-		entries, err := eng.WhereLeftOff(ctx, "reinforce-read", 10, nil)
-		if err != nil {
-			t.Fatalf("WhereLeftOff (after): %v", err)
-		}
-		if len(entries) > 0 && entries[0].ID.String() == older.ID {
-			reordered = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// LastAccess must now put "older" ahead of "newer" in WhereLeftOff — no
+	// polling needed, the drain above already guarantees the 0x22 LastAccess
+	// index write (synchronous inside TouchAccess) has landed.
+	entries, err = eng.WhereLeftOff(ctx, "reinforce-read", 10, nil)
+	if err != nil {
+		t.Fatalf("WhereLeftOff (after): %v", err)
 	}
-	if !reordered {
-		t.Fatalf("WhereLeftOff did not reorder 'older' to the front after reinforcing its read")
+	if len(entries) == 0 || entries[0].ID.String() != older.ID {
+		t.Fatalf("WhereLeftOff did not reorder 'older' to the front after reinforcing its read: %v", entries)
 	}
 }
+
+func timePtr(t time.Time) *time.Time { return &t }
 
 // TestRead_ReadOnly_NoReinforce: engine.Read with observe-mode context (or
 // req.ReadOnly) must NOT bump AccessCount.

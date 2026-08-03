@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,6 +96,16 @@ type ClusterCoordinator struct {
 	role   NodeRole
 	roleMu sync.RWMutex
 
+	// roleCallbackMu serializes OnBecameCortex and OnBecameLobe invocations
+	// against each other. handlePromotion calls OnBecameCortex synchronously on
+	// the caller's goroutine while handleDemotion fires OnBecameLobe from a bare
+	// goroutine (it must not stall the MSP tick goroutine) — without this lock a
+	// promotion and a demotion racing each other (plausible under flapping
+	// quorum) invoke both callbacks concurrently, and both are wired in
+	// production (cmd/muninn/server.go) as closures over shared, unsynchronized
+	// worker-handle state (#629).
+	roleCallbackMu sync.Mutex
+
 	// roleCh carries promotion/demotion events to the supervisor loop (#522 Step 3).
 	roleCh chan roleEvent
 
@@ -151,6 +162,13 @@ type ClusterCoordinator struct {
 	// deleting WAL segments that the snapshot receiver still needs.
 	snapshotInProgress atomic.Int32
 
+	// lastLoggedPruneSeq is the highest watermark the periodic prune loop has
+	// already logged. ReplicationLog.Prune is a cheap no-op once a watermark
+	// has already been pruned (#726), so the loop calls it unconditionally
+	// every tick — this just keeps that from writing an identical INFO line
+	// every PruneIntervalSec once the log is caught up.
+	lastLoggedPruneSeq atomic.Uint64
+
 	// reconciler runs post-partition cognitive reconciliation.
 	// Set via SetReconciler after the coordinator is created.
 	reconciler *Reconciler
@@ -164,6 +182,14 @@ type ClusterCoordinator struct {
 
 	// replicaSeqs tracks the last ack'd seq per replica (nodeID -> seq).
 	replicaSeqs sync.Map
+
+	// snapshotSeqs tracks the SnapshotSeq quoted to each Lobe in its
+	// JoinResponse (nodeID -> seq). A Lobe that received a snapshot holds every
+	// entry up to that seq even though its Applier has not acked them, so this
+	// is the floor a restarted stream resumes from (#627). Kept separate from
+	// replicaSeqs on purpose: replicaSeqs is what SafePrune trusts, and only a
+	// real ack belongs there.
+	snapshotSeqs sync.Map
 
 	// handoffAckCh receives HANDOFF_ACK from the target during graceful failover.
 	handoffAckCh chan mbp.HandoffAck
@@ -1388,6 +1414,12 @@ func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (
 	}
 
 	if resp.NeedsSnapshot {
+		// Record the seq the snapshot is guaranteed to cover so a later stream
+		// restart resumes there instead of from 0 (#627). Stored before the
+		// transfer starts, matching the JoinResponse the Lobe has already been
+		// given; a snapshot that fails closes the conn and the Lobe rejoins,
+		// which overwrites this with a fresh value.
+		c.snapshotSeqs.Store(req.NodeID, resp.SnapshotSeq)
 		c.IncrementSnapshotCount()
 		go func() {
 			defer c.DecrementSnapshotCount()
@@ -1585,9 +1617,48 @@ func (c *ClusterCoordinator) handlePromotion(epoch uint64) {
 
 	c.pushRoleEvent(roleEvent{promoted: true})
 
-	if c.OnBecameCortex != nil {
-		c.OnBecameCortex(epoch)
+	c.invokeOnBecameCortex(epoch)
+}
+
+// invokeOnBecameCortex runs OnBecameCortex synchronously on the caller's
+// goroutine (handlePromotion has always blocked here, and nothing downstream
+// depends on it returning quickly), serialized against any concurrently
+// in-flight OnBecameLobe invocation and recovered so a callback panic can
+// never take the process down (#629).
+func (c *ClusterCoordinator) invokeOnBecameCortex(epoch uint64) {
+	if c.OnBecameCortex == nil {
+		return
 	}
+	c.roleCallbackMu.Lock()
+	defer c.roleCallbackMu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("cluster: OnBecameCortex callback panicked",
+				"node", c.cfg.NodeID, "epoch", epoch, "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	c.OnBecameCortex(epoch)
+}
+
+// invokeOnBecameLobe runs OnBecameLobe asynchronously — it must not stall the
+// MSP tick goroutine that calls handleDemotion — but serialized against any
+// other role-transition callback via roleCallbackMu, and recovered so a
+// callback panic can never take the process down (#629).
+func (c *ClusterCoordinator) invokeOnBecameLobe() {
+	if c.OnBecameLobe == nil {
+		return
+	}
+	go func() {
+		c.roleCallbackMu.Lock()
+		defer c.roleCallbackMu.Unlock()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("cluster: OnBecameLobe callback panicked",
+					"node", c.cfg.NodeID, "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
+		c.OnBecameLobe()
+	}()
 }
 
 // pushRoleEvent delivers a role transition to the supervisor loop without
@@ -1633,9 +1704,9 @@ func (c *ClusterCoordinator) handleDemotion(cause demotionCause) {
 	// goroutine (via checkQuorumHealth), and OnBecameLobe stops cognitive workers
 	// which may block — it must not stall heartbeat processing. The role flip
 	// above already gates writes, so the worker teardown can complete out of band.
-	if c.OnBecameLobe != nil {
-		go c.OnBecameLobe()
-	}
+	// invokeOnBecameLobe serializes against any concurrent OnBecameCortex/
+	// OnBecameLobe invocation and recovers a callback panic (#629).
+	c.invokeOnBecameLobe()
 }
 
 // handleNewLeader is called when another node becomes Cortex.
@@ -1659,13 +1730,63 @@ func (c *ClusterCoordinator) startStreamerForLobe(info NodeInfo) {
 	c.streamers[info.NodeID] = cancel
 	c.streamersMu.Unlock()
 
+	startSeq := c.streamStartSeq(info.NodeID)
+	logSeq := c.repLog.CurrentSeq()
+	slog.Info("cluster: starting replication stream to lobe",
+		"lobe", info.NodeID, "from_seq", startSeq, "log_seq", logSeq, "backlog", logSeq-min(logSeq, startSeq))
+
 	go func() {
-		// Phase 1: always stream from seq=0 (no pruning, full log available)
-		s := NewNetworkStreamer(c.repLog, peer, 0)
+		s := NewNetworkStreamer(c.repLog, peer, startSeq)
 		if err := s.Stream(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("cluster: streamer error for lobe", "lobe", info.NodeID, "err", err)
+			// Report where the stream got to. Without this a streamer that died
+			// mid-catch-up was indistinguishable in the log from a healthy idle
+			// one, which is why the spiral in #627 ran for days unnoticed.
+			slog.Error("cluster: replication stream to lobe ended",
+				"lobe", info.NodeID,
+				"from_seq", startSeq,
+				"reached_seq", s.LastSeq(),
+				"log_seq", c.repLog.CurrentSeq(),
+				"err", err)
 		}
 	}()
+}
+
+// streamStartSeq is the highest sequence this Cortex can PROVE the Lobe already
+// holds, and therefore the seq a (re)started stream resumes from.
+//
+// Before #627 this was hardcoded to 0: every reconnect re-streamed the entire
+// replication log. A Lobe that could not finish a catch-up before the stream
+// died restarted the same full transfer, forever, and the re-transfer volume
+// grew with the log rather than with the lag.
+//
+// Two independent sources of proof, and the higher wins:
+//
+//   - the Lobe's last ReplAck (replicaSeqs) — what it has actually applied;
+//   - the SnapshotSeq quoted in its JoinResponse (snapshotSeqs) — the Cortex
+//     guarantees the snapshot contains every entry up to that seq, and the
+//     Lobe's own JoinResult.StreamFromSeq already says catch-up begins there.
+//
+// The snapshot source is not redundant: the snapshot receiver does not update
+// the Lobe's Applier.lastApplied, so a freshly-snapshotted Lobe acks 0 while
+// holding a complete database. Taking the max is what keeps that case from
+// re-streaming everything the snapshot just delivered.
+//
+// Falling back to 0 for an unknown node is the safe direction: replay is
+// idempotent (Applier skips seq <= lastApplied), so an under-estimate costs
+// bandwidth while an over-estimate would silently skip entries.
+func (c *ClusterCoordinator) streamStartSeq(nodeID string) uint64 {
+	var start uint64
+	if v, ok := c.replicaSeqs.Load(nodeID); ok {
+		if seq, ok := v.(uint64); ok {
+			start = seq
+		}
+	}
+	if v, ok := c.snapshotSeqs.Load(nodeID); ok {
+		if seq, ok := v.(uint64); ok && seq > start {
+			start = seq
+		}
+	}
+	return start
 }
 
 // stopStreamerForLobe cancels the streamer for a departed Lobe.
@@ -2062,12 +2183,19 @@ func (c *ClusterCoordinator) HandleHandoff(fromNodeID string, payload []byte) er
 	newEpoch := msg.Epoch + 1
 
 	// Promote self: update epoch, set role, broadcast claim.
-	if err := c.epochStore.ForceSet(newEpoch); err != nil {
-		return fmt.Errorf("HandleHandoff: ForceSet epoch %d: %w", newEpoch, err)
+	advanced, err := c.epochStore.Advance(newEpoch)
+	if err != nil {
+		return fmt.Errorf("HandleHandoff: advance epoch to %d: %w", newEpoch, err)
 	}
-
-	// Verify the epoch stuck — if someone else bumped it concurrently,
-	// ForceSet is a no-op (returns nil) and we must not promote.
+	// If someone else bumped the epoch concurrently, Advance refuses and reports
+	// advanced=false; we must not promote. Load() is re-read only to name the
+	// epoch that beat us in the log line.
+	if !advanced {
+		actual := c.epochStore.Load()
+		slog.Warn("HandleHandoff: epoch moved past our target, aborting promotion",
+			"expected", newEpoch, "actual", actual)
+		return fmt.Errorf("HandleHandoff: epoch already advanced to %d, expected %d", actual, newEpoch)
+	}
 	if actual := c.epochStore.Load(); actual != newEpoch {
 		slog.Warn("HandleHandoff: epoch moved past our target, aborting promotion",
 			"expected", newEpoch, "actual", actual)
@@ -2194,8 +2322,76 @@ func (c *ClusterCoordinator) SnapshotInProgress() bool {
 // startPeriodicPrune launches a goroutine that prunes fully-replicated WAL
 // segments every 60 seconds. Only runs on the Cortex (leader) node.
 // Pruning is skipped while a snapshot transfer is in progress.
+// pruneWatermark returns the sequence to prune up to, and whether the backlog
+// ceiling forced it past what replicas have acknowledged.
+//
+// Replica acks are the preferred watermark: pruning past a Lobe forces it to
+// rejoin via snapshot. But MinReplicatedSeq() is a *minimum* across replicas
+// and returns 0 when none have acked, so a single Lobe that never catches up
+// pins the watermark forever and the log grows without bound. That is not a
+// hypothetical — a Lobe stuck in a join/drop loop did exactly this, and the
+// resulting bloat slowed writes enough to keep the stream timing out.
+//
+// So: honour replica progress, but never retain more than MaxLogBacklog
+// entries behind the head. A Lobe left behind re-snapshots, which is the
+// documented consequence and strictly better than an unbounded Cortex.
+func (c *ClusterCoordinator) pruneWatermark() (uint64, bool) {
+	minSeq := c.MinReplicatedSeq()
+
+	maxBacklog := uint64(0)
+	if c.cfg.MaxLogBacklog > 0 {
+		maxBacklog = uint64(c.cfg.MaxLogBacklog)
+	}
+	if maxBacklog == 0 || c.repLog == nil {
+		return minSeq, false
+	}
+
+	head := c.repLog.CurrentSeq()
+	if head <= maxBacklog {
+		return minSeq, false
+	}
+	ceiling := head - maxBacklog
+	if ceiling > minSeq {
+		return ceiling, true
+	}
+	return minSeq, false
+}
+
+// evictLobesBehind drops the connection to every replica whose acknowledged
+// seq is below untilSeq, so it reconnects, re-joins and receives a fresh
+// snapshot.
+//
+// This is what makes the backlog ceiling safe. Without it, a forced prune
+// deletes entries a still-connected Lobe has not received, and nothing on
+// either side notices: ReadSince simply returns the first surviving entry,
+// the Applier only skips seq <= lastApplied and has no contiguity check, and
+// the Lobe then ACKs the head — so the Cortex sees a fully caught-up replica
+// that is permanently missing every write in the hole. Silently-wrong, which
+// is the failure class this project refuses (principle 2). Dropping the peer
+// converts it into a loud, self-healing re-snapshot, which is exactly what
+// Prune's own doc comment promises. Closing the peer so the Lobe retries is
+// the same mechanism the snapshot-failure path already uses.
+func (c *ClusterCoordinator) evictLobesBehind(untilSeq uint64) {
+	var behind []string
+	c.replicaSeqs.Range(func(key, value any) bool {
+		if value.(uint64) < untilSeq {
+			behind = append(behind, key.(string))
+		}
+		return true
+	})
+	for _, nodeID := range behind {
+		slog.Warn("cluster: dropping lobe left behind the prune watermark — it will rejoin via snapshot",
+			"lobe", nodeID, "until_seq", untilSeq)
+		c.stopStreamerForLobe(nodeID)
+		if peer, ok := c.mgr.GetPeer(nodeID); ok {
+			_ = peer.Close()
+		}
+		c.replicaSeqs.Delete(nodeID)
+	}
+}
+
 func (c *ClusterCoordinator) startPeriodicPrune(ctx context.Context) {
-	if c.mol == nil {
+	if c.mol == nil && c.repLog == nil {
 		return
 	}
 	go func() {
@@ -2217,15 +2413,40 @@ func (c *ClusterCoordinator) startPeriodicPrune(ctx context.Context) {
 					slog.Warn("cluster: skipping WAL prune — snapshot transfer in progress")
 					continue
 				}
-				minSeq := c.MinReplicatedSeq()
-				if minSeq == 0 {
+				pruneSeq, forced := c.pruneWatermark()
+				if pruneSeq == 0 {
 					continue
 				}
-				pruned, err := c.mol.SafePrune(minSeq)
-				if err != nil {
-					slog.Warn("cluster: periodic prune failed", "err", err)
-				} else if pruned > 0 {
-					slog.Info("cluster: pruned WAL segments", "pruned", pruned, "min_replicated_seq", minSeq)
+				if c.mol != nil {
+					pruned, err := c.mol.SafePrune(pruneSeq)
+					if err != nil {
+						slog.Warn("cluster: periodic prune failed", "err", err)
+					} else if pruned > 0 {
+						slog.Info("cluster: pruned WAL segments", "pruned", pruned, "min_replicated_seq", pruneSeq)
+					}
+				}
+				// A forced prune goes past what replicas have acked. Drop those
+				// replicas BEFORE deleting the entries they still need, so they
+				// re-snapshot instead of silently skipping the hole.
+				if forced {
+					c.evictLobesBehind(pruneSeq)
+				}
+				// The MOL prune above only unlinks sealed segment FILES. The
+				// replication log lives in its own Pebble sub-range
+				// (prefix.Replication|subEntry, #726) and needs its own prune,
+				// or it grows without bound (observed: ~10 GB/day on an
+				// otherwise idle primary). ReplicationLog.Prune is a cheap
+				// no-op once a watermark has already been pruned, so this can
+				// run unconditionally every tick without an entry count to
+				// gate on.
+				if c.repLog != nil {
+					if err := c.repLog.Prune(pruneSeq); err != nil {
+						slog.Warn("cluster: replication log prune failed", "err", err)
+					} else if pruneSeq > c.lastLoggedPruneSeq.Load() {
+						c.lastLoggedPruneSeq.Store(pruneSeq)
+						slog.Info("cluster: pruned replication log",
+							"until_seq", pruneSeq, "forced_by_backlog", forced)
+					}
 				}
 			}
 		}
@@ -2253,6 +2474,7 @@ func (c *ClusterCoordinator) RemoveNode(nodeID string) error {
 
 	// Clean up replica sequence tracking.
 	c.replicaSeqs.Delete(nodeID)
+	c.snapshotSeqs.Delete(nodeID)
 
 	// Remove from election quorum so removed nodes don't inflate the voter count.
 	c.election.UnregisterVoter(nodeID)

@@ -182,7 +182,8 @@ type Engine struct {
 	// coordinator forwards cognitive side effects to the Cortex on Lobe nodes.
 	// nil on standalone / Cortex nodes (workers handle effects locally).
 	coordinator   CognitiveForwarder
-	coordinatorID string // this node's ID, used as OriginNodeID in CognitiveSideEffect
+	writeGate     WriteGate // nil outside cluster mode; see single_writer.go (#596)
+	coordinatorID string    // this node's ID, used as OriginNodeID in CognitiveSideEffect
 
 	// onWrite is an optional callback invoked after every successful Write.
 	// Used to notify background processors (e.g. embed retroactive worker) of new data.
@@ -1110,7 +1111,7 @@ func (e *Engine) validateClientEmbeddingDim(wsPrefix [8]byte, vec []float32) err
 // Forget: the record is already durably retagged, so a failed index write must
 // not turn a committed retag into a caller-visible failure.
 func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, tags []string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
@@ -1200,13 +1201,16 @@ func (e *Engine) CheckIdempotency(ctx context.Context, opID string) (*storage.Id
 
 // WriteIdempotency stores an idempotency receipt (op_id → engramID).
 func (e *Engine) WriteIdempotency(ctx context.Context, opID, engramID string) error {
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		return err
+	}
 	return e.store.WriteIdempotency(ctx, opID, engramID)
 }
 
 // CountEmbedded returns the count of engrams that have had embeddings generated
 // (i.e. the DigestEmbed flag is set). Returns -1 on error.
 func (e *Engine) CountEmbedded(ctx context.Context) int64 {
-	const DigestEmbed uint8 = 0x02
+	const DigestEmbed uint16 = 0x02
 	count, err := e.store.CountWithFlag(ctx, DigestEmbed)
 	if err != nil {
 		return -1
@@ -1295,6 +1299,11 @@ func importanceFromRequest(p *float32) float32 {
 
 // Write implements mbp.EngineAPI.Write.
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
+	// Cluster single-writer gate (#596). Additive methods have no append gate to
+	// hang this off, so they call it directly.
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		return nil, err
+	}
 	writeStart := time.Now()
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 	e.activity.Record(wsPrefix)
@@ -1430,20 +1439,49 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	// Convert associations
-	assocs := make([]storage.Association, len(req.Associations))
-	for i, a := range req.Associations {
+	assocs := make([]storage.Association, 0, len(req.Associations)+len(callerRelationships))
+	for _, a := range req.Associations {
 		targetID, err := storage.ParseULID(a.TargetID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: association target_id %q: %v", ErrInvalidID, a.TargetID, err)
 		}
-		assocs[i] = storage.Association{
+		assocs = append(assocs, storage.Association{
 			TargetID:      targetID,
 			RelType:       storage.RelType(a.RelType),
 			Weight:        a.Weight,
 			Confidence:    a.Confidence,
 			CreatedAt:     time.Unix(0, a.CreatedAt),
 			LastActivated: a.LastActivated,
+		})
+	}
+	// relationships[] (mbp.WriteRequest.Relationships) is the OTHER inline
+	// edge field on a write, and until #817 a dangling target on it was
+	// refused differently from associations[] for the identical defect — a
+	// target naming a hard-deleted engram. associations[] failed the whole
+	// write (ErrDanglingEndpoint -> ErrInvalidID, 400) because it reaches
+	// checkInlineAssocTargets atomically through eng.Associations;
+	// relationships[] instead ran a POST-write loop of individual
+	// WriteAssociation calls that logged a WARN on refusal and returned 200
+	// regardless — silent for the MCP surface (muninn_link, muninn_remember)
+	// that is the most common agent path (#817). Folding relationships into
+	// this SAME eng.Associations slice, validated by the SAME atomic
+	// pre-write guard, closes the asymmetry by construction instead of
+	// duplicating the check or inventing a warnings field: a dangling
+	// relationships[] target now fails the whole write exactly like a
+	// dangling associations[] target, and a malformed target_id (previously
+	// silently skipped) does too, for the same reason. See CHANGELOG.
+	for _, rel := range callerRelationships {
+		targetID, err := storage.ParseULID(rel.TargetID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: relationship target_id %q: %v", ErrInvalidID, rel.TargetID, err)
 		}
+		assocs = append(assocs, storage.Association{
+			TargetID:   targetID,
+			RelType:    storage.RelType(relTypeFromString(rel.Relation)),
+			Weight:     rel.Weight,
+			Confidence: 1.0,
+			CreatedAt:  time.Now(),
+		})
 	}
 	eng.Associations = assocs
 
@@ -1512,7 +1550,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 				Type:       typ,
 				Confidence: 1.0,
 			}
-			if err := e.store.UpsertEntityRecord(ctx, record, "inline"); err != nil {
+			if err := e.store.UpsertEntityRecord(ctx, ws, record, "inline"); err != nil {
 				slog.Warn("engine: failed to store inline entity", "name", ent.Name, "err", err)
 				continue
 			}
@@ -1544,24 +1582,10 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEntities)
 	}
 
-	// Create associations from caller-provided relationships (after engram is stored).
-	for _, rel := range callerRelationships {
-		targetULID, parseErr := storage.ParseULID(rel.TargetID)
-		if parseErr != nil {
-			slog.Warn("engine: inline relationship has invalid target_id", "target_id", rel.TargetID, "error", parseErr)
-			continue
-		}
-		relAssoc := &storage.Association{
-			TargetID:   targetULID,
-			RelType:    storage.RelType(relTypeFromString(rel.Relation)),
-			Weight:     rel.Weight,
-			Confidence: 1.0,
-			CreatedAt:  time.Now(),
-		}
-		if writeErr := e.store.WriteAssociation(ctx, wsPrefix, id, targetULID, relAssoc); writeErr != nil {
-			slog.Warn("engine: failed to write inline relationship", "target_id", rel.TargetID, "error", writeErr)
-		}
-	}
+	// callerRelationships were already converted into eng.Associations above
+	// and written atomically with the engram itself, through the same
+	// checkInlineAssocTargets guard associations[] uses (#817) — nothing left
+	// to do here.
 
 	// Store caller-provided entity-to-entity relationships in the 0x21 relationship index.
 	wroteEntityRelationships := false
@@ -1597,7 +1621,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	//   - entity relationships     -> DigestRelationships
 	//   - type/classification      -> DigestClassified (req.TypeLabel is set whenever
 	//                                 the caller supplies a type or type_label)
-	var inlineStageFlags uint8
+	var inlineStageFlags uint16
 	if callerSummary != "" {
 		inlineStageFlags |= plugin.DigestSummarized
 	}
@@ -1793,7 +1817,6 @@ type preparedBatchItem struct {
 	inlineMode                string
 	callerSummary             string
 	callerEntities            []mbp.InlineEntity
-	callerRelationships       []mbp.InlineRelationship
 	callerEntityRelationships []mbp.InlineEntityRelationship
 	skipBackgroundEnrich      bool
 	contentHash               [32]byte // SHA-256 of content for dedup
@@ -1804,6 +1827,15 @@ type preparedBatchItem struct {
 // across N engrams instead of paying it per-engram.
 func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*mbp.WriteResponse, []error) {
 	n := len(reqs)
+	// Cluster single-writer gate (#596): refuse the whole batch, per item, so a
+	// caller reading errs[i] sees the same reason for every element.
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		errs := make([]error, n)
+		for i := range errs {
+			errs[i] = err
+		}
+		return make([]*mbp.WriteResponse, n), errs
+	}
 	if n > MaxBatchSize {
 		errs := make([]error, n)
 		for i := range errs {
@@ -1936,21 +1968,43 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			continue
 		}
 
-		assocs := make([]storage.Association, len(req.Associations))
-		for j, a := range req.Associations {
+		assocs := make([]storage.Association, 0, len(req.Associations)+len(callerRelationships))
+		for _, a := range req.Associations {
 			targetID, parseErr := storage.ParseULID(a.TargetID)
 			if parseErr != nil {
 				errs[i] = fmt.Errorf("parse target id: %w", parseErr)
 				break
 			}
-			assocs[j] = storage.Association{
+			assocs = append(assocs, storage.Association{
 				TargetID:      targetID,
 				RelType:       storage.RelType(a.RelType),
 				Weight:        a.Weight,
 				Confidence:    a.Confidence,
 				CreatedAt:     time.Unix(0, a.CreatedAt),
 				LastActivated: a.LastActivated,
+			})
+		}
+		if errs[i] != nil {
+			continue
+		}
+		// relationships[] folded into the same eng.Associations slice as
+		// associations[] — see the single-write path's comment (#817). A
+		// dangling or malformed relationship target now fails only this
+		// item's write, the same as a dangling associations[] target above,
+		// instead of silently succeeding with the edge dropped.
+		for _, rel := range callerRelationships {
+			targetID, parseErr := storage.ParseULID(rel.TargetID)
+			if parseErr != nil {
+				errs[i] = fmt.Errorf("%w: relationship target_id %q: %v", ErrInvalidID, rel.TargetID, parseErr)
+				break
 			}
+			assocs = append(assocs, storage.Association{
+				TargetID:   targetID,
+				RelType:    storage.RelType(relTypeFromString(rel.Relation)),
+				Weight:     rel.Weight,
+				Confidence: 1.0,
+				CreatedAt:  time.Now(),
+			})
 		}
 		if errs[i] != nil {
 			continue
@@ -1975,7 +2029,6 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			inlineMode:                inlineMode,
 			callerSummary:             callerSummary,
 			callerEntities:            callerEntities,
-			callerRelationships:       callerRelationships,
 			callerEntityRelationships: req.EntityRelationships,
 			skipBackgroundEnrich:      skipBG,
 			contentHash:               contentHash,
@@ -2062,7 +2115,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 					Type:       typ,
 					Confidence: 1.0,
 				}
-				if err := e.store.UpsertEntityRecord(ctx, record, "inline"); err != nil {
+				if err := e.store.UpsertEntityRecord(ctx, ws, record, "inline"); err != nil {
 					slog.Warn("engine: batch: failed to store inline entity", "name", ent.Name, "err", err)
 					continue
 				}
@@ -2094,23 +2147,9 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			_ = e.store.SetDigestFlag(ctx, id, existing|plugin.DigestEntities)
 		}
 
-		for _, rel := range p.callerRelationships {
-			targetULID, parseErr := storage.ParseULID(rel.TargetID)
-			if parseErr != nil {
-				slog.Warn("engine: batch: skipping inline relationship with invalid target_id", "target_id", rel.TargetID, "err", parseErr)
-				continue
-			}
-			relAssoc := &storage.Association{
-				TargetID:   targetULID,
-				RelType:    storage.RelType(relTypeFromString(rel.Relation)),
-				Weight:     rel.Weight,
-				Confidence: 1.0,
-				CreatedAt:  time.Now(),
-			}
-			if err := e.store.WriteAssociation(ctx, p.wsPrefix, id, targetULID, relAssoc); err != nil {
-				slog.Warn("engine: batch: failed to write inline relationship", "target_id", rel.TargetID, "err", err)
-			}
-		}
+		// callerRelationships were already folded into eng.Associations in
+		// Phase 1 and written atomically by WriteEngramBatch — nothing left
+		// to do here (#817).
 
 		// Store caller-provided entity-to-entity relationships in the 0x21 relationship index.
 		wroteEntityRelationships := false
@@ -2146,7 +2185,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		// GetEnrichmentCandidates does not report these memories as un-enriched (#500).
 		// Mirror the single-write path: only set a stage's flag when that stage's data
 		// is actually present from the caller.
-		var inlineStageFlags uint8
+		var inlineStageFlags uint16
 		if p.callerSummary != "" {
 			inlineStageFlags |= plugin.DigestSummarized
 		}
@@ -2355,7 +2394,7 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 	// Collect entities linked to this engram (0x20 forward index).
 	var entities []mbp.InlineEntity
 	_ = e.store.ScanEngramEntities(ctx, wsPrefix, id, func(name string) error {
-		rec, err := e.store.GetEntityRecord(ctx, name)
+		rec, err := e.store.GetEntityRecord(ctx, wsPrefix, name)
 		if err != nil || rec == nil {
 			entities = append(entities, mbp.InlineEntity{Name: name})
 			return nil
@@ -2483,6 +2522,10 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// PAS: Predictive Activation Signal config from vault Plasticity.
 	actReq.PASEnabled = resolved.PredictiveActivation
 	actReq.PASMaxInjections = resolved.PASMaxInjections
+	// Hebbian read side, gated symmetrically with PAS (COG-32). The same flag
+	// already gates learning submission (below) and association decay
+	// (decayAllVaults); before #779 the phase-4 boost ignored it.
+	actReq.HebbianEnabled = resolved.HebbianEnabled
 	actReq.ExcludeUntrusted = resolved.ExcludeUntrusted
 	// Per-vault exclude-tags (#713): candidates carrying a configured tag are
 	// dropped from recall ranking. nil/empty = no exclusion (unchanged behavior).
@@ -2503,8 +2546,19 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		actReq.MaxResults = 20
 	}
 	// Fix 2: Default to resolved HopDepth (from Plasticity preset) BFS traversal.
-	// The association graph is the primary differentiator of MuninnDB — it should
-	// be active by default. Order matters: apply default FIRST, then check explicit opt-out.
+	// Order matters: apply default FIRST, then check explicit opt-out.
+	//
+	// This default was justified as "the association graph is the primary
+	// differentiator of MuninnDB". Half of that is still true and half is not
+	// (#801): the graph reaches results through phase4HebbianBoost, which does
+	// contribute — but phase5Traverse's hop gate has sat above the phase's own
+	// score ceiling since the initial commit, so HopDepth > 0 has never produced
+	// a hop on any real corpus. Measured on a 3,458-engram production vault with
+	// 127,798 edges: 0 hops on 150/150 queries, and traversal strictly dominated
+	// by raising CandidatesPerIndex at every budget cap. Left on rather than
+	// defaulted off because it is inert, not harmful, and because HopDepth is a
+	// per-vault plasticity value surfaced on six transports — disposing of it is
+	// its own increment. See docs/internals/decision-record.md (#801).
 	if actReq.HopDepth == 0 {
 		actReq.HopDepth = resolved.HopDepth
 	}
@@ -2553,7 +2607,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			UseACTR:            !req.Weights.DisableACTR,
 			DisableACTR:        req.Weights.DisableACTR,
 			ACTRDecay:          req.Weights.ACTRDecay,
-			ACTRHebScale:       req.Weights.ACTRHebScale,
+			// The MBP/REST wire field is `omitempty` float32, so an explicit 0
+			// from a caller never reaches this struct as 0 — it arrives as
+			// "absent". Mapping 0 to nil here is therefore not a loss: it is
+			// the only honest reading of what the wire can express. Per-vault
+			// `actr_heb_scale: 0` goes through the plasticity branch below,
+			// which CAN express it.
+			ACTRHebScale: actrHebScalePtr(req.Weights.ACTRHebScale),
 		}
 	} else if modePreset != nil && req.Mode != "" && presetCarriesWeights(*modePreset) && resolved.ScoringFusion != "rrf" {
 		// EXPLICIT weight-carrying mode (semantic/recent), no caller weights:
@@ -2579,10 +2639,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		if resolved.ACTRDecay > 0 {
 			actrDecay = float32(resolved.ACTRDecay)
 		}
-		actrHebScale := float32(4.0)
-		if resolved.ACTRHebScale > 0 {
-			actrHebScale = float32(resolved.ACTRHebScale)
-		}
+		// resolved.ACTRHebScale is ALWAYS populated by auth.ResolvePlasticity
+		// (from the preset, or from an explicit override clamped to [0, 50]),
+		// so there is no "unset" to fall back from. The `> 0` guard this
+		// replaces was a SECOND silent substitution of the documented 0 —
+		// principle #1, in the same request that the activation layer's own
+		// substitution corrupted.
+		actrHebScale := float32(resolved.ACTRHebScale)
 		actReq.Weights = &activation.Weights{
 			// ACT-R ContentMatch gate: 60% semantic, 40% FTS — proven optimal.
 			// Plasticity's SemanticWeight/FTSWeight were calibrated for the old 6-component
@@ -2598,7 +2661,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			// ACT-R cognitive parameters (from Plasticity presets)
 			UseACTR:      true,
 			ACTRDecay:    actrDecay,
-			ACTRHebScale: actrHebScale,
+			ACTRHebScale: &actrHebScale,
 		}
 
 		// Wire ScoringFusion from plasticity config to activation weights.
@@ -2669,8 +2732,19 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// Snapshot the previous activation BEFORE running the current one.
 	// The activation log is updated asynchronously by Run()'s drainLog goroutine,
 	// so capturing it here guarantees we see the correct "previous" entry.
+	//
+	// #598 follow-up: gate on actReq.ReadOnly (the single resolved decision —
+	// observe-mode credential OR explicit req.ReadOnly, computed once above),
+	// not on auth.ObserveFromContext(ctx) alone. Every post-Run write site in
+	// this function must consult actReq.ReadOnly instead of re-deriving the
+	// credential check directly — TestActivateCore_ObserveFromContextResolvedExactlyOnce
+	// enforces there is exactly one direct call to auth.ObserveFromContext in
+	// this function (the one computing actReq.ReadOnly above), so a future
+	// write site that copies the old `!auth.ObserveFromContext(ctx)` pattern
+	// fails the census immediately instead of silently ignoring an explicit
+	// req.ReadOnly from a full-mode credential.
 	var prevActivation []storage.ULID
-	if resolved.PredictiveActivation && !auth.ObserveFromContext(ctx) {
+	if resolved.PredictiveActivation && !actReq.ReadOnly {
 		prevEntries := e.activation.AssocLog().RecentForVault(vaultID, 1)
 		if len(prevEntries) > 0 {
 			prevActivation = prevEntries[0].EngramIDs
@@ -2987,12 +3061,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 
 	// Persist the surfaced set as a recall event (issue #573): the engrams
 	// this recall actually returned (post entity-boost, post truncation),
-	// keyed by a time-ordered event ULID. Skipped in observe mode — a pure
-	// read must not write the signal that calibration reads. On success the
-	// event ID becomes the response query_id, so a later muninn_decide can
-	// be joined offline against exactly what this recall surfaced.
+	// keyed by a time-ordered event ULID. Skipped when actReq.ReadOnly (observe
+	// mode OR an explicit req.ReadOnly, #598) — a pure read must not write the
+	// signal that calibration reads. On success the event ID becomes the
+	// response query_id, so a later muninn_decide can be joined offline
+	// against exactly what this recall surfaced.
 	queryID := e.fastQueryID()
-	if len(items) > 0 && !auth.ObserveFromContext(ctx) {
+	if len(items) > 0 && !actReq.ReadOnly {
 		eventID := storage.NewULID()
 		entries := make([]storage.RecallSurfacedEntry, len(items))
 		for i, item := range items {
@@ -3013,10 +3088,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		}
 	}
 
-	// Submit co-activations to Hebbian worker (skipped in observe mode or when disabled by Plasticity).
+	// Submit co-activations to Hebbian worker. Skipped when actReq.ReadOnly
+	// (observe mode OR an explicit req.ReadOnly, #598 — this was the live
+	// defect: an unread caller's read_only:true still bonded every returned
+	// engram pairwise) or when disabled by Plasticity.
 	// On Lobe nodes (hebbianWorker == nil) collect refs for forwarding to Cortex instead.
 	var lobeCoActivations []mbp.CoActivationRef
-	if len(result.Activations) > 0 && !auth.ObserveFromContext(ctx) && resolved.HebbianEnabled {
+	if len(result.Activations) > 0 && !actReq.ReadOnly && resolved.HebbianEnabled {
 		hebW, _, _ := e.cogWorkers()
 		if hebW != nil {
 			coActivatedEngrams := make([]cognitive.CoActivatedEngram, len(result.Activations))
@@ -3053,8 +3131,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 
 	// PAS: Record sequential transitions (previous activation → current activation).
 	// Uses the prevActivation snapshot captured before Run() to avoid race conditions
-	// with the async drainLog goroutine.
-	if len(result.Activations) > 0 && len(prevActivation) > 0 {
+	// with the async drainLog goroutine. prevActivation is already empty whenever
+	// actReq.ReadOnly is set (see the snapshot above), but the explicit check here
+	// is defense in depth: this write must not depend on an implementation detail
+	// of an earlier phase to stay suppressed under #598's contract.
+	if len(result.Activations) > 0 && len(prevActivation) > 0 && !actReq.ReadOnly {
 		e.cogMu.RLock()
 		tw := e.transitionWorker
 		e.cogMu.RUnlock()
@@ -3208,7 +3289,7 @@ func (e *Engine) Unsubscribe(ctx context.Context, subID string) error {
 
 // Link implements mbp.EngineAPI.Link.
 func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkResponse, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
@@ -3350,7 +3431,7 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 // distinguish external bridge signal from the internal "contradiction_detected"
 // path emitted by Link/ContradictWorker.
 func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.ULID, delta float32, other storage.ULID, hasContra bool, reason, caller string) (float32, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return 0, err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
@@ -3413,8 +3494,11 @@ func (e *Engine) AdjustConfidence(ctx context.Context, vault string, id storage.
 
 // Forget implements mbp.EngineAPI.Forget.
 func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.ForgetResponse, error) {
-	if auth.AppendFromContext(ctx) {
-		return nil, ErrAppendForbidden
+	// refuseWrite, not an inline AppendFromContext check: this method used to
+	// re-implement the append gate by hand, which meant it also missed the
+	// cluster single-writer gate when that was added to the shared helper (#596).
+	if err := e.refuseWrite(ctx); err != nil {
+		return nil, err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 
@@ -3673,7 +3757,7 @@ func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 // Restore un-deletes a soft-deleted engram by restoring its state to StateActive.
 // Returns an error if the engram does not exist or was hard-deleted.
 func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	ws := e.store.ResolveVaultPrefix(vault)
@@ -3728,7 +3812,7 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 // so its read-modify-write is atomic and serializes with any concurrent
 // transition on the same engram — closing the former TOCTOU.
 func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	ws := e.store.ResolveVaultPrefix(vault)
@@ -3755,7 +3839,7 @@ func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state stri
 // trust must be one of "verified", "inferred", "external", "untrusted".
 // Returns an error if the engram is not found or trust is invalid.
 func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	level, err := storage.ParseTrustLevel(trust)
@@ -3876,8 +3960,10 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (storage.ULID, error) {
 	// Append-mode credentials cannot evolve (modify an existing memory). Guarding
 	// EvolveAt covers Evolve too, since Evolve delegates here (#687 + valid-time).
-	if auth.AppendFromContext(ctx) {
-		return storage.ULID{}, ErrAppendForbidden
+	// Via refuseWrite so the cluster single-writer gate lands here too (#596) —
+	// the previous inline AppendFromContext check silently opted out of it.
+	if err := e.refuseWrite(ctx); err != nil {
+		return storage.ULID{}, err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
 
@@ -4049,7 +4135,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 	// decrements: a crash here leaves counts slightly low with the links
 	// intact, the mirror image of DeleteEngram's slightly-high stale case.
 	for _, name := range carriedEntities {
-		if err := e.store.IncrementEntityMentionCount(ctx, name); err != nil {
+		if err := e.store.IncrementEntityMentionCount(ctx, wsPrefix, name); err != nil {
 			slog.Warn("engine: evolve: failed to increment mention count for carried entity", "entity", name, "engram", newULID.String(), "err", err)
 		}
 	}
@@ -4088,7 +4174,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 				Type:       typ,
 				Confidence: 1.0,
 			}
-			if err := e.store.UpsertEntityRecord(ctx, record, "inline"); err != nil {
+			if err := e.store.UpsertEntityRecord(ctx, wsPrefix, record, "inline"); err != nil {
 				slog.Warn("engine: evolve: failed to store inline entity", "name", ent.Name, "err", err)
 				continue
 			}
@@ -4192,7 +4278,7 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 // Consolidate merges multiple engrams into a single new engram and archives the originals.
 // Returns a ConsolidateResult with the new ID, archived IDs, and any non-fatal warnings.
 func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	if len(ids) > 50 {
@@ -4331,7 +4417,7 @@ func (e *Engine) ActivityCounts(ctx context.Context, vault string, since, until 
 // evidence-link warnings. The decision is always committed; evidence linking
 // is best-effort (a bad evidence ID produces a warning, not a failure).
 func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*DecideResult, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
 	// The body must STATE the decision, not just the reasoning behind it.
@@ -4388,7 +4474,7 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 // CompareAndSet/DeleteEngram on the same id (STO-2). TouchAccess holds the
 // per-engram stripe lock across the whole RMW.
 func (e *Engine) RecordAccess(ctx context.Context, vault, id string) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	ws := e.store.ResolveVaultPrefix(vault)
@@ -4500,7 +4586,7 @@ func semanticFloorExplicitlyDisabled(resolved auth.ResolvedPlasticity) bool {
 // persist in the relevance bucket index and cause an infinite prune loop.
 // Returns the number of engrams pruned.
 func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error) {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return 0, err
 	}
 	if !e.beginVaultOp() {
@@ -4583,7 +4669,7 @@ func (e *Engine) PruneVault(ctx context.Context, vaultName string) (int64, error
 								continue // COG-20: never pruned by the MaxEngrams path
 							}
 							lastAccess := m.LastAccess
-							if lastAccess.IsZero() || lastAccess.Year() < 2000 {
+							if storage.IsUnsetTimestamp(lastAccess) {
 								lastAccess = now
 							}
 							ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 0.1)
@@ -4734,6 +4820,24 @@ func (e *Engine) runPruneWorker() {
 // runLegacyFullWeightAssocRepair's failure policy), so decay is parked rather
 // than allowed to destroy repairable state.
 func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
+	// #760: association decay writes are keyed by weight (AssocFwdKey/AssocRevKey
+	// encode the float32 weight itself), and the decay formula (COG-28) is an
+	// independent recompute from stored peakWeight/lastActivated rather than an
+	// incremental step. Two nodes evaluating it a tick apart land on two
+	// different float32 weights for the same edge — two different LIVE keys,
+	// not one edge updated twice. Running this on every cluster node
+	// (leader AND followers) therefore does not converge; it leaves stale
+	// duplicate keys behind every pass. Followers already receive the leader's
+	// decayed weights through the ordinary replication stream, so they must
+	// not ALSO decay independently. This reuses the single-writer gate
+	// (e.writeGate, #596) rather than adding a second leadership signal — the
+	// same pattern the periodic replication-log prune already uses
+	// (ClusterCoordinator.startPeriodicPrune: "if !c.IsLeader() { continue }").
+	// A nil gate (standalone, non-cluster) decays exactly as before.
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		slog.Debug("assoc decay skipped: not the cluster leader", "err", err)
+		return
+	}
 	if !e.assocWeightRepairComplete() {
 		slog.Debug("assoc decay deferred: full-weight repair pass has not completed cleanly")
 		return
@@ -4995,7 +5099,7 @@ func (e *Engine) GetProvenance(ctx context.Context, vault, id string) ([]provena
 // useful=false signals negative feedback (retrieved but not helpful);
 // useful=true signals positive feedback (retrieved and helpful).
 func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, useful bool) error {
-	if err := e.refuseAppend(ctx); err != nil {
+	if err := e.refuseWrite(ctx); err != nil {
 		return err
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
@@ -5031,4 +5135,14 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 		})
 	}
 	return nil
+}
+
+// actrHebScalePtr maps a wire-level ACTRHebScale to activation's optional form.
+// The MBP/REST field is `omitempty`, so 0 on the wire means ABSENT, never an
+// explicit zero — see the call site in Activate.
+func actrHebScalePtr(v float32) *float32 {
+	if v <= 0 {
+		return nil
+	}
+	return &v
 }

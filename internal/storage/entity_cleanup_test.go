@@ -15,21 +15,22 @@ import (
 func TestDecrementEntityMentionCount_Basic(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-cleanup")
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Go", Type: "language", Confidence: 0.9,
 	}, "test"))
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Go", Type: "language", Confidence: 0.9,
 	}, "test"))
 
-	got, err := store.GetEntityRecord(ctx, "Go")
+	got, err := store.GetEntityRecord(ctx, ws, "Go")
 	require.NoError(t, err)
 	require.Equal(t, int32(2), got.MentionCount)
 
-	require.NoError(t, store.DecrementEntityMentionCount(ctx, "Go"))
+	require.NoError(t, store.DecrementEntityMentionCount(ctx, ws, "Go"))
 
-	got, err = store.GetEntityRecord(ctx, "Go")
+	got, err = store.GetEntityRecord(ctx, ws, "Go")
 	require.NoError(t, err)
 	require.NotNil(t, got, "entity with remaining references must still exist")
 	assert.Equal(t, int32(1), got.MentionCount)
@@ -38,29 +39,32 @@ func TestDecrementEntityMentionCount_Basic(t *testing.T) {
 func TestDecrementEntityMentionCount_NoopOnMissing(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-cleanup")
 
 	// Should not error on a non-existent entity.
-	require.NoError(t, store.DecrementEntityMentionCount(ctx, "NonExistent"))
+	require.NoError(t, store.DecrementEntityMentionCount(ctx, ws, "NonExistent"))
 }
 
 func TestDecrementEntityMentionCount_FloorAtZero(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-cleanup")
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Rust", Type: "language", Confidence: 0.8,
 	}, "test"))
 
-	// Write a live reverse link so the entity is NOT orphaned.
-	ws := store.VaultPrefix("test-vault")
+	// Write a live reverse link IN THE SAME VAULT so the entity is NOT orphaned.
+	// The orphan check is vault-scoped since #683: a link in another vault must
+	// not keep this vault's record alive.
 	id := NewULID()
 	require.NoError(t, store.WriteEntityEngramLink(ctx, ws, id, "Rust"))
 
 	// Decrement twice — count should floor at 0, not go negative.
-	require.NoError(t, store.DecrementEntityMentionCount(ctx, "Rust"))
-	require.NoError(t, store.DecrementEntityMentionCount(ctx, "Rust"))
+	require.NoError(t, store.DecrementEntityMentionCount(ctx, ws, "Rust"))
+	require.NoError(t, store.DecrementEntityMentionCount(ctx, ws, "Rust"))
 
-	got, err := store.GetEntityRecord(ctx, "Rust")
+	got, err := store.GetEntityRecord(ctx, ws, "Rust")
 	require.NoError(t, err)
 	require.NotNil(t, got, "entity with live reverse links must survive")
 	assert.Equal(t, int32(0), got.MentionCount, "count must not go below 0")
@@ -69,16 +73,17 @@ func TestDecrementEntityMentionCount_FloorAtZero(t *testing.T) {
 func TestDecrementEntityMentionCount_DeletesOrphanedEntity(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-cleanup")
 
 	// Write entity with a single mention.
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Orphan", Type: "test", Confidence: 0.5,
 	}, "test"))
 
 	// No reverse links written — entity is orphaned once count hits 0.
-	require.NoError(t, store.DecrementEntityMentionCount(ctx, "Orphan"))
+	require.NoError(t, store.DecrementEntityMentionCount(ctx, ws, "Orphan"))
 
-	got, err := store.GetEntityRecord(ctx, "Orphan")
+	got, err := store.GetEntityRecord(ctx, ws, "Orphan")
 	require.NoError(t, err)
 	assert.Nil(t, got, "orphaned entity (MentionCount=0, no 0x23 links) must be deleted")
 }
@@ -86,19 +91,20 @@ func TestDecrementEntityMentionCount_DeletesOrphanedEntity(t *testing.T) {
 func TestDecrementEntityMentionCount_PreservesEntityWithLiveLinks(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-cleanup")
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Shared", Type: "test", Confidence: 0.7,
 	}, "test"))
 
-	// Write a live reverse link — entity is NOT orphaned even at count==0.
-	ws := store.VaultPrefix("live-vault")
+	// Write a live reverse link in the same vault — entity is NOT orphaned even
+	// at count==0.
 	id := NewULID()
 	require.NoError(t, store.WriteEntityEngramLink(ctx, ws, id, "Shared"))
 
-	require.NoError(t, store.DecrementEntityMentionCount(ctx, "Shared"))
+	require.NoError(t, store.DecrementEntityMentionCount(ctx, ws, "Shared"))
 
-	got, err := store.GetEntityRecord(ctx, "Shared")
+	got, err := store.GetEntityRecord(ctx, ws, "Shared")
 	require.NoError(t, err)
 	assert.NotNil(t, got, "entity with live 0x23 reverse links must be preserved")
 }
@@ -186,7 +192,7 @@ func TestDeleteEngram_CleansEntityLinks(t *testing.T) {
 	_, err := store.WriteEngram(ctx, ws, eng)
 	require.NoError(t, err)
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "PostgreSQL", Type: "database", Confidence: 0.9,
 	}, "test"))
 	require.NoError(t, store.WriteEntityEngramLink(ctx, ws, eng.ID, "PostgreSQL"))
@@ -228,14 +234,14 @@ func TestDeleteEngram_DecrementsAndDeletesOrphanedEntity(t *testing.T) {
 	_, err := store.WriteEngram(ctx, ws, eng)
 	require.NoError(t, err)
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Orphan", Type: "test", Confidence: 0.5,
 	}, "test"))
 	require.NoError(t, store.WriteEntityEngramLink(ctx, ws, eng.ID, "Orphan"))
 
 	require.NoError(t, store.DeleteEngram(ctx, ws, eng.ID))
 
-	got, err := store.GetEntityRecord(ctx, "Orphan")
+	got, err := store.GetEntityRecord(ctx, ws, "Orphan")
 	require.NoError(t, err)
 	assert.Nil(t, got, "entity with no remaining references must be deleted after hard delete")
 }
@@ -252,10 +258,10 @@ func TestDeleteEngram_PreservesEntityReferencedByOtherEngram(t *testing.T) {
 	_, err = store.WriteEngram(ctx, ws, eng2)
 	require.NoError(t, err)
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Shared", Type: "test", Confidence: 0.8,
 	}, "test"))
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "Shared", Type: "test", Confidence: 0.8,
 	}, "test"))
 	require.NoError(t, store.WriteEntityEngramLink(ctx, ws, eng1.ID, "Shared"))
@@ -264,7 +270,7 @@ func TestDeleteEngram_PreservesEntityReferencedByOtherEngram(t *testing.T) {
 	// Delete only the first engram.
 	require.NoError(t, store.DeleteEngram(ctx, ws, eng1.ID))
 
-	got, err := store.GetEntityRecord(ctx, "Shared")
+	got, err := store.GetEntityRecord(ctx, ws, "Shared")
 	require.NoError(t, err)
 	assert.NotNil(t, got, "entity referenced by a surviving engram must not be deleted")
 }
@@ -316,7 +322,7 @@ func TestDeleteEngram_CleansCoOccurrence(t *testing.T) {
 
 	// Write entity links and co-occurrence for the engram.
 	for _, name := range []string{"Go", "PostgreSQL"} {
-		require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+		require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 			Name: name, Type: "technology", Confidence: 0.8,
 		}, "test"))
 		require.NoError(t, store.WriteEntityEngramLink(ctx, ws, eng.ID, name))
@@ -343,7 +349,7 @@ func TestSoftDelete_PreservesEntityLinks(t *testing.T) {
 	_, err := store.WriteEngram(ctx, ws, eng)
 	require.NoError(t, err)
 
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "SoftEntity", Type: "test", Confidence: 0.7,
 	}, "test"))
 	require.NoError(t, store.WriteEntityEngramLink(ctx, ws, eng.ID, "SoftEntity"))
@@ -359,7 +365,7 @@ func TestSoftDelete_PreservesEntityLinks(t *testing.T) {
 	}))
 	assert.Len(t, found, 1, "0x23 reverse link must survive SoftDelete (needed for Restore)")
 
-	got, err := store.GetEntityRecord(ctx, "SoftEntity")
+	got, err := store.GetEntityRecord(ctx, ws, "SoftEntity")
 	require.NoError(t, err)
 	assert.NotNil(t, got, "entity record must survive SoftDelete")
 }
@@ -371,20 +377,21 @@ func TestSoftDelete_PreservesEntityLinks(t *testing.T) {
 func TestUpsertEntityRecord_UnmergeToActive(t *testing.T) {
 	store := newTestPebbleStore(t)
 	ctx := context.Background()
+	ws := store.VaultPrefix("entity-cleanup")
 
 	// Write a merged entity.
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "OldFoo", Type: "test", Confidence: 0.8,
 		State: "merged", MergedInto: "CanonicalFoo",
 	}, "test"))
 
 	// Transition back to active — must succeed (was previously broken).
-	require.NoError(t, store.UpsertEntityRecord(ctx, EntityRecord{
+	require.NoError(t, store.UpsertEntityRecord(ctx, ws, EntityRecord{
 		Name: "OldFoo", Type: "test", Confidence: 0.8,
 		State: "active",
 	}, "test"), "transitioning merged entity back to active must succeed")
 
-	got, err := store.GetEntityRecord(ctx, "OldFoo")
+	got, err := store.GetEntityRecord(ctx, ws, "OldFoo")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "active", got.State)

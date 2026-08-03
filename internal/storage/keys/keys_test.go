@@ -49,7 +49,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"EmbeddingKey", EmbeddingKey(ws, id)},
 		{"TransitionKey", TransitionKey(ws, id, id)},
 		{"OrdinalKey", OrdinalKey(ws, id, id)},
-		{"EntityKey", EntityKey([8]byte{})},
+		{"EntityKey", EntityKey([8]byte{}, [8]byte{})},
 		{"EntityEngramLinkKey", EntityEngramLinkKey([8]byte{}, [16]byte{}, [8]byte{})},
 		{"RelationshipKey", RelationshipKey([8]byte{}, [16]byte{}, [8]byte{}, 0x01, [8]byte{})},
 		{"EntityReverseIndexKey", EntityReverseIndexKey([8]byte{}, [8]byte{}, [16]byte{})},
@@ -268,9 +268,12 @@ func TestEntityNameHash_Normalizes(t *testing.T) {
 }
 
 func TestEntityKeyLayout(t *testing.T) {
-	k := EntityKey([8]byte{1, 2, 3, 4, 5, 6, 7, 8})
+	// #683: the entity record is vault-scoped — 0x1F | ws(8) | nameHash(8).
+	k := EntityKey([8]byte{9, 9, 9, 9, 9, 9, 9, 9}, [8]byte{1, 2, 3, 4, 5, 6, 7, 8})
 	require.Equal(t, byte(0x1F), k[0], "EntityKey must start with 0x1F")
-	require.Len(t, k, 9, "EntityKey must be 9 bytes")
+	require.Len(t, k, 17, "EntityKey must be 17 bytes (prefix + ws + nameHash)")
+	require.Equal(t, []byte{9, 9, 9, 9, 9, 9, 9, 9}, k[1:9], "bytes 1-8 must be the workspace prefix")
+	require.Equal(t, []byte{1, 2, 3, 4, 5, 6, 7, 8}, k[9:17], "bytes 9-16 must be the name hash")
 
 	ws := [8]byte{0xAA}
 	engramID := [16]byte{0xBB}
@@ -380,7 +383,7 @@ func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
 		{"Ordinal", OrdinalKey(ws, id16, id16)[0], prefix.Ordinal},
 		{"OrdinalPrefixForParent", OrdinalPrefixForParent(ws, id16)[0], prefix.Ordinal},
 		{"OrdinalWorkspacePrefix", OrdinalWorkspacePrefix(ws)[0], prefix.Ordinal},
-		{"Entity", EntityKey(u8)[0], prefix.Entity},
+		{"Entity", EntityKey(u8, u8)[0], prefix.Entity},
 		{"EntityEngramLink", EntityEngramLinkKey(ws, id16, u8)[0], prefix.EntityEngramLink},
 		{"EntityEngramLinkPrefix", EntityEngramLinkPrefix(ws, id16)[0], prefix.EntityEngramLink},
 		{"Relationship", RelationshipKey(ws, id16, u8, 0, u8)[0], prefix.Relationship},

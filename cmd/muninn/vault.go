@@ -33,6 +33,7 @@ func printVaultUsage() {
 	fmt.Println("  export-markdown --vault <name> [--output <file>] [--all-vaults]  Export vault notes to markdown .tgz")
 	fmt.Println("  import      <file> --vault <name> [--reset-metadata]             Import .muninn archive into new vault")
 	fmt.Println("  reindex-fts <name>                               Rebuild FTS index with Porter2 stemming")
+	fmt.Println("  repair-watermark-reset <name> --which <evolve|assoc_weight|all>  Re-arm a repair pass on this node")
 	fmt.Println("  rename      <old-name> <new-name>                  Rename a vault (metadata only)")
 	fmt.Println("  reembed     <name>                               Clear embeddings and re-embed with current model")
 	fmt.Println("  recall-mode <vault> [mode]                        Get or set default recall mode")
@@ -70,7 +71,7 @@ func runVault(args []string) {
 
 	// Validate the subcommand before authenticating so typos get fast feedback.
 	switch sub {
-	case "create", "delete", "clear", "clone", "merge", "rename", "export", "export-markdown", "import", "reindex-fts", "reembed", "recall-mode", "behavior", "plasticity":
+	case "create", "delete", "clear", "clone", "merge", "rename", "export", "export-markdown", "import", "reindex-fts", "repair-watermark-reset", "reembed", "recall-mode", "behavior", "plasticity":
 	default:
 		fmt.Printf("Unknown vault command: %q\n", sub)
 		printVaultUsage()
@@ -106,6 +107,8 @@ func runVault(args []string) {
 		runVaultImport(subArgs)
 	case "reindex-fts":
 		runVaultReindexFTS(subArgs)
+	case "repair-watermark-reset":
+		runVaultRepairWatermarkReset(subArgs)
 	case "reembed":
 		runVaultReembed(subArgs)
 	case "recall-mode":
@@ -593,6 +596,87 @@ func runVaultReindexFTS(args []string) {
 		}
 		fmt.Printf("  Re-indexed %d engrams in vault %q.\n", result.EngramsReindexed, result.Vault)
 		fmt.Println("  FTS version marker set to 1 (Porter2 stemming active).")
+	case http.StatusNotFound:
+		fmt.Println("  Vault not found.")
+	case http.StatusUnauthorized:
+		fmt.Println("  Not authenticated. Use -u <user> -p to authenticate.")
+	default:
+		printHTTPError(resp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// vault repair-watermark-reset
+// ---------------------------------------------------------------------------
+
+// runVaultRepairWatermarkReset is the #761 operator escape hatch: deletes a
+// per-vault repair watermark (0x2B evolve entity-link repair, 0x2E full-weight
+// association repair, or both) so the next boot re-scans instead of trusting a
+// prior clean pass. Node-local: neither repair pass is leader-gated or
+// replicated (each cluster node runs its own startup pass), so this resets
+// only the node this CLI is pointed at (-h); an operator suspecting several
+// nodes are affected runs it once per node.
+func runVaultRepairWatermarkReset(args []string) {
+	var vaultName, which string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--which" && i+1 < len(args):
+			i++
+			which = args[i]
+		case strings.HasPrefix(a, "--which="):
+			which = strings.TrimPrefix(a, "--which=")
+		case !strings.HasPrefix(a, "-") && vaultName == "":
+			vaultName = a
+		}
+	}
+	if vaultName == "" || which == "" {
+		fmt.Println("Usage: muninn vault repair-watermark-reset <vault-name> --which <evolve|assoc_weight|all>")
+		fmt.Println("  Deletes the named repair watermark on THIS node so the next boot re-scans.")
+		fmt.Println("  Neither repair pass is leader-gated or replicated — run this once per node")
+		fmt.Println("  you suspect is affected (use -h <host:port> to target a specific node).")
+		return
+	}
+
+	fmt.Printf("Resetting repair watermark %q for vault %q...\n", which, vaultName)
+
+	bodyBytes, err := json.Marshal(map[string]string{"which": which})
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	reqURL := fmt.Sprintf("%s/api/admin/vaults/%s/repair-watermark/reset", vaultAdminBase, url.PathEscape(vaultName))
+	client := httpClientForURL(reqURL, 30*time.Second)
+	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	addSessionCookie(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		fmt.Println("Is muninn running? Try: muninn status")
+		return
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var result struct {
+			Vault string `json:"vault"`
+			Which string `json:"which"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			fmt.Println("  Done (could not parse response).")
+			return
+		}
+		fmt.Printf("  Watermark %q reset for vault %q. It will re-scan on this node's next boot.\n", result.Which, result.Vault)
+	case http.StatusBadRequest:
+		printHTTPError(resp)
 	case http.StatusNotFound:
 		fmt.Println("  Vault not found.")
 	case http.StatusUnauthorized:

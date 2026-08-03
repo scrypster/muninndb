@@ -171,7 +171,7 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 			idf, cached := idfCache[entityName]
 			if !cached {
 				idf = 0
-				if rec, err := e.store.GetEntityRecord(ctx, entityName); err == nil && rec != nil {
+				if rec, err := e.store.GetEntityRecord(ctx, ws, entityName); err == nil && rec != nil {
 					idf = entityIDF(int64(rec.MentionCount), n)
 				}
 				idfCache[entityName] = idf

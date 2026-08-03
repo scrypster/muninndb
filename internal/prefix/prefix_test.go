@@ -17,11 +17,12 @@ func TestAll_NoDuplicateBytes(t *testing.T) {
 	}
 }
 
-// TestAll_OwnerGroupsPairwiseDisjoint asserts the three owner groups
-// (storage, auth, capability) hold pairwise-disjoint byte sets. This is
-// stronger than NoDuplicateBytes scoped across owners — it catches the
+// TestAll_OwnerGroupsPairwiseDisjoint asserts the four owner groups
+// (storage, auth, capability, replication) hold pairwise-disjoint byte sets.
+// This is stronger than NoDuplicateBytes scoped across owners — it catches the
 // specific class of bug #611 fixes (e.g. auth 0x11 colliding with storage
-// DigestFlags 0x11 pre-relocation).
+// DigestFlags 0x11 pre-relocation) and #726 (replication's log entries
+// colliding with storage's 0x19 Idempotency).
 func TestAll_OwnerGroupsPairwiseDisjoint(t *testing.T) {
 	groups := map[string]map[byte]string{} // owner -> byte -> name
 	for _, e := range All() {
@@ -31,7 +32,7 @@ func TestAll_OwnerGroupsPairwiseDisjoint(t *testing.T) {
 		groups[e.Owner][e.Byte] = e.Name
 	}
 	// Pairwise check across every distinct pair of owners.
-	owners := []string{"storage", "auth", "capability"}
+	owners := []string{"storage", "auth", "capability", "replication"}
 	for i := 0; i < len(owners); i++ {
 		for j := i + 1; j < len(owners); j++ {
 			a, b := owners[i], owners[j]
@@ -119,6 +120,8 @@ func TestAll_ConstSliceComplete(t *testing.T) {
 		{"RawTagRange", RawTagRange},
 		{"ProspectiveIntent", ProspectiveIntent},
 		{"AssocWeightRepairMark", AssocWeightRepairMark},
+		// Replication (0x2F — relocated off the double-allocated 0x19 by #726)
+		{"Replication", Replication},
 		// Capability (0x40/0x41)
 		{"Capability", Capability},
 		{"CapabilityVaultIdx", CapabilityVaultIdx},

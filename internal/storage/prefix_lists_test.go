@@ -68,17 +68,21 @@ func TestClearVaultDataPrefixes_Scope(t *testing.T) {
 	// vault_lifecycle.go's ClearVault list: every vault-scoped data prefix
 	// ClearVault range-tombstones. Omits VaultMeta/NameIndex (preserved by Clear,
 	// deleted by DeleteVaultNameOnly), DigestFlags (globally keyed by ULID —
-	// orphans acceptable), Entity records (global by hash — pruned via mention
-	// count), and EntityReverseIndex (deleted row-by-row in
+	// orphans acceptable), and EntityReverseIndex (deleted row-by-row in
 	// deleteVaultEntityReverseIndex because its layout embeds the vault prefix
 	// mid-key, so a prefix-range tombstone cannot target it).
+	//
+	// Entity (0x1F) IS in the list since #683 made the record vault-scoped
+	// (0x1F|ws|nameHash). Before that it was keyed globally and had to be pruned
+	// by walking the vault's links and decrementing each mention count.
 	want := []byte{
 		prefix.Engram, prefix.Meta, prefix.AssocFwd, prefix.AssocRev,
 		prefix.FTSPosting, prefix.Trigram, prefix.HNSWNode, prefix.FTSStats,
 		prefix.TermStats, prefix.Contradiction, prefix.StateIndex, prefix.TagIndex,
 		prefix.CreatorIndex, prefix.RelevanceBucket, prefix.Coherence, prefix.VaultWeights,
 		prefix.AssocWeightIndex, prefix.VaultCount, prefix.Provenance, prefix.BucketMigration,
-		prefix.EntityEngramLink, prefix.Relationship, prefix.LastAccess, prefix.CoOccurrence,
+		prefix.Entity, prefix.EntityEngramLink, prefix.Relationship, prefix.LastAccess,
+		prefix.CoOccurrence,
 		prefix.ArchiveAssoc, prefix.RelEntityIndex, prefix.DreamState, prefix.ContentHash,
 		prefix.RecallEvent, prefix.Lease, prefix.EvolveRepairMark, prefix.RawTagRange,
 		prefix.ProspectiveIntent, prefix.AssocWeightRepairMark,

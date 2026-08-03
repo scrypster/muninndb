@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -548,6 +549,92 @@ func stopDaemonForUpgrade(pidPath string, timeout time.Duration) bool {
 	return true
 }
 
+// stopDaemonInstances stops every live process this machine can find that is
+// running this same binary — both the one named by pidPath (if any) and any
+// additional live process the exe-scan (runningDaemonPIDs) finds that the PID
+// file alone does not name.
+//
+// This exists because a daemon not started by `muninn start` has no PID file
+// at all — launchd, a systemd Type=simple unit that execs the server
+// directly, `systemd-run --scope`, and any operator-run `--daemon` process —
+// and relying on the PID file alone meant selfUpdate's "Stopping daemon..."
+// step printed ✓ having stopped nothing for every one of those (#792).
+//
+// It reports stoppedAny=true if anything needed stopping, and returns an
+// error — rather than silently claiming success — if any known live PID
+// survives the stop attempt. The caller must not proceed past that error:
+// printing "Enjoy the upgrade" while the OLD binary is still serving traffic
+// off a since-renamed inode is exactly the silently-wrong case this closes.
+//
+// DOES NOT CATCH: a live daemon this machine's exe-scan cannot see at all.
+// runningDaemonPIDs depends on /proc, so on darwin (including launchd, this
+// project's own recommended setup) it returns nothing — the gap the issue
+// measured stays open here. Closing that needs a cross-platform process
+// enumeration this increment does not add; the honesty fix (never print ✓
+// for a stop that didn't happen) applies as far as detection reaches today.
+func stopDaemonInstances(pidPath string, timeout time.Duration) (stoppedAny bool, err error) {
+	pidFilePID, pidFileErr := readPID(pidPath)
+	havePIDFilePID := pidFileErr == nil
+
+	targets := make(map[int]bool)
+	if havePIDFilePID {
+		targets[pidFilePID] = true
+	}
+	for _, pid := range runningDaemonPIDs() {
+		targets[pid] = true
+	}
+
+	for pid := range targets {
+		if !isProcessRunning(pid) {
+			continue
+		}
+		stoppedAny = true
+		proc, ferr := os.FindProcess(pid)
+		if ferr != nil {
+			continue
+		}
+		_ = stopProcess(proc)
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			if !isProcessRunning(pid) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if isProcessRunning(pid) {
+			_ = proc.Kill()
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+	if stoppedAny {
+		// Brief grace period for the OS to release file locks (e.g. PebbleDB
+		// LOCK file) before the new binary attempts to open the same data
+		// directory.
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	var stillAlive []int
+	for pid := range targets {
+		if isProcessRunning(pid) {
+			stillAlive = append(stillAlive, pid)
+		}
+	}
+	if len(stillAlive) > 0 {
+		sort.Ints(stillAlive)
+		return stoppedAny, fmt.Errorf(
+			"the daemon (pid(s) %v) is still running and could not be stopped. "+
+				"If it was started with elevated privileges, stop it the same way "+
+				"(for example 'sudo muninn stop' or systemctl), then upgrade again",
+			stillAlive)
+	}
+
+	if havePIDFilePID {
+		os.Remove(pidPath)
+	}
+	return stoppedAny, nil
+}
+
 // upgradeStep prints a left-aligned step label, executes fn, then prints ✓ or ✗.
 func upgradeStep(label string, fn func() error) error {
 	fmt.Printf("  %-28s", label)
@@ -634,40 +721,19 @@ func selfUpdate(latest string) error {
 
 	var tmpPath string
 
+	pidPath := filepath.Join(defaultDataDir(), "muninn.pid")
 	if err := upgradeStep("Stopping daemon...", func() error {
-		if !daemonWasRunning {
-			return nil
+		stopped, stopErr := stopDaemonInstances(pidPath, 15*time.Second)
+		if stopErr != nil {
+			return stopErr
 		}
-		pidPath := filepath.Join(defaultDataDir(), "muninn.pid")
-		pid, err := readPID(pidPath)
-		if err != nil {
-			// PID file gone — daemon already stopped
-			return nil
+		if stopped {
+			// A live process was found and confirmed stopped even though
+			// isDaemonRunning() (PID-file-only) said no daemon was running —
+			// e.g. the exe-scan found a daemon with no PID file (#792). Make
+			// sure the restart step below still fires for it.
+			daemonWasRunning = true
 		}
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			return nil
-		}
-		if err := stopProcess(proc); err != nil {
-			return fmt.Errorf("stop daemon: %w", err)
-		}
-		// Wait up to 15s for graceful exit (PebbleDB flush + WAL sync can take several seconds).
-		deadline := time.Now().Add(15 * time.Second)
-		for time.Now().Before(deadline) {
-			if !isProcessRunning(pid) {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		// If still alive after graceful period, force-kill to unblock the upgrade.
-		if isProcessRunning(pid) {
-			_ = proc.Kill()
-			time.Sleep(500 * time.Millisecond)
-		}
-		// Brief grace period for the OS to release file locks (e.g. PebbleDB LOCK file)
-		// before the new binary attempts to open the same data directory.
-		time.Sleep(200 * time.Millisecond)
-		os.Remove(pidPath)
 		return nil
 	}); err != nil {
 		return err

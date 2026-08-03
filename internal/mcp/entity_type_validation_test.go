@@ -15,12 +15,12 @@ type captureEntityStateEngine struct {
 	gotTypes []string
 }
 
-func (e *captureEntityStateEngine) SetEntityState(_ context.Context, _, _, _, entityType string) error {
+func (e *captureEntityStateEngine) SetEntityState(_ context.Context, _, _, _, _, entityType string) error {
 	e.gotType = entityType
 	return nil
 }
 
-func (e *captureEntityStateEngine) SetEntityStateBatch(_ context.Context, ops []engine.EntityStateOp) []error {
+func (e *captureEntityStateEngine) SetEntityStateBatch(_ context.Context, _ string, ops []engine.EntityStateOp) []error {
 	errs := make([]error, len(ops))
 	for _, op := range ops {
 		e.gotTypes = append(e.gotTypes, op.EntityType)

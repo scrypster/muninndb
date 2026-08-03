@@ -19,6 +19,9 @@ var ErrKeyNotFound = errors.New("api key not found")
 // Returns the raw token (shown once) and the key metadata.
 // expiresAt is optional; pass nil for a key that never expires.
 func (s *Store) GenerateAPIKey(vault, label, mode string, expiresAt *time.Time) (token string, key APIKey, err error) {
+	if err = s.refuseNonLeaderWrite(); err != nil {
+		return
+	}
 	if mode != ModeFull && mode != ModeObserve && mode != ModeWrite && mode != ModeAppend {
 		err = fmt.Errorf("mode must be %q, %q, %q, or %q", ModeFull, ModeObserve, ModeWrite, ModeAppend)
 		return
@@ -62,7 +65,8 @@ func (s *Store) GenerateAPIKey(vault, label, mode string, expiresAt *time.Time) 
 		err = setErr
 		return
 	}
-	err = batch.Commit(pebble.Sync)
+	err = s.commit(batch)
+	batch.Close()
 	return
 }
 
@@ -130,6 +134,9 @@ func (s *Store) ListAPIKeys(vault string) ([]APIKey, error) {
 // RevokeAPIKey removes the key with the given display ID from the given vault.
 // Returns ErrKeyNotFound if the key does not exist or the ID is invalid.
 func (s *Store) RevokeAPIKey(vault, keyID string) error {
+	if err := s.refuseNonLeaderWrite(); err != nil {
+		return err
+	}
 	idBytes, err := base64.RawURLEncoding.DecodeString(keyID)
 	if err != nil || len(idBytes) != 8 {
 		return ErrKeyNotFound
@@ -145,13 +152,12 @@ func (s *Store) RevokeAPIKey(vault, keyID string) error {
 	closer.Close()
 
 	batch := s.db.NewBatch()
+	defer batch.Close()
 	if err := batch.Delete(apiKeyStorageKey(hash), nil); err != nil {
-		batch.Close()
 		return err
 	}
 	if err := batch.Delete(idxKey, nil); err != nil {
-		batch.Close()
 		return err
 	}
-	return batch.Commit(pebble.Sync)
+	return s.commit(batch)
 }

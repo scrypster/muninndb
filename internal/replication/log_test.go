@@ -3,6 +3,8 @@ package replication
 import (
 	"context"
 	"encoding/binary"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -976,5 +978,260 @@ func TestReplicationLog_ReadSince_ConcurrentAppend(t *testing.T) {
 	// Verify we actually appended some entries
 	if appendedSeq.Load() == 0 {
 		t.Error("no entries were appended during the test")
+	}
+}
+
+// TestReplicationLog_Prune_EntryRangeCollisionNoLongerPossible is a FORWARD
+// regression guard, not a reproduction of the original defect.
+//
+// Before #726, prefix 0x19 was shared by the replication log
+// (0x19|seq_be64, msgpack) and prefix.Idempotency (0x19|siphash(op_id),
+// JSON) — byte-identical in shape. A range-delete prune over
+// [0x19|1, 0x19|untilSeq+1) therefore risked taking any receipt whose
+// siphash happened to land in that window, which is why Prune used to decode
+// every value in the window and skip anything that didn't unmarshal as a
+// ReplicationEntry.
+//
+// #726 relocated the log to prefix.Replication|subEntry, a range that
+// provably contains nothing but log entries (see keys.go and
+// prefix_relocation_test.go's TestReplicationKeys_NeverCollideWithIdempotency
+// and TestPrune_LeavesIdempotencyReceiptsAlone, which model the collision
+// correctly — seeding receipts at their real prefix.Idempotency address).
+// The precondition for the old defect — a receipt able to occupy a key this
+// Prune scans — no longer holds, so what this test pins instead is the
+// opposite: data placed inside the entry range IS entry-range data, and a
+// plain DeleteRange over it is exactly the intended (and now unnecessary to
+// avoid) behaviour.
+func TestReplicationLog_Prune_EntryRangeCollisionNoLongerPossible(t *testing.T) {
+	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	defer db.Close()
+
+	log := NewReplicationLog(db)
+	for i := 1; i <= 100; i++ {
+		if _, err := log.Append(OpSet, []byte("k"), []byte("v")); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	if err := log.Prune(60); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	// Every key in the pruned window is entry-range data and must be gone —
+	// there is no encoding to preserve here anymore.
+	for _, seq := range []uint64{7, 42, 50, 60} {
+		if _, closer, err := db.Get(replicationEntryKey(seq)); err == nil {
+			closer.Close()
+			t.Fatalf("entry %d survived Prune(60) — expected the whole window deleted", seq)
+		}
+	}
+
+	// And the log entries above the watermark are untouched.
+	if _, closer, err := db.Get(replicationEntryKey(61)); err != nil {
+		t.Fatalf("entry above watermark was pruned: %v", err)
+	} else {
+		closer.Close()
+	}
+}
+
+// TestReplicationLog_Prune_IdempotentOnRepeatedWatermark exercises the
+// lastPruned fast path: calling Prune with a watermark that has already been
+// pruned (the periodic prune loop calls Prune every tick regardless of
+// whether the watermark advanced) must not error and must not disturb
+// anything, rather than re-issuing a redundant delete/flush/compact cycle.
+func TestReplicationLog_Prune_IdempotentOnRepeatedWatermark(t *testing.T) {
+	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	defer db.Close()
+
+	log := NewReplicationLog(db)
+	for i := 1; i <= 10; i++ {
+		if _, err := log.Append(OpSet, []byte("k"), []byte("v")); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	if err := log.Prune(4); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	for seq := uint64(1); seq <= 4; seq++ {
+		if _, closer, err := db.Get(replicationEntryKey(seq)); err == nil {
+			closer.Close()
+			t.Fatalf("entry %d survived Prune(4)", seq)
+		}
+	}
+
+	// Pruning the same watermark again must be a clean no-op, not an error.
+	if err := log.Prune(4); err != nil {
+		t.Fatalf("second Prune(4) = %v, want nil", err)
+	}
+	if _, closer, err := db.Get(replicationEntryKey(5)); err != nil {
+		t.Fatalf("entry above watermark lost after repeated prune: %v", err)
+	} else {
+		closer.Close()
+	}
+}
+
+// Pruning writes tombstones; the bytes only come back when a compaction
+// rewrites the sstables holding them. In production, pruning 104k entries
+// reclaimed nothing — the store sat at 20 GB until a compaction was forced by
+// hand. Prune must therefore compact the range it just deleted.
+func TestReplicationLog_Prune_ReclaimsDiskSpace(t *testing.T) {
+	dir := t.TempDir()
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	defer db.Close()
+
+	log := NewReplicationLog(db)
+	// Payloads big enough that reclaimed space is unambiguous on disk.
+	value := make([]byte, 64*1024)
+	for i := range value {
+		value[i] = byte(i % 251)
+	}
+	for i := 1; i <= 400; i++ {
+		if _, err := log.Append(OpSet, []byte("k"), value); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	before := dirSize(t, dir)
+
+	if err := log.Prune(350); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	// Compact() returns once the compaction is applied, but Pebble unlinks the
+	// obsolete sstables from a background cleaner goroutine, so the bytes can
+	// still be on disk for a moment afterwards. Poll on the observable rather
+	// than sampling once — a single sample makes this test fail under load
+	// (observed once in a full-package run) for a reason that has nothing to do
+	// with whether the prune reclaimed anything.
+	//
+	// 350 of 400 entries at 64 KiB is ~22 MiB; require most of it back rather
+	// than an exact figure, since sstable boundaries are not key-aligned.
+	var after int64
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		after = dirSize(t, dir)
+		if after < before/2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if after >= before/2 {
+		t.Fatalf("prune did not reclaim disk: before=%d after=%d bytes "+
+			"(tombstones were written but never compacted)", before, after)
+	}
+
+	// The surviving entries must still be readable.
+	entries, err := log.ReadSince(350, 100)
+	if err != nil {
+		t.Fatalf("ReadSince after prune: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("entries above the watermark were lost")
+	}
+}
+
+// sstSize sums only sstable bytes. The Pebble WAL still holds every append
+// until it is recycled, so including it would mask what a compaction actually
+// reclaims from the tables.
+func dirSize(t *testing.T, dir string) int64 {
+	t.Helper()
+	var total int64
+	err := filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		// Compaction removes sstables while we walk — a vanished file is
+		// evidence the compaction ran, not an error.
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && filepath.Ext(info.Name()) == ".sst" {
+			total += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	return total
+}
+
+// Prune must not hold the Append mutex for its duration: Append is on the
+// synchronous write path, and a first prune over a never-pruned log scans,
+// deletes and compacts tens of GB. Run under -race.
+func TestReplicationLog_PruneDoesNotBlockAppend(t *testing.T) {
+	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	defer db.Close()
+
+	log := NewReplicationLog(db)
+	value := make([]byte, 4096)
+	for i := 1; i <= 5000; i++ {
+		if _, err := log.Append(OpSet, []byte("k"), value); err != nil {
+			t.Fatalf("seed append %d: %v", i, err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var appended atomic.Int64
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := log.Append(OpSet, []byte("k"), value); err != nil {
+				t.Errorf("concurrent append: %v", err)
+				return
+			}
+			appended.Add(1)
+		}
+	}()
+
+	err = log.Prune(4000)
+	// Sample BEFORE stopping the writer, so the count is what completed while
+	// the prune was running rather than after it returned.
+	during := appended.Load()
+	close(stop)
+	wg.Wait()
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	if during < 10 {
+		t.Fatalf("only %d appends completed while the prune ran — Prune is serialising the write path", during)
+	}
+	// Everything above the watermark must still be readable and contiguous.
+	entries, err := log.ReadSince(4000, 100)
+	if err != nil {
+		t.Fatalf("ReadSince after prune: %v", err)
+	}
+	if len(entries) == 0 || entries[0].Seq != 4001 {
+		t.Fatalf("entries above the watermark are wrong: got %d entries starting at %v",
+			len(entries), func() any {
+				if len(entries) == 0 {
+					return nil
+				}
+				return entries[0].Seq
+			}())
 	}
 }

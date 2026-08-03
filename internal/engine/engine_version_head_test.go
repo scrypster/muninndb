@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -399,6 +400,34 @@ func TestVersionHead_OverlongEvolveChainAbstainsLoudly(t *testing.T) {
 	if len(resp.Activations) == 0 && resp.AbstainedReason != activation.AbstainSupersededOnly {
 		t.Errorf("abstained_reason = %q, want %q — an unreachable chain head must be named, not fallen silent about",
 			resp.AbstainedReason, activation.AbstainSupersededOnly)
+	}
+}
+
+// #794: the SAME overlong-evolve-chain abstention as
+// TestVersionHead_OverlongEvolveChainAbstainsLoudly computes `truncated`
+// inside resolveSupersessionHead's depth-cap loop, but the abstain return at
+// the bottom of that function dropped it on the floor — so the refusal was
+// reported identically whether the chain genuinely had no current version or
+// merely ran the depth cap out before it could tell. Pin that the WARN fires
+// on the refusal path too (previously it fired only on walk.OK), matching the
+// already-tested OK-but-truncated substitution path
+// (TestVersionHead_CapDepthChainSubstitutesAndReportsTruncation).
+func TestVersionHead_OverlongEvolveChainAbstainWarnsOnTruncation(t *testing.T) {
+	h, cleanup := newVersionHeadHarness(t)
+	defer cleanup()
+
+	buf := captureWarn(t)
+
+	a := h.write("retention policy", "Telemetry rows older than ninety days are purged nightly by the vacuum sweeper.")
+	evolveChain(h, a, supersessionMaxDepth+1)
+
+	resp := h.recall(retentionQuery)
+	if sub := substitutedItem(resp); sub != nil {
+		t.Fatalf("a chain past the depth cap substituted %s — no node within the cap is nameable on an evolve chain", sub.ID)
+	}
+
+	if !strings.Contains(buf.String(), "chain depth cap") {
+		t.Errorf("expected a chain-depth-cap WARN on the abstain path, got log: %q", buf.String())
 	}
 }
 
@@ -937,7 +966,12 @@ func TestVersionHead_ShadowsDoNotEnterPerQueryNormalization_Saturating(t *testin
 			VaultID:     wsVaultID(h.ws),
 			VaultPrefix: h.ws, Context: []string{retentionQuery}, MaxResults: 10, Threshold: 0.1,
 			ExcludeTags: excludeTags,
-			Weights:     &activation.Weights{SemanticSimilarity: 0.0, FullTextRelevance: 1.0, UseACTR: true},
+			// COG-32: this vault uses the default preset, whose read-side
+			// Hebbian boost is on. The n1 priming recorded above is what makes
+			// the shadow HOT, and since #779 it only reaches phase 4 when the
+			// request says so.
+			HebbianEnabled: true,
+			Weights:        &activation.Weights{SemanticSimilarity: 0.0, FullTextRelevance: 1.0, UseACTR: true},
 		})
 		if err != nil {
 			t.Fatalf("activation run: %v", err)

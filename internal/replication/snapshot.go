@@ -29,10 +29,9 @@ const (
 	ackTimeout = 30 * time.Second
 )
 
-// snapCompleteKey is the sentinel key written after a successful full snapshot.
-// Its presence indicates a clean, complete snapshot. If absent on startup, the
-// Lobe should re-join from scratch on the next Cortex connection.
-var snapCompleteKey = append([]byte{0x19, 0x10}, []byte("snap_complete")...)
+// snapCompleteKey (see keys.go) is the sentinel written after a successful full
+// snapshot. Its presence indicates a clean, complete snapshot. If absent on
+// startup, the Lobe should re-join from scratch on the next Cortex connection.
 
 var (
 	ErrSnapshotInProgress = errors.New("snapshot: transfer already in progress")
@@ -120,8 +119,34 @@ func (s *SnapshotSender) Send(ctx context.Context, conn *PeerConn) (uint64, erro
 	return snapshotSeq, nil
 }
 
-// countKeys counts all keys in the snapshot. This iterates all keys which is
-// O(n) but provides an accurate count for progress display.
+// skipFromSnapshot reports whether a key must not be shipped to a joining Lobe.
+//
+// #826: the snapshot iterated the WHOLE database, so the Cortex shipped its own
+// replication log — every entry, each carrying the full key and value of a
+// replicated write — to every Lobe, which then held a permanent mirror of it
+// that nothing on that node ever read or pruned (the periodic prune is
+// leader-gated). Measured on production lobes: 22 GB and 7.5 GB of replication
+// log on nodes that serve no stream.
+//
+// A Lobe never reads the Cortex's entries: it catches up from
+// SnapHeader.SnapshotSeq, and if it is later promoted its own followers rejoin
+// by snapshot. So the entries are pure freight.
+//
+// ONLY the log entries are skipped. Replication METADATA still ships — in
+// particular the seq counter, so a promoted Lobe continues the cluster's
+// sequence numbering instead of restarting at 0 and having every entry it
+// emits skipped as "already applied" by a follower whose watermark is higher.
+//
+// This filter is only expressible because #726 gave replication its own prefix.
+// Under 0x19 it would also have dropped every idempotency receipt.
+func skipFromSnapshot(k []byte) bool {
+	_, isEntry := entrySeqFromKey(k)
+	return isEntry
+}
+
+// countKeys counts the keys the snapshot will actually ship. It iterates all
+// keys (O(n)) and applies the same filter as streamChunks so the progress
+// total matches what arrives.
 func (s *SnapshotSender) countKeys(snap *pebble.Snapshot) (uint64, error) {
 	iter, err := snap.NewIter(nil)
 	if err != nil {
@@ -131,6 +156,9 @@ func (s *SnapshotSender) countKeys(snap *pebble.Snapshot) (uint64, error) {
 
 	var count uint64
 	for valid := iter.First(); valid; valid = iter.Next() {
+		if skipFromSnapshot(iter.Key()) {
+			continue
+		}
 		count++
 	}
 	return count, nil
@@ -194,7 +222,7 @@ func (s *SnapshotSender) streamChunks(ctx context.Context, conn *PeerConn, snap 
 		if err != nil {
 			return fmt.Errorf("marshal chunk %d: %w", chunkIdx, err)
 		}
-		if err := conn.Send(mbp.TypeSnapChunk, payload); err != nil {
+		if err := sendBulk(ctx, conn, mbp.TypeSnapChunk, payload, "snapshot chunk"); err != nil {
 			return fmt.Errorf("send chunk %d: %w", chunkIdx, err)
 		}
 		return nil
@@ -205,6 +233,11 @@ func (s *SnapshotSender) streamChunks(ctx context.Context, conn *PeerConn, snap 
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// #826: never ship the Cortex's own log entries — see skipFromSnapshot.
+		if skipFromSnapshot(iter.Key()) {
+			continue
 		}
 
 		// Copy key and value since iterator reuses buffers.
@@ -285,10 +318,12 @@ func (r *SnapshotReceiver) WipeForResnapshot() error {
 		k := iter.Key()
 		// Preserve ONLY the exact cluster_epoch key — it is fencing state, not
 		// snapshot data, and wiping it would make a re-snapshotting node (e.g. a
-		// deferring ex-primary) restart at epoch 0 (#531 PR3). Must be an exact-key
-		// match: the 0x19 prefix is overloaded (idempotency receipts are
-		// 0x19|siphash, ~0.4% of which begin 0x19 0x03), so a prefix skip would
-		// leave stale data keys behind after the snapshot.
+		// deferring ex-primary) restart at epoch 0 (#531 PR3). KEEP the exact-key
+		// match. The historical reason was that 0x19 was overloaded with
+		// idempotency receipts (#726 has since moved replication to its own
+		// prefix), but the exact match is still what we want: a prefix skip over
+		// the whole replication namespace would strand the OLD log entries and
+		// the old lastApplied watermark across a re-snapshot.
 		if bytes.Equal(k, epochKey) {
 			continue
 		}

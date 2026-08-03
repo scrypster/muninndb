@@ -199,23 +199,24 @@ func TestSTO12_LegacyFullWeightRepairNeverCreatesADanglingEdge(t *testing.T) {
 }
 
 // TestSTO12_DeleteEngramCascadeStaysInsideItsOwnPrefix pins the OTHER side of
-// the cascade's scan bounds, and the reason the explicit prefix guard in both
-// loops is load-bearing rather than belt-and-braces.
+// the cascade's scan bounds: that neither loop crosses into a neighbouring
+// engram's keyspace.
 //
-// keys.PrefixUpperBound is LOOSE: it increments the first sub-0xFF byte from the
-// right and returns without zeroing the trailing 0xFF bytes, so for a prefix
-// ending in 0xFF — about 1 engram ID in 256 — the bound it returns spans into
-// the NEXT engram's association keyspace. (Tracked as #816; it is mandated by
-// STO-11 and has several callers, so it is not changed here.)
+// keys.PrefixUpperBound USED to be LOOSE: it incremented the first sub-0xFF byte
+// from the right and returned without clearing the trailing 0xFF bytes, so for a
+// prefix ending in 0xFF — about 1 engram ID in 256 — the bound spanned into the
+// NEXT engram's association keyspace. #816 made it carry-and-truncate, so the
+// cascade is now held in place twice: by its bound and by the explicit
+// bytes.Equal(k[:25], prefix) break in each loop, which stays as belt and braces.
 //
-// About-1-in-256 is the rate at which the BOUND IS LOOSE, and not the rate at
-// which anything is lost. Landing a second engram inside the widened band takes
+// About-1-in-256 was the rate at which the BOUND WAS LOOSE, and not the rate at
+// which anything was lost. Landing a second engram inside the widened band takes
 // a shared first 14 ID bytes — the full 48-bit ULID millisecond AND 8 of the 10
 // crypto-random entropy bytes, ~2^-64 on top of a same-millisecond collision —
-// which is why the IDs below are CONSTRUCTED and not hoped for. So the guard is
-// structural hygiene rather than a live data-loss fix: the shared helper's
-// contract is wrong, each call site compensates per key, and any future
-// non-ULID ID tail closes that 64-bit gap immediately, on a delete path.
+// which is why the IDs below are CONSTRUCTED and not hoped for. The guard was
+// structural hygiene rather than a live data-loss fix, and it stays for the same
+// reason: any future non-ULID ID tail closes that 64-bit gap immediately, on a
+// delete path.
 //
 // Both loops therefore keep SeekGE plus an explicit bytes.Equal(k[:25], prefix)
 // break — which is also why they must NOT be converted to PrefixIterator, whose
@@ -235,10 +236,10 @@ func TestSTO12_DeleteEngramCascadeStaysInsideItsOwnPrefix(t *testing.T) {
 	var victim, neighbour ULID
 	copy(victim[:], []byte{0x71, 0x22, 0x33})
 	victim[14] = 0x10
-	victim[15] = 0xFF // the prefix byte that makes PrefixUpperBound over-inclusive
+	victim[15] = 0xFF // the prefix byte that made PrefixUpperBound over-inclusive pre-#816
 	neighbour = victim
 	neighbour[14] = 0x11 // == victim[14]+1
-	neighbour[15] = 0x00 // strictly inside the band the loose bound admits
+	neighbour[15] = 0x00 // strictly inside the band a loose bound would admit
 
 	victimTarget, neighbourTarget := NewULID(), NewULID()
 	seedEndpoints(t, ps, ws, victim, neighbour, victimTarget, neighbourTarget)
@@ -267,7 +268,7 @@ func TestSTO12_DeleteEngramCascadeStaysInsideItsOwnPrefix(t *testing.T) {
 	if got := assocRowsFor(t, ps, ws, victimTarget, victim, 0.8); len(got) > 0 {
 		t.Errorf("the victim's reverse edge survived: %v", got)
 	}
-	// The neighbour, whose keys the loose upper bound admits into the scan, is
+	// The neighbour, whose keys a loose upper bound would admit into the scan, is
 	// untouched — rows AND engram.
 	if got := assocRowsFor(t, ps, ws, neighbour, neighbourTarget, 0.8); len(got) != 3 {
 		t.Errorf("the cascade crossed into the NEIGHBOURING engram's keyspace and deleted live rows: "+

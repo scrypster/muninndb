@@ -131,6 +131,43 @@ func TestClusterConfig_AutoNodeID(t *testing.T) {
 	}
 }
 
+// TestClusterConfig_AutoNodeID_StableAcrossHostnameChange reproduces #630: a
+// hostname change (macOS mDNS renaming, a container getting a fresh hostname
+// on restart) must not mint a new node identity for the same data directory.
+// A node_id that changes with the hostname mints a "ghost" registration that
+// out-lives the old identity, poisoning quorum counting and pinning
+// MinReplicatedSeq at its last ack forever.
+func TestClusterConfig_AutoNodeID_StableAcrossHostnameChange(t *testing.T) {
+	t.Setenv("MUNINN_CLUSTER_ENABLED", "true")
+	// Do not set MUNINN_CLUSTER_NODE_ID — exercise auto-derivation.
+
+	dataDir := t.TempDir()
+
+	orig := hostnameFn
+	defer func() { hostnameFn = orig }()
+
+	hostnameFn = func() (string, error) { return "MacBookPro-abcd1234", nil }
+	cfg1, err := LoadClusterConfig(dataDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg1.NodeID == "" {
+		t.Fatal("expected non-empty auto-generated NodeID")
+	}
+
+	// Same machine, same data directory, but the hostname flapped (a real,
+	// observed sequence: MacBookPro-<hash> -> Jareds-MacBook-Pro.local-<hash>).
+	hostnameFn = func() (string, error) { return "Jareds-MacBook-Pro.local", nil }
+	cfg2, err := LoadClusterConfig(dataDir)
+	if err != nil {
+		t.Fatalf("unexpected error on second load: %v", err)
+	}
+
+	if cfg1.NodeID != cfg2.NodeID {
+		t.Errorf("node identity must survive a hostname change: got %q then %q", cfg1.NodeID, cfg2.NodeID)
+	}
+}
+
 func TestClusterConfig_DisabledAlwaysValid(t *testing.T) {
 	cfg := ClusterConfig{
 		Enabled: false,
@@ -335,5 +372,40 @@ func TestClusterConfig_InvalidEnvVars(t *testing.T) {
 	}
 	if cfg.HeartbeatMS != 1000 {
 		t.Errorf("expected HeartbeatMS=1000 (default), got %d", cfg.HeartbeatMS)
+	}
+}
+
+// The backlog ceiling only protects a live cluster if it survives loading an
+// existing cluster.yaml that predates the field. Real deployments have such a
+// file already on disk; if a missing key zeroed the ceiling, the prune would be
+// inert exactly where it is needed.
+func TestLoadClusterConfig_MaxLogBacklogDefaultsWhenAbsentFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	// A cluster.yaml as it exists in production today: no max_log_backlog.
+	yaml := "enabled: true\nrole: primary\nbind_addr: 10.0.0.1:8490\n" +
+		"lease_ttl: 10\nheartbeat_ms: 1000\nprune_interval_sec: 60\n"
+	if err := os.WriteFile(filepath.Join(dir, "cluster.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write cluster.yaml: %v", err)
+	}
+
+	cfg, err := LoadClusterConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadClusterConfig: %v", err)
+	}
+	if cfg.MaxLogBacklog != 5000 {
+		t.Fatalf("MaxLogBacklog = %d, want 5000 (default must survive a yaml without the key)",
+			cfg.MaxLogBacklog)
+	}
+	// An explicit 0 must still disable the ceiling.
+	yaml += "max_log_backlog: 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "cluster.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatalf("rewrite cluster.yaml: %v", err)
+	}
+	cfg, err = LoadClusterConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadClusterConfig: %v", err)
+	}
+	if cfg.MaxLogBacklog != 0 {
+		t.Fatalf("MaxLogBacklog = %d, want 0 (explicit opt-out)", cfg.MaxLogBacklog)
 	}
 }

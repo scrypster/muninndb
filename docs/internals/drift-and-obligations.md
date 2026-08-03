@@ -83,6 +83,23 @@ and remain the reviewer's job.
 8. **A new Pebble prefix** → see `keyspace-registry.md`: disjoint, and added to
    `internal/prefix/prefix.All()` (the single source of truth). The disjointness tests in
    `internal/prefix/prefix_test.go` auto-tighten — there is no `storageMaxPrefix` to bump.
+   Two things that do NOT auto-tighten: the hard-coded `owners` slice in
+   `TestAll_OwnerGroupsPairwiseDisjoint` (a new owner string silently opts out of the
+   pairwise check until it is listed) and the `named` slice in
+   `TestAll_ConstSliceComplete`. Also check whether the prefix is vault-scoped: if it is,
+   it belongs in one or more of the four lists pinned by
+   `internal/storage/prefix_lists_test.go`; if it is global (as `prefix.Replication` is),
+   say so in the registry row so the next reader does not have to re-derive it. And obey
+   STO-14's general rule: **never mix fixed-width hash-keyed with fixed-width
+   sequence-keyed records under one prefix** — that was #726.
+
+   **Changing the SCOPE of an existing prefix is the same obligation plus a migration.**
+   #683 moved 0x1F from global to vault-scoped: that meant a new key length, the
+   `prefix.All()` category, membership in `clearVaultDataPrefixes` (and its scope test),
+   the registry row, an invariant (STO-17), and migration v6 — plus a `MaxRegisteredVersion`
+   bump that a previous migration's registration test pinned to an exact value and therefore
+   broke. Check for that pin: `TestRegisterMigrations_IncludesV5` asserted `== 5`. Pin the
+   exact value in the NEWEST migration's test and assert only a floor in the older ones.
 
 9. **Any `go build` of the muninn binary** → must keep `-tags localassets`. Enforced by
    `scripts/check-build-tags.sh` (CI `shellcheck` job), but that script only scans the
@@ -96,7 +113,16 @@ and remain the reviewer's job.
 11. **Anything under `internal/replication/` or a new write path in a cluster deployment** →
     confirm it goes through `RepLogAppend` and is leader-gated or Cortex-originated (bug
     #596 is exactly the absence of this). Background workers that mutate replicated state
-    (the pruner) inherit the obligation.
+    (the pruner) inherit the obligation. Since #826 the callback is built by
+    `replication.LocalAppendFunc`, which suppresses the append on a node whose role is
+    *definitively* follower — **know which way a role gate fails.** `IsFollower()` is
+    false for `RoleUnknown` on purpose: suppressing leader work on a node that turns out
+    to be the leader loses data, while doing it on a follower only wastes resources. A gate
+    written the other way (`if !IsLeader() { skip }`) would drop every write accepted during
+    the startup window out of the stream its followers read, silently and permanently.
+    Equally: anything that filters keys out of a snapshot (`skipFromSnapshot`) must keep
+    replication METADATA flowing — dropping the seq counter restarts a promoted node's log
+    at 1.
 
 12. **A new async worker or fire-and-forget path on the write or scoring path**
     (`internal/engine`, `internal/engine/activation`, `internal/storage`) → give it a
@@ -106,7 +132,28 @@ and remain the reviewer's job.
     deterministically — `time.Sleep` is not synchronization and flakes under `-race` on
     constrained CI cores (#722).
 
-13. **A path that rewrites an ALREADY-indexed engram's FTS entries** (`internal/index/fts/`) → call `fts.ReindexEngram`, never `DeleteEngram` followed by `IndexEngram`. The pair is not statistics-neutral — `IndexEngram` bumps `TotalEngrams`/`AvgDocLen` and increments `df_t` for every term of the document, `DeleteEngram` decrements neither — so it silently decays the engram's own BM25 score on every call (COG-24; measured −82.6% over 100 retags, #720). **One carve-out, named by mechanism:** a FULL-VAULT rebuild that first range-tombstones the 0x08 global-stats and 0x09 per-term-stats prefixes via `store.ClearFTSKeys` may call `IndexEngram` on already-indexed engrams — `Engine.ReindexFTSVault` does (`internal/engine/engine_reindex_fts.go:67` clears, `:80` re-indexes), and it is correct precisely because the stats it would otherwise inflate no longer exist. Do **not** read this as "unless the stats are handled": if a path has not range-tombstoned 0x08/0x09, it is in violation. There is no automated check: nothing stops a new call site from pairing them, and nothing distinguishes a legitimate post-`ClearFTSKeys` rebuild from an illegitimate in-place one. 🪝
+13. **A new field on `activation.ActivateRequest` that gates a scoring phase**
+    → audit EVERY constructor (`rg 'activation\.ActivateRequest\{'`) and add a pinning
+    test that the production path (`internal/engine.Activate`) sets it. There is exactly
+    ONE production constructor and dozens of test ones, so a bool defaulting to `false` is
+    a silent behaviour change for every in-tree fixture that relied on the phase. COG-32's
+    `HebbianEnabled` did exactly this: four fixtures seed `AssocLog().Record(...)` plus
+    `store.assocs` and their priming went inert until they were updated with the gate, and
+    one of them (`abstention_gate_measure_test.go`) reported a collapsed both-arms-equal
+    result that its own both-metric rule correctly rejected. That failure is the desirable
+    shape — but only because a standing corpus happened to cover it.
+
+14. **A trial/measurement seam behind `//go:build cognitiontrial`**
+    (`internal/storage/trial_clock_cognitiontrial.go`,
+    `internal/cognitive/replay_cognitiontrial.go`) → CI never passes this tag, so nothing
+    checks these files compile. Build them explicitly when you touch the packages they
+    reach into: `go build -tags 'localassets cognitiontrial' ./... && go vet -tags
+    'localassets cognitiontrial' ./...`. The cognition-trial acceptance rule
+    (`internal/engine/cognition_trial_rule_test.go`) is deliberately tagged
+    `localassets || cognitiontrial` so its own unit tests DO run in CI — a rule that
+    decides whether a subsystem lives must itself be tested.
+
+15. **A path that rewrites an ALREADY-indexed engram's FTS entries** (`internal/index/fts/`) → call `fts.ReindexEngram`, never `DeleteEngram` followed by `IndexEngram`. The pair is not statistics-neutral — `IndexEngram` bumps `TotalEngrams`/`AvgDocLen` and increments `df_t` for every term of the document, `DeleteEngram` decrements neither — so it silently decays the engram's own BM25 score on every call (COG-24; measured −82.6% over 100 retags, #720). **One carve-out, named by mechanism:** a FULL-VAULT rebuild that first range-tombstones the 0x08 global-stats and 0x09 per-term-stats prefixes via `store.ClearFTSKeys` may call `IndexEngram` on already-indexed engrams — `Engine.ReindexFTSVault` does (`internal/engine/engine_reindex_fts.go:67` clears, `:80` re-indexes), and it is correct precisely because the stats it would otherwise inflate no longer exist. Do **not** read this as "unless the stats are handled": if a path has not range-tombstoned 0x08/0x09, it is in violation. There is no automated check: nothing stops a new call site from pairing them, and nothing distinguishes a legitimate post-`ClearFTSKeys` rebuild from an illegitimate in-place one. 🪝
 
 ## Live drift found during the guardian audit (worth fixing)
 

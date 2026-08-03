@@ -420,9 +420,9 @@ func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startI
 		case sawRetracted:
 			return supersessionWalk{Reason: supersessionBlockRetracted}
 		case sawHidden:
-			return supersessionWalk{Reason: supersessionBlockHidden}
+			return supersessionWalk{Reason: supersessionBlockHidden, Truncated: truncated}
 		default:
-			return supersessionWalk{Reason: supersessionBlockNoCurrent}
+			return supersessionWalk{Reason: supersessionBlockNoCurrent, Truncated: truncated}
 		}
 	}
 	return supersessionWalk{Head: head, Immediate: immediate, OK: true, Truncated: truncated}

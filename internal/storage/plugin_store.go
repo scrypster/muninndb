@@ -16,7 +16,7 @@ import (
 // CountWithoutFlag returns the number of engrams across all vaults that are
 // missing the given digest flag bit. Engrams that have any skipFlags bit set
 // are excluded from the count (e.g. permanently-failed engrams).
-func (ps *PebbleStore) CountWithoutFlag(ctx context.Context, flag, skipFlags uint8) (int64, error) {
+func (ps *PebbleStore) CountWithoutFlag(ctx context.Context, flag, skipFlags uint16) (int64, error) {
 	lowerBound := []byte{prefix.Engram}
 	upperBound := []byte{prefix.Meta}
 
@@ -60,7 +60,7 @@ func (ps *PebbleStore) CountWithoutFlag(ctx context.Context, flag, skipFlags uin
 // CountWithFlag returns the number of engrams across all vaults that have the
 // given digest flag bit set. It scans the 0x11 DigestFlags key space directly
 // (a global key space — no vault scope needed).
-func (ps *PebbleStore) CountWithFlag(ctx context.Context, flag uint8) (int64, error) {
+func (ps *PebbleStore) CountWithFlag(ctx context.Context, flag uint16) (int64, error) {
 	lowerBound := []byte{prefix.DigestFlags}
 	upperBound := []byte{prefix.Coherence}
 
@@ -75,8 +75,7 @@ func (ps *PebbleStore) CountWithFlag(ctx context.Context, flag uint8) (int64, er
 
 	var count int64
 	for valid := iter.First(); valid; valid = iter.Next() {
-		val := iter.Value()
-		if len(val) > 0 && val[0]&flag != 0 {
+		if decodeDigestFlags(iter.Value())&flag != 0 {
 			count++
 		}
 	}
@@ -86,7 +85,7 @@ func (ps *PebbleStore) CountWithFlag(ctx context.Context, flag uint8) (int64, er
 // ScanWithoutFlag returns a forward-only iterator over all engrams that are
 // missing the given digest flag bit. Engrams that have any skipFlags bit set
 // are skipped during iteration.
-func (ps *PebbleStore) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint8) *PluginEngramIterator {
+func (ps *PebbleStore) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint16) *PluginEngramIterator {
 	lowerBound := []byte{prefix.Engram}
 	upperBound := []byte{prefix.Meta}
 
@@ -113,7 +112,7 @@ func (ps *PebbleStore) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint
 }
 
 // SetDigestFlag sets a digest flag bit on an engram's digest flags record.
-func (ps *PebbleStore) SetDigestFlag(ctx context.Context, id ULID, flag uint8) error {
+func (ps *PebbleStore) SetDigestFlag(ctx context.Context, id ULID, flag uint16) error {
 	raw, err := ps.getDigestFlagsRaw([16]byte(id))
 	if err != nil {
 		if !errors.Is(err, pebble.ErrNotFound) {
@@ -123,25 +122,65 @@ func (ps *PebbleStore) SetDigestFlag(ctx context.Context, id ULID, flag uint8) e
 	}
 	raw |= flag
 	key := keys.DigestFlagsKey([16]byte(id))
-	return ps.db.Set(key, []byte{raw}, pebble.NoSync)
+	return ps.db.Set(key, encodeDigestFlags(raw), pebble.NoSync)
 }
 
-// GetDigestFlags returns the current digest flags byte for an engram.
-func (ps *PebbleStore) GetDigestFlags(ctx context.Context, id ULID) (uint8, error) {
+// GetDigestFlags returns the current digest flags for an engram.
+func (ps *PebbleStore) GetDigestFlags(ctx context.Context, id ULID) (uint16, error) {
 	return ps.getDigestFlagsRaw([16]byte(id))
 }
 
-func (ps *PebbleStore) getDigestFlagsRaw(id [16]byte) (uint8, error) {
+func (ps *PebbleStore) getDigestFlagsRaw(id [16]byte) (uint16, error) {
 	key := keys.DigestFlagsKey(id)
 	val, closer, err := ps.db.Get(key)
 	if err != nil {
 		return 0, err
 	}
 	defer closer.Close()
-	if len(val) == 0 {
-		return 0, nil
+	return decodeDigestFlags(val), nil
+}
+
+// decodeDigestFlags decodes a raw DigestFlagsKey value into the 16-bit flags
+// space. Tolerant of the legacy 1-byte encoding (#605): before the bit split,
+// DigestEmbedFailed and DigestEnrichFailed were literally the same bit
+// (0x80), so a legacy record carrying that bit cannot say which stage failed.
+// Rather than rewrite every existing record (a repair-pass migration), reads
+// reinterpret a legacy 0x80 as BOTH failure bits set — the same outcome the
+// old aliasing already produced (skipped by both the embed and enrich
+// retroactive passes), so no previously-flagged engram becomes newly stuck or
+// newly eligible on upgrade. Only NEW failures, recorded after this fix, are
+// distinguished. Any write through SetDigestFlag re-encodes as 2 bytes, so a
+// legacy record widens the first time it is touched.
+// legacyDigestEmbedFailed and legacyDigestEnrichFailed mirror
+// plugin.DigestEmbedFailed / plugin.DigestEnrichFailed. Duplicated here
+// (rather than imported) because internal/storage cannot depend on
+// internal/plugin (plugin already depends on storage) — internal/storage's
+// own embed_migration.go and entity.go carry the same kind of local mirror
+// for the same reason.
+const (
+	legacyDigestEmbedFailed  uint16 = 0x80
+	legacyDigestEnrichFailed uint16 = 0x100
+)
+
+func decodeDigestFlags(val []byte) uint16 {
+	switch len(val) {
+	case 0:
+		return 0
+	case 1:
+		raw := uint16(val[0])
+		if raw&legacyDigestEmbedFailed != 0 {
+			raw |= legacyDigestEmbedFailed | legacyDigestEnrichFailed
+		}
+		return raw
+	default:
+		return uint16(val[0]) | uint16(val[1])<<8
 	}
-	return val[0], nil
+}
+
+// encodeDigestFlags encodes the 16-bit flags space as the 2-byte
+// DigestFlagsKey value (low byte, then high byte).
+func encodeDigestFlags(flags uint16) []byte {
+	return []byte{byte(flags), byte(flags >> 8)}
 }
 
 // UpdateEmbedding stores an embedding vector for an engram.
@@ -239,8 +278,8 @@ type PluginEngramIterator struct {
 	ps        *PebbleStore
 	iter      *pebble.Iterator
 	iterErr   error // set when NewIter failed; Next() immediately returns false
-	flag      uint8
-	skipFlags uint8 // skip engrams that have any of these bits set (e.g. DigestEmbedFailed)
+	flag      uint16
+	skipFlags uint16 // skip engrams that have any of these bits set (e.g. DigestEmbedFailed)
 	started   bool
 	current   *Engram
 	// wsCache maps ULID -> vault prefix so callers can retrieve it.

@@ -17,6 +17,24 @@ func roundScore(f float32) float64 {
 	return math.Round(float64(f)*1e6) / 1e6
 }
 
+// knownLastAccess converts a wire nanosecond timestamp to a Memory.LastAccess,
+// returning nil when the value is not a real access instant.
+//
+// Both unset shapes land here: erf.ZeroTimeSentinelNanos (the value
+// time.Time{}.UnixNano() overflows to, year 1754) and a plain 0 (the Unix
+// epoch). Neither is a time a memory was read at, and rendering either one as a
+// concrete RFC3339 instant is a plausible-looking wrong answer — the failure
+// class principle #2 names as the worst one. Absence is the honest encoding, and
+// it is the same answer the staleness annotation already gives for the same
+// engram (augmentAnnotations).
+func knownLastAccess(ns int64) *time.Time {
+	t := time.Unix(0, ns).UTC()
+	if storage.IsUnsetTimestamp(t) {
+		return nil
+	}
+	return &t
+}
+
 // activationToMemory converts an mbp.ActivationItem to an MCP Memory for recall responses.
 // Summary-first by design (#112): Summary carries the enrichment summary, while Content
 // carries the real engram content (truncated to a preview). The summary is never copied
@@ -95,7 +113,7 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		Type:        storage.MemoryType(item.MemoryType).String(),
 		TypeLabel:   item.TypeLabel,
 		CreatedAt:   time.Unix(0, item.CreatedAt).UTC(),
-		LastAccess:  time.Unix(0, item.LastAccess).UTC(),
+		LastAccess:  knownLastAccess(item.LastAccess),
 		AccessCount: item.AccessCount,
 		Relevance:   item.Relevance,
 		SourceType:  item.SourceType,
@@ -133,7 +151,7 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		Type:        storage.MemoryType(r.MemoryType).String(),
 		TypeLabel:   r.TypeLabel,
 		CreatedAt:   time.Unix(0, r.CreatedAt).UTC(),
-		LastAccess:  time.Unix(0, r.LastAccess).UTC(),
+		LastAccess:  knownLastAccess(r.LastAccess),
 		AccessCount: r.AccessCount,
 		Relevance:   r.Relevance,
 		Trust:       storage.TrustLevel(r.Trust).String(),

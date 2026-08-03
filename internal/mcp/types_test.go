@@ -8,7 +8,9 @@ import (
 
 func TestMemoryAnnotations_JSONOmitEmpty(t *testing.T) {
 	// MemoryAnnotations with only stale/stale_days set — omitempty fields absent
-	ann := MemoryAnnotations{Stale: false, StaleDays: 5.2}
+	staleDays := 5.2
+	stale := false
+	ann := MemoryAnnotations{Stale: &stale, StaleDays: &staleDays}
 	b, err := json.Marshal(ann)
 	if err != nil {
 		t.Fatalf("marshal MemoryAnnotations: %v", err)

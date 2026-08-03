@@ -82,6 +82,10 @@ type Notice struct {
 // arming a hub entity turns the notice channel into a nag. valid_until is a
 // BOUND, not a trigger — an expired intention is silenced, never fired.
 func (e *Engine) Intend(ctx context.Context, vault, content string, cues []string, validUntil *time.Time, oneShot bool, importance *float32) (string, error) {
+	// Cluster single-writer gate (#596).
+	if err := e.refuseNonLeaderWrite(); err != nil {
+		return "", err
+	}
 	if strings.TrimSpace(content) == "" {
 		return "", fmt.Errorf("%w: content is required", ErrInvalidIntention)
 	}
@@ -114,7 +118,7 @@ func (e *Engine) Intend(ctx context.Context, vault, content string, cues []strin
 	n := e.store.GetVaultCount(ctx, ws)
 	if n >= cueUbiquityMinVault {
 		for _, cue := range clean {
-			rec, err := e.store.GetEntityRecord(ctx, cue)
+			rec, err := e.store.GetEntityRecord(ctx, ws, cue)
 			if err != nil || rec == nil {
 				continue // unknown entity: maximally rare, always armable
 			}

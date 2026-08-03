@@ -27,7 +27,7 @@ func TestTraverse_FollowEntities_False(t *testing.T) {
 	idA, err := eng.store.WriteEngram(ctx, ws, engramA)
 	require.NoError(t, err)
 
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:   "PostgreSQL",
 		Type:   "database",
 		Source: "inline",
@@ -87,7 +87,7 @@ func TestTraverse_FollowEntities_True(t *testing.T) {
 	idA, err := eng.store.WriteEngram(ctx, ws, engramA)
 	require.NoError(t, err)
 
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:   "PostgreSQL",
 		Type:   "database",
 		Source: "inline",
@@ -170,7 +170,7 @@ func TestTraverse_FollowEntities_CrossVaultSkip(t *testing.T) {
 	idA, err := eng.store.WriteEngram(ctx, wsA, engramA)
 	require.NoError(t, err)
 
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, wsA, storage.EntityRecord{
 		Name: "SharedEntity", Type: "concept", Source: "inline",
 	}, "inline")
 	require.NoError(t, err)
@@ -205,7 +205,7 @@ func TestTraverse_FollowEntities_VisitedSetPreventsInfiniteLoop(t *testing.T) {
 	const vault = "traverse-entity-cycle"
 	ws := eng.store.ResolveVaultPrefix(vault)
 
-	err := eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err := eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name: "CycleEntity", Type: "concept", Source: "inline",
 	}, "inline")
 	require.NoError(t, err)
@@ -253,7 +253,7 @@ func TestTraverse_FollowEntities_SoftDeletedViaEntity(t *testing.T) {
 	idA, err := eng.store.WriteEngram(ctx, ws, engramA)
 	require.NoError(t, err)
 
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:   "TestEntity",
 		Type:   "concept",
 		Source: "inline",
@@ -309,7 +309,7 @@ func TestTraverse_FollowEntities_ArchivedViaEntity(t *testing.T) {
 	idA, err := eng.store.WriteEngram(ctx, ws, engramA)
 	require.NoError(t, err)
 
-	err = eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	err = eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:   "ArchivedEntity",
 		Type:   "concept",
 		Source: "inline",
