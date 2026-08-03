@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/scrypster/muninndb/internal/config"
 )
 
 func runCluster(args []string) {
@@ -19,8 +21,19 @@ func runCluster(args []string) {
 		return
 	}
 
-	sub := args[0]
-	subArgs := args[1:]
+	// Parse MySQL-style admin auth flags (-u, -p, -h) up front, exactly like
+	// `muninn vault` does — the remaining args go to the subcommand's own
+	// flag set (#632). info/status/failover don't use these; they attach the
+	// cluster shared-secret bearer token instead (see httpGet/httpPost).
+	remaining, username, password, prompted := parseAdminFlags(args)
+	if len(remaining) == 0 {
+		printClusterHelp()
+		osExit(1)
+		return
+	}
+
+	sub := remaining[0]
+	subArgs := remaining[1:]
 
 	switch sub {
 	case "info":
@@ -34,8 +47,20 @@ func runCluster(args []string) {
 	case "remove-node":
 		runClusterRemoveNode(subArgs)
 	case "enable":
+		if err := authenticateAdmin(username, password, prompted); err != nil {
+			fmt.Fprintf(os.Stderr, "Authentication failed: %v\n", err)
+			fmt.Fprintln(os.Stderr, "Is muninn running? Try: muninn status")
+			osExit(1)
+			return
+		}
 		osExit(runClusterEnable(subArgs))
 	case "disable":
+		if err := authenticateAdmin(username, password, prompted); err != nil {
+			fmt.Fprintf(os.Stderr, "Authentication failed: %v\n", err)
+			fmt.Fprintln(os.Stderr, "Is muninn running? Try: muninn status")
+			osExit(1)
+			return
+		}
 		osExit(runClusterDisable(subArgs))
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown cluster subcommand: %q\n", sub)
@@ -398,9 +423,39 @@ func clusterAddrDefault() string {
 	return localScheme() + "://127.0.0.1:" + defaultRESTPort
 }
 
+// clusterSecretFromDisk reads the cluster shared secret from the local
+// cluster.yaml (or the cluster: section of muninn.yaml) in the daemon's data
+// directory, so CLI cluster subcommands can attach the same
+// "Authorization: Bearer <cluster_secret>" credential /v1/cluster/* and
+// /v1/replication/* require (withClusterAuth in internal/transport/rest) —
+// without it every `muninn cluster info|status|failover` 401'd against a
+// healthy, correctly-configured daemon (#632). Returns "" (no header
+// attached) if the config can't be read or has no secret set — the server's
+// own error response then explains why, rather than the CLI guessing.
+func clusterSecretFromDisk() string {
+	cfg, err := config.LoadClusterConfig(defaultDataDir())
+	if err != nil {
+		return ""
+	}
+	return cfg.ClusterSecret
+}
+
+// addClusterSecretAuth attaches the cluster shared-secret bearer token to a
+// request bound for /v1/cluster/* or /v1/replication/* (#632).
+func addClusterSecretAuth(req *http.Request) {
+	if secret := clusterSecretFromDisk(); secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
+}
+
 func httpGet(url string) ([]byte, error) {
 	client := httpClientForURL(url, 5*time.Second)
-	resp, err := client.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	addClusterSecretAuth(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +475,13 @@ func httpGet(url string) ([]byte, error) {
 
 func httpPost(url string) ([]byte, error) {
 	client := httpClientForURL(url, 5*time.Second)
-	resp, err := client.Post(url, "application/json", nil)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	addClusterSecretAuth(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -438,6 +499,9 @@ func httpPost(url string) ([]byte, error) {
 	return body, nil
 }
 
+// httpPostJSON POSTs to an /api/admin/* route, attaching the admin session
+// cookie obtained by authenticateAdmin (mirrors doVaultRequestForce's use of
+// addSessionCookie for `muninn vault` — #632).
 func httpPostJSON(url string, body []byte) ([]byte, error) {
 	client := httpClientForURL(url, 10*time.Second)
 	var bodyReader *bytes.Reader
@@ -446,7 +510,13 @@ func httpPostJSON(url string, body []byte) ([]byte, error) {
 	} else {
 		bodyReader = bytes.NewReader([]byte{})
 	}
-	resp, err := client.Post(url, "application/json", bodyReader)
+	req, err := http.NewRequest(http.MethodPost, url, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	addSessionCookie(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

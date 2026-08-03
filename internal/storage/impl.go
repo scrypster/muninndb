@@ -414,15 +414,7 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	if eng.Stability == 0 {
 		eng.Stability = 30.0
 	}
-	if eng.CreatedAt.IsZero() {
-		eng.CreatedAt = time.Now()
-	}
-	if eng.UpdatedAt.IsZero() {
-		eng.UpdatedAt = eng.CreatedAt
-	}
-	if eng.LastAccess.IsZero() {
-		eng.LastAccess = eng.CreatedAt
-	}
+	eng.CreatedAt, eng.UpdatedAt, eng.LastAccess = normalizeEngramTimes(eng.CreatedAt, eng.UpdatedAt, eng.LastAccess)
 
 	// STO-12: inline associations are a creator. Checked BEFORE anything is
 	// encoded or queued, so a refusal is a clean no-op rather than a partly
@@ -630,15 +622,7 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		if eng.Stability == 0 {
 			eng.Stability = 30.0
 		}
-		if eng.CreatedAt.IsZero() {
-			eng.CreatedAt = time.Now()
-		}
-		if eng.UpdatedAt.IsZero() {
-			eng.UpdatedAt = eng.CreatedAt
-		}
-		if eng.LastAccess.IsZero() {
-			eng.LastAccess = eng.CreatedAt
-		}
+		eng.CreatedAt, eng.UpdatedAt, eng.LastAccess = normalizeEngramTimes(eng.CreatedAt, eng.UpdatedAt, eng.LastAccess)
 
 		erfEng := toERFEngram(eng)
 		erfBytes, encErr := erf.EncodeV2(erfEng)

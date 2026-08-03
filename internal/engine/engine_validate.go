@@ -9,18 +9,30 @@ import (
 
 // createdAtFloor is the earliest acceptable CreatedAt for a WriteRequest.
 // Values before this date are almost certainly bugs and risk ULID overflow.
-var createdAtFloor = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+//
+// It is ALSO load-bearing for an on-disk format decision in a different package,
+// which is why it is derived from storage.MinPlausibleTimestampYear rather than
+// spelled 2000 a second time: erf.decodeTimestamp maps the zero-time overflow
+// bit pattern back to the zero time, and that mapping is aliased — the instant
+// 1754-08-30T22:43:41.128654848Z encodes to the same bits and is destroyed on
+// read. This floor is the ONLY thing that makes the alias unreachable. Lowering
+// it to support a historical, genealogy or journal-import vault would make the
+// collision live and silently lose data.
+// Pinned by TestCreatedAtFloor_IsAboveERFZeroTimeSentinel.
+var createdAtFloor = time.Date(storage.MinPlausibleTimestampYear, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // createdAtSkew is the maximum amount of clock skew tolerated when a caller
 // supplies a future CreatedAt.
 const createdAtSkew = 5 * time.Minute
 
 // validateCreatedAt returns an error if t is outside acceptable bounds:
-//   - Lower bound: 2000-01-01T00:00:00Z  (protects against ULID overflow and nonsensical dates)
-//   - Upper bound: now + 5 minutes       (clock skew tolerance; rejects future backdating)
+//   - Lower bound: createdAtFloor (2000-01-01T00:00:00Z) — protects against ULID
+//     overflow and nonsensical dates, and keeps the ERF zero-time alias out of
+//     reach; see the note on createdAtFloor before changing it.
+//   - Upper bound: now + 5 minutes — clock skew tolerance; rejects future backdating.
 func validateCreatedAt(t time.Time) error {
 	if t.Before(createdAtFloor) {
-		return fmt.Errorf("created_at must not be before 2000-01-01")
+		return fmt.Errorf("created_at must not be before %s", createdAtFloor.Format("2006-01-02"))
 	}
 	if t.After(time.Now().Add(createdAtSkew)) {
 		return fmt.Errorf("created_at must not be more than 5 minutes in the future")

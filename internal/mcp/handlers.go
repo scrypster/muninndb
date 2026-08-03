@@ -2655,9 +2655,26 @@ func augmentAnnotations(m *Memory, item *mbp.ActivationItem, data *engine.Annota
 		m.Annotations = &MemoryAnnotations{}
 	}
 	ann := m.Annotations
-	staleDays := math.Round(time.Since(time.Unix(0, item.LastAccess)).Hours()/24.0*10) / 10
-	ann.Stale = staleDays > annotationStaleDays
-	ann.StaleDays = staleDays
+	// A never-accessed engram has no staleness to report, so we report NONE —
+	// both fields are omitted from the wire rather than defaulted. Before #810, a
+	// vault cloned with the zero-time sentinel reported stale_days=99317.8,
+	// stale=true for EVERY memory: 272 years of decay, announced to the calling
+	// agent, on a vault created seconds earlier. Emitting stale_days=0 /
+	// stale=false instead would be a SMALLER lie, not the truth — an agent reads
+	// that as "accessed today", which is plausible and wrong, the failure class
+	// principle #2 names as the worst one. Omission is the only honest answer
+	// available: the system does not know when this memory was last accessed.
+	//
+	// This guard is needed on top of the ERF decode-side repair, not covered by
+	// it: item.LastAccess is time.Time{}.UnixNano() for a never-accessed engram
+	// either way, so this surface sees the 1754 instant regardless.
+	lastAccess := time.Unix(0, item.LastAccess)
+	if !storage.IsUnsetTimestamp(lastAccess) {
+		staleDays := math.Round(time.Since(lastAccess).Hours()/24.0*10) / 10
+		stale := staleDays > annotationStaleDays
+		ann.StaleDays = &staleDays
+		ann.Stale = &stale
+	}
 	ann.ConflictsWith = data.ConflictsWith
 	if ann.SupersededBy == "" {
 		ann.SupersededBy = data.SupersededBy

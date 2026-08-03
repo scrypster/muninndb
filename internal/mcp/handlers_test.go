@@ -3780,3 +3780,162 @@ func TestHandleRecallUnknownModeStillRejected(t *testing.T) {
 		t.Error("engine must not receive a request carrying an unknown mode")
 	}
 }
+
+// staleAnnotateEngine is a test double whose single activation carries a
+// caller-chosen LastAccess, so the annotation surface can be exercised for a
+// record whose access time is UNKNOWN as well as one that is genuinely fresh.
+type staleAnnotateEngine struct {
+	fakeEngine
+	lastAccess int64
+}
+
+func (e *staleAnnotateEngine) Activate(_ context.Context, _ *mbp.ActivateRequest) (*mbp.ActivateResponse, error) {
+	return &mbp.ActivateResponse{
+		Activations: []mbp.ActivationItem{{
+			ID:         "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			Concept:    "test",
+			Content:    "content",
+			Score:      0.9,
+			LastAccess: e.lastAccess,
+		}},
+	}, nil
+}
+
+func (e *staleAnnotateEngine) GetAnnotations(_ context.Context, _, _ string, _ *mbp.ActivateRequest) (*engine.AnnotationData, error) {
+	return &engine.AnnotationData{}, nil
+}
+
+// TestHandleRecall_Annotate_UnknownLastAccessOmitsStaleness pins that MuninnDB
+// declines to answer a question it cannot answer, in BOTH directions.
+//
+// A memory that has never been accessed — every record in a vault cloned before
+// #810 carries the ERF zero-time sentinel, and read-modify-write writers rewrite
+// it verbatim rather than healing it — has no staleness. Before #810 the wire
+// carried stale_days=99317.8, stale=true: obviously garbage. Emitting 0/false
+// instead would be a SMALLER lie, not the truth: an agent reads "stale_days": 0
+// as "accessed today", which is plausible and wrong, the failure class principle
+// #2 calls the worst one. Both keys are therefore OMITTED.
+//
+// The second subtest is what keeps that honest: a genuinely fresh memory must
+// still emit stale_days: 0 / stale: false, present and zero. If omission ever
+// swallowed the real zero, agents would lose the ability to distinguish
+// "accessed today" from "unknown" — the exact conflation being fixed.
+func TestHandleRecall_Annotate_UnknownLastAccessOmitsStaleness(t *testing.T) {
+	const body = `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"context":["test"],"annotate":true}}}`
+
+	annotationsOf := func(t *testing.T, lastAccess int64) map[string]interface{} {
+		t.Helper()
+		srv := newTestServerWith(&staleAnnotateEngine{lastAccess: lastAccess})
+		w := postRPC(t, srv, body)
+		outer := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+		mems, ok := outer["memories"].([]interface{})
+		if !ok || len(mems) == 0 {
+			t.Fatalf("expected memories array, got %v", outer["memories"])
+		}
+		ann, ok := mems[0].(map[string]interface{})["annotations"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected annotations object, got %v", mems[0])
+		}
+		return ann
+	}
+
+	t.Run("never accessed: both keys absent", func(t *testing.T) {
+		// Exactly what a pre-#810 clone left on disk and what the engine emits
+		// for a never-accessed engram: time.Time{}.UnixNano(), which is not zero
+		// and reads back as 1754-08-30.
+		ann := annotationsOf(t, time.Time{}.UnixNano())
+		if v, present := ann["stale_days"]; present {
+			t.Errorf("stale_days = %v for a never-accessed memory; want the key ABSENT — "+
+				"0 reads to an agent as \"accessed today\", which the system cannot assert", v)
+		}
+		if v, present := ann["stale"]; present {
+			t.Errorf("stale = %v for a never-accessed memory; want the key ABSENT", v)
+		}
+	})
+
+	t.Run("accessed today: both keys present and zero", func(t *testing.T) {
+		ann := annotationsOf(t, time.Now().UnixNano())
+		v, present := ann["stale_days"]
+		if !present {
+			t.Fatalf("stale_days absent for a memory accessed today; a real zero must still be reported, "+
+				"or omission has conflated \"fresh\" with \"unknown\": %v", ann)
+		}
+		if days, _ := v.(float64); days != 0 {
+			t.Errorf("stale_days = %v, want 0 for a memory accessed today", v)
+		}
+		s, present := ann["stale"]
+		if !present {
+			t.Fatalf("stale absent for a memory accessed today: %v", ann)
+		}
+		if stale, _ := s.(bool); stale {
+			t.Errorf("stale = true for a memory accessed today")
+		}
+	})
+}
+
+// TestHandleRecall_UnknownLastAccess_OmitsLastAccess closes half of a residual
+// #810 originally filed rather than fixed, and records why the OTHER half is
+// still open.
+//
+// What it looked like before: in one response row, for one memory, MuninnDB said
+// two incompatible things about when it was last accessed —
+//
+//	"annotations": {}                                  <- staleness omitted: UNKNOWN
+//	"last_access": "1754-08-30T22:43:41.128654848Z"    <- a concrete year-1754 instant
+//
+// Mechanism: engine.go stamps mbp.ActivationItem.LastAccess as
+// eng.LastAccess.UnixNano(), and time.Time{}.UnixNano() IS
+// erf.ZeroTimeSentinelNanos — so the #810 decode-side repair is invisible on
+// this path by construction, and mcp/convert.go rendered the sentinel back out
+// through time.Unix.
+//
+// It was filed as needing "a nullable wire field on four transports at once
+// (obligation #3)". That reason was WRONG about the field an agent actually
+// reads. mcp.Memory.LastAccess is a time.Time declared in internal/mcp/types.go
+// and referenced nowhere outside this package; making it *time.Time costs
+// REST/gRPC/MBP nothing, and this very PR had already set the precedent in the
+// same file by making MemoryAnnotations.Stale/StaleDays MCP-only pointers for
+// exactly this reason. Weighing a hypothetical cross-surface divergence above an
+// ACTUAL self-contradiction inside one response was the wrong trade.
+//
+// STILL OPEN, and this is the genuinely four-transport part: the int64
+// `last_access` on mbp.ActivationItem, which REST and gRPC inherit by type alias
+// and which openapi.yaml and the SDKs describe, continues to carry the sentinel.
+// See invariants.md STO-13.
+func TestHandleRecall_UnknownLastAccess_OmitsLastAccess(t *testing.T) {
+	const body = `{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"muninn_recall","arguments":{"context":["test"],"annotate":true}}}`
+
+	srv := newTestServerWith(&staleAnnotateEngine{lastAccess: time.Time{}.UnixNano()})
+	w := postRPC(t, srv, body)
+	outer := extractInnerJSON(t, decodeResp(t, w.Body.String()))
+	mems, ok := outer["memories"].([]interface{})
+	if !ok || len(mems) == 0 {
+		t.Fatalf("expected memories array, got %v", outer["memories"])
+	}
+	row, ok := mems[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected a memory object, got %v", mems[0])
+	}
+
+	// The staleness half (pinned in full by
+	// TestHandleRecall_Annotate_UnknownLastAccessOmitsStaleness).
+	if ann, ok := row["annotations"].(map[string]interface{}); ok {
+		if _, present := ann["stale_days"]; present {
+			t.Fatalf("stale_days is present for an engram with no known access time: %v", ann)
+		}
+	}
+
+	// The half this test closes: the two must AGREE. Both omitted, or the
+	// response contradicts itself.
+	if la, present := row["last_access"]; present {
+		s, _ := la.(string)
+		year := 0
+		if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			year = parsed.UTC().Year()
+		}
+		t.Fatalf("last_access = %q (year %d) on a row whose staleness is omitted as UNKNOWN. "+
+			"An agent reads a concrete instant as a fact. Year 1754 is the erf zero-time sentinel; "+
+			"any other year here is worse — a plausible date for a memory that has never been accessed.",
+			s, year)
+	}
+}

@@ -966,7 +966,12 @@ func TestVersionHead_ShadowsDoNotEnterPerQueryNormalization_Saturating(t *testin
 			VaultID:     wsVaultID(h.ws),
 			VaultPrefix: h.ws, Context: []string{retentionQuery}, MaxResults: 10, Threshold: 0.1,
 			ExcludeTags: excludeTags,
-			Weights:     &activation.Weights{SemanticSimilarity: 0.0, FullTextRelevance: 1.0, UseACTR: true},
+			// COG-32: this vault uses the default preset, whose read-side
+			// Hebbian boost is on. The n1 priming recorded above is what makes
+			// the shadow HOT, and since #779 it only reaches phase 4 when the
+			// request says so.
+			HebbianEnabled: true,
+			Weights:        &activation.Weights{SemanticSimilarity: 0.0, FullTextRelevance: 1.0, UseACTR: true},
 		})
 		if err != nil {
 			t.Fatalf("activation run: %v", err)

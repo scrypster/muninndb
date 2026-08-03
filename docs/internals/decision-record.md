@@ -137,6 +137,30 @@ ever be") plus a cross-package disjointness test — not an assertion-only fix. 
 verify reporter claims independently (severity may rise); fix the disk, not just the future;
 guard the class of bug with a test.**
 
+**Coverage is not correctness (#731 → #732).** `muninn_state` sat in `isReadOnlyTool`
+while `handleState` reached `Engine.UpdateLifecycleState` → `store.CompareAndSet`, so an
+observe-mode credential could archive any engram in its vault — out of recall on every
+path — and every test stayed green. The exhaustive test proved each tool sat in exactly one
+bucket, never that the bucket was right. Three things hid it: the adapter **renames** the
+method (`UpdateState` → `UpdateLifecycleState`), so grepping `internal/mcp/` for the engine
+method finds only the one-line forwarder and never the handler; `registeredToolNames()` was
+a hand-maintained mirror of the dispatch map; and the classifiers were `switch` bodies,
+which cannot be enumerated, so a dead or misspelled entry was invisible. Unlike SEC-15's
+append guarantee — backstopped at the engine by `refuseAppend`, which is why append mode was
+never exploitable — observe has **no engine-level refusal**. `ObserveFromContext` suppresses
+COG-11 learning and `auth.ContextMode` gates SEC-14 trust; neither refuses an operation. The
+classification WAS the enforcement. Fixed by reclassifying, deriving the registry from the
+dispatch map, making the classifiers enumerable maps, and adding a per-tool census a human
+must edit. A reviewing pass built an independent write-reachability oracle and confirmed
+`muninn_state` was the sole outlier in both directions across all 44 tools — and found why
+the obvious follow-up test does not work: `Read`, `Activate`, `Explain` and `Stat` also
+reach writes and are correctly read-only, because the engine suppresses them via
+`ObserveFromContext`. So "a read-only tool must not reach a write" is RED on day one against
+correct code; the true invariant is "must not reach a write unguarded by `ObserveFromContext`",
+which points at an engine-level `refuseObserve` rather than a test.
+**Principles: fail closed on auth; an exhaustive test that pins shape rather than meaning is
+not a gate; prefer the enumerable structure over the one that cannot be asserted about.**
+
 ## Delivery & process
 
 **Features land as minimal increments referencing their RFC (#597 → #599, #612, #617).**
