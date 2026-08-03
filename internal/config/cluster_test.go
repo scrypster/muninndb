@@ -339,9 +339,9 @@ func TestClusterConfig_InvalidEnvVars(t *testing.T) {
 }
 
 // The backlog ceiling only protects a live cluster if it survives loading an
-// existing cluster.yaml that predates the field. Production vps-jane has such a
-// file; if a missing key zeroed the ceiling, the prune would be inert exactly
-// where it is needed.
+// existing cluster.yaml that predates the field. Real deployments have such a
+// file already on disk; if a missing key zeroed the ceiling, the prune would be
+// inert exactly where it is needed.
 func TestLoadClusterConfig_MaxLogBacklogDefaultsWhenAbsentFromYAML(t *testing.T) {
 	dir := t.TempDir()
 	// A cluster.yaml as it exists in production today: no max_log_backlog.
