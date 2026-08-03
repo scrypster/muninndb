@@ -4089,6 +4089,13 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 	if eng.State != storage.StateSoftDeleted && eng.State != storage.StateArchived {
 		return nil, fmt.Errorf("restore: engram %s is not soft-deleted or archived (state=%d)", id, eng.State)
 	}
+	// Clone before the response-shaping writes below (#858, STO-20). The two
+	// assignments at the end of this method exist only to make the RETURNED
+	// engram reflect the restore; applied to the pointer GetEngram handed back
+	// they wrote through the shared L1-cache struct instead — a race against
+	// every concurrent recall, and the returned pointer was the cache's own,
+	// which the caller is then free to mutate further.
+	eng = eng.Clone()
 	meta := &storage.EngramMeta{
 		State:       storage.StateActive,
 		Confidence:  eng.Confidence,

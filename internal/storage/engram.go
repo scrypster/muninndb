@@ -855,11 +855,17 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 
 	ps.cache.Delete(wsPrefix, id)
 
-	// Read engram
+	// Read engram, then take a private copy: the cache.Delete above makes the
+	// GetEngram below authoritative, but GetEngram RE-CACHES what it decodes,
+	// so the pointer it returns is shared with every unlocked reader from the
+	// moment it is handed back. Readers do not take casLocks (see
+	// UpdateTagsLocked's re-cache comment), so the stripe lock serialises this
+	// method against other WRITERS and does nothing for a concurrent recall.
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
 		return err
 	}
+	eng = eng.Clone()
 
 	oldState := eng.State
 
@@ -999,19 +1005,26 @@ func (ps *PebbleStore) UpdateTagsLocked(ctx context.Context, wsPrefix [8]byte, i
 		return err
 	}
 
-	// GetEngram hands back the L1 cache's LIVE entry (DomainCache.Get does not
-	// clone), so the mutation below poisons the cached copy the instant it runs —
-	// before anything has been validated, let alone committed. Every exit path
-	// from here on must therefore drop it. It used to return early from the
-	// WriteRawTagIndexEntry error branch below, ahead of the invalidation:
-	// the call reported failure (a NUL byte in a key:value tag's value is
-	// rejected by ValidateRawTagValue, reachable straight from MCP since
-	// normalizeTags only checks type/emptiness/length), Pebble still held the old
-	// tags, and until eviction GetEngram served the REJECTED ones — so
-	// muninn_read echoed tags that were never stored and
-	// activation.PassesMetaFilter, which re-checks the poisoned eng.Tags,
-	// filtered the engram out of a recall on its REAL tags. An error-returning
-	// call producing a silent false negative is the worst failure class there is.
+	// GetEngram hands back the L1 cache's LIVE entry, so every mutation below
+	// goes to a private clone (#858, STO-20). Before that clone existed the
+	// mutation poisoned the cached copy the instant it ran — before anything
+	// had been validated, let alone committed — and the invalidation below was
+	// the only thing undoing it. It used to return early from the
+	// WriteRawTagIndexEntry error branch, ahead of that invalidation: the call
+	// reported failure (a NUL byte in a key:value tag's value is rejected by
+	// ValidateRawTagValue, reachable straight from MCP since normalizeTags only
+	// checks type/emptiness/length), Pebble still held the old tags, and until
+	// eviction GetEngram served the REJECTED ones — so muninn_read echoed tags
+	// that were never stored and activation.PassesMetaFilter, which re-checks
+	// the poisoned eng.Tags, filtered the engram out of a recall on its REAL
+	// tags. An error-returning call producing a silent false negative is the
+	// worst failure class there is.
+	//
+	// The clone closes that at the source; the invalidation below STAYS because
+	// it also covers the invalidate-before-commit window further down (see the
+	// re-cache comment there), which the clone does not touch.
+	eng = eng.Clone()
+
 	committed := false
 	defer func() {
 		if committed {
@@ -1021,14 +1034,13 @@ func (ps *PebbleStore) UpdateTagsLocked(ctx context.Context, wsPrefix [8]byte, i
 		ps.metaCache.Remove([16]byte(id))
 	}()
 
-	// Snapshot the OLD tag set BEFORE the mutation below overwrites it — the
-	// removal diff further down is derived from it, and eng.Tags is the live
-	// cached record's own slice header.
+	// Snapshot the OLD tag set BEFORE the assignment below overwrites it — the
+	// removal diff further down is derived from it.
 	oldTags := append([]string(nil), eng.Tags...)
 
-	// Copy rather than alias: this slice becomes a field of the shared, cached
-	// engram, so keeping the caller's backing array would hand every reader a
-	// window into memory the caller still owns.
+	// Copy rather than alias: this slice becomes a field of the record this
+	// method re-caches on success, so keeping the caller's backing array would
+	// hand every reader a window into memory the caller still owns.
 	eng.Tags = make([]string, len(tags))
 	copy(eng.Tags, tags)
 	eng.UpdatedAt = time.Now()
@@ -1229,12 +1241,15 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	// reads authoritative Pebble state (see UpdateConfidenceWithContradiction).
 	ps.cache.Delete(wsPrefix, id)
 
-	// Read current engram
+	// Read current engram, then clone: the stripe lock serialises this against
+	// other WRITERS, but recall's readers do not take casLocks, so mutating the
+	// pointer GetEngram re-cached would race them (#858, STO-20).
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
 		mu.Unlock()
 		return err
 	}
+	eng = eng.Clone()
 
 	// Update confidence
 	eng.Confidence = confidence
@@ -1385,6 +1400,10 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 		mu.Unlock()
 		return 0, 0, err
 	}
+	// Clone before mutating: recall's readers do not take casLocks, so the
+	// stripe lock does not make an in-place write to the cached struct safe
+	// (#858, STO-20).
+	eng = eng.Clone()
 	// Read+add+clamp UNDER the stripe lock — the lost-update fix (#559). The
 	// engine-side read that used to live in Engine.AdjustConfidence is gone;
 	// the prior value returned below comes from this locked read.

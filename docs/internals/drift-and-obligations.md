@@ -199,6 +199,44 @@ wall-clock. Jobs (from `.github/workflows/ci.yml`, real recent timings):
 | `node-sdk` | 15–20s | `npm ci` + `tsc` + vitest for `sdk/node`. Before it existed the SDK was first compiled by `publish-sdk.yml` at tag time |
 | `web-unit` | 15–25s | `npm test` for `web/`. Before it existed the vitest suites there ran nowhere |
 
+**Per-package `-race` headroom, measured (#815).** The `go` job runs `go test -race
+./... -timeout 300s`, and the per-package timeout is the real cliff: crossing it produces a
+panic dump of every goroutine, not a failed assertion. `internal/engine` is the largest
+package and the one nearest that cliff. #815 reported it at **293.3s under the full
+parallel invocation — 7 seconds of headroom** and flagged that nobody had measured a
+parallel baseline. That baseline now exists: **six runs of the exact CI invocation on an
+18-core Apple Silicon machine, across two tree states, put `internal/engine` at 187.4 /
+188.6 / 190.7 / 195.3 / 200.9 / 215.9s** — 84-113s of headroom, 28-38%, not 7s. Isolated
+(not parallel) it is 172.0s, so contention costs ~15-45s here rather than the ~99s the
+issue extrapolated; the 293.3s single sample did not reproduce. The 215.9s outlier came
+from a run with other work on the machine, which is worth stating rather than dropping:
+the spread is dominated by ambient load, and that is the most likely explanation of the
+293.3s original too. Two independent cross-checks
+agree: the `go` job's own 3.5-4 min wall time in the table above cannot contain a 293s
+package, and the in-tree reduction documented at
+`cognition_trial_diagnostic_test.go` ("the whole package sat at 256s of its 300s budget")
+landed after that sample was taken.
+
+**The distribution, which is not what #815 assumed.** It described "a long tail under 3s —
+accumulation, not one offender", led by `TestConcurrentWriteActivate_StressSmall` (5.5s)
+and `TestCrossVault_FacetDFBoundary` (3.9s). That is no longer true. Of a 214.7s CPU-sum
+over 698 top-level tests, **five `TestCognitionTrial*` tests account for 47.4s (22%)**:
+`DilutionInvariance` 20.6s, `AdditivityDoesNotConvergeAndIsNotAGate` 10.6s,
+`UnmeasuredMRRIsNotAMeasuredZero` 9.1s, `EveryDeltaNMustBindToTheSameSeries` 5.8s,
+`AdditivityBreaksDecodeToAHarmfulMechanism` 1.5s. They are deterministic single-goroutine
+bootstrap arithmetic, so `-race` pays ~10x for a schedule it cannot find anything in. They
+are in CI deliberately (obligation 14: a rule that decides whether a subsystem lives must
+itself be tested), and they have **already** been through a measured reduction round whose
+levers and rejected alternatives are documented in place — resample counts are load-bearing
+for the U5 half-width gate, and cutting them further is statistics work, not budget
+trimming. Left alone on that basis, with the numbers recorded so the next person starts
+from a measurement.
+
+**Still unmeasured, and only CI can close it:** every figure above is one workstation.
+`ubuntu-latest` has far fewer cores, so ~40 concurrent package binaries contend harder
+there. The `go` job's reported duration is the cheapest proxy; watch it rather than
+inferring from a laptop.
+
 Critical path: `go` → (`cli-integration` ∥ `playwright-e2e`) → `python-sdk`. What's cached:
 embed assets (~130MB, keyed by ORT+model+platform), Go module cache, and npm for the two
 lockfile-scoped jobs (`node-sdk`, `web-unit`). npm is **not** cached in the jobs that build

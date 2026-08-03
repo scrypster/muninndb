@@ -72,7 +72,7 @@ func newFreshStore(t *testing.T, db *pebble.DB) *PebbleStore {
 // Do NOT use openTestPebble here: PebbleStore.Close() already calls
 // db.Close() internally. A second db.Close() from openTestPebble's cleanup
 // would cause pebble to panic with "pebble: closed".
-func openTestStore(t *testing.T) *PebbleStore {
+func openTestStore(t testing.TB) *PebbleStore {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "muninndb-test-*")
 	if err != nil {

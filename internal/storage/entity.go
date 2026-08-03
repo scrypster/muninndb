@@ -808,13 +808,20 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	if err != nil {
 		return fmt.Errorf("UpdateDigest: get engram: %w", err)
 	}
+	// Clone before mutating (#858, STO-20). This path runs on the enrichment
+	// worker, concurrently with recall, and takes no stripe lock at all, so
+	// every assignment below used to land on the struct GetEngram had just
+	// re-cached for every reader.
+	eng = eng.Clone()
 
 	// Only overwrite fields that were provided (non-empty).
 	if summary != "" {
 		eng.Summary = summary
 	}
 	if len(keyPoints) > 0 {
-		eng.KeyPoints = keyPoints
+		// Copy rather than alias: the caller still owns keyPoints, and this
+		// slice becomes a field of the record re-cached below.
+		eng.KeyPoints = append([]string(nil), keyPoints...)
 	}
 	if memoryType != "" {
 		if mt, ok := ParseMemoryType(memoryType); ok {

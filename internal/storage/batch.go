@@ -291,6 +291,14 @@ func (b *pebbleStoreBatch) SupersedeEngram(ctx context.Context, ws [8]byte, id U
 // mutateEngram reads the current engram from the underlying store, applies
 // mutate, and queues updated 0x01 and 0x02 key writes plus the 0x0B state
 // index transition when the state changed.
+//
+// mutate is handed a PRIVATE clone, never the L1 cache's shared pointer. This
+// is #858: GetEngram returns the cached struct under the read-only contract at
+// L1Cache.Get, and applying mutate to it in place made two concurrent evolves
+// of one id write and read a single struct — reproduced at 2 goroutines x 50
+// EvolveAt on one id. Nothing here may drop the Clone; the cache entry is
+// invalidated by Commit, not by this function, so the shared struct stays live
+// and readable by recall for the whole life of the batch.
 func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID, op string, mutate func(*Engram)) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
@@ -302,6 +310,7 @@ func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID
 	if eng == nil {
 		return fmt.Errorf("%s: engram %s not found", op, id.String())
 	}
+	eng = eng.Clone()
 	oldState := eng.State
 	mutate(eng)
 	newState := eng.State
