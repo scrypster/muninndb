@@ -1106,9 +1106,24 @@ func TestReplicationLog_Prune_ReclaimsDiskSpace(t *testing.T) {
 		t.Fatalf("pruned = %d, want 350", pruned)
 	}
 
-	after := dirSize(t, dir)
+	// Compact() returns once the compaction is applied, but Pebble unlinks the
+	// obsolete sstables from a background cleaner goroutine, so the bytes can
+	// still be on disk for a moment afterwards. Poll on the observable rather
+	// than sampling once — a single sample makes this test fail under load
+	// (observed once in a full-package run) for a reason that has nothing to do
+	// with whether the prune reclaimed anything.
+	//
 	// 350 of 400 entries at 64 KiB is ~22 MiB; require most of it back rather
 	// than an exact figure, since sstable boundaries are not key-aligned.
+	var after int64
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		after = dirSize(t, dir)
+		if after < before/2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if after >= before/2 {
 		t.Fatalf("prune did not reclaim disk: before=%d after=%d bytes "+
 			"(tombstones were written but never compacted)", before, after)
@@ -1148,4 +1163,74 @@ func dirSize(t *testing.T, dir string) int64 {
 		t.Fatalf("walk %s: %v", dir, err)
 	}
 	return total
+}
+
+// Prune must not hold the Append mutex for its duration: Append is on the
+// synchronous write path, and a first prune over a never-pruned log scans,
+// deletes and compacts tens of GB. Run under -race.
+func TestReplicationLog_PruneDoesNotBlockAppend(t *testing.T) {
+	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	defer db.Close()
+
+	log := NewReplicationLog(db)
+	value := make([]byte, 4096)
+	for i := 1; i <= 5000; i++ {
+		if _, err := log.Append(OpSet, []byte("k"), value); err != nil {
+			t.Fatalf("seed append %d: %v", i, err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var appended atomic.Int64
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := log.Append(OpSet, []byte("k"), value); err != nil {
+				t.Errorf("concurrent append: %v", err)
+				return
+			}
+			appended.Add(1)
+		}
+	}()
+
+	pruned, err := log.Prune(4000)
+	// Sample BEFORE stopping the writer, so the count is what completed while
+	// the prune was running rather than after it returned.
+	during := appended.Load()
+	close(stop)
+	wg.Wait()
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	if pruned < 4000 {
+		t.Fatalf("pruned = %d, want >= 4000", pruned)
+	}
+	if during < 10 {
+		t.Fatalf("only %d appends completed while the prune ran — Prune is serialising the write path", during)
+	}
+	// Everything above the watermark must still be readable and contiguous.
+	entries, err := log.ReadSince(4000, 100)
+	if err != nil {
+		t.Fatalf("ReadSince after prune: %v", err)
+	}
+	if len(entries) == 0 || entries[0].Seq != 4001 {
+		t.Fatalf("entries above the watermark are wrong: got %d entries starting at %v",
+			len(entries), func() any {
+				if len(entries) == 0 {
+					return nil
+				}
+				return entries[0].Seq
+			}())
+	}
 }

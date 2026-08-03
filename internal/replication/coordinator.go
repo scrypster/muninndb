@@ -2229,8 +2229,41 @@ func (c *ClusterCoordinator) pruneWatermark() (uint64, bool) {
 	return minSeq, false
 }
 
+// evictLobesBehind drops the connection to every replica whose acknowledged
+// seq is below untilSeq, so it reconnects, re-joins and receives a fresh
+// snapshot.
+//
+// This is what makes the backlog ceiling safe. Without it, a forced prune
+// deletes entries a still-connected Lobe has not received, and nothing on
+// either side notices: ReadSince simply returns the first surviving entry,
+// the Applier only skips seq <= lastApplied and has no contiguity check, and
+// the Lobe then ACKs the head — so the Cortex sees a fully caught-up replica
+// that is permanently missing every write in the hole. Silently-wrong, which
+// is the failure class this project refuses (principle 2). Dropping the peer
+// converts it into a loud, self-healing re-snapshot, which is exactly what
+// Prune's own doc comment promises. Closing the peer so the Lobe retries is
+// the same mechanism the snapshot-failure path already uses.
+func (c *ClusterCoordinator) evictLobesBehind(untilSeq uint64) {
+	var behind []string
+	c.replicaSeqs.Range(func(key, value any) bool {
+		if value.(uint64) < untilSeq {
+			behind = append(behind, key.(string))
+		}
+		return true
+	})
+	for _, nodeID := range behind {
+		slog.Warn("cluster: dropping lobe left behind the prune watermark — it will rejoin via snapshot",
+			"lobe", nodeID, "until_seq", untilSeq)
+		c.stopStreamerForLobe(nodeID)
+		if peer, ok := c.mgr.GetPeer(nodeID); ok {
+			_ = peer.Close()
+		}
+		c.replicaSeqs.Delete(nodeID)
+	}
+}
+
 func (c *ClusterCoordinator) startPeriodicPrune(ctx context.Context) {
-	if c.mol == nil {
+	if c.mol == nil && c.repLog == nil {
 		return
 	}
 	go func() {
@@ -2256,11 +2289,19 @@ func (c *ClusterCoordinator) startPeriodicPrune(ctx context.Context) {
 				if pruneSeq == 0 {
 					continue
 				}
-				pruned, err := c.mol.SafePrune(pruneSeq)
-				if err != nil {
-					slog.Warn("cluster: periodic prune failed", "err", err)
-				} else if pruned > 0 {
-					slog.Info("cluster: pruned WAL segments", "pruned", pruned, "min_replicated_seq", pruneSeq)
+				if c.mol != nil {
+					pruned, err := c.mol.SafePrune(pruneSeq)
+					if err != nil {
+						slog.Warn("cluster: periodic prune failed", "err", err)
+					} else if pruned > 0 {
+						slog.Info("cluster: pruned WAL segments", "pruned", pruned, "min_replicated_seq", pruneSeq)
+					}
+				}
+				// A forced prune goes past what replicas have acked. Drop those
+				// replicas BEFORE deleting the entries they still need, so they
+				// re-snapshot instead of silently skipping the hole.
+				if forced {
+					c.evictLobesBehind(pruneSeq)
 				}
 				// The MOL prune above only unlinks sealed segment FILES. The
 				// replication log lives in Pebble under 0x19 and needs its own

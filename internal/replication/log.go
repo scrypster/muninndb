@@ -47,6 +47,15 @@ type ReplicationLog struct {
 	init   bool   // whether seq has been initialized from Pebble
 	subs   []chan struct{}
 	subsMu sync.Mutex
+
+	// pruneMu serializes Prune calls. Prune must NOT hold mu for its
+	// duration: mu is the Append mutex, Append is on the synchronous write
+	// path (PebbleStore.replicateBatch), and a first prune over a log that
+	// has never been pruned scans, deletes and compacts tens of GB. Holding
+	// mu across that stalls every write in the process. Prune only needs mu
+	// long enough to read the seq watermark; everything it touches after
+	// that is at or below untilSeq < seq, which Append never writes.
+	pruneMu sync.Mutex
 }
 
 // NewReplicationLog creates a new ReplicationLog backed by a Pebble database.
@@ -213,14 +222,18 @@ func (l *ReplicationLog) ReadSince(afterSeq uint64, limit int) ([]ReplicationEnt
 // Lobe has not yet applied will cause a permanent replication gap — the Lobe
 // must rejoin via snapshot if it falls behind a pruned point.
 func (l *ReplicationLog) Prune(untilSeq uint64) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.pruneMu.Lock()
+	defer l.pruneMu.Unlock()
 
-	if err := l.ensureSeqInit(); err != nil {
+	l.mu.Lock()
+	err := l.ensureSeqInit()
+	seq := l.seq
+	l.mu.Unlock()
+	if err != nil {
 		return 0, err
 	}
 
-	if untilSeq >= l.seq {
+	if untilSeq >= seq {
 		return 0, nil // nothing to prune
 	}
 

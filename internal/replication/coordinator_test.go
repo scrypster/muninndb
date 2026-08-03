@@ -1596,3 +1596,27 @@ func TestPruneWatermark_BacklogCeilingForcesPruneWhenReplicaStalls(t *testing.T)
 		}
 	})
 }
+
+// A forced prune deletes entries a still-connected Lobe has not received.
+// Nothing downstream detects that hole — ReadSince returns the first surviving
+// entry, the Applier has no contiguity check, and the Lobe then ACKs the head.
+// So the forced prune must drop those Lobes first, turning a silent divergence
+// into a loud re-snapshot.
+func TestPrune_ForcedWatermarkEvictsLobesLeftBehind(t *testing.T) {
+	c := &ClusterCoordinator{
+		cfg: &config.ClusterConfig{NodeID: "cortex"},
+		mgr: NewConnManager("cortex"),
+	}
+	c.streamers = make(map[string]context.CancelFunc)
+	c.replicaSeqs.Store("lobe-stalled", uint64(5))
+	c.replicaSeqs.Store("lobe-healthy", uint64(950))
+
+	c.evictLobesBehind(900)
+
+	if _, ok := c.replicaSeqs.Load("lobe-stalled"); ok {
+		t.Error("lobe behind the prune watermark was not evicted — it will silently skip the pruned range")
+	}
+	if _, ok := c.replicaSeqs.Load("lobe-healthy"); !ok {
+		t.Error("lobe ahead of the prune watermark must not be evicted")
+	}
+}

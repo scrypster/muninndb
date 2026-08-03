@@ -438,7 +438,8 @@ When connectivity is restored, reconciliation triggers automatically after ~2s (
 | `join_token_ttl_min` | int | 15 | Lifetime of join tokens in minutes |
 | `failover_convergence_timeout_sec` | int | 30 | How long graceful failover waits for Lobes to catch up |
 | `handoff_ack_timeout_sec` | int | 5 | Timeout for HANDOFF_ACK during graceful failover |
-| `prune_interval_sec` | int | 60 | How often Cortex prunes fully-replicated WAL segments |
+| `prune_interval_sec` | int | 60 | How often Cortex prunes fully-replicated WAL segments and replication-log entries |
+| `max_log_backlog` | int | 5000 | Hard ceiling on replication-log entries retained behind the head, regardless of replica acks. A Lobe left behind the prune point is dropped and rejoins via snapshot. `0` disables the ceiling (unbounded retention) |
 | `recon_delay_ms` | int | 2000 | Delay before reconciliation after Lobe reconnects |
 | `tls` | TLSConfig | — | Mutual TLS for inter-node traffic |
 
