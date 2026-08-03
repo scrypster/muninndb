@@ -131,6 +131,43 @@ func TestClusterConfig_AutoNodeID(t *testing.T) {
 	}
 }
 
+// TestClusterConfig_AutoNodeID_StableAcrossHostnameChange reproduces #630: a
+// hostname change (macOS mDNS renaming, a container getting a fresh hostname
+// on restart) must not mint a new node identity for the same data directory.
+// A node_id that changes with the hostname mints a "ghost" registration that
+// out-lives the old identity, poisoning quorum counting and pinning
+// MinReplicatedSeq at its last ack forever.
+func TestClusterConfig_AutoNodeID_StableAcrossHostnameChange(t *testing.T) {
+	t.Setenv("MUNINN_CLUSTER_ENABLED", "true")
+	// Do not set MUNINN_CLUSTER_NODE_ID — exercise auto-derivation.
+
+	dataDir := t.TempDir()
+
+	orig := hostnameFn
+	defer func() { hostnameFn = orig }()
+
+	hostnameFn = func() (string, error) { return "MacBookPro-abcd1234", nil }
+	cfg1, err := LoadClusterConfig(dataDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg1.NodeID == "" {
+		t.Fatal("expected non-empty auto-generated NodeID")
+	}
+
+	// Same machine, same data directory, but the hostname flapped (a real,
+	// observed sequence: MacBookPro-<hash> -> Jareds-MacBook-Pro.local-<hash>).
+	hostnameFn = func() (string, error) { return "Jareds-MacBook-Pro.local", nil }
+	cfg2, err := LoadClusterConfig(dataDir)
+	if err != nil {
+		t.Fatalf("unexpected error on second load: %v", err)
+	}
+
+	if cfg1.NodeID != cfg2.NodeID {
+		t.Errorf("node identity must survive a hostname change: got %q then %q", cfg1.NodeID, cfg2.NodeID)
+	}
+}
+
 func TestClusterConfig_DisabledAlwaysValid(t *testing.T) {
 	cfg := ClusterConfig{
 		Enabled: false,

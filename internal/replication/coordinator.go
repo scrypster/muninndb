@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -94,6 +95,16 @@ type ClusterCoordinator struct {
 
 	role   NodeRole
 	roleMu sync.RWMutex
+
+	// roleCallbackMu serializes OnBecameCortex and OnBecameLobe invocations
+	// against each other. handlePromotion calls OnBecameCortex synchronously on
+	// the caller's goroutine while handleDemotion fires OnBecameLobe from a bare
+	// goroutine (it must not stall the MSP tick goroutine) — without this lock a
+	// promotion and a demotion racing each other (plausible under flapping
+	// quorum) invoke both callbacks concurrently, and both are wired in
+	// production (cmd/muninn/server.go) as closures over shared, unsynchronized
+	// worker-handle state (#629).
+	roleCallbackMu sync.Mutex
 
 	// roleCh carries promotion/demotion events to the supervisor loop (#522 Step 3).
 	roleCh chan roleEvent
@@ -1585,9 +1596,48 @@ func (c *ClusterCoordinator) handlePromotion(epoch uint64) {
 
 	c.pushRoleEvent(roleEvent{promoted: true})
 
-	if c.OnBecameCortex != nil {
-		c.OnBecameCortex(epoch)
+	c.invokeOnBecameCortex(epoch)
+}
+
+// invokeOnBecameCortex runs OnBecameCortex synchronously on the caller's
+// goroutine (handlePromotion has always blocked here, and nothing downstream
+// depends on it returning quickly), serialized against any concurrently
+// in-flight OnBecameLobe invocation and recovered so a callback panic can
+// never take the process down (#629).
+func (c *ClusterCoordinator) invokeOnBecameCortex(epoch uint64) {
+	if c.OnBecameCortex == nil {
+		return
 	}
+	c.roleCallbackMu.Lock()
+	defer c.roleCallbackMu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("cluster: OnBecameCortex callback panicked",
+				"node", c.cfg.NodeID, "epoch", epoch, "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	c.OnBecameCortex(epoch)
+}
+
+// invokeOnBecameLobe runs OnBecameLobe asynchronously — it must not stall the
+// MSP tick goroutine that calls handleDemotion — but serialized against any
+// other role-transition callback via roleCallbackMu, and recovered so a
+// callback panic can never take the process down (#629).
+func (c *ClusterCoordinator) invokeOnBecameLobe() {
+	if c.OnBecameLobe == nil {
+		return
+	}
+	go func() {
+		c.roleCallbackMu.Lock()
+		defer c.roleCallbackMu.Unlock()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("cluster: OnBecameLobe callback panicked",
+					"node", c.cfg.NodeID, "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
+		c.OnBecameLobe()
+	}()
 }
 
 // pushRoleEvent delivers a role transition to the supervisor loop without
@@ -1633,9 +1683,9 @@ func (c *ClusterCoordinator) handleDemotion(cause demotionCause) {
 	// goroutine (via checkQuorumHealth), and OnBecameLobe stops cognitive workers
 	// which may block — it must not stall heartbeat processing. The role flip
 	// above already gates writes, so the worker teardown can complete out of band.
-	if c.OnBecameLobe != nil {
-		go c.OnBecameLobe()
-	}
+	// invokeOnBecameLobe serializes against any concurrent OnBecameCortex/
+	// OnBecameLobe invocation and recovers a callback panic (#629).
+	c.invokeOnBecameLobe()
 }
 
 // handleNewLeader is called when another node becomes Cortex.
