@@ -82,6 +82,9 @@ func ctVaultFromSynth(label string, s *ctQuerySeries) ctVaultResult {
 	v.BaselineEdges = 5000
 	v.ReplayedEdges = 2100
 	v.UnreplayableFrac = 0.30
+	// ctSynthSeries is built to SHIP; give it S6's survived null so it does,
+	// same reasoning as ctShipVault.
+	v.ShuffledSeedNull = ctNullSurvived
 	return v
 }
 
@@ -387,35 +390,160 @@ func ctSortedKeys(m map[string]bool) []string {
 	return out
 }
 
-// K4 is retained as pre-registered, and it is SUBSUMED by K2 for as long as
-// MinDeltaC >= MinDeltaMechanism: both must hold for KILL, and K4's bar is the
-// higher one, so every K4 veto is already blocked by K2's Delta_HP clause.
+// K4 IS SUBSUMED BY K2, #798-A's finding and the reason K4 was deleted from
+// the KILL conjunction (it remains as a REPORT line only, in ctDecide).
 //
-// This is pinned rather than left to be rediscovered, because the consequence is
-// non-obvious and matters: K4's integrity condition — that the vetoing vault
-// survived the S6 shuffled-seed null — CANNOT currently change a verdict, since
-// K2 has no such condition and blocks first. A veto that a shuffled seed
-// reproduces still blocks KILL, via K2. If either bar is ever re-ordered, this
-// test fails and the relationship must be re-decided rather than inherited.
+// Renamed and reworked from TestCognitionTrialRule_K4IsSubsumedByK2 — the
+// underlying subsumption claim that name pinned is now ARCHITECTURAL (K4
+// cannot gate; it is no longer part of the `k1 && k2 && k3` conjunction) —
+// but the substance survives as two live claims that a future edit could
+// still break silently:
+//
+//  1. K2's Delta_HP clause is THE per-vault KILL veto, ratified at
+//     MinDeltaMechanism (0.02, #798-B), UNCONDITIONED — no shuffled-seed null
+//     requirement. It blocks a kill on its own, regardless of the tri-state.
+//  2. SHIP is unreachable unless the S2-crediting vault's ShuffledSeedNull is
+//     ctNullSurvived (S6, #798-A) — the null moved from a KILL veto (where it
+//     was provably inert, since K4's bar was always above K2's) to the SHIP
+//     conjunction, which is where v2 §7.2(3) always said it belonged.
+//
+// If MinDeltaC ever drops below MinDeltaMechanism, claim 1's "K2 decides
+// first" framing needs re-deriving (K4's old bar would then bind below K2's,
+// which is moot today since K4 no longer gates at all, but the comment above
+// K2 in ctDecide would need revisiting).
 func TestCognitionTrialRule_K4IsSubsumedByK2(t *testing.T) {
 	if ctPreregistered.MinDeltaC < ctPreregistered.MinDeltaMechanism {
-		t.Fatalf("MinDeltaC (%.3f) is now BELOW MinDeltaMechanism (%.3f). K4 is no longer "+
-			"subsumed by K2 and becomes independently load-bearing — including its S6 integrity "+
-			"condition, which until now could not change a verdict. Re-decide, do not re-pin.",
+		t.Fatalf("MinDeltaC (%.3f) is now BELOW MinDeltaMechanism (%.3f). K2's clause is still "+
+			"the veto (K4 no longer gates at all, #798-A), but the ORDERING claim above K2's "+
+			"clause in ctDecide assumed MinDeltaC is the higher bar. Re-derive, do not re-pin.",
 			ctPreregistered.MinDeltaC, ctPreregistered.MinDeltaMechanism)
 	}
-	// A vault whose Delta_HP clears K4's bar but whose null was REPRODUCED BY A
-	// SHUFFLE: K4 grants no veto, and KILL is still blocked — by K2.
+
+	// Claim 1: K2 vetoes UNCONDITIONALLY. A vault whose Delta_HP clears K2's
+	// bar (+0.02) blocks the kill EVEN THOUGH its null was reproduced by a
+	// shuffle — the pre-#798-A behaviour that used to be K4's job, now done
+	// by K2 with no integrity condition at all.
+	t.Run("K2 vetoes unconditioned by the null", func(t *testing.T) {
+		vaults := ctThree(ctKillVault)
+		vaults[1].DeltaC = ctDelta{Point: 0.050, CILower: 0.025, CIUpper: 0.075, N: 340}
+		vaults[1].DeltaHP = ctDelta{Point: 0.045, CILower: 0.020, CIUpper: 0.070, N: 340}
+		vaults[1].ShuffledSeedNull = ctNullReproducedByShuffle
+		got := ctDecide(vaults, ctGoodJudge(), true)
+		if got.Verdict == ctVerdictKill {
+			t.Fatalf("a vault whose Delta_HP is +0.045 did not block the kill\n%s", got)
+		}
+		ctRequireVerdict(t, got, ctVerdictInconclusivePowered, "K2 FAIL")
+		// K4's REPORT line still names what it would have said, but must not
+		// read as having decided anything — "irrelevant to the verdict" is the
+		// hazard-fix wording, and its absence would mean the reporting hazard
+		// #798-A fixed has regressed.
+		ctExpectReason(t, got, "K4 REPORT ONLY, DOES NOT GATE",
+			"K4's line must say up front that it does not gate, or a reader can mistake it for "+
+				"a clause that decided something")
+	})
+
+	// Claim 2: S6 blocks SHIP on the identical tri-state, on an otherwise
+	// SHIP-shaped fixture. This is the K-side clause's mirror moving to the
+	// SHIP side, and it is the concrete demonstration that the null is no
+	// longer inert.
+	t.Run("SHIP is unreachable without a survived null", func(t *testing.T) {
+		vaults := ctThree(ctShipVault)
+		vaults[0].ShuffledSeedNull = ctNullReproducedByShuffle // vault A: the one S2 credits
+		got := ctDecide(vaults, ctGoodJudge(), true)
+		if got.Verdict == ctVerdictShip {
+			t.Fatalf("SHIPPED on a benefit a shuffled seed reproduces\n%s", got)
+		}
+		ctRequireVerdict(t, got, ctVerdictInconclusivePowered, "S6 FAIL")
+	})
+}
+
+// TestCognitionTrialRule_ShipRequiresTheSurvivedNull is the direct
+// reproduction of the pre-#798-A defect: a three-vault SHIP fixture used to
+// return SHIP for EVERY value of ShuffledSeedNull, including "reproduced by a
+// shuffled seed" — the SHIP conjunction had no S6 clause at all. Only the
+// SURVIVED case may ship; the other two must not.
+func TestCognitionTrialRule_ShipRequiresTheSurvivedNull(t *testing.T) {
+	for _, tc := range []struct {
+		null     ctNullResult
+		wantShip bool
+	}{
+		{ctNullSurvived, true},
+		{ctNullNotRun, false},
+		{ctNullReproducedByShuffle, false},
+	} {
+		t.Run(tc.null.String(), func(t *testing.T) {
+			vaults := ctThree(ctShipVault)
+			vaults[0].ShuffledSeedNull = tc.null // vault A: the one S2 credits
+			got := ctDecide(vaults, ctGoodJudge(), true)
+			isShip := got.Verdict == ctVerdictShip
+			if isShip != tc.wantShip {
+				t.Fatalf("ShuffledSeedNull=%s: SHIP=%v, want %v — the SHIP conjunction must "+
+					"require S6 (the S2-crediting vault's null SURVIVED), never carry an "+
+					"unrun or shuffle-reproduced benefit\n%s", tc.null, isShip, tc.wantShip, got)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #797's ARTIFACT-KILL GUARD (U7): AN IDENTICALLY-ZERO MECHANISM-DELTA SERIES
+// IS NOT A MEASURED NULL.
+//
+// D1's absence guards (U2, above) type an EMPTY series: DeltaX.N == 0. #797's
+// defect — phase4HebbianBoost and both PAS entry points short-circuit on an
+// empty in-process activation log, and the trial harness's ReadOnly runs never
+// populate one — does not produce an empty series. It produces a FULL-LENGTH
+// one of exact zeros: every candidate's boost is 0 on every arm, so every
+// paired difference is 0, so the bootstrap point estimate AND its interval are
+// exactly {0, [0, 0]} with the series' real N intact. That is indistinguishable
+// from an empty series by N alone, and indistinguishable from a genuine
+// measured null by anything U2 checks.
+//
+// This is the exact probe on record (2026-08-03 review): all four mechanism
+// deltas at {Point:0, CI:[0,0], N:340} with a weak Delta_C returned KILL,
+// K1-K4 all PASS, byte-identical to a genuine null. U7 types the structural
+// zero as an ABSENCE OF MEASUREMENT — same family as ctNullNotRun and D1's
+// empty-series guards — so it blocks KILL the same way an absent series does.
+// ---------------------------------------------------------------------------
+
+func TestCognitionTrialRule_StructuralZeroDeltaIsNotAMeasuredNull(t *testing.T) {
+	// The harness's OWN shape: a weak Delta_C (K1-eligible) alongside
+	// STRUCTURALLY zero Delta_H / Delta_P / Delta_HP on every vault — exactly
+	// what phase4HebbianBoost's empty-log short-circuit under ReadOnly
+	// produces (#797), not a hand-picked adversarial input.
+	structuralZero := ctDelta{Point: 0, CILower: 0, CIUpper: 0, N: 340}
 	vaults := ctThree(ctKillVault)
-	vaults[1].DeltaC = ctDelta{Point: 0.050, CILower: 0.025, CIUpper: 0.075, N: 340}
-	vaults[1].DeltaHP = ctDelta{Point: 0.045, CILower: 0.020, CIUpper: 0.070, N: 340}
-	vaults[1].ShuffledSeedNull = ctNullReproducedByShuffle
+	for i := range vaults {
+		vaults[i].DeltaH = structuralZero
+		vaults[i].DeltaP = structuralZero
+		vaults[i].DeltaHP = structuralZero
+	}
 	got := ctDecide(vaults, ctGoodJudge(), true)
 	if got.Verdict == ctVerdictKill {
-		t.Fatalf("a vault whose Delta_HP is +0.045 did not block the kill\n%s", got)
+		t.Fatalf("KILLED on a mechanism-delta series that is IDENTICALLY ZERO across its full "+
+			"length. That is the artifact #797 describes reaching a verdict, not a measurement: "+
+			"an instrument that never varied did not measure the mechanism at zero, it failed to "+
+			"reach it — the audit trail below is byte-identical to a vault where both mechanisms "+
+			"were genuinely measured at zero\n%s", got)
 	}
-	ctRequireVerdict(t, got, ctVerdictInconclusivePowered, "K2 FAIL")
-	ctRequireVerdict(t, got, ctVerdictInconclusivePowered, "K4 PASS")
+	ctRequireVerdict(t, got, ctVerdictUnderpowered, "U7")
+	ctExpectReason(t, got, "IDENTICALLY ZERO",
+		"U7's message must name what it caught, or a reader cannot tell this UNDERPOWERED "+
+			"verdict apart from any other")
+
+	// The control: the SAME weak Delta_C with a GENUINELY measured (non-exact-
+	// zero) mechanism delta must still route to KILL. U7 must not fire on a
+	// real small effect, only on the exact-zero signature.
+	genuine := ctThree(ctKillVault)
+	got2 := ctDecide(genuine, ctGoodJudge(), true)
+	ctRequireVerdict(t, got2, ctVerdictKill, "")
+	for _, r := range got2.Reasons {
+		if strings.Contains(r, "U7:") {
+			t.Fatalf("the control (ctKillVault's own genuinely-measured deltas) raised a U7 "+
+				"objection %q — U7 must only catch the EXACT-zero signature, not a real small "+
+				"effect", r)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

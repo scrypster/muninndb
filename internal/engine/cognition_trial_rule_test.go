@@ -26,13 +26,49 @@ import (
 //	D1  zero-relevance queries are EXCLUDED, COUNTED, and the power gates
 //	    re-bind to the retained series (ctNDCGAt10's second return value,
 //	    ctVaultFromSeries, U2's three new clauses, the census block)
-//	D2  BASE-LEVEL-ONLY is added as a fifth arm; K2 gains Delta_HP and K4 is
-//	    the veto on it (ctArmNames, K2, K4)
+//	D2  BASE-LEVEL-ONLY is added as a fifth arm; K2 gains Delta_HP and K4 was
+//	    ORIGINALLY the veto on it (ctArmNames, K2, K4) — #798-A below deletes
+//	    K4 as a verdict clause; K2's Delta_HP clause is the veto now
 //	D3  S3 is DEMOTED to descriptive and leaves the SHIP conjunction
 //	D4  KILL's actions are split by what evidence licenses them
 //
 // These are amendments to the RULE, not to a result: none was made after seeing
 // an arm number, and each one only makes a conclusion harder to reach.
+//
+// #798-A / #798-B, pre-registered 2026-08-03 — BEFORE ANY DELTA EXISTED FOR
+// ANY VAULT (every vault's honest ShuffledSeedNull was, and until #797/F1
+// lands still is, ctNullNotRun). Amending the rule at that moment is
+// pre-registration; amending it after numbers exist would be rigging the
+// verdict, which is exactly what this whole file exists to make impossible.
+//
+//	#798-A  S6 (new, SHIP-side conjunct): the shuffled-seed null moves from K4
+//	        (a KILL veto, where it was provably inert — every vault satisfying
+//	        K4's predicate already satisfied K2's strictly weaker one, so
+//	        ShuffledSeedNull was read by exactly one verdict-relevant line in
+//	        the package and never changed a verdict) to S6, where the design
+//	        (v2 §7.2(3)) always said a control against false positives
+//	        belongs: at the positive claim, not the veto. K4 is DELETED from
+//	        the KILL conjunction and retained only as a REPORT line that says,
+//	        in its own text, that it decides nothing.
+//	#798-B  K2's Delta_HP clause is RATIFIED as THE per-vault kill veto, at
+//	        MinDeltaMechanism (0.02), unconditioned — not raised to MinDeltaC
+//	        (0.03): Delta_HP is a mechanism quantity and belongs against the
+//	        mechanism bar, not the whole prior's. Measured on the issue's own
+//	        scenario, before any real Delta existed: the verdict flips KILL ->
+//	        INCONCLUSIVE-BUT-POWERED exactly at Delta_HP = +0.02, with the
+//	        (now-deleted) K4 predicate PASS at every point on the sweep — i.e.
+//	        this clause was already doing the work #798-B asked a veto to do,
+//	        unlabelled, 33% more strictly than the pre-registered bar.
+//
+// U7, #797's own analysis, same date, same pre-registration status (no Delta
+// exists yet): a mechanism-delta series that is IDENTICALLY ZERO across its
+// full length — the signature of phase4HebbianBoost's empty-activation-log
+// short-circuit under the harness's ReadOnly runs, not a measured null — is
+// typed as an ABSENCE OF MEASUREMENT and blocked from a K-clause vote the same
+// way D1's empty-series guards block one. This does NOT close #797: the
+// session-reconstruction repair, the I1-I6 census, and the permutation null
+// are the real harness rebuild and remain open. U7 only stops an inert
+// instrument from producing a verdict.
 //
 // D5, and it is a CORRECTION of D2 rather than a new amendment. D2 wired the
 // NDCG-level ablation-additivity bounds in as a U3-class GATE. They cannot be
@@ -935,8 +971,15 @@ type ctJudgeCalibration struct {
 }
 
 // ctNullResult is S6's shuffled-seed null on ONE vault, as a TRI-STATE. "Not
-// run" is not "survived": K4's veto requires that the vetoing vault's effect
-// survives a shuffled seed, and a null that was never run cannot say that.
+// run" is not "survived": S6 requires that the S2-crediting vault's effect
+// survives a shuffled seed, and a null that was never run cannot say that —
+// the same reading U1 takes of an unrun judge-calibration gate.
+//
+// #798-A moved the null from K4 (a KILL veto, where it was provably inert —
+// TestCognitionTrialRule_K4IsSubsumedByK2) to S6 (a SHIP conjunct, where the
+// design (v2 §7.2(3)) always said it belonged: a control against false
+// positives has to sit where the positive claim is made). K4 keeps reading
+// this field for its REPORT line only; it no longer decides anything.
 //
 // The SHUFFLED-SEED arm itself is the instrument-repair increment's item
 // (#797/F1, design v2 §2.4), so ctNullNotRun is the honest state of every vault
@@ -991,7 +1034,9 @@ type ctVaultResult struct {
 	// and GATES NOTHING. The name says what it is on purpose.
 	DeltaCAllQueriesDiluted ctDelta
 
-	// ShuffledSeedNull is S6's result ON THIS VAULT. K4's veto requires it.
+	// ShuffledSeedNull is S6's result ON THIS VAULT. S6 (the SHIP conjunct)
+	// requires it on whichever vault credited S2's mechanism. K4's REPORT line
+	// also reads it, but K4 no longer gates KILL (#798-A).
 	ShuffledSeedNull ctNullResult
 
 	// The sign-agreement inputs for S4, each carrying the N it was computed
@@ -1296,7 +1341,7 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 			readBy  string
 			purpose string
 		}{
-			{"Delta_HP", v.DeltaHP, "K2 and K4", "what a KILL actually costs"},
+			{"Delta_HP", v.DeltaHP, "K2 (the veto) and K4 (report only)", "what a KILL actually costs"},
 			{"Delta_H", v.DeltaH, "S2 and K2", "the Hebbian mechanism's own contribution"},
 			{"Delta_P", v.DeltaP, "S2 and K2", "PAS's own contribution"},
 		} {
@@ -1305,6 +1350,40 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 					"over %d. %s read %s (%s); it must be the SAME paired series, and an N of 0 "+
 					"is an empty or length-mismatched arm series rendering as a confident zero.",
 					v.Label, d.name, d.val.N, v.DeltaC.N, d.readBy, d.name, d.purpose))
+			}
+			// U7 (#797's artifact-KILL guard, new label — U6 already names the
+			// weekly-bucket emptiness guard below, and design v2 §5.2 independently
+			// proposed "U6" for this one too; picking a colliding label here would
+			// plant the exact defect this file's own history keeps finding, one
+			// identifier over).
+			//
+			// D1's absence guards (immediately above) type an EMPTY series: N == 0.
+			// #797's defect does not produce an empty series — it produces a
+			// FULL-LENGTH one of exact zeros, because phase4HebbianBoost and the
+			// PAS entry points return early on an empty activation log, so every
+			// candidate's boost is 0 on EVERY arm, the paired difference is 0 on
+			// EVERY query, and ctPairedBootstrap's resampled means are all exactly
+			// 0 too. The result is indistinguishable from a genuine null by N alone:
+			// {Point: 0, CI: [0, 0], N: 340}, K1-K4 (pre-#798-A) all PASS. Measured
+			// on that exact fixture: KILL, byte-identical to a vault where both
+			// mechanisms were honestly measured at zero.
+			//
+			// A real measurement over hundreds of paired queries landing on an
+			// EXACT zero point estimate with an EXACT zero-width bootstrap CI is
+			// not a plausible outcome of variation in real data — it is the
+			// signature of every diff in the series being the literal Go zero,
+			// which happens when the instrument never varied because it never
+			// measured anything. An inert instrument must not be able to kill the
+			// mechanism it failed to measure, so this routes to UNDERPOWERED, the
+			// same family as ctNullNotRun and D1's empty-series guards, never to a
+			// K-clause vote.
+			if d.val.N > 0 && d.val.Point == 0 && d.val.CILower == 0 && d.val.CIUpper == 0 {
+				u = append(u, fmt.Sprintf("U7: vault %s's %s series is IDENTICALLY ZERO across all "+
+					"%d paired queries (Point +0.0000, CI [+0.0000,+0.0000]) — every resampled mean "+
+					"landed on the same exact zero, the signature of an instrument that never varied "+
+					"rather than one that measured a genuine null. %s read %s (%s); this is an "+
+					"ABSENCE OF MEASUREMENT wearing a full N, not a measured zero (#797).",
+					v.Label, d.name, d.val.N, d.readBy, d.name, d.purpose))
 			}
 		}
 		// THE SECOND METRIC, bound to the same series as the first. S4 exists to
@@ -1545,18 +1624,55 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	// the coupling instead of discovering it.
 	s2 := false
 	s2Which := ""
-	for _, v := range vaults {
+	s2VaultIdx := -1
+	for i, v := range vaults {
 		if v.DeltaH.Point >= ctPreregistered.MinDeltaMechanism && v.DeltaH.CILower > 0 {
-			s2, s2Which = true, "Hebbian"
+			s2, s2Which, s2VaultIdx = true, "Hebbian", i
 			break
 		}
 		if v.DeltaP.Point >= ctPreregistered.MinDeltaMechanism && v.DeltaP.CILower > 0 {
-			s2, s2Which = true, "PAS"
+			s2, s2Which, s2VaultIdx = true, "PAS", i
 			break
 		}
 	}
 	ship = append(ship, fmt.Sprintf("S2 %s: a named mechanism reaches +%.2f with CI lower > 0 on some vault%s",
 		ctPassFail(s2), ctPreregistered.MinDeltaMechanism, ctIf(s2, " ("+s2Which+")")))
+
+	// S6 (#798-A) — the shuffled-seed null gates the SHIP claim, not the KILL
+	// veto. A benefit a shuffled seed reproduces is ambient lift, not memory,
+	// and must not carry SHIP; an unrun null is not a passed one, the same
+	// reading U1 takes of the judge-calibration gate.
+	//
+	// PLACEMENT, DECIDED BEFORE ANY Δ EXISTS (pre-registration, not
+	// post-hoc): this control is v2 §7.2(3)'s SHIP-side-only null. It used to
+	// be wired only to K4 (a KILL veto) where it was provably inert — every
+	// vault clearing K4's bar already clears K2's strictly weaker one, so the
+	// null's tri-state was read by exactly one verdict-relevant line in the
+	// whole package and it decided nothing (TestCognitionTrialRule_K4IsSubsumedByK2).
+	// The SHIP conjunction had NO clause on it at all: a three-vault SHIP
+	// fixture returned SHIP for every value of the tri-state, including
+	// "reproduced by a shuffled seed". S6 is the fix, and there is
+	// deliberately NO K-side mirror: failing S6 blocks SHIP, it does not by
+	// itself establish KILL (K2's Delta_HP clause, unconditioned, is what
+	// still blocks the kill on the same evidence — see K2's comment below).
+	s6 := false
+	s6Detail := "no mechanism cleared S2, so there is no null to check"
+	if s2 {
+		switch vaults[s2VaultIdx].ShuffledSeedNull {
+		case ctNullSurvived:
+			s6 = true
+			s6Detail = fmt.Sprintf("vault %s's %s benefit survived the shuffled-seed null",
+				vaults[s2VaultIdx].Label, s2Which)
+		case ctNullReproducedByShuffle:
+			s6Detail = fmt.Sprintf("vault %s's %s benefit was REPRODUCED by a shuffled seed — "+
+				"ambient lift, not memory", vaults[s2VaultIdx].Label, s2Which)
+		default:
+			s6Detail = fmt.Sprintf("vault %s's shuffled-seed null was NOT RUN — an unrun gate is "+
+				"not a passed gate (U1's reading)", vaults[s2VaultIdx].Label)
+		}
+	}
+	ship = append(ship, fmt.Sprintf("S6 %s: the S2 mechanism's benefit survives the shuffled-seed "+
+		"null (%s)", ctPassFail(s6), s6Detail))
 
 	// S3 — DESCRIPTIVE SINCE D3, NOT A SHIP GATE.
 	//
@@ -1658,7 +1774,7 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	ship = append(ship, fmt.Sprintf("S5 %s: judge gate passed before scoring and the label hash matches",
 		ctPassFail(s5)))
 
-	if s1 && s2 && s4 && s5 {
+	if s1 && s2 && s4 && s5 && s6 {
 		ship = append(ship, "SHIP: the cognitive layer earns its complexity.")
 		return ctDecision{Verdict: ctVerdictShip, Reasons: ship}
 	}
@@ -1696,6 +1812,34 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	// trail of any verdict that spends it. Removing a clause because it has not
 	// yet fired is how a gate becomes unreachable on the one vault where it
 	// mattered.
+	//
+	// THIS CLAUSE IS THE PER-VAULT KILL VETO, RATIFIED AT MinDeltaMechanism
+	// (0.02), NOT MinDeltaC (0.03) (#798-B). It is UNCONDITIONED — no null, no
+	// integrity check — which is deliberately the MORE conservative of the two
+	// bars pre-registered for this purpose: it blocks a kill even on a benefit a
+	// shuffled seed would reproduce, landing that case on
+	// INCONCLUSIVE-BUT-POWERED instead (S6 already blocks SHIP for it above).
+	// Measured before any real Delta existed, on the issue's own #798-B
+	// scenario: the verdict flips KILL -> INCONCLUSIVE-BUT-POWERED exactly at
+	// Delta_HP = +0.02, this clause's bar, with the (now-deleted) K4 predicate
+	// PASS at every point on that sweep — i.e. this clause was ALREADY doing
+	// the work #798-B asked a veto to do, unlabelled.
+	//
+	// WHY 0.02 AND NOT 0.03: Delta_HP is a MECHANISM quantity — the joint
+	// contribution of the two things a KILL removes — and MinDeltaC is the
+	// WHOLE PRIOR's bar (base-level + Hebbian + PAS). Holding a part to the
+	// whole's threshold is the denomination error #762 names, on the other side
+	// of the same mistake #762 itself caught. Every OTHER clause in this rule
+	// errs toward "cannot conclude" (U3's NaN handling, U4's baseline-edges
+	// absence, U6's empty-bucket guard, the additivity diagnostic's demotion to
+	// non-gating) — the lower, easier-to-trip bar is the same direction of
+	// error, deliberately kept. And the worry this veto exists to answer — "a
+	// vault with a real, reproducible benefit gets outvoted 2-1 and loses the
+	// layer" — is answered by the per-vault override KILL's own action already
+	// preserves (see the KILL action text below), not by a veto that lets one
+	// vault impose its shape on the global default: that would be the INVERSE
+	// of principle #11, not an application of it. A veto is not needed for a
+	// vault to keep the layer; configuring it is.
 	hpVault := ""
 	for _, v := range vaults {
 		if v.DeltaHP.Point >= ctPreregistered.MinDeltaMechanism && v.DeltaHP.CILower > 0 {
@@ -1722,25 +1866,30 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 	kill = append(kill, fmt.Sprintf("K3 %s: power was adequate (judge gate passed, n >= %d per vault, U2/U4/U5 clear)",
 		ctPassFail(k3), ctPreregistered.MinQueriesPerVault))
 
-	// K4 — THE VETO, ON Delta_HP (D2).
+	// K4 — REPORT ONLY. DOES NOT GATE KILL (#798-A).
 	//
-	// KILL is blocked if the configuration KILL SHIPS costs a vault at least
-	// MinDeltaC with CI lower > 0 — the S1 per-vault bar, applied to the quantity
-	// the action actually spends. The integrity condition matters as much as the
-	// bar: THE VETOING VAULT MUST ITSELF HAVE SURVIVED THE S6 SHUFFLED-SEED NULL.
-	// A veto that a shuffled seed reproduces is ambient lift, not memory, and is
-	// not a veto. A veto whose null was never run is not a veto either — an unrun
-	// gate is not a passed gate, the same reading U1 takes.
+	// K4 was pre-registered as THE VETO, on Delta_HP at MinDeltaC (0.03) with
+	// an integrity condition: the vetoing vault's benefit had to itself survive
+	// the S6 shuffled-seed null. It is deleted from the KILL conjunction
+	// because it is strictly subsumed by K2's clause above, on TWO axes at
+	// once — K4's bar (0.03) is above K2's (0.02), and K2 carries no null
+	// condition at all — so every vault that could satisfy K4's predicate had
+	// already blocked the kill via K2, one line earlier. Analytically and by
+	// 300-cell enumeration (TestCognitionTrialRule_K2IsTheVetoAndS6GatesShip,
+	// née TestCognitionTrialRule_K4IsSubsumedByK2), ShuffledSeedNull was read
+	// by exactly this one verdict-relevant line in the whole package, and it
+	// never changed a verdict.
 	//
-	// SUBSUMPTION, RECORDED SO IT IS NOT MISTAKEN FOR INDEPENDENT EVIDENCE:
-	// K4's bar (MinDeltaC = 0.03) is ABOVE K2's (MinDeltaMechanism = 0.02) and
-	// both must hold for KILL, so as long as MinDeltaC >= MinDeltaMechanism every
-	// K4 veto is already blocked by K2's Delta_HP clause and K4 cannot change a
-	// verdict on its own. It is retained because it is what was pre-registered,
-	// because it names the veto and its integrity condition in the audit trail,
-	// and because it becomes load-bearing the moment the two bars are re-ordered.
-	// TestCognitionTrialRule_K4IsSubsumedByK2 pins the relationship so a future
-	// edit to either bar surfaces it instead of silently changing what KILL means.
+	// THE REPORTING HAZARD THIS FIXES: the prior text printed "vault C clears
+	// the bar but its null did not qualify it to veto" in the SAME VOICE as
+	// the clauses that decide, beside a verdict K2 had already decided one
+	// line above — a reader could conclude a veto was considered and denied on
+	// integrity grounds, when no veto was ever evaluated. This line is now
+	// explicit that it is a REPORT and names what actually decided.
+	//
+	// Kept, not deleted outright, because it is what was pre-registered and
+	// because it still names the integrity condition (survives-the-null) in
+	// the audit trail for anyone auditing the pre-registration itself.
 	k4Vetoing, k4Weak := "", ""
 	for _, v := range vaults {
 		if v.DeltaHP.Point >= ctPreregistered.MinDeltaC && v.DeltaHP.CILower > 0 {
@@ -1751,15 +1900,17 @@ func ctDecide(vaults []ctVaultResult, judge ctJudgeCalibration, fidelityOK bool)
 			k4Weak = fmt.Sprintf("%s (%s)", v.Label, v.ShuffledSeedNull)
 		}
 	}
-	k4 := k4Vetoing == ""
-	kill = append(kill, fmt.Sprintf("K4 %s: no vault's Delta_HP — what KILL actually costs, the "+
-		"FULL minus %s arm — reaches +%.2f with CI lower > 0 AND survives the S6 shuffled-seed "+
-		"null%s%s", ctPassFail(k4), ctArmNameBaseLevelOnly, ctPreregistered.MinDeltaC,
-		ctIf(k4Vetoing != "", fmt.Sprintf("; vault %s VETOES the kill", k4Vetoing)),
+	kill = append(kill, fmt.Sprintf("K4 REPORT ONLY, DOES NOT GATE (the pre-registered veto on "+
+		"Delta_HP at +%.2f with CI lower > 0 AND a survived S6 null; subsumed by K2's unconditioned "+
+		"clause above at the lower +%.2f bar — WHATEVER THIS LINE SAYS, K2 ALREADY DECIDED)%s%s",
+		ctPreregistered.MinDeltaC, ctPreregistered.MinDeltaMechanism,
+		ctIf(k4Vetoing != "", fmt.Sprintf("; vault %s would additionally have cleared K4's own bar",
+			k4Vetoing)),
 		ctIf(k4Vetoing == "" && k4Weak != "",
-			fmt.Sprintf("; vault %s clears the bar but its null did not qualify it to veto", k4Weak))))
+			fmt.Sprintf("; vault %s clears Delta_HP's bar but its null does not qualify under K4's "+
+				"integrity condition — irrelevant to the verdict, since K2 already decided", k4Weak))))
 
-	if k1 && k2 && k3 && k4 {
+	if k1 && k2 && k3 {
 		kill = append(kill,
 			"KILL: retire the cognitive layer. Executes in one PR referencing the design: "+
 				"default preset hebbian_enabled:false + predictive_activation:false (now actually "+

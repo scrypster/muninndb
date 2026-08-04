@@ -64,6 +64,11 @@ func ctShipVault(label string) ctVaultResult {
 		DeltaC:               ctDelta{Point: 0.055, CILower: 0.031, CIUpper: 0.079, N: 320},
 		DeltaH:               ctDelta{Point: 0.028, CILower: 0.008, CIUpper: 0.048, N: 320},
 		DeltaP:               ctDelta{Point: 0.006, CILower: -0.010, CIUpper: 0.022, N: 320},
+		// This is the CLEAN-SHIP fixture: everything else about it says the
+		// layer earns its complexity, so its S6 null is SURVIVED by
+		// construction. Tests that want to probe S6 itself override this
+		// field explicitly (TestCognitionTrialRule_ShuffledSeedNullGatesShip).
+		ShuffledSeedNull: ctNullSurvived,
 		// Inside the additivity bounds: max(Delta_H, Delta_P) <= Delta_HP <= Delta_C.
 		DeltaHP:                 ctDelta{Point: 0.034, CILower: 0.012, CIUpper: 0.056, N: 320},
 		DeltaCAllQueriesDiluted: ctDelta{Point: 0.049, CILower: 0.028, CIUpper: 0.070, N: 360},
@@ -703,18 +708,39 @@ func ctVaultResultProbes() map[string]ctProbe {
 					"auditable rather than asserted")
 		},
 		"ShuffledSeedNull": func(t *testing.T) {
-			// K4's integrity condition. It cannot be shown to change a VERDICT,
-			// because K4 is subsumed by K2 whenever MinDeltaC >= MinDeltaMechanism
-			// (see TestCognitionTrialRule_K4IsSubsumedByK2) — so the honest probe
-			// is that the tri-state is READ and DISTINGUISHED in the audit trail.
-			// Reporting it as a verdict gate would be the same overstatement this
-			// census exists to catch.
+			// #798-A moved this field's VERDICT-BINDING reader from K4 (a KILL
+			// veto, where it was provably inert — every vault clearing K4's bar
+			// already clears K2's strictly weaker one, so ShuffledSeedNull never
+			// changed a verdict there; see TestCognitionTrialRule_K4IsSubsumedByK2)
+			// to S6 (a SHIP conjunct). The bindingness probe therefore has to be
+			// on S6, and it is a genuine one: SHIP is reachable if and only if
+			// the S2-crediting vault's null was SURVIVED.
+			for _, tc := range []struct {
+				null ctNullResult
+				want ctVerdict
+				sub  string
+			}{
+				{ctNullSurvived, ctVerdictShip, "S6 PASS"},
+				{ctNullNotRun, ctVerdictInconclusivePowered, "S6 FAIL"},
+				{ctNullReproducedByShuffle, ctVerdictInconclusivePowered, "S6 FAIL"},
+			} {
+				vaults := ctThree(ctShipVault)
+				vaults[0].ShuffledSeedNull = tc.null // vault A is the one S2 credits
+				got := ctDecide(vaults, ctGoodJudge(), true)
+				ctRequireVerdict(t, got, tc.want, tc.sub)
+			}
+
+			// K4's REPORT line still reads the tri-state, for audit-trail
+			// continuity with the pre-registration — scoped to the K4 line
+			// specifically, because the census also prints the tri-state
+			// elsewhere and an unscoped search would pass even if K4 stopped
+			// reading it.
 			for _, tc := range []struct {
 				null ctNullResult
 				want string
 			}{
 				{ctNullNotRun, "shuffled-seed null NOT RUN"},
-				{ctNullSurvived, "VETOES the kill"},
+				{ctNullSurvived, "would additionally have cleared K4's own bar"},
 				{ctNullReproducedByShuffle, "REPRODUCED by a shuffled seed"},
 			} {
 				vaults := ctThree(ctKillVault)
@@ -722,10 +748,6 @@ func ctVaultResultProbes() map[string]ctProbe {
 				vaults[1].DeltaC = ctDelta{Point: 0.050, CILower: 0.025, CIUpper: 0.075, N: 340}
 				vaults[1].ShuffledSeedNull = tc.null
 				got := ctDecide(vaults, ctGoodJudge(), true)
-				// Scoped to the K4 line specifically. The census also prints the
-				// tri-state, so an unscoped search would pass even if K4 stopped
-				// reading it — which is exactly the inertness this census exists
-				// to catch.
 				found := false
 				for _, r := range got.Reasons {
 					if strings.HasPrefix(r, "K4 ") && strings.Contains(r, tc.want) {
@@ -733,8 +755,17 @@ func ctVaultResultProbes() map[string]ctProbe {
 					}
 				}
 				ctExpect(t, found,
-					"K4 does not distinguish %v (want %q on its own line). A null that "+
-						"was never run is not a null that was survived\n%s", tc.null, tc.want, got)
+					"K4's REPORT line does not distinguish %v (want %q on its own line). A null "+
+						"that was never run is not a null that was survived, even in a line that "+
+						"gates nothing\n%s", tc.null, tc.want, got)
+				// And the verdict must be UNAFFECTED by K4's line — it is a
+				// report, not a gate. This fixture's Delta_HP (+0.045, CI lower
+				// +0.020) already clears K2's unconditioned bar, so K2 blocks the
+				// kill regardless of what K4 says about the null.
+				ctExpect(t, got.Verdict == ctVerdictInconclusivePowered,
+					"K4's tri-state moved the verdict to %s (want INCONCLUSIVE-BUT-POWERED, decided "+
+						"by K2). K4 is REPORT ONLY since #798-A; it must never change what "+
+						"K1/K2/K3 already decided", got.Verdict)
 			}
 		},
 		"MRRDeltaH": ctFromShip(ctVerdictInconclusivePowered, "S4 FAIL",

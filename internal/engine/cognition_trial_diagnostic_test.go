@@ -94,6 +94,10 @@ func ctThreeFromSeries(s *ctQuerySeries, resamples int) []ctVaultResult {
 	v.BaselineEdges = 5000
 	v.ReplayedEdges = 2100
 	v.UnreplayableFrac = 0.30
+	// Same reasoning as ctShipVault/ctVaultFromSynth: this builder's callers
+	// use it for SHIP-shaped fixtures, so its S6 null is survived unless a
+	// test overrides it.
+	v.ShuffledSeedNull = ctNullSurvived
 	out := make([]ctVaultResult, 0, 3)
 	for _, label := range []string{"A", "B", "C"} {
 		c := v
@@ -154,6 +158,7 @@ func TestCognitionTrialRule_ThreeFromSeriesRelabelIsExact(t *testing.T) {
 		want.BaselineEdges = 5000
 		want.ReplayedEdges = 2100
 		want.UnreplayableFrac = 0.30
+		want.ShuffledSeedNull = ctNullSurvived
 		if !reflect.DeepEqual(got[i], want) {
 			t.Errorf("vault %s from the relabelled build differs from a per-label rebuild.\n"+
 				" got: %+v\nwant: %+v\nThe builder has acquired a label-dependent term, so "+
