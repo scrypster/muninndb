@@ -9,8 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.11.0] - 2026-08-04
+
+The hardening release. Three days after 0.10.0, fifty merges: a systematic
+audit of the association read/write layer, the cluster subsystem taken from
+"replicates" to "converges", a cross-tenant isolation fix, and the read path
+made provably write-free. Nearly every fix below landed with a test proven
+to fail without it.
+
+**Upgrade notes.** Migrations **v5** (replication keyspace relocation) and
+**v6** (vault-scoped entity records) run automatically on first start; a
+pre-migration binary refuses to start against a migrated data directory, so
+keep the `muninn.<version>.bak` this release's upgrade command now leaves
+beside the binary if you may need to roll back. Expect entity
+`mention_count` values to go DOWN — v6 recomputes them from each vault's own
+links, replacing an upsert counter that re-enrichment and replay had been
+inflating. Cluster operators: v5 drops historical replication log entries
+(Lobes re-sync via snapshot), and a write sent to a Lobe is now refused with
+a pointer to the Cortex instead of accepted and silently lost — repoint any
+load balancer that lacks leader affinity. Single-node deployments only need
+the rollback note.
+
 ### Added
 
+- **UPSERT write mode, keyed to a caller identity** (#556). A caller-supplied
+  `op_id` pins to a head engram via a new 0x30 prefix: a key miss creates,
+  identical content is a strict no-op, and changed content evolves — declaring
+  supersession per COG-28 — re-pointing the identity atomically inside the
+  evolve batch. Identity is the key, never the content, so identity-addressed
+  creates neither consult nor populate the content-hash dedup index (distinct
+  keys with identical text must not collapse onto one engram and share fate).
+  An Active-but-expired head (COG-19 `not_true_since`) takes the create branch
+  rather than stranding the key. Append-mode credentials may create and no-op
+  but are refused the content-change branch (SEC-15). A gRPC response hint is
+  deferred (needs a proto regen).
+- **Recall-health and MCP auth-source metrics** (#606, #648). Three Prometheus
+  counters close two log-only blind spots:
+  `muninndb_recall_embed_fallback_total{vault}` and
+  `muninndb_recall_errors_total{vault,reason}` make the embed→BM25 fallback
+  observable beyond the per-call `SemanticDegraded` field, and
+  `muninn_mcp_auth_total{source}` surfaces the credential mix
+  (api_key/capability/static_token/open) at a single instrumentation point —
+  never the credential or any prefix of it; denied requests are not counted.
+- **A reproducible anisotropy corpus and baseline measurement** (#719): the
+  canonical 160-sentence, 20-domain corpus behind the semantic-abstention
+  floor's `AnisotropyBaseline` statistic, plus
+  `docs/internals/anisotropy-calibration.md`. Deliberately adds no
+  noise-baseline registry entry: which measurement protocol the registry
+  adopts is an open maintainer decision, and μ/σ are framed as model
+  properties with `k` a policy choice behind the existing per-vault
+  `SemanticFloor` override.
 - **`muninn_update_tags` MCP tool.** Replaces an engram's tag set in place —
   the ULID, version lineage, and access history are all preserved (unlike
   `muninn_evolve`, which mints a new ULID and archives the predecessor).
@@ -414,6 +466,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remain instance-wide — a named, documented deferral, not silently wrong.
   Omitted or empty `vault` preserves the historical instance-wide behavior.
 
+- **Cache-returned engrams are read-only; writers clone** (#858). Seven write
+  paths — evolve's `mutateEngram`, `SoftDelete`, `UpdateTagsLocked`,
+  `UpdateConfidence`, `UpdateConfidenceWithContradiction`, `UpdateDigest` and
+  one more, found by an AST census rather than a method-name sweep — mutated
+  the shared L1-cache struct in place, racing every concurrent reader.
+  The per-engram stripe locks four of them relied on never helped: readers
+  never take them, and `GetEngram` re-caches what it decodes, so the pointer
+  is shared again before the caller sees it. Reproduced under `-race` with
+  nothing but a `GetEngram` loop as the second party. Writers now clone
+  before mutating; the read-only contract is pinned as STO-20.
+- **A symmetric association is now readable from both endpoints during
+  ranking** (#800). Association writers disagreed on edge direction (the
+  Hebbian worker canonicalises older→newer; the neighbour and autoassoc
+  workers write newer→older) and the ranking phases read only the forward
+  index, so the SAME relationship boosted a candidate at full strength from
+  one endpoint and by exactly zero from the other — measured end to end: one
+  link scored `hebbian_boost` 0.4 from its source and 0 from its target,
+  moving that row's recall score from 0.7150 to 0.3862. Ranking now reads a
+  relation-type-filtered union of both directions in a new sibling method;
+  `GetAssociations` is deliberately unchanged and pinned forward-only — its
+  consumers include a writer (dream persists what it infers) and
+  direction-presenting surfaces (COG-31).
+- **A failed association read is no longer written back as fabricated
+  defaults** (#809). "No such edge" and "the read failed" collapsed into one
+  zero-valued return, which the weight-update paths re-encoded over the live
+  edge: a transient Pebble read fault reset an edge's `relType`
+  (reclassifying directional edges — supersession, parent/child — as Hebbian
+  co-activation), its `createdAt`, and its `peakWeight`, the anchor of the
+  decay ceiling. Read errors now propagate and the write is refused; the
+  Hebbian worker no longer treats a failed read as cold start and re-seeds a
+  strong edge, and dream no longer infers a fresh edge over an existing one
+  it failed to read.
+- **Four association-layer defects: two laundered reads, three unevicted
+  caches, one aliased slice** (#804, #808, #818, #820). The worst:
+  `FlagContradiction` treated a FAILED idempotency-marker read as "newly
+  flagged" and restamped `detectedAt`, re-firing the non-invertible
+  confidence penalty — compounding 1.0 → 0.0709 on BOTH engrams, the true one
+  included, from one corrupt block that was otherwise harmless. Marker reads
+  now distinguish absent / corrupt / failed, and the two callers take
+  deliberately opposite actions because their loss directions are opposite:
+  flagging fails closed (one deferred penalty), the confidence update fails
+  open on the marker only (the stamp on disk is never replaced). Also: a scan
+  that died partway is no longer served — or cached for the TTL — as a
+  short-but-complete edge list (which `currencyInDeclaredChain` read as "not
+  in a chain", minting false advisories); the three edge-mutating sites that
+  bypassed the association caches now evict them; and the cache-MISS path no
+  longer hands the first caller a live view of cache-owned memory.
+- **`keys.PrefixUpperBound` had the bug it exists to prevent** (#816, #819) —
+  in both directions. The STO-11 helper kept trailing 0xFF bytes after its
+  carry, admitting a neighbouring prefix's keyspace for ~1 prefix in 256
+  (loose-bound rate, not loss rate: with ULID-shaped keys an actual crossing
+  needs a ~2⁻⁶⁴ id collision — structural hygiene on a delete path, stated
+  accurately). `AssocFwdRangeEnd` open-coded the opposite: an inverted carry
+  that stopped short. Both now carry and truncate correctly, with the helper
+  as the single implementation.
+- **Symmetric archive restore, a hard dedup cap, and sweep-path coverage**
+  (#806, #728, #696). An archived symmetric association is now stored under
+  both endpoints in the same batch that archives it, so the existing restore
+  scan finds it from either side (STO-19; directional edges are never
+  mirrored, per COG-31). `MaxDedup` is now a hard per-run cap — a large
+  cluster can no longer overshoot the configured limit, and dedup no longer
+  re-scans already-archived engrams forever. And the sweep path gained the
+  real-store regression test that would have caught the #692 truncation.
+- **CGDN was inert at any positive threshold** (#768, #805).
+  `computeComponents` never set the `ContentMatch` its abstention gate
+  multiplies by, so the experimental mode has never returned a live result —
+  the same shape as the dead traversal phase (#801). Kept and labelled INERT
+  rather than deleted (it has real per-vault config and transport surface;
+  deletion would silently orphan explicit config), pinned by a test whose RED
+  control is the threshold-0.0 path that does produce output. Corrected in
+  passing: the live CGDN ratio is bounded ≤ 1 by construction; #768's 8649.0
+  came from the shadow path. #805's ε=0.01 Hebbian rescue floor sits 20×
+  above the measured steady-state edge weight (p50 0.0005) — a second,
+  independent no-op — and is folded into the same disposition.
+- **Six narrow defects closed together** (#776, #794, #700, #733, #821,
+  #807): the COG-28 shadow scorer honored the tag-pool bypass its own
+  doctrine forbids; a version chain over the depth cap was indistinguishable
+  from "no current version exists" and never warned; `annotate:true`'s
+  fallback filled annotations from a raw reverse-edge lookup, leaking
+  lease-hidden / soft-deleted / as-of-future IDs around the COG-22 visibility
+  gate; the scheduled markdown export read every engram without `ReadOnly`,
+  reinforcing access counts and flattening ACT-R base-level vault-wide
+  (export is observation, not use); a renamed constant left the
+  `scoringmeasure` harness uncompilable under vet; and `muninn_forget`
+  hard-coded `Hard: false`, silently downgrading an SDK caller's `hard=true`
+  to a soft delete — MCP now honors it at the same authorization level gRPC
+  has always used, still refused for append-mode credentials (SEC-15).
+- **Three enrichment failure paths turned a transient error into a lasting
+  one** (#605, #642, #658). The embed-failed and enrich-failed digest flags
+  literally aliased the same bit, so a transient embed failure was recorded
+  as a permanent enrich failure and vice versa — the flags byte is widened to
+  two with a tolerant legacy decode, no repair pass needed (STO-16). A
+  caller's own cancellation counted against the provider circuit breaker
+  (`Breaker.DoIgnoring` closes that, releasing the half-open probe slot
+  rather than stranding recovery). And the embed sub-call consumed the whole
+  recall deadline on a hung backend, so the BM25 fallback that existed for
+  exactly that case had no budget left to run — it now reserves a fraction of
+  the remaining deadline, not a fixed duration.
+- **Four cluster/storage divergence bugs** (#686, #760, #771, #761). The
+  evolve/startup-repair batch path never replicated to followers — every
+  other write method did. Association-weight decay ran independently on
+  every node, landing different float32 weights for the same edge (now
+  gated on the single-writer gate, like the log prune; followers receive the
+  leader's decayed weights via ordinary replication). `link()` at a weight
+  already carrying an edge of a different `RelType` silently replaced it —
+  now refused (`ErrAssocRelTypeCollision`; putting RelType in the key is a
+  named deferral, STO-15). And the repair watermarks gained an operator
+  reset path.
+- **Cluster role flaps no longer crash the process, and a node's identity
+  survives a hostname change** (#629, #630). Promotion and demotion callbacks
+  are serialized behind one mutex with panic recovery — demotion previously
+  fired in a bare goroutine against shared cognitive-worker state, and an
+  unrecovered panic there took the whole process down under flapping quorum.
+  Node identity is now persisted to `{dataDir}/node-identity` instead of
+  re-derived from the hostname, so a renamed container no longer mints a
+  ghost cluster member that poisons quorum counting and pins
+  `MinReplicatedSeq` forever. Existing ghosts are NOT auto-reaped (a past
+  self and a real peer are indistinguishable without an operator);
+  `muninn cluster remove-node` remains the cleanup.
+- **The replication log is actually pruned, bounded by a backlog ceiling**
+  (#724, #725). `Prune` was implemented, documented, and had no production
+  caller — measured on a production primary: ~10 GB/day of log growth,
+  311 MB → 18 GB in 8 days on an otherwise idle daemon. It is now wired into
+  the periodic prune, made encoding-aware (it decodes and deletes only what
+  is provably a log entry — receipts shared the range, so a blind
+  `DeleteRange` was never safe), and bounded by
+  `ClusterConfig.MaxLogBacklog` (default 50,000) so one Lobe that never
+  catches up cannot pin the watermark and grow the Cortex forever — a
+  left-behind Lobe rejoins via snapshot, which is strictly better than
+  unbounded retention. `0` restores the old behaviour.
+- **`muninn upgrade` is now safe to run — and to undo** (#600, completing the
+  checksum work in #666). It refuses to self-update when a service manager
+  owns the daemon, before any destructive step — on the old code a systemd
+  unit was left serving off a deleted inode while the CLI reported the new
+  version (#749). It preserves the outgoing binary as `muninn.<version>.bak`
+  and refuses the upgrade if it cannot. And its "Stopping daemon..." step no
+  longer prints success while a daemon it failed to stop survives (#792) —
+  detection now reaches supervisor-started daemons via the exe scan, with
+  the darwin/launchd gap named rather than glossed.
+- **A cloned vault's `LastAccess` decoded to the year 1754, silently emptying
+  the clone's first recall** (#810). `CloneVaultData` wrote the Go zero time
+  straight to disk, bypassing the one normalization guard; ERF stores
+  `UnixNano()`, for which year 1 is out of range, so it overflowed to a bit
+  pattern that decodes as 1754 — a valid `time.Time` that `IsZero()` waves
+  through. On a weighted_sum vault recency collapsed to the floor and the
+  FIRST recall on a fresh clone returned zero results, silently, re-arming on
+  every restart and cache eviction. Three-part fix: `normalizeEngramTimes`
+  is now the single definition of "created, never accessed" for every writer
+  including clone; the overflow pattern is mapped back to the zero time at
+  the ERF decode boundary, making the sentinel unrepresentable; and the
+  census test that should have caught it now does.
+- **`muninn_where_left_off` works on a cloned or merged vault** (#811): the
+  LastAccess index backing it was not carried by clone or merge; the
+  post-operation reindex now rebuilds it alongside FTS and HNSW.
+- **The web console reports the daemon's authoritative cognitive worker
+  state** (#645) instead of a client-side inference.
+
 ### Changed
 
 - **`muninn_evolve` now rejects a `tags` argument** with JSON-RPC `-32602`,
@@ -433,9 +642,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real recorded queries, a co-activation replay driver, and the pre-registered
   acceptance rule as executable code with its own unit tests. None of it
   compiles into a shipped binary.
+- The trial's acceptance rule was made coherent BEFORE any trial data exists
+  (#798): the SHIP verdict now requires the shuffled-seed null to have
+  actually run, K4 reports but no longer gates, and an exact-zero
+  mechanism-delta series is classified UNDERPOWERED rather than counted as a
+  kill vote.
+- `phase4HebbianBoost`'s recency constant is named for what it is —
+  `recencyTau`, a decay time constant, not a half-life (#799). Pure rename,
+  byte-identical measurement outputs verified before/after.
+- Reinforcement tests drain the fire-and-forget worker deterministically
+  instead of polling a 15-second wall clock (#813) — the flake had already
+  had its deadline raised once, which moved the rate, not the mode.
+- CI guards grew teeth: the leak-tell check runs against every change's added
+  lines and the pre-commit vault-guard gap for worktrees and contributor
+  clones is closed (#845); a NUL byte can no longer make git classify a
+  tracked source file as binary and invisible to diff review (#827); and the
+  claims-and-evidence convention — "a claim that reads the same when it is
+  false is not a claim" — is now written down with its two measured
+  counterexamples (#812, #814).
+- The decision record gained three measured negatives and the
+  associative-traversal post-mortem (#801, #837): honest negatives are
+  first-class outcomes here, and the record is where they live.
 
 ### Security
 
+- **Entity records were global across vaults — a cross-tenant read oracle AND
+  a cross-tenant write** (#683). The 0x1F entity record was keyed by name
+  hash alone, with no vault prefix, while every index backing it carried the
+  vault — so two vaults that mentioned the same entity name shared ONE
+  record. Three live consequences: `mention_count` summed every vault's
+  upserts (and entity IDF divided that cross-vault numerator by a
+  single-vault denominator); a by-name lookup from a vault with NO links to
+  an entity still returned another tenant's name, type, confidence,
+  first_seen and count — an existence-and-metadata oracle over another
+  vault's entity vocabulary; and `SetEntityState` took no vault at all, so an
+  agent scoped to vault A could mark vault B's entity deprecated or merged.
+  Entity records are now keyed `0x1F|vault|nameHash` and every read/write
+  path takes the vault. **Migration v6** relocates existing records to every
+  vault that positively references them, recomputing `mention_count` from
+  each vault's own links — counts go DOWN, because the old figure was an
+  upsert counter that re-enrichment, replay and merges each inflated.
+  Unreferenced records are dropped with a WARN naming each one; deletion is
+  key-by-key behind a conjunctive positive test, never a range delete, and a
+  re-run never clobbers existing output.
+- **CLI cluster commands now authenticate** (#632). `muninn cluster ...` sent
+  no credential at all against endpoints that require the cluster secret or
+  an admin session. Fixed by extending the two auth mechanisms `muninn vault`
+  already uses rather than inventing a third: the cluster secret is read from
+  the local `cluster.yaml`, and enable/disable run the same admin
+  authentication flow as `vault`.
+- **Enrichment and embed errors no longer carry memory content** (#641,
+  #790). Enrichment parse failures embedded up to 160 bytes of the model's
+  response in the returned error — and `Run` logs every failed stage at WARN
+  on a default-configured server, so fragments of user memories reached the
+  logs (model output is a function of memory content). Parse errors now carry
+  a stage and a stable category (`unmarshal_failure`, `type_mismatch`,
+  `empty_result`), never payload bytes. All seven embed providers had the
+  same shape — the raw HTTP error body, which echoes the request body, IS the
+  memory text — and now use the same mechanism.
+- **`muninn upgrade` renders the release note inertly** (#857). The note
+  comes from a GitHub Release body and reached the terminal verbatim, where
+  an ESC byte is an escape sequence that can recolour, reposition, or
+  overwrite what a reviewer saw on the release page. C0/C1/DEL are stripped
+  (tab and newline kept); a lone invalid byte still renders as U+FFFD rather
+  than being dropped, pinned by test so a future tightening cannot quietly
+  start discarding legitimate malformed text.
 - **`muninn_state` is no longer callable by an observe-mode credential.** The
   tool was classified in `isReadOnlyTool`, but its handler reaches
   `Engine.UpdateLifecycleState` (via `mcpEngineAdapter.UpdateState`) — so an
