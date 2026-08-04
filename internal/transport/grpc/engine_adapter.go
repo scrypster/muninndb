@@ -53,7 +53,13 @@ func (a *grpcEngineAdapter) Write(ctx context.Context, req *pb.WriteRequest) (*p
 	}
 	// NOTE: Inline enrichment fields (Summary, Entities, Relationships) are not yet
 	// in the proto schema. They pass through as zero values until the proto is updated.
-	resp, err := a.eng.Write(ctx, &mbp.WriteRequest{
+	//
+	// COG-34's similar_existing self-query is scoped to the MCP/MBP single-
+	// remember surface (design record §4.5) because pb.WriteResponse carries
+	// neither SimilarExisting field — gRPC would pay the self-query's Activate
+	// call and have nowhere to put the result. Engine.Write has no other way
+	// to distinguish this caller, so the skip is explicit here (F2).
+	resp, err := a.eng.Write(engine.SkipSimilarExistingForTransport(ctx), &mbp.WriteRequest{
 		Concept: req.Concept, Content: req.Content, Tags: req.Tags,
 		Confidence: req.Confidence, Stability: req.Stability, Vault: req.Vault,
 		IdempotentID: req.IdempotentID, Associations: mbpAssocs, Embedding: req.Embedding,

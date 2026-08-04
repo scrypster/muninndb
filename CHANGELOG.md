@@ -17,17 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — the engine runs the shipped recall pipeline against the memory's own
   text and names pre-existing memories it calls a STRONG-band match,
   older than the new one by more than an hour, with no already-declared
-  `supersedes`/`contradicts` edge to it: `"N existing memories match this
-  closely — if this replaces one of them, use muninn_evolve instead."` Pure
-  advisory — writes nothing, links nothing, decides nothing (COG-34). Zero
-  new constants: the bar is COG-30's existing per-vault `strong` band, end
-  to end. When the vault's own calibration cannot express confidence for
-  the self-query (no registered embedding model, `semantic_floor:0`,
-  rrf/weighted_sum fusion), the block is omitted and
+  `supersedes`/`contradicts` edge to it: `WriteResponse.SimilarExisting`
+  carries an `[]{ID, Concept, RelevanceBand, AgeDays}` list; there is no
+  accompanying fixed prose sentence — the caller decides how to present the
+  list, and the guide names `muninn_evolve` as the action to take if one of
+  them is what the new memory replaces. Pure advisory — writes nothing,
+  links nothing, decides nothing (COG-34). Zero new constants: the bar is
+  COG-30's existing per-vault `strong` band, end to end. When the vault's
+  own calibration cannot express confidence for the self-query (no
+  registered embedding model, `semantic_floor:0`, rrf/weighted_sum fusion,
+  or the vault has no content channel), the block is omitted and
   `similar_existing_basis` names why on the wire — "not measured" is never
-  presented as "measured and found nothing". gRPC and the non-Go SDKs
-  deliberately do not carry either field yet (obligation #3). Design
-  record: `.claude/deep-review/2026-08-03-712-currency-design-v2.md`.
+  presented as "measured and found nothing". The self-query is bounded by
+  an absolute deadline (100ms) independent of the caller's own context, and
+  reuses the write's own embedding when one was supplied rather than
+  re-embedding. gRPC, `WriteBatch`/upsert-in-batch, and internal writes
+  (`Consolidate`, `Decide`, `Intend`) deliberately do not pay for or carry
+  either field (obligation #3). Design record:
+  `.claude/deep-review/2026-08-03-712-currency-design-v2.md`.
 
 - **`muninn_update_tags` MCP tool.** Replaces an engram's tag set in place —
   the ULID, version lineage, and access history are all preserved (unlike

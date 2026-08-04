@@ -110,3 +110,77 @@ func TestSimilarExisting_RED5_ObserveSafe_ZeroStoreWrites(t *testing.T) {
 		}
 	})
 }
+
+// TestSimilarExisting_RED5_ObserveSafe_ArchivedEdgeNotRestored is the NEW
+// RED-5 arm the F1 refute named: the ORIGINAL RED-5 above was structurally
+// blind to phase 4.75's lazy archive restore because its fixture had no
+// archived edge for the Bloom filter to find. This fixture has one — two
+// tag-linked, FTS-matchable engrams whose association is forced into the
+// 0x25 archive namespace before the self-query runs — so the self-query's
+// fused candidates include a Bloom-positive ID and phase 4.75 is actually
+// reachable. The RED arm forces ReadOnly false on the self-query (the exact
+// F1 contract) and shows a live 0x14 weight-index row appears; the GREEN arm
+// is the production default and must leave the archive undisturbed.
+func TestSimilarExisting_RED5_ObserveSafe_ArchivedEdgeNotRestored(t *testing.T) {
+	eng, store, db := danglingEnv(t)
+	ctx := context.Background()
+	const vault = "similar-existing-red5-archive-probe"
+	const sharedTag = "zephyrwood-planning-notes"
+
+	w := danglingWriter(t, eng, vault, sharedTag)
+	target := w("archive rotation policy", "The zephyrwood catalog entry lists lead time and unit cost.")
+	_ = w("seed neighbour", "The zephyrwood catalog entry lists lead time, unit cost, and a substitute SKU.")
+	_ = target
+
+	ws := store.VaultPrefix(vault)
+	if _, err := store.DecayAssocWeights(ctx, ws, time.Nanosecond, 0.001, 0.05); err != nil {
+		t.Fatalf("archiving decay: %v", err)
+	}
+	if n := countPrefix(t, db, ws, 0x14); n != 0 {
+		t.Fatalf("precondition: edge is not archived, %d live weight-index row(s) remain", n)
+	}
+	if n := countPrefix(t, db, ws, 0x25); n == 0 {
+		t.Fatal("precondition: no edge reached the 0x25 archive")
+	}
+
+	probeEng := &storage.Engram{
+		Concept:   "zephyrwood catalog entry",
+		Content:   "The zephyrwood catalog entry lists lead time, unit cost, and a substitute SKU.",
+		CreatedAt: time.Now(),
+	}
+	probeID := storage.NewULID()
+
+	t.Run("RED_read_only_flag_absent_restores_the_archived_edge", func(t *testing.T) {
+		restore := buildSimilarExistingRequestFn
+		buildSimilarExistingRequestFn = func(vaultName string, eng *storage.Engram) *mbp.ActivateRequest {
+			req := restore(vaultName, eng)
+			req.ReadOnly = false // sabotage: the exact contract F1 closed
+			return req
+		}
+		defer func() { buildSimilarExistingRequestFn = restore }()
+
+		adv := eng.similarExisting(ctx, ws, vault, probeID, probeEng)
+		n := countPrefix(t, db, ws, 0x14)
+		t.Logf("RED arm: items=%d omittedBasis=%q live weight-index rows=%d", len(adv.Items), adv.OmittedBasis, n)
+		if n == 0 {
+			t.Fatalf("RED-5 (archive arm) did not go red: expected the archived edge restored to a live weight-index row with read_only forced false, saw none")
+		}
+	})
+
+	t.Run("GREEN_production_default_leaves_archive_undisturbed", func(t *testing.T) {
+		// Re-archive: the RED arm above restored the edge to live.
+		if _, err := store.DecayAssocWeights(ctx, ws, time.Nanosecond, 0.001, 0.05); err != nil {
+			t.Fatalf("re-archiving decay: %v", err)
+		}
+		if n := countPrefix(t, db, ws, 0x14); n != 0 {
+			t.Fatalf("precondition: edge is not re-archived, %d live weight-index row(s) remain", n)
+		}
+
+		adv := eng.similarExisting(ctx, ws, vault, probeID, probeEng)
+		n := countPrefix(t, db, ws, 0x14)
+		t.Logf("GREEN arm: items=%d omittedBasis=%q live weight-index rows=%d", len(adv.Items), adv.OmittedBasis, n)
+		if n != 0 {
+			t.Fatalf("similar_existing's read_only:true self-query restored an archived edge: %d live weight-index row(s), want 0", n)
+		}
+	})
+}

@@ -135,7 +135,7 @@ func (e *Engine) Intend(ctx context.Context, vault, content string, cues []strin
 	for _, cue := range clean {
 		ents = append(ents, mbp.InlineEntity{Name: cue, Type: "concept"})
 	}
-	resp, err := e.Write(ctx, &mbp.WriteRequest{
+	resp, err := e.Write(withSkipSimilarExisting(ctx), &mbp.WriteRequest{
 		Vault:      vault,
 		Content:    content,
 		MemoryType: uint8(storage.TypeGoal),

@@ -242,19 +242,19 @@ func agedCloneRecallCounts(t *testing.T, fusion string, ageDays int, touchSource
 	}
 
 	// COG-34's write-time self-query (internal/engine/engine_similar_existing.go)
-	// is itself an Activate() call, and any candidate it merely SCORES — not
-	// just one it emits — warms the process-local L1 read cache
-	// (internal/storage/cache.go: Get/Set both stamp lastAccess=now). That is
-	// pre-existing Activate() behavior, not new to this mechanism, but before
-	// COG-34 nothing ever triggered a recall from inside Write(), so a
-	// write-only setup sequence was always cache-cold for its own engrams.
-	// This fixture's whole point is a vault that has NEVER been queried —
-	// disabling the hook for setup keeps that premise intact regardless of
-	// whether COG-34 is compiled in. See COG-34's invariant text for the
-	// residual this documents.
-	restoreSimilarExisting := similarExistingHookEnabled
-	similarExistingHookEnabled = false
-
+	// is itself an Activate() call issued with read_only:true. Before the F4
+	// fix (712-currency fix round), ANY Activate() call — self-query
+	// included — stamped the L1 cache's recency timestamp for every
+	// candidate it merely SCORED, not just ones it emitted
+	// (internal/storage/cache.go), and that timestamp fed real ACT-R
+	// recency scoring in a LATER, unrelated recall — exactly what this
+	// fixture's premise (a vault that has NEVER been queried) depends on
+	// staying false. F4 makes ReadOnly Activate calls suppress that stamp
+	// (storage.ContextWithNoAccessCacheStamp, threaded from
+	// activation.phase6Score's req.ReadOnly), so the self-query — read_only
+	// by construction (COG-11) — no longer contaminates this fixture, and
+	// setup no longer needs to disable the hook. See COG-34's invariant
+	// text for the fixed residual.
 	created := time.Now().Add(-time.Duration(ageDays) * 24 * time.Hour)
 	var ids []storage.ULID
 	for _, c := range []string{"heron migration routes", "heron nesting season", "heron feeding behaviour"} {
@@ -271,7 +271,6 @@ func agedCloneRecallCounts(t *testing.T, fusion string, ageDays int, touchSource
 		}
 		ids = append(ids, id)
 	}
-	similarExistingHookEnabled = restoreSimilarExisting
 	awaitFTS(t, eng)
 
 	if touchSource {

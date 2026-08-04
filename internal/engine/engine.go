@@ -398,6 +398,45 @@ func skipContentDedup(ctx context.Context) bool {
 	return v
 }
 
+// ctxKeySkipSimilarExisting marks a Write call as one whose COG-34
+// similar_existing self-query must be skipped entirely — not merely
+// discarded after running. Mirrors ctxKeySkipContentDedup's shape (#659).
+//
+// The design record (.claude/deep-review/2026-08-03-712-currency-design-v2.md
+// §4.5) scopes the advisory to "single muninn_remember (MCP) and MBP Write
+// only" — the only two surfaces whose wire response actually carries
+// SimilarExisting/SimilarExistingBasis. Because Engine.Write is the single
+// shared entry point every surface and every internal helper funnels
+// through, that scope has to be enforced by explicit exclusion rather than
+// by which caller happens to invoke Write: every caller that is NOT the
+// single-remember MCP/MBP surface must set this marker so the self-query
+// Activate call is never issued, not just left unread.
+//
+// Set by: upsertCreate (the bulk re-ingest pipeline the deferral names by
+// name — #712 remainder), Consolidate and Decide (internal engrams whose own
+// response types have no field to carry the advisory), Intend (same), and
+// the gRPC engine adapter (pb.WriteResponse carries neither field — #3's
+// "unpopulated field on a partial schema" class applies to PAYING for a
+// field as much as to shipping one empty).
+type ctxKeySkipSimilarExisting struct{}
+
+func withSkipSimilarExisting(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKeySkipSimilarExisting{}, true)
+}
+
+func skipSimilarExisting(ctx context.Context) bool {
+	v, _ := ctx.Value(ctxKeySkipSimilarExisting{}).(bool)
+	return v
+}
+
+// SkipSimilarExistingForTransport is the exported form of
+// withSkipSimilarExisting, for the one caller outside this package that
+// needs it: the gRPC engine adapter, whose pb.WriteResponse has no field to
+// carry the COG-34 advisory (design record §4.5, MCP + MBP only).
+func SkipSimilarExistingForTransport(ctx context.Context) context.Context {
+	return withSkipSimilarExisting(ctx)
+}
+
 // SetOnWrite registers a callback invoked after every successful Write.
 // Intended for wiring background processors that need to react to new data.
 // Safe to call concurrently with Write.
@@ -1881,12 +1920,22 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	// COG-34 (#712 remainder): the write-time similar_existing advisory.
-	// Runs on every genuinely-new, non-duplicate single write — the content-
+	// Runs on every genuinely-new, non-duplicate single write reached from
+	// the single muninn_remember (MCP) / MBP Write surface — the content-
 	// hash dedup short-circuit above already returned for a duplicate, and
 	// writeUpsert's evolve branch never reaches this path at all. A pure
 	// post-write read through the shipped Activate() pipeline; see
 	// engine_similar_existing.go for the mechanism and its scope.
-	e.similarExisting(ctx, wsPrefix, vaultName, id, eng).applyToWriteResponse(resp)
+	//
+	// skipSimilarExisting(ctx) is set by every OTHER caller of this shared
+	// Write() entry point — upsertCreate (bulk re-ingest, the exact pipeline
+	// the design's deferral names), Consolidate/Decide/Intend (internal
+	// engrams with no wire field to carry the advisory), and the gRPC engine
+	// adapter (pb.WriteResponse carries neither field) — so the self-query
+	// Activate call is skipped entirely there, not merely discarded: F2.
+	if !skipSimilarExisting(ctx) {
+		e.similarExisting(ctx, wsPrefix, vaultName, id, eng).applyToWriteResponse(resp)
+	}
 
 	d := time.Since(writeStart)
 	if e.latencyTracker != nil {
@@ -2066,7 +2115,7 @@ func (e *Engine) upsertCreate(ctx context.Context, wsPrefix [8]byte, vaultName s
 	// Identity-addressed create: bypass content-hash dedup so two distinct
 	// upsert keys with byte-identical text stay two engrams (see
 	// ctxKeySkipContentDedup).
-	resp, err := e.Write(withSkipContentDedup(ctx), &createReq)
+	resp, err := e.Write(withSkipSimilarExisting(withSkipContentDedup(ctx)), &createReq)
 	if err != nil {
 		return nil, fmt.Errorf("upsert create: %w", err)
 	}
@@ -4706,7 +4755,7 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 		return nil, fmt.Errorf("consolidate: too many ids (max 50, got %d)", len(ids))
 	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
-	mergedResp, err := e.Write(ctx, &mbp.WriteRequest{
+	mergedResp, err := e.Write(withSkipSimilarExisting(ctx), &mbp.WriteRequest{
 		Vault:   vault,
 		Concept: "Consolidated memory",
 		Content: mergedContent,
@@ -4889,7 +4938,7 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 		content += "\n---\nAlternatives:\n" + strings.Join(alternatives, "\n")
 	}
 
-	resp, err := e.Write(ctx, &mbp.WriteRequest{
+	resp, err := e.Write(withSkipSimilarExisting(ctx), &mbp.WriteRequest{
 		Vault:   vault,
 		Concept: decision,
 		Content: content,
