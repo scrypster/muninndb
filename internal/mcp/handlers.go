@@ -244,6 +244,12 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		}
 	}
 	result := WriteResult{ID: resp.ID, Concept: req.Concept}
+	// COG-34 (#712 remainder): mirror the write-time similar_existing
+	// advisory straight through — engine.Engine.Write already computed and
+	// gated it (strong band, temporal floor, declared-edge exclusion,
+	// self-echo, COG-22 visibility). Nothing to recompute here.
+	result.SimilarExisting = resp.SimilarExisting
+	result.SimilarExistingBasis = resp.SimilarExistingBasis
 	// #770: a caller that omits `vault` gets the default vault, and the
 	// response used to be a bare {id, concept} that said nothing about where
 	// the memory went. An agent working in vault X that forgets the parameter

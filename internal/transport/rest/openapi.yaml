@@ -170,6 +170,32 @@ components:
           type: integer
           format: int64
           description: "Unix timestamp (nanoseconds)."
+        similar_existing:
+          type: array
+          description: >
+            Write-time advisory (single, non-batch writes only): pre-existing
+            memories the vault's own recall pipeline calls a strong-band
+            match for the memory just written. Advisory only — writes
+            nothing, links nothing. Omitted when nothing qualifies.
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              concept:
+                type: string
+              relevance_band:
+                type: string
+              age_days:
+                type: number
+                format: double
+        similar_existing_basis:
+          type: string
+          description: >
+            Set instead of similar_existing when this vault's own relevance
+            calibration could not measure a strong band for this write
+            (e.g. no registered embedding model) — "not measured", never
+            "measured and found nothing".
 
     BatchWriteRequest:
       type: array

@@ -127,6 +127,37 @@ type WriteResponse struct {
 	ID        string `msgpack:"id"         json:"id"`
 	CreatedAt int64  `msgpack:"created_at" json:"created_at"`
 	Hint      string `msgpack:"hint,omitempty" json:"hint,omitempty"`
+	// SimilarExisting is COG-34's write-time advisory (#712 remainder): on a
+	// single non-duplicate remember, pre-existing memories the vault's OWN
+	// shipped recall pipeline calls a STRONG-band match for the text just
+	// written, older than the new engram by more than one hour, and not
+	// already the target of a declared supersedes/contradicts edge from it.
+	// PURE ADVISORY — writes nothing, links nothing, decides nothing
+	// (COG-34/COG-11). Every row already passed COG-22's visibilityGate.Nameable
+	// (it is a normal row of the shipped Activate() pipeline, not a
+	// hand-rolled scan) and the new engram's own ID never appears here
+	// (self-echo excluded). Omitted (nil), never empty-with-confidence, when
+	// the self-query returns nothing or nothing bands strong.
+	//
+	// MCP + MBP only, matching the existing supersession/currency annotation
+	// scope (COG-22/COG-25/COG-28/COG-29 — obligation #3); REST inherits via
+	// this type alias. gRPC and the non-Go SDKs deliberately do NOT carry
+	// this field — completing only part of a wire schema is the
+	// silently-wrong class (obligation #3), so it stays off there until it
+	// ships everywhere at once. remember_batch / remember_tree do not run
+	// this hook (deferred: an N-item recall per bulk write is a different
+	// cost profile — the guide already names bulk pipelines as the evolve
+	// case).
+	SimilarExisting []SimilarExisting `msgpack:"similar_existing,omitempty" json:"similar_existing,omitempty"`
+	// SimilarExistingBasis is set INSTEAD OF SimilarExisting when the
+	// self-query's own COG-30 relevance calibration could not express
+	// confidence for this write (the response-wide relevance_band_basis was
+	// uncalibrated/degraded — no_model_baseline, semantic_floor_disabled,
+	// semantic_degraded, rrf_fusion, or weighted_sum_fusion). "Uncalibrated"
+	// means NOT MEASURED, never "measured and found nothing" — so on a vault
+	// that cannot express the mechanism, the absence is loud in the actual
+	// result rather than a silently empty block (#582/#585/#589 doctrine).
+	SimilarExistingBasis string `msgpack:"similar_existing_basis,omitempty" json:"similar_existing_basis,omitempty"`
 }
 
 // ReadRequest retrieves an engram by ID.
@@ -469,6 +500,23 @@ type ConflictBlock struct {
 	// a conflict alone is the failure this block exists to remove, so the
 	// truncation yields to it — but never silently.
 	AdjacencyOverflow int `msgpack:"adjacency_overflow,omitempty" json:"adjacency_overflow,omitempty"`
+}
+
+// SimilarExisting is one row of the WriteResponse.SimilarExisting advisory
+// (COG-34): a pre-existing memory the write-time self-query called a
+// strong-band match for the engram just written.
+type SimilarExisting struct {
+	ID      string `msgpack:"id"      json:"id"`
+	Concept string `msgpack:"concept" json:"concept"`
+	// RelevanceBand is always "strong" — the only band this advisory admits
+	// — carried anyway so the field shape matches ActivationItem's and a
+	// future widening of the bar (there is none planned) does not need a
+	// new field.
+	RelevanceBand string `msgpack:"relevance_band" json:"relevance_band"`
+	// AgeDays is how much older the candidate is than the engram just
+	// written, in days (always > 1h/24 by construction — the temporal
+	// floor).
+	AgeDays float64 `msgpack:"age_days" json:"age_days"`
 }
 
 // ConflictPairInfo names one unresolved declared contradiction and which side

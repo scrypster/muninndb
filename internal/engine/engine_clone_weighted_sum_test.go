@@ -241,6 +241,20 @@ func agedCloneRecallCounts(t *testing.T, fusion string, ageDays int, touchSource
 		}
 	}
 
+	// COG-34's write-time self-query (internal/engine/engine_similar_existing.go)
+	// is itself an Activate() call, and any candidate it merely SCORES — not
+	// just one it emits — warms the process-local L1 read cache
+	// (internal/storage/cache.go: Get/Set both stamp lastAccess=now). That is
+	// pre-existing Activate() behavior, not new to this mechanism, but before
+	// COG-34 nothing ever triggered a recall from inside Write(), so a
+	// write-only setup sequence was always cache-cold for its own engrams.
+	// This fixture's whole point is a vault that has NEVER been queried —
+	// disabling the hook for setup keeps that premise intact regardless of
+	// whether COG-34 is compiled in. See COG-34's invariant text for the
+	// residual this documents.
+	restoreSimilarExisting := similarExistingHookEnabled
+	similarExistingHookEnabled = false
+
 	created := time.Now().Add(-time.Duration(ageDays) * 24 * time.Hour)
 	var ids []storage.ULID
 	for _, c := range []string{"heron migration routes", "heron nesting season", "heron feeding behaviour"} {
@@ -257,6 +271,7 @@ func agedCloneRecallCounts(t *testing.T, fusion string, ageDays int, touchSource
 		}
 		ids = append(ids, id)
 	}
+	similarExistingHookEnabled = restoreSimilarExisting
 	awaitFTS(t, eng)
 
 	if touchSource {

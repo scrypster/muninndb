@@ -68,6 +68,11 @@ type WriteResult struct {
 	// whose cue entity is focal in this write's inline entities. Omitted when
 	// empty (zero token cost) and inert unless MUNINN_PROSPECTIVE=1.
 	Notices []engine.Notice `json:"notices,omitempty"`
+	// SimilarExisting / SimilarExistingBasis mirror mbp.WriteResponse's
+	// COG-34 write-time advisory — see that type's doc comment. Populated
+	// for single muninn_remember only, never remember_batch/remember_tree.
+	SimilarExisting      []mbp.SimilarExisting `json:"similar_existing,omitempty"`
+	SimilarExistingBasis string                `json:"similar_existing_basis,omitempty"`
 }
 
 type Memory struct {

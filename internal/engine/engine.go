@@ -1875,16 +1875,26 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 
 	metrics.EngineWritesTotal.Inc()
 
+	resp := &mbp.WriteResponse{
+		ID:        id.String(),
+		CreatedAt: time.Now().UnixNano(),
+	}
+
+	// COG-34 (#712 remainder): the write-time similar_existing advisory.
+	// Runs on every genuinely-new, non-duplicate single write — the content-
+	// hash dedup short-circuit above already returned for a duplicate, and
+	// writeUpsert's evolve branch never reaches this path at all. A pure
+	// post-write read through the shipped Activate() pipeline; see
+	// engine_similar_existing.go for the mechanism and its scope.
+	e.similarExisting(ctx, wsPrefix, vaultName, id, eng).applyToWriteResponse(resp)
+
 	d := time.Since(writeStart)
 	if e.latencyTracker != nil {
 		e.latencyTracker.Record(wsPrefix, "write", d)
 	}
 	metrics.WriteDuration.WithLabelValues(vaultName).Observe(d.Seconds())
 
-	return &mbp.WriteResponse{
-		ID:        id.String(),
-		CreatedAt: time.Now().UnixNano(),
-	}, nil
+	return resp, nil
 }
 
 // writeUpsert implements the upsert_mode write path (#556, Rev 2 redesign).

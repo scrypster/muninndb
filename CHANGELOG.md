@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`similar_existing` write-time advisory (#712 remainder, COG-34).** On a
+  successful, non-duplicate single `muninn_remember` (MCP) / `Write` (MBP;
+  REST inherits via the type alias) — never `remember_batch`/`remember_tree`
+  — the engine runs the shipped recall pipeline against the memory's own
+  text and names pre-existing memories it calls a STRONG-band match,
+  older than the new one by more than an hour, with no already-declared
+  `supersedes`/`contradicts` edge to it: `"N existing memories match this
+  closely — if this replaces one of them, use muninn_evolve instead."` Pure
+  advisory — writes nothing, links nothing, decides nothing (COG-34). Zero
+  new constants: the bar is COG-30's existing per-vault `strong` band, end
+  to end. When the vault's own calibration cannot express confidence for
+  the self-query (no registered embedding model, `semantic_floor:0`,
+  rrf/weighted_sum fusion), the block is omitted and
+  `similar_existing_basis` names why on the wire — "not measured" is never
+  presented as "measured and found nothing". gRPC and the non-Go SDKs
+  deliberately do not carry either field yet (obligation #3). Design
+  record: `.claude/deep-review/2026-08-03-712-currency-design-v2.md`.
+
 - **`muninn_update_tags` MCP tool.** Replaces an engram's tag set in place —
   the ULID, version lineage, and access history are all preserved (unlike
   `muninn_evolve`, which mints a new ULID and archives the predecessor).
