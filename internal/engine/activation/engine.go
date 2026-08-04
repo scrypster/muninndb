@@ -817,8 +817,19 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 		e.phase4_5TransitionBoost(ctx, ws, req.VaultID, fused)
 	}
 
-	// Phase 4.75: Lazy archive restore — check Bloom filter, restore dormant edges.
-	restoredEdges := e.phase4_75ArchiveRestore(ctx, ws, fused)
+	// Phase 4.75: Lazy archive restore — check Bloom filter, restore dormant
+	// edges. Gated on req.ReadOnly (the single resolved decision COG-11
+	// establishes and #846 requires exactly one path compute) — a read must
+	// not mutate learning state, and minting a live 0x03/0x04/0x14 row out of
+	// an archived edge (plus the STO-12 stranded-row DELETE branch inside
+	// RestoreArchivedEdgesTransitive) is exactly such a mutation. The restore
+	// still happens — lazily, on the next NON-read-only Activate that
+	// reaches the edge — which is the correct semantics; a read-only call
+	// must simply not be the one that performs it.
+	var restoredEdges []mbp.EdgeRef
+	if !req.ReadOnly {
+		restoredEdges = e.phase4_75ArchiveRestore(ctx, ws, fused)
+	}
 
 	// Resolve traversal profile for Phase 5 and for audit logging.
 	// Always resolved so ProfileUsed is set on every activation, regardless of HopDepth.
@@ -1928,7 +1939,18 @@ func (e *ActivationEngine) phase6Score(
 	// Loading full engrams upfront eliminates the second pass entirely — engrams are already
 	// in hand when building the activation result. The extra bytes per candidate (~2-8KB vs ~46B
 	// for metadata-only) are worth eliminating an entire Pebble read round-trip.
-	allEngrams, err := e.store.GetEngrams(ctx, ws, ids)
+	//
+	// A ReadOnly call (the single resolved decision) suppresses the L1
+	// cache recency stamp this load would otherwise apply to every
+	// candidate it SCORES, not just ones it emits — a scoring pass is not a
+	// user access, and EngramLastAccessNs (above) feeds real recency
+	// scoring in a LATER, unrelated call. See
+	// storage.ContextWithNoAccessCacheStamp's doc.
+	getEngramsCtx := ctx
+	if req.ReadOnly {
+		getEngramsCtx = storage.ContextWithNoAccessCacheStamp(ctx)
+	}
+	allEngrams, err := e.store.GetEngrams(getEngramsCtx, ws, ids)
 	if err != nil {
 		return nil, fmt.Errorf("phase6 get engrams: %w", err)
 	}

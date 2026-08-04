@@ -29,6 +29,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `read_only:true` `Activate` no longer restores an archived association edge, and no
+  longer freshens the L1 read cache's recency timestamp for candidates it merely scores**
+  (#846). Two independent gaps, both project-wide (any caller of `Activate` with
+  `read_only:true`, not a single surface):
+  - Phase 4.75's lazy archive restore had no `ReadOnly` gate at all — every read-only
+    `Activate` whose candidates touched an archived (0x25) association edge could mint a
+    live 0x03/0x04/0x14 row for it via `RestoreArchivedEdgesTransitive`, including that
+    call's stranded-row DELETE branch, contradicting COG-11's "a read must not mutate
+    learning state" text. Fixed by gating the phase 4.75 call on the resolved
+    `actReq.ReadOnly`; the restore still happens, lazily, on the next non-read-only
+    `Activate` that reaches the edge.
+  - A read-only `Activate`'s engram load stamped the L1 cache's recency timestamp for
+    every candidate it scored, not just ones it returned, and that timestamp feeds real
+    ACT-R recency scoring in a later, unrelated recall — a scoring pass is not a user
+    access. Fixed with `storage.ContextWithNoAccessCacheStamp`, threaded from
+    `activation.phase6Score` whenever `req.ReadOnly` is true: the entry is still cached
+    (a same-call re-read avoids a Pebble round-trip) but its recency timestamp is left
+    unstamped until a real, non-read-only access touches it.
+
+  See `docs/internals/invariants.md` COG-11's amendments for the mechanism and pinning
+  tests.
 - **`muninn shell`'s `use <vault>` no longer reports success when the vault switch was not
   persisted, and no longer clobbers unrelated keys in `~/.muninn/config`** (#634). The shell's
   `use` command did call the persistence function (the issue's stated "does not persist"

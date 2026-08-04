@@ -18,8 +18,14 @@ import (
 
 // GetEngram reads a full engram record by ID.
 func (ps *PebbleStore) GetEngram(ctx context.Context, wsPrefix [8]byte, id ULID) (*Engram, error) {
+	noStamp := noAccessCacheStampFromContext(ctx)
+
 	// Check L1 cache first (vault-scoped to prevent cross-vault cache hits).
-	if eng, found := ps.cache.Get(wsPrefix, id); found {
+	if noStamp {
+		if eng, found := ps.cache.GetNoStamp(wsPrefix, id); found {
+			return eng, nil
+		}
+	} else if eng, found := ps.cache.Get(wsPrefix, id); found {
 		return eng, nil
 	}
 
@@ -42,8 +48,14 @@ func (ps *PebbleStore) GetEngram(ctx context.Context, wsPrefix [8]byte, id ULID)
 	// Convert back to storage.Engram
 	eng := fromERFEngram(erfEng)
 
-	// Cache it (vault-scoped).
-	ps.cache.Set(wsPrefix, id, eng)
+	// Cache it (vault-scoped). A suppressed ctx caches the value (so a
+	// same-call re-read is still served without a Pebble round-trip) but
+	// does not stamp recency — see cache.go's SetNoStamp doc.
+	if noStamp {
+		ps.cache.SetNoStamp(wsPrefix, id, eng)
+	} else {
+		ps.cache.Set(wsPrefix, id, eng)
+	}
 
 	return eng, nil
 }
@@ -66,6 +78,7 @@ func (ps *PebbleStore) EngramLastAccessNs(wsPrefix [8]byte, id ULID) int64 {
 // Callers must check for nil before dereferencing.
 func (ps *PebbleStore) GetEngrams(ctx context.Context, wsPrefix [8]byte, ids []ULID) ([]*Engram, error) {
 	result := make([]*Engram, len(ids))
+	noStamp := noAccessCacheStampFromContext(ctx)
 
 	// Phase 1: serve L1-cached engrams without touching Pebble.
 	type uncachedEntry struct {
@@ -75,7 +88,14 @@ func (ps *PebbleStore) GetEngrams(ctx context.Context, wsPrefix [8]byte, ids []U
 	}
 	var uncached []uncachedEntry
 	for i, id := range ids {
-		if eng, found := ps.cache.Get(wsPrefix, id); found {
+		var eng *Engram
+		var found bool
+		if noStamp {
+			eng, found = ps.cache.GetNoStamp(wsPrefix, id)
+		} else {
+			eng, found = ps.cache.Get(wsPrefix, id)
+		}
+		if found {
 			result[i] = eng
 		} else {
 			uncached = append(uncached, uncachedEntry{
@@ -145,7 +165,11 @@ func (ps *PebbleStore) GetEngrams(ctx context.Context, wsPrefix [8]byte, ids []U
 			continue
 		}
 		eng := fromERFEngram(erfEng)
-		ps.cache.Set(wsPrefix, u.id, eng)
+		if noStamp {
+			ps.cache.SetNoStamp(wsPrefix, u.id, eng)
+		} else {
+			ps.cache.Set(wsPrefix, u.id, eng)
+		}
 		result[u.resultIdx] = eng
 	}
 
