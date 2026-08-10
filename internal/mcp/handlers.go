@@ -640,7 +640,7 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	// path, is untouched.
 	if mode == "recent" {
 		rp := s.orientationPlasticity(ctx, vault)
-		if block := contradictionDebtBlock(s.contradictionDebtFor(ctx, vault, rp), rp.MultiUser, time.Now()); block != nil {
+		if block := s.contradictionDebtAttachment(ctx, vault, rp, time.Now()); block != nil {
 			result["unresolved_contradictions"] = block
 		}
 	}
@@ -1313,7 +1313,7 @@ func (s *MCPServer) handleWhereLeftOff(ctx context.Context, w http.ResponseWrite
 	}
 	// COG-29 amendment: the vault-wide unresolved-contradiction debt readout.
 	// Absent, not empty, when the vault owes nothing.
-	if block := contradictionDebtBlock(s.contradictionDebtFor(ctx, vault, rp), rp.MultiUser, time.Now()); block != nil {
+	if block := s.contradictionDebtAttachment(ctx, vault, rp, time.Now()); block != nil {
 		out["unresolved_contradictions"] = block
 	}
 	sendResult(w, id, textContent(mustJSON(out)))
@@ -1353,8 +1353,12 @@ func (s *MCPServer) handleGuide(ctx context.Context, w http.ResponseWriter, id j
 	}
 	// COG-29 amendment: the vault-wide unresolved-contradiction debt readout,
 	// rendered into the guide's contradiction section. nil ⇒ nothing is added.
-	debt := s.contradictionDebtFor(ctx, vault, *plasticity)
-	guide := generateGuide(vault, *plasticity, stats, contradictionDebtGuideSection(debt, plasticity.MultiUser, time.Now()))
+	debt, debtFailed := s.contradictionDebtFor(ctx, vault, *plasticity)
+	debtSection := contradictionDebtGuideSection(debt, plasticity.MultiUser, time.Now())
+	if debtFailed {
+		debtSection = "\n**This vault's unresolved-contradiction state could not be read.** It is UNKNOWN, not zero — `muninn_contradictions` reads the same data directly.\n"
+	}
+	guide := generateGuide(vault, *plasticity, stats, debtSection)
 	sendResult(w, id, textContent(guide))
 }
 

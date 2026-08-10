@@ -123,7 +123,7 @@ Format: **[INV-n]** assertion — `file:anchor` — *why it matters / what break
   nothing else, so `markResolvedContradictions` stays the SINGLE definition of "unresolved"
   and a third one cannot appear (pinned by `TestContradictionDebt_ResolvedPairsDisappear`
   over all three resolution verbs; RED with `markResolvedContradictions` bypassed). It is
-  gated by `vaultMayHaveContradictions`, writes nothing (COG-11), changes no score, order or
+  gated by `vaultMayHaveContradictions`, changes no score, order or
   row membership, is ABSENT (not empty) at zero debt, reports the TRUE count while showing at
   most `debtPairsShown` (3) pairs oldest-first, propagates `scan_complete` so a capped scan is
   never reported as exhaustive, renders an unknown declaration time as absent plus
@@ -150,13 +150,81 @@ Format: **[INV-n]** assertion — `file:anchor` — *why it matters / what break
   is **committed as increment 2 and is NOT shipped** — until it lands, an MBP or REST caller
   issuing the identical `Mode: "recent"` activate gets the demote window without the receipt.
   When it does land, the MCP handler must read FROM the shared struct field rather than
-  keeping this second construction site. Measured (`BenchmarkContradictionDebt_*`, Apple M5
-  Max): clean vault **~1.2µs/op, 3 allocs** (inside the noise of a ~350µs recall); with 20
-  declared pairs on a ~2,000-association vault **~175µs/op** — far below the ~50ms line above
-  which the deferred snapshot cache would have become a blocker. The scan is O(associations),
-  so that headroom shrinks linearly: ~8.5ms at 100k associations, and a 10M-association vault
-  would put an orientation call near a second. No cache ships in increment 1, deliberately —
-  a TTL chosen before measurement is a constant with no evidence.
+  keeping this second construction site. 
+  **COG-11 has two halves here and both are enforced.** It writes nothing to storage — no
+  marker, no `TouchAccess`. It also must not stamp the L1 cache's RECENCY clock, and it did:
+  the endpoint read (`fillContradictionConcepts` → `store.GetEngrams`) ran on the raw handler
+  ctx, so every orientation call freshened `EngramLastAccessNs` on BOTH members of every
+  declared pair — engrams the call never returned, on a query about something else — and that
+  value is a real recency SCORING input for a LATER, unrelated recall. The readout was quietly
+  making the very memories it demotes look freshly used. Fixed by threading
+  `storage.ContextWithNoAccessCacheStamp` through the derivation, **unconditionally, not only
+  for `read_only`**: naming a memory in a vault-wide report is never a user access, whatever
+  the caller's flag says. Pinned by
+  `TestContradictionDebt_DoesNotStampAccessRecencyOnItsEndpoints`, whose control arm is an
+  unrelated `read_only` recall that leaves both endpoints at 0.
+
+  **The declared-edge scan is CACHED; the resolution is NOT.** The scan
+  (`DeclaredContradictions`) is the entire cost and is O(all forward associations), capped at
+  `DefaultDeclaredContradictionScanCap`; a vault at that cap measured ~55ms per orientation
+  call, and — worse — a vault whose single conflict had been RESOLVED paid the full scan
+  forever to emit nothing, because the fast-path flag is sticky and resolution never deletes
+  the declaring edge. `Engine.declaredContradictionsCached` memoises the scan per vault,
+  validated against `PebbleStore.ContradictsWriteGen`, a per-vault counter of `RelContradicts`
+  association writes. **Only the scan is cached.** The 0x0A read, the endpoint fill and
+  `markResolvedContradictions` re-run on every call, because the scan is a pure function of the
+  vault's contradicts edges (so a write counter is an exact invalidation signal) while
+  resolution depends on engram STATE and on the CLOCK — and a `ValidUntil` that simply elapses
+  has no event to invalidate on. Caching the derived ANSWER would have re-created the "resolved
+  it and the theater continued" bug #764 closed, on a timer nobody could see; that is
+  RED-checked — `TestContradictionDebt_CachedScanStillSeesAResolution` fails when the sabotage
+  caches the answer. The counter lives in the STORE, not in an engine hook list, because the
+  engine path misses the inline association writers used by `Write`/`WriteBatch` and — in
+  cluster mode — replication applying a peer's write, which never calls `Engine.Link`; its
+  completeness is pinned behaviourally, one arm per public write path
+  (`TestContradictsWriteGen_BumpsOnEveryAssociationWritePath`), and it deliberately ignores
+  every other relation so ordinary Hebbian churn cannot invalidate it. The cache is engine
+  in-memory state, writes nothing, and is per-process. **Named residual:** association DELETION
+  does not bump the counter, so a contradicts edge pruned by weight decay can leave a cached
+  scan listing a pair whose edge is gone — an OVER-warn, dropped downstream as dangling if the
+  endpoints are also gone. Under-warning is what the counter prevents; over-warning is what it
+  accepts.
+
+  **Both the gate and the cache change only I/O**, so deleting either leaves the entire suite
+  green — the adversary pass demonstrated exactly that. `Engine.DeclaredScanRunsForTest` (an
+  atomic counter with a test-only accessor) is the seam that makes them assertable, and
+  `TestContradictionDebt_GateAndCacheAreBothPinned` pins all three properties: a clean vault
+  drives the derivation's scan **zero** times (the gate), ten calls on a debt-carrying vault
+  drive it **once** (the cache), and a fully-resolved vault drives it **zero** times.
+
+  Measured (`BenchmarkContradictionDebt_*`, Apple M5 Max, 2,000-association vault carrying 20
+  declared pairs): clean vault **~1.2µs/op, 3 allocs** (inside the noise of a ~350µs recall);
+  with debt, steady state **~41µs/op** (was ~206-244µs before the cache); the cold first call
+  after a declaration **~206µs/op**; a fully-resolved vault **~37µs/op** (was ~206-253µs, and
+  it paid that on every orientation call forever). The scan portion implied by cold-minus-warm
+  is ~8.3ms per 100k associations, independently reproducing the in-tree
+  `BenchmarkDeclaredContradictions` figure of 8.5ms/100k. **The steady-state number contains no
+  scan at all, so it does not grow with association count** — a property pinned structurally by
+  the scan counter rather than argued by extrapolation. An earlier version of this paragraph
+  projected "near a second" for a 10M-association vault; that was wrong twice over — the scan
+  cap bounds the uncached cost at roughly its ~55ms ceiling, and after the cache only the first
+  call following a declaration pays it at all.
+
+  **Two more named residuals, both deliberate.** (a) #713's per-vault `ExcludeTags` drops a
+  memory from recall RANKING but does not filter this readout, so an excluded memory's concept
+  can still be named — reproduced behaviourally, with a control proving recall does drop it
+  (`TestContradictionDebt_ExcludeTagsDoesNotFilterTheReadout`). Accepted because `ExcludeTags`
+  is documented as ranking-only and explicitly not a hiding mechanism; that test is the flag if
+  it is ever re-scoped into a visibility control. (b) The block attaches to an ABSTAINED
+  response. That is not a contradiction: abstention describes the ANSWER to this query ("the
+  vault has nothing for you"), the block describes what the VAULT OWES. Suppressing it there
+  would make a debt least visible exactly when the agent got no results to read.
+
+  **A derivation error is reported, not swallowed.** Failing open on presentation (principle
+  #4) must not mean failing SILENT: emitting nothing on a store fault makes the vault look
+  debt-free while the confidence penalty stays charged — the motivating incident restored. The
+  response carries `{"unavailable": true, "note": …}` instead: no count, no pairs, no age,
+  because an invented zero is the silently-wrong class.
   **Whether it STAYS is not decided by these tests.** The pre-committed field rule
   (`.claude/deep-review/2026-08-10-contradiction-debt-push-design.md` §7 Stage B) can kill it,
   and #609 — ambient push, 523 deliveries, zero uptake — is the precedent it has to beat.

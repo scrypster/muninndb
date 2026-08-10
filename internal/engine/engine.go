@@ -239,6 +239,16 @@ type Engine struct {
 	// noteContradictionDeclared.
 	contradictionProbeClean sync.Map
 
+	// declaredScanCache memoises the COG-29 debt readout's declared-edge scan
+	// per vault ([8]byte ws prefix -> *declaredScanCacheEntry), validated
+	// against the store's RelContradicts write counter. ONLY the scan is
+	// cached; resolution is re-derived on every call. See
+	// declaredContradictionsCached for why that split is load-bearing.
+	declaredScanCache sync.Map
+	// declaredScanRuns counts actual executions of that scan, so the gate and
+	// the cache — both of which change only I/O — can be pinned by a test.
+	declaredScanRuns atomic.Int64
+
 	// mergeMu serialises concurrent MergeEntity calls that touch the same entities.
 	// Uses a dedicated stripe array separate from the storage-layer entity locks to
 	// avoid reentrancy deadlock (UpsertEntityRecord acquires storage stripes internally).

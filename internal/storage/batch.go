@@ -153,6 +153,7 @@ func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8
 			peak = assoc.Weight
 		}
 		av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
+		b.ps.noteContradictsWrite(wsPrefix, assoc.RelType)
 		b.batch.Set(keys.AssocFwdKey(wsPrefix, id16, assoc.Weight, [16]byte(assoc.TargetID)), av[:], nil)
 		b.batch.Set(keys.AssocRevKey(wsPrefix, [16]byte(assoc.TargetID), assoc.Weight, id16), av[:], nil)
 		var wiBuf [4]byte
@@ -223,6 +224,7 @@ func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src
 		peak = assoc.Weight
 	}
 	av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
+	b.ps.noteContradictsWrite(ws, assoc.RelType)
 	b.batch.Set(keys.AssocFwdKey(ws, [16]byte(src), assoc.Weight, [16]byte(dst)), av[:], nil)
 	b.batch.Set(keys.AssocRevKey(ws, [16]byte(dst), assoc.Weight, [16]byte(src)), av[:], nil)
 	var weightBuf [4]byte

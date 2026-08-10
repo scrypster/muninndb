@@ -35,6 +35,11 @@ var appendInfra = map[string]bool{
 	// WaitWriteTimeIdle drains the write-time async workers and writes
 	// nothing itself — an out-of-package test seam (#722 doctrine, #764).
 	"WaitWriteTimeIdle": true,
+	// DeclaredScanRunsForTest reads an in-process counter of COG-29 debt-scan
+	// executions. Test-only seam, no store access at all, writes nothing — it
+	// exists because the fast-path gate and the scan cache change only I/O and
+	// are otherwise unassertable.
+	"DeclaredScanRunsForTest": true,
 	// ResetRepairWatermark (#761) deletes a per-vault REPAIR-PASS watermark
 	// (0x2B/0x2E), never an engram/entity/lease — refuseAppend's guarantee is
 	// specifically about existing MEMORIES, and this touches none. It is also

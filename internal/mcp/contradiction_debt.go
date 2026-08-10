@@ -39,6 +39,11 @@ import (
 // agent that carefully scoped its recall to its own tag must not read them as its own.
 const contradictionDebtScopeNote = "This vault is shared: these conflicts span ALL users of the vault and are not necessarily yours."
 
+// contradictionDebtLowerBoundNote is the words behind `scan_complete: false`. It
+// is the SAME sentence the prose render uses, so the two cannot drift into
+// disagreeing about how much the count can be trusted.
+const contradictionDebtLowerBoundNote = "The contradiction scan hit its cap, so this count is a LOWER BOUND: more unresolved pairs may exist than are reported here."
+
 // contradictionDebtReporter is the optional vault-wide debt read. Probed rather
 // than added to EngineInterface for the same reason contradictionReporter is:
 // adding a method there forces every implementation, including test doubles in
@@ -49,29 +54,56 @@ type contradictionDebtReporter interface {
 }
 
 // contradictionDebtFor is the single entry point the three orientation handlers
-// use. It returns nil — meaning "attach nothing at all", not an empty object —
-// whenever the vault carries no debt, the engine has no debt read, the vault's
-// plasticity has the readout switched off, or the derivation fails.
+// use. It returns (nil, false) — meaning "attach nothing at all", not an empty
+// object — whenever the vault carries no debt, the engine has no debt read, or
+// the vault's plasticity has the readout switched off.
 //
-// Failure is silent-but-logged by design: this is a presentation extra on a call
-// the agent made for another reason, and principle #4's fail-open-on-presentation
-// side says a debt read that errors must not turn muninn_recall into an error.
-// The pre-existing per-row and response-level contradiction paths are untouched
-// by that failure, so nothing an agent depends on regresses.
-func (s *MCPServer) contradictionDebtFor(ctx context.Context, vault string, p auth.ResolvedPlasticity) *engine.ContradictionDebt {
+// The second return is the FAILED flag, and it exists because "we could not tell
+// you" and "there is nothing to tell you" are different answers and this surface
+// exists precisely to stop reporting one as the other. A derivation error must
+// not turn muninn_recall into an error (principle #4, fail open on presentation),
+// but silently emitting nothing restores the motivating incident with the
+// confidence penalty already charged — a persistent store fault would make the
+// vault look debt-free forever. The caller renders a minimal honest marker
+// instead: no count, no pairs, no age.
+//
+// The WARN is deliberately not rate-limited, matching the gate's own probe
+// warnings: a repeated failure on a low-frequency orientation call is signal.
+func (s *MCPServer) contradictionDebtFor(ctx context.Context, vault string, p auth.ResolvedPlasticity) (*engine.ContradictionDebt, bool) {
 	if !p.ContradictionDebt {
-		return nil
+		return nil, false
 	}
 	rep, ok := s.engine.(contradictionDebtReporter)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	debt, err := rep.ContradictionDebt(ctx, vault)
 	if err != nil {
-		slog.Warn("contradiction debt readout failed; the orientation response carries no block", "vault", vault, "err", err)
-		return nil
+		slog.Warn("contradiction debt readout failed; reporting it as unavailable rather than as no debt", "vault", vault, "err", err)
+		return nil, true
 	}
-	return debt
+	return debt, false
+}
+
+// contradictionDebtAttachment is what the two JSON orientation surfaces attach:
+// the block, the unavailable marker, or nothing.
+func (s *MCPServer) contradictionDebtAttachment(ctx context.Context, vault string, p auth.ResolvedPlasticity, now time.Time) map[string]any {
+	debt, failed := s.contradictionDebtFor(ctx, vault, p)
+	if failed {
+		return contradictionDebtUnavailableBlock()
+	}
+	return contradictionDebtBlock(debt, p.MultiUser, now)
+}
+
+// contradictionDebtUnavailableBlock is the honest minimum: this vault's
+// unresolved-contradiction state could not be read on this call. It carries NO
+// count and NO pairs — an invented zero would be the silently-wrong class this
+// whole readout exists to close.
+func contradictionDebtUnavailableBlock() map[string]any {
+	return map[string]any{
+		"unavailable": true,
+		"note":        "this vault's unresolved-contradiction state could not be read on this call; it is UNKNOWN, not zero. muninn_contradictions reads the same data directly.",
+	}
 }
 
 // orientationPlasticity resolves the vault's plasticity for an orientation
@@ -127,6 +159,13 @@ func contradictionDebtBlock(debt *engine.ContradictionDebt, multiUser bool, now 
 		block["oldest_declared_at"] = debt.Oldest.UTC().Format(time.RFC3339)
 		block["oldest_age_hours"] = ageHours(debt.Oldest, now)
 	}
+	if !debt.ScanComplete {
+		// The prose render says "LOWER BOUND" in words; a bare `scan_complete:
+		// false` next to a confident `count` does not, and a caller reading the
+		// JSON is the one most likely to treat the count as exhaustive. Say the
+		// same sentence on both renders.
+		block["note"] = contradictionDebtLowerBoundNote
+	}
 	if multiUser {
 		block["scope_note"] = contradictionDebtScopeNote
 	}
@@ -164,7 +203,8 @@ func contradictionDebtGuideSection(debt *engine.ContradictionDebt, multiUser boo
 		b.WriteString(contradictionDebtScopeNote)
 	}
 	if !debt.ScanComplete {
-		b.WriteString(" The contradiction scan hit its cap, so this count is a LOWER BOUND.")
+		b.WriteString(" ")
+		b.WriteString(contradictionDebtLowerBoundNote)
 	}
 	b.WriteString("\n")
 	for _, p := range debt.Pairs {

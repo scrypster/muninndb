@@ -4,9 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/engine/activation"
+	"github.com/scrypster/muninndb/internal/engine/trigger"
+	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -441,12 +447,17 @@ func BenchmarkContradictionDebt_CleanVault(b *testing.B) {
 	}
 }
 
-// BenchmarkContradictionDebt_WithDebt is the §11 MERGE GATE. The design's R5
-// line is ~50ms: above it, the deferred cache becomes a blocker rather than a
-// deferral, because this derivation is attached to an orientation call.
-func BenchmarkContradictionDebt_WithDebt(b *testing.B) {
+// BenchmarkContradictionDebt_WithDebt is the §11 MERGE GATE, measured in the
+// STEADY STATE an orientation call actually pays: the declared-edge scan cached,
+// everything downstream of it (the 0x0A read, the endpoint fill, and the whole
+// resolution pass) re-derived on every call as it must be.
+// benchDebtVault builds the shared benchmark fixture: 20 declared, unresolved
+// pairs inside a vault carrying ~2,000 ordinary associations. The association
+// count is what the declared-edge scan's cost actually rides on — it is O(edges)
+// with no prefix that isolates contradicts edges.
+func benchDebtVault(b *testing.B) (*Engine, func()) {
+	b.Helper()
 	eng, cleanup := testEnv(b)
-	defer cleanup()
 	ctx := context.Background()
 
 	// 20 declared, unresolved pairs inside a vault carrying ~2,000 ordinary
@@ -487,12 +498,385 @@ func BenchmarkContradictionDebt_WithDebt(b *testing.B) {
 		}
 	}
 
+	if d, err := eng.ContradictionDebt(context.Background(), "test"); err != nil || d == nil || d.Count != 20 {
+		b.Fatalf("fixture did not produce 20 unresolved declared pairs: %+v (err %v)", d, err)
+	}
+	return eng, cleanup
+}
+
+func BenchmarkContradictionDebt_WithDebt(b *testing.B) {
+	eng, cleanup := benchDebtVault(b)
+	defer cleanup()
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := eng.ContradictionDebt(ctx, "test"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// TestContradictionDebt_DoesNotStampAccessRecencyOnItsEndpoints is COG-11 for
+// this readout, and it was a live defect: the derivation's endpoint read ran on
+// the raw handler ctx, so every orientation call stamped the L1 cache's recency
+// clock on BOTH members of every declared pair — engrams the call never
+// returned, on a query about something else. EngramLastAccessNs feeds real
+// recency SCORING in a LATER, unrelated recall, so the readout was quietly
+// making the very memories it demotes look freshly used.
+//
+// The control arm is the point: a default-mode recall on an unrelated topic
+// leaves both endpoints at 0, which is what proves the stamp came from the debt
+// derivation and not from the fixture.
+func TestContradictionDebt_DoesNotStampAccessRecencyOnItsEndpoints(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	a, b := debtPairFixture(t, eng, "test", "trestle bridge decking width",
+		"the trestle bridge decking is 1.2 metres wide",
+		"the trestle bridge decking is 1.6 metres wide", time.Now().Add(-26*time.Hour))
+	idA, _ := storage.ParseULID(a)
+	idB, _ := storage.ParseULID(b)
+	ws := eng.Store().ResolveVaultPrefix("test")
+
+	// CONTROL: an unrelated read_only recall must not touch these two engrams.
+	if _, err := eng.Activate(ctx, &mbp.ActivateRequest{Vault: "test",
+		Context: []string{"apiary hive inspection"}, MaxResults: 5, Threshold: 0.001, ReadOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	if ns := eng.Store().EngramLastAccessNs(ws, idA); ns != 0 {
+		t.Fatalf("control: an unrelated read_only recall already stamped endpoint A (%d) — the fixture cannot isolate the debt path", ns)
+	}
+	if ns := eng.Store().EngramLastAccessNs(ws, idB); ns != 0 {
+		t.Fatalf("control: an unrelated read_only recall already stamped endpoint B (%d)", ns)
+	}
+
 	debt, err := eng.ContradictionDebt(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if debt == nil || debt.Count != 1 {
+		t.Fatalf("precondition: want one unresolved pair, got %+v", debt)
+	}
+
+	if ns := eng.Store().EngramLastAccessNs(ws, idA); ns != 0 {
+		t.Errorf("COG-11: the debt readout stamped access recency on endpoint A (EngramLastAccessNs=%d, want 0) — it never returned that memory", ns)
+	}
+	if ns := eng.Store().EngramLastAccessNs(ws, idB); ns != 0 {
+		t.Errorf("COG-11: the debt readout stamped access recency on endpoint B (EngramLastAccessNs=%d, want 0)", ns)
+	}
+}
+
+// TestContradictionDebt_CachedScanIsInvalidatedByANewDeclaration — F2(a). A
+// vault whose scan is cached as clean must still report a contradiction declared
+// afterwards. Under-warning is the failure this invalidation exists to prevent.
+func TestContradictionDebt_CachedScanIsInvalidatedByANewDeclaration(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Seed one declared pair so the fast-path gate is open and the scan gets
+	// cached, then declare a SECOND pair and demand both.
+	debtPairFixture(t, eng, "test", "waterbar spacing",
+		"waterbars on the ridge trail sit 8 metres apart",
+		"waterbars on the ridge trail sit 12 metres apart", time.Now().Add(-30*time.Hour))
+	if d, err := eng.ContradictionDebt(ctx, "test"); err != nil || d == nil || d.Count != 1 {
+		t.Fatalf("precondition: want one pair cached, got %+v (err %v)", d, err)
+	}
+
+	debtPairFixture(t, eng, "test", "culvert diameter",
+		"the north loop culvert is 300 millimetres",
+		"the north loop culvert is 450 millimetres", time.Now().Add(-2*time.Hour))
+
+	got, err := eng.ContradictionDebt(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Count != 2 {
+		t.Fatalf("a contradiction declared after the scan was cached is invisible: got %+v, want Count 2", got)
+	}
+}
+
+// TestContradictionDebt_CachedScanStillSeesAResolution — F2(b). Resolution is
+// NEVER cached: it depends on engram state and on the clock, and a stale
+// resolution is the "resolved it and the theater continued" bug #764 closed.
+// The scan cache must not be able to keep a resolved pair alive.
+func TestContradictionDebt_CachedScanStillSeesAResolution(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	a, _ := debtPairFixture(t, eng, "test", "switch frog number",
+		"the yard switch is a number 6 frog",
+		"the yard switch is a number 8 frog", time.Now().Add(-40*time.Hour))
+	if d, err := eng.ContradictionDebt(ctx, "test"); err != nil || d == nil || d.Count != 1 {
+		t.Fatalf("precondition: want one pair cached, got %+v (err %v)", d, err)
+	}
+	runsAfterFirst := eng.DeclaredScanRunsForTest()
+
+	// Resolve WITHOUT writing any contradicts edge, so the scan cache stays
+	// valid and only the fresh resolution pass can drop the pair.
+	if _, err := eng.Forget(ctx, &mbp.ForgetRequest{Vault: "test", ID: a}); err != nil {
+		t.Fatal(err)
+	}
+	eng.waitWriteTimeIdle()
+
+	got, err := eng.ContradictionDebt(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("the pair was resolved and the cached scan kept it alive: %+v", got)
+	}
+	if runs := eng.DeclaredScanRunsForTest(); runs != runsAfterFirst {
+		t.Errorf("the scan re-ran (%d -> %d) — this test is meant to prove resolution is seen WITHOUT re-scanning", runsAfterFirst, runs)
+	}
+}
+
+// TestContradictionDebt_GateAndCacheAreBothPinned is F3. Both properties the
+// cost story rests on are invisible to behaviour — delete either and the whole
+// suite stays green, because they change only I/O. The derivation counter is the
+// seam that makes them assertable.
+func TestContradictionDebt_GateAndCacheAreBothPinned(t *testing.T) {
+	t.Run("clean vault performs ZERO scans (the fast-path gate)", func(t *testing.T) {
+		eng, cleanup := testEnv(t)
+		defer cleanup()
+		ctx := context.Background()
+		for i := 0; i < 5; i++ {
+			if _, err := eng.Write(ctx, &mbp.WriteRequest{Vault: "test",
+				Concept: fmt.Sprintf("trail segment %d surface", i),
+				Content: fmt.Sprintf("segment %d is crushed limestone", i)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		eng.waitWriteTimeIdle()
+
+		// Measured from ZERO, deliberately. The gate's own once-per-process
+		// probe scans through the store directly and is not counted here, so a
+		// clean vault must drive the DERIVATION's scan counter exactly 0 times
+		// — never once. Warming up first would let the scan cache stand in for
+		// the gate and the assertion would survive the gate's deletion.
+		base := eng.DeclaredScanRunsForTest()
+		if base != 0 {
+			t.Fatalf("precondition: counter starts at %d, want 0", base)
+		}
+		for i := 0; i < 11; i++ {
+			d, err := eng.ContradictionDebt(ctx, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d != nil {
+				t.Fatalf("clean vault returned debt: %+v", d)
+			}
+		}
+		if runs := eng.DeclaredScanRunsForTest(); runs != base {
+			t.Errorf("a clean vault ran the declared-edge scan %d time(s) over 10 orientation calls — the fast-path gate is not short-circuiting", runs-base)
+		}
+	})
+
+	t.Run("debt-carrying vault scans ONCE across repeated calls (the cache)", func(t *testing.T) {
+		eng, cleanup := testEnv(t)
+		defer cleanup()
+		ctx := context.Background()
+		debtPairFixture(t, eng, "test", "coupler height",
+			"the coupler height standard is 26 millimetres",
+			"the coupler height standard is 24 millimetres", time.Now().Add(-6*time.Hour))
+
+		base := eng.DeclaredScanRunsForTest()
+		for i := 0; i < 10; i++ {
+			d, err := eng.ContradictionDebt(ctx, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d == nil || d.Count != 1 {
+				t.Fatalf("call %d: want one pair, got %+v", i, d)
+			}
+		}
+		if runs := eng.DeclaredScanRunsForTest() - base; runs != 1 {
+			t.Errorf("10 orientation calls ran the declared-edge scan %d times, want exactly 1 — the scan cache is not holding", runs)
+		}
+	})
+
+	t.Run("a RESOLVED vault stops paying for the scan", func(t *testing.T) {
+		// The measured pathology: the fast-path flag is sticky and resolution
+		// never deletes the declaring edge, so before the cache this vault paid
+		// the full O(associations) scan on every orientation call forever, to
+		// emit nothing.
+		eng, cleanup := testEnv(t)
+		defer cleanup()
+		ctx := context.Background()
+		a, _ := debtPairFixture(t, eng, "test", "tie plate gauge",
+			"the branch line tie plates are 4 millimetres",
+			"the branch line tie plates are 6 millimetres", time.Now().Add(-6*time.Hour))
+		if _, err := eng.Forget(ctx, &mbp.ForgetRequest{Vault: "test", ID: a}); err != nil {
+			t.Fatal(err)
+		}
+		eng.waitWriteTimeIdle()
+		if _, err := eng.ContradictionDebt(ctx, "test"); err != nil {
+			t.Fatal(err)
+		}
+		base := eng.DeclaredScanRunsForTest()
+		for i := 0; i < 10; i++ {
+			if _, err := eng.ContradictionDebt(ctx, "test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if runs := eng.DeclaredScanRunsForTest() - base; runs != 0 {
+			t.Errorf("a fully-resolved vault re-ran the scan %d time(s) over 10 calls — it pays the full scan forever to emit nothing", runs)
+		}
+	})
+}
+
+// TestContradictionDebt_ExcludeTagsDoesNotFilterTheReadout records a NAMED
+// RESIDUAL, and it asserts the CURRENT behaviour on purpose — it is not a bug
+// report dressed as a test.
+//
+// #713's per-vault ExcludeTags drops a tagged memory from recall RANKING. It is
+// applied inside the activation pipeline (activation/engine.go, from
+// resolved.ExcludeTags stamped at engine.go's Activate path), and this readout
+// never builds an ActivateRequest, so the exclusion is bypassed by
+// construction: a memory the operator excluded from ranking can still have its
+// CONCEPT named in the debt block.
+//
+// That is judged acceptable for this increment and is the same exposure
+// muninn_contradictions already has to the same credential (D5): ExcludeTags is
+// documented as ranking-only and explicitly NOT a hiding mechanism — the engram
+// is not deleted and stays visible to direct-id reads. If ExcludeTags is ever
+// re-scoped into a visibility control, this test fails and is the flag that this
+// surface must then filter too.
+func TestContradictionDebt_ExcludeTagsDoesNotFilterTheReadout(t *testing.T) {
+	dir, err := os.MkdirTemp("", "muninndb-debt-excludetags-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	db, err := storage.OpenPebble(dir, storage.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 1000})
+	ftsIdx := fts.New(db)
+	embedder := &noopEmbedder{}
+	as := auth.NewStore(db)
+	if err := as.SetVaultConfig(auth.VaultConfig{
+		Name: "test", Public: true,
+		Plasticity: &auth.PlasticityConfig{ExcludeTags: []string{"archive-noise"}},
+	}); err != nil {
+		t.Fatalf("SetVaultConfig: %v", err)
+	}
+	eng := NewEngine(EngineConfig{Store: store, AuthStore: as, FTSIndex: ftsIdx,
+		ActivationEngine: activation.New(store, &ftsAdapter{ftsIdx}, nil, embedder),
+		TriggerSystem:    trigger.New(store, &ftsTrigAdapter{ftsIdx}, nil, embedder),
+		Embedder:         embedder})
+	defer func() {
+		eng.Stop()
+		store.Close()
+	}()
+	ctx := context.Background()
+
+	if got := eng.ResolveVaultPlasticity("test").ExcludeTags; len(got) != 1 || got[0] != "archive-noise" {
+		t.Fatalf("precondition: ExcludeTags did not resolve, got %v", got)
+	}
+
+	wa, err := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "sleeper spacing",
+		Content: "the ridge trail sleepers sit 600 millimetres apart", Tags: []string{"archive-noise"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wb, err := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "sleeper spacing revised",
+		Content: "the ridge trail sleepers sit 900 millimetres apart"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idA, _ := storage.ParseULID(wa.ID)
+	idB, _ := storage.ParseULID(wb.ID)
+	ws := eng.Store().ResolveVaultPrefix("test")
+	if err := eng.Store().WriteAssociation(ctx, ws, idB, idA, &storage.Association{
+		TargetID: idA, RelType: storage.RelContradicts, Weight: 0.8, Confidence: 1,
+		CreatedAt: time.Now().Add(-8 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	eng.waitWriteTimeIdle()
+
+	// CONTROL: recall genuinely drops the excluded memory, so the fixture is live.
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{Vault: "test",
+		Context: []string{"ridge trail sleeper spacing"}, MaxResults: 10, Threshold: 0.001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range resp.Activations {
+		if item.ID == wa.ID {
+			t.Fatalf("control: ExcludeTags did not drop the tagged memory from recall — the residual cannot be demonstrated")
+		}
+	}
+
+	debt, err := eng.ContradictionDebt(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if debt == nil || debt.Count != 1 {
+		t.Fatalf("want one unresolved pair, got %+v", debt)
+	}
+	named := debt.Pairs[0].ConceptA + "|" + debt.Pairs[0].ConceptB
+	if !strings.Contains(named, "sleeper spacing") {
+		t.Fatalf("the readout did not name the pair at all: %q", named)
+	}
+	// RECORDED, not asserted-as-desirable: the excluded memory IS named here.
+	t.Logf("named residual confirmed: ExcludeTags excludes %q from recall ranking, "+
+		"and the debt readout still names it (%q). Ranking-only by design; see §8.", wa.ID, named)
+}
+
+// BenchmarkContradictionDebt_WithDebtColdScan is the UNCACHED derivation — the
+// number the §11 gate was originally about, and what every FIRST orientation
+// call after a declaration pays. It evicts the scan cache each iteration, so it
+// measures the O(all forward associations) declared-edge scan plus the full
+// resolution pass. Reported alongside the steady state because the two answer
+// different questions and quoting only the cached one would be flattering.
+func BenchmarkContradictionDebt_WithDebtColdScan(b *testing.B) {
+	eng, cleanup := benchDebtVault(b)
+	defer cleanup()
+	ctx := context.Background()
+	ws := eng.Store().ResolveVaultPrefix("test")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		eng.declaredScanCache.Delete(ws)
+		if _, err := eng.ContradictionDebt(ctx, "test"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkContradictionDebt_ResolvedVault is the row the §4 cost table was
+// missing. A vault whose only conflict has been RESOLVED still has the fast-path
+// gate open forever (the flag is sticky and resolution does not delete the
+// declaring edge), so before the scan cache it paid the full O(associations)
+// scan on every orientation call to emit nothing at all. This measures that
+// steady state.
+func BenchmarkContradictionDebt_ResolvedVault(b *testing.B) {
+	eng, cleanup := benchDebtVault(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Retire one endpoint of every declared pair, so every pair resolves and
+	// the readout has nothing to say.
+	debt, err := eng.ContradictionDebt(ctx, "test")
+	if err != nil || debt == nil {
+		b.Fatalf("fixture: %+v (err %v)", debt, err)
+	}
+	rep, err := eng.GetContradictionReport(ctx, "test")
 	if err != nil {
 		b.Fatal(err)
 	}
-	if debt == nil || debt.Count != 20 {
-		b.Fatalf("fixture did not produce 20 unresolved declared pairs: %+v", debt)
+	for _, p := range rep.Pairs {
+		if _, err := eng.Forget(ctx, &mbp.ForgetRequest{Vault: "test", ID: p.IDa}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	eng.waitWriteTimeIdle()
+	if d, err := eng.ContradictionDebt(ctx, "test"); err != nil || d != nil {
+		b.Fatalf("fixture did not fully resolve: %+v (err %v)", d, err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()

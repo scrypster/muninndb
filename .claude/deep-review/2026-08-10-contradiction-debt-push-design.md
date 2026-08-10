@@ -233,11 +233,22 @@ would break `pruneConflictBlock`'s contract at `engine_contradiction.go:472-476`
 | First call in a process on a clean vault | + one bounded declared-edge scan, memoised forever after: **8.5ms over 100k associations** (`BenchmarkDeclaredContradictions`, cited in COG-29) |
 | Vault with declared contradictions | full `GetContradictionReport`: 0x0A scan + declared-edge scan + one batched `GetEngrams` over the (small, deduplicated) endpoint set |
 
-The third row is the only real cost and it is paid **only on `muninn_guide`,
-`muninn_where_left_off`, and `mode="recent"` recall** — three low-frequency orientation
-calls — and only on vaults that actually carry debt. Increment 1 ships **no cache**
-deliberately (§6, deferral 3): adding one before measuring would be a tuned constant with
-no evidence behind it.
+**AMENDED after the adversary pass (2026-08-10): the table above was incomplete and its
+conclusion was wrong.** It had no row for the state the motivating vault ends up in, and
+the "no cache" decision did not survive measurement.
+
+| Vault state | Work per attachment call (as BUILT) |
+|---|---|
+| No contradiction ever declared | one `sync.Map` load + one 0x0A `First()` — **~1.2µs/op, 3 allocs** measured |
+| **Debt declared and RESOLVED** (the missing row) | the fast-path flag is STICKY and resolution never deletes the declaring edge, so the gate stays open forever. Uncached this paid the FULL scan on every orientation call to emit nothing: **~206-253µs** on a 2,000-association vault, **~8ms** at 100k. Now **~37µs** |
+| Vault with live declared debt, steady state | scan cached, everything else re-derived: **~41µs/op** (was ~206-244µs) |
+| Vault with live declared debt, first call after a declaration | full scan: **~206µs/op** at 2,000 associations, ~8.3ms/100k, bounded by the 500k scan cap at roughly **~55ms** |
+
+The §11 gate TRIPPED on the capped-scan case (~55ms > the ~50ms R5 line), so per §11 the
+cache was promoted from deferral to blocker and BUILT. What is cached is **only the
+declared-edge scan**, invalidated by a per-vault `RelContradicts` write counter in the
+store — no TTL, and no caching of the derived answer, because resolution depends on engram
+state and on the CLOCK and a stale resolution is the bug #764 closed. See §8/R7.
 
 ---
 
@@ -326,8 +337,11 @@ test is re-run but not amended.
    MCP-specific handlers, not a field added to `mbp.ActivationItem`. **Flagged for the
    maintainer:** if MBP is considered an agent-facing session surface, `where_left_off`
    parity there is the natural increment 2.
-3. **Any caching/memoisation of the debt snapshot.** Measure the real cost first (§7,
-   Stage A gate 4). A TTL chosen before measurement is a constant with no evidence.
+3. ~~**Any caching/memoisation of the debt snapshot.**~~ **NO LONGER DEFERRED — the §11
+   gate tripped and this shipped in increment 1.** The measurement that was missing now
+   exists (§4): the capped scan is ~55ms, above the R5 line, and a RESOLVED vault paid the
+   full scan forever to emit nothing. Built as an event-invalidated cache of the SCAN ONLY,
+   with no TTL. The derived answer is deliberately NOT cached.
 4. **Detected-but-not-declared pairs** (D2) and any migration/cleanup of COG-23's legacy
    fabricated 0x0A markers.
 5. **Per-user scoping of debt in shared vaults.** Increment 1 says so in `scope_note`
@@ -463,6 +477,29 @@ derives itself — not a constant.
 is 8.5ms/100k associations; a 10M-association vault would be ~850ms on an orientation call.
 *Falsifier:* A6's `BenchmarkContradictionDebt_WithDebt` above ~50ms makes the deferred cache
 (deferral 3) a blocker rather than a deferral.
+
+**R7 — Named residuals accepted in increment 1, each with the reason and the test that
+would flag a change of mind.**
+- **#713 `ExcludeTags` does not filter this readout.** The exclusion is applied inside the
+  activation pipeline; this derivation never builds an `ActivateRequest`, so a memory the
+  operator excluded from recall RANKING can still have its concept named here. **Reproduced
+  behaviourally**, with a control proving recall does drop it
+  (`TestContradictionDebt_ExcludeTagsDoesNotFilterTheReadout`). Accepted: `ExcludeTags` is
+  documented as ranking-only and explicitly not a hiding mechanism — the engram is not
+  deleted and stays visible to direct-id reads. That test fails if it is ever re-scoped into
+  a visibility control, which is the flag to filter here too.
+- **The block attaches to an ABSTAINED response.** Deliberate. Abstention describes the
+  ANSWER to this query ("the vault has nothing for you"); the block describes what the VAULT
+  OWES. Suppressing it there would make a debt least visible exactly when the agent got no
+  results to read.
+- **Association DELETION does not invalidate the scan cache.** A contradicts edge pruned by
+  weight decay can leave a cached scan listing a pair whose edge is gone. That is an
+  OVER-warn, and a pair whose endpoints are also gone is dropped downstream as dangling.
+  Under-warning is what the counter structurally prevents; over-warning is what it accepts.
+- **Lease-hidden concepts.** D5 holds: exposure matches `muninn_contradictions`, reachable by
+  every credential that reaches these three tools, and SEC-9 makes toolset filtering
+  advertisement-only so no splitting credential class exists. Revisit if toolsets become a
+  dispatch boundary.
 
 **R6 — Two definitions of "unresolved" drift apart.** If a later change to
 `markResolvedContradictions` or `contradictionEndpointLive` touches only one site (COG-29

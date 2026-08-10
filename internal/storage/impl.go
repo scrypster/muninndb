@@ -47,12 +47,16 @@ type PebbleStore struct {
 	mol           *wal.MOL
 	gc            *wal.GroupCommitter
 	noSyncEngrams bool
-	vaultCounters sync.Map          // [8]byte -> *vaultCounter
-	provenance    *provenance.Store // Provenance chain for tracking engram creation/updates
-	scoringStore  *scoring.Store    // Per-vault learnable scoring weights
-	walSync       *walSyncer        // Periodic WAL fsync — covers all pebble.NoSync writes
-	counterFlush  *counterCoalescer // Coalesces vault count Pebble writes (100ms timer)
-	provWork      *provenanceWorker // NumCPU goroutines for provenance appends
+	vaultCounters sync.Map // [8]byte -> *vaultCounter
+	// contradictsGen counts RelContradicts association writes per vault, so the
+	// COG-29 debt readout can cache the expensive declared-edge scan and know
+	// when it is stale. See contradicts_gen.go for why this lives in the store.
+	contradictsGen contradictsGen
+	provenance     *provenance.Store // Provenance chain for tracking engram creation/updates
+	scoringStore   *scoring.Store    // Per-vault learnable scoring weights
+	walSync        *walSyncer        // Periodic WAL fsync — covers all pebble.NoSync writes
+	counterFlush   *counterCoalescer // Coalesces vault count Pebble writes (100ms timer)
+	provWork       *provenanceWorker // NumCPU goroutines for provenance appends
 	// assocCache: [24]byte (wsPrefix[8]+engramID[16]) → *assocCacheEntry
 	// Caches forward association lists to avoid repeated Pebble SSTable scans on hot engrams.
 	// Invalidated on any WriteAssociation or UpdateAssociation for that engram.
@@ -458,6 +462,7 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 			peak = assoc.Weight
 		}
 		av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
+		ps.noteContradictsWrite(wsPrefix, assoc.RelType)
 		batch.Set(keys.AssocFwdKey(wsPrefix, [16]byte(eng.ID), assoc.Weight, [16]byte(assoc.TargetID)), av[:], nil)
 		batch.Set(keys.AssocRevKey(wsPrefix, [16]byte(assoc.TargetID), assoc.Weight, [16]byte(eng.ID)), av[:], nil)
 		var wiBuf [4]byte
@@ -686,6 +691,7 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 				peak = assoc.Weight
 			}
 			av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
+			ps.noteContradictsWrite(ws, assoc.RelType)
 			batch.Set(keys.AssocFwdKey(ws, id16, assoc.Weight, [16]byte(assoc.TargetID)), av[:], nil)
 			batch.Set(keys.AssocRevKey(ws, [16]byte(assoc.TargetID), assoc.Weight, id16), av[:], nil)
 			var wiBuf [4]byte

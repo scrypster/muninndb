@@ -256,12 +256,24 @@ type ContradictionReport struct {
 // penalty must stay asynchronous and fire exactly once per pair.
 func (e *Engine) GetContradictionReport(ctx context.Context, vault string) (*ContradictionReport, error) {
 	ws := e.store.ResolveVaultPrefix(vault)
-
-	detected, err := e.store.GetContradictionRecords(ctx, ws)
+	declared, err := e.store.DeclaredContradictions(ctx, ws, 0)
 	if err != nil {
 		return nil, err
 	}
-	declared, err := e.store.DeclaredContradictions(ctx, ws, 0)
+	return e.contradictionReportFrom(ctx, ws, declared)
+}
+
+// contradictionReportFrom builds the report from an ALREADY-PERFORMED declared-
+// edge scan. Split out so the COG-29 debt readout can supply a cached scan
+// (engine_contradiction.go) while everything downstream of it — the 0x0A read,
+// the batched endpoint fill and markResolvedContradictions — still runs fresh on
+// every call, in ONE place. Splitting the scan out rather than caching the whole
+// report is deliberate: the scan is the expensive part AND the only part that is
+// a pure function of the vault's contradicts edges, while resolution depends on
+// engram state and on the CLOCK, and a cached resolution would be exactly the
+// "resolved it and the theater continued" bug #764 closed.
+func (e *Engine) contradictionReportFrom(ctx context.Context, ws [8]byte, declared storage.DeclaredContradictionScan) (*ContradictionReport, error) {
+	detected, err := e.store.GetContradictionRecords(ctx, ws)
 	if err != nil {
 		return nil, err
 	}

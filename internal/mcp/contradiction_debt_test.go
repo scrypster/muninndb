@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -440,5 +441,83 @@ func TestContradictionDebt_PlasticityOffSuppressesOnlyTheBlock(t *testing.T) {
 	offJSON, _ := json.Marshal(withoutBlock)
 	if string(on) != string(offJSON) {
 		t.Errorf("the switch changed something other than the block:\n on:  %s\n off: %s", on, offJSON)
+	}
+}
+
+// failingDebtEngine's debt derivation always errors — a persistent store fault.
+type failingDebtEngine struct{ debtStubEngine }
+
+func (e *failingDebtEngine) ContradictionDebt(_ context.Context, _ string) (*engine.ContradictionDebt, error) {
+	return nil, errors.New("synthetic store fault")
+}
+
+// TestContradictionDebt_DerivationFailureIsSaidOutLoud — F7. Failing open must
+// not mean failing SILENT. Emitting nothing on a derivation error makes the
+// vault look debt-free, which restores the motivating incident with the
+// confidence penalty already charged: the agent is told nothing while both facts
+// stay demoted. The response carries an honest marker instead — no count, no
+// pairs, no age, because an invented zero is the silently-wrong class.
+func TestContradictionDebt_DerivationFailureIsSaidOutLoud(t *testing.T) {
+	srv := newTestServerWith(&failingDebtEngine{debtStubEngine{plasticity: auth.ResolvePlasticity(nil)}})
+
+	resp := callTool(t, srv, "muninn_where_left_off", `{"vault":"default"}`)
+	block, ok := resp["unresolved_contradictions"].(map[string]any)
+	if !ok {
+		raw, _ := json.Marshal(resp)
+		t.Fatalf("a failed derivation emitted NOTHING — indistinguishable from a debt-free vault: %s", raw)
+	}
+	if block["unavailable"] != true {
+		t.Errorf("unavailable = %v, want true", block["unavailable"])
+	}
+	if note, _ := block["note"].(string); !strings.Contains(note, "UNKNOWN") {
+		t.Errorf("note = %q, want it to say the state is UNKNOWN, not zero", note)
+	}
+	for _, forbidden := range []string{"count", "pairs", "oldest_age_hours", "showing"} {
+		if _, present := block[forbidden]; present {
+			t.Errorf("the unavailable marker carries %q = %v — it must invent no numbers", forbidden, block[forbidden])
+		}
+	}
+
+	// The guide says the same thing in prose.
+	guide := callToolText(t, srv, "muninn_guide", `{"vault":"default"}`)
+	if !strings.Contains(guide, "could not be read") {
+		t.Errorf("muninn_guide is silent about the failed derivation:\n%s", guide)
+	}
+}
+
+// TestContradictionDebt_LowerBoundIsSaidOnBothRenders — F6. `scan_complete:
+// false` next to a confident `count` does not tell a JSON caller the count is a
+// floor; the prose render already said so in words. Both renders carry the SAME
+// sentence, from one const.
+func TestContradictionDebt_LowerBoundIsSaidOnBothRenders(t *testing.T) {
+	now := time.Date(2026, 3, 4, 12, 0, 0, 0, time.UTC)
+	capped := &engine.ContradictionDebt{
+		Count: 4, Truncated: true, ScanComplete: false,
+		Oldest: now.Add(-5 * time.Hour),
+		Pairs: []engine.ContradictionDebtPair{{
+			IDa: "A", ConceptA: "hive 7 queen age", IDb: "B", ConceptB: "hive 7 queen age revised",
+			DeclaredAt: now.Add(-5 * time.Hour),
+		}},
+	}
+
+	block := contradictionDebtBlock(capped, false, now)
+	note, _ := block["note"].(string)
+	if !strings.Contains(note, "LOWER BOUND") {
+		t.Errorf("JSON block note = %q, want the lower-bound sentence", note)
+	}
+	prose := contradictionDebtGuideSection(capped, false, now)
+	if !strings.Contains(prose, "LOWER BOUND") {
+		t.Errorf("prose render does not say LOWER BOUND:\n%s", prose)
+	}
+	if !strings.Contains(prose, note) {
+		t.Errorf("the two renders do not carry the SAME sentence:\n json:  %q\n prose: %s", note, prose)
+	}
+
+	// ...and a COMPLETE scan carries no note at all, so the field means
+	// something when it appears.
+	complete := *capped
+	complete.ScanComplete = true
+	if _, present := contradictionDebtBlock(&complete, false, now)["note"]; present {
+		t.Error("a complete scan carries a lower-bound note")
 	}
 }

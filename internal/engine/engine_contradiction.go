@@ -229,6 +229,65 @@ const (
 	debtPairsShown = 3
 )
 
+// declaredScanCacheEntry is one vault's memoised declared-edge scan, valid for
+// exactly as long as the store's RelContradicts write counter is unchanged.
+type declaredScanCacheEntry struct {
+	gen  uint64
+	scan storage.DeclaredContradictionScan
+}
+
+// declaredContradictionsCached returns the vault's declared-contradicts scan,
+// re-running it only when a RelContradicts edge has been written since the last
+// run.
+//
+// This exists because the scan is the ENTIRE cost of the debt readout and the
+// only part of it that is expensive: it is O(all forward associations) with no
+// prefix that isolates contradicts edges, capped at
+// storage.DefaultDeclaredContradictionScanCap. Measured, a vault sitting at that
+// cap paid ~55ms per orientation call — above the design's own ~50ms line — and,
+// worse, a vault whose single conflict had been RESOLVED still paid ~8ms forever
+// to emit nothing at all, because the fast-path flag is sticky and resolution
+// never deletes the declaring edge.
+//
+// What is cached is ONLY the scan. Everything downstream — the 0x0A read, the
+// batched endpoint fill, and markResolvedContradictions — runs fresh on every
+// call. That split is the whole design: the scan is a pure function of the
+// vault's contradicts edges (so a write counter is an exact invalidation
+// signal), while resolution depends on engram STATE and on the CLOCK, and there
+// is no event to invalidate on when a ValidUntil simply elapses. Caching the
+// derived answer would have re-created the "resolved it and the theater
+// continued" bug #764 closed, on a timer nobody could see.
+//
+// This is engine in-memory state. It writes nothing, so COG-11 is untouched by
+// it, and it is per-process — a restart re-derives.
+func (e *Engine) declaredContradictionsCached(ctx context.Context, ws [8]byte) storage.DeclaredContradictionScan {
+	gen := e.store.ContradictsWriteGen(ws)
+	if v, ok := e.declaredScanCache.Load(ws); ok {
+		if entry, _ := v.(*declaredScanCacheEntry); entry != nil && entry.gen == gen {
+			return entry.scan
+		}
+	}
+	e.declaredScanRuns.Add(1)
+	scan, err := e.store.DeclaredContradictions(ctx, ws, 0)
+	if err != nil {
+		// Degrade toward DOING the work, exactly as the gate's probes do: report
+		// an incomplete scan rather than caching a failure as if it were an
+		// answer. Complete=false makes every consumer say "lower bound".
+		slog.Warn("contradiction debt: declared-edge scan failed; the readout is a lower bound", "err", err)
+		return storage.DeclaredContradictionScan{}
+	}
+	e.declaredScanCache.Store(ws, &declaredScanCacheEntry{gen: gen, scan: scan})
+	return scan
+}
+
+// DeclaredScanRunsForTest reports how many times the declared-edge scan has
+// actually executed in this process. It exists because the two properties this
+// readout's cost story rests on — the COG-29 fast-path gate, and the scan cache
+// — are both invisible to behaviour: deleting either one changes only I/O, and
+// the entire suite stays green. Exported for tests in other packages; never
+// called by production code.
+func (e *Engine) DeclaredScanRunsForTest() int64 { return e.declaredScanRuns.Load() }
+
 // ContradictionDebtAction is the resolution instruction carried by the debt
 // readout. Built from the same contradictionResolutionActions const as the
 // recall-time warning so the two cannot name different verbs.
@@ -290,7 +349,18 @@ func (e *Engine) ContradictionDebt(ctx context.Context, vault string) (*Contradi
 		return nil, nil
 	}
 
-	report, err := e.GetContradictionReport(ctx, vault)
+	// COG-11. The endpoint read below (fillContradictionConcepts →
+	// store.GetEngrams) would otherwise stamp the L1 cache's recency clock on
+	// BOTH members of every declared pair — engrams this call never returns,
+	// on an orientation call the agent made about something else entirely.
+	// EngramLastAccessNs feeds real recency SCORING in a LATER, unrelated
+	// recall, so the readout would have been quietly making the very memories
+	// it demotes look freshly used. Suppressed UNCONDITIONALLY, not just for
+	// read_only: naming a memory in a vault-wide debt report is never a user
+	// access, whatever the caller's read_only flag says.
+	ctx = storage.ContextWithNoAccessCacheStamp(ctx)
+
+	report, err := e.contradictionReportFrom(ctx, ws, e.declaredContradictionsCached(ctx, ws))
 	if err != nil {
 		return nil, err
 	}
