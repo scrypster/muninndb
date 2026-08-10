@@ -2020,8 +2020,30 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	// inherits Concept/Tags/MemoryType/TypeLabel from the predecessor when
 	// concept == ""; pass the caller's concept only if set, embedding when
 	// supplied, importance when asserted. EffectiveAt defaults to now inside
-	// EvolveAt. Trust is set to TrustInferred internally by EvolveAt — the
-	// existing behavior, which upsert inherits.
+	// EvolveAt.
+	//
+	// Trust and confidence: the request carries both, and this branch is the one
+	// place where an evolve has a caller-asserted value to honor. Before #872
+	// they were honored on the CREATE branch and silently discarded here, so a
+	// sync job stamping trust=verified on every run produced a verified record
+	// on first sync and an inferred one on every re-sync, with no error and no
+	// warning — principle #1. nil (field omitted) falls through to
+	// evolveAtInternal's inheritance. resolveTrust keeps the SEC-14 gate on
+	// trust=verified attached to this path: an observe credential is REJECTED,
+	// never silently downgraded.
+	var trustPtr *storage.TrustLevel
+	if req.Trust != "" {
+		lvl, tErr := resolveTrust(ctx, req.Trust)
+		if tErr != nil {
+			return nil, tErr
+		}
+		trustPtr = &lvl
+	}
+	var confPtr *float32
+	if req.Confidence > 0 {
+		c := req.Confidence
+		confPtr = &c
+	}
 	concept := req.Concept // "" → EvolveAt inherits the predecessor's concept
 	newID, evErr := e.evolveAtInternal(
 		ctx,
@@ -2035,6 +2057,8 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 		req.Importance,
 		time.Time{},
 		&keyHash,
+		trustPtr,
+		confPtr,
 	)
 	if evErr != nil {
 		return nil, fmt.Errorf("upsert evolve: %w", evErr)
@@ -4344,17 +4368,29 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 // predecessor's ValidUntil stamp (half-open [from, until) windows meet exactly);
 // the zero time defaults to now.
 func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (storage.ULID, error) {
-	return e.evolveAtInternal(ctx, vault, oldID, newContent, reason, embedding, concept, entities, importance, effectiveAt, nil)
+	return e.evolveAtInternal(ctx, vault, oldID, newContent, reason, embedding, concept, entities, importance, effectiveAt, nil, nil, nil)
 }
 
-// evolveAtInternal is EvolveAt with an optional upsert key hash. When non-nil,
-// the 0x30 upsert-key forward index for (wsPrefix, *upsertKeyHash) is re-pointed
-// to the successor ULID INSIDE the evolve's atomic batch — so a content-change
-// upsert never leaves the durable pointer aimed at the soft-deleted predecessor
-// (#556, scrypster's #1 trap: the re-point must be crash-atomic with the evolve,
-// never a separate commit). Public Evolve/EvolveAt pass nil (unchanged behavior);
-// only Engine.writeUpsert passes a non-nil pointer on the content-change path.
-func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time, upsertKeyHash *[32]byte) (storage.ULID, error) {
+// evolveAtInternal is EvolveAt with an optional upsert key hash and optional
+// caller-asserted standing. When upsertKeyHash is non-nil, the 0x30 upsert-key
+// forward index for (wsPrefix, *upsertKeyHash) is re-pointed to the successor
+// ULID INSIDE the evolve's atomic batch — so a content-change upsert never
+// leaves the durable pointer aimed at the soft-deleted predecessor (#556,
+// scrypster's #1 trap: the re-point must be crash-atomic with the evolve, never
+// a separate commit).
+//
+// trustOverride/confOverride are the standing equivalents of the importance
+// override in the public signature: nil = inherit from the predecessor, non-nil
+// = the caller asserted a value on THIS write. Public Evolve/EvolveAt pass nil
+// for all three (their surfaces expose no trust or confidence argument — see
+// #872 §4 deferral 1); only Engine.writeUpsert, whose request DOES carry trust
+// and confidence, passes them. Containing the extra parameters in the unexported
+// method is the same containment upsertKeyHash uses: no embedded-library, MCP or
+// REST signature moves.
+//
+// trustOverride must already have been through resolveTrust — the SEC-14 gate on
+// trust=verified lives there, and evolveAtInternal does not re-check it.
+func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time, upsertKeyHash *[32]byte, trustOverride *storage.TrustLevel, confOverride *float32) (storage.ULID, error) {
 	// Append-mode credentials cannot evolve (modify an existing memory). Guarding
 	// EvolveAt covers Evolve too, since Evolve delegates here (#687 + valid-time).
 	// Via refuseWrite so the cluster single-writer gate lands here too (#596) —
@@ -4423,6 +4459,40 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 	if importance != nil {
 		newImportance = importanceFromRequest(importance)
 	}
+	// STANDING (trust + confidence) is inherited, never manufactured by the
+	// verb (#872, COG-34). An evolve replaces a record's CONTENT; it does not
+	// re-adjudicate how much that record is believed or who vouched for it.
+	//
+	// Trust: the old hardcoded TrustInferred laundered an "untrusted" marking
+	// off any record simply by rewording it, and demoted a human-verified one on
+	// every routine curation — which, for a Decision/Goal/Constraint/Identity
+	// with no explicit importance, silently moved it from EffectiveImportance
+	// 0.70000005 (verified bump, at or above HighImportanceFloor) to 0.6, i.e.
+	// out of the COG-20 MaxEngrams prune exemption. Inheriting confers no
+	// privilege: every credential that can evolve can already stamp trust
+	// directly on a write (MCP muninn_evolve and muninn_trust are both in
+	// mutatingTools; REST evolve and POST /api/engrams sit behind the same guard
+	// pair), so SEC-14 is untouched. TrustUnset (0x00, legacy records written
+	// before the field existed) normalizes to TrustInferred, matching
+	// resolveTrust("").
+	newTrust := oldEng.Trust
+	if newTrust == storage.TrustUnset {
+		newTrust = storage.TrustInferred
+	}
+	if trustOverride != nil {
+		newTrust = *trustOverride
+	}
+	// Confidence: the old hardcoded 1.0 was not a neutral default, it was a
+	// manufactured assertion of MAXIMUM belief in text nothing had gathered
+	// evidence about — a caller-asserted 0.4 came back as 1.0, a 2.5x inflation
+	// of the recall score (confidence multiplies straight into AbsoluteScore) on
+	// every evolve of a low-confidence memory. A stored 0 decodes as 1.0
+	// (storage/impl.go, batch.go), so a legacy record with no confidence lands
+	// on exactly the value it does today.
+	newConfidence := oldEng.Confidence
+	if confOverride != nil && *confOverride > 0 {
+		newConfidence = *confOverride
+	}
 	newEng := &storage.Engram{
 		ID:         newULID,
 		Concept:    concept,
@@ -4431,14 +4501,14 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 		MemoryType: oldEng.MemoryType,
 		TypeLabel:  oldEng.TypeLabel,
 		Importance: newImportance,
-		Confidence: 1.0,
+		Confidence: newConfidence,
 		Stability:  30.0,
 		State:      storage.StateActive,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 		LastAccess: now,
 		Embedding:  embedding,
-		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
+		Trust:      newTrust,
 		ValidFrom:  effectiveAt,
 	}
 

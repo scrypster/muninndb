@@ -148,7 +148,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"upsert_mode": map[string]any{
 						"type":        "boolean",
-						"description": "Optional. With op_id set, keep one stable memory per key across repeated writes: created on first use, and on later writes with the SAME op_id either left alone (identical content) or EVOLVED (changed content — a new version supersedes the old one, which stays retrievable as history). Requires op_id. Differs from a plain op_id retry, which always returns the original unchanged even if the content differs. NOTE on the evolve step: only content, concept and importance are taken from this call — tags, confidence and trust are inherited from the previous version (use muninn_update_tags to retag).",
+						"description": "Optional. With op_id set, keep one stable memory per key across repeated writes: created on first use, and on later writes with the SAME op_id either left alone (identical content) or EVOLVED (changed content — a new version supersedes the old one, which stays retrievable as history). Requires op_id. Differs from a plain op_id retry, which always returns the original unchanged even if the content differs. NOTE on the evolve step: content always comes from this call, and tags, memory type and type label are always inherited from the previous version (use muninn_update_tags to retag). Concept, importance, trust and confidence are inherited too UNLESS you supply them on this call, in which case your value is honored — the same on the evolve step as on the first write (trust=verified still requires a write or full credential).",
 					},
 					"embedding": map[string]any{
 						"type":        "array",

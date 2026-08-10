@@ -178,6 +178,32 @@ func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent,
 					"muninn_evolve with 'concept' — concept-surfacing views show the label, not the content.",
 				eng.Concept))
 		}
+		// #872: evolve now INHERITS the record's standing (trust, confidence)
+		// instead of resetting it to inferred/1.0 — an evolve replaces CONTENT,
+		// it does not re-adjudicate standing. That is the right default, but it
+		// is the same dilemma #769 settled for `concept`: "verified" means a
+		// human confirmed THIS content, and the content just changed. #769's
+		// residual was never the inheritance, it was that nothing SAID the
+		// label had been inherited. Announce it here too.
+		//
+		// Only the two levels that carry a consequence are loud. `inferred` is
+		// the default state of nearly every memory and `external` is an
+		// ordinary provenance label; warning on either would fire on almost
+		// every evolve in every vault, which is a warning on none.
+		switch eng.Trust {
+		case storage.TrustVerified:
+			res.Warnings = append(res.Warnings,
+				"trust=verified was carried forward from the previous version onto content that just "+
+					"changed — nothing has confirmed the NEW text. Verified memories also get a "+
+					"higher effective importance (prune protection). If this revision has not been "+
+					"checked by a human, disclaim it with muninn_trust(id, \"inferred\").")
+		case storage.TrustUntrusted:
+			res.Warnings = append(res.Warnings,
+				"trust=untrusted was carried forward from the previous version: editing the content did "+
+					"NOT clear the unreliable flag, and vaults configured to exclude untrusted memories "+
+					"will still hide this one. Clear it with muninn_trust(id, \"inferred\") once the "+
+					"reason for the flag is resolved.")
+		}
 	} else if err != nil {
 		// Never fail an accepted write over a cosmetic read-back; say so rather
 		// than reporting an empty concept as if that were the stored value.

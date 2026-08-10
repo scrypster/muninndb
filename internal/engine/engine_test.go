@@ -2257,9 +2257,18 @@ func TestActivate_TrustPropagation(t *testing.T) {
 	}
 }
 
-// TestEvolve_AutoStampsTrustInferred verifies that Evolve auto-stamps
-// TrustInferred on the new engram it creates.
-func TestEvolve_AutoStampsTrustInferred(t *testing.T) {
+// TestEvolve_InferredPredecessorStaysInferred: an evolve of an ordinary
+// (inferred) memory produces an inferred successor.
+//
+// Renamed from TestEvolve_AutoStampsTrustInferred (#872). Under the old
+// semantics evolve HARDCODED TrustInferred on every successor; it now inherits
+// the predecessor's level. This test's outcome is unchanged either way — and
+// that is precisely why it never caught the defect: its fixture writes with no
+// trust, so the predecessor is already inferred and "stamped" and "inherited"
+// are indistinguishable here. It is kept as the ordinary-case pin, with an
+// explicit premise assertion so a future reader can see what it does and does
+// not prove; the discriminating cases live in engine_evolve_standing_test.go.
+func TestEvolve_InferredPredecessorStaysInferred(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -2271,6 +2280,13 @@ func TestEvolve_AutoStampsTrustInferred(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
+	}
+	// State the premise this test rests on: the predecessor is inferred, so a
+	// passing result says nothing about whether the level was carried or minted.
+	if pre, err := eng.Read(ctx, &mbp.ReadRequest{Vault: "test", ID: writeResp.ID}); err != nil {
+		t.Fatalf("Read predecessor: %v", err)
+	} else if pre.Trust != uint8(storage.TrustInferred) {
+		t.Fatalf("premise: predecessor trust = %d, want %d (TrustInferred)", pre.Trust, storage.TrustInferred)
 	}
 
 	newULID, err := eng.Evolve(ctx, "test", writeResp.ID, "Evolved content after trust stamp.", "trust test evolution", nil, "")

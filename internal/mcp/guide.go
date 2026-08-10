@@ -277,6 +277,11 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("read surfaces return `importance` plus `importance_source` (\"explicit\" or \"derived\").\n")
 	b.WriteString("- Set it explicitly (e.g. 0.9) for memories that must survive memory pressure: pivotal decisions, hard constraints, identity facts.\n")
 	b.WriteString("- `muninn_evolve` inherits the predecessor's explicit importance unless you override it.\n")
+	b.WriteString("- `muninn_evolve` likewise inherits the predecessor's STANDING — its `trust` level and its confidence. ")
+	b.WriteString("An evolve replaces a memory's CONTENT; it does not re-adjudicate how much that memory is believed or who ")
+	b.WriteString("vouched for it. So rewording an `untrusted` memory does NOT clear the flag, and a `verified` memory stays ")
+	b.WriteString("verified (the response warns you when either level is carried). Change the level deliberately with ")
+	b.WriteString("`muninn_trust(id, level)`.\n")
 
 	// Prospective memory (THE PUSH)
 	b.WriteString("\n## Prospective memory (muninn_intend)\n\n")
