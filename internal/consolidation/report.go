@@ -16,6 +16,7 @@ type ConsolidationReport struct {
 	Errors         []string      // non-fatal errors encountered per phase
 
 	// Dream-specific fields (populated by DreamOnce, nil/zero for RunOnce)
-	Orient       *VaultSummary // Phase 0 vault summary
-	LegalSkipped int           // legal engrams skipped in Phase 2b
+	Orient         *VaultSummary // Phase 0 vault summary
+	LegalSkipped   int           // legal engrams skipped in Phase 2b
+	DedupSeparated int           // near-duplicate merges REFUSED by the pattern-separation guard (load-bearing token differs)
 }

@@ -19,7 +19,9 @@ import (
 
 // testEnv wires up a fully functional Engine with real storage and FTS,
 // using a temporary directory that is cleaned up after the test.
-func testEnv(t *testing.T) (*Engine, func()) {
+// testEnv takes testing.TB so benchmarks (BenchmarkRecallContradictionGate)
+// can build the same environment tests do.
+func testEnv(t testing.TB) (*Engine, func()) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "muninndb-engine-test-*")
 	if err != nil {
@@ -473,11 +475,21 @@ func TestActivateConfidenceAffectsScore(t *testing.T) {
 	// Allow async FTS worker to index (same as TestActivateReturnsResults).
 	awaitFTS(t, eng)
 
+	// Threshold 0.001: post-#711, full_text_relevance is an honest,
+	// query-calibrated IDF-weighted coverage score. In this 2-document
+	// corpus BOTH docs share the exact same content, so every query term has
+	// df=2/N=2 — real BM25 IDF says a term present in every document is
+	// uninformative, so full_text_relevance is legitimately low here (this
+	// is a tiny-corpus artifact, not a regression). Before the fix, tanh(raw
+	// BM25) saturated any match toward ~1.0 regardless of that informativeness,
+	// which is exactly the dishonesty #711 fixes — the old threshold=0.01 was
+	// tuned to that inflated scale. Relative ordering (this test's actual
+	// assertion) is unaffected.
 	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
 		Vault:      "test",
 		Context:    []string{"compiled programming language Google systems"},
 		MaxResults: 10,
-		Threshold:  0.01,
+		Threshold:  0.001,
 	})
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
@@ -568,7 +580,7 @@ func TestEngineGetContradictions(t *testing.T) {
 	ws := eng.store.VaultPrefix("test")
 	id1 := storage.ULID([16]byte{1})
 	id2 := storage.ULID([16]byte{2})
-	_ = eng.store.FlagContradiction(ctx, ws, id1, id2)
+	_, _ = eng.store.FlagContradiction(ctx, ws, id1, id2)
 
 	pairs, err := eng.GetContradictions(ctx, "test")
 	if err != nil {
@@ -2475,5 +2487,45 @@ func TestActivateCarriesMemoryType(t *testing.T) {
 	}
 	if top.TypeLabel != "architectural_decision" {
 		t.Errorf("TypeLabel = %q, want %q", top.TypeLabel, "architectural_decision")
+	}
+}
+
+// TestRecall_ReturnsTags is a RED-first regression test for S4: muninn_recall
+// (Activate) must return the stored tags on each activation item so callers
+// don't need a follow-up muninn_read just to see them.
+func TestRecall_ReturnsTags(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   "test",
+		Concept: "Tagged memory about the deploy pipeline",
+		Content: "The deploy pipeline now runs canary checks before promoting.",
+		Tags:    []string{"deploy", "pipeline"},
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	awaitFTS(t, eng)
+
+	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{
+		Vault:      "test",
+		Context:    []string{"deploy pipeline canary"},
+		MaxResults: 10,
+		Threshold:  0.01,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if len(resp.Activations) == 0 {
+		t.Fatal("Activate returned 0 results, want >= 1")
+	}
+	top := resp.Activations[0]
+	if len(top.Tags) != 2 {
+		t.Fatalf("Tags len = %d, want 2 (got %v)", len(top.Tags), top.Tags)
+	}
+	if top.Tags[0] != "deploy" || top.Tags[1] != "pipeline" {
+		t.Errorf("Tags = %v, want [deploy pipeline]", top.Tags)
 	}
 }

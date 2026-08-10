@@ -57,7 +57,7 @@ func (a *grpcEngineAdapter) Write(ctx context.Context, req *pb.WriteRequest) (*p
 		Concept: req.Concept, Content: req.Content, Tags: req.Tags,
 		Confidence: req.Confidence, Stability: req.Stability, Vault: req.Vault,
 		IdempotentID: req.IdempotentID, Associations: mbpAssocs, Embedding: req.Embedding,
-		MemoryType: uint8(req.MemoryType), TypeLabel: req.TypeLabel,
+		MemoryType: uint8(req.MemoryType), TypeLabel: req.TypeLabel, UpsertMode: req.UpsertMode,
 	})
 	if err != nil {
 		return nil, err
@@ -81,7 +81,7 @@ func (a *grpcEngineAdapter) BatchWrite(ctx context.Context, req *pb.BatchWriteRe
 			Concept: r.Concept, Content: r.Content, Tags: r.Tags,
 			Confidence: r.Confidence, Stability: r.Stability, Vault: r.Vault,
 			IdempotentID: r.IdempotentID, Associations: mbpAssocs, Embedding: r.Embedding,
-			MemoryType: uint8(r.MemoryType), TypeLabel: r.TypeLabel,
+			MemoryType: uint8(r.MemoryType), TypeLabel: r.TypeLabel, UpsertMode: r.UpsertMode,
 		}
 	}
 	responses, errs := a.eng.WriteBatch(ctx, mbpReqs)
@@ -113,8 +113,14 @@ func (a *grpcEngineAdapter) Read(ctx context.Context, req *pb.ReadRequest) (*pb.
 }
 
 func (a *grpcEngineAdapter) Activate(ctx context.Context, req *pb.ActivateRequest) (*pb.ActivateResponse, error) {
+	// Clamp a negative threshold: the in-process negative-means-bypass contract
+	// (used by Explain) is deliberately not exposed on the wire.
+	threshold := req.Threshold
+	if threshold < 0 {
+		threshold = 0
+	}
 	resp, err := a.eng.Activate(ctx, &mbp.ActivateRequest{
-		Context: req.Context, Threshold: req.Threshold, MaxResults: int(req.MaxResults),
+		Context: req.Context, Threshold: threshold, MaxResults: int(req.MaxResults),
 		MaxHops: int(req.MaxHops), IncludeWhy: req.IncludeWhy, Vault: req.Vault, Embedding: req.Embedding,
 	})
 	if err != nil {
@@ -127,6 +133,11 @@ func (a *grpcEngineAdapter) Activate(ctx context.Context, req *pb.ActivateReques
 			Score: item.Score, Why: item.Why,
 		}
 	}
+	// NOTE (deferred): resp.SemanticDegraded is intentionally NOT mapped here —
+	// pb.ActivateResponse has no such field. Wiring it needs a proto field + regen
+	// (a separate drift obligation); tracked as a follow-up so this stays a minimal
+	// increment. Until then gRPC callers do not receive the degrade-loudly signal
+	// that MBP/REST/MCP carry.
 	return &pb.ActivateResponse{
 		QueryID: resp.QueryID, TotalFound: int32(resp.TotalFound),
 		Activations: items, LatencyMs: resp.LatencyMs,

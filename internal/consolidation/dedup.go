@@ -47,6 +47,27 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 		if eng == nil {
 			continue
 		}
+		// #728: an already-archived (or soft-deleted) engram is dedup's OWN
+		// output — GetEngrams/scanAllEngramIDs do not filter by lifecycle
+		// state, so without this check a member this phase archived on an
+		// earlier run (or an earlier cluster in the SAME run) keeps
+		// reappearing in every future cluster it embeds near. That is
+		// silently harmless when the whole cluster fits under one run's
+		// MaxDedup — the absorb loop just re-issues an idempotent archive —
+		// but it BREAKS the hard cap's deferral guarantee: a cluster larger
+		// than the remaining budget is trimmed to its FIRST N members in
+		// cluster order, and if the already-archived member keeps sorting
+		// into that same leading position, the next run spends its whole
+		// budget re-selecting it and never reaches the genuinely still-live
+		// duplicate — "deferred" would silently become "never," which is
+		// exactly the kind of plausible-looking wrong answer this project
+		// treats as worse than an honest failure. Skipping a non-live state
+		// here is also just correct on its own terms: dedup's job is to
+		// reduce the set of engrams recall still serves, and an
+		// already-retired one is not a candidate for that job twice.
+		if eng.State == storage.StateArchived || eng.State == storage.StateSoftDeleted {
+			continue
+		}
 		embed := eng.Embedding
 		if len(embed) == 0 {
 			if loaded, err := store.GetEmbedding(ctx, wsPrefix, eng.ID); err == nil && len(loaded) > 0 {
@@ -126,15 +147,61 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 			continue
 		}
 
-		// Merge tags from all members into representative
-		tagSet := make(map[string]bool)
-		for _, tag := range representative.Tags {
-			tagSet[tag] = true
-		}
+		// Pattern-separation guard, applied BEFORE any absorption: a high embedding
+		// similarity is not proof of duplication. A member that differs from the
+		// survivor on a load-bearing token (a number, a date, a negation) is a
+		// DISTINCT fact — an update or a contradiction — and must be neither
+		// archived NOR have its tags/frequency folded into the survivor (which would
+		// cross-label a fact the guard just declared distinct). Partition first so
+		// only true duplicates are absorbed; recall's supersedes-aware ranking /
+		// contradiction surfacing handle the separated pair.
+		absorbable := make([]*storage.Engram, 0, len(clust.members))
 		for _, member := range clust.members {
 			if member.ID == representative.ID {
 				continue
 			}
+			if divergesOnLoadBearingToken(representative, member) {
+				report.DedupSeparated++
+				slog.Debug("consolidation phase 2: separation guard refused merge",
+					"survivor", representative.ID, "kept", member.ID)
+				continue
+			}
+			absorbable = append(absorbable, member)
+		}
+
+		// #728: MaxDedup is a HARD per-run cap, not a per-cluster one — trim
+		// this cluster's absorbable set to whatever budget remains BEFORE
+		// tags/frequency are folded from it, so a single cluster larger than
+		// the remaining budget cannot make report.MergedEngrams overshoot
+		// w.MaxDedup. The top-of-loop check above only stops the NEXT
+		// cluster from starting; without this trim, a cluster already in
+		// progress always finished in full regardless of the cap (the
+		// mechanism a large duplicate cluster — e.g. many-times-repeated
+		// auto-ingest captures — could exceed the configured rate limit by
+		// its own size). The untrimmed members are left live, exactly as if
+		// their cluster had not been visited yet: the next run re-scans,
+		// reclusters them (the already-archived siblings are gone from
+		// allEngrams by then), and finishes the merge — nothing is lost,
+		// only deferred across runs. Pinned by TestDedup_RespectsMaxDedupCap
+		// (exact-equality hard-cap assertion) and
+		// TestDedup_MaxDedupCapDefersRestOfClusterToNextRun.
+		if remaining := w.MaxDedup - report.MergedEngrams; remaining < len(absorbable) {
+			if remaining < 0 {
+				remaining = 0
+			}
+			absorbable = absorbable[:remaining]
+		}
+		if len(absorbable) == 0 {
+			continue
+		}
+
+		// Merge tags from the survivor + only the ABSORBABLE (true-duplicate)
+		// members — never from a separation-skipped member.
+		tagSet := make(map[string]bool)
+		for _, tag := range representative.Tags {
+			tagSet[tag] = true
+		}
+		for _, member := range absorbable {
 			for _, tag := range member.Tags {
 				tagSet[tag] = true
 			}
@@ -144,19 +211,15 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 			mergedTags = append(mergedTags, tag)
 		}
 
-		// Archive non-representative members and count archived duplicates so
-		// the representative can absorb their frequency signal. Without this
-		// bump, semantic-duplicate write-only engrams (e.g. daily auto-ingest
-		// captures from agent harnesses) would never reach the recall path
-		// that auto-increments AccessCount in storage/cache/domain.go — losing
-		// the "this content recurred N times" signal that downstream skills
-		// currently emulate via per-vault feedback cron jobs.
+		// Archive the absorbable duplicates and count them so the representative can
+		// absorb their frequency signal. Without this bump, semantic-duplicate
+		// write-only engrams (e.g. daily auto-ingest captures from agent harnesses)
+		// would never reach the recall path that auto-increments AccessCount in
+		// storage/cache/domain.go — losing the "this content recurred N times"
+		// signal that downstream skills currently emulate via per-vault feedback
+		// cron jobs.
 		archivedCount := uint32(0)
-		for _, member := range clust.members {
-			if member.ID == representative.ID {
-				continue
-			}
-
+		for _, member := range absorbable {
 			if !w.DryRun {
 				// Archive the member (soft delete)
 				if err := w.Engine.UpdateLifecycleState(ctx, vault, member.ID.String(), "archived"); err != nil {

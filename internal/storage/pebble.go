@@ -1,10 +1,11 @@
 package storage
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/cockroachdb/pebble"
+
+	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 // Options for opening a Pebble database.
@@ -59,24 +60,16 @@ func BatchDelete(batch *pebble.Batch, key []byte) {
 }
 
 // PrefixIterator creates an iterator bounded by a prefix.
+//
+// STO-11: the bound comes from keys.PrefixUpperBound. This used to open-code a
+// byte-identical COPY of that helper's pre-#816 carry loop — increment the
+// first sub-0xFF byte from the right, keep the trailing 0xFFs — which is why
+// the STO-12 census had to name PrefixIterator alongside the helper as carrying
+// the same over-inclusive bound. One rule, one implementation.
 func PrefixIterator(db *pebble.DB, prefix []byte) (*pebble.Iterator, error) {
-	// Calculate upper bound for prefix
-	upper := make([]byte, len(prefix))
-	copy(upper, prefix)
-	for i := len(upper) - 1; i >= 0; i-- {
-		if upper[i] < 0xFF {
-			upper[i]++
-			break
-		}
-	}
-	// If all bytes were 0xFF, append 0x00 to make upper strictly greater than prefix
-	if bytes.Equal(upper, prefix) {
-		upper = append(upper, 0x00)
-	}
-
 	iter, err := db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
-		UpperBound: upper,
+		UpperBound: keys.PrefixUpperBound(prefix),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prefix iterator: %w", err)

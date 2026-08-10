@@ -122,7 +122,7 @@ func TestClusterCoordinator_Role_ThreadSafe(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "auto")
 
 	// Force epoch to 1 so promotion can proceed
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	var wg sync.WaitGroup
 	const readers = 50
@@ -183,7 +183,7 @@ func TestClusterCoordinator_CurrentEpoch(t *testing.T) {
 		t.Errorf("expected epoch 0, got %d", epoch)
 	}
 
-	coord.epochStore.ForceSet(5)
+	coord.epochStore.Advance(5)
 
 	if epoch := coord.CurrentEpoch(); epoch != 5 {
 		t.Errorf("expected epoch 5, got %d", epoch)
@@ -500,6 +500,103 @@ func TestClusterCoordinator_OnBecameLobe_Callback(t *testing.T) {
 	}
 }
 
+// TestClusterCoordinator_RoleCallbacks_UnsynchronizedStateRace mirrors how
+// cmd/muninn/server.go wires OnBecameCortex/OnBecameLobe: both close over a
+// shared worker-handle variable with no lock of their own, relying entirely on
+// the coordinator to never invoke them concurrently. handlePromotion calls
+// OnBecameCortex synchronously on the caller's goroutine while handleDemotion
+// fires OnBecameLobe in a bare, unsynchronized goroutine — so a promotion and a
+// demotion racing each other (a real possibility under flapping quorum) mutate
+// that shared state from two goroutines with no happens-before edge (#629
+// claim 1). Run with -race: this must not report a data race.
+func TestClusterCoordinator_RoleCallbacks_UnsynchronizedStateRace(t *testing.T) {
+	coord, _ := newTestCoordinator(t, "auto")
+
+	type workerHandle struct{ epoch uint64 }
+	var handle *workerHandle
+
+	const iterations = 20
+	// Each iteration invokes exactly one of OnBecameCortex (sync) or
+	// OnBecameLobe (async, via a bare goroutine) — count every callback
+	// invocation so the test can wait deterministically for all of them to
+	// land before reading the shared state, rather than a wall-clock sleep.
+	invoked := make(chan struct{}, iterations*2)
+
+	coord.OnBecameCortex = func(epoch uint64) {
+		handle = &workerHandle{epoch: epoch}
+		invoked <- struct{}{}
+	}
+	coord.OnBecameLobe = func() {
+		handle = nil
+		invoked <- struct{}{}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < iterations; i++ {
+		epoch := uint64(i + 1)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			simulatePromotion(coord, epoch)
+		}()
+		go func() {
+			defer wg.Done()
+			coord.handleDemotion(causeQuorumLoss)
+		}()
+	}
+	wg.Wait()
+
+	// Drain exactly the expected number of callback invocations. handleDemotion
+	// fires OnBecameLobe from a bare goroutine, so wg.Wait() (which only waits
+	// for handlePromotion/handleDemotion to return, not for that inner
+	// goroutine) is not sufficient — this is the deterministic completion
+	// signal instead of a sleep.
+	for i := 0; i < iterations*2; i++ {
+		select {
+		case <-invoked:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for callback invocation %d/%d", i+1, iterations*2)
+		}
+	}
+	_ = handle
+}
+
+// TestClusterCoordinator_OnBecameLobe_PanicRecovered proves a panicking
+// OnBecameLobe callback (e.g. cmd/muninn/server.go's cognitive worker
+// teardown hitting a nil pointer or a double-close) no longer takes the whole
+// process down (#629 claim 1) — it is caught, logged, and the coordinator
+// keeps functioning afterward.
+func TestClusterCoordinator_OnBecameLobe_PanicRecovered(t *testing.T) {
+	coord, _ := newTestCoordinator(t, "auto")
+
+	invoked := make(chan struct{}, 1)
+	coord.OnBecameLobe = func() {
+		defer func() { invoked <- struct{}{} }()
+		panic("simulated cognitive worker teardown failure")
+	}
+
+	simulatePromotion(coord, 1)
+	coord.handleDemotion(causeClaim)
+
+	select {
+	case <-invoked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for panicking OnBecameLobe to run")
+	}
+
+	// The process (and this test) is still alive to reach this line — that is
+	// the assertion. Confirm the coordinator still works after the panic.
+	if coord.Role() != RoleReplica {
+		t.Errorf("expected role=RoleReplica after demotion, got %v", coord.Role())
+	}
+	var secondCortex bool
+	coord.OnBecameCortex = func(uint64) { secondCortex = true }
+	simulatePromotion(coord, 2)
+	if !secondCortex {
+		t.Error("expected coordinator to keep processing role callbacks after a prior panic")
+	}
+}
+
 func TestClusterCoordinator_NilCallbacksSafe(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "auto")
 
@@ -553,7 +650,7 @@ func TestClusterCoordinator_FencingToken(t *testing.T) {
 		t.Errorf("expected fencing token 0, got %d", token)
 	}
 
-	coord.epochStore.ForceSet(42)
+	coord.epochStore.Advance(42)
 
 	if token := coord.FencingToken(); token != 42 {
 		t.Errorf("expected fencing token 42, got %d", token)
@@ -942,7 +1039,7 @@ func TestGracefulFailover_Success(t *testing.T) {
 
 	// Promote to Cortex.
 	simulatePromotion(coord, 1)
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Set up a target peer with a net.Pipe so Send works.
 	targetID := "target-1"
@@ -1016,7 +1113,7 @@ func TestGracefulFailover_Success(t *testing.T) {
 func TestGracefulFailover_ConvergenceTimeout(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
 	simulatePromotion(coord, 1)
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Add a target peer.
 	targetID := "target-conv"
@@ -1054,7 +1151,7 @@ func TestGracefulFailover_ConvergenceTimeout(t *testing.T) {
 func TestGracefulFailover_AckTimeout(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
 	simulatePromotion(coord, 1)
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Set up target peer with a pipe that reads but never sends ACK.
 	targetID := "target-noack"
@@ -1093,7 +1190,7 @@ func TestGracefulFailover_AckTimeout(t *testing.T) {
 func TestGracefulFailover_DrainRejectsWrites(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "primary")
 	simulatePromotion(coord, 1)
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Set up target peer (no pipe needed — we use AddPeer for a non-connected peer
 	// since the test will cancel before reaching the Send step).
@@ -1188,7 +1285,7 @@ func TestClusterCoordinator_UpdateReplicaSeq(t *testing.T) {
 
 func TestClusterCoordinator_HandleHandoff_PromotesTarget(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "replica")
-	coord.epochStore.ForceSet(5)
+	coord.epochStore.Advance(5)
 
 	// Track promotion callback.
 	var promotedEpoch uint64
@@ -1278,7 +1375,7 @@ func TestBug176_CrashRecoveryPathClearsBreadcrumb(t *testing.T) {
 	if err := coord.epochStore.PersistRole("cortex"); err != nil {
 		t.Fatalf("PersistRole: %v", err)
 	}
-	coord.epochStore.ForceSet(1)
+	coord.epochStore.Advance(1)
 
 	// Run the crash-recovery path via runAsCortex; cancel context immediately after
 	// the recovery finishes (it blocks on <-ctx.Done() after promoting).
@@ -1322,7 +1419,7 @@ func TestBug176_CrashRecoveryPathClearsBreadcrumb(t *testing.T) {
 // breadcrumb must be cleared once the ACK is delivered to the old Cortex.
 func TestBug176_HandleHandoffClearsBreadcrumb(t *testing.T) {
 	coord, _ := newTestCoordinator(t, "replica")
-	coord.epochStore.ForceSet(5)
+	coord.epochStore.Advance(5)
 
 	// Wire a pipe so HandleHandoff can send the HANDOFF_ACK.
 	fromID := "old-cortex"
@@ -1452,8 +1549,8 @@ func TestCoordinator_SetReconcileOnHeal(t *testing.T) {
 // closed so the lobe reconnects and retries the snapshot from scratch.
 func TestClusterCoordinator_HandleIncomingJoin_SnapshotFails_NoCallback(t *testing.T) {
 	coord, db := newTestCoordinator(t, "primary")
-	if err := coord.epochStore.ForceSet(2); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := coord.epochStore.Advance(2); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 	// Only the leader accepts joins (#533); mark this cortex as leader.
 	coord.roleMu.Lock()
@@ -1523,5 +1620,100 @@ func TestClusterCoordinator_HandleIncomingJoin_SnapshotFails_NoCallback(t *testi
 	// The peer should have been closed so the lobe can reconnect and retry.
 	if peer, ok := coord.mgr.GetPeer("lobe-snapfail"); ok && peer.IsConnected() {
 		t.Error("peer still connected after snapshot failure — expected it to be closed for lobe retry")
+	}
+}
+
+// A Lobe that never catches up must not be able to pin the replication log
+// forever. MinReplicatedSeq() is a *minimum* across replicas and returns 0 when
+// none have acked, so before the backlog ceiling existed a single stuck Lobe
+// meant the Cortex log grew without bound — which is exactly what happened in
+// production (~10 GB/day on an otherwise idle primary).
+func TestPruneWatermark_BacklogCeilingForcesPruneWhenReplicaStalls(t *testing.T) {
+	db, err := pebble.Open("", &pebble.Options{FS: vfs.NewMem()})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	defer db.Close()
+
+	repLog := NewReplicationLog(db)
+	for i := 1; i <= 1000; i++ {
+		if _, err := repLog.Append(OpSet, []byte("k"), []byte("v")); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	newCoord := func(maxBacklog int) *ClusterCoordinator {
+		return &ClusterCoordinator{
+			cfg:    &config.ClusterConfig{MaxLogBacklog: maxBacklog},
+			repLog: repLog,
+		}
+	}
+
+	t.Run("stalled replica pins watermark without a ceiling", func(t *testing.T) {
+		c := newCoord(0) // ceiling disabled == old behaviour
+		c.replicaSeqs.Store("lobe-a", uint64(5))
+		got, forced := c.pruneWatermark()
+		if got != 5 || forced {
+			t.Fatalf("pruneWatermark() = (%d, %v), want (5, false)", got, forced)
+		}
+	})
+
+	t.Run("ceiling overrides a stalled replica", func(t *testing.T) {
+		c := newCoord(100)
+		c.replicaSeqs.Store("lobe-a", uint64(5))
+		got, forced := c.pruneWatermark()
+		if got != 900 || !forced {
+			t.Fatalf("pruneWatermark() = (%d, %v), want (900, true)", got, forced)
+		}
+	})
+
+	t.Run("no replicas at all still prunes under the ceiling", func(t *testing.T) {
+		c := newCoord(100)
+		got, forced := c.pruneWatermark()
+		if got != 900 || !forced {
+			t.Fatalf("pruneWatermark() = (%d, %v), want (900, true)", got, forced)
+		}
+	})
+
+	t.Run("healthy replica ahead of the ceiling wins", func(t *testing.T) {
+		c := newCoord(100)
+		c.replicaSeqs.Store("lobe-a", uint64(950))
+		got, forced := c.pruneWatermark()
+		if got != 950 || forced {
+			t.Fatalf("pruneWatermark() = (%d, %v), want (950, false)", got, forced)
+		}
+	})
+
+	t.Run("short log never forces a prune", func(t *testing.T) {
+		c := newCoord(5000) // ceiling exceeds head
+		c.replicaSeqs.Store("lobe-a", uint64(5))
+		got, forced := c.pruneWatermark()
+		if got != 5 || forced {
+			t.Fatalf("pruneWatermark() = (%d, %v), want (5, false)", got, forced)
+		}
+	})
+}
+
+// A forced prune deletes entries a still-connected Lobe has not received.
+// Nothing downstream detects that hole — ReadSince returns the first surviving
+// entry, the Applier has no contiguity check, and the Lobe then ACKs the head.
+// So the forced prune must drop those Lobes first, turning a silent divergence
+// into a loud re-snapshot.
+func TestPrune_ForcedWatermarkEvictsLobesLeftBehind(t *testing.T) {
+	c := &ClusterCoordinator{
+		cfg: &config.ClusterConfig{NodeID: "cortex"},
+		mgr: NewConnManager("cortex"),
+	}
+	c.streamers = make(map[string]context.CancelFunc)
+	c.replicaSeqs.Store("lobe-stalled", uint64(5))
+	c.replicaSeqs.Store("lobe-healthy", uint64(950))
+
+	c.evictLobesBehind(900)
+
+	if _, ok := c.replicaSeqs.Load("lobe-stalled"); ok {
+		t.Error("lobe behind the prune watermark was not evicted — it will silently skip the pruned range")
+	}
+	if _, ok := c.replicaSeqs.Load("lobe-healthy"); !ok {
+		t.Error("lobe ahead of the prune watermark must not be evicted")
 	}
 }

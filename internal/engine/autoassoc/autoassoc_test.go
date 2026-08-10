@@ -6,7 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -48,21 +47,10 @@ func (f *stubFTS) Search(_ context.Context, _ [8]byte, query string, _ int) ([]f
 	return f.results[query], nil
 }
 
-// drain waits for the worker queue to empty (for test determinism).
+// drain awaits every job enqueued so far, deterministically via the worker's
+// own WaitIdle seam instead of polling len(w.jobs) against a fixed sleep.
 func drain(w *Worker) {
-	// Poll until jobs channel is empty and workers are idle.
-	// We do this by sending a noop job and waiting for it to process.
-	// Simpler: Stop and restart. But since Stop closes the channel, we just
-	// give it a small sleep window.
-	for {
-		if len(w.jobs) == 0 {
-			time.Sleep(20 * time.Millisecond)
-			if len(w.jobs) == 0 {
-				return
-			}
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	w.WaitIdle()
 }
 
 // --- tests ---

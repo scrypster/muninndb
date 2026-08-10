@@ -78,6 +78,71 @@ type Engram struct {
 	TypeLabel      string     // free-form label, e.g. "architectural_decision", "coding_pattern"
 	Classification uint16     // concept-cluster ID
 	Trust          TrustLevel // provenance confidence label (OffsetTrust in ERF)
+
+	// Valid-time (application-time) axis — half-open [ValidFrom, ValidUntil).
+	// ValidFrom zero means "valid from CreatedAt" (the decode default for every
+	// legacy record). ValidUntil zero means open / "still current". Invalidation
+	// is always a ValidUntil stamp, never a delete (COG-19).
+	ValidFrom  time.Time
+	ValidUntil time.Time
+	Importance float32 // caller-asserted importance, 0 = unset
+}
+
+// EffectiveValidFrom returns ValidFrom, falling back to CreatedAt when unset —
+// the "valid from creation" legacy default.
+func (e *Engram) EffectiveValidFrom() time.Time {
+	if e.ValidFrom.IsZero() {
+		return e.CreatedAt
+	}
+	return e.ValidFrom
+}
+
+// ValidAt reports whether the engram's validity window covers t, using
+// half-open [ValidFrom, ValidUntil) semantics. An open ValidUntil (zero)
+// extends the window indefinitely.
+func (e *Engram) ValidAt(t time.Time) bool {
+	return validAt(e.EffectiveValidFrom(), e.ValidUntil, t)
+}
+
+// IsExpired reports whether the engram's validity window is CLOSED at or
+// before now (ValidUntil != 0 && ValidUntil <= now). A future ValidFrom does
+// NOT make an engram expired — default recall hides only expired facts, never
+// just-stored future ones.
+func (e *Engram) IsExpired(now time.Time) bool {
+	return isExpired(e.ValidUntil, now)
+}
+
+// EffectiveValidFrom returns ValidFrom, falling back to CreatedAt when unset.
+func (m *EngramMeta) EffectiveValidFrom() time.Time {
+	if m.ValidFrom.IsZero() {
+		return m.CreatedAt
+	}
+	return m.ValidFrom
+}
+
+// ValidAt reports whether the metadata's validity window covers t
+// (half-open [ValidFrom, ValidUntil)).
+func (m *EngramMeta) ValidAt(t time.Time) bool {
+	return validAt(m.EffectiveValidFrom(), m.ValidUntil, t)
+}
+
+// IsExpired reports whether the validity window is closed at or before now.
+func (m *EngramMeta) IsExpired(now time.Time) bool {
+	return isExpired(m.ValidUntil, now)
+}
+
+// validAt is the single shared validity predicate: from <= t < until,
+// with a zero until meaning open.
+func validAt(from, until, t time.Time) bool {
+	if !from.IsZero() && t.Before(from) {
+		return false
+	}
+	return until.IsZero() || t.Before(until)
+}
+
+// isExpired is the single shared expiry predicate: until != 0 && until <= now.
+func isExpired(until, now time.Time) bool {
+	return !until.IsZero() && !until.After(now)
 }
 
 // EngramMeta is the 100-byte fixed metadata section.
@@ -96,6 +161,10 @@ type EngramMeta struct {
 	AssocCount  uint16
 	EmbedDim    EmbedDimension
 	MemoryType  MemoryType
+	Trust       TrustLevel // provenance trust label; feeds use-time EffectiveImportance
+	ValidFrom   time.Time  // decode default: CreatedAt when the raw field is zero
+	ValidUntil  time.Time  // zero = open / "current"
+	Importance  float32    // 0 = unset
 }
 
 // Association represents a directed, weighted link between two engrams.
@@ -173,6 +242,24 @@ func ParseLifecycleState(s string) (LifecycleState, error) {
 type RelType uint16
 
 const (
+	// RelCoActivated is the relation the Hebbian co-activation worker writes.
+	// It was the only RelType with no name, which is how a symmetric relation
+	// ended up stored under a directional convention nobody wrote down (#800).
+	// Its on-disk value is 0x0000, which is also what decodeAssocValue returns
+	// for a short value and for an all-zero 18-byte legacy value ("old encoder
+	// wrote blank values"). That COLLISION is pre-existing; its CONSEQUENCE is
+	// not. Before #800 relType 0 only fed profile.AllowsEdge; it now also
+	// decides reverse admissibility, so on a vault written by the old encoder a
+	// legacy blank-valued edge that was genuinely DIRECTIONAL is admitted into
+	// the reverse half and read backwards during ranking.
+	//
+	// Left as-is deliberately. The blast radius is identical to the deliberate
+	// >=0x8000 admission below — ranking and traversal only, with no writer and
+	// no direction-presenting surface downstream (COG-31) — so it can nudge an
+	// ordering but cannot manufacture a presented fact. Distinguishing "really
+	// co-activated" from "blank legacy" needs a value-format change and a
+	// migration, which is its own increment.
+	RelCoActivated      RelType = 0x0000
 	RelSupports         RelType = 0x0001
 	RelContradicts      RelType = 0x0002
 	RelDependsOn        RelType = 0x0003
@@ -191,6 +278,44 @@ const (
 	RelRefines          RelType = 0x0010 // near-duplicate refinement (write-time novelty)
 	RelUserDefined      RelType = 0x8000
 )
+
+// IsSymmetric reports whether the relation asserts the same fact in both
+// directions, so that reading it from either endpoint is equally true.
+//
+// STRICT by design: a type is symmetric only if it is declared so here. An
+// unknown or user-defined relation is NOT symmetric — claiming a symmetry the
+// author never declared is what produces "the OLD version supersedes the NEW
+// one". This predicate is safe for a WRITER or a direction-presenting surface
+// to consult. See COG-31.
+//
+// It is the DECLARATION POINT for relation symmetry, not a hot-path predicate:
+// in production it is reached only through BidirectionalForRanking. Having no
+// direct production caller is the expected state, not dead code — a writer or
+// a presenter that ever needs the question answered must ask it here rather
+// than re-deciding locally, which is the mistake #800 was.
+func (r RelType) IsSymmetric() bool {
+	switch r {
+	case RelCoActivated, RelRelatesTo, RelContradicts:
+		return true
+	default:
+		return false
+	}
+}
+
+// BidirectionalForRanking reports whether an edge of this type may be read from
+// either endpoint FOR SCORING AND TRAVERSAL ONLY.
+//
+// It is IsSymmetric plus the user-defined range. The extra admission is
+// principle #4 applied where it belongs: on the presentation side of the line,
+// over-retrieving a relation whose symmetry was never declared is a small,
+// bounded ranking nudge, whereas under-retrieving silently drops half of it.
+//
+// MUST NOT be consulted by a writer, by supersession/currency/annotation, or by
+// any surface that presents an edge's direction to a caller. Its only legitimate
+// consumers are the recall ranking phases (COG-31).
+func (r RelType) BidirectionalForRanking() bool {
+	return r.IsSymmetric() || r >= RelUserDefined
+}
 
 // EmbedDimension encodes embedding dimensionality (uint8 on disk).
 type EmbedDimension uint8

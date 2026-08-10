@@ -41,7 +41,7 @@ func ContradictionSeverity(relA, relB uint16) float64 {
 // Only FlagContradiction is required; detection logic operates over the
 // associations supplied with each ContradictItem.
 type ContradictionStore interface {
-	FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) error
+	FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) (newlyFlagged bool, err error)
 }
 
 // ContradictAssoc is an association used for contradiction checking.
@@ -87,9 +87,13 @@ func NewContradictWorker(store ContradictionStore) *ContradictWorker {
 }
 
 // processBatch checks for contradictions within each item's own association set.
-// Two associations on the same engram contradict when their RelTypes are
-// semantically incompatible (e.g. Supports vs Contradicts), or when the same
-// RelType points at targets with different concept hashes (conflicting conclusions).
+// Two associations on the same engram contradict only when their RelTypes are
+// semantically incompatible per the ContradictionSeverity relation matrix
+// (e.g. Supports vs Contradicts, PrecededBy vs FollowedBy) — never merely
+// because they share a RelType and point at different targets. Two ordinary
+// associations of the same RelType to different targets (e.g. one engram
+// "references" two different other engrams) is a completely unremarkable
+// write shape and must never be flagged (COG-23).
 func (cw *ContradictWorker) processBatch(ctx context.Context, batch []ContradictItem) error {
 	for _, item := range batch {
 		n := len(item.Associations)
@@ -97,17 +101,30 @@ func (cw *ContradictWorker) processBatch(ctx context.Context, batch []Contradict
 			for j := i + 1; j < n; j++ {
 				a, b := item.Associations[i], item.Associations[j]
 				severity := ContradictionSeverity(a.RelType, b.RelType)
-				if severity <= 0 && a.RelType == b.RelType && a.TargetHash != b.TargetHash {
-					// Same relation type pointing at different-concept targets.
-					severity = 0.8
-				}
 				if severity > 0 {
-					if err := cw.store.FlagContradiction(ctx, item.WS, a.TargetID, b.TargetID); err != nil {
+					newlyFlagged, err := cw.store.FlagContradiction(ctx, item.WS, a.TargetID, b.TargetID)
+					if err != nil {
 						slog.Error("contradict: failed to flag contradiction",
 							"ws", fmt.Sprintf("%x", item.WS),
 							"engram_a", fmt.Sprintf("%x", a.TargetID),
 							"engram_b", fmt.Sprintf("%x", b.TargetID),
 							"error", err)
+						// Newness is unknown after a failed write; treat it as
+						// already-known so an erroring flag can never drive a repeat
+						// penalty.
+						continue
+					}
+					// IDEMPOTENT PENALTY. OnFound drives a ConfidenceUpdate on BOTH
+					// engrams, and BayesianUpdate compounds repeat applications of the
+					// SAME evidence: 1.0 -> 0.975 -> 0.797 -> 0.313 -> 0.0709. Confidence
+					// multiplies into the recall score, so re-firing silently removes both
+					// memories from recall — including the TRUE one, which is penalised
+					// exactly as hard as the false one. One declared contradiction is one
+					// fact, however many times the worker re-observes the edge, so the
+					// penalty fires only on first observation. The marker itself is always
+					// (re-)written above; only the penalty is suppressed.
+					if !newlyFlagged {
+						continue
 					}
 					if item.OnFound != nil {
 						item.OnFound(ContradictionEvent{

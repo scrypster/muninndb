@@ -107,6 +107,18 @@ func (s *EmbedService) Name() string {
 	return s.name
 }
 
+// Model returns the resolved model identifier for the active provider (e.g.
+// "bge-small-en-v1.5", "text-embedding-3-small"). Used to key the semantic
+// noise-baseline registry (COG-26, baseline.go) so the abstention floor is
+// looked up for the model that actually produced this vault's vectors, never
+// guessed. Empty only if provider config resolution somehow left Model unset.
+func (s *EmbedService) Model() string {
+	if s.provCfg == nil {
+		return ""
+	}
+	return s.provCfg.Model
+}
+
 // Tier returns the plugin tier.
 func (s *EmbedService) Tier() plugin.PluginTier {
 	return plugin.TierEmbed

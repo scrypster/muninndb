@@ -2,8 +2,11 @@ package cognitive
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -14,20 +17,27 @@ const (
 	HebbianPassInterval = time.Minute
 )
 
-// hebbianMetadataKey returns the Pebble key for Hebbian worker metadata.
-func hebbianMetadataKey(name string) []byte {
-	return append([]byte{0x19, 0x01}, name...)
-}
+// NOTE: there was a hebbianMetadataKey(name) here returning 0x19|0x01|name — a
+// THIRD unregistered claimant on prefix.Idempotency (0x19). It had no callers in
+// the entire tree and was removed with #726 rather than relocated, since there
+// is no on-disk state behind it. Any future Hebbian metadata key must be
+// allocated in internal/prefix and added to docs/internals/keyspace-registry.md.
 
 // HebbianStore is the storage interface for Hebbian updates.
 type HebbianStore interface {
 	UpdateAssocWeight(ctx context.Context, ws [8]byte, src, dst [16]byte, newWeight float32) error
 	GetAssocWeight(ctx context.Context, ws [8]byte, src, dst [16]byte) (float32, error)
-	// DecayAssocWeights multiplies all association weights for ws by decayFactor,
-	// deleting entries that fall below minWeight. Returns count deleted.
+	// DecayAssocWeights applies the peak-anchored, elapsed-time decay ceiling
+	// (COG-27) to every association under ws. Returns count deleted.
+	// halfLife is the wall-clock half-life of an unused edge; it must be > 0.
 	// archiveThreshold > 0 enables moving strong floor-hit edges to the 0x25 archive namespace.
-	DecayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error)
-	// UpdateAssocWeightBatch atomically updates multiple association weights in a single batch.
+	DecayAssocWeights(ctx context.Context, ws [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error)
+	// UpdateAssocWeightBatch updates multiple association weights in a single
+	// Pebble batch. What it writes is atomic; what it applies may be a SUBSET.
+	// A pair whose existing metadata cannot be read is skipped rather than
+	// overwritten with fabricated defaults, and reported through an error that
+	// also exposes SkippedUpdates() []int (indices into updates). Callers that
+	// act on an update landing must consult it.
 	UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error
 }
 
@@ -38,6 +48,10 @@ type AssocWeightUpdate struct {
 	Dst        [16]byte
 	Weight     float32
 	CountDelta uint32 // number of co-activations observed for this pair in the batch
+	// LastActivatedAt is the Unix-seconds stamp to record as the edge's
+	// lastActivated, carried through from CoActivationEvent.At. ZERO =
+	// time.Now() at the storage layer, i.e. the pre-#779 behaviour.
+	LastActivatedAt int32
 }
 
 // CoActivationEvent records a set of engrams that were retrieved together.
@@ -88,6 +102,11 @@ type HebbianWorker struct {
 	// When ltpCfg is nil, LTP is disabled and behavior is unchanged.
 	ltpCfg   *LTPConfig
 	ltpState *ltpState
+
+	// loggedReadFaults suppresses repeat log lines for a pair whose current
+	// association weight could not be read. See shouldLogReadFault.
+	readFaultMu      sync.Mutex
+	loggedReadFaults map[pairKey]struct{}
 
 	// internal stop channel for tests and lifecycle management.
 	stopCh chan struct{}
@@ -203,6 +222,13 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 		signal float64
 		ws     [8]byte
 		ltp    *LTPConfig // per-vault LTP config from the event (nil = use worker default)
+		// at is the LATEST CoActivationEvent.At seen for this pair in the
+		// batch, in Unix seconds; 0 when no event carried a time (the worker's
+		// own submissions always do, direct constructions may not). Taking the
+		// max rather than the last keeps the aggregation ORDER-INDEPENDENT,
+		// which is the same property the log-space weight update has and the
+		// reason a batch can be split or reordered without changing its result.
+		at int64
 	}
 	pairs := make(map[pairKey]*pairStats)
 
@@ -211,14 +237,21 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 			for j := i + 1; j < len(event.Engrams); j++ {
 				key := canonicalPair(event.Engrams[i].ID, event.Engrams[j].ID)
 				signal := event.Engrams[i].Score * event.Engrams[j].Score // geometric product
+				var eventAt int64
+				if !event.At.IsZero() {
+					eventAt = event.At.Unix()
+				}
 				if ps, ok := pairs[key]; ok {
 					ps.count++
 					ps.signal += signal
+					if eventAt > ps.at {
+						ps.at = eventAt
+					}
 					if ps.ltp == nil {
 						ps.ltp = event.LTP // keep non-nil LTP from later events
 					}
 				} else {
-					pairs[key] = &pairStats{count: 1, signal: signal, ws: event.WS, ltp: event.LTP}
+					pairs[key] = &pairStats{count: 1, signal: signal, ws: event.WS, ltp: event.LTP, at: eventAt}
 				}
 			}
 		}
@@ -228,12 +261,22 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 	// when effectiveSignal is large (math.Pow(1+lr, n) → +Inf for n in the thousands).
 	// Collect all updates into a batch for atomic commit.
 	var updates []AssocWeightUpdate
+	// idx ties each pending callback to the update that must persist before it
+	// may fire. OnWeightUpdate is NotifyCognitive in production, so a callback
+	// for an update that did not land tells the trigger system about a weight
+	// transition memory does not have.
 	var callbacks []struct {
+		idx int
 		ws  [8]byte
 		id  [16]byte
 		old float64
 		new float64
 	}
+	// readErrs collects pairs whose CURRENT weight could not be read. They never
+	// enter updates, so they are invisible to the batch's own skip reporting;
+	// they are folded into this function's returned error instead, which is what
+	// Worker.Run counts in Stats().Errors.
+	var readErrs []error
 
 	for pair, stats := range pairs {
 		const hebbianSignalEpsilon = 1e-9
@@ -245,9 +288,29 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 			continue
 		}
 
-		// Get current weight
+		// Get current weight.
+		//
+		// A failed read is NOT a cold start. Skipping is the correct direction —
+		// falling through would re-seed a live edge at the 0.01 cold-start weight,
+		// which is the defect this branch exists to prevent — but the skip must
+		// not be silent. This fault never reaches UpdateAssocWeightBatch, so the
+		// AssocBatchSkipError machinery below never sees it; without reporting
+		// here, a pair whose 0x14 record is corrupt (a PERMANENT, KEY-SCOPED
+		// fault) would stop learning forever with nothing in Stats().Errors and
+		// nothing in the logs. Report it through the same error this function
+		// already returns, and log the pair at most once — the fault recurs in
+		// every flush window, so an unguarded log line here is a flood.
 		current, err := hw.store.GetAssocWeight(ctx, stats.ws, pair.a, pair.b)
 		if err != nil {
+			readErrs = append(readErrs, fmt.Errorf("pair %x->%x: %w", pair.a, pair.b, err))
+			if hw.shouldLogReadFault(pair) {
+				slog.Warn("hebbian: association weight read failed — pair skipped, not re-seeded; "+
+					"further failures for this pair are counted but not logged",
+					"vault_prefix", fmt.Sprintf("%x", stats.ws),
+					"src", fmt.Sprintf("%x", pair.a),
+					"dst", fmt.Sprintf("%x", pair.b),
+					"error", err)
+			}
 			continue
 		}
 
@@ -288,37 +351,127 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 			}
 		}
 
+		// Carry the EVENT's own time to the edge rather than letting storage
+		// stamp time.Now(): an event that waited in the worker's channel was
+		// being stamped late, and an offline replay of historical events would
+		// stamp all of them "now" and erase every interleaved decay pass.
+		// Clamped to int32 because that is the on-disk width; a stamp outside
+		// the representable range falls back to 0 = "stamp at write time".
+		var lastAt int32
+		if stats.at > 0 && stats.at <= math.MaxInt32 {
+			lastAt = int32(stats.at)
+		}
+
 		updates = append(updates, AssocWeightUpdate{
-			WS:         stats.ws,
-			Src:        pair.a,
-			Dst:        pair.b,
-			Weight:     newWeight,
-			CountDelta: countDelta,
+			WS:              stats.ws,
+			Src:             pair.a,
+			Dst:             pair.b,
+			Weight:          newWeight,
+			CountDelta:      countDelta,
+			LastActivatedAt: lastAt,
 		})
 
 		if hw.OnWeightUpdate != nil {
 			callbacks = append(callbacks, struct {
+				idx int
 				ws  [8]byte
 				id  [16]byte
 				old float64
 				new float64
-			}{stats.ws, pair.a, float64(current), float64(newWeight)})
+			}{len(updates) - 1, stats.ws, pair.a, float64(current), float64(newWeight)})
 		}
 	}
 
-	// Atomically commit all updates in a single batch
+	// Commit the updates. A store may apply the batch PARTIALLY: a pair whose
+	// existing metadata cannot be read is skipped rather than overwritten with
+	// fabricated defaults, and reported via an error that names the skipped
+	// indices (storage.AssocBatchSkipError). Matching on the method rather than
+	// the concrete type keeps this package free of a storage dependency.
+	var batchErr error
+	notPersisted := map[int]struct{}{}
 	if len(updates) > 0 {
 		if err := hw.store.UpdateAssocWeightBatch(ctx, updates); err != nil {
-			slog.Error("hebbian: failed to persist association weights batch",
-				"batch_size", len(updates),
-				"error", err)
+			batchErr = err
+			var partial interface{ SkippedUpdates() []int }
+			if errors.As(err, &partial) {
+				skipped := partial.SkippedUpdates()
+				for _, i := range skipped {
+					notPersisted[i] = struct{}{}
+				}
+				slog.Error("hebbian: association weight updates skipped — existing metadata unreadable; "+
+					"the rest of the batch was applied",
+					"batch_size", len(updates),
+					"skipped", len(skipped),
+					"error", err)
+			} else {
+				// Nothing landed: no update in this batch is persisted.
+				for i := range updates {
+					notPersisted[i] = struct{}{}
+				}
+				slog.Error("hebbian: failed to persist association weights batch",
+					"batch_size", len(updates),
+					"error", err)
+			}
 		}
 	}
 
-	// Fire callbacks after batch commit succeeds
+	// Fire callbacks only for updates that actually persisted.
 	for _, cb := range callbacks {
+		if _, dropped := notPersisted[cb.idx]; dropped {
+			continue
+		}
 		hw.OnWeightUpdate(cb.ws, cb.id, "association_weight", cb.old, cb.new)
 	}
 
-	return nil
+	// Fold the read failures into the same return. One mechanism covers both
+	// halves of "this pair did not learn this pass": a pair skipped by the store
+	// because its metadata was unreadable, and a pair skipped here because its
+	// weight was unreadable. errors.Join keeps errors.As reaching the batch's
+	// SkippedUpdates() through the combined error.
+	if len(readErrs) > 0 {
+		readErr := fmt.Errorf("hebbian: %d pair(s) skipped, current association weight unreadable: %w",
+			len(readErrs), errors.Join(readErrs...))
+		if batchErr != nil {
+			batchErr = errors.Join(batchErr, readErr)
+		} else {
+			batchErr = readErr
+		}
+	}
+
+	// Return the failure rather than swallowing it: Worker.Run counts a
+	// non-nil process error in Stats().Errors, which is the only place a
+	// persistence failure in this worker becomes observable. It does not stop
+	// the worker.
+	return batchErr
+}
+
+// readFaultLogCap bounds the suppression set. A read fault broad enough to
+// exceed it is already reported through processBatch's error every window; the
+// cap only stops an unbounded map from growing behind a transient, wide fault.
+const readFaultLogCap = 4096
+
+// shouldLogReadFault reports whether this pair's read failure has not been
+// logged yet, recording it if so.
+//
+// A corrupt Pebble block is permanent and key-scoped, and the worker flushes
+// every HebbianPassInterval, so the same pair fails in window after window.
+// Logging it once turns a silent bug into an operator-visible one without
+// trading it for a log line a minute, forever.
+//
+// Guarded because tests drive processBatch directly while the worker's own
+// goroutine is live; in production it is called from that goroutine only.
+func (hw *HebbianWorker) shouldLogReadFault(pair pairKey) bool {
+	hw.readFaultMu.Lock()
+	defer hw.readFaultMu.Unlock()
+	if hw.loggedReadFaults == nil {
+		hw.loggedReadFaults = make(map[pairKey]struct{})
+	}
+	if _, seen := hw.loggedReadFaults[pair]; seen {
+		return false
+	}
+	if len(hw.loggedReadFaults) >= readFaultLogCap {
+		return false
+	}
+	hw.loggedReadFaults[pair] = struct{}{}
+	return true
 }

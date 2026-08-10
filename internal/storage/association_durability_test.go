@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 )
@@ -20,6 +21,7 @@ func TestAssocMetadata_LastActivated_PreservedOnUpdate(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	lastAct := int32(time.Now().Add(-2 * time.Hour).Unix())
 
@@ -79,10 +81,13 @@ func TestAssocMetadata_PreservedThroughDecay(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	lastAct := int32(time.Now().Add(-30 * time.Minute).Unix())
 
-	// Write association with rich metadata. Weight 0.8 * decay 0.9 = 0.72 > minWeight 0.05 → survives.
+	// Write association with rich metadata. dt=30min at H=197.3min → ceiling
+	// = 0.8*0.9 = 0.72 > minWeight 0.05 → survives. (H chosen so one 30-minute
+	// interval costs exactly the 0.9 factor this test was written around.)
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID:      dst,
 		Weight:        0.8,
@@ -93,8 +98,8 @@ func TestAssocMetadata_PreservedThroughDecay(t *testing.T) {
 		t.Fatalf("WriteAssociation: %v", err)
 	}
 
-	// Decay: factor 0.9, minWeight 0.05 — edge stays alive at 0.72.
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.9, 0.05, 0.0)
+	halfLife := time.Duration(float64(30*time.Minute) * math.Ln2 / math.Log(1/0.9))
+	removed, err := store.DecayAssocWeights(ctx, ws, halfLife, 0.05, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
@@ -144,6 +149,7 @@ func TestAssocPeakWeight_TrackedAcrossUpdates(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("peak-tracking")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write at 0.4
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
@@ -186,6 +192,7 @@ func TestAssocPeakWeight_InitialWriteSetsPeak(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("peak-initial")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID: dst, Weight: 0.7,
@@ -213,18 +220,21 @@ func TestAssocDecay_DynamicFloor(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("dynamic-floor")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write at 0.8 — PeakWeight is seeded to 0.8 by WriteAssociation.
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID: dst, Weight: 0.8,
+		LastActivated: int32(time.Now().Add(-30 * 24 * time.Hour).Unix()),
 	}); err != nil {
 		t.Fatalf("WriteAssociation: %v", err)
 	}
 
-	// Decay aggressively — 5 passes of 0.3 factor.
-	// 0.8 * 0.3^5 ≈ 0.002, well below minWeight=0.05.
+	// Decay aggressively — H=1 day against 30 days elapsed drives the ceiling
+	// to ~0, well below minWeight=0.05. Five passes, because the result must be
+	// identical however many times it is evaluated (COG-27).
 	for i := 0; i < 5; i++ {
-		if _, err := store.DecayAssocWeights(ctx, ws, 0.3, 0.05, 0.0); err != nil {
+		if _, err := store.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.05, 0.0); err != nil {
 			t.Fatalf("DecayAssocWeights pass %d: %v", i, err)
 		}
 	}
@@ -259,16 +269,18 @@ func TestAssocDecay_LowPeakEdgeClampsToVeryLowFloor(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("low-floor")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write at just above minWeight — peak bootstraps to this value.
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID: dst, Weight: 0.06, // PeakWeight seeds to 0.06
+		LastActivated: int32(time.Now().Add(-24 * time.Hour).Unix()),
 	}); err != nil {
 		t.Fatalf("WriteAssociation: %v", err)
 	}
 
-	// Decay below minWeight — floor = 0.06 * 0.05 = 0.003
-	if _, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.05, 0.0); err != nil {
+	// dt = H = 1 day → ceiling 0.03, below minWeight — floor = 0.06 * 0.05 = 0.003
+	if _, err := store.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.05, 0.0); err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
 
@@ -296,6 +308,7 @@ func TestAssocPeakWeight_BatchUpdatePreservesPeak(t *testing.T) {
 	ctx := context.Background()
 	ws := store.VaultPrefix("peak-batch")
 	src, dst := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write initial association at 0.4
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
@@ -334,12 +347,13 @@ func TestAssocPeakWeight_BatchUpdatePreservesPeak(t *testing.T) {
 	}
 }
 
-// TestAssocDecay_RecencySkip verifies that an edge activated very recently
-// (within the last few minutes) is NOT decayed, even with an aggressive factor.
+// TestAssocDecay_RecencySkip verifies that an edge activated very recently is
+// NOT decayed, even with an aggressive half-life.
 //
-// This is a recency-skip feature that does not yet exist. Currently FAILS
-// because DecayAssocWeights decays all edges unconditionally, including those
-// that were just activated.
+// Since #762 this is no longer a special-cased grace window but a consequence
+// of the mechanism: elapsed time since lastActivated is ~0, so the ceiling
+// equals peakWeight and the min() is a no-op. The user-visible property is
+// identical; there is one less undocumented cliff behind it.
 func TestAssocDecay_RecencySkip(t *testing.T) {
 	store := newTestStore(t)
 
@@ -348,6 +362,7 @@ func TestAssocDecay_RecencySkip(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// LastActivated = right now — should be skipped by recency-aware decay.
 	recentlyActivated := int32(time.Now().Unix())
@@ -364,10 +379,9 @@ func TestAssocDecay_RecencySkip(t *testing.T) {
 		t.Fatalf("WriteAssociation: %v", err)
 	}
 
-	// Aggressive decay factor 0.1 with minWeight 0.05.
-	// Without recency skip: 0.8 * 0.1 = 0.08 (survives but weight is massacred).
-	// With recency skip: weight must remain at 0.8 unchanged.
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.1, 0.05, 0.0)
+	// Aggressive half-life (1 day) with minWeight 0.05. Elapsed time is ~0, so
+	// the ceiling is peakWeight and the weight must remain at 0.8 unchanged.
+	removed, err := store.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.05, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
@@ -384,6 +398,6 @@ func TestAssocDecay_RecencySkip(t *testing.T) {
 	}
 
 	if w < 0.75 || w > 0.85 {
-		t.Errorf("recently-activated edge weight was decayed: got %v, want ~%.1f — recency skip not implemented", w, initialWeight)
+		t.Errorf("recently-activated edge weight was decayed: got %v, want ~%.1f", w, initialWeight)
 	}
 }

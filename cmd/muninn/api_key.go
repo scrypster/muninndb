@@ -15,7 +15,7 @@ func printAPIKeyUsage() {
 	fmt.Println("Usage: muninn api-key <command> [flags]")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  create  --vault <vault> [--label <label>] [--mode full|observe] [--expires 90d]")
+	fmt.Println("  create  --vault <vault> [--label <label>] [--mode full|observe|append] [--expires 90d]")
 	fmt.Println("                                           Create a new API key (token shown once)")
 	fmt.Println("  list    [--vault <vault>]                List API keys (no token values)")
 	fmt.Println("  revoke  <key-id> [--vault <vault>]      Revoke an API key immediately")
@@ -112,15 +112,15 @@ func runAPIKeyCreate(args []string) {
 	}
 
 	if vault == "" {
-		fmt.Println("Usage: muninn api-key create --vault <vault> [--label <label>] [--mode full|observe] [--expires 90d]")
+		fmt.Println("Usage: muninn api-key create --vault <vault> [--label <label>] [--mode full|observe|append] [--expires 90d]")
 		return
 	}
 
 	if mode == "" {
 		mode = "full"
 	}
-	if mode != "full" && mode != "observe" {
-		fmt.Printf("Error: invalid mode %q — must be 'full' or 'observe'\n", mode)
+	if mode != "full" && mode != "observe" && mode != "append" {
+		fmt.Printf("Error: invalid mode %q — must be 'full', 'observe', or 'append'\n", mode)
 		return
 	}
 

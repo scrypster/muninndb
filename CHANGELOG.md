@@ -13,6 +13,859 @@ Nothing yet.
 
 ---
 
+## [0.11.0] - 2026-08-04
+
+The hardening release. Three days after 0.10.0, fifty merges: a systematic
+audit of the association read/write layer, the cluster subsystem taken from
+"replicates" to "converges", a cross-tenant isolation fix, and the read path
+made provably write-free. Nearly every fix below landed with a test proven
+to fail without it.
+
+**Upgrade notes.** Migrations **v5** (replication keyspace relocation) and
+**v6** (vault-scoped entity records) run automatically on first start; a
+pre-migration binary refuses to start against a migrated data directory, so
+keep the `muninn.<version>.bak` this release's upgrade command now leaves
+beside the binary if you may need to roll back. Expect entity
+`mention_count` values to go DOWN — v6 recomputes them from each vault's own
+links, replacing an upsert counter that re-enrichment and replay had been
+inflating. Cluster operators: v5 drops historical replication log entries
+(Lobes re-sync via snapshot), and a write sent to a Lobe is now refused with
+a pointer to the Cortex instead of accepted and silently lost — repoint any
+load balancer that lacks leader affinity. Single-node deployments only need
+the rollback note.
+
+### Added
+
+- **UPSERT write mode, keyed to a caller identity** (#556). A caller-supplied
+  `op_id` pins to a head engram via a new 0x30 prefix: a key miss creates,
+  identical content is a strict no-op, and changed content evolves — declaring
+  supersession per COG-28 — re-pointing the identity atomically inside the
+  evolve batch. Identity is the key, never the content, so identity-addressed
+  creates neither consult nor populate the content-hash dedup index (distinct
+  keys with identical text must not collapse onto one engram and share fate).
+  An Active-but-expired head (COG-19 `not_true_since`) takes the create branch
+  rather than stranding the key. Append-mode credentials may create and no-op
+  but are refused the content-change branch (SEC-15). A gRPC response hint is
+  deferred (needs a proto regen).
+- **Recall-health and MCP auth-source metrics** (#606, #648). Three Prometheus
+  counters close two log-only blind spots:
+  `muninndb_recall_embed_fallback_total{vault}` and
+  `muninndb_recall_errors_total{vault,reason}` make the embed→BM25 fallback
+  observable beyond the per-call `SemanticDegraded` field, and
+  `muninn_mcp_auth_total{source}` surfaces the credential mix
+  (api_key/capability/static_token/open) at a single instrumentation point —
+  never the credential or any prefix of it; denied requests are not counted.
+- **A reproducible anisotropy corpus and baseline measurement** (#719): the
+  canonical 160-sentence, 20-domain corpus behind the semantic-abstention
+  floor's `AnisotropyBaseline` statistic, plus
+  `docs/internals/anisotropy-calibration.md`. Deliberately adds no
+  noise-baseline registry entry: which measurement protocol the registry
+  adopts is an open maintainer decision, and μ/σ are framed as model
+  properties with `k` a policy choice behind the existing per-vault
+  `SemanticFloor` override.
+- **`muninn_update_tags` MCP tool.** Replaces an engram's tag set in place —
+  the ULID, version lineage, and access history are all preserved (unlike
+  `muninn_evolve`, which mints a new ULID and archives the predecessor).
+  Takes `vault`, `id`, and `tags`; an empty `tags` array clears all tags.
+  The tag set is normalized exactly as `muninn_remember` normalizes it —
+  non-string and over-128-**byte** entries are **dropped, not rejected**, and
+  the set is **truncated to 50** — so diff the `tags` the response echoes back
+  against what you sent. (The limit is bytes, not glyphs: a 50-glyph CJK tag is
+  150 bytes and is dropped.) A soft-deleted memory can still be retagged, but its
+  keyword-search postings stay dropped while it is deleted — that is what keeps a
+  deleted memory out of search results — so retag it again after
+  `muninn_restore` if it must be findable by the new tags. Brings the MCP tool
+  count to 45. (#720)
+- **`--log-file`/`MUNINN_LOG_FILE` and a `SIGHUP` log-reopen signal, so log rotation is possible under a process supervisor** (#850). Previously the daemon handled only `SIGINT`/`SIGTERM`; there was no way to tell it to reopen its log destination, so the standard rotation contract (a rotator renames the file, then signals the writer to reopen it) had nothing to signal — `logrotate` without `copytruncate` and BSD `newsyslog` (which has no copy-truncate equivalent at all) were both unworkable, and copy-truncate itself has a lossy window. When `--log-file`/`MUNINN_LOG_FILE` names a path, the daemon opens its own descriptor on it (independent of inherited stderr) and `SIGHUP` closes and reopens it under a lock, so no log line is dropped or split across the swap. Without an explicit log file, `SIGHUP` is a documented no-op (a WARN is logged) rather than guessing at a destination — there is no portable way to resolve "whatever stderr currently is" back to a path. `muninn start` sets `MUNINN_LOG_FILE` automatically to its historical `muninn.log` path, so the common case gets rotation support with no configuration change. SIGHUP was chosen over SIGUSR1: it's the long-standing reopen/reload convention (syslog, nginx, Apache) and nothing in this codebase used it; it also compiles on the Windows build of `syscall` (unraisable there, so the reopen path is simply unreachable) where `syscall.SIGUSR1` does not exist at all. **This log-rotation mechanism is POSIX-only** — Windows has no process-signal equivalent to deliver `SIGHUP` with, so there is no trigger for reopen on that platform at all; see `docs/self-hosting.md`.
+- **`MUNINN_ACCESS_LOG` decouples the REST per-request access log from `--log-level`** (#851). The access log line was `slog.Info`, so silencing it meant raising the global level to `warn` — which also discarded every other INFO event (startup, migrations, enrichment, decay, pruner activity). `MUNINN_ACCESS_LOG=0` now silences only the per-request line; every other INFO log is unaffected. On by default, matching existing `MUNINN_LOCAL_EMBED`-style opt-out-with-`"0"` knobs.
+
+### Fixed
+
+- **A `read_only:true` `Activate` no longer restores an archived association edge, and no
+  longer freshens the L1 read cache's recency timestamp for candidates it merely scores**
+  (#846). Two independent gaps, both project-wide (any caller of `Activate` with
+  `read_only:true`, not a single surface):
+  - Phase 4.75's lazy archive restore had no `ReadOnly` gate at all — every read-only
+    `Activate` whose candidates touched an archived (0x25) association edge could mint a
+    live 0x03/0x04/0x14 row for it via `RestoreArchivedEdgesTransitive`, including that
+    call's stranded-row DELETE branch, contradicting COG-11's "a read must not mutate
+    learning state" text. Fixed by gating the phase 4.75 call on the resolved
+    `actReq.ReadOnly`; the restore still happens, lazily, on the next non-read-only
+    `Activate` that reaches the edge.
+  - A read-only `Activate`'s engram load stamped the L1 cache's recency timestamp for
+    every candidate it scored, not just ones it returned, and that timestamp feeds real
+    ACT-R recency scoring in a later, unrelated recall — a scoring pass is not a user
+    access. Fixed with `storage.ContextWithNoAccessCacheStamp`, threaded from
+    `activation.phase6Score` whenever `req.ReadOnly` is true: the entry is still cached
+    (a same-call re-read avoids a Pebble round-trip) but its recency timestamp is left
+    unstamped until a real, non-read-only access touches it.
+
+  See `docs/internals/invariants.md` COG-11's amendments for the mechanism and pinning
+  tests.
+- **`muninn shell`'s `use <vault>` no longer reports success when the vault switch was not
+  persisted, and no longer clobbers unrelated keys in `~/.muninn/config`** (#634). The shell's
+  `use` command did call the persistence function (the issue's stated "does not persist"
+  mechanism did not reproduce), but that function, `saveDefaultVault`, discarded every error
+  from `MkdirAll`, `json.Marshal`, and `WriteFile` and always printed `Switched to vault
+  '<name>'` regardless of whether the write actually happened — a non-writable config path, a
+  full disk, or a permissions problem produced exactly the reported symptom of a stale default
+  vault surviving a switch the user was told succeeded. It also marshalled a fresh
+  `map[string]string{"default_vault": vault}` on every call, discarding any other key already
+  in the file. `saveDefaultVault` now returns an error, read-modify-writes to preserve unknown
+  keys, and `use` reports the failure and falls back to a session-only switch instead of
+  printing an unqualified success message.
+
+- **Consolidation now DECLARES supersession, closing a permanent recall hole over the fact it was meant to preserve** (#779).
+  `muninn_consolidate` / `POST /api/consolidate` archived its source memories with a plain
+  soft-delete: no `supersedes` edge, an open validity window. That is exactly the signature the
+  version-head mechanism reads as "trash, not history", so consolidation was the one
+  content-replacing operation excluded from the mechanism built to close this hole — a later
+  query phrased against a source's wording reached a record recall discards, with nothing
+  declaring where the content went, and came back with nothing about the merged fact. Evolve
+  declares supersession; `muninn_link(relation="supersedes")` declares it; consolidate did not.
+  Each source now gets a `supersedes` edge from the merged memory plus a closed validity window,
+  in one atomic write per source — the same shape `muninn_evolve` writes.
+
+  **Contract change, user-visible.** Consolidated sources are now time-travellable LINEAGE
+  rather than plain archived records:
+
+  - A recall phrased against a source's wording returns the MERGED memory, annotated with
+    `substituted_for` and `substitution_basis`, instead of returning nothing.
+  - `as_of` (before the merge) and `include_invalid` now return the sources; previously a
+    consolidated source was invisible to both. `muninn_read` on a source reports
+    `superseded_by` = the merged id.
+  - The sources' full-text postings are KEPT (deleting them is what made the merged content
+    unreachable from the lexical side). They are still excluded from ordinary present-day
+    recall, exactly as before.
+  - The response field is still named `archived`, for compatibility.
+
+  **Consolidations that already ran are not migrated and need no repair pass.** Their sources
+  carry the plain-forget signature, which every read path already interprets correctly — their
+  behaviour is unchanged rather than half-converted. Note that the embed-lag race the issue
+  describes was not the cause and was already closed: `Consolidate` writes through the normal
+  write path, which wakes the retroactive embed processor (#767).
+
+  Note also what did NOT change: the merged memory still starts with no access history or
+  association edges of its own, so it can rank below its sources' former standing. Inheriting
+  that standing is deferred — it needs a design pass, not a one-line fix.
+
+- **`muninn_evolve` now warns when it carries the predecessor's concept onto changed content** (#769).
+  `concept` has always been a declared parameter of `muninn_evolve`, read by the handler and
+  honored by the engine — that half of the report did not reproduce. What was missing was the
+  loudness: a caller who replaced the substance and left `concept` unset got a successor whose
+  label describes the OLD fact, silently, and every concept-surfacing view
+  (`muninn_where_left_off`, session summaries, the console list) then presents that stale claim
+  as current. The response now carries a warning naming the carried label and the parameter to
+  set. It fires whenever the label was inherited — deciding whether an old label still fits new
+  content needs a reader, and this runtime deliberately has none, so it announces rather than
+  guesses. An explicit `concept` produces no warning.
+
+- **`muninn_entity` no longer reports co-occurrences and relationships whose every supporting memory was superseded** (#780).
+  Both views read capture-time ledgers that only a HARD delete corrects, so an entity retired by
+  an evolve that replaced the entity list — the "we moved off that technology" act — kept
+  appearing under `co_occurs_with` forever, while the same response's `engrams` list already
+  excluded every record behind it. Presence is now decided at read time against live support:
+  an edge is reported only while some live memory still co-mentions the pair. Two clarifications
+  against the report: the counter IS decremented on hard delete (just never on supersession),
+  and an ordinary evolve carries entities onto the live successor, so those pairs are genuinely
+  live and are still reported. The count itself is unchanged — it is a historical strength
+  signal and is honest as one. On an entity with more than 500 live memories the check is
+  abandoned rather than applied to a partial view (filtering on a partial view would delete real
+  edges) and a warning is logged.
+
+- **`muninn logs` no longer reads `<dataDir>/muninn.log` unconditionally** (#852). That file is written only by the CLI's own fork-a-daemon path; a daemon started under a process supervisor (a systemd unit execing `--daemon` directly, launchd with `StandardErrorPath`, `docker run`) never writes it, so `muninn logs` silently tailed a frozen file from whenever the daemon was last started by hand — with no error and no staleness indicator, showing a previous daemon lifetime's log (including its `shutdown complete` line) as if it were current. The daemon now records its actual log destination in a `muninn.logdest` sidecar at every startup, independent of how it was started; `muninn logs` reads that instead of guessing, and prints guidance (pointing at `journalctl` for a known systemd unit, or general supervisor guidance otherwise) rather than presenting stale or wrong content as current. A pre-fix daemon, or a data directory nothing has ever run in, falls back to the historical default path unchanged.
+- **`relationships[]` naming a hard-deleted engram now fails the write, matching `associations[]`** (#817).
+  `mbp.WriteRequest` has two inline edge fields. `associations[]` has refused a
+  target with no live engram record since #803 (`ErrDanglingEndpoint`, mapped
+  to `ErrInvalidID` — REST/gRPC/MBP answer 400). `relationships[]` reached the
+  same store-level guard through a different route — a post-write loop calling
+  `store.WriteAssociation` — which correctly refused the edge but only logged
+  a WARN and returned 200 regardless, so the relationship silently did not
+  exist. This was the more commonly hit half of the asymmetry: `muninn_link`
+  and `muninn_remember` — the MCP surface, the most common agent path — use
+  `relationships`, not `associations`.
+
+  **Client-visible change.** A `relationships[]` entry (on `Engine.Write` or
+  `Engine.WriteBatch`) naming a target with no live 0x01 engram record now
+  fails the write with the same `ErrInvalidID` → 400 that a dangling
+  `associations[]` entry has produced since #803, instead of returning
+  200/201 with the edge silently dropped. A malformed (unparseable)
+  `target_id` in `relationships[]`, previously also silently skipped with a
+  WARN, is refused the same way for the same reason. `Engine.WriteBatch`
+  fails only the item carrying the bad relationship; sibling items are
+  unaffected.
+
+  Chosen over annotating the response with a per-item warning (the
+  alternative the issue named as closer to this project's "degrade loudly"
+  line) because it reuses the existing, already-tested atomic guard
+  (`checkInlineAssocTargets`, run before the engram itself is persisted)
+  rather than adding a new response-shape across MBP/REST/gRPC/MCP — the
+  in-tree mechanism `associations[]` already has, extended rather than a
+  second one invented next to it (STO-12).
+
+- **Writes to a non-Cortex node are no longer accepted and lost** (#596, #631).
+  A `muninn_remember` delivered to a Lobe — by a load balancer without leader
+  affinity, a stale DNS record, or a VIP that failed over to a replica —
+  returned success with an engram id, committed the memory to that one node's
+  Pebble, and never forwarded it. Nothing in the write path knew the node's
+  role: `IsLeader()` had no caller outside `internal/replication` and the REST
+  status handlers. The engram was invisible cluster-wide and destroyed by the
+  next resnapshot. Vault configuration (including per-vault plasticity), API
+  keys and capability tokens had the same shape *and* a second one: they wrote
+  straight to Pebble, bypassing the replication log entirely, so a key minted or
+  a preset set on the Cortex reached a Lobe only via a full join snapshot —
+  never incrementally — and a failover served the pre-failover defaults.
+
+  Both are closed. In cluster mode a client write is accepted only on the
+  Cortex, and configuration now travels the same replication path as engrams.
+
+  **Client-visible change — this is a breaking behaviour change for anyone
+  sending writes to a replica.** A write that previously returned 201/200 on a
+  Lobe now fails, naming the Cortex to retry against:
+
+  | Surface | Before | Now |
+  |---|---|---|
+  | REST | `201`/`200` | **`421 Misdirected Request`**, error code `4015`, headers `X-Muninn-Cortex-Id` and `X-Muninn-Cortex-Addr` |
+  | MCP | tool result | JSON-RPC error **`-32002`**, message names the Cortex |
+  | gRPC | `OK` | **`FAILED_PRECONDITION`** |
+  | MBP | `WriteOK` | error frame, code **`4015`** |
+
+  Reads are untouched on every surface — serving reads is what a Lobe is for —
+  and so is the cluster-administration API, so an operator can still promote or
+  fail over *from* a Lobe. A standalone (non-cluster) server installs no gate
+  and is completely unaffected.
+
+  Rejecting rather than transparently forwarding is deliberate: there is no
+  node-to-node write RPC to forward over, forwarding would have correct
+  followers pump traffic into the wrong side of a split brain, and rejection
+  introduces no new timeout. The full argument is recorded at
+  `mbp.NotLeaderError` and in invariant SEC-13.
+
+- **A Lobe can no longer be talked backwards into a stale cluster, silently**
+  (#631). After a Cortex was rebuilt from an empty data directory, a Lobe still
+  holding the old, higher epoch and a far-ahead apply cursor rejoined
+  successfully, reported `lag: 0`, and received nothing — forever. The apply
+  cursor is an in-memory field on the applier with no reset path, and
+  `WipeForResnapshot` deliberately preserves the epoch, so after the snapshot
+  landed the node skipped every entry the new Cortex shipped (they were all
+  below its cursor) while the lag calculation clamped to 0. The join path now
+  rebases the apply cursor onto the snapshot's baseline and adopts the Cortex's
+  epoch with it; a backwards epoch offered **without** a resnapshot is refused
+  outright with an error naming both epochs and the remedy, because nothing
+  would reconcile the divergence. `EpochStore.ForceSet` is gone: `Advance` is
+  monotonic and *reports* whether it moved, so a caller can no longer swallow a
+  regression by ignoring a nil error, and the single legitimate backwards path
+  is the explicitly named `AdoptForSnapshot`.
+- **Cluster catch-up no longer spirals: a slow replica is not a dead one**
+  (#627). Every frame write was bounded by one fixed 5-second deadline — a
+  constant applied to a quantity measured somewhere else entirely, since the
+  frame may be a 40-byte heartbeat or a 1 MB snapshot chunk and the link may be
+  loopback or a laptop on a WAN tunnel. A replica that fell behind could not get
+  back: the receiver applied entries more slowly than the sender pushed, the
+  socket buffer filled, one write crossed 5 seconds, the stream died, the
+  replica rejoined further behind. Raising the constant only moves the cliff, so
+  the bound was replaced rather than retuned. A frame write now fails only when
+  the peer accepts **no bytes at all** for the idle timeout; the deadline resets
+  on every byte of forward progress, which makes it independent of frame size
+  and link speed. Two outer bounds keep that from becoming unbounded: a single
+  frame may not hold a connection's write slot beyond `sendMaxDuration`
+  (2 minutes) even while dribbling, and a caller that cannot get the write slot
+  within `sendSlotWait` gets `ErrPeerBusy` — the peer is busy, not dead, the
+  connection is left intact, and the shared heartbeat broadcast moves on instead
+  of blocking behind a multi-megabyte transfer.
+
+  A restarted replication stream also no longer restarts from sequence 0. It
+  resumes from the highest position the primary can prove the replica holds:
+  its last acknowledged sequence, or the snapshot sequence quoted in its join
+  response, whichever is higher. (The snapshot source is not redundant — the
+  snapshot receiver does not advance the replica's applier position, so a
+  freshly-snapshotted replica acknowledges a low sequence while holding a
+  complete database.) Previously the re-transfer volume tracked the size of the
+  log rather than the size of the lag. A stream that ends now logs where it
+  started, how far it got, and where the log is, so a stalled replica is visible
+  instead of indistinguishable from an idle one.
+
+- **Enabling clustering at runtime built a coordinator that could not
+  replicate** (#628). `POST /api/admin/cluster/enable` constructed and started a
+  cluster coordinator inside the running process. That coordinator could never
+  work: the storage layer's replication hook is captured when the Pebble store
+  is built at boot, and only when `cluster.yaml` already said enabled at that
+  moment. A node enabled this way reported itself clustered, accepted replicas
+  and shipped them a snapshot — and then appended **nothing** it wrote to the
+  replication log. It also never received the WAL handle, so it never pruned
+  (unbounded log growth), and it registered joiners as voters against a quorum
+  the boot path would have computed differently.
+
+  There is now no code path that constructs a coordinator outside boot. The
+  endpoint persists the configuration and answers **`202 Accepted`** with
+  `restart_required: true`, `enabled: false`, and a message saying so; the web
+  console shows a restart-required banner instead of "Cluster active". This is a
+  **behaviour change** for anyone scripting that endpoint: a successful call is
+  now 202, not 200, and clustering starts on the next restart of the node.
+- **Pebble prefix `0x19` was allocated twice, and a cluster prune would have
+  deleted idempotency receipts** (#726). `internal/replication` inlined a raw
+  `0x19` for every key it wrote, so a replication log entry (`0x19|seq_be64(8)`)
+  and an idempotency receipt (`0x19|siphash(op_id)(8)`) had the same prefix, the
+  same length, and the same database, with no discriminator between them —
+  116,248 entries alongside 23 receipts on one production store.
+  `ReplicationLog.Prune` range-deletes `[0x19|be64(1), 0x19|be64(untilSeq+1))`,
+  which is precisely "every receipt whose SipHash is below the watermark": a
+  vanishing probability at today's sequence numbers, growing linearly with the
+  sequence, and armed the moment the prune gets a production caller. The
+  sequence counter was worse-placed still, at `0x19|0xFF*8` — *inside* the entry
+  range. The whole replication keyspace now lives at `0x2F` with a
+  sub-namespace byte, so the prune's range provably contains nothing but log
+  entries. **Migration v5** relocates existing stores; it drops the old log
+  entries (key by key, behind a positive identification — never a range delete,
+  since receipts share that range) and compacts, which is also where a bloated
+  store gets its disk back. A pre-v5 binary refuses to start against a migrated
+  data directory. See `docs/cluster-operations.md` for the upgrade note.
+
+- **Observers accumulated the Cortex's replication log forever** (#826). Two
+  mechanisms, both closed. The snapshot sender iterated the entire database, so
+  every joining Lobe received a byte-for-byte copy of the Cortex's log — entries
+  that each carry the full key and value of a replicated write — which nothing
+  on a Lobe ever reads and nothing there prunes (the periodic prune is
+  leader-gated). And `RepLogAppend` was wired unconditionally on every cluster
+  node, so a Lobe logged a full-size entry for each of its *own* local writes
+  (last-access touches, Hebbian updates, decay), which is why a measured lobe
+  held more entries than the Cortex it followed: 22 GB and 7.5 GB on two
+  observers. Snapshots now skip the log entries and only the log entries — the
+  replication metadata, above all the sequence counter, still ships, so a
+  promoted Lobe continues the cluster's numbering — and a node that is
+  definitively a follower no longer appends. The suppression fails **open** on
+  an unknown role, so a leader serving writes during startup can never silently
+  drop them out of the stream. Neither filter was expressible before #726: under
+  `0x19` both would have discarded idempotency receipts too.
+- **`hebbian_enabled` now governs the read side too** (COG-32). The phase-4
+  Hebbian boost ran unconditionally during recall while its neighbour, the PAS
+  transition boost, was gated — so a vault with `hebbian_enabled: false` (the
+  `scratchpad` preset) was still scored by association edges it would never
+  update and never decay. The flag is now symmetric: it gates learning, decay
+  and the read-side boost. **User-visible:** `scratchpad` vaults score recall
+  without any Hebbian contribution, and rows can reorder on such vaults.
+- **An explicit `actr_heb_scale: 0` is honored** instead of being silently
+  replaced by the 4.0 default. Two layers substituted it; the config layer had
+  always admitted it. `actr_heb_scale` scales both the Hebbian and the PAS
+  transition boost, so 0 is the "no cognitive prior at all" switch — it now
+  works.
+- **Co-activation writes carry their own timestamp.** `CoActivationEvent.At`
+  was set by the engine and then dropped, so an association's `lastActivated`
+  was stamped at write time rather than at co-activation time. An event that
+  waited in the worker's channel was stamped late. Zero-value behaviour is
+  unchanged.
+- **An association's decay anchor never moves backwards** (COG-27). Making the
+  co-activation timestamp writable also made it *remotely* writable: in a
+  cluster, a cog-forwarded co-activation carries the peer's clock verbatim.
+  `lastActivated` is COG-27's elapsed-time input, so a stale stamp collapsed a
+  live edge's decay ceiling on the next pass — irreversibly, since decay never
+  raises a weight. Both association writers now keep the later of the stored and
+  the incoming stamp, the same shape `peakWeight` already had beside them.
+  **User-visible in cluster mode only:** a lagging or skewed peer, or a
+  cog-forward backlog delivered after a partition heals, can no longer age
+  another node's associations by the size of the clock gap.
+- `RecallEvent`'s doc comment no longer claims a "positives = surfaced AND
+  cited" ground-truth join that is not implementable from what is on disk (no
+  join key, no identity on either side, context-free residue, and a citation
+  side damaged by the #757 class).
+- **An association edge can no longer outlive its endpoints** (#803). Hard
+  deletes left the dead engram in the FTS and vector indexes, so the automatic
+  association workers kept finding it and minting fresh edges to an ID that no
+  longer existed — growing with use, and never reaped, because association decay
+  does not read engram records. Both hard-delete callers now clean both search
+  indexes, `DeleteEngram` cascades archived (0x25) edges in both directions, and
+  every association writer refuses an edge whose endpoint has no engram record.
+  The delete cascade also missed every edge at weight ≤ ~1/256 (and at the
+  legacy full-weight key position) because of a scan-bound bug; those edges were
+  unreapable, and the startup key-repair pass could promote one into a live
+  dangling edge. Both are closed.
+
+  **Client-visible change:** a write whose `associations[].target_id` names a
+  memory that has been hard-deleted is now **rejected** instead of silently
+  accepted. The row it used to create pointed at nothing. How the rejection
+  surfaces is per-transport: REST's single-write path returns **400**; REST's
+  batch endpoint still returns 201 with `status: "error"` on that item only, its
+  siblings committing as before; gRPC and MBP return their existing error for an
+  invalid ID. `relationships[]` is unchanged in this
+  release — it still logs a warning and succeeds (#817).
+
+- **A retag no longer leaves stale full-text-search postings.** Tags are
+  tokenized into the BM25 posting lists, but the storage-level tag update only
+  rewrote the record and the tag indices, so after changing a tag recall scored
+  the memory on a tag it no longer had and could not score it on the tag it had
+  just gained. `Engine.UpdateTags` now rebuilds the engram's postings in one
+  atomic operation, keyed on the document captured before the write. (The tag
+  *indices* were never affected — the recall pipeline re-checks them against the
+  engram's real tags — but the full-text score feeds ranking directly with
+  nothing to re-verify it.) This also stops a retagged-then-forgotten memory from
+  staying keyword-searchable under a tag it used to have. (#720)
+
+- **Curating a memory's tags no longer makes it harder to find.** The obvious way
+  to rebuild an engram's postings — delete them, then index the new document —
+  is not statistics-neutral: indexing increments the per-term document frequency
+  for *every* term the memory contains (and the corpus size), while deleting
+  decrements neither. Because BM25's inverse document frequency is
+  `ln((N+1)/(df+0.5))`, each edit moved the denominator by a whole document and
+  the numerator barely at all, so a memory's score for a query on its own
+  **unchanged** content decayed on every retag: measured on a 60-memory vault,
+  −8.1% from a single retag, below a 0.3 recall threshold by ten, and −82.6%
+  after a hundred against a −10.0% drop for an untouched control in the same
+  vault. Since `muninn_update_tags` exists precisely for `due:<ISO-date>`-style
+  conventions, ten retags is under two weeks of ordinary use, and nothing
+  surfaced the loss. Retagging is now stats-neutral by construction: one
+  full-text-index operation that leaves the corpus size alone and moves a term's
+  document frequency only when the term genuinely entered or left the memory.
+  Scoped honestly: that neutrality is with respect to how many times you retag,
+  not to how big the tag set is. A memory whose tag set grows in place is still
+  length-normalized by BM25 like any longer document, and because the rebuild
+  leaves the corpus *average* document length alone, that penalty is slightly
+  over-applied until the next `muninn reindex-fts` — the conservative direction,
+  scores under-credited rather than inflated. There is no ratchet either way:
+  returning to a previous tag set restores the previous score exactly. (#720)
+
+- **A retag no longer makes a deleted memory keyword-searchable again.** A retag
+  rebuilt the posting lists with no state check, undoing the soft delete's own
+  full-text cleanup. Recall never returned the memory (the pipeline filters
+  deleted and archived memories out before scoring), but the postings still
+  consumed candidate slots. A soft-deleted or archived memory now gets its
+  postings dropped and nothing written back — it stays retaggable, and the
+  record is updated as before. (#720)
+
+- **A rejected retag no longer leaves the wrong tags visible.** `muninn_read`
+  could echo tags that had been rejected and never stored, and — worse — a recall
+  filtered on the memory's *real* tags could drop it, because the same in-memory
+  copy backs both. The storage-level tag update mutated the cached record before
+  validating it and then returned from the validation-failure path without
+  dropping the cache entry, so a call that reported an error still changed what
+  every reader saw until the entry was evicted. Reachable from MCP with a tag
+  whose `key:value` value contains a NUL byte. The cache entry is now dropped on
+  every exit path, and the committed record is re-cached after the write — which
+  also closes the window where a concurrent reader could re-cache the
+  pre-commit tags on top of a committed update. (#720)
+
+- **A concurrent retag can no longer resurrect a deleted memory.** The
+  storage-level tag update re-encodes the whole record, so unlocked it wrote back
+  every field from a snapshot that could predate a committed delete — leaving the
+  memory `active` in the record while the state index said `soft_deleted`
+  (`muninn_forget` succeeds, `muninn_list_deleted` shows it as deleted, and
+  recall keeps returning it), and reverting a concurrent access-count
+  reinforcement. It now holds the same per-engram stripe lock every sibling
+  read-modify-write holds ([STO-2]/[STO-3]). (#720)
+
+- **`GET /api/admin/embed/status` now honors an optional `?vault=` query
+  parameter** (#802). It previously accepted the parameter and silently
+  ignored it — every vault on a multi-vault instance got the same
+  instance-wide `embedded_count`/`total_count`, which reads as a per-vault
+  coverage ratio and is not one. `total_count` now comes from `Stat` scoped to
+  the same vault (already supported); `embedded_count` gained a new
+  vault-scoped storage path (`CountEmbeddedInVault`), since the 0x11
+  DigestFlags keyspace it reads from is deliberately global and cannot be
+  scanned by vault directly — it scans the vault's own engram IDs and looks
+  up each one's flags instead. Both counts always share scope by
+  construction, so the ratio stays honest. `rate_per_sec`/`eta_seconds`
+  remain instance-wide — a named, documented deferral, not silently wrong.
+  Omitted or empty `vault` preserves the historical instance-wide behavior.
+
+- **Cache-returned engrams are read-only; writers clone** (#858). Seven write
+  paths — evolve's `mutateEngram`, `SoftDelete`, `UpdateTagsLocked`,
+  `UpdateConfidence`, `UpdateConfidenceWithContradiction`, `UpdateDigest` and
+  one more, found by an AST census rather than a method-name sweep — mutated
+  the shared L1-cache struct in place, racing every concurrent reader.
+  The per-engram stripe locks four of them relied on never helped: readers
+  never take them, and `GetEngram` re-caches what it decodes, so the pointer
+  is shared again before the caller sees it. Reproduced under `-race` with
+  nothing but a `GetEngram` loop as the second party. Writers now clone
+  before mutating; the read-only contract is pinned as STO-20.
+- **A symmetric association is now readable from both endpoints during
+  ranking** (#800). Association writers disagreed on edge direction (the
+  Hebbian worker canonicalises older→newer; the neighbour and autoassoc
+  workers write newer→older) and the ranking phases read only the forward
+  index, so the SAME relationship boosted a candidate at full strength from
+  one endpoint and by exactly zero from the other — measured end to end: one
+  link scored `hebbian_boost` 0.4 from its source and 0 from its target,
+  moving that row's recall score from 0.7150 to 0.3862. Ranking now reads a
+  relation-type-filtered union of both directions in a new sibling method;
+  `GetAssociations` is deliberately unchanged and pinned forward-only — its
+  consumers include a writer (dream persists what it infers) and
+  direction-presenting surfaces (COG-31).
+- **A failed association read is no longer written back as fabricated
+  defaults** (#809). "No such edge" and "the read failed" collapsed into one
+  zero-valued return, which the weight-update paths re-encoded over the live
+  edge: a transient Pebble read fault reset an edge's `relType`
+  (reclassifying directional edges — supersession, parent/child — as Hebbian
+  co-activation), its `createdAt`, and its `peakWeight`, the anchor of the
+  decay ceiling. Read errors now propagate and the write is refused; the
+  Hebbian worker no longer treats a failed read as cold start and re-seeds a
+  strong edge, and dream no longer infers a fresh edge over an existing one
+  it failed to read.
+- **Four association-layer defects: two laundered reads, three unevicted
+  caches, one aliased slice** (#804, #808, #818, #820). The worst:
+  `FlagContradiction` treated a FAILED idempotency-marker read as "newly
+  flagged" and restamped `detectedAt`, re-firing the non-invertible
+  confidence penalty — compounding 1.0 → 0.0709 on BOTH engrams, the true one
+  included, from one corrupt block that was otherwise harmless. Marker reads
+  now distinguish absent / corrupt / failed, and the two callers take
+  deliberately opposite actions because their loss directions are opposite:
+  flagging fails closed (one deferred penalty), the confidence update fails
+  open on the marker only (the stamp on disk is never replaced). Also: a scan
+  that died partway is no longer served — or cached for the TTL — as a
+  short-but-complete edge list (which `currencyInDeclaredChain` read as "not
+  in a chain", minting false advisories); the three edge-mutating sites that
+  bypassed the association caches now evict them; and the cache-MISS path no
+  longer hands the first caller a live view of cache-owned memory.
+- **`keys.PrefixUpperBound` had the bug it exists to prevent** (#816, #819) —
+  in both directions. The STO-11 helper kept trailing 0xFF bytes after its
+  carry, admitting a neighbouring prefix's keyspace for ~1 prefix in 256
+  (loose-bound rate, not loss rate: with ULID-shaped keys an actual crossing
+  needs a ~2⁻⁶⁴ id collision — structural hygiene on a delete path, stated
+  accurately). `AssocFwdRangeEnd` open-coded the opposite: an inverted carry
+  that stopped short. Both now carry and truncate correctly, with the helper
+  as the single implementation.
+- **Symmetric archive restore, a hard dedup cap, and sweep-path coverage**
+  (#806, #728, #696). An archived symmetric association is now stored under
+  both endpoints in the same batch that archives it, so the existing restore
+  scan finds it from either side (STO-19; directional edges are never
+  mirrored, per COG-31). `MaxDedup` is now a hard per-run cap — a large
+  cluster can no longer overshoot the configured limit, and dedup no longer
+  re-scans already-archived engrams forever. And the sweep path gained the
+  real-store regression test that would have caught the #692 truncation.
+- **CGDN was inert at any positive threshold** (#768, #805).
+  `computeComponents` never set the `ContentMatch` its abstention gate
+  multiplies by, so the experimental mode has never returned a live result —
+  the same shape as the dead traversal phase (#801). Kept and labelled INERT
+  rather than deleted (it has real per-vault config and transport surface;
+  deletion would silently orphan explicit config), pinned by a test whose RED
+  control is the threshold-0.0 path that does produce output. Corrected in
+  passing: the live CGDN ratio is bounded ≤ 1 by construction; #768's 8649.0
+  came from the shadow path. #805's ε=0.01 Hebbian rescue floor sits 20×
+  above the measured steady-state edge weight (p50 0.0005) — a second,
+  independent no-op — and is folded into the same disposition.
+- **Six narrow defects closed together** (#776, #794, #700, #733, #821,
+  #807): the COG-28 shadow scorer honored the tag-pool bypass its own
+  doctrine forbids; a version chain over the depth cap was indistinguishable
+  from "no current version exists" and never warned; `annotate:true`'s
+  fallback filled annotations from a raw reverse-edge lookup, leaking
+  lease-hidden / soft-deleted / as-of-future IDs around the COG-22 visibility
+  gate; the scheduled markdown export read every engram without `ReadOnly`,
+  reinforcing access counts and flattening ACT-R base-level vault-wide
+  (export is observation, not use); a renamed constant left the
+  `scoringmeasure` harness uncompilable under vet; and `muninn_forget`
+  hard-coded `Hard: false`, silently downgrading an SDK caller's `hard=true`
+  to a soft delete — MCP now honors it at the same authorization level gRPC
+  has always used, still refused for append-mode credentials (SEC-15).
+- **Three enrichment failure paths turned a transient error into a lasting
+  one** (#605, #642, #658). The embed-failed and enrich-failed digest flags
+  literally aliased the same bit, so a transient embed failure was recorded
+  as a permanent enrich failure and vice versa — the flags byte is widened to
+  two with a tolerant legacy decode, no repair pass needed (STO-16). A
+  caller's own cancellation counted against the provider circuit breaker
+  (`Breaker.DoIgnoring` closes that, releasing the half-open probe slot
+  rather than stranding recovery). And the embed sub-call consumed the whole
+  recall deadline on a hung backend, so the BM25 fallback that existed for
+  exactly that case had no budget left to run — it now reserves a fraction of
+  the remaining deadline, not a fixed duration.
+- **Four cluster/storage divergence bugs** (#686, #760, #771, #761). The
+  evolve/startup-repair batch path never replicated to followers — every
+  other write method did. Association-weight decay ran independently on
+  every node, landing different float32 weights for the same edge (now
+  gated on the single-writer gate, like the log prune; followers receive the
+  leader's decayed weights via ordinary replication). `link()` at a weight
+  already carrying an edge of a different `RelType` silently replaced it —
+  now refused (`ErrAssocRelTypeCollision`; putting RelType in the key is a
+  named deferral, STO-15). And the repair watermarks gained an operator
+  reset path.
+- **Cluster role flaps no longer crash the process, and a node's identity
+  survives a hostname change** (#629, #630). Promotion and demotion callbacks
+  are serialized behind one mutex with panic recovery — demotion previously
+  fired in a bare goroutine against shared cognitive-worker state, and an
+  unrecovered panic there took the whole process down under flapping quorum.
+  Node identity is now persisted to `{dataDir}/node-identity` instead of
+  re-derived from the hostname, so a renamed container no longer mints a
+  ghost cluster member that poisons quorum counting and pins
+  `MinReplicatedSeq` forever. Existing ghosts are NOT auto-reaped (a past
+  self and a real peer are indistinguishable without an operator);
+  `muninn cluster remove-node` remains the cleanup.
+- **The replication log is actually pruned, bounded by a backlog ceiling**
+  (#724, #725). `Prune` was implemented, documented, and had no production
+  caller — measured on a production primary: ~10 GB/day of log growth,
+  311 MB → 18 GB in 8 days on an otherwise idle daemon. It is now wired into
+  the periodic prune, made encoding-aware (it decodes and deletes only what
+  is provably a log entry — receipts shared the range, so a blind
+  `DeleteRange` was never safe), and bounded by
+  `ClusterConfig.MaxLogBacklog` (default 50,000) so one Lobe that never
+  catches up cannot pin the watermark and grow the Cortex forever — a
+  left-behind Lobe rejoins via snapshot, which is strictly better than
+  unbounded retention. `0` restores the old behaviour.
+- **`muninn upgrade` is now safe to run — and to undo** (#600, completing the
+  checksum work in #666). It refuses to self-update when a service manager
+  owns the daemon, before any destructive step — on the old code a systemd
+  unit was left serving off a deleted inode while the CLI reported the new
+  version (#749). It preserves the outgoing binary as `muninn.<version>.bak`
+  and refuses the upgrade if it cannot. And its "Stopping daemon..." step no
+  longer prints success while a daemon it failed to stop survives (#792) —
+  detection now reaches supervisor-started daemons via the exe scan, with
+  the darwin/launchd gap named rather than glossed.
+- **A cloned vault's `LastAccess` decoded to the year 1754, silently emptying
+  the clone's first recall** (#810). `CloneVaultData` wrote the Go zero time
+  straight to disk, bypassing the one normalization guard; ERF stores
+  `UnixNano()`, for which year 1 is out of range, so it overflowed to a bit
+  pattern that decodes as 1754 — a valid `time.Time` that `IsZero()` waves
+  through. On a weighted_sum vault recency collapsed to the floor and the
+  FIRST recall on a fresh clone returned zero results, silently, re-arming on
+  every restart and cache eviction. Three-part fix: `normalizeEngramTimes`
+  is now the single definition of "created, never accessed" for every writer
+  including clone; the overflow pattern is mapped back to the zero time at
+  the ERF decode boundary, making the sentinel unrepresentable; and the
+  census test that should have caught it now does.
+- **`muninn_where_left_off` works on a cloned or merged vault** (#811): the
+  LastAccess index backing it was not carried by clone or merge; the
+  post-operation reindex now rebuilds it alongside FTS and HNSW.
+- **The web console reports the daemon's authoritative cognitive worker
+  state** (#645) instead of a client-side inference.
+
+### Changed
+
+- **`muninn_evolve` now rejects a `tags` argument** with JSON-RPC `-32602`,
+  naming `muninn_update_tags` in the error message. Previously it accepted
+  `tags` and silently discarded them, returning success with no signal the
+  tags were dropped — so a caller could see success, see a `concept` change
+  in the same call take effect, and never learn the tags didn't. This is a
+  behavior change: a call combining `new_content` with `tags` used to
+  *partially* succeed — the content evolution landed and only the tags were
+  dropped — and now fails outright. Nothing that previously worked *completely*
+  breaks; partially-succeeding calls now fail loudly instead. (#720)
+
+### Internal
+
+- The cognition trial's machinery: a build-tagged (`cognitiontrial`) offline
+  harness that puts the Hebbian / PAS / ACT-R base-level layer on trial against
+  real recorded queries, a co-activation replay driver, and the pre-registered
+  acceptance rule as executable code with its own unit tests. None of it
+  compiles into a shipped binary.
+- The trial's acceptance rule was made coherent BEFORE any trial data exists
+  (#798): the SHIP verdict now requires the shuffled-seed null to have
+  actually run, K4 reports but no longer gates, and an exact-zero
+  mechanism-delta series is classified UNDERPOWERED rather than counted as a
+  kill vote.
+- `phase4HebbianBoost`'s recency constant is named for what it is —
+  `recencyTau`, a decay time constant, not a half-life (#799). Pure rename,
+  byte-identical measurement outputs verified before/after.
+- Reinforcement tests drain the fire-and-forget worker deterministically
+  instead of polling a 15-second wall clock (#813) — the flake had already
+  had its deadline raised once, which moved the rate, not the mode.
+- CI guards grew teeth: the leak-tell check runs against every change's added
+  lines and the pre-commit vault-guard gap for worktrees and contributor
+  clones is closed (#845); a NUL byte can no longer make git classify a
+  tracked source file as binary and invisible to diff review (#827); and the
+  claims-and-evidence convention — "a claim that reads the same when it is
+  false is not a claim" — is now written down with its two measured
+  counterexamples (#812, #814).
+- The decision record gained three measured negatives and the
+  associative-traversal post-mortem (#801, #837): honest negatives are
+  first-class outcomes here, and the record is where they live.
+
+### Security
+
+- **Entity records were global across vaults — a cross-tenant read oracle AND
+  a cross-tenant write** (#683). The 0x1F entity record was keyed by name
+  hash alone, with no vault prefix, while every index backing it carried the
+  vault — so two vaults that mentioned the same entity name shared ONE
+  record. Three live consequences: `mention_count` summed every vault's
+  upserts (and entity IDF divided that cross-vault numerator by a
+  single-vault denominator); a by-name lookup from a vault with NO links to
+  an entity still returned another tenant's name, type, confidence,
+  first_seen and count — an existence-and-metadata oracle over another
+  vault's entity vocabulary; and `SetEntityState` took no vault at all, so an
+  agent scoped to vault A could mark vault B's entity deprecated or merged.
+  Entity records are now keyed `0x1F|vault|nameHash` and every read/write
+  path takes the vault. **Migration v6** relocates existing records to every
+  vault that positively references them, recomputing `mention_count` from
+  each vault's own links — counts go DOWN, because the old figure was an
+  upsert counter that re-enrichment, replay and merges each inflated.
+  Unreferenced records are dropped with a WARN naming each one; deletion is
+  key-by-key behind a conjunctive positive test, never a range delete, and a
+  re-run never clobbers existing output.
+- **CLI cluster commands now authenticate** (#632). `muninn cluster ...` sent
+  no credential at all against endpoints that require the cluster secret or
+  an admin session. Fixed by extending the two auth mechanisms `muninn vault`
+  already uses rather than inventing a third: the cluster secret is read from
+  the local `cluster.yaml`, and enable/disable run the same admin
+  authentication flow as `vault`.
+- **Enrichment and embed errors no longer carry memory content** (#641,
+  #790). Enrichment parse failures embedded up to 160 bytes of the model's
+  response in the returned error — and `Run` logs every failed stage at WARN
+  on a default-configured server, so fragments of user memories reached the
+  logs (model output is a function of memory content). Parse errors now carry
+  a stage and a stable category (`unmarshal_failure`, `type_mismatch`,
+  `empty_result`), never payload bytes. All seven embed providers had the
+  same shape — the raw HTTP error body, which echoes the request body, IS the
+  memory text — and now use the same mechanism.
+- **`muninn upgrade` renders the release note inertly** (#857). The note
+  comes from a GitHub Release body and reached the terminal verbatim, where
+  an ESC byte is an escape sequence that can recolour, reposition, or
+  overwrite what a reviewer saw on the release page. C0/C1/DEL are stripped
+  (tab and newline kept); a lone invalid byte still renders as U+FFFD rather
+  than being dropped, pinned by test so a future tightening cannot quietly
+  start discarding legitimate malformed text.
+- **`muninn_state` is no longer callable by an observe-mode credential.** The
+  tool was classified in `isReadOnlyTool`, but its handler reaches
+  `Engine.UpdateLifecycleState` (via `mcpEngineAdapter.UpdateState`) — so an
+  `mk_` key or `cap_` token issued as read-only could transition any engram's
+  lifecycle state, including archiving it. It is now classified mutating. Effects
+  per credential mode:
+  - **observe — now denied.** A read-only client that was calling `muninn_state`
+    was performing a write and will now receive `forbidden`.
+  - **write — now allowed** (it was previously *denied*, because write mode
+    admits only tools classified mutating). This is a side effect of the
+    two-bucket classifier, not a designed grant: `mutatingTools` and
+    `readOnlyTools` are complementary over every registered tool — enforced by
+    the census in `internal/mcp/tool_classification_test.go`, not true by
+    construction — so a tool cannot be denied to observe *and* write.
+
+    It grants write mode a second tool for a capability it already held, not a
+    new capability. `muninn_compare_and_set` has been classified mutating since
+    before this change, its `set_state` enum includes `archived`, and
+    `expect_state` is optional (the tool schema says "Omit to skip the guard"),
+    so it reaches the identical `store.CompareAndSet` lifecycle transition
+    unconditionally. Write mode also already holds every other mutating tool —
+    `muninn_forget`, `muninn_evolve`, `muninn_trust`, `muninn_merge_entity`
+    among them — with the single exception of `muninn_create_workflow_vault`,
+    which `server.go` pins to a full-mode `mk_` key by a separate guard.
+    `handleState`'s response echoes only caller-supplied values, so it opens no
+    exfiltration channel.
+
+    **One property of archive is worse than its neighbours and is named rather
+    than glossed:** `state(archived)` is the only write-mode operation that
+    leaves no *enumerable* trace. `muninn_list_deleted` reads
+    `StateSoftDeleted` only and recall refuses archived engrams on every path,
+    so where a `forget` is findable through `list_deleted` and an `evolve`
+    through `as_of`/`include_invalid`, an archived engram is reachable only
+    from an ID the caller already holds. It is not silent and not
+    irreversible — `Engine.Restore` accepts `StateArchived` — but its audit
+    trail is a content-free `update-meta` provenance entry, and the `reason`
+    argument the tool advertises is discarded by both the MCP and REST adapters
+    (`Engine.UpdateLifecycleState` has no such parameter). By contrast
+    `muninn_merge_entity`, which write mode has always held, is outright
+    irreversible. All of these properties are pre-existing and untouched here.
+
+    **Residual, tracked separately (#822):** MCP write mode is broader than
+    REST write mode, but not for the reason the route shapes suggest. REST's
+    `ReadOnlyGuard(WriteOnlyGuard(...))` on `PUT /api/engrams/{id}/state` is
+    documented in `internal/transport/rest/server.go` as exfiltration
+    prevention for routes that "return engram data in their response body" —
+    and REST write mode is separately *allowed* to soft-delete
+    (`TestWriteOnlyMode_WriteHandlersNotBlocked/DeleteEngram`), which is more
+    destructive than archiving. Closing the real gap needs a full-only overlay
+    consulted before the `ModeWrite` case, whose membership must cover every
+    write-mode path to a lifecycle transition — `muninn_state` *and*
+    `muninn_compare_and_set`, then a decision about `muninn_claim`/
+    `muninn_release`, which share the CAS primitive. That is a scoping
+    decision, not a one-name move, and REST exposes no compare-and-set route
+    to take parity from. Pinned meanwhile by
+    `TestDispatch_WriteMode_AllowsCompareAndSetArchive`.
+  - **append — now denied at the MCP dispatch gate** as well as by the existing
+    `Engine.refuseAppend` backstop, which is why append mode was never
+    exploitable. Two layers again instead of one.
+  - **full — unaffected.**
+  (#731)
+
+---
+
+## [0.10.0] - 2026-08-01
+
+The trust release. Nine rounds of blind hands-on evaluation by AI agents drove
+this cycle: each round's top complaint was fixed, adversarially reviewed, and
+re-verified live by the evaluator that filed it.
+
+### The cognitive substrate, made honest
+
+- **Full-confidence learning restored** (#757): a key-encoding overflow had sent
+  every weight-1.0 association (declared links, decide evidence, LTP-saturated
+  learning) to the wrong key position since inception, where it read back as 0.
+  "Strengthens with use" works for the first time. A startup repair (#759)
+  relocates identifiable pre-fix keys, watermarked and gated so decay cannot
+  destroy the evidence first.
+- **Association decay is a real forgetting curve** (#766): decay was a per-pass
+  multiplier on a 60-second tick (a 13.5-minute half-life) since February; every
+  learned edge hit the floor within an hour of last use. Now a peak-anchored
+  elapsed-time ceiling (default 30-day half-life, `assoc_half_life_days`),
+  cadence-independent by construction, no on-disk format change. A legacy
+  `assoc_decay_factor` in (0,1) is reinterpreted per-day with a one-time loud
+  WARN; a factor of 1.0 or above skips loudly instead of silently enabling.
+- **Contradictions stopped destroying data** (#747) and started mattering
+  (#772): declaring a `contradicts` link now changes what recall returns — both
+  sides demoted and annotated, a response-level `conflict` block, and every
+  resolution path (evolve, forget(not_true_since), link(supersedes)) actually
+  clears it, immediately, in recall and in the report. The shared worker's flush
+  ticker was a debounce that starved detection (and the confidence penalty)
+  under any active session; fixed.
+
+### Recall that tells the truth
+
+- **Version chains resolve to their head** (#767): a query phrased in a
+  superseded fact's old wording returns the current version, attributed
+  (`substituted_for`, `substitution_basis`), with fork/cycle refusal and loud
+  truncation. Evolve now wakes the embed processor, closing a ~3-minute window
+  where a fresh successor was semantically invisible.
+- **A first-class relevance band** (#778): every recall row carries
+  `relevance_band` (strong/moderate/weak/filter_match/uncalibrated) derived
+  from the absolute score against the vault's own calibration — the per-query
+  score renormalization can no longer dress a weak neighbor as certainty.
+  `absolute_score` and `content_match` are now visible on the wire. The
+  response-level "nothing strongly matched" hint deliberately did not ship: it
+  failed its pre-committed acceptance rule (16.7% vs 70%), and that record is
+  pinned in CI.
+- **Calibrated abstention** (#715, #718, #754): recall can honestly abstain
+  (`abstained`, `abstained_reason`) with an anisotropy-calibrated semantic
+  floor, self-measured per model; embedding failure degrades loudly
+  (`semantic_degraded`, #740). RRF vaults no longer return silently-empty
+  default recall (#705); recall-mode presets no longer bypass the mode-aware
+  threshold (#710); top-N ordering is deterministic (#699).
+- **Currency advisories stopped lying** (#738, #758): the version-cluster
+  advisory ships with a universal version-marker gate and declared-chain
+  suppression — a deliberate near-silencing on vaults without version
+  vocabulary, because a false "possibly superseded" on a live fact is worse
+  than silence.
+
+### The write path and the agent experience
+
+- **The Push, increment 1** (#694): armed intentions with focal-cue notices
+  over MCP, behind `MUNINN_PROSPECTIVE`.
+- **Curator reflex in the on-connect surface** (#741) and evolve-first guidance
+  (#723); six silent-substitution defects from hands-on evaluation fixed in one
+  pass (#746); unrecognized memory types (#742) and link relations (#745) are
+  never silently swallowed; the entity-type enum that cost 64 points of entity
+  coverage is gone (#743); evolve records its real write verb in provenance
+  (#739); optional inline entities on evolve (#680); importance dimension with
+  pruning protection (#689); per-vault exclude-tags (#735).
+- **muninn_remember names the vault it resolved to** when the caller omits one
+  (#772 rider).
+
+### Operations, safety, durability
+
+- Consolidate no longer loses data under concurrent writes (#754). Stale PID
+  files no longer break `muninn stop` (#650). Trigger events carry the full
+  vault prefix (#697). Backup/import test hardening (#753), hermeticity
+  doctrine for async assertions (#727), and four CI timing flakes fixed at the
+  cause. Privacy: design records triaged with a public-repo naming rule
+  enforced by a reviewer-level check (#775, #734).
+
+### Known and named
+
+- The recall gate's answerability ceiling is measured, in-tree, and honest:
+  topically-adjacent unanswerable queries pass at high rates because they carry
+  real evidence; no scalar gate fixes this (#757's labeled query set). The
+  abstain-on-weak default both evaluators now ask for is the next increment's
+  question, gated by that measurement.
+- Pre-#766 decay damage is not retroactively undone: floored edges re-learn
+  from the floor rather than being resurrected by fiat.
+- Open, filed, and tracked: consolidation's embed-lag recall hole (#779), stale
+  concept after evolve (#769), entity co-occurrence staleness after evolve
+  (#780), the same-key relType replacement footgun (#771), CGDN's dead
+  experimental path (#768).
+
+---
+
 ## [0.9.0] - 2026-07-20
 
 Adds an agent-oriented credential and multi-agent workflow layer (capability

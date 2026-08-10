@@ -38,6 +38,7 @@ message WriteRequest {
   repeated float embedding = 9;
   uint32 memory_type = 10;
   string type_label = 11;
+  bool upsert_mode = 12;
 }
 
 message WriteResponse {

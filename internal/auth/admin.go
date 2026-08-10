@@ -12,6 +12,9 @@ import (
 // Store provides auth persistence on top of the shared Pebble database.
 type Store struct {
 	db *pebble.DB
+	// cluster carries the replication + single-writer seams. Both zero on a
+	// standalone server; see cluster.go.
+	cluster clusterHooks
 }
 
 func NewStore(db *pebble.DB) *Store {
@@ -33,7 +36,10 @@ func (s *Store) CreateAdmin(username, password string) error {
 	if err != nil {
 		return fmt.Errorf("marshal admin: %w", err)
 	}
-	return s.db.Set(adminUserKey(username), data, pebble.Sync)
+	// Deliberately ungated: CreateAdmin is part of node-local bootstrap, which
+	// runs before any cluster role exists (see Store.SetWriteGate). It is
+	// replicated so a failover does not lose the admin record.
+	return s.set(adminUserKey(username), data)
 }
 
 // ValidateAdmin returns nil if username/password are correct.
@@ -56,6 +62,12 @@ func (s *Store) ValidateAdmin(username, password string) error {
 
 // ChangeAdminPassword updates the password for an existing admin user.
 func (s *Store) ChangeAdminPassword(username, newPassword string) error {
+	// Cluster single-writer gate (#596). Bootstrap's MUNINN_ADMIN_PASSWORD seed
+	// also calls this, but it runs before SetWriteGate is wired, so seeding a
+	// node's own admin record at startup is unaffected.
+	if err := s.refuseNonLeaderWrite(); err != nil {
+		return err
+	}
 	key := adminUserKey(username)
 	val, closer, err := s.db.Get(key)
 	if err != nil {
@@ -76,7 +88,7 @@ func (s *Store) ChangeAdminPassword(username, newPassword string) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Set(key, encoded, pebble.Sync)
+	return s.set(key, encoded)
 }
 
 // AdminExists returns true if at least one admin user has been created.

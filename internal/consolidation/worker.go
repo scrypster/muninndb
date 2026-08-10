@@ -23,13 +23,21 @@ type EngineInterface interface {
 // Worker is the main consolidation worker that periodically runs a 5-phase
 // consolidation pipeline to reduce redundancy and strengthen associations.
 type Worker struct {
-	Engine            EngineInterface
-	Schedule          time.Duration // frequency of consolidation runs (default 6h)
-	MaxDedup          int           // max pairs to merge per run (default 100)
-	MaxTransitive     int           // max inferred edges per run (default 1000)
-	DryRun            bool          // if true, no mutations occur
-	DedupThreshold    float32       // cosine similarity threshold for dedup (0 = use default 0.95)
-	MinDedupVaultSize int           // minimum active engrams required to run Phase 2 dedup (default 20)
+	Engine   EngineInterface
+	Schedule time.Duration // frequency of consolidation runs (default 6h)
+	// MaxDedup is a HARD cap on pairs merged per run (default 100) — #728.
+	// runPhase2Dedup trims a cluster's absorbable set to the remaining
+	// budget before archiving anything from it, so report.MergedEngrams
+	// never exceeds MaxDedup even when a single duplicate cluster is larger
+	// than the whole per-run budget. Members left over from a trimmed
+	// cluster are simply left live; the NEXT run re-clusters and finishes
+	// them (their already-merged siblings are gone from the scan by then),
+	// so nothing is lost, only deferred across runs.
+	MaxDedup          int
+	MaxTransitive     int     // max inferred edges per run (default 1000)
+	DryRun            bool    // if true, no mutations occur
+	DedupThreshold    float32 // cosine similarity threshold for dedup (0 = use default 0.95)
+	MinDedupVaultSize int     // minimum active engrams required to run Phase 2 dedup (default 20)
 }
 
 // NewWorker creates a new consolidation worker with sensible defaults.

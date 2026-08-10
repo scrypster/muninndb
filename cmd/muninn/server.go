@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"log/slog"
@@ -963,6 +964,7 @@ func runServer() {
 	corsOriginsFlag := flag.String("cors-origins", corsOriginsDefault, "Comma-separated allowed CORS origins for browser clients (e.g. http://myapp.local:3000); overrides MUNINN_CORS_ORIGINS")
 	var logLevelStr string
 	flag.StringVar(&logLevelStr, "log-level", "info", "Log level: debug, info, warn, error")
+	logFile := flag.String("log-file", "", "Path to write logs to. If set, the daemon opens this file directly (not inherited stderr) and SIGHUP reopens it for log rotation. Empty (default): log to stderr; SIGHUP is then a documented no-op that WARNs instead of attempting a reopen with no known path. Also settable via MUNINN_LOG_FILE")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of muninndb:\n")
 		flag.PrintDefaults()
@@ -982,6 +984,8 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_WARN_THRESHOLD_MB  Emit a warning when HNSW in-memory vector bytes exceed N MB (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_HNSW_MAX_MB             Skip HNSW insert (keep Pebble write) when memory exceeds N MB (optional)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_LISTEN_HOST           Host to bind all servers to (e.g. 0.0.0.0 for LAN access)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_LOG_FILE              Explicit log file path; enables SIGHUP log-reopen for rotation (see --log-file)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_ACCESS_LOG            Set to \"0\" to silence the REST per-request access log independently of --log-level\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_CORS_ORIGINS          Comma-separated CORS allowed origins\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_MCP_TOKEN             Bearer token for MCP endpoint auth (Docker/compose alternative to --mcp-token)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_MEM_LIMIT_GB          Memory limit in GB (default: 4)\n")
@@ -1011,6 +1015,11 @@ func runServer() {
 	}
 	if *tlsKey == "" {
 		*tlsKey = os.Getenv("MUNINN_TLS_KEY")
+	}
+
+	// --log-file env fallback — flag takes priority.
+	if *logFile == "" {
+		*logFile = os.Getenv("MUNINN_LOG_FILE")
 	}
 
 	// Persist actual bound addresses + scheme so 'muninn status' and the startup
@@ -1111,9 +1120,40 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "invalid --log-level %q: must be debug, info, warn, or error\n", logLevelStr)
 		os.Exit(1)
 	}
+	// Log destination (#850, #852). Default: os.Stderr, whatever that is —
+	// inherited from the CLI fork (muninn.log), a supervisor's capture file,
+	// its journal, or a terminal. This process cannot resolve "whatever
+	// stderr is" to a reopenable path, so SIGHUP is a no-op in that case
+	// (handleServerSignal WARNs rather than guessing).
+	//
+	// --log-file/MUNINN_LOG_FILE names an explicit path: the daemon opens
+	// its OWN descriptor on it (independent of whatever stderr also is) so
+	// SIGHUP can reopen it after a rotator renames the file, and records
+	// the resolved destination in muninn.logdest so `muninn logs` (#852)
+	// never has to guess where the running daemon's output actually goes.
+	var reopener *reopenableFile
+	var logWriter io.Writer = os.Stderr
+	logDest := logDestInherited
+	if *logFile != "" {
+		rf, err := newReopenableFile(*logFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open --log-file/MUNINN_LOG_FILE %q: %v\n", *logFile, err)
+			os.Exit(1)
+		}
+		reopener = rf
+		logWriter = rf
+		logDest = *logFile
+	}
+	if err := writeLogDestFile(*dataDir, logDest); err != nil {
+		// Best-effort: `muninn logs` falls back to its historical default
+		// when this sidecar is missing or unreadable, so a write failure
+		// here degrades to old behavior rather than blocking startup.
+		slog.Warn("failed to record log destination sidecar", "err", err)
+	}
+
 	// Create ring buffer — onAdd wired after uiSrv is constructed.
 	ring := logging.NewRingBuffer(1000, nil)
-	baseHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	baseHandler := slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(logging.NewRingHandler(baseHandler, ring)))
 
 	// Resolve web FS (embedded by default, filesystem in dev mode)
@@ -1282,10 +1322,10 @@ func runServer() {
 	// Build storage layer
 	storeCfg := storage.PebbleStoreConfig{CacheSize: 10000}
 	if clusterCfg.Enabled {
-		storeCfg.RepLogAppend = func(op uint8, key, value []byte) error {
-			_, err := repLog.Append(replication.WALOp(op), key, value)
-			return err
-		}
+		// #826: LocalAppendFunc suppresses the append on a node that has
+		// positively established itself as a Lobe/Observer — nothing reads a
+		// follower's log and nothing prunes it. Fail-open on RoleUnknown.
+		storeCfg.RepLogAppend = replication.LocalAppendFunc(coordinator, repLog)
 	}
 	store := storage.NewPebbleStore(db, storeCfg)
 
@@ -1316,6 +1356,15 @@ func runServer() {
 	initCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	embedder, embedPlugin, err := buildEmbedder(initCtx, savedPluginCfg, *dataDir)
 	cancel()
+	// Resolve the model identifier for the COG-26 semantic noise-baseline
+	// registry (internal/plugin/embed/baseline.go). embedPlugin's concrete
+	// type (*embedpkg.EmbedService for every built-in provider) exposes it;
+	// an unrecognized plugin type leaves this empty, which resolveSemanticBaseline
+	// treats as "unknown model" — identity transform + WARN, never a guess.
+	embedModelName := ""
+	if m, ok := embedPlugin.(interface{ Model() string }); ok {
+		embedModelName = m.Model()
+	}
 	if err != nil {
 		slog.Error("embedder build failed", "err", err)
 		os.Exit(1)
@@ -1403,6 +1452,7 @@ func runServer() {
 		ConfidenceWorker: confidenceWorkerImpl.Worker,
 		Embedder:         embedder,
 		HNSWRegistry:     hnswRegistry,
+		EmbedModelName:   embedModelName,
 	})
 
 	eng.SetTransitionWorker(transitionWorkerImpl)
@@ -1412,6 +1462,12 @@ func runServer() {
 
 	// Wire cluster role change callbacks now that the engine exists.
 	if coordinator != nil {
+		// The COG-29 debt scan cache is bypassed on a positively-established
+		// follower: replicated writes land below the store, so the cache's
+		// invalidation counter never moves there (see
+		// declaredContradictionsCached and #869).
+		eng.SetReplicaProbe(coordinator.IsFollower)
+
 		hebbianStore := cognitive.NewHebbianStoreAdapter(store)
 		contradictStore := cognitive.NewContradictStoreAdapter(store)
 		confidenceStore := cognitive.NewConfidenceStoreAdapter(store)
@@ -1530,17 +1586,34 @@ func runServer() {
 	grpcAdapter := grpcpkg.NewEngineAdapter(eng)
 	grpcServer := grpcpkg.NewServer(*grpcAddr, grpcAdapter, authStore, clientTLS)
 
-	// Signal handling
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// Signal handling. SIGHUP (#850) reopens the log file when --log-file/
+	// MUNINN_LOG_FILE is configured (reopener above) and does not affect
+	// shutdown; SIGINT/SIGTERM request graceful shutdown on the first
+	// occurrence and force an immediate exit on a second. All routing
+	// decisions live in handleServerSignal so they're unit-testable without
+	// a running server.
+	//
+	// SIGHUP is included in signal.Notify unconditionally — it compiles
+	// cleanly on Windows (the Go runtime defines syscall.SIGHUP there) even
+	// though Windows has no process-signal equivalent to deliver it, so the
+	// reopen path is simply unreachable there. Chosen over SIGUSR1: SIGHUP
+	// is the long-standing convention for "reopen"/"reload" (syslog, nginx,
+	// Apache), nothing in this codebase used it already, and — unlike
+	// SIGHUP — syscall.SIGUSR1 does not exist on the Windows build of the
+	// syscall package at all, so using it would need a build-tagged stub
+	// merely to keep the symbol name available.
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
+	var sigReopener logReopener
+	if reopener != nil {
+		sigReopener = reopener
+	}
 	go func() {
-		<-sigCh
-		slog.Info("shutdown signal received — starting graceful shutdown")
-		cancel()
-		<-sigCh
-		slog.Error("second signal received — forcing immediate exit")
-		os.Exit(1)
+		shutdownRequested := false
+		for sig := range sigCh {
+			handleServerSignal(sig, sigReopener, cancel, &shutdownRequested, os.Exit)
+		}
 	}()
 
 	// Start Prometheus metrics server (if configured).
@@ -1594,25 +1667,63 @@ func runServer() {
 		restServer.SetCoordinator(coordinator)
 	}
 
-	// Wire coordinator factory so the admin enable endpoint can start cluster
-	// at runtime (without a restart) when cluster.yaml is written via the UI/CLI.
-	restServer.SetCoordinatorFactory(func(_ context.Context, cfg plugincfg.ClusterConfig) (*replication.ClusterCoordinator, error) {
-		repLog := replication.NewReplicationLog(db)
-		applier := replication.NewApplier(db)
-		epochStore, err := replication.NewEpochStore(db)
-		if err != nil {
-			return nil, fmt.Errorf("create epoch store: %w", err)
+	// Cluster single-writer gate (#596). Installed only in cluster mode: a
+	// standalone server keeps a nil gate everywhere and is completely unaffected.
+	//
+	// One gate function, four surfaces. The engine and the auth store hold it as
+	// the transport-agnostic backstop (so the embedded Go library and any future
+	// transport inherit it); REST and MCP additionally hold it at the request
+	// boundary so they can answer with a precise status/JSON-RPC error and the
+	// leader hint instead of a generic failure. gRPC and MBP map the engine's
+	// error at their own error boundaries.
+	if coordinator != nil {
+		gate := func() error {
+			if coordinator.IsLeader() {
+				return nil
+			}
+			leaderID := coordinator.CortexID()
+			var leaderAddr string
+			if leaderID != "" && leaderID != clusterCfg.NodeID {
+				for _, n := range coordinator.KnownNodes() {
+					if n.NodeID == leaderID {
+						leaderAddr = n.Addr
+						break
+					}
+				}
+			}
+			return &mbp.NotLeaderError{
+				Role:       string(coordinator.Role()),
+				LeaderID:   leaderID,
+				LeaderAddr: leaderAddr,
+			}
 		}
-		coord := replication.NewClusterCoordinator(&cfg, repLog, applier, epochStore)
-		coord.OnBecameCortex = func(epoch uint64) {
-			log.Printf("[cluster] node promoted to Cortex at epoch %d", epoch)
-		}
-		coord.OnBecameLobe = func() {
-			log.Printf("[cluster] node demoted to Lobe")
-		}
-		startCoordinator(coord, cfg.BindAddr)
-		return coord, nil
-	})
+		eng.SetWriteGate(gate)
+		authStore.SetWriteGate(gate)
+		restServer.SetWriteGate(gate)
+		mcpServer.SetWriteGate(gate)
+
+		// Configuration must travel the same replication path as engrams
+		// (#596 issue 2 / #631 claim 2): vault configs carry per-vault
+		// plasticity, and API keys minted on the Cortex have to exist on the
+		// Lobes or they return 401 there.
+		authStore.SetReplicator(func(op uint8, key, value []byte) error {
+			_, err := repLog.Append(replication.WALOp(op), key, value)
+			return err
+		})
+
+		// Forward cognitive side effects from Lobe to Cortex. This seam existed
+		// (Engine.SetCoordinator / ForwardCognitiveEffects) but was never called
+		// from the server, so it was dead in the shipped binary.
+		eng.SetCoordinator(coordinator, clusterCfg.NodeID)
+	}
+
+	// There is deliberately no runtime coordinator factory (#628). The storage
+	// layer's replication hook is captured in storeCfg.RepLogAppend above, and
+	// only when clustering was already enabled at boot. A coordinator created
+	// later would be attached to a replication log that nothing appends to —
+	// enabled-looking and unable to replicate a single write. POST
+	// /api/admin/cluster/enable persists the config and answers 202
+	// restart_required; the coordinator is built here, at boot, or not at all.
 
 	// Start GroupCommitter
 	go gc.Run(ctx)

@@ -1,15 +1,91 @@
 package mcp
 
+// entitiesArrayDescription and entityItemsSchema define THE MIDDLE GEAR between
+// a bare muninn_remember(content) — ~20 tokens, no concept, no entities, and
+// invisible to every entity-based tool — and a fully-declared write, which costs
+// roughly 8x the content in JSON. Measured on a 4,216-engram corpus, only 4.81%
+// of writes carried any declaration and 29.9% carried an entity, because under
+// time pressure the cheap path is the path taken.
+//
+// Two cheaper gears, in ascending order of cheapness:
+//
+//   - a BARE STRING name: ["PostgreSQL","Auth Service"]. The server resolves the
+//     type from the vault's own entity table (see entityTypeResolver). ~15 extra
+//     tokens for a whole entity set.
+//   - [[markup]] in the content itself: ~2 tokens per entity, no JSON at all.
+//
+// The object form is unchanged and still wins wherever it is supplied: a
+// declared type is never substituted (principle #1). `type` is deliberately NOT
+// required — requiring it is the same class of client-side hard rejection the
+// type enum was, where a caller who could not classify an entity dropped the
+// whole entity, and that cost ~64pp of measured entity coverage.
+const entitiesArrayDescription = "Entities mentioned in this memory. Providing these skips background entity extraction. " +
+	"CHEAPEST FORM: a bare string name — [\"PostgreSQL\", \"Auth Service\"] — the server resolves each type from entities it already knows " +
+	"(an unfamiliar name is stored as type \"other\", and the response says so). Full form: [{\"name\":\"PostgreSQL\",\"type\":\"database\"}]. " +
+	"Both forms may be mixed in one array. Always include entities you can name, even untyped — entity coverage is what makes a memory findable."
+
+func entityItemsSchema() map[string]any {
+	return map[string]any{
+		// A union type, not oneOf: the properties below stay visible to clients
+		// that render schemas, while a bare string still validates.
+		"type":        []string{"object", "string"},
+		"description": "Either a bare entity NAME (\"PostgreSQL\") or an object {\"name\":..., \"type\":...}.",
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string", "description": "Entity name (e.g. 'PostgreSQL', 'Auth Service')."},
+			"type": map[string]any{"type": "string", "description": entityTypeDescription},
+		},
+		"required": []string{"name"},
+	}
+}
+
+// entityTypeDescription advertises the 14 recognised entity types (the single
+// source of truth is validEntityTypes in handlers.go) as GUIDANCE rather than as
+// a machine-enforced JSON-Schema `enum`. See tools_entity_enum_test.go for why.
+const entityTypeDescription = "Entity type — OPTIONAL. Omit it and the server resolves the type from entities this vault already knows. " +
+	"Recognised types: person, organization, location, " +
+	"concept, technology, project, tool, database, service, framework, language, product, event, other. " +
+	"Any other value is accepted and stored as 'other' — always include the entity even if you are unsure of its type."
+
+// contentMarkupTip documents the cheapest entity-declaration gear there is: the
+// caller brackets names inline and the server tokenizes them out. It is a string
+// scan, never a model, and it only ever reads names the caller bracketed — it
+// does not infer entities from prose (#713).
+const contentMarkupTip = " TIP: wrap entity names in [[double brackets]] — \"Migrated [[Auth Service]] to [[PostgreSQL]] 16\" — " +
+	"and they are registered as entities at ~2 tokens each. The brackets are removed from the stored text."
+
 func allToolDefinitions() []ToolDefinition {
 	vaultProp := map[string]any{
 		"type":        "string",
 		"description": "Vault name to scope the operation (default: 'default'). Optional when authenticating via a vault-pinned mk_ key.",
 	}
-	// entityTypeEnum lists the 14 recognised entity types (the single source of
-	// truth is validEntityTypes in handlers.go). Any other value is coerced to
-	// "other" on every user-facing write path, so advertising the enum lets MCP
-	// clients validate before sending. Keep this in sync with validEntityTypes.
-	entityTypeEnum := []string{
+	// The 14 recognised entity types are advertised (in entityTypeDescription,
+	// above) as GUIDANCE rather than as a machine-enforced JSON-Schema `enum`.
+	//
+	// The enum was strictly worse than useless. Server-side it was dead weight —
+	// normalizeEntityType coerces any unrecognised value to "other" on every
+	// user-facing write path, so it never changed what was stored. Client-side it
+	// was a hard rejection: a writer whose entity did not map cleanly onto one of
+	// the 14 buckets (or whose client validates before sending) dropped the
+	// entity, and `required:["name","type"]` meant dropping the type dropped the
+	// whole entity.
+	//
+	// A difference-in-differences control on a real 4,216-engram corpus
+	// (aggregate counts only) attributed an entity-coverage collapse to exactly
+	// this line: muninn_remember_batch never received the enum and held 87.9% ->
+	// 90.2% coverage across the change, while single-write coverage fell 76.2% ->
+	// 12.8% (DiD +65.7pp largest vault, +52.3pp overall). "The enrichment worker
+	// died" is refuted by the same data — summarization and classification ran at
+	// 92-100% throughout while entity coverage sat at 0-25%.
+	//
+	// Entity coverage caps every graph-shaped capability in the product, so an
+	// entity the caller cannot confidently classify is worth strictly more than
+	// no entity at all. Guidance, not a gate. Keep in sync with validEntityTypes.
+	// entityTypeNames is the enforced vocabulary for the CORRECTION paths
+	// (muninn_entity_state / _batch), where the caller is deliberately choosing a
+	// type for an entity that already exists. There is no capture to suppress
+	// there, so an enum is appropriate — unlike the WRITE paths above, where it
+	// cost measured entity coverage. Keep in sync with validEntityTypes.
+	entityTypeNames := []string{
 		"person", "organization", "location", "concept", "technology",
 		"project", "tool", "database", "service", "framework",
 		"language", "product", "event", "other",
@@ -17,30 +93,27 @@ func allToolDefinitions() []ToolDefinition {
 	return []ToolDefinition{
 		{
 			Name:        "muninn_remember",
-			Description: "Store a new piece of information (engram) in long-term memory. IMPORTANT: Keep each memory atomic — one concept, decision, or fact per memory. If a conversation covers multiple topics, use muninn_remember_batch to store them as separate memories. Atomic memories produce sharper recall, better associations, and more accurate contradiction detection. TIP: Provide ‘entities’ and ‘entity_relationships’ whenever you can identify them — this builds the knowledge graph immediately without requiring background enrichment. NOTE: If the exact same content already exists in the vault, the existing memory ID is returned instead of creating a duplicate.",
+			Description: "Store a new piece of information (engram) in long-term memory. IMPORTANT: Keep each memory atomic — one concept, decision, or fact per memory. If a conversation covers multiple topics, use muninn_remember_batch to store them as separate memories. Atomic memories produce sharper recall, better associations, and more accurate contradiction detection. TIP: Provide ‘entities’ and ‘entity_relationships’ whenever you can identify them — this builds the knowledge graph immediately without requiring background enrichment. NOTE: If the exact same content already exists in the vault, the existing memory ID is returned instead of creating a duplicate. CAUTION: If this call is RE-ASSERTING or UPDATING a fact you already stored (a re-run score, a refreshed status), use muninn_evolve(id, ...) on the prior engram instead — calling muninn_remember repeatedly for the same evolving fact leaves every stale copy fully active and crowds recall with near-duplicates.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"vault":      vaultProp,
-					"content":    map[string]any{"type": "string", "description": "The information to remember."},
-					"concept":    map[string]any{"type": "string", "description": "Short label for this memory."},
-					"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
-					"confidence": map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
-					"created_at": map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this memory was created. Defaults to now. Use to seed memories at past or future times."},
-					"type":       map[string]any{"type": "string", "description": "Memory type — either a built-in name (fact, decision, observation, preference, issue, task, procedure, event, goal, constraint, identity, reference) or a free-form label (e.g. 'architectural_decision', 'coding_pattern'). Built-in names set the enum; free-form labels are stored as type_label with enum defaulting to 'fact'."},
-					"type_label": map[string]any{"type": "string", "description": "Explicit free-form type label (e.g. 'architectural_decision'). Overrides the label inferred from 'type'."},
-					"summary":    map[string]any{"type": "string", "description": "One-line summary of what this memory captures. Providing this skips background summarization."},
+					"vault":       vaultProp,
+					"content":     map[string]any{"type": "string", "description": "The information to remember." + contentMarkupTip},
+					"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
+					"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
+					"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
+					"importance":  map[string]any{"type": "number", "description": "Importance 0.0-1.0 — how much this memory matters (priority axis, orthogonal to confidence/truth). Memories with effective importance >= 0.7 are protected from capacity (max_engrams) pruning; importance does not affect decay or recall ranking. Omit to use a default derived from the memory type (decisions/goals/constraints rank higher than observations/events)."},
+					"created_at":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this memory was created (transaction time). Defaults to now."},
+					"valid_from":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact BECAME TRUE (application time — distinct from created_at, which records when it was stored). Defaults to created_at. Use for historical facts, e.g. storing today that the office moved last January."},
+					"valid_until": map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact STOPPED being true (exclusive — the window is [valid_from, valid_until)). Omit for facts that are still true. Facts with valid_until in the past are excluded from default recall; retrieve them with as_of or include_invalid."},
+					"type":        map[string]any{"type": "string", "description": "Memory type — either a built-in name (fact, decision, observation, preference, issue, task, procedure, event, goal, constraint, identity, reference) or a free-form label (e.g. 'architectural_decision', 'coding_pattern'). Built-in names set the enum; free-form labels are stored as type_label with enum defaulting to 'fact'."},
+					"type_label":  map[string]any{"type": "string", "description": "Explicit free-form type label (e.g. 'architectural_decision'). Overrides the label inferred from 'type'."},
+					"trust":       map[string]any{"type": "string", "enum": []string{"verified", "inferred", "external", "untrusted"}, "description": "Provenance trust level. Default 'inferred' (all AI-generated content). 'verified' = human-confirmed/admin-certified and requires a write or full credential (rejected for observe credentials). 'external' = imported from another system; 'untrusted' = flagged unreliable."},
+					"summary":     map[string]any{"type": "string", "description": "One-line summary of what this memory captures. Providing this skips background summarization."},
 					"entities": map[string]any{
 						"type":        "array",
-						"description": "Entities mentioned in this memory. Providing these skips background entity extraction.",
-						"items": map[string]any{
-							"type": "object",
-							"properties": map[string]any{
-								"name": map[string]any{"type": "string", "description": "Entity name (e.g. 'PostgreSQL', 'Auth Service')."},
-								"type": map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Entity type. One of the 14 recognised types (e.g. 'database', 'service', 'person', 'project'); any other value is stored as 'other'."},
-							},
-							"required": []string{"name", "type"},
-						},
+						"description": entitiesArrayDescription,
+						"items":       entityItemsSchema(),
 					},
 					"relationships": map[string]any{
 						"type":        "array",
@@ -73,6 +146,10 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "string",
 						"description": "Optional idempotency key. If set and a receipt exists for this key, the cached engram ID is returned without re-creating.",
 					},
+					"upsert_mode": map[string]any{
+						"type":        "boolean",
+						"description": "Optional. With op_id set, keep one stable memory per key across repeated writes: created on first use, and on later writes with the SAME op_id either left alone (identical content) or EVOLVED (changed content — a new version supersedes the old one, which stays retrievable as history). Requires op_id. Differs from a plain op_id retry, which always returns the original unchanged even if the content differs. NOTE on the evolve step: only content, concept and importance are taken from this call — tags, confidence and trust are inherited from the previous version (use muninn_update_tags to retag).",
+					},
 					"embedding": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "number"},
@@ -95,25 +172,22 @@ func allToolDefinitions() []ToolDefinition {
 						"items": map[string]any{
 							"type": "object",
 							"properties": map[string]any{
-								"content":    map[string]any{"type": "string", "description": "The information to remember."},
-								"concept":    map[string]any{"type": "string", "description": "Short label for this memory."},
-								"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
-								"confidence": map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
-								"created_at": map[string]any{"type": "string", "description": "ISO 8601 timestamp. Defaults to now."},
-								"type":       map[string]any{"type": "string", "description": "Memory type — built-in name or free-form label."},
-								"type_label": map[string]any{"type": "string", "description": "Explicit free-form type label."},
-								"summary":    map[string]any{"type": "string", "description": "One-line summary. Skips background summarization."},
+								"content":     map[string]any{"type": "string", "description": "The information to remember." + contentMarkupTip},
+								"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
+								"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
+								"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
+								"importance":  map[string]any{"type": "number", "description": "Importance 0.0-1.0 (priority axis; >= 0.7 is protected from capacity pruning; does not affect decay or ranking). Omit for a type-derived default."},
+								"created_at":  map[string]any{"type": "string", "description": "ISO 8601 timestamp (transaction time). Defaults to now."},
+								"valid_from":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact became true (application time). Defaults to created_at."},
+								"valid_until": map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact stopped being true (exclusive). Omit for facts still true."},
+								"type":        map[string]any{"type": "string", "description": "Memory type — built-in name or free-form label."},
+								"type_label":  map[string]any{"type": "string", "description": "Explicit free-form type label."},
+								"trust":       map[string]any{"type": "string", "enum": []string{"verified", "inferred", "external", "untrusted"}, "description": "Provenance trust level. Default 'inferred'. 'verified' requires a write or full credential."},
+								"summary":     map[string]any{"type": "string", "description": "One-line summary. Skips background summarization."},
 								"entities": map[string]any{
-									"type": "array",
-									"items": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"name": map[string]any{"type": "string"},
-											"type": map[string]any{"type": "string"},
-										},
-										"required": []string{"name", "type"},
-									},
-									"description": "Entities mentioned in this memory.",
+									"type":        "array",
+									"items":       entityItemsSchema(),
+									"description": entitiesArrayDescription + " These populate the knowledge graph that association, traversal, and cross-memory features depend on.",
 								},
 								"relationships": map[string]any{
 									"type": "array",
@@ -157,13 +231,13 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_recall",
-			Description: "Search long-term memory using semantic context. Returns the most relevant memories.",
+			Description: "Search long-term memory using semantic context. Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows are all `weak` matched nothing strongly: those are related memories to verify, not answers.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"vault":     vaultProp,
 					"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Search context phrases."},
-					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0 (default 0.5)."},
+					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0, compared against the ABSOLUTE content score (not the displayed per-query-normalized one). Omit it for the engine's fusion-aware default: 0.1 on normal (ACT-R) vaults — a semantic-only match structurally caps near 0.6 and a lexical-only one near 0.4, so values above ~0.4 filter almost everything honest; 0.5 on legacy weighted_sum vaults; near-zero on scoring_fusion='rrf', whose rank-based scores rarely exceed ~0.15 (an explicit threshold above ~0.01 there can filter out everything)."},
 					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 10)."},
 					"profile": map[string]any{
 						"type":        "string",
@@ -172,15 +246,23 @@ func allToolDefinitions() []ToolDefinition {
 					"mode": map[string]any{
 						"type":        "string",
 						"enum":        []string{"semantic", "recent", "balanced", "deep"},
-						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)",
+						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)\nPreset thresholds are ACT-R-calibrated and apply only under ACT-R/weighted-sum scoring; on an rrf-fusion vault the preset threshold abstains and the rrf mode-aware default (~0.001) applies, so modes are safe to use there. An explicit threshold always wins.",
 					},
 					"since": map[string]any{
 						"type":        "string",
-						"description": "ISO 8601 timestamp (e.g. 2026-01-15T00:00:00Z). Only return memories created after this time.",
+						"description": "ISO 8601 timestamp (e.g. 2026-01-15T00:00:00Z). Only return memories CREATED after this time (transaction axis — when they were stored). For 'what was true at T', use as_of instead.",
 					},
 					"before": map[string]any{
 						"type":        "string",
-						"description": "ISO 8601 timestamp (e.g. 2026-01-20T00:00:00Z). Only return memories created before this time.",
+						"description": "ISO 8601 timestamp (e.g. 2026-01-20T00:00:00Z). Only return memories CREATED before this time (transaction axis).",
+					},
+					"as_of": map[string]any{
+						"type":        "string",
+						"description": "ISO 8601 timestamp. Time-travel on the VALIDITY axis: only return facts whose validity window [valid_from, valid_until) covers this moment — 'what was true at T', regardless of when it was stored. Default (omitted): 'what is true now' — facts whose valid_until has passed are excluded.",
+					},
+					"include_invalid": map[string]any{
+						"type":        "boolean",
+						"description": "When true, disables the validity gate: expired facts (valid_until <= now) are returned too, annotated with expired=true and their valid_until. Use to show history. Default false.",
 					},
 					"tags_all": map[string]any{
 						"type":        "array",
@@ -212,7 +294,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"annotate": map[string]any{
 						"type":        "boolean",
-						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false.",
+						"description": "When true, each result includes an annotations object with staleness, conflict, and supersession metadata. Default false. Independent of annotate: whenever a result belongs to a detected same-subject version cluster, annotations also carries an ADVISORY (never asserted) possibly_superseded_by/version_cluster/newest_of_cluster/cluster_size signal — a mechanical hint pointing an older cluster member at the newest, distinct from the authoritative superseded_by/current_version pair. Also independent of annotate: a memory under an UNRESOLVED declared contradicts link always carries annotations.unresolved_contradiction (naming the memory it disagrees with) and the response carries a top-level conflict block — its score has been demoted 10 percent below its earned value, so it must not be read as the answer without checking the annotation. Resolve it with muninn_evolve, muninn_forget(not_true_since=...), or muninn_link(relation=\"supersedes\").",
 					},
 					"caller": map[string]any{
 						"type":        "string",
@@ -221,6 +303,10 @@ func allToolDefinitions() []ToolDefinition {
 					"include_leased": map[string]any{
 						"type":        "boolean",
 						"description": "When true, disables work-queue lease filtering so memories checked out by other owners are also returned (admin/debugging). Default false.",
+					},
+					"read_only": map[string]any{
+						"type":        "boolean",
+						"description": "When true, marks this recall as a pure read that must not trigger any write side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
 					},
 				},
 				"required": []string{"context"},
@@ -234,18 +320,30 @@ func allToolDefinitions() []ToolDefinition {
 				"properties": map[string]any{
 					"vault": vaultProp,
 					"id":    map[string]any{"type": "string", "description": "Memory ID (ULID)."},
+					"read_only": map[string]any{
+						"type":        "boolean",
+						"description": "When true, this read must not trigger reinforcement (AccessCount/LastAccess bump) or implicit feedback side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
+					},
 				},
 				"required": []string{"id"},
 			},
 		},
 		{
 			Name:        "muninn_forget",
-			Description: "Soft-delete a memory. It remains recoverable but is excluded from recall.",
+			Description: "Soft-delete a memory (excluded from recall, recoverable for 7 days). If the memory isn't wrong but simply STOPPED BEING TRUE, pass not_true_since instead: the memory is then invalidated on the validity axis (kept, not deleted) and remains retrievable via recall's as_of/include_invalid.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"vault": vaultProp,
 					"id":    map[string]any{"type": "string", "description": "Memory ID to forget."},
+					"not_true_since": map[string]any{
+						"type":        "string",
+						"description": "ISO 8601 timestamp. Instead of deleting, records that the fact stopped being true at this moment (sets valid_until). The memory stays active but drops out of default recall; as_of before this time still returns it.",
+					},
+					"hard": map[string]any{
+						"type":        "boolean",
+						"description": "When true, PERMANENTLY destroys the memory instead of soft-deleting it: no 7-day recovery window, not restorable, not counted anywhere. Default false (soft-delete). Cannot be combined with not_true_since. Irreversible — confirm with the caller before setting this.",
+					},
 				},
 				"required": []string{"id"},
 			},
@@ -292,7 +390,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_evolve",
-			Description: "Update a memory with new information. Creates a new version and archives the old one.",
+			Description: "Update a memory with new information. Creates a new version linked to the old one by a supersedes association, and soft-deletes the old version so it drops out of present-tense recall (never destroyed — as_of still sees it). Use this — not a repeated muninn_remember — whenever a new call is re-asserting or replacing a fact you already stored; otherwise every stale copy stays fully active and crowds recall with near-duplicates.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -304,10 +402,30 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "string",
 						"description": "Optional new label for the memory. When omitted the concept is inherited verbatim. Use this to correct concepts that encode mutable state (e.g. change \"answer owed\" to \"answer sent — closed\").",
 					},
+					"effective_at": map[string]any{
+						"type":        "string",
+						"description": "ISO 8601 timestamp for when the new version BECAME TRUE (application time; defaults to now). The old version's validity window closes at this moment and the new version's opens — use when the change happened before you recorded it.",
+					},
+					"importance": map[string]any{
+						"type":        "number",
+						"description": "Importance 0.0-1.0 for the new version. Omit to inherit the predecessor's explicitly asserted importance (an unset predecessor stays unset and keeps its type-derived default).",
+					},
 					"embedding": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "number"},
 						"description": "Optional pre-computed embedding vector for the new version. When provided, the server skips its own embedding step. Must match the vault's existing embedding dimension.",
+					},
+					"entities": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"name": map[string]any{"type": "string"},
+								"type": map[string]any{"type": "string", "description": "One of: person, organization, location, product, concept, event, other."},
+							},
+							"required": []string{"name", "type"},
+						},
+						"description": "Optional replacement entities for the new version, for when the update changes what the memory is about. When omitted, the predecessor's entity links carry forward unchanged. Maximum 20.",
 					},
 				},
 				"required": []string{"id", "new_content", "reason"},
@@ -315,7 +433,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_consolidate",
-			Description: "Merge multiple related memories into one. Archives the originals. Maximum 50 IDs.",
+			Description: "Merge multiple related memories into one. The originals are SUPERSEDED by the merged memory, exactly as muninn_evolve supersedes a predecessor: they leave present-day recall, but a query phrased against their wording still resolves to the merged memory, and they stay reachable as lineage via as_of/include_invalid. Maximum 50 IDs.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -522,7 +640,7 @@ func allToolDefinitions() []ToolDefinition {
 							"type": "object",
 							"properties": map[string]any{
 								"name":       map[string]any{"type": "string"},
-								"type":       map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Entity type. One of the 14 recognised types; any other value is stored as 'other'."},
+								"type":       map[string]any{"type": "string", "description": entityTypeDescription},
 								"confidence": map[string]any{"type": "number"},
 							},
 							"required": []string{"name", "type"},
@@ -574,6 +692,15 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "integer",
 						"description": "Max memories to return (default 10, max 50).",
 					},
+					"read_only": map[string]any{
+						"type":        "boolean",
+						"description": "When true, marks this call as a pure read. where_left_off never has write side effects regardless of this flag; it exists for API consistency with muninn_recall/muninn_read. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
+					},
+					"exclude_type_labels": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Opt-in: type_label values to skip (e.g. \"session-log\"), so recency scan noise doesn't crowd out real memories. Excluded entries don't count against limit — the scan keeps going to fill it. Default: empty (no exclusion, all types included).",
+					},
 				},
 				"required": []string{},
 			},
@@ -602,7 +729,7 @@ func allToolDefinitions() []ToolDefinition {
 					"entity_name": map[string]any{"type": "string", "description": "The entity name to update"},
 					"state":       map[string]any{"type": "string", "description": "New state: active, deprecated, merged, or resolved"},
 					"merged_into": map[string]any{"type": "string", "description": "Canonical entity name (required when state=merged)"},
-					"type":        map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve the existing type."},
+					"type":        map[string]any{"type": "string", "enum": entityTypeNames, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve the existing type."},
 					"vault":       vaultProp,
 				},
 				"required": []string{"entity_name", "state"},
@@ -625,7 +752,7 @@ func allToolDefinitions() []ToolDefinition {
 								"entity_name": map[string]any{"type": "string", "description": "Entity name to update"},
 								"state":       map[string]any{"type": "string", "description": "New state: active, deprecated, merged, or resolved"},
 								"merged_into": map[string]any{"type": "string", "description": "Canonical entity name (required when state=merged)"},
-								"type":        map[string]any{"type": "string", "enum": entityTypeEnum, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve existing."},
+								"type":        map[string]any{"type": "string", "enum": entityTypeNames, "description": "Correct the entity type to one of the 14 recognised types (e.g. 'concept', 'technology', 'product'). Any other value is stored as 'other'. Omit to preserve existing."},
 							},
 							"required": []string{"entity_name", "state"},
 						},
@@ -825,7 +952,7 @@ func allToolDefinitions() []ToolDefinition {
 		// Provenance audit trail
 		{
 			Name:        "muninn_provenance",
-			Description: "Returns the ordered audit trail for an engram — who wrote it, what changed, and why.",
+			Description: "Returns the ordered audit trail for an engram — who wrote it, what changed, and why. Each entry has a timestamp, source, agent_id and operation; evolve entries also carry predecessor_id (the version this replaced), reason, and effective_at (when the change became true, as opposed to when it was written). Fields are omitted when the operation recorded none — an omitted field means unrecorded, not empty.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -912,6 +1039,48 @@ func allToolDefinitions() []ToolDefinition {
 					},
 				},
 				"required": []string{"id", "trust"},
+			},
+		},
+		// In-place retag: metadata only, no new version.
+		{
+			Name:        "muninn_update_tags",
+			Description: "Replace an engram's full tag set IN PLACE. The ID, version lineage, and access history are preserved — unlike muninn_evolve, which mints a new ULID and archives the predecessor. This is the tool for mutable tag conventions such as due:<ISO-date> or status:<value>. The tags given REPLACE the existing set entirely; pass an empty array to clear all tags. To change content and tags together, call muninn_evolve first and then this tool on the new id. Normalization is lenient, not strict (identical rules to muninn_remember): a non-string entry, an empty string, or a tag longer than 128 BYTES is DROPPED rather than rejected, and a set longer than 50 tags is TRUNCATED to 50 — the response echoes the tag set that was actually stored, so diff it against what you sent if that matters. The limit is bytes, not glyphs: a 50-character CJK tag is 150 bytes and is silently dropped. A soft-deleted engram CAN be retagged (muninn_restore brings it back), but its keyword-search postings are DELETED rather than rebuilt while it is deleted — that is what keeps a deleted memory out of search results — so retag it after restoring, or run muninn reindex-fts, if you need it findable by the new tags.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault": vaultProp,
+					"id": map[string]any{
+						"type":        "string",
+						"description": "ULID of the engram to retag",
+					},
+					"tags": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "The complete replacement tag set. An empty array clears all tags. Over-long (>128 BYTES, not characters), empty, and non-string entries are dropped and the set is truncated to 50 — never rejected; the response echoes what was stored.",
+					},
+				},
+				"required": []string{"id", "tags"},
+			},
+		},
+		// THE PUSH: prospective memory — arm an intention on entity cues.
+		{
+			Name:        "muninn_intend",
+			Description: "Arm a prospective intention: 'when <cue entity> comes up, surface <content>'. Stored as a goal memory and armed on one or more cue entities. It NEVER interrupts — it is delivered as a 'notices' field on a later muninn_recall/muninn_remember response whose results are actually about the cue entity (requires MUNINN_PROSPECTIVE=1 on the server). Cues must be specific: an entity mentioned by a large share of the vault is refused. valid_until only silences an expired intention; it never triggers delivery.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"vault":   vaultProp,
+					"content": map[string]any{"type": "string", "description": "What to surface when a cue entity becomes focal (delivered verbatim in the notice)."},
+					"cues": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Entity names to arm on (1-8). The intention fires when one of these entities is focal in a later call's results. Prefer rare, specific entities; ubiquitous ones are rejected.",
+					},
+					"valid_until": map[string]any{"type": "string", "description": "ISO 8601 expiry. A BOUND, not a trigger: after this instant the intention is silenced, never fired. Optional."},
+					"one_shot":    map[string]any{"type": "boolean", "description": "When true (default) the intention disarms after its first delivery. Set false for a recurring prompt (re-fires once per session while armed)."},
+					"importance":  map[string]any{"type": "number", "description": "Priority in [0,1]; ranks this notice against others when more than 2 are eligible (default: goal-type derived 0.6)."},
+				},
+				"required": []string{"content", "cues"},
 			},
 		},
 		// RFC #597: privileged workflow-vault creation (recursion-guarded in dispatchToolCall).

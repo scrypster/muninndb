@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,45 @@ import (
 // annotationStaleDays is the threshold for marking a recalled memory as stale.
 // Memories not accessed in more than this many days are flagged stale=true.
 const annotationStaleDays = 30.0
+
+// parseValidityArgs parses the optional valid_from / valid_until args (RFC3339)
+// into a WriteRequest. Returns a non-empty error message on a malformed value.
+// Shared by muninn_remember and muninn_remember_batch.
+func parseValidityArgs(args map[string]any, req *mbp.WriteRequest) string {
+	if vfStr, ok := args["valid_from"].(string); ok && vfStr != "" {
+		t, err := time.Parse(time.RFC3339, vfStr)
+		if err != nil {
+			return "invalid 'valid_from': must be ISO 8601 (e.g. 2024-01-15T00:00:00Z)"
+		}
+		req.ValidFrom = &t
+	}
+	if vuStr, ok := args["valid_until"].(string); ok && vuStr != "" {
+		t, err := time.Parse(time.RFC3339, vuStr)
+		if err != nil {
+			return "invalid 'valid_until': must be ISO 8601 (e.g. 2025-06-30T00:00:00Z)"
+		}
+		req.ValidUntil = &t
+	}
+	return ""
+}
+
+// parseImportanceArg extracts the optional "importance" arg as a *float32.
+// Returns nil when absent (unset — the use-time type-table default applies).
+// Clamping/quantization (explicit 0 → 0.01) is the engine's job
+// (importanceFromRequest); this only converts presence. A non-number value is
+// rejected by the caller via the ok flag.
+func parseImportanceArg(args map[string]any) (*float32, bool) {
+	raw, present := args["importance"]
+	if !present {
+		return nil, true
+	}
+	f, ok := raw.(float64)
+	if !ok {
+		return nil, false
+	}
+	v := float32(f)
+	return &v, true
+}
 
 // parseEmbedding extracts and validates an optional "embedding" field from args.
 // Returns (nil, "") when the field is absent. Returns (nil, errMsg) on validation
@@ -48,9 +88,63 @@ func parseEmbeddingArg(args map[string]any) ([]float32, string) {
 	return embedding, ""
 }
 
+// normalizeTags coerces a raw MCP `tags` argument into the canonical tag set:
+// non-strings, empty strings, and tags longer than 128 characters are skipped,
+// and the set is capped at 50. Shared by muninn_remember, muninn_remember_batch,
+// and muninn_update_tags so a tag set applied on update obeys exactly the same
+// rules as one applied at creation — otherwise evolve's tag inheritance could
+// carry forward a set muninn_remember could never have created (#720).
+func normalizeTags(raw []any) []string {
+	tags, _ := normalizeTagsReporting(raw)
+	return tags
+}
+
+// normalizeTagsReporting is normalizeTags with the rejects reported rather than
+// discarded: dropped carries one human-readable reason per rejected entry, in
+// input order, naming the offending value.
+//
+// Create-time leniency (muninn_remember/_batch) is deliberate and stays — one
+// junk entry beside good ones should not fail an entire write. muninn_update_tags
+// REPLACES the set rather than adding to it, so the identical leniency has a
+// different cost there: a `tags` array non-empty on the wire but empty after
+// normalization silently wiped every real tag on the engram and returned ok.
+// Measured at three tags destroyed end-to-end by one 129-byte input (#720
+// review, finding 4). A caller that replaces must reject loudly — see
+// handleUpdateTags.
+func normalizeTagsReporting(raw []any) (tags []string, dropped []string) {
+	for i, t := range raw {
+		tag, ok := t.(string)
+		if !ok {
+			dropped = append(dropped, fmt.Sprintf("entry %d: not a string", i))
+			continue
+		}
+		switch {
+		case len(tag) == 0:
+			dropped = append(dropped, fmt.Sprintf("entry %d: empty string", i))
+		case len(tag) > 128:
+			dropped = append(dropped, fmt.Sprintf("entry %d: %d bytes, over the 128-byte limit (starts %q)",
+				i, len(tag), tag[:32]))
+		default:
+			tags = append(tags, tag)
+		}
+	}
+	if len(tags) > 50 {
+		for _, over := range tags[50:] {
+			dropped = append(dropped, fmt.Sprintf("%q: past the 50-tag limit", over))
+		}
+		tags = tags[:50]
+	}
+	return tags, dropped
+}
+
 func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
 	opID, _ := args["op_id"].(string)
-	if opID != "" {
+	upsertMode, _ := args["upsert_mode"].(bool)
+	// Upsert uses the durable 0x2F forward index (keyed by op_id) and merges on
+	// change — it must NOT go through the receipt-based dedup below (which would
+	// return the original engram on retry instead of merging). The engine's
+	// upsertKeyLock serializes concurrent upserts on the same key.
+	if opID != "" && !upsertMode {
 		// Acquire a per-op_id mutex to prevent TOCTOU races: without this lock,
 		// two concurrent requests with the same op_id could both pass the nil
 		// receipt check and each call Write, producing duplicate engrams.
@@ -76,6 +170,10 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		sendError(w, id, -32602, "invalid params: 'content' is required (non-empty string)")
 		return
 	}
+	if upsertMode && strings.TrimSpace(opID) == "" {
+		sendError(w, id, -32602, "invalid params: 'upsert_mode' requires 'op_id' (the key the engram is pinned to)")
+		return
+	}
 	req := &mbp.WriteRequest{
 		Vault:   vault,
 		Content: content,
@@ -84,14 +182,7 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		req.Concept = c
 	}
 	if tags, ok := args["tags"].([]any); ok {
-		for _, t := range tags {
-			if s, ok := t.(string); ok && len(s) > 0 && len(s) <= 128 {
-				req.Tags = append(req.Tags, s)
-			}
-		}
-		if len(req.Tags) > 50 {
-			req.Tags = req.Tags[:50]
-		}
+		req.Tags = normalizeTags(tags)
 	}
 	if conf, ok := args["confidence"].(float64); ok {
 		if conf < 0 {
@@ -109,8 +200,22 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		}
 		req.CreatedAt = &t
 	}
-	applyTypeArgs(args, req)
-	malformed := applyEnrichmentArgs(args, req)
+	if errMsg := parseValidityArgs(args, req); errMsg != "" {
+		sendError(w, id, -32602, errMsg)
+		return
+	}
+	if imp, ok := parseImportanceArg(args); !ok {
+		sendError(w, id, -32602, "invalid params: 'importance' must be a number in [0,1]")
+		return
+	} else if imp != nil {
+		req.Importance = imp
+	}
+	unknownType := applyTypeArgs(args, req)
+	if t, ok := args["trust"].(string); ok {
+		req.Trust = t
+	}
+	enrich := parseEnrichmentArgs(args, req, s.entityTypeResolver(ctx, vault))
+	content = req.Content // [[markup]] may have rewritten the stored text
 	if emb, errMsg := parseEmbeddingArg(args); errMsg != "" {
 		sendError(w, id, -32602, errMsg)
 		return
@@ -122,28 +227,48 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		req.Embedding = emb
 	}
 
+	if upsertMode {
+		req.UpsertMode = true
+		req.IdempotentID = opID // the durable upsert key (0x2F forward index)
+	}
 	resp, err := s.engine.Write(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
-	if opID != "" {
+	// Upsert is tracked by the durable forward index, not a receipt — don't
+	// write one (a receipt would make a later non-upsert retry return stale).
+	if opID != "" && !upsertMode {
 		if err := s.engine.WriteIdempotency(ctx, opID, resp.ID); err != nil {
 			slog.Warn("mcp: failed to record idempotency receipt", "op_id", opID, "engram_id", resp.ID, "err", err)
 		}
 	}
 	result := WriteResult{ID: resp.ID, Concept: req.Concept}
-	if resp.Hint != "" {
-		result.Hint = resp.Hint
+	// #770: a caller that omits `vault` gets the default vault, and the
+	// response used to be a bare {id, concept} that said nothing about where
+	// the memory went. An agent working in vault X that forgets the parameter
+	// once gets ok:true and a fact that is invisible from X. Routing is
+	// unchanged and correct — the failure is the SILENCE — so name the
+	// resolved vault. Only fires on the no-pinned-vault fallback (the resolved
+	// vault is literally "default"): a vault pinned by an mk_ key must never
+	// be echoed back, since the key's scope may itself be sensitive.
+	if _, hasVaultArg, _ := vaultFromArgs(args); !hasVaultArg && vault == defaultVaultName {
+		result.Hint = fmt.Sprintf("Stored in vault %q (no 'vault' specified). Pass vault:<name> to target your working vault.", vault)
+	}
+	if extra := resp.Hint; extra != "" {
+		result.Hint = joinHints(result.Hint, extra)
 	} else if len(content) > 500 {
-		result.Hint = "Tip: memories work best when each one captures a single concept. For future writes, consider using muninn_remember_batch to store multiple focused memories at once."
+		result.Hint = joinHints(result.Hint, "Tip: memories work best when each one captures a single concept. For future writes, consider using muninn_remember_batch to store multiple focused memories at once.")
 	}
-	if malformed > 0 {
-		if result.Hint != "" {
-			result.Hint += " "
-		}
-		result.Hint += fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformed)
-	}
+	result.Hint = joinHints(result.Hint, enrich.hint())
+	// An unrecognised `type` is still accepted and stored — but never silently.
+	// Tell the writer it was downgraded to "fact" while they still have the
+	// context to correct it (principle #1, degrade-loudly form).
+	result.Hint = joinHints(result.Hint, unknownTypeHint(unknownType))
+	// THE PUSH: prospective notices — focal set is the caller-supplied inline
+	// entities; the created engram is the self-echo guard. Inert unless
+	// MUNINN_PROSPECTIVE=1.
+	result.Notices = s.rememberNotices(ctx, vault, req.Entities, resp.ID)
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 
@@ -159,7 +284,13 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 	}
 
 	reqs := make([]*mbp.WriteRequest, 0, len(memoriesAny))
-	malformedCounts := make([]int, 0, len(memoriesAny))
+	enrichReports := make([]enrichmentReport, 0, len(memoriesAny))
+	// One resolver for the whole batch: at most one entity-table scan even when
+	// every item declares bare names.
+	resolve := s.entityTypeResolver(ctx, vault)
+	// Per-item unrecognised `type` values, reported on that item's hint so a
+	// batch write is never a place where a type is silently swallowed.
+	unknownTypes := make([]string, 0, len(memoriesAny))
 	for i, mAny := range memoriesAny {
 		m, ok := mAny.(map[string]any)
 		if !ok {
@@ -179,14 +310,7 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			req.Concept = c
 		}
 		if tags, ok := m["tags"].([]any); ok {
-			for _, t := range tags {
-				if s, ok := t.(string); ok && len(s) > 0 && len(s) <= 128 {
-					req.Tags = append(req.Tags, s)
-				}
-			}
-			if len(req.Tags) > 50 {
-				req.Tags = req.Tags[:50]
-			}
+			req.Tags = normalizeTags(tags)
 		}
 		if conf, ok := m["confidence"].(float64); ok {
 			if conf < 0 {
@@ -204,8 +328,21 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			}
 			req.CreatedAt = &t
 		}
-		applyTypeArgs(m, req)
-		malformed := applyEnrichmentArgs(m, req)
+		if errMsg := parseValidityArgs(m, req); errMsg != "" {
+			sendError(w, id, -32602, fmt.Sprintf("memories[%d]: %s", i, errMsg))
+			return
+		}
+		if imp, ok := parseImportanceArg(m); !ok {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].importance must be a number in [0,1]", i))
+			return
+		} else if imp != nil {
+			req.Importance = imp
+		}
+		unknownTypes = append(unknownTypes, applyTypeArgs(m, req))
+		if t, ok := m["trust"].(string); ok {
+			req.Trust = t
+		}
+		rep := parseEnrichmentArgs(m, req, resolve)
 		if emb, errMsg := parseEmbeddingArg(m); errMsg != "" {
 			sendError(w, id, -32602, fmt.Sprintf("invalid params: memories[%d].%s", i, strings.TrimPrefix(errMsg, "invalid params: ")))
 			return
@@ -217,7 +354,7 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			req.Embedding = emb
 		}
 		reqs = append(reqs, req)
-		malformedCounts = append(malformedCounts, malformed)
+		enrichReports = append(enrichReports, rep)
 	}
 
 	responses, errs := s.engine.WriteBatch(ctx, reqs)
@@ -237,8 +374,14 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		} else {
 			results[i] = batchItemResult{Index: i, ID: responses[i].ID, Concept: reqs[i].Concept, Status: "ok"}
 		}
-		if malformedCounts[i] > 0 {
-			results[i].Hint = fmt.Sprintf("%d entity item(s) were malformed (expected {\"name\":\"...\",\"type\":\"...\"} objects) and were skipped.", malformedCounts[i])
+		if h := enrichReports[i].hint(); h != "" {
+			results[i].Hint = h
+		}
+		if h := unknownTypeHint(unknownTypes[i]); h != "" {
+			if results[i].Hint != "" {
+				results[i].Hint += " "
+			}
+			results[i].Hint += h
 		}
 	}
 	sendResult(w, id, textContent(mustJSON(map[string]any{
@@ -279,7 +422,29 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
-	threshold := float32(0.5)
+	// Recall mode: validate here (fail fast with a helpful error), but FORWARD
+	// the mode instead of stamping preset values into the request — the engine
+	// is the single preset decider, because only it knows the effective
+	// scoring mode and preset thresholds are scale-bound (#704: stamping
+	// deep's ACT-R-calibrated 0.1 here silently emptied rrf vaults).
+	mode, _ := args["mode"].(string)
+	if mode != "" {
+		if _, modeErr := lookupMode(mode); modeErr != nil {
+			sendError(w, id, -32602, modeErr.Error())
+			return
+		}
+	}
+
+	// A caller-omitted threshold is forwarded as 0 ("unset") and the ENGINE
+	// applies its fusion-aware default (rrf -> 0.001 per #590, ACT-R -> 0.1,
+	// weighted_sum -> 0.5 — each the value its scoring path was calibrated
+	// against). MCP was the only transport that pre-filled a default here;
+	// REST /activate, gRPC and MBP all forward 0 already, and the surface
+	// pre-fill is how an ACT-R-calibrated number ended up gating rrf and
+	// weighted_sum vaults it was never derived for (COG-6, and the #754
+	// review's finding 5). An explicit caller threshold is never modified.
+	threshold := float32(0)
+	_, thresholdSet := args["threshold"]
 	if t, ok := args["threshold"].(float64); ok {
 		if t < 0 {
 			t = 0
@@ -300,23 +465,20 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	profile, _ := args["profile"].(string)
 
-	// Mode shortcuts: resolve preset if provided.
-	var modePreset RecallMode
-	if modeStr, ok := args["mode"].(string); ok && modeStr != "" {
-		preset, modeErr := lookupMode(modeStr)
-		if modeErr != nil {
-			sendError(w, id, -32602, modeErr.Error())
-			return
-		}
-		modePreset = preset
+	readOnly, roErrMsg := resolveReadOnly(ctx, args)
+	if roErrMsg != "" {
+		sendError(w, id, -32001, roErrMsg)
+		return
 	}
 
 	req := &mbp.ActivateRequest{
 		Vault:      vault,
 		Context:    contexts,
+		Mode:       mode,
 		Threshold:  threshold,
 		MaxResults: limit,
 		Profile:    profile,
+		ReadOnly:   readOnly,
 	}
 
 	// Ownership-lease work-queue visibility (#548).
@@ -325,36 +487,6 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	}
 	if includeLeased, ok := args["include_leased"].(bool); ok {
 		req.IncludeLeased = includeLeased
-	}
-
-	// Apply non-zero mode preset fields.
-	// Explicit caller threshold/limit args always win (already parsed above).
-	if modePreset.Threshold > 0 {
-		if _, callerSet := args["threshold"]; !callerSet {
-			req.Threshold = modePreset.Threshold
-		}
-	}
-	if modePreset.MaxHops > 0 {
-		req.MaxHops = modePreset.MaxHops
-	}
-
-	// Apply mode preset scoring weights to the request.
-	if modePreset.SemanticSimilarity > 0 || modePreset.FullTextRelevance > 0 || modePreset.Recency > 0 || modePreset.DisableACTR {
-		if req.Weights == nil {
-			req.Weights = &mbp.Weights{}
-		}
-		if modePreset.SemanticSimilarity > 0 {
-			req.Weights.SemanticSimilarity = modePreset.SemanticSimilarity
-		}
-		if modePreset.FullTextRelevance > 0 {
-			req.Weights.FullTextRelevance = modePreset.FullTextRelevance
-		}
-		if modePreset.Recency > 0 {
-			req.Weights.Recency = modePreset.Recency
-		}
-		if modePreset.DisableACTR {
-			req.Weights.DisableACTR = true
-		}
 	}
 
 	// Temporal filters: since / before
@@ -373,6 +505,21 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 			return
 		}
 		req.Filters = append(req.Filters, mbp.Filter{Field: "created_before", Op: "<", Value: t})
+	}
+
+	// Valid-time axis: as_of ("what was true at T") and include_invalid
+	// ("show history"). Orthogonal to since/before above, which filter on the
+	// TRANSACTION axis (CreatedAt).
+	if asOfStr, ok := args["as_of"].(string); ok && asOfStr != "" {
+		t, err := time.Parse(time.RFC3339, asOfStr)
+		if err != nil {
+			sendError(w, id, -32602, "invalid 'as_of': must be ISO 8601 (e.g. 2026-05-01T00:00:00Z)")
+			return
+		}
+		req.AsOf = &t
+	}
+	if includeInvalid, ok := args["include_invalid"].(bool); ok {
+		req.IncludeInvalid = includeInvalid
 	}
 
 	// Tag filters: tags_all (AND), tags_any (OR), tag_filter (prefix value range).
@@ -395,7 +542,17 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	if tags := parseStringArrayArg(args["tags_any"]); len(tags) > 0 {
 		req.Filters = append(req.Filters, mbp.Filter{Field: "tags_any", Op: "any", Value: tags})
 	}
-	if tf, ok := args["tag_filter"].(map[string]any); ok {
+	if raw, present := args["tag_filter"]; present {
+		// Validate on presence — do NOT silently drop a malformed tag_filter. A
+		// caller who passes a string (a natural mistake: tags_all/tags_any ARE
+		// string arrays) or any non-object must get an error, never an unfiltered
+		// recall that looks filtered (principle #1). tag_filter is an object:
+		// {"prefix":"due:","lte":"2026-06-17"}.
+		tf, ok := raw.(map[string]any)
+		if !ok {
+			sendError(w, id, -32602, `invalid 'tag_filter': must be an object like {"prefix":"due:","lte":"2026-06-17"} (got a non-object)`)
+			return
+		}
 		prefix, _ := tf["prefix"].(string)
 		if prefix == "" {
 			sendError(w, id, -32602, "invalid 'tag_filter': 'prefix' is required")
@@ -441,13 +598,16 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	if annotate {
 		for i, item := range resp.Activations {
-			ann, err := s.engine.GetAnnotations(ctx, vault, item.ID)
+			ann, err := s.engine.GetAnnotations(ctx, vault, item.ID, req)
 			if err != nil || ann == nil {
 				// Non-fatal: log and skip annotations for this result.
 				slog.Warn("handleRecall: GetAnnotations failed", "id", item.ID, "err", err)
 				continue
 			}
-			memories[i].Annotations = buildAnnotations(&item, ann)
+			// Augment (not replace) the always-on supersession annotation that
+			// activationToMemory already attached, so superseded_by/current_version
+			// from the ranking phase are preserved.
+			augmentAnnotations(&memories[i], &item, ann)
 		}
 	}
 
@@ -455,10 +615,65 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		"memories": memories,
 		"total":    resp.TotalFound,
 	}
+	// SemanticDegraded: the vector signal for this recall could not be
+	// trusted (embed backend unreachable, an all-zero embedding, or a
+	// failed post-load cosine fallback read). Recall still returns results
+	// via BM25/decay/Hebbian, but the caller should know semantic ranking
+	// was compromised rather than silently trusting it (principle #2).
+	if resp.SemanticDegraded {
+		result["semantic_degraded"] = true
+	}
+	// COG-29 (#764): at least two returned memories are declared to
+	// contradict each other with the conflict unresolved, so neither is
+	// presented as the answer. This map is hand-built and is NOT a mirror of
+	// mbp.ActivateResponse — a field added to the struct alone reaches REST
+	// and silently vanishes here, which is what
+	// TestRecallOverMCP_ConflictBlockAndAnnotations exists to catch.
+	if resp.Conflict != nil {
+		result["conflict"] = resp.Conflict
+	}
+	// COG-29 amendment: the vault-wide unresolved-contradiction debt readout,
+	// on mode="recent" ONLY. That condition is not a heuristic guess at "is this
+	// a session start" — it is the exact call generateGuide instructs agents to
+	// make for session continuity, in BOTH the shared and single-user branches,
+	// so it is an agent-DECLARED orientation intent. Default-mode recall, the hot
+	// path, is untouched.
+	if mode == "recent" {
+		rp := s.orientationPlasticity(ctx, vault)
+		if block := s.contradictionDebtAttachment(ctx, vault, rp, time.Now()); block != nil {
+			result["unresolved_contradictions"] = block
+		}
+	}
+	// THE PUSH: prospective notices — focal set derives from the RETURNED
+	// results; readOnly (COG-11) suppresses the fired-marker write. Omitted
+	// when empty; inert unless MUNINN_PROSPECTIVE=1.
+	if notices := s.recallNotices(ctx, vault, resp.Activations, readOnly); len(notices) > 0 {
+		result["notices"] = notices
+	}
+	// Abstention is self-describing: the caller can tell "the vault has no
+	// answer" (abstained, with a reason) from a generic empty set. Only ever
+	// present on empty results — an annotation on every response would stop
+	// meaning anything.
+	if resp.Abstained && len(memories) == 0 {
+		result["abstained"] = true
+		result["abstained_reason"] = resp.AbstainedReason
+	}
 	if len(memories) == 0 {
-		hint := "No results matched. For session continuity try mode='recent', or use muninn_where_left_off. For semantic recall, provide more specific context."
-		if p, err := s.engine.GetVaultPlasticity(ctx, vault); err == nil && p != nil && p.MultiUser {
-			hint = "No results matched. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global). For semantic recall, provide more specific context."
+		// The hint names the threshold because it is the lever that actually
+		// changes the outcome — evaluators called the old advice wrong for
+		// suggesting mode='recent' while omitting it.
+		hint := "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent', or use muninn_where_left_off."
+		p, pErr := s.engine.GetVaultPlasticity(ctx, vault)
+		if pErr == nil && p != nil && p.MultiUser {
+			hint = "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global)."
+		}
+		// COG-6: never clobber an explicit threshold — only hint. An rrf vault's
+		// blended finals rarely exceed ~0.15, so a caller-supplied threshold at
+		// or above 0.01 can silently filter every result. Only fires when the
+		// caller set the threshold explicitly (thresholdSet); the omitted-arg
+		// case is already handled mode-aware above.
+		if pErr == nil && p != nil && p.ScoringFusion == "rrf" && thresholdSet && threshold >= 0.01 {
+			hint += fmt.Sprintf(" Note: this vault uses rrf (rank-based) scoring — scores rarely exceed ~0.15; a threshold of %g filters everything; try <= 0.01.", threshold)
 		}
 		result["hint"] = hint
 	}
@@ -471,7 +686,13 @@ func (s *MCPServer) handleRead(ctx context.Context, w http.ResponseWriter, id js
 		sendError(w, id, -32602, "invalid params: 'id' is required")
 		return
 	}
-	resp, err := s.engine.Read(ctx, &mbp.ReadRequest{ID: engramID, Vault: vault})
+	readOnly, roErrMsg := resolveReadOnly(ctx, args)
+	if roErrMsg != "" {
+		sendError(w, id, -32001, roErrMsg)
+		return
+	}
+
+	resp, err := s.engine.Read(ctx, &mbp.ReadRequest{ID: engramID, Vault: vault, ReadOnly: readOnly})
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -485,9 +706,41 @@ func (s *MCPServer) handleForget(ctx context.Context, w http.ResponseWriter, id 
 		sendError(w, id, -32602, "invalid params: 'id' is required")
 		return
 	}
-	_, err := s.engine.Forget(ctx, &mbp.ForgetRequest{ID: engramID, Hard: false, Vault: vault})
+	// #807: honor the caller's explicit hard flag instead of silently
+	// downgrading it to a soft delete. Same authorization as any other
+	// mutating tool call — muninn_forget is already isMutatingTool-classified
+	// (blocked for observe-mode credentials) and the engine itself refuses
+	// EVERY Forget call, hard or soft, from an append-mode credential
+	// (SEC-15) — the identical bar gRPC's ForgetRequest.Hard already clears
+	// with no additional elevation, so this does not make MCP more
+	// permissive than the other transports that already reach hard delete.
+	hard, _ := args["hard"].(bool)
+	req := &mbp.ForgetRequest{ID: engramID, Hard: hard, Vault: vault}
+
+	// not_true_since: invalidate on the valid-time axis (stamp ValidUntil)
+	// instead of soft-deleting. The memory stays recoverable via as_of /
+	// include_invalid; default recall stops returning it (COG-19).
+	if ntsStr, ok := args["not_true_since"].(string); ok && ntsStr != "" {
+		t, err := time.Parse(time.RFC3339, ntsStr)
+		if err != nil {
+			sendError(w, id, -32602, "invalid 'not_true_since': must be ISO 8601 (e.g. 2026-07-01T00:00:00Z)")
+			return
+		}
+		req.NotTrueSince = &t
+	}
+
+	_, err := s.engine.Forget(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	if req.NotTrueSince != nil {
+		sendResult(w, id, textContent(mustJSON(map[string]any{
+			"ok":          true,
+			"invalidated": true,
+			"valid_until": req.NotTrueSince.UTC().Format(time.RFC3339),
+			"hint":        "Memory invalidated on the valid-time axis (not deleted). It stays retrievable via as_of or include_invalid; default recall no longer returns it.",
+		})))
 		return
 	}
 
@@ -518,10 +771,20 @@ func (s *MCPServer) handleLink(ctx context.Context, w http.ResponseWriter, id js
 		}
 		weight = float32(wf)
 	}
+	if srcID == dstID {
+		// A memory cannot supersede, support, or contradict ITSELF. Accepting a
+		// self-link created an edge that annotated the memory as conflicting
+		// with itself (observed live by an evaluator), poisoning the one channel
+		// — declared edges — the system treats as ground truth. This is a caller
+		// error, not a declaration; reject it loudly.
+		sendError(w, id, -32602, "invalid params: source_id and target_id are the same memory — a memory cannot be linked to itself")
+		return
+	}
+	relType, unknownRel := relTypeFromStringChecked(rel)
 	_, err := s.engine.Link(ctx, &mbp.LinkRequest{
 		SourceID: srcID,
 		TargetID: dstID,
-		RelType:  relTypeFromString(rel),
+		RelType:  relType,
 		Weight:   weight,
 		Vault:    vault,
 	})
@@ -529,16 +792,62 @@ func (s *MCPServer) handleLink(ctx context.Context, w http.ResponseWriter, id js
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
+	// An unrecognised relation is still linked (as the inert relates_to) — but
+	// never silently. Tell the caller their declaration was not recorded, and
+	// name the valid relations, while they can still re-link.
+	if h := unknownRelationHint(unknownRel); h != "" {
+		sendResult(w, id, textContent(mustJSON(map[string]any{"ok": true, "hint": h})))
+		return
+	}
 	sendResult(w, id, textContent(`{"ok":true}`))
 }
 
+// contradictionReporter is the optional richer contradictions read. Engines
+// that implement it report resolved concepts, real detection timestamps, and —
+// critically — the contradictions an agent has explicitly linked that the 30s
+// batch detector has not flagged yet. See mcpEngineAdapter.GetContradictionReport
+// for why this is probed rather than added to the Engine interface.
+type contradictionReporter interface {
+	GetContradictionReport(ctx context.Context, vault string) (*ContradictionsReport, error)
+}
+
 func (s *MCPServer) handleContradictions(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
-	pairs, err := s.engine.GetContradictions(ctx, vault)
+	rep, ok := s.engine.(contradictionReporter)
+	if !ok {
+		// Legacy shape: markers only, no detection state. Kept byte-compatible
+		// so an engine without the richer read still answers the question it
+		// can actually answer.
+		pairs, err := s.engine.GetContradictions(ctx, vault)
+		if err != nil {
+			sendError(w, id, -32000, "tool error: "+err.Error())
+			return
+		}
+		sendResult(w, id, textContent(mustJSON(map[string]any{"contradictions": pairs})))
+		return
+	}
+
+	report, err := rep.GetContradictionReport(ctx, vault)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
-	sendResult(w, id, textContent(mustJSON(map[string]any{"contradictions": pairs})))
+	if report.Contradictions == nil {
+		report.Contradictions = []ContradictionPair{}
+	}
+	// The note exists because an empty or short list used to be read as "there
+	// are no contradictions" when the truth was "the detector has not run yet".
+	// Say which one this is, in words, every time it is not simply "none".
+	switch {
+	case !report.ScanComplete:
+		report.Note = "contradiction scan hit its cap: pending_count is a lower bound, and pairs declared by an explicit contradicts link may be missing from this list"
+	case report.PendingCount > 0:
+		report.Note = fmt.Sprintf("%d contradiction(s) are declared by an explicit link and are already honored by recall; the asynchronous confidence penalty for them has not been applied yet (it runs on a ~30s batch interval)", report.PendingCount)
+	case report.DetectedCount == 0 && report.ResolvedCount > 0:
+		report.Note = fmt.Sprintf("no live contradictions in this vault; %d recorded pair(s) have been resolved (see resolved_by)", report.ResolvedCount)
+	case report.DetectedCount == 0:
+		report.Note = "no contradictions in this vault, and none awaiting detection"
+	}
+	sendResult(w, id, textContent(mustJSON(report)))
 }
 
 func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
@@ -559,6 +868,16 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 }
 
 func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	// Tags are metadata, and evolve is not a metadata update: it mints a new
+	// ULID and archives the predecessor. Unknown MCP params are not rejected
+	// in general, so accepting `tags` here would return success with the tags
+	// silently discarded — the worst failure class in this project (#720).
+	if _, present := args["tags"]; present {
+		sendError(w, id, -32602, "invalid params: 'tags' is not accepted by muninn_evolve — "+
+			"tags are metadata, and evolving to change them would archive this memory under a new ID; "+
+			"use muninn_update_tags(id, tags) to retag in place")
+		return
+	}
 	engramID, ok1 := args["id"].(string)
 	newContent, ok2 := args["new_content"].(string)
 	reason, ok3 := args["reason"].(string)
@@ -591,10 +910,102 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	if c, ok := args["concept"].(string); ok {
 		evolveConcept = c
 	}
-	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb, evolveConcept)
+	// Inline [[markup]] is stripped on evolve exactly as on remember — the same
+	// input must not produce different stored content per verb. GUARD the
+	// return: extractMarkupEntities returns ("", nil) when there is nothing to
+	// do (its documented contract, honoured by parseEnrichmentArgs), and an
+	// unconditional assign here once destroyed the content of EVERY plain-text
+	// evolve — the successor stored empty text while the predecessor was
+	// superseded away. Caught by adversarial review (finding 1), not by tests:
+	// the evolve fakes never read content back.
+	var markupNames []string
+	if stripped, names := extractMarkupEntities(newContent); len(names) > 0 {
+		newContent = stripped
+		markupNames = names
+	}
+	// Optional inline entities — same shape and normalization as remember's.
+	// When present they REPLACE the entity links otherwise carried forward
+	// from the predecessor.
+	var evolveEntities []mbp.InlineEntity
+	if entitiesAny, ok := args["entities"].([]any); ok {
+		for i, eAny := range entitiesAny {
+			if i >= 20 {
+				break
+			}
+			eMap, ok := eAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := eMap["name"].(string)
+			typ, _ := eMap["type"].(string)
+			name = strings.TrimSpace(norm.NFKC.String(name))
+			typ = normalizeEntityType(typ)
+			if name == "" || typ == "" {
+				continue
+			}
+			evolveEntities = append(evolveEntities, mbp.InlineEntity{Name: name, Type: typ})
+		}
+	}
+	// Markup names become entities ONLY when the caller also supplied explicit
+	// entities[]. The engine treats ANY non-empty entity list on evolve as
+	// "REPLACE the carried set" (EvolveAt suppresses the carry entirely), so
+	// letting markup alone populate the list silently destroyed every
+	// predecessor entity link — a side effect the caller never asked for
+	// (adversarial review, finding 2). With explicit entities the caller has
+	// already opted into replace, and markup appends with the same vault-table
+	// type resolution remember uses. Markup-only keeps the carry and WARNS.
+	var markupOnlyWarning string
+	if len(markupNames) > 0 {
+		if len(evolveEntities) > 0 {
+			resolve := s.entityTypeResolver(ctx, vault)
+			for _, n := range markupNames {
+				dup := false
+				for _, e := range evolveEntities {
+					if strings.EqualFold(e.Name, n) {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					typ, known := resolve(n)
+					if !known {
+						typ = "other"
+					}
+					evolveEntities = append(evolveEntities, mbp.InlineEntity{Name: n, Type: typ})
+				}
+			}
+		} else {
+			markupOnlyWarning = fmt.Sprintf(
+				"markup entities (%s) were stripped from the content but NOT linked: evolve without an explicit 'entities' list carries the predecessor's entity links forward, and adding markup names would REPLACE that carried set. To link them, pass 'entities' explicitly (which replaces the carry).",
+				strings.Join(markupNames, ", "))
+		}
+	}
+	// effective_at: valid-time boundary between predecessor and successor
+	// (default now). The old version's ValidUntil and the new version's
+	// ValidFrom both become this moment.
+	var effectiveAt time.Time
+	if eaStr, ok := args["effective_at"].(string); ok && eaStr != "" {
+		t, err := time.Parse(time.RFC3339, eaStr)
+		if err != nil {
+			sendError(w, id, -32602, "invalid 'effective_at': must be ISO 8601 (e.g. 2026-06-15T12:00:00Z)")
+			return
+		}
+		effectiveAt = t
+	}
+	// importance: optional override for the successor; absent inherits the
+	// predecessor's explicit importance (unset stays unset).
+	evolveImportance, impOK := parseImportanceArg(args)
+	if !impOK {
+		sendError(w, id, -32602, "invalid params: 'importance' must be a number in [0,1]")
+		return
+	}
+	result, err := s.engine.Evolve(ctx, vault, engramID, newContent, reason, evolveEmb, evolveConcept, evolveEntities, evolveImportance, effectiveAt)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
+	}
+	if markupOnlyWarning != "" {
+		result.Warnings = append(result.Warnings, markupOnlyWarning)
 	}
 	sendResult(w, id, textContent(mustJSON(result)))
 }
@@ -864,7 +1275,25 @@ func (s *MCPServer) handleWhereLeftOff(ctx context.Context, w http.ResponseWrite
 		limit = 50
 	}
 
-	entries, err := s.engine.WhereLeftOff(ctx, vault, limit)
+	// S3: WhereLeftOff has no write side effects regardless of read_only (it
+	// never reinforces — see engine_where_left_off.go), so there is nothing
+	// to set on the downstream call. Still validate/reject for API
+	// consistency with muninn_recall/muninn_read (RFC S3 requires all three).
+	if _, roErrMsg := resolveReadOnly(ctx, args); roErrMsg != "" {
+		sendError(w, id, -32001, roErrMsg)
+		return
+	}
+
+	var excludeTypeLabels []string
+	if raw, ok := args["exclude_type_labels"].([]any); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				excludeTypeLabels = append(excludeTypeLabels, s)
+			}
+		}
+	}
+
+	entries, err := s.engine.WhereLeftOff(ctx, vault, limit, excludeTypeLabels)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -872,15 +1301,22 @@ func (s *MCPServer) handleWhereLeftOff(ctx context.Context, w http.ResponseWrite
 	if entries == nil {
 		entries = []WhereLeftOffEntry{}
 	}
+	rp := s.orientationPlasticity(ctx, vault)
 	hint := "These are your most recently accessed memories. Use them to orient yourself for this session."
-	if p, perr := s.engine.GetVaultPlasticity(ctx, vault); perr == nil && p != nil && p.MultiUser {
+	if rp.MultiUser {
 		hint = "These are the most recently accessed memories across ALL users of this shared vault — not necessarily yours. For your own session context, use muninn_recall scoped to your per-user tag."
 	}
-	sendResult(w, id, textContent(mustJSON(map[string]any{
+	out := map[string]any{
 		"memories": entries,
 		"count":    len(entries),
 		"hint":     hint,
-	})))
+	}
+	// COG-29 amendment: the vault-wide unresolved-contradiction debt readout.
+	// Absent, not empty, when the vault owes nothing.
+	if block := s.contradictionDebtAttachment(ctx, vault, rp, time.Now()); block != nil {
+		out["unresolved_contradictions"] = block
+	}
+	sendResult(w, id, textContent(mustJSON(out)))
 }
 
 func (s *MCPServer) handleRetryEnrich(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
@@ -915,7 +1351,14 @@ func (s *MCPServer) handleGuide(ctx context.Context, w http.ResponseWriter, id j
 		EngramCount: statResp.EngramCount,
 		VaultCount:  statResp.VaultCount,
 	}
-	guide := generateGuide(vault, *plasticity, stats)
+	// COG-29 amendment: the vault-wide unresolved-contradiction debt readout,
+	// rendered into the guide's contradiction section. nil ⇒ nothing is added.
+	debt, debtFailed := s.contradictionDebtFor(ctx, vault, *plasticity)
+	debtSection := contradictionDebtGuideSection(debt, plasticity.MultiUser, time.Now())
+	if debtFailed {
+		debtSection = "\n**This vault's unresolved-contradiction state could not be read.** It is UNKNOWN, not zero — `muninn_contradictions` reads the same data directly.\n"
+	}
+	guide := generateGuide(vault, *plasticity, stats, debtSection)
 	sendResult(w, id, textContent(guide))
 }
 
@@ -1018,22 +1461,27 @@ func (s *MCPServer) handleFindByEntity(ctx context.Context, w http.ResponseWrite
 	}
 	engrams := res.Engrams
 	type engramEntry struct {
-		ID        string `json:"id"`
-		Concept   string `json:"concept"`
-		Summary   string `json:"summary,omitempty"`
-		State     string `json:"state"`
-		Type      string `json:"type"`
-		TypeLabel string `json:"type_label,omitempty"`
+		ID               string  `json:"id"`
+		Concept          string  `json:"concept"`
+		Summary          string  `json:"summary,omitempty"`
+		State            string  `json:"state"`
+		Type             string  `json:"type"`
+		TypeLabel        string  `json:"type_label,omitempty"`
+		Importance       float64 `json:"importance"`
+		ImportanceSource string  `json:"importance_source"`
 	}
 	entries := make([]engramEntry, 0, len(engrams))
 	for _, e := range engrams {
+		imp, impSrc := importanceFields(e.Importance, e.MemoryType, e.Trust)
 		entries = append(entries, engramEntry{
-			ID:        e.ID.String(),
-			Concept:   e.Concept,
-			Summary:   e.Summary,
-			State:     lifecycleStateLabel(e.State),
-			Type:      e.MemoryType.String(),
-			TypeLabel: e.TypeLabel,
+			ID:               e.ID.String(),
+			Concept:          e.Concept,
+			Summary:          e.Summary,
+			State:            lifecycleStateLabel(e.State),
+			Type:             e.MemoryType.String(),
+			TypeLabel:        e.TypeLabel,
+			Importance:       imp,
+			ImportanceSource: impSrc,
 		})
 	}
 	payload := map[string]any{
@@ -1088,7 +1536,7 @@ func (s *MCPServer) handleEntityState(ctx context.Context, w http.ResponseWriter
 	entityType, _ := args["type"].(string)
 	entityType = normalizeEntityType(entityType)
 
-	if err := s.engine.SetEntityState(ctx, entityName, state, mergedInto, entityType); err != nil {
+	if err := s.engine.SetEntityState(ctx, vault, entityName, state, mergedInto, entityType); err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
@@ -1151,7 +1599,7 @@ func (s *MCPServer) handleEntityStateBatch(ctx context.Context, w http.ResponseW
 		})
 	}
 
-	errs := s.engine.SetEntityStateBatch(ctx, ops)
+	errs := s.engine.SetEntityStateBatch(ctx, vault, ops)
 
 	type batchItemResult struct {
 		Index  int    `json:"index"`
@@ -1298,7 +1746,44 @@ func (s *MCPServer) handleExportGraph(ctx context.Context, w http.ResponseWriter
 
 // applyTypeArgs parses the "type" and "type_label" arguments from an MCP call
 // and sets MemoryType + TypeLabel on the WriteRequest accordingly.
-func applyTypeArgs(args map[string]any, req *mbp.WriteRequest) {
+// memoryTypeNames is the caller-facing vocabulary ParseMemoryType accepts. It is
+// the single source of truth for what unknownTypeHint offers, so a new
+// MemoryType cannot be added to the enum without the nudge learning to name it
+// (pinned by TestApplyTypeArgs_NoValidTypeIsEverReportedUnknown).
+var memoryTypeNames = []string{
+	"fact", "decision", "observation", "preference", "issue", "bugfix",
+	"bug_report", "task", "procedure", "event", "experience", "goal", "constraint",
+}
+
+// unknownTypeHint renders the loud-but-graceful notice for a `type` value that
+// is not a recognised MemoryType. Empty rejected value → empty hint (nothing was
+// discarded, so there is nothing to report).
+func unknownTypeHint(rejected string) string {
+	if rejected == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Note: type %q is not a recognised memory type, so this memory was stored as \"fact\" and %q was kept only as a display label. "+
+			"Typed memories participate in recall and graph features that plain facts do not. Valid types: %s.",
+		rejected, rejected, strings.Join(memoryTypeNames, ", "))
+}
+
+// applyTypeArgs maps the caller's `type`/`type_label` arguments onto the write
+// request, and RETURNS the `type` value if it was not a recognised MemoryType.
+//
+// The storage behaviour is deliberately unchanged — an unrecognised type is
+// still accepted and still stored as TypeFact with the caller's string kept as
+// TypeLabel, so no existing writer breaks and no memory is ever rejected. What
+// changed is that the substitution is no longer SILENT: callers surface the
+// returned value via unknownTypeHint so the writer learns their type was
+// discarded while they still have the context to correct it.
+//
+// This is the project's first principle applied to the write path ("explicit
+// config is never silently substituted") in its degrade-loudly form (#578/#740):
+// accept and continue, but never pretend nothing happened. A real-corpus census
+// found 66.3% of memories typed by their writer but untyped by the type system
+// as a direct result of the previous silent behaviour.
+func applyTypeArgs(args map[string]any, req *mbp.WriteRequest) (unknownType string) {
 	typeStr, _ := args["type"].(string)
 	explicitLabel, _ := args["type_label"].(string)
 
@@ -1309,16 +1794,19 @@ func applyTypeArgs(args map[string]any, req *mbp.WriteRequest) {
 				req.TypeLabel = typeStr
 			}
 		} else {
-			// Not a known enum name — store as free-form label, default to Fact.
+			// Not a known enum name — store as free-form label, default to Fact,
+			// and report it so the caller can be told (never silently swallowed).
 			req.MemoryType = uint8(storage.TypeFact)
 			if explicitLabel == "" {
 				req.TypeLabel = typeStr
 			}
+			unknownType = typeStr
 		}
 	}
 	if explicitLabel != "" {
 		req.TypeLabel = explicitLabel
 	}
+	return unknownType
 }
 
 // validEntityTypes is the single source of truth for the 14 recognised entity
@@ -1353,33 +1841,254 @@ func normalizeEntityType(typ string) string {
 	return typ
 }
 
-// applyEnrichmentArgs parses optional inline enrichment fields (summary, entities,
-// relationships) from MCP tool call arguments onto the WriteRequest.
+// ── the middle gear: cheap entity declaration ────────────────────────────────
+//
+// A bare muninn_remember(content) costs ~20 tokens and produces a memory that is
+// invisible to every entity-based tool. A fully-declared write costs roughly 8x
+// the content in JSON. Four independent evaluators, asked what they would
+// actually do mid-task with a user waiting, all answered "the cheap one" — so
+// the cheap one is what the graph gets. Measured on a 4,216-engram corpus: 4.81%
+// of writes carried any declaration, 29.9% carried an entity.
+//
+// Two middle gears close that gap without an LLM anywhere in the server:
+//
+//  1. BARE STRING entities — `entities:["PostgreSQL","Auth Service"]`. The type
+//     is resolved from the vault's OWN entity table (a name it already knows
+//     keeps its known type; anything else becomes "other" and is REPORTED).
+//  2. Inline [[markup]] in the content — `"Migrated [[Auth Service]] to
+//     [[PostgreSQL]]"`. A tokenizer, not a model: the brackets are stripped and
+//     the bracketed names become entities.
+//
+// Both mechanisms only ever resolve TYPES for names the CALLER supplied. Neither
+// invents a name from content — #713's counterfactual measured hand-adjudicated
+// precision of ~0.76 for INFERRED entities, and that is the pollution this
+// project keeps having to dig out of. [[markup]] is caller intent, expressed in
+// the content instead of in JSON.
+//
+// The honest counter-argument, recorded rather than argued away: once agents
+// learn the server resolves types for them, the explicit-declaration rate may
+// fall further, and the graph's typing ceiling becomes whatever the entity table
+// already knows. A vault's FIRST mention of an entity will be typed "other"
+// unless the caller declares it. We take that trade because an untyped entity is
+// worth strictly more than no entity at all — the same reasoning that removed
+// the type enum — but it is a trade, not a free win.
+
+const (
+	maxInlineEntities = 20
+	// entityTypeScanLimit caps the vault entity table pulled in to resolve bare
+	// names. Entities are returned mention-count descending, so the names a
+	// writer is most likely to reuse are the ones inside the cap.
+	entityTypeScanLimit = 5000
+	// maxMarkupNameLen bounds what [[...]] is willing to treat as an entity name.
+	// Anything longer is prose or code, not a declaration, and is left alone.
+	maxMarkupNameLen = 64
+)
+
+// entityTypeLookup resolves a caller-supplied entity NAME to a type the vault
+// already knows. A nil lookup, or one that reports !ok, means "unknown" — never
+// an error, never a rejection.
+type entityTypeLookup func(name string) (typ string, known bool)
+
+// entityTypeResolver returns a lazy, single-scan lookup over the vault's entity
+// table. The scan is only paid for if a caller actually supplies a name with no
+// type, and at most once per tool call.
+func (s *MCPServer) entityTypeResolver(ctx context.Context, vault string) entityTypeLookup {
+	var (
+		loaded bool
+		idx    map[string]string
+	)
+	return func(name string) (string, bool) {
+		if !loaded {
+			loaded = true
+			idx = make(map[string]string)
+			rows, err := s.engine.ListEntities(ctx, vault, entityTypeScanLimit, "")
+			if err != nil {
+				// Degrade loudly-but-gracefully: bare names still become "other"
+				// and the caller is told, rather than losing the entity.
+				slog.Warn("mcp: entity-type resolution unavailable; bare-string entities will be typed \"other\"",
+					"vault", vault, "err", err)
+			}
+			for _, r := range rows {
+				if r.Type == "" {
+					continue
+				}
+				if _, dup := idx[strings.ToLower(r.Name)]; !dup {
+					idx[strings.ToLower(r.Name)] = r.Type
+				}
+			}
+		}
+		t, ok := idx[strings.ToLower(name)]
+		return t, ok
+	}
+}
+
+// enrichmentReport is what the write path owes the caller about how their
+// enrichment arguments were actually interpreted. Every field here is something
+// that used to happen silently.
+type enrichmentReport struct {
+	malformed       int      // items that carried no usable name at all
+	unresolvedNames []string // caller-supplied names with no known type -> "other"
+	coercedTypes    []string // caller-supplied types outside the 14 -> "other"
+	markup          int      // entities lifted out of [[...]] in the content
+	renamedKeys     []string // near-miss item keys accepted, e.g. entity_name -> name
+	unknownArgs     []string // near-miss top-level parameters that were ignored
+}
+
+// nearMissArgs maps parameter names that evaluators actually sent to the ones
+// this schema accepts. A wrong name currently produces an opaque -32602 (or,
+// worse, a silently dropped field) with no indication of what was expected.
+var nearMissArgs = map[string]string{
+	"entity":               "entities",
+	"entity_list":          "entities",
+	"entity_relationship":  "entity_relationships",
+	"entity_relations":     "entity_relationships",
+	"relationship":         "relationships",
+	"relation":             "relationships",
+	"related":              "relationships",
+	"summarization":        "summary",
+	"summary_text":         "summary",
+	"abstract":             "summary",
+	"entity_names":         "entities",
+	"named_entities":       "entities",
+	"entities_with_types":  "entities",
+	"entity_relationships": "", // sentinel: correct name, never reported
+}
+
+// entityNameKeys / entityTypeKeys are the near-miss key names accepted INSIDE an
+// entity object. Accepting them keeps the entity (coverage is the scarce thing);
+// naming them keeps it from being a silent schema fork.
+var entityNameKeys = []string{"entity_name", "entity", "label", "value", "text"}
+var entityTypeKeys = []string{"entity_type", "kind", "category"}
+
+func (r enrichmentReport) hint() string {
+	var parts []string
+	if r.malformed > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d entity item(s) carried no usable name and were skipped — 'entities' accepts a bare string name (\"PostgreSQL\") or an object {\"name\":\"...\",\"type\":\"...\"}.",
+			r.malformed))
+	}
+	if n := len(r.unresolvedNames); n > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d entity name(s) are not yet known to this vault and were stored with type \"other\" (%s). Pass {\"name\":\"...\",\"type\":\"...\"} to type them.",
+			n, joinCapped(r.unresolvedNames, 5)))
+	}
+	if n := len(r.coercedTypes); n > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d entity type(s) are not recognised and were stored as \"other\" (%s). Recognised: person, organization, location, concept, technology, project, tool, database, service, framework, language, product, event, other.",
+			n, joinCapped(r.coercedTypes, 5)))
+	}
+	if r.markup > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d entity(ies) were read from [[...]] markup in the content; the brackets were removed from the stored text.",
+			r.markup))
+	}
+	if n := len(r.renamedKeys); n > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%s: not part of the entities schema — the accepted keys are 'name' and 'type'. The value was used anyway.",
+			joinCapped(r.renamedKeys, 5)))
+	}
+	if n := len(r.unknownArgs); n > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"Ignored unknown parameter(s) %s — did you mean %s?",
+			joinCapped(r.unknownArgs, 5), joinCapped(r.unknownArgSuggestions(), 5)))
+	}
+	return strings.Join(parts, " ")
+}
+
+func (r enrichmentReport) unknownArgSuggestions() []string {
+	out := make([]string, 0, len(r.unknownArgs))
+	for _, a := range r.unknownArgs {
+		if want := nearMissArgs[a]; want != "" {
+			out = append(out, "'"+want+"'")
+		}
+	}
+	return out
+}
+
+func joinCapped(items []string, max int) string {
+	if len(items) <= max {
+		return strings.Join(items, ", ")
+	}
+	return strings.Join(items[:max], ", ") + fmt.Sprintf(", … (+%d more)", len(items)-max)
+}
+
+// applyEnrichmentArgs is the no-resolver form, kept for call sites that have no
+// vault context. Bare names still work; they simply all resolve to "other".
 func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
-	malformed := 0
+	return parseEnrichmentArgs(args, req, nil).malformed
+}
+
+// parseEnrichmentArgs parses optional inline enrichment fields (summary, entities,
+// relationships) from MCP tool call arguments onto the WriteRequest, resolving
+// untyped entity names against the vault's own entity table and lifting any
+// [[markup]] entities out of req.Content.
+func parseEnrichmentArgs(args map[string]any, req *mbp.WriteRequest, lookup entityTypeLookup) enrichmentReport {
+	var rep enrichmentReport
 	if summary, ok := args["summary"].(string); ok && summary != "" {
 		req.Summary = summary
 	}
-	if entitiesAny, ok := args["entities"].([]any); ok {
-		for i, eAny := range entitiesAny {
-			if i >= 20 {
-				break
+	for k := range args {
+		if want, isNearMiss := nearMissArgs[k]; isNearMiss && want != "" {
+			if _, correctPresent := args[want]; !correctPresent {
+				rep.unknownArgs = append(rep.unknownArgs, k)
 			}
-			eMap, ok := eAny.(map[string]any)
-			if !ok {
-				malformed++
-				continue
-			}
-			name, _ := eMap["name"].(string)
-			typ, _ := eMap["type"].(string)
-			name = strings.TrimSpace(norm.NFKC.String(name))
-			typ = normalizeEntityType(typ)
-			if name == "" || typ == "" {
-				continue
-			}
-			req.Entities = append(req.Entities, mbp.InlineEntity{Name: name, Type: typ})
 		}
 	}
+	sort.Strings(rep.unknownArgs)
+
+	seen := make(map[string]bool)
+	add := func(name, declaredType string) {
+		name = strings.TrimSpace(norm.NFKC.String(name))
+		if name == "" {
+			rep.malformed++
+			return
+		}
+		if len(req.Entities) >= maxInlineEntities || seen[strings.ToLower(name)] {
+			return
+		}
+		seen[strings.ToLower(name)] = true
+		typ := resolveEntityType(name, declaredType, lookup, &rep)
+		req.Entities = append(req.Entities, mbp.InlineEntity{Name: name, Type: typ})
+	}
+
+	if entitiesAny, ok := args["entities"].([]any); ok {
+		for i, eAny := range entitiesAny {
+			if i >= maxInlineEntities {
+				break
+			}
+			switch e := eAny.(type) {
+			case string:
+				// The middle gear: a bare name. ~15 tokens for a whole entity
+				// set instead of typed JSON objects.
+				add(e, "")
+			case map[string]any:
+				name, _ := e["name"].(string)
+				typ, _ := e["type"].(string)
+				if strings.TrimSpace(name) == "" {
+					name, rep.renamedKeys = pickAlt(e, entityNameKeys, rep.renamedKeys)
+				}
+				if strings.TrimSpace(typ) == "" {
+					typ, rep.renamedKeys = pickAlt(e, entityTypeKeys, rep.renamedKeys)
+				}
+				add(name, typ)
+			default:
+				rep.malformed++
+			}
+		}
+	}
+
+	// Inline markup last, so an explicitly-declared spelling/type always wins
+	// over the same name written in brackets.
+	if stripped, names := extractMarkupEntities(req.Content); len(names) > 0 {
+		req.Content = stripped
+		for _, n := range names {
+			add(n, "")
+		}
+		// Counted from the markup found, not from what survived dedup: the
+		// content was rewritten either way, and that is what must be reported.
+		rep.markup = len(names)
+	}
+
 	if relsAny, ok := args["relationships"].([]any); ok {
 		for i, rAny := range relsAny {
 			if i >= 30 {
@@ -1442,7 +2151,107 @@ func applyEnrichmentArgs(args map[string]any, req *mbp.WriteRequest) int {
 			})
 		}
 	}
-	return malformed
+	return rep
+}
+
+// resolveEntityType decides the type for one caller-supplied entity name.
+//
+// A DECLARED type always wins (principle #1: explicit config is never silently
+// substituted) — it is only lowercased, and coerced to "other" if it is outside
+// the 14, which is counted. An OMITTED type is resolved from the vault's own
+// entity table; a name the vault has never seen becomes "other" and is counted.
+// Nothing here reads the content, so no name can be manufactured.
+func resolveEntityType(name, declared string, lookup entityTypeLookup, rep *enrichmentReport) string {
+	if d := strings.TrimSpace(declared); d != "" {
+		typ := normalizeEntityType(d)
+		if typ == "other" && strings.ToLower(d) != "other" {
+			rep.coercedTypes = append(rep.coercedTypes, d)
+		}
+		return typ
+	}
+	if lookup != nil {
+		if typ, known := lookup(name); known {
+			if norm := normalizeEntityType(typ); norm != "" {
+				return norm
+			}
+		}
+	}
+	rep.unresolvedNames = append(rep.unresolvedNames, name)
+	return "other"
+}
+
+// pickAlt pulls a value out of an entity object under a near-miss key, recording
+// which wrong key was used so the caller learns the real one.
+func pickAlt(obj map[string]any, keys []string, seen []string) (string, []string) {
+	for _, k := range keys {
+		if v, ok := obj[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v, append(seen, "'"+k+"'")
+		}
+	}
+	return "", seen
+}
+
+// extractMarkupEntities strips [[Entity Name]] markup out of content and returns
+// the cleaned text plus the bracketed names, in order.
+//
+// This is a TOKENIZER, not a model — it reads only what the caller explicitly
+// bracketed. It deliberately refuses anything that does not look like a
+// declaration: nested or unbalanced brackets, embedded newlines, and names
+// longer than maxMarkupNameLen are left byte-identical, so ordinary code and
+// prose containing brackets pass through untouched.
+//
+// Returns ("", nil) when there is nothing to do, so the caller can leave
+// req.Content alone rather than reassign an identical string.
+func extractMarkupEntities(content string) (string, []string) {
+	if !strings.Contains(content, "[[") {
+		return "", nil
+	}
+	var (
+		b     strings.Builder
+		names []string
+		i     int
+	)
+	for i < len(content) {
+		open := strings.Index(content[i:], "[[")
+		if open < 0 {
+			break
+		}
+		open += i
+		inner := open + 2
+		end := strings.Index(content[inner:], "]]")
+		if end < 0 {
+			break
+		}
+		end += inner
+		name := content[inner:end]
+		if !plausibleMarkupName(name) {
+			// Not a declaration — emit the opening bracket pair verbatim and
+			// keep scanning after it.
+			b.WriteString(content[i : open+2])
+			i = open + 2
+			continue
+		}
+		b.WriteString(content[i:open])
+		b.WriteString(name)
+		names = append(names, strings.TrimSpace(name))
+		i = end + 2
+		if len(names) >= maxInlineEntities {
+			break
+		}
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	b.WriteString(content[i:])
+	return b.String(), names
+}
+
+// plausibleMarkupName gates what [[...]] is allowed to claim is an entity.
+func plausibleMarkupName(s string) bool {
+	if t := strings.TrimSpace(s); t == "" || len(t) > maxMarkupNameLen {
+		return false
+	}
+	return !strings.ContainsAny(s, "[]\n\r")
 }
 
 var relTypeMap = map[string]storage.RelType{
@@ -1467,11 +2276,65 @@ var relTypeMap = map[string]storage.RelType{
 // relTypeFromString converts a relation string to a uint16 RelType value.
 // Maps to the storage.RelType constants so round-tripping is consistent.
 // Unknown or empty strings default to storage.RelRelatesTo.
+//
+// Prefer relTypeFromStringChecked on any path that can report back to the
+// caller: this variant cannot tell them their relation was discarded.
 func relTypeFromString(rel string) uint16 {
+	v, _ := relTypeFromStringChecked(rel)
+	return v
+}
+
+// relTypeFromStringChecked is relTypeFromString plus the name of the relation
+// when it was NOT recognised, so the caller can be told rather than silently
+// handed an inert edge.
+//
+// An unrecognised relation still resolves to relates_to — storage behaviour is
+// unchanged and no link is rejected — but relates_to is the one relation with no
+// downstream consumer, so the coercion does not file the declaration in a
+// different bucket, it DELETES it. link(contradicts) mistyped as
+// "contradicted_by" produces no contradiction flag, no confidence update and no
+// adversarial-profile boost; a mistyped supersedes produces no ValidUntil stamp
+// and no chain demotion, leaving the stale fact leading recall.
+//
+// Empty is not reported: handleLink rejects a missing relation upstream, and the
+// engine's inline-relationship paths treat "" as "unspecified".
+func relTypeFromStringChecked(rel string) (relType uint16, unknown string) {
 	if v, ok := relTypeMap[rel]; ok {
-		return uint16(v)
+		return uint16(v), ""
 	}
-	return uint16(storage.RelRelatesTo) // default
+	if rel != "" {
+		unknown = rel
+	}
+	return uint16(storage.RelRelatesTo), unknown
+}
+
+// relationNames returns the recognised relation names in sorted order, so the
+// hint text is deterministic and adding a RelType cannot silently omit it.
+func relationNames() []string {
+	names := make([]string, 0, len(relTypeMap))
+	for k := range relTypeMap {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// unknownRelationHint renders the loud-but-graceful notice for a relation that
+// was not recognised. Empty rejected value → empty hint.
+//
+// Declarations are the scarcest resource in the system: measured on a real
+// 4,216-engram corpus (aggregate counts only), just 0.135% of association edges
+// were authored by an agent rather than by the Hebbian or cosine workers, and a
+// counterfactual replay recovered 0 of 114 declared supersessions from content
+// alone. Discarding one silently discards information nothing else can rebuild.
+func unknownRelationHint(rejected string) string {
+	if rejected == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Note: relation %q is not recognised, so this link was stored as \"relates_to\", which carries no "+
+			"meaning for recall — the relationship you intended was not recorded. Re-link with one of: %s.",
+		rejected, strings.Join(relationNames(), ", "))
 }
 
 // relTypeReverseMap is the inverse of relTypeMap, built once at package init.
@@ -1868,18 +2731,43 @@ func (s *MCPServer) handleEntityTimeline(ctx context.Context, w http.ResponseWri
 // buildAnnotations constructs a MemoryAnnotations from engine annotation data
 // and the activation item. Staleness is derived from item.LastAccess (nanoseconds
 // Unix timestamp).
-func buildAnnotations(item *mbp.ActivationItem, data *engine.AnnotationData) *MemoryAnnotations {
-	staleDays := math.Round(time.Since(time.Unix(0, item.LastAccess)).Hours()/24.0*10) / 10
-	ann := &MemoryAnnotations{
-		Stale:         staleDays > annotationStaleDays,
-		StaleDays:     staleDays,
-		ConflictsWith: data.ConflictsWith,
-		SupersededBy:  data.SupersededBy,
+// augmentAnnotations fills the annotate=true fields (staleness, conflicts,
+// provenance) onto a Memory, preserving any always-on supersession annotation
+// (superseded_by/current_version) that the ranking phase already attached. The
+// supersession fields are authoritative from the ranking; data.SupersededBy from
+// the reverse-edge lookup only fills in when the ranking didn't set it.
+func augmentAnnotations(m *Memory, item *mbp.ActivationItem, data *engine.AnnotationData) {
+	if m.Annotations == nil {
+		m.Annotations = &MemoryAnnotations{}
+	}
+	ann := m.Annotations
+	// A never-accessed engram has no staleness to report, so we report NONE —
+	// both fields are omitted from the wire rather than defaulted. Before #810, a
+	// vault cloned with the zero-time sentinel reported stale_days=99317.8,
+	// stale=true for EVERY memory: 272 years of decay, announced to the calling
+	// agent, on a vault created seconds earlier. Emitting stale_days=0 /
+	// stale=false instead would be a SMALLER lie, not the truth — an agent reads
+	// that as "accessed today", which is plausible and wrong, the failure class
+	// principle #2 names as the worst one. Omission is the only honest answer
+	// available: the system does not know when this memory was last accessed.
+	//
+	// This guard is needed on top of the ERF decode-side repair, not covered by
+	// it: item.LastAccess is time.Time{}.UnixNano() for a never-accessed engram
+	// either way, so this surface sees the 1754 instant regardless.
+	lastAccess := time.Unix(0, item.LastAccess)
+	if !storage.IsUnsetTimestamp(lastAccess) {
+		staleDays := math.Round(time.Since(lastAccess).Hours()/24.0*10) / 10
+		stale := staleDays > annotationStaleDays
+		ann.StaleDays = &staleDays
+		ann.Stale = &stale
+	}
+	ann.ConflictsWith = data.ConflictsWith
+	if ann.SupersededBy == "" {
+		ann.SupersededBy = data.SupersededBy
 	}
 	if data.LastVerified != nil {
 		ann.LastVerified = data.LastVerified.UTC().Format(time.RFC3339)
 	}
-	return ann
 }
 
 func (s *MCPServer) handleSetTrust(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
@@ -1906,6 +2794,56 @@ func (s *MCPServer) handleSetTrust(ctx context.Context, w http.ResponseWriter, i
 		"trust": trustStr,
 		"ok":    true,
 	})))
+}
+
+// handleUpdateTags replaces an engram's full tag set IN PLACE. Unlike
+// muninn_evolve — which mints a new ULID and archives the predecessor — the
+// ID, version lineage, and access history are preserved, which is the whole
+// reason this tool exists rather than a `tags` argument on evolve (#720).
+func (s *MCPServer) handleUpdateTags(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
+	engramID, ok := args["id"].(string)
+	if !ok || engramID == "" {
+		sendError(w, id, -32602, "invalid params: 'id' is required")
+		return
+	}
+	rawTags, present := args["tags"]
+	if !present || rawTags == nil {
+		sendError(w, id, -32602, "invalid params: 'tags' is required (pass an empty array to clear all tags)")
+		return
+	}
+	tagsAny, ok := rawTags.([]any)
+	if !ok {
+		sendError(w, id, -32602, "invalid params: 'tags' must be an array of strings")
+		return
+	}
+	tags, dropped := normalizeTagsReporting(tagsAny)
+	// An explicit empty array stays a deliberate clear-all. But a NON-empty
+	// array that normalizes to nothing is a caller mistake, and because this
+	// tool replaces the set, honoring it would erase every tag on the engram and
+	// report ok — the same silent-drop failure class that #720 exists to fix,
+	// pointed the other way. Reject it and name what was wrong.
+	if len(tagsAny) > 0 && len(tags) == 0 {
+		sendError(w, id, -32602, "invalid params: no usable tag in 'tags' — every entry was rejected ("+
+			strings.Join(dropped, "; ")+"). Pass an empty array to clear all tags deliberately.")
+		return
+	}
+	if tags == nil {
+		// REST coerces a nil body field to []string{}; clear-all sends an empty
+		// set, not nil, and the response payload renders [] rather than null.
+		tags = []string{}
+	}
+	if err := s.engine.UpdateTags(ctx, vault, engramID, tags); err != nil {
+		sendError(w, id, -32000, "tool error: "+err.Error())
+		return
+	}
+	// Partial normalization still succeeds — some usable tag survived — but the
+	// caller is told what did not land rather than having to diff the echo.
+	out := map[string]any{"id": engramID, "tags": tags, "ok": true}
+	if len(dropped) > 0 {
+		out["dropped"] = len(dropped)
+		out["dropped_detail"] = dropped
+	}
+	sendResult(w, id, textContent(mustJSON(out)))
 }
 
 func (s *MCPServer) handleCompareAndSet(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {

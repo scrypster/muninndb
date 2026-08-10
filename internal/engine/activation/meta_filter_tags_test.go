@@ -7,7 +7,7 @@ import (
 )
 
 // Regression/feature test for #479: server-side tag filters on recall.
-// passesMetaFilter must support tags_all (AND), tags_any (OR), and a
+// PassesMetaFilter must support tags_all (AND), tags_any (OR), and a
 // tag-prefix value range (e.g. "due:" <= "2026-06-17", lexical compare).
 func TestPassesMetaFilter_Tags(t *testing.T) {
 	eng := &storage.Engram{Tags: []string{"truth:current", "owner:alice", "due:2026-06-15", "status:open"}}
@@ -32,8 +32,8 @@ func TestPassesMetaFilter_Tags(t *testing.T) {
 		}, true},
 	}
 	for _, c := range cases {
-		if got := passesMetaFilter(eng, c.filters); got != c.want {
-			t.Errorf("%s: passesMetaFilter = %v, want %v", c.name, got, c.want)
+		if got := PassesMetaFilter(eng, c.filters); got != c.want {
+			t.Errorf("%s: PassesMetaFilter = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

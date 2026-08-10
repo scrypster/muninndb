@@ -24,6 +24,7 @@ func TestAssociationsForOne_CacheMiss(t *testing.T) {
 
 	idA := NewULID()
 	idB := NewULID()
+	seedEndpoints(t, store, ws, idA, idB)
 
 	// Write an engram and an association A → B.
 	_, err := store.WriteEngram(ctx, ws, &Engram{Concept: "A", Content: "a"})
@@ -88,6 +89,7 @@ func TestUpdateAssocWeightBatch_SingleUpdate(t *testing.T) {
 
 	idA := NewULID()
 	idB := NewULID()
+	seedEndpoints(t, store, ws, idA, idB)
 
 	// Write initial edge with weight 0.5.
 	if err := store.WriteAssociation(ctx, ws, idA, idB, &Association{
@@ -173,14 +175,14 @@ func TestGetContradictions_WithPairs(t *testing.T) {
 	idC := NewULID()
 
 	// Flag two distinct contradiction pairs.
-	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
 		t.Fatalf("FlagContradiction(A,B): %v", err)
 	}
-	if err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
 		t.Fatalf("FlagContradiction(A,C): %v", err)
 	}
 	// Flag the same pair again in reverse order — should NOT produce a duplicate.
-	if err := store.FlagContradiction(ctx, ws, idB, idA); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idB, idA); err != nil {
 		t.Fatalf("FlagContradiction(B,A): %v", err)
 	}
 
@@ -239,10 +241,10 @@ func TestResolveContradiction(t *testing.T) {
 	idC := NewULID()
 
 	// Flag two pairs.
-	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
 		t.Fatalf("FlagContradiction(A,B): %v", err)
 	}
-	if err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idC); err != nil {
 		t.Fatalf("FlagContradiction(A,C): %v", err)
 	}
 
@@ -271,7 +273,7 @@ func TestResolveContradiction_BothDirections(t *testing.T) {
 	idA := NewULID()
 	idB := NewULID()
 
-	if err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
+	if _, err := store.FlagContradiction(ctx, ws, idA, idB); err != nil {
 		t.Fatalf("FlagContradiction: %v", err)
 	}
 
@@ -298,6 +300,7 @@ func TestGetChildrenByParent_IsPartOf(t *testing.T) {
 	child1 := NewULID()
 	child2 := NewULID()
 	other := NewULID()
+	seedEndpoints(t, store, ws, parent, child1, child2, other)
 
 	// child1 → parent (is_part_of)
 	if err := store.WriteAssociation(ctx, ws, child1, parent, &Association{
@@ -402,6 +405,7 @@ func TestWriteAssociationGetAssociationsRoundtrip(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	now := time.Now().Truncate(time.Millisecond)
 	assoc := &Association{
@@ -455,6 +459,7 @@ func TestUpdateAssocWeightPersistsCorrectly(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write initial association.
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
@@ -520,18 +525,25 @@ func TestDecayAssocWeightsReducesBelowThreshold(t *testing.T) {
 	}
 	weights := []float32{0.8, 0.5, 0.1}
 
+	for _, p := range pairs {
+		seedEndpoints(t, store, ws, p[0], p[1])
+	}
+
+	lastAct := int32(time.Now().Add(-24 * time.Hour).Unix())
 	for i, p := range pairs {
 		if err := store.WriteAssociation(ctx, ws, p[0], p[1], &Association{
-			TargetID: p[1],
-			Weight:   weights[i],
+			TargetID:      p[1],
+			Weight:        weights[i],
+			LastActivated: lastAct,
 		}); err != nil {
 			t.Fatalf("WriteAssociation[%d]: %v", i, err)
 		}
 	}
 
-	// Decay by 50% with minWeight=0.3.
+	// One half-life of elapsed time (dt = H = 1 day) = exactly 50% decay, the
+	// same reduction the old per-pass factor 0.5 produced.
 	// Dynamic floor: edges below minWeight are clamped, NOT deleted — removed=0.
-	removed, err := store.DecayAssocWeights(ctx, ws, 0.5, 0.3, 0.0)
+	removed, err := store.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.3, 0.0)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
@@ -582,6 +594,7 @@ func TestGetAssociationsMultipleSourceIDs(t *testing.T) {
 	dst1 := NewULID()
 	dst2 := NewULID()
 	dst3 := NewULID()
+	seedEndpoints(t, store, ws, srcA, srcB, dst1, dst2, dst3)
 
 	_ = store.WriteAssociation(ctx, ws, srcA, dst1, &Association{TargetID: dst1, Weight: 0.7})
 	_ = store.WriteAssociation(ctx, ws, srcA, dst2, &Association{TargetID: dst2, Weight: 0.5})
@@ -615,6 +628,7 @@ func TestGetAssociations_ReturnsCopy(t *testing.T) {
 	src := NewULID()
 	dst1 := NewULID()
 	dst2 := NewULID()
+	seedEndpoints(t, store, ws, src, dst1, dst2)
 
 	// Write two associations from src.
 	_ = store.WriteAssociation(ctx, ws, src, dst1, &Association{TargetID: dst1, Weight: 0.7})
@@ -669,6 +683,7 @@ func TestRestoredAt_ClearedAfterReestablishment(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write a restored edge (simulate via archive value written to live keys).
 	now := int32(time.Now().Unix())
@@ -690,7 +705,10 @@ func TestRestoredAt_ClearedAfterReestablishment(t *testing.T) {
 	}
 
 	// Read back and verify restoredAt is cleared.
-	_, _, _, _, _, _, restoredAt := store.getAssocValueFull(ws, src, dst)
+	_, _, _, _, _, _, restoredAt, err := store.getAssocValueFull(ctx, ws, src, dst)
+	if err != nil {
+		t.Fatalf("getAssocValueFull: %v", err)
+	}
 	if restoredAt != 0 {
 		t.Errorf("restoredAt should be cleared after 3 co-activations, got %v", restoredAt)
 	}
@@ -706,6 +724,7 @@ func TestDecayAssocWeights_ArchivesStrongEdge(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write edge: weight=0.8, will get peakWeight=0.8, coActivationCount=1 seeded.
 	// consolidation score = peakWeight(0.8) * coActivationCount(1) / max(daysSince,1)
@@ -719,8 +738,9 @@ func TestDecayAssocWeights_ArchivesStrongEdge(t *testing.T) {
 		t.Fatalf("WriteAssociation: %v", err)
 	}
 
-	// Decay aggressively to force below minWeight, archiveThreshold=0.05.
-	_, err := store.DecayAssocWeights(ctx, ws, 0.01, 0.3, 0.05)
+	// H=1 day, dt=2 days → ceiling = 0.8*0.25 = 0.2 < minWeight 0.3, so the
+	// edge hits the floor branch; archiveThreshold=0.05.
+	_, err := store.DecayAssocWeights(ctx, ws, 24*time.Hour, 0.3, 0.05)
 	if err != nil {
 		t.Fatalf("DecayAssocWeights: %v", err)
 	}
@@ -750,6 +770,7 @@ func TestGetReverseAssociations(t *testing.T) {
 
 	idA := NewULID()
 	idB := NewULID()
+	seedEndpoints(t, store, ws, idA, idB)
 
 	assoc := &Association{
 		TargetID:   idB,

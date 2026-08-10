@@ -40,8 +40,8 @@ func TestElection_ClearLeader(t *testing.T) {
 // redirect to the leader it knows.
 func TestHandleJoinRequest_NonLeaderRedirects(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(3); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(3); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 	mgr := NewConnManager("lobe-2")
 	handler := NewJoinHandler("lobe-2", "", es, newTestRepLog(t), mgr)
@@ -66,8 +66,8 @@ func TestHandleJoinRequest_NonLeaderRedirects(t *testing.T) {
 // A node that IS the leader accepts the join.
 func TestHandleJoinRequest_LeaderAccepts(t *testing.T) {
 	es := newTestEpochStore(t)
-	if err := es.ForceSet(3); err != nil {
-		t.Fatalf("ForceSet: %v", err)
+	if _, err := es.Advance(3); err != nil {
+		t.Fatalf("Advance: %v", err)
 	}
 	mgr := NewConnManager("cortex-1")
 	handler := NewJoinHandler("cortex-1", "", es, newTestRepLog(t), mgr)

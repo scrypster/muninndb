@@ -186,10 +186,21 @@ func fieldWeight(field uint8) float64 {
 	}
 }
 
-// IndexEngram writes FTS posting list entries for an engram.
-// ws is the 8-byte workspace prefix. id is the ULID.
-func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error {
-	// Collect all (term, field, docLen) tuples
+// Document is the indexable text of one engram — the fields whose Tokenize
+// output becomes posting-list terms. Used by ReindexEngram to name the before
+// and after states of a single engram without a ten-argument signature.
+type Document struct {
+	Concept   string
+	CreatedBy string
+	Content   string
+	Tags      []string
+}
+
+// docTermCounts returns the per-(term, field) term frequency for a document plus
+// its total token length — the BM25 length normalizer, which must count every
+// indexed field. Shared by IndexEngram and ReindexEngram so the two entry points
+// cannot drift on what a document's terms are.
+func docTermCounts(concept, createdBy, content string, tags []string) (map[string]map[uint8]int, uint16) {
 	termCounts := make(map[string]map[uint8]int)
 	addTerms := func(text string, field uint8) {
 		tokens := Tokenize(text)
@@ -208,9 +219,37 @@ func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, conte
 		addTerms(tag, FieldTags)
 	}
 
-	// Total doc len for BM25 normalization — must include all indexed fields.
 	allTokens := Tokenize(concept + " " + content + " " + createdBy + " " + strings.Join(tags, " "))
-	docLen := uint16(len(allTokens))
+	return termCounts, uint16(len(allTokens))
+}
+
+// docTermSet returns the set of distinct terms a document was indexed under.
+// This is document-level membership, deliberately NOT per-field: a tag token can
+// coincide with a content token, and the two entry points that reason about a
+// term entering or leaving the index (DeleteEngram, ReindexEngram) must agree on
+// what "the document contains this term" means.
+func docTermSet(concept, createdBy, content string, tags []string) map[string]struct{} {
+	termSet := make(map[string]struct{})
+	addTerms := func(text string) {
+		for _, t := range Tokenize(text) {
+			termSet[t] = struct{}{}
+		}
+	}
+
+	addTerms(concept)
+	addTerms(createdBy)
+	addTerms(content)
+	for _, tag := range tags {
+		addTerms(tag)
+	}
+	return termSet
+}
+
+// IndexEngram writes FTS posting list entries for an engram.
+// ws is the 8-byte workspace prefix. id is the ULID.
+func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error {
+	// Collect all (term, field, docLen) tuples
+	termCounts, docLen := docTermCounts(concept, createdBy, content, tags)
 
 	// Acquire lock BEFORE reading current DF values to prevent lost-update races
 	// under concurrent IndexEngram calls.
@@ -274,19 +313,7 @@ func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, conte
 // Does NOT update global stats (stats are approximate; no need to recount on soft delete).
 func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error {
 	// Collect all unique terms that were indexed for this engram.
-	termSet := make(map[string]struct{})
-	addTerms := func(text string) {
-		for _, t := range Tokenize(text) {
-			termSet[t] = struct{}{}
-		}
-	}
-
-	addTerms(concept)
-	addTerms(createdBy)
-	addTerms(content)
-	for _, tag := range tags {
-		addTerms(tag)
-	}
+	termSet := docTermSet(concept, createdBy, content, tags)
 
 	if len(termSet) == 0 {
 		return nil
@@ -318,7 +345,234 @@ func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, cont
 	return err
 }
 
-// Search performs a BM25 search for the given query string.
+// ReindexEngram atomically replaces every FTS entry for ONE engram: it drops the
+// postings and trigrams derived from prev, then writes the ones derived from
+// next, under a single idx.mu and a single Pebble batch. It is the entry point
+// for an in-place edit of an already-indexed engram (Engine.UpdateTags); it does
+// not change IndexEngram or DeleteEngram, which keep serving first-write and
+// delete.
+//
+// The reason it exists rather than callers pairing DeleteEngram with IndexEngram
+// is that the pair is NOT statistics-neutral, and the corpus statistics are what
+// BM25 — and therefore COG-24's full_text_relevance — is defined over:
+//
+//   - IndexEngram calls UpdateStats (TotalEngrams/AvgDocLen) and DeleteEngram
+//     deliberately does not, so the pair inflates the corpus size N by one per
+//     call. Second-order: idfMax grows like ln N.
+//   - IndexEngram increments the per-term document frequency df_t for EVERY term
+//     of the document, and DeleteEngram decrements none. That is first-order and
+//     per-call. getIDF is log((N−df+0.5)/(df+0.5)+1) ≡ ln((N+1)/(df+0.5)), so a
+//     retag's (N, df) → (N+1, df+1) barely moves the numerator and moves the
+//     denominator by a whole document: the engram's IDF — and with it its own
+//     score for a query on its own unchanged content — decays on every edit.
+//     Measured on a 60-engram corpus with a rare target term: one retag cost the
+//     target 8.1% of its score, ten took it below a 0.3 threshold, and 100 cost
+//     82.6% against a 10.0% drop for an unretagged control in the same vault.
+//     A memory that becomes unfindable BECAUSE its owner curates it is the
+//     silently-wrong failure class, and nothing surfaces it (#720).
+//
+// So: no UpdateStats call, and df_t moves only for terms whose document-level
+// membership actually changed — +1 for a term that entered, −1 for one that
+// left, untouched for a term present in both. Membership is per TERM over the
+// whole document, not per field, because a tag token can coincide with a content
+// token: "due" leaving the tag set is not a DF change if "due" is still in the
+// content.
+//
+// Deletes are queued before adds so a retained term ends up holding the ADD's
+// posting — Pebble applies a batch in key-op order, and the same holds for a
+// trigram shared between a departing term and a surviving one.
+//
+// What "no UpdateStats" costs, stated beside the benefit so a future reader does
+// not take the stats-neutrality above as immunity. This method writes every
+// posting at the NEW docLen but leaves AvgDocLen alone, so an in-place edit that
+// changes the tag set's token count is length-penalized against a stale corpus
+// average. Measured on one 60-engram corpus, one target, one query:
+//
+//	[constant   ] retags 0/1/10/50 → 0.1477 throughout    (avgdl 7.100, flat)
+//	[growing    ] retags 0→50, tags 1→51 → 0.1690 → 0.0486
+//	[oscillating] retags 0/1/10/50 → 0.1477 / 0.1216 / 0.1477 / 0.1477
+//
+// So the neutrality is with respect to retag COUNT, not to tag CONTENT. The
+// oscillating row is the proof: the score returns EXACTLY to 0.1477 whenever the
+// tag set returns, with no hysteresis and no per-call ratchet, because a posting's
+// value is a pure function of the current document and df_t moves only on
+// membership. That is ordinary BM25 length normalization, not drift — which is the
+// whole difference from the DeleteEngram+IndexEngram pair, where the loss
+// accumulated per call and never came back.
+//
+// The residual: AvgDocLen does not track in-place length changes, so a vault
+// whose engrams grow their tag sets in place has a corpus average that lags low
+// and over-penalizes long documents. Direction is conservative — matches are
+// under-credited, never over-credited — and `muninn reindex-fts` recomputes
+// AvgDocLen from scratch. Calling UpdateStats here is NOT the fix: it takes a
+// docLen and increments TotalEngrams, which is the N inflation this method exists
+// to avoid; a correct AvgDocLen maintenance would need a delta-aware stats update
+// (deferred, #720).
+func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) error {
+	oldTerms := docTermSet(prev.Concept, prev.CreatedBy, prev.Content, prev.Tags)
+	newCounts, docLen := docTermCounts(next.Concept, next.CreatedBy, next.Content, next.Tags)
+
+	if len(oldTerms) == 0 && len(newCounts) == 0 {
+		return nil
+	}
+
+	// Lock BEFORE the DF reads in adjustDF, as IndexEngram does: the read-modify-
+	// write on the term-stats key is a lost-update race otherwise.
+	idx.mu.Lock()
+	batch := idx.db.NewBatch()
+	defer batch.Close()
+
+	// Drop everything the OLD document put in the index first.
+	for term := range oldTerms {
+		for _, field := range []uint8{FieldConcept, FieldContent, FieldTags, FieldCreatedBy} {
+			batch.Delete(keys.FTSPostingKey(ws, term, field, id), nil)
+		}
+		for _, tri := range Trigrams(term) {
+			batch.Delete(keys.TrigramKey(ws, tri, id), nil)
+		}
+		delete(idx.idfCache, idfKey{ws, term})
+	}
+
+	// ...then write what the NEW document needs, at the new docLen.
+	for term, fieldCounts := range newCounts {
+		for field, count := range fieldCounts {
+			pv := PostingValue{
+				TF:     float32(count),
+				Field:  field,
+				DocLen: docLen,
+			}
+			batch.Set(keys.FTSPostingKey(ws, term, field, id), encodePosting(pv), nil)
+		}
+		for _, tri := range Trigrams(term) {
+			batch.Set(keys.TrigramKey(ws, tri, id), nil, nil)
+		}
+		delete(idx.idfCache, idfKey{ws, term})
+	}
+
+	// DF adjustments: membership changes only.
+	for term := range newCounts {
+		if _, retained := oldTerms[term]; !retained {
+			idx.adjustDF(batch, ws, term, 1)
+		}
+	}
+	for term := range oldTerms {
+		if _, retained := newCounts[term]; !retained {
+			idx.adjustDF(batch, ws, term, -1)
+		}
+	}
+
+	err := batch.Commit(pebble.Sync)
+	idx.mu.Unlock()
+	return err
+}
+
+// adjustDF queues a document-frequency change of delta for term into batch.
+// Caller must hold idx.mu — this reads the committed DF and writes back a
+// derived value, so an unlocked concurrent caller loses the update (same reason
+// IndexEngram takes the lock before its DF reads).
+//
+// A decrement is CLAMPED at 0 and skipped entirely when no term-stats entry
+// exists. What an unclamped uint32 decrement costs, measured (getIDF ≡
+// log((N−df+0.5)/(df+0.5)+1), and df=2^32−1 drives that ratio to just under −1):
+//
+//	WITH clamp:     df=0            getIDF(N=3) =   2.0794
+//	WITHOUT clamp:  df=4294967295   getIDF(N=3) = -20.7944
+//
+// A NEGATIVE IDF is worse than a worthless one. COG-24's numerator is
+// Σ idf_t'·cov_t, so a document that CONTAINS the term contributes a negative
+// term and ranks BELOW one that does not: the term stops being weak evidence and
+// becomes an active penalty against exactly the documents that hold it. Pinned by
+// TestAdjustDF_DecrementClampsAtZero, which asserts both df==0 and idf>0 so a
+// future change that bounds the DF but breaks the sign is still caught.
+//
+// There are two distinct ways df_t can be off, and the clamp guards the second:
+//
+//   - ABOVE its true value. DeleteEngram has never decremented DF, so an engram
+//     deleted before ReindexEngram existed left df_t inflated relative to the
+//     live corpus. Benign direction: an inflated df understates a term's rarity,
+//     so a genuine match is under-credited, never over-credited.
+//
+//   - BELOW its true value. ReindexEngram is the FIRST decrementing DF path in the
+//     codebase, so it is also the first way this can happen at all. Every
+//     write-path initial index is an ftsWorker.Submit
+//     (internal/engine/engine.go:1521 Write, :2063 the batch path, :3815 Evolve),
+//     and Submit returns false when the queue is full (worker.go:145) or after
+//     Stop (worker.go:133). An engram whose initial index job was DROPPED has no
+//     postings, so its tag tokens were never counted — yet a later retag hands
+//     ReindexEngram a prev containing them, and the −1 lands on a df another
+//     engram legitimately owns. Measured:
+//
+//     before retag of unindexed B: df(zarquon)=1  (TRUE value = 1, only A has it)
+//     after  retag of unindexed B: df(zarquon)=0  (TRUE value is still 1)
+//
+// So the clamp is not purely defensive — it bounds a reachable condition, and
+// this is the path that made it reachable. The residual it leaves is bounded and
+// mild by comparison: floored at 0, one-time per spurious decrement rather than a
+// per-call ratchet, and it INFLATES the IDF of a term for the documents that do
+// hold it rather than omitting them from results. `muninn reindex-fts` recomputes
+// df_t from scratch and clears both directions.
+func (idx *Index) adjustDF(batch *pebble.Batch, ws [8]byte, term string, delta int) {
+	tkey := keys.TermStatsKey(ws, term)
+
+	var currentDF uint32
+	existed := false
+	if val, closer, err := idx.db.Get(tkey); err == nil {
+		if len(val) >= 4 {
+			currentDF = binary.BigEndian.Uint32(val[0:4])
+			existed = true
+		}
+		closer.Close()
+	}
+
+	switch {
+	case delta > 0:
+		currentDF += uint32(delta)
+	case delta < 0:
+		if !existed {
+			return // nothing recorded, nothing to decrement
+		}
+		if d := uint32(-delta); currentDF <= d {
+			currentDF = 0
+		} else {
+			currentDF -= d
+		}
+	default:
+		return
+	}
+
+	var dfBuf [8]byte
+	binary.BigEndian.PutUint32(dfBuf[:4], currentDF)
+	batch.Set(tkey, dfBuf[:], nil)
+}
+
+// Search performs a calibrated full-text search for the given query string.
+//
+// The returned Score is an ABSOLUTE, query-calibrated coverage score in
+// [0,1] — NOT raw BM25. It is computed as:
+//
+//	Score(d) = ( Σ_t idf_t' · cov_t(d) ) / ( Σ_t idf_t' )
+//
+// where t ranges over the query's (deduplicated, tokenized) content terms,
+// cov_t(d) is term t's field-weighted BM25 coverage in doc d capped at 1
+// (see coverageCap), and idf_t' is the term's IDF — except for a term with
+// NO corpus term-stats entry at all (getIDF returns 0, meaning the corpus has
+// literally never seen this term), which is charged at idfMax: the IDF a
+// term would have at the maximum possible rarity (df=0) for this corpus size.
+// An unseen term is the strongest possible evidence the vault knows nothing
+// about the query, so it must penalize the score, not be skipped.
+//
+// The denominator depends ONLY on the query and the corpus's IDF statistics —
+// never on the result set — so this is never a per-query-max normalization:
+// a document's Score is identical no matter what else scored in the same
+// search. See COG-24 (docs/internals/invariants.md) and issue #711.
+//
+// Before this calibration, Search summed raw unbounded BM25 across terms and
+// the caller applied math.Tanh() to squash it into [0,1]. Raw BM25 saturates
+// tanh by x≈3 (real magnitudes run 2-40), so a single common token in a
+// high-weight field was indistinguishable from a genuine multi-term match —
+// and corpus-absent query terms were silently skipped rather than penalizing.
+// That silent skip + tanh saturation is what let a nonsense query with one
+// coincidental common-word hit report full_text_relevance ≈ 0.9999.
 func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int) ([]ScoredID, error) {
 	start := time.Now()
 	defer func() { metrics.FTSSearchDuration.Observe(time.Since(start).Seconds()) }()
@@ -347,28 +601,7 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 		// ErrNotFound means legacy vault — useRawFallback stays true
 	}
 
-	// Union: include both token forms when they differ
-	allTokens := make([]string, 0, len(stemmedTokens)*2)
-	seen := make(map[string]struct{})
-	// Always include stemmed tokens
-	for _, t := range stemmedTokens {
-		if _, exists := seen[t]; !exists {
-			allTokens = append(allTokens, t)
-			seen[t] = struct{}{}
-		}
-	}
-	// Only include raw tokens for legacy vaults (dual-path backward compat)
-	if useRawFallback {
-		for _, t := range rawTokens {
-			if _, exists := seen[t]; !exists {
-				allTokens = append(allTokens, t)
-				seen[t] = struct{}{}
-			}
-		}
-	}
-	tokens := allTokens
-
-	if len(tokens) == 0 {
+	if len(stemmedTokens) == 0 {
 		return nil, nil
 	}
 	N := float64(stats.TotalEngrams)
@@ -383,21 +616,70 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 		avgdl = 1.0
 	}
 
-	// Per-engram accumulated scores; pre-allocate based on token count to reduce rehash overhead.
-	scores := make(map[[16]byte]float64, len(tokens)*20)
+	// idfMax is the IDF a term would have at the maximum possible rarity
+	// (df=0) for this corpus — the charge for a query term the corpus has
+	// NEVER seen (getIDF returns 0 for "no TermStats entry", which is
+	// exactly that case; it is distinct from a real, merely-low IDF).
+	idfMax := math.Log((N+0.5)/0.5 + 1)
 
-	for _, term := range tokens {
-		idf := idx.getIDF(ws, term, N)
-		if idf <= 0 {
-			continue
+	// numer accumulates Σ_t idf_t'·cov_t(d) per engram; denom accumulates
+	// Σ_t idf_t' — the query+corpus-only normalizer (never the result set).
+	numer := make(map[[16]byte]float64, len(stemmedTokens)*20)
+	var denom float64
+
+	// stemmedTokens[i] and rawTokens[i] are the stemmed/unstemmed forms of the
+	// SAME query word (Tokenize derives stemmedTokens from tokenizeRaw output
+	// 1:1, in order — see Tokenize). Both forms are still searched independently
+	// for real postings (a legacy, un-reindexed vault can have some engrams
+	// indexed under the raw key and others under the stemmed key for the same
+	// word — see TestFTS_DualPathSearch), so each real match still contributes
+	// its own idf/coverage exactly as before #711. The ONLY change is: when
+	// NEITHER form has any corpus stats at all (the word is genuinely absent),
+	// the query word is charged idfMax exactly ONCE — not once per form —
+	// otherwise every dual-path query on a legacy vault would double-penalize
+	// absent words relative to a reindexed vault searching the same query.
+	seenStem := make(map[string]bool, len(stemmedTokens))
+	for i, stemmed := range stemmedTokens {
+		if seenStem[stemmed] {
+			continue // duplicate query word — already scored via its first occurrence
 		}
-		_ = idx.searchToken(ws, term, scores, idf, avgdl)
+		seenStem[stemmed] = true
+
+		raw := rawTokens[i]
+		tryRaw := useRawFallback && raw != stemmed
+
+		idfStemmed := idx.getIDF(ws, stemmed, N)
+		var idfRaw float64
+		if tryRaw {
+			idfRaw = idx.getIDF(ws, raw, N)
+		}
+
+		anyReal := false
+		if idfStemmed > 0 {
+			anyReal = true
+			denom += idfStemmed
+			_ = idx.searchTokenCoverage(ws, stemmed, numer, idfStemmed, avgdl)
+		}
+		if idfRaw > 0 {
+			anyReal = true
+			denom += idfRaw
+			_ = idx.searchTokenCoverage(ws, raw, numer, idfRaw, avgdl)
+		}
+		if !anyReal {
+			// Corpus-absent word (neither form has any stats): no postings
+			// exist to scan, but it penalizes every candidate via the
+			// denominator — charged exactly once for this query word.
+			denom += idfMax
+		}
 	}
 
-	// Sort by score descending
-	results := make([]ScoredID, 0, len(scores))
-	for id, score := range scores {
-		results = append(results, ScoredID{ID: id, Score: score})
+	if denom <= 0 {
+		return nil, nil
+	}
+
+	results := make([]ScoredID, 0, len(numer))
+	for id, n := range numer {
+		results = append(results, ScoredID{ID: id, Score: n / denom})
 	}
 	sortScoredIDs(results)
 
@@ -407,21 +689,21 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 	return results, nil
 }
 
-// searchToken performs a prefix scan for a single token and accumulates BM25
-// scores into the provided scores map. Extracting this into its own function
-// ensures that defer iter.Close() is scoped to the function lifetime rather
-// than the Search() loop body, which would otherwise defer all closes until
-// Search() returns (and risk double-close on the last iterator).
-func (idx *Index) searchToken(ws [8]byte, term string, scores map[[16]byte]float64, idf, avgdl float64) error {
+// searchTokenCoverage performs a prefix scan for a single token and
+// accumulates its IDF-weighted, capped coverage into numer[docID]:
+//
+//	numer[d] += idf * min(1, Σ_fields tfNorm·fieldWeight / (k1+1))
+//
+// The cap is applied per (term, doc) across ALL fields that term appears in
+// within that doc — one term's field-weighted tf can't exceed a coverage of
+// 1.0, so stuffing a single word cannot substitute for covering the query
+// (the coverage this contributes is presence/prominence, not raw frequency).
+func (idx *Index) searchTokenCoverage(ws [8]byte, term string, numer map[[16]byte]float64, idf, avgdl float64) error {
 	// Prefix scan for this term across all fields.
 	// Key format: 0x05 | ws[8] | term | 0x00 | field[1] | id[16]
-	// Use field=0x00 for lower bound; upper bound stops at the 0x00 separator + 0x01.
 	lowerBound := keys.FTSPostingKey(ws, term, 0x00, [16]byte{})
-	// Upper bound: increment the separator byte after the term so the scan covers
-	// all field values (0x00–0xFF) for this term.
 	upperBound := make([]byte, len(lowerBound))
 	copy(upperBound, lowerBound)
-	// sepPos is the index of the 0x00 separator byte: prefix(1) + ws(8) + term.
 	sepPos := 1 + 8 + len(term)
 	upperBound[sepPos] = 0x01
 
@@ -434,9 +716,13 @@ func (idx *Index) searchToken(ws [8]byte, term string, scores map[[16]byte]float
 	}
 	defer iter.Close()
 
-	// Key layout: 0x05[1] | ws[8] | term[n] | 0x00[1] | field[1] | id[16]
 	minKeyLen := 1 + 8 + len(term) + 1 + 1 + 16
-	idOffset := 1 + 8 + len(term) + 1 + 1 // skip prefix, ws, term, separator, field
+	idOffset := 1 + 8 + len(term) + 1 + 1
+
+	// covRaw accumulates the uncapped, unweighted-by-idf coverage per doc for
+	// this term (summed across every field the term appears in within that
+	// doc) so the cap is applied ONCE per (term, doc), not per field.
+	covRaw := make(map[[16]byte]float64, 32)
 
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := iter.Key()
@@ -455,16 +741,20 @@ func (idx *Index) searchToken(ws [8]byte, term string, scores map[[16]byte]float
 			dl = avgdl
 		}
 
-		// BM25 formula
 		tfNorm := tf * (k1 + 1) / (tf + k1*(1-b+b*dl/avgdl))
-		bm25 := idf * tfNorm * fieldWeight(pv.Field)
-
-		// Guard against NaN/Inf scores that corrupt sorting
-		if math.IsNaN(bm25) || math.IsInf(bm25, 0) {
+		weighted := tfNorm * fieldWeight(pv.Field)
+		if math.IsNaN(weighted) || math.IsInf(weighted, 0) {
 			continue
 		}
+		covRaw[engramID] += weighted
+	}
 
-		scores[engramID] += bm25
+	for id, raw := range covRaw {
+		cov := raw / (k1 + 1)
+		if cov > 1 {
+			cov = 1
+		}
+		numer[id] += idf * cov
 	}
 	return nil
 }

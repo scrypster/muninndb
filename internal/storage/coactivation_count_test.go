@@ -16,6 +16,7 @@ func TestCoActivationCount_NewAssocStartsAtOne(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID: dst,
@@ -49,6 +50,7 @@ func TestCoActivationCount_IncrementOnUpdate(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
 		TargetID: dst,
@@ -103,6 +105,7 @@ func TestCoActivationCount_BatchUpdate(t *testing.T) {
 
 	src1, dst1 := NewULID(), NewULID()
 	src2, dst2 := NewULID(), NewULID()
+	seedEndpoints(t, store, ws, src1, dst1, src2, dst2)
 
 	// Write both associations — each starts at count=1.
 	if err := store.WriteAssociation(ctx, ws, src1, dst1, &Association{
@@ -157,6 +160,7 @@ func TestCoActivationCount_ZeroDeltaDoesNotChange(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write: count starts at 1.
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{
@@ -231,6 +235,7 @@ func TestCoActivationCount_SaturatesAtMaxUint32(t *testing.T) {
 
 	src := NewULID()
 	dst := NewULID()
+	seedEndpoints(t, store, ws, src, dst)
 
 	// Write: count starts at 1.
 	if err := store.WriteAssociation(ctx, ws, src, dst, &Association{

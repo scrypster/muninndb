@@ -17,6 +17,24 @@ func roundScore(f float32) float64 {
 	return math.Round(float64(f)*1e6) / 1e6
 }
 
+// knownLastAccess converts a wire nanosecond timestamp to a Memory.LastAccess,
+// returning nil when the value is not a real access instant.
+//
+// Both unset shapes land here: erf.ZeroTimeSentinelNanos (the value
+// time.Time{}.UnixNano() overflows to, year 1754) and a plain 0 (the Unix
+// epoch). Neither is a time a memory was read at, and rendering either one as a
+// concrete RFC3339 instant is a plausible-looking wrong answer — the failure
+// class principle #2 names as the worst one. Absence is the honest encoding, and
+// it is the same answer the staleness annotation already gives for the same
+// engram (augmentAnnotations).
+func knownLastAccess(ns int64) *time.Time {
+	t := time.Unix(0, ns).UTC()
+	if storage.IsUnsetTimestamp(t) {
+		return nil
+	}
+	return &t
+}
+
 // activationToMemory converts an mbp.ActivationItem to an MCP Memory for recall responses.
 // Summary-first by design (#112): Summary carries the enrichment summary, while Content
 // carries the real engram content (truncated to a preview). The summary is never copied
@@ -28,27 +46,94 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 	if len(previewContent) > contentPreviewLen {
 		previewContent = previewContent[:contentPreviewLen] + "..."
 	}
-	return Memory{
-		ID:          item.ID,
-		Concept:     item.Concept,
-		Content:     previewContent,
-		Summary:     item.Summary,
-		Score:       roundScore(item.Score),
-		VectorScore: roundScore(item.ScoreComponents.SemanticSimilarity),
-		Confidence:  item.Confidence,
-		Why:         item.Why,
+	// Supersession annotation is ALWAYS surfaced (no annotate flag) so an agent is
+	// never handed a stale fact without being told the current one — the "was 8 in
+	// May, now 11" narration comes from the payload alone. The annotate=true path
+	// augments this same struct with staleness/conflicts/provenance.
+	var annotations *MemoryAnnotations
+	// SupersededBy/CurrentVersion (asserted) and PossiblySupersededBy/
+	// VersionCluster/NewestOfCluster (heuristic, never an authority) are all
+	// always-on; annotate=true only augments this struct further below.
+	if item.SupersededBy != "" || item.CurrentVersion != "" ||
+		item.PossiblySupersededBy != "" || item.VersionCluster != "" || item.NewestOfCluster ||
+		item.SubstitutedFor != "" || item.UnresolvedContradiction != nil {
+		annotations = &MemoryAnnotations{
+			SupersededBy:         item.SupersededBy,
+			CurrentVersion:       item.CurrentVersion,
+			PossiblySupersededBy: item.PossiblySupersededBy,
+			VersionCluster:       item.VersionCluster,
+			NewestOfCluster:      item.NewestOfCluster,
+			ClusterSize:          item.ClusterSize,
+			// COG-28 (#763): asserted substitution provenance. Always-on for
+			// the same reason superseded_by is — an agent must never be handed
+			// a row admitted by a DIFFERENT memory's match without being told.
+			SubstitutedFor:    item.SubstitutedFor,
+			ChainTruncated:    item.ChainTruncated,
+			HeadNotIndexedYet: item.HeadNotIndexedYet,
+			// COG-29 (#764): asserted, unresolved declared contradiction.
+			// Always-on — this row's score was demoted because of it, so
+			// omitting it would leave the number unexplained.
+			UnresolvedContradiction: item.UnresolvedContradiction,
+		}
+		if b := item.SubstitutionBasis; b != nil {
+			annotations.SubstitutionBasis = &SubstitutionBasis{
+				AbsoluteScore:      roundScore(b.AbsoluteScore),
+				ContentMatch:       roundScore(b.ContentMatch),
+				SemanticSimilarity: roundScore(b.SemanticSimilarity),
+				FullTextRelevance:  roundScore(b.FullTextRelevance),
+			}
+		}
+	}
+	m := Memory{
+		Annotations:    annotations,
+		ID:             item.ID,
+		Concept:        item.Concept,
+		Content:        previewContent,
+		Summary:        item.Summary,
+		Score:          roundScore(item.Score),
+		VectorScore:    roundScore(item.ScoreComponents.SemanticSimilarity),
+		VectorScoreRaw: roundScore(item.ScoreComponents.SemanticSimilarityRaw),
+		EntityBoost:    roundScore(item.ScoreComponents.EntityBoost),
+		// #773: the honest, cross-query-comparable quantities. They were
+		// computed on every row and mapped onto MBP/REST, and this function —
+		// the ONLY path from an activation row to an MCP agent — dropped both.
+		AbsoluteScore: roundScore(item.ScoreComponents.AbsoluteScore),
+		ContentMatch:  roundScore(item.ScoreComponents.ContentMatch),
+		// #773: the band, TOP-LEVEL. Never fold this into the annotations
+		// block below — that block is allocated behind a predicate, and a
+		// field guarded by it silently vanishes for any row that carries no
+		// other annotation (#764).
+		RelevanceBand:      item.RelevanceBand,
+		RelevanceBandBasis: item.RelevanceBandBasis,
+		Confidence:         item.Confidence,
+		Why:                item.Why,
 		// Map the lifecycle state label the same way the read path does (#502).
 		State: storage.LifecycleState(item.State).String(),
 		// Type mirrors the vocabulary muninn_remember accepts (storage.ParseMemoryType).
 		Type:        storage.MemoryType(item.MemoryType).String(),
 		TypeLabel:   item.TypeLabel,
 		CreatedAt:   time.Unix(0, item.CreatedAt).UTC(),
-		LastAccess:  time.Unix(0, item.LastAccess).UTC(),
+		LastAccess:  knownLastAccess(item.LastAccess),
 		AccessCount: item.AccessCount,
 		Relevance:   item.Relevance,
 		SourceType:  item.SourceType,
 		Trust:       storage.TrustLevel(item.Trust).String(),
+		Tags:        item.Tags,
+		Expired:     item.Expired,
 	}
+	m.Importance, m.ImportanceSource = importanceFields(item.Importance,
+		storage.MemoryType(item.MemoryType), storage.TrustLevel(item.Trust))
+	// Valid-time annotations: only present when meaningful (backdated
+	// valid_from, or a closed window).
+	if item.ValidFrom != 0 {
+		vf := time.Unix(0, item.ValidFrom).UTC()
+		m.ValidFrom = &vf
+	}
+	if item.ValidUntil != 0 {
+		vu := time.Unix(0, item.ValidUntil).UTC()
+		m.ValidUntil = &vu
+	}
+	return m
 }
 
 // readResponseToMemory converts a ReadResponse to a Memory for the muninn_read tool.
@@ -66,11 +151,25 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		Type:        storage.MemoryType(r.MemoryType).String(),
 		TypeLabel:   r.TypeLabel,
 		CreatedAt:   time.Unix(0, r.CreatedAt).UTC(),
-		LastAccess:  time.Unix(0, r.LastAccess).UTC(),
+		LastAccess:  knownLastAccess(r.LastAccess),
 		AccessCount: r.AccessCount,
 		Relevance:   r.Relevance,
 		Trust:       storage.TrustLevel(r.Trust).String(),
 	}
+	m.Importance, m.ImportanceSource = importanceFields(r.Importance,
+		storage.MemoryType(r.MemoryType), storage.TrustLevel(r.Trust))
+	// muninn_read always echoes the valid-time axis (teaches the two axes:
+	// created_at is transaction time, valid_from/valid_until application time).
+	if r.ValidFrom != 0 {
+		vf := time.Unix(0, r.ValidFrom).UTC()
+		m.ValidFrom = &vf
+	}
+	if r.ValidUntil != 0 {
+		vu := time.Unix(0, r.ValidUntil).UTC()
+		m.ValidUntil = &vu
+	}
+	isCurrent := r.IsCurrent
+	m.IsCurrent = &isCurrent
 	for _, e := range r.Entities {
 		m.Entities = append(m.Entities, ReadEntity{Name: e.Name, Type: e.Type})
 	}
@@ -83,6 +182,19 @@ func readResponseToMemory(r *mbp.ReadResponse) Memory {
 		})
 	}
 	return m
+}
+
+// importanceFields resolves the (importance, importance_source) presentation
+// pair from a stored importance plus the memory type and trust the effective
+// value derives from when unset. "explicit" = the caller asserted the value
+// (stored > 0 — writes quantize explicit 0 to 0.01); "derived" = the use-time
+// type-table default (never stored). Mirrors storage.EffectiveImportance.
+func importanceFields(stored float32, memType storage.MemoryType, trust storage.TrustLevel) (float64, string) {
+	eff := roundScore(storage.EffectiveImportance(stored, memType, trust))
+	if storage.ImportanceExplicit(stored) {
+		return eff, "explicit"
+	}
+	return eff, "derived"
 }
 
 // textContent wraps a string in the MCP tools/call result envelope.

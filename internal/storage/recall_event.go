@@ -41,12 +41,23 @@ var recallEventWriteSeq atomic.Uint64
 type RecallEventPurpose string
 
 // RecallPurposeCalibration marks reads by scoring-calibration tooling —
-// fitting weights against recorded ground truth. The only permitted purpose.
+// fitting weights against recorded ground truth.
 const RecallPurposeCalibration RecallEventPurpose = "calibration"
+
+// RecallPurposeTrial marks reads by the offline cognition trial: the
+// build-tagged harness that puts the cognitive layer (Hebbian co-activation,
+// PAS predictive activation, the ACT-R base-level prior) on trial against
+// real recorded queries, and the replay driver that rebuilds the association
+// graph from recorded co-activation sets. It is a SEPARATE purpose from
+// calibration on purpose — the gate exists so that reads of instrument data
+// are deliberate and named, and reusing "calibration" for a different
+// analysis would make the audit log lie about who read what.
+const RecallPurposeTrial RecallEventPurpose = "cognition-trial"
 
 // validRecallPurposes is the closed allowlist for recall-event reads.
 var validRecallPurposes = map[RecallEventPurpose]struct{}{
 	RecallPurposeCalibration: {},
+	RecallPurposeTrial:       {},
 }
 
 // checkRecallPurpose refuses reads whose purpose is not in the allowlist.
@@ -67,9 +78,39 @@ type RecallSurfacedEntry struct {
 }
 
 // RecallEvent is the persisted record of what one recall surfaced (issue
-// #573). Together with the decision→evidence edges written by Decide(), it
-// makes scoring ground truth regenerable by rule: positives = surfaced AND
-// cited; negatives = surfaced minus cited, per event.
+// #573).
+//
+// HONESTY CORRECTION. This comment used to claim that, together with the
+// decision->evidence edges written by Decide(), the record "makes scoring
+// ground truth regenerable by rule: positives = surfaced AND cited; negatives
+// = surfaced minus cited, per event." That rule is ASPIRATIONAL and is NOT
+// implementable from what is on disk. Four independent reasons, each verified
+// against the code rather than assumed:
+//
+//  1. There is no join key. Activate returns query_id = eventID.String(), but
+//     Decide()'s evidence_ids are MEMORY ids and no surface accepts a
+//     query_id at all — the citation side never records which recall surfaced
+//     the cited memory.
+//  2. Neither side carries an identity. RecallEvent stores no session or agent
+//     ID, and the SessionID that exists is an MBP HELLO-handshake connection ID
+//     never threaded into recall, read, feedback or decide.
+//  3. The residue is context-free. A citation survives only as an
+//     AccessCount/LastAccess bump or a RelSupports edge from a decision
+//     engram; neither carries the query. A time-window + ID-membership
+//     heuristic is ambiguous by construction as soon as two recalls in a vault
+//     surface overlapping sets close together, which is the normal case.
+//  4. The citation side is itself damaged. Decide()'s evidence links are
+//     written at weight 1.0 — exactly the class #757 wrote at the weight-0.0
+//     key position — and #759's repair explicitly cannot recover or even
+//     identify the ones a decay pass already touched.
+//
+// What the record IS good for, and what it is used for: the ranked ID list is
+// bit-for-bit the co-activation set the Hebbian worker was given (same slice,
+// same order, lossless to float32), and Context is real caller query text. So
+// it is a training signal and a query set — not a labeled relevance set. Any
+// ground truth has to be labeled separately.
+//
+// Reads are purpose-gated; see RecallEventPurpose.
 type RecallEvent struct {
 	// Context is the query context the caller passed to the recall.
 	Context []string `msgpack:"context,omitempty"`

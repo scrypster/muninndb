@@ -2,6 +2,7 @@ package cognitive
 
 import (
 	"context"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
 )
@@ -27,19 +28,20 @@ func (a *hebbianStoreAdapter) UpdateAssocWeight(ctx context.Context, ws [8]byte,
 	return a.store.UpdateAssocWeight(ctx, ws, storage.ULID(src), storage.ULID(dst), weight, 0)
 }
 
-func (a *hebbianStoreAdapter) DecayAssocWeights(ctx context.Context, ws [8]byte, decayFactor float64, minWeight float32, archiveThreshold float64) (int, error) {
-	return a.store.DecayAssocWeights(ctx, ws, decayFactor, minWeight, archiveThreshold)
+func (a *hebbianStoreAdapter) DecayAssocWeights(ctx context.Context, ws [8]byte, halfLife time.Duration, minWeight float32, archiveThreshold float64) (int, error) {
+	return a.store.DecayAssocWeights(ctx, ws, halfLife, minWeight, archiveThreshold)
 }
 
 func (a *hebbianStoreAdapter) UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error {
 	storageUpdates := make([]storage.AssocWeightUpdate, len(updates))
 	for i, u := range updates {
 		storageUpdates[i] = storage.AssocWeightUpdate{
-			WS:         u.WS,
-			Src:        storage.ULID(u.Src),
-			Dst:        storage.ULID(u.Dst),
-			Weight:     u.Weight,
-			CountDelta: u.CountDelta,
+			WS:              u.WS,
+			Src:             storage.ULID(u.Src),
+			Dst:             storage.ULID(u.Dst),
+			Weight:          u.Weight,
+			CountDelta:      u.CountDelta,
+			LastActivatedAt: u.LastActivatedAt,
 		}
 	}
 	return a.store.UpdateAssocWeightBatch(ctx, storageUpdates)
@@ -93,7 +95,7 @@ func NewContradictStoreAdapter(store storage.EngineStore) ContradictionStore {
 	return &contradictStoreAdapter{store: store}
 }
 
-func (a *contradictStoreAdapter) FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) error {
+func (a *contradictStoreAdapter) FlagContradiction(ctx context.Context, ws [8]byte, engramA, engramB [16]byte) (bool, error) {
 	return a.store.FlagContradiction(ctx, ws, storage.ULID(engramA), storage.ULID(engramB))
 }
 

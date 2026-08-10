@@ -12,6 +12,7 @@ import (
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 	"github.com/scrypster/muninndb/internal/wal"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // stateUpdate records a (workspace, id) pair whose state was changed via
@@ -33,13 +34,32 @@ type pebbleStoreBatch struct {
 	// stateUpdatedIDs tracks engrams whose state was changed by UpdateEngramState.
 	// Their cache entries are invalidated in Commit after the batch flushes to Pebble.
 	stateUpdatedIDs []stateUpdate
+	// assocEdges records every (src, dst) whose 0x03/0x04 rows this batch
+	// writes, so Commit can evict the forward cache (keyed on src) and the
+	// reverse cache (keyed on dst) — #818. Deferred to Commit deliberately:
+	// the batch may be Discarded, and evicting at queue time would drop a
+	// CORRECT cache entry on behalf of a write that never lands.
+	assocEdges []batchAssocEdge
+	// contradictsQueued records the vaults with a RelContradicts edge staged in
+	// this batch. The generation is bumped in Commit, AFTER the data is
+	// visible — see noteContradictsWrite.
+	contradictsQueued [][8]byte
+}
+
+// batchAssocEdge is one association-cache invalidation owed by a batch.
+type batchAssocEdge struct {
+	ws  [8]byte
+	src ULID
+	dst ULID
 }
 
 // batchPendingItem holds the data required for post-commit vault counter and
 // provenance work for a single engram queued into the batch.
 type batchPendingItem struct {
-	wsPrefix [8]byte
-	eng      *Engram
+	wsPrefix  [8]byte
+	eng       *Engram
+	operation string              // provenance verb: "create" (default), "evolve", etc.
+	details   *provenance.Details // optional per-operation "what changed and why"; nil for plain creates
 }
 
 // NewBatch returns a new StoreBatch that queues engram writes atomically.
@@ -53,7 +73,28 @@ func (ps *PebbleStore) NewBatch() StoreBatch {
 
 // WriteEngram queues all keys for eng into the batch (does not commit).
 // It applies the same defaulting and encoding logic as PebbleStore.WriteEngram.
+// The provenance entry records Operation "create" — use WriteEngramOp for
+// batch writes that are not creating a brand-new engram.
 func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *Engram) error {
+	return b.WriteEngramOp(ctx, wsPrefix, eng, "create")
+}
+
+// WriteEngramOp queues all keys for eng into the batch exactly like
+// WriteEngram, except the eventual provenance entry (written post-commit,
+// see Commit below) records operation as the originating verb instead of
+// always "create". Evolve's successor engram is queued through this so its
+// provenance reads "evolve", not "create" (the write-path verb was
+// previously discarded — see issue tracked in the provenance-verb work).
+func (b *pebbleStoreBatch) WriteEngramOp(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string) error {
+	return b.WriteEngramOpDetails(ctx, wsPrefix, eng, operation, nil)
+}
+
+// WriteEngramOpDetails is WriteEngramOp with an optional operation-specific
+// details payload attached to the provenance entry. Evolve uses it to record
+// what the successor replaced, why, and from which valid-time instant — the
+// verb alone said an update happened but never what changed or why. nil details
+// is exactly WriteEngramOp: no payload is recorded, and none is invented.
+func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8]byte, eng *Engram, operation string, details *provenance.Details) error {
 	// Apply defaults — same as PebbleStore.WriteEngram.
 	if eng.ID == (ULID{}) {
 		if !eng.CreatedAt.IsZero() {
@@ -71,14 +112,16 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 	if eng.Stability == 0 {
 		eng.Stability = 30.0
 	}
-	if eng.CreatedAt.IsZero() {
-		eng.CreatedAt = time.Now()
-	}
-	if eng.UpdatedAt.IsZero() {
-		eng.UpdatedAt = eng.CreatedAt
-	}
-	if eng.LastAccess.IsZero() {
-		eng.LastAccess = eng.CreatedAt
+	eng.CreatedAt, eng.UpdatedAt, eng.LastAccess = normalizeEngramTimes(eng.CreatedAt, eng.UpdatedAt, eng.LastAccess)
+
+	// STO-12: the inline-Associations loop below is a creator, checked before
+	// anything is queued. Engrams already queued in this batch count as live —
+	// same exception, and the same queue-order requirement, as
+	// pebbleStoreBatch.WriteAssociation.
+	if err := b.ps.checkInlineAssocTargets(wsPrefix, [16]byte(eng.ID), eng.Associations, func(id [16]byte) bool {
+		return b.batchQueuedEngram(wsPrefix, id)
+	}); err != nil {
+		return err
 	}
 
 	erfEng := toERFEngram(eng)
@@ -114,11 +157,19 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 			peak = assoc.Weight
 		}
 		av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
+		if assoc.RelType == RelContradicts {
+			b.contradictsQueued = append(b.contradictsQueued, wsPrefix)
+		}
 		b.batch.Set(keys.AssocFwdKey(wsPrefix, id16, assoc.Weight, [16]byte(assoc.TargetID)), av[:], nil)
 		b.batch.Set(keys.AssocRevKey(wsPrefix, [16]byte(assoc.TargetID), assoc.Weight, id16), av[:], nil)
 		var wiBuf [4]byte
 		binary.BigEndian.PutUint32(wiBuf[:], math.Float32bits(assoc.Weight))
 		b.batch.Set(keys.AssocWeightIndexKey(wsPrefix, id16, [16]byte(assoc.TargetID)), wiBuf[:], nil)
+		// #818: the INLINE association writer sets the same 0x03/0x04 rows as
+		// WriteAssociation and owes the same post-commit eviction. The source
+		// is usually a brand-new engram with no cache entry, but the TARGET is
+		// an existing one whose reverse list is now stale.
+		b.assocEdges = append(b.assocEdges, batchAssocEdge{ws: wsPrefix, src: eng.ID, dst: assoc.TargetID})
 	}
 
 	// 0x0B: state index
@@ -126,6 +177,12 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 	// 0x0C: tag indexes
 	for _, tag := range eng.Tags {
 		b.batch.Set(keys.TagIndexKey(wsPrefix, keys.Hash(tag), id16), []byte{}, nil)
+	}
+	// 0x2C: ordered raw-tag-range index (key:value tags only)
+	for _, tag := range eng.Tags {
+		if err := WriteRawTagIndexEntry(b.batch, wsPrefix, tag, id16); err != nil {
+			return err
+		}
 	}
 	// 0x0D: creator index
 	b.batch.Set(keys.CreatorIndexKey(wsPrefix, keys.Hash(eng.CreatedBy), id16), []byte{}, nil)
@@ -137,16 +194,35 @@ func (b *pebbleStoreBatch) WriteEngram(ctx context.Context, wsPrefix [8]byte, en
 	laKey := keys.LastAccessIndexKey(wsPrefix, laMillis, id16)
 	b.batch.Set(laKey, nil, nil)
 
-	b.pendingItems = append(b.pendingItems, batchPendingItem{wsPrefix: wsPrefix, eng: eng})
+	b.pendingItems = append(b.pendingItems, batchPendingItem{wsPrefix: wsPrefix, eng: eng, operation: operation, details: details})
 	return nil
 }
 
 // WriteAssociation queues forward (0x03), reverse (0x04), and weight-index (0x14) keys
 // for the association into the batch. Uses the same key-building and value-encoding
 // logic as PebbleStore.WriteAssociation.
+//
+// The endpoint-liveness guard (STO-12) here must also count engrams queued
+// EARLIER IN THIS BATCH as live, because both in-tree callers do exactly that:
+// RememberChild (tree.go) and Evolve (engine.go) queue WriteEngram and
+// WriteAssociation into the same uncommitted batch so the engram and its edge
+// land atomically. Their 0x01 key is not visible to a Pebble read until
+// Commit, so a DB-read-only guard would reject every legitimate atomic
+// child-append and every evolve. See batchQueuedEngram.
 func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src, dst ULID, assoc *Association) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
+	}
+	if err := b.checkEndpointsLive(ws, [16]byte(src), [16]byte(dst)); err != nil {
+		return err
+	}
+	// #771: same collision guard as the direct PebbleStore.WriteAssociation —
+	// checked against committed DB state only, matching checkEndpointsLive's
+	// STO-12 scope for this batch path (an edge queued earlier in the SAME
+	// uncommitted batch is not visible to a DB read; the batch writers in
+	// this codebase queue at most one edge per (src, dst) pair per call).
+	if err := checkRelTypeCollision(b.ps.db, ws, [16]byte(src), assoc.Weight, [16]byte(dst), assoc.RelType); err != nil {
+		return err
 	}
 	// Seed PeakWeight from Weight if not set (new association initial write).
 	peak := assoc.PeakWeight
@@ -154,11 +230,39 @@ func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src
 		peak = assoc.Weight
 	}
 	av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
+	if assoc.RelType == RelContradicts {
+		b.contradictsQueued = append(b.contradictsQueued, ws)
+	}
 	b.batch.Set(keys.AssocFwdKey(ws, [16]byte(src), assoc.Weight, [16]byte(dst)), av[:], nil)
 	b.batch.Set(keys.AssocRevKey(ws, [16]byte(dst), assoc.Weight, [16]byte(src)), av[:], nil)
 	var weightBuf [4]byte
 	binary.BigEndian.PutUint32(weightBuf[:], math.Float32bits(assoc.Weight))
 	b.batch.Set(keys.AssocWeightIndexKey(ws, [16]byte(src), [16]byte(dst)), weightBuf[:], nil)
+	b.assocEdges = append(b.assocEdges, batchAssocEdge{ws: ws, src: src, dst: dst})
+	return nil
+}
+
+// batchQueuedEngram reports whether an engram with this (ws, id) has already
+// been queued into this batch by WriteEngram/WriteEngramOp/WriteEngramOpDetails
+// — i.e. its 0x01 key is pending in the batch but not yet readable from Pebble.
+func (b *pebbleStoreBatch) batchQueuedEngram(ws [8]byte, id [16]byte) bool {
+	for _, it := range b.pendingItems {
+		if it.eng != nil && it.wsPrefix == ws && [16]byte(it.eng.ID) == id {
+			return true
+		}
+	}
+	return false
+}
+
+// checkEndpointsLive is checkEndpointsLive on the store, widened to accept
+// engrams queued in this same uncommitted batch.
+func (b *pebbleStoreBatch) checkEndpointsLive(ws [8]byte, src, dst [16]byte) error {
+	if !b.batchQueuedEngram(ws, src) && !b.ps.engramExists(ws, src) {
+		return fmt.Errorf("%w: source %s", ErrDanglingEndpoint, ULID(src).String())
+	}
+	if !b.batchQueuedEngram(ws, dst) && !b.ps.engramExists(ws, dst) {
+		return fmt.Errorf("%w: target %s", ErrDanglingEndpoint, ULID(dst).String())
+	}
 	return nil
 }
 
@@ -177,34 +281,67 @@ func (b *pebbleStoreBatch) WriteOrdinal(ctx context.Context, ws [8]byte, parentI
 // Reads the current engram from the underlying store, sets its state, and queues
 // updated 0x01 and 0x02 key writes plus the 0x0B state index transition.
 func (b *pebbleStoreBatch) UpdateEngramState(ctx context.Context, ws [8]byte, id ULID, newState LifecycleState) error {
+	return b.mutateEngram(ctx, ws, id, "update state", func(eng *Engram) {
+		eng.State = newState
+	})
+}
+
+// SupersedeEngram queues a soft-delete plus a ValidUntil stamp in one
+// re-encode. Used by Evolve so both changes land in the same atomic batch.
+// A pre-existing closed ValidUntil is preserved.
+func (b *pebbleStoreBatch) SupersedeEngram(ctx context.Context, ws [8]byte, id ULID, validUntil time.Time) error {
+	return b.mutateEngram(ctx, ws, id, "supersede", func(eng *Engram) {
+		eng.State = StateSoftDeleted
+		if eng.ValidUntil.IsZero() {
+			eng.ValidUntil = validUntil
+		}
+	})
+}
+
+// mutateEngram reads the current engram from the underlying store, applies
+// mutate, and queues updated 0x01 and 0x02 key writes plus the 0x0B state
+// index transition when the state changed.
+//
+// mutate is handed a PRIVATE clone, never the L1 cache's shared pointer. This
+// is #858: GetEngram returns the cached struct under the read-only contract at
+// L1Cache.Get, and applying mutate to it in place made two concurrent evolves
+// of one id write and read a single struct — reproduced at 2 goroutines x 50
+// EvolveAt on one id. Nothing here may drop the Clone; the cache entry is
+// invalidated by Commit, not by this function, so the shared struct stays live
+// and readable by recall for the whole life of the batch.
+func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID, op string, mutate func(*Engram)) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
 	}
 	eng, err := b.ps.GetEngram(ctx, ws, id)
 	if err != nil {
-		return fmt.Errorf("update state: read engram: %w", err)
+		return fmt.Errorf("%s: read engram: %w", op, err)
 	}
 	if eng == nil {
-		return fmt.Errorf("update state: engram %s not found", id.String())
+		return fmt.Errorf("%s: engram %s not found", op, id.String())
 	}
+	eng = eng.Clone()
 	oldState := eng.State
-	eng.State = newState
+	mutate(eng)
+	newState := eng.State
 	eng.UpdatedAt = time.Now()
 
 	erfEng := toERFEngram(eng)
 	erfBytes, err := erf.EncodeV2(erfEng)
 	if err != nil {
-		return fmt.Errorf("update state: encode: %w", err)
+		return fmt.Errorf("%s: encode: %w", op, err)
 	}
 	id16 := [16]byte(id)
 
 	// Transition 0x0B state index: remove old entry, write new entry.
-	b.batch.Delete(keys.StateIndexKey(ws, uint8(oldState), id16), nil)
-	b.batch.Set(keys.StateIndexKey(ws, uint8(newState), id16), []byte{}, nil)
+	if oldState != newState {
+		b.batch.Delete(keys.StateIndexKey(ws, uint8(oldState), id16), nil)
+		b.batch.Set(keys.StateIndexKey(ws, uint8(newState), id16), []byte{}, nil)
+	}
 
 	// Update 0x01 full engram record and 0x02 metadata slice.
 	if err := b.batch.Set(keys.EngramKey(ws, id16), erfBytes, nil); err != nil {
-		return fmt.Errorf("update state: set engram key: %w", err)
+		return fmt.Errorf("%s: set engram key: %w", op, err)
 	}
 	if err := b.batch.Set(keys.MetaKey(ws, id16), erf.MetaKeySlice(erfBytes), nil); err != nil {
 		return err
@@ -212,6 +349,68 @@ func (b *pebbleStoreBatch) UpdateEngramState(ctx context.Context, ws [8]byte, id
 	// Track for cache invalidation in Commit.
 	b.stateUpdatedIDs = append(b.stateUpdatedIDs, stateUpdate{ws: ws, id: id})
 	return nil
+}
+
+// WriteEntityEngramLink queues the 0x20 forward and 0x23 reverse entity-link keys
+// into the batch. Mirrors PebbleStore.WriteEntityEngramLink key construction; it
+// does not touch the 0x1F entity record. The mention-count ledger is one
+// increment per link key created and one decrement per link key destroyed
+// (DeleteEngram decrements unconditionally), so callers creating links through
+// this method must fund them — post-commit, via IncrementEntityMentionCount —
+// or the counts go stale-low once the linked engrams are hard-deleted (#622).
+func (b *pebbleStoreBatch) WriteEntityEngramLink(ctx context.Context, ws [8]byte, engramID ULID, entityName string) error {
+	if b.committed {
+		return fmt.Errorf("batch already committed")
+	}
+	nameHash := keys.EntityNameHash(entityName)
+	if err := b.batch.Set(keys.EntityEngramLinkKey(ws, [16]byte(engramID), nameHash), []byte(entityName), nil); err != nil {
+		return fmt.Errorf("batch write entity link fwd: %w", err)
+	}
+	if err := b.batch.Set(keys.EntityReverseIndexKey(nameHash, ws, [16]byte(engramID)), nil, nil); err != nil {
+		return fmt.Errorf("batch write entity link rev: %w", err)
+	}
+	return nil
+}
+
+// WriteRelationshipRecord queues the 0x21 relationship record and both 0x26
+// relationship-entity index keys into the batch. Same value encoding as
+// PebbleStore.UpsertRelationshipRecord.
+func (b *pebbleStoreBatch) WriteRelationshipRecord(ctx context.Context, ws [8]byte, engramID ULID, record RelationshipRecord) error {
+	if b.committed {
+		return fmt.Errorf("batch already committed")
+	}
+	record.UpdatedAt = time.Now().UnixNano()
+	val, err := msgpack.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("batch relationship record marshal: %w", err)
+	}
+	fromHash := keys.EntityNameHash(record.FromEntity)
+	toHash := keys.EntityNameHash(record.ToEntity)
+	relTypeByte := relTypeByteFromString(record.RelType)
+	if err := b.batch.Set(keys.RelationshipKey(ws, [16]byte(engramID), fromHash, relTypeByte, toHash), val, nil); err != nil {
+		return fmt.Errorf("batch relationship record: set 0x21: %w", err)
+	}
+	if err := b.batch.Set(keys.RelEntityIndexKey(ws, fromHash, [16]byte(engramID)), nil, nil); err != nil {
+		return fmt.Errorf("batch relationship record: set 0x26 from: %w", err)
+	}
+	if err := b.batch.Set(keys.RelEntityIndexKey(ws, toHash, [16]byte(engramID)), nil, nil); err != nil {
+		return fmt.Errorf("batch relationship record: set 0x26 to: %w", err)
+	}
+	return nil
+}
+
+// RepointUpsertKey queues a 0x2E upsert-key forward-index re-point into the
+// batch: keys.UpsertKeyKey(ws, keyHash) → id[:]. Used by Engine.evolveAtInternal
+// so the upsert pointer is moved to the successor IN THE SAME atomic batch as
+// the evolve (the successor write + predecessor supersede + association keys).
+// Atomicity is the whole point — a separate commit would leave a window where
+// the index points at the soft-deleted predecessor. Issue #556.
+func (b *pebbleStoreBatch) RepointUpsertKey(ws [8]byte, keyHash [32]byte, id ULID) {
+	if b.committed {
+		return
+	}
+	id16 := [16]byte(id)
+	b.batch.Set(keys.UpsertKeyKey(ws, keyHash), id16[:], nil)
 }
 
 // Commit atomically flushes all queued writes to Pebble and runs post-commit
@@ -230,12 +429,38 @@ func (b *pebbleStoreBatch) Commit() error {
 		return fmt.Errorf("batch commit: %w", err)
 	}
 
+	// #686: every direct PebbleStore write method calls ps.replicateBatch
+	// after committing its raw pebble.Batch (engram.go, association.go,
+	// entity.go, lease.go). Evolve and the startup repair use this
+	// StoreBatch abstraction exclusively, so without this call a leader's
+	// evolve — new engram, supersedes association, predecessor soft-delete,
+	// carried entity links — never reached a follower. Must run before
+	// b.batch.Close() (Discard), same constraint replicateBatch documents
+	// for its direct callers.
+	b.ps.replicateBatch(b.batch)
+
+	// The COG-29 debt scan cache's invalidation signal, bumped here rather than
+	// at stage time for the same reason the cache evictions below are: the
+	// generation must never advertise a write Pebble cannot serve yet.
+	for _, ws := range b.contradictsQueued {
+		b.ps.noteContradictsWrite(ws, RelContradicts)
+	}
+
 	// Invalidate L1 cache entries for all engrams whose state was updated.
 	// The batch has now been flushed to Pebble; any cached entry reflects the
 	// pre-commit state and must be evicted so subsequent reads see the new state.
 	for _, su := range b.stateUpdatedIDs {
 		b.ps.cache.Delete(su.ws, su.id)
 		b.ps.metaCache.Remove([16]byte(su.id))
+	}
+
+	// Association caches — #818. Same post-commit placement and the same
+	// forward-on-src / reverse-on-dst keying as PebbleStore.WriteAssociation.
+	// Without this an edge written through a batch was invisible from BOTH
+	// endpoints for the 2s TTL.
+	for _, e := range b.assocEdges {
+		b.ps.assocCache.Remove(assocCacheKey(e.ws, e.src))
+		b.ps.revAssocCache.Remove(assocCacheKey(e.ws, e.dst))
 	}
 
 	// Post-commit side effects — mirrors PebbleStore.WriteEngram post-commit work.
@@ -263,11 +488,16 @@ func (b *pebbleStoreBatch) Commit() error {
 		}
 
 		if b.ps.provWork != nil {
+			op := item.operation
+			if op == "" {
+				op = "create" // defensive default; WriteEngram/WriteEngramOp always set this
+			}
 			b.ps.provWork.Submit(ws, eng.ID, provenance.ProvenanceEntry{
 				Timestamp: eng.CreatedAt,
 				Source:    provenance.SourceHuman,
 				AgentID:   eng.CreatedBy,
-				Operation: "create",
+				Operation: op,
+				Details:   item.details,
 			})
 		}
 	}

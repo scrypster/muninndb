@@ -107,12 +107,8 @@ type Server struct {
 	// dataDir is the server's data directory, used for reading/writing plugin_config.json.
 	dataDir string
 
-	// coordinatorFactory, when set, is called by enableClusterRuntime to create and
-	// start a coordinator from a persisted ClusterConfig. If nil, config is persisted
-	// but the coordinator is not started until the next process restart.
-	coordinatorFactory func(ctx context.Context, cfg config.ClusterConfig) (*replication.ClusterCoordinator, error)
-
 	// coordinator is the optional cluster coordinator; nil when cluster is disabled.
+	writeGate   func() error // cluster single-writer gate (#596); nil = standalone
 	coordinator *replication.ClusterCoordinator
 
 	auditLog *audit.Logger
@@ -127,6 +123,14 @@ type Server struct {
 	ready     chan struct{} // closed by Serve after wg.Add(1); guards against Shutdown racing wg.Wait
 	wg        sync.WaitGroup
 	shutdownM sync.Mutex
+
+	// accessLogEnabled gates the per-request "request" INFO line emitted by
+	// loggingMiddleware, independently of --log-level (#851). On by
+	// default; MUNINN_ACCESS_LOG=0 silences it without discarding every
+	// other INFO event in the system, the way raising --log-level to warn
+	// would. Read once at construction, matching the MUNINN_LOCAL_EMBED
+	// on-by-default/opt-out-with-"0" convention already used elsewhere.
+	accessLogEnabled bool
 }
 
 // EmbedInfo carries static embedder metadata set at server construction time.
@@ -172,6 +176,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 		startTime:                time.Now(),
 		shutdown:                 make(chan struct{}),
 		ready:                    make(chan struct{}),
+		accessLogEnabled:         os.Getenv("MUNINN_ACCESS_LOG") != "0",
 	}
 	// Subsystems are considered ready immediately unless explicitly marked otherwise.
 	s.subsystemsReady.Store(true)
@@ -201,12 +206,12 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/workers", s.withPublicMiddleware(s.handleWorkerStats))
 
 	// Authenticated vault routes — require Bearer API key.
-	mux.HandleFunc("POST /api/engrams/batch", s.withMiddleware(auth.ReadOnlyGuard(s.handleBatchCreate)))
-	mux.HandleFunc("POST /api/engrams", s.withMiddleware(auth.ReadOnlyGuard(s.handleCreateEngram)))
+	mux.HandleFunc("POST /api/engrams/batch", s.withMiddleware(auth.ReadOnlyGuard(s.withCortexWrite(s.handleBatchCreate))))
+	mux.HandleFunc("POST /api/engrams", s.withMiddleware(auth.ReadOnlyGuard(s.withCortexWrite(s.handleCreateEngram))))
 	mux.HandleFunc("GET /api/engrams/{id}", s.withMiddleware(auth.WriteOnlyGuard(s.handleGetEngram)))
-	mux.HandleFunc("DELETE /api/engrams/{id}", s.withMiddleware(auth.ReadOnlyGuard(s.handleDeleteEngram)))
+	mux.HandleFunc("DELETE /api/engrams/{id}", s.withMiddleware(auth.ReadOnlyGuard(s.withCortexWrite(s.handleDeleteEngram))))
 	mux.HandleFunc("POST /api/activate", s.withMiddleware(auth.WriteOnlyGuard(s.handleActivate)))
-	mux.HandleFunc("POST /api/link", s.withMiddleware(auth.ReadOnlyGuard(s.handleLink)))
+	mux.HandleFunc("POST /api/link", s.withMiddleware(auth.ReadOnlyGuard(s.withCortexWrite(s.handleLink))))
 	mux.HandleFunc("GET /api/stats", s.withMiddleware(auth.WriteOnlyGuard(s.handleStats)))
 	mux.HandleFunc("GET /api/engrams", s.withMiddleware(auth.WriteOnlyGuard(s.handleListEngrams)))
 	mux.HandleFunc("GET /api/engrams/{id}/links", s.withMiddleware(auth.WriteOnlyGuard(s.handleGetEngramLinks)))
@@ -222,49 +227,50 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	// These POST operations mutate existing engrams and return engram data in
 	// their response body — write-only keys must not be able to extract vault
 	// data via any response path.
-	mux.HandleFunc("POST /api/engrams/{id}/evolve", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleEvolve))))
-	mux.HandleFunc("POST /api/consolidate", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleConsolidateEngrams))))
-	mux.HandleFunc("POST /api/decide", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleDecide))))
-	mux.HandleFunc("POST /api/engrams/{id}/restore", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleRestore))))
+	mux.HandleFunc("POST /api/engrams/{id}/evolve", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.withCortexWrite(s.handleEvolve)))))
+	mux.HandleFunc("POST /api/consolidate", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.withCortexWrite(s.handleConsolidateEngrams)))))
+	mux.HandleFunc("POST /api/decide", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.withCortexWrite(s.handleDecide)))))
+	mux.HandleFunc("POST /api/engrams/{id}/restore", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.withCortexWrite(s.handleRestore)))))
 	mux.HandleFunc("POST /api/traverse", s.withMiddleware(auth.WriteOnlyGuard(s.handleTraverse)))
 	mux.HandleFunc("POST /api/explain", s.withMiddleware(auth.WriteOnlyGuard(s.handleExplain)))
-	mux.HandleFunc("PUT /api/engrams/{id}/state", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleSetState))))
-	mux.HandleFunc("PUT /api/engrams/{id}/tags", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleUpdateTags))))
+	mux.HandleFunc("PUT /api/engrams/{id}/state", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.withCortexWrite(s.handleSetState)))))
+	mux.HandleFunc("PUT /api/engrams/{id}/tags", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.withCortexWrite(s.handleUpdateTags)))))
 	mux.HandleFunc("GET /api/deleted", s.withMiddleware(auth.WriteOnlyGuard(s.handleListDeleted)))
-	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.handleRetryEnrich))))
+	mux.HandleFunc("POST /api/engrams/{id}/retry-enrich", s.withMiddleware(auth.ReadOnlyGuard(auth.WriteOnlyGuard(s.withCortexWrite(s.handleRetryEnrich)))))
 	mux.HandleFunc("GET /api/contradictions", s.withMiddleware(auth.WriteOnlyGuard(s.handleContradictions)))
 	mux.HandleFunc("GET /api/guide", s.withMiddleware(auth.WriteOnlyGuard(s.handleGuide)))
 
 	// Admin routes — require valid admin session cookie, return JSON 401 on failure.
-	mux.HandleFunc("POST /api/admin/keys", s.withAdminMiddleware(s.handleCreateAPIKey(authStore)))
+	mux.HandleFunc("POST /api/admin/keys", s.withAdminMiddleware(s.withCortexWrite(s.handleCreateAPIKey(authStore))))
 	mux.HandleFunc("GET /api/admin/keys", s.withAdminMiddleware(s.handleListAPIKeys(authStore)))
-	mux.HandleFunc("DELETE /api/admin/keys/{id}", s.withAdminMiddleware(s.handleRevokeAPIKey(authStore)))
-	mux.HandleFunc("PUT /api/admin/vaults/config", s.withAdminMiddleware(s.handleSetVaultConfig(authStore)))
-	mux.HandleFunc("PUT /api/admin/password", s.withAdminMiddleware(s.handleChangeAdminPassword(authStore)))
+	mux.HandleFunc("DELETE /api/admin/keys/{id}", s.withAdminMiddleware(s.withCortexWrite(s.handleRevokeAPIKey(authStore))))
+	mux.HandleFunc("PUT /api/admin/vaults/config", s.withAdminMiddleware(s.withCortexWrite(s.handleSetVaultConfig(authStore))))
+	mux.HandleFunc("PUT /api/admin/password", s.withAdminMiddleware(s.withCortexWrite(s.handleChangeAdminPassword(authStore))))
 	mux.HandleFunc("GET /api/admin/embed/status", s.withAdminMiddleware(s.handleEmbedStatus))
 	mux.HandleFunc("GET /api/admin/mcp-info", s.withAdminMiddleware(s.handleMCPInfo))
 	mux.HandleFunc("GET /api/admin/entity-graph", s.withAdminMiddleware(s.handleEntityGraph))
 	mux.HandleFunc("GET /api/admin/plugins", s.withAdminMiddleware(s.handlePlugins))
 	mux.HandleFunc("GET /api/admin/vault/{name}/plasticity", s.withAdminMiddleware(s.handleGetVaultPlasticity(authStore)))
-	mux.HandleFunc("PUT /api/admin/vault/{name}/plasticity", s.withAdminMiddleware(s.handlePutVaultPlasticity(authStore)))
+	mux.HandleFunc("PUT /api/admin/vault/{name}/plasticity", s.withAdminMiddleware(s.withCortexWrite(s.handlePutVaultPlasticity(authStore))))
 	mux.HandleFunc("GET /api/admin/vaults/{name}/capabilities", s.withAdminMiddleware(s.handleListCapabilities(authStore)))
-	mux.HandleFunc("DELETE /api/admin/vaults/{name}/capabilities/{capID}", s.withAdminMiddleware(s.handleRevokeCapability(authStore)))
+	mux.HandleFunc("DELETE /api/admin/vaults/{name}/capabilities/{capID}", s.withAdminMiddleware(s.withCortexWrite(s.handleRevokeCapability(authStore))))
 	mux.HandleFunc("GET /api/admin/plugin-config", s.withAdminMiddleware(s.handleGetPluginConfig))
 	mux.HandleFunc("PUT /api/admin/plugin-config", s.withAdminMiddleware(s.handlePutPluginConfig))
-	mux.HandleFunc("DELETE /api/admin/vaults/{name}", s.withAdminMiddleware(s.handleDeleteVault))
-	mux.HandleFunc("POST /api/admin/vaults/{name}/clear", s.withAdminMiddleware(s.handleClearVault))
-	mux.HandleFunc("POST /api/admin/vaults/{name}/clone", s.withAdminMiddleware(s.handleCloneVault))
-	mux.HandleFunc("POST /api/admin/vaults/{name}/merge-into", s.withAdminMiddleware(s.handleMergeVault))
+	mux.HandleFunc("DELETE /api/admin/vaults/{name}", s.withAdminMiddleware(s.withCortexWrite(s.handleDeleteVault)))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/clear", s.withAdminMiddleware(s.withCortexWrite(s.handleClearVault)))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/clone", s.withAdminMiddleware(s.withCortexWrite(s.handleCloneVault)))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/merge-into", s.withAdminMiddleware(s.withCortexWrite(s.handleMergeVault)))
 	mux.HandleFunc("GET /api/admin/vaults/{name}/job-status", s.withAdminMiddleware(s.handleVaultJobStatus))
 	mux.HandleFunc("GET /api/admin/vaults/{name}/export", s.withAdminMiddleware(s.handleExportVault))
 	mux.HandleFunc("GET /api/admin/vaults/{name}/export-markdown", s.withAdminMiddleware(s.handleExportVaultMarkdown))
-	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddlewareNoSizeLimit(s.withLargeBody(s.handleImportVault)))
-	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-fts", s.withAdminMiddleware(s.handleReindexFTSVault))
-	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed", s.withAdminMiddleware(s.handleReembedVault))
-	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.handleRenameVault))
+	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddlewareNoSizeLimit(s.withLargeBody(s.withCortexWrite(s.handleImportVault))))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-fts", s.withAdminMiddleware(s.withCortexWrite(s.handleReindexFTSVault)))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/repair-watermark/reset", s.withAdminMiddleware(s.handleResetRepairWatermark))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed", s.withAdminMiddleware(s.withCortexWrite(s.handleReembedVault)))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.withCortexWrite(s.handleRenameVault)))
 	mux.HandleFunc("POST /api/admin/backup", s.withAdminMiddleware(s.handleBackup))
 	mux.HandleFunc("GET /api/admin/observability", s.withAdminMiddleware(s.handleObservability))
-	mux.HandleFunc("POST /api/admin/contradictions/resolve", s.withAdminMiddleware(s.handleResolveContradiction))
+	mux.HandleFunc("POST /api/admin/contradictions/resolve", s.withAdminMiddleware(s.withCortexWrite(s.handleResolveContradiction)))
 
 	// Cluster management — session auth required
 	mux.HandleFunc("GET /api/admin/cluster/token", s.withAdminMiddleware(s.handleAdminClusterToken))
@@ -409,35 +415,48 @@ func (s *Server) probeDBWritability() {
 	}
 }
 
-// SetCoordinatorFactory wires in a factory function that creates and starts a
-// ClusterCoordinator from a ClusterConfig. Must be called before Serve.
-func (s *Server) SetCoordinatorFactory(f func(context.Context, config.ClusterConfig) (*replication.ClusterCoordinator, error)) {
-	s.coordinatorFactory = f
-}
-
-// enableClusterRuntime persists the config and, if a coordinatorFactory is wired,
-// starts the coordinator. For Phase 1, if no factory is present, config is persisted
-// and the server reports success (coordinator starts on next restart).
-func (s *Server) enableClusterRuntime(ctx context.Context, cfg config.ClusterConfig) error {
-	if s.dataDir != "" {
-		if err := config.SaveClusterConfig(s.dataDir, cfg); err != nil {
-			return fmt.Errorf("persist config: %w", err)
-		}
-		// Reload after saving so auto-generated fields (NodeID) are populated
-		// before the coordinator is created. Without this, the coordinator
-		// starts with an empty NodeID and the node cannot rejoin after restart.
-		reloaded, err := config.LoadClusterConfig(s.dataDir)
-		if err != nil {
-			return fmt.Errorf("reload config after save: %w", err)
-		}
-		cfg = reloaded
+// enableClusterRuntime persists a cluster configuration. It deliberately does
+// NOT start a coordinator (#628).
+//
+// Clustering cannot be switched on in a running process, and the previous
+// attempt to do so produced the worst of the three available outcomes. The
+// storage layer's replication hook (storage.PebbleStoreConfig.RepLogAppend) is
+// captured when the PebbleStore is constructed at boot, and it is only
+// populated when cluster.yaml said Enabled at that moment. A coordinator built
+// afterwards therefore has a replication log that nothing ever appends to: the
+// node reports itself clustered, accepts Lobes, ships them a snapshot — and
+// every subsequent write it accepts is invisible to replication. It also never
+// received SetMOL, so it never prunes, and it registered joiners as voters
+// against a quorum the boot path would have computed differently.
+//
+// A half-initialised coordinator that looks enabled and cannot replicate is a
+// silently-wrong result, which is the failure class this project ranks worst.
+// Requiring a restart makes that state unrepresentable rather than merely
+// discouraged: there is no code path that constructs a coordinator outside boot.
+// The cost is one restart; the alternative was a replica that looks complete
+// and is not.
+//
+// The caller reports 202 Accepted with restart_required so the operator is told
+// plainly, instead of being congratulated on a cluster that is not running.
+func (s *Server) enableClusterRuntime(_ context.Context, cfg config.ClusterConfig) error {
+	if s.dataDir == "" {
+		return nil
 	}
-	if s.coordinatorFactory != nil {
-		coord, err := s.coordinatorFactory(ctx, cfg)
-		if err != nil {
-			return err
-		}
-		s.SetCoordinator(coord)
+	if err := config.SaveClusterConfig(s.dataDir, cfg); err != nil {
+		return fmt.Errorf("persist config: %w", err)
+	}
+	// Read the file back before reporting success. The restart is the only
+	// thing that starts clustering, so an unreadable cluster.yaml would turn
+	// "restart to activate" into a node that comes back up unclustered with no
+	// explanation. SaveClusterConfig fills auto-generated fields (NodeID);
+	// confirming they round-trip is what makes the promised restart honest.
+	saved, err := config.LoadClusterConfig(s.dataDir)
+	if err != nil {
+		return fmt.Errorf("reload config after save: %w", err)
+	}
+	if !saved.Enabled || saved.NodeID == "" {
+		return fmt.Errorf("persisted cluster config is incomplete (enabled=%v node_id=%q); a restart would not start clustering",
+			saved.Enabled, saved.NodeID)
 	}
 	return nil
 }
@@ -668,7 +687,9 @@ func (s *Server) loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		statusClass := fmt.Sprintf("%dxx", rec.status/100)
 		metrics.RESTRequestDuration.WithLabelValues(r.Method, path, statusClass).Observe(duration)
 
-		slog.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", elapsed.Milliseconds())
+		if s.accessLogEnabled {
+			slog.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", elapsed.Milliseconds())
+		}
 	}
 }
 
@@ -827,14 +848,24 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Vault = vault
-	// Apply recall mode preset if provided.
+	// Clamp a negative threshold: below zero is out-of-domain on the wire.
+	// In-process, a negative threshold is the diagnostic gate-bypass Explain
+	// uses (activation.Run treats <0 as "gate nothing"); that contract is
+	// deliberately NOT exposed to external callers, so the wire behaviour for
+	// out-of-range input stays what it always was — the engine default.
+	if req.Threshold < 0 {
+		req.Threshold = 0
+	}
+	// Validate the recall mode here (fail fast with a 400), but forward it
+	// instead of stamping preset values into the request — the engine is the
+	// single preset decider, because only it knows the effective scoring mode
+	// and preset thresholds are scale-bound (#704: stamping deep's
+	// ACT-R-calibrated 0.1 here silently emptied rrf vaults).
 	if req.Mode != "" {
-		preset, err := auth.LookupRecallMode(req.Mode)
-		if err != nil {
+		if _, err := auth.LookupRecallMode(req.Mode); err != nil {
 			s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, err.Error())
 			return
 		}
-		applyRecallModePreset(&req, preset)
 	}
 	// Apply a hard activation timeout so deep BFS traversals on large vaults
 	// cannot run unbounded. MUNINN_ACTIVATE_TIMEOUT (default 30s) is capped
@@ -851,34 +882,6 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sendJSON(w, http.StatusOK, resp)
-}
-
-// applyRecallModePreset applies non-zero recall mode preset fields to an ActivateRequest,
-// only when the caller has not already set the corresponding field.
-func applyRecallModePreset(req *ActivateRequest, preset auth.RecallModePreset) {
-	if preset.Threshold > 0 && req.Threshold == 0 {
-		req.Threshold = preset.Threshold
-	}
-	if preset.MaxHops > 0 && req.MaxHops == 0 {
-		req.MaxHops = preset.MaxHops
-	}
-	if preset.SemanticSimilarity > 0 || preset.FullTextRelevance > 0 || preset.Recency > 0 || preset.DisableACTR {
-		if req.Weights == nil {
-			req.Weights = &mbp.Weights{}
-		}
-		if preset.SemanticSimilarity > 0 && req.Weights.SemanticSimilarity == 0 {
-			req.Weights.SemanticSimilarity = preset.SemanticSimilarity
-		}
-		if preset.FullTextRelevance > 0 && req.Weights.FullTextRelevance == 0 {
-			req.Weights.FullTextRelevance = preset.FullTextRelevance
-		}
-		if preset.Recency > 0 && req.Weights.Recency == 0 {
-			req.Weights.Recency = preset.Recency
-		}
-		if preset.DisableACTR {
-			req.Weights.DisableACTR = true
-		}
-	}
 }
 
 func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {

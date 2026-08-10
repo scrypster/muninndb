@@ -462,12 +462,33 @@ func loadDefaultVault() string {
 	return ""
 }
 
-func saveDefaultVault(vault string) {
+// saveDefaultVault persists the selected vault to the config file, preserving
+// any other keys already present there. It reports failure to the caller
+// instead of failing silently: a non-writable config path, a full disk, or a
+// permissions problem must not present as a successful switch (#634).
+func saveDefaultVault(vault string) error {
 	path := configPath()
-	os.MkdirAll(filepath.Dir(path), 0700)
-	cfg := map[string]string{"default_vault": vault}
-	b, _ := json.Marshal(cfg)
-	os.WriteFile(path, b, 0644)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+
+	cfg := map[string]string{}
+	if b, err := os.ReadFile(path); err == nil {
+		// Best-effort: if the existing file is malformed we can't recover
+		// its contents, so we fall back to a fresh config rather than
+		// blocking the vault switch on it.
+		_ = json.Unmarshal(b, &cfg)
+	}
+	cfg["default_vault"] = vault
+
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := os.WriteFile(path, b, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
 }
 
 // formatVaultTable prints vaults in a table format.

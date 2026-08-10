@@ -37,6 +37,13 @@ type MockEngine struct {
 	lastActivityReq   *ActivityCountsRequest
 	activityCountsErr error
 	lastSubscribeReq  *mbp.SubscribeRequest
+
+	// #802: capture/control Stat and CountEmbedded's vault scoping so tests
+	// can assert GET /api/admin/embed/status honors ?vault=.
+	lastStatReq            *StatRequest
+	lastCountEmbeddedVault *string // nil until CountEmbedded is called
+	statEngramCountByVault map[string]int64
+	countEmbeddedByVault   map[string]int64
 }
 
 func (m *MockEngine) Hello(ctx context.Context, req *HelloRequest) (*HelloResponse, error) {
@@ -99,8 +106,15 @@ func (m *MockEngine) Forget(ctx context.Context, req *ForgetRequest) (*ForgetRes
 }
 
 func (m *MockEngine) Stat(ctx context.Context, req *StatRequest) (*StatResponse, error) {
+	m.lastStatReq = req
+	engramCount := int64(100)
+	if req != nil && req.Vault != "" {
+		if n, ok := m.statEngramCountByVault[req.Vault]; ok {
+			engramCount = n
+		}
+	}
 	return &StatResponse{
-		EngramCount:  100,
+		EngramCount:  engramCount,
 		VaultCount:   1,
 		StorageBytes: 1024000,
 	}, nil
@@ -166,7 +180,11 @@ func (m *MockEngine) GetActivityCounts(ctx context.Context, req *ActivityCountsR
 }
 
 func (m *MockEngine) WorkerStats() cognitive.EngineWorkerStats {
-	return cognitive.EngineWorkerStats{}
+	return cognitive.EngineWorkerStats{
+		Hebbian:    cognitive.DisabledWorkerStats(),
+		Contradict: cognitive.DisabledWorkerStats(),
+		Confidence: cognitive.DisabledWorkerStats(),
+	}
 }
 
 func (m *MockEngine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeRequest, deliver trigger.DeliverFunc) (string, error) {
@@ -206,6 +224,10 @@ func (m *MockEngine) StartImport(ctx context.Context, vaultName, embedderModel s
 
 func (m *MockEngine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, error) {
 	return 0, nil
+}
+
+func (m *MockEngine) ResetRepairWatermark(ctx context.Context, vaultName string, which engine.RepairWatermarkKind) error {
+	return nil
 }
 
 func (m *MockEngine) Checkpoint(destDir string) error {
@@ -301,7 +323,14 @@ func (m *MockEngine) StartReembedVault(ctx context.Context, vaultName, modelName
 	return &vaultjob.Job{ID: "mock-reembed-job", Operation: "reembed", Source: vaultName, Target: vaultName}, nil
 }
 
-func (m *MockEngine) CountEmbedded(ctx context.Context) int64 {
+func (m *MockEngine) CountEmbedded(ctx context.Context, vault string) int64 {
+	v := vault
+	m.lastCountEmbeddedVault = &v
+	if vault != "" {
+		if n, ok := m.countEmbeddedByVault[vault]; ok {
+			return n
+		}
+	}
 	return 42
 }
 
@@ -1941,6 +1970,16 @@ func TestOpenAPISpec_ListEngramsLimitContract(t *testing.T) {
 	}
 	if !strings.Contains(engramsSection, "maximum: 200") {
 		t.Fatal("expected list engrams maximum limit 200 in openapi spec")
+	}
+}
+
+func TestOpenAPISpec_WorkerStateZeroIsAmbiguous(t *testing.T) {
+	body := string(openapiSpec)
+	if !strings.Contains(body, "Zero is ambiguous between active and disabled") {
+		t.Fatal("worker state description must explain that numeric zero is ambiguous")
+	}
+	if !strings.Contains(body, "Check enabled first") {
+		t.Fatal("worker state description must direct clients to check enabled first")
 	}
 }
 

@@ -41,10 +41,13 @@ type GoalHNSW interface {
 // For each new TypeGoal engram, it queries HNSW for topK=5 neighbors with
 // cosine similarity >= 0.6 and creates RelSupports associations.
 type GoalLinkWorker struct {
-	jobs    chan GoalJob
-	store   GoalStore
-	hnsw    GoalHNSW
-	wg      sync.WaitGroup
+	jobs  chan GoalJob
+	store GoalStore
+	hnsw  GoalHNSW
+	wg    sync.WaitGroup
+	// jobWG tracks in-flight+queued jobs; see Worker.jobWG in autoassoc.go
+	// for the same pattern. Lets WaitIdle() block deterministically.
+	jobWG   sync.WaitGroup
 	stopCtx context.Context
 }
 
@@ -64,11 +67,19 @@ func NewGoalLinkWorker(ctx context.Context, store GoalStore, hnswIdx GoalHNSW) *
 
 // EnqueueGoalJob submits a job. If the queue is full, the job is dropped silently.
 func (w *GoalLinkWorker) EnqueueGoalJob(job GoalJob) {
+	w.jobWG.Add(1) // Add BEFORE the send so a concurrent WaitIdle() can't observe a false-idle gap.
 	select {
 	case w.jobs <- job:
 	default:
+		w.jobWG.Done() // never queued — nothing to wait for
 		slog.Warn("goal_link: job queue full, dropping", "id", storage.ULID(job.ID).String())
 	}
+}
+
+// WaitIdle blocks until every job enqueued so far has finished processing.
+// Test-only synchronization helper; see Worker.WaitIdle in autoassoc.go.
+func (w *GoalLinkWorker) WaitIdle() {
+	w.jobWG.Wait()
 }
 
 // Stop drains the queue and waits for the worker to finish.
@@ -84,7 +95,14 @@ func (w *GoalLinkWorker) run() {
 	}
 }
 
+// process handles a single job. jobWG.Done() is deferred here (rather than
+// called as a plain statement in run() after process returns) so it still
+// fires if process ever panics — otherwise a panicking job would leak an
+// un-Done() jobWG entry and hang a subsequent WaitIdle() forever. This does
+// not add a recover(): a panic still propagates and crashes the process, it
+// only makes the bookkeeping robust if one unwinds through here.
 func (w *GoalLinkWorker) process(job GoalJob) {
+	defer w.jobWG.Done()
 	if w.hnsw == nil {
 		slog.Warn("goal_link: hnsw index not initialized, skipping", "id", storage.ULID(job.ID).String())
 		return

@@ -109,6 +109,9 @@ func (e *Engine) FindSimilarEntities(ctx context.Context, vault string, threshol
 //
 // When dryRun=true the function reports what would happen without writing anything.
 func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string, dryRun bool) (*MergeEntityResult, error) {
+	if err := e.refuseWrite(ctx); err != nil {
+		return nil, err
+	}
 	if entityA == "" || entityB == "" {
 		return nil, fmt.Errorf("merge_entity: entity_a and entity_b are required")
 	}
@@ -131,7 +134,7 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 
 	ws := e.store.ResolveVaultPrefix(vault)
 
-	recA, err := e.store.GetEntityRecord(ctx, entityA)
+	recA, err := e.store.GetEntityRecord(ctx, ws, entityA)
 	if err != nil {
 		return nil, fmt.Errorf("merge_entity: read entity_a: %w", err)
 	}
@@ -142,7 +145,7 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 		return nil, fmt.Errorf("merge_entity: entity_a %q is already merged into %q", entityA, recA.MergedInto)
 	}
 
-	recB, err := e.store.GetEntityRecord(ctx, entityB)
+	recB, err := e.store.GetEntityRecord(ctx, ws, entityB)
 	if err != nil {
 		return nil, fmt.Errorf("merge_entity: read entity_b: %w", err)
 	}
@@ -192,8 +195,15 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 		return nil, fmt.Errorf("merge_entity: relink relationship records from entity_a to entity_b: %w", err)
 	}
 
+	// Step 1c: rewrite armed prospective intentions (0x2D) whose cue was A —
+	// key moves to Hash(B) and every stored cue list naming A is rewritten to
+	// B (THE PUSH increment 1; mirrors the 0x26 relink above).
+	if err := e.store.RelinkProspectiveIntent(ctx, ws, entityA, entityB); err != nil {
+		return nil, fmt.Errorf("merge_entity: relink armed intentions from entity_a to entity_b: %w", err)
+	}
+
 	// Step 2: mark A as merged.
-	if err := e.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	if err := e.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:       recA.Name,
 		Type:       recA.Type,
 		Confidence: recA.Confidence,
@@ -209,7 +219,7 @@ func (e *Engine) MergeEntity(ctx context.Context, vault, entityA, entityB string
 	if recA.Confidence > newConf {
 		newConf = recA.Confidence
 	}
-	if err := e.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	if err := e.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:       recB.Name,
 		Type:       recB.Type,
 		Confidence: newConf,

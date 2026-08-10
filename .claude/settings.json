@@ -1,6 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "_comment": "Project-owned, committed so contributors get the same guards. Wires .claude/hooks/drift-guard.mjs, which enforces the path-shaped cross-surface obligations in docs/internals/drift-and-obligations.md. Replaces the two .claude/hookify.*.local.md rule files, which nothing ever executed.",
+  "_comment": "Project-owned, committed so contributors get the same guards. drift-guard.mjs enforces the path-shaped cross-surface obligations in docs/internals/drift-and-obligations.md (it replaced the two .claude/hookify.*.local.md rule files, which nothing ever executed). ledger-guard.mjs rejects a malformed memory proposal in the session that can still fix it. memory-freshness.mjs reads the drain receipt at SessionStart, so a wedged or never-run drain reports itself instead of waiting to be stat-ed by someone with no reason to suspect it. memory-drain.mjs moves proposals into the vault; see _trigger_rationale for why these three events and not others.",
+  "_trigger_rationale": "Measured across all 55 session transcripts for this project (35,417 events): the two sessions holding 81.3% of all events ran 7.5 and 6.3 days and fired SessionEnd ZERO times, while compacting 2 and 16 times (18 project-wide). PreCompact is therefore the only tick that actually fires in this workload, and it leads. SessionEnd is kept because it is free and it is the right event for a short session, but on a long one it is worth nothing. Stop covers the crash/kill/window-left-open case neither of the others reaches; it is debounced against the receipt's last_run_at (20 min). Firing every turn costs one stat of the ledger plus a full read-and-rewrite of the receipt log -- measured at 44.5 ms at its 2000-entry steady state, 43 ms empty -- not the 'one small write' this line claimed before. The watermark advances only on an outcome that actually consumed from the ledger: a locked/unreachable/error run that advanced it disabled this trigger permanently, because last_run_at only moves forward and an untouched ledger's mtime does not move at all. A periodic OS timer was rejected: it has no CLAUDE_PROJECT_DIR so it cannot find the right ledger, and it would fire mid-append. The drain is invoked with --hook, so it always exits 0 and the receipt carries the truth: a hook that reports failure at session close is a hook people disable.",
   "hooks": {
     "PostToolUse": [
       {
@@ -9,6 +10,59 @@
           {
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/drift-guard.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ledger-guard.mjs\""
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 60,
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/memory-drain.mjs\" --hook --trigger PreCompact"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 60,
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/memory-drain.mjs\" --hook --trigger SessionEnd"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 60,
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/memory-drain.mjs\" --hook --trigger Stop --debounce 20"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/memory-freshness.mjs\""
           }
         ]
       }

@@ -108,7 +108,13 @@ jobs:
 
       # TestMain builds the binary itself; we just need Go + assets present.
       # Tests exercise: help, unknown-command, init, start, stop, restart, status, MCP round-trip.
+      #
+      # MUNINN_REQUIRE_INTEGRATION makes "the suite did not run" a failure rather
+      # than a quiet skip (#812). A runner has no daemon on :8750, so if the port
+      # is busy here something is wrong and a green tick would be the wrong answer.
       - name: Run CLI integration tests
+        env:
+          MUNINN_REQUIRE_INTEGRATION: '1'
         run: go test -tags localassets,integration -v -timeout 120s ./cmd/muninn/...
 
   # ── Windows: build + smoke test ───────────────────────────────────────
@@ -360,12 +366,46 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Run shellcheck
-        run: shellcheck install.sh scripts/check-build-tags.sh
+        run: shellcheck install.sh scripts/check-build-tags.sh scripts/check-filename-build-constraints.sh scripts/check-nul-bytes.sh scripts/check-leak-tells.sh
 
       - name: Check build tags
         run: bash scripts/check-build-tags.sh
+
+      - name: Check leak-tells selftest
+        run: bash scripts/check-leak-tells.sh --selftest
+
+      - name: Check leak-tells (added lines in this change)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            RANGE="$BASE_SHA..$HEAD_SHA"
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            RANGE="$BEFORE_SHA..$GITHUB_SHA"
+          else
+            RANGE="HEAD~1..HEAD"
+          fi
+          bash scripts/check-leak-tells.sh --range "$RANGE"
+
+      # #814: a file named *_arm_test.go / *_386.go is excluded by the toolchain
+      # on filename alone, with no //go:build line and no diagnostic. Lives here
+      # rather than in `go test` because a Go guard against build exclusion can
+      # itself be build-excluded.
+      - name: Check filename build constraints
+        run: bash scripts/check-filename-build-constraints.sh
+
+      # #827: a NUL byte makes git classify a tracked source file as binary,
+      # hiding its contents from git diff and every diff-based review surface.
+      # Rides this job rather than a new one to keep the CI budget flat.
+      - name: Check for NUL bytes in tracked source files
+        run: bash scripts/check-nul-bytes.sh
 
   # ── API spec validation — catches drift before it ships ───────────────
   api-spec-validation:

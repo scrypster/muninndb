@@ -77,6 +77,38 @@ func (c *L1Cache) Set(ws [8]byte, id ULID, eng *Engram) {
 	}
 }
 
+// GetNoStamp is Get without the recency side effect: it returns the cached
+// engram (if present) WITHOUT updating lastAccess. A scoring pass is not a
+// user access — a ReadOnly Activate SCORES candidates it never emits, and
+// LastAccessNs (below) feeds real ACT-R recency scoring in a LATER,
+// unrelated recall. Stamping on every scoring pass made an aged, genuinely-
+// never-accessed memory look "just accessed" to that later call purely
+// because an earlier read-only pass glanced at it. Same immutability
+// contract as Get.
+func (c *L1Cache) GetNoStamp(ws [8]byte, id ULID) (*Engram, bool) {
+	val, ok := c.data.Load(cacheKeyFor(ws, id))
+	if !ok {
+		return nil, false
+	}
+	return val.(*cacheEntry).eng, true
+}
+
+// SetNoStamp is Set without the recency side effect: the entry is cached
+// (so a same-call re-read is still served without a Pebble round-trip) but
+// its lastAccess is left at the zero value, so LastAccessNs reports 0 (not
+// cached, in the recency sense) until a REAL access — one that goes through
+// Get/Set — stamps it. See GetNoStamp's doc for why.
+func (c *L1Cache) SetNoStamp(ws [8]byte, id ULID, eng *Engram) {
+	entry := &cacheEntry{
+		eng: eng,
+	}
+	c.data.Store(cacheKeyFor(ws, id), entry)
+	newCount := c.count.Add(1)
+	if newCount > int64(c.maxSize) {
+		c.evict()
+	}
+}
+
 // Delete removes an engram from the cache for the given vault.
 // Uses LoadAndDelete to avoid decrementing the counter when the key was already
 // absent (e.g. due to concurrent eviction or a prior DeleteByVault call).

@@ -26,7 +26,13 @@ type EngineInterface interface {
 
 	// Higher-level cognitive operations (tools 1-11)
 	GetContradictions(ctx context.Context, vault string) ([]ContradictionPair, error)
-	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (*WriteResult, error)
+	// Evolve replaces a memory with a new version. entities, when non-nil,
+	// replaces the carried entity set. importance overrides the successor's
+	// caller-asserted importance (nil inherits the predecessor's explicit
+	// importance, unset stays unset). effectiveAt is the valid-time moment the
+	// new version became true (predecessor's ValidUntil stamp = successor's
+	// ValidFrom); the zero time defaults to now.
+	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (*WriteResult, error)
 	Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error)
 	Session(ctx context.Context, vault string, since time.Time) (*SessionSummary, error)
 	Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error)
@@ -85,7 +91,10 @@ type EngineInterface interface {
 
 	// WhereLeftOff returns the most recently accessed active engrams, sorted by
 	// LastAccess descending. limit caps results (default 10, max 50).
-	WhereLeftOff(ctx context.Context, vault string, limit int) ([]WhereLeftOffEntry, error)
+	// excludeTypeLabels is an opt-in salience filter (S5): engrams whose
+	// type_label is in the set are skipped and the scan keeps going to fill
+	// limit. A nil/empty excludeTypeLabels is a no-op (default behavior).
+	WhereLeftOff(ctx context.Context, vault string, limit int, excludeTypeLabels []string) ([]WhereLeftOffEntry, error)
 
 	// FindByEntity returns engrams that mention the given entity name,
 	// scanned from the 0x23 reverse index; on zero exact matches the vault's
@@ -99,14 +108,16 @@ type EngineInterface interface {
 	// WriteIdempotency stores an idempotency receipt (op_id → engramID).
 	WriteIdempotency(ctx context.Context, opID, engramID string) error
 
-	// SetEntityState sets the lifecycle state of a named entity, and optionally
-	// corrects its type. entityType may be empty (preserves existing type).
-	// For state="merged", mergedInto must be the canonical entity name.
-	SetEntityState(ctx context.Context, entityName, state, mergedInto, entityType string) error
+	// SetEntityState sets the lifecycle state of a named entity IN vault, and
+	// optionally corrects its type. entityType may be empty (preserves existing
+	// type). For state="merged", mergedInto must be the canonical entity name.
+	// The vault is load-bearing: entity records are vault-scoped (#683), and
+	// without it this was a cross-tenant write.
+	SetEntityState(ctx context.Context, vault, entityName, state, mergedInto, entityType string) error
 
-	// SetEntityStateBatch applies multiple entity state updates sequentially.
+	// SetEntityStateBatch applies multiple entity state updates to vault sequentially.
 	// Returns one error per operation (nil = success). Partial success is preserved.
-	SetEntityStateBatch(ctx context.Context, ops []engine.EntityStateOp) []error
+	SetEntityStateBatch(ctx context.Context, vault string, ops []engine.EntityStateOp) []error
 
 	// GetEntityClusters returns entity pairs that frequently co-occur in the same engrams,
 	// sorted by count descending. Only pairs with count >= minCount are returned.
@@ -173,6 +184,11 @@ type EngineInterface interface {
 	// trust must be one of "verified", "inferred", "external", "untrusted".
 	SetTrust(ctx context.Context, vault, id, trust string) error
 
+	// UpdateTags replaces an engram's full tag set in place. The ID, version
+	// lineage, and access history are preserved — unlike Evolve, which mints a
+	// new ULID and archives the predecessor.
+	UpdateTags(ctx context.Context, vault, id string, tags []string) error
+
 	// CompareAndSet atomically transitions an engram's lifecycle state, applying
 	// setState only if the current state matches expectState (nil bounds are
 	// skipped). Returns whether it applied plus the current state and lease owner.
@@ -187,10 +203,12 @@ type EngineInterface interface {
 	// when the engram was unleased or held by someone else.
 	Release(ctx context.Context, vault, id, owner string) (released bool, curOwner string, err error)
 
-	// GetAnnotations returns annotation metadata for a single engram.
+	// GetAnnotations returns annotation metadata for a single engram, gated by
+	// req's own visibility contract (#700) — pass the SAME request the
+	// recall call used so the annotation answers for the same caller view.
 	// Used to populate muninn_recall annotation objects when annotate=true.
 	// Returns a non-nil *engine.AnnotationData (possibly with empty fields) on success.
-	GetAnnotations(ctx context.Context, vault, id string) (*engine.AnnotationData, error)
+	GetAnnotations(ctx context.Context, vault, id string, req *mbp.ActivateRequest) (*engine.AnnotationData, error)
 
 	// RegisterVaultName registers a vault name in the engine's vault registry
 	// (idempotent 2-key write). Used by muninn_create_workflow_vault (RFC #597).

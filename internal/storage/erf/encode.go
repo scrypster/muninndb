@@ -58,6 +58,7 @@ func encodeInto(b *erfBuffer, eng *Engram) error {
 	b.buf[OffsetMemoryType] = eng.MemoryType
 	binary.BigEndian.PutUint16(b.buf[OffsetClassification:OffsetClassification+2], eng.Classification)
 	b.buf[OffsetTrust] = eng.Trust
+	encodeValidityAndImportance(b.buf, eng)
 
 	conceptBytes := []byte(eng.Concept)
 	createdByBytes := []byte(eng.CreatedBy)
@@ -161,6 +162,24 @@ func encodeInto(b *erfBuffer, eng *Engram) error {
 	return nil
 }
 
+// encodeValidityAndImportance writes the valid-time fields and Importance into
+// the formerly-reserved metadata area (bytes 72-91; 92-99 stay reserved).
+// Zero values encode as raw zeros — byte-identical to legacy records — so a
+// record with no validity set keeps the legacy decode semantics
+// (ValidFrom = CreatedAt, ValidUntil open). See decodeValidity.
+func encodeValidityAndImportance(buf []byte, eng *Engram) {
+	var rawFrom, rawUntil uint64
+	if !eng.ValidFrom.IsZero() {
+		rawFrom = uint64(eng.ValidFrom.UnixNano())
+	}
+	if !eng.ValidUntil.IsZero() {
+		rawUntil = uint64(eng.ValidUntil.UnixNano())
+	}
+	binary.BigEndian.PutUint64(buf[OffsetValidFrom:OffsetValidFrom+8], rawFrom)
+	binary.BigEndian.PutUint64(buf[OffsetValidUntil:OffsetValidUntil+8], rawUntil)
+	binary.BigEndian.PutUint32(buf[OffsetImportance:OffsetImportance+4], math.Float32bits(eng.Importance))
+}
+
 // EncodeV2 serializes an Engram into ERF v2 binary format.
 // V2 does NOT write inline associations or embeddings — both live in separate Pebble keys.
 // Callers are responsible for writing the embedding to the 0x18 key separately.
@@ -209,6 +228,7 @@ func encodeV2Into(b *erfBuffer, eng *Engram) error {
 	b.buf[OffsetMemoryType] = eng.MemoryType
 	binary.BigEndian.PutUint16(b.buf[OffsetClassification:OffsetClassification+2], eng.Classification)
 	b.buf[OffsetTrust] = eng.Trust
+	encodeValidityAndImportance(b.buf, eng)
 
 	conceptBytes := []byte(eng.Concept)
 	createdByBytes := []byte(eng.CreatedBy)

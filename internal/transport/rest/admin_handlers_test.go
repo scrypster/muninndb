@@ -850,7 +850,7 @@ func (m *mockEngineWithStats) EmbedStats() plugin.RetroactiveStats {
 	return m.embedStats
 }
 
-func (m *mockEngineWithStats) CountEmbedded(ctx context.Context) int64 {
+func (m *mockEngineWithStats) CountEmbedded(ctx context.Context, vault string) int64 {
 	return m.embeddedCount
 }
 

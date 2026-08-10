@@ -175,6 +175,83 @@ func TestLoadSaveDefaultVault(t *testing.T) {
 	}
 }
 
+// TestUseCommand_WriteFailureIsReported verifies that when the config file
+// cannot be written, `use <vault>` reports the failure instead of printing
+// an unqualified "Switched to vault" success message (#634).
+//
+// The write is denied structurally rather than via chmod: ".muninn" is
+// created as a regular file, so the config directory can never be created
+// under it. A chmod-based permission denial does not apply when the test
+// runs as root, but this structural failure does regardless of privilege.
+func TestUseCommand_WriteFailureIsReported(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir) // os.UserHomeDir() checks USERPROFILE on Windows
+
+	if err := os.WriteFile(filepath.Join(tmpDir, ".muninn"), []byte("occupied"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	r := &replState{}
+
+	oldStdout := os.Stdout
+	rp, wp, _ := os.Pipe()
+	os.Stdout = wp
+
+	r.handleCommand("use targetvault")
+
+	wp.Close()
+	os.Stdout = oldStdout
+
+	buf := make([]byte, 4096)
+	n, _ := rp.Read(buf)
+	output := string(buf[:n])
+
+	if strings.Contains(output, "Switched to vault 'targetvault'\n") {
+		t.Errorf("expected a failed persist to be reported, not a bare success message; got: %q", output)
+	}
+	if !strings.Contains(output, "Error") {
+		t.Errorf("expected the write failure to be reported to the user; got: %q", output)
+	}
+}
+
+// TestUseCommand_PreservesUnrelatedConfigKeys verifies that switching vaults
+// does not clobber other keys that may legitimately live in ~/.muninn/config
+// (#634).
+func TestUseCommand_PreservesUnrelatedConfigKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	configDir := filepath.Join(tmpDir, ".muninn")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	configFile := filepath.Join(configDir, "config")
+	initial := `{"default_vault":"stalevault","future_setting":"keepme"}`
+	if err := os.WriteFile(configFile, []byte(initial), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	r := &replState{}
+	r.handleCommand("use targetvault")
+
+	b, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatalf("config is not valid JSON after switch: %v", err)
+	}
+	if cfg["future_setting"] != "keepme" {
+		t.Errorf("expected unrelated config key to survive vault switch, got config: %s", string(b))
+	}
+	if cfg["default_vault"] != "targetvault" {
+		t.Errorf("expected default_vault updated to targetvault, got %v", cfg["default_vault"])
+	}
+}
+
 // TestCmdShowVaultsConnectionError verifies cmdShowVaults degrades gracefully
 // when the server is unreachable.
 func TestCmdShowVaultsConnectionError(t *testing.T) {

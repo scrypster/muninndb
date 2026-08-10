@@ -36,7 +36,7 @@ func TestEntityTokens(t *testing.T) {
 func linkEntityEngram(t *testing.T, eng *Engine, ws [8]byte, concept, entityName string) storage.ULID {
 	t.Helper()
 	ctx := context.Background()
-	require.NoError(t, eng.store.UpsertEntityRecord(ctx, storage.EntityRecord{
+	require.NoError(t, eng.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{
 		Name:   entityName,
 		Type:   "concept",
 		Source: "inline",
