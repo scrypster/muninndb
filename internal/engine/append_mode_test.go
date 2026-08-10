@@ -31,7 +31,7 @@ var appendInfra = map[string]bool{
 	// cache consults; server wiring only, no credential-reachable path, no
 	// engram/vault mutation.
 	"SetReplicaProbe": true,
-	"Store": true, "ResetReplayFailCount": true, "Stop": true, "Checkpoint": true,
+	"Store":           true, "ResetReplayFailCount": true, "Stop": true, "Checkpoint": true,
 	// SetWriteGate installs the cluster single-writer gate (#596) — wiring, and
 	// it can only ever REFUSE writes, never perform one.
 	"SetWriteGate":  true,
