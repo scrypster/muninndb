@@ -261,6 +261,25 @@ type declaredScanCacheEntry struct {
 // This is engine in-memory state. It writes nothing, so COG-11 is untouched by
 // it, and it is per-process — a restart re-derives.
 func (e *Engine) declaredContradictionsCached(ctx context.Context, ws [8]byte) storage.DeclaredContradictionScan {
+	// A cluster follower NEVER uses the cache. Its invalidation signal
+	// (ContradictsWriteGen) is maintained by PebbleStore write methods, and a
+	// follower's writes arrive through replication.Applier, which commits raw
+	// Pebble batches BELOW the store — the counter stays at zero while the
+	// leader declares, so a warmed cache would under-report forever. Paying the
+	// full scan per orientation call (bounded ~55ms at the scan cap, measured)
+	// is honest; a silently stale count is the failure this readout exists to
+	// close. When #869's applier-level invalidation callback lands, the gen
+	// should ride it and this bypass can be removed.
+	if e.replicaProbe != nil && e.replicaProbe() {
+		e.declaredScanRuns.Add(1)
+		scan, err := e.store.DeclaredContradictions(ctx, ws, 0)
+		if err != nil {
+			slog.Warn("contradiction debt: declared-edge scan failed; the readout is a lower bound", "err", err)
+			return storage.DeclaredContradictionScan{}
+		}
+		return scan
+	}
+
 	gen := e.store.ContradictsWriteGen(ws)
 	if v, ok := e.declaredScanCache.Load(ws); ok {
 		if entry, _ := v.(*declaredScanCacheEntry); entry != nil && entry.gen == gen {
@@ -279,6 +298,13 @@ func (e *Engine) declaredContradictionsCached(ctx context.Context, ws [8]byte) s
 	e.declaredScanCache.Store(ws, &declaredScanCacheEntry{gen: gen, scan: scan})
 	return scan
 }
+
+// SetReplicaProbe installs the cluster-role probe consulted by the debt scan
+// cache. probe must report true ONLY for a node positively established as a
+// follower (replication.ClusterCoordinator.IsFollower has exactly that
+// contract). Call once during server wiring, before traffic; nil means
+// standalone and keeps the cache unconditionally.
+func (e *Engine) SetReplicaProbe(probe func() bool) { e.replicaProbe = probe }
 
 // DeclaredScanRunsForTest reports how many times the declared-edge scan has
 // actually executed in this process. It exists because the two properties this

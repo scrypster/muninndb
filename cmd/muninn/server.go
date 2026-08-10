@@ -1462,6 +1462,12 @@ func runServer() {
 
 	// Wire cluster role change callbacks now that the engine exists.
 	if coordinator != nil {
+		// The COG-29 debt scan cache is bypassed on a positively-established
+		// follower: replicated writes land below the store, so the cache's
+		// invalidation counter never moves there (see
+		// declaredContradictionsCached and #869).
+		eng.SetReplicaProbe(coordinator.IsFollower)
+
 		hebbianStore := cognitive.NewHebbianStoreAdapter(store)
 		contradictStore := cognitive.NewContradictStoreAdapter(store)
 		confidenceStore := cognitive.NewConfidenceStoreAdapter(store)

@@ -12,15 +12,26 @@ import "sync/atomic"
 // for ADDITIONS — the direction that matters, because a missed addition means a
 // declared conflict is silently not reported.
 //
-// It is deliberately bumped in the STORE rather than in the engine's Link path.
-// The engine path misses two writers that reach the same keys: the inline
-// association writers used by Write/WriteBatch (an engram created with
-// Associations attached), and — in cluster mode — replication applying a peer's
-// write, which never calls Engine.Link. An engine-side hook list would have gone
-// stale on a follower with no way to notice.
+// It is deliberately bumped in the STORE rather than in the engine's Link path,
+// because the engine path misses the inline association writers used by
+// Write/WriteBatch (an engram created with Associations attached). Every bump
+// happens AFTER the batch commit that makes the edge readable — a bump before
+// commit advertises a write Pebble cannot serve yet, and a concurrent scan in
+// that window would cache an EMPTY result under the FRESH generation, an
+// under-report that never self-heals.
 //
-// NAMED RESIDUAL: association DELETION does not bump it. A contradicts edge that
-// decays below AssocMinWeight and is pruned, or that is removed with a hard
+// NAMED RESIDUAL 1 — replication is NOT covered, by any store-level hook.
+// replication.Applier commits raw Pebble batches through *pebble.DB, below this
+// store entirely (the same layering that produced #869's stale L1 caches), so a
+// follower's counter never moves for a leader's declaration. Consumers must not
+// trust this counter on a cluster follower: the engine's debt scan cache
+// bypasses itself there (Engine.SetReplicaProbe). The correct wiring is an
+// applier-level invalidation callback — the fix shape #869 introduces for the
+// L1/meta caches — and when that lands, this generation should ride the same
+// hook and the follower bypass can be removed.
+//
+// NAMED RESIDUAL 2 — association DELETION does not bump it. A contradicts edge
+// that decays below AssocMinWeight and is pruned, or that is removed with a hard
 // delete of an endpoint, can leave a cached scan listing a pair whose edge is
 // gone. That is an OVER-warn, and the resolution rule downstream drops a pair
 // whose endpoint no longer exists as dangling, so it is bounded and never

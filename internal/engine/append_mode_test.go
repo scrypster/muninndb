@@ -27,6 +27,10 @@ var appendInfra = map[string]bool{
 	"ClearCognitiveWorkers": true, "SetCognitiveWorkers": true, "SetCoordinator": true,
 	"SetEnrichPlugin": true, "SetLatencyTracker": true, "SetOnWrite": true,
 	"SetReplayEnrichTimeout": true, "SetRetroactiveProcessors": true, "SetTransitionWorker": true,
+	// SetReplicaProbe installs the cluster-role probe the COG-29 debt scan
+	// cache consults; server wiring only, no credential-reachable path, no
+	// engram/vault mutation.
+	"SetReplicaProbe": true,
 	"Store": true, "ResetReplayFailCount": true, "Stop": true, "Checkpoint": true,
 	// SetWriteGate installs the cluster single-writer gate (#596) — wiring, and
 	// it can only ever REFUSE writes, never perform one.

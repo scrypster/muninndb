@@ -248,6 +248,16 @@ type Engine struct {
 	// declaredScanRuns counts actual executions of that scan, so the gate and
 	// the cache — both of which change only I/O — can be pinned by a test.
 	declaredScanRuns atomic.Int64
+	// replicaProbe, when non-nil, reports whether this node is POSITIVELY a
+	// cluster follower (Lobe/Observer). The debt scan cache is bypassed on a
+	// follower because its invalidation signal — the store's RelContradicts
+	// write counter — never moves for replicated writes: replication.Applier
+	// commits raw Pebble batches below the store (#869 is the same class), so
+	// a follower's cache would serve a stale scan forever while the leader
+	// declares. nil (standalone) and false (leader / RoleUnknown) keep the
+	// cache; the asymmetry matches replication.LocalAppendFunc's fail-open
+	// reasoning. Set once at server wiring, before any traffic.
+	replicaProbe func() bool
 
 	// mergeMu serialises concurrent MergeEntity calls that touch the same entities.
 	// Uses a dedicated stripe array separate from the storage-layer entity locks to

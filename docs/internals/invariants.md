@@ -204,11 +204,23 @@ Format: **[INV-n]** assertion — `file:anchor` — *why it matters / what break
   it paid that on every orientation call forever). The scan portion implied by cold-minus-warm
   is ~8.3ms per 100k associations, independently reproducing the in-tree
   `BenchmarkDeclaredContradictions` figure of 8.5ms/100k. **The steady-state number contains no
-  scan at all, so it does not grow with association count** — a property pinned structurally by
-  the scan counter rather than argued by extrapolation. An earlier version of this paragraph
-  projected "near a second" for a 10M-association vault; that was wrong twice over — the scan
-  cap bounds the uncached cost at roughly its ~55ms ceiling, and after the cache only the first
-  call following a declaration pays it at all.
+  scan at all** — pinned structurally by the scan counter rather than argued by extrapolation —
+  **but it is not flat: what remains scales with pair count × association fan-out**, because the
+  0x0A record read and `markResolvedContradictions`' two per-pair `GetAssociations` calls run
+  fresh on every derivation. Adversarially measured: 196µs at 100k associations / 40 pairs,
+  380µs at 600k / 40, and **~2.97ms with ~14MB allocated per call at 600k / 400 pairs** — far
+  under the ~50ms line, but "no growth" would be the wrong sentence, and the allocation figure
+  is real GC pressure on a recall-adjacent path if pair counts ever get pathological. An
+  earlier version of this paragraph projected "near a second" for a 10M-association vault; that
+  was wrong twice over — the scan cap bounds the uncached cost at roughly its ~55ms ceiling,
+  and after the cache only the first call following a declaration pays it at all. On a cluster
+  FOLLOWER the cache is bypassed entirely and every orientation call pays the uncached cost:
+  the invalidation counter is store-level and replication applies below the store (#869's
+  layering), so a follower cache would under-report the leader's declarations forever —
+  honest-but-slower until #869's applier invalidation callback exists to ride
+  (`TestContradictionDebt_FollowerBypassesTheScanCache`, and the write-side ordering is pinned
+  by `TestContradictionDebt_StagedDeclarationDoesNotPoisonTheCache`: the generation bumps
+  post-commit, never at stage time).
 
   **Two more named residuals, both deliberate.** (a) #713's per-vault `ExcludeTags` drops a
   memory from recall RANKING but does not filter this readout, so an excluded memory's concept

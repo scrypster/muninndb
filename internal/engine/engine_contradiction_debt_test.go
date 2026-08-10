@@ -886,3 +886,157 @@ func BenchmarkContradictionDebt_ResolvedVault(b *testing.B) {
 		}
 	}
 }
+
+// TestContradictionDebt_StagedDeclarationDoesNotPoisonTheCache is the TOCTOU
+// arm of the write-generation ordering. The generation must be bumped AFTER the
+// batch commit that makes the edge readable: a bump at stage time advertises a
+// write Pebble cannot serve yet, so a derivation racing the window re-scans,
+// sees nothing, and caches the EMPTY scan under the FRESH generation — a
+// process-lifetime under-report of a declared conflict. The sequence below is
+// the deterministic form of that race (stage → derive → commit), with the
+// uncached GetContradictionReport as the ground-truth oracle.
+//
+// RED: fails with any noteContradictsWrite call restored to its pre-commit
+// position (the shipped defect), because the mid-window derivation then caches
+// count=1 under the post-declaration generation and the final read never
+// invalidates.
+func TestContradictionDebt_StagedDeclarationDoesNotPoisonTheCache(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Warm the cache with one real declared pair.
+	debtPairFixture(t, eng, "test", "ballast depth", "the siding needs 200mm of ballast",
+		"the siding needs 300mm of ballast", time.Now().Add(-24*time.Hour))
+	warm, err := eng.ContradictionDebt(ctx, "test")
+	if err != nil || warm == nil || warm.Count != 1 {
+		t.Fatalf("warm-up: want cached count 1, got %+v err=%v", warm, err)
+	}
+
+	// Stage a SECOND declared pair in a store batch without committing it.
+	validFrom := time.Now().Add(-48 * time.Hour)
+	wa, err := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "points heater", Content: "the points heater trips at dawn", ValidFrom: &validFrom})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wb, err := eng.Write(ctx, &mbp.WriteRequest{Vault: "test", Concept: "points heater revised", Content: "the points heater holds through dawn", ValidFrom: &validFrom})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.waitWriteTimeIdle()
+	idA, _ := storage.ParseULID(wa.ID)
+	idB, _ := storage.ParseULID(wb.ID)
+	ws := eng.Store().ResolveVaultPrefix("test")
+
+	batch := eng.Store().NewBatch()
+	if err := batch.WriteAssociation(ctx, ws, idB, idA, &storage.Association{
+		TargetID: idA, RelType: storage.RelContradicts, Weight: 0.8, Confidence: 1,
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Derive INSIDE the stage/commit window. Whatever it answers is allowed to
+	// be stale (the edge is not durable yet) — but it must not poison the cache
+	// for the post-commit world.
+	if _, err := eng.ContradictionDebt(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := batch.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	eng.waitWriteTimeIdle()
+
+	// Oracle: the production report path, which never consults the scan cache.
+	report, err := eng.GetContradictionReport(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 0
+	for _, p := range report.Pairs {
+		if p.Status == ContradictionDeclared {
+			want++
+		}
+	}
+	if want != 2 {
+		t.Fatalf("oracle sanity: want 2 unresolved declared pairs on the ground truth, got %d", want)
+	}
+
+	debt, err := eng.ContradictionDebt(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if debt == nil || debt.Count != want {
+		got := 0
+		if debt != nil {
+			got = debt.Count
+		}
+		t.Fatalf("SCAN CACHE UNDER-REPORTS after a staged-then-committed declaration: debt count = %d, ground truth = %d", got, want)
+	}
+}
+
+// TestContradictionDebt_FollowerBypassesTheScanCache pins the cluster-follower
+// arm. A follower's ContradictsWriteGen never moves for replicated writes
+// (replication.Applier commits raw Pebble batches below the store — the #869
+// layering), so on a node whose replicaProbe reports follower the derivation
+// must not trust the cache at all: every call re-scans.
+//
+// RED: fails with the replicaProbe bypass removed from
+// declaredContradictionsCached, because the second and later derivations are
+// then served from the cache and the scan-run counter stays flat.
+func TestContradictionDebt_FollowerBypassesTheScanCache(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	debtPairFixture(t, eng, "test", "signal lamp", "the up-line lamp is oil-lit",
+		"the up-line lamp was electrified", time.Now().Add(-24*time.Hour))
+
+	// Leader/standalone first: cache holds, exactly one scan across repeats.
+	if _, err := eng.ContradictionDebt(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	base := eng.DeclaredScanRunsForTest()
+	for i := 0; i < 5; i++ {
+		if _, err := eng.ContradictionDebt(ctx, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := eng.DeclaredScanRunsForTest() - base; got != 0 {
+		t.Fatalf("standalone control: %d scans over 5 warm derivations, want 0 (cache must hold)", got)
+	}
+
+	// Now the node is a follower. The cache is warm and valid by generation —
+	// and must be ignored anyway.
+	eng.SetReplicaProbe(func() bool { return true })
+	base = eng.DeclaredScanRunsForTest()
+	for i := 0; i < 5; i++ {
+		debt, err := eng.ContradictionDebt(ctx, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if debt == nil || debt.Count != 1 {
+			t.Fatalf("follower derivation %d: want count 1, got %+v", i, debt)
+		}
+	}
+	if got := eng.DeclaredScanRunsForTest() - base; got != 5 {
+		t.Fatalf("follower ran the scan %d time(s) over 5 orientation calls, want 5 — a follower must never trust the cache (its invalidation counter never moves for replicated writes)", got)
+	}
+
+	// And back: a probe reporting NOT-follower (leader or RoleUnknown) resumes
+	// caching, matching LocalAppendFunc's fail-open asymmetry.
+	eng.SetReplicaProbe(func() bool { return false })
+	if _, err := eng.ContradictionDebt(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	base = eng.DeclaredScanRunsForTest()
+	for i := 0; i < 3; i++ {
+		if _, err := eng.ContradictionDebt(ctx, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := eng.DeclaredScanRunsForTest() - base; got != 0 {
+		t.Fatalf("promoted node: %d scans over 3 warm derivations, want 0 (cache resumes)", got)
+	}
+}
