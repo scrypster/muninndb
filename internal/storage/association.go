@@ -136,7 +136,6 @@ func (ps *PebbleStore) writeAssociationUnguarded(ctx context.Context, wsPrefix [
 	const seedCount uint32 = 1
 	fwdKey := keys.AssocFwdKey(wsPrefix, [16]byte(src), assoc.Weight, [16]byte(dst))
 	assocValue := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, assoc.Weight, seedCount)
-	ps.noteContradictsWrite(wsPrefix, assoc.RelType)
 	batch.Set(fwdKey, assocValue[:], nil)
 
 	// Reverse association (0x04 key)
@@ -151,6 +150,11 @@ func (ps *PebbleStore) writeAssociationUnguarded(ctx context.Context, wsPrefix [
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
+	// AFTER the commit, never before. See noteContradictsWrite: a bump that
+	// advertises a write Pebble cannot serve yet lets a concurrent scan cache an
+	// EMPTY result under the FRESH generation, and that under-report never
+	// self-heals.
+	ps.noteContradictsWrite(wsPrefix, assoc.RelType)
 	ps.replicateBatch(batch)
 
 	// Invalidate the source node's cached FORWARD list and the destination

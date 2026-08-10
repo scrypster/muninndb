@@ -454,7 +454,10 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 		batch.Set(keys.EmbeddingKey(wsPrefix, [16]byte(eng.ID)), embedBytes, nil)
 	}
 
-	// 0x03/0x04/weight-index: association keys
+	// 0x03/0x04/weight-index: association keys. A queued RelContradicts edge is
+	// remembered here and the generation is bumped only AFTER the commit — see
+	// noteContradictsWrite.
+	contradictsQueued := false
 	for _, assoc := range eng.Associations {
 		// Seed PeakWeight from Weight if not set (legacy or newly created associations).
 		peak := assoc.PeakWeight
@@ -462,7 +465,9 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 			peak = assoc.Weight
 		}
 		av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
-		ps.noteContradictsWrite(wsPrefix, assoc.RelType)
+		if assoc.RelType == RelContradicts {
+			contradictsQueued = true
+		}
 		batch.Set(keys.AssocFwdKey(wsPrefix, [16]byte(eng.ID), assoc.Weight, [16]byte(assoc.TargetID)), av[:], nil)
 		batch.Set(keys.AssocRevKey(wsPrefix, [16]byte(assoc.TargetID), assoc.Weight, [16]byte(eng.ID)), av[:], nil)
 		var wiBuf [4]byte
@@ -507,6 +512,9 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	}
 	if err := batch.Commit(syncOption); err != nil {
 		return ULID{}, fmt.Errorf("commit batch: %w", err)
+	}
+	if contradictsQueued {
+		ps.noteContradictsWrite(wsPrefix, RelContradicts)
 	}
 
 	ps.replicateBatch(batch)
@@ -568,6 +576,9 @@ type EngramBatchItem struct {
 // Returns a slice of (ULID, error) per item. If the batch commit itself fails,
 // all items receive the commit error.
 func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatchItem) ([]ULID, []error) {
+	// Vaults with a RelContradicts edge queued in this batch. The generation is
+	// bumped only AFTER the commit — see noteContradictsWrite.
+	contradictsQueued := map[[8]byte]struct{}{}
 	n := len(items)
 	ids := make([]ULID, n)
 	errs := make([]error, n)
@@ -691,7 +702,9 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 				peak = assoc.Weight
 			}
 			av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
-			ps.noteContradictsWrite(ws, assoc.RelType)
+			if assoc.RelType == RelContradicts {
+				contradictsQueued[ws] = struct{}{}
+			}
 			batch.Set(keys.AssocFwdKey(ws, id16, assoc.Weight, [16]byte(assoc.TargetID)), av[:], nil)
 			batch.Set(keys.AssocRevKey(ws, [16]byte(assoc.TargetID), assoc.Weight, id16), av[:], nil)
 			var wiBuf [4]byte
@@ -825,6 +838,9 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		return ids, errs
 	}
 
+	for ws := range contradictsQueued {
+		ps.noteContradictsWrite(ws, RelContradicts)
+	}
 	ps.replicateBatch(batch)
 
 	// Post-commit: vault counters, WAL/MOL, provenance — per item.

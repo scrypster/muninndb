@@ -40,6 +40,10 @@ type pebbleStoreBatch struct {
 	// the batch may be Discarded, and evicting at queue time would drop a
 	// CORRECT cache entry on behalf of a write that never lands.
 	assocEdges []batchAssocEdge
+	// contradictsQueued records the vaults with a RelContradicts edge staged in
+	// this batch. The generation is bumped in Commit, AFTER the data is
+	// visible — see noteContradictsWrite.
+	contradictsQueued [][8]byte
 }
 
 // batchAssocEdge is one association-cache invalidation owed by a batch.
@@ -153,7 +157,9 @@ func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8
 			peak = assoc.Weight
 		}
 		av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
-		b.ps.noteContradictsWrite(wsPrefix, assoc.RelType)
+		if assoc.RelType == RelContradicts {
+			b.contradictsQueued = append(b.contradictsQueued, wsPrefix)
+		}
 		b.batch.Set(keys.AssocFwdKey(wsPrefix, id16, assoc.Weight, [16]byte(assoc.TargetID)), av[:], nil)
 		b.batch.Set(keys.AssocRevKey(wsPrefix, [16]byte(assoc.TargetID), assoc.Weight, id16), av[:], nil)
 		var wiBuf [4]byte
@@ -224,7 +230,9 @@ func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src
 		peak = assoc.Weight
 	}
 	av := encodeAssocValue(assoc.RelType, assoc.Confidence, assoc.CreatedAt, assoc.LastActivated, peak, assoc.CoActivationCount)
-	b.ps.noteContradictsWrite(ws, assoc.RelType)
+	if assoc.RelType == RelContradicts {
+		b.contradictsQueued = append(b.contradictsQueued, ws)
+	}
 	b.batch.Set(keys.AssocFwdKey(ws, [16]byte(src), assoc.Weight, [16]byte(dst)), av[:], nil)
 	b.batch.Set(keys.AssocRevKey(ws, [16]byte(dst), assoc.Weight, [16]byte(src)), av[:], nil)
 	var weightBuf [4]byte
@@ -430,6 +438,13 @@ func (b *pebbleStoreBatch) Commit() error {
 	// b.batch.Close() (Discard), same constraint replicateBatch documents
 	// for its direct callers.
 	b.ps.replicateBatch(b.batch)
+
+	// The COG-29 debt scan cache's invalidation signal, bumped here rather than
+	// at stage time for the same reason the cache evictions below are: the
+	// generation must never advertise a write Pebble cannot serve yet.
+	for _, ws := range b.contradictsQueued {
+		b.ps.noteContradictsWrite(ws, RelContradicts)
+	}
 
 	// Invalidate L1 cache entries for all engrams whose state was updated.
 	// The batch has now been flushed to Pebble; any cached entry reflects the
