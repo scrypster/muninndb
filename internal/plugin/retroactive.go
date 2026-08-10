@@ -57,10 +57,14 @@ type RetroactiveProcessor struct {
 	wg       sync.WaitGroup
 	notifyCh chan struct{} // buffered(1); non-blocking send from Notify()
 
-	// vaultGuards establish a clear boundary without stopping processing for
-	// unrelated vaults. Plugin calls hold a per-vault admission through
-	// persistence; ClearVault invalidates the generation, closes admission,
-	// and waits for admitted calls to drain.
+	// vaultGuards establish a clear boundary. Plugin calls hold a per-vault
+	// admission through persistence; ClearVault invalidates the generation,
+	// closes admission, and waits for admitted calls to drain. Scope note: an
+	// invalidation aborts the whole cross-vault pass (ScanWithoutFlag is
+	// global), so unrelated vaults' pending work waits until the next pass —
+	// their admissions are untouched, but the sweep serving them is not.
+	// Sizing: the map holds one entry per vault EVER SCANNED, not ever
+	// cleared — lockCurrentVault creates entries on the scan path.
 	vaultGuards sync.Map // map[[8]byte]*retroactiveVaultGuard
 
 	// onEmbed, when set, is called after an engram's embedding is computed and
@@ -108,6 +112,11 @@ func (rp *RetroactiveProcessor) Notify() {
 // finish persisting. If ctx is cancelled while waiting, the boundary is
 // abandoned and no clear may proceed. The returned function releases a
 // successfully established boundary and wakes the processor.
+//
+// The wait is bounded ONLY by the caller's context: an admitted enrich call
+// can hold admission for the provider's full HTTP timeout, so a clear against
+// a slow provider blocks for that long unless the caller's ctx carries its
+// own deadline. Callers that must not stall should pass one.
 func (rp *RetroactiveProcessor) BeginVaultClear(ctx context.Context, ws [8]byte) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -680,7 +689,13 @@ engramLoop:
 			if len(microEngrams) >= microBatchSize {
 				flushMicroBatch()
 				if passInvalidated {
-					rp.Notify()
+					// No self-notify: the clear that invalidated this pass owns
+					// the wake-up (its finish closure and cancellation arm both
+					// call rp.Notify at exactly the right moment). A notify here
+					// spins — the reawakened pass is rejected by the same held
+					// boundary and re-notifies itself, measured at ~175k
+					// passes/sec for the clear's whole duration, starving
+					// unrelated vaults' scans.
 					break
 				}
 			}
@@ -780,8 +795,8 @@ engramLoop:
 		case enrichReturnSuccess:
 			return true
 		case enrichInvalidatePass:
+			// No self-notify — see the micro-batch invalidation branch above.
 			passInvalidated = true
-			rp.Notify()
 			break engramLoop
 		}
 		if processed == 0 {
@@ -815,11 +830,9 @@ engramLoop:
 		}
 	}
 
-	// Flush any remaining micro-batch at end of iterator.
+	// Flush any remaining micro-batch at end of iterator. An invalidated pass
+	// does NOT re-notify here — see the micro-batch invalidation branch.
 	flushMicroBatch()
-	if passInvalidated {
-		rp.Notify()
-	}
 
 	// One summary line per pass instead of one per engram — a mismatched
 	// vault can hold thousands of pending engrams.

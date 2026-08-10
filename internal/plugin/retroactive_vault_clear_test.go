@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ type scanSignalingStore struct {
 	once    sync.Once
 }
 
-func (s *scanSignalingStore) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint8) EngramIterator {
+func (s *scanSignalingStore) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint16) EngramIterator {
 	iter := s.PluginStore.ScanWithoutFlag(ctx, flag, skipFlags)
 	s.once.Do(func() { close(s.scanned) })
 	return iter
@@ -427,4 +428,65 @@ func TestRetroactiveProcessor_CancelledVaultClearAbortsBoundary(t *testing.T) {
 		t.Fatalf("BeginVaultClear after cancellation: %v", err)
 	}
 	finishClear()
+}
+
+// scanCountingStore counts ScanWithoutFlag invocations. It exists for the
+// self-notify pin below: pass COUNT is the observable, so the wrapper counts
+// rather than signals (its sibling scanSignalingStore signals first-scan).
+type scanCountingStore struct {
+	PluginStore
+	scans atomic.Int64
+}
+
+func (s *scanCountingStore) ScanWithoutFlag(ctx context.Context, flag, skipFlags uint16) EngramIterator {
+	s.scans.Add(1)
+	return s.PluginStore.ScanWithoutFlag(ctx, flag, skipFlags)
+}
+
+// TestRetroactiveProcessor_InvalidatedPassDoesNotSelfNotify pins the feedback
+// loop found in review: an invalidated pass used to call rp.Notify on itself,
+// so a held clear boundary turned the processor into a hot loop (~175k
+// passes/sec measured, per processor, starving unrelated vaults' scans since
+// ScanWithoutFlag is global). The clear's finish closure and cancellation arm
+// are the ONLY wake points an invalidation may rely on.
+//
+// The observable is pass count over a real-time window while the boundary is
+// held: with the self-notify deleted the window sees the initial pass plus the
+// single explicit notify; with it restored the count is in the tens of
+// thousands. The generous bound is deliberate — this pins the absence of a
+// runaway, not a precise schedule (pollInterval is 3s, far past the window).
+func TestRetroactiveProcessor_InvalidatedPassDoesNotSelfNotify(t *testing.T) {
+	store, registry, _ := openTestStoreWithHNSW(t)
+	ctx := context.Background()
+	ws := store.VaultPrefix("retro-clear-no-self-notify")
+	if _, err := store.WriteEngram(ctx, ws, &storage.Engram{
+		Concept: "pending work",
+		Content: "keeps the scan non-empty while the boundary is held",
+	}); err != nil {
+		t.Fatalf("WriteEngram: %v", err)
+	}
+
+	provider := &blockingVaultClearEnricher{
+		mockPlugin:   mockPlugin{name: "no-self-notify-enricher", tier: TierEnrich},
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	close(provider.releaseFirst)
+	adapter := &scanCountingStore{PluginStore: NewStoreAdapter(store, registry)}
+	processor := NewRetroactiveProcessor(adapter, provider, DigestEnrich)
+
+	finishClear, err := processor.BeginVaultClear(ctx, ws)
+	if err != nil {
+		t.Fatalf("BeginVaultClear: %v", err)
+	}
+	defer finishClear()
+
+	processor.Start(ctx)
+	defer processor.Stop()
+	processor.Notify()
+
+	time.Sleep(300 * time.Millisecond)
+	if scans := adapter.scans.Load(); scans > 5 {
+		t.Fatalf("processor ran %d scan passes in 300ms with a clear boundary held — an invalidated pass is waking itself (want <= 5: the initial pass, the explicit notify, and margin)", scans)
+	}
 }
