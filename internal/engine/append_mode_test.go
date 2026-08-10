@@ -51,6 +51,10 @@ var appendReadOnly = map[string]bool{
 	"Explain": true, "ExportGraph": true, "ExportVault": true, "FindByEntity": true,
 	"FindSimilarEntities": true, "GetAnnotations": true, "GetAssociations": true,
 	"GetAssociationsBatch": true, "GetContradictions": true, "GetContradictionReport": true,
+	// ContradictionDebt is the COG-29 vault-wide debt readout: it gates on the
+	// existing fast path and then derives entirely from GetContradictionReport,
+	// which is itself read-only.
+	"ContradictionDebt":       true,
 	"GetEngram":               true,
 	"GetEnrichmentCandidates": true, "GetEnrichmentMode": true, "GetEntityAggregate": true,
 	"GetEntityClusters": true, "GetEntityTimeline": true, "GetNoveltyDrops": true,

@@ -102,6 +102,22 @@ type PlasticityConfig struct {
 	// explicit-read-by-id channel.
 	ReinforceOnRead *bool `json:"reinforce_on_read,omitempty"`
 
+	// ContradictionDebt controls whether the MCP orientation surfaces
+	// (muninn_guide, muninn_where_left_off, and muninn_recall with mode="recent")
+	// carry the vault-wide `unresolved_contradictions` readout. nil = true
+	// (default: the readout is delivered).
+	//
+	// Not preset-varying. It exists at vault grain because the two vault shapes
+	// this readout serves cannot share one process-global answer: a vault where
+	// one open conflict IS the incident, and a research vault where forty open
+	// conflicts are a normal working state and a standing notice would be
+	// wallpaper. Setting it false suppresses only the RECEIPT — the COG-29
+	// demote, the per-row annotation and the response-level conflict block are
+	// unaffected, as is muninn_contradictions. That combination is a deliberate,
+	// explicit operator choice honored as configured (principle #1), not a
+	// silent suppression.
+	ContradictionDebt *bool `json:"contradiction_debt,omitempty"`
+
 	// SemanticFloor overrides the COG-26 semantic-abstention baseline b for
 	// this vault (see internal/plugin/embed/baseline.go), instead of the
 	// registry value looked up from the vault's embed model. nil = use the
@@ -182,6 +198,12 @@ type ResolvedPlasticity struct {
 	// to bump AccessCount/LastAccess. Default true. Never applies to
 	// Recall/Activate (COG-12) — that path never reinforces.
 	ReinforceOnRead bool `json:"reinforce_on_read"`
+
+	// ContradictionDebt: when true, the MCP orientation surfaces carry the
+	// vault-wide `unresolved_contradictions` readout (COG-29 amendment).
+	// Default true. Suppressing it changes no score and hides nothing from
+	// muninn_contradictions. See PlasticityConfig.ContradictionDebt.
+	ContradictionDebt bool `json:"contradiction_debt"`
 
 	// SemanticFloorOverride, when non-nil, replaces the COG-26 registry
 	// lookup for this vault's semantic-abstention baseline b. nil = no
@@ -413,6 +435,9 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 		// ReinforceOnRead is not preset-varying: default true across every
 		// preset, overridable per-vault via cfg.ReinforceOnRead below.
 		ReinforceOnRead: true,
+		// ContradictionDebt is not preset-varying either: default true across
+		// every preset, overridable per-vault via cfg.ContradictionDebt below.
+		ContradictionDebt: true,
 	}
 
 	if cfg == nil {
@@ -619,6 +644,9 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 	}
 	if cfg.ReinforceOnRead != nil {
 		r.ReinforceOnRead = *cfg.ReinforceOnRead
+	}
+	if cfg.ContradictionDebt != nil {
+		r.ContradictionDebt = *cfg.ContradictionDebt
 	}
 	// LTP overrides
 	if cfg.LTPThreshold != nil {

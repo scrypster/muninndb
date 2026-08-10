@@ -85,11 +85,18 @@ const (
 	contradictionBasisULIDTiebreak = "ulid_tiebreak"
 )
 
+// contradictionResolutionActions names the three verbs that resolve a declared
+// contradiction. It is a separate const, and both the recall-time warning and
+// the vault-wide debt readout are BUILT from it by concatenation, so the two
+// strings cannot drift into naming different actions — the failure mode where
+// one surface tells an agent to evolve and the other forgets to mention it.
+const contradictionResolutionActions = "muninn_evolve the memory that should survive, muninn_forget(not_true_since=…) the side that stopped being true, or muninn_link(relation=\"supersedes\") to declare which one wins."
+
 // contradictionWarning is the response-level instruction. It names all three
 // resolution actions in words, because the accepted residual of this phase is
 // that a declared-and-abandoned conflict demotes both facts until someone
 // resolves it — recoverable, but only if the caller is told how.
-const contradictionWarning = "Two or more returned memories are declared to contradict each other and the conflict is unresolved. Neither is presented as the answer: both are returned, with their scores demoted below what they earned. Resolve it — muninn_evolve the memory that should survive, muninn_forget(not_true_since=…) the side that stopped being true, or muninn_link(relation=\"supersedes\") to declare which one wins."
+const contradictionWarning = "Two or more returned memories are declared to contradict each other and the conflict is unresolved. Neither is presented as the answer: both are returned, with their scores demoted below what they earned. Resolve it — " + contradictionResolutionActions
 
 // contradictionEdge is one declared contradicts edge between two engrams,
 // carrying which side asserted it and when.
@@ -200,6 +207,142 @@ func (e *Engine) declaredContradictionsProbe(ctx context.Context, ws [8]byte) bo
 func (e *Engine) noteContradictionDeclared(ws [8]byte) {
 	e.contradictionsDeclared.Store(ws, struct{}{})
 	e.contradictionProbeClean.Delete(ws)
+}
+
+// COG-29 amendment — the vault-wide debt readout.
+//
+// Every pre-existing contradiction notice in the product is conditional on
+// RETRIEVAL: the per-row annotation rides a returned row, and the response-level
+// conflict block is pruned by pruneConflictBlock to pairs whose endpoints
+// survived into the caller's results. A declared conflict on a topic nobody
+// queries is therefore never spoken about again, while the one-time asynchronous
+// confidence penalty has already been charged against both facts unconditionally
+// and the 10% demote waits to be charged the moment either side is retrieved.
+// This derivation is what makes that debt visible without requiring the query
+// that would have surfaced it.
+const (
+	// debtPairsShown caps how many pairs the readout enumerates. It is an
+	// OUTPUT-SIZE budget, not a property of vault data — the same class of
+	// constant as noticeCapPerResponse — so principle #11 is satisfied by
+	// construction: Count is always the TRUE total, so no vault's debt is ever
+	// under-reported, and nothing is triggered by age.
+	debtPairsShown = 3
+)
+
+// ContradictionDebtAction is the resolution instruction carried by the debt
+// readout. Built from the same contradictionResolutionActions const as the
+// recall-time warning so the two cannot name different verbs.
+const ContradictionDebtAction = "These contradictions were declared in this vault and are still unresolved. Both sides of each stay demoted below the score they earned whenever they are retrieved. Resolve each one — " + contradictionResolutionActions
+
+// ContradictionDebtPair is one unresolved DECLARED contradiction, named.
+//
+// DeclaredAt is zero when the declaring edge carries no timestamp (a legacy
+// association written before the field existed). Zero means UNKNOWN and must be
+// rendered as ABSENT — never as an instant, and never as 1970.
+type ContradictionDebtPair struct {
+	IDa        string
+	ConceptA   string
+	IDb        string
+	ConceptB   string
+	DeclaredAt time.Time
+}
+
+// ContradictionDebt is the vault-wide unresolved-declared-contradiction readout.
+//
+// Count is the TRUE total and is never capped; Pairs is capped at
+// debtPairsShown with Truncated set. ScanComplete propagates
+// ContradictionReport.ScanComplete: when it is false the count is a LOWER BOUND
+// and the caller must say so rather than implying the list is exhaustive.
+type ContradictionDebt struct {
+	Count        int
+	Oldest       time.Time
+	Pairs        []ContradictionDebtPair
+	Truncated    bool
+	ScanComplete bool
+}
+
+// ContradictionDebt returns the vault's unresolved DECLARED contradictions,
+// oldest first. It returns (nil, nil) — not an empty struct — when the vault
+// carries no such debt, so the zero case costs the caller zero bytes.
+//
+// Read-only: no marker write, no TouchAccess, no score change (COG-11).
+//
+// Three properties are load-bearing:
+//
+//  1. It gates on vaultMayHaveContradictions FIRST, so a vault that has never
+//     declared a contradiction pays one sync.Map load plus one bounded 0x0A
+//     iterator seek and returns. That gate is reused verbatim, not re-derived.
+//
+//  2. It derives from GetContradictionReport and NOTHING else, so
+//     markResolvedContradictions — the #764 D3 liveness-and-resolution rule
+//     recall itself applies — stays the SINGLE definition of "unresolved". A
+//     second definition here is precisely the "resolved it and the theater
+//     continued" bug #764 closed.
+//
+//  3. DECLARED pairs only. A detected-but-undeclared pair is excluded both by
+//     the asserted/inferred boundary COG-25/28/29 hold, and because COG-23's
+//     un-migrated fabricated 0x0A markers are mechanically indistinguishable
+//     from genuine ones — counting them would greet an upgraded vault with a
+//     standing notice about conflicts that never existed.
+func (e *Engine) ContradictionDebt(ctx context.Context, vault string) (*ContradictionDebt, error) {
+	ws := e.store.ResolveVaultPrefix(vault)
+	if !e.vaultMayHaveContradictions(ctx, ws) {
+		return nil, nil
+	}
+
+	report, err := e.GetContradictionReport(ctx, vault)
+	if err != nil {
+		return nil, err
+	}
+	if report == nil {
+		return nil, nil
+	}
+
+	debt := &ContradictionDebt{ScanComplete: report.ScanComplete}
+	for _, p := range report.Pairs {
+		if p.Status != ContradictionDeclared {
+			continue
+		}
+		debt.Pairs = append(debt.Pairs, ContradictionDebtPair{
+			IDa:        p.IDa,
+			ConceptA:   p.ConceptA,
+			IDb:        p.IDb,
+			ConceptB:   p.ConceptB,
+			DeclaredAt: p.DeclaredAt,
+		})
+	}
+	if len(debt.Pairs) == 0 {
+		return nil, nil
+	}
+
+	// Oldest first. An UNKNOWN declaration time sorts FIRST for free — the zero
+	// time precedes every real timestamp — which is the behaviour we want: an
+	// undated legacy edge is the oldest thing in the vault by construction, and
+	// COG-29's clause-4 doctrine is that over-warning beats under-warning. (An
+	// explicit is-zero clause was written first and removed: no fixture could
+	// distinguish it from this comparison, so it was a claim no test could hold.)
+	// Tiebroken by ULID so an identical vault state renders identically on every
+	// call — the COG-29 lesson where map-range order made one query's partner
+	// choice flip 33/7 across 40 calls.
+	sort.SliceStable(debt.Pairs, func(i, j int) bool {
+		a, b := debt.Pairs[i], debt.Pairs[j]
+		switch {
+		case !a.DeclaredAt.Equal(b.DeclaredAt):
+			return a.DeclaredAt.Before(b.DeclaredAt)
+		case a.IDa != b.IDa:
+			return a.IDa < b.IDa
+		default:
+			return a.IDb < b.IDb
+		}
+	})
+
+	debt.Count = len(debt.Pairs)
+	debt.Oldest = debt.Pairs[0].DeclaredAt
+	if len(debt.Pairs) > debtPairsShown {
+		debt.Pairs = debt.Pairs[:debtPairsShown]
+		debt.Truncated = true
+	}
+	return debt, nil
 }
 
 // applyContradictionHonesty is COG-29. See the block comment above for the

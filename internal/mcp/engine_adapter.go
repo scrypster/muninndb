@@ -135,6 +135,16 @@ func (a *mcpEngineAdapter) GetContradictionReport(ctx context.Context, vault str
 	}
 	return out, nil
 }
+
+// ContradictionDebt satisfies the optional contradictionDebtReporter probed by
+// the three orientation handlers (COG-29 amendment). It passes the engine type
+// through unconverted on purpose: increment 2 moves the block onto
+// mbp.ActivateResponse, and a second conversion site here would be the
+// dual-source drift the obligations doc names explicitly.
+func (a *mcpEngineAdapter) ContradictionDebt(ctx context.Context, vault string) (*engine.ContradictionDebt, error) {
+	return a.eng.ContradictionDebt(ctx, vault)
+}
+
 func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (*WriteResult, error) {
 	id, err := a.eng.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, entities, importance, effectiveAt)
 	if err != nil {

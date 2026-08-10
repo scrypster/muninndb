@@ -9,7 +9,7 @@ import (
 
 func TestGenerateGuide_AutonomousMode(t *testing.T) {
 	r := auth.ResolvePlasticity(nil)
-	guide := generateGuide("default", r, engineStats{EngramCount: 42, VaultCount: 1})
+	guide := generateGuide("default", r, engineStats{EngramCount: 42, VaultCount: 1}, "")
 
 	if !strings.Contains(guide, "vault: default") {
 		t.Error("guide should contain vault name")
@@ -34,7 +34,7 @@ func TestGenerateGuide_AutonomousMode(t *testing.T) {
 func TestGenerateGuide_PromptedMode(t *testing.T) {
 	mode := "prompted"
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{BehaviorMode: &mode})
-	guide := generateGuide("test-vault", r, engineStats{})
+	guide := generateGuide("test-vault", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "Only store memories when the user explicitly asks") {
 		t.Error("prompted mode should describe user-initiated storage")
@@ -47,7 +47,7 @@ func TestGenerateGuide_PromptedMode(t *testing.T) {
 func TestGenerateGuide_SelectiveMode(t *testing.T) {
 	mode := "selective"
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{BehaviorMode: &mode})
-	guide := generateGuide("work", r, engineStats{})
+	guide := generateGuide("work", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "Automatically remember decisions, errors") {
 		t.Error("selective mode should mention auto-remembering decisions and errors")
@@ -61,7 +61,7 @@ func TestGenerateGuide_CustomMode(t *testing.T) {
 		BehaviorMode:         &mode,
 		BehaviorInstructions: &instr,
 	})
-	guide := generateGuide("dev", r, engineStats{})
+	guide := generateGuide("dev", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "Always remember code snippets and API patterns.") {
 		t.Error("custom mode should include verbatim instructions")
@@ -71,7 +71,7 @@ func TestGenerateGuide_CustomMode(t *testing.T) {
 func TestGenerateGuide_CustomModeNoInstructions(t *testing.T) {
 	mode := "custom"
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{BehaviorMode: &mode})
-	guide := generateGuide("dev", r, engineStats{})
+	guide := generateGuide("dev", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "no instructions were provided") {
 		t.Error("custom mode with no instructions should mention fallback")
@@ -80,7 +80,7 @@ func TestGenerateGuide_CustomModeNoInstructions(t *testing.T) {
 
 func TestGenerateGuide_VaultConfigSection(t *testing.T) {
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{Preset: "knowledge-graph"})
-	guide := generateGuide("kg", r, engineStats{EngramCount: 100})
+	guide := generateGuide("kg", r, engineStats{EngramCount: 100}, "")
 
 	if !strings.Contains(guide, "Hebbian learning: enabled") {
 		t.Error("knowledge-graph should show Hebbian enabled")
@@ -95,7 +95,7 @@ func TestGenerateGuide_VaultConfigSection(t *testing.T) {
 
 func TestGenerateGuide_ScratchpadConfig(t *testing.T) {
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{Preset: "scratchpad"})
-	guide := generateGuide("scratch", r, engineStats{})
+	guide := generateGuide("scratch", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "Hebbian learning: disabled") {
 		t.Error("scratchpad should show Hebbian disabled")
@@ -110,7 +110,7 @@ func TestGenerateGuide_ScratchpadConfig(t *testing.T) {
 
 func TestGenerateGuide_WorkingConfig(t *testing.T) {
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{Preset: "working"})
-	guide := generateGuide("wf", r, engineStats{})
+	guide := generateGuide("wf", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "Hebbian learning: enabled") {
 		t.Error("working should show Hebbian enabled")
@@ -128,7 +128,7 @@ func TestGenerateGuide_WorkingConfig(t *testing.T) {
 
 func TestGenerateGuide_TipsSection(t *testing.T) {
 	r := auth.ResolvePlasticity(nil)
-	guide := generateGuide("default", r, engineStats{})
+	guide := generateGuide("default", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "mode='deep'") {
 		t.Error("tips should mention deep mode")
@@ -186,7 +186,7 @@ func TestHandleGuideNoVaultDefaultsOk(t *testing.T) {
 
 func TestGenerateGuide_EnrichmentGuidanceAutonomous(t *testing.T) {
 	r := auth.ResolvePlasticity(nil) // default = autonomous + caller_preferred
-	guide := generateGuide("default", r, engineStats{})
+	guide := generateGuide("default", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "## Enrichment") {
 		t.Error("autonomous + caller_preferred should include Enrichment section")
@@ -199,7 +199,7 @@ func TestGenerateGuide_EnrichmentGuidanceAutonomous(t *testing.T) {
 func TestGenerateGuide_EnrichmentGuidanceSelective(t *testing.T) {
 	mode := "selective"
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{BehaviorMode: &mode})
-	guide := generateGuide("test", r, engineStats{})
+	guide := generateGuide("test", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "## Enrichment") {
 		t.Error("selective + caller_preferred should include Enrichment section")
@@ -212,7 +212,7 @@ func TestGenerateGuide_EnrichmentGuidanceSelective(t *testing.T) {
 func TestGenerateGuide_EnrichmentGuidancePrompted(t *testing.T) {
 	mode := "prompted"
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{BehaviorMode: &mode})
-	guide := generateGuide("test", r, engineStats{})
+	guide := generateGuide("test", r, engineStats{}, "")
 
 	if strings.Contains(guide, "include type, summary") {
 		t.Error("prompted mode should NOT include enrichment writing instructions")
@@ -222,7 +222,7 @@ func TestGenerateGuide_EnrichmentGuidancePrompted(t *testing.T) {
 func TestGenerateGuide_EnrichmentGuidanceBackgroundOnly(t *testing.T) {
 	ie := "background_only"
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{InlineEnrichment: &ie})
-	guide := generateGuide("test", r, engineStats{})
+	guide := generateGuide("test", r, engineStats{}, "")
 
 	if strings.Contains(guide, "## Enrichment") {
 		t.Error("background_only should NOT include Enrichment section")
@@ -232,7 +232,7 @@ func TestGenerateGuide_EnrichmentGuidanceBackgroundOnly(t *testing.T) {
 func TestGenerateGuide_EnrichmentGuidanceDisabled(t *testing.T) {
 	ie := "disabled"
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{InlineEnrichment: &ie})
-	guide := generateGuide("test", r, engineStats{})
+	guide := generateGuide("test", r, engineStats{}, "")
 
 	if strings.Contains(guide, "## Enrichment") {
 		t.Error("disabled inline enrichment should NOT include Enrichment section")
@@ -241,7 +241,7 @@ func TestGenerateGuide_EnrichmentGuidanceDisabled(t *testing.T) {
 
 func TestGenerateGuide_InlineEnrichmentInConfig(t *testing.T) {
 	r := auth.ResolvePlasticity(nil)
-	guide := generateGuide("test", r, engineStats{})
+	guide := generateGuide("test", r, engineStats{}, "")
 
 	if !strings.Contains(guide, "Inline enrichment: caller_preferred") {
 		t.Error("vault config should show inline enrichment setting")
@@ -251,7 +251,7 @@ func TestGenerateGuide_InlineEnrichmentInConfig(t *testing.T) {
 func TestGenerateGuide_MultiUserVault(t *testing.T) {
 	on := true
 	r := auth.ResolvePlasticity(&auth.PlasticityConfig{MultiUser: &on})
-	guide := generateGuide("team", r, engineStats{})
+	guide := generateGuide("team", r, engineStats{}, "")
 
 	if strings.Contains(guide, "purpose-built") {
 		t.Error("multi-user guide must not recommend where_left_off for session start")
@@ -275,7 +275,7 @@ func TestGenerateGuide_MultiUserVault(t *testing.T) {
 
 func TestGenerateGuide_SingleUserKeepsWhereLeftOff(t *testing.T) {
 	r := auth.ResolvePlasticity(nil)
-	guide := generateGuide("default", r, engineStats{})
+	guide := generateGuide("default", r, engineStats{}, "")
 	if !strings.Contains(guide, "purpose-built for session resumption") {
 		t.Error("single-user guide should keep the where_left_off session-start tip")
 	}

@@ -12,7 +12,11 @@ type engineStats struct {
 	VaultCount  int
 }
 
-func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats engineStats) string {
+// generateGuide renders the per-vault guide. debtSection is the pre-rendered
+// COG-29 debt readout (see contradictionDebtGuideSection) — empty when the
+// vault carries no unresolved declared contradiction, which is the overwhelming
+// default and adds zero bytes.
+func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats engineStats, debtSection string) string {
 	var b strings.Builder
 
 	// Header
@@ -192,6 +196,10 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("`muninn_contradictions` reports each pair's `status` (`declared` = an explicit link exists; `detected` = the detector found it), its ")
 	b.WriteString("`confidence_penalty` (`pending`|`applied` — an asynchronous ~30s batch job that affects confidence only, never whether the contradiction ")
 	b.WriteString("is honored), and `resolved_by` on pairs that are no longer live.\n")
+	// The vault's OWN outstanding debt, appended to the doctrine above. Nothing
+	// else in this document reports per-vault contradiction state: everything
+	// above explains what happens WHEN you declare one.
+	b.WriteString(debtSection)
 
 	// Hierarchical memory
 	b.WriteString("\n## Hierarchical Memory\n\n")
