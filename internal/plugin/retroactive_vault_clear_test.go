@@ -486,6 +486,13 @@ func TestRetroactiveProcessor_InvalidatedPassDoesNotSelfNotify(t *testing.T) {
 	processor.Notify()
 
 	time.Sleep(300 * time.Millisecond)
+	if scans := adapter.scans.Load(); scans == 0 {
+		// Lower bound, so the pin cannot be disarmed silently: a fixture change
+		// that leaves no pending work (e.g. the digest flag already set) makes
+		// the processor return before ever scanning, and an upper-bound-only
+		// assertion would stay green while guarding nothing.
+		t.Fatal("processor never scanned — the fixture has no pending work and this test is vacuous")
+	}
 	if scans := adapter.scans.Load(); scans > 5 {
 		t.Fatalf("processor ran %d scan passes in 300ms with a clear boundary held — an invalidated pass is waking itself (want <= 5: the initial pass, the explicit notify, and margin)", scans)
 	}
