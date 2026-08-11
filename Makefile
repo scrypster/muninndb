@@ -130,21 +130,20 @@ proto:
 	@echo "==> Stubs regenerated. Review with: git diff proto/gen/"
 
 ## proto-check: fail if committed gRPC stubs differ from a fresh regeneration.
-## Backs up proto/gen, regenerates, diffs — catches hand-edits. Run before pushing.
+## Backs up proto/gen, regenerates, diffs — catches hand-edits. Fails CLOSED on
+## drift AND on a missing/broken protoc toolchain. Run before pushing.
 proto-check:
 	@echo "==> Verifying committed stubs match service.proto..."
-	@tmp=$$(mktemp -d) && cp -r proto/gen "$$tmp/gen-backup" && \
+	@tmp=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	cp -r proto/gen "$$tmp/gen-backup" && \
 		protoc \
 			--proto_path=proto \
 			--go_out=. --go_opt=module=github.com/scrypster/muninndb \
 			--go-grpc_out=. --go-grpc_opt=module=github.com/scrypster/muninndb \
 			muninn/v1/service.proto && \
-		if ! diff -r "$$tmp/gen-backup" proto/gen >/dev/null; then \
-			echo "##[error]committed stubs differ from protoc output — run 'make proto' and commit the result."; \
-			rm -rf "$$tmp"; exit 1; \
-		fi; \
-		rm -rf "$$tmp"
-	@echo "==> Stubs up to date."
+		(diff -r "$$tmp/gen-backup" proto/gen >/dev/null && echo "==> Stubs up to date.") || \
+		(echo "##[error]committed stubs differ from protoc output, or the protoc/protoc-gen-go/protoc-gen-go-grpc toolchain is missing or broken. Run 'make proto' and commit, or install the toolchain."; exit 1)
 
 ## bench: run E2E benchmark suite.
 bench:

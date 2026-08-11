@@ -476,6 +476,12 @@ jobs:
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
+        with:
+          # Pinned to the version that generated the committed stubs. protoc-gen-go
+          # embeds the protoc version in each generated file's header (e.g.
+          # "// protoc v7.35.1"); a different protoc would rewrite that header and
+          # flap `make proto-check`. Keep in sync with the dev toolchain.
+          version: "35.1"
 
       - name: Install protoc-gen-go & protoc-gen-go-grpc
         run: |
