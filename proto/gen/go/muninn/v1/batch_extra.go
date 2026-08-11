@@ -1,8 +1,10 @@
-// Code generated manually for MuninnDB. DO NOT EDIT.
+// Hand-maintained companion to service.pb.go. This file is NOT produced by
+// protoc-gen-go — it is edited by hand and intentionally kept separate from
+// service.pb.go so `make proto` (which regenerates service.pb.go from
+// service.proto) does not delete it.
 //
 // Convenience methods on protoc-gen-go message types that protoc-gen-go itself
-// does not produce. Kept in a separate file so `make proto` (which regenerates
-// service.pb.go from service.proto) does not delete them.
+// does not produce.
 
 package muninn_v1
 
