@@ -457,6 +457,37 @@ jobs:
             echo "Route count parity OK (delta=$diff, within threshold of 5)."
           fi
 
+  # ── Proto: committed stubs must match service.proto (#873) ──────────
+  # The stubs are generated, not hand-written. This gate rejects any commit
+  # whose committed stubs drift from a fresh `protoc` run — the failure mode
+  # that let hand-edits accumulate and break the gRPC surface. Cheap: no embed
+  # assets, no web build, runs in parallel.
+  proto-check:
+    name: Proto stubs up to date
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Install protoc-gen-go & protoc-gen-go-grpc
+        run: |
+          # Pinned to the versions that generated the committed stubs.
+          # Bump together with a regeneration; a mismatch silently drifts.
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Check stubs match service.proto
+        run: make proto-check
+
   vuln-check:
     name: Vulnerability scan
     runs-on: ubuntu-latest

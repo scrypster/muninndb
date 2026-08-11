@@ -7,7 +7,7 @@ HF_BASE     := https://huggingface.co/$(MODEL_REPO)/resolve/main
 ORT_BASE    := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)
 
 .PHONY: fetch-assets fetch-model fetch-ort-libs clean-assets web css build test bench test-integration \
-        corpora check-filenames check-nul-bytes \
+        corpora check-filenames check-nul-bytes proto proto-check \
         _ort-darwin-arm64 _ort-darwin-amd64 _ort-linux-amd64 _ort-linux-arm64 _ort-windows-amd64
 
 ## fetch-assets: download the model, tokenizer, and all platform ORT libraries.
@@ -117,6 +117,34 @@ build: web
 ## test: run unit tests across all packages.
 test:
 	@go test ./...
+
+## proto: regenerate gRPC stubs from proto/muninn/v1/service.proto.
+## Requires protoc, protoc-gen-go (v1.36.11), protoc-gen-go-grpc (v1.6.2) on PATH.
+proto:
+	@echo "==> Regenerating gRPC stubs from service.proto..."
+	@protoc \
+		--proto_path=proto \
+		--go_out=. --go_opt=module=github.com/scrypster/muninndb \
+		--go-grpc_out=. --go-grpc_opt=module=github.com/scrypster/muninndb \
+		muninn/v1/service.proto
+	@echo "==> Stubs regenerated. Review with: git diff proto/gen/"
+
+## proto-check: fail if committed gRPC stubs differ from a fresh regeneration.
+## Backs up proto/gen, regenerates, diffs — catches hand-edits. Run before pushing.
+proto-check:
+	@echo "==> Verifying committed stubs match service.proto..."
+	@tmp=$$(mktemp -d) && cp -r proto/gen "$$tmp/gen-backup" && \
+		protoc \
+			--proto_path=proto \
+			--go_out=. --go_opt=module=github.com/scrypster/muninndb \
+			--go-grpc_out=. --go-grpc_opt=module=github.com/scrypster/muninndb \
+			muninn/v1/service.proto && \
+		if ! diff -r "$$tmp/gen-backup" proto/gen >/dev/null; then \
+			echo "##[error]committed stubs differ from protoc output — run 'make proto' and commit the result."; \
+			rm -rf "$$tmp"; exit 1; \
+		fi; \
+		rm -rf "$$tmp"
+	@echo "==> Stubs up to date."
 
 ## bench: run E2E benchmark suite.
 bench:

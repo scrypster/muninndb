@@ -41,24 +41,24 @@ func TestAdapter_Write_UpsertMode_ThreadsToEngine(t *testing.T) {
 
 	// First upsert — create.
 	resp1, err := adapter.Write(ctx, &pb.WriteRequest{
-		Content: "v1", UpsertMode: true, IdempotentID: "grpc-doc",
+		Content: "v1", UpsertMode: true, IdempotentId: "grpc-doc",
 	})
 	if err != nil {
 		t.Fatalf("first adapter.Write: %v", err)
 	}
-	if resp1.ID == "" {
+	if resp1.Id == "" {
 		t.Fatal("first: empty ID")
 	}
 
 	// Second upsert — same key, changed content → evolve (new successor ULID).
 	resp2, err := adapter.Write(ctx, &pb.WriteRequest{
-		Content: "v2", UpsertMode: true, IdempotentID: "grpc-doc",
+		Content: "v2", UpsertMode: true, IdempotentId: "grpc-doc",
 	})
 	if err != nil {
 		t.Fatalf("second adapter.Write: %v", err)
 	}
-	if resp2.ID == resp1.ID {
-		t.Errorf("upsert evolve should mint a new id through gRPC: both %s", resp1.ID)
+	if resp2.Id == resp1.Id {
+		t.Errorf("upsert evolve should mint a new id through gRPC: both %s", resp1.Id)
 	}
 
 	ws := store.ResolveVaultPrefix("")
@@ -67,8 +67,8 @@ func TestAdapter_Write_UpsertMode_ThreadsToEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUpsertKey: %v", err)
 	}
-	id1, _ := storage.ParseULID(resp1.ID)
-	id2, _ := storage.ParseULID(resp2.ID)
+	id1, _ := storage.ParseULID(resp1.Id)
+	id2, _ := storage.ParseULID(resp2.Id)
 
 	// The durable forward index pins grpc-doc → the SUCCESSOR (re-pointed in
 	// the evolve's atomic batch).

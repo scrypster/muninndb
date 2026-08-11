@@ -540,7 +540,7 @@ func (s *Server) Subscribe(stream pb.MuninnDB_SubscribeServer) error {
 
 	// Confirm subscription to the client.
 	if err := stream.Send(&pb.ActivationPush{
-		SubscriptionID: subID,
+		SubscriptionId: subID,
 		Trigger:        "subscription_created",
 		At:             time.Now().UnixNano(),
 	}); err != nil {
@@ -556,14 +556,14 @@ func (s *Server) Subscribe(stream pb.MuninnDB_SubscribeServer) error {
 				return nil
 			}
 			pbPush := &pb.ActivationPush{
-				SubscriptionID: push.SubscriptionID,
+				SubscriptionId: push.SubscriptionID,
 				Trigger:        string(push.Trigger),
 				PushNumber:     int32(push.PushNumber),
 				At:             push.At.UnixNano(),
 			}
 			if push.Engram != nil {
 				pbPush.Activation = &pb.ActivationItem{
-					ID:      push.Engram.ID.String(),
+					Id:      push.Engram.ID.String(),
 					Concept: push.Engram.Concept,
 					Content: push.Engram.Content,
 					Score:   float32(push.Score),
