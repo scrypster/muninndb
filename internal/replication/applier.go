@@ -20,7 +20,60 @@ type Applier struct {
 	db           *pebble.DB
 	lastApplied  uint64
 	appliedSince uint64 // entries since last explicit sync
-	mu           sync.Mutex
+	// invalidate, when non-nil, is called with every user key an applied entry
+	// touched, AFTER the write is committed to Pebble (#869). The applier holds
+	// a bare *pebble.DB, so a replicated mutation lands on disk underneath the
+	// storage layer's in-memory caches; a follower that had already cached an
+	// engram kept serving the stale copy — soft-deletes, evolve supersession,
+	// trust changes, every in-place mutation — until the process restarted.
+	// The callback is how the storage layer hears about applied keys without
+	// the applier importing storage (which would be an import cycle); it is
+	// wired at server construction, mirroring how the storage layer's
+	// RepLogAppend hook points the other way.
+	//
+	// Invalidation deliberately runs after Commit: invalidating first would
+	// let a concurrent read re-load the OLD value from Pebble and re-cache it
+	// just before the commit lands, resurrecting exactly the staleness this
+	// removes. After Commit, a racing read caches the new state, which is fine.
+	invalidate func(key []byte)
+	mu         sync.Mutex
+}
+
+// SetInvalidate installs the per-key cache-invalidation callback (#869).
+// It is a setter rather than a NewApplier parameter because of construction
+// order in cmd/muninn/server.go: the applier is built with the coordinator
+// before the storage layer exists, and the storage layer is what owns the
+// caches to invalidate. Call once during server wiring, before replication
+// traffic flows; the callback must be safe for concurrent use.
+func (a *Applier) SetInvalidate(fn func(key []byte)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.invalidate = fn
+}
+
+// invalidateBatchKeys decodes an applied batch repr and feeds every user key
+// it touched to the invalidation callback. Called with a.mu held, after the
+// repr has been committed. A decode failure is logged and abandoned rather
+// than returned: the batch itself was applied successfully, and failing the
+// Apply here would make the follower re-request an entry it already holds.
+func (a *Applier) invalidateBatchKeys(repr []byte, seq uint64) {
+	if a.invalidate == nil {
+		return
+	}
+	r, _ := pebble.ReadBatch(repr)
+	for {
+		_, ukey, _, ok, err := r.Next()
+		if err != nil {
+			slog.Warn("applier: batch repr decode for cache invalidation failed — "+
+				"follower caches may serve stale entries for this batch",
+				"seq", seq, "err", err)
+			return
+		}
+		if !ok {
+			return
+		}
+		a.invalidate(ukey)
+	}
 }
 
 // NewApplier creates a new Applier for a Pebble database.
@@ -96,6 +149,9 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 		if err := markerBatch.Commit(pebble.NoSync); err != nil {
 			return err
 		}
+		// #869: the repr is committed — tell the storage layer which keys
+		// changed so its caches drop any entries the batch just mutated.
+		a.invalidateBatchKeys(entry.Value, entry.Seq)
 		a.lastApplied = entry.Seq
 		a.appliedSince++
 		if a.appliedSince >= applierSyncInterval {
@@ -123,6 +179,12 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 	// replication throughput proportional to fsync latency (~1 IOPS per entry).
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return err
+	}
+
+	// #869: single-key ops mutate exactly entry.Key — same invalidation
+	// contract as the OpBatch path, same after-commit ordering.
+	if a.invalidate != nil && len(entry.Key) > 0 {
+		a.invalidate(entry.Key)
 	}
 
 	a.lastApplied = entry.Seq
