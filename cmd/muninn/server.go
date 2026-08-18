@@ -1251,9 +1251,10 @@ func runServer() {
 	// Wire ClusterCoordinator when cluster mode is enabled.
 	var coordinator *replication.ClusterCoordinator
 	var repLog *replication.ReplicationLog
+	var applier *replication.Applier
 	if clusterCfg.Enabled {
 		repLog = replication.NewReplicationLog(db)
-		applier := replication.NewApplier(db)
+		applier = replication.NewApplier(db)
 		epochStore, err := replication.NewEpochStore(db)
 		if err != nil {
 			slog.Error("create epoch store", "err", err)
@@ -1341,6 +1342,18 @@ func runServer() {
 	// Wire MOL into coordinator for periodic SafePrune.
 	if coordinator != nil {
 		coordinator.SetMOL(mol)
+	}
+
+	// #869: replicated writes are committed by the applier straight to Pebble,
+	// underneath this store's in-memory caches — a follower that had cached an
+	// engram kept serving it unchanged (deletes included) until restart. Feed
+	// every applied key back into the store so the touched cache entries drop.
+	// This is the mirror of storeCfg.RepLogAppend above: that hook carries
+	// local writes storage→replication; this one carries applied keys
+	// replication→storage. Both are wired here because neither package may
+	// import the other.
+	if applier != nil {
+		applier.SetInvalidate(store.InvalidateReplicatedKey)
 	}
 
 	// Build indexes
