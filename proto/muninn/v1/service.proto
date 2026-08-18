@@ -1,6 +1,6 @@
 syntax = "proto3";
 package muninn.v1;
-option go_package = "github.com/scrypster/muninndb/proto/gen/go/muninn/v1";
+option go_package = "github.com/scrypster/muninndb/proto/gen/go/muninn/v1;muninn_v1";
 
 message HelloRequest {
   string version = 1;

@@ -53,7 +53,7 @@ func (m *mockEngine) Write(ctx context.Context, req *pb.WriteRequest) (*pb.Write
 	if m.writeFn != nil {
 		return m.writeFn(ctx, req)
 	}
-	return &pb.WriteResponse{ID: "00000000000000000000000000"}, nil
+	return &pb.WriteResponse{Id: "00000000000000000000000000"}, nil
 }
 
 func (m *mockEngine) BatchWrite(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error) {
@@ -88,14 +88,14 @@ func (m *mockEngine) Link(ctx context.Context, req *pb.LinkRequest) (*pb.LinkRes
 	if m.linkFn != nil {
 		return m.linkFn(ctx, req)
 	}
-	return &pb.LinkResponse{OK: true}, nil
+	return &pb.LinkResponse{Ok: true}, nil
 }
 
 func (m *mockEngine) Forget(ctx context.Context, req *pb.ForgetRequest) (*pb.ForgetResponse, error) {
 	if m.forgetFn != nil {
 		return m.forgetFn(ctx, req)
 	}
-	return &pb.ForgetResponse{OK: true}, nil
+	return &pb.ForgetResponse{Ok: true}, nil
 }
 
 func (m *mockEngine) BatchForget(ctx context.Context, req *pb.BatchForgetRequest) (*pb.BatchForgetResponse, error) {
@@ -127,7 +127,7 @@ func (m *mockEngine) Subscribe(ctx context.Context, req *pb.SubscribeRequest) (*
 	if m.subscribeFn != nil {
 		return m.subscribeFn(ctx, req)
 	}
-	return &pb.SubscribeResponse{SubID: "sub-1", Status: "ok"}, nil
+	return &pb.SubscribeResponse{SubId: "sub-1", Status: "ok"}, nil
 }
 
 func (m *mockEngine) SubscribeWithDeliver(ctx context.Context, req *pb.SubscribeRequest, deliver trigger.DeliverFunc) (string, error) {
@@ -266,11 +266,11 @@ func TestEngineAPIInterface(t *testing.T) {
 //   - mockEngine satisfies the full EngineAPI interface including SubscribeWithDeliver
 //   - The deliver func passed to SubscribeWithDeliver correctly channels pushes
 //
-// Note: the pb.* types in this project are hand-written Go structs with protobuf
-// struct tags but without proto.Message implementation (ProtoReflect), so wire-level
-// gRPC streaming cannot be tested end-to-end in unit tests. The server-side logic for
-// the Subscribe streaming handler is exercised indirectly via the engine adapter and
-// trigger system integration tests.
+// The pb.* types are now real protoc-gen-go output and implement proto.Message, so
+// wire-level gRPC is exercisable end-to-end (see TestGRPCWireRoundTrip in
+// codec_test.go for the codec round-trip). This test continues to exercise the
+// server-side Subscribe handler logic directly via the engine adapter and trigger
+// system.
 func TestSubscribeWithDeliverInterface(t *testing.T) {
 	// Compile-time check: mockEngine satisfies transportgrpc.EngineAPI.
 	var _ transportgrpc.EngineAPI = &mockEngine{}
@@ -739,7 +739,7 @@ func TestPublicVaultFullMutatingUnaryRPCsAllowed(t *testing.T) {
 	srv := transportgrpc.NewServer(":0", &mockEngine{
 		writeFn: func(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 			writeCalled = true
-			return &pb.WriteResponse{ID: "engram-123"}, nil
+			return &pb.WriteResponse{Id: "engram-123"}, nil
 		},
 		batchWriteFn: func(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error) {
 			batchWriteCalled = true
@@ -747,11 +747,11 @@ func TestPublicVaultFullMutatingUnaryRPCsAllowed(t *testing.T) {
 		},
 		linkFn: func(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error) {
 			linkCalled = true
-			return &pb.LinkResponse{OK: true}, nil
+			return &pb.LinkResponse{Ok: true}, nil
 		},
 		forgetFn: func(ctx context.Context, req *pb.ForgetRequest) (*pb.ForgetResponse, error) {
 			forgetCalled = true
-			return &pb.ForgetResponse{OK: true}, nil
+			return &pb.ForgetResponse{Ok: true}, nil
 		},
 		batchForgetFn: func(ctx context.Context, req *pb.BatchForgetRequest) (*pb.BatchForgetResponse, error) {
 			batchForgetCalled = true
@@ -785,19 +785,19 @@ func TestPublicVaultFullMutatingUnaryRPCsAllowed(t *testing.T) {
 		},
 		{
 			name:   "Link",
-			req:    &pb.LinkRequest{Vault: "default", SourceID: "id1", TargetID: "id2", RelType: 1},
+			req:    &pb.LinkRequest{Vault: "default", SourceId: "id1", TargetId: "id2", RelType: 1},
 			invoke: func(ctx context.Context, req any) (any, error) { return srv.Link(ctx, req.(*pb.LinkRequest)) },
 			called: &linkCalled,
 		},
 		{
 			name:   "Forget",
-			req:    &pb.ForgetRequest{Vault: "default", ID: "id1"},
+			req:    &pb.ForgetRequest{Vault: "default", Id: "id1"},
 			invoke: func(ctx context.Context, req any) (any, error) { return srv.Forget(ctx, req.(*pb.ForgetRequest)) },
 			called: &forgetCalled,
 		},
 		{
 			name: "BatchForget",
-			req:  &pb.BatchForgetRequest{Requests: []*pb.ForgetRequest{{Vault: "default", ID: "id1"}}},
+			req:  &pb.BatchForgetRequest{Requests: []*pb.ForgetRequest{{Vault: "default", Id: "id1"}}},
 			invoke: func(ctx context.Context, req any) (any, error) {
 				return srv.BatchForget(ctx, req.(*pb.BatchForgetRequest))
 			},
@@ -845,7 +845,7 @@ func TestObserveKeyMutatingUnaryRPCsDenied(t *testing.T) {
 	srv := transportgrpc.NewServer(":0", &mockEngine{
 		writeFn: func(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 			writeCalled = true
-			return &pb.WriteResponse{ID: "engram-123"}, nil
+			return &pb.WriteResponse{Id: "engram-123"}, nil
 		},
 		batchWriteFn: func(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error) {
 			batchWriteCalled = true
@@ -853,11 +853,11 @@ func TestObserveKeyMutatingUnaryRPCsDenied(t *testing.T) {
 		},
 		linkFn: func(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error) {
 			linkCalled = true
-			return &pb.LinkResponse{OK: true}, nil
+			return &pb.LinkResponse{Ok: true}, nil
 		},
 		forgetFn: func(ctx context.Context, req *pb.ForgetRequest) (*pb.ForgetResponse, error) {
 			forgetCalled = true
-			return &pb.ForgetResponse{OK: true}, nil
+			return &pb.ForgetResponse{Ok: true}, nil
 		},
 		batchForgetFn: func(ctx context.Context, req *pb.BatchForgetRequest) (*pb.BatchForgetResponse, error) {
 			batchForgetCalled = true
@@ -891,19 +891,19 @@ func TestObserveKeyMutatingUnaryRPCsDenied(t *testing.T) {
 		},
 		{
 			name:   "Link",
-			req:    &pb.LinkRequest{Vault: "default", SourceID: "id1", TargetID: "id2", RelType: 1},
+			req:    &pb.LinkRequest{Vault: "default", SourceId: "id1", TargetId: "id2", RelType: 1},
 			invoke: func(ctx context.Context, req any) (any, error) { return srv.Link(ctx, req.(*pb.LinkRequest)) },
 			called: &linkCalled,
 		},
 		{
 			name:   "Forget",
-			req:    &pb.ForgetRequest{Vault: "default", ID: "id1"},
+			req:    &pb.ForgetRequest{Vault: "default", Id: "id1"},
 			invoke: func(ctx context.Context, req any) (any, error) { return srv.Forget(ctx, req.(*pb.ForgetRequest)) },
 			called: &forgetCalled,
 		},
 		{
 			name: "BatchForget",
-			req:  &pb.BatchForgetRequest{Requests: []*pb.ForgetRequest{{Vault: "default", ID: "id1"}}},
+			req:  &pb.BatchForgetRequest{Requests: []*pb.ForgetRequest{{Vault: "default", Id: "id1"}}},
 			invoke: func(ctx context.Context, req any) (any, error) {
 				return srv.BatchForget(ctx, req.(*pb.BatchForgetRequest))
 			},
@@ -966,7 +966,7 @@ func newPublicTestServer(t *testing.T, eng *mockEngine) *transportgrpc.Server {
 func TestHello_Success(t *testing.T) {
 	eng := &mockEngine{
 		helloFn: func(ctx context.Context, req *pb.HelloRequest) (*pb.HelloResponse, error) {
-			return &pb.HelloResponse{ServerVersion: "1.0.0", SessionID: "sess-1"}, nil
+			return &pb.HelloResponse{ServerVersion: "1.0.0", SessionId: "sess-1"}, nil
 		},
 	}
 	srv := newPublicTestServer(t, eng)
@@ -978,8 +978,8 @@ func TestHello_Success(t *testing.T) {
 	if resp.ServerVersion != "1.0.0" {
 		t.Errorf("ServerVersion = %q, want \"1.0.0\"", resp.ServerVersion)
 	}
-	if resp.SessionID != "sess-1" {
-		t.Errorf("SessionID = %q, want \"sess-1\"", resp.SessionID)
+	if resp.SessionId != "sess-1" {
+		t.Errorf("SessionID = %q, want \"sess-1\"", resp.SessionId)
 	}
 }
 
@@ -1000,7 +1000,7 @@ func TestHello_Error(t *testing.T) {
 func TestWrite_Success(t *testing.T) {
 	eng := &mockEngine{
 		writeFn: func(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
-			return &pb.WriteResponse{ID: "engram-123", CreatedAt: 1000}, nil
+			return &pb.WriteResponse{Id: "engram-123", CreatedAt: 1000}, nil
 		},
 	}
 	srv := newPublicTestServer(t, eng)
@@ -1011,8 +1011,8 @@ func TestWrite_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if resp.ID != "engram-123" {
-		t.Errorf("ID = %q, want \"engram-123\"", resp.ID)
+	if resp.Id != "engram-123" {
+		t.Errorf("ID = %q, want \"engram-123\"", resp.Id)
 	}
 }
 
@@ -1054,13 +1054,13 @@ func TestRead_Success(t *testing.T) {
 	eng := &mockEngine{
 		readFn: func(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
 			return &pb.ReadResponse{
-				ID: req.ID, Concept: "test-concept", Content: "test-content",
+				Id: req.Id, Concept: "test-concept", Content: "test-content",
 			}, nil
 		},
 	}
 	srv := newPublicTestServer(t, eng)
 
-	resp, err := srv.Read(context.Background(), &pb.ReadRequest{ID: "engram-1"})
+	resp, err := srv.Read(context.Background(), &pb.ReadRequest{Id: "engram-1"})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -1077,7 +1077,7 @@ func TestRead_Error(t *testing.T) {
 	}
 	srv := newPublicTestServer(t, eng)
 
-	_, err := srv.Read(context.Background(), &pb.ReadRequest{ID: "missing"})
+	_, err := srv.Read(context.Background(), &pb.ReadRequest{Id: "missing"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1086,16 +1086,16 @@ func TestRead_Error(t *testing.T) {
 func TestForget_Success(t *testing.T) {
 	eng := &mockEngine{
 		forgetFn: func(ctx context.Context, req *pb.ForgetRequest) (*pb.ForgetResponse, error) {
-			return &pb.ForgetResponse{OK: true}, nil
+			return &pb.ForgetResponse{Ok: true}, nil
 		},
 	}
 	srv := newPublicTestServer(t, eng)
 
-	resp, err := srv.Forget(context.Background(), &pb.ForgetRequest{ID: "engram-1"})
+	resp, err := srv.Forget(context.Background(), &pb.ForgetRequest{Id: "engram-1"})
 	if err != nil {
 		t.Fatalf("Forget: %v", err)
 	}
-	if !resp.OK {
+	if !resp.Ok {
 		t.Error("OK = false, want true")
 	}
 }
@@ -1108,7 +1108,7 @@ func TestForget_Error(t *testing.T) {
 	}
 	srv := newPublicTestServer(t, eng)
 
-	_, err := srv.Forget(context.Background(), &pb.ForgetRequest{ID: "engram-1"})
+	_, err := srv.Forget(context.Background(), &pb.ForgetRequest{Id: "engram-1"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1148,18 +1148,18 @@ func TestStat_Error(t *testing.T) {
 func TestLink_Success(t *testing.T) {
 	eng := &mockEngine{
 		linkFn: func(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error) {
-			return &pb.LinkResponse{OK: true}, nil
+			return &pb.LinkResponse{Ok: true}, nil
 		},
 	}
 	srv := newPublicTestServer(t, eng)
 
 	resp, err := srv.Link(context.Background(), &pb.LinkRequest{
-		SourceID: "a", TargetID: "b", RelType: 1, Weight: 0.5,
+		SourceId: "a", TargetId: "b", RelType: 1, Weight: 0.5,
 	})
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}
-	if !resp.OK {
+	if !resp.Ok {
 		t.Error("OK = false, want true")
 	}
 }
@@ -1172,7 +1172,7 @@ func TestLink_Error(t *testing.T) {
 	}
 	srv := newPublicTestServer(t, eng)
 
-	_, err := srv.Link(context.Background(), &pb.LinkRequest{SourceID: "bad"})
+	_, err := srv.Link(context.Background(), &pb.LinkRequest{SourceId: "bad"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1199,11 +1199,11 @@ func TestActivate_Success(t *testing.T) {
 	eng := &mockEngine{
 		activateFn: func(ctx context.Context, req *pb.ActivateRequest) (*pb.ActivateResponse, error) {
 			return &pb.ActivateResponse{
-				QueryID:    "q-1",
+				QueryId:    "q-1",
 				TotalFound: 2,
-				Activations: []pb.ActivationItem{
-					{ID: "e1", Concept: "concept1", Score: 0.9},
-					{ID: "e2", Concept: "concept2", Score: 0.7},
+				Activations: []*pb.ActivationItem{
+					{Id: "e1", Concept: "concept1", Score: 0.9},
+					{Id: "e2", Concept: "concept2", Score: 0.7},
 				},
 				LatencyMs: 1.5,
 			}, nil
@@ -1328,8 +1328,8 @@ func TestSubscribe_Success(t *testing.T) {
 	if stream.sent[0].Trigger != "subscription_created" {
 		t.Errorf("first push trigger = %q, want \"subscription_created\"", stream.sent[0].Trigger)
 	}
-	if stream.sent[0].SubscriptionID != "sub-1" {
-		t.Errorf("SubscriptionID = %q, want \"sub-1\"", stream.sent[0].SubscriptionID)
+	if stream.sent[0].SubscriptionId != "sub-1" {
+		t.Errorf("SubscriptionID = %q, want \"sub-1\"", stream.sent[0].SubscriptionId)
 	}
 
 	// The second message should be the actual push with engram data.
@@ -1450,8 +1450,8 @@ func TestBatchForget_Success(t *testing.T) {
 
 	resp, err := srv.BatchForget(context.Background(), &pb.BatchForgetRequest{
 		Requests: []*pb.ForgetRequest{
-			{ID: "engram-1"},
-			{ID: "engram-2"},
+			{Id: "engram-1"},
+			{Id: "engram-2"},
 		},
 	})
 	if err != nil {
@@ -1476,7 +1476,7 @@ func TestBatchForget_ItemError(t *testing.T) {
 			results := make([]*pb.BatchForgetItemResult, len(req.Requests))
 			for i, r := range req.Requests {
 				result := &pb.BatchForgetItemResult{Index: int32(i)}
-				if r.ID == "missing" {
+				if r.Id == "missing" {
 					result.Error = "not found"
 				} else {
 					result.Ok = true
@@ -1490,9 +1490,9 @@ func TestBatchForget_ItemError(t *testing.T) {
 
 	resp, err := srv.BatchForget(context.Background(), &pb.BatchForgetRequest{
 		Requests: []*pb.ForgetRequest{
-			{ID: "engram-1"},
-			{ID: "missing"},
-			{ID: "engram-3"},
+			{Id: "engram-1"},
+			{Id: "missing"},
+			{Id: "engram-3"},
 		},
 	})
 	if err != nil {

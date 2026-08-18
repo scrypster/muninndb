@@ -54,11 +54,11 @@ func newVaultRecorder() *vaultRecorder {
 		},
 		writeFn: func(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 			r.record(req.Vault)
-			return &pb.WriteResponse{ID: "e-1"}, nil
+			return &pb.WriteResponse{Id: "e-1"}, nil
 		},
 		readFn: func(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
 			r.record(req.Vault)
-			return &pb.ReadResponse{ID: req.ID}, nil
+			return &pb.ReadResponse{Id: req.Id}, nil
 		},
 		statFn: func(ctx context.Context, req *pb.StatRequest) (*pb.StatResponse, error) {
 			r.record(req.Vault)
@@ -66,11 +66,11 @@ func newVaultRecorder() *vaultRecorder {
 		},
 		forgetFn: func(ctx context.Context, req *pb.ForgetRequest) (*pb.ForgetResponse, error) {
 			r.record(req.Vault)
-			return &pb.ForgetResponse{OK: true}, nil
+			return &pb.ForgetResponse{Ok: true}, nil
 		},
 		linkFn: func(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error) {
 			r.record(req.Vault)
-			return &pb.LinkResponse{OK: true}, nil
+			return &pb.LinkResponse{Ok: true}, nil
 		},
 		batchWriteFn: func(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error) {
 			for _, w := range req.Requests {
@@ -165,10 +165,10 @@ func TestVaultScope_KeyedAllUnaryOps_ForeignVault_Rejected(t *testing.T) {
 		call func() error
 	}{
 		{"hello", func() error { _, err := srv.Hello(ctx, &pb.HelloRequest{Version: "1", Vault: "vault-b"}); return err }},
-		{"read", func() error { _, err := srv.Read(ctx, &pb.ReadRequest{ID: "x", Vault: "vault-b"}); return err }},
-		{"forget", func() error { _, err := srv.Forget(ctx, &pb.ForgetRequest{ID: "x", Vault: "vault-b"}); return err }},
+		{"read", func() error { _, err := srv.Read(ctx, &pb.ReadRequest{Id: "x", Vault: "vault-b"}); return err }},
+		{"forget", func() error { _, err := srv.Forget(ctx, &pb.ForgetRequest{Id: "x", Vault: "vault-b"}); return err }},
 		{"link", func() error {
-			_, err := srv.Link(ctx, &pb.LinkRequest{SourceID: "a", TargetID: "b", Vault: "vault-b"})
+			_, err := srv.Link(ctx, &pb.LinkRequest{SourceId: "a", TargetId: "b", Vault: "vault-b"})
 			return err
 		}},
 		{"stat", func() error { _, err := srv.Stat(ctx, &pb.StatRequest{Vault: "vault-b"}); return err }},
