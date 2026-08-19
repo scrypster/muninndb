@@ -1380,6 +1380,26 @@ func importanceFromRequest(p *float32) float32 {
 }
 
 // Write implements mbp.EngineAPI.Write.
+// observeWriteFloor records, per vault, an engram that was persisted with no
+// summary. It reads the ENGRAM rather than the WriteRequest, so it reflects what
+// was actually stored and therefore already respects the vault's InlineEnrichment
+// gating (under "background_only" the caller's fields are discarded by design).
+//
+// Called only from the sites where an engram genuinely becomes durable without
+// delegating: Write and the direct branch of WriteBatch. Deliberately NOT called
+// from the writeUpsert identical-content branch (a no-op: nothing is stored) nor
+// from upsertCreate (which delegates to Write and would double-count). The
+// upsert-evolve branch is not covered because the successor engram is not in
+// scope there, only its id.
+func observeWriteFloor(vaultName string, eng *storage.Engram) {
+	if eng == nil {
+		return
+	}
+	if strings.TrimSpace(eng.Summary) == "" {
+		metrics.WritesMissingFieldTotal.WithLabelValues(vaultName, "summary").Inc()
+	}
+}
+
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	// Cluster single-writer gate (#596). Additive methods have no append gate to
 	// hang this off, so they call it directly.
@@ -1897,6 +1917,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	metrics.EngineWritesTotal.Inc()
+	observeWriteFloor(vaultName, eng)
 
 	d := time.Since(writeStart)
 	if e.latencyTracker != nil {
@@ -2670,6 +2691,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 
 		metrics.EngineWritesTotal.Inc()
+		observeWriteFloor(p.vaultName, p.eng)
 	}
 
 	return responses, errs
