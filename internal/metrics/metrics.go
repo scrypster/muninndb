@@ -103,6 +103,22 @@ var (
 		Name: "muninn_mcp_auth_total",
 		Help: "Total authenticated MCP requests by credential source (api_key, capability, static_token, open).",
 	}, []string{"source"})
+
+	// WritesMissingFieldTotal counts engram writes that stored successfully but
+	// carried no value for a caller-supplied enrichment field, per vault and
+	// field. Paired with muninndb_engine_writes_total this gives an operator a
+	// rate(missing)/rate(total) signal for how fast a vault accumulates engrams
+	// that no later stage will fill in — on a deployment with no summarize stage
+	// registered, `summary` is caller-supplied-only and nothing ever backfills it.
+	//
+	// Deliberately a CounterVec with a `field` label rather than one counter per
+	// field, so another field can be added later without minting and then
+	// deprecating a metric name. The usual CounterVec property applies: a field
+	// with no violations emits no series at all, so absence reads as "none".
+	WritesMissingFieldTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_engine_writes_missing_field_total",
+		Help: "Total engram writes stored without a value for a caller-supplied enrichment field, per vault and field.",
+	}, []string{"vault", "field"})
 )
 
 // VaultStore is the subset of storage.PebbleStore methods needed by VaultEngramCollector.
