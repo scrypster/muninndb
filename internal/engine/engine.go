@@ -2004,7 +2004,11 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 		// Identical content: no-op. Cheap fast path — no write, no evolve, no
 		// index churn. Return the existing head id with the identical hint so
 		// callers can tell nothing changed.
-		metrics.EngineWritesTotal.Inc()
+		//
+		// No EngineWritesTotal increment: no engram is written on this path, and
+		// the counter is documented as "Total number of engrams written". The
+		// latency observations below stay — a call was served, and this is the
+		// only place that fast path is measured.
 		d := time.Since(start)
 		if e.latencyTracker != nil {
 			e.latencyTracker.Record(wsPrefix, "write", d)
@@ -2105,12 +2109,10 @@ func (e *Engine) upsertCreate(ctx context.Context, wsPrefix [8]byte, vaultName s
 	}
 	resp.Hint = "upsert-created"
 
-	metrics.EngineWritesTotal.Inc()
-	d := time.Since(start)
-	if e.latencyTracker != nil {
-		e.latencyTracker.Record(wsPrefix, "write", d)
-	}
-	metrics.WriteDuration.WithLabelValues(vaultName).Observe(d.Seconds())
+	// No write instrumentation here: this function delegates the actual write to
+	// e.Write() above, which already incremented EngineWritesTotal, recorded the
+	// latency sample and observed WriteDuration for this same write. Repeating
+	// them here double-counted every upsert-create.
 	return resp, nil
 }
 
