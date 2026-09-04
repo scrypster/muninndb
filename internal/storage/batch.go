@@ -386,8 +386,8 @@ func (b *pebbleStoreBatch) WriteRelationshipRecord(ctx context.Context, ws [8]by
 	}
 	fromHash := keys.EntityNameHash(record.FromEntity)
 	toHash := keys.EntityNameHash(record.ToEntity)
-	relTypeByte := relTypeByteFromString(record.RelType)
-	if err := b.batch.Set(keys.RelationshipKey(ws, [16]byte(engramID), fromHash, relTypeByte, toHash), val, nil); err != nil {
+	predHash := keys.PredicateHash(record.RelType)
+	if err := b.batch.Set(keys.RelationshipKey(ws, [16]byte(engramID), fromHash, predHash, toHash), val, nil); err != nil {
 		return fmt.Errorf("batch relationship record: set 0x21: %w", err)
 	}
 	if err := b.batch.Set(keys.RelEntityIndexKey(ws, fromHash, [16]byte(engramID)), nil, nil); err != nil {

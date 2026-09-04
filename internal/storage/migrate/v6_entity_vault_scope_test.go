@@ -378,8 +378,11 @@ func TestRegisterMigrations_IncludesV6(t *testing.T) {
 	if !found {
 		t.Fatalf("migration v6 (#683 entity vault scoping) is not registered")
 	}
-	if got := MaxRegisteredVersion(); got != 6 {
-		t.Errorf("MaxRegisteredVersion() = %d; want 6 — the refuse-newer downgrade guard keys off this", got)
+	// Floor, not exact pin: newer migrations (v7+) legitimately raise the max,
+	// and the exact pin lives in the NEWEST migration's test only
+	// (drift-and-obligations #8; see TestRegisterMigrations_IncludesV7).
+	if got := MaxRegisteredVersion(); got < 6 {
+		t.Errorf("MaxRegisteredVersion() = %d; want >= 6 — the refuse-newer downgrade guard keys off this", got)
 	}
 }
 

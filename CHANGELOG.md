@@ -9,7 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Relationship records no longer collide when two unmapped predicates are
+  asserted about the same entity pair (#894).** The 0x21 key carried the
+  predicate as a 1-byte discriminant from an 11-entry hardcoded vocabulary
+  that folded every other string to `0xFF` — including `belongs_to`,
+  `integrates_with`, `deployed_on` and `alternative_to`, four of the ten
+  predicates the enrich plugin's default prompt itself suggests — so the
+  second write silently destroyed the first. The predicate component is now
+  the 8-byte `keys.PredicateHash` of the raw predicate string (the same
+  construction the key already uses for both entity-name hashes), the
+  vocabulary map is deleted, and migration v7 re-keys existing records on
+  first start. **Two behavior deltas worth knowing:** records already
+  destroyed by a pre-fix collision are not repaired (only the survivor's
+  bytes were ever on disk — the migration re-keys survivors); and the empty
+  predicate string (reachable via the plugin path) and trailing/leading-space
+  variants now get their own stable keys instead of colliding with every
+  other unmapped predicate. Predicate identity remains exact-match
+  (`"Uses"` and `"uses"` are still distinct predicates, by design). Cluster
+  operators: upgrade all nodes promptly — during a mixed-version window a
+  pre-upgrade follower silently skips relationship cleanup on hard-delete and
+  entity-merge for 49-byte keys, and a pre-upgrade binary refuses to open a
+  migrated data directory outright.
 
 ---
 

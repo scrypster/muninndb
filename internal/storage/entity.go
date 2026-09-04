@@ -13,7 +13,7 @@ package storage
 // │ 0x1F   │ Vault  │ 0x1F | ws(8) | nameHash(8)              │ msgpack(Entity) │
 // │ 0x20   │ Vault  │ 0x20 | ws(8) | engramID(16) | hash(8)  │ entityName(str) │
 // │ 0x21   │ Vault  │ 0x21 | ws(8) | engramID(16) | fromH(8) │                 │
-// │        │        │        | relTypeByte(1) | toH(8)        │ msgpack(Rel)    │
+// │        │        │        | predHash(8) | toH(8)           │ msgpack(Rel)    │
 // │ 0x23   │ Cross  │ 0x23 | nameHash(8) | ws(8) | engramID  │ empty           │
 // │ 0x24   │ Vault  │ 0x24 | ws(8) | hashA(8) | hashB(8)     │ msgpack(CoOcc)  │
 // └─────────────────────────────────────────────────────────────────────────────┘
@@ -38,12 +38,17 @@ package storage
 //   Write: WriteEntityEngramLink — also writes the 0x23 reverse key atomically
 //
 // Prefix 0x21 — Entity Relationship Records (Vault-Scoped)
-//   Key:   0x21 | ws(8) | engramID(16) | fromHash(8) | relTypeByte(1) | toHash(8)
-//          [42 bytes total]
+//   Key:   0x21 | ws(8) | engramID(16) | fromHash(8) | PredicateHash(relType)(8) | toHash(8)
+//          [49 bytes total]
 //   Value: msgpack-encoded RelationshipRecord (fromEntity, toEntity, relType, weight, source)
 //   Semantics: Per-engram relationship assertion — each engram that describes a relationship
 //              writes its own 0x21 key. ExportGraph deduplicates by max-weight per triple.
-//   RelType mapping: see relTypeBytes map (0x01=supports, ..., 0x0A=co_occurs_with, 0xFF=unknown)
+//   Predicate component: the 8-byte Siphash of the RAW predicate string (#894). It replaced
+//              a 1-byte discriminant that folded every predicate outside an 11-entry hardcoded
+//              vocabulary to 0xFF, so any two unmapped predicates about the same entity pair
+//              collided on one key and the second write silently destroyed the first. The hash
+//              is never decoded — the value's RelType string is authoritative. Migration v7
+//              re-keys pre-fix 42-byte records.
 //
 // Prefix 0x23 — Entity→Engram Reverse Index (Cross-Vault)
 //   Key:   0x23 | entityNameHash(8) | ws(8) | engramID(16)  [33 bytes total]
@@ -650,11 +655,14 @@ func (ps *PebbleStore) RelinkRelationshipEntity(ctx context.Context, ws [8]byte,
 		return fmt.Errorf("relink relationship entity: idx iter close: %w", err)
 	}
 
+	// 0x21 layout (#894): 0x21(1) | ws(8) | engramID(16) | fromHash(8) |
+	// predHash(8) | toHash(8) = 49 bytes. The predicate hash is copied verbatim
+	// — never decoded; the VALUE's RelType string is authoritative.
 	const (
-		relKeyLen        = 42
-		relFromHashStart = 25
-		relToHashStart   = 34
-		relTypeBytePosn  = 33
+		relKeyLen        = keys.RelationshipKeyLen
+		relFromHashStart = keys.RelationshipFromHashOff
+		relToHashStart   = keys.RelationshipToHashOff
+		relPredHashStart = keys.RelationshipPredHashOff
 	)
 
 	for _, id := range engramIDs {
@@ -703,17 +711,17 @@ func (ps *PebbleStore) RelinkRelationshipEntity(ctx context.Context, ws [8]byte,
 			}
 
 			// Build the new 0x21 key — only the changed hash slot(s) differ.
-			var fromHash, toHash [8]byte
+			var fromHash, toHash, predHash [8]byte
 			copy(fromHash[:], k[relFromHashStart:relFromHashStart+8])
 			copy(toHash[:], k[relToHashStart:relToHashStart+8])
-			relTypeByte := k[relTypeBytePosn]
+			copy(predHash[:], k[relPredHashStart:relPredHashStart+8])
 			if fromMatches {
 				fromHash = newHash
 			}
 			if toMatches {
 				toHash = newHash
 			}
-			newRelKey := keys.RelationshipKey(ws, id, fromHash, relTypeByte, toHash)
+			newRelKey := keys.RelationshipKey(ws, id, fromHash, predHash, toHash)
 			updates = append(updates, relUpdate{oldKey: oldKey, newKey: newRelKey, newVal: newVal})
 		}
 		if err := relIter.Close(); err != nil {
@@ -765,8 +773,8 @@ func (ps *PebbleStore) UpsertRelationshipRecord(ctx context.Context, ws [8]byte,
 	}
 	fromHash := keys.EntityNameHash(record.FromEntity)
 	toHash := keys.EntityNameHash(record.ToEntity)
-	relTypeByte := relTypeByteFromString(record.RelType)
-	relKey := keys.RelationshipKey(ws, [16]byte(engramID), fromHash, relTypeByte, toHash)
+	predHash := keys.PredicateHash(record.RelType)
+	relKey := keys.RelationshipKey(ws, [16]byte(engramID), fromHash, predHash, toHash)
 	idxFromKey := keys.RelEntityIndexKey(ws, fromHash, [16]byte(engramID))
 	idxToKey := keys.RelEntityIndexKey(ws, toHash, [16]byte(engramID))
 
@@ -1060,11 +1068,11 @@ func (ps *PebbleStore) deleteEntityLinks(ws [8]byte, engramID [16]byte, batch *p
 		}
 		return entityNames, fmt.Errorf("delete entity links: rel iter: %w", err)
 	}
-	// 0x21 key layout: 0x21(1) | ws(8) | engramID(16) | fromHash(8) | relTypeByte(1) | toHash(8) = 42 bytes
-	// fromHash starts at byte 25; toHash starts at byte 34.
-	const relFromHashOffset = 25
-	const relToHashOffset = 34
-	const relKeyLen = 42
+	// 0x21 key layout (#894): 0x21(1) | ws(8) | engramID(16) | fromHash(8) | predHash(8) | toHash(8) = 49 bytes
+	// fromHash starts at byte 25; toHash starts at byte 41.
+	const relFromHashOffset = keys.RelationshipFromHashOff
+	const relToHashOffset = keys.RelationshipToHashOff
+	const relKeyLen = keys.RelationshipKeyLen
 	for valid := relIter.First(); valid; valid = relIter.Next() {
 		k := relIter.Key()
 		keyCopy := make([]byte, len(k))
@@ -1137,19 +1145,4 @@ func (ps *PebbleStore) ScanVaultEntityNames(ctx context.Context, ws [8]byte, fn 
 		}
 	}
 	return nil
-}
-
-// relTypeBytes maps relationship type strings to 1-byte discriminants for the 0x21 key.
-var relTypeBytes = map[string]uint8{
-	"manages": 0x01, "uses": 0x02, "depends_on": 0x03,
-	"implements": 0x04, "created_by": 0x05, "part_of": 0x06,
-	"causes": 0x07, "contradicts": 0x08, "supports": 0x09,
-	"co_occurs_with": 0x0A, "caches_with": 0x0B,
-}
-
-func relTypeByteFromString(relType string) uint8 {
-	if b, ok := relTypeBytes[relType]; ok {
-		return b
-	}
-	return 0xFF
 }

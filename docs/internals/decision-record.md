@@ -172,6 +172,33 @@ ever be") plus a cross-package disjointness test — not an assertion-only fix. 
 verify reporter claims independently (severity may rise); fix the disk, not just the future;
 guard the class of bug with a test.**
 
+**Fold-to-constant key components get the migration half, not the guard half (#894).** The
+0x21 relationship key carried the predicate as 1 byte from an 11-entry hardcoded vocabulary
+(`relTypeBytes`) that folded every other string to 0xFF — including four of the ten
+predicates the enrich plugin's own default prompt suggests — so any two unmapped predicates
+about the same entity pair collided on one key and the second write silently destroyed the
+first. #771's STO-15 precedent shipped a refusal guard for the analogous 0x03/0x04 shape and
+deferred the key-format change; here that split is inverted, deliberately. For 0x03/0x04 the
+colliding shape (same pair, same weight, different RelType) is rare and the caller has a
+knob to vary; for 0x21 the colliding shape is "any two unmapped predicates on one pair" —
+the default pipeline's own vocabulary — and there is nothing for the caller to vary: a guard
+would convert silent loss into a loud error while leaving the feature broken for its primary
+inputs. Chosen: replace the byte with the 8-byte `keys.PredicateHash` of the raw predicate
+string — the same construction the same key already uses twice for entity names — and delete
+the vocabulary map outright rather than freeze it. The rejected middle option (0xFF-escape
+hybrid: mapped bytes for the 11, hash for the rest) would have permanently retained the map,
+needing a `reflect.DeepEqual` freeze PLUS a rule that promoting a predicate is itself a
+migration — and skipping the freeze would let a future map addition silently split a
+promoted predicate across two keys, reintroducing this exact bug as cleanup. The map was the
+"#762 constant class": a vocabulary a person chose once that had already drifted from the
+product's own prompt. Post-fix, a vault's own predicates ARE the vocabulary. The key byte
+was write-only (no reader ever decoded it), which is what made the layout change safe;
+migration v7 re-keys 42→49 bytes with undecodable values failing loud. **Principles: when
+the collision is the common case and the caller has no knob, fix the representation, not
+the error report; a frozen map is a constant class waiting to drift; hash the raw string —
+normalizing identity is a separate decision and silently merges records that today
+legitimately differ.**
+
 **Coverage is not correctness (#731 → #732).** `muninn_state` sat in `isReadOnlyTool`
 while `handleState` reached `Engine.UpdateLifecycleState` → `store.CompareAndSet`, so an
 observe-mode credential could archive any engram in its vault — out of recall on every
