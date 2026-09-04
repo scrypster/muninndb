@@ -346,3 +346,169 @@ func TestRunner_RefusesDowngradeAfterV7(t *testing.T) {
 		t.Fatalf("applied = %d; want 0", applied)
 	}
 }
+
+// TestMigrationV7_ForceRerunRekeysReplicatedStrays pins the replica-first
+// recovery documented in STO-21 and the v7 header: a follower that upgraded
+// (v7 stamped) and THEN applied a PRE-upgrade leader's replicated
+// UpsertRelationshipRecord batch repr ends up with a legacy 42-byte key the
+// applier committed byte-verbatim AFTER the stamp (internal/replication
+// applier.go SetRepr has no key-length or version gate). A plain reopen
+// applies nothing (7 == 7) and the stray is permanent; the documented
+// recovery is `muninn start --force-migration-rerun`, whose forced pass must
+// re-key the stray via v7's length discriminator. Runs the REAL
+// RegisterMigrations set so the recovery path is exercised end to end.
+func TestMigrationV7_ForceRerunRekeysReplicatedStrays(t *testing.T) {
+	db := v7TestDB(t)
+	ws := [8]byte{'v', '7', 0, 0, 0, 0, 0, 4}
+	engramID := [16]byte{0xE9}
+	fromHash := keys.EntityNameHash("Aurora Platform")
+	toHash := keys.EntityNameHash("Kepler Cache")
+	rec := v7RelationshipRecord{
+		FromEntity: "Aurora Platform", ToEntity: "Kepler Cache",
+		RelType: "integrates_with", Weight: 0.8, Source: "inline", UpdatedAt: 55,
+	}
+
+	// The follower has already run v7...
+	if err := writeMigrationVersion(db, 7); err != nil {
+		t.Fatalf("stamp version 7: %v", err)
+	}
+	// ...and then applies the old leader's replicated write: a legacy 42-byte
+	// key landing after the stamp, exactly as the applier's byte-verbatim
+	// SetRepr path delivers it.
+	strayKey := plantLegacyRelationship(t, db, ws, engramID, fromHash, toHash, 0xFF, rec)
+
+	// A plain reopen applies nothing — current version == max registered — and
+	// the stray survives it. This is the hazard, asserted: without operator
+	// action the stray is permanent.
+	plain := NewRunner(db)
+	RegisterMigrations(plain)
+	applied, err := plain.Run()
+	if err != nil {
+		t.Fatalf("plain reopen: %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("plain reopen applied %d migrations; want 0 at version 7", applied)
+	}
+	if _, closer, err := db.Get(strayKey); err != nil {
+		t.Fatalf("plain reopen must leave the replicated stray in place (it did not — test premise broken): %v", err)
+	} else {
+		closer.Close()
+	}
+	if counts := countRelationshipKeys(t, db); counts[42] != 1 || counts[49] != 0 {
+		t.Fatalf("post-reopen key lengths = %v; want the one 42-byte stray", counts)
+	}
+
+	// The documented recovery: force-rerun resets the version so the next open
+	// re-applies every migration, and v7's length discriminator re-keys the
+	// stray alongside the (empty) rest of the store.
+	if err := ForceRerunMigrations(db); err != nil {
+		t.Fatalf("force-rerun: %v", err)
+	}
+	recovered := NewRunner(db)
+	RegisterMigrations(recovered)
+	if _, err := recovered.Run(); err != nil {
+		t.Fatalf("recovery run: %v", err)
+	}
+
+	counts := countRelationshipKeys(t, db)
+	if counts[42] != 0 || counts[49] != 1 {
+		t.Fatalf("post-recovery key lengths = %v; want zero strays and one 49-byte key", counts)
+	}
+	wantKey := keys.RelationshipKey(ws, engramID, fromHash, keys.PredicateHash("integrates_with"), toHash)
+	wantVal, err := msgpack.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal want: %v", err)
+	}
+	gotVal, closer, err := db.Get(wantKey)
+	if err != nil {
+		t.Fatalf("re-keyed record not found at %x: %v", wantKey, err)
+	}
+	defer closer.Close()
+	if !bytes.Equal(gotVal, wantVal) {
+		t.Fatalf("recovered value was re-encoded: got %x want %x (must be verbatim)", gotVal, wantVal)
+	}
+	if _, _, err := db.Get(strayKey); err != pebble.ErrNotFound {
+		t.Fatalf("stray key %x still present after recovery", strayKey)
+	}
+}
+
+// TestMigrationV7_BatchReallocationPath exercises the >500-record path: with
+// batchSize 500, a pass over 600 legacy records must take the mid-scan commit
+// AND the batch re-allocation (plus the final under-batch flush). Zero loss,
+// zero duplication, and byte-identical values across the re-allocation
+// boundary are the proof the path works; a second run must be a no-op.
+func TestMigrationV7_BatchReallocationPath(t *testing.T) {
+	db := v7TestDB(t)
+	ws := [8]byte{'v', '7', 0, 0, 0, 0, 0, 5}
+
+	const total = 600 // batchSize is 500: 600 forces the re-allocation path
+	predicates := []struct {
+		name string
+		b    byte // the byte the deleted relTypeBytes map would have produced
+	}{
+		{"uses", 0x02}, {"belongs_to", 0xFF}, {"integrates_with", 0xFF},
+		{"deployed_on", 0xFF}, {"supports", 0x09}, {"", 0xFF},
+	}
+
+	type planted struct {
+		wantKey []byte
+		wantVal []byte
+	}
+	want := make([]planted, 0, total)
+	for i := 0; i < total; i++ {
+		engramID := [16]byte{byte(i >> 8), byte(i)} // distinct engram per record
+		p := predicates[i%len(predicates)]
+		fromHash := keys.EntityNameHash("Aurora Platform")
+		toHash := keys.EntityNameHash("Kepler Cache")
+		if i%2 == 1 {
+			fromHash, toHash = toHash, fromHash // vary direction too
+		}
+		rec := v7RelationshipRecord{
+			FromEntity: "Aurora Platform", ToEntity: "Kepler Cache",
+			RelType: p.name, Weight: float32(i%100) / 100.0, Source: "plugin:enrich", UpdatedAt: int64(i),
+		}
+		val, err := msgpack.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal record %d: %v", i, err)
+		}
+		if err := db.Set(legacyRelationshipKey(ws, engramID, fromHash, p.b, toHash), val, pebble.NoSync); err != nil {
+			t.Fatalf("plant record %d: %v", i, err)
+		}
+		want = append(want, planted{
+			wantKey: keys.RelationshipKey(ws, engramID, fromHash, keys.PredicateHash(p.name), toHash),
+			wantVal: val,
+		})
+	}
+
+	if err := RekeyRelationshipPredicateHash(db); err != nil {
+		t.Fatalf("v7 over %d records: %v", total, err)
+	}
+
+	counts := countRelationshipKeys(t, db)
+	if counts[42] != 0 || counts[49] != total {
+		t.Fatalf("post-v7 key lengths = %v; want zero 42-byte and %d 49-byte keys", counts, total)
+	}
+	seen := make(map[string]int, total)
+	for _, w := range want {
+		got, closer, err := db.Get(w.wantKey)
+		if err != nil {
+			t.Fatalf("record %x lost across the batch re-allocation: %v", w.wantKey, err)
+		}
+		if !bytes.Equal(got, w.wantVal) {
+			t.Fatalf("record %x value not verbatim: got %x want %x", w.wantKey, got, w.wantVal)
+		}
+		closer.Close()
+		seen[string(w.wantKey)]++
+	}
+	if len(seen) != total {
+		t.Fatalf("distinct destination keys = %d; want %d (duplication check)", len(seen), total)
+	}
+
+	// Second pass: nothing left to do.
+	if err := RekeyRelationshipPredicateHash(db); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if counts = countRelationshipKeys(t, db); counts[49] != total || counts[42] != 0 {
+		t.Fatalf("second pass changed the store: %v", counts)
+	}
+}

@@ -55,13 +55,29 @@ import (
 // CONCURRENCY. Runner.Run executes inside Open, before any transport is
 // serving and before the engine's workers start, so no writer races this.
 //
-// DOWNGRADE. A binary that predates v7 has 42-length-guarded consumers
-// (deleteEntityLinks, RelinkRelationshipEntity) that would silently skip
-// 49-byte keys; Runner.Run's refuse-newer guard blocks it structurally
-// (stored 7 > that binary's MaxRegisteredVersion 6 → refuse to start). In a
-// mixed-version cluster the same skip applies on a pre-upgrade follower until
-// it is upgraded (v5/v6 posture: binary downgrade / mixed-version clusters
-// are handled out-of-band; upgrade all nodes promptly).
+// DOWNGRADE / MIXED VERSIONS. Both directions are hazardous.
+//
+//   - Old binary, upgraded DB: refuse-newer blocks it structurally (stored 7 >
+//     that binary's MaxRegisteredVersion 6 → refuse to start).
+//   - Upgraded leader → pre-upgrade follower: the follower applies 49-byte log
+//     entries byte-transparently but its 42-length-guarded consumers
+//     (deleteEntityLinks, RelinkRelationshipEntity) silently skip them, so
+//     relationship cleanup on hard-delete/entity-merge is missed until the
+//     follower is upgraded.
+//   - PRE-UPGRADE LEADER → upgraded, v7-stamped follower (the direction
+//     refuse-newer cannot see): the replication applier commits replicated
+//     batch reprs byte-verbatim (applier.go SetRepr, no key-length or version
+//     gate), so the old leader's legacy 42-byte relationship writes land AFTER
+//     v7 stamped, and a plain reopen never re-runs v7 — permanent strays. A
+//     re-upsert of the same assertion yields two rows (42+49 keys), a merge
+//     leaves the stale-name row behind (RelinkRelationshipEntity skips it),
+//     and a hard-delete orphans the stray's two 0x26 entries.
+//
+// OPERATOR RULE: upgrade the leader first during rolling upgrades, then
+// followers promptly. If a replica-first upgrade already happened, run
+// `muninn start --force-migration-rerun` on the upgraded nodes and restart —
+// v7's length discriminator re-keys the replicated strays on the forced pass
+// (pinned by TestMigrationV7_ForceRerunRekeysReplicatedStrays).
 func RekeyRelationshipPredicateHash(db *pebble.DB) error {
 	iter, err := db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte{prefix.Relationship},
@@ -77,6 +93,12 @@ func RekeyRelationshipPredicateHash(db *pebble.DB) error {
 
 	batch := db.NewBatch()
 	batchCount := 0
+	// migrated/alreadyMigrated/skipped are ADVISORY log counts, nothing more:
+	// the correctness mechanism is the per-key length discrimination above,
+	// never these counters. An iterator that revisits a just-committed
+	// destination key (which Pebble may surface after an interim batch commit)
+	// can double-count alreadyMigrated; a count that drifts by a few is
+	// expected and harmless, and no behavior may ever gate on these numbers.
 	migrated, alreadyMigrated, skipped := 0, 0, 0
 
 	for valid := iter.First(); valid; valid = iter.Next() {

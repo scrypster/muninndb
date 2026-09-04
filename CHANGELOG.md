@@ -27,11 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   predicate string (reachable via the plugin path) and trailing/leading-space
   variants now get their own stable keys instead of colliding with every
   other unmapped predicate. Predicate identity remains exact-match
-  (`"Uses"` and `"uses"` are still distinct predicates, by design). Cluster
-  operators: upgrade all nodes promptly — during a mixed-version window a
-  pre-upgrade follower silently skips relationship cleanup on hard-delete and
-  entity-merge for 49-byte keys, and a pre-upgrade binary refuses to open a
-  migrated data directory outright.
+  (`"Uses"` and `"uses"` are still distinct predicates, by design).
+  **Cluster operators — upgrade the LEADER first, then followers promptly.**
+  Both mixed-version directions are hazardous, in opposite ways. (1) An
+  upgraded node replicating to a pre-upgrade follower: the follower applies
+  49-byte log entries byte-transparently but its 42-length-guarded consumers
+  silently skip relationship cleanup on hard-delete and entity-merge until it
+  is upgraded. (2) A pre-upgrade leader replicating to an upgraded,
+  already-migrated follower: the applier commits replicated batch reprs
+  byte-verbatim with no key-length or version gate, so the leader's legacy
+  42-byte writes land AFTER migration v7 has stamped — a plain reopen never
+  re-runs v7, leaving permanent strays (a re-upsert of the same assertion
+  yields two rows, entity-merge leaves the stale-name row behind, hard-delete
+  orphans its 0x26 index entries). If a replica-first upgrade has already
+  happened, run `muninn start --force-migration-rerun` on the upgraded nodes
+  and restart: v7's length discriminator re-keys the replicated strays. A
+  pre-upgrade binary also refuses to open a migrated data directory outright.
 
 ---
 
