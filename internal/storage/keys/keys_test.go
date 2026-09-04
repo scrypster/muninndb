@@ -51,7 +51,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"OrdinalKey", OrdinalKey(ws, id, id)},
 		{"EntityKey", EntityKey([8]byte{}, [8]byte{})},
 		{"EntityEngramLinkKey", EntityEngramLinkKey([8]byte{}, [16]byte{}, [8]byte{})},
-		{"RelationshipKey", RelationshipKey([8]byte{}, [16]byte{}, [8]byte{}, 0x01, [8]byte{})},
+		{"RelationshipKey", RelationshipKey([8]byte{}, [16]byte{}, [8]byte{}, [8]byte{}, [8]byte{})},
 		{"EntityReverseIndexKey", EntityReverseIndexKey([8]byte{}, [8]byte{}, [16]byte{})},
 		{"LastAccessIndexKey", LastAccessIndexKey([8]byte{}, 0, [16]byte{})},
 		{"DreamStateKey", DreamStateKey([8]byte{1, 2, 3, 4, 5, 6, 7, 8})},
@@ -282,9 +282,79 @@ func TestEntityKeyLayout(t *testing.T) {
 	require.Equal(t, byte(0x20), lk[0], "EntityEngramLinkKey must start with 0x20")
 	require.Len(t, lk, 33, "EntityEngramLinkKey must be 33 bytes")
 
-	rk := RelationshipKey(ws, engramID, nameHash, 0x01, [8]byte{0xDD})
+	rk := RelationshipKey(ws, engramID, nameHash, [8]byte{0xEE}, [8]byte{0xDD})
 	require.Equal(t, byte(0x21), rk[0], "RelationshipKey must start with 0x21")
-	require.Len(t, rk, 42, "RelationshipKey must be 42 bytes")
+	require.Len(t, rk, 49, "RelationshipKey must be 49 bytes (#894: 8-byte predicate hash, not a 1-byte discriminant)")
+	require.Equal(t, []byte{0xCC}, rk[25:26], "fromHash still starts at byte 25")
+	require.Equal(t, []byte{0xEE}, rk[33:34], "predicate hash starts at byte 33")
+	require.Equal(t, []byte{0xDD}, rk[41:42], "toHash now starts at byte 41")
+}
+
+// TestPredicateHash_Deterministic — same input, same hash, every call.
+func TestPredicateHash_Deterministic(t *testing.T) {
+	for _, s := range []string{"", "uses", "communicates_with", "部署于"} {
+		require.Equal(t, PredicateHash(s), PredicateHash(s), "PredicateHash(%q) must be deterministic", s)
+	}
+}
+
+// TestPredicateHash_RawNotNormalized — PredicateHash deliberately applies NO
+// normalization (#894 §2.2): case and whitespace variants are distinct
+// predicates today (they occupied different keys under the byte map: "Uses"
+// folded to 0xFF while "uses" mapped to 0x02) and must keep distinct keys.
+// Normalizing here would merge them into one key — a silent loss.
+func TestPredicateHash_RawNotNormalized(t *testing.T) {
+	require.NotEqual(t, PredicateHash("uses"), PredicateHash("Uses"),
+		"case variants are distinct predicates and must hash to distinct keys")
+	require.NotEqual(t, PredicateHash("uses"), PredicateHash("uses "),
+		"trailing-space variants must hash to distinct keys")
+	require.NotEqual(t, PredicateHash("uses"), PredicateHash("  uses"),
+		"leading-space variants must hash to distinct keys")
+}
+
+// TestPredicateHash_DistinctVocabulary — every predicate string a vault can
+// assert must get its own key component: the 11 strings the deleted
+// relTypeBytes map used to encode, the unmapped strings the enrich plugin's
+// default prompt suggests, and the near-miss battery.
+func TestPredicateHash_DistinctVocabulary(t *testing.T) {
+	predicates := []string{
+		// The old relTypeBytes vocabulary (0x01-0x0B).
+		"manages", "uses", "depends_on", "implements", "created_by",
+		"part_of", "causes", "contradicts", "supports", "co_occurs_with", "caches_with",
+		// From the enrich plugin's default relationship prompt — all unmapped
+		// under the old byte map, i.e. the vocabulary the bug actually ate.
+		"belongs_to", "integrates_with", "deployed_on", "alternative_to",
+		// Free-form predicates the inline path accepts.
+		"communicates_with", "attributed_to",
+		// The empty predicate (reachable via the plugin path) used to collide
+		// with every unmapped predicate at 0xFF.
+		"",
+	}
+	seen := make(map[[8]byte]string, len(predicates))
+	for _, p := range predicates {
+		h := PredicateHash(p)
+		if prev, exists := seen[h]; exists {
+			t.Errorf("PredicateHash collision: %q and %q share %x", prev, p, h)
+		}
+		seen[h] = p
+	}
+}
+
+// TestRelationshipKey_DistinctPredicatesDistinctKeys — two records differing
+// ONLY in predicate must land on different keys. This is the #894 invariant at
+// the constructor level: under the old byte map both predicates below folded
+// to 0xFF and produced the identical key.
+func TestRelationshipKey_DistinctPredicatesDistinctKeys(t *testing.T) {
+	ws := [8]byte{0x0A}
+	engramID := [16]byte{0x0B}
+	fromHash := EntityNameHash("Aurora Platform")
+	toHash := EntityNameHash("Kepler Cache")
+
+	k1 := RelationshipKey(ws, engramID, fromHash, PredicateHash("communicates_with"), toHash)
+	k2 := RelationshipKey(ws, engramID, fromHash, PredicateHash("attributed_to"), toHash)
+	require.NotEqual(t, k1, k2, "two distinct predicates on one entity pair must never share a key (#894)")
+
+	// And the same predicate is a stable upsert: same inputs, same key.
+	require.Equal(t, k1, RelationshipKey(ws, engramID, fromHash, PredicateHash("communicates_with"), toHash))
 }
 
 func TestArchiveAssocKey_Layout(t *testing.T) {
@@ -408,7 +478,7 @@ func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
 		{"Entity", EntityKey(u8, u8)[0], prefix.Entity},
 		{"EntityEngramLink", EntityEngramLinkKey(ws, id16, u8)[0], prefix.EntityEngramLink},
 		{"EntityEngramLinkPrefix", EntityEngramLinkPrefix(ws, id16)[0], prefix.EntityEngramLink},
-		{"Relationship", RelationshipKey(ws, id16, u8, 0, u8)[0], prefix.Relationship},
+		{"Relationship", RelationshipKey(ws, id16, u8, u8, u8)[0], prefix.Relationship},
 		{"RelationshipPrefix", RelationshipPrefix(ws)[0], prefix.Relationship},
 		{"RelationshipEngramPrefix", RelationshipEngramPrefix(ws, id16)[0], prefix.Relationship},
 		{"CoOccurrence", CoOccurrenceKey(ws, u8, u8)[0], prefix.CoOccurrence},

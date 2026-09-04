@@ -703,6 +703,19 @@ func EntityNameHash(name string) [8]byte {
 	return h
 }
 
+// PredicateHash computes the 8-byte Siphash of a relationship predicate string,
+// used as the predicate component of the 0x21 relationship key (#894). Unlike
+// EntityNameHash it applies NO normalization: it hashes the raw bytes, because
+// today's keying is exact-match ("Uses" and "uses" are distinct predicates)
+// and a normalized hash would merge records that today occupy distinct keys —
+// a silent loss, the exact failure class #894 exists to eliminate.
+func PredicateHash(relType string) [8]byte {
+	hashVal := siphash.Hash(sipKey0, sipKey1, []byte(relType))
+	var h [8]byte
+	binary.BigEndian.PutUint64(h[:], hashVal)
+	return h
+}
+
 // EntityKey constructs the VAULT-SCOPED entity record key (0x1F prefix).
 // Key: 0x1F | wsPrefix(8) | nameHash(8) = 17 bytes
 //
@@ -741,16 +754,34 @@ func EntityEngramLinkPrefix(ws [8]byte, engramID [16]byte) []byte {
 	return key
 }
 
+// Relationship key component offsets and length, exported so key-consuming
+// scans (RelinkRelationshipEntity, deleteEntityLinks) never hand-derive slice
+// bounds. See RelationshipKey for the layout.
+const (
+	RelationshipKeyLen      = 49 // 0x21(1) | ws(8) | engramID(16) | fromHash(8) | predHash(8) | toHash(8)
+	RelationshipFromHashOff = 25
+	RelationshipPredHashOff = 33
+	RelationshipToHashOff   = 41
+)
+
 // RelationshipKey constructs a vault-scoped relationship key (0x21 prefix).
-// Key: 0x21 | ws(8) | engramID(16) | fromNameHash(8) | relTypeByte(1) | toNameHash(8) = 42 bytes
-func RelationshipKey(ws [8]byte, engramID [16]byte, fromHash [8]byte, relTypeByte uint8, toHash [8]byte) []byte {
-	key := make([]byte, 1+8+16+8+1+8)
+// Key: 0x21 | ws(8) | engramID(16) | fromNameHash(8) | PredicateHash(relType)(8) | toNameHash(8) = 49 bytes
+//
+// #894: the predicate component was a 1-byte relTypeByte that folded every
+// predicate outside an 11-entry hardcoded vocabulary to 0xFF — two unmapped
+// predicates asserted about the same entity pair collided on one key and the
+// second write silently destroyed the first. It is now an 8-byte hash of the
+// raw predicate string, so every distinct predicate gets its own key. The hash
+// is never decoded back to a string: every reader takes the predicate from the
+// msgpack value, which carries the exact RelType.
+func RelationshipKey(ws [8]byte, engramID [16]byte, fromHash [8]byte, predHash [8]byte, toHash [8]byte) []byte {
+	key := make([]byte, RelationshipKeyLen)
 	key[0] = prefix.Relationship
 	copy(key[1:9], ws[:])
 	copy(key[9:25], engramID[:])
-	copy(key[25:33], fromHash[:])
-	key[33] = relTypeByte
-	copy(key[34:42], toHash[:])
+	copy(key[RelationshipFromHashOff:RelationshipFromHashOff+8], fromHash[:])
+	copy(key[RelationshipPredHashOff:RelationshipPredHashOff+8], predHash[:])
+	copy(key[RelationshipToHashOff:RelationshipToHashOff+8], toHash[:])
 	return key
 }
 

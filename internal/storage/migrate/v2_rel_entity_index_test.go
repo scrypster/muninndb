@@ -6,13 +6,26 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
-// makeRelKey builds a raw 0x21 relationship key without going through the storage
-// layer, matching the exact byte layout the migration reads from.
+// makeRelKey builds a raw LEGACY 42-byte 0x21 relationship key without going
+// through the storage layer, matching the exact pre-#894 byte layout the
+// migration reads from: 0x21 | ws(8) | engramID(16) | fromHash(8) |
+// relTypeByte(1) | toHash(8). The live keys.RelationshipKey now emits the
+// 49-byte predicate-hash layout, so v2's historical input must be hand-rolled
+// (v6's legacyEntityKey precedent: migrations and their fixtures decode the
+// format that was on disk, not whatever the live constructor becomes later).
 func makeRelKey(ws [8]byte, engramID [16]byte, fromHash [8]byte, toHash [8]byte) []byte {
-	return keys.RelationshipKey(ws, engramID, fromHash, 0x01, toHash)
+	k := make([]byte, 42)
+	k[0] = prefix.Relationship
+	copy(k[1:9], ws[:])
+	copy(k[9:25], engramID[:])
+	copy(k[25:33], fromHash[:])
+	k[33] = 0x01 // any relTypeByte — v2 never reads this byte
+	copy(k[34:42], toHash[:])
+	return k
 }
 
 // hasRelEntityIndexKey returns true iff the 0x26 key for (ws, entityHash, engramID) exists in db.

@@ -9,7 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Relationship records no longer collide when two unmapped predicates are
+  asserted about the same entity pair (#894).** The 0x21 key carried the
+  predicate as a 1-byte discriminant from an 11-entry hardcoded vocabulary
+  that folded every other string to `0xFF` — including `belongs_to`,
+  `integrates_with`, `deployed_on` and `alternative_to`, four of the ten
+  predicates the enrich plugin's default prompt itself suggests — so the
+  second write silently destroyed the first. The predicate component is now
+  the 8-byte `keys.PredicateHash` of the raw predicate string (the same
+  construction the key already uses for both entity-name hashes), the
+  vocabulary map is deleted, and migration v7 re-keys existing records on
+  first start. **Two behavior deltas worth knowing:** records already
+  destroyed by a pre-fix collision are not repaired (only the survivor's
+  bytes were ever on disk — the migration re-keys survivors); and the empty
+  predicate string (reachable via the plugin path) and trailing/leading-space
+  variants now get their own stable keys instead of colliding with every
+  other unmapped predicate. Predicate identity remains exact-match
+  (`"Uses"` and `"uses"` are still distinct predicates, by design).
+  **Cluster operators — upgrade the LEADER first, then followers promptly.**
+  Both mixed-version directions are hazardous, in opposite ways. (1) An
+  upgraded node replicating to a pre-upgrade follower: the follower applies
+  49-byte log entries byte-transparently but its 42-length-guarded consumers
+  silently skip relationship cleanup on hard-delete and entity-merge until it
+  is upgraded. (2) A pre-upgrade leader replicating to an upgraded,
+  already-migrated follower: the applier commits replicated batch reprs
+  byte-verbatim with no key-length or version gate, so the leader's legacy
+  42-byte writes land AFTER migration v7 has stamped — a plain reopen never
+  re-runs v7, leaving permanent strays (a re-upsert of the same assertion
+  yields two rows, entity-merge leaves the stale-name row behind, hard-delete
+  orphans its 0x26 index entries). If a replica-first upgrade has already
+  happened, run `muninn start --force-migration-rerun` on the upgraded nodes
+  and restart: v7's length discriminator re-keys the replicated strays. A
+  pre-upgrade binary also refuses to open a migrated data directory outright.
 
 ---
 
