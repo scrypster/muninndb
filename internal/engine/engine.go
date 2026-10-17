@@ -4610,11 +4610,31 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 
 	// Mark entity extraction complete whenever the successor carries a curated
 	// set (carried or inline), so the retroactive enrichment provider does not
-	// re-extract over it.
+	// re-extract over it. The same holds for the other stages the successor
+	// carries (#902), on the rule Write uses for inline data (#500): the
+	// inherited TypeLabel is a completed classification, and carried relationship
+	// records are a completed relationships stage. co_occurs_with records are
+	// engine-generated side effects and complete nothing, as on the read path.
+	// Like the carried entities, these describe the predecessor's content; a
+	// caller whose update changes what the memory is about passes inline
+	// entities, which replace the carry and leave relationships open.
+	var stageFlags uint16
 	if len(carriedEntities) > 0 || len(entities) > 0 {
+		stageFlags |= plugin.DigestEntities
+	}
+	if newEng.TypeLabel != "" {
+		stageFlags |= plugin.DigestClassified
+	}
+	for _, rec := range carriedRels {
+		if rec.RelType != "co_occurs_with" {
+			stageFlags |= plugin.DigestRelationships
+			break
+		}
+	}
+	if stageFlags != 0 {
 		existingFlags, _ := e.store.GetDigestFlags(ctx, plugin.ULID(newULID))
-		if err := e.store.SetDigestFlag(ctx, newULID, existingFlags|plugin.DigestEntities); err != nil {
-			slog.Warn("engine: evolve: failed to set DigestEntities flag", "id", newULID.String(), "err", err)
+		if err := e.store.SetDigestFlag(ctx, newULID, existingFlags|stageFlags); err != nil {
+			slog.Warn("engine: evolve: failed to set carried stage flags", "id", newULID.String(), "flags", stageFlags, "err", err)
 		}
 	}
 
