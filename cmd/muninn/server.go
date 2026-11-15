@@ -1332,7 +1332,7 @@ func runServer() {
 	if applier != nil {
 		// A follower applies the leader's batches straight into Pebble; route
 		// them through the store's cache invalidation (cache_guard.go).
-		applier.SetCacheInvalidation(store.InvalidateCommittedRepr, store.InvalidateAllCaches)
+		applier.SetCommitHooks(store.InvalidateCommittedRepr, store.InvalidateAllCaches)
 	}
 
 	// Run startup migrations before the engine is built.

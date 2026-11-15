@@ -31,7 +31,7 @@ func TestApplier_FollowerCacheSeesReplicatedWrite(t *testing.T) {
 	follower := storage.NewPebbleStore(followerDB, storage.PebbleStoreConfig{CacheSize: 100})
 	defer follower.Close()
 	applier := NewApplier(followerDB)
-	applier.SetCacheInvalidation(follower.InvalidateCommittedRepr, follower.InvalidateAllCaches)
+	applier.SetCommitHooks(follower.InvalidateCommittedRepr, follower.InvalidateAllCaches)
 
 	var seq uint64
 	ship := func() {

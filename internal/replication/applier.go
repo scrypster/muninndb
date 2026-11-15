@@ -22,29 +22,22 @@ type Applier struct {
 	appliedSince uint64 // entries since last explicit sync
 	mu           sync.Mutex
 
-	// The local store's read-through caches, which this applier bypasses by
-	// writing straight into Pebble. onCommitted is handed every committed
-	// data batch repr; onReplaced runs when a snapshot replaced local state.
-	// Both nil until SetCacheInvalidation (no store, or tests).
+	// onCommitted / onReset let the local store keep its derived in-memory
+	// state (the retired set, storage/retired.go) in step with what this
+	// applier writes behind its back. onCommitted receives the repr of every
+	// batch the applier commits; onReset is called when a snapshot has
+	// replaced local state wholesale (ResetTo). Both nil unless wired.
 	onCommitted func(repr []byte)
-	onReplaced  func()
+	onReset     func()
 }
 
-// SetCacheInvalidation wires the local store's cache invalidation into the
-// apply path. Without it a follower's caches would keep serving the values
-// they held before the leader's writes landed (storage.PebbleStore
-// .InvalidateCommittedRepr / .InvalidateAllCaches).
-func (a *Applier) SetCacheInvalidation(onCommitted func(repr []byte), onReplaced func()) {
+// SetCommitHooks installs the post-commit hooks (see the Applier fields).
+// Must be called before the applier is shared across goroutines.
+func (a *Applier) SetCommitHooks(onCommitted func(repr []byte), onReset func()) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.onCommitted = onCommitted
-	a.onReplaced = onReplaced
-}
-
-func (a *Applier) notifyCommitted(repr []byte) {
-	if a.onCommitted != nil {
-		a.onCommitted(repr)
-	}
+	a.onReset = onReset
 }
 
 // NewApplier creates a new Applier for a Pebble database.
@@ -109,10 +102,11 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 		if err := reprBatch.SetRepr(entry.Value); err != nil {
 			return fmt.Errorf("apply batch repr at seq %d: %w", entry.Seq, err)
 		}
-		err := reprBatch.Commit(pebble.NoSync)
-		a.notifyCommitted(reprBatch.Repr())
-		if err != nil {
+		if err := reprBatch.Commit(pebble.NoSync); err != nil {
 			return err
+		}
+		if a.onCommitted != nil {
+			a.onCommitted(entry.Value)
 		}
 		seqBuf := make([]byte, 8)
 		binary.BigEndian.PutUint64(seqBuf, entry.Seq)
@@ -147,10 +141,11 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 	// Use NoSync per entry — Pebble's WAL provides crash-safety without an fsync
 	// on every write. Syncing every entry would serialize on disk I/O, making
 	// replication throughput proportional to fsync latency (~1 IOPS per entry).
-	err := batch.Commit(pebble.NoSync)
-	a.notifyCommitted(batch.Repr())
-	if err != nil {
+	if err := batch.Commit(pebble.NoSync); err != nil {
 		return err
+	}
+	if a.onCommitted != nil {
+		a.onCommitted(batch.Repr())
 	}
 
 	a.lastApplied = entry.Seq
@@ -196,10 +191,10 @@ func (a *Applier) ResetTo(seq uint64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// The snapshot replaced local state wholesale: nothing cached survives,
+	// The snapshot replaced local state: anything derived from it is stale,
 	// whether or not the cursor moves.
-	if a.onReplaced != nil {
-		a.onReplaced()
+	if a.onReset != nil {
+		a.onReset()
 	}
 	if a.lastApplied == seq {
 		return nil
