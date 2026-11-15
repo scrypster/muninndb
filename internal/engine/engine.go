@@ -2179,6 +2179,16 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	// batches — the same known limitation as content-hash intra-batch dedup above.
 	seenOpIDs := make(map[string]int)      // op_id → original index of first occurrence
 	pendingDuplicates := make(map[int]int) // duplicate item index → first-occurrence index
+	// Exact-content duplicates WITHIN this batch (the store-level hash check
+	// below cannot see items that are not committed yet). Keyed by vault and
+	// content hash; only items carrying no validity window take part, because
+	// two same-content facts with different windows are two facts.
+	type batchContentKey struct {
+		ws   [8]byte
+		hash [32]byte
+	}
+	firstByContent := make(map[batchContentKey]int)
+	contentDuplicates := make(map[int]int) // duplicate item index → first-occurrence index
 
 	for i, req := range reqs {
 		wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
@@ -2219,8 +2229,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 
 		// ── Content-hash dedup: same O(1) check as single Write ──────
-		// NOTE: Intra-batch dedup is not performed — items within the same batch
-		// cannot see each other's hashes during Phase 1. This is a known limitation.
+		// Intra-batch duplicates are caught just below via firstByContent.
 		contentHash := storage.ContentHash(req.Content)
 		if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
 			// Same live-AND-current check as the single-Write path: an EXPIRED
@@ -2244,6 +2253,16 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			}
 			// Engram was soft-deleted or not found — remove stale hash mapping and proceed.
 			_ = e.store.DeleteContentHash(ctx, wsPrefix, contentHash)
+		}
+		if req.ValidFrom == nil && req.ValidUntil == nil && !skipContentDedup(ctx) {
+			k := batchContentKey{ws: wsPrefix, hash: contentHash}
+			if first, seen := firstByContent[k]; seen {
+				contentDuplicates[i] = first
+				// Placeholder so Phase 2 skips it; resolved after commit.
+				responses[i] = &mbp.WriteResponse{Hint: "pending_duplicate_content"}
+				continue
+			}
+			firstByContent[k] = i
 		}
 
 		vaultName := req.Vault
@@ -2412,6 +2431,18 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			if err := e.store.WriteIdempotency(ctx, reqs[origIdx].IdempotentID, batchIDs[fi].String()); err != nil {
 				slog.Warn("engine: batch: failed to store idempotency receipt", "op_id", reqs[origIdx].IdempotentID, "id", batchIDs[fi].String(), "err", err)
 			}
+		}
+	}
+
+	// Intra-batch exact-content duplicates resolve to the first occurrence's
+	// new engram, reported the same way as a duplicate of a stored memory.
+	for dupIdx, firstIdx := range contentDuplicates {
+		switch {
+		case errs[firstIdx] == nil && responses[firstIdx] != nil:
+			responses[dupIdx] = &mbp.WriteResponse{ID: responses[firstIdx].ID, CreatedAt: responses[firstIdx].CreatedAt, Hint: "duplicate_content"}
+		default:
+			responses[dupIdx] = nil
+			errs[dupIdx] = fmt.Errorf("identical content to batch item %d, which was not stored: %v", firstIdx, errs[firstIdx])
 		}
 	}
 

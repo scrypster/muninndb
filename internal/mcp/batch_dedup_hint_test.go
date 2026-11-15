@@ -46,3 +46,29 @@ func TestRememberBatch_ReportsContentDuplicate(t *testing.T) {
 		t.Errorf("status changed: %v / %v (kept \"ok\" for compatibility; the duplicate signal is additive)", r0["status"], r1["status"])
 	}
 }
+
+// TestRememberBatch_IntraBatchDuplicateIsStoredOnce: two items with identical
+// content in ONE batch used to get two different new ids and no hint.
+func TestRememberBatch_IntraBatchDuplicateIsStoredOnce(t *testing.T) {
+	eng, srv, _, cleanup := newDebtServer(t)
+	defer cleanup()
+	const vault = "railway-intra"
+	const dup = "the up starter signal is a lower-quadrant semaphore"
+	out := callTool(t, srv, "muninn_remember_batch", fmt.Sprintf(
+		`{"vault":%q,"memories":[{"concept":"starter","content":%q},{"concept":"distant","content":"the distant signal is fixed at caution"},{"concept":"starter again","content":%q}]}`,
+		vault, dup, dup))
+	eng.WaitWriteTimeIdle()
+	results, _ := out["results"].([]any)
+	r0, _ := results[0].(map[string]any)
+	r2, _ := results[2].(map[string]any)
+	if r2["id"] != r0["id"] || r2["duplicate_of"] != r0["id"] {
+		t.Fatalf("intra-batch duplicate: item0=%v item2=%v; want item 2 to resolve to item 0's id with duplicate_of", r0, r2)
+	}
+	if _, has := r0["duplicate_of"]; has {
+		t.Errorf("first occurrence must not be marked a duplicate: %v", r0)
+	}
+	sess := callTool(t, srv, "muninn_session", fmt.Sprintf(`{"vault":%q,"since":"2000-01-01T00:00:00Z"}`, vault))
+	if total, _ := sess["total"].(float64); total != 2 {
+		t.Errorf("vault holds %v memories, want 2 (the duplicate stored once)", sess["total"])
+	}
+}
