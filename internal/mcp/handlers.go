@@ -660,13 +660,22 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	}
 	if len(memories) == 0 {
 		// The hint names the threshold because it is the lever that actually
-		// changes the outcome — evaluators called the old advice wrong for
-		// suggesting mode='recent' while omitting it.
-		hint := "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent', or use muninn_where_left_off."
+		// changes the outcome. It never suggests mode='recent': recent is an
+		// alias of the default (COG-6), so it cannot rescue an empty result —
+		// and telling a mode='recent' caller to "try mode='recent'" was
+		// circular. Continuity routes to the tools that can provide it.
+		const hintBase = "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording."
+		const recentNote = " mode='recent' scores exactly like the default — it cannot rescue an empty result."
+		continuity := " For session continuity use muninn_where_left_off."
 		p, pErr := s.engine.GetVaultPlasticity(ctx, vault)
 		if pErr == nil && p != nil && p.MultiUser {
-			hint = "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global)."
+			continuity = " For session continuity recall with tags_any=[\"<your per-user tag>\"] (this vault is shared; muninn_where_left_off is vault-global)."
 		}
+		hint := hintBase
+		if mode == "recent" {
+			hint += recentNote
+		}
+		hint += continuity
 		// COG-6: never clobber an explicit threshold — only hint. An rrf vault's
 		// blended finals rarely exceed ~0.15, so a caller-supplied threshold at
 		// or above 0.01 can silently filter every result. Only fires when the

@@ -46,15 +46,14 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 		b.WriteString("project context, important facts, and anything the user might need later. ")
 		b.WriteString("Before starting any task, recall relevant memories. ")
 		b.WriteString("After completing work, remember key outcomes.\n\n")
-		b.WriteString("**Session start pattern:** At the start of every session, call recall twice:\n")
+		b.WriteString("**Session start pattern:** At the start of every session, make two calls:\n")
 		if resolved.MultiUser {
-			b.WriteString("1. `muninn_recall(context=[\"<your per-user tag>\", \"session start\"], mode=\"recent\")` — restores YOUR recent continuity. This vault is shared: unscoped recency surfaces other users' work.\n")
-			b.WriteString("2. Once the user provides context, call `muninn_recall(context=[<user topic>])` for semantic relevance.\n")
+			b.WriteString("1. `muninn_recall(context=[\"<your current topic, or your per-user tag if none>\"], tags_any=[\"<your per-user tag>\"], mode=\"recent\")` — the `tags_any` filter scopes results to YOUR memories; a tag in `context` does not filter, it only affects ranking. `mode=\"recent\"` scores exactly like the default and marks this as a session-orientation call (it attaches any unresolved contradictions). Judge each row by its `relevance_band`. This vault is shared: a recall without the tag filter surfaces other users' work.\n")
+			b.WriteString("2. Once the user provides context, call `muninn_recall(context=[<user topic>], tags_any=[\"<your per-user tag>\"])` for your memories on that topic.\n")
 			b.WriteString("Avoid `muninn_where_left_off` and `muninn_session` here — they return vault-global recency across all users (admin/audit use).\n")
 		} else {
-			b.WriteString("1. `muninn_recall(context=[\"session start\"], mode=\"recent\")` — restores recent continuity regardless of topic.\n")
+			b.WriteString("1. `muninn_where_left_off()` — purpose-built for session resumption: your most recent activity, regardless of topic.\n")
 			b.WriteString("2. Once the user provides context, call `muninn_recall(context=[<user topic>])` for semantic relevance.\n")
-			b.WriteString("Alternatively, use `muninn_where_left_off` — it is purpose-built for session resumption.\n")
 		}
 	}
 
@@ -81,7 +80,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("\n## Available Tools\n\n")
 	b.WriteString("- **muninn_remember** — Store a new memory\n")
 	b.WriteString("- **muninn_remember_batch** — Store multiple memories at once (max 50)\n")
-	b.WriteString("- **muninn_recall** — Search memories by semantic context (use mode='recent' at session start)\n")
+	b.WriteString("- **muninn_recall** — Search memories by context (`mode='recent'` scores exactly like the default; it only marks a session-orientation call)\n")
 	if resolved.MultiUser {
 		b.WriteString("- **muninn_where_left_off** — Recent activity across ALL users of this shared vault (admin/audit; not for session start)\n")
 	} else {
@@ -290,11 +289,11 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	// Tips
 	b.WriteString("\n## Tips\n\n")
 	if resolved.MultiUser {
-		b.WriteString("- This vault is shared: scope recalls to your own work (include your per-user tag in the context); muninn_where_left_off and muninn_session are vault-global (admin/audit).\n")
+		b.WriteString("- This vault is shared: scope recalls to your own work with `tags_any=[\"<your per-user tag>\"]` (a tag in the context does not filter); muninn_where_left_off and muninn_session are vault-global (admin/audit).\n")
 	} else {
 		b.WriteString("- Use muninn_where_left_off at session start — purpose-built for resuming where you left off.\n")
 	}
-	b.WriteString("- Use muninn_recall with mode='recent' when you need continuity but lack specific context.\n")
+	b.WriteString("- mode='recent' is not a recency filter and does not list recent memories: it scores exactly like the default. For topic-free continuity use muninn_where_left_off (single-user vault) or `tags_any` with your per-user tag (shared vault).\n")
 	b.WriteString("- Use muninn_recall with mode='deep' for thorough searches across the memory graph.\n")
 	b.WriteString("- Use muninn_link to connect related memories and strengthen the knowledge graph.\n")
 	b.WriteString("- Use muninn_decide to record decisions — they automatically link to supporting evidence.\n")
