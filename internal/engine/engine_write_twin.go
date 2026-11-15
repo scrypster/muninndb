@@ -122,7 +122,7 @@ type twinPairKey struct {
 
 // twinSetCap bounds seen and logged; past it, entries older than the window
 // are pruned first, then arbitrary ones (both only suppress repeats).
-const twinSetCap = 1 << 16
+const twinSetCap = 1 << 14
 
 func pruneTimeMap[K comparable](m map[K]time.Time, now time.Time) {
 	if len(m) < twinSetCap {

@@ -1763,10 +1763,27 @@ improve (a direct hand-off from the write to the processor instead of a full-sto
 - *No web-console field for the override.* The console's plasticity form already preserves
   fields it does not edit (`plasticityRawConfig` merge), the closest precedent
   (`semantic_floor`) has no field either, and the only reader is an off-by-default feature.
-- *Invariant number.* COG-34 was taken by the honest clock; this is COG-36.
 - *Backlog embeds are not writes.* The processor also embeds re-embeds and pre-existing
   backlog; comparing those with each other would log "twins" nobody wrote. Only a write
-  noted by this process, or an engram created within the hour, enters the ring.
+  noted by this process, or an engram created within the hour, enters the ring; an id
+  admitted within the hour is not re-admitted; a pair is logged and counted once per
+  hour. (The first cut claimed backlog "never enters"; review found a re-embed within the
+  hour re-admitted both members of a pair and logged it again. Now pinned.)
+- *Off is inert, and what is not.* With the check off the hook is not wired, the MCP path
+  allocates and calls nothing, and the guide, the tool description and resolved
+  plasticity JSON are unchanged. Unconditional: a nil check per write, one interface
+  assertion per remember, two accepted plasticity fields, two CLI subcommands, and four
+  unlabelled metrics exporting zeros.
+- *Review fixes, slice 1.* `Engine.Stop` could hang if a hook's send landed after the
+  worker's final drain (reproduced; admission, send and accounting are now one locked
+  step). The ring was bounded per vault but not in total and idle vaults never emptied
+  (300 vaults x 512 entries measured +255.6 MB); it is now capped at 16 MiB across vaults
+  and swept by age. The blind judging file paired each flagged write twice with the same
+  later text, giving the arm away; controls now come from unflagged writes and no later
+  text repeats. Shadow lines carry `considered` and `ring=warming|warm`, and `twin-audit`
+  reports the hour after each restart apart. `vault_ws` is a fixed-key SipHash: shadow
+  logs identify vaults to anyone with a guess list.
+- *Invariant number.* COG-35 is claimed by another branch merging first; this is COG-36.
 - *Client-supplied embeddings are not checked.* A write that carries its own `embedding`
   is indexed inline and never passes through the embed processor, so it never enters the
   ring (its vector may also come from another model). No block, no shadow line.
@@ -1780,7 +1797,7 @@ the write itself made at write time (an evolve) skipped, a link made later still
 a flag — and prints flags, flags per 100 writes, the per-day maximum, the guard, and the
 pre-committed verdict (VETO under a 0.70 precision lower bound, over 5 per 100, or
 `too_homogeneous`; DO_NOT_ENABLE under 40 flags or at cold start). `--out` writes ids-only
-pairs, a blind judging file with full text and an equal number of rank-11–20 controls, and a
+pairs, a blind judging file with full text (every sampled flag, up to 100, plus as many controls: unflagged writes against a rank-11–20 neighbour; no later text repeats), and a
 separate key; `--key/--labels` scores the judgements. `muninn twin-audit` reads the shadow
 log back and counts unresolved near-twin pairs (both live, no supersedes/contradicts edge,
 neither forgotten) per 100 writes, for pairs at least 7 days old. Its known over-counts are
