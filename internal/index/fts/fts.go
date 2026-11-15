@@ -1,9 +1,11 @@
 package fts
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -759,13 +761,19 @@ func (idx *Index) searchTokenCoverage(ws [8]byte, term string, numer map[[16]byt
 	return nil
 }
 
-// sortScoredIDs sorts in descending order by score.
+// sortScoredIDs sorts in descending order by score, breaking exact ties on
+// ascending ID. The tie-break is load-bearing: Search builds its input from a
+// Go map, and coverage is capped per term, so many documents routinely tie
+// exactly. Sorting on score alone left tied documents in map-iteration order,
+// so which of them survived the topK cut — the recall candidate SET — changed
+// between identical calls on an unchanged index.
 func sortScoredIDs(s []ScoredID) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j].Score > s[j-1].Score; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
+	sort.Slice(s, func(i, j int) bool {
+		if s[i].Score != s[j].Score {
+			return s[i].Score > s[j].Score
 		}
-	}
+		return bytes.Compare(s[i].ID[:], s[j].ID[:]) < 0
+	})
 }
 
 // FTSStats holds global FTS statistics.
