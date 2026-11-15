@@ -84,6 +84,9 @@ func assertAllIdenticalReachable(t *testing.T, idx *Index, dupVec []float32, dup
 // TestIdentical_MoreThanM0CopiesAllReachable: 40, 100 and 200 bit-identical
 // copies inside a vault, and a vault holding nothing else.
 func TestIdentical_MoreThanM0CopiesAllReachable(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	for _, tc := range []struct {
 		name         string
 		base, copies int
@@ -102,6 +105,9 @@ func TestIdentical_MoreThanM0CopiesAllReachable(t *testing.T) {
 // written by the new rule and by the old one, restarted five times. The first
 // start may repair an old graph; no later start repairs anything.
 func TestIdentical_RestartCyclesRepairAtMostOnce(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		copies int

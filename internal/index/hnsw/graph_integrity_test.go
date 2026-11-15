@@ -10,6 +10,9 @@ import (
 )
 
 func TestBulkInsertSelfQuery(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {
@@ -70,6 +73,9 @@ func TestBulkInsertSelfQuery(t *testing.T) {
 }
 
 func TestBulkInsertReloadSelfQuery(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {

@@ -126,6 +126,9 @@ func ctThreeFromSynth(s *ctQuerySeries) []ctVaultResult {
 // ---------------------------------------------------------------------------
 
 func TestCognitionTrialRule_DilutionInvariance(t *testing.T) {
+	// Pure arithmetic over synthetic series: no engine, no package state, so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	const n = 320
 	src := ctSynthSeries(n)
 

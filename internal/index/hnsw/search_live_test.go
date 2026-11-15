@@ -90,6 +90,9 @@ func countIn(hits []hnsw.ScoredID, set map[[16]byte]bool) int {
 // scores, for every k. (The engine does not even call SearchLive for a vault
 // with an empty retired set; this pins that the two walks agree anyway.)
 func TestSearchLive_NoRetiredMatchesSearch(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	idx, _, _, _ := starvationIndex(t, 1500, 0, 0)
 	rng := rand.New(rand.NewSource(9))
 	ctx := context.Background()
@@ -119,6 +122,9 @@ func TestSearchLive_NoRetiredMatchesSearch(t *testing.T) {
 // them; SearchLive returns all 20 relevant live vectors, keeps the nearest
 // retired ones as shadows on their own budget, and stays inside its bound.
 func TestSearchLive_RetiredClusterDoesNotTakeSlots(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	idx, rel, dup, q := starvationIndex(t, 1980, 20, 500)
 	ctx := context.Background()
 	retired := func(id [16]byte) bool { return dup[id] }
@@ -189,6 +195,9 @@ func TestSearchLive_TombstonedNeverReturned(t *testing.T) {
 // neighbours. recall@10 against exact search over live vectors: 0.53 on this
 // shape before the "a full beam of retired routing" trigger, 1.00 with it.
 func TestSearchLive_ChainAimedRecallAgainstExact(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	db := memDB(t)
 	idx := hnsw.NewWithParams(db, testWS(), 64, 0)
 	t.Cleanup(idx.Close)

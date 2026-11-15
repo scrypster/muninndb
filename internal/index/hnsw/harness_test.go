@@ -166,6 +166,9 @@ func runHarness(t testing.TB, dim int, sizes []int, shapes []string, nq int) map
 // clustered shapes reach jitter-equivalent recall@10 >= 0.95, and uniform and
 // plain-topic data are no more than one point below the current rule.
 func TestHarness_Fast(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	const n = 400
 	res := runHarness(t, 64, []int{n}, []string{"uniform", "topics", "dup50"}, 20)
 	get := func(shape, class, arm string) harnessCell {

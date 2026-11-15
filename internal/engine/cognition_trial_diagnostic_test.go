@@ -193,6 +193,9 @@ func TestCognitionTrialRule_ThreeFromSeriesRelabelIsExact(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCognitionTrialRule_AdditivityDoesNotConvergeAndIsNotAGate(t *testing.T) {
+	// Pure arithmetic over synthetic series: no engine, no package state, so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	// A reduced resample count, and the justification is NARROWER than it was
 	// written. The additivity relations read ctDelta.Point, which is the exact
 	// arithmetic mean and is bit-identical at any resample count — that part
@@ -455,6 +458,9 @@ func TestCognitionTrialRule_AdditivityBreaksDecodeToAHarmfulMechanism(t *testing
 // ---------------------------------------------------------------------------
 
 func TestCognitionTrialRule_EveryDeltaNMustBindToTheSameSeries(t *testing.T) {
+	// Pure arithmetic over synthetic series: no engine, no package state, so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	const n = 320
 	for _, tc := range []struct {
 		arm     string
@@ -551,6 +557,9 @@ func ctMRRDisagreeingSeries(n int) *ctQuerySeries {
 }
 
 func TestCognitionTrialRule_UnmeasuredMRRIsNotAMeasuredZero(t *testing.T) {
+	// Pure arithmetic over synthetic series: no engine, no package state, so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	const n = 320
 	decide := func(mutate func(s *ctQuerySeries)) (ctDecision, ctVaultResult) {
 		s := ctMRRDisagreeingSeries(n)

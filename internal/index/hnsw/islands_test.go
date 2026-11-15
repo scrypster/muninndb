@@ -100,6 +100,9 @@ func TestInsert_ExactDuplicatesAreNotClosed(t *testing.T) {
 // TestInsert_TopicLargerThanM0IsNotClosed: the non-duplicate case. ~40-member
 // topics of ordinary (not near-identical) vectors close the same way.
 func TestInsert_TopicLargerThanM0IsNotClosed(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	c := makeCorpus("topics", 128, 800, 7)
 	db := memPebble(t)
 	defer db.Close()
@@ -114,6 +117,9 @@ func TestInsert_TopicLargerThanM0IsNotClosed(t *testing.T) {
 // TestSearch_RecallVsExact_ClusteredShapes: recall@10 against brute force on
 // shapes with clusters larger than M0.
 func TestSearch_RecallVsExact_ClusteredShapes(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	for _, tc := range []struct {
 		shape  string
 		dim, n int
@@ -160,6 +166,9 @@ func TestSearch_RecallVsExact_ClusteredShapes(t *testing.T) {
 // TestLoadFromPebble_DiverseGraphReloadsIdentically: a persisted graph reloads
 // to the same graph — no repair fires — so a restart cannot change results.
 func TestLoadFromPebble_DiverseGraphReloadsIdentically(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	c := makeCorpus("topics", 128, 1000, 3)
 	db := memPebble(t)
 	defer db.Close()

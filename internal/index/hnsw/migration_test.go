@@ -179,6 +179,9 @@ func meanRecall(c *corpus, qs []query, got [][][16]byte) float64 {
 // builds; the repaired graph replaces it in one step, is persisted complete
 // (no stale layers), and the next load needs no repair: results change once.
 func TestMigration_OldRuleGraphServedThenReplacedOnce(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		seed int64
