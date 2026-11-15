@@ -338,13 +338,13 @@ Every cognitive behavior is tunable per vault:
 |---------|---------|-------|-------------|
 | `preset` | `"default"` | default/reference/scratchpad/knowledge-graph/working | Base behavior template |
 | `hebbian_enabled` | true | bool | Hebbian co-activation learning. Governs the WHOLE loop (COG-32): weight updates, association decay, **and** the read-side phase-4 boost during recall. `false` means recall is never scored by association weights. |
-| `temporal_enabled` | true | bool | Temporal decay scoring |
-| `auto_link_neighbors` | true | bool | Semantic neighbor auto-linking on write |
+| `temporal_enabled` | true | bool | Accepted and stored, but no runtime path reads it — changing it has no effect (temporal decay is not switched by this flag) |
+| `auto_link_neighbors` | true | bool | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `hop_depth` | 2 | 0–8 | BFS traversal depth. Accepted and stored, but Phase 5 emits nothing on real corpora (#801), so this value does not currently change any recall result |
 | `semantic_weight` | 0.6 | 0–1 | Vector similarity weight |
 | `fts_weight` | 0.3 | 0–1 | BM25 full-text weight |
-| `relevance_floor` | 0.05 | 0–1 | Minimum activation threshold |
-| `temporal_halflife` | 30 | days | Stability / decay resistance |
+| `relevance_floor` | 0.05 | 0–1 | Accepted and stored, but no runtime path reads it — changing it has no effect |
+| `temporal_halflife` | 30 | days | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `traversal_profile` | auto | string | Default traversal profile |
 | `actr_decay` | 0.5 | 0.01–2.0 | ACT-R power-law exponent |
 | `actr_heb_scale` | 4.0 | 0–50 | Hebbian amplifier in ACT-R |

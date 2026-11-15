@@ -124,7 +124,10 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	}
 	fmt.Fprintf(&b, "- Predictive activation (PAS): %s\n", enabledStr(resolved.PredictiveActivation))
 	fmt.Fprintf(&b, "- Graph hop depth: %d\n", resolved.HopDepth)
-	fmt.Fprintf(&b, "- Temporal decay: %s\n", enabledStr(resolved.TemporalEnabled))
+	// No "Temporal decay" line: it was printed from temporal_enabled, which no
+	// runtime path reads (nor auto_link_neighbors, temporal_halflife,
+	// relevance_floor) — reporting it described behaviour the flag does not
+	// control. Pinned by TestGuide_DoesNotReportConfigNothingReads.
 	fmt.Fprintf(&b, "- Inline enrichment: %s\n", resolved.InlineEnrichment)
 	if resolved.MaxEngrams > 0 {
 		fmt.Fprintf(&b, "- Max engrams: %d\n", resolved.MaxEngrams)
