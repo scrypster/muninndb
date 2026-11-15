@@ -92,7 +92,7 @@ func (ps *PebbleStore) putLease(wsPrefix [8]byte, id ULID, l Lease) error {
 	if err := batch.Set(keys.LeaseKey(wsPrefix, [16]byte(id)), val, nil); err != nil {
 		return fmt.Errorf("stage lease set: %w", err)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit lease: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -107,7 +107,7 @@ func (ps *PebbleStore) deleteLease(wsPrefix [8]byte, id ULID) error {
 	if err := batch.Delete(keys.LeaseKey(wsPrefix, [16]byte(id)), nil); err != nil {
 		return fmt.Errorf("stage lease delete: %w", err)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit lease delete: %w", err)
 	}
 	ps.replicateBatch(batch)

@@ -510,7 +510,7 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	if ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	if err := batch.Commit(syncOption); err != nil {
+	if err := ps.commitBatch(batch, syncOption); err != nil {
 		return ULID{}, fmt.Errorf("commit batch: %w", err)
 	}
 	if contradictsQueued {
@@ -830,7 +830,7 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 	if ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	if commitErr := batch.Commit(syncOption); commitErr != nil {
+	if commitErr := ps.commitBatch(batch, syncOption); commitErr != nil {
 		for i := range errs {
 			if errs[i] == nil {
 				errs[i] = fmt.Errorf("commit batch: %w", commitErr)
@@ -992,7 +992,7 @@ func (ps *PebbleStore) ClearFTSKeys(ws, wsPlus [8]byte) error {
 			return fmt.Errorf("storage: clear FTS keys 0x%02X: %w", p, err)
 		}
 	}
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
 		batch.Close()
 		return fmt.Errorf("storage: commit FTS clear batch: %w", err)
 	}

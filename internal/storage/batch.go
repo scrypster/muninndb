@@ -427,7 +427,7 @@ func (b *pebbleStoreBatch) Commit() error {
 	if b.ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	if err := b.batch.Commit(syncOption); err != nil {
+	if err := b.ps.commitBatch(b.batch, syncOption); err != nil {
 		return fmt.Errorf("batch commit: %w", err)
 	}
 

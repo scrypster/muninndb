@@ -109,7 +109,7 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	if err := ps.deleteVaultEntityReverseIndex(batch, ws); err != nil {
 		return 0, fmt.Errorf("clear vault: delete entity reverse index: %w", err)
 	}
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
 		return 0, fmt.Errorf("clear vault: commit: %w", err)
 	}
 

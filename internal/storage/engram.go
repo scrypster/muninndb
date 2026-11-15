@@ -29,7 +29,8 @@ func (ps *PebbleStore) GetEngram(ctx context.Context, wsPrefix [8]byte, id ULID)
 		return eng, nil
 	}
 
-	// Get from pebble
+	// Get from pebble. The fill token is taken BEFORE the read (cache_guard.go).
+	tok := ps.cache.guard.token()
 	key := keys.EngramKey(wsPrefix, [16]byte(id))
 	val, err := Get(ps.db, key)
 	if err != nil {
@@ -52,11 +53,7 @@ func (ps *PebbleStore) GetEngram(ctx context.Context, wsPrefix [8]byte, id ULID)
 	// same-call re-read is still served without a Pebble round-trip) but
 	// does not stamp recency — see cache.go's SetNoStamp doc.
 	testFillPoint(wsPrefix, id)
-	if noStamp {
-		ps.cache.SetNoStamp(wsPrefix, id, eng)
-	} else {
-		ps.cache.Set(wsPrefix, id, eng)
-	}
+	ps.cache.fill(wsPrefix, id, eng, tok, !noStamp)
 
 	return eng, nil
 }
@@ -135,6 +132,7 @@ func (ps *PebbleStore) GetEngrams(ctx context.Context, wsPrefix [8]byte, ids []U
 		copy(upper, lastKey)
 	}
 
+	tok := ps.readFillToken(ctx) // before NewIter (cache_guard.go R1)
 	iter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: upper,
@@ -167,11 +165,7 @@ func (ps *PebbleStore) GetEngrams(ctx context.Context, wsPrefix [8]byte, ids []U
 		}
 		eng := fromERFEngram(erfEng)
 		testFillPoint(wsPrefix, u.id)
-		if noStamp {
-			ps.cache.SetNoStamp(wsPrefix, u.id, eng)
-		} else {
-			ps.cache.Set(wsPrefix, u.id, eng)
-		}
+		ps.cache.fill(wsPrefix, u.id, eng, tok, !noStamp)
 		result[u.resultIdx] = eng
 	}
 
@@ -196,7 +190,8 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 		}
 
 		// Level 2: full engram L1 cache — extract metadata fields without Pebble read.
-		if eng, found := ps.cache.Get(wsPrefix, id); found {
+		if entry, found := ps.cache.getEntry(wsPrefix, id, true); found {
+			eng := entry.eng
 			meta := &EngramMeta{
 				ID:          eng.ID,
 				CreatedAt:   eng.CreatedAt,
@@ -215,13 +210,15 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 				ValidUntil:  eng.ValidUntil,
 				Importance:  eng.Importance,
 			}
-			ps.metaCache.Add([16]byte(id), meta)
+			// Derived from the L1 entry, so it carries that entry's token.
+			ps.fillMeta([16]byte(id), meta, entry.token)
 			result[i] = meta
 			continue
 		}
 
 		// Slow path: read compact metadata key from Pebble (snapshot-aware).
 		key := keys.MetaKey(wsPrefix, [16]byte(id))
+		tok := ps.readFillToken(ctx) // before the read (cache_guard.go R1)
 		val, err := getFromReader(ps.pebbleReader(ctx), key)
 		if err != nil {
 			// Unexpected storage error — return it.
@@ -259,7 +256,7 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 		}
 		// Populate metaCache so subsequent calls for this engram skip Pebble.
 		testFillPoint(wsPrefix, id)
-		ps.metaCache.Add([16]byte(id), meta)
+		ps.fillMeta([16]byte(id), meta, tok)
 		result[i] = meta
 	}
 	return result, nil
@@ -323,7 +320,7 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -397,7 +394,7 @@ func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -441,7 +438,7 @@ func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULI
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -493,7 +490,7 @@ func (ps *PebbleStore) StampValidUntil(ctx context.Context, wsPrefix [8]byte, id
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return false, fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -540,7 +537,7 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		batch.Delete(keys.EngramKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.MetaKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.LeaseKey(wsPrefix, [16]byte(id)), nil)
-		if err := batch.Commit(pebble.NoSync); err != nil {
+		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 			mu.Unlock()
 			return err
 		}
@@ -798,7 +795,7 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		slog.Warn("storage: entity link cleanup failed on delete, links may be orphaned", "engram", id.String(), "err", err)
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		mu.Unlock()
 		return fmt.Errorf("delete engram: %w", err)
 	}
@@ -926,7 +923,7 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 	}
 	batch.Set(metaKey, metaSlice437, nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -936,7 +933,7 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 	// Note: entity links (0x20/0x23/0x21) are intentionally preserved on soft
 	// delete so that Restore can return the engram with its entity associations
 	// intact. Entity cleanup only happens on hard delete (DeleteEngram).
-	ps.cache.Set(wsPrefix, id, eng)
+	ps.recacheCommitted(ctx, wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
 	return nil
@@ -1153,7 +1150,7 @@ func (ps *PebbleStore) UpdateTagsLocked(ctx context.Context, wsPrefix [8]byte, i
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 
@@ -1166,7 +1163,7 @@ func (ps *PebbleStore) UpdateTagsLocked(ctx context.Context, wsPrefix [8]byte, i
 	// lock for the reason UpdateConfidence gives: outside it, a racing
 	// DeleteEngram's post-commit cache.Delete can land first and this Set would
 	// re-cache an engram Pebble has already deleted.
-	ps.cache.Set(wsPrefix, id, eng)
+	ps.recacheCommitted(ctx, wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 	committed = true
 
@@ -1304,14 +1301,14 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	}
 	batch.Set(metaKey, metaSlice505, nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		mu.Unlock()
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	// Cache mutation under the stripe lock (see UpdateConfidenceWithContradiction):
 	// otherwise a racing DeleteEngram's post-commit cache.Delete can land before
 	// this cache.Set, re-caching an engram Pebble has already deleted.
-	ps.cache.Set(wsPrefix, id, eng)
+	ps.recacheCommitted(ctx, wsPrefix, id)
 	// Invalidate metadata cache — cached metadata is stale.
 	ps.metaCache.Remove([16]byte(id))
 	mu.Unlock()
@@ -1507,7 +1504,7 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 		}
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		mu.Unlock()
 		return 0, 0, fmt.Errorf("commit batch: %w", err)
 	}
@@ -1518,7 +1515,7 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 	// critical section the cache mutation is atomic with the commit;
 	// DeleteEngram's cache.Delete always runs after we release.
 	// replicateBatch stays post-commit (no local-cache effect).
-	ps.cache.Set(wsPrefix, id, eng)
+	ps.recacheCommitted(ctx, wsPrefix, id)
 	ps.metaCache.Remove(id16)
 	mu.Unlock()
 

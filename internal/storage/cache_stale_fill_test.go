@@ -274,6 +274,14 @@ func TestCacheStaleFill_RandomizedStress_CacheEqualsStoreAtQuiescence(t *testing
 		}
 		ids[i] = id
 	}
+	// A ring of edges so the association caches are exercised too.
+	for i := range ids {
+		if err := s.WriteAssociation(ctx, ws, ids[i], ids[(i+1)%nKeys], &Association{
+			TargetID: ids[(i+1)%nKeys], Weight: 0.5, RelType: RelRelatesTo, Confidence: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	const writers, readers, opsPer = 4, 6, 40
 	for round := 0; round < rounds; round++ {
@@ -289,7 +297,10 @@ func TestCacheStaleFill_RandomizedStress_CacheEqualsStoreAtQuiescence(t *testing
 				r := rand.New(rand.NewSource(seed))
 				for i := 0; i < opsPer; i++ {
 					id := ids[r.Intn(nKeys)]
-					switch r.Intn(7) {
+					switch r.Intn(8) {
+					case 7:
+						j := r.Intn(nKeys)
+						_ = s.UpdateAssocWeight(ctx, ws, ids[j], ids[(j+1)%nKeys], 0.05+0.9*r.Float32(), 0)
 					case 0:
 						_ = s.UpdateConfidence(ctx, ws, id, r.Float32())
 					case 1:
@@ -307,11 +318,21 @@ func TestCacheStaleFill_RandomizedStress_CacheEqualsStoreAtQuiescence(t *testing
 							})
 						}
 						unlock()
+					// UpdateRelevance, UpdateTrust and the StoreBatch mutate path
+					// take no stripe lock, so racing a locked writer they can
+					// lose its update IN PEBBLE (record vs 0x0B index) with no
+					// cache involved — a separate, pre-existing write-write race.
+					// They are serialized here so this test measures the cache.
 					case 4:
+						unlock := s.LockEngram(id)
 						_ = s.UpdateRelevance(ctx, ws, id, r.Float32(), 30)
+						unlock()
 					case 5:
+						unlock := s.LockEngram(id)
 						_ = s.UpdateTrust(ctx, ws, id, TrustLevel(r.Intn(3)))
+						unlock()
 					case 6:
+						unlock := s.LockEngram(id)
 						b := s.NewBatch()
 						var err error
 						if r.Intn(2) == 0 {
@@ -324,6 +345,7 @@ func TestCacheStaleFill_RandomizedStress_CacheEqualsStoreAtQuiescence(t *testing
 						} else {
 							b.Discard()
 						}
+						unlock()
 					}
 				}
 			}(int64(round*1000 + w))
@@ -347,6 +369,7 @@ func TestCacheStaleFill_RandomizedStress_CacheEqualsStoreAtQuiescence(t *testing
 						_, _ = s.GetMetadata(sctx, ws, ids)
 						runtime.Gosched()
 						_, _ = s.GetEngrams(sctx, ws, ids)
+						_, _ = s.GetAssociations(sctx, ws, ids, 0)
 						snap.Close()
 					case 3:
 						_, _ = s.GetMetadata(ctx, ws, ids[:1+r.Intn(nKeys)])
@@ -372,6 +395,19 @@ func cacheVsStore(t *testing.T, s *PebbleStore, ws [8]byte, ids []ULID) []string
 	t.Helper()
 	var diffs []string
 	for _, id := range ids {
+		if st := stateIndexStates(t, s, ws, id); len(st) != 1 {
+			diffs = append(diffs, fmt.Sprintf("state index %s: holds %v (want exactly the record's state)", id, st))
+		}
+		if e, ok := s.assocCache.Peek(assocCacheKey(ws, id)); ok {
+			want := committedFwdWeights(t, s, ws, id)
+			got := make([]float32, len(e.assocs))
+			for i, a := range e.assocs {
+				got[i] = a.Weight
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				diffs = append(diffs, fmt.Sprintf("assoc %s: cached weights %v, store %v", id, got, want))
+			}
+		}
 		raw, err := Get(s.db, keys.EngramKey(ws, [16]byte(id)))
 		if err != nil || raw == nil {
 			t.Fatalf("read committed record: %v", err)
@@ -381,6 +417,9 @@ func cacheVsStore(t *testing.T, s *PebbleStore, ws [8]byte, ids []ULID) []string
 			t.Fatal(err)
 		}
 		want := fromERFEngram(dec)
+		if st := stateIndexStates(t, s, ws, id); len(st) == 1 && st[0] != want.State {
+			diffs = append(diffs, fmt.Sprintf("state index %s: index says %v, record says %v", id, st[0], want.State))
+		}
 		if got, ok := s.cache.GetNoStamp(ws, id); ok {
 			if d := engramStateDiff(got, want); d != "" {
 				diffs = append(diffs, "L1 "+id.String()+": "+d)
@@ -511,4 +550,26 @@ func TestL1Cache_CountEqualsLive_ChurnWithEvictionAndDelete(t *testing.T) {
 	if c.Len() != 0 || liveEntries(c) != 0 {
 		t.Fatalf("after DeleteByVault: Len()=%d live=%d", c.Len(), liveEntries(c))
 	}
+}
+
+// committedFwdWeights scans the committed 0x03 rows for src, bypassing every cache.
+func committedFwdWeights(t *testing.T, s *PebbleStore, ws [8]byte, src ULID) []float32 {
+	t.Helper()
+	pfx := keys.AssocFwdPrefixForID(ws, [16]byte(src))
+	it, err := PrefixIterator(s.db, pfx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+	out := []float32{}
+	for it.First(); it.Valid(); it.Next() {
+		k := it.Key()
+		if len(k) < 45 {
+			continue
+		}
+		var wc [4]byte
+		copy(wc[:], k[25:29])
+		out = append(out, keys.WeightFromComplement(wc))
+	}
+	return out
 }

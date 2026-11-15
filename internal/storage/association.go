@@ -147,7 +147,7 @@ func (ps *PebbleStore) writeAssociationUnguarded(ctx context.Context, wsPrefix [
 	binary.BigEndian.PutUint32(weightBuf[:], math.Float32bits(assoc.Weight))
 	batch.Set(keys.AssocWeightIndexKey(wsPrefix, [16]byte(src), [16]byte(dst)), weightBuf[:], nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	// AFTER the commit, never before. See noteContradictsWrite: a bump that
@@ -211,6 +211,7 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 	// Phase 3: open ONE iterator covering the entire 0x03|wsPrefix range (snapshot-aware).
 	lower := keys.AssocFwdRangeStart(wsPrefix)
 	upper := keys.AssocFwdRangeEnd(wsPrefix) // nil means unbounded (all-0xFF workspace)
+	tok := ps.readFillToken(ctx)             // before NewIter (cache_guard.go R1)
 	rawIter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: upper,
@@ -280,7 +281,7 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 			return nil, fmt.Errorf("assoc scan: %w", err)
 		}
 
-		ps.assocCache.Add(assocCacheKey(wsPrefix, id), &assocCacheEntry{assocs: assocs, truncated: truncated})
+		ps.fillAssoc(wsPrefix, id, &assocCacheEntry{assocs: assocs, truncated: truncated}, tok)
 		// COPY (#820). `assocs` is now the cache entry's backing array; the hit
 		// path above copies for the same reason, and this function's own doc
 		// comment promises it. Returning `assocs` published a live view of the
@@ -415,6 +416,7 @@ func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte
 		return bytes.Compare(sorted[i][:], sorted[j][:]) < 0
 	})
 
+	tok := ps.readFillToken(ctx) // before NewIter (cache_guard.go R1)
 	iter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
 		LowerBound: keys.AssocRevRangeStart(wsPrefix),
 		UpperBound: keys.AssocRevRangeEnd(wsPrefix),
@@ -477,7 +479,7 @@ func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte
 		if err := iter.Error(); err != nil {
 			return nil, fmt.Errorf("ranking reverse scan: %w", err)
 		}
-		ps.revAssocCache.Add(assocCacheKey(wsPrefix, id), &revAssocCacheEntry{assocs: assocs, truncated: truncated})
+		ps.fillRevAssoc(wsPrefix, id, &revAssocCacheEntry{assocs: assocs, truncated: truncated}, tok)
 		n := len(assocs)
 		if maxPerNode > 0 && n > maxPerNode {
 			n = maxPerNode
@@ -593,6 +595,7 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 	prefix := keys.AssocFwdKey(wsPrefix, [16]byte(id), 1.0, [16]byte{})
 	prefix = prefix[0 : 1+8+16] // trim to just the prefix portion
 
+	tok := ps.cache.guard.token() // live read: before the iterator (cache_guard.go R1)
 	rawIter, err := PrefixIterator(ps.db, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("prefix iterator: %w", err)
@@ -641,7 +644,7 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 		return nil, fmt.Errorf("associationsForOne scan: %w", err)
 	}
 	// Populate cache — expirable.LRU enforces the TTL automatically.
-	ps.assocCache.Add(ck, &assocCacheEntry{assocs: assocs, truncated: truncated})
+	ps.fillAssoc(wsPrefix, id, &assocCacheEntry{assocs: assocs, truncated: truncated}, tok)
 	return assocs, nil
 }
 
@@ -870,7 +873,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	binary.BigEndian.PutUint32(wiBuf[:], math.Float32bits(weight))
 	batch.Set(keys.AssocWeightIndexKey(wsPrefix, [16]byte(a), [16]byte(b)), wiBuf[:], nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -1061,7 +1064,7 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 		batch.Set(keys.AssocWeightIndexKey(update.WS, update.Src, update.Dst), wiBuf[:], nil)
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -1250,7 +1253,7 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 				_ = batch.Delete(keys.AssocWeightIndexKey(wsPrefix, e.src, e.dst), nil)
 			}
 		}
-		if err := batch.Commit(pebble.NoSync); err != nil {
+		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 			return fmt.Errorf("decay assoc chunk commit: %w", err)
 		}
 		ps.replicateBatch(batch)
@@ -1700,7 +1703,7 @@ func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, 
 	// Also write reverse for quick lookup
 	batch.Set(contraKeyRev, encodeContradictionValue(aBytes, detectedAt), nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return false, fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -1724,7 +1727,7 @@ func (ps *PebbleStore) ResolveContradiction(ctx context.Context, wsPrefix [8]byt
 	batch.Delete(contraKeyAB, nil)
 	batch.Delete(contraKeyBA, nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("resolve contradiction: %w", err)
 	}
 	ps.replicateBatch(batch)

@@ -239,7 +239,7 @@ func (ps *PebbleStore) WriteEntityEngramLink(ctx context.Context, ws [8]byte, en
 	if err := batch.Set(revKey, nil, nil); err != nil {
 		return fmt.Errorf("write entity link rev: %w", err)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return err
 	}
 	ps.replicateBatch(batch)
@@ -285,7 +285,7 @@ func (ps *PebbleStore) RelinkEntityEngramLink(ctx context.Context, ws [8]byte, e
 	if err := batch.Delete(keys.EntityReverseIndexKey(fromHash, ws, id), nil); err != nil {
 		return fmt.Errorf("relink entity engram link: del rev: %w", err)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return err
 	}
 	ps.replicateBatch(batch)
@@ -309,7 +309,7 @@ func (ps *PebbleStore) DeleteEntityEngramLink(ctx context.Context, ws [8]byte, e
 	if err := batch.Delete(revKey, nil); err != nil {
 		return fmt.Errorf("delete entity link rev: %w", err)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return err
 	}
 	ps.replicateBatch(batch)
@@ -744,7 +744,7 @@ func (ps *PebbleStore) RelinkRelationshipEntity(ctx context.Context, ws [8]byte,
 				return fmt.Errorf("relink relationship entity: set new idx: %w", err)
 			}
 		}
-		if err := batch.Commit(pebble.NoSync); err != nil {
+		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 			batch.Close()
 			return fmt.Errorf("relink relationship entity: commit: %w", err)
 		}
@@ -781,7 +781,7 @@ func (ps *PebbleStore) UpsertRelationshipRecord(ctx context.Context, ws [8]byte,
 	if err := batch.Set(idxToKey, nil, nil); err != nil {
 		return fmt.Errorf("upsert relationship record: set 0x26 to: %w", err)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return err
 	}
 	ps.replicateBatch(batch)
@@ -871,7 +871,7 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 	ps.cache.Delete(ws, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("UpdateDigest: commit: %w", err)
 	}
 	ps.replicateBatch(batch)
