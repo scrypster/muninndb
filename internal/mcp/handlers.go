@@ -400,34 +400,43 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 }
 
 func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
-	raw, exists := args["context"]
-	if !exists {
-		sendError(w, id, -32602, "invalid params: 'context' is required")
-		return
-	}
-	var ctxArr []any
-	switch v := raw.(type) {
-	case string:
-		// LLM clients sometimes send a bare string instead of a single-element array — coerce it.
-		ctxArr = []any{v}
-	case []any:
-		ctxArr = v
-	default:
-		sendError(w, id, -32602, fmt.Sprintf("invalid params: 'context' must be a string or array of strings, got %T", raw))
-		return
-	}
-	if len(ctxArr) == 0 {
-		sendError(w, id, -32602, "invalid params: 'context' must not be empty")
-		return
-	}
+	// The query text arrives as `query` (one plain string — the easy shape to
+	// emit; a malformed `context` array is the commonest way a recall dies
+	// inside the client before reaching us) and/or `context` (string or array
+	// of strings). At least one non-empty phrase is required; when both are
+	// given, query is one more context phrase.
+	const recallInputHelp = `pass 'query' (a string, e.g. {"query":"what we decided about caching"}) or 'context' (an array of phrases)`
 	var contexts []string
-	for _, c := range ctxArr {
-		if str, ok := c.(string); ok {
-			contexts = append(contexts, str)
+	if raw, exists := args["context"]; exists {
+		var ctxArr []any
+		switch v := raw.(type) {
+		case string:
+			// LLM clients sometimes send a bare string instead of a single-element array — coerce it.
+			ctxArr = []any{v}
+		case []any:
+			ctxArr = v
+		default:
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: 'context' must be a string or array of strings, got %T — or %s", raw, recallInputHelp))
+			return
+		}
+		for _, c := range ctxArr {
+			if str, ok := c.(string); ok && strings.TrimSpace(str) != "" {
+				contexts = append(contexts, str)
+			}
+		}
+	}
+	if rawQ, exists := args["query"]; exists {
+		q, ok := rawQ.(string)
+		if !ok {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: 'query' must be a string, got %T — %s", rawQ, recallInputHelp))
+			return
+		}
+		if strings.TrimSpace(q) != "" {
+			contexts = append(contexts, q)
 		}
 	}
 	if len(contexts) == 0 {
-		sendError(w, id, -32602, "invalid params: 'context' must contain at least one string")
+		sendArgError(w, id, argRejectMissingField, "invalid params: no recall text given — "+recallInputHelp)
 		return
 	}
 
@@ -930,6 +939,23 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	engramID, ok1 := args["id"].(string)
 	newContent, ok2 := args["new_content"].(string)
 	reason, ok3 := args["reason"].(string)
+	// `content` is accepted as an alias for `new_content`: it is the field name
+	// muninn_remember uses, and sending it here was the single largest cause of
+	// failed evolves in measured agent traffic (33 of 43 failures in 30 days).
+	// Accepted only when new_content is absent, and always said in the
+	// response; if BOTH are given and differ there is no safe choice, so refuse.
+	var notes []string
+	if alias, hasAlias := args["content"].(string); hasAlias && alias != "" {
+		switch {
+		case !ok2 || newContent == "":
+			newContent, ok2 = alias, true
+			notes = append(notes, "accepted `content` as `new_content` (muninn_evolve's field is `new_content`)")
+		case alias != newContent:
+			sendArgError(w, id, argRejectConflictingAlias,
+				"invalid params: 'new_content' and 'content' were both given and differ — muninn_evolve takes the replacement text in 'new_content' only; send one of them")
+			return
+		}
+	}
 	if !ok1 || !ok2 || !ok3 || engramID == "" || newContent == "" || reason == "" {
 		var missing []string
 		if !ok1 || engramID == "" {
@@ -941,7 +967,9 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 		if !ok3 || reason == "" {
 			missing = append(missing, "'reason' (why the memory changed)")
 		}
-		sendError(w, id, -32602, fmt.Sprintf("invalid params: missing required field(s): %s", strings.Join(missing, ", ")))
+		sendArgError(w, id, argRejectMissingField, fmt.Sprintf(
+			"invalid params: missing required field(s): %s. Example: {\"id\":\"<memory id>\",\"new_content\":\"<full replacement text>\",\"reason\":\"<why it changed>\"}",
+			strings.Join(missing, ", ")))
 		return
 	}
 	var evolveEmb []float32
@@ -1056,6 +1084,7 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	if markupOnlyWarning != "" {
 		result.Warnings = append(result.Warnings, markupOnlyWarning)
 	}
+	result.Notes = append(notes, result.Notes...)
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 

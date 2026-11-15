@@ -345,7 +345,10 @@ func (w *RESTEngineWrapper) Decide(ctx context.Context, vault, decision, rationa
 	if err != nil {
 		return nil, err
 	}
-	return &DecideResponse{ID: res.ID.String(), Warnings: res.Warnings}, nil
+	// DecideResponse has no notes field; an engine note (e.g. a concept
+	// derived from an over-cap decision) is carried in warnings rather than
+	// dropped, so the REST caller is told too without a wire-type change.
+	return &DecideResponse{ID: res.ID.String(), Warnings: append(res.Warnings, res.Notes...)}, nil
 }
 
 func (w *RESTEngineWrapper) Restore(ctx context.Context, vault, engramID string) (*RestoreResponse, error) {

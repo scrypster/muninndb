@@ -327,6 +327,13 @@ type Engine struct {
 	// contentHashLocks; the storage layer trusts the caller holds this lock.
 	upsertKeyLocks [upsertKeyStripes]sync.Mutex
 
+	// evolveLocks serialise evolve's read-target → fork-guard → commit
+	// sequence per (vault, target id), so two simultaneous evolves of one
+	// memory cannot both see it as current and both write a successor.
+	// Lock order: upsertKeyLock (upsert path) → evolveLock; nothing takes
+	// them in the other order.
+	evolveLocks [upsertKeyStripes]sync.Mutex
+
 	// idempotencyLocks provides per-op_id mutexes to prevent TOCTOU races in the
 	// idempotency check → write → store-receipt window. Mirrors the pattern used by
 	// MCPServer.idempotencyLocks but lives on the engine so gRPC and REST callers
@@ -4223,6 +4230,9 @@ type DecideResult struct {
 	// evaluators read the previous {"concept":""} response as data loss.
 	Concept  string
 	Warnings []string
+	// Notes say how the input was interpreted when that differs from the
+	// literal arguments (e.g. a concept derived from an over-cap decision).
+	Notes []string
 }
 
 // SessionResult holds the result of a Session query.
@@ -4289,6 +4299,16 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 	oldULID, err := storage.ParseULID(oldID)
 	if err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: parse old id: %w", err)
+	}
+
+	mu := e.evolveLock(wsPrefix, oldULID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Refuse to fork: a target that already has a successor gets an error
+	// naming the current head instead of a second, rival successor.
+	if err := e.refuseSupersededEvolveTarget(ctx, wsPrefix, oldULID); err != nil {
+		return storage.ULID{}, err
 	}
 
 	// Read the old engram to inherit Concept and Tags.
@@ -4845,9 +4865,20 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 		content += "\n---\nAlternatives:\n" + strings.Join(alternatives, "\n")
 	}
 
+	// The decision text doubles as the concept, which ERF caps at
+	// MaxConceptBytes. A long decision used to fail the whole write ("concept
+	// exceeds max length") — 44% of measured muninn_decide calls. Derive a
+	// title instead and say so; the full decision is already in content above,
+	// so nothing the caller wrote is dropped.
+	var notes []string
+	concept, cut := conceptFromText(decision, maxConceptBytes)
+	if cut {
+		notes = append(notes, fmt.Sprintf("the decision text is %d bytes, over the %d-byte concept limit: the concept is its leading text cut at a boundary (%d bytes); the full decision is stored in the content", len(decision), maxConceptBytes, len(concept)))
+	}
+
 	resp, err := e.Write(ctx, &mbp.WriteRequest{
 		Vault:   vault,
-		Concept: decision,
+		Concept: concept,
 		Content: content,
 		Tags:    []string{"decision"},
 		// A decision-recording tool must produce a decision-TYPED memory.
@@ -4879,7 +4910,7 @@ func (e *Engine) Decide(ctx context.Context, vault, decision, rationale string, 
 	if err != nil {
 		return nil, fmt.Errorf("decide: parse id: %w", err)
 	}
-	return &DecideResult{ID: decideULID, Concept: decision, Warnings: warnings}, nil
+	return &DecideResult{ID: decideULID, Concept: concept, Warnings: warnings, Notes: notes}, nil
 }
 
 // RecordAccess increments the access count and updates the last-accessed timestamp
