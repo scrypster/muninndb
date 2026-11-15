@@ -2,8 +2,11 @@ package storage
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/scrypster/muninndb/internal/provenance"
+	"github.com/scrypster/muninndb/internal/storage/erf"
+	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 // WriterIdentity is the hashed identity of the caller that created an engram:
@@ -59,4 +62,30 @@ func (ps *PebbleStore) FlushCounters() {
 	if ps.counterFlush != nil {
 		ps.counterFlush.flush()
 	}
+}
+
+// GetEngramUncached reads an engram straight from Pebble and does NOT fill
+// the L1 cache. For feedback's liveness checks, which run concurrently with
+// feedback's own access bump: GetEngram's read-then-cache is not ordered
+// against a concurrent writer, so a reader that decoded the pre-bump value
+// can store it AFTER the writer's commit and leave a stale cache entry
+// (measured: 2 of 40 concurrent runs served AccessCount 0 with 1 persisted).
+// That fill race is general and pre-existing; this read simply does not take
+// part in it.
+func (ps *PebbleStore) GetEngramUncached(ctx context.Context, wsPrefix [8]byte, id ULID) (*Engram, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	val, err := Get(ps.db, keys.EngramKey(wsPrefix, [16]byte(id)))
+	if err != nil {
+		return nil, fmt.Errorf("get engram: %w", err)
+	}
+	if val == nil {
+		return nil, fmt.Errorf("engram %w", ErrNotFound)
+	}
+	erfEng, err := erf.Decode(val)
+	if err != nil {
+		return nil, fmt.Errorf("decode engram: %w", err)
+	}
+	return fromERFEngram(erfEng), nil
 }

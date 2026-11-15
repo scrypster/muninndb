@@ -556,7 +556,9 @@ func (e *Engine) RecordFeedbackLabelsDetailed(ctx context.Context, vault string,
 // (Engine.Link) — and a successor-scan here was measured redundant (removing
 // it left TestFeedback_NotLiveMemoriesNeverBumped green for every state).
 func (e *Engine) labelLive(ctx context.Context, ws [8]byte, m storage.ULID, now time.Time) (bool, error) {
-	eng, err := e.store.GetEngram(ctx, ws, m)
+	// Uncached: a cache-filling read here races feedback's own access bump
+	// and can leave a stale entry (see GetEngramUncached).
+	eng, err := e.store.GetEngramUncached(ctx, ws, m)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return false, nil

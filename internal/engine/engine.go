@@ -5788,7 +5788,7 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 	// Existence first: the day marker is keyed partly by this caller-supplied
 	// id, so an id that names no memory must write nothing.
 	readCtx := storage.ContextWithNoAccessCacheStamp(ctx)
-	if eng, gerr := e.store.GetEngram(readCtx, wsPrefix, id); gerr != nil || eng == nil {
+	if eng, gerr := e.store.GetEngramUncached(readCtx, wsPrefix, id); gerr != nil || eng == nil {
 		if gerr != nil && !errors.Is(gerr, storage.ErrNotFound) {
 			return fmt.Errorf("record feedback: storage error")
 		}
