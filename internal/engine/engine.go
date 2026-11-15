@@ -3149,8 +3149,19 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		ctx, wsPrefix, result.Activations, result.ShadowMatches, actReq, injectorGate, nameableCache)
 	result.TotalFound += subInjected
 
+	// Explain's diagnostic activation (explainTargetFrom) scores every
+	// candidate to find ONE memory's card; the declared-relationship phases
+	// examine only the window a default recall examines, so their per-row
+	// association reads do not scale with explain's 1,000-row list.
+	explainTarget, diagnostic := explainTargetFrom(ctx)
+	windowReq := actReq
+	if diagnostic {
+		w := *actReq
+		w.MaxResults = explainRecallLimit
+		windowReq = &w
+	}
 	var supInjected int
-	result.Activations, supInjected = e.applySupersessionWithGate(ctx, wsPrefix, result.Activations, actReq, injectorGate, nameableCache)
+	result.Activations, supInjected = e.applySupersessionWithGate(ctx, wsPrefix, result.Activations, windowReq, injectorGate, nameableCache)
 	result.TotalFound += supInjected
 
 	// Final valid-time gate (COG-19: default recall never returns an engram whose
@@ -3186,8 +3197,14 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// first. An explicit RelSupersedes on a pair always wins and suppresses the
 	// heuristic for that pair (COG-25). Runs after the validity gate and before
 	// final truncation so it sees exactly the survivor set truncation will cut.
-	result.Activations = e.applyCurrencyAnnotationOrdered(ctx, wsPrefix, result.Activations, vaultSize, actReq.MaxResults,
-		activation.ContentFirstOrder(actReq.Weights))
+	// Skipped for explain's diagnostic activation: COG-25 changes no score
+	// (annotations and in-cluster tie order only), and its pairwise
+	// similarity pass over explain's whole candidate list was the measured
+	// cost of explain (~800 ms against a ~3 ms recall on 2,000 memories).
+	if !diagnostic {
+		result.Activations = e.applyCurrencyAnnotationOrdered(ctx, wsPrefix, result.Activations, vaultSize, actReq.MaxResults,
+			activation.ContentFirstOrder(actReq.Weights))
+	}
 
 	// COG-29 contradiction honesty (#764). Runs LAST of the post-pipeline
 	// phases and before truncation: after the COG-19 gate so a side already
@@ -3199,7 +3216,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// truncation so the adjacency guarantee holds.
 	var conflictBlock *mbp.ConflictBlock
 	result.Activations, conflictBlock = e.applyContradictionHonesty(
-		ctx, wsPrefix, result.Activations, actReq, injectorGate, gateNow)
+		ctx, wsPrefix, result.Activations, windowReq, injectorGate, gateNow)
 
 	// Re-apply MaxResults: entity boost / supersession / the validity gate may have
 	// changed the set. All re-sort or preserve score order, so truncation keeps top-K.
@@ -3287,7 +3304,22 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// no returned row there is no seed to be associated with.
 	var associated []mbp.AssociatedItem
 	var associatedIDs []storage.ULID
-	if !req.ExcludeAssociated && activation.ContentFirstOrder(actReq.Weights) {
+	if diagnostic {
+		// Explain reads one row: hydrate only that one (items, provenance,
+		// bands, brief all scale with the rows that reach this point).
+		for i := range result.Activations {
+			if result.Activations[i].Engram.ID == explainTarget {
+				result.Activations = result.Activations[i : i+1]
+				break
+			}
+		}
+		if len(result.Activations) > 0 && result.Activations[0].Engram.ID != explainTarget {
+			result.Activations = result.Activations[:0]
+		}
+		relevanceBands, relevanceBases = applyRelevanceBands(result.Activations, result.Calibration,
+			cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR), result.SemanticDegraded)
+	}
+	if !diagnostic && !req.ExcludeAssociated && activation.ContentFirstOrder(actReq.Weights) {
 		associated, associatedIDs = buildAssociated(uncut, result.Activations)
 	}
 
@@ -3610,7 +3642,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	if briefMode == "" {
 		briefMode = "auto"
 	}
-	if briefMode == "extractive" || briefMode == "auto" {
+	if !diagnostic && (briefMode == "extractive" || briefMode == "auto") {
 		// Try embedding-based brief if available and we have context embedding
 		if briefMode == "auto" && e.embedder != nil && len(req.Embedding) > 0 {
 			// Embedding-based approach: score sentences by cosine similarity to context embedding

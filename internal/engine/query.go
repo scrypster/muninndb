@@ -80,6 +80,29 @@ const weightedSumRecallThreshold = 0.5
 // result list" — and the Note says which claim is being made.
 const explainMaxCandidates = 1000
 
+// explainRecallLimit is the default recall explain compares itself against:
+// the MCP muninn_recall default limit. Explain's weak_only probe recalls with
+// it, and the diagnostic activation bounds its declared-relationship windows
+// (supersession, contradiction) to it — the rows such a recall examines.
+const explainRecallLimit = 10
+
+type explainTargetKey struct{}
+
+// withExplainTarget marks an activation as explain's diagnostic run for one
+// memory. activateCore then skips work that cannot change that memory's
+// score card and scales with the candidate list: COG-25 currency (no score
+// change), per-row hydration of every other row (items, provenance, brief),
+// and the associated block; the supersession and contradiction windows are
+// bounded to explainRecallLimit. Engine-internal; not a wire field.
+func withExplainTarget(ctx context.Context, id storage.ULID) context.Context {
+	return context.WithValue(ctx, explainTargetKey{}, id)
+}
+
+func explainTargetFrom(ctx context.Context) (storage.ULID, bool) {
+	id, ok := ctx.Value(explainTargetKey{}).(storage.ULID)
+	return id, ok
+}
+
 // recallThresholdFor returns the threshold a default recall applies in
 // vault. RRF fusion produces reciprocal-rank scores that are not calibrated to
 // the 0..1 relevance scale, so that surface drops the bar to 0 — Explain has to
@@ -593,18 +616,21 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 	// "why didn't my memory come back". Passing 0 does NOT work: the COG-6
 	// coerce turns it into the live default and the absolute gate then drops the
 	// engram before it is ever scored.
-	resp, err := e.Activate(ctx, &mbp.ActivateRequest{
-		Vault:      vault,
-		Context:    query,
-		Embedding:  embedding,
-		MaxResults: explainMaxCandidates,
-		Threshold:  -1,
+	resp, err := e.Activate(withExplainTarget(ctx, id), &mbp.ActivateRequest{
+		Vault:             vault,
+		Context:           query,
+		Embedding:         embedding,
+		MaxResults:        explainMaxCandidates,
+		Threshold:         -1,
+		ExcludeAssociated: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("explain activation: %w", err)
 	}
+	var band string
 	for _, item := range resp.Activations {
 		if item.ID == engramID {
+			band = item.RelevanceBand
 			result.Scored = true
 			result.FinalScore = float64(item.Score)
 			result.Concept = item.Concept
@@ -633,9 +659,13 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 	// exactly that default recall (read-only; explain's ctx already suppresses
 	// cache stamps and runs in observe mode) — would_return then agrees with
 	// what recall does, by construction rather than by a re-derivation.
-	if result.WouldReturn {
+	// The probe is a whole second recall, so it runs only when it can change
+	// the answer: weak_only withholds a response whose EVERY row is weak, and
+	// a row's band is a function of its own absolute score, so a target that
+	// is moderate/strong/filter_match/uncalibrated keeps its response.
+	if result.WouldReturn && band == activation.RelevanceWeak {
 		probe, perr := e.Activate(ctx, &mbp.ActivateRequest{
-			Vault: vault, Context: query, Embedding: embedding, ReadOnly: true,
+			Vault: vault, Context: query, Embedding: embedding, ReadOnly: true, MaxResults: explainRecallLimit,
 		})
 		if perr == nil && probe.AbstainedReason == activation.AbstainWeakOnly {
 			result.WouldReturn = false

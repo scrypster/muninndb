@@ -86,6 +86,25 @@ func TestContentFirst_LatencyMeasure(t *testing.T) {
 	sort.Ints(sizes)
 	t.Logf("associated block: %d of %d limit-10 recalls carry it; bytes median=%d p99=%d max=%d",
 		withBlock, len(queries), sizes[len(sizes)/2], sizes[len(sizes)*99/100], sizes[len(sizes)-1])
+	if os.Getenv("CF_EXPLAIN") == "1" {
+		var rec, exp []time.Duration
+		for i, q := range queries[:60] {
+			target := ids[(i*37)%len(ids)]
+			t0 := time.Now()
+			if _, err := c.eng.Activate(context.Background(), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10, ReadOnly: true}); err != nil {
+				t.Fatal(err)
+			}
+			rec = append(rec, time.Since(t0))
+			t1 := time.Now()
+			if _, err := c.eng.Explain(context.Background(), vault, target.String(), []string{q}, nil); err != nil {
+				t.Fatal(err)
+			}
+			exp = append(exp, time.Since(t1))
+		}
+		sort.Slice(rec, func(i, j int) bool { return rec[i] < rec[j] })
+		sort.Slice(exp, func(i, j int) bool { return exp[i] < exp[j] })
+		t.Logf("explain: recall(limit 10) p50=%v  explain p50=%v  ratio=%.2f", rec[len(rec)/2], exp[len(exp)/2], float64(exp[len(exp)/2])/float64(rec[len(rec)/2]))
+	}
 	for _, limit := range []int{10, 100} {
 		var lat []time.Duration
 		for rep := 0; rep < 3; rep++ {
