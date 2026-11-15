@@ -405,11 +405,12 @@ components:
           type: number
           format: float
           description: >-
-            Raw BEFORE the per-query 1/maxRaw rescale, clamped to [0,1] and
-            multiplied by confidence. Unlike `score` it is not relative to this
-            query's candidate set, so 0.9 means the same thing on a good query
-            and a garbage one. This is the quantity the abstention gate compares
-            and the quantity relevance_band is derived from.
+            min(content_match, 1) multiplied by confidence — not relative to
+            this query's candidate set, so 0.9 means the same thing on a good
+            query and a garbage one. This is the quantity the abstention gate
+            compares and relevance_band is derived from, and on default (ACT-R)
+            vaults it is also `score`, the quantity that orders the results
+            (COG-35).
         decay_factor:
           type: number
           format: float
@@ -421,12 +422,35 @@ components:
         hebbian_boost:
           type: number
           format: float
+          description: >-
+            Learned co-activation with a recently recalled memory.
+            ASSOCIATION evidence, not match strength (COG-35). On default
+            (ACT-R) vaults it does not change the order of results except to
+            break an exact content tie; a row whose score is 0 was injected
+            by association evidence and follows every matched row. On rrf and
+            weighted_sum vaults it still contributes to score.
         transition_boost:
           type: number
           format: float
+          description: >-
+            Predictive activation: how often this memory followed the
+            previous recall's results.
+            ASSOCIATION evidence, not match strength (COG-35). On default
+            (ACT-R) vaults it does not change the order of results except to
+            break an exact content tie; a row whose score is 0 was injected
+            by association evidence and follows every matched row. On rrf and
+            weighted_sum vaults it still contributes to score.
         entity_boost:
           type: number
           format: float
+          description: >-
+            Rarity-weighted named entities shared with the top matches
+            (capped at 0.30).
+            ASSOCIATION evidence, not match strength (COG-35). On default
+            (ACT-R) vaults it does not change the order of results except to
+            break an exact content tie; a row whose score is 0 was injected
+            by association evidence and follows every matched row. On rrf and
+            weighted_sum vaults it still contributes to score.
         access_frequency:
           type: number
           format: float
@@ -463,11 +487,14 @@ components:
           type: number
           format: float
           description: >-
-            RELATIVE to this query's own best candidate: the 1/maxRaw rescale
-            pins the argmax of ANY query near the top of the range, including a
-            query this vault cannot answer. It ORDERS results. Judge relevance
-            by relevance_band (or score_components.absolute_score), never by
-            this.
+            What ORDERS the results. On default (ACT-R) vaults it is the
+            absolute content score (content match x confidence, equal to
+            score_components.absolute_score); association evidence is reported
+            in hebbian_boost / transition_boost / entity_boost and only breaks
+            exact ties; a row injected by association has score 0 and follows
+            every matched row; the first N rows do not depend on max_results
+            (COG-35). On rrf and weighted_sum vaults it is RELATIVE to this
+            query's best candidate. Judge relevance by relevance_band.
         confidence:
           type: number
           format: float
@@ -1207,6 +1234,16 @@ components:
         hebbian_boost:
           type: number
           format: double
+        transition_boost:
+          type: number
+          format: double
+        entity_boost:
+          type: number
+          format: double
+          description: >-
+            With hebbian_boost and transition_boost, the row's association
+            evidence. On default (ACT-R) vaults none of the three changes the
+            order of results except to break an exact content tie (COG-35).
         access_frequency:
           type: number
           format: double
@@ -1228,6 +1265,10 @@ components:
         final_score:
           type: number
           format: double
+          description: >-
+            The row's recall score for this query. On default (ACT-R) vaults
+            it is the absolute content score that orders recall, so it equals
+            the `score` the same memory carries in a recall row (COG-35).
         components:
           $ref: "#/components/schemas/ExplainComponents"
         fts_matches:

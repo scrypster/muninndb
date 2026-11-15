@@ -232,7 +232,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_recall",
-			Description: "Search long-term memory. Simplest call: {\"query\": \"what we decided about caching\"} (or `context`: an array of phrases). Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows would all be `weak` matched nothing strongly: on a calibrated vault recall WITHHOLDS them by default and answers `abstained: true, abstained_reason: \"weak_only\"` with `weak_available` = how many — pass `include_weak: true` to receive them as related memories to verify, not answers. One moderate or strong row returns the whole set as usual.",
+			Description: "Search long-term memory. Simplest call: {\"query\": \"what we decided about caching\"} (or `context`: an array of phrases). Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. Results are ordered by how well each memory MATCHED (on default-scoring vaults `score` is that content score, content match x confidence; on rrf/weighted_sum vaults it is relative to this query's best candidate). `entity_boost`, `hebbian_boost` and `transition_boost` are evidence that a memory is ASSOCIATED with the matches or with recently recalled memories — not match strength; on default-scoring vaults they only break exact ties, and a row with `score` 0 was added because of that association, after every matched row. A response whose rows would all be `weak` matched nothing strongly: on a calibrated vault recall WITHHOLDS them by default and answers `abstained: true, abstained_reason: \"weak_only\"` with `weak_available` = how many — pass `include_weak: true` to receive them as related memories to verify, not answers. One moderate or strong row returns the whole set as usual.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -523,7 +523,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_explain",
-			Description: "Show the full score breakdown for why a specific memory would be returned for a given query. Use for debugging recall quality — to understand why a memory ranked high or low.",
+			Description: "Show the full score breakdown for why a specific memory would be returned for a given query. Use for debugging recall quality — to understand why a memory ranked high or low. On default-scoring vaults the final score is the content score (content match x confidence) that orders recall; the association fields (entity, Hebbian, transition boosts) are reported beside it and do not change the order except to break exact ties.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

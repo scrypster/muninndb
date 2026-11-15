@@ -250,9 +250,14 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("`uncalibrated` (this vault's scoring mode or embed model has no calibrated scale — `relevance_band_basis` says which: ")
 	b.WriteString("e.g. `no_model_baseline` means this embed model has no measured noise floor, while `semantic_floor_disabled` means the ")
 	b.WriteString("operator explicitly set `semantic_floor: 0` — same arithmetic, opposite cause).\n")
-	b.WriteString("- **`score`** — RELATIVE to this query's own best candidate. The top row of EVERY query is near the top of the range, ")
-	b.WriteString("including a query whose answer this vault does not contain. It orders results; it does not tell you they are good. ")
+	b.WriteString("- **`score`** — what ORDERS the results. On default-scoring vaults it is the memory's content score (content match x confidence, ")
+	b.WriteString("equal to `absolute_score`): rows come back strongest match first, and the first N rows are the same whatever `limit` you pass. ")
+	b.WriteString("On rrf and weighted_sum vaults it is RELATIVE to this query's best candidate. Either way it is a number, not a judgement — the band is. ")
 	b.WriteString("`absolute_score` and `content_match` on the same row are the cross-query-comparable numbers behind the band.\n")
+	b.WriteString("- **`entity_boost`, `hebbian_boost`, `transition_boost`** — evidence that a memory is ASSOCIATED with what matched: it shares a rare ")
+	b.WriteString("named entity with a top match, has a learned co-activation edge to a recently recalled memory, or is what usually follows the last recall. ")
+	b.WriteString("They are NOT match strength. On default-scoring vaults they do not move a memory past a better match; they only break exact ties, and a ")
+	b.WriteString("row with `score` 0 was added BECAUSE of an association (it matched nothing itself) and comes after every matched row.\n")
 	b.WriteString("- **`confidence`** — belief that the stored FACT is TRUE (moved by detected or declared contradictions; muninn_feedback does not change it). ")
 	b.WriteString("It is NOT a measure of how well the memory matched. A memory can be a certain fact and a terrible match: `confidence: 1, relevance_band: \"weak\"`.\n\n")
 	b.WriteString("Despite the similar name, the pre-existing `relevance` float on a row is a FOURTH quantity, unrelated to `relevance_band`: ")
@@ -337,6 +342,6 @@ func ageEffectLine(resolved auth.ResolvedPlasticity) string {
 	case "rrf":
 		return "- Age effect on recall: none. RRF ranks by position in the keyword and semantic result lists; no age term.\n"
 	default:
-		return "- Age effect on recall: none. A memory's age and access history do not change whether it is found, its absolute_score or its relevance_band, and a restart does not either. Rank is content match x confidence times association boosts; those boosts come from recent recalls held in memory, so the order of results can shift after other recalls or after a restart, while what is found does not. Exact ties go to the newer memory.\n"
+		return "- Age effect on recall: none. A memory's age and access history do not change whether it is found, its absolute_score or its relevance_band, and a restart does not either. Results are ordered by content match x confidence; association evidence (entities, co-activation, recent recalls) is reported on each row but only breaks exact ties — so the order of matched results does not shift after other recalls or a restart, except between memories whose content scores are exactly equal. Remaining ties go to the newer memory.\n"
 	}
 }

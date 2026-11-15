@@ -137,11 +137,13 @@ The activation log — a ring buffer of recent ACTIVATE calls — is consulted. 
 
 This implements Hebb's Rule at query time: ideas that have fired together recently are more likely to fire together again.
 
+**On the default ACT-R path this boost is association evidence, not rank (COG-35).** Results are ordered by the absolute content score (content match × confidence); the Hebbian, PAS and entity boosts are reported per row and break only exact content ties. Measured on a production install (150 model-written rewordings of live memory titles, three vaults), ordering by content alone put the right memory first 62 times against 15 for the boosted order. rrf and weighted_sum keep the boost in their score.
+
 ### Phase 4.5: PAS Transition Boost
 
 If Predictive Activation Signal is enabled for the vault, the engine consults the transition cache for candidates predicted by sequential patterns. If activation N returned engram A, and PAS has learned that engram B frequently follows A, engram B is injected as a candidate and receives a transition boost proportional to its transition count relative to the maximum across all targets.
 
-PAS candidates enter the scoring pipeline alongside standard retrieval results. The transition boost is additive in the ACT-R formula: `totalActivation = baseLevel + scale × hebbianBoost + scale × transitionBoost`. This surfaces memories that would not otherwise appear in the result set — candidate expansion, not just re-ranking.
+PAS candidates enter the scoring pipeline alongside standard retrieval results. The transition boost is additive in the ACT-R prior: `totalActivation = baseLevel + scale × hebbianBoost + scale × transitionBoost`, reported in `raw`; on the default ACT-R path that prior no longer orders results (COG-35). A PAS candidate is returned only if it clears the content gate on its own match — candidate expansion, not re-ranking.
 
 ### Phase 5: BFS Association Traversal
 

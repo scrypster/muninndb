@@ -333,6 +333,8 @@ func explainResultFromEngine(data *engine.ExplainData) *ExplainResult {
 		res.Components.SemanticSimilarityRaw = f64(float64(data.Components.SemanticSimilarityRaw))
 		res.Components.DecayFactor = f64(float64(data.Components.DecayFactor))
 		res.Components.HebbianBoost = f64(float64(data.Components.HebbianBoost))
+		res.Components.TransitionBoost = f64(float64(data.Components.TransitionBoost))
+		res.Components.EntityBoost = f64(float64(data.Components.EntityBoost))
 		res.Components.AccessFrequency = f64(float64(data.Components.AccessFrequency))
 	}
 	return res
