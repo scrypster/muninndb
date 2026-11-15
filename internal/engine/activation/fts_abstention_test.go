@@ -54,7 +54,7 @@ func openTestActivationFTS(t *testing.T) *fts.Index {
 // devNoteCorpus is ~30 realistic dev-note memories sharing common software
 // vocabulary. Exactly one ("how we validate schema migrations") contains the
 // common word "how" prominently in its concept field (field weight 3.0) --
-// this is the exact shape of the sourdough/Vuetify bug from the design doc:
+// this is the exact shape of the common-token saturation bug from the design doc:
 // a single common token in a high-weight field saturates raw BM25.
 //
 // One engram ("dbPerfID") is the sole genuine match for "database performance
