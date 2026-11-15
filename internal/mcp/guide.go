@@ -103,7 +103,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- **muninn_restore** — Recover a soft-deleted memory\n")
 	b.WriteString("- **muninn_traverse** — Explore the memory graph from a starting node\n")
 	b.WriteString("- **muninn_explain** — Show score breakdown for a memory\n")
-	b.WriteString("- **muninn_state** — Transition a memory's lifecycle state\n")
+	b.WriteString("- **muninn_state** — Transition a memory's lifecycle state (not out of soft-deleted: use muninn_restore)\n")
 	b.WriteString("- **muninn_list_deleted** — List recoverable deleted memories\n")
 	b.WriteString("- **muninn_retry_enrich** — Re-queue a memory for enrichment\n")
 	b.WriteString("- **muninn_remember_tree** — Store a nested engram tree in one call\n")

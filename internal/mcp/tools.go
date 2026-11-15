@@ -541,7 +541,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_state",
-			Description: "Transition a memory's lifecycle state. Use to mark work as active, completed, paused, blocked, or archived. Valid states: planning, active, paused, blocked, completed, cancelled, archived.",
+			Description: "Transition a memory's lifecycle state. Use to mark work as active, completed, paused, blocked, or archived. Valid states: planning, active, paused, blocked, completed, cancelled, archived. A forgotten (soft-deleted) memory cannot change state — the call is refused; use muninn_restore to bring it back.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -555,7 +555,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_compare_and_set",
-			Description: "Atomically transition a memory's lifecycle state only if it currently matches an expected state (compare-and-set). Use to avoid clobbering concurrent transitions. Returns whether it applied and the current state/owner on conflict.",
+			Description: "Atomically transition a memory's lifecycle state only if it currently matches an expected state (compare-and-set). Use to avoid clobbering concurrent transitions. Returns whether it applied and the current state/owner on conflict. A forgotten (soft-deleted) memory cannot change state — the call is refused; use muninn_restore.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -123,6 +124,9 @@ func TestRMWWriters_RandomizedNoFieldRegresses(t *testing.T) {
 			case 1:
 				v = StateActive
 				if _, err := ps.CompareAndSet(ctx, ws, ids[i], CASCondition{}, CASMutation{State: &v}); err != nil {
+					if errors.Is(err, ErrRestoreRequired) {
+						return nil // refused out of soft-deleted: state unchanged
+					}
 					return err
 				}
 			default:
@@ -133,6 +137,10 @@ func TestRMWWriters_RandomizedNoFieldRegresses(t *testing.T) {
 					return err
 				}
 				if err := b.Commit(); err != nil {
+					b.Discard()
+					if errors.Is(err, ErrRestoreRequired) {
+						return nil
+					}
 					return err
 				}
 			}

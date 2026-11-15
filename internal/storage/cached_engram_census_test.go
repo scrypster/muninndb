@@ -220,7 +220,7 @@ func TestCachedEngramMutationCensus(t *testing.T) {
 // something vanished, not what; naming them makes a legitimate removal a diff a
 // reviewer can read.
 var cachedEngramKnownSources = map[string]string{
-	"internal/storage/batch.go:pebbleStoreBatch.mutateEngram": "#858 itself — the reported race, reached from " +
+	"internal/storage/batch.go:pebbleStoreBatch.mutateEngramOpt": "#858 itself (mutateEngram delegates here) — the reported race, reached from " +
 		"Engine.EvolveAt via SupersedeEngram and from UpdateEngramState",
 	// SoftDelete's body moved to SoftDeleteLocked (Engine.Forget holds the
 	// lock across the state change and the posting removal); same read.

@@ -52,10 +52,11 @@ type pebbleStoreBatch struct {
 
 // pendingMutation is one mutateEngram call awaiting Commit.
 type pendingMutation struct {
-	ws     [8]byte
-	id     ULID
-	op     string
-	mutate func(*Engram)
+	ws             [8]byte
+	id             ULID
+	op             string
+	refuseUndelete bool
+	mutate         func(*Engram)
 }
 
 // batchAssocEdge is one association-cache invalidation owed by a batch.
@@ -295,7 +296,7 @@ func (b *pebbleStoreBatch) WriteOrdinal(ctx context.Context, ws [8]byte, parentI
 // Reads the current engram from the underlying store, sets its state, and queues
 // updated 0x01 and 0x02 key writes plus the 0x0B state index transition.
 func (b *pebbleStoreBatch) UpdateEngramState(ctx context.Context, ws [8]byte, id ULID, newState LifecycleState) error {
-	return b.mutateEngram(ctx, ws, id, "update state", func(eng *Engram) {
+	return b.mutateEngramOpt(ctx, ws, id, "update state", true, func(eng *Engram) {
 		eng.State = newState
 	})
 }
@@ -327,6 +328,13 @@ func (b *pebbleStoreBatch) SupersedeEngram(ctx context.Context, ws [8]byte, id U
 // (#858, STO-20). Several mutations of one engram in one batch apply in queue
 // order to a single working copy.
 func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID, op string, mutate func(*Engram)) error {
+	return b.mutateEngramOpt(ctx, ws, id, op, false, mutate)
+}
+
+// mutateEngramOpt is mutateEngram with refuseUndelete: when set, Commit fails
+// with ErrRestoreRequired if the mutation would move a soft-deleted record to
+// any other state (Restore is the one way out; see CompareAndSet).
+func (b *pebbleStoreBatch) mutateEngramOpt(ctx context.Context, ws [8]byte, id ULID, op string, refuseUndelete bool, mutate func(*Engram)) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
 	}
@@ -337,7 +345,7 @@ func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID
 	if eng == nil {
 		return fmt.Errorf("%s: engram %s not found", op, id.String())
 	}
-	b.mutations = append(b.mutations, pendingMutation{ws: ws, id: id, op: op, mutate: mutate})
+	b.mutations = append(b.mutations, pendingMutation{ws: ws, id: id, op: op, refuseUndelete: refuseUndelete, mutate: mutate})
 	// Track for cache invalidation in Commit.
 	b.stateUpdatedIDs = append(b.stateUpdatedIDs, stateUpdate{ws: ws, id: id})
 	return nil
@@ -381,7 +389,12 @@ func (b *pebbleStoreBatch) applyMutationsLocked(ctx context.Context) (unlock fun
 			work[k] = w
 			order = append(order, k)
 		}
+		before := w.eng.State
 		m.mutate(w.eng)
+		if m.refuseUndelete && before == StateSoftDeleted && w.eng.State != StateSoftDeleted {
+			unlock()
+			return nil, fmt.Errorf("%s %s: %w", m.op, m.id.String(), ErrRestoreRequired)
+		}
 	}
 
 	now := time.Now()

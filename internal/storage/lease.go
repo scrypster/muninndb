@@ -183,6 +183,15 @@ func (ps *PebbleStore) CompareAndSet(ctx context.Context, wsPrefix [8]byte, id U
 		return CASOutcome{Applied: false, State: cur.State, Lease: curLease}, nil
 	}
 
+	// Restore is the ONE way out of the soft-deleted state: a forget dropped
+	// the keyword postings and only Restore rebuilds them, so a state change
+	// from soft-deleted would bring the memory back unfindable by keyword
+	// (TestStateTransition_CannotUndeleteAroundRestore). Lease-only mutations
+	// of a forgotten memory are still allowed.
+	if mut.State != nil && cur.State == StateSoftDeleted && *mut.State != StateSoftDeleted {
+		return CASOutcome{State: cur.State, Lease: curLease}, fmt.Errorf("compare-and-set %s: %w", id.String(), ErrRestoreRequired)
+	}
+
 	newState := cur.State
 	newLease := curLease
 
