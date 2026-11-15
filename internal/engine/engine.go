@@ -5538,7 +5538,7 @@ func resolveScoringPlan(req *mbp.ActivateRequest, resolved *auth.ResolvedPlastic
 			ACTRHebScale: actrHebScalePtr(req.Weights.ACTRHebScale),
 		}
 	} else if modePreset != nil && req.Mode != "" && presetCarriesWeights(*modePreset) && resolved.ScoringFusion != "rrf" {
-		// EXPLICIT weight-carrying mode (semantic/recent), no caller weights:
+		// EXPLICIT weight-carrying mode (today only semantic), no caller weights:
 		// the preset defines the FULL weight vector, from the ZERO base — the
 		// same struct these modes produced when transports stamped them as
 		// caller weights. Overlaying resolved defaults instead is wrong: the
@@ -5547,8 +5547,12 @@ func resolveScoringPlan(req *mbp.ActivateRequest, resolved *auth.ResolvedPlastic
 		// scoring those default weights let a fresh, recently-active engram
 		// score ~0.7 with zero content match — above semantic's own 0.3
 		// threshold (see presetCarriesWeights). rrf vaults take the resolved
-		// branch instead: presets never change the fusion mode, and under rrf
-		// the preset weights are inert.
+		// branch instead: under rrf the preset weights are inert. A preset may
+		// change the fusion mode in exactly one way — DisableACTR, which forces
+		// legacy weighted_sum on an ACT-R vault (COG-6). This branch sets
+		// UseACTR = !DisableACTR, so a weight-carrying preset WITHOUT
+		// DisableACTR would flip a weighted_sum vault to ACT-R; the recall-mode
+		// census (TestRecallModeCensus R1) forbids that shape.
 		w = &activation.Weights{
 			SemanticSimilarity: modePreset.SemanticSimilarity,
 			FullTextRelevance:  modePreset.FullTextRelevance,

@@ -503,16 +503,20 @@ func TestLookupRecallMode_DeepValues(t *testing.T) {
 	}
 }
 
+// TestLookupRecallMode_RecentValues: recent equals balanced — both are the
+// all-zero preset (recent-mode orientation design v2, D1). The engine census
+// (TestRecallModeCensus R5) pins the resulting scoring plans as identical.
 func TestLookupRecallMode_RecentValues(t *testing.T) {
 	p, err := LookupRecallMode("recent")
 	if err != nil {
 		t.Fatalf("LookupRecallMode(recent): %v", err)
 	}
-	if p.Recency != 0.7 {
-		t.Errorf("recent Recency = %v, want 0.7", p.Recency)
+	b, err := LookupRecallMode("balanced")
+	if err != nil {
+		t.Fatalf("LookupRecallMode(balanced): %v", err)
 	}
-	if p.MaxHops != 1 {
-		t.Errorf("recent MaxHops = %d, want 1", p.MaxHops)
+	if p != b || p != (RecallModePreset{}) {
+		t.Errorf("recent = %+v, want the all-zero balanced preset %+v", p, b)
 	}
 }
 
