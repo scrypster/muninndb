@@ -380,6 +380,19 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		}
 	})
 
+	t.Run("muninn_recall/query", func(t *testing.T) {
+		// `query` (one plain string) is the schema's first, easiest-to-emit
+		// alternative to the `context` array; neither is schema-required.
+		result := mcpTool(t, tok, "muninn_recall", map[string]any{
+			"vault": vault,
+			"query": "explorer ruins Alice",
+			"limit": 5,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_recall with query returned error field: %v", errVal)
+		}
+	})
+
 	t.Run("muninn_read", func(t *testing.T) {
 		result := mcpTool(t, tok, "muninn_read", map[string]any{
 			"vault": vault,

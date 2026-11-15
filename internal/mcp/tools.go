@@ -232,12 +232,13 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_recall",
-			Description: "Search long-term memory using semantic context. Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows are all `weak` matched nothing strongly: those are related memories to verify, not answers.",
+			Description: "Search long-term memory. Simplest call: {\"query\": \"what we decided about caching\"} (or `context`: an array of phrases). Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows are all `weak` matched nothing strongly: those are related memories to verify, not answers.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"vault":     vaultProp,
-					"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Search context phrases."},
+					"query":     map[string]any{"type": "string", "description": "What to search for, as one plain string. Give this OR context (if both, query is one more context phrase)."},
+					"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Search context phrases (alternative to query; a bare string is also accepted)."},
 					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0, compared against the ABSOLUTE content score (not the displayed per-query-normalized one). Omit it for the engine's fusion-aware default: 0.1 on normal (ACT-R) vaults — a semantic-only match structurally caps near 0.6 and a lexical-only one near 0.4, so values above ~0.4 filter almost everything honest; 0.5 on legacy weighted_sum vaults; near-zero on scoring_fusion='rrf', whose rank-based scores rarely exceed ~0.15 (an explicit threshold above ~0.01 there can filter out everything)."},
 					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 10)."},
 					"profile": map[string]any{
@@ -310,7 +311,11 @@ func allToolDefinitions() []ToolDefinition {
 						"description": "When true, marks this recall as a pure read that must not trigger any write side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
 					},
 				},
-				"required": []string{"context"},
+				// Neither query nor context is schema-required: exactly which one
+				// is present is checked by the handler, which names both options.
+				// (A top-level anyOf would express it, but several MCP clients
+				// reject combinators in tool schemas.) query is emitted first.
+				schemaPropertyOrderKey: []string{"query", "context"},
 			},
 		},
 		{
