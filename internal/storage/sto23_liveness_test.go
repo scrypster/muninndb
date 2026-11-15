@@ -277,3 +277,31 @@ func TestSTO22_SnapshotReverseAssociationFillDoesNotOverwriteNewerCommit(t *test
 		t.Fatalf("stale reverse-association fill: live read returned %+v after a committed weight of 0.9", got[dst])
 	}
 }
+
+// Clearing one vault resets only that vault's retired set.
+func TestSTO23_ClearVaultResetsOnlyItsOwnRetiredSet(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	a, b := s.VaultPrefix("clear-a"), s.VaultPrefix("clear-b")
+	writeLive(t, s, a, "gate latch")
+	writeLive(t, s, b, "gate hinge")
+	for _, ws := range [][8]byte{a, b} {
+		if _, err := s.RetiredIDs(ctx, ws); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.ClearVault(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := s.retired.Load(b)
+	if !ok {
+		t.Fatal("clearing vault a dropped vault b's retired set")
+	}
+	set := v.(*retiredSet)
+	set.mu.RLock()
+	built := set.built
+	set.mu.RUnlock()
+	if !built {
+		t.Fatal("clearing vault a reset vault b's retired set")
+	}
+}
