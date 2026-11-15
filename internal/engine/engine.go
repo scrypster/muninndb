@@ -2995,6 +2995,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	if actReq.MaxResults == 0 {
 		actReq.MaxResults = 20
 	}
+	// COG-35: cut to MaxResults ONCE, at the end of this function, after every
+	// post-pipeline phase. Phase 6 honours this only on a content-first
+	// (ACT-R) response; rrf / weighted_sum / CGDN keep the phase-6 cut, so
+	// their responses are byte-for-byte the trunk's.
+	actReq.DeferTruncation = true
 	// Fix 4: Observe mode is a pure read — skip activation log side effects.
 	// S3: an explicit req.ReadOnly (already the effective value computed by the
 	// MCP/REST/gRPC handler — credential-observe OR request read_only) also
@@ -3181,7 +3186,8 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// first. An explicit RelSupersedes on a pair always wins and suppresses the
 	// heuristic for that pair (COG-25). Runs after the validity gate and before
 	// final truncation so it sees exactly the survivor set truncation will cut.
-	result.Activations = e.applyCurrencyAnnotation(ctx, wsPrefix, result.Activations, vaultSize, actReq.MaxResults)
+	result.Activations = e.applyCurrencyAnnotationOrdered(ctx, wsPrefix, result.Activations, vaultSize, actReq.MaxResults,
+		activation.ContentFirstOrder(actReq.Weights))
 
 	// COG-29 contradiction honesty (#764). Runs LAST of the post-pipeline
 	// phases and before truncation: after the COG-19 gate so a side already
@@ -3198,6 +3204,10 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 
 	// Re-apply MaxResults: entity boost / supersession / the validity gate may have
 	// changed the set. All re-sort or preserve score order, so truncation keeps top-K.
+	// On a content-first response (COG-35) this is the ONLY cut: phase 6 handed
+	// over every gated row (DeferTruncation), so the first N rows here do not
+	// depend on MaxResults — every phase above saw the same list whatever the
+	// limit, and none of them moves a matched row past a better content score.
 	// COG-29 may raise the cut by up to contradictionMaxCluster-1 so a conflict
 	// cluster is never returned half-truncated; the overflow is reported in the
 	// conflict block rather than applied silently.

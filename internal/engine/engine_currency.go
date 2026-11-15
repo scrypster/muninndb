@@ -169,6 +169,16 @@ var currencyVersionStatusMarkers = map[string]struct{}{
 // boost phase uses (COG-18) so "shared rare entity" means the same thing
 // here as it does there.
 func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, vaultSize int64, maxResults int) []activation.ScoredEngram {
+	return e.applyCurrencyAnnotationOrdered(ctx, ws, results, vaultSize, maxResults, false)
+}
+
+// applyCurrencyAnnotationOrdered is applyCurrencyAnnotation with the response's
+// order made explicit: under content-first order (COG-35) the base sort breaks
+// an exact score tie by association evidence before the newest-first rule
+// (activation.ResultBefore), so this phase cannot undo phase 6's tie order.
+// The in-cluster tie reorder below is unchanged and still the last word on an
+// exact tie between members of one detected cluster.
+func (e *Engine) applyCurrencyAnnotationOrdered(ctx context.Context, ws [8]byte, results []activation.ScoredEngram, vaultSize int64, maxResults int, contentFirst bool) []activation.ScoredEngram {
 	if len(results) < 2 {
 		return results
 	}
@@ -360,10 +370,7 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 	// sort.SliceStable order-dependent. Keeping the base a pure total order and
 	// doing the reorder as a localized post-pass restores both properties.
 	sort.SliceStable(results, func(i, j int) bool {
-		if results[i].Score != results[j].Score {
-			return results[i].Score > results[j].Score
-		}
-		return rankorder.Before(results[i].Engram.ID, results[j].Engram.ID)
+		return activation.ResultBefore(&results[i], &results[j], contentFirst)
 	})
 
 	// Localized in-cluster tie reorder: within each maximal run of EQUAL score,

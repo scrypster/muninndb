@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -174,6 +175,10 @@ func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
 	t.Run("PAS on, populated transition store", func(t *testing.T) { ctRunFidelity(t, true) })
 }
 
+// ctWeights is the fidelity run's scoring config; shared with the order check
+// so it asks activation.ContentFirstOrder about the SAME weights.
+var ctWeights = &activation.Weights{SemanticSimilarity: 0.6, FullTextRelevance: 0.4, UseACTR: true}
+
 func ctRunFidelity(t *testing.T, pasEnabled bool) {
 	store := newStubStore()
 	now := time.Now()
@@ -255,11 +260,7 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 		// nothing about itself.
 		PASEnabled:       pasEnabled,
 		PASMaxInjections: 3,
-		Weights: &activation.Weights{
-			SemanticSimilarity: 0.6,
-			FullTextRelevance:  0.4,
-			UseACTR:            true,
-		},
+		Weights: ctWeights,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -418,6 +419,14 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 				"invalidates its model", c.id, c.gotConfidence, c.engramConfidence)
 		}
 		wantFinal := wantRaw * c.gotConfidence
+		if activation.ContentFirstOrder(ctWeights) {
+			// COG-35: the shipped ACT-R order is content-first — Final IS the
+			// absolute content score (the CONTENT-MATCH-ONLY arm, clamped,
+			// x Confidence). The FULL arm still reconstructs Raw above, so the
+			// trial's ablations of the prior stay trustworthy as measurements;
+			// they no longer describe the shipped ORDER.
+			wantFinal = wantAbs
+		}
 		if math.Abs(wantFinal-c.gotFinal) > tol {
 			t.Errorf("%s: reconstructed Final %.12f vs pipeline %.12f (raw %.12f x conf %.6f) "+
 				"— the harness ranks on arm(row) x Confidence, so this composition is the "+
@@ -439,11 +448,28 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 	// ORDER is exactly the claim an NDCG column needs, and a wrong hebScale, a
 	// wrong cap or a wrong softplus would each break it.
 	recon := append([]ctCandidate(nil), cands...)
-	sort.SliceStable(recon, func(i, j int) bool {
-		ri := ctArmFull.raw(recon[i].contentMatch, recon[i].baseLevel, recon[i].hebbian, recon[i].transition, hebScale) * recon[i].gotConfidence
-		rj := ctArmFull.raw(recon[j].contentMatch, recon[j].baseLevel, recon[j].hebbian, recon[j].transition, hebScale) * recon[j].gotConfidence
-		return ri > rj
-	})
+	if activation.ContentFirstOrder(ctWeights) {
+		// COG-35: the pipeline orders by the absolute content score; an exact
+		// tie goes to more association evidence, then newest-first.
+		sort.SliceStable(recon, func(i, j int) bool {
+			ai := math.Min(recon[i].contentMatch, 1) * recon[i].gotConfidence
+			aj := math.Min(recon[j].contentMatch, 1) * recon[j].gotConfidence
+			if ai != aj {
+				return ai > aj
+			}
+			ei, ej := recon[i].hebbian+recon[i].transition, recon[j].hebbian+recon[j].transition
+			if ei != ej {
+				return ei > ej
+			}
+			return rankorder.Before(recon[i].id, recon[j].id)
+		})
+	} else {
+		sort.SliceStable(recon, func(i, j int) bool {
+			ri := ctArmFull.raw(recon[i].contentMatch, recon[i].baseLevel, recon[i].hebbian, recon[i].transition, hebScale) * recon[i].gotConfidence
+			rj := ctArmFull.raw(recon[j].contentMatch, recon[j].baseLevel, recon[j].hebbian, recon[j].transition, hebScale) * recon[j].gotConfidence
+			return ri > rj
+		})
+	}
 	for i, c := range recon {
 		if c.rank != i {
 			t.Errorf("ranking disagreement at position %d: reconstruction puts %s "+
