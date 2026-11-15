@@ -262,7 +262,7 @@ func TestRecallOverMCP_QueryIDAndFeedbackBlockPresent(t *testing.T) {
 
 	ro := ls.recall(t, "", "default", "ridge trail drainage", map[string]any{"read_only": true})
 	roID, _ := ro["query_id"].(string)
-	require.True(t, strings.HasPrefix(roID, "ro1."), "read-only query_id %q", roID)
+	require.True(t, strings.HasPrefix(roID, "ro2."), "read-only query_id %q", roID)
 	require.Equal(t, roID, ro["feedback"].(map[string]any)["query_id"])
 
 	empty := ls.recall(t, "", "default", "zzqx nothing matches", map[string]any{"threshold": 0.99})

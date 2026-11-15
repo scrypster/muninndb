@@ -28,7 +28,8 @@ func (c *cfEnv) activate(vault, query string, limit int, readOnly bool, mut func
 	if mut != nil {
 		mut(req)
 	}
-	resp, err := c.eng.Activate(context.Background(), req)
+	// As MCP/REST/MBP call it: a surface that returns the associated block.
+	resp, err := c.eng.Activate(mbp.WithAssociatedRendered(context.Background()), req)
 	if err != nil {
 		c.t.Fatal(err)
 	}

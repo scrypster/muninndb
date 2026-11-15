@@ -649,9 +649,14 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 	// it against the bar reproduced the argmax-exemption lie explain existed to
 	// debug. rrf and weighted_sum still gate on Final.
 	gated := result.FinalScore
-	if fusion := e.ResolveVaultPlasticity(vault).ScoringFusion; fusion != "rrf" && fusion != "weighted_sum" {
+	fusion := e.ResolveVaultPlasticity(vault).ScoringFusion
+	if fusion != "rrf" && fusion != "weighted_sum" {
 		gated = float64(result.Components.AbsoluteScore)
 	}
+	// Whether a default recall in this vault has the COG-35 associated
+	// channel at all (content-first order; rrf/weighted_sum do not).
+	assocChannel := activation.ContentFirstOrder(&activation.Weights{
+		UseRRFFusion: fusion == "rrf", DisableACTR: fusion == "rrf" || fusion == "weighted_sum"})
 	result.WouldReturn = result.Scored && gated >= result.Threshold
 	// Clearing the bar is not the whole story: a default recall withholds a
 	// calibrated response whose every row is weak (weak_only). That is a
@@ -673,6 +678,30 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 			result.Note = fmt.Sprintf("this memory clears the bar but only as a WEAK match, and every row a default recall would return for this query is weak, "+
 				"so recall withholds them (abstained_reason \"weak_only\", %d weak rows available). Recall with include_weak: true to receive them.", probe.WeakAvailable)
 		}
+	}
+	// COG-35: explain evaluates CONTENT match, but a default recall can still
+	// surface a non-matching memory in its separate `associated` block (a
+	// rare named entity shared with a returned row). A memory explain would
+	// not return always gets a note saying so, with the shared-entity
+	// evidence explain's own run measured (its boost seeds as a default
+	// recall does). It does NOT say whether this memory IS in the block: only
+	// a second, default recall can say that by construction, and that probe
+	// could not be shown to stay within explain's 1.5x cost bound on the
+	// targets it would run for (TestExplain_CostRatioMeasure times that
+	// target set; the paired ratio swings with which call runs warm).
+	if result.Scored && !result.WouldReturn && result.Note == "" {
+		note := fmt.Sprintf("explain evaluates CONTENT match: this memory's match score (%.3f) is below the recall threshold (%.3f), "+
+			"so a default recall does not return it in `memories`.", gated, result.Threshold)
+		if assocChannel {
+			note += " A memory that does not match can still be surfaced in a recall's separate `associated` block (not a match) when it shares a rare named entity with a returned row."
+			if result.Components.EntityBoost > 0 {
+				note += fmt.Sprintf(" This query's top matches credited this one shared-entity evidence (%.3f), so it may appear there — run the recall and look in `associated` (explain does not check it).",
+					result.Components.EntityBoost)
+			} else {
+				note += " This query's top matches credited this one no shared-entity evidence, so it is not expected there."
+			}
+		}
+		result.Note = note
 	}
 	return result, nil
 }

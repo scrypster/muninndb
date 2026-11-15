@@ -247,7 +247,7 @@ func TestActivateReadOnly_ObserveMode_StillSuppresses(t *testing.T) {
 // TestActivateReadOnly_FullMode_SuppressesRecallEvent is the RED test for the
 // second write site: a read_only:true recall from a full-mode credential must
 // not persist a 0x29 recall event. Persistence is observable from the
-// outside: a read-only recall's query id is the self-verifying "ro1."/"ro0."
+// outside: a read-only recall's query id is the self-verifying "ro2."/"ro0."
 // form, never an event ULID (see mintRecallQueryID), and no 0x29 event
 // exists under it.
 func TestActivateReadOnly_FullMode_SuppressesRecallEvent(t *testing.T) {
@@ -269,7 +269,7 @@ func TestActivateReadOnly_FullMode_SuppressesRecallEvent(t *testing.T) {
 	}
 	if len(resp.QueryID) < 3 || resp.QueryID[:2] != "ro" {
 		t.Errorf("read_only:true recall got query_id %q, not the read-only "+
-			"(ro1./ro0.) form — a pure read must not write the signal calibration reads", resp.QueryID)
+			"(ro2./ro0.) form — a pure read must not write the signal calibration reads", resp.QueryID)
 	}
 	n, err := store.CountRecallEventsSince(context.Background(), store.ResolveVaultPrefix(vault), time.Now().Add(-time.Hour))
 	if err != nil {

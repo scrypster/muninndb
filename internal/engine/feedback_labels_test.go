@@ -188,7 +188,7 @@ func TestRecall_QueryIDIsULIDOnZeroRowsAndFailedEventWrite(t *testing.T) {
 	require.Empty(t, le.labels("failed-write"))
 }
 
-// TestRecall_ReadOnlyQueryIDSurvivesRestart: an ro1. id minted before a
+// TestRecall_ReadOnlyQueryIDSurvivesRestart: an ro2. id minted before a
 // restart verifies after it (same persisted secret), and a normal id minted
 // before a restart still joins its event after it.
 func TestRecall_ReadOnlyQueryIDSurvivesRestart(t *testing.T) {
@@ -198,7 +198,7 @@ func TestRecall_ReadOnlyQueryIDSurvivesRestart(t *testing.T) {
 	le.seed(ctx, vault)
 
 	ro := le.recall(ctx, vault, true)
-	require.True(t, strings.HasPrefix(ro.QueryID, "ro1."), "read-only id %q", ro.QueryID)
+	require.True(t, strings.HasPrefix(ro.QueryID, "ro2."), "read-only id %q", ro.QueryID)
 	normal := le.recall(ctx, vault, false)
 	roMem, normMem := ro.Activations[0].ID, normal.Activations[1].ID
 
@@ -220,7 +220,7 @@ func TestRecall_ReadOnlyQueryIDSurvivesRestart(t *testing.T) {
 }
 
 // TestRecall_ReadOnlyQueryIDRejectedWithRotatedSecret: a rotated auth secret
-// invalidates ro1. ids (bad_mac), uniformly.
+// invalidates ro2. ids (bad_mac), uniformly.
 func TestRecall_ReadOnlyQueryIDRejectedWithRotatedSecret(t *testing.T) {
 	le := newLabelEnv(t, testSecret)
 	ctx := caller("tok-a", "sess-a")
@@ -596,7 +596,7 @@ func TestFeedback_AppendAllowed(t *testing.T) {
 // -------------------------------------------------- read-only is pure ----
 
 // TestLabels_ReadOnlyRecallWritesNothing: a full key-and-value iteration of
-// the store before and after a read-only recall is byte-identical — the ro1.
+// the store before and after a read-only recall is byte-identical — the ro2.
 // id is minted, not stored.
 func TestLabels_ReadOnlyRecallWritesNothing(t *testing.T) {
 	le := newLabelEnv(t, testSecret)
@@ -605,7 +605,7 @@ func TestLabels_ReadOnlyRecallWritesNothing(t *testing.T) {
 	before := le.snapshotKV()
 	for i := 0; i < 3; i++ {
 		resp := le.recall(ctx, "ro-recall", true)
-		require.True(t, strings.HasPrefix(resp.QueryID, "ro1."))
+		require.True(t, strings.HasPrefix(resp.QueryID, "ro2."))
 	}
 	require.True(t, bytes.Equal(before, le.snapshotKV()), "a read-only recall must write nothing")
 	// Observe credentials are read-only too.

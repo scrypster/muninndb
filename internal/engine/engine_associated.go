@@ -26,8 +26,12 @@ import (
 const (
 	// associatedMax is the most association-only rows one response carries.
 	associatedMax = 3
-	// associatedMaxBytes bounds the JSON-encoded block. Items that would
-	// push it past the bound are dropped, weakest first.
+	// associatedMaxBytes bounds the block: the JSON array as encoding/json
+	// encodes it (HTML-escaped: <, > and & cost six bytes each), the
+	// `"associated":` key not counted. An item too long on its own is
+	// shortened to fit (associatedShorten); items that would push the array
+	// past the bound are dropped, weakest first, and counted in
+	// AssociatedOmitted.
 	associatedMaxBytes = 600
 	// associatedConceptRunes / associatedEntityRunes truncate the two
 	// free-text fields so one long concept cannot spend the whole budget.
@@ -57,9 +61,11 @@ type associatedCandidate struct {
 // summed weight of those entities, capped at entityBoostCap; strongest first,
 // exact ties newest-first; at most associatedMax items within
 // associatedMaxBytes. nil when there is nothing — never an empty slice.
-func buildAssociated(full, returned []activation.ScoredEngram) (items []mbp.AssociatedItem, ids []storage.ULID) {
+// omitted counts the candidates that qualified but are not shown (item or
+// byte cap), so "more existed" never looks like "there were no more".
+func buildAssociated(full, returned []activation.ScoredEngram) (items []mbp.AssociatedItem, ids []storage.ULID, omitted int) {
 	if len(returned) == 0 {
-		return nil, nil
+		return nil, nil, 0
 	}
 	served := make(map[storage.ULID]bool, len(returned))
 	for i := range returned {
@@ -97,7 +103,7 @@ func buildAssociated(full, returned []activation.ScoredEngram) (items []mbp.Asso
 		cands = append(cands, c)
 	}
 	if len(cands) == 0 {
-		return nil, nil
+		return nil, nil, 0
 	}
 	sort.SliceStable(cands, func(i, j int) bool {
 		if cands[i].strength != cands[j].strength {
@@ -105,35 +111,64 @@ func buildAssociated(full, returned []activation.ScoredEngram) (items []mbp.Asso
 		}
 		return rankorder.Before(cands[i].row.Engram.ID, cands[j].row.Engram.ID)
 	})
-	if len(cands) > associatedMax {
-		cands = cands[:associatedMax]
+	shown := cands
+	if len(shown) > associatedMax {
+		shown = shown[:associatedMax]
 	}
-	for _, c := range cands {
-		items = append(items, mbp.AssociatedItem{
-			ID:       c.row.Engram.ID.String(),
-			Concept:  associatedTruncate(c.row.Engram.Concept, associatedConceptRunes),
-			Why:      fmt.Sprintf("shares entity %q with returned %s", associatedTruncate(c.entity, associatedEntityRunes), c.via.String()),
-			Strength: float32(math.Round(c.strength*1000) / 1000),
-			Basis:    associatedBasis,
-		})
+	for _, c := range shown {
+		items = append(items, associatedShorten(c))
 		ids = append(ids, c.row.Engram.ID)
 	}
-	for len(items) > 0 {
+	for len(items) > 1 {
 		if b, err := json.Marshal(items); err == nil && len(b) <= associatedMaxBytes {
 			break
 		}
 		items, ids = items[:len(items)-1], ids[:len(ids)-1]
 	}
-	if len(items) == 0 {
-		return nil, nil
-	}
-	return items, ids
+	return items, ids, len(cands) - len(items)
 }
 
-func associatedTruncate(s string, n int) string {
+// associatedShorten renders one candidate as an item, shortening its two
+// free-text fields (concept first, then the entity name in why — never the
+// ids) rune by rune until the item ALONE fits associatedMaxBytes as an
+// array. The fixed part (id, why's frame and returned id, strength, basis)
+// is ~180 bytes, so this always terminates within the cap. Truncated is set
+// whenever either field was shortened.
+func associatedShorten(c associatedCandidate) mbp.AssociatedItem {
+	conceptN, entityN := associatedConceptRunes, associatedEntityRunes
+	for {
+		concept, ct := associatedTruncate(c.row.Engram.Concept, conceptN)
+		entity, et := associatedTruncate(c.entity, entityN)
+		it := mbp.AssociatedItem{
+			ID:        c.row.Engram.ID.String(),
+			Concept:   concept,
+			Why:       fmt.Sprintf("shares entity %q with returned %s", entity, c.via.String()),
+			Strength:  float32(math.Round(c.strength*1000) / 1000),
+			Basis:     associatedBasis,
+			Truncated: ct || et,
+		}
+		b, err := json.Marshal([]mbp.AssociatedItem{it})
+		if err != nil || len(b) <= associatedMaxBytes || (conceptN == 0 && entityN == 0) {
+			return it
+		}
+		if conceptN > 0 && (utf8.RuneCountInString(concept) >= utf8.RuneCountInString(entity) || entityN == 0) {
+			conceptN = min(conceptN, utf8.RuneCountInString(concept)) - 1
+		} else {
+			entityN = min(entityN, utf8.RuneCountInString(entity)) - 1
+		}
+	}
+}
+
+// associatedTruncate returns s cut to at most n runes, the last of them
+// "…" when it was cut (n == 0: empty), and whether it was cut. Cuts fall on
+// rune boundaries, so valid UTF-8 stays valid.
+func associatedTruncate(s string, n int) (string, bool) {
 	if utf8.RuneCountInString(s) <= n {
-		return s
+		return s, false
+	}
+	if n <= 0 {
+		return "", true
 	}
 	r := []rune(s)
-	return string(r[:n-1]) + "…"
+	return string(r[:n-1]) + "…", true
 }

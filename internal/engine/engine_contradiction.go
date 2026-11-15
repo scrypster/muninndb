@@ -487,6 +487,9 @@ func (e *Engine) applyContradictionHonesty(
 	if req.MaxResults > 0 && window > req.MaxResults+contradictionMargin {
 		window = req.MaxResults + contradictionMargin
 	}
+	if c := recallCostFrom(ctx); c != nil {
+		c.contradictionWindow.Add(int64(window))
+	}
 	idx := make(map[storage.ULID]int, window)
 	ids := make([]storage.ULID, 0, window)
 	for i := 0; i < window; i++ {

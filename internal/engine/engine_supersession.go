@@ -157,6 +157,9 @@ func (e *Engine) applySupersessionWithGate(ctx context.Context, ws [8]byte, resu
 	if maxResults > 0 && orig > maxResults+supersessionMargin {
 		orig = maxResults + supersessionMargin
 	}
+	if c := recallCostFrom(ctx); c != nil {
+		c.supersessionWindow.Add(int64(orig))
+	}
 
 	// Snapshot original earned scores BEFORE any mutation, so Phase-2 demotion is
 	// against the earned score, not a running (already-promoted) head score.

@@ -15,7 +15,7 @@ import (
 // Security review findings on the label pipeline (both RED before the fix).
 
 // TestFeedback_ReadOnlyLabelsCappedPerCredentialDay: read-only recalls are
-// cheap and write nothing, so each one mints a fresh ro1. id. 1,000 of them
+// cheap and write nothing, so each one mints a fresh ro2. id. 1,000 of them
 // labelling the same memory must yield at most ONE access bump per
 // credential per UTC day — no bump path is uncapped.
 func TestFeedback_ReadOnlyLabelsCappedPerCredentialDay(t *testing.T) {

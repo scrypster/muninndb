@@ -68,16 +68,29 @@ func TestExplain_CostRatioMeasure(t *testing.T) {
 		}
 	}
 	for _, n := range sizes {
-		recall, explain := explainRatioAt(t, n)
+		recall, explain, assoc := explainRatioAt(t, n)
 		ratio := float64(explain) / float64(recall)
 		t.Logf("n=%d recall(limit 10) p50=%v explain p50=%v ratio=%.2f", n, recall, explain, ratio)
+		if len(assoc.ratio) > 0 {
+			p50 := func(d []time.Duration) time.Duration {
+				sort.Slice(d, func(i, j int) bool { return d[i] < d[j] })
+				return d[len(d)/2]
+			}
+			t.Logf("n=%d below-bar memories with entity evidence, %d queries, explain timed FIRST: explain p50=%v, then recall of the same query p50=%v, paired ratio p50=%.2f — reported, not bounded (the second call runs warm)",
+				n, len(assoc.ratio), p50(assoc.explain), p50(assoc.recall), float64(p50(assoc.ratio))/float64(time.Millisecond))
+		}
 		if ratio > 1.5 {
 			t.Errorf("n=%d: explain p50 is %.2fx a limit-10 recall (bound 1.5x)", n, ratio)
 		}
 	}
 }
 
-func explainRatioAt(t *testing.T, n int) (recallP50, explainP50 time.Duration) {
+// assocTargetTimes are explain/recall timings on below-bar memories with
+// entity-boost evidence (explain first, then a default recall of the same
+// query); ratio holds explain/recall scaled to 1ms.
+type assocTargetTimes struct{ explain, recall, ratio []time.Duration }
+
+func explainRatioAt(t *testing.T, n int) (recallP50, explainP50 time.Duration, assoc assocTargetTimes) {
 	t.Helper()
 	words := strings.Fields("culvert outlet riprap drainage waterbar switchback tread gravel bridge decking " +
 		"blowdown crosscut brushing corridor cairn blaze trailhead ridge saddle spur creek ford boardwalk " +
@@ -124,7 +137,7 @@ func explainRatioAt(t *testing.T, n int) (recallP50, explainP50 time.Duration) {
 		q := words[r.Intn(len(words))] + " " + words[r.Intn(len(words))] + " " + words[r.Intn(len(words))]
 		target := ids[r.Intn(len(ids))]
 		t0 := time.Now()
-		if _, err := c.eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10, ReadOnly: true}); err != nil {
+		if _, err := c.eng.Activate(mbp.WithAssociatedRendered(ctx), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10, ReadOnly: true}); err != nil {
 			t.Fatal(err)
 		}
 		rec = append(rec, time.Since(t0))
@@ -134,7 +147,49 @@ func explainRatioAt(t *testing.T, n int) (recallP50, explainP50 time.Duration) {
 		}
 		exp = append(exp, time.Since(t1))
 	}
+	// The random targets above are almost never below-bar memories the boost
+	// credited entity evidence — the targets a precise "is it in
+	// `associated`?" check would need a second, default recall for — so the
+	// ratio above says nothing about them. Time that target set too: explain
+	// FIRST, then a default recall of the same query. Whichever call runs
+	// second runs warm, so the paired ratio is reported, not bounded: it
+	// measures call order, not explain (explain first 64 ms then recall
+	// 9.9 ms at 12,000 memories; recall first, the reverse). Note the random
+	// loop above times recall FIRST.
+	for i := 0; i < 80 && len(assoc.ratio) < 30; i++ {
+		q := words[r.Intn(len(words))] + " " + words[r.Intn(len(words))] + " " + words[r.Intn(len(words))]
+		all, err := c.eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: explainMaxCandidates, Threshold: -1, ReadOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := ""
+		for _, a := range all.Activations {
+			if a.ScoreComponents.AbsoluteScore < 0.1 && a.ScoreComponents.EntityBoost > 0 {
+				target = a.ID
+				break
+			}
+		}
+		if target == "" {
+			continue
+		}
+		t1 := time.Now()
+		ex, err := c.eng.Explain(ctx, vault, target, []string{q}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := time.Since(t1)
+		t0 := time.Now()
+		if _, err := c.eng.Activate(mbp.WithAssociatedRendered(ctx), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10, ReadOnly: true}); err != nil {
+			t.Fatal(err)
+		}
+		rd := time.Since(t0)
+		if ex.Scored && !ex.WouldReturn && ex.Components.EntityBoost > 0 {
+			assoc.explain = append(assoc.explain, d)
+			assoc.recall = append(assoc.recall, rd)
+			assoc.ratio = append(assoc.ratio, time.Duration(float64(time.Millisecond)*float64(d)/float64(rd)))
+		}
+	}
 	sort.Slice(rec, func(i, j int) bool { return rec[i] < rec[j] })
 	sort.Slice(exp, func(i, j int) bool { return exp[i] < exp[j] })
-	return rec[len(rec)/2], exp[len(exp)/2]
+	return rec[len(rec)/2], exp[len(exp)/2], assoc
 }

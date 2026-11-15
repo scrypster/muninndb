@@ -235,15 +235,17 @@ func recallSourceFlags(s *activation.ScoredEngram) uint8 {
 }
 
 // mintRecallQueryID returns the query id for a recall whose event id is
-// eventID: the ULID itself for a normal recall, or the self-verifying ro1. id
+// eventID: the ULID itself for a normal recall, or the self-verifying ro2. id
 // for a read-only one (ro0. with no key wired).
-// rows are the returned memory ids in served order; a read-only id carries a
-// keyed tag per row so a later label can be checked for membership.
-func (e *Engine) mintRecallQueryID(vault string, eventID storage.ULID, readOnly bool, rc, rs [8]byte, rows [][16]byte) string {
+// rows are the returned (matched) memory ids in served order and assoc the
+// ids of the response's associated block; a read-only id carries a keyed tag
+// per id, in two sections, so a later label can be checked for membership
+// and told apart.
+func (e *Engine) mintRecallQueryID(vault string, eventID storage.ULID, readOnly bool, rc, rs [8]byte, rows, assoc [][16]byte) string {
 	if !readOnly {
 		return eventID.String()
 	}
-	return e.qidKey.MintReadOnlyQueryID(vault, [16]byte(eventID), eventID.String(), rc, rs, rows)
+	return e.qidKey.MintReadOnlyQueryID(vault, [16]byte(eventID), eventID.String(), rc, rs, rows, assoc)
 }
 
 // Feedback outcomes. The engine always computes them; the TRANSPORT decides
@@ -428,18 +430,25 @@ func (e *Engine) RecordFeedbackLabelsDetailed(ctx context.Context, vault string,
 				continue
 			}
 		}
-		// isMember reports a memory's served rank in this group's recall.
-		isMember := func(id storage.ULID) (int, bool) {
+		// isMember reports whether a memory was served by this group's
+		// recall, and where: pos is its 1-based position among the event's
+		// entries / the id's matched tags, and assoc that it was an item of
+		// the response's associated block.
+		isMember := func(id storage.ULID) (pos int, assoc, ok bool) {
 			if r.kind == auth.QueryIDEvent {
 				is := id.String()
 				for i := range events[r.e].Entries {
 					if events[r.e].Entries[i].ID == is {
-						return i + 1, true
+						return i + 1, events[r.e].EntryAssociated(i), true
 					}
 				}
-				return 0, false
+				return 0, false, false
 			}
-			return e.qidKey.ReadOnlyRank(vault, [16]byte(r.e), r.ro, [16]byte(id))
+			if p, ok := e.qidKey.ReadOnlyRank(vault, [16]byte(r.e), r.ro, [16]byte(id)); ok {
+				return p, false, true
+			}
+			p, ok := e.qidKey.ReadOnlyAssociated(vault, [16]byte(r.e), r.ro, [16]byte(id))
+			return p, ok, ok
 		}
 		for _, m := range r.mems {
 			o := FeedbackOutcome{Group: gi, QueryID: groups[gi].QueryID, ID: m.String()}
@@ -451,11 +460,11 @@ func (e *Engine) RecordFeedbackLabelsDetailed(ctx context.Context, vault string,
 			}
 			seen[pair] = struct{}{}
 
-			rank, member := isMember(m)
+			pos, assoc, member := isMember(m)
 			if !member {
 				o.Outcome, o.Reason = FeedbackOutcomeRejected, FeedbackReasonNotInRecall
 				if head := e.labelHead(ctx, ws, m); head != m {
-					if _, ok := isMember(head); ok {
+					if _, _, ok := isMember(head); ok {
 						o.Reason, o.HeadID = FeedbackReasonSubstituted, head.String()
 					}
 				}
@@ -467,11 +476,17 @@ func (e *Engine) RecordFeedbackLabelsDetailed(ctx context.Context, vault string,
 				continue
 			}
 
+			// Rank and set size describe the MATCHED rows the recall served
+			// in `memories`: an associated-block item has no matched-row rank
+			// (0) and is never counted in the set size (COG-35); its source
+			// says what it was.
 			fresh := storage.RecallLabel{
 				LastAt:    now.UnixMilli(),
 				Channel:   ch,
 				LabelSess: nonZero(ls),
-				Rank:      clampU16(rank),
+			}
+			if !assoc {
+				fresh.Rank = clampU16(pos)
 			}
 			if useful {
 				fresh.Polarity = 1
@@ -480,14 +495,30 @@ func (e *Engine) RecordFeedbackLabelsDetailed(ctx context.Context, vault string,
 			if r.kind == auth.QueryIDEvent {
 				ev := events[r.e]
 				fresh.Membership = storage.LabelMembershipVerified
-				fresh.SetSize = clampU16(len(ev.Entries))
-				fresh.Source = ev.EntrySource(rank - 1)
+				fresh.SetSize = clampU16(ev.MatchedCount())
+				fresh.Source = ev.EntrySource(pos - 1)
 				fresh.RecallCred = ev.RecallCred
 				fresh.RecallSess = ev.RecallSess
 			} else {
 				fresh.Membership = storage.LabelMembershipToken
 				fresh.SetSize = clampU16(r.ro.Rows())
 				fresh.Source = storage.RecallSourceUnknown
+				if assoc {
+					fresh.Source = storage.RecallSourceAssociated | storage.RecallSourceEntityBoost
+				}
+				if r.ro.Legacy() {
+					// An ro1 id lists matched rows then (from a build with the
+					// associated block) up to associatedMax associated items,
+					// in one undivided tag list. Only the first max(1, n-3)
+					// positions are certainly matched rows (a block exists
+					// only beside at least one matched row): those keep their
+					// rank; a later position may be an associated item, so
+					// its rank is unknown, and the set size is unknown.
+					if pos > max(1, r.ro.Rows()-associatedMax) {
+						fresh.Rank = 0
+					}
+					fresh.SetSize = 0
+				}
 				fresh.RecallCred = nonZero(r.ro.RC)
 				fresh.RecallSess = nonZero(r.ro.RS)
 				header = &storage.RecallROHeader{
@@ -600,7 +631,7 @@ func (e *Engine) probeEventVault(vault string, id storage.ULID) string {
 	return ""
 }
 
-// probeReadOnlyVault finds the vault an ro1. id was minted for (its MAC binds
+// probeReadOnlyVault finds the vault a read-only (ro2./ro1.) id was minted for (its MAC binds
 // the vault name), for a caller allowed to read every vault. One HMAC per
 // vault, failure path only.
 func (e *Engine) probeReadOnlyVault(vault string, id storage.ULID, p auth.ParsedReadOnlyID) string {

@@ -233,7 +233,9 @@ type ActivateRequest struct {
 	// them. An explicit Threshold, any Filters, or mode "deep" imply it.
 	IncludeWeak bool `json:"include_weak,omitempty" msgpack:"include_weak,omitempty"`
 	// ExcludeAssociated suppresses the response's `associated` block (MCP
-	// include_associated:false). Zero value = include.
+	// include_associated:false). Zero value = include — on a surface that
+	// returns the block at all (WithAssociatedRendered); every other surface
+	// never gets one.
 	ExcludeAssociated bool `json:"exclude_associated,omitempty" msgpack:"exclude_associated,omitempty"`
 }
 
@@ -332,11 +334,18 @@ type ActivateResponse struct {
 	Conflict *ConflictBlock `msgpack:"conflict,omitempty" json:"conflict,omitempty"`
 	// Associated (COG-35) lists, in a separate bounded channel, memories that
 	// did NOT match the query but are associated with rows that did, when they
-	// did not make the cut: at most 3, compact (no content), at most
-	// AssociatedMaxBytes when JSON-encoded. Not counted against max_results or
-	// in TotalFound, never abstention-relevant. nil (absent) when there are
-	// none or the caller set ExcludeAssociated.
+	// did not make the cut: at most 3, compact (no content), the array at most
+	// 600 bytes as encoding/json encodes it (HTML-escaped; the "associated"
+	// key not counted). An item too long on its own is shortened and marked
+	// Truncated, never dropped. Not counted against max_results or in
+	// TotalFound, never abstention-relevant. nil (absent) when there are none,
+	// the caller set ExcludeAssociated, or the surface does not return the
+	// block (no WithAssociatedRendered on the request context).
 	Associated []AssociatedItem `msgpack:"associated,omitempty" json:"associated,omitempty"`
+	// AssociatedOmitted counts association-only memories that qualified for
+	// Associated but were left out by its 3-item or byte cap. Absent (0) when
+	// every qualifying memory is shown.
+	AssociatedOmitted int `msgpack:"associated_omitted,omitempty" json:"associated_omitted,omitempty"`
 }
 
 // AssociatedItem is one association-only memory: evidence that it is
@@ -351,6 +360,9 @@ type AssociatedItem struct {
 	Strength float32 `msgpack:"strength" json:"strength"`
 	// Basis is always "associated_not_matched".
 	Basis string `msgpack:"basis" json:"basis"`
+	// Truncated is true when Concept and/or the entity name in Why were
+	// shortened (on a UTF-8 boundary, ending in "…") to fit the byte cap.
+	Truncated bool `msgpack:"truncated,omitempty" json:"truncated,omitempty"`
 }
 
 // ActivationItem is a single activated engram.

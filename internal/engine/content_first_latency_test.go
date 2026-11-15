@@ -71,7 +71,7 @@ func TestContentFirst_LatencyMeasure(t *testing.T) {
 	var sizes []int
 	withBlock := 0
 	for _, q := range queries {
-		resp, err := c.eng.Activate(context.Background(), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10, ReadOnly: true})
+		resp, err := c.eng.Activate(mbp.WithAssociatedRendered(context.Background()), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10, ReadOnly: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +91,7 @@ func TestContentFirst_LatencyMeasure(t *testing.T) {
 		for i, q := range queries[:60] {
 			target := ids[(i*37)%len(ids)]
 			t0 := time.Now()
-			if _, err := c.eng.Activate(context.Background(), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10, ReadOnly: true}); err != nil {
+			if _, err := c.eng.Activate(mbp.WithAssociatedRendered(context.Background()), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10, ReadOnly: true}); err != nil {
 				t.Fatal(err)
 			}
 			rec = append(rec, time.Since(t0))
@@ -110,7 +110,7 @@ func TestContentFirst_LatencyMeasure(t *testing.T) {
 		for rep := 0; rep < 3; rep++ {
 			for _, q := range queries {
 				start := time.Now()
-				if _, err := c.eng.Activate(context.Background(), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: limit, ReadOnly: true}); err != nil {
+				if _, err := c.eng.Activate(mbp.WithAssociatedRendered(context.Background()), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: limit, ReadOnly: true}); err != nil {
 					t.Fatal(err)
 				}
 				lat = append(lat, time.Since(start))

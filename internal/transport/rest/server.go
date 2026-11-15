@@ -877,7 +877,10 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	// to the outer WriteTimeout so we never wait longer than the HTTP server allows.
 	ctx, cancel := context.WithTimeout(r.Context(), activateTimeout)
 	defer cancel()
-	resp, err := s.engine.Activate(ctx, &req)
+	// The response is mbp.ActivateResponse verbatim (sendJSON), so it carries
+	// the COG-35 associated block: the engine may build it and record its
+	// ids as served.
+	resp, err := s.engine.Activate(mbp.WithAssociatedRendered(ctx), &req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			s.sendError(r, w, http.StatusGatewayTimeout, ErrIndexError, "activation timeout: query took too long")

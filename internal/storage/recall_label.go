@@ -29,9 +29,12 @@ const (
 	// LabelMembershipVerified: the memory was checked against the served
 	// entries of the persisted recall event.
 	LabelMembershipVerified uint8 = 1
-	// LabelMembershipToken: a read-only (ro1.) query id — no event exists;
-	// membership and rank were verified against the keyed row tags the id
-	// carries (auth.QueryIDKey.ReadOnlyRank). Source flags stay unknown.
+	// LabelMembershipToken: a read-only (ro2., or legacy ro1.) query id — no
+	// event exists; membership and rank were verified against the keyed row
+	// tags the id carries (auth.QueryIDKey.ReadOnlyRank/ReadOnlyAssociated).
+	// Source flags stay unknown for a matched row; an ro2 associated-block
+	// item records RecallSourceAssociated|RecallSourceEntityBoost (every
+	// associated item came through the entity boost).
 	LabelMembershipToken uint8 = 2
 )
 
@@ -60,8 +63,8 @@ type RecallLabel struct {
 	FirstAt    int64  `msgpack:"t0"`   // unix ms
 	LastAt     int64  `msgpack:"t1"`   // unix ms
 	Membership uint8  `msgpack:"m"`    // LabelMembership*
-	Rank       uint16 `msgpack:"r"`    // 1-based served rank; 0 unknown
-	SetSize    uint16 `msgpack:"k"`    // result-set size; 0 unknown
+	Rank       uint16 `msgpack:"r"`    // 1-based served rank among matched rows; 0 unknown, or an associated-block item (Associated())
+	SetSize    uint16 `msgpack:"k"`    // matched rows served in `memories` (associated items never counted); 0 unknown
 	Source     uint8  `msgpack:"s"`    // the entry's RecallSource* flags; 0xFF unknown
 	RecallCred []byte `msgpack:"rc"`   // recall credential hash (8 B) or empty
 	RecallSess []byte `msgpack:"rs"`   // recall session hash (8 B) or empty
@@ -71,13 +74,19 @@ type RecallLabel struct {
 	Channel    uint8  `msgpack:"ch"`   // LabelChannel*
 }
 
+// Associated reports a label on an item of the response's COG-35
+// `associated` block (not a matched row). False when the source is unknown.
+func (l RecallLabel) Associated() bool {
+	return l.Source != RecallSourceUnknown && l.Source&RecallSourceAssociated != 0
+}
+
 // RecallROHeader is the value of the read-only header child row: the
 // stand-in for the parent event a read-only recall never writes. It is
 // written by muninn_feedback, in the same batch as the first label for that
 // id — never by the recall.
 type RecallROHeader struct {
 	Unverified uint8  `msgpack:"u"`  // always 1: no event — membership came from the id's row tags, source flags unknown
-	RecallCred []byte `msgpack:"rc"` // authenticated inside the ro1. id
+	RecallCred []byte `msgpack:"rc"` // authenticated inside the read-only (ro2./ro1.) id
 	RecallSess []byte `msgpack:"rs"`
 	At         int64  `msgpack:"at"` // unix ms, from the id's ULID time
 }

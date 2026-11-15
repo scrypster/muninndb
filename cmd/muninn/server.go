@@ -1486,7 +1486,7 @@ func runServer() {
 		Embedder:         embedder,
 		HNSWRegistry:     hnswRegistry,
 		EmbedModelName:   embedModelName,
-		// The persisted auth secret keys read-only query ids (ro1.) and the
+		// The persisted auth secret keys read-only query ids (ro2./ro1.) and the
 		// label pipeline's credential/session hashes, so ids survive restarts.
 		QueryIDSecret: sessionSecret,
 		WriteTwinMode: writeTwinMode,

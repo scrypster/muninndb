@@ -182,6 +182,27 @@ type cfRow struct {
 	entity, hebbian, transi float32
 }
 
+// cfAgrees reports whether an explain row agrees with a recall row. The returned
+// score and the content score carry no clock, so they must agree EXACTLY. The
+// three association annotations decay with wall-clock time, and explain runs
+// after recall: on a loaded machine the gap is long enough to move a float32
+// (measured: hebbian 1.000 vs 0.9986 across a 2.5 s gap), which made a
+// bit-for-bit comparison flake. They annotate and never order (COG-35), so
+// they are held to a tolerance wide enough for a slow run and far too narrow
+// to hide a real disagreement.
+func cfAgrees(recall, explain cfRow) bool {
+	const tol = 0.05
+	near := func(a, b float32) bool {
+		d := a - b
+		if d < 0 {
+			d = -d
+		}
+		return d <= tol
+	}
+	return recall.id == explain.id && recall.score == explain.score && recall.abs == explain.abs &&
+		near(recall.entity, explain.entity) && near(recall.hebbian, explain.hebbian) && near(recall.transi, explain.transi)
+}
+
 func (r cfRow) String() string {
 	return fmt.Sprintf("{%s score=%.4f abs=%.4f ent=%.3f heb=%.3f pas=%.3f}", r.id[len(r.id)-6:], r.score, r.abs, r.entity, r.hebbian, r.transi)
 }
@@ -472,7 +493,7 @@ func TestContentFirst_ScoreIsTheContentScoreAndExplainAgrees(t *testing.T) {
 		}
 		r := rows[i]
 		got := cfRow{r.id, float32(ex.FinalScore), ex.Components.AbsoluteScore, ex.Components.EntityBoost, ex.Components.HebbianBoost, ex.Components.TransitionBoost}
-		if got != r {
+		if !cfAgrees(r, got) {
 			t.Errorf("explain disagrees with the recall row\nrecall  %v\nexplain %v", r, got)
 		}
 	}

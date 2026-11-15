@@ -198,6 +198,9 @@ func (e *Engine) applyCurrencyAnnotationOrdered(ctx context.Context, ws [8]byte,
 	if maxResults > 0 && examined > maxResults+margin {
 		examined = maxResults + margin
 	}
+	if c := recallCostFrom(ctx); c != nil {
+		c.currencyPairs.Add(int64(examined) * int64(examined-1) / 2)
+	}
 
 	// Per-call tag document-frequency cache: at most one 0x0C range scan per
 	// DISTINCT tag across the whole examined set (bounded — "no new

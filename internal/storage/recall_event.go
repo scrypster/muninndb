@@ -129,11 +129,14 @@ const (
 	RecallSourceHebbian uint8 = 1 << 5
 	// RecallSourceAssociated: the entry was served in the response's
 	// `associated` block (an association-only memory, COG-35), not as a
-	// matched row. Ranked after every matched entry.
+	// matched row. Stored after every matched entry; it is not a matched row:
+	// a label on it has rank 0 and it is not counted in a label's set size.
+	// Test it with EntryAssociated / RecallLabel.Associated, never with a
+	// bare mask: RecallSourceUnknown (0xFF) has this bit set too.
 	RecallSourceAssociated uint8 = 1 << 6
 	// RecallSourceUnknown is recorded on a label when the source flags are
-	// not known: a read-only query id (no event) or an event written before
-	// the flags existed.
+	// not known: a read-only query id's matched row (no event), a legacy ro1
+	// id, or an event written before the flags existed.
 	RecallSourceUnknown uint8 = 0xFF
 )
 
@@ -194,6 +197,29 @@ type RecallEvent struct {
 	// session — D4).
 	RecallCred []byte `msgpack:"rc,omitempty"`
 	RecallSess []byte `msgpack:"rs,omitempty"`
+}
+
+// EntryAssociated reports whether entry i was served in the response's
+// `associated` block rather than as a matched row. Only an event that carries
+// source flags can say so; an older event predates the block.
+func (ev *RecallEvent) EntryAssociated(i int) bool {
+	s := ev.EntrySource(i)
+	return s != RecallSourceUnknown && s&RecallSourceAssociated != 0
+}
+
+// MatchedCount is the number of entries served as matched rows (in
+// `memories`) — a label's set size. Associated-block entries are excluded.
+func (ev *RecallEvent) MatchedCount() int {
+	if ev == nil {
+		return 0
+	}
+	n := 0
+	for i := range ev.Entries {
+		if !ev.EntryAssociated(i) {
+			n++
+		}
+	}
+	return n
 }
 
 // EntrySource returns entry i's source flags, or RecallSourceUnknown when the

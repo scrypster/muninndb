@@ -48,7 +48,7 @@ type EngineConfig struct {
 
 	// QueryIDSecret is the PERSISTED auth secret (cmd/muninn: dataDir/
 	// auth_secret, returned by auth.Bootstrap). k_q is derived from it for
-	// read-only query ids (ro1.) and for the credential/session hashes the
+	// read-only query ids (ro2., legacy ro1.) and for the credential/session hashes the
 	// label pipeline records. Persisted so an id minted before a restart
 	// verifies after it. nil → read-only ids are ro0.<ULID> and cannot be
 	// labelled, credential/session hashes are zero, and NewEngine WARNs once.

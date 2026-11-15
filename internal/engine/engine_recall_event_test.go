@@ -83,7 +83,7 @@ func TestRecall_ObserveModeDoesNotPersist(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.Activations)
 	require.True(t, strings.HasPrefix(resp.QueryID, "ro"),
-		"observe-mode query_id must be the read-only (ro1./ro0.) form, never an event id, got %q", resp.QueryID)
+		"observe-mode query_id must be the read-only (ro2./ro0.) form, never an event id, got %q", resp.QueryID)
 
 	ws := eng.store.ResolveVaultPrefix(vault)
 	count := 0

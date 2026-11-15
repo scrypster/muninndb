@@ -340,6 +340,9 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 		if acc.injectable <= 0 || acc.injectable < req.Threshold {
 			continue
 		}
+		if c := recallCostFrom(ctx); c != nil {
+			c.boostInjectReads.Add(1)
+		}
 		eng, err := e.store.GetEngram(ctx, ws, id)
 		if err != nil || eng == nil {
 			continue

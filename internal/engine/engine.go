@@ -3333,9 +3333,13 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// in a separate bounded block (engine_associated.go). Content-first
 	// responses only — rrf/weighted_sum/CGDN still let injected rows compete
 	// for `memories` by score, exactly as before. Runs after weak_only: with
-	// no returned row there is no seed to be associated with.
+	// no returned row there is no seed to be associated with. Built ONLY for
+	// a surface that returns the block (mbp.WithAssociatedRendered): its ids
+	// are recorded as served below, so a surface whose response has no
+	// `associated` field (gRPC, the embedded library) must never get one.
 	var associated []mbp.AssociatedItem
 	var associatedIDs []storage.ULID
+	var associatedOmitted int
 	if diagnostic {
 		// Explain reads one row: hydrate only that one (items, provenance,
 		// bands, brief all scale with the rows that reach this point).
@@ -3351,8 +3355,8 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		relevanceBands, relevanceBases = applyRelevanceBands(result.Activations, result.Calibration,
 			cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR), result.SemanticDegraded)
 	}
-	if !diagnostic && !req.ExcludeAssociated && activation.ContentFirstOrder(actReq.Weights) {
-		associated, associatedIDs = buildAssociated(uncut, result.Activations)
+	if !diagnostic && !req.ExcludeAssociated && mbp.AssociatedRendered(ctx) && activation.ContentFirstOrder(actReq.Weights) {
+		associated, associatedIDs, associatedOmitted = buildAssociated(uncut, result.Activations)
 	}
 
 	// The stored Ebbinghaus `relevance` is a decay number recall scoring
@@ -3519,7 +3523,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// every path. A normal recall's id is the event ULID — also on the
 	// zero-row path (no event: a label against it is unknown_event) and when
 	// the write fails (likewise). A read-only recall writes nothing and gets
-	// the self-verifying ro1. id. There is no process-local counter fallback:
+	// the self-verifying ro2. id. There is no process-local counter fallback:
 	// a counter restarts at 1 on every boot, so it is not a key.
 	eventID := storage.NewULID()
 	recallCred, recallSess, _ := e.callerHashes(ctx)
@@ -3527,12 +3531,16 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	for _, sc := range result.Activations {
 		servedRows = append(servedRows, [16]byte(sc.Engram.ID))
 	}
-	// Associated items are SERVED too, ranked after every matched row, so a
-	// label for one is a verified member (normal and read-only ids alike).
+	// Associated items are SERVED too — exactly the ids the response's block
+	// carries — so a label for one is a verified member. They are recorded
+	// apart from the matched rows (the event's associated source flag, the
+	// read-only id's associated section): a label on one is marked as such
+	// and never takes a matched-row rank or counts toward the set size.
+	servedAssoc := make([][16]byte, 0, len(associatedIDs))
 	for _, id := range associatedIDs {
-		servedRows = append(servedRows, [16]byte(id))
+		servedAssoc = append(servedAssoc, [16]byte(id))
 	}
-	queryID := e.mintRecallQueryID(req.Vault, eventID, actReq.ReadOnly, recallCred, recallSess, servedRows)
+	queryID := e.mintRecallQueryID(req.Vault, eventID, actReq.ReadOnly, recallCred, recallSess, servedRows, servedAssoc)
 	if len(items) > 0 && !actReq.ReadOnly {
 		entries := make([]storage.RecallSurfacedEntry, len(items))
 		for i, item := range items {
@@ -3723,6 +3731,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		WeakAvailable:          weakAvailable,
 		Conflict:               conflictBlock,
 		Associated:             associated,
+		AssociatedOmitted:      associatedOmitted,
 	}, nil
 }
 

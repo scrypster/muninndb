@@ -1517,7 +1517,8 @@ or clone; no new prefix; the per-memory use summary and evolve carrying use hist
 are the next slice.
 
 **Residuals, stated.** Prune does not replicate (inherited). Each node has its own
-`auth_secret`, so an `ro1.` id minted on a follower fails on the leader. Open-server and
+`auth_secret`, so a read-only id (`ro2.`; `ro1.` before the associated block got its own
+section) minted on a follower fails on the leader. Open-server and
 static-token deployments are one credential for labelling. REST/MBP/gRPC writes carry no
 session, so their memories label as `self = unknown`. A hard-deleted memory's labels remain
 until prune, as its ids in 0x29 entries always did.

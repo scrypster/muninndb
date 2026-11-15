@@ -812,7 +812,8 @@ components:
             ULID of its persisted recall event — on every path, including an
             empty result. A read-only recall (read_only, or an observe-mode
             key) persists nothing and returns a self-verifying id beginning
-            "ro1." (or "ro0." when the server has no auth secret). Ids stay
+            "ro2." (or "ro0." when the server has no auth secret; "ro1." ids
+            from earlier builds are still accepted). Ids stay
             valid across restarts. Labelling a recall's results
             (muninn_feedback, and the ready-to-copy `feedback` block) is
             MCP-only; this REST surface carries the id but no feedback block
@@ -877,10 +878,14 @@ components:
           description: >-
             Default (ACT-R) vaults only (COG-35): memories that did NOT match
             the query but are associated with a returned one (they share a
-            rare named entity with it) and did not make the cut. At most 3,
-            at most 600 bytes as JSON, not counted in total_found or against
-            max_results, never abstention-relevant. Absent when empty or when
-            exclude_associated is set.
+            rare named entity with it) and did not make the cut. At most 3;
+            the array, as JSON with <, > and & escaped to \u003c etc. and
+            the "associated" key not counted, is at most 600 bytes — an item
+            too long on its own is shortened (truncated true), never dropped.
+            Not counted in total_found or against max_results, never
+            abstention-relevant. Absent when empty or when exclude_associated
+            is set. Its ids are recorded as served with this query_id (a
+            label on one is stored as an associated item, rank 0).
           items:
             type: object
             properties:
@@ -898,6 +903,16 @@ components:
               basis:
                 type: string
                 enum: [associated_not_matched]
+              truncated:
+                type: boolean
+                description: >-
+                  concept and/or the entity name in why were shortened (on a
+                  character boundary, ending in "…") to fit. Absent when not.
+        associated_omitted:
+          type: integer
+          description: >-
+            How many association-only memories qualified for associated but
+            were left out by its 3-item or 600-byte cap. Absent when 0.
         conflict:
           $ref: "#/components/schemas/ConflictBlock"
 

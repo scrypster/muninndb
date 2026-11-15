@@ -636,7 +636,9 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	annotate, _ := args["annotate"].(bool)
 
-	resp, err := s.engine.Activate(ctx, req)
+	// muninn_recall returns the associated block (below), so the engine may
+	// build it and record its ids as served (COG-35).
+	resp, err := s.engine.Activate(mbp.WithAssociatedRendered(ctx), req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -700,6 +702,9 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	// vanish here (TestRecallOverMCP_AssociatedBlock). Absent when empty.
 	if len(resp.Associated) > 0 {
 		result["associated"] = resp.Associated
+	}
+	if resp.AssociatedOmitted > 0 {
+		result["associated_omitted"] = resp.AssociatedOmitted
 	}
 	// COG-29 amendment: the vault-wide unresolved-contradiction debt readout,
 	// on mode="recent" ONLY. That condition is not a heuristic guess at "is this
@@ -3124,7 +3129,7 @@ func isMemoryID(s string) bool {
 }
 
 // isQueryIDShape reports whether s is SHAPED like a recall query id (an event
-// ULID, ro1., or ro0.). Shape only: a malformed MAC is a semantic outcome,
+// ULID, ro2. or the legacy ro1., or ro0.). Shape only: a malformed MAC is a semantic outcome,
 // reported only in aggregate.
 func isQueryIDShape(s string) bool {
 	kind, p := auth.ClassifyQueryID(s)

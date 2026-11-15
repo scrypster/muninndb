@@ -312,7 +312,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"include_associated": map[string]any{
 						"type":        "boolean",
-						"description": "Default true. When a memory did not match your query but is ASSOCIATED with one that did (it shares a rare named entity with a returned memory) and did not make the cut, the response carries it in a separate `associated` array: at most 3 compact items (id, concept, why, strength, basis \"associated_not_matched\"), at most ~600 bytes, not counted in total or against limit. They are leads to follow, not answers. Pass false to omit the block.",
+						"description": "Default true. When a memory did not match your query but is ASSOCIATED with one that did (it shares a rare named entity with a returned memory) and did not make the cut, the response carries it in a separate `associated` array: at most 3 compact items (id, concept, why, strength, basis \"associated_not_matched\"; truncated: true when concept or why was shortened to fit), the array at most 600 bytes as JSON (the key not counted), not counted in total or against limit; `associated_omitted` says how many more qualified but did not fit. They are leads to follow, not answers. A muninn_feedback label on one is recorded as an associated item, not a ranked match. Pass false to omit the block.",
 					},
 					"include_weak": map[string]any{
 						"type":        "boolean",
