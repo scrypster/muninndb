@@ -281,7 +281,7 @@ when the cost equation changes, don't let an old call block a index built for it
 Reliable-colleague work surfaced a recurring trap: tuning a threshold/baseline/vocabulary on the
 maintainer's own vault and shipping that constant as the universal default. #712 currency
 (version-cluster) failed this twice — v1's entity anchor didn't fire on the entity-sparse real
-vault, and v2's tag-marker vocabulary (`four-bucket`, `v2`, `final`) + document-frequency
+vault, and v2's tag-marker vocabulary (a pricing-scheme label, `v2`, `final`) + document-frequency
 thresholds were tuned to one vault's pricing history (and still false-positived on it, telling a
 shipped fact it was superseded by an aspirational "planned" one). The semantic-abstention floor's
 `b = μ+2σ` was derived from that vault's embedding anisotropy — a value that fits bge-small on that

@@ -41,7 +41,7 @@ package embed
 // μ+1.3σ (0.520) moves the sem-only survival bar to cos ≈ 0.600 (see
 // docs/internals/invariants.md COG-26 for the full derivation), which:
 //   - rescues genuine matches at cosine >= 0.60 (the refute's 0.59 case and
-//     the real-vault "annuity plan design" case at cosine 0.63);
+//     a production-vault genuine match measured at cosine 0.63);
 //   - still abstains every measured noise top observed so far (max measured
 //     432-pair noise cosine ≈ 0.596, "quarterly ballet recital" against an
 //     unrelated corpus) — but with a THIN margin (contentMatch ≈ 0.095 vs
