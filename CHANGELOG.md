@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A restored memory is findable by keyword again. Forgetting a memory drops
+  its keyword-search postings and `muninn_restore` never put them back, so a
+  restored memory could only be found by meaning, never by its words. Restore
+  now rebuilds them from the memory's current text and tags without moving
+  the keyword statistics, and a memory retagged while deleted comes back
+  findable by its new tags. Memories restored before this release need
+  `muninn reindex-fts`.
+- Concurrent writes to one memory no longer undo each other. Enrichment's
+  summary write, the decay worker's relevance update, trust and validity
+  stamps, embedding status, evolve's supersede and dream dedup each rewrote a
+  memory from a copy read without a lock, so a forget landing at the same
+  moment could be reverted (the memory came back active) and other fields
+  could silently roll back. Every such write now holds the memory's lock and
+  writes only its own fields over the stored record.
+- Clearing a vault while it is being written can no longer crash the server
+  ("sync: WaitGroup is reused before previous Wait has returned").
+- Clearing one vault no longer empties every other vault's association
+  caches.
 - Retired versions no longer take recall's candidate slots. An evolved
   memory's old versions keep their vector and keyword postings (so a query in
   the old wording can still reach the current fact), but recall used to count

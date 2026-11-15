@@ -1704,3 +1704,39 @@ leader; the reverse-association fill is guarded.
 - `internal/index/adjacency` writes 0x03/0x04 keys with a raw commit, bypassing
   `commitBatch`; only its own test imports it today.
 
+
+### Storage hardening: record writers lock, restore inverts forget, clears stay scoped (2026-11-15)
+
+Closes four of the known-open items listed by the two entries above.
+
+**Every read-modify-write of an engram record holds its stripe lock (STO-24).** The
+alternative was a per-field merge without a lock (patch only my bytes into whatever is on
+disk). Rejected: a patch is still a read followed by a write, so it needs the same
+serialization to not revert a whole-record writer, and five whole-record writers
+(`SoftDelete`, `UpdateTags`, `UpdateConfidence*`, `UpdateDigest`) already existed. So the
+rule is both: hold the lock, and write only the fields you own over the committed record.
+`StoreBatch.mutateEngram` defers its read to `Commit` and takes every touched stripe in
+ascending order; the alternative (hold the lock from queue to commit) puts arbitrary caller
+code inside a non-reentrant lock. Callers that passed a whole metadata struct read earlier
+were moved to field-scoped writers (`AddAccessCount` for dream dedup) or to the `*Locked`
+variants under `LockEngram` (`Engine.Restore`). Benchmarked uncontended: see the commit.
+
+**Restore is the exact inverse of a soft forget.** A soft forget changes the state and drops
+the keyword postings, nothing else (vector, tag and entity indexes, associations and the
+content hash stay). Restore rebuilds the postings with `ReindexEngram(doc, doc)` — every
+posting, no DF or corpus-count move — which inverts `fts.DeleteEngram` exactly and is a no-op
+for a memory whose postings were never dropped. A retag of a forgotten memory now moves DF
+from the old tags to the new ones before dropping the postings, so forget → retag → restore
+equals a plain retag (score-equality pinned). Forget's two halves and Restore's rebuild run
+under the engram's lock. Memories restored before this change need `muninn reindex-fts`.
+
+**The provenance drain is epoch-based, not a WaitGroup.** A `sync.WaitGroup` cannot be
+`Add`ed while a `Wait` is returning, which a vault clear racing writes does routinely; the
+tracker also makes `Drain` wait only for jobs submitted before it began, so it cannot starve.
+
+**Clearing a vault keeps other vaults' association caches.** `metaCache` is still purged
+whole: it is keyed by engram ID alone, and scoping it is a cache-key change.
+
+**Still open:** provenance submitted after its write's commit can land after a clear's
+tombstones (a write committing just before the clear); metaCache keyed by ID alone also
+means a cloned vault and its source share entries; closed near-duplicate islands in HNSW.
