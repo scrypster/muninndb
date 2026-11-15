@@ -121,25 +121,61 @@ func (ps *PebbleStore) invalidateKey(k []byte) {
 }
 
 // invalidateRange handles a range tombstone. Only vault clears write one over
-// a cache-backing prefix; they are rare, so the response is wholesale: every
-// stripe is bumped and the derived caches are dropped (L1 only for the
-// vault when the range is vault-scoped).
+// a cache-backing prefix; they are rare, so the guard response is wholesale:
+// every stripe is bumped, so no fill in flight anywhere can install. Entries
+// are dropped per vault where the cache key carries the vault — the L1 cache
+// and both association caches, keyed (vault, engram) — when the range is
+// vault-scoped; otherwise everything goes.
+//
+// metaCache is the exception: it is keyed by engram ID alone, so an entry
+// cannot be attributed to a vault (and a cloned vault shares IDs with its
+// source), and scoping it would need a key-shape change. It is purged
+// whole; the cost is one cold metadata read per engram afterwards.
 func (ps *PebbleStore) invalidateRange(start, end []byte) {
 	lo, hi := []byte{prefix.Engram}, []byte{prefix.AssocRev + 1}
 	if bytes.Compare(start, hi) >= 0 || (len(end) > 0 && bytes.Compare(end, lo) <= 0) {
 		return // entirely outside 0x01..0x04
 	}
 	ps.cache.guard.bumpAll()
-	if len(start) >= 9 && start[0] >= prefix.Engram && start[0] <= prefix.AssocRev {
-		var ws [8]byte
-		copy(ws[:], start[1:9])
-		ps.cache.DeleteByVault(ws)
-	} else {
-		ps.cache.InvalidateAll()
-	}
 	ps.metaCache.Purge()
-	ps.assocCache.Purge()
-	ps.revAssocCache.Purge()
+	ws, scoped := vaultOfRange(start, end)
+	if !scoped {
+		ps.cache.InvalidateAll()
+		ps.assocCache.Purge()
+		ps.revAssocCache.Purge()
+		return
+	}
+	ps.cache.DeleteByVault(ws)
+	for _, k := range ps.assocCache.Keys() {
+		if [8]byte(k[:8]) == ws {
+			ps.assocCache.Remove(k)
+		}
+	}
+	for _, k := range ps.revAssocCache.Keys() {
+		if [8]byte(k[:8]) == ws {
+			ps.revAssocCache.Remove(k)
+		}
+	}
+}
+
+// vaultOfRange reports the vault a range tombstone covers when it lies within
+// ONE vault of ONE cache-backing prefix: [p|ws, p|ws+1) or narrower. Anything
+// wider (several vaults, several prefixes, open-ended) is not scoped.
+func vaultOfRange(start, end []byte) ([8]byte, bool) {
+	var ws [8]byte
+	if len(start) < 9 || start[0] < prefix.Engram || start[0] > prefix.AssocRev || len(end) == 0 {
+		return ws, false
+	}
+	copy(ws[:], start[1:9])
+	upper, err := incrementWS(ws)
+	if err != nil {
+		return ws, false
+	}
+	limit := append([]byte{start[0]}, upper[:]...)
+	if bytes.Compare(end, limit) > 0 {
+		return ws, false
+	}
+	return ws, true
 }
 
 // fillMeta installs meta in metaCache under the guard (R3/R4). metaCache has
