@@ -647,6 +647,9 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	// was compromised rather than silently trusting it (principle #2).
 	if resp.SemanticDegraded {
 		result["semantic_degraded"] = true
+		if resp.SemanticDegradedReason != "" {
+			result["semantic_degraded_reason"] = resp.SemanticDegradedReason
+		}
 	}
 	// COG-29 (#764): at least two returned memories are declared to
 	// contradict each other with the conflict unresolved, so neither is

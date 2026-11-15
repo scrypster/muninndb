@@ -16,7 +16,9 @@ type healthSnapshot struct {
 	EmbedState        string // engine.EmbedHealth.State
 	EmbedLastOKAt     time.Time
 	EmbedLastDegraded time.Time
-	Workers           cognitive.EngineWorkerStats
+	// EmbedDegradedReason is engine.EmbedHealth.LastDegradedReason.
+	EmbedDegradedReason string
+	Workers             cognitive.EngineWorkerStats
 	// EmbeddingsPending is the retroactive embed backlog when a backfill is
 	// running; nil when no backfill is running (unknown is not zero).
 	EmbeddingsPending *int64
@@ -38,6 +40,10 @@ type EmbedderStatus struct {
 	State          string `json:"state"`
 	LastOKAt       string `json:"last_ok_at,omitempty"`
 	LastDegradedAt string `json:"last_degraded_at,omitempty"`
+	// LastDegradedReason is why the most recent degraded recall fell back:
+	// embed_timeout | embed_unavailable | embed_zero_vector |
+	// stored_embedding_read (see semantic_degraded_reason on muninn_recall).
+	LastDegradedReason string `json:"last_degraded_reason,omitempty"`
 }
 
 // WorkerHealth is one cognitive worker in muninn_status.
@@ -69,13 +75,14 @@ func deriveHealth(s healthSnapshot) (health string, reasons []string, emb Embedd
 	}
 	if !s.EmbedLastDegraded.IsZero() {
 		emb.LastDegradedAt = s.EmbedLastDegraded.UTC().Format(time.RFC3339)
+		emb.LastDegradedReason = s.EmbedDegradedReason
 	}
 	switch s.EmbedState {
 	case "up", "unknown":
 	case "disabled":
 		reasons = append(reasons, "embedder disabled: no embedding provider is active (not configured, or unreachable at startup) — recall is keyword-only (BM25)")
 	case "degraded_to_keyword":
-		reasons = append(reasons, "embedder degraded: the most recent recall could not embed its query and fell back to keyword-only (BM25) ranking")
+		reasons = append(reasons, embedDegradedReason(s.EmbedDegradedReason))
 	default:
 		reasons = append(reasons, fmt.Sprintf("embedder state %q is not recognised", s.EmbedState))
 	}
@@ -114,4 +121,22 @@ func deriveHealth(s healthSnapshot) (health string, reasons []string, emb Embedd
 		return "good", reasons, emb, workers
 	}
 	return "degraded", reasons, emb, workers
+}
+
+// embedDegradedReason is the health_reasons entry for degraded_to_keyword,
+// naming the cause when the engine recorded one: a busy embedder (the query
+// embed missed its budget) is a capacity condition an operator handles very
+// differently from an unreachable backend.
+func embedDegradedReason(reason string) string {
+	const base = "embedder degraded: the most recent recall could not embed its query and fell back to keyword-only (BM25) ranking"
+	switch reason {
+	case "embed_timeout":
+		return base + " — the query embed missed its time budget (the embedder was busy, e.g. embedding a backfill, or slow); the backend is up (reason: embed_timeout)"
+	case "embed_unavailable":
+		return base + " — the embed call failed (reason: embed_unavailable)"
+	case "":
+		return base
+	default:
+		return base + " (reason: " + reason + ")"
+	}
 }

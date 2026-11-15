@@ -477,11 +477,12 @@ func (a *mcpEngineAdapter) CountChildren(ctx context.Context, vault, engramID st
 func (a *mcpEngineAdapter) HealthSnapshot(_ context.Context) healthSnapshot {
 	eh := a.eng.EmbedHealth()
 	snap := healthSnapshot{
-		EmbedState:        eh.State,
-		EmbedLastOKAt:     eh.LastOKAt,
-		EmbedLastDegraded: eh.LastDegradedAt,
-		Workers:           a.eng.WorkerStats(),
-		Now:               time.Now(),
+		EmbedState:          eh.State,
+		EmbedLastOKAt:       eh.LastOKAt,
+		EmbedLastDegraded:   eh.LastDegradedAt,
+		EmbedDegradedReason: eh.LastDegradedReason,
+		Workers:             a.eng.WorkerStats(),
+		Now:                 time.Now(),
 	}
 	if es := a.eng.EmbedStats(); es.Status == "running" && es.Total > 0 {
 		pending := es.Total - es.Processed

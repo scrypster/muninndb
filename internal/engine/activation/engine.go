@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/scrypster/muninndb/internal/embedlane"
 	hnswpkg "github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
@@ -405,6 +406,23 @@ type ActivateRequest struct {
 	EmbedBudgetFraction float64
 }
 
+// Semantic-degradation reasons (ActivateResult.SemanticDegradedReason).
+const (
+	// DegradedEmbedTimeout: the query embed did not arrive within the embed
+	// budget — the embedder's lane was busy (e.g. a backfill batch) or the
+	// embedder was slow. A capacity condition, not a broken backend.
+	DegradedEmbedTimeout = "embed_timeout"
+	// DegradedEmbedUnavailable: the embed call failed outright (backend
+	// unreachable, provider error).
+	DegradedEmbedUnavailable = "embed_unavailable"
+	// DegradedEmbedZeroVector: the embed call succeeded but returned an
+	// empty/all-zero vector for a non-trivial query.
+	DegradedEmbedZeroVector = "embed_zero_vector"
+	// DegradedStoredEmbeddingRead: phase6's post-load read of stored
+	// embeddings failed, so some candidates scored with vectorScore=0.
+	DegradedStoredEmbeddingRead = "stored_embedding_read"
+)
+
 // defaultEmbedBudgetFraction is the fraction of a caller's REMAINING context
 // deadline that phase1 reserves for the embed call, leaving the rest for
 // phase2's BM25/FTS retrieval and phase6 scoring to complete the graceful
@@ -446,6 +464,10 @@ type ActivateResult struct {
 	// Hebbian survive), but callers should surface this to the user/agent
 	// rather than silently trusting a zeroed vectorScore (principle #2).
 	SemanticDegraded bool
+	// SemanticDegradedReason names which semantic failure set SemanticDegraded
+	// (the first one this activation hit): one of the Degraded* constants.
+	// Empty iff SemanticDegraded is false.
+	SemanticDegradedReason string
 
 	// Abstained is true when the pipeline ran to completion and deliberately
 	// returned nothing: candidates were retrieved and scored, and none cleared
@@ -918,6 +940,8 @@ type phase1Result struct {
 	// ActivateResult.SemanticDegraded so callers get a loud signal instead of a
 	// silently-zeroed vectorScore (principle #2, "degrade loudly-but-gracefully").
 	semanticDegraded bool
+	// semanticDegradedReason is the Degraded* constant for semanticDegraded.
+	semanticDegradedReason string
 }
 
 // isZeroVector reports whether vec is empty or every component is exactly
@@ -985,15 +1009,28 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 	if e.embedder != nil && e.hnsw != nil {
 		embedCtx, cancelEmbed := embedBudgetContext(ctx, req.EmbedBudgetFraction)
 		defer cancelEmbed()
-		vec, err := e.embedder.Embed(embedCtx, req.Context)
+		// Mark this — and only this — embed as a recall query, so an embedder
+		// with scheduling lanes (the bundled local one) serves it ahead of
+		// background batch embeds instead of queueing it behind them. The
+		// mark rides on embedCtx alone; nothing else in recall inherits it.
+		vec, err := e.embedder.Embed(embedlane.WithQuery(embedCtx), req.Context)
 		if err != nil {
-			// Embedding backend unreachable (e.g. connection refused on the
-			// embedding endpoint). Degrade to BM25+decay recall instead of
-			// aborting: FTS still returns useful results, and phase2 already
-			// takes the FTS-only path when len(embedding)==0.
-			slog.Warn("activation: embed backend unreachable, degrading to BM25-only recall",
-				"vault", req.VaultID, "error", err)
+			// Degrade to BM25+decay recall instead of aborting: FTS still
+			// returns useful results, and phase2 already takes the FTS-only
+			// path when len(embedding)==0. The embed budget exists precisely
+			// so this fallback still has time to run (#658).
 			result.semanticDegraded = true
+			if errors.Is(err, context.DeadlineExceeded) {
+				// The budget ran out first: the embedder's lane was busy or it
+				// was slow. Distinct from "unreachable" — the backend is up.
+				result.semanticDegradedReason = DegradedEmbedTimeout
+				slog.Warn("activation: query embed exceeded its budget (embedder busy or slow), degrading to BM25-only recall",
+					"vault", req.VaultID, "error", err)
+			} else {
+				result.semanticDegradedReason = DegradedEmbedUnavailable
+				slog.Warn("activation: embed backend unreachable, degrading to BM25-only recall",
+					"vault", req.VaultID, "error", err)
+			}
 			return result, nil
 		}
 		// Embed returns a flat len(texts)*dim slice — each phrase's vector
@@ -1017,6 +1054,7 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 			slog.Warn("activation: embed backend returned empty/zero vector for non-trivial query, degrading to BM25-only recall",
 				"vault", req.VaultID, "query_len", len(result.queryStr))
 			result.semanticDegraded = true
+			result.semanticDegradedReason = DegradedEmbedZeroVector
 		}
 	}
 	return result, nil
@@ -1889,6 +1927,7 @@ func (e *ActivationEngine) phase6Score(
 	// whatever phase1 already found (embed backend unreachable / zero
 	// vector) so the final ActivateResult carries one loud, honest signal.
 	semanticDegraded := p1.semanticDegraded
+	semanticDegradedReason := p1.semanticDegradedReason
 
 	// Guard: RRF and CGDN are mutually exclusive scoring paths.
 	// If both are enabled, RRF takes precedence (checked first below).
@@ -2171,6 +2210,9 @@ func (e *ActivationEngine) phase6Score(
 				slog.Warn("activation: phase6 post-load cosine fallback failed, candidates degraded to vectorScore=0",
 					"vault", req.VaultID, "candidates", len(fallbackIDs), "error", err)
 				semanticDegraded = true
+				if semanticDegradedReason == "" {
+					semanticDegradedReason = DegradedStoredEmbeddingRead
+				}
 			}
 		}
 		for i := range all {
@@ -2720,14 +2762,15 @@ cgdnDone:
 	}
 
 	return &ActivateResult{
-		QueryID:          newQueryID(),
-		Activations:      activations,
-		TotalFound:       totalFound,
-		SemanticDegraded: semanticDegraded,
-		Abstained:        abstained,
-		AbstainedReason:  abstainReason,
-		ShadowMatches:    shadowMatches,
-		Calibration:      relevanceCalibration(w),
+		QueryID:                newQueryID(),
+		Activations:            activations,
+		TotalFound:             totalFound,
+		SemanticDegraded:       semanticDegraded,
+		SemanticDegradedReason: semanticDegradedReason,
+		Abstained:              abstained,
+		AbstainedReason:        abstainReason,
+		ShadowMatches:          shadowMatches,
+		Calibration:            relevanceCalibration(w),
 	}, nil
 }
 
