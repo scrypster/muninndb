@@ -820,7 +820,10 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 
 	// A private, committed copy: GetEngramUncached decodes straight from
 	// Pebble and shares nothing with the L1 cache (STO-20), so no Clone.
-	eng, err := ps.GetEngramUncached(ctx, ws, id)
+	// WithoutCancel: GetEngramUncached checks ctx and the GetEngram it
+	// replaced did not — a digest computed before the caller's ctx was
+	// cancelled is still written (TestReplayEnrichment_ContextCancellation).
+	eng, err := ps.GetEngramUncached(context.WithoutCancel(ctx), ws, id)
 	if err != nil {
 		return fmt.Errorf("UpdateDigest: get engram: %w", err)
 	}

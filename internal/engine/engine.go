@@ -3991,7 +3991,8 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 func (e *Engine) softForget(ctx context.Context, wsPrefix [8]byte, id storage.ULID) error {
 	unlock := e.store.LockEngram(id)
 	defer unlock()
-	eng, readErr := e.store.GetEngramUncached(ctx, wsPrefix, id)
+	// WithoutCancel: the GetEngram this replaced ignored ctx; so does this.
+	eng, readErr := e.store.GetEngramUncached(context.WithoutCancel(ctx), wsPrefix, id)
 	if err := e.store.SoftDeleteLocked(ctx, wsPrefix, id); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return ErrEngramNotFound
@@ -4246,7 +4247,8 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 
 	// A private decode of the committed record (never the L1 cache's shared
 	// struct, #858/STO-20), so the response-shaping writes below are safe.
-	eng, err := e.store.GetEngramUncached(ctx, ws, ulid)
+	// WithoutCancel: the GetEngram this replaced ignored ctx; so does this.
+	eng, err := e.store.GetEngramUncached(context.WithoutCancel(ctx), ws, ulid)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, ErrEngramNotFound
