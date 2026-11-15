@@ -2894,9 +2894,8 @@ func (e *Engine) ActivateWithStructuredFilter(ctx context.Context, req *mbp.Acti
 // structuredFilter may be nil (plain Activate) or a typed predicate (structured query).
 func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, structuredFilter activation.EngramFilter) (*mbp.ActivateResponse, error) {
 	// Pin a Pebble snapshot so all read phases see a consistent point-in-time view.
-	snap := e.store.NewSnapshot()
+	ctx, snap := e.store.NewSnapshotContext(ctx)
 	defer snap.Close()
-	ctx = storage.ContextWithSnapshot(ctx, snap)
 	activateStart := time.Now()
 
 	// Resolve per-vault Plasticity config. nil authStore means use defaults (tests, bench).

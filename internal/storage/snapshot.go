@@ -30,3 +30,12 @@ func (ps *PebbleStore) pebbleReader(ctx context.Context) pebble.Reader {
 func (ps *PebbleStore) NewSnapshot() *pebble.Snapshot {
 	return ps.db.NewSnapshot()
 }
+
+// NewSnapshotContext pins a Pebble snapshot and returns a ctx carrying it,
+// plus the snapshot itself (the caller must Close it). This is the read
+// pipeline's entry point for point-in-time reads; prefer it over the
+// NewSnapshot + ContextWithSnapshot pair.
+func (ps *PebbleStore) NewSnapshotContext(ctx context.Context) (context.Context, *pebble.Snapshot) {
+	snap := ps.db.NewSnapshot()
+	return ContextWithSnapshot(ctx, snap), snap
+}

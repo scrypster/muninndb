@@ -51,6 +51,7 @@ func (ps *PebbleStore) GetEngram(ctx context.Context, wsPrefix [8]byte, id ULID)
 	// Cache it (vault-scoped). A suppressed ctx caches the value (so a
 	// same-call re-read is still served without a Pebble round-trip) but
 	// does not stamp recency — see cache.go's SetNoStamp doc.
+	testFillPoint(wsPrefix, id)
 	if noStamp {
 		ps.cache.SetNoStamp(wsPrefix, id, eng)
 	} else {
@@ -165,6 +166,7 @@ func (ps *PebbleStore) GetEngrams(ctx context.Context, wsPrefix [8]byte, ids []U
 			continue
 		}
 		eng := fromERFEngram(erfEng)
+		testFillPoint(wsPrefix, u.id)
 		if noStamp {
 			ps.cache.SetNoStamp(wsPrefix, u.id, eng)
 		} else {
@@ -256,6 +258,7 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 			Importance:  erfMeta.Importance,
 		}
 		// Populate metaCache so subsequent calls for this engram skip Pebble.
+		testFillPoint(wsPrefix, id)
 		ps.metaCache.Add([16]byte(id), meta)
 		result[i] = meta
 	}
