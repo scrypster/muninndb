@@ -577,7 +577,7 @@ For quick reference, these are the MCP tools available to AI agents:
 9. `muninn_guide` — get vault-aware usage instructions (call on first connect)
 10. `muninn_evolve` — update a memory (archive old version)
 11. `muninn_consolidate` — merge N memories into 1
-12. `muninn_session` — recent activity summary
+12. `muninn_session` — recent activity since a timestamp: live writes newest first (paged via `limit`/`offset`, with `total`, `returned`, `truncated`; forgotten/superseded memories excluded) and `activations`, the count of recalls with at least one result in the window (recall records are kept 90 days)
 13. `muninn_decide` — record a decision with rationale
 14. `muninn_restore` — recover a soft-deleted memory
 15. `muninn_traverse` — BFS graph exploration

@@ -66,7 +66,7 @@ func (f *fakeEngine) Evolve(ctx context.Context, vault, oldID, newContent, reaso
 func (f *fakeEngine) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
 	return &ConsolidateResult{ID: "merged-id"}, nil
 }
-func (f *fakeEngine) Session(ctx context.Context, vault string, since time.Time) (*SessionSummary, error) {
+func (f *fakeEngine) Session(ctx context.Context, vault string, since time.Time, offset, limit int) (*SessionSummary, error) {
 	return &SessionSummary{}, nil
 }
 func (f *fakeEngine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error) {

@@ -4652,9 +4652,16 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 	return &ConsolidateResult{MergedID: mergedULID, Archived: archived, Warnings: warnings}, nil
 }
 
-// Session returns all engrams written to the vault after the given time.
+// SessionDefaultLimit / SessionMaxLimit bound one page of the session timeline.
+const (
+	SessionDefaultLimit = 100
+	SessionMaxLimit     = 500
+)
+
+// Session returns the newest page (SessionDefaultLimit) of live engrams
+// written to the vault since the given time. See SessionPaged.
 func (e *Engine) Session(ctx context.Context, vault string, since time.Time) (*SessionResult, error) {
-	res, err := e.SessionPaged(ctx, vault, since, 0, 500)
+	res, err := e.SessionPaged(ctx, vault, since, 0, SessionDefaultLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -4664,19 +4671,44 @@ func (e *Engine) Session(ctx context.Context, vault string, since time.Time) (*S
 // SessionPagedResult extends SessionResult with total count for pagination.
 type SessionPagedResult struct {
 	SessionResult
+	// Total is the number of live (not soft-deleted) engrams created since
+	// Since — the whole window, not just this page.
 	Total int
+	// Activations is the number of recall events recorded since Since: recalls
+	// that were not read-only and returned at least one result. Events are
+	// retained for 90 days, so a window reaching further back undercounts.
+	Activations int
 }
 
-// SessionPaged returns engrams created since the given time with offset/limit pagination.
+// SessionPaged returns live engrams created since the given time, NEWEST
+// first, paged by offset/limit over that order, with the exact window total
+// and the count of recalls-with-results in the same window. Soft-deleted
+// engrams (forgotten, or superseded by an evolve) are excluded: they are not
+// live activity, and listing them as writes reported deleted memories as
+// present. limit is clamped to SessionMaxLimit.
 func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time, offset, limit int) (*SessionPagedResult, error) {
+	if limit <= 0 {
+		limit = SessionDefaultLimit
+	}
+	if limit > SessionMaxLimit {
+		limit = SessionMaxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
-	// Fetch one extra to know if there are more pages.
-	engrams, err := e.store.EngramsByCreatedSince(ctx, ws, since, offset, limit)
+	engrams, total, err := e.store.LiveEngramsCreatedSinceNewestFirst(ctx, ws, since, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	activations, err := e.store.CountRecallEventsSince(ctx, ws, since)
 	if err != nil {
 		return nil, err
 	}
 	result := &SessionPagedResult{
 		SessionResult: SessionResult{Since: since},
+		Total:         total,
+		Activations:   activations,
 	}
 	for _, eng := range engrams {
 		if eng != nil {
@@ -4687,7 +4719,6 @@ func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time
 			})
 		}
 	}
-	result.Total = len(result.Writes) + offset
 	return result, nil
 }
 

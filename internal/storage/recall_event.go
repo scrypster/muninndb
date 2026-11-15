@@ -219,6 +219,39 @@ func (ps *PebbleStore) ScanRecallEvents(ctx context.Context, wsPrefix [8]byte, p
 	return nil
 }
 
+// CountRecallEventsSince counts the vault's recall events at or after since.
+// A recall event exists only for a non-read-only recall that returned at least
+// one result, and events are pruned after recallEventRetentionDays — so this is
+// "recalls with results", bounded by retention, and never "all recalls".
+//
+// It is deliberately NOT purpose-gated: it iterates keys only (the event time
+// is the ULID in the key, as in PruneRecallEvents) and never reads or decodes
+// an event value, so no query context or surfaced id leaves storage. The gate
+// protects the content of the instrument data; a count of keys carries none.
+func (ps *PebbleStore) CountRecallEventsSince(ctx context.Context, wsPrefix [8]byte, since time.Time) (int, error) {
+	var bound [16]byte
+	binary.BigEndian.PutUint64(bound[:8], ulid.Timestamp(since)<<16)
+	lower := keys.RecallEventKey(wsPrefix, bound)
+	iter, err := ps.db.NewIter(&pebble.IterOptions{
+		LowerBound: lower,
+		UpperBound: prefixUpperBound(keys.RecallEventPrefix(wsPrefix)),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("count recall events: iter: %w", err)
+	}
+	defer iter.Close()
+	n := 0
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if len(iter.Key()) == 25 {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // PruneRecallEvents deletes all recall events in a vault whose event time is
 // before the cutoff, using the ULID timestamp embedded in the key — no value
 // reads needed. Returns the number of events deleted.

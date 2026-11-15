@@ -1084,7 +1084,22 @@ func (s *MCPServer) handleSession(ctx context.Context, w http.ResponseWriter, id
 		sendError(w, id, -32602, "invalid params: 'since' must be ISO 8601 (e.g. 2024-01-01T00:00:00Z)")
 		return
 	}
-	result, err := s.engine.Session(ctx, vault, since)
+	offset, limit := 0, 0
+	if v, ok := args["offset"].(float64); ok {
+		if v < 0 {
+			sendError(w, id, -32602, "invalid params: 'offset' must be >= 0")
+			return
+		}
+		offset = int(v)
+	}
+	if v, ok := args["limit"].(float64); ok {
+		if v < 1 {
+			sendError(w, id, -32602, "invalid params: 'limit' must be >= 1")
+			return
+		}
+		limit = int(v)
+	}
+	result, err := s.engine.Session(ctx, vault, since, offset, limit)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return

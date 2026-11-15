@@ -71,7 +71,7 @@ Concrete signals that speak to production readiness:
 ### Observability
 
 - [Full provenance trail](feature-reference.md) — every write records its origin (tool, caller, session) in `internal/provenance/`; queryable via `muninn_provenance`.
-- [Episodic sessions](feature-reference.md) — `muninn_session` groups recall and write events into named episodes for replay and audit.
+- [Session activity](feature-reference.md) — `muninn_session` lists live memories written since a timestamp (newest first, paged, with `total`/`truncated`) and counts the recalls that returned results in the same window.
 - [Feedback loop](feature-reference.md) — explicit user feedback (confirmed / rejected) drives Bayesian confidence updates and SGD weight adjustment.
 
 ### Deployment

@@ -352,10 +352,23 @@ type SessionEntry struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// SessionSummary is the muninn_session response. Writes are live memories
+// (soft-deleted ones excluded) created since Since, NEWEST first, one page of
+// them: Total counts the whole window, Returned this page, and Truncated is
+// true whenever Offset+Returned < Total — so a partial list never reads as the
+// complete answer.
 type SessionSummary struct {
-	Writes      []SessionEntry `json:"writes"`
-	Activations int            `json:"activations"`
-	Since       time.Time      `json:"since"`
+	Writes []SessionEntry `json:"writes"`
+	// Activations counts recalls since Since that returned at least one result
+	// (read-only recalls and empty recalls leave no record; records are kept 90
+	// days). It is a measured count, not every recall call.
+	Activations int       `json:"activations"`
+	Since       time.Time `json:"since"`
+	Total       int       `json:"total"`
+	Returned    int       `json:"returned"`
+	Truncated   bool      `json:"truncated"`
+	Offset      int       `json:"offset"`
+	Limit       int       `json:"limit"`
 }
 
 type ConsolidateResult struct {
