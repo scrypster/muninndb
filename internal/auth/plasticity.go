@@ -715,13 +715,13 @@ func validInlineEnrichment(s string) bool {
 	return validInlineEnrichments[s]
 }
 
-// ValidRecallMode returns true if s is a known recall mode name.
+// ValidRecallMode returns true if s is a known recall mode name. Derived from
+// the preset map itself: a hand-written list let a preset added only to the
+// map validate false here, so a vault configured for it silently resolved to
+// balanced (pinned by TestValidRecallMode_MatchesPresetMap).
 func ValidRecallMode(s string) bool {
-	switch s {
-	case "semantic", "recent", "balanced", "deep":
-		return true
-	}
-	return false
+	_, ok := recallModePresets[s]
+	return ok
 }
 
 // ValidPlasticityPreset returns true if s is a known preset name.

@@ -15,7 +15,7 @@ const mcpSessionHeader = "Mcp-Session-Id"
 // how to use MuninnDB. Kept concise — call muninn_guide for the full guide.
 const mcpInstructions = `MuninnDB is a long-term memory server for AI agents. ` +
 	`At session start recall recent context — muninn_where_left_off in a single-user vault; ` +
-	`in a shared vault it is vault-global, so use muninn_recall scoped to your per-user tag instead ` +
+	`in a shared vault it is vault-global, so use muninn_recall with tags_any set to your per-user tag instead ` +
 	`(muninn_guide states whether this vault is shared, under Vault Configuration). ` +
 	`Store with muninn_remember (include type, summary, entities). ` +
 	`You are this memory's curator, not a static store: the moment you write is the moment you know something, so it is the moment to reconcile. ` +

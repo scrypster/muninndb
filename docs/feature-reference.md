@@ -123,7 +123,7 @@ The ACTIVATE pipeline has **6 phases**:
 
 #### Recall Modes (MCP shortcuts)
 - `semantic` — high-precision vector search (threshold=0.3)
-- `recent` — recency-biased, 1 hop (threshold=0.2; hop count has no effect today, #801)
+- `recent` — alias of `balanced`: engine-default scoring and threshold. Like any mode passed on a request, it replaces (ignores) the vault's default recall mode. It declares session-orientation intent only (on MCP it attaches the unresolved-contradiction readout); it does not list recent memories or favour recency beyond the default ranking. For topic-free orientation use `muninn_where_left_off` (single-user) or `tags_any` with your per-user tag (shared vault)
 - `balanced` — engine defaults
 - `deep` — lowest threshold (0.1), 4 hops (hop count has no effect today, #801)
 

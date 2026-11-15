@@ -660,13 +660,43 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	}
 	if len(memories) == 0 {
 		// The hint names the threshold because it is the lever that actually
-		// changes the outcome — evaluators called the old advice wrong for
-		// suggesting mode='recent' while omitting it.
-		hint := "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent', or use muninn_where_left_off."
+		// changes the outcome. It never suggests mode='recent': recent is an
+		// alias of balanced (COG-6), so it cannot rescue an empty result —
+		// and telling a mode='recent' caller to "try mode='recent'" was
+		// circular. Continuity routes to the tools that can provide it — and
+		// never to a tag filter the caller ALREADY applied: an explicit tag
+		// filter defines the candidate set and floors its rows at the default
+		// bar (COG-5 S1), so an empty tag-filtered recall most likely means
+		// nothing carrying that tag exists yet (a new user's first session).
+		const hintBase = "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording."
+		const recentNote = " mode='recent' scores exactly like mode='balanced' (engine defaults) — it cannot rescue an empty result."
+		tagFiltered := false
+		for _, f := range req.Filters {
+			if f.Field == "tags_any" || f.Field == "tags_all" || f.Field == "tag_prefix" {
+				tagFiltered = true
+			}
+		}
+		continuity := " For session continuity use muninn_where_left_off."
 		p, pErr := s.engine.GetVaultPlasticity(ctx, vault)
 		if pErr == nil && p != nil && p.MultiUser {
-			hint = "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global)."
+			continuity = " For session continuity recall with tags_any=[\"<your per-user tag>\"] (this vault is shared; muninn_where_left_off is vault-global)."
 		}
+		if tagFiltered {
+			// Single-user vaults keep the where_left_off route (it is not the
+			// filter the caller used); shared vaults get no route, because the
+			// only scoped one is the call that just came back empty.
+			note := " Your tag filter already scopes this recall and returns tag matches even without a content match at the default bar, so most likely nothing carrying that tag has been stored yet (expected on a first session in this vault)."
+			if pErr == nil && p != nil && p.MultiUser {
+				continuity = note
+			} else {
+				continuity = note + continuity
+			}
+		}
+		hint := hintBase
+		if mode == "recent" {
+			hint += recentNote
+		}
+		hint += continuity
 		// COG-6: never clobber an explicit threshold — only hint. An rrf vault's
 		// blended finals rarely exceed ~0.15, so a caller-supplied threshold at
 		// or above 0.01 can silently filter every result. Only fires when the
