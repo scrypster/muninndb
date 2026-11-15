@@ -152,7 +152,9 @@ func TestLabels_ScansAndCountIgnoreChildRows(t *testing.T) {
 	ctx := context.Background()
 	ws := store.ResolveVaultPrefix("label-scan-children")
 
-	e1, e2 := NewULID(), NewULID()
+	// Distinct timestamps: two NewULID() calls in one millisecond draw fresh
+	// entropy and need not sort in call order.
+	e1, e2 := NewULIDWithTime(time.Now().Add(-2*time.Second)), NewULIDWithTime(time.Now().Add(-time.Second))
 	m1, m2 := NewULID(), NewULID()
 	writeTestEvent(t, store, ws, e1, m1, m2)
 	writeTestEvent(t, store, ws, e2, m1)
@@ -220,8 +222,14 @@ func TestLabels_PruneKeepsLabelledEventsTo180Days(t *testing.T) {
 
 	unl91, lab91, lab181, ro91, fresh := day(91), day(91), day(181), day(91), day(1)
 	mem := NewULID()
+	// Raw writes, not WriteRecallEvent: its amortized prune (every 256th
+	// write, process-wide) would otherwise run the real 90/180-day rule in the
+	// middle of this setup when other tests have advanced the counter — and
+	// prune lab91 before its label exists.
 	for _, id := range []ULID{unl91, lab91, lab181, fresh} {
-		writeTestEvent(t, store, ws, id, mem)
+		val, err := msgpack.Marshal(&RecallEvent{SurfacedAt: 1, Entries: []RecallSurfacedEntry{{ID: mem.String(), Score: 0.5}}})
+		require.NoError(t, err)
+		require.NoError(t, store.db.Set(keys.RecallEventKey(ws, id), val, pebble.NoSync))
 	}
 	upsertTestLabel(t, store, ws, lab91, mem, testLC, nil)
 	upsertTestLabel(t, store, ws, lab181, mem, testLC, nil)

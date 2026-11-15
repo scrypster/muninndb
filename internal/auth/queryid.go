@@ -12,11 +12,26 @@ import (
 // Query ids for the label pipeline (slice 2a).
 //
 // A normal (non-read-only) recall's query id is the ULID of its persisted
-// 0x29 event. A read-only recall writes nothing, so its id must verify itself:
+// 0x29 event. A read-only recall writes nothing, so its id must verify itself
+// — including WHICH memories it returned:
 //
-//	ro1.<ULID 26>.<rc 16 hex>.<rs 16 hex>.<mac 22 base64url>
-//	mac = HMAC-SHA256(k_q, "ro1" 0x00 vault 0x00 ULID(16) rc(8) rs(8))[:16]
-//	k_q = HMAC-SHA256(auth_secret, "muninn/query-id/v1")
+//	ro1.<ULID 26>.<rc 16 hex>.<rs 16 hex>.<tags base64url>.<mac 22 base64url>
+//	tag_i = HMAC-SHA256(k_q, "row" 0x00 vault 0x00 ULID(16) engramID_i(16))[:4]
+//	tags  = tag_1 ‖ … ‖ tag_k        (served order, 4 bytes per returned row)
+//	mac   = HMAC-SHA256(k_q, "ro1" 0x00 vault 0x00 ULID(16) rc(8) rs(8) tags)[:16]
+//	k_q   = HMAC-SHA256(auth_secret, "muninn/query-id/v1")
+//
+// The row tags make a read-only label's membership AND rank checkable
+// statelessly: a label is accepted only for a memory whose tag is in the id,
+// and its rank is the tag's position. Without them a caller could mint
+// unlimited read-only ids (they are cheap and write nothing) and use each to
+// label ANY memory (security review of slice 2a; this is the spec's deferred
+// D3, pulled forward). A 4-byte keyed tag cannot be searched offline (k_q is
+// secret); an online forgery matches one of k rows with probability k/2^32
+// per minted id, and its only effect is a label row — access bumps are
+// capped per (credential, memory, UTC day) on every path. Exact verification
+// would need the full 16-byte ids (22 chars per row); 4 bytes keeps the id at
+// ~142 chars for 10 rows and ~355 for 50.
 //
 // k_q is derived from the PERSISTED auth_secret (Bootstrap reads it at every
 // boot), so an id minted before a restart verifies after it. The derivation
@@ -35,8 +50,10 @@ const (
 	ulidLen         = 26
 	roHashHexLen    = 16
 	roMACLen        = 22 // base64url, no padding, of 16 bytes
-	// ROQueryIDLenV1 is the exact length of an ro1. id.
-	ROQueryIDLenV1 = len(roPrefixV1) + ulidLen + 1 + roHashHexLen + 1 + roHashHexLen + 1 + roMACLen
+	// ROTagLen is the per-row tag length in bytes.
+	ROTagLen = 4
+	// roMaxRows bounds the tag field (recall limit is 100).
+	roMaxRows = 100
 )
 
 // QueryIDKey is k_q. The zero value / nil means "no key wired" (an embedded
@@ -86,7 +103,7 @@ func (q *QueryIDKey) SessionHash(session string) [8]byte {
 	return q.sum8("sess", session)
 }
 
-func (q *QueryIDKey) mac(vault string, id [16]byte, rc, rs [8]byte) []byte {
+func (q *QueryIDKey) mac(vault string, id [16]byte, rc, rs [8]byte, tags []byte) []byte {
 	m := hmac.New(sha256.New, q.k)
 	m.Write([]byte("ro1"))
 	m.Write([]byte{0})
@@ -95,17 +112,38 @@ func (q *QueryIDKey) mac(vault string, id [16]byte, rc, rs [8]byte) []byte {
 	m.Write(id[:])
 	m.Write(rc[:])
 	m.Write(rs[:])
+	m.Write(tags)
 	return m.Sum(nil)[:16]
 }
 
-// MintReadOnlyQueryID mints a read-only query id. idStr is the 26-char ULID
-// string of id. With no key it returns ro0.<ULID>.
-func (q *QueryIDKey) MintReadOnlyQueryID(vault string, id [16]byte, idStr string, rc, rs [8]byte) string {
+func (q *QueryIDKey) rowTag(vault string, id, engramID [16]byte) []byte {
+	m := hmac.New(sha256.New, q.k)
+	m.Write([]byte("row"))
+	m.Write([]byte{0})
+	m.Write([]byte(vault))
+	m.Write([]byte{0})
+	m.Write(id[:])
+	m.Write(engramID[:])
+	return m.Sum(nil)[:ROTagLen]
+}
+
+// MintReadOnlyQueryID mints a read-only query id for the rows the recall
+// returned, in served order. idStr is the 26-char ULID string of id. With no
+// key it returns ro0.<ULID>.
+func (q *QueryIDKey) MintReadOnlyQueryID(vault string, id [16]byte, idStr string, rc, rs [8]byte, rows [][16]byte) string {
 	if q == nil {
 		return roPrefixNoKey + idStr
 	}
+	if len(rows) > roMaxRows {
+		rows = rows[:roMaxRows]
+	}
+	tags := make([]byte, 0, len(rows)*ROTagLen)
+	for _, r := range rows {
+		tags = append(tags, q.rowTag(vault, id, r)...)
+	}
 	return roPrefixV1 + idStr + "." + hex.EncodeToString(rc[:]) + "." + hex.EncodeToString(rs[:]) + "." +
-		base64.RawURLEncoding.EncodeToString(q.mac(vault, id, rc, rs))
+		base64.RawURLEncoding.EncodeToString(tags) + "." +
+		base64.RawURLEncoding.EncodeToString(q.mac(vault, id, rc, rs, tags))
 }
 
 // QueryIDKind classifies a query id by SHAPE only. Shape checks leak nothing:
@@ -126,8 +164,13 @@ type ParsedReadOnlyID struct {
 	ULID string
 	RC   [8]byte
 	RS   [8]byte
+	tags []byte
 	mac  []byte
 }
+
+// Rows is the number of returned rows the id carries tags for (the result
+// set size).
+func (p ParsedReadOnlyID) Rows() int { return len(p.tags) / ROTagLen }
 
 // ClassifyQueryID decides the id's kind by shape. For QueryIDReadOnly the
 // parsed body is returned (unverified).
@@ -137,23 +180,24 @@ func ClassifyQueryID(s string) (QueryIDKind, ParsedReadOnlyID) {
 		return QueryIDEvent, ParsedReadOnlyID{ULID: s}
 	case strings.HasPrefix(s, roPrefixNoKey) && len(s) == len(roPrefixNoKey)+ulidLen && isCrockford(s[len(roPrefixNoKey):]):
 		return QueryIDNoKey, ParsedReadOnlyID{ULID: s[len(roPrefixNoKey):]}
-	case strings.HasPrefix(s, roPrefixV1) && len(s) == ROQueryIDLenV1:
+	case strings.HasPrefix(s, roPrefixV1) && len(s) <= len(roPrefixV1)+ulidLen+2*(1+roHashHexLen)+1+base64.RawURLEncoding.EncodedLen(roMaxRows*ROTagLen)+1+roMACLen:
 		parts := strings.Split(s[len(roPrefixV1):], ".")
-		if len(parts) != 4 || len(parts[0]) != ulidLen || !isCrockford(parts[0]) ||
-			len(parts[1]) != roHashHexLen || len(parts[2]) != roHashHexLen || len(parts[3]) != roMACLen {
+		if len(parts) != 5 || len(parts[0]) != ulidLen || !isCrockford(parts[0]) ||
+			len(parts[1]) != roHashHexLen || len(parts[2]) != roHashHexLen || len(parts[4]) != roMACLen {
 			return QueryIDInvalid, ParsedReadOnlyID{}
 		}
 		var p ParsedReadOnlyID
 		p.ULID = parts[0]
 		rc, err1 := hex.DecodeString(parts[1])
 		rs, err2 := hex.DecodeString(parts[2])
-		mac, err3 := base64.RawURLEncoding.DecodeString(parts[3])
-		if err1 != nil || err2 != nil || err3 != nil || len(mac) != 16 {
+		tags, err3 := base64.RawURLEncoding.DecodeString(parts[3])
+		mac, err4 := base64.RawURLEncoding.DecodeString(parts[4])
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || len(mac) != 16 || len(tags)%ROTagLen != 0 {
 			return QueryIDInvalid, ParsedReadOnlyID{}
 		}
 		copy(p.RC[:], rc)
 		copy(p.RS[:], rs)
-		p.mac = mac
+		p.tags, p.mac = tags, mac
 		return QueryIDReadOnly, p
 	}
 	return QueryIDInvalid, ParsedReadOnlyID{}
@@ -165,7 +209,23 @@ func (q *QueryIDKey) VerifyReadOnly(vault string, id [16]byte, p ParsedReadOnlyI
 	if q == nil || len(p.mac) != 16 {
 		return false
 	}
-	return hmac.Equal(q.mac(vault, id, p.RC, p.RS), p.mac)
+	return hmac.Equal(q.mac(vault, id, p.RC, p.RS, p.tags), p.mac)
+}
+
+// ReadOnlyRank returns the 1-based served rank of engramID in a VERIFIED
+// read-only id, or ok=false when the id carries no tag for it (the memory was
+// not in that recall's result set).
+func (q *QueryIDKey) ReadOnlyRank(vault string, id [16]byte, p ParsedReadOnlyID, engramID [16]byte) (rank int, ok bool) {
+	if q == nil {
+		return 0, false
+	}
+	want := q.rowTag(vault, id, engramID)
+	for i := 0; i+ROTagLen <= len(p.tags); i += ROTagLen {
+		if hmac.Equal(p.tags[i:i+ROTagLen], want) {
+			return i/ROTagLen + 1, true
+		}
+	}
+	return 0, false
 }
 
 // isCrockford reports whether s uses only the Crockford base32 alphabet the

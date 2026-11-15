@@ -127,14 +127,14 @@ var (
 	// existing row, never stored as a new one).
 	FeedbackLabelsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "muninndb_feedback_labels_total",
-		Help: "Accepted muninn_feedback labels, by membership (verified|unverified), polarity (pos|neg), channel (direct|handoff) and first (true|false).",
+		Help: "Accepted muninn_feedback labels, by membership (verified = against the recall event | token = against a read-only id's row tags), polarity (pos|neg), channel (direct|handoff) and first (true|false).",
 	}, []string{"membership", "polarity", "channel", "first"})
 
 	// FeedbackRejectedTotal counts label posts rejected for a semantic reason
 	// (the caller still received the uniform success response).
 	FeedbackRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "muninndb_feedback_rejected_total",
-		Help: "Rejected muninn_feedback label ids, by reason (not_in_recall|unknown_event|bad_mac|unknown_id|no_key).",
+		Help: "Rejected muninn_feedback label ids, by reason (not_in_recall|unknown_event|bad_mac|no_key).",
 	}, []string{"reason"})
 
 	// FeedbackInvalidTotal counts syntactically invalid feedback calls (the

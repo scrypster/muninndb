@@ -27,9 +27,10 @@ const (
 	// LabelMembershipVerified: the memory was checked against the served
 	// entries of the persisted recall event.
 	LabelMembershipVerified uint8 = 1
-	// LabelMembershipUnverified: a read-only (ro1.) query id — no event
-	// exists, so membership and rank are unknown; the id's MAC is verified.
-	LabelMembershipUnverified uint8 = 2
+	// LabelMembershipToken: a read-only (ro1.) query id — no event exists;
+	// membership and rank were verified against the keyed row tags the id
+	// carries (auth.QueryIDKey.ReadOnlyRank). Source flags stay unknown.
+	LabelMembershipToken uint8 = 2
 )
 
 // Label self-labelling (RecallLabel.Self).
@@ -57,7 +58,7 @@ type RecallLabel struct {
 	FirstAt    int64  `msgpack:"t0"`   // unix ms
 	LastAt     int64  `msgpack:"t1"`   // unix ms
 	Membership uint8  `msgpack:"m"`    // LabelMembership*
-	Rank       uint16 `msgpack:"r"`    // 1-based; 0 unknown (read-only)
+	Rank       uint16 `msgpack:"r"`    // 1-based served rank; 0 unknown
 	SetSize    uint16 `msgpack:"k"`    // result-set size; 0 unknown
 	Source     uint8  `msgpack:"s"`    // the entry's RecallSource* flags; 0xFF unknown
 	RecallCred []byte `msgpack:"rc"`   // recall credential hash (8 B) or empty
@@ -66,6 +67,12 @@ type RecallLabel struct {
 	Self       uint8  `msgpack:"self"` // LabelSelf*
 	Superseded uint8  `msgpack:"sup"`  // 1 if superseded/expired/soft-deleted when labelled
 	Channel    uint8  `msgpack:"ch"`   // LabelChannel*
+	// DayFirst is 1 when this was the labelling credential's FIRST label for
+	// this memory on its UTC day (across all query ids; process-local, so a
+	// restart can repeat it). A consumer that counts USE must count only
+	// DayFirst rows: read-only recalls are cheap, so one credential can
+	// produce many distinct (query, memory) labels for one memory in a day.
+	DayFirst uint8 `msgpack:"d"`
 }
 
 // RecallROHeader is the value of the read-only header child row: the
@@ -73,7 +80,7 @@ type RecallLabel struct {
 // written by muninn_feedback, in the same batch as the first label for that
 // id — never by the recall.
 type RecallROHeader struct {
-	Unverified uint8  `msgpack:"u"`  // always 1: membership cannot be checked
+	Unverified uint8  `msgpack:"u"`  // always 1: no event — membership came from the id's row tags, source flags unknown
 	RecallCred []byte `msgpack:"rc"` // authenticated inside the ro1. id
 	RecallSess []byte `msgpack:"rs"`
 	At         int64  `msgpack:"at"` // unix ms, from the id's ULID time

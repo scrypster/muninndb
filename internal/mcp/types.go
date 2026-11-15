@@ -364,9 +364,11 @@ type VaultStatus struct {
 // LabelsStatus is muninn_status's `labels` block.
 type LabelsStatus struct {
 	WindowDays int `json:"window_days"`
-	// Label rows (persisted) whose last post is inside the window.
+	// Label rows (persisted) whose last post is inside the window. verified:
+	// membership checked against the recall event; token: checked against a
+	// read-only query id's row tags.
 	Verified      int `json:"verified"`
-	Unverified    int `json:"unverified"`
+	Token         int `json:"token"`
 	Positive      int `json:"positive"`
 	Negative      int `json:"negative"`
 	FirstInWindow int `json:"first_in_window"`

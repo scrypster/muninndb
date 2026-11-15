@@ -214,7 +214,7 @@ func TestRecall_ReadOnlyQueryIDSurvivesRestart(t *testing.T) {
 	for _, r := range rows {
 		byMem[r.EngramID.String()] = r.Label
 	}
-	require.Equal(t, storage.LabelMembershipUnverified, byMem[roMem].Membership)
+	require.Equal(t, storage.LabelMembershipToken, byMem[roMem].Membership)
 	require.Equal(t, storage.LabelMembershipVerified, byMem[normMem].Membership)
 	require.Equal(t, uint16(2), byMem[normMem].Rank, "joined to the pre-restart event's entries")
 }
@@ -423,8 +423,9 @@ func TestFeedback_BatchGroupsMixedVerifiedAndUnverified(t *testing.T) {
 		case m1:
 			require.Equal(t, storage.LabelMembershipVerified, r.Label.Membership)
 		case m2:
-			require.Equal(t, storage.LabelMembershipUnverified, r.Label.Membership)
-			require.Equal(t, uint16(0), r.Label.Rank, "read-only rank is unknown")
+			require.Equal(t, storage.LabelMembershipToken, r.Label.Membership)
+			require.Equal(t, uint16(2), r.Label.Rank, "read-only rank comes from the id's row tags")
+			require.Equal(t, uint16(len(ro.Activations)), r.Label.SetSize)
 			require.Equal(t, storage.RecallSourceUnknown, r.Label.Source)
 			require.Equal(t, uint8(0), r.Label.Polarity)
 		default:

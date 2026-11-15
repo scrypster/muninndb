@@ -147,7 +147,7 @@ func TestFeedback_FormValidation(t *testing.T) {
 	}
 	// A malformed-MAC ro1. id is SHAPED correctly: it is not a format error.
 	fe := &recordingFeedbackEngine{}
-	ro := "ro1." + testULID + ".0011223344556677.8899aabbccddeeff.AAAAAAAAAAAAAAAAAAAAAA"
+	ro := "ro1." + testULID + ".0011223344556677.8899aabbccddeeff.AAAAAA.AAAAAAAAAAAAAAAAAAAAAA"
 	resp := feedbackRPC(t, newTestServerWith(fe), `{"query_id":"`+ro+`","engram_ids":["`+testULID+`"],"useful":true}`)
 	require.Nil(t, resp.Error)
 	require.Equal(t, 1, fe.labelCalls)

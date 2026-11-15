@@ -748,7 +748,7 @@ func (a *mcpEngineAdapter) LabelStats(ctx context.Context, vault string) (*Label
 	out := &LabelsStatus{
 		WindowDays:    st.WindowDays,
 		Verified:      st.Verified,
-		Unverified:    st.Unverified,
+		Token:         st.Token,
 		Positive:      st.Positive,
 		Negative:      st.Negative,
 		FirstInWindow: st.FirstInWindow,

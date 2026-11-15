@@ -3399,7 +3399,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// a counter restarts at 1 on every boot, so it is not a key.
 	eventID := storage.NewULID()
 	recallCred, recallSess, _ := e.callerHashes(ctx)
-	queryID := e.mintRecallQueryID(req.Vault, eventID, actReq.ReadOnly, recallCred, recallSess)
+	servedRows := make([][16]byte, 0, len(items))
+	for _, sc := range result.Activations {
+		servedRows = append(servedRows, [16]byte(sc.Engram.ID))
+	}
+	queryID := e.mintRecallQueryID(req.Vault, eventID, actReq.ReadOnly, recallCred, recallSess, servedRows)
 	if len(items) > 0 && !actReq.ReadOnly {
 		entries := make([]storage.RecallSurfacedEntry, len(items))
 		for i, item := range items {
@@ -5781,8 +5785,17 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 		metrics.FeedbackLegacyTotal.WithLabelValues("false").Inc()
 		return nil
 	}
+	// Existence first: the cap map is keyed partly by this caller-supplied
+	// id, so an id that names no memory must allocate nothing.
+	if eng, gerr := e.store.GetEngram(storage.ContextWithNoAccessCacheStamp(ctx), wsPrefix, id); gerr != nil || eng == nil {
+		if gerr != nil && !errors.Is(gerr, storage.ErrNotFound) {
+			return fmt.Errorf("record feedback: storage error")
+		}
+		metrics.FeedbackLegacyTotal.WithLabelValues("false").Inc()
+		return nil
+	}
 	lc, _, _ := e.callerHashes(ctx)
-	if !e.legacyBumpAllowed(wsPrefix, lc, id) {
+	if !e.accessBumpAllowed(wsPrefix, lc, id) {
 		metrics.FeedbackLegacyTotal.WithLabelValues("true").Inc()
 		return nil
 	}

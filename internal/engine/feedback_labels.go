@@ -45,11 +45,17 @@ const (
 	labelRejectNotInRecall  = "not_in_recall"
 	labelRejectUnknownEvent = "unknown_event"
 	labelRejectBadMAC       = "bad_mac"
-	labelRejectUnknownID    = "unknown_id"
 	labelRejectNoKey        = "no_key"
 )
 
-var labelRejectReasons = []string{labelRejectNotInRecall, labelRejectUnknownEvent, labelRejectBadMAC, labelRejectUnknownID, labelRejectNoKey}
+var labelRejectReasons = []string{labelRejectNotInRecall, labelRejectUnknownEvent, labelRejectBadMAC, labelRejectNoKey}
+
+// Feedback call limits, enforced by the engine as well as the MCP layer.
+const (
+	maxFeedbackGroups      = 50
+	maxFeedbackIDsPerGroup = 20
+	maxFeedbackIDsPerCall  = 200
+)
 
 // labelStatsWindowDays is the trailing window of the status `labels` block.
 const labelStatsWindowDays = 7
@@ -57,6 +63,21 @@ const labelStatsWindowDays = 7
 // Storm thresholds: muninndb_feedback_storm_total{threshold} is incremented
 // when a (credential, memory, UTC day) post count first reaches each.
 var labelStormThresholds = []int{10, 100}
+
+// Bounds on the process-local label bookkeeping (security review of 2a):
+// every map below is keyed partly by caller input, so each is capped.
+const (
+	// labelDayMaxEntries caps each per-UTC-day map (access-bump cap, storm
+	// counter). Keys are only ever inserted for memories that EXIST (and,
+	// for labels, were verified members of the recall), so the cap is a
+	// backstop. At the cap, the access-bump map fails CLOSED (no bump) and
+	// the storm map stops tracking new keys.
+	labelDayMaxEntries = 100_000
+	// labelMaxTrackedVaults caps the per-vault rejection tally. Only vaults
+	// that exist are tracked; at the cap, rings wholly outside the window are
+	// dropped, and if none are, the rejection is counted in metrics only.
+	labelMaxTrackedVaults = 4096
+)
 
 // labelState is the engine's process-local label bookkeeping: the legacy
 // form's per-day access-bump cap, the storm counter, and the rejection tally
@@ -69,8 +90,9 @@ type labelState struct {
 	day       int64
 	legacyCap map[labelDayKey]struct{}
 	storm     map[labelDayKey]int
-	// rejected is a ring of per-UTC-day rejection counts per vault.
-	rejected map[string]*[labelStatsWindowDays]labelDayTally
+	// rejected is a ring of per-UTC-day rejection counts per EXISTING vault,
+	// keyed by its resolved workspace prefix (never the caller's string).
+	rejected map[[8]byte]*[labelStatsWindowDays]labelDayTally
 	since    time.Time
 }
 
@@ -103,39 +125,70 @@ func (s *labelState) rollDayLocked(day int64) {
 	}
 }
 
-func (e *Engine) noteLabelRejected(vault, reason string, n int) {
+func (e *Engine) noteLabelRejected(vault string, ws [8]byte, exists bool, reason string, n int) {
 	if n <= 0 {
 		return
 	}
 	metrics.FeedbackRejectedTotal.WithLabelValues(reason).Add(float64(n))
+	if !exists {
+		// A vault that does not exist allocates nothing: the caller controls
+		// the name.
+		return
+	}
 	now := e.labelClock()
 	day := unixDay(now)
 	s := &e.labels
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.rejected == nil {
-		s.rejected = make(map[string]*[labelStatsWindowDays]labelDayTally)
+		s.rejected = make(map[[8]byte]*[labelStatsWindowDays]labelDayTally)
 		s.since = now
 	}
-	ring, ok := s.rejected[vault]
+	ring, ok := s.rejected[ws]
 	if !ok {
+		if len(s.rejected) >= labelMaxTrackedVaults {
+			for k, r := range s.rejected {
+				if ringStale(r, day) {
+					delete(s.rejected, k)
+				}
+			}
+			if len(s.rejected) >= labelMaxTrackedVaults {
+				return // metrics still counted it
+			}
+		}
 		ring = &[labelStatsWindowDays]labelDayTally{}
-		s.rejected[vault] = ring
+		s.rejected[ws] = ring
 	}
 	slot := &ring[day%labelStatsWindowDays]
 	if slot.day != day || slot.counts == nil {
-		*slot = labelDayTally{day: day, counts: make(map[string]int64)}
+		*slot = labelDayTally{day: day, counts: make(map[string]int64, len(labelRejectReasons))}
 	}
 	slot.counts[reason] += int64(n)
 }
 
-// noteStorm counts one accepted post for (ws, lc, mem) today and fires the
-// storm metric when the count first reaches a threshold.
-func (e *Engine) noteStorm(ws [8]byte, lc [8]byte, mem storage.ULID) {
+// ringStale reports whether every slot of a rejection ring is outside the
+// trailing window.
+func ringStale(r *[labelStatsWindowDays]labelDayTally, today int64) bool {
+	for _, slot := range r {
+		if slot.counts != nil && today-slot.day < labelStatsWindowDays {
+			return false
+		}
+	}
+	return true
+}
+
+// noteStorm counts one accepted post for (ws, lc, mem) today, fires the storm
+// metric when the count first reaches a threshold, and returns the count (0
+// when the key is untracked because the map is at its cap).
+func (e *Engine) noteStorm(ws [8]byte, lc [8]byte, mem storage.ULID) int {
 	s := &e.labels
 	s.mu.Lock()
 	s.rollDayLocked(unixDay(e.labelClock()))
 	k := labelDayKey{ws: ws, lc: lc, mem: mem}
+	if _, tracked := s.storm[k]; !tracked && len(s.storm) >= labelDayMaxEntries {
+		s.mu.Unlock()
+		return 0
+	}
 	s.storm[k]++
 	n := s.storm[k]
 	s.mu.Unlock()
@@ -144,17 +197,25 @@ func (e *Engine) noteStorm(ws [8]byte, lc [8]byte, mem storage.ULID) {
 			metrics.FeedbackStormTotal.WithLabelValues(fmt.Sprint(th)).Inc()
 		}
 	}
+	return n
 }
 
-// legacyBumpAllowed reports whether the legacy (no query_id) form may bump
-// access for (ws, lc, mem) today, and records that it did.
-func (e *Engine) legacyBumpAllowed(ws [8]byte, lc [8]byte, mem storage.ULID) bool {
+// accessBumpAllowed reports whether feedback may bump access for (ws, lc,
+// mem) today, and records that it did. It is the ONE cap every feedback
+// access-bump path goes through — labelled (either membership kind) and
+// legacy alike — so 1,000 fresh query ids are still one use per credential,
+// memory and UTC day. Callers must only ask for memories that exist. Fails
+// closed at the map cap.
+func (e *Engine) accessBumpAllowed(ws [8]byte, lc [8]byte, mem storage.ULID) bool {
 	s := &e.labels
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rollDayLocked(unixDay(e.labelClock()))
 	k := labelDayKey{ws: ws, lc: lc, mem: mem}
 	if _, done := s.legacyCap[k]; done {
+		return false
+	}
+	if len(s.legacyCap) >= labelDayMaxEntries {
 		return false
 	}
 	s.legacyCap[k] = struct{}{}
@@ -211,11 +272,13 @@ func recallSourceFlags(s *activation.ScoredEngram) uint8 {
 // mintRecallQueryID returns the query id for a recall whose event id is
 // eventID: the ULID itself for a normal recall, or the self-verifying ro1. id
 // for a read-only one (ro0. with no key wired).
-func (e *Engine) mintRecallQueryID(vault string, eventID storage.ULID, readOnly bool, rc, rs [8]byte) string {
+// rows are the returned memory ids in served order; a read-only id carries a
+// keyed tag per row so a later label can be checked for membership.
+func (e *Engine) mintRecallQueryID(vault string, eventID storage.ULID, readOnly bool, rc, rs [8]byte, rows [][16]byte) string {
 	if !readOnly {
 		return eventID.String()
 	}
-	return e.qidKey.MintReadOnlyQueryID(vault, [16]byte(eventID), eventID.String(), rc, rs)
+	return e.qidKey.MintReadOnlyQueryID(vault, [16]byte(eventID), eventID.String(), rc, rs, rows)
 }
 
 type labelTarget struct {
@@ -253,7 +316,21 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 	}
 
 	// Shape validation (the MCP layer already did this with exact messages;
-	// the engine is the authority for every other caller).
+	// the engine is the authority for every other caller), including the
+	// size limits, so no caller can make one call unbounded.
+	if len(groups) > maxFeedbackGroups {
+		return fmt.Errorf("%w: too many groups in one feedback call (max %d)", ErrInvalidRequest, maxFeedbackGroups)
+	}
+	totalIDs := 0
+	for _, g := range groups {
+		totalIDs += len(g.IDs)
+		if len(g.IDs) > maxFeedbackIDsPerGroup {
+			return fmt.Errorf("%w: too many ids in one group (max %d)", ErrInvalidRequest, maxFeedbackIDsPerGroup)
+		}
+	}
+	if totalIDs > maxFeedbackIDsPerCall {
+		return fmt.Errorf("%w: too many ids in one feedback call (max %d)", ErrInvalidRequest, maxFeedbackIDsPerCall)
+	}
 	type resolvedGroup struct {
 		kind auth.QueryIDKind
 		ro   auth.ParsedReadOnlyID
@@ -282,6 +359,7 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 	}
 
 	ws := e.store.ResolveVaultPrefix(vault)
+	vaultExists := e.store.VaultNameExists(vault)
 	lc, ls, _ := e.callerHashes(ctx)
 	if e.qidKey == nil {
 		lc, ls = [8]byte{}, [8]byte{}
@@ -312,16 +390,16 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 		useful := groups[gi].Useful
 		switch r.kind {
 		case auth.QueryIDNoKey:
-			e.noteLabelRejected(vault, labelRejectNoKey, len(r.mems))
+			e.noteLabelRejected(vault, ws, vaultExists, labelRejectNoKey, len(r.mems))
 			continue
 		case auth.QueryIDReadOnly:
 			if !e.qidKey.VerifyReadOnly(vault, [16]byte(r.e), r.ro) {
-				e.noteLabelRejected(vault, labelRejectBadMAC, len(r.mems))
+				e.noteLabelRejected(vault, ws, vaultExists, labelRejectBadMAC, len(r.mems))
 				continue
 			}
 		case auth.QueryIDEvent:
 			if events[r.e] == nil {
-				e.noteLabelRejected(vault, labelRejectUnknownEvent, len(r.mems))
+				e.noteLabelRejected(vault, ws, vaultExists, labelRejectUnknownEvent, len(r.mems))
 				continue
 			}
 		}
@@ -352,7 +430,7 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 					}
 				}
 				if idx < 0 {
-					e.noteLabelRejected(vault, labelRejectNotInRecall, 1)
+					e.noteLabelRejected(vault, ws, vaultExists, labelRejectNotInRecall, 1)
 					continue
 				}
 				fresh.Membership = storage.LabelMembershipVerified
@@ -362,7 +440,14 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 				fresh.RecallCred = ev.RecallCred
 				fresh.RecallSess = ev.RecallSess
 			} else {
-				fresh.Membership = storage.LabelMembershipUnverified
+				rank, member := e.qidKey.ReadOnlyRank(vault, [16]byte(r.e), r.ro, [16]byte(m))
+				if !member {
+					e.noteLabelRejected(vault, ws, vaultExists, labelRejectNotInRecall, 1)
+					continue
+				}
+				fresh.Membership = storage.LabelMembershipToken
+				fresh.Rank = clampU16(rank)
+				fresh.SetSize = clampU16(r.ro.Rows())
 				fresh.Source = storage.RecallSourceUnknown
 				fresh.RecallCred = nonZero(r.ro.RC)
 				fresh.RecallSess = nonZero(r.ro.RS)
@@ -378,48 +463,39 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 			if err != nil && !errors.Is(err, storage.ErrNotFound) {
 				return fmt.Errorf("record feedback: storage error")
 			}
-			if err != nil || eng == nil {
-				if r.kind == auth.QueryIDReadOnly {
-					// Unverified membership must at least name a memory that
-					// exists in this vault.
-					e.noteLabelRejected(vault, labelRejectUnknownID, 1)
-					continue
-				}
+			exists := err == nil && eng != nil
+			if !exists {
 				// A verified member that was since hard-deleted: still a
 				// label about what the recall served.
 				fresh.Superseded = 1
-			} else {
-				if r.kind == auth.QueryIDReadOnly && eng.State == storage.StateSoftDeleted && eng.ValidUntil.IsZero() {
-					// Forgotten (not superseded): no longer a live-or-
-					// superseded memory.
-					e.noteLabelRejected(vault, labelRejectUnknownID, 1)
-					continue
-				}
-				if eng.State == storage.StateSoftDeleted || eng.IsExpired(now) {
-					fresh.Superseded = 1
-				}
+			} else if eng.State == storage.StateSoftDeleted || eng.IsExpired(now) {
+				fresh.Superseded = 1
 			}
 			fresh.Self = e.selfLabel(ctx, ws, m, fresh.RecallSess)
+			if e.noteStorm(ws, lc, m) == 1 {
+				fresh.DayFirst = 1
+			}
 
 			_, first, err := e.store.UpsertRecallLabel(ctx, ws, r.e, m, lc, fresh, header)
 			if err != nil {
 				return fmt.Errorf("record feedback: storage error")
 			}
 			membership := "verified"
-			if fresh.Membership == storage.LabelMembershipUnverified {
-				membership = "unverified"
+			if fresh.Membership == storage.LabelMembershipToken {
+				membership = "token"
 			}
 			polarity := "neg"
 			if useful {
 				polarity = "pos"
 			}
 			metrics.FeedbackLabelsTotal.WithLabelValues(membership, polarity, channel, fmt.Sprint(first)).Inc()
-			e.noteStorm(ws, lc, m)
 
-			// A FIRST positive label is one use: today's access bump,
-			// synchronously and swallowing not-found. Repeats never bump;
-			// useful=false never bumps.
-			if first && useful {
+			// A FIRST positive label on a verified member (event or row tag —
+			// there is no unverified path) is one use, capped per
+			// (credential, memory, UTC day) like every bump path.
+			// Synchronous, swallowing not-found. Repeats never bump;
+			// useful=false never bumps; a deleted memory is never bumped.
+			if first && useful && exists && e.accessBumpAllowed(ws, lc, m) {
 				if err := e.store.TouchAccess(ctx, ws, m); err != nil && !errors.Is(err, storage.ErrNotFound) {
 					slog.Warn("feedback: access bump failed", "err", err)
 				}
@@ -459,8 +535,10 @@ func (e *Engine) selfLabel(ctx context.Context, ws [8]byte, m storage.ULID, reca
 type LabelStats struct {
 	WindowDays int
 	// Persisted (survive restarts): label rows whose last post is in the window.
-	Verified, Unverified int
-	Positive, Negative   int
+	// Verified: membership checked against the recall event; Token: checked
+	// against a read-only id's row tags.
+	Verified, Token    int
+	Positive, Negative int
 	// FirstInWindow counts rows whose FIRST post is in the window.
 	FirstInWindow int
 	// Rejected is process-local: per-reason counts in the window, since
@@ -483,8 +561,8 @@ func (e *Engine) LabelStats(ctx context.Context, vault string) (*LabelStats, err
 		if row.Label.LastAt < cutoff {
 			return nil
 		}
-		if row.Label.Membership == storage.LabelMembershipUnverified {
-			out.Unverified++
+		if row.Label.Membership == storage.LabelMembershipToken {
+			out.Token++
 		} else {
 			out.Verified++
 		}
@@ -504,7 +582,7 @@ func (e *Engine) LabelStats(ctx context.Context, vault string) (*LabelStats, err
 	today := unixDay(now)
 	e.labels.mu.Lock()
 	out.RejectedSince = e.labels.since
-	if ring := e.labels.rejected[vault]; ring != nil {
+	if ring := e.labels.rejected[ws]; ring != nil {
 		for _, slot := range ring {
 			if slot.counts == nil || today-slot.day >= labelStatsWindowDays {
 				continue
