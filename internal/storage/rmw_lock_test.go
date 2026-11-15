@@ -320,3 +320,43 @@ func TestUpdateEmbedding_ConcurrentForgetStaysForgotten(t *testing.T) {
 	il.wait(t)
 	assertLifecycle(t, ps, ws, id, StateSoftDeleted)
 }
+
+// TestAddAccessCount_ConcurrentWithTouchAccessLosesNothing pins
+// AddAccessCount's stripe lock: unlocked, its read-add-write raced
+// TouchAccess and lost increments (reviewer measured 1,584-1,768 of 3,200).
+func TestAddAccessCount_ConcurrentWithTouchAccessLosesNothing(t *testing.T) {
+	ps := openTestStore(t)
+	ctx := context.Background()
+	ws := ps.VaultPrefix("trail-log")
+	id := writeRMWFixture(t, ps, ws, "trail counter at the north gate")
+	before, _ := ps.GetEngramUncached(ctx, ws, id)
+
+	const workers, per = 8, 200
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < per; i++ {
+				if err := ps.AddAccessCount(ctx, ws, id, 1); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < per; i++ {
+				if err := ps.TouchAccess(ctx, ws, id); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	got, _ := ps.GetEngramUncached(ctx, ws, id)
+	if want := before.AccessCount + 2*workers*per; got.AccessCount != want {
+		t.Fatalf("AccessCount = %d, want %d: concurrent increments were lost", got.AccessCount, want)
+	}
+}
