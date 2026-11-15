@@ -27,18 +27,32 @@ type LoggedPair struct {
 	At      time.Time // when it was logged
 }
 
+// LogSpan is the time range a server log covers (first and last timestamped
+// line of any kind) — the shadow period the audit's write count spans.
+type LogSpan struct {
+	First, Last time.Time
+}
+
 // ParseFlagLog reads FlagLogMsg lines from a server log (slog text or JSON
-// handler output) and returns the pairs. Unparseable lines are skipped.
-func ParseFlagLog(r io.Reader) ([]LoggedPair, error) {
+// handler output) and returns the pairs plus the span the whole log covers.
+// Unparseable lines are skipped.
+func ParseFlagLog(r io.Reader) ([]LoggedPair, LogSpan, error) {
 	var out []LoggedPair
+	var span LogSpan
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
 		if !strings.Contains(line, FlagLogMsg) {
+			if at, ok := lineTime(line); ok {
+				span.extend(at)
+			}
 			continue
 		}
 		kv := parseLogLine(line)
+		if at, err := time.Parse(time.RFC3339Nano, kv["time"]); err == nil {
+			span.extend(at)
+		}
 		if kv["msg"] != FlagLogMsg {
 			continue
 		}
@@ -51,7 +65,24 @@ func ParseFlagLog(r io.Reader) ([]LoggedPair, error) {
 		shown, _ := strconv.ParseBool(kv["shown"])
 		out = append(out, LoggedPair{VaultWS: kv["vault_ws"], NewID: nid, HeadID: hid, Rule: kv["rule"], Shown: shown, At: at})
 	}
-	return out, sc.Err()
+	return out, span, sc.Err()
+}
+
+func (s *LogSpan) extend(at time.Time) {
+	if s.First.IsZero() || at.Before(s.First) {
+		s.First = at
+	}
+	if at.After(s.Last) {
+		s.Last = at
+	}
+}
+
+// lineTime reads the time= / "time": field of any log line cheaply.
+func lineTime(line string) (time.Time, bool) {
+	if at, err := time.Parse(time.RFC3339Nano, parseLogLine(line)["time"]); err == nil {
+		return at, true
+	}
+	return time.Time{}, false
 }
 
 // parseLogLine accepts a JSON object line or a logfmt line (key=value,
@@ -129,10 +160,19 @@ var ErrNoPairs = errors.New("no flagged pairs for this vault in the log")
 // Audit counts unresolved near-twin pairs. A pair (W, E) is UNRESOLVED when,
 // read from the store now: both are still live (StateActive), neither has a
 // supersedes or contradicts edge to the other, and neither was forgotten.
-// Only rule=recent pairs count (the rule the block shows), each pair once.
-func Audit(ctx context.Context, store *storage.PebbleStore, ws [8]byte, pairs []LoggedPair, now time.Time, minAge time.Duration) (*AuditReport, error) {
+// Only rule=recent pairs count (the rule the block shows), each pair once,
+// and only pairs flagged at least minAge ago. The denominator is every
+// non-successor write made over the same period: span (the log's coverage)
+// cut at now−minAge, so a write too young to have a mature verdict is not
+// counted either.
+func Audit(ctx context.Context, store *storage.PebbleStore, ws [8]byte, pairs []LoggedPair, span LogSpan, now time.Time, minAge time.Duration) (*AuditReport, error) {
 	wsHex := hexWS(ws)
 	rep := &AuditReport{MinAgeDays: int(minAge / (24 * time.Hour))}
+	cut := now.Add(-minAge)
+	rep.From, rep.To = span.First, span.Last
+	if rep.To.IsZero() || rep.To.After(cut) {
+		rep.To = cut
+	}
 	seen := map[[2]storage.ULID]bool{}
 	var mature []LoggedPair
 	for _, p := range pairs {
@@ -145,15 +185,12 @@ func Audit(ctx context.Context, store *storage.PebbleStore, ws [8]byte, pairs []
 		}
 		seen[k] = true
 		rep.PairsLogged++
-		if now.Sub(p.At) < minAge {
+		if p.At.After(cut) {
 			continue
 		}
 		mature = append(mature, p)
 		if rep.From.IsZero() || p.At.Before(rep.From) {
 			rep.From = p.At
-		}
-		if p.At.After(rep.To) {
-			rep.To = p.At
 		}
 	}
 	if rep.PairsLogged == 0 {
@@ -176,7 +213,7 @@ func Audit(ctx context.Context, store *storage.PebbleStore, ws [8]byte, pairs []
 		}
 		for i := range all {
 			c := all[i].created
-			if !c.Before(rep.From.Add(-Window)) && !c.After(rep.To) && !all[i].successor {
+			if !c.Before(rep.From) && !c.After(rep.To) && !all[i].successor {
 				rep.Writes++
 			}
 		}

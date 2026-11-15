@@ -217,22 +217,28 @@ func TestTwinAudit_UnresolvedPerHundredWrites(t *testing.T) {
 		line(n1, a2, "historic"), // only the shown rule counts
 		`{"time":"` + at.Add(12*time.Minute).Format(time.RFC3339Nano) + `","level":"INFO","msg":"unrelated"}`,
 	}, "\n")
-	pairs, err := ParseFlagLog(strings.NewReader(log))
+	pairs, span, err := ParseFlagLog(strings.NewReader(log))
 	if err != nil || len(pairs) != 5 {
 		t.Fatalf("parse: %d pairs, err %v", len(pairs), err)
 	}
-	rep, err := Audit(ctx, f.store, f.ws, pairs, f.now, 7*24*time.Hour)
+	if !span.First.Equal(at.Add(11*time.Minute)) || !span.Last.Equal(at.Add(12*time.Minute)) {
+		t.Fatalf("log span = %+v", span)
+	}
+	// The shadow period: the whole day of writes around the pairs.
+	period := LogSpan{First: at.Add(-time.Minute), Last: at.Add(3 * time.Hour)}
+	rep, err := Audit(ctx, f.store, f.ws, pairs, period, f.now, 7*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rep.PairsMature != 3 || rep.Unresolved != 1 {
 		t.Fatalf("want 3 mature pairs, 1 unresolved (the link and the forget resolve theirs), got %+v", rep)
 	}
-	if rep.Writes == 0 || math.Abs(rep.UnresolvedPer100-100/float64(rep.Writes)) > 1e-9 {
-		t.Fatalf("rate: %+v", rep)
+	// 6 paired memories + 14 unrelated notes, all inside the period.
+	if rep.Writes != 20 || math.Abs(rep.UnresolvedPer100-5) > 1e-9 {
+		t.Fatalf("rate: want 1 unresolved per 20 writes = 5 per 100, got %+v", rep)
 	}
 	// Too young pairs are not counted yet.
-	young, _ := Audit(ctx, f.store, f.ws, pairs, at.Add(24*time.Hour), 7*24*time.Hour)
+	young, _ := Audit(ctx, f.store, f.ws, pairs, period, at.Add(24*time.Hour), 7*24*time.Hour)
 	if young.PairsMature != 0 {
 		t.Fatalf("pairs flagged a day ago are not mature: %+v", young)
 	}
@@ -241,7 +247,7 @@ func TestTwinAudit_UnresolvedPerHundredWrites(t *testing.T) {
 func TestTwinAudit_ParsesJSONLogLines(t *testing.T) {
 	l := `{"time":"2026-09-01T10:00:00Z","level":"INFO","msg":"write twin flagged","vault_ws":"00112233aabbccdd",` +
 		`"new_id":"01JABCDEFGHJKMNPQRSTVWXYZ0","head_id":"01JABCDEFGHJKMNPQRSTVWXYZ1","rule":"recent","shown":true}`
-	pairs, err := ParseFlagLog(strings.NewReader(l))
+	pairs, _, err := ParseFlagLog(strings.NewReader(l))
 	if err != nil || len(pairs) != 1 || !pairs[0].Shown || pairs[0].VaultWS != "00112233aabbccdd" {
 		t.Fatalf("json line: %+v err %v", pairs, err)
 	}

@@ -265,7 +265,7 @@ func runTwinAudit(args []string) {
 		osExit(1)
 		return
 	}
-	pairs, err := writetwin.ParseFlagLog(f)
+	pairs, span, err := writetwin.ParseFlagLog(f)
 	f.Close()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: read log:", err)
@@ -279,7 +279,7 @@ func runTwinAudit(args []string) {
 		return
 	}
 	defer store.Close()
-	rep, err := writetwin.Audit(context.Background(), store, store.ResolveVaultPrefix(*vault), pairs, time.Now(), *minAge)
+	rep, err := writetwin.Audit(context.Background(), store, store.ResolveVaultPrefix(*vault), pairs, span, time.Now(), *minAge)
 	if err != nil && !errors.Is(err, writetwin.ErrNoPairs) {
 		fmt.Fprintln(os.Stderr, "error: audit:", err)
 		osExit(1)
