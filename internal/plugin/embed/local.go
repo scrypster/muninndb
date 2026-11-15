@@ -67,9 +67,25 @@ var (
 // ~1.4 GB; two concurrent ones to ~2.8 GB). Both lanes share one ORT session:
 // OrtApi::Run is documented safe for concurrent calls on one session, the Go
 // wrapper's DynamicAdvancedSession.Run keeps no per-call state on the session,
-// and the tokenizer is read-only after load; vectors from either lane are
-// byte-identical (TestLocalProvider_LanesProduceIdenticalVectors). A second
-// session would cost ~85 MB for no measured latency gain.
+// and the tokenizer is read-only after load. A second session would cost
+// ~85 MB for no measured latency gain.
+//
+// Bit-exactness is a property of the CONCURRENCY LEVEL, not of the design.
+// At the 2-way concurrency these lanes permit, vectors are bit-identical to a
+// serial run (pinned by TestLocalProvider_LanesProduceIdenticalVectors;
+// review stress: 0 mismatches in 12,000 raw runs at 2-way, 16,000 at 8-way).
+// It is NOT guaranteed under heavier concurrency: at 16-way, 3 of 136,000 runs
+// on a shared session and 1 of 72,000 on separate sessions differed in every
+// component (max diff ~0.005, cosine ~0.9995, never NaN) — ORT's CPU kernels
+// under oversubscription, not session sharing. Do not raise a lane's capacity
+// or add lanes without re-running that bit-equality stress.
+//
+// Independently of scheduling, the bundled model is dynamically quantized, so
+// a text's vector depends on its batch-mates: alone vs inside a batch, cosine
+// p50 0.9994 (min 0.9989); batch of 8 vs 64, min 0.9985. An exact own-text
+// match therefore scores ~0.998, never 1.0 — nothing may assume self-cosine
+// 1.0 — and re-embedding after the 64 -> 8 batch change moves a stored vector
+// by at most that much.
 type LocalProvider struct {
 	// mu serialises Init and Close. Both also hold BOTH lanes while they run,
 	// so the session is never created, probed or destroyed under an inference.

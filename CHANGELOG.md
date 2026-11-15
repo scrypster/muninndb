@@ -23,7 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (other reasons: `embed_unavailable`, `embed_zero_vector`,
   `stored_embedding_read`); `muninn_status` reports the reason. The local
   embedder's batch size drops from 64 to 8 (same throughput, peak RSS ~0.8 GB
-  instead of ~2.5 GB) and it is no longer rate-limited. New metrics:
+  instead of ~2.5 GB) and it is no longer rate-limited — a `rate_per_sec`
+  plugin option is now ignored for the local provider. gRPC's
+  `ActivateResponse` gains `semantic_degraded` (7) and
+  `semantic_degraded_reason` (8); it previously served keyword-only results
+  unmarked. Only recall's query embed uses the query lane; a burst of
+  simultaneous recalls serialises on it. New metrics:
   `muninndb_embed_lane_waits_total{lane}`,
   `muninndb_embed_lane_timeouts_total{lane}`,
   `muninndb_embed_lane_wait_seconds{lane}`,

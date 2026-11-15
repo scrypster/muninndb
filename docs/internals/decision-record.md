@@ -1408,3 +1408,46 @@ deliberately not edited here):
 schedule. Findability must be a function of persisted state; ranking may use learned,
 process-local signals only where they can promote and never gate — and a doc that says
 ranking is restart-invariant while such a signal exists is the same lie in prose.**
+
+### Embed lanes: recall's query embed stops queueing behind backfill (2026-11-15)
+
+The bundled local embedder serialised every inference behind one `sync.Mutex`, and a
+mutex cannot be abandoned: a 5 ms-deadline query embed returned `err=nil` 2.4 s later
+behind a batch, so #658's "reserve half the deadline for the BM25 fallback" never worked
+for this provider. Recall under a batch loop was p50 ~2.4 s (16 ms idle); with a 200 ms
+deadline it hard-failed with zero results and `semantic_degraded=false`. It now runs
+inference in two one-at-a-time lanes whose acquisition honours the caller's context, and
+a missed budget degrades to BM25 with `semantic_degraded_reason=embed_timeout`.
+
+**Who takes which lane.** Only recall's phase-1 query embed is marked
+(`embedlane.WithQuery`) and takes the QUERY lane. Everything else takes the BATCH lane:
+recall-brief sentence scoring, trigger and subscription embeds, the retroactive
+processor, write-path embeds, and the plugin health probe. The lane is chosen by the
+caller's explicit mark, never by text count (a single-text write is background work);
+a marked call over 4 texts also falls to the batch lane to bound memory.
+
+**Capacity is a measured limit, not a tuning knob.** One query lane means a burst of
+simultaneous recalls serialises on it: a 50-way fan-out measured p50/p99 635 ms / 1.25 s
+idle and 1.13 s / 2.11 s under a batch loop. Widening it is a capacity decision gated on
+re-running the bit-equality stress: lanes share one ORT session and are bit-identical
+to a serial run at the 2-way concurrency they permit (0 mismatches in 12,000 runs at
+2-way, 16,000 at 8-way), but at 16-way 3 of 136,000 shared-session runs and 1 of 72,000
+separate-session runs differed in every component (max diff ~0.005, cosine ~0.9995) —
+ORT's CPU kernels under oversubscription, not session sharing.
+
+**The model is not batch-invariant, and never was.** The bundled bge-small int8 model is
+dynamically quantized, so a vector depends on its batch-mates (alone vs in a batch:
+cosine p50 0.9994, min 0.9989; batch of 8 vs 64: min 0.9985). An exact own-text match
+scores ~0.998, never 1.0; nothing may assume self-cosine 1.0. The batch size dropped
+64 -> 8 because throughput was flat across chunk sizes 1-64 while peak RSS scaled with
+the batch (~0.8 GB at 8 vs ~2.2-2.8 GB at 64 on a 2 GB production host); re-embeds after
+that change move vectors by at most the amounts above.
+
+**Residuals, recorded.** The local provider is no longer rate-limited, so a user-set
+`rate_per_sec` plugin option is now ignored for it (as it always was for Ollama) — the
+smaller correct change than a batch-only bucket, since an in-process model has no quota
+to protect. An inference that has started cannot be cancelled, so a deadline can still
+be overrun by up to one inference (~20-40 ms query, ~0.2 s batch). gRPC now carries
+`semantic_degraded`/`semantic_degraded_reason` (fields 7/8); before, it served
+keyword-only rows unmarked — silent on that transport, and the lanes made that outcome
+the common one for a deadline behind a batch.
