@@ -2128,3 +2128,27 @@ labels — nothing in ranking reads them yet. Today only the entity boost produc
 association-only rows; Hebbian and predictive-activation evidence attaches to
 rows that also matched, so their `why` variants are not built.
 
+### The candidate budget stays as it is — an honest negative (2026-11-15)
+
+**The defect is real.** `CalcCandidatesPerIndex` is not monotone in vault size:
+a 1,000-memory vault considers 1,000 candidates per index and a 1,001-memory
+vault 31 (sqrt(N) past the knee). On a production install about a fifth of right
+answers to model-reworded questions were never candidates at all.
+
+**Fixing it bought nothing measurable.** An experimental build with the ceiling
+raised to 1,000 on the same install (150 reworded questions, three vaults, with
+content-first order already in place) moved the right memory into the top ten
+for 95 → 98 of 150 and to rank 1 for 60 → 61; paired MRR +0.010, 95% CI −0.001
+to +0.024 — not distinguishable from noise. It also made explain 3–5x slower at
+the time (since fixed separately: explain no longer scales with its candidate
+list). The candidate cliff is not what keeps a third of right answers out of the
+top ten.
+
+**Decision.** Left unchanged pending evidence that it costs answers. A monotone
+alternative measured on synthetic vaults, min(N, 200), would REDUCE candidates
+for vaults of 201–1,000 memories with no measured benefit to offset it; a change
+with no measured value does not ship. The work (rule, monotonicity RED tests,
+the 60th-nearest fixture, and an opt-in latency harness: p50 at 12,000 memories
+29.2 ms old rule / 31.0 at 200 / 43.3 at 500 / 57.0 at 1,000) is kept on the
+local branch `exp/candidate-budget`.
+
