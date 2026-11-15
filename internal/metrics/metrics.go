@@ -103,6 +103,18 @@ var (
 		Name: "muninn_mcp_auth_total",
 		Help: "Total authenticated MCP requests by credential source (api_key, capability, static_token, open).",
 	}, []string{"source"})
+
+	// MCPArgRejectionsTotal counts MCP tool calls rejected for the SHAPE of
+	// their arguments (JSON-RPC -32602), labelled by tool and a coarse reason
+	// from a closed set: missing_field, conflicting_alias, invalid_params (the
+	// generic catch-all every handler's -32602 falls into). Both labels are
+	// bounded — tool is a registered tool name (unknown names are folded to
+	// "unknown") and reason is a code constant — and no vault label is carried,
+	// so the series cannot reveal anything about vault contents or names.
+	MCPArgRejectionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninn_mcp_arg_rejections_total",
+		Help: "Total MCP tool calls rejected for argument shape (JSON-RPC -32602), by tool and reason.",
+	}, []string{"tool", "reason"})
 )
 
 // VaultStore is the subset of storage.PebbleStore methods needed by VaultEngramCollector.

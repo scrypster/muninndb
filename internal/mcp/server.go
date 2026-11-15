@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -333,7 +334,40 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		ctx = storage.ContextWithNoAccessCacheStamp(ctx)
 	}
 
-	handler(ctx, w, req.ID, vault, args)
+	tw := &toolCallWriter{ResponseWriter: w}
+	handler(ctx, tw, req.ID, vault, args)
+	if tw.rejectReason != "" {
+		// req.Params.Name is a registered tool here (found above), so the tool
+		// label is bounded by the tool table.
+		metrics.MCPArgRejectionsTotal.WithLabelValues(req.Params.Name, tw.rejectReason).Inc()
+	}
+}
+
+// Argument-shape rejection reasons (the closed label set of
+// muninn_mcp_arg_rejections_total).
+const (
+	argRejectInvalidParams    = "invalid_params"    // generic: any other -32602
+	argRejectMissingField     = "missing_field"     // a required argument is absent or empty
+	argRejectConflictingAlias = "conflicting_alias" // an argument and its accepted alias disagree
+)
+
+// toolCallWriter wraps the response writer for one tool call so a handler's
+// argument rejection can be counted without threading a recorder through
+// every handler signature. Unwrap keeps http.ResponseController working.
+type toolCallWriter struct {
+	http.ResponseWriter
+	rejectReason string
+}
+
+func (w *toolCallWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// sendArgError is sendError(-32602) with a specific rejection reason for the
+// argument-rejection counter.
+func sendArgError(w http.ResponseWriter, id json.RawMessage, reason, message string) {
+	if tw, ok := w.(*toolCallWriter); ok {
+		tw.rejectReason = reason
+	}
+	sendError(w, id, -32602, message)
 }
 
 // toolHandlerFunc is the signature every MCP tool handler shares.
@@ -796,6 +830,14 @@ func (s *MCPServer) SetStorageWritableProbe(probe func() bool) { s.storageWritab
 
 // sendError writes a JSON-RPC error response.
 func sendError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
+	// Every -32602 from a tool handler is an argument-shape rejection; record
+	// it on the dispatch writer (generic reason unless the handler named one
+	// via sendArgError) so dispatchToolCall can count it per tool.
+	if code == -32602 {
+		if tw, ok := w.(*toolCallWriter); ok && tw.rejectReason == "" {
+			tw.rejectReason = argRejectInvalidParams
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(JSONRPCResponse{
 		JSONRPC: "2.0",

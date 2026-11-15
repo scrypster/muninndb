@@ -64,6 +64,10 @@ type WriteResult struct {
 	Concept  string   `json:"concept"`
 	Hint     string   `json:"hint,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// Notes record how the server interpreted the call when that differs from
+	// the literal arguments — an accepted alias, a derived concept — so a
+	// tolerant write is never a silent one. Omitted when empty.
+	Notes []string `json:"notes,omitempty"`
 	// Notices are prospective-memory deliveries (THE PUSH): armed intentions
 	// whose cue entity is focal in this write's inline entities. Omitted when
 	// empty (zero token cost) and inert unless MUNINN_PROSPECTIVE=1.
