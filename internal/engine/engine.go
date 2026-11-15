@@ -2189,6 +2189,16 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	// batches — the same known limitation as content-hash intra-batch dedup above.
 	seenOpIDs := make(map[string]int)      // op_id → original index of first occurrence
 	pendingDuplicates := make(map[int]int) // duplicate item index → first-occurrence index
+	// Exact-content duplicates WITHIN this batch (the store-level hash check
+	// below cannot see items that are not committed yet). Keyed by vault and
+	// content hash; only items carrying no validity window take part, because
+	// two same-content facts with different windows are two facts.
+	type batchContentKey struct {
+		ws   [8]byte
+		hash [32]byte
+	}
+	firstByContent := make(map[batchContentKey]int)
+	contentDuplicates := make(map[int]int) // duplicate item index → first-occurrence index
 
 	for i, req := range reqs {
 		wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
@@ -2229,8 +2239,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 
 		// ── Content-hash dedup: same O(1) check as single Write ──────
-		// NOTE: Intra-batch dedup is not performed — items within the same batch
-		// cannot see each other's hashes during Phase 1. This is a known limitation.
+		// Intra-batch duplicates are caught just below via firstByContent.
 		contentHash := storage.ContentHash(req.Content)
 		if existingID, err := e.store.GetContentHash(ctx, wsPrefix, contentHash); err == nil && existingID != (storage.ULID{}) {
 			// Same live-AND-current check as the single-Write path: an EXPIRED
@@ -2254,6 +2263,16 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			}
 			// Engram was soft-deleted or not found — remove stale hash mapping and proceed.
 			_ = e.store.DeleteContentHash(ctx, wsPrefix, contentHash)
+		}
+		if req.ValidFrom == nil && req.ValidUntil == nil && !skipContentDedup(ctx) {
+			k := batchContentKey{ws: wsPrefix, hash: contentHash}
+			if first, seen := firstByContent[k]; seen {
+				contentDuplicates[i] = first
+				// Placeholder so Phase 2 skips it; resolved after commit.
+				responses[i] = &mbp.WriteResponse{Hint: "pending_duplicate_content"}
+				continue
+			}
+			firstByContent[k] = i
 		}
 
 		vaultName := req.Vault
@@ -2422,6 +2441,18 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			if err := e.store.WriteIdempotency(ctx, reqs[origIdx].IdempotentID, batchIDs[fi].String()); err != nil {
 				slog.Warn("engine: batch: failed to store idempotency receipt", "op_id", reqs[origIdx].IdempotentID, "id", batchIDs[fi].String(), "err", err)
 			}
+		}
+	}
+
+	// Intra-batch exact-content duplicates resolve to the first occurrence's
+	// new engram, reported the same way as a duplicate of a stored memory.
+	for dupIdx, firstIdx := range contentDuplicates {
+		switch {
+		case errs[firstIdx] == nil && responses[firstIdx] != nil:
+			responses[dupIdx] = &mbp.WriteResponse{ID: responses[firstIdx].ID, CreatedAt: responses[firstIdx].CreatedAt, Hint: "duplicate_content"}
+		default:
+			responses[dupIdx] = nil
+			errs[dupIdx] = fmt.Errorf("identical content to batch item %d, which was not stored: %v", firstIdx, errs[firstIdx])
 		}
 	}
 
@@ -3582,6 +3613,20 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 		return nil, fmt.Errorf("%w: target_id %q: %v", ErrInvalidID, req.TargetID, err)
 	}
 
+	// A supersedes link gives the target a successor exactly as evolve does,
+	// so it takes the same per-target lock and passes the same fork guard —
+	// before the endpoint-state check, so a target an evolve just superseded
+	// is refused with the error that names its current version. Without the
+	// lock a link racing an evolve forked the target (24 of 30 trials).
+	if storage.RelType(req.RelType) == storage.RelSupersedes {
+		mu := e.evolveLock(wsPrefix, targetID)
+		mu.Lock()
+		defer mu.Unlock()
+		if err := e.refuseSupersededEvolveTarget(ctx, wsPrefix, targetID, sourceID); err != nil {
+			return nil, err
+		}
+	}
+
 	// Guard: reject links to/from soft-deleted engrams. A single batched
 	// GetMetadata call avoids two expensive GetEngram round-trips.
 	metas, err := e.store.GetMetadata(ctx, wsPrefix, []storage.ULID{sourceID, targetID})
@@ -4347,7 +4392,7 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 
 	// Refuse to fork: a target that already has a successor gets an error
 	// naming the current head instead of a second, rival successor.
-	if err := e.refuseSupersededEvolveTarget(ctx, wsPrefix, oldULID); err != nil {
+	if err := e.refuseSupersededEvolveTarget(ctx, wsPrefix, oldULID, storage.ULID{}); err != nil {
 		return storage.ULID{}, err
 	}
 
@@ -4819,6 +4864,19 @@ type SessionPagedResult struct {
 // live activity, and listing them as writes reported deleted memories as
 // present. limit is clamped to SessionMaxLimit.
 func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time, offset, limit int) (*SessionPagedResult, error) {
+	return e.SessionPagedBefore(ctx, vault, since, nil, offset, limit)
+}
+
+// SessionPagedBefore is SessionPaged over the window [since, before): before
+// (exclusive, an engram ID — the last ID of the previous page) is the stable
+// cursor; nil means "up to now". A since before the Unix epoch — Go's zero
+// time is what an unset timestamp serialises to — means "from the beginning":
+// ULID timestamps cannot represent earlier instants, and the bound used to
+// underflow into an empty, authoritative-looking answer.
+func (e *Engine) SessionPagedBefore(ctx context.Context, vault string, since time.Time, before *storage.ULID, offset, limit int) (*SessionPagedResult, error) {
+	if epoch := time.Unix(0, 0); since.Before(epoch) {
+		since = epoch
+	}
 	if limit <= 0 {
 		limit = SessionDefaultLimit
 	}
@@ -4829,7 +4887,7 @@ func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time
 		offset = 0
 	}
 	ws := e.store.ResolveVaultPrefix(vault)
-	engrams, total, err := e.store.LiveEngramsCreatedSinceNewestFirst(ctx, ws, since, offset, limit)
+	engrams, total, err := e.store.LiveEngramsCreatedSinceNewestFirst(ctx, ws, since, before, offset, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -282,10 +282,16 @@ func TestVersionHead_ForkRefusesAndAbstainsAmbiguous(t *testing.T) {
 	a := h.write("retention policy", "Telemetry rows older than ninety days are purged nightly by the vacuum sweeper.")
 	// Two independent successors of A: a genuine fork. Written as bare engrams
 	// plus declared edges so both stay active (evolve would serialize them).
+	// The second edge is written at the store level: Link now refuses a
+	// second successor, so this is the on-disk shape a pre-guard store has.
 	b := h.write("retention policy alpha", "Aged instrumentation records compact into cold shards after one quarter.")
 	c := h.write("retention policy beta", "Stale measurement archives migrate to glacier storage each fiscal period.")
 	h.linkSupersedes(b, a)
-	h.linkSupersedes(c, a)
+	if err := h.eng.store.WriteAssociation(h.ctx, h.ws, h.mustParse(c), h.mustParse(a), &storage.Association{
+		TargetID: h.mustParse(a), RelType: storage.RelSupersedes, Weight: 1, Confidence: 1, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	h.softDelete(a) // evolve's other half: the predecessor is hidden from the present
 
 	resp := h.recall(retentionQuery)

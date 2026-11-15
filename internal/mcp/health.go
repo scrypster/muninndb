@@ -20,7 +20,9 @@ type healthSnapshot struct {
 	// EmbeddingsPending is the retroactive embed backlog when a backfill is
 	// running; nil when no backfill is running (unknown is not zero).
 	EmbeddingsPending *int64
-	Now               time.Time
+	// StorageWritable is the data-directory writability probe; nil = unknown.
+	StorageWritable *bool
+	Now             time.Time
 }
 
 // healthReporter is probed (not added to EngineInterface) so test engines and
@@ -58,6 +60,9 @@ type WorkerHealth struct {
 // caller can see the verdict rests on no observation.
 func deriveHealth(s healthSnapshot) (health string, reasons []string, emb EmbedderStatus, workers map[string]WorkerHealth) {
 	reasons = []string{}
+	if s.StorageWritable != nil && !*s.StorageWritable {
+		reasons = append(reasons, "storage not writable: the data directory refused a probe write (read-only or full disk) — new memories cannot be stored")
+	}
 	emb = EmbedderStatus{State: s.EmbedState}
 	if !s.EmbedLastOKAt.IsZero() {
 		emb.LastOKAt = s.EmbedLastOKAt.UTC().Format(time.RFC3339)

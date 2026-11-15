@@ -342,6 +342,8 @@ type VaultStatus struct {
 	// "unknown" when the engine cannot report health at all.
 	Health        string   `json:"health"`
 	HealthReasons []string `json:"health_reasons"`
+	// Storage: writable | not_writable | unknown (probe not wired).
+	Storage string `json:"storage,omitempty"`
 
 	Embedder *EmbedderStatus         `json:"embedder,omitempty"`
 	Workers  map[string]WorkerHealth `json:"workers,omitempty"`
@@ -372,6 +374,15 @@ type SessionEntry struct {
 // them: Total counts the whole window, Returned this page, and Truncated is
 // true whenever Offset+Returned < Total — so a partial list never reads as the
 // complete answer.
+// SessionRequest is one muninn_session page request. Before (exclusive, an
+// engram ID) is the stable cursor: pass the previous page's NextBefore.
+type SessionRequest struct {
+	Since  time.Time
+	Before string
+	Offset int
+	Limit  int
+}
+
 type SessionSummary struct {
 	Writes []SessionEntry `json:"writes"`
 	// Activations counts recalls since Since that returned at least one result
@@ -384,6 +395,10 @@ type SessionSummary struct {
 	Truncated   bool      `json:"truncated"`
 	Offset      int       `json:"offset"`
 	Limit       int       `json:"limit"`
+	// NextBefore is the ID of the last write returned, set when more remain:
+	// pass it as `before` (with the same since) for the next page. Unlike
+	// offset it is stable when new writes land between page requests.
+	NextBefore string `json:"next_before,omitempty"`
 }
 
 type ConsolidateResult struct {

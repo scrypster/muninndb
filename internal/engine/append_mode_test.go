@@ -71,7 +71,7 @@ var appendReadOnly = map[string]bool{
 	"Hello": true, "ListDeleted": true, "ListEngrams": true, "ListEntities": true, "ListVaults": true,
 	"Read": true, "RecallTree": true, "ReevaluatePushOnEmbed": true, "ResolveVaultPlasticity": true,
 	"VaultPlasticityConfig": true,
-	"Session":               true, "SessionPaged": true, "Stat": true, "Subscribe": true, "SubscribeWithDeliver": true,
+	"Session":               true, "SessionPaged": true, "SessionPagedBefore": true, "Stat": true, "Subscribe": true, "SubscribeWithDeliver": true,
 	"Traverse": true, "Unsubscribe": true, "VaultNameExists": true, "WhereLeftOff": true, "WorkerStats": true,
 	// EmbedHealth is two atomic loads of recall-observed embed outcomes.
 	"EmbedHealth": true,

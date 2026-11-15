@@ -408,7 +408,8 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	// given, query is one more context phrase.
 	const recallInputHelp = `pass 'query' (a string, e.g. {"query":"what we decided about caching"}) or 'context' (an array of phrases)`
 	var contexts []string
-	if raw, exists := args["context"]; exists {
+	// A JSON null is "absent" for both optional fields.
+	if raw, exists := args["context"]; exists && raw != nil {
 		var ctxArr []any
 		switch v := raw.(type) {
 		case string:
@@ -426,7 +427,7 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 			}
 		}
 	}
-	if rawQ, exists := args["query"]; exists {
+	if rawQ, exists := args["query"]; exists && rawQ != nil {
 		q, ok := rawQ.(string)
 		if !ok {
 			sendError(w, id, -32602, fmt.Sprintf("invalid params: 'query' must be a string, got %T — %s", rawQ, recallInputHelp))
@@ -931,6 +932,12 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 	}
 	if hr, ok := s.engine.(healthReporter); ok {
 		snap := hr.HealthSnapshot(ctx)
+		status.Storage = "unknown"
+		if s.storageWritable != nil {
+			ok := s.storageWritable()
+			snap.StorageWritable = &ok
+			status.Storage = map[bool]string{true: "writable", false: "not_writable"}[ok]
+		}
 		health, reasons, emb, workers := deriveHealth(snap)
 		status.Health = health
 		status.HealthReasons = reasons
@@ -1148,27 +1155,54 @@ func (s *MCPServer) handleSession(ctx context.Context, w http.ResponseWriter, id
 		sendError(w, id, -32602, "invalid params: 'since' must be ISO 8601 (e.g. 2024-01-01T00:00:00Z)")
 		return
 	}
-	offset, limit := 0, 0
-	if v, ok := args["offset"].(float64); ok {
-		if v < 0 {
-			sendError(w, id, -32602, "invalid params: 'offset' must be >= 0")
+	offset, okOff, errOff := intArg(args, "offset")
+	if errOff != "" || (okOff && offset < 0) {
+		sendError(w, id, -32602, "invalid params: 'offset' must be an integer >= 0")
+		return
+	}
+	limit, okLim, errLim := intArg(args, "limit")
+	if errLim != "" || (okLim && limit < 1) {
+		sendError(w, id, -32602, "invalid params: 'limit' must be an integer >= 1")
+		return
+	}
+	before, _ := args["before"].(string)
+	if raw, present := args["before"]; present && raw != nil {
+		if _, isStr := raw.(string); !isStr {
+			sendError(w, id, -32602, "invalid params: 'before' must be a string (the next_before of a previous page)")
 			return
 		}
-		offset = int(v)
 	}
-	if v, ok := args["limit"].(float64); ok {
-		if v < 1 {
-			sendError(w, id, -32602, "invalid params: 'limit' must be >= 1")
-			return
-		}
-		limit = int(v)
-	}
-	result, err := s.engine.Session(ctx, vault, since, offset, limit)
+	result, err := s.engine.Session(ctx, vault, SessionRequest{Since: since, Before: before, Offset: offset, Limit: limit})
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
 	sendResult(w, id, textContent(mustJSON(result)))
+}
+
+// intArg reads an optional integer argument. JSON numbers and numeric
+// strings ("2") are accepted; null/absent is (0, false, ""); anything else is
+// an error message — never silently ignored.
+func intArg(args map[string]any, key string) (int, bool, string) {
+	raw, present := args[key]
+	if !present || raw == nil {
+		return 0, false, ""
+	}
+	switch v := raw.(type) {
+	case float64:
+		if v != float64(int(v)) {
+			return 0, false, key + " must be an integer"
+		}
+		return int(v), true, ""
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0, false, key + " must be an integer"
+		}
+		return n, true, ""
+	default:
+		return 0, false, key + " must be an integer"
+	}
 }
 
 func (s *MCPServer) handleDecide(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {

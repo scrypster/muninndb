@@ -392,7 +392,7 @@ func allToolDefinitions() []ToolDefinition {
 			Description: "Get health and capacity statistics for the vault. `health` is derived, not a constant: \"good\" when the embedder is up (or not yet exercised by a recall) and no cognitive worker is erroring or stopped; " +
 				"otherwise \"degraded\" with one entry per cause in `health_reasons`. Also reports `embedder.state` (up | degraded_to_keyword | disabled | unknown), " +
 				"each cognitive worker's state (active | idle | dormant | stopped | disabled | erroring) with `last_run_age_seconds`, `embeddings_pending` while an embed backfill runs, and `enrichment_mode`. " +
-				"A dormant worker just has nothing to do — reported, not a degradation.",
+				"`storage` is writable | not_writable | unknown (a data directory that refuses writes is degraded). A dormant worker just has nothing to do — reported, not a degradation.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -463,7 +463,7 @@ func allToolDefinitions() []ToolDefinition {
 			Name: "muninn_session",
 			Description: "Get a summary of recent memory activity since a timestamp — vault-wide: in a vault shared by multiple users or agents this includes other users' activity (admin/audit use there). " +
 				"`writes` lists live memories created since `since`, NEWEST first, one page at a time (forgotten and superseded memories are excluded); " +
-				"`total` counts the whole window, `returned` this page, and `truncated` is true when more remain (page with `offset`). " +
+				"`total` counts the whole window, `returned` this page, and `truncated` is true when more remain (page with `before` = the response's `next_before`; `offset` also works but repeats items if writes land between pages). A `since` before 1970 (including Go's zero time) means from the beginning. " +
 				"`activations` counts recalls since `since` that returned at least one result (read-only and empty recalls are not recorded; records are kept 90 days).",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -471,7 +471,8 @@ func allToolDefinitions() []ToolDefinition {
 					"vault":  vaultProp,
 					"since":  map[string]any{"type": "string", "description": "ISO 8601 timestamp. Return activity at or after this time."},
 					"limit":  map[string]any{"type": "integer", "description": "Max writes to return (default 100, max 500)."},
-					"offset": map[string]any{"type": "integer", "description": "Skip this many of the newest writes (for paging; default 0)."},
+					"offset": map[string]any{"type": "integer", "description": "Skip this many of the newest writes (default 0). Not stable if writes land between pages — prefer `before`."},
+					"before": map[string]any{"type": "string", "description": "Paging cursor: the `next_before` of the previous page (same `since`). Returns only writes older than it, so new writes between pages cause no repeats."},
 				},
 				"required": []string{"since"},
 			},

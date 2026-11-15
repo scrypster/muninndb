@@ -70,7 +70,7 @@ func (e *consolidateErrEngine) Consolidate(_ context.Context, _ string, _ []stri
 // sessionErrEngine returns an error from Session.
 type sessionErrEngine struct{ fakeEngine }
 
-func (e *sessionErrEngine) Session(_ context.Context, _ string, _ time.Time, _, _ int) (*SessionSummary, error) {
+func (e *sessionErrEngine) Session(_ context.Context, _ string, _ SessionRequest) (*SessionSummary, error) {
 	return nil, fmt.Errorf("session storage error")
 }
 

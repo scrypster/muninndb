@@ -110,3 +110,30 @@ func TestDeriveHealth(t *testing.T) {
 		})
 	}
 }
+
+// TestStatus_UnwritableStorageIsDegraded: health used to ignore storage, so a
+// read-only or full disk still reported its verdict from the embedder and
+// workers alone. The probe is the same one REST /api/health reports as
+// db_writable.
+func TestStatus_UnwritableStorageIsDegraded(t *testing.T) {
+	_, srv, _, cleanup := newDebtServer(t)
+	defer cleanup()
+	srv.SetStorageWritableProbe(func() bool { return false })
+	out := callTool(t, srv, "muninn_status", `{"vault":"railway-disk"}`)
+	if out["storage"] != "not_writable" {
+		t.Errorf("storage = %v, want not_writable", out["storage"])
+	}
+	found := false
+	for _, r := range out["health_reasons"].([]any) {
+		if strings.Contains(r.(string), "storage not writable") {
+			found = true
+		}
+	}
+	if out["health"] != "degraded" || !found {
+		t.Fatalf("health = %v reasons = %v; want degraded with a storage reason", out["health"], out["health_reasons"])
+	}
+	srv.SetStorageWritableProbe(func() bool { return true })
+	if out := callTool(t, srv, "muninn_status", `{"vault":"railway-disk"}`); out["storage"] != "writable" {
+		t.Errorf("storage = %v, want writable", out["storage"])
+	}
+}

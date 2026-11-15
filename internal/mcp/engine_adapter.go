@@ -192,8 +192,17 @@ func (a *mcpEngineAdapter) Consolidate(ctx context.Context, vault string, ids []
 	}
 	return &ConsolidateResult{ID: res.MergedID.String(), Archived: res.Archived, Warnings: res.Warnings}, nil
 }
-func (a *mcpEngineAdapter) Session(ctx context.Context, vault string, since time.Time, offset, limit int) (*SessionSummary, error) {
-	res, err := a.eng.SessionPaged(ctx, vault, since, offset, limit)
+func (a *mcpEngineAdapter) Session(ctx context.Context, vault string, req SessionRequest) (*SessionSummary, error) {
+	var before *storage.ULID
+	if req.Before != "" {
+		u, err := storage.ParseULID(req.Before)
+		if err != nil {
+			return nil, fmt.Errorf("'before' must be a memory id (the next_before of a previous page): %w", err)
+		}
+		before = &u
+	}
+	offset, limit := req.Offset, req.Limit
+	res, err := a.eng.SessionPagedBefore(ctx, vault, req.Since, before, offset, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +216,7 @@ func (a *mcpEngineAdapter) Session(ctx context.Context, vault string, since time
 		offset = 0
 	}
 	summary := &SessionSummary{
-		Since:       since,
+		Since:       res.Since,
 		Writes:      []SessionEntry{},
 		Activations: res.Activations,
 		Total:       res.Total,
@@ -223,6 +232,9 @@ func (a *mcpEngineAdapter) Session(ctx context.Context, vault string, since time
 	}
 	summary.Returned = len(summary.Writes)
 	summary.Truncated = offset+summary.Returned < summary.Total
+	if summary.Truncated && summary.Returned > 0 {
+		summary.NextBefore = summary.Writes[summary.Returned-1].ID
+	}
 	return summary, nil
 }
 func (a *mcpEngineAdapter) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error) {

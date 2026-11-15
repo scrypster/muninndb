@@ -383,6 +383,10 @@ func (s *Server) ActiveCoordinator() *replication.ClusterCoordinator {
 // SetDataDir sets the data directory used for persisting cluster configuration.
 func (s *Server) SetDataDir(dir string) { s.dataDir = dir }
 
+// DBWritable reports the cached data-directory writability probe (the
+// db_writable of /api/health). Cheap: an atomic load.
+func (s *Server) DBWritable() bool { return s.dbWritable.Load() }
+
 // SetVersion sets the version string reported by the health endpoint.
 func (s *Server) SetVersion(v string) { s.version = v }
 

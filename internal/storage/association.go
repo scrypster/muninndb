@@ -1526,6 +1526,46 @@ func (ps *PebbleStore) GetReverseAssociations(ctx context.Context, wsPrefix [8]b
 	return results, nil
 }
 
+// SupersedersOf returns the distinct engrams holding a RelSupersedes edge onto
+// id. Unlike GetReverseAssociations it is NOT capped: the 0x04 reverse index
+// orders a node's incoming edges by weight, then source, with no relation in
+// the key, so any capped scan can be starved — a node with >= cap incoming
+// max-weight edges of another relation hides its supersedes edge entirely.
+// Cost is one full pass over id's incoming edges, decoding only the relation;
+// the write paths that need an exact answer (evolve's fork guard) pay it.
+func (ps *PebbleStore) SupersedersOf(ctx context.Context, wsPrefix [8]byte, id ULID) ([]ULID, error) {
+	iter, err := PrefixIterator(ps.db, keys.AssocRevPrefixForID(wsPrefix, [16]byte(id)))
+	if err != nil {
+		return nil, fmt.Errorf("SupersedersOf prefix iter: %w", err)
+	}
+	defer iter.Close()
+	seen := map[ULID]bool{}
+	var out []ULID
+	for iter.First(); iter.Valid(); iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		k := iter.Key()
+		if len(k) < 45 {
+			continue
+		}
+		relType, _, _, _, _, _, _ := decodeAssocValue(iter.Value())
+		if relType != RelSupersedes {
+			continue
+		}
+		var src ULID
+		copy(src[:], k[29:45])
+		if !seen[src] {
+			seen[src] = true
+			out = append(out, src)
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("SupersedersOf scan: %w", err)
+	}
+	return out, nil
+}
+
 // contradictionValueLen is the current 0x0A value length: the partner ULID
 // followed by the detection time in Unix nanoseconds.
 // Layout: partner(16) | detectedAtUnixNano(8).

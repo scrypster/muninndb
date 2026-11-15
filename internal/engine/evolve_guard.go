@@ -27,21 +27,11 @@ func (e *Engine) evolveLock(ws [8]byte, id storage.ULID) *sync.Mutex {
 }
 
 // distinctSuperseders returns the distinct engrams holding a RelSupersedes
-// edge onto id. GetReverseAssociations repurposes TargetID to hold the SOURCE.
+// edge onto id, from an UNCAPPED relation-filtered scan (store.SupersedersOf):
+// a capped mixed-relation read can be starved by other incoming links and let
+// a second evolve fork.
 func (e *Engine) distinctSuperseders(ctx context.Context, ws [8]byte, id storage.ULID) ([]storage.ULID, error) {
-	rev, err := e.store.GetReverseAssociations(ctx, ws, id, supersessionReverseScan)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[storage.ULID]bool{}
-	var out []storage.ULID
-	for i := range rev {
-		if rev[i].RelType == storage.RelSupersedes && !seen[rev[i].TargetID] {
-			seen[rev[i].TargetID] = true
-			out = append(out, rev[i].TargetID)
-		}
-	}
-	return out, nil
+	return e.store.SupersedersOf(ctx, ws, id)
 }
 
 // refuseSupersededEvolveTarget returns nil when target has no successor (the
@@ -63,16 +53,19 @@ func (e *Engine) distinctSuperseders(ctx context.Context, ws [8]byte, id storage
 // question is "does this memory have a successor in storage", not "may this
 // caller see it". The cost for an ordinary target is one reverse-association
 // read.
-func (e *Engine) refuseSupersededEvolveTarget(ctx context.Context, ws [8]byte, target storage.ULID) error {
+//
+// except, when non-zero, is a successor that does not count: re-declaring the
+// SAME supersedes link (source except → target) is idempotent, not a fork.
+func (e *Engine) refuseSupersededEvolveTarget(ctx context.Context, ws [8]byte, target, except storage.ULID) error {
 	succ, err := e.distinctSuperseders(ctx, ws, target)
 	if err != nil {
 		return fmt.Errorf("evolve: check for an existing successor: %w", err)
 	}
-	if len(succ) == 0 {
+	if len(succ) == 0 || (len(succ) == 1 && except != (storage.ULID{}) && succ[0] == except) {
 		return nil
 	}
 	refuse := func(detail string) error {
-		return fmt.Errorf("%w: memory %s already has a successor, and evolving it again would fork its version history. %s",
+		return fmt.Errorf("%w: memory %s already has a successor, and giving it another (by evolve or a supersedes link) would fork its version history. %s",
 			ErrEvolveTargetSuperseded, target.String(), detail)
 	}
 	visited := map[storage.ULID]bool{target: true}
@@ -83,7 +76,12 @@ func (e *Engine) refuseSupersededEvolveTarget(ctx context.Context, ws [8]byte, t
 			for i, s := range succ {
 				ids[i] = s.String()
 			}
-			return refuse(fmt.Sprintf("Its history is already forked at %s (successors: %s); resolve that by evolving or forgetting one branch.",
+			// A soft forget does NOT repair a fork: the forgotten branch keeps
+			// its supersedes link and recall's head walk still sees two
+			// successors (and abstains as ambiguous). Only a hard forget
+			// removes the branch and its link. Pinned end to end by
+			// TestEvolve_ForkRepairAdviceWorks.
+			return refuse(fmt.Sprintf("Its history is already forked at %s (successors: %s). To repair it, permanently delete the branch you do not want with muninn_forget(id, hard=true) — a soft forget leaves its supersedes link and the fork in place — then evolve the surviving version.",
 				cur.String(), strings.Join(ids, ", ")))
 		}
 		next := succ[0]
