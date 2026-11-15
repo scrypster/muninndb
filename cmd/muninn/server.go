@@ -1460,7 +1460,7 @@ func runServer() {
 	transitionWorkerImpl := cognitive.NewTransitionWorker(ctx, store.TransitionCache())
 	actEngine.SetTransitionStore(store.TransitionCache())
 
-	// Write-time twin check (COG-35): off | shadow | 1, default off. An
+	// Write-time twin check (COG-36): off | shadow | 1, default off. An
 	// unrecognised value runs OFF, loudly — a switch that adds to write
 	// responses must never turn on by accident.
 	writeTwinMode, writeTwinOK := writetwin.ParseMode(os.Getenv("MUNINN_WRITE_RELATED"))
@@ -1782,7 +1782,7 @@ func runServer() {
 		// Re-evaluate push subscriptions once each engram's embedding lands (#512),
 		// so vector-scored matches on freshly-written engrams are not missed.
 		retroProcessor.SetOnEmbed(eng.ReevaluatePushOnEmbed)
-		// Feed the write-time twin ring (COG-35) the exact vector each write
+		// Feed the write-time twin ring (COG-36) the exact vector each write
 		// was stored and indexed with. A no-op when the check is off.
 		retroProcessor.SetOnEmbedded(eng.WriteTwinOnEmbedded)
 		eng.SetWriteTwinFeed(retroProcessor)

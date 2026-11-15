@@ -16,7 +16,7 @@ import (
 )
 
 // writeTwinCapable is the optional engine surface for the write-time twin
-// check (COG-35). The adapter forwards it to *engine.Engine; test fakes need
+// check (COG-36). The adapter forwards it to *engine.Engine; test fakes need
 // not implement it (the block is then simply absent).
 type writeTwinCapable interface {
 	WriteTwinInline(ctx context.Context, vault, newID string, render func(*engine.WriteTwinResult) int) *engine.WriteTwinResult

@@ -41,7 +41,7 @@ var appendInfra = map[string]bool{
 	// SetWriteGate installs the cluster single-writer gate (#596) — wiring, and
 	// it can only ever REFUSE writes, never perform one.
 	"SetWriteGate": true,
-	// Write-time twin check (COG-35). WriteTwinOnEmbedded is the embed
+	// Write-time twin check (COG-36). WriteTwinOnEmbedded is the embed
 	// processor's post-store hook (in-memory ring + a shadow log line; no
 	// store write); SetWriteTwinFeed is wiring. Neither is credential-reachable.
 	"WriteTwinOnEmbedded": true, "SetWriteTwinFeed": true,
@@ -95,7 +95,7 @@ var appendReadOnly = map[string]bool{
 	"NoticesForRecall": true, "NoticesForRemember": true,
 	// LabelStats counts label rows and reads an in-process rejection tally.
 	"LabelStats": true,
-	// WriteTwinInline (COG-35) reads the ring and resolves chain heads through
+	// WriteTwinInline (COG-36) reads the ring and resolves chain heads through
 	// no-stamp reads; it writes nothing (not even access metadata).
 	"WriteTwinInline": true,
 }

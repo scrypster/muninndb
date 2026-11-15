@@ -17,7 +17,7 @@ import (
 	"github.com/scrypster/muninndb/internal/writetwin"
 )
 
-// Write-time twin check (COG-35, design 2026-11-14 write-time push v3).
+// Write-time twin check (COG-36, design 2026-11-14 write-time push v3).
 //
 // A new write whose vector is very close to another write made in the same
 // vault within the last hour is, on two production vaults' blind-judged

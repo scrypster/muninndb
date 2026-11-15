@@ -1,5 +1,5 @@
 // Package writetwin holds the pure rule behind the write-time twin check
-// (COG-35): the mode switch, the "very close" threshold resolution, the
+// (COG-36): the mode switch, the "very close" threshold resolution, the
 // per-vault homogeneity guard, the recent-write ring, and the pre-committed
 // acceptance verdict the offline replay reports.
 //

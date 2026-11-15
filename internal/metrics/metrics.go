@@ -114,7 +114,7 @@ var (
 		Buckets: []float64{0.001, 0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5},
 	}, []string{"lane"})
 
-	// Write-time twin check (COG-35). No vault, id, concept or content ever
+	// Write-time twin check (COG-36). No vault, id, concept or content ever
 	// rides a label: every label below is a closed enum.
 	//
 	// WriteTwinCheckedTotal counts twin checks by path (retro: the shadow

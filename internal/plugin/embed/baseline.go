@@ -89,7 +89,7 @@ func Rescale(cos, b float64) float64 {
 }
 
 // writeTwinHintRegistry is the per-embedder "very close" hint for the
-// write-time twin check (COG-35): the cosine at or above which a new write and
+// write-time twin check (COG-36): the cosine at or above which a new write and
 // a write made in the same vault within the last hour are treated as a likely
 // duplicate or undeclared update.
 //

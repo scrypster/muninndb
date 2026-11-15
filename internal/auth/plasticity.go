@@ -141,7 +141,7 @@ type PlasticityConfig struct {
 	ExcludeTags []string `json:"exclude_tags,omitempty"`
 
 	// WriteTwinThreshold overrides the write-time twin check's "very close"
-	// cosine bar for this vault (COG-35), instead of the hint looked up from
+	// cosine bar for this vault (COG-36), instead of the hint looked up from
 	// the embed model (internal/plugin/embed.WriteTwinHint). nil = use the
 	// model hint (or none: an unregistered model runs shadow-only). Not
 	// preset-varying. Clamped to [0.50, 0.999] at resolution (COG-2:
@@ -488,7 +488,7 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 	// default-empty / opt-in invariant, #713).
 	r.ExcludeTags = resolveExcludeTags(cfg.ExcludeTags)
 
-	// The write-time twin fields are not preset-varying either (COG-35).
+	// The write-time twin fields are not preset-varying either (COG-36).
 	// The threshold override is CLAMPED here, never rejected (COG-2); NaN
 	// clamps to the top of the range — the least intrusive value.
 	if cfg.WriteTwinThreshold != nil {

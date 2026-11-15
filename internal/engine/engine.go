@@ -122,7 +122,7 @@ type Engine struct {
 	// hebbianWorker.Stop(), etc. before the process exits.
 	// ──────────────────────────────────────────────────────────────────
 
-	// twin is the write-time twin check (COG-35); nil when
+	// twin is the write-time twin check (COG-36); nil when
 	// MUNINN_WRITE_RELATED is off, which makes every hook a no-op.
 	twin *writeTwin
 
@@ -1649,7 +1649,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		}
 		return nil, fmt.Errorf("write engram: %w", err)
 	}
-	// Write-time twin check (COG-35): record what the embed hook cannot know
+	// Write-time twin check (COG-36): record what the embed hook cannot know
 	// (vault name, writer). No-op when the check is off.
 	e.noteTwinWrite(ctx, wsPrefix, vaultName, id, 0)
 
@@ -2458,7 +2458,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	batchIDs, batchErrs := e.store.WriteEngramBatch(ctx, filteredItems)
 	ids := make([]storage.ULID, n)
 	// One id per WriteBatch call, so the shadow log can tell an intra-batch
-	// twin from a recent one (COG-35). 0 when the check is off.
+	// twin from a recent one (COG-36). 0 when the check is off.
 	twinBatch := e.nextTwinBatchID()
 	for fi, origIdx := range filteredIdx {
 		if batchErrs[fi] != nil {

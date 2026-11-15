@@ -1713,7 +1713,7 @@ memories have a near-identical sibling). An offline, blind-judged replay found t
 write whose vector is very close to a write made in the same vault within the previous
 hour is a duplicate or an undeclared update 87% of the time (39 of 45), and that
 candidates at cosine ≥ 0.93 were correct 29 of 35 times (0.83, Wilson 95% [0.67, 0.92]).
-Slice 1 (COG-35) builds the narrowest version of that push and the tooling to measure it
+Slice 1 (COG-36) builds the narrowest version of that push and the tooling to measure it
 on each vault before anything is shown. It is **off by default**; `MUNINN_WRITE_RELATED=shadow`
 computes and logs; `=1` additionally shows a block on single `muninn_remember` responses in
 vaults an operator has opted in.
@@ -1763,7 +1763,7 @@ improve (a direct hand-off from the write to the processor instead of a full-sto
 - *No web-console field for the override.* The console's plasticity form already preserves
   fields it does not edit (`plasticityRawConfig` merge), the closest precedent
   (`semantic_floor`) has no field either, and the only reader is an off-by-default feature.
-- *Invariant number.* COG-34 was taken by the honest clock; this is COG-35.
+- *Invariant number.* COG-34 was taken by the honest clock; this is COG-36.
 - *Backlog embeds are not writes.* The processor also embeds re-embeds and pre-existing
   backlog; comparing those with each other would log "twins" nobody wrote. Only a write
   noted by this process, or an engram created within the hour, enters the ring.

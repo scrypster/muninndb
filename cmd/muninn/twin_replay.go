@@ -21,7 +21,7 @@ import (
 )
 
 // twin-replay and twin-audit are the acceptance tooling for the write-time
-// twin check (COG-35, design v3 §6). Both are READ-ONLY and run offline
+// twin check (COG-36, design v3 §6). Both are READ-ONLY and run offline
 // against a data directory — normally a `muninn backup` copy, since a running
 // server holds the Pebble lock. Both print ids and counts only; memory text
 // is written solely to the judging file the operator asks for with --out.

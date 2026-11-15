@@ -43,7 +43,7 @@ func NewEngineAdapter(eng *engine.Engine, enricher plugin.EnrichPlugin, pStore p
 	return &mcpEngineAdapter{eng: eng, enricher: enricher, pStore: pStore}
 }
 
-// WriteTwinInline forwards the mode-1 write-time twin check (COG-35).
+// WriteTwinInline forwards the mode-1 write-time twin check (COG-36).
 func (a *mcpEngineAdapter) WriteTwinInline(ctx context.Context, vault, newID string, render func(*engine.WriteTwinResult) int) *engine.WriteTwinResult {
 	return a.eng.WriteTwinInline(ctx, vault, newID, render)
 }

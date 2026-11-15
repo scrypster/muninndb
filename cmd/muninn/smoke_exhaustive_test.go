@@ -351,7 +351,7 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		if id, _ := result["id"].(string); id == "" {
 			t.Errorf("expected id in result, got: %v", result)
 		}
-		// COG-35: the write-time twin block is off by default — a default
+		// COG-36: the write-time twin block is off by default — a default
 		// server's remember response carries no `related` key at all.
 		if _, has := result["related"]; has {
 			t.Errorf("write-time twin block must be absent with MUNINN_WRITE_RELATED unset, got: %v", result)

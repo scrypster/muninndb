@@ -20,7 +20,7 @@ func twinCos(a, b []float32) float64 {
 }
 
 // TestWriteTwin_QuantizationJitterTwinStillClearsThreshold pins the property
-// the write-time twin check (COG-35) relies on with the bundled int8 model:
+// the write-time twin check (COG-36) relies on with the bundled int8 model:
 // a text's vector depends slightly on its batch-mates, and an exact copy never
 // scores 1.0 — but that jitter is two orders of magnitude smaller than the
 // distance between the twin threshold and a clear twin, so a twin embedded in

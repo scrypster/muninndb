@@ -54,7 +54,7 @@ type EngineConfig struct {
 	// labelled, credential/session hashes are zero, and NewEngine WARNs once.
 	QueryIDSecret []byte
 
-	// WriteTwinMode is the write-time twin check's mode (COG-35), parsed from
+	// WriteTwinMode is the write-time twin check's mode (COG-36), parsed from
 	// MUNINN_WRITE_RELATED by cmd/muninn. The zero value is writetwin.Off:
 	// no ring, no worker, no lookup, byte-identical responses.
 	WriteTwinMode writetwin.Mode

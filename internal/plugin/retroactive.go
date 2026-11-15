@@ -77,12 +77,12 @@ type RetroactiveProcessor struct {
 	// holds (a store lookup of an id's vault is a full scan). It is called
 	// synchronously inside the vault's clear admission, so a vault clear
 	// cannot interleave with it; it must be cheap and must not block. The
-	// write-time twin check (COG-35) feeds its ring from it. Only set on the
+	// write-time twin check (COG-36) feeds its ring from it. Only set on the
 	// embed processor.
 	onEmbedded func(ws [8]byte, eng *Engram, vec []float32)
 
 	// passStartNs is the wall-clock start (UnixNano) of the pass currently
-	// processing work, or 0 when idle. The write-time twin check (COG-35)
+	// processing work, or 0 when idle. The write-time twin check (COG-36)
 	// reads it to tell "my write is queued behind earlier work"
 	// (embedder_busy) from "the embed itself ran long" (embed_timeout).
 	passStartNs atomic.Int64
