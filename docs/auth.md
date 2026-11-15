@@ -309,13 +309,13 @@ curl -X PUT "http://127.0.0.1:8475/api/admin/vault/default/plasticity" \
 |-------|------|-------|---------|
 | `preset` | string | `default` \| `reference` \| `scratchpad` \| `knowledge-graph` \| `working` | Base cognitive profile; overrides applied on top |
 | `hebbian_enabled` | bool | — | Enable/disable Hebbian co-activation learning. Symmetric (COG-32): gates weight updates, association decay, **and** the read-side boost recall applies from association weights |
-| `temporal_enabled` | bool | — | Enable/disable time-based temporal scoring |
+| `temporal_enabled` | bool | — | Accepted and stored, but no runtime path reads it — changing it has no effect (time-based scoring is not switched by this flag) |
 | `multi_user` | bool | — | Vault shared by multiple users/agents: guide + recall hints steer clients to per-user scoped recall; `where_left_off`/`session` flagged vault-global |
 | `hop_depth` | int | 0–8 | BFS hops for associative retrieval; higher = broader context |
 | `semantic_weight` | float | 0–1 | Multiplier for semantic similarity in fusion scoring |
 | `fts_weight` | float | 0–1 | Multiplier for full-text keyword match scoring |
-| `relevance_floor` | float | 0–1 | Minimum relevance score; prevents memories from becoming invisible |
-| `temporal_halflife` | float | >0 | Days before an engram reaches half-life |
+| `relevance_floor` | float | 0–1 | Accepted and stored, but no runtime path reads it — changing it has no effect |
+| `temporal_halflife` | float | >0 | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `traversal_profile` | string | `default` \| `causal` \| `confirmatory` \| `adversarial` \| `structural` | Link traversal strategy; empty = auto-infer |
 | `predictive_activation` | bool | — | Enable/disable Predictive Activation Signal (PAS); default: true |
 | `pas_max_injections` | int | 1–20 | Max transition candidates injected per activation; default: 5 |

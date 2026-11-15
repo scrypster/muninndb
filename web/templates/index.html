@@ -1425,8 +1425,8 @@
                     Hebbian learning
                   </label>
                   <label style="font-size:0.8125rem;display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
-                    <input type="checkbox" x-model="plasticityForm.temporalEnabled" @change="_updatePlasticityChart()" />
-                    Temporal scoring
+                    <input type="checkbox" x-model="plasticityForm.temporalEnabled" @change="_updatePlasticityChart()" title="Stored for compatibility only: no runtime path reads temporal_enabled, so this toggle does not change scoring or decay." />
+                    Temporal scoring <span style="color:var(--text-muted);">(no effect)</span>
                   </label>
                 </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
