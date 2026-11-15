@@ -28,9 +28,10 @@ import (
 // strictly stronger than "zero substitutions on the nonsense probes".
 //
 // It reuses TestMeasureAbstentionGate's fixture verbatim — the same 18-engram
-// synthetic billing corpus, the same 12 answerable paraphrases and 16 nonsense
+// synthetic booking corpus, the same 12 answerable paraphrases and 16 nonsense
 // probes, the same real bge-small embedder — so the numbers are directly
-// comparable to the recorded 0.6410 / 6.2% baseline.
+// comparable to the recorded graft-free baseline: NDCG@5 0.8026, FPR 12.5%
+// (2 of 16) on this corpus at the 0.10 engine default.
 // ---------------------------------------------------------------------------
 
 // shadowGraftChain marks one corpus member as a superseded predecessor,
@@ -77,9 +78,9 @@ func TestMeasureShadowPrecision_GraftedChain(t *testing.T) {
 	}
 
 	store := newStubStore()
-	vecs := make(map[storage.ULID][]float32, len(billingCorpus)+1)
-	byConcept := make(map[string]storage.ULID, len(billingCorpus))
-	for _, n := range billingCorpus {
+	vecs := make(map[storage.ULID][]float32, len(bookingCorpus)+1)
+	byConcept := make(map[string]storage.ULID, len(bookingCorpus))
+	for _, n := range bookingCorpus {
 		eng := &storage.Engram{
 			Concept: n.concept, Content: n.content,
 			Confidence: 1.0, Stability: 30.0, CreatedAt: abmFixtureNow(),
@@ -151,13 +152,15 @@ func TestMeasureShadowPrecision_GraftedChain(t *testing.T) {
 	//
 	// Shadows are excluded from maxRaw by construction (they are scored in a
 	// separate pass over a disjoint set), so a declared chain in the pool must
-	// leave the live gate's numbers exactly where TestMeasureAbstentionGate
-	// recorded them: NDCG@5 0.6410, FPR 6.2%.
+	// leave the live gate's numbers where the same run WITHOUT the graft puts
+	// them on this corpus: NDCG@5 0.8026, FPR 12.5%. (The absolute gate does
+	// not depend on the pool, so that FPR is also TestMeasureAbstentionGate's
+	// absolute-arm FPR.)
 	const (
-		wantNDCG = 0.6410
-		// The recorded 6.2%% is 1 false positive in 16 probes; compare the exact
+		wantNDCG = 0.8026
+		// The recorded 12.5% is 2 false positives in 16 probes; compare the exact
 		// fraction so the assertion is not a rounding artefact.
-		wantFPR = 1.0 / 16.0
+		wantFPR = 2.0 / 16.0
 	)
 	var ndcgSum float64
 	for _, q := range abmAnswerable {
