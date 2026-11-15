@@ -930,6 +930,23 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	engramID, ok1 := args["id"].(string)
 	newContent, ok2 := args["new_content"].(string)
 	reason, ok3 := args["reason"].(string)
+	// `content` is accepted as an alias for `new_content`: it is the field name
+	// muninn_remember uses, and sending it here was the single largest cause of
+	// failed evolves in measured agent traffic (33 of 43 failures in 30 days).
+	// Accepted only when new_content is absent, and always said in the
+	// response; if BOTH are given and differ there is no safe choice, so refuse.
+	var notes []string
+	if alias, hasAlias := args["content"].(string); hasAlias && alias != "" {
+		switch {
+		case !ok2 || newContent == "":
+			newContent, ok2 = alias, true
+			notes = append(notes, "accepted `content` as `new_content` (muninn_evolve's field is `new_content`)")
+		case alias != newContent:
+			sendArgError(w, id, argRejectConflictingAlias,
+				"invalid params: 'new_content' and 'content' were both given and differ — muninn_evolve takes the replacement text in 'new_content' only; send one of them")
+			return
+		}
+	}
 	if !ok1 || !ok2 || !ok3 || engramID == "" || newContent == "" || reason == "" {
 		var missing []string
 		if !ok1 || engramID == "" {
@@ -941,7 +958,9 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 		if !ok3 || reason == "" {
 			missing = append(missing, "'reason' (why the memory changed)")
 		}
-		sendError(w, id, -32602, fmt.Sprintf("invalid params: missing required field(s): %s", strings.Join(missing, ", ")))
+		sendArgError(w, id, argRejectMissingField, fmt.Sprintf(
+			"invalid params: missing required field(s): %s. Example: {\"id\":\"<memory id>\",\"new_content\":\"<full replacement text>\",\"reason\":\"<why it changed>\"}",
+			strings.Join(missing, ", ")))
 		return
 	}
 	var evolveEmb []float32
@@ -1056,6 +1075,7 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	if markupOnlyWarning != "" {
 		result.Warnings = append(result.Warnings, markupOnlyWarning)
 	}
+	result.Notes = append(notes, result.Notes...)
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 

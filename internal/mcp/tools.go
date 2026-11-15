@@ -393,8 +393,10 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "muninn_evolve",
-			Description: "Update a memory with new information. Creates a new version linked to the old one by a supersedes association, and soft-deletes the old version so it drops out of present-tense recall (never destroyed — as_of still sees it). Use this — not a repeated muninn_remember — whenever a new call is re-asserting or replacing a fact you already stored; otherwise every stale copy stays fully active and crowds recall with near-duplicates.",
+			Name: "muninn_evolve",
+			Description: "Update a memory with new information. Creates a new version linked to the old one by a supersedes association, and soft-deletes the old version so it drops out of present-tense recall (never destroyed — as_of still sees it). Use this — not a repeated muninn_remember — whenever a new call is re-asserting or replacing a fact you already stored; otherwise every stale copy stays fully active and crowds recall with near-duplicates. " +
+				"Evolve the CURRENT version: a memory that already has a successor is refused with an error naming its current version, because a second successor would fork its history. " +
+				"`content` is accepted as an alias for `new_content` when `new_content` is absent (the response notes it).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
