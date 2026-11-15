@@ -208,6 +208,10 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 		}
 	}
 
+	// The vault's recent-write vectors and guard go with its data (COG-36).
+	// Runs inside the processors' clear boundary, so no embed hook can
+	// re-insert a pre-clear vector after this.
+	e.resetTwinVault(ws)
 	if e.fts != nil {
 		e.fts.InvalidateIDFCache()
 	}

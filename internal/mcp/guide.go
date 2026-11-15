@@ -340,3 +340,12 @@ func ageEffectLine(resolved auth.ResolvedPlasticity) string {
 		return "- Age effect on recall: none. A memory's age and access history do not change whether it is found, its absolute_score or its relevance_band, and a restart does not either. Rank is content match x confidence times association boosts; those boosts come from recent recalls held in memory, so the order of results can shift after other recalls or after a restart, while what is found does not. Exact ties go to the newer memory.\n"
 	}
 }
+
+// writeTwinGuideSection is appended to the guide only when the server runs the
+// write-time twin check (COG-36): with it off the guide is byte-identical to a
+// server without the feature.
+const writeTwinGuideSection = "\n## Related memories on write (muninn_remember)\n\n" +
+	"If a muninn_remember response carries `related`, a memory written in this vault within the last hour is very close to the one you just stored. " +
+	"It is evidence, not a verdict: read both, then pick the option that fits — usually the first, `muninn_link(source_id=<new>, target_id=<earlier>, relation=\"supersedes\")`, when the new memory updates the earlier one. " +
+	"Every option names the id it would retire. `related.unavailable` means the check could not run that time; nothing is implied.\n" +
+	"- It appears only when the vault has opted in (`write_twin_inline`) and your credential is full-mode; otherwise the server only logs what it would have said.\n"

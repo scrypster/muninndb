@@ -40,7 +40,11 @@ var appendInfra = map[string]bool{
 	"Store":           true, "ResetReplayFailCount": true, "Stop": true, "Checkpoint": true,
 	// SetWriteGate installs the cluster single-writer gate (#596) — wiring, and
 	// it can only ever REFUSE writes, never perform one.
-	"SetWriteGate":  true,
+	"SetWriteGate": true,
+	// Write-time twin check (COG-36). WriteTwinOnEmbedded is the embed
+	// processor's post-store hook (in-memory ring + a shadow log line; no
+	// store write); SetWriteTwinFeed is wiring. Neither is credential-reachable.
+	"WriteTwinOnEmbedded": true, "SetWriteTwinFeed": true,
 	"Observability": true, "LatencyTracker": true, "ActivityTracker": true,
 	// WaitWriteTimeIdle drains the write-time async workers and writes
 	// nothing itself — an out-of-package test seam (#722 doctrine, #764).
@@ -91,6 +95,9 @@ var appendReadOnly = map[string]bool{
 	"NoticesForRecall": true, "NoticesForRemember": true,
 	// LabelStats counts label rows and reads an in-process rejection tally.
 	"LabelStats": true,
+	// WriteTwinInline (COG-36) reads the ring and resolves chain heads through
+	// no-stamp reads; it writes nothing (not even access metadata).
+	"WriteTwinInline": true, "WriteTwinEnabled": true,
 }
 
 // TestAppendMode_MethodCensus is the ANTI-ROT pin the #687 reviews demanded: it

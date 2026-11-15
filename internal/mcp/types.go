@@ -72,6 +72,13 @@ type WriteResult struct {
 	// whose cue entity is focal in this write's inline entities. Omitted when
 	// empty (zero token cost) and inert unless MUNINN_PROSPECTIVE=1.
 	Notices []engine.Notice `json:"notices,omitempty"`
+	// Related is the write-time twin block (COG-36): earlier memories, written
+	// in this vault within the last hour, whose vectors are very close to
+	// this one. Present only when the server runs MUNINN_WRITE_RELATED=1, the
+	// vault opted in (write_twin_inline), the credential is full-mode, and
+	// the write created a new memory. Omitted otherwise — off and shadow
+	// responses are byte-identical to a plain write.
+	Related *RelatedBlock `json:"related,omitempty"`
 }
 
 type Memory struct {

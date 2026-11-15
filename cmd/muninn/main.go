@@ -86,6 +86,10 @@ func main() {
 		runDream(rest)
 	case "backup":
 		runBackup(rest)
+	case "twin-replay":
+		runTwinReplay(rest)
+	case "twin-audit":
+		runTwinAudit(rest)
 	case "upgrade":
 		runUpgrade(rest)
 	case "restart":

@@ -38,6 +38,7 @@ import (
 	"github.com/scrypster/muninndb/internal/scoring"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
+	"github.com/scrypster/muninndb/internal/writetwin"
 )
 
 // dedupReinforceCap is the minimum interval between content-hash dedup
@@ -124,6 +125,11 @@ type Engine struct {
 	// code (or server.go in standalone) is responsible for calling
 	// hebbianWorker.Stop(), etc. before the process exits.
 	// ──────────────────────────────────────────────────────────────────
+
+	// twin is the write-time twin check (COG-36); nil when
+	// MUNINN_WRITE_RELATED is off, which makes every hook a no-op.
+	twin *writeTwin
+
 	cogMu            sync.RWMutex
 	hebbianWorker    *cognitive.HebbianWorker
 	contradictWorker *cognitive.Worker[cognitive.ContradictItem]
@@ -600,6 +606,11 @@ func NewEngine(cfg EngineConfig) *Engine {
 		replayFailCounts: make(map[storage.ULID]int),
 		qidKey:           auth.NewQueryIDKey(cfg.QueryIDSecret),
 	}
+	if cfg.WriteTwinMode != writetwin.Off {
+		e.twin = newWriteTwin(cfg.WriteTwinMode)
+		// engine:spawn-ok — tracked by twin.done, drained in Stop() via twin.shutdown()
+		go e.runWriteTwinWorker()
+	}
 	if e.qidKey == nil {
 		slog.Warn("engine: no auth secret wired — read-only recall query ids are ro0.<ULID> and cannot be labelled, " +
 			"and label credential/session hashes are recorded as unknown")
@@ -750,6 +761,9 @@ func (e *Engine) Stop() {
 		// so goroutines see a cancelled context, and before wg.Wait() calls below.
 		e.fireAndForgetStopped.Store(true)
 		e.jobStopped.Store(true)
+		if e.twin != nil {
+			e.twin.shutdown()
+		}
 		e.vaultOpMu.Lock()
 		e.vaultOpStopped.Store(true)
 		e.vaultOpMu.Unlock()
@@ -999,6 +1013,9 @@ func (e *Engine) WaitWriteTimeIdle() {
 	}
 	if e.activation != nil {
 		e.activation.WaitLogIdle()
+	}
+	if e.twin != nil {
+		e.twin.waitIdle()
 	}
 }
 
@@ -1656,6 +1673,9 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		}
 		return nil, fmt.Errorf("write engram: %w", err)
 	}
+	// Write-time twin check (COG-36): record what the embed hook cannot know
+	// (vault name, writer). No-op when the check is off.
+	e.noteTwinWrite(ctx, wsPrefix, vaultName, id, 0)
 
 	// Store content hash → engram ID mapping for future dedup lookups — unless
 	// this is an identity-addressed upsert create (skipContentDedup), whose
@@ -2461,6 +2481,9 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	}
 	batchIDs, batchErrs := e.store.WriteEngramBatch(ctx, filteredItems)
 	ids := make([]storage.ULID, n)
+	// One id per WriteBatch call, so the shadow log can tell an intra-batch
+	// twin from a recent one (COG-36). 0 when the check is off.
+	twinBatch := e.nextTwinBatchID()
 	for fi, origIdx := range filteredIdx {
 		if batchErrs[fi] != nil {
 			// STO-12, same mapping as Engine.Write: a dangling inline
@@ -2474,6 +2497,9 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			continue
 		}
 		ids[origIdx] = batchIDs[fi]
+		if twinBatch != 0 {
+			e.noteTwinWrite(ctx, prepared[origIdx].wsPrefix, prepared[origIdx].vaultName, batchIDs[fi], twinBatch)
+		}
 		responses[origIdx] = &mbp.WriteResponse{
 			ID:        batchIDs[fi].String(),
 			CreatedAt: time.Now().UnixNano(),

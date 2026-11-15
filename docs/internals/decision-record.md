@@ -2024,3 +2024,111 @@ same).
 engine tests cost 0.2 s; the margin problem predates it — 292 s was measured here on a loaded
 machine). The next engine test added anywhere may be the one that tips CI. The hnsw package
 went from 43 s (trunk) to ~125 s under `-race` with this work.
+
+### Write-time twin check, slice 1: shadow first, the hook instead of a second embed (2026-11-15)
+
+The engine volunteered nothing at write time, and agents re-write facts instead of
+updating them (on real usage evolve:new ran about 1:7, and a large share of stored
+memories have a near-identical sibling). An offline, blind-judged replay found that a new
+write whose vector is very close to a write made in the same vault within the previous
+hour is a duplicate or an undeclared update 87% of the time (39 of 45), and that
+candidates at cosine ≥ 0.93 were correct 29 of 35 times (0.83, Wilson 95% [0.67, 0.92]).
+Slice 1 (COG-36) builds the narrowest version of that push and the tooling to measure it
+on each vault before anything is shown. It is **off by default**; `MUNINN_WRITE_RELATED=shadow`
+computes and logs; `=1` additionally shows a block on single `muninn_remember` responses in
+vaults an operator has opted in.
+
+**0.93 came from two production vaults.** It is not a canonical-corpus measurement and is
+not defended as one. It ships only as a *model-scale hint* keyed by embed model (how close
+bge-small places restatements and updates), with three things around it that keep it from
+being one vault's answer imposed on another (principle #11): a per-vault override
+(`write_twin_threshold`, clamped), a homogeneity guard that reports a vault where the hint
+does not discriminate (more than 5 of 100 ordinary writes already clear it), and the rule
+that the block is enabled on a vault only after that vault's own replay check passes. An
+unregistered model gets no hint at all and runs shadow-only. The recent-twin precision at
+≥ 0.93 specifically was never judged — Gate 0 judged the case at its ~0.87 floor — so each
+vault's replay judges the exact rule.
+
+**The vector comes from the hook, not from `TryEmbed` (deviation from v3 §4/§7).** v3 was
+written against one provider mutex that ignored deadlines; the trunk now has query and
+batch lanes (the embed-lanes change). The design's `LocalProvider.TryEmbed` would still have been a
+second inference per mode-1 write (~45 ms CPU), in a batch of one, so its vector would
+differ from the stored one by the int8 model's batch jitter, and it would have needed an
+`embedder_not_bounded` carve-out for every HTTP provider. Instead the retroactive
+processor — which embeds every write anyway — hands the engine the exact vector it just
+stored and indexed (`SetOnEmbedded`, with the vault prefix it already holds: a store lookup
+of an id's vault is a full scan). Shadow and mode 1 both add zero embed calls, the ring and
+HNSW hold identical vectors (pinned), it works for every provider, and the inline path only
+waits — `min(100 ms, 2 × measured delivery)`, the design's budget — then says
+`embedder_busy` (the processor was mid-pass before this write) or `embed_timeout`. The cost
+is that mode 1's latency is the processor's pass latency: measured on a 2,000-memory
+fixture with the bundled embedder on a shared development machine (120 remembers per mode),
+the remember handler was p50 9.5 ms / p99 35 ms off, 9.6 / 29 ms shadow (no added cost), and
+89–92 ms / 126–141 ms in mode 1, where 76% of checks got their vector in budget and the rest
+reported `embed_timeout` (18%) or `embedder_busy` (7%). That number is the next thing to
+improve (a direct hand-off from the write to the processor instead of a full-store pass).
+
+**Other deviations, each on evidence.**
+- *Per-vault opt-in.* v3 has one env var but also says mode 1 shows only on a vault whose
+  replay passed. That needs a per-vault switch, so mode 1 shows the block only where
+  plasticity `write_twin_inline: true` is set; everywhere else mode 1 is shadow.
+- *`calibrating`.* The guard is computed asynchronously; before its first measurement in a
+  process the vault reports `calibrating` (shows nothing) rather than guessing.
+- *The 1,000-byte cap and "at most 2 candidates" conflict.* With 26-character ids and options
+  that each name the id they retire, one candidate measures ~880 bytes and two 1,184–1,312.
+  The cap was kept (it is the stated budget); the block therefore shows one candidate in
+  practice and the second head is logged `shown=false` — the engine is told how many were
+  rendered so the log never claims a display that did not happen. Raising the cap to ~1,350
+  bytes would show two; that is a product call, not taken here.
+- *No web-console field for the override.* The console's plasticity form already preserves
+  fields it does not edit (`plasticityRawConfig` merge), the closest precedent
+  (`semantic_floor`) has no field either, and the only reader is an off-by-default feature.
+- *Backlog embeds are not writes.* The processor also embeds re-embeds and pre-existing
+  backlog; comparing those with each other would log "twins" nobody wrote. Only a write
+  noted by this process, or an engram created within the hour, enters the ring; an id
+  admitted within the hour is not re-admitted; a pair is logged and counted once per
+  hour. (The first cut claimed backlog "never enters"; review found a re-embed within the
+  hour re-admitted both members of a pair and logged it again. Now pinned.)
+- *Off is inert, and what is not.* With the check off the hook is not wired, the MCP path
+  allocates and calls nothing, and the guide, the tool description and resolved
+  plasticity JSON are unchanged. Unconditional: a nil check per write, one interface
+  assertion per remember, two accepted plasticity fields, two CLI subcommands, and four
+  unlabelled metrics exporting zeros.
+- *Review fixes, slice 1.* `Engine.Stop` could hang if a hook's send landed after the
+  worker's final drain (reproduced; admission, send and accounting are now one locked
+  step). The ring was bounded per vault but not in total and idle vaults never emptied
+  (300 vaults x 512 entries measured +255.6 MB); it is now capped at 16 MiB across vaults
+  and swept by age. The blind judging file paired each flagged write twice with the same
+  later text, giving the arm away; controls now come from unflagged writes and no later
+  text repeats. Shadow lines carry `considered` and `ring=warming|warm`, and `twin-audit`
+  reports the hour after each restart apart. `vault_ws` is a fixed-key SipHash: shadow
+  logs identify vaults to anyone with a guess list.
+- *Invariant number.* COG-35 is claimed by another branch merging first; this is COG-36.
+- *Client-supplied embeddings are not checked.* A write that carries its own `embedding`
+  is indexed inline and never passes through the embed processor, so it never enters the
+  ring (its vector may also come from another model). No block, no shadow line.
+- *Batch ids.* Intra-batch pairs need to know which items shared a `WriteBatch` call; the
+  engine notes it just after the commit. A pass that embeds an item in the microseconds
+  between commit and note logs it as `rule=recent` — a labelling race only.
+
+**Acceptance tooling.** `muninn twin-replay` replays the last 60 days of a vault (read-only,
+on a backup copy) under the exact rule — heads resolved as of each write, a supersedes edge
+the write itself made at write time (an evolve) skipped, a link made later still counted as
+a flag — and prints flags, flags per 100 writes, the per-day maximum, the guard, and the
+pre-committed verdict (VETO under a 0.70 precision lower bound, over 5 per 100, or
+`too_homogeneous`; DO_NOT_ENABLE under 40 flags or at cold start). `--out` writes ids-only
+pairs, a blind judging file with full text (every sampled flag, up to 100, plus as many controls: unflagged writes against a rank-11–20 neighbour; no later text repeats), and a
+separate key; `--key/--labels` scores the judgements. `muninn twin-audit` reads the shadow
+log back and counts unresolved near-twin pairs (both live, no supersedes/contradicts edge,
+neither forgotten) per 100 writes, for pairs at least 7 days old. Its known over-counts are
+printed with every report (undatable forgets, the ring cap, dequantized vectors).
+
+**Handed off, confirmed on this trunk, not fixed here.**
+- The novelty fingerprint sorts terms by count only, over map order (`novelty.go:45`), so
+  ties are nondeterministic. Still true.
+- Prospective-notice dedup is keyed on the raw client `Mcp-Session-Id` (`server.go:650`), a
+  shared `anon` bucket, arbitrary eviction at 1,024 sessions. Still true.
+- "A client retrying a failed write without an op id stores a duplicate" is **narrower than
+  stated**: an exact retry returns the existing id with `duplicate_content` (content-hash
+  dedup), as does a retry that changes only the concept. A retry whose content bytes differ
+  (re-rendered punctuation, casing) stores a second memory. That is the residual.

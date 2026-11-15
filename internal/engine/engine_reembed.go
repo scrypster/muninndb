@@ -96,6 +96,8 @@ func (e *Engine) runReembed(job *vaultjob.Job, ws [8]byte, vaultName string) {
 	if e.hnswRegistry != nil {
 		e.hnswRegistry.BeginClear(ws)
 	}
+	// Re-embedding replaces every vector: the twin ring's are stale (COG-36).
+	e.resetTwinVault(ws)
 
 	// Step 2: Clear all 0x07 HNSW keys.
 	err := e.store.ClearHNSWForVault(ws)

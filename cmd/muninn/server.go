@@ -50,6 +50,7 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/rest"
 	"github.com/scrypster/muninndb/internal/ui"
 	"github.com/scrypster/muninndb/internal/wal"
+	"github.com/scrypster/muninndb/internal/writetwin"
 	webui "github.com/scrypster/muninndb/web"
 )
 
@@ -1459,6 +1460,19 @@ func runServer() {
 	transitionWorkerImpl := cognitive.NewTransitionWorker(ctx, store.TransitionCache())
 	actEngine.SetTransitionStore(store.TransitionCache())
 
+	// Write-time twin check (COG-36): off | shadow | 1, default off. An
+	// unrecognised value runs OFF, loudly — a switch that adds to write
+	// responses must never turn on by accident.
+	writeTwinMode, writeTwinOK := writetwin.ParseMode(os.Getenv("MUNINN_WRITE_RELATED"))
+	if !writeTwinOK {
+		slog.Warn("MUNINN_WRITE_RELATED has an unrecognised value; the write-time twin check stays off (use off, shadow or 1)",
+			"value", os.Getenv("MUNINN_WRITE_RELATED"))
+	} else if writeTwinMode != writetwin.Off {
+		// The audit (muninn twin-audit) reads this line back as a ring
+		// warm-up start: keep the message equal to writetwin.StartLogMsg.
+		slog.Info(writetwin.StartLogMsg, "mode", writeTwinMode.String())
+	}
+
 	// Build engine API - pass the full worker implementations
 	eng := engine.NewEngine(engine.EngineConfig{
 		Store:            store,
@@ -1475,6 +1489,7 @@ func runServer() {
 		// The persisted auth secret keys read-only query ids (ro1.) and the
 		// label pipeline's credential/session hashes, so ids survive restarts.
 		QueryIDSecret: sessionSecret,
+		WriteTwinMode: writeTwinMode,
 	})
 
 	eng.SetTransitionWorker(transitionWorkerImpl)
@@ -1769,6 +1784,12 @@ func runServer() {
 		// Re-evaluate push subscriptions once each engram's embedding lands (#512),
 		// so vector-scored matches on freshly-written engrams are not missed.
 		retroProcessor.SetOnEmbed(eng.ReevaluatePushOnEmbed)
+		// Feed the write-time twin ring (COG-36) the exact vector each write
+		// was stored and indexed with. A no-op when the check is off.
+		if writeTwinMode != writetwin.Off {
+			retroProcessor.SetOnEmbedded(eng.WriteTwinOnEmbedded)
+			eng.SetWriteTwinFeed(retroProcessor)
+		}
 		retroProcessor.Start(ctx)
 		slog.Info("retroactive embed processor started")
 	}

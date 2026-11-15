@@ -114,6 +114,64 @@ var (
 		Buckets: []float64{0.001, 0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5},
 	}, []string{"lane"})
 
+	// Write-time twin check (COG-36). No vault, id, concept or content ever
+	// rides a label: every label below is a closed enum.
+	//
+	// WriteTwinCheckedTotal counts twin checks by path (retro: the shadow
+	// worker fed by the embed hook; inline: a mode-1 remember) and outcome.
+	WriteTwinCheckedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninn_write_twin_checked_total",
+		Help: "Write-time twin checks, by path (retro|inline) and outcome (flagged|none|unavailable).",
+	}, []string{"path", "outcome"})
+	// WriteTwinFlaggedTotal counts named (write, head) pairs by rule and
+	// whether the block was shown.
+	WriteTwinFlaggedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninn_write_twin_flagged_total",
+		Help: "Write-time twin pairs named, by rule (recent|batch|historic) and shown (true|false).",
+	}, []string{"rule", "shown"})
+	// WriteTwinUnavailableTotal counts checks that could not run, by reason.
+	WriteTwinUnavailableTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninn_write_twin_unavailable_total",
+		Help: "Write-time twin checks that could not run, by reason.",
+	}, []string{"reason"})
+	// WriteTwinEmbedSkippedBusyTotal counts inline checks that gave up
+	// because the embed processor was already busy with earlier work.
+	WriteTwinEmbedSkippedBusyTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "muninn_write_twin_embed_skipped_busy_total",
+		Help: "Inline write-time twin checks that reported embedder_busy (the write's vector was queued behind earlier embed work).",
+	})
+	// WriteTwinDroppedTotal counts shadow jobs dropped because the worker's
+	// queue was full (the write itself is never affected).
+	WriteTwinDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "muninn_write_twin_dropped_total",
+		Help: "Shadow write-time twin jobs dropped because the worker queue was full.",
+	})
+	// WriteTwinRingEvictedTotal counts ring entries evicted, by reason
+	// (age | vault_cap | total_cap).
+	WriteTwinRingEvictedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninn_write_twin_ring_evicted_total",
+		Help: "Write-time twin ring entries evicted, by reason (age|vault_cap|total_cap).",
+	}, []string{"reason"})
+	// WriteTwinRingBytes is the ring's current vector memory across vaults.
+	WriteTwinRingBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "muninn_write_twin_ring_bytes",
+		Help: "Bytes the write-time twin ring holds across all vaults (capped).",
+	})
+	// WriteTwinInlineWaitSeconds is how long a mode-1 remember waited for
+	// its own vector (bounded by min(100ms, 2x the measured delivery time)).
+	WriteTwinInlineWaitSeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "muninn_write_twin_inline_wait_seconds",
+		Help:    "Time a mode-1 muninn_remember waited for its vector before the twin check.",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15},
+	})
+	// WriteTwinLookupSeconds is the duration of the lookup itself (ring scan
+	// plus head resolution), by path — the part that runs after the vector.
+	WriteTwinLookupSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "muninn_write_twin_lookup_seconds",
+		Help:    "Duration of the write-time twin lookup (ring scan + head resolution), by path (retro|inline).",
+		Buckets: []float64{0.0001, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1},
+	}, []string{"path"})
+
 	// RecallErrorsTotal counts activation calls that hard-failed (returned an
 	// error, not a degraded-but-successful result), labelled by a coarse
 	// reason so an operator can separate caller-side cancellation/timeout
