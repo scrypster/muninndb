@@ -66,6 +66,17 @@ func (e *noopEmbedder) Tokenize(text string) []string {
 	return strings.Fields(text)
 }
 
+// IsNoopEmbedder reports whether e is the no-embedder stub (or nil): recall
+// through it is keyword-only by construction. Status surfaces use it to say
+// "semantic recall is disabled" instead of guessing.
+func IsNoopEmbedder(e Embedder) bool {
+	if e == nil {
+		return true
+	}
+	_, ok := e.(*noopEmbedder)
+	return ok
+}
+
 // NewNoopEmbedder returns an Embedder that produces no embeddings.
 func NewNoopEmbedder() Embedder {
 	return &noopEmbedder{}

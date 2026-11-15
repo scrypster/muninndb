@@ -73,7 +73,8 @@ var ErrAppendForbidden = errors.New("append-mode credential cannot modify or del
 //   - additive remember on a content-hash duplicate → TouchAccess (#682).
 //   - the read path (Read/Activate/recall) under an append credential is NOT
 //     forced read-only (resolveReadOnly forces it only for observe), so it drives
-//     RecordFeedback (per-vault adaptive scoring weights), TouchAccess (access
+//     RecordFeedback (an inert per-vault weight update — see
+//     internal/scoring/deadloop_characterization_test.go), TouchAccess (access
 //     count / last-access), and Hebbian LTP + PAS on existing associations.
 //
 // None overwrite content/confidence/state/tags/lifecycle or delete — they only

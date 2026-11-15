@@ -366,6 +366,10 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		Status  string `json:"status"`
 		Error   string `json:"error,omitempty"`
 		Hint    string `json:"hint,omitempty"`
+		// DuplicateOf names the existing memory this item's content was
+		// deduplicated against (no new engram was written). Status stays
+		// "ok" for compatibility; this field is the signal.
+		DuplicateOf string `json:"duplicate_of,omitempty"`
 	}
 	results := make([]batchItemResult, len(reqs))
 	for i := range reqs {
@@ -373,10 +377,15 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			results[i] = batchItemResult{Index: i, Status: "error", Error: errs[i].Error()}
 		} else {
 			results[i] = batchItemResult{Index: i, ID: responses[i].ID, Concept: reqs[i].Concept, Status: "ok"}
+			// The engine's per-item hint (e.g. "duplicate_content") was
+			// dropped here, so a deduplicated item read as a fresh write.
+			// Carry it exactly as muninn_remember does.
+			results[i].Hint = responses[i].Hint
+			if responses[i].Hint == "duplicate_content" {
+				results[i].DuplicateOf = responses[i].ID
+			}
 		}
-		if h := enrichReports[i].hint(); h != "" {
-			results[i].Hint = h
-		}
+		results[i].Hint = joinHints(results[i].Hint, enrichReports[i].hint())
 		if h := unknownTypeHint(unknownTypes[i]); h != "" {
 			if results[i].Hint != "" {
 				results[i].Hint += " "
@@ -890,9 +899,19 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 	status := VaultStatus{
 		Vault:          vault,
 		TotalMemories:  resp.EngramCount,
-		Health:         "good",
+		Health:         "unknown",
+		HealthReasons:  []string{"this engine does not report embedder or worker state"},
 		EnrichmentMode: enrichMode,
 		// Plugins: populated in a future task when plugin registry is accessible via handleStatus.
+	}
+	if hr, ok := s.engine.(healthReporter); ok {
+		snap := hr.HealthSnapshot(ctx)
+		health, reasons, emb, workers := deriveHealth(snap)
+		status.Health = health
+		status.HealthReasons = reasons
+		status.Embedder = &emb
+		status.Workers = workers
+		status.EmbeddingsPending = snap.EmbeddingsPending
 	}
 	sendResult(w, id, textContent(mustJSON(status)))
 }
@@ -1084,7 +1103,22 @@ func (s *MCPServer) handleSession(ctx context.Context, w http.ResponseWriter, id
 		sendError(w, id, -32602, "invalid params: 'since' must be ISO 8601 (e.g. 2024-01-01T00:00:00Z)")
 		return
 	}
-	result, err := s.engine.Session(ctx, vault, since)
+	offset, limit := 0, 0
+	if v, ok := args["offset"].(float64); ok {
+		if v < 0 {
+			sendError(w, id, -32602, "invalid params: 'offset' must be >= 0")
+			return
+		}
+		offset = int(v)
+	}
+	if v, ok := args["limit"].(float64); ok {
+		if v < 1 {
+			sendError(w, id, -32602, "invalid params: 'limit' must be >= 1")
+			return
+		}
+		limit = int(v)
+	}
+	result, err := s.engine.Session(ctx, vault, since, offset, limit)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return

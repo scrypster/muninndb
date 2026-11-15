@@ -160,8 +160,9 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "muninn_remember_batch",
-			Description: "Store multiple memories at once. More efficient than calling muninn_remember repeatedly. Maximum 50 per batch. Best practice: break complex topics into individual atomic memories — one concept, decision, or fact each. This produces sharper embeddings, better associations, and more accurate retrieval.",
+			Name: "muninn_remember_batch",
+			Description: "Store multiple memories at once. More efficient than calling muninn_remember repeatedly. Maximum 50 per batch. Best practice: break complex topics into individual atomic memories — one concept, decision, or fact each. This produces sharper embeddings, better associations, and more accurate retrieval. " +
+				"An item whose content exactly matches an existing memory is not stored again: its result carries `duplicate_of` (the existing id, also returned as `id`) and hint `duplicate_content`.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -378,8 +379,11 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "muninn_status",
-			Description: "Get health and capacity statistics for the vault.",
+			Name: "muninn_status",
+			Description: "Get health and capacity statistics for the vault. `health` is derived, not a constant: \"good\" when the embedder is up (or not yet exercised by a recall) and no cognitive worker is erroring or stopped; " +
+				"otherwise \"degraded\" with one entry per cause in `health_reasons`. Also reports `embedder.state` (up | degraded_to_keyword | disabled | unknown), " +
+				"each cognitive worker's state (active | idle | dormant | stopped | disabled | erroring) with `last_run_age_seconds`, `embeddings_pending` while an embed backfill runs, and `enrichment_mode`. " +
+				"A dormant worker just has nothing to do — reported, not a degradation.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -445,13 +449,18 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "muninn_session",
-			Description: "Get a summary of recent memory activity since a timestamp — vault-wide: in a vault shared by multiple users or agents this includes other users' activity (admin/audit use there).",
+			Name: "muninn_session",
+			Description: "Get a summary of recent memory activity since a timestamp — vault-wide: in a vault shared by multiple users or agents this includes other users' activity (admin/audit use there). " +
+				"`writes` lists live memories created since `since`, NEWEST first, one page at a time (forgotten and superseded memories are excluded); " +
+				"`total` counts the whole window, `returned` this page, and `truncated` is true when more remain (page with `offset`). " +
+				"`activations` counts recalls since `since` that returned at least one result (read-only and empty recalls are not recorded; records are kept 90 days).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"vault": vaultProp,
-					"since": map[string]any{"type": "string", "description": "ISO 8601 timestamp. Return activity after this time."},
+					"vault":  vaultProp,
+					"since":  map[string]any{"type": "string", "description": "ISO 8601 timestamp. Return activity at or after this time."},
+					"limit":  map[string]any{"type": "integer", "description": "Max writes to return (default 100, max 500)."},
+					"offset": map[string]any{"type": "integer", "description": "Skip this many of the newest writes (for paging; default 0)."},
 				},
 				"required": []string{"since"},
 			},
@@ -976,16 +985,21 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"entity_name"},
 			},
 		},
-		// SGD learning loop feedback
+		// Explicit feedback. The per-vault weight update it also records is a
+		// pinned no-op (internal/scoring/deadloop_characterization_test.go) and
+		// nothing outside internal/scoring reads those weights, so the
+		// description states only the effect that exists.
 		{
-			Name:        "muninn_feedback",
-			Description: "Record explicit feedback on an engram. Use useful=false when a retrieved engram was not helpful. Updates the vault's learned scoring weights via SGD.",
+			Name: "muninn_feedback",
+			Description: "Record explicit feedback on a retrieved engram. useful=true counts as an access of that engram (the same reinforcement as reading it by id: " +
+				"access count and last-access time, which feed its decay/recency). useful=false is accepted and currently has no effect on the engram or on ranking. " +
+				"Feedback does not change recall ranking weights and does not change confidence.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"vault":     vaultProp,
 					"engram_id": map[string]any{"type": "string", "description": "Engram ID that was retrieved"},
-					"useful":    map[string]any{"type": "boolean", "description": "Whether the engram was helpful (default false = negative signal)"},
+					"useful":    map[string]any{"type": "boolean", "description": "true = the engram was helpful (counts as an access); false (default) currently has no effect"},
 				},
 				"required": []string{"engram_id"},
 			},

@@ -13,7 +13,7 @@ Every claim cites a specific source file in the repository.
 | Temporal decay scoring (ACT-R model) | `internal/cognitive/decay.go`, `internal/engine/activation/engine.go` |
 | 6-phase predictive spread activation (`Run` in `ActivationEngine`) | `internal/engine/activation/engine.go` (phases 1–6, line 340+) |
 | Semantic push triggers (subscription registry + worker) | `internal/engine/trigger/registry.go`, `internal/engine/trigger/worker.go` |
-| SGD feedback loop — adaptive per-vault scoring weights | `internal/scoring/weights.go` (`VaultWeights.Update()`), `internal/scoring/store.go` (`RecordFeedback`) |
+| Explicit feedback — `useful=true` counts as an access (the per-vault weight update it also records is a pinned no-op that nothing reads; see `internal/scoring/deadloop_characterization_test.go`) | `internal/engine/engine.go` (`RecordFeedback`) |
 | Hierarchical memory with ordinal ordering | `internal/engine/tree.go`, `internal/storage/keys/keys.go` (prefix `0x1E`) |
 | Entity graph with cross-vault reverse index | `internal/storage/entity.go` (`UpsertEntityRecord`), key-space prefix `0x23` in `internal/storage/keys/keys.go` |
 | Full audit trail with provenance tracking | `internal/provenance/store.go`, `internal/provenance/types.go` |
@@ -41,7 +41,7 @@ Concrete signals that speak to production readiness:
 - [ACT-R temporal decay](cognitive-primitives.md) — base-level activation scores follow the ACT-R decay equation, parameterized per vault via Plasticity presets.
 - [6-phase spread activation](retrieval-design.md) — the ACTIVATE pipeline (embed → candidate retrieval → RRF fusion → Hebbian boost → BFS traversal → final scoring) runs on every recall request.
 - [Semantic push triggers](semantic-triggers.md) — subscriptions fire server-side push events on new writes, threshold crossings, and contradiction detection.
-- [SGD feedback loop](feature-reference.md) — per-vault scoring weight vectors are updated from user feedback signals via stochastic gradient descent.
+- [Explicit feedback](feature-reference.md) — `muninn_feedback useful=true` reinforces the engram as an access; it does not change recall ranking weights (the recorded weight update is a no-op today).
 
 ### Storage
 
@@ -71,8 +71,8 @@ Concrete signals that speak to production readiness:
 ### Observability
 
 - [Full provenance trail](feature-reference.md) — every write records its origin (tool, caller, session) in `internal/provenance/`; queryable via `muninn_provenance`.
-- [Episodic sessions](feature-reference.md) — `muninn_session` groups recall and write events into named episodes for replay and audit.
-- [Feedback loop](feature-reference.md) — explicit user feedback (confirmed / rejected) drives Bayesian confidence updates and SGD weight adjustment.
+- [Session activity](feature-reference.md) — `muninn_session` lists live memories written since a timestamp (newest first, paged, with `total`/`truncated`) and counts the recalls that returned results in the same window.
+- [Feedback](feature-reference.md) — explicit feedback reinforces access (`useful=true`) and otherwise has no effect; confidence is moved only by detected or declared contradictions.
 
 ### Deployment
 

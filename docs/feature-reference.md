@@ -338,13 +338,13 @@ Every cognitive behavior is tunable per vault:
 |---------|---------|-------|-------------|
 | `preset` | `"default"` | default/reference/scratchpad/knowledge-graph/working | Base behavior template |
 | `hebbian_enabled` | true | bool | Hebbian co-activation learning. Governs the WHOLE loop (COG-32): weight updates, association decay, **and** the read-side phase-4 boost during recall. `false` means recall is never scored by association weights. |
-| `temporal_enabled` | true | bool | Temporal decay scoring |
-| `auto_link_neighbors` | true | bool | Semantic neighbor auto-linking on write |
+| `temporal_enabled` | true | bool | Accepted and stored, but no runtime path reads it — changing it has no effect (temporal decay is not switched by this flag) |
+| `auto_link_neighbors` | true | bool | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `hop_depth` | 2 | 0–8 | BFS traversal depth. Accepted and stored, but Phase 5 emits nothing on real corpora (#801), so this value does not currently change any recall result |
 | `semantic_weight` | 0.6 | 0–1 | Vector similarity weight |
 | `fts_weight` | 0.3 | 0–1 | BM25 full-text weight |
-| `relevance_floor` | 0.05 | 0–1 | Minimum activation threshold |
-| `temporal_halflife` | 30 | days | Stability / decay resistance |
+| `relevance_floor` | 0.05 | 0–1 | Accepted and stored, but no runtime path reads it — changing it has no effect |
+| `temporal_halflife` | 30 | days | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `traversal_profile` | auto | string | Default traversal profile |
 | `actr_decay` | 0.5 | 0.01–2.0 | ACT-R power-law exponent |
 | `actr_heb_scale` | 4.0 | 0–50 | Hebbian amplifier in ACT-R |
@@ -573,11 +573,11 @@ For quick reference, these are the MCP tools available to AI agents:
 5. `muninn_forget` — soft-delete
 6. `muninn_link` — create/strengthen association
 7. `muninn_contradictions` — check for contradictions
-8. `muninn_status` — health and stats
+8. `muninn_status` — memory count plus a derived `health`: `good` only when the embedder is up (or not yet exercised) and no cognitive worker is erroring/stopped, else `degraded` with `health_reasons`; also `embedder.state`, per-worker state and last-run age, `embeddings_pending` during a backfill, and `enrichment_mode`
 9. `muninn_guide` — get vault-aware usage instructions (call on first connect)
 10. `muninn_evolve` — update a memory (archive old version)
 11. `muninn_consolidate` — merge N memories into 1
-12. `muninn_session` — recent activity summary
+12. `muninn_session` — recent activity since a timestamp: live writes newest first (paged via `limit`/`offset`, with `total`, `returned`, `truncated`; forgotten/superseded memories excluded) and `activations`, the count of recalls with at least one result in the window (recall records are kept 90 days)
 13. `muninn_decide` — record a decision with rationale
 14. `muninn_restore` — recover a soft-deleted memory
 15. `muninn_traverse` — BFS graph exploration
@@ -597,7 +597,7 @@ For quick reference, these are the MCP tools available to AI agents:
 29. `muninn_similar_entities` — trigram duplicate detection; returns pairs of entity names above a similarity threshold (default 0.85). See [docs/entity-graph.md](entity-graph.md)
 30. `muninn_merge_entity` — merge entity_a into canonical entity_b: relinks all engrams, marks entity_a as merged; supports dry_run. See [docs/entity-graph.md](entity-graph.md)
 31. `muninn_export_graph` — export the entity relationship graph as JSON-LD (default) or GraphML for visualisation or external analysis. See [docs/entity-graph.md](entity-graph.md)
-32. `muninn_feedback` — SGD scoring weight update; pass `useful` (bool) to signal whether a retrieved engram was helpful. Note: `useful` is the external parameter — `direction` is an internal variable in scoring/weights.go and is never exposed.
+32. `muninn_feedback` — explicit feedback on a retrieved engram. `useful=true` counts as an access (access count and last-access time, as a read by id would); `useful=false` currently has no effect. It does not change recall ranking weights or confidence: the per-vault weight update it also records is a mathematical no-op that nothing outside `internal/scoring` reads (pinned by `internal/scoring/deadloop_characterization_test.go`).
 33. `muninn_provenance` — full audit trail for an engram: who wrote it, what changed, and why. Implementation: internal/provenance/
 34. `muninn_replay_enrichment` — re-run the enrichment pipeline delta on one or more engrams that are missing specific stages (entities, relationships, classification, summary); supports dry_run
 35. `muninn_where_left_off` — most recently accessed memories for session context; uses the 0x22 LastAccess index for O(limit) performance regardless of vault size

@@ -192,12 +192,28 @@ func (a *mcpEngineAdapter) Consolidate(ctx context.Context, vault string, ids []
 	}
 	return &ConsolidateResult{ID: res.MergedID.String(), Archived: res.Archived, Warnings: res.Warnings}, nil
 }
-func (a *mcpEngineAdapter) Session(ctx context.Context, vault string, since time.Time) (*SessionSummary, error) {
-	res, err := a.eng.Session(ctx, vault, since)
+func (a *mcpEngineAdapter) Session(ctx context.Context, vault string, since time.Time, offset, limit int) (*SessionSummary, error) {
+	res, err := a.eng.SessionPaged(ctx, vault, since, offset, limit)
 	if err != nil {
 		return nil, err
 	}
-	summary := &SessionSummary{Since: since}
+	if limit <= 0 {
+		limit = engine.SessionDefaultLimit
+	}
+	if limit > engine.SessionMaxLimit {
+		limit = engine.SessionMaxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	summary := &SessionSummary{
+		Since:       since,
+		Writes:      []SessionEntry{},
+		Activations: res.Activations,
+		Total:       res.Total,
+		Offset:      offset,
+		Limit:       limit,
+	}
 	for _, w := range res.Writes {
 		summary.Writes = append(summary.Writes, SessionEntry{
 			ID:        w.ID,
@@ -205,6 +221,8 @@ func (a *mcpEngineAdapter) Session(ctx context.Context, vault string, since time
 			CreatedAt: w.At,
 		})
 	}
+	summary.Returned = len(summary.Writes)
+	summary.Truncated = offset+summary.Returned < summary.Total
 	return summary, nil
 }
 func (a *mcpEngineAdapter) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error) {
@@ -436,6 +454,28 @@ func (a *mcpEngineAdapter) RecallTree(ctx context.Context, vault, rootID string,
 
 func (a *mcpEngineAdapter) CountChildren(ctx context.Context, vault, engramID string) (int, error) {
 	return a.eng.CountChildren(ctx, vault, engramID)
+}
+
+// HealthSnapshot implements healthReporter from in-memory state only: two
+// atomic loads (EmbedHealth), the workers' counters, and the embed backfill's
+// progress counters. No store scan, no embedder call.
+func (a *mcpEngineAdapter) HealthSnapshot(_ context.Context) healthSnapshot {
+	eh := a.eng.EmbedHealth()
+	snap := healthSnapshot{
+		EmbedState:        eh.State,
+		EmbedLastOKAt:     eh.LastOKAt,
+		EmbedLastDegraded: eh.LastDegradedAt,
+		Workers:           a.eng.WorkerStats(),
+		Now:               time.Now(),
+	}
+	if es := a.eng.EmbedStats(); es.Status == "running" && es.Total > 0 {
+		pending := es.Total - es.Processed
+		if pending < 0 {
+			pending = 0
+		}
+		snap.EmbeddingsPending = &pending
+	}
+	return snap
 }
 
 func (a *mcpEngineAdapter) GetEnrichmentMode(ctx context.Context) string {

@@ -174,7 +174,15 @@ type Engine struct {
 	repairAssocWeightsFn func(ctx context.Context, ws [8]byte) (int, error)
 	coherence            *coherence.Registry // per-vault incremental coherence counters
 	scoring              *scoring.Store      // per-vault learnable scoring weights
-	prov                 *provenance.Store   // audit trail per-engram
+
+	// semanticOKAt / semanticDegradedAt are the Unix-nano times of the most
+	// recent recall whose query embedding succeeded / fell back to BM25-only
+	// (result.SemanticDegraded). They are the only runtime evidence of
+	// embedder health this process has — the plugin health checker is not
+	// started — and they cost two atomic stores per recall. Read by EmbedHealth.
+	semanticOKAt       atomic.Int64
+	semanticDegradedAt atomic.Int64
+	prov               *provenance.Store // audit trail per-engram
 
 	// Fix 5: coherence persistence lifecycle
 	coherenceFlushStop chan struct{}
@@ -2685,14 +2693,6 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		return nil, fmt.Errorf("parse id: %w", err)
 	}
 
-	eng, err := e.store.GetEngram(ctx, wsPrefix, id)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, ErrEngramNotFound
-		}
-		return nil, fmt.Errorf("get engram: %w", err)
-	}
-
 	// S3: effective read-only = observe-mode credential OR an explicit
 	// req.ReadOnly (already the effective decision computed by the
 	// MCP/REST/gRPC handler). A read-only read must skip BOTH write side
@@ -2700,6 +2700,21 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 	// closing the brief→"verify before acting"→read→reinforce loop for
 	// observe credentials.
 	readOnly := auth.ObserveFromContext(ctx) || req.ReadOnly
+	if readOnly {
+		// ...and the load itself must not stamp the L1 cache's access time,
+		// which later recalls read back as a recency score: a read-only read
+		// of a memory used to promote it to rank 1 in the next identical
+		// recall. Decided BEFORE the load for that reason.
+		ctx = storage.ContextWithNoAccessCacheStamp(ctx)
+	}
+
+	eng, err := e.store.GetEngram(ctx, wsPrefix, id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, ErrEngramNotFound
+		}
+		return nil, fmt.Errorf("get engram: %w", err)
+	}
 
 	if !readOnly {
 		// Fire implicit positive feedback signal asynchronously — read = accessed.
@@ -2967,6 +2982,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// degraded call.
 	if result.SemanticDegraded {
 		metrics.RecallEmbedFallbackTotal.WithLabelValues(req.Vault).Inc()
+		e.semanticDegradedAt.Store(time.Now().UnixNano())
+	} else if len(req.Embedding) == 0 && !activation.IsNoopEmbedder(e.embedder) {
+		// Only a recall that actually asked the embedder is evidence it is up:
+		// a caller-supplied embedding never touched it.
+		e.semanticOKAt.Store(time.Now().UnixNano())
 	}
 
 	// Entity boost phase: spread activation through shared named entities.
@@ -3965,6 +3985,45 @@ func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 	return stats
 }
 
+// EmbedHealth is the embedder's observed state for status surfaces.
+type EmbedHealth struct {
+	// State is one of:
+	//   "disabled"            — no embedder is active (noop): recall is keyword-only
+	//   "up"                  — the most recent embedding-backed recall succeeded
+	//   "degraded_to_keyword" — the most recent recall fell back to BM25-only
+	//   "unknown"             — an embedder is configured but no recall has
+	//                           exercised it since this process started
+	State          string
+	LastOKAt       time.Time // zero if never observed
+	LastDegradedAt time.Time // zero if never observed
+}
+
+// EmbedHealth reports the embedder's state from what recalls have observed.
+// It is two atomic loads and never calls the embedder, so it is safe for a
+// status call an agent makes often. It cannot see an outage no recall has hit
+// yet: "up" means "the last recall that tried worked", not a live probe.
+func (e *Engine) EmbedHealth() EmbedHealth {
+	ok, deg := e.semanticOKAt.Load(), e.semanticDegradedAt.Load()
+	h := EmbedHealth{}
+	if ok != 0 {
+		h.LastOKAt = time.Unix(0, ok)
+	}
+	if deg != 0 {
+		h.LastDegradedAt = time.Unix(0, deg)
+	}
+	switch {
+	case activation.IsNoopEmbedder(e.embedder):
+		h.State = "disabled"
+	case ok == 0 && deg == 0:
+		h.State = "unknown"
+	case deg > ok:
+		h.State = "degraded_to_keyword"
+	default:
+		h.State = "up"
+	}
+	return h
+}
+
 // Restore un-deletes a soft-deleted engram by restoring its state to StateActive.
 // Returns an error if the engram does not exist or was hard-deleted.
 func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram, error) {
@@ -4665,9 +4724,16 @@ func (e *Engine) Consolidate(ctx context.Context, vault string, ids []string, me
 	return &ConsolidateResult{MergedID: mergedULID, Archived: archived, Warnings: warnings}, nil
 }
 
-// Session returns all engrams written to the vault after the given time.
+// SessionDefaultLimit / SessionMaxLimit bound one page of the session timeline.
+const (
+	SessionDefaultLimit = 100
+	SessionMaxLimit     = 500
+)
+
+// Session returns the newest page (SessionDefaultLimit) of live engrams
+// written to the vault since the given time. See SessionPaged.
 func (e *Engine) Session(ctx context.Context, vault string, since time.Time) (*SessionResult, error) {
-	res, err := e.SessionPaged(ctx, vault, since, 0, 500)
+	res, err := e.SessionPaged(ctx, vault, since, 0, SessionDefaultLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -4677,19 +4743,44 @@ func (e *Engine) Session(ctx context.Context, vault string, since time.Time) (*S
 // SessionPagedResult extends SessionResult with total count for pagination.
 type SessionPagedResult struct {
 	SessionResult
+	// Total is the number of live (not soft-deleted) engrams created since
+	// Since — the whole window, not just this page.
 	Total int
+	// Activations is the number of recall events recorded since Since: recalls
+	// that were not read-only and returned at least one result. Events are
+	// retained for 90 days, so a window reaching further back undercounts.
+	Activations int
 }
 
-// SessionPaged returns engrams created since the given time with offset/limit pagination.
+// SessionPaged returns live engrams created since the given time, NEWEST
+// first, paged by offset/limit over that order, with the exact window total
+// and the count of recalls-with-results in the same window. Soft-deleted
+// engrams (forgotten, or superseded by an evolve) are excluded: they are not
+// live activity, and listing them as writes reported deleted memories as
+// present. limit is clamped to SessionMaxLimit.
 func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time, offset, limit int) (*SessionPagedResult, error) {
+	if limit <= 0 {
+		limit = SessionDefaultLimit
+	}
+	if limit > SessionMaxLimit {
+		limit = SessionMaxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
-	// Fetch one extra to know if there are more pages.
-	engrams, err := e.store.EngramsByCreatedSince(ctx, ws, since, offset, limit)
+	engrams, total, err := e.store.LiveEngramsCreatedSinceNewestFirst(ctx, ws, since, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	activations, err := e.store.CountRecallEventsSince(ctx, ws, since)
 	if err != nil {
 		return nil, err
 	}
 	result := &SessionPagedResult{
 		SessionResult: SessionResult{Since: since},
+		Total:         total,
+		Activations:   activations,
 	}
 	for _, eng := range engrams {
 		if eng != nil {
@@ -4700,7 +4791,6 @@ func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time
 			})
 		}
 	}
-	result.Total = len(result.Writes) + offset
 	return result, nil
 }
 

@@ -50,6 +50,13 @@ components:
           type: integer
           format: int64
           description: "Unix timestamp in nanoseconds; zero means never."
+        lastError:
+          type: integer
+          format: int64
+          description: "Unix timestamp in nanoseconds of the most recent FAILED batch; zero means never failed."
+        lastBatchFailed:
+          type: boolean
+          description: "True while the most recent batch is one that failed; the next successful batch clears it. errors is cumulative and cannot say whether the worker is failing now."
         state:
           type: integer
           format: int32
@@ -936,10 +943,12 @@ components:
       properties:
         entries:
           type: array
+          description: "Live engrams (soft-deleted excluded) created since `since`, newest first."
           items:
             $ref: "#/components/schemas/SessionItem"
         total:
           type: integer
+          description: "Live engrams in the whole `since` window, not just this page."
         offset:
           type: integer
         limit:
@@ -2634,6 +2643,12 @@ paths:
     get:
       tags: [vault]
       summary: "Retrieve recent write activity (session timeline) for a vault."
+      description: >
+        Live engrams created at or after `since`, NEWEST first, paged by
+        `offset`/`limit` over that order (limit is clamped to 500).
+        Soft-deleted engrams — forgotten, or superseded by an evolve — are
+        excluded. `total` is the exact count of live engrams in the window, so
+        `offset + len(entries) < total` means more remain.
       security:
         - BearerAuth: []
       parameters:

@@ -239,6 +239,71 @@ func (ps *PebbleStore) EngramsByCreatedSince(ctx context.Context, wsPrefix [8]by
 	return engrams, nil
 }
 
+// LiveEngramsCreatedSinceNewestFirst is the session-timeline read: engrams
+// created at or after since, NEWEST first, excluding soft-deleted ones
+// (forgotten, or superseded by an evolve), paged by offset/limit over that
+// newest-first order. total is the number of live engrams in the whole window,
+// so a caller can tell a partial page from a complete answer.
+//
+// Cost is one reverse scan of the window's 0x01 keys with a fixed-offset meta
+// decode per key — proportional to the writes since `since`, not to the vault.
+// A window reaching back to the vault's first write is therefore a full scan of
+// the vault's engram keys; that is the price of an exact total.
+func (ps *PebbleStore) LiveEngramsCreatedSinceNewestFirst(ctx context.Context, wsPrefix [8]byte, since time.Time, offset, limit int) (page []*Engram, total int, err error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	ms := ulid.Timestamp(since)
+	var minID ulid.ULID
+	binary.BigEndian.PutUint32(minID[0:4], uint32(ms>>16))
+	binary.BigEndian.PutUint16(minID[4:6], uint16(ms))
+	lowerKey := keys.EngramKey(wsPrefix, [16]byte(minID))
+
+	upperWS := wsPrefix
+	for i := 7; i >= 0; i-- {
+		upperWS[i]++
+		if upperWS[i] != 0 {
+			break
+		}
+	}
+	upperKey := make([]byte, 1+8)
+	upperKey[0] = prefix.Engram
+	copy(upperKey[1:9], upperWS[:])
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lowerKey, UpperBound: upperKey})
+	if err != nil {
+		return nil, 0, err
+	}
+	defer iter.Close()
+
+	for valid := iter.Last(); valid; valid = iter.Prev() {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		key := iter.Key()
+		if len(key) < 25 {
+			continue
+		}
+		meta, concept, derr := erf.DecodeMetaConcept(iter.Value())
+		if derr != nil {
+			continue
+		}
+		if LifecycleState(meta.State) == StateSoftDeleted {
+			continue
+		}
+		if total >= offset && len(page) < limit {
+			var id ULID
+			copy(id[:], key[9:25])
+			page = append(page, &Engram{ID: id, Concept: concept, CreatedAt: meta.CreatedAt})
+		}
+		total++
+	}
+	return page, total, nil
+}
+
 // CountEngrams returns the total number of engrams across all vaults by scanning
 // the 0x01 key prefix. Called once at startup to seed the in-memory counter.
 func (ps *PebbleStore) CountEngrams(ctx context.Context) (int64, error) {

@@ -332,7 +332,18 @@ type ContradictionsReport struct {
 type VaultStatus struct {
 	Vault         string `json:"vault"`
 	TotalMemories int64  `json:"total_memories"`
-	Health        string `json:"health"`
+	// Health is derived, never a constant: "good" when the embedder is up (or
+	// not yet exercised) and no cognitive worker is erroring or stopped,
+	// "degraded" otherwise with one entry per cause in HealthReasons, and
+	// "unknown" when the engine cannot report health at all.
+	Health        string   `json:"health"`
+	HealthReasons []string `json:"health_reasons"`
+
+	Embedder *EmbedderStatus         `json:"embedder,omitempty"`
+	Workers  map[string]WorkerHealth `json:"workers,omitempty"`
+	// EmbeddingsPending is the embed backfill backlog while one is running;
+	// omitted when none is running.
+	EmbeddingsPending *int64 `json:"embeddings_pending,omitempty"`
 
 	// Enrichment capability
 	EnrichmentMode string                `json:"enrichment_mode"` // "none", "inline", "plugin:<name>"
@@ -352,10 +363,23 @@ type SessionEntry struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// SessionSummary is the muninn_session response. Writes are live memories
+// (soft-deleted ones excluded) created since Since, NEWEST first, one page of
+// them: Total counts the whole window, Returned this page, and Truncated is
+// true whenever Offset+Returned < Total — so a partial list never reads as the
+// complete answer.
 type SessionSummary struct {
-	Writes      []SessionEntry `json:"writes"`
-	Activations int            `json:"activations"`
-	Since       time.Time      `json:"since"`
+	Writes []SessionEntry `json:"writes"`
+	// Activations counts recalls since Since that returned at least one result
+	// (read-only recalls and empty recalls leave no record; records are kept 90
+	// days). It is a measured count, not every recall call.
+	Activations int       `json:"activations"`
+	Since       time.Time `json:"since"`
+	Total       int       `json:"total"`
+	Returned    int       `json:"returned"`
+	Truncated   bool      `json:"truncated"`
+	Offset      int       `json:"offset"`
+	Limit       int       `json:"limit"`
 }
 
 type ConsolidateResult struct {
