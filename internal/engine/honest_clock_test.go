@@ -382,3 +382,66 @@ func TestHonestClock_InertDecayWarnsOnce(t *testing.T) {
 		t.Errorf("WARN must say recall scoring no longer uses the setting; got:\n%s", out)
 	}
 }
+
+// TestHonestClock_KnownResidual_InMemoryBoostsReorderAcrossARestart is a
+// PINNED KNOWN RESIDUAL, not a guarantee: it documents current behaviour and
+// FAILS WHEN IT IS FIXED, so the fix has to update the invariant text with it.
+//
+// The honest clock makes findability and absolute scores (hence bands) a
+// function of persisted state. RANK is not: the Hebbian and PAS boosts read
+// the in-memory activation log, which a normal (read_only=false) recall
+// writes, which weights entries by a wall clock, and which a restart wipes.
+// So on the normal path, one unrelated recall can lift an associated row over
+// an exact match; a fresh process puts the exact match back at rank 1. The
+// mechanisms are deliberately NOT changed by this increment (separate work).
+func TestHonestClock_KnownResidual_InMemoryBoostsReorderAcrossARestart(t *testing.T) {
+	// residual → follow-up. Remove the entry (and amend COG-34) when it fixes.
+	known := map[string]string{
+		"in-memory activation log reorders rank on the read_only=false path": "Hebbian/PAS log persistence or windowing (memo R3/R4)",
+	}
+	h := newHCEnv(t)
+	const vault = "trail-residual"
+	ctx := context.Background()
+	exact := h.write(vault, "waterbar drainage on switchback four", "the waterbar on switchback four drains to the left side", 90*24*time.Hour, 0, 0)
+	partner := h.write(vault, "footbridge decking", "the footbridge decking was replaced with treated planks", 30*24*time.Hour, 0, 0)
+	assoc := h.write(vault, "switchback four crew notes", "crew notes for switchback four", 60*24*time.Hour, 0, 0)
+	if _, err := h.eng.Link(ctx, &mbp.LinkRequest{Vault: vault, SourceID: partner.String(), TargetID: assoc.String(), Weight: 1.0}); err != nil {
+		t.Fatal(err)
+	}
+	const q = "waterbar drainage on switchback four"
+	top := func() (string, float32) {
+		t.Helper()
+		resp, err := h.eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Activations) == 0 {
+			t.Fatal("no rows")
+		}
+		return resp.Activations[0].ID, resp.Activations[0].Score
+	}
+
+	h.restart()
+	freshTop, freshScore := top()
+	if freshTop != exact.String() {
+		t.Fatalf("premise: a fresh process must rank the exact match first, got %s (%.3f)", freshTop, freshScore)
+	}
+
+	h.restart()
+	// One unrelated normal recall: it returns the partner and writes the log.
+	if _, err := h.eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault, Context: []string{"footbridge decking planks"}, MaxResults: 10}); err != nil {
+		t.Fatal(err)
+	}
+	h.eng.activation.WaitLogIdle()
+	afterTop, afterScore := top()
+	stillReorders := afterTop != freshTop
+	t.Logf("fresh process: top %s score %.3f; after one unrelated recall: top %s score %.3f", freshTop, freshScore, afterTop, afterScore)
+	for residual, followUp := range known {
+		if !stillReorders {
+			t.Errorf("KNOWN RESIDUAL APPEARS FIXED (%s): rank no longer depends on the in-memory log — remove the allowlist entry and amend COG-34 / the guide wording [%s]", residual, followUp)
+		}
+	}
+	if stillReorders && len(known) == 0 {
+		t.Errorf("rank depends on the in-memory activation log but no residual is allowlisted")
+	}
+}

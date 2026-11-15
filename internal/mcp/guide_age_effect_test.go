@@ -10,7 +10,7 @@ import (
 // TestGuide_AgeEffectLineDerivedFromScoring: the guide states what age does to
 // recall, derived from the vault's effective scoring fusion — never from a
 // decay setting scoring does not read. Under ACT-R (every shipped preset) age
-// and access history change neither findability nor rank, so the line is the
+// and access history change neither findability nor absolute score, so the line is the
 // same for every preset's decay exponent; weighted_sum keeps its age terms and
 // says so with the resolved weights; rrf has none. The writer-declared
 // valid_until is named as the way to retire a memory, since age no longer does.

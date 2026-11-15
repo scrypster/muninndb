@@ -330,6 +330,6 @@ func ageEffectLine(resolved auth.ResolvedPlasticity) string {
 	case "rrf":
 		return "- Age effect on recall: none. RRF ranks by position in the keyword and semantic result lists; no age term.\n"
 	default:
-		return "- Age effect on recall: none. A memory's age and access history change neither whether it is found nor where it ranks: ranking is content match x confidence, plus association boosts. Exact ties go to the newer memory.\n"
+		return "- Age effect on recall: none. A memory's age and access history do not change whether it is found, its absolute_score or its relevance_band, and a restart does not either. Rank is content match x confidence times association boosts; those boosts come from recent recalls held in memory, so the order of results can shift after other recalls or after a restart, while what is found does not. Exact ties go to the newer memory.\n"
 	}
 }

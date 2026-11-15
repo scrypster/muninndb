@@ -1338,6 +1338,58 @@ gate. The `actr_decay` field and the preset values are kept (WARNed as inert) be
 increment 2 gives them a job. No runtime toggle ships: the A/B control is a `cognitiontrial`
 build with `MUNINN_TRIAL_LEGACY_ACTR_CLOCK=1`, per the kill-switch refusal above.
 
+**What is and is not guaranteed.** Guaranteed: whether a memory is found, its absolute
+score and its relevance band are functions of persisted state — not of age, access history,
+cache state, uptime or a restart. NOT guaranteed: rank. The Hebbian and PAS boosts read an
+in-memory activation log that every read_only=false recall writes, that weights entries by a
+wall clock and that a restart wipes. Probe (now pinned, fails when fixed): after one
+unrelated normal recall an associated row went to rank 1 (score 1.000) over an exact match at
+0.82; in a fresh process the exact match was rank 1 again. This increment deliberately does
+not touch those mechanisms (`TestHonestClock_KnownResidual_InMemoryBoostsReorderAcrossARestart`).
+
+**Entity-boost seeds need real evidence (found in production on this branch).** On 60
+made-up-word queries the build returned 74 `weak` rows plus 111 `uncalibrated/not_scored`
+rows injected only because they shared a named entity with a weak row: once age stopped
+gating old weak seeds out cold, noise seeded noise. A seed may now INJECT only if its own
+band is moderate or strong — computed before the boost from phase 6's AbsoluteScore by the
+same `applyRelevanceBands` the response uses, so no new constant. A weak-only response
+injects nothing; boosting rows already present is unchanged; an uncalibrated response
+(weighted_sum, CGDN, degraded semantic channel, unregistered embed model) keeps the old rule
+because it has no noise-relative bar to judge by — a named residual.
+
+**Invariant number collision.** COG-34 is the next number after the highest invariant on
+this branch (COG-33). Other unmerged designs (#872 among them) also claim COG-34; whichever
+merges second renumbers.
+
+**Product wording that is untrue while this is the last increment shipped** (owner's call;
+deliberately not edited here):
+- `README.md:3` — "fades when unused" (tagline): ACT-R recall has no age or disuse term.
+- `README.md:5` — "engine-native Ebbinghaus decay" (patent line): recall does not apply it
+  under ACT-R; only the pruner's base-level scan and weighted_sum still use age.
+- `README.md:260` — "Memories you ignore fade naturally. The database moves while you sleep."
+- `docs/plugins.md:33` — "memories you ignore fade naturally".
+- `docs/index.md:17` — lists "temporal decay" as a cognitive primitive.
+- `docs/cognitive-primitives.md:20` — "A fact you looked up once and never revisited fades."
+- `docs/cognitive-primitives.md:24` and `:28-36` — "MuninnDB implements this directly" and
+  the B(M) formula as the scoring base level.
+- `docs/cognitive-primitives.md:40-56` — the worked "~37x temporal advantage" example.
+- `docs/cognitive-primitives.md:62,66` — "Relevance tracks reality"; B(M) computed at query
+  time from access count and last access.
+- `docs/cognitive-primitives.md:327,329` — an unaccessed memory's activation "naturally
+  decreases"; each access "makes the memory more cognitively available".
+- `docs/how-memory-works.md:42` — "a memory used heavily but not recently still fades".
+- `docs/how-memory-works.md:44,46` — the 37x example and "MuninnDB implements this directly".
+- `docs/how-memory-works.md:120` — memories "resistant to fading"; burst memories "lose
+  relevance faster".
+- `docs/how-memory-works.md:140` — "Irrelevant things fade."
+- `sdk/python/muninn/langchain.py:5` — "relevance decays over time, frequently recalled
+  memories strengthen" (recall never counts as access, COG-12, and nothing decays in ranking).
+- `sdk/python/muninn/langchain.py:65` — "decay curves".
+- `sdk/python/muninn/langchain.py:152-154` — `clear()` relies on "natural decay"; "Memories
+  fade on their own as they stop being recalled" — they do not; use `valid_until`,
+  `retention_days`, forget, or a new vault.
+
 **Principle: a scoring input that a restart can change is not an input, it is noise with a
 schedule. Findability must be a function of persisted state; ranking may use learned,
-process-local signals only where they can promote and never gate.**
+process-local signals only where they can promote and never gate — and a doc that says
+ranking is restart-invariant while such a signal exists is the same lie in prose.**

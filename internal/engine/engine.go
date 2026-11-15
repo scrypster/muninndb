@@ -5384,7 +5384,7 @@ func (e *Engine) warnInertACTRDecay(vault string, cfg *auth.PlasticityConfig, re
 			fn()
 		}
 	}
-	const why = "recall scoring no longer uses it: the ACT-R base level is neutral for every memory, so age and access history change neither findability nor rank"
+	const why = "recall scoring no longer uses it: the ACT-R base level is neutral for every memory, so age and access history do not change whether a memory is found or its absolute score"
 	switch {
 	case cfg != nil && cfg.ACTRDecay != nil:
 		v := *cfg.ACTRDecay
