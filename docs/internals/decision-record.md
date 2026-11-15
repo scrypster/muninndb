@@ -1728,7 +1728,17 @@ posting, no DF or corpus-count move — which inverts `fts.DeleteEngram` exactly
 for a memory whose postings were never dropped. A retag of a forgotten memory now moves DF
 from the old tags to the new ones before dropping the postings, so forget → retag → restore
 equals a plain retag (score-equality pinned). Forget's two halves and Restore's rebuild run
-under the engram's lock. Memories restored before this change need `muninn reindex-fts`.
+under the engram's lock. Memories restored before this change have no postings;
+admin observability reports them per vault (`keyword_unindexed_live`: live records with
+no keyword posting, one point read each, cached ten minutes, recomputed after a rebuild),
+and `muninn vault reindex-fts <name>` repairs them — nothing is rewritten automatically.
+The rebuild now drops a forgotten memory's postings after indexing it (term frequencies
+kept, as Forget keeps them), so it no longer makes trash keyword-findable. Follow-up: a
+state change out of soft-deleted (`muninn_state`, `muninn_compare_and_set`,
+`UpdateEngramState`) is refused with `ErrRestoreRequired`, so Restore is the only way back
+and always re-indexes; archival changes state only, so un-archiving needs nothing.
+`UpdateEmbedding` applies its batch under the stripe and syncs the WAL after releasing
+it (same durability, no fsync inside a shared stripe).
 
 **The provenance drain is epoch-based, not a WaitGroup.** A `sync.WaitGroup` cannot be
 `Add`ed while a `Wait` is returning, which a vault clear racing writes does routinely; the

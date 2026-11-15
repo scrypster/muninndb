@@ -57,13 +57,17 @@ type CognitiveForwarder interface {
 
 // Engine is the cognitive database engine implementing mbp.EngineAPI.
 type Engine struct {
-	store       *storage.PebbleStore
-	authStore   *auth.Store // nil = use Plasticity defaults (e.g. in tests)
-	fts         *fts.Index
-	ftsWorker   *fts.Worker // async FTS indexing — decoupled from write hot path
-	activation  *activation.ActivationEngine
-	triggers    *trigger.TriggerSystem
-	engramCount atomic.Int64
+	store     *storage.PebbleStore
+	authStore *auth.Store // nil = use Plasticity defaults (e.g. in tests)
+	fts       *fts.Index
+
+	// kwCoverage caches keywordUnindexedLive per vault (observability.go).
+	kwCoverageMu sync.Mutex
+	kwCoverage   map[[8]byte]kwCoverageEntry
+	ftsWorker    *fts.Worker // async FTS indexing — decoupled from write hot path
+	activation   *activation.ActivationEngine
+	triggers     *trigger.TriggerSystem
+	engramCount  atomic.Int64
 	// ──────────────────────────────────────────────────────────────────
 	// Cognitive Worker Subsystem
 	// ──────────────────────────────────────────────────────────────────
@@ -1259,7 +1263,7 @@ func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, 
 		return nil
 	}
 	if prevErr != nil || prev == nil {
-		slog.Warn("engine: update_tags: pre-read failed, FTS tag postings left stale until reindex-fts",
+		slog.Warn("engine: update_tags: pre-read failed, FTS tag postings left stale until `muninn vault reindex-fts <name>`",
 			"id", id.String(), "err", prevErr)
 		return nil
 	}
@@ -4297,7 +4301,7 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 	if e.fts != nil {
 		doc := fts.Document{Concept: eng.Concept, CreatedBy: eng.CreatedBy, Content: eng.Content, Tags: eng.Tags}
 		if err := e.fts.ReindexEngram(ws, [16]byte(ulid), doc, doc); err != nil {
-			slog.Warn("engine: restore: keyword postings not rebuilt; run muninn reindex-fts", "id", id, "err", err)
+			slog.Warn("engine: restore: keyword postings not rebuilt; run `muninn vault reindex-fts <name>`", "id", id, "err", err)
 		}
 	}
 

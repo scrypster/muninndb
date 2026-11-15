@@ -2,13 +2,17 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/cognitive"
+	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/metrics/latency"
 	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/plugin/llmstats"
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 // LLMStats holds aggregate LLM call metrics for enrich and embed subsystems.
@@ -96,6 +100,11 @@ type VaultObservability struct {
 	HNSWBytes   int64                    `json:"hnsw_bytes"`
 	Coherence   *CoherenceStats          `json:"coherence,omitempty"`
 	Latency     map[string]latency.Stats `json:"latency"`
+	// KeywordUnindexedLive counts memories that are not forgotten but have
+	// no keyword postings — what a restore before the restore fix left
+	// behind. Non-zero means `muninn vault reindex-fts <name>` is worth
+	// running. See Engine.keywordUnindexedLive for cost and caching.
+	KeywordUnindexedLive int64 `json:"keyword_unindexed_live"`
 }
 
 // Observability assembles a full system snapshot for the observability endpoint.
@@ -214,12 +223,18 @@ func (e *Engine) Observability(ctx context.Context, version string, uptimeSecond
 			vaultLatency = latencyByVault[wsPrefix]
 		}
 
+		unindexed, kwErr := e.keywordUnindexedLive(ctx, wsPrefix)
+		if kwErr != nil {
+			return nil, kwErr
+		}
+
 		vaults[name] = VaultObservability{
-			EngramCount: count,
-			HNSWVectors: vectors,
-			HNSWBytes:   vectorBytes,
-			Coherence:   coherenceByName[name],
-			Latency:     vaultLatency,
+			KeywordUnindexedLive: unindexed,
+			EngramCount:          count,
+			HNSWVectors:          vectors,
+			HNSWBytes:            vectorBytes,
+			Coherence:            coherenceByName[name],
+			Latency:              vaultLatency,
 		}
 	}
 
@@ -264,4 +279,67 @@ func (e *Engine) Observability(ctx context.Context, version string, uptimeSecond
 		Vaults:     vaults,
 		LLM:        llmStats,
 	}, nil
+}
+
+// kwCoverageTTL bounds how stale keywordUnindexedLive's cached count can be.
+// The count only shrinks between rebuilds (a live retag heals one memory), and
+// nothing in the current code creates new cases, so a long TTL is honest.
+const kwCoverageTTL = 10 * time.Minute
+
+type kwCoverageEntry struct {
+	n  int64
+	at time.Time
+}
+
+// keywordUnindexedLive counts the vault's memories that are not forgotten
+// (soft-deleted) but have no keyword postings — the end state a Restore
+// before the restore fix left, which `muninn vault reindex-fts <name>`
+// repairs. It never rewrites anything. Cost: one scan of the vault's records
+// plus one point read each, paid at most once per kwCoverageTTL per vault
+// (the observability endpoint is polled) and recomputed after a rebuild.
+// A memory written in the last moments may be counted until the async
+// keyword indexer catches up.
+func (e *Engine) keywordUnindexedLive(ctx context.Context, ws [8]byte) (int64, error) {
+	if e.fts == nil {
+		return 0, nil
+	}
+	e.kwCoverageMu.Lock()
+	if c, ok := e.kwCoverage[ws]; ok && time.Since(c.at) < kwCoverageTTL {
+		e.kwCoverageMu.Unlock()
+		return c.n, nil
+	}
+	e.kwCoverageMu.Unlock()
+
+	var n int64
+	err := e.store.ScanEngrams(ctx, ws, func(eng *storage.Engram) error {
+		if eng.State == storage.StateSoftDeleted {
+			return nil // no postings by design (Forget), or a superseded version
+		}
+		ok, herr := e.fts.HasPostings(ws, [16]byte(eng.ID), fts.Document{
+			Concept: eng.Concept, CreatedBy: eng.CreatedBy, Content: eng.Content, Tags: eng.Tags,
+		})
+		if herr != nil {
+			return herr
+		}
+		if !ok {
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("observability: keyword coverage: %w", err)
+	}
+	e.kwCoverageMu.Lock()
+	if e.kwCoverage == nil {
+		e.kwCoverage = make(map[[8]byte]kwCoverageEntry)
+	}
+	e.kwCoverage[ws] = kwCoverageEntry{n: n, at: time.Now()}
+	e.kwCoverageMu.Unlock()
+	return n, nil
+}
+
+func (e *Engine) invalidateKeywordCoverage(ws [8]byte) {
+	e.kwCoverageMu.Lock()
+	delete(e.kwCoverage, ws)
+	e.kwCoverageMu.Unlock()
 }

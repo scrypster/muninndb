@@ -16,8 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restored memory could only be found by meaning, never by its words. Restore
   now rebuilds them from the memory's current text and tags without moving
   the keyword statistics, and a memory retagged while deleted comes back
-  findable by its new tags. Memories restored before this release need
-  `muninn reindex-fts`.
+  findable by its new tags. A memory restored before this release is still
+  missing its postings: the admin observability snapshot
+  (`/api/admin/observability`, and the web console's per-vault breakdown)
+  now reports `keyword_unindexed_live` per vault, and if it is non-zero
+  `muninn vault reindex-fts <name>` rebuilds that vault's keyword index. The
+  rebuild runs online under the vault's lock; keyword results for that vault
+  are partial until it finishes. It no longer makes forgotten memories
+  keyword-findable (it used to index them too).
+- `muninn_state` and `muninn_compare_and_set` refuse to move a forgotten
+  (soft-deleted) memory to another state and point at `muninn_restore`, the
+  one way back; a state change used to bring it back unfindable by keyword.
 - Concurrent writes to one memory no longer undo each other. Enrichment's
   summary write, the decay worker's relevance update, trust and validity
   stamps, embedding status, evolve's supersede and dream dedup each rewrote a
@@ -491,7 +500,7 @@ the rollback note.
   not to how big the tag set is. A memory whose tag set grows in place is still
   length-normalized by BM25 like any longer document, and because the rebuild
   leaves the corpus *average* document length alone, that penalty is slightly
-  over-applied until the next `muninn reindex-fts` — the conservative direction,
+  over-applied until the next `muninn vault reindex-fts <name>` — the conservative direction,
   scores under-credited rather than inflated. There is no ratchet either way:
   returning to a previous tag set restores the previous score exactly. (#720)
 

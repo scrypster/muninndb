@@ -247,6 +247,28 @@ func docTermSet(concept, createdBy, content string, tags []string) map[string]st
 	return termSet
 }
 
+// HasPostings reports whether the engram whose document is doc has its
+// keyword postings in the index. One point read: postings are written in one
+// batch per engram, so any one of them stands for all. A document with no
+// indexable terms reports true (there is nothing to be missing).
+func (idx *Index) HasPostings(ws [8]byte, id [16]byte, doc Document) (bool, error) {
+	counts, _ := docTermCounts(doc.Concept, doc.CreatedBy, doc.Content, doc.Tags)
+	for term, fields := range counts {
+		for field := range fields {
+			_, closer, err := idx.db.Get(keys.FTSPostingKey(ws, term, field, id))
+			if err == pebble.ErrNotFound {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			closer.Close()
+			return true, nil
+		}
+	}
+	return true, nil
+}
+
 // IndexEngram writes FTS posting list entries for an engram.
 // ws is the 8-byte workspace prefix. id is the ULID.
 func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error {
@@ -405,7 +427,7 @@ func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, cont
 // The residual: AvgDocLen does not track in-place length changes, so a vault
 // whose engrams grow their tag sets in place has a corpus average that lags low
 // and over-penalizes long documents. Direction is conservative — matches are
-// under-credited, never over-credited — and `muninn reindex-fts` recomputes
+// under-credited, never over-credited — and `muninn vault reindex-fts <name>` recomputes
 // AvgDocLen from scratch. Calling UpdateStats here is NOT the fix: it takes a
 // docLen and increments TotalEngrams, which is the N inflation this method exists
 // to avoid; a correct AvgDocLen maintenance would need a delta-aware stats update
@@ -511,7 +533,7 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 // this is the path that made it reachable. The residual it leaves is bounded and
 // mild by comparison: floored at 0, one-time per spurious decrement rather than a
 // per-call ratchet, and it INFLATES the IDF of a term for the documents that do
-// hold it rather than omitting them from results. `muninn reindex-fts` recomputes
+// hold it rather than omitting them from results. `muninn vault reindex-fts <name>` recomputes
 // df_t from scratch and clears both directions.
 func (idx *Index) adjustDF(batch *pebble.Batch, ws [8]byte, term string, delta int) {
 	tkey := keys.TermStatsKey(ws, term)
