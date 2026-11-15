@@ -3111,7 +3111,24 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	preBoost := len(result.Activations)
 	seedPolicy := entitySeedPolicyFor(result.Activations, result.Calibration,
 		cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR), result.SemanticDegraded)
-	result.Activations = e.applyEntityBoostSeeded(ctx, wsPrefix, vaultSize, result.Activations, actReq, seedPolicy)
+	// Explain's diagnostic activation (explainTargetFrom) scores every
+	// candidate (threshold -1) to find ONE memory's card. Its entity boost
+	// seeds and injects exactly as a DEFAULT recall does — under threshold -1
+	// the injection rule admitted every memory sharing any seed entity (a
+	// point read and a lease read each: the measured cost of explain on a
+	// 12,000-memory vault). The supersession and contradiction windows below
+	// are likewise bounded to the default recall's.
+	explainTarget, diagnostic := explainTargetFrom(ctx)
+	boostReq, windowReq := actReq, actReq
+	if diagnostic {
+		b := *actReq
+		b.Threshold = cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR)
+		boostReq = &b
+		w := *actReq
+		w.MaxResults = explainRecallLimit
+		windowReq = &w
+	}
+	result.Activations = e.applyEntityBoostSeeded(ctx, wsPrefix, vaultSize, result.Activations, boostReq, seedPolicy)
 	// Injected engrams count as found: on the boost path, total <
 	// len(activations) was the #569 bypass fingerprint. Known imprecision, for
 	// BOTH injectors here and below (scoped follow-up, PR #570 review): an
@@ -3149,17 +3166,6 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		ctx, wsPrefix, result.Activations, result.ShadowMatches, actReq, injectorGate, nameableCache)
 	result.TotalFound += subInjected
 
-	// Explain's diagnostic activation (explainTargetFrom) scores every
-	// candidate to find ONE memory's card; the declared-relationship phases
-	// examine only the window a default recall examines, so their per-row
-	// association reads do not scale with explain's 1,000-row list.
-	explainTarget, diagnostic := explainTargetFrom(ctx)
-	windowReq := actReq
-	if diagnostic {
-		w := *actReq
-		w.MaxResults = explainRecallLimit
-		windowReq = &w
-	}
 	var supInjected int
 	result.Activations, supInjected = e.applySupersessionWithGate(ctx, wsPrefix, result.Activations, windowReq, injectorGate, nameableCache)
 	result.TotalFound += supInjected
