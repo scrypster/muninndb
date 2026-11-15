@@ -755,6 +755,16 @@ components:
       properties:
         query_id:
           type: string
+          description: >-
+            Identifies this recall. A normal recall's id is the 26-character
+            ULID of its persisted recall event — on every path, including an
+            empty result. A read-only recall (read_only, or an observe-mode
+            key) persists nothing and returns a self-verifying id beginning
+            "ro1." (or "ro0." when the server has no auth secret). Ids stay
+            valid across restarts. Labelling a recall's results
+            (muninn_feedback, and the ready-to-copy `feedback` block) is
+            MCP-only; this REST surface carries the id but no feedback block
+            and has no feedback endpoint.
         total_found:
           type: integer
         activations:

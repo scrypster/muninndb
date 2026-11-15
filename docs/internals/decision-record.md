@@ -1451,3 +1451,73 @@ be overrun by up to one inference (~20-40 ms query, ~0.2 s batch). gRPC now carr
 `semantic_degraded`/`semantic_degraded_reason` (fields 7/8); before, it served
 keyword-only rows unmarked — silent on that transport, and the lanes made that outcome
 the common one for a deadline behind a batch.
+
+### The label pipeline: labels are child rows of the recall they describe (slice 2a, 2026-11-15)
+
+**Context.** Explicit feedback taught the engine nothing: `muninn_feedback` sent an inert
+weight update plus a fire-and-forget access bump, an omitted or string `useful` was silently
+recorded as a NEGATIVE, a read-only recall's `query_id` was a process counter that restarted
+at 1 on every boot, and the MCP recall response did not even carry the id. Measured on a
+production deployment: 94.6% of live memories had never been accessed. Slice 2a makes it
+possible, cheap and safe for an agent to say which recalled memories it used, and records
+each label with what a later slice needs to correct for position and exposure bias. **Nothing
+in ranking reads labels in this slice.**
+
+**Decisions, and why.**
+
+- **Child rows, not a new prefix.** A label is `0x29|ws|E|'L'|memory|credential-hash`, a
+  child of the recall event it refers to. ClearVault's 0x29 range, the exclusion from
+  export/clone/merge, and retention all come for free from 0x29's existing deliberate
+  treatment, so the "a new prefix was missed by a list" class cannot happen. The price is
+  that every 0x29 value decoder must select 25-byte keys (STO-21) — which they already did.
+- **Labelled events live 180 days, unlabelled 90.** So the salience design's day-90 premise
+  re-run sits inside the window. Disclosed cost: a labelled event keeps its raw query text
+  for 180 days. A rollback binary prunes labelled groups at 90.
+- **The read-only id is self-verifying and NOT bound to the labelling credential.** A
+  harness drain labels later, from another session, possibly with another key; binding the
+  MAC to the labeller would reject exactly that path. The recall credential's hash is
+  authenticated inside the id instead, so every label records whether labeller = recaller.
+- **The read-only id binds its returned rows (security review).** Without them, a cheap
+  read-only recall minted an id that could label ANY memory. Each of the first 100 rows
+  (MCP's recall cap) gets a 4-byte keyed tag in served order, covered by the MAC; a label for
+  an untagged row 101+ (other transports) is rejected as `untagged_row`: membership and rank become checkable statelessly
+  (the spec's deferred D3, pulled forward). Exact verification would need the full 16-byte
+  ids (22 chars per row); 4 bytes keeps a 10-row id at 142 chars and a 50-row id at 355, and
+  a forgery is online-only (k_q is secret) with probability k/2^32 per minted id — and its
+  only effect is a label row.
+- **The access-bump cap is durable (three security reviews).** First an uncapped bump; then
+  an in-memory per-day table with one global cap (one tenant could starve all others); then a
+  partitioned table with no overall ceiling. The mistake in all three was letting an
+  in-memory table make an AUTHORISATION decision. The day marker
+  `0x29|ws|D|'B'|memory|credential-hash` decides it: at most one bump per (memory,
+  credential, UTC day), across restarts, and only for a LIVE memory (not soft-deleted,
+  superseded or expired). Markers are written for verified members of a recall and, on the
+  legacy form, for memories that exist. Memory now holds metrics only (a fixed-size,
+  per-existing-vault rejection tally).
+- **Uniform response for callers that cannot read; outcomes for callers that can
+  (adversarial review).** A write-mode key gets `{ok, received_groups, received_ids}` whatever
+  happened, so it cannot learn existence through feedback. A credential that can recall in the
+  vault gains nothing from uniformity and lost the ability to self-correct: the first build
+  silently lost every label posted without `vault` on an unpinned server (the copied call had
+  no vault, so it resolved to `default`). Readers now get one result per id — recorded,
+  repeat, or rejected with a reason (`not_in_recall`, `substituted` + the head id,
+  `unknown_query`, `wrong_vault`, `untagged_row`, `no_key`) and a hint — and a credential
+  that may read every vault is told which vault a misdirected id belongs to. The copyable
+  call carries the vault.
+- **"Nothing in ranking changes" is pinned under ACT-R only.** Labels feed no scoring
+  phase. The first positive label's access bump is the pre-existing `useful=true` channel,
+  now capped at one per memory/credential/day: under ACT-R access history does not reach
+  ranking (COG-7, `TestLabels_RecallOrderUnchanged`), but on a weighted_sum vault access
+  counts still feed the access-frequency term, as before this slice.
+
+**Owner defaults taken (not re-litigated):** append-mode credentials may label (SEC-15
+amendment); `useful` is required and must be a JSON boolean; negative labels are recorded and
+have no ranking effect; labelled events kept 180 days vs 90; labels do not travel with export
+or clone; no new prefix; the per-memory use summary and evolve carrying use history forward
+are the next slice.
+
+**Residuals, stated.** Prune does not replicate (inherited). Each node has its own
+`auth_secret`, so an `ro1.` id minted on a follower fails on the leader. Open-server and
+static-token deployments are one credential for labelling. REST/MBP/gRPC writes carry no
+session, so their memories label as `self = unknown`. A hard-deleted memory's labels remain
+until prune, as its ids in 0x29 entries always did.

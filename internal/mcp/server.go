@@ -326,6 +326,16 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		mode = auth.ModeFull
 	}
 	ctx = context.WithValue(ctx, auth.ContextMode, mode)
+	// Label pipeline: the engine (the only holder of k_q) hashes the raw
+	// credential and MCP session into the ids a recall event and a label
+	// record. Raw values are never persisted or logged.
+	rawSession, _ := ctx.Value(noticeSessionCtxKey{}).(string)
+	ctx = auth.WithCallerIdentity(ctx, a.Token, rawSession)
+	// Who may see per-id feedback outcomes: a credential that can READ this
+	// vault (it could recall the same facts anyway); a write-mode key gets the
+	// uniform response. An unpinned credential may read every vault, so a
+	// wrong-vault label can name the vault it belongs to.
+	ctx = withFeedbackAccess(ctx, feedbackAccess{canRead: mode != auth.ModeWrite, allVaults: a.Vault == ""})
 	// An observe credential is always effectively read-only, for every tool:
 	// none of its loads may stamp the L1 cache's access time, which later
 	// recalls score as recency (engine.Read and recall already honour this

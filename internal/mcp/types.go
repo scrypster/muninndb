@@ -354,7 +354,39 @@ type VaultStatus struct {
 	// Enrichment capability
 	EnrichmentMode string                `json:"enrichment_mode"` // "none", "inline", "plugin:<name>"
 	Plugins        []PluginStatusSummary `json:"plugins,omitempty"`
+
+	// Labels is the label pipeline's outcome block (slice 2a): counts only,
+	// never ids. muninn_feedback's response is uniform, so this is where an
+	// operator sees whether labels are landing.
+	Labels *LabelsStatus `json:"labels,omitempty"`
 }
+
+// LabelsStatus is muninn_status's `labels` block.
+type LabelsStatus struct {
+	WindowDays int `json:"window_days"`
+	// Feedback POSTS in the window (persisted, from the day markers).
+	// verified: labels checked against the recall event; token: labels
+	// checked against a read-only query id's row tags; legacy: engram_id
+	// posts, which record no label.
+	Verified int `json:"verified"`
+	Token    int `json:"token"`
+	Legacy   int `json:"legacy"`
+	Positive int `json:"positive"`
+	Negative int `json:"negative"`
+	// memory_credential_days: distinct (memory, credential, UTC day) with
+	// feedback; bumps: how many of those earned the day's access bump.
+	MemoryCredentialDays int `json:"memory_credential_days"`
+	Bumps                int `json:"bumps"`
+	// Rejected per-reason counts are process-local (rejections store
+	// nothing): counted since rejected_since, at most window_days back.
+	Rejected      map[string]int64 `json:"rejected"`
+	RejectedSince string           `json:"rejected_since,omitempty"`
+	Note          string           `json:"note"`
+}
+
+// labelsStatusNote states what the labels block is and is not.
+const labelsStatusNote = "Feedback labels recorded by muninn_feedback, for measurement. They do not change ranking yet. " +
+	"Post counts are persisted; rejection counts are since this server process started."
 
 // PluginStatusSummary is a brief health summary for one plugin.
 type PluginStatusSummary struct {

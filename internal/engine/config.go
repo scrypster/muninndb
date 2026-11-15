@@ -44,4 +44,12 @@ type EngineConfig struct {
 	// because a decay pass over an unrepaired vault destroys the evidence the
 	// repair needs. Tests set a small value to exercise the pass promptly.
 	AssocWeightRepairDelay *time.Duration
+
+	// QueryIDSecret is the PERSISTED auth secret (cmd/muninn: dataDir/
+	// auth_secret, returned by auth.Bootstrap). k_q is derived from it for
+	// read-only query ids (ro1.) and for the credential/session hashes the
+	// label pipeline records. Persisted so an id minted before a restart
+	// verifies after it. nil → read-only ids are ro0.<ULID> and cannot be
+	// labelled, credential/session hashes are zero, and NewEngine WARNs once.
+	QueryIDSecret []byte
 }
