@@ -11,6 +11,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/oklog/ulid/v2"
 	"github.com/scrypster/muninndb/internal/prefix"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage/erf"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
@@ -21,6 +22,14 @@ const recentActiveCacheTTL = 1 * time.Second
 // RecentActive returns up to topK engram IDs with the highest relevance in the vault.
 // Uses the 0x10 bucket index for O(k) scanning instead of scanning all engrams.
 // Results are cached per vault for recentActiveCacheTTL to avoid repeated SSTable scans.
+//
+// Order: highest bucket first; WITHIN a bucket every entry is an exact tie
+// (the bucket is the ranking key), so the cut follows recall's one tie rule —
+// newest first (rankorder). Each bucket is therefore walked from its end
+// backwards. A forward walk kept the OLDEST topK of a tied bucket, and this
+// cut runs before recall's final sort, so the newest of a set of equals never
+// became candidates (honest clock, increment 1). The walk is still O(k): at
+// most one seek per bucket (10 buckets) plus one step per returned id.
 func (ps *PebbleStore) RecentActive(ctx context.Context, wsPrefix [8]byte, topK int) ([]ULID, error) {
 	// Check cache first.
 	now := time.Now().UnixNano()
@@ -31,13 +40,11 @@ func (ps *PebbleStore) RecentActive(ctx context.Context, wsPrefix [8]byte, topK 
 		}
 	}
 
-	// Build lower bound for bucket key scan: 0x10 | wsPrefix | storedBucket=0x00 | id={0}
-	// This gets us the highest relevance bucket first (bucket 0 = 1.0 relevance)
-	lowerBound := keys.RelevanceBucketKey(wsPrefix, 1.0, [16]byte{})
-	lowerBound = lowerBound[0 : 1+8+1] // 0x10 | wsPrefix | bucket byte
-
-	// Build upper bound: 0x10 | wsPrefix | 0xFF | {FF...}
-	// This keeps the scan within the wsPrefix namespace
+	// Scan bounds for the whole vault: 0x10 | wsPrefix | storedBucket | id.
+	// storedBucket 0 is the highest relevance (keys.RelevanceBucketKey).
+	lowerBound := make([]byte, 1+8)
+	lowerBound[0] = prefix.RelevanceBucket
+	copy(lowerBound[1:9], wsPrefix[:])
 	upperBound := make([]byte, 1+8+1+16)
 	upperBound[0] = prefix.RelevanceBucket
 	copy(upperBound[1:9], wsPrefix[:])
@@ -57,21 +64,55 @@ func (ps *PebbleStore) RecentActive(ctx context.Context, wsPrefix [8]byte, topK 
 
 	ids := []ULID{}
 	seen := make(map[ULID]struct{})
-	count := 0
-
-	for iter.First(); iter.Valid() && count < topK; iter.Next() {
-		// Extract ULID from key
-		// Key format: 0x10 | wsPrefix(8) | storedBucket(1) | id(16)
-		key := iter.Key()
-		if len(key) >= 26 {
-			var id ULID
-			copy(id[:], key[10:26])
-			if _, dup := seen[id]; !dup {
-				seen[id] = struct{}{}
-				ids = append(ids, id)
-				count++
+	add := func(key []byte) {
+		if len(key) < 26 {
+			return
+		}
+		var id ULID
+		copy(id[:], key[10:26])
+		if _, dup := seen[id]; !dup {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	// bucketKey(b) is the first possible key of bucket b.
+	bucketKey := func(b int) []byte {
+		k := make([]byte, 1+8+1)
+		k[0] = prefix.RelevanceBucket
+		copy(k[1:9], wsPrefix[:])
+		k[9] = byte(b)
+		return k
+	}
+	newestFirst := rankorder.NewestFirst()
+	// Visit only non-empty buckets, highest first: SeekGE finds the next one.
+	for b := -1; len(ids) < topK && b < 0xFF; {
+		if !iter.SeekGE(bucketKey(b + 1)) {
+			break
+		}
+		if k := iter.Key(); len(k) >= 10 {
+			b = int(k[9])
+		} else {
+			break
+		}
+		valid := true
+		if newestFirst {
+			// Position at this bucket's LAST key and walk backwards.
+			if b == 0xFF {
+				valid = iter.Last()
+			} else {
+				valid = iter.SeekLT(bucketKey(b + 1))
 			}
 		}
+		for ; valid && len(ids) < topK; valid = stepRelevanceIter(iter, newestFirst) {
+			key := iter.Key()
+			if len(key) < 10 || key[9] != byte(b) {
+				break
+			}
+			add(key)
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("recent active iter: %w", err)
 	}
 
 	// Cache the result for recentActiveCacheTTL.
@@ -81,6 +122,13 @@ func (ps *PebbleStore) RecentActive(ctx context.Context, wsPrefix [8]byte, topK 
 	})
 
 	return ids, nil
+}
+
+func stepRelevanceIter(iter *pebble.Iterator, newestFirst bool) bool {
+	if newestFirst {
+		return iter.Prev()
+	}
+	return iter.Next()
 }
 
 // ListByState returns up to limit engram IDs whose state matches the given
@@ -636,6 +684,54 @@ func (ps *PebbleStore) ListByCreatorInRange(ctx context.Context, wsPrefix [8]byt
 		var id ULID
 		copy(id[:], k[idOffset:idOffset+16])
 		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// EngramIDsByCreatedRangeNewestFirst is the recall-side time-bounded candidate
+// pool: engram IDs created in [since, until], NEWEST first, at most limit.
+// Every in-range engram is an equal member of this pool, so the cut at limit
+// follows recall's one tie rule (rankorder: newest first). It is a separate
+// method rather than a change to EngramIDsByCreatedRange because retention
+// purges OLDEST-first through that one, and must keep doing so.
+func (ps *PebbleStore) EngramIDsByCreatedRangeNewestFirst(ctx context.Context, wsPrefix [8]byte, since, until time.Time, limit int) ([]ULID, error) {
+	if !rankorder.NewestFirst() {
+		return ps.EngramIDsByCreatedRange(ctx, wsPrefix, since, until, limit)
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	minID := ulidMinFromTime(since)
+	maxIDBytes := [16]byte(ulidMaxFromTime(until))
+	for i := 15; i >= 0; i-- { // exclusive upper bound: maxID + 1
+		maxIDBytes[i]++
+		if maxIDBytes[i] != 0 {
+			break
+		}
+	}
+	iter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
+		LowerBound: keys.EngramKey(wsPrefix, [16]byte(minID)),
+		UpperBound: keys.EngramKey(wsPrefix, maxIDBytes),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+	var ids []ULID
+	for valid := iter.Last(); valid && len(ids) < limit; valid = iter.Prev() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		key := iter.Key()
+		if len(key) < 25 { // 1 prefix + 8 ws + 16 ulid
+			continue
+		}
+		var id ULID
+		copy(id[:], key[9:25])
+		ids = append(ids, id)
+	}
+	if err := iter.Error(); err != nil {
+		return nil, err
 	}
 	return ids, nil
 }

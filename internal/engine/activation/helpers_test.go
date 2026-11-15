@@ -557,7 +557,7 @@ func (s *internalStubStore) GetEmbeddings(_ context.Context, _ [8]byte, ids []st
 	return out, nil
 }
 
-func (s *internalStubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
+func (s *internalStubStore) EngramIDsByCreatedRangeNewestFirst(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
 	return nil, nil
 }
 

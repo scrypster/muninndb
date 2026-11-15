@@ -11,6 +11,7 @@ import (
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/engine/novelty"
 	"github.com/scrypster/muninndb/internal/index/hnsw"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -351,8 +352,9 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 		}
 	}
 
-	// Base ordering: a TOTAL order (Score desc, ULID asc) — transitive and
-	// run-to-run deterministic (#699). The newest-first reorder is NOT folded in
+	// Base ordering: a TOTAL order (Score desc, ULID desc — newest first, the
+	// one tie rule in internal/rankorder) — transitive and run-to-run
+	// deterministic (#699). The newest-first reorder is NOT folded in
 	// here: mixing EVF (within-cluster) and ULID (cross-cluster) in one comparator
 	// is intransitive (X<Y by EVF, Y<Z by ULID, Z<X by ULID cycles), which makes
 	// sort.SliceStable order-dependent. Keeping the base a pure total order and
@@ -361,8 +363,7 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 		if results[i].Score != results[j].Score {
 			return results[i].Score > results[j].Score
 		}
-		a, b := results[i].Engram.ID, results[j].Engram.ID
-		return bytes.Compare(a[:], b[:]) < 0
+		return rankorder.Before(results[i].Engram.ID, results[j].Engram.ID)
 	})
 
 	// Localized in-cluster tie reorder: within each maximal run of EQUAL score,
@@ -383,7 +384,7 @@ func (e *Engine) applyCurrencyAnnotation(ctx context.Context, ws [8]byte, result
 
 // currencyReorderTieRun reorders, within one equal-score run, each detected
 // cluster's members among the slots they occupy — newest-EffectiveValidFrom-first,
-// ULID-ascending as the final tiebreak — leaving every non-member and every other
+// newest ULID (rankorder) as the final tiebreak — leaving every non-member and every other
 // cluster's slots untouched. Clusters occupy disjoint slot sets, so the outcome is
 // independent of the (map) iteration order: deterministic and membership-preserving.
 func currencyReorderTieRun(run []activation.ScoredEngram) {
@@ -406,7 +407,7 @@ func currencyReorderTieRun(run []activation.ScoredEngram) {
 			if !ta.Equal(tb) {
 				return ta.After(tb)
 			}
-			return bytes.Compare(members[a].Engram.ID[:], members[b].Engram.ID[:]) < 0
+			return rankorder.Before(members[a].Engram.ID, members[b].Engram.ID)
 		})
 		for k, idx := range idxs {
 			run[idx] = members[k]

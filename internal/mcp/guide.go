@@ -143,6 +143,12 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	} else {
 		fmt.Fprintf(&b, "- Scoring fusion: ACT-R (default)\n")
 	}
+	// Age effect, DERIVED from the fusion that scores this vault — never from
+	// a decay setting scoring does not read (actr_decay is inert under ACT-R
+	// since the honest clock, increment 1; pinned by
+	// TestGuide_AgeEffectLineDerivedFromScoring).
+	b.WriteString(ageEffectLine(resolved))
+	b.WriteString("  Age alone does not retire a memory. For memories that should stop mattering (session bookmarks, progress notes), set `valid_until`; for a fact that changed, `muninn_evolve` it.\n")
 
 	// Memory quality guidance
 	b.WriteString("\n## Writing Effective Memories\n\n")
@@ -246,7 +252,8 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- **`confidence`** — belief that the stored FACT is TRUE (moved by detected or declared contradictions; muninn_feedback does not change it). ")
 	b.WriteString("It is NOT a measure of how well the memory matched. A memory can be a certain fact and a terrible match: `confidence: 1, relevance_band: \"weak\"`.\n\n")
 	b.WriteString("Despite the similar name, the pre-existing `relevance` float on a row is a FOURTH quantity, unrelated to `relevance_band`: ")
-	b.WriteString("it is the engram's stored decay/pruning strength (how alive the memory is in the vault), not a statement about this query.\n\n")
+	b.WriteString("it is the engram's stored decay/pruning strength (how alive the memory is in the vault), not a statement about this query. ")
+	b.WriteString("It is omitted on ACT-R recalls (the default), where it is not a scoring input.\n\n")
 	b.WriteString("A response whose rows are ALL `weak` matched nothing strongly — treat those as related memories to verify, not as answers. ")
 	b.WriteString("Note the converse is not true: a `moderate` row can still fail to answer you. The band reports how much EVIDENCE a memory has ")
 	b.WriteString("against your query, which is not the same question as whether it answers it — that one is not computable here, and MuninnDB ")
@@ -311,4 +318,18 @@ func enabledStr(v bool) string {
 		return "enabled"
 	}
 	return "disabled"
+}
+
+// ageEffectLine states what a memory's age does to recall on this vault, from
+// the scoring that actually runs.
+func ageEffectLine(resolved auth.ResolvedPlasticity) string {
+	switch resolved.ScoringFusion {
+	case "weighted_sum":
+		return fmt.Sprintf("- Age effect on recall: older memories score lower. Weighted-sum scoring adds a recency term (weight %.2f) and a decay term (weight %.2f) that fall with time since last access, so an old memory can drop below the recall threshold.\n",
+			resolved.RecencyWeight, resolved.TemporalWeight)
+	case "rrf":
+		return "- Age effect on recall: none. RRF ranks by position in the keyword and semantic result lists; no age term.\n"
+	default:
+		return "- Age effect on recall: none. A memory's age and access history change neither whether it is found nor where it ranks: ranking is content match x confidence, plus association boosts. Exact ties go to the newer memory.\n"
+	}
 }

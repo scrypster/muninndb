@@ -236,8 +236,8 @@ scoring is query-time and is not a worker entry.
 ### Hebbian Learning
 Co-activated memories have their association weights strengthened automatically. Background `HebbianWorker` processes co-activation events from an in-memory ring buffer (`ActivationLog`).
 
-### ACT-R Temporal Scoring
-Power-law decay based on access count and time since last access. Frequently accessed memories stay strong. Configurable per vault via `actr_decay` and `actr_heb_scale`.
+### ACT-R Scoring
+The default scoring. A memory's score is its content match × confidence, multiplied up by association boosts (Hebbian, PAS; scaled by `actr_heb_scale`). The ACT-R base level is neutral for every memory: **age and access history change neither whether a memory is found nor where it ranks**, so the same store answers the same way in a long-running and a freshly restarted server. Exact ties go to the newer memory. `actr_decay` is accepted but currently inert (it WARNs once per vault); it is reserved for a planned earned-use salience term. Memories retire through `valid_until`, `muninn_evolve`/`muninn_forget`, `retention_days` or `max_engrams` — not age. `scoring_fusion: weighted_sum` keeps additive recency/decay terms.
 
 ### Bayesian Confidence
 Memories have a confidence score (0.0–1.0) that's adjusted based on evidence:
@@ -346,7 +346,7 @@ Every cognitive behavior is tunable per vault:
 | `relevance_floor` | 0.05 | 0–1 | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `temporal_halflife` | 30 | days | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `traversal_profile` | auto | string | Default traversal profile |
-| `actr_decay` | 0.5 | 0.01–2.0 | ACT-R power-law exponent |
+| `actr_decay` | 0.5 | 0.01–2.0 | ACT-R power-law exponent — currently inert in recall scoring (WARNs once per vault when set) |
 | `actr_heb_scale` | 4.0 | 0–50 | Hebbian amplifier in ACT-R |
 | `experimental_cgdn` | false | bool | Enable experimental CGDN scorer. Accepted and stored, but the scorer is inert at any positive activation threshold (#768), so on the surface default (0.5) it returns nothing — see below |
 | `predictive_activation` | true | bool | Enable PAS |
@@ -361,8 +361,8 @@ Every cognitive behavior is tunable per vault:
 
 ### Presets
 - **default** — balanced, all features on, autonomous behavior
-- **reference** — long-term knowledge, minimal decay, strong Hebbian, autonomous behavior
-- **scratchpad** — short-lived, high recency bias, no Hebbian, PAS off, selective behavior
+- **reference** — long-term knowledge, strong Hebbian, autonomous behavior
+- **scratchpad** — no Hebbian, PAS off, selective behavior (no recency bias in recall: pair with `retention_days` or `valid_until` for short-lived notes)
 - **working** — default cognition (Hebbian + PAS on) with 7-day auto-eviction and selective behavior; for shared workflow scratch vaults, pair with `multi_user` (RFC #597)
 - **knowledge-graph** — deep traversal (4 hops — inert today, #801), strong Hebbian (8.0 scale), autonomous behavior
 

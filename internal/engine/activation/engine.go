@@ -1,7 +1,6 @@
 package activation
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	hnswpkg "github.com/scrypster/muninndb/internal/index/hnsw"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -549,8 +549,16 @@ type ActivationStore interface {
 	VaultPrefix(vault string) [8]byte
 	// EngramLastAccessNs returns the nanosecond timestamp of the last cache access for id.
 	// Returns 0 if not in cache; callers fall back to eng.LastAccess.
+	//
+	// PROCESS-LOCAL: any load resets it and a restart wipes it. Its only
+	// scoring consumer is the weighted_sum/CGDN path (computeComponents —
+	// honest-clock residual D2). ACT-R scoring cannot read it: computeACTR has
+	// no parameter through which it could arrive.
 	EngramLastAccessNs(wsPrefix [8]byte, id storage.ULID) int64
-	EngramIDsByCreatedRange(ctx context.Context, wsPrefix [8]byte, since, until time.Time, limit int) ([]storage.ULID, error)
+	// EngramIDsByCreatedRangeNewestFirst is the time-bounded candidate pool:
+	// ids created in [since, until], NEWEST first, capped at limit (recall's
+	// one tie rule at a cut — see internal/rankorder).
+	EngramIDsByCreatedRangeNewestFirst(ctx context.Context, wsPrefix [8]byte, since, until time.Time, limit int) ([]storage.ULID, error)
 	// ListByTagInRange returns engram IDs carrying tag, created within [since, until],
 	// newest-first (see storage.PebbleStore.ListByTagInRange). Used for tag-scoped
 	// candidate seeding so tag-filtered recall does not miss engrams absent from the
@@ -1229,7 +1237,7 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 			if before.IsZero() {
 				before = time.Now()
 			}
-			ids, _ := e.store.EngramIDsByCreatedRange(ctx, ws, since, before, k*3)
+			ids, _ := e.store.EngramIDsByCreatedRangeNewestFirst(ctx, ws, since, before, k*3)
 			sets.time = ids
 		}
 
@@ -1299,7 +1307,7 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 			if before_ts.IsZero() {
 				before_ts = time.Now()
 			}
-			ids, err := e.store.EngramIDsByCreatedRange(gctx, ws, since, before_ts, k*3)
+			ids, err := e.store.EngramIDsByCreatedRangeNewestFirst(gctx, ws, since, before_ts, k*3)
 			if err != nil {
 				return nil
 			}
@@ -1405,8 +1413,15 @@ func phase3RRF(sets *candidateSets) []fusedCandidate {
 		c.rrfScore += 1.0 / (rrfK_Transition + float64(rank+1))
 	}
 
+	// Exact rrf ties break newest-first (rankorder). This order is a cut:
+	// phase 4 boosts only the first 50 and traversal seeds from the head, so an
+	// arbitrary (map/insertion) order among equals would decide which tied
+	// memories are learned from — and differently on every call.
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].rrfScore > result[j].rrfScore
+		if result[i].rrfScore != result[j].rrfScore {
+			return result[i].rrfScore > result[j].rrfScore
+		}
+		return rankorder.Before(result[i].id, result[j].id)
 	})
 	return result
 }
@@ -1921,16 +1936,26 @@ func (e *ActivationEngine) phase6Score(
 		ids[i] = c.id
 	}
 
-	// Look up per-engram cache access time BEFORE GetEngrams to avoid
-	// contamination: GetEngrams populates/touches the L1 cache (setting
-	// lastAccess = now), which would make every engram appear "just accessed."
-	// By reading first, only engrams recalled in a *prior* activation carry
-	// a cache timestamp; cache-cold engrams return 0 so the scorer falls
-	// back to eng.LastAccess (the persisted write/CreatedAt time).
-	lastAccessNsByID := make(map[storage.ULID]int64, len(all))
-	for _, c := range all {
-		if ns := e.store.EngramLastAccessNs(ws, c.id); ns != 0 {
-			lastAccessNsByID[c.id] = ns
+	// The L1 cache access time is read ONLY for the paths that still score
+	// with it: weighted_sum and CGDN (computeComponents — honest-clock residual
+	// D2: their age terms are additive, so there is no neutral value to pin
+	// them to, and removing the clock alone would make their cliff permanent).
+	// ACT-R does not read it (computeACTR has no parameter for it) and rrf
+	// never did, so on those paths the map is never built: N fewer cache
+	// lookups per recall, and no way for a process-local timestamp to reach
+	// their scores. The trial-only legacy switch (cognitiontrial build) is the
+	// one exception, so its control arm is the pre-honest-clock engine.
+	//
+	// When it IS read, it is read BEFORE GetEngrams: that load stamps the L1
+	// cache (lastAccess = now), which would make every engram look "just
+	// accessed". Cache-cold engrams return 0 and fall back to eng.LastAccess.
+	var lastAccessNsByID map[storage.ULID]int64
+	if !w.UseRRFFusion && (w.UseCGDN || !w.UseACTR || legacyACTRClock()) {
+		lastAccessNsByID = make(map[storage.ULID]int64, len(all))
+		for _, c := range all {
+			if ns := e.store.EngramLastAccessNs(ws, c.id); ns != 0 {
+				lastAccessNsByID[c.id] = ns
+			}
 		}
 	}
 
@@ -1943,9 +1968,9 @@ func (e *ActivationEngine) phase6Score(
 	// A ReadOnly call (the single resolved decision) suppresses the L1
 	// cache recency stamp this load would otherwise apply to every
 	// candidate it SCORES, not just ones it emits — a scoring pass is not a
-	// user access, and EngramLastAccessNs (above) feeds real recency
-	// scoring in a LATER, unrelated call. See
-	// storage.ContextWithNoAccessCacheStamp's doc.
+	// user access. On ACT-R and rrf the stamp is now only an eviction hint;
+	// on weighted_sum/CGDN, EngramLastAccessNs (above) still feeds recency
+	// scoring in a LATER call. See storage.ContextWithNoAccessCacheStamp.
 	getEngramsCtx := ctx
 	if req.ReadOnly {
 		getEngramsCtx = storage.ContextWithNoAccessCacheStamp(ctx)
@@ -2159,6 +2184,20 @@ func (e *ActivationEngine) phase6Score(
 		admission Admission
 	}
 
+	// sortScored is the final ranking on EVERY fusion path (rrf, CGDN, ACT-R,
+	// weighted_sum): score descending, exact ties newest-first (rankorder —
+	// the same rule the candidate cuts upstream used, so no layer can hide
+	// what a later one would have ranked first). A total order on distinct
+	// ids, so the result is independent of input order (#698).
+	sortScored := func(items []scoredItem) {
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].final != items[j].final {
+				return items[i].final > items[j].final
+			}
+			return rankorder.Before(items[i].id, items[j].id)
+		})
+	}
+
 	now := time.Now()
 	scored := make([]scoredItem, 0, len(all))
 	// COG-28: shadows produced by the OTHER declared-supersession signature —
@@ -2230,12 +2269,7 @@ func (e *ActivationEngine) phase6Score(
 				admission: admissionOf(final, req.Threshold, c.inTagPool, false),
 			})
 		}
-		sort.Slice(scored, func(i, j int) bool {
-			if scored[i].final != scored[j].final {
-				return scored[i].final > scored[j].final
-			}
-			return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
-		})
+		sortScored(scored)
 		goto cgdnDone
 	}
 
@@ -2390,12 +2424,7 @@ func (e *ActivationEngine) phase6Score(
 			return final, absolute, comp
 		})
 
-		sort.Slice(scored, func(i, j int) bool {
-			if scored[i].final != scored[j].final {
-				return scored[i].final > scored[j].final
-			}
-			return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
-		})
+		sortScored(scored)
 		goto cgdnDone
 	}
 
@@ -2420,7 +2449,7 @@ func (e *ActivationEngine) phase6Score(
 			if eng == nil || !PassesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 				continue
 			}
-			components := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
+			components := scoreACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
 			if components.Raw > maxRaw {
 				maxRaw = components.Raw
 			}
@@ -2464,9 +2493,13 @@ func (e *ActivationEngine) phase6Score(
 			// being the floor production actually enforces.
 			//
 			// The fix is to gate on the ABSOLUTE evidence instead — ContentMatch,
-			// attenuated by the prior only where the prior attenuates (decay must
-			// still retire a stale memory), never amplified by it, never rescaled
-			// by what else happened to be in this query's pool — times Confidence.
+			// attenuated by the prior only where the prior attenuates, never
+			// amplified by it, never rescaled by what else happened to be in this
+			// query's pool — times Confidence. (Since the honest clock, increment
+			// 1, the ACT-R prior never attenuates: the base level is pinned at
+			// bLevelCap, so for ACT-R this is exactly min(ContentMatch, 1) x
+			// Confidence. Age no longer retires a memory; supersession and a
+			// declared valid_until do.)
 			// Ranking would be untouched: `final` still orders the results, so
 			// Hebbian and PAS keep their full power to PROMOTE a relevant memory;
 			// they just could not promote an irrelevant one past the bar.
@@ -2542,7 +2575,7 @@ func (e *ActivationEngine) phase6Score(
 			// shadow is evidence, not a returned row, so it must never be
 			// admitted on the tagMatchFloor alone — pass inTagPool=false,
 			// never c.inTagPool.
-			comp := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, false)
+			comp := scoreACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, false)
 			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
 			raw := math.Min(comp.Raw*scale, 1.0)
 			final := raw * comp.Confidence
@@ -2551,12 +2584,7 @@ func (e *ActivationEngine) phase6Score(
 			comp.Final = final
 			return final, absolute, comp
 		})
-		sort.Slice(scored, func(i, j int) bool {
-			if scored[i].final != scored[j].final {
-				return scored[i].final > scored[j].final
-			}
-			return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
-		})
+		sortScored(scored)
 		goto cgdnDone
 	}
 
@@ -2596,12 +2624,7 @@ func (e *ActivationEngine) phase6Score(
 		comp.AbsoluteScore = math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
 		return comp.Final, comp.Final, comp
 	})
-	sort.Slice(scored, func(i, j int) bool {
-		if scored[i].final != scored[j].final {
-			return scored[i].final > scored[j].final
-		}
-		return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
-	})
+	sortScored(scored)
 
 cgdnDone:
 	totalFound := len(scored)
@@ -2890,115 +2913,119 @@ func cosineSimilarity32(a, b []float32) float32 {
 	return dot / (float32(math.Sqrt(float64(na))) * float32(math.Sqrt(float64(nb))))
 }
 
-// computeACTR computes the ACT-R scoring components for a candidate engram.
-// Formula (Anderson 1993):
-//
-//	B(M) = min(ln(n+1) - d × ln(max(ageDays,ageFloor) / (n+1)), bLevelCap)  [base-level activation]
-//	where bLevelCap = ln(exp(actrDenominator)-1) ≈ 1.489 is the unique value at which
-//	softplus(B(M)) = actrDenominator, i.e. base-level alone would push raw = contentMatch.
-//	Capping here preserves score absoluteness and threshold semantics across queries.
-//	Score = ContentMatch × softplus(B(M) + scale×Hebbian) × Confidence
-//
-// ContentMatch gates the score: zero semantic relevance = zero score regardless of recency.
-// B(M) + scale×Hebbian are additive: Hebbian can rescue old but linked memories.
-// This resolves the decay-vs-Hebbian tension without two separate pathways.
-func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, eng *storage.Engram,
-	lastAccessNs int64, now time.Time, w resolvedWeights, inTagPool bool) ScoreComponents {
+// bLevelCap is the ACT-R base-level's saturation value: the unique B at which
+// softplus(B) = actrDenominator, i.e. where the base level alone leaves
+// raw = contentMatch (a prior of exactly 1). ln(e^1.693 - 1) ~= 1.489.
+var bLevelCap = math.Log(math.Exp(actrDenominator) - 1)
 
-	// Compute content relevance (same as standard path). ftsScore is already a
-	// calibrated, absolute [0,1] coverage score (see fts.Index.Search, COG-24) —
-	// no tanh normalization needed post-#711. semCal is COG-26's baseline-
-	// rescaled cosine (rescaleSemantic): near-baseline cosine (anisotropy
-	// noise, bge-small ≈0.45-0.60) contributes ~0 to contentMatch instead of
-	// clearing the ACT-R gate below (engine.go:2308, threshold 0.1) on noise
-	// alone.
-	normalizedFTS := ftsScore
-	semCal := rescaleSemantic(vectorScore, w.SemanticBaseline)
-	contentMatch := w.SemanticSimilarity*semCal + w.FullTextRelevance*normalizedFTS
+// computeACTR computes the ACT-R scoring components for a candidate engram.
+//
+//	Score = ContentMatch x softplus(B + scale x (Hebbian + transition)) / actrDenominator x Confidence
+//	B     = bLevelCap, for every engram (honest clock, increment 1)
+//
+// THE BASE LEVEL IS NEUTRAL AND CONSTANT. softplus(bLevelCap)/actrDenominator
+// = 1 exactly, so with no association boost Raw = ContentMatch and the gate's
+// absolute score is min(ContentMatch, 1) x Confidence. Age, access count, the
+// persisted LastAccess and the L1 cache clock are NOT inputs: this function has
+// no parameter through which the cache timestamp could arrive (principle #3 —
+// the hidden clock is unrepresentable here, not merely ignored). Before this,
+// B decayed with time since the last L1-cache stamp — which any load reset and
+// a restart wiped — so the same persisted memory was rank 1 in a warm process
+// and gated out in a cold one (a 400-day exact match came back empty).
+//
+// What is given up, stated plainly: when two undeclared versions of a fact
+// both match a query, the one phrased closer to the query ranks first even if
+// it is older. Exact ties go to the newer (rankorder). A bounded per-vault
+// salience term (age + earned use) is increment 2; it may raise the prior
+// above neutral for RANKING only — the gate's min(Raw, ContentMatch) already
+// keeps it from admitting a weaker match — and may never lower it.
+//
+// ContentMatch gates the score: zero relevance = zero score. Hebbian and PAS
+// boosts still multiply the prior above 1 (up to ~3.24x at full boost) and so
+// still promote a relevant memory in RANKING; they cannot lift it past the gate.
+//
+// Reported components carry the values scoring APPLIED: DecayFactor and
+// Recency are the neutral 1.0 (no attenuation was applied), AccessFrequency is
+// 0 (access history contributes nothing). A computed-but-unapplied factor —
+// e.g. a 0.05 decay on a row whose applied multiplier was 1 — would tell
+// muninn_explain's reader the opposite of what happened.
+func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, eng *storage.Engram,
+	now time.Time, w resolvedWeights, inTagPool bool) ScoreComponents {
+	contentMatch, semCal, contentMatchFloored := actrContentMatch(vectorScore, ftsScore, w, inTagPool)
+	raw := actrRaw(contentMatch, bLevelCap, hebbianBoost, transitionBoost, w)
+	conf := float64(eng.Confidence)
+	return ScoreComponents{
+		SemanticSimilarity:    semCal,
+		SemanticSimilarityRaw: vectorScore,
+		FullTextRelevance:     ftsScore,
+		ContentMatch:          contentMatch,
+		ContentMatchFloored:   contentMatchFloored,
+		DecayFactor:           1.0, // applied: no age attenuation
+		HebbianBoost:          hebbianBoost,
+		TransitionBoost:       transitionBoost,
+		AccessFrequency:       0,   // applied: access history is not an ACT-R input
+		Recency:               1.0, // applied: no recency attenuation
+		Confidence:            conf,
+		Raw:                   raw,
+		Final:                 raw * conf,
+	}
+}
+
+// actrContentMatch is the ACT-R aboutness term, shared by computeACTR and the
+// trial-only legacy scorer so the two arms differ ONLY in the base level.
+func actrContentMatch(vectorScore, ftsScore float64, w resolvedWeights, inTagPool bool) (contentMatch, semCal float64, floored bool) {
+	// ftsScore is already a calibrated, absolute [0,1] coverage score (see
+	// fts.Index.Search, COG-24) — no tanh normalization needed post-#711.
+	// semCal is COG-26's baseline-rescaled cosine (rescaleSemantic):
+	// near-baseline cosine (anisotropy noise, bge-small ~0.45-0.60)
+	// contributes ~0 to contentMatch instead of clearing the gate on noise.
+	semCal = rescaleSemantic(vectorScore, w.SemanticBaseline)
+	contentMatch = w.SemanticSimilarity*semCal + w.FullTextRelevance*ftsScore
 
 	// COG-5 amendment (S1): candidates that matched an explicit tag filter
 	// (inTagPool) receive a content-match floor so an explicit filter match
 	// surfaces regardless of semantic/lexical overlap with the query. Without
 	// this, a content-unrelated tag hit scores contentMatch=0 and is dropped
-	// by the gate below even though the user explicitly asked for it via
-	// tags_all/tags_any/tag_prefix (S1 seeds these into the pool, but under
-	// default ACT-R scoring the gate silently discarded them). tagMatchFloor
-	// (0.1) is well below typical genuine content-match scores (0.5-0.9), so
-	// a real semantic/lexical match always outranks a floored tag-only hit —
-	// the floor only rescues candidates that would otherwise score exactly
-	// zero. RRF scoring already honors inTagPool via its own pool boost and
-	// is unaffected by this change. See docs/internals/invariants.md COG-5.
-	contentMatchFloored := false
+	// by the gate even though the user explicitly asked for it via
+	// tags_all/tags_any/tag_prefix. tagMatchFloor (0.1) is well below typical
+	// genuine content-match scores (0.5-0.9), so a real semantic/lexical match
+	// always outranks a floored tag-only hit — the floor only rescues
+	// candidates that would otherwise score exactly zero. RRF scoring already
+	// honors inTagPool via its own pool boost. See invariants.md COG-5.
 	if inTagPool && contentMatch < tagMatchFloor {
 		contentMatch = tagMatchFloor
-		contentMatchFloored = true
+		floored = true
 	}
+	return contentMatch, semCal, floored
+}
 
-	// Compute ACT-R base-level activation B(M).
-	// B(M) = ln(n+1) - d × ln(max(ageDays, ageFloor) / (n+1))
-	// High n + low ageDays → high B (fresh, frequently accessed → strong base level)
-	// Low n + high ageDays → low B (old, rarely accessed → weak base level)
-	var lastAccess time.Time
-	if lastAccessNs > 0 {
-		lastAccess = time.Unix(0, lastAccessNs)
-	} else {
-		lastAccess = eng.LastAccess
-	}
-	// Treat an unset LastAccess as "just now" — these are newly written engrams
-	// that have never been accessed. A fresh write = maximum recency.
-	if storage.IsUnsetTimestamp(lastAccess) {
-		lastAccess = now
-	}
-	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute — sub-hour precision for intraday recall
-	ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, ageFloorDays)
-	n := float64(eng.AccessCount + 1) // +1 avoids ln(0) for never-accessed engrams
-	d := w.ACTRDecay                  // power-law forgetting exponent (default 0.5)
-	baseLevel := math.Log(n) - d*math.Log(math.Max(ageDays, ageFloorDays)/n)
-	// Cap baseLevel at the derived saturation threshold: the unique B(M) where
-	// softplus(B(M)) = actrDenominator, i.e. where raw = contentMatch (zero Hebbian).
-	// Above this, base-level alone exceeds the content-match gate — semantically wrong.
-	// Preserves score absoluteness: threshold=0.3 means the same in fresh and mature vaults.
-	// Hebbian boosts may still push totalActivation above the cap — that is intentional.
-	bLevelCap := math.Log(math.Exp(actrDenominator) - 1) // ≈ 1.489
-	if baseLevel > bLevelCap {
-		baseLevel = bLevelCap
-	}
-
-	// Total activation = base-level + scaled Hebbian boost + scaled transition boost.
-	// ACTRHebScale (default 4.0) amplifies both Hebbian and transition signals so
-	// they can meaningfully rescue old memories, matching Anderson's spreading activation.
-	// Transition boost uses the same scale as Hebbian — both represent contextual priors.
+// actrRaw applies the ACT-R contextual prior to a content match.
+//
+// Total activation = base level + scaled Hebbian + scaled transition boost.
+// ACTRHebScale (default 4.0) scales both contextual signals. softplus maps it
+// to (0, +inf); dividing by actrDenominator = 1 + softplus(0) makes a neutral
+// prior exactly 1. The upper bound is enforced after per-query normalization
+// in phase 6 — not here — so the caller sees true relative magnitudes.
+func actrRaw(contentMatch, baseLevel, hebbianBoost, transitionBoost float64, w resolvedWeights) float64 {
 	totalActivation := baseLevel + w.ACTRHebScale*hebbianBoost + w.ACTRHebScale*transitionBoost
-
-	// Contextual prior: softplus maps total activation to (0, +inf).
-	contextualPrior := softplus(totalActivation)
-
-	// Final raw score: ContentMatch gates contextual prior.
-	// Normalize by actrDenominator = 1 + softplus(0) ≈ 1.693 so that a median-activation
-	// memory with perfect content match produces raw ≈ 1.0. The upper bound is enforced
-	// after per-query normalization in the ACT-R scoring path (see caller) — not here —
-	// so the caller can see true relative magnitudes before rescaling.
-	raw := contentMatch * contextualPrior / actrDenominator
+	raw := contentMatch * softplus(totalActivation) / actrDenominator
 	if raw < 0.0 {
 		raw = 0.0
 	}
-	conf := float64(eng.Confidence)
+	return raw
+}
 
-	return ScoreComponents{
-		SemanticSimilarity:    semCal,
-		SemanticSimilarityRaw: vectorScore,
-		FullTextRelevance:     normalizedFTS,
-		ContentMatch:          contentMatch,
-		ContentMatchFloored:   contentMatchFloored,
-		DecayFactor:           math.Max(0.05, math.Exp(-ageDays/math.Max(float64(eng.Stability), 1.0))), // kept for reporting; guard against Stability=0
-		HebbianBoost:          hebbianBoost,
-		TransitionBoost:       transitionBoost,
-		AccessFrequency:       math.Log1p(float64(eng.AccessCount)) / math.Log1p(100),
-		Recency:               math.Exp(-ageDays * math.Log(2) / 7.0),
-		Confidence:            conf,
-		Raw:                   raw,
-		Final:                 raw * conf,
+// scoreACTR is phase 6's ACT-R entry point. In every shipped build
+// legacyACTRClock() is the constant false and this is computeACTR, with the
+// cache timestamp discarded HERE, before scoring is reached. Only the
+// cognitiontrial build can route to the pre-honest-clock scorer (the A/B
+// control arm).
+func scoreACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, eng *storage.Engram,
+	lastAccessNs int64, now time.Time, w resolvedWeights, inTagPool bool) ScoreComponents {
+	if legacyACTRClock() {
+		return legacyComputeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost, eng, lastAccessNs, now, w, inTagPool)
 	}
+	return computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost, eng, now, w, inTagPool)
 }
 
 // computeRRFScore computes the final score for a candidate using the Phase 3
@@ -3299,18 +3326,26 @@ func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {
 func buildWhy(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, hopConcepts []string, queryStr string, useACTR bool) string {
 	var parts []string
 
-	signals := map[string]float64{
-		"semantic": c.SemanticSimilarity,
-		"fts":      c.FullTextRelevance,
-		"decay":    c.DecayFactor,
-		"hebbian":  c.HebbianBoost,
+	// Candidate dominant signals, in a FIXED order so a tie resolves the
+	// same way every call (a map's random iteration order made the "why" of
+	// an identical recall vary). Decay is a candidate only off ACT-R: ACT-R
+	// applies no age term (computeACTR reports the neutral 1.0), so naming it
+	// as the reason a row ranked would be false.
+	type signal struct {
+		name string
+		val  float64
 	}
+	signals := []signal{{"semantic", c.SemanticSimilarity}, {"fts", c.FullTextRelevance}}
+	if !useACTR {
+		signals = append(signals, signal{"decay", c.DecayFactor})
+	}
+	signals = append(signals, signal{"hebbian", c.HebbianBoost})
 	best := ""
 	bestVal := 0.0
-	for k, v := range signals {
-		if v > bestVal {
-			bestVal = v
-			best = k
+	for _, sg := range signals {
+		if sg.val > bestVal {
+			bestVal = sg.val
+			best = sg.name
 		}
 	}
 

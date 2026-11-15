@@ -295,6 +295,9 @@ components:
         actr_decay:
           type: number
           format: float
+          description: >-
+            Currently inert under ACT-R scoring (the base level is neutral for
+            every memory); a request that sets it is accepted and logged once.
         actr_heb_scale:
           type: number
           format: float
@@ -403,6 +406,10 @@ components:
         decay_factor:
           type: number
           format: float
+          description: >-
+            The decay multiplier scoring APPLIED. Under ACT-R (the default) it
+            is always 1.0: age is not a scoring input. Under weighted_sum it is
+            the Ebbinghaus factor exp(-days since last access / stability).
         hebbian_boost:
           type: number
           format: float
@@ -415,9 +422,17 @@ components:
         access_frequency:
           type: number
           format: float
+          description: >-
+            The access-frequency signal scoring APPLIED. Under ACT-R (the
+            default) it is always 0: access history is not a scoring input.
+            Under weighted_sum it is log1p(access_count)/log1p(100).
         recency:
           type: number
           format: float
+          description: >-
+            The recency multiplier scoring APPLIED. Under ACT-R (the default) it
+            is always 1.0. Under weighted_sum it halves every 7 days since last
+            access.
         raw:
           type: number
           format: float
@@ -522,6 +537,10 @@ components:
         relevance:
           type: number
           format: float
+          description: >-
+            The memory's stored Ebbinghaus relevance. Omitted on ACT-R recalls
+            (the default), where it is not a scoring input; reported when the
+            vault scores with weighted_sum or rrf.
         source_type:
           type: string
         state:
@@ -1141,12 +1160,20 @@ components:
         decay_factor:
           type: number
           format: double
+          description: >-
+            The decay multiplier scoring APPLIED. Under ACT-R (the default) it
+            is always 1.0: age is not a scoring input. Under weighted_sum it is
+            the Ebbinghaus factor exp(-days since last access / stability).
         hebbian_boost:
           type: number
           format: double
         access_frequency:
           type: number
           format: double
+          description: >-
+            The access-frequency signal scoring APPLIED. Under ACT-R (the
+            default) it is always 0: access history is not a scoring input.
+            Under weighted_sum it is log1p(access_count)/log1p(100).
         confidence:
           type: number
           format: double

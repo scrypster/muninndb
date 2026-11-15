@@ -192,27 +192,36 @@ func TestClone_AgedActivelyUsedSource_RecallEquivalent(t *testing.T) {
 	}
 }
 
-// TestClone_AgedNeverAccessedSource_IsPreExistinglyUnrecallable is the control
-// that keeps the claim above honest.
+// TestClone_AgedNeverAccessedSource_RecallByFusion is the control that keeps
+// the claim above honest, per fusion mode.
 //
-// An aged source that was NEVER read scores zero in BOTH vaults at 400 days.
-// That is a pre-existing property of recency scoring — a memory written 400 days
-// ago and never touched since has genuinely decayed — and it has nothing to do
-// with cloning. Without this control the sweep above would look like it measured
-// "aged vaults recall badly" rather than "cloning destroyed an actively-used
-// vault's recency", and those are different findings with different fixes.
+// weighted_sum: an aged source that was NEVER read scores zero in BOTH vaults
+// at 400 days. That is a property of weighted_sum's additive recency/decay
+// terms (honest-clock residual D2) and has nothing to do with cloning. Without
+// this arm the sweep above would look like it measured "aged vaults recall
+// badly" rather than "cloning destroyed an actively-used vault's recency".
 //
-// The clone-specific defect requires an ACTIVELY USED source. That is the normal
-// case, and it is the only case anyone clones.
-func TestClone_AgedNeverAccessedSource_IsPreExistinglyUnrecallable(t *testing.T) {
-	src, clone := agedCloneRecallCounts(t, "", 400, false)
-	if clone != src {
-		t.Errorf("clone=%d source=%d — even in the never-accessed case the clone must match its source", clone, src)
-	}
-	if src != 0 {
-		t.Errorf("source returned %d at 400 days with no access at all, want 0. This test's premise — that an "+
-			"aged never-read memory is already unrecallable INDEPENDENT of cloning — no longer holds, so the "+
-			"sweep in TestClone_AgedActivelyUsedSource_RecallEquivalent has lost its control. Re-derive both.", src)
+// ACT-R (the default): since the honest clock (increment 1) age is not a
+// scoring input, so the same never-read 400-day memories ARE recalled — in the
+// source and, identically, in the clone. This arm used to assert 0 too ("DEFAULT
+// ACT-R breaks at 7 days"); that cliff is the defect the honest clock removed.
+func TestClone_AgedNeverAccessedSource_RecallByFusion(t *testing.T) {
+	for _, tc := range []struct {
+		fusion  string
+		wantSrc int
+	}{
+		{"", 3},             // ACT-R: age-free, every exact-topic memory recalled
+		{"weighted_sum", 0}, // keeps its clock: 400 days never read is below its bar
+	} {
+		src, clone := agedCloneRecallCounts(t, tc.fusion, 400, false)
+		if clone != src {
+			t.Errorf("fusion %q: clone=%d source=%d — even in the never-accessed case the clone must match its source", tc.fusion, clone, src)
+		}
+		if src != tc.wantSrc {
+			t.Errorf("fusion %q: source returned %d at 400 days with no access at all, want %d. This control's premise "+
+				"no longer holds, so the sweep in TestClone_AgedActivelyUsedSource_RecallEquivalent has lost its control. "+
+				"Re-derive both.", tc.fusion, src, tc.wantSrc)
+		}
 	}
 }
 

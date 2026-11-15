@@ -1,13 +1,13 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
 	"sort"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -258,8 +258,7 @@ func (e *Engine) applySupersessionWithGate(ctx context.Context, ws [8]byte, resu
 		if results[i].Score != results[j].Score {
 			return results[i].Score > results[j].Score
 		}
-		a, b := results[i].Engram.ID, results[j].Engram.ID
-		return bytes.Compare(a[:], b[:]) < 0
+		return rankorder.Before(results[i].Engram.ID, results[j].Engram.ID)
 	})
 	return results, injected
 }

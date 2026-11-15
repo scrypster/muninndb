@@ -97,3 +97,36 @@ func TestGetTopTransitions_TiedCountsAreNewestFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestEngramIDsByCreatedRangeNewestFirst: the time-bounded recall pool. The
+// oldest-first EngramIDsByCreatedRange stays as it is — retention purges
+// oldest-first through it — so recall uses the newest-first variant.
+func TestEngramIDsByCreatedRangeNewestFirst(t *testing.T) {
+	store := openTestStore(t)
+	ws := store.VaultPrefix("created-range-desc")
+	ctx := context.Background()
+	now := time.Now()
+	var ids []ULID
+	for i := 0; i < 20; i++ {
+		created := now.Add(-time.Duration(20-i) * time.Hour)
+		id, err := store.WriteEngram(ctx, ws, &Engram{Concept: "c", Content: "c", CreatedAt: created})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	got, err := store.EngramIDsByCreatedRangeNewestFirst(ctx, ws, now.Add(-48*time.Hour), now, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := ulidDesc(ids)[:6]; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("newest-first range kept\n%v\nwant\n%v", got, want)
+	}
+	asc, err := store.EngramIDsByCreatedRange(ctx, ws, now.Add(-48*time.Hour), now, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(asc) != fmt.Sprint(ids[:6]) {
+		t.Fatalf("the retention scan must stay oldest-first: got %v want %v", asc, ids[:6])
+	}
+}

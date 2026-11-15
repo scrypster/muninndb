@@ -167,6 +167,9 @@ type Engine struct {
 	// need the WARN must not pay a config read every ~60s sweep pass.
 	// vault name (string) -> struct{}.
 	assocDecayLegacyChecked sync.Map
+	// inertDecayWarned dedupes warnInertACTRDecay (honest clock): once per
+	// process per (vault, source, value).
+	inertDecayWarned sync.Map
 	// repairAssocWeightsFn, when non-nil, replaces the per-vault store call the
 	// repair pass makes. Test-only seam, and the only way to exercise the
 	// failure policy: a real forced storage error is not reachable from a test
@@ -2845,9 +2848,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 
 	// Resolve per-vault Plasticity config. nil authStore means use defaults (tests, bench).
 	var resolved auth.ResolvedPlasticity
+	var vaultPlasticity *auth.PlasticityConfig
 	if e.authStore != nil {
 		vaultCfg, err := e.authStore.GetVaultConfig(req.Vault)
 		if err == nil {
+			vaultPlasticity = vaultCfg.Plasticity
 			resolved = auth.ResolvePlasticity(vaultCfg.Plasticity)
 		} else {
 			slog.Warn("plasticity: failed to read vault config, using defaults",
@@ -2928,6 +2933,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// so the recall-mode census can see exactly what reaches the scorer.
 	actReq.Weights, actReq.Threshold, actReq.HopDepth = resolveScoringPlan(req, &resolved,
 		e.resolveSemanticBaseline(req.Vault, wsPrefix, resolved), semanticFloorExplicitlyDisabled(resolved))
+	e.warnInertACTRDecay(req.Vault, vaultPlasticity, resolved, actReq.Weights, req.Weights)
 
 	// Convert filters if provided
 	if len(req.Filters) > 0 {
@@ -3154,6 +3160,15 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		result.SemanticDegraded,
 	)
 
+	// The stored Ebbinghaus `relevance` is a decay number recall scoring
+	// APPLIES only off ACT-R (weighted_sum/CGDN read their own clock; rrf none).
+	// On an ACT-R recall it is not an input to anything on the row, so a row
+	// presenting it beside the score would claim a decay that was not applied
+	// (honest clock, increment 1). Dropped, exactly as `dormant` already is
+	// (activation: Dormant = !UseACTR && ...). muninn_read still reports it:
+	// there it describes the memory, not a recall.
+	reportStoredRelevance := result.Calibration.FusionMode != activation.FusionACTR
+
 	// Convert result.Activations to []mbp.ActivationItem
 	items := make([]mbp.ActivationItem, len(result.Activations))
 	for i, scored := range result.Activations {
@@ -3169,7 +3184,6 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			CreatedAt:   scored.Engram.CreatedAt.UnixNano(),
 			LastAccess:  scored.Engram.LastAccess.UnixNano(),
 			AccessCount: scored.Engram.AccessCount,
-			Relevance:   scored.Engram.Relevance,
 			State:       uint8(scored.Engram.State),
 			Trust:       uint8(scored.Engram.Trust),
 			MemoryType:  uint8(scored.Engram.MemoryType),
@@ -3250,6 +3264,9 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		}
 		items[i].Expired = scored.Engram.IsExpired(gateNow)
 
+		if reportStoredRelevance {
+			items[i].Relevance = scored.Engram.Relevance
+		}
 		items[i].ScoreComponents = mbp.ScoreComponents{
 			SemanticSimilarity:    float32(scored.Components.SemanticSimilarity),
 			SemanticSimilarityRaw: float32(scored.Components.SemanticSimilarityRaw),
@@ -5324,6 +5341,66 @@ func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
 		} else if removed > 0 {
 			slog.Info("assoc decay pruned edges", "vault", vaultName, "removed", removed)
 		}
+	}
+}
+
+// warnInertACTRDecay makes inert decay configuration LOUD (principle #1:
+// explicit config is never silently ignored). Since the honest clock
+// (increment 1) the ACT-R base level is the neutral constant bLevelCap, so the
+// decay exponent d has no effect on ACT-R recall scoring. Three sources carry
+// one anyway:
+//
+//   - a preset whose d differs from the default preset's (reference 0.2,
+//     knowledge-graph 0.3, scratchpad 0.8 — documented as fading);
+//   - an explicit per-vault plasticity actr_decay override;
+//   - a wire weights.actr_decay on an ACT-R recall.
+//
+// Each WARNs once per process per (vault, source, value) — the recall path
+// runs this on every call, and a per-recall WARN is a flood, which is
+// functionally silent. Nothing is warned when the scoring that actually runs is
+// not ACT-R (rrf, weighted_sum, CGDN), nor for a preset whose d is the default.
+// The stored fields are kept: increment 2 gives d a job again (the decay of an
+// earned-use advantage).
+// defaultPresetACTRDecay is the default preset's d, derived from the preset
+// table rather than restated, so "differs from the default" tracks the table.
+var defaultPresetACTRDecay = auth.ResolvePlasticity(nil).ACTRDecay
+
+func (e *Engine) warnInertACTRDecay(vault string, cfg *auth.PlasticityConfig, resolved auth.ResolvedPlasticity, w *activation.Weights, wire *mbp.Weights) {
+	if w == nil || !w.UseACTR || w.DisableACTR || w.UseRRFFusion || w.UseCGDN {
+		return
+	}
+	once := func(key string, fn func()) {
+		if _, loaded := e.inertDecayWarned.LoadOrStore(key, struct{}{}); !loaded {
+			fn()
+		}
+	}
+	const why = "recall scoring no longer uses it: the ACT-R base level is neutral for every memory, so age and access history change neither findability nor rank"
+	switch {
+	case cfg != nil && cfg.ACTRDecay != nil:
+		v := *cfg.ACTRDecay
+		once(fmt.Sprintf("override|%s|%v", vault, v), func() {
+			slog.Warn("plasticity actr_decay override is inert: "+why,
+				"vault", vault, "setting", "actr_decay", "actr_decay", v,
+				"note", "kept for a future earned-use salience term; to retire memories use valid_until, forget, or retention")
+		})
+	case resolved.ACTRDecay != defaultPresetACTRDecay:
+		v := resolved.ACTRDecay
+		preset := "default"
+		if cfg != nil && cfg.Preset != "" {
+			preset = cfg.Preset
+		}
+		once(fmt.Sprintf("preset|%s|%s|%v", vault, preset, v), func() {
+			slog.Warn("preset decay setting is inert: "+why,
+				"vault", vault, "preset", preset, "setting", "actr_decay", "actr_decay", v,
+				"note", "this preset no longer makes memories fade in recall; to retire memories use valid_until, forget, or retention")
+		})
+	}
+	if wire != nil && wire.ACTRDecay > 0 {
+		v := wire.ACTRDecay
+		once(fmt.Sprintf("wire|%v", v), func() {
+			slog.Warn("request weights.actr_decay is inert: "+why,
+				"vault", vault, "setting", "weights.actr_decay", "actr_decay", v)
+		})
 	}
 }
 

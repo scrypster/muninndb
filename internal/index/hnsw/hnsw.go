@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
@@ -376,11 +377,14 @@ func (idx *Index) Search(ctx context.Context, query []float32, k int) ([]ScoredI
 					visitedMax = nDist
 				}
 
-				// Remove max if over ef
+				// Remove max if over ef. Among exactly tied farthest
+				// entries the OLDEST is evicted (rankorder: newest-first is
+				// what survives a cut).
 				if len(visited) > ef {
 					maxIdx := 0
 					for i := 1; i < len(visited); i++ {
-						if visited[i].dist > visited[maxIdx].dist {
+						if visited[i].dist > visited[maxIdx].dist ||
+							(visited[i].dist == visited[maxIdx].dist && rankorder.Before(visited[maxIdx].id, visited[i].id)) {
 							maxIdx = i
 						}
 					}
@@ -399,7 +403,14 @@ func (idx *Index) Search(ctx context.Context, query []float32, k int) ([]ScoredI
 	}
 
 	// Sort visited by distance and take top-k (D1: sort.Slice replaces insertion sort).
-	sort.Slice(visited, func(i, j int) bool { return visited[i].dist < visited[j].dist })
+	// Exact distance ties break newest-first (rankorder.Before) — recall's one
+	// tie rule, applied at this cut because it runs before the final sort.
+	sort.Slice(visited, func(i, j int) bool {
+		if visited[i].dist != visited[j].dist {
+			return visited[i].dist < visited[j].dist
+		}
+		return rankorder.Before(visited[i].id, visited[j].id)
+	})
 
 	results := make([]ScoredID, 0, k)
 	for _, v := range visited {

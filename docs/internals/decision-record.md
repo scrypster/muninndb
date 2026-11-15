@@ -1283,3 +1283,61 @@ the shape; finding an instance of the shape is still per-subsystem work.
 one day is itself the evidence that "a claim that reads the same when false" is a species,
 not an incident — and the falsifier that catches most of a species does not catch all of
 it. State which half a general check reaches before treating it as coverage.**
+
+### Age stops deciding findability: the honest clock, increment 1 (2026-11-14)
+
+**What was wrong.** ACT-R's "last access" came from the in-memory L1 read-cache timestamp,
+falling back to the persisted field only on a cache miss. Any load reset it and a restart
+wiped it, so recall ran in two regimes. Cold (fresh process, eviction, read-only harnesses),
+a never-accessed memory stopped clearing the gate at ~29 days for an exact match and 2–7
+days for looser matches. Warm, every pooled candidate sat at the cap and there was no decay
+at all. On a production server about a quarter of live memories older than 35 days were not
+returned for a recall of their own exact text — and came back at rank 1 once anything had
+loaded them. A gated-out candidate was even rehearsed by the very recall that rejected it.
+
+**Decision: Shape A+ now.** The ACT-R base level is the neutral constant `bLevelCap` for
+every memory (prior exactly 1); `computeACTR` has no cache-timestamp parameter; exact score
+ties break newest-first at every cut and at the final sort (`internal/rankorder`); every
+surface reports the factor actually applied (decay/recency 1.0, access frequency 0 under
+ACT-R; the stored Ebbinghaus `relevance` is dropped from ACT-R recall rows). No constant is
+calibrated, nothing on disk changes, the gate formula is untouched (with a prior ≥ 1 it
+already reduces to `min(CM, 1) × confidence`). Invariants COG-7 (amended) and COG-34.
+
+**Why not Shape B (a calibrated age/use salience term) now.** B is A plus a bounded salience
+term `rank = CM·(1+λ·s)` whose λ needs a per-vault census of near-verbatim twins — new
+machinery that reorders every pair within the factor (1+λ), not just twins, and should be
+designed once together with earned use. It is increment 2, gated by a pre-build measurement
+of whether agents actually prefer the newer twin.
+
+**The honest negative: "persisted clock, no floor" was rejected on arithmetic.** Reading the
+persisted `LastAccess` without flooring the prior at neutral makes one access make a memory
+LESS findable than none after 9.8 h (d=0.5), 0.9 h (d=0.2), 3.4 h (d=0.3), 17.7 h (d=0.8) —
+it penalises exactly the memories known to be used. The floor is required; with the COG-7
+cap, floored means equal to neutral, so in increment 1 access history has no ACT-R effect.
+
+**What the newest-first tie rule had to fix, and why it is one function.** The FTS top-k cut
+(made deterministic earlier, ascending ID) runs BEFORE the final sort, so with 300 identical
+memories the newest 200 never became candidates whatever the final comparator said; the
+RecentActive bucket walk, the time-bounded pool, PAS transition targets and phase-3 fusion
+all cut oldest-first or in map order too. One `rankorder.Before` used by every layer makes
+the layers unable to disagree, and lets the trial-only kill switch flip all of them together.
+
+**Accepted cost.** With age out of scoring, when two undeclared versions of a fact both
+match, the one phrased closer to the query ranks first even if older. The old cold engine
+returned only the newer one (age beat content 5:1 — it also ranked a 120-day exact match
+below a 3-day weak one, which was the defect); the old fully-warm engine already ranked the
+closer-phrased one first. Stale copies should retire through supersession (`muninn_evolve`)
+or a declared `valid_until`, not age. Abstention is unchanged against the warm engine: the
+gate expression did not move, nonsense returns only `weak` rows, and a localassets test
+shows the new cold engine returns exactly the rows (and absolute scores) the old warm one did.
+
+**Residuals named.** weighted_sum/CGDN keep the cache clock (D2: their age terms are additive,
+so there is no neutral; removing the clock alone would make their ~45-day cliff permanent).
+The PAS/Hebbian activation log is in memory and changes ranking across a restart, never the
+gate. The `actr_decay` field and the preset values are kept (WARNed as inert) because
+increment 2 gives them a job. No runtime toggle ships: the A/B control is a `cognitiontrial`
+build with `MUNINN_TRIAL_LEGACY_ACTR_CLOCK=1`, per the kill-switch refusal above.
+
+**Principle: a scoring input that a restart can change is not an input, it is noise with a
+schedule. Findability must be a function of persisted state; ranking may use learned,
+process-local signals only where they can promote and never gate.**

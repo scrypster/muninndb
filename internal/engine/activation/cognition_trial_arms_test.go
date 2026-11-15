@@ -39,7 +39,9 @@ import (
 // computing any arm — a run-time check on the actual data, which is strictly
 // stronger than a link to this synthetic one.
 //
-// THE ALGEBRA, and the reason a clean CONTENT-MATCH-ONLY arm exists at all:
+// THE ALGEBRA, and the reason a clean CONTENT-MATCH-ONLY arm exists at all.
+// (Since the honest clock, increment 1, the live B(M) is the constant
+// bLevelCap; the decaying form below is the trial's legacy control arm.)
 //
 //	B(M)      = min(ln n - d*ln(max(ageDays, ageFloor)/n), bLevelCap)
 //	prior     = softplus(B(M) + scale*(hebbian + transition)) / D
@@ -277,9 +279,14 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 			boosted++
 		}
 		cands = append(cands, ctCandidate{
-			id:               a.Engram.ID,
-			contentMatch:     c.ContentMatch,
-			baseLevel:        ctBaseLevel(a.Engram.AccessCount, a.Engram.LastAccess, now),
+			id:           a.Engram.ID,
+			contentMatch: c.ContentMatch,
+			// Honest clock (increment 1): the live pipeline's base level is
+			// bLevelCap for EVERY engram, so FULL and CONTENT-MATCH-ONLY now
+			// coincide on the base level and differ only by the boosts.
+			// ctBaseLevel survives as the pre-honest-clock formula (the
+			// cognitiontrial legacy control arm) for the age-floor proof below.
+			baseLevel:        ctBLevelCap,
 			hebbian:          c.HebbianBoost,
 			transition:       c.TransitionBoost,
 			gotRaw:           c.Raw,
@@ -533,10 +540,15 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 			baseStrictlyBelowFull++
 		}
 	}
-	if baseBelow == 0 {
-		t.Error("BASE-LEVEL-ONLY equalled CONTENT-MATCH-ONLY on every candidate — the corpus sits " +
-			"at bLevelCap everywhere, so the arm cannot distinguish the base-level prior from " +
-			"nothing and this fixture proves nothing about it")
+	// Honest clock (increment 1): the live base level IS bLevelCap for every
+	// engram, so BASE-LEVEL-ONLY must equal CONTENT-MATCH-ONLY everywhere —
+	// the arm that used to measure the age prior now measures nothing, by
+	// construction. (Before, this guard demanded they DIFFER, as proof the
+	// corpus exercised decay.) Any difference means an age/access input has
+	// leaked back into the base level.
+	if baseBelow != 0 {
+		t.Errorf("BASE-LEVEL-ONLY scored below CONTENT-MATCH-ONLY on %d candidates — the base "+
+			"level is no longer neutral, so an age or access input reached ACT-R scoring", baseBelow)
 	}
 	if baseStrictlyBelowFull == 0 {
 		t.Error("BASE-LEVEL-ONLY never scored below FULL on a candidate carrying a boost — the " +

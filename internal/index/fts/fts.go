@@ -1,7 +1,6 @@
 package fts
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"math"
@@ -14,6 +13,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/kljensen/snowball"
 	"github.com/scrypster/muninndb/internal/metrics"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
@@ -761,18 +761,21 @@ func (idx *Index) searchTokenCoverage(ws [8]byte, term string, numer map[[16]byt
 	return nil
 }
 
-// sortScoredIDs sorts in descending order by score, breaking exact ties on
-// ascending ID. The tie-break is load-bearing: Search builds its input from a
-// Go map, and coverage is capped per term, so many documents routinely tie
-// exactly. Sorting on score alone left tied documents in map-iteration order,
-// so which of them survived the topK cut — the recall candidate SET — changed
-// between identical calls on an unchanged index.
+// sortScoredIDs sorts in descending order by score, breaking exact ties
+// newest-first (rankorder.Before: ULID descending). The tie-break is
+// load-bearing twice over. Search builds its input from a Go map, and coverage
+// is capped per term, so many documents routinely tie exactly: sorting on score
+// alone left tied documents in map-iteration order, so which of them survived
+// the topK cut — the recall candidate SET — changed between identical calls.
+// And this cut runs BEFORE recall's final sort, so its direction must be the
+// final sort's: an oldest-first cut here kept the oldest k of a set of
+// identical memories and the newest never became candidates at all.
 func sortScoredIDs(s []ScoredID) {
 	sort.Slice(s, func(i, j int) bool {
 		if s[i].Score != s[j].Score {
 			return s[i].Score > s[j].Score
 		}
-		return bytes.Compare(s[i].ID[:], s[j].ID[:]) < 0
+		return rankorder.Before(s[i].ID, s[j].ID)
 	})
 }
 

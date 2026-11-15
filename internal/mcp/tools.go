@@ -999,7 +999,7 @@ func allToolDefinitions() []ToolDefinition {
 		{
 			Name: "muninn_feedback",
 			Description: "Record explicit feedback on a retrieved engram. useful=true counts as an access of that engram (the same reinforcement as reading it by id: " +
-				"access count and last-access time, which feed its decay/recency). useful=false is accepted and currently has no effect on the engram or on ranking. " +
+				"access count and last-access time). Under default ACT-R scoring access history does not change recall ranking or findability; the max_engrams pruner and weighted_sum scoring read it. useful=false is accepted and currently has no effect on the engram or on ranking. " +
 				"Feedback does not change recall ranking weights and does not change confidence.",
 			InputSchema: map[string]any{
 				"type": "object",

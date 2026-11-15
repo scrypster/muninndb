@@ -448,7 +448,7 @@
         <div style="display:inline-flex;border:1px solid var(--border);border-radius:0.5rem;overflow:hidden;font-size:0.8125rem;">
           <button @click="searchMode = 'balanced'" class="seg-btn" :class="searchMode === 'balanced' && 'seg-active'"
             :style="'padding:0.3rem 0.75rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'balanced' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
-            title="Blend keyword + semantic search with temporal decay (default)">Balanced</button>
+            title="Blend keyword + semantic search (default); age does not lower a memory's score">Balanced</button>
           <button @click="searchMode = 'semantic'" class="seg-btn" :class="searchMode === 'semantic' && 'seg-active'"
             :style="'padding:0.3rem 0.75rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'semantic' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Pure vector similarity — best for concept matching">Semantic</button>
@@ -1320,7 +1320,7 @@
                   <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
                     <span :style="'font-size:0.65rem;background:rgba(99,102,241,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#a5b4fc' : '#4338ca')">2-hop</span>
                     <span :style="'font-size:0.65rem;background:rgba(99,102,241,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#a5b4fc' : '#4338ca')">Hebbian</span>
-                    <span :style="'font-size:0.65rem;background:rgba(99,102,241,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#a5b4fc' : '#4338ca')">Temporal</span>
+                    <span :style="'font-size:0.65rem;background:rgba(99,102,241,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#a5b4fc' : '#4338ca')">PAS</span>
                   </div>
                 </div>
 
@@ -1331,7 +1331,6 @@
                   <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">Docs &amp; facts</div>
                   <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
                     <span :style="'font-size:0.65rem;background:rgba(16,185,129,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#6ee7b7' : '#047857')">3-hop</span>
-                    <span :style="'font-size:0.65rem;background:rgba(16,185,129,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#6ee7b7' : '#047857')">No fading</span>
                   </div>
                 </div>
 
@@ -1339,9 +1338,9 @@
                 <div @click="plasticityForm.showAdvanced=false; plasticityForm.preset='scratchpad'; onPlasticityPresetChange()"
                      :style="'border-radius:0.625rem;cursor:pointer;transition:all 0.15s;' + (plasticityForm.preset==='scratchpad' && !plasticityForm.showAdvanced ? 'border:2px solid #f59e0b;background:rgba(245,158,11,0.12);padding:calc(1.25rem - 1px);' : 'border:1px solid var(--border);background:var(--bg-elevated);padding:1.25rem;')">
                   <div style="font-weight:600;font-size:0.875rem;margin-bottom:0.25rem;">Scratchpad</div>
-                  <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">Short-lived drafts</div>
+                  <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">Drafts, no learning</div>
                   <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
-                    <span :style="'font-size:0.65rem;background:rgba(245,158,11,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#fcd34d' : '#b45309')">Fast fading</span>
+                    <span :style="'font-size:0.65rem;background:rgba(245,158,11,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#fcd34d' : '#b45309')">No PAS</span>
                     <span :style="'font-size:0.65rem;background:rgba(245,158,11,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#fcd34d' : '#b45309')">No assoc.</span>
                   </div>
                 </div>
@@ -1392,7 +1391,7 @@
               <p style="font-size:0.8125rem;font-weight:600;color:var(--text-secondary);margin:0 0 0.75rem;text-transform:uppercase;letter-spacing:0.05em;">Search Scoring</p>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.625rem;margin-bottom:1.25rem;">
                 <template x-for="sf in [
-                  {id:'',             label:'ACT-R (default)', desc:'Cognitive decay + Hebbian'},
+                  {id:'',             label:'ACT-R (default)', desc:'Content match + Hebbian; age-free'},
                   {id:'rrf',          label:'RRF',             desc:'Reciprocal rank fusion'},
                   {id:'weighted_sum', label:'Weighted Sum',    desc:'Linear blend of signals'}
                 ]" :key="sf.id">

@@ -10,7 +10,7 @@ Every claim cites a specific source file in the repository.
 | Capability | Code Reference |
 |---|---|
 | Hebbian association strengthening on every read | `internal/cognitive/hebbian.go` |
-| Temporal decay scoring (ACT-R model) | `internal/cognitive/decay.go`, `internal/engine/activation/engine.go` |
+| ACT-R scoring (neutral, age-free base level; association boosts) | `internal/cognitive/decay.go`, `internal/engine/activation/engine.go` |
 | 6-phase predictive spread activation (`Run` in `ActivationEngine`) | `internal/engine/activation/engine.go` (phases 1–6, line 340+) |
 | Semantic push triggers (subscription registry + worker) | `internal/engine/trigger/registry.go`, `internal/engine/trigger/worker.go` |
 | Explicit feedback — `useful=true` counts as an access (the per-vault weight update it also records is a pinned no-op that nothing reads; see `internal/scoring/deadloop_characterization_test.go`) | `internal/engine/engine.go` (`RecordFeedback`) |
@@ -38,7 +38,7 @@ Concrete signals that speak to production readiness:
 ### Cognitive
 
 - [Hebbian association strengthening](cognitive-primitives.md) — co-activated engram pairs have their association weights incremented on every successful recall.
-- [ACT-R temporal decay](cognitive-primitives.md) — base-level activation scores follow the ACT-R decay equation, parameterized per vault via Plasticity presets.
+- [ACT-R scoring](cognitive-primitives.md) — the base level is neutral for every memory (age and access history do not change findability or rank); association boosts promote in ranking only. `actr_decay` is currently inert and WARNs when set.
 - [6-phase spread activation](retrieval-design.md) — the ACTIVATE pipeline (embed → candidate retrieval → RRF fusion → Hebbian boost → BFS traversal → final scoring) runs on every recall request.
 - [Semantic push triggers](semantic-triggers.md) — subscriptions fire server-side push events on new writes, threshold crossings, and contradiction detection.
 - [Explicit feedback](feature-reference.md) — `muninn_feedback useful=true` reinforces the engram as an access; it does not change recall ranking weights (the recorded weight update is a no-op today).
@@ -53,7 +53,7 @@ Concrete signals that speak to production readiness:
 ### Retrieval
 
 - [Multi-strategy recall](retrieval-design.md) — candidates are gathered in parallel from full-text search, HNSW vector index, temporal decay pool, and tag index before fusion.
-- [Relevance scoring](retrieval-design.md) — final scores are composites of semantic similarity, FTS relevance, ACT-R decay, Hebbian boost, recency, and access frequency.
+- [Relevance scoring](retrieval-design.md) — under ACT-R (default) the score is content match (semantic + FTS) × confidence × association boosts; `weighted_sum` adds recency, decay and access-frequency terms.
 - [Activation spread via BFS](retrieval-design.md) — the BFS traversal phase (Phase 5) walks the association graph up to a configurable hop depth to surface indirectly related memories.
 
 ### Organization
