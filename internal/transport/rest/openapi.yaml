@@ -434,7 +434,8 @@ components:
             Learned co-activation with a recently recalled memory.
             ASSOCIATION evidence, not match strength (COG-35). On default
             (ACT-R) vaults it does not change the order of results except to
-            break an exact content tie; a row whose score is 0 was injected
+            break an exact content tie (with a real embedder matched rows
+            practically never tie; ties occur on keyword-only vaults); a row whose score is 0 was injected
             by association evidence and follows every matched row. On rrf and
             weighted_sum vaults it still contributes to score.
         transition_boost:
@@ -445,7 +446,8 @@ components:
             previous recall's results.
             ASSOCIATION evidence, not match strength (COG-35). On default
             (ACT-R) vaults it does not change the order of results except to
-            break an exact content tie; a row whose score is 0 was injected
+            break an exact content tie (with a real embedder matched rows
+            practically never tie; ties occur on keyword-only vaults); a row whose score is 0 was injected
             by association evidence and follows every matched row. On rrf and
             weighted_sum vaults it still contributes to score.
         entity_boost:
@@ -456,7 +458,8 @@ components:
             (capped at 0.30).
             ASSOCIATION evidence, not match strength (COG-35). On default
             (ACT-R) vaults it does not change the order of results except to
-            break an exact content tie; a row whose score is 0 was injected
+            break an exact content tie (with a real embedder matched rows
+            practically never tie; ties occur on keyword-only vaults); a row whose score is 0 was injected
             by association evidence and follows every matched row. On rrf and
             weighted_sum vaults it still contributes to score.
         access_frequency:
@@ -496,10 +499,17 @@ components:
           format: float
           description: >-
             What ORDERS the results. On default (ACT-R) vaults it is the
-            absolute content score (content match x confidence, equal to
-            score_components.absolute_score); association evidence is reported
-            in hebbian_boost / transition_boost / entity_boost and only breaks
-            exact ties; a row injected by association has score 0 and follows
+            absolute content score (content match x confidence), equal to
+            score_components.absolute_score except where a DECLARED
+            relationship moved it: an unresolved declared contradiction
+            demotes a row to 0.9x; a declared-supersession head takes its
+            chain's best score and the superseded row sits 0.01 below it; a
+            substituted version head carries its predecessor's score.
+            Association evidence is reported in hebbian_boost /
+            transition_boost / entity_boost and only breaks EXACT ties — with
+            a real embedder matched rows practically never tie (0 exact ties
+            in 27,000 adjacent top-10 pairs measured), so on embedder vaults it
+            does not change their order; ties occur on keyword-only vaults. A row injected by association has score 0 and follows
             every matched row; the first N rows do not depend on max_results
             (COG-35). On rrf and weighted_sum vaults it is RELATIVE to this
             query's best candidate. Judge relevance by relevance_band.
@@ -1254,7 +1264,9 @@ components:
           description: >-
             With hebbian_boost and transition_boost, the row's association
             evidence. On default (ACT-R) vaults none of the three changes the
-            order of results except to break an exact content tie (COG-35).
+            order of results except to break an exact content tie (COG-35) —
+            which, with a real embedder, practically never occurs between
+            matched rows; ties occur on keyword-only vaults.
         access_frequency:
           type: number
           format: double
@@ -1278,8 +1290,9 @@ components:
           format: double
           description: >-
             The row's recall score for this query. On default (ACT-R) vaults
-            it is the absolute content score that orders recall, so it equals
-            the `score` the same memory carries in a recall row (COG-35).
+            it is the absolute content score that orders recall (as declared
+            contradiction/supersession adjust it), and it equals the `score`
+            the same memory carries in a recall row (COG-35).
         components:
           $ref: "#/components/schemas/ExplainComponents"
         fts_matches:

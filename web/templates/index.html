@@ -3228,7 +3228,7 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
           </div>
           <div style="margin-bottom:1.25rem;">
             <div style="font-size:0.75rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.25rem;">Association Evidence</div>
-            <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.625rem;">Evidence this memory is associated with the matches or with recent recalls &mdash; not how well it matched. On default-scoring vaults it does not change the order except to break exact ties.</div>
+            <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.625rem;">Evidence this memory is associated with the matches or with recent recalls &mdash; not how well it matched. On default-scoring vaults it only breaks exact ties, which a real embedder practically never produces between matched rows.</div>
             <template x-for="[label, val] in [
               ['Hebbian Boost', explainModal.data.components.hebbian_boost],
               ['Transition Boost', explainModal.data.components.transition_boost],

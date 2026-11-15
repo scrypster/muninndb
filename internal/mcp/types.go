@@ -91,7 +91,10 @@ type Memory struct {
 	// learned co-activation edge to a recently recalled memory, and a
 	// predictive-activation transition from the last recall. Under the
 	// default (ACT-R) scoring they do not change the order except to break an
-	// exact content tie (COG-35); a row whose score is 0 was injected by that
+	// exact content tie (COG-35) — with a real embedder matched rows practically
+	// never tie exactly (0 in 27,000 adjacent top-10 pairs measured), so there
+	// they do not change the order of matched rows; a row whose score is 0 was
+	// injected by that
 	// association, after every matched row. HebbianBoost and TransitionBoost
 	// were computed on every row and dropped here until COG-35.
 	EntityBoost     float64 `json:"entity_boost,omitempty"`

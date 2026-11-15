@@ -137,7 +137,7 @@ The activation log — a ring buffer of recent ACTIVATE calls — is consulted. 
 
 This implements Hebb's Rule at query time: ideas that have fired together recently are more likely to fire together again.
 
-**On the default ACT-R path this boost is association evidence, not rank (COG-35).** Results are ordered by the absolute content score (content match × confidence); the Hebbian, PAS and entity boosts are reported per row and break only exact content ties. Measured on a production install (150 model-written rewordings of live memory titles, three vaults), ordering by content alone put the right memory first 62 times against 15 for the boosted order. rrf and weighted_sum keep the boost in their score.
+**On the default ACT-R path this boost is association evidence, not rank (COG-35).** Results are ordered by the absolute content score (content match × confidence); the Hebbian, PAS and entity boosts are reported per row and break only exact content ties, which a real embedder practically never produces between matched rows (0 in 27,000 adjacent top-10 pairs measured); ties occur on keyword-only vaults. Measured on a production install (150 model-written rewordings of live memory titles, three vaults), ordering by content alone put the right memory first 62 times against 15 for the boosted order. rrf and weighted_sum keep the boost in their score.
 
 ### Phase 4.5: PAS Transition Boost
 
