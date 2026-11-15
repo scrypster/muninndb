@@ -383,22 +383,15 @@ func TestHonestClock_InertDecayWarnsOnce(t *testing.T) {
 	}
 }
 
-// TestHonestClock_KnownResidual_InMemoryBoostsReorderAcrossARestart is a
-// PINNED KNOWN RESIDUAL, not a guarantee: it documents current behaviour and
-// FAILS WHEN IT IS FIXED, so the fix has to update the invariant text with it.
-//
-// The honest clock makes findability and absolute scores (hence bands) a
-// function of persisted state. RANK is not: the Hebbian and PAS boosts read
-// the in-memory activation log, which a normal (read_only=false) recall
-// writes, which weights entries by a wall clock, and which a restart wipes.
-// So on the normal path, one unrelated recall can lift an associated row over
-// an exact match; a fresh process puts the exact match back at rank 1. The
-// mechanisms are deliberately NOT changed by this increment (separate work).
-func TestHonestClock_KnownResidual_InMemoryBoostsReorderAcrossARestart(t *testing.T) {
-	// residual → follow-up. Remove the entry (and amend COG-34) when it fixes.
-	known := map[string]string{
-		"in-memory activation log reorders rank on the read_only=false path": "Hebbian/PAS log persistence or windowing (memo R3/R4)",
-	}
+// TestHonestClock_InMemoryLogNoLongerReordersScoredRows replaces the honest
+// clock's pinned KNOWN RESIDUAL (..._KnownResidual_InMemoryBoostsReorderAcrossARestart):
+// after one unrelated normal recall, an associated row used to go to rank 1
+// over an exact match, and a fresh process put the exact match back. Under
+// content-first order (COG-35) the Hebbian and PAS boosts no longer order
+// scored rows, so the scored order is the same fresh, after the unrelated
+// recall, and after a restart. RED on the trunk (the associated row took
+// rank 1 after the unrelated recall).
+func TestHonestClock_InMemoryLogNoLongerReordersScoredRows(t *testing.T) {
 	h := newHCEnv(t)
 	const vault = "trail-residual"
 	ctx := context.Background()
@@ -409,40 +402,116 @@ func TestHonestClock_KnownResidual_InMemoryBoostsReorderAcrossARestart(t *testin
 		t.Fatal(err)
 	}
 	const q = "waterbar drainage on switchback four"
-	top := func() (string, float32) {
+	order := func() string {
 		t.Helper()
 		resp, err := h.eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10})
 		if err != nil {
 			t.Fatal(err)
 		}
+		h.eng.activation.WaitLogIdle()
 		if len(resp.Activations) == 0 {
 			t.Fatal("no rows")
 		}
-		return resp.Activations[0].ID, resp.Activations[0].Score
+		var b strings.Builder
+		for _, a := range resp.Activations {
+			fmt.Fprintf(&b, "%s:%.4f heb=%.3f ", a.ID, a.Score, a.ScoreComponents.HebbianBoost)
+		}
+		return b.String()
 	}
 
 	h.restart()
-	freshTop, freshScore := top()
-	if freshTop != exact.String() {
-		t.Fatalf("premise: a fresh process must rank the exact match first, got %s (%.3f)", freshTop, freshScore)
+	fresh := order()
+	if !strings.HasPrefix(fresh, exact.String()) {
+		t.Fatalf("premise: a fresh process must rank the exact match first: %s", fresh)
 	}
-
 	h.restart()
-	// One unrelated normal recall: it returns the partner and writes the log.
 	if _, err := h.eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault, Context: []string{"footbridge decking planks"}, MaxResults: 10}); err != nil {
 		t.Fatal(err)
 	}
 	h.eng.activation.WaitLogIdle()
-	afterTop, afterScore := top()
-	stillReorders := afterTop != freshTop
-	t.Logf("fresh process: top %s score %.3f; after one unrelated recall: top %s score %.3f", freshTop, freshScore, afterTop, afterScore)
+	after := order()
+	if !strings.Contains(after, assoc.String()) {
+		t.Fatalf("premise: the associated row must be returned so its evidence is in play: %s", after)
+	}
+	strip := func(s string) string { // ids and scores only: the evidence fields MAY differ
+		var ids []string
+		for _, f := range strings.Fields(s) {
+			if !strings.HasPrefix(f, "heb=") {
+				ids = append(ids, f)
+			}
+		}
+		return strings.Join(ids, " ")
+	}
+	if strip(after) != strip(fresh) {
+		t.Errorf("the in-memory activation log reordered scored rows (COG-35 says it must not)\nfresh process: %s\nafter one unrelated recall: %s", fresh, after)
+	}
+	h.restart()
+	if again := order(); strip(again) != strip(fresh) {
+		t.Errorf("scored rows differ across a restart\nfirst: %s\nnow:   %s", fresh, again)
+	}
+}
+
+// TestContentFirst_KnownResidual_TieOrderReadsTheInMemoryLog is a PINNED KNOWN
+// RESIDUAL, not a guarantee: it documents current behaviour and FAILS WHEN IT
+// IS FIXED, so the fix has to update COG-34/COG-35 with it.
+//
+// Under content-first order association evidence breaks EXACT content ties,
+// and the Hebbian/PAS halves of that evidence read the in-memory activation
+// log (written by every read_only=false recall, weighted by a wall clock,
+// wiped by a restart). So two memories with identical content scores can swap
+// places after an unrelated recall and swap back in a fresh process. Only exact
+// ties are exposed; rows with different content scores cannot move (pinned by
+// TestHonestClock_InMemoryLogNoLongerReordersScoredRows). Injected rows are
+// ordered by entity evidence, which is persisted, so they are not exposed —
+// except that on vaults over 1,000 memories a PAS transition can add a genuine
+// content match the index cut missed to the candidate pool (named in COG-35).
+func TestContentFirst_KnownResidual_TieOrderReadsTheInMemoryLog(t *testing.T) {
+	known := map[string]string{
+		"exact content ties are broken by log-dependent association evidence": "persist or window the activation log (Hebbian/PAS read side)",
+	}
+	h := newHCEnv(t)
+	const vault = "trail-tie-residual"
+	ctx := context.Background()
+	older := h.write(vault, "waterbar on switchback", "waterbar on switchback", 20*time.Hour, 0, 0)
+	newer := h.write(vault, "waterbar on switchback", "waterbar on switchback", 10*time.Hour, 0, 0)
+	partner := h.write(vault, "footbridge decking", "the footbridge decking was replaced with treated planks", 50*time.Hour, 0, 0)
+	for i := 0; i < 10; i++ {
+		h.write(vault, fmt.Sprintf("brushing log %d", i), fmt.Sprintf("crew brushed the corridor on day %d", i), time.Duration(100+i)*time.Hour, 0, 0)
+	}
+	if _, err := h.eng.Link(ctx, &mbp.LinkRequest{Vault: vault, SourceID: partner.String(), TargetID: older.String(), Weight: 1.0}); err != nil {
+		t.Fatal(err)
+	}
+	first := func() string {
+		t.Helper()
+		resp, err := h.eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault, Context: []string{"waterbar switchback"}, MaxResults: 10, ReadOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Activations) < 2 || resp.Activations[0].ScoreComponents.AbsoluteScore != resp.Activations[1].ScoreComponents.AbsoluteScore {
+			t.Fatalf("premise: the twins must be the top two rows and tie exactly: %+v", resp.Activations)
+		}
+		return resp.Activations[0].ID
+	}
+	h.restart()
+	if got := first(); got != newer.String() {
+		t.Fatalf("premise: a fresh process breaks the tie newest-first, got %s", got)
+	}
+	if _, err := h.eng.Activate(ctx, &mbp.ActivateRequest{Vault: vault, Context: []string{"footbridge decking planks"}, MaxResults: 10}); err != nil {
+		t.Fatal(err)
+	}
+	h.eng.activation.WaitLogIdle()
+	stillReorders := first() == older.String()
 	for residual, followUp := range known {
 		if !stillReorders {
-			t.Errorf("KNOWN RESIDUAL APPEARS FIXED (%s): rank no longer depends on the in-memory log — remove the allowlist entry and amend COG-34 / the guide wording [%s]", residual, followUp)
+			t.Errorf("KNOWN RESIDUAL APPEARS FIXED (%s): an exact tie no longer depends on the in-memory log — remove the allowlist entry and amend COG-34 / COG-35 [%s]", residual, followUp)
 		}
 	}
 	if stillReorders && len(known) == 0 {
-		t.Errorf("rank depends on the in-memory activation log but no residual is allowlisted")
+		t.Errorf("exact-tie order depends on the in-memory activation log but no residual is allowlisted")
+	}
+	h.restart()
+	if got := first(); got != newer.String() {
+		t.Errorf("a restart must restore newest-first on the tie, got %s", got)
 	}
 }
 

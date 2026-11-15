@@ -150,12 +150,15 @@ func TestRelevanceBand_WeakNeighborIsNotDressedAsCertain(t *testing.T) {
 		t.Fatalf("premise not reproduced: absolute score %.4f >= 0.2, so this row is "+
 			"not weak and the test proves nothing", abs)
 	}
-	// Premise 2: the displayed score materially overstates that evidence — the
-	// ACT-R prior inflating Final away from the absolute quantity, which is the
-	// mechanism #773 names.
-	if float64(top.Score) < 3.0*abs {
-		t.Fatalf("premise not reproduced: score %.4f is not >= 3x the absolute "+
-			"evidence %.4f, so nothing is being overstated", top.Score, abs)
+	// Premise 2 used to be that the displayed score materially overstated that
+	// evidence (>= 3x) — the ACT-R prior inflating Final away from the absolute
+	// quantity, the mechanism #773 names. Under content-first order (COG-35)
+	// that shape is unrepresentable on ACT-R: the score IS the absolute
+	// evidence and the Hebbian prior is reported beside it. Asserted, so a
+	// regression back to an inflated score fails here.
+	if top.Score != top.ScoreComponents.AbsoluteScore {
+		t.Errorf("score %.4f is not the absolute evidence %.4f on a Hebbian-hot row — "+
+			"the prior is inflating the displayed score again (COG-35)", top.Score, abs)
 	}
 	if top.ScoreComponents.HebbianBoost < 0.99 {
 		t.Fatalf("premise not reproduced: hebbian boost %.3f — the fixture failed to "+
