@@ -34,7 +34,7 @@ type EngineInterface interface {
 	// ValidFrom); the zero time defaults to now.
 	Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (*WriteResult, error)
 	Consolidate(ctx context.Context, vault string, ids []string, mergedContent string) (*ConsolidateResult, error)
-	Session(ctx context.Context, vault string, since time.Time, offset, limit int) (*SessionSummary, error)
+	Session(ctx context.Context, vault string, req SessionRequest) (*SessionSummary, error)
 	Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error)
 
 	// Epic 18: tools 12-17

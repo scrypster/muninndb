@@ -249,7 +249,12 @@ func (ps *PebbleStore) EngramsByCreatedSince(ctx context.Context, wsPrefix [8]by
 // decode per key — proportional to the writes since `since`, not to the vault.
 // A window reaching back to the vault's first write is therefore a full scan of
 // the vault's engram keys; that is the price of an exact total.
-func (ps *PebbleStore) LiveEngramsCreatedSinceNewestFirst(ctx context.Context, wsPrefix [8]byte, since time.Time, offset, limit int) (page []*Engram, total int, err error) {
+//
+// before, when non-nil, is an EXCLUSIVE upper bound on the engram ID: the
+// window becomes [since, before). Passing the last ID of the previous page
+// makes newest-first paging stable when new writes land between pages, which
+// offset paging is not.
+func (ps *PebbleStore) LiveEngramsCreatedSinceNewestFirst(ctx context.Context, wsPrefix [8]byte, since time.Time, before *ULID, offset, limit int) (page []*Engram, total int, err error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -272,6 +277,9 @@ func (ps *PebbleStore) LiveEngramsCreatedSinceNewestFirst(ctx context.Context, w
 	upperKey := make([]byte, 1+8)
 	upperKey[0] = prefix.Engram
 	copy(upperKey[1:9], upperWS[:])
+	if before != nil {
+		upperKey = keys.EngramKey(wsPrefix, [16]byte(*before)) // exclusive
+	}
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lowerKey, UpperBound: upperKey})
 	if err != nil {

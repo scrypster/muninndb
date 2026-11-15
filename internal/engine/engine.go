@@ -4746,6 +4746,19 @@ type SessionPagedResult struct {
 // live activity, and listing them as writes reported deleted memories as
 // present. limit is clamped to SessionMaxLimit.
 func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time, offset, limit int) (*SessionPagedResult, error) {
+	return e.SessionPagedBefore(ctx, vault, since, nil, offset, limit)
+}
+
+// SessionPagedBefore is SessionPaged over the window [since, before): before
+// (exclusive, an engram ID — the last ID of the previous page) is the stable
+// cursor; nil means "up to now". A since before the Unix epoch — Go's zero
+// time is what an unset timestamp serialises to — means "from the beginning":
+// ULID timestamps cannot represent earlier instants, and the bound used to
+// underflow into an empty, authoritative-looking answer.
+func (e *Engine) SessionPagedBefore(ctx context.Context, vault string, since time.Time, before *storage.ULID, offset, limit int) (*SessionPagedResult, error) {
+	if epoch := time.Unix(0, 0); since.Before(epoch) {
+		since = epoch
+	}
 	if limit <= 0 {
 		limit = SessionDefaultLimit
 	}
@@ -4756,7 +4769,7 @@ func (e *Engine) SessionPaged(ctx context.Context, vault string, since time.Time
 		offset = 0
 	}
 	ws := e.store.ResolveVaultPrefix(vault)
-	engrams, total, err := e.store.LiveEngramsCreatedSinceNewestFirst(ctx, ws, since, offset, limit)
+	engrams, total, err := e.store.LiveEngramsCreatedSinceNewestFirst(ctx, ws, since, before, offset, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -1777,8 +1777,8 @@ func (e *slowIdempotentEngine) Evolve(ctx context.Context, vault, oldID, newCont
 func (e *slowIdempotentEngine) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
 	return (&fakeEngine{}).Consolidate(ctx, vault, ids, merged)
 }
-func (e *slowIdempotentEngine) Session(ctx context.Context, vault string, since time.Time, offset, limit int) (*SessionSummary, error) {
-	return (&fakeEngine{}).Session(ctx, vault, since, offset, limit)
+func (e *slowIdempotentEngine) Session(ctx context.Context, vault string, req SessionRequest) (*SessionSummary, error) {
+	return (&fakeEngine{}).Session(ctx, vault, req)
 }
 func (e *slowIdempotentEngine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error) {
 	return (&fakeEngine{}).Decide(ctx, vault, decision, rationale, alternatives, evidenceIDs)
