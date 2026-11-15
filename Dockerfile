@@ -1,6 +1,6 @@
 # Stage 1: Fetch assets and build
 # go:embed directives require the ORT native library and ONNX model to exist at compile time.
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.26.11-bookworm AS builder
 ENV GOTOOLCHAIN=auto
 
 WORKDIR /src
