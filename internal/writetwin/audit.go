@@ -31,6 +31,24 @@ type LoggedPair struct {
 // line of any kind) — the shadow period the audit's write count spans.
 type LogSpan struct {
 	First, Last time.Time
+	// Starts are the times the check started in a process (StartLogMsg
+	// lines). For one Window after each, the ring is warming — writes made
+	// before the start are not in it — so the audit treats that stretch as
+	// blind and reports it separately.
+	Starts []time.Time
+}
+
+// StartLogMsg is logged once when a server starts the check; the audit reads
+// it back to find each warm-up stretch. Renaming it breaks the audit.
+const StartLogMsg = "write-time twin check enabled"
+
+func (s LogSpan) blind(at time.Time) bool {
+	for _, st := range s.Starts {
+		if !at.Before(st) && at.Before(st.Add(Window)) {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseFlagLog reads FlagLogMsg lines from a server log (slog text or JSON
@@ -46,6 +64,9 @@ func ParseFlagLog(r io.Reader) ([]LoggedPair, LogSpan, error) {
 		if !strings.Contains(line, FlagLogMsg) {
 			if at, ok := lineTime(line); ok {
 				span.extend(at)
+				if strings.Contains(line, StartLogMsg) && parseLogLine(line)["msg"] == StartLogMsg {
+					span.Starts = append(span.Starts, at)
+				}
 			}
 			continue
 		}
@@ -152,6 +173,11 @@ type AuditReport struct {
 	Writes           int       `json:"writes"` // non-successor writes in [From, To]
 	UnresolvedPer100 float64   `json:"unresolved_per_100_writes"`
 	MinAgeDays       int       `json:"min_age_days"`
+	// The first hour after each process start is blind (the ring was
+	// warming); its pairs and writes are reported here, not in the rate.
+	WarmupStretches     int `json:"warmup_stretches"`
+	WarmupPairsExcluded int `json:"warmup_pairs_excluded"`
+	WarmupWritesExclude int `json:"warmup_writes_excluded"`
 }
 
 // ErrNoPairs is returned when the log holds no pairs for the vault.
@@ -170,6 +196,7 @@ func Audit(ctx context.Context, store *storage.PebbleStore, ws [8]byte, pairs []
 	rep := &AuditReport{MinAgeDays: int(minAge / (24 * time.Hour))}
 	cut := now.Add(-minAge)
 	rep.From, rep.To = span.First, span.Last
+	rep.WarmupStretches = len(span.Starts)
 	if rep.To.IsZero() || rep.To.After(cut) {
 		rep.To = cut
 	}
@@ -186,6 +213,10 @@ func Audit(ctx context.Context, store *storage.PebbleStore, ws [8]byte, pairs []
 		seen[k] = true
 		rep.PairsLogged++
 		if p.At.After(cut) {
+			continue
+		}
+		if span.blind(p.At) {
+			rep.WarmupPairsExcluded++
 			continue
 		}
 		mature = append(mature, p)
@@ -206,7 +237,7 @@ func Audit(ctx context.Context, store *storage.PebbleStore, ws [8]byte, pairs []
 			rep.Unresolved++
 		}
 	}
-	if len(mature) > 0 {
+	if len(mature) > 0 || rep.WarmupPairsExcluded > 0 {
 		all, err := loadReplayEngrams(ctx, store, ws)
 		if err != nil {
 			return nil, err
@@ -214,6 +245,10 @@ func Audit(ctx context.Context, store *storage.PebbleStore, ws [8]byte, pairs []
 		for i := range all {
 			c := all[i].created
 			if !c.Before(rep.From) && !c.After(rep.To) && !all[i].successor {
+				if span.blind(c) {
+					rep.WarmupWritesExclude++
+					continue
+				}
 				rep.Writes++
 			}
 		}

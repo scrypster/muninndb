@@ -237,6 +237,21 @@ func TestTwinAudit_UnresolvedPerHundredWrites(t *testing.T) {
 	if rep.Writes != 20 || math.Abs(rep.UnresolvedPer100-5) > 1e-9 {
 		t.Fatalf("rate: want 1 unresolved per 20 writes = 5 per 100, got %+v", rep)
 	}
+	// A process start 5 minutes before the pairs makes the next hour blind:
+	// those pairs and that hour's writes are reported apart, not in the rate.
+	startLine := `time=` + at.Add(6*time.Minute).Format(time.RFC3339Nano) + ` level=INFO msg="write-time twin check enabled" mode=shadow`
+	pairs2, span2, err := ParseFlagLog(strings.NewReader(startLine + "\n" + log))
+	if err != nil || len(span2.Starts) != 1 {
+		t.Fatalf("start line not read: %+v %v", span2, err)
+	}
+	span2.First, span2.Last = period.First, period.Last
+	warm, err := Audit(ctx, f.store, f.ws, pairs2, span2, f.now, 7*24*time.Hour)
+	if err != nil && err != ErrNoPairs {
+		t.Fatal(err)
+	}
+	if warm.WarmupPairsExcluded != 3 || warm.PairsMature != 0 || warm.WarmupWritesExclude == 0 || warm.Writes+warm.WarmupWritesExclude != 20 {
+		t.Fatalf("blind stretch not excluded and reported: %+v", warm)
+	}
 	// Too young pairs are not counted yet.
 	young, _ := Audit(ctx, f.store, f.ws, pairs, period, at.Add(24*time.Hour), 7*24*time.Hour)
 	if young.PairsMature != 0 {

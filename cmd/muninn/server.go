@@ -1468,7 +1468,9 @@ func runServer() {
 		slog.Warn("MUNINN_WRITE_RELATED has an unrecognised value; the write-time twin check stays off (use off, shadow or 1)",
 			"value", os.Getenv("MUNINN_WRITE_RELATED"))
 	} else if writeTwinMode != writetwin.Off {
-		slog.Info("write-time twin check enabled", "mode", writeTwinMode.String())
+		// The audit (muninn twin-audit) reads this line back as a ring
+		// warm-up start: keep the message equal to writetwin.StartLogMsg.
+		slog.Info(writetwin.StartLogMsg, "mode", writeTwinMode.String())
 	}
 
 	// Build engine API - pass the full worker implementations
