@@ -115,6 +115,56 @@ var (
 		Name: "muninn_mcp_arg_rejections_total",
 		Help: "Total MCP tool calls rejected for argument shape (JSON-RPC -32602), by tool and reason.",
 	}, []string{"tool", "reason"})
+
+	// Label pipeline (slice 2a). Every label value is from a closed set; no
+	// vault name, query id or memory id is ever a label, so the series reveal
+	// nothing about vault contents. The muninn_feedback response is uniform;
+	// these counters (and muninn_status's `labels` block) are the ONLY place
+	// per-outcome information appears, and only in aggregate.
+
+	// FeedbackLabelsTotal counts accepted label posts. first=true is a new
+	// (query, memory, credential) label; first=false a repeat (counted on the
+	// existing row, never stored as a new one).
+	FeedbackLabelsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_feedback_labels_total",
+		Help: "Accepted muninn_feedback labels, by membership (verified|unverified), polarity (pos|neg), channel (direct|handoff) and first (true|false).",
+	}, []string{"membership", "polarity", "channel", "first"})
+
+	// FeedbackRejectedTotal counts label posts rejected for a semantic reason
+	// (the caller still received the uniform success response).
+	FeedbackRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_feedback_rejected_total",
+		Help: "Rejected muninn_feedback label ids, by reason (not_in_recall|unknown_event|bad_mac|unknown_id|no_key).",
+	}, []string{"reason"})
+
+	// FeedbackInvalidTotal counts syntactically invalid feedback calls (the
+	// caller received a -32602 error).
+	FeedbackInvalidTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_feedback_invalid_total",
+		Help: "muninn_feedback calls rejected for shape, by field (useful|form|query_id|id|limit|source).",
+	}, []string{"field"})
+
+	// FeedbackLegacyTotal counts the legacy no-query_id form; capped=true when
+	// the per-(credential, memory, UTC day) access-bump cap suppressed a bump.
+	FeedbackLegacyTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_feedback_legacy_total",
+		Help: "Legacy muninn_feedback calls (engram_id, no query_id; record no label), by whether the daily access-bump cap applied.",
+	}, []string{"capped"})
+
+	// FeedbackStormTotal is incremented when one (credential, memory, UTC day)
+	// post count first reaches a threshold — repeats made visible without
+	// storing them.
+	FeedbackStormTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_feedback_storm_total",
+		Help: "Times a (credential, memory, UTC day) feedback post count first reached a threshold (10|100).",
+	}, []string{"threshold"})
+
+	// RecallTotal is the server-side recall denominator, including read-only
+	// recalls, which persist nothing.
+	RecallTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_recall_total",
+		Help: "Completed recalls (Activate), by read_only (true|false).",
+	}, []string{"read_only"})
 )
 
 // VaultStore is the subset of storage.PebbleStore methods needed by VaultEngramCollector.

@@ -19,6 +19,7 @@ import (
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine"
 	"github.com/scrypster/muninndb/internal/engine/activation"
+	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 	"golang.org/x/text/unicode/norm"
@@ -639,6 +640,14 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	result := map[string]any{
 		"memories": memories,
 		"total":    resp.TotalFound,
+		// Label pipeline: the query id is on EVERY recall response, empty and
+		// read-only included. This map is hand-built, not a mirror of
+		// mbp.ActivateResponse — TestRecallOverMCP_QueryIDAndFeedbackBlockPresent
+		// pins that it survives here.
+		"query_id": resp.QueryID,
+	}
+	if len(memories) > 0 {
+		result["feedback"] = recallFeedbackBlock(resp.QueryID)
 	}
 	// SemanticDegraded: the vector signal for this recall could not be
 	// trusted (embed backend unreachable, an all-zero embedding, or a
@@ -944,6 +953,13 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 		status.Embedder = &emb
 		status.Workers = workers
 		status.EmbeddingsPending = snap.EmbeddingsPending
+	}
+	if lr, ok := s.engine.(labelStatsReporter); ok {
+		if ls, err := lr.LabelStats(ctx, vault); err == nil {
+			status.Labels = ls
+		} else {
+			slog.Warn("handleStatus: label stats failed", "err", err)
+		}
 	}
 	sendResult(w, id, textContent(mustJSON(status)))
 }
@@ -2797,18 +2813,193 @@ func stringArg(args map[string]any, key string) string {
 	return v
 }
 
+// Feedback limits (label pipeline): at most 50 groups, 20 ids per group and
+// 200 ids per call.
+const (
+	feedbackMaxGroups      = 50
+	feedbackMaxIDsPerGroup = 20
+	feedbackMaxIDsPerCall  = 200
+	// feedbackIDPlaceholder is the placeholder the recall response's
+	// copyable call carries; sent verbatim it is a clear error, never a
+	// silent no-op.
+	feedbackIDPlaceholder = "<ids that helped>"
+)
+
+// feedbackUsefulHelp is the -32602 message for a missing or non-boolean
+// `useful` — it shows the exact call, because the old handler silently turned
+// an omitted field (or the string "true") into a NEGATIVE.
+const feedbackUsefulHelp = `useful is required and must be a JSON boolean: true if the memory helped, false if it did not. Example: {"query_id":"<from muninn_recall>","engram_ids":["<id>"],"useful":true}`
+
+// handleFeedback records which recalled memories were useful. Exactly one of
+// three forms: query_id+engram_ids (recommended), groups (batch, e.g. a
+// harness drain), or engram_id (legacy — records no label). Validation is
+// SYNTACTIC only and every rule is a -32602; semantic outcomes (unknown
+// event, id not in that recall, bad MAC, repeats) are never reported — the
+// response is identical for every credential and every outcome.
 func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
-	engramID, ok := args["engram_id"].(string)
-	if !ok || engramID == "" {
-		sendError(w, id, -32602, "engram_id is required")
+	invalid := func(field, msg string) {
+		metrics.FeedbackInvalidTotal.WithLabelValues(field).Inc()
+		sendArgError(w, id, argRejectInvalidParams, msg)
+	}
+	_, hasQ := args["query_id"]
+	_, hasIDs := args["engram_ids"]
+	_, hasGroups := args["groups"]
+	_, hasLegacy := args["engram_id"]
+	forms := 0
+	for _, f := range []bool{hasQ || hasIDs, hasGroups, hasLegacy} {
+		if f {
+			forms++
+		}
+	}
+	if forms != 1 {
+		invalid("form", "send exactly one of: query_id+engram_ids, groups, or engram_id")
 		return
 	}
-	useful, _ := args["useful"].(bool)
-	if err := s.engine.RecordFeedback(ctx, vault, engramID, useful); err != nil {
-		sendError(w, id, -32000, "tool error: "+err.Error())
+	source := FeedbackSourceDirect
+	if raw, ok := args["source"]; ok && raw != nil {
+		v, isStr := raw.(string)
+		if !isStr || (v != FeedbackSourceDirect && v != FeedbackSourceHandoff) {
+			invalid("source", `source must be "direct" (the default) or "handoff"`)
+			return
+		}
+		source = v
+	}
+
+	if hasLegacy {
+		useful, ok := args["useful"].(bool)
+		if !ok {
+			invalid("useful", feedbackUsefulHelp)
+			return
+		}
+		engramID, isStr := args["engram_id"].(string)
+		if !isStr || !isMemoryID(engramID) {
+			invalid("id", "engram_id is not a memory id")
+			return
+		}
+		if err := s.engine.RecordFeedback(ctx, vault, engramID, useful); err != nil {
+			sendFeedbackError(w, id, err)
+			return
+		}
+		sendResult(w, id, textContent(mustJSON(map[string]any{
+			"ok": true, "received_groups": 0, "received_ids": 1,
+			"note": "engram_id without a query_id records no label. To label, send the recall's query_id with engram_ids.",
+		})))
 		return
 	}
-	sendResult(w, id, textContent(mustJSON(map[string]any{"ok": true, "engram_id": engramID, "useful": useful})))
+
+	var groups []FeedbackGroup
+	if hasGroups {
+		rawGroups, ok := args["groups"].([]any)
+		if !ok || len(rawGroups) == 0 {
+			invalid("form", `groups must be a non-empty array of {"query_id":"…","ids":["…"],"useful":true}`)
+			return
+		}
+		if len(rawGroups) > feedbackMaxGroups {
+			invalid("limit", fmt.Sprintf("too many groups in one feedback call (max %d); split into several calls", feedbackMaxGroups))
+			return
+		}
+		for gi, rg := range rawGroups {
+			g, ok := rg.(map[string]any)
+			if !ok {
+				invalid("form", fmt.Sprintf(`groups[%d]: must be an object {"query_id":"…","ids":["…"],"useful":true}`, gi))
+				return
+			}
+			fg, field, msg := parseFeedbackGroup(g, "ids", fmt.Sprintf("groups[%d]: ", gi), fmt.Sprintf("groups[%d].ids", gi))
+			if msg != "" {
+				invalid(field, msg)
+				return
+			}
+			groups = append(groups, fg)
+		}
+	} else {
+		fg, field, msg := parseFeedbackGroup(args, "engram_ids", "", "engram_ids")
+		if msg != "" {
+			invalid(field, msg)
+			return
+		}
+		groups = []FeedbackGroup{fg}
+	}
+	total := 0
+	for _, g := range groups {
+		total += len(g.IDs)
+	}
+	if total > feedbackMaxIDsPerCall {
+		invalid("limit", fmt.Sprintf("too many ids in one feedback call (max %d); split into several calls", feedbackMaxIDsPerCall))
+		return
+	}
+	if err := s.engine.RecordFeedbackLabels(ctx, vault, groups, source); err != nil {
+		sendFeedbackError(w, id, err)
+		return
+	}
+	sendResult(w, id, textContent(mustJSON(map[string]any{
+		"ok": true, "received_groups": len(groups), "received_ids": total,
+	})))
+}
+
+// Feedback sources (muninn_feedback's `source`).
+const (
+	FeedbackSourceDirect  = "direct"
+	FeedbackSourceHandoff = "handoff"
+)
+
+// parseFeedbackGroup validates one group's shape. idsKey is "engram_ids" for
+// the single form and "ids" inside groups; prefix is prepended to the useful
+// and query_id messages; idsPath names the array in id messages. Returns the
+// metric field and message on error.
+func parseFeedbackGroup(g map[string]any, idsKey, prefix, idsPath string) (FeedbackGroup, string, string) {
+	useful, ok := g["useful"].(bool)
+	if !ok {
+		return FeedbackGroup{}, "useful", prefix + feedbackUsefulHelp
+	}
+	qid, ok := g["query_id"].(string)
+	if !ok || !isQueryIDShape(qid) {
+		return FeedbackGroup{}, "query_id", prefix + "query_id must be the query_id returned by muninn_recall"
+	}
+	rawIDs, ok := g[idsKey].([]any)
+	if !ok || len(rawIDs) == 0 {
+		return FeedbackGroup{}, "id", fmt.Sprintf("%s must be a non-empty array of the memory ids that helped (or did not)", idsPath)
+	}
+	if len(rawIDs) > feedbackMaxIDsPerGroup {
+		return FeedbackGroup{}, "limit", fmt.Sprintf("too many ids in %s (max %d per recall); split into several groups", idsPath, feedbackMaxIDsPerGroup)
+	}
+	ids := make([]string, 0, len(rawIDs))
+	for i, r := range rawIDs {
+		v, isStr := r.(string)
+		if isStr && v == feedbackIDPlaceholder {
+			return FeedbackGroup{}, "id", fmt.Sprintf("%s[%d] is the placeholder — replace it with the ids of the memories that actually helped", idsPath, i)
+		}
+		if !isStr || !isMemoryID(v) {
+			// Index only, never echoing the value.
+			return FeedbackGroup{}, "id", fmt.Sprintf("%s[%d] is not a memory id", idsPath, i)
+		}
+		ids = append(ids, v)
+	}
+	return FeedbackGroup{QueryID: qid, IDs: ids, Useful: useful}, "", ""
+}
+
+func isMemoryID(s string) bool {
+	_, err := storage.ParseULID(s)
+	return err == nil
+}
+
+// isQueryIDShape reports whether s is SHAPED like a recall query id (an event
+// ULID, ro1., or ro0.). Shape only: a malformed MAC is a semantic outcome,
+// reported only in aggregate.
+func isQueryIDShape(s string) bool {
+	kind, p := auth.ClassifyQueryID(s)
+	return kind != auth.QueryIDInvalid && isMemoryID(p.ULID)
+}
+
+// sendFeedbackError maps an engine refusal without per-id detail.
+func sendFeedbackError(w http.ResponseWriter, id json.RawMessage, err error) {
+	switch {
+	case errors.Is(err, engine.ErrObserveForbidden):
+		sendError(w, id, -32001, "forbidden: observe-mode credential cannot record feedback")
+	case errors.Is(err, engine.ErrInvalidRequest):
+		sendError(w, id, -32602, err.Error())
+	default:
+		sendError(w, id, -32000, "tool error: feedback could not be recorded")
+	}
 }
 
 func (s *MCPServer) handleEntity(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {

@@ -21,6 +21,8 @@ const mcpInstructions = `MuninnDB is a long-term memory server for AI agents. ` 
 	`You are this memory's curator, not a static store: the moment you write is the moment you know something, so it is the moment to reconcile. ` +
 	`Before adding a fact, recall what's related — if your new knowledge corrects, sharpens, or supersedes an existing memory, muninn_evolve that one instead of adding a rival copy (evolve supersedes and retires the old version; a second muninn_remember leaves a stale duplicate competing in recall). ` +
 	`Reserve muninn_remember for genuinely new facts. Keep memories atomic — one concept each. ` +
+	`After a recall, if any returned memory actually helped, send once: muninn_feedback {"query_id":"<the recall's query_id>","engram_ids":["<ids that helped>"],"useful":true}. ` +
+	`Every recall response includes this call ready to copy. ` +
 	`Call muninn_guide for the full reference.`
 
 // apiKeyValidator is the subset of auth.Store used by MCP for vault key auth.
@@ -278,6 +280,11 @@ var additiveTools = map[string]bool{
 	"muninn_remember_batch": true,
 	"muninn_remember_tree":  true,
 	"muninn_add_child":      true,
+	// muninn_feedback (label pipeline, SEC-15 amendment): a label is a NEW
+	// child row of a recall event, and a first positive label strengthens the
+	// memory's access metadata — the same additive residual as content-hash
+	// dedup. It never modifies or deletes a memory.
+	"muninn_feedback": true,
 }
 
 // isMutatingTool reports whether name writes, modifies, or deletes data.

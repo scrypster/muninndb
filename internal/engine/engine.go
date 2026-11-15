@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -280,8 +281,20 @@ type Engine struct {
 	// noveltyJobsDropped counts novelty jobs silently dropped because the channel was full.
 	noveltyJobsDropped atomic.Int64
 
-	// queryCounter generates fast query IDs without crypto/rand syscall overhead.
-	queryCounter atomic.Uint64
+	// qidKey is k_q (auth.NewQueryIDKey over the persisted auth secret): it
+	// mints and verifies read-only query ids and keys the credential/session
+	// hashes of the label pipeline. nil when no secret is wired.
+	qidKey *auth.QueryIDKey
+	// labels is the label pipeline's process-local bookkeeping (legacy cap,
+	// storm counter, status rejection tally). It never touches scoring.
+	labels labelState
+	// labelNow is the label pipeline's clock (UTC-day caps, label times);
+	// nil → time.Now. Tests inject a fixed clock.
+	labelNow func() time.Time
+	// recallEventWriteHook, when non-nil, replaces the recall-event write —
+	// a test seam for the failed-write path (the recall's query id must
+	// still be a real ULID).
+	recallEventWriteHook func(ctx context.Context, ws [8]byte, id storage.ULID, ev *storage.RecallEvent) error
 	// stopOnce ensures Stop() is idempotent even if called multiple times.
 	stopOnce sync.Once
 
@@ -520,12 +533,6 @@ func (e *Engine) LatencyTracker() *latency.Tracker {
 	return e.latencyTracker
 }
 
-// fastQueryID returns a unique query identifier without crypto/rand overhead.
-func (e *Engine) fastQueryID() string {
-	n := e.queryCounter.Add(1)
-	return fmt.Sprintf("q-%016x", n)
-}
-
 // getVaultMutex returns the per-vault mutex for name, creating it if needed.
 // Used to serialize destructive vault operations (PruneVault, ReindexFTSVault,
 // ClearVault) so concurrent calls on the same vault cannot corrupt state.
@@ -583,6 +590,11 @@ func NewEngine(cfg EngineConfig) *Engine {
 		hnswRegistry:     cfg.HNSWRegistry,
 		jobManager:       vaultjob.NewManager(),
 		replayFailCounts: make(map[storage.ULID]int),
+		qidKey:           auth.NewQueryIDKey(cfg.QueryIDSecret),
+	}
+	if e.qidKey == nil {
+		slog.Warn("engine: no auth secret wired — read-only recall query ids are ro0.<ULID> and cannot be labelled, " +
+			"and label credential/session hashes are recorded as unknown")
 	}
 	// Start async novelty worker to decouple O(N) Jaccard scan from write hot path.
 	// engine:spawn-ok — tracked by noveltyDone channel, drained in Stop()
@@ -1399,6 +1411,9 @@ func importanceFromRequest(p *float32) float32 {
 
 // Write implements mbp.EngineAPI.Write.
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
+	// Label pipeline: create/evolve provenance records the writer's hashed
+	// session and credential, so a later label can tell self-labelling.
+	ctx = e.withWriterIdentity(ctx)
 	// Cluster single-writer gate (#596). Additive methods have no append gate to
 	// hang this off, so they call it directly.
 	if err := e.refuseNonLeaderWrite(); err != nil {
@@ -2157,6 +2172,9 @@ type preparedBatchItem struct {
 // fans out all post-commit async work per item. This amortises the fsync cost
 // across N engrams instead of paying it per-engram.
 func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*mbp.WriteResponse, []error) {
+	// Label pipeline: create/evolve provenance records the writer's hashed
+	// session and credential, so a later label can tell self-labelling.
+	ctx = e.withWriterIdentity(ctx)
 	n := len(reqs)
 	// Cluster single-writer gate (#596): refuse the whole batch, per item, so a
 	// caller reading errs[i] sees the same reason for every element.
@@ -3371,30 +3389,54 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// this recall actually returned (post entity-boost, post truncation),
 	// keyed by a time-ordered event ULID. Skipped when actReq.ReadOnly (observe
 	// mode OR an explicit req.ReadOnly, #598) — a pure read must not write the
-	// signal that calibration reads. On success the event ID becomes the
-	// response query_id, so a later muninn_decide can be joined offline
-	// against exactly what this recall surfaced.
-	queryID := e.fastQueryID()
+	// signal that calibration reads.
+	//
+	// Label pipeline (slice 2a): the query id is minted BEFORE the write, on
+	// every path. A normal recall's id is the event ULID — also on the
+	// zero-row path (no event: a label against it is unknown_event) and when
+	// the write fails (likewise). A read-only recall writes nothing and gets
+	// the self-verifying ro1. id. There is no process-local counter fallback:
+	// a counter restarts at 1 on every boot, so it is not a key.
+	eventID := storage.NewULID()
+	recallCred, recallSess, _ := e.callerHashes(ctx)
+	queryID := e.mintRecallQueryID(req.Vault, eventID, actReq.ReadOnly, recallCred, recallSess)
 	if len(items) > 0 && !actReq.ReadOnly {
-		eventID := storage.NewULID()
 		entries := make([]storage.RecallSurfacedEntry, len(items))
 		for i, item := range items {
-			entries[i] = storage.RecallSurfacedEntry{ID: item.ID, Score: item.Score}
+			sc := &result.Activations[i]
+			entry := storage.RecallSurfacedEntry{
+				ID:     item.ID,
+				Score:  item.Score,
+				Source: recallSourceFlags(sc),
+				Abs:    float32(sc.Components.AbsoluteScore),
+				CM:     float32(sc.Components.ContentMatch),
+			}
+			if sc.Components.ContentMatch > 0 {
+				entry.Prior = float32(sc.Components.Raw / sc.Components.ContentMatch)
+			}
+			entries[i] = entry
 		}
 		ev := &storage.RecallEvent{
 			Context:    req.Context,
 			Threshold:  float32(actReq.Threshold),
 			SurfacedAt: time.Now().UnixNano(),
 			Entries:    entries,
+			Version:    storage.RecallEventVersionLabels,
+			RecallCred: nonZero(recallCred),
+			RecallSess: nonZero(recallSess),
 		}
-		if err := e.store.WriteRecallEvent(ctx, wsPrefix, eventID, ev); err != nil {
+		write := e.store.WriteRecallEvent
+		if e.recallEventWriteHook != nil {
+			write = e.recallEventWriteHook
+		}
+		if err := write(ctx, wsPrefix, eventID, ev); err != nil {
 			// Persistence is best-effort: a failed sink write degrades
-			// calibration ground truth, never the recall itself.
+			// calibration ground truth, never the recall itself. The query
+			// id stays the (unpersisted) event ULID.
 			slog.Warn("activate: persist recall event failed", "err", err)
-		} else {
-			queryID = eventID.String()
 		}
 	}
+	metrics.RecallTotal.WithLabelValues(strconv.FormatBool(actReq.ReadOnly)).Inc()
 
 	// Submit co-activations to Hebbian worker. Skipped when actReq.ReadOnly
 	// (observe mode OR an explicit req.ReadOnly, #598 — this was the live
@@ -3476,7 +3518,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	restoredEdges := result.RestoredEdges
 	if e.coordinator != nil && (len(lobeCoActivations) > 0 || len(restoredEdges) > 0) {
 		effect := mbp.CognitiveSideEffect{
-			QueryID:       e.fastQueryID(),
+			QueryID:       queryID,
 			OriginNodeID:  e.coordinatorID,
 			Timestamp:     time.Now().UnixNano(),
 			CoActivations: lobeCoActivations,
@@ -4339,6 +4381,9 @@ type EngineSessionEntry struct {
 // from the predecessor — the update changed what the memory is about.
 // All three writes are committed in a single atomic Pebble batch.
 func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string) (storage.ULID, error) {
+	// Label pipeline: create/evolve provenance records the writer's hashed
+	// session and credential, so a later label can tell self-labelling.
+	ctx = e.withWriterIdentity(ctx)
 	return e.EvolveAt(ctx, vault, oldID, newContent, reason, embedding, concept, nil, nil, time.Time{})
 }
 
@@ -5706,44 +5751,44 @@ func (e *Engine) GetProvenance(ctx context.Context, vault, id string) ([]provena
 	return e.prov.Get(ctx, wsPrefix, [16]byte(ulid))
 }
 
-// RecordFeedback records an explicit feedback signal for an engram.
-// useful=false signals negative feedback (retrieved but not helpful);
-// useful=true signals positive feedback (retrieved and helpful).
+// RecordFeedback is the LEGACY feedback form: one engram id, no query id. It
+// records NO label (a label needs the recall it is about — see
+// RecordFeedbackLabels). useful=true bumps the engram's access metadata at
+// most once per (credential, memory, UTC day) — before the label pipeline,
+// 1,000 posts were 1,000 accesses. Synchronous (it was fire-and-forget) and
+// uniform: a missing engram is swallowed, never reported.
+//
+// Gates: cluster single-writer (SEC-13), then observe refusal. Append-mode
+// credentials may call it (SEC-15 amendment): it strengthens access metadata,
+// the same additive residual as content-hash dedup, and never modifies or
+// deletes the memory.
+//
+// The per-vault scoring-weight update this used to send was a no-op (see
+// feedback_truth_test.go) and is gone.
 func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, useful bool) error {
-	if err := e.refuseWrite(ctx); err != nil {
+	if err := e.refuseNonLeaderWrite(); err != nil {
 		return err
 	}
+	if auth.ObserveFromContext(ctx) {
+		return ErrObserveForbidden
+	}
 	wsPrefix := e.store.ResolveVaultPrefix(vault)
-	ulid, err := storage.ParseULID(engramID)
+	id, err := storage.ParseULID(engramID)
 	if err != nil {
-		return fmt.Errorf("parse id: %w", err)
+		return fmt.Errorf("%w: engram_id is not a memory id", ErrInvalidRequest)
 	}
-	signal := scoring.FeedbackSignal{
-		EngramID:    [16]byte(ulid),
-		Accessed:    useful,
-		ScoreVector: scoring.DefaultWeights(),
-		Timestamp:   time.Now(),
+	if !useful {
+		metrics.FeedbackLegacyTotal.WithLabelValues("false").Inc()
+		return nil
 	}
-	// spawnFireAndForget ensures Stop() drains this goroutine before DB close.
-	// Uses e.stopCtx (not caller ctx) — feedback writes are gated by engine
-	// lifecycle, not request lifecycle. Client disconnect must not abort them.
-	e.spawnFireAndForget(func() {
-		e.scoring.RecordFeedback(e.stopCtx, wsPrefix, signal)
-	})
-
-	// #682: useful=true is an explicit positive signal — reinforce
-	// AccessCount/LastAccess the same as an explicit read. This is NEW wiring
-	// (previously feedback only updated vault-level scoring weights, never
-	// per-engram AccessCount). useful=false records negative feedback only;
-	// it must not decrement or otherwise touch AccessCount. Unconditional
-	// (not gated by ReinforceOnRead — that flag governs the passive
-	// read-implies-access channel; an explicit "this was useful" signal is a
-	// different, always-on channel) and uncapped, mirroring explicit
-	// read-by-id.
-	if useful {
-		e.spawnFireAndForget(func() {
-			_ = e.store.TouchAccess(e.stopCtx, wsPrefix, ulid)
-		})
+	lc, _, _ := e.callerHashes(ctx)
+	if !e.legacyBumpAllowed(wsPrefix, lc, id) {
+		metrics.FeedbackLegacyTotal.WithLabelValues("true").Inc()
+		return nil
+	}
+	metrics.FeedbackLegacyTotal.WithLabelValues("false").Inc()
+	if err := e.store.TouchAccess(ctx, wsPrefix, id); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return fmt.Errorf("record feedback: storage error")
 	}
 	return nil
 }

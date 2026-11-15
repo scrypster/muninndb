@@ -194,7 +194,9 @@ func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8
 	laKey := keys.LastAccessIndexKey(wsPrefix, laMillis, id16)
 	b.batch.Set(laKey, nil, nil)
 
-	b.pendingItems = append(b.pendingItems, batchPendingItem{wsPrefix: wsPrefix, eng: eng, operation: operation, details: details})
+	// The writer identity (label pipeline) is captured here, where ctx is in
+	// scope; Commit has none.
+	b.pendingItems = append(b.pendingItems, batchPendingItem{wsPrefix: wsPrefix, eng: eng, operation: operation, details: stampWriterIdentity(ctx, details)})
 	return nil
 }
 

@@ -161,10 +161,16 @@ type EngineInterface interface {
 	// Returns an empty slice (not error) if no entries exist.
 	GetProvenance(ctx context.Context, vault, id string) ([]ProvenanceEntry, error)
 
-	// RecordFeedback records an explicit negative feedback signal for an engram.
-	// useful=false means the engram was retrieved but was not helpful.
-	// The engine computes the ScoreVector internally.
+	// RecordFeedback is the LEGACY feedback form (one engram id, no query id):
+	// it records no label; useful=true bumps access at most once per
+	// (credential, memory, UTC day).
 	RecordFeedback(ctx context.Context, vault, engramID string, useful bool) error
+
+	// RecordFeedbackLabels records labels (label pipeline, slice 2a): each
+	// group names the recall (its query_id) and the memories it returned
+	// that were (or were not) useful. Uniform: it never reports per-id
+	// outcomes. source is "direct" or "handoff".
+	RecordFeedbackLabels(ctx context.Context, vault string, groups []FeedbackGroup, source string) error
 
 	// GetEntityAggregate returns the full aggregate view for a named entity.
 	// limit caps engrams returned (0 = default 20).
@@ -219,4 +225,19 @@ type EngineInterface interface {
 	// to reject caller-supplied names that collide with an existing vault
 	// (operator or workflow-scoped), preventing cross-vault config clobber.
 	VaultNameExists(name string) bool
+}
+
+// FeedbackGroup is one (query id, memory ids, polarity) group of a
+// muninn_feedback call.
+type FeedbackGroup struct {
+	QueryID string
+	IDs     []string
+	Useful  bool
+}
+
+// labelStatsReporter is implemented by engines that can report the label
+// pipeline's per-vault outcome counts for muninn_status. Optional, like
+// healthReporter, so test fakes need not implement it.
+type labelStatsReporter interface {
+	LabelStats(ctx context.Context, vault string) (*LabelsStatus, error)
 }

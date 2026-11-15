@@ -19,6 +19,12 @@ var appendAdditive = map[string]bool{
 	// Intend only CREATES: a new TypeGoal engram (via Write) plus new 0x2D
 	// armed-intention keys. It never modifies or deletes existing state.
 	"Intend": true,
+	// Label pipeline (SEC-15 amendment). RecordFeedbackLabels creates a NEW
+	// child row of a recall event and, on a first positive label, bumps the
+	// memory's access metadata — the dedup-touch residual class, never an
+	// overwrite/evolve/forget. RecordFeedback (legacy, no label) only bumps
+	// access, capped per credential/memory/day. Both refuse observe.
+	"RecordFeedbackLabels": true, "RecordFeedback": true,
 }
 
 // appendInfra: engine wiring/lifecycle/getters with no credential-reachable
@@ -83,6 +89,8 @@ var appendReadOnly = map[string]bool{
 	// consume delivery state, never overwrite/evolve/forget an engram. COG-11
 	// readOnly (observe) suppresses even the marker.
 	"NoticesForRecall": true, "NoticesForRemember": true,
+	// LabelStats counts label rows and reads an in-process rejection tally.
+	"LabelStats": true,
 }
 
 // TestAppendMode_MethodCensus is the ANTI-ROT pin the #687 reviews demanded: it
@@ -143,7 +151,6 @@ func guardedOps(eng *Engine, ap context.Context) map[string]func() error {
 		"SetTrust":             func() error { return eng.SetTrust(ap, v, id, "verified") },
 		"Consolidate":          func() error { _, e := eng.Consolidate(ap, v, []string{id}, "m"); return e },
 		"Decide":               func() error { _, e := eng.Decide(ap, v, "d", "r", nil, nil); return e },
-		"RecordFeedback":       func() error { return eng.RecordFeedback(ap, v, id, true) },
 		"RecordAccess":         func() error { return eng.RecordAccess(ap, v, id) },
 		"SetEntityState":       func() error { return eng.SetEntityState(ap, "v", "E", "merged", "", "") },
 		"SetEntityStateBatch":  func() error { errs := eng.SetEntityStateBatch(ap, "v", []EntityStateOp{{}}); return errs[0] },

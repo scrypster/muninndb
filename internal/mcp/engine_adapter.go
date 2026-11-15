@@ -731,6 +731,36 @@ func (a *mcpEngineAdapter) RecordFeedback(ctx context.Context, vault, engramID s
 	return a.eng.RecordFeedback(ctx, vault, engramID, useful)
 }
 
+func (a *mcpEngineAdapter) RecordFeedbackLabels(ctx context.Context, vault string, groups []FeedbackGroup, source string) error {
+	eg := make([]engine.FeedbackGroup, len(groups))
+	for i, g := range groups {
+		eg[i] = engine.FeedbackGroup{QueryID: g.QueryID, IDs: g.IDs, Useful: g.Useful}
+	}
+	return a.eng.RecordFeedbackLabels(ctx, vault, eg, source)
+}
+
+// LabelStats implements labelStatsReporter.
+func (a *mcpEngineAdapter) LabelStats(ctx context.Context, vault string) (*LabelsStatus, error) {
+	st, err := a.eng.LabelStats(ctx, vault)
+	if err != nil {
+		return nil, err
+	}
+	out := &LabelsStatus{
+		WindowDays:    st.WindowDays,
+		Verified:      st.Verified,
+		Unverified:    st.Unverified,
+		Positive:      st.Positive,
+		Negative:      st.Negative,
+		FirstInWindow: st.FirstInWindow,
+		Rejected:      st.Rejected,
+		Note:          labelsStatusNote,
+	}
+	if !st.RejectedSince.IsZero() {
+		out.RejectedSince = st.RejectedSince.UTC().Format(time.RFC3339)
+	}
+	return out, nil
+}
+
 func (a *mcpEngineAdapter) GetProvenance(ctx context.Context, vault, id string) ([]ProvenanceEntry, error) {
 	entries, err := a.eng.GetProvenance(ctx, vault, id)
 	if err != nil {

@@ -126,6 +126,10 @@ func additiveWriteOps(eng *Engine, ctx context.Context) map[string]func() error 
 		},
 		"RegisterVaultName": func() error { return eng.RegisterVaultName(v) },
 		"Intend":            func() error { _, e := eng.Intend(ctx, v, "do a thing", []string{"cue"}, nil, false, nil); return e },
+		"RecordFeedback":    func() error { return eng.RecordFeedback(ctx, v, id, true) },
+		"RecordFeedbackLabels": func() error {
+			return eng.RecordFeedbackLabels(ctx, v, []FeedbackGroup{{QueryID: id, IDs: []string{id}, Useful: true}}, "")
+		},
 	}
 }
 

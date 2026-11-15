@@ -552,6 +552,7 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 			Source:    provenance.SourceHuman,
 			AgentID:   eng.CreatedBy,
 			Operation: "create",
+			Details:   stampWriterIdentity(ctx, nil),
 		})
 	}
 
@@ -875,6 +876,7 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 				Source:    provenance.SourceHuman,
 				AgentID:   eng.CreatedBy,
 				Operation: "create",
+				Details:   stampWriterIdentity(ctx, nil),
 			})
 		}
 	}

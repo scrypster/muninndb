@@ -247,9 +247,9 @@ func TestActivateReadOnly_ObserveMode_StillSuppresses(t *testing.T) {
 // TestActivateReadOnly_FullMode_SuppressesRecallEvent is the RED test for the
 // second write site: a read_only:true recall from a full-mode credential must
 // not persist a 0x29 recall event. Persistence is observable from the
-// outside without a purpose-gated read: a persisted event replaces the
-// fast, non-persisted "q-..." query ID with a real event ULID (see
-// (*Engine).fastQueryID and the persist branch in activateCore).
+// outside: a read-only recall's query id is the self-verifying "ro1."/"ro0."
+// form, never an event ULID (see mintRecallQueryID), and no 0x29 event
+// exists under it.
 func TestActivateReadOnly_FullMode_SuppressesRecallEvent(t *testing.T) {
 	eng, as, store, _, cleanup := hebbianReadOnlyEnv(t)
 	defer cleanup()
@@ -267,10 +267,16 @@ func TestActivateReadOnly_FullMode_SuppressesRecallEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
-	if len(resp.QueryID) < 2 || resp.QueryID[:2] != "q-" {
-		t.Errorf("read_only:true recall persisted a recall event (query_id %q "+
-			"is not the unpersisted fast-ID form) — a pure read must not write "+
-			"the signal calibration reads", resp.QueryID)
+	if len(resp.QueryID) < 3 || resp.QueryID[:2] != "ro" {
+		t.Errorf("read_only:true recall got query_id %q, not the read-only "+
+			"(ro1./ro0.) form — a pure read must not write the signal calibration reads", resp.QueryID)
+	}
+	n, err := store.CountRecallEventsSince(context.Background(), store.ResolveVaultPrefix(vault), time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("read_only:true recall persisted %d recall event(s)", n)
 	}
 }
 
@@ -293,9 +299,13 @@ func TestActivate_NotReadOnly_StillPersistsRecallEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
-	if len(resp.QueryID) >= 2 && resp.QueryID[:2] == "q-" {
-		t.Errorf("ordinary recall did not persist a recall event (query_id %q); "+
-			"the fix must not disable recall-event persistence outright", resp.QueryID)
+	n, err := store.CountRecallEventsSince(context.Background(), store.ResolveVaultPrefix(vault), time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || len(resp.QueryID) != 26 {
+		t.Errorf("ordinary recall did not persist its recall event (events %d, query_id %q); "+
+			"the fix must not disable recall-event persistence outright", n, resp.QueryID)
 	}
 }
 
