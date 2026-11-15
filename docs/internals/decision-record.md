@@ -1767,6 +1767,9 @@ improve (a direct hand-off from the write to the processor instead of a full-sto
 - *Backlog embeds are not writes.* The processor also embeds re-embeds and pre-existing
   backlog; comparing those with each other would log "twins" nobody wrote. Only a write
   noted by this process, or an engram created within the hour, enters the ring.
+- *Client-supplied embeddings are not checked.* A write that carries its own `embedding`
+  is indexed inline and never passes through the embed processor, so it never enters the
+  ring (its vector may also come from another model). No block, no shadow line.
 - *Batch ids.* Intra-batch pairs need to know which items shared a `WriteBatch` call; the
   engine notes it just after the commit. A pass that embeds an item in the microseconds
   between commit and note logs it as `rule=recent` — a labelling race only.
