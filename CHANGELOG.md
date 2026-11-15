@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An opt-in write-time twin check. With `MUNINN_WRITE_RELATED=shadow` the server notices
+  when a new memory is very close to one written in the same vault within the last hour
+  (most such pairs are duplicates or undeclared updates) and logs and counts it — nothing
+  is shown. With `MUNINN_WRITE_RELATED=1`, in a vault whose operator has set
+  `write_twin_inline: true`, single `muninn_remember` responses for full-mode credentials
+  carry a `related` block: the earlier memory, how close it is against the threshold in
+  use, and the exact call that would retire it (update first; it never suggests the old
+  memory superseding the new one). Off by default. The check never adds an embed call, never
+  delays the commit, and waits at most 100 ms for the write's own vector before answering
+  `embedder_busy` or `embed_timeout`. `muninn twin-replay` checks a vault (read-only, on a
+  backup) before you enable it; `muninn twin-audit` measures unresolved near-twins
+  afterwards. Per-vault `write_twin_threshold` overrides the model hint (bge-small: 0.93).
+
 ### Fixed
 
 - Retired versions no longer take recall's candidate slots. An evolved

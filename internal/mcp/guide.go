@@ -303,6 +303,13 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- `valid_until` silences an expired intention; it never triggers delivery (there is no scheduler).\n")
 	b.WriteString("- Notice delivery requires the server opt-in `MUNINN_PROSPECTIVE=1`; arming works regardless and delivery starts once enabled.\n")
 
+	// Write-time twin block (COG-35)
+	b.WriteString("\n## Related memories on write (muninn_remember)\n\n")
+	b.WriteString("If a muninn_remember response carries `related`, a memory written in this vault within the last hour is very close to the one you just stored. ")
+	b.WriteString("It is evidence, not a verdict: read both, then pick the option that fits — usually the first, `muninn_link(source_id=<new>, target_id=<earlier>, relation=\"supersedes\")`, when the new memory updates the earlier one. ")
+	b.WriteString("Every option names the id it would retire. `related.unavailable` means the check could not run that time; nothing is implied.\n")
+	b.WriteString("- Off by default. It appears only when the server runs `MUNINN_WRITE_RELATED=1` and the vault has opted in (`write_twin_inline`); in `shadow` the server only logs what it would have said.\n")
+
 	// Tips
 	b.WriteString("\n## Tips\n\n")
 	if resolved.MultiUser {
