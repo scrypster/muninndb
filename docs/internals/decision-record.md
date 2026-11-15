@@ -2024,3 +2024,73 @@ same).
 engine tests cost 0.2 s; the margin problem predates it — 292 s was measured here on a loaded
 machine). The next engine test added anywhere may be the one that tips CI. The hnsw package
 went from 43 s (trunk) to ~125 s under `-race` with this work.
+
+### Evidence of match orders; evidence of association annotates (COG-35, 2026-11-15)
+
+**What was wrong.** On the default ACT-R path the order of a recall was content
+match × confidence MULTIPLIED by the Hebbian/PAS prior (up to 3.24×) and then
+PLUS an entity boost of up to 0.30. Measured on a production install, read-only:
+150 questions written by a model as rewordings of 150 live memories' titles
+(median 20% of title words reused), three vaults, labels the ranker did not
+choose; recall at limit 100, rows re-ordered offline.
+
+- Engine order: right memory at rank 1 in 15/150, top 3 in 46, top 10 in 86;
+  MRR 0.238 (at the default limit of 10: 34 / 61 / 93, MRR 0.341).
+- Same rows by the absolute content score alone: rank 1 in 62, top 3 in 79,
+  top 10 in 101; MRR 0.495. Paired MRR difference +0.257, 95% CI
+  [+0.199, +0.318]. Same direction in all three vaults (rank 1: 35 vs 8,
+  14 vs 1, 13 vs 6).
+- Engine score with only the entity boost removed: rank 1 in 47, MRR 0.419 —
+  the Hebbian and PAS boosts cost rank too.
+- Content score plus a scaled entity boost: 0.05×–0.25× indistinguishable from
+  content-only (rank 1 = 62; top 3 = 81–83); 0.5× → rank 1 = 48; 1.0× → 24.
+  Content-first with the boost breaking ties inside a 0.005–0.05 window:
+  indistinguishable from content-only.
+- Why: on boosted top-10 rows the entity boost was 0.115 at the median (p90
+  0.247), while the content-score spread between rank 1 and rank 10 was 0.078 at
+  the median — the boost was larger than the whole top ten's spread. 858 of
+  1,410 top-10 rows carried one; the top row was the best content match in 23
+  of 141 queries.
+- The top ten also depended on `limit`: for 56 questions the first ten rows at
+  limit=100 equalled the rows at limit=10 in only 5 (same top row in 39).
+  Cause: phase 6 cut at `limit` BEFORE the entity boost, which could lift only
+  rows inside the cut; a row past it re-entered as a content-less injection.
+
+**Decision.** Order by the absolute content score; association evidence breaks
+exact ties and orders injected rows (which have score 0 and follow every scored
+row); the cut to `limit` happens once, after every post-pipeline phase. Learning
+is untouched: Hebbian edges, PAS transitions and entity links are recorded,
+read, reported per row and still inject associated rows. Plasticity switches
+keep their meaning for whether those mechanisms run. rrf / weighted_sum / CGDN
+are unchanged (their scores are not content scores; pinned by a differential
+against the trunk).
+
+**Why structural, not a tuned weight.** The evidence is one install, three
+vaults, model-written questions. No boost strength measured BETTER than none, so
+the defensible rule is the one that needs no constant: match evidence first.
+A small multiplier (0.05×–0.25×) measured the same as zero here and would be a
+number tuned on one install — principle #11 forbids shipping it.
+
+**What does change for callers** (also COG-35): weaker matches stop outranking
+stronger ones; for a query whose matched rows fill the limit, the returned rows
+are the top-N matches and nothing an association injected; score equals
+`absolute_score` on default vaults; COG-29's adjacency rule (both sides of a
+declared contradiction) now applies at a tight limit, because the partner is no
+longer cut before COG-29 runs; COG-25 examines only the returned rows (its
+margin, measured, tripled limit=10 p50 once the cut was deferred).
+
+**What remains unbacked.** "Strengthens with use" has no ranking effect on the
+default path until a label-backed, bounded salience term exists — association
+features annotate and inject but do not reorder. Residuals: exact ties are broken
+by evidence that reads the in-memory log (pinned, fails when fixed); on vaults
+above 1,000 memories a PAS transition can still add a genuine match to the
+candidate pool.
+
+**A/B.** `cognitiontrial` build with `MUNINN_TRIAL_LEGACY_BOOST_ORDER=1`
+restores the boosted order on the same store; every RED test of this change
+fails again under it. No runtime toggle ships.
+
+**Principle: a signal that says two memories are related is not evidence that
+either one answers the question. Let it annotate and inject; let only match
+evidence order.**
+
