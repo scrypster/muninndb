@@ -186,10 +186,15 @@ func (ps *PebbleStore) CompareAndSet(ctx context.Context, wsPrefix [8]byte, id U
 	// Apply the state change through the shared metadata path so the 0x0B state
 	// index, caches, provenance and replication all stay consistent.
 	if mut.State != nil {
-		updated := *cur
-		updated.State = *mut.State
-		updated.UpdatedAt = time.Now()
-		if err := ps.UpdateMetadata(ctx, wsPrefix, id, &updated); err != nil {
+		// Field-scoped (State, UpdatedAt) over the committed record, under the
+		// stripe lock held above: UpdateMetadata now takes that lock itself
+		// and it is not reentrant, and writing back *cur would also revert any
+		// field cur's cached copy did not have.
+		newSt := *mut.State
+		if err := ps.patchMetaLocked(ctx, wsPrefix, id, func(m *EngramMeta) {
+			m.State = newSt
+			m.UpdatedAt = time.Now()
+		}); err != nil {
 			return CASOutcome{}, fmt.Errorf("cas update state: %w", err)
 		}
 		newState = *mut.State

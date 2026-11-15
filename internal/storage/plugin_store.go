@@ -243,6 +243,13 @@ func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id
 		embedBytes[8+i] = byte(v)
 	}
 
+	// Stripe lock across the 0x01 read-patch-commit below: unlocked, the
+	// EmbedDim patch wrote back a record read before a concurrent forget (or
+	// any other writer) committed, reverting it
+	// (TestUpdateEmbedding_ConcurrentForgetStaysForgotten).
+	unlock := ps.LockEngram(id)
+	defer unlock()
+
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
@@ -279,6 +286,7 @@ func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id
 		// If the ERF record doesn't exist (race), skip — WriteEngram will set it.
 	}
 
+	testRMWPoint("UpdateEmbedding", wsPrefix, id)
 	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
 		return fmt.Errorf("update embedding: commit: %w", err)
 	}

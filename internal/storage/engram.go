@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"time"
 
@@ -262,25 +263,68 @@ func (ps *PebbleStore) GetMetadata(ctx context.Context, wsPrefix [8]byte, ids []
 	return result, nil
 }
 
-// UpdateMetadata writes only the metadata fields that changed.
-// If the state changes, it also updates the 0x0B state secondary index.
-// Patches the raw 0x01 bytes in-place (no full re-encode).
+// UpdateMetadata patches the fixed-size metadata fields of an engram record
+// (UpdatedAt, LastAccess, Confidence, Relevance, Stability, AccessCount,
+// State) to the values in meta, and moves the 0x0B state, 0x10 relevance and
+// 0x22 last-access indexes to match.
+//
+// The caller OWNS every one of those seven fields: they are written as given.
+// That is only correct when the caller derived them from a read it made under
+// the engram's stripe lock; a struct read earlier (a recall, a consolidation
+// pass) reverts whatever another writer committed since. Callers that change
+// one field use the field-scoped writers (TouchAccess, AddAccessCount,
+// CompareAndSet, UpdateRelevance, UpdateConfidence); Engine.Restore reads and
+// writes under LockEngram via UpdateMetadataLocked.
+//
+// Takes the stripe lock across the read of the committed record and the
+// commit, so the index moves key on the values the record held at commit
+// time and no other locked writer can land between them (STO-2/STO-3).
 func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id ULID, meta *EngramMeta) error {
-	// Read slim metadata to detect state change (needed for index update).
-	oldMetas, err := ps.GetMetadata(ctx, wsPrefix, []ULID{id})
-	if err != nil {
-		return err
-	}
-	if len(oldMetas) == 0 || oldMetas[0] == nil {
-		return fmt.Errorf("engram %w", ErrNotFound)
-	}
-	cachedOldState := oldMetas[0].State
-	var prevLastAccessMillis int64
-	if !oldMetas[0].LastAccess.IsZero() {
-		prevLastAccessMillis = oldMetas[0].LastAccess.UnixMilli()
-	}
+	unlock := ps.LockEngram(id)
+	defer unlock()
+	return ps.UpdateMetadataLocked(ctx, wsPrefix, id, meta)
+}
 
-	// Read raw 0x01 bytes without decoding the full ERF structure.
+// UpdateMetadataLocked is UpdateMetadata for a caller that already holds the
+// engram's stripe lock via LockEngram (the lock is not reentrant).
+func (ps *PebbleStore) UpdateMetadataLocked(ctx context.Context, wsPrefix [8]byte, id ULID, meta *EngramMeta) error {
+	return ps.patchMetaLocked(ctx, wsPrefix, id, func(m *EngramMeta) {
+		m.UpdatedAt = meta.UpdatedAt
+		m.LastAccess = meta.LastAccess
+		m.Confidence = meta.Confidence
+		m.Relevance = meta.Relevance
+		m.Stability = meta.Stability
+		m.AccessCount = meta.AccessCount
+		m.State = meta.State
+	})
+}
+
+// AddAccessCount adds delta to an engram's AccessCount and changes nothing
+// else. Dream dedup's frequency absorption uses it: it used to write the
+// representative's whole metadata from a copy read at the start of the
+// pass, so a forget, relevance or confidence change committed during the pass
+// was reverted (and a forgotten representative came back active).
+func (ps *PebbleStore) AddAccessCount(ctx context.Context, wsPrefix [8]byte, id ULID, delta uint32) error {
+	unlock := ps.LockEngram(id)
+	defer unlock()
+	return ps.patchMetaLocked(ctx, wsPrefix, id, func(m *EngramMeta) {
+		m.AccessCount += delta
+	})
+}
+
+// patchMetaLocked is the one read-modify-write of the fixed-size metadata
+// fields. The caller MUST hold the engram's stripe lock. It reads the
+// committed 0x01 record straight from Pebble — never a cache, never a value
+// the caller read earlier — hands fn the record's current metadata, patches
+// the seven patchable fields fn leaves there (fn's changes to any other field
+// are ignored), and moves the 0x0B, 0x10 and 0x22 indexes from what the
+// RECORD held to what it now holds.
+//
+// Index moves key on the record because the alternatives are stale: the
+// metaCache copy the old UpdateMetadata gated on could predate a forget (a
+// restore then skipped its 0x0B move), and a caller's earlier read predates
+// whatever committed since. Under the lock the record IS the last commit.
+func (ps *PebbleStore) patchMetaLocked(ctx context.Context, wsPrefix [8]byte, id ULID, fn func(m *EngramMeta)) error {
 	engramKey := keys.EngramKey(wsPrefix, [16]byte(id))
 	rawBytes, err := Get(ps.db, engramKey)
 	if err != nil {
@@ -289,21 +333,32 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	if rawBytes == nil {
 		return fmt.Errorf("engram %w", ErrNotFound)
 	}
-	// The 0x0B move keys on the state the RECORD holds, not the metadata
-	// cache's copy: a cache fill from an older Pebble snapshot (a recall in
-	// flight across a forget) can leave the cache saying "active" for a
-	// soft-deleted record, and gating on that skipped the index move on
-	// restore. The raw bytes were just read from Pebble, before the patch.
-	oldState := cachedOldState
-	if len(rawBytes) > erf.OffsetState {
-		oldState = LifecycleState(rawBytes[erf.OffsetState])
+	cur, err := erf.DecodeMeta(erf.MetaKeySlice(rawBytes))
+	if err != nil {
+		return fmt.Errorf("decode metadata: %w", err)
+	}
+	old := EngramMeta{
+		UpdatedAt:   cur.UpdatedAt,
+		LastAccess:  cur.LastAccess,
+		Confidence:  cur.Confidence,
+		Relevance:   cur.Relevance,
+		Stability:   cur.Stability,
+		AccessCount: cur.AccessCount,
+		State:       LifecycleState(cur.State),
+	}
+	next := old
+	fn(&next)
+
+	var prevLastAccessMillis int64
+	if !old.LastAccess.IsZero() {
+		prevLastAccessMillis = old.LastAccess.UnixMilli()
 	}
 
 	// Patch all mutable metadata fields in-place and recompute CRC32.
 	if err := erf.PatchAllMeta(rawBytes,
-		meta.UpdatedAt, meta.LastAccess,
-		meta.Confidence, meta.Relevance, meta.Stability,
-		meta.AccessCount, uint8(meta.State),
+		next.UpdatedAt, next.LastAccess,
+		next.Confidence, next.Relevance, next.Stability,
+		next.AccessCount, uint8(next.State),
 	); err != nil {
 		return fmt.Errorf("patch metadata: %w", err)
 	}
@@ -311,19 +366,22 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
-	// Update state secondary index if the state changed.
-	if oldState != meta.State {
-		batch.Delete(keys.StateIndexKey(wsPrefix, uint8(oldState), [16]byte(id)), nil)
-		batch.Set(keys.StateIndexKey(wsPrefix, uint8(meta.State), [16]byte(id)), []byte{}, nil)
+	if old.State != next.State {
+		batch.Delete(keys.StateIndexKey(wsPrefix, uint8(old.State), [16]byte(id)), nil)
+		batch.Set(keys.StateIndexKey(wsPrefix, uint8(next.State), [16]byte(id)), []byte{}, nil)
+	}
+	// A caller that changes Relevance here gets the same bucket move
+	// UpdateRelevance makes; the old method left the 0x10 entry behind.
+	if oldB, newB := keys.RelevanceBucketKey(wsPrefix, old.Relevance, [16]byte(id)),
+		keys.RelevanceBucketKey(wsPrefix, next.Relevance, [16]byte(id)); string(oldB) != string(newB) {
+		batch.Delete(oldB, nil)
+		batch.Set(newB, []byte{}, nil)
 	}
 
 	batch.Set(engramKey, rawBytes, nil)
-	metaKey := keys.MetaKey(wsPrefix, [16]byte(id))
-	metaSlice248 := rawBytes
-	if len(metaSlice248) > erf.MetaKeySize {
-		metaSlice248 = metaSlice248[:erf.MetaKeySize]
-	}
-	batch.Set(metaKey, metaSlice248, nil)
+	batch.Set(keys.MetaKey(wsPrefix, [16]byte(id)), erf.MetaKeySlice(rawBytes), nil)
+
+	testRMWPoint("UpdateMetadata", wsPrefix, id)
 
 	// Invalidate L1 cache and metadata cache BEFORE commit — cached structs are stale.
 	ps.cache.Delete(wsPrefix, id)
@@ -334,9 +392,11 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	}
 	ps.replicateBatch(batch)
 
-	// Update LastAccess index (best effort — index inconsistency is non-fatal).
-	if !meta.LastAccess.IsZero() {
-		newMillis := meta.LastAccess.UnixMilli()
+	// LastAccess index (best effort — index inconsistency is non-fatal). Still
+	// under the stripe lock, so two bumps cannot interleave their index moves
+	// and strand an entry.
+	if !next.LastAccess.IsZero() {
+		newMillis := next.LastAccess.UnixMilli()
 		if newMillis != prevLastAccessMillis {
 			_ = ps.WriteLastAccessEntry(ctx, wsPrefix, id, prevLastAccessMillis, newMillis)
 		}
@@ -357,16 +417,15 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 // UpdateRelevance updates the relevance and stability of an engram.
 // It moves the relevance bucket key (0x10) from the old bucket to the new bucket,
 // and patches the raw 0x01 bytes in-place (no full re-encode).
+//
+// Holds the engram's stripe lock across the read and the commit, and takes
+// the bucket to move FROM out of the record it is about to patch. Unlocked,
+// it reverted any change committed inside its window (a forget came back
+// active), and two concurrent calls each moved the bucket from the same
+// stale value, orphaning one (TestUpdateRelevance_Concurrent*).
 func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id ULID, relevance, stability float32) error {
-	// Read slim metadata to get the old relevance for bucket key movement.
-	metas, err := ps.GetMetadata(ctx, wsPrefix, []ULID{id})
-	if err != nil {
-		return err
-	}
-	if len(metas) == 0 || metas[0] == nil {
-		return fmt.Errorf("engram %w", ErrNotFound)
-	}
-	oldRelevance := metas[0].Relevance
+	unlock := ps.LockEngram(id)
+	defer unlock()
 
 	// Read raw 0x01 bytes without decoding the full ERF structure.
 	engramKey := keys.EngramKey(wsPrefix, [16]byte(id))
@@ -377,6 +436,10 @@ func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id
 	if rawBytes == nil {
 		return fmt.Errorf("engram %w", ErrNotFound)
 	}
+	if len(rawBytes) < erf.OffsetRelevance+4 {
+		return fmt.Errorf("get engram raw: record too short (%d bytes)", len(rawBytes))
+	}
+	oldRelevance := math.Float32frombits(binary.BigEndian.Uint32(rawBytes[erf.OffsetRelevance : erf.OffsetRelevance+4]))
 
 	// Patch relevance/stability/updatedAt in-place and recompute CRC32.
 	if err := erf.PatchRelevance(rawBytes, time.Now(), relevance, stability); err != nil {
@@ -392,12 +455,9 @@ func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id
 
 	// Write patched records.
 	batch.Set(engramKey, rawBytes, nil)
-	metaKey := keys.MetaKey(wsPrefix, [16]byte(id))
-	metaEnd := erf.MetaKeySize
-	if metaEnd > len(rawBytes) {
-		metaEnd = len(rawBytes)
-	}
-	batch.Set(metaKey, rawBytes[:metaEnd], nil)
+	batch.Set(keys.MetaKey(wsPrefix, [16]byte(id)), erf.MetaKeySlice(rawBytes), nil)
+
+	testRMWPoint("UpdateRelevance", wsPrefix, id)
 
 	// Invalidate L1 cache and metadata cache BEFORE commit — cached structs are stale.
 	ps.cache.Delete(wsPrefix, id)
@@ -421,8 +481,13 @@ func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id
 }
 
 // UpdateTrust updates the trust label of an engram in-place using PatchTrust.
-// Invalidates the L1 and metadata caches. Appends a provenance entry.
+// Appends a provenance entry. Holds the engram's stripe lock across the read
+// and the commit (unlocked, it reverted a concurrent confidence write and a
+// supersede's reads of it; TestUpdateTrust_ConcurrentUpdateConfidenceIsKept).
 func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULID, trust TrustLevel) error {
+	unlock := ps.LockEngram(id)
+	defer unlock()
+
 	engramKey := keys.EngramKey(wsPrefix, [16]byte(id))
 	rawBytes, err := Get(ps.db, engramKey)
 	if err != nil {
@@ -443,7 +508,9 @@ func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULI
 	metaKey := keys.MetaKey(wsPrefix, [16]byte(id))
 	batch.Set(metaKey, erf.MetaKeySlice(rawBytes), nil)
 
-	// Invalidate L1 and metadata caches before commit — cached structs are stale.
+	testRMWPoint("UpdateTrust", wsPrefix, id)
+
+	// Invalidate L1 cache and metadata cache BEFORE commit — cached structs are stale.
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
@@ -469,8 +536,17 @@ func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULI
 // already-closed window is left untouched and (false, nil) is returned —
 // used by the RelSupersedes link stamp, which must not destroy an earlier
 // window end. Patches the raw 0x01 bytes (no full re-encode), mirroring
-// UpdateTrust.
+// UpdateTrust, under the engram's stripe lock (unlocked, it reverted an access
+// bump committed inside its window; TestStampValidUntil_ConcurrentTouchAccessIsKept).
 func (ps *PebbleStore) StampValidUntil(ctx context.Context, wsPrefix [8]byte, id ULID, until time.Time, onlyIfOpen bool) (bool, error) {
+	unlock := ps.LockEngram(id)
+	defer unlock()
+	return ps.StampValidUntilLocked(ctx, wsPrefix, id, until, onlyIfOpen)
+}
+
+// StampValidUntilLocked is StampValidUntil for a caller that already holds
+// the engram's stripe lock via LockEngram.
+func (ps *PebbleStore) StampValidUntilLocked(ctx context.Context, wsPrefix [8]byte, id ULID, until time.Time, onlyIfOpen bool) (bool, error) {
 	engramKey := keys.EngramKey(wsPrefix, [16]byte(id))
 	rawBytes, err := Get(ps.db, engramKey)
 	if err != nil {
@@ -495,7 +571,9 @@ func (ps *PebbleStore) StampValidUntil(ctx context.Context, wsPrefix [8]byte, id
 	metaKey := keys.MetaKey(wsPrefix, [16]byte(id))
 	batch.Set(metaKey, erf.MetaKeySlice(rawBytes), nil)
 
-	// Invalidate L1 and metadata caches before commit — cached structs are stale.
+	testRMWPoint("StampValidUntil", wsPrefix, id)
+
+	// Invalidate L1 cache and metadata cache BEFORE commit — cached structs are stale.
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
@@ -1336,11 +1414,11 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 // Locking mirrors UpdateConfidence exactly (engram.go:799): the per-engram
 // stripe lock (casLocks.For(id) — the SAME striped mutex CompareAndSet,
 // DeleteEngram, and UpdateConfidence use) is held across the whole read-then-
-// write, and the L1 cache entry is dropped before the authoritative GetEngram
-// read, so this serializes with a same-id CompareAndSet/DeleteEngram instead of
-// racing it (STO-2). All other fields (State, Confidence, Relevance,
-// Stability, UpdatedAt) are read fresh under the lock and passed through to
-// UpdateMetadata unchanged, so the 0x0B state index stays consistent with
+// write, and the committed record is read straight from Pebble under it
+// (patchMetaLocked), so this serializes with a same-id CompareAndSet/DeleteEngram
+// instead of racing it (STO-2). All other fields (State, Confidence, Relevance,
+// Stability, UpdatedAt) are read fresh under the lock and written back
+// unchanged, so the 0x0B state index stays consistent with
 // whatever state a concurrent CAS just committed (STO-3) — TouchAccess never
 // has a stale view of State to accidentally index against.
 //
@@ -1359,25 +1437,13 @@ func (ps *PebbleStore) TouchAccess(ctx context.Context, wsPrefix [8]byte, id ULI
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Drop any stale cache entry left by a racing DeleteEngram between its
-	// batch.Commit and its post-commit cache.Delete (mirrors UpdateConfidence).
-	ps.cache.Delete(wsPrefix, id)
-
-	eng, err := ps.GetEngram(ctx, wsPrefix, id)
-	if err != nil {
-		return err
-	}
-
-	meta := &EngramMeta{
-		State:       eng.State,
-		Confidence:  eng.Confidence,
-		Relevance:   eng.Relevance,
-		Stability:   eng.Stability,
-		AccessCount: eng.AccessCount + 1,
-		UpdatedAt:   eng.UpdatedAt,
-		LastAccess:  time.Now(),
-	}
-	return ps.UpdateMetadata(ctx, wsPrefix, id, meta)
+	// Field-scoped: only AccessCount and LastAccess move; every other field
+	// is whatever the committed record holds under this lock (patchMetaLocked
+	// reads Pebble directly, so no cache entry is consulted).
+	return ps.patchMetaLocked(ctx, wsPrefix, id, func(m *EngramMeta) {
+		m.AccessCount++
+		m.LastAccess = time.Now()
+	})
 }
 
 // UpdateConfidenceWithContradiction atomically applies a confidence delta and,

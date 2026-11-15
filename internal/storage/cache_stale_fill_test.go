@@ -308,10 +308,12 @@ func TestCacheStaleFill_RandomizedStress_CacheEqualsStoreAtQuiescence(t *testing
 					case 2:
 						_ = s.SoftDelete(ctx, ws, id)
 					case 3:
-						// restore: UpdateMetadata back to active (Engine.Restore's write)
+						// restore: Engine.Restore's write — read and write under
+						// the engram's lock (UpdateMetadata takes it itself, so
+						// the locked variant is used here).
 						unlock := s.LockEngram(id)
-						if e, err := s.GetEngram(ctx, ws, id); err == nil {
-							_ = s.UpdateMetadata(ctx, ws, id, &EngramMeta{
+						if e, err := s.GetEngramUncached(ctx, ws, id); err == nil {
+							_ = s.UpdateMetadataLocked(ctx, ws, id, &EngramMeta{
 								State: StateActive, Confidence: e.Confidence, Relevance: e.Relevance,
 								Stability: e.Stability, AccessCount: e.AccessCount,
 								UpdatedAt: time.Now(), LastAccess: e.LastAccess,
@@ -319,20 +321,14 @@ func TestCacheStaleFill_RandomizedStress_CacheEqualsStoreAtQuiescence(t *testing
 						}
 						unlock()
 					// UpdateRelevance, UpdateTrust and the StoreBatch mutate path
-					// take no stripe lock, so racing a locked writer they can
-					// lose its update IN PEBBLE (record vs 0x0B index) with no
-					// cache involved — a separate, pre-existing write-write race.
-					// They are serialized here so this test measures the cache.
+					// used to take no stripe lock and were serialized here by
+					// the test; they now hold it themselves (and the lock is not
+					// reentrant), so they are called bare.
 					case 4:
-						unlock := s.LockEngram(id)
 						_ = s.UpdateRelevance(ctx, ws, id, r.Float32(), 30)
-						unlock()
 					case 5:
-						unlock := s.LockEngram(id)
 						_ = s.UpdateTrust(ctx, ws, id, TrustLevel(r.Intn(3)))
-						unlock()
 					case 6:
-						unlock := s.LockEngram(id)
 						b := s.NewBatch()
 						var err error
 						if r.Intn(2) == 0 {
@@ -345,7 +341,6 @@ func TestCacheStaleFill_RandomizedStress_CacheEqualsStoreAtQuiescence(t *testing
 						} else {
 							b.Discard()
 						}
-						unlock()
 					}
 				}
 			}(int64(round*1000 + w))
