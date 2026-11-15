@@ -60,6 +60,18 @@ type Registry struct {
 	// lazily-created Index so LoadFromPebble fails deterministically, exercising
 	// the no-cache-on-error path in getOrCreate. Always nil in production.
 	loadErrHook func() error
+
+	// Background graph repair (repair.go). repairSlot admits ONE vault's
+	// repair at a time across the registry, so peak extra memory is one
+	// vault's scratch graph however many vaults need repair at start-up.
+	// closed (guarded by mu) stops new repairs once Close has begun.
+	repairSlot chan struct{}
+	repairOnce sync.Once
+	closed     bool
+
+	// repairHook is a test-only seam called at a repair's named stages, with
+	// the vault being repaired. Always nil in production.
+	repairHook func(ws [8]byte, stage string)
 }
 
 // warnThrottleInterval is the minimum gap between repeated memory-warning log lines.
@@ -145,7 +157,8 @@ func (r *Registry) getOrCreate(ws [8]byte) *Index {
 	// transient load error into permanent silent recall loss. Returning the
 	// uncached empty index lets this request degrade gracefully while the next
 	// access retries the load. (issue #499)
-	if err := idx.LoadFromPebble(); err != nil {
+	plan, err := idx.load()
+	if err != nil {
 		slog.Error("hnsw: failed to load graph from pebble; not caching index (load will be retried on next access)", "vault", ws, "error", err)
 		// Record the failure so Insert refuses writes instead of treating the
 		// vault as empty (Dim()==0 would let a mismatched vector through and
@@ -154,7 +167,92 @@ func (r *Registry) getOrCreate(ws [8]byte) *Index {
 		return idx
 	}
 	r.indexes[ws] = idx
+	// A graph that needs repair is served AS LOADED while the repair runs in
+	// the background: the repair must never run here, under the
+	// registry-wide write lock, where it would stall the first access to
+	// every other vault for its whole duration.
+	if plan.kind != repairNone {
+		r.startRepair(ws, idx, plan)
+	}
 	return idx
+}
+
+// startRepair launches idx's repair in the background. Caller holds r.mu.
+func (r *Registry) startRepair(ws [8]byte, idx *Index, plan repairPlan) {
+	if r.closed {
+		slog.Warn("hnsw: graph needs repair but the registry is closing; serving the loaded graph", "vault", ws, "kind", plan.kind.String())
+		return
+	}
+	r.repairOnce.Do(func() { r.repairSlot = make(chan struct{}, 1) })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	idx.repair.mu.Lock()
+	idx.repair.cancel, idx.repair.done = cancel, done
+	idx.repair.mu.Unlock()
+	idx.setRepairStatus(func(s *RebuildStatus) {
+		*s = RebuildStatus{State: "queued", Kind: plan.kind.String(), Vectors: plan.vectors,
+			ClosedNodes: plan.closed, UnreachableNodes: plan.unreachable}
+	})
+	var hook func(string)
+	if h := r.repairHook; h != nil {
+		hook = func(stage string) { h(ws, stage) }
+	}
+	slot := r.repairSlot
+	go func() {
+		defer close(done)
+		defer cancel()
+		select {
+		case slot <- struct{}{}:
+		case <-ctx.Done():
+			idx.setRepairStatus(func(s *RebuildStatus) { s.State = "cancelled" })
+			return
+		}
+		defer func() { <-slot }()
+		idx.runRepair(ctx, plan, hook)
+	}()
+}
+
+// WaitRepairs blocks until every loaded vault's background graph repair has
+// finished (or been cancelled). Test and measurement seam; production never
+// needs to wait — searches are served throughout.
+func (r *Registry) WaitRepairs() {
+	for _, idx := range r.snapshotIndexes() {
+		idx.waitRepair()
+	}
+}
+
+// Close cancels any background graph repair (a cancelled repair writes
+// nothing; the next start assesses the graph again), waits for it to stop,
+// and waits for in-flight neighbour-list writes. Call before closing the
+// Pebble database. Searches and inserts keep working afterwards; no new
+// repair starts.
+func (r *Registry) Close() {
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+	for _, idx := range r.snapshotIndexes() {
+		idx.stopRepair()
+		idx.Close()
+	}
+}
+
+// RebuildStatus returns the vault's graph-repair status when its index is
+// loaded and a repair has been needed since; nil otherwise. Never loads.
+func (r *Registry) RebuildStatus(ws [8]byte) *RebuildStatus {
+	if idx := r.get(ws); idx != nil {
+		return idx.RebuildStatus()
+	}
+	return nil
+}
+
+func (r *Registry) snapshotIndexes() []*Index {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	idxs := make([]*Index, 0, len(r.indexes))
+	for _, idx := range r.indexes {
+		idxs = append(idxs, idx)
+	}
+	return idxs
 }
 
 // Search implements activation.HNSWIndex and trigger.HNSWIndex.
@@ -236,24 +334,27 @@ func (r *Registry) VaultVectorBytes(ws [8]byte) int64 {
 // Called by ClearVault and DeleteVault to evict stale index state after the
 // underlying storage has been wiped. The next Insert or Search call will
 // recreate the index lazily (empty, since Pebble data is gone).
+//
+// A background repair of the dropped index is cancelled and waited for, so it
+// cannot write the vault's old lists back after the reset.
 func (r *Registry) ResetVault(ws [8]byte) {
 	r.mu.Lock()
+	idx := r.indexes[ws]
 	delete(r.indexes, ws)
 	r.mu.Unlock()
+	if idx != nil {
+		idx.stopRepair()
+	}
 }
 
 // WaitPersisted blocks until every loaded index has finished persisting its
-// in-flight neighbour-list writes (Index.Close for each). A test that closes
+// in-flight neighbour-list writes (Index.Close for each), background graph
+// repairs included (each finishes; none is cancelled). A test that closes
 // the store and re-opens it — a restart — must call it first, or the graph
 // it reloads can be missing the last asynchronous writes.
 func (r *Registry) WaitPersisted() {
-	r.mu.RLock()
-	idxs := make([]*Index, 0, len(r.indexes))
-	for _, idx := range r.indexes {
-		idxs = append(idxs, idx)
-	}
-	r.mu.RUnlock()
-	for _, idx := range idxs {
+	for _, idx := range r.snapshotIndexes() {
+		idx.waitRepair()
 		idx.Close()
 	}
 }

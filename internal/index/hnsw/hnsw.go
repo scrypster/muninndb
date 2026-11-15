@@ -3,13 +3,11 @@ package hnsw
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"log/slog"
 	"math"
 	"math/rand"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/rankorder"
@@ -110,6 +108,9 @@ type Index struct {
 	// value on the diverse graph is re-measured by the harness); never set
 	// outside in-package tests.
 	noRetiredBeamTrigger bool
+
+	// repair tracks this index's background graph repair (repair.go).
+	repair repairState
 }
 
 // Dim returns the vault's established vector dimension.
@@ -460,13 +461,22 @@ func (idx *Index) search(query []float32, k int, dist *int) []ScoredID {
 // Insert adds a vector to the HNSW index.
 // This is safe for concurrent use but should be called from the async indexing worker.
 func (idx *Index) Insert(id [16]byte, vector []float32) {
+	idx.insert(id, vector, true)
+}
+
+// insert is Insert; copyVec false lets a repair's scratch graph share the
+// served graph's (immutable) vectors instead of duplicating every one.
+func (idx *Index) insert(id [16]byte, vector []float32, copyVec bool) {
 	level := idx.randomLevel()
 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	cachedVec := make([]float32, len(vector))
-	copy(cachedVec, vector)
+	cachedVec := vector
+	if copyVec {
+		cachedVec = make([]float32, len(vector))
+		copy(cachedVec, vector)
+	}
 	node := &HNSWNode{
 		id:     id,
 		vec:    cachedVec,
@@ -813,235 +823,6 @@ func decodeNeighbors(buf []byte) [][16]byte {
 		copy(result[i][:], buf[i*16:])
 	}
 	return result
-}
-
-// LoadFromPebble reads all HNSW nodes from Pebble into memory.
-// Loads into temporary structures first and only applies on success to maintain consistency.
-func (idx *Index) LoadFromPebble() error {
-	if idx.loadErrHook != nil {
-		return idx.loadErrHook()
-	}
-
-	start := time.Now()
-
-	// Scope the iterator to this vault's keyspace. The 0x07 range is shared by
-	// all vaults; bounding it to 0x07‖ws … 0x07‖(ws+1) means Pebble only visits
-	// this vault's keys instead of scanning the whole 0x07 keyspace and skipping
-	// foreign keys per-key. The in-loop ws check below remains as a safety net.
-	lowerBound := append([]byte{0x07}, idx.ws[:]...)
-	upperBound := []byte{0x08}
-	if wsPlus, err := keys.IncrementWSPrefix(idx.ws); err == nil {
-		upperBound = append([]byte{0x07}, wsPlus[:]...)
-	}
-
-	iter, err := idx.db.NewIter(&pebble.IterOptions{
-		LowerBound: lowerBound,
-		UpperBound: upperBound,
-	})
-	if err != nil {
-		return err
-	}
-	defer iter.Close()
-
-	// Load into temporary structures
-	tempNodes := make(map[[16]byte]*HNSWNode)
-	tempMaxLevel := 0
-	tempEntryPoint := [16]byte{}
-
-	for iter.First(); iter.Valid(); iter.Next() {
-		key := iter.Key()
-		if len(key) < 26 {
-			continue
-		}
-
-		// Only load nodes belonging to this index's vault. The 0x07 range is
-		// shared by all vaults; without this filter every per-vault index loads
-		// every vault's nodes — bloating memory and surfacing cross-vault IDs
-		// that can never resolve in the querying vault.
-		if [8]byte(key[1:9]) != idx.ws {
-			continue
-		}
-
-		var id [16]byte
-		copy(id[:], key[9:25])
-
-		// Vector slot (0xFF): load into node.vec
-		if key[25] == 0xFF {
-			if _, ok := tempNodes[id]; !ok {
-				tempNodes[id] = &HNSWNode{id: id}
-			}
-			tempNodes[id].vec = decodeVector(iter.Value())
-			continue
-		}
-
-		layer := int(key[25])
-
-		if _, ok := tempNodes[id]; !ok {
-			tempNodes[id] = &HNSWNode{id: id}
-		}
-		node := tempNodes[id]
-		node.setLayer(layer, decodeNeighbors(iter.Value()))
-
-		if layer > tempMaxLevel {
-			tempMaxLevel = layer
-			tempEntryPoint = id
-		} else if tempEntryPoint == ([16]byte{}) {
-			// Ensure at least one node is always set as the entry point even
-			// when all nodes are at layer 0 (where layer == maxLevel == 0).
-			tempEntryPoint = id
-		}
-	}
-
-	if err := iter.Error(); err != nil {
-		return fmt.Errorf("hnsw: LoadFromPebble incomplete read: %w", err)
-	}
-	for _, node := range tempNodes {
-		node.norm = vecNorm(node.vec)
-	}
-	// The entry point is the smallest id among the nodes WITH a vector at the
-	// highest level any of them reaches — the rule Insert applies live, so a
-	// reload starts every search where the live graph did. (Key order alone
-	// gave the same id except that it could pick a node whose vector is
-	// missing, from which every search returns nothing.)
-	if !idx.legacy {
-		if e, l, ok := canonicalEntry(tempNodes); ok {
-			tempEntryPoint, tempMaxLevel = e, l
-		}
-	}
-
-	// Count vectors that were actually restored (nodes carrying a 0xFF slot).
-	vectorCount := 0
-	for _, node := range tempNodes {
-		if node.vec != nil {
-			vectorCount++
-		}
-	}
-
-	// Persisted neighbor lists are written asynchronously with NoSync and can be
-	// stale or degenerate (observed in production: an entry point whose every
-	// neighbor on every layer was itself — one such node at the graph apex makes
-	// the entire vault unreachable for vector search while the rest of the
-	// persisted graph looks healthy). Restoring structure we cannot trust is
-	// worse than rebuilding from the vectors, which ARE reliable (written once,
-	// validated on read). So: check connectivity from the restored entry point
-	// and rebuild the graph in memory from the vectors when the structure is
-	// broken, then re-persist the healthy neighbor lists.
-	reachable := bfsReachable(tempNodes, tempEntryPoint)
-	rebuilt := false
-	if vectorCount > 1 && reachable*2 < vectorCount {
-		slog.Warn("hnsw: restored graph is disconnected — rebuilding from vectors",
-			"vault", idx.ws,
-			"nodes", len(tempNodes),
-			"reachable_from_entry", reachable,
-		)
-		tmp := New(idx.db, idx.ws)
-		tmp.efConstruction = idx.efConstruction
-		tmp.efSearch = idx.efSearch
-		// Deterministic order: ULIDs ascending (map iteration is random).
-		ids := make([][16]byte, 0, len(tempNodes))
-		for id, n := range tempNodes {
-			if n.vec != nil {
-				ids = append(ids, id)
-			}
-		}
-		sort.Slice(ids, func(i, j int) bool { return string(ids[i][:]) < string(ids[j][:]) })
-		for _, id := range ids {
-			tmp.Insert(id, tempNodes[id].vec)
-		}
-		tmp.persistWg.Wait() // flush re-persisted (healthy) neighbor lists
-		tmp.mu.Lock()
-		tempNodes = tmp.nodes
-		tempMaxLevel = tmp.maxLevel
-		tempEntryPoint = tmp.entryPoint
-		tmp.mu.Unlock()
-		reachable = bfsReachable(tempNodes, tempEntryPoint)
-		rebuilt = true
-	}
-
-	// A graph can also come back with a SMALL unreachable remainder — nodes
-	// whose every in-edge was pruned away after they were persisted (#620).
-	// That never trips the majority-disconnected rebuild above, so without
-	// repair the orphans are permanent: graph search can't reach them, and
-	// inserts discover neighbors by graph search, so nothing ever re-links
-	// them. Re-link each orphan the same way a fresh insert would, then
-	// re-persist. Cost is one insert per orphan — negligible next to a full
-	// rebuild, and zero when the graph is healthy.
-	repaired := 0
-	if vectorCount > 1 && !rebuilt {
-		reach := bfsReachableSet(tempNodes, tempEntryPoint)
-		orphans := make([][16]byte, 0)
-		for id, n := range tempNodes {
-			if n.vec != nil && !reach[id] {
-				orphans = append(orphans, id)
-			}
-		}
-		if len(orphans) > 0 {
-			// Deterministic order: ULIDs ascending (map iteration is random).
-			sort.Slice(orphans, func(i, j int) bool { return string(orphans[i][:]) < string(orphans[j][:]) })
-			tmp := New(idx.db, idx.ws)
-			tmp.efConstruction = idx.efConstruction
-			tmp.efSearch = idx.efSearch
-			tmp.nodes = tempNodes
-			tmp.maxLevel = tempMaxLevel
-			tmp.entryPoint = tempEntryPoint
-			for _, id := range orphans {
-				old := tempNodes[id]
-				// Drop the orphan's stale persisted layer lists first: the
-				// re-insert draws a fresh level, and leftover higher-layer keys
-				// would resurrect ghost edges on the next load.
-				for l := range old.layers {
-					if err := idx.db.Delete(keys.HNSWNodeKey(idx.ws, id, uint8(l)), pebble.NoSync); err != nil {
-						slog.Warn("hnsw: failed to clear stale orphan layer", "error", err)
-					}
-				}
-				delete(tmp.nodes, id)
-				tmp.Insert(id, old.vec)
-				repaired++
-			}
-			tmp.persistWg.Wait() // flush re-persisted neighbor lists
-			tmp.mu.Lock()
-			tempNodes = tmp.nodes
-			tempMaxLevel = tmp.maxLevel
-			tempEntryPoint = tmp.entryPoint
-			tmp.mu.Unlock()
-			reachable = bfsReachable(tempNodes, tempEntryPoint)
-		}
-	}
-
-	// Derive the vault's dimension from the vector with the smallest ID —
-	// deterministic across calls and restarts (map iteration is random), and
-	// consistent with the storage layer's first-embedding-key derivation.
-	tempDim := 0
-	var dimID [16]byte
-	for id, node := range tempNodes {
-		if node.vec == nil {
-			continue
-		}
-		if tempDim == 0 || string(id[:]) < string(dimID[:]) {
-			tempDim = len(node.vec)
-			dimID = id
-		}
-	}
-
-	// Only apply to index if load completed successfully
-	idx.mu.Lock()
-	idx.nodes = tempNodes
-	idx.maxLevel = tempMaxLevel
-	idx.entryPoint = tempEntryPoint
-	idx.dim = tempDim
-	idx.mu.Unlock()
-
-	slog.Info("hnsw: loaded graph from pebble",
-		"vault", idx.ws,
-		"nodes", len(tempNodes),
-		"vectors", vectorCount,
-		"duration", time.Since(start),
-		"reachable_from_entry", reachable,
-		"rebuilt", rebuilt,
-		"repaired", repaired,
-	)
-
-	return nil
 }
 
 // canonicalEntry returns the smallest id at the highest level among nodes

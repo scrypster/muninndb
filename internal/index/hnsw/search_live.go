@@ -57,8 +57,9 @@ type LiveSearchStats struct {
 //     budget, or exhausted the reachable graph with fewer than ef live hits,
 //     while nodes remain unvisited, the search makes ONE exact pass over the
 //     unvisited nodes. A query landing in a
-//     closed island of near-identical retired vectors (the neighbour-selection
-//     defect tracked separately) can otherwise reach nothing live at all, and
+//     closed island of near-identical retired vectors (on graphs built before
+//     the diverse selection rule, select.go; repaired at load) can otherwise
+//     reach nothing live at all, and
 //     a walk that ran out of budget inside a big retired region returns a
 //     beam of distant live hits. Worst case for a whole search: ≈ 2N distance
 //     evaluations plus the ordinary beam, i.e. never more than about two exact
@@ -279,6 +280,13 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 	//     (a closed island of near-duplicates).
 	// Cost: one distance per unvisited node (≤ N), paid only by queries that
 	// spent a beam on retired routing.
+	//
+	// Re-measured on the diverse graph (decision record, "closed islands"):
+	// at 12k / dim 384 the beam-of-retired trigger bought no recall (25% and
+	// 90% retired; ten 500-version chains) and forced the exact pass on every
+	// query of a 90%-retired vault; on the 64-dim chain fixture
+	// (TestSearchLive_ChainAimedRecallAgainstExact) it still lifts recall@10
+	// from 0.956 to 1.000. Kept until its removal is its own evidenced change.
 	beamOfRetired := stats.RetiredExpanded >= ef && !idx.noRetiredBeamTrigger
 	if (budgetSpent || beamOfRetired || (!stoppedByDistance && len(w) < ef)) && len(seen) < len(idx.nodes) {
 		stats.ExactScan = true

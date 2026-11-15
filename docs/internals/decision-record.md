@@ -1802,3 +1802,97 @@ efSearch = 100 would lift it to 0.98–0.99 but is a global parameter change, no
 Synthetic is not real: the topic shape may exaggerate islands; a production vault's recall
 against exact search is unmeasured. Insert is 1.9–2.9× slower and holds the vault's write
 lock for longer.
+
+### Closed islands, part 2: an old graph is repaired once, in the background (2026-11-15)
+
+**Why a migration.** The selection fix changes only what new lists contain; a store keeps its
+old graph until something rebuilds it. The trunk's load-time rebuild did exist, and it was
+itself a defect: it ran synchronously inside `Registry.getOrCreate`, under the registry-wide
+write lock (stalling the first access to every vault), it fired only on forward reach (the
+entry reaching < 50%), and it rebuilt with the same nearest-only rule — re-creating the
+islands, so it fired again on every boot. Measured on the trunk (realistic mix shape, dim
+384, real-disk Pebble, one M-series core): 11,500 vectors 6.7 / 7.3 / 7.3 s per boot, 16,500
+vectors 10.9 / 10.9 / 11.7 s per boot, reach after every rebuild 1,365 / 11,500 and 2,126 /
+16,500. That loop was also the "graph is repaired on load" restart variance.
+
+**Detection is structural; the format carries no version.** At load, `assessGraph` counts
+linked vectors that cannot reach the entry point (reverse BFS over layer-0 edges, O(N + E)).
+**Threshold: one closed node means a full rebuild.** Evidence for the margin: graphs built by
+the new rule had 0 closed nodes in every build measured (16 harness builds at 2,000 / 12,000
+× 8 shapes, the 64- and 128-dim test corpora, and both migrated stores after their rebuild); graphs
+built by the old rule had 1,581–1,782 of 2,000 and 5,567–11,115 of 12,000 on every clustered
+harness shape, 10,829 / 11,500 and 13,449 / 16,500 on the persisted mix stores, and at least
+79 of 2,000 on the gentlest clustered corpus seen (0 on uniform and loose-topic data, which
+the old rule does not island and which are correctly left alone). A forward reach below
+half also means a full rebuild; vectors that are merely unreachable or have no list are
+re-linked by re-insertion. **Deviation from the design, on evidence:** the design proposed a
+full rebuild only at ≥ 50% closed and re-linking the closed nodes below that. Re-linking was
+built and does not converge — the old-rule lists around the re-linked nodes close again (79
+closed before, 82 after, the same on every subsequent boot; repaired-graph recall@10 0.93
+instead of 1.00). An island is therefore always rebuilt. Loop-safety rests on the measured
+fact that a rebuilt graph has none; if one ever does, it is logged as a WARN, and the repeat
+rebuild is deterministic (id order, vault-seeded levels), so results still do not change
+across restarts.
+
+**Served throughout, swapped once, crash-safe without a marker.** The registry caches the
+index as loaded and starts the repair in a goroutine, one vault at a time across the
+registry (peak extra memory is one vault's scratch graph). The scratch index has no
+database, so nothing is written while it builds; searches and inserts use the loaded graph
+unchanged (determinism holds for the graph being served). The swap, under the index's write
+lock: replay inserts that landed meanwhile (also replayed in rounds beforehand, outside the
+lock), drain in-flight list writes, confirm the vault's entry vector is still on disk, then
+commit every list and the deletion of every layer a node no longer has in ONE synced batch,
+and only then replace the in-memory graph. A crash or cancel before the commit leaves the old
+graph byte-for-byte (`TestMigration_CancelledRepairWritesNothing`; with the scratch index
+given the database — persist-as-you-go, as the trunk's rebuild did — the same point already
+showed 2,006 changed and 117 extra keys);
+the next load assesses it again and starts over. `ResetVault` cancels and waits; Engine.Stop
+calls the new `Registry.Close`, which does the same for every vault, so a repair cannot write
+into a closed database. No marker key is used: one under 0x07 would load on an old binary as a
+vector-less entry point (that vault's vector search returning nothing), and none is needed.
+
+**Measured, new code, the same stores** (one M-series core on a shared, loaded machine):
+first access 0.056 s / 0.127 s (11,500 / 16,500) — the trunk's 6.7 s / 10.9 s is gone from
+this path; background rebuild 11.4–16.2 s / 18.9–25.6 s across two runs (645–1,013
+vectors/s, persistence included); every later boot 0.05–0.19 s with no repair. Extra heap
+while it runs: the scratch graph 7.6 MB / 20.4 MB (vectors are shared, not copied) plus the
+commit batch 6.4 MB / 9.2 MB — single GC-snapshot deltas, noisy, well inside a 2 GB host;
+allocation churn is 4.0 / 5.9 GB of short-lived garbage over the rebuild. A 2-vCPU server was
+not measured: the rebuild is single-threaded, so expect it to take the per-core slowdown
+(the design guessed 2–4×: roughly 25–60 s for 11,500 vectors), served throughout, and to
+occupy one of the two cores while it runs. Progress is reported per vault as `hnsw_rebuild`
+in admin observability (state, kind, done/total, counts at load, duration); `muninn_status`
+does not show it — that is an MCP surface change, not made here.
+
+**Retired-version trigger, re-measured on the new graph (kept, not removed).** `SearchLive`
+at 12,000 vectors / dim 384, recall@10 against exact search over live vectors, exact pass
+fired, distances per query — current rule; new rule; new rule with the beam-of-retired
+trigger off:
+
+| corpus | class | current | new | new, trigger off |
+|---|---|---|---|---|
+| 3,000 retired (25%) | ordinary | 0.749, 35/200, 2,438 | 0.995, 0/200, 704 | 0.995, 0/200, 704 |
+| 90% retired | ordinary | 1.000, 200/200, 12,075 | 1.000, 200/200, 12,078 | 1.000, 0/200, 1,495 |
+| ten 500-version chains | ordinary | 0.871, 83/200, 5,193 | 0.995, 16/200, 1,353 | 0.995, 0/200, 445 |
+| ten 500-version chains | chain-aimed | 0.995, 199/200, 12,022 | 1.000, 200/200, 12,082 | 1.000, 37/200, 2,912 |
+
+On these shapes the trigger buys no recall on the new graph and costs a full scan on every
+query of a mostly-retired vault. **But** on the in-tree 64-dim chain fixture
+(`TestSearchLive_ChainAimedRecallAgainstExact`) turning it off drops chain-aimed recall@10
+from 1.000 to 0.956 on the new graph (0.625 on the old). Its removal is a separate change
+that has to answer that cell.
+
+**Tombstones are in memory only — verified.** A hard delete tombstones the node in the
+running index and removes nothing from 0x07, so after a restart the deleted vector is an
+ordinary graph node again and the vector index returns it
+(`TestHNSWTombstone_KnownResidual_HardDeletedVectorIsAGraphHitAfterRestart`, fails when
+fixed). What the user sees: recall never returns it, before or after a restart (the engram
+record is gone; `TestHNSWTombstone_HardDeletedNeverRecalledAcrossRestart`); the cost is a
+vector candidate slot it can take from a live memory. Not fixed here.
+
+**Residuals.** If `ClearVault` wipes the vault between the commit's vector check and the
+batch commit (microseconds, once per migrated vault), the old lists land in a cleared vault
+as vector-less keys, which load as unreachable, unsearchable junk. Layer keys of nodes that
+have no vector at all are not deleted by the rebuild. The rebuild competes with serving for
+CPU. Concurrent-insert levels (RNG drawn before the lock) and index-level dedup remain
+deferred from the design.

@@ -872,6 +872,13 @@ func (e *Engine) Stop() {
 		case <-time.After(5 * time.Second):
 			slog.Warn("engine: fire-and-forget goroutines did not drain within 5s")
 		}
+		// Cancel any background HNSW graph repair (a cancelled repair writes
+		// nothing; the next start assesses the graph again) and drain
+		// in-flight neighbour-list writes — both write to Pebble, which the
+		// caller closes next.
+		if e.hnswRegistry != nil {
+			e.hnswRegistry.Close()
+		}
 	})
 }
 
