@@ -161,15 +161,15 @@ type writeTwin struct {
 	ring *writetwin.Ring
 	now  func() time.Time
 
-	mu       sync.Mutex
-	meta     map[[16]byte]twinMeta
+	mu   sync.Mutex
+	meta map[[16]byte]twinMeta
 	// seen holds ids admitted to the ring within the window. A re-embed of
 	// one of them is not a new write and is not re-admitted.
 	seen map[[16]byte]time.Time
 	// logged de-dupes flag lines (and the flagged counter) per
 	// (new, head, rule, shown) within the window.
-	logged  map[twinPairKey]time.Time
-	started time.Time // process start of the check: the ring is warming for one window
+	logged   map[twinPairKey]time.Time
+	started  time.Time // process start of the check: the ring is warming for one window
 	waiters  map[[16]byte]chan writetwin.Entry
 	names    map[[8]byte]string
 	namesAt  time.Time

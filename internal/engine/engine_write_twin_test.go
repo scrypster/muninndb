@@ -801,3 +801,29 @@ func TestWriteTwin_DroppedJobsWarnRateLimited(t *testing.T) {
 		t.Fatalf("want one WARN per minute of drops (2), got %d: %v", len(l), l)
 	}
 }
+
+// TestWriteTwin_SamePairLoggedAndCountedOnce: the same (new, head) pair
+// evaluated twice in the window yields one line and one count.
+func TestWriteTwin_SamePairLoggedAndCountedOnce(t *testing.T) {
+	env := newTwinEnv(t, writetwin.Shadow, "bge-small-en-v1.5")
+	lc := captureLogs(t)
+	ws := env.store.ResolveVaultPrefix("layout")
+	a := env.write("layout", "tunnel", "the tunnel portal is cast plaster")
+	env.embed("layout", a, twinUnit(130))
+	b := env.write("layout", "tunnel", "tunnel portal: cast plaster")
+	env.embed("layout", b, twinAt(twinUnit(130), 0.98, 131))
+	env.eng.WaitWriteTimeIdle()
+	eb, _ := env.store.GetEngram(storage.ContextWithNoAccessCacheStamp(context.Background()), ws, b)
+	entry, _ := env.eng.twin.ring.Get(ws, b)
+	before := testutil.ToFloat64(metrics.WriteTwinFlaggedTotal.WithLabelValues("recent", "false"))
+	env.eng.twin.mu.Lock()
+	gen := env.eng.twin.gens[ws]
+	env.eng.twin.mu.Unlock()
+	env.eng.processTwinJob(twinJob{ws: ws, entry: writetwin.Entry{ID: b, Vec: entry.Vec, CreatedAt: eb.CreatedAt}, gen: gen})
+	if l := lc.lines(writetwin.FlagLogMsg); len(l) != 1 {
+		t.Fatalf("want one line for the pair, got %d: %v", len(l), l)
+	}
+	if d := testutil.ToFloat64(metrics.WriteTwinFlaggedTotal.WithLabelValues("recent", "false")) - before; d != 0 {
+		t.Fatalf("the re-evaluated pair was counted again (+%v)", d)
+	}
+}
