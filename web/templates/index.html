@@ -1017,6 +1017,12 @@
                     <div style="font-size:1rem;font-weight:600;color:var(--text-primary);" x-text="formatBytes(v.hnsw_bytes)"></div>
                     <div style="font-size:0.6875rem;color:var(--text-muted);">HNSW Memory</div>
                   </div>
+                  <template x-if="v.keyword_unindexed_live > 0">
+                    <div>
+                      <div style="font-size:1rem;font-weight:600;color:var(--warning, #d97706);" x-text="v.keyword_unindexed_live.toLocaleString()"></div>
+                      <div style="font-size:0.6875rem;color:var(--text-muted);" :title="'Live memories with no keyword-search postings (left by a restore before the fix). Run: muninn vault reindex-fts ' + vaultName">Not keyword-indexed</div>
+                    </div>
+                  </template>
                   <template x-if="v.coherence">
                     <div>
                       <div style="font-size:1rem;font-weight:600;color:var(--text-primary);" x-text="(v.coherence.score * 100).toFixed(0) + '%'"></div>

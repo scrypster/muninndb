@@ -44,6 +44,19 @@ type pebbleStoreBatch struct {
 	// this batch. The generation is bumped in Commit, AFTER the data is
 	// visible — see noteContradictsWrite.
 	contradictsQueued [][8]byte
+	// mutations are the read-modify-writes queued by mutateEngram. They are
+	// APPLIED in Commit, under the engrams' stripe locks, to the records as
+	// committed at that moment — see mutateEngram.
+	mutations []pendingMutation
+}
+
+// pendingMutation is one mutateEngram call awaiting Commit.
+type pendingMutation struct {
+	ws             [8]byte
+	id             ULID
+	op             string
+	refuseUndelete bool
+	mutate         func(*Engram)
 }
 
 // batchAssocEdge is one association-cache invalidation owed by a batch.
@@ -113,6 +126,15 @@ func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8
 		eng.Stability = 30.0
 	}
 	eng.CreatedAt, eng.UpdatedAt, eng.LastAccess = normalizeEngramTimes(eng.CreatedAt, eng.UpdatedAt, eng.LastAccess)
+
+	// The mirror of mutateEngramOpt's check: a mutation of this engram queued
+	// earlier would be applied at Commit over the stored record, after this
+	// write, and discard it.
+	for _, m := range b.mutations {
+		if m.ws == wsPrefix && m.id == eng.ID {
+			return fmt.Errorf("batch write: engram %s already has a mutation queued in the same batch; the mutation would discard this write", eng.ID.String())
+		}
+	}
 
 	// STO-12: the inline-Associations loop below is a creator, checked before
 	// anything is queued. Engrams already queued in this batch count as live —
@@ -283,7 +305,7 @@ func (b *pebbleStoreBatch) WriteOrdinal(ctx context.Context, ws [8]byte, parentI
 // Reads the current engram from the underlying store, sets its state, and queues
 // updated 0x01 and 0x02 key writes plus the 0x0B state index transition.
 func (b *pebbleStoreBatch) UpdateEngramState(ctx context.Context, ws [8]byte, id ULID, newState LifecycleState) error {
-	return b.mutateEngram(ctx, ws, id, "update state", func(eng *Engram) {
+	return b.mutateEngramOpt(ctx, ws, id, "update state", true, func(eng *Engram) {
 		eng.State = newState
 	})
 }
@@ -300,20 +322,36 @@ func (b *pebbleStoreBatch) SupersedeEngram(ctx context.Context, ws [8]byte, id U
 	})
 }
 
-// mutateEngram reads the current engram from the underlying store, applies
-// mutate, and queues updated 0x01 and 0x02 key writes plus the 0x0B state
-// index transition when the state changed.
+// mutateEngram queues mutate to be applied to the engram's record at Commit,
+// with the matching 0x01/0x02 writes and the 0x0B state index transition.
 //
-// mutate is handed a PRIVATE clone, never the L1 cache's shared pointer. This
-// is #858: GetEngram returns the cached struct under the read-only contract at
-// L1Cache.Get, and applying mutate to it in place made two concurrent evolves
-// of one id write and read a single struct — reproduced at 2 goroutines x 50
-// EvolveAt on one id. Nothing here may drop the Clone; the cache entry is
-// invalidated by Commit, not by this function, so the shared struct stays live
-// and readable by recall for the whole life of the batch.
+// The engram is read here only to fail fast on a missing one (the caller gets
+// the same queue-time error it always did). The read that is MODIFIED happens
+// in Commit, under the engram's stripe lock, straight from Pebble: this used
+// to re-encode the copy read at queue time, so anything committed between the
+// queue and the Commit — a trust change, an access bump, a forget — was
+// reverted, and the 0x0B move keyed on a state the record no longer had
+// (TestSupersedeEngram_ConcurrentUpdateTrustIsKept).
+//
+// mutate is handed a PRIVATE decode, never the L1 cache's shared pointer
+// (#858, STO-20). Several mutations of one engram in one batch apply in queue
+// order to a single working copy.
 func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID, op string, mutate func(*Engram)) error {
+	return b.mutateEngramOpt(ctx, ws, id, op, false, mutate)
+}
+
+// mutateEngramOpt is mutateEngram with refuseUndelete: when set, Commit fails
+// with ErrRestoreRequired if the mutation would move a soft-deleted record to
+// any other state (Restore is the one way out; see CompareAndSet).
+func (b *pebbleStoreBatch) mutateEngramOpt(ctx context.Context, ws [8]byte, id ULID, op string, refuseUndelete bool, mutate func(*Engram)) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
+	}
+	// The mutation is applied at Commit to the record as STORED, so in a
+	// batch that also writes this engram it would silently discard that
+	// write. Refused rather than merged: no caller needs it.
+	if b.batchQueuedEngram(ws, [16]byte(id)) {
+		return fmt.Errorf("%s: engram %s is also written in the same batch; a queued mutation would discard that write", op, id.String())
 	}
 	eng, err := b.ps.GetEngram(ctx, ws, id)
 	if err != nil {
@@ -322,35 +360,82 @@ func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID
 	if eng == nil {
 		return fmt.Errorf("%s: engram %s not found", op, id.String())
 	}
-	eng = eng.Clone()
-	oldState := eng.State
-	mutate(eng)
-	newState := eng.State
-	eng.UpdatedAt = time.Now()
-
-	erfEng := toERFEngram(eng)
-	erfBytes, err := erf.EncodeV2(erfEng)
-	if err != nil {
-		return fmt.Errorf("%s: encode: %w", op, err)
-	}
-	id16 := [16]byte(id)
-
-	// Transition 0x0B state index: remove old entry, write new entry.
-	if oldState != newState {
-		b.batch.Delete(keys.StateIndexKey(ws, uint8(oldState), id16), nil)
-		b.batch.Set(keys.StateIndexKey(ws, uint8(newState), id16), []byte{}, nil)
-	}
-
-	// Update 0x01 full engram record and 0x02 metadata slice.
-	if err := b.batch.Set(keys.EngramKey(ws, id16), erfBytes, nil); err != nil {
-		return fmt.Errorf("%s: set engram key: %w", op, err)
-	}
-	if err := b.batch.Set(keys.MetaKey(ws, id16), erf.MetaKeySlice(erfBytes), nil); err != nil {
-		return err
-	}
+	b.mutations = append(b.mutations, pendingMutation{ws: ws, id: id, op: op, refuseUndelete: refuseUndelete, mutate: mutate})
 	// Track for cache invalidation in Commit.
 	b.stateUpdatedIDs = append(b.stateUpdatedIDs, stateUpdate{ws: ws, id: id})
 	return nil
+}
+
+// applyMutationsLocked takes the stripe locks of every engram with a queued
+// mutation (ascending stripe order, so it cannot deadlock another batch),
+// re-reads each committed record, applies the mutations in queue order, and
+// queues the resulting writes. The caller commits and then calls unlock.
+func (b *pebbleStoreBatch) applyMutationsLocked(ctx context.Context) (unlock func(), err error) {
+	if len(b.mutations) == 0 {
+		return func() {}, nil
+	}
+	lockKeys := make([][]byte, len(b.mutations))
+	for i := range b.mutations {
+		lockKeys[i] = b.mutations[i].id[:]
+	}
+	unlock = b.ps.casLocks.lockMany(lockKeys)
+
+	type wkey struct {
+		ws [8]byte
+		id ULID
+	}
+	type working struct {
+		eng      *Engram
+		oldState LifecycleState
+		op       string
+	}
+	work := make(map[wkey]*working, len(b.mutations))
+	var order []wkey
+	for _, m := range b.mutations {
+		k := wkey{m.ws, m.id}
+		w, ok := work[k]
+		if !ok {
+			eng, rerr := b.ps.GetEngramUncached(ctx, m.ws, m.id)
+			if rerr != nil {
+				unlock()
+				return nil, fmt.Errorf("%s: read engram: %w", m.op, rerr)
+			}
+			w = &working{eng: eng, oldState: eng.State, op: m.op}
+			work[k] = w
+			order = append(order, k)
+		}
+		before := w.eng.State
+		m.mutate(w.eng)
+		if m.refuseUndelete && before == StateSoftDeleted && w.eng.State != StateSoftDeleted {
+			unlock()
+			return nil, fmt.Errorf("%s %s: %w", m.op, m.id.String(), ErrRestoreRequired)
+		}
+	}
+
+	now := time.Now()
+	for _, k := range order {
+		w := work[k]
+		w.eng.UpdatedAt = now
+		erfBytes, eerr := erf.EncodeV2(toERFEngram(w.eng))
+		if eerr != nil {
+			unlock()
+			return nil, fmt.Errorf("%s: encode: %w", w.op, eerr)
+		}
+		id16 := [16]byte(k.id)
+		if newState := w.eng.State; w.oldState != newState {
+			b.batch.Delete(keys.StateIndexKey(k.ws, uint8(w.oldState), id16), nil)
+			b.batch.Set(keys.StateIndexKey(k.ws, uint8(newState), id16), []byte{}, nil)
+		}
+		if serr := b.batch.Set(keys.EngramKey(k.ws, id16), erfBytes, nil); serr != nil {
+			unlock()
+			return nil, fmt.Errorf("%s: set engram key: %w", w.op, serr)
+		}
+		if serr := b.batch.Set(keys.MetaKey(k.ws, id16), erf.MetaKeySlice(erfBytes), nil); serr != nil {
+			unlock()
+			return nil, serr
+		}
+	}
+	return unlock, nil
 }
 
 // WriteEntityEngramLink queues the 0x20 forward and 0x23 reverse entity-link keys
@@ -421,13 +506,32 @@ func (b *pebbleStoreBatch) Commit() error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
 	}
+	// Queued read-modify-writes are applied now, under their stripe locks,
+	// to the records as committed — and the locks are held through the
+	// commit so nothing can land between that read and this write.
+	unlockMutations, err := b.applyMutationsLocked(context.Background())
+	if err != nil {
+		return err // not committed; Discard still releases the batch
+	}
 	b.committed = true
 
 	syncOption := pebble.Sync
 	if b.ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	if err := b.ps.commitBatch(b.batch, syncOption); err != nil {
+	// With queued mutations the engrams' stripes are held: apply NoSync,
+	// replicate (log order must equal commit order for those engrams), release
+	// the stripes, THEN sync the WAL — same durability on return, no fsync
+	// inside a shared stripe. Without mutations no stripe is held and the
+	// commit is exactly as before.
+	locked := len(b.mutations) > 0
+	commitOpt := syncOption
+	if locked {
+		commitOpt = pebble.NoSync
+	}
+	err = b.ps.commitBatch(b.batch, commitOpt)
+	if err != nil {
+		unlockMutations()
 		return fmt.Errorf("batch commit: %w", err)
 	}
 
@@ -439,7 +543,17 @@ func (b *pebbleStoreBatch) Commit() error {
 	// carried entity links — never reached a follower. Must run before
 	// b.batch.Close() (Discard), same constraint replicateBatch documents
 	// for its direct callers.
+	for _, m := range b.mutations {
+		testCommittedPoint("BatchCommit", m.ws, m.id)
+	}
 	b.ps.replicateBatch(b.batch)
+	unlockMutations()
+	var syncErr error
+	if locked && syncOption == pebble.Sync {
+		// Applied and shipped; a sync failure is reported, after the
+		// post-commit bookkeeping below has run for the applied batch.
+		syncErr = b.ps.syncWAL()
+	}
 
 	// The COG-29 debt scan cache's invalidation signal, bumped here rather than
 	// at stage time for the same reason the cache evictions below are: the
@@ -504,6 +618,9 @@ func (b *pebbleStoreBatch) Commit() error {
 		}
 	}
 
+	if syncErr != nil {
+		return fmt.Errorf("batch commit: sync: %w", syncErr)
+	}
 	return nil
 }
 
