@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Recall no longer waits behind background embedding. The bundled local
+  embedder serialised every inference behind one lock that ignored deadlines:
+  a recall's query embed queued behind retroactive 64-text batches (p50 ~2.4 s
+  versus ~16 ms idle) and, with a caller deadline, recall then failed outright
+  with zero results. Inference now runs in a query lane (recall's query embed,
+  marked explicitly by the caller) and a batch lane (everything else, still one
+  batch at a time), and a queued call gives up when its deadline passes. A
+  recall whose query embed misses its budget answers keyword-only with
+  `semantic_degraded: true` and `semantic_degraded_reason: "embed_timeout"`
+  (other reasons: `embed_unavailable`, `embed_zero_vector`,
+  `stored_embedding_read`); `muninn_status` reports the reason. The local
+  embedder's batch size drops from 64 to 8 (same throughput, peak RSS ~0.8 GB
+  instead of ~2.5 GB) and it is no longer rate-limited — a `rate_per_sec`
+  plugin option is now ignored for the local provider. gRPC's
+  `ActivateResponse` gains `semantic_degraded` (7) and
+  `semantic_degraded_reason` (8); it previously served keyword-only results
+  unmarked. Only recall's query embed uses the query lane; a burst of
+  simultaneous recalls serialises on it. New metrics:
+  `muninndb_embed_lane_waits_total{lane}`,
+  `muninndb_embed_lane_timeouts_total{lane}`,
+  `muninndb_embed_lane_wait_seconds{lane}`,
+  `muninndb_recall_embed_timeout_total{vault}`.
+
 ### Security
 
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to

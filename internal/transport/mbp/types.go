@@ -286,9 +286,15 @@ type ActivateResponse struct {
 	// primary HNSW vector search produced real scores and only a secondary
 	// post-load fetch failed (over-warn beats under-warn on a correctness signal).
 	// Caller-supplied embeddings are not zero-checked (only embed-backend paths).
-	// Carried on MBP + REST (alias) + MCP muninn_recall; gRPC does NOT yet map it
-	// (pb.ActivateResponse has no field — a documented deferral, tracked separately).
+	// Carried on MBP + REST (alias) + MCP muninn_recall + gRPC
+	// (pb.ActivateResponse.semantic_degraded, field 7).
 	SemanticDegraded bool `msgpack:"semantic_degraded,omitempty" json:"semantic_degraded,omitempty"`
+	// SemanticDegradedReason names which failure set SemanticDegraded:
+	// embed_timeout (the query embed missed its budget — embedder busy or
+	// slow) | embed_unavailable (the embed call failed) | embed_zero_vector |
+	// stored_embedding_read. Empty iff SemanticDegraded is false. Same
+	// surfaces as SemanticDegraded (gRPC field 8).
+	SemanticDegradedReason string `msgpack:"semantic_degraded_reason,omitempty" json:"semantic_degraded_reason,omitempty"`
 	// Abstained is true when the recall pipeline ran to completion and
 	// DELIBERATELY returned nothing: candidates were scored and every one fell
 	// below the relevance bar (or was filtered). It distinguishes "the vault

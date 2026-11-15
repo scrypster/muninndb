@@ -185,7 +185,11 @@ type Engine struct {
 	// started — and they cost two atomic stores per recall. Read by EmbedHealth.
 	semanticOKAt       atomic.Int64
 	semanticDegradedAt atomic.Int64
-	prov               *provenance.Store // audit trail per-engram
+	// semanticDegradedReason is the activation.Degraded* reason of the most
+	// recent degraded recall (stored alongside semanticDegradedAt).
+	semanticDegradedReason atomic.Pointer[string]
+
+	prov *provenance.Store // audit trail per-engram
 
 	// Fix 5: coherence persistence lifecycle
 	coherenceFlushStop chan struct{}
@@ -3027,6 +3031,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// degraded call.
 	if result.SemanticDegraded {
 		metrics.RecallEmbedFallbackTotal.WithLabelValues(req.Vault).Inc()
+		if result.SemanticDegradedReason == activation.DegradedEmbedTimeout {
+			metrics.RecallEmbedTimeoutTotal.WithLabelValues(req.Vault).Inc()
+		}
+		reason := result.SemanticDegradedReason
+		e.semanticDegradedReason.Store(&reason)
 		e.semanticDegradedAt.Store(time.Now().UnixNano())
 	} else if len(req.Embedding) == 0 && !activation.IsNoopEmbedder(e.embedder) {
 		// Only a recall that actually asked the embedder is evidence it is up:
@@ -3530,16 +3539,17 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	metrics.ActivateDuration.WithLabelValues(req.Vault).Observe(d.Seconds())
 
 	return &mbp.ActivateResponse{
-		QueryID:          queryID,
-		TotalFound:       result.TotalFound,
-		Activations:      items,
-		LatencyMs:        result.LatencyMs,
-		Brief:            briefSentences,
-		SemanticDegraded: result.SemanticDegraded,
-		Abstained:        result.Abstained,
-		AbstainedReason:  result.AbstainedReason,
-		WeakAvailable:    weakAvailable,
-		Conflict:         conflictBlock,
+		QueryID:                queryID,
+		TotalFound:             result.TotalFound,
+		Activations:            items,
+		LatencyMs:              result.LatencyMs,
+		Brief:                  briefSentences,
+		SemanticDegraded:       result.SemanticDegraded,
+		SemanticDegradedReason: result.SemanticDegradedReason,
+		Abstained:              result.Abstained,
+		AbstainedReason:        result.AbstainedReason,
+		WeakAvailable:          weakAvailable,
+		Conflict:               conflictBlock,
 	}, nil
 }
 
@@ -4088,6 +4098,9 @@ type EmbedHealth struct {
 	State          string
 	LastOKAt       time.Time // zero if never observed
 	LastDegradedAt time.Time // zero if never observed
+	// LastDegradedReason is the activation.Degraded* reason of the most recent
+	// degraded recall (e.g. "embed_timeout"); empty if none was observed.
+	LastDegradedReason string
 }
 
 // EmbedHealth reports the embedder's state from what recalls have observed.
@@ -4102,6 +4115,9 @@ func (e *Engine) EmbedHealth() EmbedHealth {
 	}
 	if deg != 0 {
 		h.LastDegradedAt = time.Unix(0, deg)
+	}
+	if r := e.semanticDegradedReason.Load(); r != nil {
+		h.LastDegradedReason = *r
 	}
 	switch {
 	case activation.IsNoopEmbedder(e.embedder):

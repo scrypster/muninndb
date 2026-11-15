@@ -780,6 +780,17 @@ components:
             or a post-load embedding fetch failed — so semantic_similarity may be
             understated. Query-granular and coarse (set on any such failure even if
             the primary vector search produced real scores). Omitted when false.
+        semantic_degraded_reason:
+          type: string
+          enum: [embed_timeout, embed_unavailable, embed_zero_vector, stored_embedding_read]
+          description: >-
+            Why semantic_degraded is set. embed_timeout: the query embed did not
+            arrive within recall's embed budget (the embedder was busy — e.g. a
+            backfill batch — or slow), so recall ran keyword-only; the backend is
+            up. embed_unavailable: the embed call failed. embed_zero_vector: the
+            embedder returned an empty/all-zero vector. stored_embedding_read: a
+            post-load stored-embedding read failed. Omitted when semantic_degraded
+            is false.
         abstained:
           type: boolean
           description: >-
