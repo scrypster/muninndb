@@ -383,7 +383,7 @@ func allToolDefinitions() []ToolDefinition {
 			Description: "Get health and capacity statistics for the vault. `health` is derived, not a constant: \"good\" when the embedder is up (or not yet exercised by a recall) and no cognitive worker is erroring or stopped; " +
 				"otherwise \"degraded\" with one entry per cause in `health_reasons`. Also reports `embedder.state` (up | degraded_to_keyword | disabled | unknown), " +
 				"each cognitive worker's state (active | idle | dormant | stopped | disabled | erroring) with `last_run_age_seconds`, `embeddings_pending` while an embed backfill runs, and `enrichment_mode`. " +
-				"A dormant worker just has nothing to do — reported, not a degradation.",
+				"`storage` is writable | not_writable | unknown (a data directory that refuses writes is degraded). A dormant worker just has nothing to do — reported, not a degradation.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

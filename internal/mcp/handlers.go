@@ -906,6 +906,12 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 	}
 	if hr, ok := s.engine.(healthReporter); ok {
 		snap := hr.HealthSnapshot(ctx)
+		status.Storage = "unknown"
+		if s.storageWritable != nil {
+			ok := s.storageWritable()
+			snap.StorageWritable = &ok
+			status.Storage = map[bool]string{true: "writable", false: "not_writable"}[ok]
+		}
 		health, reasons, emb, workers := deriveHealth(snap)
 		status.Health = health
 		status.HealthReasons = reasons

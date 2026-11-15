@@ -23,7 +23,11 @@ import (
 
 // MCPServer serves the MCP JSON-RPC 2.0 protocol on a single HTTP mux.
 type MCPServer struct {
-	engine           EngineInterface
+	engine EngineInterface
+	// storageWritable reports whether the data directory accepts writes — the
+	// same cached probe REST /api/health reports as db_writable. nil = not
+	// wired (muninn_status then reports storage "unknown").
+	storageWritable  func() bool
 	token            string              // required Bearer token (mdb_ static token); empty = no auth
 	authKeys         apiKeyValidator     // optional: enables mk_ vault API key auth; nil = disabled
 	capKeys          capabilityValidator // optional: enables cap_ capability auth (RFC #597); nil = disabled
@@ -784,6 +788,11 @@ func sendResult(w http.ResponseWriter, id json.RawMessage, result any) {
 		Result:  result,
 	})
 }
+
+// SetStorageWritableProbe wires the storage-writability signal muninn_status
+// folds into health. The probe must be cheap (REST's is a cached atomic,
+// refreshed every 30s by a background sentinel-file write).
+func (s *MCPServer) SetStorageWritableProbe(probe func() bool) { s.storageWritable = probe }
 
 // sendError writes a JSON-RPC error response.
 func sendError(w http.ResponseWriter, id json.RawMessage, code int, message string) {

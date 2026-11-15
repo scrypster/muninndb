@@ -1581,6 +1581,9 @@ func runServer() {
 	// authenticate on every transport and muninn_create_workflow_vault (opt-in
 	// via MUNINN_AGENT_VAULT_CREATE) can mint workflow capabilities (RFC #597).
 	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, authStore, authStore, clientTLS)
+	// muninn_status health folds in the same storage-writability probe that
+	// REST /api/health reports as db_writable.
+	mcpServer.SetStorageWritableProbe(restServer.DBWritable)
 
 	// Build gRPC server
 	grpcAdapter := grpcpkg.NewEngineAdapter(eng)

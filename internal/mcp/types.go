@@ -338,6 +338,8 @@ type VaultStatus struct {
 	// "unknown" when the engine cannot report health at all.
 	Health        string   `json:"health"`
 	HealthReasons []string `json:"health_reasons"`
+	// Storage: writable | not_writable | unknown (probe not wired).
+	Storage string `json:"storage,omitempty"`
 
 	Embedder *EmbedderStatus         `json:"embedder,omitempty"`
 	Workers  map[string]WorkerHealth `json:"workers,omitempty"`
