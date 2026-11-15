@@ -2909,6 +2909,19 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// forces this; it can only ADD read-only-ness, never remove it.
 	actReq.ReadOnly = auth.ObserveFromContext(ctx) || req.ReadOnly
 
+	// A read-only recall must not stamp L1 cache recency on ANY engram it
+	// reads — phase 6, entity-boost injection, supersession, version-head and
+	// contradiction lookups alike. The stamp is not a cache detail: the next
+	// Activate reads it back via EngramLastAccessNs as ACT-R recency, so a
+	// read that stamps makes the following identical read score differently.
+	// Suppressing it on the request ctx (rather than per call site, as phase 6
+	// alone did) makes the leak unrepresentable for every post-pipeline phase,
+	// including ones added later. Pinned by
+	// TestActivateReadOnly_RepeatedCallsAreIdentical_EntityBoostInjection.
+	if actReq.ReadOnly {
+		ctx = storage.ContextWithNoAccessCacheStamp(ctx)
+	}
+
 	// Resolve the recall-mode preset — explicit wire mode first, else the
 	// vault default. The engine is the SINGLE preset decider (#704):
 	// transports validate the mode name and forward it instead of stamping
