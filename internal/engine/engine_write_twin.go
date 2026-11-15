@@ -90,6 +90,7 @@ const (
 	twinNoEmbedder     = "no_embedder"
 	twinCalibrating    = "calibrating"
 	twinInternalError  = "internal_error"
+	twinRingWarming    = "ring_warming"
 	twinMaxInlineWait  = 100 * time.Millisecond
 	twinQueueSize      = 256
 	twinGuardMaxAge    = time.Hour
@@ -113,6 +114,37 @@ type twinJob struct {
 	gen         uint64
 }
 
+type twinPairKey struct {
+	newID, headID [16]byte
+	rule          string
+	shown         bool
+}
+
+// twinSetCap bounds seen and logged; past it, entries older than the window
+// are pruned first, then arbitrary ones (both only suppress repeats).
+const twinSetCap = 1 << 16
+
+func pruneTimeMap[K comparable](m map[K]time.Time, now time.Time) {
+	if len(m) < twinSetCap {
+		return
+	}
+	for k, at := range m {
+		if now.Sub(at) > writetwin.Window || len(m) >= twinSetCap {
+			delete(m, k)
+		}
+	}
+}
+
+// ringState is "warming" for the first window after the check started in
+// this process: writes made before the start are not in the ring, so an
+// absence of twins means nothing yet.
+func (t *writeTwin) ringState() string {
+	if t.now().Sub(t.started) < writetwin.Window {
+		return "warming"
+	}
+	return "warm"
+}
+
 type twinGuard struct {
 	rank1      []float64
 	computedAt time.Time
@@ -131,6 +163,13 @@ type writeTwin struct {
 
 	mu       sync.Mutex
 	meta     map[[16]byte]twinMeta
+	// seen holds ids admitted to the ring within the window. A re-embed of
+	// one of them is not a new write and is not re-admitted.
+	seen map[[16]byte]time.Time
+	// logged de-dupes flag lines (and the flagged counter) per
+	// (new, head, rule, shown) within the window.
+	logged  map[twinPairKey]time.Time
+	started time.Time // process start of the check: the ring is warming for one window
 	waiters  map[[16]byte]chan writetwin.Entry
 	names    map[[8]byte]string
 	namesAt  time.Time
@@ -177,6 +216,9 @@ func newWriteTwin(mode writetwin.Mode) *writeTwin {
 		ring:           writetwin.NewRing(nil),
 		now:            time.Now,
 		meta:           make(map[[16]byte]twinMeta),
+		seen:           make(map[[16]byte]time.Time),
+		logged:         make(map[twinPairKey]time.Time),
+		started:        time.Now(),
 		waiters:        make(map[[16]byte]chan writetwin.Entry),
 		names:          make(map[[8]byte]string),
 		gens:           make(map[[8]byte]uint64),
@@ -335,6 +377,17 @@ func (e *Engine) WriteTwinOnEmbedded(ws [8]byte, eng *storage.Engram, vec []floa
 	if !ok && now.Sub(eng.CreatedAt) > writetwin.Window {
 		return
 	}
+	// A re-embed (or retry) of an engram this process already admitted is
+	// not a new write either: without this a vault re-embed within the hour
+	// put both members of a pair back in the ring and logged the pair again.
+	t.mu.Lock()
+	if at, dup := t.seen[eng.ID]; dup && !ok && now.Sub(at) <= writetwin.Window {
+		t.mu.Unlock()
+		return
+	}
+	pruneTimeMap(t.seen, now)
+	t.seen[eng.ID] = now
+	t.mu.Unlock()
 
 	entry := writetwin.Entry{ID: eng.ID, Vec: vec, CreatedAt: eng.CreatedAt, BatchID: meta.batchID}
 	t.ring.Insert(ws, entry)
@@ -645,7 +698,24 @@ func (e *Engine) twinHeadsFor(ctx context.Context, ws [8]byte, newID storage.ULI
 	return out
 }
 
-func (e *Engine) logTwinFlag(ws [8]byte, newID storage.ULID, newCreated time.Time, n twinNamed, rule string, shown bool, meta twinMeta, thr writetwin.Threshold, guard string) {
+// twinLookup describes the lookup a flag came from, for the log line.
+type twinLookup struct {
+	considered int    // ring entries compared (0 after a restart ≠ "no twins")
+	ring       string // warming | warm
+}
+
+func (e *Engine) logTwinFlag(ws [8]byte, newID storage.ULID, newCreated time.Time, n twinNamed, rule string, shown bool, meta twinMeta, thr writetwin.Threshold, guard string, lk twinLookup) {
+	t := e.twin
+	key := twinPairKey{newID: newID, headID: n.head.ID, rule: rule, shown: shown}
+	now := t.now()
+	t.mu.Lock()
+	if at, dup := t.logged[key]; dup && now.Sub(at) <= writetwin.Window {
+		t.mu.Unlock()
+		return // the same pair, already logged and counted
+	}
+	pruneTimeMap(t.logged, now)
+	t.logged[key] = now
+	t.mu.Unlock()
 	metrics.WriteTwinFlaggedTotal.WithLabelValues(rule, fmt.Sprint(shown)).Inc()
 	slog.Info(writetwin.FlagLogMsg,
 		"vault_ws", writetwin.HexWS(ws),
@@ -662,6 +732,8 @@ func (e *Engine) logTwinFlag(ws [8]byte, newID storage.ULID, newCreated time.Tim
 		"threshold", thr.Value,
 		"threshold_source", thr.Source,
 		"guard", guard,
+		"considered", lk.considered,
+		"ring", lk.ring,
 	)
 }
 
@@ -694,18 +766,21 @@ func (e *Engine) processTwinJob(job twinJob) {
 	newID := storage.ULID(job.entry.ID)
 	named := map[storage.ULID]bool{}
 	flagged := false
+	ringState := t.ringState()
 
 	if job.entry.BatchID != 0 {
-		m, _ := t.ring.Scan(job.ws, job.entry, thr.Value, writetwin.SelectBatch)
+		m, considered := t.ring.Scan(job.ws, job.entry, thr.Value, writetwin.SelectBatch)
+		lk := twinLookup{considered: considered, ring: ringState}
 		for _, n := range e.twinHeadsFor(ctx, job.ws, newID, m, writetwin.MaxShown, named) {
-			e.logTwinFlag(job.ws, newID, job.entry.CreatedAt, n, "batch", false, job.meta, thr, guard)
+			e.logTwinFlag(job.ws, newID, job.entry.CreatedAt, n, "batch", false, job.meta, thr, guard, lk)
 			flagged = true
 		}
 	}
+	recent, considered := t.ring.Scan(job.ws, job.entry, thr.Value, writetwin.SelectRecent)
+	lk := twinLookup{considered: considered, ring: ringState}
 	if !job.inlineOwned {
-		m, _ := t.ring.Scan(job.ws, job.entry, thr.Value, writetwin.SelectRecent)
-		for _, n := range e.twinHeadsFor(ctx, job.ws, newID, m, writetwin.MaxShown, named) {
-			e.logTwinFlag(job.ws, newID, job.entry.CreatedAt, n, "recent", false, job.meta, thr, guard)
+		for _, n := range e.twinHeadsFor(ctx, job.ws, newID, recent, writetwin.MaxShown, named) {
+			e.logTwinFlag(job.ws, newID, job.entry.CreatedAt, n, "recent", false, job.meta, thr, guard, lk)
 			flagged = true
 		}
 	}
@@ -723,7 +798,7 @@ func (e *Engine) processTwinJob(job twinJob) {
 				if !n.head.CreatedAt.Before(cutoff) {
 					continue // recent: the ring rule's business, not historic
 				}
-				e.logTwinFlag(job.ws, newID, job.entry.CreatedAt, n, "historic", false, job.meta, thr, guard)
+				e.logTwinFlag(job.ws, newID, job.entry.CreatedAt, n, "historic", false, job.meta, thr, guard, lk)
 				flagged = true
 			}
 		}
@@ -896,7 +971,12 @@ func (e *Engine) WriteTwinInline(ctx context.Context, vault, newID string, rende
 		shown = render(base)
 	}
 	for i, n := range named {
-		e.logTwinFlag(ws, id, entry.CreatedAt, n, "recent", i < shown, meta, thr, guard)
+		e.logTwinFlag(ws, id, entry.CreatedAt, n, "recent", i < shown, meta, thr, guard, twinLookup{considered: considered, ring: t.ringState()})
+	}
+	if len(named) == 0 && t.ringState() == "warming" {
+		// Within the first window after a restart, "no twin" may only mean
+		// the earlier write predates this process: say so, never imply none.
+		return unavailable(twinRingWarming, base)
 	}
 	outcome := "none"
 	if len(named) > 0 {

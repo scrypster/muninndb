@@ -67,6 +67,10 @@ func newTwinEnv(t *testing.T, mode writetwin.Mode, model string) *twinTestEnv {
 	eng := NewEngine(EngineConfig{Store: store, AuthStore: as, FTSIndex: ftsIdx, ActivationEngine: act,
 		TriggerSystem: trig, Embedder: emb, HNSWRegistry: reg, EmbedModelName: model, WriteTwinMode: mode})
 	t.Cleanup(func() { eng.Stop(); store.Close() })
+	if eng.twin != nil {
+		// Past the ring's warm-up window unless a test says otherwise.
+		eng.twin.started = time.Now().Add(-2 * writetwin.Window)
+	}
 	return &twinTestEnv{t: t, eng: eng, store: store, as: as, reg: reg, emb: emb}
 }
 
@@ -556,7 +560,8 @@ func TestWriteTwin_NoContentOrVaultNameInLabelsOrLog(t *testing.T) {
 		"rule":    {"recent": true, "batch": true, "historic": true},
 		"shown":   {"true": true, "false": true},
 		"reason": {twinEmbedderBusy: true, twinEmbedTimeout: true, twinNoModelHint: true, twinNoEmbedder: true,
-			twinCalibrating: true, twinInternalError: true, writetwin.GuardColdStart: true, writetwin.GuardTooHomogeneous: true},
+			twinCalibrating: true, twinInternalError: true, twinRingWarming: true, writetwin.GuardColdStart: true, writetwin.GuardTooHomogeneous: true,
+			"age": true, "vault_cap": true, "total_cap": true},
 	}
 	mfs, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
@@ -648,5 +653,151 @@ func TestWriteTwin_ShownLogMatchesRender(t *testing.T) {
 	}
 	if !shownA || shownB {
 		t.Fatalf("log must say a shown and never b (shownA=%v shownB=%v): %v", shownA, shownB, lc.lines(writetwin.FlagLogMsg))
+	}
+}
+
+// TestWriteTwin_EvolveNeverFlagsItself: an evolved successor sits next to its
+// predecessor in the ring; the predecessor's head IS the new memory, which must
+// never be named as its own twin.
+func TestWriteTwin_EvolveNeverFlagsItself(t *testing.T) {
+	env := newTwinEnv(t, writetwin.Shadow, "bge-small-en-v1.5")
+	lc := captureLogs(t)
+	base := twinUnit(90)
+	a := env.write("layout", "throttle", "the yard throttle is a walkaround cab on loconet")
+	env.embed("layout", a, base)
+	w, err := env.eng.Evolve(context.Background(), "layout", a.String(), "the yard throttle is a wireless walkaround cab on loconet", "upgraded", nil, "throttle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.embed("layout", w, twinAt(base, 0.98, 91))
+	env.eng.WaitWriteTimeIdle()
+	for _, l := range lc.lines(writetwin.FlagLogMsg) {
+		if strings.Contains(l, "new_id="+w.String()) && strings.Contains(l, "head_id="+w.String()) {
+			t.Fatalf("an evolve was logged as its own twin: %s", l)
+		}
+	}
+}
+
+// TestWriteTwin_BacklogEmbedsAreNotWrites: engrams this process did not see
+// written, created hours ago (a re-embed, a first embedder, an import), never
+// enter the ring and never produce flags.
+func TestWriteTwin_BacklogEmbedsAreNotWrites(t *testing.T) {
+	env := newTwinEnv(t, writetwin.Shadow, "bge-small-en-v1.5")
+	lc := captureLogs(t)
+	old := time.Now().Add(-3 * time.Hour)
+	var ids []storage.ULID
+	for _, c := range []string{"the coal stage is scratch-built", "coal stage: scratch-built from card"} {
+		r, err := env.eng.Write(context.Background(), &mbp.WriteRequest{Vault: "layout", Concept: "coal stage", Content: c, CreatedAt: &old})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := storage.ParseULID(r.ID)
+		ids = append(ids, id)
+	}
+	// Simulate a later process: it never noted these writes.
+	env.eng.twin.mu.Lock()
+	env.eng.twin.meta = map[[16]byte]twinMeta{}
+	env.eng.twin.mu.Unlock()
+	env.embed("layout", ids[0], twinUnit(95))
+	env.embed("layout", ids[1], twinAt(twinUnit(95), 0.99, 96))
+	env.eng.WaitWriteTimeIdle()
+	if n := env.eng.twin.ring.Len(env.store.ResolveVaultPrefix("layout")); n != 0 {
+		t.Fatalf("backlog embeds entered the ring: %d entries", n)
+	}
+	if l := lc.lines(writetwin.FlagLogMsg); len(l) != 0 {
+		t.Fatalf("backlog embeds were flagged: %v", l)
+	}
+}
+
+// TestWriteTwin_StaleJobAfterClearIsDropped: a shadow job queued before a
+// vault clear must not compare its pre-clear vector with the rebuilt vault.
+func TestWriteTwin_StaleJobAfterClearIsDropped(t *testing.T) {
+	env := newTwinEnv(t, writetwin.Shadow, "bge-small-en-v1.5")
+	lc := captureLogs(t)
+	ws := env.store.ResolveVaultPrefix("layout")
+	b := env.write("layout", "fiddle yard", "the fiddle yard has six roads")
+	a := env.write("layout", "fiddle yard", "the fiddle yard holds six roads of stock")
+	ea, _ := env.store.GetEngram(storage.ContextWithNoAccessCacheStamp(context.Background()), ws, a)
+	env.eng.twin.mu.Lock()
+	stale := twinJob{ws: ws, entry: writetwin.Entry{ID: a, Vec: twinAt(twinUnit(97), 0.99, 98), CreatedAt: ea.CreatedAt}, gen: env.eng.twin.gens[ws]}
+	env.eng.twin.mu.Unlock()
+	env.eng.resetTwinVault(ws)           // the clear
+	env.embed("layout", b, twinUnit(97)) // post-clear content
+	env.eng.WaitWriteTimeIdle()
+	env.eng.processTwinJob(stale)
+	if l := lc.lines(writetwin.FlagLogMsg); len(l) != 0 {
+		t.Fatalf("a job from before the clear was processed against the rebuilt vault: %v", l)
+	}
+}
+
+// TestWriteTwin_ReembedDoesNotRelogAPair: a re-embed within the hour must not
+// re-admit engrams already seen, nor log or count the same pair twice.
+func TestWriteTwin_ReembedDoesNotRelogAPair(t *testing.T) {
+	env := newTwinEnv(t, writetwin.Shadow, "bge-small-en-v1.5")
+	lc := captureLogs(t)
+	ws := env.store.ResolveVaultPrefix("layout")
+	a := env.write("layout", "platform", "the platform edge is 3mm cork")
+	b := env.write("layout", "platform", "platform edge: 3mm cork strip")
+	embedBoth := func() {
+		env.embed("layout", a, twinUnit(99))
+		env.embed("layout", b, twinAt(twinUnit(99), 0.98, 100))
+		env.eng.WaitWriteTimeIdle()
+	}
+	embedBoth()
+	env.eng.resetTwinVault(ws) // what a vault re-embed does
+	embedBoth()
+	if n := env.eng.twin.ring.Len(ws); n != 0 {
+		t.Fatalf("a re-embed re-admitted %d already-seen engrams", n)
+	}
+	if l := lc.lines(writetwin.FlagLogMsg); len(l) != 1 {
+		t.Fatalf("want the pair logged exactly once, got %d: %v", len(l), l)
+	}
+}
+
+// TestWriteTwin_LogsConsideredAndRingState: the flag line says how many ring
+// entries were compared and whether the ring is still warming after a start.
+func TestWriteTwin_LogsConsideredAndRingState(t *testing.T) {
+	env := newTwinEnv(t, writetwin.Shadow, "bge-small-en-v1.5")
+	env.eng.twin.started = time.Now() // a fresh process
+	lc := captureLogs(t)
+	a := env.write("layout", "goods yard", "the goods yard crane is a working kit")
+	env.embed("layout", a, twinUnit(110))
+	b := env.write("layout", "goods yard", "goods yard: working crane kit")
+	env.embed("layout", b, twinAt(twinUnit(110), 0.98, 111))
+	env.eng.WaitWriteTimeIdle()
+	l := lc.lines(writetwin.FlagLogMsg)
+	if len(l) != 1 || !strings.Contains(l[0], "considered=1") || !strings.Contains(l[0], "ring=warming") {
+		t.Fatalf("flag line must carry considered and ring state: %v", l)
+	}
+}
+
+// TestWriteTwin_InlineSaysRingWarmingInsteadOfNone: within the first window
+// after a start, an inline check that found nothing must not look like "no
+// twin exists".
+func TestWriteTwin_InlineSaysRingWarmingInsteadOfNone(t *testing.T) {
+	env := inlineReady(t, "layout")
+	env.eng.twin.started = time.Now()
+	w := env.write("layout", "helix", "the helix climbs two percent per turn")
+	env.embed("layout", w, twinUnit(120))
+	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String(), nil)
+	if res == nil || res.Unavailable != twinRingWarming {
+		t.Fatalf("want ring_warming, got %+v", res)
+	}
+}
+
+// TestWriteTwin_DroppedJobsWarnRateLimited: a full shadow queue WARNs, at most
+// once a minute, besides the metric.
+func TestWriteTwin_DroppedJobsWarnRateLimited(t *testing.T) {
+	lc := captureLogs(t)
+	tw := newWriteTwin(writetwin.Shadow) // no worker: the queue fills and stays full
+	clock := time.Unix(1_800_000_000, 0)
+	tw.now = func() time.Time { return clock }
+	for i := 0; i < twinQueueSize+10; i++ {
+		tw.enqueue(twinJob{})
+	}
+	clock = clock.Add(2 * time.Minute)
+	tw.enqueue(twinJob{})
+	if l := lc.lines("shadow queue full"); len(l) != 2 {
+		t.Fatalf("want one WARN per minute of drops (2), got %d: %v", len(l), l)
 	}
 }
