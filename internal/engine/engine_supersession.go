@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
-	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -263,11 +262,11 @@ func (e *Engine) applySupersessionWithGate(ctx context.Context, ws [8]byte, resu
 
 	// Deterministic order: stable sort with a ULID tiebreak so the manufactured
 	// head−ε ties (and the MaxResults truncation boundary) are reproducible.
+	// The shared comparator (COG-35): under content-first order an exact tie
+	// is broken by association evidence before the newest-first rule.
+	contentFirst := activation.ContentFirstOrder(req.Weights)
 	sort.SliceStable(results, func(i, j int) bool {
-		if results[i].Score != results[j].Score {
-			return results[i].Score > results[j].Score
-		}
-		return rankorder.Before(results[i].Engram.ID, results[j].Engram.ID)
+		return activation.ResultBefore(&results[i], &results[j], contentFirst)
 	})
 	return results, injected
 }

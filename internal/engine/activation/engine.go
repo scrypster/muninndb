@@ -206,10 +206,13 @@ type ScoreComponents struct {
 	DecayFactor     float64
 	HebbianBoost    float64
 	TransitionBoost float64
-	// EntityBoost is the post-pipeline spread-activation adjustment added by
-	// the entity boost phase (rarity-weighted, capped). Zero when the result
-	// received no entity boost; for engrams injected by that phase it equals
-	// the full Score (issue #569).
+	// EntityBoost is the post-pipeline spread-activation evidence from the
+	// entity boost phase (rarity-weighted, capped). Zero when the result shares
+	// no rare entity with a seed. Under content-first order (COG-35) it is an
+	// ANNOTATION — evidence that the row is associated with the matches — and
+	// changes neither Score nor order except to break an exact content tie; an
+	// injected row's Score is 0. On rrf/weighted_sum/CGDN it is still added to
+	// Score, and an injected row's Score equals it (issue #569).
 	EntityBoost     float64
 	AccessFrequency float64
 	Recency         float64
@@ -218,8 +221,23 @@ type ScoreComponents struct {
 	Final           float64
 }
 
+// AssocEntity is one rare named entity an entity-boost INJECTED row shares
+// with injecting seeds — the evidence the COG-35 `associated` channel names.
+// Weight is that entity's rarity-weighted contribution; Seeds are the seeds
+// carrying it, in rank order.
+type AssocEntity struct {
+	Name   string
+	Weight float64
+	Seeds  []storage.ULID
+}
+
 // ScoredEngram is one activation result.
 type ScoredEngram struct {
+	// AssocEntities is set only on a row the entity boost INJECTED (it
+	// matched nothing itself): the shared entities and the seeds they came
+	// through, so the engine can say WHY the row is associated.
+	AssocEntities []AssocEntity
+
 	Engram      *storage.Engram
 	Score       float64
 	Components  ScoreComponents
@@ -353,6 +371,19 @@ type ActivateRequest struct {
 	// CandidatesPerIndex overrides the per-index candidate pool size for phase2.
 	// Zero means fall back to 30.
 	CandidatesPerIndex int
+	// DeferTruncation asks phase 6 to return EVERY row that cleared the gate
+	// instead of cutting at MaxResults, because the caller cuts once, after its
+	// own post-pipeline phases (internal/engine.activateCore). Honoured only on
+	// a content-first response (COG-35): there a row's rank is a function of
+	// its own content score, so the first N rows are the same whatever the cut
+	// — but only if nothing downstream ever sees a list that was cut at
+	// `limit` first. Before COG-35 phase 6 cut at `limit` and the entity boost
+	// then lifted rows from inside that cut only, so a row past the cut was
+	// re-entered as a content-less injection or not at all, and the first ten
+	// rows of limit=100 differed from limit=10. rrf / weighted_sum / CGDN keep
+	// the phase-6 cut (their boosted order is unchanged, deliberately). The
+	// activation log still records only the first MaxResults rows.
+	DeferTruncation bool
 	// HebbianEnabled gates the PHASE 4 read-side Hebbian boost, symmetrically
 	// with the way PASEnabled gates phase 4.5 (COG-32). Set by the engine from
 	// the vault's resolved PlasticityConfig, which already gates Hebbian
@@ -925,9 +956,24 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	// The drainer extracts ids/scores off the critical path.
 	// Non-blocking: drops if channel full (Hebbian recencyTau=3600s, 1ms lag is negligible).
 	if !req.ReadOnly && len(result.Activations) > 0 {
+		// The log records what phase 6 would have RETURNED: under
+		// DeferTruncation the result carries every gated row, and logging all
+		// of them would widen what the Hebbian and PAS read sides treat as
+		// "recently activated" by a factor of the pool size.
+		//
+		// A COPY, not a sub-slice: the engine's post-pipeline phases re-sort
+		// result.Activations IN PLACE (entity boost, currency) while the async
+		// drainer may still be reading what it was handed. Before deferral that
+		// sharing already existed for the entity boost's in-place sort; with
+		// the whole gated list in one array it would be every recall's shape.
+		n := len(result.Activations)
+		if n > req.MaxResults {
+			n = req.MaxResults
+		}
+		logged := append(make([]ScoredEngram, 0, n), result.Activations[:n]...)
 		e.logWG.Add(1) // Add FIRST — visible to WaitLogIdle() (test-only); undone below on drop
 		select {
-		case e.logCh <- logItem{vaultID: req.VaultID, activations: result.Activations}:
+		case e.logCh <- logItem{vaultID: req.VaultID, activations: logged}:
 			// Yield to allow the drainer goroutine to process immediately.
 			// Cost: ~1-5ns (no syscall). Ensures test consistency and reduces
 			// drainer queue depth in production under bursty load.
@@ -2030,6 +2076,9 @@ func (e *ActivationEngine) phase6Score(
 ) (*ActivateResult, error) {
 
 	w := resolveWeights(req.Weights, e.weights)
+	// COG-35: on the ACT-R path rows are ordered by their absolute content
+	// score and association evidence only breaks exact ties (content_first.go).
+	contentFirst := ContentFirstOrder(req.Weights)
 
 	// semanticDegraded accumulates any semantic-signal failure discovered
 	// during scoring (post-load cosine fallback read errors), OR'd with
@@ -2348,10 +2397,21 @@ func (e *ActivationEngine) phase6Score(
 	// the same rule the candidate cuts upstream used, so no layer can hide
 	// what a later one would have ranked first). A total order on distinct
 	// ids, so the result is independent of input order (#698).
+	//
+	// Under content-first order (COG-35, ACT-R only) `final` IS the absolute
+	// content score, and an exact tie is broken by association evidence
+	// before the newest-first rule — the same keys as ResultBefore, which the
+	// engine's post-pipeline re-sorts use.
 	sortScored := func(items []scoredItem) {
 		sort.Slice(items, func(i, j int) bool {
 			if items[i].final != items[j].final {
 				return items[i].final > items[j].final
+			}
+			if contentFirst {
+				ei, ej := AssociationEvidence(items[i].components), AssociationEvidence(items[j].components)
+				if ei != ej {
+					return ei > ej
+				}
 			}
 			return rankorder.Before(items[i].id, items[j].id)
 		})
@@ -2722,6 +2782,15 @@ func (e *ActivationEngine) phase6Score(
 			if absolute < req.Threshold && !cc.inTagPool {
 				continue
 			}
+			// COG-35: under content-first order the score that orders the
+			// rows IS the absolute content score. Raw keeps the boosted,
+			// per-query-rescaled activation for the record (it is what the
+			// Hebbian/PAS prior did to this row), but it no longer orders
+			// anything: association evidence is reported in HebbianBoost /
+			// TransitionBoost and breaks only exact ties (sortScored).
+			if contentFirst {
+				final = absolute
+			}
 			cc.components.Raw = raw
 			cc.components.Final = final
 			scored = append(scored, scoredItem{id: cc.id, final: final, components: cc.components, hopPath: cc.hopPath,
@@ -2745,6 +2814,11 @@ func (e *ActivationEngine) phase6Score(
 			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
 			raw := math.Min(comp.Raw*scale, 1.0)
 			final := raw * comp.Confidence
+			if contentFirst {
+				// COG-35: an injected head lands at its predecessor's
+				// CONTENT score, on the same scale as every other row.
+				final = absolute
+			}
 			comp.AbsoluteScore = absolute
 			comp.Raw = raw
 			comp.Final = final
@@ -2794,7 +2868,9 @@ func (e *ActivationEngine) phase6Score(
 
 cgdnDone:
 	totalFound := len(scored)
-	if len(scored) > req.MaxResults {
+	// COG-35: a content-first caller that cuts after its own post-pipeline
+	// phases gets every gated row (see ActivateRequest.DeferTruncation).
+	if len(scored) > req.MaxResults && !(req.DeferTruncation && contentFirst) {
 		scored = scored[:req.MaxResults]
 	}
 
@@ -2838,7 +2914,7 @@ cgdnDone:
 		}
 		var why string
 		if req.IncludeWhy {
-			why = buildWhy(eng, s.components, s.hopPath, hopConcepts, p1.queryStr, w.UseACTR)
+			why = buildWhyOrdered(eng, s.components, s.hopPath, hopConcepts, p1.queryStr, w.UseACTR, contentFirst)
 		}
 		activations = append(activations, ScoredEngram{
 			Engram:      eng,
@@ -3499,6 +3575,14 @@ func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {
 }
 
 func buildWhy(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, hopConcepts []string, queryStr string, useACTR bool) string {
+	return buildWhyOrdered(eng, c, hopPath, hopConcepts, queryStr, useACTR, false)
+}
+
+// buildWhyOrdered is buildWhy aware of COG-35. Under content-first order an
+// association signal is never named as the reason a row RANKED (it did not
+// move it); it is stated as what it is — evidence the row is associated with
+// recently activated memories.
+func buildWhyOrdered(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, hopConcepts []string, queryStr string, useACTR, contentFirst bool) string {
 	var parts []string
 
 	// Candidate dominant signals, in a FIXED order so a tie resolves the
@@ -3514,7 +3598,9 @@ func buildWhy(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, ho
 	if !useACTR {
 		signals = append(signals, signal{"decay", c.DecayFactor})
 	}
-	signals = append(signals, signal{"hebbian", c.HebbianBoost})
+	if !contentFirst {
+		signals = append(signals, signal{"hebbian", c.HebbianBoost})
+	}
 	best := ""
 	bestVal := 0.0
 	for _, sg := range signals {
@@ -3537,6 +3623,10 @@ func buildWhy(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, ho
 		parts = append(parts, "frequently accessed recently, high decay relevance")
 	case "hebbian":
 		parts = append(parts, "strongly associated with recently activated engrams")
+	}
+
+	if contentFirst && (c.HebbianBoost > 0 || c.TransitionBoost > 0) {
+		parts = append(parts, "associated with recently activated memories (association evidence; does not change order)")
 	}
 
 	if len(hopPath) > 1 {

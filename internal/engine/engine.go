@@ -3021,6 +3021,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	if actReq.MaxResults == 0 {
 		actReq.MaxResults = 20
 	}
+	// COG-35: cut to MaxResults ONCE, at the end of this function, after every
+	// post-pipeline phase. Phase 6 honours this only on a content-first
+	// (ACT-R) response; rrf / weighted_sum / CGDN keep the phase-6 cut, so
+	// their responses are byte-for-byte the trunk's.
+	actReq.DeferTruncation = true
 	// Fix 4: Observe mode is a pure read — skip activation log side effects.
 	// S3: an explicit req.ReadOnly (already the effective value computed by the
 	// MCP/REST/gRPC handler — credential-observe OR request read_only) also
@@ -3132,7 +3137,24 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	preBoost := len(result.Activations)
 	seedPolicy := entitySeedPolicyFor(result.Activations, result.Calibration,
 		cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR), result.SemanticDegraded)
-	result.Activations = e.applyEntityBoostSeeded(ctx, wsPrefix, vaultSize, result.Activations, actReq, seedPolicy)
+	// Explain's diagnostic activation (explainTargetFrom) scores every
+	// candidate (threshold -1) to find ONE memory's card. Its entity boost
+	// seeds and injects exactly as a DEFAULT recall does — under threshold -1
+	// the injection rule admitted every memory sharing any seed entity (a
+	// point read and a lease read each: the measured cost of explain on a
+	// 12,000-memory vault). The supersession and contradiction windows below
+	// are likewise bounded to the default recall's.
+	explainTarget, diagnostic := explainTargetFrom(ctx)
+	boostReq, windowReq := actReq, actReq
+	if diagnostic {
+		b := *actReq
+		b.Threshold = cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR)
+		boostReq = &b
+		w := *actReq
+		w.MaxResults = explainRecallLimit
+		windowReq = &w
+	}
+	result.Activations = e.applyEntityBoostSeeded(ctx, wsPrefix, vaultSize, result.Activations, boostReq, seedPolicy)
 	// Injected engrams count as found: on the boost path, total <
 	// len(activations) was the #569 bypass fingerprint. Known imprecision, for
 	// BOTH injectors here and below (scoped follow-up, PR #570 review): an
@@ -3171,7 +3193,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	result.TotalFound += subInjected
 
 	var supInjected int
-	result.Activations, supInjected = e.applySupersessionWithGate(ctx, wsPrefix, result.Activations, actReq, injectorGate, nameableCache)
+	result.Activations, supInjected = e.applySupersessionWithGate(ctx, wsPrefix, result.Activations, windowReq, injectorGate, nameableCache)
 	result.TotalFound += supInjected
 
 	// Final valid-time gate (COG-19: default recall never returns an engram whose
@@ -3207,7 +3229,14 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// first. An explicit RelSupersedes on a pair always wins and suppresses the
 	// heuristic for that pair (COG-25). Runs after the validity gate and before
 	// final truncation so it sees exactly the survivor set truncation will cut.
-	result.Activations = e.applyCurrencyAnnotation(ctx, wsPrefix, result.Activations, vaultSize, actReq.MaxResults)
+	// Skipped for explain's diagnostic activation: COG-25 changes no score
+	// (annotations and in-cluster tie order only), and its pairwise
+	// similarity pass over explain's whole candidate list was the measured
+	// cost of explain (~800 ms against a ~3 ms recall on 2,000 memories).
+	if !diagnostic {
+		result.Activations = e.applyCurrencyAnnotationOrdered(ctx, wsPrefix, result.Activations, vaultSize, actReq.MaxResults,
+			activation.ContentFirstOrder(actReq.Weights))
+	}
 
 	// COG-29 contradiction honesty (#764). Runs LAST of the post-pipeline
 	// phases and before truncation: after the COG-19 gate so a side already
@@ -3217,24 +3246,25 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// pair IS the resolution, after currency because COG-25 may reorder exact
 	// ties and this phase's ordering must be the last word, and before
 	// truncation so the adjacency guarantee holds.
-	var conflictKeep int
 	var conflictBlock *mbp.ConflictBlock
-	result.Activations, conflictBlock, conflictKeep = e.applyContradictionHonesty(
-		ctx, wsPrefix, result.Activations, actReq, injectorGate, gateNow)
+	result.Activations, conflictBlock = e.applyContradictionHonesty(
+		ctx, wsPrefix, result.Activations, windowReq, injectorGate, gateNow)
 
 	// Re-apply MaxResults: entity boost / supersession / the validity gate may have
 	// changed the set. All re-sort or preserve score order, so truncation keeps top-K.
-	// COG-29 may raise the cut by up to contradictionMaxCluster-1 so a conflict
-	// cluster is never returned half-truncated; the overflow is reported in the
-	// conflict block rather than applied silently.
-	truncateAt := actReq.MaxResults
-	if conflictKeep > truncateAt {
-		truncateAt = conflictKeep
+	// On a content-first response (COG-35) this is the ONLY cut: phase 6 handed
+	// over every gated row (DeferTruncation), so the first N rows here do not
+	// depend on MaxResults — every phase above saw the same list whatever the
+	// limit, and none of them moves a matched row past a better content score.
+	// COG-29 overflow: a returned row's disputing partner may follow the cut —
+	// only that partner, at most min(limit, 3) extra rows, reported in the
+	// conflict block (applyContradictionCut).
+	var overflow int
+	uncut := result.Activations // the associated channel selects from rows that missed the cut
+	result.Activations, overflow = applyContradictionCut(result.Activations, actReq.MaxResults)
+	if conflictBlock != nil {
+		conflictBlock.AdjacencyOverflow = overflow
 	}
-	if truncateAt > 0 && len(result.Activations) > truncateAt {
-		result.Activations = result.Activations[:truncateAt]
-	}
-
 	// A conflict cluster that fell entirely outside the caller's cut must not
 	// be reported: the block describes what the caller RECEIVED. Prune to the
 	// pairs with a surviving endpoint, and drop the block when none remain.
@@ -3297,6 +3327,32 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		conflictBlock = nil
 		result.Abstained = true
 		result.AbstainedReason = activation.AbstainWeakOnly
+	}
+
+	// COG-35 associated channel: association-only rows that missed the cut,
+	// in a separate bounded block (engine_associated.go). Content-first
+	// responses only — rrf/weighted_sum/CGDN still let injected rows compete
+	// for `memories` by score, exactly as before. Runs after weak_only: with
+	// no returned row there is no seed to be associated with.
+	var associated []mbp.AssociatedItem
+	var associatedIDs []storage.ULID
+	if diagnostic {
+		// Explain reads one row: hydrate only that one (items, provenance,
+		// bands, brief all scale with the rows that reach this point).
+		for i := range result.Activations {
+			if result.Activations[i].Engram.ID == explainTarget {
+				result.Activations = result.Activations[i : i+1]
+				break
+			}
+		}
+		if len(result.Activations) > 0 && result.Activations[0].Engram.ID != explainTarget {
+			result.Activations = result.Activations[:0]
+		}
+		relevanceBands, relevanceBases = applyRelevanceBands(result.Activations, result.Calibration,
+			cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR), result.SemanticDegraded)
+	}
+	if !diagnostic && !req.ExcludeAssociated && activation.ContentFirstOrder(actReq.Weights) {
+		associated, associatedIDs = buildAssociated(uncut, result.Activations)
 	}
 
 	// The stored Ebbinghaus `relevance` is a decay number recall scoring
@@ -3471,6 +3527,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	for _, sc := range result.Activations {
 		servedRows = append(servedRows, [16]byte(sc.Engram.ID))
 	}
+	// Associated items are SERVED too, ranked after every matched row, so a
+	// label for one is a verified member (normal and read-only ids alike).
+	for _, id := range associatedIDs {
+		servedRows = append(servedRows, [16]byte(id))
+	}
 	queryID := e.mintRecallQueryID(req.Vault, eventID, actReq.ReadOnly, recallCred, recallSess, servedRows)
 	if len(items) > 0 && !actReq.ReadOnly {
 		entries := make([]storage.RecallSurfacedEntry, len(items))
@@ -3487,6 +3548,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 				entry.Prior = float32(sc.Components.Raw / sc.Components.ContentMatch)
 			}
 			entries[i] = entry
+		}
+		for _, id := range associatedIDs {
+			entries = append(entries, storage.RecallSurfacedEntry{
+				ID:     id.String(),
+				Source: storage.RecallSourceAssociated | storage.RecallSourceEntityBoost,
+			})
 		}
 		ev := &storage.RecallEvent{
 			Context:    req.Context,
@@ -3607,7 +3674,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	if briefMode == "" {
 		briefMode = "auto"
 	}
-	if briefMode == "extractive" || briefMode == "auto" {
+	if !diagnostic && (briefMode == "extractive" || briefMode == "auto") {
 		// Try embedding-based brief if available and we have context embedding
 		if briefMode == "auto" && e.embedder != nil && len(req.Embedding) > 0 {
 			// Embedding-based approach: score sentences by cosine similarity to context embedding
@@ -3655,6 +3722,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		AbstainedReason:        result.AbstainedReason,
 		WeakAvailable:          weakAvailable,
 		Conflict:               conflictBlock,
+		Associated:             associated,
 	}, nil
 }
 

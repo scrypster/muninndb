@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
-	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -103,7 +102,10 @@ func entityIDF(df, n int64) float64 {
 // auditable — injected results never appear with an empty component trace
 // (issue #569).
 //
-// Results are re-sorted by score descending.
+// Results are re-sorted by score descending (activation.ResultBefore). Under
+// content-first order (COG-35, the default ACT-R path) the boost does not
+// change any row's Score: it is reported in Components.EntityBoost, orders
+// injected rows (Score 0, after every scored row) and breaks exact ties.
 //
 // vaultSize is the recalled vault's engram count (activateCore already holds
 // it); it feeds entityIDF's n so rarity is judged against the vault being
@@ -204,6 +206,14 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 		seeds = append(seeds, r)
 	}
 
+	// Seeds in RANK order (the stable sort below reorders them injecting-first)
+	// and the rare entities each carries — the provenance an association-only
+	// row's `why` is built from (COG-35 associated channel).
+	seedsInRank := make([]storage.ULID, len(seeds))
+	for i, sd := range seeds {
+		seedsInRank[i] = sd.Engram.ID
+	}
+	seedEntities := make(map[storage.ULID]map[string]struct{}, len(seeds))
 	seedIDs := make(map[storage.ULID]struct{}, len(seeds))
 	for _, s := range seeds {
 		seedIDs[s.Engram.ID] = struct{}{}
@@ -215,6 +225,7 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 	type boostAcc struct {
 		total   float64
 		counted map[string]struct{} // entities already credited to this target
+		order   []string            // credited entities, in credit order
 		// injectable is the part of total contributed by seeds the policy
 		// lets inject; pass 2b compares THIS against the threshold.
 		injectable float64
@@ -244,6 +255,12 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 			if contribution < entityBoostNoiseFloor {
 				return nil // ubiquitous entity — no evidence; skip its fan-out
 			}
+			if seedInjects {
+				if seedEntities[seed.Engram.ID] == nil {
+					seedEntities[seed.Engram.ID] = make(map[string]struct{}, 2)
+				}
+				seedEntities[seed.Engram.ID][entityName] = struct{}{}
+			}
 			// Credit is once-per-entity per target, so a second seed carrying
 			// the same entity cannot change any accumulator — skip the rescan.
 			if _, done := scanned[entityName]; done {
@@ -267,6 +284,7 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 					return nil // this entity already credited to this target
 				}
 				acc.counted[entityName] = struct{}{}
+				acc.order = append(acc.order, entityName)
 				acc.total = math.Min(acc.total+contribution, entityBoostCap)
 				if seedInjects {
 					acc.injectable = math.Min(acc.injectable+contribution, entityBoostCap)
@@ -280,6 +298,13 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 		return results
 	}
 
+	// COG-35: under content-first order the boost is association EVIDENCE —
+	// recorded on the row, used to order rows with no content score and to
+	// break exact content ties, never added to the score that orders matched
+	// rows. rrf never reaches here; weighted_sum and CGDN keep the additive
+	// boost (their order is deliberately unchanged).
+	contentFirst := activation.ContentFirstOrder(req.Weights)
+
 	// Pass 2a: boost engrams already in the result set.
 	seenInResults := make(map[storage.ULID]int, len(results))
 	for i, r := range results {
@@ -287,10 +312,12 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 	}
 	for id, acc := range boosts {
 		if idx, found := seenInResults[id]; found {
-			results[idx].Score += acc.total
 			results[idx].Components.EntityBoost = acc.total
-			// Keep the reported Final consistent with the adjusted Score.
-			results[idx].Components.Final = results[idx].Score
+			if !contentFirst {
+				results[idx].Score += acc.total
+				// Keep the reported Final consistent with the adjusted Score.
+				results[idx].Components.Final = results[idx].Score
+			}
 			delete(boosts, id)
 		}
 	}
@@ -320,13 +347,33 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 		if !gate.Admits(ctx, e.store, ws, eng) {
 			continue
 		}
+		// Content-first: an injected row has NO content score, so its score
+		// is 0 and it sorts after every scored row, ordered among the other
+		// injections by its entity evidence (activation.ResultBefore).
+		score := acc.total
+		if contentFirst {
+			score = 0
+		}
+		var evidence []activation.AssocEntity
+		for _, name := range acc.order {
+			ae := activation.AssocEntity{Name: name, Weight: entityBoostFactor * idfCache[name]}
+			for _, sid := range seedsInRank {
+				if _, carries := seedEntities[sid][name]; carries {
+					ae.Seeds = append(ae.Seeds, sid)
+				}
+			}
+			if len(ae.Seeds) > 0 {
+				evidence = append(evidence, ae)
+			}
+		}
 		results = append(results, activation.ScoredEngram{
-			Engram: eng,
-			Score:  acc.total,
+			AssocEntities: evidence,
+			Engram:        eng,
+			Score:         score,
 			Components: activation.ScoreComponents{
 				EntityBoost: acc.total,
 				Confidence:  float64(eng.Confidence),
-				Final:       acc.total,
+				Final:       score,
 			},
 		})
 	}
@@ -337,10 +384,7 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 	// subset. Break ties newest-first (rankorder) so the output is independent of map order.
 	// Mirrors applySupersession's tiebreak (engine_supersession.go).
 	sort.SliceStable(results, func(i, j int) bool {
-		if results[i].Score != results[j].Score {
-			return results[i].Score > results[j].Score
-		}
-		return rankorder.Before(results[i].Engram.ID, results[j].Engram.ID)
+		return activation.ResultBefore(&results[i], &results[j], contentFirst)
 	})
 	return results
 }

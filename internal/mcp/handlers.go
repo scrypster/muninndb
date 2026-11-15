@@ -511,11 +511,18 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	}
 
 	includeWeak, _ := args["include_weak"].(bool)
+	// include_associated defaults to true: only an explicit false suppresses
+	// the response's associated block (COG-35).
+	excludeAssociated := false
+	if v, ok := args["include_associated"].(bool); ok && !v {
+		excludeAssociated = true
+	}
 	req := &mbp.ActivateRequest{
-		Vault:     vault,
-		Context:   contexts,
-		Mode:      mode,
-		Threshold: threshold,
+		ExcludeAssociated: excludeAssociated,
+		Vault:             vault,
+		Context:           contexts,
+		Mode:              mode,
+		Threshold:         threshold,
 		// weak_only abstention never overrides an explicit threshold — and
 		// the wire cannot tell an explicit 0 from "unset", so an explicit
 		// threshold argument (any value) opts out here.
@@ -686,6 +693,13 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	// TestRecallOverMCP_ConflictBlockAndAnnotations exists to catch.
 	if resp.Conflict != nil {
 		result["conflict"] = resp.Conflict
+	}
+	// COG-35 associated channel: association-only memories that did not make
+	// the cut, compact and bounded, NOT counted in `total` or against `limit`.
+	// Hand-built map again — a field added to mbp.ActivateResponse alone would
+	// vanish here (TestRecallOverMCP_AssociatedBlock). Absent when empty.
+	if len(resp.Associated) > 0 {
+		result["associated"] = resp.Associated
 	}
 	// COG-29 amendment: the vault-wide unresolved-contradiction debt readout,
 	// on mode="recent" ONLY. That condition is not a heuristic guess at "is this

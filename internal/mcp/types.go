@@ -93,7 +93,20 @@ type Memory struct {
 	// SemanticSimilarityRaw). Lets an operator see the raw signal for a match
 	// that a low VectorScore made look weak or that abstained entirely.
 	VectorScoreRaw float64 `json:"vector_score_raw,omitempty"`
-	EntityBoost    float64 `json:"entity_boost,omitempty"`
+	// EntityBoost / HebbianBoost / TransitionBoost are ASSOCIATION evidence,
+	// not match strength: a rare named entity shared with a top match, a
+	// learned co-activation edge to a recently recalled memory, and a
+	// predictive-activation transition from the last recall. Under the
+	// default (ACT-R) scoring they do not change the order except to break an
+	// exact content tie (COG-35) — with a real embedder matched rows practically
+	// never tie exactly (0 in 27,000 adjacent top-10 pairs measured), so there
+	// they do not change the order of matched rows; a row whose score is 0 was
+	// injected by that
+	// association, after every matched row. HebbianBoost and TransitionBoost
+	// were computed on every row and dropped here until COG-35.
+	EntityBoost     float64 `json:"entity_boost,omitempty"`
+	HebbianBoost    float64 `json:"hebbian_boost,omitempty"`
+	TransitionBoost float64 `json:"transition_boost,omitempty"`
 	// AbsoluteScore and ContentMatch are #773. Both already existed on
 	// activation.ScoreComponents and on the MBP/REST wire, and BOTH were
 	// structurally invisible to every MCP agent — reachable only inside
@@ -112,9 +125,11 @@ type Memory struct {
 	// strong | moderate | weak | filter_match | uncalibrated. Recall always
 	// sets it; muninn_read never does (this struct is shared, hence omitempty).
 	//
-	// Read it, NOT `score`: score is renormalized against this query's own best
-	// candidate, so the top row is near 1.0 on EVERY query, including one whose
-	// answer this vault does not contain. And NOT `confidence`: that is belief
+	// Read it, NOT `score` alone: on rrf/weighted_sum vaults score is relative
+	// to this query's own best candidate; on default (ACT-R) vaults it is the
+	// absolute content score that orders the rows (COG-35), but a number is
+	// not a judgement against this vault's noise floor — the band is. And NOT
+	// `confidence`: that is belief
 	// that the stored fact is TRUE (COG-10), not a measure of how well it
 	// matched. `relevance` below is a third thing again — the engram's stored
 	// decay/pruning strength.
@@ -512,7 +527,12 @@ type ExplainComponents struct {
 	SemanticSimilarityRaw *float64 `json:"semantic_similarity_raw"`
 	DecayFactor           *float64 `json:"decay_factor"`
 	HebbianBoost          *float64 `json:"hebbian_boost"`
-	AccessFrequency       *float64 `json:"access_frequency"`
+	// TransitionBoost / EntityBoost complete the row's ASSOCIATION evidence
+	// (COG-35): reported beside the score, they do not change recall order
+	// except to break an exact content tie on default-scoring vaults.
+	TransitionBoost *float64 `json:"transition_boost"`
+	EntityBoost     *float64 `json:"entity_boost"`
+	AccessFrequency *float64 `json:"access_frequency"`
 	// Confidence is the engram's STORED confidence. It does not depend on the
 	// query, so it is non-null whenever the engram exists — including when the
 	// query produced no score at all.

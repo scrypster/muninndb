@@ -433,6 +433,8 @@ func (w *RESTEngineWrapper) Explain(ctx context.Context, vault string, req *Expl
 			SemanticSimilarityRaw: float64(c.SemanticSimilarityRaw),
 			DecayFactor:           float64(c.DecayFactor),
 			HebbianBoost:          float64(c.HebbianBoost),
+			TransitionBoost:       float64(c.TransitionBoost),
+			EntityBoost:           float64(c.EntityBoost),
 			AccessFrequency:       float64(c.AccessFrequency),
 			Confidence:            data.Confidence,
 		},

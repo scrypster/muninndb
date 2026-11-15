@@ -6,7 +6,6 @@ import (
 	"sort"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
-	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -248,11 +247,9 @@ func (e *Engine) applyVersionHeadSubstitution(
 	// applySupersession, so an injected head that ties a returned row lands
 	// reproducibly. applySupersession re-sorts after this, but it returns early
 	// when no stale row is present — so this phase must leave the set ordered.
+	contentFirst := activation.ContentFirstOrder(req.Weights)
 	sort.SliceStable(results, func(i, j int) bool {
-		if results[i].Score != results[j].Score {
-			return results[i].Score > results[j].Score
-		}
-		return rankorder.Before(results[i].Engram.ID, results[j].Engram.ID)
+		return activation.ResultBefore(&results[i], &results[j], contentFirst)
 	})
 	return results, injected, blocked
 }

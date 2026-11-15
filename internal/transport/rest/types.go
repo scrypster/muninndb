@@ -362,8 +362,13 @@ type ExplainComponents struct {
 	SemanticSimilarityRaw float64 `json:"semantic_similarity_raw"`
 	DecayFactor           float64 `json:"decay_factor"`
 	HebbianBoost          float64 `json:"hebbian_boost"`
-	AccessFrequency       float64 `json:"access_frequency"`
-	Confidence            float64 `json:"confidence"`
+	// TransitionBoost / EntityBoost complete the association evidence
+	// (COG-35); they do not change recall order on default-scoring vaults
+	// except to break an exact content tie.
+	TransitionBoost float64 `json:"transition_boost"`
+	EntityBoost     float64 `json:"entity_boost"`
+	AccessFrequency float64 `json:"access_frequency"`
+	Confidence      float64 `json:"confidence"`
 }
 
 // ExplainResponse is returned by the explain endpoint.

@@ -329,6 +329,14 @@ components:
         max_results:
           type: integer
           default: 10
+          description: >-
+            Maximum rows returned. The first N rows do not depend on it on
+            default (ACT-R) vaults. The response can exceed it in exactly one
+            case: a returned memory with an unresolved declared contradiction
+            whose disputing partner did not make the cut brings that partner
+            along — only the partner, at most one per returned memory, never
+            chained, at most min(max_results, 3) extra rows, reported as
+            conflict.adjacency_overflow.
         max_hops:
           type: integer
           default: 0
@@ -337,6 +345,10 @@ components:
         read_only:
           type: boolean
           description: "When true, suppress reinforcement side effects (TouchAccess and implicit feedback) for this recall. Always effectively true for observe-mode credentials."
+        exclude_associated:
+          type: boolean
+          description: >-
+            Omit the response's associated block (default false: included).
         include_weak:
           type: boolean
           description: >-
@@ -405,11 +417,12 @@ components:
           type: number
           format: float
           description: >-
-            Raw BEFORE the per-query 1/maxRaw rescale, clamped to [0,1] and
-            multiplied by confidence. Unlike `score` it is not relative to this
-            query's candidate set, so 0.9 means the same thing on a good query
-            and a garbage one. This is the quantity the abstention gate compares
-            and the quantity relevance_band is derived from.
+            min(content_match, 1) multiplied by confidence — not relative to
+            this query's candidate set, so 0.9 means the same thing on a good
+            query and a garbage one. This is the quantity the abstention gate
+            compares and relevance_band is derived from, and on default (ACT-R)
+            vaults it is also `score`, the quantity that orders the results
+            (COG-35).
         decay_factor:
           type: number
           format: float
@@ -421,12 +434,38 @@ components:
         hebbian_boost:
           type: number
           format: float
+          description: >-
+            Learned co-activation with a recently recalled memory.
+            ASSOCIATION evidence, not match strength (COG-35). On default
+            (ACT-R) vaults it does not change the order of results except to
+            break an exact content tie (with a real embedder matched rows
+            practically never tie; ties occur on keyword-only vaults); a row whose score is 0 was injected
+            by association evidence and follows every matched row. On rrf and
+            weighted_sum vaults it still contributes to score.
         transition_boost:
           type: number
           format: float
+          description: >-
+            Predictive activation: how often this memory followed the
+            previous recall's results.
+            ASSOCIATION evidence, not match strength (COG-35). On default
+            (ACT-R) vaults it does not change the order of results except to
+            break an exact content tie (with a real embedder matched rows
+            practically never tie; ties occur on keyword-only vaults); a row whose score is 0 was injected
+            by association evidence and follows every matched row. On rrf and
+            weighted_sum vaults it still contributes to score.
         entity_boost:
           type: number
           format: float
+          description: >-
+            Rarity-weighted named entities shared with the top matches
+            (capped at 0.30).
+            ASSOCIATION evidence, not match strength (COG-35). On default
+            (ACT-R) vaults it does not change the order of results except to
+            break an exact content tie (with a real embedder matched rows
+            practically never tie; ties occur on keyword-only vaults); a row whose score is 0 was injected
+            by association evidence and follows every matched row. On rrf and
+            weighted_sum vaults it still contributes to score.
         access_frequency:
           type: number
           format: float
@@ -463,11 +502,21 @@ components:
           type: number
           format: float
           description: >-
-            RELATIVE to this query's own best candidate: the 1/maxRaw rescale
-            pins the argmax of ANY query near the top of the range, including a
-            query this vault cannot answer. It ORDERS results. Judge relevance
-            by relevance_band (or score_components.absolute_score), never by
-            this.
+            What ORDERS the results. On default (ACT-R) vaults it is the
+            absolute content score (content match x confidence), equal to
+            score_components.absolute_score except where a DECLARED
+            relationship moved it: an unresolved declared contradiction
+            demotes a row to 0.9x; a declared-supersession head takes its
+            chain's best score and the superseded row sits 0.01 below it; a
+            substituted version head carries its predecessor's score.
+            Association evidence is reported in hebbian_boost /
+            transition_boost / entity_boost and only breaks EXACT ties — with
+            a real embedder matched rows practically never tie (0 exact ties
+            in 27,000 adjacent top-10 pairs measured), so on embedder vaults it
+            does not change their order; ties occur on keyword-only vaults. A row injected by association has score 0 and follows
+            every matched row; the first N rows do not depend on max_results
+            (COG-35). On rrf and weighted_sum vaults it is RELATIVE to this
+            query's best candidate. Judge relevance by relevance_band.
         confidence:
           type: number
           format: float
@@ -687,8 +736,11 @@ components:
         adjacency_overflow:
           type: integer
           description: >-
-            How many rows beyond max_results this response carries in order to
-            keep a conflict cluster whole. Never applied silently.
+            How many rows beyond max_results this response carries: each is the
+            disputing partner of a returned memory that did not make the cut —
+            at most one per returned memory, never chained, at most
+            min(max_results, 3). A partner the cap kept out is still named on
+            the row (unresolved_contradiction.with, partner_in_results=false).
 
     ConflictPairInfo:
       type: object
@@ -820,6 +872,32 @@ components:
           description: >-
             Set only with abstained_reason weak_only: how many weak rows were
             withheld. Repeat the request with include_weak true to receive them.
+        associated:
+          type: array
+          description: >-
+            Default (ACT-R) vaults only (COG-35): memories that did NOT match
+            the query but are associated with a returned one (they share a
+            rare named entity with it) and did not make the cut. At most 3,
+            at most 600 bytes as JSON, not counted in total_found or against
+            max_results, never abstention-relevant. Absent when empty or when
+            exclude_associated is set.
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              concept:
+                type: string
+              why:
+                type: string
+                description: The evidence, e.g. shares entity "X" with returned <id>.
+              strength:
+                type: number
+                format: float
+                description: Association evidence (0..0.30), not a match score.
+              basis:
+                type: string
+                enum: [associated_not_matched]
         conflict:
           $ref: "#/components/schemas/ConflictBlock"
 
@@ -1207,6 +1285,18 @@ components:
         hebbian_boost:
           type: number
           format: double
+        transition_boost:
+          type: number
+          format: double
+        entity_boost:
+          type: number
+          format: double
+          description: >-
+            With hebbian_boost and transition_boost, the row's association
+            evidence. On default (ACT-R) vaults none of the three changes the
+            order of results except to break an exact content tie (COG-35) —
+            which, with a real embedder, practically never occurs between
+            matched rows; ties occur on keyword-only vaults.
         access_frequency:
           type: number
           format: double
@@ -1228,6 +1318,11 @@ components:
         final_score:
           type: number
           format: double
+          description: >-
+            The row's recall score for this query. On default (ACT-R) vaults
+            it is the absolute content score that orders recall (as declared
+            contradiction/supersession adjust it), and it equals the `score`
+            the same memory carries in a recall row (COG-35).
         components:
           $ref: "#/components/schemas/ExplainComponents"
         fts_matches:

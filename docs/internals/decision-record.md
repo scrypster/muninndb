@@ -2132,3 +2132,131 @@ printed with every report (undatable forgets, the ring cap, dequantized vectors)
   stated**: an exact retry returns the existing id with `duplicate_content` (content-hash
   dedup), as does a retry that changes only the concept. A retry whose content bytes differ
   (re-rendered punctuation, casing) stores a second memory. That is the residual.
+
+### Evidence of match orders; evidence of association annotates (COG-35, 2026-11-15)
+
+**What was wrong.** On the default ACT-R path the order of a recall was content
+match × confidence MULTIPLIED by the Hebbian/PAS prior (up to 3.24×) and then
+PLUS an entity boost of up to 0.30. Measured on a production install, read-only:
+150 questions written by a model as rewordings of 150 live memories' titles
+(median 20% of title words reused), three vaults, labels the ranker did not
+choose; recall at limit 100, rows re-ordered offline.
+
+- Engine order: right memory at rank 1 in 15/150, top 3 in 46, top 10 in 86;
+  MRR 0.238 (at the default limit of 10: 34 / 61 / 93, MRR 0.341).
+- Same rows by the absolute content score alone: rank 1 in 62, top 3 in 79,
+  top 10 in 101; MRR 0.495. Paired MRR difference +0.257, 95% CI
+  [+0.199, +0.318]. Same direction in all three vaults (rank 1: 35 vs 8,
+  14 vs 1, 13 vs 6).
+- Engine score with only the entity boost removed: rank 1 in 47, MRR 0.419 —
+  the Hebbian and PAS boosts cost rank too.
+- Content score plus a scaled entity boost: 0.05×–0.25× indistinguishable from
+  content-only (rank 1 = 62; top 3 = 81–83); 0.5× → rank 1 = 48; 1.0× → 24.
+  Content-first with the boost breaking ties inside a 0.005–0.05 window:
+  indistinguishable from content-only.
+- Why: on boosted top-10 rows the entity boost was 0.115 at the median (p90
+  0.247), while the content-score spread between rank 1 and rank 10 was 0.078 at
+  the median — the boost was larger than the whole top ten's spread. 858 of
+  1,410 top-10 rows carried one; the top row was the best content match in 23
+  of 141 queries.
+- The top ten also depended on `limit`: for 56 questions the first ten rows at
+  limit=100 equalled the rows at limit=10 in only 5 (same top row in 39).
+  Cause: phase 6 cut at `limit` BEFORE the entity boost, which could lift only
+  rows inside the cut; a row past it re-entered as a content-less injection.
+
+**Decision.** Order by the absolute content score; association evidence breaks
+exact ties and orders injected rows (which have score 0 and follow every scored
+row); the cut to `limit` happens once, after every post-pipeline phase. Learning
+is untouched: Hebbian edges, PAS transitions and entity links are recorded,
+read, reported per row and still inject associated rows. Plasticity switches
+keep their meaning for whether those mechanisms run. rrf / weighted_sum / CGDN
+are unchanged (their scores are not content scores; pinned by a differential
+against the trunk).
+
+**Why structural, not a tuned weight.** The evidence is one install, three
+vaults, model-written questions. No boost strength measured BETTER than none, so
+the defensible rule is the one that needs no constant: match evidence first.
+A small multiplier (0.05×–0.25×) measured the same as zero here and would be a
+number tuned on one install — principle #11 forbids shipping it.
+
+**What does change for callers** (also COG-35): weaker matches stop outranking
+stronger ones; for a query whose matched rows fill the limit, the returned rows
+are the top-N matches and nothing an association injected; score equals
+`absolute_score` on default vaults; COG-29's adjacency rule (both sides of a
+declared contradiction) now applies at a tight limit, because the partner is no
+longer cut before COG-29 runs; COG-25 examines only the returned rows (its
+margin, measured, tripled limit=10 p50 once the cut was deferred).
+
+**What remains unbacked.** "Strengthens with use" has no ranking effect on the
+default path until a label-backed, bounded salience term exists — association
+features annotate and inject but do not reorder. Residuals: exact ties are broken
+by evidence that reads the in-memory log (pinned, fails when fixed); on vaults
+above 1,000 memories a PAS transition can still add a genuine match to the
+candidate pool.
+
+**A/B.** `cognitiontrial` build with `MUNINN_TRIAL_LEGACY_BOOST_ORDER=1`
+restores the boosted order on the same store; every RED test of this change
+fails again under it. No runtime toggle ships.
+
+**Principle: a signal that says two memories are related is not evidence that
+either one answers the question. Let it annotate and inject; let only match
+evidence order.**
+
+### Association-only memories get their own channel: `associated` (COG-35 follow-up, 2026-11-15)
+
+**What content-first cost.** Measured live on the production install, content-first
+order moved right-memory-first from 34 to 60 of 150 reworded questions (top ten
+93 → 95; paired MRR +0.132, 95% CI +0.088 to +0.175; 47 up, 4 down, none lost).
+The adversarial review then measured the other side: on a 1,000-memory fixture
+with realistic entity density, 46 of 150 limit-10 responses carried an
+association-only row before and 0 after; a memory linked to the queried entity
+that matches none of the query's words went from rank 2 to not returned at
+limits 5 and 10. Those rows were displacing better matches — the production
+numbers show that — but dropping them silently removes "pushes to you when it
+matters" from recall.
+
+**Decision.** A separate, bounded, labelled block: at most 3 compact items
+(no content), at most 600 bytes, never counted against `limit` or in `total`,
+never a band other than `associated_not_matched`, selected by the existing
+seed rule and injection gate, absent when empty, on by default with an opt-out.
+Measured on a 2,000-memory synthetic vault with dense invented entities: present
+on 179 of 200 limit-10 recalls, median 419 bytes, p99 613 bytes including the key.
+
+**Why this and not a re-weighted boost.** Association evidence was measured to
+cost rank whenever it was allowed to order matches, at every strength tried.
+Presenting it beside the matches, labelled as association, keeps the product's
+push without letting it impersonate relevance.
+
+**How we will learn whether it is ever useful.** Associated items are served
+rows for the label pipeline: they are in the recall event's entries (after the
+matched rows, source flag `associated`) and in a read-only query id's row tags,
+so `muninn_feedback` labels for them are accepted and stored with that source.
+Whether association earns more than an annotation is a question for those
+labels — nothing in ranking reads them yet. Today only the entity boost produces
+association-only rows; Hebbian and predictive-activation evidence attaches to
+rows that also matched, so their `why` variants are not built.
+
+### The candidate budget stays as it is — an honest negative (2026-11-15)
+
+**The defect is real.** `CalcCandidatesPerIndex` is not monotone in vault size:
+a 1,000-memory vault considers 1,000 candidates per index and a 1,001-memory
+vault 31 (sqrt(N) past the knee). On a production install about a fifth of right
+answers to model-reworded questions were never candidates at all.
+
+**Fixing it bought nothing measurable.** An experimental build with the ceiling
+raised to 1,000 on the same install (150 reworded questions, three vaults, with
+content-first order already in place) moved the right memory into the top ten
+for 95 → 98 of 150 and to rank 1 for 60 → 61; paired MRR +0.010, 95% CI −0.001
+to +0.024 — not distinguishable from noise. It also made explain 3–5x slower at
+the time (since fixed separately: explain no longer scales with its candidate
+list). The candidate cliff is not what keeps a third of right answers out of the
+top ten.
+
+**Decision.** Left unchanged pending evidence that it costs answers. A monotone
+alternative measured on synthetic vaults, min(N, 200), would REDUCE candidates
+for vaults of 201–1,000 memories with no measured benefit to offset it; a change
+with no measured value does not ship. The work (rule, monotonicity RED tests,
+the 60th-nearest fixture, and an opt-in latency harness: p50 at 12,000 memories
+29.2 ms old rule / 31.0 at 200 / 43.3 at 500 / 57.0 at 1,000) is kept on the
+local branch `exp/candidate-budget`.
+

@@ -232,7 +232,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_recall",
-			Description: "Search long-term memory. Simplest call: {\"query\": \"what we decided about caching\"} (or `context`: an array of phrases). Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows would all be `weak` matched nothing strongly: on a calibrated vault recall WITHHOLDS them by default and answers `abstained: true, abstained_reason: \"weak_only\"` with `weak_available` = how many — pass `include_weak: true` to receive them as related memories to verify, not answers. One moderate or strong row returns the whole set as usual.",
+			Description: "Search long-term memory. Simplest call: {\"query\": \"what we decided about caching\"} (or `context`: an array of phrases). Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. Results are ordered by how well each memory MATCHED (on default-scoring vaults `score` is that content score, content match x confidence, equal to `absolute_score` except where a declared contradiction (0.9x) or declared supersession moved it; on rrf/weighted_sum vaults it is relative to this query's best candidate). `entity_boost`, `hebbian_boost` and `transition_boost` are evidence that a memory is ASSOCIATED with the matches or with recently recalled memories — not match strength; on default-scoring vaults they only break exact ties (with a real embedder matched rows practically never tie, so they do not change the order of matched rows), and a row with `score` 0 was added because of that association, after every matched row. A response whose rows would all be `weak` matched nothing strongly: on a calibrated vault recall WITHHOLDS them by default and answers `abstained: true, abstained_reason: \"weak_only\"` with `weak_available` = how many — pass `include_weak: true` to receive them as related memories to verify, not answers. One moderate or strong row returns the whole set as usual. An optional `associated` array (at most 3, compact, not counted against limit) lists memories that did NOT match but are associated with a returned one — each says why; follow them with muninn_read if relevant; include_associated: false omits it.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -240,7 +240,7 @@ func allToolDefinitions() []ToolDefinition {
 					"query":     map[string]any{"type": "string", "description": "What to search for, as one plain string. Give this OR context (if both, query is one more context phrase)."},
 					"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Search context phrases (alternative to query; a bare string is also accepted)."},
 					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0, compared against the ABSOLUTE content score (not the displayed per-query-normalized one). Omit it for the engine's fusion-aware default: 0.1 on normal (ACT-R) vaults — a semantic-only match structurally caps near 0.6 and a lexical-only one near 0.4, so values above ~0.4 filter almost everything honest; 0.5 on legacy weighted_sum vaults; near-zero on scoring_fusion='rrf', whose rank-based scores rarely exceed ~0.15 (an explicit threshold above ~0.01 there can filter out everything)."},
-					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 10)."},
+					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 10). The response can exceed it in exactly one case: a returned memory with an unresolved declared contradiction whose disputing partner did not make the cut brings that partner along — only the partner, at most one per returned memory, never chained, at most min(limit, 3) extra rows in total, reported as conflict.adjacency_overflow."},
 					"profile": map[string]any{
 						"type":        "string",
 						"description": "Traversal profile for BFS graph traversal. Leave unset for automatic inference from your context phrases.\n• default       — balanced retrieval across all edge types; contradiction edges dampened (0.3×)\n• causal        — follow cause/effect/dependency chains (Causes, DependsOn, Blocks, PrecededBy, FollowedBy)\n• confirmatory  — find supporting evidence; contradiction edges excluded (Supports, Implements, Refines, References)\n• adversarial   — surface conflicts and contradictions (Contradicts, Supersedes, Blocks; Contradicts boosted 1.5×)\n• structural    — follow project/person/hierarchy edges (IsPartOf, BelongsToProject, CreatedByPerson)\n\nWhen to specify explicitly:\n  Use 'causal' when asking why something happened or what something depends on.\n  Use 'adversarial' when auditing for inconsistencies or contradictions.\n  Use 'confirmatory' when looking for supporting evidence for a claim.\n  Use 'structural' when navigating project or organizational structure.",
@@ -309,6 +309,10 @@ func allToolDefinitions() []ToolDefinition {
 					"read_only": map[string]any{
 						"type":        "boolean",
 						"description": "When true, marks this recall as a pure read that must not trigger any write side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
+					},
+					"include_associated": map[string]any{
+						"type":        "boolean",
+						"description": "Default true. When a memory did not match your query but is ASSOCIATED with one that did (it shares a rare named entity with a returned memory) and did not make the cut, the response carries it in a separate `associated` array: at most 3 compact items (id, concept, why, strength, basis \"associated_not_matched\"), at most ~600 bytes, not counted in total or against limit. They are leads to follow, not answers. Pass false to omit the block.",
 					},
 					"include_weak": map[string]any{
 						"type":        "boolean",
@@ -523,7 +527,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_explain",
-			Description: "Show the full score breakdown for why a specific memory would be returned for a given query. Use for debugging recall quality — to understand why a memory ranked high or low.",
+			Description: "Show the full score breakdown for why a specific memory would be returned for a given query. Use for debugging recall quality — to understand why a memory ranked high or low. On default-scoring vaults the final score is the content score (content match x confidence) that orders recall; the association fields (entity, Hebbian, transition boosts) are reported beside it and do not change the order except to break exact ties.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
