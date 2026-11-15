@@ -78,7 +78,7 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 	ep := idx.entryPoint
 	epNode := idx.nodes[ep]
 	if epNode == nil || len(epNode.vec) == 0 {
-		return nil, nil, stats, nil
+		return nil, nil, stats, idx.entryError()
 	}
 	epDist := 1.0 - float64(CosineSimilarity(query, epNode.vec))
 	stats.Distances++

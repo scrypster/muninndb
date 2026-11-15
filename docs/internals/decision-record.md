@@ -1829,10 +1829,10 @@ re-linked by re-insertion. **Deviation from the design, on evidence:** the desig
 full rebuild only at ≥ 50% closed and re-linking the closed nodes below that. Re-linking was
 built and does not converge — the old-rule lists around the re-linked nodes close again (79
 closed before, 82 after, the same on every subsequent boot; repaired-graph recall@10 0.93
-instead of 1.00). An island is therefore always rebuilt. Loop-safety rests on the measured
-fact that a rebuilt graph has none; if one ever does, it is logged as a WARN, and the repeat
-rebuild is deterministic (id order, vault-seeded levels), so results still do not change
-across restarts.
+instead of 1.00). An island is therefore always rebuilt. ~~Loop-safety rests on the measured
+fact that a rebuilt graph has none~~ — **wrong, see the review section below:** 40–200
+bit-identical vectors left rebuilt graphs broken and the vault repaired on every boot. The
+repair now enforces its own postcondition instead.
 
 **Served throughout, swapped once, crash-safe without a marker.** The registry caches the
 index as loaded and starts the repair in a goroutine, one vault at a time across the
@@ -1890,9 +1890,91 @@ fixed). What the user sees: recall never returns it, before or after a restart (
 record is gone; `TestHNSWTombstone_HardDeletedNeverRecalledAcrossRestart`); the cost is a
 vector candidate slot it can take from a live memory. Not fixed here.
 
-**Residuals.** If `ClearVault` wipes the vault between the commit's vector check and the
-batch commit (microseconds, once per migrated vault), the old lists land in a cleared vault
-as vector-less keys, which load as unreachable, unsearchable junk. Layer keys of nodes that
-have no vector at all are not deleted by the rebuild. The rebuild competes with serving for
+**Residuals.** ~~If `ClearVault` wipes the vault between the commit's vector check and the
+batch commit (microseconds…)~~ — **wrong on both counts, see the review section below:** the
+window was milliseconds, and the result was a silent vector-search outage, not harmless
+junk. Fixed by `BeginClear`/`EndClear` and by load deleting vector-less keys. The rebuild competes with serving for
 CPU. Concurrent-insert levels (RNG drawn before the lock) and index-level dedup remain
 deferred from the design.
+
+### Closed islands, part 3: what the adversarial review found, and the fixes (2026-11-15)
+
+An independent adversarial review found no must-fix and no data loss (power loss at 40
+random cut points during a repair left the old graph 8 times and the new one 32 times, never
+a mix; old and new binaries read each other's stores; 108,369 searches during a 12,000-vector
+repair, worst 11.4 ms). It confirmed the amended rule under a grading that needs no epsilon
+and found five defects in claims this branch made. Each fix below has a test that fails when
+that fix alone is removed (`guards_test.go`, `identical_test.go`; the per-guard sweep ran the
+whole package with each guard neutralised in turn).
+
+**The epsilon was the wrong quantity.** 5 × 10⁻⁴ is the distance between two copies of one
+STORED vector; the jitter grading compares QUERY distances, which batch jitter moves by a
+median of 2.1 × 10⁻³ (review's measurement). So 5 × 10⁻⁴ was about 4× too STRICT, not
+generous. The harness now reports a **collapsed** grading as primary — the near-identical
+cluster collapsed to one representative, so a swap inside it is not a miss and no epsilon is
+needed (`recallCollapsed`); strict and jitter stay as reference columns. Review's own
+collapsed numbers: aimed queries 1.000 on the new rule, every strict miss a within-cluster
+swap (gap p50 2.5–3.2 × 10⁻⁵, max 2.6 × 10⁻⁴), and shapes this harness skipped also pass
+(zipf 1.000, tiny 1.000, one giant cluster 1.000 aimed / 0.985 ordinary, time-ordered drift
+0.997). This branch's harness re-run with the collapsed column (dim 384, after the fixes
+below): every clustered cell of the new rule ≥ 0.982 collapsed recall@10 at 12,000 (min:
+mix cluster-topic) and 1.000 at 2,000; the current rule 0.506–0.835 on ordinary and
+cluster-topic cells. Collapsed grading, like the jitter one, saturates AIMED queries for
+both rules (current 0.97–1.00), so aimed cells still carry no evidence either way. Strict
+recall and distances per query are unchanged by the fixes (selection on non-identical data is
+the same rule).
+
+**Bit-identical vectors were not reachable, and their vault repaired on every boot.** Every
+distance among identical vectors ties, so candidates ordered by id sent every list to the
+same smallest-id copies. Measured before the fix (dim 32, synthetic): 100 copies in 600
+vectors, 55 found at k = 100 and 45 unreachable; a vault of 100 copies, 99 closed; restart
+cycles repaired on every boot, the unreachable count growing. Reachable in real data: the
+bundled embedder reads only the first 256 tokens, so memories sharing a long templated
+opening can embed identically; clients can also supply embeddings. **Fix: a ring.** At
+layer 0 a group of identical vectors is linked in id order — each member's list starts with
+its id-predecessor and id-successor in the group, and its own group does not compete for the
+other slots, which go to ordinary diverse selection over outsiders. Every member has two
+in-edges (the group is strongly connected) and out-edges leaving it; a beam that enters walks
+it; ties come back newest-first by the existing final sort (rankorder). Groups are derived
+from the vectors (exact bit pattern) at load and on insert; nothing is persisted, lists keep
+their size (≤ M0) and format, so the on-disk shape is unchanged. Chosen over "one graph node
+with a member list", which needs new keys. After: all copies reachable and returned at k =
+copies for 40/100/200 copies and an all-identical vault; five restart cycles repair at most
+once.
+
+**The repair loop is now impossible by construction.** Rather than record anything, the
+repair makes its result satisfy exactly what the next load checks: `ensureNavigable` gives a
+closed node an out-edge to the nearest node that can reach the entry (replacing its last,
+back-filled slot), and an unreachable node an in-edge from the nearest reachable node with a
+spare slot or a redundant last edge; it WARNs with the count when it had to. Removing an
+out-edge from a node that then reaches the entry directly cannot strand anything. Decided
+from the graph, nothing persisted, no marker.
+
+**Clear vs repair.** `ClearVault` deleted the vault's keys BEFORE calling `ResetVault`; the
+review measured the window at 2–8 ms after a 12,000-node build (not microseconds) and 12,811
+vector-less layer keys written back; in the same process a re-import then got 0 vector hits
+because the entry point had no vector — recall silently keyword-only until a restart. Fixes:
+`Registry.BeginClear` (cancel AND wait for the repair, drain list writes, keep the vault
+uncached and unrepaired) runs before the delete and `EndClear` after, in `ClearVault` and in
+re-embed; the commit still refuses when the entry vector is gone (for any path that bypasses
+the protocol); load ignores and deletes layer keys without a vector; the entry point is
+`canonicalEntry` alone; a search whose entry has no vector returns `ErrEntryWithoutVector`
+(logged once) so callers degrade LOUDLY. The earlier `ResetDuringRepair` test counted keys
+before the repair goroutine finished and passed with both guards removed; it is replaced by
+tests that wait for the goroutine.
+
+**Other review items.** Re-inserting the entry point's id dropped results from 10 to 1
+(pre-existing): stale in-edges routed the walk into the half-built node. A re-insert now links
+the new node before publishing it. An old-rule graph WITHOUT islands keeps its nearest-only
+lists forever (a fixture stayed at recall 0.931 where a fresh build gets 0.998); there is now
+an operator rebuild: `Registry.RebuildVault`, REST `POST /api/admin/vaults/{name}/reindex-hnsw`
+(202, background), CLI `muninn vault reindex-hnsw`, progress as `hnsw_rebuild` in admin
+observability. **Recorded, not fixed:** with the memory cap (`SetMaxBytes`) reached, the boot
+repair re-links the skipped vectors and ignores the cap (the trunk's orphan repair did the
+same).
+
+**CI RISK — the engine package under -race.** The review measured `internal/engine` at
+314.7 s under `-race` on a busy machine, over CI's 300 s per-package limit (this branch's two
+engine tests cost 0.2 s; the margin problem predates it — 292 s was measured here on a loaded
+machine). The next engine test added anywhere may be the one that tips CI. The hnsw package
+went from 43 s (trunk) to ~125 s under `-race` with this work.

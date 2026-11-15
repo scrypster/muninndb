@@ -181,6 +181,15 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 		defer e.ftsWorker.SetClearing(ws, false)
 	}
 
+	// Stop the vault's vector-graph repair and drain its list writes BEFORE
+	// the keys are deleted, and keep the index uncached until we return: a
+	// repair that committed after the delete would write the old graph back
+	// as vector-less keys (STO-8).
+	if e.hnswRegistry != nil {
+		e.hnswRegistry.BeginClear(ws)
+		defer e.hnswRegistry.EndClear(ws)
+	}
+
 	vaultCount, err := e.store.ClearVault(ctx, ws)
 	if err != nil {
 		return fmt.Errorf("clear vault %q: %w", vaultName, err)
@@ -199,9 +208,6 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 		}
 	}
 
-	if e.hnswRegistry != nil {
-		e.hnswRegistry.ResetVault(ws)
-	}
 	if e.fts != nil {
 		e.fts.InvalidateIDFCache()
 	}

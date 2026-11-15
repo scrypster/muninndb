@@ -107,6 +107,10 @@ type EngineAPI interface {
 	// the current (Porter2-stemmed) tokenizer. Sets the FTS version marker to 1
 	// upon completion. Returns the number of engrams re-indexed.
 	ReindexFTSVault(ctx context.Context, vaultName string) (int64, error)
+	// RebuildVectorIndex schedules a background full rebuild of the named
+	// vault's HNSW graph (served throughout; progress in admin observability
+	// as hnsw_rebuild). Returns hnsw.ErrRebuildInProgress if one is running.
+	RebuildVectorIndex(ctx context.Context, vaultName string) error
 	// ResetRepairWatermark deletes the named repair watermark(s) (#761) for
 	// vaultName so the next boot re-scans instead of trusting a prior clean
 	// pass. Node-local: neither repair pass is leader-gated or replicated.

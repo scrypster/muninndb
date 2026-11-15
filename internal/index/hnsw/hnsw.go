@@ -3,11 +3,13 @@ package hnsw
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"log/slog"
 	"math"
 	"math/rand"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/rankorder"
@@ -111,6 +113,18 @@ type Index struct {
 
 	// repair tracks this index's background graph repair (repair.go).
 	repair repairState
+
+	// dups groups nodes by exact vector (select.go: identical vectors are
+	// linked as a ring). Derived from the vectors, never persisted. Guarded
+	// by mu; nil in the legacy arm.
+	dups dupGroups
+
+	// entryWarned throttles the "entry point has no vector" WARN to once.
+	entryWarned atomic.Bool
+
+	// persistHook is a test-only seam called at the start of every
+	// persistNode. Always nil in production.
+	persistHook func()
 }
 
 // Dim returns the vault's established vector dimension.
@@ -278,23 +292,39 @@ type candidate struct {
 
 // Search finds the k nearest neighbors to the query vector.
 func (idx *Index) Search(ctx context.Context, query []float32, k int) ([]ScoredID, error) {
-	return idx.search(query, k, nil), nil
+	return idx.search(query, k, nil)
+}
+
+// ErrEntryWithoutVector reports a graph that holds nodes but whose entry
+// point has no vector: no search can start, so vector recall is down for
+// the vault. Returned instead of an empty result, which would read as
+// "nothing matched" (callers degrade to keyword recall with a WARN).
+var ErrEntryWithoutVector = errors.New("hnsw: entry point has no vector; vector search unavailable for this vault until its graph is rebuilt")
+
+// entryError returns ErrEntryWithoutVector, logging it once per index.
+// Caller holds idx.mu (read).
+func (idx *Index) entryError() error {
+	if !idx.entryWarned.Swap(true) {
+		slog.Error("hnsw: entry point has no vector — vector search returns errors for this vault (recall degrades to keyword) until the graph is rebuilt",
+			"vault", idx.ws, "entry", idx.entryPoint, "nodes", len(idx.nodes))
+	}
+	return ErrEntryWithoutVector
 }
 
 // search is Search; when dist is non-nil it is incremented once per distance
 // computed, so a measurement can report the cost of a query.
-func (idx *Index) search(query []float32, k int, dist *int) []ScoredID {
+func (idx *Index) search(query []float32, k int, dist *int) ([]ScoredID, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
 	if len(idx.nodes) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	ep := idx.entryPoint
 	epNode := idx.nodes[ep]
 	if epNode == nil || len(epNode.vec) == 0 {
-		return nil
+		return nil, idx.entryError()
 	}
 	count := func() {
 		if dist != nil {
@@ -455,7 +485,7 @@ func (idx *Index) search(query []float32, k int, dist *int) []ScoredID {
 			Score: 1.0 - v.dist,
 		})
 	}
-	return results
+	return results, nil
 }
 
 // Insert adds a vector to the HNSW index.
@@ -471,6 +501,163 @@ func (idx *Index) insert(id [16]byte, vector []float32, copyVec bool) {
 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
+
+	if idx.legacy {
+		idx.insertLegacy(id, vector, copyVec, level)
+		return
+	}
+
+	cachedVec := vector
+	if copyVec {
+		cachedVec = make([]float32, len(vector))
+		copy(cachedVec, vector)
+	}
+	node := &HNSWNode{
+		id:     id,
+		vec:    cachedVec,
+		norm:   vecNorm(cachedVec),
+		layers: make([][][16]byte, level+1),
+	}
+	// A re-insert of an existing id (a re-embed) leaves the old node in the
+	// map until the new one is linked: other nodes' edges still point at this
+	// id, and a walk that followed one into a half-built node would find
+	// nothing but the node itself and link it to nothing.
+	old := idx.nodes[id]
+	if idx.dups == nil {
+		idx.dups = dupGroups{}
+	}
+	if old != nil {
+		idx.dups.remove(id, old.vec)
+	}
+	idx.dups.add(id, cachedVec)
+
+	en := idx.nodes[idx.entryPoint]
+	if len(idx.nodes) == 0 || (len(idx.nodes) == 1 && old != nil) || en == nil || len(en.vec) == 0 {
+		// The first node — or no usable entry (its vector is missing):
+		// this node becomes the entry point.
+		idx.nodes[id] = node
+		idx.entryPoint = id
+		idx.maxLevel = level
+		idx.persistAsync(id, node)
+		return
+	}
+
+	// Traverse from the EXISTING entry point and link the new node into the
+	// graph BEFORE any entry-point promotion. Promoting first would make
+	// ep == id below: searchLayer then sees only the new node itself, the node
+	// links to nothing (or to itself), and every promotion orphans the entire
+	// prior graph — fragmenting the index a little more on each maxLevel raise.
+	ep := idx.entryPoint
+	oldMaxLevel := idx.maxLevel
+	epVec := en.vec
+
+	// Phase 1: greedy descent from oldMaxLevel to level+1.
+	for l := oldMaxLevel; l > level; l-- {
+		epVec = idx.greedyDescend(ep, epVec, vector, l, &ep)
+	}
+
+	// Phase 2: the node's own lists, every layer, before it is published.
+	top := min(level, oldMaxLevel)
+	for l := top; l >= 0; l-- {
+		found := idx.searchLayer(ep, vector, idx.efC(), l)
+		ids := make([][16]byte, 0, len(found))
+		for _, nb := range found {
+			if nb.id != id {
+				ids = append(ids, nb.id)
+			}
+		}
+		node.layers[l] = idx.selectNeighbors(node, ids, maxConnections(l), [16]byte{}, l)
+		// The next layer's search starts from the nearest candidate found,
+		// whichever neighbours were kept.
+		if len(ids) > 0 {
+			ep = ids[0]
+		}
+	}
+	idx.nodes[id] = node
+
+	// The node's ring neighbours among identical vectors (select.go): their
+	// lists are re-selected below because the ring moved.
+	isPeer := map[[16]byte]bool{}
+	if peers := idx.identicalPeers(node); peers != nil {
+		for _, p := range ringOf(peers, id) {
+			isPeer[p] = true
+		}
+	}
+
+	// Neighbors whose layer lists we mutate must be re-persisted, or the
+	// back-edges exist only in memory and every restart sheds them — leaving
+	// the on-disk graph forward-only and barely navigable after reload.
+	mutated := make(map[[16]byte]*HNSWNode)
+
+	// Phase 3: back-links.
+	for l := top; l >= 0; l-- {
+		maxConn := maxConnections(l)
+		for _, nbID := range node.layers[l] {
+			nbNode := idx.nodes[nbID]
+			if nbNode == nil {
+				continue
+			}
+			nbNode.mu.Lock()
+			for len(nbNode.layers) <= l {
+				nbNode.layers = append(nbNode.layers, nil)
+			}
+			if !containsID(nbNode.layers[l], id) {
+				nbNode.layers[l] = append(nbNode.layers[l], id)
+			}
+			// Prune with the same diversity rule as the node's own pick
+			// (select.go) — keeping the maxConn NEAREST here is what closed
+			// islands of more than M0 mutual nearest neighbours — and always
+			// retain the just-appended edge. The new node's only path into the
+			// graph is a back-edge from one of these neighbors; in a dense
+			// region every neighbor's list is already full of mutually-closer
+			// nodes, so a prune that could drop the fresh edge would drop it at
+			// every neighbor and the node would be born with zero in-edges —
+			// permanently invisible to graph search, since future inserts can
+			// only discover neighbors by traversing the graph (#620). An
+			// identical peer's list is re-selected even when it has room: the
+			// ring moved (the new node now sits between this peer and its old
+			// ring neighbour), and the stale link must go.
+			if len(nbNode.layers[l]) > maxConn || (l == 0 && isPeer[nbID]) {
+				nbNode.layers[l] = idx.selectNeighbors(nbNode, nbNode.layers[l], maxConn, id, l)
+			}
+			nbNode.mu.Unlock()
+			mutated[nbID] = nbNode
+		}
+	}
+
+	// Promote to entry point only after the node is linked into the graph.
+	// The entry point is the SMALLEST id at the top level — the same rule
+	// load applies — so a reloaded graph starts every search where the live
+	// graph did. A re-inserted entry point that came back at a lower level
+	// hands the entry to whichever node the rule now names.
+	switch {
+	case id == idx.entryPoint && level < idx.maxLevel:
+		if e, l, ok := canonicalEntry(idx.nodes); ok {
+			idx.entryPoint, idx.maxLevel = e, l
+		}
+	case level > idx.maxLevel || (level == idx.maxLevel && string(id[:]) < string(idx.entryPoint[:])):
+		idx.entryPoint = id
+		idx.maxLevel = level
+	}
+
+	idx.persistAsync(id, node)
+	for nbID, nbNode := range mutated {
+		idx.persistAsync(nbID, nbNode)
+	}
+}
+
+func containsID(ids [][16]byte, id [16]byte) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
+// insertLegacy is the pre-review insert path, kept verbatim for the trial
+// arm (idx.legacy) so the A/B control reproduces the trunk exactly.
+func (idx *Index) insertLegacy(id [16]byte, vector []float32, copyVec bool, level int) {
 
 	cachedVec := vector
 	if copyVec {
@@ -534,7 +721,7 @@ func (idx *Index) insert(id [16]byte, vector []float32, copyVec bool) {
 			for i, nb := range found {
 				ids[i] = nb.id
 			}
-			chosen = idx.selectNeighbors(node, ids, maxConn, [16]byte{})
+			chosen = idx.selectNeighbors(node, ids, maxConn, [16]byte{}, l)
 		}
 		node.layers[l] = chosen
 
@@ -564,7 +751,7 @@ func (idx *Index) insert(id [16]byte, vector []float32, copyVec bool) {
 				if idx.legacy {
 					nbNode.layers[l] = idx.pruneNeighbors(nbNode.vec, nbNode.layers[l], maxConn, id)
 				} else {
-					nbNode.layers[l] = idx.selectNeighbors(nbNode, nbNode.layers[l], maxConn, id)
+					nbNode.layers[l] = idx.selectNeighbors(nbNode, nbNode.layers[l], maxConn, id, l)
 				}
 			}
 			nbNode.mu.Unlock()
@@ -788,6 +975,9 @@ func (idx *Index) Close() {
 // persistNode writes a node's neighbor lists to Pebble.
 func (idx *Index) persistNode(id [16]byte, node *HNSWNode) {
 	defer idx.persistWg.Done()
+	if idx.persistHook != nil {
+		idx.persistHook()
+	}
 	node.mu.RLock()
 	defer node.mu.RUnlock()
 
@@ -825,17 +1015,28 @@ func decodeNeighbors(buf []byte) [][16]byte {
 	return result
 }
 
-// canonicalEntry returns the smallest id at the highest level among nodes
-// that carry a vector; ok is false when no node has both a vector and a list.
+// canonicalEntry returns the entry point a graph's nodes imply: among nodes
+// that carry a vector, the highest level, then a node with a layer-0 list
+// over one without, then the smallest id. ok is false when no node has a
+// vector. Insert promotes by the same rule, so a reload starts every search
+// where the live graph did.
 func canonicalEntry(nodes map[[16]byte]*HNSWNode) (entry [16]byte, level int, ok bool) {
 	level = -1
+	linked := false
 	for id, n := range nodes {
-		if len(n.vec) == 0 || len(n.layers) == 0 {
+		if len(n.vec) == 0 {
 			continue
 		}
 		l := len(n.layers) - 1
-		if !ok || l > level || (l == level && string(id[:]) < string(entry[:])) {
-			entry, level, ok = id, l, true
+		if l < 0 {
+			l = 0
+		}
+		lk := len(n.layers) > 0 && len(n.layers[0]) > 0
+		better := !ok || l > level ||
+			(l == level && lk && !linked) ||
+			(l == level && lk == linked && string(id[:]) < string(entry[:]))
+		if better {
+			entry, level, linked, ok = id, l, lk, true
 		}
 	}
 	return entry, level, ok

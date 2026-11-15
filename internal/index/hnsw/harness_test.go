@@ -4,11 +4,15 @@ package hnsw
 // pre-fix nearest-only rule (Index.legacy), on synthetic corpora with
 // controlled cluster structure, graded against exact brute-force search.
 //
-// Two gradings are printed side by side for every cell:
+// Three gradings are printed side by side for every cell:
 //
+//	collapsed (r@kc, PRIMARY)  the near-identical cluster collapsed to one
+//	        representative (recallCollapsed): a swap inside the cluster is
+//	        not a miss; no epsilon. Adopted after the adversarial review.
 //	strict  |returned ∩ exact top-k| / k
 //	jitter  a returned vector counts when its true distance is within
-//	        jitterEps of the exact k-th distance
+//	        jitterEps of the exact k-th distance (reference only; see the
+//	        correction below)
 //
 // The jitter grading is the POST HOC amendment to the pre-registered rule
 // (decision record, "closed islands"): it was adopted after the strict rule
@@ -18,7 +22,11 @@ package hnsw
 // 5.14e-4 (n = 72 pairs; median 7.0e-4, max 1.24e-3), measured by
 // internal/plugin/embed TestMeasure_BatchCompositionJitter, rounded down.
 // Two stored vectors closer than that cannot be ordered by anything the
-// embedder guarantees.
+// embedder guarantees. CORRECTION (adversarial review): that is the distance
+// between two copies of one STORED vector, but the grading compares QUERY
+// distances, which batch jitter moves by a median of 2.1e-3 — so 5e-4 is
+// about 4x too strict, not generous. Kept for reference; the collapsed
+// grading needs no epsilon.
 //
 // The fast variant runs in the default suite. The full table:
 //
@@ -43,6 +51,7 @@ const jitterEps = 5.0e-4
 type harnessCell struct {
 	class                    string
 	r10, r10j, r50, r50j     float64
+	r10c, r50c               float64
 	distPerQuery             float64
 	n                        float64
 	build                    time.Duration
@@ -53,6 +62,7 @@ type harnessCell struct {
 func (h *harnessCell) mean() harnessCell {
 	o := *h
 	o.r10, o.r10j, o.r50, o.r50j, o.distPerQuery = h.r10/h.n, h.r10j/h.n, h.r50/h.n, h.r50j/h.n, h.distPerQuery/h.n
+	o.r10c, o.r50c = h.r10c/h.n, h.r50c/h.n
 	return o
 }
 
@@ -84,6 +94,7 @@ func harnessBuild(t testing.TB, c *corpus, legacy bool) (*Index, time.Duration, 
 
 func harnessEval(idx *Index, c *corpus, qs []query) map[string]*harnessCell {
 	vm := c.vecMap()
+	cs := c.clusterSet()
 	out := map[string]*harnessCell{}
 	for _, q := range qs {
 		cell := out[q.class]
@@ -92,14 +103,16 @@ func harnessEval(idx *Index, c *corpus, qs []query) map[string]*harnessCell {
 			out[q.class] = cell
 		}
 		var dist int
-		g10 := idx.search(q.q, 10, &dist)
-		g50 := idx.search(q.q, 50, nil)
+		g10, _ := idx.search(q.q, 10, &dist)
+		g50, _ := idx.search(q.q, 50, nil)
 		w50, d50 := exactTopKD(c, q.q, 50, nil)
 		w10, k10, k50 := w50[:10], d50[9], d50[len(d50)-1]
 		cell.r10 += recallStrict(g10, w10)
 		cell.r10j += recallWithin(c, vm, q.q, g10, 10, k10, jitterEps)
 		cell.r50 += recallStrict(g50, w50)
 		cell.r50j += recallWithin(c, vm, q.q, g50, 50, k50, jitterEps)
+		cell.r10c += recallCollapsed(c, cs, g10, w10, 10)
+		cell.r50c += recallCollapsed(c, cs, g50, w50, 50)
 		cell.distPerQuery += float64(dist)
 		cell.n++
 	}
@@ -107,13 +120,13 @@ func harnessEval(idx *Index, c *corpus, qs []query) map[string]*harnessCell {
 }
 
 func harnessHeader() string {
-	return fmt.Sprintf("%-6s %-12s %-14s %-7s %-6s %-6s %-6s %-6s %-7s %-8s %-8s %-6s %-6s %-6s",
-		"N", "shape", "class", "arm", "r@10", "r@10j", "r@50", "r@50j", "dist/q", "build_s", "vec/s", "heapMB", "deg0", "closed")
+	return fmt.Sprintf("%-6s %-12s %-14s %-7s %-6s %-6s %-6s %-6s %-6s %-6s %-7s %-8s %-8s %-6s %-6s %-6s",
+		"N", "shape", "class", "arm", "r@10c", "r@50c", "r@10", "r@10j", "r@50", "r@50j", "dist/q", "build_s", "vec/s", "heapMB", "deg0", "closed")
 }
 
 func harnessRow(n int, shape, arm string, c harnessCell) string {
-	return fmt.Sprintf("%-6d %-12s %-14s %-7s %-6.3f %-6.3f %-6.3f %-6.3f %-7.0f %-8.2f %-8.0f %-6.1f %-6.1f %-6d",
-		n, shape, c.class, arm, c.r10, c.r10j, c.r50, c.r50j, c.distPerQuery, c.build.Seconds(),
+	return fmt.Sprintf("%-6d %-12s %-14s %-7s %-6.3f %-6.3f %-6.3f %-6.3f %-6.3f %-6.3f %-7.0f %-8.2f %-8.0f %-6.1f %-6.1f %-6d",
+		n, shape, c.class, arm, c.r10c, c.r50c, c.r10, c.r10j, c.r50, c.r50j, c.distPerQuery, c.build.Seconds(),
 		float64(n)/c.build.Seconds(), c.heapMB, c.deg0, c.closedNodes)
 }
 
@@ -163,12 +176,12 @@ func TestHarness_Fast(t *testing.T) {
 		return c
 	}
 	for _, cl := range []string{"ordinary", "cluster-topic", "cluster-aimed"} {
-		if c := get("dup50", cl, "new"); c.r10j < 0.95 {
-			t.Errorf("dup50 %s: jitter-equivalent recall@10 %.3f < 0.95", cl, c.r10j)
+		if c := get("dup50", cl, "new"); c.r10c < 0.95 {
+			t.Errorf("dup50 %s: collapsed recall@10 %.3f < 0.95", cl, c.r10c)
 		}
 	}
-	if c := get("topics", "ordinary", "new"); c.r10j < 0.95 {
-		t.Errorf("topics: jitter-equivalent recall@10 %.3f < 0.95", c.r10j)
+	if c := get("topics", "ordinary", "new"); c.r10c < 0.95 {
+		t.Errorf("topics: collapsed recall@10 %.3f < 0.95", c.r10c)
 	}
 	for _, sh := range []string{"uniform", "topics"} {
 		cur, nw := get(sh, "ordinary", "current"), get(sh, "ordinary", "new")

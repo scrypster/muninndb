@@ -3533,6 +3533,42 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/admin/vaults/{name}/reindex-hnsw:
+    post:
+      tags: [admin-vaults]
+      summary: "Rebuild a vault's vector (HNSW) graph in the background."
+      description: "Returns 202 at once. The vault keeps serving vector search from its current graph until the rebuilt graph replaces it in one step. Progress is the hnsw_rebuild field of /api/admin/observability. Node-local: the graph is per node."
+      security:
+        - AdminSession: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: "Rebuild queued."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  vault:
+                    type: string
+                  state:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "A rebuild of this vault is already in progress."
+        "421":
+          $ref: "#/components/responses/NotCortex"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/admin/vaults/{name}/repair-watermark/reset:
     post:
       tags: [admin-vaults]

@@ -301,6 +301,53 @@ func recallWithin(c *corpus, vecOf map[[16]byte][]float32, q []float32, got []Sc
 	return float64(h) / float64(k)
 }
 
+// recallCollapsed grades with every member of the corpus's near-identical
+// cluster collapsed to ONE representative key: E = the distinct keys of the
+// exact top-k, G = the distinct keys of the returned top-k, recall = |G ∩ E| /
+// |E|. Swapping one near-duplicate for another is not a miss, and no epsilon
+// is needed — the grading the adversarial review proposed as primary.
+func recallCollapsed(c *corpus, inCluster map[[16]byte]bool, got []ScoredID, want [][16]byte, k int) float64 {
+	var cluster [16]byte
+	cluster[0] = 0xFF // a key no item can have alongside a real cluster member
+	key := func(id [16]byte) [16]byte {
+		if inCluster[id] {
+			return cluster
+		}
+		return id
+	}
+	e := map[[16]byte]bool{}
+	for _, id := range want {
+		e[key(id)] = true
+	}
+	g := map[[16]byte]bool{}
+	for i, x := range got {
+		if i >= k {
+			break
+		}
+		g[key(x.ID)] = true
+	}
+	h := 0
+	for x := range g {
+		if e[x] {
+			h++
+		}
+	}
+	if len(e) == 0 {
+		return 1
+	}
+	return float64(h) / float64(len(e))
+}
+
+func (c *corpus) clusterSet() map[[16]byte]bool {
+	m := map[[16]byte]bool{}
+	for i, id := range c.ids {
+		if c.inCluster[i] {
+			m[id] = true
+		}
+	}
+	return m
+}
+
 func (c *corpus) vecMap() map[[16]byte][]float32 {
 	m := make(map[[16]byte][]float32, len(c.vecs))
 	for i, id := range c.ids {

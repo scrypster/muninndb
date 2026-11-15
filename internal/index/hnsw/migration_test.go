@@ -356,41 +356,6 @@ func TestMigration_CancelledRepairWritesNothing(t *testing.T) {
 	reg2.Close()
 }
 
-// TestMigration_ResetDuringRepairWritesNothing: clearing a vault while its
-// repair runs must not let the repair write the old vault's lists back.
-func TestMigration_ResetDuringRepairWritesNothing(t *testing.T) {
-	c := oldRuleFixture(7)
-	db := memPebble(t)
-	defer db.Close()
-	var ws [8]byte
-	copy(ws[:], "RESET001")
-	persistCorpus(t, c, db, ws, true)
-
-	gate := newStageGate("built")
-	reg := NewRegistry(db)
-	reg.repairHook = gate.hook
-	_ = reg.VaultVectors(ws)
-	gate.wait(t)
-	// The vault is wiped (as ClearVault does) and then reset.
-	lo := append([]byte{0x07}, ws[:]...)
-	wsPlus, _ := keys.IncrementWSPrefix(ws)
-	if err := db.DeleteRange(lo, append([]byte{0x07}, wsPlus[:]...), pebble.Sync); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan struct{})
-	go func() { reg.ResetVault(ws); close(done) }()
-	close(gate.release)
-	select {
-	case <-done:
-	case <-time.After(watchdog):
-		t.Fatal("ResetVault did not return")
-	}
-	if n := len(graphKeys(t, db, ws)); n != 0 {
-		t.Errorf("%d graph keys written back into a cleared vault", n)
-	}
-	reg.Close()
-}
-
 // TestMigration_InsertsDuringRepairSurvive: vectors inserted while the
 // repair builds are searchable at once (old graph) and after the swap, and
 // are persisted with the repaired graph.
@@ -676,4 +641,48 @@ func TestMeasure_MigrationCost(t *testing.T) {
 		}
 		db.Close()
 	}
+}
+
+// TestRegistry_RebuildVaultOnDemand: an old-rule graph with no islands is
+// left alone at load (nothing to repair) but keeps its nearest-only lists; an
+// operator-requested rebuild replaces them, once, and the next start needs
+// nothing.
+func TestRegistry_RebuildVaultOnDemand(t *testing.T) {
+	c := makeCorpus("uniform", 32, 300, 31)
+	db := memPebble(t)
+	defer db.Close()
+	var ws [8]byte
+	copy(ws[:], "ONDEMAND")
+	old := persistCorpus(t, c, db, ws, true)
+	reg := NewRegistry(db)
+	_ = reg.VaultVectors(ws)
+	reg.WaitRepairs()
+	if s := reg.RebuildStatus(ws); s != nil {
+		t.Fatalf("setup: the old-rule graph was repaired at load: %+v", s)
+	}
+	if err := reg.RebuildVault(ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.RebuildVault(ws); err != nil && err != ErrRebuildInProgress {
+		t.Errorf("second request: %v", err)
+	}
+	reg.WaitRepairs()
+	if s := reg.RebuildStatus(ws); s == nil || s.State != "done" || s.Kind != "full" {
+		t.Fatalf("status after the requested rebuild = %+v", s)
+	}
+	if d := sameStructure(old, reg.get(ws)); d == 0 {
+		t.Error("the requested rebuild left every list as the old rule wrote it")
+	}
+	rebuilt := reg.get(ws)
+	reg.Close()
+	reg2 := NewRegistry(db)
+	_ = reg2.VaultVectors(ws)
+	reg2.WaitRepairs()
+	if s := reg2.RebuildStatus(ws); s != nil {
+		t.Errorf("restart after the rebuild repaired again: %+v", s)
+	}
+	if d := sameStructure(rebuilt, reg2.get(ws)); d != 0 {
+		t.Errorf("reloaded graph differs from the rebuilt one at %d nodes", d)
+	}
+	reg2.Close()
 }

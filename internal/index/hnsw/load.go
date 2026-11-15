@@ -37,9 +37,13 @@ import (
 // so an island is always repaired by rebuilding. A full rebuild also runs when
 // the entry reaches fewer than half the vectors. Otherwise unreachable or
 // unlinked vectors are re-linked by re-inserting just those (id order):
-// proportional to the damage, and a healthy graph has none, so neither repair
-// can repeat on every boot unless the rebuilt graph itself has an island
-// (never observed; it is logged as a WARN if it ever happens).
+// proportional to the damage. Neither repair can repeat on the next boot:
+// its result is made to satisfy exactly what this assessment checks — no
+// closed and no unreachable vector — by ensureNavigable (repair.go), which
+// adds escape edges if re-insertion alone left any. (Before identical vectors
+// were ringed, 40–200 bit-identical copies did leave a rebuilt graph broken
+// and it was repaired again on every boot.) Layer keys with no vector are
+// leftovers, ignored and deleted here, never adopted as nodes.
 //
 // Either repair runs on a SCRATCH copy, never on the graph being served:
 // searches keep using the loaded graph, unchanged, until the repaired graph
@@ -274,12 +278,37 @@ func (idx *Index) load() (repairPlan, error) {
 	for _, node := range tempNodes {
 		node.norm = vecNorm(node.vec)
 	}
-	// The entry point is the smallest id among the nodes WITH a vector at the
-	// highest level any of them reaches — the rule Insert applies live, so a
-	// reload starts every search where the live graph did. (Key order alone
-	// gave the same id except that it could pick a node whose vector is
-	// missing, from which every search returns nothing.)
+	leftovers := 0
 	if !idx.legacy {
+		// Layer keys with no vector are leftovers — written back into a
+		// cleared vault, or left by an insert whose vector was rolled back.
+		// They are never adopted (a vector-less entry point answers every
+		// search with nothing) and are deleted.
+		var b *pebble.Batch
+		for id, node := range tempNodes {
+			if len(node.vec) > 0 {
+				continue
+			}
+			if b == nil {
+				b = idx.db.NewBatch()
+			}
+			for l := range node.layers {
+				_ = b.Delete(keys.HNSWNodeKey(idx.ws, id, uint8(l)), nil)
+			}
+			delete(tempNodes, id)
+			leftovers++
+		}
+		if b != nil {
+			if err := b.Commit(pebble.NoSync); err != nil {
+				slog.Warn("hnsw: failed to delete vector-less leftover keys", "vault", idx.ws, "error", err)
+			}
+			_ = b.Close()
+			slog.Warn("hnsw: ignored and deleted vector-less leftover graph keys", "vault", idx.ws, "nodes", leftovers)
+		}
+		// The entry point follows from the nodes alone (canonicalEntry): the
+		// rule Insert applies live, so a reload starts every search where the
+		// live graph did.
+		tempEntryPoint, tempMaxLevel = [16]byte{}, 0
 		if e, l, ok := canonicalEntry(tempNodes); ok {
 			tempEntryPoint, tempMaxLevel = e, l
 		}
@@ -302,11 +331,16 @@ func (idx *Index) load() (repairPlan, error) {
 
 	plan := assessGraph(tempNodes, tempEntryPoint, idx.legacy)
 
+	var dups dupGroups
+	if !idx.legacy {
+		dups = buildDupGroups(tempNodes)
+	}
 	idx.mu.Lock()
 	idx.nodes = tempNodes
 	idx.maxLevel = tempMaxLevel
 	idx.entryPoint = tempEntryPoint
 	idx.dim = tempDim
+	idx.dups = dups
 	idx.mu.Unlock()
 
 	slog.Info("hnsw: loaded graph from pebble",

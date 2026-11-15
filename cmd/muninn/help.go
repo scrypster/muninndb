@@ -223,6 +223,7 @@ var subcommandHelp = map[string]func(){
 				{"export-markdown --vault <name>", "Export vault notes as markdown .tgz"},
 				{"import <file> --vault <name>", "Import .muninn archive"},
 				{"reindex-fts <name>", "Rebuild FTS index"},
+				{"reindex-hnsw <name>", "Rebuild the vector graph (background)"},
 				{"repair-watermark-reset <name> --which <evolve|assoc_weight|all>", "Re-arm a repair pass on this node"},
 				{"", ""},
 				{"-u <user>", "Admin username (default: root)"},

@@ -2,6 +2,7 @@ package hnsw
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -68,6 +69,12 @@ type Registry struct {
 	repairSlot chan struct{}
 	repairOnce sync.Once
 	closed     bool
+
+	// clearing counts in-progress vault clears (BeginClear/EndClear), guarded
+	// by mu. While a vault is being cleared its index is neither cached nor
+	// repaired, so nothing can write its graph back between the wipe and the
+	// reset.
+	clearing map[[8]byte]int
 
 	// repairHook is a test-only seam called at a repair's named stages, with
 	// the vault being repaired. Always nil in production.
@@ -158,6 +165,10 @@ func (r *Registry) getOrCreate(ws [8]byte) *Index {
 	// uncached empty index lets this request degrade gracefully while the next
 	// access retries the load. (issue #499)
 	plan, err := idx.load()
+	if r.clearing[ws] > 0 && err == nil {
+		// Being cleared: serve this load once, cache nothing, repair nothing.
+		return idx
+	}
 	if err != nil {
 		slog.Error("hnsw: failed to load graph from pebble; not caching index (load will be retried on next access)", "vault", ws, "error", err)
 		// Record the failure so Insert refuses writes instead of treating the
@@ -187,7 +198,7 @@ func (r *Registry) startRepair(ws [8]byte, idx *Index, plan repairPlan) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	idx.repair.mu.Lock()
-	idx.repair.cancel, idx.repair.done = cancel, done
+	idx.repair.cancel, idx.repair.done, idx.repair.ctx = cancel, done, ctx
 	idx.repair.mu.Unlock()
 	idx.setRepairStatus(func(s *RebuildStatus) {
 		*s = RebuildStatus{State: "queued", Kind: plan.kind.String(), Vectors: plan.vectors,
@@ -210,6 +221,41 @@ func (r *Registry) startRepair(ws [8]byte, idx *Index, plan repairPlan) {
 		defer func() { <-slot }()
 		idx.runRepair(ctx, plan, hook)
 	}()
+}
+
+// ErrRebuildInProgress is returned by RebuildVault while a repair of the
+// vault is already queued or running (its progress is in RebuildStatus).
+var ErrRebuildInProgress = errors.New("hnsw: a rebuild of this vault's vector graph is already in progress")
+
+// RebuildVault schedules an operator-requested FULL rebuild of the vault's
+// graph — the same background repair the load path runs (served throughout,
+// one swap, one atomic batch). It exists for graphs the load check has no
+// reason to touch: one written by the pre-fix rule WITHOUT islands keeps its
+// nearest-only lists forever (measured on a synthetic corpus: recall@10 0.931
+// where a fresh build of the same vectors gets 0.998). Returns at once;
+// progress is RebuildStatus (admin observability, hnsw_rebuild).
+func (r *Registry) RebuildVault(ws [8]byte) error {
+	idx := r.getOrCreate(ws)
+	if err := idx.LoadError(); err != nil {
+		return err
+	}
+	idx.mu.RLock()
+	plan := assessGraph(idx.nodes, idx.entryPoint, idx.legacy)
+	idx.mu.RUnlock()
+	plan.kind, plan.targets = repairFull, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.indexes[ws] != idx {
+		return fmt.Errorf("hnsw: vault index was reset; retry")
+	}
+	if s := idx.RebuildStatus(); s != nil && (s.State == "queued" || s.State == "running") {
+		return ErrRebuildInProgress
+	}
+	if r.closed {
+		return fmt.Errorf("hnsw: registry is closing")
+	}
+	r.startRepair(ws, idx, plan)
+	return nil
 }
 
 // WaitRepairs blocks until every loaded vault's background graph repair has
@@ -328,6 +374,47 @@ func (r *Registry) TotalVectorBytes() int64 {
 // VaultVectorBytes returns the in-memory vector size for a single vault.
 func (r *Registry) VaultVectorBytes(ws [8]byte) int64 {
 	return r.getOrCreate(ws).VectorBytes()
+}
+
+// BeginClear must be called BEFORE a vault's 0x07 keys are deleted (vault
+// clear, re-embed). It drops the cached index, cancels its background repair
+// and WAITS for it to stop, and drains in-flight neighbour-list writes; until
+// the matching EndClear, the vault's index is never cached or repaired. So no
+// repair commit and no list write can land after the delete — a repair that
+// was already committing finishes before BeginClear returns, i.e. before the
+// delete starts.
+func (r *Registry) BeginClear(ws [8]byte) {
+	r.mu.Lock()
+	if r.clearing == nil {
+		r.clearing = map[[8]byte]int{}
+	}
+	r.clearing[ws]++
+	idx := r.indexes[ws]
+	delete(r.indexes, ws)
+	r.mu.Unlock()
+	if idx != nil {
+		idx.stopRepair()
+		idx.Close()
+	}
+}
+
+// EndClear ends a BeginClear after the keys are gone; the next access loads
+// the vault afresh.
+func (r *Registry) EndClear(ws [8]byte) {
+	r.mu.Lock()
+	if r.clearing[ws] > 0 {
+		r.clearing[ws]--
+		if r.clearing[ws] == 0 {
+			delete(r.clearing, ws)
+		}
+	}
+	idx := r.indexes[ws]
+	delete(r.indexes, ws)
+	r.mu.Unlock()
+	if idx != nil {
+		idx.stopRepair()
+		idx.Close()
+	}
 }
 
 // ResetVault drops the in-memory HNSW index for the given vault workspace prefix.

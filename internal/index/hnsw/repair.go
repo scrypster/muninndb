@@ -29,6 +29,8 @@ type RebuildStatus struct {
 	UnreachableNodes int       `json:"unreachable_nodes"` // at load
 	Done             int       `json:"done"`              // vectors re-inserted so far
 	Total            int       `json:"total"`             // vectors to re-insert
+	ReplayedInserts  int       `json:"replayed_inserts"`  // inserts that landed during the repair
+	EscapeEdges      int       `json:"escape_edges"`      // edges added to make the result navigable (see ensureNavigable)
 	StartedAt        time.Time `json:"started_at"`
 	DurationSeconds  float64   `json:"duration_seconds,omitempty"`
 	Error            string    `json:"error,omitempty"`
@@ -39,8 +41,12 @@ type repairState struct {
 	mu       sync.Mutex
 	status   *RebuildStatus
 	cancel   context.CancelFunc
+	ctx      context.Context // the running repair's context (tests observe cancellation)
 	done     chan struct{}
 	progress atomic.Int64
+	// replayedUnderLock counts inserts the final, write-locked replay pass had
+	// to apply (test observation: the earlier passes should leave it ~0).
+	replayedUnderLock atomic.Int64
 }
 
 // RebuildStatus returns this index's repair status, or nil when no repair
@@ -142,9 +148,10 @@ func (idx *Index) runRepair(ctx context.Context, plan repairPlan, hook func(stag
 	if err != nil {
 		return finish("cancelled", err)
 	}
-	if hook != nil {
-		hook("built")
+	if hook == nil {
+		hook = func(string) {}
 	}
+	hook("built")
 
 	// Catch up with inserts that landed while the scratch graph was built —
 	// outside the write lock first, so searches are not held up by them.
@@ -161,8 +168,10 @@ func (idx *Index) runRepair(ctx context.Context, plan repairPlan, hook func(stag
 		}
 		replayed += len(pending)
 	}
+	hook("replayed")
 
 	idx.mu.Lock()
+	hook("precommit")
 	if ctx.Err() != nil {
 		idx.mu.Unlock()
 		return finish("cancelled", errRepairCancelled)
@@ -170,27 +179,36 @@ func (idx *Index) runRepair(ctx context.Context, plan repairPlan, hook func(stag
 	for _, n := range idx.notIn(tmp) {
 		tmp.insert(n.id, n.vec, false)
 		replayed++
+		idx.repair.replayedUnderLock.Add(1)
 	}
+	escapes := tmp.ensureNavigable()
 	// Writes queued by inserts on the served graph must land BEFORE the batch,
 	// or a late one would overwrite a new list with an old one.
-	idx.persistWg.Wait()
+	idx.drainPersists(hook)
 	if idx.db != nil {
 		if err := idx.commitGraph(tmp); err != nil {
 			idx.mu.Unlock()
 			return finish("failed", err)
 		}
 	}
+	hook("committed")
 	idx.nodes = tmp.nodes
 	idx.entryPoint = tmp.entryPoint
 	idx.maxLevel = tmp.maxLevel
+	idx.dups = tmp.dups
 	idx.mu.Unlock()
+	idx.setRepairStatus(func(s *RebuildStatus) { s.ReplayedInserts, s.EscapeEdges = replayed, escapes })
+	if escapes > 0 {
+		slog.Warn("hnsw: repaired graph needed escape edges to be fully navigable (nodes that could not reach the entry point, or be reached from it, after re-insertion)",
+			"vault", idx.ws, "escape_edges", escapes)
+	}
 
 	idx.mu.RLock()
 	after := assessGraph(idx.nodes, idx.entryPoint, idx.legacy)
 	idx.mu.RUnlock()
 	ok := finish("done", nil)
-	if after.closed > 0 || after.unreachable > 0 {
-		slog.Warn("hnsw: repaired graph still has closed or unreachable nodes; the next load will repair it again",
+	if !idx.legacy && (after.closed > 0 || after.unreachable > 0) {
+		slog.Error("hnsw: repaired graph still has closed or unreachable nodes after escape edges (a defect); the next load will repair it again",
 			"vault", idx.ws, "closed_nodes", after.closed, "unreachable_nodes", after.unreachable)
 	}
 	slog.Info("hnsw: background graph repair finished; searches now use the repaired graph",
@@ -254,6 +272,9 @@ func (idx *Index) buildRepaired(ctx context.Context, plan repairPlan) (*Index, e
 			tmp.nodes[id] = c
 		}
 		tmp.entryPoint, tmp.maxLevel = entry, maxLevel
+		if !tmp.legacy {
+			tmp.dups = buildDupGroups(tmp.nodes)
+		}
 		for i, id := range plan.targets {
 			if err := step(i); err != nil {
 				return nil, err
@@ -267,6 +288,109 @@ func (idx *Index) buildRepaired(ctx context.Context, plan repairPlan) (*Index, e
 		}
 	}
 	return tmp, nil
+}
+
+// drainPersists waits for in-flight neighbour-list writes. Caller holds
+// idx.mu (write), so no new one can start.
+func (idx *Index) drainPersists(hook func(string)) {
+	hook("drain-wait")
+	idx.persistWg.Wait()
+}
+
+// ensureNavigable is a repair's POSTCONDITION, enforced rather than hoped
+// for: every node with a vector can reach the entry point and be reached
+// from it over layer-0 edges. The next load assesses exactly these two
+// properties, so a repaired graph can never be repaired again for the same
+// reason — the repair loop is impossible by construction, decided from the
+// graph itself with nothing persisted. Neither property has been seen to
+// fail after a rebuild once identical vectors are ringed; this is the guard
+// if one ever does.
+//
+//   - A closed node gets an out-edge to the nearest node that can reach the
+//     entry (found by a layer-0 search from the entry; the entry itself if
+//     none), replacing its last — back-filled, least diverse — slot when the
+//     list is full. Removing an out-edge from a node that now reaches the
+//     entry directly cannot strand anything.
+//   - An unreachable node gets an in-edge from the nearest reachable node
+//     with a free slot, or one whose last slot points at a node with another
+//     in-edge.
+//
+// Returns the number of edges added. Caller has exclusive use of idx (a
+// scratch index).
+func (idx *Index) ensureNavigable() int {
+	if idx.legacy || len(idx.nodes) < 2 {
+		return 0
+	}
+	added := 0
+	for pass := 0; pass < 3; pass++ {
+		closed := closedNodes(idx.nodes, idx.entryPoint)
+		fwd := bfsReachableSet(idx.nodes, idx.entryPoint)
+		var unreach [][16]byte
+		for id, n := range idx.nodes {
+			if len(n.vec) > 0 && !fwd[id] {
+				unreach = append(unreach, id)
+			}
+		}
+		if len(closed) == 0 && len(unreach) == 0 {
+			return added
+		}
+		ids := make([][16]byte, 0, len(closed))
+		for id := range closed {
+			ids = append(ids, id)
+		}
+		for _, c := range sortIDs(ids) {
+			n := idx.nodes[c]
+			target := idx.entryPoint
+			for _, cand := range idx.searchLayer(idx.entryPoint, n.vec, idx.efC(), 0) {
+				if cand.id != c && !closed[cand.id] {
+					target = cand.id
+					break
+				}
+			}
+			if len(n.layers) == 0 {
+				n.layers = [][][16]byte{nil}
+			}
+			if len(n.layers[0]) < M0 {
+				n.layers[0] = append(n.layers[0], target)
+			} else {
+				n.layers[0][len(n.layers[0])-1] = target
+			}
+			added++
+		}
+		indeg := map[[16]byte]int{}
+		for _, n := range idx.nodes {
+			if len(n.layers) > 0 {
+				for _, nb := range n.layers[0] {
+					indeg[nb]++
+				}
+			}
+		}
+		for _, u := range sortIDs(unreach) {
+			un := idx.nodes[u]
+			for _, cand := range idx.searchLayer(idx.entryPoint, un.vec, idx.efC(), 0) {
+				r := idx.nodes[cand.id]
+				if cand.id == u || r == nil || !fwd[cand.id] {
+					continue
+				}
+				if len(r.layers) == 0 {
+					r.layers = [][][16]byte{nil}
+				}
+				l0 := r.layers[0]
+				if len(l0) < M0 {
+					r.layers[0] = append(l0, u)
+				} else if last := l0[len(l0)-1]; indeg[last] >= 2 {
+					indeg[last]--
+					l0[len(l0)-1] = u
+				} else {
+					continue
+				}
+				indeg[u]++
+				added++
+				break
+			}
+		}
+	}
+	return added
 }
 
 type pendingVec struct {
