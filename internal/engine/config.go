@@ -10,6 +10,7 @@ import (
 	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/storage"
+	"github.com/scrypster/muninndb/internal/writetwin"
 )
 
 // EngineConfig holds all constructor parameters for Engine.
@@ -52,4 +53,9 @@ type EngineConfig struct {
 	// verifies after it. nil → read-only ids are ro0.<ULID> and cannot be
 	// labelled, credential/session hashes are zero, and NewEngine WARNs once.
 	QueryIDSecret []byte
+
+	// WriteTwinMode is the write-time twin check's mode (COG-35), parsed from
+	// MUNINN_WRITE_RELATED by cmd/muninn. The zero value is writetwin.Off:
+	// no ring, no worker, no lookup, byte-identical responses.
+	WriteTwinMode writetwin.Mode
 }

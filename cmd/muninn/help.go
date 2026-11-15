@@ -182,6 +182,34 @@ var subcommandHelp = map[string]func(){
 				"muninn backup --output /backups/muninn-2026-02-25",
 			})
 	},
+	"twin-replay": func() {
+		printSubcommandUsage("twin-replay", "read-only replay of the write-time twin rule over a vault (acceptance check before MUNINN_WRITE_RELATED=1)", "muninn twin-replay --vault <name> [flags]",
+			[][2]string{
+				{"--data-dir <dir>", "Data directory to replay — normally a `muninn backup` copy (default: ~/.muninn/data)"},
+				{"--vault <name>", "Vault to replay (required)"},
+				{"--days <n>", "Replay window in days (default 60)"},
+				{"--threshold <t>", "Use this threshold instead of the vault override / model hint"},
+				{"--model <name>", "Embed model whose hint to use when the vault records none"},
+				{"--out <dir>", "Write pairs.jsonl (ids), judge.jsonl (FULL TEXT, blind) and key.jsonl"},
+				{"--key <file> --labels <file>", "Score blind labels and print the pre-committed verdict"},
+			},
+			[]string{
+				"muninn backup --output /tmp/snap && muninn twin-replay --data-dir /tmp/snap --vault work --model bge-small-en-v1.5 --out /tmp/judge",
+				"muninn twin-replay --data-dir /tmp/snap --vault work --model bge-small-en-v1.5 --key /tmp/judge/key.jsonl --labels /tmp/judge/labels.jsonl",
+			})
+	},
+	"twin-audit": func() {
+		printSubcommandUsage("twin-audit", "count unresolved near-twin pairs from the shadow log, read from the store", "muninn twin-audit --vault <name> --log <server.log> [flags]",
+			[][2]string{
+				{"--data-dir <dir>", "Data directory — normally a `muninn backup` copy (default: ~/.muninn/data)"},
+				{"--vault <name>", "Vault to audit (required)"},
+				{"--log <file>", "Server log with the shadow-mode \"write twin flagged\" lines (required)"},
+				{"--min-age <dur>", "Only count pairs flagged at least this long ago (default 168h)"},
+			},
+			[]string{
+				"muninn twin-audit --data-dir /tmp/snap --vault work --log ~/.muninn/data/muninn.log",
+			})
+	},
 	"upgrade": func() {
 		printSubcommandUsage("upgrade", "check for and install updates", "muninn upgrade [flags]",
 			[][2]string{

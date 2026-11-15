@@ -233,6 +233,8 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		req.UpsertMode = true
 		req.IdempotentID = opID // the durable upsert key (0x2F forward index)
 	}
+	// Descriptive writer facts for the write-time twin shadow log (COG-35).
+	ctx = engine.WithWriteTwinCaller(ctx, twinCallerFor(authFromContext(ctx), opID != ""))
 	resp, err := s.engine.Write(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
@@ -271,6 +273,13 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 	// entities; the created engram is the self-echo guard. Inert unless
 	// MUNINN_PROSPECTIVE=1.
 	result.Notices = s.rememberNotices(ctx, vault, req.Entities, resp.ID)
+	// Write-time twin block (COG-35): AFTER the commit, bounded, panic-safe,
+	// and absent unless mode 1 + an opted-in vault + a full-mode credential.
+	// A client-supplied embedding is never fed to the twin ring (it may come
+	// from another model), so there is nothing to wait for.
+	if len(req.Embedding) == 0 {
+		result.Related = s.rememberRelated(ctx, vault, resp.ID, resp.Hint, upsertMode)
+	}
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 
@@ -359,6 +368,10 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		enrichReports = append(enrichReports, rep)
 	}
 
+	// Batch items are shadow-checked only (COG-35): no inline block, ever —
+	// the whole batch's embed would hold the lane for seconds. The caller
+	// description only enriches the shadow log.
+	ctx = engine.WithWriteTwinCaller(ctx, twinCallerFor(authFromContext(ctx), false))
 	responses, errs := s.engine.WriteBatch(ctx, reqs)
 
 	type batchItemResult struct {
