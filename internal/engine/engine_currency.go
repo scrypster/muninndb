@@ -183,9 +183,20 @@ func (e *Engine) applyCurrencyAnnotationOrdered(ctx context.Context, ws [8]byte,
 		return results
 	}
 
+	// The margin absorbs boundary reshuffles of a boosted order. Under
+	// content-first order (COG-35) the list arrives already in its final order
+	// and uncut — phase 6 deferred the cut to activateCore — so the rows the
+	// caller receives (the "co-retrieved set" this phase is defined over) are
+	// exactly the first maxResults, and examining a margin past them would
+	// only pay the pairwise similarity reads for rows that are never returned:
+	// measured, that margin tripled limit=10 recall p50 on a 2,000-memory vault.
+	margin := currencyMargin
+	if contentFirst {
+		margin = 0
+	}
 	examined := len(results)
-	if maxResults > 0 && examined > maxResults+currencyMargin {
-		examined = maxResults + currencyMargin
+	if maxResults > 0 && examined > maxResults+margin {
+		examined = maxResults + margin
 	}
 
 	// Per-call tag document-frequency cache: at most one 0x0C range scan per
