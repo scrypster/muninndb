@@ -9,7 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
+  v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
+  v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:
+  GO-2026-6865 (zstd, reached via the MBP transport compressor), GO-2026-6859
+  (`net/http`), GO-2026-6809 (`crypto/x509`), GO-2026-6443 and GO-2026-6348
+  (gRPC server), GO-2026-6603/6611/6612/6617 (`x/net`), plus standard-library
+  fixes in `net/http`, `crypto/tls`, `html/template`, `net/url` and
+  `encoding/asn1` between go1.26.6 and go1.26.11. The Docker builder image
+  moves from `golang:1.24` to `golang:1.26.11` to match.
 
 ---
 
