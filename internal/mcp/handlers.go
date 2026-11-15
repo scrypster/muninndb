@@ -366,6 +366,10 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		Status  string `json:"status"`
 		Error   string `json:"error,omitempty"`
 		Hint    string `json:"hint,omitempty"`
+		// DuplicateOf names the existing memory this item's content was
+		// deduplicated against (no new engram was written). Status stays
+		// "ok" for compatibility; this field is the signal.
+		DuplicateOf string `json:"duplicate_of,omitempty"`
 	}
 	results := make([]batchItemResult, len(reqs))
 	for i := range reqs {
@@ -373,10 +377,15 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			results[i] = batchItemResult{Index: i, Status: "error", Error: errs[i].Error()}
 		} else {
 			results[i] = batchItemResult{Index: i, ID: responses[i].ID, Concept: reqs[i].Concept, Status: "ok"}
+			// The engine's per-item hint (e.g. "duplicate_content") was
+			// dropped here, so a deduplicated item read as a fresh write.
+			// Carry it exactly as muninn_remember does.
+			results[i].Hint = responses[i].Hint
+			if responses[i].Hint == "duplicate_content" {
+				results[i].DuplicateOf = responses[i].ID
+			}
 		}
-		if h := enrichReports[i].hint(); h != "" {
-			results[i].Hint = h
-		}
+		results[i].Hint = joinHints(results[i].Hint, enrichReports[i].hint())
 		if h := unknownTypeHint(unknownTypes[i]); h != "" {
 			if results[i].Hint != "" {
 				results[i].Hint += " "

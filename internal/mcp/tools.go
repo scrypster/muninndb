@@ -160,8 +160,9 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "muninn_remember_batch",
-			Description: "Store multiple memories at once. More efficient than calling muninn_remember repeatedly. Maximum 50 per batch. Best practice: break complex topics into individual atomic memories — one concept, decision, or fact each. This produces sharper embeddings, better associations, and more accurate retrieval.",
+			Name: "muninn_remember_batch",
+			Description: "Store multiple memories at once. More efficient than calling muninn_remember repeatedly. Maximum 50 per batch. Best practice: break complex topics into individual atomic memories — one concept, decision, or fact each. This produces sharper embeddings, better associations, and more accurate retrieval. " +
+				"An item whose content exactly matches an existing memory is not stored again: its result carries `duplicate_of` (the existing id, also returned as `id`) and hint `duplicate_content`.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

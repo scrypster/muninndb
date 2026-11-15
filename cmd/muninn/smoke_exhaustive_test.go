@@ -440,6 +440,22 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_status returned error field: %v", errVal)
 		}
+		// health is derived (good | degraded | unknown), never a bare constant,
+		// and always comes with its reasons list and the worker/embedder blocks.
+		switch h := result["health"]; h {
+		case "good", "degraded":
+		default:
+			t.Errorf("muninn_status health = %v, want good or degraded from a real engine", h)
+		}
+		if _, ok := result["health_reasons"].([]any); !ok {
+			t.Errorf("muninn_status missing health_reasons list: %v", result)
+		}
+		if _, ok := result["workers"].(map[string]any); !ok {
+			t.Errorf("muninn_status missing workers block: %v", result)
+		}
+		if _, ok := result["embedder"].(map[string]any); !ok {
+			t.Errorf("muninn_status missing embedder block: %v", result)
+		}
 	})
 
 	t.Run("muninn_evolve", func(t *testing.T) {
@@ -490,6 +506,11 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_session returned error field: %v", errVal)
+		}
+		for _, k := range []string{"total", "returned", "truncated", "activations"} {
+			if _, ok := result[k]; !ok {
+				t.Errorf("muninn_session missing %q: %v", k, result)
+			}
 		}
 	})
 
