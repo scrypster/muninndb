@@ -329,3 +329,38 @@ func TestHonestClock_RRFFusionTieIsNewestFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestHonestClock_ReportedFactorsAreAppliedOnEveryFusionPath: decay_factor,
+// recency and access_frequency are documented as the factor scoring APPLIED.
+// rrf applies none of them, so 0 there read as "fully decayed"; it must report
+// the neutral values (1, 1, 0) like ACT-R. CGDN applies only the decay factor.
+// weighted_sum applies all three, so it reports the real values.
+func TestHonestClock_ReportedFactorsAreAppliedOnEveryFusionPath(t *testing.T) {
+	now := time.Now()
+	const ageDays, stability = 40.0, 30.0
+	mk := func() *storage.Engram {
+		at := now.Add(-time.Duration(ageDays*24) * time.Hour)
+		return &storage.Engram{Concept: "c", Content: "c", Confidence: 1, Stability: stability,
+			CreatedAt: at, LastAccess: at, AccessCount: 5}
+	}
+	wsDecay := math.Max(0.05, math.Exp(-ageDays/stability))
+	wsRecency := math.Exp(-ageDays * math.Ln2 / 7)
+	wsAccess := math.Log1p(5) / math.Log1p(100)
+	for _, tc := range []struct {
+		name                  string
+		w                     *Weights
+		decay, recency, acces float64
+	}{
+		{"actr", &Weights{UseACTR: true, SemanticSimilarity: 0.6, FullTextRelevance: 0.4}, 1, 1, 0},
+		{"rrf", &Weights{UseRRFFusion: true, DisableACTR: true}, 1, 1, 0},
+		{"cgdn", &Weights{UseCGDN: true, DisableACTR: true, SemanticSimilarity: 0.5, FullTextRelevance: 0.3}, wsDecay, 1, 0},
+		{"weighted_sum", &Weights{DisableACTR: true, SemanticSimilarity: 0.35, FullTextRelevance: 0.25,
+			DecayFactor: 0.2, AccessFrequency: 0.05, Recency: 0.05}, wsDecay, wsRecency, wsAccess},
+	} {
+		comp := hcScoreOne(t, mk(), 0, tc.w, fusedCandidate{ftsScore: 0.8, vectorScore: 0.9, rrfScore: 0.03})
+		if math.Abs(comp.DecayFactor-tc.decay) > 1e-9 || math.Abs(comp.Recency-tc.recency) > 1e-9 || math.Abs(comp.AccessFrequency-tc.acces) > 1e-9 {
+			t.Errorf("%s: reported decay=%.4f recency=%.4f access=%.4f, applied are %.4f %.4f %.4f",
+				tc.name, comp.DecayFactor, comp.Recency, comp.AccessFrequency, tc.decay, tc.recency, tc.acces)
+		}
+	}
+}

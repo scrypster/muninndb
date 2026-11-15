@@ -2257,11 +2257,16 @@ func (e *ActivationEngine) phase6Score(
 					SemanticSimilarity:    rescaleSemantic(c.vectorScore, w.SemanticBaseline),
 					SemanticSimilarityRaw: c.vectorScore,
 					FullTextRelevance:     normalizedFTS,
-					HebbianBoost:          c.hebbianBoost,
-					TransitionBoost:       c.transitionBoost,
-					Confidence:            float64(eng.Confidence),
-					Raw:                   c.rrfScore * (1.0 + c.hebbianBoost + c.transitionBoost),
-					Final:                 final,
+					// The factors rrf APPLIED: none. Neutral values (1, 1, 0 —
+					// AccessFrequency's zero value) say "no attenuation", where
+					// the old zero values read as "fully decayed".
+					DecayFactor:     1.0,
+					Recency:         1.0,
+					HebbianBoost:    c.hebbianBoost,
+					TransitionBoost: c.transitionBoost,
+					Confidence:      float64(eng.Confidence),
+					Raw:             c.rrfScore * (1.0 + c.hebbianBoost + c.transitionBoost),
+					Final:           final,
 				},
 				hopPath: c.hopPath,
 				// floored=false: the RRF components literal above carries no
@@ -2338,6 +2343,7 @@ func (e *ActivationEngine) phase6Score(
 			comp := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
 			// Gated activation: content relevance × cognitive gate
 			a := computeGatedActivation(comp.SemanticSimilarity, comp.FullTextRelevance, comp.DecayFactor, comp.HebbianBoost, w)
+			reportCGDNApplied(&comp)
 			cgdnCands = append(cgdnCands, cgdnCandidate{
 				id: c.id, activation: a, components: comp, hopPath: c.hopPath, inTagPool: c.inTagPool,
 			})
@@ -2407,6 +2413,7 @@ func (e *ActivationEngine) phase6Score(
 		shadowMatches = collectShadowMatches(all, shadowEngrams, req, func(c scoringCandidate, eng *storage.Engram) (float64, float64, ScoreComponents) {
 			comp := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
 			a := computeGatedActivation(comp.SemanticSimilarity, comp.FullTextRelevance, comp.DecayFactor, comp.HebbianBoost, w)
+			reportCGDNApplied(&comp)
 			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
 			// Clamped to 1.0: with an EMPTY live pool the denominator
 			// degenerates to sigma^n over the 0.01 fallback, and an unclamped
@@ -2835,6 +2842,14 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 		Raw:                   raw,
 		Final:                 raw * conf,
 	}
+}
+
+// reportCGDNApplied makes a CGDN score card report what CGDN APPLIED: its gate
+// multiplies in the decay factor (computeGatedActivation) but never recency or
+// access frequency, so those report the neutral 1 and 0.
+func reportCGDNApplied(c *ScoreComponents) {
+	c.Recency = 1.0
+	c.AccessFrequency = 0
 }
 
 // actrDenominator is the precomputed normalization denominator used in computeACTR.

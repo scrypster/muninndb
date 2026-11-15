@@ -407,9 +407,10 @@ components:
           type: number
           format: float
           description: >-
-            The decay multiplier scoring APPLIED. Under ACT-R (the default) it
-            is always 1.0: age is not a scoring input. Under weighted_sum it is
-            the Ebbinghaus factor exp(-days since last access / stability).
+            The decay factor scoring APPLIED. 1.0 (no attenuation) under ACT-R
+            (the default) and rrf, which have no age input. Under weighted_sum
+            and CGDN it is the Ebbinghaus factor exp(-days since last access /
+            stability), floored at 0.05.
         hebbian_boost:
           type: number
           format: float
@@ -423,16 +424,16 @@ components:
           type: number
           format: float
           description: >-
-            The access-frequency signal scoring APPLIED. Under ACT-R (the
-            default) it is always 0: access history is not a scoring input.
-            Under weighted_sum it is log1p(access_count)/log1p(100).
+            The access-frequency signal scoring APPLIED. 0 under ACT-R (the
+            default), rrf and CGDN, which do not use access history. Under
+            weighted_sum it is log1p(access_count)/log1p(100).
         recency:
           type: number
           format: float
           description: >-
-            The recency multiplier scoring APPLIED. Under ACT-R (the default) it
-            is always 1.0. Under weighted_sum it halves every 7 days since last
-            access.
+            The recency factor scoring APPLIED. 1.0 (no attenuation) under
+            ACT-R (the default), rrf and CGDN, which apply none. Under
+            weighted_sum it halves every 7 days since last access.
         raw:
           type: number
           format: float
@@ -1161,9 +1162,10 @@ components:
           type: number
           format: double
           description: >-
-            The decay multiplier scoring APPLIED. Under ACT-R (the default) it
-            is always 1.0: age is not a scoring input. Under weighted_sum it is
-            the Ebbinghaus factor exp(-days since last access / stability).
+            The decay factor scoring APPLIED. 1.0 (no attenuation) under ACT-R
+            (the default) and rrf, which have no age input. Under weighted_sum
+            and CGDN it is the Ebbinghaus factor exp(-days since last access /
+            stability), floored at 0.05.
         hebbian_boost:
           type: number
           format: double
@@ -1171,9 +1173,9 @@ components:
           type: number
           format: double
           description: >-
-            The access-frequency signal scoring APPLIED. Under ACT-R (the
-            default) it is always 0: access history is not a scoring input.
-            Under weighted_sum it is log1p(access_count)/log1p(100).
+            The access-frequency signal scoring APPLIED. 0 under ACT-R (the
+            default), rrf and CGDN, which do not use access history. Under
+            weighted_sum it is log1p(access_count)/log1p(100).
         confidence:
           type: number
           format: double
