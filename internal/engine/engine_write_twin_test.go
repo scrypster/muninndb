@@ -219,7 +219,7 @@ func TestWriteTwin_OffByDefault(t *testing.T) {
 	env.embed("layout", a, twinUnit(1)) // a no-op hook, never a panic
 	b := env.write("layout", "turnout", "the yard turnout uses a code 83 frog, insulated")
 	env.embed("layout", b, twinAt(twinUnit(1), 0.99, 2))
-	if res := env.eng.WriteTwinInline(context.Background(), "layout", b.String()); res != nil {
+	if res := env.eng.WriteTwinInline(context.Background(), "layout", b.String(), nil); res != nil {
 		t.Fatalf("off: WriteTwinInline must return nil (byte-identical responses), got %+v", res)
 	}
 }
@@ -234,7 +234,7 @@ func TestWriteTwin_InlineNeverDelaysWriteBeyondN(t *testing.T) {
 		return ch
 	}
 	w := env.write("layout", "helix", "the helix climbs two percent per turn")
-	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String())
+	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String(), nil)
 	if res == nil || res.Unavailable != twinEmbedTimeout {
 		t.Fatalf("no vector within N must answer embed_timeout, got %+v", res)
 	}
@@ -272,7 +272,7 @@ func TestWriteTwin_ReturnsBusyInsteadOfQueueingBehindABatch(t *testing.T) {
 	}
 	before := testutil.ToFloat64(metrics.WriteTwinEmbedSkippedBusyTotal)
 	w := env.write("layout", "helix", "the helix climbs two percent per turn")
-	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String())
+	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String(), nil)
 	if res == nil || res.Unavailable != twinEmbedderBusy {
 		t.Fatalf("queued behind an earlier pass must answer embedder_busy, got %+v", res)
 	}
@@ -289,7 +289,7 @@ func TestWriteTwin_PanicAfterCommitStillReturnsTheWrite(t *testing.T) {
 	w := env.write("layout", "helix", "the helix climbs two percent per turn")
 	env.embed("layout", w, twinUnit(3))
 	env.eng.twin.testAfterVector = func() { panic("injected lookup fault") }
-	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String())
+	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String(), nil)
 	if res == nil || res.Unavailable != twinInternalError {
 		t.Fatalf("a panic in the lookup must surface as unavailable internal_error, got %+v", res)
 	}
@@ -325,7 +325,7 @@ func TestWriteTwin_NamesOnlyChainHeads(t *testing.T) {
 	w := env.write("layout", "branch line", "branch line: DCC address after the latest re-mapping")
 	env.embed("layout", w, base)
 
-	res := env.eng.WriteTwinInline(ctx, "layout", w.String())
+	res := env.eng.WriteTwinInline(ctx, "layout", w.String(), nil)
 	if res == nil || res.Unavailable != "" {
 		t.Fatalf("inline check: %+v", res)
 	}
@@ -364,7 +364,7 @@ func TestWriteTwin_DoesNotStampOrCountAsAccess(t *testing.T) {
 	evBefore := events()
 
 	env.embed("layout", w, twinAt(twinUnit(20), 0.98, 21)) // shadow job queued too
-	res := env.eng.WriteTwinInline(ctx, "layout", w.String())
+	res := env.eng.WriteTwinInline(ctx, "layout", w.String(), nil)
 	if res == nil || len(res.Candidates) != 1 || res.Candidates[0].ID != e1.String() {
 		t.Fatalf("precondition: the check must name e1, got %+v", res)
 	}
@@ -405,7 +405,7 @@ func TestWriteTwin_IndependentOfActivationScoring(t *testing.T) {
 	}
 	w := env.write("layout", "signals", "the station home signal is a searchlight with two aspects")
 	env.embed("layout", w, base)
-	res := env.eng.WriteTwinInline(ctx, "layout", w.String())
+	res := env.eng.WriteTwinInline(ctx, "layout", w.String(), nil)
 	if res == nil || len(res.Candidates) != 2 {
 		t.Fatalf("want both candidates, got %+v", res)
 	}
@@ -436,12 +436,12 @@ func TestWriteTwin_HomogeneousVaultGoesShadowAndSaysSo(t *testing.T) {
 			}
 		}
 		w := env.write("layout", "wagon", "wagon card: a new forty-foot boxcar")
-		first := env.eng.WriteTwinInline(ctx, "layout", w.String())
+		first := env.eng.WriteTwinInline(ctx, "layout", w.String(), nil)
 		if first == nil || first.Unavailable != twinCalibrating {
 			t.Fatalf("before any measurement the vault must say calibrating, got %+v", first)
 		}
 		env.eng.WaitWriteTimeIdle() // the guard computation has finished
-		res := env.eng.WriteTwinInline(ctx, "layout", w.String())
+		res := env.eng.WriteTwinInline(ctx, "layout", w.String(), nil)
 		if res == nil {
 			t.Fatal("nil result")
 		}
@@ -463,7 +463,7 @@ func TestWriteTwin_UnknownModelHasNoHint(t *testing.T) {
 	env.optIn("layout", true, nil)
 	env.eng.SetWriteTwinFeed(idleFeed{})
 	w := env.write("layout", "helix", "the helix climbs two percent per turn")
-	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String())
+	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String(), nil)
 	if res == nil || res.Unavailable != twinNoModelHint {
 		t.Fatalf("an unregistered model must get no hint (no_model_hint), got %+v", res)
 	}
@@ -488,12 +488,12 @@ func TestWriteTwin_OverrideWinsAndIsClamped(t *testing.T) {
 	env.optIn("layout", true, &low)
 	w := env.write("layout", "helix", "the helix climbs two percent per turn")
 	env.embed("layout", w, twinUnit(5))
-	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String())
+	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String(), nil)
 	if res == nil || res.Threshold != writetwin.OverrideMin || res.ThresholdSource != "override" {
 		t.Fatalf("override 0.2 must clamp to %.2f with source override, got %+v", writetwin.OverrideMin, res)
 	}
 	env.optIn("layout", true, &high)
-	res = env.eng.WriteTwinInline(context.Background(), "layout", w.String())
+	res = env.eng.WriteTwinInline(context.Background(), "layout", w.String(), nil)
 	if res == nil || res.Threshold != 0.96 || res.ThresholdSource != "override" {
 		t.Fatalf("an in-range override must win over the 0.93 model hint, got %+v", res)
 	}
@@ -599,7 +599,7 @@ func TestWriteTwin_RingRaceConcurrentWritesAndClear(t *testing.T) {
 			defer wg.Done()
 			for i := g; i < len(ids); i += 4 {
 				env.embed("layout", ids[i], twinAt(twinUnit(70), 0.96, int64(700+i)))
-				_ = env.eng.WriteTwinInline(ctx, "layout", ids[i].String())
+				_ = env.eng.WriteTwinInline(ctx, "layout", ids[i].String(), nil)
 			}
 		}(g)
 	}
@@ -615,5 +615,38 @@ func TestWriteTwin_RingRaceConcurrentWritesAndClear(t *testing.T) {
 	env.eng.resetTwinVault(ws)
 	if n := env.eng.twin.ring.Len(ws); n != 0 {
 		t.Fatalf("after a clear the vault's ring must be empty, holds %d", n)
+	}
+}
+
+// TestWriteTwin_ShownLogMatchesRender: when the caller can show only the
+// first candidate (the byte cap), the log says shown=true for that one and
+// shown=false for the other — never a display that did not happen.
+func TestWriteTwin_ShownLogMatchesRender(t *testing.T) {
+	env := inlineReady(t, "layout")
+	lc := captureLogs(t)
+	base := twinUnit(80)
+	a := env.write("layout", "ballast", "mainline ballast is fine grey granite")
+	env.embed("layout", a, twinAt(base, 0.97, 81))
+	b := env.write("layout", "ballast", "the mainline uses fine grey granite ballast")
+	env.embed("layout", b, twinAt(base, 0.95, 82))
+	w := env.write("layout", "ballast", "fine grey granite ballast on the mainline")
+	env.embed("layout", w, base)
+	env.eng.WaitWriteTimeIdle()
+	res := env.eng.WriteTwinInline(context.Background(), "layout", w.String(), func(*WriteTwinResult) int { return 1 })
+	if res == nil || len(res.Candidates) != 2 {
+		t.Fatalf("want two candidates, got %+v", res)
+	}
+	// (The shadow worker also logged both, shown=false, from the hook above;
+	// what matters is that b is never claimed shown.)
+	var shownA, shownB bool
+	for _, l := range lc.lines(writetwin.FlagLogMsg) {
+		if !strings.Contains(l, "new_id="+w.String()) || !strings.Contains(l, "shown=true") {
+			continue
+		}
+		shownA = shownA || strings.Contains(l, "head_id="+a.String())
+		shownB = shownB || strings.Contains(l, "head_id="+b.String())
+	}
+	if !shownA || shownB {
+		t.Fatalf("log must say a shown and never b (shownA=%v shownB=%v): %v", shownA, shownB, lc.lines(writetwin.FlagLogMsg))
 	}
 }

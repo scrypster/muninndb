@@ -714,7 +714,13 @@ func (t *writeTwin) awaitVector(ctx context.Context, ws [8]byte, id storage.ULID
 // fails it, and recovers its own panics. The caller has already decided the
 // credential may see the result (full mode only) and that the write created a
 // new memory (not a dedup, idempotent or upsert result).
-func (e *Engine) WriteTwinInline(ctx context.Context, vault, newID string) (res *WriteTwinResult) {
+//
+// render, when non-nil, receives the result and returns how many of its
+// leading candidates the caller actually shows (a byte cap can cut the
+// second); the shadow log then records shown=true for exactly those and
+// shown=false for the rest, so the log never claims a display that did not
+// happen. nil render means all were shown.
+func (e *Engine) WriteTwinInline(ctx context.Context, vault, newID string, render func(*WriteTwinResult) int) (res *WriteTwinResult) {
 	t := e.twin
 	if t == nil || t.mode != writetwin.Inline {
 		return nil
@@ -795,7 +801,13 @@ func (e *Engine) WriteTwinInline(ctx context.Context, vault, newID string) (res 
 			ID: n.head.ID.String(), Concept: truncateRunes(n.head.Concept, writetwin.MaxConceptRunes),
 			Similarity: n.sim, CreatedAt: n.head.CreatedAt,
 		})
-		e.logTwinFlag(ws, id, entry.CreatedAt, n, "recent", true, meta, thr, guard)
+	}
+	shown := len(named)
+	if render != nil && len(named) > 0 {
+		shown = render(base)
+	}
+	for i, n := range named {
+		e.logTwinFlag(ws, id, entry.CreatedAt, n, "recent", i < shown, meta, thr, guard)
 	}
 	outcome := "none"
 	if len(named) > 0 {

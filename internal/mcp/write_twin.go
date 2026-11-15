@@ -19,7 +19,7 @@ import (
 // check (COG-35). The adapter forwards it to *engine.Engine; test fakes need
 // not implement it (the block is then simply absent).
 type writeTwinCapable interface {
-	WriteTwinInline(ctx context.Context, vault, newID string) *engine.WriteTwinResult
+	WriteTwinInline(ctx context.Context, vault, newID string, render func(*engine.WriteTwinResult) int) *engine.WriteTwinResult
 }
 
 // RelatedBlock is the mode-1 write-time twin block on a muninn_remember
@@ -120,7 +120,11 @@ func (s *MCPServer) rememberRelated(ctx context.Context, vault, newID, engineHin
 	if !ok {
 		return nil
 	}
-	res := wt.WriteTwinInline(ctx, vault, newID)
+	var built *RelatedBlock
+	res := wt.WriteTwinInline(ctx, vault, newID, func(r *engine.WriteTwinResult) int {
+		built = buildRelatedBlock(newID, r, time.Now())
+		return len(built.Candidates)
+	})
 	if res == nil {
 		return nil
 	}
@@ -130,7 +134,10 @@ func (s *MCPServer) rememberRelated(ctx context.Context, vault, newID, engineHin
 	if len(res.Candidates) == 0 {
 		return nil
 	}
-	return buildRelatedBlock(newID, res, time.Now())
+	if built == nil { // an engine that did not call render
+		built = buildRelatedBlock(newID, res, time.Now())
+	}
+	return built
 }
 
 // buildRelatedBlock renders the evidence and options, then enforces the
@@ -141,8 +148,11 @@ func buildRelatedBlock(newID string, res *engine.WriteTwinResult, now time.Time)
 	if len(cands) > writetwin.MaxShown {
 		cands = cands[:writetwin.MaxShown]
 	}
-	for _, conceptRunes := range []int{writetwin.MaxConceptRunes, 40, 16} {
-		for n := len(cands); n >= 1; n-- {
+	// Shrink order: keep every candidate and shorten the concept echoes (the
+	// id is the evidence; the concept is a convenience), and only then drop
+	// the second candidate.
+	for n := len(cands); n >= 1; n-- {
+		for _, conceptRunes := range []int{writetwin.MaxConceptRunes, 40, 16} {
 			b := renderRelated(newID, res, cands[:n], conceptRunes, now)
 			if size, err := json.Marshal(b); err == nil && len(size) <= writetwin.MaxBlockBytes {
 				return b
@@ -169,18 +179,20 @@ func renderRelated(newID string, res *engine.WriteTwinResult, cands []engine.Wri
 	// option names exactly the id it retires. "old supersedes new" is never
 	// offered — it would retire the update — and forgetting the new copy is
 	// never the first option.
-	for _, c := range cands {
+	// The ids live in call and retires; the condition names the candidate by
+	// position so the id is not paid for three times per option.
+	for i, c := range cands {
 		id := c.ID
 		b.Options = append(b.Options, RelatedOption{
-			If:      "the new memory updates or corrects " + id,
-			Call:    fmt.Sprintf("muninn_link(source_id=%q, target_id=%q, relation=\"supersedes\")", newID, id),
+			If:      fmt.Sprintf("the new memory updates or corrects candidate %d", i+1),
+			Call:    fmt.Sprintf("muninn_link(source_id=%q,target_id=%q,relation=\"supersedes\")", newID, id),
 			Retires: &id,
 		})
 	}
 	nid := newID
-	which := cands[0].ID
+	which := "candidate 1"
 	if len(cands) > 1 {
-		which = "an earlier memory above"
+		which = "a candidate"
 	}
 	b.Options = append(b.Options,
 		RelatedOption{If: which + " already says this and is the better copy", Call: fmt.Sprintf("muninn_forget(id=%q)", newID), Retires: &nid},
