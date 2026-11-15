@@ -151,9 +151,15 @@ type writeTwin struct {
 	// guardMinSample is writetwin.GuardMinSample in production; tests of the
 	// guard's store wiring lower it rather than writing 500 engrams.
 	guardMinSample int
+	// after is the inline wait's timer (time.After in production); tests
+	// inject one that records the budget and fires on command.
+	after func(time.Duration) <-chan time.Time
 	// testAfterVector, when set, runs on the inline path after the vector
 	// arrived (a panic-injection seam for TestWriteTwin_PanicAfterCommit…).
 	testAfterVector func()
+	// testOnWait, when set, runs once the inline path has registered its
+	// waiter — the deterministic point for a test to deliver the vector.
+	testOnWait func()
 }
 
 func newWriteTwin(mode writetwin.Mode) *writeTwin {
@@ -169,6 +175,7 @@ func newWriteTwin(mode writetwin.Mode) *writeTwin {
 		jobs:           make(chan twinJob, twinQueueSize),
 		stop:           make(chan struct{}),
 		guardMinSample: writetwin.GuardMinSample,
+		after:          time.After,
 	}
 	t.idleCond = sync.NewCond(&t.idleMu)
 	return t
@@ -678,13 +685,14 @@ func (t *writeTwin) awaitVector(ctx context.Context, ws [8]byte, id storage.ULID
 	}
 	t.waiters[id] = ch
 	t.mu.Unlock()
+	if t.testOnWait != nil {
+		t.testOnWait()
+	}
 
-	timer := time.NewTimer(budget)
-	defer timer.Stop()
 	select {
 	case e := <-ch:
 		return e, true
-	case <-timer.C:
+	case <-t.after(budget):
 	case <-ctx.Done():
 	}
 	t.mu.Lock()
