@@ -382,6 +382,8 @@ func cfIDs(rows []cfRow, n int) string {
 // (each normal recall rewrites the log the next one reads). RED on the trunk:
 // phase 6 cut at `limit` BEFORE the entity boost, so a row past the cut could
 // be lifted into the first ten only when the limit was large enough to keep it.
+// Content-first order alone already makes this pass; the deferred cut is pinned
+// by TestContentFirst_TieAtTheCutDoesNotDependOnLimit (adversarial review).
 func TestContentFirst_FirstNRowsDoNotDependOnLimit(t *testing.T) {
 	c := newCFEnv(t)
 	const vault = "trail-limit"
@@ -399,6 +401,44 @@ func TestContentFirst_FirstNRowsDoNotDependOnLimit(t *testing.T) {
 		}
 		if a, b := cfIDs(r50, 10), cfIDs(r10, 10); a != b {
 			t.Errorf("read_only=%v: first 10 of limit=50 != limit=10\n50: %v\n10: %v", readOnly, r50[:10], r10)
+		}
+	}
+}
+
+// TestContentFirst_TieAtTheCutDoesNotDependOnLimit — the case only the
+// deferred cut decides: two memories tie EXACTLY on content at the limit
+// boundary, and only the older one shares a rare entity with the top match.
+// Its entity evidence exists only after the entity boost runs, so a phase-6
+// cut at `limit` broke the tie newest-first BEFORE that evidence existed, and
+// limit=6 returned the other twin while limit=100 put the associated one
+// sixth. RED with actReq.DeferTruncation = false.
+func TestContentFirst_TieAtTheCutDoesNotDependOnLimit(t *testing.T) {
+	c := newCFEnv(t)
+	const vault = "trail-cut-tie"
+	h := time.Hour
+	c.write(vault, "culvert outlet riprap drainage", "culvert outlet riprap drainage at mile two", 50*h, "Kestrel Saddle")
+	c.write(vault, "culvert outlet riprap", "the culvert outlet riprap was reset", 40*h)
+	c.write(vault, "outlet riprap drainage", "riprap drainage at the outlet upstream", 39*h)
+	c.write(vault, "culvert drainage riprap", "culvert drainage riprap after storms", 38*h)
+	c.write(vault, "culvert outlet drainage", "culvert outlet drainage is slow", 37*h)
+	twinOld := c.write(vault, "riprap drainage", "riprap drainage below the bench", 30*h, "Kestrel Saddle")
+	twinNew := c.write(vault, "riprap drainage", "riprap drainage below the bench", 20*h)
+	c.write(vault, "drainage notes", "drainage was checked in autumn", 15*h)
+	for i := 0; i < 12; i++ {
+		c.write(vault, fmt.Sprintf("brushing log %d", i), fmt.Sprintf("crew brushed the corridor on day %d", i), time.Duration(100+i)*h)
+	}
+	all := c.recall(vault, cfQuery, 100, true)
+	io, in := cfIndex(all, twinOld), cfIndex(all, twinNew)
+	if io < 0 || in < 0 || all[io].abs != all[in].abs || all[io].entity <= 0 {
+		t.Fatalf("premise: the twins must tie exactly and the older must carry entity evidence\n%v", all)
+	}
+	if io != 5 || in != 6 {
+		t.Fatalf("premise: the twins must sit just below the five seeds (ranks 6 and 7), associated one first: %v", all)
+	}
+	for _, limit := range []int{1, 2, 3, 4, 5, 6, 7, 8} {
+		got := c.recall(vault, cfQuery, limit, true)
+		if a, b := cfIDs(got, limit), cfIDs(all, limit); a != b {
+			t.Errorf("limit=%d: first rows differ from the first %d of limit=100\nlimit %d: %v\nlimit 100: %v", limit, limit, limit, got, all[:limit])
 		}
 	}
 }
