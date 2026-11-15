@@ -222,7 +222,7 @@ func (ps *PebbleStore) WriteRecallEvent(ctx context.Context, wsPrefix [8]byte, e
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 	batch.Set(key, val, nil)
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("write recall event: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -432,7 +432,7 @@ func (ps *PebbleStore) PruneRecallEvents(ctx context.Context, wsPrefix [8]byte, 
 		batch.Close()
 		return 0, nil
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return 0, fmt.Errorf("prune recall events: commit: %w", err)
 	}
 	slog.Info("storage: recall events pruned", "count", count)

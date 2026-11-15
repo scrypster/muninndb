@@ -21,6 +21,23 @@ type Applier struct {
 	lastApplied  uint64
 	appliedSince uint64 // entries since last explicit sync
 	mu           sync.Mutex
+
+	// onCommitted / onReset let the local store keep its derived in-memory
+	// state (the retired set, storage/retired.go) in step with what this
+	// applier writes behind its back. onCommitted receives the repr of every
+	// batch the applier commits; onReset is called when a snapshot has
+	// replaced local state wholesale (ResetTo). Both nil unless wired.
+	onCommitted func(repr []byte)
+	onReset     func()
+}
+
+// SetCommitHooks installs the post-commit hooks (see the Applier fields).
+// Must be called before the applier is shared across goroutines.
+func (a *Applier) SetCommitHooks(onCommitted func(repr []byte), onReset func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onCommitted = onCommitted
+	a.onReset = onReset
 }
 
 // NewApplier creates a new Applier for a Pebble database.
@@ -85,7 +102,11 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 		if err := reprBatch.SetRepr(entry.Value); err != nil {
 			return fmt.Errorf("apply batch repr at seq %d: %w", entry.Seq, err)
 		}
-		if err := reprBatch.Commit(pebble.NoSync); err != nil {
+		err := reprBatch.Commit(pebble.NoSync)
+		if a.onCommitted != nil {
+			a.onCommitted(reprBatch.Repr())
+		}
+		if err != nil {
 			return err
 		}
 		seqBuf := make([]byte, 8)
@@ -121,7 +142,11 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 	// Use NoSync per entry — Pebble's WAL provides crash-safety without an fsync
 	// on every write. Syncing every entry would serialize on disk I/O, making
 	// replication throughput proportional to fsync latency (~1 IOPS per entry).
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	err := batch.Commit(pebble.NoSync)
+	if a.onCommitted != nil {
+		a.onCommitted(batch.Repr())
+	}
+	if err != nil {
 		return err
 	}
 
@@ -168,6 +193,11 @@ func (a *Applier) ResetTo(seq uint64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// The snapshot replaced local state: anything derived from it is stale,
+	// whether or not the cursor moves.
+	if a.onReset != nil {
+		a.onReset()
+	}
 	if a.lastApplied == seq {
 		return nil
 	}

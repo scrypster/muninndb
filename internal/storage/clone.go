@@ -180,7 +180,7 @@ func (ps *PebbleStore) CloneVaultData(
 			batchCount++
 
 			if batchCount >= cloneBatchSize {
-				if err := batch.Commit(pebble.NoSync); err != nil {
+				if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 					batch.Close()
 					iter.Close()
 					return copiedEngrams, fmt.Errorf("clone: commit engram batch: %w", err)
@@ -196,7 +196,7 @@ func (ps *PebbleStore) CloneVaultData(
 		iter.Close()
 
 		if batchCount > 0 {
-			if err := batch.Commit(pebble.NoSync); err != nil {
+			if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 				batch.Close()
 				return copiedEngrams, fmt.Errorf("clone: commit final engram batch: %w", err)
 			}
@@ -253,7 +253,7 @@ func (ps *PebbleStore) CloneVaultData(
 			batchCount++
 
 			if batchCount >= cloneBatchSize {
-				if err := batch.Commit(pebble.NoSync); err != nil {
+				if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 					batch.Close()
 					iter.Close()
 					return copiedEngrams, fmt.Errorf("clone: commit batch prefix 0x%02X: %w", p, err)
@@ -266,7 +266,7 @@ func (ps *PebbleStore) CloneVaultData(
 		iter.Close()
 
 		if batchCount > 0 {
-			if err := batch.Commit(pebble.NoSync); err != nil {
+			if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 				batch.Close()
 				return copiedEngrams, fmt.Errorf("clone: commit final prefix 0x%02X: %w", p, err)
 			}
@@ -392,7 +392,7 @@ func (ps *PebbleStore) MergeVaultData(
 			batchCount++
 
 			if batchCount >= cloneBatchSize {
-				if err := batch.Commit(pebble.NoSync); err != nil {
+				if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 					batch.Close()
 					iter.Close()
 					return mergedEngrams, fmt.Errorf("merge: commit engram batch: %w", err)
@@ -408,7 +408,7 @@ func (ps *PebbleStore) MergeVaultData(
 		iter.Close()
 
 		if batchCount > 0 {
-			if err := batch.Commit(pebble.NoSync); err != nil {
+			if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 				batch.Close()
 				return mergedEngrams, fmt.Errorf("merge: commit final engram batch: %w", err)
 			}
@@ -505,7 +505,7 @@ func (ps *PebbleStore) MergeVaultData(
 			batchCount++
 
 			if batchCount >= cloneBatchSize {
-				if err := batch.Commit(pebble.NoSync); err != nil {
+				if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 					batch.Close()
 					iter.Close()
 					return mergedEngrams, fmt.Errorf("merge: commit batch prefix 0x%02X: %w", p, err)
@@ -518,7 +518,7 @@ func (ps *PebbleStore) MergeVaultData(
 		iter.Close()
 
 		if batchCount > 0 {
-			if err := batch.Commit(pebble.NoSync); err != nil {
+			if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 				batch.Close()
 				return mergedEngrams, fmt.Errorf("merge: commit final prefix 0x%02X: %w", p, err)
 			}

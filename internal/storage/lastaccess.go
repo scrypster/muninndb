@@ -44,7 +44,7 @@ func (ps *PebbleStore) WriteLastAccessEntry(ctx context.Context, ws [8]byte, id 
 	if err := batch.Set(newKey, nil, nil); err != nil {
 		return fmt.Errorf("last access: set new: %w", err)
 	}
-	return batch.Commit(pebble.NoSync)
+	return ps.commitBatch(batch, pebble.NoSync)
 }
 
 // ScanLastAccessDesc scans the 0x22 index in ascending key order (= descending

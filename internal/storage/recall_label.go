@@ -178,7 +178,7 @@ func (ps *PebbleStore) UpsertRecallLabel(ctx context.Context, wsPrefix [8]byte, 
 	if err := batch.Set(key, val, nil); err != nil {
 		return RecallLabel{}, false, fmt.Errorf("recall label: %w", err)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return RecallLabel{}, false, fmt.Errorf("recall label commit: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -379,7 +379,7 @@ func (ps *PebbleStore) upsertRecallDayMarker(ctx context.Context, wsPrefix [8]by
 	if err := batch.Set(key, out, nil); err != nil {
 		return RecallDayMarker{}, false, false, err
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return RecallDayMarker{}, false, false, fmt.Errorf("recall day marker commit: %w", err)
 	}
 	ps.replicateBatch(batch)

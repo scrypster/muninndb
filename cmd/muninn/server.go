@@ -1251,9 +1251,10 @@ func runServer() {
 	// Wire ClusterCoordinator when cluster mode is enabled.
 	var coordinator *replication.ClusterCoordinator
 	var repLog *replication.ReplicationLog
+	var applier *replication.Applier
 	if clusterCfg.Enabled {
 		repLog = replication.NewReplicationLog(db)
-		applier := replication.NewApplier(db)
+		applier = replication.NewApplier(db)
 		epochStore, err := replication.NewEpochStore(db)
 		if err != nil {
 			slog.Error("create epoch store", "err", err)
@@ -1328,6 +1329,11 @@ func runServer() {
 		storeCfg.RepLogAppend = replication.LocalAppendFunc(coordinator, repLog)
 	}
 	store := storage.NewPebbleStore(db, storeCfg)
+	if applier != nil {
+		// A follower applies the leader's batches straight into Pebble; route
+		// them through the store's cache invalidation (cache_guard.go).
+		applier.SetCommitHooks(store.InvalidateCommittedRepr, store.InvalidateAllCaches)
+	}
 
 	// Run startup migrations before the engine is built.
 	runStartupMigrations(context.Background(), store)

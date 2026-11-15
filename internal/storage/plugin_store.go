@@ -279,7 +279,7 @@ func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id
 		// If the ERF record doesn't exist (race), skip — WriteEngram will set it.
 	}
 
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
 		return fmt.Errorf("update embedding: commit: %w", err)
 	}
 	ps.replicateBatch(batch)

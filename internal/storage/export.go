@@ -462,7 +462,7 @@ func (ps *PebbleStore) ImportVaultData(
 				batchCount++
 
 				if batchCount >= exportBatchSize {
-					if err := batch.Commit(pebble.NoSync); err != nil {
+					if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 						batch.Close()
 						return nil, fmt.Errorf("import: commit batch: %w", err)
 					}
@@ -502,7 +502,7 @@ func (ps *PebbleStore) ImportVaultData(
 			}
 			// Checksum verified — commit the final batch now.
 			if kv.batchCount > 0 {
-				if err := kv.batch.Commit(pebble.Sync); err != nil {
+				if err := ps.commitBatch(kv.batch, pebble.Sync); err != nil {
 					kv.batch.Close()
 					return nil, fmt.Errorf("import: commit final batch (after checksum): %w", err)
 				}
@@ -522,7 +522,7 @@ func (ps *PebbleStore) ImportVaultData(
 		slog.Warn("import: archive has no checksum.txt — skipping integrity check (legacy export)",
 			"vault", vaultName)
 		if kv.batchCount > 0 {
-			if err := kv.batch.Commit(pebble.NoSync); err != nil {
+			if err := ps.commitBatch(kv.batch, pebble.NoSync); err != nil {
 				kv.batch.Close()
 				return nil, fmt.Errorf("import: commit final batch: %w", err)
 			}
