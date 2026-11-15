@@ -193,12 +193,13 @@ wall-clock. Jobs (from `.github/workflows/ci.yml`, real recent timings):
 
 | Job | ~duration | Notes |
 |---|---|---|
-| `go` (build & test) | 3.5–4 min | gofmt gate, embed-asset cache, web build, `go build -tags localassets`, `go vet`, **`go test -race -tags localassets ./...`**, coverage |
+| `go` (build & test) | ~5 min on develop before the split (expect less after) | gofmt gate, embed-asset cache, web build, `go build -tags localassets`, `go vet`, **`go test -race -tags localassets` on every package except `internal/engine`**, coverage (`coverage` artifact, which no longer includes `internal/engine`) |
+| `go-engine` (shards 0, 1) | not yet measured in CI | parallel to `go`. `internal/engine` under `-race -covermode=atomic -timeout 300s`, split in two by `scripts/go-test-shard.sh` (a test's shard is a hash of its own name, so adding a test never moves another). A `--check` step fails the job unless the shards partition the package's test list exactly. Coverage per shard as `coverage-engine-0`/`-1` |
 | `windows` (build & smoke) | 2–3 min | parallel to `go`; now fetches the same bge-small-en-v1.5 the release ships |
 | `shellcheck` | 10–45s | lints scripts + runs `check-build-tags.sh` |
 | `api-spec-validation` | 15–20s | Redocly lint + informational route-count diff |
 | `vuln-check` | 15–60s | `govulncheck`, pinned to v1.6.0 |
-| `cli-integration` | 1.5–2 min | **runs after `go`** (sequential); this is where the MCP registry-parity smoke test runs |
+| `cli-integration` | 1.5–2 min | **runs after `go` and `go-engine`** (sequential); this is where the MCP registry-parity smoke test runs |
 | `playwright-e2e` | 1.5–2 min | management-console E2E (thin: ~5 specs) |
 | `python-sdk` | 1–2 min | **serialized after `cli-integration`** "so integration jobs are sequential" — this coupling is not a real data dependency and costs ~1.5 min of avoidable critical path |
 | `node-sdk` | 15–20s | `npm ci` + `tsc` + vitest for `sdk/node`. Before it existed the SDK was first compiled by `publish-sdk.yml` at tag time |
@@ -242,10 +243,45 @@ from a measurement.
 there. The `go` job's reported duration is the cheapest proxy; watch it rather than
 inferring from a laptop.
 
-Critical path: `go` → (`cli-integration` ∥ `playwright-e2e`) → `python-sdk`. What's cached:
+**The engine split (2026-11).** The trunk that followed develop `34b505f` grew
+`internal/engine` from 720 to 876 top-level tests, and the new ones were heavy. The one
+real CI figure: develop's last run put `internal/engine` at **169.1s** (and `hnsw` at
+42.4s) under the `go` job's `-race -cover`; that job took 5m03s. On an 18-core machine
+under load 18–36 (one run each, so load accounts for much of the spread): develop's engine
+package took 192s under `-race`; the trunk's took **412s** under `-race` and 176s plain. Its
+`-race` CPU time was 3x develop's. A `GOMAXPROCS=4 -p 4` copy of the CI command put it at
+542s, and **`internal/index/hnsw` at 702s**: the trunk's SearchLive, migration and
+identical-vector suites took that package to 295s even on its own. Scaling develop's 169s
+CI figure says ~360s, so the 300s claim held, for two packages. Three changes, cheapest
+first:
+
+1. `testEnv`, `testEnvWithStore` and `testEnvWithAuth` (behind ~530 call sites) open Pebble
+   with `storage.DefaultOptions()` on `vfs.NewMem()`, through the new optional
+   `storage.Options.FS`. On disk each environment cost ~130ms under `-race` (the open alone
+   was 50–70ms of fsyncs on macOS, where Go's fsync is `F_FULLFSYNC`); in memory, ~3.5ms.
+   The code paths are unchanged; only the fsyncs are free. Linux fsync is cheaper, so expect
+   CI to gain less than the workstation did. One latent dependency on write latency
+   surfaced and was fixed (see `writeRRFThresholdFixture`). Engine 412s → 215s.
+2. `t.Parallel()` on the heaviest tests that are verifiably hermetic: six in
+   `internal/engine` (the two retired-set fixtures, the four `TestCognitionTrialRule_*`
+   bootstraps above) and twelve in `hnsw`. Engine 215s → **144s**; hnsw 295s → 125s.
+   Assertions, fixture sizes and resample counts are unchanged.
+3. The split: `internal/engine` moved out of the `go` job into `go-engine`, two shards.
+   At `GOMAXPROCS=4` with `-race -covermode=atomic` the shards took 69s and 79s. The
+   `go test -list` names of the two shards, combined, are identical to the unsharded
+   package's 876. No timeout was raised.
+
+Not yet confirmed by CI: the two shard jobs' real duration, and whether `hnsw` (125s here,
+with parallel tests that a 4-vCPU runner overlaps less) and `storage` (184s here, led by
+`TestRetiredSet_DigestRewriteRacingForget` at 46s) are comfortably inside 300s in a `go`
+job that no longer carries the engine. If either comes near the limit, shard it the same
+way. Do not raise the timeout.
+
+Critical path: (`go` ∥ `go-engine`) → (`cli-integration` ∥ `playwright-e2e`) →
+`python-sdk`. What's cached:
 embed assets (~130MB, keyed by ORT+model+platform), Go module cache, and npm for the two
 lockfile-scoped jobs (`node-sdk`, `web-unit`). npm is **not** cached in the jobs that build
-the web bundle as a side effect. Race detector runs only in the `go` job.
+the web bundle as a side effect. The race detector runs in `go` and `go-engine`.
 
 **When adding tests:** unit + invariant tests are nearly free — prefer them. Integration,
 Playwright, `-race`, and asset-gated tests cost real minutes. Reach for end-to-end
