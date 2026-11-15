@@ -1435,8 +1435,9 @@ in ranking reads labels in this slice.**
   MAC to the labeller would reject exactly that path. The recall credential's hash is
   authenticated inside the id instead, so every label records whether labeller = recaller.
 - **The read-only id binds its returned rows (security review).** Without them, a cheap
-  read-only recall minted an id that could label ANY memory. Each row gets a 4-byte keyed
-  tag in served order, covered by the MAC: membership and rank become checkable statelessly
+  read-only recall minted an id that could label ANY memory. Each of the first 100 rows
+  (MCP's recall cap) gets a 4-byte keyed tag in served order, covered by the MAC; a label for
+  an untagged row 101+ (other transports) is rejected as `untagged_row`: membership and rank become checkable statelessly
   (the spec's deferred D3, pulled forward). Exact verification would need the full 16-byte
   ids (22 chars per row); 4 bytes keeps a 10-row id at 142 chars and a 50-row id at 355, and
   a forgery is online-only (k_q is secret) with probability k/2^32 per minted id — and its
@@ -1446,12 +1447,25 @@ in ranking reads labels in this slice.**
   partitioned table with no overall ceiling. The mistake in all three was letting an
   in-memory table make an AUTHORISATION decision. The day marker
   `0x29|ws|D|'B'|memory|credential-hash` decides it: at most one bump per (memory,
-  credential, UTC day), across restarts, written only for verified members. Memory now holds
-  metrics only (a fixed-size, per-existing-vault rejection tally).
-- **One uniform feedback response.** `{ok, received_groups, received_ids}` for every
-  credential and outcome; outcomes appear only in aggregate (metrics without vault/id labels,
-  and `muninn_status` → `labels`). One code path cannot branch wrong, and a write-mode key
-  cannot learn existence through feedback.
+  credential, UTC day), across restarts, and only for a LIVE memory (not soft-deleted,
+  superseded or expired). Markers are written for verified members of a recall and, on the
+  legacy form, for memories that exist. Memory now holds metrics only (a fixed-size,
+  per-existing-vault rejection tally).
+- **Uniform response for callers that cannot read; outcomes for callers that can
+  (adversarial review).** A write-mode key gets `{ok, received_groups, received_ids}` whatever
+  happened, so it cannot learn existence through feedback. A credential that can recall in the
+  vault gains nothing from uniformity and lost the ability to self-correct: the first build
+  silently lost every label posted without `vault` on an unpinned server (the copied call had
+  no vault, so it resolved to `default`). Readers now get one result per id — recorded,
+  repeat, or rejected with a reason (`not_in_recall`, `substituted` + the head id,
+  `unknown_query`, `wrong_vault`, `untagged_row`, `no_key`) and a hint — and a credential
+  that may read every vault is told which vault a misdirected id belongs to. The copyable
+  call carries the vault.
+- **"Nothing in ranking changes" is pinned under ACT-R only.** Labels feed no scoring
+  phase. The first positive label's access bump is the pre-existing `useful=true` channel,
+  now capped at one per memory/credential/day: under ACT-R access history does not reach
+  ranking (COG-7, `TestLabels_RecallOrderUnchanged`), but on a weighted_sum vault access
+  counts still feed the access-frequency term, as before this slice.
 
 **Owner defaults taken (not re-litigated):** append-mode credentials may label (SEC-15
 amendment); `useful` is required and must be a JSON boolean; negative labels are recorded and
