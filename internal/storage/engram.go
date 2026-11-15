@@ -615,7 +615,10 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	mu := ps.casLocks.For(id[:])
 	mu.Lock()
 
-	// Read engram to collect secondary index data for cleanup.
+	// Read engram to collect secondary index data for cleanup. A cache hit is
+	// safe here: every 0x01 writer holds this stripe (STO-24), so nothing can
+	// commit between this read and the delete, and STO-22 guarantees a cached
+	// entry is not older than the last commit.
 	eng, err := ps.GetEngram(ctx, wsPrefix, id)
 	if err != nil {
 		// Not found or unreadable — attempt key-only delete as fallback.

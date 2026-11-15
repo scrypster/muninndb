@@ -4189,6 +4189,14 @@ func (e *Engine) EmbedHealth() EmbedHealth {
 
 // Restore un-deletes a soft-deleted engram by restoring its state to StateActive.
 // Returns an error if the engram does not exist or was hard-deleted.
+//
+// Read and write happen under the engram's stripe lock (LockEngram — the lock
+// every record writer takes), and the read is the committed record straight
+// from Pebble. The state check and every field written back come from that
+// read, so nothing committed between the check and the write can be reverted:
+// this used to read through the cache, unlocked, and write that copy's
+// Confidence/Relevance/Stability/AccessCount/LastAccess back, losing a write
+// that landed in between (TestRestore_ReadsCommittedStateUnderLock).
 func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram, error) {
 	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
@@ -4198,7 +4206,13 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 	if err != nil {
 		return nil, fmt.Errorf("parse id: %w", err)
 	}
-	eng, err := e.store.GetEngram(ctx, ws, ulid)
+
+	unlock := e.store.LockEngram(ulid)
+	defer unlock()
+
+	// A private decode of the committed record (never the L1 cache's shared
+	// struct, #858/STO-20), so the response-shaping writes below are safe.
+	eng, err := e.store.GetEngramUncached(ctx, ws, ulid)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, ErrEngramNotFound
@@ -4208,13 +4222,6 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 	if eng.State != storage.StateSoftDeleted && eng.State != storage.StateArchived {
 		return nil, fmt.Errorf("restore: engram %s is not soft-deleted or archived (state=%d)", id, eng.State)
 	}
-	// Clone before the response-shaping writes below (#858, STO-20). The two
-	// assignments at the end of this method exist only to make the RETURNED
-	// engram reflect the restore; applied to the pointer GetEngram handed back
-	// they wrote through the shared L1-cache struct instead — a race against
-	// every concurrent recall, and the returned pointer was the cache's own,
-	// which the caller is then free to mutate further.
-	eng = eng.Clone()
 	meta := &storage.EngramMeta{
 		State:       storage.StateActive,
 		Confidence:  eng.Confidence,
@@ -4224,7 +4231,7 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 		UpdatedAt:   time.Now(),
 		LastAccess:  eng.LastAccess,
 	}
-	if err := e.store.UpdateMetadata(ctx, ws, ulid, meta); err != nil {
+	if err := e.store.UpdateMetadataLocked(ctx, ws, ulid, meta); err != nil {
 		return nil, fmt.Errorf("restore update: %w", err)
 	}
 
@@ -4232,7 +4239,7 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 	// whose predecessor-stamp (evolve/supersedes) is in the past would be
 	// invisible to default recall — restore would be a recall no-op.
 	if !eng.ValidUntil.IsZero() {
-		if _, err := e.store.StampValidUntil(ctx, ws, ulid, time.Time{}, false); err != nil {
+		if _, err := e.store.StampValidUntilLocked(ctx, ws, ulid, time.Time{}, false); err != nil {
 			slog.Warn("engine: restore: failed to clear ValidUntil stamp", "id", id, "err", err)
 		} else {
 			eng.ValidUntil = time.Time{}

@@ -234,8 +234,9 @@ var cachedEngramKnownSources = map[string]string{
 	// reads a cache-returned engram — it reads GetEngramUncached under the
 	// engram's stripe lock (item 2 of the storage-hardening pass), a private
 	// decode that shares nothing with the cache.
-	"internal/engine/engine.go:Engine.Restore": "mutated the cached struct purely to shape its RETURN value, and " +
-		"returned the cache's own pointer to the caller",
+	// Removed from the floor (case (a)): Engine.Restore no longer reads a
+	// cache-returned engram — it reads GetEngramUncached under LockEngram
+	// (item 4 of the storage-hardening pass), a private decode.
 }
 
 // cachedEngramExemptions maps "<relpath>:<func>" to the reason an in-place

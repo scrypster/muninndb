@@ -159,6 +159,9 @@ func (ps *PebbleStore) CompareAndSet(ctx context.Context, wsPrefix [8]byte, id U
 	mu.Lock()
 	defer mu.Unlock()
 
+	// The condition may be evaluated on a cached copy: under this stripe no
+	// record writer can commit (STO-24) and the cache is never older than the
+	// last commit (STO-22). The state WRITE below re-reads the record itself.
 	metas, err := ps.GetMetadata(ctx, wsPrefix, []ULID{id})
 	if err != nil {
 		return CASOutcome{}, fmt.Errorf("cas get metadata: %w", err)
