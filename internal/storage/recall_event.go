@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -20,6 +21,15 @@ const (
 	// Pinned rather than configurable: calibration ground truth wants weeks
 	// to months of events, and the records are small (one per recall).
 	recallEventRetentionDays = 90
+
+	// recallLabelledRetentionDays is the retention of an event that carries
+	// any child row (a label, or the read-only header that stands in for a
+	// parent). Labelled data deliberately outlives unlabelled data so the
+	// day-90 premise re-run of the salience design sits inside the window.
+	// Cost, stated: a labelled event keeps its raw query text (Context) for
+	// 180 days instead of 90. A rollback binary that predates this constant
+	// prunes labelled events at 90 days — data loss, accepted and stated.
+	recallLabelledRetentionDays = 180
 
 	// recallEventPruneInterval amortizes retention pruning: every Nth
 	// WriteRecallEvent per process also prunes the writing vault's expired
@@ -54,10 +64,19 @@ const RecallPurposeCalibration RecallEventPurpose = "calibration"
 // analysis would make the audit log lie about who read what.
 const RecallPurposeTrial RecallEventPurpose = "cognition-trial"
 
+// RecallPurposeLabel marks reads by muninn_feedback's label pipeline: the
+// membership check that a labelled memory was among the entries an event
+// served, and the rank / set size / source flags copied onto the label. It
+// is the ONLY caller of this purpose (Engine.RecordFeedback); the read never
+// leaves the engine — the feedback response is uniform and carries none of
+// it.
+const RecallPurposeLabel RecallEventPurpose = "label"
+
 // validRecallPurposes is the closed allowlist for recall-event reads.
 var validRecallPurposes = map[RecallEventPurpose]struct{}{
 	RecallPurposeCalibration: {},
 	RecallPurposeTrial:       {},
+	RecallPurposeLabel:       {},
 }
 
 // checkRecallPurpose refuses reads whose purpose is not in the allowlist.
@@ -72,10 +91,50 @@ func checkRecallPurpose(action string, purpose RecallEventPurpose) error {
 
 // RecallSurfacedEntry is one engram surfaced by a recall, with the final
 // score the caller saw (post entity-boost, post truncation).
+//
+// Source, Abs, CM and Prior were added by the label pipeline (slice 2a). They
+// are additive omitempty msgpack fields: an event written before them decodes
+// with zeros, and an older binary decoding a new event ignores them (msgpack
+// skips unknown map keys; pinned by TestRecallEvent_OldDecoderIgnoresNewFields).
+// Because Source 0 is a legal value (admission "injected", no boosts), a
+// reader must consult RecallEvent.Version before trusting it — see
+// RecallEvent.EntrySource.
 type RecallSurfacedEntry struct {
 	ID    string  `msgpack:"id"`
 	Score float32 `msgpack:"score"`
+	// Source is the row's source flags (RecallSource* bits).
+	Source uint8 `msgpack:"s,omitempty"`
+	// Abs is the row's AbsoluteScore (the gate's evidence).
+	Abs float32 `msgpack:"a,omitempty"`
+	// CM is the row's ContentMatch.
+	CM float32 `msgpack:"c,omitempty"`
+	// Prior is the prior multiplier Raw/ContentMatch (0 when CM is 0).
+	Prior float32 `msgpack:"b,omitempty"`
 }
+
+// Recall-entry source flags (RecallSurfacedEntry.Source).
+const (
+	// RecallSourceAdmissionMask selects bits 0-1: how the row entered the
+	// candidate set (activation.Admission: 0 injected, 1 scored, 2 tag filter).
+	RecallSourceAdmissionMask uint8 = 0x03
+	// RecallSourceVersionHead: the row is a version head substituted for a
+	// superseded member (SubstitutedFor != 0).
+	RecallSourceVersionHead uint8 = 1 << 2
+	// RecallSourceEntityBoost: entity boost > 0.
+	RecallSourceEntityBoost uint8 = 1 << 3
+	// RecallSourcePAS: PAS transition boost > 0.
+	RecallSourcePAS uint8 = 1 << 4
+	// RecallSourceHebbian: Hebbian boost > 0.
+	RecallSourceHebbian uint8 = 1 << 5
+	// RecallSourceUnknown is recorded on a label when the source flags are
+	// not known: a read-only query id (no event) or an event written before
+	// the flags existed.
+	RecallSourceUnknown uint8 = 0xFF
+)
+
+// RecallEventVersionLabels is the RecallEvent.Version from which per-entry
+// Source/Abs/CM/Prior and the event's RecallCred/RecallSess are recorded.
+const RecallEventVersionLabels uint8 = 1
 
 // RecallEvent is the persisted record of what one recall surfaced (issue
 // #573).
@@ -120,6 +179,25 @@ type RecallEvent struct {
 	SurfacedAt int64 `msgpack:"surfaced_at"`
 	// Entries are the surfaced engrams in returned order.
 	Entries []RecallSurfacedEntry `msgpack:"entries"`
+	// Version is 0 for events written before the label pipeline and
+	// RecallEventVersionLabels for events that carry the fields below and the
+	// per-entry source flags.
+	Version uint8 `msgpack:"v,omitempty"`
+	// RecallCred and RecallSess are the 8-byte recall credential and session
+	// hashes (auth.QueryIDKey.CredHash / SessionHash), never the raw values.
+	// Empty when unknown (no key wired, or a transport that carries no
+	// session — D4).
+	RecallCred []byte `msgpack:"rc,omitempty"`
+	RecallSess []byte `msgpack:"rs,omitempty"`
+}
+
+// EntrySource returns entry i's source flags, or RecallSourceUnknown when the
+// event predates the flags.
+func (ev *RecallEvent) EntrySource(i int) uint8 {
+	if ev == nil || ev.Version < RecallEventVersionLabels || i < 0 || i >= len(ev.Entries) {
+		return RecallSourceUnknown
+	}
+	return ev.Entries[i].Source
 }
 
 // WriteRecallEvent persists ev under (wsPrefix, eventID). Event IDs are
@@ -148,8 +226,10 @@ func (ps *PebbleStore) WriteRecallEvent(ctx context.Context, wsPrefix [8]byte, e
 	}
 	ps.replicateBatch(batch)
 	if recallEventWriteSeq.Add(1)%recallEventPruneInterval == 0 {
-		cutoff := time.Now().AddDate(0, 0, -recallEventRetentionDays)
-		if _, err := ps.PruneRecallEvents(ctx, wsPrefix, cutoff); err != nil {
+		now := time.Now()
+		if _, err := ps.PruneRecallEvents(ctx, wsPrefix,
+			now.AddDate(0, 0, -recallEventRetentionDays),
+			now.AddDate(0, 0, -recallLabelledRetentionDays)); err != nil {
 			return fmt.Errorf("write recall event: amortized prune: %w", err)
 		}
 	}
@@ -203,7 +283,10 @@ func (ps *PebbleStore) ScanRecallEvents(ctx context.Context, wsPrefix [8]byte, p
 			return err
 		}
 		k := iter.Key()
-		if len(k) != 25 { // 1 + 8 + 16
+		// Only the 25-byte parent carries a RecallEvent value. Child rows
+		// (the read-only header and labels) share the prefix and must never
+		// reach the RecallEvent decoder.
+		if len(k) != keys.RecallEventKeyLen {
 			continue
 		}
 		var id ULID
@@ -229,9 +312,7 @@ func (ps *PebbleStore) ScanRecallEvents(ctx context.Context, wsPrefix [8]byte, p
 // an event value, so no query context or surfaced id leaves storage. The gate
 // protects the content of the instrument data; a count of keys carries none.
 func (ps *PebbleStore) CountRecallEventsSince(ctx context.Context, wsPrefix [8]byte, since time.Time) (int, error) {
-	var bound [16]byte
-	binary.BigEndian.PutUint64(bound[:8], ulid.Timestamp(since)<<16)
-	lower := keys.RecallEventKey(wsPrefix, bound)
+	lower := keys.RecallEventKey(wsPrefix, ulidTimeBound(since))
 	iter, err := ps.db.NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: prefixUpperBound(keys.RecallEventPrefix(wsPrefix)),
@@ -245,24 +326,46 @@ func (ps *PebbleStore) CountRecallEventsSince(ctx context.Context, wsPrefix [8]b
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		if len(iter.Key()) == 25 {
+		if len(iter.Key()) == keys.RecallEventKeyLen { // parents only; child rows are not recalls
 			n++
 		}
 	}
 	return n, nil
 }
 
-// PruneRecallEvents deletes all recall events in a vault whose event time is
-// before the cutoff, using the ULID timestamp embedded in the key — no value
-// reads needed. Returns the number of events deleted.
-func (ps *PebbleStore) PruneRecallEvents(ctx context.Context, wsPrefix [8]byte, before time.Time) (int, error) {
+// PruneRecallEvents deletes a vault's expired recall events, using the ULID
+// timestamp embedded in the key — no value reads needed. Keys are grouped by
+// their 25-byte event prefix (the parent plus its child rows):
+//
+//   - a group with NO child rows (an ordinary unlabelled event) is deleted
+//     when its event time is before unlabelledBefore (90 days, as before);
+//   - a group with ANY child row (a label, or the read-only header) is
+//     deleted — parent and every child together — only when its event time is
+//     before labelledBefore (180 days).
+//
+// Returns the number of event groups deleted.
+//
+// INHERITED GAP (D5, not fixed here): this commits WITHOUT replicateBatch, so
+// in a cluster followers keep events the leader pruned. WriteRecallEvent and
+// UpsertRecallLabel do replicate; only retention is node-local.
+//
+// Race, stated: a label upserted onto an unlabelled event in the same instant
+// a prune pass decided that event's group was unlabelled-and-expired leaves
+// an orphan label with no parent. It is benign — a later label lookup reports
+// unknown_event, and the orphan is deleted by the 180-day rule.
+func (ps *PebbleStore) PruneRecallEvents(ctx context.Context, wsPrefix [8]byte, unlabelledBefore, labelledBefore time.Time) (int, error) {
 	prefix := keys.RecallEventPrefix(wsPrefix)
-	// Smallest possible ULID at the cutoff timestamp: 6-byte big-endian
-	// milliseconds, zero entropy. Every key below it is older than cutoff.
-	var bound [16]byte
-	ms := ulid.Timestamp(before)
-	binary.BigEndian.PutUint64(bound[:8], ms<<16) // left-align 48-bit ms into first 6 bytes
-	upper := keys.RecallEventKey(wsPrefix, bound)
+	// Iterate up to the LATER of the two cutoffs; groups between them are
+	// kept or deleted per their children. The bound is the smallest ULID at
+	// the cutoff timestamp (6-byte big-endian ms, zero entropy), so every
+	// key below it — parent or child — belongs to an older event.
+	later := unlabelledBefore
+	if labelledBefore.After(later) {
+		later = labelledBefore
+	}
+	upper := keys.RecallEventKey(wsPrefix, ulidTimeBound(later))
+	unlabelledMs := ulid.Timestamp(unlabelledBefore)
+	labelledMs := ulid.Timestamp(labelledBefore)
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upper})
 	if err != nil {
@@ -270,18 +373,58 @@ func (ps *PebbleStore) PruneRecallEvents(ctx context.Context, wsPrefix [8]byte, 
 	}
 	batch := ps.db.NewBatch()
 	count := 0
+	var (
+		groupID   []byte   // the 16-byte event id of the current group
+		groupKeys [][]byte // every key of the current group
+		hasChild  bool
+	)
+	flush := func() error {
+		if groupID == nil {
+			return nil
+		}
+		ms := ulid.ULID(*(*[16]byte)(groupID)).Time()
+		cutoff := unlabelledMs
+		if hasChild {
+			cutoff = labelledMs
+		}
+		if ms < cutoff {
+			for _, k := range groupKeys {
+				if err := batch.Delete(k, nil); err != nil {
+					return fmt.Errorf("prune recall events: delete: %w", err)
+				}
+			}
+			count++
+		}
+		groupID, groupKeys, hasChild = nil, groupKeys[:0], false
+		return nil
+	}
 	for valid := iter.First(); valid; valid = iter.Next() {
 		if err := ctx.Err(); err != nil {
 			iter.Close()
 			batch.Close()
 			return 0, err
 		}
-		if err := batch.Delete(iter.Key(), nil); err != nil {
-			iter.Close()
-			batch.Close()
-			return 0, fmt.Errorf("prune recall events: delete: %w", err)
+		k := iter.Key()
+		if len(k) < keys.RecallEventKeyLen {
+			continue // not a recall-event shape; never ours to delete
 		}
-		count++
+		if groupID == nil || !bytes.Equal(groupID, k[9:25]) {
+			if err := flush(); err != nil {
+				iter.Close()
+				batch.Close()
+				return 0, err
+			}
+			groupID = append([]byte(nil), k[9:25]...)
+		}
+		if len(k) != keys.RecallEventKeyLen {
+			hasChild = true
+		}
+		groupKeys = append(groupKeys, append([]byte(nil), k...))
+	}
+	if err := flush(); err != nil {
+		iter.Close()
+		batch.Close()
+		return 0, err
 	}
 	iter.Close()
 	if count == 0 {
@@ -293,6 +436,14 @@ func (ps *PebbleStore) PruneRecallEvents(ctx context.Context, wsPrefix [8]byte, 
 	}
 	slog.Info("storage: recall events pruned", "count", count)
 	return count, nil
+}
+
+// ulidTimeBound is the smallest ULID at t's millisecond: 6-byte big-endian
+// milliseconds, zero entropy.
+func ulidTimeBound(t time.Time) [16]byte {
+	var bound [16]byte
+	binary.BigEndian.PutUint64(bound[:8], ulid.Timestamp(t)<<16) // left-align 48-bit ms into first 6 bytes
+	return bound
 }
 
 // prefixUpperBound returns the smallest key greater than every key with the
