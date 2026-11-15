@@ -82,6 +82,9 @@ func buildTopics(env *rcEnv, seed int64, bg int, specs []topicSpec) []builtTopic
 // 20 relevant returned) and the 500-chain took all of them (nothing returned
 // at all, abstained superseded_only — even the head was lost).
 func TestRecall_RetiredVersionsDoNotConsumeVectorSlots(t *testing.T) {
+	// Hermetic (its own in-memory store and engine, no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	env := openRCEnv(t, vfs.NewMem())
 	defer env.stop()
 

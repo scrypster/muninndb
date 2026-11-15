@@ -123,6 +123,9 @@ func TestRetiredSet_RestoreAfterStaleSnapshotFill(t *testing.T) {
 // from the records, and again after a restart. Seeds are logged; set
 // MUNINN_RETIRED_SEED to replay one. Its value is under -race.
 func TestRetiredSet_RandomizedLifecycleDifferential(t *testing.T) {
+	// Hermetic (its own in-memory store and engine, no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	seeds := []int64{1, 2, 3}
 	if s := os.Getenv("MUNINN_RETIRED_SEED"); s != "" {
 		n, err := strconv.ParseInt(s, 10, 64)
