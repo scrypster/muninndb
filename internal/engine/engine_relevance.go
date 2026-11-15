@@ -158,22 +158,7 @@ func applyRelevanceBands(
 	// mixed response where some rows look confidently classified. A
 	// follow-up may flip tag rows specifically; do it deliberately, not as
 	// a drive-by.
-	responseBasis := activation.FusionBandBasis(cal.FusionMode)
-	if responseBasis == "" && semanticDegraded {
-		responseBasis = activation.BasisSemanticDegraded
-	}
-	if responseBasis == "" && cal.SemanticBaseline <= 0 {
-		// Same arithmetic (identity transform, raw-cosine noise floor ~0.45,
-		// no honest band), two OPPOSITE causes — name the right one. An
-		// operator who explicitly set `semantic_floor: 0` made a documented
-		// choice and must not be told their model is unregistered (G6 refute
-		// of #773, finding 3).
-		if cal.BaselineExplicitlyDisabled {
-			responseBasis = activation.BasisSemanticFloorDisabled
-		} else {
-			responseBasis = activation.BasisNoModelBaseline
-		}
-	}
+	responseBasis := responseBandBasis(cal, semanticDegraded)
 
 	for i, row := range rows {
 		switch {
@@ -206,4 +191,29 @@ func applyRelevanceBands(
 		}
 	}
 	return bands, bases
+}
+
+// responseBandBasis is the response-wide reason a run's rows cannot be banded
+// at all ("" when they can): a fusion mode with no absolute scale, a degraded
+// semantic channel, or no calibrated (or a deliberately disabled) noise
+// baseline. Shared by applyRelevanceBands and the entity-boost seed rule so the
+// two cannot disagree about whether a response is calibrated.
+func responseBandBasis(cal activation.RelevanceCalibration, semanticDegraded bool) string {
+	basis := activation.FusionBandBasis(cal.FusionMode)
+	if basis == "" && semanticDegraded {
+		basis = activation.BasisSemanticDegraded
+	}
+	if basis == "" && cal.SemanticBaseline <= 0 {
+		// Same arithmetic (identity transform, raw-cosine noise floor ~0.45,
+		// no honest band), two OPPOSITE causes — name the right one. An
+		// operator who explicitly set `semantic_floor: 0` made a documented
+		// choice and must not be told their model is unregistered (G6 refute
+		// of #773, finding 3).
+		if cal.BaselineExplicitlyDisabled {
+			basis = activation.BasisSemanticFloorDisabled
+		} else {
+			basis = activation.BasisNoModelBaseline
+		}
+	}
+	return basis
 }

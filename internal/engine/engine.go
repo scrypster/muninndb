@@ -3006,8 +3006,15 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// After BFS produces a scored set, any engram sharing a named entity with a
 	// top-N result receives a small boost. This surfaces entity-linked engrams
 	// that have no direct association edge to the query-matching engrams.
+	//
+	// Only a seed with REAL evidence may inject a row the pipeline did not
+	// retrieve: its relevance band, computed here from phase 6's measured
+	// AbsoluteScore exactly as the response will present it (the boost never
+	// changes AbsoluteScore), must be moderate or strong — see entitySeedPolicy.
 	preBoost := len(result.Activations)
-	result.Activations = e.applyEntityBoost(ctx, wsPrefix, vaultSize, result.Activations, actReq)
+	seedPolicy := entitySeedPolicyFor(result.Activations, result.Calibration,
+		cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR), result.SemanticDegraded)
+	result.Activations = e.applyEntityBoostSeeded(ctx, wsPrefix, vaultSize, result.Activations, actReq, seedPolicy)
 	// Injected engrams count as found: on the boost path, total <
 	// len(activations) was the #569 bypass fingerprint. Known imprecision, for
 	// BOTH injectors here and below (scoped follow-up, PR #570 review): an

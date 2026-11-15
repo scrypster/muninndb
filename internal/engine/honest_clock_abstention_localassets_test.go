@@ -225,3 +225,78 @@ func TestHonestClock_NonsenseAbstainsWarmAndCold(t *testing.T) {
 		}
 	}
 }
+
+// TestHonestClock_EntityBoostSeedsOnlyFromRealEvidence — measured on a
+// production install: on made-up-word queries, entity-boost injection turned a
+// handful of WEAK rows into many more `uncalibrated / not_scored` rows (memories
+// whose only claim was sharing a named entity with a weak row). Once the
+// honest clock stopped gating old weak seeds out cold, noise seeded noise.
+//
+// Rule: an entity-boost seed may INJECT only if its own relevance band is
+// moderate or strong (the band is calibrated against the vault's noise floor —
+// no new constant). Weak rows seed no injection; boosting rows already in the
+// set is unchanged. A response whose rows are all weak injects nothing.
+func TestHonestClock_EntityBoostSeedsOnlyFromRealEvidence(t *testing.T) {
+	h := newHCRealEnv(t)
+	day := 24 * time.Hour
+	hive := h.writeAged("hive inspection", "the north hive was inspected and the queen cells were removed", 120*day)
+	h.writeAged("smoker fuel", "pine needles burn cool and slow in the bee smoker", 60*day)
+	h.writeAged("honey harvest", "the autumn harvest filled eleven frames of capped honey", 3*day)
+	bridge := h.writeAged("bridge decking", "the footbridge decking was replaced with treated planks", 30*day)
+	h.writeAged("waterbar drainage", "the waterbar on switchback four drains to the left side of the tread", 400*day)
+	h.eng.waitWriteTimeIdle()
+
+	// One rare named entity shared by the hive memory and the (topically
+	// unrelated) bridge memory: the bridge row can only arrive by injection.
+	ctx := context.Background()
+	ws := h.store.ResolveVaultPrefix("default")
+	if err := h.store.UpsertEntityRecord(ctx, ws, storage.EntityRecord{Name: "Ridgeview Volunteers", Type: "organization", Source: "inline"}, "inline"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{hive, bridge} {
+		uid, _ := storage.ParseULID(id)
+		if err := h.store.WriteEntityEngramLink(ctx, ws, uid, "Ridgeview Volunteers"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.close()
+	h.open()
+
+	find := func(resp *mbp.ActivateResponse, id string) *mbp.ActivationItem {
+		for i := range resp.Activations {
+			if resp.Activations[i].ID == id {
+				return &resp.Activations[i]
+			}
+		}
+		return nil
+	}
+
+	// Weak-only: a made-up query that shares one word with the hive memory.
+	weak := h.recall("hive karaoke mortgage spreadsheet", "")
+	t.Logf("weak query: %s", hcRender(weak))
+	if hv := find(weak, hive); hv == nil || hv.RelevanceBand != activation.RelevanceWeak {
+		t.Fatalf("premise: the hive memory must be returned as a WEAK row for the made-up query: %s", hcRender(weak))
+	}
+	for _, a := range weak.Activations {
+		if a.RelevanceBandBasis == activation.BasisNotScored {
+			t.Errorf("a weak-only response injected %s (%s/%s) on entity evidence alone", a.Concept, a.RelevanceBand, a.RelevanceBandBasis)
+		}
+	}
+
+	// Strong seed: the exact topic. The entity-linked bridge memory is still
+	// injected, with its component trace intact.
+	strong := h.recall("north hive inspected queen cells removed", "")
+	t.Logf("strong query: %s", hcRender(strong))
+	if hv := find(strong, hive); hv == nil || (hv.RelevanceBand != activation.RelevanceStrong && hv.RelevanceBand != activation.RelevanceModerate) {
+		t.Fatalf("premise: the hive memory must be a moderate/strong row for its own topic: %s", hcRender(strong))
+	}
+	br := find(strong, bridge)
+	if br == nil {
+		t.Fatalf("a strong seed must still inject its entity-linked memory: %s", hcRender(strong))
+	}
+	if br.RelevanceBandBasis != activation.BasisNotScored || br.ScoreComponents.EntityBoost <= 0 ||
+		br.ScoreComponents.Final != br.Score {
+		t.Errorf("injected row lost its trace: basis %q entity_boost %.4f final %.4f score %.4f",
+			br.RelevanceBandBasis, br.ScoreComponents.EntityBoost, br.ScoreComponents.Final, br.Score)
+	}
+}

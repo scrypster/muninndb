@@ -108,7 +108,61 @@ func entityIDF(df, n int64) float64 {
 // vaultSize is the recalled vault's engram count (activateCore already holds
 // it); it feeds entityIDF's n so rarity is judged against the vault being
 // recalled from, not the whole deployment — see entityIDF.
+// entitySeedPolicy decides which seeds may INJECT new rows (pass 2b). Pass 2a
+// (boosting rows already in the result set) is unaffected by it.
+//
+// calibrated=false: the response has no calibrated relevance band (rrf is
+// skipped anyway; weighted_sum, CGDN, a degraded semantic channel, or an
+// embed model with no measured noise baseline). There is no noise-relative
+// bar to judge a seed by, so every seed may inject, as before.
+//
+// calibrated=true: only seeds whose band is moderate or strong (in canInject)
+// may inject. A weak row carries too little evidence to vouch for memories
+// that matched nothing at all, and on a weak-only response — the shape a
+// made-up query produces — nothing is injected. Honest clock, increment 1:
+// with age no longer gating old weak rows out cold, weak seeds injecting
+// entity neighbours turned 74 weak rows into 111 more not_scored ones on 60
+// made-up-word queries on a production install.
+type entitySeedPolicy struct {
+	calibrated bool
+	canInject  map[storage.ULID]struct{}
+}
+
+// mayInject reports whether seed id may inject new rows under the policy.
+func (p entitySeedPolicy) mayInject(id storage.ULID) bool {
+	if !p.calibrated {
+		return true
+	}
+	_, ok := p.canInject[id]
+	return ok
+}
+
+// entitySeedPolicyFor computes the policy from the run's own bands. The band
+// of each row is computed exactly as the response will present it
+// (applyRelevanceBands, from the row's AbsoluteScore — phase 6's measured
+// evidence, which entity boost never changes), BEFORE the boost runs.
+func entitySeedPolicyFor(rows []activation.ScoredEngram, cal activation.RelevanceCalibration, calibrationGate float64, semanticDegraded bool) entitySeedPolicy {
+	if responseBandBasis(cal, semanticDegraded) != "" {
+		return entitySeedPolicy{}
+	}
+	bands, _ := applyRelevanceBands(rows, cal, calibrationGate, semanticDegraded)
+	p := entitySeedPolicy{calibrated: true, canInject: make(map[storage.ULID]struct{}, len(rows))}
+	for i, b := range bands {
+		if b == activation.RelevanceModerate || b == activation.RelevanceStrong {
+			p.canInject[rows[i].Engram.ID] = struct{}{}
+		}
+	}
+	return p
+}
+
+// applyEntityBoost is applyEntityBoostSeeded with the uncalibrated policy
+// (every seed may inject) — the behaviour unit tests of the boost arithmetic
+// exercise. activateCore calls applyEntityBoostSeeded with the run's policy.
 func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int64, results []activation.ScoredEngram, req *activation.ActivateRequest) []activation.ScoredEngram {
+	return e.applyEntityBoostSeeded(ctx, ws, vaultSize, results, req, entitySeedPolicy{})
+}
+
+func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSize int64, results []activation.ScoredEngram, req *activation.ActivateRequest, policy entitySeedPolicy) []activation.ScoredEngram {
 	if len(results) == 0 {
 		return results
 	}
@@ -161,12 +215,22 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 	type boostAcc struct {
 		total   float64
 		counted map[string]struct{} // entities already credited to this target
+		// injectable is the part of total contributed by seeds the policy
+		// lets inject; pass 2b compares THIS against the threshold.
+		injectable float64
 	}
 	boosts := make(map[storage.ULID]*boostAcc)
 	idfCache := make(map[string]float64, 8)
 	scanned := make(map[string]struct{}, 8) // entities whose reverse index was already walked
 
+	// Injecting seeds first: credit is once per (entity, target), so an entity
+	// shared by an injecting and a non-injecting seed must be credited by the
+	// injecting one, or its evidence would be lost to the injectable total.
+	sort.SliceStable(seeds, func(i, j int) bool {
+		return policy.mayInject(seeds[i].Engram.ID) && !policy.mayInject(seeds[j].Engram.ID)
+	})
 	for _, seed := range seeds {
+		seedInjects := policy.mayInject(seed.Engram.ID)
 		_ = e.store.ScanEngramEntities(ctx, ws, seed.Engram.ID, func(entityName string) error {
 			idf, cached := idfCache[entityName]
 			if !cached {
@@ -204,6 +268,9 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 				}
 				acc.counted[entityName] = struct{}{}
 				acc.total = math.Min(acc.total+contribution, entityBoostCap)
+				if seedInjects {
+					acc.injectable = math.Min(acc.injectable+contribution, entityBoostCap)
+				}
 				return nil
 			})
 		})
@@ -241,7 +308,9 @@ func (e *Engine) applyEntityBoost(ctx context.Context, ws [8]byte, vaultSize int
 	// gate's per-candidate lease read costs less than batching would save.
 	gate := newVisibilityGate(req, time.Now())
 	for id, acc := range boosts {
-		if acc.total < req.Threshold {
+		// Only evidence from seeds the policy lets inject counts toward
+		// admitting a row the pipeline never retrieved (entitySeedPolicy).
+		if acc.injectable <= 0 || acc.injectable < req.Threshold {
 			continue
 		}
 		eng, err := e.store.GetEngram(ctx, ws, id)
