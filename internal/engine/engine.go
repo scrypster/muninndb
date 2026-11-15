@@ -327,6 +327,13 @@ type Engine struct {
 	// contentHashLocks; the storage layer trusts the caller holds this lock.
 	upsertKeyLocks [upsertKeyStripes]sync.Mutex
 
+	// evolveLocks serialise evolve's read-target → fork-guard → commit
+	// sequence per (vault, target id), so two simultaneous evolves of one
+	// memory cannot both see it as current and both write a successor.
+	// Lock order: upsertKeyLock (upsert path) → evolveLock; nothing takes
+	// them in the other order.
+	evolveLocks [upsertKeyStripes]sync.Mutex
+
 	// idempotencyLocks provides per-op_id mutexes to prevent TOCTOU races in the
 	// idempotency check → write → store-receipt window. Mirrors the pattern used by
 	// MCPServer.idempotencyLocks but lives on the engine so gRPC and REST callers
@@ -4307,6 +4314,16 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 	oldULID, err := storage.ParseULID(oldID)
 	if err != nil {
 		return storage.ULID{}, fmt.Errorf("evolve: parse old id: %w", err)
+	}
+
+	mu := e.evolveLock(wsPrefix, oldULID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Refuse to fork: a target that already has a successor gets an error
+	// naming the current head instead of a second, rival successor.
+	if err := e.refuseSupersededEvolveTarget(ctx, wsPrefix, oldULID); err != nil {
+		return storage.ULID{}, err
 	}
 
 	// Read the old engram to inherit Concept and Tags.
