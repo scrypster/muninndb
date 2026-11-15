@@ -183,6 +183,36 @@ func TestTwinReplay_ExactRuleAndAsOfHeads(t *testing.T) {
 	if flags != 3 {
 		t.Fatalf("every flagged write is sampled when under JudgeMax: %d", flags)
 	}
+	// Properly blind: no later text appears twice, and no control is drawn
+	// from a flagged write (that pairing gave the arm away).
+	later := map[string]int{}
+	flagged := map[string]bool{}
+	for _, k := range keys {
+		if k.Kind == "flag" {
+			flagged[k.NewID] = true
+		}
+	}
+	controls := 0
+	for i, k := range keys {
+		later[judge[i].Later.Concept+"|"+judge[i].Later.Content]++
+		if k.Kind == "control" {
+			controls++
+			if flagged[k.NewID] {
+				t.Fatalf("control row %d reuses flagged write %s", k.Item, k.NewID)
+			}
+		}
+		if k.Seed != 7 {
+			t.Fatalf("key row %d does not record the seed: %+v", k.Item, k)
+		}
+	}
+	for text, n := range later {
+		if n > 1 {
+			t.Fatalf("later text appears %d times (the arm is identifiable): %q", n, text)
+		}
+	}
+	if controls != flags {
+		t.Fatalf("want as many controls as flags here (%d), got %d", flags, controls)
+	}
 }
 
 func TestTwinAudit_UnresolvedPerHundredWrites(t *testing.T) {

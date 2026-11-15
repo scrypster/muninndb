@@ -112,7 +112,8 @@ func Replay(ctx context.Context, store *storage.PebbleStore, ws [8]byte, opt Rep
 	}
 
 	var pairs []ReplayPair
-	lo := 0 // sliding window start into all (sorted by created, id)
+	var ordinary []int // indices of in-window, vectored, non-successor writes
+	lo := 0            // sliding window start into all (sorted by created, id)
 	for wi := range all {
 		w := &all[wi]
 		if w.created.Before(from) || w.created.After(opt.Now) {
@@ -128,6 +129,7 @@ func Replay(ctx context.Context, store *storage.PebbleStore, ws [8]byte, opt Rep
 			continue
 		}
 		rep.Writes++
+		ordinary = append(ordinary, wi)
 		for lo < wi && w.created.Sub(all[lo].created) > Window {
 			lo++
 		}
@@ -195,13 +197,16 @@ func Replay(ctx context.Context, store *storage.PebbleStore, ws [8]byte, opt Rep
 	rep.GuardSample = len(rank1)
 	rep.Guard, rep.GuardShare = GuardVerdict(rank1, opt.Threshold.Value)
 	rep.Verdict = Decide(rep.FlaggedWrites, rep.Writes, rep.Guard, 0, 0)
-	return rep, pairs, &Corpus{all: all}, nil
+	return rep, pairs, &Corpus{all: all, ordinary: ordinary}, nil
 }
 
 // Corpus is the replay's loaded vault, kept so JudgingSet can sample from it
 // without a second scan. Opaque: it holds content, which only the judging
 // file may carry.
-type Corpus struct{ all []replayEngram }
+type Corpus struct {
+	all      []replayEngram
+	ordinary []int // in-window, vectored, non-successor writes (control pool)
+}
 
 func (opt ReplayOptions) withDefaults() ReplayOptions {
 	if opt.Days <= 0 {
@@ -389,15 +394,29 @@ type KeyItem struct {
 	OtherID    string  `json:"other_id"`
 	Similarity float64 `json:"similarity"`
 	Rule       string  `json:"rule,omitempty"`
+	Seed       int64   `json:"seed"` // the sampling seed (reproducible draw)
 }
 
 // JudgeAsk is the question every judging row carries.
 const JudgeAsk = "Is the later memory a duplicate of the earlier one, an update/correction of it, or a distinct fact? Answer duplicate | update | distinct."
 
 // JudgingSet samples up to opt.JudgeMax flagged writes (their top pair) plus
-// an equal number of controls — for each sampled write, one earlier memory at
-// rank 11–20 of its nearest neighbours — shuffled together. Full text is used:
-// Gate 0's 900-character window shared the embedder's own truncation.
+// up to as many CONTROL rows, shuffled together, so a judge cannot tell the
+// arms apart:
+//
+//   - a control is a write that was NOT flagged, paired with one memory at
+//     rank 11–20 of its nearest earlier neighbours;
+//   - no later text appears in two rows. (The first version paired each
+//     flagged write twice — with its near-copy and with a control — and the
+//     repeated later text gave the arm away.)
+//
+// Sample sizes: flags = min(flagged writes, JudgeMax); controls = the same
+// number when the vault has that many unflagged writes with 11+ earlier
+// neighbours, fewer otherwise (the key file says how many). Precision — and so
+// the veto — is computed on the flag rows only, every one of them judged, so
+// the arithmetic is unchanged from v3: at 100 judged flags a true 0.87 gives a
+// Wilson lower bound ≈ 0.79. Full text is used: Gate 0's 900-character window
+// shared the embedder's own truncation. The seed is recorded on every key row.
 func JudgingSet(c *Corpus, pairs []ReplayPair, opt ReplayOptions) ([]JudgeItem, []KeyItem) {
 	opt = opt.withDefaults()
 	all := c.all
@@ -423,15 +442,40 @@ func JudgingSet(c *Corpus, pairs []ReplayPair, opt ReplayOptions) ([]JudgeItem, 
 		key            KeyItem
 	}
 	var rows []row
+	usedLater := map[string]bool{}
+	laterKey := func(i int) string { return all[i].concept + "\x00" + all[i].content }
 	for _, nid := range order {
 		p := top[nid]
 		wi, hi := idx[p.NewID], idx[p.HeadID]
-		rows = append(rows, row{earlier: hi, later: wi, key: KeyItem{Kind: "flag", NewID: p.NewID.String(),
-			OtherID: p.HeadID.String(), Similarity: p.Similarity, Rule: p.Rule}})
-		if ci, sim, ok := controlFor(all, wi, rng); ok {
-			rows = append(rows, row{earlier: ci, later: wi, key: KeyItem{Kind: "control", NewID: p.NewID.String(),
-				OtherID: all[ci].id.String(), Similarity: sim}})
+		if usedLater[laterKey(wi)] {
+			continue
 		}
+		usedLater[laterKey(wi)] = true
+		rows = append(rows, row{earlier: hi, later: wi, key: KeyItem{Kind: "flag", NewID: p.NewID.String(),
+			OtherID: p.HeadID.String(), Similarity: p.Similarity, Rule: p.Rule, Seed: opt.Seed}})
+	}
+	flagRows := len(rows)
+	pool := make([]int, 0, len(c.ordinary))
+	for _, wi := range c.ordinary {
+		if _, flagged := top[all[wi].id]; !flagged {
+			pool = append(pool, wi)
+		}
+	}
+	rng.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
+	for _, wi := range pool {
+		if len(rows)-flagRows >= flagRows {
+			break
+		}
+		if usedLater[laterKey(wi)] {
+			continue
+		}
+		ci, sim, ok := controlFor(all, wi, rng)
+		if !ok {
+			continue
+		}
+		usedLater[laterKey(wi)] = true
+		rows = append(rows, row{earlier: ci, later: wi, key: KeyItem{Kind: "control", NewID: all[wi].id.String(),
+			OtherID: all[ci].id.String(), Similarity: sim, Seed: opt.Seed}})
 	}
 	rng.Shuffle(len(rows), func(i, j int) { rows[i], rows[j] = rows[j], rows[i] })
 	judge := make([]JudgeItem, len(rows))
