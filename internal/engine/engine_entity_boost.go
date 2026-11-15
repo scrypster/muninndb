@@ -206,6 +206,14 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 		seeds = append(seeds, r)
 	}
 
+	// Seeds in RANK order (the stable sort below reorders them injecting-first)
+	// and the rare entities each carries — the provenance an association-only
+	// row's `why` is built from (COG-35 associated channel).
+	seedsInRank := make([]storage.ULID, len(seeds))
+	for i, sd := range seeds {
+		seedsInRank[i] = sd.Engram.ID
+	}
+	seedEntities := make(map[storage.ULID]map[string]struct{}, len(seeds))
 	seedIDs := make(map[storage.ULID]struct{}, len(seeds))
 	for _, s := range seeds {
 		seedIDs[s.Engram.ID] = struct{}{}
@@ -217,6 +225,7 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 	type boostAcc struct {
 		total   float64
 		counted map[string]struct{} // entities already credited to this target
+		order   []string            // credited entities, in credit order
 		// injectable is the part of total contributed by seeds the policy
 		// lets inject; pass 2b compares THIS against the threshold.
 		injectable float64
@@ -246,6 +255,12 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 			if contribution < entityBoostNoiseFloor {
 				return nil // ubiquitous entity — no evidence; skip its fan-out
 			}
+			if seedInjects {
+				if seedEntities[seed.Engram.ID] == nil {
+					seedEntities[seed.Engram.ID] = make(map[string]struct{}, 2)
+				}
+				seedEntities[seed.Engram.ID][entityName] = struct{}{}
+			}
 			// Credit is once-per-entity per target, so a second seed carrying
 			// the same entity cannot change any accumulator — skip the rescan.
 			if _, done := scanned[entityName]; done {
@@ -269,6 +284,7 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 					return nil // this entity already credited to this target
 				}
 				acc.counted[entityName] = struct{}{}
+				acc.order = append(acc.order, entityName)
 				acc.total = math.Min(acc.total+contribution, entityBoostCap)
 				if seedInjects {
 					acc.injectable = math.Min(acc.injectable+contribution, entityBoostCap)
@@ -338,9 +354,22 @@ func (e *Engine) applyEntityBoostSeeded(ctx context.Context, ws [8]byte, vaultSi
 		if contentFirst {
 			score = 0
 		}
+		var evidence []activation.AssocEntity
+		for _, name := range acc.order {
+			ae := activation.AssocEntity{Name: name, Weight: entityBoostFactor * idfCache[name]}
+			for _, sid := range seedsInRank {
+				if _, carries := seedEntities[sid][name]; carries {
+					ae.Seeds = append(ae.Seeds, sid)
+				}
+			}
+			if len(ae.Seeds) > 0 {
+				evidence = append(evidence, ae)
+			}
+		}
 		results = append(results, activation.ScoredEngram{
-			Engram: eng,
-			Score:  score,
+			AssocEntities: evidence,
+			Engram:        eng,
+			Score:         score,
 			Components: activation.ScoreComponents{
 				EntityBoost: acc.total,
 				Confidence:  float64(eng.Confidence),

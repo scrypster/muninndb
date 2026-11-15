@@ -345,6 +345,10 @@ components:
         read_only:
           type: boolean
           description: "When true, suppress reinforcement side effects (TouchAccess and implicit feedback) for this recall. Always effectively true for observe-mode credentials."
+        exclude_associated:
+          type: boolean
+          description: >-
+            Omit the response's associated block (default false: included).
         include_weak:
           type: boolean
           description: >-
@@ -868,6 +872,32 @@ components:
           description: >-
             Set only with abstained_reason weak_only: how many weak rows were
             withheld. Repeat the request with include_weak true to receive them.
+        associated:
+          type: array
+          description: >-
+            Default (ACT-R) vaults only (COG-35): memories that did NOT match
+            the query but are associated with a returned one (they share a
+            rare named entity with it) and did not make the cut. At most 3,
+            at most 600 bytes as JSON, not counted in total_found or against
+            max_results, never abstention-relevant. Absent when empty or when
+            exclude_associated is set.
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              concept:
+                type: string
+              why:
+                type: string
+                description: The evidence, e.g. shares entity "X" with returned <id>.
+              strength:
+                type: number
+                format: float
+                description: Association evidence (0..0.30), not a match score.
+              basis:
+                type: string
+                enum: [associated_not_matched]
         conflict:
           $ref: "#/components/schemas/ConflictBlock"
 

@@ -2094,3 +2094,37 @@ fails again under it. No runtime toggle ships.
 either one answers the question. Let it annotate and inject; let only match
 evidence order.**
 
+### Association-only memories get their own channel: `associated` (COG-35 follow-up, 2026-11-15)
+
+**What content-first cost.** Measured live on the production install, content-first
+order moved right-memory-first from 34 to 60 of 150 reworded questions (top ten
+93 → 95; paired MRR +0.132, 95% CI +0.088 to +0.175; 47 up, 4 down, none lost).
+The adversarial review then measured the other side: on a 1,000-memory fixture
+with realistic entity density, 46 of 150 limit-10 responses carried an
+association-only row before and 0 after; a memory linked to the queried entity
+that matches none of the query's words went from rank 2 to not returned at
+limits 5 and 10. Those rows were displacing better matches — the production
+numbers show that — but dropping them silently removes "pushes to you when it
+matters" from recall.
+
+**Decision.** A separate, bounded, labelled block: at most 3 compact items
+(no content), at most 600 bytes, never counted against `limit` or in `total`,
+never a band other than `associated_not_matched`, selected by the existing
+seed rule and injection gate, absent when empty, on by default with an opt-out.
+Measured on a 2,000-memory synthetic vault with dense invented entities: present
+on 179 of 200 limit-10 recalls, median 419 bytes, p99 613 bytes including the key.
+
+**Why this and not a re-weighted boost.** Association evidence was measured to
+cost rank whenever it was allowed to order matches, at every strength tried.
+Presenting it beside the matches, labelled as association, keeps the product's
+push without letting it impersonate relevance.
+
+**How we will learn whether it is ever useful.** Associated items are served
+rows for the label pipeline: they are in the recall event's entries (after the
+matched rows, source flag `associated`) and in a read-only query id's row tags,
+so `muninn_feedback` labels for them are accepted and stored with that source.
+Whether association earns more than an annotation is a question for those
+labels — nothing in ranking reads them yet. Today only the entity boost produces
+association-only rows; Hebbian and predictive-activation evidence attaches to
+rows that also matched, so their `why` variants are not built.
+

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -65,6 +66,26 @@ func TestContentFirst_LatencyMeasure(t *testing.T) {
 	for _, q := range queries[:20] { // warm-up
 		c.recall(vault, q, 10, true)
 	}
+	// Bytes the COG-35 associated block adds per recall (JSON), every query
+	// counted, zeros included.
+	var sizes []int
+	withBlock := 0
+	for _, q := range queries {
+		resp, err := c.eng.Activate(context.Background(), &mbp.ActivateRequest{Vault: vault, Context: []string{q}, MaxResults: 10, ReadOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		if resp.Associated != nil {
+			b, _ := json.Marshal(map[string]any{"associated": resp.Associated})
+			n = len(b) - 2 // the key and value as they sit inside the response object
+			withBlock++
+		}
+		sizes = append(sizes, n)
+	}
+	sort.Ints(sizes)
+	t.Logf("associated block: %d of %d limit-10 recalls carry it; bytes median=%d p99=%d max=%d",
+		withBlock, len(queries), sizes[len(sizes)/2], sizes[len(sizes)*99/100], sizes[len(sizes)-1])
 	for _, limit := range []int{10, 100} {
 		var lat []time.Duration
 		for rep := 0; rep < 3; rep++ {

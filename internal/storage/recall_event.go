@@ -127,6 +127,10 @@ const (
 	RecallSourcePAS uint8 = 1 << 4
 	// RecallSourceHebbian: Hebbian boost > 0.
 	RecallSourceHebbian uint8 = 1 << 5
+	// RecallSourceAssociated: the entry was served in the response's
+	// `associated` block (an association-only memory, COG-35), not as a
+	// matched row. Ranked after every matched entry.
+	RecallSourceAssociated uint8 = 1 << 6
 	// RecallSourceUnknown is recorded on a label when the source flags are
 	// not known: a read-only query id (no event) or an event written before
 	// the flags existed.

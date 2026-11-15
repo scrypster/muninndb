@@ -232,6 +232,9 @@ type ActivateRequest struct {
 	// (abstained_reason "weak_only", weak_available = how many). true returns
 	// them. An explicit Threshold, any Filters, or mode "deep" imply it.
 	IncludeWeak bool `json:"include_weak,omitempty" msgpack:"include_weak,omitempty"`
+	// ExcludeAssociated suppresses the response's `associated` block (MCP
+	// include_associated:false). Zero value = include.
+	ExcludeAssociated bool `json:"exclude_associated,omitempty" msgpack:"exclude_associated,omitempty"`
 }
 
 // Weights defines scoring weight distribution.
@@ -327,6 +330,27 @@ type ActivateResponse struct {
 	// Carried on MBP + REST (alias) + MCP; gRPC does NOT map it (pb has no
 	// annotation fields at all — obligation #3, deliberate).
 	Conflict *ConflictBlock `msgpack:"conflict,omitempty" json:"conflict,omitempty"`
+	// Associated (COG-35) lists, in a separate bounded channel, memories that
+	// did NOT match the query but are associated with rows that did, when they
+	// did not make the cut: at most 3, compact (no content), at most
+	// AssociatedMaxBytes when JSON-encoded. Not counted against max_results or
+	// in TotalFound, never abstention-relevant. nil (absent) when there are
+	// none or the caller set ExcludeAssociated.
+	Associated []AssociatedItem `msgpack:"associated,omitempty" json:"associated,omitempty"`
+}
+
+// AssociatedItem is one association-only memory: evidence that it is
+// ASSOCIATED with a returned memory, never that it matched the query.
+type AssociatedItem struct {
+	ID      string `msgpack:"id"      json:"id"`
+	Concept string `msgpack:"concept" json:"concept"`
+	// Why names the evidence, e.g. `shares entity "X" with <returned id>`.
+	Why string `msgpack:"why" json:"why"`
+	// Strength is the association evidence (the rarity-weighted entity
+	// evidence shared with returned rows, 0..0.30). Not a match score.
+	Strength float32 `msgpack:"strength" json:"strength"`
+	// Basis is always "associated_not_matched".
+	Basis string `msgpack:"basis" json:"basis"`
 }
 
 // ActivationItem is a single activated engram.

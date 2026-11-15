@@ -63,7 +63,15 @@ func TestContentFirst_OnlyServedRowsEnterLearningState(t *testing.T) {
 		}
 		return m
 	}
-	first := served(c.recall(vault, cfQuery, l1, false)) // normal: writes the log
+	resp1 := c.activate(vault, cfQuery, l1, false, nil) // normal: writes the log
+	first := map[storage.ULID]bool{}
+	for _, a := range resp1.Activations {
+		first[mustULID(t, a.ID)] = true
+	}
+	associated := map[string]bool{}
+	for _, a := range resp1.Associated {
+		associated[a.ID] = true
+	}
 	ws := c.store.ResolveVaultPrefix(vault)
 	entries := c.eng.activation.AssocLog().RecentForVault(wsVaultID(ws), 1)
 	if len(entries) != 1 {
@@ -78,13 +86,19 @@ func TestContentFirst_OnlyServedRowsEnterLearningState(t *testing.T) {
 			t.Errorf("activation log holds %s, which the recall did not serve", id)
 		}
 	}
-	if len(events) != 1 || len(events[0].Entries) != l1 {
-		t.Fatalf("recall event must carry exactly the %d served rows, got %d events", l1, len(events))
+	// The event records exactly what was served: the l1 matched rows, then
+	// the associated items (COG-35), flagged and ranked after them.
+	if len(events) != 1 || len(events[0].Entries) != l1+len(resp1.Associated) {
+		t.Fatalf("recall event must carry the %d served rows plus %d associated items", l1, len(resp1.Associated))
 	}
-	for _, e := range events[0].Entries {
+	for i, e := range events[0].Entries {
 		id, _ := storage.ParseULID(e.ID)
-		if !first[id] {
-			t.Errorf("recall event entry %s was not served", e.ID)
+		isAssoc := e.Source&storage.RecallSourceAssociated != 0
+		switch {
+		case i < l1 && (!first[id] || isAssoc):
+			t.Errorf("recall event entry %d (%s) is not a served matched row", i, e.ID)
+		case i >= l1 && (!associated[e.ID] || !isAssoc):
+			t.Errorf("recall event entry %d (%s) past the matched rows is not a flagged associated item", i, e.ID)
 		}
 	}
 

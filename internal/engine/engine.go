@@ -3211,6 +3211,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// only that partner, at most min(limit, 3) extra rows, reported in the
 	// conflict block (applyContradictionCut).
 	var overflow int
+	uncut := result.Activations // the associated channel selects from rows that missed the cut
 	result.Activations, overflow = applyContradictionCut(result.Activations, actReq.MaxResults)
 	if conflictBlock != nil {
 		conflictBlock.AdjacencyOverflow = overflow
@@ -3277,6 +3278,17 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		conflictBlock = nil
 		result.Abstained = true
 		result.AbstainedReason = activation.AbstainWeakOnly
+	}
+
+	// COG-35 associated channel: association-only rows that missed the cut,
+	// in a separate bounded block (engine_associated.go). Content-first
+	// responses only — rrf/weighted_sum/CGDN still let injected rows compete
+	// for `memories` by score, exactly as before. Runs after weak_only: with
+	// no returned row there is no seed to be associated with.
+	var associated []mbp.AssociatedItem
+	var associatedIDs []storage.ULID
+	if !req.ExcludeAssociated && activation.ContentFirstOrder(actReq.Weights) {
+		associated, associatedIDs = buildAssociated(uncut, result.Activations)
 	}
 
 	// The stored Ebbinghaus `relevance` is a decay number recall scoring
@@ -3451,6 +3463,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	for _, sc := range result.Activations {
 		servedRows = append(servedRows, [16]byte(sc.Engram.ID))
 	}
+	// Associated items are SERVED too, ranked after every matched row, so a
+	// label for one is a verified member (normal and read-only ids alike).
+	for _, id := range associatedIDs {
+		servedRows = append(servedRows, [16]byte(id))
+	}
 	queryID := e.mintRecallQueryID(req.Vault, eventID, actReq.ReadOnly, recallCred, recallSess, servedRows)
 	if len(items) > 0 && !actReq.ReadOnly {
 		entries := make([]storage.RecallSurfacedEntry, len(items))
@@ -3467,6 +3484,12 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 				entry.Prior = float32(sc.Components.Raw / sc.Components.ContentMatch)
 			}
 			entries[i] = entry
+		}
+		for _, id := range associatedIDs {
+			entries = append(entries, storage.RecallSurfacedEntry{
+				ID:     id.String(),
+				Source: storage.RecallSourceAssociated | storage.RecallSourceEntityBoost,
+			})
 		}
 		ev := &storage.RecallEvent{
 			Context:    req.Context,
@@ -3635,6 +3658,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		AbstainedReason:        result.AbstainedReason,
 		WeakAvailable:          weakAvailable,
 		Conflict:               conflictBlock,
+		Associated:             associated,
 	}, nil
 }
 

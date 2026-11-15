@@ -221,8 +221,23 @@ type ScoreComponents struct {
 	Final           float64
 }
 
+// AssocEntity is one rare named entity an entity-boost INJECTED row shares
+// with injecting seeds — the evidence the COG-35 `associated` channel names.
+// Weight is that entity's rarity-weighted contribution; Seeds are the seeds
+// carrying it, in rank order.
+type AssocEntity struct {
+	Name   string
+	Weight float64
+	Seeds  []storage.ULID
+}
+
 // ScoredEngram is one activation result.
 type ScoredEngram struct {
+	// AssocEntities is set only on a row the entity boost INJECTED (it
+	// matched nothing itself): the shared entities and the seeds they came
+	// through, so the engine can say WHY the row is associated.
+	AssocEntities []AssocEntity
+
 	Engram      *storage.Engram
 	Score       float64
 	Components  ScoreComponents
