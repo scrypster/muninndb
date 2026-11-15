@@ -573,7 +573,7 @@ For quick reference, these are the MCP tools available to AI agents:
 5. `muninn_forget` — soft-delete
 6. `muninn_link` — create/strengthen association
 7. `muninn_contradictions` — check for contradictions
-8. `muninn_status` — health and stats
+8. `muninn_status` — memory count plus a derived `health`: `good` only when the embedder is up (or not yet exercised) and no cognitive worker is erroring/stopped, else `degraded` with `health_reasons`; also `embedder.state`, per-worker state and last-run age, `embeddings_pending` during a backfill, and `enrichment_mode`
 9. `muninn_guide` — get vault-aware usage instructions (call on first connect)
 10. `muninn_evolve` — update a memory (archive old version)
 11. `muninn_consolidate` — merge N memories into 1

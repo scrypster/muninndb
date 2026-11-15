@@ -174,7 +174,15 @@ type Engine struct {
 	repairAssocWeightsFn func(ctx context.Context, ws [8]byte) (int, error)
 	coherence            *coherence.Registry // per-vault incremental coherence counters
 	scoring              *scoring.Store      // per-vault learnable scoring weights
-	prov                 *provenance.Store   // audit trail per-engram
+
+	// semanticOKAt / semanticDegradedAt are the Unix-nano times of the most
+	// recent recall whose query embedding succeeded / fell back to BM25-only
+	// (result.SemanticDegraded). They are the only runtime evidence of
+	// embedder health this process has — the plugin health checker is not
+	// started — and they cost two atomic stores per recall. Read by EmbedHealth.
+	semanticOKAt       atomic.Int64
+	semanticDegradedAt atomic.Int64
+	prov               *provenance.Store // audit trail per-engram
 
 	// Fix 5: coherence persistence lifecycle
 	coherenceFlushStop chan struct{}
@@ -2954,6 +2962,11 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// degraded call.
 	if result.SemanticDegraded {
 		metrics.RecallEmbedFallbackTotal.WithLabelValues(req.Vault).Inc()
+		e.semanticDegradedAt.Store(time.Now().UnixNano())
+	} else if len(req.Embedding) == 0 && !activation.IsNoopEmbedder(e.embedder) {
+		// Only a recall that actually asked the embedder is evidence it is up:
+		// a caller-supplied embedding never touched it.
+		e.semanticOKAt.Store(time.Now().UnixNano())
 	}
 
 	// Entity boost phase: spread activation through shared named entities.
@@ -3950,6 +3963,45 @@ func (e *Engine) WorkerStats() cognitive.EngineWorkerStats {
 		stats.Confidence = conf.Stats()
 	}
 	return stats
+}
+
+// EmbedHealth is the embedder's observed state for status surfaces.
+type EmbedHealth struct {
+	// State is one of:
+	//   "disabled"            — no embedder is active (noop): recall is keyword-only
+	//   "up"                  — the most recent embedding-backed recall succeeded
+	//   "degraded_to_keyword" — the most recent recall fell back to BM25-only
+	//   "unknown"             — an embedder is configured but no recall has
+	//                           exercised it since this process started
+	State          string
+	LastOKAt       time.Time // zero if never observed
+	LastDegradedAt time.Time // zero if never observed
+}
+
+// EmbedHealth reports the embedder's state from what recalls have observed.
+// It is two atomic loads and never calls the embedder, so it is safe for a
+// status call an agent makes often. It cannot see an outage no recall has hit
+// yet: "up" means "the last recall that tried worked", not a live probe.
+func (e *Engine) EmbedHealth() EmbedHealth {
+	ok, deg := e.semanticOKAt.Load(), e.semanticDegradedAt.Load()
+	h := EmbedHealth{}
+	if ok != 0 {
+		h.LastOKAt = time.Unix(0, ok)
+	}
+	if deg != 0 {
+		h.LastDegradedAt = time.Unix(0, deg)
+	}
+	switch {
+	case activation.IsNoopEmbedder(e.embedder):
+		h.State = "disabled"
+	case ok == 0 && deg == 0:
+		h.State = "unknown"
+	case deg > ok:
+		h.State = "degraded_to_keyword"
+	default:
+		h.State = "up"
+	}
+	return h
 }
 
 // Restore un-deletes a soft-deleted engram by restoring its state to StateActive.

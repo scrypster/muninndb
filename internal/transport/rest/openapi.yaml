@@ -50,6 +50,13 @@ components:
           type: integer
           format: int64
           description: "Unix timestamp in nanoseconds; zero means never."
+        lastError:
+          type: integer
+          format: int64
+          description: "Unix timestamp in nanoseconds of the most recent FAILED batch; zero means never failed."
+        lastBatchFailed:
+          type: boolean
+          description: "True while the most recent batch is one that failed; the next successful batch clears it. errors is cumulative and cannot say whether the worker is failing now."
         state:
           type: integer
           format: int32

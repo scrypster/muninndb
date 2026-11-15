@@ -456,6 +456,28 @@ func (a *mcpEngineAdapter) CountChildren(ctx context.Context, vault, engramID st
 	return a.eng.CountChildren(ctx, vault, engramID)
 }
 
+// HealthSnapshot implements healthReporter from in-memory state only: two
+// atomic loads (EmbedHealth), the workers' counters, and the embed backfill's
+// progress counters. No store scan, no embedder call.
+func (a *mcpEngineAdapter) HealthSnapshot(_ context.Context) healthSnapshot {
+	eh := a.eng.EmbedHealth()
+	snap := healthSnapshot{
+		EmbedState:        eh.State,
+		EmbedLastOKAt:     eh.LastOKAt,
+		EmbedLastDegraded: eh.LastDegradedAt,
+		Workers:           a.eng.WorkerStats(),
+		Now:               time.Now(),
+	}
+	if es := a.eng.EmbedStats(); es.Status == "running" && es.Total > 0 {
+		pending := es.Total - es.Processed
+		if pending < 0 {
+			pending = 0
+		}
+		snap.EmbeddingsPending = &pending
+	}
+	return snap
+}
+
 func (a *mcpEngineAdapter) GetEnrichmentMode(ctx context.Context) string {
 	return a.eng.GetEnrichmentMode()
 }

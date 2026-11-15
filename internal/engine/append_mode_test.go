@@ -73,6 +73,8 @@ var appendReadOnly = map[string]bool{
 	"VaultPlasticityConfig": true,
 	"Session":               true, "SessionPaged": true, "Stat": true, "Subscribe": true, "SubscribeWithDeliver": true,
 	"Traverse": true, "Unsubscribe": true, "VaultNameExists": true, "WhereLeftOff": true, "WorkerStats": true,
+	// EmbedHealth is two atomic loads of recall-observed embed outcomes.
+	"EmbedHealth": true,
 	// NoticesFor* are read/query surfaces with ONE recorded residual write: on
 	// delivery they bump the fired-marker (FiredCount/LastFiredAt; a one-shot
 	// consumes its own 0x2D keys). That is delivery bookkeeping on the

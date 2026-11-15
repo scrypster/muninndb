@@ -332,7 +332,18 @@ type ContradictionsReport struct {
 type VaultStatus struct {
 	Vault         string `json:"vault"`
 	TotalMemories int64  `json:"total_memories"`
-	Health        string `json:"health"`
+	// Health is derived, never a constant: "good" when the embedder is up (or
+	// not yet exercised) and no cognitive worker is erroring or stopped,
+	// "degraded" otherwise with one entry per cause in HealthReasons, and
+	// "unknown" when the engine cannot report health at all.
+	Health        string   `json:"health"`
+	HealthReasons []string `json:"health_reasons"`
+
+	Embedder *EmbedderStatus         `json:"embedder,omitempty"`
+	Workers  map[string]WorkerHealth `json:"workers,omitempty"`
+	// EmbeddingsPending is the embed backfill backlog while one is running;
+	// omitted when none is running.
+	EmbeddingsPending *int64 `json:"embeddings_pending,omitempty"`
 
 	// Enrichment capability
 	EnrichmentMode string                `json:"enrichment_mode"` // "none", "inline", "plugin:<name>"

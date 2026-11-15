@@ -890,9 +890,19 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 	status := VaultStatus{
 		Vault:          vault,
 		TotalMemories:  resp.EngramCount,
-		Health:         "good",
+		Health:         "unknown",
+		HealthReasons:  []string{"this engine does not report embedder or worker state"},
 		EnrichmentMode: enrichMode,
 		// Plugins: populated in a future task when plugin registry is accessible via handleStatus.
+	}
+	if hr, ok := s.engine.(healthReporter); ok {
+		snap := hr.HealthSnapshot(ctx)
+		health, reasons, emb, workers := deriveHealth(snap)
+		status.Health = health
+		status.HealthReasons = reasons
+		status.Embedder = &emb
+		status.Workers = workers
+		status.EmbeddingsPending = snap.EmbeddingsPending
 	}
 	sendResult(w, id, textContent(mustJSON(status)))
 }

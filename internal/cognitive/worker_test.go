@@ -217,3 +217,73 @@ func TestWorkerReportsStoppedAfterRunExits(t *testing.T) {
 		t.Fatalf("Status = %q after Run exits, want stopped", got)
 	}
 }
+
+// runToCompletion submits items, then cancels and waits for Run to exit. Run is
+// a single goroutine, so once it has returned every flush — including the
+// shutdown flush that drains the channel — has finished: no sleep needed.
+func runToCompletion(t *testing.T, w *Worker[int], items ...int) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = w.Run(ctx)
+	}()
+	for _, it := range items {
+		if !w.Submit(it) {
+			t.Fatalf("submit %d dropped", it)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not stop")
+	}
+}
+
+// TestWorkerLastBatchFailed: status surfaces need "is this worker failing
+// NOW", which the cumulative Errors counter cannot answer — one transient
+// failure a week ago would mark the worker broken forever. LastBatchFailed is
+// true only while the most recent flush is the one that failed.
+func TestWorkerLastBatchFailed(t *testing.T) {
+	t.Run("last flush failed", func(t *testing.T) {
+		w := NewWorker(4, 1, time.Hour, func(context.Context, []int) error { return errTestFlush })
+		runToCompletion(t, w, 1)
+		st := w.Stats()
+		if st.Errors == 0 || !st.LastBatchFailed {
+			t.Fatalf("errors=%d lastRun=%d lastError=%d LastBatchFailed=%v; want a failing worker reported as failing", st.Errors, st.LastRun, st.LastError, st.LastBatchFailed)
+		}
+	})
+	t.Run("failed then recovered", func(t *testing.T) {
+		w := NewWorker(4, 1, time.Hour, func(_ context.Context, batch []int) error {
+			if batch[0] == 1 {
+				return errTestFlush
+			}
+			return nil
+		})
+		// Two separate Runs, so the failing and the succeeding item can never
+		// be drained into one shutdown batch.
+		runToCompletion(t, w, 1)
+		if !w.Stats().LastBatchFailed {
+			t.Fatal("precondition: first flush should be reported as failing")
+		}
+		runToCompletion(t, w, 2)
+		st := w.Stats()
+		if st.Errors != 1 || st.LastBatchFailed {
+			t.Fatalf("errors=%d LastBatchFailed=%v; want one historical error and a recovered worker", st.Errors, st.LastBatchFailed)
+		}
+	})
+	t.Run("never ran", func(t *testing.T) {
+		w := NewWorker(4, 1, time.Hour, func(context.Context, []int) error { return nil })
+		if w.Stats().LastBatchFailed {
+			t.Fatal("a worker that never flushed is not failing")
+		}
+	})
+}
+
+var errTestFlush = errorString("synthetic flush failure")
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }
