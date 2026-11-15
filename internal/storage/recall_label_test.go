@@ -435,3 +435,74 @@ func TestRecallEventEntries_BatchAndGate(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, got)
 }
+
+// TestRecallDayMarker_ShapeGrantAndLifecycle: the day marker is a 50-byte
+// 'B' child of the day event D (00:00 UTC, zero entropy); it grants the
+// day's bump exactly once; scans and counts ignore it; labels never see it;
+// it is pruned with the 180-day labelled rule and cleared with the vault.
+func TestRecallDayMarker_ShapeGrantAndLifecycle(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.ResolveVaultPrefix("day-marker")
+	mem := NewULID()
+	day := time.Date(2026, 5, 6, 0, 0, 0, 0, time.UTC).Unix() / 86400
+
+	k := keys.RecallDayMarkerKey(ws, day, mem, testLC)
+	require.Len(t, k, 50)
+	require.Equal(t, byte('B'), k[25])
+	d := keys.RecallDayEventID(day)
+	require.Equal(t, uint64(day*86400000), ulidTimeMs16(d))
+	require.Equal(t, make([]byte, 10), d[6:], "zero entropy: never a real event id")
+
+	_, first, granted, err := store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, 1, false)
+	require.NoError(t, err)
+	require.True(t, first)
+	require.False(t, granted, "a post that does not ask for a bump gets none")
+	for i := 0; i < 5; i++ {
+		m, first, granted, err := store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, int64(2+i), true)
+		require.NoError(t, err)
+		require.False(t, first)
+		require.Equal(t, i == 0, granted, "granted exactly once per day")
+		require.Equal(t, uint32(2+i), m.Posts)
+	}
+	_, _, granted, err = store.UpsertRecallDayMarker(ctx, ws, day+1, mem, testLC, 9, true)
+	require.NoError(t, err)
+	require.True(t, granted, "a new UTC day is a new marker")
+
+	n, err := store.CountRecallEventsSince(ctx, ws, time.Unix(0, 0))
+	require.NoError(t, err)
+	require.Zero(t, n)
+	require.NoError(t, store.ScanRecallEvents(ctx, ws, RecallPurposeCalibration, func(ULID, *RecallEvent) error {
+		t.Fatal("a marker is not an event")
+		return nil
+	}))
+	require.NoError(t, store.ScanRecallLabels(ctx, ws, RecallPurposeLabel, func(RecallLabelRow) error {
+		t.Fatal("a marker is not a label")
+		return nil
+	}))
+
+	// Prune: markers of day+1 (2026-05-07) live until the 180-day rule.
+	marker := func(d int64) bool {
+		m, err := store.GetRecallDayMarker(ctx, ws, d, mem, testLC, RecallPurposeLabel)
+		require.NoError(t, err)
+		return m != nil
+	}
+	dayTime := time.Unix(day*86400, 0)
+	_, err = store.PruneRecallEvents(ctx, ws, dayTime.Add(48*time.Hour), dayTime.Add(-time.Hour))
+	require.NoError(t, err)
+	require.True(t, marker(day) && marker(day+1), "labelled-rule retention, not the 90-day rule")
+	_, err = store.PruneRecallEvents(ctx, ws, dayTime.Add(48*time.Hour), dayTime.Add(36*time.Hour))
+	require.NoError(t, err)
+	require.False(t, marker(day))
+	require.False(t, marker(day+1))
+
+	_, _, _, err = store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, 1, true)
+	require.NoError(t, err)
+	_, err = store.ClearVault(ctx, ws)
+	require.NoError(t, err)
+	require.False(t, marker(day), "cleared with the vault")
+}
+
+func ulidTimeMs16(id [16]byte) uint64 {
+	return uint64(id[0])<<40 | uint64(id[1])<<32 | uint64(id[2])<<24 | uint64(id[3])<<16 | uint64(id[4])<<8 | uint64(id[5])
+}

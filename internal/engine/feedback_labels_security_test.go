@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -30,15 +32,14 @@ func TestFeedback_ReadOnlyLabelsCappedPerCredentialDay(t *testing.T) {
 		le.label(ctx, vault, ro.QueryID, true, mem)
 	}
 	require.LessOrEqual(t, le.accessCount(vault, mem), uint32(1), "1,000 fresh read-only ids must not be 1,000 uses")
-	// Each id is a distinct label row (it is data), but exactly one is the
-	// credential's first for this memory today — what a use count may read.
-	dayFirst := 0
-	for _, r := range le.labels(vault) {
-		if r.EngramID.String() == mem && r.Label.DayFirst == 1 {
-			dayFirst++
-		}
-	}
-	require.Equal(t, 1, dayFirst)
+	// Each id is a distinct label row (it is data), but the credential has ONE
+	// durable day marker for the memory: 1,000 posts, one bump.
+	mk, err := le.store.GetRecallDayMarker(context.Background(), le.store.ResolveVaultPrefix(vault), unixDay(time.Now()),
+		mustParseULID(t, mem), le.eng.qidKey.CredHash("tok-a"), storage.RecallPurposeLabel)
+	require.NoError(t, err)
+	require.NotNil(t, mk)
+	require.Equal(t, uint32(1000), mk.Posts)
+	require.NotZero(t, mk.BumpedAt)
 
 	// The same cap holds across normal query ids.
 	other := le.recall(ctx, vault, false).Activations[1].ID
@@ -93,13 +94,19 @@ func TestFeedback_LegacyCapIgnoresUnknownIDs(t *testing.T) {
 	for i := 0; i < 10000; i++ {
 		require.NoError(t, le.eng.RecordFeedback(ctx, "legacy-bound", storage.NewULID().String(), true))
 	}
-	le.eng.labels.mu.Lock()
+	require.Zero(t, countDayMarkers(le), "ids that name no memory write no marker")
+}
+
+func countDayMarkers(le *labelEnv) int {
+	iter, err := le.db.NewIter(nil)
+	require.NoError(le.t, err)
+	defer iter.Close()
 	n := 0
-	for _, vs := range le.eng.labels.vaults {
-		for _, cd := range vs.creds {
-			n += len(cd.mems)
+	for iter.First(); iter.Valid(); iter.Next() {
+		k := iter.Key()
+		if len(k) == 50 && k[0] == 0x29 && k[25] == 'B' {
+			n++
 		}
 	}
-	le.eng.labels.mu.Unlock()
-	require.Zero(t, n)
+	return n
 }

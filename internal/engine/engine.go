@@ -5785,8 +5785,8 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 		metrics.FeedbackLegacyTotal.WithLabelValues("false").Inc()
 		return nil
 	}
-	// Existence first: the cap map is keyed partly by this caller-supplied
-	// id, so an id that names no memory must allocate nothing.
+	// Existence first: the day marker is keyed partly by this caller-supplied
+	// id, so an id that names no memory must write nothing.
 	if eng, gerr := e.store.GetEngram(storage.ContextWithNoAccessCacheStamp(ctx), wsPrefix, id); gerr != nil || eng == nil {
 		if gerr != nil && !errors.Is(gerr, storage.ErrNotFound) {
 			return fmt.Errorf("record feedback: storage error")
@@ -5795,11 +5795,20 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 		return nil
 	}
 	lc, _, _ := e.callerHashes(ctx)
-	if !e.accessBumpAllowed(wsPrefix, e.store.VaultNameExists(vault), lc, id) {
-		metrics.FeedbackLegacyTotal.WithLabelValues("true").Inc()
+	now := e.labelClock()
+	// The same DURABLE per-(memory, credential, UTC day) marker as the
+	// labelled path: one bump per credential per memory per day, across
+	// restarts. Existence was checked first, so markers exist only for real
+	// memories.
+	mk, _, granted, err := e.store.UpsertRecallDayMarker(ctx, wsPrefix, unixDay(now), id, lc, now.UnixMilli(), true)
+	if err != nil {
+		return fmt.Errorf("record feedback: storage error")
+	}
+	noteStormFromMarker(mk.Posts)
+	metrics.FeedbackLegacyTotal.WithLabelValues(strconv.FormatBool(!granted)).Inc()
+	if !granted {
 		return nil
 	}
-	metrics.FeedbackLegacyTotal.WithLabelValues("false").Inc()
 	if err := e.store.TouchAccess(ctx, wsPrefix, id); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return fmt.Errorf("record feedback: storage error")
 	}

@@ -984,7 +984,12 @@ func RecallEventKey(ws [8]byte, eventID [16]byte) []byte {
 //	event (parent)    0x29 | ws(8) | E(16)                              = 25 B
 //	read-only header  0x29 | ws(8) | E(16) | 'H'                        = 26 B
 //	label             0x29 | ws(8) | E(16) | 'L' | engramID(16) | lc(8) = 50 B
+//	day marker        0x29 | ws(8) | D(16) | 'B' | engramID(16) | lc(8) = 50 B
 //
+// D is the "day event" id: a ULID whose 48-bit time is 00:00 UTC of the day
+// and whose 80 entropy bits are zero, so markers of one day form one group
+// that the 0x29 retention rules prune like any labelled event. No recall
+// event is ever written under D (a real event ULID carries random entropy).
 // 'H' (0x48) sorts before 'L' (0x4C), so a group reads header-then-labels.
 // Every reader that decodes 0x29 VALUES as RecallEvent must select keys of
 // exactly RecallEventKeyLen; the child shapes carry different value types.
@@ -1001,7 +1006,27 @@ const (
 	// RecallChildLabel tags a label child: one row per (event, memory,
 	// labelling credential).
 	RecallChildLabel byte = 'L'
+	// RecallChildDayMarker tags a per-(memory, labelling credential, UTC day)
+	// marker under the day event D: the DURABLE record of that credential's
+	// feedback on that memory that day, and of whether it earned the day's
+	// access bump. Authorisation comes from this row, never from memory.
+	RecallChildDayMarker byte = 'B'
 )
+
+// RecallDayEventID is the 16-byte day-event id D for a UTC day (unix days).
+func RecallDayEventID(unixDay int64) [16]byte {
+	var d [16]byte
+	ms := uint64(unixDay) * 86400000
+	d[0], d[1], d[2], d[3], d[4], d[5] = byte(ms>>40), byte(ms>>32), byte(ms>>24), byte(ms>>16), byte(ms>>8), byte(ms)
+	return d
+}
+
+// RecallDayMarkerKey constructs a day-marker child key (50 bytes).
+func RecallDayMarkerKey(ws [8]byte, unixDay int64, engramID [16]byte, lc [8]byte) []byte {
+	key := RecallLabelKey(ws, RecallDayEventID(unixDay), engramID, lc)
+	key[25] = RecallChildDayMarker
+	return key
+}
 
 // RecallROHeaderKey constructs the read-only header child key (26 bytes).
 func RecallROHeaderKey(ws [8]byte, eventID [16]byte) []byte {

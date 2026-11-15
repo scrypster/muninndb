@@ -67,12 +67,6 @@ type RecallLabel struct {
 	Self       uint8  `msgpack:"self"` // LabelSelf*
 	Superseded uint8  `msgpack:"sup"`  // 1 if superseded/expired/soft-deleted when labelled
 	Channel    uint8  `msgpack:"ch"`   // LabelChannel*
-	// DayFirst is 1 when this was the labelling credential's FIRST label for
-	// this memory on its UTC day (across all query ids; process-local, so a
-	// restart can repeat it). A consumer that counts USE must count only
-	// DayFirst rows: read-only recalls are cheap, so one credential can
-	// produce many distinct (query, memory) labels for one memory in a day.
-	DayFirst uint8 `msgpack:"d"`
 }
 
 // RecallROHeader is the value of the read-only header child row: the
@@ -280,4 +274,87 @@ func (ps *PebbleStore) ScanRecallLabels(ctx context.Context, wsPrefix [8]byte, p
 		}
 	}
 	return nil
+}
+
+// RecallDayMarker is the value of a day-marker child row: one per (memory,
+// labelling credential, UTC day) that saw feedback. It is the durable answer
+// to "has this credential already earned this memory's access bump today?"
+// and the per-day use record a later slice counts (read-only recalls are
+// cheap, so one credential can produce many distinct (query, memory) labels
+// for one memory in a day; it produces ONE marker).
+type RecallDayMarker struct {
+	Posts    uint32 `msgpack:"n"` // feedback posts that day (labels and legacy), repeats included
+	FirstAt  int64  `msgpack:"f"` // unix ms of the day's first post
+	BumpedAt int64  `msgpack:"b"` // unix ms the day's access bump was granted; 0 = not granted
+}
+
+// UpsertRecallDayMarker records one feedback post for (memory, lc, day) and
+// decides — durably, under the marker key's stripe lock, in one replicated
+// batch — whether it earns the day's access bump: granted iff wantBump and no
+// bump was granted earlier that day. Returns the stored marker, whether this
+// was the day's first post, and whether the bump was granted. The caller
+// performs the bump AFTER this returns (never under the lock: stripes are
+// shared with engram CAS locks), so a failed bump is a lost bump, never an
+// extra one.
+func (ps *PebbleStore) UpsertRecallDayMarker(ctx context.Context, wsPrefix [8]byte, unixDay int64, engramID ULID, lc [8]byte, nowMs int64, wantBump bool) (m RecallDayMarker, firstToday, granted bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return RecallDayMarker{}, false, false, err
+	}
+	key := keys.RecallDayMarkerKey(wsPrefix, unixDay, [16]byte(engramID), lc)
+	mu := ps.casLocks.For(key)
+	mu.Lock()
+	defer mu.Unlock()
+	val, closer, gerr := ps.db.Get(key)
+	switch {
+	case gerr == pebble.ErrNotFound:
+		firstToday = true
+		m.FirstAt = nowMs
+	case gerr != nil:
+		return RecallDayMarker{}, false, false, fmt.Errorf("recall day marker read: %w", gerr)
+	default:
+		uerr := msgpack.Unmarshal(val, &m)
+		closer.Close()
+		if uerr != nil {
+			return RecallDayMarker{}, false, false, fmt.Errorf("recall day marker unmarshal: %w", uerr)
+		}
+	}
+	m.Posts++
+	if wantBump && m.BumpedAt == 0 {
+		m.BumpedAt = nowMs
+		granted = true
+	}
+	out, err := msgpack.Marshal(&m)
+	if err != nil {
+		return RecallDayMarker{}, false, false, fmt.Errorf("recall day marker marshal: %w", err)
+	}
+	batch := ps.db.NewBatch()
+	defer batch.Close()
+	if err := batch.Set(key, out, nil); err != nil {
+		return RecallDayMarker{}, false, false, err
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return RecallDayMarker{}, false, false, fmt.Errorf("recall day marker commit: %w", err)
+	}
+	ps.replicateBatch(batch)
+	return m, firstToday, granted, nil
+}
+
+// GetRecallDayMarker fetches one day marker (purpose-gated).
+func (ps *PebbleStore) GetRecallDayMarker(ctx context.Context, wsPrefix [8]byte, unixDay int64, engramID ULID, lc [8]byte, purpose RecallEventPurpose) (*RecallDayMarker, error) {
+	if err := checkRecallPurpose("get recall day marker", purpose); err != nil {
+		return nil, err
+	}
+	val, closer, err := ps.db.Get(keys.RecallDayMarkerKey(wsPrefix, unixDay, [16]byte(engramID), lc))
+	if err == pebble.ErrNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer closer.Close()
+	var m RecallDayMarker
+	if err := msgpack.Unmarshal(val, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
 }

@@ -4,15 +4,16 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
-// Second security review: the bounds on the label bookkeeping must be
-// PARTITIONED — per existing vault, and per credential inside it — so a
-// principal that fills its own bound affects only itself.
+// Security reviews 2 and 3: no in-memory bound may decide an effect on
+// stored state, and what stays in memory (metrics) is fixed-size.
 
 // seedN writes n distinct trail memories and returns their ids.
 func (le *labelEnv) seedN(ctx context.Context, vault string, n int) []string {
@@ -28,64 +29,94 @@ func (le *labelEnv) seedN(ctx context.Context, vault string, n int) []string {
 	return ids
 }
 
-func dayFirstFor(le *labelEnv, vault, mem string, lc [8]byte) int {
-	n := 0
-	for _, r := range le.labels(vault) {
-		if r.EngramID.String() == mem && r.LabelCred == lc && r.Label.DayFirst == 1 {
-			n++
-		}
-	}
-	return n
+func markerFor(le *labelEnv, vault, mem, token string) *storage.RecallDayMarker {
+	le.t.Helper()
+	m, err := le.store.GetRecallDayMarker(context.Background(), le.store.ResolveVaultPrefix(vault), unixDay(time.Now()),
+		mustParseULID(le.t, mem), le.eng.qidKey.CredHash(token), storage.RecallPurposeLabel)
+	require.NoError(le.t, err)
+	return m
 }
 
-// TestFeedback_PartitionFullAffectsOnlyThatPrincipal: credential A fills its
-// own per-day bound in vault V; credential B in V and credential A in vault C
-// are unaffected (first positive label still bumps exactly once and still
-// reports first-of-day), and A — at its bound — gets no further bump, and
-// never a second bump for a memory it already bumped today.
-func TestFeedback_PartitionFullAffectsOnlyThatPrincipal(t *testing.T) {
-	old := labelPerCredentialDayMax
-	labelPerCredentialDayMax = 4
-	t.Cleanup(func() { labelPerCredentialDayMax = old })
+// TestFeedback_MetricBucketExhaustionChangesNothingForOthers: the in-memory
+// tally is metrics only. Filling it (and forcing evictions) with one
+// principal's rejections across many vaults changes nothing about what
+// another credential, or another vault, is granted: B's first positive label
+// of the day still bumps once and still has its own day marker; A cannot
+// obtain a second bump for a memory it already bumped today.
+func TestFeedback_MetricBucketExhaustionChangesNothingForOthers(t *testing.T) {
+	old := labelMaxTrackedVaults
+	labelMaxTrackedVaults = 2
+	t.Cleanup(func() { labelMaxTrackedVaults = old })
 
 	le := newLabelEnv(t, testSecret)
 	a, b := caller("tok-a", "sess-a"), caller("tok-b", "sess-b")
-	const vault, vaultC = "partition-v", "partition-c"
-	le.seedN(a, vault, 6)
-	le.seedN(a, vaultC, 2)
+	const vault, vaultC = "metric-v", "metric-c"
+	le.seed(a, vault)
+	le.seed(a, vaultC)
+	for i := 0; i < 6; i++ { // A fills and churns the tally across vaults
+		v := fmt.Sprintf("metric-fill-%d", i)
+		le.seedN(a, v, 1)
+		le.label(a, v, storage.NewULID().String(), true, storage.NewULID().String())
+	}
+	le.eng.labels.mu.Lock()
+	require.LessOrEqual(t, len(le.eng.labels.vaults), 2)
+	le.eng.labels.mu.Unlock()
 
 	resp := le.recall(a, vault, false)
-	require.GreaterOrEqual(t, len(resp.Activations), 6)
-	ids := make([]string, len(resp.Activations))
-	for i, x := range resp.Activations {
-		ids[i] = x.ID
-	}
-	// A fills its partition with 4 memories, then one more.
-	for _, m := range ids[:5] {
-		le.label(a, vault, resp.QueryID, true, m)
-	}
-	require.Equal(t, uint32(1), le.accessCount(vault, ids[0]))
-	require.Zero(t, le.accessCount(vault, ids[4]), "at its own bound, A gets no further bump (fail closed for A only)")
+	x := resp.Activations[0].ID
+	le.label(a, vault, resp.QueryID, true, x)
+	le.label(a, vault, le.recall(a, vault, true).QueryID, true, x)
+	require.Equal(t, uint32(1), le.accessCount(vault, x), "A: one bump, however many ids")
 
-	// A cannot obtain a second bump for a memory it already bumped today,
-	// through a fresh query id.
-	le.label(a, vault, le.recall(a, vault, false).QueryID, true, ids[0])
-	require.Equal(t, uint32(1), le.accessCount(vault, ids[0]))
+	le.label(b, vault, le.recall(b, vault, false).QueryID, true, x)
+	require.Equal(t, uint32(2), le.accessCount(vault, x), "B's first positive label still earns its own bump")
+	mb := markerFor(le, vault, x, "tok-b")
+	require.NotNil(t, mb)
+	require.NotZero(t, mb.BumpedAt)
+	require.Equal(t, uint32(1), mb.Posts)
 
-	// B, same vault: unaffected.
-	lcB := le.eng.qidKey.CredHash("tok-b")
-	le.label(b, vault, resp.QueryID, true, ids[5])
-	require.Equal(t, uint32(1), le.accessCount(vault, ids[5]), "B's first positive label still bumps once")
-	require.Equal(t, 1, dayFirstFor(le, vault, ids[5], lcB), "and is still first-of-day")
-	le.label(b, vault, le.recall(b, vault, false).QueryID, true, ids[5])
-	require.Equal(t, uint32(1), le.accessCount(vault, ids[5]), "once, not twice")
-
-	// A, vault C: unaffected.
-	lcA := le.eng.qidKey.CredHash("tok-a")
 	rc := le.recall(a, vaultC, false)
 	le.label(a, vaultC, rc.QueryID, true, rc.Activations[0].ID)
-	require.Equal(t, uint32(1), le.accessCount(vaultC, rc.Activations[0].ID))
-	require.Equal(t, 1, dayFirstFor(le, vaultC, rc.Activations[0].ID, lcA))
+	require.Equal(t, uint32(1), le.accessCount(vaultC, rc.Activations[0].ID), "vault C unaffected")
+}
+
+// TestFeedback_ManyDistinctLabelsInMemoryBounded: one credential posting
+// 100,000 distinct verified labels (10,000 read-only recalls × 10 rows)
+// leaves the in-memory state empty — every decision is durable — and each
+// memory is bumped at most once. Durable growth is exactly one label row per
+// (query, memory) and one day marker per memory.
+func TestFeedback_ManyDistinctLabelsInMemoryBounded(t *testing.T) {
+	if testing.Short() || raceBuild {
+		// ~7s plain; the bound it pins is single-threaded bookkeeping, which
+		// TestFeedback_ConcurrentSameQueryMemory covers under -race.
+		t.Skip("100,000 labels: skipped under -short and -race")
+	}
+	le := newLabelEnv(t, testSecret)
+	ctx := caller("tok-a", "sess-a")
+	const vault = "many-labels"
+	ids := le.seedN(ctx, vault, 10)
+	var groups []FeedbackGroup
+	for i := 0; i < 10000; i++ {
+		ro := le.recall(ctx, vault, true)
+		require.Len(t, ro.Activations, 10)
+		g := FeedbackGroup{QueryID: ro.QueryID, Useful: true}
+		for _, a := range ro.Activations {
+			g.IDs = append(g.IDs, a.ID)
+		}
+		groups = append(groups, g)
+		if len(groups) == 20 { // 200 ids per call, the limit
+			require.NoError(t, le.eng.RecordFeedbackLabels(ctx, vault, groups, FeedbackChannelHandoff))
+			groups = groups[:0]
+		}
+	}
+	le.eng.labels.mu.Lock()
+	require.Zero(t, len(le.eng.labels.vaults), "no in-memory state for accepted labels")
+	le.eng.labels.mu.Unlock()
+	for _, id := range ids {
+		require.Equal(t, uint32(1), le.accessCount(vault, id))
+	}
+	require.Len(t, le.labels(vault), 100000)
+	require.Equal(t, 10, countDayMarkers(le))
 }
 
 // TestFeedback_ClearVaultDropsLabelPartition: clearing (or deleting) a vault
