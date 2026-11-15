@@ -407,7 +407,8 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	// given, query is one more context phrase.
 	const recallInputHelp = `pass 'query' (a string, e.g. {"query":"what we decided about caching"}) or 'context' (an array of phrases)`
 	var contexts []string
-	if raw, exists := args["context"]; exists {
+	// A JSON null is "absent" for both optional fields.
+	if raw, exists := args["context"]; exists && raw != nil {
 		var ctxArr []any
 		switch v := raw.(type) {
 		case string:
@@ -425,7 +426,7 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 			}
 		}
 	}
-	if rawQ, exists := args["query"]; exists {
+	if rawQ, exists := args["query"]; exists && rawQ != nil {
 		q, ok := rawQ.(string)
 		if !ok {
 			sendError(w, id, -32602, fmt.Sprintf("invalid params: 'query' must be a string, got %T — %s", rawQ, recallInputHelp))

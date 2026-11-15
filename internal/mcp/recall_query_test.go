@@ -128,3 +128,23 @@ func TestSchemaPropertyOrderKeyNeverReachesTheWire(t *testing.T) {
 		t.Fatalf("%s leaked into tools/list output", schemaPropertyOrderKey)
 	}
 }
+
+// TestRecall_NullOptionalFieldIsAbsent: a JSON null for query or context
+// must be treated as absent — `{"query":null,"context":[...]}` worked before
+// query existed and must keep working.
+func TestRecall_NullOptionalFieldIsAbsent(t *testing.T) {
+	eng, srv, _, cleanup := newDebtServer(t)
+	defer cleanup()
+	const vault = "railway-null"
+	seedRecallVault(t, srv, vault)
+	eng.WaitWriteTimeIdle()
+	want := fmt.Sprint(recallIDs(t, callTool(t, srv, "muninn_recall", fmt.Sprintf(`{"vault":%q,"context":["junction signal box"],"read_only":true}`, vault))))
+	for _, args := range []string{
+		fmt.Sprintf(`{"vault":%q,"query":null,"context":["junction signal box"],"read_only":true}`, vault),
+		fmt.Sprintf(`{"vault":%q,"context":null,"query":"junction signal box","read_only":true}`, vault),
+	} {
+		if got := fmt.Sprint(recallIDs(t, callTool(t, srv, "muninn_recall", args))); got != want {
+			t.Errorf("%s: rows %s, want %s", args, got, want)
+		}
+	}
+}
