@@ -151,6 +151,8 @@ type writeTwin struct {
 	idleCond *sync.Cond
 	inflight int
 	closed   bool // set when the worker has stopped: no new work is admitted
+	lastDrop time.Time
+	dropped  int // jobs dropped since the last drop WARN
 
 	// guardMinSample is writetwin.GuardMinSample in production; tests of the
 	// guard's store wiring lower it rather than writing 500 engrams.
@@ -161,6 +163,9 @@ type writeTwin struct {
 	// testAfterVector, when set, runs on the inline path after the vector
 	// arrived (a panic-injection seam for TestWriteTwin_PanicAfterCommit…).
 	testAfterVector func()
+	// testBeforeEnqueue, when set, runs in the embed hook just before the
+	// shadow job is handed to the worker — the point a shutdown can race.
+	testBeforeEnqueue func()
 	// testOnWait, when set, runs once the inline path has registered its
 	// waiter — the deterministic point for a test to deliver the vector.
 	testOnWait func()
@@ -187,9 +192,9 @@ func newWriteTwin(mode writetwin.Mode) *writeTwin {
 	return t
 }
 
-// begin admits one unit of async work; false once the worker has stopped, so
-// a hook racing engine shutdown can never strand work that waitIdle would
-// then wait on forever.
+// begin admits one unit of goroutine work (a guard computation); false once
+// the worker has stopped. Channel work goes through enqueue instead, which
+// must hold this lock across its send.
 func (t *writeTwin) begin() bool {
 	t.idleMu.Lock()
 	defer t.idleMu.Unlock()
@@ -198,6 +203,19 @@ func (t *writeTwin) begin() bool {
 	}
 	t.inflight++
 	return true
+}
+
+// noteDropLocked WARNs about dropped shadow jobs at most once a minute
+// (caller holds idleMu). The metric counts every one.
+func (t *writeTwin) noteDropLocked() {
+	t.dropped++
+	now := t.now()
+	if now.Sub(t.lastDrop) < time.Minute {
+		return
+	}
+	slog.Warn("write twin: shadow queue full, jobs dropped (the writes are unaffected; their twins go unlogged)",
+		"dropped", t.dropped, "queue", cap(t.jobs))
+	t.lastDrop, t.dropped = now, 0
 }
 
 func (t *writeTwin) end() {
@@ -327,14 +345,30 @@ func (e *Engine) WriteTwinOnEmbedded(ws [8]byte, eng *storage.Engram, vec []floa
 	}
 	t.mu.Unlock()
 
-	if !t.begin() {
+	if t.testBeforeEnqueue != nil {
+		t.testBeforeEnqueue()
+	}
+	t.enqueue(twinJob{ws: ws, entry: entry, meta: meta, inlineOwned: owned, gen: gen})
+}
+
+// enqueue hands a job to the worker without ever blocking. The admission
+// check, the send and the in-flight count happen under ONE lock, the same lock
+// the worker takes to close admission before its final drain: so a job is
+// either in the channel before the drain (and the drain releases it) or never
+// sent at all. Splitting them — admit, unlock, send — let a send land after
+// the drain, holding in-flight at 1 forever and hanging Engine.Stop.
+func (t *writeTwin) enqueue(job twinJob) {
+	t.idleMu.Lock()
+	defer t.idleMu.Unlock()
+	if t.closed {
 		return
 	}
 	select {
-	case t.jobs <- twinJob{ws: ws, entry: entry, meta: meta, inlineOwned: owned, gen: gen}:
+	case t.jobs <- job:
+		t.inflight++
 	default:
-		t.end()
 		metrics.WriteTwinDroppedTotal.Inc()
+		t.noteDropLocked()
 	}
 }
 
