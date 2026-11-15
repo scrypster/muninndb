@@ -543,8 +543,12 @@ func TestL1Cache_CountEqualsLive_ChurnWithEvictionAndDelete(t *testing.T) {
 	if c.Len() != live {
 		t.Fatalf("count drift: Len()=%d live=%d after concurrent churn", c.Len(), live)
 	}
-	if live > max+16 { // concurrent fills may overshoot by at most one per goroutine
-		t.Fatalf("cache holds %d entries, max %d", live, max)
+	// Capacity is approximate DURING concurrent fills; once quiescent, the
+	// next stamped fill must bring the cache back within it (exact counter).
+	extra := NewULID()
+	c.Set(ws, extra, &Engram{ID: extra})
+	if live := liveEntries(c); live > max || c.Len() != live {
+		t.Fatalf("after a quiescent fill the cache holds %d entries (Len %d), max %d", live, c.Len(), max)
 	}
 	c.DeleteByVault(ws)
 	if c.Len() != 0 || liveEntries(c) != 0 {

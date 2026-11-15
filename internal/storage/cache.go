@@ -84,7 +84,13 @@ func (c *L1Cache) fill(ws [8]byte, id ULID, eng *Engram, tok uint64, stamp bool)
 	key := cacheKeyFor(ws, id)
 	if _, loaded := c.data.Swap(key, entry); !loaded {
 		if n := c.count.Add(1); stamp && n > int64(c.maxSize) {
-			c.evict()
+			// Evict until back at capacity. One eviction per fill (the old
+			// shape) never recovered from concurrent evictions that picked
+			// the same victim — with an exact counter that overshoot would
+			// persist. Stops if a pass removes nothing (another goroutine is
+			// evicting the same sample).
+			for c.count.Load() > int64(c.maxSize) && c.evict() {
+			}
 		}
 	}
 	if !c.guard.engramClean(id, tok) {
@@ -225,7 +231,7 @@ func (c *L1Cache) InvalidateAll() {
 
 // evict removes one entry using approximate LRU.
 // Scans 64 random entries, evicts the one with oldest lastAccess.
-func (c *L1Cache) evict() {
+func (c *L1Cache) evict() bool {
 	const sampleSize = 64
 
 	var oldest *cacheEntry
@@ -256,6 +262,8 @@ func (c *L1Cache) evict() {
 		// concurrent evictions pick the same victim.
 		if _, loaded := c.data.LoadAndDelete(oldestID); loaded {
 			c.count.Add(-1)
+			return true
 		}
 	}
+	return false
 }

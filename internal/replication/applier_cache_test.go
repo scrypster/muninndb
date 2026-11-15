@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -68,5 +69,44 @@ func TestApplier_FollowerCacheSeesReplicatedWrite(t *testing.T) {
 	}
 	if e.Confidence != 0.9 {
 		t.Fatalf("follower served its pre-replication cache entry: confidence %v, leader committed 0.9", e.Confidence)
+	}
+}
+
+// The commit hook fails safe: it runs even when Commit returns an error, so a
+// batch that was applied (or partially visible) before the error can never
+// leave the follower's caches stale. A read-only DB makes Commit fail
+// deterministically.
+func TestApplier_CommitHookRunsWhenCommitFails(t *testing.T) {
+	dir := t.TempDir()
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := pebble.Open(dir, &pebble.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+
+	a := NewApplier(ro)
+	var calls int
+	a.SetCommitHooks(func([]byte) { calls++ }, func() {})
+
+	src := ro.NewBatch()
+	src.Set([]byte("k"), []byte("v"), nil)
+	repr := append([]byte(nil), src.Repr()...)
+	src.Close()
+
+	if err := a.Apply(ReplicationEntry{Seq: 1, Op: OpSet, Key: []byte("k"), Value: []byte("v")}); err == nil {
+		t.Fatal("precondition: commit on a read-only DB should fail")
+	}
+	if err := a.Apply(ReplicationEntry{Seq: 2, Op: OpBatch, Value: repr}); err == nil {
+		t.Fatal("precondition: repr commit on a read-only DB should fail")
+	}
+	if calls != 2 {
+		t.Fatalf("commit hook ran %d times across two failed commits, want 2 (fail-open invalidation)", calls)
 	}
 }

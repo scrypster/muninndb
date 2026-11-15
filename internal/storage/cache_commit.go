@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"sync"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/prefix"
@@ -21,9 +22,18 @@ import (
 // always safe, and a failed commit's effect on Pebble is not ours to assume.
 func (ps *PebbleStore) commitBatch(b *pebble.Batch, opts *pebble.WriteOptions) error {
 	err := b.Commit(opts)
+	if f, ok := commitResultForTest.Load(ps); ok {
+		err = f.(func(error) error)(err)
+	}
 	ps.invalidateCommittedRepr(b.Repr())
 	return err
 }
+
+// commitResultForTest is a TEST-ONLY seam, keyed by store so parallel tests
+// on other stores are untouched: an entry rewrites that store's Commit
+// result, so a test can make a commit that APPLIED report an error and prove
+// the invalidation above still runs. Production never stores into it.
+var commitResultForTest sync.Map // *PebbleStore -> func(error) error
 
 // InvalidateCommittedRepr applies commitBatch's invalidation to a batch that
 // was committed to this store's DB by someone else — the replication applier

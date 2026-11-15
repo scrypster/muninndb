@@ -102,11 +102,12 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 		if err := reprBatch.SetRepr(entry.Value); err != nil {
 			return fmt.Errorf("apply batch repr at seq %d: %w", entry.Seq, err)
 		}
-		if err := reprBatch.Commit(pebble.NoSync); err != nil {
-			return err
-		}
+		err := reprBatch.Commit(pebble.NoSync)
 		if a.onCommitted != nil {
-			a.onCommitted(entry.Value)
+			a.onCommitted(reprBatch.Repr())
+		}
+		if err != nil {
+			return err
 		}
 		seqBuf := make([]byte, 8)
 		binary.BigEndian.PutUint64(seqBuf, entry.Seq)
@@ -141,11 +142,12 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 	// Use NoSync per entry — Pebble's WAL provides crash-safety without an fsync
 	// on every write. Syncing every entry would serialize on disk I/O, making
 	// replication throughput proportional to fsync latency (~1 IOPS per entry).
-	if err := batch.Commit(pebble.NoSync); err != nil {
-		return err
-	}
+	err := batch.Commit(pebble.NoSync)
 	if a.onCommitted != nil {
 		a.onCommitted(batch.Repr())
+	}
+	if err != nil {
+		return err
 	}
 
 	a.lastApplied = entry.Seq

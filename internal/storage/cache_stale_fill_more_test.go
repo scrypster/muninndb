@@ -2,11 +2,13 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
@@ -151,5 +153,46 @@ func TestNoRawBatchCommitsInStorage(t *testing.T) {
 				t.Errorf("%s:%d writes a cache-backing key directly on the DB: %s", f, i+1, strings.TrimSpace(line))
 			}
 		}
+	}
+}
+
+// A commit that APPLIED but reported an error must still invalidate: the
+// guard fails safe. Without it the cache keeps serving the pre-write value
+// that Pebble no longer holds.
+func TestCommitBatch_InvalidatesEvenWhenCommitReportsError(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	ws, id := writeProbe(t, s, "commit-error", 0.20)
+	if e, err := s.GetEngram(ctx, ws, id); err != nil || e.Relevance != 0.20 {
+		t.Fatalf("precondition: %v %v", e, err) // now cached
+	}
+
+	inject := func(err error) error {
+		if err != nil {
+			return err
+		}
+		return errors.New("injected: commit applied, then reported failure")
+	}
+	commitResultForTest.Store(s, inject)
+	// The StoreBatch path (evolve's supersede) does no invalidation of its own
+	// before the commit, so commitBatch is the only thing that can drop the
+	// cached pre-write copy.
+	b := s.NewBatch()
+	if err := b.SupersedeEngram(ctx, ws, id, time.Now()); err != nil {
+		commitResultForTest.Delete(s)
+		t.Fatal(err)
+	}
+	err := b.Commit()
+	commitResultForTest.Delete(s)
+	if err == nil {
+		t.Fatal("injection did not reach the commit")
+	}
+
+	e, err := s.GetEngram(ctx, ws, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.State != StateSoftDeleted {
+		t.Fatalf("cache served state %v after a commit that applied soft_deleted but returned an error (invalidation skipped on the error path)", e.State)
 	}
 }
