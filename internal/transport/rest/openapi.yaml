@@ -329,6 +329,14 @@ components:
         max_results:
           type: integer
           default: 10
+          description: >-
+            Maximum rows returned. The first N rows do not depend on it on
+            default (ACT-R) vaults. The response can exceed it in exactly one
+            case: a returned memory with an unresolved declared contradiction
+            whose disputing partner did not make the cut brings that partner
+            along — only the partner, at most one per returned memory, never
+            chained, at most min(max_results, 3) extra rows, reported as
+            conflict.adjacency_overflow.
         max_hops:
           type: integer
           default: 0
@@ -714,8 +722,11 @@ components:
         adjacency_overflow:
           type: integer
           description: >-
-            How many rows beyond max_results this response carries in order to
-            keep a conflict cluster whole. Never applied silently.
+            How many rows beyond max_results this response carries: each is the
+            disputing partner of a returned memory that did not make the cut —
+            at most one per returned memory, never chained, at most
+            min(max_results, 3). A partner the cap kept out is still named on
+            the row (unresolved_contradiction.with, partner_in_results=false).
 
     ConflictPairInfo:
       type: object

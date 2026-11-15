@@ -447,9 +447,10 @@ func TestContradictionHonesty_TightLimitStillDisclosesTheConflict(t *testing.T) 
 	// disputed top row was already gone and COG-29's own adjacency rule ("if
 	// any cluster member is inside the caller's cut, all of them are; the
 	// overflow is bounded and reported") could never apply. The cut now
-	// happens once, after COG-29, so the rule does apply: max_results=1 on a
-	// disputed top row returns BOTH sides, annotated, with the overflow
-	// reported — the first row is the same row it always was.
+	// happens once, after COG-29, so the disputing partner follows the cut
+	// (applyContradictionCut: only the partner, at most min(limit, 3) extra
+	// rows): max_results=1 on a disputed top row returns BOTH sides, annotated,
+	// with the overflow reported — the first row is the same row it always was.
 	resp := recallContradiction(t, eng, "test", func(r *mbp.ActivateRequest) { r.MaxResults = 1 })
 	if len(resp.Activations) != 2 {
 		t.Fatalf("max_results=1 on a disputed top row returned %d rows, want both sides (1 + adjacency overflow 1)", len(resp.Activations))
@@ -602,7 +603,7 @@ func TestContradictionHonesty_SupersedesEdgeAloneResolves(t *testing.T) {
 		req := &activation.ActivateRequest{MaxResults: 10}
 		now := time.Now()
 		in := append([]activation.ScoredEngram(nil), rows...)
-		_, block, _ := eng.applyContradictionHonesty(ctx, ws, in, req, newVisibilityGate(req, now), now)
+		_, block := eng.applyContradictionHonesty(ctx, ws, in, req, newVisibilityGate(req, now), now)
 		return block
 	}
 	if run() == nil {

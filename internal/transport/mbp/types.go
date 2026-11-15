@@ -190,8 +190,11 @@ type ReadResponse struct {
 
 // ActivateRequest queries for relevant engrams.
 type ActivateRequest struct {
-	Context     []string  `msgpack:"context" json:"context"`
-	Threshold   float32   `msgpack:"threshold,omitempty" json:"threshold,omitempty"`
+	Context   []string `msgpack:"context" json:"context"`
+	Threshold float32  `msgpack:"threshold,omitempty" json:"threshold,omitempty"`
+	// MaxResults bounds the rows returned, except for the bounded COG-29
+	// partner overflow (ConflictBlock.AdjacencyOverflow, at most
+	// min(MaxResults, 3)).
 	MaxResults  int       `msgpack:"max_results,omitempty" json:"max_results,omitempty"`
 	MaxHops     int       `msgpack:"max_hops,omitempty" json:"max_hops,omitempty"`
 	IncludeWhy  bool      `msgpack:"include_why,omitempty" json:"include_why,omitempty"`
@@ -482,9 +485,10 @@ type ConflictBlock struct {
 	Pairs      []ConflictPairInfo `msgpack:"pairs,omitempty"   json:"pairs,omitempty"`
 	Warning    string             `msgpack:"warning,omitempty" json:"warning,omitempty"`
 	// AdjacencyOverflow reports how many rows beyond max_results the response
-	// carries in order to keep a conflict cluster whole. Returning one side of
-	// a conflict alone is the failure this block exists to remove, so the
-	// truncation yields to it — but never silently.
+	// carries: each is the disputing partner of a returned row that did not
+	// make the cut — only the partner, at most one per returned row, never
+	// chained, at most min(max_results, 3) (engine.applyContradictionCut).
+	// A partner the cap keeps out is still named on its row.
 	AdjacencyOverflow int `msgpack:"adjacency_overflow,omitempty" json:"adjacency_overflow,omitempty"`
 }
 

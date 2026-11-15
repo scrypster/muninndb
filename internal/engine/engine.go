@@ -3197,9 +3197,8 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// pair IS the resolution, after currency because COG-25 may reorder exact
 	// ties and this phase's ordering must be the last word, and before
 	// truncation so the adjacency guarantee holds.
-	var conflictKeep int
 	var conflictBlock *mbp.ConflictBlock
-	result.Activations, conflictBlock, conflictKeep = e.applyContradictionHonesty(
+	result.Activations, conflictBlock = e.applyContradictionHonesty(
 		ctx, wsPrefix, result.Activations, actReq, injectorGate, gateNow)
 
 	// Re-apply MaxResults: entity boost / supersession / the validity gate may have
@@ -3208,17 +3207,14 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	// over every gated row (DeferTruncation), so the first N rows here do not
 	// depend on MaxResults — every phase above saw the same list whatever the
 	// limit, and none of them moves a matched row past a better content score.
-	// COG-29 may raise the cut by up to contradictionMaxCluster-1 so a conflict
-	// cluster is never returned half-truncated; the overflow is reported in the
-	// conflict block rather than applied silently.
-	truncateAt := actReq.MaxResults
-	if conflictKeep > truncateAt {
-		truncateAt = conflictKeep
+	// COG-29 overflow: a returned row's disputing partner may follow the cut —
+	// only that partner, at most min(limit, 3) extra rows, reported in the
+	// conflict block (applyContradictionCut).
+	var overflow int
+	result.Activations, overflow = applyContradictionCut(result.Activations, actReq.MaxResults)
+	if conflictBlock != nil {
+		conflictBlock.AdjacencyOverflow = overflow
 	}
-	if truncateAt > 0 && len(result.Activations) > truncateAt {
-		result.Activations = result.Activations[:truncateAt]
-	}
-
 	// A conflict cluster that fell entirely outside the caller's cut must not
 	// be reported: the block describes what the caller RECEIVED. Prune to the
 	// pairs with a surviving endpoint, and drop the block when none remain.
