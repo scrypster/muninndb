@@ -2845,7 +2845,7 @@ func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, i
 	// recall applies to query/context): legacy callers that send
 	// "query_id": null alongside engram_id must not be told they sent two
 	// forms.
-	hasQ, hasIDs, hasGroups, hasLegacy := presentArg(args, "query_id"), presentArg(args, "engram_ids"), presentArg(args, "groups"), presentArg(args, "engram_id")
+	hasQ, hasIDs, hasGroups, hasLegacy := presentArg(args, "query_id"), presentArg(args, "engram_ids") || presentArg(args, "ids"), presentArg(args, "groups"), presentArg(args, "engram_id")
 	forms := 0
 	for _, f := range []bool{hasQ || hasIDs, hasGroups, hasLegacy} {
 		if f {
@@ -2895,7 +2895,7 @@ func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, i
 	if hasGroups {
 		rawGroups, ok := args["groups"].([]any)
 		if !ok || len(rawGroups) == 0 {
-			invalid("form", `groups must be a non-empty array of {"query_id":"…","ids":["…"],"useful":true}`)
+			invalid("form", "groups must be a non-empty array of groups, e.g. "+feedbackBatchShape)
 			return
 		}
 		if len(rawGroups) > feedbackMaxGroups {
@@ -2905,10 +2905,10 @@ func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, i
 		for gi, rg := range rawGroups {
 			g, ok := rg.(map[string]any)
 			if !ok {
-				invalid("form", fmt.Sprintf(`groups[%d]: must be an object {"query_id":"…","ids":["…"],"useful":true}`, gi))
+				invalid("form", fmt.Sprintf("groups[%d]: must be an object like the one in %s", gi, feedbackBatchShape))
 				return
 			}
-			fg, field, msg := parseFeedbackGroup(g, "ids", fmt.Sprintf("groups[%d]: ", gi), fmt.Sprintf("groups[%d].ids", gi))
+			fg, field, msg := parseFeedbackGroup(g, fmt.Sprintf("groups[%d]: ", gi), fmt.Sprintf("groups[%d].", gi), feedbackBatchShape)
 			if msg != "" {
 				invalid(field, msg)
 				return
@@ -2916,7 +2916,7 @@ func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, i
 			groups = append(groups, fg)
 		}
 	} else {
-		fg, field, msg := parseFeedbackGroup(args, "engram_ids", "", "engram_ids")
+		fg, field, msg := parseFeedbackGroup(args, "", "", feedbackSingleShape)
 		if msg != "" {
 			invalid(field, msg)
 			return
@@ -2985,11 +2985,20 @@ const (
 	FeedbackSourceHandoff = "handoff"
 )
 
-// parseFeedbackGroup validates one group's shape. idsKey is "engram_ids" for
-// the single form and "ids" inside groups; prefix is prepended to the useful
-// and query_id messages; idsPath names the array in id messages. Returns the
-// metric field and message on error.
-func parseFeedbackGroup(g map[string]any, idsKey, prefix, idsPath string) (FeedbackGroup, string, string) {
+// The exact shape of each form, quoted in id-field errors so a caller sees
+// the call it should have made. engram_ids is the canonical name everywhere;
+// ids is accepted as an alias in both forms.
+const (
+	feedbackSingleShape = `{"vault":"<vault>","query_id":"<from muninn_recall>","engram_ids":["<id>"],"useful":true}`
+	feedbackBatchShape  = `{"groups":[{"query_id":"<from muninn_recall>","engram_ids":["<id>"],"useful":true}]}`
+)
+
+// parseFeedbackGroup validates one group's shape (the single form's top-level
+// arguments, or one batch group). prefix is prepended to the useful and
+// query_id messages; idsPrefix ("" or "groups[i].") prefixes the id field in
+// id messages; shape is the form's exact example. Returns the metric field
+// and message on error.
+func parseFeedbackGroup(g map[string]any, prefix, idsPrefix, shape string) (FeedbackGroup, string, string) {
 	useful, ok := g["useful"].(bool)
 	if !ok {
 		return FeedbackGroup{}, "useful", prefix + feedbackUsefulHelp
@@ -2998,10 +3007,11 @@ func parseFeedbackGroup(g map[string]any, idsKey, prefix, idsPath string) (Feedb
 	if !ok || !isQueryIDShape(qid) {
 		return FeedbackGroup{}, "query_id", prefix + "query_id must be the query_id returned by muninn_recall"
 	}
-	rawIDs, ok := g[idsKey].([]any)
-	if !ok || len(rawIDs) == 0 {
-		return FeedbackGroup{}, "id", fmt.Sprintf("%s must be a non-empty array of the memory ids that helped (or did not)", idsPath)
+	rawIDs, field, msg := feedbackIDsArg(g, idsPrefix, shape)
+	if msg != "" {
+		return FeedbackGroup{}, field, msg
 	}
+	idsPath := idsPrefix + "engram_ids"
 	if len(rawIDs) > feedbackMaxIDsPerGroup {
 		return FeedbackGroup{}, "limit", fmt.Sprintf("too many ids in %s (max %d per recall); split into several groups", idsPath, feedbackMaxIDsPerGroup)
 	}
@@ -3018,6 +3028,56 @@ func parseFeedbackGroup(g map[string]any, idsKey, prefix, idsPath string) (Feedb
 		ids = append(ids, v)
 	}
 	return FeedbackGroup{QueryID: qid, IDs: ids, Useful: useful}, "", ""
+}
+
+// feedbackIDsArg reads the memory ids from engram_ids (canonical) or ids
+// (alias). Both given and equal → accepted; both given and different → a
+// clear error. A bare string is an array of one (the tolerance recall gives
+// `context`).
+func feedbackIDsArg(g map[string]any, idsPrefix, shape string) ([]any, string, string) {
+	norm := func(key string) ([]any, bool, bool) { // value, present, wellTyped
+		v, ok := g[key]
+		if !ok || v == nil {
+			return nil, false, true
+		}
+		switch x := v.(type) {
+		case string:
+			if x == "" {
+				return nil, false, true
+			}
+			return []any{x}, true, true
+		case []any:
+			return x, len(x) > 0, true
+		}
+		return nil, true, false
+	}
+	canon, hasCanon, okCanon := norm("engram_ids")
+	alias, hasAlias, okAlias := norm("ids")
+	if !okCanon || !okAlias {
+		return nil, "id", fmt.Sprintf("%sengram_ids (or ids) must be an array of memory ids, e.g. %s", idsPrefix, shape)
+	}
+	if hasCanon && hasAlias && !sameIDList(canon, alias) {
+		return nil, "id", fmt.Sprintf("%sengram_ids and ids were both given and differ — send the memory ids once, in engram_ids, e.g. %s", idsPrefix, shape)
+	}
+	if hasCanon {
+		return canon, "", ""
+	}
+	if hasAlias {
+		return alias, "", ""
+	}
+	return nil, "id", fmt.Sprintf("%sengram_ids (or ids) is required: the ids of the memories that helped (or did not), e.g. %s", idsPrefix, shape)
+}
+
+func sameIDList(a, b []any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func isMemoryID(s string) bool {
