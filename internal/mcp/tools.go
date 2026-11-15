@@ -1010,7 +1010,8 @@ func allToolDefinitions() []ToolDefinition {
 				"labels are recorded for measurement and do not change ranking yet. useful=false changes nothing about the memory. " +
 				"useful is required and must be a JSON boolean. " +
 				"Re-sending the same labels is harmless (one label per query, memory and credential; the latest useful value wins). " +
-				`Batch form, e.g. for a handoff drain: {"groups":[{"query_id":"…","ids":["…"],"useful":true}],"source":"handoff"} — at most 50 groups, 20 ids per group, 200 ids per call; never pair an id with a recall that did not return it. ` +
+				`Batch form, e.g. for a handoff drain: {"groups":[{"query_id":"…","engram_ids":["…"],"useful":true}],"source":"handoff"} — at most 50 groups, 20 ids per group, 200 ids per call; never pair an id with a recall that did not return it. ` +
+				"The memory ids are engram_ids in both forms (ids is accepted as an alias; a single id may be a bare string). " +
 				"Legacy form {\"engram_id\":\"…\",\"useful\":true} is still accepted but records no label. " +
 				"A credential that can read the vault gets one result per id (recorded, repeat, or rejected with a reason and a hint, e.g. wrong_vault, not_in_recall, substituted); a write-only key gets {ok, received_groups, received_ids} whatever happened. muninn_status reports label counts. " +
 				"A first useful=true label also counts as one access of the memory (access count and last-access time; under default ACT-R scoring that does not change ranking). Feedback never changes confidence.",
@@ -1021,7 +1022,7 @@ func allToolDefinitions() []ToolDefinition {
 					"query_id": map[string]any{"type": "string", "description": "The query_id returned by the muninn_recall whose results you are labelling (also in its feedback block)"},
 					"engram_ids": map[string]any{
 						"type": "array", "items": map[string]any{"type": "string"}, "maxItems": feedbackMaxIDsPerGroup,
-						"description": "Ids of memories that recall returned and that helped (useful:true) or did not (useful:false)",
+						"description": "Ids of memories that recall returned and that helped (useful:true) or did not (useful:false). ids is accepted as an alias; a single id may be a bare string",
 					},
 					"useful": map[string]any{"type": "boolean", "description": "Required. true = these memories helped; false = they were returned and did not help"},
 					"groups": map[string]any{
@@ -1030,11 +1031,11 @@ func allToolDefinitions() []ToolDefinition {
 						"items": map[string]any{
 							"type": "object",
 							"properties": map[string]any{
-								"query_id": map[string]any{"type": "string"},
-								"ids":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": feedbackMaxIDsPerGroup},
-								"useful":   map[string]any{"type": "boolean"},
+								"query_id":   map[string]any{"type": "string"},
+								"engram_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": feedbackMaxIDsPerGroup, "description": "Memory ids from that recall (ids is accepted as an alias)"},
+								"useful":     map[string]any{"type": "boolean"},
 							},
-							"required": []string{"query_id", "ids", "useful"},
+							"required": []string{"query_id", "engram_ids", "useful"},
 						},
 					},
 					"source":    map[string]any{"type": "string", "enum": []string{FeedbackSourceDirect, FeedbackSourceHandoff}, "description": "direct (default) or handoff (a later drain posting on an agent's behalf)"},
