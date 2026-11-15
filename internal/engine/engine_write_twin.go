@@ -142,11 +142,15 @@ type writeTwin struct {
 
 	jobs    chan twinJob
 	stop    chan struct{}
+	done    chan struct{} // closed when the worker goroutine has returned
 	stopped sync.Once
+	ctx     context.Context // cancelled at shutdown: bounds a guard computation
+	cancel  context.CancelFunc
 
 	idleMu   sync.Mutex
 	idleCond *sync.Cond
 	inflight int
+	closed   bool // set when the worker has stopped: no new work is admitted
 
 	// guardMinSample is writetwin.GuardMinSample in production; tests of the
 	// guard's store wiring lower it rather than writing 500 engrams.
@@ -174,17 +178,26 @@ func newWriteTwin(mode writetwin.Mode) *writeTwin {
 		guards:         make(map[[8]byte]*twinGuard),
 		jobs:           make(chan twinJob, twinQueueSize),
 		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 		guardMinSample: writetwin.GuardMinSample,
 		after:          time.After,
 	}
 	t.idleCond = sync.NewCond(&t.idleMu)
+	t.ctx, t.cancel = context.WithCancel(context.Background())
 	return t
 }
 
-func (t *writeTwin) begin() {
+// begin admits one unit of async work; false once the worker has stopped, so
+// a hook racing engine shutdown can never strand work that waitIdle would
+// then wait on forever.
+func (t *writeTwin) begin() bool {
 	t.idleMu.Lock()
+	defer t.idleMu.Unlock()
+	if t.closed {
+		return false
+	}
 	t.inflight++
-	t.idleMu.Unlock()
+	return true
 }
 
 func (t *writeTwin) end() {
@@ -206,8 +219,15 @@ func (t *writeTwin) waitIdle() {
 	t.idleMu.Unlock()
 }
 
+// shutdown stops the worker, cancels any guard computation, and waits for
+// both: nothing of the check outlives Engine.Stop (and so the store).
 func (t *writeTwin) shutdown() {
-	t.stopped.Do(func() { close(t.stop) })
+	t.stopped.Do(func() {
+		t.cancel()
+		close(t.stop)
+	})
+	<-t.done
+	t.waitIdle()
 }
 
 // SetWriteTwinFeed records the embed processor that feeds the ring (its
@@ -307,7 +327,9 @@ func (e *Engine) WriteTwinOnEmbedded(ws [8]byte, eng *storage.Engram, vec []floa
 	}
 	t.mu.Unlock()
 
-	t.begin()
+	if !t.begin() {
+		return
+	}
 	select {
 	case t.jobs <- twinJob{ws: ws, entry: entry, meta: meta, inlineOwned: owned, gen: gen}:
 	default:
@@ -332,10 +354,15 @@ func (e *Engine) resetTwinVault(ws [8]byte) {
 
 func (e *Engine) runWriteTwinWorker() {
 	t := e.twin
+	defer close(t.done)
 	for {
 		select {
 		case <-t.stop:
-			// Drain so waitIdle cannot hang on jobs that will never run.
+			// Refuse new work, then drain so waitIdle cannot hang on jobs
+			// that will never run.
+			t.idleMu.Lock()
+			t.closed = true
+			t.idleMu.Unlock()
 			for {
 				select {
 				case <-t.jobs:
@@ -409,21 +436,37 @@ func (e *Engine) twinGuardStatus(ws [8]byte, thr float64) (status string, share 
 	rank1, computed := g.rank1, !g.computedAt.IsZero()
 	gen := t.gens[ws]
 	t.mu.Unlock()
+	if needs && !t.begin() {
+		needs = false
+		t.mu.Lock()
+		g.computing = false
+		t.mu.Unlock()
+	}
 	if needs {
-		t.begin()
+		// Tracked by the twin's in-flight counter, cancelled via twin.ctx and
+		// awaited in writeTwin.shutdown() (Engine.Stop).
+		// engine:spawn-ok — guard computation, drained in Stop() via twin.shutdown()
 		go func() {
 			defer t.end()
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("write twin: guard computation panicked", "panic", fmt.Sprint(r))
-				}
+			var samples []float64
+			ok := func() (ok bool) {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("write twin: guard computation panicked", "panic", fmt.Sprint(r))
+						ok = false
+					}
+				}()
+				samples = e.computeTwinGuard(t.ctx, ws)
+				return true
 			}()
-			samples := e.computeTwinGuard(context.Background(), ws)
 			t.mu.Lock()
-			if t.gens[ws] == gen {
-				if cur := t.guards[ws]; cur != nil {
-					cur.rank1, cur.computedAt, cur.computing = samples, t.now(), false
+			if cur := t.guards[ws]; cur == g {
+				// A failed computation leaves the old measurement and is
+				// retried on the next check; it never wedges "computing".
+				if ok && t.gens[ws] == gen {
+					cur.rank1, cur.computedAt = samples, t.now()
 				}
+				cur.computing = false
 			}
 			t.mu.Unlock()
 		}()
@@ -477,6 +520,9 @@ func (e *Engine) computeTwinGuard(ctx context.Context, ws [8]byte) []float64 {
 			return out
 		}
 		for i := len(part) - 1; i >= 0 && len(out) < writetwin.GuardMaxSample; i-- {
+			if ctx.Err() != nil {
+				return out
+			}
 			if len(vecs[i]) == 0 {
 				continue
 			}

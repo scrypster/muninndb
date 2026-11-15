@@ -604,6 +604,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 	}
 	if cfg.WriteTwinMode != writetwin.Off {
 		e.twin = newWriteTwin(cfg.WriteTwinMode)
+		// engine:spawn-ok — tracked by twin.done, drained in Stop() via twin.shutdown()
 		go e.runWriteTwinWorker()
 	}
 	if e.qidKey == nil {
