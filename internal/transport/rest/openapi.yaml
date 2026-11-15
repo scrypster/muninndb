@@ -351,8 +351,9 @@ components:
           description: >-
             Recall-mode preset. semantic — high-precision vector match
             (threshold 0.3); balanced — engine defaults; deep — 4 hops,
-            threshold 0.1; recent — ALIAS of the vault default: identical
-            scoring and threshold. recent declares session-orientation intent
+            threshold 0.1; recent — ALIAS of balanced: engine-default scoring
+            and threshold. Any mode sent here replaces (ignores) the vault's
+            default recall_mode. recent declares session-orientation intent
             only; it does NOT list recent memories or favour recency beyond
             the default ranking. For topic-free orientation use the session
             timeline or a tag filter scoped to your own memories.
