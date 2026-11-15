@@ -67,25 +67,25 @@ import (
 //     the absolute numbers are not "what recall returns".
 //
 // PRIVACY: every string is synthetic and authored in this repo. The corpus is
-// billingCorpus from semantic_abstention_test.go; the queries are below.
+// bookingCorpus from semantic_abstention_test.go; the queries are below.
 // ---------------------------------------------------------------------------
 
-// abmAnswerable pairs a paraphrased query with the billingCorpus concept that
+// abmAnswerable pairs a paraphrased query with the bookingCorpus concept that
 // answers it. Paraphrases deliberately avoid the stored wording — that is the
 // case retrieval-by-meaning exists to serve, and the one that breaks.
 var abmAnswerable = []struct{ query, goldConcept string }{
-	{"how do incoming customer payments get applied to the right open bill", "Remittance processing flow"},
+	{"how does money a hiker sends in get tied to the right pending stay", "Reservation deposit matching"},
 	{"getting a refund after paying extra by mistake", "Overpayment refund workflow"},
 	{"what happens when someone stops paying on time", "Delinquent account escalation"},
 	{"how much extra do we charge for paying after the deadline", "Late fee assessment schedule"},
 	{"does the price go up automatically when the agreement is extended", "Contract renewal rate escalation"},
 	{"what do we do when a customer says a charge is wrong", "Invoice dispute resolution"},
-	{"how does a new company get set up on the system", "Employer portal onboarding"},
-	{"checking that our numbers agree with the accounting system each month", "Ledger reconciliation procedure"},
-	{"everyone pays the same amount no matter how much they use", "Per-capita billing model"},
-	{"how risky is this customer based on their payment history", "Audit score calculation"},
+	{"how does a new caretaker get set up on the system", "Hut warden portal onboarding"},
+	{"checking that our numbers agree with the accounting system each month", "Lodge cashbook reconciliation"},
+	{"everyone pays the same amount no matter how often they visit", "Pass-holder flat rate model"},
+	{"how risky is this guest based on their payment history", "Account reliability score"},
 	{"what shape does the incoming money data arrive in", "Batch payment file format"},
-	{"the price changes depending on how much you use each month", "Four-bucket pricing rate tiers"},
+	{"what a bed costs depends on the time of year and how busy it is", "In-season bunk rate bands"},
 }
 
 // abmUnanswerable are synthetic probes shaped like plausible memory queries —
@@ -157,7 +157,7 @@ func (c abmCell) fpr() float64 {
 	return float64(c.falsePos) / float64(c.nUnanswer)
 }
 
-// abmMeasureFixture builds the real-embedder billing corpus and marks every
+// abmMeasureFixture builds the real-embedder booking corpus and marks every
 // third engram as co-activated (Hebbian-hot), modelling an active session.
 // Returns the engine and concept->ID map.
 // abmFixedAge pins the fixture's AGE rather than its timestamp.
@@ -340,7 +340,7 @@ func TestMeasureAbstentionGate(t *testing.T) {
 	t.Log("")
 	t.Log("=== ABSTENTION GATE: NDCG@5 on answerable (higher better) vs FPR on unanswerable (lower better) ===")
 	t.Logf("corpus=%d engrams (paraphrase condition: FTS stubbed empty) | answerable=%d unanswerable=%d",
-		len(billingCorpus), len(abmAnswerable), len(abmUnanswerable))
+		len(bookingCorpus), len(abmAnswerable), len(abmUnanswerable))
 	for ti, thr := range thresholds {
 		t.Logf("")
 		t.Logf("--- threshold: %s ---", thr.name)
