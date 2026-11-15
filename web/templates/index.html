@@ -454,7 +454,7 @@
             title="Pure vector similarity — best for concept matching">Semantic</button>
           <button @click="searchMode = 'recent'" class="seg-btn" :class="searchMode === 'recent' && 'seg-active'"
             :style="'padding:0.3rem 0.75rem;border:none;border-right:1px solid var(--border);cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'recent' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
-            title="Prioritize recently created memories">Recent</button>
+            title="Same results as Balanced — marks the query as session orientation">Recent</button>
           <button @click="searchMode = 'deep'" class="seg-btn" :class="searchMode === 'deep' && 'seg-active'"
             :style="'padding:0.3rem 0.75rem;border:none;cursor:pointer;transition:all 0.15s;font-weight:600;' + (searchMode === 'deep' ? 'background:var(--accent);color:#fff;' : 'background:var(--bg-elevated);color:var(--text-secondary);')"
             title="Exhaustive graph traversal — slower but finds distant connections">Deep</button>
@@ -1377,7 +1377,7 @@
                 <template x-for="rm in [
                   {id:'balanced',  label:'Balanced',  desc:'Engine default'},
                   {id:'semantic',  label:'Semantic',  desc:'Pure vector match'},
-                  {id:'recent',    label:'Recent',    desc:'Recency-biased'},
+                  {id:'recent',    label:'Recent',    desc:'Same as Balanced'},
                   {id:'deep',      label:'Deep',      desc:'4-hop graph'}
                 ]" :key="rm.id">
                   <div @click="plasticityForm.recallMode = rm.id"

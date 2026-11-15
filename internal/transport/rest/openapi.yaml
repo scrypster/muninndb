@@ -348,6 +348,14 @@ components:
         mode:
           type: string
           enum: ["", "semantic", "recent", "balanced", "deep"]
+          description: >-
+            Recall-mode preset. semantic — high-precision vector match
+            (threshold 0.3); balanced — engine defaults; deep — 4 hops,
+            threshold 0.1; recent — ALIAS of the vault default: identical
+            scoring and threshold. recent declares session-orientation intent
+            only; it does NOT list recent memories or favour recency beyond
+            the default ranking. For topic-free orientation use the session
+            timeline or a tag filter scoped to your own memories.
 
     ScoreComponents:
       type: object
@@ -1435,6 +1443,10 @@ components:
           type: string
           nullable: true
           enum: ["", semantic, recent, balanced, deep]
+          description: >-
+            Default recall-mode preset for this vault. recent is an alias of
+            balanced (identical scoring and threshold); it is not a recency
+            filter.
 
     VaultConfig:
       type: object
