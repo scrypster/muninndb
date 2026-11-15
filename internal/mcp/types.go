@@ -482,6 +482,10 @@ type ExplainResult struct {
 	// Threshold is the bar a default muninn_recall applies in this vault —
 	// would_return means "clears that bar", not "was a candidate".
 	Threshold float64 `json:"threshold"`
+	// WithheldReason: set ("weak_only") when the memory clears the bar but a
+	// default recall withholds the whole weak-only response; would_return is
+	// then false and Note says how to receive it.
+	WithheldReason string `json:"withheld_reason,omitempty"`
 	// Note explains, in plain language, anything the caller would otherwise
 	// have to infer from a zero. Empty on the fully-scored happy path.
 	Note string `json:"note,omitempty"`

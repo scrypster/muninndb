@@ -372,6 +372,11 @@ type ExplainResponse struct {
 	AssocPath   []string          `json:"assoc_path"`
 	WouldReturn bool              `json:"would_return"`
 	Threshold   float64           `json:"threshold"`
+	// WithheldReason: "weak_only" when the memory clears the bar but a default
+	// recall withholds the whole weak-only response (see ActivateResponse).
+	WithheldReason string `json:"withheld_reason,omitempty"`
+	// Note explains a false would_return or an unscored engram.
+	Note string `json:"note,omitempty"`
 }
 
 // SetStateRequest is the body for PUT /api/engrams/{id}/state.

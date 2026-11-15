@@ -502,6 +502,14 @@ const (
 	// to choose a branch rather than guessing which is current. COG-28's named
 	// exception — read the predecessor and resolve the fork.
 	AbstainAmbiguousVersion = "ambiguous_version"
+	// AbstainWeakOnly: the response was calibrated (a measured noise floor
+	// exists) and EVERY row it would have returned was band `weak`. On real
+	// agent traffic that shape is almost exclusively an unanswerable query
+	// (measured on a production install: 1 weak row in 1,096 rows over 150
+	// real queries, versus 141 weak rows over 60 made-up ones), so the rows
+	// are withheld by default and counted (weak_available); include_weak, an
+	// explicit threshold, explicit filters or mode "deep" return them.
+	AbstainWeakOnly = "weak_only"
 )
 
 // ActivateResponseFrame is one streaming frame of results.

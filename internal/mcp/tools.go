@@ -232,7 +232,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_recall",
-			Description: "Search long-term memory. Simplest call: {\"query\": \"what we decided about caching\"} (or `context`: an array of phrases). Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows are all `weak` matched nothing strongly: those are related memories to verify, not answers.",
+			Description: "Search long-term memory. Simplest call: {\"query\": \"what we decided about caching\"} (or `context`: an array of phrases). Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows would all be `weak` matched nothing strongly: on a calibrated vault recall WITHHOLDS them by default and answers `abstained: true, abstained_reason: \"weak_only\"` with `weak_available` = how many — pass `include_weak: true` to receive them as related memories to verify, not answers. One moderate or strong row returns the whole set as usual.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -248,7 +248,7 @@ func allToolDefinitions() []ToolDefinition {
 					"mode": map[string]any{
 						"type":        "string",
 						"enum":        []string{"semantic", "recent", "balanced", "deep"},
-						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — ALIAS of balanced: engine-default scoring and threshold. Like every mode sent here it replaces (ignores) the vault's default recall mode. It declares session-orientation intent (attaches the unresolved-contradiction readout). It does NOT list recent memories or favour recency beyond the default ranking. For topic-free orientation use muninn_where_left_off (single-user) or tags_any with your per-user tag (shared).\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)\nPreset thresholds are ACT-R-calibrated and apply only under ACT-R/weighted-sum scoring; on an rrf-fusion vault the preset threshold abstains and the rrf mode-aware default (~0.001) applies, so modes are safe to use there. An explicit threshold always wins.",
+						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — ALIAS of balanced: engine-default scoring and threshold. Like every mode sent here it replaces (ignores) the vault's default recall mode. It declares session-orientation intent (attaches the unresolved-contradiction readout). It does NOT list recent memories or favour recency beyond the default ranking. For topic-free orientation use muninn_where_left_off (single-user) or tags_any with your per-user tag (shared).\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1); being an explicit exhaustive request it implies include_weak\nPreset thresholds are ACT-R-calibrated and apply only under ACT-R/weighted-sum scoring; on an rrf-fusion vault the preset threshold abstains and the rrf mode-aware default (~0.001) applies, so modes are safe to use there. An explicit threshold always wins.",
 					},
 					"since": map[string]any{
 						"type":        "string",
@@ -309,6 +309,10 @@ func allToolDefinitions() []ToolDefinition {
 					"read_only": map[string]any{
 						"type":        "boolean",
 						"description": "When true, marks this recall as a pure read that must not trigger any write side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
+					},
+					"include_weak": map[string]any{
+						"type":        "boolean",
+						"description": "When true, return the rows even if every one is `weak` (by default such a response is withheld with abstained_reason \"weak_only\" and a weak_available count). Implied by an explicit threshold, any tag/time filter, and mode=\"deep\". Default false.",
 					},
 				},
 				// Neither query nor context is schema-required: exactly which one

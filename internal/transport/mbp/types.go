@@ -224,6 +224,11 @@ type ActivateRequest struct {
 	// IncludeInvalid disables the valid-time gate entirely (show history):
 	// expired facts are returned, annotated with expired=true.
 	IncludeInvalid bool `json:"include_invalid,omitempty" msgpack:"include_invalid,omitempty"`
+	// IncludeWeak opts out of weak_only abstention: on a calibrated response
+	// whose every row is band `weak`, recall withholds the rows by default
+	// (abstained_reason "weak_only", weak_available = how many). true returns
+	// them. An explicit Threshold, any Filters, or mode "deep" imply it.
+	IncludeWeak bool `json:"include_weak,omitempty" msgpack:"include_weak,omitempty"`
 }
 
 // Weights defines scoring weight distribution.
@@ -291,7 +296,10 @@ type ActivateResponse struct {
 	// result is indistinguishable from an un-run one, the silent-substitution
 	// class fixed across #742..#746. AbstainedReason is machine-readable:
 	// no_candidates | below_threshold | filtered | superseded_only |
-	// ambiguous_version. The last two come from COG-28 version-head resolution
+	// ambiguous_version | weak_only. weak_only: the response was CALIBRATED and
+	// every row it would have returned was band `weak` — neighbours of the
+	// query, not answers — so they were withheld; WeakAvailable says how many,
+	// and the request's include_weak returns them. The middle two come from COG-28 version-head resolution
 	// (#763): the query's only admission-worthy evidence sat in a declared
 	// supersession chain with, respectively, no reachable current head or a
 	// fork the engine refuses to choose a branch of. Both fields are
@@ -301,6 +309,9 @@ type ActivateResponse struct {
 	// flag. Empty iff Abstained is false.
 	Abstained       bool   `msgpack:"abstained,omitempty"        json:"abstained,omitempty"`
 	AbstainedReason string `msgpack:"abstained_reason,omitempty" json:"abstained_reason,omitempty"`
+	// WeakAvailable is set only with AbstainedReason "weak_only": the number of
+	// weak rows withheld. Recall again with include_weak to receive them.
+	WeakAvailable int `msgpack:"weak_available,omitempty" json:"weak_available,omitempty"`
 	// Conflict is COG-29 contradiction honesty (#764): at least two returned
 	// memories are declared to contradict each other and the conflict is
 	// unresolved, so neither is presented as the answer. nil otherwise.

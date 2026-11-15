@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -52,6 +53,10 @@ type ExplainData struct {
 	WouldReturn bool
 	Threshold   float64
 	Components  mbp.ScoreComponents
+	// WithheldReason is set when the memory clears the bar but a default
+	// recall would still not return it: "weak_only" — the whole response is
+	// band weak on a calibrated vault and is withheld (include_weak returns it).
+	WithheldReason string
 	// Note is a plain-language explanation, set whenever Found or Scored is
 	// false. Empty on the fully-scored happy path.
 	Note string
@@ -622,5 +627,22 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 		gated = float64(result.Components.AbsoluteScore)
 	}
 	result.WouldReturn = result.Scored && gated >= result.Threshold
+	// Clearing the bar is not the whole story: a default recall withholds a
+	// calibrated response whose every row is weak (weak_only). That is a
+	// property of the RESPONSE, not of this row, so it is answered by running
+	// exactly that default recall (read-only; explain's ctx already suppresses
+	// cache stamps and runs in observe mode) — would_return then agrees with
+	// what recall does, by construction rather than by a re-derivation.
+	if result.WouldReturn {
+		probe, perr := e.Activate(ctx, &mbp.ActivateRequest{
+			Vault: vault, Context: query, Embedding: embedding, ReadOnly: true,
+		})
+		if perr == nil && probe.AbstainedReason == activation.AbstainWeakOnly {
+			result.WouldReturn = false
+			result.WithheldReason = activation.AbstainWeakOnly
+			result.Note = fmt.Sprintf("this memory clears the bar but only as a WEAK match, and every row a default recall would return for this query is weak, "+
+				"so recall withholds them (abstained_reason \"weak_only\", %d weak rows available). Recall with include_weak: true to receive them.", probe.WeakAvailable)
+		}
+	}
 	return result, nil
 }

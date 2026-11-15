@@ -3168,6 +3168,20 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		result.SemanticDegraded,
 	)
 
+	// weak_only abstention: a calibrated response whose every row is `weak`
+	// is withheld (see weakOnlyAbstains for exactly when). Runs AFTER banding
+	// and BEFORE the items, learning submissions and brief are built, so a
+	// withheld row is neither returned, nor co-activated, nor summarised.
+	var weakAvailable int
+	if weakOnlyAbstains(req, structuredFilter, resolved.RecallMode, result.Calibration, result.SemanticDegraded, relevanceBands) {
+		weakAvailable = len(result.Activations)
+		result.Activations = result.Activations[:0]
+		relevanceBands, relevanceBases = nil, nil
+		conflictBlock = nil
+		result.Abstained = true
+		result.AbstainedReason = activation.AbstainWeakOnly
+	}
+
 	// The stored Ebbinghaus `relevance` is a decay number recall scoring
 	// APPLIES only off ACT-R (weighted_sum/CGDN read their own clock; rrf none).
 	// On an ACT-R recall it is not an input to anything on the row, so a row
@@ -3493,6 +3507,7 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		SemanticDegraded: result.SemanticDegraded,
 		Abstained:        result.Abstained,
 		AbstainedReason:  result.AbstainedReason,
+		WeakAvailable:    weakAvailable,
 		Conflict:         conflictBlock,
 	}, nil
 }

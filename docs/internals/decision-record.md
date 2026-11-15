@@ -1357,6 +1357,21 @@ injects nothing; boosting rows already present is unchanged; an uncalibrated res
 (weighted_sum, CGDN, degraded semantic channel, unregistered embed model) keeps the old rule
 because it has no noise-relative bar to judge by — a named residual.
 
+**A weak-only response is withheld by default (weak_only).** Measured on a production
+install with this build: 150 real agent queries returned 1,096 rows of which exactly one was
+`weak`, while made-up-word queries returned 141 weak rows. On a calibrated vault, an all-weak
+response is in practice a query the vault cannot answer, and it cost the agent up to `limit`
+rows of near-noise (recall payloads are the main token cost of memory). So it abstains,
+loudly: `abstained_reason: "weak_only"`, `weak_available`, a hint naming `include_weak`.
+Judgement calls: an explicit threshold keeps its meaning (the caller chose the bar; the wire
+cannot tell explicit 0 from unset, so MCP opts out whenever the argument is present); any
+explicit filter means the caller defined the set; `deep` is an explicit exhaustive request
+and implies include_weak; historical recall follows the same rule because its bands are the
+same. Uncalibrated responses (rrf, weighted_sum, CGDN, degraded, unregistered model) are
+unchanged. On a 300-memory synthetic fixture (real bge-small): 40 made-up queries abstained
+28 → 31 (102 → 90 rows; the rest carry at least one moderate row, which this rule
+deliberately does not trim); 40 topical queries: 0 responses changed.
+
 **Invariant number collision.** COG-34 is the next number after the highest invariant on
 this branch (COG-33). Other unmerged designs (#872 among them) also claim COG-34; whichever
 merges second renumbers.

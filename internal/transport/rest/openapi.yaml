@@ -337,6 +337,13 @@ components:
         read_only:
           type: boolean
           description: "When true, suppress reinforcement side effects (TouchAccess and implicit feedback) for this recall. Always effectively true for observe-mode credentials."
+        include_weak:
+          type: boolean
+          description: >-
+            Return the rows even when every one is relevance band weak. By
+            default a calibrated weak-only response is withheld (abstained,
+            abstained_reason weak_only, weak_available). Implied by a non-zero
+            threshold, any filter, and mode deep.
         weights:
           $ref: "#/components/schemas/Weights"
         filters:
@@ -781,7 +788,17 @@ components:
             relevance bar or was filtered. Empty iff abstained is false.
         abstained_reason:
           type: string
-          enum: [no_candidates, below_threshold, filtered, superseded_only, ambiguous_version]
+          enum: [no_candidates, below_threshold, filtered, superseded_only, ambiguous_version, weak_only]
+          description: >-
+            weak_only: the response was calibrated (the vault has a measured
+            noise floor) and every row it would have returned was band weak, so
+            the rows were withheld; weak_available says how many, and
+            include_weak returns them.
+        weak_available:
+          type: integer
+          description: >-
+            Set only with abstained_reason weak_only: how many weak rows were
+            withheld. Repeat the request with include_weak true to receive them.
         conflict:
           $ref: "#/components/schemas/ConflictBlock"
 
@@ -1205,6 +1222,14 @@ components:
         threshold:
           type: number
           format: double
+        withheld_reason:
+          type: string
+          enum: [weak_only]
+          description: >-
+            Set when the memory clears the bar but a default recall withholds
+            the whole weak-only response; would_return is then false.
+        note:
+          type: string
 
     SetStateRequest:
       type: object

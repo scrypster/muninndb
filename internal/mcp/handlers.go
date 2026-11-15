@@ -18,6 +18,7 @@ import (
 
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine"
+	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 	"golang.org/x/text/unicode/norm"
@@ -489,14 +490,19 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
+	includeWeak, _ := args["include_weak"].(bool)
 	req := &mbp.ActivateRequest{
-		Vault:      vault,
-		Context:    contexts,
-		Mode:       mode,
-		Threshold:  threshold,
-		MaxResults: limit,
-		Profile:    profile,
-		ReadOnly:   readOnly,
+		Vault:     vault,
+		Context:   contexts,
+		Mode:      mode,
+		Threshold: threshold,
+		// weak_only abstention never overrides an explicit threshold — and
+		// the wire cannot tell an explicit 0 from "unset", so an explicit
+		// threshold argument (any value) opts out here.
+		IncludeWeak: includeWeak || thresholdSet,
+		MaxResults:  limit,
+		Profile:     profile,
+		ReadOnly:    readOnly,
 	}
 
 	// Ownership-lease work-queue visibility (#548).
@@ -675,6 +681,16 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	if resp.Abstained && len(memories) == 0 {
 		result["abstained"] = true
 		result["abstained_reason"] = resp.AbstainedReason
+	}
+	if resp.AbstainedReason == activation.AbstainWeakOnly && len(memories) == 0 {
+		// weak_only is a deliberate, counted withholding, not "nothing
+		// matched": say how many and exactly how to see them.
+		result["weak_available"] = resp.WeakAvailable
+		result["hint"] = fmt.Sprintf("Nothing in this vault matched strongly: the %d memories that came closest are all relevance_band \"weak\" "+
+			"(neighbours of the query, not answers), so they were withheld. To see them anyway, repeat this call with include_weak: true "+
+			"and verify each one before relying on it.", resp.WeakAvailable)
+		sendResult(w, id, textContent(mustJSON(result)))
+		return
 	}
 	if len(memories) == 0 {
 		// The hint names the threshold because it is the lever that actually

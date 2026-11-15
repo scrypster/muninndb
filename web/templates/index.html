@@ -3192,7 +3192,7 @@ Authorization = "Bearer &lt;token from %USERPROFILE%\.muninn\mcp.token&gt;"</pre
                 x-text="explainModal.data.final_score.toFixed(4)"></div>
               <div style="font-size:0.75rem;"
                 :style="explainModal.data.would_return ? 'color:#22c55e;' : 'color:#ef4444;'"
-                x-text="explainModal.data.would_return ? 'Above threshold' : 'Below threshold (' + explainModal.data.threshold.toFixed(3) + ')'"></div>
+                x-text="explainModal.data.would_return ? 'Above threshold' : (explainModal.data.withheld_reason === 'weak_only' ? 'Withheld: every match is weak (recall with include_weak)' : 'Below threshold (' + explainModal.data.threshold.toFixed(3) + ')')"></div>
             </div>
           </div>
 

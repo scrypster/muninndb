@@ -272,7 +272,9 @@ func TestHonestClock_EntityBoostSeedsOnlyFromRealEvidence(t *testing.T) {
 	}
 
 	// Weak-only: a made-up query that shares one word with the hive memory.
-	weak := h.recall("hive karaoke mortgage spreadsheet", "")
+	// include_weak: weak_only abstention would otherwise withhold this
+	// response outright; the point here is what the boost injects into it.
+	weak := h.activate(&mbp.ActivateRequest{Context: []string{"hive karaoke mortgage spreadsheet"}, IncludeWeak: true})
 	t.Logf("weak query: %s", hcRender(weak))
 	if hv := find(weak, hive); hv == nil || hv.RelevanceBand != activation.RelevanceWeak {
 		t.Fatalf("premise: the hive memory must be returned as a WEAK row for the made-up query: %s", hcRender(weak))
@@ -298,5 +300,115 @@ func TestHonestClock_EntityBoostSeedsOnlyFromRealEvidence(t *testing.T) {
 		br.ScoreComponents.Final != br.Score {
 		t.Errorf("injected row lost its trace: basis %q entity_boost %.4f final %.4f score %.4f",
 			br.RelevanceBandBasis, br.ScoreComponents.EntityBoost, br.ScoreComponents.Final, br.Score)
+	}
+}
+
+// weakOnlyFixture: a small calibrated vault (real bge-small, registered noise
+// floor). "hive karaoke mortgage spreadsheet" reaches two memories only as
+// WEAK rows (measured above); the hive memory's own topic is strong.
+func weakOnlyFixture(t *testing.T) (*hcRealEnv, map[string]string) {
+	h := newHCRealEnv(t)
+	day := 24 * time.Hour
+	ids := map[string]string{
+		"hive":     h.writeAged("hive inspection", "the north hive was inspected and the queen cells were removed", 120*day),
+		"smoker":   h.writeAged("smoker fuel", "pine needles burn cool and slow in the bee smoker", 60*day),
+		"honey":    h.writeAged("honey harvest", "the autumn harvest filled eleven frames of capped honey", 3*day),
+		"bridge":   h.writeAged("bridge decking", "the footbridge decking was replaced with treated planks", 30*day),
+		"waterbar": h.writeAged("waterbar drainage", "the waterbar on switchback four drains to the left side of the tread", 400*day),
+	}
+	h.eng.waitWriteTimeIdle()
+	h.close()
+	h.open()
+	return h, ids
+}
+
+const weakOnlyQuery = "hive karaoke mortgage spreadsheet"
+
+func (h *hcRealEnv) activate(req *mbp.ActivateRequest) *mbp.ActivateResponse {
+	h.t.Helper()
+	req.Vault = "default"
+	req.ReadOnly = true
+	if req.MaxResults == 0 {
+		req.MaxResults = 10
+	}
+	resp, err := h.eng.Activate(context.Background(), req)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return resp
+}
+
+// TestWeakOnly_CalibratedWeakOnlyResponseAbstains — RED before: the two weak
+// rows were returned. Now: withheld, loud, counted, and recoverable.
+func TestWeakOnly_CalibratedWeakOnlyResponseAbstains(t *testing.T) {
+	h, _ := weakOnlyFixture(t)
+	opted := h.activate(&mbp.ActivateRequest{Context: []string{weakOnlyQuery}, IncludeWeak: true})
+	if len(opted.Activations) == 0 {
+		t.Fatalf("premise: the query must reach weak rows")
+	}
+	for _, a := range opted.Activations {
+		if a.RelevanceBand != activation.RelevanceWeak {
+			t.Fatalf("premise: every row must be weak, got %s=%s", a.Concept, a.RelevanceBand)
+		}
+	}
+	resp := h.activate(&mbp.ActivateRequest{Context: []string{weakOnlyQuery}})
+	if len(resp.Activations) != 0 || !resp.Abstained || resp.AbstainedReason != activation.AbstainWeakOnly {
+		t.Fatalf("weak-only calibrated response: rows=%d abstained=%v reason=%q, want 0 rows, abstained, %q (%s)",
+			len(resp.Activations), resp.Abstained, resp.AbstainedReason, activation.AbstainWeakOnly, hcRender(resp))
+	}
+	if resp.WeakAvailable != len(opted.Activations) {
+		t.Errorf("weak_available=%d, want %d (the rows include_weak returns)", resp.WeakAvailable, len(opted.Activations))
+	}
+	// Explicit threshold, explicit filter, and deep keep returning the rows.
+	for name, req := range map[string]*mbp.ActivateRequest{
+		"explicit threshold": {Context: []string{weakOnlyQuery}, Threshold: 0.1},
+		"mode deep":          {Context: []string{weakOnlyQuery}, Mode: "deep"},
+		"time filter":        {Context: []string{weakOnlyQuery}, Filters: []mbp.Filter{{Field: "created_after", Op: "gte", Value: time.Now().Add(-1000 * 24 * time.Hour)}}},
+	} {
+		if r := h.activate(req); len(r.Activations) == 0 || r.AbstainedReason == activation.AbstainWeakOnly {
+			t.Errorf("%s: weak rows must still be returned (rows=%d reason=%q)", name, len(r.Activations), r.AbstainedReason)
+		}
+	}
+}
+
+// TestWeakOnly_MixedResponseIsUntouched — all-or-nothing: one non-weak row
+// returns every row, weak neighbours included, exactly as with include_weak.
+func TestWeakOnly_MixedResponseIsUntouched(t *testing.T) {
+	h, _ := weakOnlyFixture(t)
+	q := []string{"inspecting the hive and its queen cells"}
+	def := h.activate(&mbp.ActivateRequest{Context: q})
+	opt := h.activate(&mbp.ActivateRequest{Context: q, IncludeWeak: true})
+	weak, real := 0, 0
+	for _, a := range def.Activations {
+		if a.RelevanceBand == activation.RelevanceWeak {
+			weak++
+		} else {
+			real++
+		}
+	}
+	if weak == 0 || real == 0 {
+		t.Fatalf("premise: need a mixed response (weak=%d non-weak=%d): %s", weak, real, hcRender(def))
+	}
+	if hcRender(def) != hcRender(opt) || def.Abstained {
+		t.Fatalf("a mixed response must be returned whole\ndefault      %s\ninclude_weak %s", hcRender(def), hcRender(opt))
+	}
+}
+
+// TestWeakOnly_ExplainAgrees — explain's would_return says what recall does.
+func TestWeakOnly_ExplainAgrees(t *testing.T) {
+	h, ids := weakOnlyFixture(t)
+	ex, err := h.eng.Explain(context.Background(), "default", ids["hive"], []string{weakOnlyQuery}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.WouldReturn || ex.WithheldReason != activation.AbstainWeakOnly || !strings.Contains(ex.Note, "include_weak") {
+		t.Fatalf("explain of a weak-only memory: would_return=%v withheld=%q note=%q; recall withholds it", ex.WouldReturn, ex.WithheldReason, ex.Note)
+	}
+	ex2, err := h.eng.Explain(context.Background(), "default", ids["hive"], []string{"north hive inspected queen cells removed"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ex2.WouldReturn || ex2.WithheldReason != "" {
+		t.Fatalf("explain of a strong match must still say would_return: %+v", ex2)
 	}
 }

@@ -302,6 +302,9 @@ func explainResultFromEngine(data *engine.ExplainData) *ExplainResult {
 		WouldReturn: data.WouldReturn,
 		Threshold:   data.Threshold,
 		Note:        data.Note,
+		// WithheldReason travels with would_return: a false would_return on a
+		// row that clears the bar is unexplained without it.
+		WithheldReason: data.WithheldReason,
 	}
 	// Stored confidence never depends on the query: report it whenever the
 	// engram exists. (It was previously unmapped entirely, so muninn_explain

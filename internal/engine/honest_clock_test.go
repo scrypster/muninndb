@@ -445,3 +445,64 @@ func TestHonestClock_KnownResidual_InMemoryBoostsReorderAcrossARestart(t *testin
 		t.Errorf("rank depends on the in-memory activation log but no residual is allowlisted")
 	}
 }
+
+// TestWeakOnly_UncalibratedAndExplicitRequestsUnchanged — weak_only applies
+// only where a measured noise floor makes "weak" mean something, and never
+// overrides what the caller explicitly asked for.
+func TestWeakOnly_UncalibratedAndExplicitRequestsUnchanged(t *testing.T) {
+	weak := []string{activation.RelevanceWeak, activation.RelevanceWeak}
+	cal := activation.RelevanceCalibration{FusionMode: activation.FusionACTR, SemanticBaseline: 0.52, ContentCeiling: 1}
+	plain := &mbp.ActivateRequest{Context: []string{"q"}}
+	if !weakOnlyAbstains(plain, nil, "", cal, false, weak) {
+		t.Fatalf("control: a calibrated all-weak default recall must abstain")
+	}
+	for name, c := range map[string]struct {
+		req        *mbp.ActivateRequest
+		vaultMode  string
+		cal        activation.RelevanceCalibration
+		degraded   bool
+		bands      []string
+		structured bool
+	}{
+		"rrf":                {plain, "", activation.RelevanceCalibration{FusionMode: activation.FusionRRF, SemanticBaseline: 0.52}, false, weak, false},
+		"weighted_sum":       {plain, "", activation.RelevanceCalibration{FusionMode: activation.FusionWeightedSum, SemanticBaseline: 0.52}, false, weak, false},
+		"cgdn":               {plain, "", activation.RelevanceCalibration{FusionMode: activation.FusionCGDN, SemanticBaseline: 0.52}, false, weak, false},
+		"semantic degraded":  {plain, "", cal, true, weak, false},
+		"unregistered model": {plain, "", activation.RelevanceCalibration{FusionMode: activation.FusionACTR}, false, weak, false},
+		"explicit threshold": {&mbp.ActivateRequest{Threshold: 0.1}, "", cal, false, weak, false},
+		"include_weak":       {&mbp.ActivateRequest{IncludeWeak: true}, "", cal, false, weak, false},
+		"tag filter":         {&mbp.ActivateRequest{Filters: []mbp.Filter{{Field: "tags_any", Op: "any", Value: []string{"x"}}}}, "", cal, false, weak, false},
+		"structured filter":  {plain, "", cal, false, weak, true},
+		"wire mode deep":     {&mbp.ActivateRequest{Mode: "deep"}, "", cal, false, weak, false},
+		"vault default deep": {plain, "deep", cal, false, weak, false},
+		"one moderate row":   {plain, "", cal, false, []string{activation.RelevanceModerate, activation.RelevanceWeak}, false},
+		"one filter_match":   {plain, "", cal, false, []string{activation.RelevanceFilterMatch, activation.RelevanceWeak}, false},
+		"one injected row":   {plain, "", cal, false, []string{activation.RelevanceUncalibrated, activation.RelevanceWeak}, false},
+		"empty response":     {plain, "", cal, false, nil, false},
+	} {
+		var sf activation.EngramFilter
+		if c.structured {
+			sf = hcAnyFilter{}
+		}
+		if weakOnlyAbstains(c.req, sf, c.vaultMode, c.cal, c.degraded, c.bands) {
+			t.Errorf("%s: weak_only must not apply", name)
+		}
+	}
+}
+
+type hcAnyFilter struct{}
+
+func (hcAnyFilter) Match(*storage.Engram) bool { return true }
+
+// TestWeakOnly_UnregisteredModelEndToEnd — the FTS-only engine has no
+// measured noise floor, so its weak-looking rows are uncalibrated and still
+// returned (behaviour unchanged).
+func TestWeakOnly_UnregisteredModelEndToEnd(t *testing.T) {
+	h := newHCEnv(t)
+	const vault = "trail-uncal"
+	hcFixture(h, vault)
+	h.restart()
+	if rows := h.recall(vault, "waterbar", ""); len(rows) == 0 {
+		t.Fatalf("an uncalibrated response must not be withheld")
+	}
+}

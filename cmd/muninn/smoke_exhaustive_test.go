@@ -393,6 +393,24 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		}
 	})
 
+	t.Run("muninn_recall/include_weak", func(t *testing.T) {
+		// include_weak is a declared muninn_recall argument (weak_only
+		// abstention opt-out); it must be accepted, and a recall that opted in
+		// can never come back withheld as weak_only.
+		result := mcpTool(t, tok, "muninn_recall", map[string]any{
+			"vault":        vault,
+			"query":        "explorer ruins Alice",
+			"limit":        5,
+			"include_weak": true,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_recall with include_weak returned error field: %v", errVal)
+		}
+		if result["abstained_reason"] == "weak_only" {
+			t.Errorf("include_weak:true must never be withheld as weak_only: %v", result)
+		}
+	})
+
 	t.Run("muninn_read", func(t *testing.T) {
 		result := mcpTool(t, tok, "muninn_read", map[string]any{
 			"vault": vault,

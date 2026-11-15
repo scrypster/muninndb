@@ -402,12 +402,26 @@ func (w *RESTEngineWrapper) Explain(ctx context.Context, vault string, req *Expl
 	if err != nil {
 		return nil, err
 	}
+	// Components were never mapped here, so the web console's score panel
+	// (which reads this endpoint) showed 0 for every factor of every memory.
+	c := data.Components
 	return &ExplainResponse{
-		EngramID:    data.EngramID,
-		Concept:     data.Concept,
-		FinalScore:  data.FinalScore,
-		WouldReturn: data.WouldReturn,
-		Threshold:   data.Threshold,
+		EngramID:   data.EngramID,
+		Concept:    data.Concept,
+		FinalScore: data.FinalScore,
+		Components: ExplainComponents{
+			FullTextRelevance:     float64(c.FullTextRelevance),
+			SemanticSimilarity:    float64(c.SemanticSimilarity),
+			SemanticSimilarityRaw: float64(c.SemanticSimilarityRaw),
+			DecayFactor:           float64(c.DecayFactor),
+			HebbianBoost:          float64(c.HebbianBoost),
+			AccessFrequency:       float64(c.AccessFrequency),
+			Confidence:            data.Confidence,
+		},
+		WouldReturn:    data.WouldReturn,
+		Threshold:      data.Threshold,
+		WithheldReason: data.WithheldReason,
+		Note:           data.Note,
 	}, nil
 }
 
