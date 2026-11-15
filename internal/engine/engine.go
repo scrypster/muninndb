@@ -5355,7 +5355,9 @@ func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
 //   - an explicit per-vault plasticity actr_decay override;
 //   - a wire weights.actr_decay on an ACT-R recall.
 //
-// Each WARNs once per process per (vault, source, value) — the recall path
+// Each WARNs once per process per (vault, source) — never per value: the
+// dedupe set must stay bounded by the number of vaults, and the request-level
+// source uses one fixed key because its value is caller-controlled. The recall path
 // runs this on every call, and a per-recall WARN is a flood, which is
 // functionally silent. Nothing is warned when the scoring that actually runs is
 // not ACT-R (rrf, weighted_sum, CGDN), nor for a preset whose d is the default.
@@ -5378,7 +5380,7 @@ func (e *Engine) warnInertACTRDecay(vault string, cfg *auth.PlasticityConfig, re
 	switch {
 	case cfg != nil && cfg.ACTRDecay != nil:
 		v := *cfg.ACTRDecay
-		once(fmt.Sprintf("override|%s|%v", vault, v), func() {
+		once("override|"+vault, func() {
 			slog.Warn("plasticity actr_decay override is inert: "+why,
 				"vault", vault, "setting", "actr_decay", "actr_decay", v,
 				"note", "kept for a future earned-use salience term; to retire memories use valid_until, forget, or retention")
@@ -5389,7 +5391,7 @@ func (e *Engine) warnInertACTRDecay(vault string, cfg *auth.PlasticityConfig, re
 		if cfg != nil && cfg.Preset != "" {
 			preset = cfg.Preset
 		}
-		once(fmt.Sprintf("preset|%s|%s|%v", vault, preset, v), func() {
+		once("preset|"+vault+"|"+preset, func() {
 			slog.Warn("preset decay setting is inert: "+why,
 				"vault", vault, "preset", preset, "setting", "actr_decay", "actr_decay", v,
 				"note", "this preset no longer makes memories fade in recall; to retire memories use valid_until, forget, or retention")
@@ -5397,7 +5399,11 @@ func (e *Engine) warnInertACTRDecay(vault string, cfg *auth.PlasticityConfig, re
 	}
 	if wire != nil && wire.ACTRDecay > 0 {
 		v := wire.ACTRDecay
-		once(fmt.Sprintf("wire|%v", v), func() {
+		// Fixed key: the wire value is caller-controlled, so keying the dedupe
+		// set on it would let any caller grow the set (and the log) without
+		// bound by sending distinct values. One WARN per process is enough to
+		// say "a request-level actr_decay was sent and ignored".
+		once("wire", func() {
 			slog.Warn("request weights.actr_decay is inert: "+why,
 				"vault", vault, "setting", "weights.actr_decay", "actr_decay", v)
 		})
