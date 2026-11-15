@@ -41,7 +41,7 @@ func newLaneProvider(t *testing.T) *LocalProvider {
 // watchdog is a FAILURE DETECTOR, never a timing assertion: it only turns a
 // hang (the defect — a queued call that never gives up) into a test failure
 // instead of a stuck CI job.
-const watchdog = 30 * time.Second
+const watchdog = 10 * time.Second
 
 type embedResult struct {
 	vec     []float32

@@ -98,13 +98,35 @@ func TestRecall_DegradesToBM25WhenEmbedLaneBusy(t *testing.T) {
 	eng, p := laneEnv(t)
 	ids := writeRailwayNotes(t, eng, p)
 
-	release := p.HoldLaneForTest(true) // an in-flight query-lane inference that does not finish in time
+	rel := p.HoldLaneForTest(true) // an in-flight query-lane inference that does not finish in time
+	var relOnce sync.Once
+	release := func() { relOnce.Do(rel) }
 	defer release()
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
+	type out struct {
+		resp *mbp.ActivateResponse
+		err  error
+	}
+	done := make(chan out, 1)
 	start := time.Now()
-	resp, err := eng.Activate(ctx, &mbp.ActivateRequest{Vault: "default", Context: []string{"semaphore signals main line"}, MaxResults: 5})
-	elapsed := time.Since(start)
+	go func() {
+		r, err := eng.Activate(ctx, &mbp.ActivateRequest{Vault: "default", Context: []string{"semaphore signals main line"}, MaxResults: 5})
+		done <- out{r, err}
+	}()
+	var o out
+	select {
+	case o = <-done:
+	case <-time.After(10 * time.Second): // watchdog (failure detector only)
+		// The embed is still queued for a lane its deadline should have
+		// abandoned. Free the lane, as the old mutex eventually freed, and
+		// report what recall then did.
+		release()
+		o = <-done
+		t.Fatalf("recall ignored its deadline while the query lane was busy; after the lane freed it returned err=%v degraded=%v",
+			o.err, o.resp != nil && o.resp.SemanticDegraded)
+	}
+	resp, err, elapsed := o.resp, o.err, time.Since(start)
 	if err != nil {
 		t.Fatalf("recall failed after %s with the query lane busy: %v — want a keyword-only degraded result", elapsed, err)
 	}
