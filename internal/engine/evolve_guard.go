@@ -27,21 +27,11 @@ func (e *Engine) evolveLock(ws [8]byte, id storage.ULID) *sync.Mutex {
 }
 
 // distinctSuperseders returns the distinct engrams holding a RelSupersedes
-// edge onto id. GetReverseAssociations repurposes TargetID to hold the SOURCE.
+// edge onto id, from an UNCAPPED relation-filtered scan (store.SupersedersOf):
+// a capped mixed-relation read can be starved by other incoming links and let
+// a second evolve fork.
 func (e *Engine) distinctSuperseders(ctx context.Context, ws [8]byte, id storage.ULID) ([]storage.ULID, error) {
-	rev, err := e.store.GetReverseAssociations(ctx, ws, id, supersessionReverseScan)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[storage.ULID]bool{}
-	var out []storage.ULID
-	for i := range rev {
-		if rev[i].RelType == storage.RelSupersedes && !seen[rev[i].TargetID] {
-			seen[rev[i].TargetID] = true
-			out = append(out, rev[i].TargetID)
-		}
-	}
-	return out, nil
+	return e.store.SupersedersOf(ctx, ws, id)
 }
 
 // refuseSupersededEvolveTarget returns nil when target has no successor (the
@@ -83,7 +73,12 @@ func (e *Engine) refuseSupersededEvolveTarget(ctx context.Context, ws [8]byte, t
 			for i, s := range succ {
 				ids[i] = s.String()
 			}
-			return refuse(fmt.Sprintf("Its history is already forked at %s (successors: %s); resolve that by evolving or forgetting one branch.",
+			// A soft forget does NOT repair a fork: the forgotten branch keeps
+			// its supersedes link and recall's head walk still sees two
+			// successors (and abstains as ambiguous). Only a hard forget
+			// removes the branch and its link. Pinned end to end by
+			// TestEvolve_ForkRepairAdviceWorks.
+			return refuse(fmt.Sprintf("Its history is already forked at %s (successors: %s). To repair it, permanently delete the branch you do not want with muninn_forget(id, hard=true) — a soft forget leaves its supersedes link and the fork in place — then evolve the surviving version.",
 				cur.String(), strings.Join(ids, ", ")))
 		}
 		next := succ[0]
