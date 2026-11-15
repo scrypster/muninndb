@@ -512,7 +512,10 @@ func TestIDFCacheVaultIsolation(t *testing.T) {
 // capped at 1.0 per term, so every document containing all query terms in the
 // same fields scores identically) the survivors were whatever map iteration
 // order produced — a different candidate SET on every identical call. Ties now
-// break on ascending ID, so the result is a pure function of index + query.
+// break on DESCENDING ID (newest ULID first — the one tie rule recall uses at
+// every cut and at the final sort, honest clock increment 1), so the result is
+// a pure function of index + query and the cut keeps the newest of a set of
+// equals.
 func TestSearch_TiedScoresAtTopKAreDeterministic(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
@@ -543,8 +546,8 @@ func TestSearch_TiedScoresAtTopKAreDeterministic(t *testing.T) {
 		if call == 0 {
 			want = got
 			for i, r := range got {
-				if r.ID != ([16]byte{0x01, byte(i)}) {
-					t.Fatalf("tied result %d = %x, want the %d-th lowest ID (ties break on ascending ID)", i, r.ID, i)
+				if r.ID != ([16]byte{0x01, byte(n - 1 - i)}) {
+					t.Fatalf("tied result %d = %x, want the %d-th highest ID (ties break newest-first, on descending ID)", i, r.ID, i)
 				}
 			}
 			continue
