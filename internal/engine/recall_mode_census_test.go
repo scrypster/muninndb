@@ -223,7 +223,8 @@ func TestRecallModeCensus(t *testing.T) {
 				}
 				for rule, followUp := range allowed {
 					if _, still := got[rule]; !still {
-						t.Errorf("%s no longer violates %s — %s appears fixed; remove its knownCensusViolations entry", cell, rule, followUp)
+						t.Errorf("%s no longer violates %s — remove its knownCensusViolations entry. This entry pins a NUMBER; "+
+							"whether %s is actually fixed is decided by TestRecallModeCensus_ContentFreeAbstains", cell, rule, followUp)
 					}
 				}
 			}
@@ -232,6 +233,20 @@ func TestRecallModeCensus(t *testing.T) {
 	for cell := range knownCensusViolations {
 		if !seen[cell] {
 			t.Errorf("knownCensusViolations entry %s names no censused cell", cell)
+		}
+	}
+
+	// R5b: a WIRE mode replaces the vault's default recall mode, so wire
+	// `recent` equals wire `balanced` (engine defaults) on EVERY vault —
+	// including vaults whose default mode is semantic or deep, where neither
+	// equals a no-mode recall. "recent equals the vault default" is false.
+	for _, vaultMode := range append([]string{""}, names...) {
+		for _, fusion := range fusions {
+			rec, bal := censusPlan(fusion, "recent", vaultMode), censusPlan(fusion, "balanced", vaultMode)
+			if !reflect.DeepEqual(rec, bal) {
+				t.Errorf("wire recent on a %q-default %s vault violates R5b (must equal wire balanced):\nrecent   %+v\nbalanced %+v",
+					vaultMode, fusion, rec, bal)
+			}
 		}
 	}
 
@@ -273,6 +288,94 @@ func TestRecallModeCensus_RejectsRecencyCarryingPreset(t *testing.T) {
 		p := scoringPlan{W: activation.Weights{SemanticSimilarity: 0.3, Recency: 0.7, DisableACTR: true}, Threshold: 0.2}
 		if _, ok := censusViolations(v1, fusion, p, b)["R3"]; !ok {
 			t.Errorf("v1's rejected variant on %s must violate R3", fusion)
+		}
+	}
+}
+
+// TestRecallModeCensus_ContentFreeAbstains is the BEHAVIOURAL census: the
+// structural rules above pin numbers, and a preset can satisfy every one of
+// them while still returning rows for a query that matches nothing — e.g.
+// {DisableACTR: true, Threshold: 0.5} as an ACT-R vault default scores fresh
+// engrams ~0.7 on recency/decay alone. So for every preset (enumerated from
+// auth.RecallModeNames), on both paths (wire req.Mode; vault-default
+// RecallMode) and on actr and weighted_sum vaults, a nonsense query and a
+// content-free orientation query must ABSTAIN. rrf is excluded: its default
+// bar is rank-based (~0.001) and admits rows for any query by design.
+//
+// Known violations are allowlisted BY BEHAVIOUR: an entry goes stale — and
+// fails this test — only when that cell actually abstains on both queries.
+func TestRecallModeCensus_ContentFreeAbstains(t *testing.T) {
+	eng, as, _, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+
+	// cell → follow-up. Measured on this fixture (fresh engrams, no embedder).
+	known := map[censusCell]string{
+		// F1, REPRODUCED (adversarial review, on develop and on this branch):
+		// an ACT-R vault whose DEFAULT mode is semantic returns 10 nonsense
+		// rows at 0.7000 — semantic applies DisableACTR over the vault's
+		// resolved decay/recency weights, against its 0.3 bar. As a WIRE mode
+		// semantic uses the zero base and abstains. Out of scope here.
+		{"semantic", "vault", formulaACTR}: "F1",
+		// F4: the weighted_sum vault DEFAULT itself admits content-free
+		// queries (~0.7 vs its 0.5 bar; legacy blended formula). Every preset
+		// that keeps the vault's resolved weights on weighted_sum inherits it;
+		// deep additionally lowers the bar to 0.1 (F2).
+		{"balanced", "wire", formulaWeightedSum}:  "F4",
+		{"balanced", "vault", formulaWeightedSum}: "F4",
+		{"recent", "wire", formulaWeightedSum}:    "F4",
+		{"recent", "vault", formulaWeightedSum}:   "F4",
+		{"deep", "wire", formulaWeightedSum}:      "F2+F4",
+		{"deep", "vault", formulaWeightedSum}:     "F2+F4",
+		{"semantic", "vault", formulaWeightedSum}: "F1+F4",
+	}
+
+	queries := []string{"zxqv blorptangle quuxified", "session start"}
+	fusionCfg := map[string]*string{formulaACTR: nil, formulaWeightedSum: ptr("weighted_sum")}
+	names := auth.RecallModeNames()
+
+	// One wire-path vault per fusion (no default mode), one vault per
+	// (fusion, preset) for the vault-default path.
+	vaultFor := map[censusCell]string{}
+	for _, fusion := range []string{formulaACTR, formulaWeightedSum} {
+		wireVault := "beh-wire-" + fusion
+		setupAliasVault(t, eng, as, wireVault, &auth.PlasticityConfig{ScoringFusion: fusionCfg[fusion]})
+		for _, name := range names {
+			vaultFor[censusCell{name, "wire", fusion}] = wireVault
+			v := "beh-vault-" + fusion + "-" + name
+			setupAliasVault(t, eng, as, v, &auth.PlasticityConfig{ScoringFusion: fusionCfg[fusion], RecallMode: ptr(name)})
+			vaultFor[censusCell{name, "vault", fusion}] = v
+		}
+	}
+
+	seen := map[censusCell]bool{}
+	for cell, vault := range vaultFor {
+		seen[cell] = true
+		wireMode := ""
+		if cell.path == "wire" {
+			wireMode = cell.preset
+		}
+		admitted := []string{}
+		for _, q := range queries {
+			o := recallOutcomeOf(t, eng, vault, q, wireMode, true)
+			if !o.Abstained || len(o.Rows) > 0 {
+				top := float32(0)
+				if len(o.Rows) > 0 {
+					top = o.Rows[0].Floats[0]
+				}
+				admitted = append(admitted, fmt.Sprintf("%q→%d rows (top %.4f)", q, len(o.Rows), top))
+			}
+		}
+		followUp, allowed := known[cell]
+		switch {
+		case len(admitted) > 0 && !allowed:
+			t.Errorf("%s returns rows for content-free queries: %s", cell, strings.Join(admitted, ", "))
+		case len(admitted) == 0 && allowed:
+			t.Errorf("%s now abstains on every content-free query — %s appears FIXED; remove its allowlist entry", cell, followUp)
+		}
+	}
+	for cell := range known {
+		if !seen[cell] {
+			t.Errorf("behavioural allowlist entry %s names no censused cell", cell)
 		}
 	}
 }

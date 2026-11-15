@@ -12,10 +12,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mode="recent" is an ALIAS of the vault default (recent-mode orientation
-// design v2, D1/D2): the preset is empty, so it must score EXACTLY like a
-// no-mode recall on every fusion mode — same IDs, order, scores, bands and
-// abstention. It used to build a zero-base {Sem 0.3, FTS 0, Recency 0.7}
+// mode="recent" is an ALIAS of balanced (recent-mode orientation design v2,
+// D1/D2): the preset is empty, so it scores exactly like the engine defaults
+// on every fusion mode — same IDs, order, scores, bands and abstention. Like
+// every WIRE mode it REPLACES the vault's default recall mode, so it equals a
+// no-mode recall only on a vault whose default mode is balanced (or unset);
+// on a semantic- or deep-default vault it equals wire mode=balanced, not the
+// no-mode call (the wire_recent_ignores_vault_default arm). It used to build a zero-base {Sem 0.3, FTS 0, Recency 0.7}
 // vector whose Recency the ACT-R formula never reads, raise the bar to 0.2,
 // drop the vault's ACTRDecay/HebScale, and flip a weighted_sum vault to ACT-R
 // scoring — so a topical query that returns 10 rows in default mode returned
@@ -171,6 +174,27 @@ func TestActivate_RecentMode_EqualsDefault(t *testing.T) {
 			requireSameOutcome(t, bal, rec, "vault default RecallMode=recent, query %q: must equal a balanced-default vault "+
 				"(balanced %d rows, recent %d rows)", q, len(bal.Rows), len(rec.Rows))
 		}
+	})
+
+	// A wire mode replaces the vault's default recall mode. On an ACT-R
+	// vault whose DEFAULT mode is semantic, the no-mode recall admits
+	// nonsense (F1, reproduced) while wire recent and wire balanced both
+	// abstain — so "recent equals the vault default" would be false, and
+	// "recent equals balanced" is the true statement.
+	t.Run("wire_recent_ignores_vault_default", func(t *testing.T) {
+		for _, vm := range []string{"semantic", "deep"} {
+			v := "alias-wire-over-" + vm
+			setupAliasVault(t, eng, as, v, &auth.PlasticityConfig{RecallMode: ptr(vm)})
+			for _, q := range recallQueries {
+				bal := recallOutcomeOf(t, eng, v, q, "balanced", true)
+				rec := recallOutcomeOf(t, eng, v, q, "recent", true)
+				requireSameOutcome(t, bal, rec, "%s-default vault, query %q: wire recent must equal wire balanced", vm, q)
+			}
+		}
+		noMode := recallOutcomeOf(t, eng, "alias-wire-over-semantic", recallQueries[2], "", true)
+		rec := recallOutcomeOf(t, eng, "alias-wire-over-semantic", recallQueries[2], "recent", true)
+		require.NotEmpty(t, noMode.Rows, "precondition (F1): the semantic-default vault's no-mode recall admits nonsense")
+		require.True(t, rec.Abstained, "wire recent on a semantic-default vault scores like balanced and abstains on nonsense")
 	})
 
 	// rrf vault: CONTROL — passes before and after, because the rrf branch

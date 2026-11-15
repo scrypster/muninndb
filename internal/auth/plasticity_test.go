@@ -585,3 +585,26 @@ func TestResolvePlasticity_WorkingEqualsDefaultPlusTwoDeltas(t *testing.T) {
 		t.Errorf("working must equal default + {RetentionDays:7, BehaviorMode:selective}\ndefault+δ: %+v\nworking:   %+v", d, w)
 	}
 }
+
+// TestValidRecallMode_MatchesPresetMap: ValidRecallMode and the preset map
+// must never diverge. When it was a hand-written list, a preset added only
+// to the map validated false on the vault path, so ResolvePlasticity
+// silently resolved a vault configured for it to balanced (principle #1) —
+// and the engine's behavioural census, which configures vaults by preset
+// name, could not see the preset there at all.
+func TestValidRecallMode_MatchesPresetMap(t *testing.T) {
+	for _, name := range RecallModeNames() {
+		if !ValidRecallMode(name) {
+			t.Errorf("preset %q is in the recall-mode map but ValidRecallMode rejects it", name)
+		}
+		n := name
+		if got := ResolvePlasticity(&PlasticityConfig{RecallMode: &n}).RecallMode; got != name {
+			t.Errorf("vault RecallMode %q resolved to %q — a defined preset must never be silently substituted", name, got)
+		}
+	}
+	for _, bad := range []string{"", "Recent", "recency", "fast"} {
+		if ValidRecallMode(bad) {
+			t.Errorf("ValidRecallMode(%q) = true, want false", bad)
+		}
+	}
+}

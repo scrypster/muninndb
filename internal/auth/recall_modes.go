@@ -25,9 +25,11 @@ var recallModePresets = map[string]RecallModePreset{
 		Threshold:          0.3,
 		DisableACTR:        true,
 	},
-	// "recent" is an ALIAS of the vault default: no fields, so it scores
-	// exactly like "balanced" on every fusion mode (pinned by the engine's
-	// TestRecallModeCensus R5). It declares session-orientation INTENT only —
+	// "recent" is an ALIAS of "balanced": no fields, so it scores exactly
+	// like the engine defaults on every fusion mode (pinned by the engine's
+	// TestRecallModeCensus R5/R5b). Sent on the wire it replaces the vault's
+	// default recall mode, like every mode does — so it is NOT "the vault
+	// default" on a vault whose default is semantic or deep. It declares session-orientation INTENT only —
 	// on MCP it attaches the COG-29 unresolved-contradiction readout, keyed
 	// on the wire string. It never listed recent memories: its old {Recency
 	// .7, Sem .3, MaxHops 1, Threshold .2} built a vector whose Recency the
