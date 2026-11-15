@@ -21,6 +21,10 @@ type LiveSearchStats struct {
 	// ExactScan reports that the graph walk could not produce a full beam of
 	// live hits and the search fell back to one exact pass over the index.
 	ExactScan bool
+	// Distances counts the query-to-node distances computed, descent and
+	// exact pass included — the search's cost in the unit an exact scan of N
+	// nodes costs N.
+	Distances int
 }
 
 // SearchLive is Search for a vault whose index holds RETIRED vectors — soft-
@@ -76,6 +80,7 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 		return nil, nil, stats, nil
 	}
 	epDist := 1.0 - float64(CosineSimilarity(query, epNode.vec))
+	stats.Distances++
 
 	// Phase 1: greedy descent through the upper layers. Retired nodes route
 	// here exactly as in Search — the descent only chooses where layer 0
@@ -94,6 +99,7 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 					continue
 				}
 				nDist := 1.0 - float64(CosineSimilarity(query, nNode.vec))
+				stats.Distances++
 				if nDist < epDist {
 					ep = nID
 					epDist = nDist
@@ -231,6 +237,7 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 				continue
 			}
 			nDist := 1.0 - float64(CosineSimilarity(query, nNode.vec))
+			stats.Distances++
 			isSkip := skip(nID)
 			if isSkip {
 				offerShadow(item{nID, nDist})
@@ -272,7 +279,8 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 	//     (a closed island of near-duplicates).
 	// Cost: one distance per unvisited node (≤ N), paid only by queries that
 	// spent a beam on retired routing.
-	if (budgetSpent || stats.RetiredExpanded >= ef || (!stoppedByDistance && len(w) < ef)) && len(seen) < len(idx.nodes) {
+	beamOfRetired := stats.RetiredExpanded >= ef && !idx.noRetiredBeamTrigger
+	if (budgetSpent || beamOfRetired || (!stoppedByDistance && len(w) < ef)) && len(seen) < len(idx.nodes) {
 		stats.ExactScan = true
 		n := 0
 		for id, node := range idx.nodes {
@@ -284,6 +292,7 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 				return nil, nil, stats, ctx.Err()
 			}
 			d := 1.0 - float64(CosineSimilarity(query, node.vec))
+			stats.Distances++
 			if skip(id) {
 				offerShadow(item{id, d})
 			} else {

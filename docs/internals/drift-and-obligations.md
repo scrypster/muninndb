@@ -148,7 +148,9 @@ and remain the reviewer's job.
     `internal/cognitive/replay_cognitiontrial.go`,
     `internal/engine/activation/legacy_clock_cognitiontrial.go`,
     `internal/rankorder/legacy_cognitiontrial.go` — the honest-clock A/B control,
-    `MUNINN_TRIAL_LEGACY_ACTR_CLOCK=1`) → CI never passes this tag, so nothing
+    `MUNINN_TRIAL_LEGACY_ACTR_CLOCK=1`;
+    `internal/index/hnsw/legacy_select_cognitiontrial.go` — the HNSW neighbour-selection
+    A/B control, `MUNINN_TRIAL_LEGACY_HNSW_SELECT=1`) → CI never passes this tag, so nothing
     checks these files compile. Build them explicitly when you touch the packages they
     reach into: `go build -tags 'localassets cognitiontrial' ./... && go vet -tags
     'localassets cognitiontrial' ./...`. The cognition-trial acceptance rule
