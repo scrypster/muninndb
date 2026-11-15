@@ -170,6 +170,16 @@ func (r *Registry) Search(ctx context.Context, ws [8]byte, vec []float32, topK i
 	return idx.Search(ctx, vec, topK)
 }
 
+// SearchLive is Search with retired nodes routed through but never counted as
+// results; see Index.SearchLive. Same dimension guard as Search.
+func (r *Registry) SearchLive(ctx context.Context, ws [8]byte, vec []float32, topK int, retired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, stats LiveSearchStats, err error) {
+	idx := r.getOrCreate(ws)
+	if err := CheckDim(idx.Dim(), len(vec)); err != nil {
+		return nil, nil, stats, err
+	}
+	return idx.SearchLive(ctx, vec, topK, retired, shadowBudget)
+}
+
 // TotalVectors returns the total number of indexed vectors across all vaults.
 func (r *Registry) TotalVectors() int {
 	r.mu.RLock()
@@ -230,6 +240,22 @@ func (r *Registry) ResetVault(ws [8]byte) {
 	r.mu.Lock()
 	delete(r.indexes, ws)
 	r.mu.Unlock()
+}
+
+// WaitPersisted blocks until every loaded index has finished persisting its
+// in-flight neighbour-list writes (Index.Close for each). A test that closes
+// the store and re-opens it — a restart — must call it first, or the graph
+// it reloads can be missing the last asynchronous writes.
+func (r *Registry) WaitPersisted() {
+	r.mu.RLock()
+	idxs := make([]*Index, 0, len(r.indexes))
+	for _, idx := range r.indexes {
+		idxs = append(idxs, idx)
+	}
+	r.mu.RUnlock()
+	for _, idx := range idxs {
+		idx.Close()
+	}
 }
 
 // get returns the per-vault Index if it exists, or nil if it has not been created yet.

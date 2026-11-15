@@ -579,6 +579,60 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 	start := time.Now()
 	defer func() { metrics.FTSSearchDuration.Observe(time.Since(start).Seconds()) }()
 
+	results, err := idx.scoreAll(ws, query)
+	if err != nil || results == nil {
+		return results, err
+	}
+	if topK > 0 && len(results) > topK {
+		results = results[:topK]
+	}
+	return results, nil
+}
+
+// SearchLive is Search for a vault holding RETIRED documents — superseded
+// versions whose postings are kept on purpose (COG-28: they are the keyword
+// path a query worded like an OLD version still reaches; dropping them, as
+// forget does for trash, would make that wording unable to find the current
+// fact at all). Search cuts the full score-sorted match list at topK, so
+// retired versions that out-score live documents take their slots; SearchLive
+// cuts the LIVE matches at topK and returns the best shadowBudget retired
+// matches separately, on a budget not counted against topK.
+//
+// No over-fetch is needed: BM25 coverage scoring already scores every
+// matching document before the cut, and each document's score is its own
+// (no cross-document normalisation), so skipping retired ones at the cut
+// changes no live score. Corpus statistics (N, df) still include retired
+// documents, exactly as before — a separate question from slot consumption.
+func (idx *Index) SearchLive(ctx context.Context, ws [8]byte, query string, topK int, retired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error) {
+	start := time.Now()
+	defer func() { metrics.FTSSearchDuration.Observe(time.Since(start).Seconds()) }()
+
+	results, err := idx.scoreAll(ws, query)
+	if err != nil || results == nil {
+		return results, nil, err
+	}
+	live = results[:0:0]
+	for _, r := range results {
+		if retired != nil && retired(r.ID) {
+			if len(shadows) < shadowBudget {
+				shadows = append(shadows, r)
+			}
+			continue
+		}
+		if topK > 0 && len(live) >= topK {
+			if len(shadows) >= shadowBudget {
+				break
+			}
+			continue
+		}
+		live = append(live, r)
+	}
+	return live, shadows, nil
+}
+
+// scoreAll scores every document matching query and returns them
+// score-descending (sortScoredIDs order), uncut. nil when nothing can match.
+func (idx *Index) scoreAll(ws [8]byte, query string) ([]ScoredID, error) {
 	// Dual-path: search both stemmed tokens (new index) and unstemmed tokens (legacy index).
 	// This ensures backward compatibility for vaults not yet re-indexed with stemming.
 	stemmedTokens := Tokenize(query)
@@ -684,10 +738,6 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 		results = append(results, ScoredID{ID: id, Score: n / denom})
 	}
 	sortScoredIDs(results)
-
-	if topK > 0 && len(results) > topK {
-		results = results[:topK]
-	}
 	return results, nil
 }
 

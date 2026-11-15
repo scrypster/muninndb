@@ -127,6 +127,27 @@ func (a *ftsAdapter) Search(ctx context.Context, ws [8]byte, query string, topK 
 	return out, nil
 }
 
+// SearchLive mirrors the production adapter (activation.NewFTSAdapter), so
+// every engine test built on testEnv recalls through the same retired-aware
+// keyword path a server does.
+func (a *ftsAdapter) SearchLive(ctx context.Context, ws [8]byte, query string, topK int, retired func([16]byte) bool, shadowBudget int) ([]activation.ScoredID, []activation.ScoredID, error) {
+	live, shadows, err := a.idx.SearchLive(ctx, ws, query, topK, retired, shadowBudget)
+	if err != nil {
+		return nil, nil, err
+	}
+	conv := func(in []fts.ScoredID) []activation.ScoredID {
+		if in == nil {
+			return nil
+		}
+		out := make([]activation.ScoredID, len(in))
+		for i, r := range in {
+			out[i] = activation.ScoredID{ID: storage.ULID(r.ID), Score: r.Score}
+		}
+		return out
+	}
+	return conv(live), conv(shadows), nil
+}
+
 // ftsTrigAdapter converts fts.ScoredID to trigger.ScoredID.
 type ftsTrigAdapter struct{ idx *fts.Index }
 

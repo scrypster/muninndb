@@ -115,6 +115,9 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 
 	// Step 4: evict all in-memory caches.
 
+	// Retired set (retired.go): derived from the records just range-deleted.
+	ps.resetRetired(ws)
+
 	// L1 engram cache — vault-scoped by hex prefix.
 	ps.cache.DeleteByVault(ws)
 

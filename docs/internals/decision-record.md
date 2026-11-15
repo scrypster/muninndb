@@ -1451,3 +1451,71 @@ be overrun by up to one inference (~20-40 ms query, ~0.2 s batch). gRPC now carr
 `semantic_degraded`/`semantic_degraded_reason` (fields 7/8); before, it served
 keyword-only rows unmarked — silent on that transport, and the lanes made that outcome
 the common one for a deadline behind a batch.
+
+### Retired versions stop taking candidate slots; declared chains lose their depth cap (2026-11-15)
+
+Evolve retires a version but leaves its vector in HNSW and its postings in FTS — on
+purpose, because COG-28 needs that evidence to route a query worded like an old version
+to the current head. Recall took the top k per index and only THEN dropped retired
+engrams, so they spent slots the phase-6 filter emptied. Measured on synthetic fixtures:
+in a 2,000-memory vault (k = 45) a 50-version chain on a topic took 44 of 45 vector slots
+and 0 of 20 relevant live memories came back; a 500-version chain took every slot and the
+recall returned nothing (`superseded_only`, the head lost too). Separately, the chain walk
+stopped at 8 hops, so for chains of 10+ an old-wording query's evidence was discarded and
+every recall that touched a long chain logged depth-cap WARNs (~15 per recall on a
+500-version chain). A production vault holds 18 chains longer than 8 (the longest ~495,
+repeatedly-evolved bookmark-style memories) and 15 forks.
+
+**One retired set, in the store, derived.** A per-vault in-memory set of retired engrams
+(soft-deleted or archived) lives in `PebbleStore`, because every lifecycle transition
+commits at a handful of store sites; the set is updated there after the commit by
+RE-READING the 0x02 record (so out-of-order notes on one engram converge on the latest
+state), built lazily on a vault's first use from the 0x0B state index with every hit
+verified against its record (a stale index entry must never hide a live memory — the
+dangerous direction), and reset by the bulk raw-KV paths. No on-disk state: a restart
+derives the same set (pinned by a restart-invariance test that compares ids, order,
+absolute scores and substitution attribution across a re-open). Measured: 20,000
+memories / 5,000 retired build in ~2 ms, ~70 KB retained, 8 ns per lookup. The design
+asked for a per-index set; one shared set is the same information with one place to keep
+it correct.
+
+**Route, don't tombstone.** `hnsw.Index.SearchLive` treats a retired node as a routing
+node: it is expanded, never counted toward the ef beam, and the nearest 16 are returned as
+shadows on their own budget. Tombstoning was measured worse in the proof pass and would
+discard the evidence COG-28 redirects. Bounds, both derived from the index: retired
+expansions ≤ max(ef, N/M0) (the routing detour costs at most about one exact pass), and a
+walk that ends short of ef live hits with nodes unvisited makes ONE exact pass over them.
+That fallback is load-bearing, not belt-and-braces: 34+ near-identical vectors form a
+CLOSED island (the neighbour-selection defect, 1A) — an unbounded walk through a
+500-version island reached 0 live nodes — so without it skipping retired nodes would
+return nothing. FTS skips retired documents at the cut instead of dropping postings
+(dropping them is what forget does to trash; for a superseded version it would make the
+old wording unable to find the current fact, and would need a backfill for every
+existing chain); no over-fetch is needed because BM25 scores every match before the cut.
+Shadows enter fusion with raw scores and no rank, so they feed the shadow pass but never
+seed the Hebbian boost or traversal. Historical views skip nothing. A vault with an empty
+retired set calls the unchanged `Search`.
+
+**No depth cap, no head map.** The walk limit is now retired count + 8: a chain of retired
+intermediates always reaches its terminus, and the 8 hops of slack bind only on hand-made
+graphs of active nodes. The walk's reads are memoised per recall phase; a 499-hop store
+walk measured 0.7–1.6 ms. The O(1) retired→head map was not built: the successor relation
+lives in 0x04 rows that ~15 storage sites mutate (Hebbian weight moves and decay archival
+included), so the map would be a second copy of every chain with that many invalidation
+obligations, to save about a millisecond on the recalls that touch a 500-version chain.
+Chain WARNs log once per (vault, node, kind) per process.
+
+**Measured before → after** (synthetic starvation fixture, 20 relevant live memories,
+vector-only query): see the commit for the full table; at 2,000 memories relevant
+reached went 20/20/0/0 → 20/20/20/20 for chains of 0/10/50/500, at 300 memories
+20/20/0/0 → 20/20/20/20. Recall p50 at 2,000 memories: no chain 0.44 → 0.43 ms;
+50-chain on-topic 0.45 → 0.87 ms (the exact pass plus 20 more live candidates scored);
+500-chain on-topic 5.1 → 2.0 ms (the old cost was eight-hop walks and their WARN flood).
+
+**Residuals, recorded.** The decay pool (`RecentActive`, state-blind, with a 1 s cache that
+ignores topK) still admits retired engrams. A `Link(relation=supersedes)` target is
+stamped but stays active, so it is not retired and still competes; including it needs a
+clock-aware set. A replication follower never runs the hooks (same class as its HNSW
+graph). Live near-duplicate islands (1A with no retired versions) are untouched: the
+plain `Search` path is unchanged, and 34+ live near-duplicates still hide everything
+behind them.

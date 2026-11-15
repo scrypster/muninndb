@@ -2935,6 +2935,25 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	actReq.AsOf = req.AsOf
 	actReq.IncludeInvalid = req.IncludeInvalid
 
+	// Candidate budget counts LIVE memories on a current-view recall. The vault
+	// count includes every retired version (only a hard delete decrements it),
+	// so a vault with many evolve chains was sized as if its history were
+	// competing for slots — which, until retired engrams were skipped at the
+	// index cut, it was. Historical views keep the full count: there, retired
+	// predecessors are ordinary candidates. A vault with nothing retired is
+	// unchanged.
+	if actReq.AsOf == nil && !actReq.IncludeInvalid {
+		if view, err := e.store.RetiredIDs(ctx, wsPrefix); err == nil {
+			if n := int64(view.Len()); n > 0 {
+				live := vaultSize - n
+				if live < 0 {
+					live = 0
+				}
+				actReq.CandidatesPerIndex = activation.CalcCandidatesPerIndex(live)
+			}
+		}
+	}
+
 	// Ownership-lease work-queue visibility (#548): hide engrams checked out by a
 	// live foreign lease unless the caller opts in.
 	actReq.CallerOwner = req.CallerOwner

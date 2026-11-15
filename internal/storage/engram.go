@@ -324,6 +324,11 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
+	if oldState != meta.State {
+		// Retired set (retired.go): restore, CompareAndSet and
+		// UpdateLifecycleState all change state through here.
+		ps.noteRetired(wsPrefix, [16]byte(id))
+	}
 
 	// Update LastAccess index (best effort — index inconsistency is non-fatal).
 	if !meta.LastAccess.IsZero() {
@@ -543,6 +548,7 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		}
 		mu.Unlock()
 		ps.replicateBatch(batch)
+		ps.noteRetired(wsPrefix, [16]byte(id))
 		ps.cache.Delete(wsPrefix, id)
 		return nil
 	}
@@ -801,6 +807,7 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 	}
 	mu.Unlock()
 	ps.replicateBatch(batch)
+	ps.noteRetired(wsPrefix, [16]byte(id)) // retired set: a hard-deleted engram is never retired
 
 	ps.cache.Delete(wsPrefix, id)
 	for _, src := range assocCacheDirty {
@@ -927,6 +934,7 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
+	ps.noteRetired(wsPrefix, [16]byte(id)) // retired set: forget soft-deletes (retired.go)
 
 	// Update cache (vault-scoped) and invalidate the metadata-only cache
 	// so subsequent GetMetadata calls see the updated StateSoftDeleted state.

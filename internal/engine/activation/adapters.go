@@ -24,6 +24,26 @@ func (a *hnswActivationAdapter) Search(ctx context.Context, ws [8]byte, vec []fl
 	return out, nil
 }
 
+// SearchLive implements LiveHNSWIndex.
+func (a *hnswActivationAdapter) SearchLive(ctx context.Context, ws [8]byte, vec []float32, topK int, retired func([16]byte) bool, shadowBudget int) ([]ScoredID, []ScoredID, error) {
+	live, shadows, _, err := a.reg.SearchLive(ctx, ws, vec, topK, retired, shadowBudget)
+	if err != nil {
+		return nil, nil, err
+	}
+	return convertHNSW(live), convertHNSW(shadows), nil
+}
+
+func convertHNSW(in []hnswpkg.ScoredID) []ScoredID {
+	if in == nil {
+		return nil
+	}
+	out := make([]ScoredID, len(in))
+	for i, r := range in {
+		out[i] = ScoredID{ID: storage.ULID(r.ID), Score: r.Score}
+	}
+	return out
+}
+
 // NewHNSWAdapter returns an HNSWIndex that delegates to the given registry.
 func NewHNSWAdapter(reg *hnswpkg.Registry) HNSWIndex {
 	return &hnswActivationAdapter{reg: reg}
@@ -42,6 +62,26 @@ func (a *ftsActivationAdapter) Search(ctx context.Context, ws [8]byte, query str
 		out[i] = ScoredID{ID: storage.ULID(r.ID), Score: r.Score}
 	}
 	return out, nil
+}
+
+// SearchLive implements LiveFTSIndex.
+func (a *ftsActivationAdapter) SearchLive(ctx context.Context, ws [8]byte, query string, topK int, retired func([16]byte) bool, shadowBudget int) ([]ScoredID, []ScoredID, error) {
+	live, shadows, err := a.idx.SearchLive(ctx, ws, query, topK, retired, shadowBudget)
+	if err != nil {
+		return nil, nil, err
+	}
+	return convertFTS(live), convertFTS(shadows), nil
+}
+
+func convertFTS(in []fts.ScoredID) []ScoredID {
+	if in == nil {
+		return nil
+	}
+	out := make([]ScoredID, len(in))
+	for i, r := range in {
+		out[i] = ScoredID{ID: storage.ULID(r.ID), Score: r.Score}
+	}
+	return out
 }
 
 // NewFTSAdapter returns an FTSIndex that delegates to the given index.

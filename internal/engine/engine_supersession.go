@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
@@ -22,10 +23,15 @@ const (
 	// unrelated result.
 	supersessionEpsilon = 0.01
 
-	// supersessionMaxDepth caps the supersedes-chain walk. A chain longer than
-	// this, a cycle, or an ambiguous (multi-superseder) node is treated as
-	// unresolvable and left un-demoted rather than guessed at — degrade loudly (a
-	// WARN), never silently pick an arbitrary head.
+	// supersessionMaxDepth was the supersedes-chain walk's depth cap. It is now
+	// only the SLACK the walk allows beyond the vault's retired count (see
+	// supersessionWalkLimit): every intermediate an evolve, a supersedes link or
+	// a consolidation leaves behind is retired, so a declared chain of retired
+	// intermediates can never reach the limit, and the cap now binds only on a
+	// pathological graph of ACTIVE nodes joined by RelSupersedes edges. It also
+	// still bounds the writer's fork-guard walk (evolve_guard.go). A cycle or an
+	// ambiguous (multi-superseder) node is still unresolvable and refused —
+	// degrade loudly, never silently pick an arbitrary head.
 	supersessionMaxDepth = 8
 
 	// supersessionReverseScan bounds the reverse-association scan per chain hop. It
@@ -180,6 +186,7 @@ func (e *Engine) applySupersessionWithGate(ctx context.Context, ws [8]byte, resu
 		return a
 	}
 
+	memo := newChainReads()
 	for i := 0; i < orig; i++ {
 		if err := ctx.Err(); err != nil {
 			break
@@ -193,7 +200,7 @@ func (e *Engine) applySupersessionWithGate(ctx context.Context, ws [8]byte, resu
 		// intermediate presented as current is still accompanied by the record
 		// it replaced. The COG-28 substitution path, where the injected head is
 		// the ONLY row the caller sees, propagates it loudly instead.
-		walk := e.resolveSupersessionHead(ctx, ws, results[i].Engram.ID, gate, nameable)
+		walk := e.resolveSupersessionHeadCached(ctx, ws, results[i].Engram.ID, gate, nameable, memo)
 		if !walk.OK {
 			continue
 		}
@@ -311,45 +318,158 @@ func (e *Engine) applySupersessionWithGate(ctx context.Context, ws [8]byte, resu
 // TargetID repurposed to hold the SOURCE — so for a RelSupersedes edge it is the
 // engram that supersedes X (see annotation.go / storage/association.go).
 func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startID storage.ULID, gate *visibilityGate, nameable func(*storage.Engram) bool) supersessionWalk {
+	return e.resolveSupersessionHeadCached(ctx, ws, startID, gate, nameable, nil)
+}
+
+// chainReads memoises the two store reads a chain walk makes per hop — the
+// reverse-association scan and the successor's engram — for the duration of
+// ONE recall phase. Several shadows of one long chain (the nearest versions of
+// a 500-version chain all match the same query) walk the same suffix; without
+// this each paid every read again. It is per-phase and discarded with it, so
+// it can never serve a read across a write: there is no invalidation to get
+// wrong. nil disables memoisation.
+type chainReads struct {
+	limit int // walk limit for this vault, computed once (supersessionWalkLimit)
+	hops  map[storage.ULID]chainHop
+	engs  map[storage.ULID]*storage.Engram
+}
+
+type chainHop struct {
+	found int          // distinct-superseder count, as the walk counts it
+	next  storage.ULID // the (last) superseder seen
+	err   bool         // the reverse scan failed
+}
+
+func newChainReads() *chainReads {
+	return &chainReads{limit: -1, hops: map[storage.ULID]chainHop{}, engs: map[storage.ULID]*storage.Engram{}}
+}
+
+// supersessionWalkLimit is how many hops a chain walk may take in vault ws:
+// the vault's retired count plus supersessionMaxDepth of slack. Every
+// intermediate on a declared evolve/link/consolidate chain is retired, and the
+// walk refuses a cycle, so such a chain is always walked to its terminus —
+// the 495-version chains real vaults grow are resolved in full. The slack is
+// what remains of the old cap, for chains through ACTIVE nodes (a hand-made
+// RelSupersedes graph), and it is also the whole limit when the retired set
+// is unavailable.
+func (e *Engine) supersessionWalkLimit(ctx context.Context, ws [8]byte) int {
+	view, err := e.store.RetiredIDs(ctx, ws)
+	if err != nil {
+		return supersessionMaxDepth
+	}
+	return view.Len() + supersessionMaxDepth
+}
+
+// warnChainOnce logs a chain-walk WARN at most once per (vault, node, kind)
+// per process. Each of these conditions is a property of the STORED chain, not
+// of the query, so repeating it on every recall that touches the chain was a
+// flood — a production server logged thousands of depth-cap warnings — and a
+// flood is functionally silent. Once is enough to name the node; the
+// per-recall signal (the abstention reason, chain_truncated) is unchanged.
+var chainWarned sync.Map
+
+func warnChainOnce(ws [8]byte, node storage.ULID, kind, msg string, args ...any) {
+	var key [25]byte
+	copy(key[:8], ws[:])
+	copy(key[8:24], node[:])
+	switch kind {
+	case "ambiguous":
+		key[24] = 1
+	case "cycle":
+		key[24] = 2
+	case "truncated":
+		key[24] = 3
+	default:
+		key[24] = 4
+	}
+	if _, dup := chainWarned.LoadOrStore(key, struct{}{}); dup {
+		return
+	}
+	slog.Warn(msg, args...)
+}
+
+func (e *Engine) resolveSupersessionHeadCached(ctx context.Context, ws [8]byte, startID storage.ULID, gate *visibilityGate, nameable func(*storage.Engram) bool, memo *chainReads) supersessionWalk {
 	cur := startID
 	visited := map[storage.ULID]bool{startID: true}
+
+	limit := -1
+	if memo != nil {
+		if memo.limit < 0 {
+			memo.limit = e.supersessionWalkLimit(ctx, ws)
+		}
+		limit = memo.limit
+	} else {
+		limit = e.supersessionWalkLimit(ctx, ws)
+	}
+
+	superseders := func(id storage.ULID) chainHop {
+		if memo != nil {
+			if h, ok := memo.hops[id]; ok {
+				return h
+			}
+		}
+		var h chainHop
+		rev, err := e.store.GetReverseAssociations(ctx, ws, id, supersessionReverseScan)
+		if err != nil {
+			h.err = true
+		} else {
+			// Collect all distinct superseders at this hop; >1 is genuine ambiguity.
+			for i := range rev {
+				if rev[i].RelType == storage.RelSupersedes {
+					if h.found == 0 || rev[i].TargetID != h.next {
+						h.found++
+						h.next = rev[i].TargetID
+					}
+				}
+			}
+		}
+		if memo != nil {
+			memo.hops[id] = h
+		}
+		return h
+	}
+	engramOf := func(id storage.ULID) *storage.Engram {
+		if memo != nil {
+			if eng, ok := memo.engs[id]; ok {
+				return eng
+			}
+		}
+		eng, err := e.store.GetEngram(ctx, ws, id)
+		if err != nil {
+			eng = nil
+		}
+		if memo != nil {
+			memo.engs[id] = eng
+		}
+		return eng
+	}
 
 	var head *storage.Engram
 	var immediate storage.ULID
 	sawSuccessor, sawRetracted, sawHidden, truncated := false, false, false, false
 	depth := 0
-	for ; depth < supersessionMaxDepth; depth++ {
-		rev, err := e.store.GetReverseAssociations(ctx, ws, cur, supersessionReverseScan)
-		if err != nil {
+	for ; depth < limit; depth++ {
+		hop := superseders(cur)
+		if hop.err {
 			break
 		}
-		// Collect all distinct superseders at this hop; >1 is genuine ambiguity.
-		var next storage.ULID
-		found := 0
-		for i := range rev {
-			if rev[i].RelType == storage.RelSupersedes {
-				if found == 0 || rev[i].TargetID != next {
-					found++
-					next = rev[i].TargetID
-				}
-			}
-		}
+		next, found := hop.next, hop.found
 		if found == 0 {
 			break // cur has no superseder → the chain ends here
 		}
 		if found > 1 {
-			slog.Warn("recall: engram has multiple superseders, leaving un-demoted", "id", cur.String())
+			warnChainOnce(ws, cur, "ambiguous", "recall: engram has multiple superseders, leaving un-demoted (logged once per engram per process)", "id", cur.String())
 			return supersessionWalk{Reason: supersessionBlockAmbiguous}
 		}
 		if visited[next] {
-			slog.Warn("recall: supersedes cycle detected, leaving un-demoted", "at", next.String())
+			warnChainOnce(ws, next, "cycle", "recall: supersedes cycle detected, leaving un-demoted (logged once per engram per process)", "at", next.String())
 			return supersessionWalk{Reason: supersessionBlockCycle}
 		}
 		visited[next] = true
 		sawSuccessor = true
 
-		eng, err := e.store.GetEngram(ctx, ws, next)
-		if err != nil || eng == nil {
+		eng := engramOf(next)
+		if eng == nil {
 			break // dangling edge → stop; the chain ends below it
 		}
 		// RETRACTION vs. FURTHER SUPERSESSION. Both leave a hop's superseder
@@ -406,7 +526,7 @@ func (e *Engine) resolveSupersessionHead(ctx context.Context, ws [8]byte, startI
 	// supersessionMaxDepth hops is flagged truncated because the loop never
 	// gets the iteration that would prove it terminal. Over-warning that a
 	// "current" answer might not be the last word is the safe direction.
-	if depth >= supersessionMaxDepth {
+	if depth >= limit {
 		truncated = true
 	}
 
