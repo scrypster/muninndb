@@ -469,7 +469,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_decide",
-			Description: "Record a decision with rationale and link it to supporting evidence.",
+			Description: "Record a decision with rationale and link it to supporting evidence. The decision text becomes the memory's concept; when it is longer than the concept limit (512 bytes) the concept is cut at a sentence or word boundary, the full decision is kept in the stored content, and the response notes it.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
