@@ -98,15 +98,22 @@ func (c *L1Cache) GetNoStamp(ws [8]byte, id ULID) (*Engram, bool) {
 // its lastAccess is left at the zero value, so LastAccessNs reports 0 (not
 // cached, in the recency sense) until a REAL access — one that goes through
 // Get/Set — stamps it. See GetNoStamp's doc for why.
+//
+// It also never EVICTS: on a full cache the fill is skipped. Eviction removes
+// a warm entry, and a warm entry's lastAccess is a live recency SCORING input
+// (EngramLastAccessNs) for the next recall — so a suppressed read that evicted
+// would still change what the following identical read scores. Skipping costs
+// only a Pebble re-read of this engram later, the same as if it had been
+// evicted. The capacity check is approximate under concurrency, like Set's.
 func (c *L1Cache) SetNoStamp(ws [8]byte, id ULID, eng *Engram) {
+	if c.count.Load() >= int64(c.maxSize) {
+		return
+	}
 	entry := &cacheEntry{
 		eng: eng,
 	}
 	c.data.Store(cacheKeyFor(ws, id), entry)
-	newCount := c.count.Add(1)
-	if newCount > int64(c.maxSize) {
-		c.evict()
-	}
+	c.count.Add(1)
 }
 
 // Delete removes an engram from the cache for the given vault.
