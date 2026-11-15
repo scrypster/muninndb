@@ -247,8 +247,23 @@ func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id
 	// EmbedDim patch wrote back a record read before a concurrent forget (or
 	// any other writer) committed, reverting it
 	// (TestUpdateEmbedding_ConcurrentForgetStaysForgotten).
+	//
+	// The lock covers the read, the patch and the memtable apply ONLY. The
+	// write's durability is unchanged — it is Sync, and this method does not
+	// return until the WAL holding it is synced — but the fsync runs after
+	// the lock is released (commit NoSync under the lock, then LogData(Sync),
+	// which syncs the WAL up to and including this batch). Holding a stripe
+	// across an fsync serialised every writer that hashed to the stripe
+	// (stripes are shared with other engrams and recall-label keys): with 4
+	// of 16 mixed writers embedding on 64 memories the other writers fell
+	// from 51.5k to 5.1k ops/s and their p99 rose from 0.2 ms to 34 ms.
 	unlock := ps.LockEngram(id)
-	defer unlock()
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
 
 	batch := ps.db.NewBatch()
 	defer batch.Close()
@@ -287,8 +302,15 @@ func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id
 	}
 
 	testRMWPoint("UpdateEmbedding", wsPrefix, id)
-	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("update embedding: commit: %w", err)
+	}
+	locked = false
+	unlock()
+	// Make the commit durable before returning, as the Sync commit did:
+	// an empty Sync LogData syncs the WAL through every earlier commit.
+	if err := ps.db.LogData(nil, pebble.Sync); err != nil {
+		return fmt.Errorf("update embedding: sync: %w", err)
 	}
 	ps.replicateBatch(batch)
 	return nil
