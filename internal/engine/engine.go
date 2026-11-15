@@ -2882,177 +2882,17 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	if actReq.MaxResults == 0 {
 		actReq.MaxResults = 20
 	}
-	// Fix 2: Default to resolved HopDepth (from Plasticity preset) BFS traversal.
-	// Order matters: apply default FIRST, then check explicit opt-out.
-	//
-	// This default was justified as "the association graph is the primary
-	// differentiator of MuninnDB". Half of that is still true and half is not
-	// (#801): the graph reaches results through phase4HebbianBoost, which does
-	// contribute — but phase5Traverse's hop gate has sat above the phase's own
-	// score ceiling since the initial commit, so HopDepth > 0 has never produced
-	// a hop on any real corpus. Measured on a 3,458-engram production vault with
-	// 127,798 edges: 0 hops on 150/150 queries, and traversal strictly dominated
-	// by raising CandidatesPerIndex at every budget cap. Left on rather than
-	// defaulted off because it is inert, not harmful, and because HopDepth is a
-	// per-vault plasticity value surfaced on six transports — disposing of it is
-	// its own increment. See docs/internals/decision-record.md (#801).
-	if actReq.HopDepth == 0 {
-		actReq.HopDepth = resolved.HopDepth
-	}
-	if req.DisableHops {
-		actReq.HopDepth = 0
-	}
-
 	// Fix 4: Observe mode is a pure read — skip activation log side effects.
 	// S3: an explicit req.ReadOnly (already the effective value computed by the
 	// MCP/REST/gRPC handler — credential-observe OR request read_only) also
 	// forces this; it can only ADD read-only-ness, never remove it.
 	actReq.ReadOnly = auth.ObserveFromContext(ctx) || req.ReadOnly
 
-	// Resolve the recall-mode preset — explicit wire mode first, else the
-	// vault default. The engine is the SINGLE preset decider (#704):
-	// transports validate the mode name and forward it instead of stamping
-	// preset values into the request, because only the engine knows the
-	// effective scoring mode. An invalid mode from a raw wire caller is
-	// ignored (transports fail fast; a display preference falls open, never
-	// hides memory — the #604 line), and "balanced" means engine defaults.
-	var modePreset *auth.RecallModePreset
-	recallMode := req.Mode
-	if recallMode == "" {
-		recallMode = resolved.RecallMode
-	}
-	if recallMode != "" && recallMode != "balanced" {
-		if p, mErr := auth.LookupRecallMode(recallMode); mErr == nil {
-			modePreset = &p
-		}
-	}
-
-	// Convert weights if provided; otherwise apply preset weights from Plasticity config.
-	// All scoring goes through ACT-R; legacy temporal path is kept in code but not reachable for now.
-	if req.Weights != nil {
-		actReq.Weights = &activation.Weights{
-			SemanticSimilarity: req.Weights.SemanticSimilarity,
-			FullTextRelevance:  req.Weights.FullTextRelevance,
-			DecayFactor:        req.Weights.DecayFactor,
-			HebbianBoost:       req.Weights.HebbianBoost,
-			AccessFrequency:    req.Weights.AccessFrequency,
-			Recency:            req.Weights.Recency,
-			UseCGDN:            req.Weights.UseCGDN,
-			CGDNAlpha:          req.Weights.CGDNAlpha,
-			CGDNBeta:           req.Weights.CGDNBeta,
-			CGDNPower:          req.Weights.CGDNPower,
-			UseACTR:            !req.Weights.DisableACTR,
-			DisableACTR:        req.Weights.DisableACTR,
-			ACTRDecay:          req.Weights.ACTRDecay,
-			// The MBP/REST wire field is `omitempty` float32, so an explicit 0
-			// from a caller never reaches this struct as 0 — it arrives as
-			// "absent". Mapping 0 to nil here is therefore not a loss: it is
-			// the only honest reading of what the wire can express. Per-vault
-			// `actr_heb_scale: 0` goes through the plasticity branch below,
-			// which CAN express it.
-			ACTRHebScale: actrHebScalePtr(req.Weights.ACTRHebScale),
-		}
-	} else if modePreset != nil && req.Mode != "" && presetCarriesWeights(*modePreset) && resolved.ScoringFusion != "rrf" {
-		// EXPLICIT weight-carrying mode (semantic/recent), no caller weights:
-		// the preset defines the FULL weight vector, from the ZERO base — the
-		// same struct these modes produced when transports stamped them as
-		// caller weights. Overlaying resolved defaults instead is wrong: the
-		// preset zero-value scheme cannot express semantic's implicit "decay,
-		// hebbian, access, recency = 0", and under legacy (DisableACTR)
-		// scoring those default weights let a fresh, recently-active engram
-		// score ~0.7 with zero content match — above semantic's own 0.3
-		// threshold (see presetCarriesWeights). rrf vaults take the resolved
-		// branch instead: presets never change the fusion mode, and under rrf
-		// the preset weights are inert.
-		actReq.Weights = &activation.Weights{
-			SemanticSimilarity: modePreset.SemanticSimilarity,
-			FullTextRelevance:  modePreset.FullTextRelevance,
-			Recency:            modePreset.Recency,
-			UseACTR:            !modePreset.DisableACTR,
-			DisableACTR:        modePreset.DisableACTR,
-		}
-	} else {
-		actrDecay := float32(0.5)
-		if resolved.ACTRDecay > 0 {
-			actrDecay = float32(resolved.ACTRDecay)
-		}
-		// resolved.ACTRHebScale is ALWAYS populated by auth.ResolvePlasticity
-		// (from the preset, or from an explicit override clamped to [0, 50]),
-		// so there is no "unset" to fall back from. The `> 0` guard this
-		// replaces was a SECOND silent substitution of the documented 0 —
-		// principle #1, in the same request that the activation layer's own
-		// substitution corrupted.
-		actrHebScale := float32(resolved.ACTRHebScale)
-		actReq.Weights = &activation.Weights{
-			// ACT-R ContentMatch gate: 60% semantic, 40% FTS — proven optimal.
-			// Plasticity's SemanticWeight/FTSWeight were calibrated for the old 6-component
-			// additive formula and produce different semantics in ACT-R mode. Use hardcoded
-			// proven values to guarantee deterministic results.
-			SemanticSimilarity: 0.6,
-			FullTextRelevance:  0.4,
-			// Legacy fields kept for backward compat with non-ACT-R scoring paths
-			DecayFactor:     float32(resolved.TemporalWeight),
-			HebbianBoost:    float32(resolved.HebbianWeight),
-			Recency:         float32(resolved.RecencyWeight),
-			AccessFrequency: 0.05,
-			// ACT-R cognitive parameters (from Plasticity presets)
-			UseACTR:      true,
-			ACTRDecay:    actrDecay,
-			ACTRHebScale: &actrHebScale,
-		}
-
-		// Wire ScoringFusion from plasticity config to activation weights.
-		if resolved.ScoringFusion == "rrf" {
-			actReq.Weights.UseRRFFusion = true
-			actReq.Weights.DisableACTR = true
-			actReq.Weights.UseACTR = false
-		} else if resolved.ScoringFusion == "weighted_sum" {
-			actReq.Weights.DisableACTR = true
-			actReq.Weights.UseACTR = false
-		}
-	}
-
-	// Gate CGDN behind vault's ExperimentalCGDN flag.
-	if actReq.Weights.UseCGDN && !resolved.ExperimentalCGDN {
-		actReq.Weights.UseCGDN = false
-	}
-
-	// COG-26: resolve the semantic-abstention baseline b for this vault's
-	// embed model, regardless of scoring mode — the noise floor is a property
-	// of the embedder, not the scorer. Applies uniformly whether Weights came
-	// from an explicit caller override, a recall-mode preset, or the resolved
-	// default, so a caller-supplied Weights struct still gets the floor
-	// (unlike SemanticSimilarity/FullTextRelevance, which an explicit caller
-	// override legitimately replaces).
-	actReq.Weights.SemanticBaseline = float32(e.resolveSemanticBaseline(req.Vault, wsPrefix, resolved))
-	// Distinguish the two causes of a zero baseline for the relevance-band
-	// phase: an operator who explicitly set `semantic_floor: 0` (documented
-	// "disable the floor") must not be told their model is unregistered
-	// (semantic_floor_disabled vs no_model_baseline — G6 refute of #773,
-	// finding 3). Scoring math is identical either way (identity transform).
-	actReq.Weights.SemanticFloorDisabled = semanticFloorExplicitlyDisabled(resolved)
-
-	// COG-6: the effective default threshold is mode-aware and keyed on the
-	// EFFECTIVE scoring mode (actReq.Weights.UseRRFFusion), decided here in one
-	// place — AFTER the weights block sets UseRRFFusion — so the threshold default
-	// always matches the scoring math that will actually run. (Keying on vault
-	// config, resolved.ScoringFusion, diverges when a caller passes explicit
-	// weights on an rrf vault: the request scores ACT-R but config says rrf.)
-	// For rrf scoring, leave Threshold 0 ("unset") so activation.Run() applies its
-	// rrf default (0.001, #590's mechanism); coercing to 0.1 here — an
-	// ACT-R-calibrated value — made #590's fix unreachable on every production
-	// transport. ACT-R/weighted_sum default behavior is unchanged.
-	if actReq.Threshold == 0 && !actReq.Weights.UseRRFFusion {
-		actReq.Threshold = cog6DefaultThreshold(actReq.Weights.UseRRFFusion, actReq.Weights.UseACTR)
-	}
-
-	// Apply the recall-mode preset (#704) — resolved into modePreset above the
-	// weights block (the zero-base branch needs it there); runs after the
-	// COG-6 coerce because its threshold decision is keyed on the effective
-	// scoring mode. Semantics documented on applyRecallModePreset.
-	if modePreset != nil {
-		applyRecallModePreset(actReq, req, *modePreset)
-	}
+	// Scoring plan (hops, recall-mode preset, weights, COG-26 floor, COG-6
+	// threshold coerce, preset application) is resolved in ONE pure function
+	// so the recall-mode census can see exactly what reaches the scorer.
+	actReq.Weights, actReq.Threshold, actReq.HopDepth = resolveScoringPlan(req, &resolved,
+		e.resolveSemanticBaseline(req.Vault, wsPrefix, resolved), semanticFloorExplicitlyDisabled(resolved))
 
 	// Convert filters if provided
 	if len(req.Filters) > 0 {
@@ -5618,4 +5458,188 @@ func actrHebScalePtr(v float32) *float32 {
 		return nil
 	}
 	return &v
+}
+
+// resolveScoringPlan decides everything about a recall that reaches the
+// scorer: the hop depth, the recall-mode preset (wire mode first, else the
+// vault default), the weight vector and fusion bits, the COG-26 semantic
+// floor, the COG-6 mode-aware default threshold, and the preset's own
+// threshold/hop/scalar overrides. It is pure — no engine state, no I/O — so
+// the recall-mode census (recall_mode_census_test.go) can assert on the plan
+// for every preset x path x fusion cell directly. activateCore is its only
+// production caller; baseline and floorDisabled are resolved there because
+// the baseline lookup reads the store.
+func resolveScoringPlan(req *mbp.ActivateRequest, resolved *auth.ResolvedPlasticity, baseline float64, floorDisabled bool) (w *activation.Weights, threshold float64, hopDepth int) {
+	hopDepth = req.MaxHops
+	threshold = float64(req.Threshold)
+
+	// Fix 2: Default to resolved HopDepth (from Plasticity preset) BFS traversal.
+	// Order matters: apply default FIRST, then check explicit opt-out.
+	//
+	// This default was justified as "the association graph is the primary
+	// differentiator of MuninnDB". Half of that is still true and half is not
+	// (#801): the graph reaches results through phase4HebbianBoost, which does
+	// contribute — but phase5Traverse's hop gate has sat above the phase's own
+	// score ceiling since the initial commit, so HopDepth > 0 has never produced
+	// a hop on any real corpus. Measured on a 3,458-engram production vault with
+	// 127,798 edges: 0 hops on 150/150 queries, and traversal strictly dominated
+	// by raising CandidatesPerIndex at every budget cap. Left on rather than
+	// defaulted off because it is inert, not harmful, and because HopDepth is a
+	// per-vault plasticity value surfaced on six transports — disposing of it is
+	// its own increment. See docs/internals/decision-record.md (#801).
+	if hopDepth == 0 {
+		hopDepth = resolved.HopDepth
+	}
+	if req.DisableHops {
+		hopDepth = 0
+	}
+
+	// Resolve the recall-mode preset — explicit wire mode first, else the
+	// vault default. The engine is the SINGLE preset decider (#704):
+	// transports validate the mode name and forward it instead of stamping
+	// preset values into the request, because only the engine knows the
+	// effective scoring mode. An invalid mode from a raw wire caller is
+	// ignored (transports fail fast; a display preference falls open, never
+	// hides memory — the #604 line), and "balanced" means engine defaults.
+	var modePreset *auth.RecallModePreset
+	recallMode := req.Mode
+	if recallMode == "" {
+		recallMode = resolved.RecallMode
+	}
+	if recallMode != "" && recallMode != "balanced" {
+		if p, mErr := auth.LookupRecallMode(recallMode); mErr == nil {
+			modePreset = &p
+		}
+	}
+
+	// Convert weights if provided; otherwise apply preset weights from Plasticity config.
+	// All scoring goes through ACT-R; legacy temporal path is kept in code but not reachable for now.
+	if req.Weights != nil {
+		w = &activation.Weights{
+			SemanticSimilarity: req.Weights.SemanticSimilarity,
+			FullTextRelevance:  req.Weights.FullTextRelevance,
+			DecayFactor:        req.Weights.DecayFactor,
+			HebbianBoost:       req.Weights.HebbianBoost,
+			AccessFrequency:    req.Weights.AccessFrequency,
+			Recency:            req.Weights.Recency,
+			UseCGDN:            req.Weights.UseCGDN,
+			CGDNAlpha:          req.Weights.CGDNAlpha,
+			CGDNBeta:           req.Weights.CGDNBeta,
+			CGDNPower:          req.Weights.CGDNPower,
+			UseACTR:            !req.Weights.DisableACTR,
+			DisableACTR:        req.Weights.DisableACTR,
+			ACTRDecay:          req.Weights.ACTRDecay,
+			// The MBP/REST wire field is `omitempty` float32, so an explicit 0
+			// from a caller never reaches this struct as 0 — it arrives as
+			// "absent". Mapping 0 to nil here is therefore not a loss: it is
+			// the only honest reading of what the wire can express. Per-vault
+			// `actr_heb_scale: 0` goes through the plasticity branch below,
+			// which CAN express it.
+			ACTRHebScale: actrHebScalePtr(req.Weights.ACTRHebScale),
+		}
+	} else if modePreset != nil && req.Mode != "" && presetCarriesWeights(*modePreset) && resolved.ScoringFusion != "rrf" {
+		// EXPLICIT weight-carrying mode (semantic/recent), no caller weights:
+		// the preset defines the FULL weight vector, from the ZERO base — the
+		// same struct these modes produced when transports stamped them as
+		// caller weights. Overlaying resolved defaults instead is wrong: the
+		// preset zero-value scheme cannot express semantic's implicit "decay,
+		// hebbian, access, recency = 0", and under legacy (DisableACTR)
+		// scoring those default weights let a fresh, recently-active engram
+		// score ~0.7 with zero content match — above semantic's own 0.3
+		// threshold (see presetCarriesWeights). rrf vaults take the resolved
+		// branch instead: presets never change the fusion mode, and under rrf
+		// the preset weights are inert.
+		w = &activation.Weights{
+			SemanticSimilarity: modePreset.SemanticSimilarity,
+			FullTextRelevance:  modePreset.FullTextRelevance,
+			Recency:            modePreset.Recency,
+			UseACTR:            !modePreset.DisableACTR,
+			DisableACTR:        modePreset.DisableACTR,
+		}
+	} else {
+		actrDecay := float32(0.5)
+		if resolved.ACTRDecay > 0 {
+			actrDecay = float32(resolved.ACTRDecay)
+		}
+		// resolved.ACTRHebScale is ALWAYS populated by auth.ResolvePlasticity
+		// (from the preset, or from an explicit override clamped to [0, 50]),
+		// so there is no "unset" to fall back from. The `> 0` guard this
+		// replaces was a SECOND silent substitution of the documented 0 —
+		// principle #1, in the same request that the activation layer's own
+		// substitution corrupted.
+		actrHebScale := float32(resolved.ACTRHebScale)
+		w = &activation.Weights{
+			// ACT-R ContentMatch gate: 60% semantic, 40% FTS — proven optimal.
+			// Plasticity's SemanticWeight/FTSWeight were calibrated for the old 6-component
+			// additive formula and produce different semantics in ACT-R mode. Use hardcoded
+			// proven values to guarantee deterministic results.
+			SemanticSimilarity: 0.6,
+			FullTextRelevance:  0.4,
+			// Legacy fields kept for backward compat with non-ACT-R scoring paths
+			DecayFactor:     float32(resolved.TemporalWeight),
+			HebbianBoost:    float32(resolved.HebbianWeight),
+			Recency:         float32(resolved.RecencyWeight),
+			AccessFrequency: 0.05,
+			// ACT-R cognitive parameters (from Plasticity presets)
+			UseACTR:      true,
+			ACTRDecay:    actrDecay,
+			ACTRHebScale: &actrHebScale,
+		}
+
+		// Wire ScoringFusion from plasticity config to activation weights.
+		if resolved.ScoringFusion == "rrf" {
+			w.UseRRFFusion = true
+			w.DisableACTR = true
+			w.UseACTR = false
+		} else if resolved.ScoringFusion == "weighted_sum" {
+			w.DisableACTR = true
+			w.UseACTR = false
+		}
+	}
+
+	// Gate CGDN behind vault's ExperimentalCGDN flag.
+	if w.UseCGDN && !resolved.ExperimentalCGDN {
+		w.UseCGDN = false
+	}
+
+	// COG-26: resolve the semantic-abstention baseline b for this vault's
+	// embed model, regardless of scoring mode — the noise floor is a property
+	// of the embedder, not the scorer. Applies uniformly whether Weights came
+	// from an explicit caller override, a recall-mode preset, or the resolved
+	// default, so a caller-supplied Weights struct still gets the floor
+	// (unlike SemanticSimilarity/FullTextRelevance, which an explicit caller
+	// override legitimately replaces).
+	w.SemanticBaseline = float32(baseline)
+	// Distinguish the two causes of a zero baseline for the relevance-band
+	// phase: an operator who explicitly set `semantic_floor: 0` (documented
+	// "disable the floor") must not be told their model is unregistered
+	// (semantic_floor_disabled vs no_model_baseline — G6 refute of #773,
+	// finding 3). Scoring math is identical either way (identity transform).
+	w.SemanticFloorDisabled = floorDisabled
+
+	// COG-6: the effective default threshold is mode-aware and keyed on the
+	// EFFECTIVE scoring mode (w.UseRRFFusion), decided here in one
+	// place — AFTER the weights block sets UseRRFFusion — so the threshold default
+	// always matches the scoring math that will actually run. (Keying on vault
+	// config, resolved.ScoringFusion, diverges when a caller passes explicit
+	// weights on an rrf vault: the request scores ACT-R but config says rrf.)
+	// For rrf scoring, leave Threshold 0 ("unset") so activation.Run() applies its
+	// rrf default (0.001, #590's mechanism); coercing to 0.1 here — an
+	// ACT-R-calibrated value — made #590's fix unreachable on every production
+	// transport. ACT-R/weighted_sum default behavior is unchanged.
+	if threshold == 0 && !w.UseRRFFusion {
+		threshold = cog6DefaultThreshold(w.UseRRFFusion, w.UseACTR)
+	}
+
+	// Apply the recall-mode preset (#704) — resolved into modePreset above the
+	// weights block (the zero-base branch needs it there); runs after the
+	// COG-6 coerce because its threshold decision is keyed on the effective
+	// scoring mode. Semantics documented on applyRecallModePreset.
+	if modePreset != nil {
+		plan := &activation.ActivateRequest{Weights: w, Threshold: threshold, HopDepth: hopDepth}
+		applyRecallModePreset(plan, req, *modePreset)
+		w, threshold, hopDepth = plan.Weights, plan.Threshold, plan.HopDepth
+	}
+
+	return w, threshold, hopDepth
 }
