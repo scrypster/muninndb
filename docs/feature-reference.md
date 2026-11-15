@@ -568,7 +568,7 @@ For quick reference, these are the MCP tools available to AI agents:
 
 1. `muninn_remember` — store a memory
 2. `muninn_remember_batch` — store multiple memories at once (max 50)
-3. `muninn_recall` — semantic search with modes and profiles
+3. `muninn_recall` — semantic search with modes and profiles. Pass the text as `query` (one string) or `context` (array of phrases, or a bare string); at least one is required, and both together are combined (MCP only — REST/MBP still take `context`)
 4. `muninn_read` — fetch by ID
 5. `muninn_forget` — soft-delete
 6. `muninn_link` — create/strengthen association

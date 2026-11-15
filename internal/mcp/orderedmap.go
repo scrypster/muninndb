@@ -30,6 +30,11 @@ func (o *OrderedMap) Set(key string, value any) {
 	o.values[key] = value
 }
 
+// schemaPropertyOrderKey is a Go-side-only schema key: a []string of optional
+// properties to emit first (after required ones). orderSchemaProperties
+// consumes and strips it, so it never reaches the wire.
+const schemaPropertyOrderKey = "x-muninn-property-order"
+
 // MarshalJSON emits a JSON object with keys in insertion order.
 func (o *OrderedMap) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
@@ -99,6 +104,14 @@ func orderSchemaProperties(schema any) any {
 		out["items"] = orderSchemaProperties(items)
 	}
 
+	// A schema may name properties to lead the optional ones (after any
+	// required fields). The key is Go-side only and is removed from the copy.
+	var leading []string
+	if lo, ok := out[schemaPropertyOrderKey].([]string); ok {
+		leading = lo
+		delete(out, schemaPropertyOrderKey)
+	}
+
 	props, hasProps := out["properties"].(map[string]any)
 	if !hasProps {
 		return out
@@ -123,8 +136,16 @@ func orderSchemaProperties(schema any) any {
 		}
 	}
 
-	// 2. Optional fields, sorted alphabetically.
-	optional := make([]string, 0, len(props)-len(required))
+	// 2. Leading optional fields, in the declared order.
+	for _, k := range leading {
+		if v, ok := props[k]; ok && !reqSet[k] {
+			om.Set(k, orderSchemaProperties(v))
+			reqSet[k] = true // exclude from the alphabetical tail
+		}
+	}
+
+	// 3. Remaining optional fields, sorted alphabetically.
+	optional := make([]string, 0, len(props))
 	for k := range props {
 		if !reqSet[k] {
 			optional = append(optional, k)
