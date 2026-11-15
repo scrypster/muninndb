@@ -222,7 +222,9 @@ func TestCachedEngramMutationCensus(t *testing.T) {
 var cachedEngramKnownSources = map[string]string{
 	"internal/storage/batch.go:pebbleStoreBatch.mutateEngram": "#858 itself — the reported race, reached from " +
 		"Engine.EvolveAt via SupersedeEngram and from UpdateEngramState",
-	"internal/storage/engram.go:PebbleStore.SoftDelete": "read-modify-write under casLocks; the stripe lock does " +
+	// SoftDelete's body moved to SoftDeleteLocked (Engine.Forget holds the
+	// lock across the state change and the posting removal); same read.
+	"internal/storage/engram.go:PebbleStore.SoftDeleteLocked": "read-modify-write under casLocks; the stripe lock does " +
 		"not cover recall's unlocked readers, demonstrated under -race",
 	"internal/storage/engram.go:PebbleStore.UpdateTagsLocked": "replaced eng.Tags on the shared struct, which is " +
 		"also the STO-18 removal-diff source",

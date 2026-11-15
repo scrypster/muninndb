@@ -1275,10 +1275,23 @@ func (e *Engine) UpdateTags(ctx context.Context, vault string, id storage.ULID, 
 	if cur.State == storage.StateSoftDeleted && !activation.CarriesSupersessionSignature(cur) {
 		// Trash, not history: an open ValidUntil means muninn_forget threw this
 		// record away rather than superseding it, and Forget already de-indexed
-		// it. Drop whatever postings remain and write nothing back, so a retag
-		// cannot put a discarded document into the candidate pool.
+		// it. Leave it with no postings, so a retag cannot put a discarded
+		// document into the candidate pool — but leave the index in exactly
+		// the state Forget would have left the NEW document in: Forget drops
+		// postings and keeps the document's term frequencies (fts.DeleteEngram
+		// never decrements them), and Restore re-adds postings without
+		// incrementing. So the frequencies move from the old tag set to the new
+		// one (ReindexEngram's membership-only DF update) and the postings are
+		// then dropped. Restore then rebuilds the new tags' postings, and
+		// forget -> retag -> restore ends identical to a plain retag
+		// (TestRestore_AfterRetagWhileDeleted_MatchesALiveRetag).
+		next := prevDoc
+		next.Tags = tags
+		if err := e.fts.ReindexEngram(wsPrefix, [16]byte(id), prevDoc, next); err != nil {
+			slog.Warn("engine: update_tags: fts reindex failed", "id", id.String(), "err", err)
+		}
 		if err := e.fts.DeleteEngram(wsPrefix, [16]byte(id),
-			prevDoc.Concept, prevDoc.CreatedBy, prevDoc.Content, prevDoc.Tags); err != nil {
+			next.Concept, next.CreatedBy, next.Content, next.Tags); err != nil {
 			slog.Warn("engine: update_tags: fts delete failed", "id", id.String(), "err", err)
 		}
 		return nil
@@ -3962,24 +3975,36 @@ func (e *Engine) Forget(ctx context.Context, req *mbp.ForgetRequest) (*mbp.Forge
 				break
 			}
 		}
-	} else {
-		// Read the engram before soft-deleting so we can clean up FTS index entries.
-		eng, readErr := e.store.GetEngram(ctx, wsPrefix, id)
-		if err := e.store.SoftDelete(ctx, wsPrefix, id); err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				return nil, ErrEngramNotFound
-			}
-			return nil, fmt.Errorf("soft delete: %w", err)
-		}
-		// Remove FTS posting-list entries so soft-deleted engrams do not appear in search.
-		if readErr == nil && eng != nil && e.fts != nil {
-			if ftErr := e.fts.DeleteEngram(wsPrefix, [16]byte(id), eng.Concept, eng.CreatedBy, eng.Content, eng.Tags); ftErr != nil {
-				slog.Warn("engine: fts cleanup failed after soft delete", "id", req.ID, "error", ftErr)
-			}
-		}
+	} else if err := e.softForget(ctx, wsPrefix, id); err != nil {
+		return nil, err
 	}
 
 	return &mbp.ForgetResponse{OK: true}, nil
+}
+
+// softForget is Forget's soft branch: the state change and the keyword
+// postings' removal, as one unit under the engram's stripe lock, so a
+// concurrent Restore or retag of the same memory cannot land between them
+// (Restore re-adds the postings under the same lock). The postings are
+// derived from the record read under the lock, i.e. the text and tags that
+// produced them.
+func (e *Engine) softForget(ctx context.Context, wsPrefix [8]byte, id storage.ULID) error {
+	unlock := e.store.LockEngram(id)
+	defer unlock()
+	eng, readErr := e.store.GetEngramUncached(ctx, wsPrefix, id)
+	if err := e.store.SoftDeleteLocked(ctx, wsPrefix, id); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return ErrEngramNotFound
+		}
+		return fmt.Errorf("soft delete: %w", err)
+	}
+	// Remove FTS posting-list entries so soft-deleted engrams do not appear in search.
+	if readErr == nil && eng != nil && e.fts != nil {
+		if ftErr := e.fts.DeleteEngram(wsPrefix, [16]byte(id), eng.Concept, eng.CreatedBy, eng.Content, eng.Tags); ftErr != nil {
+			slog.Warn("engine: fts cleanup failed after soft delete", "id", id.String(), "error", ftErr)
+		}
+	}
+	return nil
 }
 
 // cleanSearchIndexesAfterHardDelete removes a hard-deleted engram from the FTS
@@ -4197,6 +4222,15 @@ func (e *Engine) EmbedHealth() EmbedHealth {
 // this used to read through the cache, unlocked, and write that copy's
 // Confidence/Relevance/Stability/AccessCount/LastAccess back, losing a write
 // that landed in between (TestRestore_ReadsCommittedStateUnderLock).
+//
+// Restore is the inverse of Forget's soft delete. Forget changes the state
+// (0x01/0x02 record, 0x0B index; the retired set re-derives from the record)
+// and drops the keyword (FTS) postings; Restore sets the state back and
+// re-adds the postings from the memory's CURRENT text and tags, without
+// moving the corpus statistics (fts.DeleteEngram never decremented them).
+// Forget leaves the vector (HNSW), tag and entity indexes, associations and
+// the content-hash mapping in place, so there is nothing to undo there; the
+// hash mapping is re-put because a hard-deleted duplicate may have freed it.
 func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram, error) {
 	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
@@ -4249,6 +4283,21 @@ func (e *Engine) Restore(ctx context.Context, vault, id string) (*storage.Engram
 	// Re-add content-hash mapping so future writes detect this engram as a duplicate.
 	contentHash := storage.ContentHash(eng.Content)
 	_ = e.store.PutContentHash(ctx, ws, contentHash, ulid)
+
+	// Re-add the keyword postings Forget dropped. ReindexEngram with the same
+	// document on both sides writes every posting and trigram for it and
+	// moves no document frequency and no corpus count — the exact inverse of
+	// fts.DeleteEngram, which removes postings and leaves the statistics. It
+	// is idempotent, so a memory whose postings were never dropped (an
+	// archived one, a superseded version) comes out unchanged. Under the
+	// lock, so it cannot interleave with a concurrent Forget's delete or a
+	// retag's reindex of the same memory.
+	if e.fts != nil {
+		doc := fts.Document{Concept: eng.Concept, CreatedBy: eng.CreatedBy, Content: eng.Content, Tags: eng.Tags}
+		if err := e.fts.ReindexEngram(ws, [16]byte(ulid), doc, doc); err != nil {
+			slog.Warn("engine: restore: keyword postings not rebuilt; run muninn reindex-fts", "id", id, "err", err)
+		}
+	}
 
 	eng.State = storage.StateActive
 	return eng, nil

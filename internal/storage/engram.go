@@ -963,10 +963,16 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 // shape exactly, including dropping the cache entry before the authoritative
 // GetEngram read so a racing DeleteEngram's stale cache entry can't be reused.
 func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID) error {
-	mu := ps.casLocks.For(id[:])
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := ps.LockEngram(id)
+	defer unlock()
+	return ps.SoftDeleteLocked(ctx, wsPrefix, id)
+}
 
+// SoftDeleteLocked is SoftDelete for a caller that already holds the
+// engram's stripe lock via LockEngram (Engine.Forget, which removes the
+// keyword postings under the same lock so a concurrent Restore cannot
+// interleave).
+func (ps *PebbleStore) SoftDeleteLocked(ctx context.Context, wsPrefix [8]byte, id ULID) error {
 	ps.cache.Delete(wsPrefix, id)
 
 	// Read engram, then take a private copy: the cache.Delete above makes the
