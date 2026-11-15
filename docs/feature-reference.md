@@ -98,7 +98,7 @@ The ACTIVATE pipeline has **6 phases**:
 | **Phase 6** | Final Scoring + Filter | Computes ACT-R score, applies filters, ranks, truncates, and builds response |
 
 #### Scoring Models
-- **ACT-R** (default, production) — `ContentMatch × softplus(BaseLevel + HebbianScale × HebbianBoost + TransitionBoost)`. Power-law temporal decay based on access count and recency. This is the only production scorer
+- **ACT-R** (default, production) — `ContentMatch × softplus(BaseLevel + HebbianScale × HebbianBoost + TransitionBoost)`. BaseLevel is the neutral constant `bLevelCap` for every memory (honest clock), so age and access history change neither findability nor absolute score; the boosts can still reorder results (see ACT-R Scoring below). This is the only production scorer
 - **CGDN** (Cognitive-Gated Divisive Normalization) — experimental, and **currently inert at any positive activation threshold**: its component producer never sets the field the abstention gate reads, so `absolute` is 0.0 for every non-tag-pool candidate and every threshold above zero drops the whole result set (measured, #768 — see `docs/internals/decision-record.md`). Requires `experimental_cgdn: true` in vault plasticity config
 
 #### Score Components

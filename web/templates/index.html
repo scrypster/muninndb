@@ -1261,7 +1261,7 @@
             <h3 style="margin:0 0 0.25rem;font-size:1rem;">Cognitive Engine Workers</h3>
             <p style="color:var(--text-muted);font-size:0.8125rem;margin:0 0 1.25rem;">
               Background workers are started automatically by the server; vault plasticity settings control applicable cognitive behavior.
-              Dormant workers are enabled and wake when qualifying work arrives. Temporal scoring runs at query time, not in a background worker.
+              Dormant workers are enabled and wake when qualifying work arrives. Recall scoring runs at query time, not in a background worker; under ACT-R it has no age term.
             </p>
             <table style="width:100%;border-collapse:collapse;font-size:0.8125rem;">
               <thead>
@@ -1353,7 +1353,6 @@
                   <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
                     <span :style="'font-size:0.65rem;background:rgba(236,72,153,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#f9a8d4' : '#be185d')">4-hop</span>
                     <span :style="'font-size:0.65rem;background:rgba(236,72,153,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#f9a8d4' : '#be185d')">Strong assoc.</span>
-                    <span :style="'font-size:0.65rem;background:rgba(236,72,153,0.2);border-radius:9999px;padding:0.1rem 0.4rem;color:' + (isDarkMode ? '#f9a8d4' : '#be185d')">Slow fading</span>
                   </div>
                 </div>
 
@@ -1424,7 +1423,7 @@
                     Hebbian learning
                   </label>
                   <label style="font-size:0.8125rem;display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
-                    <input type="checkbox" x-model="plasticityForm.temporalEnabled" @change="_updatePlasticityChart()" />
+                    <input type="checkbox" x-model="plasticityForm.temporalEnabled" @change="_updatePlasticityChart()" title="Stored for compatibility; no recall scoring path reads it (memories do not fade with age under ACT-R)." />
                     Temporal scoring
                   </label>
                 </div>
@@ -1446,7 +1445,7 @@
                     <input class="input-field" type="number" step="0.01" min="0" max="1" x-model.number="plasticityForm.relevanceFloor" placeholder="preset" @input="$nextTick(() => _updatePlasticityChart())" />
                   </div>
                   <div class="form-group">
-                    <label style="font-size:0.75rem;" title="Days until memory relevance decays to 50%">Temporal Halflife (days)</label>
+                    <label style="font-size:0.75rem;" title="Stored for compatibility; no recall scoring path reads it.">Temporal Halflife (days)</label>
                     <input class="input-field" type="number" step="1" min="1" x-model.number="plasticityForm.temporalHalflife" placeholder="preset" @input="$nextTick(() => _updatePlasticityChart())" />
                   </div>
                 </div>

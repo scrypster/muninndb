@@ -379,9 +379,10 @@ func (e *Engine) ContradictionDebt(ctx context.Context, vault string) (*Contradi
 	// store.GetEngrams) would otherwise stamp the L1 cache's recency clock on
 	// BOTH members of every declared pair — engrams this call never returns,
 	// on an orientation call the agent made about something else entirely.
-	// EngramLastAccessNs feeds real recency SCORING in a LATER, unrelated
-	// recall, so the readout would have been quietly making the very memories
-	// it demotes look freshly used. Suppressed UNCONDITIONALLY, not just for
+	// EngramLastAccessNs still feeds recency SCORING on weighted_sum/CGDN
+	// vaults in a LATER, unrelated recall (ACT-R and rrf no longer read it), so
+	// there the readout would quietly make the very memories it demotes look
+	// freshly used. Suppressed UNCONDITIONALLY, not just for
 	// read_only: naming a memory in a vault-wide debt report is never a user
 	// access, whatever the caller's read_only flag says.
 	ctx = storage.ContextWithNoAccessCacheStamp(ctx)
