@@ -1554,3 +1554,117 @@ Pebble point read.
 **Residual.** Unlocked writers can still lose a locked writer's update in Pebble itself —
 a write-write race, not a cache one; listed in STO-22. `recentActiveCache` stays a TTL'd
 candidate list.
+
+### Retired versions stop taking candidate slots; declared chains lose their depth cap (2026-11-15)
+
+Evolve retires a version but leaves its vector in HNSW and its postings in FTS — on
+purpose, because COG-28 needs that evidence to route a query worded like an old version
+to the current head. Recall took the top k per index and only THEN dropped retired
+engrams, so they spent slots the phase-6 filter emptied. Measured on synthetic fixtures:
+in a 2,000-memory vault (k = 45) a 50-version chain on a topic took 44 of 45 vector slots
+and 0 of 20 relevant live memories came back; a 500-version chain took every slot and the
+recall returned nothing (`superseded_only`, the head lost too). Separately, the chain walk
+stopped at 8 hops, so for chains of 10+ an old-wording query's evidence was discarded and
+every recall that touched a long chain logged depth-cap WARNs (~15 per recall on a
+500-version chain). A production vault holds 18 chains longer than 8 (the longest ~495,
+repeatedly-evolved bookmark-style memories) and 15 forks.
+
+**One retired set, in the store, derived from what was committed.** A per-vault in-memory
+set of retired engrams (soft-deleted or archived) lives in `PebbleStore`. It is driven from
+`commitBatch`, through which every engram-record commit goes (a source-scan test pins it),
+on success and on error alike: each 0x02 metadata key a batch sets or deletes re-derives
+that entry from the record now in Pebble — the batch only says which records may have
+changed, so being told about a commit that failed is harmless and not being told about one
+that landed despite an error is impossible (a security review flagged the success-only
+form as fail-open; the replication applier's hooks follow the same rule). The first version noted only when the writer's cached old
+state differed from the new one; review showed a recall's snapshot read refilling the
+metadata cache with a pre-forget "active" made a later restore look like a no-op, so a
+restored, live memory stayed in the set and was hidden from recall until a restart (a
+randomized lifecycle differential diverged on every seed; the enrichment digest rewrite,
+which no lifecycle hook covered, left 2–4 of 3,000 live memories hidden). The same stale
+gate skipped `UpdateMetadata`'s 0x0B move; it now reads the old state from the raw record.
+The set is built from the 0x02 records themselves, not the 0x0B index, because the index can
+diverge from the records and a set built from it differed across a restart. Followers get
+the same rule through the replication applier's commit hooks; a resnapshot drops the set.
+No on-disk state. Measured: 20,000 memories / 5,000 retired build in ~2.5 ms, ~80 KB
+retained, 9 ns per lookup. The design asked for a per-index set; one shared set is the
+same information with one place to keep it correct.
+
+**Route, don't tombstone.** `hnsw.Index.SearchLive` treats a retired node as a routing
+node: it is expanded, never counted toward the ef beam, and the nearest 16 are returned as
+shadows on their own budget. Tombstoning was measured worse in the proof pass and would
+discard the evidence COG-28 redirects. Bounds, both derived from the index: retired
+expansions ≤ max(ef, N/M0) (the routing detour costs at most about one exact pass), and a
+walk that routes through a full beam (ef) of retired nodes, spends that budget, or ends
+short of ef live hits makes ONE exact pass over the unvisited nodes. The beam-of-retired
+trigger came from review: a walk inside a large retired region stops "by distance" on a
+beam of distant live hits (the frontier cap drops candidates there); on a 12k index with ten
+500-version chains, chain-aimed recall@10 against exact search over live vectors was 0.44,
+0.52 with budget exhaustion added, 1.00 with it (off-topic queries 0.84 → 0.92, the pass
+firing on 81 of 200 of them at ~1.4 ms each on that 42%-retired index).
+That fallback is load-bearing, not belt-and-braces: 34+ near-identical vectors form a
+CLOSED island (the neighbour-selection defect, 1A) — an unbounded walk through a
+500-version island reached 0 live nodes — so without it skipping retired nodes would
+return nothing. FTS skips retired documents at the cut instead of dropping postings
+(dropping them is what forget does to trash; for a superseded version it would make the
+old wording unable to find the current fact, and would need a backfill for every
+existing chain); no over-fetch is needed because BM25 scores every match before the cut.
+Shadows enter fusion with raw scores and no rank, so they feed the shadow pass but never
+seed the Hebbian boost or traversal. Historical views skip nothing. A vault with an empty
+retired set calls the unchanged `Search`.
+
+**No depth cap, no head map.** The walk limit is now retired count + 8: a chain of retired
+intermediates always reaches its terminus, and the 8 hops of slack bind only on hand-made
+graphs of active nodes. The walk's reads are memoised per recall phase; a 499-hop store
+walk measured 0.7–1.6 ms. The O(1) retired→head map was not built: the successor relation
+lives in 0x04 rows that ~15 storage sites mutate (Hebbian weight moves and decay archival
+included), so the map would be a second copy of every chain with that many invalidation
+obligations, to save about a millisecond on the recalls that touch a 500-version chain.
+Chain WARNs log once per (vault, node, kind) per process.
+
+**The candidate budget stays on the total count.** Sizing it from live memories (the
+design's suggestion, first built) made it jump across `CalcCandidatesPerIndex`'s 1,000 cliff
+with churn: 1,420 memories with 500 retired went from 37 to 920 per index (p50 1.1 → 3.6 ms)
+and would flip back as memories were restored. Since retired engrams no longer take slots,
+k is already "live hits per index"; the total count moves only on write and hard delete.
+Cross-binary differentials over one shared data dir with nothing retired, at 950, 1,050 and
+1,500 memories (both sides of the cliff), were identical to the trunk.
+
+**Measured before → after** (synthetic starvation fixture, 20 relevant live memories,
+vector-only query): see the commit for the full table; at 2,000 memories relevant
+reached went 20/20/0/0 → 20/20/20/20 for chains of 0/10/50/500, at 300 memories
+20/20/0/0 → 20/20/20/20. Recall p50 at 2,000 memories: no chain 0.44 → 0.43 ms;
+50-chain on-topic 0.45 → 0.87 ms (the exact pass plus 20 more live candidates scored);
+500-chain on-topic 5.1 → 2.0 ms (the old cost was eight-hop walks and their WARN flood).
+
+**Residuals, recorded.** The decay pool (`RecentActive`, state-blind, with a 1 s cache that
+ignores topK) still admits retired engrams. A `Link(relation=supersedes)` target is
+stamped but stays active, so it is not retired and still competes (and a chain built only
+from supersedes links keeps the old 8-hop reach); including it needs a clock-aware set.
+Pre-existing defects found on the way, not fixed here: a soft forget drops the memory's FTS
+postings and restore never re-adds them (a restored memory is unfindable by keyword); the
+digest rewrite takes no stripe lock and can commit a pre-forget copy (resurrecting a
+forgotten memory); snapshot reads refill the shared caches with stale records. Live near-duplicate islands (1A with no retired versions) are untouched: the
+plain `Search` path is unchanged, and 34+ live near-duplicates still hide everything
+behind them.
+
+### Integration of the cache guard and the retired set: one commit point (2026-11-15)
+
+**Decision.** `fix/cache-stale-fill` and `fix/retired-candidates` each introduced a single
+commit point for batches in `internal/storage`. The merged tree keeps one
+`PebbleStore.commitBatch` (`cache_commit.go`): commit, then the cache invalidation walk, then
+the retired set's `noteCommittedBatch` — both on success and on error. The order matters:
+the retired set re-derives each entry from the record as stored, read straight from Pebble,
+so it never sees a cache at all; invalidating first means nothing that follows can be served
+a pre-commit cached value. Followers compose the same two consumers in the same order on
+the applier's commit hook and on a resnapshot (`cmd/muninn/server.go`).
+
+**Known open, NOT fixed here (carried forward):**
+- Restore never re-adds the keyword (FTS) postings that forget removes, so a restored memory
+  cannot be found by keyword.
+- `UpdateDigest` can undo a concurrent forget (it rewrites the record from an older read).
+- The unlocked full-record writers — `UpdateRelevance`, `UpdateTrust`, `StampValidUntil`,
+  `UpdateMetadata` called directly, `StoreBatch.mutateEngram` — can lose a locked writer's
+  update in Pebble (record vs 0x0B state index). A write-write race, not a cache one (STO-22).
+- Closed near-duplicate islands in the HNSW graph: live near-duplicates can be unreachable
+  from the entry point.

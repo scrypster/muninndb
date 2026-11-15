@@ -20,12 +20,19 @@ import (
 //
 // The walk runs even when Commit returns an error: invalidating an entry is
 // always safe, and a failed commit's effect on Pebble is not ours to assume.
+// (fix/retired-candidates defined its own commitBatch in commit_batch.go for
+// the retired set; on merge this became the one implementation.)
 func (ps *PebbleStore) commitBatch(b *pebble.Batch, opts *pebble.WriteOptions) error {
 	err := b.Commit(opts)
 	if f, ok := commitResultForTest.Load(ps); ok {
 		err = f.(func(error) error)(err)
 	}
 	ps.invalidateCommittedRepr(b.Repr())
+	// Then the retired set (retired.go), which re-derives each touched
+	// engram's entry from the record as stored — read straight from Pebble,
+	// never through a cache — so it runs after the invalidation and, like it,
+	// whether or not Commit errored.
+	ps.noteCommittedBatch(b)
 	return err
 }
 

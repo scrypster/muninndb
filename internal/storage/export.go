@@ -261,6 +261,9 @@ func (ps *PebbleStore) ImportVaultData(
 	opts ImportOpts,
 	r io.Reader,
 ) (*ExportResult, error) {
+	// Bulk raw-KV copy bypasses the per-engram lifecycle hooks: drop the
+	// target's retired set so its next reader rebuilds it (retired.go).
+	defer ps.resetRetired(wsTarget)
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("import: gzip reader: %w", err)

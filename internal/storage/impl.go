@@ -153,6 +153,11 @@ type PebbleStore struct {
 	// the unix-nano stamp of the last WARN, used to rate-limit it.
 	guardReadFaults        atomic.Uint64
 	guardReadFaultLoggedAt atomic.Int64
+
+	// retired is the per-vault in-memory retired-engram set ([8]byte →
+	// *retiredSet), derived from the store and driven by every committed
+	// batch through replicateBatch. See retired.go.
+	retired sync.Map
 }
 
 // pointGet is the single-key read used by the metadata helpers that must tell

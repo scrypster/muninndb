@@ -274,7 +274,7 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	if len(oldMetas) == 0 || oldMetas[0] == nil {
 		return fmt.Errorf("engram %w", ErrNotFound)
 	}
-	oldState := oldMetas[0].State
+	cachedOldState := oldMetas[0].State
 	var prevLastAccessMillis int64
 	if !oldMetas[0].LastAccess.IsZero() {
 		prevLastAccessMillis = oldMetas[0].LastAccess.UnixMilli()
@@ -288,6 +288,15 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	}
 	if rawBytes == nil {
 		return fmt.Errorf("engram %w", ErrNotFound)
+	}
+	// The 0x0B move keys on the state the RECORD holds, not the metadata
+	// cache's copy: a cache fill from an older Pebble snapshot (a recall in
+	// flight across a forget) can leave the cache saying "active" for a
+	// soft-deleted record, and gating on that skipped the index move on
+	// restore. The raw bytes were just read from Pebble, before the patch.
+	oldState := cachedOldState
+	if len(rawBytes) > erf.OffsetState {
+		oldState = LifecycleState(rawBytes[erf.OffsetState])
 	}
 
 	// Patch all mutable metadata fields in-place and recompute CRC32.

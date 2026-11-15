@@ -1330,9 +1330,22 @@ func runServer() {
 	}
 	store := storage.NewPebbleStore(db, storeCfg)
 	if applier != nil {
-		// A follower applies the leader's batches straight into Pebble; route
-		// them through the store's cache invalidation (cache_guard.go).
-		applier.SetCommitHooks(store.InvalidateCommittedRepr, store.InvalidateAllCaches)
+		// A follower applies the leader's batches straight into Pebble, past the
+		// store's write path. Both consumers run on every attempted commit
+		// (success or error) and on a resnapshot, in this order: the read-
+		// through caches are invalidated first (cache_guard.go), then the
+		// retired set re-derives each touched entry from the stored record
+		// (retired.go) — that re-derive reads Pebble directly, never a cache.
+		applier.SetCommitHooks(
+			func(repr []byte) {
+				store.InvalidateCommittedRepr(repr)
+				store.NoteCommittedRepr(repr)
+			},
+			func() {
+				store.InvalidateAllCaches()
+				store.ResetAllRetired()
+			},
+		)
 	}
 
 	// Run startup migrations before the engine is built.

@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sort"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
@@ -119,11 +118,12 @@ func (e *Engine) applyVersionHeadSubstitution(
 	var order []storage.ULID
 	subs := make(map[storage.ULID]*headSub, len(shadows))
 
+	memo := newChainReads()
 	for _, sh := range shadows {
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		walk := e.resolveSupersessionHead(ctx, ws, sh.Engram.ID, gate, nameable)
+		walk := e.resolveSupersessionHeadCached(ctx, ws, sh.Engram.ID, gate, nameable, memo)
 		if !walk.OK {
 			// "not superseded" is the overwhelmingly common case (any expired
 			// or forgotten engram that happened to match) and is not a block —
@@ -135,8 +135,8 @@ func (e *Engine) applyVersionHeadSubstitution(
 					// too, not only on the OK-but-truncated substitution path
 					// below, so this is never silently indistinguishable from
 					// "no current version exists".
-					slog.Warn("recall: version-head substitution abstained after the walk ran out at the chain depth cap; a current head may exist beyond it",
-						"predecessor", sh.Engram.ID.String(), "reason", walk.Reason, "max_depth", supersessionMaxDepth)
+					warnChainOnce(ws, sh.Engram.ID, "truncated", "recall: version-head substitution abstained after the walk ran out at the chain walk limit; a current head may exist beyond it (logged once per engram per process)",
+						"predecessor", sh.Engram.ID.String(), "reason", walk.Reason, "walk_limit", memo.limit)
 				}
 				blocked = append(blocked, substitutionBlock{PredecessorID: sh.Engram.ID, Reason: walk.Reason, Truncated: walk.Truncated})
 			}
@@ -162,8 +162,8 @@ func (e *Engine) applyVersionHeadSubstitution(
 			continue
 		}
 		if walk.Truncated {
-			slog.Warn("recall: version-head substitution truncated at the chain depth cap; the injected head may not be the terminus",
-				"predecessor", sh.Engram.ID.String(), "head", walk.Head.ID.String(), "max_depth", supersessionMaxDepth)
+			warnChainOnce(ws, sh.Engram.ID, "truncated", "recall: version-head substitution truncated at the chain walk limit; the injected head may not be the terminus (logged once per engram per process)",
+				"predecessor", sh.Engram.ID.String(), "head", walk.Head.ID.String(), "walk_limit", memo.limit)
 		}
 		cur, ok := subs[walk.Head.ID]
 		if !ok {

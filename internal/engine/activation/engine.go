@@ -271,9 +271,11 @@ type ScoredEngram struct {
 	// which is why the attribution is mandatory rather than optional (design
 	// §5.4). nil on non-substituted rows.
 	//
-	// ChainTruncated marks a walk that hit supersessionMaxDepth: the injected
-	// row is the deepest node WITHIN the cap and may not be the chain's true
-	// terminus. HeadNotIndexedYet marks an injected head with no stored
+	// ChainTruncated marks a walk that hit the chain walk limit (the vault's
+	// retired count + supersessionMaxDepth, engine_supersession.go): the
+	// injected row is the deepest node within the limit and may not be the
+	// chain's true terminus. A chain of retired (evolve/consolidate)
+	// intermediates cannot reach it; a chain through active nodes can. HeadNotIndexedYet marks an injected head with no stored
 	// embedding — "not indexed yet" rather than "not relevant", the
 	// loud-degradation doctrine applied to the fresh-evolve window.
 	SubstitutedFor    storage.ULID
@@ -621,6 +623,27 @@ type FTSIndex interface {
 // HNSWIndex is the vector search interface.
 type HNSWIndex interface {
 	Search(ctx context.Context, ws [8]byte, vec []float32, topK int) ([]ScoredID, error)
+}
+
+// RetiredSource is implemented by a store that maintains the per-vault set of
+// RETIRED engrams (soft-deleted or archived — storage.PebbleStore, see
+// storage/retired.go). Optional: a store without it gets the pre-retired-set
+// behaviour, in which retired engrams compete for index slots until phase 6
+// drops them.
+type RetiredSource interface {
+	RetiredIDs(ctx context.Context, ws [8]byte) (storage.RetiredView, error)
+}
+
+// LiveHNSWIndex is an HNSWIndex that can route through retired nodes without
+// counting them as results, returning the nearest of them separately as
+// shadows (hnsw.Index.SearchLive).
+type LiveHNSWIndex interface {
+	SearchLive(ctx context.Context, ws [8]byte, vec []float32, topK int, retired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error)
+}
+
+// LiveFTSIndex is the FTSIndex counterpart (fts.Index.SearchLive).
+type LiveFTSIndex interface {
+	SearchLive(ctx context.Context, ws [8]byte, query string, topK int, retired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error)
 }
 
 // Embedder converts text to a vector embedding.
@@ -1088,12 +1111,18 @@ func meanPoolEmbeddings(flat []float32, n int) []float32 {
 
 // phase2 retrieves candidates from FTS, HNSW, and decay pool in parallel.
 type candidateSets struct {
-	fts        []ScoredID
-	vector     []ScoredID
-	decay      []storage.ULID
-	time       []storage.ULID // from time-bounded range scan when since/before filters present
-	tag        []storage.ULID // from tag-index scan when tags_all/tags_any filters present
-	transition []storage.ULID // PAS: transition-predicted candidates from previous activation
+	fts    []ScoredID
+	vector []ScoredID
+	// ftsShadow / vectorShadow are RETIRED hits, collected on a separate
+	// budget (retiredScope) so they never take a live slot. They enter fusion
+	// with their raw scores and NO rank contribution: evidence for COG-28's
+	// shadow pass, never a seed for phase 4/5 and never a live candidate.
+	ftsShadow    []ScoredID
+	vectorShadow []ScoredID
+	decay        []storage.ULID
+	time         []storage.ULID // from time-bounded range scan when since/before filters present
+	tag          []storage.ULID // from tag-index scan when tags_all/tags_any filters present
+	transition   []storage.ULID // PAS: transition-predicted candidates from previous activation
 }
 
 // extractTimeBounds extracts since/before time bounds from filter list.
@@ -1239,12 +1268,72 @@ func (e *ActivationEngine) seedTagCandidates(ctx context.Context, ws [8]byte, ta
 	return seed
 }
 
+// retiredScope decides, once per recall, whether retired engrams are skipped
+// at the index cut and how many of them may be kept as shadow evidence.
+//
+// Skipped only on a CURRENT-view recall: under as_of / include_invalid a
+// superseded predecessor can be the right answer, so those paths keep every
+// retired engram as an ordinary candidate (exactly the pre-retired-set
+// behaviour). A vault with an empty retired set returns nil and the indexes are
+// searched exactly as before — no new code path at all.
+//
+// The shadow budget is shadowMatchCap per index when the request can produce
+// shadows at all (shadowsEnabled), else 0: COG-28 emits at most shadowMatchCap
+// shadows per query, so keeping the nearest shadowMatchCap retired hits from
+// each index is enough to feed it, and it is a bound that does not grow with
+// the vault or the chain length.
+func (e *ActivationEngine) retiredScope(ctx context.Context, req *ActivateRequest, ws [8]byte) (isRetired func([16]byte) bool, shadowBudget int) {
+	if req.AsOf != nil || req.IncludeInvalid {
+		return nil, 0
+	}
+	src, ok := e.store.(RetiredSource)
+	if !ok {
+		return nil, 0
+	}
+	view, err := src.RetiredIDs(ctx, ws)
+	if err != nil {
+		slog.Warn("activation: retired set unavailable — retired versions compete for candidate slots this recall", "vault", req.VaultID, "err", err)
+		return nil, 0
+	}
+	if view.Len() == 0 {
+		return nil, 0
+	}
+	if shadowsEnabled(req, resolveWeights(req.Weights, e.weights)) {
+		shadowBudget = shadowMatchCap
+	}
+	return view.Contains, shadowBudget
+}
+
+// searchFTS / searchHNSW run the index search for phase 2, through the
+// retired-aware variant when this recall skips retired engrams and the index
+// supports it.
+func (e *ActivationEngine) searchFTS(ctx context.Context, ws [8]byte, query string, k int, isRetired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error) {
+	if isRetired != nil {
+		if lf, ok := e.fts.(LiveFTSIndex); ok {
+			return lf.SearchLive(ctx, ws, query, k, isRetired, shadowBudget)
+		}
+	}
+	live, err = e.fts.Search(ctx, ws, query, k)
+	return live, nil, err
+}
+
+func (e *ActivationEngine) searchHNSW(ctx context.Context, ws [8]byte, vec []float32, k int, isRetired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error) {
+	if isRetired != nil {
+		if lh, ok := e.hnsw.(LiveHNSWIndex); ok {
+			return lh.SearchLive(ctx, ws, vec, k, isRetired, shadowBudget)
+		}
+	}
+	live, err = e.hnsw.Search(ctx, ws, vec, k)
+	return live, nil, err
+}
+
 func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 *phase1Result, ws [8]byte) (*candidateSets, error) {
 	var sets candidateSets
 	k := req.CandidatesPerIndex
 	if k <= 0 {
 		k = 30
 	}
+	isRetired, shadowBudget := e.retiredScope(ctx, req, ws)
 
 	// Extract time bounds from filters for Phase 3: time-bounded candidate injection.
 	since, before, hasTimeBounds := extractTimeBounds(req.Filters)
@@ -1269,11 +1358,12 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 	// (~3-5µs per activation at 12+ concurrent goroutines).
 	if e.hnsw == nil || len(p1.embedding) == 0 {
 		if e.fts != nil {
-			results, err := e.fts.Search(ctx, ws, p1.queryStr, k)
+			results, shadows, err := e.searchFTS(ctx, ws, p1.queryStr, k, isRetired, shadowBudget)
 			if err != nil {
 				slog.Warn("activation: fts search degraded", "vault", req.VaultID, "error", err)
 			}
 			sets.fts = results
+			sets.ftsShadow = shadows
 		}
 		ids, _ := e.store.RecentActive(ctx, ws, k)
 		sets.decay = ids
@@ -1307,18 +1397,19 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 		if e.fts == nil {
 			return nil
 		}
-		results, err := e.fts.Search(gctx, ws, p1.queryStr, k)
+		results, shadows, err := e.searchFTS(gctx, ws, p1.queryStr, k, isRetired, shadowBudget)
 		if err != nil {
 			slog.Warn("activation: fts search degraded", "vault", req.VaultID, "error", err)
 			// continue with empty FTS results
 			return nil
 		}
 		sets.fts = results
+		sets.ftsShadow = shadows
 		return nil
 	})
 
 	g.Go(func() error {
-		results, err := e.hnsw.Search(gctx, ws, p1.embedding, k)
+		results, shadows, err := e.searchHNSW(gctx, ws, p1.embedding, k, isRetired, shadowBudget)
 		if err != nil {
 			var dimErr *hnswpkg.DimMismatchError
 			if errors.As(err, &dimErr) {
@@ -1333,6 +1424,7 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 			return nil
 		}
 		sets.vector = results
+		sets.vectorShadow = shadows
 		return nil
 	})
 
@@ -1408,7 +1500,7 @@ const (
 // phase3RRF merges candidate lists via Reciprocal Rank Fusion.
 // Uses index-into-slice instead of map-of-pointers to reduce heap allocations.
 func phase3RRF(sets *candidateSets) []fusedCandidate {
-	totalCap := len(sets.fts) + len(sets.vector) + len(sets.decay) + len(sets.time) + len(sets.tag) + len(sets.transition)
+	totalCap := len(sets.fts) + len(sets.vector) + len(sets.decay) + len(sets.time) + len(sets.tag) + len(sets.transition) + len(sets.ftsShadow) + len(sets.vectorShadow)
 	result := make([]fusedCandidate, 0, totalCap)
 	index := make(map[storage.ULID]int, totalCap)
 
@@ -1457,6 +1549,23 @@ func phase3RRF(sets *candidateSets) []fusedCandidate {
 	for rank, id := range sets.transition {
 		c := getOrCreate(id)
 		c.rrfScore += 1.0 / (rrfK_Transition + float64(rank+1))
+	}
+
+	// Retired hits (retiredScope): raw scores only, no rank contribution, so
+	// they reach phase 6's COG-28 shadow pass with the same evidence they
+	// carried before, but sort below every ranked candidate and never seed
+	// the phase 4 boost or phase 5 traversal.
+	for _, s := range sets.ftsShadow {
+		c := getOrCreate(s.ID)
+		if s.Score > c.ftsScore {
+			c.ftsScore = s.Score
+		}
+	}
+	for _, s := range sets.vectorShadow {
+		c := getOrCreate(s.ID)
+		if s.Score > c.vectorScore {
+			c.vectorScore = s.Score
+		}
 	}
 
 	// Exact rrf ties break newest-first (rankorder). This order is a cut:

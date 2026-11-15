@@ -102,9 +102,12 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 		if err := reprBatch.SetRepr(entry.Value); err != nil {
 			return fmt.Errorf("apply batch repr at seq %d: %w", entry.Seq, err)
 		}
+		// The hook runs whether or not Commit succeeded (fail-safe): a commit
+		// that errors may still have landed, and the hook's consumers
+		// re-derive from what Pebble holds rather than trusting the batch.
 		err := reprBatch.Commit(pebble.NoSync)
 		if a.onCommitted != nil {
-			a.onCommitted(reprBatch.Repr())
+			a.onCommitted(entry.Value)
 		}
 		if err != nil {
 			return err
@@ -142,6 +145,7 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 	// Use NoSync per entry — Pebble's WAL provides crash-safety without an fsync
 	// on every write. Syncing every entry would serialize on disk I/O, making
 	// replication throughput proportional to fsync latency (~1 IOPS per entry).
+	// Fail-safe, as above: the hook runs on a failed commit too.
 	err := batch.Commit(pebble.NoSync)
 	if a.onCommitted != nil {
 		a.onCommitted(batch.Repr())

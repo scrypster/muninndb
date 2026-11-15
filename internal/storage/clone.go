@@ -78,6 +78,9 @@ func (ps *PebbleStore) CloneVaultData(
 	wsSource, wsTarget [8]byte,
 	onCopy func(copied int64),
 ) (int64, error) {
+	// Bulk raw-KV copy bypasses the per-engram lifecycle hooks: drop the
+	// target's retired set so its next reader rebuilds it (retired.go).
+	defer ps.resetRetired(wsTarget)
 	wsSourceNext, err := incrementWS(wsSource)
 	if err != nil {
 		return 0, fmt.Errorf("clone: %w", err)
@@ -316,6 +319,9 @@ func (ps *PebbleStore) MergeVaultData(
 	wsSource, wsTarget [8]byte,
 	onCopy func(copied int64),
 ) (int64, error) {
+	// Bulk raw-KV copy bypasses the per-engram lifecycle hooks: drop the
+	// target's retired set so its next reader rebuilds it (retired.go).
+	defer ps.resetRetired(wsTarget)
 	wsSourceNext, err := incrementWS(wsSource)
 	if err != nil {
 		return 0, fmt.Errorf("merge: %w", err)
