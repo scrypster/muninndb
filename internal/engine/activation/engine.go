@@ -271,9 +271,11 @@ type ScoredEngram struct {
 	// which is why the attribution is mandatory rather than optional (design
 	// §5.4). nil on non-substituted rows.
 	//
-	// ChainTruncated marks a walk that hit supersessionMaxDepth: the injected
-	// row is the deepest node WITHIN the cap and may not be the chain's true
-	// terminus. HeadNotIndexedYet marks an injected head with no stored
+	// ChainTruncated marks a walk that hit the chain walk limit (the vault's
+	// retired count + supersessionMaxDepth, engine_supersession.go): the
+	// injected row is the deepest node within the limit and may not be the
+	// chain's true terminus. A chain of retired (evolve/consolidate)
+	// intermediates cannot reach it; a chain through active nodes can. HeadNotIndexedYet marks an injected head with no stored
 	// embedding — "not indexed yet" rather than "not relevant", the
 	// loud-degradation doctrine applied to the fresh-evolve window.
 	SubstitutedFor    storage.ULID

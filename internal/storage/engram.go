@@ -274,7 +274,7 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	if len(oldMetas) == 0 || oldMetas[0] == nil {
 		return fmt.Errorf("engram %w", ErrNotFound)
 	}
-	oldState := oldMetas[0].State
+	cachedOldState := oldMetas[0].State
 	var prevLastAccessMillis int64
 	if !oldMetas[0].LastAccess.IsZero() {
 		prevLastAccessMillis = oldMetas[0].LastAccess.UnixMilli()
@@ -288,6 +288,15 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	}
 	if rawBytes == nil {
 		return fmt.Errorf("engram %w", ErrNotFound)
+	}
+	// The 0x0B move keys on the state the RECORD holds, not the metadata
+	// cache's copy: a cache fill from an older Pebble snapshot (a recall in
+	// flight across a forget) can leave the cache saying "active" for a
+	// soft-deleted record, and gating on that skipped the index move on
+	// restore. The raw bytes were just read from Pebble, before the patch.
+	oldState := cachedOldState
+	if len(rawBytes) > erf.OffsetState {
+		oldState = LifecycleState(rawBytes[erf.OffsetState])
 	}
 
 	// Patch all mutable metadata fields in-place and recompute CRC32.
@@ -320,15 +329,10 @@ func (ps *PebbleStore) UpdateMetadata(ctx context.Context, wsPrefix [8]byte, id 
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
-	if oldState != meta.State {
-		// Retired set (retired.go): restore, CompareAndSet and
-		// UpdateLifecycleState all change state through here.
-		ps.noteRetired(wsPrefix, [16]byte(id))
-	}
 
 	// Update LastAccess index (best effort — index inconsistency is non-fatal).
 	if !meta.LastAccess.IsZero() {
@@ -399,7 +403,7 @@ func (ps *PebbleStore) UpdateRelevance(ctx context.Context, wsPrefix [8]byte, id
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -443,7 +447,7 @@ func (ps *PebbleStore) UpdateTrust(ctx context.Context, wsPrefix [8]byte, id ULI
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -495,7 +499,7 @@ func (ps *PebbleStore) StampValidUntil(ctx context.Context, wsPrefix [8]byte, id
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return false, fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -542,13 +546,12 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		batch.Delete(keys.EngramKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.MetaKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.LeaseKey(wsPrefix, [16]byte(id)), nil)
-		if err := batch.Commit(pebble.NoSync); err != nil {
+		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 			mu.Unlock()
 			return err
 		}
 		mu.Unlock()
 		ps.replicateBatch(batch)
-		ps.noteRetired(wsPrefix, [16]byte(id))
 		ps.cache.Delete(wsPrefix, id)
 		return nil
 	}
@@ -801,13 +804,12 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		slog.Warn("storage: entity link cleanup failed on delete, links may be orphaned", "engram", id.String(), "err", err)
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		mu.Unlock()
 		return fmt.Errorf("delete engram: %w", err)
 	}
 	mu.Unlock()
 	ps.replicateBatch(batch)
-	ps.noteRetired(wsPrefix, [16]byte(id)) // retired set: a hard-deleted engram is never retired
 
 	ps.cache.Delete(wsPrefix, id)
 	for _, src := range assocCacheDirty {
@@ -930,11 +932,10 @@ func (ps *PebbleStore) SoftDelete(ctx context.Context, wsPrefix [8]byte, id ULID
 	}
 	batch.Set(metaKey, metaSlice437, nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
-	ps.noteRetired(wsPrefix, [16]byte(id)) // retired set: forget soft-deletes (retired.go)
 
 	// Update cache (vault-scoped) and invalidate the metadata-only cache
 	// so subsequent GetMetadata calls see the updated StateSoftDeleted state.
@@ -1158,7 +1159,7 @@ func (ps *PebbleStore) UpdateTagsLocked(ctx context.Context, wsPrefix [8]byte, i
 	ps.cache.Delete(wsPrefix, id)
 	ps.metaCache.Remove([16]byte(id))
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 
@@ -1309,7 +1310,7 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	}
 	batch.Set(metaKey, metaSlice505, nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		mu.Unlock()
 		return fmt.Errorf("commit batch: %w", err)
 	}
@@ -1512,7 +1513,7 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 		}
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		mu.Unlock()
 		return 0, 0, fmt.Errorf("commit batch: %w", err)
 	}

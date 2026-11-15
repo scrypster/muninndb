@@ -2935,24 +2935,15 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 	actReq.AsOf = req.AsOf
 	actReq.IncludeInvalid = req.IncludeInvalid
 
-	// Candidate budget counts LIVE memories on a current-view recall. The vault
-	// count includes every retired version (only a hard delete decrements it),
-	// so a vault with many evolve chains was sized as if its history were
-	// competing for slots — which, until retired engrams were skipped at the
-	// index cut, it was. Historical views keep the full count: there, retired
-	// predecessors are ordinary candidates. A vault with nothing retired is
-	// unchanged.
-	if actReq.AsOf == nil && !actReq.IncludeInvalid {
-		if view, err := e.store.RetiredIDs(ctx, wsPrefix); err == nil {
-			if n := int64(view.Len()); n > 0 {
-				live := vaultSize - n
-				if live < 0 {
-					live = 0
-				}
-				actReq.CandidatesPerIndex = activation.CalcCandidatesPerIndex(live)
-			}
-		}
-	}
+	// Candidate budget: deliberately still the TOTAL vault count, retired
+	// versions included. Retired engrams no longer take slots (phase 2 skips
+	// them), so k is "how many live hits per index", and sizing it from the
+	// live count was tried and rejected: CalcCandidatesPerIndex is N up to
+	// 1,000 and ~sqrt(N) beyond, so a 1,420-memory vault with 500 retired
+	// jumped from 37 to 920 candidates per index (p50 1.1 → 3.6 ms) and would
+	// flip back and forth across that cliff as memories are retired and
+	// restored. The total count moves only on write and hard delete, so the
+	// budget is exactly the trunk's and does not churn.
 
 	// Ownership-lease work-queue visibility (#548): hide engrams checked out by a
 	// live foreign lease unless the caller opts in.

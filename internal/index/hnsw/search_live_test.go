@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/cockroachdb/pebble"
@@ -179,5 +180,88 @@ func TestSearchLive_TombstonedNeverReturned(t *testing.T) {
 	}
 	if len(live) != 30 {
 		t.Errorf("got %d live hits, want 30", len(live))
+	}
+}
+
+// Chain-aimed queries in a vault with several long chains: the walk routes
+// through a full beam of retired nodes, stops "by distance" on a beam of
+// distant live hits, and only the exact pass recovers the true live
+// neighbours. recall@10 against exact search over live vectors: 0.53 on this
+// shape before the "a full beam of retired routing" trigger, 1.00 with it.
+func TestSearchLive_ChainAimedRecallAgainstExact(t *testing.T) {
+	db := memDB(t)
+	idx := hnsw.NewWithParams(db, testWS(), 64, 0)
+	t.Cleanup(idx.Close)
+	rng := rand.New(rand.NewSource(1))
+	type node struct {
+		id  [16]byte
+		v   []float32
+		ret bool
+	}
+	var all []node
+	var topics [][]float32
+	for i := 0; i < 2500; i++ {
+		all = append(all, node{newID(rng), randomUnitVector(rng, liveDim), false})
+	}
+	for c := 0; c < 8; c++ {
+		topic := randomUnitVector(rng, liveDim)
+		topics = append(topics, topic)
+		for i := 0; i < 50; i++ {
+			all = append(all, node{newID(rng), nearVec(rng, topic, 0.8), false})
+		}
+		for i := 0; i < 120; i++ {
+			all = append(all, node{newID(rng), nearVec(rng, topic, 0.25), true})
+		}
+	}
+	rng.Shuffle(len(all), func(i, j int) { all[i], all[j] = all[j], all[i] })
+	ret := map[[16]byte]bool{}
+	for _, n := range all {
+		idx.Insert(n.id, n.v)
+		if n.ret {
+			ret[n.id] = true
+		}
+	}
+	ctx := context.Background()
+	qr := rand.New(rand.NewSource(2))
+	sum, nq := 0.0, 0
+	for c := range topics {
+		for k := 0; k < 4; k++ {
+			q := nearVec(qr, topics[c], 0.25)
+			type sd struct {
+				id [16]byte
+				s  float32
+			}
+			var ex []sd
+			for _, n := range all {
+				if !n.ret {
+					ex = append(ex, sd{n.id, hnsw.CosineSimilarity(q, n.v)})
+				}
+			}
+			sort.Slice(ex, func(i, j int) bool { return ex[i].s > ex[j].s })
+			truth := map[[16]byte]bool{}
+			for _, e := range ex[:10] {
+				truth[e.id] = true
+			}
+			live, _, _, err := idx.SearchLive(ctx, q, 63, func(id [16]byte) bool { return ret[id] }, 16)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := 0
+			for i, x := range live {
+				if i == 10 {
+					break
+				}
+				if truth[x.ID] {
+					h++
+				}
+			}
+			sum += float64(h) / 10
+			nq++
+		}
+	}
+	if r := sum / float64(nq); r < 0.95 {
+		t.Errorf("chain-aimed recall@10 = %.3f against exact search over live vectors, want >= 0.95", r)
+	} else {
+		t.Logf("chain-aimed recall@10 = %.3f", r)
 	}
 }

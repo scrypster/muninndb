@@ -425,7 +425,7 @@ func (b *pebbleStoreBatch) Commit() error {
 	if b.ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	if err := b.batch.Commit(syncOption); err != nil {
+	if err := b.ps.commitBatch(b.batch, syncOption); err != nil {
 		return fmt.Errorf("batch commit: %w", err)
 	}
 
@@ -452,9 +452,6 @@ func (b *pebbleStoreBatch) Commit() error {
 	for _, su := range b.stateUpdatedIDs {
 		b.ps.cache.Delete(su.ws, su.id)
 		b.ps.metaCache.Remove([16]byte(su.id))
-		// Retired set (retired.go): Evolve/Link/Consolidate supersede
-		// through mutateEngram, so this is where those versions retire.
-		b.ps.noteRetired(su.ws, [16]byte(su.id))
 	}
 
 	// Association caches — #818. Same post-commit placement and the same
@@ -471,7 +468,6 @@ func (b *pebbleStoreBatch) Commit() error {
 	for _, item := range b.pendingItems {
 		ws := item.wsPrefix
 		eng := item.eng
-		b.ps.noteWritten(ws, [16]byte(eng.ID), eng.State)
 
 		vc := b.ps.getOrInitCounter(ctx, ws)
 		newCount := vc.count.Add(1)

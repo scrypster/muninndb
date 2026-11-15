@@ -49,13 +49,16 @@ type LiveSearchStats struct {
 //     routing detour through retired nodes costs at most about one exact pass
 //     over the index (N/M0 × M0 = N) — the price at which an exact scan
 //     becomes the cheaper way to finish.
-//   - If the walk ends — budget spent or reachable graph exhausted — with
-//     fewer than ef live hits while nodes remain unvisited, the search makes
-//     ONE exact pass over the unvisited nodes. A query landing in a closed
-//     island of near-identical retired vectors (the neighbour-selection defect
-//     tracked separately) can otherwise reach nothing live at all. Worst case
-//     for a whole search: ≈ 2N distance evaluations plus the ordinary beam,
-//     i.e. never more than about two exact scans of the vault.
+//   - If the walk routed through ef or more retired nodes, spent the retired
+//     budget, or exhausted the reachable graph with fewer than ef live hits,
+//     while nodes remain unvisited, the search makes ONE exact pass over the
+//     unvisited nodes. A query landing in a
+//     closed island of near-identical retired vectors (the neighbour-selection
+//     defect tracked separately) can otherwise reach nothing live at all, and
+//     a walk that ran out of budget inside a big retired region returns a
+//     beam of distant live hits. Worst case for a whole search: ≈ 2N distance
+//     evaluations plus the ordinary beam, i.e. never more than about two exact
+//     scans of the vault; it is paid only by queries that spend the budget.
 //
 // With nothing retired encountered this walks the same path as Search;
 // callers with an empty retired set should call Search itself (the engine
@@ -253,9 +256,23 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 		}
 	}
 
-	// Exact fallback: the walk could not fill the beam with live hits and part
-	// of the index was never reached. One pass over the unvisited nodes.
-	if (!stoppedByDistance || budgetSpent) && len(w) < ef && len(seen) < len(idx.nodes) {
+	// Exact fallback, one pass over the unvisited nodes, when any of
+	//   - the walk routed through at least ef retired nodes (a full beam's
+	//     worth): the query landed in a retired region, and a beam filled from
+	//     around it is made of distant live hits — the frontier cap (2·ef)
+	//     drops candidates while the walk is inside the region, so it stops
+	//     "by distance" on the wrong neighbourhood. Measured on a 12k index
+	//     with ten 500-version chains, chain-aimed recall@10 against exact
+	//     search over live vectors: 0.44 firing only on a short beam, 0.52
+	//     adding budget exhaustion, 1.00 with this trigger (off-topic
+	//     queries on that 42%-retired index: 0.84 → 0.92; the pass fired on
+	//     81 of 200 of them, ~1.4 ms each);
+	//   - the retired-routing budget ran out; or
+	//   - the walk exhausted what it could reach with fewer than ef live hits
+	//     (a closed island of near-duplicates).
+	// Cost: one distance per unvisited node (≤ N), paid only by queries that
+	// spent a beam on retired routing.
+	if (budgetSpent || stats.RetiredExpanded >= ef || (!stoppedByDistance && len(w) < ef)) && len(seen) < len(idx.nodes) {
 		stats.ExactScan = true
 		n := 0
 		for id, node := range idx.nodes {

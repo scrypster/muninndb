@@ -30,6 +30,7 @@ type rcEnv struct {
 	t     testing.TB
 	eng   *Engine
 	store *storage.PebbleStore
+	db    *pebble.DB
 	reg   *hnswpkg.Registry
 	ctx   context.Context
 	ws    [8]byte
@@ -51,11 +52,18 @@ func openRCEnv(t testing.TB, fs vfs.FS) *rcEnv {
 // the activation engine sees (a counting double).
 func openRCEnvWith(t testing.TB, fs vfs.FS, wrapHNSW func(activation.HNSWIndex) activation.HNSWIndex) *rcEnv {
 	t.Helper()
+	return openRCEnvCache(t, fs, wrapHNSW, 20000)
+}
+
+// openRCEnvCache is openRCEnvWith with an explicit L1 cache size (a tiny cache
+// makes evictions deterministic).
+func openRCEnvCache(t testing.TB, fs vfs.FS, wrapHNSW func(activation.HNSWIndex) activation.HNSWIndex, cacheSize int) *rcEnv {
+	t.Helper()
 	db, err := pebble.Open("rc-db", &pebble.Options{FS: fs, MemTableSize: 64 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 20000, NoSyncEngrams: true})
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: cacheSize, NoSyncEngrams: true})
 	ftsIdx := fts.New(db)
 	embedder := &noopEmbedder{}
 	reg := hnswpkg.NewRegistry(db)
@@ -70,7 +78,7 @@ func openRCEnvWith(t testing.TB, fs vfs.FS, wrapHNSW func(activation.HNSWIndex) 
 		Embedder: embedder, HNSWRegistry: reg,
 		ContradictWorker: (*cognitive.Worker[cognitive.ContradictItem])(nil),
 	})
-	env := &rcEnv{t: t, eng: eng, store: store, reg: reg, ctx: context.Background(), ws: store.ResolveVaultPrefix("default")}
+	env := &rcEnv{t: t, eng: eng, store: store, db: db, reg: reg, ctx: context.Background(), ws: store.ResolveVaultPrefix("default")}
 	stopped := false
 	env.stop = func() {
 		if stopped {

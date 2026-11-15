@@ -52,15 +52,11 @@ type PebbleStore struct {
 	// COG-29 debt readout can cache the expensive declared-edge scan and know
 	// when it is stale. See contradicts_gen.go for why this lives in the store.
 	contradictsGen contradictsGen
-	// retired is the per-vault in-memory retired-engram set ([8]byte →
-	// *retiredSet), derived from the store and maintained at the lifecycle
-	// commit points. See retired.go.
-	retired      sync.Map
-	provenance   *provenance.Store // Provenance chain for tracking engram creation/updates
-	scoringStore *scoring.Store    // Per-vault learnable scoring weights
-	walSync      *walSyncer        // Periodic WAL fsync — covers all pebble.NoSync writes
-	counterFlush *counterCoalescer // Coalesces vault count Pebble writes (100ms timer)
-	provWork     *provenanceWorker // NumCPU goroutines for provenance appends
+	provenance     *provenance.Store // Provenance chain for tracking engram creation/updates
+	scoringStore   *scoring.Store    // Per-vault learnable scoring weights
+	walSync        *walSyncer        // Periodic WAL fsync — covers all pebble.NoSync writes
+	counterFlush   *counterCoalescer // Coalesces vault count Pebble writes (100ms timer)
+	provWork       *provenanceWorker // NumCPU goroutines for provenance appends
 	// assocCache: [24]byte (wsPrefix[8]+engramID[16]) → *assocCacheEntry
 	// Caches forward association lists to avoid repeated Pebble SSTable scans on hot engrams.
 	// Invalidated on any WriteAssociation or UpdateAssociation for that engram.
@@ -157,6 +153,11 @@ type PebbleStore struct {
 	// the unix-nano stamp of the last WARN, used to rate-limit it.
 	guardReadFaults        atomic.Uint64
 	guardReadFaultLoggedAt atomic.Int64
+
+	// retired is the per-vault in-memory retired-engram set ([8]byte →
+	// *retiredSet), derived from the store and driven by every committed
+	// batch through replicateBatch. See retired.go.
+	retired sync.Map
 }
 
 // pointGet is the single-key read used by the metadata helpers that must tell
@@ -514,7 +515,7 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	if ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	if err := batch.Commit(syncOption); err != nil {
+	if err := ps.commitBatch(batch, syncOption); err != nil {
 		return ULID{}, fmt.Errorf("commit batch: %w", err)
 	}
 	if contradictsQueued {
@@ -522,7 +523,6 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	}
 
 	ps.replicateBatch(batch)
-	ps.noteWritten(wsPrefix, [16]byte(eng.ID), eng.State) // retired set (retired.go)
 
 	// NOTE: Intentionally NOT caching on write to avoid flooding L1 cache.
 
@@ -834,7 +834,7 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 	if ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	if commitErr := batch.Commit(syncOption); commitErr != nil {
+	if commitErr := ps.commitBatch(batch, syncOption); commitErr != nil {
 		for i := range errs {
 			if errs[i] == nil {
 				errs[i] = fmt.Errorf("commit batch: %w", commitErr)
@@ -855,7 +855,6 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 		}
 		eng := items[i].Engram
 		ws := items[i].WSPrefix
-		ps.noteWritten(ws, [16]byte(eng.ID), eng.State) // retired set (retired.go)
 
 		vc := ps.getOrInitCounter(ctx, ws)
 		newCount := vc.count.Add(1)
@@ -996,7 +995,7 @@ func (ps *PebbleStore) ClearFTSKeys(ws, wsPlus [8]byte) error {
 			return fmt.Errorf("storage: clear FTS keys 0x%02X: %w", p, err)
 		}
 	}
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
 		batch.Close()
 		return fmt.Errorf("storage: commit FTS clear batch: %w", err)
 	}

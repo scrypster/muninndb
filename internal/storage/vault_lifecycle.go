@@ -60,6 +60,10 @@ var clearVaultDataPrefixes = []byte{
 //   - 0x0F name index    (global by name hash, deleted by DeleteVaultNameOnly)
 //   - 0x11 digest flags  (globally keyed by ULID — orphans are acceptable)
 func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error) {
+	// Retired set (retired.go): derived from the records this range-deletes.
+	// Deferred so it runs on every exit, including a failed commit that may
+	// still have landed — dropping the set is always safe (it is rebuilt).
+	defer ps.resetRetired(ws)
 	// Capture count before anything is deleted.
 	vaultCount := ps.GetVaultCount(ctx, ws)
 
@@ -114,9 +118,6 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	}
 
 	// Step 4: evict all in-memory caches.
-
-	// Retired set (retired.go): derived from the records just range-deleted.
-	ps.resetRetired(ws)
 
 	// L1 engram cache — vault-scoped by hex prefix.
 	ps.cache.DeleteByVault(ws)

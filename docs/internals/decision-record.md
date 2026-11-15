@@ -1466,25 +1466,39 @@ every recall that touched a long chain logged depth-cap WARNs (~15 per recall on
 500-version chain). A production vault holds 18 chains longer than 8 (the longest ~495,
 repeatedly-evolved bookmark-style memories) and 15 forks.
 
-**One retired set, in the store, derived.** A per-vault in-memory set of retired engrams
-(soft-deleted or archived) lives in `PebbleStore`, because every lifecycle transition
-commits at a handful of store sites; the set is updated there after the commit by
-RE-READING the 0x02 record (so out-of-order notes on one engram converge on the latest
-state), built lazily on a vault's first use from the 0x0B state index with every hit
-verified against its record (a stale index entry must never hide a live memory — the
-dangerous direction), and reset by the bulk raw-KV paths. No on-disk state: a restart
-derives the same set (pinned by a restart-invariance test that compares ids, order,
-absolute scores and substitution attribution across a re-open). Measured: 20,000
-memories / 5,000 retired build in ~2 ms, ~70 KB retained, 8 ns per lookup. The design
-asked for a per-index set; one shared set is the same information with one place to keep
-it correct.
+**One retired set, in the store, derived from what was committed.** A per-vault in-memory
+set of retired engrams (soft-deleted or archived) lives in `PebbleStore`. It is driven from
+`commitBatch`, through which every engram-record commit goes (a source-scan test pins it),
+on success and on error alike: each 0x02 metadata key a batch sets or deletes re-derives
+that entry from the record now in Pebble — the batch only says which records may have
+changed, so being told about a commit that failed is harmless and not being told about one
+that landed despite an error is impossible (a security review flagged the success-only
+form as fail-open; the replication applier's hooks follow the same rule). The first version noted only when the writer's cached old
+state differed from the new one; review showed a recall's snapshot read refilling the
+metadata cache with a pre-forget "active" made a later restore look like a no-op, so a
+restored, live memory stayed in the set and was hidden from recall until a restart (a
+randomized lifecycle differential diverged on every seed; the enrichment digest rewrite,
+which no lifecycle hook covered, left 2–4 of 3,000 live memories hidden). The same stale
+gate skipped `UpdateMetadata`'s 0x0B move; it now reads the old state from the raw record.
+The set is built from the 0x02 records themselves, not the 0x0B index, because the index can
+diverge from the records and a set built from it differed across a restart. Followers get
+the same rule through the replication applier's commit hooks; a resnapshot drops the set.
+No on-disk state. Measured: 20,000 memories / 5,000 retired build in ~2.5 ms, ~80 KB
+retained, 9 ns per lookup. The design asked for a per-index set; one shared set is the
+same information with one place to keep it correct.
 
 **Route, don't tombstone.** `hnsw.Index.SearchLive` treats a retired node as a routing
 node: it is expanded, never counted toward the ef beam, and the nearest 16 are returned as
 shadows on their own budget. Tombstoning was measured worse in the proof pass and would
 discard the evidence COG-28 redirects. Bounds, both derived from the index: retired
 expansions ≤ max(ef, N/M0) (the routing detour costs at most about one exact pass), and a
-walk that ends short of ef live hits with nodes unvisited makes ONE exact pass over them.
+walk that routes through a full beam (ef) of retired nodes, spends that budget, or ends
+short of ef live hits makes ONE exact pass over the unvisited nodes. The beam-of-retired
+trigger came from review: a walk inside a large retired region stops "by distance" on a
+beam of distant live hits (the frontier cap drops candidates there); on a 12k index with ten
+500-version chains, chain-aimed recall@10 against exact search over live vectors was 0.44,
+0.52 with budget exhaustion added, 1.00 with it (off-topic queries 0.84 → 0.92, the pass
+firing on 81 of 200 of them at ~1.4 ms each on that 42%-retired index).
 That fallback is load-bearing, not belt-and-braces: 34+ near-identical vectors form a
 CLOSED island (the neighbour-selection defect, 1A) — an unbounded walk through a
 500-version island reached 0 live nodes — so without it skipping retired nodes would
@@ -1505,6 +1519,14 @@ included), so the map would be a second copy of every chain with that many inval
 obligations, to save about a millisecond on the recalls that touch a 500-version chain.
 Chain WARNs log once per (vault, node, kind) per process.
 
+**The candidate budget stays on the total count.** Sizing it from live memories (the
+design's suggestion, first built) made it jump across `CalcCandidatesPerIndex`'s 1,000 cliff
+with churn: 1,420 memories with 500 retired went from 37 to 920 per index (p50 1.1 → 3.6 ms)
+and would flip back as memories were restored. Since retired engrams no longer take slots,
+k is already "live hits per index"; the total count moves only on write and hard delete.
+Cross-binary differentials over one shared data dir with nothing retired, at 950, 1,050 and
+1,500 memories (both sides of the cliff), were identical to the trunk.
+
 **Measured before → after** (synthetic starvation fixture, 20 relevant live memories,
 vector-only query): see the commit for the full table; at 2,000 memories relevant
 reached went 20/20/0/0 → 20/20/20/20 for chains of 0/10/50/500, at 300 memories
@@ -1514,8 +1536,11 @@ reached went 20/20/0/0 → 20/20/20/20 for chains of 0/10/50/500, at 300 memorie
 
 **Residuals, recorded.** The decay pool (`RecentActive`, state-blind, with a 1 s cache that
 ignores topK) still admits retired engrams. A `Link(relation=supersedes)` target is
-stamped but stays active, so it is not retired and still competes; including it needs a
-clock-aware set. A replication follower never runs the hooks (same class as its HNSW
-graph). Live near-duplicate islands (1A with no retired versions) are untouched: the
+stamped but stays active, so it is not retired and still competes (and a chain built only
+from supersedes links keeps the old 8-hop reach); including it needs a clock-aware set.
+Pre-existing defects found on the way, not fixed here: a soft forget drops the memory's FTS
+postings and restore never re-adds them (a restored memory is unfindable by keyword); the
+digest rewrite takes no stripe lock and can commit a pre-forget copy (resurrecting a
+forgotten memory); snapshot reads refill the shared caches with stale records. Live near-duplicate islands (1A with no retired versions) are untouched: the
 plain `Search` path is unchanged, and 34+ live near-duplicates still hide everything
 behind them.

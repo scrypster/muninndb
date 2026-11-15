@@ -25,10 +25,12 @@ const (
 
 	// supersessionMaxDepth was the supersedes-chain walk's depth cap. It is now
 	// only the SLACK the walk allows beyond the vault's retired count (see
-	// supersessionWalkLimit): every intermediate an evolve, a supersedes link or
-	// a consolidation leaves behind is retired, so a declared chain of retired
-	// intermediates can never reach the limit, and the cap now binds only on a
-	// pathological graph of ACTIVE nodes joined by RelSupersedes edges. It also
+	// supersessionWalkLimit): every intermediate an evolve or a consolidation
+	// leaves behind is retired, so a chain of retired intermediates can never
+	// reach the limit. It still binds on chains through ACTIVE nodes — and a
+	// Link(relation=supersedes) target is one: Link stamps the target's
+	// ValidUntil but leaves it active, so a chain built only by supersedes
+	// links keeps the old 8-hop reach (no worse than before). It also
 	// still bounds the writer's fork-guard walk (evolve_guard.go). A cycle or an
 	// ambiguous (multi-superseder) node is still unresolvable and refused —
 	// degrade loudly, never silently pick an arbitrary head.
@@ -346,11 +348,12 @@ func newChainReads() *chainReads {
 
 // supersessionWalkLimit is how many hops a chain walk may take in vault ws:
 // the vault's retired count plus supersessionMaxDepth of slack. Every
-// intermediate on a declared evolve/link/consolidate chain is retired, and the
+// intermediate an evolve or a consolidation leaves behind is retired, and the
 // walk refuses a cycle, so such a chain is always walked to its terminus —
 // the 495-version chains real vaults grow are resolved in full. The slack is
-// what remains of the old cap, for chains through ACTIVE nodes (a hand-made
-// RelSupersedes graph), and it is also the whole limit when the retired set
+// what remains of the old cap, for chains through ACTIVE nodes: a hand-made
+// RelSupersedes graph, or a Link(relation=supersedes) target, which Link
+// stamps but leaves active. It is also the whole limit when the retired set
 // is unavailable.
 func (e *Engine) supersessionWalkLimit(ctx context.Context, ws [8]byte) int {
 	view, err := e.store.RetiredIDs(ctx, ws)

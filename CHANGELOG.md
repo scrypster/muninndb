@@ -19,8 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   500-version chain made the recall return nothing at all. Retired (forgotten,
   superseded or archived) memories are now routed through but never counted;
   the nearest few are kept separately as evidence for version-head
-  substitution. The candidate budget counts live memories. `as_of` and
-  `include_invalid` recalls are unchanged.
+  substitution. `as_of` and `include_invalid` recalls are unchanged.
 - A query worded like an old version reaches the current version at any chain
   length. The supersession walk stopped at 8 hops, so on chains of 10+ versions
   that evidence was discarded (`abstained_reason: superseded_only`), and every

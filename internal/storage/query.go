@@ -886,7 +886,7 @@ func (ps *PebbleStore) MigrateBuckets(ctx context.Context, wsPrefix [8]byte) err
 		}
 		batch.Set(migKey, stateVal, nil)
 
-		if err := batch.Commit(pebble.NoSync); err != nil {
+		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 			return fmt.Errorf("migrate chunk commit: %w", err)
 		}
 		chunk = chunk[:0]

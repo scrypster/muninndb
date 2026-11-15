@@ -5,8 +5,13 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -189,4 +194,204 @@ func TestRetiredSet_BuildCost(t *testing.T) {
 		}
 	}
 	t.Logf("Contains: %s per lookup", time.Since(start)/100000)
+}
+
+// deriveRetiredFromRecords is the reference: every engram whose RECORD (the
+// 0x01 value, read by scanning Pebble, not the 0x0B index the set is built
+// from) is soft-deleted or archived.
+func deriveRetiredFromRecords(t testing.TB, ps *PebbleStore, ws [8]byte) map[[16]byte]bool {
+	t.Helper()
+	out := map[[16]byte]bool{}
+	if err := ps.ScanEngrams(context.Background(), ws, func(e *Engram) error {
+		if isRetiredState(e.State) {
+			out[[16]byte(e.ID)] = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func assertSetMatchesRecords(t testing.TB, ps *PebbleStore, ws [8]byte, step string) {
+	t.Helper()
+	want := deriveRetiredFromRecords(t, ps, ws)
+	view, err := ps.RetiredIDs(context.Background(), ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := 0
+	view.s.mu.RLock()
+	for id := range view.s.ids {
+		if !want[id] {
+			extra++
+		}
+	}
+	view.s.mu.RUnlock()
+	missing := 0
+	for id := range want {
+		if !view.Contains(id) {
+			missing++
+		}
+	}
+	if extra != 0 || missing != 0 {
+		t.Errorf("%s: set=%d records=%d — %d in the set the record calls live (hidden from recall), %d retired records missing",
+			step, view.Len(), len(want), extra, missing)
+	}
+}
+
+// The enrichment digest rewrite (UpdateDigest) re-encodes the whole record
+// and commits it without going through any lifecycle method. Racing it
+// against forget must still leave the set equal to the records: the set is
+// driven from committed batches, not from an enumerated list of write paths.
+func TestRetiredSet_DigestRewriteRacingForget(t *testing.T) {
+	ps := memStore(t)
+	ctx := context.Background()
+	ws := ps.VaultPrefix("digest-race")
+	const n = 3000
+	ids := make([]ULID, n)
+	for i := range ids {
+		id, err := ps.WriteEngram(ctx, ws, &Engram{Concept: fmt.Sprintf("hive %d", i), Content: fmt.Sprintf("brood frame note %d", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = id
+	}
+	if _, err := ps.RetiredIDs(ctx, ws); err != nil {
+		t.Fatal(err)
+	}
+	// Four enrichment rewriters sweep every id while one goroutine forgets
+	// them all. UpdateDigest takes no stripe lock, so a rewrite that read the
+	// record before a forget can commit after it — whatever the RECORD ends up
+	// saying, the set must say the same.
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func(off int) {
+			defer wg.Done()
+			for i := range ids {
+				_ = ps.UpdateDigest(ctx, ids[(i+off*n/4)%n], "summary", []string{"point"}, "fact", "")
+			}
+		}(g)
+	}
+	for i := range ids {
+		if err := ps.SoftDelete(ctx, ws, ids[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wg.Wait()
+	assertSetMatchesRecords(t, ps, ws, "after forget racing digest rewrites")
+}
+
+// Every function in this package that writes an engram RECORD (builds a 0x01
+// or 0x02 key) and commits must commit through commitBatch, because that is
+// where the retired set learns about it — on success and on error. A raw
+// batch.Commit would leave the set stale. Raw bulk-copy paths (which reset the
+// set) are the named exceptions.
+func TestRetiredSet_EveryRecordCommitGoesThroughCommitBatch(t *testing.T) {
+	exempt := map[string]bool{
+		"CloneVaultData": true, "MergeVaultData": true, "ImportVaultData": true, // reset the target set
+		"ClearVault":  true, // resets every set
+		"commitBatch": true,
+	}
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, pkg := range pkgs {
+		for fname, f := range pkg.Files {
+			for _, d := range f.Decls {
+				fn, ok := d.(*ast.FuncDecl)
+				if !ok || fn.Body == nil || exempt[fn.Name.Name] {
+					continue
+				}
+				var writesRecord, commits, rawCommit bool
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					sel, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					switch sel.Sel.Name {
+					case "MetaKey", "EngramKey":
+						writesRecord = true
+					case "Commit":
+						commits, rawCommit = true, true
+					case "commitBatch":
+						commits = true
+					}
+					return true
+				})
+				if writesRecord && commits {
+					checked++
+					if rawCommit {
+						t.Errorf("%s: %s builds an engram record key and commits a raw batch — commit through ps.commitBatch or the retired set will not see it",
+							fname, fn.Name.Name)
+					}
+				}
+			}
+		}
+	}
+	if checked < 12 {
+		t.Fatalf("found only %d record-writing committers — the scan is not finding the write paths", checked)
+	}
+	t.Logf("%d record-writing committers, none commits a raw batch", checked)
+}
+
+// A commit that FAILS still reaches the retired set, and the set re-derives
+// from the record rather than trusting the batch. The set is deliberately
+// poisoned (a live engram marked retired); a SoftDelete of that engram whose
+// commit fails (read-only DB) must heal the entry to what the record says —
+// live — not leave it, and not adopt the batch's "soft-deleted".
+func TestRetiredSet_FailedCommitStillRederivesFromRecord(t *testing.T) {
+	fs := vfs.NewMem()
+	ctx := context.Background()
+	db, err := pebble.Open("ro-store", &pebble.Options{FS: fs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := NewPebbleStore(db, PebbleStoreConfig{CacheSize: 100, NoSyncEngrams: true})
+	ws := ps.VaultPrefix("ro")
+	live, err := ps.WriteEngram(ctx, ws, &Engram{Concept: "cairn", Content: "cairn rebuilt at the col"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone, err := ps.WriteEngram(ctx, ws, &Engram{Concept: "blaze", Content: "blaze repainted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.SoftDelete(ctx, ws, gone); err != nil {
+		t.Fatal(err)
+	}
+	ps.Close()
+
+	rodb, err := pebble.Open("ro-store", &pebble.Options{FS: fs, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ro := NewPebbleStore(rodb, PebbleStoreConfig{CacheSize: 100, NoSyncEngrams: true})
+	defer ro.Close()
+	view, err := ro.RetiredIDs(ctx, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.s.mu.Lock()
+	view.s.ids[[16]byte(live)] = struct{}{} // poison: a live engram the set calls retired
+	view.s.mu.Unlock()
+
+	if err := ro.SoftDelete(ctx, ws, live); err == nil {
+		t.Fatal("expected the soft delete's commit to fail on a read-only DB")
+	}
+	if view.Contains([16]byte(live)) {
+		t.Errorf("after a failed commit touching it, the live engram is still in the set — the hook did not run on the error path")
+	}
+	if !view.Contains([16]byte(gone)) || view.Len() != 1 {
+		t.Errorf("set = %d entries, want exactly the forgotten engram", view.Len())
+	}
+	assertSetMatchesRecords(t, ro, ws, "after a failed commit")
 }
