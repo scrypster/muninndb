@@ -1668,3 +1668,39 @@ the applier's commit hook and on a resnapshot (`cmd/muninn/server.go`).
   update in Pebble (record vs 0x0B state index). A write-write race, not a cache one (STO-22).
 - Closed near-duplicate islands in the HNSW graph: live near-duplicates can be unreachable
   from the entry point.
+
+### Liveness has one source: the engram record (2026-11-15)
+
+**Context.** Review of the merged trunk found a new way to hide a live memory: a clone (or
+merge) of a vault being written copied 0x01 and 0x02 in separate live passes, so a forget
+between them tore the copy — 0x01 active, 0x02 soft-deleted. The retired set read 0x02;
+recall's filter and Read read 0x01. Reproduced as "Read says live, default recall never
+returns it", identical after a restart; 73 of 150 clones in a differential were torn.
+
+**Decision.** 0x01 is the single source of truth for liveness (STO-23), because it is what
+recall's final filter and Read already use; the cheaper 0x02 stays the scan's consistency
+check. Clone and merge read their source from one snapshot. Existing torn copies are not
+rewritten: the build trusts 0x01, counts the disagreement and WARNs once per vault.
+
+**Also pinned in this change (STO-22 guards no test covered):** the fill token is taken
+before the snapshot pin (a test seam lands a write between them); a follower's vault clear
+invalidates through the range tombstone; ClearVault bumps the fill generations
+(`InvalidateVault`) as well as dropping entries — the in-flight-fill test fails only when
+BOTH that and the range-tombstone path are reverted, since either alone suffices on the
+leader; the reverse-association fill is guarded.
+
+**Known open, NOT fixed here:**
+- `ClearVault` can panic: it calls the provenance worker's `Drain()` while concurrent
+  metadata writes call `Submit` ("sync: WaitGroup is reused before previous Wait has
+  returned", provenance_worker.go:101 ← vault_lifecycle.go:87); present before and after
+  these merges.
+- Clearing any vault empties the metadata and association caches for every vault (metaCache
+  is keyed by engram ID alone, so it cannot be scoped without a key change); the retired set
+  reset is now scoped to the cleared vault. Cost: one slower recall (+10–20 ms) per vault.
+- A shadow substitution can differ across a restart when the HNSW graph is repaired on load
+  (1 of 432 probes on one seed; the live head was returned both times).
+- Cache invalidation runs straight after commit, not in a defer (no reachable panic found
+  between them).
+- `internal/index/adjacency` writes 0x03/0x04 keys with a raw commit, bypassing
+  `commitBatch`; only its own test imports it today.
+

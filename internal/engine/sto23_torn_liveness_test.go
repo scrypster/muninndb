@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/storage/erf"
@@ -26,24 +27,43 @@ func TestSTO23_TornMetadataNeverHidesALiveMemory(t *testing.T) {
 	eng, _, store, stop := newEngineOverDB(t, db)
 	ctx := context.Background()
 	const vault = "trail-crew"
-	for i := 0; i < 20; i++ {
-		r, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault,
-			Concept: fmt.Sprintf("switchback drain %d", i),
-			Content: fmt.Sprintf("cleared the switchback drain culvert %d after the storm", i)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := eng.Forget(ctx, &mbp.ForgetRequest{Vault: vault, ID: r.ID}); err != nil {
-			t.Fatal(err)
-		}
-	}
 	x, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "switchback drain X",
 		Content: "the switchback drain culvert on the upper loop is still blocked"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	awaitFTS(t, eng)
+	// Newer, unrelated memories push X out of the recency candidate pool, so
+	// the keyword index is X's only route into recall — the route the retired
+	// set gates.
+	for i := 0; i < 80; i++ {
+		if _, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault,
+			Concept: fmt.Sprintf("tool shed inventory %d", i),
+			Content: fmt.Sprintf("counted %d grub hoes and pulaskis in the tool shed", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ws := store.ResolveVaultPrefix(vault)
+	// Twenty superseded versions worded CLOSER to the query than X. They keep
+	// their keyword postings (supersession does), so they fill the retired
+	// shadow budget: a memory wrongly marked retired gets no shadow slot and
+	// no route into recall at all.
+	for i := 0; i < 20; i++ {
+		r, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault,
+			Concept: fmt.Sprintf("switchback drain culvert blocked %d", i),
+			Content: fmt.Sprintf("switchback drain culvert blocked on the upper loop, switchback drain culvert blocked again, note %d", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rid, _ := storage.ParseULID(r.ID)
+		b := store.NewBatch()
+		if err := b.SupersedeEngram(ctx, ws, rid, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	awaitFTS(t, eng)
 	xid, _ := storage.ParseULID(x.ID)
 
 	mk := keys.MetaKey(ws, [16]byte(xid))
