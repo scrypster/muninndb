@@ -120,7 +120,7 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	// Step 4: evict all in-memory caches.
 
 	// L1 engram cache — vault-scoped by hex prefix.
-	ps.cache.DeleteByVault(ws)
+	ps.cache.InvalidateVault(ws) // bumps every stripe first: an in-flight fill from before the clear is rejected
 
 	// assocCache: keys are [24]byte = ws[8] + engramID[16].
 	// Purge all entries whose first 8 bytes match the cleared vault prefix.

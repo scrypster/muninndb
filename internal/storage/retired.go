@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/cockroachdb/pebble"
@@ -114,50 +116,116 @@ func (ps *PebbleStore) RetiredIDs(ctx context.Context, ws [8]byte) (RetiredView,
 	if s.built {
 		return RetiredView{s: s}, nil
 	}
-	// Scan the 0x02 metadata records themselves, not the 0x0B state index:
-	// the incremental notes re-derive from the record, so the build must too,
-	// or a record whose 0x0B entry diverged (a lost update elsewhere in the
-	// store) would be retired before a restart and live after it. Measured in
+	// Scan the 0x01 ENGRAM records — the source of truth for liveness
+	// (STO-23): recall's final filter and Read decide liveness from the same
+	// record, so the set must too, or a store whose 0x01 and 0x02 disagree
+	// hides a memory every reader calls live. Not the 0x0B state index
+	// either: it can diverge from the records, and a set built from it
+	// differed across a restart in the randomized differential. Measured in
 	// TestRetiredSet_BuildCost.
-	ids := make(map[[16]byte]struct{})
-	lower := make([]byte, 9)
-	lower[0] = prefix.Meta
-	copy(lower[1:], ws[:])
-	iter, err := PrefixIterator(ps.db, lower)
+	ids, err := ps.buildRetiredFromRecords(ctx, ws)
 	if err != nil {
-		return RetiredView{}, fmt.Errorf("build retired set: %w", err)
+		return RetiredView{}, err
 	}
-	n := 0
-	for iter.First(); iter.Valid(); iter.Next() {
-		if n++; n%4096 == 0 && ctx.Err() != nil {
-			iter.Close()
-			return RetiredView{}, ctx.Err()
-		}
-		k, v := iter.Key(), iter.Value()
-		if len(k) != 25 || len(v) <= erf.OffsetState {
-			continue
-		}
-		if isRetiredState(LifecycleState(v[erf.OffsetState])) {
-			var id [16]byte
-			copy(id[:], k[9:25])
-			ids[id] = struct{}{}
-		}
-	}
-	if err := iter.Error(); err != nil {
-		iter.Close()
-		return RetiredView{}, fmt.Errorf("build retired set: %w", err)
-	}
-	iter.Close()
 	s.ids = ids
 	s.built = true
 	return RetiredView{s: s}, nil
 }
 
-// recordRetired reads the authoritative 0x02 metadata record for id and
-// reports whether its lifecycle state is retired. A missing record (hard
-// deleted) is not retired.
+// buildRetiredFromRecords derives a vault's retired set from its 0x01 engram
+// records, both read from ONE snapshot. The 0x02 metadata records are walked
+// alongside only as a consistency check: where the two disagree on
+// liveness (a copy torn by a concurrent write before clone/merge read from a
+// snapshot), 0x01 wins, the disagreement is counted
+// (RetiredLivenessDisagreements) and one WARN is logged per vault. Nothing is
+// rewritten.
+func (ps *PebbleStore) buildRetiredFromRecords(ctx context.Context, ws [8]byte) (map[[16]byte]struct{}, error) {
+	snap := ps.db.NewSnapshot()
+	defer snap.Close()
+	engLo := make([]byte, 9)
+	engLo[0] = prefix.Engram
+	copy(engLo[1:], ws[:])
+	metaLo := make([]byte, 9)
+	metaLo[0] = prefix.Meta
+	copy(metaLo[1:], ws[:])
+
+	engIt, err := snap.NewIter(&pebble.IterOptions{LowerBound: engLo, UpperBound: keys.PrefixUpperBound(append([]byte(nil), engLo...))})
+	if err != nil {
+		return nil, fmt.Errorf("build retired set: %w", err)
+	}
+	defer engIt.Close()
+	metaIt, err := snap.NewIter(&pebble.IterOptions{LowerBound: metaLo, UpperBound: keys.PrefixUpperBound(append([]byte(nil), metaLo...))})
+	if err != nil {
+		return nil, fmt.Errorf("build retired set: %w", err)
+	}
+	defer metaIt.Close()
+
+	ids := make(map[[16]byte]struct{})
+	disagree := 0
+	metaValid := metaIt.First()
+	n := 0
+	for valid := engIt.First(); valid; valid = engIt.Next() {
+		if n++; n%4096 == 0 && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		k, v := engIt.Key(), engIt.Value()
+		if len(k) != 25 || len(v) <= erf.OffsetState {
+			continue
+		}
+		var id [16]byte
+		copy(id[:], k[9:25])
+		retired := isRetiredState(LifecycleState(v[erf.OffsetState]))
+		if retired {
+			ids[id] = struct{}{}
+		}
+		// Advance the metadata walk to this id (both are sorted by id).
+		for metaValid {
+			mk := metaIt.Key()
+			if len(mk) != 25 {
+				metaValid = metaIt.Next()
+				continue
+			}
+			c := bytes.Compare(mk[9:25], id[:])
+			if c < 0 {
+				metaValid = metaIt.Next()
+				continue
+			}
+			if c == 0 {
+				mv := metaIt.Value()
+				if len(mv) > erf.OffsetState && isRetiredState(LifecycleState(mv[erf.OffsetState])) != retired {
+					disagree++
+				}
+				metaValid = metaIt.Next()
+			}
+			break
+		}
+	}
+	if err := engIt.Error(); err != nil {
+		return nil, fmt.Errorf("build retired set: %w", err)
+	}
+	if disagree > 0 {
+		ps.retiredDisagreements.Add(int64(disagree))
+		if _, warned := ps.retiredDisagreeWarned.LoadOrStore(ws, true); !warned {
+			slog.Warn("storage: engram and metadata records disagree on liveness; trusting the engram record",
+				"vault_prefix", fmt.Sprintf("%x", ws), "records", disagree)
+		}
+	}
+	return ids, nil
+}
+
+// RetiredLivenessDisagreements reports how many engrams, across every
+// retired-set build in this process, had a 0x02 metadata record that
+// disagreed with their 0x01 engram record on liveness (0x01 was trusted).
+func (ps *PebbleStore) RetiredLivenessDisagreements() int64 {
+	return ps.retiredDisagreements.Load()
+}
+
+// recordRetired reads the authoritative 0x01 engram record for id — the
+// record recall's filter and Read decide liveness from (STO-23) — and reports
+// whether its lifecycle state is retired. A missing record (hard deleted) is
+// not retired.
 func (ps *PebbleStore) recordRetired(ws [8]byte, id [16]byte) (bool, error) {
-	val, err := Get(ps.db, keys.MetaKey(ws, id))
+	val, err := Get(ps.db, keys.EngramKey(ws, id))
 	if err != nil {
 		return false, err
 	}
@@ -187,26 +255,55 @@ func (ps *PebbleStore) noteCommittedBatch(b *pebble.Batch) {
 	if b == nil || b.Empty() || !ps.anyRetiredSet() {
 		return
 	}
+	// Every 0x01 or 0x02 key names an engram whose liveness may have changed;
+	// each is re-derived once from its 0x01 record. Only a 0x01 SET's value
+	// feeds noteMeta's fast path — a 0x02 value is not the liveness source.
+	type touched struct {
+		ws    [8]byte
+		value []byte // the batch's 0x01 value, when it set one
+	}
+	var order [][16]byte
+	seen := map[[16]byte]*touched{}
 	r := b.Reader()
 	for {
 		kind, k, v, ok, err := r.Next()
 		if !ok || err != nil {
-			return
+			break
 		}
 		switch kind {
-		case pebble.InternalKeyKindSet:
-			if ws, id, isMeta := parseMetaKey(k); isMeta {
-				ps.noteMeta(ws, id, v, true)
+		case pebble.InternalKeyKindSet, pebble.InternalKeyKindDelete, pebble.InternalKeyKindSingleDelete:
+			ws, id, isRec := parseRecordKey(k)
+			if !isRec {
+				continue
 			}
-		case pebble.InternalKeyKindDelete, pebble.InternalKeyKindSingleDelete:
-			if ws, id, isMeta := parseMetaKey(k); isMeta {
-				ps.noteMeta(ws, id, nil, false)
+			t := seen[id]
+			if t == nil {
+				t = &touched{ws: ws}
+				seen[id] = t
+				order = append(order, id)
+			}
+			if kind == pebble.InternalKeyKindSet && k[0] == prefix.Engram {
+				t.value = v
 			}
 		case pebble.InternalKeyKindRangeDelete:
-			if len(k) > 0 && k[0] <= prefix.Meta && (len(v) == 0 || v[0] >= prefix.Meta) {
+			if len(k) > 0 && k[0] <= prefix.Meta && (len(v) == 0 || v[0] >= prefix.Engram) {
+				// A range inside one vault's 0x01 or 0x02 keyspace (a vault
+				// clear issues one per prefix) resets only that vault.
+				if len(k) >= 9 && len(v) >= 9 && k[0] == v[0] && (k[0] == prefix.Engram || k[0] == prefix.Meta) {
+					var ws [8]byte
+					copy(ws[:], k[1:9])
+					if next, err := incrementWS(ws); err == nil && bytes.Equal(v[1:9], next[:]) {
+						ps.resetRetired(ws)
+						continue
+					}
+				}
 				ps.ResetAllRetired()
 			}
 		}
+	}
+	for _, id := range order {
+		t := seen[id]
+		ps.noteMeta(t.ws, id, t.value, t.value != nil)
 	}
 }
 
@@ -246,8 +343,10 @@ func (ps *PebbleStore) anyRetiredSet() bool {
 	return found
 }
 
-func parseMetaKey(k []byte) (ws [8]byte, id [16]byte, ok bool) {
-	if len(k) != 25 || k[0] != prefix.Meta {
+// parseRecordKey recognises an engram record key (0x01) or its metadata
+// record key (0x02): ws|id, 25 bytes.
+func parseRecordKey(k []byte) (ws [8]byte, id [16]byte, ok bool) {
+	if len(k) != 25 || (k[0] != prefix.Meta && k[0] != prefix.Engram) {
 		return ws, id, false
 	}
 	copy(ws[:], k[1:9])

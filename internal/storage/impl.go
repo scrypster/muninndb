@@ -158,6 +158,11 @@ type PebbleStore struct {
 	// *retiredSet), derived from the store and driven by every committed
 	// batch through replicateBatch. See retired.go.
 	retired sync.Map
+	// retiredDisagreements counts engrams whose 0x02 metadata disagreed with
+	// their 0x01 record on liveness at a retired-set build (0x01 trusted);
+	// retiredDisagreeWarned holds the vaults already WARNed about. STO-23.
+	retiredDisagreements  atomic.Int64
+	retiredDisagreeWarned sync.Map
 }
 
 // pointGet is the single-key read used by the metadata helpers that must tell

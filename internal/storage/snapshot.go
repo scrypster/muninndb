@@ -69,6 +69,7 @@ func (ps *PebbleStore) NewSnapshot() *pebble.Snapshot {
 // and a write committed after the pin can never be overwritten by them.
 func (ps *PebbleStore) NewSnapshotContext(ctx context.Context) (context.Context, *pebble.Snapshot) {
 	tok := ps.cache.guard.token()
+	testSnapshotPinPoint() // test seam: a write landing between token and pin
 	snap := ps.db.NewSnapshot()
 	return context.WithValue(ctx, snapshotCtxKey{}, &snapshotView{snap: snap, fillToken: tok}), snap
 }

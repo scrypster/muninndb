@@ -28,3 +28,14 @@ func setFillHookForTest(fn func(ws [8]byte, id ULID)) func() {
 func SetCacheFillHookForTesting(fn func(ws [8]byte, id ULID)) (restore func()) {
 	return setFillHookForTest(fn)
 }
+
+// snapshotPinHook is a TEST-ONLY seam inside NewSnapshotContext, between the
+// fill token and the snapshot pin. A write run from it lands in exactly the
+// window whose ordering STO-22 depends on: token first, then pin.
+var snapshotPinHook atomic.Pointer[func()]
+
+func testSnapshotPinPoint() {
+	if h := snapshotPinHook.Load(); h != nil {
+		(*h)()
+	}
+}

@@ -86,6 +86,14 @@ func (ps *PebbleStore) CloneVaultData(
 		return 0, fmt.Errorf("clone: %w", err)
 	}
 
+	// Every pass reads the SOURCE from one snapshot (STO-23). Reading each
+	// prefix live let a forget/evolve/archive between the 0x01 pass and the
+	// 0x02 pass leave the copy disagreeing with itself — engram record active,
+	// metadata record soft-deleted — which hid a live memory in the copy.
+	// Target-side existence checks still read the live DB.
+	snap := ps.db.NewSnapshot()
+	defer snap.Close()
+
 	var copiedEngrams int64
 
 	// ---- Phase 1: Copy engrams (0x01) with ERF decode → reset → re-encode ----
@@ -97,7 +105,7 @@ func (ps *PebbleStore) CloneVaultData(
 		hi[0] = prefix.Engram
 		copy(hi[1:], wsSourceNext[:])
 
-		iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+		iter, err := snap.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
 		if err != nil {
 			return 0, fmt.Errorf("clone: create engram iter: %w", err)
 		}
@@ -219,7 +227,7 @@ func (ps *PebbleStore) CloneVaultData(
 		hi[0] = p
 		copy(hi[1:], wsSourceNext[:])
 
-		iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+		iter, err := snap.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
 		if err != nil {
 			return copiedEngrams, fmt.Errorf("clone: iter prefix 0x%02X: %w", p, err)
 		}
@@ -327,6 +335,14 @@ func (ps *PebbleStore) MergeVaultData(
 		return 0, fmt.Errorf("merge: %w", err)
 	}
 
+	// Every pass reads the SOURCE from one snapshot (STO-23). Reading each
+	// prefix live let a forget/evolve/archive between the 0x01 pass and the
+	// 0x02 pass leave the copy disagreeing with itself — engram record active,
+	// metadata record soft-deleted — which hid a live memory in the copy.
+	// Target-side existence checks still read the live DB.
+	snap := ps.db.NewSnapshot()
+	defer snap.Close()
+
 	var mergedEngrams int64
 
 	// ---- Phase 1: Merge engrams (0x01) with collision detection ----
@@ -338,7 +354,7 @@ func (ps *PebbleStore) MergeVaultData(
 		hi[0] = prefix.Engram
 		copy(hi[1:], wsSourceNext[:])
 
-		iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+		iter, err := snap.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
 		if err != nil {
 			return 0, fmt.Errorf("merge: create engram iter: %w", err)
 		}
@@ -455,7 +471,7 @@ func (ps *PebbleStore) MergeVaultData(
 		hi[0] = p
 		copy(hi[1:], wsSourceNext[:])
 
-		iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+		iter, err := snap.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
 		if err != nil {
 			return mergedEngrams, fmt.Errorf("merge: iter prefix 0x%02X: %w", p, err)
 		}
