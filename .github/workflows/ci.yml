@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Every job only reads the repository: actions/checkout needs contents: read;
+# actions/cache and actions/upload-artifact authenticate with the runner's own
+# runtime token, which GITHUB_TOKEN permissions do not govern; nothing here
+# writes to the repo, PRs, issues, or packages. A job that needs more must
+# declare its own permissions block.
+permissions:
+  contents: read
+
 jobs:
   # ── Go: build + test ────────────────────────────────────────────────────
   go:
@@ -60,11 +68,12 @@ jobs:
       - name: go vet
         run: go vet -tags localassets ./...
 
-      # internal/engine runs in the go-engine job below, sharded: under -race it
-      # outgrew the per-package -timeout 300s on one runner.
-      - name: Run Go tests (every package except internal/engine)
+      # internal/engine (go-engine, sharded) and internal/index/hnsw (go-hnsw)
+      # run in their own jobs below: under -race -cover each outgrew the
+      # per-package -timeout 300s here.
+      - name: Run Go tests (every package except internal/engine and internal/index/hnsw)
         run: |
-          pkgs=$(go list -tags localassets ./... | grep -vx 'github.com/scrypster/muninndb/internal/engine')
+          pkgs=$(go list -tags localassets ./... | grep -vxE 'github.com/scrypster/muninndb/internal/(engine|index/hnsw)')
           # shellcheck disable=SC2086 # word-splitting the package list is intended
           go test -tags localassets $pkgs -timeout 300s -race -coverprofile=coverage.out -covermode=atomic
 
@@ -137,11 +146,43 @@ jobs:
           name: coverage-engine-${{ matrix.shard }}
           path: coverage-engine-${{ matrix.shard }}.out
 
+  # ── Go: internal/index/hnsw tests ───────────────────────────────────────
+  # -race requires -covermode=atomic, and in this package atomic coverage
+  # counters land inside the vector loops, where the race detector instruments
+  # every one: on a 4-CPU linux container one test took 99s with coverage and
+  # 30s without, and the package timed out at 300s with it but finished in
+  # ~116s without. So the race run here collects no coverage, and coverage
+  # comes from a second, uninstrumented run (~20s). Every test still runs under
+  # -race.
+  go-hnsw:
+    name: Go hnsw tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run internal/index/hnsw tests under -race
+        run: go test -tags localassets -race -timeout 300s ./internal/index/hnsw/
+
+      - name: Coverage for internal/index/hnsw (no -race)
+        run: go test -tags localassets -timeout 300s -covermode=set -coverprofile=coverage-hnsw.out ./internal/index/hnsw/
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-hnsw
+          path: coverage-hnsw.out
+
   # ── CLI: integration tests (full binary lifecycle + MCP round-trip) ─────
   cli-integration:
     name: CLI integration tests
     runs-on: ubuntu-latest
-    needs: [go, go-engine]
+    needs: [go, go-engine, go-hnsw]
 
     steps:
       - uses: actions/checkout@v5
@@ -378,7 +419,7 @@ jobs:
   playwright-e2e:
     name: Playwright E2E tests
     runs-on: ubuntu-latest
-    needs: [go, go-engine]
+    needs: [go, go-engine, go-hnsw]
 
     steps:
       - uses: actions/checkout@v5
