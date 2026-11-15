@@ -9,7 +9,8 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
-// mode="recent" is an alias of the vault default (recent-mode orientation
+// mode="recent" is an alias of balanced — engine defaults, ignoring the
+// vault's default recall mode like every wire mode (recent-mode orientation
 // design v2, D1). These tests pin that no MCP surface tells an agent it is
 // anything else — and that the guide's shared-vault session-start call keeps
 // the exact mode="recent" string, which is the COG-29 contradiction-debt
@@ -39,7 +40,7 @@ func recallHint(t *testing.T, eng EngineInterface, args string) string {
 
 // TestHandleRecall_RecentAbstainHintNotCircular: the empty-result hint used to
 // tell a caller who had ALREADY sent mode='recent' to "try mode='recent'".
-// Since recent scores exactly like the default, it cannot rescue an empty
+// Since recent scores exactly like balanced, it cannot rescue an empty
 // result — the hint must say so and route to the tools that can.
 func TestHandleRecall_RecentAbstainHintNotCircular(t *testing.T) {
 	abstained := &mbp.ActivateResponse{Abstained: true, AbstainedReason: "below_threshold"}
@@ -54,10 +55,10 @@ func TestHandleRecall_RecentAbstainHintNotCircular(t *testing.T) {
 		avoid []string
 	}{
 		{"single_recent", single, `{"vault":"default","context":["anything"],"mode":"recent"}`,
-			[]string{"threshold", "scores exactly like the default", "muninn_where_left_off"},
+			[]string{"threshold", "scores exactly like mode='balanced'", "muninn_where_left_off"},
 			[]string{"try mode='recent'"}},
 		{"shared_recent", shared, `{"vault":"default","context":["anything"],"mode":"recent"}`,
-			[]string{"threshold", "scores exactly like the default", "tags_any"},
+			[]string{"threshold", "scores exactly like mode='balanced'", "tags_any"},
 			[]string{"try mode='recent'", "or use muninn_where_left_off"}},
 		// No mode: the hint must not advertise recent as a continuity fix either.
 		{"single_default", single, `{"vault":"default","context":["anything"]}`,
@@ -168,6 +169,39 @@ func TestGuide_MakesNoRecencyClaimForRecentMode(t *testing.T) {
 					t.Errorf("%s guide line about mode recent must not claim %q: %q", name, banned, line)
 				}
 			}
+		}
+	}
+}
+
+// TestHandleRecall_TagFilteredAbstainHintNotCircular: a caller who ALREADY
+// scoped with a tag filter (a new user's first session on a shared vault:
+// context=["user-a"], tags_any=["user-a"], mode="recent") used to be told to
+// "recall with tags_any" — the call they had just made. An explicit tag
+// filter defines the candidate set (COG-5 S1) and floors its rows at the
+// default bar, so the honest reading is that nothing carrying that tag has
+// been stored yet.
+func TestHandleRecall_TagFilteredAbstainHintNotCircular(t *testing.T) {
+	abstained := &mbp.ActivateResponse{Abstained: true, AbstainedReason: "below_threshold"}
+	single := &abstainedFakeEngine{resp: abstained}
+	shared := &abstainedMultiUserEngine{abstainedFakeEngine{resp: abstained}}
+	filters := map[string]string{
+		"tags_any":   `"tags_any":["user-a"]`,
+		"tags_all":   `"tags_all":["user-a"]`,
+		"tag_filter": `"tag_filter":{"prefix":"user:","eq":"a"}`,
+	}
+	for fname, f := range filters {
+		for vname, eng := range map[string]EngineInterface{"single": single, "shared": shared} {
+			t.Run(vname+"_"+fname, func(t *testing.T) {
+				hint := recallHint(t, eng, `{"vault":"default","context":["user-a"],"mode":"recent",`+f+`}`)
+				for _, avoid := range []string{"recall with tags_any", "tags_any=[", "try mode='recent'"} {
+					if strings.Contains(hint, avoid) {
+						t.Errorf("caller already used %s; hint must not recommend %q; got %q", fname, avoid, hint)
+					}
+				}
+				if !strings.Contains(hint, "nothing carrying that tag") {
+					t.Errorf("hint must say plainly that nothing tagged for the caller exists yet; got %q", hint)
+				}
+			})
 		}
 	}
 }

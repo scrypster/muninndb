@@ -48,7 +48,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 		b.WriteString("After completing work, remember key outcomes.\n\n")
 		b.WriteString("**Session start pattern:** At the start of every session, make two calls:\n")
 		if resolved.MultiUser {
-			b.WriteString("1. `muninn_recall(context=[\"<your current topic, or your per-user tag if none>\"], tags_any=[\"<your per-user tag>\"], mode=\"recent\")` — the `tags_any` filter scopes results to YOUR memories; a tag in `context` does not filter, it only affects ranking. `mode=\"recent\"` scores exactly like the default and marks this as a session-orientation call (it attaches any unresolved contradictions). Judge each row by its `relevance_band`. This vault is shared: a recall without the tag filter surfaces other users' work.\n")
+			b.WriteString("1. `muninn_recall(context=[\"<your current topic, or your per-user tag if none>\"], tags_any=[\"<your per-user tag>\"], mode=\"recent\")` — the `tags_any` filter scopes results to YOUR memories; a tag in `context` does not filter, it only affects ranking. `mode=\"recent\"` scores exactly like `mode=\"balanced\"` (engine defaults) and marks this as a session-orientation call (it attaches any unresolved contradictions). Judge each row by its `relevance_band`. This vault is shared: a recall without the tag filter surfaces other users' work.\n")
 			b.WriteString("2. Once the user provides context, call `muninn_recall(context=[<user topic>], tags_any=[\"<your per-user tag>\"])` for your memories on that topic.\n")
 			b.WriteString("Avoid `muninn_where_left_off` and `muninn_session` here — they return vault-global recency across all users (admin/audit use).\n")
 		} else {
@@ -80,7 +80,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("\n## Available Tools\n\n")
 	b.WriteString("- **muninn_remember** — Store a new memory\n")
 	b.WriteString("- **muninn_remember_batch** — Store multiple memories at once (max 50)\n")
-	b.WriteString("- **muninn_recall** — Search memories by context (`mode='recent'` scores exactly like the default; it only marks a session-orientation call)\n")
+	b.WriteString("- **muninn_recall** — Search memories by context (`mode='recent'` scores exactly like `mode='balanced'`; it only marks a session-orientation call)\n")
 	if resolved.MultiUser {
 		b.WriteString("- **muninn_where_left_off** — Recent activity across ALL users of this shared vault (admin/audit; not for session start)\n")
 	} else {
@@ -293,7 +293,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	} else {
 		b.WriteString("- Use muninn_where_left_off at session start — purpose-built for resuming where you left off.\n")
 	}
-	b.WriteString("- mode='recent' is not a recency filter and does not list recent memories: it scores exactly like the default. For topic-free continuity use muninn_where_left_off (single-user vault) or `tags_any` with your per-user tag (shared vault).\n")
+	b.WriteString("- mode='recent' is not a recency filter and does not list recent memories: it scores exactly like mode='balanced' (engine defaults). For topic-free continuity use muninn_where_left_off (single-user vault) or `tags_any` with your per-user tag (shared vault).\n")
 	b.WriteString("- Use muninn_recall with mode='deep' for thorough searches across the memory graph.\n")
 	b.WriteString("- Use muninn_link to connect related memories and strengthen the knowledge graph.\n")
 	b.WriteString("- Use muninn_decide to record decisions — they automatically link to supporting evidence.\n")
