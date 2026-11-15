@@ -242,7 +242,7 @@ func (a *mcpEngineAdapter) Decide(ctx context.Context, vault, decision, rational
 	if err != nil {
 		return nil, err
 	}
-	return &WriteResult{ID: res.ID.String(), Concept: res.Concept, Warnings: res.Warnings}, nil
+	return &WriteResult{ID: res.ID.String(), Concept: res.Concept, Warnings: res.Warnings, Notes: res.Notes}, nil
 }
 
 func (a *mcpEngineAdapter) Restore(ctx context.Context, vault, id string) (*RestoreResult, error) {
