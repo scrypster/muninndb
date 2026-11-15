@@ -553,6 +553,9 @@ func (e *Engine) Traverse(ctx context.Context, vault, startID string, maxHops, m
 // those facts plus an explicit Note, instead of an all-zero card that reads
 // like a genuine score of zero.
 func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []string, embedding []float32) (*ExplainData, error) {
+	// A diagnostic is not an access: its loads must not stamp the L1 cache's
+	// access time, which later recalls read back as a recency score.
+	ctx = storage.ContextWithNoAccessCacheStamp(ctx)
 	result := &ExplainData{
 		EngramID:  engramID,
 		Threshold: e.recallThresholdFor(vault),

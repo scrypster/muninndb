@@ -2693,14 +2693,6 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 		return nil, fmt.Errorf("parse id: %w", err)
 	}
 
-	eng, err := e.store.GetEngram(ctx, wsPrefix, id)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, ErrEngramNotFound
-		}
-		return nil, fmt.Errorf("get engram: %w", err)
-	}
-
 	// S3: effective read-only = observe-mode credential OR an explicit
 	// req.ReadOnly (already the effective decision computed by the
 	// MCP/REST/gRPC handler). A read-only read must skip BOTH write side
@@ -2708,6 +2700,21 @@ func (e *Engine) Read(ctx context.Context, req *mbp.ReadRequest) (*mbp.ReadRespo
 	// closing the brief→"verify before acting"→read→reinforce loop for
 	// observe credentials.
 	readOnly := auth.ObserveFromContext(ctx) || req.ReadOnly
+	if readOnly {
+		// ...and the load itself must not stamp the L1 cache's access time,
+		// which later recalls read back as a recency score: a read-only read
+		// of a memory used to promote it to rank 1 in the next identical
+		// recall. Decided BEFORE the load for that reason.
+		ctx = storage.ContextWithNoAccessCacheStamp(ctx)
+	}
+
+	eng, err := e.store.GetEngram(ctx, wsPrefix, id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, ErrEngramNotFound
+		}
+		return nil, fmt.Errorf("get engram: %w", err)
+	}
 
 	if !readOnly {
 		// Fire implicit positive feedback signal asynchronously — read = accessed.

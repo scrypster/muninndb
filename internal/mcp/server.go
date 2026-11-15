@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 // MCPServer serves the MCP JSON-RPC 2.0 protocol on a single HTTP mux.
@@ -320,6 +321,13 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		mode = auth.ModeFull
 	}
 	ctx = context.WithValue(ctx, auth.ContextMode, mode)
+	// An observe credential is always effectively read-only, for every tool:
+	// none of its loads may stamp the L1 cache's access time, which later
+	// recalls score as recency (engine.Read and recall already honour this
+	// per call; tools without a read_only flag of their own did not).
+	if mode == auth.ModeObserve {
+		ctx = storage.ContextWithNoAccessCacheStamp(ctx)
+	}
 
 	handler(ctx, w, req.ID, vault, args)
 }
