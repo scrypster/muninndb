@@ -731,12 +731,20 @@ func (a *mcpEngineAdapter) RecordFeedback(ctx context.Context, vault, engramID s
 	return a.eng.RecordFeedback(ctx, vault, engramID, useful)
 }
 
-func (a *mcpEngineAdapter) RecordFeedbackLabels(ctx context.Context, vault string, groups []FeedbackGroup, source string) error {
+func (a *mcpEngineAdapter) RecordFeedbackLabels(ctx context.Context, vault string, groups []FeedbackGroup, source string, probeOtherVaults bool) ([]FeedbackOutcome, error) {
 	eg := make([]engine.FeedbackGroup, len(groups))
 	for i, g := range groups {
 		eg[i] = engine.FeedbackGroup{QueryID: g.QueryID, IDs: g.IDs, Useful: g.Useful}
 	}
-	return a.eng.RecordFeedbackLabels(ctx, vault, eg, source)
+	res, err := a.eng.RecordFeedbackLabelsDetailed(ctx, vault, eg, source, engine.FeedbackOptions{ProbeOtherVaults: probeOtherVaults})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FeedbackOutcome, len(res))
+	for i, r := range res {
+		out[i] = FeedbackOutcome{Group: r.Group, QueryID: r.QueryID, ID: r.ID, Outcome: r.Outcome, Reason: r.Reason, HeadID: r.HeadID, Vault: r.Vault}
+	}
+	return out, nil
 }
 
 // LabelStats implements labelStatsReporter.
@@ -746,14 +754,16 @@ func (a *mcpEngineAdapter) LabelStats(ctx context.Context, vault string) (*Label
 		return nil, err
 	}
 	out := &LabelsStatus{
-		WindowDays:    st.WindowDays,
-		Verified:      st.Verified,
-		Token:         st.Token,
-		Positive:      st.Positive,
-		Negative:      st.Negative,
-		FirstInWindow: st.FirstInWindow,
-		Rejected:      st.Rejected,
-		Note:          labelsStatusNote,
+		WindowDays:           st.WindowDays,
+		Verified:             st.Verified,
+		Token:                st.Token,
+		Legacy:               st.Legacy,
+		Positive:             st.Positive,
+		Negative:             st.Negative,
+		MemoryCredentialDays: st.MemoryCredentialDays,
+		Bumps:                st.Bumps,
+		Rejected:             st.Rejected,
+		Note:                 labelsStatusNote,
 	}
 	if !st.RejectedSince.IsZero() {
 		out.RejectedSince = st.RejectedSince.UTC().Format(time.RFC3339)

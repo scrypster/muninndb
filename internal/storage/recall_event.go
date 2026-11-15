@@ -66,10 +66,11 @@ const RecallPurposeTrial RecallEventPurpose = "cognition-trial"
 
 // RecallPurposeLabel marks reads by muninn_feedback's label pipeline: the
 // membership check that a labelled memory was among the entries an event
-// served, and the rank / set size / source flags copied onto the label. It
-// is the ONLY caller of this purpose (Engine.RecordFeedback); the read never
-// leaves the engine — the feedback response is uniform and carries none of
-// it.
+// served, and the rank / set size / source flags copied onto the label
+// (Engine.RecordFeedbackLabelsDetailed, via RecallEventEntries), plus the
+// label-row reads (GetRecallLabel, GetRecallROHeader, GetRecallDayMarker,
+// ScanRecallLabels) that the next slice and the tests use. No event content
+// leaves the engine through it: feedback reports at most a per-id outcome.
 const RecallPurposeLabel RecallEventPurpose = "label"
 
 // validRecallPurposes is the closed allowlist for recall-event reads.

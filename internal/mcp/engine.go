@@ -170,7 +170,10 @@ type EngineInterface interface {
 	// group names the recall (its query_id) and the memories it returned
 	// that were (or were not) useful. Uniform: it never reports per-id
 	// outcomes. source is "direct" or "handoff".
-	RecordFeedbackLabels(ctx context.Context, vault string, groups []FeedbackGroup, source string) error
+	// Outcomes are per (group, id) in input order; the handler shows them
+	// only to callers that can read the vault. probeOtherVaults is set only
+	// for a caller that may read every vault.
+	RecordFeedbackLabels(ctx context.Context, vault string, groups []FeedbackGroup, source string, probeOtherVaults bool) ([]FeedbackOutcome, error)
 
 	// GetEntityAggregate returns the full aggregate view for a named entity.
 	// limit caps engrams returned (0 = default 20).
@@ -233,6 +236,18 @@ type FeedbackGroup struct {
 	QueryID string
 	IDs     []string
 	Useful  bool
+}
+
+// FeedbackOutcome is one (group, id) result of a feedback call.
+type FeedbackOutcome struct {
+	Group   int    `json:"group"`
+	QueryID string `json:"query_id"`
+	ID      string `json:"id"`
+	Outcome string `json:"outcome"`           // recorded | repeat | rejected
+	Reason  string `json:"reason,omitempty"`  // not_in_recall | substituted | unknown_query | wrong_vault | untagged_row | no_key
+	HeadID  string `json:"head_id,omitempty"` // substituted: label this id instead
+	Vault   string `json:"vault,omitempty"`   // wrong_vault: the vault the query_id belongs to
+	Hint    string `json:"hint,omitempty"`
 }
 
 // labelStatsReporter is implemented by engines that can report the label

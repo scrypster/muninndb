@@ -1004,7 +1004,7 @@ func allToolDefinitions() []ToolDefinition {
 		{
 			Name: "muninn_feedback",
 			Description: "Say which memories a recall returned were useful. Send once per recall, after you used its results: " +
-				`{"query_id":"<the recall's query_id>","engram_ids":["<ids that helped>"],"useful":true}. ` +
+				`{"vault":"<the vault you recalled in>","query_id":"<the recall's query_id>","engram_ids":["<ids that helped>"],"useful":true}. ` +
 				"Every muninn_recall response carries this call ready to copy (feedback.call) — replace the placeholder with the ids that actually helped. " +
 				"A label records that this memory helped (useful=true) or did not (useful=false) for THIS query; " +
 				"labels are recorded for measurement and do not change ranking yet. useful=false changes nothing about the memory. " +
@@ -1012,7 +1012,7 @@ func allToolDefinitions() []ToolDefinition {
 				"Re-sending the same labels is harmless (one label per query, memory and credential; the latest useful value wins). " +
 				`Batch form, e.g. for a handoff drain: {"groups":[{"query_id":"…","ids":["…"],"useful":true}],"source":"handoff"} — at most 50 groups, 20 ids per group, 200 ids per call; never pair an id with a recall that did not return it. ` +
 				"Legacy form {\"engram_id\":\"…\",\"useful\":true} is still accepted but records no label. " +
-				"The response is the same whatever happened to each id ({ok, received_groups, received_ids}); muninn_status reports label counts. " +
+				"A credential that can read the vault gets one result per id (recorded, repeat, or rejected with a reason and a hint, e.g. wrong_vault, not_in_recall, substituted); a write-only key gets {ok, received_groups, received_ids} whatever happened. muninn_status reports label counts. " +
 				"A first useful=true label also counts as one access of the memory (access count and last-access time; under default ACT-R scoring that does not change ranking). Feedback never changes confidence.",
 			InputSchema: map[string]any{
 				"type": "object",

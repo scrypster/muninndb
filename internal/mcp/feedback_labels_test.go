@@ -40,12 +40,12 @@ func (e *recordingFeedbackEngine) RecordFeedback(_ context.Context, _, _ string,
 	return nil
 }
 
-func (e *recordingFeedbackEngine) RecordFeedbackLabels(_ context.Context, _ string, groups []FeedbackGroup, _ string) error {
+func (e *recordingFeedbackEngine) RecordFeedbackLabels(_ context.Context, _ string, groups []FeedbackGroup, _ string, _ bool) ([]FeedbackOutcome, error) {
 	e.labelCalls++
 	for _, g := range groups {
 		e.lastUseful = append(e.lastUseful, g.Useful)
 	}
-	return nil
+	return nil, nil
 }
 
 const testULID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -257,7 +257,7 @@ func TestRecallOverMCP_QueryIDAndFeedbackBlockPresent(t *testing.T) {
 	require.True(t, ok, "a non-empty recall carries the feedback block: %v", res)
 	require.Equal(t, qid, fb["query_id"])
 	call, _ := fb["call"].(string)
-	require.Equal(t, `muninn_feedback {"query_id":"`+qid+`","engram_ids":["<ids that helped>"],"useful":true}`, call)
+	require.Equal(t, `muninn_feedback {"vault":"default","query_id":"`+qid+`","engram_ids":["<ids that helped>"],"useful":true}`, call)
 	require.Equal(t, recallFeedbackNote(), fb["note"])
 
 	ro := ls.recall(t, "", "default", "ridge trail drainage", map[string]any{"read_only": true})

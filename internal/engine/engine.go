@@ -5787,20 +5787,26 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 	}
 	// Existence first: the day marker is keyed partly by this caller-supplied
 	// id, so an id that names no memory must write nothing.
-	if eng, gerr := e.store.GetEngram(storage.ContextWithNoAccessCacheStamp(ctx), wsPrefix, id); gerr != nil || eng == nil {
+	readCtx := storage.ContextWithNoAccessCacheStamp(ctx)
+	if eng, gerr := e.store.GetEngram(readCtx, wsPrefix, id); gerr != nil || eng == nil {
 		if gerr != nil && !errors.Is(gerr, storage.ErrNotFound) {
 			return fmt.Errorf("record feedback: storage error")
 		}
 		metrics.FeedbackLegacyTotal.WithLabelValues("false").Inc()
 		return nil
 	}
-	lc, _, _ := e.callerHashes(ctx)
 	now := e.labelClock()
+	// A soft-deleted, superseded or expired memory is never bumped.
+	live, err := e.labelLive(readCtx, wsPrefix, id, now)
+	if err != nil {
+		return err
+	}
+	lc, _, _ := e.callerHashes(ctx)
 	// The same DURABLE per-(memory, credential, UTC day) marker as the
 	// labelled path: one bump per credential per memory per day, across
-	// restarts. Existence was checked first, so markers exist only for real
-	// memories.
-	mk, _, granted, err := e.store.UpsertRecallDayMarker(ctx, wsPrefix, unixDay(now), id, lc, now.UnixMilli(), true)
+	// restarts.
+	mk, _, granted, err := e.store.UpsertRecallDayMarker(ctx, wsPrefix, unixDay(now), id, lc, now.UnixMilli(), live,
+		storage.DayMarkerPost{Positive: true})
 	if err != nil {
 		return fmt.Errorf("record feedback: storage error")
 	}

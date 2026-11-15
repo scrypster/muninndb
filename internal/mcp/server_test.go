@@ -174,8 +174,8 @@ func (f *fakeEngine) GetProvenance(_ context.Context, _, _ string) ([]Provenance
 	return []ProvenanceEntry{}, nil
 }
 
-func (f *fakeEngine) RecordFeedbackLabels(_ context.Context, _ string, _ []FeedbackGroup, _ string) error {
-	return nil
+func (f *fakeEngine) RecordFeedbackLabels(_ context.Context, _ string, _ []FeedbackGroup, _ string, _ bool) ([]FeedbackOutcome, error) {
+	return nil, nil
 }
 
 func (f *fakeEngine) RecordFeedback(_ context.Context, _, _ string, _ bool) error {

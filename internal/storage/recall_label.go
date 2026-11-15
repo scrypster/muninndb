@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/vmihailenco/msgpack/v5"
@@ -286,7 +288,26 @@ type RecallDayMarker struct {
 	Posts    uint32 `msgpack:"n"` // feedback posts that day (labels and legacy), repeats included
 	FirstAt  int64  `msgpack:"f"` // unix ms of the day's first post
 	BumpedAt int64  `msgpack:"b"` // unix ms the day's access bump was granted; 0 = not granted
+	// Per-kind post counts, so muninn_status reads the trailing window's
+	// markers instead of every label row ever stored.
+	Verified uint32 `msgpack:"v,omitempty"` // labels verified against the event
+	Token    uint32 `msgpack:"t,omitempty"` // labels verified against a read-only id's tags
+	Legacy   uint32 `msgpack:"l,omitempty"` // legacy engram_id posts (no label)
+	Positive uint32 `msgpack:"p,omitempty"`
+	Negative uint32 `msgpack:"g,omitempty"`
 }
+
+// DayMarkerPost describes one post for UpsertRecallDayMarker's counts.
+type DayMarkerPost struct {
+	Membership uint8 // LabelMembership*, or 0 for a legacy post
+	Positive   bool
+}
+
+// recallMarkerWriteSeq drives the amortized prune from the FEEDBACK write
+// path: a vault used only through read-only recalls and feedback writes no
+// events, so WriteRecallEvent's schedule alone would never prune its label
+// groups or day markers.
+var recallMarkerWriteSeq atomic.Uint64
 
 // UpsertRecallDayMarker records one feedback post for (memory, lc, day) and
 // decides — durably, under the marker key's stripe lock, in one replicated
@@ -296,7 +317,20 @@ type RecallDayMarker struct {
 // performs the bump AFTER this returns (never under the lock: stripes are
 // shared with engram CAS locks), so a failed bump is a lost bump, never an
 // extra one.
-func (ps *PebbleStore) UpsertRecallDayMarker(ctx context.Context, wsPrefix [8]byte, unixDay int64, engramID ULID, lc [8]byte, nowMs int64, wantBump bool) (m RecallDayMarker, firstToday, granted bool, err error) {
+func (ps *PebbleStore) UpsertRecallDayMarker(ctx context.Context, wsPrefix [8]byte, unixDay int64, engramID ULID, lc [8]byte, nowMs int64, wantBump bool, post DayMarkerPost) (m RecallDayMarker, firstToday, granted bool, err error) {
+	m, firstToday, granted, err = ps.upsertRecallDayMarker(ctx, wsPrefix, unixDay, engramID, lc, nowMs, wantBump, post)
+	if err == nil && recallMarkerWriteSeq.Add(1)%recallEventPruneInterval == 0 {
+		now := time.Now()
+		if _, perr := ps.PruneRecallEvents(ctx, wsPrefix,
+			now.AddDate(0, 0, -recallEventRetentionDays),
+			now.AddDate(0, 0, -recallLabelledRetentionDays)); perr != nil {
+			slog.Warn("storage: amortized recall-event prune (feedback path) failed", "err", perr)
+		}
+	}
+	return m, firstToday, granted, err
+}
+
+func (ps *PebbleStore) upsertRecallDayMarker(ctx context.Context, wsPrefix [8]byte, unixDay int64, engramID ULID, lc [8]byte, nowMs int64, wantBump bool, post DayMarkerPost) (m RecallDayMarker, firstToday, granted bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return RecallDayMarker{}, false, false, err
 	}
@@ -319,6 +353,19 @@ func (ps *PebbleStore) UpsertRecallDayMarker(ctx context.Context, wsPrefix [8]by
 		}
 	}
 	m.Posts++
+	switch post.Membership {
+	case LabelMembershipVerified:
+		m.Verified++
+	case LabelMembershipToken:
+		m.Token++
+	default:
+		m.Legacy++
+	}
+	if post.Positive {
+		m.Positive++
+	} else {
+		m.Negative++
+	}
 	if wantBump && m.BumpedAt == 0 {
 		m.BumpedAt = nowMs
 		granted = true
@@ -357,4 +404,52 @@ func (ps *PebbleStore) GetRecallDayMarker(ctx context.Context, wsPrefix [8]byte,
 		return nil, err
 	}
 	return &m, nil
+}
+
+// ScanRecallDayMarkers iterates the vault's day markers for UTC days
+// [fromDay, toDay]. It reads only the key range of that window — every 0x29
+// key written for events of those days plus the markers — so its cost is
+// bounded by the window's activity, never by the vault's history. Not
+// purpose-gated, like CountRecallEventsSince: a marker holds counts only, no
+// query text and no recall content.
+func (ps *PebbleStore) ScanRecallDayMarkers(ctx context.Context, wsPrefix [8]byte, fromDay, toDay int64, fn func(engramID ULID, lc [8]byte, m *RecallDayMarker) error) error {
+	lo := keys.RecallEventKey(wsPrefix, keys.RecallDayEventID(fromDay))
+	hi := keys.RecallEventKey(wsPrefix, keys.RecallDayEventID(toDay+1))
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	if err != nil {
+		return fmt.Errorf("scan recall day markers: %w", err)
+	}
+	defer iter.Close()
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		k := iter.Key()
+		if len(k) != keys.RecallLabelKeyLen || k[25] != keys.RecallChildDayMarker {
+			continue
+		}
+		var m RecallDayMarker
+		if err := msgpack.Unmarshal(iter.Value(), &m); err != nil {
+			return fmt.Errorf("recall day marker unmarshal: %w", err)
+		}
+		var id ULID
+		var lc [8]byte
+		copy(id[:], k[26:42])
+		copy(lc[:], k[42:50])
+		if err := fn(id, lc, &m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RecallEventExists reports whether a parent event exists (key only, no
+// value read) — the feedback path's wrong-vault probe.
+func (ps *PebbleStore) RecallEventExists(wsPrefix [8]byte, eventID ULID) bool {
+	_, closer, err := ps.db.Get(keys.RecallEventKey(wsPrefix, [16]byte(eventID)))
+	if err != nil {
+		return false
+	}
+	closer.Close()
+	return true
 }

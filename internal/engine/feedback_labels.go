@@ -246,29 +246,66 @@ func (e *Engine) mintRecallQueryID(vault string, eventID storage.ULID, readOnly 
 	return e.qidKey.MintReadOnlyQueryID(vault, [16]byte(eventID), eventID.String(), rc, rs, rows)
 }
 
-type labelTarget struct {
-	group   int
-	eventID storage.ULID
-	memID   storage.ULID
-	useful  bool
+// Feedback outcomes. The engine always computes them; the TRANSPORT decides
+// who may see them. A caller that cannot read the vault (a write-mode key)
+// gets the uniform response, so it learns nothing about existence; a caller
+// that can recall in the vault gains nothing from uniformity and needs the
+// outcome to self-correct.
+const (
+	FeedbackOutcomeRecorded = "recorded" // a new label for (query, memory, credential)
+	FeedbackOutcomeRepeat   = "repeat"   // the label existed (polarity updated) or the pair repeated in this call
+	FeedbackOutcomeRejected = "rejected"
+
+	FeedbackReasonNotInRecall  = "not_in_recall" // the query did not return this memory
+	FeedbackReasonSubstituted  = "substituted"   // it returned the memory's current version (HeadID) instead
+	FeedbackReasonUnknownQuery = "unknown_query" // no such recall in this vault (or an id from before a secret rotation)
+	FeedbackReasonWrongVault   = "wrong_vault"   // the id belongs to another vault (Vault), named only to callers that may read every vault
+	FeedbackReasonUntaggedRow  = "untagged_row"  // a read-only id tags only its first 100 rows
+	FeedbackReasonNoKey        = "no_key"        // a read-only id from a server with no auth secret
+)
+
+// FeedbackOutcome is the result for one (group, id) of a feedback call, in
+// input order.
+type FeedbackOutcome struct {
+	Group   int
+	QueryID string
+	ID      string
+	Outcome string
+	Reason  string
+	HeadID  string // FeedbackReasonSubstituted: the id the recall returned
+	Vault   string // FeedbackReasonWrongVault: the vault the id belongs to
 }
 
-// RecordFeedbackLabels records labels for the memories each group's recall
-// returned. Synchronous: when it returns nil, every accepted label is
-// committed (and replicated). It never reports per-id outcomes — not
-// existence, not membership, not repetition — so its result is uniform for
-// every credential; outcomes are visible only in aggregate (metrics, status).
+// FeedbackOptions are per-call transport decisions.
+type FeedbackOptions struct {
+	// ProbeOtherVaults: the caller may read every vault (an unpinned
+	// credential), so on an unknown id the engine may look for the vault it
+	// belongs to and name it. Never set for a vault-pinned credential: it
+	// would reveal another vault's existence.
+	ProbeOtherVaults bool
+}
+
+// RecordFeedbackLabels is RecordFeedbackLabelsDetailed without outcomes.
+func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups []FeedbackGroup, channel string) error {
+	_, err := e.RecordFeedbackLabelsDetailed(ctx, vault, groups, channel, FeedbackOptions{})
+	return err
+}
+
+// RecordFeedbackLabelsDetailed records labels for the memories each group's
+// recall returned, and returns one outcome per (group, id) in input order.
+// Synchronous: when it returns, every accepted label is committed (and
+// replicated).
 //
 // Gates: cluster single-writer (SEC-13), then observe refusal. Append-mode
 // credentials MAY label (SEC-15 amendment): a label creates a child row and,
-// on a first positive label, strengthens access metadata — it never
-// modifies or deletes the memory.
-func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups []FeedbackGroup, channel string) error {
+// on a first positive label of a LIVE memory, strengthens access metadata —
+// it never modifies or deletes the memory.
+func (e *Engine) RecordFeedbackLabelsDetailed(ctx context.Context, vault string, groups []FeedbackGroup, channel string, opts FeedbackOptions) ([]FeedbackOutcome, error) {
 	if err := e.refuseNonLeaderWrite(); err != nil {
-		return err
+		return nil, err
 	}
 	if auth.ObserveFromContext(ctx) {
-		return ErrObserveForbidden
+		return nil, ErrObserveForbidden
 	}
 	var ch uint8
 	switch channel {
@@ -277,24 +314,24 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 	case FeedbackChannelHandoff:
 		ch = storage.LabelChannelHandoff
 	default:
-		return fmt.Errorf("%w: feedback source must be direct or handoff", ErrInvalidRequest)
+		return nil, fmt.Errorf("%w: feedback source must be direct or handoff", ErrInvalidRequest)
 	}
 
 	// Shape validation (the MCP layer already did this with exact messages;
 	// the engine is the authority for every other caller), including the
 	// size limits, so no caller can make one call unbounded.
 	if len(groups) > maxFeedbackGroups {
-		return fmt.Errorf("%w: too many groups in one feedback call (max %d)", ErrInvalidRequest, maxFeedbackGroups)
+		return nil, fmt.Errorf("%w: too many groups in one feedback call (max %d)", ErrInvalidRequest, maxFeedbackGroups)
 	}
 	totalIDs := 0
 	for _, g := range groups {
 		totalIDs += len(g.IDs)
 		if len(g.IDs) > maxFeedbackIDsPerGroup {
-			return fmt.Errorf("%w: too many ids in one group (max %d)", ErrInvalidRequest, maxFeedbackIDsPerGroup)
+			return nil, fmt.Errorf("%w: too many ids in one group (max %d)", ErrInvalidRequest, maxFeedbackIDsPerGroup)
 		}
 	}
 	if totalIDs > maxFeedbackIDsPerCall {
-		return fmt.Errorf("%w: too many ids in one feedback call (max %d)", ErrInvalidRequest, maxFeedbackIDsPerCall)
+		return nil, fmt.Errorf("%w: too many ids in one feedback call (max %d)", ErrInvalidRequest, maxFeedbackIDsPerCall)
 	}
 	type resolvedGroup struct {
 		kind auth.QueryIDKind
@@ -306,17 +343,17 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 	for gi, g := range groups {
 		kind, p := auth.ClassifyQueryID(g.QueryID)
 		if kind == auth.QueryIDInvalid {
-			return fmt.Errorf("%w: groups[%d]: query_id must be the query_id returned by muninn_recall", ErrInvalidRequest, gi)
+			return nil, fmt.Errorf("%w: groups[%d]: query_id must be the query_id returned by muninn_recall", ErrInvalidRequest, gi)
 		}
 		eid, err := storage.ParseULID(p.ULID)
 		if err != nil {
-			return fmt.Errorf("%w: groups[%d]: query_id must be the query_id returned by muninn_recall", ErrInvalidRequest, gi)
+			return nil, fmt.Errorf("%w: groups[%d]: query_id must be the query_id returned by muninn_recall", ErrInvalidRequest, gi)
 		}
 		mems := make([]storage.ULID, 0, len(g.IDs))
 		for ii, s := range g.IDs {
 			m, err := storage.ParseULID(s)
 			if err != nil {
-				return fmt.Errorf("%w: groups[%d].ids[%d] is not a memory id", ErrInvalidRequest, gi, ii)
+				return nil, fmt.Errorf("%w: groups[%d].ids[%d] is not a memory id", ErrInvalidRequest, gi, ii)
 			}
 			mems = append(mems, m)
 		}
@@ -342,7 +379,7 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 		var err error
 		events, err = e.store.RecallEventEntries(ctx, ws, eventIDs, storage.RecallPurposeLabel)
 		if err != nil {
-			return fmt.Errorf("record feedback: %w", err)
+			return nil, fmt.Errorf("record feedback: %w", err)
 		}
 	}
 
@@ -351,34 +388,90 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 	readCtx := storage.ContextWithNoAccessCacheStamp(ctx)
 	now := e.labelClock()
 	seen := make(map[[2]storage.ULID]struct{})
+	var out []FeedbackOutcome
+	rejectGroup := func(gi int, r resolvedGroup, metricReason, reason, otherVault string) {
+		e.noteLabelRejected(vault, ws, vaultExists, metricReason, len(r.mems))
+		for _, m := range r.mems {
+			out = append(out, FeedbackOutcome{Group: gi, QueryID: groups[gi].QueryID, ID: m.String(), Outcome: FeedbackOutcomeRejected, Reason: reason, Vault: otherVault})
+		}
+	}
 	for gi, r := range resolved {
 		useful := groups[gi].Useful
 		switch r.kind {
 		case auth.QueryIDNoKey:
-			e.noteLabelRejected(vault, ws, vaultExists, labelRejectNoKey, len(r.mems))
+			rejectGroup(gi, r, labelRejectNoKey, FeedbackReasonNoKey, "")
 			continue
 		case auth.QueryIDReadOnly:
 			if !e.qidKey.VerifyReadOnly(vault, [16]byte(r.e), r.ro) {
-				e.noteLabelRejected(vault, ws, vaultExists, labelRejectBadMAC, len(r.mems))
+				other := ""
+				if opts.ProbeOtherVaults {
+					other = e.probeReadOnlyVault(vault, r.e, r.ro)
+				}
+				if other != "" {
+					rejectGroup(gi, r, labelRejectBadMAC, FeedbackReasonWrongVault, other)
+				} else {
+					rejectGroup(gi, r, labelRejectBadMAC, FeedbackReasonUnknownQuery, "")
+				}
 				continue
 			}
 		case auth.QueryIDEvent:
 			if events[r.e] == nil {
-				e.noteLabelRejected(vault, ws, vaultExists, labelRejectUnknownEvent, len(r.mems))
+				other := ""
+				if opts.ProbeOtherVaults {
+					other = e.probeEventVault(vault, r.e)
+				}
+				if other != "" {
+					rejectGroup(gi, r, labelRejectUnknownEvent, FeedbackReasonWrongVault, other)
+				} else {
+					rejectGroup(gi, r, labelRejectUnknownEvent, FeedbackReasonUnknownQuery, "")
+				}
 				continue
 			}
 		}
+		// isMember reports a memory's served rank in this group's recall.
+		isMember := func(id storage.ULID) (int, bool) {
+			if r.kind == auth.QueryIDEvent {
+				is := id.String()
+				for i := range events[r.e].Entries {
+					if events[r.e].Entries[i].ID == is {
+						return i + 1, true
+					}
+				}
+				return 0, false
+			}
+			return e.qidKey.ReadOnlyRank(vault, [16]byte(r.e), r.ro, [16]byte(id))
+		}
 		for _, m := range r.mems {
+			o := FeedbackOutcome{Group: gi, QueryID: groups[gi].QueryID, ID: m.String()}
 			pair := [2]storage.ULID{r.e, m}
 			if _, dup := seen[pair]; dup {
-				continue // deduped within the call
+				o.Outcome = FeedbackOutcomeRepeat // deduped within the call
+				out = append(out, o)
+				continue
 			}
 			seen[pair] = struct{}{}
+
+			rank, member := isMember(m)
+			if !member {
+				o.Outcome, o.Reason = FeedbackOutcomeRejected, FeedbackReasonNotInRecall
+				if head := e.labelHead(ctx, ws, m); head != m {
+					if _, ok := isMember(head); ok {
+						o.Reason, o.HeadID = FeedbackReasonSubstituted, head.String()
+					}
+				}
+				if o.Reason == FeedbackReasonNotInRecall && r.kind == auth.QueryIDReadOnly && r.ro.Rows() >= auth.ROMaxRows {
+					o.Reason = FeedbackReasonUntaggedRow
+				}
+				e.noteLabelRejected(vault, ws, vaultExists, labelRejectNotInRecall, 1)
+				out = append(out, o)
+				continue
+			}
 
 			fresh := storage.RecallLabel{
 				LastAt:    now.UnixMilli(),
 				Channel:   ch,
 				LabelSess: nonZero(ls),
+				Rank:      clampU16(rank),
 			}
 			if useful {
 				fresh.Polarity = 1
@@ -386,32 +479,13 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 			var header *storage.RecallROHeader
 			if r.kind == auth.QueryIDEvent {
 				ev := events[r.e]
-				idx := -1
-				ms := m.String()
-				for i := range ev.Entries {
-					if ev.Entries[i].ID == ms {
-						idx = i
-						break
-					}
-				}
-				if idx < 0 {
-					e.noteLabelRejected(vault, ws, vaultExists, labelRejectNotInRecall, 1)
-					continue
-				}
 				fresh.Membership = storage.LabelMembershipVerified
-				fresh.Rank = clampU16(idx + 1)
 				fresh.SetSize = clampU16(len(ev.Entries))
-				fresh.Source = ev.EntrySource(idx)
+				fresh.Source = ev.EntrySource(rank - 1)
 				fresh.RecallCred = ev.RecallCred
 				fresh.RecallSess = ev.RecallSess
 			} else {
-				rank, member := e.qidKey.ReadOnlyRank(vault, [16]byte(r.e), r.ro, [16]byte(m))
-				if !member {
-					e.noteLabelRejected(vault, ws, vaultExists, labelRejectNotInRecall, 1)
-					continue
-				}
 				fresh.Membership = storage.LabelMembershipToken
-				fresh.Rank = clampU16(rank)
 				fresh.SetSize = clampU16(r.ro.Rows())
 				fresh.Source = storage.RecallSourceUnknown
 				fresh.RecallCred = nonZero(r.ro.RC)
@@ -424,31 +498,28 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 				}
 			}
 
-			eng, err := e.store.GetEngram(readCtx, ws, m)
-			if err != nil && !errors.Is(err, storage.ErrNotFound) {
-				return fmt.Errorf("record feedback: storage error")
+			live, err := e.labelLive(readCtx, ws, m, now)
+			if err != nil {
+				return nil, err
 			}
-			exists := err == nil && eng != nil
-			if !exists {
-				// A verified member that was since hard-deleted: still a
-				// label about what the recall served.
-				fresh.Superseded = 1
-			} else if eng.State == storage.StateSoftDeleted || eng.IsExpired(now) {
+			if !live {
+				// Hard- or soft-deleted, superseded or expired when labelled:
+				// still a label about what the recall served, never a use.
 				fresh.Superseded = 1
 			}
 			fresh.Self = e.selfLabel(ctx, ws, m, fresh.RecallSess)
 			_, first, err := e.store.UpsertRecallLabel(ctx, ws, r.e, m, lc, fresh, header)
 			if err != nil {
-				return fmt.Errorf("record feedback: storage error")
+				return nil, fmt.Errorf("record feedback: storage error")
 			}
 			// The day marker decides the access bump DURABLY: granted only on
 			// a first positive label of this (query, memory, credential), for
-			// a memory that exists, and only if this credential has not
-			// already earned this memory's bump today.
-			nowDay := unixDay(now)
-			mk, _, granted, err := e.store.UpsertRecallDayMarker(ctx, ws, nowDay, m, lc, now.UnixMilli(), first && useful && exists)
+			// a LIVE memory, and only if this credential has not already
+			// earned this memory's bump today.
+			mk, _, granted, err := e.store.UpsertRecallDayMarker(ctx, ws, unixDay(now), m, lc, now.UnixMilli(), first && useful && live,
+				storage.DayMarkerPost{Membership: fresh.Membership, Positive: useful})
 			if err != nil {
-				return fmt.Errorf("record feedback: storage error")
+				return nil, fmt.Errorf("record feedback: storage error")
 			}
 			noteStormFromMarker(mk.Posts)
 			membership := "verified"
@@ -460,12 +531,13 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 				polarity = "pos"
 			}
 			metrics.FeedbackLabelsTotal.WithLabelValues(membership, polarity, channel, fmt.Sprint(first)).Inc()
+			if first {
+				o.Outcome = FeedbackOutcomeRecorded
+			} else {
+				o.Outcome = FeedbackOutcomeRepeat
+			}
+			out = append(out, o)
 
-			// A FIRST positive label on a verified member (event or row tag —
-			// there is no unverified path) is one use, capped per
-			// (credential, memory, UTC day) like every bump path.
-			// Synchronous, swallowing not-found. Repeats never bump;
-			// useful=false never bumps; a deleted memory is never bumped.
 			if granted {
 				if err := e.store.TouchAccess(ctx, ws, m); err != nil && !errors.Is(err, storage.ErrNotFound) {
 					slog.Warn("feedback: access bump failed", "err", err)
@@ -473,7 +545,73 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 			}
 		}
 	}
-	return nil
+	return out, nil
+}
+
+// labelLive reports whether m is a live memory: it exists, is not
+// soft-deleted and has not expired. Only a live memory may receive feedback's
+// access bump. "Superseded" needs no separate check: both supersession paths
+// close the predecessor — evolve soft-deletes it and stamps ValidUntil
+// (SupersedeEngram), and an explicit supersedes link stamps ValidUntil
+// (Engine.Link) — and a successor-scan here was measured redundant (removing
+// it left TestFeedback_NotLiveMemoriesNeverBumped green for every state).
+func (e *Engine) labelLive(ctx context.Context, ws [8]byte, m storage.ULID, now time.Time) (bool, error) {
+	eng, err := e.store.GetEngram(ctx, ws, m)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("record feedback: storage error")
+	}
+	return eng != nil && eng.State != storage.StateSoftDeleted && !eng.IsExpired(now), nil
+}
+
+// labelHead walks m's supersession chain to its head (an unambiguous chain
+// only; a fork or a cycle stops the walk where it is).
+func (e *Engine) labelHead(ctx context.Context, ws [8]byte, m storage.ULID) storage.ULID {
+	cur := m
+	seen := map[storage.ULID]bool{m: true}
+	for depth := 0; depth < supersessionMaxDepth; depth++ {
+		succ, err := e.store.SupersedersOf(ctx, ws, cur)
+		if err != nil || len(succ) != 1 || seen[succ[0]] {
+			return cur
+		}
+		cur = succ[0]
+		seen[cur] = true
+	}
+	return cur
+}
+
+// probeEventVault finds the vault a normal query id's event belongs to, for
+// a caller allowed to read every vault. Failure path only; one key Get per
+// vault.
+func (e *Engine) probeEventVault(vault string, id storage.ULID) string {
+	names, err := e.store.ListVaultNames()
+	if err != nil {
+		return ""
+	}
+	for _, n := range names {
+		if n != vault && e.store.RecallEventExists(e.store.ResolveVaultPrefix(n), id) {
+			return n
+		}
+	}
+	return ""
+}
+
+// probeReadOnlyVault finds the vault an ro1. id was minted for (its MAC binds
+// the vault name), for a caller allowed to read every vault. One HMAC per
+// vault, failure path only.
+func (e *Engine) probeReadOnlyVault(vault string, id storage.ULID, p auth.ParsedReadOnlyID) string {
+	names, err := e.store.ListVaultNames()
+	if err != nil {
+		return ""
+	}
+	for _, n := range names {
+		if n != vault && e.qidKey.VerifyReadOnly(n, [16]byte(id), p) {
+			return n
+		}
+	}
+	return ""
 }
 
 // selfLabel decides whether memory m was written in the recall's session,
@@ -501,56 +639,51 @@ func (e *Engine) selfLabel(ctx context.Context, ws [8]byte, m storage.ULID, reca
 	return storage.LabelSelfUnknown
 }
 
-// LabelStats is the status `labels` block for one vault: persisted label rows
-// last posted in the trailing window, and the process-local rejection tally.
+// LabelStats is the status `labels` block for one vault, over the trailing
+// window: post counts from the window's durable day markers, and the
+// process-local rejection tally.
 type LabelStats struct {
 	WindowDays int
-	// Persisted (survive restarts): label rows whose last post is in the window.
-	// Verified: membership checked against the recall event; Token: checked
-	// against a read-only id's row tags.
-	Verified, Token    int
-	Positive, Negative int
-	// FirstInWindow counts rows whose FIRST post is in the window.
-	FirstInWindow int
+	// Posts in the window, by kind: Verified (against the recall event),
+	// Token (against a read-only id's row tags), Legacy (engram_id, no label).
+	Verified, Token, Legacy int
+	Positive, Negative      int
+	// MemoryCredentialDays counts (memory, credential, UTC day) with feedback;
+	// Bumps how many of them earned the day's access bump.
+	MemoryCredentialDays, Bumps int
 	// Rejected is process-local: per-reason counts in the window, since
-	// RejectedSince (the first rejection this process saw, or zero).
+	// RejectedSince (this vault's first rejection this process saw, or zero).
 	Rejected      map[string]int64
 	RejectedSince time.Time
 }
 
-// LabelStats reports the vault's label outcomes for the trailing 7 days. No
-// ids, no content — counts only.
+// LabelStats reports the vault's feedback for the trailing 7 days. No ids, no
+// content — counts only. Cost: one range scan over the 0x29 keys of the last
+// 7 days (ScanRecallDayMarkers), bounded by that window's activity, never by
+// the vault's history; no per-call INFO log.
 func (e *Engine) LabelStats(ctx context.Context, vault string) (*LabelStats, error) {
 	ws := e.store.ResolveVaultPrefix(vault)
 	now := e.labelClock()
-	cutoff := now.AddDate(0, 0, -labelStatsWindowDays).UnixMilli()
+	today := unixDay(now)
 	out := &LabelStats{WindowDays: labelStatsWindowDays, Rejected: make(map[string]int64, len(labelRejectReasons))}
 	for _, r := range labelRejectReasons {
 		out.Rejected[r] = 0
 	}
-	err := e.store.ScanRecallLabels(ctx, ws, storage.RecallPurposeLabel, func(row storage.RecallLabelRow) error {
-		if row.Label.LastAt < cutoff {
-			return nil
-		}
-		if row.Label.Membership == storage.LabelMembershipToken {
-			out.Token++
-		} else {
-			out.Verified++
-		}
-		if row.Label.Polarity == 1 {
-			out.Positive++
-		} else {
-			out.Negative++
-		}
-		if row.Label.FirstAt >= cutoff {
-			out.FirstInWindow++
+	err := e.store.ScanRecallDayMarkers(ctx, ws, today-labelStatsWindowDays+1, today, func(_ storage.ULID, _ [8]byte, m *storage.RecallDayMarker) error {
+		out.Verified += int(m.Verified)
+		out.Token += int(m.Token)
+		out.Legacy += int(m.Legacy)
+		out.Positive += int(m.Positive)
+		out.Negative += int(m.Negative)
+		out.MemoryCredentialDays++
+		if m.BumpedAt != 0 {
+			out.Bumps++
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	today := unixDay(now)
 	e.labels.mu.Lock()
 	if vt := e.labels.vaults[ws]; vt != nil {
 		out.RejectedSince = vt.since

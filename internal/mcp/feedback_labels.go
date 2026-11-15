@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 )
@@ -29,24 +30,70 @@ func recallFeedbackNote() string {
 // top row would manufacture exactly the position bias the labels exist to
 // measure. The placeholder sent verbatim is a clear -32602, never a silent
 // no-op.
-func recallFeedbackCall(queryID string) string {
+//
+// The call carries the VAULT the recall ran in: on a server whose credential
+// is not pinned to a vault, an omitted vault resolves to "default", and a
+// label for a recall in any other vault would be lost.
+func recallFeedbackCall(queryID, vault string) string {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false) // keep "<ids that helped>" readable
 	_ = enc.Encode(struct {
+		Vault     string   `json:"vault"`
 		QueryID   string   `json:"query_id"`
 		EngramIDs []string `json:"engram_ids"`
 		Useful    bool     `json:"useful"`
-	}{QueryID: queryID, EngramIDs: []string{feedbackIDPlaceholder}, Useful: true})
+	}{Vault: vault, QueryID: queryID, EngramIDs: []string{feedbackIDPlaceholder}, Useful: true})
 	return "muninn_feedback " + strings.TrimSpace(buf.String())
 }
 
 // recallFeedbackBlock is the `feedback` block of a recall response that
 // returned at least one row.
-func recallFeedbackBlock(queryID string) map[string]any {
+func recallFeedbackBlock(queryID, vault string) map[string]any {
 	return map[string]any{
 		"query_id": queryID,
-		"call":     recallFeedbackCall(queryID),
+		"vault":    vault,
+		"call":     recallFeedbackCall(queryID, vault),
 		"note":     recallFeedbackNote(),
 	}
+}
+
+// feedbackAccess is what dispatch knows about the caller that the feedback
+// handler needs: whether it can read the vault (and so may see per-id
+// outcomes) and whether it may read every vault (and so may be told which
+// vault a misdirected query id belongs to).
+type feedbackAccess struct {
+	canRead   bool
+	allVaults bool
+}
+
+type feedbackAccessKey struct{}
+
+func withFeedbackAccess(ctx context.Context, a feedbackAccess) context.Context {
+	return context.WithValue(ctx, feedbackAccessKey{}, a)
+}
+
+// feedbackAccessFrom fails closed: no value → a non-reader.
+func feedbackAccessFrom(ctx context.Context) feedbackAccess {
+	a, _ := ctx.Value(feedbackAccessKey{}).(feedbackAccess)
+	return a
+}
+
+// feedbackHint is the self-correction text for a rejected outcome.
+func feedbackHint(o FeedbackOutcome) string {
+	switch o.Reason {
+	case "not_in_recall":
+		return "that recall did not return this id; label only ids from the same recall's memories"
+	case "substituted":
+		return "that recall returned this memory's current version " + o.HeadID + " in its place; label " + o.HeadID
+	case "unknown_query":
+		return "no recall with this query_id in this vault; pass the vault the recall ran in (feedback.call carries it)"
+	case "wrong_vault":
+		return "this query_id belongs to vault " + o.Vault + "; send the label with \"vault\":\"" + o.Vault + "\""
+	case "untagged_row":
+		return "a read-only query_id covers only its first 100 rows"
+	case "no_key":
+		return "this server has no auth secret, so read-only query_ids cannot be labelled"
+	}
+	return ""
 }

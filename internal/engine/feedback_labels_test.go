@@ -358,7 +358,10 @@ func TestFeedback_DifferentCredentialsAreDistinctLabels(t *testing.T) {
 // on one UTC day; a new day allows one more.
 func TestFeedback_LegacyFormCappedPerDay(t *testing.T) {
 	le := newLabelEnv(t, testSecret)
-	day := time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)
+	// A frozen clock at the REAL current time: the amortized prune runs on
+	// the wall clock, so a label clock far in the past would put the day
+	// markers outside retention and let a prune pass erase them mid-test.
+	day := time.Now().UTC()
 	le.eng.labelNow = func() time.Time { return day }
 	ctx := caller("tok-a", "sess-a")
 	ids := le.seed(ctx, "legacy-cap")

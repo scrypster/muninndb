@@ -16,7 +16,7 @@ import (
 // — still one bump. Both forms.
 func TestFeedback_RestartMidDayCannotBumpTwice(t *testing.T) {
 	le := newLabelEnv(t, testSecret)
-	day := time.Date(2026, 5, 6, 9, 0, 0, 0, time.UTC)
+	day := time.Now().UTC() // frozen at the real time: see TestFeedback_LegacyFormCappedPerDay
 	clock := func() time.Time { return day }
 	le.eng.labelNow = clock
 	ctx := caller("tok-a", "sess-a")

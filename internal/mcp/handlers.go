@@ -647,7 +647,7 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		"query_id": resp.QueryID,
 	}
 	if len(memories) > 0 {
-		result["feedback"] = recallFeedbackBlock(resp.QueryID)
+		result["feedback"] = recallFeedbackBlock(resp.QueryID, vault)
 	}
 	// SemanticDegraded: the vector signal for this recall could not be
 	// trusted (embed backend unreachable, an all-zero embedding, or a
@@ -2841,10 +2841,11 @@ func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, i
 		metrics.FeedbackInvalidTotal.WithLabelValues(field).Inc()
 		sendArgError(w, id, argRejectInvalidParams, msg)
 	}
-	_, hasQ := args["query_id"]
-	_, hasIDs := args["engram_ids"]
-	_, hasGroups := args["groups"]
-	_, hasLegacy := args["engram_id"]
+	// A JSON null, an empty string or an empty array is ABSENT (the rule
+	// recall applies to query/context): legacy callers that send
+	// "query_id": null alongside engram_id must not be told they sent two
+	// forms.
+	hasQ, hasIDs, hasGroups, hasLegacy := presentArg(args, "query_id"), presentArg(args, "engram_ids"), presentArg(args, "groups"), presentArg(args, "engram_id")
 	forms := 0
 	for _, f := range []bool{hasQ || hasIDs, hasGroups, hasLegacy} {
 		if f {
@@ -2880,9 +2881,12 @@ func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, i
 			sendFeedbackError(w, id, err)
 			return
 		}
+		// The legacy echo fields (engram_id, useful) are kept: callers that
+		// read the old response must see nothing change.
 		sendResult(w, id, textContent(mustJSON(map[string]any{
-			"ok": true, "received_groups": 0, "received_ids": 1,
-			"note": "engram_id without a query_id records no label. To label, send the recall's query_id with engram_ids.",
+			"ok": true, "engram_id": engramID, "useful": useful,
+			"received_groups": 0, "received_ids": 1,
+			"note": "engram_id without a query_id records no label. To label, send the recall's vault and query_id with engram_ids.",
 		})))
 		return
 	}
@@ -2927,13 +2931,52 @@ func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, i
 		invalid("limit", fmt.Sprintf("too many ids in one feedback call (max %d); split into several calls", feedbackMaxIDsPerCall))
 		return
 	}
-	if err := s.engine.RecordFeedbackLabels(ctx, vault, groups, source); err != nil {
+	access := feedbackAccessFrom(ctx)
+	outcomes, err := s.engine.RecordFeedbackLabels(ctx, vault, groups, source, access.canRead && access.allVaults)
+	if err != nil {
 		sendFeedbackError(w, id, err)
 		return
 	}
-	sendResult(w, id, textContent(mustJSON(map[string]any{
-		"ok": true, "received_groups": len(groups), "received_ids": total,
-	})))
+	resp := map[string]any{"ok": true, "received_groups": len(groups), "received_ids": total}
+	if access.canRead {
+		// A caller that can recall in this vault gains nothing from a
+		// uniform answer and needs the outcome to self-correct. A write-mode
+		// key (cannot read) keeps the uniform body above.
+		recorded, rejected := 0, 0
+		for i := range outcomes {
+			outcomes[i].Hint = feedbackHint(outcomes[i])
+			switch outcomes[i].Outcome {
+			case "recorded", "repeat":
+				recorded++
+			case "rejected":
+				rejected++
+			}
+		}
+		if outcomes == nil {
+			outcomes = []FeedbackOutcome{}
+		}
+		resp["vault"] = vault
+		resp["labelled"] = recorded
+		resp["rejected"] = rejected
+		resp["results"] = outcomes
+	}
+	sendResult(w, id, textContent(mustJSON(resp)))
+}
+
+// presentArg reports whether args[key] is present and non-empty: null, "",
+// and [] are absent.
+func presentArg(args map[string]any, key string) bool {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return false
+	}
+	switch x := v.(type) {
+	case string:
+		return x != ""
+	case []any:
+		return len(x) > 0
+	}
+	return true
 }
 
 // Feedback sources (muninn_feedback's `source`).

@@ -130,6 +130,10 @@ func additiveWriteOps(eng *Engine, ctx context.Context) map[string]func() error 
 		"RecordFeedbackLabels": func() error {
 			return eng.RecordFeedbackLabels(ctx, v, []FeedbackGroup{{QueryID: id, IDs: []string{id}, Useful: true}}, "")
 		},
+		"RecordFeedbackLabelsDetailed": func() error {
+			_, e := eng.RecordFeedbackLabelsDetailed(ctx, v, []FeedbackGroup{{QueryID: id, IDs: []string{id}, Useful: true}}, "", FeedbackOptions{})
+			return e
+		},
 	}
 }
 

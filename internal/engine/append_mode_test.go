@@ -24,7 +24,7 @@ var appendAdditive = map[string]bool{
 	// memory's access metadata — the dedup-touch residual class, never an
 	// overwrite/evolve/forget. RecordFeedback (legacy, no label) only bumps
 	// access, capped per credential/memory/day. Both refuse observe.
-	"RecordFeedbackLabels": true, "RecordFeedback": true,
+	"RecordFeedbackLabels": true, "RecordFeedbackLabelsDetailed": true, "RecordFeedback": true,
 }
 
 // appendInfra: engine wiring/lifecycle/getters with no credential-reachable

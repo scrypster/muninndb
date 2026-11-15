@@ -454,18 +454,18 @@ func TestRecallDayMarker_ShapeGrantAndLifecycle(t *testing.T) {
 	require.Equal(t, uint64(day*86400000), ulidTimeMs16(d))
 	require.Equal(t, make([]byte, 10), d[6:], "zero entropy: never a real event id")
 
-	_, first, granted, err := store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, 1, false)
+	_, first, granted, err := store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, 1, false, DayMarkerPost{})
 	require.NoError(t, err)
 	require.True(t, first)
 	require.False(t, granted, "a post that does not ask for a bump gets none")
 	for i := 0; i < 5; i++ {
-		m, first, granted, err := store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, int64(2+i), true)
+		m, first, granted, err := store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, int64(2+i), true, DayMarkerPost{})
 		require.NoError(t, err)
 		require.False(t, first)
 		require.Equal(t, i == 0, granted, "granted exactly once per day")
 		require.Equal(t, uint32(2+i), m.Posts)
 	}
-	_, _, granted, err = store.UpsertRecallDayMarker(ctx, ws, day+1, mem, testLC, 9, true)
+	_, _, granted, err = store.UpsertRecallDayMarker(ctx, ws, day+1, mem, testLC, 9, true, DayMarkerPost{})
 	require.NoError(t, err)
 	require.True(t, granted, "a new UTC day is a new marker")
 
@@ -496,7 +496,7 @@ func TestRecallDayMarker_ShapeGrantAndLifecycle(t *testing.T) {
 	require.False(t, marker(day))
 	require.False(t, marker(day+1))
 
-	_, _, _, err = store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, 1, true)
+	_, _, _, err = store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, 1, true, DayMarkerPost{})
 	require.NoError(t, err)
 	_, err = store.ClearVault(ctx, ws)
 	require.NoError(t, err)
@@ -505,4 +505,24 @@ func TestRecallDayMarker_ShapeGrantAndLifecycle(t *testing.T) {
 
 func ulidTimeMs16(id [16]byte) uint64 {
 	return uint64(id[0])<<40 | uint64(id[1])<<32 | uint64(id[2])<<24 | uint64(id[3])<<16 | uint64(id[4])<<8 | uint64(id[5])
+}
+
+// TestLabels_PruneRunsFromTheLabelWritePath (review item 6): a vault used only
+// through read-only recalls and feedback writes no events, so the amortized
+// prune must also run from the feedback write path.
+func TestLabels_PruneRunsFromTheLabelWritePath(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	ws := store.ResolveVaultPrefix("prune-from-labels")
+	mem := NewULID()
+	oldRO := NewULIDWithTime(time.Now().AddDate(0, 0, -181))
+	upsertTestLabel(t, store, ws, oldRO, mem, testLC, &RecallROHeader{Unverified: 1})
+	day := time.Now().UTC().Unix() / 86400
+	for i := 0; i < 2*recallEventPruneInterval; i++ {
+		_, _, _, err := store.UpsertRecallDayMarker(ctx, ws, day, mem, testLC, int64(i), false, DayMarkerPost{})
+		require.NoError(t, err)
+	}
+	h, err := store.GetRecallROHeader(ctx, ws, oldRO, RecallPurposeLabel)
+	require.NoError(t, err)
+	require.Nil(t, h, "a 181-day read-only label group is pruned by feedback writes alone")
 }

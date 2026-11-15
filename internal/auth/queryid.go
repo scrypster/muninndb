@@ -52,8 +52,13 @@ const (
 	roMACLen        = 22 // base64url, no padding, of 16 bytes
 	// ROTagLen is the per-row tag length in bytes.
 	ROTagLen = 4
-	// roMaxRows bounds the tag field (recall limit is 100).
-	roMaxRows = 100
+	// ROMaxRows is the most rows a read-only id carries tags for. MCP caps a
+	// recall at 100, so every MCP row is tagged; on transports that allow a
+	// larger recall, rows 101+ are UNTAGGED and a label for one is rejected
+	// with an explicit reason (untagged_row), never treated as an ordinary
+	// miss.
+	ROMaxRows = 100
+	roMaxRows = ROMaxRows
 )
 
 // QueryIDKey is k_q. The zero value / nil means "no key wired" (an embedded
