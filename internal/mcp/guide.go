@@ -165,6 +165,10 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("  1. \"Decided on JWTs with 15-minute expiry for authentication\" (type: decision)\n")
 	b.WriteString("  2. \"Tom is implementing the auth system\" (type: task)\n")
 	b.WriteString("  3. \"API rate limit set to 100 requests/second per client\" (type: decision)\n\n")
+	b.WriteString("**Say which recalled memories helped.** Every `muninn_recall` response carries a `query_id` and, when it returned anything, a `feedback.call` ready to copy: " +
+		"`muninn_feedback {\"query_id\":\"<the recall's query_id>\",\"engram_ids\":[\"<ids that helped>\"],\"useful\":true}`. Send it once, with only the ids that actually helped " +
+		"(`useful:false` for ones that were returned and did not). A label is about that query, not the memory in general. " +
+		"Labels are recorded for measurement and do not change ranking yet; re-sending is harmless.\n\n")
 	b.WriteString("**You are the curator, not a filing cabinet.** MuninnDB is living memory, not a static database. The moment you write is the moment you know something — so it is the moment to reconcile. Before storing a fact, recall its neighborhood; if what you now know corrects, clarifies, or replaces something already there, *evolve* that memory rather than leaving a stale rival copy to compete in recall. Curating as you write is how the vault stays true over time instead of accreting contradictions — and it costs nothing extra, because you already had the knowledge in hand.\n\n")
 	b.WriteString("**Updating vs. creating.** If you are re-asserting or updating a fact that changes or replaces a prior version of the same thing ")
 	b.WriteString("(a re-run score, a corrected status, a fact that went stale), call `muninn_evolve(id, new_content, reason)` — not `muninn_remember`. ")

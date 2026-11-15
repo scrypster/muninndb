@@ -979,6 +979,28 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		}
 	})
 
+	t.Run("muninn_feedback_label", func(t *testing.T) {
+		// Label pipeline: recall carries query_id + a feedback block; the
+		// query_id+engram_ids form is accepted with the uniform response.
+		rec := mcpTool(t, tok, "muninn_recall", map[string]any{"vault": vault, "query": "Alice", "threshold": 0.001})
+		qid, _ := rec["query_id"].(string)
+		if qid == "" {
+			t.Fatalf("muninn_recall carries no query_id: %v", rec)
+		}
+		result := mcpTool(t, tok, "muninn_feedback", map[string]any{
+			"vault":      vault,
+			"query_id":   qid,
+			"engram_ids": []any{idA},
+			"useful":     true,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_feedback (label form) returned error field: %v", errVal)
+		}
+		if result["ok"] != true {
+			t.Errorf("muninn_feedback (label form) = %v, want ok:true", result)
+		}
+	})
+
 	t.Run("muninn_trust", func(t *testing.T) {
 		result := mcpTool(t, tok, "muninn_trust", map[string]any{
 			"vault": vault,
