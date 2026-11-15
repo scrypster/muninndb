@@ -260,7 +260,7 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 		// nothing about itself.
 		PASEnabled:       pasEnabled,
 		PASMaxInjections: 3,
-		Weights: ctWeights,
+		Weights:          ctWeights,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
