@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/scrypster/muninndb/actions/workflows/ci.yml/badge.svg)](https://github.com/scrypster/muninndb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-BSL%201.1-blue)](LICENSE)
-[![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8)](https://go.dev)
+[![Go](https://img.shields.io/badge/go-1.26.11%2B-00ADD8)](https://go.dev)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/scrypster/muninndb/releases)
 
 > **Prerequisites:** None. Single binary, zero dependencies, zero configuration required.
