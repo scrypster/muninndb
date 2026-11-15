@@ -138,6 +138,9 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 	// ClearVault on a renamed vault would silently range-delete an empty
 	// prefix and leave the real engrams orphaned.
 	ws := e.store.ResolveVaultPrefix(vaultName)
+	// The vault's in-memory label bookkeeping (feedback_labels.go) goes with
+	// its data; DeleteVault reaches here too.
+	e.dropLabelPartition(ws)
 
 	// Establish the clear boundary before deleting storage. Each processor
 	// invalidates its current scan, closes admission for this vault, and waits

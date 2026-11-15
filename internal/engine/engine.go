@@ -5795,7 +5795,7 @@ func (e *Engine) RecordFeedback(ctx context.Context, vault, engramID string, use
 		return nil
 	}
 	lc, _, _ := e.callerHashes(ctx)
-	if !e.accessBumpAllowed(wsPrefix, lc, id) {
+	if !e.accessBumpAllowed(wsPrefix, e.store.VaultNameExists(vault), lc, id) {
 		metrics.FeedbackLegacyTotal.WithLabelValues("true").Inc()
 		return nil
 	}

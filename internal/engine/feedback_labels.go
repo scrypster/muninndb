@@ -64,42 +64,63 @@ const labelStatsWindowDays = 7
 // when a (credential, memory, UTC day) post count first reaches each.
 var labelStormThresholds = []int{10, 100}
 
-// Bounds on the process-local label bookkeeping (security review of 2a):
-// every map below is keyed partly by caller input, so each is capped.
-const (
-	// labelDayMaxEntries caps each per-UTC-day map (access-bump cap, storm
-	// counter). Keys are only ever inserted for memories that EXIST (and,
-	// for labels, were verified members of the recall), so the cap is a
-	// backstop. At the cap, the access-bump map fails CLOSED (no bump) and
-	// the storm map stops tracking new keys.
-	labelDayMaxEntries = 100_000
-	// labelMaxTrackedVaults caps the per-vault rejection tally. Only vaults
-	// that exist are tracked; at the cap, rings wholly outside the window are
-	// dropped, and if none are, the rejection is counted in metrics only.
-	labelMaxTrackedVaults = 4096
+// Process-local label bookkeeping (two security reviews of 2a). It is
+// PARTITIONED so that no bound is shared across tenants:
+//
+//	labelState.vaults[ws]            one partition per EXISTING vault (created
+//	                                 only after VaultNameExists; dropped by
+//	                                 ClearVault/DeleteVault) — so the number of
+//	                                 partitions is bounded by the vaults that
+//	                                 exist, never by caller-supplied names
+//	  .rejected                      that vault's 7-day rejection ring
+//	  .creds[lc]                     one per-UTC-day partition per credential
+//	                                 hash (credentials are authenticated)
+//	    .mems[mem]                   {posts, bumped} for memories that exist
+//
+// Limits and what happens AT each limit, chosen deliberately:
+//
+//   - labelPerCredentialDayMax distinct memories per (vault, credential, UTC
+//     day). At the limit a NEW memory is not tracked for that credential:
+//     no access bump (fail CLOSED, for that principal only), DayFirst = 0
+//     (a label is never wrongly marked first), no storm count. Entries are
+//     NEVER evicted within a day — eviction would forget that a memory was
+//     already bumped or labelled and could re-grant a bump or a "first". The
+//     whole credential partition resets at its own UTC-day boundary.
+//   - labelPerVaultCredentialMax credentials per vault per day. At the limit
+//     the vault's partitions from earlier days are reclaimed first (their
+//     state is for a past day, so dropping them grants nothing); if none, a
+//     NEW credential in that vault is untracked and fails closed as above.
+//     This can only affect principals of the same vault, whose credentials
+//     are minted by that vault's own full-mode key holders.
+//
+// None of it is persisted, so a process restart starts a fresh day for
+// everyone (at most one extra bump and one extra DayFirst per restart).
+var (
+	labelPerCredentialDayMax   = 10_000
+	labelPerVaultCredentialMax = 4096
 )
 
-// labelState is the engine's process-local label bookkeeping: the legacy
-// form's per-day access-bump cap, the storm counter, and the rejection tally
-// shown in status. None of it is persisted and none of it touches scoring.
+// labelState is the engine's process-local label bookkeeping. It never
+// touches scoring.
 type labelState struct {
-	mu sync.Mutex
-	// day is the UTC day (unix days) the two per-day maps belong to; both
-	// are dropped when the day changes, so memory is bounded by one day's
-	// distinct (credential, memory) pairs.
-	day       int64
-	legacyCap map[labelDayKey]struct{}
-	storm     map[labelDayKey]int
-	// rejected is a ring of per-UTC-day rejection counts per EXISTING vault,
-	// keyed by its resolved workspace prefix (never the caller's string).
-	rejected map[[8]byte]*[labelStatsWindowDays]labelDayTally
-	since    time.Time
+	mu     sync.Mutex
+	vaults map[[8]byte]*labelVaultState
 }
 
-type labelDayKey struct {
-	ws  [8]byte
-	lc  [8]byte
-	mem storage.ULID
+type labelVaultState struct {
+	rejected [labelStatsWindowDays]labelDayTally
+	since    time.Time // this vault's first counted rejection (per vault: no cross-tenant signal)
+	creds    map[[8]byte]*labelCredDay
+}
+
+type labelCredDay struct {
+	day  int64
+	mems map[storage.ULID]*labelMemDay
+}
+
+type labelMemDay struct {
+	posts  int  // accepted label posts today (storm metric, DayFirst)
+	bumped bool // an access bump was granted today
 }
 
 type labelDayTally struct {
@@ -116,13 +137,73 @@ func (e *Engine) labelClock() time.Time {
 
 func unixDay(t time.Time) int64 { return t.UTC().Unix() / 86400 }
 
-// rollDayLocked drops the per-day maps when the UTC day changed.
-func (s *labelState) rollDayLocked(day int64) {
-	if s.day != day || s.legacyCap == nil {
-		s.day = day
-		s.legacyCap = make(map[labelDayKey]struct{})
-		s.storm = make(map[labelDayKey]int)
+// vaultPartitionLocked returns ws's partition, creating it only for a vault
+// that exists.
+func (s *labelState) vaultPartitionLocked(ws [8]byte, exists bool) *labelVaultState {
+	if vs, ok := s.vaults[ws]; ok {
+		return vs
 	}
+	if !exists {
+		return nil
+	}
+	if s.vaults == nil {
+		s.vaults = make(map[[8]byte]*labelVaultState)
+	}
+	vs := &labelVaultState{creds: make(map[[8]byte]*labelCredDay)}
+	s.vaults[ws] = vs
+	return vs
+}
+
+// memEntryLocked returns today's entry for (ws, lc, mem), creating it within
+// the bounds above, or nil when the principal is at its own bound.
+func (s *labelState) memEntryLocked(ws [8]byte, exists bool, lc [8]byte, mem storage.ULID, day int64) *labelMemDay {
+	vs := s.vaultPartitionLocked(ws, exists)
+	if vs == nil {
+		return nil
+	}
+	cd, ok := vs.creds[lc]
+	if ok && cd.day != day {
+		cd.day, cd.mems = day, make(map[storage.ULID]*labelMemDay)
+	}
+	if !ok {
+		if len(vs.creds) >= labelPerVaultCredentialMax {
+			for k, c := range vs.creds {
+				if c.day != day {
+					delete(vs.creds, k) // a past day's state grants nothing
+				}
+			}
+			if len(vs.creds) >= labelPerVaultCredentialMax {
+				return nil
+			}
+		}
+		cd = &labelCredDay{day: day, mems: make(map[storage.ULID]*labelMemDay)}
+		vs.creds[lc] = cd
+	}
+	me, ok := cd.mems[mem]
+	if !ok {
+		if len(cd.mems) >= labelPerCredentialDayMax {
+			return nil
+		}
+		me = &labelMemDay{}
+		cd.mems[mem] = me
+	}
+	return me
+}
+
+// dropLabelPartition forgets a vault's label bookkeeping (ClearVault,
+// DeleteVault).
+func (e *Engine) dropLabelPartition(ws [8]byte) {
+	e.labels.mu.Lock()
+	delete(e.labels.vaults, ws)
+	e.labels.mu.Unlock()
+}
+
+// labelPartitionExists is a test seam.
+func (e *Engine) labelPartitionExists(ws [8]byte) bool {
+	e.labels.mu.Lock()
+	defer e.labels.mu.Unlock()
+	_, ok := e.labels.vaults[ws]
+	return ok
 }
 
 func (e *Engine) noteLabelRejected(vault string, ws [8]byte, exists bool, reason string, n int) {
@@ -130,67 +211,38 @@ func (e *Engine) noteLabelRejected(vault string, ws [8]byte, exists bool, reason
 		return
 	}
 	metrics.FeedbackRejectedTotal.WithLabelValues(reason).Add(float64(n))
-	if !exists {
-		// A vault that does not exist allocates nothing: the caller controls
-		// the name.
-		return
-	}
 	now := e.labelClock()
 	day := unixDay(now)
 	s := &e.labels
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.rejected == nil {
-		s.rejected = make(map[[8]byte]*[labelStatsWindowDays]labelDayTally)
-		s.since = now
+	vs := s.vaultPartitionLocked(ws, exists) // a vault that does not exist allocates nothing
+	if vs == nil {
+		return
 	}
-	ring, ok := s.rejected[ws]
-	if !ok {
-		if len(s.rejected) >= labelMaxTrackedVaults {
-			for k, r := range s.rejected {
-				if ringStale(r, day) {
-					delete(s.rejected, k)
-				}
-			}
-			if len(s.rejected) >= labelMaxTrackedVaults {
-				return // metrics still counted it
-			}
-		}
-		ring = &[labelStatsWindowDays]labelDayTally{}
-		s.rejected[ws] = ring
+	if vs.since.IsZero() {
+		vs.since = now
 	}
-	slot := &ring[day%labelStatsWindowDays]
+	slot := &vs.rejected[day%labelStatsWindowDays]
 	if slot.day != day || slot.counts == nil {
 		*slot = labelDayTally{day: day, counts: make(map[string]int64, len(labelRejectReasons))}
 	}
 	slot.counts[reason] += int64(n)
 }
 
-// ringStale reports whether every slot of a rejection ring is outside the
-// trailing window.
-func ringStale(r *[labelStatsWindowDays]labelDayTally, today int64) bool {
-	for _, slot := range r {
-		if slot.counts != nil && today-slot.day < labelStatsWindowDays {
-			return false
-		}
-	}
-	return true
-}
-
-// noteStorm counts one accepted post for (ws, lc, mem) today, fires the storm
-// metric when the count first reaches a threshold, and returns the count (0
-// when the key is untracked because the map is at its cap).
-func (e *Engine) noteStorm(ws [8]byte, lc [8]byte, mem storage.ULID) int {
+// noteLabelPost counts one accepted label post for (ws, lc, mem) today, fires
+// the storm metric when the count first reaches a threshold, and returns the
+// count — 0 when the principal is at its own bound (untracked: never first).
+func (e *Engine) noteLabelPost(ws [8]byte, exists bool, lc [8]byte, mem storage.ULID) int {
 	s := &e.labels
 	s.mu.Lock()
-	s.rollDayLocked(unixDay(e.labelClock()))
-	k := labelDayKey{ws: ws, lc: lc, mem: mem}
-	if _, tracked := s.storm[k]; !tracked && len(s.storm) >= labelDayMaxEntries {
+	me := s.memEntryLocked(ws, exists, lc, mem, unixDay(e.labelClock()))
+	if me == nil {
 		s.mu.Unlock()
 		return 0
 	}
-	s.storm[k]++
-	n := s.storm[k]
+	me.posts++
+	n := me.posts
 	s.mu.Unlock()
 	for _, th := range labelStormThresholds {
 		if n == th {
@@ -205,20 +257,16 @@ func (e *Engine) noteStorm(ws [8]byte, lc [8]byte, mem storage.ULID) int {
 // access-bump path goes through — labelled (either membership kind) and
 // legacy alike — so 1,000 fresh query ids are still one use per credential,
 // memory and UTC day. Callers must only ask for memories that exist. Fails
-// closed at the map cap.
-func (e *Engine) accessBumpAllowed(ws [8]byte, lc [8]byte, mem storage.ULID) bool {
+// closed for a principal at its own bound.
+func (e *Engine) accessBumpAllowed(ws [8]byte, exists bool, lc [8]byte, mem storage.ULID) bool {
 	s := &e.labels
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.rollDayLocked(unixDay(e.labelClock()))
-	k := labelDayKey{ws: ws, lc: lc, mem: mem}
-	if _, done := s.legacyCap[k]; done {
+	me := s.memEntryLocked(ws, exists, lc, mem, unixDay(e.labelClock()))
+	if me == nil || me.bumped {
 		return false
 	}
-	if len(s.legacyCap) >= labelDayMaxEntries {
-		return false
-	}
-	s.legacyCap[k] = struct{}{}
+	me.bumped = true
 	return true
 }
 
@@ -472,7 +520,7 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 				fresh.Superseded = 1
 			}
 			fresh.Self = e.selfLabel(ctx, ws, m, fresh.RecallSess)
-			if e.noteStorm(ws, lc, m) == 1 {
+			if e.noteLabelPost(ws, vaultExists, lc, m) == 1 {
 				fresh.DayFirst = 1
 			}
 
@@ -495,7 +543,7 @@ func (e *Engine) RecordFeedbackLabels(ctx context.Context, vault string, groups 
 			// (credential, memory, UTC day) like every bump path.
 			// Synchronous, swallowing not-found. Repeats never bump;
 			// useful=false never bumps; a deleted memory is never bumped.
-			if first && useful && exists && e.accessBumpAllowed(ws, lc, m) {
+			if first && useful && exists && e.accessBumpAllowed(ws, vaultExists, lc, m) {
 				if err := e.store.TouchAccess(ctx, ws, m); err != nil && !errors.Is(err, storage.ErrNotFound) {
 					slog.Warn("feedback: access bump failed", "err", err)
 				}
@@ -581,9 +629,9 @@ func (e *Engine) LabelStats(ctx context.Context, vault string) (*LabelStats, err
 	}
 	today := unixDay(now)
 	e.labels.mu.Lock()
-	out.RejectedSince = e.labels.since
-	if ring := e.labels.rejected[ws]; ring != nil {
-		for _, slot := range ring {
+	if vs := e.labels.vaults[ws]; vs != nil {
+		out.RejectedSince = vs.since
+		for _, slot := range vs.rejected {
 			if slot.counts == nil || today-slot.day >= labelStatsWindowDays {
 				continue
 			}

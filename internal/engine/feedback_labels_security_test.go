@@ -78,7 +78,7 @@ func TestFeedback_RejectedStatsBoundedForBogusVaults(t *testing.T) {
 		le.label(ctx, fmt.Sprintf("bogus-%05d", i), storage.NewULID().String(), true, storage.NewULID().String())
 	}
 	le.eng.labels.mu.Lock()
-	n := len(le.eng.labels.rejected)
+	n := len(le.eng.labels.vaults)
 	le.eng.labels.mu.Unlock()
 	require.Zero(t, n, "no state for vaults that do not exist")
 }
@@ -94,7 +94,12 @@ func TestFeedback_LegacyCapIgnoresUnknownIDs(t *testing.T) {
 		require.NoError(t, le.eng.RecordFeedback(ctx, "legacy-bound", storage.NewULID().String(), true))
 	}
 	le.eng.labels.mu.Lock()
-	n := len(le.eng.labels.legacyCap)
+	n := 0
+	for _, vs := range le.eng.labels.vaults {
+		for _, cd := range vs.creds {
+			n += len(cd.mems)
+		}
+	}
 	le.eng.labels.mu.Unlock()
 	require.Zero(t, n)
 }
