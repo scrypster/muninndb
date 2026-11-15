@@ -97,7 +97,7 @@ var appendReadOnly = map[string]bool{
 	"LabelStats": true,
 	// WriteTwinInline (COG-36) reads the ring and resolves chain heads through
 	// no-stamp reads; it writes nothing (not even access metadata).
-	"WriteTwinInline": true,
+	"WriteTwinInline": true, "WriteTwinEnabled": true,
 }
 
 // TestAppendMode_MethodCensus is the ANTI-ROT pin the #687 reviews demanded: it

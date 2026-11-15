@@ -22,6 +22,19 @@ type writeTwinCapable interface {
 	WriteTwinInline(ctx context.Context, vault, newID string, render func(*engine.WriteTwinResult) int) *engine.WriteTwinResult
 }
 
+// writeTwinSwitch reports whether the engine runs the check at all (any mode
+// but off). An engine that does not implement it is treated as off.
+type writeTwinSwitch interface {
+	WriteTwinEnabled() bool
+}
+
+// writeTwinOn: with the check off nothing on the MCP path changes — no
+// context allocation, no guide section, no block.
+func (s *MCPServer) writeTwinOn() bool {
+	sw, ok := s.engine.(writeTwinSwitch)
+	return ok && sw.WriteTwinEnabled()
+}
+
 // RelatedBlock is the mode-1 write-time twin block on a muninn_remember
 // response. It is EVIDENCE, not an assertion: which earlier memories are very
 // close, how close against the threshold in use, and what each possible

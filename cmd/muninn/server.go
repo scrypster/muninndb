@@ -1784,8 +1784,10 @@ func runServer() {
 		retroProcessor.SetOnEmbed(eng.ReevaluatePushOnEmbed)
 		// Feed the write-time twin ring (COG-36) the exact vector each write
 		// was stored and indexed with. A no-op when the check is off.
-		retroProcessor.SetOnEmbedded(eng.WriteTwinOnEmbedded)
-		eng.SetWriteTwinFeed(retroProcessor)
+		if writeTwinMode != writetwin.Off {
+			retroProcessor.SetOnEmbedded(eng.WriteTwinOnEmbedded)
+			eng.SetWriteTwinFeed(retroProcessor)
+		}
 		retroProcessor.Start(ctx)
 		slog.Info("retroactive embed processor started")
 	}

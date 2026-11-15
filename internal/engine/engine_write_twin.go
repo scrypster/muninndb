@@ -293,6 +293,17 @@ func (t *writeTwin) shutdown() {
 	t.waitIdle()
 }
 
+// WriteTwinEnabled reports whether the write-time twin check runs in any
+// mode (shadow or 1). Off: false, and callers skip all of their own work.
+func (e *Engine) WriteTwinEnabled() bool { return e.twin != nil }
+
+// HasWriteTwinCaller reports whether ctx carries a writer description (tests
+// of the off-mode path use it to show nothing was allocated).
+func HasWriteTwinCaller(ctx context.Context) bool {
+	_, ok := ctx.Value(ctxKeyWriteTwinCaller{}).(WriteTwinCaller)
+	return ok
+}
+
 // SetWriteTwinFeed records the embed processor that feeds the ring (its
 // post-store hook must be wired to WriteTwinOnEmbedded). Without a feed the
 // inline path reports no_embedder instead of waiting for a vector that will

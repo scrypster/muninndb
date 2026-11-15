@@ -450,8 +450,12 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 	if total == 0 {
 		return true
 	}
-	rp.passStartNs.Store(time.Now().UnixNano())
-	defer rp.passStartNs.Store(0)
+	// Only the write-time twin check reads the pass start; with no hook
+	// wired (the check off) the processor does exactly what it did before.
+	if rp.onEmbedded != nil {
+		rp.passStartNs.Store(time.Now().UnixNano())
+		defer rp.passStartNs.Store(0)
+	}
 
 	// Snapshot cumulative processed count so we can detect per-pass work.
 	rp.statsMu.RLock()

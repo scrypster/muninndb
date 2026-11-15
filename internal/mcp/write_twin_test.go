@@ -39,15 +39,20 @@ const (
 // twin to report, so a missing block can only mean a gate withheld it.
 type twinFake struct {
 	fakeEngine
-	hint    string
-	calls   atomic.Int64
-	panicky bool
-	res     *engine.WriteTwinResult
+	hint      string
+	calls     atomic.Int64
+	panicky   bool
+	res       *engine.WriteTwinResult
+	off       bool // the server runs MUNINN_WRITE_RELATED=off
+	sawCaller bool
 }
 
 func (f *twinFake) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
+	f.sawCaller = engine.HasWriteTwinCaller(ctx)
 	return &mbp.WriteResponse{ID: twinNewID, Hint: f.hint}, nil
 }
+
+func (f *twinFake) WriteTwinEnabled() bool { return !f.off }
 
 func (f *twinFake) CheckIdempotency(_ context.Context, opID string) (*storage.IdempotencyReceipt, error) {
 	if opID == twinOpSeen {
@@ -396,4 +401,33 @@ func TestWriteTwin_SupersedesOptionRetiresOldFromDefaultRecall(t *testing.T) {
 			require.True(t, after[kept], "%q must leave %s in default recall: %v", opt.Call, kept, after)
 		})
 	}
+}
+
+// TestWriteTwin_OffIsInertOnTheMCPPath: with the check off, a remember
+// allocates no writer context, never calls the check, carries no block, the
+// guide is unchanged, and resolved plasticity JSON carries no new field.
+func TestWriteTwin_OffIsInertOnTheMCPPath(t *testing.T) {
+	f := &twinFake{off: true}
+	out := twinPost(t, newTestServerWith(f), "", "", rememberArgs(nil))
+	require.NotContains(t, out, "related")
+	require.False(t, f.sawCaller, "off must not allocate the writer context")
+	require.Zero(t, f.calls.Load())
+	on := &twinFake{}
+	twinPost(t, newTestServerWith(on), "", "", rememberArgs(nil))
+	require.True(t, on.sawCaller, "control: on, the writer context is attached")
+
+	guide := func(mode writetwin.Mode) string {
+		ts := newTwinServer(t, mode, false)
+		w := postRPC(t, ts.srv, string(mkToolCallBody("muninn_guide", map[string]any{"vault": twinVault})))
+		resp := decodeResp(t, w.Body.String())
+		require.Nil(t, resp.Error)
+		raw, _ := json.Marshal(resp.Result)
+		return string(raw)
+	}
+	require.NotContains(t, guide(writetwin.Off), "Related memories on write")
+	require.Contains(t, guide(writetwin.Shadow), "Related memories on write")
+
+	raw, err := json.Marshal(auth.ResolvePlasticity(nil))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "write_twin", "an unset vault resolves to byte-identical plasticity JSON")
 }

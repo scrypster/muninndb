@@ -245,7 +245,8 @@ type ResolvedPlasticity struct {
 	// clamped to [0.50, 0.999]. nil = no override (use the model hint).
 	WriteTwinThresholdOverride *float64 `json:"write_twin_threshold_override,omitempty"`
 	// WriteTwinInline is PlasticityConfig.WriteTwinInline (default false).
-	WriteTwinInline bool `json:"write_twin_inline"`
+	// omitempty: a vault without the setting resolves to byte-identical JSON.
+	WriteTwinInline bool `json:"write_twin_inline,omitempty"`
 }
 
 type plasticityPreset struct {
