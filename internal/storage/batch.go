@@ -127,6 +127,15 @@ func (b *pebbleStoreBatch) WriteEngramOpDetails(ctx context.Context, wsPrefix [8
 	}
 	eng.CreatedAt, eng.UpdatedAt, eng.LastAccess = normalizeEngramTimes(eng.CreatedAt, eng.UpdatedAt, eng.LastAccess)
 
+	// The mirror of mutateEngramOpt's check: a mutation of this engram queued
+	// earlier would be applied at Commit over the stored record, after this
+	// write, and discard it.
+	for _, m := range b.mutations {
+		if m.ws == wsPrefix && m.id == eng.ID {
+			return fmt.Errorf("batch write: engram %s already has a mutation queued in the same batch; the mutation would discard this write", eng.ID.String())
+		}
+	}
+
 	// STO-12: the inline-Associations loop below is a creator, checked before
 	// anything is queued. Engrams already queued in this batch count as live —
 	// same exception, and the same queue-order requirement, as
@@ -337,6 +346,12 @@ func (b *pebbleStoreBatch) mutateEngram(ctx context.Context, ws [8]byte, id ULID
 func (b *pebbleStoreBatch) mutateEngramOpt(ctx context.Context, ws [8]byte, id ULID, op string, refuseUndelete bool, mutate func(*Engram)) error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
+	}
+	// The mutation is applied at Commit to the record as STORED, so in a
+	// batch that also writes this engram it would silently discard that
+	// write. Refused rather than merged: no caller needs it.
+	if b.batchQueuedEngram(ws, [16]byte(id)) {
+		return fmt.Errorf("%s: engram %s is also written in the same batch; a queued mutation would discard that write", op, id.String())
 	}
 	eng, err := b.ps.GetEngram(ctx, ws, id)
 	if err != nil {
