@@ -189,6 +189,9 @@ func newWriteTwin(mode writetwin.Mode) *writeTwin {
 	}
 	t.idleCond = sync.NewCond(&t.idleMu)
 	t.ctx, t.cancel = context.WithCancel(context.Background())
+	t.ring.OnEvict = func(reason string, n int) {
+		metrics.WriteTwinRingEvictedTotal.WithLabelValues(reason).Add(float64(n))
+	}
 	return t
 }
 
@@ -389,8 +392,14 @@ func (e *Engine) resetTwinVault(ws [8]byte) {
 func (e *Engine) runWriteTwinWorker() {
 	t := e.twin
 	defer close(t.done)
+	sweep := time.NewTicker(time.Minute)
+	defer sweep.Stop()
 	for {
 		select {
+		case <-sweep.C:
+			// An idle process still lets go of vectors past the window.
+			t.ring.Sweep()
+			metrics.WriteTwinRingBytes.Set(float64(t.ring.Bytes()))
 		case <-t.stop:
 			// Refuse new work, then drain so waitIdle cannot hang on jobs
 			// that will never run.

@@ -265,3 +265,60 @@ func TestRing_CapAndEviction(t *testing.T) {
 		t.Fatalf("entries seen over an hour ago must be evicted, %d remain", r.Len(ws))
 	}
 }
+
+func TestRing_IdleVaultEmptiesAfterTheWindow(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	clock := now
+	r := NewRing(func() time.Time { return clock })
+	idle, busy := [8]byte{7}, [8]byte{8}
+	for i := 0; i < 50; i++ {
+		r.Insert(idle, Entry{ID: [16]byte{byte(i), 1}, Vec: unitVec(384, 0), CreatedAt: now})
+	}
+	// 48 hours later another vault writes once: the idle vault's vectors are
+	// past the window and must be gone — the vault slot too.
+	clock = now.Add(48 * time.Hour)
+	r.Insert(busy, Entry{ID: [16]byte{1, 2}, Vec: unitVec(384, 0), CreatedAt: clock})
+	if r.Len(idle) != 0 || r.Vaults() != 1 {
+		t.Fatalf("idle vault still holds %d entries (%d vaults) after 48h", r.Len(idle), r.Vaults())
+	}
+	// And with no write anywhere, the periodic Sweep empties everything.
+	clock = clock.Add(2 * Window)
+	r.Sweep()
+	if r.Vaults() != 0 || r.Bytes() != 0 {
+		t.Fatalf("after a sweep past the window: %d vaults, %d bytes", r.Vaults(), r.Bytes())
+	}
+}
+
+func TestRing_TotalCapAcrossVaults(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	clock := now
+	r := NewRing(func() time.Time { return clock })
+	evicted := 0
+	r.OnEvict = func(reason string, n int) {
+		if reason == "total_cap" {
+			evicted += n
+		}
+	}
+	vec := unitVec(384, 0)
+	for v := 0; v < 300; v++ {
+		for i := 0; i < RingCap; i++ {
+			clock = clock.Add(time.Microsecond)
+			var id [16]byte
+			id[0], id[1], id[2] = byte(v>>8), byte(v), byte(i>>8)
+			id[3] = byte(i)
+			r.Insert([8]byte{byte(v >> 8), byte(v), 1}, Entry{ID: id, Vec: vec, CreatedAt: clock})
+		}
+	}
+	if b := r.Bytes(); b > RingTotalBytes {
+		t.Fatalf("300 vaults x 512 entries hold %d bytes, over the %d cap", b, RingTotalBytes)
+	}
+	if evicted == 0 {
+		t.Fatal("no total_cap evictions were reported")
+	}
+	// The newest writes survive; the globally oldest went first.
+	v299 := 299
+	last := [8]byte{byte(v299 >> 8), byte(v299), 1}
+	if r.Len(last) != RingCap {
+		t.Fatalf("the most recent vault lost entries to the global cap: %d", r.Len(last))
+	}
+}

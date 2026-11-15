@@ -36,13 +36,37 @@ type Match struct {
 	BatchID    uint64
 }
 
-// Ring holds, per vault, at most RingCap entries seen within Window. It is
-// safe for concurrent use. All methods are O(RingCap) at worst — a brute-force
-// scan of ≤512 dot products is microseconds and needs no index.
+// RingTotalBytes caps the ring's vectors across ALL vaults. Per-vault caps
+// alone are not a bound: any write auto-creates a vault, and 300 vaults x 512
+// bge-small entries measured +255.6 MB. Past this cap the globally oldest
+// entries go first.
+const RingTotalBytes = 16 << 20
+
+// entryOverhead approximates an entry's non-vector bytes (struct, slice
+// header, the vault slot) for the byte accounting.
+const entryOverhead = 96
+
+func entryBytes(e Entry) int { return len(e.Vec)*4 + entryOverhead }
+
+// sweepEvery bounds how often an Insert sweeps every vault for entries past
+// the window (the engine worker also sweeps on a ticker, so an idle process
+// still empties).
+const sweepEvery = time.Minute
+
+// Ring holds, per vault, at most RingCap entries seen within Window, and at
+// most RingTotalBytes across vaults. It is safe for concurrent use. Lookups
+// are O(RingCap) — a brute-force scan of ≤512 dot products is microseconds and
+// needs no index.
 type Ring struct {
-	mu     sync.Mutex
-	vaults map[[8]byte]*vaultRing
-	now    func() time.Time
+	mu        sync.Mutex
+	vaults    map[[8]byte]*vaultRing
+	now       func() time.Time
+	total     int // bytes held across vaults
+	byteCap   int
+	lastSweep time.Time
+	// OnEvict, when set, is told how many entries left and why ("age",
+	// "vault_cap", "total_cap"). Called with the ring locked: keep it cheap.
+	OnEvict func(reason string, n int)
 }
 
 type vaultRing struct {
@@ -54,7 +78,100 @@ func NewRing(now func() time.Time) *Ring {
 	if now == nil {
 		now = time.Now
 	}
-	return &Ring{vaults: make(map[[8]byte]*vaultRing), now: now}
+	return &Ring{vaults: make(map[[8]byte]*vaultRing), now: now, byteCap: RingTotalBytes}
+}
+
+// SetByteCap overrides RingTotalBytes (tests).
+func (r *Ring) SetByteCap(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.byteCap = n
+}
+
+// Bytes reports the bytes the ring's entries hold across vaults.
+func (r *Ring) Bytes() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.total
+}
+
+// Vaults reports how many vaults hold at least one entry.
+func (r *Ring) Vaults() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.vaults)
+}
+
+// Sweep drops every entry past the window in every vault, and every vault
+// left empty. The engine worker calls it periodically.
+func (r *Ring) Sweep() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sweepLocked(r.now())
+}
+
+func (r *Ring) sweepLocked(now time.Time) {
+	r.lastSweep = now
+	for ws, vr := range r.vaults {
+		r.evictVaultLocked(ws, vr, now)
+	}
+}
+
+func (r *Ring) evicted(reason string, n int) {
+	if n > 0 && r.OnEvict != nil {
+		r.OnEvict(reason, n)
+	}
+}
+
+// evictVaultLocked drops vr's entries past the window or the per-vault cap,
+// and the vault itself once empty.
+func (r *Ring) evictVaultLocked(ws [8]byte, vr *vaultRing, now time.Time) {
+	age, capped := 0, 0
+	cut := 0
+	for cut < len(vr.entries) {
+		e := vr.entries[cut]
+		switch {
+		case now.Sub(e.Seen) > Window:
+			age++
+		case len(vr.entries)-cut > RingCap:
+			capped++
+		default:
+			goto done
+		}
+		r.total -= entryBytes(e)
+		cut++
+	}
+done:
+	if cut > 0 {
+		vr.entries = append(vr.entries[:0], vr.entries[cut:]...)
+	}
+	if len(vr.entries) == 0 {
+		delete(r.vaults, ws)
+	}
+	r.evicted("age", age)
+	r.evicted("vault_cap", capped)
+}
+
+// enforceTotalLocked evicts the globally oldest entries until the ring is
+// back under its byte cap.
+func (r *Ring) enforceTotalLocked() {
+	n := 0
+	for r.total > r.byteCap && len(r.vaults) > 0 {
+		var oldWS [8]byte
+		var oldest *vaultRing
+		for ws, vr := range r.vaults {
+			if oldest == nil || vr.entries[0].Seen.Before(oldest.entries[0].Seen) {
+				oldWS, oldest = ws, vr
+			}
+		}
+		r.total -= entryBytes(oldest.entries[0])
+		oldest.entries = append(oldest.entries[:0], oldest.entries[1:]...)
+		if len(oldest.entries) == 0 {
+			delete(r.vaults, oldWS)
+		}
+		n++
+	}
+	r.evicted("total_cap", n)
 }
 
 // Insert adds or replaces (by id) an entry for vault ws and evicts anything
@@ -74,22 +191,18 @@ func (r *Ring) Insert(ws [8]byte, e Entry) {
 	for i := range vr.entries {
 		if vr.entries[i].ID == e.ID {
 			// Same engram embedded again (re-embed, retry): keep one entry.
+			r.total -= entryBytes(vr.entries[i])
 			vr.entries = append(vr.entries[:i], vr.entries[i+1:]...)
 			break
 		}
 	}
 	vr.entries = append(vr.entries, e)
-	vr.evictLocked(now)
-}
-
-func (vr *vaultRing) evictLocked(now time.Time) {
-	cut := 0
-	for cut < len(vr.entries) && (now.Sub(vr.entries[cut].Seen) > Window || len(vr.entries)-cut > RingCap) {
-		cut++
+	r.total += entryBytes(e)
+	r.evictVaultLocked(ws, vr, now)
+	if now.Sub(r.lastSweep) >= sweepEvery {
+		r.sweepLocked(now) // lazily, from any vault's write
 	}
-	if cut > 0 {
-		vr.entries = append(vr.entries[:0], vr.entries[cut:]...)
-	}
+	r.enforceTotalLocked()
 }
 
 // Get returns the entry for id in vault ws.
@@ -120,6 +233,11 @@ func (r *Ring) Len(ws [8]byte) int {
 func (r *Ring) ClearVault(ws [8]byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if vr := r.vaults[ws]; vr != nil {
+		for _, e := range vr.entries {
+			r.total -= entryBytes(e)
+		}
+	}
 	delete(r.vaults, ws)
 }
 

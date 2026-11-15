@@ -146,6 +146,17 @@ var (
 		Name: "muninn_write_twin_dropped_total",
 		Help: "Shadow write-time twin jobs dropped because the worker queue was full.",
 	})
+	// WriteTwinRingEvictedTotal counts ring entries evicted, by reason
+	// (age | vault_cap | total_cap).
+	WriteTwinRingEvictedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninn_write_twin_ring_evicted_total",
+		Help: "Write-time twin ring entries evicted, by reason (age|vault_cap|total_cap).",
+	}, []string{"reason"})
+	// WriteTwinRingBytes is the ring's current vector memory across vaults.
+	WriteTwinRingBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "muninn_write_twin_ring_bytes",
+		Help: "Bytes the write-time twin ring holds across all vaults (capped).",
+	})
 	// WriteTwinInlineWaitSeconds is how long a mode-1 remember waited for
 	// its own vector (bounded by min(100ms, 2x the measured delivery time)).
 	WriteTwinInlineWaitSeconds = promauto.NewHistogram(prometheus.HistogramOpts{
