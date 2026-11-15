@@ -798,21 +798,32 @@ const (
 // existing engram identified by id. The engram's vault prefix is resolved via
 // FindVaultPrefix. Both 0x01 (full engram) and 0x02 (meta slice) keys are
 // updated atomically, and the L1/meta caches are invalidated.
+//
+// It owns Summary, KeyPoints, MemoryType, TypeLabel (and UpdatedAt) and the
+// 0x11 digest flags, and nothing else. Because the record is re-encoded whole,
+// the read it starts from must be the committed record AND no other writer
+// may commit between that read and this commit: the engram's stripe lock is
+// held across both and the read goes straight to Pebble. Without that, a
+// forget committing while enrichment was between its read and its write was
+// undone — the digest rewrote the pre-forget copy, so 0x01/0x02 said active
+// while 0x0B said soft-deleted (TestUpdateDigest_ConcurrentForgetStaysForgotten).
+// The same lock makes the 0x11 flags read-modify-write atomic with
+// RepairEvolveEntityCarry's, which takes the same stripe.
 func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string, keyPoints []string, memoryType string, typeLabel string) error {
 	ws, ok := ps.FindVaultPrefix(id)
 	if !ok {
 		return fmt.Errorf("UpdateDigest: engram %s not found", id.String())
 	}
 
-	eng, err := ps.GetEngram(ctx, ws, id)
+	unlock := ps.LockEngram(id)
+	defer unlock()
+
+	// A private, committed copy: GetEngramUncached decodes straight from
+	// Pebble and shares nothing with the L1 cache (STO-20), so no Clone.
+	eng, err := ps.GetEngramUncached(ctx, ws, id)
 	if err != nil {
 		return fmt.Errorf("UpdateDigest: get engram: %w", err)
 	}
-	// Clone before mutating (#858, STO-20). This path runs on the enrichment
-	// worker, concurrently with recall, and takes no stripe lock at all, so
-	// every assignment below used to land on the struct GetEngram had just
-	// re-cached for every reader.
-	eng = eng.Clone()
 
 	// Only overwrite fields that were provided (non-empty).
 	if summary != "" {
@@ -866,6 +877,8 @@ func (ps *PebbleStore) UpdateDigest(ctx context.Context, id ULID, summary string
 		flags |= digestClassifiedFlag
 	}
 	batch.Set(keys.DigestFlagsKey([16]byte(id)), encodeDigestFlags(flags), nil)
+
+	testRMWPoint("UpdateDigest", ws, id)
 
 	// Invalidate caches before commit — cached structs are stale.
 	ps.cache.Delete(ws, id)

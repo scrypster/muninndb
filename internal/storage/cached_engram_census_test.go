@@ -230,8 +230,10 @@ var cachedEngramKnownSources = map[string]string{
 		"doing nothing but GetEngram in a loop",
 	"internal/storage/engram.go:PebbleStore.UpdateConfidenceWithContradiction": "the #559 lost-update path; same " +
 		"shape as UpdateConfidence",
-	"internal/storage/entity.go:PebbleStore.UpdateDigest": "the enrichment worker's write path — no stripe lock at " +
-		"all, and it aliased the caller's keyPoints slice into the cached struct",
+	// Removed from the floor (case (a)): PebbleStore.UpdateDigest no longer
+	// reads a cache-returned engram — it reads GetEngramUncached under the
+	// engram's stripe lock (item 2 of the storage-hardening pass), a private
+	// decode that shares nothing with the cache.
 	"internal/engine/engine.go:Engine.Restore": "mutated the cached struct purely to shape its RETURN value, and " +
 		"returned the cache's own pointer to the caller",
 }
