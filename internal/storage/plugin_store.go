@@ -305,14 +305,19 @@ func (ps *PebbleStore) UpdateEmbedding(ctx context.Context, wsPrefix [8]byte, id
 	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("update embedding: commit: %w", err)
 	}
+	// Replicate BEFORE releasing the stripe: the replication log must see
+	// same-engram batches in commit order, or a forget committing in the gap
+	// ships first and a follower applies this older record on top of it
+	// (TestReplication_SameEngramBatchesShipInCommitOrder).
+	testCommittedPoint("UpdateEmbedding", wsPrefix, id)
+	ps.replicateBatch(batch)
 	locked = false
 	unlock()
-	// Make the commit durable before returning, as the Sync commit did:
-	// an empty Sync LogData syncs the WAL through every earlier commit.
-	if err := ps.db.LogData(nil, pebble.Sync); err != nil {
+	// Make the commit durable before returning, as the Sync commit did. A
+	// failure here is returned; the batch is applied and already shipped.
+	if err := ps.syncWAL(); err != nil {
 		return fmt.Errorf("update embedding: sync: %w", err)
 	}
-	ps.replicateBatch(batch)
 	return nil
 }
 

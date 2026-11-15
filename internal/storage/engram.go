@@ -631,8 +631,8 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 			mu.Unlock()
 			return err
 		}
+		ps.replicateBatch(batch) // under the stripe: commit order == log order
 		mu.Unlock()
-		ps.replicateBatch(batch)
 		ps.cache.Delete(wsPrefix, id)
 		return nil
 	}
@@ -889,8 +889,8 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		mu.Unlock()
 		return fmt.Errorf("delete engram: %w", err)
 	}
+	ps.replicateBatch(batch) // under the stripe: commit order == log order
 	mu.Unlock()
-	ps.replicateBatch(batch)
 
 	ps.cache.Delete(wsPrefix, id)
 	for _, src := range assocCacheDirty {
@@ -1407,9 +1407,11 @@ func (ps *PebbleStore) UpdateConfidence(ctx context.Context, wsPrefix [8]byte, i
 	ps.recacheCommitted(ctx, wsPrefix, id)
 	// Invalidate metadata cache — cached metadata is stale.
 	ps.metaCache.Remove([16]byte(id))
-	mu.Unlock()
-
+	// Replicated under the stripe so the replication log sees same-engram
+	// batches in commit order (TestReplication_SameEngramBatchesShipInCommitOrder).
+	testCommittedPoint("UpdateConfidence", wsPrefix, id)
 	ps.replicateBatch(batch)
+	mu.Unlock()
 
 	return nil
 }
@@ -1601,9 +1603,8 @@ func (ps *PebbleStore) UpdateConfidenceWithContradiction(ctx context.Context, ws
 	// replicateBatch stays post-commit (no local-cache effect).
 	ps.recacheCommitted(ctx, wsPrefix, id)
 	ps.metaCache.Remove(id16)
+	ps.replicateBatch(batch) // under the stripe: commit order == log order
 	mu.Unlock()
-
-	ps.replicateBatch(batch)
 
 	return prior, newConf, nil
 }

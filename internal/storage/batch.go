@@ -519,9 +519,19 @@ func (b *pebbleStoreBatch) Commit() error {
 	if b.ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	err = b.ps.commitBatch(b.batch, syncOption)
-	unlockMutations()
+	// With queued mutations the engrams' stripes are held: apply NoSync,
+	// replicate (log order must equal commit order for those engrams), release
+	// the stripes, THEN sync the WAL — same durability on return, no fsync
+	// inside a shared stripe. Without mutations no stripe is held and the
+	// commit is exactly as before.
+	locked := len(b.mutations) > 0
+	commitOpt := syncOption
+	if locked {
+		commitOpt = pebble.NoSync
+	}
+	err = b.ps.commitBatch(b.batch, commitOpt)
 	if err != nil {
+		unlockMutations()
 		return fmt.Errorf("batch commit: %w", err)
 	}
 
@@ -533,7 +543,17 @@ func (b *pebbleStoreBatch) Commit() error {
 	// carried entity links — never reached a follower. Must run before
 	// b.batch.Close() (Discard), same constraint replicateBatch documents
 	// for its direct callers.
+	for _, m := range b.mutations {
+		testCommittedPoint("BatchCommit", m.ws, m.id)
+	}
 	b.ps.replicateBatch(b.batch)
+	unlockMutations()
+	var syncErr error
+	if locked && syncOption == pebble.Sync {
+		// Applied and shipped; a sync failure is reported, after the
+		// post-commit bookkeeping below has run for the applied batch.
+		syncErr = b.ps.syncWAL()
+	}
 
 	// The COG-29 debt scan cache's invalidation signal, bumped here rather than
 	// at stage time for the same reason the cache evictions below are: the
@@ -598,6 +618,9 @@ func (b *pebbleStoreBatch) Commit() error {
 		}
 	}
 
+	if syncErr != nil {
+		return fmt.Errorf("batch commit: sync: %w", syncErr)
+	}
 	return nil
 }
 

@@ -1,6 +1,10 @@
 package storage
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+
+	"github.com/cockroachdb/pebble"
+)
 
 // rmwHook is a TEST-ONLY seam inside every read-modify-write of an engram
 // record: testRMWPoint runs after the writer has read the record it will
@@ -40,4 +44,24 @@ func (ps *PebbleStore) EngramStripeHeldForTesting(id ULID) bool {
 		return false
 	}
 	return true
+}
+
+// testCommittedPoint is the RMW seam's second point, between a writer's
+// commit and its replicateBatch: tests land a concurrent writer there to
+// prove the replication log receives same-engram batches in commit order.
+func testCommittedPoint(op string, ws [8]byte, id ULID) {
+	testRMWPoint(op+":committed", ws, id)
+}
+
+// walSyncHook is a TEST-ONLY seam replacing the WAL sync a writer runs after
+// releasing its stripe (syncWAL), so a test can force it to fail.
+var walSyncHook atomic.Pointer[func() error]
+
+// syncWAL makes every commit so far durable: an empty Sync LogData syncs the
+// WAL through all earlier commits.
+func (ps *PebbleStore) syncWAL() error {
+	if h := walSyncHook.Load(); h != nil {
+		return (*h)()
+	}
+	return ps.db.LogData(nil, pebble.Sync)
 }

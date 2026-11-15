@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cockroachdb/pebble"
 )
 
 // TestWriteContentionHarness is a MEASUREMENT, not a check: it runs only with
@@ -19,16 +21,31 @@ func TestWriteContentionHarness(t *testing.T) {
 	if os.Getenv("MUNINN_CONTENTION_HARNESS") != "1" {
 		t.Skip("measurement harness; set MUNINN_CONTENTION_HARNESS=1")
 	}
-	for _, k := range []int{1, 64, 10000} {
-		for _, withEmbed := range []bool{false, true} {
-			opsPerSec, p99 := runContention(t, k, withEmbed)
-			t.Logf("K=%-6d embed=%-5v non-embed ops/s=%8.0f  p99(non-embed)=%v", k, withEmbed, opsPerSec, p99)
+	// replog=true installs a stand-in for the cluster replication log:
+	// ReplicationLog.Append is one Pebble Sync commit under a process-wide
+	// mutex, and replicateBatch runs under the engram's stripe.
+	for _, replog := range []bool{false, true} {
+		for _, k := range []int{1, 64, 10000} {
+			for _, withEmbed := range []bool{false, true} {
+				opsPerSec, p99 := runContention(t, k, withEmbed, replog)
+				t.Logf("replog=%-5v K=%-6d embed=%-5v non-embed ops/s=%8.0f  p99(non-embed)=%v", replog, k, withEmbed, opsPerSec, p99)
+			}
 		}
 	}
 }
 
-func runContention(t *testing.T, k int, withEmbed bool) (float64, time.Duration) {
+func runContention(t *testing.T, k int, withEmbed, replog bool) (float64, time.Duration) {
 	ps := openTestStore(t)
+	if replog {
+		var logMu sync.Mutex
+		var seq uint64
+		ps.repLogAppend = func(_ uint8, _, value []byte) error {
+			logMu.Lock()
+			defer logMu.Unlock()
+			seq++
+			return ps.db.Set([]byte(fmt.Sprintf("\xffreplog-%020d", seq)), value, pebble.Sync)
+		}
+	}
 	ctx := context.Background()
 	ws := ps.VaultPrefix(fmt.Sprintf("trail-contention-%d-%v", k, withEmbed))
 	ids := make([]ULID, k)
