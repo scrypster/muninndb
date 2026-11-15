@@ -3560,6 +3560,20 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 		return nil, fmt.Errorf("%w: target_id %q: %v", ErrInvalidID, req.TargetID, err)
 	}
 
+	// A supersedes link gives the target a successor exactly as evolve does,
+	// so it takes the same per-target lock and passes the same fork guard —
+	// before the endpoint-state check, so a target an evolve just superseded
+	// is refused with the error that names its current version. Without the
+	// lock a link racing an evolve forked the target (24 of 30 trials).
+	if storage.RelType(req.RelType) == storage.RelSupersedes {
+		mu := e.evolveLock(wsPrefix, targetID)
+		mu.Lock()
+		defer mu.Unlock()
+		if err := e.refuseSupersededEvolveTarget(ctx, wsPrefix, targetID, sourceID); err != nil {
+			return nil, err
+		}
+	}
+
 	// Guard: reject links to/from soft-deleted engrams. A single batched
 	// GetMetadata call avoids two expensive GetEngram round-trips.
 	metas, err := e.store.GetMetadata(ctx, wsPrefix, []storage.ULID{sourceID, targetID})
@@ -4325,7 +4339,7 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 
 	// Refuse to fork: a target that already has a successor gets an error
 	// naming the current head instead of a second, rival successor.
-	if err := e.refuseSupersededEvolveTarget(ctx, wsPrefix, oldULID); err != nil {
+	if err := e.refuseSupersededEvolveTarget(ctx, wsPrefix, oldULID, storage.ULID{}); err != nil {
 		return storage.ULID{}, err
 	}
 

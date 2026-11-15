@@ -197,3 +197,54 @@ func TestEvolve_ForkRepairAdviceWorks(t *testing.T) {
 	}
 	h.evolve(b1, "smoker fuel", "Wood shavings are used as smoker fuel.")
 }
+
+// Declaring a supersedes link is the other way to give a memory a successor,
+// so it must pass the same guard under the same lock.
+func TestLinkSupersedes_SecondSuccessorIsRefused(t *testing.T) {
+	h, cleanup := newVersionHeadHarness(t)
+	defer cleanup()
+	a := h.write("frame spacing", "Frames are spaced at 38mm.")
+	b := h.write("frame spacing", "Frames are spaced at 35mm.")
+	c := h.write("frame spacing", "Frames are spaced at 32mm.")
+	h.linkSupersedes(b, a)
+	// Re-declaring the same edge is idempotent, not a fork.
+	h.linkSupersedes(b, a)
+	_, err := h.eng.Link(h.ctx, &mbp.LinkRequest{Vault: "default", SourceID: c, TargetID: a, RelType: uint16(storage.RelSupersedes), Weight: 1})
+	if !errors.Is(err, ErrEvolveTargetSuperseded) || !strings.Contains(err.Error(), b) {
+		t.Fatalf("second supersedes link err = %v, want ErrEvolveTargetSuperseded naming %s", err, b)
+	}
+	if got := supersedersOf(t, h, a); len(got) != 1 {
+		t.Fatalf("superseders = %v, want only %s", got, b)
+	}
+}
+
+func TestLinkSupersedes_RacingAnEvolveNeverForks(t *testing.T) {
+	h, cleanup := newVersionHeadHarness(t)
+	defer cleanup()
+	for trial := 0; trial < 30; trial++ {
+		a := h.write(fmt.Sprintf("swarm trap %d", trial), fmt.Sprintf("Swarm trap %d hangs at two metres.", trial))
+		c := h.write(fmt.Sprintf("swarm trap %d", trial), fmt.Sprintf("Swarm trap %d hangs at three metres.", trial))
+		var wg sync.WaitGroup
+		var evErr, linkErr error
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, evErr = h.eng.Evolve(h.ctx, "default", a, fmt.Sprintf("Swarm trap %d hangs at four metres.", trial), "race", nil, "")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, linkErr = h.eng.Link(h.ctx, &mbp.LinkRequest{Vault: "default", SourceID: c, TargetID: a, RelType: uint16(storage.RelSupersedes), Weight: 1})
+		}()
+		close(start)
+		wg.Wait()
+		if got := supersedersOf(t, h, a); len(got) != 1 {
+			t.Fatalf("trial %d: %d superseders (evolve err %v, link err %v) — a fork", trial, len(got), evErr, linkErr)
+		}
+		if (evErr == nil) == (linkErr == nil) {
+			t.Fatalf("trial %d: want exactly one winner, got evolve=%v link=%v", trial, evErr, linkErr)
+		}
+	}
+}

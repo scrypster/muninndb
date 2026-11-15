@@ -53,16 +53,19 @@ func (e *Engine) distinctSuperseders(ctx context.Context, ws [8]byte, id storage
 // question is "does this memory have a successor in storage", not "may this
 // caller see it". The cost for an ordinary target is one reverse-association
 // read.
-func (e *Engine) refuseSupersededEvolveTarget(ctx context.Context, ws [8]byte, target storage.ULID) error {
+//
+// except, when non-zero, is a successor that does not count: re-declaring the
+// SAME supersedes link (source except → target) is idempotent, not a fork.
+func (e *Engine) refuseSupersededEvolveTarget(ctx context.Context, ws [8]byte, target, except storage.ULID) error {
 	succ, err := e.distinctSuperseders(ctx, ws, target)
 	if err != nil {
 		return fmt.Errorf("evolve: check for an existing successor: %w", err)
 	}
-	if len(succ) == 0 {
+	if len(succ) == 0 || (len(succ) == 1 && except != (storage.ULID{}) && succ[0] == except) {
 		return nil
 	}
 	refuse := func(detail string) error {
-		return fmt.Errorf("%w: memory %s already has a successor, and evolving it again would fork its version history. %s",
+		return fmt.Errorf("%w: memory %s already has a successor, and giving it another (by evolve or a supersedes link) would fork its version history. %s",
 			ErrEvolveTargetSuperseded, target.String(), detail)
 	}
 	visited := map[storage.ULID]bool{target: true}
