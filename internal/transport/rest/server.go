@@ -265,6 +265,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/admin/vaults/{name}/export-markdown", s.withAdminMiddleware(s.handleExportVaultMarkdown))
 	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddlewareNoSizeLimit(s.withLargeBody(s.withCortexWrite(s.handleImportVault))))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-fts", s.withAdminMiddleware(s.withCortexWrite(s.handleReindexFTSVault)))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-hnsw", s.withAdminMiddleware(s.withCortexWrite(s.handleRebuildVectorIndex)))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/repair-watermark/reset", s.withAdminMiddleware(s.handleResetRepairWatermark))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed", s.withAdminMiddleware(s.withCortexWrite(s.handleReembedVault)))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.withCortexWrite(s.handleRenameVault)))

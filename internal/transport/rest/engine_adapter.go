@@ -286,6 +286,24 @@ func (w *RESTEngineWrapper) ReindexFTSVault(ctx context.Context, vaultName strin
 	return w.engine.ReindexFTSVault(ctx, vaultName)
 }
 
+func (w *RESTEngineWrapper) RebuildVectorIndex(ctx context.Context, vaultName string) error {
+	if w.hnswReg == nil {
+		return fmt.Errorf("no vector index configured")
+	}
+	names, err := w.engine.Store().ListVaultNames()
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, n := range names {
+		found = found || n == vaultName
+	}
+	if !found {
+		return engine.ErrVaultNotFound
+	}
+	return w.hnswReg.RebuildVault(w.engine.Store().ResolveVaultPrefix(vaultName))
+}
+
 func (w *RESTEngineWrapper) ResetRepairWatermark(ctx context.Context, vaultName string, which engine.RepairWatermarkKind) error {
 	return w.engine.ResetRepairWatermark(ctx, vaultName, which)
 }

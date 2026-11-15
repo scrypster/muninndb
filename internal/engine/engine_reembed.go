@@ -90,13 +90,19 @@ func (e *Engine) runReembed(job *vaultjob.Job, ws [8]byte, vaultName string) {
 		}
 	}()
 
-	// Step 1: Reset in-memory HNSW index for this vault.
+	// Step 1: Drop the in-memory HNSW index for this vault, stopping its
+	// background repair and draining its list writes BEFORE the keys go (a
+	// later write-back would leave vector-less keys; STO-8).
 	if e.hnswRegistry != nil {
-		e.hnswRegistry.ResetVault(ws)
+		e.hnswRegistry.BeginClear(ws)
 	}
 
 	// Step 2: Clear all 0x07 HNSW keys.
-	if err := e.store.ClearHNSWForVault(ws); err != nil {
+	err := e.store.ClearHNSWForVault(ws)
+	if e.hnswRegistry != nil {
+		e.hnswRegistry.EndClear(ws)
+	}
+	if err != nil {
 		e.jobManager.Fail(job, fmt.Errorf("clear HNSW: %w", err))
 		return
 	}

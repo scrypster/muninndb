@@ -9,6 +9,7 @@ import (
 
 	"github.com/scrypster/muninndb/internal/cognitive"
 	"github.com/scrypster/muninndb/internal/index/fts"
+	"github.com/scrypster/muninndb/internal/index/hnsw"
 	"github.com/scrypster/muninndb/internal/metrics/latency"
 	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/plugin/llmstats"
@@ -95,9 +96,12 @@ type CoherenceStats struct {
 
 // VaultObservability holds per-vault observability data.
 type VaultObservability struct {
-	EngramCount int64                    `json:"engram_count"`
-	HNSWVectors int                      `json:"hnsw_vectors"`
-	HNSWBytes   int64                    `json:"hnsw_bytes"`
+	EngramCount int64 `json:"engram_count"`
+	HNSWVectors int   `json:"hnsw_vectors"`
+	HNSWBytes   int64 `json:"hnsw_bytes"`
+	// HNSWRebuild is present while (or after) the vault's vector graph is
+	// repaired in the background at load; absent when no repair was needed.
+	HNSWRebuild *hnsw.RebuildStatus      `json:"hnsw_rebuild,omitempty"`
 	Coherence   *CoherenceStats          `json:"coherence,omitempty"`
 	Latency     map[string]latency.Stats `json:"latency"`
 	// KeywordUnindexedLive counts memories that are not forgotten but have
@@ -213,9 +217,11 @@ func (e *Engine) Observability(ctx context.Context, version string, uptimeSecond
 
 		var vectors int
 		var vectorBytes int64
+		var rebuild *hnsw.RebuildStatus
 		if e.hnswRegistry != nil {
 			vectors = e.hnswRegistry.VaultVectors(wsPrefix)
 			vectorBytes = e.hnswRegistry.VaultVectorBytes(wsPrefix)
+			rebuild = e.hnswRegistry.RebuildStatus(wsPrefix)
 		}
 
 		var vaultLatency map[string]latency.Stats
@@ -233,6 +239,7 @@ func (e *Engine) Observability(ctx context.Context, version string, uptimeSecond
 			EngramCount:          count,
 			HNSWVectors:          vectors,
 			HNSWBytes:            vectorBytes,
+			HNSWRebuild:          rebuild,
 			Coherence:            coherenceByName[name],
 			Latency:              vaultLatency,
 		}

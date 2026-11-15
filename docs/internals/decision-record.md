@@ -1750,3 +1750,277 @@ whole: it is keyed by engram ID alone, and scoping it is a cache-key change.
 **Still open:** provenance submitted after its write's commit can land after a clear's
 tombstones (a write committing just before the clear); metaCache keyed by ID alone also
 means a cloned vault and its source share entries; closed near-duplicate islands in HNSW.
+
+### Closed islands in the vector index: diverse neighbour selection (2026-11-15)
+
+**The defect.** `Insert` kept the M (layer 0: M0 = 32) nearest candidates as a node's
+neighbours and `pruneNeighbors` kept the nearest when a neighbour's list overflowed. Any set
+of 33 or more vectors that are each other's 32 nearest neighbours therefore ended with no
+layer-0 edge leaving the set: edges INTO it survive in outsiders' lists, so the load-time
+forward check passed, but a search whose descent lands inside can never leave. It is not
+limited to near-duplicates — synthetic ~40-member topics (intra-topic cosine ≈ 0.69) close
+the same way, 1,676 of 2,000 nodes on one corpus. All measurements here are on synthetic
+vectors; no production vault was read.
+
+**Decision.** One selection rule for a node's own pick AND for back-link pruning
+(`internal/index/hnsw/select.go`): Malkov–Yashunin Algorithm 4 (keep a candidate only if it
+is nearer to the base than to every neighbour already kept) with keepPruned back-fill (top
+lists up with the set-aside candidates, nearest first), plus one addition — a candidate
+bit-identical to a kept neighbour is set aside, because with identical vectors every
+comparison ties and the strict test keeps them all (40 identical vectors closed under the
+plain heuristic: `TestInsert_ExactDuplicatesAreNotClosed` fails with the addition removed).
+#620's just-linked edge is kept first. Ids with a missing vector are never selected (the old
+prune sorted them last; a search cannot expand them). The entry point is the smallest id at
+the top level, live and at load, so a reloaded graph starts every search where the live one
+did. A `cognitiontrial`-only switch (`MUNINN_TRIAL_LEGACY_HNSW_SELECT=1`) restores the old
+rules; the trial arm reproduces the trunk's failing test output exactly. Rejected, from the
+design pass: the heuristic without back-fill (cluster-aimed recall@10 0.898, lists thinned to
+16–20), the heuristic at the node's own pick only (topics 0.523 — the prune is where the
+island closes), a query-time escape (a short-count detector caught 0 of 149–233 failing
+queries: islands are larger than k, so result lists come back full), index-level dedup
+(needs a per-vault ε and new keys; deferred), an exact scan below some N (a fallback that
+leaves the graph broken).
+
+**The pre-registered acceptance rule FAILED as written, on two counts.** Written before any
+recall number existed (verbatim in the design record): S1 every clustered shape and class
+recall@10 ≥ 0.95 and recall@50 ≥ 0.90 against exact search; S2 uniform/topic/ordinary cells
+≥ current − 0.01; S3 distance computations per query ≤ 1.5× current and 12k build ≤ 3×
+current; S4 layer-0 degree ≤ current. (1) S1 failed: queries aimed into a 500-member
+near-identical cluster pooled at recall@10 ≈ 0.93 (1,000 queries × 3 seeds), below the 0.95
+bar. Every miss swaps one near-duplicate for another at a k-th-distance gap of 2–4 × 10⁻⁵.
+(2) S3 failed: distances per query up to 1.74× current and build up to 3.41× current. The
+current index's queries are cheap BECAUSE they are trapped; on uniform data, the one shape
+it does not island, the query-cost ratio is 1.00×. S2 and S4 passed; no kill line was
+crossed.
+
+**Amended rule — adopted AFTER seeing those numbers, i.e. post hoc.** (a) A returned vector
+counts as a hit when its true distance is within ε of the exact k-th distance, ε = 5.0 × 10⁻⁴:
+the minimum, rounded down, of the cosine distance between the same text embedded alone and
+inside a batch on the bundled bge-small (5.14 × 10⁻⁴ over 72 pairs; median 7.0 × 10⁻⁴, max
+1.24 × 10⁻³ — `TestMeasure_BatchCompositionJitter`, `MUNINN_MEASURE_EMBED_JITTER=1`). Two
+stored vectors closer than that cannot be ordered by anything the embedder guarantees. With
+that equivalence the bar stays recall@10 ≥ 0.95 on every clustered shape. (b) Uniform and
+plain-topic data no more than one point below current (unchanged; passed). (c) Cost bounded
+absolutely: distances per query must stay well under N on every non-degenerate shape, and
+build throughput is stated. The harness (`harness_test.go`, `HNSW_HARNESS=1`) prints strict
+and jitter-equivalent recall side by side for every cell.
+
+**Graded (dim 384, package M/M0/efC/efS, plain `Search`, 200 queries per class; recall@10
+strict / jitter-equivalent, recall@50 strict; current → new):**
+
+| N | shape | class | current | new | dist/q cur → new | build vec/s cur → new |
+|---|---|---|---|---|---|---|
+| 2k | uniform | ordinary | 0.948 / 0.960, 0.858 | 0.952 / 0.965, 0.863 | 1117 → 1139 | 1792 → 640 |
+| 2k | topics | ordinary | 0.296 / 0.297, 0.272 | 1.000 / 1.000, 0.992 | 242 → 273 | 3815 → 1340 |
+| 2k | dup10 | ordinary | 0.458 / 0.466, 0.431 | 1.000 / 1.000, 0.994 | 237 → 267 | 3938 → 1434 |
+| 2k | dup34 | ordinary | 0.250 / 0.254, 0.230 | 1.000 / 1.000, 0.991 | 182 → 276 | 3994 → 1449 |
+| 2k | dup500 | ordinary / topic / aimed | 0.738 / 0.753 / 0.820 strict | 1.000 / 0.998 / **0.918** strict | 147 → 247 | 3547 → 1324 |
+| 2k | dup500 | (jitter) | 0.742 / 0.771 / 0.980 | 1.000 / 1.000 / 1.000 | | |
+| 12k | uniform | ordinary | 0.741 / 0.753, 0.529 | 0.747 / 0.759, 0.540 | 1608 → 1611 | 643 → 338 |
+| 12k | topics | ordinary | 0.707 / 0.719, 0.649 | 1.000 / 1.000, 0.973 | 318 → 524 | 1887 → 897 |
+| 12k | topicsloose | ordinary | 0.782 / 0.786, 0.707 | 0.991 / 0.993, 0.924 | 765 → 964 | 1316 → 562 |
+| 12k | dup34 | ordinary / topic / aimed | 0.643 / 0.824 / 0.720 strict | 0.985 / 1.000 / 1.000 | 314 → 534 | 1954 → 808 |
+| 12k | dup50 | ordinary / topic / aimed | 0.626 / 0.655 / 0.745 strict | 0.995 / 0.990 / 0.990 | 377 → 520 | 2112 → 829 |
+| 12k | dup500 | ordinary / topic / aimed | 0.590 / 0.508 / 0.550 strict | 0.990 / 0.996 / **0.927** strict | 295 → 514 | 2359 → 944 |
+| 12k | dup500 | (jitter) | 0.595 / 0.553 / 0.990 | 0.990 / 1.000 / 1.000 | | |
+| 12k | mix | ordinary / topic / aimed | 0.637 / 0.698 / 0.760 strict | 1.000 / 0.988 / **0.944** strict | 310 → 493 | 2414 → 949 |
+| 12k | mix | (jitter) | 0.646 / 0.748 / 1.000 | 1.000 / 0.995 / 1.000 | | |
+
+Every clustered cell of the new rule reaches jitter-equivalent recall@10 ≥ 0.985 (minimum:
+dup34 ordinary at 12k), jitter-equivalent recall@50 ≥ 0.961. **Read the aimed rows with
+care:** the jitter grading saturates cluster-aimed queries for BOTH rules (current 0.98–1.00)
+— inside a near-identical cluster almost anything returned is within ε of the k-th. On that
+class the amendment shows only that the new rule's residual strict miss is below embedder
+resolution; it is not evidence that the fix helps there. The evidence that it does is the
+ordinary and cluster-topic classes, where strict and jitter grading agree within 0.05
+and the new rule gains 0.02–0.75 per cell (largest where the current graph islands worst). Cost, absolutely: distances per query at N = 2,000 are
+106–507 on clustered shapes (5–25% of N) and 1,139 on uniform (57% of N — the current rule
+spends 1,117 there, so this is HNSW on structureless 384-dim data at small N, not the fix);
+at N = 12,000 they are 185–574 on clustered shapes (1.5–4.8%), 964 on topicsloose (8%),
+1,611 on uniform (13.4%). N grew 6×, distances 1.4× (uniform) to 2.1× (clustered):
+sub-linear. In-memory build throughput on one M-series core: 338–949 vectors/s at 12k (current
+643–2,414). Heap and mean layer-0 degree (32.0) are identical for both rules. **The reviewer
+must judge (c) at N = 2,000 uniform, where "well under N" is not met by either rule.**
+
+**Residuals.** Within-cluster ORDER among near-identical vectors (the strict aimed cells,
+0.918–0.944) is the COG-34 known limit, extended from exact to near-identical duplicates;
+efSearch = 100 would lift it to 0.98–0.99 but is a global parameter change, not proposed.
+Synthetic is not real: the topic shape may exaggerate islands; a production vault's recall
+against exact search is unmeasured. Insert is 1.9–2.9× slower and holds the vault's write
+lock for longer.
+
+### Closed islands, part 2: an old graph is repaired once, in the background (2026-11-15)
+
+**Why a migration.** The selection fix changes only what new lists contain; a store keeps its
+old graph until something rebuilds it. The trunk's load-time rebuild did exist, and it was
+itself a defect: it ran synchronously inside `Registry.getOrCreate`, under the registry-wide
+write lock (stalling the first access to every vault), it fired only on forward reach (the
+entry reaching < 50%), and it rebuilt with the same nearest-only rule — re-creating the
+islands, so it fired again on every boot. Measured on the trunk (realistic mix shape, dim
+384, real-disk Pebble, one M-series core): 11,500 vectors 6.7 / 7.3 / 7.3 s per boot, 16,500
+vectors 10.9 / 10.9 / 11.7 s per boot, reach after every rebuild 1,365 / 11,500 and 2,126 /
+16,500. That loop was also the "graph is repaired on load" restart variance.
+
+**Detection is structural; the format carries no version.** At load, `assessGraph` counts
+linked vectors that cannot reach the entry point (reverse BFS over layer-0 edges, O(N + E)).
+**Threshold: one closed node means a full rebuild.** Evidence for the margin: graphs built by
+the new rule had 0 closed nodes in every build measured (16 harness builds at 2,000 / 12,000
+× 8 shapes, the 64- and 128-dim test corpora, and both migrated stores after their rebuild); graphs
+built by the old rule had 1,581–1,782 of 2,000 and 5,567–11,115 of 12,000 on every clustered
+harness shape, 10,829 / 11,500 and 13,449 / 16,500 on the persisted mix stores, and at least
+79 of 2,000 on the gentlest clustered corpus seen (0 on uniform and loose-topic data, which
+the old rule does not island and which are correctly left alone). A forward reach below
+half also means a full rebuild; vectors that are merely unreachable or have no list are
+re-linked by re-insertion. **Deviation from the design, on evidence:** the design proposed a
+full rebuild only at ≥ 50% closed and re-linking the closed nodes below that. Re-linking was
+built and does not converge — the old-rule lists around the re-linked nodes close again (79
+closed before, 82 after, the same on every subsequent boot; repaired-graph recall@10 0.93
+instead of 1.00). An island is therefore always rebuilt. ~~Loop-safety rests on the measured
+fact that a rebuilt graph has none~~ — **wrong, see the review section below:** 40–200
+bit-identical vectors left rebuilt graphs broken and the vault repaired on every boot. The
+repair now enforces its own postcondition instead.
+
+**Served throughout, swapped once, crash-safe without a marker.** The registry caches the
+index as loaded and starts the repair in a goroutine, one vault at a time across the
+registry (peak extra memory is one vault's scratch graph). The scratch index has no
+database, so nothing is written while it builds; searches and inserts use the loaded graph
+unchanged (determinism holds for the graph being served). The swap, under the index's write
+lock: replay inserts that landed meanwhile (also replayed in rounds beforehand, outside the
+lock), drain in-flight list writes, confirm the vault's entry vector is still on disk, then
+commit every list and the deletion of every layer a node no longer has in ONE synced batch,
+and only then replace the in-memory graph. A crash or cancel before the commit leaves the old
+graph byte-for-byte (`TestMigration_CancelledRepairWritesNothing`; with the scratch index
+given the database — persist-as-you-go, as the trunk's rebuild did — the same point already
+showed 2,006 changed and 117 extra keys);
+the next load assesses it again and starts over. `ResetVault` cancels and waits; Engine.Stop
+calls the new `Registry.Close`, which does the same for every vault, so a repair cannot write
+into a closed database. No marker key is used: one under 0x07 would load on an old binary as a
+vector-less entry point (that vault's vector search returning nothing), and none is needed.
+
+**Measured, new code, the same stores** (one M-series core on a shared, loaded machine):
+first access 0.056 s / 0.127 s (11,500 / 16,500) — the trunk's 6.7 s / 10.9 s is gone from
+this path; background rebuild 11.4–16.2 s / 18.9–25.6 s across two runs (645–1,013
+vectors/s, persistence included); every later boot 0.05–0.19 s with no repair. Extra heap
+while it runs: the scratch graph 7.6 MB / 20.4 MB (vectors are shared, not copied) plus the
+commit batch 6.4 MB / 9.2 MB — single GC-snapshot deltas, noisy, well inside a 2 GB host;
+allocation churn is 4.0 / 5.9 GB of short-lived garbage over the rebuild. A 2-vCPU server was
+not measured: the rebuild is single-threaded, so expect it to take the per-core slowdown
+(the design guessed 2–4×: roughly 25–60 s for 11,500 vectors), served throughout, and to
+occupy one of the two cores while it runs. Progress is reported per vault as `hnsw_rebuild`
+in admin observability (state, kind, done/total, counts at load, duration); `muninn_status`
+does not show it — that is an MCP surface change, not made here.
+
+**Retired-version trigger, re-measured on the new graph (kept, not removed).** `SearchLive`
+at 12,000 vectors / dim 384, recall@10 against exact search over live vectors, exact pass
+fired, distances per query — current rule; new rule; new rule with the beam-of-retired
+trigger off:
+
+| corpus | class | current | new | new, trigger off |
+|---|---|---|---|---|
+| 3,000 retired (25%) | ordinary | 0.749, 35/200, 2,438 | 0.995, 0/200, 704 | 0.995, 0/200, 704 |
+| 90% retired | ordinary | 1.000, 200/200, 12,075 | 1.000, 200/200, 12,078 | 1.000, 0/200, 1,495 |
+| ten 500-version chains | ordinary | 0.871, 83/200, 5,193 | 0.995, 16/200, 1,353 | 0.995, 0/200, 445 |
+| ten 500-version chains | chain-aimed | 0.995, 199/200, 12,022 | 1.000, 200/200, 12,082 | 1.000, 37/200, 2,912 |
+
+On these shapes the trigger buys no recall on the new graph and costs a full scan on every
+query of a mostly-retired vault. **But** on the in-tree 64-dim chain fixture
+(`TestSearchLive_ChainAimedRecallAgainstExact`) turning it off drops chain-aimed recall@10
+from 1.000 to 0.956 on the new graph (0.625 on the old). Its removal is a separate change
+that has to answer that cell.
+
+**Tombstones are in memory only — verified.** A hard delete tombstones the node in the
+running index and removes nothing from 0x07, so after a restart the deleted vector is an
+ordinary graph node again and the vector index returns it
+(`TestHNSWTombstone_KnownResidual_HardDeletedVectorIsAGraphHitAfterRestart`, fails when
+fixed). What the user sees: recall never returns it, before or after a restart (the engram
+record is gone; `TestHNSWTombstone_HardDeletedNeverRecalledAcrossRestart`); the cost is a
+vector candidate slot it can take from a live memory. Not fixed here.
+
+**Residuals.** ~~If `ClearVault` wipes the vault between the commit's vector check and the
+batch commit (microseconds…)~~ — **wrong on both counts, see the review section below:** the
+window was milliseconds, and the result was a silent vector-search outage, not harmless
+junk. Fixed by `BeginClear`/`EndClear` and by load deleting vector-less keys. The rebuild competes with serving for
+CPU. Concurrent-insert levels (RNG drawn before the lock) and index-level dedup remain
+deferred from the design.
+
+### Closed islands, part 3: what the adversarial review found, and the fixes (2026-11-15)
+
+An independent adversarial review found no must-fix and no data loss (power loss at 40
+random cut points during a repair left the old graph 8 times and the new one 32 times, never
+a mix; old and new binaries read each other's stores; 108,369 searches during a 12,000-vector
+repair, worst 11.4 ms). It confirmed the amended rule under a grading that needs no epsilon
+and found five defects in claims this branch made. Each fix below has a test that fails when
+that fix alone is removed (`guards_test.go`, `identical_test.go`; the per-guard sweep ran the
+whole package with each guard neutralised in turn).
+
+**The epsilon was the wrong quantity.** 5 × 10⁻⁴ is the distance between two copies of one
+STORED vector; the jitter grading compares QUERY distances, which batch jitter moves by a
+median of 2.1 × 10⁻³ (review's measurement). So 5 × 10⁻⁴ was about 4× too STRICT, not
+generous. The harness now reports a **collapsed** grading as primary — the near-identical
+cluster collapsed to one representative, so a swap inside it is not a miss and no epsilon is
+needed (`recallCollapsed`); strict and jitter stay as reference columns. Review's own
+collapsed numbers: aimed queries 1.000 on the new rule, every strict miss a within-cluster
+swap (gap p50 2.5–3.2 × 10⁻⁵, max 2.6 × 10⁻⁴), and shapes this harness skipped also pass
+(zipf 1.000, tiny 1.000, one giant cluster 1.000 aimed / 0.985 ordinary, time-ordered drift
+0.997). This branch's harness re-run with the collapsed column (dim 384, after the fixes
+below): every clustered cell of the new rule ≥ 0.982 collapsed recall@10 at 12,000 (min:
+mix cluster-topic) and 1.000 at 2,000; the current rule 0.506–0.835 on ordinary and
+cluster-topic cells. Collapsed grading, like the jitter one, saturates AIMED queries for
+both rules (current 0.97–1.00), so aimed cells still carry no evidence either way. Strict
+recall and distances per query are unchanged by the fixes (selection on non-identical data is
+the same rule).
+
+**Bit-identical vectors were not reachable, and their vault repaired on every boot.** Every
+distance among identical vectors ties, so candidates ordered by id sent every list to the
+same smallest-id copies. Measured before the fix (dim 32, synthetic): 100 copies in 600
+vectors, 55 found at k = 100 and 45 unreachable; a vault of 100 copies, 99 closed; restart
+cycles repaired on every boot, the unreachable count growing. Reachable in real data: the
+bundled embedder reads only the first 256 tokens, so memories sharing a long templated
+opening can embed identically; clients can also supply embeddings. **Fix: a ring.** At
+layer 0 a group of identical vectors is linked in id order — each member's list starts with
+its id-predecessor and id-successor in the group, and its own group does not compete for the
+other slots, which go to ordinary diverse selection over outsiders. Every member has two
+in-edges (the group is strongly connected) and out-edges leaving it; a beam that enters walks
+it; ties come back newest-first by the existing final sort (rankorder). Groups are derived
+from the vectors (exact bit pattern) at load and on insert; nothing is persisted, lists keep
+their size (≤ M0) and format, so the on-disk shape is unchanged. Chosen over "one graph node
+with a member list", which needs new keys. After: all copies reachable and returned at k =
+copies for 40/100/200 copies and an all-identical vault; five restart cycles repair at most
+once.
+
+**The repair loop is now impossible by construction.** Rather than record anything, the
+repair makes its result satisfy exactly what the next load checks: `ensureNavigable` gives a
+closed node an out-edge to the nearest node that can reach the entry (replacing its last,
+back-filled slot), and an unreachable node an in-edge from the nearest reachable node with a
+spare slot or a redundant last edge; it WARNs with the count when it had to. Removing an
+out-edge from a node that then reaches the entry directly cannot strand anything. Decided
+from the graph, nothing persisted, no marker.
+
+**Clear vs repair.** `ClearVault` deleted the vault's keys BEFORE calling `ResetVault`; the
+review measured the window at 2–8 ms after a 12,000-node build (not microseconds) and 12,811
+vector-less layer keys written back; in the same process a re-import then got 0 vector hits
+because the entry point had no vector — recall silently keyword-only until a restart. Fixes:
+`Registry.BeginClear` (cancel AND wait for the repair, drain list writes, keep the vault
+uncached and unrepaired) runs before the delete and `EndClear` after, in `ClearVault` and in
+re-embed; the commit still refuses when the entry vector is gone (for any path that bypasses
+the protocol); load ignores and deletes layer keys without a vector; the entry point is
+`canonicalEntry` alone; a search whose entry has no vector returns `ErrEntryWithoutVector`
+(logged once) so callers degrade LOUDLY. The earlier `ResetDuringRepair` test counted keys
+before the repair goroutine finished and passed with both guards removed; it is replaced by
+tests that wait for the goroutine.
+
+**Other review items.** Re-inserting the entry point's id dropped results from 10 to 1
+(pre-existing): stale in-edges routed the walk into the half-built node. A re-insert now links
+the new node before publishing it. An old-rule graph WITHOUT islands keeps its nearest-only
+lists forever (a fixture stayed at recall 0.931 where a fresh build gets 0.998); there is now
+an operator rebuild: `Registry.RebuildVault`, REST `POST /api/admin/vaults/{name}/reindex-hnsw`
+(202, background), CLI `muninn vault reindex-hnsw`, progress as `hnsw_rebuild` in admin
+observability. **Recorded, not fixed:** with the memory cap (`SetMaxBytes`) reached, the boot
+repair re-links the skipped vectors and ignores the cap (the trunk's orphan repair did the
+same).
+
+**CI RISK — the engine package under -race.** The review measured `internal/engine` at
+314.7 s under `-race` on a busy machine, over CI's 300 s per-package limit (this branch's two
+engine tests cost 0.2 s; the margin problem predates it — 292 s was measured here on a loaded
+machine). The next engine test added anywhere may be the one that tips CI. The hnsw package
+went from 43 s (trunk) to ~125 s under `-race` with this work.

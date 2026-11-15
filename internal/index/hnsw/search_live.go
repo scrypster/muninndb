@@ -21,6 +21,10 @@ type LiveSearchStats struct {
 	// ExactScan reports that the graph walk could not produce a full beam of
 	// live hits and the search fell back to one exact pass over the index.
 	ExactScan bool
+	// Distances counts the query-to-node distances computed, descent and
+	// exact pass included — the search's cost in the unit an exact scan of N
+	// nodes costs N.
+	Distances int
 }
 
 // SearchLive is Search for a vault whose index holds RETIRED vectors — soft-
@@ -53,8 +57,9 @@ type LiveSearchStats struct {
 //     budget, or exhausted the reachable graph with fewer than ef live hits,
 //     while nodes remain unvisited, the search makes ONE exact pass over the
 //     unvisited nodes. A query landing in a
-//     closed island of near-identical retired vectors (the neighbour-selection
-//     defect tracked separately) can otherwise reach nothing live at all, and
+//     closed island of near-identical retired vectors (on graphs built before
+//     the diverse selection rule, select.go; repaired at load) can otherwise
+//     reach nothing live at all, and
 //     a walk that ran out of budget inside a big retired region returns a
 //     beam of distant live hits. Worst case for a whole search: ≈ 2N distance
 //     evaluations plus the ordinary beam, i.e. never more than about two exact
@@ -73,9 +78,10 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 	ep := idx.entryPoint
 	epNode := idx.nodes[ep]
 	if epNode == nil || len(epNode.vec) == 0 {
-		return nil, nil, stats, nil
+		return nil, nil, stats, idx.entryError()
 	}
 	epDist := 1.0 - float64(CosineSimilarity(query, epNode.vec))
+	stats.Distances++
 
 	// Phase 1: greedy descent through the upper layers. Retired nodes route
 	// here exactly as in Search — the descent only chooses where layer 0
@@ -94,6 +100,7 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 					continue
 				}
 				nDist := 1.0 - float64(CosineSimilarity(query, nNode.vec))
+				stats.Distances++
 				if nDist < epDist {
 					ep = nID
 					epDist = nDist
@@ -231,6 +238,7 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 				continue
 			}
 			nDist := 1.0 - float64(CosineSimilarity(query, nNode.vec))
+			stats.Distances++
 			isSkip := skip(nID)
 			if isSkip {
 				offerShadow(item{nID, nDist})
@@ -272,7 +280,15 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 	//     (a closed island of near-duplicates).
 	// Cost: one distance per unvisited node (≤ N), paid only by queries that
 	// spent a beam on retired routing.
-	if (budgetSpent || stats.RetiredExpanded >= ef || (!stoppedByDistance && len(w) < ef)) && len(seen) < len(idx.nodes) {
+	//
+	// Re-measured on the diverse graph (decision record, "closed islands"):
+	// at 12k / dim 384 the beam-of-retired trigger bought no recall (25% and
+	// 90% retired; ten 500-version chains) and forced the exact pass on every
+	// query of a 90%-retired vault; on the 64-dim chain fixture
+	// (TestSearchLive_ChainAimedRecallAgainstExact) it still lifts recall@10
+	// from 0.956 to 1.000. Kept until its removal is its own evidenced change.
+	beamOfRetired := stats.RetiredExpanded >= ef && !idx.noRetiredBeamTrigger
+	if (budgetSpent || beamOfRetired || (!stoppedByDistance && len(w) < ef)) && len(seen) < len(idx.nodes) {
 		stats.ExactScan = true
 		n := 0
 		for id, node := range idx.nodes {
@@ -284,6 +300,7 @@ func (idx *Index) SearchLive(ctx context.Context, query []float32, k int, retire
 				return nil, nil, stats, ctx.Err()
 			}
 			d := 1.0 - float64(CosineSimilarity(query, node.vec))
+			stats.Distances++
 			if skip(id) {
 				offerShadow(item{id, d})
 			} else {
