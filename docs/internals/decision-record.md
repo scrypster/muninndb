@@ -1521,3 +1521,36 @@ are the next slice.
 static-token deployments are one credential for labelling. REST/MBP/gRPC writes carry no
 session, so their memories label as `self = unknown`. A hard-deleted memory's labels remain
 until prune, as its ids in 0x29 entries always did.
+
+### Cache fills are guarded at the commit, not at the call sites (2026-11-15)
+
+**Context.** Four independent reproductions in one night of one bug class: a read-through
+cache filled with a value read BEFORE a concurrent write committed, AFTER that write had
+invalidated the entry, so the stale value stayed cached. The forms: a recall's phase-6
+snapshot read re-caching a pre-write relevance; a lost access-count bump; a forgotten memory
+re-cached as active so `restore` refused it; a stale metadata-cache state that made a later
+restore skip its state-index move. "Invalidate before commit" (the existing pattern) cannot
+close it: the stale read can start before the invalidation and fill after it.
+
+**Decision.** A global write clock plus 4096 striped generations per cache family (engram
+values; association lists), in `cache_guard.go`. Writers bump after commit and then drop the
+entry; readers take the clock before pinning their source and install compare-then-recheck.
+The bump lives in `PebbleStore.commitBatch`, which walks the committed batch's keys, rather
+than in each write method: fifty-odd commit sites in the package, and a single forgotten one
+re-opens the bug. A source-scan test makes a raw `batch.Commit` in storage a test failure.
+
+**Alternatives rejected.** A per-key mutex on the read path (the brief ruled it out; it also
+serialises every concurrent recall on hot keys). Pebble sequence numbers (not exported by
+pebble v1's `Snapshot`, so a snapshot read cannot state its sequence). Invalidate-and-forbid
+windows (needs a timeout to end the window, which is a timing assumption). Not filling from
+snapshot reads at all (correct, but phase 6's batch read is recall's cold-fill path, so
+every recall after an invalidation would go back to Pebble).
+
+**Cost, measured.** Interleaved A/B on a shared machine: GetEngram hit and 50-id
+GetEngrams batches all within noise (hits never touch the guard); same allocations except
++0–2 on a 50-id all-miss batch. Writers that re-cached their own struct now pay one extra
+Pebble point read.
+
+**Residual.** Unlocked writers can still lose a locked writer's update in Pebble itself —
+a write-write race, not a cache one; listed in STO-22. `recentActiveCache` stays a TTL'd
+candidate list.
