@@ -240,7 +240,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- **`score`** — RELATIVE to this query's own best candidate. The top row of EVERY query is near the top of the range, ")
 	b.WriteString("including a query whose answer this vault does not contain. It orders results; it does not tell you they are good. ")
 	b.WriteString("`absolute_score` and `content_match` on the same row are the cross-query-comparable numbers behind the band.\n")
-	b.WriteString("- **`confidence`** — belief that the stored FACT is TRUE (moved by contradiction and explicit feedback). ")
+	b.WriteString("- **`confidence`** — belief that the stored FACT is TRUE (moved by detected or declared contradictions; muninn_feedback does not change it). ")
 	b.WriteString("It is NOT a measure of how well the memory matched. A memory can be a certain fact and a terrible match: `confidence: 1, relevance_band: \"weak\"`.\n\n")
 	b.WriteString("Despite the similar name, the pre-existing `relevance` float on a row is a FOURTH quantity, unrelated to `relevance_band`: ")
 	b.WriteString("it is the engram's stored decay/pruning strength (how alive the memory is in the vault), not a statement about this query.\n\n")

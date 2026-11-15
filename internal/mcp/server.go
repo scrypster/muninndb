@@ -393,7 +393,7 @@ func (s *MCPServer) toolHandlers() map[string]toolHandlerFunc {
 		// Provenance audit trail
 		"muninn_provenance": s.handleProvenance,
 
-		// SGD learning loop feedback
+		// Explicit feedback (useful=true reinforces access; see the tool description)
 		"muninn_feedback": s.handleFeedback,
 
 		// Entity aggregate view

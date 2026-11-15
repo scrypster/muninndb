@@ -984,16 +984,21 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"entity_name"},
 			},
 		},
-		// SGD learning loop feedback
+		// Explicit feedback. The per-vault weight update it also records is a
+		// pinned no-op (internal/scoring/deadloop_characterization_test.go) and
+		// nothing outside internal/scoring reads those weights, so the
+		// description states only the effect that exists.
 		{
-			Name:        "muninn_feedback",
-			Description: "Record explicit feedback on an engram. Use useful=false when a retrieved engram was not helpful. Updates the vault's learned scoring weights via SGD.",
+			Name: "muninn_feedback",
+			Description: "Record explicit feedback on a retrieved engram. useful=true counts as an access of that engram (the same reinforcement as reading it by id: " +
+				"access count and last-access time, which feed its decay/recency). useful=false is accepted and currently has no effect on the engram or on ranking. " +
+				"Feedback does not change recall ranking weights and does not change confidence.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"vault":     vaultProp,
 					"engram_id": map[string]any{"type": "string", "description": "Engram ID that was retrieved"},
-					"useful":    map[string]any{"type": "boolean", "description": "Whether the engram was helpful (default false = negative signal)"},
+					"useful":    map[string]any{"type": "boolean", "description": "true = the engram was helpful (counts as an access); false (default) currently has no effect"},
 				},
 				"required": []string{"engram_id"},
 			},
