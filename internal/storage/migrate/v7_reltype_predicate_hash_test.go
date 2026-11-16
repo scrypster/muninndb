@@ -536,6 +536,10 @@ func TestMigrationV7_PrefersNewerRowOnForceRerun(t *testing.T) {
 		{"destination row is newer", 55, 90, 90},
 		{"tie keeps the destination", 70, 70, 70},
 	}
+	// The tie case cannot be told apart by UpdatedAt (both rows carry it), so it
+	// is pinned by CONTENT instead: the two rows differ in Weight and the
+	// destination's must survive. Without that the subtest is a pin that cannot
+	// go red.
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -550,7 +554,7 @@ func TestMigrationV7_PrefersNewerRowOnForceRerun(t *testing.T) {
 			// The upgraded node's own post-fix re-assert of the same triple.
 			destination := v7RelationshipRecord{
 				FromEntity: "Aurora Platform", ToEntity: "Kepler Cache",
-				RelType: relType, Weight: 0.8, Source: "inline", UpdatedAt: tc.destinationAt,
+				RelType: relType, Weight: 0.5, Source: "destination", UpdatedAt: tc.destinationAt,
 			}
 			destVal, err := msgpack.Marshal(destination)
 			if err != nil {
@@ -563,7 +567,7 @@ func TestMigrationV7_PrefersNewerRowOnForceRerun(t *testing.T) {
 			// The replicated legacy stray for the same triple, both rows live.
 			legacy := v7RelationshipRecord{
 				FromEntity: "Aurora Platform", ToEntity: "Kepler Cache",
-				RelType: relType, Weight: 0.8, Source: "inline", UpdatedAt: tc.legacyAt,
+				RelType: relType, Weight: 0.9, Source: "legacy", UpdatedAt: tc.legacyAt,
 			}
 			strayKey := plantLegacyRelationship(t, db, ws, engramID, fromHash, toHash, 0xFF, legacy)
 
@@ -598,6 +602,16 @@ func TestMigrationV7_PrefersNewerRowOnForceRerun(t *testing.T) {
 			}
 			if gotRec.UpdatedAt != tc.wantSurvivor {
 				t.Fatalf("survivor UpdatedAt = %d; want %d (the newer row must win)", gotRec.UpdatedAt, tc.wantSurvivor)
+			}
+			// Content check: on an UpdatedAt tie the DESTINATION must survive,
+			// which only a differing field can show. wantWeight is the
+			// destination's unless the legacy row is strictly newer.
+			wantWeight := float32(0.5)
+			if tc.legacyAt > tc.destinationAt {
+				wantWeight = 0.9
+			}
+			if gotRec.Weight != wantWeight {
+				t.Fatalf("survivor Weight = %v; want %v (source=%q)", gotRec.Weight, wantWeight, gotRec.Source)
 			}
 		})
 	}
