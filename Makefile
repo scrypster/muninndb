@@ -130,19 +130,21 @@ proto:
 	@echo "==> Stubs regenerated. Review with: git diff proto/gen/"
 
 ## proto-check: fail if committed gRPC stubs differ from a fresh regeneration.
-## Backs up proto/gen, regenerates, diffs — catches hand-edits. Fails CLOSED on
-## drift AND on a missing/broken protoc toolchain. Run before pushing.
+## Regenerates into a temp copy of proto/gen and diffs it against the tree — catches
+## hand-edits. Never writes to the working tree, so the edit it detects is still there
+## afterwards. Fails CLOSED on drift AND on a missing/broken protoc toolchain. Run
+## before pushing.
 proto-check:
 	@echo "==> Verifying committed stubs match service.proto..."
 	@tmp=$$(mktemp -d) || exit 1; \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	cp -r proto/gen "$$tmp/gen-backup" && \
+	mkdir -p "$$tmp/proto" && cp -r proto/gen "$$tmp/proto/gen" && \
 		protoc \
 			--proto_path=proto \
-			--go_out=. --go_opt=module=github.com/scrypster/muninndb \
-			--go-grpc_out=. --go-grpc_opt=module=github.com/scrypster/muninndb \
+			--go_out="$$tmp" --go_opt=module=github.com/scrypster/muninndb \
+			--go-grpc_out="$$tmp" --go-grpc_opt=module=github.com/scrypster/muninndb \
 			muninn/v1/service.proto && \
-		(diff -r "$$tmp/gen-backup" proto/gen >/dev/null && echo "==> Stubs up to date.") || \
+		(diff -r proto/gen "$$tmp/proto/gen" >/dev/null && echo "==> Stubs up to date.") || \
 		(echo "##[error]committed stubs differ from protoc output, or the protoc/protoc-gen-go/protoc-gen-go-grpc toolchain is missing or broken. Run 'make proto' and commit, or install the toolchain."; exit 1)
 
 ## bench: run E2E benchmark suite.
