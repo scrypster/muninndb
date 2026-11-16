@@ -1903,14 +1903,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	// Submit to async FTS worker — decoupled from write hot path.
 	// Engram is already durable; FTS visibility follows within ~100ms.
 	if e.ftsWorker != nil {
-		e.ftsWorker.Submit(fts.IndexJob{
-			WS:        wsPrefix,
-			ID:        [16]byte(id),
-			Concept:   eng.Concept,
-			CreatedBy: eng.CreatedBy,
-			Content:   eng.Content,
-			Tags:      eng.Tags,
-		})
+		e.ftsWorker.Submit(keywordIndexJob(wsPrefix, id, eng))
 	}
 
 	// Submit to contradiction worker for post-write analysis.
@@ -2741,14 +2734,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 
 		if e.ftsWorker != nil {
-			if !e.ftsWorker.Submit(fts.IndexJob{
-				WS:        p.wsPrefix,
-				ID:        [16]byte(id),
-				Concept:   p.eng.Concept,
-				CreatedBy: p.eng.CreatedBy,
-				Content:   p.eng.Content,
-				Tags:      p.eng.Tags,
-			}) {
+			if !e.ftsWorker.Submit(keywordIndexJob(p.wsPrefix, id, p.eng)) {
 				slog.Warn("engine: FTS index job dropped in batch write", "id", id.String())
 			}
 		}
@@ -5021,13 +5007,7 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 
 	// Submit new engram to async FTS worker.
 	if e.ftsWorker != nil {
-		e.ftsWorker.Submit(fts.IndexJob{
-			WS:        wsPrefix,
-			ID:        [16]byte(newULID),
-			Concept:   newEng.Concept,
-			CreatedBy: newEng.CreatedBy,
-			Content:   newEng.Content,
-		})
+		e.ftsWorker.Submit(keywordIndexJob(wsPrefix, newULID, newEng))
 	}
 
 	return newULID, nil
