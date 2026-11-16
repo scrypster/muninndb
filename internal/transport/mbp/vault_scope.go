@@ -2,6 +2,7 @@ package mbp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -91,6 +92,10 @@ func (c *connSubscriptions) drain() []string {
 	return ids
 }
 
+// errInvalidVaultName is the refusal for a request that names something no
+// vault can be called (auth.IsValidVaultName). It does not repeat the name.
+var errInvalidVaultName = errors.New("invalid vault name")
+
 type vaultScopeKeyType struct{}
 
 var vaultScopeKey = vaultScopeKeyType{}
@@ -111,6 +116,8 @@ func withVaultScope(ctx context.Context, sc *vaultScope) context.Context {
 //     never operate on vault B, even a public one).
 //   - Unauthenticated session: the request vault (default "default") must be a
 //     vault configured Public. Locked or unconfigured vaults are rejected.
+//   - Either: a name that is not a vault name (auth.IsValidVaultName) is
+//     rejected as "invalid vault name", without being looked up or repeated.
 //
 // It fails closed if the context carries no scope or the server has no auth
 // store, so a misconfigured server denies access rather than exposing every
@@ -124,6 +131,9 @@ func (s *Server) scopeVault(ctx context.Context, reqVault string) (string, error
 
 	if sc.key != nil {
 		if reqVault != "" && reqVault != sc.key.Vault {
+			if !auth.IsValidVaultName(reqVault) {
+				return "", errInvalidVaultName
+			}
 			return "", fmt.Errorf("api key is not authorized for vault %q", reqVault)
 		}
 		return sc.key.Vault, nil
@@ -132,6 +142,15 @@ func (s *Server) scopeVault(ctx context.Context, reqVault string) (string, error
 	vault := reqVault
 	if vault == "" {
 		vault = "default"
+	}
+	// A name no vault can have is refused as that, before it is looked up. The
+	// lookup is of a name the caller chose, by a caller with no credential, and
+	// the refusal below repeats the name: neither should be done with something
+	// that is not a vault name (SEC-27). Every path that makes a vault public
+	// has checked its name against the same rule, so this refuses no vault that
+	// could have been reached.
+	if !auth.IsValidVaultName(vault) {
+		return "", errInvalidVaultName
 	}
 	cfg, err := s.authStore.GetVaultConfig(vault)
 	if err != nil || !cfg.Public {

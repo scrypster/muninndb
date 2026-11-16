@@ -5,11 +5,97 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cockroachdb/pebble"
 )
 
-var warnedUnconfiguredVaults sync.Map
+// Which unconfigured vaults have been warned about, so each is warned about
+// once (noteUnconfiguredVault). The set is bounded: see there.
+var (
+	warnedUnconfiguredVaults sync.Map     // name (cut to maxWarnedVaultNameBytes) -> struct{}
+	warnedUnconfiguredCount  atomic.Int64 // names in the set, or reserved for it
+	warnedUnconfiguredFull   atomic.Bool  // the "no more will be logged" notice was written
+)
+
+const (
+	// maxWarnedUnconfiguredVaults is how many distinct unconfigured vault
+	// names are remembered and logged. The warning exists to tell an operator
+	// that one of THEIR vaults has no explicit policy, and a deployment has a
+	// handful of those. Names past this many are not an operator's vaults, they
+	// are whatever callers are sending.
+	maxWarnedUnconfiguredVaults = 256
+
+	// maxWarnedVaultNameBytes is how much of a name is remembered and logged:
+	// the longest a vault name may be (IsValidVaultName). A longer name cannot
+	// belong to a vault; it is remembered and shown by its first bytes.
+	maxWarnedVaultNameBytes = 64
+
+	msgUnconfiguredVaultLimit = "more vaults with no explicit config have been asked about than are remembered; further ones are treated as locked without being logged"
+)
+
+// noteUnconfiguredVault warns, once per vault, that a vault has no explicit
+// configuration and is being treated as locked.
+//
+// What it keeps is bounded, because the name comes from the caller and is
+// looked up BEFORE the caller has shown a credential: a request with no key
+// names a vault, on any transport, and the name comes here to find out whether
+// that vault is public. Remembering every name asked about, and logging each,
+// let any caller grow the server's memory and its log without limit — 2,000
+// handshakes naming distinct 32 KiB vaults left 80 MiB behind. So at most
+// maxWarnedUnconfiguredVaults names are remembered, each cut to
+// maxWarnedVaultNameBytes, which is at most 16 KiB and 257 log lines for the
+// life of the process: one per name, and one saying no more will be logged.
+//
+// The price is that once the set is full, an operator's own unconfigured vault
+// asked about for the first time is not named in the log. It is still treated
+// as locked; only the hint is lost.
+func noteUnconfiguredVault(vault string) {
+	name := vault
+	if len(name) > maxWarnedVaultNameBytes {
+		name = name[:maxWarnedVaultNameBytes] + "…"
+	}
+	if _, seen := warnedUnconfiguredVaults.Load(name); seen {
+		return
+	}
+	// Take a place before storing, so the set never holds more than the limit
+	// however many callers arrive at once.
+	if warnedUnconfiguredCount.Add(1) > maxWarnedUnconfiguredVaults {
+		warnedUnconfiguredCount.Add(-1)
+		if warnedUnconfiguredFull.CompareAndSwap(false, true) {
+			slog.Warn(msgUnconfiguredVaultLimit, "remembered", maxWarnedUnconfiguredVaults)
+		}
+		return
+	}
+	if _, already := warnedUnconfiguredVaults.LoadOrStore(name, struct{}{}); already {
+		warnedUnconfiguredCount.Add(-1)
+		return
+	}
+	slog.Warn("vault has no explicit config — defaulting to locked access (fail-closed); call SetVaultConfig to set an explicit policy",
+		"vault", name,
+	)
+}
+
+// resetUnconfiguredVaultWarnings forgets every name. Tests only.
+func resetUnconfiguredVaultWarnings() {
+	warnedUnconfiguredVaults.Range(func(k, _ any) bool {
+		warnedUnconfiguredVaults.Delete(k)
+		return true
+	})
+	warnedUnconfiguredCount.Store(0)
+	warnedUnconfiguredFull.Store(false)
+}
+
+// unconfiguredVaultWarningsHeld reports how many names are remembered and how
+// many bytes they hold. Tests only.
+func unconfiguredVaultWarningsHeld() (names, bytes int) {
+	warnedUnconfiguredVaults.Range(func(k, _ any) bool {
+		names++
+		bytes += len(k.(string))
+		return true
+	})
+	return names, bytes
+}
 
 // GetVaultConfig returns the config for a vault.
 //
@@ -32,11 +118,7 @@ func (s *Store) GetVaultConfig(vault string) (VaultConfig, error) {
 		// Fail-closed: any vault that has never been explicitly configured
 		// requires an API key. Operators should call SetVaultConfig to
 		// establish an explicit policy for each vault.
-		if _, already := warnedUnconfiguredVaults.LoadOrStore(vault, struct{}{}); !already {
-			slog.Warn("vault has no explicit config — defaulting to locked access (fail-closed); call SetVaultConfig to set an explicit policy",
-				"vault", vault,
-			)
-		}
+		noteUnconfiguredVault(vault)
 		return VaultConfig{Name: vault, Public: false}, nil
 	}
 	defer closer.Close()

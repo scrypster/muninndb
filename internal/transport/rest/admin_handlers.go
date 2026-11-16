@@ -40,16 +40,12 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 
 // isValidVaultName returns true if name is a valid vault name: 1–64 characters,
 // containing only lowercase letters, digits, hyphens, and underscores.
+//
+// The rule itself lives in auth.IsValidVaultName, so that the admin routes
+// here, MCP, and the checks every transport makes on a vault named by a caller
+// with no key are one rule and cannot drift apart.
 func isValidVaultName(name string) bool {
-	if len(name) == 0 || len(name) > 64 {
-		return false
-	}
-	for _, r := range name {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
-			return false
-		}
-	}
-	return true
+	return auth.IsValidVaultName(name)
 }
 
 // canonicalize returns a lowercase alphanumeric-only string for collision detection.

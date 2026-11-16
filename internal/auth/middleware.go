@@ -58,6 +58,18 @@ func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
 			return
 		}
+		// A name no vault can have is refused as that, before it is looked up:
+		// the caller has shown no credential and chose the name, and the answer
+		// below repeats it (SEC-27). The status and code are the ones such a
+		// request has always been given, 401 VAULT_LOCKED; only the message
+		// differs. Every path that makes a vault public has checked its name
+		// against the same rule, so no reachable vault is refused here.
+		if !IsValidVaultName(vault) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"code":"VAULT_LOCKED","error":"invalid vault name"}`))
+			return
+		}
 		cfg, err := s.GetVaultConfig(vault)
 		if err != nil || !cfg.Public {
 			w.Header().Set("Content-Type", "application/json")

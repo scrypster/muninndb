@@ -100,6 +100,18 @@ func denyWriteOnlyRead(ctx context.Context) error {
 	return nil
 }
 
+// msgInvalidVaultName is what a request is told when it names something no
+// vault can be called (auth.IsValidVaultName). A caller with no key names a
+// vault before it has shown any credential, and the name is looked up to find
+// out whether that vault is public; a message can carry megabytes in that
+// field. The name is checked first, and the refusal does not repeat it
+// (SEC-27). The status code is the one the request got before the check
+// existed: Unauthenticated with no key, PermissionDenied for a key naming a
+// vault that is not its own. Every path that makes a vault public has checked
+// its name against the same rule, so this refuses no vault that could have
+// been reached.
+const msgInvalidVaultName = "invalid vault name"
+
 // resolveRequestVault validates the vault named in an RPC request against the
 // authenticated context and returns the vault to hand to the engine. It mirrors
 // the REST layer's validateResolvedVault so gRPC enforces the same vault model:
@@ -119,6 +131,9 @@ func (s *Server) resolveRequestVault(ctx context.Context, reqVault string) (stri
 	reqVault = strings.TrimSpace(reqVault)
 	if key, ok := ctx.Value(auth.ContextAPIKey).(*auth.APIKey); ok && key != nil {
 		if reqVault != "" && reqVault != key.Vault {
+			if !auth.IsValidVaultName(reqVault) {
+				return "", status.Error(codes.PermissionDenied, msgInvalidVaultName)
+			}
 			return "", status.Errorf(codes.PermissionDenied, "api key is not authorized for vault %q", reqVault)
 		}
 		return key.Vault, nil
@@ -127,6 +142,11 @@ func (s *Server) resolveRequestVault(ctx context.Context, reqVault string) (stri
 	vault := reqVault
 	if vault == "" {
 		vault = "default"
+	}
+	// A name no vault can have is refused as that, before it is looked up or
+	// repeated back: see msgInvalidVaultName.
+	if !auth.IsValidVaultName(vault) {
+		return "", status.Error(codes.Unauthenticated, msgInvalidVaultName)
 	}
 	if s.authStore == nil {
 		return "", status.Errorf(codes.Unauthenticated, "vault %q requires an API key", vault)
@@ -220,6 +240,9 @@ func (s *Server) authUnaryInterceptor(ctx context.Context, req any, _ *grpc.Unar
 	}
 
 	// No token — check vault config (fail-closed: unconfigured vaults require a key).
+	if !auth.IsValidVaultName(vault) {
+		return nil, status.Error(codes.Unauthenticated, msgInvalidVaultName)
+	}
 	cfg, err := s.authStore.GetVaultConfig(vault)
 	if err != nil || !cfg.Public {
 		return nil, status.Errorf(codes.Unauthenticated, "vault %q requires an API key", vault)

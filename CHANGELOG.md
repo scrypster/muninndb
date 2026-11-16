@@ -299,6 +299,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any memory is set aside for it. Once the handshake is done the connection is not on
   a clock, and may stay idle (SEC-27).
 
+- A caller with no key can no longer make the server's memory and log grow by naming
+  vaults. Every request made without a key names a vault (or means `default`), and the
+  server looks the name up to see whether that vault is public. Each name it did not
+  recognise was kept for the life of the process, so that the "vault has no explicit
+  config" warning is logged once per vault, and was written to the log in full. The name
+  was whatever the caller sent. 2,000 MBP handshakes naming different 32 KB vaults left
+  the server 80 MB larger with no connection open, and 200 gRPC calls naming different
+  1 MB vaults left it 200 MB larger. None of them needed a key, and each was refused.
+  **Who is affected:** anyone whose REST port (8475) or gRPC port (8477) can be reached by
+  a client they do not trust, in every release from v0.2.0 to v0.11.0, and the MBP port
+  (8474) from v0.6.2. v0.1.0 kept nothing, but wrote a log line for every such request.
+  **What to do:** upgrade. Until then, keep those ports away from untrusted clients, and
+  if the server's memory has grown for no reason and its log is full of "vault has no
+  explicit config" warnings naming vaults you do not have, restart it.
+  **What changed:** two things. A name that no vault can have (anything other than 1 to
+  64 lowercase letters, digits, hyphens and underscores) is now refused before it is
+  looked up, and the refusal no longer repeats the name. And the server remembers at
+  most 256 unrecognised names, each cut to 64 characters, and after that logs once that
+  it has stopped.
+  **What a client will notice:** a request without a key that names a vault with an
+  invalid name used to be answered "vault ... requires an API key". The message is now
+  "invalid vault name". The status is unchanged: HTTP 401 with code `VAULT_LOCKED` on
+  REST, `Unauthenticated` on gRPC, error `4010` on MBP. Over gRPC and MBP a request with
+  a key that names some other vault with an invalid name gets the same message, also
+  under the status it had before. Requests naming a well-formed vault are answered
+  exactly as before.
+  **What an operator will notice:** once 256 different unconfigured vaults have been
+  asked about, a vault of your own that has no explicit configuration is no longer named
+  in the log the first time it is used. It is still treated as locked (SEC-27).
+
 - The MBP listener now limits how many connections it holds. There was no limit. A
   client that could reach the port could open connections until the server ran out of
   memory or file descriptors, and needed no key to do it.
