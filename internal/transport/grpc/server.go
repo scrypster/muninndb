@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 )
 
@@ -178,6 +180,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, tlsConfig *
 
 	opts := []grpc.ServerOption{
 		grpc.MaxConcurrentStreams(500),
+		grpc.StatsHandler(connTagger{}),
 		grpc.KeepaliveParams(kasp),
 		grpc.ChainUnaryInterceptor(server.authUnaryInterceptor, notCortexUnaryInterceptor),
 		grpc.ChainStreamInterceptor(server.authStreamInterceptor, notCortexStreamInterceptor),
@@ -555,6 +558,44 @@ func (s *Server) Activate(req *pb.ActivateRequest, stream pb.MuninnDB_ActivateSe
 	return nil
 }
 
+// maxSubscribeStreamsPerConnection is how many Subscribe streams one client
+// connection may have open at once. It is the number an MBP connection is
+// allowed (mbp.maxSubscriptionsPerConnection) for the same reason: a vault
+// allows 100 subscriptions in all, and without a limit of its own one
+// connection could hold every one of them. A client that needs more opens
+// another connection. This bounds what ONE connection takes; it does not stop
+// a caller who opens many connections (SEC-26 residual).
+const maxSubscribeStreamsPerConnection = 8
+
+// connState is what the server keeps about one client connection.
+type connState struct {
+	subscribeStreams atomic.Int32 // Subscribe streams open on it now
+}
+
+type connStateKey struct{}
+
+// connOf returns the state of the connection an RPC arrived on, or nil for a
+// handler called without a transport (as unit tests do).
+func connOf(ctx context.Context) *connState {
+	c, _ := ctx.Value(connStateKey{}).(*connState)
+	return c
+}
+
+// connTagger is a stats.Handler whose only job is to give each client
+// connection a connState, carried in the context every RPC on that connection
+// inherits. gRPC has no other per-connection hook: a handler sees a stream,
+// and the peer address alone does not say when a connection has been replaced.
+type connTagger struct{}
+
+func (connTagger) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context {
+	return context.WithValue(ctx, connStateKey{}, &connState{})
+}
+func (connTagger) HandleConn(context.Context, stats.ConnStats) {}
+func (connTagger) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.Context {
+	return ctx
+}
+func (connTagger) HandleRPC(context.Context, stats.RPCStats) {}
+
 // subscribeRecheckInterval is the longest an open Subscribe stream with nothing
 // to deliver goes without asking whether it is still authorised (SEC-23). It is
 // the interval of the REST subscription stream's keepalive, which does the same
@@ -592,6 +633,18 @@ func (s *Server) Subscribe(stream pb.MuninnDB_SubscribeServer) error {
 		return err
 	}
 
+	// One connection holds a bounded number of Subscribe streams at a time, so
+	// that it cannot take every subscription its vault allows (SEC-26). The
+	// place is taken before anything is read from the stream and given back
+	// when the stream ends, however it ends.
+	if conn := connOf(ctx); conn != nil {
+		if conn.subscribeStreams.Add(1) > maxSubscribeStreamsPerConnection {
+			conn.subscribeStreams.Add(-1)
+			return status.Error(codes.ResourceExhausted, "subscription limit reached for this connection")
+		}
+		defer conn.subscribeStreams.Add(-1)
+	}
+
 	req, err := stream.Recv()
 	if err != nil {
 		return err
@@ -627,6 +680,11 @@ func (s *Server) Subscribe(stream pb.MuninnDB_SubscribeServer) error {
 
 	subID, err := s.engine.SubscribeWithDeliver(ctx, req, deliver)
 	if err != nil {
+		// A full vault or a full server is the caller's to act on, not a server
+		// fault to log at ERROR for every refused stream.
+		if errors.Is(err, trigger.ErrVaultSubscriptionLimitReached) || errors.Is(err, trigger.ErrGlobalSubscriptionLimitReached) {
+			return status.Error(codes.ResourceExhausted, "subscription limit reached")
+		}
 		slog.Error("subscribe failed", "error", err)
 		return err
 	}

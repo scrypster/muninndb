@@ -584,14 +584,16 @@ var matrixOps = []matrixOp{
 				}
 			}
 			// A session that may not subscribe has none of its own. It is
-			// given the id of one held elsewhere, which it must not be able
-			// to end either.
-			sub, err := c.env.eng.Subscribe(fullCtx(), &mbp.SubscribeRequest{Vault: c.vault, Context: []string{"tug roster"}, TTL: 60})
+			// given the id of a real subscription held elsewhere, the way a
+			// REST or gRPC subscriber holds one, which it must not be able to
+			// end either. (One made with no delivery function would not be
+			// registered at all: SEC-26.)
+			id, err := c.env.eng.SubscribeWithDeliver(fullCtx(), &mbp.SubscribeRequest{Vault: c.vault, Context: []string{"tug roster"}, TTL: 60}, delivered)
 			if err != nil {
 				c.t.Fatalf("seed a subscription: %v", err)
 			}
-			c.subID = sub.SubID
-			c.t.Cleanup(func() { _ = c.env.eng.Unsubscribe(fullCtx(), sub.SubID) })
+			c.subID = id
+			c.t.Cleanup(func() { _ = c.env.eng.Unsubscribe(fullCtx(), id) })
 			return &mbp.UnsubscribeRequest{SubID: c.subID}
 		},
 		check: func(c *cell, _ reply, went bool) {

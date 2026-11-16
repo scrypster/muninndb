@@ -457,27 +457,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key now return one name. `openapi.yaml` describes the scoping, and documents the
   response as the JSON array the server has always sent (SEC-25).
 
-- Subscriptions over MBP now belong to the connection that made them. Over MBP, any
-  connection could cancel any subscription on the server by naming its id, including one
-  in a vault its key was not for. A client could choose its own subscription id, and
-  choosing one already used in another vault replaced that vault's subscription in the
-  server's records. A subscription stayed registered after its connection closed. And
-  one connection could register subscriptions until the vault's limit of 100 was reached,
-  after which nobody else could subscribe to that vault, on any transport.
+- Subscriptions over MBP now belong to the connection that made them, and no longer use
+  up a vault's subscription limit. Over MBP, any connection could cancel any subscription
+  on the server by naming its id, including one in a vault its key was not for. A client
+  could choose its own subscription id, and choosing one already used in another vault
+  replaced that vault's subscription in the server's records. A subscription stayed
+  registered after its connection closed. And MBP subscriptions, which have never
+  delivered anything, counted against the vault's limit of 100: one connection, or after
+  an earlier fix thirteen of them, could fill it, after which nobody else could subscribe
+  to that vault on any transport. Over gRPC one connection could do the same with 100
+  streams.
   **Who is affected:** servers where anyone you do not fully trust can open an MBP
-  session, in every release up to v0.11.0. That includes anyone with no key at all when a
-  vault is public. Choosing an id was also possible over gRPC, from v0.8.0.
+  session or a gRPC connection, in every release up to v0.11.0. That includes anyone with
+  no key at all when a vault is public. Choosing an id was also possible over gRPC, from
+  v0.8.0.
   **What a client could do:** stop other clients receiving push notifications, by
   cancelling their subscriptions or by using up the vault's limit. Nothing stored could be
   read or changed this way.
-  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP or gRPC
+  ports.
   **What changed:** the server always chooses the subscription id. A `subscription_id`
   sent by a client is ignored, on MBP and on gRPC, and the id in the answer is the one to
-  use. Over MBP a connection can cancel only the subscriptions it made, may hold at most
-  8, and loses them when it closes. Cancelling an id that is not the connection's own is
-  answered the same way as cancelling one that does not exist. One thing has not changed:
-  a subscription made over MBP does not receive push notifications. Use REST or gRPC to
-  receive them (SEC-26).
+  use. Over MBP a connection can cancel only the subscriptions it made and may hold at
+  most 8. Cancelling an id that is not the connection's own is answered the same way as
+  cancelling one that does not exist. An MBP subscription is no longer registered with
+  the push system at all, so it takes none of the vault's 100 places. Over gRPC one
+  connection may have at most 8 `Subscribe` streams open at once. The ninth is refused
+  with `ResourceExhausted`. A vault's limit also now holds when many subscribers arrive
+  at the same moment. Before, they could all get in.
+  **What a client will notice:** a gRPC client that opens more than 8 `Subscribe` streams
+  on one connection must open another connection for the rest. A subscribe refused
+  because the vault or the server is full is now `ResourceExhausted` over gRPC, where it
+  was `Unknown`.
+  **What has not changed:** a subscription made over MBP does not receive push
+  notifications, and the answer to it still says "active". Use REST or gRPC to receive
+  them.
+  **What is still open:** a vault's limit of 100 subscriptions can still be used up by a
+  caller who is allowed to subscribe to it. Over REST, 100 requests to
+  `GET /api/subscribe` do it, and on a public vault they need no key. `default` is public
+  unless you lock it. Over gRPC it takes thirteen connections. If your subscribers must
+  not be shut out, lock the vault and give them keys, and keep the REST and gRPC ports
+  away from clients you do not trust (SEC-26).
 
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to

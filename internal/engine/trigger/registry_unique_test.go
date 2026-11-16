@@ -52,3 +52,39 @@ func TestTriggerSystem_SubscribeRefusesATakenID(t *testing.T) {
 		t.Fatalf("second Subscribe under the same id: err = %v; want ErrSubscriptionIDTaken", err)
 	}
 }
+
+// TestTriggerSystem_LimitsHoldUnderConcurrentSubscribes: the per-vault and
+// server-wide limits are a count that is checked and then raised, and between
+// the two a subscription's context is embedded, which can take seconds. Checked
+// and raised separately, every subscriber that arrived while the vault was one
+// short of full passed the check, and all of them were registered.
+func TestTriggerSystem_LimitsHoldUnderConcurrentSubscribes(t *testing.T) {
+	const perVault, callers = 10, 200
+	ts := &TriggerSystem{registry: newRegistry(), config: TriggerConfig{MaxSubscriptionsPerVault: perVault, MaxTotalSubscriptions: 1000}}
+
+	start := make(chan struct{})
+	results := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func(i int) {
+			<-start
+			results <- ts.Subscribe(&Subscription{ID: "watch-" + string(rune('a'+i/26)) + string(rune('a'+i%26)), VaultID: 7})
+		}(i)
+	}
+	close(start)
+	granted := 0
+	for i := 0; i < callers; i++ {
+		switch err := <-results; err {
+		case nil:
+			granted++
+		case ErrVaultSubscriptionLimitReached:
+		default:
+			t.Fatalf("Subscribe: %v", err)
+		}
+	}
+	if granted != perVault {
+		t.Errorf("%d subscriptions granted to %d concurrent callers; the vault allows %d", granted, callers, perVault)
+	}
+	if n := ts.registry.CountForVault(7); n != perVault {
+		t.Errorf("the vault holds %d subscriptions; it allows %d", n, perVault)
+	}
+}

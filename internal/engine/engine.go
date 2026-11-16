@@ -3819,14 +3819,26 @@ func (e *Engine) Subscribe(ctx context.Context, req *mbp.SubscribeRequest) (*mbp
 
 // SubscribeWithDeliver registers a subscription and immediately sets a delivery
 // function that is called (in a goroutine by DeliveryRouter) on every push.
-// Returns the subscription ID. Pass deliver=nil to register without a delivery
-// function (useful for MBP clients that pull via the stream).
+// Returns the subscription ID.
+//
+// With deliver == nil NOTHING IS REGISTERED: an id is returned and that is all.
+// A subscription with no delivery function can never tell anyone anything, and
+// one cannot be attached later. Registering it anyway cost the vault one of
+// its subscription places, cost an embedding call, and cost the trigger worker
+// an evaluation on every write to the vault, on behalf of a subscriber that
+// could not be reached. MBP is the caller this is for: its SUBSCRIBE has never
+// delivered a push (the server writes no ACTIVATION frame), and thirteen
+// connections with no key used it to fill a public vault's limit and shut out
+// the REST and gRPC subscribers who can be delivered to (SEC-26).
 //
 // The id is always chosen here, a fresh random one. req.SubscriptionID is
 // ignored: ids are one namespace across every vault, so an id a client could
 // choose is an id it could choose to be somebody else's (SEC-26).
 func (e *Engine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeRequest, deliver trigger.DeliverFunc) (string, error) {
 	subID := uuid.New().String()
+	if deliver == nil {
+		return subID, nil
+	}
 
 	// Resolve vault to a routing uint32 using the same BigEndian convention
 	// already used in storage/impl.go (binary.BigEndian.Uint32(wsPrefix[:4])).
