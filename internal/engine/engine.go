@@ -3566,8 +3566,8 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 			// source_type says where the memory CAME FROM, so it is read from
 			// the entry that created it. It used to be read from the LAST
 			// entry, and the first access or feedback appends an
-			// update-relevance entry written as "inferred", so the field
-			// flipped from the writer's source to "inferred" after one read:
+			// update-meta entry written as "inferred" (TouchAccess), so the
+			// field flipped from the writer's source to "inferred" after one read:
 			// it reported who touched the memory last. Origin stops at the
 			// creating entry instead of loading the whole log.
 			origin, ok, err := e.prov.Origin(ctx, wsPrefix, id)
