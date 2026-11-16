@@ -931,9 +931,15 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, http.StatusOK, resp)
 }
 
+// handleStats answers about the caller's own vault. Only a verified admin
+// session — the console's dashboard — gets the server-wide answer (every
+// vault's coherence entry, the vault count, the on-disk size); a vault API key
+// or an open vault entitles the caller to one vault and to nothing about the
+// others (SEC-24).
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.engine.Stat(r.Context(), &StatRequest{
-		Vault: ctxVault(r),
+		Vault:      ctxVault(r),
+		ServerWide: auth.AdminSessionFromContext(r.Context()),
 	})
 	if err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())

@@ -622,7 +622,9 @@ type EmbedStatusResponse struct {
 func (s *Server) handleEmbedStatus(w http.ResponseWriter, r *http.Request) {
 	vault := r.URL.Query().Get("vault")
 
-	statResp, err := s.engine.Stat(r.Context(), &StatRequest{Vault: vault})
+	// Admin route. With no vault named the count is the instance's, which is
+	// the server-wide answer; with one named it is that vault's either way.
+	statResp, err := s.engine.Stat(r.Context(), &StatRequest{Vault: vault, ServerWide: true})
 	totalCount := int64(-1)
 	if err == nil {
 		totalCount = int64(statResp.EngramCount)

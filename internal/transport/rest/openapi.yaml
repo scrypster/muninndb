@@ -990,20 +990,42 @@ components:
 
     StatResponse:
       type: object
+      description: >-
+        Statistics for the scope named in `scope`. A vault API key, or no
+        credential on a public vault, entitles the caller to one vault and the
+        answer covers that vault only. Only an admin session gets the
+        server-wide answer.
       properties:
-        engramCount:
+        scope:
+          type: string
+          enum: [vault, server]
+          description: >-
+            What the figures cover. `vault`: the caller's one vault. `server`:
+            every vault on the server (admin session only).
+        engram_count:
           type: integer
           format: int64
-        vaultCount:
+          description: "Engrams in the request's vault."
+        vault_count:
           type: integer
-        indexSize:
+          description: >-
+            At `vault` scope, always 1 (the vault in scope). At `server` scope,
+            the number of vaults on the server.
+        index_size:
           type: integer
           format: int64
-        storageBytes:
+          description: "Vector index bytes for the request's vault."
+        storage_bytes:
           type: integer
           format: int64
+          description: >-
+            At `server` scope, the store's on-disk size. At `vault` scope,
+            always 0: the on-disk size is one figure for every vault.
         coherence:
           type: object
+          description: >-
+            Coherence metrics keyed by vault name. At `vault` scope, at most
+            the caller's own vault. At `server` scope, every vault.
           additionalProperties:
             $ref: "#/components/schemas/CoherenceResult"
 
@@ -2237,7 +2259,12 @@ paths:
   /api/stats:
     get:
       tags: [health]
-      summary: "Return database statistics."
+      summary: "Return statistics for the caller's vault."
+      description: >-
+        Answers about the one vault the caller is entitled to: the key's vault,
+        or the public vault named in `vault`. Nothing about any other vault is
+        returned. With an admin session the answer is server-wide
+        (`scope: server`).
       security:
         - BearerAuth: []
       parameters:

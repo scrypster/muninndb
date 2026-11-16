@@ -283,6 +283,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that file, or set the listen host yourself, restrict 8474 with a firewall or publish it
   on loopback only (`127.0.0.1:8474:8474`) unless remote MBP clients are intended.
 
+- Statistics no longer tell a caller about vaults it is not entitled to. `GET /api/stats`
+  and the MBP `STAT` request answered every caller — one with no credential on a public
+  vault, and one with a key pinned to a single vault — with a `coherence` block listing
+  every vault on the server by name with its engram total, plus the server's vault count
+  and on-disk size. The gRPC `Stat` call returned the vault count and on-disk size.
+  **Who is affected:** servers with more than one vault where either a vault is public
+  (the `default` vault is, out of the box) or a key has been issued to someone who should
+  not learn what other vaults exist, in every release up to v0.11.0.
+  **What a caller could learn:** the name and size of every vault on the server. Nothing
+  in a vault could be read this way.
+  **What to do:** upgrade. If your vault names are themselves sensitive (a customer or
+  project name), treat them as known to anyone who held a key or could reach a public
+  vault over REST or MBP.
+  **What changed, including the response shape:** for a key or a public-vault caller the
+  answer now covers that one vault: `engram_count` is its count, `vault_count` is `1`,
+  `coherence` holds only its own entry, and `storage_bytes` is `0`, because the on-disk
+  size is one figure for every vault. A new field, `scope`, says which answer it is:
+  `vault`, or `server` for the admin session, whose answer — what the web console's
+  dashboard shows — is unchanged. A client that used a key to read the server's vault
+  count or storage size will now see `1` and `0`; those figures need the admin session.
+  `openapi.yaml` documents `scope` and the two scopes, and its `StatResponse` field
+  names are corrected to the snake_case the server has always sent. Vault names are
+  still returned by `GET /api/vaults` and gRPC `ListVaults`; see the next entry
+  (SEC-24).
+
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
   v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:

@@ -4210,7 +4210,49 @@ func (e *Engine) cleanSearchIndexesAfterHardDelete(wsPrefix [8]byte, id [16]byte
 }
 
 // Stat implements mbp.EngineAPI.Stat.
+//
+// The answer is about ONE vault unless the request says ServerWide — and no
+// client can say that (the field has no wire name; see mbp.StatRequest). So a
+// transport that hands the engine the vault its caller is entitled to cannot
+// leak another vault's name, size or existence through Stat, whichever
+// transport it is and whether or not it remembered to filter (SEC-24).
 func (e *Engine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatResponse, error) {
+	if !req.ServerWide {
+		return e.statVault(ctx, req.Vault), nil
+	}
+	return e.statServer(ctx, req.Vault), nil
+}
+
+// statVault is the answer for a caller entitled to one vault. Every figure is
+// that vault's own: VaultCount is the one vault in scope, the coherence block
+// has at most its entry, and the store's on-disk size — one figure for every
+// vault — is left out.
+func (e *Engine) statVault(ctx context.Context, vault string) *mbp.StatResponse {
+	if vault == "" {
+		// An unnamed vault is the default vault, as everywhere else. It is
+		// never "all of them": that is what ServerWide is for.
+		vault = "default"
+	}
+	resp := &mbp.StatResponse{
+		Scope:       mbp.StatScopeVault,
+		EngramCount: e.store.GetVaultCount(ctx, e.store.ResolveVaultPrefix(vault)),
+		VaultCount:  1,
+	}
+	if e.coherence != nil {
+		for _, snap := range e.coherence.Snapshots() {
+			if snap.VaultName == vault {
+				resp.CoherenceScores = map[string]mbp.CoherenceResult{vault: coherenceResult(snap)}
+				break
+			}
+		}
+	}
+	return resp
+}
+
+// statServer is the server-wide answer: every vault's coherence entry by name,
+// the vault count and the on-disk size. EngramCount is vault's own when a
+// vault is named and the server's total otherwise.
+func (e *Engine) statServer(ctx context.Context, vault string) *mbp.StatResponse {
 	vaultNames, _ := e.store.ListVaultNames()
 
 	// Count all vaults: data vaults + config-only (empty) vaults, deduplicated.
@@ -4234,12 +4276,13 @@ func (e *Engine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatRespo
 	}
 
 	engramCount := e.engramCount.Load()
-	if req.Vault != "" {
-		wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
+	if vault != "" {
+		wsPrefix := e.store.ResolveVaultPrefix(vault)
 		engramCount = e.store.GetVaultCount(ctx, wsPrefix)
 	}
 
 	resp := &mbp.StatResponse{
+		Scope:        mbp.StatScopeServer,
 		EngramCount:  engramCount,
 		VaultCount:   vaultCount,
 		StorageBytes: e.store.DiskSize(),
@@ -4251,19 +4294,23 @@ func (e *Engine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatRespo
 		if len(snapshots) > 0 {
 			resp.CoherenceScores = make(map[string]mbp.CoherenceResult, len(snapshots))
 			for _, snap := range snapshots {
-				resp.CoherenceScores[snap.VaultName] = mbp.CoherenceResult{
-					Score:                snap.Score,
-					OrphanRatio:          snap.OrphanRatio,
-					ContradictionDensity: snap.ContradictionDensity,
-					DuplicationPressure:  snap.DuplicationPressure,
-					TemporalVariance:     snap.TemporalVariance,
-					TotalEngrams:         snap.TotalEngrams,
-				}
+				resp.CoherenceScores[snap.VaultName] = coherenceResult(snap)
 			}
 		}
 	}
 
-	return resp, nil
+	return resp
+}
+
+func coherenceResult(snap coherence.Result) mbp.CoherenceResult {
+	return mbp.CoherenceResult{
+		Score:                snap.Score,
+		OrphanRatio:          snap.OrphanRatio,
+		ContradictionDensity: snap.ContradictionDensity,
+		DuplicationPressure:  snap.DuplicationPressure,
+		TemporalVariance:     snap.TemporalVariance,
+		TotalEngrams:         snap.TotalEngrams,
+	}
 }
 
 // ListVaults returns all vault names that have been written to.

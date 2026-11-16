@@ -104,8 +104,12 @@ func (w *RESTEngineWrapper) Stat(ctx context.Context, req *StatRequest) (*StatRe
 		return nil, err
 	}
 	if w.hnswReg != nil {
-		if req.Vault != "" {
-			ws := w.engine.Store().ResolveVaultPrefix(req.Vault)
+		vault := req.Vault
+		if vault == "" && !req.ServerWide {
+			vault = "default" // the scope engine.Stat answered for
+		}
+		if vault != "" {
+			ws := w.engine.Store().ResolveVaultPrefix(vault)
 			resp.IndexSize = w.hnswReg.VaultVectorBytes(ws)
 		} else {
 			resp.IndexSize = w.hnswReg.TotalVectorBytes()

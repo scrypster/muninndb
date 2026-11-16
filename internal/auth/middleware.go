@@ -105,6 +105,7 @@ func (s *Store) AdminAPIMiddleware(secret []byte, next http.HandlerFunc) http.Ha
 			vault = "default"
 		}
 		ctx := context.WithValue(r.Context(), ContextVault, vault)
+		ctx = context.WithValue(ctx, ContextAdminSession, true)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -124,12 +125,25 @@ func (s *Store) VaultAuthWithAdminBypass(secret []byte, next http.HandlerFunc) h
 			}
 			ctx := context.WithValue(r.Context(), ContextVault, vault)
 			ctx = context.WithValue(ctx, ContextMode, ModeFull)
+			ctx = context.WithValue(ctx, ContextAdminSession, true)
 			next(w, r.WithContext(ctx))
 			return
 		}
 		// Fall through to standard vault auth (Bearer token or public vault).
 		s.VaultAuthMiddleware(next)(w, r)
 	}
+}
+
+// AdminSessionFromContext reports whether the request was authenticated by a
+// verified admin session cookie — the console operator, who may see every
+// vault — as opposed to a vault API key or an open vault, which entitle the
+// caller to one vault. Only AdminAPIMiddleware and VaultAuthWithAdminBypass set
+// it, and only after the cookie has verified; a request that falls through to
+// vault auth never carries it. Handlers use it to decide whether a server-wide
+// answer may be given (SEC-24).
+func AdminSessionFromContext(ctx context.Context) bool {
+	admin, _ := ctx.Value(ContextAdminSession).(bool)
+	return admin
 }
 
 // Mode enforcement uses two layers — documented here for future reference:
