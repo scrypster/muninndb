@@ -52,8 +52,9 @@ func debtPairFixture(t *testing.T, eng *Engine, vault, subject, factA, factB str
 	ws := eng.Store().ResolveVaultPrefix(vault)
 	// Weight 0.5 cannot collide with RelRefines (rel_type 16). The novelty
 	// worker writes RelRefines at Jaccard similarity, which is always >= 0.70
-	// (the frog pair is exactly 0.8). WaitWriteTimeIdle does not drain that
-	// worker. The readout counts Declared edges regardless of weight.
+	// (novelty.Threshold), so a declared edge at 0.5 never shares its
+	// (src, weight, target) key. The readout counts Declared edges regardless
+	// of weight.
 	if err := eng.Store().WriteAssociation(ctx, ws, idB, idA, &storage.Association{
 		TargetID: idA, RelType: storage.RelContradicts, Weight: 0.5, Confidence: 1,
 		CreatedAt: declaredAt,
