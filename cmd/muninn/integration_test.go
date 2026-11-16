@@ -8,10 +8,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,11 +32,31 @@ var suiteSkipReason string
 // green "ok" would be the wrong answer.
 const requireIntegrationEnv = "MUNINN_REQUIRE_INTEGRATION"
 
+// integrationPorts are every port a default `muninn start` binds (server.go flag
+// defaults). The suite drives a real daemon on them, because `muninn start`
+// refuses per-service address flags (lifecycle.go checkStartArgs), so all of
+// them must be free before it runs.
+var integrationPorts = []string{"8474", "8475", "8476", "8477", "8750"}
+
+// busyIntegrationPorts returns the integrationPorts that accept a TCP
+// connection on loopback. Nothing is sent on the connection.
+func busyIntegrationPorts() []string {
+	var busy []string
+	for _, p := range integrationPorts {
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+p, 500*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			busy = append(busy, p)
+		}
+	}
+	return busy
+}
+
 // TestMain builds the muninn binary once and runs all integration tests.
 //
-// If muninn is already listening on :8750 the suite cannot run — these tests
-// need exclusive use of that port. #812: this used to print one line to stderr
-// and os.Exit(0), so `go test` reported
+// If anything is already listening on one of integrationPorts the suite cannot
+// run — these tests need exclusive use of those ports. #812: this used to print
+// one line to stderr and os.Exit(0), so `go test` reported
 //
 //	ok  	github.com/scrypster/muninndb/cmd/muninn	0.4s
 //
@@ -43,13 +65,28 @@ const requireIntegrationEnv = "MUNINN_REQUIRE_INTEGRATION"
 // believed. Now the same condition produces a real SKIP record, and a
 // non-zero exit when the caller has declared the suite must actually run.
 func TestMain(m *testing.M) {
-	if resp, err := http.Get("http://127.0.0.1:8750/mcp/health"); err == nil {
-		resp.Body.Close()
-		suiteSkipReason = "muninn is already listening on :8750 and these tests need exclusive use of that port — stop it and re-run"
+	// The unit tests compiled into this binary get the same hermetic guard as
+	// the plain build (hermetic_test.go): temp HOME, unreachable CLI addresses,
+	// no network. The suite's own daemon is on the default ports, so dials to
+	// them are allowed here, and only after the pre-flight below found them free.
+	//
+	// The go toolchain below must keep the caller's environment: under the
+	// guard's temp HOME it would start from an empty build and module cache.
+	toolchainEnv := os.Environ()
+	hermetic.allowDefaultPorts = true
+	cleanup, err := installHermeticGuard()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration: hermetic guard: %v\n", err)
+		os.Exit(1)
+	}
+
+	if busy := busyIntegrationPorts(); len(busy) > 0 {
+		suiteSkipReason = fmt.Sprintf("something is already listening on 127.0.0.1 port(s) %s and these tests need exclusive use of them — stop it and re-run", strings.Join(busy, ", "))
 
 		if os.Getenv(requireIntegrationEnv) != "" {
 			fmt.Fprintf(os.Stderr, "FAIL\tintegration: %s\n", suiteSkipReason)
 			fmt.Fprintf(os.Stderr, "integration: %s is set, so a suite that did not run is a failure, not a skip.\n", requireIntegrationEnv)
+			cleanup()
 			os.Exit(1)
 		}
 
@@ -68,7 +105,9 @@ func TestMain(m *testing.M) {
 		}
 		fmt.Fprintf(os.Stderr, "integration: SKIPPING the whole suite — %s\n", suiteSkipReason)
 		fmt.Fprintf(os.Stderr, "integration: set %s=1 to make this a failure instead.\n", requireIntegrationEnv)
-		os.Exit(m.Run())
+		code := m.Run()
+		cleanup()
+		os.Exit(hermeticReport(code))
 	}
 
 	// Build the binary into a temp file.
@@ -80,16 +119,20 @@ func TestMain(m *testing.M) {
 	tmp.Close()
 	muninnBin = tmp.Name()
 
-	out, err := exec.Command("go", "build", "-tags", "localassets", "-o", muninnBin, ".").CombinedOutput()
+	build := exec.Command("go", "build", "-tags", "localassets", "-o", muninnBin, ".")
+	build.Env = toolchainEnv
+	out, err := build.CombinedOutput()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration: build failed: %v\n%s\n", err, out)
 		os.Remove(muninnBin)
+		cleanup()
 		os.Exit(1)
 	}
 
 	code := m.Run()
 	os.Remove(muninnBin)
-	os.Exit(code)
+	cleanup()
+	os.Exit(hermeticReport(code))
 }
 
 // TestIntegrationPrecondition is the suite's honesty record. When the suite can
@@ -104,9 +147,16 @@ func TestIntegrationPrecondition(t *testing.T) {
 }
 
 // muninnCmd creates a command with MUNINNDB_DATA set to the given directory.
+// It inherits the hermetic guard's temp HOME, but not its unreachable CLI
+// addresses: the subprocess must find the daemon this suite started.
 func muninnCmd(dataDir string, args ...string) *exec.Cmd {
 	cmd := exec.Command(muninnBin, args...)
-	cmd.Env = append(os.Environ(), "MUNINNDB_DATA="+dataDir)
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); !slices.Contains(hermeticAddrEnv, k) {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	cmd.Env = append(cmd.Env, "MUNINNDB_DATA="+dataDir)
 	return cmd
 }
 
@@ -750,8 +800,12 @@ func TestVaultBehaviorPersistsAfterInit(t *testing.T) {
 		t.Fatal("REST API did not become available within 8s")
 	}
 
-	// Apply behavior via the same function called during init.
-	// This uses the default vaultAdminBase (8475) and vaultUIBase (8476).
+	// Apply behavior via the same function called during init, against the
+	// daemon this test started. The hermetic guard points the package-level
+	// bases at an unreachable address, so name the default ones explicitly.
+	oldAdmin, oldUI := vaultAdminBase, vaultUIBase
+	vaultAdminBase, vaultUIBase = "http://127.0.0.1:8475", "http://127.0.0.1:8476"
+	t.Cleanup(func() { vaultAdminBase, vaultUIBase = oldAdmin, oldUI })
 	out := captureStdout(func() {
 		applyBehaviorToVault("selective", "")
 	})

@@ -46,7 +46,7 @@ func TestReplParseCommand(t *testing.T) {
 
 func TestAutoAuth(t *testing.T) {
 	// autoAuth with bad URL should return error, not panic
-	_, err := autoAuth("http://localhost:9999")
+	_, err := autoAuth(hermeticUnreachableURL)
 	if err == nil {
 		t.Error("expected error for unreachable server")
 	}
@@ -73,7 +73,8 @@ func TestHandleCommandExit(t *testing.T) {
 }
 
 func TestHandleCommandNonExitReturnsFalse(t *testing.T) {
-	r := &replState{mcpURL: "http://localhost:9999"}
+	withNoServer(t) // "show vaults" calls the REST API
+	r := &replState{mcpURL: hermeticUnreachableURL}
 	commands := []string{"help", "show vaults", "show stats", "show memories", "use myapp", ""}
 	for _, cmd := range commands {
 		if r.handleCommand(cmd) {

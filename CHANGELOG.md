@@ -224,6 +224,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cluster background work (the periodic log prune, for one) is still not
   waited for at shutdown.
 
+### Internal
+
+- The `cmd/muninn` tests no longer contact a daemon running on the same machine. Several used
+  the CLI's default addresses, so running them next to a live daemon sent it health probes
+  and, from two tests, a login with the default admin credentials. The package's `TestMain`
+  now points every CLI address at a refusing port, gives the tests a temporary home
+  directory, stubs the release lookup and refuses any dial to a default daemon port or a
+  non-loopback host, failing the run if a test attempts one. Three enrichment tests that sent
+  placeholder keys to the real OpenAI and Anthropic APIs now use a local stand-in or a
+  cancelled context. The integration suite checks all five default ports before it starts
+  its daemon and runs under a temporary home directory.
+
 ### Security
 
 - A blank session-secret file no longer turns admin authentication off or lets a session
