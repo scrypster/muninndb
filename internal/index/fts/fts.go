@@ -3,6 +3,8 @@ package fts
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -269,6 +271,7 @@ func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, conte
 	// approach (posting batch committed first, DF written separately) could leave
 	// posting lists with stale DF counts.
 	batch := idx.db.NewBatch()
+	defer batch.Close()
 
 	for term, fieldCounts := range termCounts {
 		for field, count := range fieldCounts {
@@ -288,18 +291,17 @@ func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, conte
 			batch.Set(tkey, nil, nil)
 		}
 
-		// Read current DF and write updated DF into the same batch.
-		tkey := keys.TermStatsKey(ws, term)
-		var currentDF uint32
-		val, closer, err := idx.db.Get(tkey)
-		if err == nil && len(val) >= 4 {
-			currentDF = binary.BigEndian.Uint32(val[0:4])
-			closer.Close()
+		// Read current DF and write updated DF into the same batch. A read
+		// that FAILS is not a count of zero: writing 1 over a count that could
+		// not be read would durably reset the word's frequency.
+		currentDF, _, err := readDF(idx.db, ws, term)
+		if err != nil {
+			idx.mu.Unlock()
+			return err
 		}
-		newDF := currentDF + 1
 		var dfBuf [8]byte
-		binary.BigEndian.PutUint32(dfBuf[:4], newDF)
-		batch.Set(tkey, dfBuf[:], nil)
+		binary.BigEndian.PutUint32(dfBuf[:4], currentDF+1)
+		batch.Set(keys.TermStatsKey(ws, term), dfBuf[:], nil)
 	}
 
 	// Commit single atomic batch: posting lists + DF updates land together.
@@ -453,18 +455,45 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 	// DF adjustments: membership changes only.
 	for term := range newCounts {
 		if _, retained := oldTerms[term]; !retained {
-			idx.adjustDF(batch, ws, term, 1)
+			if err := idx.adjustDF(batch, ws, term, 1); err != nil {
+				idx.mu.Unlock()
+				return err
+			}
 		}
 	}
 	for term := range oldTerms {
 		if _, retained := newCounts[term]; !retained {
-			idx.adjustDF(batch, ws, term, -1)
+			if err := idx.adjustDF(batch, ws, term, -1); err != nil {
+				idx.mu.Unlock()
+				return err
+			}
 		}
 	}
 
 	err := batch.Commit(pebble.Sync)
 	idx.mu.Unlock()
 	return err
+}
+
+// readDF returns term's committed document frequency. found is false when the
+// vault holds no record for the term — the only case that means the corpus has
+// never counted it. Any other read failure is returned as an error and never
+// folded into "not found": the search path would report a word the vault holds
+// as absent, and the write paths, which read this to add or subtract one, would
+// commit a count derived from nothing over the real one.
+func readDF(r pebble.Reader, ws [8]byte, term string) (df uint32, found bool, err error) {
+	val, closer, err := r.Get(keys.TermStatsKey(ws, term))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("fts: read document frequency: %w", err)
+	}
+	defer closer.Close()
+	if len(val) < 4 {
+		return 0, false, nil
+	}
+	return binary.BigEndian.Uint32(val[0:4]), true, nil
 }
 
 // adjustDF queues a document-frequency change of delta for term into batch.
@@ -517,17 +546,10 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 // per-call ratchet, and it INFLATES the IDF of a term for the documents that do
 // hold it rather than omitting them from results. `muninn vault reindex-fts <name>` recomputes
 // df_t from scratch and clears both directions.
-func (idx *Index) adjustDF(batch *pebble.Batch, ws [8]byte, term string, delta int) {
-	tkey := keys.TermStatsKey(ws, term)
-
-	var currentDF uint32
-	existed := false
-	if val, closer, err := idx.db.Get(tkey); err == nil {
-		if len(val) >= 4 {
-			currentDF = binary.BigEndian.Uint32(val[0:4])
-			existed = true
-		}
-		closer.Close()
+func (idx *Index) adjustDF(batch *pebble.Batch, ws [8]byte, term string, delta int) error {
+	currentDF, existed, err := readDF(idx.db, ws, term)
+	if err != nil {
+		return err
 	}
 
 	switch {
@@ -535,7 +557,7 @@ func (idx *Index) adjustDF(batch *pebble.Batch, ws [8]byte, term string, delta i
 		currentDF += uint32(delta)
 	case delta < 0:
 		if !existed {
-			return // nothing recorded, nothing to decrement
+			return nil // nothing recorded, nothing to decrement
 		}
 		if d := uint32(-delta); currentDF <= d {
 			currentDF = 0
@@ -543,12 +565,13 @@ func (idx *Index) adjustDF(batch *pebble.Batch, ws [8]byte, term string, delta i
 			currentDF -= d
 		}
 	default:
-		return
+		return nil
 	}
 
 	var dfBuf [8]byte
 	binary.BigEndian.PutUint32(dfBuf[:4], currentDF)
-	batch.Set(tkey, dfBuf[:], nil)
+	batch.Set(keys.TermStatsKey(ws, term), dfBuf[:], nil)
+	return nil
 }
 
 // Search performs a calibrated full-text search for the given query string.
@@ -642,8 +665,17 @@ func (idx *Index) scoreAll(ws [8]byte, query string) ([]ScoredID, error) {
 	stemmedTokens := Tokenize(query)
 	rawTokens := tokenizeRaw(query)
 
+	// Every read below goes through r, and every read that FAILS fails the
+	// search. A failed read is not "no match": reporting it as one hands the
+	// caller a confident empty result for a query the vault may well answer,
+	// with nothing to tell it apart from a real miss.
+	var r pebble.Reader = idx.db
+
 	// Read global stats
-	stats := idx.readStats(ws)
+	stats, err := idx.readStats(r, ws)
+	if err != nil {
+		return nil, err
+	}
 
 	// Determine whether to use raw-token fallback.
 	// Vaults reindexed with ReindexFTSVault have FTSVersionKey=0x01 and skip the fallback.
@@ -651,14 +683,20 @@ func (idx *Index) scoreAll(ws [8]byte, query string) ([]ScoredID, error) {
 	if cachedVer, ok := idx.versionCache.Load(ws); ok {
 		useRawFallback = cachedVer.(byte) == 0x00
 	} else {
-		versionKey := keys.FTSVersionKey(ws)
-		if val, closer, err := idx.db.Get(versionKey); err == nil {
-			ver := val[0]
+		val, closer, verr := r.Get(keys.FTSVersionKey(ws))
+		switch {
+		case verr == nil:
+			if len(val) > 0 {
+				ver := val[0]
+				idx.versionCache.Store(ws, ver)
+				useRawFallback = ver == 0x00
+			}
 			closer.Close()
-			idx.versionCache.Store(ws, ver)
-			useRawFallback = ver == 0x00
+		case errors.Is(verr, pebble.ErrNotFound):
+			// legacy vault — useRawFallback stays true
+		default:
+			return nil, fmt.Errorf("fts: read schema version: %w", verr)
 		}
-		// ErrNotFound means legacy vault — useRawFallback stays true
 	}
 
 	if len(stemmedTokens) == 0 {
@@ -708,22 +746,31 @@ func (idx *Index) scoreAll(ws [8]byte, query string) ([]ScoredID, error) {
 		raw := rawTokens[i]
 		tryRaw := useRawFallback && raw != stemmed
 
-		idfStemmed := idx.getIDF(ws, stemmed, N)
+		idfStemmed, err := idx.getIDF(r, ws, stemmed, N)
+		if err != nil {
+			return nil, err
+		}
 		var idfRaw float64
 		if tryRaw {
-			idfRaw = idx.getIDF(ws, raw, N)
+			if idfRaw, err = idx.getIDF(r, ws, raw, N); err != nil {
+				return nil, err
+			}
 		}
 
 		anyReal := false
 		if idfStemmed > 0 {
 			anyReal = true
 			denom += idfStemmed
-			_ = idx.searchTokenCoverage(ws, stemmed, numer, idfStemmed, avgdl)
+			if err := idx.searchTokenCoverage(r, ws, stemmed, numer, idfStemmed, avgdl); err != nil {
+				return nil, err
+			}
 		}
 		if idfRaw > 0 {
 			anyReal = true
 			denom += idfRaw
-			_ = idx.searchTokenCoverage(ws, raw, numer, idfRaw, avgdl)
+			if err := idx.searchTokenCoverage(r, ws, raw, numer, idfRaw, avgdl); err != nil {
+				return nil, err
+			}
 		}
 		if !anyReal {
 			// Corpus-absent word (neither form has any stats): no postings
@@ -754,7 +801,7 @@ func (idx *Index) scoreAll(ws [8]byte, query string) ([]ScoredID, error) {
 // within that doc — one term's field-weighted tf can't exceed a coverage of
 // 1.0, so stuffing a single word cannot substitute for covering the query
 // (the coverage this contributes is presence/prominence, not raw frequency).
-func (idx *Index) searchTokenCoverage(ws [8]byte, term string, numer map[[16]byte]float64, idf, avgdl float64) error {
+func (idx *Index) searchTokenCoverage(r pebble.Reader, ws [8]byte, term string, numer map[[16]byte]float64, idf, avgdl float64) error {
 	// Prefix scan for this term across all fields.
 	// Key format: 0x05 | ws[8] | term | 0x00 | field[1] | id[16]
 	lowerBound := keys.FTSPostingKey(ws, term, 0x00, [16]byte{})
@@ -763,12 +810,12 @@ func (idx *Index) searchTokenCoverage(ws [8]byte, term string, numer map[[16]byt
 	sepPos := 1 + 8 + len(term)
 	upperBound[sepPos] = 0x01
 
-	iter, err := idx.db.NewIter(&pebble.IterOptions{
+	iter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: lowerBound,
 		UpperBound: upperBound,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("fts: scan postings: %w", err)
 	}
 	defer iter.Close()
 
@@ -803,6 +850,12 @@ func (idx *Index) searchTokenCoverage(ws [8]byte, term string, numer map[[16]byt
 			continue
 		}
 		covRaw[engramID] += weighted
+	}
+	// An iterator that stopped on a read error looks exactly like one that ran
+	// out of postings. Check before crediting anything: a partial scan must not
+	// score as if it were the whole posting list.
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("fts: scan postings: %w", err)
 	}
 
 	for id, raw := range covRaw {
@@ -861,14 +914,19 @@ func decodeStats(buf []byte) FTSStats {
 	}
 }
 
-func (idx *Index) readStats(ws [8]byte) FTSStats {
-	key := keys.FTSStatsKey(ws)
-	val, closer, err := idx.db.Get(key)
+// readStats returns the vault's corpus statistics. A vault with no statistics
+// record yet reads as one document of average length 100, the long-standing
+// placeholder for an empty index. Any other read failure is an error.
+func (idx *Index) readStats(r pebble.Reader, ws [8]byte) (FTSStats, error) {
+	val, closer, err := r.Get(keys.FTSStatsKey(ws))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return FTSStats{TotalEngrams: 1, AvgDocLen: 100}, nil
+	}
 	if err != nil {
-		return FTSStats{TotalEngrams: 1, AvgDocLen: 100}
+		return FTSStats{}, fmt.Errorf("fts: read corpus statistics: %w", err)
 	}
 	defer closer.Close()
-	return decodeStats(val)
+	return decodeStats(val), nil
 }
 
 // getIDF returns term's IDF in the vault for a corpus of N documents, or 0 when
@@ -897,21 +955,17 @@ func (idx *Index) readStats(ws [8]byte) FTSStats {
 // the tag word ended with no full-text match in 5 of 520 vault builds and with
 // a stale positive IDF in 3 more. The on-disk index was complete in every one;
 // the state lasted until a restart, a reindex, or another write holding the word.
-func (idx *Index) getIDF(ws [8]byte, term string, N float64) float64 {
-	val, closer, err := idx.db.Get(keys.TermStatsKey(ws, term))
-	if err != nil {
-		return 0
-	}
-	defer closer.Close()
-	if len(val) < 8 {
-		return 0
+func (idx *Index) getIDF(r pebble.Reader, ws [8]byte, term string, N float64) (float64, error) {
+	rawDF, found, err := readDF(r, ws, term)
+	if err != nil || !found {
+		return 0, err
 	}
 
-	df := float64(binary.BigEndian.Uint32(val[0:4]))
+	df := float64(rawDF)
 	if N < df {
 		N = df
 	}
-	return math.Log((N-df+0.5)/(df+0.5) + 1)
+	return math.Log((N-df+0.5)/(df+0.5) + 1), nil
 }
 
 // UpdateStats increments the engram count and recalculates avgdl.
@@ -923,11 +977,16 @@ func (idx *Index) UpdateStats(ws [8]byte, docLen int) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
+	// Not found means an empty index. A read that FAILED must not: carrying on
+	// would write a document count of 1 over the real one.
 	val, closer, err := idx.db.Get(key)
 	var st FTSStats
-	if err == nil {
+	switch {
+	case err == nil:
 		st = decodeStats(val)
 		closer.Close()
+	case !errors.Is(err, pebble.ErrNotFound):
+		return fmt.Errorf("fts: read corpus statistics: %w", err)
 	}
 
 	// Rolling average of doc length

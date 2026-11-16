@@ -128,7 +128,7 @@ func TestCalibration_AbsentTermUsesIdfMax(t *testing.T) {
 	// doc) + the absent term. Score = idf_widget*cov / (idf_widget + idfMax).
 	// Verify the denominator actually reflects idfMax by checking the score
 	// is close to idf_widget*cov/(idf_widget+idfMax) computed independently.
-	idfWidget := idx.getIDF(ws, "widget", N)
+	idfWidget := mustIDF(t, idx, ws, "widget", N)
 	results2, err := idx.Search(ctx, ws, "widget zyxquuxplarf", 10)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
@@ -201,7 +201,7 @@ func TestCalibration_ScoreIndependentOfOtherResults(t *testing.T) {
 	// equal-to-1.0 alone isn't conclusive — the real proof is lowScore below,
 	// computed independently of highScore's existence.
 	N := float64(10)
-	idfWidget := idx.getIDF(ws, "widget", N)
+	idfWidget := mustIDF(t, idx, ws, "widget", N)
 	if idfWidget <= 0 {
 		t.Fatal("test setup: expected widget to have a real idf")
 	}

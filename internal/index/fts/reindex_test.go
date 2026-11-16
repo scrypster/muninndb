@@ -83,7 +83,7 @@ func TestReindexEngram_IsStatsNeutral(t *testing.T) {
 		t.Fatalf("IndexEngram(target): %v", err)
 	}
 
-	statsBefore := idx.readStats(ws)
+	statsBefore := mustStats(t, idx, ws)
 	type dfSnap struct {
 		df      uint32
 		missing bool
@@ -107,7 +107,7 @@ func TestReindexEngram_IsStatsNeutral(t *testing.T) {
 		t.Fatalf("ReindexEngram: %v", err)
 	}
 
-	statsAfter := idx.readStats(ws)
+	statsAfter := mustStats(t, idx, ws)
 	if statsAfter.TotalEngrams != statsBefore.TotalEngrams {
 		t.Errorf("TotalEngrams %d → %d across a retag, want unchanged (a retag adds no document to the corpus)",
 			statsBefore.TotalEngrams, statsAfter.TotalEngrams)
@@ -296,7 +296,7 @@ func TestAdjustDF_DecrementClampsAtZero(t *testing.T) {
 	// And the consequence, stated in the units that matter: IDF must stay
 	// positive. At the wrapped value this is −20.7944, which makes a document
 	// holding the term rank BELOW one that does not.
-	idf := idx.getIDF(ws, stemOf(t, "zarquon"), 3)
+	idf := mustIDF(t, idx, ws, stemOf(t, "zarquon"), 3)
 	t.Logf("getIDF(zarquon, N=3) with df=%d → %.4f", df2, idf)
 	if idf <= 0 {
 		t.Errorf("getIDF(zarquon, N=3) = %.4f with df=%d, want > 0 — a negative IDF penalizes documents that CONTAIN the term (COG-24's numerator is Σ idf_t'·cov_t)", idf, df2)

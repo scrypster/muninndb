@@ -93,7 +93,7 @@ func TestSearch_StraddlingAnIndexDoesNotPoisonTheTerm(t *testing.T) {
 	idfTestIndex(t, idx, ws, 1, 7)
 
 	// Reader, first read: scoreAll takes N before it looks at any term.
-	staleN := float64(idx.readStats(ws).TotalEngrams)
+	staleN := float64(mustStats(t, idx, ws).TotalEngrams)
 	if staleN != 7 {
 		t.Fatalf("setup: N = %v, want 7", staleN)
 	}
@@ -102,7 +102,7 @@ func TestSearch_StraddlingAnIndexDoesNotPoisonTheTerm(t *testing.T) {
 	idfTestIndex(t, idx, ws, 8, 8)
 
 	// Reader, second read: the term's df, now 8, against the N it already holds.
-	_ = idx.getIDF(ws, idfTestTerm, staleN)
+	_ = mustIDF(t, idx, ws, idfTestTerm, staleN)
 
 	// The vault is quiescent from here on: 8 documents, df = 8, N = 8.
 	requireAllFound(t, idx, ws, idfTestTerm, 8, "first search after the straddle")
@@ -133,7 +133,7 @@ func TestSearch_TermWithPostingsIsNeverScoredAsAbsent(t *testing.T) {
 
 	// Roll N back by one document: the state after the third document's posting
 	// batch and before its stats write.
-	st := idx.readStats(ws)
+	st := mustStats(t, idx, ws)
 	if st.TotalEngrams != 3 {
 		t.Fatalf("setup: N = %d, want 3", st.TotalEngrams)
 	}
