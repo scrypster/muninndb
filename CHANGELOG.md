@@ -366,7 +366,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the server's memory limit. It is the number of connections that fit in a quarter of
   that limit if every one of them holds as much as a connection can, which is 69 MB (see
   the next entry). That is 16 at the default `MUNINN_MEM_LIMIT_GB=4`, 59 at 16 and 237
-  at 64. Set `MUNINN_MBP_MAX_CONNECTIONS` to choose the number yourself.
+  at 64. Set `MUNINN_MBP_MAX_CONNECTIONS` to choose the number yourself. The server logs
+  the limit in force when it starts, as `max_connections` on the `mbp: listening` line.
   **If you run more than 16 MBP clients at once, set it before you upgrade, or the extra
   clients will be refused.** Refusals are logged at WARN
   at most once every 10 seconds, with a count. The limit keeps the server and its other
@@ -457,6 +458,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is `vault`, or `server` for the admin session, whose answer is unchanged and is what
   the web console's dashboard shows. A client that used a key to read the server's vault
   count or storage size will now see `1` and `0`. Those figures need the admin session.
+  The SDKs do not carry `scope` yet. An SDK client using a key sees a storage size of 0
+  and a vault count of 1 with nothing to say why, and the SDK examples that print the
+  storage size will print "0 bytes".
   `openapi.yaml` documents `scope` and the two scopes, and its `StatResponse` field
   names are corrected to the snake_case the server has always sent. Vault names were
   also returned by the listing calls, which the next entry covers (SEC-24).
@@ -475,6 +479,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **What to do:** upgrade. If you have public vaults other than `default`, treat their
   names as known to anyone who could reach the REST port, and lock any that should not
   be open (`PUT /api/admin/vaults/config`).
+  **Two places still name or count things without a credential.** If you start the server
+  with `--metrics-addr`, the Prometheus endpoint it opens has no authentication, and
+  its per-vault metrics are labelled with vault names. Anyone who can reach that address
+  can read every vault's name. It is off unless you turn it on. Bind it to loopback or to
+  a network only your monitoring can reach. And `GET /api/workers` answers without a
+  credential. It returns server-wide counters for the background workers and names no
+  vault.
   **What changed:** with a key, or with no credential on a public vault, the list is now
   the caller's own vault only. The admin session still gets every vault, so the web
   console is unchanged. `muninn vault list` and `muninn show vaults` used the

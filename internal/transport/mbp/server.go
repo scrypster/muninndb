@@ -105,7 +105,7 @@ func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
 	if s.maxConns <= 0 {
 		s.maxConns = resolveMaxConnections()
 	}
-	slog.Info("mbp: listening", "addr", ln.Addr().String(), "max_connections", s.maxConns)
+	slog.Info("mbp: listening", "addr", ln.Addr().String(), "max_connections", s.maxConns, "set_with", maxConnectionsEnv)
 	s.listener = ln
 	s.startRefusers()
 
