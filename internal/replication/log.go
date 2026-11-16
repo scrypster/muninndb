@@ -24,6 +24,7 @@ type ReplicationLog struct {
 	mu         sync.Mutex
 	seq        uint64 // current sequence number
 	init       bool   // whether seq has been initialized from Pebble
+	floor      uint64 // lowest value seq may be initialized to. Set only by an AdvanceTo that could not read the counter.
 	lastPruned uint64 // highest seq already deleted by Prune, this process lifetime
 	subs       []chan struct{}
 	subsMu     sync.Mutex
@@ -56,6 +57,11 @@ func (l *ReplicationLog) ensureSeqInit() error {
 		if len(val) >= 8 {
 			l.seq = binary.BigEndian.Uint64(val)
 		}
+	}
+	// An AdvanceTo that ran while the counter was unreadable left its target
+	// here. The stored value is the one from before that promotion.
+	if l.seq < l.floor {
+		l.seq = l.floor
 	}
 
 	l.init = true
@@ -284,6 +290,54 @@ func (l *ReplicationLog) CurrentSeq() uint64 {
 	}
 
 	return l.seq
+}
+
+// AdvanceTo raises the sequence counter to seq when it is below it, so the next
+// Append is numbered seq+1. It never lowers the counter and it writes no entry.
+// It returns the counter's value before the call.
+//
+// Its one caller is a promotion (ClusterCoordinator.handlePromotion). A
+// follower applies the leader's entries without appending any of its own, so
+// its counter stays where its last term as leader left it, which is 0 for a
+// node that has never led. If such a node numbered its first entry from there, every
+// follower that had applied further than that would discard the entry as
+// already applied (Applier.Apply). AdvanceTo is how the node's numbering
+// catches up with what it has applied before it starts appending.
+//
+// The sequences between the old counter and seq have no entry in this node's
+// log and never will: it received them as a follower and did not log them. A
+// ReadSince across that range returns the entries on either side of it.
+//
+// A failure does not undo the advance, and the caller is expected to carry on
+// (a promotion cannot be taken back once the claim is broadcast). If the write
+// fails, the counter stays advanced in memory: this process numbers correctly,
+// the next Append persists the counter in its own batch, and a restart before
+// any Append recomputes the same value at the next promotion. If the counter
+// cannot be read at all, the target is kept as a floor that the first
+// successful read is raised to, so the stored value from before the promotion
+// is never used as it stands. The error is returned so the caller can report it.
+func (l *ReplicationLog) AdvanceTo(seq uint64) (previous uint64, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if err := l.ensureSeqInit(); err != nil {
+		if seq > l.floor {
+			l.floor = seq
+		}
+		return 0, fmt.Errorf("replication log: read sequence counter before advancing to %d: %w", seq, err)
+	}
+	previous = l.seq
+	if seq <= l.seq {
+		return previous, nil
+	}
+	l.seq = seq
+
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, l.seq)
+	if err := l.db.Set(seqCounterKey(), buf, pebble.Sync); err != nil {
+		return previous, fmt.Errorf("replication log: persist advanced sequence counter %d: %w", seq, err)
+	}
+	return previous, nil
 }
 
 // Subscribe registers a notification channel that receives a signal whenever a

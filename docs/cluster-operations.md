@@ -229,6 +229,10 @@ curl -H "Authorization: Bearer $MUNINN_CLUSTER_SECRET" \
 
 Response: `status` (`ok` | `degraded` | `down`), `role`, `is_leader`, `epoch`, `replication_lag`.
 
+`replication_lag` on a Lobe is measured against the Lobe's own log, not the Cortex's, so it reads
+0 on a Lobe that is receiving nothing. Do not read `ok` with lag 0 as proof that a Lobe is
+complete. See [What a failover does to replication](#what-a-failover-does-to-replication).
+
 **GET /v1/cluster/info** — Full topology:
 
 ```sh
@@ -295,10 +299,78 @@ Add sentinel nodes as in §2. They increase quorum size and improve ODOWN detect
 1. **MSP (Muninn Sentinel Protocol)** heartbeats detect peers. After `missedThreshold` (default 3) missed heartbeats, a peer is **SDOWN** (subjectively down).
 2. When **quorum** of non-observer nodes agree a peer is SDOWN, that peer is **ODOWN** (objectively down).
 3. **OnODown** for the Cortex → triggers `StartElection`.
-4. Lobes and Sentinels vote. A Lobe with the highest epoch and caught-up WAL can win.
+4. Lobes and Sentinels vote. The first candidate to collect a majority for the new epoch wins. **A vote does not compare replication positions**: a Lobe that was behind another Lobe when the Cortex died can be elected. See [What a failover does to replication](#what-a-failover-does-to-replication) for what follows from that.
 5. New leader broadcasts `CortexClaim`, others demote to Lobe.
 
 **Quorum loss**: If the Cortex cannot reach quorum for 5 seconds, it **pre-emptively demotes** itself to avoid split-brain writes.
+
+### What a failover does to replication
+
+Every replicated write has a sequence number, and a Lobe remembers the highest one it has
+applied. It ignores anything numbered at or below that, which is what makes a replayed stream
+harmless.
+
+**The new Cortex continues the numbering.** When a Lobe is promoted (by election, by a graceful
+handoff, or by `POST /v1/replication/promote`) it numbers its first write one past the last
+entry it applied. Lobes that were level with it carry straight on. The promotion logs it:
+
+```
+cluster: replication sequence continues from this node's applied position node=<id> epoch=<n> log_head_was=<old> log_head=<new>
+```
+
+What that does for a Lobe depends on where it stood when the old Cortex went away. Only the
+first of these three cases is repaired by the numbering. The other two are open defects, and
+neither is reported anywhere:
+
+| Where the Lobe stood | What happens | Visible? |
+|---|---|---|
+| **Level** with the node that won | It receives every write the new Cortex makes. | Nothing to see. |
+| **Ahead** of the node that won | It holds entries the new Cortex never received. The new Cortex's first writes reuse those sequence numbers, and the Lobe skips them as already applied. The two nodes then disagree about that range in both directions. | **No.** Its health reads `ok`, lag 0. |
+| **Behind** the node that won | It receives every write the new Cortex makes from then on, but not the entries between its own position and the new Cortex's position at promotion. The new Cortex applied those as a Lobe and has no log of them to send. | **No.** Its health reads `ok`, lag 0. |
+
+The followers of a healthy, idle cluster are level. They stop being level when one of them is
+slow, disconnected or restarting at the moment the Cortex goes away, or when the old Cortex is
+still taking writes while the role moves.
+
+If you have reason to think a Lobe was not level at a failover, re-seed it from the Cortex:
+
+1. Stop the Cortex. This is a write outage for the length of the copy.
+2. Stop the Lobe.
+3. Replace the Lobe's `pebble/` and `wal/` directories with copies of the Cortex's. Leave the
+   Lobe's own `cluster.yaml` and `auth_secret` in place.
+4. Start the Lobe, then the Cortex.
+
+Anything the Lobe held that the Cortex did not is discarded by the copy. Deleting the Lobe's data
+directory and restarting it is not a substitute: no snapshot is sent to a joining Lobe (see the
+list below), so it would come back holding only what the Cortex's log still has.
+
+**Other gaps on the failover path.** None of these is changed by the numbering fix:
+
+- **After a graceful failover, the other Lobes do not switch by themselves.** The handoff target
+  becomes the Cortex and the old Cortex rejoins it as a Lobe, but any other Lobe keeps reading
+  from its connection to the old Cortex, which no longer sends anything. It receives none of
+  the new Cortex's writes until that connection closes, in practice until the old Cortex is
+  stopped or restarted. Its health reads `ok` with lag 0 in the meantime. When the connection
+  does close, the Lobe joins the new Cortex and is sent what the new Cortex's log still holds.
+  After a graceful failover, restart the demoted node promptly.
+- **`POST /api/admin/cluster/failover` can answer 500 although the handoff took effect.** The
+  response says only that an internal error occurred. The old Cortex's log says
+  `graceful failover: HANDOFF_ACK timeout (5s)`. Check `GET /v1/cluster/health` on the target
+  before retrying.
+- **Writes are not stopped during a graceful failover.** Step 1 of the process below says the
+  Cortex enters DRAINING and rejects new writes. Nothing enforces that today. A write the old
+  Cortex accepts while the role is moving can reach some Lobes and not others.
+- **The old Cortex's unshipped writes.** Anything the old Cortex had accepted but not yet
+  shipped when it went away stays on its disk and is in nobody else's history. Nothing detects
+  that when it rejoins.
+- **No Lobe is sent a snapshot.** Other sections of this guide say a joining Lobe receives one.
+  In a running server it does not. A Lobe that joins, or reattaches, after the Cortex has
+  pruned its log is sent only what the log still holds.
+- **A node can count one voter too many.** If a peer's handshake is served before startup has
+  finished registering this node's seeds, a `seed-<addr>` placeholder stays in its voter list
+  alongside that peer's real id. The quorum on that node is then one higher than it should
+  be, and a three-node cluster that loses a node may fail to elect. The list is rebuilt when
+  that node restarts. How often this happens is not measured.
 
 ### Manual / Graceful Failover
 
@@ -357,9 +429,15 @@ Use when the Cortex has failed and you need a new leader elected. The Lobe with 
    - Target the upgraded replica with least lag
    - `POST /api/admin/cluster/failover` with `target_node_id`
    - Old primary becomes replica
+   - Promote an **upgraded** node. Whether the sequence numbering continues across a failover
+     is decided by the binary of the node that is promoted. A node running a build from before
+     that fix restarts the numbering, and every Lobe, whatever it runs, then discards its
+     writes until the counter passes the old Cortex's head.
 
 4. **Upgrade Old Primary**
-   - Stop the demoted primary (now replica)
+   - Stop the demoted primary (now replica). Do this promptly: the other replicas start
+     following the new primary only when their connection to the old one closes (see
+     [What a failover does to replication](#what-a-failover-does-to-replication)).
    - Replace binary, start
    - Wait for catch-up
 
