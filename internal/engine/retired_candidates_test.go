@@ -771,9 +771,18 @@ func TestVersionHead_WalkLimitWarnsOncePerChain(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// These memories are near-duplicates of each other, so the novelty
+		// worker links each new one to an earlier one with `refines`, weighted
+		// by their similarity (1.0 for some pairs). Let it finish before the
+		// hand-written edge goes in, and give that edge a weight no similarity
+		// lands on: an edge's RelType is not in its key, so `refines` and
+		// `supersedes` at one weight on one pair are the same key (STO-15). This
+		// test used to write at weight 1 without waiting, and lost about one run
+		// in ten to that collision.
+		env.eng.waitWriteTimeIdle()
 		dst := env.mustULID(prev)
 		if err := env.store.WriteAssociation(env.ctx, env.ws, env.mustULID(resp.ID), dst, &storage.Association{
-			TargetID: dst, RelType: storage.RelSupersedes, Weight: 1, Confidence: 1, CreatedAt: time.Now(),
+			TargetID: dst, RelType: storage.RelSupersedes, Weight: 0.9, Confidence: 1, CreatedAt: time.Now(),
 		}); err != nil {
 			t.Fatal(err)
 		}

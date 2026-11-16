@@ -40,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the old value (STO-22). Reported by likesjx (#869), who also wrote the first fix and verified
   it on a live cluster (#878).
 
+- Two links written at the same moment can no longer silently replace one another. Two
+  links between the same pair of memories at the same weight share one storage key, whatever
+  their relation. A guard refuses the second, but it checked and then wrote with nothing
+  holding the two steps together. When the write-time near-duplicate check linked a new
+  memory to an older one with `refines` at the same moment a caller declared `supersedes` on
+  that pair, both writes were told OK and one edge was lost. When `supersedes` was the one
+  lost, recall presented the superseded memory as the current version. The check and the
+  write are now one step on both write paths: the later writer gets the existing collision
+  error. This closes the concurrent case only. A later weight update on the pair can still
+  land one relation on another's key, and a declared link can still be refused because an
+  automatic one reached the key first; both need the relation in the key (#880).
+
 - Relevance band descriptions corrected. A band reports how much evidence a memory has
   against your query, measured against the embedding model's noise floor — not whether it answers
   you. `moderate` is now documented as a candidate to verify, not an established answer, and
