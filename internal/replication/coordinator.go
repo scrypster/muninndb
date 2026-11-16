@@ -822,7 +822,7 @@ func (c *ClusterCoordinator) streamFromCortex(ctx context.Context, conn net.Conn
 		}
 		// After applying a replication entry, report our progress so the Cortex
 		// can track replica lag (#516 part 3). The Cortex reads these acks via
-		// handleClusterConn → HandleIncomingFrame → UpdateReplicaSeq.
+		// ServeConn → HandleIncomingFrame → UpdateReplicaSeq.
 		if frame.Type == mbp.TypeReplEntry {
 			c.sendReplAck(cortexID, conn)
 		}
@@ -1327,7 +1327,7 @@ func (c *ClusterCoordinator) EvictConn(nodeID string, conn net.Conn) {
 // HandleIncomingJoin processes a TypeJoinRequest frame on a raw inbound conn
 // whose node ID is not yet known. It registers the live conn under req.NodeID
 // so that peer.Send works immediately (no dial required), processes the join
-// request, and returns the joining node's stable ID so that handleClusterConn
+// request, and returns the joining node's stable ID so that ServeConn
 // can use it for all subsequent frames on the same connection.
 func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (string, bool, error) {
 	var req mbp.JoinRequest
