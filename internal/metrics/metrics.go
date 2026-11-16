@@ -255,6 +255,25 @@ var (
 		Name: "muninndb_recall_total",
 		Help: "Completed recalls (Activate), by read_only (true|false).",
 	}, []string{"read_only"})
+
+	// WritesMissingFieldTotal counts engram writes that stored successfully
+	// without a value for a caller-supplied enrichment field at write time, per
+	// vault and field. Paired with muninndb_engine_writes_total this gives an
+	// operator a rate(missing)/rate(total) signal for how fast a vault
+	// accumulates such engrams. Whether a later stage fills the field depends on
+	// the deployment (on one with no summarize stage registered, nothing does),
+	// so the metric reports the write-time state only. Writes to a vault whose
+	// inline_enrichment is background_only are not observed: there the caller's
+	// fields are discarded by design and a background stage owns them.
+	//
+	// Deliberately a CounterVec with a `field` label rather than one counter per
+	// field, so another field can be added later without minting and then
+	// deprecating a metric name. The usual CounterVec property applies: a field
+	// with no violations emits no series at all, so absence reads as "none".
+	WritesMissingFieldTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_engine_writes_missing_field_total",
+		Help: "Total engram writes stored without a value for a caller-supplied enrichment field (e.g. summary) at write time, per vault and field.",
+	}, []string{"vault", "field"})
 )
 
 // VaultStore is the subset of storage.PebbleStore methods needed by VaultEngramCollector.
