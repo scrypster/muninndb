@@ -204,7 +204,9 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 
 	// Public routes — no auth, no body size limit (health/auth handshake).
 	mux.HandleFunc("GET /api/openapi.yaml", s.withPublicMiddleware(s.handleOpenAPISpec))
-	mux.HandleFunc("POST /api/hello", s.withPublicMiddleware(s.handleHello))
+	// Hello registers a vault's name, which is a write. It is behind vault auth
+	// like every other route that names a vault (SEC-29).
+	mux.HandleFunc("POST /api/hello", s.withMiddleware(s.handleHello))
 	mux.HandleFunc("GET /api/health", s.withPublicMiddleware(s.handleHealth))
 	mux.HandleFunc("GET /api/ready", s.withPublicMiddleware(s.handleReady))
 	mux.HandleFunc("GET /api/workers", s.withPublicMiddleware(s.handleWorkerStats))
@@ -710,12 +712,53 @@ func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
 		return
 	}
+	vault, status, err := s.helloVault(r, req.Vault)
+	if err != nil {
+		s.sendError(r, w, status, ErrInvalidEngram, err.Error())
+		return
+	}
+	req.Vault = vault
 	resp, err := s.engine.Hello(r.Context(), &req)
 	if err != nil {
 		s.sendError(r, w, http.StatusUnauthorized, ErrAuthFailed, err.Error())
 		return
 	}
 	s.sendJSON(w, http.StatusOK, resp)
+}
+
+// helloVault is the vault a hello may register: the one the request was
+// authorised for, never one the caller only named (SEC-29). The engine records
+// the name of the vault it is handed, so what reaches it has to be a vault the
+// caller is entitled to.
+//
+//   - With a key it is the key's vault. Naming any other is refused.
+//   - With no key it is the public vault the request named, which the auth
+//     middleware has already checked is public.
+//   - Under an admin session it is the vault named in the body, which is how
+//     the console registers a vault it has just created; an admin may use any
+//     vault, so the name only has to be a vault name.
+//
+// A server built with no auth store authorises nothing anywhere, and takes the
+// name as given, as before.
+func (s *Server) helloVault(r *http.Request, named string) (string, int, error) {
+	named = strings.TrimSpace(named)
+	if s.authStore == nil {
+		return named, 0, nil
+	}
+	if auth.AdminSessionFromContext(r.Context()) {
+		if named == "" {
+			named = ctxVault(r)
+		}
+		if !isValidVaultName(named) {
+			return "", http.StatusBadRequest, errors.New("invalid vault name")
+		}
+		return named, 0, nil
+	}
+	vault, err := resolveHandlerVault(r, named)
+	if err != nil {
+		return "", http.StatusBadRequest, err
+	}
+	return vault, 0, nil
 }
 
 func (s *Server) handleCreateEngram(w http.ResponseWriter, r *http.Request) {

@@ -1416,13 +1416,22 @@ func (e *Engine) Hello(ctx context.Context, req *mbp.HelloRequest) (*mbp.HelloRe
 
 	// Register the vault name so it appears in ListVaults even before the
 	// first engram is written (idempotent, cheap).
+	//
+	// This is a write, so two things hold. The CALLER must already have been
+	// authorised for req.Vault: every transport hands Hello the vault it
+	// resolved for the request, never one the client only named (SEC-29). And
+	// it happens on the Cortex only, like every client-originated write (#596):
+	// a Lobe answers the handshake and leaves the name to arrive by
+	// replication, once the Cortex has it.
 	vaultName := req.Vault
 	if vaultName == "" {
 		vaultName = "default"
 	}
-	wsPrefix := e.store.ResolveVaultPrefix(vaultName)
-	if err := e.store.WriteVaultName(wsPrefix, vaultName); err != nil {
-		slog.Warn("engine: Hello: failed to persist vault name", "vault", vaultName, "err", err)
+	if e.refuseNonLeaderWrite() == nil {
+		wsPrefix := e.store.ResolveVaultPrefix(vaultName)
+		if err := e.store.WriteVaultName(wsPrefix, vaultName); err != nil {
+			slog.Warn("engine: Hello: failed to persist vault name", "vault", vaultName, "err", err)
+		}
 	}
 
 	return &mbp.HelloResponse{

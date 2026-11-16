@@ -299,6 +299,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any memory is set aside for it. Once the handshake is done the connection is not on
   a clock, and may stay idle (SEC-27).
 
+- `POST /api/hello` no longer lets a caller with no credential register vaults. The
+  route had no authentication, and it recorded whatever vault name the request carried.
+  Anyone who could reach the REST port could add vault names to the server, 100 a second
+  from one address under the default rate limit, each written to storage for good. The
+  names were not checked, and they showed up in the admin vault list, in the web
+  console and in the server's vault count. A key for one vault could register other
+  names the same way. No memory could be read or written through this, and no key or
+  vault setting was created.
+  **Who is affected:** anyone whose REST port (8475) can be reached by a client they do
+  not trust, in every release from v0.3.0-alpha to v0.11.0. Releases before v0.3.0-alpha
+  did not record the name.
+  **What to do:** upgrade. Then look at your vault list (`muninn vault list -u <admin
+  user> -p`, or the console) for vaults you did not create, and delete them. Upgrading
+  does not remove names that were added earlier.
+  **What changed:** the route now takes the same credentials as every other route that
+  names a vault, and registers only the vault the caller is entitled to. With a key
+  that is the key's vault. With no key it is a vault that is already public. Signed in
+  as admin it is the vault named, which is what the console does after creating one. In
+  a cluster the name is recorded on the primary node only.
+  **What a client will notice:** a hello with no key for a vault that is not public is
+  now answered 401, where it was 200. A hello with a key that names a different vault is
+  answered 400. A hello with a key for its own vault, with or without naming it, works
+  as before, and the response now always carries the vault's name in `vault_id`
+  (SEC-29).
+
 - A caller with no key can no longer make the server's memory and log grow by naming
   vaults. Every request made without a key names a vault (or means `default`), and the
   server looks the name up to see whether that vault is public. Each name it did not

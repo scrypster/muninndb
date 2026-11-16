@@ -198,3 +198,44 @@ func TestSingleWriter_GateRunsBeforeAppendGate(t *testing.T) {
 		t.Errorf("append-mode write on a follower: err = %v, want ErrNotLeader (cluster gate first)", err)
 	}
 }
+
+// TestSingleWriter_HelloOnAFollowerRegistersNothing: Hello records the name of
+// the vault it is handed, and that is a client-originated write like any other.
+// It used to be made on whatever node the handshake reached, a Lobe included,
+// where it was a local write the Cortex never saw. A Lobe now answers the
+// handshake and writes nothing; the Cortex registers the name as before.
+func TestSingleWriter_HelloOnAFollowerRegistersNothing(t *testing.T) {
+	registered := func(t *testing.T, e *Engine, vault string) bool {
+		t.Helper()
+		names, err := e.ListVaults(context.Background())
+		if err != nil {
+			t.Fatalf("ListVaults: %v", err)
+		}
+		for _, n := range names {
+			if n == vault {
+				return true
+			}
+		}
+		return false
+	}
+
+	lobe, cleanupL := testEnv(t)
+	defer cleanupL()
+	lobe.SetWriteGate(followerGate)
+	resp, err := lobe.Hello(context.Background(), &mbp.HelloRequest{Version: "1", Vault: "tug-roster"})
+	if err != nil || resp == nil || resp.VaultID != "tug-roster" {
+		t.Fatalf("Hello on a follower = %+v, %v; the handshake itself is not a write and must be answered", resp, err)
+	}
+	if registered(t, lobe, "tug-roster") {
+		t.Errorf("a Lobe registered a vault name from a handshake: a local write the Cortex never saw (#596)")
+	}
+
+	cortex, cleanupC := testEnv(t)
+	defer cleanupC()
+	if _, err := cortex.Hello(context.Background(), &mbp.HelloRequest{Version: "1", Vault: "tug-roster"}); err != nil {
+		t.Fatalf("Hello on the Cortex: %v", err)
+	}
+	if !registered(t, cortex, "tug-roster") {
+		t.Errorf("the Cortex did not register the vault name")
+	}
+}

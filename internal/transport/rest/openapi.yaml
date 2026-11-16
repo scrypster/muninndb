@@ -2207,8 +2207,15 @@ paths:
   /api/hello:
     post:
       tags: [health]
-      summary: "Protocol handshake — returns session metadata."
-      security: []
+      summary: "Protocol handshake — returns session metadata and registers the vault's name."
+      description: >-
+        Registers the name of the vault the request is authorised for, so the
+        vault is listed before anything is written to it. With an API key that
+        is the key's vault, and naming any other is refused. With no key the
+        vault named must be public. Under an admin session it is the vault
+        named in the body.
+      security:
+        - BearerAuth: []
       requestBody:
         required: false
         content:
@@ -2242,6 +2249,10 @@ paths:
                     type: array
                     items:
                       type: string
+        "400":
+          description: "The body names a vault other than the one the request is authorised for, or something that is not a vault name."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /api/workers:
     get:
