@@ -2,7 +2,10 @@ package fts
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -147,5 +150,294 @@ func TestIndexWrites_ReadErrorDoesNotResetCounts(t *testing.T) {
 	}
 	if res, err := idx.Search(context.Background(), ws, "velmora", 100); err != nil || len(res) != 6 {
 		t.Errorf("after the failed writes: Search(velmora) = %d matches, err %v; want 6, nil", len(res), err)
+	}
+}
+
+// The two tests above fail EVERY read at once, so the first guarded read hides
+// every guard behind it: five of the seven read-error checks could each be
+// deleted with those tests still green. The sweeps below fail exactly ONE read —
+// the k-th, for every k a search or a write makes — so each read's own guard is
+// the only thing between its failure and a wrong answer.
+//
+// They count the reads K instead of assuming a number, and refuse to run on a
+// K too small to mean anything, so a storage-engine upgrade that changes how
+// many reads an operation makes cannot quietly leave them testing nothing.
+
+// singleFault fails exactly the k-th sstable read after it is armed. With k = 0
+// it only counts.
+type singleFault struct {
+	armed atomic.Bool
+	n, k  atomic.Int64
+	fired atomic.Bool
+}
+
+func (f *singleFault) inject(op errorfs.Op, path string) error {
+	if !f.armed.Load() || op.OpKind() != errorfs.OpKindRead || !strings.HasSuffix(path, ".sst") {
+		return nil
+	}
+	if n := f.n.Add(1); n == f.k.Load() {
+		f.fired.Store(true)
+		return errorfs.ErrInjected
+	}
+	return nil
+}
+
+func openSingleFaultDB(t *testing.T, f *singleFault) *pebble.DB {
+	t.Helper()
+	cache := pebble.NewCache(1)
+	db, err := pebble.Open("single-fault", &pebble.Options{
+		FS:                          errorfs.Wrap(vfs.NewMem(), errorfs.InjectorFunc(f.inject)),
+		Cache:                       cache,
+		DisableAutomaticCompactions: true, // a background read must not take the fault
+	})
+	if err != nil {
+		cache.Unref()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		f.armed.Store(false)
+		db.Close()
+		cache.Unref()
+	})
+	return db
+}
+
+// singleFaultFixture indexes the same twelve documents on every call and flushes
+// them to one sstable. Their words stem ("ledgers", "running", "crates"), so a
+// search also makes the unstemmed-form reads of a vault with no schema marker.
+func singleFaultFixture(t *testing.T, idx *Index, db *pebble.DB, ws [8]byte) {
+	t.Helper()
+	for i := 0; i < 12; i++ {
+		content := "the tide office logged barges at dusk"
+		if i%3 == 0 {
+			content = "widget crates counted beside quays"
+		}
+		if err := idx.IndexEngram(ws, [16]byte{0xC0, byte(i)}, fmt.Sprintf("harbor ledgers running %d", i), "", content, []string{"kestrel"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func storeDigest(t *testing.T, db *pebble.DB) [32]byte {
+	t.Helper()
+	it, err := db.NewIter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+	h := sha256.New()
+	for it.First(); it.Valid(); it.Next() {
+		h.Write(it.Key())
+		h.Write([]byte{0})
+		h.Write(it.Value())
+		h.Write([]byte{1})
+	}
+	if err := it.Error(); err != nil {
+		t.Fatal(err)
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// singleFaultLegacyDoc adds one document the way a pre-stemming build indexed
+// it: postings and frequency records under its UNSTEMMED words. It is what makes
+// the unstemmed-form reads matter. Without it a failed unstemmed read that was
+// taken for "no record" would be right by coincidence, and so would a failed
+// schema-marker read taken for "no marker".
+func singleFaultLegacyDoc(t *testing.T, idx *Index, db *pebble.DB, ws [8]byte) {
+	t.Helper()
+	id := [16]byte{0xCF, 1}
+	batch := db.NewBatch()
+	for _, raw := range []string{"ledgers", "running"} {
+		if err := batch.Set(keys.FTSPostingKey(ws, raw, FieldConcept, id), encodePosting(PostingValue{TF: 1, Field: FieldConcept, DocLen: 2}), nil); err != nil {
+			t.Fatal(err)
+		}
+		var df [8]byte
+		df[3] = 1
+		if err := batch.Set(keys.TermStatsKey(ws, raw), df[:], nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpdateStats(ws, 2); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSearch_AnySingleReadFaultIsAnErrorOrTheExactAnswer: whichever one read of
+// a search fails, the search returns that error and no results. Never a partial
+// result, never an empty success, never the right answer reached past an
+// unchecked error, never an open snapshot left behind.
+//
+// Two vaults, because two of the reads only matter in one of them. In a vault
+// with no schema marker the unstemmed-form frequency reads decide whether the
+// legacy document matches. In a reindexed vault (marker = 1) the marker read
+// decides whether those forms are consulted at all. Every search uses a fresh
+// Index, as the first search of a process does, so the marker is really read.
+func TestSearch_AnySingleReadFaultIsAnErrorOrTheExactAnswer(t *testing.T) {
+	// Words in every document, in some, stemmed ones, and one the vault lacks.
+	const q = "harbor ledgers running widget kestrel quays zarquonmissing"
+	ctx := context.Background()
+
+	for _, shape := range []struct {
+		name        string
+		reindexed   bool
+		wantMatches int
+	}{
+		{name: "no schema marker (unstemmed forms are searched)", reindexed: false, wantMatches: 13},
+		{name: "reindexed vault (schema marker 1)", reindexed: true, wantMatches: 12},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			f := &singleFault{}
+			db := openSingleFaultDB(t, f)
+			ws := keys.VaultPrefix("single-fault-search")
+			singleFaultFixture(t, New(db), db, ws)
+			singleFaultLegacyDoc(t, New(db), db, ws)
+			if shape.reindexed {
+				if err := db.Set(keys.FTSVersionKey(ws), []byte{0x01}, pebble.Sync); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Flush(); err != nil {
+				t.Fatal(err)
+			}
+
+			base, err := New(db).Search(ctx, ws, q, 100)
+			if err != nil || len(base) != shape.wantMatches {
+				t.Fatalf("fixture: Search = %d matches, err %v; want %d, nil", len(base), err, shape.wantMatches)
+			}
+			f.n.Store(0)
+			f.armed.Store(true)
+			_, _ = New(db).Search(ctx, ws, q, 100)
+			f.armed.Store(false)
+			reads := int(f.n.Load())
+			if reads < 8 {
+				t.Fatalf("a search made %d sstable reads; this test needs the statistics, schema-marker, frequency and posting reads to be separate fault points", reads)
+			}
+
+			failed := 0
+			for k := 1; k <= reads+2; k++ {
+				idx := New(db)
+				f.n.Store(0)
+				f.k.Store(int64(k))
+				f.fired.Store(false)
+				f.armed.Store(true)
+				var res []ScoredID
+				var err error
+				if k%2 == 0 {
+					res, err = idx.Search(ctx, ws, q, 100)
+				} else {
+					var shadows []ScoredID
+					res, shadows, err = idx.SearchLive(ctx, ws, q, 100, func(id [16]byte) bool { return id[1] == 3 }, 5)
+					res = append(res, shadows...)
+					sortScoredIDs(res)
+				}
+				f.armed.Store(false)
+
+				if k <= reads && !f.fired.Load() {
+					t.Fatalf("read %d of %d was never reached: the search does not make the same reads every time", k, reads)
+				}
+				switch {
+				case f.fired.Load() && err != nil && len(res) == 0:
+					failed++
+					if !errors.Is(err, errorfs.ErrInjected) {
+						t.Errorf("read %d of %d failed: the search returned %v, which does not wrap the read error", k, reads, err)
+					}
+				case !f.fired.Load() && err == nil && reflect.DeepEqual(res, base):
+					// k is past the search's last read: nothing was injected
+				default:
+					t.Errorf("read %d of %d failed (injected: %v): the search returned %d results and err %v; want the error and no results — every read a search makes feeds its answer",
+						k, reads, f.fired.Load(), len(res), err)
+				}
+				if open := db.Metrics().Snapshots.Count; open != 0 {
+					t.Errorf("read %d of %d failed: %d snapshots left open", k, reads, open)
+				}
+			}
+			if failed != reads {
+				t.Errorf("%d of %d single read faults failed the search, want all of them", failed, reads)
+			}
+			t.Logf("%d sstable reads per search; failing each in turn: %d searches returned the error, none returned a wrong answer", reads, failed)
+		})
+	}
+}
+
+// TestIndexWrites_AnySingleReadFaultIsAnErrorAndLeavesTheStoreUnchanged: for
+// each writer, whichever one of its reads fails, it returns an error and the
+// store is byte-for-byte what it was. Not a changed store, and not a clean run
+// reached past an unchecked error either: a writer that carries on after a read
+// it could not make has decided something on a value it does not have.
+func TestIndexWrites_AnySingleReadFaultIsAnErrorAndLeavesTheStoreUnchanged(t *testing.T) {
+	ws := keys.VaultPrefix("single-fault-write")
+	prev := Document{Concept: "harbor ledgers running 4", Content: "the tide office logged barges at dusk", Tags: []string{"kestrel"}}
+	next := prev
+	next.Tags = []string{"osprey", "widget"}
+
+	for _, op := range []struct {
+		name string
+		run  func(idx *Index) error
+	}{
+		{"IndexEngram", func(idx *Index) error {
+			return idx.IndexEngram(ws, [16]byte{0xD0, 1}, "harbor quays", "", "widget crates and a new word glimmerfen", []string{"kestrel"})
+		}},
+		{"ReindexEngram", func(idx *Index) error { return idx.ReindexEngram(ws, [16]byte{0xC0, 4}, prev, next) }},
+		{"UpdateStats", func(idx *Index) error { return idx.UpdateStats(ws, 7) }},
+	} {
+		t.Run(op.name, func(t *testing.T) {
+			// A clean run: how many reads, and what the store looks like after.
+			f := &singleFault{}
+			db := openSingleFaultDB(t, f)
+			idx := New(db)
+			singleFaultFixture(t, idx, db, ws)
+			before := storeDigest(t, db)
+			f.armed.Store(true)
+			if err := op.run(idx); err != nil {
+				t.Fatal(err)
+			}
+			f.armed.Store(false)
+			reads := int(f.n.Load())
+			clean := storeDigest(t, db)
+			if reads < 1 || clean == before {
+				t.Fatalf("fixture: a clean %s made %d sstable reads and changed the store: %v", op.name, reads, clean != before)
+			}
+
+			failed := 0
+			for k := 1; k <= reads+1; k++ {
+				f := &singleFault{}
+				db := openSingleFaultDB(t, f)
+				idx := New(db)
+				singleFaultFixture(t, idx, db, ws)
+				if storeDigest(t, db) != before {
+					t.Fatal("fixture: the store is not the same on every build")
+				}
+				f.k.Store(int64(k))
+				f.armed.Store(true)
+				err := op.run(idx)
+				f.armed.Store(false)
+				got := storeDigest(t, db)
+
+				if k <= reads && !f.fired.Load() {
+					t.Fatalf("read %d of %d was never reached: %s does not make the same reads every time", k, reads, op.name)
+				}
+				switch {
+				case f.fired.Load() && err != nil && got == before:
+					failed++
+				case !f.fired.Load() && err == nil && got == clean:
+					// k is past the writer's last read: nothing was injected
+				default:
+					t.Errorf("read %d of %d failed (injected: %v): %s returned err %v, store changed: %v, store equals a clean run: %v; want an error and an unchanged store — every read a writer makes decides what it commits or reports",
+						k, reads, f.fired.Load(), op.name, err, got != before, got == clean)
+				}
+			}
+			if failed != reads {
+				t.Errorf("%d of %d single read faults failed %s, want all of them", failed, reads, op.name)
+			}
+			t.Logf("%d sstable reads; failing each in turn: %d returned an error with the store unchanged, none left a changed store", reads, failed)
+		})
 	}
 }
