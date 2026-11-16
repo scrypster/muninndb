@@ -41,6 +41,9 @@ type Server struct {
 	shutdownM sync.Mutex
 	tlsConfig *tls.Config // nil = plain TCP
 
+	// handshakeTimeout overrides helloTimeout when positive. Tests set it so
+	// they do not wait fifteen seconds for a silent connection to be closed.
+	handshakeTimeout time.Duration
 	// decodeBudget overrides connDecodeBudget when positive. Tests set it to
 	// watch the budget work without megabyte payloads.
 	decodeBudget int64
@@ -164,6 +167,34 @@ func (s *Server) acceptLoop(ctx context.Context) {
 	}
 }
 
+// Limits on a connection that has not authenticated yet (SEC-27). Until HELLO
+// succeeds the peer has shown no credential, so what it can make the server
+// hold has to be small and has to end.
+const (
+	// helloTimeout is how long a connection has to complete the handshake:
+	// from accept to HELLO_OK written. It is one deadline for the whole
+	// exchange, not one per read, so a peer that sends a byte now and then does
+	// not keep it open. The value is the REST server's ReadTimeout, which is
+	// the same bound on the same thing there: the time a client has to deliver
+	// a request. Like that one it is fixed, not configurable.
+	helloTimeout = 15 * time.Second
+
+	// maxHelloPayload is the largest HELLO payload read. A HELLO holds a
+	// version, a key (46 bytes), a vault name (at most 64), a client name and
+	// a few capability names; 64 KiB is several hundred times that. A frame
+	// header that declares more is refused before anything is allocated for
+	// it. Without this, the 16 bytes of a header declaring MaxPayloadSize made
+	// the server allocate 16 MiB for a peer that had not authenticated.
+	maxHelloPayload = 64 * 1024
+)
+
+func (s *Server) helloDeadline() time.Time {
+	if s.handshakeTimeout > 0 {
+		return time.Now().Add(s.handshakeTimeout)
+	}
+	return time.Now().Add(helloTimeout)
+}
+
 // handleConnection handles a single client connection.
 func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
@@ -172,9 +203,17 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// The handshake is on a clock: everything up to HELLO_OK, reads and writes
+	// both. It is taken off once the session exists (below).
+	_ = conn.SetDeadline(s.helloDeadline())
+
 	// Read the HELLO frame first
-	helloFrame, err := ReadFrame(conn)
+	helloFrame, err := readFrameLimited(conn, maxHelloPayload)
 	if err != nil {
+		if errors.Is(err, ErrPayloadTooLarge) {
+			s.writeErrorFrame(conn, 0, ErrAuthFailed, "HELLO payload too large")
+			return
+		}
 		s.writeErrorFrame(conn, 0, ErrAuthFailed, "failed to read HELLO")
 		return
 	}
@@ -276,6 +315,10 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	if err := WriteFrame(conn, helloOKFrame); err != nil {
 		return
 	}
+
+	// The session exists. From here the connection is not on the handshake's
+	// clock: a client may hold it open and idle between requests.
+	_ = conn.SetDeadline(time.Time{})
 
 	// Start writer goroutine
 	writeCh := make(chan *Frame, 256)

@@ -272,14 +272,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Subscribe` stream) are still checked only when they open, so after revoking a key
   whose holder may have one open, restart the server (SEC-23).
 
+- An MBP connection now has 15 seconds to complete its handshake. Until now there was no
+  limit. A client that connected and sent nothing, or part of a handshake, held a
+  connection and its resources on the server for as long as it kept the socket open, and
+  a 16-byte header claiming a 16 MB handshake made the server set that memory aside at
+  once. Neither needed a key.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
+  trust, in every release up to v0.11.0.
+  **What a client could do:** hold connections, and 16 MB of memory for each, without
+  authenticating and without sending more than a few bytes.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port.
+  **What changed:** a connection that has not completed its handshake within 15 seconds
+  of being accepted is closed. The limit covers the whole handshake, so sending a byte
+  now and then does not extend it. It is the same 15 seconds the REST server allows for a
+  request to arrive. A handshake may be at most 64 KB and a larger one is refused before
+  any memory is set aside for it. Once the handshake is done the connection is not on
+  a clock, and may stay idle (SEC-27).
+
 - Limits of the MBP listener that this release does not change. The fixes above do not
   make it safe to expose the MBP port to clients you do not trust. The listener has no
-  limit on the number of connections. It has no timeout for a connection that never
-  completes its handshake, and none for a connection that goes idle. Every request that
-  is being read or handled holds its raw payload in memory, up to 16 MB each and up to 64
-  at a time on one connection. A client that can reach the port can therefore still hold
-  connections and memory for as long as it likes. Keep port 8474 on loopback or behind a
-  firewall. The next paragraph says which deployments expose it.
+  limit on the number of connections. It has no timeout for a connection that has
+  completed its handshake and then goes idle. Every request that is being read or handled
+  holds its raw payload in memory, up to 16 MB each and up to 64 at a time on one
+  connection. A client that can reach the port can therefore still hold connections and
+  memory for as long as it likes. Keep port 8474 on loopback or behind a firewall. The
+  next paragraph says which deployments expose it.
 
 - Which deployments expose the MBP port (for the MBP entries above). The server binds
   every port, MBP's 8474 included, to `127.0.0.1` unless it is told otherwise, so by
