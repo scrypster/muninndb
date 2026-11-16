@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cluster: a data race between a failed send to a peer and the checks that ask whether that
+  peer is connected. `PeerConn.Send` clears a connection's state under the peer's lock when a
+  write fails, while `ConnManager.HasLivePeerAt` and `RegisterConnKind` read that state holding
+  only the manager's lock. It was reached when a frame was sent to a node that had just stopped
+  while peer discovery or a second handshake from that node was in progress. Both reads now take
+  the peer's lock.
 - After a cluster failover, replicas no longer discard the new leader's writes. A replica
   does not advance its own replication sequence counter while it follows, so a replica that
   was promoted numbered its writes from wherever that counter had been left. On a node that
