@@ -1,7 +1,10 @@
 package mbp
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -258,3 +261,108 @@ func TestEnqueue_AReplyTooLargeForAFrameIsRefusedAsThat(t *testing.T) {
 		t.Errorf("held %d after the refusal; want nothing", f.largeBytes)
 	}
 }
+
+// scriptedConn is a connection whose Write does what a script says, one step
+// per call: accept some bytes, and optionally report that the write deadline
+// passed. It stands in for a socket so that the cases progressWriter has to
+// tell apart can be produced exactly; what a real socket accepts, and when, is
+// decided by the kernel's buffers and cannot be arranged from a test.
+type scriptedConn struct {
+	net.Conn // nil: only Write and SetWriteDeadline are used
+	steps    []writeStep
+	calls    int
+	written  []byte
+	deadline int // SetWriteDeadline calls
+}
+
+type writeStep struct {
+	accept  int  // bytes taken by this call (capped at what was offered)
+	timeout bool // the call then reports that its deadline passed
+}
+
+type deadlinePassed struct{}
+
+func (deadlinePassed) Error() string   { return "i/o timeout" }
+func (deadlinePassed) Timeout() bool   { return true }
+func (deadlinePassed) Temporary() bool { return true }
+
+func (c *scriptedConn) SetWriteDeadline(time.Time) error { c.deadline++; return nil }
+
+func (c *scriptedConn) Write(b []byte) (int, error) {
+	step := writeStep{accept: len(b)} // past the end of the script: take everything
+	if c.calls < len(c.steps) {
+		step = c.steps[c.calls]
+	}
+	c.calls++
+	n := step.accept
+	if n > len(b) {
+		n = len(b)
+	}
+	c.written = append(c.written, b[:n]...)
+	if step.timeout {
+		return n, deadlinePassed{}
+	}
+	return n, nil
+}
+
+// TestProgressWriter_SlowIsNotStalled pins the branch that tells a slow peer
+// from one that has stopped. A write whose deadline passes after SOME bytes
+// went through carries on, with a new deadline, from where it got to; only a
+// write that got nothing through in a whole stall timeout is a stall. Without
+// that branch every write that outlasts the stall timeout closes the
+// connection, however steadily the peer is taking bytes.
+func TestProgressWriter_SlowIsNotStalled(t *testing.T) {
+	payload := make([]byte, 3*replyWriteChunk+1000)
+	for i := range payload {
+		payload[i] = byte(i * 31)
+	}
+
+	t.Run("a peer that takes a little before each deadline gets all of it", func(t *testing.T) {
+		conn := &scriptedConn{}
+		// Every write runs past its deadline having taken 1,000 bytes, forty
+		// times over, and after that the peer takes what it is offered.
+		for i := 0; i < 40; i++ {
+			conn.steps = append(conn.steps, writeStep{accept: 1000, timeout: true})
+		}
+		w := &progressWriter{conn: conn, stall: time.Second}
+		n, err := w.Write(payload)
+		if err != nil || n != len(payload) {
+			t.Fatalf("Write = %d, %v; want all %d bytes: the peer never took nothing", n, err, len(payload))
+		}
+		if !bytes.Equal(conn.written, payload) {
+			t.Errorf("the bytes that went out are not the payload: a write that timed out part-way was resumed from the wrong place")
+		}
+		if conn.deadline < 40 {
+			t.Errorf("the deadline was set %d times over 40 timed-out writes; it is renewed whenever bytes go through", conn.deadline)
+		}
+	})
+
+	t.Run("a peer that takes nothing for a whole stall timeout is stalled", func(t *testing.T) {
+		conn := &scriptedConn{steps: []writeStep{
+			{accept: 1000, timeout: true}, // slow
+			{accept: 0, timeout: true},    // nothing at all
+		}}
+		w := &progressWriter{conn: conn, stall: time.Second}
+		n, err := w.Write(payload)
+		if !errors.Is(err, errReplyStalled) || n != 1000 {
+			t.Errorf("Write = %d, %v; want 1000 bytes and errReplyStalled", n, err)
+		}
+	})
+
+	t.Run("any other error ends the write as itself", func(t *testing.T) {
+		broken := errors.New("broken pipe")
+		w := &progressWriter{conn: failingConn{err: broken}, stall: time.Second}
+		if _, err := w.Write(payload); !errors.Is(err, broken) || errors.Is(err, errReplyStalled) {
+			t.Errorf("Write error = %v; want the connection's own error, not a stall", err)
+		}
+	})
+}
+
+// failingConn fails every write with err.
+type failingConn struct {
+	net.Conn
+	err error
+}
+
+func (failingConn) SetWriteDeadline(time.Time) error { return nil }
+func (c failingConn) Write([]byte) (int, error)      { return 0, c.err }

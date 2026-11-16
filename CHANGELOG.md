@@ -451,17 +451,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if there is no room, so a slow client is served at the speed it reads and every request
   it sent is answered. The server stops reading requests from a connection whose replies
   are backing up, and from one that has 4 MB of requests in progress. And a connection
-  that accepts no reply data at all for 15 seconds is closed. That last limit is on
-  making no progress, not on how long a reply takes: a client that keeps reading, however
-  slowly, is not cut off. With this, one connection can make the server hold at most 69
+  whose socket accepts no reply data at all for 15 seconds is closed. That last limit is
+  on making no progress, not on how long a reply takes. With this, one connection can
+  make the server hold at most 69
   MB of requests and replies: 20 MB of requests in progress, 32 MB of decompressed
   payloads and 17 MB of unread replies. The same test now holds 16 MB where it held 183.
   **What a client will notice:** a `PING` may carry at most 1,024 bytes. A larger one is
   refused with error `4003`. `PONG` repeats what `PING` sent, and that was the cheapest
   way to make the server queue large replies. A reply too large for one frame (16 MB) is
   now refused with error `4013`, "ask for fewer results". Before, it stopped every later
-  reply on the connection. A client that stops reading for 15 seconds while replies are
-  waiting is disconnected. More than 256 pipelined requests are now all answered.
+  reply on the connection. More than 256 pipelined requests are now all answered.
+  **A slow reader can be disconnected.** A client that stops reading for 15 seconds
+  while replies are waiting is disconnected, and so can a client that is reading, if it
+  reads slowly and has a lot waiting. The server can only see whether its own socket
+  takes more data, and the operating system takes it in large steps: about the first
+  megabyte of waiting replies at once, and then nothing until the client has worked
+  through a good part of that. Measured on one machine with 3.5 MB of replies waiting,
+  over TLS: a client reading 64 KB a second was served, and a client reading 8 KB a
+  second was disconnected after 15 seconds in which the socket took nothing. With 1 MB
+  waiting, TLS clients reading 2 to 16 KB a second were disconnected and clients
+  reading 32 and 64 KB a second were served, and without TLS clients reading 1 to 16 KB
+  a second were served, because the whole megabyte fitted at once. A client that reads
+  each reply as it arrives never has that much waiting and is not affected. A client
+  that requests megabytes of replies and reads them slower than a few tens of KB a
+  second should request less at a time.
   **What this does not cover:** the memory the server uses to carry out requests. One
   connection can have 64 in progress at once, on this port as on the others (SEC-30).
 

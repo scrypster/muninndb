@@ -67,13 +67,36 @@ import (
 //
 // The writer gives the peer replyStallTimeout to accept SOME bytes, and renews
 // it every time any are accepted. It is a bound on making no progress, not on
-// how long a frame takes: a reply of megabytes over a slow link is a slow
-// client, and slow is not a failure. A fixed deadline per frame is the mistake
-// the replication transport made and unmade (#627, peer_conn.go, whose
+// how long a frame takes. A fixed deadline per frame is the mistake the
+// replication transport made and unmade (#627, peer_conn.go, whose
 // progressWriter this follows): it cut every peer that fell behind, which then
 // reconnected further behind. There is deliberately no outer bound per frame
-// here. A peer that accepts a byte every few seconds keeps its connection, as
-// an idle peer does, and what it holds meanwhile is bounded by the above.
+// here.
+//
+// What "progress" can and cannot see. The only progress visible from here is
+// this side's socket accepting more bytes, and the kernel does not accept them
+// as the peer reads them. It takes what its buffers hold at once (on loopback
+// with default buffers, about the first megabyte of pending replies) and then
+// accepts more in large steps, each after the peer has drained a good part of a
+// buffer. So a peer that is reading steadily can still go a whole stall timeout
+// without this socket accepting a byte, if it reads slowly and more than the
+// buffers' worth is waiting. Measured on one machine, macOS loopback:
+//
+//   - a peer with a 4 KiB receive buffer reading 1 KiB every 150 ms, 4 MiB
+//     waiting: this socket accepted 3 KiB, once, in 25 seconds;
+//   - a TLS peer reading 2, 8 and 16 KiB/s, 1 MiB waiting: the RAW socket
+//     under TLS accepted nothing for 33.8, 38.1 and 25.6 seconds at a stretch
+//     (a TLS client takes whole buffers off its socket and hands them on
+//     slowly), so counting bytes below TLS would not tell these peers from
+//     dead ones either;
+//   - at the 15 second timeout, 3.5 MiB of replies waiting: a TLS peer reading
+//     8 KiB/s was closed and one reading 64 KiB/s was served.
+//
+// A peer that reads its replies as they arrive never has more than the
+// buffers' worth waiting and is not affected. Telling a slow reader from a
+// stopped one below those rates needs the peer's acknowledgements (TCP_INFO or
+// the send queue's depth), which is a different mechanism on each platform and
+// is not built.
 const (
 	// replyQueueLen is how many reply frames a connection's queue holds.
 	replyQueueLen = 256
@@ -406,11 +429,13 @@ func (s *Server) stallTimeout() time.Duration {
 // progressWriter writes to a connection in bounded chunks and renews the write
 // deadline whenever any bytes are accepted. A deadline that passes after some
 // bytes went through is a slow peer and the write carries on; one that passes
-// with none is a peer that is not reading.
+// with none is a peer whose socket took nothing for the whole stall timeout.
 //
-// On a TLS connection a write that timed out cannot be resumed (crypto/tls
-// makes the error permanent), so there a peer that takes less than one chunk in
-// the stall timeout is closed where a plain connection would carry on.
+// On a TLS connection it is stricter than that, and not by design. crypto/tls
+// reports only whole records as written and makes a write timeout permanent,
+// so a chunk that is not accepted in full within one stall timeout ends the
+// connection, where on a plain connection the part that got through would have
+// counted as progress. See the measurements at the top of this file.
 type progressWriter struct {
 	conn  net.Conn
 	stall time.Duration

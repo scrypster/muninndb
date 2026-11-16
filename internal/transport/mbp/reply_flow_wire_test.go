@@ -397,22 +397,32 @@ func TestARequestThatWaitedIsCheckedAgainstItsSessionAgain(t *testing.T) {
 		env.rec.mu.Unlock()
 		return n
 	}
-	carriedOut, quietSince := 0, time.Now()
-	for deadline := time.Now().Add(90 * time.Second); time.Since(quietSince) < time.Second; time.Sleep(20 * time.Millisecond) {
-		if n := countActivates(); n != carriedOut {
-			carriedOut, quietSince = n, time.Now()
+	// awaitQuiet waits until the engine has not been called for a while, and
+	// returns how many requests have been carried out by then.
+	awaitQuiet := func(quiet time.Duration) int {
+		n, since := countActivates(), time.Now()
+		for deadline := time.Now().Add(90 * time.Second); time.Since(since) < quiet; time.Sleep(20 * time.Millisecond) {
+			if now := countActivates(); now != n {
+				n, since = now, time.Now()
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("fixture: the engine never went quiet")
+			}
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("fixture: the engine never went quiet")
-		}
+		return n
 	}
-	if carriedOut == 0 || carriedOut >= requests {
-		t.Fatalf("fixture: %d of %d requests were carried out with nothing read; some must have been, and some must be waiting", carriedOut, requests)
+	if n := awaitQuiet(time.Second); n == 0 || n >= requests {
+		t.Fatalf("fixture: %d of %d requests were carried out with nothing read; some must have been, and some must be waiting", n, requests)
 	}
 
 	if err := env.store.RevokeAPIKey(vault, key.ID); err != nil {
 		t.Fatal(err)
 	}
+	// A request that already had its room when the key was revoked is being
+	// carried out and finishes: it was admitted before. Let those finish. From
+	// here on, the only way the engine can be called is for a request that got
+	// its room AFTER the revocation, which is what must not happen.
+	carriedOut := awaitQuiet(3 * time.Second)
 
 	// Now the client reads. Room comes back, and the requests that waited wake.
 	replies, refused := 0, 0
@@ -434,12 +444,12 @@ func TestARequestThatWaitedIsCheckedAgainstItsSessionAgain(t *testing.T) {
 			t.Errorf("unexpected answer: frame 0x%02X %d %q", f.Type, ep.Code, ep.Message)
 		}
 	}
-	t.Logf("%d requests carried out before the key was revoked; after it: %d replies read (all built before), %d refused", carriedOut, replies, refused)
+	t.Logf("%d requests carried out by the time the revocation had settled; after it: %d replies read (all built before), %d refused", carriedOut, replies, refused)
 	if after := countActivates(); after != carriedOut {
 		t.Errorf("%d requests were carried out after the key was revoked (%d before, %d after)", after-carriedOut, carriedOut, after)
 	}
 	if replies > carriedOut {
-		t.Errorf("%d replies were delivered; only %d requests had been carried out when the key was revoked", replies, carriedOut)
+		t.Errorf("%d replies were delivered; only %d requests were ever carried out", replies, carriedOut)
 	}
 	if refused == 0 {
 		t.Errorf("no request was refused: none of them was waiting, so this showed nothing")
