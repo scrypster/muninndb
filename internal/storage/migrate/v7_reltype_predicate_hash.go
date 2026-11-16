@@ -159,7 +159,7 @@ func RekeyRelationshipPredicateHash(db *pebble.DB) error {
 		if existing, closer, gerr := db.Get(newKey); gerr == nil {
 			var cur v7RelationshipRecord
 			if uerr := msgpack.Unmarshal(existing, &cur); uerr == nil && cur.UpdatedAt >= rec.UpdatedAt {
-				keep = true // SABOTAGE: pre-fix unconditional overwrite
+				keep = false
 			}
 			closer.Close()
 		}
