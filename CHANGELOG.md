@@ -32,6 +32,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Evolving a memory no longer resets its trust level and confidence. `muninn_evolve`, REST
+  `POST /api/engrams/{id}/evolve` and the content-change step of an `upsert_mode` write built
+  every new version at trust `inferred` and confidence 1.0, whatever the version it replaced
+  held. Rewording a memory flagged `untrusted` cleared the flag, so a vault with
+  `exclude_untrusted` set returned it again. Correcting a `verified` memory demoted it, and
+  for a decision, goal, constraint or identity memory with no explicit importance that also
+  removed its protection from `max_engrams` pruning. A memory stored at confidence 0.4 came
+  back at 1.0. The new version now carries both values from the one it replaces.
+  `muninn_evolve` adds a warning to its response when the level it carried is `verified` or
+  `untrusted`, because the text that level described has just changed; set the level with
+  `muninn_trust`. An `upsert_mode` write that supplies `trust` or `confidence` now has them
+  applied on the content-change step as well: they were applied when the memory was created
+  and dropped on every later change. Two things to expect. A memory below confidence 1.0
+  stays below it when evolved, and keeps scoring by its stored confidence; evolve used to
+  raise it to 1.0 as a side effect. And nothing is migrated: versions written by an earlier
+  release keep the `inferred`/1.0 they were given. The version each one replaced still holds
+  its original level, and `muninn_trust` on the current version restores it.
+  `muninn_consolidate` is not changed by this: a merged memory is still written at
+  `inferred`/1.0 whatever its sources held (#872).
+
 - A connected follower no longer serves a memory that was soft-deleted on the leader.
   A follower applies replicated writes straight to storage, and nothing told its read caches,
   so a Lobe that stayed connected kept returning a deleted memory as active until it rejoined.

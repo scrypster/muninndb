@@ -4765,10 +4765,10 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 	// out of the COG-20 MaxEngrams prune exemption. Inheriting confers no
 	// privilege: every credential that can evolve can already stamp trust
 	// directly on a write (MCP muninn_evolve and muninn_trust are both in
-	// mutatingTools; REST evolve and POST /api/engrams sit behind the same guard
-	// pair), so SEC-14 is untouched. TrustUnset (0x00, legacy records written
-	// before the field existed) normalizes to TrustInferred, matching
-	// resolveTrust("").
+	// mutatingTools; REST evolve's guards admit a subset of the credentials
+	// POST /api/engrams admits, and that body carries trust), so SEC-14 is
+	// untouched. TrustUnset (0x00, legacy records written before the field
+	// existed) normalizes to TrustInferred, matching resolveTrust("").
 	newTrust := oldEng.Trust
 	if newTrust == storage.TrustUnset {
 		newTrust = storage.TrustInferred
