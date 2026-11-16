@@ -296,6 +296,13 @@ floor should self-measure each vault's anisotropy baseline over its own embeddin
 per-vault override; model/cold-start defaults are hints, never fixed law. Ship mechanisms and
 hints, not other people's answers.**
 
+*Status, 2026-11-15: the self-measuring floor is not built.* The floor in use is a per-model
+registry value (`noiseBaselineRegistry` in `internal/plugin/embed/baseline.go`) that a vault
+can override with `semantic_floor` — the hint-plus-override form of the principle.
+`AnisotropyBaseline` characterizes a MODEL on a fixed corpus and has no production caller.
+Product text that said a band is judged against "this vault's own noise floor" was corrected
+in the honest-relevance-labels change; nothing is measured per vault today.
+
 ### A config value must denominate a unit someone can reason about (assoc decay / #762, 2026-08-01)
 
 Association decay was `w ← w × AssocDecayFactor`, applied "once per prune pass" at 0.95.

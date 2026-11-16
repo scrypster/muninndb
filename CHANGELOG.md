@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A connected follower no longer serves a memory that was soft-deleted on the leader.
+  A follower applies replicated writes straight to storage, and nothing told its read caches,
+  so a Lobe that stayed connected kept returning a deleted memory as active until it rejoined.
+  The follower now invalidates what each applied batch touched right after the commit, drops
+  every cache on a snapshot reset, and a cache fill that raced the commit can no longer install
+  the old value (STO-22). Reported by likesjx (#869), who also wrote the first fix and verified
+  it on a live cluster (#878).
+
 - Relevance band descriptions corrected. A band reports how much evidence a memory has
   against your query, measured against the embedding model's noise floor — not whether it answers
   you. `moderate` is now documented as a candidate to verify, not an established answer, and
