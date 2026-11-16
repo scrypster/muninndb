@@ -119,6 +119,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LC_ALL=C tr -d ' \t\r\n\v\f\000' < <data-dir>/auth_secret | wc -c`: if it prints 0, the file was
   blank and the server was affected. A file size above zero is not enough to rule it out.
 
+- gRPC now refuses read calls from an ingest-only key. A `write`-mode API key is meant to
+  store memories and read nothing; REST and MCP enforced that, the gRPC handlers for Read,
+  Activate, Stat, ListVaults and Subscribe did not check the mode at all, and
+  AdjustConfidence returned an engram's confidence to such a key. All six now return
+  `PermissionDenied` ("write-only key cannot read") before the engine is called. Every RPC
+  is classified as a handshake, a read, a mutation or both, and a test checks every
+  credential mode against every RPC, so a new RPC cannot be added without that decision.
+
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
   v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:
